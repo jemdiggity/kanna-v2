@@ -39,9 +39,7 @@
       "open": true
     },
     "sql": {
-      "preload": {
-        "kanna": "sqlite:kanna.db"
-      }
+      "preload": ["sqlite:kanna-v2.db"]
     }
   }
 }
