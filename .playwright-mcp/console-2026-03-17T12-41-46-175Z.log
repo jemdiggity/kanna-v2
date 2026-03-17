@@ -1,0 +1,53 @@
+[      83ms] [ERROR] Failed to initialize database: TypeError: Cannot read properties of undefined (reading 'invoke')
+    at invoke (http://localhost:1420/node_modules/.vite/deps/chunk-G7S6KQDI.js?v=41961f2a:109:37)
+    at _Database.load (http://localhost:1420/node_modules/.vite/deps/@tauri-apps_plugin-sql.js?v=41961f2a:27:25)
+    at http://localhost:1420/src/App.vue:219:41
+    at http://localhost:1420/node_modules/.vite/deps/vue.js?v=41961f2a:5257:40
+    at callWithErrorHandling (http://localhost:1420/node_modules/.vite/deps/vue.js?v=41961f2a:2353:19)
+    at callWithAsyncErrorHandling (http://localhost:1420/node_modules/.vite/deps/vue.js?v=41961f2a:2360:17)
+    at hook.__weh.hook.__weh (http://localhost:1420/node_modules/.vite/deps/vue.js?v=41961f2a:5237:19)
+    at flushPostFlushCbs (http://localhost:1420/node_modules/.vite/deps/vue.js?v=41961f2a:2538:28)
+    at render2 (http://localhost:1420/node_modules/.vite/deps/vue.js?v=41961f2a:8959:7)
+    at mount (http://localhost:1420/node_modules/.vite/deps/vue.js?v=41961f2a:6399:13) @ http://localhost:1420/src/main.ts:6
+[   65310ms] [ERROR] Failed to initialize database: TypeError: Cannot read properties of undefined (reading 'invoke')
+    at invoke (http://localhost:1420/node_modules/.vite/deps/chunk-G7S6KQDI.js?v=41961f2a:109:37)
+    at _Database.load (http://localhost:1420/node_modules/.vite/deps/@tauri-apps_plugin-sql.js?v=41961f2a:27:25)
+    at http://localhost:1420/src/App.vue:219:41
+    at http://localhost:1420/node_modules/.vite/deps/vue.js?v=41961f2a:5257:40
+    at callWithErrorHandling (http://localhost:1420/node_modules/.vite/deps/vue.js?v=41961f2a:2353:19)
+    at callWithAsyncErrorHandling (http://localhost:1420/node_modules/.vite/deps/vue.js?v=41961f2a:2360:17)
+    at hook.__weh.hook.__weh (http://localhost:1420/node_modules/.vite/deps/vue.js?v=41961f2a:5237:19)
+    at flushPostFlushCbs (http://localhost:1420/node_modules/.vite/deps/vue.js?v=41961f2a:2538:28)
+    at render2 (http://localhost:1420/node_modules/.vite/deps/vue.js?v=41961f2a:8959:7)
+    at mount (http://localhost:1420/node_modules/.vite/deps/vue.js?v=41961f2a:6399:13) @ http://localhost:1420/src/App.vue:225
+[   72725ms] [WARNING] [Vue warn]: Component <App>: setup function returned a promise, but no <Suspense> boundary was found in the parent component tree. A component with async setup() must be nested in a <Suspense> in order to be rendered. 
+  at <App> @ http://localhost:1420/node_modules/.vite/deps/vue.js?v=41961f2a:2205
+[   82874ms] [WARNING] [Vue warn]: Component <App>: setup function returned a promise, but no <Suspense> boundary was found in the parent component tree. A component with async setup() must be nested in a <Suspense> in order to be rendered. 
+  at <App> @ http://localhost:1420/node_modules/.vite/deps/vue.js?v=41961f2a:2205
+[  123036ms] [WARNING] [Vue warn]: Component <App>: setup function returned a promise, but no <Suspense> boundary was found in the parent component tree. A component with async setup() must be nested in a <Suspense> in order to be rendered. 
+  at <App> @ http://localhost:1420/node_modules/.vite/deps/vue.js?v=41961f2a:2205
+[  126304ms] [WARNING] [Vue warn]: Component <App>: setup function returned a promise, but no <Suspense> boundary was found in the parent component tree. A component with async setup() must be nested in a <Suspense> in order to be rendered. 
+  at <App> @ http://localhost:1420/node_modules/.vite/deps/vue.js?v=41961f2a:2205
+[  127638ms] [WARNING] [Vue warn]: Component <App>: setup function returned a promise, but no <Suspense> boundary was found in the parent component tree. A component with async setup() must be nested in a <Suspense> in order to be rendered. 
+  at <App> @ http://localhost:1420/node_modules/.vite/deps/vue.js?v=41961f2a:2205
+[  165930ms] [ERROR] WebSocket connection to 'ws://localhost:1420/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:1420/@vite/client:1034
+[  166933ms] [ERROR] WebSocket connection to 'ws://localhost:1420/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:1420/@vite/client:1034
+[  167942ms] [ERROR] WebSocket connection to 'ws://localhost:1420/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:1420/@vite/client:1034
+[  168945ms] [ERROR] WebSocket connection to 'ws://localhost:1420/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:1420/@vite/client:1034
+[  169947ms] [ERROR] WebSocket connection to 'ws://localhost:1420/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:1420/@vite/client:1034
+[  170949ms] [ERROR] WebSocket connection to 'ws://localhost:1420/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:1420/@vite/client:1034
+[  171952ms] [ERROR] WebSocket connection to 'ws://localhost:1420/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:1420/@vite/client:1034
+[  172956ms] [ERROR] WebSocket connection to 'ws://localhost:1420/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:1420/@vite/client:1034
+[  173969ms] [ERROR] WebSocket connection to 'ws://localhost:1420/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:1420/@vite/client:1034
+[  174978ms] [ERROR] WebSocket connection to 'ws://localhost:1420/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:1420/@vite/client:1034
+[  204071ms] [ERROR] WebSocket connection to 'ws://localhost:1420/?token=OXIURCGFA3gr' failed:  @ http://localhost:1420/@vite/client:801
+[  204107ms] [ERROR] WebSocket connection to 'ws://localhost:1420/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:1420/@vite/client:1034
+[  205110ms] [ERROR] WebSocket connection to 'ws://localhost:1420/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:1420/@vite/client:1034
+[  206114ms] [ERROR] WebSocket connection to 'ws://localhost:1420/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:1420/@vite/client:1034
+[  207118ms] [ERROR] WebSocket connection to 'ws://localhost:1420/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:1420/@vite/client:1034
+[  208120ms] [ERROR] WebSocket connection to 'ws://localhost:1420/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:1420/@vite/client:1034
+[  209125ms] [ERROR] WebSocket connection to 'ws://localhost:1420/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:1420/@vite/client:1034
+[  210136ms] [ERROR] WebSocket connection to 'ws://localhost:1420/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:1420/@vite/client:1034
+[  211148ms] [ERROR] WebSocket connection to 'ws://localhost:1420/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:1420/@vite/client:1034
+[  212173ms] [ERROR] WebSocket connection to 'ws://localhost:1420/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:1420/@vite/client:1034
+[  213248ms] [ERROR] WebSocket connection to 'ws://localhost:1420/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:1420/@vite/client:1034

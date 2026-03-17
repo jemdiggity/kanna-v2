@@ -6,8 +6,7 @@ import { execDb, callVueMethod, tauriInvoke } from "./vue";
 
 /** Reset all DB tables to a clean state with default settings. */
 export async function resetDatabase(client: WebDriverClient): Promise<void> {
-  // Delete in FK-safe order
-  await execDb(client, "PRAGMA foreign_keys = OFF");
+  // Delete in FK-safe order (children before parents)
   await execDb(client, "DELETE FROM terminal_session");
   await execDb(client, "DELETE FROM worktree");
   await execDb(client, "DELETE FROM agent_run");
@@ -16,31 +15,17 @@ export async function resetDatabase(client: WebDriverClient): Promise<void> {
   await execDb(client, "DELETE FROM settings");
 
   // Re-insert default settings
-  await execDb(
-    client,
-    "INSERT INTO settings (key, value) VALUES ('terminal_font_family', 'SF Mono')"
-  );
-  await execDb(
-    client,
-    "INSERT INTO settings (key, value) VALUES ('terminal_font_size', '13')"
-  );
-  await execDb(
-    client,
-    "INSERT INTO settings (key, value) VALUES ('suspend_after_minutes', '5')"
-  );
-  await execDb(
-    client,
-    "INSERT INTO settings (key, value) VALUES ('kill_after_minutes', '30')"
-  );
-  await execDb(
-    client,
-    "INSERT INTO settings (key, value) VALUES ('appearance_mode', 'system')"
-  );
-  await execDb(
-    client,
-    "INSERT INTO settings (key, value) VALUES ('ide_command', 'code')"
-  );
-  await execDb(client, "PRAGMA foreign_keys = ON");
+  const defaults = [
+    ["terminal_font_family", "SF Mono"],
+    ["terminal_font_size", "13"],
+    ["suspend_after_minutes", "5"],
+    ["kill_after_minutes", "30"],
+    ["appearance_mode", "system"],
+    ["ide_command", "code"],
+  ];
+  for (const [key, value] of defaults) {
+    await execDb(client, "INSERT INTO settings (key, value) VALUES (?, ?)", [key, value]);
+  }
 
   // Refresh the Vue state so the UI reflects the empty DB
   await callVueMethod(client, "refreshRepos");

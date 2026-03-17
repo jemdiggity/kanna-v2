@@ -95,7 +95,7 @@ function cleanupInstance() {
 async function renderDiff(patch: string) {
   if (!containerRef.value) return;
 
-  const files = parsePatchFiles({ patchContent: patch });
+  const files = parsePatchFiles(patch);
   if (!files || files.length === 0) {
     noDiff.value = true;
     cleanupInstance();

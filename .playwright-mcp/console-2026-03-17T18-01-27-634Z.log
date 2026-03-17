@@ -1,0 +1,12 @@
+[ 1928784ms] [ERROR] WebSocket connection to 'ws://localhost:1420/?token=5rzq6wss91so' failed:  @ http://localhost:1420/@vite/client:801
+[ 1928861ms] [ERROR] WebSocket connection to 'ws://localhost:1420/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:1420/@vite/client:1034
+[ 1929864ms] [ERROR] WebSocket connection to 'ws://localhost:1420/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:1420/@vite/client:1034
+[ 1930867ms] [ERROR] WebSocket connection to 'ws://localhost:1420/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:1420/@vite/client:1034
+[11742301ms] [ERROR] WebSocket connection to 'ws://localhost:1420/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:1420/@vite/client:1034
+[11743304ms] [ERROR] WebSocket connection to 'ws://localhost:1420/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:1420/@vite/client:1034
+[11744309ms] [ERROR] WebSocket connection to 'ws://localhost:1420/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:1420/@vite/client:1034
+[11745314ms] [ERROR] WebSocket connection to 'ws://localhost:1420/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:1420/@vite/client:1034
+[11746317ms] [ERROR] WebSocket connection to 'ws://localhost:1420/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:1420/@vite/client:1034
+[11747323ms] [ERROR] WebSocket connection to 'ws://localhost:1420/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:1420/@vite/client:1034
+[11748337ms] [ERROR] WebSocket connection to 'ws://localhost:1420/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:1420/@vite/client:1034
+[11749362ms] [ERROR] WebSocket connection to 'ws://localhost:1420/' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:1420/@vite/client:1034

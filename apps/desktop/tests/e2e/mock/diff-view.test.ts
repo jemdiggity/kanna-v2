@@ -1,9 +1,10 @@
+import { resolve } from "path";
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { WebDriverClient } from "../helpers/webdriver";
 import { resetDatabase, importTestRepo, cleanupWorktrees } from "../helpers/reset";
 import { callVueMethod, getVueState, tauriInvoke } from "../helpers/vue";
 
-const TEST_REPO_PATH = process.cwd().replace(/\/apps\/desktop$/, "");
+const TEST_REPO_PATH = resolve(import.meta.dir, "../../../..");
 
 describe("diff view", () => {
   const client = new WebDriverClient();

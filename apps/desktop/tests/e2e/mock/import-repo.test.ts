@@ -1,10 +1,11 @@
+import { resolve } from "path";
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { WebDriverClient } from "../helpers/webdriver";
 import { resetDatabase, importTestRepo } from "../helpers/reset";
 import { getVueState, callVueMethod } from "../helpers/vue";
 
 // Use the kanna-tauri repo itself as a test fixture
-const TEST_REPO_PATH = process.cwd().replace(/\/apps\/desktop$/, "");
+const TEST_REPO_PATH = resolve(import.meta.dir, "../../../..");
 
 describe("import repo", () => {
   const client = new WebDriverClient();

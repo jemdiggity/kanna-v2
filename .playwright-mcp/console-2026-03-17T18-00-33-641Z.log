@@ -1,0 +1,1 @@
+[     107ms] The requested module '/node_modules/.vite/deps/@pierre_diffs_worker.js?v=c8467e42' does not provide an export named 'createWorkerFactory'

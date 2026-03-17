@@ -1,9 +1,13 @@
-import { describe, it, expect, beforeAll, afterAll } from "bun:test";
+import { describe, it, expect, beforeAll, afterAll, setDefaultTimeout } from "bun:test";
 import { WebDriverClient } from "../helpers/webdriver";
 import { resetDatabase, importTestRepo, cleanupWorktrees } from "../helpers/reset";
 import { callVueMethod } from "../helpers/vue";
+import { resolve } from "path";
 
-const TEST_REPO_PATH = process.cwd().replace(/\/apps\/desktop$/, "");
+setDefaultTimeout(15_000);
+
+// Resolve repo path relative to this file
+const TEST_REPO_PATH = resolve(import.meta.dir, "../../../../..");
 
 describe("claude session (real CLI)", () => {
   const client = new WebDriverClient();
@@ -29,8 +33,8 @@ describe("claude session (real CLI)", () => {
     // Wait for task to appear
     await client.waitForText(".sidebar", "In Progress");
 
-    // Wait for result block — up to 60s for Claude to respond
-    const result = await client.waitForElement(".result-block", 60000);
+    // Wait for result block — up to 90s for Claude to respond
+    const result = await client.waitForElement(".result-block", 90_000);
     expect(result).toBeTruthy();
 
     const text = await client.getText(result);
