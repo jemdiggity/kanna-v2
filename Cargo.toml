@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "crates/daemon",
+    "crates/tauri-plugin-delta-updater",
+]
+resolver = "2"
