@@ -24,3 +24,4 @@ git2 = "0.19"
 tokio = { version = "1", features = ["full"] }
 dashmap = "6"
 claude-agent-sdk = { path = "../../../crates/claude-agent-sdk" }
+tauri-plugin-delta-updater = { path = "../../../crates/tauri-plugin-delta-updater" }

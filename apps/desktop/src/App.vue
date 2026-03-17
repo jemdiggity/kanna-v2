@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted } from "vue";
+import { invoke } from "@tauri-apps/api/core";
 import Database from "@tauri-apps/plugin-sql";
 import type { DbHandle, PipelineItem } from "@kanna/db";
 import { listPipelineItems } from "@kanna/db";
@@ -8,17 +9,37 @@ import Sidebar from "./components/Sidebar.vue";
 import MainPanel from "./components/MainPanel.vue";
 import NewTaskModal from "./components/NewTaskModal.vue";
 import ImportRepoModal from "./components/ImportRepoModal.vue";
+import PreferencesPanel from "./components/PreferencesPanel.vue";
 import { useRepo } from "./composables/useRepo";
 import { usePipeline } from "./composables/usePipeline";
 import { usePreferences } from "./composables/usePreferences";
 import { useKeyboardShortcuts } from "./composables/useKeyboardShortcuts";
+import { useResourceSweeper } from "./composables/useResourceSweeper";
 import { usePRWorkflow } from "./composables/usePRWorkflow";
 
 const db = ref<DbHandle | null>(null);
 
 const { repos, selectedRepoId, refresh: refreshRepos, importRepo } = useRepo(db);
 const { items, selectedItemId, loadItems, transition, createItem, selectedItem } = usePipeline(db);
-const { load: loadPreferences } = usePreferences(db);
+const {
+  fontFamily,
+  fontSize,
+  suspendAfterMinutes,
+  killAfterMinutes,
+  appearanceMode,
+  ideCommand,
+  load: loadPreferences,
+  save: savePreference,
+} = usePreferences(db);
+
+// Resource sweeper — runs every 60s, manages idle sessions and old tasks
+useResourceSweeper(
+  () => db.value,
+  () => ({
+    suspendAfterMinutes: suspendAfterMinutes.value,
+    killAfterMinutes: killAfterMinutes.value,
+  })
+);
 
 const selectedRepo = computed(() =>
   repos.value.find((r) => r.id === selectedRepoId.value) ?? null
@@ -31,6 +52,7 @@ const prWorkflow = computed(() =>
 
 const showNewTaskModal = ref(false);
 const showImportRepoModal = ref(false);
+const showPreferencesPanel = ref(false);
 const zenMode = ref(false);
 
 const currentItem = computed(() => selectedItem());
@@ -121,6 +143,7 @@ useKeyboardShortcuts({
   navigateUp: () => navigateItems(-1),
   navigateDown: () => navigateItems(1),
   exitZen: () => { zenMode.value = false; },
+  openPreferences: () => { showPreferencesPanel.value = true; },
 });
 
 // Handlers
@@ -146,6 +169,31 @@ async function handleImportRepo(path: string, name: string, defaultBranch: strin
   showImportRepoModal.value = false;
 }
 
+async function handlePreferenceUpdate(key: string, value: string) {
+  await savePreference(key, value);
+}
+
+// Reconcile DB terminal sessions against live daemon sessions on startup
+async function reconcileSessions() {
+  if (!db.value) return;
+  try {
+    const liveSessions = await invoke<{ session_id: string }[]>("list_sessions");
+    const liveIds = new Set(liveSessions.map((s) => s.session_id));
+
+    const dbSessions = await db.value.select<{ id: string; daemon_session_id: string }>(
+      "SELECT id, daemon_session_id FROM terminal_session WHERE daemon_session_id IS NOT NULL"
+    );
+
+    for (const s of dbSessions) {
+      if (!liveIds.has(s.daemon_session_id)) {
+        await db.value!.execute("DELETE FROM terminal_session WHERE id = ?", [s.id]);
+      }
+    }
+  } catch {
+    // Daemon may not be running yet
+  }
+}
+
 // Initialize
 onMounted(async () => {
   try {
@@ -153,6 +201,7 @@ onMounted(async () => {
     db.value = database as unknown as DbHandle;
     await refreshRepos();
     await loadPreferences();
+    await reconcileSessions();
   } catch (e) {
     console.error("Failed to initialize database:", e);
   }
@@ -171,6 +220,7 @@ onMounted(async () => {
       @select-item="handleSelectItem"
       @import-repo="showImportRepoModal = true"
       @new-task="showNewTaskModal = true"
+      @open-preferences="showPreferencesPanel = true"
     />
     <MainPanel
       :item="currentItem"
@@ -188,6 +238,19 @@ onMounted(async () => {
       v-if="showImportRepoModal"
       @import="handleImportRepo"
       @cancel="showImportRepoModal = false"
+    />
+    <PreferencesPanel
+      v-if="showPreferencesPanel"
+      :preferences="{
+        fontFamily: fontFamily,
+        fontSize: fontSize,
+        suspendAfterMinutes: suspendAfterMinutes,
+        killAfterMinutes: killAfterMinutes,
+        appearanceMode: appearanceMode,
+        ideCommand: ideCommand,
+      }"
+      @update="handlePreferenceUpdate"
+      @close="showPreferencesPanel = false"
     />
   </div>
 </template>

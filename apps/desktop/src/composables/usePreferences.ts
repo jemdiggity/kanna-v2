@@ -8,6 +8,7 @@ export function usePreferences(db: Ref<DbHandle | null>) {
   const suspendAfterMinutes = ref(30);
   const killAfterMinutes = ref(60);
   const appearanceMode = ref<"dark" | "light" | "system">("dark");
+  const ideCommand = ref("code");
 
   async function load() {
     if (!db.value) return;
@@ -23,6 +24,8 @@ export function usePreferences(db: Ref<DbHandle | null>) {
     if (am === "dark" || am === "light" || am === "system") {
       appearanceMode.value = am;
     }
+    const ide = await getSetting(db.value, "ideCommand");
+    if (ide) ideCommand.value = ide;
   }
 
   async function save(key: string, value: string) {
@@ -37,6 +40,7 @@ export function usePreferences(db: Ref<DbHandle | null>) {
     suspendAfterMinutes,
     killAfterMinutes,
     appearanceMode,
+    ideCommand,
     load,
     save,
   };

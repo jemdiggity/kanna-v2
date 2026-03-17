@@ -8,6 +8,7 @@ export interface KeyboardActions {
   navigateUp: () => void;
   navigateDown: () => void;
   exitZen: () => void;
+  openPreferences: () => void;
 }
 
 export function useKeyboardShortcuts(actions: KeyboardActions) {
@@ -56,6 +57,13 @@ export function useKeyboardShortcuts(actions: KeyboardActions) {
     if (meta && e.key === "ArrowDown") {
       e.preventDefault();
       actions.navigateDown();
+      return;
+    }
+
+    // Cmd+, -> open preferences
+    if (meta && e.key === ",") {
+      e.preventDefault();
+      actions.openPreferences();
       return;
     }
 

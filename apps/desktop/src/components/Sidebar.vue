@@ -15,6 +15,7 @@ const emit = defineEmits<{
   (e: "select-item", id: string): void;
   (e: "import-repo"): void;
   (e: "new-task"): void;
+  (e: "open-preferences"): void;
 }>();
 
 const collapsedRepos = ref<Set<string>>(new Set());
@@ -95,6 +96,9 @@ function handleSelectItem(item: PipelineItem) {
     <div class="sidebar-footer">
       <button class="btn-import" @click="emit('import-repo')">
         Import Repo
+      </button>
+      <button class="btn-icon btn-prefs" title="Preferences (Cmd+,)" @click="emit('open-preferences')">
+        &#9881;
       </button>
     </div>
   </aside>
@@ -250,10 +254,13 @@ function handleSelectItem(item: PipelineItem) {
 .sidebar-footer {
   padding: 10px 14px;
   border-top: 1px solid #333;
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .btn-import {
-  width: 100%;
+  flex: 1;
   padding: 6px 12px;
   background: #2a2a2a;
   border: 1px solid #444;
@@ -266,5 +273,10 @@ function handleSelectItem(item: PipelineItem) {
 .btn-import:hover {
   background: #333;
   color: #e0e0e0;
+}
+
+.btn-prefs {
+  flex-shrink: 0;
+  font-size: 14px;
 }
 </style>
