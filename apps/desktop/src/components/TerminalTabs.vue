@@ -18,6 +18,10 @@ interface ShellTab {
   label: string;
 }
 
+const emit = defineEmits<{
+  (e: "agent-completed"): void;
+}>();
+
 const activeTab = ref<"agent" | "diff" | string>("agent");
 const shellTabs = ref<ShellTab[]>([]);
 
@@ -76,7 +80,7 @@ async function addShellTab() {
     </div>
     <div class="tab-content">
       <template v-if="activeTab === 'agent'">
-        <AgentView v-if="sessionId" :session-id="sessionId" />
+        <AgentView v-if="sessionId" :session-id="sessionId" @completed="emit('agent-completed')" />
         <div v-else class="placeholder">No agent session active</div>
       </template>
       <template v-if="activeTab === 'diff'">

@@ -281,6 +281,7 @@ onMounted(async () => {
       @make-pr="handleMakePR"
       @merge="handleMerge"
       @close-task="handleCloseTask"
+      @agent-completed="refreshAllItems"
     />
 
     <NewTaskModal

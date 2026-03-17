@@ -6,6 +6,11 @@ const props = defineProps<{
   sessionId: string
 }>()
 
+const emit = defineEmits<{
+  (e: "completed", result: AgentMessage): void
+  (e: "error", error: string): void
+}>()
+
 interface ContentBlock {
   type: string
   text?: string
@@ -72,18 +77,26 @@ async function pollMessages() {
       })
       console.log(`[AgentView] Got message:`, raw ? raw.type : "null")
       if (raw) {
-        messages.value.push(normalizeMessage(raw))
+        const msg = normalizeMessage(raw)
+        messages.value.push(msg)
         await nextTick()
         scrollToBottom()
+        // Emit completion when we get a result message
+        if (msg.type === "result") {
+          isRunning.value = false
+          emit("completed", msg)
+          break
+        }
       } else {
         // null means session ended
         console.log(`[AgentView] Session ended (null message)`)
         isRunning.value = false
         break
       }
-    } catch (e) {
+    } catch (e: any) {
       console.error("Agent message error:", e)
       isRunning.value = false
+      emit("error", e?.message || String(e))
       break
     }
   }

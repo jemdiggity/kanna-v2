@@ -13,6 +13,7 @@ const emit = defineEmits<{
   (e: "make-pr"): void;
   (e: "merge"): void;
   (e: "close-task"): void;
+  (e: "agent-completed"): void;
 }>();
 </script>
 
@@ -24,6 +25,7 @@ const emit = defineEmits<{
         :session-id="item.id"
         :repo-path="repoPath"
         :worktree-path="item.branch ? `${repoPath}/.kanna-worktrees/${item.branch}` : undefined"
+        @agent-completed="emit('agent-completed')"
       />
       <ActionBar
         :item="item"
