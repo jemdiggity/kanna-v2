@@ -7,3 +7,4 @@ target/
 .turbo/
 .vscode/
 .kanna-worktrees/
+.playwright-mcp/
