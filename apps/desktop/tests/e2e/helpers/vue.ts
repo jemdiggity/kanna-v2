@@ -12,7 +12,11 @@ export async function getVueState(
   prop: string
 ): Promise<unknown> {
   return client.executeSync(
-    `const ctx = ${CTX}; const val = ctx.${prop}; return val && val.__v_isRef ? val.value : val;`
+    `const ctx = ${CTX};
+     const val = ctx.${prop};
+     const unwrapped = val && val.__v_isRef ? val.value : val;
+     // JSON round-trip to strip Vue reactive proxies
+     try { return JSON.parse(JSON.stringify(unwrapped)); } catch { return unwrapped; }`
   );
 }
 

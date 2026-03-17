@@ -51,9 +51,13 @@ export async function cleanupWorktrees(
   client: WebDriverClient,
   repoPath: string
 ): Promise<void> {
-  const worktrees = (await tauriInvoke(client, "git_worktree_list", {
-    repoPath,
-  })) as Array<{ name: string; path: string }>;
+  let worktrees: Array<{ name: string; path: string }>;
+  try {
+    const result = await tauriInvoke(client, "git_worktree_list", { repoPath });
+    worktrees = Array.isArray(result) ? result : [];
+  } catch {
+    return; // Can't list worktrees — skip cleanup
+  }
 
   for (const wt of worktrees) {
     // Only remove task- worktrees (not the main worktree)

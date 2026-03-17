@@ -27,13 +27,13 @@ describe("preferences", () => {
     }
 
     await Bun.sleep(500);
-    const panel = await client.waitForElement(".preferences-panel", 2000);
+    const panel = await client.waitForElement(".prefs-panel", 2000);
     expect(panel).toBeTruthy();
   });
 
   it("shows preference fields", async () => {
     const panelText = await client.executeSync<string>(
-      `return document.querySelector(".preferences-panel")?.textContent || ""`
+      `return document.querySelector(".prefs-panel")?.textContent || ""`
     );
     // Should contain labels for common settings
     expect(panelText.toLowerCase()).toContain("font");
@@ -42,7 +42,7 @@ describe("preferences", () => {
 
   it("closes preferences panel", async () => {
     // Find close button within preferences
-    const buttons = await client.findElements(".preferences-panel button");
+    const buttons = await client.findElements(".prefs-panel button");
     for (const id of buttons) {
       const text = await client.getText(id);
       if (text.includes("Close") || text.includes("\u2715") || text === "X") {
@@ -52,7 +52,7 @@ describe("preferences", () => {
     }
 
     await Bun.sleep(300);
-    await client.waitForNoElement(".preferences-panel", 2000);
+    await client.waitForNoElement(".prefs-panel", 2000);
   });
 
   it("default settings are in DB", async () => {

@@ -43,16 +43,16 @@ describe("task lifecycle", () => {
   });
 
   it("shows agent output after Claude responds", async () => {
-    // Wait for at least one message block to appear (up to 30s for real Claude)
-    const el = await client.waitForElement(".agent-view .message-block", 30000);
+    // Wait for at least one message block to appear (up to 60s for real Claude)
+    const el = await client.waitForElement(".agent-view .message-block", 60000);
     expect(el).toBeTruthy();
-  });
+  }, 65000);
 
   it("shows result block when completed", async () => {
     const el = await client.waitForElement(".result-block", 60000);
     const text = await client.getText(el);
     expect(text).toContain("Completed");
-  });
+  }, 65000);
 
   it("closes task and updates stage", async () => {
     // Find and click the Close button
