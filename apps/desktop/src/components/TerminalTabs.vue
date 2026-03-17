@@ -1,12 +1,45 @@
 <script setup lang="ts">
 import { ref } from "vue";
+import { invoke } from "@tauri-apps/api/core";
 import AgentView from "./AgentView.vue";
+import TerminalView from "./TerminalView.vue";
 
-defineProps<{
+const props = defineProps<{
   sessionId: string | null;
+  worktreePath?: string;
 }>();
 
-const activeTab = ref<"agent" | "shell">("agent");
+interface ShellTab {
+  id: string;
+  label: string;
+}
+
+const activeTab = ref<"agent" | string>("agent");
+const shellTabs = ref<ShellTab[]>([]);
+
+async function addShellTab() {
+  const sessionId = crypto.randomUUID();
+  const cwd = props.worktreePath ?? (window as any).__TAURI_INTERNALS__?.metadata?.currentDir ?? "/tmp";
+
+  try {
+    await invoke("spawn_session", {
+      sessionId,
+      cwd,
+      executable: "/bin/zsh",
+      args: ["--login"],
+      env: {},
+      cols: 80,
+      rows: 24,
+    });
+  } catch (e) {
+    console.error("Failed to spawn shell session:", e);
+    return;
+  }
+
+  const label = `Shell ${shellTabs.value.length + 1}`;
+  shellTabs.value.push({ id: sessionId, label });
+  activeTab.value = sessionId;
+}
 </script>
 
 <template>
@@ -20,24 +53,27 @@ const activeTab = ref<"agent" | "shell">("agent");
         Agent
       </button>
       <button
+        v-for="tab in shellTabs"
+        :key="tab.id"
         class="tab"
-        :class="{ active: activeTab === 'shell' }"
-        @click="activeTab = 'shell'"
+        :class="{ active: activeTab === tab.id }"
+        @click="activeTab = tab.id"
       >
-        Shell
+        {{ tab.label }}
       </button>
+      <button class="tab tab-add" @click="addShellTab" title="New shell">+</button>
     </div>
     <div class="tab-content">
-      <AgentView
-        v-if="activeTab === 'agent' && sessionId"
-        :session-id="sessionId"
-      />
-      <div v-else-if="activeTab === 'agent' && !sessionId" class="placeholder">
-        No agent session active
-      </div>
-      <div v-else-if="activeTab === 'shell'" class="placeholder">
-        Shell terminal (xterm.js -- coming soon)
-      </div>
+      <template v-if="activeTab === 'agent'">
+        <AgentView v-if="sessionId" :session-id="sessionId" />
+        <div v-else class="placeholder">No agent session active</div>
+      </template>
+      <template v-for="tab in shellTabs" :key="tab.id">
+        <TerminalView
+          v-show="activeTab === tab.id"
+          :session-id="tab.id"
+        />
+      </template>
     </div>
   </div>
 </template>
@@ -77,6 +113,13 @@ const activeTab = ref<"agent" | "shell">("agent");
 .tab.active {
   color: #e0e0e0;
   border-bottom-color: #0066cc;
+}
+
+.tab-add {
+  margin-left: 4px;
+  padding: 6px 10px;
+  font-size: 16px;
+  line-height: 1;
 }
 
 .tab-content {
