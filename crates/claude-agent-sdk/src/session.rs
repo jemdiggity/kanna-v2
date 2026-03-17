@@ -73,7 +73,7 @@ impl Session {
         cmd.args(&args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null());
+            .stderr(std::process::Stdio::piped());
 
         if let Some(cwd) = &options.cwd {
             cmd.current_dir(cwd);
@@ -95,6 +95,19 @@ impl Session {
             .stdout
             .take()
             .ok_or_else(|| Error::SpawnFailed(std::io::Error::other("failed to capture stdout")))?;
+
+        // Spawn stderr reader for debugging
+        if let Some(stderr) = child.stderr.take() {
+            tokio::spawn(async move {
+                use tokio::io::AsyncReadExt;
+                let mut buf = Vec::new();
+                let mut reader = stderr;
+                let _ = reader.read_to_end(&mut buf).await;
+                if !buf.is_empty() {
+                    eprintln!("[SDK stderr] {}", String::from_utf8_lossy(&buf));
+                }
+            });
+        }
 
         // For single-turn sessions (no resume/continue), close stdin immediately
         // so the CLI knows we're done and processes the -p prompt without waiting.

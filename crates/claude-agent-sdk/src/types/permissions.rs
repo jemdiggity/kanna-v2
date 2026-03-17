@@ -18,8 +18,8 @@ impl PermissionMode {
     /// Returns the CLI flag value for this permission mode.
     pub fn as_cli_flag(&self) -> &str {
         match self {
-            PermissionMode::DontAsk => "dont-ask",
-            PermissionMode::AcceptEdits => "accept-edits",
+            PermissionMode::DontAsk => "dontAsk",
+            PermissionMode::AcceptEdits => "acceptEdits",
             PermissionMode::Default => "default",
         }
     }

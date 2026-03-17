@@ -26,3 +26,6 @@ dashmap = "6"
 claude-agent-sdk = { path = "../../../crates/claude-agent-sdk" }
 tauri-plugin-delta-updater = { path = "../../../crates/tauri-plugin-delta-updater" }
 chrono = "0.4"
+
+[target.'cfg(debug_assertions)'.dependencies]
+tauri-plugin-webdriver = "0.2"

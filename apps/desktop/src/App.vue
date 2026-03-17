@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted } from "vue";
-import { invoke } from "@tauri-apps/api/core";
-import Database from "@tauri-apps/plugin-sql";
+import { isTauri, getMockDatabase } from "./tauri-mock";
+import { invoke } from "./invoke";
 import type { DbHandle, PipelineItem } from "@kanna/db";
 import { listPipelineItems } from "@kanna/db";
 import type { Stage } from "@kanna/core";
@@ -243,8 +243,14 @@ async function runMigrations(database: DbHandle) {
 // Initialize
 onMounted(async () => {
   try {
-    const database = await Database.load("sqlite:kanna-v2.db");
-    db.value = database as unknown as DbHandle;
+    let database: DbHandle;
+    if (isTauri) {
+      const { default: Database } = await import("@tauri-apps/plugin-sql");
+      database = (await Database.load("sqlite:kanna-v2.db")) as unknown as DbHandle;
+    } else {
+      database = getMockDatabase() as unknown as DbHandle;
+    }
+    db.value = database;
     await runMigrations(db.value);
     await refreshRepos();
     await loadPreferences();

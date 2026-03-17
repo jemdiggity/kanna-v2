@@ -2,8 +2,8 @@ import { ref, onUnmounted } from "vue"
 import { Terminal } from "@xterm/xterm"
 import { FitAddon } from "@xterm/addon-fit"
 import { WebLinksAddon } from "@xterm/addon-web-links"
-import { invoke } from "@tauri-apps/api/core"
-import { listen } from "@tauri-apps/api/event"
+import { invoke } from "../invoke"
+import { listen } from "../listen"
 
 export function useTerminal(sessionId: string) {
   const terminal = ref<Terminal | null>(null)

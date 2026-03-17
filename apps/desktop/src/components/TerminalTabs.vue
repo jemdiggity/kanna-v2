@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref } from "vue";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "../invoke";
 import AgentView from "./AgentView.vue";
 import TerminalView from "./TerminalView.vue";
 

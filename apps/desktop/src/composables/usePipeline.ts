@@ -1,5 +1,5 @@
 import { ref, type Ref } from "vue";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "../invoke";
 import type { DbHandle } from "@kanna/db";
 import type { PipelineItem } from "@kanna/db";
 import { listPipelineItems, updatePipelineItemStage, insertPipelineItem } from "@kanna/db";

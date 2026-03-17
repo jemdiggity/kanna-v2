@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, nextTick } from "vue"
-import { invoke } from "@tauri-apps/api/core"
+import { invoke } from "../invoke"
 
 const props = defineProps<{
   sessionId: string

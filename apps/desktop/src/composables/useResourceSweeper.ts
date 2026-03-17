@@ -1,5 +1,5 @@
 import { onMounted, onUnmounted } from "vue"
-import { invoke } from "@tauri-apps/api/core"
+import { invoke } from "../invoke"
 import type { DbHandle } from "@kanna/db"
 
 export function useResourceSweeper(

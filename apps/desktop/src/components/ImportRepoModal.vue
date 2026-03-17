@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref } from "vue";
-import { open } from "@tauri-apps/plugin-dialog";
-import { invoke } from "@tauri-apps/api/core";
+import { open } from "../dialog";
+import { invoke } from "../invoke";
 
 const emit = defineEmits<{
   (e: "import", path: string, name: string, defaultBranch: string): void;
