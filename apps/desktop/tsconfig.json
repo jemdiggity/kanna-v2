@@ -14,12 +14,26 @@
     "noEmit": true,
     "jsx": "preserve",
 
+    /* Path aliases */
+    "baseUrl": ".",
+    "paths": {
+      "@kanna/db": ["../../packages/db/src"],
+      "@kanna/core": ["../../packages/core/src"]
+    },
+
     /* Linting */
     "strict": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["src/**/*.ts", "src/**/*.d.ts", "src/**/*.tsx", "src/**/*.vue"],
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.d.ts",
+    "src/**/*.tsx",
+    "src/**/*.vue",
+    "../../packages/db/src/**/*.ts",
+    "../../packages/core/src/**/*.ts"
+  ],
   "references": [{ "path": "./tsconfig.node.json" }]
 }
