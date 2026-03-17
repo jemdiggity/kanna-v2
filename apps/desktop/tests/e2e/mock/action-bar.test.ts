@@ -41,12 +41,20 @@ describe("action bar", () => {
       }
     }
 
-    await Bun.sleep(500);
-    const item = (await callVueMethod(client, "selectedItem")) as { stage: string } | null;
-    expect(item?.stage).toBe("closed");
+    // Wait for stage to update in sidebar
+    await client.waitForText(".sidebar", "Closed", 5000);
+
+    // Verify via DB query
+    const stage = await client.executeSync<string>(
+      `const ctx = document.getElementById("app").__vue_app__._instance.setupState;
+       const item = ctx.selectedItem();
+       return item ? (item.stage?.value || item.stage) : null;`
+    );
+    expect(stage).toBe("closed");
   });
 
   it("hides Make PR and Close for closed task", async () => {
+    await Bun.sleep(300);
     const actionBar = await client.findElement(".action-bar");
     const text = await client.getText(actionBar);
     expect(text).not.toContain("Make PR");
