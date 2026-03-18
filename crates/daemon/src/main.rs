@@ -586,9 +586,15 @@ async fn handle_handoff(
         }
     }
 
-    eprintln!("[handoff] complete, exiting in 500ms");
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    std::process::exit(0);
+    eprintln!("[handoff] complete, exiting");
+    // Use a blocking thread to exit — std::process::exit from an async context
+    // can hang if tokio tasks are still running.
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        std::process::exit(0);
+    });
+    // Give the thread a moment to run
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 }
 
 /// Runs in a blocking thread for the entire lifetime of a session.
