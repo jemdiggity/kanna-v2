@@ -25,19 +25,23 @@ PTY session daemon for Kanna. Runs as a standalone process, persists terminal se
 - **Socket layer** (`socket.rs`): Binds Unix socket, reads/writes line-delimited JSON.
 - **Protocol** (`protocol.rs`): Command/Event enums, serde-tagged JSON.
 - **Session Manager** (`session.rs`): HashMap of session_id → PtySession.
-- **PTY** (`pty.rs`): Wraps `portable-pty` for cross-platform PTY handling.
-- **Main** (`main.rs`): Connection handling, command dispatch, output streaming.
+- **PTY** (`pty.rs`): Raw libc PTY (`openpty`/`fork`/`execvp`). Exposes raw fd for handoff.
+- **FD Transfer** (`fd_transfer.rs`): `SCM_RIGHTS` fd passing over Unix sockets.
+- **Main** (`main.rs`): Connection handling, command dispatch, output streaming, handoff.
 
 ## Session Lifecycle
 
 ```
-Spawn ──► stream_output task starts (one reader, runs for session lifetime)
+Spawn ──► create PTY, store session (no reader yet)
                │
-Attach ──► swap ActiveWriter to this connection (instant, atomic)
+Attach ──► first: clone reader + start stream_output + set ActiveWriter
+           reattach: swap ActiveWriter + send resize (SIGWINCH → Claude redraws)
                │
-Detach ──► set ActiveWriter to None (output buffered, not sent)
+Detach ──► set ActiveWriter to None (output discarded)
                │
 Kill ──────► kill child process, stream_output exits on read() EOF
+               │
+Handoff ──► transfer master fd to new daemon via SCM_RIGHTS
 ```
 
 ## Single-Reader Architecture
@@ -122,6 +126,7 @@ Line-delimited JSON over Unix socket. Each message is a single JSON object termi
 | `List` | List all sessions with status |
 | `Subscribe` | Opt into broadcast hook events |
 | `HookEvent` | Broadcast a hook event to all subscribers |
+| `Handoff` | Request session transfer (new daemon → old daemon) |
 
 ### Events (daemon → client)
 
@@ -134,6 +139,42 @@ Line-delimited JSON over Unix socket. Each message is a single JSON object termi
 | `SessionCreated` | New session ready |
 | `SessionList` | Response to List |
 | `HookEvent` | Broadcast hook event |
+| `HandoffReady` | Session metadata for handoff (followed by SCM_RIGHTS fds) |
+
+## Daemon Handoff
+
+When a new daemon starts and detects an old daemon running (via PID file), it performs a handoff to adopt live sessions:
+
+```
+New daemon                          Old daemon
+    │                                    │
+    ├──► Handoff{version:1} ────────────►│
+    │                                    ├── collect live sessions
+    │                                    ├── detach fds (no close)
+    │◄── HandoffReady{sessions} ◄───────┤
+    │◄── SCM_RIGHTS (master fds) ◄──────┤
+    │                                    ├── exit
+    ├── adopt sessions from fds          │
+    ├── bind socket                      ✗
+    ├── ready for clients
+```
+
+Key details:
+- **SCM_RIGHTS** transfers PTY master fds at the kernel level. The child process's PTY connection is unbroken.
+- The old daemon calls `detach_for_handoff()` which extracts the raw fd via `std::mem::forget` to prevent the `OwnedFd` destructor from closing it.
+- The new daemon creates `PtySession::adopt()` from the received fds. Adopted sessions don't own the child process (can't `waitpid`), so liveness is checked via `kill(pid, 0)`.
+- Version check prevents incompatible handoffs.
+- If handoff fails, old daemon is killed and sessions are lost.
+
+### Dev Workflow
+
+`bun tauri dev` builds the daemon before starting Vite:
+
+1. `cargo build -p kanna-daemon` (+ kanna-hook)
+2. Vite starts
+3. Tauri app starts, calls `ensure_daemon_running()`
+4. New daemon spawns, performs handoff from old daemon
+5. Claude sessions continue uninterrupted
 
 ## Configuration
 
@@ -145,20 +186,32 @@ Line-delimited JSON over Unix socket. Each message is a single JSON object termi
 
 ## Testing
 
-Integration tests in `tests/reconnect.rs` spawn a real daemon process and communicate over Unix sockets:
+Integration tests spawn real daemon processes and communicate over Unix sockets:
 
 ```bash
 cd crates/daemon
-cargo test --test reconnect -- --test-threads=1
+cargo test --test reconnect --test handoff -- --test-threads=1
 ```
 
-Tests must run single-threaded (`--test-threads=1`) because each test spawns and kills a daemon process, and parallel tests would conflict on temp directories.
+Tests must run single-threaded (`--test-threads=1`) because each test spawns and kills daemon processes.
 
 ### Test Coverage
 
+**Reconnect** (`tests/reconnect.rs`):
 - Basic spawn/attach/I/O roundtrip
 - Separate-connection spawn/attach/input (mirrors real Tauri architecture)
 - Reattach on same connection (no byte splitting)
 - Reattach on new connection (simulates app restart)
 - Input works after reattach
-- Rapid reattach (5 connections, no delays, no workarounds)
+- Rapid reattach (5 connections, no delays)
+
+**Handoff** (`tests/handoff.rs`):
+- Single session transfer: spawn on A, handoff to B, I/O works through B
+- Empty handoff: no sessions, B starts fresh
+- Multiple sessions: 3 sessions all survive handoff
+
+**FD Transfer** (unit tests in `fd_transfer.rs`):
+- Single fd transfer over socketpair
+- Multiple fd transfer
+- Empty transfer
+- Invalid fd rejection
