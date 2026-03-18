@@ -117,8 +117,10 @@ function cleanupInstance() {
 async function renderDiff(patch: string) {
   if (!containerRef.value) return;
 
-  const files = parsePatchFiles(patch);
-  if (!files || files.length === 0) {
+  const patches = parsePatchFiles(patch);
+  // parsePatchFiles returns [{ patchMetadata, files: [FileDiffMetadata, ...] }]
+  const allFiles = patches?.flatMap((p: any) => p.files || []) || [];
+  if (allFiles.length === 0) {
     noDiff.value = true;
     cleanupInstance();
     return;
@@ -129,7 +131,7 @@ async function renderDiff(patch: string) {
   cleanupInstance();
 
   // Render each file diff
-  for (const fileMeta of files) {
+  for (const fileMeta of allFiles) {
     const wrapper = document.createElement("div");
     wrapper.className = "diff-file";
     containerRef.value.appendChild(wrapper);

@@ -156,7 +156,7 @@ useKeyboardShortcuts({
   nextTab: () => { /* TODO */ },
   prevTab: () => { /* TODO */ },
   newWindow: () => { /* TODO: Tauri window API */ },
-  showShortcuts: () => { showShortcutsModal.value = true; },
+  showShortcuts: () => { showShortcutsModal.value = !showShortcutsModal.value; },
   openPreferences: () => { showPreferencesPanel.value = true; },
 });
 

@@ -46,6 +46,25 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions) {
       term.write(cached)
     }
 
+    // Let app-level shortcuts pass through even when terminal has focus
+    term.attachCustomKeyEventHandler((e: KeyboardEvent) => {
+      const meta = e.metaKey || e.ctrlKey
+      // Shift+Cmd+N (new task), Cmd+/ (shortcuts), Cmd+P (file picker),
+      // Cmd+S (make PR), Cmd+M (merge), Cmd+N (new window)
+      if (meta && e.shiftKey && e.key === "N") return false
+      if (meta && e.key === "/") return false
+      if (meta && e.key === "p") return false
+      if (meta && e.key === "s") return false
+      if (meta && e.key === "m") return false
+      if (meta && !e.shiftKey && e.key === "n") return false
+      if (meta && e.shiftKey && e.key === "Z") return false
+      // Cmd+Opt+Left/Right for tab navigation
+      if (meta && e.altKey && (e.key === "ArrowLeft" || e.key === "ArrowRight")) return false
+      // Cmd+Opt+Up/Down for task navigation
+      if (meta && e.altKey && (e.key === "ArrowUp" || e.key === "ArrowDown")) return false
+      return true // let terminal handle everything else
+    })
+
     // Send keystrokes to daemon
     term.onData((data) => {
       invoke("send_input", {
