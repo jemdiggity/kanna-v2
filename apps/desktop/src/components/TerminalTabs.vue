@@ -80,16 +80,18 @@ async function addShellTab() {
       <button class="tab tab-add" @click="addShellTab" title="New shell">+</button>
     </div>
     <div class="tab-content">
-      <!-- PTY mode: keep alive with v-show so scrollback is preserved -->
+      <!-- PTY mode: key by sessionId so switching tasks creates a new terminal -->
       <TerminalView
         v-if="sessionId && agentType === 'pty'"
         v-show="activeTab === 'agent'"
+        :key="sessionId"
         :session-id="sessionId"
       />
-      <!-- SDK mode: v-show to preserve state -->
+      <!-- SDK mode: key by sessionId so switching tasks creates a new view -->
       <AgentView
         v-if="sessionId && agentType !== 'pty'"
         v-show="activeTab === 'agent'"
+        :key="sessionId"
         :session-id="sessionId"
         @completed="emit('agent-completed')"
       />
