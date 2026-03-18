@@ -89,7 +89,20 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions) {
       }
     )
 
-    // If spawn options provided, spawn the PTY session now with actual terminal dimensions
+    // Try to attach first — session may already exist in daemon (e.g. after app restart)
+    try {
+      await invoke("attach_session", { sessionId })
+      // Attach succeeded — session was alive, sync size
+      if (terminal.value) {
+        const { cols, rows } = terminal.value
+        invoke("resize_session", { sessionId, cols, rows }).catch(() => {})
+      }
+      return
+    } catch {
+      // Attach failed — session doesn't exist in daemon
+    }
+
+    // No existing session — spawn a new one if we have spawn options
     if (spawnOptions && terminal.value) {
       const { cols, rows } = terminal.value
       try {
@@ -98,10 +111,9 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions) {
         console.error("[terminal] PTY spawn failed:", e)
         return
       }
+      // Now attach to the newly spawned session
+      await invoke("attach_session", { sessionId })
     }
-
-    // Attach to start receiving output
-    await invoke("attach_session", { sessionId })
   }
 
   function fit() {
