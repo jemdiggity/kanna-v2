@@ -10,6 +10,8 @@ const props = defineProps<{
   agentType?: string;
   worktreePath?: string;
   repoPath?: string;
+  prompt?: string;
+  spawnPtySession?: (sessionId: string, cwd: string, prompt: string, cols: number, rows: number) => Promise<void>;
 }>();
 
 const diffViewRef = ref<InstanceType<typeof DiffView> | null>(null);
@@ -86,6 +88,11 @@ async function addShellTab() {
         v-show="activeTab === 'agent'"
         :key="sessionId"
         :session-id="sessionId"
+        :spawn-options="spawnPtySession && worktreePath && prompt ? {
+          cwd: worktreePath,
+          prompt: prompt,
+          spawnFn: spawnPtySession,
+        } : undefined"
       />
       <!-- SDK mode: key by sessionId so switching tasks creates a new view -->
       <AgentView

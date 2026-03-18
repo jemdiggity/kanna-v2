@@ -77,27 +77,10 @@ export function usePipeline(db: Ref<DbHandle | null>) {
     });
 
     // 4. Spawn agent based on type
-    if (agentType === "pty") {
-      try {
-        await spawnPtySession(id, worktreePath, prompt);
-      } catch (e) {
-        // Daemon not running — fall back to SDK mode
-        console.warn("PTY spawn failed, falling back to SDK mode:", e);
-        if (db.value) {
-          await db.value.execute(
-            "UPDATE pipeline_item SET agent_type = ? WHERE id = ?",
-            ["sdk", id]
-          );
-        }
-        await invoke("create_agent_session", {
-          sessionId: id,
-          cwd: worktreePath,
-          prompt,
-          systemPrompt: null,
-          permissionMode: "dontAsk",
-        });
-      }
-    } else {
+    // PTY mode: don't spawn here — TerminalView will spawn on mount
+    // with the correct terminal dimensions from xterm.js.
+    // SDK mode: spawn immediately since no terminal sizing needed.
+    if (agentType !== "pty") {
       await invoke("create_agent_session", {
         sessionId: id,
         cwd: worktreePath,
@@ -112,8 +95,9 @@ export function usePipeline(db: Ref<DbHandle | null>) {
     selectedItemId.value = id;
   }
 
-  /** Spawn Claude CLI in a PTY via the daemon with hook notifications. */
-  async function spawnPtySession(sessionId: string, cwd: string, prompt: string) {
+  /** Spawn Claude CLI in a PTY via the daemon with hook notifications.
+   *  Called by TerminalView on mount so it can pass the actual terminal dimensions. */
+  async function spawnPtySession(sessionId: string, cwd: string, prompt: string, cols = 80, rows = 24) {
     // Find kanna-hook binary — must be in PATH (symlink or install)
     let kannaHookPath: string;
     try {
@@ -146,8 +130,8 @@ export function usePipeline(db: Ref<DbHandle | null>) {
       executable: "/bin/zsh",
       args: ["--login", "-c", claudeCmd],
       env: { TERM: "xterm-256color" },
-      cols: 80,
-      rows: 24,
+      cols,
+      rows,
     });
   }
 
@@ -162,6 +146,7 @@ export function usePipeline(db: Ref<DbHandle | null>) {
     loadItems,
     transition,
     createItem,
+    spawnPtySession,
     selectedItem,
   };
 }

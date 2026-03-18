@@ -7,6 +7,7 @@ import ActionBar from "./ActionBar.vue";
 defineProps<{
   item: PipelineItem | null;
   repoPath?: string;
+  spawnPtySession?: (sessionId: string, cwd: string, prompt: string, cols: number, rows: number) => Promise<void>;
 }>();
 
 const emit = defineEmits<{
@@ -26,6 +27,8 @@ const emit = defineEmits<{
         :agent-type="item.agent_type || 'pty'"
         :repo-path="repoPath"
         :worktree-path="item.branch ? `${repoPath}/.kanna-worktrees/${item.branch}` : undefined"
+        :prompt="item.prompt || ''"
+        :spawn-pty-session="spawnPtySession"
         @agent-completed="emit('agent-completed')"
       />
       <ActionBar

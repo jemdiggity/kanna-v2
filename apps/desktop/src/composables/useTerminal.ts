@@ -9,7 +9,13 @@ import { listen } from "../listen"
 // Module-level cache: sessionId → serialized ANSI scrollback
 const scrollbackCache = new Map<string, string>()
 
-export function useTerminal(sessionId: string) {
+export interface SpawnOptions {
+  cwd: string
+  prompt: string
+  spawnFn: (sessionId: string, cwd: string, prompt: string, cols: number, rows: number) => Promise<void>
+}
+
+export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions) {
   const terminal = ref<Terminal | null>(null)
   const fitAddon = new FitAddon()
   const serializeAddon = new SerializeAddon()
@@ -83,14 +89,19 @@ export function useTerminal(sessionId: string) {
       }
     )
 
-    // Only attach if we don't have cached scrollback (fresh session)
-    // If we have cache, the session was already attached before
-    await invoke("attach_session", { sessionId })
-
-    if (terminal.value) {
-      const { cols, rows } = terminal.value;
-      invoke("resize_session", { sessionId, cols, rows }).catch(() => {})
+    // If spawn options provided, spawn the PTY session now with actual terminal dimensions
+    if (spawnOptions && terminal.value) {
+      const { cols, rows } = terminal.value
+      try {
+        await spawnOptions.spawnFn(sessionId, spawnOptions.cwd, spawnOptions.prompt, cols, rows)
+      } catch (e) {
+        console.error("[terminal] PTY spawn failed:", e)
+        return
+      }
     }
+
+    // Attach to start receiving output
+    await invoke("attach_session", { sessionId })
   }
 
   function fit() {

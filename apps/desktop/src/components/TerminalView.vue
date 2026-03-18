@@ -1,11 +1,15 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from "vue"
-import { useTerminal } from "../composables/useTerminal"
+import { useTerminal, type SpawnOptions } from "../composables/useTerminal"
 import "@xterm/xterm/css/xterm.css"
 
-const props = defineProps<{ sessionId: string }>()
+const props = defineProps<{
+  sessionId: string
+  spawnOptions?: SpawnOptions
+}>()
+
 const containerRef = ref<HTMLElement | null>(null)
-const { init, startListening, fit, dispose } = useTerminal(props.sessionId)
+const { init, startListening, fit, dispose } = useTerminal(props.sessionId, props.spawnOptions)
 
 let resizeObserver: ResizeObserver | null = null
 

@@ -23,7 +23,7 @@ import { usePRWorkflow } from "./composables/usePRWorkflow";
 const db = ref<DbHandle | null>(null);
 
 const { repos, selectedRepoId, refresh: refreshRepos, importRepo } = useRepo(db);
-const { items, selectedItemId, loadItems, transition, createItem, selectedItem } = usePipeline(db);
+const { items, selectedItemId, loadItems, transition, createItem, spawnPtySession, selectedItem } = usePipeline(db);
 const {
   fontFamily,
   fontSize,
@@ -381,6 +381,7 @@ onMounted(async () => {
     <MainPanel
       :item="currentItem"
       :repo-path="selectedRepo?.path"
+      :spawn-pty-session="spawnPtySession"
       @make-pr="handleMakePR"
       @merge="handleMerge"
       @close-task="handleCloseTask"
