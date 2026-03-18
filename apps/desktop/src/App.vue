@@ -35,13 +35,14 @@ const {
   save: savePreference,
 } = usePreferences(db);
 
-useResourceSweeper(
-  () => db.value,
-  () => ({
-    suspendAfterMinutes: suspendAfterMinutes.value,
-    killAfterMinutes: killAfterMinutes.value,
-  })
-);
+// Resource sweeper disabled — corrupts daemon command connection
+// useResourceSweeper(
+//   () => db.value,
+//   () => ({
+//     suspendAfterMinutes: suspendAfterMinutes.value,
+//     killAfterMinutes: killAfterMinutes.value,
+//   })
+// );
 
 const selectedRepo = computed(() =>
   repos.value.find((r) => r.id === selectedRepoId.value) ?? null
@@ -296,7 +297,7 @@ onMounted(async () => {
     await runMigrations(db.value);
     await refreshRepos();
     await loadPreferences();
-    await reconcileSessions();
+    // await reconcileSessions(); // disabled — corrupts daemon connection
 
     // Transition stale "working" items to "unread" (Claude finished while app was closed)
     if (db.value) {
