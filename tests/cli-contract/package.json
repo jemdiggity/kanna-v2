@@ -1,0 +1,7 @@
+{
+  "name": "@kanna/cli-contract",
+  "private": true,
+  "scripts": {
+    "test": "bun test"
+  }
+}
