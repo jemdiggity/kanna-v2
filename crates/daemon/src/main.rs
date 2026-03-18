@@ -81,30 +81,37 @@ async fn handle_connection(
     let mut reader = BufReader::new(read_half);
     let writer = Arc::new(Mutex::new(write_half));
 
-    // Subscribe to hook broadcast — relay any hook events from other connections to this client
-    let mut hook_rx = hook_tx.subscribe();
-    let writer_hook = writer.clone();
-    let hook_relay = tokio::spawn(async move {
-        use tokio::io::AsyncWriteExt;
-        while let Ok(msg) = hook_rx.recv().await {
-            let mut w = writer_hook.lock().await;
-            let _ = w.write_all(msg.as_bytes()).await;
-            let _ = w.write_all(b"\n").await;
-            let _ = w.flush().await;
-        }
-    });
+    // No automatic broadcast subscription — clients must explicitly Subscribe.
+    // This prevents hook events from mixing with command responses.
+    let subscribed = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     loop {
         let cmd = read_command(&mut reader).await;
         match cmd {
             None => break,
+            Some(Command::Subscribe) => {
+                // Opt in to receiving broadcast hook events on this connection
+                if !subscribed.load(std::sync::atomic::Ordering::Relaxed) {
+                    subscribed.store(true, std::sync::atomic::Ordering::Relaxed);
+                    let mut hook_rx = hook_tx.subscribe();
+                    let writer_hook = writer.clone();
+                    tokio::spawn(async move {
+                        use tokio::io::AsyncWriteExt;
+                        while let Ok(msg) = hook_rx.recv().await {
+                            let mut w = writer_hook.lock().await;
+                            let _ = w.write_all(msg.as_bytes()).await;
+                            let _ = w.write_all(b"\n").await;
+                            let _ = w.flush().await;
+                        }
+                    });
+                }
+                let _ = write_event(&mut *writer.lock().await, &Event::Ok).await;
+            }
             Some(command) => {
                 handle_command(command, sessions.clone(), writer.clone(), &hook_tx).await;
             }
         }
     }
-
-    hook_relay.abort();
 }
 
 async fn handle_command(
@@ -134,37 +141,15 @@ async fn handle_command(
 
             match pty::PtySession::spawn(&executable, &args, &cwd, &env, cols, rows) {
                 Ok(pty_session) => {
-                    // Get the reader before inserting into the manager
-                    let reader = match pty_session.try_clone_reader() {
-                        Ok(r) => r,
-                        Err(e) => {
-                            let evt = Event::Error {
-                                message: format!("failed to clone PTY reader: {}", e),
-                            };
-                            let _ = write_event(&mut *writer.lock().await, &evt).await;
-                            return;
-                        }
-                    };
-
-                    let pid = pty_session.pid();
                     mgr.insert(session_id.clone(), pty_session);
                     drop(mgr);
 
-                    // Send SessionCreated
-                    {
-                        let evt = Event::SessionCreated {
-                            session_id: session_id.clone(),
-                        };
-                        let _ = write_event(&mut *writer.lock().await, &evt).await;
-                    }
-
-                    // Spawn output streaming task
-                    let sid = session_id.clone();
-                    let writer_out = writer.clone();
-                    let sessions_exit = sessions.clone();
-                    tokio::task::spawn_blocking(move || {
-                        stream_output(sid, reader, writer_out, sessions_exit, pid);
-                    });
+                    // Only send SessionCreated — no auto-streaming.
+                    // Client must Attach to start receiving Output events.
+                    let evt = Event::SessionCreated {
+                        session_id: session_id.clone(),
+                    };
+                    let _ = write_event(&mut *writer.lock().await, &evt).await;
                 }
                 Err(e) => {
                     let evt = Event::Error {
@@ -332,6 +317,11 @@ async fn handle_command(
         Command::Handoff => {
             let evt = Event::HandoffUnsupported;
             let _ = write_event(&mut *writer.lock().await, &evt).await;
+        }
+
+        Command::Subscribe => {
+            // Handled in handle_connection before dispatch
+            let _ = write_event(&mut *writer.lock().await, &Event::Ok).await;
         }
 
         Command::HookEvent {

@@ -36,6 +36,7 @@ pub enum Command {
         session_id: String,
     },
     List,
+    Subscribe,
     Handoff,
     HookEvent {
         session_id: String,

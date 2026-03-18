@@ -113,8 +113,8 @@ async fn ensure_daemon_running() {
 /// Spawn the event bridge: a background task that reads events from a dedicated
 /// daemon connection and emits them as Tauri events.
 fn spawn_event_bridge(app: tauri::AppHandle) {
-    tokio::spawn(async move {
-        // Try to connect a dedicated event connection
+    tauri::async_runtime::spawn(async move {
+        // Dedicated event connection — separate from the command connection
         let mut event_client = match try_connect_daemon().await {
             Some(c) => c,
             None => {
@@ -123,7 +123,13 @@ fn spawn_event_bridge(app: tauri::AppHandle) {
             }
         };
 
-        eprintln!("[event-bridge] connected to daemon for event streaming");
+        // Subscribe to hook event broadcasts
+        let _ = event_client
+            .send_command(&serde_json::json!({"type":"Subscribe"}).to_string())
+            .await;
+        let _ = event_client.read_event().await; // consume Ok response
+
+        eprintln!("[event-bridge] connected and subscribed to daemon events");
 
         loop {
             match event_client.read_event().await {

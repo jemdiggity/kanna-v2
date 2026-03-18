@@ -50,7 +50,21 @@ pub async fn spawn_session(
     let json = serde_json::to_string(&cmd).map_err(|e| e.to_string())?;
     ensure_connected(&state).await?;
     let mut guard = state.lock().await;
-    guard.as_mut().unwrap().send_command(&json).await
+    let client = guard.as_mut().unwrap();
+    client.send_command(&json).await?;
+
+    // Read response — expect SessionCreated or Error
+    let response = client.read_event().await?;
+    let event: serde_json::Value =
+        serde_json::from_str(&response).map_err(|e| format!("bad response: {}", e))?;
+    match event.get("type").and_then(|t| t.as_str()) {
+        Some("SessionCreated") => Ok(()),
+        Some("Error") => {
+            let msg = event.get("message").and_then(|m| m.as_str()).unwrap_or("unknown error");
+            Err(msg.to_string())
+        }
+        _ => Err(format!("unexpected spawn response: {}", response)),
+    }
 }
 
 #[tauri::command]
@@ -158,17 +172,55 @@ pub async fn list_sessions(
 
 #[tauri::command]
 pub async fn attach_session(
-    state: tauri::State<'_, DaemonState>,
+    app: tauri::AppHandle,
     session_id: String,
 ) -> Result<(), String> {
-    let cmd = serde_json::json!({
-        "type": "Attach",
-        "session_id": session_id,
+    // Create a dedicated connection for this session's output streaming.
+    // This avoids mixing Output events with command responses.
+    let socket_path = daemon_socket_path();
+    let mut stream_client = DaemonClient::connect(&socket_path).await?;
+
+    // Send Attach command
+    let cmd = serde_json::json!({ "type": "Attach", "session_id": session_id });
+    stream_client.send_command(&serde_json::to_string(&cmd).unwrap()).await?;
+
+    // Read the Ok/Error response
+    let response = stream_client.read_event().await?;
+    let event: serde_json::Value = serde_json::from_str(&response).map_err(|e| e.to_string())?;
+    if let Some("Error") = event.get("type").and_then(|t| t.as_str()) {
+        let msg = event.get("message").and_then(|m| m.as_str()).unwrap_or("attach failed");
+        return Err(msg.to_string());
+    }
+
+    // Spawn a background task to read Output/Exit events and emit Tauri events
+    let sid = session_id.clone();
+    use tauri::Emitter;
+    tauri::async_runtime::spawn(async move {
+        loop {
+            match stream_client.read_event().await {
+                Ok(line) => {
+                    let event: serde_json::Value = match serde_json::from_str(&line) {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
+                    match event.get("type").and_then(|t| t.as_str()) {
+                        Some("Output") => {
+                            let _ = app.emit("terminal_output", &event);
+                        }
+                        Some("Exit") => {
+                            let _ = app.emit("session_exit", &event);
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        eprintln!("[attach] output stream ended for session {}", sid);
     });
-    let json = serde_json::to_string(&cmd).map_err(|e| e.to_string())?;
-    ensure_connected(&state).await?;
-    let mut guard = state.lock().await;
-    guard.as_mut().unwrap().send_command(&json).await
+
+    Ok(())
 }
 
 #[tauri::command]
