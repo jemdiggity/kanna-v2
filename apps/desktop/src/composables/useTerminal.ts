@@ -10,6 +10,7 @@ export function useTerminal(sessionId: string) {
   const fitAddon = new FitAddon()
   let unlistenOutput: (() => void) | null = null
   let unlistenExit: (() => void) | null = null
+  let logged = false
 
   function init(container: HTMLElement) {
     const term = new Terminal({
@@ -46,7 +47,17 @@ export function useTerminal(sessionId: string) {
       "terminal_output",
       (event) => {
         if (event.payload.session_id === sessionId && terminal.value) {
-          terminal.value.write(new Uint8Array(event.payload.data))
+          const data = event.payload.data
+          // Debug: log first chunk to verify data format
+          if (data && !logged) {
+            console.log("[terminal] data type:", typeof data, "isArray:", Array.isArray(data), "len:", data?.length, "first5:", data?.slice?.(0, 5))
+            logged = true
+          }
+          if (Array.isArray(data)) {
+            terminal.value.write(new Uint8Array(data))
+          } else if (typeof data === "string") {
+            terminal.value.write(data)
+          }
         }
       }
     )
