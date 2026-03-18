@@ -63,6 +63,12 @@ export function useTerminal(sessionId: string) {
 
     // Attach to daemon session to start receiving output
     await invoke("attach_session", { sessionId })
+
+    // Sync xterm.js size to the PTY — the spawn may have used different dimensions
+    if (terminal.value) {
+      const { cols, rows } = terminal.value;
+      invoke("resize_session", { sessionId, cols, rows }).catch(() => {})
+    }
   }
 
   function fit() {

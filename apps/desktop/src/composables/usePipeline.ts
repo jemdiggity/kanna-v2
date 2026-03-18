@@ -146,8 +146,8 @@ export function usePipeline(db: Ref<DbHandle | null>) {
       executable: "/bin/zsh",
       args: ["--login", "-c", claudeCmd],
       env: {},
-      cols: 120,
-      rows: 40,
+      cols: 80,
+      rows: 24,
     });
   }
 
