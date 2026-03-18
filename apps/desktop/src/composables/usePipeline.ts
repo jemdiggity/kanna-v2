@@ -78,7 +78,25 @@ export function usePipeline(db: Ref<DbHandle | null>) {
 
     // 4. Spawn agent based on type
     if (agentType === "pty") {
-      await spawnPtySession(id, worktreePath, prompt);
+      try {
+        await spawnPtySession(id, worktreePath, prompt);
+      } catch (e) {
+        // Daemon not running — fall back to SDK mode
+        console.warn("PTY spawn failed, falling back to SDK mode:", e);
+        if (db.value) {
+          await db.value.execute(
+            "UPDATE pipeline_item SET agent_type = ? WHERE id = ?",
+            ["sdk", id]
+          );
+        }
+        await invoke("create_agent_session", {
+          sessionId: id,
+          cwd: worktreePath,
+          prompt,
+          systemPrompt: null,
+          permissionMode: "dontAsk",
+        });
+      }
     } else {
       await invoke("create_agent_session", {
         sessionId: id,

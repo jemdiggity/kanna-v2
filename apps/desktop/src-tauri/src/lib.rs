@@ -169,8 +169,7 @@ pub fn run() {
         .manage(Arc::new(Mutex::new(None)) as DaemonState)
         .setup(|app| {
             let handle = app.handle().clone();
-            tokio::spawn(async move {
-                // Ensure daemon is running, then start the event bridge
+            tauri::async_runtime::spawn(async move {
                 ensure_daemon_running().await;
                 spawn_event_bridge(handle);
             });
