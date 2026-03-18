@@ -2,11 +2,9 @@
 import { ref, onMounted } from "vue"
 import { Terminal } from "@xterm/xterm"
 import { FitAddon } from "@xterm/addon-fit"
+import { invoke } from "@tauri-apps/api/core"
+import { listen } from "@tauri-apps/api/event"
 import "@xterm/xterm/css/xterm.css"
-
-// Direct Tauri imports — no wrappers
-const { invoke } = await import("@tauri-apps/api/core")
-const { listen } = await import("@tauri-apps/api/event")
 
 const containerRef = ref<HTMLElement | null>(null)
 const status = ref("Starting...")
