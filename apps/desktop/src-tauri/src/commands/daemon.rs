@@ -93,11 +93,11 @@ pub async fn send_input(
     });
     let json = serde_json::to_string(&cmd).map_err(|e| e.to_string())?;
     ensure_connected(&state).await?;
-    {
-        let mut guard = state.lock().await;
-        guard.as_mut().unwrap().send_command(&json).await?;
-    }
-    send_and_ack(&state).await
+    let mut guard = state.lock().await;
+    let client = guard.as_mut().unwrap();
+    client.send_command(&json).await?;
+    let _ = client.read_event().await; // consume Ok
+    Ok(())
 }
 
 #[tauri::command]
@@ -115,11 +115,11 @@ pub async fn resize_session(
     });
     let json = serde_json::to_string(&cmd).map_err(|e| e.to_string())?;
     ensure_connected(&state).await?;
-    {
-        let mut guard = state.lock().await;
-        guard.as_mut().unwrap().send_command(&json).await?;
-    }
-    send_and_ack(&state).await
+    let mut guard = state.lock().await;
+    let client = guard.as_mut().unwrap();
+    client.send_command(&json).await?;
+    let _ = client.read_event().await; // consume Ok
+    Ok(())
 }
 
 #[tauri::command]

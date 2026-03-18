@@ -1,6 +1,7 @@
 import { createApp } from "vue";
 import { isTauri } from "./tauri-mock";
-import App from "./App.vue";
+// TEMP: swap to PtyTest for debugging
+import App from "./PtyTest.vue";
 
 if (isTauri) {
   const { invoke } = await import("@tauri-apps/api/core");
