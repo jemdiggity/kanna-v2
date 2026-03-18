@@ -165,6 +165,35 @@ pub fn git_remote_url(repo_path: String) -> Result<String, String> {
     Ok(url)
 }
 
+#[tauri::command]
+pub fn git_diff_range(repo_path: String, from: String, to: String) -> Result<String, String> {
+    let repo = Repository::open(&repo_path).map_err(|e| e.to_string())?;
+
+    let from_obj = repo.revparse_single(&from).map_err(|e| format!("bad ref '{}': {}", from, e))?;
+    let to_obj = repo.revparse_single(&to).map_err(|e| format!("bad ref '{}': {}", to, e))?;
+
+    let from_tree = from_obj.peel_to_tree().map_err(|e| format!("can't peel '{}' to tree: {}", from, e))?;
+    let to_tree = to_obj.peel_to_tree().map_err(|e| format!("can't peel '{}' to tree: {}", to, e))?;
+
+    let diff = repo
+        .diff_tree_to_tree(Some(&from_tree), Some(&to_tree), None)
+        .map_err(|e| e.to_string())?;
+
+    let mut output = Vec::new();
+    diff.print(git2::DiffFormat::Patch, |_delta, _hunk, line| {
+        let origin = line.origin();
+        match origin {
+            '+' | '-' | ' ' => output.push(origin as u8),
+            _ => {}
+        }
+        output.extend_from_slice(line.content());
+        true
+    })
+    .map_err(|e| e.to_string())?;
+
+    String::from_utf8(output).map_err(|e| e.to_string())
+}
+
 // --- CLI-based commands (use system git for auth) ---
 
 #[tauri::command]
