@@ -164,12 +164,12 @@ onUnmounted(() => {
         <div
           class="result-block"
           :class="{
-            success: msg.subtype === 'success',
-            error: msg.subtype !== 'success',
+            success: msg.subtype === 'success' || msg.subtype === 'error_max_turns',
+            error: msg.subtype !== 'success' && msg.subtype !== 'error_max_turns',
           }"
         >
           <div class="result-header">
-            {{ msg.subtype === 'success' ? 'Completed' : 'Error' }}
+            {{ msg.subtype === 'success' || msg.subtype === 'error_max_turns' ? 'Completed' : 'Error' }}
           </div>
           <div class="result-details">
             <span v-if="msg.num_turns">{{ msg.num_turns }} turns</span>
