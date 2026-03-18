@@ -145,7 +145,7 @@ export function usePipeline(db: Ref<DbHandle | null>) {
       cwd,
       executable: "/bin/zsh",
       args: ["--login", "-c", claudeCmd],
-      env: { TERM: "xterm-256color", TERM_PROGRAM: "xterm" },
+      env: { TERM: "xterm-256color" },
       cols: 80,
       rows: 24,
     });

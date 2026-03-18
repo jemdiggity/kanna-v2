@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>PTY Test — Plain xterm.js</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
+  <style>
+    body { margin: 0; background: #1a1a1a; color: #e0e0e0; font-family: monospace; }
+    #controls { padding: 8px; background: #252525; display: flex; gap: 8px; align-items: center; font-size: 13px; }
+    #controls button { padding: 4px 12px; background: #333; border: 1px solid #555; color: #e0e0e0; cursor: pointer; border-radius: 3px; }
+    #controls button:hover { background: #444; }
+    #terminal { width: 100vw; height: calc(100vh - 40px); }
+    #status { color: #888; }
+  </style>
+</head>
+<body>
+  <div id="controls">
+    <button onclick="spawnClaude()">Spawn Claude</button>
+    <button onclick="spawnEcho()">Spawn Echo Test</button>
+    <span id="status">Not connected</span>
+  </div>
+  <div id="terminal"></div>
+
+  <script type="module">
+    import { Terminal } from 'https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/+esm'
+    import { FitAddon } from 'https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/+esm'
+
+    const term = new Terminal({
+      fontFamily: '"SF Mono", Menlo, monospace',
+      fontSize: 13,
+      theme: { background: '#1a1a1a', foreground: '#e0e0e0' },
+      scrollback: 10000,
+      cursorBlink: true,
+    })
+    const fitAddon = new FitAddon()
+    term.loadAddon(fitAddon)
+    term.open(document.getElementById('terminal'))
+    fitAddon.fit()
+    window.addEventListener('resize', () => fitAddon.fit())
+
+    const status = document.getElementById('status')
+    let ws = null
+    let sessionId = null
+
+    function connect() {
+      return new Promise((resolve, reject) => {
+        ws = new WebSocket(`ws://localhost:3456/ws`)
+        ws.binaryType = 'arraybuffer'
+
+        ws.onopen = () => {
+          status.textContent = 'Connected to daemon'
+          resolve()
+        }
+
+        ws.onmessage = (event) => {
+          if (event.data instanceof ArrayBuffer) {
+            // Raw PTY output bytes
+            term.write(new Uint8Array(event.data))
+          } else {
+            // JSON control message
+            const msg = JSON.parse(event.data)
+            if (msg.type === 'exit') {
+              term.write(`\r\n[Process exited with code ${msg.code}]\r\n`)
+              status.textContent = `Exited (code ${msg.code})`
+            } else if (msg.type === 'SessionCreated') {
+              sessionId = msg.session_id
+              status.textContent = `Session: ${sessionId}`
+              // Attach
+              ws.send(JSON.stringify({ type: 'Attach', session_id: sessionId }))
+            } else if (msg.type === 'Ok') {
+              // Attach confirmed
+            } else {
+              console.log('msg:', msg)
+            }
+          }
+        }
+
+        ws.onclose = () => {
+          status.textContent = 'Disconnected'
+        }
+
+        ws.onerror = (e) => {
+          status.textContent = 'Connection error'
+          reject(e)
+        }
+      })
+    }
+
+    // Send key input to daemon
+    term.onData((data) => {
+      if (!ws || !sessionId) return
+      const bytes = new TextEncoder().encode(data)
+      const cmd = JSON.stringify({
+        type: 'Input',
+        session_id: sessionId,
+        data: Array.from(bytes),
+      })
+      ws.send(cmd)
+    })
+
+    // Resize
+    term.onResize(({ cols, rows }) => {
+      if (!ws || !sessionId) return
+      ws.send(JSON.stringify({ type: 'Resize', session_id: sessionId, cols, rows }))
+    })
+
+    window.spawnClaude = async function() {
+      term.reset()
+      if (!ws) await connect()
+      const id = 'test-' + Date.now()
+      ws.send(JSON.stringify({
+        type: 'Spawn',
+        session_id: id,
+        executable: '/bin/zsh',
+        args: ['--login', '-c', "claude --dangerously-skip-permissions 'say hello world briefly'"],
+        cwd: '/tmp',
+        env: { TERM: 'xterm-256color', TERM_PROGRAM: 'xterm' },
+        cols: term.cols,
+        rows: term.rows,
+      }))
+    }
+
+    window.spawnEcho = async function() {
+      term.reset()
+      if (!ws) await connect()
+      const id = 'echo-' + Date.now()
+      ws.send(JSON.stringify({
+        type: 'Spawn',
+        session_id: id,
+        executable: '/bin/zsh',
+        args: ['--login', '-c', "printf '\\033[31mRED\\033[0m \\033[32mGREEN\\033[0m\\r\\nLine 2\\r\\n'"],
+        cwd: '/tmp',
+        env: { TERM: 'xterm-256color' },
+        cols: term.cols,
+        rows: term.rows,
+      }))
+    }
+
+    // Auto-connect
+    connect().catch(() => {
+      term.writeln('Could not connect to WebSocket server.')
+      term.writeln('Run: bun run tests/pty-test/server.ts')
+    })
+  </script>
+</body>
+</html>
