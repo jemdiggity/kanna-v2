@@ -10,6 +10,7 @@ export type ActionName =
   | "navigateDown"
   | "toggleZen"
   | "dismiss"
+  | "openInIDE"
   | "openShell"
   | "showDiff"
   | "showShortcuts"
@@ -41,7 +42,8 @@ interface ShortcutDef {
 export const shortcuts: ShortcutDef[] = [
   // Pipeline
   { action: "newTask",    label: "New Task",          group: "Pipeline",   key: "n",                            meta: true, noShift: true, display: "Cmd+N" },
-  { action: "openFile",   label: "Open File",         group: "Pipeline",   key: "p",                            meta: true,               display: "Cmd+P" },
+  { action: "openFile",   label: "File Picker",        group: "Pipeline",   key: "p",                            meta: true,               display: "Cmd+P" },
+  { action: "openInIDE",  label: "Open in IDE",        group: "Pipeline",   key: "o",                            meta: true,               display: "Cmd+O" },
   { action: "makePR",     label: "Make PR",           group: "Pipeline",   key: "s",                            meta: true, noShift: true, display: "Cmd+S" },
   { action: "merge",      label: "Merge PR",          group: "Pipeline",   key: "m",                            meta: true,               display: "Cmd+M" },
   { action: "closeTask",  label: "Close / Reject",    group: "Pipeline",   key: ["Backspace", "Delete"],        meta: true,               display: "Cmd+Delete" },

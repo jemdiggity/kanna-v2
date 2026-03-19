@@ -88,7 +88,8 @@ Sorted in sidebar: working > unread > idle, then by most recent.
 | Cmd+N | New task |
 | Cmd+D | Diff modal |
 | Cmd+J | Shell modal |
-| Cmd+P | Open in IDE |
+| Cmd+P | File picker |
+| Cmd+O | Open in IDE |
 | Cmd+S | Make PR |
 | Cmd+M | Merge PR |
 | Cmd+Delete | Close task |

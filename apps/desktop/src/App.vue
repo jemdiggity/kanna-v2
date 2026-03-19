@@ -178,6 +178,12 @@ async function handleCloseTask() {
 useKeyboardShortcuts({
   newTask: () => { showNewTaskModal.value = true; },
   openFile: () => { showFilePickerModal.value = true; },
+  openInIDE: async () => {
+    const item = currentItem.value;
+    if (!item?.branch || !selectedRepo.value) return;
+    const worktreePath = `${selectedRepo.value.path}/.kanna-worktrees/${item.branch}`;
+    await invoke("run_script", { script: `${ideCommand.value} "${worktreePath}"`, cwd: worktreePath, env: {} }).catch(() => {});
+  },
   makePR: handleMakePR,
   merge: handleMerge,
   closeTask: handleCloseTask,
