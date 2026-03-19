@@ -149,11 +149,30 @@ Line-delimited JSON over Unix domain socket. Each message is one JSON object + `
 | `HandoffReady` | sessions | Session metadata (followed by SCM_RIGHTS) |
 | `HookEvent` | session_id, event, data | Broadcast hook event |
 
+## Logging
+
+The daemon logs to both stderr and a per-process log file using `flexi_logger` with the standard `log` crate macros.
+
+**Log file location:** `{KANNA_DAEMON_DIR}/kanna-daemon_{discriminant}.log`
+
+Default: `~/Library/Application Support/Kanna/kanna-daemon_{pid}.log`
+
+**Log level:** Controlled by `RUST_LOG` env var. Defaults to `info`.
+
+| Level | Usage |
+|-------|-------|
+| `error` | PTY read failures, accept errors |
+| `info` | Startup, shutdown, handoff progress, session adoption |
+| `debug` | Detailed protocol tracing (when `RUST_LOG=debug`) |
+
+Logs are written to both destinations simultaneously — the file for tooling/debugging, stderr for the dev terminal running `bun tauri dev`.
+
 ## Configuration
 
 | Env Var | Description | Default |
 |---------|-------------|---------|
-| `KANNA_DAEMON_DIR` | Data directory (socket, PID file) | `~/Library/Application Support/Kanna` |
+| `KANNA_DAEMON_DIR` | Data directory (socket, PID, log files) | `~/Library/Application Support/Kanna` |
+| `RUST_LOG` | Log level filter | `info` |
 
 ## Dev Workflow
 
