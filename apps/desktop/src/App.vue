@@ -95,7 +95,7 @@ watch([repos, selectedRepoId], refreshAllItems, { immediate: true });
 // Sort items the same way the sidebar does
 function sortedItemsForCurrentRepo(): PipelineItem[] {
   const activityOrder: Record<string, number> = { idle: 0, unread: 1, working: 2 };
-  return items.value
+  return allItems.value
     .filter((item) => item.repo_id === selectedRepoId.value)
     .sort((a, b) => {
       const ao = activityOrder[(a as any).activity || "idle"] ?? 0;
