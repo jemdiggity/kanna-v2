@@ -34,7 +34,7 @@ export function useKeyboardShortcuts(actions: KeyboardActions) {
     }
 
     // Shift+Cmd+N → New Task
-    if (meta && e.shiftKey && e.key === "N") {
+    if (meta && e.shiftKey && (e.key === "N" || e.key === "n")) {
       e.preventDefault();
       actions.newTask();
       return;
@@ -90,7 +90,7 @@ export function useKeyboardShortcuts(actions: KeyboardActions) {
     }
 
     // Shift+Cmd+Z → Zen Mode
-    if (meta && e.shiftKey && e.key === "Z") {
+    if (meta && e.shiftKey && (e.key === "Z" || e.key === "z")) {
       e.preventDefault();
       actions.toggleZen();
       return;

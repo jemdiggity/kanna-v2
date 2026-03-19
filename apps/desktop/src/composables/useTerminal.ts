@@ -37,7 +37,7 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions) {
     term.attachCustomKeyEventHandler((e: KeyboardEvent) => {
       if (e.key === "Escape") return false
       const meta = e.metaKey || e.ctrlKey
-      if (meta && e.shiftKey && e.key === "N") return false
+      if (meta && e.shiftKey && (e.key === "N" || e.key === "n")) return false
       if (meta && e.key === "/") return false
       if (meta && e.key === "p") return false
       if (meta && e.key === "s") return false
@@ -45,7 +45,7 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions) {
       if (meta && e.key === "d") return false
       if (meta && e.key === "j") return false
       if (meta && !e.shiftKey && e.key === "n") return false
-      if (meta && e.shiftKey && e.key === "Z") return false
+      if (meta && e.shiftKey && (e.key === "Z" || e.key === "z")) return false
       if (meta && e.altKey && (e.key === "ArrowLeft" || e.key === "ArrowRight")) return false
       if (meta && e.altKey && (e.key === "ArrowUp" || e.key === "ArrowDown")) return false
       return true
