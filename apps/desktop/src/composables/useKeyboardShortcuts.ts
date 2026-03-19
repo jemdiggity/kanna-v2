@@ -6,7 +6,6 @@ export interface KeyboardActions {
   openFile: () => void;
   makePR: () => void;
   merge: () => void;
-  closeTask: () => void;
   // Navigation
   navigateUp: () => void;
   navigateDown: () => void;
@@ -65,13 +64,6 @@ export function useKeyboardShortcuts(actions: KeyboardActions) {
     if (meta && e.key === "m") {
       e.preventDefault();
       actions.merge();
-      return;
-    }
-
-    // Cmd+Delete → Close/Reject
-    if (meta && (e.key === "Backspace" || e.key === "Delete")) {
-      e.preventDefault();
-      actions.closeTask();
       return;
     }
 

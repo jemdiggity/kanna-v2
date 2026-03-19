@@ -148,24 +148,11 @@ async function handleMerge() {
   }
 }
 
-async function handleCloseTask() {
-  const item = selectedItem();
-  if (!item || !selectedRepo.value || !prWorkflow.value) return;
-  try {
-    await prWorkflow.value.closeTask(item, selectedRepo.value.path);
-    await loadItems(selectedRepo.value.id);
-    await refreshAllItems();
-  } catch (e) {
-    console.error("Close failed:", e);
-  }
-}
-
 useKeyboardShortcuts({
   newTask: () => { showNewTaskModal.value = true; },
   openFile: () => { showFilePickerModal.value = true; },
   makePR: handleMakePR,
   merge: handleMerge,
-  closeTask: handleCloseTask,
   navigateUp: () => navigateItems(-1),
   navigateDown: () => navigateItems(1),
   toggleZen: () => { zenMode.value = !zenMode.value; },
@@ -420,7 +407,6 @@ onMounted(async () => {
       :spawn-pty-session="spawnPtySession"
       @make-pr="handleMakePR"
       @merge="handleMerge"
-      @close-task="handleCloseTask"
       @agent-completed="refreshAllItems"
     />
 

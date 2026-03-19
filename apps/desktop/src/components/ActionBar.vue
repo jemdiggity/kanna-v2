@@ -9,7 +9,6 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: "make-pr"): void;
   (e: "merge"): void;
-  (e: "close-task"): void;
 }>();
 
 const showMakePR = computed(() => {
@@ -20,11 +19,6 @@ const showMerge = computed(() => {
   return props.item.stage === "needs_review";
 });
 
-const showClose = computed(() => {
-  return (
-    props.item.stage !== "merged" && props.item.stage !== "closed"
-  );
-});
 </script>
 
 <template>
@@ -42,13 +36,6 @@ const showClose = computed(() => {
       @click="emit('merge')"
     >
       Merge
-    </button>
-    <button
-      v-if="showClose"
-      class="btn btn-danger"
-      @click="emit('close-task')"
-    >
-      Close
     </button>
   </div>
 </template>
@@ -99,15 +86,4 @@ const showClose = computed(() => {
   background: #3ab553;
 }
 
-.btn-danger {
-  background: #333;
-  border-color: #555;
-  color: #ccc;
-}
-
-.btn-danger:hover {
-  background: #b62324;
-  border-color: #d13435;
-  color: #fff;
-}
 </style>

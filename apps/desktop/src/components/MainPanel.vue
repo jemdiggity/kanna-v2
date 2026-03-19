@@ -13,7 +13,6 @@ defineProps<{
 const emit = defineEmits<{
   (e: "make-pr"): void;
   (e: "merge"): void;
-  (e: "close-task"): void;
   (e: "agent-completed"): void;
 }>();
 </script>
@@ -35,7 +34,6 @@ const emit = defineEmits<{
         :item="item"
         @make-pr="emit('make-pr')"
         @merge="emit('merge')"
-        @close-task="emit('close-task')"
       />
     </template>
     <div v-else class="empty-state">

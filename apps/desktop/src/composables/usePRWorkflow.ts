@@ -64,19 +64,5 @@ export function usePRWorkflow(db: DbHandle) {
     await updatePipelineItemStage(db, item.id, "merged");
   }
 
-  async function closeTask(item: PipelineItem, repoPath: string) {
-    // Close PR if one exists
-    if (item.pr_number) {
-      const remoteUrl = await invoke<string>("git_remote_url", { repoPath });
-      const remote = parseGitHubRemote(remoteUrl);
-      if (remote) {
-        const token = await getGitHubToken();
-        const github = new GitHubClient(remote.owner, remote.repo, token);
-        await github.closePR(item.pr_number);
-      }
-    }
-    await updatePipelineItemStage(db, item.id, "closed");
-  }
-
-  return { createPR, mergePR, closeTask };
+  return { createPR, mergePR };
 }
