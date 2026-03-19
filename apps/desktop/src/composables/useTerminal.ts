@@ -96,8 +96,9 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions) {
       if (terminal.value) {
         terminal.value.reset()
         const { cols, rows } = terminal.value
+        // Force a size change then restore — guarantees SIGWINCH fires
+        await invoke("resize_session", { sessionId, cols: cols - 1, rows }).catch(() => {})
         await invoke("resize_session", { sessionId, cols, rows }).catch(() => {})
-        invoke("signal_session", { sessionId, signal: "SIGWINCH" }).catch(() => {})
       }
       return
     } catch {
