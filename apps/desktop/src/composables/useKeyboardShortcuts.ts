@@ -13,7 +13,8 @@ export type ActionName =
   | "openShell"
   | "showDiff"
   | "showShortcuts"
-  | "openPreferences";
+  | "openPreferences"
+  | "toggleMaximize";
 
 export type KeyboardActions = Record<ActionName, () => void>;
 
@@ -55,6 +56,8 @@ export const shortcuts: ShortcutDef[] = [
   { action: "showDiff",       label: "View Diff",           group: "Help", key: "d",                            meta: true, noShift: true, display: "Cmd+D" },
   { action: "showShortcuts",  label: "Keyboard Shortcuts",  group: "Help", key: "/",                            meta: true,               display: "Cmd+/" },
   { action: "openPreferences", label: "Preferences",        group: "Help", key: ",",                            meta: true,               display: "Cmd+," },
+  // Window
+  { action: "toggleMaximize", label: "Toggle Maximize",    group: "Window", key: "Enter",                       meta: true, shift: true,  display: "Shift+Cmd+Enter" },
   // Escape is special — no meta required
   { action: "dismiss",    label: "Dismiss",           group: "Navigation", key: "Escape",                                                 display: "Escape" },
 ];
