@@ -29,7 +29,7 @@ interface ShortcutDef {
   meta?: boolean;
   shift?: boolean;
   alt?: boolean;
-  /** When true, requires shift to NOT be pressed (distinguishes Cmd+N from Shift+Cmd+N) */
+  /** When true, requires shift to NOT be pressed */
   noShift?: boolean;
   /** Display string for the shortcuts modal (e.g. "Cmd+Delete") */
   display: string;
