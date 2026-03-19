@@ -4,7 +4,7 @@ import { isTauri, getMockDatabase } from "./tauri-mock";
 import { invoke } from "./invoke";
 import { listen } from "./listen";
 import type { DbHandle, PipelineItem } from "@kanna/db";
-import { listPipelineItems, updatePipelineItemActivity, getSetting, setSetting } from "@kanna/db";
+import { listPipelineItems, updatePipelineItemStage, updatePipelineItemActivity, getSetting, setSetting } from "@kanna/db";
 import type { Stage } from "@kanna/core";
 import Sidebar from "./components/Sidebar.vue";
 import MainPanel from "./components/MainPanel.vue";
