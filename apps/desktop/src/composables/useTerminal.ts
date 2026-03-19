@@ -25,6 +25,7 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions) {
       theme: { background: "#1a1a1a", foreground: "#e0e0e0", cursor: "#e0e0e0" },
       scrollback: 10000,
       cursorBlink: true,
+      vtExtensions: { kittyKeyboard: true },
     })
     term.loadAddon(fitAddon)
     term.loadAddon(new WebLinksAddon())
