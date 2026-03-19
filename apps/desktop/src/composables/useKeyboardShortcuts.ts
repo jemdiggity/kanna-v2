@@ -2,6 +2,7 @@ import { onMounted, onUnmounted } from "vue";
 
 export type ActionName =
   | "newTask"
+  | "newWindow"
   | "openFile"
   | "makePR"
   | "merge"
@@ -45,6 +46,8 @@ export const shortcuts: ShortcutDef[] = [
   { action: "makePR",     label: "Make PR",           group: "Pipeline",   key: "s",                            meta: true, display: "Cmd+S" },
   { action: "merge",      label: "Merge PR",          group: "Pipeline",   key: "m",                            meta: true,               display: "Cmd+M" },
   { action: "closeTask",  label: "Close / Reject",    group: "Pipeline",   key: ["Backspace", "Delete"],        meta: true,               display: "Cmd+Delete" },
+  // Window
+  { action: "newWindow",  label: "New Window",        group: "Window",     key: ["N", "n"],                     meta: true, shift: true,  display: "Shift+Cmd+N" },
   // Navigation
   { action: "navigateDown", label: "Next Task",       group: "Navigation", key: "ArrowDown",                    meta: true, alt: true,    display: "Option+Cmd+Down" },
   { action: "navigateUp",   label: "Previous Task",   group: "Navigation", key: "ArrowUp",                      meta: true, alt: true,    display: "Option+Cmd+Up" },
