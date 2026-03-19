@@ -11,6 +11,11 @@ use tauri::{Emitter, Manager};
 use tokio::sync::Mutex;
 
 fn daemon_socket_path() -> PathBuf {
+    if std::env::var("KANNA_WORKTREE").is_ok() {
+        // Worktree daemon uses {cwd}/.kanna-daemon/
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/tmp"));
+        return cwd.join(".kanna-daemon").join("daemon.sock");
+    }
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     PathBuf::from(home)
         .join("Library")
@@ -66,15 +71,20 @@ async fn ensure_daemon_running() {
         return;
     };
 
-    eprintln!("[daemon] spawning {:?}", daemon_bin);
+    // Pass KANNA_WORKTREE through so the daemon isolates to {cwd}/.kanna-daemon
+    let is_worktree = std::env::var("KANNA_WORKTREE").is_ok();
+    eprintln!("[daemon] spawning {:?} (worktree={})", daemon_bin, is_worktree);
     use std::os::unix::process::CommandExt;
     // setsid() detaches daemon from our process group so Ctrl+C doesn't kill it
+    let mut cmd = std::process::Command::new(&daemon_bin);
+    cmd.stdin(std::process::Stdio::null())
+       .stdout(std::process::Stdio::null())
+       .stderr(std::process::Stdio::null());
+    if is_worktree {
+        cmd.env("KANNA_WORKTREE", "1");
+    }
     match unsafe {
-        std::process::Command::new(&daemon_bin)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .pre_exec(|| { libc::setsid(); Ok(()) })
+        cmd.pre_exec(|| { libc::setsid(); Ok(()) })
             .spawn()
     }
     {

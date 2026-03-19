@@ -21,6 +21,10 @@ async fn send_and_ack(state: &DaemonState) -> Result<(), String> {
 }
 
 fn daemon_socket_path() -> PathBuf {
+    if std::env::var("KANNA_WORKTREE").is_ok() {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/tmp"));
+        return cwd.join(".kanna-daemon").join("daemon.sock");
+    }
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     PathBuf::from(home)
         .join("Library")
