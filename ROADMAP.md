@@ -2,7 +2,7 @@
 
 ## Now
 - Fix Shift+Enter in agent terminal (#15)
-- Cmd+O opens task worktree in IDE
+- New window shares repo/task state (#24)
 - Clean daemon exit on handoff (avoid SIGKILL)
 
 ## Soon
