@@ -29,6 +29,12 @@ fn app_support_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("KANNA_DAEMON_DIR") {
         return PathBuf::from(dir);
     }
+    // Worktree agents use a local .kanna-daemon dir to avoid conflicting
+    // with the main app's daemon
+    if std::env::var("KANNA_WORKTREE").is_ok() {
+        let cwd = std::env::current_dir().expect("failed to get cwd");
+        return cwd.join(".kanna-daemon");
+    }
     let home = std::env::var("HOME").expect("HOME not set");
     PathBuf::from(home)
         .join("Library")
