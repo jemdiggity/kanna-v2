@@ -36,11 +36,16 @@ export function usePipeline(db: Ref<DbHandle | null>) {
     const branch = `task-${id}`;
     const worktreePath = `${repoPath}/.kanna-worktrees/${branch}`;
 
-    // 1. Create git worktree
+    // 1. Create git worktree with a unique port offset (1–100)
+    // Each worktree gets port 1420 + offset for its dev server.
+    const existingCount = items.value.filter((i) => i.branch).length;
+    const portOffset = existingCount + 1;
+
     await invoke("git_worktree_add", {
       repoPath,
       branch,
       path: worktreePath,
+      portOffset,
     });
 
     // 2. Read .kanna.toml config and run setup script if defined
