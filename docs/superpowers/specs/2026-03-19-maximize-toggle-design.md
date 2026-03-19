@@ -10,7 +10,7 @@ Add a keyboard shortcut (Shift+Cmd+Enter) that toggles full-window maximization 
 
 - **Key**: Shift+Cmd+Enter
 - **Action**: `toggleMaximize`
-- **Group**: Views
+- **Group**: Window
 - Registered in `useKeyboardShortcuts.ts` alongside existing shortcuts
 
 ### What Gets Maximized
