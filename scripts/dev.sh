@@ -15,7 +15,8 @@ start() {
     echo "Session '$SESSION' already running. Use 'restart' or 'stop'."
     exit 1
   fi
-  tmux new-session -d -s "$SESSION" -c "$ROOT" "bun dev"
+  tmux new-session -d -s "$SESSION" -c "$ROOT"
+  tmux send-keys -t "$SESSION" "bun dev" Enter
   echo "Started tmux session '$SESSION'. Attach with: tmux attach -t $SESSION"
 }
 
