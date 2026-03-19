@@ -37,12 +37,11 @@ fi
 
 echo "$VERSION" > "$VERSION_FILE"
 
-# Sync semver to tauri.conf.json
-SEMVER="$(echo "$VERSION" | cut -d- -f1)"
+# Sync to tauri.conf.json (full version — Tauri accepts semver with prerelease)
 TAURI_CONF="$ROOT/apps/desktop/src-tauri/tauri.conf.json"
 if [ -f "$TAURI_CONF" ]; then
   CURRENT="$(grep '"version"' "$TAURI_CONF" | head -1 | sed 's/.*"\([^"]*\)".*/\1/')"
-  if [ "$CURRENT" != "$SEMVER" ]; then
-    sed -i '' "s/\"version\": \"[^\"]*\"/\"version\": \"$SEMVER\"/" "$TAURI_CONF"
+  if [ "$CURRENT" != "$VERSION" ]; then
+    sed -i '' "s/\"version\": \"[^\"]*\"/\"version\": \"$VERSION\"/" "$TAURI_CONF"
   fi
 fi
