@@ -65,6 +65,9 @@ const showDiffModal = ref(false);
 const showShellModal = ref(false);
 const diffScopes = new Map<string, "branch" | "commit" | "working">();
 const zenMode = ref(false);
+const agentMaximized = ref(false);
+const shellMaximized = ref(false);
+const diffMaximized = ref(false);
 
 const currentItem = computed(() => {
   const item = selectedItem();
@@ -184,18 +187,29 @@ useKeyboardShortcuts({
   navigateUp: () => navigateItems(-1),
   navigateDown: () => navigateItems(1),
   toggleZen: () => { zenMode.value = !zenMode.value; },
+  toggleMaximize: () => {
+    if (showDiffModal.value) { diffMaximized.value = !diffMaximized.value; }
+    else if (showShellModal.value) { shellMaximized.value = !shellMaximized.value; }
+    else { agentMaximized.value = !agentMaximized.value; }
+  },
   dismiss: () => {
     if (showShortcutsModal.value) { showShortcutsModal.value = false; return; }
     if (showFilePickerModal.value) { showFilePickerModal.value = false; return; }
-    if (showDiffModal.value) { showDiffModal.value = false; return; }
-    if (showShellModal.value) { showShellModal.value = false; focusAgentTerminal(); return; }
+    if (showDiffModal.value) { showDiffModal.value = false; diffMaximized.value = false; return; }
+    if (showShellModal.value) { showShellModal.value = false; shellMaximized.value = false; focusAgentTerminal(); return; }
     if (showNewTaskModal.value) { showNewTaskModal.value = false; return; }
     if (showImportRepoModal.value) { showImportRepoModal.value = false; return; }
     if (showPreferencesPanel.value) { showPreferencesPanel.value = false; return; }
     if (zenMode.value) { zenMode.value = false; }
   },
-  openShell: () => { showShellModal.value = !showShellModal.value; },
-  showDiff: () => { showDiffModal.value = !showDiffModal.value; },
+  openShell: () => {
+    showShellModal.value = !showShellModal.value;
+    if (!showShellModal.value) shellMaximized.value = false;
+  },
+  showDiff: () => {
+    showDiffModal.value = !showDiffModal.value;
+    if (!showDiffModal.value) diffMaximized.value = false;
+  },
   showShortcuts: () => { showShortcutsModal.value = !showShortcutsModal.value; },
   openPreferences: () => { showPreferencesPanel.value = true; },
 });
@@ -444,7 +458,7 @@ onMounted(async () => {
 <template>
   <div class="app" :class="{ zen: zenMode }">
     <Sidebar
-      v-if="!zenMode"
+      v-if="!zenMode && !agentMaximized"
       :repos="repos"
       :pipeline-items="allItems"
       :selected-repo-id="selectedRepoId"
@@ -459,6 +473,7 @@ onMounted(async () => {
       :item="currentItem"
       :repo-path="selectedRepo?.path"
       :spawn-pty-session="spawnPtySession"
+      :maximized="agentMaximized"
       @make-pr="handleMakePR"
       @merge="handleMerge"
       @close-task="handleCloseTask"
@@ -496,15 +511,17 @@ onMounted(async () => {
       v-if="showShellModal && currentItem"
       :session-id="`shell-${currentItem.id}`"
       :cwd="currentItem.branch ? `${selectedRepo?.path}/.kanna-worktrees/${currentItem.branch}` : selectedRepo?.path || '/tmp'"
-      @close="showShellModal = false; focusAgentTerminal()"
+      :maximized="shellMaximized"
+      @close="showShellModal = false; shellMaximized = false; focusAgentTerminal()"
     />
     <DiffModal
       v-if="showDiffModal && selectedRepo?.path"
       :repo-path="selectedRepo.path"
       :worktree-path="currentItem?.branch ? `${selectedRepo.path}/.kanna-worktrees/${currentItem.branch}` : undefined"
       :initial-scope="currentItem ? diffScopes.get(currentItem.id) : undefined"
+      :maximized="diffMaximized"
       @scope-change="(s: any) => { if (currentItem) diffScopes.set(currentItem.id, s); }"
-      @close="showDiffModal = false"
+      @close="showDiffModal = false; diffMaximized = false"
     />
     <FilePickerModal
       v-if="showFilePickerModal && currentItem?.branch"
