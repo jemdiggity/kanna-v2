@@ -221,11 +221,21 @@ pub fn git_worktree_add(
         .output()
         .map_err(|e| format!("failed to run git worktree add: {}", e))?;
 
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
-    } else {
-        Err(String::from_utf8_lossy(&output.stderr).to_string())
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).to_string());
     }
+
+    // Create .cargo/config.toml so Cargo builds in the worktree's own target dir.
+    // Without this, all worktrees share the main repo's target/ and cargo build
+    // in one worktree can overwrite the running daemon binary.
+    let cargo_dir = std::path::Path::new(&path).join(".cargo");
+    let _ = std::fs::create_dir_all(&cargo_dir);
+    let _ = std::fs::write(
+        cargo_dir.join("config.toml"),
+        "[build]\ntarget-dir = \"target\"\n",
+    );
+
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 #[tauri::command]
