@@ -234,17 +234,13 @@ function handleSelectItem(item: PipelineItem) {
 
 .btn-add-task {
   margin-left: auto;
-  opacity: 0;
   font-size: 14px;
   padding: 0 4px;
-}
-
-.repo-header:hover .btn-add-task {
-  opacity: 0.6;
+  opacity: 0.5;
 }
 
 .btn-add-task:hover {
-  opacity: 1 !important;
+  opacity: 1;
 }
 
 .pipeline-list {
