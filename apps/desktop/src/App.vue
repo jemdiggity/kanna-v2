@@ -66,7 +66,10 @@ const showShellModal = ref(false);
 const diffScopes = new Map<string, "branch" | "commit" | "working">();
 const zenMode = ref(false);
 
-const currentItem = computed(() => selectedItem());
+const currentItem = computed(() => {
+  const item = selectedItem();
+  return item && item.stage !== "closed" ? item : null;
+});
 
 // Load pipeline items when selected repo changes
 watch(selectedRepoId, async (repoId) => {
