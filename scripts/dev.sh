@@ -8,7 +8,13 @@
 #   ./scripts/dev.sh log      # print recent output
 set -e
 ROOT="$(git rev-parse --show-toplevel)"
-SESSION="kanna"
+if [ -n "$KANNA_WORKTREE" ]; then
+  # Derive a short name from the worktree path (e.g., task-abc123)
+  WORKTREE_NAME="$(basename "$ROOT")"
+  SESSION="kanna-${WORKTREE_NAME}"
+else
+  SESSION="kanna"
+fi
 
 start() {
   if tmux has-session -t "$SESSION" 2>/dev/null; then
