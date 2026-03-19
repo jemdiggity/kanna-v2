@@ -1,8 +1,9 @@
 <script setup lang="ts">
+import { ref, watch, nextTick, type ComponentPublicInstance } from "vue";
 import AgentView from "./AgentView.vue";
 import TerminalView from "./TerminalView.vue";
 
-defineProps<{
+const props = defineProps<{
   sessionId: string | null;
   agentType?: string;
   worktreePath?: string;
@@ -14,19 +15,59 @@ defineProps<{
 const emit = defineEmits<{
   (e: "agent-completed"): void;
 }>();
+
+// Keep PTY terminals alive across switches (VSCode-style show/hide)
+interface PtySessionConfig {
+  worktreePath?: string;
+  prompt?: string;
+}
+const visitedPtySessions = ref(new Map<string, PtySessionConfig>());
+const termRefs = ref<Record<string, ComponentPublicInstance | null>>({});
+
+watch(
+  () => [props.sessionId, props.agentType] as const,
+  ([newId, agentType], [oldId]) => {
+    if (!newId || agentType !== "pty") return;
+
+    // Register new sessions; existing ones keep their original config
+    if (!visitedPtySessions.value.has(newId)) {
+      visitedPtySessions.value.set(newId, {
+        worktreePath: props.worktreePath,
+        prompt: props.prompt,
+      });
+    }
+
+    // Returning to an already-mounted terminal: fit + SIGWINCH
+    if (newId !== oldId && visitedPtySessions.value.has(newId)) {
+      nextTick(() => {
+        const ref = termRefs.value[newId];
+        if (ref) {
+          (ref as any).redraw?.();
+          (ref as any).focus?.();
+        }
+      });
+    }
+  },
+  { immediate: true }
+);
+
+function setTermRef(sessionId: string, el: ComponentPublicInstance | null) {
+  termRefs.value[sessionId] = el;
+}
 </script>
 
 <template>
   <div class="terminal-panel">
-    <!-- PTY mode: key by sessionId so switching tasks creates a new terminal -->
+    <!-- PTY mode: keep all visited terminals alive, show only active one -->
     <TerminalView
-      v-if="sessionId && agentType === 'pty'"
-      ref="termRef"
-      :key="sessionId"
-      :session-id="sessionId"
-      :spawn-options="spawnPtySession && worktreePath && prompt ? {
-        cwd: worktreePath,
-        prompt: prompt,
+      v-for="[sid, config] of visitedPtySessions"
+      v-show="sid === sessionId"
+      :key="sid"
+      :ref="(el: any) => setTermRef(sid, el)"
+      :session-id="sid"
+      :spawn-options="spawnPtySession && config.worktreePath && config.prompt ? {
+        cwd: config.worktreePath,
+        prompt: config.prompt,
         spawnFn: spawnPtySession,
       } : undefined"
     />
