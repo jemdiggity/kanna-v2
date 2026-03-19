@@ -43,11 +43,11 @@ function itemsForRepo(repoId: string): PipelineItem[] {
       // Among pinned tasks, sort by pin_order
       if (a.pinned && b.pinned) return (a.pin_order ?? 0) - (b.pin_order ?? 0);
       // Among unpinned tasks, sort by activity then time
-      const ao = order[(a as any).activity || "idle"] ?? 0;
-      const bo = order[(b as any).activity || "idle"] ?? 0;
+      const ao = order[a.activity || "idle"] ?? 0;
+      const bo = order[b.activity || "idle"] ?? 0;
       if (ao !== bo) return ao - bo;
-      const aTime = (a as any).activity_changed_at || a.created_at;
-      const bTime = (b as any).activity_changed_at || b.created_at;
+      const aTime = a.activity_changed_at || a.created_at;
+      const bTime = b.activity_changed_at || b.created_at;
       return bTime.localeCompare(aTime);
     });
 }
