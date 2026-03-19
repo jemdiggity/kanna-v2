@@ -26,7 +26,7 @@ import { usePRWorkflow } from "./composables/usePRWorkflow";
 const db = ref<DbHandle | null>(null);
 
 const { repos, selectedRepoId, refresh: refreshRepos, importRepo } = useRepo(db);
-const { items, selectedItemId, loadItems, transition, createItem, spawnPtySession, selectedItem } = usePipeline(db);
+const { items, selectedItemId, loadItems, transition, createItem, spawnPtySession, selectedItem, pinItem, unpinItem, reorderPinned } = usePipeline(db);
 const {
   suspendAfterMinutes,
   killAfterMinutes,
@@ -280,6 +280,21 @@ async function handleNewTaskSubmit(prompt: string) {
   }
 }
 
+async function handlePinItem(itemId: string, position: number) {
+  await pinItem(itemId, position);
+  await refreshAllItems();
+}
+
+async function handleUnpinItem(itemId: string) {
+  await unpinItem(itemId);
+  await refreshAllItems();
+}
+
+async function handleReorderPinned(repoId: string, orderedIds: string[]) {
+  await reorderPinned(repoId, orderedIds);
+  await refreshAllItems();
+}
+
 async function handleImportRepo(path: string, name: string, defaultBranch: string) {
   await importRepo(path, name, defaultBranch);
   showImportRepoModal.value = false;
@@ -505,6 +520,9 @@ onMounted(async () => {
       @import-repo="showImportRepoModal = true"
       @new-task="(repoId: string) => { selectedRepoId = repoId; showNewTaskModal = true; }"
       @open-preferences="showPreferencesPanel = true"
+      @pin-item="handlePinItem"
+      @unpin-item="handleUnpinItem"
+      @reorder-pinned="handleReorderPinned"
     />
     <MainPanel
       :item="currentItem"
