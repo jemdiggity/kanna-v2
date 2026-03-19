@@ -159,6 +159,8 @@ export function usePipeline(db: Ref<DbHandle | null>) {
       }
     }
 
+    // Let the worktree know it's a worktree (not the main repo)
+    env.KANNA_WORKTREE = "1";
     // Isolate daemon per worktree so agents don't steal our sessions
     env.KANNA_DAEMON_DIR = `${cwd}/.kanna-daemon`;
 
