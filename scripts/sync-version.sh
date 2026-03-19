@@ -37,12 +37,13 @@ fi
 
 echo "$VERSION" > "$VERSION_FILE"
 
-# Sync to tauri.conf.json (full version — Tauri accepts semver with prerelease)
+# Sync to tauri.conf.json (semver only — Tauri rejects prerelease strings)
+SEMVER="$(echo "$VERSION" | cut -d- -f1)"
 TAURI_CONF="$ROOT/apps/desktop/src-tauri/tauri.conf.json"
 if [ -f "$TAURI_CONF" ]; then
   CURRENT="$(grep '"version"' "$TAURI_CONF" | head -1 | sed 's/.*"\([^"]*\)".*/\1/')"
-  if [ "$CURRENT" != "$VERSION" ]; then
-    sed -i '' "s/\"version\": \"[^\"]*\"/\"version\": \"$VERSION\"/" "$TAURI_CONF"
+  if [ "$CURRENT" != "$SEMVER" ]; then
+    sed -i '' "s/\"version\": \"[^\"]*\"/\"version\": \"$SEMVER\"/" "$TAURI_CONF"
   fi
 
   # Sync devUrl port from env var (set by Kanna when spawning worktree agents)
