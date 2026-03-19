@@ -44,7 +44,7 @@ function handleKeydown(e: KeyboardEvent) {
         />
       </div>
       <div class="modal-footer">
-        <span class="hint">Cmd+Enter to submit</span>
+        <span class="hint">⌘Enter to submit</span>
         <div class="modal-actions">
           <button class="btn btn-cancel" @click="emit('cancel')">Cancel</button>
           <button

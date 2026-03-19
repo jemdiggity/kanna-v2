@@ -79,7 +79,7 @@ function handleSelectItem(item: PipelineItem) {
           <span class="repo-count">{{ itemsForRepo(repo.id).length }}</span>
           <button
             class="btn-icon btn-add-task"
-            title="New Task (Cmd+N)"
+            title="New Task (⌘N)"
             @click.stop="emit('new-task', repo.id)"
           >+</button>
         </div>
@@ -111,7 +111,7 @@ function handleSelectItem(item: PipelineItem) {
       <button class="btn-import" @click="emit('import-repo')">
         Import Repo
       </button>
-      <button class="btn-icon btn-prefs" title="Preferences (Cmd+,)" @click="emit('open-preferences')">
+      <button class="btn-icon btn-prefs" title="Preferences (⌘,)" @click="emit('open-preferences')">
         &#9881;
       </button>
     </div>

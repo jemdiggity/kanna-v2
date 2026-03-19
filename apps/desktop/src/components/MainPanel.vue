@@ -40,7 +40,7 @@ const emit = defineEmits<{
     </template>
     <div v-else class="empty-state">
       <p class="empty-title">No task selected</p>
-      <p class="empty-hint">Select a task from the sidebar or press Cmd+N to create one.</p>
+      <p class="empty-hint">Select a task from the sidebar or press ⌘N to create one.</p>
     </div>
   </main>
 </template>

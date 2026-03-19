@@ -108,7 +108,7 @@ onUnmounted(() => {
     <div class="preview-modal">
       <div class="preview-header">
         <span class="file-path">{{ filePath }}</span>
-        <button class="btn-open" @click="openInIDE" title="Open in IDE (Cmd+O)">Open in IDE</button>
+        <button class="btn-open" @click="openInIDE" title="Open in IDE (⌘O)">Open in IDE</button>
       </div>
       <div v-if="loading" class="preview-status">Loading...</div>
       <div v-else-if="error" class="preview-status preview-error">{{ error }}</div>

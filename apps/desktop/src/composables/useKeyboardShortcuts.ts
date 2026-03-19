@@ -40,24 +40,24 @@ interface ShortcutDef {
  */
 export const shortcuts: ShortcutDef[] = [
   // Pipeline
-  { action: "newTask",    label: "New Task",          group: "Pipeline",   key: "n",                            meta: true, display: "Cmd+N" },
-  { action: "openFile",   label: "File Picker",        group: "Pipeline",   key: "p",                            meta: true,               display: "Cmd+P" },
-  { action: "openInIDE",  label: "Open in IDE",        group: "Pipeline",   key: "o",                            meta: true,               display: "Cmd+O" },
-  { action: "makePR",     label: "Make PR",           group: "Pipeline",   key: "s",                            meta: true, display: "Cmd+S" },
-  { action: "merge",      label: "Merge PR",          group: "Pipeline",   key: "m",                            meta: true,               display: "Cmd+M" },
-  { action: "closeTask",  label: "Close / Reject",    group: "Pipeline",   key: ["Backspace", "Delete"],        meta: true,               display: "Cmd+Delete" },
+  { action: "newTask",    label: "New Task",          group: "Pipeline",   key: "n",                            meta: true, display: "⌘N" },
+  { action: "openFile",   label: "File Picker",        group: "Pipeline",   key: "p",                            meta: true,               display: "⌘P" },
+  { action: "openInIDE",  label: "Open in IDE",        group: "Pipeline",   key: "o",                            meta: true,               display: "⌘O" },
+  { action: "makePR",     label: "Make PR",           group: "Pipeline",   key: "s",                            meta: true, display: "⌘S" },
+  { action: "merge",      label: "Merge PR",          group: "Pipeline",   key: "m",                            meta: true,               display: "⌘M" },
+  { action: "closeTask",  label: "Close / Reject",    group: "Pipeline",   key: ["Backspace", "Delete"],        meta: true,               display: "⌘⌫" },
   // Window — disabled until #24 (new window state sharing)
-  // { action: "newWindow",  label: "New Window",     group: "Window",     key: ["N", "n"],                     meta: true, shift: true,  display: "Shift+Cmd+N" },
+  // { action: "newWindow",  label: "New Window",     group: "Window",     key: ["N", "n"],                     meta: true, shift: true,  display: "⇧⌘N" },
   // Navigation
-  { action: "navigateDown", label: "Next Task",       group: "Navigation", key: "ArrowDown",                    meta: true, alt: true,    display: "Option+Cmd+Down" },
-  { action: "navigateUp",   label: "Previous Task",   group: "Navigation", key: "ArrowUp",                      meta: true, alt: true,    display: "Option+Cmd+Up" },
-  { action: "toggleZen",    label: "Zen Mode",        group: "Navigation", key: ["Z", "z"],                     meta: true, shift: true,  display: "Shift+Cmd+Z" },
+  { action: "navigateDown", label: "Next Task",       group: "Navigation", key: "ArrowDown",                    meta: true, alt: true,    display: "⌥⌘↓" },
+  { action: "navigateUp",   label: "Previous Task",   group: "Navigation", key: "ArrowUp",                      meta: true, alt: true,    display: "⌥⌘↑" },
+  { action: "toggleZen",    label: "Zen Mode",        group: "Navigation", key: ["Z", "z"],                     meta: true, shift: true,  display: "⇧⌘Z" },
   // Terminal
-  { action: "openShell",  label: "Shell Terminal",    group: "Terminal",   key: "j",                            meta: true,               display: "Cmd+J" },
+  { action: "openShell",  label: "Shell Terminal",    group: "Terminal",   key: "j",                            meta: true,               display: "⌘J" },
   // Views / Help
-  { action: "showDiff",       label: "View Diff",           group: "Help", key: "d",                            meta: true, display: "Cmd+D" },
-  { action: "showShortcuts",  label: "Keyboard Shortcuts",  group: "Help", key: "/",                            meta: true,               display: "Cmd+/" },
-  { action: "openPreferences", label: "Preferences",        group: "Help", key: ",",                            meta: true,               display: "Cmd+," },
+  { action: "showDiff",       label: "View Diff",           group: "Help", key: "d",                            meta: true, display: "⌘D" },
+  { action: "showShortcuts",  label: "Keyboard Shortcuts",  group: "Help", key: "/",                            meta: true,               display: "⌘/" },
+  { action: "openPreferences", label: "Preferences",        group: "Help", key: ",",                            meta: true,               display: "⌘," },
   // Escape is special — no meta required
   { action: "dismiss",    label: "Dismiss",           group: "Navigation", key: "Escape",                                                 display: "Escape" },
 ];
