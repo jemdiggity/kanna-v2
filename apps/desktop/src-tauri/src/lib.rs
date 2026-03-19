@@ -10,11 +10,25 @@ use std::sync::Arc;
 use tauri::{Emitter, Manager};
 use tokio::sync::Mutex;
 
-fn daemon_socket_path() -> PathBuf {
+fn worktree_root() -> Option<PathBuf> {
+    // Exe is at {worktree}/apps/desktop/src-tauri/.build/debug/kanna-desktop
+    // or {worktree}/apps/desktop/src-tauri/target/debug/kanna-desktop
+    std::env::current_exe().ok().and_then(|p| {
+        p.parent()        // debug/
+            .and_then(|d| d.parent()) // .build or target/
+            .and_then(|d| d.parent()) // src-tauri/
+            .and_then(|d| d.parent()) // desktop/
+            .and_then(|d| d.parent()) // apps/
+            .and_then(|d| d.parent()) // worktree root
+            .map(|d| d.to_path_buf())
+    })
+}
+
+pub fn daemon_socket_path() -> PathBuf {
     if std::env::var("KANNA_WORKTREE").is_ok() {
-        // Worktree daemon uses {cwd}/.kanna-daemon/
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/tmp"));
-        return cwd.join(".kanna-daemon").join("daemon.sock");
+        if let Some(root) = worktree_root() {
+            return root.join(".kanna-daemon").join("daemon.sock");
+        }
     }
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     PathBuf::from(home)
@@ -82,6 +96,10 @@ async fn ensure_daemon_running() {
        .stderr(std::process::Stdio::null());
     if is_worktree {
         cmd.env("KANNA_WORKTREE", "1");
+        if let Some(root) = worktree_root() {
+            let daemon_dir = root.join(".kanna-daemon");
+            cmd.env("KANNA_DAEMON_DIR", daemon_dir.to_str().unwrap_or("/tmp"));
+        }
     }
     match unsafe {
         cmd.pre_exec(|| { libc::setsid(); Ok(()) })
