@@ -45,9 +45,11 @@ function handleKeydown(e: KeyboardEvent) {
     emit("close");
   } else if (e.key === "ArrowDown" || (e.ctrlKey && e.key === "n")) {
     e.preventDefault();
+    e.stopPropagation();
     selectedIndex.value = Math.min(selectedIndex.value + 1, filtered.value.length - 1);
   } else if (e.key === "ArrowUp" || (e.ctrlKey && e.key === "p")) {
     e.preventDefault();
+    e.stopPropagation();
     selectedIndex.value = Math.max(selectedIndex.value - 1, 0);
   } else if (e.key === "Enter") {
     e.preventDefault();
