@@ -2,7 +2,7 @@
 
 ## Project
 
-Kanna — Tauri v2 desktop app for managing Claude Code agent tasks. Vue 3 frontend, Rust backend, SQLite database.
+Kanna — Tauri v2 desktop app for managing Claude Code agent tasks. Vue 3 frontend, Rust backend, SQLite database. See [PRD.md](PRD.md) for product requirements.
 
 ## Package Manager
 
