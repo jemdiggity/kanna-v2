@@ -190,7 +190,7 @@ useKeyboardShortcuts({
   toggleMaximize: () => {
     if (showDiffModal.value) { diffMaximized.value = !diffMaximized.value; }
     else if (showShellModal.value) { shellMaximized.value = !shellMaximized.value; }
-    else { agentMaximized.value = !agentMaximized.value; }
+    else if (currentItem.value) { agentMaximized.value = !agentMaximized.value; }
   },
   dismiss: () => {
     if (showShortcutsModal.value) { showShortcutsModal.value = false; return; }

@@ -31,7 +31,7 @@ async function spawnShell(sessionId: string, cwd: string, _prompt: string, cols:
 </script>
 
 <template>
-  <div class="modal-overlay" :class="{ maximized: props.maximized }" @click.self="emit('close')">
+  <div class="modal-overlay" :class="{ maximized }" @click.self="emit('close')">
     <div class="shell-modal">
       <TerminalView
         ref="termRef"
