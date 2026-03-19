@@ -35,8 +35,10 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions) {
       fitAddon.fit()
     }
 
-    // Let app-level shortcuts pass through even when terminal has focus
+    // Let app-level shortcuts pass through even when terminal has focus,
+    // but always let Escape reach the terminal (needed for Claude CLI)
     term.attachCustomKeyEventHandler((e: KeyboardEvent) => {
+      if (e.key === "Escape") return true
       if (isAppShortcut(e)) return false
       return true
     })

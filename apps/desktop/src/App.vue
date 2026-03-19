@@ -218,11 +218,11 @@ useKeyboardShortcuts({
     if (showFilePreviewModal.value) { showFilePreviewModal.value = false; return; }
     if (showFilePickerModal.value) { showFilePickerModal.value = false; return; }
     if (showDiffModal.value) { showDiffModal.value = false; return; }
-    if (showShellModal.value) { showShellModal.value = false; focusAgentTerminal(); return; }
+    // Shell modal: Escape goes to the terminal inside it; close with Cmd+J
+    if (showShellModal.value) { return; }
     if (showNewTaskModal.value) { showNewTaskModal.value = false; return; }
     if (showImportRepoModal.value) { showImportRepoModal.value = false; return; }
     if (showPreferencesPanel.value) { showPreferencesPanel.value = false; return; }
-    if (zenMode.value) { zenMode.value = false; }
   },
   openShell: () => { showShellModal.value = !showShellModal.value; },
   showDiff: () => { showDiffModal.value = !showDiffModal.value; },
