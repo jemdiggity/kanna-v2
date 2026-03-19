@@ -159,6 +159,9 @@ export function usePipeline(db: Ref<DbHandle | null>) {
       }
     }
 
+    // Isolate daemon per worktree so agents don't steal our sessions
+    env.KANNA_DAEMON_DIR = `${cwd}/.kanna-daemon`;
+
     // Build Claude CLI command
     const claudeCmd = `claude --dangerously-skip-permissions --settings '${hookSettings}' '${prompt.replace(/'/g, "'\\''")}'`;
 

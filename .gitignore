@@ -2,6 +2,7 @@ node_modules/
 dist/
 target/
 .build/
+.kanna-daemon/
 *.sqlite
 *.sqlite-journal
 .DS_Store
