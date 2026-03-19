@@ -210,12 +210,6 @@ User makes PR
 bun dev          # from repo root
 ```
 
-This runs:
-1. `cargo build -p kanna-daemon -p kanna-hook`
-2. `vite` (frontend dev server)
-3. Tauri builds and starts the app
-4. App spawns new daemon (handoff from old if running)
-
 ## Testing
 
 ```bash
