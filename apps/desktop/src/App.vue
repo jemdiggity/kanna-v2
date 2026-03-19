@@ -31,7 +31,7 @@ const {
   fontSize,
   suspendAfterMinutes,
   killAfterMinutes,
-  appearanceMode,
+
   ideCommand,
   load: loadPreferences,
   save: savePreference,
@@ -441,7 +441,7 @@ onMounted(async () => {
         fontSize: fontSize,
         suspendAfterMinutes: suspendAfterMinutes,
         killAfterMinutes: killAfterMinutes,
-        appearanceMode: appearanceMode,
+
         ideCommand: ideCommand,
       }"
       @update="handlePreferenceUpdate"

@@ -5,7 +5,7 @@ const props = defineProps<{
     fontSize: number
     suspendAfterMinutes: number
     killAfterMinutes: number
-    appearanceMode: string
+
     ideCommand: string
   }
 }>()
@@ -73,18 +73,6 @@ function handleKeydown(e: KeyboardEvent) {
             min="5"
             @change="emit('update', 'killAfterMinutes', ($event.target as HTMLInputElement).value)"
           />
-        </div>
-
-        <div class="pref-row">
-          <label>Appearance</label>
-          <select
-            :value="preferences.appearanceMode"
-            @change="emit('update', 'appearanceMode', ($event.target as HTMLSelectElement).value)"
-          >
-            <option value="system">System</option>
-            <option value="light">Light</option>
-            <option value="dark">Dark</option>
-          </select>
         </div>
 
         <div class="pref-row">
