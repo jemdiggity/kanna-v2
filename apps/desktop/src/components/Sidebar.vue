@@ -59,7 +59,6 @@ function handleSelectItem(item: PipelineItem) {
 <template>
   <aside class="sidebar">
     <div class="sidebar-header">
-      <span class="app-title">Ka<span class="flipped">n</span><span class="flipped">n</span>a</span>
       <button class="btn-icon" title="New Task (Cmd+N)" @click="emit('new-task')">+</button>
     </div>
 
