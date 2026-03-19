@@ -5,6 +5,7 @@ defineProps<{
   repoPath: string;
   worktreePath?: string;
   initialScope?: "branch" | "commit" | "working";
+  maximized?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -14,7 +15,7 @@ const emit = defineEmits<{
 </script>
 
 <template>
-  <div class="modal-overlay" @click.self="emit('close')">
+  <div class="modal-overlay" :class="{ maximized }" @click.self="emit('close')">
     <div class="diff-modal">
       <DiffView :repo-path="repoPath" :worktree-path="worktreePath" :initial-scope="initialScope" @scope-change="emit('scope-change', $event)" />
     </div>
@@ -41,5 +42,13 @@ const emit = defineEmits<{
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+
+.maximized { background: none; }
+.maximized .diff-modal {
+  width: 100vw;
+  height: 100vh;
+  border-radius: 0;
+  border: none;
 }
 </style>

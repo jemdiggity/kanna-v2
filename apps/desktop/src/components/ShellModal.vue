@@ -6,6 +6,7 @@ import TerminalView from "./TerminalView.vue";
 const props = defineProps<{
   sessionId: string;
   cwd: string;
+  maximized?: boolean;
 }>();
 
 const emit = defineEmits<{ (e: "close"): void }>();
@@ -30,7 +31,7 @@ async function spawnShell(sessionId: string, cwd: string, _prompt: string, cols:
 </script>
 
 <template>
-  <div class="modal-overlay" @click.self="emit('close')">
+  <div class="modal-overlay" :class="{ maximized }" @click.self="emit('close')">
     <div class="shell-modal">
       <TerminalView
         ref="termRef"
@@ -63,5 +64,14 @@ async function spawnShell(sessionId: string, cwd: string, _prompt: string, cols:
   flex-direction: column;
   overflow: hidden;
   padding: 4px;
+}
+
+.maximized { background: none; }
+.maximized .shell-modal {
+  width: 100vw;
+  height: 100vh;
+  border-radius: 0;
+  border: none;
+  padding: 0;
 }
 </style>

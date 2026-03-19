@@ -14,6 +14,7 @@ export type ActionName =
   | "openInIDE"
   | "openShell"
   | "showDiff"
+  | "toggleMaximize"
   | "showShortcuts"
   | "openPreferences";
 
@@ -58,6 +59,8 @@ export const shortcuts: ShortcutDef[] = [
   { action: "showDiff",       label: "View Diff",           group: "Help", key: "d",                            meta: true, display: "⌘D" },
   { action: "showShortcuts",  label: "Keyboard Shortcuts",  group: "Help", key: "/",                            meta: true,               display: "⌘/" },
   { action: "openPreferences", label: "Preferences",        group: "Help", key: ",",                            meta: true,               display: "⌘," },
+  // Window
+  { action: "toggleMaximize", label: "Maximize",         group: "Window",     key: "Enter",                        meta: true, shift: true,  display: "⇧⌘Enter" },
   // Escape is special — no meta required
   { action: "dismiss",    label: "Dismiss",           group: "Navigation", key: "Escape",                                                 display: "Escape" },
 ];

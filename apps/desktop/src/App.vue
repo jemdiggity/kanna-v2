@@ -66,6 +66,7 @@ const showDiffModal = ref(false);
 const showShellModal = ref(false);
 const diffScopes = new Map<string, "branch" | "commit" | "working">();
 const zenMode = ref(false);
+const maximized = ref(false);
 
 const currentItem = computed(() => {
   const item = selectedItem();
@@ -213,11 +214,12 @@ useKeyboardShortcuts({
   navigateUp: () => navigateItems(-1),
   navigateDown: () => navigateItems(1),
   toggleZen: () => { zenMode.value = !zenMode.value; },
+  toggleMaximize: () => { maximized.value = !maximized.value; },
   dismiss: () => {
     if (showShortcutsModal.value) { showShortcutsModal.value = false; return; }
     if (showFilePreviewModal.value) { showFilePreviewModal.value = false; return; }
     if (showFilePickerModal.value) { showFilePickerModal.value = false; return; }
-    if (showDiffModal.value) { showDiffModal.value = false; return; }
+    if (showDiffModal.value) { showDiffModal.value = false; maximized.value = false; return; }
     // Shell modal: Escape goes to the terminal inside it; close with Cmd+J
     if (showShellModal.value) { return; }
     if (showNewTaskModal.value) { showNewTaskModal.value = false; return; }
@@ -471,7 +473,7 @@ onMounted(async () => {
 <template>
   <div class="app" :class="{ zen: zenMode }">
     <Sidebar
-      v-if="!zenMode"
+      v-if="!zenMode && !maximized"
       :repos="repos"
       :pipeline-items="allItems"
       :selected-repo-id="selectedRepoId"
@@ -486,6 +488,7 @@ onMounted(async () => {
       :item="currentItem"
       :repo-path="selectedRepo?.path"
       :spawn-pty-session="spawnPtySession"
+      :maximized="maximized"
       @make-pr="handleMakePR"
       @merge="handleMerge"
       @close-task="handleCloseTask"
@@ -521,15 +524,17 @@ onMounted(async () => {
       v-if="showShellModal && currentItem"
       :session-id="`shell-${currentItem.id}`"
       :cwd="currentItem.branch ? `${selectedRepo?.path}/.kanna-worktrees/${currentItem.branch}` : selectedRepo?.path || '/tmp'"
-      @close="showShellModal = false; focusAgentTerminal()"
+      :maximized="maximized"
+      @close="showShellModal = false; maximized = false; focusAgentTerminal()"
     />
     <DiffModal
       v-if="showDiffModal && selectedRepo?.path"
       :repo-path="selectedRepo.path"
       :worktree-path="currentItem?.branch ? `${selectedRepo.path}/.kanna-worktrees/${currentItem.branch}` : undefined"
       :initial-scope="currentItem ? diffScopes.get(currentItem.id) : undefined"
+      :maximized="maximized"
       @scope-change="(s: any) => { if (currentItem) diffScopes.set(currentItem.id, s); }"
-      @close="showDiffModal = false"
+      @close="showDiffModal = false; maximized = false"
     />
     <FilePickerModal
       v-if="showFilePickerModal && currentItem?.branch"

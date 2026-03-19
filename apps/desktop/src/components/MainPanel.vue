@@ -8,6 +8,7 @@ defineProps<{
   item: PipelineItem | null;
   repoPath?: string;
   spawnPtySession?: (sessionId: string, cwd: string, prompt: string, cols: number, rows: number) => Promise<void>;
+  maximized?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -21,7 +22,7 @@ const emit = defineEmits<{
 <template>
   <main class="main-panel">
     <template v-if="item">
-      <TaskHeader :item="item" />
+      <TaskHeader v-if="!maximized" :item="item" />
       <TerminalTabs
         :session-id="item.id"
         :agent-type="item.agent_type || 'pty'"
@@ -32,6 +33,7 @@ const emit = defineEmits<{
         @agent-completed="emit('agent-completed')"
       />
       <ActionBar
+        v-if="!maximized"
         :item="item"
         @make-pr="emit('make-pr')"
         @merge="emit('merge')"
