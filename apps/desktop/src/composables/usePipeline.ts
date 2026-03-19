@@ -128,34 +128,8 @@ export function usePipeline(db: Ref<DbHandle | null>) {
       },
     });
 
-    // Build port env vars from .kanna.toml [ports] config + item's port_offset
+    // Read .kanna/config.json for ports and setup scripts
     const env: Record<string, string> = { TERM: "xterm-256color", TERM_PROGRAM: "vscode" };
-    const item = items.value.find((i) => i.id === sessionId);
-    if (item?.port_offset) {
-      try {
-        const repo = await getRepo(db.value!, item.repo_id);
-        if (repo) {
-          const configContent = await invoke<string>("read_text_file", {
-            path: `${repo.path}/.kanna/config.json`,
-          });
-          if (configContent) {
-            const repoConfig = parseRepoConfig(configContent);
-            if (repoConfig.ports) {
-              for (const [name, base] of Object.entries(repoConfig.ports)) {
-                env[name] = String(base + item.port_offset);
-              }
-            }
-          }
-        }
-      } catch {
-        // Non-fatal — continue without port env vars
-      }
-    }
-
-    // Let the worktree know it's a worktree — daemon auto-uses {cwd}/.kanna-daemon
-    env.KANNA_WORKTREE = "1";
-
-    // Read setup scripts from .kanna/config.json
     let setupCmds: string[] = [];
     const item = items.value.find((i) => i.id === sessionId);
     if (item) {
@@ -167,6 +141,11 @@ export function usePipeline(db: Ref<DbHandle | null>) {
           });
           if (configContent) {
             const repoConfig = parseRepoConfig(configContent);
+            if (repoConfig.ports && item.port_offset) {
+              for (const [name, base] of Object.entries(repoConfig.ports)) {
+                env[name] = String(base + item.port_offset);
+              }
+            }
             if (repoConfig.setup?.length) setupCmds = repoConfig.setup;
           }
         }
@@ -174,6 +153,9 @@ export function usePipeline(db: Ref<DbHandle | null>) {
         // Non-fatal
       }
     }
+
+    // Let the worktree know it's a worktree — daemon auto-uses {cwd}/.kanna-daemon
+    env.KANNA_WORKTREE = "1";
 
     // Build shell command: setup scripts first, then Claude CLI
     const claudeCmd = `claude --dangerously-skip-permissions --settings '${hookSettings}' '${prompt.replace(/'/g, "'\\''")}'`;
