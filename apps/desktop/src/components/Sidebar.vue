@@ -175,7 +175,6 @@ function handleSelectItem(item: PipelineItem) {
 .sidebar-content {
   flex: 1;
   overflow-y: auto;
-  padding: 6px 0;
 }
 
 .empty-state {
