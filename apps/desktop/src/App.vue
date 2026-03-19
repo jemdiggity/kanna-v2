@@ -163,11 +163,11 @@ async function handleCloseTask() {
     await invoke("kill_session", { sessionId: `shell-${item.id}` }).catch(() => {});
     // Mark as closed in DB
     await updatePipelineItemStage(db.value!, item.id, "closed");
-    // Select next task or clear selection
+    // Select the first read (idle) task in the list, or first available
     const currentItems = sortedItemsForCurrentRepo();
-    const idx = currentItems.findIndex((i) => i.id === item.id);
-    const next = currentItems[idx + 1] || currentItems[idx - 1];
-    selectedItemId.value = next?.id || null;
+    const remaining = currentItems.filter((i) => i.id !== item.id);
+    const firstRead = remaining.find((i) => (i as any).activity === "idle" || !(i as any).activity);
+    selectedItemId.value = (firstRead || remaining[0])?.id || null;
     // Refresh sidebar
     await loadItems(selectedRepo.value.id);
     await refreshAllItems();
