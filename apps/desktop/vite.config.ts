@@ -1,22 +1,10 @@
 import { defineConfig } from "vite";
 import vue from "@vitejs/plugin-vue";
 import path from "path";
-import fs from "fs";
-
 // @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
-
-// Read port from .env.local at repo root (written by Kanna worktree setup)
-let port = 1420;
-for (const dir of [__dirname, path.resolve(__dirname, "../..") ]) {
-  try {
-    const envLocal = fs.readFileSync(path.join(dir, ".env.local"), "utf-8");
-    const match = envLocal.match(/KANNA_DEV_PORT=(\d+)/);
-    if (match) { port = parseInt(match[1], 10); break; }
-  } catch {}
-}
 // @ts-expect-error process is a nodejs global
-if (process.env.KANNA_DEV_PORT) port = parseInt(process.env.KANNA_DEV_PORT, 10);
+const port = parseInt(process.env.KANNA_DEV_PORT || "1420", 10);
 
 // https://vite.dev/config/
 export default defineConfig(async () => ({

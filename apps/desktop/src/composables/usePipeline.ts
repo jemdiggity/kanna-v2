@@ -2,7 +2,7 @@ import { ref, type Ref } from "vue";
 import { invoke } from "../invoke";
 import type { DbHandle } from "@kanna/db";
 import type { PipelineItem } from "@kanna/db";
-import { listPipelineItems, updatePipelineItemStage, insertPipelineItem } from "@kanna/db";
+import { listPipelineItems, updatePipelineItemStage, insertPipelineItem, getRepo } from "@kanna/db";
 import { canTransition, parseKannaConfig, type Stage } from "@kanna/core";
 
 export type AgentType = "pty" | "sdk";
@@ -61,22 +61,7 @@ export function usePipeline(db: Ref<DbHandle | null>) {
       path: worktreePath,
     });
 
-    // 4. Write .env.local with offset ports (from [ports] config)
-    if (config?.ports) {
-      const envLines = Object.entries(config.ports)
-        .map(([name, base]) => `${name}=${base + portOffset}`)
-        .join("\n");
-      try {
-        await invoke("write_text_file", {
-          path: `${worktreePath}/.env.local`,
-          content: envLines + "\n",
-        });
-      } catch {
-        // Non-fatal — agent can still work without port assignments
-      }
-    }
-
-    // 5. Run setup script if defined
+    // 4. Run setup script if defined
     if (config?.tasks?.setup) {
       try {
         await invoke("run_script", {
@@ -149,6 +134,31 @@ export function usePipeline(db: Ref<DbHandle | null>) {
       },
     });
 
+    // Build port env vars from .kanna.toml [ports] config + item's port_offset
+    const env: Record<string, string> = { TERM: "xterm-256color" };
+    const item = items.value.find((i) => i.id === sessionId);
+    if (item?.port_offset) {
+      try {
+        // Find the repo path to read .kanna.toml
+        const repo = await getRepo(db.value!, item.repo_id);
+        if (repo) {
+          const configContent = await invoke<string>("read_text_file", {
+            path: `${repo.path}/.kanna.toml`,
+          });
+          if (configContent) {
+            const config = parseKannaConfig(configContent);
+            if (config.ports) {
+              for (const [name, base] of Object.entries(config.ports)) {
+                env[name] = String(base + item.port_offset);
+              }
+            }
+          }
+        }
+      } catch {
+        // Non-fatal — continue without port env vars
+      }
+    }
+
     // Build Claude CLI command
     const claudeCmd = `claude --dangerously-skip-permissions --settings '${hookSettings}' '${prompt.replace(/'/g, "'\\''")}'`;
 
@@ -157,7 +167,7 @@ export function usePipeline(db: Ref<DbHandle | null>) {
       cwd,
       executable: "/bin/zsh",
       args: ["--login", "-c", claudeCmd],
-      env: { TERM: "xterm-256color" },
+      env,
       cols,
       rows,
     });
