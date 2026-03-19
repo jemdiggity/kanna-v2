@@ -1,0 +1,6 @@
+{
+  "setup": ["bun install"],
+  "ports": {
+    "KANNA_DEV_PORT": 1420
+  }
+}

@@ -15,6 +15,7 @@ export * from "./discord/client.js";
 // Config
 export * from "./config/types.js";
 export * from "./config/parser.js";
+export * from "./config/repo-config.js";
 
 // PR Workflow
 export * from "./pr-workflow/workflow.js";

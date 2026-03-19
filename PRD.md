@@ -22,7 +22,7 @@ Software developers who use Claude Code and want to run multiple agent tasks in 
 
 1. Cmd+N → enter prompt
 2. App creates git worktree (`{repo}/.kanna-worktrees/task-{uuid}`)
-3. Runs `.kanna.toml` setup script if present (e.g., `npm install`)
+3. Runs `.kanna/config.json` setup scripts if present (e.g., `bun install`)
 4. Spawns Claude CLI in the worktree via daemon
 5. Agent starts working. User watches in real-time terminal.
 
@@ -183,17 +183,16 @@ Stored in SQLite `settings` table.
 | `KANNA_DAEMON_DIR` | Daemon data directory |
 | `RUST_LOG` | Daemon log level |
 
-### Per-repo config (`.kanna.toml`)
+### Per-repo config (`.kanna/config.json`)
 
-```toml
-[tasks]
-setup = "npm install"      # runs after worktree creation
-
-[team]
-notify_on_pr = true
-notify_on_merge = true
-slack_channel = "dev-ai"
-discord_channel = "123456"
+```json
+{
+  "setup": ["bun install"],
+  "teardown": ["./scripts/cleanup.sh"],
+  "ports": {
+    "KANNA_DEV_PORT": 1420
+  }
+}
 ```
 
 ## Architecture

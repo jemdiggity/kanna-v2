@@ -3,7 +3,7 @@ import { invoke } from "../invoke";
 import type { DbHandle } from "@kanna/db";
 import type { PipelineItem } from "@kanna/db";
 import { listPipelineItems, updatePipelineItemStage, insertPipelineItem, getRepo } from "@kanna/db";
-import { canTransition, parseKannaConfig, type Stage } from "@kanna/core";
+import { canTransition, parseRepoConfig, type RepoConfig, type Stage } from "@kanna/core";
 
 export type AgentType = "pty" | "sdk";
 
@@ -36,15 +36,15 @@ export function usePipeline(db: Ref<DbHandle | null>) {
     const branch = `task-${id}`;
     const worktreePath = `${repoPath}/.kanna-worktrees/${branch}`;
 
-    // 1. Read .kanna.toml config (need ports info before creating worktree)
-    let config: ReturnType<typeof parseKannaConfig> | null = null;
+    // 1. Read .kanna/config.json
+    let repoConfig: RepoConfig = {};
     try {
       const configContent = await invoke<string>("read_text_file", {
-        path: `${repoPath}/.kanna.toml`,
+        path: `${repoPath}/.kanna/config.json`,
       });
-      if (configContent) config = parseKannaConfig(configContent);
+      if (configContent) repoConfig = parseRepoConfig(configContent);
     } catch {
-      // No .kanna.toml or parse error — continue without config
+      // No .kanna/config.json or parse error — continue without config
     }
 
     // 2. Assign port offset (lowest unused across all items)
@@ -61,11 +61,11 @@ export function usePipeline(db: Ref<DbHandle | null>) {
       path: worktreePath,
     });
 
-    // 4. Run setup script if defined
-    if (config?.tasks?.setup) {
+    // 4. Run setup scripts if defined
+    if (repoConfig.setup?.length) {
       try {
         await invoke("run_script", {
-          script: config.tasks.setup,
+          script: repoConfig.setup.join(" && "),
           cwd: worktreePath,
           env: {},
         });
@@ -146,16 +146,15 @@ export function usePipeline(db: Ref<DbHandle | null>) {
     const item = items.value.find((i) => i.id === sessionId);
     if (item?.port_offset) {
       try {
-        // Find the repo path to read .kanna.toml
         const repo = await getRepo(db.value!, item.repo_id);
         if (repo) {
           const configContent = await invoke<string>("read_text_file", {
-            path: `${repo.path}/.kanna.toml`,
+            path: `${repo.path}/.kanna/config.json`,
           });
           if (configContent) {
-            const config = parseKannaConfig(configContent);
-            if (config.ports) {
-              for (const [name, base] of Object.entries(config.ports)) {
+            const repoConfig = parseRepoConfig(configContent);
+            if (repoConfig.ports) {
+              for (const [name, base] of Object.entries(repoConfig.ports)) {
                 env[name] = String(base + item.port_offset);
               }
             }
