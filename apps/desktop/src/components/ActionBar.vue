@@ -30,25 +30,11 @@ const showClose = computed(() => {
 <template>
   <div class="action-bar">
     <button
-      v-if="showMakePR"
-      class="btn btn-primary"
-      @click="emit('make-pr')"
-    >
-      Make PR
-    </button>
-    <button
       v-if="showMerge"
       class="btn btn-success"
       @click="emit('merge')"
     >
       Merge
-    </button>
-    <button
-      v-if="showClose"
-      class="btn btn-danger"
-      @click="emit('close-task')"
-    >
-      Close
     </button>
   </div>
 </template>
