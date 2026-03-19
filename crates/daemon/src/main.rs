@@ -471,6 +471,7 @@ async fn handle_command(
                 "SIGCONT" => libc::SIGCONT,
                 "SIGTERM" => libc::SIGTERM,
                 "SIGKILL" => libc::SIGKILL,
+                "SIGWINCH" => libc::SIGWINCH,
                 other => {
                     let evt = Event::Error {
                         message: format!("unknown signal: {}", other),

@@ -89,11 +89,13 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions) {
     try {
       await invoke("attach_session", { sessionId })
       // Attach succeeded — session was alive in daemon.
-      // Send resize to trigger SIGWINCH → Claude redraws its TUI.
+      // Reset terminal, send resize + explicit SIGWINCH to force Claude TUI redraw.
+      // (SIGWINCH is needed because ioctl(TIOCSWINSZ) won't fire it if size is unchanged.)
       if (terminal.value) {
         terminal.value.reset()
         const { cols, rows } = terminal.value
-        invoke("resize_session", { sessionId, cols, rows }).catch(() => {})
+        await invoke("resize_session", { sessionId, cols, rows }).catch(() => {})
+        invoke("signal_session", { sessionId, signal: "SIGWINCH" }).catch(() => {})
       }
       return
     } catch {
@@ -128,5 +130,13 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions) {
     dispose()
   })
 
-  return { terminal, init, startListening, fit, dispose }
+  /** Re-fit the terminal and send SIGWINCH to force TUI apps to redraw. */
+  function redraw() {
+    if (!terminal.value) return
+    fitAddon.fit()
+    // Explicit SIGWINCH in case ioctl(TIOCSWINSZ) didn't fire one (same dimensions)
+    invoke("signal_session", { sessionId, signal: "SIGWINCH" }).catch(() => {})
+  }
+
+  return { terminal, init, startListening, fit, redraw, dispose }
 }
