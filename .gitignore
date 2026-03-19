@@ -8,3 +8,4 @@ target/
 .vscode/
 .kanna-worktrees/
 .playwright-mcp/
+VERSION

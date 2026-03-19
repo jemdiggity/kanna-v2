@@ -14,14 +14,13 @@ fn main() {
     let commit = git(&["rev-parse", "--short", "HEAD"]);
     let branch = git(&["rev-parse", "--abbrev-ref", "HEAD"]);
 
-    // Read version from root VERSION file (single source of truth)
-    let root = git(&["rev-parse", "--show-toplevel"]);
-    let version_path = format!("{}/VERSION", root);
-    let version = std::fs::read_to_string(&version_path)
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|_| "0.0.0".to_string());
-    // Re-run build script if VERSION changes
-    println!("cargo:rerun-if-changed={}", version_path);
+    // Version from latest git tag (strip leading 'v'), fallback to 0.0.0
+    let tag = git(&["describe", "--tags", "--abbrev=0"]);
+    let version = if tag == "unknown" || tag.is_empty() {
+        "0.0.0".to_string()
+    } else {
+        tag.strip_prefix('v').unwrap_or(&tag).to_string()
+    };
 
     println!("cargo:rustc-env=KANNA_VERSION={}", version);
     println!("cargo:rustc-env=GIT_COMMIT={}", commit);

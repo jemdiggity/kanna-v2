@@ -1,25 +1,36 @@
 #!/bin/bash
-# Sync VERSION file to all package.json and tauri.conf.json files
+# Generate VERSION from git tag + branch + commit, then sync to build configs.
+#
+# Version format:
+#   Tagged commit:  1.2.3
+#   Untagged:       0.0.0-dev.main.abc1234
+#
+# The generated VERSION file is read by:
+#   - Daemon build.rs (compile-time env var)
+#   - tauri.conf.json (app version)
 set -e
 ROOT="$(git rev-parse --show-toplevel)"
-VERSION="$(cat "$ROOT/VERSION" | tr -d '[:space:]')"
 
-# Update package.json files that have a version field
-for f in "$ROOT"/package.json "$ROOT"/apps/*/package.json "$ROOT"/packages/*/package.json; do
-  [ -f "$f" ] || continue
-  if grep -q '"version"' "$f"; then
-    sed -i '' "s/\"version\": \"[^\"]*\"/\"version\": \"$VERSION\"/" "$f"
-  fi
-done
+COMMIT="$(git rev-parse --short HEAD)"
+BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 
-# Update tauri.conf.json
-TAURI_CONF="$ROOT/apps/desktop/src-tauri/tauri.conf.json"
-if [ -f "$TAURI_CONF" ]; then
-  sed -i '' "s/\"version\": \"[^\"]*\"/\"version\": \"$VERSION\"/" "$TAURI_CONF"
+# Get version from latest tag (strip leading 'v')
+TAG="$(git describe --tags --abbrev=0 2>/dev/null || echo "")"
+if [ -n "$TAG" ] && [ "$(git rev-list -n1 "$TAG")" = "$(git rev-parse HEAD)" ]; then
+  # HEAD is the tagged commit — use the tag as-is
+  VERSION="${TAG#v}"
+else
+  # Not on a tag — dev version
+  BASE="${TAG#v}"
+  BASE="${BASE:-0.0.0}"
+  VERSION="${BASE}-dev.${BRANCH}.${COMMIT}"
 fi
 
-# Update Cargo.toml for daemon
-DAEMON_TOML="$ROOT/crates/daemon/Cargo.toml"
-if [ -f "$DAEMON_TOML" ]; then
-  sed -i '' "s/^version = \"[^\"]*\"/version = \"$VERSION\"/" "$DAEMON_TOML"
+echo "$VERSION" > "$ROOT/VERSION"
+
+# Sync to tauri.conf.json (only the semver part — Tauri rejects prerelease strings)
+SEMVER="$(echo "$VERSION" | cut -d- -f1)"
+TAURI_CONF="$ROOT/apps/desktop/src-tauri/tauri.conf.json"
+if [ -f "$TAURI_CONF" ]; then
+  sed -i '' "s/\"version\": \"[^\"]*\"/\"version\": \"$SEMVER\"/" "$TAURI_CONF"
 fi
