@@ -79,7 +79,7 @@ function handleSelectItem(item: PipelineItem) {
           <span class="repo-count">{{ itemsForRepo(repo.id).length }}</span>
           <button
             class="btn-icon btn-add-task"
-            title="New Task"
+            title="New Task (Cmd+N)"
             @click.stop="emit('new-task', repo.id)"
           >+</button>
         </div>

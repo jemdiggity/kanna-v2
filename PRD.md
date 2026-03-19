@@ -30,7 +30,7 @@ Software developers who use Claude Code and want to run multiple agent tasks in 
 
 1. Agent finishes → task marked as unread (bold in sidebar)
 2. User selects task, presses Cmd+D → diff modal shows all branch changes
-3. Optionally Cmd+P → open in IDE, or Cmd+J → shell in worktree
+3. Optionally Cmd+P → file picker → preview, Cmd+O → open in IDE, or Cmd+J → shell in worktree
 4. Cmd+S → create GitHub PR, task moves to `needs_review`
 5. Cmd+M → merge PR, task moves to `merged`
 
