@@ -13,7 +13,7 @@ const emit = defineEmits<{
   (e: "select-repo", id: string): void;
   (e: "select-item", id: string): void;
   (e: "import-repo"): void;
-  (e: "new-task"): void;
+  (e: "new-task", repoId: string): void;
   (e: "open-preferences"): void;
 }>();
 
@@ -58,10 +58,6 @@ function handleSelectItem(item: PipelineItem) {
 
 <template>
   <aside class="sidebar">
-    <div class="sidebar-header">
-      <button class="btn-icon" title="New Task (Cmd+N)" @click="emit('new-task')">+</button>
-    </div>
-
     <div class="sidebar-content">
       <div v-if="repos.length === 0" class="empty-state">
         No repos imported yet.
@@ -81,6 +77,11 @@ function handleSelectItem(item: PipelineItem) {
           </button>
           <span class="repo-name">{{ repo.name }}</span>
           <span class="repo-count">{{ itemsForRepo(repo.id).length }}</span>
+          <button
+            class="btn-icon btn-add-task"
+            title="New Task"
+            @click.stop="emit('new-task', repo.id)"
+          >+</button>
         </div>
 
         <div v-if="!collapsedRepos.has(repo.id)" class="pipeline-list">
@@ -229,6 +230,21 @@ function handleSelectItem(item: PipelineItem) {
 .repo-count {
   color: #666;
   font-size: 11px;
+}
+
+.btn-add-task {
+  margin-left: auto;
+  opacity: 0;
+  font-size: 14px;
+  padding: 0 4px;
+}
+
+.repo-header:hover .btn-add-task {
+  opacity: 0.6;
+}
+
+.btn-add-task:hover {
+  opacity: 1 !important;
 }
 
 .pipeline-list {

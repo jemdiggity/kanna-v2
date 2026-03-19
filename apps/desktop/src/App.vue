@@ -411,7 +411,7 @@ onMounted(async () => {
       @select-repo="handleSelectRepo"
       @select-item="handleSelectItem"
       @import-repo="showImportRepoModal = true"
-      @new-task="showNewTaskModal = true"
+      @new-task="(repoId: string) => { selectedRepoId = repoId; showNewTaskModal = true; }"
       @open-preferences="showPreferencesPanel = true"
     />
     <MainPanel
