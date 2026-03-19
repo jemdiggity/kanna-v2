@@ -87,6 +87,7 @@ export function usePipeline(db: Ref<DbHandle | null>) {
       branch,
       agent_type: agentType,
       port_offset: portOffset,
+      activity: "working",
     });
 
     // 4. Spawn agent based on type

@@ -48,12 +48,12 @@ export async function listPipelineItems(
 
 export async function insertPipelineItem(
   db: DbHandle,
-  item: Omit<PipelineItem, "created_at" | "updated_at" | "activity" | "activity_changed_at">
+  item: Omit<PipelineItem, "created_at" | "updated_at" | "activity_changed_at"> & { activity?: PipelineItem["activity"] }
 ): Promise<void> {
   await db.execute(
     `INSERT INTO pipeline_item
-       (id, repo_id, issue_number, issue_title, prompt, stage, pr_number, pr_url, branch, agent_type, port_offset)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (id, repo_id, issue_number, issue_title, prompt, stage, pr_number, pr_url, branch, agent_type, port_offset, activity, activity_changed_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
     [
       item.id,
       item.repo_id,
@@ -66,6 +66,7 @@ export async function insertPipelineItem(
       item.branch,
       item.agent_type,
       item.port_offset ?? null,
+      item.activity ?? "idle",
     ]
   );
 }
