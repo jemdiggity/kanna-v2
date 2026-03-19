@@ -41,6 +41,17 @@ async fn main() {
     let dir = app_support_dir();
     std::fs::create_dir_all(&dir).expect("Failed to create app support dir");
 
+    // Log to file + stderr
+    let _ = flexi_logger::Logger::try_with_env_or_str("info")
+        .unwrap()
+        .log_to_file(
+            flexi_logger::FileSpec::default()
+                .directory(&dir)
+                .discriminant(std::process::id().to_string()),
+        )
+        .duplicate_to_stderr(flexi_logger::Duplicate::Info)
+        .start();
+
     let pid_path = dir.join("daemon.pid");
     let socket_path = dir.join("daemon.sock");
 
@@ -53,7 +64,7 @@ async fn main() {
 
     let listener = bind_socket(&socket_path).expect("Failed to bind Unix socket");
 
-    eprintln!("kanna-daemon starting, pid={}, socket={:?}", pid, socket_path);
+    log::info!("kanna-daemon starting, pid={}, socket={:?}", pid, socket_path);
 
     let sessions: Arc<Mutex<SessionManager>> = Arc::new(Mutex::new(SessionManager::new()));
     let session_writers: SessionWriters = Arc::new(Mutex::new(HashMap::new()));
@@ -62,7 +73,7 @@ async fn main() {
     if !adopted.is_empty() {
         let mut mgr = sessions.lock().await;
         for (session_id, pty_session) in adopted {
-            eprintln!("[handoff] adopted session {} (pid={})", session_id, pty_session.pid());
+            log::info!("[handoff] adopted session {} (pid={})", session_id, pty_session.pid());
             mgr.insert(session_id, pty_session);
             // Note: no stream_output started — client must Attach to start streaming
         }
@@ -75,7 +86,7 @@ async fn main() {
     let sessions_shutdown = sessions.clone();
     tokio::spawn(async move {
         tokio::signal::ctrl_c().await.ok();
-        eprintln!("kanna-daemon shutting down");
+        log::info!("kanna-daemon shutting down");
         sessions_shutdown.lock().await.kill_all();
         let _ = std::fs::remove_file(&pid_path_clone);
         let _ = std::fs::remove_file(&socket_path_clone);
@@ -93,7 +104,7 @@ async fn main() {
                 });
             }
             Err(e) => {
-                eprintln!("accept error: {}", e);
+                log::error!("accept error: {}", e);
             }
         }
     }
@@ -114,13 +125,13 @@ async fn attempt_handoff(
         Err(_) => return vec![],
     };
 
-    eprintln!("[handoff] old daemon detected (pid={}), requesting handoff", old_pid);
+    log::info!("[handoff] old daemon detected (pid={}), requesting handoff", old_pid);
 
     // Connect to old daemon
     let stream = match tokio::net::UnixStream::connect(socket_path).await {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("[handoff] failed to connect to old daemon: {}", e);
+            log::info!("[handoff] failed to connect to old daemon: {}", e);
             // Old daemon might be stuck — kill it
             unsafe { libc::kill(old_pid, libc::SIGTERM) };
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -139,7 +150,7 @@ async fn attempt_handoff(
     json.push('\n');
     use tokio::io::AsyncWriteExt;
     if let Err(e) = writer.write_all(json.as_bytes()).await {
-        eprintln!("[handoff] failed to send handoff command: {}", e);
+        log::info!("[handoff] failed to send handoff command: {}", e);
         return vec![];
     }
     let _ = writer.flush().await;
@@ -153,7 +164,7 @@ async fn attempt_handoff(
     ).await {
         Ok(Ok(_)) => {}
         _ => {
-            eprintln!("[handoff] timeout or error reading handoff response");
+            log::info!("[handoff] timeout or error reading handoff response");
             unsafe { libc::kill(old_pid, libc::SIGTERM) };
             return vec![];
         }
@@ -162,7 +173,7 @@ async fn attempt_handoff(
     let event: serde_json::Value = match serde_json::from_str(line.trim()) {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("[handoff] invalid response: {}", e);
+            log::info!("[handoff] invalid response: {}", e);
             return vec![];
         }
     };
@@ -171,11 +182,11 @@ async fn attempt_handoff(
         Some("HandoffReady") => {}
         Some("Error") => {
             let msg = event.get("message").and_then(|m| m.as_str()).unwrap_or("unknown");
-            eprintln!("[handoff] old daemon refused: {}", msg);
+            log::info!("[handoff] old daemon refused: {}", msg);
             return vec![];
         }
         other => {
-            eprintln!("[handoff] unexpected response type: {:?}", other);
+            log::info!("[handoff] unexpected response type: {:?}", other);
             return vec![];
         }
     }
@@ -187,25 +198,25 @@ async fn attempt_handoff(
     };
 
     if session_infos.is_empty() {
-        eprintln!("[handoff] no sessions to adopt");
+        log::info!("[handoff] no sessions to adopt");
         // Wait for old daemon to exit
         wait_for_exit(old_pid).await;
         return vec![];
     }
 
-    eprintln!("[handoff] receiving {} session fds", session_infos.len());
+    log::info!("[handoff] receiving {} session fds", session_infos.len());
 
     // Receive master fds via SCM_RIGHTS
     let fds = match fd_transfer::recv_fds(raw_fd, session_infos.len()) {
         Ok(fds) => fds,
         Err(e) => {
-            eprintln!("[handoff] failed to receive fds: {}", e);
+            log::info!("[handoff] failed to receive fds: {}", e);
             return vec![];
         }
     };
 
     if fds.len() != session_infos.len() {
-        eprintln!("[handoff] fd count mismatch: got {}, expected {}", fds.len(), session_infos.len());
+        log::info!("[handoff] fd count mismatch: got {}, expected {}", fds.len(), session_infos.len());
         return vec![];
     }
 
@@ -235,11 +246,11 @@ async fn wait_for_exit(pid: i32) {
             return;
         }
     }
-    eprintln!("[handoff] old daemon (pid={}) didn't exit, sending SIGTERM", pid);
+    log::info!("[handoff] old daemon (pid={}) didn't exit, sending SIGTERM", pid);
     unsafe { libc::kill(pid, libc::SIGTERM) };
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     if unsafe { libc::kill(pid, 0) } == 0 {
-        eprintln!("[handoff] old daemon still alive, sending SIGKILL");
+        log::info!("[handoff] old daemon still alive, sending SIGKILL");
         unsafe { libc::kill(pid, libc::SIGKILL) };
     }
 }
@@ -563,7 +574,7 @@ async fn handle_handoff(
     // Clear all writer slots (stream_output tasks will exit on next read failure)
     session_writers.lock().await.clear();
 
-    eprintln!("[handoff] transferring {} sessions", infos.len());
+    log::info!("[handoff] transferring {} sessions", infos.len());
 
     // Send HandoffReady with session metadata
     let evt = Event::HandoffReady { sessions: infos };
@@ -578,7 +589,7 @@ async fn handle_handoff(
     // Send master fds via SCM_RIGHTS
     if !fds.is_empty() {
         if let Err(e) = fd_transfer::send_fds(socket_fd, &fds) {
-            eprintln!("[handoff] failed to send fds: {}", e);
+            log::info!("[handoff] failed to send fds: {}", e);
         }
         // Close our copies — the new daemon owns them now
         for fd in &fds {
@@ -586,7 +597,7 @@ async fn handle_handoff(
         }
     }
 
-    eprintln!("[handoff] complete, exiting");
+    log::info!("[handoff] complete, exiting");
     // Use a blocking thread to exit — std::process::exit from an async context
     // can hang if tokio tasks are still running.
     std::thread::spawn(|| {
@@ -627,7 +638,7 @@ fn stream_output(
                 });
             }
             Err(e) => {
-                eprintln!("PTY read error for session {}: {}", session_id, e);
+                log::error!("PTY read error for session {}: {}", session_id, e);
                 break;
             }
         }
