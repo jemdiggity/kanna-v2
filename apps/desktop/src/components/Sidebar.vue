@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import type { Repo, PipelineItem } from "@kanna/db";
-import StageBadge from "./StageBadge.vue";
 import { ref } from "vue";
 
 const props = defineProps<{
@@ -93,7 +92,6 @@ function handleSelectItem(item: PipelineItem) {
             :class="{ selected: selectedItemId === item.id }"
             @click="handleSelectItem(item)"
           >
-            <StageBadge :stage="item.stage" />
             <span
               class="item-title"
               :style="{
