@@ -2,10 +2,12 @@
 # Start (or restart) the Kanna dev environment in a tmux session.
 #
 # Usage:
-#   ./scripts/dev.sh          # start or reattach
-#   ./scripts/dev.sh stop     # stop the session
-#   ./scripts/dev.sh restart  # stop + start
-#   ./scripts/dev.sh log      # print recent output
+#   ./scripts/dev.sh              # start or reattach
+#   ./scripts/dev.sh stop         # stop the session
+#   ./scripts/dev.sh stop -k      # stop the session and kill the daemon
+#   ./scripts/dev.sh restart      # stop + start
+#   ./scripts/dev.sh restart -k   # stop (kill daemon) + start
+#   ./scripts/dev.sh log          # print recent output
 set -e
 ROOT="$(git rev-parse --show-toplevel)"
 
@@ -50,6 +52,23 @@ LOCALEOF
   echo "Started tmux session '$SESSION'. Attach with: tmux attach -t $SESSION"
 }
 
+kill_daemon() {
+  local pid_file="$ROOT/.kanna-daemon/daemon.pid"
+  if [ -f "$pid_file" ]; then
+    local pid
+    pid="$(cat "$pid_file")"
+    if kill -0 "$pid" 2>/dev/null; then
+      kill "$pid"
+      echo "Killed daemon (pid=$pid)."
+    else
+      echo "Daemon not running (stale pid=$pid)."
+      rm -f "$pid_file"
+    fi
+  else
+    echo "No daemon pid file found."
+  fi
+}
+
 stop() {
   if tmux has-session -t "$SESSION" 2>/dev/null; then
     tmux send-keys -t "$SESSION" C-c
@@ -58,6 +77,9 @@ stop() {
     echo "Stopped."
   else
     echo "No session running."
+  fi
+  if $KILL_DAEMON; then
+    kill_daemon
   fi
 }
 
@@ -70,8 +92,12 @@ log() {
 }
 
 ATTACH=false
+KILL_DAEMON=false
 for arg in "$@"; do
-  case "$arg" in --attach|-a) ATTACH=true ;; esac
+  case "$arg" in
+    --attach|-a) ATTACH=true ;;
+    --kill-daemon|-k) KILL_DAEMON=true ;;
+  esac
 done
 
 CMD="${1:-start}"
@@ -80,5 +106,5 @@ case "$CMD" in
   stop)    stop ;;
   restart) stop; sleep 1; start; $ATTACH && tmux attach -t "$SESSION" ;;
   log)     log ;;
-  *)       echo "Usage: $0 {start|stop|restart|log} [--attach]" ;;
+  *)       echo "Usage: $0 {start|stop|restart|log} [--attach] [--kill-daemon]" ;;
 esac

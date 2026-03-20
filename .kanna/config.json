@@ -1,6 +1,6 @@
 {
   "setup": ["bun install"],
-  "teardown": ["./scripts/clean.sh --all"],
+  "teardown": ["./scripts/dev.sh stop -k", "./scripts/clean.sh --all"],
   "ports": {
     "KANNA_DEV_PORT": 1420
   }
