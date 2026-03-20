@@ -14,16 +14,19 @@ watch(hideOnStartup, (val) => emit("update:hide-on-startup", val));
 const groups = getShortcutGroups();
 
 function splitKeys(display: string): string[] {
-  const symbols = ["⌘", "⇧", "⌥"];
+  const symbols = ["⌘", "⇧", "⌥", "⌫"];
   const parts: string[] = [];
   let rest = display;
-  for (const sym of symbols) {
-    if (rest.startsWith(sym)) {
+  while (rest) {
+    const sym = symbols.find((s) => rest.startsWith(s));
+    if (sym) {
       parts.push(sym);
       rest = rest.slice(sym.length);
+    } else {
+      parts.push(rest);
+      break;
     }
   }
-  if (rest) parts.push(rest);
   return parts;
 }
 </script>
