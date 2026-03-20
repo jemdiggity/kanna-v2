@@ -26,7 +26,7 @@ import { usePRWorkflow } from "./composables/usePRWorkflow";
 const db = ref<DbHandle | null>(null);
 
 const { repos, selectedRepoId, refresh: refreshRepos, importRepo } = useRepo(db);
-const { items, selectedItemId, loadItems, transition, createItem, spawnPtySession, selectedItem, pinItem, unpinItem, reorderPinned } = usePipeline(db);
+const { items, selectedItemId, loadItems, transition, createItem, spawnPtySession, selectedItem, pinItem, unpinItem, reorderPinned, renameItem } = usePipeline(db);
 const {
   suspendAfterMinutes,
   killAfterMinutes,
@@ -295,6 +295,11 @@ async function handleReorderPinned(repoId: string, orderedIds: string[]) {
   await refreshAllItems();
 }
 
+async function handleRenameItem(itemId: string, displayName: string | null) {
+  await renameItem(itemId, displayName);
+  await refreshAllItems();
+}
+
 async function handleImportRepo(path: string, name: string, defaultBranch: string) {
   await importRepo(path, name, defaultBranch);
   showImportRepoModal.value = false;
@@ -380,6 +385,9 @@ async function runMigrations(database: DbHandle) {
   } catch { /* column already exists */ }
   try {
     await database.execute(`ALTER TABLE pipeline_item ADD COLUMN pin_order INTEGER`);
+  } catch { /* column already exists */ }
+  try {
+    await database.execute(`ALTER TABLE pipeline_item ADD COLUMN display_name TEXT`);
   } catch { /* column already exists */ }
 }
 
@@ -540,6 +548,7 @@ onMounted(async () => {
       @pin-item="handlePinItem"
       @unpin-item="handleUnpinItem"
       @reorder-pinned="handleReorderPinned"
+      @rename-item="handleRenameItem"
     />
     <MainPanel
       :item="currentItem"

@@ -7,7 +7,7 @@ defineProps<{
 }>();
 
 function title(item: PipelineItem): string {
-  return item.issue_title || item.prompt || "Untitled";
+  return item.display_name || item.issue_title || item.prompt || "Untitled";
 }
 </script>
 

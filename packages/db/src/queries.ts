@@ -48,7 +48,7 @@ export async function listPipelineItems(
 
 export async function insertPipelineItem(
   db: DbHandle,
-  item: Omit<PipelineItem, "created_at" | "updated_at" | "activity_changed_at" | "pinned" | "pin_order"> & { activity?: PipelineItem["activity"] }
+  item: Omit<PipelineItem, "created_at" | "updated_at" | "activity_changed_at" | "pinned" | "pin_order" | "display_name"> & { activity?: PipelineItem["activity"] }
 ): Promise<void> {
   await db.execute(
     `INSERT INTO pipeline_item
@@ -124,6 +124,17 @@ export async function unpinPipelineItem(
   await db.execute(
     "UPDATE pipeline_item SET pinned = 0, pin_order = NULL, updated_at = datetime('now') WHERE id = ?",
     [id]
+  );
+}
+
+export async function updatePipelineItemDisplayName(
+  db: DbHandle,
+  id: string,
+  displayName: string | null
+): Promise<void> {
+  await db.execute(
+    "UPDATE pipeline_item SET display_name = ?, updated_at = datetime('now') WHERE id = ?",
+    [displayName, id]
   );
 }
 

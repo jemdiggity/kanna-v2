@@ -2,7 +2,7 @@ import { ref, type Ref } from "vue";
 import { invoke } from "../invoke";
 import type { DbHandle } from "@kanna/db";
 import type { PipelineItem } from "@kanna/db";
-import { listPipelineItems, updatePipelineItemStage, insertPipelineItem, getRepo, pinPipelineItem, unpinPipelineItem, reorderPinnedItems } from "@kanna/db";
+import { listPipelineItems, updatePipelineItemStage, insertPipelineItem, getRepo, pinPipelineItem, unpinPipelineItem, reorderPinnedItems, updatePipelineItemDisplayName } from "@kanna/db";
 import { canTransition, parseRepoConfig, type RepoConfig, type Stage } from "@kanna/core";
 
 export type AgentType = "pty" | "sdk";
@@ -201,6 +201,13 @@ export function usePipeline(db: Ref<DbHandle | null>) {
     }
   }
 
+  async function renameItem(itemId: string, displayName: string | null) {
+    if (!db.value) return;
+    await updatePipelineItemDisplayName(db.value, itemId, displayName);
+    const item = items.value.find((i) => i.id === itemId);
+    if (item) item.display_name = displayName;
+  }
+
   async function reorderPinned(repoId: string, orderedIds: string[]) {
     if (!db.value) return;
     await reorderPinnedItems(db.value, repoId, orderedIds);
@@ -226,5 +233,6 @@ export function usePipeline(db: Ref<DbHandle | null>) {
     pinItem,
     unpinItem,
     reorderPinned,
+    renameItem,
   };
 }

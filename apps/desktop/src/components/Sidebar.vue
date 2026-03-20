@@ -19,6 +19,7 @@ const emit = defineEmits<{
   (e: "pin-item", itemId: string, position: number): void;
   (e: "unpin-item", itemId: string): void;
   (e: "reorder-pinned", repoId: string, orderedIds: string[]): void;
+  (e: "rename-item", itemId: string, displayName: string | null): void;
 }>();
 
 const collapsedRepos = ref<Set<string>>(new Set());
@@ -52,8 +53,37 @@ function itemsForRepo(repoId: string): PipelineItem[] {
 }
 
 function itemTitle(item: PipelineItem): string {
-  const raw = item.issue_title || item.prompt || "Untitled";
+  const raw = item.display_name || item.issue_title || item.prompt || "Untitled";
   return raw.length > 40 ? raw.slice(0, 40) + "..." : raw;
+}
+
+const editingItemId = ref<string | null>(null);
+const editingValue = ref("");
+
+function startRename(item: PipelineItem) {
+  editingItemId.value = item.id;
+  editingValue.value = item.display_name || item.issue_title || item.prompt || "";
+  nextTick(() => {
+    const input = document.querySelector('.rename-input') as HTMLInputElement | null;
+    if (input) {
+      input.focus();
+      input.select();
+    }
+  });
+}
+
+function commitRename(itemId: string) {
+  const trimmed = editingValue.value.trim();
+  const item = props.pipelineItems.find((i) => i.id === itemId);
+  const original = item?.issue_title || item?.prompt || "";
+  // If cleared or matches original, set to null (remove custom name)
+  const displayName = trimmed && trimmed !== original ? trimmed : null;
+  emit("rename-item", itemId, displayName);
+  editingItemId.value = null;
+}
+
+function cancelRename() {
+  editingItemId.value = null;
 }
 
 function handleSelectRepo(repoId: string) {
@@ -202,8 +232,19 @@ watch(
               class="pipeline-item"
               :class="{ selected: selectedItemId === item.id }"
               @click="handleSelectItem(item)"
+              @dblclick.stop="startRename(item)"
             >
+              <input
+                v-if="editingItemId === item.id"
+                class="rename-input"
+                v-model="editingValue"
+                @keydown.enter="commitRename(item.id)"
+                @keydown.escape="cancelRename()"
+                @blur="commitRename(item.id)"
+                @click.stop
+              />
               <span
+                v-else
                 class="item-title"
                 :style="{
                   fontWeight: item.activity === 'unread' ? 'bold' : 'normal',
@@ -227,8 +268,19 @@ watch(
               class="pipeline-item"
               :class="{ selected: selectedItemId === item.id }"
               @click="handleSelectItem(item)"
+              @dblclick.stop="startRename(item)"
             >
+              <input
+                v-if="editingItemId === item.id"
+                class="rename-input"
+                v-model="editingValue"
+                @keydown.enter="commitRename(item.id)"
+                @keydown.escape="cancelRename()"
+                @blur="commitRename(item.id)"
+                @click.stop
+              />
               <span
+                v-else
                 class="item-title"
                 :style="{
                   fontWeight: item.activity === 'unread' ? 'bold' : 'normal',
@@ -392,6 +444,19 @@ watch(
   white-space: nowrap;
   flex: 1;
   pointer-events: none;
+}
+
+.rename-input {
+  flex: 1;
+  font-size: 12px;
+  color: #eee;
+  background: #2a2a2a;
+  border: 1px solid #0066cc;
+  border-radius: 2px;
+  padding: 1px 4px;
+  outline: none;
+  font-family: inherit;
+  min-width: 0;
 }
 
 .no-items {
