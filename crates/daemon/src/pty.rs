@@ -148,6 +148,15 @@ impl PtySession {
         Ok(Box::new(file))
     }
 
+    /// Clone the master fd for writing (e.g. kitty keyboard responses).
+    pub fn try_clone_writer(&self) -> Result<OwnedFd, Box<dyn std::error::Error + Send + Sync>> {
+        let new_fd = unsafe { libc::dup(self.master_fd.as_raw_fd()) };
+        if new_fd < 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+        Ok(unsafe { OwnedFd::from_raw_fd(new_fd) })
+    }
+
     pub fn resize(&self, cols: u16, rows: u16) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let ws = libc::winsize {
             ws_row: rows,
