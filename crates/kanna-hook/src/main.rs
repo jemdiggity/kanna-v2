@@ -9,17 +9,29 @@
 //!   kanna-hook Stop abc123
 //!   kanna-hook PostToolUse abc123 '{"tool":"Bash"}'
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 
-fn daemon_socket_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+fn app_support_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("KANNA_DAEMON_DIR") {
+        return PathBuf::from(dir);
+    }
+    let home = std::env::var("HOME").expect("HOME not set");
     PathBuf::from(home)
         .join("Library")
         .join("Application Support")
         .join("Kanna")
-        .join("daemon.sock")
+}
+
+fn daemon_socket_path() -> PathBuf {
+    let dir = app_support_dir();
+    let mut hasher = DefaultHasher::new();
+    dir.hash(&mut hasher);
+    let hash = hasher.finish() as u32;
+    PathBuf::from(format!("/tmp/kanna-{:08x}.sock", hash))
 }
 
 fn main() {
