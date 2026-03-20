@@ -15,11 +15,16 @@ use tokio::net::UnixStream;
 use tokio::sync::{broadcast, Mutex};
 
 /// Swappable writer target. stream_output checks this on every read.
-/// None = no client attached (output discarded).
+/// None = no client attached (output buffered).
 type ActiveWriter = Arc<Mutex<Option<Arc<Mutex<tokio::net::unix::OwnedWriteHalf>>>>>;
 
 /// Map of session_id → active writer target.
 type SessionWriters = Arc<Mutex<HashMap<String, ActiveWriter>>>;
+
+/// Pre-attach buffer: collects output between Spawn and first Attach.
+/// Flushed to the client on Attach, then set to None.
+type PreAttachBuffer = Arc<Mutex<Option<Vec<u8>>>>;
+type PreAttachBuffers = Arc<Mutex<HashMap<String, PreAttachBuffer>>>;
 
 use protocol::{Command, Event};
 use session::SessionManager;
@@ -84,6 +89,7 @@ async fn main() {
 
     let sessions: Arc<Mutex<SessionManager>> = Arc::new(Mutex::new(SessionManager::new()));
     let session_writers: SessionWriters = Arc::new(Mutex::new(HashMap::new()));
+    let pre_attach_buffers: PreAttachBuffers = Arc::new(Mutex::new(HashMap::new()));
 
     // Adopt handed-off sessions
     if !adopted.is_empty() {
@@ -115,8 +121,9 @@ async fn main() {
                 let sessions_clone = sessions.clone();
                 let hook_tx_clone = hook_tx.clone();
                 let writers_clone = session_writers.clone();
+                let buffers_clone = pre_attach_buffers.clone();
                 tokio::spawn(async move {
-                    handle_connection(stream, sessions_clone, hook_tx_clone, writers_clone).await;
+                    handle_connection(stream, sessions_clone, hook_tx_clone, writers_clone, buffers_clone).await;
                 });
             }
             Err(e) => {
@@ -276,6 +283,7 @@ async fn handle_connection(
     sessions: Arc<Mutex<SessionManager>>,
     hook_tx: broadcast::Sender<String>,
     session_writers: SessionWriters,
+    pre_attach_buffers: PreAttachBuffers,
 ) {
     // Keep the raw fd for SCM_RIGHTS (used by Handoff)
     let raw_fd = stream.as_raw_fd();
@@ -311,7 +319,7 @@ async fn handle_connection(
                 let _ = write_event(&mut *writer.lock().await, &Event::Ok).await;
             }
             Some(command) => {
-                handle_command(command, sessions.clone(), writer.clone(), &hook_tx, session_writers.clone()).await;
+                handle_command(command, sessions.clone(), writer.clone(), &hook_tx, session_writers.clone(), pre_attach_buffers.clone()).await;
             }
         }
     }
@@ -323,6 +331,7 @@ async fn handle_command(
     writer: Arc<Mutex<tokio::net::unix::OwnedWriteHalf>>,
     hook_tx: &broadcast::Sender<String>,
     session_writers: SessionWriters,
+    pre_attach_buffers: PreAttachBuffers,
 ) {
     match command {
         Command::Spawn {
@@ -349,17 +358,20 @@ async fn handle_command(
                     mgr.insert(session_id.clone(), pty_session);
                     drop(mgr);
 
-                    // Start stream_output immediately so kitty keyboard
-                    // negotiation completes during CLI startup (before Attach).
+                    // Start stream_output immediately so startup output
+                    // (including kitty keyboard mode push) is captured.
                     if let Ok(reader) = pty_reader {
                         let active_writer: ActiveWriter = Arc::new(Mutex::new(None));
                         session_writers.lock().await.insert(session_id.clone(), active_writer.clone());
+
+                        let buffer: PreAttachBuffer = Arc::new(Mutex::new(Some(Vec::new())));
+                        pre_attach_buffers.lock().await.insert(session_id.clone(), buffer.clone());
 
                         let sid = session_id.clone();
                         let sessions_exit = sessions.clone();
                         let writers_cleanup = session_writers.clone();
                         tokio::task::spawn_blocking(move || {
-                            stream_output(sid, reader, active_writer, sessions_exit, writers_cleanup);
+                            stream_output(sid, reader, active_writer, buffer, sessions_exit, writers_cleanup);
                         });
                     }
 
@@ -400,6 +412,20 @@ async fn handle_command(
                 drop(writers);
 
                 let _ = write_event(&mut *writer.lock().await, &Event::Ok).await;
+
+                // Flush pre-attach buffer (startup output including kitty keyboard push)
+                if let Some(buffer) = pre_attach_buffers.lock().await.remove(&session_id) {
+                    if let Some(data) = buffer.lock().await.take() {
+                        if !data.is_empty() {
+                            log::info!("[attach] flushing {} bytes of pre-attach output for {}", data.len(), session_id);
+                            let evt = Event::Output {
+                                session_id: session_id.clone(),
+                                data,
+                            };
+                            let _ = write_event(&mut *writer.lock().await, &evt).await;
+                        }
+                    }
+                }
             } else {
                 // No stream_output yet (adopted session from handoff) — start it now
                 let pty_reader = match mgr.sessions.get(&session_id).unwrap().try_clone_reader() {
@@ -423,8 +449,9 @@ async fn handle_command(
                 let sid = session_id.clone();
                 let sessions_exit = sessions.clone();
                 let writers_cleanup = session_writers.clone();
+                let no_buffer: PreAttachBuffer = Arc::new(Mutex::new(None));
                 tokio::task::spawn_blocking(move || {
-                    stream_output(sid, pty_reader, active_writer, sessions_exit, writers_cleanup);
+                    stream_output(sid, pty_reader, active_writer, no_buffer, sessions_exit, writers_cleanup);
                 });
             }
         }
@@ -652,13 +679,12 @@ fn stream_output(
     session_id: String,
     mut reader: Box<dyn Read + Send>,
     active_writer: ActiveWriter,
+    pre_attach_buffer: PreAttachBuffer,
     sessions: Arc<Mutex<SessionManager>>,
     session_writers: SessionWriters,
 ) {
     let rt = tokio::runtime::Handle::current();
     let mut buf = [0u8; 4096];
-    let mut pre_attach_buffer: Vec<u8> = Vec::new();
-    let mut pre_attach_done = false;
 
     loop {
         match reader.read(&mut buf) {
@@ -666,39 +692,20 @@ fn stream_output(
             Ok(n) => {
                 let data = buf[..n].to_vec();
 
-                // Check if a client is attached
-                let has_client = rt.block_on(async {
-                    active_writer.lock().await.is_some()
+                // If pre-attach buffer is active (Some), append to it
+                let buffered = rt.block_on(async {
+                    let mut guard = pre_attach_buffer.lock().await;
+                    if let Some(ref mut buffer) = *guard {
+                        if buffer.len() + data.len() <= MAX_PRE_ATTACH_BUFFER {
+                            buffer.extend_from_slice(&data);
+                        }
+                        true
+                    } else {
+                        false
+                    }
                 });
-
-                if !has_client && !pre_attach_done {
-                    // No client yet — buffer output for replay on first attach.
-                    // This captures kitty keyboard mode pushes from the CLI so
-                    // xterm.js receives them when the client connects.
-                    if pre_attach_buffer.len() + data.len() <= MAX_PRE_ATTACH_BUFFER {
-                        pre_attach_buffer.extend_from_slice(&data);
-                    }
-                    continue;
-                }
-
-                // Client attached — flush pre-attach buffer on first connected read
-                if !pre_attach_done {
-                    pre_attach_done = true;
-                    if !pre_attach_buffer.is_empty() {
-                        let buf_data: Vec<u8> = pre_attach_buffer.drain(..).collect();
-                        log::info!("[stream_output] flushing {} bytes of pre-attach output for {}", buf_data.len(), session_id);
-                        let flush_evt = Event::Output {
-                            session_id: session_id.clone(),
-                            data: buf_data,
-                        };
-                        rt.block_on(async {
-                            let maybe_writer = active_writer.lock().await.clone();
-                            if let Some(w) = maybe_writer {
-                                let _ = write_event(&mut *w.lock().await, &flush_evt).await;
-                            }
-                        });
-                    }
-                }
+                // Buffer is active — Attach handler will flush it
+                if buffered { continue; }
 
                 let evt = Event::Output {
                     session_id: session_id.clone(),
