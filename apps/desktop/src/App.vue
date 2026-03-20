@@ -16,10 +16,11 @@ import FilePickerModal from "./components/FilePickerModal.vue";
 import FilePreviewModal from "./components/FilePreviewModal.vue";
 import DiffModal from "./components/DiffModal.vue";
 import ShellModal from "./components/ShellModal.vue";
+import CommandPaletteModal from "./components/CommandPaletteModal.vue";
 import { useRepo } from "./composables/useRepo";
 import { usePipeline } from "./composables/usePipeline";
 import { usePreferences } from "./composables/usePreferences";
-import { useKeyboardShortcuts } from "./composables/useKeyboardShortcuts";
+import { useKeyboardShortcuts, type ActionName } from "./composables/useKeyboardShortcuts";
 import { useResourceSweeper } from "./composables/useResourceSweeper";
 
 const db = ref<DbHandle | null>(null);
@@ -58,6 +59,7 @@ const showFilePreviewModal = ref(false);
 const previewFilePath = ref("");
 const showDiffModal = ref(false);
 const showShellModal = ref(false);
+const showCommandPalette = ref(false);
 const diffScopes = new Map<string, "branch" | "commit" | "working">();
 const zenMode = ref(false);
 const maximized = ref(false);
@@ -165,7 +167,7 @@ async function handleCloseTask() {
   }
 }
 
-useKeyboardShortcuts({
+const keyboardActions = {
   newTask: () => { showNewTaskModal.value = true; },
   newWindow: async () => {
     if (isTauri) {
@@ -212,6 +214,7 @@ useKeyboardShortcuts({
   toggleZen: () => { zenMode.value = !zenMode.value; },
   toggleMaximize: () => { maximized.value = !maximized.value; },
   dismiss: () => {
+    if (showCommandPalette.value) { showCommandPalette.value = false; return; }
     if (showShortcutsModal.value) { showShortcutsModal.value = false; return; }
     if (showFilePreviewModal.value) { showFilePreviewModal.value = false; return; }
     if (showFilePickerModal.value) { showFilePickerModal.value = false; return; }
@@ -226,7 +229,9 @@ useKeyboardShortcuts({
   showDiff: () => { showDiffModal.value = !showDiffModal.value; },
   showShortcuts: () => { showShortcutsModal.value = !showShortcutsModal.value; },
   openPreferences: () => { showPreferencesPanel.value = true; },
-});
+  commandPalette: () => { showCommandPalette.value = !showCommandPalette.value; },
+};
+useKeyboardShortcuts(keyboardActions);
 
 function focusAgentTerminal() {
   nextTick(() => {
@@ -589,6 +594,11 @@ onMounted(async () => {
       }"
       @update="handlePreferenceUpdate"
       @close="showPreferencesPanel = false"
+    />
+    <CommandPaletteModal
+      v-if="showCommandPalette"
+      @close="showCommandPalette = false"
+      @execute="(action: ActionName) => keyboardActions[action]()"
     />
     <KeyboardShortcutsModal
       v-if="showShortcutsModal"
