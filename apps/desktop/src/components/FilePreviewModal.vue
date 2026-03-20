@@ -258,6 +258,186 @@ onUnmounted(() => {
   color: #fff;
 }
 
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.mode-badge {
+  padding: 2px 8px;
+  background: #333;
+  border: 1px solid #444;
+  border-radius: 4px;
+  color: #aaa;
+  font-size: 11px;
+  font-family: "SF Mono", Menlo, monospace;
+  cursor: pointer;
+  user-select: none;
+}
+
+.mode-badge:hover {
+  background: #3a3a3a;
+  color: #ccc;
+}
+
+.mode-hint {
+  color: #555;
+  margin-left: 4px;
+  font-size: 10px;
+}
+
+/* Rendered markdown styles */
+.markdown-rendered {
+  padding: 24px 32px;
+  color: #e0e0e0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.markdown-rendered :deep(h1),
+.markdown-rendered :deep(h2),
+.markdown-rendered :deep(h3),
+.markdown-rendered :deep(h4),
+.markdown-rendered :deep(h5),
+.markdown-rendered :deep(h6) {
+  color: #e0e0e0;
+  margin: 24px 0 12px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.markdown-rendered :deep(h1) { font-size: 1.8em; padding-bottom: 8px; border-bottom: 1px solid #333; }
+.markdown-rendered :deep(h2) { font-size: 1.4em; padding-bottom: 6px; border-bottom: 1px solid #333; }
+.markdown-rendered :deep(h3) { font-size: 1.2em; }
+.markdown-rendered :deep(h4) { font-size: 1.1em; }
+.markdown-rendered :deep(h5) { font-size: 1em; }
+.markdown-rendered :deep(h6) { font-size: 0.9em; color: #aaa; }
+
+.markdown-rendered :deep(p) {
+  margin: 0 0 12px;
+}
+
+.markdown-rendered :deep(a) {
+  color: #58a6ff;
+  text-decoration: none;
+}
+
+.markdown-rendered :deep(a:hover) {
+  text-decoration: underline;
+}
+
+.markdown-rendered :deep(strong) {
+  color: #f0f0f0;
+  font-weight: 600;
+}
+
+.markdown-rendered :deep(blockquote) {
+  margin: 0 0 12px;
+  padding: 4px 16px;
+  border-left: 3px solid #444;
+  color: #aaa;
+}
+
+.markdown-rendered :deep(blockquote p) {
+  margin: 0;
+}
+
+.markdown-rendered :deep(ul),
+.markdown-rendered :deep(ol) {
+  margin: 0 0 12px;
+  padding-left: 24px;
+}
+
+.markdown-rendered :deep(li) {
+  margin: 4px 0;
+}
+
+.markdown-rendered :deep(li > ul),
+.markdown-rendered :deep(li > ol) {
+  margin: 4px 0 0;
+}
+
+/* Task list checkboxes */
+.markdown-rendered :deep(.task-list-item) {
+  list-style: none;
+  margin-left: -24px;
+  padding-left: 24px;
+}
+
+.markdown-rendered :deep(.task-list-item input[type="checkbox"]) {
+  margin-right: 8px;
+  pointer-events: none;
+}
+
+.markdown-rendered :deep(hr) {
+  border: none;
+  border-top: 1px solid #333;
+  margin: 24px 0;
+}
+
+/* Code blocks (Shiki-highlighted) */
+.markdown-rendered :deep(pre) {
+  margin: 0 0 12px;
+  padding: 12px 16px;
+  background: #252525 !important;
+  border-radius: 6px;
+  overflow-x: auto;
+}
+
+.markdown-rendered :deep(pre code) {
+  font-family: "SF Mono", Menlo, monospace;
+  font-size: 13px;
+  background: none;
+  padding: 0;
+  border-radius: 0;
+}
+
+/* Inline code */
+.markdown-rendered :deep(code) {
+  font-family: "SF Mono", Menlo, monospace;
+  font-size: 0.9em;
+  background: #2a2a2a;
+  padding: 2px 6px;
+  border-radius: 3px;
+  color: #e0e0e0;
+}
+
+/* Tables */
+.markdown-rendered :deep(table) {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 0 0 12px;
+}
+
+.markdown-rendered :deep(th),
+.markdown-rendered :deep(td) {
+  border: 1px solid #333;
+  padding: 8px 12px;
+  text-align: left;
+}
+
+.markdown-rendered :deep(th) {
+  background: #252525;
+  font-weight: 600;
+}
+
+.markdown-rendered :deep(tr:nth-child(even)) {
+  background: #1e1e1e;
+}
+
+/* Images */
+.markdown-rendered :deep(img) {
+  max-width: 100%;
+}
+
+/* Strikethrough */
+.markdown-rendered :deep(del) {
+  color: #666;
+}
+
 .preview-status {
   padding: 24px;
   color: #666;
@@ -276,14 +456,14 @@ onUnmounted(() => {
   line-height: 1.5;
 }
 
-.preview-content :deep(pre) {
+.preview-content:not(.markdown-rendered) :deep(pre) {
   margin: 0;
   padding: 12px 16px;
   background: #1a1a1a !important;
   min-height: 100%;
 }
 
-.preview-content :deep(code) {
+.preview-content:not(.markdown-rendered) :deep(code) {
   font-family: "SF Mono", Menlo, monospace;
   font-size: 13px;
 }
