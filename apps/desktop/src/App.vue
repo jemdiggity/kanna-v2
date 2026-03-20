@@ -26,7 +26,7 @@ import { usePRWorkflow } from "./composables/usePRWorkflow";
 const db = ref<DbHandle | null>(null);
 
 const { repos, selectedRepoId, refresh: refreshRepos, importRepo } = useRepo(db);
-const { items, selectedItemId, loadItems, transition, createItem, spawnPtySession, selectedItem } = usePipeline(db);
+const { items, selectedItemId, loadItems, transition, createItem, spawnPtySession, selectedItem, pinItem, unpinItem, reorderPinned } = usePipeline(db);
 const {
   suspendAfterMinutes,
   killAfterMinutes,
@@ -102,13 +102,15 @@ watch([repos, selectedRepoId], refreshAllItems, { immediate: true });
 function sortedItemsForCurrentRepo(): PipelineItem[] {
   const activityOrder: Record<string, number> = { idle: 0, unread: 1, working: 2 };
   return allItems.value
-    .filter((item) => item.repo_id === selectedRepoId.value)
+    .filter((item) => item.repo_id === selectedRepoId.value && item.stage !== "closed")
     .sort((a, b) => {
-      const ao = activityOrder[(a as any).activity || "idle"] ?? 0;
-      const bo = activityOrder[(b as any).activity || "idle"] ?? 0;
+      if (a.pinned !== b.pinned) return b.pinned - a.pinned;
+      if (a.pinned && b.pinned) return (a.pin_order ?? 0) - (b.pin_order ?? 0);
+      const ao = activityOrder[a.activity || "idle"] ?? 0;
+      const bo = activityOrder[b.activity || "idle"] ?? 0;
       if (ao !== bo) return ao - bo;
-      const aTime = (a as any).activity_changed_at || a.created_at;
-      const bTime = (b as any).activity_changed_at || b.created_at;
+      const aTime = a.activity_changed_at || a.created_at;
+      const bTime = b.activity_changed_at || b.created_at;
       return bTime.localeCompare(aTime);
     });
 }
@@ -278,6 +280,21 @@ async function handleNewTaskSubmit(prompt: string) {
   }
 }
 
+async function handlePinItem(itemId: string, position: number) {
+  await pinItem(itemId, position);
+  await refreshAllItems();
+}
+
+async function handleUnpinItem(itemId: string) {
+  await unpinItem(itemId);
+  await refreshAllItems();
+}
+
+async function handleReorderPinned(repoId: string, orderedIds: string[]) {
+  await reorderPinned(repoId, orderedIds);
+  await refreshAllItems();
+}
+
 async function handleImportRepo(path: string, name: string, defaultBranch: string) {
   await importRepo(path, name, defaultBranch);
   showImportRepoModal.value = false;
@@ -357,6 +374,12 @@ async function runMigrations(database: DbHandle) {
   } catch { /* column already exists */ }
   try {
     await database.execute(`ALTER TABLE pipeline_item ADD COLUMN port_env TEXT`);
+  } catch { /* column already exists */ }
+  try {
+    await database.execute(`ALTER TABLE pipeline_item ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0`);
+  } catch { /* column already exists */ }
+  try {
+    await database.execute(`ALTER TABLE pipeline_item ADD COLUMN pin_order INTEGER`);
   } catch { /* column already exists */ }
 }
 
@@ -497,6 +520,9 @@ onMounted(async () => {
       @import-repo="showImportRepoModal = true"
       @new-task="(repoId: string) => { selectedRepoId = repoId; showNewTaskModal = true; }"
       @open-preferences="showPreferencesPanel = true"
+      @pin-item="handlePinItem"
+      @unpin-item="handleUnpinItem"
+      @reorder-pinned="handleReorderPinned"
     />
     <MainPanel
       :item="currentItem"

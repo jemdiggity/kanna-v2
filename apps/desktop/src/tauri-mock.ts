@@ -59,6 +59,56 @@ class MockDatabase {
       return { rowsAffected: 1 };
     }
 
+    // Handle pin/unpin updates — must be before generic UPDATE handler
+    if (upper.startsWith("UPDATE") && query.includes("pinned = 1")) {
+      const whereMatch = query.match(/WHERE\s+id\s*=\s*\?/i);
+      if (whereMatch && bindValues) {
+        const pinOrder = bindValues[0];
+        const id = bindValues[1];
+        for (const row of tables[table]) {
+          if (row["id"] === id) {
+            row["pinned"] = 1;
+            row["pin_order"] = pinOrder;
+            row["updated_at"] = new Date().toISOString();
+          }
+        }
+        return { rowsAffected: 1 };
+      }
+    }
+
+    if (upper.startsWith("UPDATE") && query.includes("pinned = 0")) {
+      const whereMatch = query.match(/WHERE\s+id\s*=\s*\?/i);
+      if (whereMatch && bindValues) {
+        const id = bindValues[0];
+        for (const row of tables[table]) {
+          if (row["id"] === id) {
+            row["pinned"] = 0;
+            row["pin_order"] = null;
+            row["updated_at"] = new Date().toISOString();
+          }
+        }
+        return { rowsAffected: 1 };
+      }
+    }
+
+    if (upper.startsWith("UPDATE") && query.includes("CASE")) {
+      // Bulk reorder — best-effort for mock
+      if (bindValues) {
+        const n = Math.round(bindValues.length / 3);
+        for (let i = 0; i < n; i++) {
+          const id = bindValues[i * 2] as string;
+          const order = bindValues[i * 2 + 1] as number;
+          for (const row of tables[table]) {
+            if (row["id"] === id) {
+              row["pin_order"] = order;
+              row["updated_at"] = new Date().toISOString();
+            }
+          }
+        }
+        return { rowsAffected: n };
+      }
+    }
+
     if (upper.startsWith("UPDATE")) {
       // Simplified: UPDATE table SET col = ? WHERE id = ?
       const setMatch = query.match(/SET\s+(.+?)\s+WHERE/i);

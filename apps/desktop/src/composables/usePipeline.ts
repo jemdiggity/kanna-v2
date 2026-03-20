@@ -2,7 +2,7 @@ import { ref, type Ref } from "vue";
 import { invoke } from "../invoke";
 import type { DbHandle } from "@kanna/db";
 import type { PipelineItem } from "@kanna/db";
-import { listPipelineItems, updatePipelineItemStage, insertPipelineItem, getRepo } from "@kanna/db";
+import { listPipelineItems, updatePipelineItemStage, insertPipelineItem, getRepo, pinPipelineItem, unpinPipelineItem, reorderPinnedItems } from "@kanna/db";
 import { canTransition, parseRepoConfig, type RepoConfig, type Stage } from "@kanna/core";
 
 export type AgentType = "pty" | "sdk";
@@ -181,6 +181,35 @@ export function usePipeline(db: Ref<DbHandle | null>) {
     });
   }
 
+  async function pinItem(itemId: string, position: number) {
+    if (!db.value) return;
+    await pinPipelineItem(db.value, itemId, position);
+    const item = items.value.find((i) => i.id === itemId);
+    if (item) {
+      item.pinned = 1;
+      item.pin_order = position;
+    }
+  }
+
+  async function unpinItem(itemId: string) {
+    if (!db.value) return;
+    await unpinPipelineItem(db.value, itemId);
+    const item = items.value.find((i) => i.id === itemId);
+    if (item) {
+      item.pinned = 0;
+      item.pin_order = null;
+    }
+  }
+
+  async function reorderPinned(repoId: string, orderedIds: string[]) {
+    if (!db.value) return;
+    await reorderPinnedItems(db.value, repoId, orderedIds);
+    orderedIds.forEach((id, index) => {
+      const item = items.value.find((i) => i.id === id);
+      if (item) item.pin_order = index;
+    });
+  }
+
   function selectedItem(): PipelineItem | null {
     if (!selectedItemId.value) return null;
     return items.value.find((i) => i.id === selectedItemId.value) ?? null;
@@ -194,5 +223,8 @@ export function usePipeline(db: Ref<DbHandle | null>) {
     createItem,
     spawnPtySession,
     selectedItem,
+    pinItem,
+    unpinItem,
+    reorderPinned,
   };
 }

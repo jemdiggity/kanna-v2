@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { Repo, PipelineItem } from "@kanna/db";
-import { ref } from "vue";
+import { ref, watch, onMounted, nextTick } from "vue";
+import Sortable from "sortablejs";
 
 const props = defineProps<{
   repos: Repo[];
@@ -15,30 +16,39 @@ const emit = defineEmits<{
   (e: "import-repo"): void;
   (e: "new-task", repoId: string): void;
   (e: "open-preferences"): void;
+  (e: "pin-item", itemId: string, position: number): void;
+  (e: "unpin-item", itemId: string): void;
+  (e: "reorder-pinned", repoId: string, orderedIds: string[]): void;
 }>();
 
 const collapsedRepos = ref<Set<string>>(new Set());
 
-function toggleRepo(repoId: string) {
-  if (collapsedRepos.value.has(repoId)) {
-    collapsedRepos.value.delete(repoId);
-  } else {
-    collapsedRepos.value.add(repoId);
-  }
+// Track Sortable instances for cleanup
+const sortableInstances = new Map<string, Sortable[]>();
+const isDragging = ref(false);
+
+function sortedPinned(repoId: string): PipelineItem[] {
+  return props.pipelineItems
+    .filter((i) => i.repo_id === repoId && i.stage !== "closed" && i.pinned)
+    .sort((a, b) => (a.pin_order ?? 0) - (b.pin_order ?? 0));
+}
+
+function sortedUnpinned(repoId: string): PipelineItem[] {
+  const order: Record<string, number> = { idle: 0, unread: 1, working: 2 };
+  return props.pipelineItems
+    .filter((i) => i.repo_id === repoId && i.stage !== "closed" && !i.pinned)
+    .sort((a, b) => {
+      const ao = order[a.activity || "idle"] ?? 0;
+      const bo = order[b.activity || "idle"] ?? 0;
+      if (ao !== bo) return ao - bo;
+      const aTime = a.activity_changed_at || a.created_at;
+      const bTime = b.activity_changed_at || b.created_at;
+      return bTime.localeCompare(aTime);
+    });
 }
 
 function itemsForRepo(repoId: string): PipelineItem[] {
-  const order: Record<string, number> = { idle: 0, unread: 1, working: 2 };
-  return props.pipelineItems
-    .filter((item) => item.repo_id === repoId && item.stage !== "closed")
-    .sort((a, b) => {
-      const ao = order[(a as any).activity || "idle"] ?? 0;
-      const bo = order[(b as any).activity || "idle"] ?? 0;
-      if (ao !== bo) return ao - bo;
-      const aTime = (a as any).activity_changed_at || a.created_at;
-      const bTime = (b as any).activity_changed_at || b.created_at;
-      return bTime.localeCompare(aTime);
-    });
+  return [...sortedPinned(repoId), ...sortedUnpinned(repoId)];
 }
 
 function itemTitle(item: PipelineItem): string {
@@ -54,6 +64,104 @@ function handleSelectItem(item: PipelineItem) {
   emit("select-repo", item.repo_id);
   emit("select-item", item.id);
 }
+
+function toggleRepo(repoId: string) {
+  if (collapsedRepos.value.has(repoId)) {
+    collapsedRepos.value.delete(repoId);
+    nextTick(() => initSortables(repoId));
+  } else {
+    collapsedRepos.value.add(repoId);
+    destroySortables(repoId);
+  }
+}
+
+function destroySortables(repoId: string) {
+  const instances = sortableInstances.get(repoId);
+  if (instances) {
+    instances.forEach((s) => s.destroy());
+    sortableInstances.delete(repoId);
+  }
+}
+
+/** Read item IDs from DOM order (source of truth after Sortable reorders) */
+function getIdsFromEl(el: HTMLElement): string[] {
+  return Array.from(el.children)
+    .map((child) => (child as HTMLElement).dataset.itemId)
+    .filter(Boolean) as string[];
+}
+
+function initSortables(repoId: string) {
+  destroySortables(repoId);
+
+  const pinnedEl = document.querySelector(`[data-pinned="${repoId}"]`) as HTMLElement | null;
+  const unpinnedEl = document.querySelector(`[data-unpinned="${repoId}"]`) as HTMLElement | null;
+  if (!pinnedEl || !unpinnedEl) return;
+
+  const instances: Sortable[] = [];
+
+  instances.push(Sortable.create(pinnedEl, {
+    group: `repo-${repoId}`,
+    animation: 150,
+    forceFallback: true,
+    fallbackClass: "sortable-fallback",
+    ghostClass: "sortable-ghost",
+    chosenClass: "sortable-chosen",
+    onStart() { isDragging.value = true; },
+    onEnd() {
+      isDragging.value = false;
+      const ids = getIdsFromEl(pinnedEl);
+      // Pin any newly arrived items
+      for (let i = 0; i < ids.length; i++) {
+        const item = props.pipelineItems.find((it) => it.id === ids[i]);
+        if (item && !item.pinned) {
+          emit("pin-item", ids[i], i);
+        }
+      }
+      // Reorder all pinned
+      if (ids.length > 0) {
+        emit("reorder-pinned", repoId, ids);
+      }
+    },
+  }));
+
+  instances.push(Sortable.create(unpinnedEl, {
+    group: `repo-${repoId}`,
+    animation: 150,
+    forceFallback: true,
+    fallbackClass: "sortable-fallback",
+    ghostClass: "sortable-ghost",
+    chosenClass: "sortable-chosen",
+    sort: false,
+    onStart() { isDragging.value = true; },
+    onEnd() { isDragging.value = false; },
+    onAdd(evt) {
+      const itemId = (evt.item as HTMLElement).dataset.itemId;
+      if (itemId) {
+        const item = props.pipelineItems.find((i) => i.id === itemId);
+        if (item?.pinned) {
+          emit("unpin-item", itemId);
+        }
+      }
+    },
+  }));
+
+  sortableInstances.set(repoId, instances);
+}
+
+// Init sortables when repos/items change
+watch(
+  () => [props.repos, props.pipelineItems],
+  () => {
+    nextTick(() => {
+      for (const repo of props.repos) {
+        if (!collapsedRepos.value.has(repo.id)) {
+          initSortables(repo.id);
+        }
+      }
+    });
+  },
+  { immediate: true, deep: true }
+);
 </script>
 
 <template>
@@ -85,21 +193,51 @@ function handleSelectItem(item: PipelineItem) {
         </div>
 
         <div v-if="!collapsedRepos.has(repo.id)" class="pipeline-list">
-          <div
-            v-for="item in itemsForRepo(repo.id)"
-            :key="item.id"
-            class="pipeline-item"
-            :class="{ selected: selectedItemId === item.id }"
-            @click="handleSelectItem(item)"
-          >
-            <span
-              class="item-title"
-              :style="{
-                fontWeight: (item as any).activity === 'unread' ? 'bold' : 'normal',
-                fontStyle: (item as any).activity === 'working' ? 'italic' : 'normal',
-              }"
-            >{{ itemTitle(item) }}</span>
+          <!-- Pinned tasks -->
+          <div :data-pinned="repo.id" class="pinned-zone">
+            <div
+              v-for="item in sortedPinned(repo.id)"
+              :key="item.id"
+              :data-item-id="item.id"
+              class="pipeline-item"
+              :class="{ selected: selectedItemId === item.id }"
+              @click="handleSelectItem(item)"
+            >
+              <span
+                class="item-title"
+                :style="{
+                  fontWeight: item.activity === 'unread' ? 'bold' : 'normal',
+                  fontStyle: item.activity === 'working' ? 'italic' : 'normal',
+                }"
+              >{{ itemTitle(item) }}</span>
+            </div>
           </div>
+
+          <!-- Divider -->
+          <div v-show="itemsForRepo(repo.id).length > 0" class="pin-divider">
+            <div class="pin-divider-line"></div>
+          </div>
+
+          <!-- Unpinned tasks -->
+          <div :data-unpinned="repo.id" class="unpinned-zone">
+            <div
+              v-for="item in sortedUnpinned(repo.id)"
+              :key="item.id"
+              :data-item-id="item.id"
+              class="pipeline-item"
+              :class="{ selected: selectedItemId === item.id }"
+              @click="handleSelectItem(item)"
+            >
+              <span
+                class="item-title"
+                :style="{
+                  fontWeight: item.activity === 'unread' ? 'bold' : 'normal',
+                  fontStyle: item.activity === 'working' ? 'italic' : 'normal',
+                }"
+              >{{ itemTitle(item) }}</span>
+            </div>
+          </div>
+
           <div v-if="itemsForRepo(repo.id).length === 0" class="no-items">
             No tasks
           </div>
@@ -128,48 +266,6 @@ function handleSelectItem(item: PipelineItem) {
   flex-direction: column;
   height: 100%;
   user-select: none;
-}
-
-.sidebar-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 12px 14px;
-  border-bottom: 1px solid #333;
-  -webkit-app-region: drag;
-}
-
-.app-title {
-  font-size: 14px;
-  font-weight: 600;
-  color: #f0f0f0;
-  letter-spacing: 0.5px;
-}
-
-.flipped {
-  display: inline-block;
-  transform: scaleX(-1);
-}
-
-.btn-icon {
-  -webkit-app-region: no-drag;
-  background: none;
-  border: 1px solid #444;
-  color: #aaa;
-  width: 24px;
-  height: 24px;
-  border-radius: 4px;
-  cursor: pointer;
-  font-size: 16px;
-  line-height: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.btn-icon:hover {
-  background: #333;
-  color: #e0e0e0;
 }
 
 .sidebar-content {
@@ -231,6 +327,27 @@ function handleSelectItem(item: PipelineItem) {
   font-size: 11px;
 }
 
+.btn-icon {
+  -webkit-app-region: no-drag;
+  background: none;
+  border: 1px solid #444;
+  color: #aaa;
+  width: 24px;
+  height: 24px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.btn-icon:hover {
+  background: #333;
+  color: #e0e0e0;
+}
+
 .btn-add-task {
   margin-left: auto;
   font-size: 14px;
@@ -251,9 +368,11 @@ function handleSelectItem(item: PipelineItem) {
   align-items: center;
   gap: 8px;
   padding: 4px 14px;
-  cursor: pointer;
+  cursor: grab;
   border-radius: 4px;
   margin: 1px 6px;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .pipeline-item:hover {
@@ -272,6 +391,7 @@ function handleSelectItem(item: PipelineItem) {
   text-overflow: ellipsis;
   white-space: nowrap;
   flex: 1;
+  pointer-events: none;
 }
 
 .no-items {
@@ -307,5 +427,44 @@ function handleSelectItem(item: PipelineItem) {
 .btn-prefs {
   flex-shrink: 0;
   font-size: 14px;
+}
+
+.pinned-zone {
+  min-height: 0;
+}
+
+.pinned-zone:not(:empty) {
+  min-height: 28px;
+}
+
+.pin-divider {
+  padding: 6px 6px;
+}
+
+.pin-divider-line {
+  height: 1px;
+  background: #555;
+}
+
+.unpinned-zone {
+  min-height: 8px;
+}
+
+/* Sortable.js classes */
+.sortable-ghost {
+  opacity: 0.4;
+  background: #0066cc22;
+  border-radius: 4px;
+}
+
+.sortable-chosen {
+  cursor: grabbing;
+}
+
+.sortable-fallback {
+  opacity: 0.9;
+  background: #1e1e1e;
+  border-radius: 4px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
 }
 </style>

@@ -48,7 +48,7 @@ export async function listPipelineItems(
 
 export async function insertPipelineItem(
   db: DbHandle,
-  item: Omit<PipelineItem, "created_at" | "updated_at" | "activity_changed_at"> & { activity?: PipelineItem["activity"] }
+  item: Omit<PipelineItem, "created_at" | "updated_at" | "activity_changed_at" | "pinned" | "pin_order"> & { activity?: PipelineItem["activity"] }
 ): Promise<void> {
   await db.execute(
     `INSERT INTO pipeline_item
@@ -103,6 +103,46 @@ export async function updatePipelineItemActivity(
   await db.execute(
     "UPDATE pipeline_item SET activity = ?, activity_changed_at = datetime('now'), updated_at = datetime('now') WHERE id = ?",
     [activity, id]
+  );
+}
+
+export async function pinPipelineItem(
+  db: DbHandle,
+  id: string,
+  pinOrder: number
+): Promise<void> {
+  await db.execute(
+    "UPDATE pipeline_item SET pinned = 1, pin_order = ?, updated_at = datetime('now') WHERE id = ?",
+    [pinOrder, id]
+  );
+}
+
+export async function unpinPipelineItem(
+  db: DbHandle,
+  id: string
+): Promise<void> {
+  await db.execute(
+    "UPDATE pipeline_item SET pinned = 0, pin_order = NULL, updated_at = datetime('now') WHERE id = ?",
+    [id]
+  );
+}
+
+export async function reorderPinnedItems(
+  db: DbHandle,
+  _repoId: string,
+  orderedIds: string[]
+): Promise<void> {
+  if (orderedIds.length === 0) return;
+  const cases = orderedIds.map((_, i) => `WHEN ? THEN ?`).join(" ");
+  const placeholders = orderedIds.map(() => "?").join(", ");
+  const bindValues: unknown[] = [];
+  for (let i = 0; i < orderedIds.length; i++) {
+    bindValues.push(orderedIds[i], i);
+  }
+  bindValues.push(...orderedIds);
+  await db.execute(
+    `UPDATE pipeline_item SET pin_order = CASE id ${cases} END, updated_at = datetime('now') WHERE id IN (${placeholders})`,
+    bindValues
   );
 }
 

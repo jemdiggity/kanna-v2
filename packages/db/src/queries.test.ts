@@ -10,6 +10,9 @@ import {
   updatePipelineItemPR,
   getSetting,
   setSetting,
+  pinPipelineItem,
+  unpinPipelineItem,
+  reorderPinnedItems,
   type DbHandle,
 } from "./queries.js";
 import type { Repo, PipelineItem, Setting } from "./schema.js";
@@ -50,7 +53,7 @@ function createMockDb(): DbHandle & {
         const [id] = bindValues as string[];
         tables.repo = tables.repo.filter((r) => r.id !== id);
       } else if (q.startsWith("INSERT INTO PIPELINE_ITEM")) {
-        const [id, repo_id, issue_number, issue_title, prompt, stage, pr_number, pr_url, branch, agent_type] =
+        const [id, repo_id, issue_number, issue_title, prompt, stage, pr_number, pr_url, branch, agent_type, port_offset, activity] =
           bindValues as unknown[];
         tables.pipeline_item.push({
           id: id as string,
@@ -63,9 +66,14 @@ function createMockDb(): DbHandle & {
           pr_url: (pr_url as string | null),
           branch: (branch as string | null),
           agent_type: (agent_type as string | null),
+          port_offset: (port_offset as number | null) ?? null,
+          activity: (activity as string) || "idle",
+          activity_changed_at: new Date().toISOString(),
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
-        });
+          pinned: 0,
+          pin_order: null,
+        } as PipelineItem);
       } else if (q.startsWith("UPDATE PIPELINE_ITEM SET STAGE")) {
         const [newStage, id] = bindValues as string[];
         const item = tables.pipeline_item.find((p) => p.id === id);
@@ -80,6 +88,37 @@ function createMockDb(): DbHandle & {
           item.pr_number = prNumber as number;
           item.pr_url = prUrl as string;
           item.updated_at = new Date().toISOString();
+        }
+      } else if (q.startsWith("UPDATE PIPELINE_ITEM SET PINNED = 1")) {
+        const [pinOrder, id] = bindValues as unknown[];
+        const item = tables.pipeline_item.find((p) => p.id === id);
+        if (item) {
+          (item as any).pinned = 1;
+          (item as any).pin_order = pinOrder as number;
+          item.updated_at = new Date().toISOString();
+        }
+      } else if (q.startsWith("UPDATE PIPELINE_ITEM SET PINNED = 0")) {
+        const [id] = bindValues as string[];
+        const item = tables.pipeline_item.find((p) => p.id === id);
+        if (item) {
+          (item as any).pinned = 0;
+          (item as any).pin_order = null;
+          item.updated_at = new Date().toISOString();
+        }
+      } else if (q.startsWith("UPDATE PIPELINE_ITEM SET PIN_ORDER = CASE")) {
+        // Bulk reorder: bind layout is [id0, 0, id1, 1, ..., id0, id1, ...]
+        // First 2n values are CASE WHEN pairs (id, order), last n are WHERE IN ids
+        if (bindValues) {
+          const n = Math.round(bindValues.length / 3);
+          for (let i = 0; i < n; i++) {
+            const id = bindValues[i * 2] as string;
+            const order = bindValues[i * 2 + 1] as number;
+            const item = tables.pipeline_item.find((p) => p.id === id);
+            if (item) {
+              (item as any).pin_order = order;
+              item.updated_at = new Date().toISOString();
+            }
+          }
         }
       } else if (q.startsWith("INSERT INTO SETTINGS")) {
         const [key, value] = bindValues as string[];
@@ -266,5 +305,53 @@ describe("settings queries", () => {
     await setSetting(db, "ideCommand", "cursor");
     await setSetting(db, "ideCommand", "code");
     expect(await getSetting(db, "ideCommand")).toBe("code");
+  });
+});
+
+describe("pin queries", () => {
+  let db: ReturnType<typeof createMockDb>;
+
+  beforeEach(async () => {
+    db = createMockDb();
+    await insertPipelineItem(db, {
+      id: "pi1", repo_id: "r1", issue_number: null, issue_title: null,
+      prompt: "task 1", stage: "in_progress", pr_number: null, pr_url: null,
+      branch: null, agent_type: null,
+    });
+    await insertPipelineItem(db, {
+      id: "pi2", repo_id: "r1", issue_number: null, issue_title: null,
+      prompt: "task 2", stage: "in_progress", pr_number: null, pr_url: null,
+      branch: null, agent_type: null,
+    });
+    await insertPipelineItem(db, {
+      id: "pi3", repo_id: "r1", issue_number: null, issue_title: null,
+      prompt: "task 3", stage: "in_progress", pr_number: null, pr_url: null,
+      branch: null, agent_type: null,
+    });
+  });
+
+  it("pinPipelineItem sets pinned and pin_order", async () => {
+    await pinPipelineItem(db, "pi1", 0);
+    const item = db.tables.pipeline_item.find((p) => p.id === "pi1");
+    expect((item as any).pinned).toBe(1);
+    expect((item as any).pin_order).toBe(0);
+  });
+
+  it("unpinPipelineItem clears pinned and pin_order", async () => {
+    await pinPipelineItem(db, "pi1", 0);
+    await unpinPipelineItem(db, "pi1");
+    const item = db.tables.pipeline_item.find((p) => p.id === "pi1");
+    expect((item as any).pinned).toBe(0);
+    expect((item as any).pin_order).toBeNull();
+  });
+
+  it("reorderPinnedItems updates pin_order by array index", async () => {
+    await pinPipelineItem(db, "pi1", 0);
+    await pinPipelineItem(db, "pi2", 1);
+    await pinPipelineItem(db, "pi3", 2);
+    await reorderPinnedItems(db, "r1", ["pi3", "pi1", "pi2"]);
+    expect((db.tables.pipeline_item.find((p) => p.id === "pi3") as any).pin_order).toBe(0);
+    expect((db.tables.pipeline_item.find((p) => p.id === "pi1") as any).pin_order).toBe(1);
+    expect((db.tables.pipeline_item.find((p) => p.id === "pi2") as any).pin_order).toBe(2);
   });
 });

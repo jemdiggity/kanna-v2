@@ -81,6 +81,21 @@ Closed tasks are cleaned up on app startup. Tasks closed longer than `gcAfterDay
 
 Sorted in sidebar: working > unread > idle, then by most recent.
 
+## Pinned Tasks
+
+Tasks can be pinned to the top of their repo's task list by dragging them above the pin divider.
+
+| Behavior | Description |
+|----------|-------------|
+| Pin | Drag a task above the divider to pin it |
+| Unpin | Drag a pinned task below the divider to unpin it |
+| Reorder | Drag pinned tasks to reorder among themselves |
+| Divider visibility | Always visible when pinned tasks exist; appears during drag when none exist |
+| Scope | Per-repo — each repo has its own pinned tasks |
+| Closed tasks | Disappear from sidebar regardless of pin state |
+
+Pinned tasks are sorted by manual order. Unpinned tasks are sorted by activity state (working > unread > idle), then by most recent timestamp.
+
 ## Keyboard Shortcuts
 
 | Shortcut | Action |
