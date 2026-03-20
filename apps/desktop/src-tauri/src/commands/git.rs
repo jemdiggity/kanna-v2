@@ -192,6 +192,37 @@ pub fn git_diff_range(repo_path: String, from: String, to: String) -> Result<Str
     String::from_utf8(output).map_err(|e| e.to_string())
 }
 
+#[derive(Serialize)]
+pub struct AppGitInfo {
+    pub branch: String,
+    pub commit_hash: String,
+    pub version: String,
+}
+
+#[tauri::command]
+pub fn git_app_info() -> Result<AppGitInfo, String> {
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let repo = Repository::discover(&cwd).map_err(|e| e.to_string())?;
+
+    let head = repo.head().map_err(|e| e.to_string())?;
+    let branch = head.shorthand().unwrap_or("unknown").to_string();
+    let oid = head.target().ok_or("HEAD has no target".to_string())?;
+    let hash = &oid.to_string()[..7];
+
+    // Read version from VERSION file at repo workdir root
+    let version = repo
+        .workdir()
+        .and_then(|d| std::fs::read_to_string(d.join("VERSION")).ok())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    Ok(AppGitInfo {
+        branch,
+        commit_hash: hash.to_string(),
+        version,
+    })
+}
+
 // --- CLI-based commands (use system git for auth) ---
 
 #[tauri::command]
