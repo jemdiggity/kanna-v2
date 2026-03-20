@@ -41,7 +41,7 @@ interface ShortcutDef {
  */
 export const shortcuts: ShortcutDef[] = [
   // Pipeline
-  { action: "newTask",    label: "New Task",          group: "Pipeline",   key: "n",                            meta: true, display: "⌘N" },
+  { action: "newTask",    label: "New Task",          group: "Pipeline",   key: ["N", "n"],                     meta: true, shift: true,  display: "⇧⌘N" },
   { action: "openFile",   label: "File Picker",        group: "Pipeline",   key: "p",                            meta: true,               display: "⌘P" },
   { action: "openInIDE",  label: "Open in IDE",        group: "Pipeline",   key: "o",                            meta: true,               display: "⌘O" },
   { action: "makePR",     label: "Make PR",           group: "Pipeline",   key: "s",                            meta: true, display: "⌘S" },
