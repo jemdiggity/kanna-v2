@@ -180,9 +180,8 @@ onUnmounted(() => {
       <div class="preview-header">
         <span class="file-path">{{ filePath }}</span>
         <div class="header-actions">
-          <span v-if="isMarkdownFile" class="mode-badge" @click="renderMarkdown = !renderMarkdown">
+          <span v-if="isMarkdownFile" class="mode-badge" @click="renderMarkdown = !renderMarkdown" title="space">
             {{ renderMarkdown ? "Rendered" : "Raw" }}
-            <span class="mode-hint">␣</span>
           </span>
           <button class="btn-open" @click="openInIDE" title="Open in IDE (⌘O)">Open in IDE</button>
         </div>
@@ -280,12 +279,6 @@ onUnmounted(() => {
 .mode-badge:hover {
   background: #3a3a3a;
   color: #ccc;
-}
-
-.mode-hint {
-  color: #555;
-  margin-left: 4px;
-  font-size: 10px;
 }
 
 /* Rendered markdown styles */
