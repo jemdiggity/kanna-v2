@@ -469,6 +469,17 @@ onMounted(async () => {
       }
     }
 
+    // Set window title for non-main branches
+    if (isTauri) {
+      try {
+        const info = await invoke<{ branch: string; commit_hash: string; version: string }>("git_app_info");
+        if (info.branch !== "main" && info.branch !== "master") {
+          const { getCurrentWindow } = await import("@tauri-apps/api/window");
+          await getCurrentWindow().setTitle(`Kanna — ${info.branch} (${info.version} @ ${info.commit_hash})`);
+        }
+      } catch {}
+    }
+
     // Listen for hook events from Claude (via daemon broadcast)
     listen("hook_event", (event: any) => {
       const payload = event.payload || event;

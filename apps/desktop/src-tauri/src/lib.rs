@@ -252,6 +252,7 @@ pub fn run() {
             commands::git::git_push,
             commands::git::git_worktree_add,
             commands::git::git_worktree_remove,
+            commands::git::git_app_info,
             // FS commands
             commands::fs::file_exists,
             commands::fs::list_files,
