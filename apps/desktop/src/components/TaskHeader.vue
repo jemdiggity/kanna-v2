@@ -1,14 +1,25 @@
 <script setup lang="ts">
+import { computed } from "vue";
 import type { PipelineItem } from "@kanna/db";
 import StageBadge from "./StageBadge.vue";
 
-defineProps<{
+const props = defineProps<{
   item: PipelineItem;
 }>();
 
 function title(item: PipelineItem): string {
   return item.display_name || item.issue_title || item.prompt || "Untitled";
 }
+
+const ports = computed<number[]>(() => {
+  if (!props.item.port_env) return [];
+  try {
+    const env = JSON.parse(props.item.port_env) as Record<string, string | number>;
+    return Object.values(env).map(Number).filter((n) => !isNaN(n));
+  } catch {
+    return [];
+  }
+});
 </script>
 
 <template>
@@ -20,6 +31,9 @@ function title(item: PipelineItem): string {
     <div class="header-meta">
       <span v-if="item.branch" class="meta-item branch">
         <span class="meta-label">branch:</span> {{ item.branch }}
+      </span>
+      <span v-for="port in ports" :key="port" class="meta-item port">
+        :{{ port }}
       </span>
       <a
         v-if="item.issue_number"
@@ -86,6 +100,15 @@ function title(item: PipelineItem): string {
   background: #2a2a2a;
   padding: 1px 6px;
   border-radius: 3px;
+}
+
+.port {
+  font-family: "JetBrains Mono", "SF Mono", Menlo, monospace;
+  font-size: 11px;
+  background: #2a2a2a;
+  padding: 1px 6px;
+  border-radius: 3px;
+  color: #8a8;
 }
 
 .link {
