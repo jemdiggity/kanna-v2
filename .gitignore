@@ -11,3 +11,4 @@ target/
 .kanna-worktrees/
 .playwright-mcp/
 VERSION
+tauri.conf.local.json

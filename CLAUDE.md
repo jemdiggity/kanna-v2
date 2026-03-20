@@ -17,15 +17,36 @@ Use `bun` for all package management and script execution. Not pnpm, not npm.
 - `crates/daemon/` — PTY daemon (Unix socket, session persistence)
 - `crates/tauri-plugin-delta-updater/` — self-updater plugin (stub)
 
-## Key Commands
+## Development Workflow
+
+We develop Kanna **in and on** Kanna — Claude Code agents run from one of three contexts:
+
+1. **Main branch** — the stable Kanna instance at the repo root, used to manage tasks and spawn worktrees
+2. **Release build** — installed to `/Applications/Kanna.app`, used when the main branch is being modified
+3. **Dev worktree** — a feature branch checked out at `{repoPath}/.kanna-worktrees/task-{uuid}`, running its own isolated dev server
+
+### Worktree isolation
+
+Worktrees are fully isolated from the main branch instance:
+
+- **Separate Vite port** — main uses `localhost:1420`, worktrees get a unique port via `KANNA_DEV_PORT` env var (set from `.kanna/config.json` `ports` field). `dev.sh` writes `tauri.conf.local.json` with the port override and passes `--config` to Tauri — the committed `tauri.conf.json` is never modified.
+- **Separate daemon** — worktrees use `{worktree}/.kanna-daemon/` instead of `~/Library/Application Support/Kanna/`
+- **Separate database** — each instance uses its own SQLite DB
+- **Separate tmux session** — `dev.sh` names the session `kanna-{worktree-dir}` instead of `kanna`
+
+This means the main Kanna app and a dev worktree can run simultaneously without port or data conflicts.
+
+### Launching the dev server
+
+Always use `dev.sh` inside the worktree — it auto-detects the worktree context, sets `KANNA_WORKTREE=1`, forwards all `KANNA_*` env vars, and runs in a background tmux session.
 
 ```bash
-# Development (from repo root)
-bun dev                      # builds daemon + starts Tauri app
-./scripts/dev.sh             # same, but in a tmux session
+# Development (from repo root or worktree root)
+./scripts/dev.sh             # start in tmux (auto-detects worktree)
 ./scripts/dev.sh stop        # stop the tmux session
 ./scripts/dev.sh restart     # stop + start
 ./scripts/dev.sh log         # print recent tmux output
+./scripts/dev.sh start -a    # start and attach to tmux session
 
 # Build
 cd apps/desktop && bun tauri build
@@ -44,6 +65,10 @@ cd apps/desktop/src-tauri && cargo test --test agent_cli_integration -- --ignore
 # Terminal 1: KANNA_DB_NAME=kanna-test.db bun tauri dev
 # Terminal 2: cd apps/desktop && bun test:e2e
 ```
+
+### First build in a worktree
+
+The first `bun dev` in a fresh worktree compiles ~523 Rust crates (the daemon builds quickly, but the full Tauri app takes several minutes). Subsequent builds are incremental.
 
 ## Architecture
 

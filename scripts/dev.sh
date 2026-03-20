@@ -26,10 +26,26 @@ start() {
   tmux new-session -d -s "$SESSION" -c "$ROOT"
   # Forward all KANNA_* env vars into the tmux session
   EXPORTS="$(env | grep '^KANNA_' | sed 's/^/export /' | tr '\n' ' ')"
+
+  # In worktrees, write a local Tauri config override with the isolated port
+  # (must exist before tauri dev parses --config)
+  DEV_CMD="bun dev"
+  LOCAL_CONF="$ROOT/apps/desktop/src-tauri/tauri.conf.local.json"
+  if [ -n "$KANNA_WORKTREE" ] && [ -n "$KANNA_DEV_PORT" ]; then
+    cat > "$LOCAL_CONF" <<LOCALEOF
+{
+  "build": {
+    "devUrl": "http://localhost:$KANNA_DEV_PORT"
+  }
+}
+LOCALEOF
+    DEV_CMD="bun dev -- --config $LOCAL_CONF"
+  fi
+
   if [ -n "$EXPORTS" ]; then
-    tmux send-keys -t "$SESSION" "$EXPORTS&& bun dev" Enter
+    tmux send-keys -t "$SESSION" "$EXPORTS&& $DEV_CMD" Enter
   else
-    tmux send-keys -t "$SESSION" "bun dev" Enter
+    tmux send-keys -t "$SESSION" "$DEV_CMD" Enter
   fi
   echo "Started tmux session '$SESSION'. Attach with: tmux attach -t $SESSION"
 }

@@ -45,9 +45,4 @@ if [ -f "$TAURI_CONF" ]; then
   if [ "$CURRENT" != "$SEMVER" ]; then
     sed -i '' "s/\"version\": \"[^\"]*\"/\"version\": \"$SEMVER\"/" "$TAURI_CONF"
   fi
-
-  # Sync devUrl port from env var — only in worktrees (main app uses 1420)
-  if [ -n "$KANNA_DEV_PORT" ] && [ -n "$KANNA_WORKTREE" ]; then
-    sed -i '' "s|http://localhost:[0-9]*|http://localhost:$KANNA_DEV_PORT|" "$TAURI_CONF"
-  fi
 fi
