@@ -36,6 +36,15 @@ fn app_support_dir() -> PathBuf {
         .join("Kanna")
 }
 
+fn socket_path(dir: &PathBuf) -> PathBuf {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    dir.hash(&mut hasher);
+    let hash = hasher.finish() as u32;
+    PathBuf::from(format!("/tmp/kanna-{:08x}.sock", hash))
+}
+
 #[tokio::main]
 async fn main() {
     let dir = app_support_dir();
@@ -53,7 +62,7 @@ async fn main() {
         .start();
 
     let pid_path = dir.join("daemon.pid");
-    let socket_path = dir.join("daemon.sock");
+    let socket_path = socket_path(&dir);
 
     // Attempt handoff from old daemon (if running)
     let adopted = attempt_handoff(&pid_path, &socket_path).await;

@@ -28,10 +28,23 @@ fn worktree_root() -> Option<PathBuf> {
     })
 }
 
-pub fn daemon_socket_path() -> PathBuf {
+fn short_socket_path(dir: &PathBuf) -> PathBuf {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    dir.hash(&mut hasher);
+    let hash = hasher.finish() as u32;
+    PathBuf::from(format!("/tmp/kanna-{:08x}.sock", hash))
+}
+
+/// Directory where daemon stores PID file and logs.
+pub fn daemon_data_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("KANNA_DAEMON_DIR") {
+        return PathBuf::from(dir);
+    }
     if std::env::var("KANNA_WORKTREE").is_ok() {
         if let Some(root) = worktree_root() {
-            return root.join(".kanna-daemon").join("daemon.sock");
+            return root.join(".kanna-daemon");
         }
     }
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
@@ -39,7 +52,24 @@ pub fn daemon_socket_path() -> PathBuf {
         .join("Library")
         .join("Application Support")
         .join("Kanna")
-        .join("daemon.sock")
+}
+
+pub fn daemon_socket_path() -> PathBuf {
+    if let Ok(dir) = std::env::var("KANNA_DAEMON_DIR") {
+        return short_socket_path(&PathBuf::from(dir));
+    }
+    if std::env::var("KANNA_WORKTREE").is_ok() {
+        if let Some(root) = worktree_root() {
+            let daemon_dir = root.join(".kanna-daemon");
+            return short_socket_path(&daemon_dir);
+        }
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    let dir = PathBuf::from(home)
+        .join("Library")
+        .join("Application Support")
+        .join("Kanna");
+    short_socket_path(&dir)
 }
 
 /// Try to connect to the daemon. Returns None if not available.
@@ -55,21 +85,7 @@ async fn ensure_daemon_running() {
 
     // Look for the daemon binary in common locations
     let daemon_candidates = [
-        // Dev: daemon crate's own target directory
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| {
-                // current exe is at apps/desktop/src-tauri/target/debug/kanna-desktop
-                // daemon is at crates/daemon/target/debug/kanna-daemon
-                p.parent() // target/debug/
-                    .and_then(|d| d.parent()) // target/
-                    .and_then(|d| d.parent()) // src-tauri/
-                    .and_then(|d| d.parent()) // desktop/
-                    .and_then(|d| d.parent()) // apps/
-                    .and_then(|d| d.parent()) // kanna-tauri/
-                    .map(|root| root.join("crates/daemon/target/debug/kanna-daemon"))
-            }),
-        // Same directory as the app binary
+        // Same directory as the app binary (covers .build/debug/ from cargo config)
         std::env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(|d| d.join("kanna-daemon"))),
@@ -115,7 +131,7 @@ async fn ensure_daemon_running() {
     {
         Ok(child) => {
             let expected_pid = child.id().to_string();
-            let pid_path = daemon_socket_path().parent().unwrap().join("daemon.pid");
+            let pid_path = daemon_data_dir().join("daemon.pid");
 
             // Wait for the NEW daemon to be ready:
             // PID file must match our child AND socket must be connectable.
