@@ -24,7 +24,7 @@
         "@xterm/addon-web-links": "0.13.0-beta.100",
         "@xterm/xterm": "6.1.0-beta.100",
         "markdown-it": "^14.1.0",
-        "markdown-it-strikethrough-alt": "*",
+        "markdown-it-strikethrough-alt": "^1.0.0",
         "markdown-it-task-lists": "^2.1.1",
         "shiki": "^4.0.2",
         "sortablejs": "^1.15.7",
