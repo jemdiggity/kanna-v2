@@ -1,0 +1,13 @@
+{
+  "planPath": "docs/superpowers/plans/2026-03-20-pipeline-simplification.md",
+  "tasks": [
+    {"id": 9, "subject": "Task 1: Update pipeline types and transitions", "status": "pending"},
+    {"id": 12, "subject": "Task 2: Delete dead code (PR workflow, GitHub client)", "status": "pending", "blockedBy": [9]},
+    {"id": 13, "subject": "Task 3: Update DB migration and stage refs in App.vue", "status": "pending", "blockedBy": [12]},
+    {"id": 10, "subject": "Task 4: Add startPrAgent and wire Cmd+S", "status": "pending", "blockedBy": [13]},
+    {"id": 11, "subject": "Task 5: Update UI components", "status": "pending", "blockedBy": [13]},
+    {"id": 14, "subject": "Task 6: Update remaining references", "status": "pending", "blockedBy": [11]},
+    {"id": 15, "subject": "Task 7: Verify and clean up", "status": "pending", "blockedBy": [14]}
+  ],
+  "lastUpdated": "2026-03-20T00:00:00Z"
+}
