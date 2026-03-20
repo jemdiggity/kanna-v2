@@ -59,12 +59,17 @@ export function usePipeline(db: Ref<DbHandle | null>) {
     const worktreeAddCwd = opts?.baseBranch
       ? `${repoPath}/.kanna-worktrees/${opts.baseBranch}`
       : repoPath;
-    await invoke("git_worktree_add", {
-      repoPath: worktreeAddCwd,
-      branch,
-      path: worktreePath,
-      startPoint: opts?.baseBranch ? "HEAD" : null,
-    });
+    try {
+      await invoke("git_worktree_add", {
+        repoPath: worktreeAddCwd,
+        branch,
+        path: worktreePath,
+        startPoint: opts?.baseBranch ? "HEAD" : null,
+      });
+    } catch (e) {
+      console.error("[createItem] git_worktree_add failed:", e);
+      throw e;
+    }
 
     // 4. Compute port env vars from config + offset
     const portEnv: Record<string, string> = {};
@@ -75,23 +80,28 @@ export function usePipeline(db: Ref<DbHandle | null>) {
     }
 
     // 5. Insert pipeline item to DB (setup runs in PTY before agent starts)
-    await insertPipelineItem(db.value, {
-      id,
-      repo_id: repoId,
-      issue_number: null,
-      issue_title: null,
-      prompt,
-      stage: opts?.stage || "in_progress",
-      pr_number: null,
-      pr_url: null,
-      branch,
-      agent_type: agentType,
-      port_offset: portOffset,
-      port_env: Object.keys(portEnv).length > 0 ? JSON.stringify(portEnv) : null,
-      activity: "working",
-    });
+    try {
+      await insertPipelineItem(db.value, {
+        id,
+        repo_id: repoId,
+        issue_number: null,
+        issue_title: null,
+        prompt,
+        stage: opts?.stage || "in_progress",
+        pr_number: null,
+        pr_url: null,
+        branch,
+        agent_type: agentType,
+        port_offset: portOffset,
+        port_env: Object.keys(portEnv).length > 0 ? JSON.stringify(portEnv) : null,
+        activity: "working",
+      });
+    } catch (e) {
+      console.error("[createItem] DB insert failed:", e);
+      throw e;
+    }
 
-    // 4. Spawn agent based on type
+    // 6. Spawn agent based on type
     // PTY mode: don't spawn here — TerminalView will spawn on mount
     // with the correct terminal dimensions from xterm.js.
     // SDK mode: spawn immediately since no terminal sizing needed.
@@ -105,7 +115,7 @@ export function usePipeline(db: Ref<DbHandle | null>) {
       });
     }
 
-    // 5. Refresh pipeline items and select the new one
+    // 7. Refresh pipeline items and select the new one
     await loadItems(repoId);
     selectedItemId.value = id;
   }
@@ -151,7 +161,7 @@ export function usePipeline(db: Ref<DbHandle | null>) {
       if (item.port_env) {
         try {
           Object.assign(env, JSON.parse(item.port_env));
-        } catch {}
+        } catch (e) { console.error("[spawnPty] failed to parse port_env:", e); }
       }
       // Setup scripts (read from config — only needed at spawn time)
       try {
@@ -165,7 +175,7 @@ export function usePipeline(db: Ref<DbHandle | null>) {
             if (repoConfig.setup?.length) setupCmds = repoConfig.setup;
           }
         }
-      } catch {}
+      } catch (e) { console.error("[spawnPty] failed to read setup config:", e); }
     }
 
     // Let the worktree know it's a worktree — daemon auto-uses {cwd}/.kanna-daemon
