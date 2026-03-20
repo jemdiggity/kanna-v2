@@ -2,6 +2,7 @@ import { ref, onUnmounted } from "vue"
 import { Terminal } from "@xterm/xterm"
 import { FitAddon } from "@xterm/addon-fit"
 import { WebLinksAddon } from "@xterm/addon-web-links"
+import { ImageAddon } from "@xterm/addon-image"
 import { invoke } from "../invoke"
 import { listen } from "../listen"
 import { isAppShortcut } from "./useKeyboardShortcuts"
@@ -29,6 +30,7 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions) {
     })
     term.loadAddon(fitAddon)
     term.loadAddon(new WebLinksAddon())
+    term.loadAddon(new ImageAddon())
     term.open(container)
 
     // Push kitty keyboard mode so Shift+Enter sends CSI 13;2 u

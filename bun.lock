@@ -20,11 +20,12 @@
         "@tauri-apps/plugin-shell": "^2",
         "@tauri-apps/plugin-sql": "^2.3.2",
         "@xterm/addon-fit": "0.12.0-beta.100",
+        "@xterm/addon-image": "0.9.0-beta.100",
         "@xterm/addon-serialize": "0.15.0-beta.100",
         "@xterm/addon-web-links": "0.13.0-beta.100",
         "@xterm/xterm": "6.1.0-beta.100",
         "markdown-it": "^14.1.0",
-        "markdown-it-strikethrough-alt": "*",
+        "markdown-it-strikethrough-alt": "^1.0.0",
         "markdown-it-task-lists": "^2.1.1",
         "shiki": "^4.0.2",
         "sortablejs": "^1.15.7",
@@ -312,6 +313,8 @@
     "@vue/shared": ["@vue/shared@3.5.30", "", {}, "sha512-YXgQ7JjaO18NeK2K9VTbDHaFy62WrObMa6XERNfNOkAhD1F1oDSf3ZJ7K6GqabZ0BvSDHajp8qfS5Sa2I9n8uQ=="],
 
     "@xterm/addon-fit": ["@xterm/addon-fit@0.12.0-beta.100", "", { "peerDependencies": { "@xterm/xterm": "^6.1.0-beta.100" } }, "sha512-FjZ5l/cKbOCGVDmL/ikYgnkH/WZlvk6ObLYaNKc7J//L7POYmh31odZNYKIXFz0rH9gzZoJ6GpkXvvEJwWfZtg=="],
+
+    "@xterm/addon-image": ["@xterm/addon-image@0.9.0-beta.100", "", { "peerDependencies": { "@xterm/xterm": "^5.6.0-beta.100" } }, "sha512-Nzfk4ezp12qPyan2XXV3bqvDeapu6UJOdoPJ2LKpDjs3gymS6+v5cuYsMJ8XxAtLGd6HZ1sxIs+iRcHvGk0R0g=="],
 
     "@xterm/addon-serialize": ["@xterm/addon-serialize@0.15.0-beta.100", "", { "peerDependencies": { "@xterm/xterm": "^6.1.0-beta.100" } }, "sha512-FKTTfCdcosQwbfp1xTj2gUhsNsi0gfF2iO0D8oaDgRTooHK4s3Mvg8VzRqbnrBjf8DbHS0Re6IBrx7ZxH/wRMw=="],
 
