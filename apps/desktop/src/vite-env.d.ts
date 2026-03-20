@@ -5,3 +5,6 @@ declare module "*.vue" {
   const component: DefineComponent<{}, {}, any>;
   export default component;
 }
+
+declare module "markdown-it-task-lists";
+declare module "markdown-it-strikethrough-alt";
