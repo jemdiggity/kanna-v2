@@ -107,7 +107,7 @@ export function usePipeline(db: Ref<DbHandle | null>) {
 
   /** Spawn Claude CLI in a PTY via the daemon with hook notifications.
    *  Called by TerminalView on mount so it can pass the actual terminal dimensions. */
-  async function spawnPtySession(sessionId: string, cwd: string, prompt: string, cols = 80, rows = 24) {
+  async function spawnPtySession(sessionId: string, cwd: string, prompt: string, cols = 80, rows = 24, model?: string) {
     // Find kanna-hook binary — must be in PATH (symlink or install)
     let kannaHookPath: string;
     try {
@@ -167,7 +167,8 @@ export function usePipeline(db: Ref<DbHandle | null>) {
     env.KANNA_WORKTREE = "1";
 
     // Build shell command: setup scripts first, then Claude CLI
-    const claudeCmd = `claude --dangerously-skip-permissions --settings '${hookSettings}' '${prompt.replace(/'/g, "'\\''")}'`;
+    const modelFlag = model ? ` --model ${model}` : "";
+    const claudeCmd = `claude --dangerously-skip-permissions${modelFlag} --settings '${hookSettings}' '${prompt.replace(/'/g, "'\\''")}'`;
     const fullCmd = [...setupCmds, claudeCmd].join(" && ");
 
     await invoke("spawn_session", {
@@ -179,6 +180,45 @@ export function usePipeline(db: Ref<DbHandle | null>) {
       cols,
       rows,
     });
+  }
+
+  const PR_AGENT_PROMPT = "Rename the branch to something reasonable based on the work done, push it, and create a GitHub PR using gh.";
+
+  async function startPrAgent(itemId: string) {
+    if (!db.value) return;
+    const item = items.value.find((i) => i.id === itemId);
+    if (!item || item.stage !== "in_progress") return;
+
+    const repo = await getRepo(db.value, item.repo_id);
+    if (!repo) return;
+    const worktreePath = `${repo.path}/.kanna-worktrees/${item.branch}`;
+
+    // 1. Kill existing coding agent session
+    await invoke("kill_session", { sessionId: itemId }).catch(() => {});
+
+    // 2. Run teardown scripts if configured
+    try {
+      const configContent = await invoke<string>("read_text_file", {
+        path: `${repo.path}/.kanna/config.json`,
+      });
+      if (configContent) {
+        const repoConfig = parseRepoConfig(configContent);
+        if (repoConfig.teardown?.length) {
+          for (const cmd of repoConfig.teardown) {
+            await invoke("run_script", { script: cmd, cwd: worktreePath, env: {} });
+          }
+        }
+      }
+    } catch { /* no config or teardown failed — continue */ }
+
+    // 3. Transition to pr stage
+    await updatePipelineItemStage(db.value, itemId, "pr");
+    item.stage = "pr";
+
+    // 4. Spawn PR agent PTY session (reuses same session ID)
+    // Small delay to ensure daemon has cleaned up old session
+    await new Promise((r) => setTimeout(r, 500));
+    await spawnPtySession(itemId, worktreePath, PR_AGENT_PROMPT, 80, 24, "haiku");
   }
 
   async function pinItem(itemId: string, position: number) {
@@ -229,6 +269,7 @@ export function usePipeline(db: Ref<DbHandle | null>) {
     transition,
     createItem,
     spawnPtySession,
+    startPrAgent,
     selectedItem,
     pinItem,
     unpinItem,

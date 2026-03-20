@@ -5,7 +5,7 @@ import { invoke } from "./invoke";
 import { listen } from "./listen";
 import type { DbHandle, PipelineItem } from "@kanna/db";
 import { listPipelineItems, updatePipelineItemStage, updatePipelineItemActivity, getSetting, setSetting } from "@kanna/db";
-import type { Stage } from "@kanna/core";
+import { parseRepoConfig, type Stage } from "@kanna/core";
 import Sidebar from "./components/Sidebar.vue";
 import MainPanel from "./components/MainPanel.vue";
 import NewTaskModal from "./components/NewTaskModal.vue";
@@ -25,7 +25,7 @@ import { useResourceSweeper } from "./composables/useResourceSweeper";
 const db = ref<DbHandle | null>(null);
 
 const { repos, selectedRepoId, refresh: refreshRepos, importRepo } = useRepo(db);
-const { items, selectedItemId, loadItems, transition, createItem, spawnPtySession, selectedItem, pinItem, unpinItem, reorderPinned, renameItem } = usePipeline(db);
+const { items, selectedItemId, loadItems, transition, createItem, spawnPtySession, startPrAgent, selectedItem, pinItem, unpinItem, reorderPinned, renameItem } = usePipeline(db);
 const {
   suspendAfterMinutes,
   killAfterMinutes,
@@ -130,18 +130,34 @@ async function handleCloseTask() {
   const item = selectedItem();
   if (!item || !selectedRepo.value) return;
   try {
-    // Kill the agent PTY session
+    // Kill sessions
     await invoke("kill_session", { sessionId: item.id }).catch(() => {});
-    // Kill the shell session if one exists
     await invoke("kill_session", { sessionId: `shell-${item.id}` }).catch(() => {});
-    // Mark as done in DB
+
+    // Run teardown scripts if transitioning from in_progress
+    if (item.stage === "in_progress") {
+      const worktreePath = `${selectedRepo.value.path}/.kanna-worktrees/${item.branch}`;
+      try {
+        const configContent = await invoke<string>("read_text_file", {
+          path: `${selectedRepo.value.path}/.kanna/config.json`,
+        });
+        if (configContent) {
+          const repoConfig = parseRepoConfig(configContent);
+          if (repoConfig.teardown?.length) {
+            for (const cmd of repoConfig.teardown) {
+              await invoke("run_script", { script: cmd, cwd: worktreePath, env: {} });
+            }
+          }
+        }
+      } catch { /* teardown failed — continue closing */ }
+    }
+
+    // Mark as done
     await updatePipelineItemStage(db.value!, item.id, "done");
-    // Select the first read (idle) task in the list, or first available
     const currentItems = sortedItemsForCurrentRepo();
     const remaining = currentItems.filter((i) => i.id !== item.id);
     const firstRead = remaining.find((i) => (i as any).activity === "idle" || !(i as any).activity);
     selectedItemId.value = (firstRead || remaining[0])?.id || null;
-    // Refresh sidebar
     await loadItems(selectedRepo.value.id);
     await refreshAllItems();
   } catch (e) {
@@ -180,8 +196,16 @@ useKeyboardShortcuts({
     const worktreePath = `${selectedRepo.value.path}/.kanna-worktrees/${item.branch}`;
     await invoke("run_script", { script: `${ideCommand.value} "${worktreePath}"`, cwd: worktreePath, env: {} }).catch(() => {});
   },
-  makePR: () => {},
-  merge: () => {},
+  makePR: async () => {
+    const item = selectedItem();
+    if (!item) return;
+    try {
+      await startPrAgent(item.id);
+      await refreshAllItems();
+    } catch (e) {
+      console.error("PR agent failed to start:", e);
+    }
+  },
   closeTask: handleCloseTask,
   navigateUp: () => navigateItems(-1),
   navigateDown: () => navigateItems(1),
