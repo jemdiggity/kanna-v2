@@ -179,11 +179,22 @@ onUnmounted(() => {
     <div class="preview-modal">
       <div class="preview-header">
         <span class="file-path">{{ filePath }}</span>
-        <button class="btn-open" @click="openInIDE" title="Open in IDE (⌘O)">Open in IDE</button>
+        <div class="header-actions">
+          <span v-if="isMarkdownFile" class="mode-badge" @click="renderMarkdown = !renderMarkdown">
+            {{ renderMarkdown ? "Rendered" : "Raw" }}
+            <span class="mode-hint">␣</span>
+          </span>
+          <button class="btn-open" @click="openInIDE" title="Open in IDE (⌘O)">Open in IDE</button>
+        </div>
       </div>
       <div v-if="loading" class="preview-status">Loading...</div>
       <div v-else-if="error" class="preview-status preview-error">{{ error }}</div>
-      <div v-else class="preview-content" v-html="highlighted"></div>
+      <div
+        v-else
+        class="preview-content"
+        :class="{ 'markdown-rendered': renderMarkdown && isMarkdownFile }"
+        v-html="renderMarkdown && isMarkdownFile ? renderedMarkdown : highlighted"
+      ></div>
     </div>
   </div>
 </template>
