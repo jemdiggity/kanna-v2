@@ -538,7 +538,9 @@ export const useKannaStore = defineStore("kanna", () => {
   }
 
   async function startBlockedTask(item: PipelineItem) {
-    const repo = repos.value.find((r) => r.id === item.repo_id);
+    // repos.value may be empty during init() (computedAsync hasn't fired yet),
+    // so fall back to a direct DB query.
+    const repo = repos.value.find((r) => r.id === item.repo_id) ?? await getRepo(_db, item.repo_id);
     if (!repo) {
       console.error("[store] startBlockedTask: repo not found for", item.id);
       return;
@@ -587,8 +589,17 @@ export const useKannaStore = defineStore("kanna", () => {
       console.debug("[store] no .kanna/config.json:", e);
     }
 
+    // items.value may be empty during init() (computedAsync hasn't fired),
+    // so query DB directly for port offsets as a fallback.
+    let portItems = items.value;
+    if (portItems.length === 0) {
+      portItems = await _db.select<PipelineItem>(
+        "SELECT * FROM pipeline_item WHERE repo_id = ? AND stage != 'done'",
+        [item.repo_id],
+      );
+    }
     const usedOffsets = new Set(
-      items.value.map((i) => i.port_offset).filter((o): o is number => o != null)
+      portItems.map((i) => i.port_offset).filter((o): o is number => o != null)
     );
     let portOffset = 1;
     while (usedOffsets.has(portOffset)) portOffset++;

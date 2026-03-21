@@ -81,6 +81,20 @@ const preselectedBlockerIds = computedAsync(async () => {
   return blockers.map((b: any) => b.id);
 }, []);
 
+// Build a map of blocked item ID → blocker names for the sidebar
+const sidebarBlockerNames = computedAsync(async () => {
+  const blockedItems = store.items.filter((i) => i.stage === "blocked");
+  if (blockedItems.length === 0) return {};
+  const map: Record<string, string> = {};
+  for (const item of blockedItems) {
+    const blockers = await store.listBlockersForItem(item.id);
+    map[item.id] = blockers
+      .map((b) => b.display_name || (b.prompt ? b.prompt.slice(0, 30) : "Untitled"))
+      .join(", ");
+  }
+  return map;
+}, {});
+
 async function onBlockerConfirm(selectedIds: string[]) {
   showBlockerSelect.value = false;
   if (blockerSelectMode.value === "block") {
@@ -221,6 +235,7 @@ onMounted(async () => {
       :pipeline-items="store.items"
       :selected-repo-id="store.selectedRepoId"
       :selected-item-id="store.selectedItemId"
+      :blocker-names="sidebarBlockerNames"
       @select-repo="store.selectRepo"
       @select-item="store.selectItem"
       @import-repo="showImportRepoModal = true"

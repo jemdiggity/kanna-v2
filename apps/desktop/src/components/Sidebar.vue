@@ -8,6 +8,7 @@ const props = defineProps<{
   pipelineItems: PipelineItem[];
   selectedRepoId: string | null;
   selectedItemId: string | null;
+  blockerNames?: Record<string, string>;
 }>();
 
 const emit = defineEmits<{
@@ -384,11 +385,16 @@ function onUnpinnedChange(repoId: string, evt: any) {
                 @blur="commitRename(element.id)"
                 @click.stop
               />
-              <span
-                v-else
-                class="item-title"
-                style="color: #666;"
-              >{{ itemTitle(element) }}</span>
+              <div v-else class="blocked-item-content">
+                <span
+                  class="item-title"
+                  style="color: #666;"
+                >{{ itemTitle(element) }}</span>
+                <span
+                  v-if="blockerNames?.[element.id]"
+                  class="blocked-by-text"
+                >Blocked by: {{ blockerNames[element.id] }}</span>
+              </div>
             </div>
           </div>
 
@@ -630,6 +636,22 @@ function onUnpinnedChange(repoId: string, evt: any) {
 
 .type-zone {
   min-height: 0;
+}
+
+.blocked-item-content {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  pointer-events: none;
+}
+
+.blocked-by-text {
+  font-size: 10px;
+  color: #555;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Drag classes */

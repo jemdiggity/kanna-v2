@@ -53,7 +53,7 @@ function handleKeydown(e: KeyboardEvent) {
     e.preventDefault();
     e.stopPropagation();
     selectedIndex.value = Math.max(selectedIndex.value - 1, 0);
-  } else if (e.key === " ") {
+  } else if (e.key === " " && (e.target as HTMLElement)?.tagName !== "INPUT") {
     e.preventDefault();
     const item = filtered.value[selectedIndex.value];
     if (item) toggleItem(item.id);
