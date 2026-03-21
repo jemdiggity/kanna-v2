@@ -136,12 +136,12 @@ export function usePipeline(db: Ref<DbHandle | null>) {
   /** Spawn Claude CLI in a PTY via the daemon with hook notifications.
    *  Called by TerminalView on mount so it can pass the actual terminal dimensions. */
   async function spawnPtySession(sessionId: string, cwd: string, prompt: string, cols = 80, rows = 24, model?: string) {
-    // Find kanna-hook binary — must be in PATH (symlink or install)
+    // Find kanna-hook binary — resolved relative to app binary, falls back to PATH
     let kannaHookPath: string;
     try {
       kannaHookPath = await invoke<string>("which_binary", { name: "kanna-hook" });
     } catch {
-      throw new Error("kanna-hook not found in PATH. Run: ln -sf $(pwd)/crates/kanna-hook/target/debug/kanna-hook ~/.local/bin/kanna-hook");
+      throw new Error("kanna-hook binary not found. Ensure it is built (cargo build -p kanna-hook).");
     }
 
     // Build the --settings JSON with hooks that call kanna-hook
