@@ -21,8 +21,6 @@ import { useRepo } from "./composables/useRepo";
 import { usePipeline } from "./composables/usePipeline";
 import { usePreferences } from "./composables/usePreferences";
 import { useKeyboardShortcuts, type ActionName } from "./composables/useKeyboardShortcuts";
-import { useResourceSweeper } from "./composables/useResourceSweeper";
-
 const db = ref<DbHandle | null>(null);
 
 const { repos, selectedRepoId, refresh: refreshRepos, importRepo } = useRepo(db);
@@ -37,14 +35,6 @@ const {
   save: savePreference,
 } = usePreferences(db);
 
-// Resource sweeper disabled — corrupts daemon command connection
-// useResourceSweeper(
-//   () => db.value,
-//   () => ({
-//     suspendAfterMinutes: suspendAfterMinutes.value,
-//     killAfterMinutes: killAfterMinutes.value,
-//   })
-// );
 
 const selectedRepo = computed(() =>
   repos.value.find((r) => r.id === selectedRepoId.value) ?? null
