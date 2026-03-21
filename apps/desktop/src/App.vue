@@ -10,7 +10,6 @@ import Sidebar from "./components/Sidebar.vue";
 import MainPanel from "./components/MainPanel.vue";
 import NewTaskModal from "./components/NewTaskModal.vue";
 import ImportRepoModal from "./components/ImportRepoModal.vue";
-import PreferencesPanel from "./components/PreferencesPanel.vue";
 import KeyboardShortcutsModal from "./components/KeyboardShortcutsModal.vue";
 import FilePickerModal from "./components/FilePickerModal.vue";
 import FilePreviewModal from "./components/FilePreviewModal.vue";
@@ -28,13 +27,9 @@ const db = ref<DbHandle | null>(null);
 const { repos, selectedRepoId, refresh: refreshRepos, importRepo } = useRepo(db);
 const { allItems, selectedItemId, loadAllItems, createItem, spawnPtySession, startPrAgent, startMergeAgent, selectedItem, pinItem, unpinItem, reorderPinned, renameItem } = usePipeline(db);
 const {
-  suspendAfterMinutes,
-  killAfterMinutes,
-
   ideCommand,
   gcAfterDays,
   load: loadPreferences,
-  save: savePreference,
 } = usePreferences(db);
 
 // Resource sweeper disabled — corrupts daemon command connection
@@ -52,7 +47,6 @@ const selectedRepo = computed(() =>
 
 const showNewTaskModal = ref(false);
 const showImportRepoModal = ref(false);
-const showPreferencesPanel = ref(false);
 const showShortcutsModal = ref(false);
 const hideShortcutsOnStartup = ref(false);
 const showFilePickerModal = ref(false);
@@ -259,12 +253,10 @@ const keyboardActions = {
     if (showShellModal.value) { return; }
     if (showNewTaskModal.value) { showNewTaskModal.value = false; return; }
     if (showImportRepoModal.value) { showImportRepoModal.value = false; return; }
-    if (showPreferencesPanel.value) { showPreferencesPanel.value = false; return; }
   },
   openShell: () => { showShellModal.value = !showShellModal.value; },
   showDiff: () => { showDiffModal.value = !showDiffModal.value; },
   showShortcuts: () => { showShortcutsModal.value = !showShortcutsModal.value; },
-  openPreferences: () => { showPreferencesPanel.value = true; },
   commandPalette: () => { showCommandPalette.value = !showCommandPalette.value; },
 };
 useKeyboardShortcuts(keyboardActions);
@@ -334,10 +326,6 @@ async function handleRenameItem(itemId: string, displayName: string | null) {
 async function handleImportRepo(path: string, name: string, defaultBranch: string) {
   await importRepo(path, name, defaultBranch);
   showImportRepoModal.value = false;
-}
-
-async function handlePreferenceUpdate(key: string, value: string) {
-  await savePreference(key, value);
 }
 
 // Run migrations to ensure tables exist
@@ -443,7 +431,6 @@ onMounted(async () => {
     await runMigrations(db.value);
     await refreshRepos();
     await loadPreferences();
-    // await reconcileSessions(); // disabled — corrupts daemon connection
 
     // Transition stale "working" items to "unread"
     if (db.value) {
@@ -591,7 +578,6 @@ onMounted(async () => {
       @select-item="handleSelectItem"
       @import-repo="showImportRepoModal = true"
       @new-task="(repoId: string) => { selectedRepoId = repoId; showNewTaskModal = true; }"
-      @open-preferences="showPreferencesPanel = true"
       @pin-item="handlePinItem"
       @unpin-item="handleUnpinItem"
       @reorder-pinned="handleReorderPinned"
@@ -615,17 +601,6 @@ onMounted(async () => {
       v-if="showImportRepoModal"
       @import="handleImportRepo"
       @cancel="showImportRepoModal = false"
-    />
-    <PreferencesPanel
-      v-if="showPreferencesPanel"
-      :preferences="{
-        suspendAfterMinutes: suspendAfterMinutes,
-        killAfterMinutes: killAfterMinutes,
-
-        ideCommand: ideCommand,
-      }"
-      @update="handlePreferenceUpdate"
-      @close="showPreferencesPanel = false"
     />
     <CommandPaletteModal
       v-if="showCommandPalette"

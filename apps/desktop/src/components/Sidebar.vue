@@ -15,7 +15,6 @@ const emit = defineEmits<{
   (e: "select-item", id: string): void;
   (e: "import-repo"): void;
   (e: "new-task", repoId: string): void;
-  (e: "open-preferences"): void;
   (e: "pin-item", itemId: string, position: number): void;
   (e: "unpin-item", itemId: string): void;
   (e: "reorder-pinned", repoId: string, orderedIds: string[]): void;
@@ -364,9 +363,6 @@ function onUnpinnedChange(repoId: string, evt: any) {
       <button class="btn-import" @click="emit('import-repo')">
         Import Repo
       </button>
-      <button class="btn-icon btn-prefs" title="Preferences (⌘,)" @click="emit('open-preferences')">
-        &#9881;
-      </button>
     </div>
   </aside>
 </template>
@@ -550,11 +546,6 @@ function onUnpinnedChange(repoId: string, evt: any) {
 .btn-import:hover {
   background: #333;
   color: #e0e0e0;
-}
-
-.btn-prefs {
-  flex-shrink: 0;
-  font-size: 14px;
 }
 
 .pinned-zone {
