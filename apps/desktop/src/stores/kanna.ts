@@ -695,6 +695,10 @@ export const useKannaStore = defineStore("kanna", () => {
       );
 
       await updatePipelineItemStage(_db, originalId, "done");
+      // The original task going to "done" may unblock other tasks that
+      // were waiting on it. We must check — suppressing this causes deadlocks
+      // when two tasks block each other (A blocked by B, then B blocked by A').
+      await checkUnblocked(originalId);
     } catch (e) {
       console.error("[store] blockTask close failed:", e);
     }
