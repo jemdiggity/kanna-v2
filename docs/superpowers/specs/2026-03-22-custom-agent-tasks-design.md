@@ -190,7 +190,14 @@ This prompt is stored as a constant in the codebase (e.g. `packages/core/src/con
 
 ### `createItem` / `spawnPtySession` modifications
 
-Accept an optional `CustomTaskConfig` parameter. When present, overlay its values onto the defaults:
+Accept an optional `CustomTaskConfig` parameter. The existing `createItem` signature uses `(repoId, repoPath, prompt, opts?)` where `opts` has `baseBranch` and `stage`. Add a new optional `customTask?: CustomTaskConfig` field to `opts`. When present:
+
+- `customTask.prompt` overrides the `prompt` positional parameter
+- `customTask.executionMode` maps to the existing `agentType` parameter (`pty` or `sdk`)
+- `customTask.stage` maps to `opts.stage`
+- `customTask.name` maps to `displayName` on the insert
+
+Overlay custom task config values onto the defaults:
 
 - `model` → `--model <model>` CLI flag (both PTY and SDK)
 - `permission_mode` → replaces `--dangerously-skip-permissions` with `--permission-mode <value>`. Note: `spawnPtySession` currently hardcodes `--dangerously-skip-permissions` in the shell command string — this must be changed to use `--permission-mode` to support configurable permission modes.
@@ -204,7 +211,11 @@ Accept an optional `CustomTaskConfig` parameter. When present, overlay its value
 
 ### SDK mode path
 
-If `execution_mode` is `sdk`, route through the `agent.rs` headless path. Pass `system_prompt`, `model`, `allowed_tools`, `max_turns`, etc. via `SessionOptions`. Note: the existing `createItem` SDK invoke call currently omits `model`, `allowed_tools`, and `max_turns` — these must be added to the `invoke("create_agent_session", {...})` call.
+If `execution_mode` is `sdk`, route through the `agent.rs` headless path. Pass `system_prompt`, `model`, `allowed_tools`, `max_turns`, etc. via `SessionOptions`.
+
+Required SDK changes:
+- The existing `createItem` SDK invoke call currently omits `model`, `allowed_tools`, and `max_turns` — these must be added to the `invoke("create_agent_session", {...})` call
+- `max_budget_usd` and `disallowed_tools` are not currently supported by the `create_agent_session` Rust command or the `SessionOptions` builder — both must be added to the Rust command signature and the SDK builder
 
 ### What doesn't change
 
