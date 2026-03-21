@@ -1,0 +1,17 @@
+{
+  "planPath": "docs/superpowers/plans/2026-03-22-blocked-task.md",
+  "tasks": [
+    {"id": 1, "subject": "Task 1: Add blocked stage to pipeline types and transitions", "status": "pending"},
+    {"id": 2, "subject": "Task 2: Add TaskBlocker type and DB query helpers", "status": "pending", "blockedBy": [1]},
+    {"id": 3, "subject": "Task 3: Add task_blocker table migration", "status": "pending", "blockedBy": [1, 2]},
+    {"id": 4, "subject": "Task 4: Add blockTask, checkUnblocked, startBlockedTask to store", "status": "pending", "blockedBy": [2, 3]},
+    {"id": 5, "subject": "Task 5: Add blocked stage to StageBadge", "status": "pending", "blockedBy": [4]},
+    {"id": 6, "subject": "Task 6: Add Blocked section to Sidebar", "status": "pending", "blockedBy": [4]},
+    {"id": 7, "subject": "Task 7: Add blocked task placeholder to MainPanel", "status": "pending", "blockedBy": [4, 5]},
+    {"id": 8, "subject": "Task 8: Add Block Task and Edit Blocked Task to command palette", "status": "pending", "blockedBy": [8]},
+    {"id": 9, "subject": "Task 9: Create BlockerSelectModal", "status": "pending", "blockedBy": [8]},
+    {"id": 10, "subject": "Task 10: Handle closeTask for blocked items + verify currentItem", "status": "pending", "blockedBy": [4, 9]},
+    {"id": 11, "subject": "Task 11: Final integration and cleanup", "status": "pending", "blockedBy": [10]}
+  ],
+  "lastUpdated": "2026-03-22T00:00:00Z"
+}
