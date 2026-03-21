@@ -1,0 +1,11 @@
+{
+  "planPath": "docs/superpowers/plans/2026-03-21-remove-repo-from-sidebar.md",
+  "tasks": [
+    {"id": 1, "subject": "Task 1: Update DB schema type and query functions", "status": "pending"},
+    {"id": 2, "subject": "Task 2: Update useRepo composable", "status": "pending", "blockedBy": [1]},
+    {"id": 3, "subject": "Task 3: Add migration and wire up App.vue", "status": "pending", "blockedBy": [2]},
+    {"id": 4, "subject": "Task 4: Add hover X button to Sidebar", "status": "pending", "blockedBy": [2]},
+    {"id": 5, "subject": "Task 5: Manual smoke test", "status": "pending", "blockedBy": [3, 4]}
+  ],
+  "lastUpdated": "2026-03-21T22:30:00+09:00"
+}
