@@ -109,7 +109,7 @@ export function usePipeline(db: Ref<DbHandle | null>) {
 
     // 6. Spawn agent
     // Refresh items first — spawnPtySession reads port_env from items list
-    await loadItems(repoId);
+    await loadAllItems([repoId]);
 
     if (agentType !== "pty") {
       await invoke("create_agent_session", {
