@@ -134,6 +134,12 @@ export function usePipeline(db: Ref<DbHandle | null>) {
     // Build the --settings JSON with hooks that call kanna-hook
     const hookSettings = JSON.stringify({
       hooks: {
+        SessionStart: [
+          { hooks: [{ type: "command", command: `${kannaHookPath} SessionStart ${sessionId}` }] },
+        ],
+        UserPromptSubmit: [
+          { hooks: [{ type: "command", command: `${kannaHookPath} UserPromptSubmit ${sessionId}` }] },
+        ],
         Stop: [
           { hooks: [{ type: "command", command: `${kannaHookPath} Stop ${sessionId}` }] },
         ],
