@@ -64,6 +64,7 @@ const showCommandPalette = ref(false);
 const diffScopes = new Map<string, "branch" | "commit" | "working">();
 const zenMode = ref(false);
 const maximized = ref(false);
+const lastKilledPrompt = ref<string | null>(null);
 
 const currentItem = computed(() => {
   const item = selectedItem();
@@ -122,6 +123,8 @@ async function handleCloseTask() {
   const item = selectedItem();
   if (!item || !selectedRepo.value) return;
   try {
+    // Save prompt for undo
+    lastKilledPrompt.value = item.prompt || null;
     // Kill sessions
     await invoke("kill_session", { sessionId: item.id }).catch(() => {});
     await invoke("kill_session", { sessionId: `shell-${item.id}` }).catch(() => {});
@@ -206,6 +209,12 @@ const keyboardActions = {
     await refreshItems();
   },
   closeTask: handleCloseTask,
+  undoClose: async () => {
+    if (!lastKilledPrompt.value) return;
+    const prompt = lastKilledPrompt.value;
+    lastKilledPrompt.value = null;
+    await handleNewTaskSubmit(prompt);
+  },
   navigateUp: () => navigateItems(-1),
   navigateDown: () => navigateItems(1),
   toggleZen: () => { zenMode.value = !zenMode.value; },
