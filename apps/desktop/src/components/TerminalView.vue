@@ -41,6 +41,6 @@ onUnmounted(() => {
 .terminal-container {
   flex: 1;
   overflow: hidden;
-  background: #1a1a1a;
+  background: #1e1e1e;
 }
 </style>
