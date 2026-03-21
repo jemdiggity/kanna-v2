@@ -69,12 +69,17 @@ function splitKeys(display: string): string[] {
   border: 1px solid #444;
   border-radius: 8px;
   padding: 20px;
-  width: 500px;
+  width: 800px;
   max-width: 90vw;
   max-height: 80vh;
   overflow-y: auto;
 }
 h3 { margin: 0 0 16px; font-size: 15px; font-weight: 600; }
+.shortcuts-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0 24px;
+}
 .shortcut-group { margin-bottom: 16px; }
 h4 { color: #888; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; margin: 0 0 8px; }
 .shortcut-row { display: flex; justify-content: space-between; align-items: center; padding: 3px 0; font-size: 13px; }
