@@ -10,6 +10,81 @@ use std::sync::Arc;
 use tauri::{Emitter, Manager};
 use tokio::sync::Mutex;
 
+/// Install a native macOS event monitor that intercepts fn+F (Globe+F) and
+/// toggles fullscreen.  The fn/Globe modifier sets NSEventModifierFlagFunction
+/// on the NSEvent, which JavaScript cannot detect — so we must handle it here,
+/// before the event reaches WKWebView / xterm.js.
+#[cfg(target_os = "macos")]
+fn setup_fn_f_fullscreen() {
+    use objc2::rc::Retained;
+    use objc2::runtime::{AnyClass, AnyObject};
+    use objc2::msg_send;
+    use std::ffi::{c_char, CStr};
+    use std::ptr::{self, NonNull};
+
+    let block = block2::RcBlock::new(
+        |event: NonNull<AnyObject>| -> *mut AnyObject {
+            unsafe {
+                let flags: usize = msg_send![event.as_ref(), modifierFlags];
+
+                // fn/Globe (bit 23) pressed, without Cmd/Ctrl/Option
+                let fn_only = (flags & (1 << 23)) != 0
+                    && (flags & (1 << 20)) == 0
+                    && (flags & (1 << 18)) == 0
+                    && (flags & (1 << 19)) == 0;
+
+                if fn_only {
+                    let chars: Option<Retained<AnyObject>> =
+                        msg_send![event.as_ref(), characters];
+                    if let Some(chars) = chars {
+                        let utf8: *const c_char = msg_send![&*chars, UTF8String];
+                        if !utf8.is_null() {
+                            if let Ok(s) = CStr::from_ptr(utf8).to_str() {
+                                if s.eq_ignore_ascii_case("f") {
+                                    if let Some(ns_app) = AnyClass::get(c"NSApplication") {
+                                        let app: Option<Retained<AnyObject>> =
+                                            msg_send![ns_app, sharedApplication];
+                                        if let Some(app) = app {
+                                            let win: Option<Retained<AnyObject>> =
+                                                msg_send![&*app, keyWindow];
+                                            if let Some(win) = win {
+                                                let _: () = msg_send![
+                                                    &*win,
+                                                    toggleFullScreen: ptr::null::<AnyObject>()
+                                                ];
+                                            }
+                                        }
+                                    }
+                                    return ptr::null_mut(); // consume the event
+                                }
+                            }
+                        }
+                    }
+                }
+
+                event.as_ptr() // pass through
+            }
+        },
+    );
+
+    unsafe {
+        let Some(ns_event) = AnyClass::get(c"NSEvent") else {
+            eprintln!("[macos] NSEvent class not found, fn+F shortcut unavailable");
+            return;
+        };
+        let mask: u64 = 1 << 10; // NSEventMaskKeyDown
+        let monitor: Option<Retained<AnyObject>> = msg_send![
+            ns_event,
+            addLocalMonitorForEventsMatchingMask: mask,
+            handler: &*block
+        ];
+        // Keep the monitor alive for the lifetime of the app
+        if let Some(m) = monitor {
+            std::mem::forget(m);
+        }
+    }
+}
+
 fn worktree_root() -> Option<PathBuf> {
     // Walk up from exe path to find directory containing .kanna-worktrees
     // (that's the main repo root — our worktree is a child of it)
@@ -232,6 +307,9 @@ pub fn run() {
         .manage(Arc::new(DashMap::new()) as AgentState)
         .manage(Arc::new(Mutex::new(None)) as DaemonState)
         .setup(|app| {
+            #[cfg(target_os = "macos")]
+            setup_fn_f_fullscreen();
+
             let handle = app.handle().clone();
             let daemon_state: DaemonState = app.handle().state::<DaemonState>().inner().clone();
             tauri::async_runtime::spawn(async move {
