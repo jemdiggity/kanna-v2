@@ -66,7 +66,7 @@ interface TaskBlocker {
 Triggered from command palette when selected task is `in_progress`.
 
 1. User opens command palette, selects "Block Task"
-2. Fuzzy search shows all other `in_progress` tasks (multi-select)
+2. Fuzzy search shows all other `in_progress` and `blocked` tasks (multi-select)
 3. User selects one or more blockers, confirms
 4. Insert a new `pipeline_item` with:
    - Same `prompt`, `repo_id`, `agent_type` as the closed task
@@ -82,7 +82,7 @@ Triggered from command palette when selected task is `in_progress`.
 Triggered from command palette when selected task is `blocked`.
 
 1. User opens command palette, selects "Edit Blocked Task"
-2. Fuzzy search of `in_progress` tasks, with current blockers pre-selected
+2. Fuzzy search of `in_progress` and `blocked` tasks, with current blockers pre-selected
 3. User adds/removes blockers, confirms
 4. Validate no circular dependencies (see below), reject if detected
 5. Diff selection against existing `task_blocker` rows — insert new, delete removed
@@ -186,7 +186,7 @@ All changes target the post-refactor branch (`task-8a29c9c0`).
 
 - **Blocker abandoned (Cmd+Delete):** Still counts as unblocked. The agent prompt mentions the dependency so it can adapt.
 - **All blockers removed via edit:** Zero dependencies = immediately unblocked → task auto-starts.
-- **Circular dependencies:** Prevented at insert time via DFS. "Block Task" only offers `in_progress` tasks (which can't be blocked by anything), so cycles are impossible there. "Edit Blocked Task" can select any `in_progress` task, but the cycle check catches cases where a chain of blocked tasks would loop back.
+- **Circular dependencies:** Prevented at insert time via DFS. Both commands allow selecting `in_progress` and `blocked` tasks as blockers (supporting dependency chains like C → B → A). The cycle check catches cases where a chain of blocked tasks would loop back.
 - **Multiple blocked tasks share a blocker:** Each is checked independently when the blocker transitions.
 - **Blocked task during GC:** Blocked tasks should NOT be garbage collected (they're not `done`). No changes needed — GC only targets `stage = 'done'`.
 - **Abandoning a blocked task (Cmd+Delete):** Transitions `blocked → done`. Deletes associated `task_blocker` rows. No worktree to clean up.
