@@ -190,10 +190,17 @@ const keyboardActions = {
     }
     // Close the original task (not the newly selected PR task)
     // Kill sessions, run teardown, mark done
-    await invoke("kill_session", { sessionId: originalId }).catch(() => {});
-    await invoke("kill_session", { sessionId: `shell-${originalId}` }).catch(() => {});
-    await updatePipelineItemStage(db.value!, originalId, "done");
-    await refreshItems();
+    try {
+      await invoke("kill_session", { sessionId: originalId }).catch(() => {});
+      await invoke("kill_session", { sessionId: `shell-${originalId}` }).catch(() => {});
+      await updatePipelineItemStage(db.value!, originalId, "done");
+      // Also update the in-memory item so the sidebar reflects the change immediately
+      const memItem = allItems.value.find((i) => i.id === originalId);
+      if (memItem) memItem.stage = "done";
+      await refreshItems();
+    } catch (e) {
+      console.error("Failed to close source task:", e);
+    }
   },
   mergeQueue: async () => {
     if (!selectedRepoId.value) {
