@@ -1,4 +1,4 @@
-import type { Repo, PipelineItem, Setting } from "./schema.js";
+import type { Repo, PipelineItem, Setting, TaskBlocker } from "./schema.js";
 
 export type DbHandle = {
   execute(query: string, bindValues?: unknown[]): Promise<{ rowsAffected: number }>;
@@ -169,6 +169,109 @@ export async function reorderPinnedItems(
     `UPDATE pipeline_item SET pin_order = CASE id ${cases} END, updated_at = datetime('now') WHERE id IN (${placeholders})`,
     bindValues
   );
+}
+
+// ---------------------------------------------------------------------------
+// TaskBlocker
+// ---------------------------------------------------------------------------
+
+export async function insertTaskBlocker(
+  db: DbHandle,
+  blockedItemId: string,
+  blockerItemId: string,
+): Promise<void> {
+  await db.execute(
+    "INSERT OR IGNORE INTO task_blocker (blocked_item_id, blocker_item_id) VALUES (?, ?)",
+    [blockedItemId, blockerItemId],
+  );
+}
+
+export async function removeTaskBlocker(
+  db: DbHandle,
+  blockedItemId: string,
+  blockerItemId: string,
+): Promise<void> {
+  await db.execute(
+    "DELETE FROM task_blocker WHERE blocked_item_id = ? AND blocker_item_id = ?",
+    [blockedItemId, blockerItemId],
+  );
+}
+
+export async function removeAllBlockersForItem(
+  db: DbHandle,
+  blockedItemId: string,
+): Promise<void> {
+  await db.execute(
+    "DELETE FROM task_blocker WHERE blocked_item_id = ?",
+    [blockedItemId],
+  );
+}
+
+export async function listBlockersForItem(
+  db: DbHandle,
+  blockedItemId: string,
+): Promise<PipelineItem[]> {
+  return db.select<PipelineItem>(
+    `SELECT pi.* FROM pipeline_item pi
+     JOIN task_blocker tb ON pi.id = tb.blocker_item_id
+     WHERE tb.blocked_item_id = ?`,
+    [blockedItemId],
+  );
+}
+
+export async function listBlockedByItem(
+  db: DbHandle,
+  blockerItemId: string,
+): Promise<PipelineItem[]> {
+  return db.select<PipelineItem>(
+    `SELECT pi.* FROM pipeline_item pi
+     JOIN task_blocker tb ON pi.id = tb.blocked_item_id
+     WHERE tb.blocker_item_id = ?`,
+    [blockerItemId],
+  );
+}
+
+export async function getUnblockedItems(
+  db: DbHandle,
+): Promise<PipelineItem[]> {
+  return db.select<PipelineItem>(
+    `SELECT pi.* FROM pipeline_item pi
+     WHERE pi.stage = 'blocked'
+     AND NOT EXISTS (
+       SELECT 1 FROM task_blocker tb
+       JOIN pipeline_item blocker ON blocker.id = tb.blocker_item_id
+       WHERE tb.blocked_item_id = pi.id
+       AND blocker.stage IN ('in_progress', 'blocked')
+     )`,
+  );
+}
+
+export async function hasCircularDependency(
+  db: DbHandle,
+  blockedItemId: string,
+  proposedBlockerIds: string[],
+): Promise<boolean> {
+  const visited = new Set<string>();
+
+  async function dfs(currentId: string): Promise<boolean> {
+    if (currentId === blockedItemId) return true;
+    if (visited.has(currentId)) return false;
+    visited.add(currentId);
+    const blockers = await db.select<TaskBlocker>(
+      "SELECT * FROM task_blocker WHERE blocked_item_id = ?",
+      [currentId],
+    );
+    for (const b of blockers) {
+      if (await dfs(b.blocker_item_id)) return true;
+    }
+    return false;
+  }
+
+  for (const blockerId of proposedBlockerIds) {
+    visited.clear();
+    if (await dfs(blockerId)) return true;
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------------------
