@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, nextTick } from "vue";
+import { ref, onMounted, onActivated, nextTick } from "vue";
 import { invoke } from "../invoke";
 import TerminalView from "./TerminalView.vue";
 
@@ -15,6 +15,12 @@ const termRef = ref<InstanceType<typeof TerminalView> | null>(null);
 
 onMounted(async () => {
   await nextTick();
+  termRef.value?.focus();
+});
+
+onActivated(async () => {
+  await nextTick();
+  termRef.value?.fit?.();
   termRef.value?.focus();
 });
 
