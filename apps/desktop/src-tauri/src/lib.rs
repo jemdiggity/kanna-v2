@@ -277,6 +277,10 @@ pub fn run() {
             commands::fs::which_binary,
             commands::fs::read_env_var,
             commands::fs::append_log,
+            commands::fs::get_app_data_dir,
+            commands::fs::copy_file,
+            commands::fs::remove_file,
+            commands::fs::list_dir,
             // Shell commands
             commands::shell::run_script,
             commands::shell::ensure_term_init,
