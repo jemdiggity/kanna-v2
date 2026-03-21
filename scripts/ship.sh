@@ -248,7 +248,7 @@ if [[ "$RELEASE" = true ]]; then
 
     STEP="committing version bump"
     echo "    Committing version bump..."
-    git -C "$ROOT" add VERSION apps/desktop/src-tauri/tauri.conf.json apps/desktop/src-tauri/Cargo.toml apps/desktop/src-tauri/Cargo.lock
+    git -C "$ROOT" add -f VERSION apps/desktop/src-tauri/tauri.conf.json apps/desktop/src-tauri/Cargo.toml apps/desktop/src-tauri/Cargo.lock
     git -C "$ROOT" commit -m "release: v$VERSION"
 
     STEP="tagging and pushing"
