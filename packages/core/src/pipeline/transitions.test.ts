@@ -25,6 +25,22 @@ describe("canTransition", () => {
   it("rejects done → pr (terminal)", () => {
     expect(canTransition("done", "pr")).toBe(false);
   });
+
+  it("allows blocked → in_progress", () => {
+    expect(canTransition("blocked", "in_progress")).toBe(true);
+  });
+
+  it("allows blocked → done", () => {
+    expect(canTransition("blocked", "done")).toBe(true);
+  });
+
+  it("rejects in_progress → blocked (not a transition)", () => {
+    expect(canTransition("in_progress", "blocked")).toBe(false);
+  });
+
+  it("rejects blocked → pr (must go through in_progress first)", () => {
+    expect(canTransition("blocked", "pr")).toBe(false);
+  });
 });
 
 describe("getTransition", () => {
