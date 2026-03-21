@@ -30,6 +30,11 @@ export interface PipelineItem {
   updated_at: string;
 }
 
+export interface TaskBlocker {
+  blocked_item_id: string;
+  blocker_item_id: string;
+}
+
 export interface Worktree {
   id: string;
   pipeline_item_id: string;
