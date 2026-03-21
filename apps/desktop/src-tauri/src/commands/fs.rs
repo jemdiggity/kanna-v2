@@ -13,6 +13,22 @@ pub fn read_text_file(path: String) -> Result<String, String> {
 
 #[tauri::command]
 pub fn which_binary(name: String) -> Result<String, String> {
+    // First try next to the app binary (covers .build/debug/ and macOS bundle)
+    let candidates = [
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join(&name))),
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join("../Resources").join(&name))),
+    ];
+    for candidate in candidates.into_iter().flatten() {
+        if candidate.exists() {
+            return Ok(candidate.to_string_lossy().to_string());
+        }
+    }
+
+    // Fall back to PATH
     let output = Command::new("which")
         .arg(&name)
         .output()
