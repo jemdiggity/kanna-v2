@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, nextTick } from "vue";
+import { ref, computed, watch, onMounted, onUnmounted, nextTick } from "vue";
 import { isTauri, getMockDatabase } from "./tauri-mock";
 import { invoke } from "./invoke";
 import { listen } from "./listen";
 import type { DbHandle, PipelineItem } from "@kanna/db";
-import { updatePipelineItemStage, updatePipelineItemActivity, getSetting, setSetting } from "@kanna/db";
+import { updatePipelineItemStage, updatePipelineItemActivity, getSetting, setSetting, runMigrations } from "@kanna/db";
 import { parseRepoConfig } from "@kanna/core";
 import Sidebar from "./components/Sidebar.vue";
 import MainPanel from "./components/MainPanel.vue";
@@ -342,228 +342,172 @@ async function handleImportRepo(path: string, name: string, defaultBranch: strin
   showImportRepoModal.value = false;
 }
 
-// Run migrations to ensure tables exist
-async function runMigrations(database: DbHandle) {
-  await database.execute(`CREATE TABLE IF NOT EXISTS repo (
-    id TEXT PRIMARY KEY, path TEXT NOT NULL, name TEXT NOT NULL,
-    default_branch TEXT NOT NULL DEFAULT 'main',
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    last_opened_at TEXT NOT NULL DEFAULT (datetime('now'))
-  )`);
-  await database.execute(`CREATE TABLE IF NOT EXISTS pipeline_item (
-    id TEXT PRIMARY KEY, repo_id TEXT NOT NULL REFERENCES repo(id) ON DELETE CASCADE,
-    issue_number INTEGER, issue_title TEXT, prompt TEXT,
-    stage TEXT NOT NULL DEFAULT 'in_progress', pr_number INTEGER, pr_url TEXT,
-    branch TEXT, agent_type TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-  )`);
-  await database.execute(`CREATE TABLE IF NOT EXISTS worktree (
-    id TEXT PRIMARY KEY, pipeline_item_id TEXT NOT NULL REFERENCES pipeline_item(id) ON DELETE CASCADE,
-    path TEXT NOT NULL, branch TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now'))
-  )`);
-  await database.execute(`CREATE TABLE IF NOT EXISTS terminal_session (
-    id TEXT PRIMARY KEY, repo_id TEXT NOT NULL REFERENCES repo(id) ON DELETE CASCADE,
-    pipeline_item_id TEXT REFERENCES pipeline_item(id) ON DELETE SET NULL,
-    label TEXT, cwd TEXT, daemon_session_id TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-  )`);
-  await database.execute(`CREATE TABLE IF NOT EXISTS agent_run (
-    id TEXT PRIMARY KEY, repo_id TEXT NOT NULL REFERENCES repo(id) ON DELETE CASCADE,
-    agent_type TEXT NOT NULL, issue_number INTEGER, pr_number INTEGER,
-    status TEXT NOT NULL DEFAULT 'running', started_at TEXT NOT NULL DEFAULT (datetime('now')),
-    finished_at TEXT, error TEXT
-  )`);
-  await database.execute(`CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)`);
-  await database.execute(`INSERT OR IGNORE INTO settings (key, value) VALUES ('suspendAfterMinutes', '5')`);
-  await database.execute(`INSERT OR IGNORE INTO settings (key, value) VALUES ('killAfterMinutes', '30')`);
-  await database.execute(`INSERT OR IGNORE INTO settings (key, value) VALUES ('ideCommand', 'code')`);
+// Initialize database connection
+async function initDatabase(): Promise<DbHandle> {
+  if (!isTauri) {
+    dbName.value = "mock";
+    return getMockDatabase() as unknown as DbHandle;
+  }
 
-  // Activity columns (added in feature-parity update)
-  try {
-    await database.execute(`ALTER TABLE pipeline_item ADD COLUMN activity TEXT NOT NULL DEFAULT 'idle'`);
-  } catch { /* column already exists */ }
-  try {
-    await database.execute(`ALTER TABLE pipeline_item ADD COLUMN activity_changed_at TEXT`);
-  } catch { /* column already exists */ }
-  try {
-    await database.execute(`ALTER TABLE pipeline_item ADD COLUMN port_offset INTEGER`);
-  } catch { /* column already exists */ }
-  try {
-    await database.execute(`ALTER TABLE pipeline_item ADD COLUMN port_env TEXT`);
-  } catch { /* column already exists */ }
-  try {
-    await database.execute(`ALTER TABLE pipeline_item ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0`);
-  } catch { /* column already exists */ }
-  try {
-    await database.execute(`ALTER TABLE pipeline_item ADD COLUMN pin_order INTEGER`);
-  } catch { /* column already exists */ }
-  try {
-    await database.execute(`ALTER TABLE pipeline_item ADD COLUMN display_name TEXT`);
-  } catch { /* column already exists */ }
-  try {
-    await database.execute(`ALTER TABLE repo ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0`);
-  } catch { /* column already exists */ }
-
-  // Pipeline simplification: map old stages to new
-  try {
-    await database.execute(`UPDATE pipeline_item SET stage = 'in_progress' WHERE stage = 'queued'`);
-    await database.execute(`UPDATE pipeline_item SET stage = 'done' WHERE stage IN ('needs_review', 'merged', 'closed')`);
-  } catch { /* migration already applied or no rows to update */ }
-}
-
-// Initialize
-onMounted(async () => {
+  const { default: Database } = await import("@tauri-apps/plugin-sql");
   let resolvedDbName = "kanna-v2.db";
   try {
-    let database: DbHandle;
-    if (isTauri) {
-      const { default: Database } = await import("@tauri-apps/plugin-sql");
-      let resolvedDbName = "kanna-v2.db";
-      try {
-        const envDb = await invoke<string>("read_env_var", { name: "KANNA_DB_NAME" });
-        if (envDb) resolvedDbName = envDb;
-      } catch {}
-      // Worktree instances use a separate DB to avoid conflicts
-      try {
-        const wt = await invoke<string>("read_env_var", { name: "KANNA_WORKTREE" });
-        if (wt) {
-          // Get worktree name from KANNA_DAEMON_DIR (set by ensure_daemon_running)
-          // e.g., /path/to/.kanna-worktrees/task-abc123/.kanna-daemon → task-abc123
-          const daemonDir = await invoke<string>("read_env_var", { name: "KANNA_DAEMON_DIR" }).catch(() => "");
-          let suffix = Date.now().toString();
-          if (daemonDir) {
-            const parts = daemonDir.split("/");
-            const idx = parts.indexOf(".kanna-daemon");
-            if (idx > 0) suffix = parts[idx - 1];
-          }
-          resolvedDbName = `kanna-wt-${suffix}.db`;
-        }
-      } catch {}
-      console.log("[db] using database:", resolvedDbName);
-      dbName.value = resolvedDbName;
-      await backupOnStartup(resolvedDbName);
-      database = (await Database.load(`sqlite:${resolvedDbName}`)) as unknown as DbHandle;
-    } else {
-      dbName.value = "mock";
-      database = getMockDatabase() as unknown as DbHandle;
+    const envDb = await invoke<string>("read_env_var", { name: "KANNA_DB_NAME" });
+    if (envDb) resolvedDbName = envDb;
+  } catch {}
+  // Worktree instances use a separate DB to avoid conflicts
+  try {
+    const wt = await invoke<string>("read_env_var", { name: "KANNA_WORKTREE" });
+    if (wt) {
+      const daemonDir = await invoke<string>("read_env_var", { name: "KANNA_DAEMON_DIR" }).catch(() => "");
+      let suffix = Date.now().toString();
+      if (daemonDir) {
+        const parts = daemonDir.split("/");
+        const idx = parts.indexOf(".kanna-daemon");
+        if (idx > 0) suffix = parts[idx - 1];
+      }
+      resolvedDbName = `kanna-wt-${suffix}.db`;
     }
+  } catch {}
+  console.log("[db] using database:", resolvedDbName);
+  dbName.value = resolvedDbName;
+  await backupOnStartup(resolvedDbName);
+  const database = (await Database.load(`sqlite:${resolvedDbName}`)) as unknown as DbHandle;
+  startPeriodicBackup(resolvedDbName, db);
+  return database;
+}
+
+// Transition stale "working" items to "unread" on startup
+async function resetStaleActivity(database: DbHandle) {
+  const workingItems = await database.select<PipelineItem>(
+    "SELECT * FROM pipeline_item WHERE activity = 'working'"
+  );
+  for (const item of workingItems) {
+    await updatePipelineItemActivity(database, item.id, "unread");
+  }
+}
+
+// Remove done tasks older than gcAfterDays
+async function gcStaleTasks(database: DbHandle) {
+  const cutoff = new Date(Date.now() - gcAfterDays.value * 86400000).toISOString();
+  const stale = await database.select<PipelineItem>(
+    "SELECT * FROM pipeline_item WHERE stage = 'done' AND updated_at < ?",
+    [cutoff]
+  );
+  for (const item of stale) {
+    if (item.branch) {
+      for (const repo of repos.value) {
+        const worktreePath = `${repo.path}/.kanna-worktrees/${item.branch}`;
+        await invoke("git_worktree_remove", { repoPath: repo.path, path: worktreePath }).catch(() => {});
+      }
+    }
+    await database.execute("DELETE FROM pipeline_item WHERE id = ?", [item.id]);
+  }
+  if (stale.length > 0) {
+    console.log(`[gc] cleaned up ${stale.length} done task(s)`);
+  }
+}
+
+// Restore persisted repo/item selection from settings
+async function restoreSelection(database: DbHandle) {
+  const savedRepo = await getSetting(database, "selected_repo_id");
+  const savedItem = await getSetting(database, "selected_item_id");
+  if (savedRepo && repos.value.some((r) => r.id === savedRepo)) {
+    selectedRepoId.value = savedRepo;
+    if (savedItem && allItems.value.some((i) => i.id === savedItem)) {
+      selectedItemId.value = savedItem;
+    }
+  }
+}
+
+// Set window title for non-main branches
+async function setWindowTitle() {
+  if (!isTauri) return;
+  try {
+    const info = await invoke<{ branch: string; commit_hash: string; version: string }>("git_app_info");
+    if (info.branch !== "main" && info.branch !== "master") {
+      const { getCurrentWindow } = await import("@tauri-apps/api/window");
+      await getCurrentWindow().setTitle(`Kanna — ${info.branch} (${info.version} @ ${info.commit_hash})`);
+    }
+  } catch {}
+}
+
+// Register daemon event listeners, returns cleanup function
+async function registerEventListeners(): Promise<Array<() => void>> {
+  const unlisteners: Array<() => void> = [];
+
+  const unlistenHook = await listen("hook_event", async (event: any) => {
+    const payload = event.payload || event;
+    const sessionId = payload.session_id;
+    const hookEvent = payload.event;
+    if (!sessionId || !db.value) return;
+
+    const item = allItems.value.find((i) => i.id === sessionId);
+    if (!item) return;
+
+    if (hookEvent === "Stop" || hookEvent === "StopFailure") {
+      const activity = selectedItemId.value === sessionId ? "idle" : "unread";
+      updatePipelineItemActivity(db.value!, item.id, activity);
+      item.activity = activity;
+      item.activity_changed_at = new Date().toISOString();
+    } else if (hookEvent === "WaitingForInput") {
+      updatePipelineItemActivity(db.value!, item.id, "unread");
+      item.activity = "unread";
+      item.activity_changed_at = new Date().toISOString();
+    } else if (hookEvent === "PostToolUse") {
+      updatePipelineItemActivity(db.value!, item.id, "working");
+      item.activity = "working";
+    }
+  });
+  unlisteners.push(unlistenHook);
+
+  const unlistenExit = await listen("session_exit", async (event: any) => {
+    const payload = event.payload || event;
+    const sessionId = payload.session_id;
+    if (!sessionId || !db.value) return;
+
+    const item = allItems.value.find((i) => i.id === sessionId);
+    if (!item) return;
+    const activity = selectedItemId.value === sessionId ? "idle" : "unread";
+    updatePipelineItemActivity(db.value!, item.id, activity);
+    item.activity = activity;
+    item.activity_changed_at = new Date().toISOString();
+  });
+  unlisteners.push(unlistenExit);
+
+  return unlisteners;
+}
+
+const eventUnlisteners: Array<() => void> = [];
+
+onMounted(async () => {
+  try {
+    const database = await initDatabase();
     db.value = database;
-    await runMigrations(db.value);
+    await runMigrations(database);
     await refreshRepos();
     await loadPreferences();
-
-    // Transition stale "working" items to "unread"
-    if (db.value) {
-      const workingItems = await db.value.select<PipelineItem>(
-        "SELECT * FROM pipeline_item WHERE activity = 'working'"
-      );
-      for (const item of workingItems) {
-        // Don't try to reattach on startup — it creates daemon connections
-        // that interfere with future PTY sessions. Just mark as unread.
-        await updatePipelineItemActivity(db.value, item.id, "unread");
-      }
-    }
-
-    // GC: remove done tasks older than gcAfterDays
-    if (db.value) {
-      const cutoff = new Date(Date.now() - gcAfterDays.value * 86400000).toISOString();
-      const stale = await db.value.select<PipelineItem>(
-        "SELECT * FROM pipeline_item WHERE stage = 'done' AND updated_at < ?",
-        [cutoff]
-      );
-      for (const item of stale) {
-        // Remove worktree
-        if (item.branch) {
-          for (const repo of repos.value) {
-            const worktreePath = `${repo.path}/.kanna-worktrees/${item.branch}`;
-            await invoke("git_worktree_remove", { repoPath: repo.path, path: worktreePath }).catch(() => {});
-          }
-        }
-        // Delete from DB
-        await db.value.execute("DELETE FROM pipeline_item WHERE id = ?", [item.id]);
-      }
-      if (stale.length > 0) {
-        console.log(`[gc] cleaned up ${stale.length} done task(s)`);
-      }
-    }
-
-    // Start periodic database backup (every 4 hours)
-    startPeriodicBackup(resolvedDbName, db);
-
-    // Load all items now that repos are loaded
+    await resetStaleActivity(database);
+    await gcStaleTasks(database);
     await refreshItems();
+    await restoreSelection(database);
+    await setWindowTitle();
 
-    // Restore persisted selection
-    if (db.value) {
-      const savedRepo = await getSetting(db.value, "selected_repo_id");
-      const savedItem = await getSetting(db.value, "selected_item_id");
-      if (savedRepo && repos.value.some((r) => r.id === savedRepo)) {
-        selectedRepoId.value = savedRepo;
-        if (savedItem && allItems.value.some((i) => i.id === savedItem)) {
-          selectedItemId.value = savedItem;
-        }
-      }
-    }
-
-    // Set window title for non-main branches
-    if (isTauri) {
-      try {
-        const info = await invoke<{ branch: string; commit_hash: string; version: string }>("git_app_info");
-        if (info.branch !== "main" && info.branch !== "master") {
-          const { getCurrentWindow } = await import("@tauri-apps/api/window");
-          await getCurrentWindow().setTitle(`Kanna — ${info.branch} (${info.version} @ ${info.commit_hash})`);
-        }
-      } catch {}
-    }
-
-    // Show keyboard shortcuts on startup unless user opted out
-    const hideShortcuts = await getSetting(db.value, "hideShortcutsOnStartup");
+    const hideShortcuts = await getSetting(database, "hideShortcutsOnStartup");
     hideShortcutsOnStartup.value = hideShortcuts === "true";
     if (!hideShortcutsOnStartup.value) {
       showShortcutsModal.value = true;
     }
 
-    // Listen for hook events from Claude (via daemon broadcast)
-    listen("hook_event", async (event: any) => {
-      const payload = event.payload || event;
-      const sessionId = payload.session_id;
-      const hookEvent = payload.event;
-      if (!sessionId || !db.value) return;
-
-      const item = allItems.value.find((i) => i.id === sessionId);
-      if (!item) return;
-
-      if (hookEvent === "Stop" || hookEvent === "StopFailure") {
-        const activity = selectedItemId.value === sessionId ? "idle" : "unread";
-        updatePipelineItemActivity(db.value!, item.id, activity);
-        item.activity = activity;
-        item.activity_changed_at = new Date().toISOString();
-      } else if (hookEvent === "WaitingForInput") {
-        updatePipelineItemActivity(db.value!, item.id, "unread");
-        item.activity = "unread";
-        item.activity_changed_at = new Date().toISOString();
-      } else if (hookEvent === "PostToolUse") {
-        updatePipelineItemActivity(db.value!, item.id, "working");
-        item.activity = "working";
-      }
-    });
-
-    // Listen for process exit (backup for when hooks don't fire)
-    listen("session_exit", async (event: any) => {
-      const payload = event.payload || event;
-      const sessionId = payload.session_id;
-      if (!sessionId || !db.value) return;
-
-      const item = allItems.value.find((i) => i.id === sessionId);
-      if (!item) return;
-      const activity = selectedItemId.value === sessionId ? "idle" : "unread";
-      updatePipelineItemActivity(db.value!, item.id, activity);
-      item.activity = activity;
-      item.activity_changed_at = new Date().toISOString();
-    });
+    eventUnlisteners.push(...await registerEventListeners());
   } catch (e) {
-    console.error("Failed to initialize database:", e);
+    console.error("Failed to initialize:", e);
+  }
+});
+
+onUnmounted(() => {
+  for (const unlisten of eventUnlisteners) {
+    unlisten();
   }
 });
 </script>
