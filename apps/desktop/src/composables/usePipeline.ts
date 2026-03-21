@@ -271,6 +271,7 @@ export function usePipeline(db: Ref<DbHandle | null>) {
       `- Work in your worktree. Never modify the user's local main.`,
       `- When in doubt, ask the user. Don't force-push, skip tests, or resolve ambiguous conflicts silently.`,
       `- Keep the user informed of progress but don't be verbose.`,
+      `- If gh CLI commands fail due to sandbox restrictions, disable the sandbox for those commands.`,
     ].join("\n");
 
     await createItem(repoId, repoPath, prompt, "pty", { stage: "merge" });
