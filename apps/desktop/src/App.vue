@@ -4,7 +4,7 @@ import { isTauri, getMockDatabase } from "./tauri-mock";
 import { invoke } from "./invoke";
 import { listen } from "./listen";
 import type { DbHandle, PipelineItem } from "@kanna/db";
-import { listPipelineItems, updatePipelineItemStage, updatePipelineItemActivity, getSetting, setSetting } from "@kanna/db";
+import { updatePipelineItemStage, updatePipelineItemActivity, getSetting, setSetting } from "@kanna/db";
 import { parseRepoConfig, type Stage } from "@kanna/core";
 import Sidebar from "./components/Sidebar.vue";
 import MainPanel from "./components/MainPanel.vue";
@@ -26,7 +26,7 @@ import { useResourceSweeper } from "./composables/useResourceSweeper";
 const db = ref<DbHandle | null>(null);
 
 const { repos, selectedRepoId, refresh: refreshRepos, importRepo } = useRepo(db);
-const { items, selectedItemId, loadItems, transition, createItem, spawnPtySession, startPrAgent, selectedItem, pinItem, unpinItem, reorderPinned, renameItem } = usePipeline(db);
+const { allItems, selectedItemId, loadAllItems, transition, createItem, spawnPtySession, startPrAgent, selectedItem, pinItem, unpinItem, reorderPinned, renameItem } = usePipeline(db);
 const {
   suspendAfterMinutes,
   killAfterMinutes,
@@ -70,39 +70,27 @@ const currentItem = computed(() => {
   return item && item.stage !== "done" ? item : null;
 });
 
-// Load pipeline items when selected repo changes
-watch(selectedRepoId, async (repoId) => {
-  if (repoId) {
-    await loadItems(repoId);
-  } else {
-    items.value = [];
-    selectedItemId.value = null;
-  }
-});
-
-// All pipeline items across all repos for sidebar display
-const allItems = ref<PipelineItem[]>([]);
-
-async function refreshAllItems() {
-  if (!db.value) return;
-  const allLoaded: PipelineItem[] = [];
-  for (const repo of repos.value) {
-    const repoItems = await listPipelineItems(db.value, repo.id);
-    allLoaded.push(...repoItems);
-  }
-  allItems.value = allLoaded;
+/** Reload allItems from DB for all known repos. */
+async function refreshItems() {
+  await loadAllItems(repos.value.map((r) => r.id));
 }
 
-watch([repos, selectedRepoId], refreshAllItems, { immediate: true });
+// Reload items whenever repos change
+watch(repos, refreshItems, { immediate: true });
 
-// Sort items the same way the sidebar does
+// Sort items the same way the sidebar does: pinned first (by pin_order), then unpinned (by activity, then timestamp).
+// Uses the same two-pass approach as Sidebar.vue's itemsForRepo() to guarantee identical ordering.
 function sortedItemsForCurrentRepo(): PipelineItem[] {
+  const repoItems = allItems.value.filter(
+    (item) => item.repo_id === selectedRepoId.value && item.stage !== "done"
+  );
+  const pinned = repoItems
+    .filter((i) => i.pinned)
+    .sort((a, b) => (a.pin_order ?? 0) - (b.pin_order ?? 0));
   const activityOrder: Record<string, number> = { idle: 0, unread: 1, working: 2 };
-  return allItems.value
-    .filter((item) => item.repo_id === selectedRepoId.value && item.stage !== "done")
+  const unpinned = repoItems
+    .filter((i) => !i.pinned)
     .sort((a, b) => {
-      if (a.pinned !== b.pinned) return b.pinned - a.pinned;
-      if (a.pinned && b.pinned) return (a.pin_order ?? 0) - (b.pin_order ?? 0);
       const ao = activityOrder[a.activity || "idle"] ?? 0;
       const bo = activityOrder[b.activity || "idle"] ?? 0;
       if (ao !== bo) return ao - bo;
@@ -110,6 +98,7 @@ function sortedItemsForCurrentRepo(): PipelineItem[] {
       const bTime = b.activity_changed_at || b.created_at;
       return bTime.localeCompare(aTime);
     });
+  return [...pinned, ...unpinned];
 }
 
 // Keyboard shortcuts
@@ -161,8 +150,7 @@ async function handleCloseTask() {
     const remaining = currentItems.filter((i) => i.id !== item.id);
     const firstRead = remaining.find((i) => (i as any).activity === "idle" || !(i as any).activity);
     selectedItemId.value = (firstRead || remaining[0])?.id || null;
-    await loadItems(selectedRepo.value.id);
-    await refreshAllItems();
+    await refreshItems();
   } catch (e) {
     console.error("Close failed:", e);
   }
@@ -215,8 +203,7 @@ const keyboardActions = {
     await invoke("kill_session", { sessionId: originalId }).catch(() => {});
     await invoke("kill_session", { sessionId: `shell-${originalId}` }).catch(() => {});
     await updatePipelineItemStage(db.value!, originalId, "done");
-    await loadItems(repoId);
-    await refreshAllItems();
+    await refreshItems();
   },
   closeTask: handleCloseTask,
   navigateUp: () => navigateItems(-1),
@@ -282,7 +269,7 @@ async function handleNewTaskSubmit(prompt: string) {
   try {
     await createItem(selectedRepoId.value, repo.path, prompt);
     showNewTaskModal.value = false;
-    await refreshAllItems();
+    await refreshItems();
   } catch (e: any) {
     console.error("Task creation failed:", e);
     alert(`Task creation failed: ${e?.message || e}`);
@@ -291,22 +278,18 @@ async function handleNewTaskSubmit(prompt: string) {
 
 async function handlePinItem(itemId: string, position: number) {
   await pinItem(itemId, position);
-  await refreshAllItems();
 }
 
 async function handleUnpinItem(itemId: string) {
   await unpinItem(itemId);
-  await refreshAllItems();
 }
 
 async function handleReorderPinned(repoId: string, orderedIds: string[]) {
   await reorderPinned(repoId, orderedIds);
-  await refreshAllItems();
 }
 
 async function handleRenameItem(itemId: string, displayName: string | null) {
   await renameItem(itemId, displayName);
-  await refreshAllItems();
 }
 
 async function handleImportRepo(path: string, name: string, defaultBranch: string) {
@@ -479,14 +462,16 @@ onMounted(async () => {
       }
     }
 
+    // Load all items now that repos are loaded
+    await refreshItems();
+
     // Restore persisted selection
     if (db.value) {
       const savedRepo = await getSetting(db.value, "selected_repo_id");
       const savedItem = await getSetting(db.value, "selected_item_id");
       if (savedRepo && repos.value.some((r) => r.id === savedRepo)) {
         selectedRepoId.value = savedRepo;
-        await loadItems(savedRepo);
-        if (savedItem && items.value.some((i) => i.id === savedItem)) {
+        if (savedItem && allItems.value.some((i) => i.id === savedItem)) {
           selectedItemId.value = savedItem;
         }
       }
@@ -529,11 +514,11 @@ onMounted(async () => {
         const activity = selectedItemId.value === sessionId ? "idle" : "unread";
         updatePipelineItemActivity(db.value!, item.id, activity);
         item.activity = activity;
-        refreshAllItems();
+        item.activity_changed_at = new Date().toISOString();
       } else if (hookEvent === "WaitingForInput") {
         updatePipelineItemActivity(db.value!, item.id, "unread");
         item.activity = "unread";
-        refreshAllItems();
+        item.activity_changed_at = new Date().toISOString();
       } else if (hookEvent === "PostToolUse") {
         updatePipelineItemActivity(db.value!, item.id, "working");
         item.activity = "working";
@@ -556,7 +541,7 @@ onMounted(async () => {
       const activity = selectedItemId.value === sessionId ? "idle" : "unread";
       updatePipelineItemActivity(db.value!, item.id, activity);
       item.activity = activity;
-      refreshAllItems();
+      item.activity_changed_at = new Date().toISOString();
     });
   } catch (e) {
     console.error("Failed to initialize database:", e);
@@ -588,7 +573,7 @@ onMounted(async () => {
       :spawn-pty-session="spawnPtySession"
       :maximized="maximized"
       @close-task="handleCloseTask"
-      @agent-completed="refreshAllItems"
+      @agent-completed="refreshItems"
     />
 
     <NewTaskModal

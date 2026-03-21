@@ -8,17 +8,23 @@ import { canTransition, parseRepoConfig, type RepoConfig, type Stage } from "@ka
 export type AgentType = "pty" | "sdk";
 
 export function usePipeline(db: Ref<DbHandle | null>) {
-  const items = ref<PipelineItem[]>([]);
+  const allItems = ref<PipelineItem[]>([]);
   const selectedItemId = ref<string | null>(null);
 
-  async function loadItems(repoId: string) {
+  /** Load items for all repos into the single allItems list. */
+  async function loadAllItems(repoIds: string[]) {
     if (!db.value) return;
-    items.value = await listPipelineItems(db.value, repoId);
+    const loaded: PipelineItem[] = [];
+    for (const repoId of repoIds) {
+      const repoItems = await listPipelineItems(db.value, repoId);
+      loaded.push(...repoItems);
+    }
+    allItems.value = loaded;
   }
 
   async function transition(itemId: string, toStage: Stage) {
     if (!db.value) return;
-    const item = items.value.find((i) => i.id === itemId);
+    const item = allItems.value.find((i) => i.id === itemId);
     if (!item) return;
     if (!canTransition(item.stage as Stage, toStage)) return;
     await updatePipelineItemStage(db.value, itemId, toStage);
@@ -50,7 +56,7 @@ export function usePipeline(db: Ref<DbHandle | null>) {
 
     // 2. Assign port offset (lowest unused across all items)
     const usedOffsets = new Set(
-      items.value.map((i) => i.port_offset).filter((o): o is number => o != null)
+      allItems.value.map((i) => i.port_offset).filter((o): o is number => o != null)
     );
     let portOffset = 1;
     while (usedOffsets.has(portOffset)) portOffset++;
@@ -115,8 +121,6 @@ export function usePipeline(db: Ref<DbHandle | null>) {
       });
     }
 
-    // 7. Refresh pipeline items and select the new one
-    await loadItems(repoId);
     selectedItemId.value = id;
   }
 
@@ -155,7 +159,7 @@ export function usePipeline(db: Ref<DbHandle | null>) {
     // Build env from item's stored port_env + setup from config
     const env: Record<string, string> = { TERM: "xterm-256color", TERM_PROGRAM: "vscode" };
     let setupCmds: string[] = [];
-    const item = items.value.find((i) => i.id === sessionId);
+    const item = allItems.value.find((i) => i.id === sessionId);
     if (item) {
       // Port env vars (computed at task creation, stored in DB)
       if (item.port_env) {
@@ -199,7 +203,7 @@ export function usePipeline(db: Ref<DbHandle | null>) {
 
   async function startPrAgent(itemId: string, repoId: string, repoPath: string) {
     if (!db.value) return;
-    const item = items.value.find((i) => i.id === itemId);
+    const item = allItems.value.find((i) => i.id === itemId);
     if (!item?.branch) return;
 
     const prompt = [
@@ -216,7 +220,7 @@ export function usePipeline(db: Ref<DbHandle | null>) {
   async function pinItem(itemId: string, position: number) {
     if (!db.value) return;
     await pinPipelineItem(db.value, itemId, position);
-    const item = items.value.find((i) => i.id === itemId);
+    const item = allItems.value.find((i) => i.id === itemId);
     if (item) {
       item.pinned = 1;
       item.pin_order = position;
@@ -226,7 +230,7 @@ export function usePipeline(db: Ref<DbHandle | null>) {
   async function unpinItem(itemId: string) {
     if (!db.value) return;
     await unpinPipelineItem(db.value, itemId);
-    const item = items.value.find((i) => i.id === itemId);
+    const item = allItems.value.find((i) => i.id === itemId);
     if (item) {
       item.pinned = 0;
       item.pin_order = null;
@@ -236,7 +240,7 @@ export function usePipeline(db: Ref<DbHandle | null>) {
   async function renameItem(itemId: string, displayName: string | null) {
     if (!db.value) return;
     await updatePipelineItemDisplayName(db.value, itemId, displayName);
-    const item = items.value.find((i) => i.id === itemId);
+    const item = allItems.value.find((i) => i.id === itemId);
     if (item) item.display_name = displayName;
   }
 
@@ -244,20 +248,20 @@ export function usePipeline(db: Ref<DbHandle | null>) {
     if (!db.value) return;
     await reorderPinnedItems(db.value, repoId, orderedIds);
     orderedIds.forEach((id, index) => {
-      const item = items.value.find((i) => i.id === id);
+      const item = allItems.value.find((i) => i.id === id);
       if (item) item.pin_order = index;
     });
   }
 
   function selectedItem(): PipelineItem | null {
     if (!selectedItemId.value) return null;
-    return items.value.find((i) => i.id === selectedItemId.value) ?? null;
+    return allItems.value.find((i) => i.id === selectedItemId.value) ?? null;
   }
 
   return {
-    items,
+    allItems,
     selectedItemId,
-    loadItems,
+    loadAllItems,
     transition,
     createItem,
     spawnPtySession,
