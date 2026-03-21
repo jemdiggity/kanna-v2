@@ -46,6 +46,8 @@ export const useKannaStore = defineStore("kanna", () => {
   const selectedItemId = ref<string | null>(null);
 
   // ── Preferences ──────────────────────────────────────────────────
+  const suspendAfterMinutes = ref(30);
+  const killAfterMinutes = ref(60);
   const ideCommand = ref("code");
   const gcAfterDays = ref(3);
   const hideShortcutsOnStartup = ref(false);
@@ -443,6 +445,10 @@ export const useKannaStore = defineStore("kanna", () => {
 
   // ── Actions: Preferences ─────────────────────────────────────────
   async function loadPreferences() {
+    const sa = await getSetting(_db, "suspendAfterMinutes");
+    if (sa) suspendAfterMinutes.value = parseInt(sa, 10) || 30;
+    const ka = await getSetting(_db, "killAfterMinutes");
+    if (ka) killAfterMinutes.value = parseInt(ka, 10) || 60;
     const ide = await getSetting(_db, "ideCommand");
     if (ide) ideCommand.value = ide;
     const gc = await getSetting(_db, "gcAfterDays");
@@ -520,15 +526,22 @@ export const useKannaStore = defineStore("kanna", () => {
       await updatePipelineItemActivity(_db, item.id, "unread");
     }
 
+    // Eager load repos + items for GC and selection restore
+    // (computedAsync hasn't fired yet — repos.value is still [])
+    const eagerRepos = await listRepos(_db);
+    const eagerItems: PipelineItem[] = [];
+    for (const repo of eagerRepos) {
+      eagerItems.push(...await listPipelineItems(_db, repo.id));
+    }
+
     // GC: remove done tasks older than gcAfterDays
     const cutoff = new Date(Date.now() - gcAfterDays.value * 86400000).toISOString();
-    const stale = await _db.select<PipelineItem>(
-      "SELECT * FROM pipeline_item WHERE stage = 'done' AND updated_at < ?",
-      [cutoff]
+    const stale = eagerItems.filter(
+      (i) => i.stage === "done" && i.updated_at < cutoff
     );
     for (const item of stale) {
       if (item.branch) {
-        const repo = repos.value.find((r) => r.id === item.repo_id);
+        const repo = eagerRepos.find((r) => r.id === item.repo_id);
         if (repo) {
           const worktreePath = `${repo.path}/.kanna-worktrees/${item.branch}`;
           await invoke("git_worktree_remove", { repoPath: repo.path, path: worktreePath }).catch((e: unknown) =>
@@ -542,15 +555,15 @@ export const useKannaStore = defineStore("kanna", () => {
       console.log(`[gc] cleaned up ${stale.length} done task(s)`);
     }
 
-    // Trigger initial data load
+    // Trigger reactive data load
     bump();
 
-    // Restore persisted selection
+    // Restore persisted selection (use eager data since computedAsync is still resolving)
     const savedRepo = await getSetting(_db, "selected_repo_id");
     const savedItem = await getSetting(_db, "selected_item_id");
-    if (savedRepo && repos.value.some((r) => r.id === savedRepo)) {
+    if (savedRepo && eagerRepos.some((r) => r.id === savedRepo)) {
       selectedRepoId.value = savedRepo;
-      if (savedItem && items.value.some((i) => i.id === savedItem)) {
+      if (savedItem && eagerItems.some((i) => i.id === savedItem)) {
         selectedItemId.value = savedItem;
       }
     }
@@ -598,6 +611,7 @@ export const useKannaStore = defineStore("kanna", () => {
   return {
     // State
     repos, items, selectedRepoId, selectedItemId,
+    suspendAfterMinutes, killAfterMinutes,
     ideCommand, gcAfterDays, hideShortcutsOnStartup,
     lastUndoAction, refreshKey,
     // Getters
