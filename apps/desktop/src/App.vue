@@ -533,8 +533,8 @@ onMounted(async () => {
       if (!item) return;
 
       if (hookEvent === "Stop" || hookEvent === "StopFailure") {
-        // Auto-transition pr → done
-        const becameDone = item.stage === "pr" || item.stage === "merge";
+        // Auto-transition pr → done (merge transitions on session_exit only — it's interactive)
+        const becameDone = item.stage === "pr";
         if (becameDone) {
           await updatePipelineItemStage(db.value!, item.id, "done");
           item.stage = "done";
