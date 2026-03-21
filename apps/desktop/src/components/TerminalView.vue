@@ -43,5 +43,6 @@ onUnmounted(() => {
   flex: 1;
   overflow: hidden;
   background: #1e1e1e;
+  padding: 8px 12px;
 }
 </style>
