@@ -14,6 +14,7 @@ import FilePreviewModal from "./components/FilePreviewModal.vue";
 import DiffModal from "./components/DiffModal.vue";
 import ShellModal from "./components/ShellModal.vue";
 import CommandPaletteModal from "./components/CommandPaletteModal.vue";
+import BlockerSelectModal from "./components/BlockerSelectModal.vue";
 import { useKeyboardShortcuts, type ActionName } from "./composables/useKeyboardShortcuts";
 import { startPeriodicBackup } from "./composables/useBackup";
 import { useKannaStore } from "./stores/kanna";
@@ -62,6 +63,38 @@ function handleBlockTask() {
 function handleEditBlockedTask() {
   blockerSelectMode.value = "edit";
   showBlockerSelect.value = true;
+}
+
+const blockerCandidates = computed(() => {
+  const item = store.currentItem;
+  return store.items.filter((i) =>
+    i.id !== item?.id &&
+    (i.stage === "in_progress" || i.stage === "blocked") &&
+    i.repo_id === store.selectedRepoId
+  );
+});
+
+const preselectedBlockerIds = computedAsync(async () => {
+  const item = store.currentItem;
+  if (!item || item.stage !== "blocked") return [];
+  const blockers = await store.listBlockersForItem(item.id);
+  return blockers.map((b: any) => b.id);
+}, []);
+
+async function onBlockerConfirm(selectedIds: string[]) {
+  showBlockerSelect.value = false;
+  if (blockerSelectMode.value === "block") {
+    await store.blockTask(selectedIds);
+  } else {
+    const item = store.currentItem;
+    if (item) {
+      try {
+        await store.editBlockedTask(item.id, selectedIds);
+      } catch (e: any) {
+        alert(e.message);
+      }
+    }
+  }
 }
 
 const paletteExtraCommands = computed(() => {
@@ -259,6 +292,14 @@ onMounted(async () => {
       :worktree-path="store.currentItem?.branch ? `${store.selectedRepo.path}/.kanna-worktrees/${store.currentItem.branch}` : store.selectedRepo.path"
       :ide-command="store.ideCommand"
       @close="showFilePreviewModal = false"
+    />
+    <BlockerSelectModal
+      v-if="showBlockerSelect"
+      :candidates="blockerCandidates"
+      :preselected="blockerSelectMode === 'edit' ? preselectedBlockerIds : undefined"
+      :title="blockerSelectMode === 'block' ? 'Select blocking tasks' : 'Edit blocking tasks'"
+      @confirm="onBlockerConfirm"
+      @cancel="showBlockerSelect = false"
     />
   </div>
 </template>
