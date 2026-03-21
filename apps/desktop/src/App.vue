@@ -515,21 +515,10 @@ onMounted(async () => {
       if (!item) return;
 
       if (hookEvent === "Stop" || hookEvent === "StopFailure") {
-        // Auto-transition pr → done
-        const becameDone = item.stage === "pr";
-        if (becameDone) {
-          await updatePipelineItemStage(db.value!, item.id, "done");
-          item.stage = "done";
-        }
         const activity = selectedItemId.value === sessionId ? "idle" : "unread";
         updatePipelineItemActivity(db.value!, item.id, activity);
         item.activity = activity;
         item.activity_changed_at = new Date().toISOString();
-        // Auto-select next task if the done task was selected
-        if (becameDone && selectedItemId.value === sessionId) {
-          const remaining = sortedItemsForCurrentRepo();
-          selectedItemId.value = remaining[0]?.id || null;
-        }
       } else if (hookEvent === "WaitingForInput") {
         updatePipelineItemActivity(db.value!, item.id, "unread");
         item.activity = "unread";
@@ -548,21 +537,10 @@ onMounted(async () => {
 
       const item = allItems.value.find((i) => i.id === sessionId);
       if (!item) return;
-      // Auto-transition pr → done on exit too
-      const becameDone = item.stage === "pr";
-      if (becameDone) {
-        await updatePipelineItemStage(db.value!, item.id, "done");
-        item.stage = "done";
-      }
       const activity = selectedItemId.value === sessionId ? "idle" : "unread";
       updatePipelineItemActivity(db.value!, item.id, activity);
       item.activity = activity;
       item.activity_changed_at = new Date().toISOString();
-      // Auto-select next task if the done task was selected
-      if (becameDone && selectedItemId.value === sessionId) {
-        const remaining = sortedItemsForCurrentRepo();
-        selectedItemId.value = remaining[0]?.id || null;
-      }
     });
   } catch (e) {
     console.error("Failed to initialize database:", e);
