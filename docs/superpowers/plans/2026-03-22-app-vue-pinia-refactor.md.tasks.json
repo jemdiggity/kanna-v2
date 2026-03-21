@@ -1,0 +1,13 @@
+{
+  "planPath": "docs/superpowers/plans/2026-03-22-app-vue-pinia-refactor.md",
+  "tasks": [
+    {"id": 0, "subject": "Task 0: Install dependencies (pinia, @vueuse/core)", "status": "pending"},
+    {"id": 1, "subject": "Task 1: Create DB bootstrap module (stores/db.ts)", "status": "pending", "blockedBy": [0]},
+    {"id": 2, "subject": "Task 2: Create Pinia store (stores/kanna.ts)", "status": "pending", "blockedBy": [0, 1]},
+    {"id": 3, "subject": "Task 3: Update main.ts bootstrap", "status": "pending", "blockedBy": [1, 2]},
+    {"id": 4, "subject": "Task 4: Rewrite App.vue as UI shell", "status": "pending", "blockedBy": [2, 3]},
+    {"id": 5, "subject": "Task 5: Delete old composables", "status": "pending", "blockedBy": [4]},
+    {"id": 6, "subject": "Task 6: Type-check and smoke test", "status": "pending", "blockedBy": [4, 5]}
+  ],
+  "lastUpdated": "2026-03-22T00:00:00Z"
+}
