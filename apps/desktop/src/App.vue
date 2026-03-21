@@ -25,7 +25,7 @@ import { useResourceSweeper } from "./composables/useResourceSweeper";
 
 const db = ref<DbHandle | null>(null);
 
-const { repos, selectedRepoId, refresh: refreshRepos, importRepo } = useRepo(db);
+const { repos, selectedRepoId, refresh: refreshRepos, importRepo, hideRepo, unhideRepo } = useRepo(db);
 const { allItems, selectedItemId, loadAllItems, transition, createItem, spawnPtySession, startPrAgent, selectedItem, pinItem, unpinItem, reorderPinned, renameItem } = usePipeline(db);
 const {
   suspendAfterMinutes,
@@ -120,6 +120,7 @@ function navigateItems(direction: -1 | 1) {
 }
 
 async function handleCloseTask() {
+  lastUndoAction.value = null;
   const item = selectedItem();
   if (!item || !selectedRepo.value) return;
   try {
@@ -156,6 +157,8 @@ async function handleCloseTask() {
     console.error("Close failed:", e);
   }
 }
+
+const lastUndoAction = ref<{ type: 'hideRepo'; repoId: string } | null>(null);
 
 const keyboardActions = {
   newTask: () => { showNewTaskModal.value = true; },
@@ -208,6 +211,12 @@ const keyboardActions = {
   },
   closeTask: handleCloseTask,
   undoClose: async () => {
+    if (lastUndoAction.value?.type === 'hideRepo') {
+      const repoId = lastUndoAction.value.repoId;
+      lastUndoAction.value = null;
+      await unhideRepo(repoId);
+      return;
+    }
     if (!db.value) return;
     try {
       const rows = await db.value.select<PipelineItem[]>(
@@ -262,6 +271,11 @@ function focusAgentTerminal() {
 async function handleSelectRepo(repoId: string) {
   selectedRepoId.value = repoId;
   if (db.value) setSetting(db.value, "selected_repo_id", repoId);
+}
+
+async function handleHideRepo(repoId: string) {
+  await hideRepo(repoId);
+  lastUndoAction.value = { type: 'hideRepo', repoId };
 }
 
 function handleSelectItem(itemId: string) {
@@ -401,6 +415,9 @@ async function runMigrations(database: DbHandle) {
   } catch { /* column already exists */ }
   try {
     await database.execute(`ALTER TABLE pipeline_item ADD COLUMN display_name TEXT`);
+  } catch { /* column already exists */ }
+  try {
+    await database.execute(`ALTER TABLE repo ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0`);
   } catch { /* column already exists */ }
 
   // Pipeline simplification: map old stages to new
@@ -599,6 +616,7 @@ onMounted(async () => {
       @unpin-item="handleUnpinItem"
       @reorder-pinned="handleReorderPinned"
       @rename-item="handleRenameItem"
+      @hide-repo="handleHideRepo"
     />
     <MainPanel
       :item="currentItem"
