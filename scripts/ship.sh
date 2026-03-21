@@ -207,6 +207,10 @@ for i in "${!ARCHS[@]}"; do
         cd "$ROOT/apps/desktop"
         # sccache doesn't work inside Tauri's build subprocess
         export RUSTC_WRAPPER=""
+        # x86_64 cross-compile needs x86 Homebrew OpenSSL
+        if [[ "$ARCH" = "x86_64-apple-darwin" && -d "/usr/local/opt/openssl@3" ]]; then
+            export OPENSSL_DIR="/usr/local/opt/openssl@3"
+        fi
         if [[ "$DRY_RUN" = true ]]; then
             # Unset notarization vars so Tauri signs but doesn't notarize
             unset APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID
