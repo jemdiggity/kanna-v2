@@ -2,7 +2,6 @@
 import type { PipelineItem } from "@kanna/db";
 import TaskHeader from "./TaskHeader.vue";
 import TerminalTabs from "./TerminalTabs.vue";
-import ActionBar from "./ActionBar.vue";
 
 defineProps<{
   item: PipelineItem | null;
@@ -12,9 +11,6 @@ defineProps<{
 }>();
 
 const emit = defineEmits<{
-  (e: "make-pr"): void;
-  (e: "merge"): void;
-  (e: "close-task"): void;
   (e: "agent-completed"): void;
 }>();
 </script>
@@ -31,13 +27,6 @@ const emit = defineEmits<{
         :prompt="item.prompt || ''"
         :spawn-pty-session="spawnPtySession"
         @agent-completed="emit('agent-completed')"
-      />
-      <ActionBar
-        v-if="!maximized"
-        :item="item"
-        @make-pr="emit('make-pr')"
-        @merge="emit('merge')"
-        @close-task="emit('close-task')"
       />
     </template>
     <div v-else class="empty-state">

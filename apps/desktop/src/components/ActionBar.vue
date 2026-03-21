@@ -8,33 +8,21 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: "make-pr"): void;
-  (e: "merge"): void;
-  (e: "close-task"): void;
 }>();
 
 const showMakePR = computed(() => {
-  return props.item.stage === "in_progress" && !props.item.pr_number;
-});
-
-const showMerge = computed(() => {
-  return props.item.stage === "needs_review";
-});
-
-const showClose = computed(() => {
-  return (
-    props.item.stage !== "merged" && props.item.stage !== "closed"
-  );
+  return props.item.stage === "in_progress";
 });
 </script>
 
 <template>
   <div class="action-bar">
     <button
-      v-if="showMerge"
-      class="btn btn-success"
-      @click="emit('merge')"
+      v-if="showMakePR"
+      class="btn btn-primary"
+      @click="emit('make-pr')"
     >
-      Merge
+      Make PR
     </button>
   </div>
 </template>

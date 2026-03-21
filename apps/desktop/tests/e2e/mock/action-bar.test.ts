@@ -42,38 +42,22 @@ describe("action bar", () => {
     expect(el).toBeTruthy();
   });
 
-  it("shows Close button for in_progress task", async () => {
-    const el = await client.waitForText(".action-bar", "Close");
-    expect(el).toBeTruthy();
-  });
-
-  it("clicking Close changes stage to Closed", async () => {
-    const buttons = await client.findElements(".action-bar button");
-    for (const id of buttons) {
-      const text = await client.getText(id);
-      if (text.trim() === "Close") {
-        await client.click(id);
-        break;
-      }
-    }
-
-    // Wait for stage to update in sidebar
-    await client.waitForText(".sidebar", "Closed", 5000);
-
-    // Verify via DB query
-    const stage = await client.executeSync<string>(
-      `const ctx = document.getElementById("app").__vue_app__._instance.setupState;
+  it("does not show Make PR for done task", async () => {
+    // Transition to done
+    await client.executeAsync<string>(
+      `const cb = arguments[arguments.length - 1];
+       const ctx = document.getElementById("app").__vue_app__._instance.setupState;
+       const db = ctx.db.value || ctx.db;
        const item = ctx.selectedItem();
-       return item ? (item.stage?.value || item.stage) : null;`
+       db.execute("UPDATE pipeline_item SET stage = 'done' WHERE id = ?", [item.id])
+         .then(function() { return ctx.loadItems(ctx.selectedRepoId.value); })
+         .then(function() { return ctx.refreshAllItems(); })
+         .then(function() { cb("ok"); })
+         .catch(function(e) { cb("err:" + e); });`
     );
-    expect(stage).toBe("closed");
-  });
-
-  it("hides Make PR and Close for closed task", async () => {
     await Bun.sleep(300);
     const actionBar = await client.findElement(".action-bar");
     const text = await client.getText(actionBar);
     expect(text).not.toContain("Make PR");
-    expect(text).not.toContain("Close");
   });
 });

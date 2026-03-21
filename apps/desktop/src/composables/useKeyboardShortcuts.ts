@@ -5,7 +5,6 @@ export type ActionName =
   | "newWindow"
   | "openFile"
   | "makePR"
-  | "merge"
   | "closeTask"
   | "undoClose"
   | "navigateUp"
@@ -17,7 +16,8 @@ export type ActionName =
   | "showDiff"
   | "toggleMaximize"
   | "showShortcuts"
-  | "openPreferences";
+  | "openPreferences"
+  | "commandPalette";
 
 export type KeyboardActions = Record<ActionName, () => void>;
 
@@ -46,7 +46,6 @@ export const shortcuts: ShortcutDef[] = [
   { action: "openFile",   label: "File Picker",        group: "Pipeline",   key: "p",                            meta: true,               display: "⌘P" },
   { action: "openInIDE",  label: "Open in IDE",        group: "Pipeline",   key: "o",                            meta: true,               display: "⌘O" },
   { action: "makePR",     label: "Make PR",           group: "Pipeline",   key: "s",                            meta: true, display: "⌘S" },
-  { action: "merge",      label: "Merge PR",          group: "Pipeline",   key: "m",                            meta: true,               display: "⌘M" },
   { action: "closeTask",  label: "Close / Reject",    group: "Pipeline",   key: ["Backspace", "Delete"],        meta: true,               display: "⌘⌫" },
   { action: "undoClose",  label: "Undo Close",        group: "Pipeline",   key: ["Z", "z"],                     meta: true,               display: "⌘Z" },
   // Window — disabled until #24 (new window state sharing)
@@ -61,6 +60,7 @@ export const shortcuts: ShortcutDef[] = [
   { action: "showDiff",       label: "View Diff",           group: "Help", key: "d",                            meta: true, display: "⌘D" },
   { action: "showShortcuts",  label: "Keyboard Shortcuts",  group: "Help", key: "/",                            meta: true,               display: "⌘/" },
   { action: "openPreferences", label: "Preferences",        group: "Help", key: ",",                            meta: true,               display: "⌘," },
+  { action: "commandPalette",  label: "Command Palette",    group: "Help", key: ["P", "p"],                     meta: true, shift: true,  display: "⇧⌘P" },
   // Window
   { action: "toggleMaximize", label: "Maximize",         group: "Window",     key: "Enter",                        meta: true, shift: true,  display: "⇧⌘Enter" },
   // Escape is special — no meta required

@@ -38,12 +38,15 @@ watch(
       });
     }
 
-    // Returning to an already-mounted terminal: fit + SIGWINCH
+    // Returning to an already-mounted terminal: just fit + focus.
+    // xterm.js buffer is preserved via v-show, so no SIGWINCH needed.
+    // ResizeObserver handles fit when container becomes visible, but we
+    // call fit() explicitly for the case where dimensions haven't changed.
     if (newId !== oldId && visitedPtySessions.value.has(newId)) {
       nextTick(() => {
         const ref = termRefs.value[newId];
         if (ref) {
-          (ref as any).redraw?.();
+          (ref as any).fit?.();
           (ref as any).focus?.();
         }
       });

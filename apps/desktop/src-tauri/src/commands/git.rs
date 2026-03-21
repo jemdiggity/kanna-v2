@@ -245,9 +245,14 @@ pub fn git_worktree_add(
     repo_path: String,
     branch: String,
     path: String,
+    start_point: Option<String>,
 ) -> Result<String, String> {
+    let mut args = vec!["worktree".to_string(), "add".to_string(), "-b".to_string(), branch, path.clone()];
+    if let Some(sp) = start_point {
+        args.push(sp);
+    }
     let output = Command::new("git")
-        .args(["worktree", "add", "-b", &branch, &path])
+        .args(&args)
         .current_dir(&repo_path)
         .output()
         .map_err(|e| format!("failed to run git worktree add: {}", e))?;

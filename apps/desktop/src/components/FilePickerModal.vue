@@ -16,6 +16,7 @@ const query = ref("");
 const files = ref<string[]>([]);
 const selectedIndex = ref(0);
 const inputRef = ref<HTMLInputElement | null>(null);
+const mouseMoved = ref(false);
 
 const filtered = computed(() => {
   const q = query.value.toLowerCase();
@@ -70,7 +71,7 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="modal-overlay" @click.self="emit('close')" @keydown="handleKeydown">
+  <div class="modal-overlay" @click.self="emit('close')" @keydown="handleKeydown" @mousemove.once="mouseMoved = true">
     <div class="picker-modal">
       <input
         ref="inputRef"
@@ -86,7 +87,7 @@ onMounted(async () => {
           class="file-item"
           :class="{ selected: i === selectedIndex }"
           @click="selectFile(file)"
-          @mouseenter="selectedIndex = i"
+          @mouseenter="mouseMoved && (selectedIndex = i)"
         >
           {{ file }}
         </div>

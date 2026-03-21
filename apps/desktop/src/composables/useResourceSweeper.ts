@@ -38,7 +38,7 @@ export function useResourceSweeper(
       const oldItems = await database.select<{ id: string; branch: string; repo_path: string }>(
         `SELECT pi.id, pi.branch, r.path as repo_path FROM pipeline_item pi
          JOIN repo r ON pi.repo_id = r.id
-         WHERE pi.stage IN ('merged', 'closed')
+         WHERE pi.stage = 'done'
          AND pi.updated_at < ?`,
         [threeDaysAgo]
       )

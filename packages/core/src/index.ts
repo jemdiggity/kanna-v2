@@ -2,10 +2,6 @@
 export * from "./pipeline/types.js";
 export * from "./pipeline/transitions.js";
 
-// GitHub
-export * from "./github/types.js";
-export * from "./github/client.js";
-
 // Slack
 export * from "./slack/client.js";
 
@@ -17,5 +13,3 @@ export * from "./config/types.js";
 export * from "./config/parser.js";
 export * from "./config/repo-config.js";
 
-// PR Workflow
-export * from "./pr-workflow/workflow.js";

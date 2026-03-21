@@ -236,7 +236,7 @@ describe("pipeline_item queries", () => {
       issue_number: 42,
       issue_title: "Fix bug",
       prompt: null,
-      stage: "queued",
+      stage: "in_progress",
       pr_number: null,
       pr_url: null,
       branch: null,
@@ -244,7 +244,7 @@ describe("pipeline_item queries", () => {
     });
     const items = await listPipelineItems(db, "r1");
     expect(items).toHaveLength(1);
-    expect(items[0].stage).toBe("queued");
+    expect(items[0].stage).toBe("in_progress");
   });
 
   it("updatePipelineItemStage updates the stage", async () => {
@@ -254,7 +254,7 @@ describe("pipeline_item queries", () => {
       issue_number: null,
       issue_title: null,
       prompt: "do it",
-      stage: "queued",
+      stage: "in_progress",
       pr_number: null,
       pr_url: null,
       branch: null,

@@ -5,7 +5,7 @@ import { invoke } from "./invoke";
 import { listen } from "./listen";
 import type { DbHandle, PipelineItem } from "@kanna/db";
 import { listPipelineItems, updatePipelineItemStage, updatePipelineItemActivity, getSetting, setSetting } from "@kanna/db";
-import type { Stage } from "@kanna/core";
+import { parseRepoConfig, type Stage } from "@kanna/core";
 import Sidebar from "./components/Sidebar.vue";
 import MainPanel from "./components/MainPanel.vue";
 import NewTaskModal from "./components/NewTaskModal.vue";
@@ -16,17 +16,17 @@ import FilePickerModal from "./components/FilePickerModal.vue";
 import FilePreviewModal from "./components/FilePreviewModal.vue";
 import DiffModal from "./components/DiffModal.vue";
 import ShellModal from "./components/ShellModal.vue";
+import CommandPaletteModal from "./components/CommandPaletteModal.vue";
 import { useRepo } from "./composables/useRepo";
 import { usePipeline } from "./composables/usePipeline";
 import { usePreferences } from "./composables/usePreferences";
-import { useKeyboardShortcuts } from "./composables/useKeyboardShortcuts";
+import { useKeyboardShortcuts, type ActionName } from "./composables/useKeyboardShortcuts";
 import { useResourceSweeper } from "./composables/useResourceSweeper";
-import { usePRWorkflow } from "./composables/usePRWorkflow";
 
 const db = ref<DbHandle | null>(null);
 
 const { repos, selectedRepoId, refresh: refreshRepos, importRepo } = useRepo(db);
-const { items, selectedItemId, loadItems, transition, createItem, spawnPtySession, selectedItem, pinItem, unpinItem, reorderPinned } = usePipeline(db);
+const { items, selectedItemId, loadItems, transition, createItem, spawnPtySession, startPrAgent, selectedItem, pinItem, unpinItem, reorderPinned, renameItem } = usePipeline(db);
 const {
   suspendAfterMinutes,
   killAfterMinutes,
@@ -50,20 +50,17 @@ const selectedRepo = computed(() =>
   repos.value.find((r) => r.id === selectedRepoId.value) ?? null
 );
 
-// PR workflow — only instantiate when db is available
-const prWorkflow = computed(() =>
-  db.value ? usePRWorkflow(db.value) : null
-);
-
 const showNewTaskModal = ref(false);
 const showImportRepoModal = ref(false);
 const showPreferencesPanel = ref(false);
 const showShortcutsModal = ref(false);
+const hideShortcutsOnStartup = ref(false);
 const showFilePickerModal = ref(false);
 const showFilePreviewModal = ref(false);
 const previewFilePath = ref("");
 const showDiffModal = ref(false);
 const showShellModal = ref(false);
+const showCommandPalette = ref(false);
 const diffScopes = new Map<string, "branch" | "commit" | "working">();
 const zenMode = ref(false);
 const maximized = ref(false);
@@ -71,7 +68,7 @@ const lastKilledPrompt = ref<string | null>(null);
 
 const currentItem = computed(() => {
   const item = selectedItem();
-  return item && item.stage !== "closed" ? item : null;
+  return item && item.stage !== "done" ? item : null;
 });
 
 // Load pipeline items when selected repo changes
@@ -103,7 +100,7 @@ watch([repos, selectedRepoId], refreshAllItems, { immediate: true });
 function sortedItemsForCurrentRepo(): PipelineItem[] {
   const activityOrder: Record<string, number> = { idle: 0, unread: 1, working: 2 };
   return allItems.value
-    .filter((item) => item.repo_id === selectedRepoId.value && item.stage !== "closed")
+    .filter((item) => item.repo_id === selectedRepoId.value && item.stage !== "done")
     .sort((a, b) => {
       if (a.pinned !== b.pinned) return b.pinned - a.pinned;
       if (a.pinned && b.pinned) return (a.pin_order ?? 0) - (b.pin_order ?? 0);
@@ -133,48 +130,40 @@ function navigateItems(direction: -1 | 1) {
   selectedItemId.value = currentItems[nextIndex].id;
 }
 
-async function handleMakePR() {
-  const item = selectedItem();
-  if (!item || !selectedRepo.value || !prWorkflow.value) return;
-  try {
-    await prWorkflow.value.createPR(item, selectedRepo.value.path);
-    await loadItems(selectedRepo.value.id);
-    await refreshAllItems();
-  } catch (e) {
-    console.error("PR creation failed:", e);
-  }
-}
-
-async function handleMerge() {
-  const item = selectedItem();
-  if (!item || !selectedRepo.value || !prWorkflow.value) return;
-  try {
-    await prWorkflow.value.mergePR(item, selectedRepo.value.path);
-    await loadItems(selectedRepo.value.id);
-    await refreshAllItems();
-  } catch (e) {
-    console.error("Merge failed:", e);
-  }
-}
-
 async function handleCloseTask() {
   const item = selectedItem();
   if (!item || !selectedRepo.value) return;
   try {
     // Save prompt for undo
     lastKilledPrompt.value = item.prompt || null;
-    // Kill the agent PTY session
+    // Kill sessions
     await invoke("kill_session", { sessionId: item.id }).catch(() => {});
-    // Kill the shell session if one exists
     await invoke("kill_session", { sessionId: `shell-${item.id}` }).catch(() => {});
-    // Mark as closed in DB
-    await updatePipelineItemStage(db.value!, item.id, "closed");
-    // Select the first read (idle) task in the list, or first available
+
+    // Run teardown scripts if transitioning from in_progress
+    if (item.stage === "in_progress") {
+      const worktreePath = `${selectedRepo.value.path}/.kanna-worktrees/${item.branch}`;
+      try {
+        const configContent = await invoke<string>("read_text_file", {
+          path: `${selectedRepo.value.path}/.kanna/config.json`,
+        });
+        if (configContent) {
+          const repoConfig = parseRepoConfig(configContent);
+          if (repoConfig.teardown?.length) {
+            for (const cmd of repoConfig.teardown) {
+              await invoke("run_script", { script: cmd, cwd: worktreePath, env: {} });
+            }
+          }
+        }
+      } catch { /* teardown failed — continue closing */ }
+    }
+
+    // Mark as done
+    await updatePipelineItemStage(db.value!, item.id, "done");
     const currentItems = sortedItemsForCurrentRepo();
     const remaining = currentItems.filter((i) => i.id !== item.id);
     const firstRead = remaining.find((i) => (i as any).activity === "idle" || !(i as any).activity);
     selectedItemId.value = (firstRead || remaining[0])?.id || null;
-    // Refresh sidebar
     await loadItems(selectedRepo.value.id);
     await refreshAllItems();
   } catch (e) {
@@ -182,7 +171,7 @@ async function handleCloseTask() {
   }
 }
 
-useKeyboardShortcuts({
+const keyboardActions = {
   newTask: () => { showNewTaskModal.value = true; },
   newWindow: async () => {
     if (isTauri) {
@@ -213,8 +202,25 @@ useKeyboardShortcuts({
     const worktreePath = `${selectedRepo.value.path}/.kanna-worktrees/${item.branch}`;
     await invoke("run_script", { script: `${ideCommand.value} "${worktreePath}"`, cwd: worktreePath, env: {} }).catch(() => {});
   },
-  makePR: handleMakePR,
-  merge: handleMerge,
+  makePR: async () => {
+    const item = selectedItem();
+    if (!item || !selectedRepo.value) return;
+    const originalId = item.id;
+    const repoId = selectedRepo.value.id;
+    const repoPath = selectedRepo.value.path;
+    try {
+      await startPrAgent(originalId, repoId, repoPath);
+    } catch (e) {
+      console.error("PR agent failed to start:", e);
+    }
+    // Close the original task (not the newly selected PR task)
+    // Kill sessions, run teardown, mark done
+    await invoke("kill_session", { sessionId: originalId }).catch(() => {});
+    await invoke("kill_session", { sessionId: `shell-${originalId}` }).catch(() => {});
+    await updatePipelineItemStage(db.value!, originalId, "done");
+    await loadItems(repoId);
+    await refreshAllItems();
+  },
   closeTask: handleCloseTask,
   undoClose: async () => {
     if (!lastKilledPrompt.value) return;
@@ -227,6 +233,7 @@ useKeyboardShortcuts({
   toggleZen: () => { zenMode.value = !zenMode.value; },
   toggleMaximize: () => { maximized.value = !maximized.value; },
   dismiss: () => {
+    if (showCommandPalette.value) { showCommandPalette.value = false; return; }
     if (showShortcutsModal.value) { showShortcutsModal.value = false; return; }
     if (showFilePreviewModal.value) { showFilePreviewModal.value = false; return; }
     if (showFilePickerModal.value) { showFilePickerModal.value = false; return; }
@@ -241,7 +248,9 @@ useKeyboardShortcuts({
   showDiff: () => { showDiffModal.value = !showDiffModal.value; },
   showShortcuts: () => { showShortcutsModal.value = !showShortcutsModal.value; },
   openPreferences: () => { showPreferencesPanel.value = true; },
-});
+  commandPalette: () => { showCommandPalette.value = !showCommandPalette.value; },
+};
+useKeyboardShortcuts(keyboardActions);
 
 function focusAgentTerminal() {
   nextTick(() => {
@@ -304,6 +313,11 @@ async function handleReorderPinned(repoId: string, orderedIds: string[]) {
   await refreshAllItems();
 }
 
+async function handleRenameItem(itemId: string, displayName: string | null) {
+  await renameItem(itemId, displayName);
+  await refreshAllItems();
+}
+
 async function handleImportRepo(path: string, name: string, defaultBranch: string) {
   await importRepo(path, name, defaultBranch);
   showImportRepoModal.value = false;
@@ -345,7 +359,7 @@ async function runMigrations(database: DbHandle) {
   await database.execute(`CREATE TABLE IF NOT EXISTS pipeline_item (
     id TEXT PRIMARY KEY, repo_id TEXT NOT NULL REFERENCES repo(id) ON DELETE CASCADE,
     issue_number INTEGER, issue_title TEXT, prompt TEXT,
-    stage TEXT NOT NULL DEFAULT 'queued', pr_number INTEGER, pr_url TEXT,
+    stage TEXT NOT NULL DEFAULT 'in_progress', pr_number INTEGER, pr_url TEXT,
     branch TEXT, agent_type TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -390,6 +404,15 @@ async function runMigrations(database: DbHandle) {
   try {
     await database.execute(`ALTER TABLE pipeline_item ADD COLUMN pin_order INTEGER`);
   } catch { /* column already exists */ }
+  try {
+    await database.execute(`ALTER TABLE pipeline_item ADD COLUMN display_name TEXT`);
+  } catch { /* column already exists */ }
+
+  // Pipeline simplification: map old stages to new
+  try {
+    await database.execute(`UPDATE pipeline_item SET stage = 'in_progress' WHERE stage = 'queued'`);
+    await database.execute(`UPDATE pipeline_item SET stage = 'done' WHERE stage IN ('needs_review', 'merged', 'closed')`);
+  } catch { /* migration already applied or no rows to update */ }
 }
 
 // Initialize
@@ -442,11 +465,11 @@ onMounted(async () => {
       }
     }
 
-    // GC: remove closed tasks older than gcAfterDays
+    // GC: remove done tasks older than gcAfterDays
     if (db.value) {
       const cutoff = new Date(Date.now() - gcAfterDays.value * 86400000).toISOString();
       const stale = await db.value.select<PipelineItem>(
-        "SELECT * FROM pipeline_item WHERE stage = 'closed' AND updated_at < ?",
+        "SELECT * FROM pipeline_item WHERE stage = 'done' AND updated_at < ?",
         [cutoff]
       );
       for (const item of stale) {
@@ -461,7 +484,7 @@ onMounted(async () => {
         await db.value.execute("DELETE FROM pipeline_item WHERE id = ?", [item.id]);
       }
       if (stale.length > 0) {
-        console.log(`[gc] cleaned up ${stale.length} closed task(s)`);
+        console.log(`[gc] cleaned up ${stale.length} done task(s)`);
       }
     }
 
@@ -489,8 +512,15 @@ onMounted(async () => {
       } catch {}
     }
 
+    // Show keyboard shortcuts on startup unless user opted out
+    const hideShortcuts = await getSetting(db.value, "hideShortcutsOnStartup");
+    hideShortcutsOnStartup.value = hideShortcuts === "true";
+    if (!hideShortcutsOnStartup.value) {
+      showShortcutsModal.value = true;
+    }
+
     // Listen for hook events from Claude (via daemon broadcast)
-    listen("hook_event", (event: any) => {
+    listen("hook_event", async (event: any) => {
       const payload = event.payload || event;
       const sessionId = payload.session_id;
       const hookEvent = payload.event;
@@ -500,6 +530,11 @@ onMounted(async () => {
       if (!item) return;
 
       if (hookEvent === "Stop" || hookEvent === "StopFailure") {
+        // Auto-transition pr → done
+        if (item.stage === "pr") {
+          await updatePipelineItemStage(db.value!, item.id, "done");
+          item.stage = "done";
+        }
         const activity = selectedItemId.value === sessionId ? "idle" : "unread";
         updatePipelineItemActivity(db.value!, item.id, activity);
         item.activity = activity;
@@ -515,13 +550,18 @@ onMounted(async () => {
     });
 
     // Listen for process exit (backup for when hooks don't fire)
-    listen("session_exit", (event: any) => {
+    listen("session_exit", async (event: any) => {
       const payload = event.payload || event;
       const sessionId = payload.session_id;
       if (!sessionId || !db.value) return;
 
       const item = allItems.value.find((i) => i.id === sessionId);
       if (!item) return;
+      // Auto-transition pr → done on exit too
+      if (item.stage === "pr") {
+        await updatePipelineItemStage(db.value!, item.id, "done");
+        item.stage = "done";
+      }
       const activity = selectedItemId.value === sessionId ? "idle" : "unread";
       updatePipelineItemActivity(db.value!, item.id, activity);
       item.activity = activity;
@@ -549,14 +589,13 @@ onMounted(async () => {
       @pin-item="handlePinItem"
       @unpin-item="handleUnpinItem"
       @reorder-pinned="handleReorderPinned"
+      @rename-item="handleRenameItem"
     />
     <MainPanel
       :item="currentItem"
       :repo-path="selectedRepo?.path"
       :spawn-pty-session="spawnPtySession"
       :maximized="maximized"
-      @make-pr="handleMakePR"
-      @merge="handleMerge"
       @close-task="handleCloseTask"
       @agent-completed="refreshAllItems"
     />
@@ -582,9 +621,16 @@ onMounted(async () => {
       @update="handlePreferenceUpdate"
       @close="showPreferencesPanel = false"
     />
+    <CommandPaletteModal
+      v-if="showCommandPalette"
+      @close="showCommandPalette = false"
+      @execute="(action: ActionName) => keyboardActions[action]()"
+    />
     <KeyboardShortcutsModal
       v-if="showShortcutsModal"
+      :hide-on-startup="hideShortcutsOnStartup"
       @close="showShortcutsModal = false"
+      @update:hide-on-startup="(val: boolean) => { hideShortcutsOnStartup = val; if (db) setSetting(db, 'hideShortcutsOnStartup', String(val)); }"
     />
     <ShellModal
       v-if="showShellModal && currentItem"
@@ -604,15 +650,15 @@ onMounted(async () => {
       @close="showDiffModal = false; maximized = false"
     />
     <FilePickerModal
-      v-if="showFilePickerModal && currentItem?.branch"
-      :worktree-path="`${selectedRepo?.path}/.kanna-worktrees/${currentItem.branch}`"
+      v-if="showFilePickerModal && selectedRepo?.path"
+      :worktree-path="currentItem?.branch ? `${selectedRepo.path}/.kanna-worktrees/${currentItem.branch}` : selectedRepo.path"
       @close="showFilePickerModal = false"
       @select="(f: string) => { showFilePickerModal = false; previewFilePath = f; showFilePreviewModal = true; }"
     />
     <FilePreviewModal
-      v-if="showFilePreviewModal && currentItem?.branch"
+      v-if="showFilePreviewModal && selectedRepo?.path"
       :file-path="previewFilePath"
-      :worktree-path="`${selectedRepo?.path}/.kanna-worktrees/${currentItem.branch}`"
+      :worktree-path="currentItem?.branch ? `${selectedRepo.path}/.kanna-worktrees/${currentItem.branch}` : selectedRepo.path"
       :ide-command="ideCommand"
       @close="showFilePreviewModal = false"
     />

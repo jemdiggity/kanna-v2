@@ -4,19 +4,15 @@ defineProps<{
 }>();
 
 const stageColors: Record<string, string> = {
-  queued: "#888",
   in_progress: "#0066cc",
-  needs_review: "#d29922",
-  merged: "#2ea043",
-  closed: "#666",
+  pr: "#d29922",
+  done: "#666",
 };
 
 const stageLabels: Record<string, string> = {
-  queued: "Queued",
   in_progress: "In Progress",
-  needs_review: "Review",
-  merged: "Merged",
-  closed: "Closed",
+  pr: "PR",
+  done: "Done",
 };
 </script>
 
