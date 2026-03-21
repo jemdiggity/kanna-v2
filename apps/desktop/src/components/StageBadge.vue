@@ -8,6 +8,7 @@ const stageColors: Record<string, string> = {
   pr: "#d29922",
   merge: "#8b5cf6",
   done: "#666",
+  blocked: "#666",
 };
 
 const stageLabels: Record<string, string> = {
@@ -15,6 +16,7 @@ const stageLabels: Record<string, string> = {
   pr: "PR",
   merge: "Merge",
   done: "Done",
+  blocked: "Blocked",
 };
 </script>
 
