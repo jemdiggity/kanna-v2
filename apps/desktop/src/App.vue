@@ -24,6 +24,7 @@ import { useKeyboardShortcuts, type ActionName } from "./composables/useKeyboard
 import { useResourceSweeper } from "./composables/useResourceSweeper";
 
 const db = ref<DbHandle | null>(null);
+const dbName = ref("");
 
 const { repos, selectedRepoId, refresh: refreshRepos, importRepo } = useRepo(db);
 const { allItems, selectedItemId, loadAllItems, transition, createItem, spawnPtySession, startPrAgent, selectedItem, pinItem, unpinItem, reorderPinned, renameItem } = usePipeline(db);
@@ -404,10 +405,10 @@ onMounted(async () => {
     let database: DbHandle;
     if (isTauri) {
       const { default: Database } = await import("@tauri-apps/plugin-sql");
-      let dbName = "kanna-v2.db";
+      let resolvedDbName = "kanna-v2.db";
       try {
         const envDb = await invoke<string>("read_env_var", { name: "KANNA_DB_NAME" });
-        if (envDb) dbName = envDb;
+        if (envDb) resolvedDbName = envDb;
       } catch {}
       // Worktree instances use a separate DB to avoid conflicts
       try {
@@ -422,12 +423,14 @@ onMounted(async () => {
             const idx = parts.indexOf(".kanna-daemon");
             if (idx > 0) suffix = parts[idx - 1];
           }
-          dbName = `kanna-wt-${suffix}.db`;
+          resolvedDbName = `kanna-wt-${suffix}.db`;
         }
       } catch {}
-      console.log("[db] using database:", dbName);
-      database = (await Database.load(`sqlite:${dbName}`)) as unknown as DbHandle;
+      console.log("[db] using database:", resolvedDbName);
+      dbName.value = resolvedDbName;
+      database = (await Database.load(`sqlite:${resolvedDbName}`)) as unknown as DbHandle;
     } else {
+      dbName.value = "mock";
       database = getMockDatabase() as unknown as DbHandle;
     }
     db.value = database;
