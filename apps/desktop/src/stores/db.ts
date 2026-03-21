@@ -101,4 +101,11 @@ export async function runMigrations(db: DbHandle): Promise<void> {
     await db.execute(`UPDATE pipeline_item SET stage = 'in_progress' WHERE stage = 'queued'`);
     await db.execute(`UPDATE pipeline_item SET stage = 'done' WHERE stage IN ('needs_review', 'merged', 'closed')`);
   } catch (e) { console.debug("[db] stage migration:", e); }
+
+  // Task blocker junction table for blocked task dependencies
+  await db.execute(`CREATE TABLE IF NOT EXISTS task_blocker (
+    blocked_item_id TEXT NOT NULL REFERENCES pipeline_item(id) ON DELETE CASCADE,
+    blocker_item_id TEXT NOT NULL REFERENCES pipeline_item(id) ON DELETE CASCADE,
+    PRIMARY KEY (blocked_item_id, blocker_item_id)
+  )`);
 }
