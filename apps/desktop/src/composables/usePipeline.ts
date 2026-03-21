@@ -172,7 +172,7 @@ export function usePipeline(db: Ref<DbHandle | null>) {
     });
 
     // Build env from item's stored port_env + setup from config
-    const env: Record<string, string> = { TERM: "xterm-256color", TERM_PROGRAM: "vscode" };
+    const env: Record<string, string> = { TERM: "xterm-256color", TERM_PROGRAM: "vscode", COLORTERM: "truecolor" };
     let setupCmds: string[] = [];
     const item = allItems.value.find((i) => i.id === sessionId);
     if (item) {
