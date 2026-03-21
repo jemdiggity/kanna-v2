@@ -110,4 +110,11 @@ export async function runMigrations(db: DbHandle): Promise<void> {
     started_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`);
   await db.execute(`CREATE INDEX IF NOT EXISTS idx_activity_log_item ON activity_log(pipeline_item_id)`);
+
+  // Task blocker junction table for blocked task dependencies
+  await db.execute(`CREATE TABLE IF NOT EXISTS task_blocker (
+    blocked_item_id TEXT NOT NULL REFERENCES pipeline_item(id) ON DELETE CASCADE,
+    blocker_item_id TEXT NOT NULL REFERENCES pipeline_item(id) ON DELETE CASCADE,
+    PRIMARY KEY (blocked_item_id, blocker_item_id)
+  )`);
 }
