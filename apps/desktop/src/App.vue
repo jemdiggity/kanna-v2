@@ -567,7 +567,7 @@ onMounted(async () => {
       const item = allItems.value.find((i) => i.id === sessionId);
       if (!item) return;
       // Auto-transition pr → done on exit too
-      const becameDone = item.stage === "pr" || item.stage === "merge";
+      const becameDone = item.stage === "pr";
       if (becameDone) {
         await updatePipelineItemStage(db.value!, item.id, "done");
         item.stage = "done";
