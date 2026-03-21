@@ -165,6 +165,8 @@ function initSortables(repoId: string) {
     onStart() { isDragging.value = true; },
     onEnd() { isDragging.value = false; },
     onAdd(evt) {
+      // Guard: only unpin during actual user drag, not spurious Sortable/Vue reconciliation
+      if (!isDragging.value) return;
       const itemId = (evt.item as HTMLElement).dataset.itemId;
       if (itemId) {
         const item = props.pipelineItems.find((i) => i.id === itemId);
@@ -178,10 +180,23 @@ function initSortables(repoId: string) {
   sortableInstances.set(repoId, instances);
 }
 
-// Init sortables when repos/items change
+// Track item IDs per repo to detect structural changes (add/remove/pin toggle)
+// Only reinit Sortable when items actually move between zones, not on every property change
+function itemFingerprint(): string {
+  return props.pipelineItems
+    .map((i) => `${i.id}:${i.repo_id}:${i.pinned}:${i.stage}`)
+    .sort()
+    .join(",");
+}
+
+let lastFingerprint = "";
+
 watch(
-  () => [props.repos, props.pipelineItems],
+  () => [props.repos, itemFingerprint()],
   () => {
+    const fp = itemFingerprint();
+    if (fp === lastFingerprint) return;
+    lastFingerprint = fp;
     nextTick(() => {
       for (const repo of props.repos) {
         if (!collapsedRepos.value.has(repo.id)) {
@@ -190,7 +205,7 @@ watch(
       }
     });
   },
-  { immediate: true, deep: true }
+  { immediate: true }
 );
 </script>
 
