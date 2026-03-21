@@ -208,9 +208,13 @@ export function usePipeline(db: Ref<DbHandle | null>) {
     const item = items.value.find((i) => i.id === itemId);
     if (!item?.branch) return;
 
+    const sourceWorktree = `${repoPath}/.kanna-worktrees/${item.branch}`;
     const prompt = [
       `You are in a worktree branched from "${item.branch}".`,
       `Your job is to create a GitHub pull request for that work.`,
+      `IMPORTANT: First, check for uncommitted changes in the source worktree at "${sourceWorktree}" by running "git -C ${sourceWorktree} status".`,
+      `If there are uncommitted changes there, commit them from that worktree: "git -C ${sourceWorktree} add -A && git -C ${sourceWorktree} commit -m '<appropriate message>'", then pull those commits into your branch: "git pull --rebase".`,
+      `Then:`,
       `1. Rename this branch to something meaningful based on the commits (use "git branch -m <new-name>").`,
       `2. Push the branch (git push -u origin HEAD).`,
       `3. Create a PR with "gh pr create" — write a clear title and description summarizing the changes.`,
