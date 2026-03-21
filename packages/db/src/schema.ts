@@ -3,6 +3,7 @@ export interface Repo {
   path: string;
   name: string;
   default_branch: string;
+  hidden: number;       // 0 = visible, 1 = hidden
   created_at: string;
   last_opened_at: string;
 }

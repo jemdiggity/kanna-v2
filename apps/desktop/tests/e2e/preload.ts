@@ -36,9 +36,30 @@ const vueCheck = await fetch(`${WD_URL}/session/${sid}/execute/sync`, {
   }),
 }).then((r) => r.json());
 
+if (!vueCheck.value) {
+  await fetch(`${WD_URL}/session/${sid}`, { method: "DELETE" });
+  console.error("\n  Vue app not mounted. Wait for the Tauri window to fully load.\n");
+  process.exit(1);
+}
+
+// Verify the app is running with a test database — refuse to run tests against production data
+const dbCheck = await fetch(`${WD_URL}/session/${sid}/execute/sync`, {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    script:
+      'const ctx = document.getElementById("app").__vue_app__._instance.setupState;' +
+      'const v = ctx.dbName; return v && v.__v_isRef ? v.value : v;',
+    args: [],
+  }),
+}).then((r) => r.json());
+
 await fetch(`${WD_URL}/session/${sid}`, { method: "DELETE" });
 
-if (!vueCheck.value) {
-  console.error("\n  Vue app not mounted. Wait for the Tauri window to fully load.\n");
+const currentDb = dbCheck.value as string;
+if (!currentDb || !currentDb.includes("test")) {
+  console.error(`\n  REFUSING TO RUN: app is using database "${currentDb}", not a test DB.`);
+  console.error("  Start the app with:\n");
+  console.error("    KANNA_DB_NAME=kanna-test.db bun tauri dev\n");
   process.exit(1);
 }

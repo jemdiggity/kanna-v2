@@ -1,5 +1,41 @@
 use std::io::Write;
 use std::process::Command;
+use tauri::AppHandle;
+use tauri::Manager;
+
+#[tauri::command]
+pub fn get_app_data_dir(app: AppHandle) -> Result<String, String> {
+    app.path()
+        .app_data_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .map_err(|e| format!("failed to get app data dir: {}", e))
+}
+
+#[tauri::command]
+pub fn copy_file(src: String, dst: String) -> Result<(), String> {
+    std::fs::copy(&src, &dst)
+        .map(|_| ())
+        .map_err(|e| format!("failed to copy '{}' to '{}': {}", src, dst, e))
+}
+
+#[tauri::command]
+pub fn remove_file(path: String) -> Result<(), String> {
+    std::fs::remove_file(&path).map_err(|e| format!("failed to remove '{}': {}", path, e))
+}
+
+#[tauri::command]
+pub fn list_dir(path: String) -> Result<Vec<String>, String> {
+    let dir = std::path::Path::new(&path);
+    if !dir.is_dir() {
+        return Err(format!("not a directory: {}", path));
+    }
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(dir).map_err(|e| format!("failed to read dir '{}': {}", path, e))? {
+        let entry = entry.map_err(|e| format!("failed to read entry: {}", e))?;
+        names.push(entry.file_name().to_string_lossy().to_string());
+    }
+    Ok(names)
+}
 
 #[tauri::command]
 pub fn file_exists(path: String) -> bool {

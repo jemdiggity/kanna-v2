@@ -6,10 +6,11 @@ import "@xterm/xterm/css/xterm.css"
 const props = defineProps<{
   sessionId: string
   spawnOptions?: SpawnOptions
+  kittyKeyboard?: boolean
 }>()
 
 const containerRef = ref<HTMLElement | null>(null)
-const { terminal, init, startListening, fit, redraw, dispose } = useTerminal(props.sessionId, props.spawnOptions)
+const { terminal, init, startListening, fit, redraw, dispose } = useTerminal(props.sessionId, props.spawnOptions, { kittyKeyboard: props.kittyKeyboard })
 
 defineExpose({
   focus: () => terminal.value?.focus(),

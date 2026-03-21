@@ -1,5 +1,7 @@
 import { createApp } from "vue";
+import { createPinia } from "pinia";
 import { isTauri } from "./tauri-mock";
+import { loadDatabase, runMigrations } from "./stores/db";
 import App from "./App.vue";
 
 if (isTauri) {
@@ -30,4 +32,17 @@ if (isTauri) {
   console.log("[kanna] Running in browser mode with mock Tauri APIs");
 }
 
-createApp(App).mount("#app");
+try {
+  const { db, dbName } = await loadDatabase();
+  await runMigrations(db);
+
+  const app = createApp(App);
+  app.use(createPinia());
+  app.provide("db", db);
+  app.provide("dbName", dbName);
+  app.mount("#app");
+} catch (e) {
+  console.error("[init] fatal:", e);
+  const el = document.getElementById("app");
+  if (el) el.textContent = `Failed to initialize: ${e}`;
+}

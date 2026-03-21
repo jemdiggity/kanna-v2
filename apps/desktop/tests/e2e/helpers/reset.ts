@@ -1,11 +1,46 @@
 /**
  * Test reset helpers — clean DB state and worktrees between test files.
  */
+import { join } from "path";
+import { homedir } from "os";
+import { copyFile, access } from "fs/promises";
 import { WebDriverClient } from "./webdriver";
-import { execDb, callVueMethod, tauriInvoke } from "./vue";
+import { execDb, callVueMethod, getVueState, tauriInvoke } from "./vue";
+
+const APP_DATA_DIR = join(homedir(), "Library", "Application Support", "com.kanna.app");
+
+/** Back up the SQLite DB file before wiping. Best-effort — logs but never throws. */
+async function backupDatabase(dbFileName: string): Promise<void> {
+  const src = join(APP_DATA_DIR, dbFileName);
+  try {
+    await access(src);
+  } catch {
+    return; // DB file doesn't exist yet — nothing to back up
+  }
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const dest = join(APP_DATA_DIR, `${dbFileName}.backup-${timestamp}`);
+  try {
+    await copyFile(src, dest);
+    console.log(`[reset] backed up ${dbFileName} → ${dest}`);
+  } catch (err) {
+    console.error(`[reset] WARNING: failed to back up ${dbFileName}:`, err);
+  }
+}
 
 /** Reset all DB tables to a clean state with default settings. */
 export async function resetDatabase(client: WebDriverClient): Promise<void> {
+  // Safety: refuse to wipe a non-test database
+  const currentDb = await getVueState(client, "dbName") as string;
+  if (!currentDb || !currentDb.includes("test")) {
+    throw new Error(
+      `REFUSING to wipe database "${currentDb}" — not a test DB!\n` +
+      `Start the app with: KANNA_DB_NAME=kanna-test.db bun tauri dev`
+    );
+  }
+
+  // Back up the DB file before wiping
+  await backupDatabase(currentDb);
+
   // Delete in FK-safe order (children before parents)
   await execDb(client, "DELETE FROM terminal_session");
   await execDb(client, "DELETE FROM worktree");

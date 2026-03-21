@@ -35,5 +35,8 @@
     "../../packages/db/src/**/*.ts",
     "../../packages/core/src/**/*.ts"
   ],
+  "exclude": [
+    "src/**/*.test.ts"
+  ],
   "references": [{ "path": "./tsconfig.node.json" }]
 }

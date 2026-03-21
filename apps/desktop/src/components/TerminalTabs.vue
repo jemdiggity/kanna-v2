@@ -74,6 +74,7 @@ function setTermRef(sessionId: string, el: ComponentPublicInstance | null) {
         prompt: config.prompt,
         spawnFn: spawnPtySession,
       } : undefined"
+      :kitty-keyboard="!!(spawnPtySession && config.worktreePath && config.prompt)"
     />
     <!-- SDK mode: key by sessionId so switching tasks creates a new view -->
     <AgentView

@@ -14,7 +14,11 @@ export interface SpawnOptions {
   spawnFn: (sessionId: string, cwd: string, prompt: string, cols: number, rows: number) => Promise<void>
 }
 
-export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions) {
+export interface TerminalOptions {
+  kittyKeyboard?: boolean
+}
+
+export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, options?: TerminalOptions) {
   const terminal = ref<Terminal | null>(null)
   const fitAddon = new FitAddon()
   let unlistenOutput: (() => void) | null = null
@@ -49,7 +53,7 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions) {
       },
       scrollback: 10000,
       cursorBlink: false,
-      vtExtensions: { kittyKeyboard: true },
+      ...(options?.kittyKeyboard ? { vtExtensions: { kittyKeyboard: true } } : {}),
     })
     term.loadAddon(fitAddon)
     term.loadAddon(new WebLinksAddon())
@@ -60,9 +64,6 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions) {
     }
     term.loadAddon(new ImageAddon())
     term.open(container)
-
-    // Push kitty keyboard mode so Shift+Enter sends CSI 13;2 u
-    term.write("\x1b[>1u")
 
     if (container.offsetWidth > 0 && container.offsetHeight > 0) {
       fitAddon.fit()

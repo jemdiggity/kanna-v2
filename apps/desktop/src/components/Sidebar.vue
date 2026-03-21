@@ -15,11 +15,11 @@ const emit = defineEmits<{
   (e: "select-item", id: string): void;
   (e: "import-repo"): void;
   (e: "new-task", repoId: string): void;
-  (e: "open-preferences"): void;
   (e: "pin-item", itemId: string, position: number): void;
   (e: "unpin-item", itemId: string): void;
   (e: "reorder-pinned", repoId: string, orderedIds: string[]): void;
   (e: "rename-item", itemId: string, displayName: string | null): void;
+  (e: "hide-repo", repoId: string): void;
 }>();
 
 const collapsedRepos = ref<Set<string>>(new Set());
@@ -175,6 +175,11 @@ function onUnpinnedChange(repoId: string, evt: any) {
             title="New Task (⌘N)"
             @click.stop="emit('new-task', repo.id)"
           >+</button>
+          <button
+            class="btn-icon btn-hide-repo"
+            title="Remove Repo"
+            @click.stop="emit('hide-repo', repo.id)"
+          >&times;</button>
         </div>
 
         <div v-if="!collapsedRepos.has(repo.id)" class="pipeline-list">
@@ -364,9 +369,6 @@ function onUnpinnedChange(repoId: string, evt: any) {
       <button class="btn-import" @click="emit('import-repo')">
         Import Repo
       </button>
-      <button class="btn-icon btn-prefs" title="Preferences (⌘,)" @click="emit('open-preferences')">
-        &#9881;
-      </button>
     </div>
   </aside>
 </template>
@@ -464,13 +466,28 @@ function onUnpinnedChange(repoId: string, evt: any) {
 }
 
 .btn-add-task {
-  margin-left: auto;
   font-size: 14px;
   padding: 0 4px;
   opacity: 0.5;
 }
 
 .btn-add-task:hover {
+  opacity: 1;
+}
+
+.btn-hide-repo {
+  margin-left: auto;
+  opacity: 0;
+  font-size: 14px;
+  padding: 0 4px;
+  transition: opacity 0.1s;
+}
+
+.repo-header:hover .btn-hide-repo {
+  opacity: 0.5;
+}
+
+.btn-hide-repo:hover {
   opacity: 1;
 }
 
@@ -550,11 +567,6 @@ function onUnpinnedChange(repoId: string, evt: any) {
 .btn-import:hover {
   background: #333;
   color: #e0e0e0;
-}
-
-.btn-prefs {
-  flex-shrink: 0;
-  font-size: 14px;
 }
 
 .pinned-zone {
