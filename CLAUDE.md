@@ -79,6 +79,20 @@ The first `bun dev` in a fresh worktree compiles ~523 Rust crates (the daemon bu
 - **Permission mode flags** use camelCase: `dontAsk`, `acceptEdits`, `default` (not kebab-case)
 - **Browser mock layer** (`tauri-mock.ts`, `invoke.ts`, `listen.ts`, `dialog.ts`) enables running the frontend in a regular browser without Tauri APIs
 
+### Data flow
+
+```
+User creates task → worktree + DB record → daemon Spawn → Attach (start streaming)
+  → daemon forks child (zsh -c "claude ...") → reads PTY output → Output events via Unix socket
+  → Tauri events → frontend xterm.js
+
+User types → xterm.js onData → invoke("send_input") → daemon Input → PTY write
+
+Claude finishes → kanna-hook fires Stop → daemon broadcasts → app updates task activity
+
+User makes PR → GitHub API → DB update → stage transition
+```
+
 ## Daemon
 
 - Raw libc PTY (not portable-pty) — needed for `SCM_RIGHTS` fd handoff
@@ -88,6 +102,26 @@ The first `bun dev` in a fresh worktree compiles ~523 Rust crates (the daemon bu
 - No scrollback buffer — reconnection uses SIGWINCH to trigger Claude TUI redraw
 - Logs to `~/Library/Application Support/Kanna/kanna-daemon_*.log` via flexi_logger
 - `KANNA_DAEMON_DIR` env var overrides data directory (used by tests)
+
+### Daemon invariants
+
+1. **One daemon at a time.** New daemon always replaces the old one.
+2. **Always handoff.** New daemon transfers sessions from old daemon via SCM_RIGHTS.
+3. **Always spawn.** App always starts a fresh daemon. Never reuses existing.
+4. **Always wait.** App waits for the new daemon's PID before connecting.
+5. **Sessions survive upgrades.** Child processes are unaware of daemon restarts.
+6. **One reader per session.** Single `stream_output` task, started on first Attach.
+7. **One client per session.** Attach swaps the output target atomically.
+
+### App startup sequence
+
+1. App spawns new daemon binary (detached via `setsid`)
+2. New daemon detects old daemon, performs handoff (fd transfer), old daemon exits
+3. New daemon writes PID file and binds socket
+4. App polls PID file until it matches the spawned child
+5. App clears stale command connection (`DaemonState`)
+6. App connects to new daemon (event bridge + on-demand command connection)
+7. Frontend mounts terminals, calls Attach → Resize → Claude redraws
 
 ## Database
 
