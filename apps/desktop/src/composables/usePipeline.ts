@@ -107,10 +107,10 @@ export function usePipeline(db: Ref<DbHandle | null>) {
       throw e;
     }
 
-    // 6. Spawn agent based on type
-    // PTY mode: don't spawn here — TerminalView will spawn on mount
-    // with the correct terminal dimensions from xterm.js.
-    // SDK mode: spawn immediately since no terminal sizing needed.
+    // 6. Spawn agent
+    // Refresh items first — spawnPtySession reads port_env from items list
+    await loadItems(repoId);
+
     if (agentType !== "pty") {
       await invoke("create_agent_session", {
         sessionId: id,
@@ -119,8 +119,17 @@ export function usePipeline(db: Ref<DbHandle | null>) {
         systemPrompt: null,
         permissionMode: "dontAsk",
       });
+    } else {
+      // Pre-spawn PTY so connection is instant when the terminal mounts.
+      // Default 80x24 — TerminalView will resize to actual dimensions on attach.
+      try {
+        await spawnPtySession(id, worktreePath, prompt);
+      } catch (e) {
+        console.warn("[pipeline] PTY pre-spawn failed, will retry on mount:", e);
+      }
     }
 
+    // 7. Select the new item
     selectedItemId.value = id;
   }
 
@@ -138,6 +147,12 @@ export function usePipeline(db: Ref<DbHandle | null>) {
     // Build the --settings JSON with hooks that call kanna-hook
     const hookSettings = JSON.stringify({
       hooks: {
+        SessionStart: [
+          { hooks: [{ type: "command", command: `${kannaHookPath} SessionStart ${sessionId}` }] },
+        ],
+        UserPromptSubmit: [
+          { hooks: [{ type: "command", command: `${kannaHookPath} UserPromptSubmit ${sessionId}` }] },
+        ],
         Stop: [
           { hooks: [{ type: "command", command: `${kannaHookPath} Stop ${sessionId}` }] },
         ],

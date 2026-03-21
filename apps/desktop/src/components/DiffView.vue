@@ -167,12 +167,29 @@ watch(
   { immediate: false }
 );
 
+const scopeOrder: Array<"working" | "branch" | "commit"> = ["working", "branch", "commit"];
+
+function cycleScope() {
+  const idx = scopeOrder.indexOf(scope.value);
+  scope.value = scopeOrder[(idx + 1) % scopeOrder.length];
+  loadDiff();
+}
+
+function onKeydown(e: KeyboardEvent) {
+  if (e.key === " " && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
+    e.preventDefault();
+    cycleScope();
+  }
+}
+
 onMounted(() => {
   loadDiff();
+  window.addEventListener("keydown", onKeydown);
 });
 
 onUnmounted(() => {
   cleanupInstance();
+  window.removeEventListener("keydown", onKeydown);
 });
 
 defineExpose({ refresh: loadDiff });
