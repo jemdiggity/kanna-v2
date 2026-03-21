@@ -61,4 +61,21 @@ describe("parseRepoConfig", () => {
     expect(config.setup).toEqual(["ls"]);
     expect((config as any).unknown).toBeUndefined();
   });
+
+  it("parses test scripts", () => {
+    const config = parseRepoConfig(JSON.stringify({
+      test: ["bun test", "cargo test"],
+    }));
+    expect(config.test).toEqual(["bun test", "cargo test"]);
+  });
+
+  it("ignores test if not an array of strings", () => {
+    const config = parseRepoConfig(JSON.stringify({ test: "not-an-array" }));
+    expect(config.test).toBeUndefined();
+  });
+
+  it("ignores test with mixed types in array", () => {
+    const config = parseRepoConfig(JSON.stringify({ test: ["valid", 123] }));
+    expect(config.test).toBeUndefined();
+  });
 });

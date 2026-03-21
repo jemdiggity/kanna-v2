@@ -1,6 +1,7 @@
 export interface RepoConfig {
   setup?: string[];
   teardown?: string[];
+  test?: string[];
   ports?: Record<string, number>;
 }
 
@@ -14,6 +15,10 @@ export function parseRepoConfig(json: string): RepoConfig {
 
   if (Array.isArray(raw.teardown) && raw.teardown.every((s) => typeof s === "string")) {
     config.teardown = raw.teardown as string[];
+  }
+
+  if (Array.isArray(raw.test) && raw.test.every((s) => typeof s === "string")) {
+    config.test = raw.test as string[];
   }
 
   if (raw.ports && typeof raw.ports === "object" && !Array.isArray(raw.ports)) {
