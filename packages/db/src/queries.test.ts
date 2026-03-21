@@ -4,6 +4,9 @@ import {
   getRepo,
   insertRepo,
   deleteRepo,
+  hideRepo,
+  unhideRepo,
+  findRepoByPath,
   listPipelineItems,
   insertPipelineItem,
   updatePipelineItemStage,
@@ -46,12 +49,21 @@ function createMockDb(): DbHandle & {
           path,
           name,
           default_branch,
+          hidden: 0,
           created_at: new Date().toISOString(),
           last_opened_at: new Date().toISOString(),
         });
       } else if (q.startsWith("DELETE FROM REPO")) {
         const [id] = bindValues as string[];
         tables.repo = tables.repo.filter((r) => r.id !== id);
+      } else if (q.startsWith("UPDATE REPO SET HIDDEN = 1")) {
+        const [id] = bindValues as [string];
+        const repo = tables.repo.find((r) => r.id === id);
+        if (repo) repo.hidden = 1;
+      } else if (q.startsWith("UPDATE REPO SET HIDDEN = 0")) {
+        const [id] = bindValues as [string];
+        const repo = tables.repo.find((r) => r.id === id);
+        if (repo) repo.hidden = 0;
       } else if (q.startsWith("INSERT INTO PIPELINE_ITEM")) {
         const [id, repo_id, issue_number, issue_title, prompt, stage, pr_number, pr_url, branch, agent_type, port_offset, activity] =
           bindValues as unknown[];
@@ -138,6 +150,15 @@ function createMockDb(): DbHandle & {
       if (q.startsWith("SELECT * FROM REPO WHERE ID")) {
         const [id] = bindValues as string[];
         return tables.repo.filter((r) => r.id === id) as unknown as T[];
+      } else if (q.startsWith("SELECT * FROM REPO WHERE PATH")) {
+        const [path] = bindValues as string[];
+        return tables.repo.filter((r) => r.path === path) as unknown as T[];
+      } else if (q.startsWith("SELECT * FROM REPO WHERE HIDDEN")) {
+        return tables.repo.filter((r) => r.hidden === 0).sort(
+          (a, b) =>
+            new Date(b.last_opened_at).getTime() -
+            new Date(a.last_opened_at).getTime()
+        ) as unknown as T[];
       } else if (q.startsWith("SELECT * FROM REPO")) {
         return [...tables.repo].sort(
           (a, b) =>
@@ -215,6 +236,59 @@ describe("repo queries", () => {
     });
     await deleteRepo(db, "r1");
     expect(await listRepos(db)).toHaveLength(0);
+  });
+});
+
+describe("repo hide/unhide queries", () => {
+  let db: ReturnType<typeof createMockDb>;
+
+  beforeEach(async () => {
+    db = createMockDb();
+    await insertRepo(db, {
+      id: "r1",
+      path: "/home/user/project-a",
+      name: "project-a",
+      default_branch: "main",
+    });
+    await insertRepo(db, {
+      id: "r2",
+      path: "/home/user/project-b",
+      name: "project-b",
+      default_branch: "main",
+    });
+  });
+
+  it("hideRepo sets hidden to 1", async () => {
+    await hideRepo(db, "r1");
+    const repo = db.tables.repo.find((r) => r.id === "r1");
+    expect(repo?.hidden).toBe(1);
+  });
+
+  it("listRepos excludes hidden repos", async () => {
+    await hideRepo(db, "r1");
+    const repos = await listRepos(db);
+    expect(repos).toHaveLength(1);
+    expect(repos[0].id).toBe("r2");
+  });
+
+  it("unhideRepo sets hidden back to 0", async () => {
+    await hideRepo(db, "r1");
+    await unhideRepo(db, "r1");
+    const repos = await listRepos(db);
+    expect(repos).toHaveLength(2);
+  });
+
+  it("findRepoByPath returns repo including hidden", async () => {
+    await hideRepo(db, "r1");
+    const repo = await findRepoByPath(db, "/home/user/project-a");
+    expect(repo).not.toBeNull();
+    expect(repo!.id).toBe("r1");
+    expect(repo!.hidden).toBe(1);
+  });
+
+  it("findRepoByPath returns null for unknown path", async () => {
+    const repo = await findRepoByPath(db, "/nonexistent");
+    expect(repo).toBeNull();
   });
 });
 

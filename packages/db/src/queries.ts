@@ -10,7 +10,7 @@ export type DbHandle = {
 // ---------------------------------------------------------------------------
 
 export async function listRepos(db: DbHandle): Promise<Repo[]> {
-  return db.select<Repo>("SELECT * FROM repo ORDER BY last_opened_at DESC");
+  return db.select<Repo>("SELECT * FROM repo WHERE hidden = 0 ORDER BY last_opened_at DESC");
 }
 
 export async function getRepo(db: DbHandle, id: string): Promise<Repo | null> {
@@ -20,7 +20,7 @@ export async function getRepo(db: DbHandle, id: string): Promise<Repo | null> {
 
 export async function insertRepo(
   db: DbHandle,
-  repo: Omit<Repo, "created_at" | "last_opened_at">
+  repo: Omit<Repo, "created_at" | "last_opened_at" | "hidden">
 ): Promise<void> {
   await db.execute(
     `INSERT INTO repo (id, path, name, default_branch) VALUES (?, ?, ?, ?)`,
@@ -30,6 +30,20 @@ export async function insertRepo(
 
 export async function deleteRepo(db: DbHandle, id: string): Promise<void> {
   await db.execute("DELETE FROM repo WHERE id = ?", [id]);
+}
+
+export async function hideRepo(db: DbHandle, id: string): Promise<void> {
+  await db.execute("UPDATE repo SET hidden = 1 WHERE id = ?", [id]);
+}
+
+export async function unhideRepo(db: DbHandle, id: string): Promise<void> {
+  await db.execute("UPDATE repo SET hidden = 0 WHERE id = ?", [id]);
+}
+
+/** Includes hidden repos — callers must check `existing.hidden`. */
+export async function findRepoByPath(db: DbHandle, path: string): Promise<Repo | null> {
+  const rows = await db.select<Repo>("SELECT * FROM repo WHERE path = ?", [path]);
+  return rows[0] ?? null;
 }
 
 // ---------------------------------------------------------------------------
