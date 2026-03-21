@@ -14,6 +14,9 @@ import {
   updatePipelineItemActivity, pinPipelineItem, unpinPipelineItem,
   reorderPinnedItems, updatePipelineItemDisplayName,
   getRepo, getSetting, setSetting,
+  insertTaskBlocker, removeTaskBlocker, removeAllBlockersForItem,
+  listBlockersForItem, listBlockedByItem, getUnblockedItems,
+  hasCircularDependency,
 } from "@kanna/db";
 
 // Module-level DB handle — set once by init(), never null after that.
@@ -326,7 +329,14 @@ export const useKannaStore = defineStore("kanna", () => {
         } catch (e) { console.error("[store] teardown failed:", e); }
       }
 
+      if (item.stage === "blocked") {
+        await removeAllBlockersForItem(_db, item.id);
+      }
+
       await updatePipelineItemStage(_db, item.id, "done");
+      if (item.stage === "in_progress") {
+        await checkUnblocked(item.id);
+      }
       bump();
 
       // Select next item
@@ -477,6 +487,7 @@ export const useKannaStore = defineStore("kanna", () => {
       await invoke("kill_session", { sessionId: originalId }).catch((e: unknown) => console.error("[store] kill_session failed:", e));
       await invoke("kill_session", { sessionId: `shell-${originalId}` }).catch((e: unknown) => console.error("[store] kill shell session failed:", e));
       await updatePipelineItemStage(_db, originalId, "done");
+      await checkUnblocked(originalId);
       bump();
     } catch (e) {
       console.error("[store] failed to close source task:", e);
@@ -510,6 +521,213 @@ export const useKannaStore = defineStore("kanna", () => {
       console.error("[store] activity update failed:", e)
     );
     bump();
+  }
+
+  async function checkUnblocked(blockerItemId: string) {
+    const blockedItems = await listBlockedByItem(_db, blockerItemId);
+    for (const blocked of blockedItems) {
+      if (blocked.stage !== "blocked") continue;
+      const blockers = await listBlockersForItem(_db, blocked.id);
+      const allClear = blockers.every(
+        (b) => b.stage === "pr" || b.stage === "merge" || b.stage === "done"
+      );
+      if (allClear) {
+        await startBlockedTask(blocked);
+      }
+    }
+  }
+
+  async function startBlockedTask(item: PipelineItem) {
+    const repo = repos.value.find((r) => r.id === item.repo_id);
+    if (!repo) {
+      console.error("[store] startBlockedTask: repo not found for", item.id);
+      return;
+    }
+
+    const blockers = await listBlockersForItem(_db, item.id);
+    const blockerContext = blockers
+      .map((b) => {
+        const name = b.display_name || (b.prompt ? b.prompt.slice(0, 60) : "Untitled");
+        return `- ${name} (branch: ${b.branch || "unknown"})`;
+      })
+      .join("\n");
+
+    const augmentedPrompt = [
+      "Note: this task was previously blocked by the following tasks which have now completed:",
+      blockerContext,
+      "Their changes may be on branches that haven't merged to main yet.",
+      "",
+      "Original task:",
+      item.prompt || "",
+    ].join("\n");
+
+    const id = item.id;
+    const branch = `task-${id}`;
+    const worktreePath = `${repo.path}/.kanna-worktrees/${branch}`;
+
+    try {
+      await invoke("git_worktree_add", {
+        repoPath: repo.path,
+        branch,
+        path: worktreePath,
+        startPoint: null,
+      });
+    } catch (e) {
+      console.error("[store] startBlockedTask worktree_add failed:", e);
+      return;
+    }
+
+    let repoConfig: RepoConfig = {};
+    try {
+      const configContent = await invoke<string>("read_text_file", {
+        path: `${repo.path}/.kanna/config.json`,
+      });
+      if (configContent) repoConfig = parseRepoConfig(configContent);
+    } catch (e) {
+      console.debug("[store] no .kanna/config.json:", e);
+    }
+
+    const usedOffsets = new Set(
+      items.value.map((i) => i.port_offset).filter((o): o is number => o != null)
+    );
+    let portOffset = 1;
+    while (usedOffsets.has(portOffset)) portOffset++;
+
+    const portEnv: Record<string, string> = {};
+    if (repoConfig.ports) {
+      for (const [name, base] of Object.entries(repoConfig.ports)) {
+        portEnv[name] = String(base + portOffset);
+      }
+    }
+
+    await _db.execute(
+      `UPDATE pipeline_item
+       SET branch = ?, port_offset = ?, port_env = ?,
+           stage = 'in_progress', activity = 'working',
+           activity_changed_at = datetime('now'), updated_at = datetime('now')
+       WHERE id = ?`,
+      [branch, portOffset, Object.keys(portEnv).length > 0 ? JSON.stringify(portEnv) : null, id],
+    );
+
+    bump();
+
+    try {
+      await spawnPtySession(id, worktreePath, augmentedPrompt);
+    } catch (e) {
+      console.warn("[store] startBlockedTask PTY pre-spawn failed, will retry on mount:", e);
+    }
+  }
+
+  async function blockTask(blockerIds: string[]) {
+    const item = currentItem.value;
+    const repo = selectedRepo.value;
+    if (!item || !repo || item.stage !== "in_progress") return;
+
+    const originalPrompt = item.prompt;
+    const originalRepoId = item.repo_id;
+    const originalAgentType = item.agent_type;
+    const originalDisplayName = item.display_name;
+    const originalId = item.id;
+
+    const newId = crypto.randomUUID();
+    await insertPipelineItem(_db, {
+      id: newId,
+      repo_id: originalRepoId,
+      issue_number: null,
+      issue_title: null,
+      prompt: originalPrompt,
+      stage: "blocked",
+      pr_number: null,
+      pr_url: null,
+      branch: null,
+      agent_type: originalAgentType,
+      port_offset: null,
+      port_env: null,
+      activity: "idle",
+    });
+
+    if (originalDisplayName) {
+      await updatePipelineItemDisplayName(_db, newId, originalDisplayName);
+    }
+
+    for (const blockerId of blockerIds) {
+      await insertTaskBlocker(_db, newId, blockerId);
+    }
+
+    try {
+      await invoke("kill_session", { sessionId: originalId }).catch((e: unknown) =>
+        console.error("[store] kill_session failed:", e)
+      );
+      await invoke("kill_session", { sessionId: `shell-${originalId}` }).catch((e: unknown) =>
+        console.error("[store] kill shell session failed:", e)
+      );
+
+      const worktreePath = `${repo.path}/.kanna-worktrees/${item.branch}`;
+      try {
+        const configContent = await invoke<string>("read_text_file", {
+          path: `${repo.path}/.kanna/config.json`,
+        });
+        if (configContent) {
+          const repoConfig = parseRepoConfig(configContent);
+          if (repoConfig.teardown?.length) {
+            for (const cmd of repoConfig.teardown) {
+              await invoke("run_script", { script: cmd, cwd: worktreePath, env: { KANNA_WORKTREE: "1" } });
+            }
+          }
+        }
+      } catch (e) {
+        console.error("[store] teardown failed:", e);
+      }
+
+      await invoke("git_worktree_remove", { repoPath: repo.path, path: worktreePath }).catch((e: unknown) =>
+        console.error("[store] worktree remove failed:", e)
+      );
+
+      await updatePipelineItemStage(_db, originalId, "done");
+    } catch (e) {
+      console.error("[store] blockTask close failed:", e);
+    }
+
+    bump();
+    selectedItemId.value = newId;
+  }
+
+  async function editBlockedTask(itemId: string, newBlockerIds: string[]) {
+    const item = items.value.find((i) => i.id === itemId);
+    if (!item || item.stage !== "blocked") return;
+
+    if (newBlockerIds.length > 0) {
+      const hasCycle = await hasCircularDependency(_db, itemId, newBlockerIds);
+      if (hasCycle) {
+        throw new Error("Cannot add blocker — it would create a circular dependency");
+      }
+    }
+
+    const currentBlockers = await listBlockersForItem(_db, itemId);
+    const currentIds = new Set(currentBlockers.map((b) => b.id));
+    const newIds = new Set(newBlockerIds);
+
+    for (const id of currentIds) {
+      if (!newIds.has(id)) {
+        await removeTaskBlocker(_db, itemId, id);
+      }
+    }
+
+    for (const id of newIds) {
+      if (!currentIds.has(id)) {
+        await insertTaskBlocker(_db, itemId, id);
+      }
+    }
+
+    bump();
+
+    const updatedBlockers = await listBlockersForItem(_db, itemId);
+    const allClear = updatedBlockers.length === 0 || updatedBlockers.every(
+      (b) => b.stage === "pr" || b.stage === "merge" || b.stage === "done"
+    );
+    if (allClear) {
+      await startBlockedTask(item);
+    }
   }
 
   // ── Lifecycle ────────────────────────────────────────────────────
@@ -553,6 +771,13 @@ export const useKannaStore = defineStore("kanna", () => {
     }
     if (stale.length > 0) {
       console.log(`[gc] cleaned up ${stale.length} done task(s)`);
+    }
+
+    // Check for blocked tasks that can now start
+    const unblockedItems = await getUnblockedItems(_db);
+    for (const item of unblockedItems) {
+      console.log(`[store] auto-starting previously blocked task: ${item.id}`);
+      await startBlockedTask(item);
     }
 
     // Trigger reactive data load
@@ -622,6 +847,8 @@ export const useKannaStore = defineStore("kanna", () => {
     importRepo, hideRepo,
     createItem, spawnPtySession, closeTask, undoClose,
     startPrAgent, startMergeAgent, makePR, mergeQueue,
+    blockTask, editBlockedTask,
+    listBlockersForItem: (itemId: string) => listBlockersForItem(_db, itemId),
     pinItem, unpinItem, reorderPinned, renameItem,
     savePreference,
   };
