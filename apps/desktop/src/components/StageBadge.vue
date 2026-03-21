@@ -6,12 +6,14 @@ defineProps<{
 const stageColors: Record<string, string> = {
   in_progress: "#0066cc",
   pr: "#d29922",
+  merge: "#8b5cf6",
   done: "#666",
 };
 
 const stageLabels: Record<string, string> = {
   in_progress: "In Progress",
   pr: "PR",
+  merge: "Merge",
   done: "Done",
 };
 </script>
