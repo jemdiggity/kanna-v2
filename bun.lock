@@ -20,9 +20,10 @@
         "@tauri-apps/plugin-shell": "^2",
         "@tauri-apps/plugin-sql": "^2.3.2",
         "@xterm/addon-fit": "0.12.0-beta.100",
-        "@xterm/addon-image": "0.9.0-beta.100",
+        "@xterm/addon-image": "0.10.0-beta.100",
         "@xterm/addon-serialize": "0.15.0-beta.100",
         "@xterm/addon-web-links": "0.13.0-beta.100",
+        "@xterm/addon-webgl": "0.19.0-beta.100",
         "@xterm/xterm": "6.1.0-beta.100",
         "markdown-it": "^14.1.0",
         "markdown-it-strikethrough-alt": "^1.0.0",
@@ -314,11 +315,13 @@
 
     "@xterm/addon-fit": ["@xterm/addon-fit@0.12.0-beta.100", "", { "peerDependencies": { "@xterm/xterm": "^6.1.0-beta.100" } }, "sha512-FjZ5l/cKbOCGVDmL/ikYgnkH/WZlvk6ObLYaNKc7J//L7POYmh31odZNYKIXFz0rH9gzZoJ6GpkXvvEJwWfZtg=="],
 
-    "@xterm/addon-image": ["@xterm/addon-image@0.9.0-beta.100", "", { "peerDependencies": { "@xterm/xterm": "^5.6.0-beta.100" } }, "sha512-Nzfk4ezp12qPyan2XXV3bqvDeapu6UJOdoPJ2LKpDjs3gymS6+v5cuYsMJ8XxAtLGd6HZ1sxIs+iRcHvGk0R0g=="],
+    "@xterm/addon-image": ["@xterm/addon-image@0.10.0-beta.100", "", { "peerDependencies": { "@xterm/xterm": "^6.1.0-beta.100" } }, "sha512-OQYB/ABHJ2IMQdHaY54Mog59Fb5CfGZNHWa0BOku8tc5g7ZUX9/VQwKg/xk+9VHzswYkGBMkdlT6L5vjuFxh9A=="],
 
     "@xterm/addon-serialize": ["@xterm/addon-serialize@0.15.0-beta.100", "", { "peerDependencies": { "@xterm/xterm": "^6.1.0-beta.100" } }, "sha512-FKTTfCdcosQwbfp1xTj2gUhsNsi0gfF2iO0D8oaDgRTooHK4s3Mvg8VzRqbnrBjf8DbHS0Re6IBrx7ZxH/wRMw=="],
 
     "@xterm/addon-web-links": ["@xterm/addon-web-links@0.13.0-beta.100", "", { "peerDependencies": { "@xterm/xterm": "^6.1.0-beta.100" } }, "sha512-090+6wUmpNjtPS1tuSg3TXPLXut3nUC32zqU0inw+baqryjx5NIvbgmtg37llFsj05+V7IIYyiKd0Lt16NXMAg=="],
+
+    "@xterm/addon-webgl": ["@xterm/addon-webgl@0.19.0-beta.100", "", { "peerDependencies": { "@xterm/xterm": "^5.6.0-beta.100" } }, "sha512-S22OMBxzJ3ZG59Gmzi5Qna8wEOjI/Zqa53vprCTmj6EFVl/v8hw5MvlSH6OIE26PNUvVfbndO5jIYywUWAJVYg=="],
 
     "@xterm/xterm": ["@xterm/xterm@6.1.0-beta.100", "", {}, "sha512-yTrSoii0jep0ZjwUltOf2izZiql04lVri0/M0vJKg8Lm2YXN0JP5mVGvuhceuaCqzwA1bKUONxM2pyaozd4JMw=="],
 
