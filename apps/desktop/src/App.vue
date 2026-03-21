@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, inject, onMounted, nextTick, type Ref } from "vue";
+import { computedAsync } from "@vueuse/core";
 import { isTauri } from "./tauri-mock";
 import { invoke } from "./invoke";
 import type { DbHandle } from "@kanna/db";
@@ -137,6 +138,12 @@ async function handleImportRepo(path: string, name: string, defaultBranch: strin
   showImportRepoModal.value = false;
 }
 
+const currentBlockers = computedAsync(async () => {
+  const item = store.currentItem;
+  if (!item || item.stage !== "blocked") return [];
+  return store.listBlockersForItem(item.id);
+}, []);
+
 // Init
 onMounted(async () => {
   await store.init(db);
@@ -170,6 +177,7 @@ onMounted(async () => {
       :repo-path="store.selectedRepo?.path"
       :spawn-pty-session="store.spawnPtySession"
       :maximized="maximized"
+      :blockers="currentBlockers"
       @close-task="store.closeTask"
       @agent-completed="store.bump"
     />

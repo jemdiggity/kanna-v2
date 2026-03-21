@@ -8,6 +8,7 @@ defineProps<{
   repoPath?: string;
   spawnPtySession?: (sessionId: string, cwd: string, prompt: string, cols: number, rows: number) => Promise<void>;
   maximized?: boolean;
+  blockers?: PipelineItem[];
 }>();
 
 const emit = defineEmits<{
@@ -19,15 +20,34 @@ const emit = defineEmits<{
   <main class="main-panel">
     <template v-if="item">
       <TaskHeader v-if="!maximized" :item="item" />
-      <TerminalTabs
-        :session-id="item.id"
-        :agent-type="item.agent_type || 'pty'"
-        :repo-path="repoPath"
-        :worktree-path="item.branch ? `${repoPath}/.kanna-worktrees/${item.branch}` : undefined"
-        :prompt="item.prompt || ''"
-        :spawn-pty-session="spawnPtySession"
-        @agent-completed="emit('agent-completed')"
-      />
+      <template v-if="item.stage === 'blocked'">
+        <div class="blocked-placeholder">
+          <p class="blocked-title">Task Blocked</p>
+          <p class="blocked-prompt">{{ item.prompt }}</p>
+          <div v-if="blockers && blockers.length > 0" class="blocked-by">
+            <p class="blocked-by-label">Blocked by:</p>
+            <div v-for="b in blockers" :key="b.id" class="blocker-item">
+              <span
+                class="blocker-status"
+                :style="{ color: b.stage === 'in_progress' ? '#0066cc' : '#666' }"
+              >{{ b.stage === 'in_progress' ? 'In Progress' : b.stage }}</span>
+              <span class="blocker-name">{{ b.display_name || (b.prompt ? b.prompt.slice(0, 60) : 'Untitled') }}</span>
+            </div>
+          </div>
+          <p class="blocked-hint">This task will start automatically when all blockers leave "In Progress".</p>
+        </div>
+      </template>
+      <template v-else>
+        <TerminalTabs
+          :session-id="item.id"
+          :agent-type="item.agent_type || 'pty'"
+          :repo-path="repoPath"
+          :worktree-path="item.branch ? `${repoPath}/.kanna-worktrees/${item.branch}` : undefined"
+          :prompt="item.prompt || ''"
+          :spawn-pty-session="spawnPtySession"
+          @agent-completed="emit('agent-completed')"
+        />
+      </template>
     </template>
     <div v-else class="empty-state">
       <p class="empty-title">No task selected</p>
@@ -63,5 +83,75 @@ const emit = defineEmits<{
 .empty-hint {
   font-size: 12px;
   color: #555;
+}
+
+.blocked-placeholder {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 32px;
+  max-width: 600px;
+  margin: 0 auto;
+}
+
+.blocked-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: #888;
+}
+
+.blocked-prompt {
+  font-size: 13px;
+  color: #aaa;
+  text-align: center;
+  white-space: pre-wrap;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.blocked-by {
+  width: 100%;
+  margin-top: 8px;
+}
+
+.blocked-by-label {
+  font-size: 12px;
+  color: #666;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 6px;
+}
+
+.blocker-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: #252525;
+  border-radius: 4px;
+  margin-bottom: 4px;
+}
+
+.blocker-status {
+  font-size: 11px;
+  font-weight: 600;
+  min-width: 80px;
+}
+
+.blocker-name {
+  font-size: 12px;
+  color: #bbb;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.blocked-hint {
+  font-size: 11px;
+  color: #555;
+  margin-top: 8px;
 }
 </style>
