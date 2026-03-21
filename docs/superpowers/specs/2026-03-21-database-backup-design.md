@@ -45,9 +45,9 @@ New composable: `apps/desktop/src/composables/useBackup.ts`
 
 Exports:
 - **`backupOnStartup(dbName: string)`** — called from `App.vue` before `runMigrations()`. Resolves the full DB path via `get_app_data_dir` + `dbName`. Checks if the DB file exists. If it does, copies it to `{dbPath}.backup-{timestamp}`. On failure, logs to console and continues.
-- **`startPeriodicBackup(dbName: string, db: DbHandle, intervalMs: number)`** — starts a `setInterval` timer. Called after full app initialization. Accepts the open `DbHandle` so it can flush WAL before copying. Returns a cleanup function to clear the interval on unmount.
+- **`startPeriodicBackup(dbName: string, db: Ref<DbHandle | null>, intervalMs: number)`** — starts a `setInterval` timer. Called after full app initialization. Accepts the reactive `db` ref (consistent with `usePipeline`, `usePreferences`, etc.) so it always reads the current handle when flushing WAL. Returns a cleanup function to clear the interval on unmount.
 
-Both use a shared `createBackup(dbName: string, db?: DbHandle)` function that performs the backup and triggers retention cleanup.
+Both use a shared `createBackup(dbName: string, db?: DbHandle | null)` function that performs the backup and triggers retention cleanup. `startPeriodicBackup` unwraps `db.value` at each interval tick, skipping the backup if the handle is null.
 
 **Backup filename format:** `kanna-v2.db.backup-2026-03-21T10-30-00`
 - ISO timestamp with colons replaced by hyphens for filesystem safety
@@ -107,9 +107,8 @@ Retention window: 7 days (hardcoded). With 4-hour intervals plus one per startup
 - `copy_file` copies a file correctly
 - `remove_file` deletes a file
 - `list_dir` returns filenames
-- `get_app_data_dir` returns a valid path
 
-These are simple filesystem operations — standard Rust unit tests with temp directories.
+Standard Rust unit tests with temp directories. Note: `get_app_data_dir` requires `AppHandle` (no public constructor) and cannot be unit tested directly — it is tested indirectly through the composable tests which mock `invoke("get_app_data_dir")`.
 
 **Composable tests** (`apps/desktop/src/composables/useBackup.test.ts`):
 - Mock the Tauri `invoke` function (same pattern used by existing composable tests)
