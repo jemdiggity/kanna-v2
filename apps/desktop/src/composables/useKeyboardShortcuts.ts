@@ -41,28 +41,27 @@ interface ShortcutDef {
  * Used by: keydown handler, terminal passthrough, shortcuts modal.
  */
 export const shortcuts: ShortcutDef[] = [
-  // Pipeline
-  { action: "newTask",    label: "New Task",          group: "Pipeline",   key: ["N", "n"],                     meta: true, shift: true,  display: "⇧⌘N" },
-  { action: "openFile",   label: "File Picker",        group: "Pipeline",   key: "p",                            meta: true,               display: "⌘P" },
-  { action: "openInIDE",  label: "Open in IDE",        group: "Pipeline",   key: "o",                            meta: true,               display: "⌘O" },
-  { action: "makePR",     label: "Make PR",           group: "Pipeline",   key: "s",                            meta: true, display: "⌘S" },
-  { action: "mergeQueue", label: "Merge Queue",       group: "Pipeline",   key: ["M", "m"],                     meta: true, shift: true,  display: "⇧⌘M" },
-  { action: "closeTask",  label: "Close / Reject",    group: "Pipeline",   key: ["Backspace", "Delete"],        meta: true,               display: "⌘⌫" },
-  { action: "undoClose",  label: "Undo Close",        group: "Pipeline",   key: ["Z", "z"],                     meta: true,               display: "⌘Z" },
+  // Tasks — lifecycle operations
+  { action: "newTask",    label: "New Task",          group: "Tasks",      key: ["N", "n"],                     meta: true, shift: true,  display: "⇧⌘N" },
+  { action: "makePR",     label: "Make PR",           group: "Tasks",      key: "s",                            meta: true, display: "⌘S" },
+  { action: "mergeQueue", label: "Merge Queue",       group: "Tasks",      key: ["M", "m"],                     meta: true, shift: true,  display: "⇧⌘M" },
+  { action: "closeTask",  label: "Close / Reject",    group: "Tasks",      key: ["Backspace", "Delete"],        meta: true,               display: "⌘⌫" },
+  { action: "undoClose",  label: "Undo Close",        group: "Tasks",      key: ["Z", "z"],                     meta: true,               display: "⌘Z" },
+  // Navigation — moving between tasks and finding things
+  { action: "navigateUp",     label: "Previous Task",    group: "Navigation", key: "ArrowUp",                   meta: true, alt: true,    display: "⌥⌘↑" },
+  { action: "navigateDown",   label: "Next Task",        group: "Navigation", key: "ArrowDown",                 meta: true, alt: true,    display: "⌥⌘↓" },
+  { action: "openFile",       label: "File Picker",      group: "Navigation", key: "p",                         meta: true,               display: "⌘P" },
+  { action: "commandPalette", label: "Command Palette",  group: "Navigation", key: ["P", "p"],                  meta: true, shift: true,  display: "⇧⌘P" },
+  // Views — panels, modes, and display
+  { action: "showDiff",       label: "View Diff",        group: "Views",      key: "d",                         meta: true, display: "⌘D" },
+  { action: "openShell",      label: "Shell Terminal",   group: "Views",      key: "j",                         meta: true,               display: "⌘J" },
+  { action: "openInIDE",      label: "Open in IDE",      group: "Views",      key: "o",                         meta: true,               display: "⌘O" },
+  { action: "toggleZen",      label: "Zen Mode",         group: "Views",      key: ["Z", "z"],                  meta: true, shift: true,  display: "⇧⌘Z" },
+  { action: "toggleMaximize", label: "Maximize",         group: "Views",      key: "Enter",                     meta: true, shift: true,  display: "⇧⌘Enter" },
   // Window — disabled until #24 (new window state sharing)
   // { action: "newWindow",  label: "New Window",     group: "Window",     key: ["N", "n"],                     meta: true, shift: true,  display: "⇧⌘N" },
-  // Navigation
-  { action: "navigateDown", label: "Next Task",       group: "Navigation", key: "ArrowDown",                    meta: true, alt: true,    display: "⌥⌘↓" },
-  { action: "navigateUp",   label: "Previous Task",   group: "Navigation", key: "ArrowUp",                      meta: true, alt: true,    display: "⌥⌘↑" },
-  { action: "toggleZen",    label: "Zen Mode",        group: "Navigation", key: ["Z", "z"],                     meta: true, shift: true,  display: "⇧⌘Z" },
-  // Terminal
-  { action: "openShell",  label: "Shell Terminal",    group: "Terminal",   key: "j",                            meta: true,               display: "⌘J" },
-  // Views / Help
-  { action: "showDiff",       label: "View Diff",           group: "Help", key: "d",                            meta: true, display: "⌘D" },
-  { action: "showShortcuts",  label: "Keyboard Shortcuts",  group: "Help", key: "/",                            meta: true,               display: "⌘/" },
-  { action: "commandPalette",  label: "Command Palette",    group: "Help", key: ["P", "p"],                     meta: true, shift: true,  display: "⇧⌘P" },
-  // Window
-  { action: "toggleMaximize", label: "Maximize",         group: "Window",     key: "Enter",                        meta: true, shift: true,  display: "⇧⌘Enter" },
+  // Help
+  { action: "showShortcuts",  label: "Keyboard Shortcuts", group: "Help",   key: "/",                           meta: true,               display: "⌘/" },
   // Escape is special — no meta required
   { action: "dismiss",    label: "Dismiss",           group: "Navigation", key: "Escape",                                                 display: "Escape" },
 ];
@@ -88,7 +87,7 @@ export function isAppShortcut(e: KeyboardEvent): boolean {
  * Returns shortcut definitions grouped for display in the shortcuts modal.
  */
 export function getShortcutGroups(): { title: string; shortcuts: { keys: string; action: string }[] }[] {
-  const groupOrder = ["Pipeline", "Navigation", "Terminal", "Window", "Help"];
+  const groupOrder = ["Tasks", "Navigation", "Views", "Help"];
   const map = new Map<string, { keys: string; action: string }[]>();
   for (const def of shortcuts) {
     // Don't show Escape in the modal
