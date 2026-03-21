@@ -30,22 +30,32 @@ function sortedPinned(repoId: string): PipelineItem[] {
     .sort((a, b) => (a.pin_order ?? 0) - (b.pin_order ?? 0));
 }
 
-function sortedUnpinned(repoId: string): PipelineItem[] {
+function sortByActivity(items: PipelineItem[]): PipelineItem[] {
   const order: Record<string, number> = { idle: 0, unread: 1, working: 2 };
-  return props.pipelineItems
-    .filter((i) => i.repo_id === repoId && i.stage !== "done" && !i.pinned)
-    .sort((a, b) => {
-      const ao = order[a.activity || "idle"] ?? 0;
-      const bo = order[b.activity || "idle"] ?? 0;
-      if (ao !== bo) return ao - bo;
-      const aTime = a.activity_changed_at || a.created_at;
-      const bTime = b.activity_changed_at || b.created_at;
-      return bTime.localeCompare(aTime);
-    });
+  return items.sort((a, b) => {
+    const ao = order[a.activity || "idle"] ?? 0;
+    const bo = order[b.activity || "idle"] ?? 0;
+    if (ao !== bo) return ao - bo;
+    const aTime = a.activity_changed_at || a.created_at;
+    const bTime = b.activity_changed_at || b.created_at;
+    return bTime.localeCompare(aTime);
+  });
+}
+
+function sortedPR(repoId: string): PipelineItem[] {
+  return sortByActivity(
+    props.pipelineItems.filter((i) => i.repo_id === repoId && i.stage === "pr" && !i.pinned)
+  );
+}
+
+function sortedInProgress(repoId: string): PipelineItem[] {
+  return sortByActivity(
+    props.pipelineItems.filter((i) => i.repo_id === repoId && i.stage === "in_progress" && !i.pinned)
+  );
 }
 
 function itemsForRepo(repoId: string): PipelineItem[] {
-  return [...sortedPinned(repoId), ...sortedUnpinned(repoId)];
+  return [...sortedPinned(repoId), ...sortedPR(repoId), ...sortedInProgress(repoId)];
 }
 
 function itemTitle(item: PipelineItem): string {
@@ -204,13 +214,14 @@ function onUnpinnedChange(repoId: string, evt: any) {
           </draggable>
 
           <!-- Divider -->
-          <div v-show="itemsForRepo(repo.id).length > 0" class="pin-divider">
+          <div v-show="sortedPinned(repo.id).length > 0" class="pin-divider">
             <div class="pin-divider-line"></div>
           </div>
 
-          <!-- Unpinned tasks (not sortable, but can drag to/from pinned) -->
+          <!-- PR tasks -->
+          <div v-if="sortedPR(repo.id).length > 0" class="section-label">Pull Requests</div>
           <draggable
-            :model-value="sortedUnpinned(repo.id)"
+            :model-value="sortedPR(repo.id)"
             :group="{ name: `repo-${repo.id}` }"
             item-key="id"
             :animation="150"
@@ -219,7 +230,50 @@ function onUnpinnedChange(repoId: string, evt: any) {
             ghost-class="sortable-ghost"
             chosen-class="sortable-chosen"
             fallback-class="sortable-fallback"
-            class="unpinned-zone"
+            class="type-zone"
+            @change="(evt: any) => onUnpinnedChange(repo.id, evt)"
+          >
+            <template #item="{ element }">
+              <div
+                class="pipeline-item"
+                :class="{ selected: selectedItemId === element.id }"
+                @click="handleSelectItem(element)"
+                @dblclick.stop="startRename(element)"
+              >
+                <input
+                  v-if="editingItemId === element.id"
+                  class="rename-input"
+                  v-model="editingValue"
+                  @keydown.enter="commitRename(element.id)"
+                  @keydown.escape="cancelRename()"
+                  @blur="commitRename(element.id)"
+                  @click.stop
+                />
+                <span
+                  v-else
+                  class="item-title"
+                  :style="{
+                    fontWeight: element.activity === 'unread' ? 'bold' : 'normal',
+                    fontStyle: element.activity === 'working' ? 'italic' : 'normal',
+                  }"
+                >{{ itemTitle(element) }}</span>
+              </div>
+            </template>
+          </draggable>
+
+          <!-- In Progress tasks -->
+          <div v-if="sortedInProgress(repo.id).length > 0" class="section-label">In Progress</div>
+          <draggable
+            :model-value="sortedInProgress(repo.id)"
+            :group="{ name: `repo-${repo.id}` }"
+            item-key="id"
+            :animation="150"
+            :sort="false"
+            :force-fallback="true"
+            ghost-class="sortable-ghost"
+            chosen-class="sortable-chosen"
+            fallback-class="sortable-fallback"
+            class="type-zone"
             @change="(evt: any) => onUnpinnedChange(repo.id, evt)"
           >
             <template #item="{ element }">
@@ -471,8 +525,16 @@ function onUnpinnedChange(repoId: string, evt: any) {
   background: #555;
 }
 
-.unpinned-zone {
-  min-height: 8px;
+.section-label {
+  color: #666;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 6px 14px 2px;
+}
+
+.type-zone {
+  min-height: 0;
 }
 
 /* Drag classes */
