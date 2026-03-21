@@ -60,8 +60,14 @@ function sortedInProgress(repoId: string): PipelineItem[] {
   );
 }
 
+function sortedBlocked(repoId: string): PipelineItem[] {
+  return props.pipelineItems
+    .filter((i) => i.repo_id === repoId && i.stage === "blocked" && !i.pinned)
+    .sort((a, b) => a.created_at.localeCompare(b.created_at));
+}
+
 function itemsForRepo(repoId: string): PipelineItem[] {
-  return [...sortedPinned(repoId), ...sortedPR(repoId), ...sortedMerge(repoId), ...sortedInProgress(repoId)];
+  return [...sortedPinned(repoId), ...sortedPR(repoId), ...sortedMerge(repoId), ...sortedInProgress(repoId), ...sortedBlocked(repoId)];
 }
 
 function itemTitle(item: PipelineItem): string {
@@ -357,6 +363,34 @@ function onUnpinnedChange(repoId: string, evt: any) {
               </div>
             </template>
           </draggable>
+
+          <!-- Blocked tasks -->
+          <div v-if="sortedBlocked(repo.id).length > 0" class="section-label">Blocked</div>
+          <div class="type-zone">
+            <div
+              v-for="element in sortedBlocked(repo.id)"
+              :key="element.id"
+              class="pipeline-item"
+              :class="{ selected: selectedItemId === element.id }"
+              @click="handleSelectItem(element)"
+              @dblclick.stop="startRename(element)"
+            >
+              <input
+                v-if="editingItemId === element.id"
+                class="rename-input"
+                v-model="editingValue"
+                @keydown.enter="commitRename(element.id)"
+                @keydown.escape="cancelRename()"
+                @blur="commitRename(element.id)"
+                @click.stop
+              />
+              <span
+                v-else
+                class="item-title"
+                style="color: #666;"
+              >{{ itemTitle(element) }}</span>
+            </div>
+          </div>
 
           <div v-if="itemsForRepo(repo.id).length === 0" class="no-items">
             No tasks
