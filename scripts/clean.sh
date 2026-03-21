@@ -2,7 +2,7 @@
 # Clean Tauri/Rust build artifacts to reclaim disk space.
 #
 # Usage:
-#   ./scripts/clean.sh          # clean Rust target dirs only (~12 GB)
+#   ./scripts/clean.sh          # clean Rust target dirs only (~16 GB)
 #   ./scripts/clean.sh --all    # also remove node_modules, dist, .turbo
 #   ./scripts/clean.sh --dry    # show what would be removed and sizes
 set -e
@@ -42,6 +42,8 @@ remove() {
 
 # Rust build output (.cargo/config.toml sets target-dir = ".build")
 remove "$ROOT/.build"
+# Tauri CLI runs cargo from apps/desktop/src-tauri/, which uses default target dir
+remove "$ROOT/apps/desktop/src-tauri/target"
 
 if $ALL; then
   # Frontend build output
