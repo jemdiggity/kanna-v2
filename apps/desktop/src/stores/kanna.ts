@@ -4,7 +4,7 @@ import { computedAsync } from "@vueuse/core";
 import { invoke } from "../invoke";
 import { isTauri } from "../tauri-mock";
 import { listen } from "../listen";
-import { parseRepoConfig } from "@kanna/core";
+import { parseRepoConfig, parseAgentMd } from "@kanna/core";
 import type { RepoConfig, CustomTaskConfig } from "@kanna/core";
 import type { DbHandle, PipelineItem, Repo } from "@kanna/db";
 import {
@@ -362,6 +362,30 @@ export const useKannaStore = defineStore("kanna", () => {
 
       if (item.stage === "in_progress") {
         const worktreePath = `${repo.path}/.kanna-worktrees/${item.branch}`;
+
+        // Custom task teardown (before repo-level teardown)
+        if (item.display_name) {
+          try {
+            const tasksDir = `${repo.path}/.kanna/tasks`;
+            const entries = await invoke<string[]>("list_dir", { path: tasksDir }).catch(() => [] as string[]);
+            for (const entry of entries) {
+              const agentMdPath = `${tasksDir}/${entry}/agent.md`;
+              let content: string;
+              try {
+                content = await invoke<string>("read_text_file", { path: agentMdPath });
+              } catch { continue; }
+              const config = parseAgentMd(content, entry);
+              if (config && config.name === item.display_name && config.teardown?.length) {
+                for (const cmd of config.teardown) {
+                  await invoke("run_script", { script: cmd, cwd: worktreePath, env: { KANNA_WORKTREE: "1" } });
+                }
+                break;
+              }
+            }
+          } catch (e) { console.error("[store] custom task teardown failed:", e); }
+        }
+
+        // Repo-level teardown
         try {
           const configContent = await invoke<string>("read_text_file", {
             path: `${repo.path}/.kanna/config.json`,

@@ -22,11 +22,16 @@ import { startPeriodicBackup } from "./composables/useBackup";
 import { createNavigationHistory } from "./composables/useNavigationHistory";
 import { useMarkAsRead } from "./composables/useMarkAsRead";
 import { activeContext } from "./composables/useShortcutContext";
+import { useCustomTasks } from "./composables/useCustomTasks";
 import { useKannaStore } from "./stores/kanna";
+import { NEW_CUSTOM_TASK_PROMPT, parseAgentMd } from "@kanna/core";
+import type { CustomTaskConfig } from "@kanna/core";
+import type { DynamicCommand } from "./components/CommandPaletteModal.vue";
 
 const store = useKannaStore();
 const db = inject<DbHandle>("db")!;
 const dbName = inject<string>("dbName")!;
+const { tasks: customTasks, scan: scanCustomTasks } = useCustomTasks();
 const { recordNavigation, goBack, goForward } = createNavigationHistory();
 const { selectedItemId: selectedItemIdRef, items: itemsRef } = storeToRefs(store);
 useMarkAsRead(computed(() => db) as unknown as Ref<DbHandle | null>, selectedItemIdRef, itemsRef);
@@ -172,6 +177,66 @@ const paletteExtraCommands = computed(() => {
   return cmds;
 });
 
+// Custom tasks
+async function handleLaunchCustomTask(task: CustomTaskConfig) {
+  if (!store.selectedRepoId) {
+    if (store.repos.length === 1) {
+      store.selectedRepoId = store.repos[0].id;
+    } else {
+      alert("Select a repository first");
+      return;
+    }
+  }
+  const repo = store.repos.find((r) => r.id === store.selectedRepoId);
+  if (!repo) return;
+  try {
+    await store.createItem(store.selectedRepoId, repo.path, task.prompt, "pty", { customTask: task });
+  } catch (e: any) {
+    console.error("[App] custom task launch failed:", e);
+    alert(`Custom task launch failed: ${e?.message || e}`);
+  }
+}
+
+async function handleCreateCustomTask() {
+  if (!store.selectedRepoId) {
+    if (store.repos.length === 1) {
+      store.selectedRepoId = store.repos[0].id;
+    } else {
+      alert("Select a repository first");
+      return;
+    }
+  }
+  const repo = store.repos.find((r) => r.id === store.selectedRepoId);
+  if (!repo) return;
+  try {
+    await store.createItem(store.selectedRepoId, repo.path, NEW_CUSTOM_TASK_PROMPT);
+  } catch (e: any) {
+    console.error("[App] custom task creation failed:", e);
+    alert(`Custom task creation failed: ${e?.message || e}`);
+  }
+}
+
+const customTaskCommands = computed<DynamicCommand[]>(() => {
+  const cmds: DynamicCommand[] = [];
+  // Always include "New Custom Task" option
+  cmds.push({
+    id: "custom-task-new",
+    label: "New Custom Task",
+    description: "Create a new reusable agent task definition",
+    execute: () => handleCreateCustomTask(),
+  });
+  // Add discovered custom tasks
+  for (const task of customTasks.value) {
+    cmds.push({
+      id: `custom-task-${task.name}`,
+      label: task.name,
+      description: task.description,
+      execute: () => handleLaunchCustomTask(task),
+    });
+  }
+  return cmds;
+});
+
 // Keyboard shortcuts
 const keyboardActions = {
   newTask: () => { showNewTaskModal.value = true; },
@@ -234,7 +299,13 @@ const keyboardActions = {
     shortcutsContext.value = activeContext.value;
     showShortcutsModal.value = true;
   },
-  commandPalette: () => { showCommandPalette.value = !showCommandPalette.value; },
+  commandPalette: () => {
+    showCommandPalette.value = !showCommandPalette.value;
+    if (showCommandPalette.value) {
+      const repo = store.selectedRepo;
+      if (repo) scanCustomTasks(repo.path);
+    }
+  },
   showAnalytics: () => { showAnalyticsModal.value = !showAnalyticsModal.value; },
   goBack: () => {
     if (!store.selectedItemId) return;
@@ -351,6 +422,7 @@ onMounted(async () => {
     <CommandPaletteModal
       v-if="showCommandPalette"
       :extra-commands="paletteExtraCommands"
+      :dynamic-commands="customTaskCommands"
       @close="showCommandPalette = false"
       @execute="(action: ActionName) => keyboardActions[action]()"
     />
