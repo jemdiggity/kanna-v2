@@ -50,16 +50,42 @@ The composable needs to know the current task ID to push it onto the opposite st
 | Go forward (on A) | push A | pop B |
 | Select task D (on B) | push B | clear |
 
-### Keyboard Shortcut Registration
+### Keyboard Shortcut Changes
 
-In `useKeyboardShortcuts.ts`, add two entries to the `shortcuts` array in the Navigation section:
+The existing `ShortcutDef` interface only has `meta`, `shift`, and `alt` modifier fields. Since VS Code uses the Control key (not Command) for back/forward on macOS, the interface and matcher need a new `ctrl` field.
 
-```ts
-{ key: '-', ctrl: true, label: '⌃-', description: 'Go Back', section: 'Navigation' },
-{ key: '-', ctrl: true, shift: true, label: '⌃⇧-', description: 'Go Forward', section: 'Navigation' },
-```
+**Changes to `useKeyboardShortcuts.ts`:**
 
-Note: `ctrl: true` (not `meta`) — this matches VS Code's convention where back/forward use the Control key on macOS, not Command.
+1. **Extend `ActionName` union** — add `goBack` and `goForward`:
+   ```ts
+   export type ActionName =
+     | "newTask"
+     // ... existing ...
+     | "goBack"
+     | "goForward";
+   ```
+
+2. **Add `ctrl` field to `ShortcutDef`:**
+   ```ts
+   interface ShortcutDef {
+     // ... existing fields ...
+     ctrl?: boolean;
+   }
+   ```
+
+3. **Update `matches()` function** — add `ctrlKey` check:
+   ```ts
+   if (e.ctrlKey !== (def.ctrl ?? false)) return false;
+   ```
+   This also fixes `isAppShortcut()` (used by terminal passthrough) since it delegates to `matches()`.
+
+4. **Add shortcut entries** in the Navigation section:
+   ```ts
+   { action: "goBack",    label: "Go Back",    group: "Navigation", key: "-", ctrl: true,               display: "⌃-" },
+   { action: "goForward", label: "Go Forward", group: "Navigation", key: "-", ctrl: true, shift: true,  display: "⌃⇧-" },
+   ```
+
+**Note on WKWebView key capture:** `Ctrl+-` may conflict with macOS zoom shortcuts in WKWebView. If the key event is swallowed before reaching JavaScript, an alternative binding (e.g., `Ctrl+[` / `Ctrl+]`) may be needed. This should be verified at implementation time.
 
 ### App.vue Integration
 
@@ -70,21 +96,21 @@ Note: `ctrl: true` (not `meta`) — this matches VS Code's convention where back
 
 2. **Record history on task selection** — in `handleSelectItem()`, before updating `selectedItemId`, call `recordNavigation(selectedItemId.value)` (only if the current value is non-null and differs from the new one).
 
-3. **Record history on next/prev task** — the existing `selectNextItem` and `selectPrevItem` actions already call `handleSelectItem`, so they get history tracking for free.
+3. **Record history on next/prev task** — `navigateItems()` sets `selectedItemId.value` directly without calling `handleSelectItem`. It must also call `recordNavigation(selectedItemId.value)` before the assignment so that up/down keyboard navigation is tracked in history.
 
 4. **Wire shortcut actions** — add to the `keyboardActions` map:
    ```ts
-   'Go Back': () => {
+   goBack: () => {
      const taskId = goBack(selectedItemId.value)
-     if (taskId) navigateToTask(taskId)  // set selectedItemId without recording history
+     if (taskId) navigateToTask(taskId)
    },
-   'Go Forward': () => {
+   goForward: () => {
      const taskId = goForward(selectedItemId.value)
      if (taskId) navigateToTask(taskId)
    },
    ```
 
-5. **Add a `navigateToTask` helper** that updates `selectedItemId` and persists to settings DB *without* pushing to the history stack. This prevents back/forward from creating circular history entries. The existing `handleSelectItem` continues to record history.
+5. **Add a `navigateToTask` helper** — updates `selectedItemId`, persists to settings DB, and clears the unread activity indicator (same as `handleSelectItem`), but does *not* call `recordNavigation`. This prevents back/forward from creating circular history entries.
 
 ### Edge Cases
 
@@ -97,8 +123,8 @@ Note: `ctrl: true` (not `meta`) — this matches VS Code's convention where back
 | File | Change |
 |------|--------|
 | `apps/desktop/src/composables/useNavigationHistory.ts` | New composable |
-| `apps/desktop/src/composables/useKeyboardShortcuts.ts` | Add two shortcut definitions |
-| `apps/desktop/src/App.vue` | Initialize composable, wire actions, add `navigateToTask` helper |
+| `apps/desktop/src/composables/useKeyboardShortcuts.ts` | Add `ctrl` to `ShortcutDef`, update `matches()`, extend `ActionName`, add two shortcut entries |
+| `apps/desktop/src/App.vue` | Initialize composable, wire actions, add `navigateToTask` helper, update `navigateItems` to record history |
 
 ## Testing
 
