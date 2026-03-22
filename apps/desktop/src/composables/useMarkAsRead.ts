@@ -1,5 +1,4 @@
 import { watch, type Ref } from "vue";
-import { useDebounceFn } from "@vueuse/core";
 import type { DbHandle, PipelineItem } from "@kanna/db";
 import * as dbModule from "@kanna/db";
 
@@ -8,8 +7,19 @@ export function useMarkAsRead(
   selectedItemId: Ref<string | null>,
   allItems: Ref<PipelineItem[]>
 ): void {
-  const markAsRead = useDebounceFn(
-    (itemId: string, selectionTime: number) => {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+
+  const cancelPending = () => {
+    if (timer !== null) {
+      clearTimeout(timer);
+      timer = null;
+    }
+  };
+
+  const scheduleMarkAsRead = (itemId: string, selectionTime: number) => {
+    cancelPending();
+    timer = setTimeout(() => {
+      timer = null;
       if (!db.value) return;
       const item = allItems.value.find((i) => i.id === itemId);
       if (!item || item.activity !== "unread") return;
@@ -26,13 +36,14 @@ export function useMarkAsRead(
         console.error("[useMarkAsRead] failed to update activity:", e);
       });
       item.activity = "idle";
-    },
-    1000
-  );
+    }, 1000);
+  };
 
   watch(selectedItemId, (itemId) => {
     if (itemId) {
-      markAsRead(itemId, Date.now());
+      scheduleMarkAsRead(itemId, Date.now());
+    } else {
+      cancelPending();
     }
   });
 }

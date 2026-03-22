@@ -144,18 +144,24 @@ describe("useMarkAsRead", () => {
     expect(item.activity).toBe("idle");
   });
 
-  it("no-ops when selectedItemId is set to null", async () => {
+  it("cancels pending mark-as-read when selectedItemId becomes null", async () => {
     const db = ref({ execute: async () => ({ rowsAffected: 1 }), select: async () => [] });
-    const selectedItemId = ref<string | null>("item-1");
-    const item = makeItem({ id: "item-1", activity: "unread" });
+    const selectedItemId = ref<string | null>(null);
+    const item = makeItem({ id: "item-1", activity: "unread", activity_changed_at: "2026-03-21T00:00:00.000Z" });
     const allItems = ref<PipelineItem[]>([item]);
 
     useMarkAsRead(db as any, selectedItemId, allItems);
 
+    // Select item (starts debounce)
+    selectedItemId.value = "item-1";
+    await new Promise((r) => setTimeout(r, 200));
+
+    // Deselect (should cancel pending debounce)
     selectedItemId.value = null;
 
     await new Promise((r) => setTimeout(r, 1200));
     expect(dbCalls).toHaveLength(0);
+    expect(item.activity).toBe("unread");
   });
 
   it("no-ops when db is null", async () => {
