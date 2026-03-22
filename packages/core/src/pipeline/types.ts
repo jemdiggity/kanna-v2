@@ -1,4 +1,4 @@
-export const SYSTEM_TAGS = ["in progress", "done", "pr", "merge", "blocked"] as const;
+export const SYSTEM_TAGS = ["in progress", "done", "pr", "merge", "blocked", "teardown"] as const;
 export type SystemTag = (typeof SYSTEM_TAGS)[number];
 
 export function parseTags(raw: string | null | undefined): string[] {

@@ -108,10 +108,13 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
   }
 
   async function startListening() {
+    const teardownId = `td-${sessionId}`
+
     unlistenOutput = await listen(
       "terminal_output",
       (event) => {
-        if (event.payload.session_id === sessionId && terminal.value) {
+        const sid = event.payload.session_id
+        if ((sid === sessionId || sid === teardownId) && terminal.value) {
           if (event.payload.data_b64) {
             const binary = atob(event.payload.data_b64)
             const bytes = new Uint8Array(binary.length)
@@ -129,7 +132,8 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
     unlistenExit = await listen(
       "session_exit",
       (event) => {
-        if (event.payload.session_id === sessionId && terminal.value) {
+        const sid = event.payload.session_id
+        if ((sid === sessionId || sid === teardownId) && terminal.value) {
           terminal.value.write(`\r\n[Process exited with code ${event.payload.code}]\r\n`)
         }
       }
