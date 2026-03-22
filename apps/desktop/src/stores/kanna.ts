@@ -440,10 +440,12 @@ export const useKannaStore = defineStore("kanna", () => {
       }
       bump();
 
-      // Select next item
-      const remaining = sortedItemsForCurrentRepo.value.filter((i) => i.id !== item.id);
-      const firstIdle = remaining.find((i) => i.activity === "idle" || !i.activity);
-      selectedItemId.value = (firstIdle || remaining[0])?.id || null;
+      // Select next item in display order
+      const sorted = sortedItemsForCurrentRepo.value;
+      const idx = sorted.findIndex((i) => i.id === item.id);
+      const remaining = sorted.filter((i) => i.id !== item.id);
+      const nextIdx = idx >= remaining.length ? remaining.length - 1 : idx;
+      selectedItemId.value = remaining[nextIdx]?.id || null;
     } catch (e) {
       console.error("[store] close failed:", e);
     }
