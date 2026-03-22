@@ -945,11 +945,15 @@ export const useKannaStore = defineStore("kanna", () => {
       if (hookEvent === "Stop" || hookEvent === "StopFailure") {
         _handleAgentFinished(sessionId);
       } else if (hookEvent === "WaitingForInput") {
-        await updatePipelineItemActivity(_db, item.id, "unread");
-        bump();
+        if (item.activity !== "unread") {
+          await updatePipelineItemActivity(_db, item.id, "unread");
+          bump();
+        }
       } else if (hookEvent === "PostToolUse") {
-        await updatePipelineItemActivity(_db, item.id, "working");
-        bump();
+        if (item.activity !== "working") {
+          await updatePipelineItemActivity(_db, item.id, "working");
+          bump();
+        }
       }
     });
 

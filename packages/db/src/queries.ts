@@ -120,10 +120,11 @@ export async function updatePipelineItemActivity(
   activity: "working" | "unread" | "idle"
 ): Promise<void> {
   const unreadClause = activity === "unread" ? ", unread_at = datetime('now')" : "";
-  await db.execute(
-    `UPDATE pipeline_item SET activity = ?, activity_changed_at = datetime('now')${unreadClause}, updated_at = datetime('now') WHERE id = ?`,
-    [activity, id]
+  const result = await db.execute(
+    `UPDATE pipeline_item SET activity = ?, activity_changed_at = datetime('now')${unreadClause}, updated_at = datetime('now') WHERE id = ? AND activity != ?`,
+    [activity, id, activity]
   );
+  if (result.rowsAffected === 0) return;
   await db.execute(
     "INSERT INTO activity_log (pipeline_item_id, activity) VALUES (?, ?)",
     [id, activity]
