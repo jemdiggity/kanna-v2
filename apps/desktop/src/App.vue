@@ -13,6 +13,7 @@ import FilePreviewModal from "./components/FilePreviewModal.vue";
 import DiffModal from "./components/DiffModal.vue";
 import ShellModal from "./components/ShellModal.vue";
 import CommandPaletteModal from "./components/CommandPaletteModal.vue";
+import AnalyticsModal from "./components/AnalyticsModal.vue";
 import { useKeyboardShortcuts, type ActionName } from "./composables/useKeyboardShortcuts";
 import { startPeriodicBackup } from "./composables/useBackup";
 import { useKannaStore } from "./stores/kanna";
@@ -31,6 +32,7 @@ const previewFilePath = ref("");
 const showDiffModal = ref(false);
 const showShellModal = ref(false);
 const showCommandPalette = ref(false);
+const showAnalyticsModal = ref(false);
 const diffScopes = new Map<string, "branch" | "commit" | "working">();
 const zenMode = ref(false);
 const sidebarHidden = ref(false);
@@ -95,6 +97,7 @@ const keyboardActions = {
     if (showFilePreviewModal.value) { showFilePreviewModal.value = false; focusAgentTerminal(); return; }
     if (showFilePickerModal.value) { showFilePickerModal.value = false; focusAgentTerminal(); return; }
     if (showDiffModal.value) { showDiffModal.value = false; maximized.value = false; focusAgentTerminal(); return; }
+    if (showAnalyticsModal.value) { showAnalyticsModal.value = false; focusAgentTerminal(); return; }
     if (showShellModal.value) { return; }
     if (showNewTaskModal.value) { showNewTaskModal.value = false; focusAgentTerminal(); return; }
     if (showImportRepoModal.value) { showImportRepoModal.value = false; focusAgentTerminal(); return; }
@@ -103,6 +106,7 @@ const keyboardActions = {
   showDiff: () => { showDiffModal.value = !showDiffModal.value; },
   showShortcuts: () => { showShortcutsModal.value = !showShortcutsModal.value; },
   commandPalette: () => { showCommandPalette.value = !showCommandPalette.value; },
+  showAnalytics: () => { showAnalyticsModal.value = !showAnalyticsModal.value; },
 };
 useKeyboardShortcuts(keyboardActions);
 
@@ -229,6 +233,12 @@ onMounted(async () => {
       :worktree-path="store.currentItem?.branch ? `${store.selectedRepo.path}/.kanna-worktrees/${store.currentItem.branch}` : store.selectedRepo.path"
       :ide-command="store.ideCommand"
       @close="showFilePreviewModal = false; focusAgentTerminal()"
+    />
+    <AnalyticsModal
+      v-if="showAnalyticsModal"
+      :db="db"
+      :repo-id="store.selectedRepoId"
+      @close="showAnalyticsModal = false"
     />
   </div>
 </template>

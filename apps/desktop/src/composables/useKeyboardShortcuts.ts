@@ -17,8 +17,15 @@ export type ActionName =
   | "showDiff"
   | "toggleMaximize"
   | "showShortcuts"
+<<<<<<< HEAD
   | "toggleSidebar"
   | "commandPalette";
+||||||| parent of 313620c (feat(analytics): register Cmd+Shift+A shortcut and wire AnalyticsModal into App.vue)
+  | "commandPalette";
+=======
+  | "commandPalette"
+  | "showAnalytics";
+>>>>>>> 313620c (feat(analytics): register Cmd+Shift+A shortcut and wire AnalyticsModal into App.vue)
 
 export type KeyboardActions = Record<ActionName, () => void>;
 
@@ -62,6 +69,7 @@ export const shortcuts: ShortcutDef[] = [
   // Window — disabled until #24 (new window state sharing)
   // { action: "newWindow",  label: "New Window",     group: "Window",     key: ["N", "n"],                     meta: true, shift: true,  display: "⇧⌘N" },
   { action: "toggleSidebar", label: "Toggle Sidebar",  group: "Views",      key: "b",                            meta: true,               display: "⌘B" },
+  { action: "showAnalytics", label: "Analytics",        group: "Views",      key: ["A", "a"],                     meta: true, shift: true,  display: "⇧⌘A" },
   // Help
   { action: "showShortcuts",  label: "Keyboard Shortcuts", group: "Help",   key: "/",                           meta: true,               display: "⌘/" },
   // Escape is special — no meta required
