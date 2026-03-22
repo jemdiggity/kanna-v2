@@ -254,14 +254,14 @@ const keyboardActions = {
   toggleMaximize: () => { maximized.value = !maximized.value; },
   dismiss: () => {
     if (showCommandPalette.value) { showCommandPalette.value = false; return; }
-    if (showShortcutsModal.value) { showShortcutsModal.value = false; return; }
-    if (showFilePreviewModal.value) { showFilePreviewModal.value = false; return; }
-    if (showFilePickerModal.value) { showFilePickerModal.value = false; return; }
-    if (showDiffModal.value) { showDiffModal.value = false; maximized.value = false; return; }
+    if (showShortcutsModal.value) { showShortcutsModal.value = false; focusAgentTerminal(); return; }
+    if (showFilePreviewModal.value) { showFilePreviewModal.value = false; focusAgentTerminal(); return; }
+    if (showFilePickerModal.value) { showFilePickerModal.value = false; focusAgentTerminal(); return; }
+    if (showDiffModal.value) { showDiffModal.value = false; maximized.value = false; focusAgentTerminal(); return; }
     // Shell modal: Escape goes to the terminal inside it; close with Cmd+J
     if (showShellModal.value) { return; }
-    if (showNewTaskModal.value) { showNewTaskModal.value = false; return; }
-    if (showImportRepoModal.value) { showImportRepoModal.value = false; return; }
+    if (showNewTaskModal.value) { showNewTaskModal.value = false; focusAgentTerminal(); return; }
+    if (showImportRepoModal.value) { showImportRepoModal.value = false; focusAgentTerminal(); return; }
   },
   openShell: () => { showShellModal.value = !showShellModal.value; },
   showDiff: () => { showDiffModal.value = !showDiffModal.value; },
@@ -631,12 +631,12 @@ onMounted(async () => {
       :initial-scope="currentItem ? diffScopes.get(currentItem.id) : undefined"
       :maximized="maximized"
       @scope-change="(s: any) => { if (currentItem) diffScopes.set(currentItem.id, s); }"
-      @close="showDiffModal = false; maximized = false"
+      @close="showDiffModal = false; maximized = false; focusAgentTerminal()"
     />
     <FilePickerModal
       v-if="showFilePickerModal && selectedRepo?.path"
       :worktree-path="currentItem?.branch ? `${selectedRepo.path}/.kanna-worktrees/${currentItem.branch}` : selectedRepo.path"
-      @close="showFilePickerModal = false"
+      @close="showFilePickerModal = false; focusAgentTerminal()"
       @select="(f: string) => { showFilePickerModal = false; previewFilePath = f; showFilePreviewModal = true; }"
     />
     <FilePreviewModal
@@ -644,7 +644,7 @@ onMounted(async () => {
       :file-path="previewFilePath"
       :worktree-path="currentItem?.branch ? `${selectedRepo.path}/.kanna-worktrees/${currentItem.branch}` : selectedRepo.path"
       :ide-command="ideCommand"
-      @close="showFilePreviewModal = false"
+      @close="showFilePreviewModal = false; focusAgentTerminal()"
     />
   </div>
 </template>
