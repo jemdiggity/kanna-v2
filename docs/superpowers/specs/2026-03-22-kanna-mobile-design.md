@@ -29,6 +29,14 @@ New crate at `crates/kanna-server/`. Rust binary using axum + tokio-tungstenite.
 - Read SQLite DB directly (same DB the desktop app uses, read-only)
 - Talk to daemon over Unix socket (same protocol)
 
+**Daemon event bridge:**
+
+The daemon has a "one client per session" invariant — only one output consumer per PTY session. The desktop app uses this for its terminal views. kanna-server must coexist with the desktop app, not compete with it.
+
+kanna-server uses the daemon's `Subscribe` command (not `Attach`) to receive broadcast events for all sessions. `Subscribe` is a read-only event stream separate from `Attach` — it doesn't claim the session's output writer. This means the desktop app retains full `Attach` ownership while kanna-server passively observes and forwards events through the relay.
+
+When the phone sends `attach_session`, kanna-server starts forwarding events for that session ID from its `Subscribe` stream to the relay. `detach_session` stops forwarding. No daemon state changes.
+
 **v1 command surface:**
 - `list_pipeline_items` — read pipeline items from SQLite
 - `get_pipeline_item` — single item detail
@@ -62,12 +70,16 @@ Stateless WebSocket message broker deployed on Cloud Run.
 - Phone message with no server connected → `{"type": "error", "message": "Desktop offline"}`
 - Server event with no phone connected → dropped (terminal output is ephemeral)
 
+**Deployment:** Deploy with `--session-affinity` so Cloud Run routes reconnecting clients back to the same instance (preserves the in-memory connection map). kanna-server's exponential backoff reconnection handles instance recycling transparently — a dropped WebSocket just triggers a reconnect.
+
 **Pairing flow (one-time):**
 1. Run `kanna-server register` on Mac
-2. Generates random device token, hits relay REST endpoint with Firebase Auth token + device token
-3. Relay stores `{deviceToken → userId}` in Firestore
-4. kanna-server saves device token locally
-5. Subsequent connections use device token only
+2. Opens a browser-based Firebase Auth flow (localhost callback), obtains a Firebase ID token
+3. Generates a random device token
+4. Hits relay REST endpoint (`POST /register`) with Firebase ID token + device token
+5. Relay verifies the Firebase token, stores `{deviceToken → userId}` in Firestore
+6. kanna-server saves the device token locally (e.g., `~/.kanna/server.toml`)
+7. Subsequent connections use device token only
 
 ### 3. Tauri Mobile App (`apps/mobile/`)
 
@@ -88,13 +100,20 @@ Separate Tauri app in the monorepo. Shares the Vue frontend with desktop but has
 
 **Shared frontend:**
 - Same Vue components, stores, composables from `apps/desktop/src/`
-- `invoke()` and `listen()` work identically on both platforms
+- `listen()` works identically on both platforms
 - Needs responsive CSS for phone screens
 - Some views gated for mobile (e.g., hide file browser)
 - xterm.js works in mobile WebViews
 
+**DB access abstraction:**
+
+The desktop frontend accesses SQLite directly via `tauri-plugin-sql` and `@kanna/db` query helpers (e.g., `listPipelineItems(db, repoId)`). These calls bypass Tauri `invoke` entirely. On mobile, there is no local database — all data comes from kanna-server through the relay.
+
+The solution is a **data access layer** that abstracts the DB calls behind a platform-aware interface. On desktop, it calls the `@kanna/db` helpers directly. On mobile, it serializes the query as an `invoke` message through the relay to kanna-server, which executes the query against the local SQLite and returns the result.
+
+Concretely: the kanna store (`apps/desktop/src/stores/kanna.ts`) currently calls `@kanna/db` helpers with a `DbHandle`. On mobile, a mock `DbHandle` (or a new composable like `useData()`) routes those calls through `invoke` instead. The store code doesn't change — only the data source behind it.
+
 **Mobile-specific differences:**
-- DB queries go through relay (as invoke commands to kanna-server) instead of local `tauri-plugin-sql`
 - Settings stored locally (Firebase token, relay URL)
 
 ## Message Protocol
