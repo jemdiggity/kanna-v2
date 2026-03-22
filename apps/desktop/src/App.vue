@@ -410,6 +410,15 @@ async function runMigrations(database: DbHandle) {
     await database.execute(`UPDATE pipeline_item SET stage = 'in_progress' WHERE stage = 'queued'`);
     await database.execute(`UPDATE pipeline_item SET stage = 'done' WHERE stage IN ('needs_review', 'merged', 'closed')`);
   } catch { /* migration already applied or no rows to update */ }
+
+  // Activity log for analytics dashboard
+  await database.execute(`CREATE TABLE IF NOT EXISTS activity_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pipeline_item_id TEXT NOT NULL REFERENCES pipeline_item(id) ON DELETE CASCADE,
+    activity TEXT NOT NULL,
+    started_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+  await database.execute(`CREATE INDEX IF NOT EXISTS idx_activity_log_item ON activity_log(pipeline_item_id)`);
 }
 
 // Initialize

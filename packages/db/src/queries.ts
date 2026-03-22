@@ -84,6 +84,10 @@ export async function insertPipelineItem(
       item.activity ?? "idle",
     ]
   );
+  await db.execute(
+    "INSERT INTO activity_log (pipeline_item_id, activity) VALUES (?, ?)",
+    [item.id, item.activity ?? "idle"]
+  );
 }
 
 export async function updatePipelineItemStage(
@@ -117,6 +121,10 @@ export async function updatePipelineItemActivity(
   await db.execute(
     "UPDATE pipeline_item SET activity = ?, activity_changed_at = datetime('now'), updated_at = datetime('now') WHERE id = ?",
     [activity, id]
+  );
+  await db.execute(
+    "INSERT INTO activity_log (pipeline_item_id, activity) VALUES (?, ?)",
+    [id, activity]
   );
 }
 
