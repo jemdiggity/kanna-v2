@@ -17,7 +17,7 @@ const emit = defineEmits<{
 <template>
   <div class="modal-overlay" :class="{ maximized }" @click.self="emit('close')">
     <div class="diff-modal">
-      <DiffView :repo-path="repoPath" :worktree-path="worktreePath" :initial-scope="initialScope" @scope-change="emit('scope-change', $event)" />
+      <DiffView :repo-path="repoPath" :worktree-path="worktreePath" :initial-scope="initialScope" @scope-change="emit('scope-change', $event)" @close="emit('close')" />
     </div>
   </div>
 </template>

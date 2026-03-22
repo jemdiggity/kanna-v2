@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, watch, onMounted, onUnmounted } from "vue";
+import { useLessScroll } from "../composables/useLessScroll";
 import { invoke } from "../invoke";
 import { FileDiff, parsePatchFiles } from "@pierre/diffs";
 import {
@@ -14,6 +15,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: "scope-change", scope: "branch" | "commit" | "working"): void;
+  (e: "close"): void;
 }>();
 
 const containerRef = ref<HTMLElement | null>(null);
@@ -167,28 +169,40 @@ watch(
 
 const scopeOrder: Array<"working" | "branch" | "commit"> = ["working", "branch", "commit"];
 
-function cycleScope() {
+function cycleScopeForward() {
   const idx = scopeOrder.indexOf(scope.value);
   scope.value = scopeOrder[(idx + 1) % scopeOrder.length];
   loadDiff();
 }
 
-function onKeydown(e: KeyboardEvent) {
-  if (e.key === " " && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
-    e.preventDefault();
-    cycleScope();
-  }
+function cycleScopeBack() {
+  const idx = scopeOrder.indexOf(scope.value);
+  scope.value = scopeOrder[(idx - 1 + scopeOrder.length) % scopeOrder.length];
+  loadDiff();
 }
 
-onMounted(() => {
-  loadDiff();
-  window.addEventListener("keydown", onKeydown);
+useLessScroll(containerRef, {
+  extraHandler(e) {
+    // Cmd+Shift+] — next scope
+    if (e.key === "]" && e.metaKey && e.shiftKey && !e.ctrlKey && !e.altKey) {
+      e.preventDefault();
+      cycleScopeForward();
+      return true;
+    }
+    // Cmd+Shift+[ — previous scope
+    if (e.key === "[" && e.metaKey && e.shiftKey && !e.ctrlKey && !e.altKey) {
+      e.preventDefault();
+      cycleScopeBack();
+      return true;
+    }
+    return false;
+  },
+  onClose: () => emit("close"),
 });
 
-onUnmounted(() => {
-  cleanupInstance();
-  window.removeEventListener("keydown", onKeydown);
-});
+onMounted(() => loadDiff());
+
+onUnmounted(() => cleanupInstance());
 
 defineExpose({ refresh: loadDiff });
 </script>
