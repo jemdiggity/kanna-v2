@@ -4,6 +4,7 @@ import type { PipelineItem } from "@kanna/db";
 
 const props = defineProps<{
   candidates: PipelineItem[];
+  disabledIds?: string[];
   preselected?: string[];
   title: string;
 }>();
@@ -18,6 +19,12 @@ const selected = ref<Set<string>>(new Set(props.preselected || []));
 const selectedIndex = ref(-1);
 const inputRef = ref<HTMLInputElement | null>(null);
 const mouseMoved = ref(false);
+
+const disabledSet = computed(() => new Set(props.disabledIds || []));
+
+function isDisabled(id: string): boolean {
+  return disabledSet.value.has(id);
+}
 
 function sortName(item: PipelineItem): string {
   return (item.display_name || item.issue_title || item.prompt || "").toLowerCase();
@@ -38,6 +45,7 @@ const selectedItems = computed(() =>
 );
 
 function addItem(id: string) {
+  if (isDisabled(id)) return;
   selected.value.add(id);
   query.value = "";
   selectedIndex.value = -1;
@@ -66,11 +74,15 @@ function handleKeydown(e: KeyboardEvent) {
   } else if (e.key === "ArrowDown" || (e.ctrlKey && e.key === "n")) {
     e.preventDefault();
     e.stopPropagation();
-    selectedIndex.value = Math.min(selectedIndex.value + 1, filtered.value.length - 1);
+    let next = selectedIndex.value + 1;
+    while (next < filtered.value.length && isDisabled(filtered.value[next].id)) next++;
+    if (next < filtered.value.length) selectedIndex.value = next;
   } else if (e.key === "ArrowUp" || (e.ctrlKey && e.key === "p")) {
     e.preventDefault();
     e.stopPropagation();
-    selectedIndex.value = Math.max(selectedIndex.value - 1, 0);
+    let prev = selectedIndex.value - 1;
+    while (prev >= 0 && isDisabled(filtered.value[prev].id)) prev--;
+    if (prev >= 0) selectedIndex.value = prev;
   } else if (e.key === "Enter") {
     e.preventDefault();
     if (selectedIndex.value >= 0 && filtered.value[selectedIndex.value]) {
@@ -127,13 +139,14 @@ onMounted(async () => {
           v-for="(item, i) in filtered"
           :key="item.id"
           class="command-item"
-          :class="{ highlighted: i === selectedIndex }"
+          :class="{ highlighted: i === selectedIndex && !isDisabled(item.id), disabled: isDisabled(item.id) }"
           @click="addItem(item.id)"
-          @mouseenter="mouseMoved && (selectedIndex = i)"
+          @mouseenter="mouseMoved && !isDisabled(item.id) && (selectedIndex = i)"
         >
           <span class="command-label">{{ itemTitle(item) }}</span>
           <span class="command-meta">
-            <span class="stage-label">{{ item.stage === 'in_progress' ? 'In Progress' : 'Blocked' }}</span>
+            <span v-if="isDisabled(item.id)" class="stage-label">Circular dependency</span>
+            <span v-else class="stage-label">{{ item.stage === 'in_progress' ? 'In Progress' : 'Blocked' }}</span>
           </span>
         </div>
       </div>
@@ -249,6 +262,13 @@ onMounted(async () => {
 }
 .command-item.highlighted:hover {
   background: #0066cc;
+}
+.command-item.disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.command-item.disabled:hover {
+  background: transparent;
 }
 .command-label {
   font-weight: 500;

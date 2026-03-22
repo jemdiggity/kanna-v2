@@ -78,22 +78,30 @@ function handleEditBlockedTask() {
   showBlockerSelect.value = true;
 }
 
-const blockerCandidates = computedAsync(async () => {
+const blockerCandidates = computed(() => {
   const item = store.currentItem;
   if (!item) return [];
-  const candidates = store.items.filter((i) =>
+  return store.items.filter((i) =>
     i.id !== item.id &&
     (i.stage === "in_progress" || i.stage === "blocked") &&
     i.repo_id === store.selectedRepoId
   );
-  // For "Block Task": filter out blocked tasks that are (transitively)
-  // blocked by the current task. Otherwise the user can create nonsensical
-  // mutual dependencies (A blocked by B, then B blocked by A').
+});
+
+// Tasks that would create circular dependencies — shown greyed out
+const disabledBlockerIds = computedAsync(async () => {
+  const item = store.currentItem;
+  if (!item) return [];
   if (item.stage === "in_progress") {
     const dependents = await collectDependents(item.id);
-    return candidates.filter((c) => !dependents.has(c.id));
+    return [...dependents];
   }
-  return candidates;
+  if (item.stage === "blocked") {
+    // For edit mode, any task transitively blocked by this item would create a cycle
+    const dependents = await collectDependents(item.id);
+    return [...dependents];
+  }
+  return [];
 }, []);
 
 /** Walk the blocker graph to find all tasks transitively blocked by itemId. */
@@ -135,6 +143,7 @@ const sidebarBlockerNames = computedAsync(async () => {
 }, {});
 
 async function onBlockerConfirm(selectedIds: string[]) {
+  console.log("[app] onBlockerConfirm", blockerSelectMode.value, selectedIds);
   showBlockerSelect.value = false;
   if (blockerSelectMode.value === "block") {
     await store.blockTask(selectedIds);
@@ -381,6 +390,7 @@ onMounted(async () => {
     <BlockerSelectModal
       v-if="showBlockerSelect"
       :candidates="blockerCandidates"
+      :disabled-ids="disabledBlockerIds"
       :preselected="blockerSelectMode === 'edit' ? preselectedBlockerIds : undefined"
       :title="blockerSelectMode === 'block' ? 'Select blocking tasks' : 'Edit blocking tasks'"
       @confirm="onBlockerConfirm"
