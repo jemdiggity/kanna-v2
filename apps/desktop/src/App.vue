@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, inject, onMounted, nextTick, type Ref } from "vue";
-import { storeToRefs } from "pinia";
+
 import { computedAsync } from "@vueuse/core";
 import { isTauri } from "./tauri-mock";
 import { invoke } from "./invoke";
@@ -20,7 +20,6 @@ import BlockerSelectModal from "./components/BlockerSelectModal.vue";
 import { useKeyboardShortcuts, type ActionName } from "./composables/useKeyboardShortcuts";
 import { startPeriodicBackup } from "./composables/useBackup";
 import { createNavigationHistory } from "./composables/useNavigationHistory";
-import { useMarkAsRead } from "./composables/useMarkAsRead";
 import { activeContext } from "./composables/useShortcutContext";
 import { useKannaStore } from "./stores/kanna";
 
@@ -28,8 +27,7 @@ const store = useKannaStore();
 const db = inject<DbHandle>("db")!;
 const dbName = inject<string>("dbName")!;
 const { recordNavigation, goBack, goForward } = createNavigationHistory();
-const { selectedItemId: selectedItemIdRef, items: itemsRef } = storeToRefs(store);
-useMarkAsRead(computed(() => db) as unknown as Ref<DbHandle | null>, selectedItemIdRef, itemsRef);
+
 
 // UI state
 const showNewTaskModal = ref(false);
@@ -66,7 +64,7 @@ function navigateItems(direction: -1 | 1) {
   const nextId = currentItems[nextIndex].id;
   if (nextId !== store.selectedItemId) {
     if (store.selectedItemId) recordNavigation(store.selectedItemId);
-    store.selectedItemId = nextId;
+    store.selectItem(nextId);
   }
 }
 

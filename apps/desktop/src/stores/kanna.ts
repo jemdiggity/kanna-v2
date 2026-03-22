@@ -1,6 +1,6 @@
 import { ref, computed } from "vue";
 import { defineStore } from "pinia";
-import { computedAsync } from "@vueuse/core";
+import { computedAsync, watchDebounced } from "@vueuse/core";
 import { invoke } from "../invoke";
 import { isTauri } from "../tauri-mock";
 import { listen } from "../listen";
@@ -100,14 +100,23 @@ export const useKannaStore = defineStore("kanna", () => {
     await setSetting(_db, "selected_repo_id", repoId);
   }
 
+  // Mark unread → idle after 1s dwell. Array replacement (not mutation)
+  // because computedAsync items are a shallowRef.
+  watchDebounced(selectedItemId, async (itemId) => {
+    if (!itemId) return;
+    const selectionTime = Date.now() - 1000;
+    const item = items.value.find((i) => i.id === itemId);
+    if (!item || item.activity !== "unread") return;
+    if (item.activity_changed_at && new Date(item.activity_changed_at).getTime() > selectionTime) return;
+    await updatePipelineItemActivity(_db, itemId, "idle");
+    items.value = items.value.map((i) =>
+      i.id === itemId ? { ...i, activity: "idle", activity_changed_at: new Date().toISOString() } : i,
+    );
+  }, { debounce: 1000 });
+
   async function selectItem(itemId: string) {
     selectedItemId.value = itemId;
     await setSetting(_db, "selected_item_id", itemId);
-    const item = items.value.find((i) => i.id === itemId);
-    if (item && item.activity === "unread") {
-      await updatePipelineItemActivity(_db, itemId, "idle");
-      bump();
-    }
   }
 
   // ── Actions: Repo management ─────────────────────────────────────
