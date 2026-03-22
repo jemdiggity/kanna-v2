@@ -47,13 +47,13 @@ function sortByActivity(items: PipelineItem[]): PipelineItem[] {
 
 function sortedPR(repoId: string): PipelineItem[] {
   return sortByActivity(
-    props.pipelineItems.filter((i) => i.repo_id === repoId && hasTag(i, "pr") && !i.pinned)
+    props.pipelineItems.filter((i) => i.repo_id === repoId && hasTag(i, "pr") && !hasTag(i, "done") && !i.pinned)
   );
 }
 
 function sortedMerge(repoId: string): PipelineItem[] {
   return sortByActivity(
-    props.pipelineItems.filter((i) => i.repo_id === repoId && hasTag(i, "merge") && !i.pinned)
+    props.pipelineItems.filter((i) => i.repo_id === repoId && hasTag(i, "merge") && !hasTag(i, "done") && !i.pinned)
   );
 }
 
@@ -65,7 +65,7 @@ function sortedActive(repoId: string): PipelineItem[] {
 
 function sortedBlocked(repoId: string): PipelineItem[] {
   return props.pipelineItems
-    .filter((i) => i.repo_id === repoId && hasTag(i, "blocked") && !i.pinned)
+    .filter((i) => i.repo_id === repoId && hasTag(i, "blocked") && !hasTag(i, "done") && !i.pinned)
     .sort((a, b) => a.created_at.localeCompare(b.created_at));
 }
 
