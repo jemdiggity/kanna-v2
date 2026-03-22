@@ -6,7 +6,6 @@ import { isTauri } from "./tauri-mock";
 import { invoke } from "./invoke";
 import { hasTag } from "@kanna/core";
 import type { DbHandle } from "@kanna/db";
-import { insertOperatorEvent } from "@kanna/db";
 import Sidebar from "./components/Sidebar.vue";
 import MainPanel from "./components/MainPanel.vue";
 import NewTaskModal from "./components/NewTaskModal.vue";

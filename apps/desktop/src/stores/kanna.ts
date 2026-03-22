@@ -12,7 +12,7 @@ import {
   listRepos, insertRepo, findRepoByPath,
   hideRepo as hideRepoQuery, unhideRepo as unhideRepoQuery,
   listPipelineItems, insertPipelineItem,
-  addPipelineItemTag, removePipelineItemTag, updatePipelineItemTags,
+  addPipelineItemTag, removePipelineItemTag,
   updatePipelineItemActivity, pinPipelineItem, unpinPipelineItem,
   reorderPinnedItems, updatePipelineItemDisplayName,
   getRepo, getSetting, setSetting,
@@ -192,7 +192,6 @@ export const useKannaStore = defineStore("kanna", () => {
     // Compute effective values from custom task config
     const effectivePrompt = opts?.customTask?.prompt ?? prompt;
     const effectiveAgentType = opts?.customTask?.executionMode ?? agentType;
-    const effectiveStage = opts?.customTask?.stage ?? opts?.stage ?? "in_progress";
     const displayName = opts?.customTask?.name ?? null;
 
     // Read .kanna/config.json
@@ -752,7 +751,7 @@ export const useKannaStore = defineStore("kanna", () => {
     bump();
 
     try {
-      await spawnPtySession(id, worktreePath, augmentedPrompt, 80, 24, undefined, {
+      await spawnPtySession(id, worktreePath, augmentedPrompt, 80, 24, {
         portEnv,
         setupCmds: repoConfig.setup || [],
       });

@@ -1,7 +1,7 @@
 import { readdir, readFile, stat } from "fs/promises";
 import { join } from "path";
 import { parse as parseYaml } from "yaml";
-import type { Stage } from "../pipeline/types.js";
+export type Stage = "in_progress" | "pr" | "merge" | "done";
 
 export interface CustomTaskConfig {
   name: string;

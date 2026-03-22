@@ -1,4 +1,4 @@
-import type { Repo, PipelineItem, Setting, TaskBlocker, OperatorEvent } from "./schema.js";
+import type { Repo, PipelineItem, Setting, TaskBlocker } from "./schema.js";
 
 export type DbHandle = {
   execute(query: string, bindValues?: unknown[]): Promise<{ rowsAffected: number }>;
@@ -62,7 +62,7 @@ export async function listPipelineItems(
 
 export async function insertPipelineItem(
   db: DbHandle,
-  item: Omit<PipelineItem, "created_at" | "updated_at" | "activity_changed_at" | "unread_at" | "pinned" | "pin_order" | "display_name" | "closed_at" | "stage"> & { tags?: string[]; activity?: PipelineItem["activity"]; display_name?: string | null }
+  item: Omit<PipelineItem, "created_at" | "updated_at" | "activity_changed_at" | "unread_at" | "pinned" | "pin_order" | "display_name" | "closed_at" | "stage" | "tags"> & { tags?: string[]; activity?: PipelineItem["activity"]; display_name?: string | null }
 ): Promise<void> {
   const tagsJson = JSON.stringify(item.tags ?? []);
   await db.execute(
