@@ -321,7 +321,13 @@ const keyboardActions = {
   blockTask: () => { handleBlockTask(); },
   editBlockedTask: () => { handleEditBlockedTask(); },
 };
-useKeyboardShortcuts(keyboardActions);
+useKeyboardShortcuts(keyboardActions, {
+  beforeAction: (action) => {
+    if (action !== "showShortcuts" && action !== "dismiss" && showShortcutsModal.value) {
+      showShortcutsModal.value = false;
+    }
+  },
+});
 
 function focusAgentTerminal() {
   nextTick(() => {
