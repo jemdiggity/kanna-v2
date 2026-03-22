@@ -1,0 +1,12 @@
+{
+  "planPath": "docs/superpowers/plans/2026-03-22-regression-testing.md",
+  "tasks": [
+    {"id": 0, "subject": "Task 0: Create test file with mock infrastructure", "status": "pending"},
+    {"id": 1, "subject": "Task 1: High-risk sorting & activity tests (tests 1-8)", "status": "pending", "blockedBy": [0]},
+    {"id": 2, "subject": "Task 2: High-risk init & hook event tests (tests 9-16)", "status": "pending", "blockedBy": [0]},
+    {"id": 3, "subject": "Task 3: Medium-risk task lifecycle tests (tests 17-24)", "status": "pending", "blockedBy": [0]},
+    {"id": 4, "subject": "Task 4: Lower-risk passthrough tests (tests 25-26)", "status": "pending", "blockedBy": [0]},
+    {"id": 5, "subject": "Task 5: Wire into Merge Queue", "status": "pending", "blockedBy": [0, 1, 2, 3, 4]}
+  ],
+  "lastUpdated": "2026-03-22T00:00:00.000Z"
+}
