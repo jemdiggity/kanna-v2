@@ -2,11 +2,12 @@
 import { ref, watch, onMounted, onUnmounted } from "vue";
 import { invoke } from "../invoke";
 import { registerContextShortcuts } from "../composables/useShortcutContext";
-registerContextShortcuts("diff", [{ label: "Cycle Scope", display: "Space" }]);
 import { FileDiff, parsePatchFiles } from "@pierre/diffs";
 import {
   getOrCreateWorkerPoolSingleton,
 } from "@pierre/diffs/worker";
+
+registerContextShortcuts("diff", [{ label: "Cycle Scope", display: "Space" }]);
 
 const props = defineProps<{
   repoPath: string;
