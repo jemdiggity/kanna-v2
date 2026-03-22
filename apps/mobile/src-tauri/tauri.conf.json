@@ -4,6 +4,9 @@
   "version": "0.1.0",
   "identifier": "com.kanna.mobile",
   "build": {
+    "beforeDevCommand": "bun run dev",
+    "devUrl": "http://localhost:1421",
+    "beforeBuildCommand": "bun run build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -14,6 +17,6 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": []
+    "icon": ["icons/icon.png"]
   }
 }
