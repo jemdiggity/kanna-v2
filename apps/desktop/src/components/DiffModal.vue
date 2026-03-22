@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { onMounted, onUnmounted } from "vue";
 import DiffView from "./DiffView.vue";
 
 defineProps<{
@@ -12,6 +13,16 @@ const emit = defineEmits<{
   (e: "close"): void;
   (e: "scope-change", scope: "branch" | "commit" | "working"): void;
 }>();
+
+// Use capture phase so Escape reaches us before xterm's handler consumes it
+function onKeydown(e: KeyboardEvent) {
+  if (e.key === "Escape" && !e.metaKey && !e.ctrlKey && !e.altKey) {
+    e.stopPropagation();
+    emit("close");
+  }
+}
+onMounted(() => window.addEventListener("keydown", onKeydown, true));
+onUnmounted(() => window.removeEventListener("keydown", onKeydown, true));
 </script>
 
 <template>
