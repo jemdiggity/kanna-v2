@@ -9,8 +9,8 @@ Add a lightweight toast notification system to surface errors and warnings that 
 - **Types:** Errors and warnings only. No success/info toasts.
 - **Position:** Top-right corner, fixed.
 - **Auto-dismiss:** Warnings at 3s, errors at 5s. Both auto-dismiss.
-- **Stacking:** Max 3 visible, newest on top. Excess queued (oldest removed when 4th arrives).
-- **z-index:** 1100 (above modals at 1000).
+- **Stacking:** Max 3 visible, newest on top. When a 4th arrives, the oldest is evicted immediately (no queue).
+- **z-index:** 1200 (above modals at 1000 and KeyboardShortcutsModal at 1100).
 
 ## Composable: `useToast()`
 
@@ -34,14 +34,14 @@ interface Toast {
   id: number
   type: 'warning' | 'error'
   message: string
-  timer: ReturnType<typeof setTimeout>
 }
 ```
 
 - Module-scoped `ref<Toast[]>` — max 3 entries.
+- Dismiss timers stored in a separate `Map<number, ReturnType<typeof setTimeout>>` outside the reactive array (avoids devtools/serialization issues with timer handles in reactive state).
 - Each toast gets a unique auto-incrementing ID.
-- `warning()` and `error()` push a toast, set a dismiss timer, and evict the oldest if over the limit.
-- `dismiss(id)` clears the timer and removes the toast from the array.
+- `warning()` and `error()` push a toast, set a dismiss timer in the map, and evict the oldest if over the limit.
+- `dismiss(id)` clears the timer from the map and removes the toast from the array.
 
 ## Component: `<ToastContainer />`
 
@@ -53,8 +53,9 @@ Rendered once in `App.vue` at the root, outside the flex layout.
 
 - Fixed position: `top: 12px; right: 12px`.
 - Toasts stack vertically with 8px gap, newest on top.
+- Container uses `display: flex; flex-direction: column-reverse` so new toasts append to the array but render on top. This avoids `TransitionGroup` `v-move` conflicts (no reordering happens, so no move transitions fire).
 - Each toast: left color accent border + message text + dismiss X button.
-- Vue `<TransitionGroup>` for slide-in-from-right / fade-out animations.
+- Vue `<TransitionGroup>` for slide-in-from-right / fade-out animations. No `v-move` class needed.
 
 ### Styling
 
@@ -80,9 +81,11 @@ No keyboard shortcuts for toast dismissal. Escape is reserved for modals.
 
 ### Phase 1: Replace `alert()` calls
 
-Two `alert()` calls in `App.vue`:
-- Task creation failure → `error('Task creation failed: ...')`
-- Second alert → equivalent `error()` or `warning()` call
+Three `alert()` calls in `App.vue` and one in `kanna.ts`:
+- `App.vue:157` — `editBlockedTask` failure in `onBlockerConfirm` → `error(...)`
+- `App.vue:276` — "Select a repository first" → `warning('Select a repository first')`
+- `App.vue:287` — Task creation failure → `error('Task creation failed: ...')`
+- `kanna.ts:506` — "Select a repository first" in `mergeQueue()` → `warning('Select a repository first')`
 
 ### Phase 2: Surface critical silent failures from `kanna.ts`
 
