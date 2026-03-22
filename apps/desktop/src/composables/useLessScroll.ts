@@ -17,7 +17,7 @@ function noMods(e: KeyboardEvent): boolean {
 
 /**
  * Registers less-style scroll key bindings on the given scrollable element.
- * Returns a cleanup function, but also auto-cleans on onUnmounted.
+ * Auto-cleans on onUnmounted.
  *
  * @param scrollRef - Ref to the scrollable DOM element
  * @param extraHandler - Optional handler for component-specific keys.
