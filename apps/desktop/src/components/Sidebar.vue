@@ -160,7 +160,8 @@ function onUnpinnedChange(repoId: string, evt: any) {
   <aside class="sidebar">
     <div class="sidebar-content">
       <div v-if="repos.length === 0" class="empty-state">
-        No repos imported yet.
+        No repos imported yet.<br>
+        Press <kbd>⇧⌘I</kbd> to import one.
       </div>
 
       <div v-for="repo in repos" :key="repo.id" class="repo-section">
@@ -406,7 +407,7 @@ function onUnpinnedChange(repoId: string, evt: any) {
     </div>
 
     <div class="sidebar-footer">
-      <button class="btn-import" @click="emit('import-repo')">
+      <button class="btn-import" @click="emit('import-repo')" title="Import Repo (⇧⌘I)">
         Import Repo
       </button>
     </div>
@@ -435,6 +436,17 @@ function onUnpinnedChange(repoId: string, evt: any) {
   font-size: 12px;
   padding: 16px 14px;
   text-align: center;
+  line-height: 1.8;
+}
+
+.empty-state kbd {
+  background: #2a2a2a;
+  border: 1px solid #444;
+  border-radius: 3px;
+  padding: 1px 5px;
+  font-family: inherit;
+  font-size: 11px;
+  color: #999;
 }
 
 .repo-section {

@@ -333,6 +333,7 @@ onMounted(async () => {
       :spawn-pty-session="store.spawnPtySession"
       :maximized="maximized"
       :blockers="currentBlockers"
+      :has-repos="store.repos.length > 0"
       @close-task="store.closeTask"
       @agent-completed="store.bump"
     />

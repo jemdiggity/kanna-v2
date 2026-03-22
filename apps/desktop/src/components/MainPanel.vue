@@ -9,6 +9,7 @@ defineProps<{
   spawnPtySession?: (sessionId: string, cwd: string, prompt: string, cols: number, rows: number) => Promise<void>;
   maximized?: boolean;
   blockers?: PipelineItem[];
+  hasRepos?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -49,8 +50,14 @@ const emit = defineEmits<{
       </template>
     </template>
     <div v-else class="empty-state">
-      <p class="empty-title">No task selected</p>
-      <p class="empty-hint">Select a task from the sidebar or press ⌘N to create one.</p>
+      <template v-if="!hasRepos">
+        <p class="empty-title">No repos imported</p>
+        <p class="empty-hint">Press <kbd>⇧⌘I</kbd> to import a repo and get started.</p>
+      </template>
+      <template v-else>
+        <p class="empty-title">No task selected</p>
+        <p class="empty-hint">Select a task from the sidebar or press ⇧⌘N to create one.</p>
+      </template>
     </div>
   </main>
 </template>
