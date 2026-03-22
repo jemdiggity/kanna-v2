@@ -7,8 +7,8 @@ use daemon_client::DaemonClient;
 use dashmap::DashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tauri::{Emitter, Manager};
 use tauri::menu::{AboutMetadataBuilder, MenuBuilder, SubmenuBuilder};
+use tauri::{Emitter, Manager};
 use tokio::sync::Mutex;
 
 /// Install a native macOS event monitor that intercepts fn+F (Globe+F) and
@@ -17,56 +17,53 @@ use tokio::sync::Mutex;
 /// before the event reaches WKWebView / xterm.js.
 #[cfg(target_os = "macos")]
 fn setup_fn_f_fullscreen() {
+    use objc2::msg_send;
     use objc2::rc::Retained;
     use objc2::runtime::{AnyClass, AnyObject};
-    use objc2::msg_send;
     use std::ffi::{c_char, CStr};
     use std::ptr::{self, NonNull};
 
-    let block = block2::RcBlock::new(
-        |event: NonNull<AnyObject>| -> *mut AnyObject {
-            unsafe {
-                let flags: usize = msg_send![event.as_ref(), modifierFlags];
+    let block = block2::RcBlock::new(|event: NonNull<AnyObject>| -> *mut AnyObject {
+        unsafe {
+            let flags: usize = msg_send![event.as_ref(), modifierFlags];
 
-                // fn/Globe (bit 23) pressed, without Cmd/Ctrl/Option
-                let fn_only = (flags & (1 << 23)) != 0
-                    && (flags & (1 << 20)) == 0
-                    && (flags & (1 << 18)) == 0
-                    && (flags & (1 << 19)) == 0;
+            // fn/Globe (bit 23) pressed, without Cmd/Ctrl/Option
+            let fn_only = (flags & (1 << 23)) != 0
+                && (flags & (1 << 20)) == 0
+                && (flags & (1 << 18)) == 0
+                && (flags & (1 << 19)) == 0;
 
-                if fn_only {
-                    let chars: Option<Retained<AnyObject>> =
-                        msg_send![event.as_ref(), characters];
-                    if let Some(chars) = chars {
-                        let utf8: *const c_char = msg_send![&*chars, UTF8String];
-                        if !utf8.is_null() {
-                            if let Ok(s) = CStr::from_ptr(utf8).to_str() {
-                                if s.eq_ignore_ascii_case("f") {
-                                    if let Some(ns_app) = AnyClass::get(c"NSApplication") {
-                                        let app: Option<Retained<AnyObject>> =
-                                            msg_send![ns_app, sharedApplication];
-                                        if let Some(app) = app {
-                                            let win: Option<Retained<AnyObject>> =
-                                                msg_send![&*app, keyWindow];
-                                            if let Some(win) = win {
-                                                let _: () = msg_send![
-                                                    &*win,
-                                                    toggleFullScreen: ptr::null::<AnyObject>()
-                                                ];
-                                            }
+            if fn_only {
+                let chars: Option<Retained<AnyObject>> = msg_send![event.as_ref(), characters];
+                if let Some(chars) = chars {
+                    let utf8: *const c_char = msg_send![&*chars, UTF8String];
+                    if !utf8.is_null() {
+                        if let Ok(s) = CStr::from_ptr(utf8).to_str() {
+                            if s.eq_ignore_ascii_case("f") {
+                                if let Some(ns_app) = AnyClass::get(c"NSApplication") {
+                                    let app: Option<Retained<AnyObject>> =
+                                        msg_send![ns_app, sharedApplication];
+                                    if let Some(app) = app {
+                                        let win: Option<Retained<AnyObject>> =
+                                            msg_send![&*app, keyWindow];
+                                        if let Some(win) = win {
+                                            let _: () = msg_send![
+                                                &*win,
+                                                toggleFullScreen: ptr::null::<AnyObject>()
+                                            ];
                                         }
                                     }
-                                    return ptr::null_mut(); // consume the event
                                 }
+                                return ptr::null_mut(); // consume the event
                             }
                         }
                     }
                 }
-
-                event.as_ptr() // pass through
             }
-        },
-    );
+
+            event.as_ptr() // pass through
+        }
+    });
 
     unsafe {
         let Some(ns_event) = AnyClass::get(c"NSEvent") else {
@@ -171,10 +168,7 @@ async fn ensure_daemon_running() {
             .and_then(|p| p.parent().map(|d| d.join("../Resources/kanna-daemon"))),
     ];
 
-    let daemon_bin = daemon_candidates
-        .into_iter()
-        .flatten()
-        .find(|p| p.exists());
+    let daemon_bin = daemon_candidates.into_iter().flatten().find(|p| p.exists());
 
     let Some(daemon_bin) = daemon_bin else {
         eprintln!("[daemon] daemon binary not found — PTY sessions will not work");
@@ -183,13 +177,16 @@ async fn ensure_daemon_running() {
 
     // Pass KANNA_WORKTREE through so the daemon isolates to {cwd}/.kanna-daemon
     let is_worktree = std::env::var("KANNA_WORKTREE").is_ok();
-    eprintln!("[daemon] spawning {:?} (worktree={})", daemon_bin, is_worktree);
+    eprintln!(
+        "[daemon] spawning {:?} (worktree={})",
+        daemon_bin, is_worktree
+    );
     use std::os::unix::process::CommandExt;
     // setsid() detaches daemon from our process group so Ctrl+C doesn't kill it
     let mut cmd = std::process::Command::new(&daemon_bin);
     cmd.stdin(std::process::Stdio::null())
-       .stdout(std::process::Stdio::null())
-       .stderr(std::process::Stdio::null());
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
     if is_worktree {
         cmd.env("KANNA_WORKTREE", "1");
         if let Some(root) = worktree_root() {
@@ -201,10 +198,12 @@ async fn ensure_daemon_running() {
         }
     }
     match unsafe {
-        cmd.pre_exec(|| { libc::setsid(); Ok(()) })
-            .spawn()
-    }
-    {
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        })
+        .spawn()
+    } {
         Ok(child) => {
             let expected_pid = child.id().to_string();
             let pid_path = daemon_data_dir().join("daemon.pid");
@@ -313,9 +312,7 @@ pub fn run() {
 
             // Build app menu with full version in About
             let version = env!("KANNA_VERSION");
-            let about = AboutMetadataBuilder::new()
-                .version(Some(version))
-                .build();
+            let about = AboutMetadataBuilder::new().version(Some(version)).build();
             let app_submenu = SubmenuBuilder::new(app, "Kanna")
                 .about(Some(about))
                 .separator()
@@ -330,12 +327,8 @@ pub fn run() {
                 .paste()
                 .select_all()
                 .build()?;
-            let view_submenu = SubmenuBuilder::new(app, "View")
-                .fullscreen()
-                .build()?;
-            let window_submenu = SubmenuBuilder::new(app, "Window")
-                .minimize()
-                .build()?;
+            let view_submenu = SubmenuBuilder::new(app, "View").fullscreen().build()?;
+            let window_submenu = SubmenuBuilder::new(app, "Window").minimize().build()?;
             let menu = MenuBuilder::new(app)
                 .item(&app_submenu)
                 .item(&edit_submenu)
@@ -381,6 +374,8 @@ pub fn run() {
             commands::git::git_worktree_add,
             commands::git::git_worktree_remove,
             commands::git::git_app_info,
+            commands::git::git_clone,
+            commands::git::git_init,
             // FS commands
             commands::fs::file_exists,
             commands::fs::list_files,
@@ -393,6 +388,7 @@ pub fn run() {
             commands::fs::copy_file,
             commands::fs::remove_file,
             commands::fs::list_dir,
+            commands::fs::ensure_directory,
             // Shell commands
             commands::shell::run_script,
             commands::shell::ensure_term_init,

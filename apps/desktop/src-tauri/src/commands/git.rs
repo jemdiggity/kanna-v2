@@ -21,10 +21,7 @@ pub fn git_diff(repo_path: String, staged: bool) -> Result<String, String> {
 
     let diff = if staged {
         // Staged diff: HEAD tree vs index
-        let head = repo
-            .head()
-            .ok()
-            .and_then(|h| h.peel_to_tree().ok());
+        let head = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
         repo.diff_tree_to_index(head.as_ref(), None, None)
             .map_err(|e| e.to_string())?
     } else {
@@ -85,11 +82,7 @@ pub fn git_worktree_list(repo_path: String) -> Result<Vec<WorktreeInfo>, String>
 }
 
 #[tauri::command]
-pub fn git_log(
-    repo_path: String,
-    base: String,
-    head: String,
-) -> Result<Vec<CommitInfo>, String> {
+pub fn git_log(repo_path: String, base: String, head: String) -> Result<Vec<CommitInfo>, String> {
     let repo = Repository::open(&repo_path).map_err(|e| e.to_string())?;
 
     let head_obj = repo
@@ -100,12 +93,8 @@ pub fn git_log(
         .map_err(|e| format!("failed to resolve base ref '{}': {}", base, e))?;
 
     let mut revwalk = repo.revwalk().map_err(|e| e.to_string())?;
-    revwalk
-        .push(head_obj.id())
-        .map_err(|e| e.to_string())?;
-    revwalk
-        .hide(base_obj.id())
-        .map_err(|e| e.to_string())?;
+    revwalk.push(head_obj.id()).map_err(|e| e.to_string())?;
+    revwalk.hide(base_obj.id()).map_err(|e| e.to_string())?;
     revwalk
         .set_sorting(git2::Sort::TIME)
         .map_err(|e| e.to_string())?;
@@ -167,11 +156,19 @@ pub fn git_remote_url(repo_path: String) -> Result<String, String> {
 pub fn git_diff_range(repo_path: String, from: String, to: String) -> Result<String, String> {
     let repo = Repository::open(&repo_path).map_err(|e| e.to_string())?;
 
-    let from_obj = repo.revparse_single(&from).map_err(|e| format!("bad ref '{}': {}", from, e))?;
-    let to_obj = repo.revparse_single(&to).map_err(|e| format!("bad ref '{}': {}", to, e))?;
+    let from_obj = repo
+        .revparse_single(&from)
+        .map_err(|e| format!("bad ref '{}': {}", from, e))?;
+    let to_obj = repo
+        .revparse_single(&to)
+        .map_err(|e| format!("bad ref '{}': {}", to, e))?;
 
-    let from_tree = from_obj.peel_to_tree().map_err(|e| format!("can't peel '{}' to tree: {}", from, e))?;
-    let to_tree = to_obj.peel_to_tree().map_err(|e| format!("can't peel '{}' to tree: {}", to, e))?;
+    let from_tree = from_obj
+        .peel_to_tree()
+        .map_err(|e| format!("can't peel '{}' to tree: {}", from, e))?;
+    let to_tree = to_obj
+        .peel_to_tree()
+        .map_err(|e| format!("can't peel '{}' to tree: {}", to, e))?;
 
     let diff = repo
         .diff_tree_to_tree(Some(&from_tree), Some(&to_tree), None)
@@ -247,7 +244,13 @@ pub fn git_worktree_add(
     path: String,
     start_point: Option<String>,
 ) -> Result<String, String> {
-    let mut args = vec!["worktree".to_string(), "add".to_string(), "-b".to_string(), branch, path.clone()];
+    let mut args = vec![
+        "worktree".to_string(),
+        "add".to_string(),
+        "-b".to_string(),
+        branch,
+        path.clone(),
+    ];
     if let Some(sp) = start_point {
         args.push(sp);
     }
@@ -270,6 +273,27 @@ pub fn git_worktree_add(
     );
 
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+#[tauri::command]
+pub async fn git_clone(url: String, destination: String) -> Result<(), String> {
+    let output = Command::new("git")
+        .args(["clone", &url, &destination])
+        .output()
+        .map_err(|e| format!("Failed to run git clone: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git clone failed: {}", stderr.trim()));
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+pub fn git_init(path: String) -> Result<(), String> {
+    Repository::init(&path).map_err(|e| format!("git init failed: {}", e))?;
+    Ok(())
 }
 
 #[tauri::command]

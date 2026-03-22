@@ -48,7 +48,9 @@ pub fn list_dir(path: String) -> Result<Vec<String>, String> {
         return Err(format!("not a directory: {}", path));
     }
     let mut names = Vec::new();
-    for entry in std::fs::read_dir(dir).map_err(|e| format!("failed to read dir '{}': {}", path, e))? {
+    for entry in
+        std::fs::read_dir(dir).map_err(|e| format!("failed to read dir '{}': {}", path, e))?
+    {
         let entry = entry.map_err(|e| format!("failed to read entry: {}", e))?;
         names.push(entry.file_name().to_string_lossy().to_string());
     }
@@ -107,15 +109,17 @@ pub fn list_files(path: String) -> Result<Vec<String>, String> {
         return Err(format!("not a directory: {}", path));
     }
 
-    let skip_dirs = [".git", "node_modules", "target", "dist", ".kanna-worktrees", ".turbo"];
+    let skip_dirs = [
+        ".git",
+        "node_modules",
+        "target",
+        "dist",
+        ".kanna-worktrees",
+        ".turbo",
+    ];
     let mut files = Vec::new();
 
-    fn walk(
-        dir: &std::path::Path,
-        root: &std::path::Path,
-        skip: &[&str],
-        out: &mut Vec<String>,
-    ) {
+    fn walk(dir: &std::path::Path, root: &std::path::Path, skip: &[&str], out: &mut Vec<String>) {
         let entries = match std::fs::read_dir(dir) {
             Ok(e) => e,
             Err(_) => return,
@@ -148,6 +152,13 @@ pub fn write_text_file(path: String, content: String) -> Result<(), String> {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     std::fs::write(&path, &content).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn ensure_directory(path: String) -> Result<(), String> {
+    std::fs::create_dir_all(&path)
+        .map_err(|e| format!("Failed to create directory {}: {}", path, e))?;
+    Ok(())
 }
 
 #[tauri::command]
