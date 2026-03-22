@@ -3,7 +3,8 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdirSync, writeFileSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { parseAgentMd, scanCustomTasks } from "./custom-tasks.js";
+import { parseAgentMd } from "./custom-tasks.js";
+import { scanCustomTasks } from "./custom-tasks-scanner.js";
 
 describe("parseAgentMd", () => {
   it("parses a full agent.md with all fields", () => {
