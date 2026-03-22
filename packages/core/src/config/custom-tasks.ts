@@ -1,4 +1,5 @@
 import { parse as parseYaml } from "yaml";
+import type { Stage } from "../pipeline/types.js";
 
 export interface CustomTaskConfig {
   name: string;
@@ -12,7 +13,7 @@ export interface CustomTaskConfig {
   maxBudgetUsd?: number;
   setup?: string[];
   teardown?: string[];
-  stage?: "in_progress" | "pr" | "merge" | "done";
+  stage?: Stage;
   prompt: string;
 }
 
@@ -59,7 +60,7 @@ function slugToDisplayName(slug: string): string {
     .join(" ");
 }
 
-function parseFrontmatter(content: string): { frontmatter: Record<string, unknown> | null; body: string } {
+function parseFrontmatter(content: string): { frontmatter: Record<string, unknown> | null | undefined; body: string } {
   const match = content.match(/^---[ \t]*\r?\n([\s\S]*?\r?\n)?---[ \t]*\r?\n?([\s\S]*)$/);
   if (!match) {
     return { frontmatter: null, body: content };
@@ -72,7 +73,7 @@ function parseFrontmatter(content: string): { frontmatter: Record<string, unknow
   try {
     parsed = parseYaml(yamlStr);
   } catch {
-    return { frontmatter: undefined as any, body: "" };
+    return { frontmatter: undefined, body: "" };
   }
 
   if (parsed === null || parsed === undefined) {
@@ -80,7 +81,7 @@ function parseFrontmatter(content: string): { frontmatter: Record<string, unknow
   }
 
   if (typeof parsed !== "object" || Array.isArray(parsed)) {
-    return { frontmatter: undefined as any, body: "" };
+    return { frontmatter: undefined, body: "" };
   }
 
   return { frontmatter: parsed as Record<string, unknown>, body };
