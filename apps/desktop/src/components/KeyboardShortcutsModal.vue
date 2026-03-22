@@ -1,8 +1,13 @@
 <script setup lang="ts">
-import { ref, watch } from "vue";
+import { ref, watch, computed } from "vue";
 import { getShortcutGroups } from "../composables/useKeyboardShortcuts";
+import { getContextShortcuts, getContextTitle, type ShortcutContext } from "../composables/useShortcutContext";
 
-const props = defineProps<{ hideOnStartup?: boolean }>();
+const props = defineProps<{
+  hideOnStartup?: boolean;
+  context: ShortcutContext;
+}>();
+
 const emit = defineEmits<{
   (e: "close"): void;
   (e: "update:hide-on-startup", value: boolean): void;
@@ -11,6 +16,10 @@ const emit = defineEmits<{
 const hideOnStartup = ref(props.hideOnStartup ?? false);
 watch(hideOnStartup, (val) => emit("update:hide-on-startup", val));
 
+// Context mode is default on open (relies on v-if destroying/recreating component)
+const showFullMode = ref(false);
+const contextTitle = computed(() => getContextTitle(props.context));
+const contextItems = computed(() => getContextShortcuts(props.context));
 const groups = getShortcutGroups();
 
 function splitKeys(display: string): string[] {
@@ -34,8 +43,20 @@ function splitKeys(display: string): string[] {
 <template>
   <div class="modal-overlay" @click.self="emit('close')">
     <div class="modal shortcuts-modal">
-      <h3>Keyboard Shortcuts</h3>
-      <div class="shortcuts-grid">
+      <h3>{{ showFullMode ? 'Keyboard Shortcuts' : contextTitle }}</h3>
+
+      <!-- Context mode: flat list -->
+      <div v-if="!showFullMode" class="context-shortcuts">
+        <div v-for="s in contextItems" :key="s.keys" class="shortcut-row">
+          <span class="shortcut-action">{{ s.action }}</span>
+          <span class="shortcut-keys">
+            <kbd v-for="(k, i) in splitKeys(s.keys)" :key="i">{{ k }}</kbd>
+          </span>
+        </div>
+      </div>
+
+      <!-- Full mode: grouped list (existing) -->
+      <div v-else class="shortcuts-grid">
         <div v-for="group in groups" :key="group.title" class="shortcut-group">
           <h4>{{ group.title }}</h4>
           <div v-for="s in group.shortcuts" :key="s.keys" class="shortcut-row">
@@ -46,10 +67,17 @@ function splitKeys(display: string): string[] {
           </div>
         </div>
       </div>
-      <label class="startup-checkbox">
-        <input type="checkbox" v-model="hideOnStartup" />
-        Don't show on startup
-      </label>
+
+      <!-- Footer -->
+      <div class="shortcuts-footer">
+        <a class="toggle-link" @click="showFullMode = !showFullMode">
+          {{ showFullMode ? `Show ${contextTitle.toLowerCase()}` : 'Show all shortcuts' }}
+        </a>
+        <label v-if="showFullMode" class="startup-checkbox">
+          <input type="checkbox" v-model="hideOnStartup" />
+          Don't show on startup
+        </label>
+      </div>
     </div>
   </div>
 </template>
@@ -97,13 +125,30 @@ kbd {
   text-align: center;
   line-height: 1.4;
 }
+.context-shortcuts {
+  margin-bottom: 12px;
+}
+.shortcuts-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid #333;
+}
+.toggle-link {
+  color: #58a6ff;
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+}
+.toggle-link:hover {
+  text-decoration: underline;
+}
 .startup-checkbox {
   display: flex;
   align-items: center;
   gap: 6px;
-  margin-top: 12px;
-  padding-top: 12px;
-  border-top: 1px solid #333;
   font-size: 12px;
   color: #888;
   cursor: pointer;
