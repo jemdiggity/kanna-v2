@@ -36,6 +36,7 @@ export function useMarkAsRead(
         console.error("[useMarkAsRead] failed to update activity:", e);
       });
       item.activity = "idle";
+      item.activity_changed_at = new Date().toISOString();
     }, 1000);
   };
 
