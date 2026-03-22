@@ -2,6 +2,7 @@ mod commands;
 mod config;
 mod daemon_client;
 mod db;
+mod register;
 mod relay_client;
 
 use config::Config;
@@ -19,8 +20,15 @@ async fn main() {
 
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(|s| s.as_str()) == Some("register") {
-        eprintln!("Registration not yet implemented");
-        std::process::exit(1);
+        let relay_url = args
+            .get(2)
+            .map(|s| s.as_str())
+            .unwrap_or("wss://kanna-relay.run.app");
+        if let Err(e) = register::register(relay_url).await {
+            eprintln!("Registration failed: {}", e);
+            std::process::exit(1);
+        }
+        return;
     }
 
     let config = match Config::load() {
