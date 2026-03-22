@@ -946,6 +946,11 @@ export const useKannaStore = defineStore("kanna", () => {
 
       if (hookEvent === "Stop" || hookEvent === "StopFailure") {
         _handleAgentFinished(sessionId);
+      } else if (hookEvent === "Interrupted") {
+        if (item.activity === "working") {
+          await updatePipelineItemActivity(_db, item.id, "idle");
+          bump();
+        }
       } else if (hookEvent === "WaitingForInput") {
         if (item.activity !== "unread") {
           await updatePipelineItemActivity(_db, item.id, "unread");

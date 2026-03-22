@@ -238,6 +238,14 @@ pub async fn attach_session(
                                     "data_b64": b64,
                                 });
                                 let _ = app.emit("terminal_output", &payload);
+                                // Detect Claude CLI interrupt from output
+                                if bytes.windows(11).any(|w| w == b"Interrupted") {
+                                    let hook = serde_json::json!({
+                                        "session_id": event.get("session_id"),
+                                        "event": "Interrupted",
+                                    });
+                                    let _ = app.emit("hook_event", &hook);
+                                }
                             } else {
                                 let _ = app.emit("terminal_output", &event);
                             }
