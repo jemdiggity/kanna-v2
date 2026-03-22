@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, nextTick } from "vue";
+import { ref, computed, watch, onMounted, nextTick } from "vue";
 import { invoke } from "../invoke";
+import { fuzzyMatch, type FuzzyResult } from "../utils/fuzzyMatch";
 
 const props = defineProps<{
   worktreePath: string;
@@ -18,12 +19,21 @@ const selectedIndex = ref(0);
 const inputRef = ref<HTMLInputElement | null>(null);
 const mouseMoved = ref(false);
 
-const filtered = computed(() => {
-  const q = query.value.toLowerCase();
-  if (!q) return files.value.slice(0, 100);
-  return files.value
-    .filter((f) => f.toLowerCase().includes(q))
-    .slice(0, 100);
+interface ScoredFile {
+  path: string;
+  result: FuzzyResult;
+}
+
+const filtered = computed((): ScoredFile[] => {
+  const q = query.value.trim();
+  if (!q) return files.value.slice(0, 100).map((path) => ({ path, result: { score: 0, indices: [] } }));
+  const scored: ScoredFile[] = [];
+  for (const f of files.value) {
+    const result = fuzzyMatch(q, f);
+    if (result) scored.push({ path: f, result });
+  }
+  scored.sort((a, b) => b.result.score - a.result.score);
+  return scored.slice(0, 100);
 });
 
 async function loadFiles() {
@@ -54,13 +64,39 @@ function handleKeydown(e: KeyboardEvent) {
     selectedIndex.value = Math.max(selectedIndex.value - 1, 0);
   } else if (e.key === "Enter") {
     e.preventDefault();
-    const file = filtered.value[selectedIndex.value];
-    if (file) selectFile(file);
+    const entry = filtered.value[selectedIndex.value];
+    if (entry) selectFile(entry.path);
   }
 }
 
+interface HighlightSegment {
+  text: string;
+  highlight: boolean;
+}
+
+function highlightPath(entry: ScoredFile): HighlightSegment[] {
+  const { path, result } = entry;
+  if (result.indices.length === 0) return [{ text: path, highlight: false }];
+
+  const matchSet = new Set(result.indices);
+  const segments: HighlightSegment[] = [];
+  let current = "";
+  let inMatch = false;
+
+  for (let i = 0; i < path.length; i++) {
+    const isMatch = matchSet.has(i);
+    if (isMatch !== inMatch) {
+      if (current) segments.push({ text: current, highlight: inMatch });
+      current = "";
+      inMatch = isMatch;
+    }
+    current += path[i];
+  }
+  if (current) segments.push({ text: current, highlight: inMatch });
+  return segments;
+}
+
 // Reset selection when query changes
-import { watch } from "vue";
 watch(query, () => { selectedIndex.value = 0; });
 
 onMounted(async () => {
@@ -82,14 +118,17 @@ onMounted(async () => {
       />
       <div class="file-list">
         <div
-          v-for="(file, i) in filtered"
-          :key="file"
+          v-for="(entry, i) in filtered"
+          :key="entry.path"
           class="file-item"
           :class="{ selected: i === selectedIndex }"
-          @click="selectFile(file)"
+          @click="selectFile(entry.path)"
           @mouseenter="mouseMoved && (selectedIndex = i)"
         >
-          {{ file }}
+          <template v-for="(segment, si) in highlightPath(entry)" :key="si">
+            <span v-if="segment.highlight" class="match">{{ segment.text }}</span>
+            <template v-else>{{ segment.text }}</template>
+          </template>
         </div>
         <div v-if="filtered.length === 0" class="empty">No files found</div>
       </div>
@@ -146,6 +185,13 @@ onMounted(async () => {
 }
 .file-item.selected:hover {
   background: #0066cc;
+}
+.match {
+  color: #ffcc00;
+  font-weight: 600;
+}
+.file-item.selected .match {
+  color: #ffe066;
 }
 .empty {
   padding: 16px;
