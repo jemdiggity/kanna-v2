@@ -69,13 +69,13 @@ describe("useNavigationHistory", () => {
     });
 
     it("ignores null previous task", () => {
-      nav.recordNavigation(null, "A");
+      nav.recordNavigation(null);
       expect(nav.canGoBack.value).toBe(false);
     });
 
     it("caps back stack at 50 entries", () => {
       for (let i = 0; i < 60; i++) {
-        nav.recordNavigation(`task-${i}`, `task-${i + 1}`);
+        nav.recordNavigation(`task-${i}`);
       }
       let count = 0;
       let current = "task-60";

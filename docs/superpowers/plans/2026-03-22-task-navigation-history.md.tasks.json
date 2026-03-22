@@ -1,10 +1,10 @@
 {
   "planPath": "docs/superpowers/plans/2026-03-22-task-navigation-history.md",
   "tasks": [
-    {"id": 1, "subject": "Task 1: Create useNavigationHistory composable with tests", "status": "pending"},
-    {"id": 2, "subject": "Task 2: Add ctrl modifier support to keyboard shortcuts", "status": "pending", "blockedBy": [1]},
-    {"id": 3, "subject": "Task 3: Wire navigation history into App.vue", "status": "pending", "blockedBy": [1, 2]},
+    {"id": 1, "subject": "Task 1: Create useNavigationHistory composable with tests", "status": "completed"},
+    {"id": 2, "subject": "Task 2: Add ctrl modifier support to keyboard shortcuts", "status": "completed", "blockedBy": [1]},
+    {"id": 3, "subject": "Task 3: Wire navigation history into App.vue", "status": "completed", "blockedBy": [1, 2]},
     {"id": 4, "subject": "Task 4: Manual verification in dev server", "status": "pending", "blockedBy": [3]}
   ],
-  "lastUpdated": "2026-03-22T00:00:00Z"
+  "lastUpdated": "2026-03-22T12:00:00Z"
 }
