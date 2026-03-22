@@ -27,8 +27,8 @@ describe("app launch", () => {
     expect(el).toBeTruthy();
   });
 
-  it("shows no task selected in main panel", async () => {
-    const el = await client.waitForText(".main-panel", "No task selected");
+  it("shows no repo imported in main panel", async () => {
+    const el = await client.waitForText(".main-panel", "No repo imported");
     expect(el).toBeTruthy();
   });
 
