@@ -103,18 +103,10 @@ if [[ "$DRY_RUN" = false ]]; then
         exit 1
     fi
 
-    # Branch up to date with origin
-    CURRENT_BRANCH=$(git -C "$ROOT" symbolic-ref --short HEAD)
-    git -C "$ROOT" fetch --quiet origin "$CURRENT_BRANCH"
-    UPSTREAM="origin/$CURRENT_BRANCH"
-
-    if ! git -C "$ROOT" rev-parse --verify "$UPSTREAM" >/dev/null 2>&1; then
-        echo "Error: Remote branch $UPSTREAM does not exist."
-        exit 1
-    fi
-
-    if ! git -C "$ROOT" merge-base --is-ancestor "$UPSTREAM" HEAD; then
-        echo "Error: Your branch is behind $UPSTREAM. Pull the latest changes first."
+    # Must be up to date with origin/main (releases always target main)
+    git -C "$ROOT" fetch --quiet origin main
+    if ! git -C "$ROOT" merge-base --is-ancestor origin/main HEAD; then
+        echo "Error: Your branch is behind origin/main. Merge or rebase first."
         exit 1
     fi
 fi
@@ -286,7 +278,23 @@ if [[ "$RELEASE" = true ]]; then
     if ! git -C "$ROOT" tag -l "v$VERSION" | grep -q "v$VERSION"; then
         git -C "$ROOT" tag "v$VERSION"
     fi
-    git -C "$ROOT" push origin HEAD --tags
+
+    # Fast-forward main to include the version bump, then push main + tag.
+    # This works because the worktree branch started from main with no diverging commits.
+    CURRENT_BRANCH=$(git -C "$ROOT" symbolic-ref --short HEAD)
+    if [[ "$CURRENT_BRANCH" != "main" ]]; then
+        echo "    Fast-forwarding main to include release commit..."
+        git -C "$ROOT" fetch origin main --quiet
+        RELEASE_COMMIT=$(git -C "$ROOT" rev-parse HEAD)
+        # Verify main is an ancestor (worktree didn't diverge)
+        if ! git -C "$ROOT" merge-base --is-ancestor origin/main "$RELEASE_COMMIT"; then
+            echo "Error: main has diverged from this branch. Merge main first."
+            exit 1
+        fi
+        git -C "$ROOT" push origin "$RELEASE_COMMIT:refs/heads/main" --tags
+    else
+        git -C "$ROOT" push origin main --tags
+    fi
 
     STEP="creating GitHub release"
     echo "    Creating GitHub release..."
