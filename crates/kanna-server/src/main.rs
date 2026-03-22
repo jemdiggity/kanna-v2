@@ -1,5 +1,7 @@
+mod commands;
 mod config;
 mod daemon_client;
+mod db;
 
 use config::Config;
 
