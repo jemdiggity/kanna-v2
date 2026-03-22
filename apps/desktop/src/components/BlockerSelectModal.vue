@@ -76,8 +76,8 @@ function handleKeydown(e: KeyboardEvent) {
       // If typing a search, Enter adds the highlighted item
       const item = filtered.value[selectedIndex.value];
       if (item) addItem(item.id);
-    } else if (selected.value.size > 0) {
-      // If not searching, Enter confirms
+    } else {
+      // If not searching, Enter confirms (even with zero — removes all blockers)
       emit("confirm", [...selected.value]);
     }
   } else if (e.key === "Backspace" && query.value === "") {
@@ -143,7 +143,7 @@ onMounted(async () => {
 
       <div class="palette-footer">
         <span class="hint">
-          <template v-if="selected.size === 0">Type to search, Enter to add</template>
+          <template v-if="selected.size === 0">Type to search, Enter to add · Enter to save</template>
           <template v-else>Enter to confirm ({{ selected.size }} selected) · Backspace to remove last</template>
         </span>
       </div>
