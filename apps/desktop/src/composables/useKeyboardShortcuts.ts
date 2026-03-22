@@ -17,7 +17,9 @@ export type ActionName =
   | "showDiff"
   | "toggleMaximize"
   | "showShortcuts"
-  | "commandPalette";
+  | "commandPalette"
+  | "goBack"
+  | "goForward";
 
 export type KeyboardActions = Record<ActionName, () => void>;
 
@@ -32,6 +34,7 @@ interface ShortcutDef {
   meta?: boolean;
   shift?: boolean;
   alt?: boolean;
+  ctrl?: boolean;
   /** Display string for the shortcuts modal (e.g. "Cmd+Delete") */
   display: string;
 }
@@ -55,6 +58,8 @@ export const shortcuts: ShortcutDef[] = [
   { action: "navigateDown", label: "Next Task",       group: "Navigation", key: "ArrowDown",                    meta: true, alt: true,    display: "⌥⌘↓" },
   { action: "navigateUp",   label: "Previous Task",   group: "Navigation", key: "ArrowUp",                      meta: true, alt: true,    display: "⌥⌘↑" },
   { action: "toggleZen",    label: "Zen Mode",        group: "Navigation", key: ["Z", "z"],                     meta: true, shift: true,  display: "⇧⌘Z" },
+  { action: "goBack",    label: "Go Back",    group: "Navigation", key: "-", ctrl: true,               display: "⌃-" },
+  { action: "goForward", label: "Go Forward", group: "Navigation", key: "-", ctrl: true, shift: true,  display: "⌃⇧-" },
   // Terminal
   { action: "openShell",  label: "Shell Terminal",    group: "Terminal",   key: "j",                            meta: true,               display: "⌘J" },
   // Views / Help
@@ -72,6 +77,7 @@ function matches(def: ShortcutDef, e: KeyboardEvent): boolean {
   if (e.metaKey !== (def.meta ?? false)) return false;
   if (e.shiftKey !== (def.shift ?? false)) return false;
   if (e.altKey !== (def.alt ?? false)) return false;
+  if (e.ctrlKey !== (def.ctrl ?? false)) return false;
   const keys = Array.isArray(def.key) ? def.key : [def.key];
   return keys.includes(e.key);
 }
