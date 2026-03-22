@@ -628,6 +628,7 @@ function onUnpinnedChange(repoId: string, evt: any) {
 
 .pinned-zone:not(:empty) {
   min-height: 28px;
+  padding-top: 4px;
 }
 
 .pin-divider {
