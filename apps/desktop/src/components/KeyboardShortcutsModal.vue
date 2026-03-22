@@ -99,8 +99,6 @@ function splitKeys(display: string): string[] {
   padding: 20px;
   width: 800px;
   max-width: 90vw;
-  max-height: 80vh;
-  overflow-y: auto;
 }
 h3 { margin: 0 0 16px; font-size: 15px; font-weight: 600; }
 .shortcuts-grid {
