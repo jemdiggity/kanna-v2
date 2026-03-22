@@ -868,9 +868,17 @@ fn stream_output(
                     continue;
                 }
 
+                // Check if observers exist before cloning data (avoids clone on hot path with zero observers)
+                let has_observers = rt.block_on(async {
+                    let guard = session_observers.lock().await;
+                    guard.get(&session_id).map_or(false, |list| !list.is_empty())
+                });
+
+                let obs_data = if has_observers { Some(data.clone()) } else { None };
+
                 let evt = Event::Output {
                     session_id: session_id.clone(),
-                    data: data.clone(),
+                    data,
                 };
                 rt.block_on(async {
                     let mut writers = session_writers.lock().await;
@@ -888,16 +896,36 @@ fn stream_output(
                     }
                 });
 
-                // Tee output to passive observers
-                rt.block_on(async {
-                    let observers_guard = session_observers.lock().await;
-                    if let Some(observer_list) = observers_guard.get(&session_id) {
-                        let obs_evt = Event::Output { session_id: session_id.clone(), data };
-                        for obs in observer_list {
-                            let _ = write_event(&mut *obs.lock().await, &obs_evt).await;
+                // Tee output to passive observers concurrently, removing dead ones
+                if let Some(obs_data) = obs_data {
+                    rt.block_on(async {
+                        let mut observers_guard = session_observers.lock().await;
+                        if let Some(observer_list) = observers_guard.get_mut(&session_id) {
+                            let obs_evt = Event::Output { session_id: session_id.clone(), data: obs_data };
+                            // Write to all observers concurrently
+                            let results = futures::future::join_all(
+                                observer_list.iter().map(|obs| {
+                                    let evt = obs_evt.clone();
+                                    let obs = obs.clone();
+                                    async move {
+                                        write_event(&mut *obs.lock().await, &evt).await
+                                    }
+                                })
+                            ).await;
+                            // Remove observers whose writes failed (dead connections)
+                            let mut i = 0;
+                            observer_list.retain(|_| {
+                                let ok = results[i].is_ok();
+                                i += 1;
+                                ok
+                            });
+                            // Clean up empty entry
+                            if observer_list.is_empty() {
+                                observers_guard.remove(&session_id);
+                            }
                         }
-                    }
-                });
+                    });
+                }
             }
             Err(e) => {
                 log::error!("PTY read error for session {}: {}", session_id, e);
@@ -933,13 +961,19 @@ fn stream_output(
         drop(writers);
         session_sizes.lock().await.remove(&session_id);
 
-        // Tee Exit event to passive observers, then clean up
+        // Tee Exit event to passive observers concurrently, then clean up
         let mut observers_guard = session_observers.lock().await;
         if let Some(observer_list) = observers_guard.remove(&session_id) {
             let obs_evt = Event::Exit { session_id: session_id.clone(), code: exit_code };
-            for obs in &observer_list {
-                let _ = write_event(&mut *obs.lock().await, &obs_evt).await;
-            }
+            futures::future::join_all(
+                observer_list.iter().map(|obs| {
+                    let evt = obs_evt.clone();
+                    let obs = obs.clone();
+                    async move {
+                        let _ = write_event(&mut *obs.lock().await, &evt).await;
+                    }
+                })
+            ).await;
         }
     });
 }

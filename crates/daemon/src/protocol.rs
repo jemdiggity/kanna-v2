@@ -44,7 +44,7 @@ pub enum Command {
     },
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 #[allow(clippy::enum_variant_names)]
 pub enum Event {
