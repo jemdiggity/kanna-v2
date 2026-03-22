@@ -9,7 +9,7 @@ import { getSetting, setSetting, type DbHandle } from "@kanna/db";
 import Sidebar from "./components/Sidebar.vue";
 import MainPanel from "./components/MainPanel.vue";
 import NewTaskModal from "./components/NewTaskModal.vue";
-import ImportRepoModal from "./components/ImportRepoModal.vue";
+import AddRepoModal from "./components/AddRepoModal.vue";
 import KeyboardShortcutsModal from "./components/KeyboardShortcutsModal.vue";
 import FilePickerModal from "./components/FilePickerModal.vue";
 import FilePreviewModal from "./components/FilePreviewModal.vue";
@@ -41,7 +41,8 @@ useOperatorEvents(computed(() => db) as unknown as Ref<DbHandle | null>);
 
 // UI state
 const showNewTaskModal = ref(false);
-const showImportRepoModal = ref(false);
+const showAddRepoModal = ref(false);
+const addRepoInitialTab = ref<"create" | "import">("create");
 const showShortcutsModal = ref(false);
 const shortcutsContext = ref<"main" | "diff" | "file">("main");
 const showFilePickerModal = ref(false);
@@ -282,7 +283,7 @@ const keyboardActions = {
     if (showAnalyticsModal.value) { showAnalyticsModal.value = false; focusAgentTerminal(); return; }
     if (showShellModal.value) { return; }
     if (showNewTaskModal.value) { showNewTaskModal.value = false; focusAgentTerminal(); return; }
-    if (showImportRepoModal.value) { showImportRepoModal.value = false; focusAgentTerminal(); return; }
+    if (showAddRepoModal.value) { showAddRepoModal.value = false; focusAgentTerminal(); return; }
   },
   openShell: () => { showShellModal.value = !showShellModal.value; },
   showDiff: () => { showDiffModal.value = !showDiffModal.value; },
@@ -318,7 +319,8 @@ const keyboardActions = {
     const taskId = goForward(store.selectedItemId, validIds);
     if (taskId) store.selectItem(taskId);
   },
-  importRepo: () => { showImportRepoModal.value = true; },
+  createRepo: () => { addRepoInitialTab.value = "create"; showAddRepoModal.value = true; },
+  importRepo: () => { addRepoInitialTab.value = "import"; showAddRepoModal.value = true; },
   blockTask: () => { handleBlockTask(); },
   editBlockedTask: () => { handleEditBlockedTask(); },
 };
@@ -365,9 +367,29 @@ async function handleNewTaskSubmit(prompt: string) {
   }
 }
 
+async function handleCreateRepo(name: string, path: string) {
+  try {
+    await store.createRepo(name, path);
+    showAddRepoModal.value = false;
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    toast.error(`Failed to create repo: ${msg}`);
+  }
+}
+
 async function handleImportRepo(path: string, name: string, defaultBranch: string) {
   await store.importRepo(path, name, defaultBranch);
-  showImportRepoModal.value = false;
+  showAddRepoModal.value = false;
+}
+
+async function handleCloneRepo(url: string, destination: string) {
+  try {
+    await store.cloneAndImportRepo(url, destination);
+    showAddRepoModal.value = false;
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    toast.error(`Clone failed: ${msg}`);
+  }
 }
 
 const currentBlockers = computedAsync(async () => {
@@ -409,7 +431,7 @@ onMounted(async () => {
       :blocker-names="sidebarBlockerNames"
       @select-repo="store.selectRepo"
       @select-item="handleSelectItem"
-      @import-repo="showImportRepoModal = true"
+      @add-repo="addRepoInitialTab = 'import'; showAddRepoModal = true"
       @new-task="(repoId: string) => { store.selectedRepoId = repoId; showNewTaskModal = true; }"
       @pin-item="store.pinItem"
       @unpin-item="store.unpinItem"
@@ -433,10 +455,13 @@ onMounted(async () => {
       @submit="handleNewTaskSubmit"
       @cancel="showNewTaskModal = false"
     />
-    <ImportRepoModal
-      v-if="showImportRepoModal"
+    <AddRepoModal
+      v-if="showAddRepoModal"
+      :initial-tab="addRepoInitialTab"
+      @create="handleCreateRepo"
       @import="handleImportRepo"
-      @cancel="showImportRepoModal = false"
+      @clone="handleCloneRepo"
+      @cancel="showAddRepoModal = false"
     />
     <CommandPaletteModal
       v-if="showCommandPalette"
