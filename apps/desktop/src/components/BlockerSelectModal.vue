@@ -40,6 +40,7 @@ const selectedItems = computed(() =>
 function addItem(id: string) {
   selected.value.add(id);
   query.value = "";
+  selectedIndex.value = -1;
   inputRef.value?.focus();
 }
 
