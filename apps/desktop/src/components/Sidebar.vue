@@ -68,7 +68,7 @@ function sortedBlocked(repoId: string): PipelineItem[] {
 }
 
 function itemsForRepo(repoId: string): PipelineItem[] {
-  return [...sortedPinned(repoId), ...sortedPR(repoId), ...sortedMerge(repoId), ...sortedInProgress(repoId), ...sortedBlocked(repoId)];
+  return [...sortedPinned(repoId), ...sortedMerge(repoId), ...sortedPR(repoId), ...sortedInProgress(repoId), ...sortedBlocked(repoId)];
 }
 
 function itemTitle(item: PipelineItem): string {
@@ -236,10 +236,10 @@ function onUnpinnedChange(repoId: string, evt: any) {
             <div class="pin-divider-line"></div>
           </div>
 
-          <!-- PR tasks -->
-          <div v-if="sortedPR(repo.id).length > 0" class="section-label">Pull Requests</div>
+          <!-- Merge Queue tasks -->
+          <div v-if="sortedMerge(repo.id).length > 0" class="section-label">Merge Queue</div>
           <draggable
-            :model-value="sortedPR(repo.id)"
+            :model-value="sortedMerge(repo.id)"
             :group="{ name: `repo-${repo.id}` }"
             item-key="id"
             :animation="150"
@@ -279,10 +279,10 @@ function onUnpinnedChange(repoId: string, evt: any) {
             </template>
           </draggable>
 
-          <!-- Merge Queue tasks -->
-          <div v-if="sortedMerge(repo.id).length > 0" class="section-label">Merge Queue</div>
+          <!-- PR tasks -->
+          <div v-if="sortedPR(repo.id).length > 0" class="section-label">Pull Requests</div>
           <draggable
-            :model-value="sortedMerge(repo.id)"
+            :model-value="sortedPR(repo.id)"
             :group="{ name: `repo-${repo.id}` }"
             item-key="id"
             :animation="150"
