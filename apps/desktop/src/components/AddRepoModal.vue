@@ -40,12 +40,12 @@ const inputRef = ref<HTMLInputElement>();
 onMounted(async () => {
   try {
     const { homeDir: tauri_homeDir } = await import("@tauri-apps/api/path");
-    homeDir.value = await tauri_homeDir();
+    const raw = await tauri_homeDir();
+    homeDir.value = raw.endsWith("/") ? raw : raw + "/";
   } catch {
-    homeDir.value = "/Users/unknown";
+    homeDir.value = "/Users/unknown/";
   }
-  const home = homeDir.value.endsWith("/") ? homeDir.value : homeDir.value + "/";
-  createParentDir.value = `${home}.kanna/repos`;
+  createParentDir.value = `${homeDir.value}.kanna/repos`;
   inputRef.value?.focus();
 });
 
