@@ -6,7 +6,7 @@ import { isTauri } from "../tauri-mock";
 import { listen } from "../listen";
 import { parseRepoConfig } from "@kanna/core";
 import type { RepoConfig } from "@kanna/core";
-import type { DbHandle, PipelineItem } from "@kanna/db";
+import type { DbHandle, PipelineItem, Repo } from "@kanna/db";
 import {
   listRepos, insertRepo, findRepoByPath,
   hideRepo as hideRepoQuery, unhideRepo as unhideRepoQuery,
@@ -28,13 +28,13 @@ export const useKannaStore = defineStore("kanna", () => {
   function bump() { refreshKey.value++; }
 
   // ── Reactive DB reads ────────────────────────────────────────────
-  const repos = computedAsync(async () => {
+  const repos = computedAsync<Repo[]>(async () => {
     refreshKey.value; // subscribe to trigger
     if (!_db) return [];
     return await listRepos(_db);
   }, []);
 
-  const items = computedAsync(async () => {
+  const items = computedAsync<PipelineItem[]>(async () => {
     refreshKey.value;
     if (!_db || repos.value.length === 0) return [];
     const loaded: PipelineItem[] = [];
