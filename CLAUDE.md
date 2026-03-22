@@ -31,7 +31,7 @@ We develop Kanna **in and on** Kanna — Claude Code agents run from one of thre
 
 Worktrees are fully isolated from the main branch instance:
 
-- **Separate Vite port** — main uses `localhost:1420`, worktrees get a unique port via `KANNA_DEV_PORT` env var (set from `.kanna/config.json` `ports` field). `dev.sh` writes `tauri.conf.local.json` with the port override and passes `--config` to Tauri — the committed `tauri.conf.json` is never modified.
+- **Separate Vite port** — main uses `localhost:1420`, worktrees get a unique port automatically. The app reads base ports from `.kanna/config.json` `ports` field (e.g., `"KANNA_DEV_PORT": 1420`), picks the next unused offset (1, 2, 3…), and stores the computed port (e.g., `1421`) as `port_env` in the DB. When the worktree's agent session spawns, `KANNA_DEV_PORT` is passed as an env var — no manual editing of `config.json` is needed. `dev.sh` then writes `tauri.conf.local.json` with the port override and passes `--config` to Tauri — the committed `tauri.conf.json` is never modified. Vite also reads `KANNA_DEV_PORT` to set its server port.
 - **Separate daemon** — worktrees use `{worktree}/.kanna-daemon/` instead of `~/Library/Application Support/Kanna/`
 - **Separate database** — each instance uses its own SQLite DB
 - **Separate tmux session** — `dev.sh` names the session `kanna-{worktree-dir}` instead of `kanna`
