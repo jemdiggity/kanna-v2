@@ -21,6 +21,7 @@ import { usePipeline } from "./composables/usePipeline";
 import { usePreferences } from "./composables/usePreferences";
 import { useKeyboardShortcuts, type ActionName } from "./composables/useKeyboardShortcuts";
 import { backupOnStartup, startPeriodicBackup } from "./composables/useBackup";
+import { activeContext } from "./composables/useShortcutContext";
 
 const db = ref<DbHandle | null>(null);
 const dbName = ref("");
@@ -42,6 +43,7 @@ const showNewTaskModal = ref(false);
 const showImportRepoModal = ref(false);
 const showShortcutsModal = ref(false);
 const hideShortcutsOnStartup = ref(false);
+const shortcutsContext = ref<"main" | "diff" | "file">("main");
 const showFilePickerModal = ref(false);
 const showFilePreviewModal = ref(false);
 const previewFilePath = ref("");
@@ -265,7 +267,20 @@ const keyboardActions = {
   },
   openShell: () => { showShellModal.value = !showShellModal.value; },
   showDiff: () => { showDiffModal.value = !showDiffModal.value; },
-  showShortcuts: () => { showShortcutsModal.value = !showShortcutsModal.value; },
+  showShortcuts: () => {
+    if (showShortcutsModal.value) {
+      showShortcutsModal.value = false;
+      return;
+    }
+    // Close any other modal first (single-modal convention)
+    showCommandPalette.value = false;
+    showFilePreviewModal.value = false;
+    showFilePickerModal.value = false;
+    // Don't close diff/shell — those are the contexts we want to read
+    // Snapshot the active context at open time
+    shortcutsContext.value = activeContext.value;
+    showShortcutsModal.value = true;
+  },
   commandPalette: () => { showCommandPalette.value = !showCommandPalette.value; },
 };
 useKeyboardShortcuts(keyboardActions);
@@ -612,6 +627,7 @@ onMounted(async () => {
     />
     <KeyboardShortcutsModal
       v-if="showShortcutsModal"
+      :context="shortcutsContext"
       :hide-on-startup="hideShortcutsOnStartup"
       @close="showShortcutsModal = false"
       @update:hide-on-startup="(val: boolean) => { hideShortcutsOnStartup = val; if (db) setSetting(db, 'hideShortcutsOnStartup', String(val)); }"
