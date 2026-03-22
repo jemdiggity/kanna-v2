@@ -868,6 +868,7 @@ export const useKannaStore = defineStore("kanna", () => {
     startPrAgent, startMergeAgent, makePR, mergeQueue,
     blockTask, editBlockedTask,
     listBlockersForItem: (itemId: string) => listBlockersForItem(_db, itemId),
+    listBlockedByItem: (itemId: string) => listBlockedByItem(_db, itemId),
     pinItem, unpinItem, reorderPinned, renameItem,
     savePreference,
   };

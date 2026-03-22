@@ -78,14 +78,40 @@ function handleEditBlockedTask() {
   showBlockerSelect.value = true;
 }
 
-const blockerCandidates = computed(() => {
+const blockerCandidates = computedAsync(async () => {
   const item = store.currentItem;
-  return store.items.filter((i) =>
-    i.id !== item?.id &&
+  if (!item) return [];
+  const candidates = store.items.filter((i) =>
+    i.id !== item.id &&
     (i.stage === "in_progress" || i.stage === "blocked") &&
     i.repo_id === store.selectedRepoId
   );
-});
+  // For "Block Task": filter out blocked tasks that are (transitively)
+  // blocked by the current task. Otherwise the user can create nonsensical
+  // mutual dependencies (A blocked by B, then B blocked by A').
+  if (item.stage === "in_progress") {
+    const dependents = await collectDependents(item.id);
+    return candidates.filter((c) => !dependents.has(c.id));
+  }
+  return candidates;
+}, []);
+
+/** Walk the blocker graph to find all tasks transitively blocked by itemId. */
+async function collectDependents(itemId: string): Promise<Set<string>> {
+  const result = new Set<string>();
+  const queue = [itemId];
+  while (queue.length > 0) {
+    const current = queue.pop()!;
+    const blocked = await store.listBlockedByItem(current);
+    for (const b of blocked) {
+      if (!result.has(b.id)) {
+        result.add(b.id);
+        queue.push(b.id);
+      }
+    }
+  }
+  return result;
+}
 
 const preselectedBlockerIds = computedAsync(async () => {
   const item = store.currentItem;
