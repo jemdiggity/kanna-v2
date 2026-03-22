@@ -17,7 +17,8 @@ export type ActionName =
   | "showDiff"
   | "toggleMaximize"
   | "showShortcuts"
-  | "commandPalette";
+  | "commandPalette"
+  | "showAnalytics";
 
 export type KeyboardActions = Record<ActionName, () => void>;
 
@@ -61,6 +62,7 @@ export const shortcuts: ShortcutDef[] = [
   { action: "showDiff",       label: "View Diff",           group: "Help", key: "d",                            meta: true, display: "⌘D" },
   { action: "showShortcuts",  label: "Keyboard Shortcuts",  group: "Help", key: "/",                            meta: true,               display: "⌘/" },
   { action: "commandPalette",  label: "Command Palette",    group: "Help", key: ["P", "p"],                     meta: true, shift: true,  display: "⇧⌘P" },
+  { action: "showAnalytics", label: "Analytics", group: "Help", key: ["A", "a"], meta: true, shift: true, display: "⇧⌘A" },
   // Window
   { action: "toggleMaximize", label: "Maximize",         group: "Window",     key: "Enter",                        meta: true, shift: true,  display: "⇧⌘Enter" },
   // Escape is special — no meta required

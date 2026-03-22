@@ -16,6 +16,7 @@ import FilePreviewModal from "./components/FilePreviewModal.vue";
 import DiffModal from "./components/DiffModal.vue";
 import ShellModal from "./components/ShellModal.vue";
 import CommandPaletteModal from "./components/CommandPaletteModal.vue";
+import AnalyticsModal from "./components/AnalyticsModal.vue";
 import { useRepo } from "./composables/useRepo";
 import { usePipeline } from "./composables/usePipeline";
 import { usePreferences } from "./composables/usePreferences";
@@ -48,6 +49,7 @@ const previewFilePath = ref("");
 const showDiffModal = ref(false);
 const showShellModal = ref(false);
 const showCommandPalette = ref(false);
+const showAnalyticsModal = ref(false);
 const diffScopes = new Map<string, "branch" | "commit" | "working">();
 const zenMode = ref(false);
 const maximized = ref(false);
@@ -258,6 +260,7 @@ const keyboardActions = {
     if (showFilePreviewModal.value) { showFilePreviewModal.value = false; return; }
     if (showFilePickerModal.value) { showFilePickerModal.value = false; return; }
     if (showDiffModal.value) { showDiffModal.value = false; maximized.value = false; return; }
+    if (showAnalyticsModal.value) { showAnalyticsModal.value = false; return; }
     // Shell modal: Escape goes to the terminal inside it; close with Cmd+J
     if (showShellModal.value) { return; }
     if (showNewTaskModal.value) { showNewTaskModal.value = false; return; }
@@ -267,6 +270,7 @@ const keyboardActions = {
   showDiff: () => { showDiffModal.value = !showDiffModal.value; },
   showShortcuts: () => { showShortcutsModal.value = !showShortcutsModal.value; },
   commandPalette: () => { showCommandPalette.value = !showCommandPalette.value; },
+  showAnalytics: () => { showAnalyticsModal.value = !showAnalyticsModal.value; },
 };
 useKeyboardShortcuts(keyboardActions);
 
@@ -654,6 +658,12 @@ onMounted(async () => {
       :worktree-path="currentItem?.branch ? `${selectedRepo.path}/.kanna-worktrees/${currentItem.branch}` : selectedRepo.path"
       :ide-command="ideCommand"
       @close="showFilePreviewModal = false"
+    />
+    <AnalyticsModal
+      v-if="showAnalyticsModal"
+      :db="db"
+      :repo-id="selectedRepoId"
+      @close="showAnalyticsModal = false"
     />
   </div>
 </template>
