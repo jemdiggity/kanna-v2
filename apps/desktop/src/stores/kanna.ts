@@ -5,7 +5,7 @@ import { invoke } from "../invoke";
 import { isTauri } from "../tauri-mock";
 import { listen } from "../listen";
 import { parseRepoConfig } from "@kanna/core";
-import type { RepoConfig } from "@kanna/core";
+import type { RepoConfig, CustomTaskConfig } from "@kanna/core";
 import type { DbHandle, PipelineItem, Repo } from "@kanna/db";
 import {
   listRepos, insertRepo, findRepoByPath,
@@ -150,11 +150,17 @@ export const useKannaStore = defineStore("kanna", () => {
     repoPath: string,
     prompt: string,
     agentType: "pty" | "sdk" = "pty",
-    opts?: { baseBranch?: string; stage?: string },
+    opts?: { baseBranch?: string; stage?: string; customTask?: CustomTaskConfig },
   ) {
     const id = crypto.randomUUID();
     const branch = `task-${id}`;
     const worktreePath = `${repoPath}/.kanna-worktrees/${branch}`;
+
+    // Compute effective values from custom task config
+    const effectivePrompt = opts?.customTask?.prompt ?? prompt;
+    const effectiveAgentType = opts?.customTask?.executionMode ?? agentType;
+    const effectiveStage = opts?.customTask?.stage ?? opts?.stage ?? "in_progress";
+    const displayName = opts?.customTask?.name ?? null;
 
     // Read .kanna/config.json
     let repoConfig: RepoConfig = {};
@@ -205,15 +211,16 @@ export const useKannaStore = defineStore("kanna", () => {
         repo_id: repoId,
         issue_number: null,
         issue_title: null,
-        prompt,
-        stage: opts?.stage || "in_progress",
+        prompt: effectivePrompt,
+        stage: effectiveStage,
         pr_number: null,
         pr_url: null,
         branch,
-        agent_type: agentType,
+        agent_type: effectiveAgentType,
         port_offset: portOffset,
         port_env: Object.keys(portEnv).length > 0 ? JSON.stringify(portEnv) : null,
         activity: "working",
+        display_name: displayName,
       });
     } catch (e) {
       console.error("[store] DB insert failed:", e);
@@ -224,17 +231,30 @@ export const useKannaStore = defineStore("kanna", () => {
     bump();
 
     // Spawn agent
-    if (agentType !== "pty") {
+    if (effectiveAgentType !== "pty") {
       await invoke("create_agent_session", {
         sessionId: id,
         cwd: worktreePath,
-        prompt,
+        prompt: effectivePrompt,
         systemPrompt: null,
-        permissionMode: "dontAsk",
+        permissionMode: opts?.customTask?.permissionMode ?? "dontAsk",
+        model: opts?.customTask?.model ?? null,
+        allowedTools: opts?.customTask?.allowedTools ?? null,
+        disallowedTools: opts?.customTask?.disallowedTools ?? null,
+        maxTurns: opts?.customTask?.maxTurns ?? null,
+        maxBudgetUsd: opts?.customTask?.maxBudgetUsd ?? null,
       });
     } else {
       try {
-        await spawnPtySession(id, worktreePath, prompt);
+        await spawnPtySession(id, worktreePath, effectivePrompt, 80, 24, {
+          model: opts?.customTask?.model,
+          permissionMode: opts?.customTask?.permissionMode,
+          allowedTools: opts?.customTask?.allowedTools,
+          disallowedTools: opts?.customTask?.disallowedTools,
+          maxTurns: opts?.customTask?.maxTurns,
+          maxBudgetUsd: opts?.customTask?.maxBudgetUsd,
+          setupCmdsOverride: opts?.customTask?.setup,
+        });
       } catch (e) {
         console.warn("[store] PTY pre-spawn failed, will retry on mount:", e);
       }
