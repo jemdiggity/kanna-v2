@@ -75,9 +75,7 @@ pub async fn run_script(
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         Err(format!(
             "script exited with status {}: {}{}",
-            output.status,
-            stderr,
-            stdout
+            output.status, stderr, stdout
         ))
     }
 }

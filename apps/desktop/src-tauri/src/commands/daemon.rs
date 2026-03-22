@@ -14,7 +14,10 @@ async fn send_and_ack(state: &DaemonState) -> Result<(), String> {
     let response = client.read_event().await?;
     let event: serde_json::Value = serde_json::from_str(&response).unwrap_or_default();
     if let Some("Error") = event.get("type").and_then(|t| t.as_str()) {
-        let msg = event.get("message").and_then(|m| m.as_str()).unwrap_or("daemon error");
+        let msg = event
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("daemon error");
         return Err(msg.to_string());
     }
     Ok(())
@@ -68,7 +71,10 @@ pub async fn spawn_session(
     match event.get("type").and_then(|t| t.as_str()) {
         Some("SessionCreated") => Ok(()),
         Some("Error") => {
-            let msg = event.get("message").and_then(|m| m.as_str()).unwrap_or("unknown error");
+            let msg = event
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("unknown error");
             Err(msg.to_string())
         }
         _ => Err(format!("unexpected spawn response: {}", response)),
@@ -191,10 +197,7 @@ pub async fn list_sessions(
 }
 
 #[tauri::command]
-pub async fn attach_session(
-    app: tauri::AppHandle,
-    session_id: String,
-) -> Result<(), String> {
+pub async fn attach_session(app: tauri::AppHandle, session_id: String) -> Result<(), String> {
     // Create a dedicated connection for this session's output streaming.
     // This avoids mixing Output events with command responses.
     let socket_path = daemon_socket_path();
@@ -202,13 +205,18 @@ pub async fn attach_session(
 
     // Send Attach command
     let cmd = serde_json::json!({ "type": "Attach", "session_id": session_id });
-    stream_client.send_command(&serde_json::to_string(&cmd).unwrap()).await?;
+    stream_client
+        .send_command(&serde_json::to_string(&cmd).unwrap())
+        .await?;
 
     // Read the Ok/Error response
     let response = stream_client.read_event().await?;
     let event: serde_json::Value = serde_json::from_str(&response).map_err(|e| e.to_string())?;
     if let Some("Error") = event.get("type").and_then(|t| t.as_str()) {
-        let msg = event.get("message").and_then(|m| m.as_str()).unwrap_or("attach failed");
+        let msg = event
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("attach failed");
         return Err(msg.to_string());
     }
 
@@ -228,7 +236,8 @@ pub async fn attach_session(
                             // Convert data array to base64 string for efficient transfer
                             // The raw number array can be large and slow to serialize
                             if let Some(data) = event.get("data").and_then(|d| d.as_array()) {
-                                let bytes: Vec<u8> = data.iter()
+                                let bytes: Vec<u8> = data
+                                    .iter()
                                     .filter_map(|v| v.as_u64().map(|n| n as u8))
                                     .collect();
                                 use base64::Engine;

@@ -59,9 +59,21 @@ async fn sdk_session_produces_assistant_and_result() {
     }
     session.close().await;
 
-    assert!(!types.is_empty(), "no messages received (polled {} times)", poll_count);
-    assert!(types.contains(&"assistant".into()), "missing assistant: {:?}", types);
-    assert!(types.contains(&"result".into()), "missing result: {:?}", types);
+    assert!(
+        !types.is_empty(),
+        "no messages received (polled {} times)",
+        poll_count
+    );
+    assert!(
+        types.contains(&"assistant".into()),
+        "missing assistant: {:?}",
+        types
+    );
+    assert!(
+        types.contains(&"result".into()),
+        "missing result: {:?}",
+        types
+    );
 }
 
 // ── Layer 2: Buffered session (mirrors Tauri command pattern) ───────────
@@ -143,7 +155,11 @@ async fn drain_until_result(b: &Buffered, timeout_secs: u64) -> Vec<String> {
         }
         match poll(b).await {
             Some(msg) => {
-                let t = msg.get("type").and_then(|v| v.as_str()).unwrap_or("?").to_string();
+                let t = msg
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?")
+                    .to_string();
                 if t == "waiting" {
                     tokio::time::sleep(Duration::from_millis(200)).await;
                     continue;
@@ -166,7 +182,11 @@ async fn buffered_session_drains_all_messages() {
     let b = start_buffered("Respond with exactly: BUFFERED_OK").await;
     let types = drain_until_result(&b, 120).await;
 
-    assert!(types.contains(&"assistant".into()), "no assistant: {:?}", types);
+    assert!(
+        types.contains(&"assistant".into()),
+        "no assistant: {:?}",
+        types
+    );
     assert!(types.contains(&"result".into()), "no result: {:?}", types);
     assert!(*b.finished.lock().await, "finished flag not set");
 }
@@ -180,8 +200,16 @@ async fn concurrent_sessions_are_independent() {
     let types_a = drain_until_result(&a, 120).await;
     let types_b = drain_until_result(&b, 120).await;
 
-    assert!(types_a.contains(&"result".into()), "session a: {:?}", types_a);
-    assert!(types_b.contains(&"result".into()), "session b: {:?}", types_b);
+    assert!(
+        types_a.contains(&"result".into()),
+        "session a: {:?}",
+        types_a
+    );
+    assert!(
+        types_b.contains(&"result".into()),
+        "session b: {:?}",
+        types_b
+    );
 }
 
 #[tokio::test]
