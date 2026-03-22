@@ -54,17 +54,18 @@ Key properties:
 
 **kanna-server usage:** On startup, kanna-server opens one persistent connection to the daemon. When the phone sends `attach_session`, kanna-server sends `Observe` to the daemon and starts forwarding `Output`/`Exit` events through the relay. `detach_session` sends `Unobserve`. For `send_input`, kanna-server sends the daemon's existing `Input` command directly — input does not require `Attach` ownership.
 
+**No resize from mobile:** The phone does not send `resize_session` — the PTY dimensions are owned by the desktop. Resizing from the phone would break the desktop terminal layout. The mobile xterm.js instance renders the output at whatever dimensions the desktop has set, using horizontal scrolling if needed.
+
 **v1 command surface:**
 - `list_pipeline_items` — read pipeline items from SQLite
 - `get_pipeline_item` — single item detail
 - `list_sessions` — daemon session list
 - `attach_session` — start streaming terminal output
 - `detach_session` — stop streaming
-- `send_input` — send keystrokes to terminal
-- `resize_session` — terminal resize
+- `send_input` — send keystrokes to terminal (no coordination with desktop — concurrent input goes to the same PTY)
 
 **Startup:**
-- Reads relay URL + device token from config file
+- Reads relay URL + device token from config file (`~/Library/Application Support/Kanna/server.toml`)
 - Connects to relay, authenticates with device token
 - Discovers daemon socket path using same logic as Tauri app
 - Opens SQLite DB read-only
@@ -95,7 +96,7 @@ Stateless WebSocket message broker deployed on Cloud Run.
 3. Generates a random device token
 4. Hits relay REST endpoint (`POST /register`) with Firebase ID token + device token
 5. Relay verifies the Firebase token, stores `{deviceToken → userId}` in Firestore
-6. kanna-server saves the device token locally (e.g., `~/.kanna/server.toml`)
+6. kanna-server saves the device token locally (`~/Library/Application Support/Kanna/server.toml`)
 7. Subsequent connections use device token only
 
 ### 3. Tauri Mobile App (`apps/mobile/`)
