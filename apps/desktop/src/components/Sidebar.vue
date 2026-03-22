@@ -32,41 +32,32 @@ function sortedPinned(repoId: string): PipelineItem[] {
     .sort((a, b) => (a.pin_order ?? 0) - (b.pin_order ?? 0));
 }
 
-function sortByActivity(items: PipelineItem[]): PipelineItem[] {
-  const order: Record<string, number> = { idle: 0, unread: 1, working: 2 };
-  return items.sort((a, b) => {
-    const ao = order[a.activity || "idle"] ?? 0;
-    const bo = order[b.activity || "idle"] ?? 0;
-    if (ao !== bo) return ao - bo;
-    const isIdle = (a.activity || "idle") === "idle";
-    const aTime = (isIdle ? a.unread_at : null) || a.activity_changed_at || a.created_at;
-    const bTime = (isIdle ? b.unread_at : null) || b.activity_changed_at || b.created_at;
-    return bTime.localeCompare(aTime);
-  });
+function sortByCreatedAt(items: PipelineItem[]): PipelineItem[] {
+  return items.sort((a, b) => b.created_at.localeCompare(a.created_at));
 }
 
 function sortedPR(repoId: string): PipelineItem[] {
-  return sortByActivity(
+  return sortByCreatedAt(
     props.pipelineItems.filter((i) => i.repo_id === repoId && hasTag(i, "pr") && !hasTag(i, "done") && !i.pinned)
   );
 }
 
 function sortedMerge(repoId: string): PipelineItem[] {
-  return sortByActivity(
+  return sortByCreatedAt(
     props.pipelineItems.filter((i) => i.repo_id === repoId && hasTag(i, "merge") && !hasTag(i, "done") && !i.pinned)
   );
 }
 
 function sortedActive(repoId: string): PipelineItem[] {
-  return sortByActivity(
+  return sortByCreatedAt(
     props.pipelineItems.filter((i) => i.repo_id === repoId && !hasTag(i, "pr") && !hasTag(i, "merge") && !hasTag(i, "blocked") && !hasTag(i, "done") && !i.pinned)
   );
 }
 
 function sortedBlocked(repoId: string): PipelineItem[] {
-  return props.pipelineItems
-    .filter((i) => i.repo_id === repoId && hasTag(i, "blocked") && !hasTag(i, "done") && !i.pinned)
-    .sort((a, b) => a.created_at.localeCompare(b.created_at));
+  return sortByCreatedAt(
+    props.pipelineItems.filter((i) => i.repo_id === repoId && hasTag(i, "blocked") && !hasTag(i, "done") && !i.pinned)
+  );
 }
 
 function itemsForRepo(repoId: string): PipelineItem[] {

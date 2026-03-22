@@ -98,7 +98,7 @@ export const useKannaStore = defineStore("kanna", () => {
     return item && !hasTag(item, "done") ? item : null;
   });
 
-  // Mirrors Sidebar.vue's itemsForRepo(): pinned (by pin_order), then pr → merge → active (each by activity).
+  // Mirrors Sidebar.vue's itemsForRepo(): pinned (by pin_order), then merge → pr → active → blocked (each by created_at desc).
   const sortedItemsForCurrentRepo = computed(() => {
     const repoItems = items.value.filter(
       (item) => item.repo_id === selectedRepoId.value && !hasTag(item, "done")
@@ -106,24 +106,12 @@ export const useKannaStore = defineStore("kanna", () => {
     const pinned = repoItems
       .filter((i) => i.pinned)
       .sort((a, b) => (a.pin_order ?? 0) - (b.pin_order ?? 0));
-    const activityOrder: Record<string, number> = { idle: 0, unread: 1, working: 2 };
-    function sortByActivity(arr: typeof repoItems) {
-      return arr.sort((a, b) => {
-        const ao = activityOrder[a.activity || "idle"] ?? 0;
-        const bo = activityOrder[b.activity || "idle"] ?? 0;
-        if (ao !== bo) return ao - bo;
-        const isIdle = (a.activity || "idle") === "idle";
-        const aTime = (isIdle ? a.unread_at : null) || a.activity_changed_at || a.created_at;
-        const bTime = (isIdle ? b.unread_at : null) || b.activity_changed_at || b.created_at;
-        return bTime.localeCompare(aTime);
-      });
-    }
-    const merge = sortByActivity(repoItems.filter((i) => hasTag(i, "merge") && !i.pinned));
-    const pr = sortByActivity(repoItems.filter((i) => hasTag(i, "pr") && !i.pinned));
-    const active = sortByActivity(repoItems.filter((i) => !hasTag(i, "pr") && !hasTag(i, "merge") && !hasTag(i, "blocked") && !i.pinned));
-    const blocked = repoItems
-      .filter((i) => hasTag(i, "blocked") && !i.pinned)
-      .sort((a, b) => a.created_at.localeCompare(b.created_at));
+    const sortByCreatedAt = (arr: typeof repoItems) =>
+      arr.sort((a, b) => b.created_at.localeCompare(a.created_at));
+    const merge = sortByCreatedAt(repoItems.filter((i) => hasTag(i, "merge") && !i.pinned));
+    const pr = sortByCreatedAt(repoItems.filter((i) => hasTag(i, "pr") && !i.pinned));
+    const active = sortByCreatedAt(repoItems.filter((i) => !hasTag(i, "pr") && !hasTag(i, "merge") && !hasTag(i, "blocked") && !i.pinned));
+    const blocked = sortByCreatedAt(repoItems.filter((i) => hasTag(i, "blocked") && !i.pinned));
     return [...pinned, ...merge, ...pr, ...active, ...blocked];
   });
 
