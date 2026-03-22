@@ -53,11 +53,11 @@ const emit = defineEmits<{
     <div v-else class="empty-state">
       <template v-if="!hasRepos">
         <p class="empty-title">No repos imported</p>
-        <p class="empty-hint">Press <kbd>⇧⌘I</kbd> to import a repo and get started.</p>
+        <p class="empty-hint">Press <kbd>⇧</kbd><kbd>⌘</kbd><kbd>I</kbd> to import a repo and get started.</p>
       </template>
       <template v-else>
         <p class="empty-title">No task selected</p>
-        <p class="empty-hint">Select a task from the sidebar or press ⇧⌘N to create one.</p>
+        <p class="empty-hint">Select a task from the sidebar or press <kbd>⇧</kbd><kbd>⌘</kbd><kbd>N</kbd> to create one.</p>
       </template>
     </div>
   </main>
@@ -90,6 +90,20 @@ const emit = defineEmits<{
 .empty-hint {
   font-size: 12px;
   color: #555;
+}
+
+.empty-hint kbd {
+  background: #2a2a2a;
+  border: 1px solid #444;
+  border-radius: 3px;
+  padding: 1px 5px;
+  font-family: inherit;
+  font-size: 11px;
+  color: #999;
+}
+
+.empty-hint kbd + kbd {
+  margin-left: 2px;
 }
 
 .blocked-placeholder {

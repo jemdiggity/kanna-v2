@@ -163,7 +163,7 @@ function onUnpinnedChange(repoId: string, evt: any) {
     <div class="sidebar-content">
       <div v-if="repos.length === 0" class="empty-state">
         No repos imported yet.<br>
-        Press <kbd>⇧⌘I</kbd> to import one.
+        Press <kbd>⇧</kbd><kbd>⌘</kbd><kbd>I</kbd> to import one.
       </div>
 
       <div v-for="repo in repos" :key="repo.id" class="repo-section">
@@ -449,6 +449,10 @@ function onUnpinnedChange(repoId: string, evt: any) {
   font-family: inherit;
   font-size: 11px;
   color: #999;
+}
+
+.empty-state kbd + kbd {
+  margin-left: 2px;
 }
 
 .repo-section {
