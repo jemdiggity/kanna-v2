@@ -1,0 +1,16 @@
+{
+  "planPath": "docs/superpowers/plans/2026-03-23-kanna-mobile.md",
+  "tasks": [
+    {"id": 1, "subject": "Task 1: Daemon Protocol Extension — Observe/Unobserve", "status": "pending"},
+    {"id": 2, "subject": "Task 2: kanna-server — Config and Daemon Client", "status": "pending"},
+    {"id": 3, "subject": "Task 3: kanna-server — SQLite Queries and Command Dispatcher", "status": "pending", "blockedBy": [2]},
+    {"id": 4, "subject": "Task 4: kanna-server — Relay WebSocket Client", "status": "pending", "blockedBy": [3]},
+    {"id": 5, "subject": "Task 5: kanna-server — Observe-Based Terminal Streaming", "status": "pending", "blockedBy": [1, 4]},
+    {"id": 6, "subject": "Task 6: kanna-server — Device Registration", "status": "pending", "blockedBy": [2]},
+    {"id": 7, "subject": "Task 7: Relay Service — Cloud Run WebSocket Broker", "status": "pending"},
+    {"id": 8, "subject": "Task 8: Tauri Mobile App — Scaffold", "status": "pending", "blockedBy": [7]},
+    {"id": 9, "subject": "Task 9: DB Access Abstraction", "status": "pending", "blockedBy": [3]},
+    {"id": 10, "subject": "Task 10: Integration Test — End-to-End Message Flow", "status": "pending", "blockedBy": [5, 7]}
+  ],
+  "lastUpdated": "2026-03-23T00:00:00Z"
+}
