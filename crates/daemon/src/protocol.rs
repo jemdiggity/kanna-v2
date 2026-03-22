@@ -37,6 +37,8 @@ pub enum Command {
     },
     List,
     Subscribe,
+    Observe { session_id: String },
+    Unobserve { session_id: String },
     Handoff {
         version: u32,
     },
@@ -263,6 +265,36 @@ mod tests {
         assert_eq!(json, r#"{"type":"ShuttingDown"}"#);
         let decoded: Event = serde_json::from_str(&json).unwrap();
         assert!(matches!(decoded, Event::ShuttingDown));
+    }
+
+    #[test]
+    fn test_command_observe_roundtrip() {
+        let cmd = Command::Observe {
+            session_id: "s1".to_string(),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        let decoded: Command = serde_json::from_str(&json).unwrap();
+        match decoded {
+            Command::Observe { session_id } => {
+                assert_eq!(session_id, "s1");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_command_unobserve_roundtrip() {
+        let cmd = Command::Unobserve {
+            session_id: "s1".to_string(),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        let decoded: Command = serde_json::from_str(&json).unwrap();
+        match decoded {
+            Command::Unobserve { session_id } => {
+                assert_eq!(session_id, "s1");
+            }
+            _ => panic!("wrong variant"),
+        }
     }
 
     #[test]
