@@ -19,15 +19,18 @@ const selectedIndex = ref(0);
 const inputRef = ref<HTMLInputElement | null>(null);
 const mouseMoved = ref(false);
 
-// Only show candidates that aren't already selected
+function sortName(item: PipelineItem): string {
+  return (item.display_name || item.issue_title || item.prompt || "").toLowerCase();
+}
+
+// Only show candidates that aren't already selected, sorted alphabetically
 const filtered = computed(() => {
   const base = props.candidates.filter((c) => !selected.value.has(c.id));
   const q = query.value.toLowerCase();
-  if (!q) return base;
-  return base.filter((c) => {
-    const name = c.display_name || c.prompt || "";
-    return name.toLowerCase().includes(q);
-  });
+  const results = q
+    ? base.filter((c) => sortName(c).includes(q))
+    : base;
+  return results.sort((a, b) => sortName(a).localeCompare(sortName(b)));
 });
 
 const selectedItems = computed(() =>
