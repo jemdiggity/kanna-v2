@@ -17,6 +17,7 @@ export type ActionName =
   | "showDiff"
   | "toggleMaximize"
   | "showShortcuts"
+  | "toggleSidebar"
   | "commandPalette";
 
 export type KeyboardActions = Record<ActionName, () => void>;
@@ -54,6 +55,7 @@ export const shortcuts: ShortcutDef[] = [
   // Navigation
   { action: "navigateDown", label: "Next Task",       group: "Navigation", key: "ArrowDown",                    meta: true, alt: true,    display: "⌥⌘↓" },
   { action: "navigateUp",   label: "Previous Task",   group: "Navigation", key: "ArrowUp",                      meta: true, alt: true,    display: "⌥⌘↑" },
+  { action: "toggleSidebar", label: "Toggle Sidebar",  group: "Navigation", key: "b",                            meta: true,               display: "⌘B" },
   { action: "toggleZen",    label: "Zen Mode",        group: "Navigation", key: ["Z", "z"],                     meta: true, shift: true,  display: "⇧⌘Z" },
   // Terminal
   { action: "openShell",  label: "Shell Terminal",    group: "Terminal",   key: "j",                            meta: true,               display: "⌘J" },
