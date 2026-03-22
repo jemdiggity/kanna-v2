@@ -66,6 +66,7 @@ export const useKannaStore = defineStore("kanna", () => {
     return item && item.stage !== "done" ? item : null;
   });
 
+  // Mirrors Sidebar.vue's itemsForRepo(): pinned (by pin_order), then pr → merge → in_progress (each by activity).
   const sortedItemsForCurrentRepo = computed(() => {
     const repoItems = items.value.filter(
       (item) => item.repo_id === selectedRepoId.value && item.stage !== "done"
@@ -74,9 +75,8 @@ export const useKannaStore = defineStore("kanna", () => {
       .filter((i) => i.pinned)
       .sort((a, b) => (a.pin_order ?? 0) - (b.pin_order ?? 0));
     const activityOrder: Record<string, number> = { idle: 0, unread: 1, working: 2 };
-    const unpinned = repoItems
-      .filter((i) => !i.pinned)
-      .sort((a, b) => {
+    function sortByActivity(arr: typeof repoItems) {
+      return arr.sort((a, b) => {
         const ao = activityOrder[a.activity || "idle"] ?? 0;
         const bo = activityOrder[b.activity || "idle"] ?? 0;
         if (ao !== bo) return ao - bo;
@@ -84,7 +84,11 @@ export const useKannaStore = defineStore("kanna", () => {
         const bTime = b.activity_changed_at || b.created_at;
         return bTime.localeCompare(aTime);
       });
-    return [...pinned, ...unpinned];
+    }
+    const pr = sortByActivity(repoItems.filter((i) => i.stage === "pr" && !i.pinned));
+    const merge = sortByActivity(repoItems.filter((i) => i.stage === "merge" && !i.pinned));
+    const inProgress = sortByActivity(repoItems.filter((i) => i.stage === "in_progress" && !i.pinned));
+    return [...pinned, ...pr, ...merge, ...inProgress];
   });
 
   // ── Actions: Selection ───────────────────────────────────────────
