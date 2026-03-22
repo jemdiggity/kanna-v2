@@ -1,0 +1,12 @@
+{
+  "planPath": "docs/superpowers/plans/2026-03-22-toast-notifications.md",
+  "tasks": [
+    {"id": 1, "subject": "Task 1: Create useToast composable", "status": "pending"},
+    {"id": 2, "subject": "Task 2: Create ToastContainer component", "status": "pending", "blockedBy": [1]},
+    {"id": 3, "subject": "Task 3: Mount ToastContainer in App.vue", "status": "pending", "blockedBy": [2]},
+    {"id": 4, "subject": "Task 4: Replace alert() calls in App.vue", "status": "pending", "blockedBy": [3]},
+    {"id": 5, "subject": "Task 5: Replace alert() in kanna.ts and surface critical failures", "status": "pending", "blockedBy": [3]},
+    {"id": 6, "subject": "Task 6: Manual smoke test", "status": "pending", "blockedBy": [4, 5]}
+  ],
+  "lastUpdated": "2026-03-22T00:00:00Z"
+}
