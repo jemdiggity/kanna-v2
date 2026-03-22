@@ -126,4 +126,14 @@ export async function runMigrations(db: DbHandle): Promise<void> {
     blocker_item_id TEXT NOT NULL REFERENCES pipeline_item(id) ON DELETE CASCADE,
     PRIMARY KEY (blocked_item_id, blocker_item_id)
   )`);
+
+  // Operator telemetry event log
+  await db.execute(`CREATE TABLE IF NOT EXISTS operator_event (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_type TEXT NOT NULL,
+    pipeline_item_id TEXT,
+    repo_id TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+  await db.execute(`CREATE INDEX IF NOT EXISTS idx_operator_event_repo ON operator_event(repo_id, created_at)`);
 }

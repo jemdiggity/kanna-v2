@@ -6,6 +6,7 @@ import { isTauri } from "./tauri-mock";
 import { invoke } from "./invoke";
 import { hasTag } from "@kanna/core";
 import type { DbHandle } from "@kanna/db";
+import { insertOperatorEvent } from "@kanna/db";
 import Sidebar from "./components/Sidebar.vue";
 import MainPanel from "./components/MainPanel.vue";
 import NewTaskModal from "./components/NewTaskModal.vue";
@@ -22,6 +23,7 @@ import ToastContainer from "./components/ToastContainer.vue";
 import { useKeyboardShortcuts, type ActionName } from "./composables/useKeyboardShortcuts";
 import { startPeriodicBackup } from "./composables/useBackup";
 import { createNavigationHistory } from "./composables/useNavigationHistory";
+import { useOperatorEvents } from "./composables/useOperatorEvents";
 import { activeContext } from "./composables/useShortcutContext";
 import { useCustomTasks } from "./composables/useCustomTasks";
 import { useToast } from "./composables/useToast";
@@ -36,7 +38,7 @@ const db = inject<DbHandle>("db")!;
 const dbName = inject<string>("dbName")!;
 const { tasks: customTasks, scan: scanCustomTasks } = useCustomTasks();
 const { recordNavigation, goBack, goForward } = createNavigationHistory();
-
+useOperatorEvents(computed(() => db) as unknown as Ref<DbHandle | null>);
 
 // UI state
 const showNewTaskModal = ref(false);

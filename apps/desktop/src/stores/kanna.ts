@@ -18,7 +18,7 @@ import {
   getRepo, getSetting, setSetting,
   insertTaskBlocker, removeTaskBlocker, removeAllBlockersForItem,
   listBlockersForItem, listBlockedByItem, getUnblockedItems,
-  hasCircularDependency,
+  hasCircularDependency, insertOperatorEvent,
 } from "@kanna/db";
 
 /** Generate an 8-char hex ID (32 bits of randomness). */
@@ -48,6 +48,13 @@ export const useKannaStore = defineStore("kanna", () => {
   // ── Refresh trigger ──────────────────────────────────────────────
   const refreshKey = ref(0);
   function bump() { refreshKey.value++; }
+
+  function emitTaskSelected(itemId: string) {
+    const item = items.value.find((i) => i.id === itemId);
+    insertOperatorEvent(_db, "task_selected", itemId, item?.repo_id ?? null).catch((e) =>
+      console.error("[store] operator event failed:", e)
+    );
+  }
 
   // ── Reactive DB reads ────────────────────────────────────────────
   const repos = computedAsync<Repo[]>(async () => {
@@ -143,6 +150,7 @@ export const useKannaStore = defineStore("kanna", () => {
   async function selectItem(itemId: string) {
     selectedItemId.value = itemId;
     await setSetting(_db, "selected_item_id", itemId);
+    emitTaskSelected(itemId);
   }
 
   // ── Actions: Repo management ─────────────────────────────────────
@@ -289,6 +297,7 @@ export const useKannaStore = defineStore("kanna", () => {
     }
 
     selectedItemId.value = id;
+    emitTaskSelected(id);
   }
 
   async function spawnPtySession(sessionId: string, cwd: string, prompt: string, cols = 80, rows = 24, options?: PtySpawnOptions) {
@@ -455,6 +464,7 @@ export const useKannaStore = defineStore("kanna", () => {
       const remaining = sorted.filter((i) => i.id !== item.id);
       const nextIdx = idx >= remaining.length ? remaining.length - 1 : idx;
       selectedItemId.value = remaining[nextIdx]?.id || null;
+      if (selectedItemId.value) emitTaskSelected(selectedItemId.value);
     } catch (e) {
       console.error("[store] close failed:", e);
       toast.error("Failed to close task");
@@ -482,6 +492,7 @@ export const useKannaStore = defineStore("kanna", () => {
       const worktreePath = `${repo.path}/.kanna-worktrees/${item.branch}`;
       await spawnPtySession(item.id, worktreePath, item.prompt || "");
       selectedItemId.value = item.id;
+      emitTaskSelected(item.id);
       bump();
     } catch (e) {
       console.error("[store] undo close failed:", e);
@@ -836,6 +847,7 @@ export const useKannaStore = defineStore("kanna", () => {
 
     bump();
     selectedItemId.value = newId;
+    emitTaskSelected(newId);
   }
 
   async function editBlockedTask(itemId: string, newBlockerIds: string[]) {

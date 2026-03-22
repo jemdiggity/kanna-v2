@@ -24,8 +24,8 @@ const props = defineProps<{
 const emit = defineEmits<{ (e: "close"): void }>();
 
 const activeView = ref(0);
-const viewCount = 2;
-const viewNames = ["Tasks", "Avg Time in State"];
+const viewCount = 3;
+const viewNames = ["Tasks", "Avg Time in State", "Operator"];
 
 const {
   taskBuckets,
@@ -33,6 +33,9 @@ const {
   headlineStats,
   hasData,
   loading,
+  operatorMetrics,
+  operatorBreakdowns,
+  hasOperatorData,
 } = useAnalytics(toRef(props, "db"), toRef(props, "repoId"));
 
 function handleKeydown(e: KeyboardEvent) {
@@ -179,6 +182,45 @@ const lineChartOptions = {
             <span class="bar-label"><span class="dot busy" /> Busy</span>
             <span class="bar-label"><span class="dot unread" /> Unread</span>
             <span class="bar-label"><span class="dot idle" /> Idle</span>
+          </div>
+        </template>
+      </template>
+
+      <!-- View 2: Operator -->
+      <template v-else-if="activeView === 2">
+        <template v-if="!hasOperatorData">
+          <div class="empty-state">Operator tracking started — data will appear as you work.</div>
+        </template>
+        <template v-else>
+          <div class="headline-cards">
+            <div class="card">
+              <div class="card-value">{{ operatorMetrics.avgResponseTime != null ? formatDuration(operatorMetrics.avgResponseTime) : '—' }}</div>
+              <div class="card-label">Avg Response Time</div>
+            </div>
+            <div class="card">
+              <div class="card-value">{{ operatorMetrics.avgDwellTime != null ? formatDuration(operatorMetrics.avgDwellTime) : '—' }}</div>
+              <div class="card-label">Avg Dwell Time</div>
+            </div>
+            <div class="card">
+              <div class="card-value">{{ operatorMetrics.switchesPerHour != null ? operatorMetrics.switchesPerHour.toFixed(1) : '—' }}</div>
+              <div class="card-label">Switches/Hour</div>
+            </div>
+            <div class="card">
+              <div class="card-value">{{ operatorMetrics.focusScore != null ? Math.round(operatorMetrics.focusScore * 100) + '%' : '—' }}</div>
+              <div class="card-label">Focus Score</div>
+            </div>
+          </div>
+          <div class="chart-container">
+            <Bar
+              :data="{
+                labels: operatorBreakdowns.map((b) => b.label),
+                datasets: [
+                  { label: 'Dwell Time', data: operatorBreakdowns.map((b) => b.dwellTime), backgroundColor: '#0066cc' },
+                  { label: 'Response Time', data: operatorBreakdowns.map((b) => b.responseTime), backgroundColor: '#d29922' },
+                ],
+              }"
+              :options="horizontalChartOptions"
+            />
           </div>
         </template>
       </template>

@@ -9,6 +9,7 @@
     "lint": "turbo lint"
   },
   "devDependencies": {
+    "happy-dom": "^20.8.4",
     "turbo": "^2",
     "typescript": "^5.7"
   },

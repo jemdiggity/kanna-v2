@@ -18,9 +18,10 @@ import {
   pinPipelineItem,
   unpinPipelineItem,
   reorderPinnedItems,
+  insertOperatorEvent,
   type DbHandle,
 } from "./queries.js";
-import type { Repo, PipelineItem, Setting } from "./schema.js";
+import type { Repo, PipelineItem, Setting, OperatorEvent } from "./schema.js";
 
 // ---------------------------------------------------------------------------
 // In-memory DbHandle for testing
@@ -31,12 +32,14 @@ function createMockDb(): DbHandle & {
     repo: Repo[];
     pipeline_item: PipelineItem[];
     settings: Setting[];
+    operator_event: Omit<OperatorEvent, "id" | "created_at">[];
   };
 } {
   const tables = {
     repo: [] as Repo[],
     pipeline_item: [] as PipelineItem[],
     settings: [] as Setting[],
+    operator_event: [] as Omit<OperatorEvent, "id" | "created_at">[],
   };
 
   return {
@@ -143,6 +146,9 @@ function createMockDb(): DbHandle & {
         } else {
           tables.settings.push({ key, value });
         }
+      } else if (q.startsWith("INSERT INTO OPERATOR_EVENT")) {
+        const [event_type, pipeline_item_id, repo_id] = bindValues as [string, string | null, string | null];
+        tables.operator_event.push({ event_type: event_type as OperatorEvent["event_type"], pipeline_item_id, repo_id });
       }
 
       return { rowsAffected: 1 };
@@ -526,5 +532,24 @@ describe("pin queries", () => {
     expect((db.tables.pipeline_item.find((p) => p.id === "pi3") as any).pin_order).toBe(0);
     expect((db.tables.pipeline_item.find((p) => p.id === "pi1") as any).pin_order).toBe(1);
     expect((db.tables.pipeline_item.find((p) => p.id === "pi2") as any).pin_order).toBe(2);
+  });
+});
+
+describe("insertOperatorEvent", () => {
+  it("inserts a task_selected event", async () => {
+    const db = createMockDb();
+    await insertOperatorEvent(db, "task_selected", "item-1", "repo-1");
+    expect(db.tables.operator_event).toHaveLength(1);
+    expect(db.tables.operator_event[0].event_type).toBe("task_selected");
+    expect(db.tables.operator_event[0].pipeline_item_id).toBe("item-1");
+    expect(db.tables.operator_event[0].repo_id).toBe("repo-1");
+  });
+
+  it("inserts an app_blur event with null item and repo", async () => {
+    const db = createMockDb();
+    await insertOperatorEvent(db, "app_blur", null, null);
+    expect(db.tables.operator_event).toHaveLength(1);
+    expect(db.tables.operator_event[0].pipeline_item_id).toBeNull();
+    expect(db.tables.operator_event[0].repo_id).toBeNull();
   });
 });

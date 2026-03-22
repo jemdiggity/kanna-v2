@@ -1,0 +1,13 @@
+{
+  "planPath": "docs/superpowers/plans/2026-03-22-operator-telemetry.md",
+  "tasks": [
+    {"id": 1, "subject": "Task 1: Add OperatorEvent type and insertOperatorEvent query helper", "status": "pending"},
+    {"id": 2, "subject": "Task 2: Add operator_event table migration", "status": "pending", "blockedBy": [1]},
+    {"id": 3, "subject": "Task 3: Emit task_selected events from the store", "status": "pending", "blockedBy": [1, 2]},
+    {"id": 4, "subject": "Task 4: Create useOperatorEvents composable for app visibility", "status": "pending", "blockedBy": [1, 2]},
+    {"id": 5, "subject": "Task 5: Add operator metric computation to useAnalytics", "status": "pending", "blockedBy": [3, 4]},
+    {"id": 6, "subject": "Task 6: Add Operator view to AnalyticsModal", "status": "pending", "blockedBy": [5]},
+    {"id": 7, "subject": "Task 7: Manual verification", "status": "pending", "blockedBy": [6]}
+  ],
+  "lastUpdated": "2026-03-22T00:00:00.000Z"
+}
