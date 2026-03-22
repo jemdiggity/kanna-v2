@@ -44,7 +44,8 @@ onMounted(async () => {
   } catch {
     homeDir.value = "/Users/unknown";
   }
-  createParentDir.value = `${homeDir.value}.kanna/repos`;
+  const home = homeDir.value.endsWith("/") ? homeDir.value : homeDir.value + "/";
+  createParentDir.value = `${home}.kanna/repos`;
   inputRef.value?.focus();
 });
 
@@ -186,6 +187,7 @@ function handleSubmit() {
     if (selectedLocalPath.value) {
       emit("import", selectedLocalPath.value, localRepoName.value, localBranch.value);
     } else if (parsed.value.type === "clone" && parsed.value.cloneUrl) {
+      cloning.value = true;
       emit("clone", parsed.value.cloneUrl, cloneDestination.value);
     }
   }
