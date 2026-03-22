@@ -1,0 +1,19 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Kanna Mobile",
+  "version": "0.1.0",
+  "identifier": "com.kanna.mobile",
+  "build": {
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": []
+  }
+}
