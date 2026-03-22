@@ -1,8 +1,8 @@
-# Diff View Keyboard Navigation
+# Diff View & File Viewer Keyboard Navigation
 
 ## Summary
 
-Add `less`-style keyboard scrolling to DiffView and remap scope cycling from Space to macOS tab navigation convention (Cmd+Shift+[ / Cmd+Shift+]).
+Add `less`-style keyboard scrolling to DiffView and FilePreviewModal. Remap scope cycling (DiffView) from Space to Cmd+Shift+[/], remap markdown toggle (FilePreviewModal) from Space to `m`.
 
 ## Changes
 
@@ -44,6 +44,25 @@ Add `less`-style keyboard scrolling to DiffView and remap scope cycling from Spa
 ### File: `apps/desktop/src/components/DiffModal.vue`
 
 - Pass through new `close` emit from DiffView (already closes via `@close="emit('close')"` on overlay click; add `@close` on the DiffView component).
+
+### File: `apps/desktop/src/components/FilePreviewModal.vue`
+
+**Replace the existing `handleKeydown` handler entirely.**
+
+**Markdown toggle remap:**
+- Remove: Space (no modifiers) → toggle `renderMarkdown` (markdown files only)
+- Add: `m` (no modifiers) → toggle `renderMarkdown` (markdown files only)
+- Update the mode badge tooltip from "space" to "m"
+
+**`less`-style scroll bindings on `.preview-content`:**
+
+Same key table as DiffView (j/k/f/b/d/u/g/G/q/Space/arrows/PageUp/PageDown).
+
+**Key matching rules:** Same as DiffView (input target guard, modifier checks, window listener).
+
+**Cmd+O retained:** `openInIDE()` binding unchanged (meta+o).
+
+**`q` closes the modal:** Already has `close` emit, just call `emit('close')`.
 
 ## Non-goals
 
