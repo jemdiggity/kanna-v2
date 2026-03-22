@@ -64,3 +64,10 @@ export interface Setting {
   key: string;
   value: string;
 }
+
+export interface ActivityLog {
+  id: number;
+  pipeline_item_id: string;
+  activity: "working" | "unread" | "idle";
+  started_at: string;
+}
