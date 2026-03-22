@@ -27,7 +27,7 @@ function useShortcutContext(ctx: ShortcutContext) {
 ```
 
 - `"main"` is the default when no modal/overlay is active.
-- `DiffView` calls `useShortcutContext("diff")` on mount.
+- `DiffModal` calls `useShortcutContext("diff")` on mount (modal-level, not DiffView, since DiffView is a reusable component).
 - `FilePreviewModal` calls `useShortcutContext("file")` on mount.
 - When those components unmount, context falls back to `"main"`.
 
@@ -49,7 +49,7 @@ interface ShortcutDef {
 |----------|----------|
 | `⇧⌘N` New Task | `main` |
 | `⌘P` File Picker | `main` |
-| `⌘O` Open in IDE | `main`, `file` |
+| `⌘O` Open in IDE | `main` |
 | `⌘S` Make PR | `main` |
 | `⇧⌘M` Merge Queue | `main` |
 | `⌘⌫` Close/Reject | `main` |
@@ -69,22 +69,26 @@ interface ShortcutDef {
 Components register local shortcuts that only exist within their context:
 
 ```typescript
-function registerContextShortcuts(ctx: ShortcutContext, extras: ContextShortcut[]) {
-  // Stored in a reactive map, cleared automatically on unmount
-}
-
 interface ContextShortcut {
   label: string;
   display: string;
 }
+
+function registerContextShortcuts(ctx: ShortcutContext, extras: ContextShortcut[]) {
+  // Stored in a reactive map, keyed by context
+  // Internally calls onUnmounted() to remove entries — must be called during component setup
+}
 ```
+
+`registerContextShortcuts` must be called during Vue component `setup()` so the automatic cleanup hook registers correctly.
 
 **Supplementary shortcuts by context:**
 
 | Shortcut | Context | Source Component |
 |----------|---------|------------------|
 | `Space` Cycle Scope | `diff` | DiffView.vue |
-| `Space` Toggle Markdown | `file` | FilePreviewModal.vue |
+| `Space` Toggle Markdown (markdown files only) | `file` | FilePreviewModal.vue |
+| `⌘O` Open in IDE | `file` | FilePreviewModal.vue (local handler opens specific file, not worktree) |
 
 ### Modal UI
 
@@ -106,6 +110,10 @@ The existing `KeyboardShortcutsModal` is reworked to support two modes:
 - `Escape` closes.
 - Backdrop click closes.
 - Defaults to context mode each time it opens.
+- The modal snapshots `activeContext` at open time and does not reactively update. If the underlying context component unmounts while the shortcuts modal is visible, the modal continues showing the snapshotted context's shortcuts.
+
+**`⌘/` while another modal is open:**
+Pressing `⌘/` while another modal (e.g., command palette, file picker) is open closes the current modal first via the existing dismiss priority chain, then opens the shortcuts modal. This follows the app's single-modal-at-a-time convention.
 
 ### Data Flow
 
@@ -113,14 +121,13 @@ The existing `KeyboardShortcutsModal` is reworked to support two modes:
 App starts → activeContext = "main"
 
 User opens diff (⌘D):
-  → DiffModal mounts → DiffView mounts
-  → useShortcutContext("diff") → activeContext = "diff"
-  → registerContextShortcuts("diff", [{ label: "Cycle Scope", display: "Space" }])
+  → DiffModal mounts → useShortcutContext("diff") → activeContext = "diff"
+  → DiffView mounts → registerContextShortcuts("diff", [{ label: "Cycle Scope", display: "Space" }])
 
 User presses ⌘/:
   → Handler fires "showShortcuts"
-  → Modal opens, reads activeContext → "diff"
-  → getContextShortcuts("diff") returns:
+  → Modal opens, snapshots activeContext → "diff"
+  → getContextShortcuts("diff") returns: { keys: string; action: string }[]
       - Global shortcuts tagged with "diff" (Maximize, Escape, ⌘/, ⇧⌘P)
       - Supplementary shortcuts from DiffView (Space)
   → Renders "Diff Viewer Shortcuts"
@@ -138,7 +145,8 @@ User closes diff:
 - `apps/desktop/src/composables/useShortcutContext.ts` — **new** composable
 - `apps/desktop/src/composables/useKeyboardShortcuts.ts` — add `context` field to `ShortcutDef`, tag shortcuts, add `getContextShortcuts()` export
 - `apps/desktop/src/components/KeyboardShortcutsModal.vue` — context/full mode toggle, read active context
-- `apps/desktop/src/components/DiffView.vue` — call `useShortcutContext("diff")`, register Space shortcut
+- `apps/desktop/src/components/DiffModal.vue` — call `useShortcutContext("diff")`
+- `apps/desktop/src/components/DiffView.vue` — register Space shortcut via `registerContextShortcuts`
 - `apps/desktop/src/components/FilePreviewModal.vue` — call `useShortcutContext("file")`, register Space and ⌘O shortcuts
 - `apps/desktop/src/App.vue` — update `showShortcuts` action to toggle instead of just open
 
