@@ -126,6 +126,11 @@ async function loadFile() {
     highlighted.value = hl.codeToHtml(content.value, {
       lang: useLang,
       theme: "github-dark",
+      transformers: [{
+        pre(node: any) {
+          node.properties.style = "white-space:pre-wrap;word-wrap:break-word;";
+        },
+      }],
     });
   } catch (e: any) {
     error.value = e?.message || String(e);
