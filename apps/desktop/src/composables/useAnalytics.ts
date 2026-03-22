@@ -1,5 +1,5 @@
 import { ref, computed, watch, type Ref } from "vue";
-import type { DbHandle, PipelineItem, ActivityLog } from "@kanna/db";
+import type { DbHandle, PipelineItem, ActivityLog, OperatorEvent } from "@kanna/db";
 
 interface ThroughputBucket {
   label: string;
@@ -15,6 +15,20 @@ interface ActivityBreakdown {
   unread: number;   // seconds
 }
 
+interface OperatorMetrics {
+  avgResponseTime: number | null;  // seconds
+  avgDwellTime: number | null;     // seconds
+  switchesPerHour: number | null;
+  focusScore: number | null;       // 0.0–1.0
+}
+
+interface OperatorTaskBreakdown {
+  itemId: string;
+  label: string;
+  dwellTime: number;     // seconds — total active time on this task
+  responseTime: number;  // seconds — time task sat unread before first look
+}
+
 type BucketSize = "daily" | "weekly" | "monthly";
 
 export function useAnalytics(db: Ref<DbHandle | null>, repoId: Ref<string | null>) {
@@ -23,6 +37,9 @@ export function useAnalytics(db: Ref<DbHandle | null>, repoId: Ref<string | null
   const bucketSize = ref<BucketSize>("daily");
   const hasData = ref(false);
   const loading = ref(false);
+  const operatorMetrics = ref<OperatorMetrics>({ avgResponseTime: null, avgDwellTime: null, switchesPerHour: null, focusScore: null });
+  const operatorBreakdowns = ref<OperatorTaskBreakdown[]>([]);
+  const hasOperatorData = ref(false);
 
   const headlineStats = computed(() => {
     const totalCreated = throughputBuckets.value.reduce((sum, b) => sum + b.created, 0);
@@ -79,11 +96,121 @@ export function useAnalytics(db: Ref<DbHandle | null>, repoId: Ref<string | null
     return d.toLocaleDateString(undefined, { month: "short", year: "2-digit" });
   }
 
+  function computeDwells(events: OperatorEvent[]): Map<string, number> {
+    const dwells = new Map<string, number>();
+    let activeItemId: string | null = null;
+    let segmentStart: number | null = null;
+    let appVisible = true;
+
+    for (const event of events) {
+      const t = new Date(event.created_at + "Z").getTime();
+
+      if (event.event_type === "task_selected") {
+        if (activeItemId && segmentStart !== null && appVisible) {
+          const dur = Math.max(0, (t - segmentStart) / 1000);
+          dwells.set(activeItemId, (dwells.get(activeItemId) || 0) + dur);
+        }
+        activeItemId = event.pipeline_item_id;
+        segmentStart = appVisible ? t : null;
+      } else if (event.event_type === "app_blur") {
+        if (activeItemId && segmentStart !== null) {
+          const dur = Math.max(0, (t - segmentStart) / 1000);
+          dwells.set(activeItemId, (dwells.get(activeItemId) || 0) + dur);
+        }
+        segmentStart = null;
+        appVisible = false;
+      } else if (event.event_type === "app_focus") {
+        appVisible = true;
+        if (activeItemId) segmentStart = t;
+      }
+    }
+
+    if (activeItemId && segmentStart !== null && appVisible) {
+      const dur = Math.max(0, (Date.now() - segmentStart) / 1000);
+      dwells.set(activeItemId, (dwells.get(activeItemId) || 0) + dur);
+    }
+
+    return dwells;
+  }
+
+  function computeActiveHours(events: OperatorEvent[]): number {
+    if (events.length === 0) return 0;
+    const first = new Date(events[0].created_at + "Z").getTime();
+    const now = Date.now();
+    let totalBlur = 0;
+    let blurStart: number | null = null;
+
+    for (const event of events) {
+      const t = new Date(event.created_at + "Z").getTime();
+      if (event.event_type === "app_blur") {
+        blurStart = t;
+      } else if (event.event_type === "app_focus" && blurStart !== null) {
+        totalBlur += t - blurStart;
+        blurStart = null;
+      }
+    }
+    if (blurStart !== null) totalBlur += now - blurStart;
+
+    return Math.max(0.001, (now - first - totalBlur) / 3600000);
+  }
+
+  function computeSwitchCount(events: OperatorEvent[]): number {
+    let count = 0;
+    let prevItemId: string | null = null;
+    for (const event of events) {
+      if (event.event_type === "task_selected" && event.pipeline_item_id) {
+        if (prevItemId !== null && event.pipeline_item_id !== prevItemId) {
+          count++;
+        }
+        prevItemId = event.pipeline_item_id;
+      }
+    }
+    return count;
+  }
+
+  function computeResponseTimes(
+    events: OperatorEvent[],
+    activityLogs: ActivityLog[]
+  ): Map<string, number> {
+    const responses = new Map<string, number[]>();
+
+    const selectionTimes = new Map<string, number[]>();
+    for (const e of events) {
+      if (e.event_type === "task_selected" && e.pipeline_item_id) {
+        const arr = selectionTimes.get(e.pipeline_item_id) || [];
+        arr.push(new Date(e.created_at + "Z").getTime());
+        selectionTimes.set(e.pipeline_item_id, arr);
+      }
+    }
+
+    for (const log of activityLogs) {
+      if (log.activity !== "unread") continue;
+      const unreadAt = new Date(log.started_at + "Z").getTime();
+      const selections = selectionTimes.get(log.pipeline_item_id) || [];
+      const firstAfter = selections.find((t) => t > unreadAt);
+      if (firstAfter !== undefined) {
+        const dur = (firstAfter - unreadAt) / 1000;
+        const arr = responses.get(log.pipeline_item_id) || [];
+        arr.push(dur);
+        responses.set(log.pipeline_item_id, arr);
+      }
+    }
+
+    const avgResponses = new Map<string, number>();
+    for (const [itemId, times] of responses) {
+      avgResponses.set(itemId, times.reduce((a, b) => a + b, 0) / times.length);
+    }
+    return avgResponses;
+  }
+
   async function refresh() {
     if (!db.value || !repoId.value) {
       hasData.value = false;
       throughputBuckets.value = [];
       activityBreakdowns.value = [];
+      operatorMetrics.value = { avgResponseTime: null, avgDwellTime: null, switchesPerHour: null, focusScore: null };
+      operatorBreakdowns.value = [];
+      hasOperatorData.value = false;
       return;
     }
     loading.value = true;
@@ -97,6 +224,9 @@ export function useAnalytics(db: Ref<DbHandle | null>, repoId: Ref<string | null
       if (!hasData.value) {
         throughputBuckets.value = [];
         activityBreakdowns.value = [];
+        operatorMetrics.value = { avgResponseTime: null, avgDwellTime: null, switchesPerHour: null, focusScore: null };
+        operatorBreakdowns.value = [];
+        hasOperatorData.value = false;
         return;
       }
 
@@ -173,6 +303,68 @@ export function useAnalytics(db: Ref<DbHandle | null>, repoId: Ref<string | null
         });
       }
       activityBreakdowns.value = breakdowns;
+
+      // --- Operator Metrics ---
+      const opEvents = await db.value.select<OperatorEvent>(
+        `SELECT * FROM operator_event
+         WHERE repo_id = ? OR repo_id IS NULL
+         ORDER BY created_at ASC`,
+        [repoId.value]
+      );
+
+      hasOperatorData.value = opEvents.some((e) => e.event_type === "task_selected");
+
+      if (hasOperatorData.value) {
+        const dwells = computeDwells(opEvents);
+        const dwellValues = [...dwells.values()];
+        const avgDwell = dwellValues.length > 0
+          ? dwellValues.reduce((a, b) => a + b, 0) / dwellValues.length
+          : null;
+
+        const activeHours = computeActiveHours(opEvents);
+        const switchCount = computeSwitchCount(opEvents);
+
+        const totalDwell = dwellValues.reduce((a, b) => a + b, 0);
+        const focusDwell = dwellValues.filter((d) => d > 30).reduce((a, b) => a + b, 0);
+        const focusScore = totalDwell > 0 ? focusDwell / totalDwell : null;
+
+        const responseTimes = computeResponseTimes(opEvents, logs);
+        const responseValues = [...responseTimes.values()];
+        const avgResponse = responseValues.length > 0
+          ? responseValues.reduce((a, b) => a + b, 0) / responseValues.length
+          : null;
+
+        operatorMetrics.value = {
+          avgResponseTime: avgResponse,
+          avgDwellTime: avgDwell,
+          switchesPerHour: switchCount / activeHours,
+          focusScore,
+        };
+
+        // Per-task breakdowns for chart (most recent 20)
+        const taskBreakdowns: OperatorTaskBreakdown[] = [];
+        const recentItemIds = [...new Set(
+          opEvents
+            .filter((e) => e.event_type === "task_selected" && e.pipeline_item_id)
+            .map((e) => e.pipeline_item_id!)
+        )].slice(-20);
+
+        for (const itemId of recentItemIds) {
+          const item = itemMap.get(itemId);
+          taskBreakdowns.push({
+            itemId,
+            label: item
+              ? (item.display_name || item.issue_title || item.prompt?.slice(0, 30) || item.id.slice(0, 8))
+              : itemId.slice(0, 8),
+            dwellTime: dwells.get(itemId) || 0,
+            responseTime: responseTimes.get(itemId) || 0,
+          });
+        }
+        operatorBreakdowns.value = taskBreakdowns;
+      } else {
+        operatorMetrics.value = { avgResponseTime: null, avgDwellTime: null, switchesPerHour: null, focusScore: null };
+        operatorBreakdowns.value = [];
+      }
     } catch (e) {
       console.error("[analytics] refresh failed:", e);
     } finally {
@@ -191,5 +383,8 @@ export function useAnalytics(db: Ref<DbHandle | null>, repoId: Ref<string | null
     hasData,
     loading,
     refresh,
+    operatorMetrics,
+    operatorBreakdowns,
+    hasOperatorData,
   };
 }
