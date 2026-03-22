@@ -131,15 +131,11 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
     try {
       await invoke("attach_session", { sessionId })
       // Attach succeeded — session was alive in daemon.
-      // Reset terminal, send resize + explicit SIGWINCH to force Claude TUI redraw.
-      // (SIGWINCH is needed because ioctl(TIOCSWINSZ) won't fire it if size is unchanged.)
+      // Clear display and force SIGWINCH so Claude TUI redraws from scratch.
+      // Use CSI 2 J + CSI H instead of reset() to preserve internal state
+      // (kitty keyboard mode, character attributes, etc.).
       if (terminal.value) {
-        terminal.value.reset()
-        // Restore kitty keyboard mode — reset() clears it but Claude CLI still has it enabled
-        if (options?.kittyKeyboard) {
-          terminal.value.write("\x1b[>1u")
-        }
-        terminal.value.write("\x1b[?25l") // hide cursor until TUI redraws
+        terminal.value.write("\x1b[?25l\x1b[2J\x1b[H") // hide cursor, clear display, cursor home
         const { cols, rows } = terminal.value
         // Force a size change then restore — guarantees SIGWINCH fires
         await invoke("resize_session", { sessionId, cols: cols - 1, rows }).catch(() => {})
