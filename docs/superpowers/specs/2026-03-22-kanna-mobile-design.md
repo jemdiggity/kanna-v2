@@ -31,11 +31,28 @@ New crate at `crates/kanna-server/`. Rust binary using axum + tokio-tungstenite.
 
 **Daemon event bridge:**
 
-The daemon has a "one client per session" invariant — only one output consumer per PTY session. The desktop app uses this for its terminal views. kanna-server must coexist with the desktop app, not compete with it.
+The daemon has a "one client per session" invariant — only one output consumer per PTY session via `Attach`. The existing `Subscribe` command only broadcasts `HookEvent` messages (session lifecycle hooks), not terminal output. Terminal output flows exclusively through `Attach` → `stream_output` → `ActiveWriter`.
 
-kanna-server uses the daemon's `Subscribe` command (not `Attach`) to receive broadcast events for all sessions. `Subscribe` is a read-only event stream separate from `Attach` — it doesn't claim the session's output writer. This means the desktop app retains full `Attach` ownership while kanna-server passively observes and forwards events through the relay.
+This means a **daemon protocol extension** is required to support mobile terminal streaming without breaking the desktop app.
 
-When the phone sends `attach_session`, kanna-server starts forwarding events for that session ID from its `Subscribe` stream to the relay. `detach_session` stops forwarding. No daemon state changes.
+**New daemon command: `Observe`**
+
+```json
+{"type": "Observe", "session_id": "..."}
+{"type": "Unobserve", "session_id": "..."}
+```
+
+`Observe` registers a passive, read-only output listener for a session. The daemon tees PTY output to both the `ActiveWriter` (set by `Attach`, used by desktop) and any registered observers. Observers receive `Output` and `Exit` events but cannot send input or claim the session.
+
+Key properties:
+- Multiple observers per session (no limit)
+- Observers are independent of `Attach` — the desktop app's `Attach`/`Detach` lifecycle is unchanged
+- If no `ActiveWriter` is set, observers still receive output (the PTY reader runs regardless)
+- `Observe` is idempotent; `Unobserve` removes the observer
+
+**Implementation in daemon:** The `PtySession` gains an `observers: Vec<mpsc::Sender<Event>>` alongside the existing `active_writer: Option<mpsc::Sender<Event>>`. The `stream_output` loop sends each output chunk to both the active writer and all observers.
+
+**kanna-server usage:** On startup, kanna-server opens one persistent connection to the daemon. When the phone sends `attach_session`, kanna-server sends `Observe` to the daemon and starts forwarding `Output`/`Exit` events through the relay. `detach_session` sends `Unobserve`. For `send_input`, kanna-server sends the daemon's existing `Input` command directly — input does not require `Attach` ownership.
 
 **v1 command surface:**
 - `list_pipeline_items` — read pipeline items from SQLite
