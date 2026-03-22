@@ -76,3 +76,11 @@ export interface ActivityLog {
   activity: "working" | "unread" | "idle";
   started_at: string;
 }
+
+export interface OperatorEvent {
+  id: number;
+  event_type: "task_selected" | "app_blur" | "app_focus";
+  pipeline_item_id: string | null;
+  repo_id: string | null;
+  created_at: string;
+}

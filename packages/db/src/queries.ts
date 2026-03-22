@@ -1,4 +1,4 @@
-import type { Repo, PipelineItem, Setting, TaskBlocker } from "./schema.js";
+import type { Repo, PipelineItem, Setting, TaskBlocker, OperatorEvent } from "./schema.js";
 
 export type DbHandle = {
   execute(query: string, bindValues?: unknown[]): Promise<{ rowsAffected: number }>;
@@ -280,6 +280,22 @@ export async function hasCircularDependency(
     if (await dfs(blockerId)) return true;
   }
   return false;
+}
+
+// ---------------------------------------------------------------------------
+// OperatorEvent
+// ---------------------------------------------------------------------------
+
+export async function insertOperatorEvent(
+  db: DbHandle,
+  eventType: "task_selected" | "app_blur" | "app_focus",
+  pipelineItemId: string | null,
+  repoId: string | null
+): Promise<void> {
+  await db.execute(
+    "INSERT INTO operator_event (event_type, pipeline_item_id, repo_id) VALUES (?, ?, ?)",
+    [eventType, pipelineItemId, repoId]
+  );
 }
 
 // ---------------------------------------------------------------------------
