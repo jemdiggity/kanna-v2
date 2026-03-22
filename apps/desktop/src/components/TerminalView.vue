@@ -36,14 +36,20 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div ref="containerRef" class="terminal-container"></div>
+  <div class="terminal-wrapper">
+    <div ref="containerRef" class="terminal-container"></div>
+  </div>
 </template>
 
 <style scoped>
-.terminal-container {
+.terminal-wrapper {
   flex: 1;
   overflow: hidden;
   background: #1e1e1e;
   padding: 8px 12px;
+}
+.terminal-container {
+  width: 100%;
+  height: 100%;
 }
 </style>
