@@ -15,13 +15,6 @@ interface OperatorMetrics {
   focusScore: number | null;       // 0.0–1.0
 }
 
-interface OperatorTaskBreakdown {
-  itemId: string;
-  label: string;
-  dwellTime: number;     // seconds — total active time on this task
-  responseTime: number;  // seconds — time task sat unread before first look
-}
-
 type BucketSize = "daily" | "weekly" | "monthly";
 
 export function useAnalytics(db: Ref<DbHandle | null>, repoId: Ref<string | null>) {
@@ -30,7 +23,6 @@ export function useAnalytics(db: Ref<DbHandle | null>, repoId: Ref<string | null
   const hasData = ref(false);
   const loading = ref(false);
   const operatorMetrics = ref<OperatorMetrics>({ avgResponseTime: null, avgDwellTime: null, switchesPerHour: null, focusScore: null });
-  const operatorBreakdowns = ref<OperatorTaskBreakdown[]>([]);
   const hasOperatorData = ref(false);
 
   const headlineStats = computed(() => {
@@ -193,7 +185,6 @@ export function useAnalytics(db: Ref<DbHandle | null>, repoId: Ref<string | null
       taskBuckets.value = [];
       avgTimeInState.value = { working: 0, idle: 0, unread: 0 };
       operatorMetrics.value = { avgResponseTime: null, avgDwellTime: null, switchesPerHour: null, focusScore: null };
-      operatorBreakdowns.value = [];
       hasOperatorData.value = false;
       return;
     }
@@ -208,7 +199,6 @@ export function useAnalytics(db: Ref<DbHandle | null>, repoId: Ref<string | null
         taskBuckets.value = [];
         avgTimeInState.value = { working: 0, idle: 0, unread: 0 };
         operatorMetrics.value = { avgResponseTime: null, avgDwellTime: null, switchesPerHour: null, focusScore: null };
-        operatorBreakdowns.value = [];
         hasOperatorData.value = false;
         return;
       }
@@ -255,9 +245,6 @@ export function useAnalytics(db: Ref<DbHandle | null>, repoId: Ref<string | null
         arr.push(log);
         grouped.set(log.pipeline_item_id, arr);
       }
-
-      const itemMap = new Map<string, PipelineItem>();
-      for (const item of doneItems) itemMap.set(item.id, item);
 
       const totals = { working: 0, idle: 0, unread: 0 };
       let taskCount = 0;
@@ -324,30 +311,8 @@ export function useAnalytics(db: Ref<DbHandle | null>, repoId: Ref<string | null
           switchesPerHour: switchCount / activeHours,
           focusScore,
         };
-
-        // Per-task breakdowns for chart (most recent 20)
-        const taskBreakdowns: OperatorTaskBreakdown[] = [];
-        const recentItemIds = [...new Set(
-          opEvents
-            .filter((e) => e.event_type === "task_selected" && e.pipeline_item_id)
-            .map((e) => e.pipeline_item_id!)
-        )].slice(-20);
-
-        for (const itemId of recentItemIds) {
-          const item = itemMap.get(itemId);
-          taskBreakdowns.push({
-            itemId,
-            label: item
-              ? (item.display_name || item.issue_title || item.prompt?.slice(0, 30) || item.id.slice(0, 8))
-              : itemId.slice(0, 8),
-            dwellTime: dwells.get(itemId) || 0,
-            responseTime: responseTimes.get(itemId) || 0,
-          });
-        }
-        operatorBreakdowns.value = taskBreakdowns;
       } else {
         operatorMetrics.value = { avgResponseTime: null, avgDwellTime: null, switchesPerHour: null, focusScore: null };
-        operatorBreakdowns.value = [];
       }
     } catch (e) {
       console.error("[analytics] refresh failed:", e);
@@ -367,7 +332,6 @@ export function useAnalytics(db: Ref<DbHandle | null>, repoId: Ref<string | null
     loading,
     refresh,
     operatorMetrics,
-    operatorBreakdowns,
     hasOperatorData,
   };
 }

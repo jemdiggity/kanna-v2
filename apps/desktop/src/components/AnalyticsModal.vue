@@ -1,13 +1,12 @@
 <script setup lang="ts">
 import { ref, toRef } from "vue";
-import { Line, Bar } from "vue-chartjs";
+import { Line } from "vue-chartjs";
 import {
   Chart as ChartJS,
   CategoryScale,
   LinearScale,
   PointElement,
   LineElement,
-  BarElement,
   Title,
   Tooltip,
   Legend,
@@ -16,7 +15,7 @@ import {
 import type { DbHandle } from "@kanna/db";
 import { useAnalytics } from "../composables/useAnalytics";
 
-ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, BarElement, Title, Tooltip, Legend, Filler);
+ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend, Filler);
 
 const props = defineProps<{
   db: DbHandle | null;
@@ -35,7 +34,6 @@ const {
   hasData,
   loading,
   operatorMetrics,
-  operatorBreakdowns,
   hasOperatorData,
 } = useAnalytics(toRef(props, "db"), toRef(props, "repoId"));
 
@@ -56,26 +54,6 @@ function formatDuration(seconds: number): string {
   const m = Math.round((seconds % 3600) / 60);
   return m > 0 ? `${h}h ${m}m` : `${h}h`;
 }
-
-const horizontalChartOptions = {
-  indexAxis: "y" as const,
-  responsive: true,
-  maintainAspectRatio: false,
-  plugins: {
-    legend: { labels: { color: "#888" } },
-    tooltip: {
-      backgroundColor: "#1e1e1e",
-      borderColor: "#444",
-      borderWidth: 1,
-      titleColor: "#ccc",
-      bodyColor: "#ccc",
-    },
-  },
-  scales: {
-    x: { ticks: { color: "#888" }, grid: { color: "#333" }, beginAtZero: true },
-    y: { ticks: { color: "#888" }, grid: { color: "#333" } },
-  },
-};
 
 const lineChartOptions = {
   responsive: true,
@@ -230,18 +208,6 @@ const lineChartOptions = {
               <div class="card-value">{{ operatorMetrics.focusScore != null ? Math.round(operatorMetrics.focusScore * 100) + '%' : '—' }}</div>
               <div class="card-label">Focus Score</div>
             </div>
-          </div>
-          <div class="chart-container">
-            <Bar
-              :data="{
-                labels: operatorBreakdowns.map((b) => b.label),
-                datasets: [
-                  { label: 'Dwell Time', data: operatorBreakdowns.map((b) => b.dwellTime), backgroundColor: '#0066cc' },
-                  { label: 'Response Time', data: operatorBreakdowns.map((b) => b.responseTime), backgroundColor: '#d29922' },
-                ],
-              }"
-              :options="horizontalChartOptions"
-            />
           </div>
         </template>
       </template>
