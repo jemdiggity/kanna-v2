@@ -21,12 +21,14 @@ import { usePipeline } from "./composables/usePipeline";
 import { usePreferences } from "./composables/usePreferences";
 import { useKeyboardShortcuts, type ActionName } from "./composables/useKeyboardShortcuts";
 import { backupOnStartup, startPeriodicBackup } from "./composables/useBackup";
+import { useMarkAsRead } from "./composables/useMarkAsRead";
 
 const db = ref<DbHandle | null>(null);
 const dbName = ref("");
 
 const { repos, selectedRepoId, refresh: refreshRepos, importRepo, hideRepo, unhideRepo } = useRepo(db);
 const { allItems, selectedItemId, loadAllItems, createItem, spawnPtySession, startPrAgent, startMergeAgent, selectedItem, pinItem, unpinItem, reorderPinned, renameItem } = usePipeline(db);
+useMarkAsRead(db, selectedItemId, allItems);
 const {
   ideCommand,
   gcAfterDays,
@@ -291,12 +293,6 @@ async function handleHideRepo(repoId: string) {
 function handleSelectItem(itemId: string) {
   selectedItemId.value = itemId;
   if (db.value) setSetting(db.value, "selected_item_id", itemId);
-  // Mark as read if unread
-  const item = allItems.value.find((i) => i.id === itemId);
-  if (item && item.activity === "unread" && db.value) {
-    updatePipelineItemActivity(db.value, itemId, "idle");
-    item.activity = "idle";
-  }
 }
 
 async function handleNewTaskSubmit(prompt: string) {
