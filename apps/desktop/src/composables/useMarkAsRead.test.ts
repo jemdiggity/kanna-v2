@@ -33,14 +33,14 @@ function makeItem(
     branch: null,
     agent_type: "pty",
     activity: "unread",
-    activity_changed_at: "2026-03-22T10:00:00.000Z",
+    activity_changed_at: "2026-03-21T00:00:00.000Z",
     port_offset: null,
     display_name: null,
     port_env: null,
     pinned: 0,
     pin_order: null,
-    created_at: "2026-03-22T09:00:00.000Z",
-    updated_at: "2026-03-22T09:00:00.000Z",
+    created_at: "2026-03-21T09:00:00.000Z",
+    updated_at: "2026-03-21T09:00:00.000Z",
     ...overrides,
   };
 }
@@ -53,7 +53,7 @@ describe("useMarkAsRead", () => {
   it("marks an unread item as idle after debounce", async () => {
     const db = ref({ execute: async () => ({ rowsAffected: 1 }), select: async () => [] });
     const selectedItemId = ref<string | null>(null);
-    const item = makeItem({ id: "item-1", activity: "unread", activity_changed_at: "2026-03-22T10:00:00.000Z" });
+    const item = makeItem({ id: "item-1", activity: "unread", activity_changed_at: "2026-03-21T00:00:00.000Z" });
     const allItems = ref<PipelineItem[]>([item]);
 
     useMarkAsRead(db as any, selectedItemId, allItems);
@@ -89,8 +89,8 @@ describe("useMarkAsRead", () => {
   it("cancels pending mark-as-read on rapid navigation", async () => {
     const db = ref({ execute: async () => ({ rowsAffected: 1 }), select: async () => [] });
     const selectedItemId = ref<string | null>(null);
-    const item1 = makeItem({ id: "item-1", activity: "unread", activity_changed_at: "2026-03-22T10:00:00.000Z" });
-    const item2 = makeItem({ id: "item-2", activity: "unread", activity_changed_at: "2026-03-22T10:00:00.000Z" });
+    const item1 = makeItem({ id: "item-1", activity: "unread", activity_changed_at: "2026-03-21T00:00:00.000Z" });
+    const item2 = makeItem({ id: "item-2", activity: "unread", activity_changed_at: "2026-03-21T00:00:00.000Z" });
     const allItems = ref<PipelineItem[]>([item1, item2]);
 
     useMarkAsRead(db as any, selectedItemId, allItems);
@@ -161,7 +161,7 @@ describe("useMarkAsRead", () => {
   it("no-ops when db is null", async () => {
     const db = ref(null);
     const selectedItemId = ref<string | null>(null);
-    const item = makeItem({ id: "item-1", activity: "unread", activity_changed_at: "2026-03-22T10:00:00.000Z" });
+    const item = makeItem({ id: "item-1", activity: "unread", activity_changed_at: "2026-03-21T00:00:00.000Z" });
     const allItems = ref<PipelineItem[]>([item]);
 
     useMarkAsRead(db as any, selectedItemId, allItems);
@@ -175,7 +175,7 @@ describe("useMarkAsRead", () => {
   it("no-ops when item is removed from allItems during debounce", async () => {
     const db = ref({ execute: async () => ({ rowsAffected: 1 }), select: async () => [] });
     const selectedItemId = ref<string | null>(null);
-    const item = makeItem({ id: "item-1", activity: "unread", activity_changed_at: "2026-03-22T10:00:00.000Z" });
+    const item = makeItem({ id: "item-1", activity: "unread", activity_changed_at: "2026-03-21T00:00:00.000Z" });
     const allItems = ref<PipelineItem[]>([item]);
 
     useMarkAsRead(db as any, selectedItemId, allItems);
