@@ -28,7 +28,9 @@ pub async fn create_agent_session(
     system_prompt: Option<String>,
     model: Option<String>,
     allowed_tools: Option<Vec<String>>,
+    disallowed_tools: Option<Vec<String>>,
     max_turns: Option<u32>,
+    max_budget_usd: Option<f64>,
     permission_mode: Option<String>,
 ) -> Result<(), String> {
     let mut builder = SessionOptions::builder()
@@ -44,8 +46,14 @@ pub async fn create_agent_session(
     if let Some(tools) = allowed_tools {
         builder = builder.allowed_tools(tools);
     }
+    if let Some(tools) = disallowed_tools {
+        builder = builder.disallowed_tools(tools);
+    }
     if let Some(mt) = max_turns {
         builder = builder.max_turns(mt);
+    }
+    if let Some(budget) = max_budget_usd {
+        builder = builder.max_budget_usd(budget);
     }
 
     let session = Session::start(builder.build(), &prompt)
