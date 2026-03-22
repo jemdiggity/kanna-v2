@@ -97,6 +97,7 @@ export async function runMigrations(db: DbHandle): Promise<void> {
   await addColumn("pipeline_item", "display_name", "TEXT");
   await addColumn("pipeline_item", "unread_at", "TEXT");
   await addColumn("repo", "hidden", "INTEGER NOT NULL DEFAULT 0");
+  await addColumn("pipeline_item", "closed_at", "TEXT");
 
   try {
     await db.execute(`UPDATE pipeline_item SET stage = 'in_progress' WHERE stage = 'queued'`);

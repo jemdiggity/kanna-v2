@@ -1,19 +1,21 @@
 <script setup lang="ts">
 import { ref, toRef } from "vue";
-import { Bar } from "vue-chartjs";
+import { Line } from "vue-chartjs";
 import {
   Chart as ChartJS,
   CategoryScale,
   LinearScale,
-  BarElement,
+  PointElement,
+  LineElement,
   Title,
   Tooltip,
   Legend,
+  Filler,
 } from "chart.js";
 import type { DbHandle } from "@kanna/db";
 import { useAnalytics } from "../composables/useAnalytics";
 
-ChartJS.register(CategoryScale, LinearScale, BarElement, Title, Tooltip, Legend);
+ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend, Filler);
 
 const props = defineProps<{
   db: DbHandle | null;
@@ -23,11 +25,11 @@ const emit = defineEmits<{ (e: "close"): void }>();
 
 const activeView = ref(0);
 const viewCount = 2;
-const viewNames = ["Throughput", "Activity Time"];
+const viewNames = ["Tasks", "Avg Time in State"];
 
 const {
-  throughputBuckets,
-  activityBreakdowns,
+  taskBuckets,
+  avgTimeInState,
   headlineStats,
   hasData,
   loading,
@@ -51,33 +53,26 @@ function formatDuration(seconds: number): string {
   return m > 0 ? `${h}h ${m}m` : `${h}h`;
 }
 
-const chartOptions = {
+const lineChartOptions = {
   responsive: true,
   maintainAspectRatio: false,
-  plugins: {
-    legend: { labels: { color: "#888" } },
+  interaction: {
+    intersect: false,
+    mode: "index" as const,
   },
-  scales: {
-    x: { ticks: { color: "#888" }, grid: { color: "#333" } },
-    y: { ticks: { color: "#888" }, grid: { color: "#333" }, beginAtZero: true },
-  },
-};
-
-const horizontalChartOptions = {
-  indexAxis: "y" as const,
-  responsive: true,
-  maintainAspectRatio: false,
   plugins: {
     legend: { labels: { color: "#888" } },
     tooltip: {
-      callbacks: {
-        label: (ctx: any) => `${ctx.dataset.label}: ${formatDuration(ctx.raw)}`,
-      },
+      backgroundColor: "#1e1e1e",
+      borderColor: "#444",
+      borderWidth: 1,
+      titleColor: "#ccc",
+      bodyColor: "#ccc",
     },
   },
   scales: {
-    x: { stacked: true, ticks: { color: "#888", callback: (v: any) => formatDuration(v) }, grid: { color: "#333" }, beginAtZero: true },
-    y: { stacked: true, ticks: { color: "#ccc" }, grid: { color: "#333" } },
+    x: { ticks: { color: "#888" }, grid: { color: "#333" } },
+    y: { ticks: { color: "#888", stepSize: 1 }, grid: { color: "#333" }, beginAtZero: true },
   },
 };
 </script>
@@ -98,68 +93,92 @@ const horizontalChartOptions = {
         <div class="empty-state">No tasks yet</div>
       </template>
 
-      <!-- View 0: Throughput -->
+      <!-- View 0: Tasks created / closed -->
       <template v-else-if="activeView === 0">
         <div class="headline-cards">
           <div class="card">
-            <div class="card-value">{{ headlineStats.tasksCreated }}</div>
+            <div class="card-value">{{ headlineStats.totalCreated }}</div>
             <div class="card-label">Created</div>
           </div>
           <div class="card">
-            <div class="card-value">{{ headlineStats.tasksCompleted }}</div>
-            <div class="card-label">Completed</div>
+            <div class="card-value">{{ headlineStats.totalClosed }}</div>
+            <div class="card-label">Closed</div>
           </div>
           <div class="card">
-            <div class="card-value">{{ headlineStats.completionRate != null ? headlineStats.completionRate + '%' : '—' }}</div>
-            <div class="card-label">Completion Rate</div>
+            <div class="card-value">{{ headlineStats.open }}</div>
+            <div class="card-label">Open</div>
           </div>
         </div>
         <div class="chart-container">
-          <Bar
+          <Line
             :data="{
-              labels: throughputBuckets.map((b) => b.label),
+              labels: taskBuckets.map((b) => b.label),
               datasets: [
-                { label: 'Created', data: throughputBuckets.map((b) => b.created), backgroundColor: '#0066cc' },
-                { label: 'Completed', data: throughputBuckets.map((b) => b.completed), backgroundColor: '#2ea043' },
+                {
+                  label: 'Created',
+                  data: taskBuckets.map((b) => b.created),
+                  borderColor: '#0066cc',
+                  backgroundColor: 'rgba(0, 102, 204, 0.1)',
+                  fill: true,
+                  tension: 0.3,
+                  pointRadius: 3,
+                  pointHoverRadius: 5,
+                },
+                {
+                  label: 'Closed',
+                  data: taskBuckets.map((b) => b.closed),
+                  borderColor: '#2ea043',
+                  backgroundColor: 'rgba(46, 160, 67, 0.1)',
+                  fill: true,
+                  tension: 0.3,
+                  pointRadius: 3,
+                  pointHoverRadius: 5,
+                },
               ],
             }"
-            :options="chartOptions"
+            :options="lineChartOptions"
           />
         </div>
       </template>
 
-      <!-- View 1: Activity Time -->
+      <!-- View 1: Avg Time in State -->
       <template v-else-if="activeView === 1">
-        <template v-if="activityBreakdowns.length === 0">
-          <div class="empty-state">Activity tracking started — data will appear as agents run.</div>
+        <template v-if="avgTimeInState.working === 0 && avgTimeInState.idle === 0 && avgTimeInState.unread === 0">
+          <div class="empty-state">Activity tracking started — data will appear as tasks complete.</div>
         </template>
         <template v-else>
           <div class="headline-cards">
-            <div class="card">
-              <div class="card-value">{{ formatDuration(headlineStats.avgWorking) }}</div>
-              <div class="card-label">Avg Working</div>
+            <div class="card busy">
+              <div class="card-value">{{ formatDuration(avgTimeInState.working) }}</div>
+              <div class="card-label">Avg Busy</div>
             </div>
-            <div class="card">
-              <div class="card-value">{{ formatDuration(headlineStats.avgIdle) }}</div>
+            <div class="card unread">
+              <div class="card-value">{{ formatDuration(avgTimeInState.unread) }}</div>
+              <div class="card-label">Avg Unread</div>
+            </div>
+            <div class="card idle">
+              <div class="card-value">{{ formatDuration(avgTimeInState.idle) }}</div>
               <div class="card-label">Avg Idle</div>
             </div>
-            <div class="card">
-              <div class="card-value">{{ formatDuration(headlineStats.avgUnread) }}</div>
-              <div class="card-label">Avg Waiting</div>
-            </div>
           </div>
-          <div class="chart-container">
-            <Bar
-              :data="{
-                labels: activityBreakdowns.map((b) => b.label),
-                datasets: [
-                  { label: 'Working', data: activityBreakdowns.map((b) => b.working), backgroundColor: '#0066cc' },
-                  { label: 'Waiting', data: activityBreakdowns.map((b) => b.unread), backgroundColor: '#d29922' },
-                  { label: 'Idle', data: activityBreakdowns.map((b) => b.idle), backgroundColor: '#555' },
-                ],
-              }"
-              :options="horizontalChartOptions"
+          <div class="state-bar">
+            <div
+              class="state-segment busy"
+              :style="{ flex: avgTimeInState.working }"
             />
+            <div
+              class="state-segment unread"
+              :style="{ flex: avgTimeInState.unread }"
+            />
+            <div
+              class="state-segment idle"
+              :style="{ flex: avgTimeInState.idle }"
+            />
+          </div>
+          <div class="state-bar-labels">
+            <span class="bar-label"><span class="dot busy" /> Busy</span>
+            <span class="bar-label"><span class="dot unread" /> Unread</span>
+            <span class="bar-label"><span class="dot idle" /> Idle</span>
           </div>
         </template>
       </template>
@@ -229,6 +248,10 @@ const horizontalChartOptions = {
   text-align: center;
 }
 
+.card.busy { border-color: #0066cc; }
+.card.unread { border-color: #d29922; }
+.card.idle { border-color: #555; }
+
 .card-value {
   font-size: 24px;
   font-weight: 600;
@@ -246,6 +269,47 @@ const horizontalChartOptions = {
   position: relative;
 }
 
+.state-bar {
+  display: flex;
+  height: 32px;
+  border-radius: 6px;
+  overflow: hidden;
+  gap: 2px;
+}
+
+.state-segment {
+  min-width: 2px;
+  transition: flex 0.3s ease;
+}
+
+.state-segment.busy { background: #0066cc; }
+.state-segment.unread { background: #d29922; }
+.state-segment.idle { background: #555; }
+
+.state-bar-labels {
+  display: flex;
+  justify-content: center;
+  gap: 16px;
+  font-size: 11px;
+  color: #888;
+}
+
+.bar-label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.bar-label .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.bar-label .dot.busy { background: #0066cc; }
+.bar-label .dot.unread { background: #d29922; }
+.bar-label .dot.idle { background: #555; }
+
 .empty-state {
   text-align: center;
   color: #666;
@@ -259,14 +323,14 @@ const horizontalChartOptions = {
   gap: 6px;
 }
 
-.dot {
+.dots > .dot {
   width: 6px;
   height: 6px;
   border-radius: 50%;
   background: #555;
 }
 
-.dot.active {
+.dots > .dot.active {
   background: #0066cc;
 }
 </style>
