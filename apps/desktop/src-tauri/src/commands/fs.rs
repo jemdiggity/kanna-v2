@@ -1,7 +1,25 @@
 use std::io::Write;
 use std::process::Command;
+use std::sync::OnceLock;
 use tauri::AppHandle;
 use tauri::Manager;
+
+fn webview_log_path() -> &'static str {
+    static PATH: OnceLock<String> = OnceLock::new();
+    PATH.get_or_init(|| {
+        // Derive worktree suffix from KANNA_DAEMON_DIR
+        // e.g. /path/.kanna-worktrees/task-abc123/.kanna-daemon → task-abc123
+        if let Ok(dir) = std::env::var("KANNA_DAEMON_DIR") {
+            let parts: Vec<&str> = dir.split('/').collect();
+            if let Some(idx) = parts.iter().position(|p| *p == ".kanna-daemon") {
+                if idx > 0 {
+                    return format!("/tmp/kanna-webview-{}.log", parts[idx - 1]);
+                }
+            }
+        }
+        "/tmp/kanna-webview.log".to_string()
+    })
+}
 
 #[tauri::command]
 pub fn get_app_data_dir(app: AppHandle) -> Result<String, String> {
@@ -137,7 +155,7 @@ pub fn append_log(message: String) -> Result<(), String> {
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open("/tmp/kanna-webview.log")
+        .open(webview_log_path())
         .map_err(|e| e.to_string())?;
     let timestamp = chrono::Local::now().format("%H:%M:%S%.3f");
     writeln!(file, "{} {}", timestamp, message).map_err(|e| e.to_string())
