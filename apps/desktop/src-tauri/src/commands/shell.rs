@@ -58,7 +58,9 @@ pub async fn run_script(
     cwd: String,
     env: HashMap<String, String>,
 ) -> Result<String, String> {
-    let output = Command::new("sh")
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+    let output = Command::new(&shell)
+        .arg("-l")
         .arg("-c")
         .arg(&script)
         .current_dir(&cwd)
