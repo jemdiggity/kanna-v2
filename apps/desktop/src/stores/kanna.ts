@@ -2,6 +2,7 @@ import { ref, computed } from "vue";
 import { defineStore } from "pinia";
 import { computedAsync } from "@vueuse/core";
 import { invoke } from "../invoke";
+import { useToast } from '../composables/useToast';
 import { isTauri } from "../tauri-mock";
 import { listen } from "../listen";
 import { parseRepoConfig } from "@kanna/core";
@@ -177,6 +178,7 @@ export const useKannaStore = defineStore("kanna", () => {
       });
     } catch (e) {
       console.error("[store] git_worktree_add failed:", e);
+      useToast().error("Failed to create worktree");
       throw e;
     }
 
@@ -207,6 +209,7 @@ export const useKannaStore = defineStore("kanna", () => {
       });
     } catch (e) {
       console.error("[store] DB insert failed:", e);
+      useToast().error("Failed to save task to database");
       throw e;
     }
 
@@ -349,6 +352,7 @@ export const useKannaStore = defineStore("kanna", () => {
       selectedItemId.value = (firstIdle || remaining[0])?.id || null;
     } catch (e) {
       console.error("[store] close failed:", e);
+      useToast().error("Failed to close task");
     }
   }
 
@@ -376,6 +380,7 @@ export const useKannaStore = defineStore("kanna", () => {
       bump();
     } catch (e) {
       console.error("[store] undo close failed:", e);
+      useToast().error("Failed to undo close");
     }
   }
 
@@ -486,6 +491,7 @@ export const useKannaStore = defineStore("kanna", () => {
       await startPrAgent(originalId, repo.id, repo.path);
     } catch (e) {
       console.error("[store] PR agent failed to start:", e);
+      useToast().error("Failed to start PR agent");
     }
     try {
       await invoke("kill_session", { sessionId: originalId }).catch((e: unknown) => console.error("[store] kill_session failed:", e));
@@ -503,7 +509,7 @@ export const useKannaStore = defineStore("kanna", () => {
       if (repos.value.length === 1) {
         selectedRepoId.value = repos.value[0].id;
       } else {
-        alert("Select a repository first");
+        useToast().warning("Select a repository first");
         return;
       }
     }
@@ -513,6 +519,7 @@ export const useKannaStore = defineStore("kanna", () => {
       await startMergeAgent(repo.id, repo.path);
     } catch (e) {
       console.error("[store] merge agent failed to start:", e);
+      useToast().error("Failed to start merge agent");
     }
   }
 
@@ -580,6 +587,7 @@ export const useKannaStore = defineStore("kanna", () => {
       });
     } catch (e) {
       console.error("[store] startBlockedTask worktree_add failed:", e);
+      useToast().error("Failed to create worktree for blocked task");
       return;
     }
 
@@ -714,6 +722,7 @@ export const useKannaStore = defineStore("kanna", () => {
       await checkUnblocked(originalId);
     } catch (e) {
       console.error("[store] blockTask close failed:", e);
+      useToast().error("Failed to block task");
     }
 
     bump();
