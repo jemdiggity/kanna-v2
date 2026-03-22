@@ -16,11 +16,13 @@ import CommandPaletteModal from "./components/CommandPaletteModal.vue";
 import AnalyticsModal from "./components/AnalyticsModal.vue";
 import { useKeyboardShortcuts, type ActionName } from "./composables/useKeyboardShortcuts";
 import { startPeriodicBackup } from "./composables/useBackup";
+import { createNavigationHistory } from "./composables/useNavigationHistory";
 import { useKannaStore } from "./stores/kanna";
 
 const store = useKannaStore();
 const db = inject<DbHandle>("db")!;
 const dbName = inject<string>("dbName")!;
+const { recordNavigation, goBack, goForward } = createNavigationHistory();
 
 // UI state
 const showNewTaskModal = ref(false);
@@ -51,7 +53,11 @@ function navigateItems(direction: -1 | 1) {
     if (nextIndex < 0) nextIndex = 0;
     if (nextIndex >= currentItems.length) nextIndex = currentItems.length - 1;
   }
-  store.selectedItemId = currentItems[nextIndex].id;
+  const nextId = currentItems[nextIndex].id;
+  if (nextId !== store.selectedItemId) {
+    if (store.selectedItemId) recordNavigation(store.selectedItemId);
+    store.selectedItemId = nextId;
+  }
 }
 
 // Keyboard shortcuts
@@ -107,6 +113,18 @@ const keyboardActions = {
   showShortcuts: () => { showShortcutsModal.value = !showShortcutsModal.value; },
   commandPalette: () => { showCommandPalette.value = !showCommandPalette.value; },
   showAnalytics: () => { showAnalyticsModal.value = !showAnalyticsModal.value; },
+  goBack: () => {
+    if (!store.selectedItemId) return;
+    const validIds = new Set(store.items.filter((i) => i.stage !== "done").map((i) => i.id));
+    const taskId = goBack(store.selectedItemId, validIds);
+    if (taskId) store.selectItem(taskId);
+  },
+  goForward: () => {
+    if (!store.selectedItemId) return;
+    const validIds = new Set(store.items.filter((i) => i.stage !== "done").map((i) => i.id));
+    const taskId = goForward(store.selectedItemId, validIds);
+    if (taskId) store.selectItem(taskId);
+  },
 };
 useKeyboardShortcuts(keyboardActions);
 
@@ -115,6 +133,13 @@ function focusAgentTerminal() {
     const el = document.querySelector(".main-panel .xterm-helper-textarea") as HTMLElement | null;
     el?.focus();
   });
+}
+
+function handleSelectItem(itemId: string) {
+  if (store.selectedItemId && store.selectedItemId !== itemId) {
+    recordNavigation(store.selectedItemId);
+  }
+  store.selectItem(itemId);
 }
 
 // Handlers that mix UI state + store
@@ -162,7 +187,7 @@ onMounted(async () => {
       :selected-repo-id="store.selectedRepoId"
       :selected-item-id="store.selectedItemId"
       @select-repo="store.selectRepo"
-      @select-item="store.selectItem"
+      @select-item="handleSelectItem"
       @import-repo="showImportRepoModal = true"
       @new-task="(repoId: string) => { store.selectedRepoId = repoId; showNewTaskModal = true; }"
       @pin-item="store.pinItem"
