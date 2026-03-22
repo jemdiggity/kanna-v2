@@ -33,6 +33,7 @@ const showShellModal = ref(false);
 const showCommandPalette = ref(false);
 const diffScopes = new Map<string, "branch" | "commit" | "working">();
 const zenMode = ref(false);
+const sidebarHidden = ref(false);
 const maximized = ref(false);
 
 // Navigation
@@ -85,6 +86,7 @@ const keyboardActions = {
   undoClose: () => store.undoClose(),
   navigateUp: () => navigateItems(-1),
   navigateDown: () => navigateItems(1),
+  toggleSidebar: () => { sidebarHidden.value = !sidebarHidden.value; },
   toggleZen: () => { zenMode.value = !zenMode.value; },
   toggleMaximize: () => { maximized.value = !maximized.value; },
   dismiss: () => {
@@ -150,7 +152,7 @@ onMounted(async () => {
 <template>
   <div class="app" :class="{ zen: zenMode }">
     <Sidebar
-      v-if="!zenMode && !maximized"
+      v-if="!zenMode && !maximized && !sidebarHidden"
       :repos="store.repos"
       :pipeline-items="store.items"
       :selected-repo-id="store.selectedRepoId"
