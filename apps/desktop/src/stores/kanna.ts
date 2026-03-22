@@ -669,6 +669,15 @@ export const useKannaStore = defineStore("kanna", () => {
       await insertTaskBlocker(_db, newId, blockerId);
     }
 
+    // Transfer: any task that was blocked by the original now depends on
+    // the new blocked replacement instead. Without this, blocking B when
+    // A' depends on B would leave A' pointing at the dead original B.
+    const dependents = await listBlockedByItem(_db, originalId);
+    for (const dep of dependents) {
+      await removeTaskBlocker(_db, dep.id, originalId);
+      await insertTaskBlocker(_db, dep.id, newId);
+    }
+
     try {
       await invoke("kill_session", { sessionId: originalId }).catch((e: unknown) =>
         console.error("[store] kill_session failed:", e)
@@ -712,8 +721,12 @@ export const useKannaStore = defineStore("kanna", () => {
   }
 
   async function editBlockedTask(itemId: string, newBlockerIds: string[]) {
+    console.log("[store] editBlockedTask called", itemId, newBlockerIds);
     const item = items.value.find((i) => i.id === itemId);
-    if (!item || item.stage !== "blocked") return;
+    if (!item || item.stage !== "blocked") {
+      console.error("[store] editBlockedTask: item not found or not blocked", itemId, item?.stage);
+      return;
+    }
 
     if (newBlockerIds.length > 0) {
       const hasCycle = await hasCircularDependency(_db, itemId, newBlockerIds);
@@ -745,6 +758,7 @@ export const useKannaStore = defineStore("kanna", () => {
       (b) => b.stage === "pr" || b.stage === "merge" || b.stage === "done"
     );
     if (allClear) {
+      console.log("[store] editBlockedTask: all clear, starting blocked task", itemId);
       await startBlockedTask(item);
     }
   }
