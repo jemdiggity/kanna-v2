@@ -325,8 +325,8 @@ function onUnpinnedChange(repoId: string, evt: any) {
             </template>
           </draggable>
 
-          <!-- Active tasks -->
-          <div v-if="sortedActive(repo.id).length > 0" class="section-label">Active</div>
+          <!-- In Progress tasks -->
+          <div v-if="sortedActive(repo.id).length > 0" class="section-label">In Progress</div>
           <draggable
             :model-value="sortedActive(repo.id)"
             :group="{ name: `repo-${repo.id}` }"
