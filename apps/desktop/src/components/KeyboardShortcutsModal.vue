@@ -90,7 +90,7 @@ function splitKeys(display: string): string[] {
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 1000;
+  z-index: 1100;
 }
 .shortcuts-modal {
   background: #252525;

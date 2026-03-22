@@ -1,4 +1,4 @@
-import { ref, onMounted, onUnmounted } from "vue";
+import { ref, onUnmounted } from "vue";
 import { shortcuts } from "./useKeyboardShortcuts";
 
 export type ShortcutContext = "main" | "diff" | "file";
@@ -27,9 +27,8 @@ export function resetContext() {
  * Must be called during component setup().
  */
 export function useShortcutContext(ctx: ShortcutContext) {
-  onMounted(() => {
-    activeContext.value = ctx;
-  });
+  // Set immediately in setup so context is available before any user interaction
+  activeContext.value = ctx;
   onUnmounted(() => {
     activeContext.value = "main";
   });
@@ -48,9 +47,8 @@ export function setContextShortcuts(ctx: ShortcutContext, extras: ContextShortcu
  * Must be called during component setup() so cleanup hooks register correctly.
  */
 export function registerContextShortcuts(ctx: ShortcutContext, extras: ContextShortcut[]) {
-  onMounted(() => {
-    contextShortcuts.value.set(ctx, extras);
-  });
+  // Set immediately in setup so shortcuts are available before any user interaction
+  contextShortcuts.value.set(ctx, extras);
   onUnmounted(() => {
     contextShortcuts.value.delete(ctx);
   });
