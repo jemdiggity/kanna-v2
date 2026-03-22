@@ -23,6 +23,7 @@ export type ActionName =
   | "showAnalytics"
   | "goBack"
   | "goForward"
+  | "createRepo"
   | "importRepo"
   | "blockTask"
   | "editBlockedTask";
@@ -73,7 +74,8 @@ export const shortcuts: ShortcutDef[] = [
   // { action: "newWindow",  label: "New Window",     group: "Window",     key: ["N", "n"],                     meta: true, shift: true,  display: "⇧⌘N" },
   { action: "toggleSidebar", label: "Toggle Sidebar",  group: "Views",      key: "b",                            meta: true,               display: "⌘B",       context: ["main"] },
   { action: "showAnalytics", label: "Analytics",        group: "Views",      key: ["A", "a"],                     meta: true, shift: true,  display: "⇧⌘A",     context: ["main"] },
-  { action: "importRepo",   label: "Import Repo",      group: "Navigation", key: ["I", "i"],                     meta: true, shift: true,  display: "⇧⌘I",     context: ["main"] },
+  { action: "createRepo",   label: "Create Repo",      group: "Navigation", key: ["I", "i"],                     meta: true,               display: "⌘I",       context: ["main"] },
+  { action: "importRepo",   label: "Import / Clone",   group: "Navigation", key: ["I", "i"],                     meta: true, shift: true,  display: "⇧⌘I",     context: ["main"] },
   { action: "goBack",       label: "Go Back",          group: "Navigation", key: "-",                            ctrl: true,               display: "⌃-",       context: ["main"] },
   { action: "goForward",    label: "Go Forward",       group: "Navigation", key: "-",                            ctrl: true, shift: true,  display: "⌃⇧-",     context: ["main"] },
   // Help
