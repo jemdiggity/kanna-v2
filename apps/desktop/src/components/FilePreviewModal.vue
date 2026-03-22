@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, watch, onUnmounted } from "vue";
+import { ref, computed, onMounted, watch } from "vue";
 import { invoke } from "../invoke";
+import { useLessScroll } from "../composables/useLessScroll";
 
 const props = defineProps<{
   filePath: string;
@@ -10,6 +11,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{ (e: "close"): void }>();
 
+const contentRef = ref<HTMLElement | null>(null);
 const content = ref("");
 const highlighted = ref("");
 const loading = ref(true);
@@ -149,34 +151,34 @@ function openInIDE() {
   }).catch(() => {});
 }
 
-function handleKeydown(e: KeyboardEvent) {
-  const meta = e.metaKey || e.ctrlKey;
-  if (meta && e.key === "o") {
-    e.preventDefault();
-    openInIDE();
-    return;
-  }
-  if (
-    e.key === " " &&
-    isMarkdownFile.value &&
-    !e.metaKey &&
-    !e.ctrlKey &&
-    !e.altKey &&
-    !e.shiftKey
-  ) {
-    e.preventDefault();
-    renderMarkdown.value = !renderMarkdown.value;
-  }
-}
-
-onMounted(() => {
-  loadFile();
-  window.addEventListener("keydown", handleKeydown);
+useLessScroll(contentRef, {
+  extraHandler(e) {
+    const meta = e.metaKey || e.ctrlKey;
+    // Cmd+O — open in IDE
+    if (meta && e.key === "o") {
+      e.preventDefault();
+      openInIDE();
+      return true;
+    }
+    // m — toggle markdown rendering
+    if (
+      e.key === "m" &&
+      isMarkdownFile.value &&
+      !e.metaKey &&
+      !e.ctrlKey &&
+      !e.altKey &&
+      !e.shiftKey
+    ) {
+      e.preventDefault();
+      renderMarkdown.value = !renderMarkdown.value;
+      return true;
+    }
+    return false;
+  },
+  onClose: () => emit("close"),
 });
 
-onUnmounted(() => {
-  window.removeEventListener("keydown", handleKeydown);
-});
+onMounted(() => loadFile());
 </script>
 
 <template>
@@ -185,7 +187,7 @@ onUnmounted(() => {
       <div class="preview-header">
         <span class="file-path">{{ filePath }}</span>
         <div class="header-actions">
-          <span v-if="isMarkdownFile" class="mode-badge" @click="renderMarkdown = !renderMarkdown" title="space">
+          <span v-if="isMarkdownFile" class="mode-badge" @click="renderMarkdown = !renderMarkdown" title="m">
             {{ renderMarkdown ? "Rendered" : "Raw" }}
           </span>
           <button class="btn-open" @click="openInIDE" title="Open in IDE (⌘O)">Open in IDE</button>
@@ -195,6 +197,7 @@ onUnmounted(() => {
       <div v-else-if="error" class="preview-status preview-error">{{ error }}</div>
       <div
         v-else
+        ref="contentRef"
         class="preview-content"
         :class="{ 'markdown-rendered': renderMarkdown && isMarkdownFile }"
         v-html="renderMarkdown && isMarkdownFile ? renderedMarkdown : highlighted"
