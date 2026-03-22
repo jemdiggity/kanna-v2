@@ -8,6 +8,8 @@
 #   ./scripts/dev.sh restart      # stop + start
 #   ./scripts/dev.sh restart -k   # stop (kill daemon) + start
 #   ./scripts/dev.sh log          # print recent output
+#   ./scripts/dev.sh seed         # seed the DB with test data (no server start)
+#   ./scripts/dev.sh start --seed # start + seed
 set -e
 ROOT="$(git rev-parse --show-toplevel)"
 
@@ -91,20 +93,52 @@ log() {
   fi
 }
 
+seed() {
+  local APP_DATA_DIR="$HOME/Library/Application Support/com.kanna.app"
+
+  # Resolve DB name using the same logic as the app (db.ts)
+  local DB_NAME="${KANNA_DB_NAME:-kanna-v2.db}"
+  if [ -n "$KANNA_WORKTREE" ]; then
+    DB_NAME="kanna-wt-$(basename "$ROOT").db"
+  fi
+
+  # SAFETY: never seed the production database
+  if [ "$DB_NAME" = "kanna-v2.db" ]; then
+    echo "REFUSED: will not seed production database (kanna-v2.db)."
+    echo "Run from a worktree, or set KANNA_DB_NAME to a non-production name."
+    exit 1
+  fi
+
+  local DB_PATH="$APP_DATA_DIR/$DB_NAME"
+  local SEED_SQL="$ROOT/apps/desktop/tests/e2e/seed.sql"
+
+  if [ ! -f "$SEED_SQL" ]; then
+    echo "Seed file not found: $SEED_SQL"
+    exit 1
+  fi
+
+  mkdir -p "$APP_DATA_DIR"
+  sqlite3 "$DB_PATH" < "$SEED_SQL"
+  echo "Seeded $DB_PATH"
+}
+
 ATTACH=false
 KILL_DAEMON=false
+SEED=false
 for arg in "$@"; do
   case "$arg" in
     --attach|-a) ATTACH=true ;;
     --kill-daemon|-k) KILL_DAEMON=true ;;
+    --seed|-s) SEED=true ;;
   esac
 done
 
 CMD="${1:-start}"
 case "$CMD" in
-  start)   start; $ATTACH && tmux attach -t "$SESSION" ;;
+  start)   start; $SEED && seed; $ATTACH && tmux attach -t "$SESSION" ;;
   stop)    stop ;;
-  restart) stop; sleep 1; start; $ATTACH && tmux attach -t "$SESSION" ;;
+  restart) stop; sleep 1; start; $SEED && seed; $ATTACH && tmux attach -t "$SESSION" ;;
   log)     log ;;
-  *)       echo "Usage: $0 {start|stop|restart|log} [--attach] [--kill-daemon]" ;;
+  seed)    seed ;;
+  *)       echo "Usage: $0 {start|stop|restart|log|seed} [--attach] [--kill-daemon] [--seed]" ;;
 esac
