@@ -27,7 +27,7 @@ console.error = forwardLog("ERROR", console.error);
 
 // Mobile uses remote DB handle — queries go through relay to kanna-server
 const db: DbHandle = createRemoteDbHandle(
-  (cmd, args) => invoke(cmd, args) as Promise<unknown>
+  (cmd: string, args: Record<string, unknown>) => invoke(cmd, args) as Promise<unknown>
 );
 
 // Import App from desktop source — shared Vue components

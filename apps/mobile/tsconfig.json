@@ -18,6 +18,7 @@
       "@/*": ["src/*"],
       "@desktop/*": ["../desktop/src/*"],
       "@kanna/db": ["../../packages/db/src"],
+      "@kanna/db/*": ["../../packages/db/src/*"],
       "@kanna/core": ["../../packages/core/src"]
     },
 
@@ -38,7 +39,8 @@
     "../../packages/core/src/**/*.ts"
   ],
   "exclude": [
-    "src/**/*.test.ts"
+    "src/**/*.test.ts",
+    "../desktop/src/**/*.test.ts"
   ],
   "references": [{ "path": "./tsconfig.node.json" }]
 }

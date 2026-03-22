@@ -18,6 +18,7 @@ export default defineConfig(async () => ({
     alias: {
       "@": path.resolve(__dirname, "src"),
       "@desktop": path.resolve(__dirname, "../desktop/src"),
+      "@kanna/db/remote-db": path.resolve(__dirname, "../../packages/db/src/remote-db"),
       "@kanna/db": path.resolve(__dirname, "../../packages/db/src"),
       "@kanna/core": path.resolve(__dirname, "../../packages/core/src"),
     },
