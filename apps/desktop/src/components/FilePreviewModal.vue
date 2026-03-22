@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch, onUnmounted } from "vue";
 import { invoke } from "../invoke";
+import { useShortcutContext, registerContextShortcuts } from "../composables/useShortcutContext";
 
 const props = defineProps<{
   filePath: string;
@@ -9,6 +10,14 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{ (e: "close"): void }>();
+
+useShortcutContext("file");
+registerContextShortcuts("file", [
+  { label: "Open in IDE", display: "⌘O" },
+  ...(props.filePath.toLowerCase().endsWith(".md")
+    ? [{ label: "Toggle Markdown", display: "Space" }]
+    : []),
+]);
 
 const content = ref("");
 const highlighted = ref("");
