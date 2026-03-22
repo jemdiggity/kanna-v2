@@ -5,7 +5,7 @@ import { computedAsync } from "@vueuse/core";
 import { isTauri } from "./tauri-mock";
 import { invoke } from "./invoke";
 import { hasTag } from "@kanna/core";
-import type { DbHandle } from "@kanna/db";
+import { getSetting, setSetting, type DbHandle } from "@kanna/db";
 import Sidebar from "./components/Sidebar.vue";
 import MainPanel from "./components/MainPanel.vue";
 import NewTaskModal from "./components/NewTaskModal.vue";
@@ -50,6 +50,7 @@ const previewFilePath = ref("");
 const showDiffModal = ref(false);
 const showShellModal = ref(false);
 const showCommandPalette = ref(false);
+const commandUsageCounts = ref<Record<string, number>>({});
 const showAnalyticsModal = ref(false);
 const showBlockerSelect = ref(false);
 const blockerSelectMode = ref<"block" | "edit">("block");
@@ -375,12 +376,24 @@ const currentBlockers = computedAsync(async () => {
   return store.listBlockersForItem(item.id);
 }, []);
 
+async function trackCommandUsage(commandId: string) {
+  const counts = { ...commandUsageCounts.value };
+  counts[commandId] = (counts[commandId] || 0) + 1;
+  commandUsageCounts.value = counts;
+  await setSetting(db, "commandPaletteUsage", JSON.stringify(counts));
+}
+
 // Init
 onMounted(async () => {
   await store.init(db);
   startPeriodicBackup(dbName, ref(db) as Ref<DbHandle | null>);
   if (!store.hideShortcutsOnStartup) {
     showShortcutsModal.value = true;
+  }
+  const raw = await getSetting(db, "commandPaletteUsage");
+  if (raw) {
+    try { commandUsageCounts.value = JSON.parse(raw); }
+    catch (e) { console.error("[App] corrupt commandPaletteUsage setting:", e); }
   }
 });
 </script>
@@ -429,8 +442,10 @@ onMounted(async () => {
       v-if="showCommandPalette"
       :extra-commands="paletteExtraCommands"
       :dynamic-commands="customTaskCommands"
+      :usage-counts="commandUsageCounts"
       @close="showCommandPalette = false"
       @execute="(action: ActionName) => keyboardActions[action]()"
+      @use="trackCommandUsage"
     />
     <KeyboardShortcutsModal
       v-if="showShortcutsModal"

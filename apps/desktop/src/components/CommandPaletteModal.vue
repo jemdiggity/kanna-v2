@@ -12,11 +12,13 @@ export interface DynamicCommand {
 const props = defineProps<{
   extraCommands?: Command[];
   dynamicCommands?: DynamicCommand[];
+  usageCounts?: Record<string, number>;
 }>();
 
 const emit = defineEmits<{
   (e: "close"): void;
   (e: "execute", action: ActionName): void;
+  (e: "use", commandId: string): void;
 }>();
 
 const query = ref("");
@@ -87,11 +89,18 @@ const allCommands = computed<UnifiedCommand[]>(() => {
   return [...dynamic, ...shortcutCommands, ...extra];
 });
 
+function sortByUsage(commands: UnifiedCommand[]): UnifiedCommand[] {
+  const counts = props.usageCounts || {};
+  return [...commands].sort((a, b) => (counts[b.id] || 0) - (counts[a.id] || 0));
+}
+
 const filtered = computed(() => {
   const q = query.value.toLowerCase();
-  if (!q) return allCommands.value;
-  return allCommands.value.filter(
-    (c) => c.label.toLowerCase().includes(q) || (c.description?.toLowerCase().includes(q) ?? false)
+  if (!q) return sortByUsage(allCommands.value);
+  return sortByUsage(
+    allCommands.value.filter(
+      (c) => c.label.toLowerCase().includes(q) || (c.description?.toLowerCase().includes(q) ?? false)
+    )
   );
 });
 
@@ -111,6 +120,7 @@ function handleKeydown(e: KeyboardEvent) {
     e.preventDefault();
     const cmd = filtered.value[selectedIndex.value];
     if (cmd) {
+      emit("use", cmd.id);
       emit("close");
       cmd.execute();
     }
@@ -141,7 +151,7 @@ onMounted(async () => {
           :key="cmd.id"
           class="command-item"
           :class="{ selected: i === selectedIndex }"
-          @click="emit('close'); cmd.execute()"
+          @click="emit('use', cmd.id); emit('close'); cmd.execute()"
           @mouseenter="mouseMoved && (selectedIndex = i)"
         >
           <div class="command-label-group">
