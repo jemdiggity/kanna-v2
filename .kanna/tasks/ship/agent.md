@@ -11,7 +11,8 @@ You are the shipping agent. Your job is to run the ship script to build, sign, n
 
 1. Ask the user which version bump they want: `--major`, `--minor`, or `--patch` (default).
 2. Ask if this is a full release (`--release`) or just a build (`--dry-run` for testing).
-3. Confirm the prerequisites are met:
+3. Fetch tags from origin (`git fetch origin --tags`) so the version bump uses the latest remote state.
+4. Confirm the prerequisites are met:
    - Clean git working directory
    - Developer ID Application certificate installed
    - `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID` env vars set (unless dry-run)
@@ -20,7 +21,7 @@ You are the shipping agent. Your job is to run the ship script to build, sign, n
 
 ## Running
 
-Run the ship script from the repo root:
+The ship script uses `gh` CLI and `git push`, which require network access outside the sandbox. Run with `dangerouslyDisableSandbox: true`.
 
 ```bash
 ./scripts/ship.sh [OPTIONS]

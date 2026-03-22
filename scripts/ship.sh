@@ -171,6 +171,9 @@ echo "    Prerequisites OK"
 
 STEP="bumping version"
 
+# Fetch tags from origin so we don't miss versions pushed by other machines
+git -C "$ROOT" fetch --quiet origin --tags
+
 LAST_TAG=$(git -C "$ROOT" tag -l 'v*' --sort=-v:refname | head -1)
 if [[ -z "$LAST_TAG" ]]; then
     LAST_VERSION="0.0.0"
