@@ -70,6 +70,8 @@ pub async fn handle_invoke(
                 other => Err(format!("unexpected daemon response: {:?}", other)),
             }
         }
+        // Note: attach_session and detach_session are handled directly in main.rs
+        // because they require long-lived daemon connections for streaming.
         "db_select" => {
             let query = args
                 .get("query")
