@@ -32,6 +32,8 @@ A single input field with placeholder `my-awesome-project`. Below the input, a m
 
 **Default repo directory:** `~/.kanna/repos/`. Created automatically on first use. No configuration required.
 
+**Name collision handling:** If the resolved directory already exists (for both Create New and Clone), auto-enumerate by appending `-2`, `-3`, etc. The dialog shows the enumerated name in the path line so the user sees what will actually be created. For example, if `~/.kanna/repos/my-project` exists, the path shows `~/.kanna/repos/my-project-2`. The check runs on each keystroke (Create New) or after parsing (Clone). The user can still override via the "change" link.
+
 **Footer:** Bottom-left hint text: "⌘Enter to create". Bottom-right: Cancel and Create buttons. Create button is disabled (greyed out) until a name is entered. Matches the NewTaskModal footer pattern.
 
 ### Import / Clone Tab
@@ -156,7 +158,7 @@ All paths displayed with `~` in the UI must be resolved to absolute paths before
 ### Error Handling
 
 - **Invalid repo name** (empty, contains `/`, etc.) → Create button stays disabled
-- **Directory already exists** at create path → inline error: "Directory already exists"
+- **Directory already exists** at create/clone path → auto-enumerate name (e.g., `my-project-2`), shown in path line
 - **Clone fails** (network, auth, invalid URL) → inline error in dialog, user can retry
 - **Not a git repo** (local folder import) → inline warning: "Not a git repo. Use Create New tab to initialize one."
 - **Duplicate repo** (path already imported) → unhide if hidden, otherwise select existing (current behavior)
