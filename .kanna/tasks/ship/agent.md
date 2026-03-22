@@ -1,7 +1,6 @@
 ---
 name: Ship
 description: Build, sign, notarize, and release a new version of Kanna
-permission_mode: dontAsk
 execution_mode: pty
 ---
 
