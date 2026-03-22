@@ -9,6 +9,7 @@ const props = defineProps<{
 const tagList = computed(() => parseTags(props.tags));
 
 const tagColors: Record<string, string> = {
+  "in progress": "#3b82f6",
   pr: "#d29922",
   merge: "#8b5cf6",
   done: "#666",
@@ -16,6 +17,7 @@ const tagColors: Record<string, string> = {
 };
 
 const tagLabels: Record<string, string> = {
+  "in progress": "In Progress",
   pr: "PR",
   merge: "Merge",
   done: "Done",

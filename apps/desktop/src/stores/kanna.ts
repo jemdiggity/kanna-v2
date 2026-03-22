@@ -246,7 +246,7 @@ export const useKannaStore = defineStore("kanna", () => {
         issue_number: null,
         issue_title: null,
         prompt: effectivePrompt,
-        tags: opts?.tags ?? [],
+        tags: opts?.tags ?? ["in progress"],
         pr_number: null,
         pr_url: null,
         branch,
