@@ -66,19 +66,18 @@ async function refreshItems() {
 // Reload items whenever repos change
 watch(repos, refreshItems, { immediate: true });
 
-// Sort items the same way the sidebar does: pinned first (by pin_order), then unpinned (by activity, then timestamp).
-// Uses the same two-pass approach as Sidebar.vue's itemsForRepo() to guarantee identical ordering.
-function sortedItemsForCurrentRepo(): PipelineItem[] {
+// Mirrors Sidebar.vue's itemsForRepo(): pinned (by pin_order), then pr → merge → in_progress (each by activity).
+const sortedItemsForCurrentRepo = computed(() => {
+  const repoId = selectedRepoId.value;
   const repoItems = allItems.value.filter(
-    (item) => item.repo_id === selectedRepoId.value && item.stage !== "done"
+    (item) => item.repo_id === repoId && item.stage !== "done"
   );
   const pinned = repoItems
     .filter((i) => i.pinned)
     .sort((a, b) => (a.pin_order ?? 0) - (b.pin_order ?? 0));
   const activityOrder: Record<string, number> = { idle: 0, unread: 1, working: 2 };
-  const unpinned = repoItems
-    .filter((i) => !i.pinned)
-    .sort((a, b) => {
+  function sortByActivity(items: PipelineItem[]): PipelineItem[] {
+    return items.sort((a, b) => {
       const ao = activityOrder[a.activity || "idle"] ?? 0;
       const bo = activityOrder[b.activity || "idle"] ?? 0;
       if (ao !== bo) return ao - bo;
@@ -86,12 +85,16 @@ function sortedItemsForCurrentRepo(): PipelineItem[] {
       const bTime = b.activity_changed_at || b.created_at;
       return bTime.localeCompare(aTime);
     });
-  return [...pinned, ...unpinned];
-}
+  }
+  const pr = sortByActivity(repoItems.filter((i) => i.stage === "pr" && !i.pinned));
+  const merge = sortByActivity(repoItems.filter((i) => i.stage === "merge" && !i.pinned));
+  const inProgress = sortByActivity(repoItems.filter((i) => i.stage === "in_progress" && !i.pinned));
+  return [...pinned, ...pr, ...merge, ...inProgress];
+});
 
 // Keyboard shortcuts
 function navigateItems(direction: -1 | 1) {
-  const currentItems = sortedItemsForCurrentRepo();
+  const currentItems = sortedItemsForCurrentRepo.value;
   if (currentItems.length === 0) return;
 
   const currentIndex = currentItems.findIndex((i) => i.id === selectedItemId.value);
@@ -135,7 +138,7 @@ async function handleCloseTask() {
 
     // Mark as done
     await updatePipelineItemStage(db.value!, item.id, "done");
-    const currentItems = sortedItemsForCurrentRepo();
+    const currentItems = sortedItemsForCurrentRepo.value;
     const remaining = currentItems.filter((i) => i.id !== item.id);
     const firstRead = remaining.find((i) => (i as any).activity === "idle" || !(i as any).activity);
     selectedItemId.value = (firstRead || remaining[0])?.id || null;
