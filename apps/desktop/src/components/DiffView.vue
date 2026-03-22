@@ -8,7 +8,10 @@ import {
   getOrCreateWorkerPoolSingleton,
 } from "@pierre/diffs/worker";
 
-registerContextShortcuts("diff", [{ label: "Cycle Scope", display: "Space" }]);
+registerContextShortcuts("diff", [
+  { label: "Scope →", display: "⇧⌘]" },
+  { label: "Scope ←", display: "⇧⌘[" },
+]);
 
 const props = defineProps<{
   repoPath: string;
