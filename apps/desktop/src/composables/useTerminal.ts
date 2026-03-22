@@ -84,10 +84,24 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
     }
 
     // Let app-level shortcuts pass through even when terminal has focus,
-    // but always let Escape reach the terminal (needed for Claude CLI)
+    // but always let Escape reach the terminal (needed for Claude CLI).
+    // In kitty keyboard mode, Cmd+C/V would be encoded as CSI sequences
+    // and sent to the PTY instead of triggering clipboard operations —
+    // intercept Cmd+C here and let Cmd+V fall through to the native paste event.
     term.attachCustomKeyEventHandler((e: KeyboardEvent) => {
       if (e.key === "Escape") return true
       if (isAppShortcut(e)) return false
+      // Prevent kitty keyboard from encoding Cmd+key as CSI sequences —
+      // let them fall through to the OS/browser (Cmd+Q, Cmd+V, etc.).
+      // Cmd+C is special: copy the terminal selection to clipboard.
+      if (e.type === "keydown" && e.metaKey) {
+        if (e.key === "c" && !e.altKey && !e.ctrlKey) {
+          const sel = term.getSelection()
+          if (sel) navigator.clipboard.writeText(sel)
+          e.preventDefault()
+        }
+        return false
+      }
       return true
     })
 
