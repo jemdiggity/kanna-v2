@@ -19,7 +19,9 @@ export type ActionName =
   | "showShortcuts"
   | "toggleSidebar"
   | "commandPalette"
-  | "showAnalytics";
+  | "showAnalytics"
+  | "goBack"
+  | "goForward";
 
 export type KeyboardActions = Record<ActionName, () => void>;
 
@@ -34,6 +36,7 @@ interface ShortcutDef {
   meta?: boolean;
   shift?: boolean;
   alt?: boolean;
+  ctrl?: boolean;
   /** Display string for the shortcuts modal (e.g. "Cmd+Delete") */
   display: string;
 }
@@ -64,6 +67,8 @@ export const shortcuts: ShortcutDef[] = [
   // { action: "newWindow",  label: "New Window",     group: "Window",     key: ["N", "n"],                     meta: true, shift: true,  display: "⇧⌘N" },
   { action: "toggleSidebar", label: "Toggle Sidebar",  group: "Views",      key: "b",                            meta: true,               display: "⌘B" },
   { action: "showAnalytics", label: "Analytics",        group: "Views",      key: ["A", "a"],                     meta: true, shift: true,  display: "⇧⌘A" },
+  { action: "goBack",       label: "Go Back",          group: "Navigation", key: "-",                            ctrl: true,               display: "⌃-" },
+  { action: "goForward",    label: "Go Forward",       group: "Navigation", key: "-",                            ctrl: true, shift: true,  display: "⌃⇧-" },
   // Help
   { action: "showShortcuts",  label: "Keyboard Shortcuts", group: "Help",   key: "/",                           meta: true,               display: "⌘/" },
   // Escape is special — no meta required
@@ -75,6 +80,7 @@ function matches(def: ShortcutDef, e: KeyboardEvent): boolean {
   if (e.metaKey !== (def.meta ?? false)) return false;
   if (e.shiftKey !== (def.shift ?? false)) return false;
   if (e.altKey !== (def.alt ?? false)) return false;
+  if (e.ctrlKey !== (def.ctrl ?? false)) return false;
   const keys = Array.isArray(def.key) ? def.key : [def.key];
   return keys.includes(e.key);
 }
