@@ -111,11 +111,12 @@ export function getShortcutGroups(): { title: string; shortcuts: { keys: string;
   return groupOrder.filter((g) => map.has(g)).map((g) => ({ title: g, shortcuts: map.get(g)! }));
 }
 
-export function useKeyboardShortcuts(actions: KeyboardActions) {
+export function useKeyboardShortcuts(actions: KeyboardActions, options?: { beforeAction?: (action: ActionName) => void }) {
   function handler(e: KeyboardEvent) {
     for (const def of shortcuts) {
       if (matches(def, e)) {
         if (def.action !== "dismiss") e.preventDefault();
+        options?.beforeAction?.(def.action);
         actions[def.action]();
         return;
       }
