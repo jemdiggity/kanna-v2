@@ -24,7 +24,7 @@ import { useMarkAsRead } from "./composables/useMarkAsRead";
 import { activeContext } from "./composables/useShortcutContext";
 import { useCustomTasks } from "./composables/useCustomTasks";
 import { useKannaStore } from "./stores/kanna";
-import { NEW_CUSTOM_TASK_PROMPT, parseAgentMd } from "@kanna/core";
+import { NEW_CUSTOM_TASK_PROMPT } from "@kanna/core";
 import type { CustomTaskConfig } from "@kanna/core";
 import type { DynamicCommand } from "./components/CommandPaletteModal.vue";
 
