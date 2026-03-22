@@ -37,8 +37,9 @@ function sortByActivity(items: PipelineItem[]): PipelineItem[] {
     const ao = order[a.activity || "idle"] ?? 0;
     const bo = order[b.activity || "idle"] ?? 0;
     if (ao !== bo) return ao - bo;
-    const aTime = a.activity_changed_at || a.created_at;
-    const bTime = b.activity_changed_at || b.created_at;
+    const isIdle = (a.activity || "idle") === "idle";
+    const aTime = (isIdle ? a.unread_at : null) || a.activity_changed_at || a.created_at;
+    const bTime = (isIdle ? b.unread_at : null) || b.activity_changed_at || b.created_at;
     return bTime.localeCompare(aTime);
   });
 }

@@ -81,6 +81,7 @@ function createMockDb(): DbHandle & {
           port_offset: (port_offset as number | null) ?? null,
           activity: (activity as string) || "idle",
           activity_changed_at: new Date().toISOString(),
+          unread_at: null,
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
           pinned: 0,
