@@ -219,6 +219,8 @@ function onUnpinnedChange(repoId: string, evt: any) {
                   :style="{
                     fontWeight: element.activity === 'unread' ? 'bold' : 'normal',
                     fontStyle: element.activity === 'working' ? 'italic' : 'normal',
+                    textDecoration: hasTag(element, 'teardown') ? 'line-through' : 'none',
+                    opacity: hasTag(element, 'teardown') ? 0.5 : 1,
                   }"
                 >{{ itemTitle(element) }}</span>
               </div>
@@ -267,6 +269,8 @@ function onUnpinnedChange(repoId: string, evt: any) {
                   :style="{
                     fontWeight: element.activity === 'unread' ? 'bold' : 'normal',
                     fontStyle: element.activity === 'working' ? 'italic' : 'normal',
+                    textDecoration: hasTag(element, 'teardown') ? 'line-through' : 'none',
+                    opacity: hasTag(element, 'teardown') ? 0.5 : 1,
                   }"
                 >{{ itemTitle(element) }}</span>
               </div>
@@ -310,6 +314,8 @@ function onUnpinnedChange(repoId: string, evt: any) {
                   :style="{
                     fontWeight: element.activity === 'unread' ? 'bold' : 'normal',
                     fontStyle: element.activity === 'working' ? 'italic' : 'normal',
+                    textDecoration: hasTag(element, 'teardown') ? 'line-through' : 'none',
+                    opacity: hasTag(element, 'teardown') ? 0.5 : 1,
                   }"
                 >{{ itemTitle(element) }}</span>
               </div>
@@ -353,6 +359,8 @@ function onUnpinnedChange(repoId: string, evt: any) {
                   :style="{
                     fontWeight: element.activity === 'unread' ? 'bold' : 'normal',
                     fontStyle: element.activity === 'working' ? 'italic' : 'normal',
+                    textDecoration: hasTag(element, 'teardown') ? 'line-through' : 'none',
+                    opacity: hasTag(element, 'teardown') ? 0.5 : 1,
                   }"
                 >{{ itemTitle(element) }}</span>
               </div>

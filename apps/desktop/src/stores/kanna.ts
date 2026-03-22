@@ -417,73 +417,135 @@ export const useKannaStore = defineStore("kanna", () => {
     });
   }
 
+  /** Collect all teardown commands for a task (custom task + repo-level). */
+  async function collectTeardownCommands(item: PipelineItem, repo: Repo): Promise<string[]> {
+    const cmds: string[] = [];
+    if (item.display_name) {
+      try {
+        const tasksDir = `${repo.path}/.kanna/tasks`;
+        const entries = await invoke<string[]>("list_dir", { path: tasksDir }).catch(() => [] as string[]);
+        for (const entry of entries) {
+          const agentMdPath = `${tasksDir}/${entry}/agent.md`;
+          let content: string;
+          try {
+            content = await invoke<string>("read_text_file", { path: agentMdPath });
+          } catch { continue; }
+          const config = parseAgentMd(content, entry);
+          if (config && config.name === item.display_name && config.teardown?.length) {
+            cmds.push(...config.teardown);
+            break;
+          }
+        }
+      } catch (e) { console.error("[store] custom task teardown lookup failed:", e); }
+    }
+    try {
+      const configContent = await invoke<string>("read_text_file", {
+        path: `${repo.path}/.kanna/config.json`,
+      });
+      if (configContent) {
+        const repoConfig = parseRepoConfig(configContent);
+        if (repoConfig.teardown?.length) {
+          cmds.push(...repoConfig.teardown);
+        }
+      }
+    } catch (e) { console.error("[store] repo teardown lookup failed:", e); }
+    return cmds;
+  }
+
+  function selectNextItem(closingId: string) {
+    const sorted = sortedItemsForCurrentRepo.value;
+    const idx = sorted.findIndex((i) => i.id === closingId);
+    const remaining = sorted.filter((i) => i.id !== closingId);
+    const nextIdx = idx >= remaining.length ? remaining.length - 1 : idx;
+    selectedItemId.value = remaining[nextIdx]?.id || null;
+    if (selectedItemId.value) emitTaskSelected(selectedItemId.value);
+  }
+
   async function closeTask() {
     lastUndoAction.value = null;
     const item = currentItem.value;
     const repo = selectedRepo.value;
     if (!item || !repo) return;
     try {
-      await invoke("kill_session", { sessionId: item.id }).catch((e: unknown) => console.error("[store] kill_session failed:", e));
-      await invoke("kill_session", { sessionId: `shell-${item.id}` }).catch((e: unknown) => console.error("[store] kill shell session failed:", e));
-
-      if (!hasTag(item, "blocked")) {
-        const worktreePath = `${repo.path}/.kanna-worktrees/${item.branch}`;
-
-        // Custom task teardown (before repo-level teardown)
-        if (item.display_name) {
-          try {
-            const tasksDir = `${repo.path}/.kanna/tasks`;
-            const entries = await invoke<string[]>("list_dir", { path: tasksDir }).catch(() => [] as string[]);
-            for (const entry of entries) {
-              const agentMdPath = `${tasksDir}/${entry}/agent.md`;
-              let content: string;
-              try {
-                content = await invoke<string>("read_text_file", { path: agentMdPath });
-              } catch { continue; }
-              const config = parseAgentMd(content, entry);
-              if (config && config.name === item.display_name && config.teardown?.length) {
-                for (const cmd of config.teardown) {
-                  await invoke("run_script", { script: cmd, cwd: worktreePath, env: { KANNA_WORKTREE: "1" } });
-                }
-                break;
-              }
-            }
-          } catch (e) { console.error("[store] custom task teardown failed:", e); }
-        }
-
-        // Repo-level teardown
-        try {
-          const configContent = await invoke<string>("read_text_file", {
-            path: `${repo.path}/.kanna/config.json`,
-          });
-          if (configContent) {
-            const repoConfig = parseRepoConfig(configContent);
-            if (repoConfig.teardown?.length) {
-              for (const cmd of repoConfig.teardown) {
-                await invoke("run_script", { script: cmd, cwd: worktreePath, env: { KANNA_WORKTREE: "1" } });
-              }
-            }
-          }
-        } catch (e) { console.error("[store] teardown failed:", e); }
+      // Already tearing down — force complete
+      if (hasTag(item, "teardown")) {
+        await invoke("kill_session", { sessionId: `td-${item.id}` }).catch((e: unknown) =>
+          console.error("[store] kill teardown session failed:", e));
+        await removePipelineItemTag(_db, item.id, "teardown");
+        await addPipelineItemTag(_db, item.id, "done");
+        selectNextItem(item.id);
+        bump();
+        return;
       }
 
-      if (hasTag(item, "blocked")) {
+      const wasBlocked = hasTag(item, "blocked");
+
+      // Blocked tasks never started — no teardown needed
+      if (wasBlocked) {
         await removeAllBlockersForItem(_db, item.id);
+        await addPipelineItemTag(_db, item.id, "done");
+        selectNextItem(item.id);
+        bump();
+        (async () => {
+          await invoke("kill_session", { sessionId: item.id }).catch((e: unknown) =>
+            console.error("[store] kill_session failed:", e));
+        })();
+        return;
       }
 
-      await addPipelineItemTag(_db, item.id, "done");
-      if (!hasTag(item, "blocked")) {
-        await checkUnblocked(item.id);
+      const teardownCmds = await collectTeardownCommands(item, repo);
+
+      if (teardownCmds.length === 0) {
+        // No teardown — fast close
+        await addPipelineItemTag(_db, item.id, "done");
+        selectNextItem(item.id);
+        bump();
+        (async () => {
+          try {
+            await Promise.all([
+              invoke("kill_session", { sessionId: item.id }).catch((e: unknown) =>
+                console.error("[store] kill_session failed:", e)),
+              invoke("kill_session", { sessionId: `shell-${item.id}` }).catch((e: unknown) =>
+                console.error("[store] kill shell session failed:", e)),
+            ]);
+            await checkUnblocked(item.id);
+          } catch (e) { console.error("[store] close cleanup failed:", e); }
+        })();
+        return;
       }
+
+      // Has teardown scripts — enter teardown state
+      // 1. Kill existing sessions
+      await Promise.all([
+        invoke("kill_session", { sessionId: item.id }).catch((e: unknown) =>
+          console.error("[store] kill_session failed:", e)),
+        invoke("kill_session", { sessionId: `shell-${item.id}` }).catch((e: unknown) =>
+          console.error("[store] kill shell session failed:", e)),
+      ]);
+
+      // 2. Spawn teardown PTY session and attach so output flows to the
+      //    existing terminal (useTerminal listens for td-{sessionId} events)
+      const worktreePath = `${repo.path}/.kanna-worktrees/${item.branch}`;
+      const scriptParts = teardownCmds.map((cmd) => {
+        const escaped = cmd.replace(/'/g, "'\\''");
+        return `printf '\\033[2m$ %s\\033[0m\\n' '${escaped}' && ${cmd}`;
+      });
+      const fullCmd = `printf '\\033[33mRunning teardown...\\033[0m\\n' && ${scriptParts.join(" && ")}`;
+      const tdSessionId = `td-${item.id}`;
+      await invoke("spawn_session", {
+        sessionId: tdSessionId,
+        cwd: worktreePath,
+        executable: "/bin/zsh",
+        args: ["--login", "-c", fullCmd],
+        env: { KANNA_WORKTREE: "1" },
+        cols: 120,
+        rows: 30,
+      });
+      await invoke("attach_session", { sessionId: tdSessionId });
+
+      // 3. Tag and refresh sidebar (strikethrough)
+      await addPipelineItemTag(_db, item.id, "teardown");
       bump();
-
-      // Select next item in display order
-      const sorted = sortedItemsForCurrentRepo.value;
-      const idx = sorted.findIndex((i) => i.id === item.id);
-      const remaining = sorted.filter((i) => i.id !== item.id);
-      const nextIdx = idx >= remaining.length ? remaining.length - 1 : idx;
-      selectedItemId.value = remaining[nextIdx]?.id || null;
-      if (selectedItemId.value) emitTaskSelected(selectedItemId.value);
     } catch (e) {
       console.error("[store] close failed:", e);
       toast.error("Failed to close task");
@@ -1015,6 +1077,22 @@ export const useKannaStore = defineStore("kanna", () => {
       const payload = event.payload || event;
       const sessionId = payload.session_id;
       if (!sessionId) return;
+
+      // Teardown session finished — mark task done
+      if (typeof sessionId === "string" && sessionId.startsWith("td-")) {
+        const itemId = sessionId.slice(3);
+        const item = items.value.find((i) => i.id === itemId);
+        if (!item || !hasTag(item, "teardown")) return;
+        await removePipelineItemTag(_db, itemId, "teardown");
+        await addPipelineItemTag(_db, itemId, "done");
+        if (selectedItemId.value === itemId) {
+          selectNextItem(itemId);
+        }
+        await checkUnblocked(itemId);
+        bump();
+        return;
+      }
+
       _handleAgentFinished(sessionId);
     });
   }
