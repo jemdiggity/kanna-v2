@@ -163,7 +163,7 @@ function openInIDE() {
     script: `${cmd} "${fullPath}"`,
     cwd: props.worktreePath,
     env: {},
-  }).catch(() => {});
+  }).catch((e) => console.error("[openInIDE] failed:", e));
 }
 
 useLessScroll(contentRef, {
