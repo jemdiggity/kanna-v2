@@ -15,7 +15,7 @@ const emit = defineEmits<{
 
 const query = ref("");
 const selected = ref<Set<string>>(new Set(props.preselected || []));
-const selectedIndex = ref(0);
+const selectedIndex = ref(-1);
 const inputRef = ref<HTMLInputElement | null>(null);
 const mouseMoved = ref(false);
 
@@ -72,12 +72,11 @@ function handleKeydown(e: KeyboardEvent) {
     selectedIndex.value = Math.max(selectedIndex.value - 1, 0);
   } else if (e.key === "Enter") {
     e.preventDefault();
-    if (filtered.value.length > 0 && query.value) {
-      // If typing a search, Enter adds the highlighted item
-      const item = filtered.value[selectedIndex.value];
-      if (item) addItem(item.id);
+    if (selectedIndex.value >= 0 && filtered.value[selectedIndex.value]) {
+      // Item highlighted — add it
+      addItem(filtered.value[selectedIndex.value].id);
     } else {
-      // If not searching, Enter confirms (even with zero — removes all blockers)
+      // Nothing highlighted — confirm selection
       emit("confirm", [...selected.value]);
     }
   } else if (e.key === "Backspace" && query.value === "") {
@@ -89,7 +88,7 @@ function handleKeydown(e: KeyboardEvent) {
   }
 }
 
-watch(query, () => { selectedIndex.value = 0; });
+watch(query, (val) => { selectedIndex.value = val ? 0 : -1; });
 
 onMounted(async () => {
   await nextTick();
