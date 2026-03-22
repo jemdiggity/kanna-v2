@@ -44,7 +44,7 @@ A single input field with placeholder `owner/repo, URL, or gh repo clone...`. Be
 |-------|-------------|
 | `https://github.com/owner/repo` | Clone URL |
 | `https://github.com/owner/repo.git` | Clone URL |
-| `git@github.com:owner/repo.git` | Unsupported — show inline hint: "Use HTTPS URL instead" |
+| `git@github.com:owner/repo.git` | Clone URL (SSH) |
 | `owner/repo` | GitHub shorthand → clone |
 | `gh repo clone owner/repo` | gh CLI command → clone |
 | `/path/to/local/repo` | Local path → import directly |
@@ -82,7 +82,7 @@ function parseRepoInput(input: string): ParsedInput
 Parsing priority:
 1. Starts with `/` or `~` → local path (assign raw input to `localPath`)
 2. Starts with `gh repo clone ` → strip prefix, parse remainder as shorthand
-3. Starts with `git@github.com:` → return `unknown` with hint "Use HTTPS URL instead"
+3. Starts with `git@github.com:` → extract owner/repo, use raw input as `cloneUrl`
 4. Starts with `https://github.com/` → extract owner/repo, construct `cloneUrl`
 5. Matches `<word>/<word>` pattern (no spaces, no extra slashes) → GitHub shorthand, construct `cloneUrl` as `https://github.com/{owner}/{repo}.git`
 6. Otherwise → unknown (keep Import disabled)
@@ -172,5 +172,5 @@ All paths displayed with `~` in the UI must be resolved to absolute paths before
 - Listing user's GitHub repos as suggestions
 - Batch import of multiple repos
 - Configuring the default repo directory (always `~/.kanna/repos/`)
-- SSH key management for private repo cloning
+- SSH key management (SSH clone is attempted as-is; auth failures show the git error)
 - Git LFS handling
