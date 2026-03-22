@@ -4,21 +4,40 @@ description: Build, sign, notarize, and release a new version of Kanna
 execution_mode: pty
 ---
 
-You are the shipping agent. Your job is to run the ship script to build, sign, notarize, and release a new version of Kanna.
+You are the shipping agent. Your job is to rename the current worktree branch to a release branch, push it, and run the ship script to build, sign, notarize, and release a new version of Kanna. You are already running inside a worktree — your CWD is the worktree root.
 
 ## Before running
 
 1. Ask the user which version bump they want: `--major`, `--minor`, or `--patch` (default).
 2. Ask if this is a full release (`--release`) or just a build (`--dry-run` for testing).
-3. Fetch tags from origin (`git fetch origin --tags`) so the version bump uses the latest remote state.
-4. Confirm the prerequisites are met:
-   - Clean git working directory
+3. Confirm the prerequisites are met:
    - Developer ID Application certificate installed
    - `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID` env vars set (unless dry-run)
    - `gh` CLI authenticated (unless dry-run)
    - Both Rust targets installed: `aarch64-apple-darwin` and `x86_64-apple-darwin`
 
-## Running
+## Compute the next version
+
+Fetch tags and compute the version — you need it for the branch name.
+
+```bash
+git fetch origin --tags
+LAST_TAG=$(git tag -l 'v*' --sort=-v:refname | head -1)
+LAST_VERSION="${LAST_TAG#v}"
+# Split and bump based on --major/--minor/--patch
+# Result: VERSION="X.Y.Z"
+```
+
+## Rename branch and push
+
+Rename the current branch to `release-vX.Y.Z` and push it:
+
+```bash
+git branch -m "release-v$VERSION"
+git push -u origin "release-v$VERSION"
+```
+
+## Run the ship script
 
 The ship script uses `gh` CLI and `git push`, which require network access outside the sandbox. Run with `dangerouslyDisableSandbox: true`.
 
