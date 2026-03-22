@@ -9,7 +9,9 @@ import {
   findRepoByPath,
   listPipelineItems,
   insertPipelineItem,
-  updatePipelineItemStage,
+  updatePipelineItemTags,
+  addPipelineItemTag,
+  removePipelineItemTag,
   updatePipelineItemPR,
   getSetting,
   setSetting,
@@ -65,7 +67,8 @@ function createMockDb(): DbHandle & {
         const repo = tables.repo.find((r) => r.id === id);
         if (repo) repo.hidden = 0;
       } else if (q.startsWith("INSERT INTO PIPELINE_ITEM")) {
-        const [id, repo_id, issue_number, issue_title, prompt, stage, pr_number, pr_url, branch, agent_type, port_offset, activity] =
+        // stage is a literal 'legacy' in the SQL, not a bind param
+        const [id, repo_id, issue_number, issue_title, prompt, tagsJson, pr_number, pr_url, branch, agent_type, port_offset, _port_env, activity] =
           bindValues as unknown[];
         tables.pipeline_item.push({
           id: id as string,
@@ -73,7 +76,8 @@ function createMockDb(): DbHandle & {
           issue_number: (issue_number as number | null),
           issue_title: (issue_title as string | null),
           prompt: (prompt as string | null),
-          stage: stage as string,
+          stage: "legacy",
+          tags: (tagsJson as string) || "[]",
           pr_number: (pr_number as number | null),
           pr_url: (pr_url as string | null),
           branch: (branch as string | null),
@@ -87,11 +91,11 @@ function createMockDb(): DbHandle & {
           pinned: 0,
           pin_order: null,
         } as PipelineItem);
-      } else if (q.startsWith("UPDATE PIPELINE_ITEM SET STAGE")) {
-        const [newStage, id] = bindValues as string[];
+      } else if (q.startsWith("UPDATE PIPELINE_ITEM SET TAGS")) {
+        const [newTags, id] = bindValues as string[];
         const item = tables.pipeline_item.find((p) => p.id === id);
         if (item) {
-          item.stage = newStage;
+          item.tags = newTags;
           item.updated_at = new Date().toISOString();
         }
       } else if (q.startsWith("UPDATE PIPELINE_ITEM SET PR_NUMBER")) {
@@ -119,8 +123,6 @@ function createMockDb(): DbHandle & {
           item.updated_at = new Date().toISOString();
         }
       } else if (q.startsWith("UPDATE PIPELINE_ITEM SET PIN_ORDER = CASE")) {
-        // Bulk reorder: bind layout is [id0, 0, id1, 1, ..., id0, id1, ...]
-        // First 2n values are CASE WHEN pairs (id, order), last n are WHERE IN ids
         if (bindValues) {
           const n = Math.round(bindValues.length / 3);
           for (let i = 0; i < n; i++) {
@@ -171,6 +173,10 @@ function createMockDb(): DbHandle & {
         return tables.pipeline_item.filter(
           (p) => p.repo_id === repoId
         ) as unknown as T[];
+      } else if (q.startsWith("SELECT TAGS FROM PIPELINE_ITEM WHERE ID")) {
+        const [id] = bindValues as string[];
+        const item = tables.pipeline_item.find((p) => p.id === id);
+        return item ? [{ tags: item.tags } as unknown as T] : [];
       } else if (q.startsWith("SELECT * FROM SETTINGS WHERE KEY")) {
         const [key] = bindValues as string[];
         return tables.settings.filter(
@@ -311,7 +317,7 @@ describe("pipeline_item queries", () => {
       issue_number: 42,
       issue_title: "Fix bug",
       prompt: null,
-      stage: "in_progress",
+      tags: [],
       pr_number: null,
       pr_url: null,
       branch: null,
@@ -322,17 +328,17 @@ describe("pipeline_item queries", () => {
     });
     const items = await listPipelineItems(db, "r1");
     expect(items).toHaveLength(1);
-    expect(items[0].stage).toBe("in_progress");
+    expect(items[0].tags).toBe("[]");
   });
 
-  it("updatePipelineItemStage updates the stage", async () => {
+  it("insertPipelineItem with tags", async () => {
     await insertPipelineItem(db, {
       id: "pi1",
       repo_id: "r1",
       issue_number: null,
       issue_title: null,
       prompt: "do it",
-      stage: "in_progress",
+      tags: ["pr"],
       pr_number: null,
       pr_url: null,
       branch: null,
@@ -341,9 +347,92 @@ describe("pipeline_item queries", () => {
       port_offset: null,
       port_env: null,
     });
-    await updatePipelineItemStage(db, "pi1", "in_progress");
     const item = db.tables.pipeline_item.find((p) => p.id === "pi1");
-    expect(item?.stage).toBe("in_progress");
+    expect(item?.tags).toBe('["pr"]');
+  });
+
+  it("updatePipelineItemTags updates the tags", async () => {
+    await insertPipelineItem(db, {
+      id: "pi1",
+      repo_id: "r1",
+      issue_number: null,
+      issue_title: null,
+      prompt: "do it",
+      tags: [],
+      pr_number: null,
+      pr_url: null,
+      branch: null,
+      agent_type: null,
+      activity: "idle",
+      port_offset: null,
+      port_env: null,
+    });
+    await updatePipelineItemTags(db, "pi1", ["done"]);
+    const item = db.tables.pipeline_item.find((p) => p.id === "pi1");
+    expect(item?.tags).toBe('["done"]');
+  });
+
+  it("addPipelineItemTag adds a tag", async () => {
+    await insertPipelineItem(db, {
+      id: "pi1",
+      repo_id: "r1",
+      issue_number: null,
+      issue_title: null,
+      prompt: "do it",
+      tags: ["pr"],
+      pr_number: null,
+      pr_url: null,
+      branch: null,
+      agent_type: null,
+      activity: "idle",
+      port_offset: null,
+      port_env: null,
+    });
+    await addPipelineItemTag(db, "pi1", "blocked");
+    const item = db.tables.pipeline_item.find((p) => p.id === "pi1");
+    expect(JSON.parse(item!.tags)).toEqual(["pr", "blocked"]);
+  });
+
+  it("addPipelineItemTag is idempotent", async () => {
+    await insertPipelineItem(db, {
+      id: "pi1",
+      repo_id: "r1",
+      issue_number: null,
+      issue_title: null,
+      prompt: "do it",
+      tags: ["pr"],
+      pr_number: null,
+      pr_url: null,
+      branch: null,
+      agent_type: null,
+      activity: "idle",
+      port_offset: null,
+      port_env: null,
+    });
+    await addPipelineItemTag(db, "pi1", "pr");
+    const item = db.tables.pipeline_item.find((p) => p.id === "pi1");
+    expect(JSON.parse(item!.tags)).toEqual(["pr"]);
+  });
+
+  it("removePipelineItemTag removes a tag", async () => {
+    await insertPipelineItem(db, {
+      id: "pi1",
+      repo_id: "r1",
+      issue_number: null,
+      issue_title: null,
+      prompt: "do it",
+      tags: ["pr", "blocked"],
+      pr_number: null,
+      pr_url: null,
+      branch: null,
+      agent_type: null,
+      activity: "idle",
+      port_offset: null,
+      port_env: null,
+    });
+    await removePipelineItemTag(db, "pi1", "pr");
+    const item = db.tables.pipeline_item.find((p) => p.id === "pi1");
+    expect(JSON.parse(item!.tags)).toEqual(["blocked"]);
   });
 
   it("updatePipelineItemPR sets pr_number and pr_url", async () => {
@@ -353,7 +442,7 @@ describe("pipeline_item queries", () => {
       issue_number: null,
       issue_title: null,
       prompt: null,
-      stage: "in_progress",
+      tags: [],
       pr_number: null,
       pr_url: null,
       branch: "feature/x",
@@ -399,17 +488,17 @@ describe("pin queries", () => {
     db = createMockDb();
     await insertPipelineItem(db, {
       id: "pi1", repo_id: "r1", issue_number: null, issue_title: null,
-      prompt: "task 1", stage: "in_progress", pr_number: null, pr_url: null,
+      prompt: "task 1", tags: [], pr_number: null, pr_url: null,
       branch: null, agent_type: null, activity: "idle", port_offset: null, port_env: null,
     });
     await insertPipelineItem(db, {
       id: "pi2", repo_id: "r1", issue_number: null, issue_title: null,
-      prompt: "task 2", stage: "in_progress", pr_number: null, pr_url: null,
+      prompt: "task 2", tags: [], pr_number: null, pr_url: null,
       branch: null, agent_type: null, activity: "idle", port_offset: null, port_env: null,
     });
     await insertPipelineItem(db, {
       id: "pi3", repo_id: "r1", issue_number: null, issue_title: null,
-      prompt: "task 3", stage: "in_progress", pr_number: null, pr_url: null,
+      prompt: "task 3", tags: [], pr_number: null, pr_url: null,
       branch: null, agent_type: null, activity: "idle", port_offset: null, port_env: null,
     });
   });

@@ -14,7 +14,8 @@ export interface PipelineItem {
   issue_number: number | null;
   issue_title: string | null;
   prompt: string | null;
-  stage: string;
+  stage: string;    // legacy — kept for DB compat, unused in code
+  tags: string;     // JSON array of tag strings, e.g. '["pr"]' or '[]'
   pr_number: number | null;
   pr_url: string | null;
   branch: string | null;

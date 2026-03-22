@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import type { PipelineItem } from "@kanna/db";
-import StageBadge from "./StageBadge.vue";
+import TagBadges from "./TagBadges.vue";
 
 const props = defineProps<{
   item: PipelineItem;
@@ -25,7 +25,7 @@ const ports = computed<number[]>(() => {
 <template>
   <div class="task-header">
     <div class="header-top">
-      <StageBadge :stage="item.stage" />
+      <TagBadges :tags="item.tags" />
       <h2 class="task-title">{{ title(item) }}</h2>
     </div>
     <div class="header-meta">

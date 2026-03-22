@@ -141,7 +141,7 @@ DB name configurable via `KANNA_DB_NAME` env var (defaults to `kanna-v2.db`). E2
 
 ## Conventions
 
-- Pipeline stages: `queued`, `in_progress`, `needs_review`, `merged`, `closed`
+- Task tags (JSON array on `pipeline_item.tags`): system tags are `done`, `pr`, `merge`, `blocked`. No tags = active task.
 - Git worktrees created at `{repoPath}/.kanna-worktrees/task-{uuid}`
 - Branch names: `task-{uuid}`
 - GitHub labels: `kn:wip`, `kn:pr-ready`, `kn:claimed`

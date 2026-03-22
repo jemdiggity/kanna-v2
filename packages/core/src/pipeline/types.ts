@@ -1,13 +1,12 @@
-export type Stage = "in_progress" | "pr" | "merge" | "done" | "blocked";
+export const SYSTEM_TAGS = ["done", "pr", "merge", "blocked"] as const;
+export type SystemTag = (typeof SYSTEM_TAGS)[number];
 
-export const VALID_TRANSITIONS = [
-  { from: "in_progress", to: "pr" },
-  { from: "in_progress", to: "done" },
-  { from: "in_progress", to: "merge" },
-  { from: "pr", to: "done" },
-  { from: "merge", to: "done" },
-  { from: "blocked", to: "in_progress" },
-  { from: "blocked", to: "done" },
-] as const;
+export function parseTags(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+  try { return JSON.parse(raw); }
+  catch { return []; }
+}
 
-export type ValidTransition = (typeof VALID_TRANSITIONS)[number];
+export function hasTag(item: { tags: string }, tag: string): boolean {
+  return parseTags(item.tags).includes(tag);
+}

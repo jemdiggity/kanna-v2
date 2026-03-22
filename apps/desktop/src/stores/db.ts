@@ -98,11 +98,18 @@ export async function runMigrations(db: DbHandle): Promise<void> {
   await addColumn("pipeline_item", "unread_at", "TEXT");
   await addColumn("repo", "hidden", "INTEGER NOT NULL DEFAULT 0");
   await addColumn("pipeline_item", "closed_at", "TEXT");
+  await addColumn("pipeline_item", "tags", "TEXT NOT NULL DEFAULT '[]'");
 
+  // Legacy stage → tags migration
   try {
     await db.execute(`UPDATE pipeline_item SET stage = 'in_progress' WHERE stage = 'queued'`);
     await db.execute(`UPDATE pipeline_item SET stage = 'done' WHERE stage IN ('needs_review', 'merged', 'closed')`);
-  } catch (e) { console.debug("[db] stage migration:", e); }
+    // Populate tags from stage for items that haven't been migrated yet
+    await db.execute(`UPDATE pipeline_item SET tags = '["done"]' WHERE stage = 'done' AND tags = '[]'`);
+    await db.execute(`UPDATE pipeline_item SET tags = '["pr"]' WHERE stage = 'pr' AND tags = '[]'`);
+    await db.execute(`UPDATE pipeline_item SET tags = '["merge"]' WHERE stage = 'merge' AND tags = '[]'`);
+    await db.execute(`UPDATE pipeline_item SET tags = '["blocked"]' WHERE stage = 'blocked' AND tags = '[]'`);
+  } catch (e) { console.debug("[db] stage/tags migration:", e); }
 
   // Activity log for analytics dashboard
   await db.execute(`CREATE TABLE IF NOT EXISTS activity_log (

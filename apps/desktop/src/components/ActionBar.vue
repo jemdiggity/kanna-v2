@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { PipelineItem } from "@kanna/db";
+import { hasTag } from "@kanna/core";
 import { computed } from "vue";
 
 const props = defineProps<{
@@ -11,7 +12,7 @@ const emit = defineEmits<{
 }>();
 
 const showMakePR = computed(() => {
-  return props.item.stage === "in_progress";
+  return !hasTag(props.item, "done") && !hasTag(props.item, "pr") && !hasTag(props.item, "merge") && !hasTag(props.item, "blocked");
 });
 </script>
 

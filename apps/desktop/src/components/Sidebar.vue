@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { Repo, PipelineItem } from "@kanna/db";
+import { hasTag } from "@kanna/core";
 import { ref, nextTick } from "vue";
 import draggable from "vuedraggable";
 
@@ -27,7 +28,7 @@ const collapsedRepos = ref<Set<string>>(new Set());
 
 function sortedPinned(repoId: string): PipelineItem[] {
   return props.pipelineItems
-    .filter((i) => i.repo_id === repoId && i.stage !== "done" && i.pinned)
+    .filter((i) => i.repo_id === repoId && !hasTag(i, "done") && i.pinned)
     .sort((a, b) => (a.pin_order ?? 0) - (b.pin_order ?? 0));
 }
 
@@ -46,30 +47,30 @@ function sortByActivity(items: PipelineItem[]): PipelineItem[] {
 
 function sortedPR(repoId: string): PipelineItem[] {
   return sortByActivity(
-    props.pipelineItems.filter((i) => i.repo_id === repoId && i.stage === "pr" && !i.pinned)
+    props.pipelineItems.filter((i) => i.repo_id === repoId && hasTag(i, "pr") && !i.pinned)
   );
 }
 
 function sortedMerge(repoId: string): PipelineItem[] {
   return sortByActivity(
-    props.pipelineItems.filter((i) => i.repo_id === repoId && i.stage === "merge" && !i.pinned)
+    props.pipelineItems.filter((i) => i.repo_id === repoId && hasTag(i, "merge") && !i.pinned)
   );
 }
 
-function sortedInProgress(repoId: string): PipelineItem[] {
+function sortedActive(repoId: string): PipelineItem[] {
   return sortByActivity(
-    props.pipelineItems.filter((i) => i.repo_id === repoId && i.stage === "in_progress" && !i.pinned)
+    props.pipelineItems.filter((i) => i.repo_id === repoId && !hasTag(i, "pr") && !hasTag(i, "merge") && !hasTag(i, "blocked") && !hasTag(i, "done") && !i.pinned)
   );
 }
 
 function sortedBlocked(repoId: string): PipelineItem[] {
   return props.pipelineItems
-    .filter((i) => i.repo_id === repoId && i.stage === "blocked" && !i.pinned)
+    .filter((i) => i.repo_id === repoId && hasTag(i, "blocked") && !i.pinned)
     .sort((a, b) => a.created_at.localeCompare(b.created_at));
 }
 
 function itemsForRepo(repoId: string): PipelineItem[] {
-  return [...sortedPinned(repoId), ...sortedMerge(repoId), ...sortedPR(repoId), ...sortedInProgress(repoId), ...sortedBlocked(repoId)];
+  return [...sortedPinned(repoId), ...sortedMerge(repoId), ...sortedPR(repoId), ...sortedActive(repoId), ...sortedBlocked(repoId)];
 }
 
 function itemTitle(item: PipelineItem): string {
@@ -324,10 +325,10 @@ function onUnpinnedChange(repoId: string, evt: any) {
             </template>
           </draggable>
 
-          <!-- In Progress tasks -->
-          <div v-if="sortedInProgress(repo.id).length > 0" class="section-label">In Progress</div>
+          <!-- Active tasks -->
+          <div v-if="sortedActive(repo.id).length > 0" class="section-label">Active</div>
           <draggable
-            :model-value="sortedInProgress(repo.id)"
+            :model-value="sortedActive(repo.id)"
             :group="{ name: `repo-${repo.id}` }"
             item-key="id"
             :animation="150"

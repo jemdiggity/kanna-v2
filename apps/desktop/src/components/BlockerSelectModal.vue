@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, nextTick } from "vue";
 import type { PipelineItem } from "@kanna/db";
+import { hasTag } from "@kanna/core";
 
 const props = defineProps<{
   candidates: PipelineItem[];
@@ -145,8 +146,8 @@ onMounted(async () => {
         >
           <span class="command-label">{{ itemTitle(item) }}</span>
           <span class="command-meta">
-            <span v-if="isDisabled(item.id)" class="stage-label">Circular dependency</span>
-            <span v-else class="stage-label">{{ item.stage === 'in_progress' ? 'In Progress' : 'Blocked' }}</span>
+            <span v-if="isDisabled(item.id)" class="tag-label">Circular dependency</span>
+            <span v-else class="tag-label">{{ hasTag(item, 'blocked') ? 'Blocked' : 'Active' }}</span>
           </span>
         </div>
       </div>
@@ -277,11 +278,11 @@ onMounted(async () => {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.stage-label {
+.tag-label {
   font-size: 11px;
   color: #888;
 }
-.command-item.highlighted .stage-label {
+.command-item.highlighted .tag-label {
   color: #ccc;
 }
 .palette-footer {

@@ -1,6 +1,5 @@
-// Pipeline
+// Pipeline (tags)
 export * from "./pipeline/types.js";
-export * from "./pipeline/transitions.js";
 
 // Slack
 export * from "./slack/client.js";

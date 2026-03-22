@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { PipelineItem } from "@kanna/db";
+import { hasTag } from "@kanna/core";
 import TaskHeader from "./TaskHeader.vue";
 import TerminalTabs from "./TerminalTabs.vue";
 
@@ -21,17 +22,17 @@ const emit = defineEmits<{
   <main class="main-panel">
     <template v-if="item">
       <TaskHeader v-if="!maximized" :item="item" />
-      <template v-if="item.stage === 'blocked'">
+      <template v-if="hasTag(item, 'blocked')">
         <div class="blocked-placeholder">
           <p class="blocked-title">Task Blocked</p>
-          <p class="blocked-hint">This task will start automatically when all blockers leave "In Progress".</p>
+          <p class="blocked-hint">This task will start automatically when all blockers complete.</p>
           <div v-if="blockers && blockers.length > 0" class="blocked-by">
             <p class="blocked-by-label">Waiting on:</p>
             <div v-for="b in blockers" :key="b.id" class="blocker-item">
               <span
                 class="blocker-status"
-                :style="{ color: b.stage === 'in_progress' ? '#0066cc' : '#666' }"
-              >{{ b.stage === 'in_progress' ? 'In Progress' : b.stage }}</span>
+                :style="{ color: hasTag(b, 'done') ? '#666' : '#0066cc' }"
+              >{{ hasTag(b, 'done') ? 'Done' : 'Active' }}</span>
               <span class="blocker-name">{{ b.display_name || (b.prompt ? b.prompt.slice(0, 60) : 'Untitled') }}</span>
             </div>
           </div>

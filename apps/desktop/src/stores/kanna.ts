@@ -4,13 +4,14 @@ import { computedAsync, watchDebounced } from "@vueuse/core";
 import { invoke } from "../invoke";
 import { isTauri } from "../tauri-mock";
 import { listen } from "../listen";
-import { parseRepoConfig, parseAgentMd } from "@kanna/core";
+import { parseRepoConfig, parseAgentMd, hasTag } from "@kanna/core";
 import type { RepoConfig, CustomTaskConfig } from "@kanna/core";
 import type { DbHandle, PipelineItem, Repo } from "@kanna/db";
 import {
   listRepos, insertRepo, findRepoByPath,
   hideRepo as hideRepoQuery, unhideRepo as unhideRepoQuery,
-  listPipelineItems, insertPipelineItem, updatePipelineItemStage,
+  listPipelineItems, insertPipelineItem,
+  addPipelineItemTag, removePipelineItemTag, updatePipelineItemTags,
   updatePipelineItemActivity, pinPipelineItem, unpinPipelineItem,
   reorderPinnedItems, updatePipelineItemDisplayName,
   getRepo, getSetting, setSetting,
@@ -84,13 +85,13 @@ export const useKannaStore = defineStore("kanna", () => {
   const currentItem = computed(() => {
     if (!selectedItemId.value) return null;
     const item = items.value.find((i) => i.id === selectedItemId.value);
-    return item && item.stage !== "done" ? item : null;
+    return item && !hasTag(item, "done") ? item : null;
   });
 
-  // Mirrors Sidebar.vue's itemsForRepo(): pinned (by pin_order), then pr → merge → in_progress (each by activity).
+  // Mirrors Sidebar.vue's itemsForRepo(): pinned (by pin_order), then pr → merge → active (each by activity).
   const sortedItemsForCurrentRepo = computed(() => {
     const repoItems = items.value.filter(
-      (item) => item.repo_id === selectedRepoId.value && item.stage !== "done"
+      (item) => item.repo_id === selectedRepoId.value && !hasTag(item, "done")
     );
     const pinned = repoItems
       .filter((i) => i.pinned)
@@ -107,13 +108,13 @@ export const useKannaStore = defineStore("kanna", () => {
         return bTime.localeCompare(aTime);
       });
     }
-    const pr = sortByActivity(repoItems.filter((i) => i.stage === "pr" && !i.pinned));
-    const merge = sortByActivity(repoItems.filter((i) => i.stage === "merge" && !i.pinned));
-    const inProgress = sortByActivity(repoItems.filter((i) => i.stage === "in_progress" && !i.pinned));
+    const merge = sortByActivity(repoItems.filter((i) => hasTag(i, "merge") && !i.pinned));
+    const pr = sortByActivity(repoItems.filter((i) => hasTag(i, "pr") && !i.pinned));
+    const active = sortByActivity(repoItems.filter((i) => !hasTag(i, "pr") && !hasTag(i, "merge") && !hasTag(i, "blocked") && !i.pinned));
     const blocked = repoItems
-      .filter((i) => i.stage === "blocked" && !i.pinned)
+      .filter((i) => hasTag(i, "blocked") && !i.pinned)
       .sort((a, b) => a.created_at.localeCompare(b.created_at));
-    return [...pinned, ...pr, ...merge, ...inProgress, ...blocked];
+    return [...pinned, ...merge, ...pr, ...active, ...blocked];
   });
 
   // ── Actions: Selection ───────────────────────────────────────────
@@ -171,7 +172,7 @@ export const useKannaStore = defineStore("kanna", () => {
     repoPath: string,
     prompt: string,
     agentType: "pty" | "sdk" = "pty",
-    opts?: { baseBranch?: string; stage?: string; customTask?: CustomTaskConfig },
+    opts?: { baseBranch?: string; tags?: string[]; customTask?: CustomTaskConfig },
   ) {
     const id = generateId();
     const branch = `task-${id}`;
@@ -233,7 +234,7 @@ export const useKannaStore = defineStore("kanna", () => {
         issue_number: null,
         issue_title: null,
         prompt: effectivePrompt,
-        stage: effectiveStage,
+        tags: opts?.tags ?? [],
         pr_number: null,
         pr_url: null,
         branch,
@@ -392,7 +393,7 @@ export const useKannaStore = defineStore("kanna", () => {
       await invoke("kill_session", { sessionId: item.id }).catch((e: unknown) => console.error("[store] kill_session failed:", e));
       await invoke("kill_session", { sessionId: `shell-${item.id}` }).catch((e: unknown) => console.error("[store] kill shell session failed:", e));
 
-      if (item.stage === "in_progress") {
+      if (!hasTag(item, "blocked")) {
         const worktreePath = `${repo.path}/.kanna-worktrees/${item.branch}`;
 
         // Custom task teardown (before repo-level teardown)
@@ -433,12 +434,12 @@ export const useKannaStore = defineStore("kanna", () => {
         } catch (e) { console.error("[store] teardown failed:", e); }
       }
 
-      if (item.stage === "blocked") {
+      if (hasTag(item, "blocked")) {
         await removeAllBlockersForItem(_db, item.id);
       }
 
-      await updatePipelineItemStage(_db, item.id, "done");
-      if (item.stage === "in_progress") {
+      await addPipelineItemTag(_db, item.id, "done");
+      if (!hasTag(item, "blocked")) {
         await checkUnblocked(item.id);
       }
       bump();
@@ -464,13 +465,13 @@ export const useKannaStore = defineStore("kanna", () => {
     }
     try {
       const rows = await _db.select<PipelineItem>(
-        "SELECT * FROM pipeline_item WHERE stage = 'done' ORDER BY updated_at DESC LIMIT 1"
+        "SELECT * FROM pipeline_item WHERE tags LIKE '%\"done\"%' ORDER BY updated_at DESC LIMIT 1"
       );
       const item = rows[0];
       if (!item?.branch) return;
       const repo = repos.value.find((r) => r.id === item.repo_id);
       if (!repo) return;
-      await updatePipelineItemStage(_db, item.id, "in_progress");
+      await removePipelineItemTag(_db, item.id, "done");
       await updatePipelineItemActivity(_db, item.id, "working");
       const worktreePath = `${repo.path}/.kanna-worktrees/${item.branch}`;
       await spawnPtySession(item.id, worktreePath, item.prompt || "");
@@ -497,7 +498,7 @@ export const useKannaStore = defineStore("kanna", () => {
       `3. Create a PR with "gh pr create" — write a clear title and description summarizing the changes.`,
     ].join("\n");
 
-    await createItem(repoId, repoPath, prompt, "pty", { baseBranch: item.branch, stage: "pr" });
+    await createItem(repoId, repoPath, prompt, "pty", { baseBranch: item.branch, tags: ["pr"] });
   }
 
   async function startMergeAgent(repoId: string, repoPath: string) {
@@ -536,7 +537,7 @@ export const useKannaStore = defineStore("kanna", () => {
       `- If gh CLI commands fail due to sandbox restrictions, disable the sandbox for those commands.`,
     ].join("\n");
 
-    await createItem(repoId, repoPath, prompt, "pty", { stage: "merge" });
+    await createItem(repoId, repoPath, prompt, "pty", { tags: ["merge"] });
   }
 
   async function pinItem(itemId: string, position: number) {
@@ -592,7 +593,7 @@ export const useKannaStore = defineStore("kanna", () => {
     try {
       await invoke("kill_session", { sessionId: originalId }).catch((e: unknown) => console.error("[store] kill_session failed:", e));
       await invoke("kill_session", { sessionId: `shell-${originalId}` }).catch((e: unknown) => console.error("[store] kill shell session failed:", e));
-      await updatePipelineItemStage(_db, originalId, "done");
+      await addPipelineItemTag(_db, originalId, "done");
       await checkUnblocked(originalId);
       bump();
     } catch (e) {
@@ -632,10 +633,10 @@ export const useKannaStore = defineStore("kanna", () => {
   async function checkUnblocked(blockerItemId: string) {
     const blockedItems = await listBlockedByItem(_db, blockerItemId);
     for (const blocked of blockedItems) {
-      if (blocked.stage !== "blocked") continue;
+      if (!hasTag(blocked, "blocked")) continue;
       const blockers = await listBlockersForItem(_db, blocked.id);
       const allClear = blockers.every(
-        (b) => b.stage === "pr" || b.stage === "merge" || b.stage === "done"
+        (b) => hasTag(b, "pr") || hasTag(b, "merge") || hasTag(b, "done")
       );
       if (allClear) {
         await startBlockedTask(blocked);
@@ -700,7 +701,7 @@ export const useKannaStore = defineStore("kanna", () => {
     let portItems = items.value;
     if (portItems.length === 0) {
       portItems = await _db.select<PipelineItem>(
-        "SELECT * FROM pipeline_item WHERE repo_id = ? AND stage != 'done'",
+        "SELECT * FROM pipeline_item WHERE repo_id = ? AND tags NOT LIKE '%\"done\"%'",
         [item.repo_id],
       );
     }
@@ -720,7 +721,7 @@ export const useKannaStore = defineStore("kanna", () => {
     await _db.execute(
       `UPDATE pipeline_item
        SET branch = ?, port_offset = ?, port_env = ?,
-           stage = 'in_progress', activity = 'working',
+           tags = '[]', activity = 'working',
            activity_changed_at = datetime('now'), updated_at = datetime('now')
        WHERE id = ?`,
       [branch, portOffset, Object.keys(portEnv).length > 0 ? JSON.stringify(portEnv) : null, id],
@@ -741,7 +742,7 @@ export const useKannaStore = defineStore("kanna", () => {
   async function blockTask(blockerIds: string[]) {
     const item = currentItem.value;
     const repo = selectedRepo.value;
-    if (!item || !repo || item.stage !== "in_progress") return;
+    if (!item || !repo || hasTag(item, "done") || hasTag(item, "blocked")) return;
 
     const originalPrompt = item.prompt;
     const originalRepoId = item.repo_id;
@@ -756,7 +757,7 @@ export const useKannaStore = defineStore("kanna", () => {
       issue_number: null,
       issue_title: null,
       prompt: originalPrompt,
-      stage: "blocked",
+      tags: ["blocked"],
       pr_number: null,
       pr_url: null,
       branch: null,
@@ -812,7 +813,7 @@ export const useKannaStore = defineStore("kanna", () => {
         console.error("[store] worktree remove failed:", e)
       );
 
-      await updatePipelineItemStage(_db, originalId, "done");
+      await addPipelineItemTag(_db, originalId, "done");
       // The original task going to "done" may unblock other tasks that
       // were waiting on it. We must check — suppressing this causes deadlocks
       // when two tasks block each other (A blocked by B, then B blocked by A').
@@ -827,7 +828,7 @@ export const useKannaStore = defineStore("kanna", () => {
 
   async function editBlockedTask(itemId: string, newBlockerIds: string[]) {
     const item = items.value.find((i) => i.id === itemId);
-    if (!item || item.stage !== "blocked") return;
+    if (!item || !hasTag(item, "blocked")) return;
 
     if (newBlockerIds.length > 0) {
       const hasCycle = await hasCircularDependency(_db, itemId, newBlockerIds);
@@ -856,7 +857,7 @@ export const useKannaStore = defineStore("kanna", () => {
 
     const updatedBlockers = await listBlockersForItem(_db, itemId);
     const allClear = updatedBlockers.length === 0 || updatedBlockers.every(
-      (b) => b.stage === "pr" || b.stage === "merge" || b.stage === "done"
+      (b) => hasTag(b, "pr") || hasTag(b, "merge") || hasTag(b, "done")
     );
     if (allClear) {
       await startBlockedTask(item);
@@ -888,7 +889,7 @@ export const useKannaStore = defineStore("kanna", () => {
     // GC: remove done tasks older than gcAfterDays
     const cutoff = new Date(Date.now() - gcAfterDays.value * 86400000).toISOString();
     const stale = eagerItems.filter(
-      (i) => i.stage === "done" && i.updated_at < cutoff
+      (i) => hasTag(i, "done") && i.updated_at < cutoff
     );
     for (const item of stale) {
       if (item.branch) {
