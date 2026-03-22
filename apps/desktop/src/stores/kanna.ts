@@ -4,8 +4,8 @@ import { computedAsync, watchDebounced } from "@vueuse/core";
 import { invoke } from "../invoke";
 import { isTauri } from "../tauri-mock";
 import { listen } from "../listen";
-import { parseRepoConfig } from "@kanna/core";
-import type { RepoConfig } from "@kanna/core";
+import { parseRepoConfig, parseAgentMd } from "@kanna/core";
+import type { RepoConfig, CustomTaskConfig } from "@kanna/core";
 import type { DbHandle, PipelineItem, Repo } from "@kanna/db";
 import {
   listRepos, insertRepo, findRepoByPath,
@@ -26,6 +26,17 @@ function generateId(): string {
   return Array.from(buf, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+export interface PtySpawnOptions {
+  model?: string;
+  permissionMode?: string;
+  allowedTools?: string[];
+  disallowedTools?: string[];
+  maxTurns?: number;
+  maxBudgetUsd?: number;
+  setupCmdsOverride?: string[];
+  portEnv?: Record<string, string>;
+  setupCmds?: string[];
+}
 // Module-level DB handle — set once by init(), never null after that.
 let _db: DbHandle;
 
@@ -156,11 +167,17 @@ export const useKannaStore = defineStore("kanna", () => {
     repoPath: string,
     prompt: string,
     agentType: "pty" | "sdk" = "pty",
-    opts?: { baseBranch?: string; stage?: string },
+    opts?: { baseBranch?: string; stage?: string; customTask?: CustomTaskConfig },
   ) {
     const id = generateId();
     const branch = `task-${id}`;
     const worktreePath = `${repoPath}/.kanna-worktrees/${branch}`;
+
+    // Compute effective values from custom task config
+    const effectivePrompt = opts?.customTask?.prompt ?? prompt;
+    const effectiveAgentType = opts?.customTask?.executionMode ?? agentType;
+    const effectiveStage = opts?.customTask?.stage ?? opts?.stage ?? "in_progress";
+    const displayName = opts?.customTask?.name ?? null;
 
     // Read .kanna/config.json
     let repoConfig: RepoConfig = {};
@@ -211,15 +228,16 @@ export const useKannaStore = defineStore("kanna", () => {
         repo_id: repoId,
         issue_number: null,
         issue_title: null,
-        prompt,
-        stage: opts?.stage || "in_progress",
+        prompt: effectivePrompt,
+        stage: effectiveStage,
         pr_number: null,
         pr_url: null,
         branch,
-        agent_type: agentType,
+        agent_type: effectiveAgentType,
         port_offset: portOffset,
         port_env: Object.keys(portEnv).length > 0 ? JSON.stringify(portEnv) : null,
         activity: "working",
+        display_name: displayName,
       });
     } catch (e) {
       console.error("[store] DB insert failed:", e);
@@ -229,17 +247,29 @@ export const useKannaStore = defineStore("kanna", () => {
     bump();
 
     // Spawn agent
-    if (agentType !== "pty") {
+    if (effectiveAgentType !== "pty") {
       await invoke("create_agent_session", {
         sessionId: id,
         cwd: worktreePath,
-        prompt,
+        prompt: effectivePrompt,
         systemPrompt: null,
-        permissionMode: "dontAsk",
+        permissionMode: opts?.customTask?.permissionMode ?? "dontAsk",
+        model: opts?.customTask?.model ?? null,
+        allowedTools: opts?.customTask?.allowedTools ?? null,
+        disallowedTools: opts?.customTask?.disallowedTools ?? null,
+        maxTurns: opts?.customTask?.maxTurns ?? null,
+        maxBudgetUsd: opts?.customTask?.maxBudgetUsd ?? null,
       });
     } else {
       try {
-        await spawnPtySession(id, worktreePath, prompt, 80, 24, undefined, {
+        await spawnPtySession(id, worktreePath, effectivePrompt, 80, 24, {
+          model: opts?.customTask?.model,
+          permissionMode: opts?.customTask?.permissionMode,
+          allowedTools: opts?.customTask?.allowedTools,
+          disallowedTools: opts?.customTask?.disallowedTools,
+          maxTurns: opts?.customTask?.maxTurns,
+          maxBudgetUsd: opts?.customTask?.maxBudgetUsd,
+          setupCmdsOverride: opts?.customTask?.setup,
           portEnv,
           setupCmds: repoConfig.setup || [],
         });
@@ -251,10 +281,7 @@ export const useKannaStore = defineStore("kanna", () => {
     selectedItemId.value = id;
   }
 
-  async function spawnPtySession(
-    sessionId: string, cwd: string, prompt: string, cols = 80, rows = 24, model?: string,
-    opts?: { portEnv?: Record<string, string>; setupCmds?: string[] },
-  ) {
+  async function spawnPtySession(sessionId: string, cwd: string, prompt: string, cols = 80, rows = 24, options?: PtySpawnOptions) {
     let kannaHookPath: string;
     try {
       kannaHookPath = await invoke<string>("which_binary", { name: "kanna-hook" });
@@ -289,12 +316,12 @@ export const useKannaStore = defineStore("kanna", () => {
     });
 
     const env: Record<string, string> = { TERM: "xterm-256color", TERM_PROGRAM: "vscode" };
-    let setupCmds: string[] = opts?.setupCmds || [];
+    let setupCmds: string[] = options?.setupCmds || [];
 
-    // When opts are provided (e.g. from createItem/startBlockedTask), use them directly
+    // When options are provided (e.g. from createItem/startBlockedTask), use them directly
     // to avoid a race with computedAsync not having refreshed items.value yet.
-    if (opts?.portEnv) {
-      Object.assign(env, opts.portEnv);
+    if (options?.portEnv) {
+      Object.assign(env, options.portEnv);
     } else {
       // Fallback: read from items.value (works for undoClose and terminal retry)
       const item = items.value.find((i) => i.id === sessionId);
@@ -323,9 +350,23 @@ export const useKannaStore = defineStore("kanna", () => {
 
     env.KANNA_WORKTREE = "1";
 
-    const modelFlag = model ? ` --model ${model}` : "";
-    const claudeCmd = `claude --dangerously-skip-permissions${modelFlag} --settings '${hookSettings}' '${prompt.replace(/'/g, "'\\''")}'`;
-    const fullCmd = [...setupCmds, claudeCmd].join(" && ");
+    const flags: string[] = [];
+    const permMode = options?.permissionMode ?? "dontAsk";
+    flags.push(`--permission-mode ${permMode}`);
+    if (options?.model) flags.push(`--model ${options.model}`);
+    if (options?.maxTurns != null) flags.push(`--max-turns ${options.maxTurns}`);
+    if (options?.maxBudgetUsd != null) flags.push(`--max-budget-usd ${options.maxBudgetUsd}`);
+    if (options?.allowedTools?.length) {
+      flags.push(`--allowedTools ${options.allowedTools.join(",")}`);
+    }
+    if (options?.disallowedTools?.length) {
+      flags.push(`--disallowedTools ${options.disallowedTools.join(",")}`);
+    }
+
+    const escapedPrompt = prompt.replace(/'/g, "'\\''");
+    const claudeCmd = `claude ${flags.join(" ")} --settings '${hookSettings}' '${escapedPrompt}'`;
+    const allSetupCmds = [...setupCmds, ...(options?.setupCmdsOverride || [])];
+    const fullCmd = [...allSetupCmds, claudeCmd].join(" && ");
 
     await invoke("spawn_session", {
       sessionId,
@@ -349,6 +390,30 @@ export const useKannaStore = defineStore("kanna", () => {
 
       if (item.stage === "in_progress") {
         const worktreePath = `${repo.path}/.kanna-worktrees/${item.branch}`;
+
+        // Custom task teardown (before repo-level teardown)
+        if (item.display_name) {
+          try {
+            const tasksDir = `${repo.path}/.kanna/tasks`;
+            const entries = await invoke<string[]>("list_dir", { path: tasksDir }).catch(() => [] as string[]);
+            for (const entry of entries) {
+              const agentMdPath = `${tasksDir}/${entry}/agent.md`;
+              let content: string;
+              try {
+                content = await invoke<string>("read_text_file", { path: agentMdPath });
+              } catch { continue; }
+              const config = parseAgentMd(content, entry);
+              if (config && config.name === item.display_name && config.teardown?.length) {
+                for (const cmd of config.teardown) {
+                  await invoke("run_script", { script: cmd, cwd: worktreePath, env: { KANNA_WORKTREE: "1" } });
+                }
+                break;
+              }
+            }
+          } catch (e) { console.error("[store] custom task teardown failed:", e); }
+        }
+
+        // Repo-level teardown
         try {
           const configContent = await invoke<string>("read_text_file", {
             path: `${repo.path}/.kanna/config.json`,

@@ -2,8 +2,16 @@
 import { ref, computed, onMounted, nextTick, watch } from "vue";
 import { shortcuts, type ActionName } from "../composables/useKeyboardShortcuts";
 
+export interface DynamicCommand {
+  id: string;
+  label: string;
+  description?: string;
+  execute: () => void;
+}
+
 const props = defineProps<{
   extraCommands?: Command[];
+  dynamicCommands?: DynamicCommand[];
 }>();
 
 const emit = defineEmits<{
@@ -23,12 +31,13 @@ interface Command {
   shortcut: string;
 }
 
-const commands = computed<Command[]>(() => {
-  const shortcutCommands = shortcuts
-    .filter((s) => s.action !== "dismiss" && s.action !== "commandPalette")
-    .map((s) => ({ action: s.action, label: s.label, group: s.group, shortcut: s.display }));
-  return [...shortcutCommands, ...(props.extraCommands || [])];
-});
+interface UnifiedCommand {
+  id: string;
+  label: string;
+  description?: string;
+  shortcut?: string;
+  execute: () => void;
+}
 
 /** Split a shortcut display string like "⇧⌘P" into individual keys ["⇧", "⌘", "P"] */
 function splitKeys(display: string): string[] {
@@ -48,11 +57,41 @@ function splitKeys(display: string): string[] {
   return keys;
 }
 
+const allCommands = computed<UnifiedCommand[]>(() => {
+  // Dynamic commands first (custom tasks)
+  const dynamic: UnifiedCommand[] = (props.dynamicCommands || []).map((dc) => ({
+    id: dc.id,
+    label: dc.label,
+    description: dc.description,
+    execute: dc.execute,
+  }));
+
+  // Static shortcut commands
+  const shortcutCommands: UnifiedCommand[] = shortcuts
+    .filter((s) => s.action !== "dismiss" && s.action !== "commandPalette")
+    .map((s) => ({
+      id: `shortcut-${s.action}`,
+      label: s.label,
+      shortcut: s.display,
+      execute: () => emit("execute", s.action),
+    }));
+
+  // Extra commands (e.g. block task)
+  const extra: UnifiedCommand[] = (props.extraCommands || []).map((c) => ({
+    id: `extra-${c.action}`,
+    label: c.label,
+    shortcut: c.shortcut || undefined,
+    execute: () => emit("execute", c.action),
+  }));
+
+  return [...dynamic, ...shortcutCommands, ...extra];
+});
+
 const filtered = computed(() => {
   const q = query.value.toLowerCase();
-  if (!q) return commands.value;
-  return commands.value.filter(
-    (c) => c.label.toLowerCase().includes(q) || c.group.toLowerCase().includes(q)
+  if (!q) return allCommands.value;
+  return allCommands.value.filter(
+    (c) => c.label.toLowerCase().includes(q) || (c.description?.toLowerCase().includes(q) ?? false)
   );
 });
 
@@ -73,7 +112,7 @@ function handleKeydown(e: KeyboardEvent) {
     const cmd = filtered.value[selectedIndex.value];
     if (cmd) {
       emit("close");
-      emit("execute", cmd.action);
+      cmd.execute();
     }
   }
 }
@@ -99,15 +138,18 @@ onMounted(async () => {
       <div class="command-list">
         <div
           v-for="(cmd, i) in filtered"
-          :key="cmd.action"
+          :key="cmd.id"
           class="command-item"
           :class="{ selected: i === selectedIndex }"
-          @click="emit('close'); emit('execute', cmd.action)"
+          @click="emit('close'); cmd.execute()"
           @mouseenter="mouseMoved && (selectedIndex = i)"
         >
-          <span class="command-label">{{ cmd.label }}</span>
+          <div class="command-label-group">
+            <span class="command-label">{{ cmd.label }}</span>
+            <span v-if="cmd.description" class="command-description">{{ cmd.description }}</span>
+          </div>
           <span class="command-meta">
-            <span class="command-keys">
+            <span v-if="cmd.shortcut" class="command-keys">
               <kbd v-for="key in splitKeys(cmd.shortcut)" :key="key" class="command-key">{{ key }}</kbd>
             </span>
           </span>
@@ -170,13 +212,30 @@ onMounted(async () => {
 .command-item.selected:hover {
   background: #0066cc;
 }
+.command-label-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
 .command-label {
   font-weight: 500;
+}
+.command-description {
+  font-size: 11px;
+  color: #888;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.command-item.selected .command-description {
+  color: rgba(255, 255, 255, 0.7);
 }
 .command-meta {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-shrink: 0;
 }
 .command-keys {
   display: flex;

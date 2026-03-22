@@ -10,9 +10,11 @@
     "dev": "tsc --watch"
   },
   "devDependencies": {
+    "@types/node": "^25.5.0",
     "vitest": "^3"
   },
   "dependencies": {
-    "smol-toml": "^1.6.0"
+    "smol-toml": "^1.6.0",
+    "yaml": "^2.8.3"
   }
 }
