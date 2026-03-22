@@ -65,6 +65,12 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
     term.loadAddon(new ImageAddon())
     term.open(container)
 
+    // Push kitty keyboard mode so Shift+Enter sends CSI 13;2 u instead of bare CR.
+    // vtExtensions.kittyKeyboard enables protocol support; this push activates it.
+    if (options?.kittyKeyboard) {
+      term.write("\x1b[>1u")
+    }
+
     if (container.offsetWidth > 0 && container.offsetHeight > 0) {
       fitAddon.fit()
     }
@@ -129,6 +135,10 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
       // (SIGWINCH is needed because ioctl(TIOCSWINSZ) won't fire it if size is unchanged.)
       if (terminal.value) {
         terminal.value.reset()
+        // Restore kitty keyboard mode — reset() clears it but Claude CLI still has it enabled
+        if (options?.kittyKeyboard) {
+          terminal.value.write("\x1b[>1u")
+        }
         terminal.value.write("\x1b[?25l") // hide cursor until TUI redraws
         const { cols, rows } = terminal.value
         // Force a size change then restore — guarantees SIGWINCH fires
