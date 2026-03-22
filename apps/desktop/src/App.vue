@@ -21,6 +21,7 @@ import { usePipeline } from "./composables/usePipeline";
 import { usePreferences } from "./composables/usePreferences";
 import { useKeyboardShortcuts, type ActionName } from "./composables/useKeyboardShortcuts";
 import { backupOnStartup, startPeriodicBackup } from "./composables/useBackup";
+import { createNavigationHistory } from "./composables/useNavigationHistory";
 
 const db = ref<DbHandle | null>(null);
 const dbName = ref("");
@@ -33,6 +34,7 @@ const {
   load: loadPreferences,
 } = usePreferences(db);
 
+const { recordNavigation, goBack, goForward } = createNavigationHistory();
 
 const selectedRepo = computed(() =>
   repos.value.find((r) => r.id === selectedRepoId.value) ?? null
@@ -103,7 +105,11 @@ function navigateItems(direction: -1 | 1) {
     if (nextIndex < 0) nextIndex = 0;
     if (nextIndex >= currentItems.length) nextIndex = currentItems.length - 1;
   }
-  selectedItemId.value = currentItems[nextIndex].id;
+  const nextId = currentItems[nextIndex].id;
+  if (nextId !== selectedItemId.value) {
+    if (selectedItemId.value) recordNavigation(selectedItemId.value);
+    selectedItemId.value = nextId;
+  }
 }
 
 async function handleCloseTask() {
@@ -267,6 +273,18 @@ const keyboardActions = {
   showDiff: () => { showDiffModal.value = !showDiffModal.value; },
   showShortcuts: () => { showShortcutsModal.value = !showShortcutsModal.value; },
   commandPalette: () => { showCommandPalette.value = !showCommandPalette.value; },
+  goBack: () => {
+    if (!selectedItemId.value) return;
+    const validIds = new Set(allItems.value.filter((i) => i.stage !== "done").map((i) => i.id));
+    const taskId = goBack(selectedItemId.value, validIds);
+    if (taskId) navigateToTask(taskId);
+  },
+  goForward: () => {
+    if (!selectedItemId.value) return;
+    const validIds = new Set(allItems.value.filter((i) => i.stage !== "done").map((i) => i.id));
+    const taskId = goForward(selectedItemId.value, validIds);
+    if (taskId) navigateToTask(taskId);
+  },
 };
 useKeyboardShortcuts(keyboardActions);
 
@@ -288,7 +306,20 @@ async function handleHideRepo(repoId: string) {
   lastUndoAction.value = { type: 'hideRepo', repoId };
 }
 
+function navigateToTask(taskId: string) {
+  selectedItemId.value = taskId;
+  if (db.value) setSetting(db.value, "selected_item_id", taskId);
+  const item = allItems.value.find((i) => i.id === taskId);
+  if (item && item.activity === "unread" && db.value) {
+    updatePipelineItemActivity(db.value, taskId, "idle");
+    item.activity = "idle";
+  }
+}
+
 function handleSelectItem(itemId: string) {
+  if (selectedItemId.value && selectedItemId.value !== itemId) {
+    recordNavigation(selectedItemId.value);
+  }
   selectedItemId.value = itemId;
   if (db.value) setSetting(db.value, "selected_item_id", itemId);
   // Mark as read if unread
