@@ -2,7 +2,7 @@ use std::path::Path;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 
-use crate::protocol::{Command, Event};
+use kanna_daemon::protocol::{Command, Event};
 
 pub fn bind_socket(path: &Path) -> std::io::Result<UnixListener> {
     // Remove stale socket file if it exists

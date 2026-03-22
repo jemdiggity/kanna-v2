@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::protocol::{SessionInfo, SessionState};
+use kanna_daemon::protocol::{SessionInfo, SessionState};
 use crate::pty::PtySession;
 
 pub struct SessionManager {
