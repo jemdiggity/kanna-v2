@@ -2,6 +2,7 @@
 import { ref, watch, nextTick, type ComponentPublicInstance } from "vue";
 import AgentView from "./AgentView.vue";
 import TerminalView from "./TerminalView.vue";
+import { useKannaStore } from "../stores/kanna";
 
 const props = defineProps<{
   sessionId: string | null;
@@ -58,6 +59,11 @@ watch(
 function setTermRef(sessionId: string, el: ComponentPublicInstance | null) {
   termRefs.value[sessionId] = el;
 }
+
+const store = useKannaStore();
+function handleEscape(sid: string) {
+  store.handleInterrupt(sid);
+}
 </script>
 
 <template>
@@ -75,6 +81,7 @@ function setTermRef(sessionId: string, el: ComponentPublicInstance | null) {
         spawnFn: spawnPtySession,
       } : undefined"
       :kitty-keyboard="!!(spawnPtySession && config.worktreePath && config.prompt)"
+      :on-escape="() => handleEscape(sid)"
     />
     <!-- SDK mode: key by sessionId so switching tasks creates a new view -->
     <AgentView

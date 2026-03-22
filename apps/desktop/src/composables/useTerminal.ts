@@ -16,9 +16,11 @@ export interface SpawnOptions {
 
 export interface TerminalOptions {
   kittyKeyboard?: boolean
+  onEscape?: () => void
 }
 
 export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, options?: TerminalOptions) {
+  const onEscape = options?.onEscape
   const terminal = ref<Terminal | null>(null)
   const fitAddon = new FitAddon()
   let unlistenOutput: (() => void) | null = null
@@ -72,7 +74,12 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
     // Let app-level shortcuts pass through even when terminal has focus,
     // but always let Escape reach the terminal (needed for Claude CLI)
     term.attachCustomKeyEventHandler((e: KeyboardEvent) => {
-      if (e.key === "Escape") return true
+      if (e.key === "Escape") {
+        // Notify the store so it can clear "working" activity — Claude CLI
+        // doesn't fire a hook when interrupted, so we detect it here.
+        if (e.type === "keydown" && onEscape) onEscape()
+        return true
+      }
       if (isAppShortcut(e)) return false
       return true
     })

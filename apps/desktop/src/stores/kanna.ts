@@ -517,6 +517,13 @@ export const useKannaStore = defineStore("kanna", () => {
   }
 
   // ── Event handlers ───────────────────────────────────────────────
+  async function handleInterrupt(sessionId: string) {
+    const item = items.value.find((i) => i.id === sessionId);
+    if (!item || item.activity !== "working") return;
+    await updatePipelineItemActivity(_db, item.id, "idle");
+    bump();
+  }
+
   function _handleAgentFinished(sessionId: string) {
     const item = items.value.find((i) => i.id === sessionId);
     if (!item) return;
@@ -879,6 +886,6 @@ export const useKannaStore = defineStore("kanna", () => {
     listBlockersForItem: (itemId: string) => listBlockersForItem(_db, itemId),
     listBlockedByItem: (itemId: string) => listBlockedByItem(_db, itemId),
     pinItem, unpinItem, reorderPinned, renameItem,
-    savePreference,
+    savePreference, handleInterrupt,
   };
 });

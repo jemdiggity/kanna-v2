@@ -7,10 +7,11 @@ const props = defineProps<{
   sessionId: string
   spawnOptions?: SpawnOptions
   kittyKeyboard?: boolean
+  onEscape?: () => void
 }>()
 
 const containerRef = ref<HTMLElement | null>(null)
-const { terminal, init, startListening, fit, redraw, dispose } = useTerminal(props.sessionId, props.spawnOptions, { kittyKeyboard: props.kittyKeyboard })
+const { terminal, init, startListening, fit, redraw, dispose } = useTerminal(props.sessionId, props.spawnOptions, { kittyKeyboard: props.kittyKeyboard, onEscape: props.onEscape })
 
 defineExpose({
   focus: () => terminal.value?.focus(),
