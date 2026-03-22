@@ -49,6 +49,9 @@ export async function loadDatabase(): Promise<{ db: DbHandle; dbName: string }> 
 }
 
 export async function runMigrations(db: DbHandle): Promise<void> {
+  // Enable foreign key enforcement so ON DELETE CASCADE works
+  await db.execute("PRAGMA foreign_keys = ON");
+
   await db.execute(`CREATE TABLE IF NOT EXISTS repo (
     id TEXT PRIMARY KEY, path TEXT NOT NULL, name TEXT NOT NULL,
     default_branch TEXT NOT NULL DEFAULT 'main',

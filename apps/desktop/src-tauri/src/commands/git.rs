@@ -247,10 +247,29 @@ pub fn git_worktree_add(
     path: String,
     start_point: Option<String>,
 ) -> Result<String, String> {
-    let mut args = vec!["worktree".to_string(), "add".to_string(), "-b".to_string(), branch, path.clone()];
-    if let Some(sp) = start_point {
-        args.push(sp);
+    // Check if the branch already exists — if so, use it directly instead of -b
+    let branch_exists = Command::new("git")
+        .args(["show-ref", "--verify", "--quiet", &format!("refs/heads/{}", branch)])
+        .current_dir(&repo_path)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    let mut args = vec!["worktree".to_string(), "add".to_string()];
+    if branch_exists {
+        // Branch exists: attach worktree to existing branch
+        args.push(path.clone());
+        args.push(branch);
+    } else {
+        // Branch doesn't exist: create it with -b
+        args.push("-b".to_string());
+        args.push(branch);
+        args.push(path.clone());
+        if let Some(sp) = start_point {
+            args.push(sp);
+        }
     }
+
     let output = Command::new("git")
         .args(&args)
         .current_dir(&repo_path)

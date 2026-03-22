@@ -697,17 +697,20 @@ export const useKannaStore = defineStore("kanna", () => {
     const branch = `task-${id}`;
     const worktreePath = `${repo.path}/.kanna-worktrees/${branch}`;
 
-    try {
-      await invoke("git_worktree_add", {
-        repoPath: repo.path,
-        branch,
-        path: worktreePath,
-        startPoint: null,
-      });
-    } catch (e) {
-      console.error("[store] startBlockedTask worktree_add failed:", e);
-      toast.error("Failed to create worktree for blocked task");
-      return;
+    const worktreeExists = await invoke<boolean>("file_exists", { path: worktreePath });
+    if (!worktreeExists) {
+      try {
+        await invoke("git_worktree_add", {
+          repoPath: repo.path,
+          branch,
+          path: worktreePath,
+          startPoint: null,
+        });
+      } catch (e) {
+        console.error("[store] startBlockedTask worktree_add failed:", e);
+        toast.error("Failed to create worktree for blocked task");
+        return;
+      }
     }
 
     let repoConfig: RepoConfig = {};
@@ -931,6 +934,11 @@ export const useKannaStore = defineStore("kanna", () => {
     }
     if (stale.length > 0) {
       console.log(`[gc] cleaned up ${stale.length} done task(s)`);
+      // Clean up orphaned task_blocker rows (for DBs created before foreign_keys pragma)
+      await _db.execute(
+        `DELETE FROM task_blocker WHERE blocker_item_id NOT IN (SELECT id FROM pipeline_item)
+         OR blocked_item_id NOT IN (SELECT id FROM pipeline_item)`,
+      );
     }
 
     // Check for blocked tasks that can now start
