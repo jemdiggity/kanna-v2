@@ -631,9 +631,10 @@ export const useKannaStore = defineStore("kanna", () => {
       `IMPORTANT: First, check for uncommitted changes in the source worktree at "${sourceWorktree}" by running "git -C ${sourceWorktree} status".`,
       `If there are uncommitted changes there, commit them from that worktree: "git -C ${sourceWorktree} add -A && git -C ${sourceWorktree} commit -m '<appropriate message>'", then pull those commits into your branch: "git pull --rebase".`,
       `Then:`,
-      `1. Rename this branch to something meaningful based on the commits (use "git branch -m <new-name>").`,
-      `2. Push the branch (git push -u origin HEAD).`,
-      `3. Create a PR with "gh pr create" — write a clear title and description summarizing the changes.`,
+      `1. Rebase onto latest main: "git fetch origin main && git rebase origin/main". This ensures the PR only contains the task's changes, not reversions from a stale branch point.`,
+      `2. Rename this branch to something meaningful based on the commits (use "git branch -m <new-name>").`,
+      `3. Push the branch (git push -u origin HEAD).`,
+      `4. Create a PR with "gh pr create" — write a clear title and description summarizing the changes.`,
       `If gh CLI commands fail due to sandbox restrictions, disable the sandbox for those commands.`,
     ].join("\n");
 
