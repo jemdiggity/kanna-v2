@@ -53,6 +53,12 @@ const currentList = useVirtualList(currentSource, { itemHeight: 28 });
 const previewList = useVirtualList(previewSource, { itemHeight: 28 });
 
 async function onKeydown(e: KeyboardEvent) {
+  // Stop propagation to prevent global shortcut handler from interfering
+  // (except for meta-key combos which should still reach global handlers)
+  if (!e.metaKey) {
+    e.stopPropagation();
+  }
+
   if (e.key === "Escape" && !filterText.value) {
     e.preventDefault();
     emit("close");

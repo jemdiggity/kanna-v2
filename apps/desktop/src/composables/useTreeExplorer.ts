@@ -220,18 +220,28 @@ export function useTreeExplorer(rootPath: () => string, repoRoot: () => string) 
     slideTimer = setTimeout(() => { slideDirection.value = null; }, 200);
   }
 
-  async function moveCursor(delta: number) {
+  // Track the latest preview request to avoid stale async updates
+  let previewSeq = 0;
+
+  function moveCursor(delta: number) {
     const col = state.value.columns[1];
     if (!col?.length) return;
     const newIdx = Math.max(0, Math.min(col.length - 1, state.value.cursor[1] + delta));
     state.value.cursor[1] = newIdx;
 
-    // Update preview column
+    // Update preview column async (non-blocking so cursor stays snappy)
     const entry = col[newIdx];
+    const seq = ++previewSeq;
     if (entry?.isDir) {
-      const previewEntries = await fetchDir(absolutePath(entry.path));
-      state.value.columns[2] = previewEntries;
-      state.value.cursor[2] = 0;
+      fetchDir(absolutePath(entry.path)).then((previewEntries) => {
+        // Only apply if this is still the latest request
+        if (seq === previewSeq) {
+          state.value.columns[2] = previewEntries;
+          state.value.cursor[2] = 0;
+        }
+      }).catch(() => {
+        // Preview fetch is best-effort
+      });
     } else {
       state.value.columns[2] = [];
       state.value.cursor[2] = 0;
@@ -289,12 +299,12 @@ export function useTreeExplorer(rootPath: () => string, repoRoot: () => string) 
       case "j":
       case "ArrowDown":
         e.preventDefault();
-        await moveCursor(1);
+        moveCursor(1);
         return null;
       case "k":
       case "ArrowUp":
         e.preventDefault();
-        await moveCursor(-1);
+        moveCursor(-1);
         return null;
       case "l":
       case "ArrowRight":
