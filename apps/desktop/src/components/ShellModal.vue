@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { ref, onMounted, onActivated, nextTick } from "vue";
+import { ref, onMounted, onActivated, onDeactivated, nextTick } from "vue";
 import { invoke } from "../invoke";
 import TerminalView from "./TerminalView.vue";
+import { useShortcutContext, setContext, resetContext } from "../composables/useShortcutContext";
 
 const props = defineProps<{
   sessionId: string;
@@ -12,6 +13,12 @@ const props = defineProps<{
 
 const emit = defineEmits<{ (e: "close"): void }>();
 const termRef = ref<InstanceType<typeof TerminalView> | null>(null);
+
+useShortcutContext("shell");
+
+// KeepAlive: onUnmounted won't fire on hide, so manage context on activate/deactivate too
+onActivated(() => setContext("shell"));
+onDeactivated(() => resetContext());
 
 onMounted(async () => {
   await nextTick();

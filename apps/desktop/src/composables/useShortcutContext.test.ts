@@ -56,7 +56,7 @@ describe("useShortcutContext", () => {
       expect(labels).toContain("Cycle Scope");
     });
 
-    it("includes untagged global shortcuts in main context", () => {
+    it("includes global shortcuts tagged for main context", () => {
       const result = getContextShortcuts("main");
       const labels = result.map((s) => s.action);
       expect(labels).toContain("Keyboard Shortcuts");
@@ -64,12 +64,14 @@ describe("useShortcutContext", () => {
       expect(labels).toContain("Dismiss");
     });
 
-    it("excludes untagged global shortcuts from non-main contexts", () => {
-      const result = getContextShortcuts("diff");
-      const labels = result.map((s) => s.action);
-      expect(labels).not.toContain("Keyboard Shortcuts");
-      expect(labels).not.toContain("Command Palette");
-      expect(labels).not.toContain("Dismiss");
+    it("includes global shortcuts tagged for all contexts", () => {
+      for (const ctx of ["diff", "file", "shell"] as ShortcutContext[]) {
+        const result = getContextShortcuts(ctx);
+        const labels = result.map((s) => s.action);
+        expect(labels).toContain("Keyboard Shortcuts");
+        expect(labels).toContain("Command Palette");
+        expect(labels).toContain("Dismiss");
+      }
     });
 
     it("excludes shortcuts tagged for other contexts", () => {

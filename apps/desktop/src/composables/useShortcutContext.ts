@@ -1,7 +1,7 @@
 import { ref, onUnmounted } from "vue";
 import { shortcuts } from "./useKeyboardShortcuts";
 
-export type ShortcutContext = "main" | "diff" | "file";
+export type ShortcutContext = "main" | "diff" | "file" | "shell";
 
 export interface ContextShortcut {
   label: string;
@@ -72,8 +72,7 @@ export function getContextShortcuts(ctx: ShortcutContext): { keys: string; actio
   const result: { keys: string; action: string }[] = [];
 
   // Global shortcuts: include if explicitly tagged for this context.
-  // Untagged shortcuts (⌘/, ⇧⌘P, Escape) only show in "main" context —
-  // they're always available but clutter the focused context views.
+  // Untagged shortcuts fall back to "main" context only.
   for (const def of shortcuts) {
     if (def.context && def.context.includes(ctx)) {
       result.push({ keys: def.display, action: def.label });
@@ -99,6 +98,7 @@ export function getContextTitle(ctx: ShortcutContext): string {
     main: "Main Shortcuts",
     diff: "Diff Viewer Shortcuts",
     file: "File Viewer Shortcuts",
+    shell: "Shell Shortcuts",
   };
   return titles[ctx];
 }

@@ -63,13 +63,13 @@ export const shortcuts: ShortcutDef[] = [
   { action: "navigateUp",     label: "Previous Task",    group: "Navigation", key: "ArrowUp",                   meta: true, alt: true,    display: "⌥⌘↑",     context: ["main"] },
   { action: "navigateDown",   label: "Next Task",        group: "Navigation", key: "ArrowDown",                 meta: true, alt: true,    display: "⌥⌘↓",     context: ["main"] },
   { action: "openFile",       label: "File Picker",      group: "Navigation", key: "p",                         meta: true,               display: "⌘P",       context: ["main"] },
-  { action: "commandPalette", label: "Command Palette",  group: "Navigation", key: ["P", "p"],                  meta: true, shift: true,  display: "⇧⌘P" },
+  { action: "commandPalette", label: "Command Palette",  group: "Navigation", key: ["P", "p"],                  meta: true, shift: true,  display: "⇧⌘P",     context: ["main", "diff", "file", "shell"] },
   // Views — panels, modes, and display
   { action: "showDiff",       label: "View Diff",        group: "Views",      key: "d",                         meta: true, display: "⌘D",                       context: ["main"] },
-  { action: "openShell",      label: "Shell Terminal",   group: "Views",      key: "j",                         meta: true,               display: "⌘J",       context: ["main"] },
+  { action: "openShell",      label: "Shell Terminal",   group: "Views",      key: "j",                         meta: true,               display: "⌘J",       context: ["main", "shell"] },
   { action: "openInIDE",      label: "Open in IDE",      group: "Views",      key: "o",                         meta: true,               display: "⌘O",       context: ["main"] },
   { action: "toggleZen",      label: "Zen Mode",         group: "Views",      key: ["Z", "z"],                  meta: true, shift: true,  display: "⇧⌘Z",     context: ["main"] },
-  { action: "toggleMaximize", label: "Maximize",         group: "Views",      key: "Enter",                     meta: true, shift: true,  display: "⇧⌘Enter", context: ["diff"] },
+  { action: "toggleMaximize", label: "Maximize",         group: "Views",      key: "Enter",                     meta: true, shift: true,  display: "⇧⌘Enter", context: ["diff", "shell"] },
   // Window — disabled until #24 (new window state sharing)
   // { action: "newWindow",  label: "New Window",     group: "Window",     key: ["N", "n"],                     meta: true, shift: true,  display: "⇧⌘N" },
   { action: "toggleSidebar", label: "Toggle Sidebar",  group: "Views",      key: "b",                            meta: true,               display: "⌘B",       context: ["main"] },
@@ -79,9 +79,9 @@ export const shortcuts: ShortcutDef[] = [
   { action: "goBack",       label: "Go Back",          group: "Navigation", key: "-",                            ctrl: true,               display: "⌃-",       context: ["main"] },
   { action: "goForward",    label: "Go Forward",       group: "Navigation", key: "-",                            ctrl: true, shift: true,  display: "⌃⇧-",     context: ["main"] },
   // Help
-  { action: "showShortcuts",  label: "Keyboard Shortcuts", group: "Help",   key: "/",                           meta: true,               display: "⌘/" },
+  { action: "showShortcuts",  label: "Keyboard Shortcuts", group: "Help",   key: "/",                           meta: true,               display: "⌘/",       context: ["main", "diff", "file", "shell"] },
   // Escape is special — no meta required
-  { action: "dismiss",    label: "Dismiss",           group: "Navigation", key: "Escape",                                                 display: "Escape" },
+  { action: "dismiss",    label: "Dismiss",           group: "Navigation", key: "Escape",                                                 display: "Escape",   context: ["main", "diff", "file", "shell"] },
 ];
 
 function matches(def: ShortcutDef, e: KeyboardEvent): boolean {
