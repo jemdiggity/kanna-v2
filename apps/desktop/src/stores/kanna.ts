@@ -242,12 +242,26 @@ export const useKannaStore = defineStore("kanna", () => {
     const worktreeAddCwd = opts?.baseBranch
       ? `${repoPath}/.kanna-worktrees/${opts.baseBranch}`
       : repoPath;
+
+    // For new tasks (no baseBranch), fetch origin and branch from origin/{defaultBranch}
+    // so the worktree starts from the latest remote state, not a potentially stale local branch.
+    let startPoint: string | null = opts?.baseBranch ? "HEAD" : null;
+    if (!opts?.baseBranch) {
+      try {
+        const defaultBranch = await invoke<string>("git_default_branch", { repoPath });
+        await invoke("git_fetch", { repoPath, branch: defaultBranch });
+        startPoint = `origin/${defaultBranch}`;
+      } catch (e) {
+        console.debug("[store] fetch origin failed (offline?), using local HEAD:", e);
+      }
+    }
+
     try {
       await invoke("git_worktree_add", {
         repoPath: worktreeAddCwd,
         branch,
         path: worktreePath,
-        startPoint: opts?.baseBranch ? "HEAD" : null,
+        startPoint,
       });
     } catch (e) {
       console.error("[store] git_worktree_add failed:", e);
@@ -803,12 +817,22 @@ export const useKannaStore = defineStore("kanna", () => {
 
     const worktreeExists = await invoke<boolean>("file_exists", { path: worktreePath });
     if (!worktreeExists) {
+      // Fetch origin so the worktree starts from the latest remote state
+      let startPoint: string | null = null;
+      try {
+        const defaultBranch = await invoke<string>("git_default_branch", { repoPath: repo.path });
+        await invoke("git_fetch", { repoPath: repo.path, branch: defaultBranch });
+        startPoint = `origin/${defaultBranch}`;
+      } catch (e) {
+        console.debug("[store] fetch origin failed (offline?), using local HEAD:", e);
+      }
+
       try {
         await invoke("git_worktree_add", {
           repoPath: repo.path,
           branch,
           path: worktreePath,
-          startPoint: null,
+          startPoint,
         });
       } catch (e) {
         console.error("[store] startBlockedTask worktree_add failed:", e);

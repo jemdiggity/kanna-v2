@@ -238,6 +238,24 @@ pub fn git_push(repo_path: String, branch: String) -> Result<String, String> {
 }
 
 #[tauri::command]
+pub fn git_fetch(repo_path: String, branch: Option<String>) -> Result<(), String> {
+    let mut args = vec!["fetch".to_string(), "origin".to_string()];
+    if let Some(b) = branch {
+        args.push(b);
+    }
+    let output = Command::new("git")
+        .args(&args)
+        .current_dir(&repo_path)
+        .output()
+        .map_err(|e| format!("failed to run git fetch: {}", e))?;
+
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    }
+    Ok(())
+}
+
+#[tauri::command]
 pub fn git_worktree_add(
     repo_path: String,
     branch: String,
