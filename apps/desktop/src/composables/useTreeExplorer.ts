@@ -30,6 +30,7 @@ export function useTreeExplorer(rootPath: () => string, repoRoot: () => string) 
   });
 
   const filterText = ref("");
+  const filtering = ref(false);
   const loading = ref(false);
   const slideDirection = shallowRef<"left" | "right" | null>(null);
 
@@ -286,12 +287,39 @@ export function useTreeExplorer(rootPath: () => string, repoRoot: () => string) 
 
   /** Handle a key event. Returns file path string if a file should be opened, null otherwise. */
   async function handleKey(e: KeyboardEvent): Promise<string | null> {
-    // Filter mode: typing characters
-    if (filterText.value && e.key === "Escape") {
-      e.preventDefault();
-      filterText.value = "";
+    // --- Filter mode: intercept keys when filtering is active ---
+    if (filtering.value) {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        filterText.value = "";
+        filtering.value = false;
+        return null;
+      }
+      if (e.key === "Enter") {
+        // Confirm filter and return to navigation
+        e.preventDefault();
+        filtering.value = false;
+        return null;
+      }
+      if (e.key === "Backspace") {
+        e.preventDefault();
+        if (filterText.value.length > 0) {
+          filterText.value = filterText.value.slice(0, -1);
+        } else {
+          filtering.value = false;
+        }
+        return null;
+      }
+      // Printable characters append to filter
+      if (e.key.length === 1 && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        e.preventDefault();
+        filterText.value += e.key;
+        return null;
+      }
       return null;
     }
+
+    // --- Normal navigation mode ---
 
     // gg sequence
     if (pendingG.value) {
@@ -319,10 +347,12 @@ export function useTreeExplorer(rootPath: () => string, repoRoot: () => string) 
       case "ArrowRight":
       case "Enter":
         e.preventDefault();
+        filterText.value = "";
         return await navigateRight();
       case "h":
       case "ArrowLeft":
         e.preventDefault();
+        filterText.value = "";
         await navigateLeft();
         return null;
       case "y":
@@ -343,20 +373,10 @@ export function useTreeExplorer(rootPath: () => string, repoRoot: () => string) 
         return null;
       case "/":
         e.preventDefault();
-        // Focus filter — handled by component
-        return null;
-      case "Backspace":
-        e.preventDefault();
-        if (filterText.value.length > 0) {
-          filterText.value = filterText.value.slice(0, -1);
-        }
+        filtering.value = true;
         return null;
       default:
-        // Type-to-filter: printable characters
-        if (e.key.length === 1 && !e.metaKey && !e.ctrlKey && !e.altKey) {
-          filterText.value += e.key;
-          return null;
-        }
+        break;
     }
 
     return null;
@@ -376,6 +396,7 @@ export function useTreeExplorer(rootPath: () => string, repoRoot: () => string) 
       breadcrumb: [],
     };
     filterText.value = "";
+    filtering.value = false;
     cache.clear();
     slideDirection.value = null;
     pendingG.value = false;
@@ -384,6 +405,7 @@ export function useTreeExplorer(rootPath: () => string, repoRoot: () => string) 
   return {
     state,
     filterText,
+    filtering,
     loading,
     slideDirection,
     open,

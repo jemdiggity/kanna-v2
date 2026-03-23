@@ -31,6 +31,7 @@ const currentColRef = ref<HTMLElement | null>(null);
 const {
   state,
   filterText,
+  filtering,
   loading,
   slideDirection,
   open,
@@ -189,12 +190,16 @@ function isDimmed(entry: TreeNode): boolean {
       </div>
 
       <!-- Filter bar -->
-      <div class="filter-bar">
-        <span v-if="filterText" class="filter-text">
-          filter: <strong>{{ filterText }}</strong>
-          <span class="filter-hint">(Esc to clear)</span>
+      <div class="filter-bar" :class="{ 'filter-active': filtering }">
+        <span v-if="filtering" class="filter-text">
+          /{{ filterText }}<span class="filter-caret">|</span>
+          <span class="filter-hint">(Enter confirm &middot; Esc cancel)</span>
         </span>
-        <span v-else class="filter-hint">type to filter &middot; Esc to close</span>
+        <span v-else-if="filterText" class="filter-text">
+          filter: <strong>{{ filterText }}</strong>
+          <span class="filter-hint">(/ to edit &middot; Esc to close)</span>
+        </span>
+        <span v-else class="filter-hint">/ filter &middot; Esc close</span>
       </div>
     </div>
   </div>
@@ -387,6 +392,20 @@ function isDimmed(entry: TreeNode): boolean {
 
 .filter-text strong {
   color: #ffcc00;
+}
+
+.filter-bar.filter-active {
+  background: #1a1a1a;
+  border-top-color: #0066cc;
+}
+
+.filter-caret {
+  color: #ffcc00;
+  animation: blink 1s step-end infinite;
+}
+
+@keyframes blink {
+  50% { opacity: 0; }
 }
 
 .filter-hint {
