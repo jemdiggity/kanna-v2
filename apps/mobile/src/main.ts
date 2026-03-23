@@ -13,33 +13,35 @@ const db = createRemoteDbHandle(
   (cmd, args) => invoke(cmd, args) as Promise<unknown>,
 );
 
-// Auto-connect to relay on startup
-async function connectToRelay() {
+// Connect to relay, then mount the app
+async function boot() {
   const relayUrl = __KANNA_RELAY_URL__;
-  const idToken = "mobile-dev-token";
 
-  try {
-    await invoke("connect_relay", {
-      relayUrl,
-      idToken,
-    });
-    console.log("[mobile] Connected to relay at", relayUrl);
-  } catch (e) {
-    console.error("[mobile] Failed to connect to relay:", e);
-    // Retry after 3 seconds
-    setTimeout(connectToRelay, 3000);
+  // Keep trying until relay is connected
+  let connected = false;
+  while (!connected) {
+    try {
+      await invoke("connect_relay", {
+        relayUrl,
+        idToken: "mobile-dev-token",
+      });
+      console.log("[mobile] Connected to relay at", relayUrl);
+      connected = true;
+    } catch (e) {
+      console.warn("[mobile] Relay not ready, retrying in 2s:", e);
+      await new Promise((r) => setTimeout(r, 2000));
+    }
   }
+
+  // Import App from desktop — shared Vue components
+  // __KANNA_MOBILE__ gates desktop-only features
+  const { default: App } = await import("@desktop/App.vue");
+
+  const app = createApp(App);
+  app.use(createPinia());
+  app.provide("db", db);
+  app.provide("dbName", "mobile");
+  app.mount("#app");
 }
 
-// Import App from desktop — shared Vue components
-// __KANNA_MOBILE__ gates desktop-only features
-import App from "@desktop/App.vue";
-
-const app = createApp(App);
-app.use(createPinia());
-app.provide("db", db);
-app.provide("dbName", "mobile");
-app.mount("#app");
-
-// Connect after app is mounted
-connectToRelay();
+boot();
