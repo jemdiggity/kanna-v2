@@ -220,8 +220,32 @@ export function useTreeExplorer(rootPath: () => string, repoRoot: () => string) 
     slideTimer = setTimeout(() => { slideDirection.value = null; }, 200);
   }
 
-  // Track the latest preview request to avoid stale async updates
+  // Debounced preview update — only fires after cursor rests for 50ms
+  let previewTimer: ReturnType<typeof setTimeout> | null = null;
   let previewSeq = 0;
+
+  function updatePreview(entry: TreeNode | undefined) {
+    if (previewTimer) clearTimeout(previewTimer);
+    const seq = ++previewSeq;
+
+    previewTimer = setTimeout(() => {
+      if (seq !== previewSeq) return;
+
+      if (entry?.isDir) {
+        fetchDir(absolutePath(entry.path)).then((previewEntries) => {
+          if (seq === previewSeq) {
+            state.value.columns[2] = previewEntries;
+            state.value.cursor[2] = 0;
+          }
+        }).catch(() => {
+          // Preview fetch is best-effort
+        });
+      } else {
+        state.value.columns[2] = [];
+        state.value.cursor[2] = 0;
+      }
+    }, 50);
+  }
 
   function moveCursor(delta: number) {
     const col = state.value.columns[1];
@@ -229,23 +253,8 @@ export function useTreeExplorer(rootPath: () => string, repoRoot: () => string) 
     const newIdx = Math.max(0, Math.min(col.length - 1, state.value.cursor[1] + delta));
     state.value.cursor[1] = newIdx;
 
-    // Update preview column async (non-blocking so cursor stays snappy)
-    const entry = col[newIdx];
-    const seq = ++previewSeq;
-    if (entry?.isDir) {
-      fetchDir(absolutePath(entry.path)).then((previewEntries) => {
-        // Only apply if this is still the latest request
-        if (seq === previewSeq) {
-          state.value.columns[2] = previewEntries;
-          state.value.cursor[2] = 0;
-        }
-      }).catch(() => {
-        // Preview fetch is best-effort
-      });
-    } else {
-      state.value.columns[2] = [];
-      state.value.cursor[2] = 0;
-    }
+    // Debounced preview update — cursor moves instantly, preview waits for pause
+    updatePreview(col[newIdx]);
   }
 
   function jumpTop() {
@@ -355,6 +364,7 @@ export function useTreeExplorer(rootPath: () => string, repoRoot: () => string) 
 
   function reset() {
     clearSlideTimer();
+    if (previewTimer) { clearTimeout(previewTimer); previewTimer = null; }
     if (pendingGTimer !== null) {
       clearTimeout(pendingGTimer);
       pendingGTimer = null;
