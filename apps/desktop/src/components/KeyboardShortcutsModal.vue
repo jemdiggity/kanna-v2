@@ -15,6 +15,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: "close"): void;
   (e: "update:hide-on-startup", value: boolean): void;
+  (e: "update:full-mode", value: boolean): void;
 }>();
 
 const hideOnStartup = ref(props.hideOnStartup ?? false);
@@ -26,6 +27,11 @@ watch(() => props.startInFullMode, (val) => { showFullMode.value = val ?? false;
 const contextTitle = computed(() => getContextTitle(t, props.context));
 const contextItems = computed(() => getContextShortcuts(props.context).map(s => ({ ...s, action: t(s.action) })));
 const groups = computed(() => getShortcutGroups(t));
+
+function toggleMode() {
+  showFullMode.value = !showFullMode.value;
+  emit("update:full-mode", showFullMode.value);
+}
 
 function splitKeys(display: string): string[] {
   const symbols = ["⌘", "⇧", "⌥", "⌫", "⌃"];
@@ -75,7 +81,7 @@ function splitKeys(display: string): string[] {
 
       <!-- Footer -->
       <div class="shortcuts-footer">
-        <a class="toggle-link" @click="showFullMode = !showFullMode">
+        <a class="toggle-link" @click="toggleMode">
           {{ showFullMode ? t('shortcuts.showContext', { context: contextTitle.toLowerCase() }) : t('shortcuts.showAll') }}
           <span class="toggle-hint"><kbd>⇧</kbd><kbd>⌘</kbd><kbd>/</kbd></span>
         </a>
