@@ -18,6 +18,7 @@ const emit = defineEmits<{
 }>();
 
 const activeTab = ref<"create" | "import">(props.initialTab);
+watch(() => props.initialTab, (tab) => { activeTab.value = tab; });
 
 // ── Create New tab state ──
 const createName = ref("");
