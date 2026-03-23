@@ -104,7 +104,7 @@ MEOF
 }
 MEOF
 
-  # Window: tauri ios dev (auto-select connected physical device)
+  # Window: tauri ios dev
   tmux new-window -t "$SESSION" -n mobile -c "$ROOT/apps/mobile"
   tmux send-keys -t "$SESSION:mobile" \
     "KANNA_DEV_PORT=${MOBILE_PORT} KANNA_RELAY_PORT=${RELAY_PORT} bunx tauri ios dev" Enter

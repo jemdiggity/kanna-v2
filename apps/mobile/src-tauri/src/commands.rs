@@ -121,6 +121,22 @@ pub async fn send_input(
 }
 
 #[tauri::command]
+pub async fn db_select(
+    relay: State<'_, RelaySink>,
+    pending: State<'_, PendingRequests>,
+    query: String,
+    bind_values: Vec<serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    invoke_remote(
+        &relay,
+        &pending,
+        "db_select",
+        json!({ "query": query, "bind_values": bind_values }),
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn connect_relay(
     app: tauri::AppHandle,
     relay: State<'_, RelaySink>,
