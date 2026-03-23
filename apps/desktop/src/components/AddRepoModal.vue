@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted } from "vue";
+import { ref, computed, watch, onMounted, onUnmounted } from "vue";
 import { open } from "../dialog";
 import { invoke } from "../invoke";
 import { parseRepoInput } from "../utils/parseRepoInput";
@@ -47,6 +47,11 @@ onMounted(async () => {
   }
   createParentDir.value = `${homeDir.value}.kanna/repos`;
   inputRef.value?.focus();
+  window.addEventListener("keydown", handleKeydown);
+});
+
+onUnmounted(() => {
+  window.removeEventListener("keydown", handleKeydown);
 });
 
 // ── Create New tab logic ──
@@ -221,7 +226,7 @@ function switchTab(tab: "create" | "import") {
 </script>
 
 <template>
-  <div class="modal-overlay" @click.self="emit('cancel')" @keydown="handleKeydown">
+  <div class="modal-overlay" @click.self="emit('cancel')">
     <div class="modal">
       <div class="tabs">
         <button
@@ -263,7 +268,6 @@ function switchTab(tab: "create" | "import") {
             type="text"
             placeholder="owner/repo, URL, or gh repo clone..."
             :disabled="cloning"
-            @keydown="handleKeydown"
           />
           <template v-if="parsed.type === 'clone' && parsed.owner && parsed.repo">
             <div class="resolved-url">↳ github.com/{{ parsed.owner }}/{{ parsed.repo }}</div>
@@ -294,7 +298,6 @@ function switchTab(tab: "create" | "import") {
               class="text-input"
               type="text"
               placeholder="Repository name"
-              @keydown="handleKeydown"
             />
           </div>
         </template>
