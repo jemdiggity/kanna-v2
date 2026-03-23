@@ -374,6 +374,7 @@ function handleSelectItem(itemId: string) {
     recordNavigation(store.selectedItemId);
   }
   store.selectItem(itemId);
+  focusAgentTerminal();
 }
 
 // Handlers that mix UI state + store
