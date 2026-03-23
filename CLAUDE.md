@@ -45,6 +45,7 @@ Always use `./scripts/dev.sh` to start the dev server — never run `bun tauri d
 ```bash
 # Development (from repo root or worktree root)
 ./scripts/dev.sh             # start in tmux (auto-detects worktree)
+./scripts/dev.sh start --seed # start with seed data (requires KANNA_DB_NAME=kanna-test.db)
 ./scripts/dev.sh stop        # stop the tmux session
 ./scripts/dev.sh restart     # stop + start
 ./scripts/dev.sh log         # print recent tmux output

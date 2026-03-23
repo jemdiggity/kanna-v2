@@ -147,6 +147,14 @@ function onUnpinnedChange(repoId: string, evt: any) {
     }
   }
 }
+
+function renameSelectedItem() {
+  if (!props.selectedItemId) return;
+  const item = props.pipelineItems.find((i) => i.id === props.selectedItemId);
+  if (item) startRename(item);
+}
+
+defineExpose({ renameSelectedItem });
 </script>
 
 <template>

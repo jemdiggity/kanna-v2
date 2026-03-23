@@ -59,6 +59,7 @@ const diffScopes = new Map<string, "branch" | "commit" | "working">();
 const zenMode = ref(false);
 const sidebarHidden = ref(false);
 const maximized = ref(false);
+const sidebarRef = ref<InstanceType<typeof Sidebar> | null>(null);
 
 // Navigation
 function selectItemAcrossRepos(itemId: string) {
@@ -227,8 +228,16 @@ async function handleCreateCustomTask() {
   }
 }
 
-const customTaskCommands = computed<DynamicCommand[]>(() => {
+const paletteDynamicCommands = computed<DynamicCommand[]>(() => {
   const cmds: DynamicCommand[] = [];
+  // Rename task (only when a task is selected)
+  if (store.currentItem) {
+    cmds.push({
+      id: "rename-task",
+      label: "Rename Task",
+      execute: () => sidebarRef.value?.renameSelectedItem(),
+    });
+  }
   // Always include "New Custom Task" option
   cmds.push({
     id: "custom-task-new",
@@ -434,6 +443,7 @@ onMounted(async () => {
 <template>
   <div class="app" :class="{ zen: zenMode }">
     <Sidebar
+      ref="sidebarRef"
       v-if="!zenMode && !maximized && !sidebarHidden"
       :repos="store.repos"
       :pipeline-items="store.items"
@@ -477,7 +487,7 @@ onMounted(async () => {
     <CommandPaletteModal
       v-if="showCommandPalette"
       :extra-commands="paletteExtraCommands"
-      :dynamic-commands="customTaskCommands"
+      :dynamic-commands="paletteDynamicCommands"
       :usage-counts="commandUsageCounts"
       @close="showCommandPalette = false"
       @execute="(action: ActionName) => keyboardActions[action]()"
