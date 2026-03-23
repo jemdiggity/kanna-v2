@@ -1,0 +1,13 @@
+{
+  "planPath": "docs/superpowers/plans/2026-03-23-tree-explorer.md",
+  "tasks": [
+    {"id": 1, "subject": "Task 1: Add ignore crate and read_dir_entries Rust command", "status": "pending"},
+    {"id": 2, "subject": "Task 2: Add mock and register shortcut", "status": "pending", "blockedBy": [1]},
+    {"id": 3, "subject": "Task 3: Create useTreeExplorer composable", "status": "pending", "blockedBy": [2]},
+    {"id": 4, "subject": "Task 4: Create TreeExplorerModal.vue component", "status": "pending", "blockedBy": [3]},
+    {"id": 5, "subject": "Task 5: Wire into App.vue", "status": "pending", "blockedBy": [4]},
+    {"id": 6, "subject": "Task 6: Manual smoke test", "status": "pending", "blockedBy": [5]},
+    {"id": 7, "subject": "Task 7: Polish and animation refinement", "status": "pending", "blockedBy": [6]}
+  ],
+  "lastUpdated": "2026-03-23T00:00:00Z"
+}
