@@ -1,7 +1,10 @@
 <script setup lang="ts">
 import { ref, watch, computed } from "vue";
+import { useI18n } from "vue-i18n";
 import { getShortcutGroups } from "../composables/useKeyboardShortcuts";
 import { getContextShortcuts, getContextTitle, type ShortcutContext } from "../composables/useShortcutContext";
+
+const { t } = useI18n();
 
 const props = defineProps<{
   hideOnStartup?: boolean;
@@ -20,9 +23,9 @@ watch(hideOnStartup, (val) => emit("update:hide-on-startup", val));
 // Context mode is default on open (relies on v-if destroying/recreating component)
 const showFullMode = ref(props.startInFullMode ?? false);
 watch(() => props.startInFullMode, (val) => { showFullMode.value = val ?? false; });
-const contextTitle = computed(() => getContextTitle(props.context));
-const contextItems = computed(() => getContextShortcuts(props.context));
-const groups = getShortcutGroups();
+const contextTitle = computed(() => getContextTitle(t, props.context));
+const contextItems = computed(() => getContextShortcuts(props.context).map(s => ({ ...s, action: t(s.action) })));
+const groups = computed(() => getShortcutGroups(t));
 
 function splitKeys(display: string): string[] {
   const symbols = ["⌘", "⇧", "⌥", "⌫", "⌃"];
@@ -45,7 +48,7 @@ function splitKeys(display: string): string[] {
 <template>
   <div class="modal-overlay" @click.self="emit('close')">
     <div class="modal shortcuts-modal">
-      <h3>{{ showFullMode ? 'Keyboard Shortcuts' : contextTitle }}</h3>
+      <h3>{{ showFullMode ? t('shortcuts.title') : contextTitle }}</h3>
 
       <!-- Context mode: multi-column grid -->
       <div v-if="!showFullMode" class="context-shortcuts">
@@ -73,12 +76,12 @@ function splitKeys(display: string): string[] {
       <!-- Footer -->
       <div class="shortcuts-footer">
         <a class="toggle-link" @click="showFullMode = !showFullMode">
-          {{ showFullMode ? `Show ${contextTitle.toLowerCase()}` : 'Show all shortcuts' }}
+          {{ showFullMode ? t('shortcuts.showContext', { context: contextTitle.toLowerCase() }) : t('shortcuts.showAll') }}
           <span class="toggle-hint"><kbd>⇧</kbd><kbd>⌘</kbd><kbd>/</kbd></span>
         </a>
         <label v-if="showFullMode" class="startup-checkbox">
           <input type="checkbox" v-model="hideOnStartup" />
-          Don't show on startup
+          {{ t('shortcuts.showOnStartup') }}
         </label>
       </div>
     </div>

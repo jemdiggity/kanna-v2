@@ -86,6 +86,7 @@ export async function runMigrations(db: DbHandle): Promise<void> {
   await db.execute(`INSERT OR IGNORE INTO settings (key, value) VALUES ('suspendAfterMinutes', '5')`);
   await db.execute(`INSERT OR IGNORE INTO settings (key, value) VALUES ('killAfterMinutes', '30')`);
   await db.execute(`INSERT OR IGNORE INTO settings (key, value) VALUES ('ideCommand', 'code')`);
+  await db.execute(`INSERT OR IGNORE INTO settings (key, value) VALUES ('locale', 'en')`);
 
   const addColumn = async (table: string, col: string, def: string) => {
     try { await db.execute(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`); }

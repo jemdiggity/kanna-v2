@@ -1,8 +1,11 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, nextTick, watch } from "vue";
+import { useI18n } from "vue-i18n";
 import { invoke } from "../invoke";
 import { useLessScroll } from "../composables/useLessScroll";
 import { useShortcutContext, registerContextShortcuts } from "../composables/useShortcutContext";
+
+const { t } = useI18n();
 
 const props = defineProps<{
   filePath: string;
@@ -18,16 +21,16 @@ const modalRef = ref<HTMLElement | null>(null);
 useShortcutContext("file");
 const showLineNumbers = ref(false);
 registerContextShortcuts("file", [
-  { label: "Open in IDE", display: "⌘O" },
-  { label: "Toggle Line Numbers", display: "l" },
+  { label: t('filePreview.shortcutOpenIDE'), display: "⌘O" },
+  { label: t('filePreview.shortcutToggleLineNumbers'), display: "l" },
   ...(props.filePath.toLowerCase().endsWith(".md")
-    ? [{ label: "Toggle Markdown", display: "m" }]
+    ? [{ label: t('filePreview.shortcutToggleMarkdown'), display: "m" }]
     : []),
-  { label: "Line ↓/↑", display: "j / k" },
-  { label: "Page ↓/↑", display: "f / b" },
-  { label: "Half ↓/↑", display: "d / u" },
-  { label: "Top / Bottom", display: "g / G" },
-  { label: "Close", display: "q" },
+  { label: t('filePreview.shortcutLineUpDown'), display: "j / k" },
+  { label: t('filePreview.shortcutPageUpDown'), display: "f / b" },
+  { label: t('filePreview.shortcutHalfUpDown'), display: "d / u" },
+  { label: t('filePreview.shortcutTopBottom'), display: "g / G" },
+  { label: t('filePreview.shortcutClose'), display: "q" },
 ]);
 const content = ref("");
 const highlighted = ref("");
@@ -225,12 +228,12 @@ onMounted(() => {
         <span class="file-path">{{ filePath }}</span>
         <div class="header-actions">
           <span v-if="isMarkdownFile" class="mode-badge" @click="renderMarkdown = !renderMarkdown" title="m">
-            {{ renderMarkdown ? "Rendered" : "Raw" }}
+            {{ renderMarkdown ? $t('filePreview.rendered') : $t('filePreview.raw') }}
           </span>
-          <button class="btn-open" @click="openInIDE" title="Open in IDE (⌘O)">Open in IDE</button>
+          <button class="btn-open" @click="openInIDE" :title="$t('filePreview.openInIDETooltip')">{{ $t('filePreview.openInIDE') }}</button>
         </div>
       </div>
-      <div v-if="loading" class="preview-status">Loading...</div>
+      <div v-if="loading" class="preview-status">{{ $t('common.loading') }}</div>
       <div v-else-if="error" class="preview-status preview-error">{{ error }}</div>
       <div
         v-else

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, watch, onMounted, onUnmounted } from "vue";
+import { useI18n } from "vue-i18n";
 import { useLessScroll } from "../composables/useLessScroll";
 import { invoke } from "../invoke";
 import { registerContextShortcuts } from "../composables/useShortcutContext";
@@ -8,14 +9,16 @@ import {
   getOrCreateWorkerPoolSingleton,
 } from "@pierre/diffs/worker";
 
+const { t } = useI18n();
+
 registerContextShortcuts("diff", [
-  { label: "Scope →", display: "⇧⌘]" },
-  { label: "Scope ←", display: "⇧⌘[" },
-  { label: "Line ↓/↑", display: "j / k" },
-  { label: "Page ↓/↑", display: "f / b" },
-  { label: "Half ↓/↑", display: "d / u" },
-  { label: "Top / Bottom", display: "g / G" },
-  { label: "Close", display: "q" },
+  { label: t('diffView.shortcutScopeNext'), display: "⇧⌘]" },
+  { label: t('diffView.shortcutScopePrev'), display: "⇧⌘[" },
+  { label: t('diffView.shortcutLineUpDown'), display: "j / k" },
+  { label: t('diffView.shortcutPageUpDown'), display: "f / b" },
+  { label: t('diffView.shortcutHalfUpDown'), display: "d / u" },
+  { label: t('diffView.shortcutTopBottom'), display: "g / G" },
+  { label: t('diffView.shortcutClose'), display: "q" },
 ]);
 
 const props = defineProps<{
@@ -222,13 +225,13 @@ defineExpose({ refresh: loadDiff });
   <div class="diff-view">
     <div class="diff-toolbar">
       <div class="scope-selector">
-        <button :class="{ active: scope === 'branch' }" @click="scope = 'branch'; loadDiff()">Branch</button>
-        <button :class="{ active: scope === 'commit' }" @click="scope = 'commit'; loadDiff()">Last Commit</button>
-        <button :class="{ active: scope === 'working' }" @click="scope = 'working'; loadDiff()">Working</button>
+        <button :class="{ active: scope === 'branch' }" @click="scope = 'branch'; loadDiff()">{{ $t('diffView.scopeBranch') }}</button>
+        <button :class="{ active: scope === 'commit' }" @click="scope = 'commit'; loadDiff()">{{ $t('diffView.scopeLastCommit') }}</button>
+        <button :class="{ active: scope === 'working' }" @click="scope = 'working'; loadDiff()">{{ $t('diffView.scopeWorking') }}</button>
       </div>
     </div>
     <div v-if="error" class="diff-status diff-error">{{ error }}</div>
-    <div v-else-if="noDiff && !loading" class="diff-status">No changes</div>
+    <div v-else-if="noDiff && !loading" class="diff-status">{{ $t('diffView.noChanges') }}</div>
     <div ref="containerRef" class="diff-container"></div>
   </div>
 </template>

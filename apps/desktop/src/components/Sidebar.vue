@@ -2,7 +2,10 @@
 import type { Repo, PipelineItem } from "@kanna/db";
 import { hasTag } from "@kanna/core";
 import { ref, nextTick } from "vue";
+import { useI18n } from "vue-i18n";
 import draggable from "vuedraggable";
+
+const { t } = useI18n();
 
 const props = defineProps<{
   repos: Repo[];
@@ -65,7 +68,7 @@ function itemsForRepo(repoId: string): PipelineItem[] {
 }
 
 function itemTitle(item: PipelineItem): string {
-  const raw = item.display_name || item.issue_title || item.prompt || "Untitled";
+  const raw = item.display_name || item.issue_title || item.prompt || t('tasks.untitled');
   return raw.length > 40 ? raw.slice(0, 40) + "..." : raw;
 }
 
@@ -161,8 +164,8 @@ defineExpose({ renameSelectedItem });
   <aside class="sidebar">
     <div class="sidebar-content">
       <div v-if="repos.length === 0" class="empty-state">
-        No repos yet.<br>
-        Press <kbd>⌘</kbd><kbd>I</kbd> to create one.
+        {{ $t('sidebar.noReposYet') }}<br>
+        {{ $t('sidebar.noReposHint', { shortcut: '⌘I' }) }}
       </div>
 
       <div v-for="repo in repos" :key="repo.id" class="repo-section">
@@ -181,12 +184,12 @@ defineExpose({ renameSelectedItem });
           <span class="repo-count">{{ itemsForRepo(repo.id).length }}</span>
           <button
             class="btn-icon btn-add-task"
-            title="New Task (⌘N)"
+            :title="$t('sidebar.newTaskTooltip')"
             @click.stop="emit('new-task', repo.id)"
           >+</button>
           <button
             class="btn-icon btn-hide-repo"
-            title="Remove Repo"
+            :title="$t('sidebar.removeRepoTooltip')"
             @click.stop="emit('hide-repo', repo.id)"
           >&times;</button>
         </div>
@@ -241,7 +244,7 @@ defineExpose({ renameSelectedItem });
           </div>
 
           <!-- Merge Queue tasks -->
-          <div v-if="sortedMerge(repo.id).length > 0" class="section-label">Merge Queue</div>
+          <div v-if="sortedMerge(repo.id).length > 0" class="section-label">{{ $t('sidebar.sectionMergeQueue') }}</div>
           <draggable
             :model-value="sortedMerge(repo.id)"
             :group="{ name: `repo-${repo.id}` }"
@@ -286,7 +289,7 @@ defineExpose({ renameSelectedItem });
           </draggable>
 
           <!-- PR tasks -->
-          <div v-if="sortedPR(repo.id).length > 0" class="section-label">Pull Requests</div>
+          <div v-if="sortedPR(repo.id).length > 0" class="section-label">{{ $t('sidebar.sectionPullRequests') }}</div>
           <draggable
             :model-value="sortedPR(repo.id)"
             :group="{ name: `repo-${repo.id}` }"
@@ -331,7 +334,7 @@ defineExpose({ renameSelectedItem });
           </draggable>
 
           <!-- In Progress tasks -->
-          <div v-if="sortedActive(repo.id).length > 0" class="section-label">In Progress</div>
+          <div v-if="sortedActive(repo.id).length > 0" class="section-label">{{ $t('sidebar.sectionInProgress') }}</div>
           <draggable
             :model-value="sortedActive(repo.id)"
             :group="{ name: `repo-${repo.id}` }"
@@ -376,7 +379,7 @@ defineExpose({ renameSelectedItem });
           </draggable>
 
           <!-- Blocked tasks -->
-          <div v-if="sortedBlocked(repo.id).length > 0" class="section-label">Blocked</div>
+          <div v-if="sortedBlocked(repo.id).length > 0" class="section-label">{{ $t('sidebar.sectionBlocked') }}</div>
           <div class="type-zone">
             <div
               v-for="element in sortedBlocked(repo.id)"
@@ -403,21 +406,21 @@ defineExpose({ renameSelectedItem });
                 <span
                   v-if="blockerNames?.[element.id]"
                   class="blocked-by-text"
-                >Blocked by: {{ blockerNames[element.id] }}</span>
+                >{{ $t('sidebar.blockedBy') }} {{ blockerNames[element.id] }}</span>
               </div>
             </div>
           </div>
 
           <div v-if="itemsForRepo(repo.id).length === 0" class="no-items">
-            No tasks
+            {{ $t('sidebar.noTasks') }}
           </div>
         </div>
       </div>
     </div>
 
     <div class="sidebar-footer">
-      <button class="btn-import" @click="emit('add-repo')" title="Add Repo (⌘I)">
-        Add Repo
+      <button class="btn-import" @click="emit('add-repo')" :title="$t('sidebar.addRepoTooltip')">
+        {{ $t('sidebar.addRepo') }}
       </button>
     </div>
   </aside>

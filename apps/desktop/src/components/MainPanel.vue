@@ -24,16 +24,16 @@ const emit = defineEmits<{
       <TaskHeader v-if="!maximized" :item="item" />
       <template v-if="hasTag(item, 'blocked')">
         <div class="blocked-placeholder">
-          <p class="blocked-title">Task Blocked</p>
-          <p class="blocked-hint">This task will start automatically when all blockers complete.</p>
+          <p class="blocked-title">{{ $t('mainPanel.taskBlocked') }}</p>
+          <p class="blocked-hint">{{ $t('mainPanel.taskBlockedHint') }}</p>
           <div v-if="blockers && blockers.length > 0" class="blocked-by">
-            <p class="blocked-by-label">Waiting on:</p>
+            <p class="blocked-by-label">{{ $t('mainPanel.waitingOn') }}</p>
             <div v-for="b in blockers" :key="b.id" class="blocker-item">
               <span
                 class="blocker-status"
                 :style="{ color: hasTag(b, 'done') ? '#666' : '#0066cc' }"
-              >{{ hasTag(b, 'done') ? 'Done' : 'Active' }}</span>
-              <span class="blocker-name">{{ b.display_name || (b.prompt ? b.prompt.slice(0, 60) : 'Untitled') }}</span>
+              >{{ hasTag(b, 'done') ? $t('mainPanel.blockerDone') : $t('mainPanel.blockerActive') }}</span>
+              <span class="blocker-name">{{ b.display_name || (b.prompt ? b.prompt.slice(0, 60) : $t('tasks.untitled')) }}</span>
             </div>
           </div>
         </div>
@@ -52,12 +52,12 @@ const emit = defineEmits<{
     </template>
     <div v-else class="empty-state">
       <template v-if="!hasRepos">
-        <p class="empty-title">No repos yet</p>
-        <p class="empty-hint">Press <kbd>⌘</kbd><kbd>I</kbd> to create a repo and get started.</p>
+        <p class="empty-title">{{ $t('mainPanel.noReposTitle') }}</p>
+        <p class="empty-hint">{{ $t('mainPanel.noReposHint', { shortcut: '⌘I' }) }}</p>
       </template>
       <template v-else>
-        <p class="empty-title">No task selected</p>
-        <p class="empty-hint">Select a task from the sidebar or press <kbd>⇧</kbd><kbd>⌘</kbd><kbd>N</kbd> to create one.</p>
+        <p class="empty-title">{{ $t('mainPanel.noTaskSelected') }}</p>
+        <p class="empty-hint">{{ $t('mainPanel.noTaskHint', { shortcut: '⇧⌘N' }) }}</p>
       </template>
     </div>
   </main>

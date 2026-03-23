@@ -34,10 +34,10 @@ export type KeyboardActions = Record<ActionName, () => void>;
 
 interface ShortcutDef {
   action: ActionName;
-  /** Display label for the shortcuts modal */
-  label: string;
-  /** Group for the shortcuts modal */
-  group: string;
+  /** i18n key for the display label in the shortcuts modal */
+  labelKey: string;
+  /** i18n key for the group heading in the shortcuts modal */
+  groupKey: string;
   /** Key(s) that trigger this shortcut (matched against KeyboardEvent.key). Array = any match. */
   key: string | string[];
   meta?: boolean;
@@ -58,36 +58,36 @@ interface ShortcutDef {
  */
 export const shortcuts: ShortcutDef[] = [
   // Tasks — lifecycle operations
-  { action: "newTask",    label: "New Task",          group: "Tasks",      key: ["N", "n"],                     meta: true, shift: true,  display: "⇧⌘N",     context: ["main"] },
-  { action: "makePR",     label: "Make PR",           group: "Tasks",      key: "s",                            meta: true, display: "⌘S",                       context: ["main"] },
-  { action: "mergeQueue", label: "Merge Queue",       group: "Tasks",      key: ["M", "m"],                     meta: true, shift: true,  display: "⇧⌘M",     context: ["main"] },
-  { action: "closeTask",  label: "Close / Reject",    group: "Tasks",      key: ["Backspace", "Delete"],        meta: true,               display: "⌘⌫",       context: ["main"] },
-  { action: "undoClose",  label: "Undo Close",        group: "Tasks",      key: ["Z", "z"],                     meta: true,               display: "⌘Z",       context: ["main"] },
+  { action: "newTask",    labelKey: "shortcuts.newTask",       groupKey: "shortcuts.groupTasks",      key: ["N", "n"],                     meta: true, shift: true,  display: "⇧⌘N",     context: ["main"] },
+  { action: "makePR",     labelKey: "shortcuts.makePR",        groupKey: "shortcuts.groupTasks",      key: "s",                            meta: true, display: "⌘S",                       context: ["main"] },
+  { action: "mergeQueue", labelKey: "shortcuts.mergeQueue",    groupKey: "shortcuts.groupTasks",      key: ["M", "m"],                     meta: true, shift: true,  display: "⇧⌘M",     context: ["main"] },
+  { action: "closeTask",  labelKey: "shortcuts.closeReject",   groupKey: "shortcuts.groupTasks",      key: ["Backspace", "Delete"],        meta: true,               display: "⌘⌫",       context: ["main"] },
+  { action: "undoClose",  labelKey: "shortcuts.undoClose",     groupKey: "shortcuts.groupTasks",      key: ["Z", "z"],                     meta: true,               display: "⌘Z",       context: ["main"] },
   // Navigation — moving between tasks and finding things
-  { action: "navigateUp",     label: "Previous Task",    group: "Navigation", key: "ArrowUp",                   meta: true, alt: true,    display: "⌥⌘↑",     context: ["main"] },
-  { action: "navigateDown",   label: "Next Task",        group: "Navigation", key: "ArrowDown",                 meta: true, alt: true,    display: "⌥⌘↓",     context: ["main"] },
-  { action: "openFile",       label: "File Picker",      group: "Navigation", key: "p",                         meta: true,               display: "⌘P",       context: ["main"] },
-  { action: "commandPalette", label: "Command Palette",  group: "Navigation", key: ["P", "p"],                  meta: true, shift: true,  display: "⇧⌘P",     context: ["main", "diff", "file", "shell"] },
+  { action: "navigateUp",     labelKey: "shortcuts.previousTask",   groupKey: "shortcuts.groupNavigation", key: "ArrowUp",                   meta: true, alt: true,    display: "⌥⌘↑",     context: ["main"] },
+  { action: "navigateDown",   labelKey: "shortcuts.nextTask",       groupKey: "shortcuts.groupNavigation", key: "ArrowDown",                 meta: true, alt: true,    display: "⌥⌘↓",     context: ["main"] },
+  { action: "openFile",       labelKey: "shortcuts.filePicker",     groupKey: "shortcuts.groupNavigation", key: "p",                         meta: true,               display: "⌘P",       context: ["main"] },
+  { action: "commandPalette", labelKey: "shortcuts.commandPalette", groupKey: "shortcuts.groupNavigation", key: ["P", "p"],                  meta: true, shift: true,  display: "⇧⌘P",     context: ["main", "diff", "file", "shell"] },
   // Views — panels, modes, and display
-  { action: "showDiff",       label: "View Diff",        group: "Views",      key: "d",                         meta: true, display: "⌘D",                       context: ["main"] },
-  { action: "openShell",      label: "Shell Terminal",   group: "Views",      key: "j",                         meta: true,               display: "⌘J",       context: ["main", "shell"] },
-  { action: "openInIDE",      label: "Open in IDE",      group: "Views",      key: "o",                         meta: true,               display: "⌘O",       context: ["main"] },
-  { action: "toggleZen",      label: "Zen Mode",         group: "Views",      key: ["Z", "z"],                  meta: true, shift: true,  display: "⇧⌘Z",     context: ["main"] },
-  { action: "toggleMaximize", label: "Maximize",         group: "Views",      key: "Enter",                     meta: true, shift: true,  display: "⇧⌘Enter", context: ["diff", "shell"] },
+  { action: "showDiff",       labelKey: "shortcuts.viewDiff",       groupKey: "shortcuts.groupViews",      key: "d",                         meta: true, display: "⌘D",                       context: ["main"] },
+  { action: "openShell",      labelKey: "shortcuts.shellTerminal",  groupKey: "shortcuts.groupViews",      key: "j",                         meta: true,               display: "⌘J",       context: ["main", "shell"] },
+  { action: "openInIDE",      labelKey: "shortcuts.openInIDE",      groupKey: "shortcuts.groupViews",      key: "o",                         meta: true,               display: "⌘O",       context: ["main"] },
+  { action: "toggleZen",      labelKey: "shortcuts.zenMode",        groupKey: "shortcuts.groupViews",      key: ["Z", "z"],                  meta: true, shift: true,  display: "⇧⌘Z",     context: ["main"] },
+  { action: "toggleMaximize", labelKey: "shortcuts.maximize",       groupKey: "shortcuts.groupViews",      key: "Enter",                     meta: true, shift: true,  display: "⇧⌘Enter", context: ["diff", "shell"] },
   // Window — disabled until #24 (new window state sharing)
-  // { action: "newWindow",  label: "New Window",     group: "Window",     key: ["N", "n"],                     meta: true, shift: true,  display: "⇧⌘N" },
-  { action: "toggleSidebar", label: "Toggle Sidebar",  group: "Views",      key: "b",                            meta: true,               display: "⌘B",       context: ["main"] },
-  { action: "showAnalytics", label: "Analytics",        group: "Views",      key: ["A", "a"],                     meta: true, shift: true,  display: "⇧⌘A",     context: ["main"] },
-  { action: "createRepo",   label: "Create Repo",      group: "Navigation", key: ["I", "i"],                     meta: true,               display: "⌘I",       context: ["main"] },
-  { action: "importRepo",   label: "Import / Clone",   group: "Navigation", key: ["I", "i"],                     meta: true, shift: true,  display: "⇧⌘I",     context: ["main"] },
-  { action: "goBack",       label: "Go Back",          group: "Navigation", key: "-",                            ctrl: true,               display: "⌃-",       context: ["main"] },
-  { action: "goForward",    label: "Go Forward",       group: "Navigation", key: ["_", "-"],                     ctrl: true, shift: true,  display: "⌃⇧-",     context: ["main"] },
-  { action: "toggleTreeExplorer", label: "Tree Explorer", group: "Navigation", key: "e", meta: true, shift: true, display: "⇧⌘E", context: ["main", "shell"] },
+  // { action: "newWindow",  labelKey: "shortcuts.newWindow", groupKey: "shortcuts.groupWindow", key: ["N", "n"],                     meta: true, shift: true,  display: "⇧⌘N" },
+  { action: "toggleSidebar", labelKey: "shortcuts.toggleSidebar", groupKey: "shortcuts.groupViews",      key: "b",                            meta: true,               display: "⌘B",       context: ["main"] },
+  { action: "showAnalytics", labelKey: "shortcuts.analytics",      groupKey: "shortcuts.groupViews",      key: ["A", "a"],                     meta: true, shift: true,  display: "⇧⌘A",     context: ["main"] },
+  { action: "createRepo",   labelKey: "shortcuts.createRepo",     groupKey: "shortcuts.groupNavigation", key: ["I", "i"],                     meta: true,               display: "⌘I",       context: ["main"] },
+  { action: "importRepo",   labelKey: "shortcuts.importClone",    groupKey: "shortcuts.groupNavigation", key: ["I", "i"],                     meta: true, shift: true,  display: "⇧⌘I",     context: ["main"] },
+  { action: "goBack",       labelKey: "shortcuts.goBack",         groupKey: "shortcuts.groupNavigation", key: "-",                            ctrl: true,               display: "⌃-",       context: ["main"] },
+  { action: "goForward",    labelKey: "shortcuts.goForward",      groupKey: "shortcuts.groupNavigation", key: ["_", "-"],                     ctrl: true, shift: true,  display: "⌃⇧-",     context: ["main"] },
+  { action: "toggleTreeExplorer", labelKey: "shortcuts.treeExplorer", groupKey: "shortcuts.groupNavigation", key: "e", meta: true, shift: true, display: "⇧⌘E", context: ["main", "shell"] },
   // Help — ⇧⌘/ must come before ⌘/ so the more specific shortcut matches first
-  { action: "showAllShortcuts", label: "All Shortcuts",      group: "Help",   key: "/",                           meta: true, shift: true,  display: "⇧⌘/",     context: ["main", "diff", "file", "shell"], hidden: true },
-  { action: "showShortcuts",  label: "Keyboard Shortcuts", group: "Help",   key: "/",                           meta: true,               display: "⌘/",       context: ["main", "diff", "file", "shell"] },
+  { action: "showAllShortcuts", labelKey: "shortcuts.allShortcuts",       groupKey: "shortcuts.groupHelp",   key: "/",                           meta: true, shift: true,  display: "⇧⌘/",     context: ["main", "diff", "file", "shell"], hidden: true },
+  { action: "showShortcuts",  labelKey: "shortcuts.keyboardShortcuts",  groupKey: "shortcuts.groupHelp",   key: "/",                           meta: true,               display: "⌘/",       context: ["main", "diff", "file", "shell"] },
   // Escape is special — no meta required
-  { action: "dismiss",    label: "Dismiss",           group: "Navigation", key: "Escape",                                                 display: "Escape",   context: ["main", "diff", "file", "shell"] },
+  { action: "dismiss",    labelKey: "shortcuts.dismiss",       groupKey: "shortcuts.groupNavigation", key: "Escape",                                                 display: "Escape",   context: ["main", "diff", "file", "shell"] },
 ];
 
 function matches(def: ShortcutDef, e: KeyboardEvent): boolean {
@@ -110,16 +110,17 @@ export function isAppShortcut(e: KeyboardEvent): boolean {
 
 /**
  * Returns shortcut definitions grouped for display in the shortcuts modal.
+ * Accepts a `t` function to resolve i18n keys to translated strings.
  */
-export function getShortcutGroups(): { title: string; shortcuts: { keys: string; action: string }[] }[] {
-  const groupOrder = ["Tasks", "Navigation", "Views", "Help"];
+export function getShortcutGroups(t: (key: string) => string): { title: string; shortcuts: { keys: string; action: string }[] }[] {
+  const groupOrder = ["shortcuts.groupTasks", "shortcuts.groupNavigation", "shortcuts.groupViews", "shortcuts.groupHelp"];
   const map = new Map<string, { keys: string; action: string }[]>();
   for (const def of shortcuts) {
     if (def.hidden) continue;
-    if (!map.has(def.group)) map.set(def.group, []);
-    map.get(def.group)!.push({ keys: def.display, action: def.label });
+    if (!map.has(def.groupKey)) map.set(def.groupKey, []);
+    map.get(def.groupKey)!.push({ keys: def.display, action: t(def.labelKey) });
   }
-  return groupOrder.filter((g) => map.has(g)).map((g) => ({ title: g, shortcuts: map.get(g)! }));
+  return groupOrder.filter((g) => map.has(g)).map((g) => ({ title: t(g), shortcuts: map.get(g)! }));
 }
 
 export function useKeyboardShortcuts(actions: KeyboardActions, options?: { beforeAction?: (action: ActionName) => void }) {

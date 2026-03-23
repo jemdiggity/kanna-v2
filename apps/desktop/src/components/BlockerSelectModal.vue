@@ -1,7 +1,10 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, nextTick } from "vue";
+import { useI18n } from "vue-i18n";
 import type { PipelineItem } from "@kanna/db";
 import { hasTag } from "@kanna/core";
+
+const { t } = useI18n();
 
 const props = defineProps<{
   candidates: PipelineItem[];
@@ -59,12 +62,12 @@ function removeItem(id: string) {
 }
 
 function chipTitle(item: PipelineItem): string {
-  const raw = item.display_name || item.issue_title || item.prompt || "Untitled";
+  const raw = item.display_name || item.issue_title || item.prompt || t('tasks.untitled');
   return raw.length > 40 ? raw.slice(0, 40) + "..." : raw;
 }
 
 function itemTitle(item: PipelineItem): string {
-  const raw = item.display_name || item.issue_title || item.prompt || "Untitled";
+  const raw = item.display_name || item.issue_title || item.prompt || t('tasks.untitled');
   return raw.length > 60 ? raw.slice(0, 60) + "..." : raw;
 }
 
@@ -130,7 +133,7 @@ onMounted(async () => {
           v-model="query"
           type="text"
           class="inline-input"
-          :placeholder="selected.size === 0 ? 'Search tasks...' : ''"
+          :placeholder="selected.size === 0 ? $t('blockerSelect.searchPlaceholder') : ''"
         />
       </div>
 
@@ -146,19 +149,19 @@ onMounted(async () => {
         >
           <span class="command-label">{{ itemTitle(item) }}</span>
           <span class="command-meta">
-            <span v-if="isDisabled(item.id)" class="tag-label">Circular dependency</span>
-            <span v-else class="tag-label">{{ hasTag(item, 'blocked') ? 'Blocked' : 'Active' }}</span>
+            <span v-if="isDisabled(item.id)" class="tag-label">{{ $t('blockerSelect.circularDep') }}</span>
+            <span v-else class="tag-label">{{ hasTag(item, 'blocked') ? $t('blockerSelect.statusBlocked') : $t('blockerSelect.statusActive') }}</span>
           </span>
         </div>
       </div>
       <div v-else-if="query" class="command-list">
-        <div class="empty">No matching tasks</div>
+        <div class="empty">{{ $t('blockerSelect.noMatchingTasks') }}</div>
       </div>
 
       <div class="palette-footer">
         <span class="hint">
-          <template v-if="selected.size === 0">Type to search, Enter to add · Enter to save</template>
-          <template v-else>Enter to confirm ({{ selected.size }} selected) · Backspace to remove last</template>
+          <template v-if="selected.size === 0">{{ $t('blockerSelect.hintEmpty') }}</template>
+          <template v-else>{{ $t('blockerSelect.hintSelected', { count: selected.size }) }}</template>
         </span>
       </div>
     </div>

@@ -1,0 +1,237 @@
+{
+  "tasks": {
+    "newTask": "New Task",
+    "makePR": "Make PR",
+    "mergeQueue": "Merge Queue",
+    "closeTask": "Close / Reject",
+    "undoClose": "Undo Close",
+    "blockTask": "Block Task",
+    "editBlockedTask": "Edit Blocked Task",
+    "descriptionPlaceholder": "Describe the task...",
+    "untitled": "Untitled",
+    "renameTask": "Rename Task"
+  },
+  "actions": {
+    "create": "Create",
+    "cancel": "Cancel",
+    "done": "Done",
+    "delete": "Delete",
+    "close": "Close",
+    "edit": "Edit",
+    "submit": "Submit",
+    "dismiss": "Dismiss",
+    "import": "Import"
+  },
+  "preferences": {
+    "title": "Preferences",
+    "language": "Language",
+    "suspendAfter": "Suspend After (min)",
+    "killAfter": "Kill After (min)",
+    "ideCommand": "IDE Command",
+    "idePlaceholder": "code, cursor, idea..."
+  },
+  "shortcuts": {
+    "title": "Keyboard Shortcuts",
+    "showOnStartup": "Don't show on startup",
+    "showAll": "Show all shortcuts",
+    "showContext": "Show {context}",
+    "groupTasks": "Tasks",
+    "groupNavigation": "Navigation",
+    "groupViews": "Views",
+    "groupHelp": "Help",
+    "newTask": "New Task",
+    "makePR": "Make PR",
+    "mergeQueue": "Merge Queue",
+    "closeReject": "Close / Reject",
+    "undoClose": "Undo Close",
+    "previousTask": "Previous Task",
+    "nextTask": "Next Task",
+    "filePicker": "File Picker",
+    "commandPalette": "Command Palette",
+    "viewDiff": "View Diff",
+    "shellTerminal": "Shell Terminal",
+    "openInIDE": "Open in IDE",
+    "zenMode": "Zen Mode",
+    "maximize": "Maximize",
+    "toggleSidebar": "Toggle Sidebar",
+    "analytics": "Analytics",
+    "createRepo": "Create Repo",
+    "importClone": "Import / Clone",
+    "goBack": "Go Back",
+    "goForward": "Go Forward",
+    "allShortcuts": "All Shortcuts",
+    "keyboardShortcuts": "Keyboard Shortcuts",
+    "dismiss": "Dismiss",
+    "treeExplorer": "Tree Explorer"
+  },
+  "shortcutContexts": {
+    "main": "Main Shortcuts",
+    "diff": "Diff Viewer Shortcuts",
+    "file": "File Viewer Shortcuts",
+    "shell": "Shell Shortcuts",
+    "tree": "Tree Explorer Shortcuts"
+  },
+  "sidebar": {
+    "addRepo": "Add Repo",
+    "addRepoTooltip": "Add Repo (⌘I)",
+    "noTasks": "No tasks",
+    "noReposYet": "No repos yet.",
+    "noReposHint": "Press {shortcut} to create one.",
+    "newTaskTooltip": "New Task (⌘N)",
+    "removeRepoTooltip": "Remove Repo",
+    "sectionMergeQueue": "Merge Queue",
+    "sectionPullRequests": "Pull Requests",
+    "sectionInProgress": "In Progress",
+    "sectionBlocked": "Blocked",
+    "blockedBy": "Blocked by:"
+  },
+  "modals": {
+    "selectRepo": "Select a Git Repository",
+    "chooseDirectory": "Choose parent directory",
+    "chooseCloneDirectory": "Choose clone directory",
+    "submitHint": "⌘Enter to {action}"
+  },
+  "toasts": {
+    "taskCreationFailed": "Task creation failed",
+    "prCreationFailed": "PR creation failed",
+    "repoCreationFailed": "Failed to create repo",
+    "cloneFailed": "Clone failed",
+    "worktreeFailed": "Failed to create worktree",
+    "dbInsertFailed": "Failed to save task to database",
+    "closeTaskFailed": "Failed to close task",
+    "undoCloseFailed": "Failed to undo close",
+    "prAgentFailed": "Failed to start PR agent",
+    "closeSourceTaskFailed": "Failed to close source task",
+    "mergeAgentFailed": "Failed to start merge agent",
+    "blockedWorktreeFailed": "Failed to create worktree for blocked task",
+    "blockTaskFailed": "Failed to block task",
+    "selectRepoFirst": "Select a repository first",
+    "agentStartFailed": "Agent failed to start"
+  },
+  "tags": {
+    "inProgress": "In Progress",
+    "pr": "PR",
+    "merge": "Merge",
+    "done": "Done",
+    "blocked": "Blocked"
+  },
+  "analytics": {
+    "viewTasks": "Tasks",
+    "viewAvgTime": "Avg Time in State",
+    "viewOperator": "Operator",
+    "hint": "spacebar to switch · esc to close",
+    "noTasks": "No tasks yet",
+    "loading": "Loading...",
+    "labelCreated": "Created",
+    "labelClosed": "Closed",
+    "labelOpen": "Open",
+    "activityTrackingStarted": "Activity tracking started — data will appear as tasks complete.",
+    "avgBusy": "Avg Busy",
+    "avgUnread": "Avg Unread",
+    "avgIdle": "Avg Idle",
+    "busy": "Busy",
+    "unread": "Unread",
+    "idle": "Idle",
+    "operatorTrackingStarted": "Operator tracking started — data will appear as you work.",
+    "avgResponseTime": "Avg Response Time",
+    "avgDwellTime": "Avg Dwell Time",
+    "switchesPerHour": "Switches/Hour",
+    "focusScore": "Focus Score"
+  },
+  "agentView": {
+    "thinking": "Thinking...",
+    "working": "Working",
+    "completed": "Completed",
+    "error": "Error",
+    "turns": "turns",
+    "running": "Agent running..."
+  },
+  "addRepo": {
+    "tabCreate": "Create New",
+    "tabImport": "Import / Clone",
+    "namePlaceholder": "my-awesome-project",
+    "change": "change",
+    "importPlaceholder": "owner/repo, URL, or gh repo clone...",
+    "chooseLocalFolder": "choose a local folder",
+    "detecting": "detecting...",
+    "gitRepoConfirmed": "✓ Git repo · branch:",
+    "notAGitRepo": "Not a git repo. Use Create New tab to initialize one.",
+    "repoNamePlaceholder": "Repository name",
+    "cloning": "Cloning...",
+    "or": "or"
+  },
+  "diffView": {
+    "scopeBranch": "Branch",
+    "scopeLastCommit": "Last Commit",
+    "scopeWorking": "Working",
+    "noChanges": "No changes",
+    "shortcutScopeNext": "Scope →",
+    "shortcutScopePrev": "Scope ←",
+    "shortcutLineUpDown": "Line ↓/↑",
+    "shortcutPageUpDown": "Page ↓/↑",
+    "shortcutHalfUpDown": "Half ↓/↑",
+    "shortcutTopBottom": "Top / Bottom",
+    "shortcutClose": "Close"
+  },
+  "filePicker": {
+    "placeholder": "Search files...",
+    "noFiles": "No files found"
+  },
+  "filePreview": {
+    "rendered": "Rendered",
+    "raw": "Raw",
+    "openInIDE": "Open in IDE",
+    "openInIDETooltip": "Open in IDE (⌘O)",
+    "shortcutOpenIDE": "Open in IDE",
+    "shortcutToggleMarkdown": "Toggle Markdown",
+    "shortcutLineUpDown": "Line ↓/↑",
+    "shortcutPageUpDown": "Page ↓/↑",
+    "shortcutHalfUpDown": "Half ↓/↑",
+    "shortcutTopBottom": "Top / Bottom",
+    "shortcutClose": "Close",
+    "shortcutToggleLineNumbers": "Toggle Line Numbers"
+  },
+  "mainPanel": {
+    "taskBlocked": "Task Blocked",
+    "taskBlockedHint": "This task will start automatically when all blockers complete.",
+    "waitingOn": "Waiting on:",
+    "blockerDone": "Done",
+    "blockerActive": "Active",
+    "noReposTitle": "No repos yet",
+    "noReposHint": "Press {shortcut} to create a repo and get started.",
+    "noTaskSelected": "No task selected",
+    "noTaskHint": "Select a task from the sidebar or press {shortcut} to create one."
+  },
+  "blockerSelect": {
+    "searchPlaceholder": "Search tasks...",
+    "circularDep": "Circular dependency",
+    "statusBlocked": "Blocked",
+    "statusActive": "Active",
+    "noMatchingTasks": "No matching tasks",
+    "hintEmpty": "Type to search, Enter to add · Enter to save",
+    "hintSelected": "Enter to confirm ({count} selected) · Backspace to remove last"
+  },
+  "commandPalette": {
+    "placeholder": "Type a command...",
+    "noCommands": "No commands found"
+  },
+  "terminalTabs": {
+    "noSession": "No agent session active"
+  },
+  "taskHeader": {
+    "branchLabel": "branch:",
+    "prPrefix": "PR #"
+  },
+  "app": {
+    "selectRepoFirst": "Select a repository first",
+    "customTaskLaunchFailed": "Custom task launch failed",
+    "customTaskCreationFailed": "Custom task creation failed",
+    "newCustomTask": "New Custom Task",
+    "newCustomTaskDesc": "Create a new reusable agent task definition",
+    "selectBlockingTasks": "Select blocking tasks",
+    "editBlockingTasks": "Edit blocking tasks"
+  },
+  "common": {
+    "loading": "Loading..."
+  }
+}

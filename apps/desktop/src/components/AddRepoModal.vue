@@ -1,9 +1,12 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted } from "vue";
+import { useI18n } from "vue-i18n";
 import { open } from "../dialog";
 import { invoke } from "../invoke";
 import { parseRepoInput } from "../utils/parseRepoInput";
 import type { ParsedInput } from "../utils/parseRepoInput";
+
+const { t } = useI18n();
 
 const props = defineProps<{
   initialTab: "create" | "import";
@@ -138,14 +141,14 @@ async function findAvailableName(parentDir: string, baseName: string): Promise<s
 }
 
 async function handleChangeCreateDir() {
-  const result = await open({ directory: true, multiple: false, title: "Choose parent directory" });
+  const result = await open({ directory: true, multiple: false, title: t('modals.chooseDirectory') });
   if (!result) return;
   const dir = Array.isArray(result) ? result[0] : result;
   if (dir) createParentDir.value = dir;
 }
 
 async function handleChangeCloneDir() {
-  const result = await open({ directory: true, multiple: false, title: "Choose clone directory" });
+  const result = await open({ directory: true, multiple: false, title: t('modals.chooseCloneDirectory') });
   if (!result) return;
   const dir = Array.isArray(result) ? result[0] : result;
   if (dir) createParentDir.value = dir;
@@ -153,7 +156,7 @@ async function handleChangeCloneDir() {
 
 async function handleChooseLocalFolder() {
   error.value = null;
-  const result = await open({ directory: true, multiple: false, title: "Select a Git Repository" });
+  const result = await open({ directory: true, multiple: false, title: t('modals.selectRepo') });
   if (!result) return;
   const dirPath = Array.isArray(result) ? result[0] : result;
   if (!dirPath) return;
@@ -235,14 +238,14 @@ function switchTab(tab: "create" | "import") {
           :class="{ active: activeTab === 'create' }"
           @click="switchTab('create')"
         >
-          Create New
+          {{ $t('addRepo.tabCreate') }}
         </button>
         <button
           class="tab"
           :class="{ active: activeTab === 'import' }"
           @click="switchTab('import')"
         >
-          Import / Clone
+          {{ $t('addRepo.tabImport') }}
         </button>
       </div>
 
@@ -252,11 +255,11 @@ function switchTab(tab: "create" | "import") {
           v-model="createName"
           class="text-input"
           type="text"
-          placeholder="my-awesome-project"
+          :placeholder="$t('addRepo.namePlaceholder')"
         />
         <div class="path-hint">
           <span class="path-text">{{ displayCreatePath }}</span>
-          <a v-if="createName.trim()" class="change-link" @click="handleChangeCreateDir">change</a>
+          <a v-if="createName.trim()" class="change-link" @click="handleChangeCreateDir">{{ $t('addRepo.change') }}</a>
         </div>
       </div>
 
@@ -267,38 +270,38 @@ function switchTab(tab: "create" | "import") {
             v-model="importInput"
             class="text-input"
             type="text"
-            placeholder="owner/repo, URL, or gh repo clone..."
+            :placeholder="$t('addRepo.importPlaceholder')"
             :disabled="cloning"
           />
           <template v-if="parsed.type === 'clone' && parsed.owner && parsed.repo">
             <div class="resolved-url">↳ github.com/{{ parsed.owner }}/{{ parsed.repo }}</div>
             <div class="path-hint">
               <span class="path-text">{{ displayCloneDestination }}</span>
-              <a class="change-link" @click="handleChangeCloneDir">change</a>
+              <a class="change-link" @click="handleChangeCloneDir">{{ $t('addRepo.change') }}</a>
             </div>
           </template>
           <template v-else>
             <div class="path-hint">
-              or <a class="change-link" @click="handleChooseLocalFolder">choose a local folder</a>
+              {{ $t('addRepo.or') }} <a class="change-link" @click="handleChooseLocalFolder">{{ $t('addRepo.chooseLocalFolder') }}</a>
             </div>
           </template>
         </template>
 
         <template v-else>
           <div class="selected-path">{{ selectedLocalPath }}</div>
-          <div v-if="localLoading" class="path-hint">detecting...</div>
+          <div v-if="localLoading" class="path-hint">{{ $t('addRepo.detecting') }}</div>
           <div v-else-if="localIsGitRepo" class="resolved-url">
-            ✓ Git repo · branch: {{ localBranch }}<template v-if="localRemote"> · {{ localRemote }}</template>
+            {{ $t('addRepo.gitRepoConfirmed') }} {{ localBranch }}<template v-if="localRemote"> · {{ localRemote }}</template>
           </div>
           <div v-else class="error-inline">
-            Not a git repo. Use Create New tab to initialize one.
+            {{ $t('addRepo.notAGitRepo') }}
           </div>
           <div v-if="localIsGitRepo && !localLoading" class="name-field">
             <input
               v-model="localRepoName"
               class="text-input"
               type="text"
-              placeholder="Repository name"
+              :placeholder="$t('addRepo.repoNamePlaceholder')"
             />
           </div>
         </template>
@@ -308,17 +311,17 @@ function switchTab(tab: "create" | "import") {
 
       <div class="modal-footer">
         <span class="hint">
-          ⌘Enter to {{ activeTab === "create" ? "create" : "import" }}
+          {{ $t('modals.submitHint', { action: activeTab === 'create' ? $t('actions.create').toLowerCase() : $t('actions.import').toLowerCase() }) }}
         </span>
         <div class="modal-actions">
-          <button class="btn btn-cancel" @click="emit('cancel')">Cancel</button>
+          <button class="btn btn-cancel" @click="emit('cancel')">{{ $t('actions.cancel') }}</button>
           <button
             v-if="activeTab === 'create'"
             class="btn btn-primary"
             :disabled="createDisabled"
             @click="handleSubmit"
           >
-            Create
+            {{ $t('actions.create') }}
           </button>
           <button
             v-else
@@ -327,9 +330,9 @@ function switchTab(tab: "create" | "import") {
             @click="handleSubmit"
           >
             <template v-if="cloning">
-              <span class="spinner" /> Cloning...
+              <span class="spinner" /> {{ $t('addRepo.cloning') }}
             </template>
-            <template v-else>Import</template>
+            <template v-else>{{ $t('actions.import') }}</template>
           </button>
         </div>
       </div>

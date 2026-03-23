@@ -67,6 +67,9 @@ export function clearContextShortcuts(ctx?: ShortcutContext) {
  * Returns shortcuts relevant to the given context:
  * - Global shortcuts tagged with this context (or untagged = all contexts)
  * - Supplementary shortcuts registered by components for this context
+ *
+ * The `action` field contains an i18n key (for global shortcuts) or a
+ * pre-translated label (for supplementary shortcuts registered by components).
  */
 export function getContextShortcuts(ctx: ShortcutContext): { keys: string; action: string }[] {
   const result: { keys: string; action: string }[] = [];
@@ -76,9 +79,9 @@ export function getContextShortcuts(ctx: ShortcutContext): { keys: string; actio
   for (const def of shortcuts) {
     if (def.hidden) continue;
     if (def.context && def.context.includes(ctx)) {
-      result.push({ keys: def.display, action: def.label });
+      result.push({ keys: def.display, action: def.labelKey });
     } else if (!def.context && ctx === "main") {
-      result.push({ keys: def.display, action: def.label });
+      result.push({ keys: def.display, action: def.labelKey });
     }
   }
 
@@ -94,13 +97,13 @@ export function getContextShortcuts(ctx: ShortcutContext): { keys: string; actio
 }
 
 /** Human-readable context title for the modal header. */
-export function getContextTitle(ctx: ShortcutContext): string {
-  const titles: Record<ShortcutContext, string> = {
-    main: "Main Shortcuts",
-    diff: "Diff Viewer Shortcuts",
-    file: "File Viewer Shortcuts",
-    shell: "Shell Shortcuts",
-    tree: "Tree Explorer Shortcuts",
+export function getContextTitle(t: (key: string) => string, ctx: ShortcutContext): string {
+  const keys: Record<ShortcutContext, string> = {
+    main: "shortcutContexts.main",
+    diff: "shortcutContexts.diff",
+    file: "shortcutContexts.file",
+    shell: "shortcutContexts.shell",
+    tree: "shortcutContexts.tree",
   };
-  return titles[ctx];
+  return t(keys[ctx]);
 }

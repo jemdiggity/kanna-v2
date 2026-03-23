@@ -1,10 +1,14 @@
 <script setup lang="ts">
+import { useI18n } from 'vue-i18n'
+
+useI18n()
+
 defineProps<{
   preferences: {
     suspendAfterMinutes: number
     killAfterMinutes: number
-
     ideCommand: string
+    locale: string
   }
 }>()
 
@@ -25,12 +29,24 @@ function handleKeydown(e: KeyboardEvent) {
   <div class="modal-overlay" @click.self="emit('close')" @keydown="handleKeydown">
     <div class="prefs-panel">
       <div class="prefs-header">
-        <h3>Preferences</h3>
+        <h3>{{ $t('preferences.title') }}</h3>
       </div>
 
       <div class="prefs-body">
         <div class="pref-row">
-          <label>Suspend After (min)</label>
+          <label>{{ $t('preferences.language') }}</label>
+          <select
+            :value="preferences.locale"
+            @change="emit('update', 'locale', ($event.target as HTMLSelectElement).value)"
+          >
+            <option value="en">English</option>
+            <option value="ja">日本語</option>
+            <option value="ko">한국어</option>
+          </select>
+        </div>
+
+        <div class="pref-row">
+          <label>{{ $t('preferences.suspendAfter') }}</label>
           <input
             type="number"
             :value="preferences.suspendAfterMinutes"
@@ -40,7 +56,7 @@ function handleKeydown(e: KeyboardEvent) {
         </div>
 
         <div class="pref-row">
-          <label>Kill After (min)</label>
+          <label>{{ $t('preferences.killAfter') }}</label>
           <input
             type="number"
             :value="preferences.killAfterMinutes"
@@ -50,18 +66,18 @@ function handleKeydown(e: KeyboardEvent) {
         </div>
 
         <div class="pref-row">
-          <label>IDE Command</label>
+          <label>{{ $t('preferences.ideCommand') }}</label>
           <input
             type="text"
             :value="preferences.ideCommand"
-            placeholder="code, cursor, idea..."
+            :placeholder="$t('preferences.idePlaceholder')"
             @change="emit('update', 'ideCommand', ($event.target as HTMLInputElement).value)"
           />
         </div>
       </div>
 
       <div class="prefs-footer">
-        <button class="btn-done" @click="emit('close')">Done</button>
+        <button class="btn-done" @click="emit('close')">{{ $t('actions.done') }}</button>
       </div>
     </div>
   </div>
@@ -139,6 +155,22 @@ function handleKeydown(e: KeyboardEvent) {
 }
 
 .pref-row input:focus {
+  border-color: #0066cc;
+}
+
+.pref-row select {
+  background: #1a1a1a;
+  border: 1px solid #444;
+  border-radius: 4px;
+  color: #e0e0e0;
+  font-size: 12px;
+  padding: 5px 8px;
+  width: 160px;
+  outline: none;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+}
+
+.pref-row select:focus {
   border-color: #0066cc;
 }
 

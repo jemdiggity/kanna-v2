@@ -1,0 +1,237 @@
+{
+  "tasks": {
+    "newTask": "新規タスク",
+    "makePR": "PR作成",
+    "mergeQueue": "マージキュー",
+    "closeTask": "クローズ / 却下",
+    "undoClose": "クローズ取り消し",
+    "blockTask": "タスクをブロック",
+    "editBlockedTask": "ブロックタスクを編集",
+    "descriptionPlaceholder": "タスクの説明...",
+    "untitled": "無題",
+    "renameTask": "タスク名を変更"
+  },
+  "actions": {
+    "create": "作成",
+    "cancel": "キャンセル",
+    "done": "完了",
+    "delete": "削除",
+    "close": "閉じる",
+    "edit": "編集",
+    "submit": "送信",
+    "dismiss": "閉じる",
+    "import": "インポート"
+  },
+  "preferences": {
+    "title": "設定",
+    "language": "言語",
+    "suspendAfter": "一時停止 (分)",
+    "killAfter": "強制停止 (分)",
+    "ideCommand": "IDEコマンド",
+    "idePlaceholder": "code, cursor, idea..."
+  },
+  "shortcuts": {
+    "title": "キーボードショートカット",
+    "showOnStartup": "起動時に表示しない",
+    "showAll": "すべてのショートカットを表示",
+    "showContext": "{context}を表示",
+    "groupTasks": "タスク",
+    "groupNavigation": "ナビゲーション",
+    "groupViews": "表示",
+    "groupHelp": "ヘルプ",
+    "newTask": "新規タスク",
+    "makePR": "PR作成",
+    "mergeQueue": "マージキュー",
+    "closeReject": "クローズ / 却下",
+    "undoClose": "クローズ取り消し",
+    "previousTask": "前のタスク",
+    "nextTask": "次のタスク",
+    "filePicker": "ファイル検索",
+    "commandPalette": "コマンドパレット",
+    "viewDiff": "差分表示",
+    "shellTerminal": "シェルターミナル",
+    "openInIDE": "IDEで開く",
+    "zenMode": "集中モード",
+    "maximize": "最大化",
+    "toggleSidebar": "サイドバー切替",
+    "analytics": "分析",
+    "createRepo": "リポジトリ作成",
+    "importClone": "インポート / クローン",
+    "goBack": "戻る",
+    "goForward": "進む",
+    "allShortcuts": "すべてのショートカット",
+    "keyboardShortcuts": "キーボードショートカット",
+    "dismiss": "閉じる",
+    "treeExplorer": "ツリーエクスプローラー"
+  },
+  "shortcutContexts": {
+    "main": "メインショートカット",
+    "diff": "差分ビューアーショートカット",
+    "file": "ファイルビューアーショートカット",
+    "shell": "シェルショートカット",
+    "tree": "ツリーエクスプローラーショートカット"
+  },
+  "sidebar": {
+    "addRepo": "リポジトリ追加",
+    "addRepoTooltip": "リポジトリ追加 (⌘I)",
+    "noTasks": "タスクなし",
+    "noReposYet": "リポジトリがありません。",
+    "noReposHint": "{shortcut} で作成できます。",
+    "newTaskTooltip": "新規タスク (⌘N)",
+    "removeRepoTooltip": "リポジトリを削除",
+    "sectionMergeQueue": "マージキュー",
+    "sectionPullRequests": "プルリクエスト",
+    "sectionInProgress": "進行中",
+    "sectionBlocked": "ブロック中",
+    "blockedBy": "ブロック元:"
+  },
+  "modals": {
+    "selectRepo": "Gitリポジトリを選択",
+    "chooseDirectory": "親ディレクトリを選択",
+    "chooseCloneDirectory": "クローン先ディレクトリを選択",
+    "submitHint": "⌘Enterで{action}"
+  },
+  "toasts": {
+    "taskCreationFailed": "タスクの作成に失敗しました",
+    "prCreationFailed": "PRの作成に失敗しました",
+    "repoCreationFailed": "リポジトリの作成に失敗しました",
+    "cloneFailed": "クローンに失敗しました",
+    "worktreeFailed": "ワークツリーの作成に失敗しました",
+    "dbInsertFailed": "データベースへの保存に失敗しました",
+    "closeTaskFailed": "タスクのクローズに失敗しました",
+    "undoCloseFailed": "クローズの取り消しに失敗しました",
+    "prAgentFailed": "PRエージェントの開始に失敗しました",
+    "closeSourceTaskFailed": "元タスクのクローズに失敗しました",
+    "mergeAgentFailed": "マージエージェントの開始に失敗しました",
+    "blockedWorktreeFailed": "ブロックタスクのワークツリー作成に失敗しました",
+    "blockTaskFailed": "タスクのブロックに失敗しました",
+    "selectRepoFirst": "リポジトリを先に選択してください",
+    "agentStartFailed": "エージェントの開始に失敗しました"
+  },
+  "tags": {
+    "inProgress": "進行中",
+    "pr": "PR",
+    "merge": "マージ",
+    "done": "完了",
+    "blocked": "ブロック中"
+  },
+  "analytics": {
+    "viewTasks": "タスク",
+    "viewAvgTime": "平均滞在時間",
+    "viewOperator": "オペレーター",
+    "hint": "スペースキーで切替 · Escで閉じる",
+    "noTasks": "タスクがありません",
+    "loading": "読み込み中...",
+    "labelCreated": "作成済み",
+    "labelClosed": "クローズ済み",
+    "labelOpen": "オープン",
+    "activityTrackingStarted": "アクティビティ追跡を開始しました。タスク完了後にデータが表示されます。",
+    "avgBusy": "平均稼働",
+    "avgUnread": "平均未読",
+    "avgIdle": "平均アイドル",
+    "busy": "稼働",
+    "unread": "未読",
+    "idle": "アイドル",
+    "operatorTrackingStarted": "オペレーター追跡を開始しました。作業中にデータが表示されます。",
+    "avgResponseTime": "平均応答時間",
+    "avgDwellTime": "平均滞在時間",
+    "switchesPerHour": "切替回数/時",
+    "focusScore": "集中スコア"
+  },
+  "agentView": {
+    "thinking": "思考中...",
+    "working": "作業中",
+    "completed": "完了",
+    "error": "エラー",
+    "turns": "ターン",
+    "running": "エージェント実行中..."
+  },
+  "addRepo": {
+    "tabCreate": "新規作成",
+    "tabImport": "インポート / クローン",
+    "namePlaceholder": "my-awesome-project",
+    "change": "変更",
+    "importPlaceholder": "owner/repo、URL、または gh repo clone...",
+    "chooseLocalFolder": "ローカルフォルダを選択",
+    "detecting": "検出中...",
+    "gitRepoConfirmed": "✓ Gitリポジトリ · ブランチ:",
+    "notAGitRepo": "Gitリポジトリではありません。新規作成タブで初期化してください。",
+    "repoNamePlaceholder": "リポジトリ名",
+    "cloning": "クローン中...",
+    "or": "または"
+  },
+  "diffView": {
+    "scopeBranch": "ブランチ",
+    "scopeLastCommit": "最新コミット",
+    "scopeWorking": "ワーキング",
+    "noChanges": "変更なし",
+    "shortcutScopeNext": "スコープ →",
+    "shortcutScopePrev": "スコープ ←",
+    "shortcutLineUpDown": "行 ↓/↑",
+    "shortcutPageUpDown": "ページ ↓/↑",
+    "shortcutHalfUpDown": "半ページ ↓/↑",
+    "shortcutTopBottom": "先頭 / 末尾",
+    "shortcutClose": "閉じる"
+  },
+  "filePicker": {
+    "placeholder": "ファイルを検索...",
+    "noFiles": "ファイルが見つかりません"
+  },
+  "filePreview": {
+    "rendered": "レンダリング",
+    "raw": "ソース",
+    "openInIDE": "IDEで開く",
+    "openInIDETooltip": "IDEで開く (⌘O)",
+    "shortcutOpenIDE": "IDEで開く",
+    "shortcutToggleMarkdown": "Markdown切替",
+    "shortcutLineUpDown": "行 ↓/↑",
+    "shortcutPageUpDown": "ページ ↓/↑",
+    "shortcutHalfUpDown": "半ページ ↓/↑",
+    "shortcutTopBottom": "先頭 / 末尾",
+    "shortcutClose": "閉じる",
+    "shortcutToggleLineNumbers": "行番号の切替"
+  },
+  "mainPanel": {
+    "taskBlocked": "タスクがブロック中",
+    "taskBlockedHint": "すべてのブロッカーが完了すると、このタスクは自動的に開始されます。",
+    "waitingOn": "待機中:",
+    "blockerDone": "完了",
+    "blockerActive": "アクティブ",
+    "noReposTitle": "リポジトリがありません",
+    "noReposHint": "{shortcut} でリポジトリを作成して始めましょう。",
+    "noTaskSelected": "タスクが選択されていません",
+    "noTaskHint": "サイドバーからタスクを選択するか、{shortcut} で新規作成してください。"
+  },
+  "blockerSelect": {
+    "searchPlaceholder": "タスクを検索...",
+    "circularDep": "循環依存",
+    "statusBlocked": "ブロック中",
+    "statusActive": "アクティブ",
+    "noMatchingTasks": "一致するタスクがありません",
+    "hintEmpty": "入力して検索、Enterで追加 · Enterで保存",
+    "hintSelected": "Enterで確定（{count}件選択中） · Backspaceで最後を削除"
+  },
+  "commandPalette": {
+    "placeholder": "コマンドを入力...",
+    "noCommands": "コマンドが見つかりません"
+  },
+  "terminalTabs": {
+    "noSession": "アクティブなエージェントセッションがありません"
+  },
+  "taskHeader": {
+    "branchLabel": "ブランチ:",
+    "prPrefix": "PR #"
+  },
+  "app": {
+    "selectRepoFirst": "リポジトリを先に選択してください",
+    "customTaskLaunchFailed": "カスタムタスクの起動に失敗しました",
+    "customTaskCreationFailed": "カスタムタスクの作成に失敗しました",
+    "newCustomTask": "新規カスタムタスク",
+    "newCustomTaskDesc": "再利用可能なエージェントタスク定義を作成",
+    "selectBlockingTasks": "ブロックタスクを選択",
+    "editBlockingTasks": "ブロックタスクを編集"
+  },
+  "common": {
+    "loading": "読み込み中..."
+  }
+}

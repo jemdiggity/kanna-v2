@@ -1,0 +1,237 @@
+{
+  "tasks": {
+    "newTask": "새 작업",
+    "makePR": "PR 생성",
+    "mergeQueue": "머지 큐",
+    "closeTask": "닫기 / 거부",
+    "undoClose": "닫기 취소",
+    "blockTask": "작업 차단",
+    "editBlockedTask": "차단된 작업 편집",
+    "descriptionPlaceholder": "작업을 설명하세요...",
+    "untitled": "제목 없음",
+    "renameTask": "작업 이름 변경"
+  },
+  "actions": {
+    "create": "생성",
+    "cancel": "취소",
+    "done": "완료",
+    "delete": "삭제",
+    "close": "닫기",
+    "edit": "편집",
+    "submit": "제출",
+    "dismiss": "닫기",
+    "import": "가져오기"
+  },
+  "preferences": {
+    "title": "설정",
+    "language": "언어",
+    "suspendAfter": "일시 중지 (분)",
+    "killAfter": "강제 종료 (분)",
+    "ideCommand": "IDE 명령어",
+    "idePlaceholder": "code, cursor, idea..."
+  },
+  "shortcuts": {
+    "title": "키보드 단축키",
+    "showOnStartup": "시작 시 표시하지 않기",
+    "showAll": "모든 단축키 표시",
+    "showContext": "{context} 표시",
+    "groupTasks": "작업",
+    "groupNavigation": "탐색",
+    "groupViews": "보기",
+    "groupHelp": "도움말",
+    "newTask": "새 작업",
+    "makePR": "PR 생성",
+    "mergeQueue": "머지 큐",
+    "closeReject": "닫기 / 거부",
+    "undoClose": "닫기 취소",
+    "previousTask": "이전 작업",
+    "nextTask": "다음 작업",
+    "filePicker": "파일 검색",
+    "commandPalette": "명령 팔레트",
+    "viewDiff": "차이 보기",
+    "shellTerminal": "셸 터미널",
+    "openInIDE": "IDE에서 열기",
+    "zenMode": "집중 모드",
+    "maximize": "최대화",
+    "toggleSidebar": "사이드바 전환",
+    "analytics": "분석",
+    "createRepo": "저장소 생성",
+    "importClone": "가져오기 / 복제",
+    "goBack": "뒤로",
+    "goForward": "앞으로",
+    "allShortcuts": "모든 단축키",
+    "keyboardShortcuts": "키보드 단축키",
+    "dismiss": "닫기",
+    "treeExplorer": "트리 탐색기"
+  },
+  "shortcutContexts": {
+    "main": "메인 단축키",
+    "diff": "차이 뷰어 단축키",
+    "file": "파일 뷰어 단축키",
+    "shell": "셸 단축키",
+    "tree": "트리 탐색기 단축키"
+  },
+  "sidebar": {
+    "addRepo": "저장소 추가",
+    "addRepoTooltip": "저장소 추가 (⌘I)",
+    "noTasks": "작업 없음",
+    "noReposYet": "저장소가 없습니다.",
+    "noReposHint": "{shortcut}을 눌러 생성하세요.",
+    "newTaskTooltip": "새 작업 (⌘N)",
+    "removeRepoTooltip": "저장소 삭제",
+    "sectionMergeQueue": "머지 큐",
+    "sectionPullRequests": "풀 리퀘스트",
+    "sectionInProgress": "진행 중",
+    "sectionBlocked": "차단됨",
+    "blockedBy": "차단 원인:"
+  },
+  "modals": {
+    "selectRepo": "Git 저장소 선택",
+    "chooseDirectory": "상위 디렉토리 선택",
+    "chooseCloneDirectory": "복제 디렉토리 선택",
+    "submitHint": "⌘Enter로 {action}"
+  },
+  "toasts": {
+    "taskCreationFailed": "작업 생성 실패",
+    "prCreationFailed": "PR 생성 실패",
+    "repoCreationFailed": "저장소 생성 실패",
+    "cloneFailed": "복제 실패",
+    "worktreeFailed": "워크트리 생성 실패",
+    "dbInsertFailed": "데이터베이스 저장 실패",
+    "closeTaskFailed": "작업 닫기 실패",
+    "undoCloseFailed": "닫기 취소 실패",
+    "prAgentFailed": "PR 에이전트 시작 실패",
+    "closeSourceTaskFailed": "원본 작업 닫기 실패",
+    "mergeAgentFailed": "머지 에이전트 시작 실패",
+    "blockedWorktreeFailed": "차단된 작업의 워크트리 생성 실패",
+    "blockTaskFailed": "작업 차단 실패",
+    "selectRepoFirst": "먼저 저장소를 선택하세요",
+    "agentStartFailed": "에이전트 시작 실패"
+  },
+  "tags": {
+    "inProgress": "진행 중",
+    "pr": "PR",
+    "merge": "머지",
+    "done": "완료",
+    "blocked": "차단됨"
+  },
+  "analytics": {
+    "viewTasks": "작업",
+    "viewAvgTime": "평균 상태 시간",
+    "viewOperator": "운영자",
+    "hint": "스페이스바로 전환 · Esc로 닫기",
+    "noTasks": "아직 작업이 없습니다",
+    "loading": "로딩 중...",
+    "labelCreated": "생성됨",
+    "labelClosed": "닫힘",
+    "labelOpen": "열림",
+    "activityTrackingStarted": "활동 추적이 시작되었습니다 — 작업 완료 후 데이터가 표시됩니다.",
+    "avgBusy": "평균 작업",
+    "avgUnread": "평균 미읽음",
+    "avgIdle": "평균 대기",
+    "busy": "작업",
+    "unread": "미읽음",
+    "idle": "대기",
+    "operatorTrackingStarted": "운영자 추적이 시작되었습니다 — 작업 중 데이터가 표시됩니다.",
+    "avgResponseTime": "평균 응답 시간",
+    "avgDwellTime": "평균 체류 시간",
+    "switchesPerHour": "전환/시간",
+    "focusScore": "집중 점수"
+  },
+  "agentView": {
+    "thinking": "생각 중...",
+    "working": "작업 중",
+    "completed": "완료",
+    "error": "오류",
+    "turns": "턴",
+    "running": "에이전트 실행 중..."
+  },
+  "addRepo": {
+    "tabCreate": "새로 만들기",
+    "tabImport": "가져오기 / 복제",
+    "namePlaceholder": "my-awesome-project",
+    "change": "변경",
+    "importPlaceholder": "owner/repo, URL, 또는 gh repo clone...",
+    "chooseLocalFolder": "로컬 폴더 선택",
+    "detecting": "감지 중...",
+    "gitRepoConfirmed": "✓ Git 저장소 · 브랜치:",
+    "notAGitRepo": "Git 저장소가 아닙니다. 새로 만들기 탭에서 초기화하세요.",
+    "repoNamePlaceholder": "저장소 이름",
+    "cloning": "복제 중...",
+    "or": "또는"
+  },
+  "diffView": {
+    "scopeBranch": "브랜치",
+    "scopeLastCommit": "최근 커밋",
+    "scopeWorking": "작업 중",
+    "noChanges": "변경 없음",
+    "shortcutScopeNext": "범위 →",
+    "shortcutScopePrev": "범위 ←",
+    "shortcutLineUpDown": "줄 ↓/↑",
+    "shortcutPageUpDown": "페이지 ↓/↑",
+    "shortcutHalfUpDown": "반 페이지 ↓/↑",
+    "shortcutTopBottom": "처음 / 끝",
+    "shortcutClose": "닫기"
+  },
+  "filePicker": {
+    "placeholder": "파일 검색...",
+    "noFiles": "파일을 찾을 수 없습니다"
+  },
+  "filePreview": {
+    "rendered": "렌더링",
+    "raw": "원본",
+    "openInIDE": "IDE에서 열기",
+    "openInIDETooltip": "IDE에서 열기 (⌘O)",
+    "shortcutOpenIDE": "IDE에서 열기",
+    "shortcutToggleMarkdown": "마크다운 전환",
+    "shortcutLineUpDown": "줄 ↓/↑",
+    "shortcutPageUpDown": "페이지 ↓/↑",
+    "shortcutHalfUpDown": "반 페이지 ↓/↑",
+    "shortcutTopBottom": "처음 / 끝",
+    "shortcutClose": "닫기",
+    "shortcutToggleLineNumbers": "줄 번호 전환"
+  },
+  "mainPanel": {
+    "taskBlocked": "작업 차단됨",
+    "taskBlockedHint": "모든 차단 요소가 완료되면 이 작업이 자동으로 시작됩니다.",
+    "waitingOn": "대기 중:",
+    "blockerDone": "완료",
+    "blockerActive": "활성",
+    "noReposTitle": "저장소가 없습니다",
+    "noReposHint": "{shortcut}을 눌러 저장소를 만들고 시작하세요.",
+    "noTaskSelected": "선택된 작업 없음",
+    "noTaskHint": "사이드바에서 작업을 선택하거나 {shortcut}을 눌러 새로 만드세요."
+  },
+  "blockerSelect": {
+    "searchPlaceholder": "작업 검색...",
+    "circularDep": "순환 종속성",
+    "statusBlocked": "차단됨",
+    "statusActive": "활성",
+    "noMatchingTasks": "일치하는 작업 없음",
+    "hintEmpty": "입력하여 검색, Enter로 추가 · Enter로 저장",
+    "hintSelected": "Enter로 확인 ({count}개 선택) · Backspace로 마지막 삭제"
+  },
+  "commandPalette": {
+    "placeholder": "명령어를 입력하세요...",
+    "noCommands": "명령어를 찾을 수 없습니다"
+  },
+  "terminalTabs": {
+    "noSession": "활성 에이전트 세션 없음"
+  },
+  "taskHeader": {
+    "branchLabel": "브랜치:",
+    "prPrefix": "PR #"
+  },
+  "app": {
+    "selectRepoFirst": "먼저 저장소를 선택하세요",
+    "customTaskLaunchFailed": "커스텀 작업 실행 실패",
+    "customTaskCreationFailed": "커스텀 작업 생성 실패",
+    "newCustomTask": "새 커스텀 작업",
+    "newCustomTaskDesc": "재사용 가능한 에이전트 작업 정의 생성",
+    "selectBlockingTasks": "차단 작업 선택",
+    "editBlockingTasks": "차단 작업 편집"
+  },
+  "common": {
+    "loading": "로딩 중..."
+  }
+}

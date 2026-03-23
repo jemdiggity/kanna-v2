@@ -1,11 +1,13 @@
 <script setup lang="ts">
-import { ref, computed, inject, onMounted, nextTick, type Ref } from "vue";
+import { ref, reactive, computed, inject, onMounted, nextTick, type Ref } from "vue";
+import { useI18n } from "vue-i18n";
 
 import { computedAsync } from "@vueuse/core";
 import { isTauri } from "./tauri-mock";
 import { invoke } from "./invoke";
 import { hasTag } from "@kanna/core";
 import { getSetting, setSetting, type DbHandle } from "@kanna/db";
+import i18n from "./i18n";
 import Sidebar from "./components/Sidebar.vue";
 import MainPanel from "./components/MainPanel.vue";
 import NewTaskModal from "./components/NewTaskModal.vue";
@@ -19,6 +21,7 @@ import ShellModal from "./components/ShellModal.vue";
 import CommandPaletteModal from "./components/CommandPaletteModal.vue";
 import AnalyticsModal from "./components/AnalyticsModal.vue";
 import BlockerSelectModal from "./components/BlockerSelectModal.vue";
+import PreferencesPanel from "./components/PreferencesPanel.vue";
 import ToastContainer from "./components/ToastContainer.vue";
 import { useKeyboardShortcuts, type ActionName } from "./composables/useKeyboardShortcuts";
 import { startPeriodicBackup } from "./composables/useBackup";
@@ -34,6 +37,7 @@ import type { DynamicCommand } from "./components/CommandPaletteModal.vue";
 
 const store = useKannaStore();
 const toast = useToast();
+const { t } = useI18n();
 const db = inject<DbHandle>("db")!;
 const dbName = inject<string>("dbName")!;
 const { tasks: customTasks, scan: scanCustomTasks } = useCustomTasks();
@@ -58,6 +62,13 @@ const commandUsageCounts = ref<Record<string, number>>({});
 const showAnalyticsModal = ref(false);
 const showBlockerSelect = ref(false);
 const blockerSelectMode = ref<"block" | "edit">("block");
+const showPreferencesPanel = ref(false);
+const preferences = reactive({
+  suspendAfterMinutes: 30,
+  killAfterMinutes: 60,
+  ideCommand: "code",
+  locale: "en",
+});
 const diffScopes = new Map<string, "branch" | "commit" | "working">();
 const zenMode = ref(false);
 const sidebarHidden = ref(false);
@@ -184,10 +195,10 @@ const paletteExtraCommands = computed(() => {
   const cmds: Array<{ action: ActionName; label: string; group: string; shortcut: string }> = [];
   const item = store.currentItem;
   if (item && !hasTag(item, "done") && !hasTag(item, "blocked")) {
-    cmds.push({ action: "blockTask", label: "Block Task", group: "Tasks", shortcut: "" });
+    cmds.push({ action: "blockTask", label: t('tasks.blockTask'), group: t('shortcuts.groupTasks'), shortcut: "" });
   }
   if (item && hasTag(item, "blocked")) {
-    cmds.push({ action: "editBlockedTask", label: "Edit Blocked Task", group: "Tasks", shortcut: "" });
+    cmds.push({ action: "editBlockedTask", label: t('tasks.editBlockedTask'), group: t('shortcuts.groupTasks'), shortcut: "" });
   }
   return cmds;
 });
@@ -198,7 +209,7 @@ async function handleLaunchCustomTask(task: CustomTaskConfig) {
     if (store.repos.length === 1) {
       store.selectedRepoId = store.repos[0].id;
     } else {
-      alert("Select a repository first");
+      alert(t('app.selectRepoFirst'));
       return;
     }
   }
@@ -208,7 +219,7 @@ async function handleLaunchCustomTask(task: CustomTaskConfig) {
     await store.createItem(store.selectedRepoId, repo.path, task.prompt, "pty", { customTask: task });
   } catch (e: any) {
     console.error("[App] custom task launch failed:", e);
-    alert(`Custom task launch failed: ${e?.message || e}`);
+    alert(`${t('app.customTaskLaunchFailed')}: ${e?.message || e}`);
   }
 }
 
@@ -217,7 +228,7 @@ async function handleCreateCustomTask() {
     if (store.repos.length === 1) {
       store.selectedRepoId = store.repos[0].id;
     } else {
-      alert("Select a repository first");
+      alert(t('app.selectRepoFirst'));
       return;
     }
   }
@@ -227,7 +238,7 @@ async function handleCreateCustomTask() {
     await store.createItem(store.selectedRepoId, repo.path, NEW_CUSTOM_TASK_PROMPT);
   } catch (e: any) {
     console.error("[App] custom task creation failed:", e);
-    alert(`Custom task creation failed: ${e?.message || e}`);
+    alert(`${t('app.customTaskCreationFailed')}: ${e?.message || e}`);
   }
 }
 
@@ -237,15 +248,15 @@ const paletteDynamicCommands = computed<DynamicCommand[]>(() => {
   if (store.currentItem) {
     cmds.push({
       id: "rename-task",
-      label: "Rename Task",
+      label: t('tasks.renameTask'),
       execute: () => sidebarRef.value?.renameSelectedItem(),
     });
   }
   // Always include "New Custom Task" option
   cmds.push({
     id: "custom-task-new",
-    label: "New Custom Task",
-    description: "Create a new reusable agent task definition",
+    label: t('app.newCustomTask'),
+    description: t('app.newCustomTaskDesc'),
     execute: () => handleCreateCustomTask(),
   });
   // Add discovered custom tasks
@@ -398,7 +409,7 @@ async function handleNewTaskSubmit(prompt: string) {
     if (store.repos.length === 1) {
       store.selectedRepoId = store.repos[0].id;
     } else {
-      toast.warning("Select a repository first");
+      toast.warning(t('toasts.selectRepoFirst'));
       return;
     }
   }
@@ -409,7 +420,7 @@ async function handleNewTaskSubmit(prompt: string) {
     showNewTaskModal.value = false;
   } catch (e: any) {
     console.error("Task creation failed:", e);
-    toast.error(`Task creation failed: ${e?.message || e}`);
+    toast.error(`${t('toasts.taskCreationFailed')}: ${e?.message || e}`);
   }
 }
 
@@ -419,7 +430,7 @@ async function handleCreateRepo(name: string, path: string) {
     showAddRepoModal.value = false;
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
-    toast.error(`Failed to create repo: ${msg}`);
+    toast.error(`${t('toasts.repoCreationFailed')}: ${msg}`);
   }
 }
 
@@ -437,7 +448,7 @@ async function handleCloneRepo(url: string, destination: string) {
     showAddRepoModal.value = false;
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
-    toast.error(`Clone failed: ${msg}`);
+    toast.error(`${t('toasts.cloneFailed')}: ${msg}`);
   } finally {
     cloningRepo.value = false;
   }
@@ -456,9 +467,37 @@ async function trackCommandUsage(commandId: string) {
   await setSetting(db, "commandPaletteUsage", JSON.stringify(counts));
 }
 
+// Preferences update handler
+async function handlePreferenceUpdate(key: string, value: string) {
+  await store.savePreference(key, value);
+  if (key === "locale" && ["en", "ja", "ko"].includes(value)) {
+    i18n.global.locale.value = value as "en" | "ja" | "ko";
+    preferences.locale = value;
+  } else if (key === "suspendAfterMinutes") {
+    preferences.suspendAfterMinutes = parseInt(value, 10) || 30;
+  } else if (key === "killAfterMinutes") {
+    preferences.killAfterMinutes = parseInt(value, 10) || 60;
+  } else if (key === "ideCommand") {
+    preferences.ideCommand = value;
+  }
+}
+
 // Init
 onMounted(async () => {
   await store.init(db);
+
+  // Load persisted locale
+  const savedLocale = await getSetting(db, "locale");
+  if (savedLocale && ["en", "ja", "ko"].includes(savedLocale)) {
+    i18n.global.locale.value = savedLocale as "en" | "ja" | "ko";
+    preferences.locale = savedLocale;
+  }
+
+  // Sync preferences from store
+  preferences.suspendAfterMinutes = store.suspendAfterMinutes;
+  preferences.killAfterMinutes = store.killAfterMinutes;
+  preferences.ideCommand = store.ideCommand;
+
   startPeriodicBackup(dbName, ref(db) as Ref<DbHandle | null>);
   if (!store.hideShortcutsOnStartup) {
     shortcutsStartFull.value = true;
@@ -585,9 +624,15 @@ onMounted(async () => {
       :candidates="blockerCandidates"
       :disabled-ids="disabledBlockerIds"
       :preselected="blockerSelectMode === 'edit' ? preselectedBlockerIds : undefined"
-      :title="blockerSelectMode === 'block' ? 'Select blocking tasks' : 'Edit blocking tasks'"
+      :title="blockerSelectMode === 'block' ? $t('app.selectBlockingTasks') : $t('app.editBlockingTasks')"
       @confirm="onBlockerConfirm"
       @cancel="showBlockerSelect = false"
+    />
+    <PreferencesPanel
+      v-if="showPreferencesPanel"
+      :preferences="preferences"
+      @update="handlePreferenceUpdate"
+      @close="showPreferencesPanel = false"
     />
     <ToastContainer />
   </div>

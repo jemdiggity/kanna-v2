@@ -52,33 +52,33 @@ describe("useShortcutContext", () => {
     it("returns global shortcuts tagged for the context", () => {
       register("diff", [{ label: "Cycle Scope", display: "Space" }]);
       const result = getContextShortcuts("diff");
-      const labels = result.map((s) => s.action);
-      expect(labels).toContain("Cycle Scope");
+      const actions = result.map((s) => s.action);
+      expect(actions).toContain("Cycle Scope");
     });
 
     it("includes global shortcuts tagged for main context", () => {
       const result = getContextShortcuts("main");
-      const labels = result.map((s) => s.action);
-      expect(labels).toContain("Keyboard Shortcuts");
-      expect(labels).toContain("Command Palette");
-      expect(labels).toContain("Dismiss");
+      const actions = result.map((s) => s.action);
+      expect(actions).toContain("shortcuts.keyboardShortcuts");
+      expect(actions).toContain("shortcuts.commandPalette");
+      expect(actions).toContain("shortcuts.dismiss");
     });
 
     it("includes global shortcuts tagged for all contexts", () => {
       for (const ctx of ["diff", "file", "shell"] as ShortcutContext[]) {
         const result = getContextShortcuts(ctx);
-        const labels = result.map((s) => s.action);
-        expect(labels).toContain("Keyboard Shortcuts");
-        expect(labels).toContain("Command Palette");
-        expect(labels).toContain("Dismiss");
+        const actions = result.map((s) => s.action);
+        expect(actions).toContain("shortcuts.keyboardShortcuts");
+        expect(actions).toContain("shortcuts.commandPalette");
+        expect(actions).toContain("shortcuts.dismiss");
       }
     });
 
     it("excludes shortcuts tagged for other contexts", () => {
       const result = getContextShortcuts("diff");
-      const labels = result.map((s) => s.action);
-      expect(labels).not.toContain("New Task");
-      expect(labels).not.toContain("File Picker");
+      const actions = result.map((s) => s.action);
+      expect(actions).not.toContain("shortcuts.newTask");
+      expect(actions).not.toContain("shortcuts.filePicker");
     });
   });
 });

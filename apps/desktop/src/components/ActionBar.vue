@@ -23,7 +23,7 @@ const showMakePR = computed(() => {
       class="btn btn-primary"
       @click="emit('make-pr')"
     >
-      Make PR
+      {{ $t('tasks.makePR') }}
     </button>
   </div>
 </template>

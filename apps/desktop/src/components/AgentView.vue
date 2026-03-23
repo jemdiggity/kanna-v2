@@ -142,7 +142,7 @@ onUnmounted(() => {
           </div>
           <div v-else-if="block.type === 'thinking'" class="thinking-block">
             <details>
-              <summary class="thinking-summary">Thinking...</summary>
+              <summary class="thinking-summary">{{ $t('agentView.thinking') }}</summary>
               <pre class="thinking-content">{{ block.thinking }}</pre>
             </details>
           </div>
@@ -155,7 +155,7 @@ onUnmounted(() => {
       <!-- Tool progress -->
       <template v-else-if="msg.type === 'tool_progress'">
         <div class="progress-block">
-          <span class="progress-label">{{ msg.content || 'Working' }}</span>
+          <span class="progress-label">{{ msg.content || $t('agentView.working') }}</span>
         </div>
       </template>
 
@@ -169,10 +169,10 @@ onUnmounted(() => {
           }"
         >
           <div class="result-header">
-            {{ msg.subtype === 'success' || msg.subtype === 'error_max_turns' ? 'Completed' : 'Error' }}
+            {{ msg.subtype === 'success' || msg.subtype === 'error_max_turns' ? $t('agentView.completed') : $t('agentView.error') }}
           </div>
           <div class="result-details">
-            <span v-if="msg.num_turns">{{ msg.num_turns }} turns</span>
+            <span v-if="msg.num_turns">{{ msg.num_turns }} {{ $t('agentView.turns') }}</span>
             <span v-if="msg.duration_ms"> / {{ (msg.duration_ms / 1000).toFixed(1) }}s</span>
             <span v-if="msg.total_cost_usd"> / ${{ msg.total_cost_usd.toFixed(4) }}</span>
           </div>
@@ -190,7 +190,7 @@ onUnmounted(() => {
     </div>
 
     <div v-if="isRunning" class="running-indicator">
-      <span class="pulse"></span> Agent running...
+      <span class="pulse"></span> {{ $t('agentView.running') }}
     </div>
   </div>
 </template>

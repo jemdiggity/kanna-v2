@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, nextTick, watch } from "vue";
+import { useI18n } from "vue-i18n";
 import { shortcuts, type ActionName } from "../composables/useKeyboardShortcuts";
+
+const { t } = useI18n();
 
 export interface DynamicCommand {
   id: string;
@@ -73,7 +76,7 @@ const allCommands = computed<UnifiedCommand[]>(() => {
     .filter((s) => s.action !== "dismiss" && s.action !== "commandPalette")
     .map((s) => ({
       id: `shortcut-${s.action}`,
-      label: s.label,
+      label: t(s.labelKey),
       shortcut: s.display,
       execute: () => emit("execute", s.action),
     }));
@@ -143,7 +146,7 @@ onMounted(async () => {
         v-model="query"
         type="text"
         class="palette-input"
-        placeholder="Type a command..."
+        :placeholder="t('commandPalette.placeholder')"
       />
       <div class="command-list">
         <div
@@ -164,7 +167,7 @@ onMounted(async () => {
             </span>
           </span>
         </div>
-        <div v-if="filtered.length === 0" class="empty">No commands found</div>
+        <div v-if="filtered.length === 0" class="empty">{{ t('commandPalette.noCommands') }}</div>
       </div>
     </div>
   </div>

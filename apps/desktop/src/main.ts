@@ -1,5 +1,6 @@
 import { createApp } from "vue";
 import { createPinia } from "pinia";
+import i18n from "./i18n";
 import { isTauri } from "./tauri-mock";
 import { loadDatabase, runMigrations } from "./stores/db";
 import App from "./App.vue";
@@ -38,6 +39,7 @@ try {
 
   const app = createApp(App);
   app.use(createPinia());
+  app.use(i18n);
   app.provide("db", db);
   app.provide("dbName", dbName);
   app.mount("#app");

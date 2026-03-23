@@ -84,7 +84,7 @@ function setTermRef(sessionId: string, el: ComponentPublicInstance | null) {
       @completed="emit('agent-completed')"
     />
     <div v-if="!sessionId" class="placeholder">
-      No agent session active
+      {{ $t('terminalTabs.noSession') }}
     </div>
   </div>
 </template>

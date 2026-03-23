@@ -36,14 +36,14 @@ function handleKeydown(e: KeyboardEvent) {
   <div class="modal-overlay" @click.self="emit('cancel')">
     <div class="modal">
       <div class="modal-header">
-        <h3>New Task</h3>
+        <h3>{{ $t('tasks.newTask') }}</h3>
       </div>
       <div class="modal-body">
         <textarea
           ref="textareaRef"
           v-model="prompt"
           class="prompt-input"
-          placeholder="Describe the task..."
+          :placeholder="$t('tasks.descriptionPlaceholder')"
           rows="6"
           autocomplete="off"
           autocorrect="off"
@@ -53,15 +53,15 @@ function handleKeydown(e: KeyboardEvent) {
         />
       </div>
       <div class="modal-footer">
-        <span class="hint">⌘Enter to submit</span>
+        <span class="hint">{{ $t('modals.submitHint', { action: $t('actions.submit').toLowerCase() }) }}</span>
         <div class="modal-actions">
-          <button class="btn btn-cancel" @click="emit('cancel')">Cancel</button>
+          <button class="btn btn-cancel" @click="emit('cancel')">{{ $t('actions.cancel') }}</button>
           <button
             class="btn btn-primary"
             :disabled="!prompt.trim()"
             @click="handleSubmit"
           >
-            Create
+            {{ $t('actions.create') }}
           </button>
         </div>
       </div>

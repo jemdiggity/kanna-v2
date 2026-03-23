@@ -8,6 +8,7 @@ import { listen } from "../listen";
 import { parseRepoConfig, parseAgentMd, hasTag } from "@kanna/core";
 import type { RepoConfig, CustomTaskConfig } from "@kanna/core";
 import type { DbHandle, PipelineItem, Repo } from "@kanna/db";
+import i18n from '../i18n';
 import {
   listRepos, insertRepo, findRepoByPath,
   hideRepo as hideRepoQuery, unhideRepo as unhideRepoQuery,
@@ -41,6 +42,8 @@ export interface PtySpawnOptions {
 }
 // Module-level DB handle — set once by init(), never null after that.
 let _db: DbHandle;
+
+function tt(key: string): string { return i18n.global.t(key); }
 
 export const useKannaStore = defineStore("kanna", () => {
   const toast = useToast();
@@ -265,7 +268,7 @@ export const useKannaStore = defineStore("kanna", () => {
       });
     } catch (e) {
       console.error("[store] git_worktree_add failed:", e);
-      toast.error("Failed to create worktree");
+      toast.error(tt('toasts.worktreeFailed'));
       throw e;
     }
 
@@ -297,7 +300,7 @@ export const useKannaStore = defineStore("kanna", () => {
       });
     } catch (e) {
       console.error("[store] DB insert failed:", e);
-      toast.error("Failed to save task to database");
+      toast.error(tt('toasts.dbInsertFailed'));
       throw e;
     }
 
@@ -332,7 +335,7 @@ export const useKannaStore = defineStore("kanna", () => {
         });
       } catch (e) {
         console.warn("[store] PTY pre-spawn failed, will retry on mount:", e);
-        toast.error(`Agent failed to start: ${e instanceof Error ? e.message : e}`);
+        toast.error(`${tt('toasts.agentStartFailed')}: ${e instanceof Error ? e.message : e}`);
       }
     }
 
@@ -581,7 +584,7 @@ export const useKannaStore = defineStore("kanna", () => {
       bump();
     } catch (e) {
       console.error("[store] close failed:", e);
-      toast.error("Failed to close task");
+      toast.error(tt('toasts.closeTaskFailed'));
     }
   }
 
@@ -617,7 +620,7 @@ export const useKannaStore = defineStore("kanna", () => {
       }
     } catch (e) {
       console.error("[store] undo close failed:", e);
-      toast.error("Failed to undo close");
+      toast.error(tt('toasts.undoCloseFailed'));
     }
   }
 
@@ -730,7 +733,7 @@ export const useKannaStore = defineStore("kanna", () => {
       await startPrAgent(originalId, repo.id, repo.path);
     } catch (e) {
       console.error("[store] PR agent failed to start:", e);
-      toast.error("Failed to start PR agent");
+      toast.error(tt('toasts.prAgentFailed'));
     }
     try {
       await invoke("kill_session", { sessionId: originalId }).catch((e: unknown) => console.error("[store] kill_session failed:", e));
@@ -740,7 +743,7 @@ export const useKannaStore = defineStore("kanna", () => {
       bump();
     } catch (e) {
       console.error("[store] failed to close source task:", e);
-      toast.error("Failed to close source task");
+      toast.error(tt('toasts.closeSourceTaskFailed'));
     }
   }
 
@@ -749,7 +752,7 @@ export const useKannaStore = defineStore("kanna", () => {
       if (repos.value.length === 1) {
         selectedRepoId.value = repos.value[0].id;
       } else {
-        toast.warning("Select a repository first");
+        toast.warning(tt('toasts.selectRepoFirst'));
         return;
       }
     }
@@ -759,7 +762,7 @@ export const useKannaStore = defineStore("kanna", () => {
       await startMergeAgent(repo.id, repo.path);
     } catch (e) {
       console.error("[store] merge agent failed to start:", e);
-      toast.error("Failed to start merge agent");
+      toast.error(tt('toasts.mergeAgentFailed'));
     }
   }
 
@@ -839,7 +842,7 @@ export const useKannaStore = defineStore("kanna", () => {
         });
       } catch (e) {
         console.error("[store] startBlockedTask worktree_add failed:", e);
-        toast.error("Failed to create worktree for blocked task");
+        toast.error(tt('toasts.blockedWorktreeFailed'));
         return;
       }
     }
@@ -978,7 +981,7 @@ export const useKannaStore = defineStore("kanna", () => {
       await checkUnblocked(originalId);
     } catch (e) {
       console.error("[store] blockTask close failed:", e);
-      toast.error("Failed to block task");
+      toast.error(tt('toasts.blockTaskFailed'));
     }
 
     bump();

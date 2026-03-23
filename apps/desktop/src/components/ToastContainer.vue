@@ -15,7 +15,7 @@ const { toasts, dismiss } = useToast()
         role="alert"
       >
         <span class="toast-message">{{ toast.message }}</span>
-        <button class="toast-dismiss" @click="dismiss(toast.id)" aria-label="Dismiss">&times;</button>
+        <button class="toast-dismiss" @click="dismiss(toast.id)" :aria-label="$t('actions.dismiss')">&times;</button>
       </div>
     </TransitionGroup>
   </div>

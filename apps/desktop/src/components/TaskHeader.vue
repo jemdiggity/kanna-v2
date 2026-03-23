@@ -1,14 +1,17 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import type { PipelineItem } from "@kanna/db";
+import { useI18n } from "vue-i18n";
 import TagBadges from "./TagBadges.vue";
+
+const { t } = useI18n();
 
 const props = defineProps<{
   item: PipelineItem;
 }>();
 
 function title(item: PipelineItem): string {
-  return item.display_name || item.issue_title || item.prompt || "Untitled";
+  return item.display_name || item.issue_title || item.prompt || t('tasks.untitled');
 }
 
 const ports = computed<number[]>(() => {
@@ -30,7 +33,7 @@ const ports = computed<number[]>(() => {
     </div>
     <div class="header-meta">
       <span v-if="item.branch" class="meta-item branch">
-        <span class="meta-label">branch:</span> {{ item.branch }}
+        <span class="meta-label">{{ $t('taskHeader.branchLabel') }}</span> {{ item.branch }}
       </span>
       <span v-for="port in ports" :key="port" class="meta-item port">
         :{{ port }}
@@ -49,7 +52,7 @@ const ports = computed<number[]>(() => {
         :href="item.pr_url"
         target="_blank"
       >
-        PR #{{ item.pr_number }}
+        {{ $t('taskHeader.prPrefix') }}{{ item.pr_number }}
       </a>
     </div>
   </div>

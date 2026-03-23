@@ -114,7 +114,7 @@ onMounted(async () => {
         v-model="query"
         type="text"
         class="picker-input"
-        placeholder="Search files..."
+        :placeholder="$t('filePicker.placeholder')"
       />
       <div class="file-list">
         <div
@@ -130,7 +130,7 @@ onMounted(async () => {
             <template v-else>{{ segment.text }}</template>
           </template>
         </div>
-        <div v-if="filtered.length === 0" class="empty">No files found</div>
+        <div v-if="filtered.length === 0" class="empty">{{ $t('filePicker.noFiles') }}</div>
       </div>
     </div>
   </div>

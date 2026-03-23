@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { computed } from "vue";
+import { useI18n } from "vue-i18n";
 import { parseTags } from "@kanna/core";
+
+const { t } = useI18n();
 
 const props = defineProps<{
   tags: string;
@@ -16,13 +19,18 @@ const tagColors: Record<string, string> = {
   blocked: "#666",
 };
 
-const tagLabels: Record<string, string> = {
-  "in progress": "In Progress",
-  pr: "PR",
-  merge: "Merge",
-  done: "Done",
-  blocked: "Blocked",
+const tagLabelKeys: Record<string, string> = {
+  "in progress": "tags.inProgress",
+  pr: "tags.pr",
+  merge: "tags.merge",
+  done: "tags.done",
+  blocked: "tags.blocked",
 };
+
+function tagLabel(tag: string): string {
+  const key = tagLabelKeys[tag];
+  return key ? t(key) : tag;
+}
 </script>
 
 <template>
@@ -32,7 +40,7 @@ const tagLabels: Record<string, string> = {
     class="tag-badge"
     :style="{ backgroundColor: tagColors[tag] || '#555' }"
   >
-    {{ tagLabels[tag] || tag }}
+    {{ tagLabel(tag) }}
   </span>
 </template>
 
