@@ -336,7 +336,13 @@ const keyboardActions = {
   showDiff: () => { showDiffModal.value = !showDiffModal.value; },
   showShortcuts: () => {
     if (showShortcutsModal.value) {
-      showShortcutsModal.value = false;
+      if (shortcutsStartFull.value) {
+        // Showing all → switch to contextual
+        shortcutsStartFull.value = false;
+      } else {
+        // Showing contextual → close
+        showShortcutsModal.value = false;
+      }
       return;
     }
     showCommandPalette.value = false;
@@ -346,8 +352,13 @@ const keyboardActions = {
   },
   showAllShortcuts: () => {
     if (showShortcutsModal.value) {
-      // Toggle full/context mode when already open
-      shortcutsStartFull.value = !shortcutsStartFull.value;
+      if (!shortcutsStartFull.value) {
+        // Showing contextual → switch to all
+        shortcutsStartFull.value = true;
+      } else {
+        // Showing all → close
+        showShortcutsModal.value = false;
+      }
       return;
     }
     showCommandPalette.value = false;
@@ -573,6 +584,7 @@ onMounted(async () => {
       :hide-on-startup="store.hideShortcutsOnStartup"
       @close="showShortcutsModal = false"
       @update:hide-on-startup="(val: boolean) => store.savePreference('hideShortcutsOnStartup', String(val))"
+      @update:full-mode="shortcutsStartFull = $event"
     />
     <KeepAlive :max="10">
       <ShellModal
