@@ -109,13 +109,32 @@ pub async fn send_input(
     relay: State<'_, RelaySink>,
     pending: State<'_, PendingRequests>,
     session_id: String,
-    data: String,
+    data: Vec<u8>,
 ) -> Result<serde_json::Value, String> {
+    // Convert byte array to string for the relay protocol
+    let data_str = String::from_utf8_lossy(&data).to_string();
     invoke_remote(
         &relay,
         &pending,
         "send_input",
-        json!({ "session_id": session_id, "data": data }),
+        json!({ "session_id": session_id, "data": data_str }),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn resize_session(
+    relay: State<'_, RelaySink>,
+    pending: State<'_, PendingRequests>,
+    session_id: String,
+    cols: u16,
+    rows: u16,
+) -> Result<serde_json::Value, String> {
+    invoke_remote(
+        &relay,
+        &pending,
+        "resize_session",
+        json!({ "session_id": session_id, "cols": cols, "rows": rows }),
     )
     .await
 }
