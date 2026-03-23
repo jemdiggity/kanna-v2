@@ -51,7 +51,7 @@ async function onKeydown(e: KeyboardEvent) {
     e.stopPropagation();
   }
 
-  if (e.key === "Escape" && !filterText.value) {
+  if (e.key === "Escape" && !filtering.value && !filterText.value) {
     e.preventDefault();
     emit("close");
     return;
