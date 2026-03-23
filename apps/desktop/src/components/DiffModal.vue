@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, nextTick } from "vue";
+import { ref, onMounted, nextTick } from "vue";
 import DiffView from "./DiffView.vue";
 import { useShortcutContext } from "../composables/useShortcutContext";
 useShortcutContext("diff");
@@ -18,18 +18,11 @@ const emit = defineEmits<{
   (e: "scope-change", scope: "branch" | "commit" | "working"): void;
 }>();
 
-// Use capture phase so Escape reaches us before xterm's handler consumes it
-function onKeydown(e: KeyboardEvent) {
-  if (e.key === "Escape" && !e.metaKey && !e.ctrlKey && !e.altKey) {
-    e.stopPropagation();
-    emit("close");
-  }
-}
+// Escape is handled by the centralized dismiss handler in useKeyboardShortcuts
+// (capture phase), which respects modal priority (e.g. closes shortcuts menu first).
 onMounted(() => {
-  window.addEventListener("keydown", onKeydown, true);
   nextTick(() => modalRef.value?.focus());
 });
-onUnmounted(() => window.removeEventListener("keydown", onKeydown, true));
 </script>
 
 <template>

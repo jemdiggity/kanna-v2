@@ -133,10 +133,12 @@ export function useKeyboardShortcuts(actions: KeyboardActions, options?: { befor
   }
 
   onMounted(() => {
-    window.addEventListener("keydown", handler);
+    // Capture phase so the centralized dismiss handler fires before
+    // per-modal Escape handlers (e.g. DiffModal) and before xterm.
+    window.addEventListener("keydown", handler, true);
   });
 
   onUnmounted(() => {
-    window.removeEventListener("keydown", handler);
+    window.removeEventListener("keydown", handler, true);
   });
 }
