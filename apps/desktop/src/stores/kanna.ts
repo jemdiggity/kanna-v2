@@ -574,16 +574,23 @@ export const useKannaStore = defineStore("kanna", () => {
         "SELECT * FROM pipeline_item WHERE tags LIKE '%\"done\"%' ORDER BY updated_at DESC LIMIT 1"
       );
       const item = rows[0];
-      if (!item?.branch) return;
+      if (!item) return;
       const repo = repos.value.find((r) => r.id === item.repo_id);
       if (!repo) return;
       await removePipelineItemTag(_db, item.id, "done");
       await updatePipelineItemActivity(_db, item.id, "working");
-      const worktreePath = `${repo.path}/.kanna-worktrees/${item.branch}`;
-      await spawnPtySession(item.id, worktreePath, item.prompt || "");
       selectedItemId.value = item.id;
       emitTaskSelected(item.id);
       bump();
+      // Re-spawn session for tasks that have a worktree (blocked tasks don't)
+      if (item.branch) {
+        const worktreePath = `${repo.path}/.kanna-worktrees/${item.branch}`;
+        try {
+          await spawnPtySession(item.id, worktreePath, item.prompt || "");
+        } catch (spawnErr) {
+          console.warn("[store] session re-spawn after undo failed:", spawnErr);
+        }
+      }
     } catch (e) {
       console.error("[store] undo close failed:", e);
       toast.error("Failed to undo close");
