@@ -45,6 +45,10 @@ function handleKeydown(e: KeyboardEvent) {
           class="prompt-input"
           placeholder="Describe the task..."
           rows="6"
+          autocomplete="off"
+          autocorrect="off"
+          autocapitalize="off"
+          spellcheck="false"
           @keydown="handleKeydown"
         />
       </div>
