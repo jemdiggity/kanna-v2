@@ -595,6 +595,7 @@ export const useKannaStore = defineStore("kanna", () => {
       `1. Rename this branch to something meaningful based on the commits (use "git branch -m <new-name>").`,
       `2. Push the branch (git push -u origin HEAD).`,
       `3. Create a PR with "gh pr create" — write a clear title and description summarizing the changes.`,
+      `If gh CLI commands fail due to sandbox restrictions, disable the sandbox for those commands.`,
     ].join("\n");
 
     await createItem(repoId, repoPath, prompt, "pty", { baseBranch: item.branch, tags: ["pr"] });
