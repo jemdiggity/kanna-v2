@@ -220,17 +220,16 @@ pub fn list_files(path: String) -> Result<Vec<String>, String> {
         return Err(format!("not a directory: {}", path));
     }
 
-    let skip_dirs = [
-        ".git",
-        "node_modules",
-        "target",
-        "dist",
-        ".kanna-worktrees",
-        ".turbo",
-    ];
+    let repo = git2::Repository::discover(root)
+        .map_err(|e| format!("not a git repository: {}", e))?;
     let mut files = Vec::new();
 
-    fn walk(dir: &std::path::Path, root: &std::path::Path, skip: &[&str], out: &mut Vec<String>) {
+    fn walk(
+        dir: &std::path::Path,
+        root: &std::path::Path,
+        repo: &git2::Repository,
+        out: &mut Vec<String>,
+    ) {
         let entries = match std::fs::read_dir(dir) {
             Ok(e) => e,
             Err(_) => return,
@@ -238,21 +237,26 @@ pub fn list_files(path: String) -> Result<Vec<String>, String> {
         for entry in entries.flatten() {
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with('.') && name != ".claude" {
+
+            // Always hide .git
+            if name == ".git" {
                 continue;
             }
+
+            // Respect .gitignore via libgit2
+            if repo.status_should_ignore(&path).unwrap_or(false) {
+                continue;
+            }
+
             if path.is_dir() {
-                if skip.contains(&name.as_str()) {
-                    continue;
-                }
-                walk(&path, root, skip, out);
+                walk(&path, root, repo, out);
             } else if let Ok(rel) = path.strip_prefix(root) {
                 out.push(rel.to_string_lossy().to_string());
             }
         }
     }
 
-    walk(root, root, &skip_dirs, &mut files);
+    walk(root, root, &repo, &mut files);
     files.sort();
     Ok(files)
 }
