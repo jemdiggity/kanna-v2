@@ -9,15 +9,9 @@ export function createRemoteDbHandle(
   invoke: (cmd: string, args: Record<string, unknown>) => Promise<unknown>,
 ): DbHandle {
   return {
-    async execute(
-      query: string,
-      bindValues?: unknown[],
-    ): Promise<{ rowsAffected: number }> {
-      const result = await invoke("db_execute", {
-        query,
-        bindValues: bindValues ?? [],
-      });
-      return result as { rowsAffected: number };
+    async execute(): Promise<{ rowsAffected: number }> {
+      // No-op on mobile — DB is read-only via relay
+      return { rowsAffected: 0 };
     },
     async select<T>(query: string, bindValues?: unknown[]): Promise<T[]> {
       const result = await invoke("db_select", {
