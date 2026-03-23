@@ -18,6 +18,7 @@ export type ActionName =
   | "showDiff"
   | "toggleMaximize"
   | "showShortcuts"
+  | "showAllShortcuts"
   | "toggleSidebar"
   | "commandPalette"
   | "showAnalytics"
@@ -46,6 +47,8 @@ interface ShortcutDef {
   display: string;
   /** Which contexts this shortcut appears in. Undefined = all contexts. */
   context?: ShortcutContext[];
+  /** Hide from shortcuts modal display */
+  hidden?: boolean;
 }
 
 /**
@@ -78,7 +81,8 @@ export const shortcuts: ShortcutDef[] = [
   { action: "importRepo",   label: "Import / Clone",   group: "Navigation", key: ["I", "i"],                     meta: true, shift: true,  display: "⇧⌘I",     context: ["main"] },
   { action: "goBack",       label: "Go Back",          group: "Navigation", key: "-",                            ctrl: true,               display: "⌃-",       context: ["main"] },
   { action: "goForward",    label: "Go Forward",       group: "Navigation", key: ["_", "-"],                     ctrl: true, shift: true,  display: "⌃⇧-",     context: ["main"] },
-  // Help
+  // Help — ⇧⌘/ must come before ⌘/ so the more specific shortcut matches first
+  { action: "showAllShortcuts", label: "All Shortcuts",      group: "Help",   key: "/",                           meta: true, shift: true,  display: "⇧⌘/",     context: ["main", "diff", "file", "shell"], hidden: true },
   { action: "showShortcuts",  label: "Keyboard Shortcuts", group: "Help",   key: "/",                           meta: true,               display: "⌘/",       context: ["main", "diff", "file", "shell"] },
   // Escape is special — no meta required
   { action: "dismiss",    label: "Dismiss",           group: "Navigation", key: "Escape",                                                 display: "Escape",   context: ["main", "diff", "file", "shell"] },
@@ -109,6 +113,7 @@ export function getShortcutGroups(): { title: string; shortcuts: { keys: string;
   const groupOrder = ["Tasks", "Navigation", "Views", "Help"];
   const map = new Map<string, { keys: string; action: string }[]>();
   for (const def of shortcuts) {
+    if (def.hidden) continue;
     if (!map.has(def.group)) map.set(def.group, []);
     map.get(def.group)!.push({ keys: def.display, action: def.label });
   }

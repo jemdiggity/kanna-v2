@@ -74,6 +74,7 @@ export function getContextShortcuts(ctx: ShortcutContext): { keys: string; actio
   // Global shortcuts: include if explicitly tagged for this context.
   // Untagged shortcuts fall back to "main" context only.
   for (const def of shortcuts) {
+    if (def.hidden) continue;
     if (def.context && def.context.includes(ctx)) {
       result.push({ keys: def.display, action: def.label });
     } else if (!def.context && ctx === "main") {

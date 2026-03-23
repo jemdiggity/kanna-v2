@@ -44,6 +44,7 @@ const showNewTaskModal = ref(false);
 const showAddRepoModal = ref(false);
 const addRepoInitialTab = ref<"create" | "import">("create");
 const showShortcutsModal = ref(false);
+const shortcutsStartFull = ref(false);
 const shortcutsContext = ref<ShortcutContext>("main");
 const showFilePickerModal = ref(false);
 const showFilePreviewModal = ref(false);
@@ -312,11 +313,20 @@ const keyboardActions = {
       showShortcutsModal.value = false;
       return;
     }
-    // Close non-context modals (command palette isn't a context)
     showCommandPalette.value = false;
-    // Don't close diff/shell/file preview/file picker — those provide context
-    // Snapshot the active context at open time
     shortcutsContext.value = activeContext.value;
+    shortcutsStartFull.value = false;
+    showShortcutsModal.value = true;
+  },
+  showAllShortcuts: () => {
+    if (showShortcutsModal.value) {
+      // Toggle full/context mode when already open
+      shortcutsStartFull.value = !shortcutsStartFull.value;
+      return;
+    }
+    showCommandPalette.value = false;
+    shortcutsContext.value = activeContext.value;
+    shortcutsStartFull.value = true;
     showShortcutsModal.value = true;
   },
   commandPalette: () => {
@@ -346,7 +356,7 @@ const keyboardActions = {
 };
 useKeyboardShortcuts(keyboardActions, {
   beforeAction: (action) => {
-    if (action !== "showShortcuts" && action !== "dismiss" && showShortcutsModal.value) {
+    if (action !== "showShortcuts" && action !== "showAllShortcuts" && action !== "dismiss" && showShortcutsModal.value) {
       showShortcutsModal.value = false;
     }
   },
@@ -496,6 +506,7 @@ onMounted(async () => {
     <KeyboardShortcutsModal
       v-if="showShortcutsModal"
       :context="shortcutsContext"
+      :start-in-full-mode="shortcutsStartFull"
       :hide-on-startup="store.hideShortcutsOnStartup"
       @close="showShortcutsModal = false"
       @update:hide-on-startup="(val: boolean) => store.savePreference('hideShortcutsOnStartup', String(val))"

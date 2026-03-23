@@ -198,6 +198,14 @@ function handleKeydown(e: KeyboardEvent) {
     e.preventDefault();
     handleSubmit();
   }
+  if (e.metaKey && e.shiftKey && (e.key === "[" || e.key === "{")) {
+    e.preventDefault();
+    switchTab("create");
+  }
+  if (e.metaKey && e.shiftKey && (e.key === "]" || e.key === "}")) {
+    e.preventDefault();
+    switchTab("import");
+  }
   if (e.key === "Escape") {
     e.preventDefault();
     emit("cancel");

@@ -92,7 +92,11 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
     // and sent to the PTY instead of triggering clipboard operations —
     // intercept Cmd+C here and let Cmd+V fall through to the native paste event.
     term.attachCustomKeyEventHandler((e: KeyboardEvent) => {
-      if (e.key === "Escape") return true
+      if (e.key === "Escape") {
+        // When a modal overlay is visible, let Escape bubble to the app to dismiss it
+        if (document.querySelector('.modal-overlay')) return false
+        return true
+      }
       if (isAppShortcut(e)) return false
       // Prevent kitty keyboard from encoding Cmd+key as CSI sequences —
       // let them fall through to the OS/browser (Cmd+Q, Cmd+V, etc.).

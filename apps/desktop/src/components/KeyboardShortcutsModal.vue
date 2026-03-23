@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { ref, watch, computed, onMounted, onUnmounted } from "vue";
+import { ref, watch, computed } from "vue";
 import { getShortcutGroups } from "../composables/useKeyboardShortcuts";
 import { getContextShortcuts, getContextTitle, type ShortcutContext } from "../composables/useShortcutContext";
 
 const props = defineProps<{
   hideOnStartup?: boolean;
   context: ShortcutContext;
+  startInFullMode?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -17,22 +18,14 @@ const hideOnStartup = ref(props.hideOnStartup ?? false);
 watch(hideOnStartup, (val) => emit("update:hide-on-startup", val));
 
 // Context mode is default on open (relies on v-if destroying/recreating component)
-const showFullMode = ref(false);
+const showFullMode = ref(props.startInFullMode ?? false);
+watch(() => props.startInFullMode, (val) => { showFullMode.value = val ?? false; });
 const contextTitle = computed(() => getContextTitle(props.context));
 const contextItems = computed(() => getContextShortcuts(props.context));
 const groups = getShortcutGroups();
 
-function onKeydown(e: KeyboardEvent) {
-  if (e.metaKey && e.shiftKey && e.key === "/") {
-    e.preventDefault();
-    showFullMode.value = !showFullMode.value;
-  }
-}
-onMounted(() => window.addEventListener("keydown", onKeydown));
-onUnmounted(() => window.removeEventListener("keydown", onKeydown));
-
 function splitKeys(display: string): string[] {
-  const symbols = ["⌘", "⇧", "⌥", "⌫"];
+  const symbols = ["⌘", "⇧", "⌥", "⌫", "⌃"];
   const parts: string[] = [];
   let rest = display;
   while (rest) {
@@ -54,7 +47,7 @@ function splitKeys(display: string): string[] {
     <div class="modal shortcuts-modal">
       <h3>{{ showFullMode ? 'Keyboard Shortcuts' : contextTitle }}</h3>
 
-      <!-- Context mode: flat list -->
+      <!-- Context mode: multi-column grid -->
       <div v-if="!showFullMode" class="context-shortcuts">
         <div v-for="s in contextItems" :key="s.keys" class="shortcut-row">
           <span class="shortcut-action">{{ s.action }}</span>
@@ -64,7 +57,7 @@ function splitKeys(display: string): string[] {
         </div>
       </div>
 
-      <!-- Full mode: grouped list (existing) -->
+      <!-- Full mode: grouped columns -->
       <div v-else class="shortcuts-grid">
         <div v-for="group in groups" :key="group.title" class="shortcut-group">
           <h4>{{ group.title }}</h4>
@@ -106,21 +99,21 @@ function splitKeys(display: string): string[] {
   background: #252525;
   border: 1px solid #444;
   border-radius: 8px;
-  padding: 20px;
-  width: 800px;
+  padding: 20px 24px;
+  width: 900px;
   max-width: 90vw;
 }
 h3 { margin: 0 0 16px; font-size: 15px; font-weight: 600; }
 .shortcuts-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 0 24px;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 0 28px;
 }
 .shortcut-group { margin-bottom: 16px; }
 h4 { color: #888; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; margin: 0 0 8px; }
-.shortcut-row { display: flex; justify-content: space-between; align-items: center; padding: 3px 0; font-size: 13px; }
-.shortcut-action { color: #ccc; }
-.shortcut-keys { display: flex; gap: 3px; }
+.shortcut-row { display: flex; align-items: center; padding: 3px 0; font-size: 13px; }
+.shortcut-action { color: #ccc; margin-right: 8px; }
+.shortcut-keys { display: flex; gap: 3px; margin-left: auto; }
 kbd {
   background: #333;
   border: 1px solid #555;
@@ -134,6 +127,9 @@ kbd {
   line-height: 1.4;
 }
 .context-shortcuts {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 0 28px;
   margin-bottom: 12px;
 }
 .shortcuts-footer {
