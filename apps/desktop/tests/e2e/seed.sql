@@ -105,8 +105,12 @@ VALUES ('repo-seed-kanna', '/Users/test/kanna-tauri', 'kanna-tauri', 'main', 0,
         datetime('now', '-30 days'), datetime('now', '-1 hours'));
 
 INSERT INTO repo (id, path, name, default_branch, hidden, created_at, last_opened_at)
-VALUES ('repo-seed-api', '/Users/test/kanna-api', 'kanna-api', 'main', 1,
-        datetime('now', '-60 days'), datetime('now', '-14 days'));
+VALUES ('repo-seed-api', '/Users/test/kanna-api', 'kanna-api', 'main', 0,
+        datetime('now', '-60 days'), datetime('now', '-3 hours'));
+
+INSERT INTO repo (id, path, name, default_branch, hidden, created_at, last_opened_at)
+VALUES ('repo-seed-docs', '/Users/test/kanna-docs', 'kanna-docs', 'main', 0,
+        datetime('now', '-20 days'), datetime('now', '-2 days'));
 
 -- ── Pipeline items ──────────────────────────────────────────────────────────
 
@@ -169,6 +173,66 @@ VALUES
    'in_progress', '["in progress"]', 'task-seed-search',
    'claude', 'working', datetime('now', '-1 hours'),
    1, '{"KANNA_DEV_PORT":"1421"}', datetime('now', '-4 days'), datetime('now', '-1 hours'));
+
+-- Rate limiting: api repo, has PR
+INSERT INTO pipeline_item
+  (id, repo_id, issue_number, issue_title, prompt, stage, tags, branch,
+   agent_type, activity, pr_number, pr_url,
+   created_at, updated_at)
+VALUES
+  ('task-seed-rate-limit', 'repo-seed-api', 18, 'Rate limiting middleware',
+   'Add rate limiting middleware with configurable per-route limits',
+   'pr', '["pr"]', 'task-seed-rate-limit',
+   'claude', 'idle', 23, 'https://github.com/test/kanna-api/pull/23',
+   datetime('now', '-6 days'), datetime('now', '-2 days'));
+
+-- Webhooks: api repo, in progress
+INSERT INTO pipeline_item
+  (id, repo_id, issue_number, issue_title, prompt, stage, tags, branch,
+   agent_type, activity, activity_changed_at,
+   created_at, updated_at)
+VALUES
+  ('task-seed-webhooks', 'repo-seed-api', 21, 'Webhook delivery system',
+   'Build a webhook delivery system with retry logic and event filtering',
+   'in_progress', '["in progress"]', 'task-seed-webhooks',
+   'claude', 'idle', datetime('now', '-4 hours'),
+   datetime('now', '-3 days'), datetime('now', '-4 hours'));
+
+-- API docs: docs repo, in progress, working
+INSERT INTO pipeline_item
+  (id, repo_id, issue_number, issue_title, prompt, stage, tags, branch,
+   agent_type, activity, activity_changed_at, pinned, pin_order,
+   created_at, updated_at)
+VALUES
+  ('task-seed-api-docs', 'repo-seed-docs', 5, 'API reference docs',
+   'Write API reference documentation for all public endpoints',
+   'in_progress', '["in progress"]', 'task-seed-api-docs',
+   'claude', 'working', datetime('now', '-45 minutes'), 1, 1,
+   datetime('now', '-4 days'), datetime('now', '-45 minutes'));
+
+-- Tutorials: docs repo, in progress
+INSERT INTO pipeline_item
+  (id, repo_id, issue_number, issue_title, prompt, stage, tags, branch,
+   agent_type, activity, activity_changed_at,
+   created_at, updated_at)
+VALUES
+  ('task-seed-tutorials', 'repo-seed-docs', 8, 'Getting started tutorials',
+   'Create getting started tutorials for common workflows',
+   'in_progress', '["in progress"]', 'task-seed-tutorials',
+   'claude', 'idle', datetime('now', '-1 days'),
+   datetime('now', '-3 days'), datetime('now', '-1 days'));
+
+-- Changelog: docs repo, has PR
+INSERT INTO pipeline_item
+  (id, repo_id, issue_number, issue_title, prompt, stage, tags, branch,
+   agent_type, activity, pr_number, pr_url,
+   created_at, updated_at)
+VALUES
+  ('task-seed-changelog', 'repo-seed-docs', 3, 'Auto-generated changelog',
+   'Set up auto-generated changelog from git history',
+   'pr', '["pr"]', 'task-seed-changelog',
+   'claude', 'idle', 7, 'https://github.com/test/kanna-docs/pull/7',
+   datetime('now', '-8 days'), datetime('now', '-3 days'));
 
 -- Notifications: done + merged
 INSERT INTO pipeline_item

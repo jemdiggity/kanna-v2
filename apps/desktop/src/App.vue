@@ -61,22 +61,33 @@ const sidebarHidden = ref(false);
 const maximized = ref(false);
 
 // Navigation
+function selectItemAcrossRepos(itemId: string) {
+  const item = store.items.find((i) => i.id === itemId);
+  if (item && item.repo_id !== store.selectedRepoId) {
+    store.selectRepo(item.repo_id);
+  }
+  store.selectItem(itemId);
+}
+
 function navigateItems(direction: -1 | 1) {
-  const currentItems = store.sortedItemsForCurrentRepo;
-  if (currentItems.length === 0) return;
-  const currentIndex = currentItems.findIndex((i) => i.id === store.selectedItemId);
+  const allItems = store.sortedItemsAllRepos;
+  if (allItems.length === 0) return;
+  const currentIndex = allItems.findIndex((i) => i.id === store.selectedItemId);
   let nextIndex: number;
   if (currentIndex === -1) {
     nextIndex = 0;
   } else {
     nextIndex = currentIndex + direction;
     if (nextIndex < 0) nextIndex = 0;
-    if (nextIndex >= currentItems.length) nextIndex = currentItems.length - 1;
+    if (nextIndex >= allItems.length) nextIndex = allItems.length - 1;
   }
-  const nextId = currentItems[nextIndex].id;
-  if (nextId !== store.selectedItemId) {
+  const nextItem = allItems[nextIndex];
+  if (nextItem.id !== store.selectedItemId) {
     if (store.selectedItemId) recordNavigation(store.selectedItemId);
-    store.selectItem(nextId);
+    if (nextItem.repo_id !== store.selectedRepoId) {
+      store.selectRepo(nextItem.repo_id);
+    }
+    store.selectItem(nextItem.id);
   }
 }
 
@@ -311,13 +322,13 @@ const keyboardActions = {
     if (!store.selectedItemId) return;
     const validIds = new Set(store.items.filter((i) => !hasTag(i, "done")).map((i) => i.id));
     const taskId = goBack(store.selectedItemId, validIds);
-    if (taskId) store.selectItem(taskId);
+    if (taskId) selectItemAcrossRepos(taskId);
   },
   goForward: () => {
     if (!store.selectedItemId) return;
     const validIds = new Set(store.items.filter((i) => !hasTag(i, "done")).map((i) => i.id));
     const taskId = goForward(store.selectedItemId, validIds);
-    if (taskId) store.selectItem(taskId);
+    if (taskId) selectItemAcrossRepos(taskId);
   },
   createRepo: () => { addRepoInitialTab.value = "create"; showAddRepoModal.value = true; },
   importRepo: () => { addRepoInitialTab.value = "import"; showAddRepoModal.value = true; },

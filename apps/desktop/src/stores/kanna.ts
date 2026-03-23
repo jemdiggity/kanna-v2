@@ -98,10 +98,9 @@ export const useKannaStore = defineStore("kanna", () => {
     return item && !hasTag(item, "done") ? item : null;
   });
 
-  // Mirrors Sidebar.vue's itemsForRepo(): pinned (by pin_order), then merge → pr → active → blocked (each by created_at desc).
-  const sortedItemsForCurrentRepo = computed(() => {
+  function sortItemsForRepo(repoId: string): PipelineItem[] {
     const repoItems = items.value.filter(
-      (item) => item.repo_id === selectedRepoId.value && !hasTag(item, "done")
+      (item) => item.repo_id === repoId && !hasTag(item, "done")
     );
     const pinned = repoItems
       .filter((i) => i.pinned)
@@ -113,7 +112,17 @@ export const useKannaStore = defineStore("kanna", () => {
     const active = sortByCreatedAt(repoItems.filter((i) => !hasTag(i, "pr") && !hasTag(i, "merge") && !hasTag(i, "blocked") && !i.pinned));
     const blocked = sortByCreatedAt(repoItems.filter((i) => hasTag(i, "blocked") && !i.pinned));
     return [...pinned, ...merge, ...pr, ...active, ...blocked];
-  });
+  }
+
+  // Mirrors Sidebar.vue's itemsForRepo(): pinned (by pin_order), then merge → pr → active → blocked (each by created_at desc).
+  const sortedItemsForCurrentRepo = computed(() =>
+    sortItemsForRepo(selectedRepoId.value ?? "")
+  );
+
+  // All items across all repos, in sidebar order (repo by repo, each with its own sort).
+  const sortedItemsAllRepos = computed(() =>
+    repos.value.flatMap((repo) => sortItemsForRepo(repo.id))
+  );
 
   // ── Actions: Selection ───────────────────────────────────────────
   async function selectRepo(repoId: string) {
@@ -1112,7 +1121,7 @@ export const useKannaStore = defineStore("kanna", () => {
     ideCommand, gcAfterDays, hideShortcutsOnStartup,
     lastUndoAction, refreshKey,
     // Getters
-    selectedRepo, currentItem, sortedItemsForCurrentRepo,
+    selectedRepo, currentItem, sortedItemsForCurrentRepo, sortedItemsAllRepos,
     // Actions
     bump, init,
     selectRepo, selectItem,
