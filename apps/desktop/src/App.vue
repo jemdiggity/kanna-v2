@@ -446,6 +446,7 @@ onMounted(async () => {
   await store.init(db);
   startPeriodicBackup(dbName, ref(db) as Ref<DbHandle | null>);
   if (!store.hideShortcutsOnStartup) {
+    shortcutsStartFull.value = true;
     showShortcutsModal.value = true;
   }
   const raw = await getSetting(db, "commandPaletteUsage");
