@@ -193,7 +193,9 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
       try {
         await spawnOptions.spawnFn(sessionId, spawnOptions.cwd, spawnOptions.prompt, cols, rows)
       } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
         console.error("[terminal] PTY spawn failed:", e)
+        terminal.value.write(`\r\n\x1b[31mFailed to start agent: ${msg}\x1b[0m\r\n`)
         return
       }
       // Now attach to the newly spawned session

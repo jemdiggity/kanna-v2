@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "../../scripts/sync-version.sh && bun run build:daemon && vite",
-    "build:daemon": "cd ../../crates/daemon && cargo build && cd ../../crates/kanna-hook && cargo build",
+    "build:daemon": "cd ../../crates/daemon && cargo build && cd ../../crates/kanna-hook && cargo build && ../../scripts/stage-sidecars.sh",
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
     "tauri": "tauri",

@@ -77,11 +77,20 @@ pub fn read_text_file(path: String) -> Result<String, String> {
 
 #[tauri::command]
 pub fn which_binary(name: String) -> Result<String, String> {
+    // Tauri externalBin appends the target triple to the binary name
+    let sidecar_name = format!("{}-{}", name, current_target_triple());
+
     // First try next to the app binary (covers .build/debug/ and macOS bundle)
     let candidates = [
+        // Tauri externalBin: triple-suffixed, same dir as exe
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join(&sidecar_name))),
+        // Dev builds: plain name, same dir as exe
         std::env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(|d| d.join(&name))),
+        // macOS bundle Resources
         std::env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(|d| d.join("../Resources").join(&name))),
@@ -103,6 +112,13 @@ pub fn which_binary(name: String) -> Result<String, String> {
     } else {
         Err(format!("binary '{}' not found in PATH", name))
     }
+}
+
+pub fn current_target_triple() -> &'static str {
+    #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+    { "aarch64-apple-darwin" }
+    #[cfg(all(target_arch = "x86_64", target_os = "macos"))]
+    { "x86_64-apple-darwin" }
 }
 
 #[tauri::command]

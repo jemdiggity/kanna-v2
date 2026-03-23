@@ -332,6 +332,7 @@ export const useKannaStore = defineStore("kanna", () => {
         });
       } catch (e) {
         console.warn("[store] PTY pre-spawn failed, will retry on mount:", e);
+        toast.error(`Agent failed to start: ${e instanceof Error ? e.message : e}`);
       }
     }
 

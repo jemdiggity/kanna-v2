@@ -222,7 +222,21 @@ for i in "${!ARCHS[@]}"; do
     LABEL="${ARCH_LABELS[$i]}"
 
     STEP="build ($LABEL)"
-    echo "    Building ($LABEL)..."
+    echo "    Building sidecars ($LABEL)..."
+
+    # Build and stage kanna-daemon + kanna-hook for this target
+    (
+        cd "$ROOT"
+        export RUSTC_WRAPPER=""
+        if [[ "$ARCH" = "x86_64-apple-darwin" && -d "/usr/local/opt/openssl@3" ]]; then
+            export OPENSSL_DIR="/usr/local/opt/openssl@3"
+        fi
+        cargo build --release --target "$ARCH" --manifest-path crates/daemon/Cargo.toml
+        cargo build --release --target "$ARCH" --manifest-path crates/kanna-hook/Cargo.toml
+    )
+    "$ROOT/scripts/stage-sidecars.sh" --release --target "$ARCH"
+
+    echo "    Building app ($LABEL)..."
 
     (
         cd "$ROOT/apps/desktop"
