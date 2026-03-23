@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, toRef } from "vue";
+import { ref, toRef, onMounted, nextTick } from "vue";
 import { Line } from "vue-chartjs";
 import {
   Chart as ChartJS,
@@ -36,6 +36,12 @@ const {
   operatorMetrics,
   hasOperatorData,
 } = useAnalytics(toRef(props, "db"), toRef(props, "repoId"));
+
+const overlayRef = ref<HTMLDivElement | null>(null);
+
+onMounted(() => {
+  nextTick(() => overlayRef.value?.focus());
+});
 
 function handleKeydown(e: KeyboardEvent) {
   if (e.key === "Escape") {
@@ -80,7 +86,7 @@ const lineChartOptions = {
 </script>
 
 <template>
-  <div class="modal-overlay" @click.self="emit('close')" @keydown="handleKeydown" tabindex="0">
+  <div ref="overlayRef" class="modal-overlay" @click.self="emit('close')" @keydown="handleKeydown" tabindex="0">
     <div class="analytics-modal">
       <div class="modal-header">
         <h2>{{ viewNames[activeView] }}</h2>
