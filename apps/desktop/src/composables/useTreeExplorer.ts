@@ -7,6 +7,10 @@ export interface TreeNode {
   path: string;
 }
 
+export interface DisplayTreeNode extends TreeNode {
+  dimmed: boolean;
+}
+
 interface DirEntryResponse {
   name: string;
   is_dir: boolean;
@@ -36,6 +40,16 @@ export function useTreeExplorer(rootPath: () => string, repoRoot: () => string) 
   // Pending g key for gg sequence
   const pendingG = ref(false);
   let pendingGTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // Slide direction cleanup timer
+  let slideTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function clearSlideTimer() {
+    if (slideTimer !== null) {
+      clearTimeout(slideTimer);
+      slideTimer = null;
+    }
+  }
 
   async function fetchDir(dirPath: string): Promise<TreeNode[]> {
     if (cache.has(dirPath)) return cache.get(dirPath)!;
@@ -70,19 +84,23 @@ export function useTreeExplorer(rootPath: () => string, repoRoot: () => string) 
     if (!node.isDir) return;
     const absPath = absolutePath(node.path);
     if (!cache.has(absPath)) {
-      fetchDir(absPath).catch(() => {});
+      fetchDir(absPath).catch(() => {
+      // Prefetch is best-effort — failure is non-fatal
+    });
     }
   }
 
   // Filtered entries for the active column
-  const filteredColumn = computed(() => {
+  const filteredColumn = computed<DisplayTreeNode[]>(() => {
     const col = state.value.activeColumn;
     const entries = state.value.columns[col] ?? [];
-    if (!filterText.value) return entries;
+    if (!filterText.value) {
+      return entries.map((entry) => ({ ...entry, dimmed: false }));
+    }
     const lower = filterText.value.toLowerCase();
     return entries.map((entry) => ({
       ...entry,
-      _dimmed: !entry.name.toLowerCase().includes(lower),
+      dimmed: !entry.name.toLowerCase().includes(lower),
     }));
   });
 
@@ -174,7 +192,8 @@ export function useTreeExplorer(rootPath: () => string, repoRoot: () => string) 
     }
 
     // Clear slide direction after animation
-    setTimeout(() => { slideDirection.value = null; }, 200);
+    clearSlideTimer();
+    slideTimer = setTimeout(() => { slideDirection.value = null; }, 200);
     return null;
   }
 
@@ -214,7 +233,8 @@ export function useTreeExplorer(rootPath: () => string, repoRoot: () => string) 
     ];
     filterText.value = "";
 
-    setTimeout(() => { slideDirection.value = null; }, 200);
+    clearSlideTimer();
+    slideTimer = setTimeout(() => { slideDirection.value = null; }, 200);
   }
 
   async function moveCursor(delta: number) {
@@ -335,6 +355,11 @@ export function useTreeExplorer(rootPath: () => string, repoRoot: () => string) 
   }
 
   function reset() {
+    clearSlideTimer();
+    if (pendingGTimer !== null) {
+      clearTimeout(pendingGTimer);
+      pendingGTimer = null;
+    }
     state.value = {
       columns: [[], [], []],
       cursor: [0, 0, 0],
