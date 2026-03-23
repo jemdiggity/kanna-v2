@@ -94,7 +94,17 @@ MEOF
   tmux send-keys -t "$SESSION:server" \
     "KANNA_SERVER_CONFIG=${SERVER_CONFIG} RUST_LOG=info cargo run --manifest-path crates/kanna-server/Cargo.toml" Enter
 
-  # Window: tauri ios dev
+  # Write mobile tauri.conf.local.json with the isolated port
+  local MOBILE_LOCAL_CONF="$ROOT/apps/mobile/src-tauri/tauri.conf.local.json"
+  cat > "$MOBILE_LOCAL_CONF" <<MEOF
+{
+  "build": {
+    "devUrl": "http://localhost:${MOBILE_PORT}"
+  }
+}
+MEOF
+
+  # Window: tauri ios dev (auto-select connected physical device)
   tmux new-window -t "$SESSION" -n mobile -c "$ROOT/apps/mobile"
   tmux send-keys -t "$SESSION:mobile" \
     "KANNA_DEV_PORT=${MOBILE_PORT} KANNA_RELAY_PORT=${RELAY_PORT} bunx tauri ios dev" Enter
