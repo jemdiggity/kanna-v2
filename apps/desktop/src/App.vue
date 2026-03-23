@@ -13,6 +13,7 @@ import AddRepoModal from "./components/AddRepoModal.vue";
 import KeyboardShortcutsModal from "./components/KeyboardShortcutsModal.vue";
 import FilePickerModal from "./components/FilePickerModal.vue";
 import FilePreviewModal from "./components/FilePreviewModal.vue";
+import TreeExplorerModal from "./components/TreeExplorerModal.vue";
 import DiffModal from "./components/DiffModal.vue";
 import ShellModal from "./components/ShellModal.vue";
 import CommandPaletteModal from "./components/CommandPaletteModal.vue";
@@ -50,6 +51,7 @@ const showFilePickerModal = ref(false);
 const showFilePreviewModal = ref(false);
 const previewFilePath = ref("");
 const showDiffModal = ref(false);
+const showTreeExplorer = ref(false);
 const showShellModal = ref(false);
 const showCommandPalette = ref(false);
 const commandUsageCounts = ref<Record<string, number>>({});
@@ -278,6 +280,9 @@ const keyboardActions = {
     } else {
       showFilePickerModal.value = !showFilePickerModal.value;
     }
+  },
+  toggleTreeExplorer: () => {
+    showTreeExplorer.value = !showTreeExplorer.value;
   },
   openInIDE: async () => {
     const item = store.currentItem;
@@ -551,6 +556,13 @@ onMounted(async () => {
       :worktree-path="store.currentItem?.branch ? `${store.selectedRepo.path}/.kanna-worktrees/${store.currentItem.branch}` : store.selectedRepo.path"
       :ide-command="store.ideCommand"
       @close="showFilePreviewModal = false; focusAgentTerminal()"
+    />
+    <TreeExplorerModal
+      v-if="showTreeExplorer && store.selectedRepo?.path"
+      :worktree-path="store.currentItem?.branch ? `${store.selectedRepo.path}/.kanna-worktrees/${store.currentItem.branch}` : store.selectedRepo.path"
+      :repo-root="store.selectedRepo.path"
+      @close="showTreeExplorer = false; focusAgentTerminal()"
+      @open-file="(f: string) => { showTreeExplorer = false; previewFilePath = f; showFilePreviewModal = true; }"
     />
     <AnalyticsModal
       v-if="showAnalyticsModal"
