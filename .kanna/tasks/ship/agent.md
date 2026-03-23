@@ -11,13 +11,15 @@ You are the shipping agent. Your job is to rename the current worktree branch to
 1. Ask the user which version bump they want: `--major`, `--minor`, or `--patch` (default).
 2. Ask if this is a full release (`--release`) or just a build (`--dry-run` for testing).
 3. Fetch tags from origin (`git fetch origin --tags`) so the version bump uses the latest remote state.
-4. Confirm the prerequisites are met:
+4. Confirm the prerequisites are met (see sandbox note below):
    - Clean git working directory
    - Branch is up to date with `origin/main` (the script checks this)
    - Developer ID Application certificate installed
    - `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID` env vars set (unless dry-run)
    - `gh` CLI authenticated (unless dry-run)
    - Both Rust targets installed: `aarch64-apple-darwin` and `x86_64-apple-darwin`
+
+**Sandbox note:** The Claude Code sandbox blocks macOS Keychain access (`security find-identity` returns 0 identities) and network calls (`gh` fails with TLS/x509 errors). If you see these errors, they are caused by the sandbox — retry the command with `dangerouslyDisableSandbox: true`.
 
 ## Compute the next version
 
