@@ -65,6 +65,91 @@ pub fn list_dir(path: String) -> Result<Vec<String>, String> {
     Ok(names)
 }
 
+#[derive(serde::Serialize)]
+pub struct DirEntry {
+    pub name: String,
+    pub is_dir: bool,
+}
+
+#[tauri::command]
+pub fn read_dir_entries(path: String, repo_root: String) -> Result<Vec<DirEntry>, String> {
+    use ignore::gitignore::GitignoreBuilder;
+    use std::path::Path;
+
+    let dir = Path::new(&path);
+    if !dir.is_dir() {
+        return Err(format!("not a directory: {}", path));
+    }
+
+    // Build gitignore matcher rooted at repo_root
+    let root = Path::new(&repo_root);
+    let mut builder = GitignoreBuilder::new(root);
+
+    // Walk up from repo_root to find all .gitignore files in the hierarchy
+    fn add_gitignores(builder: &mut GitignoreBuilder, dir: &std::path::Path) {
+        let gi = dir.join(".gitignore");
+        if gi.exists() {
+            let _ = builder.add(gi);
+        }
+    }
+
+    // Add repo root .gitignore
+    add_gitignores(&mut builder, root);
+
+    // Add .gitignore files along the path from root to target dir
+    if let Ok(rel) = dir.strip_prefix(root) {
+        let mut current = root.to_path_buf();
+        for component in rel.components() {
+            current = current.join(component);
+            add_gitignores(&mut builder, &current);
+        }
+    }
+
+    // Add global gitignore if it exists
+    let global_path = ignore::gitignore::Gitignore::global().0.path().to_path_buf();
+    if global_path.exists() {
+        let _ = builder.add(global_path);
+    }
+
+    let gitignore = builder
+        .build()
+        .map_err(|e| format!("gitignore error: {}", e))?;
+
+    let read = std::fs::read_dir(dir)
+        .map_err(|e| format!("failed to read dir '{}': {}", path, e))?;
+
+    let mut entries: Vec<DirEntry> = Vec::new();
+
+    for entry in read.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+
+        // Always skip .git directory
+        if name == ".git" {
+            continue;
+        }
+
+        let entry_path = entry.path();
+        let is_dir = entry_path.is_dir();
+
+        // Check gitignore — pass the full path and whether it's a directory
+        let matched = gitignore.matched_path_or_any_parents(&entry_path, is_dir);
+        if matched.is_ignore() {
+            continue;
+        }
+
+        entries.push(DirEntry { name, is_dir });
+    }
+
+    // Sort: directories first, then files, both case-insensitive alphabetical
+    entries.sort_by(|a, b| {
+        b.is_dir
+            .cmp(&a.is_dir)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+
+    Ok(entries)
+}
+
 #[tauri::command]
 pub fn file_exists(path: String) -> bool {
     std::path::Path::new(&path).exists()

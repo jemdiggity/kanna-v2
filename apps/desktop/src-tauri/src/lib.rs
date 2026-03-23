@@ -430,6 +430,7 @@ pub fn run() {
             commands::fs::remove_file,
             commands::fs::list_dir,
             commands::fs::ensure_directory,
+            commands::fs::read_dir_entries,
             // Shell commands
             commands::shell::run_script,
             commands::shell::ensure_term_init,
