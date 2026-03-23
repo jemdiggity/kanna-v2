@@ -30,6 +30,7 @@ pub fn run() {
             commands::attach_session,
             commands::detach_session,
             commands::send_input,
+            commands::db_select,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

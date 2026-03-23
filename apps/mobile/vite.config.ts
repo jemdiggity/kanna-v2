@@ -6,6 +6,8 @@ import path from "path";
 const host = process.env.TAURI_DEV_HOST;
 // @ts-expect-error process is a nodejs global
 const port = parseInt(process.env.KANNA_DEV_PORT || "1421", 10);
+// @ts-expect-error process is a nodejs global
+const relayPort = process.env.KANNA_RELAY_PORT || "9080";
 
 export default defineConfig(async () => ({
   plugins: [vue()],
@@ -26,6 +28,9 @@ export default defineConfig(async () => ({
 
   define: {
     __KANNA_MOBILE__: true,
+    __KANNA_RELAY_URL__: JSON.stringify(
+      host ? `ws://${host}:${relayPort}` : `ws://localhost:${relayPort}`,
+    ),
   },
 
   build: {
