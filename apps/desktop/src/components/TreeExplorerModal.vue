@@ -2,6 +2,19 @@
 import { ref, computed, onMounted, onUnmounted, nextTick, watch } from "vue";
 import { useVirtualList } from "@vueuse/core";
 import { useTreeExplorer, type TreeNode } from "../composables/useTreeExplorer";
+import { useShortcutContext, registerContextShortcuts } from "../composables/useShortcutContext";
+
+useShortcutContext("tree");
+registerContextShortcuts("tree", [
+  { label: "Move ↓ / ↑", display: "j / k" },
+  { label: "Enter dir / Open file", display: "l" },
+  { label: "Go to parent", display: "h" },
+  { label: "Yank path", display: "y" },
+  { label: "Top / Bottom", display: "g g / G" },
+  { label: "Filter", display: "/" },
+  { label: "Clear filter", display: "Esc" },
+  { label: "Close", display: "Esc" },
+]);
 
 const props = defineProps<{
   worktreePath: string;

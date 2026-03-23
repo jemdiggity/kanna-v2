@@ -1,7 +1,7 @@
 import { ref, onUnmounted } from "vue";
 import { shortcuts } from "./useKeyboardShortcuts";
 
-export type ShortcutContext = "main" | "diff" | "file" | "shell";
+export type ShortcutContext = "main" | "diff" | "file" | "shell" | "tree";
 
 export interface ContextShortcut {
   label: string;
@@ -100,6 +100,7 @@ export function getContextTitle(ctx: ShortcutContext): string {
     diff: "Diff Viewer Shortcuts",
     file: "File Viewer Shortcuts",
     shell: "Shell Shortcuts",
+    tree: "Tree Explorer Shortcuts",
   };
   return titles[ctx];
 }
