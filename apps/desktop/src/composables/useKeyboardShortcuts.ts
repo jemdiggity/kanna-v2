@@ -27,7 +27,8 @@ export type ActionName =
   | "createRepo"
   | "importRepo"
   | "blockTask"
-  | "editBlockedTask";
+  | "editBlockedTask"
+  | "toggleTreeExplorer";
 
 export type KeyboardActions = Record<ActionName, () => void>;
 
@@ -81,6 +82,7 @@ export const shortcuts: ShortcutDef[] = [
   { action: "importRepo",   label: "Import / Clone",   group: "Navigation", key: ["I", "i"],                     meta: true, shift: true,  display: "⇧⌘I",     context: ["main"] },
   { action: "goBack",       label: "Go Back",          group: "Navigation", key: "-",                            ctrl: true,               display: "⌃-",       context: ["main"] },
   { action: "goForward",    label: "Go Forward",       group: "Navigation", key: ["_", "-"],                     ctrl: true, shift: true,  display: "⌃⇧-",     context: ["main"] },
+  { action: "toggleTreeExplorer", label: "Tree Explorer", group: "Navigation", key: "e", meta: true, shift: true, display: "⇧⌘E", context: ["main", "shell"] },
   // Help — ⇧⌘/ must come before ⌘/ so the more specific shortcut matches first
   { action: "showAllShortcuts", label: "All Shortcuts",      group: "Help",   key: "/",                           meta: true, shift: true,  display: "⇧⌘/",     context: ["main", "diff", "file", "shell"], hidden: true },
   { action: "showShortcuts",  label: "Keyboard Shortcuts", group: "Help",   key: "/",                           meta: true,               display: "⌘/",       context: ["main", "diff", "file", "shell"] },
