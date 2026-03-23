@@ -10,7 +10,7 @@ const props = defineProps<{
 }>()
 
 const containerRef = ref<HTMLElement | null>(null)
-const { terminal, init, startListening, fit, redraw, dispose } = useTerminal(props.sessionId, props.spawnOptions, { kittyKeyboard: props.kittyKeyboard })
+const { terminal, init, startListening, fit, fitDeferred, redraw, dispose } = useTerminal(props.sessionId, props.spawnOptions, { kittyKeyboard: props.kittyKeyboard })
 
 defineExpose({
   focus: () => terminal.value?.focus(),
@@ -24,7 +24,7 @@ onMounted(() => {
   if (containerRef.value) {
     init(containerRef.value)
     startListening()
-    resizeObserver = new ResizeObserver(() => fit())
+    resizeObserver = new ResizeObserver(() => fitDeferred())
     resizeObserver.observe(containerRef.value)
   }
 })

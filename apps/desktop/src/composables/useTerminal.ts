@@ -25,6 +25,8 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
   const fitAddon = new FitAddon()
   let unlistenOutput: (() => void) | null = null
   let unlistenExit: (() => void) | null = null
+  let container: HTMLElement | null = null
+  let fitRafId = 0
 
   function handleLinkActivate(_event: MouseEvent, uri: string) {
     if (isTauri) {
@@ -34,7 +36,8 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
     }
   }
 
-  function init(container: HTMLElement) {
+  function init(el: HTMLElement) {
+    container = el
     const term = new Terminal({
       fontFamily: '"JetBrains Mono", "SF Mono", Menlo, monospace',
       fontSize: 13,
@@ -69,7 +72,12 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
     term.loadAddon(fitAddon)
     term.loadAddon(new WebLinksAddon(handleLinkActivate))
     try {
-      term.loadAddon(new WebglAddon())
+      const webgl = new WebglAddon()
+      webgl.onContextLoss(() => {
+        console.warn("[terminal] WebGL context lost, falling back to DOM renderer")
+        webgl.dispose()
+      })
+      term.loadAddon(webgl)
     } catch (e) {
       console.warn("[terminal] WebGL addon failed, falling back to DOM renderer:", e)
     }
@@ -194,10 +202,21 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
   }
 
   function fit() {
+    if (!container || container.offsetWidth === 0 || container.offsetHeight === 0) return
     fitAddon.fit()
   }
 
+  /** Debounced fit — coalesces multiple resize events into a single rAF frame. */
+  function fitDeferred() {
+    if (fitRafId) return
+    fitRafId = requestAnimationFrame(() => {
+      fitRafId = 0
+      fit()
+    })
+  }
+
   function dispose() {
+    if (fitRafId) cancelAnimationFrame(fitRafId)
     if (unlistenOutput) unlistenOutput()
     if (unlistenExit) unlistenExit()
     terminal.value?.dispose()
@@ -211,7 +230,7 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
    *  If the session is dead, re-attach or re-spawn. */
   async function redraw() {
     if (!terminal.value) return
-    fitAddon.fit()
+    fit()
     // Try resize — if it fails, the session is dead → re-run startListening
     try {
       const { cols, rows } = terminal.value
@@ -227,5 +246,5 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
     await invoke("resize_session", { sessionId, cols, rows }).catch(() => {})
   }
 
-  return { terminal, init, startListening, fit, redraw, dispose }
+  return { terminal, init, startListening, fit, fitDeferred, redraw, dispose }
 }
