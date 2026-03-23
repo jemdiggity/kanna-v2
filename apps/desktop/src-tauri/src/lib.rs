@@ -83,6 +83,37 @@ fn setup_fn_f_fullscreen() {
     }
 }
 
+/// Resolve the user's full PATH from their interactive login shell.
+/// macOS apps launched from Finder/Spotlight inherit a minimal PATH
+/// (/usr/bin:/bin:/usr/sbin:/sbin) that doesn't include tools like
+/// claude, bun, or homebrew binaries. This runs the user's shell once
+/// at startup to get the real PATH and sets it on our process so all
+/// children (daemon, PTY sessions) inherit it.
+#[cfg(target_os = "macos")]
+fn fix_path_from_shell() {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+    match std::process::Command::new(&shell)
+        .args(["-ilc", "printf '%s' \"$PATH\""])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            let path = String::from_utf8_lossy(&output.stdout);
+            if !path.is_empty() {
+                eprintln!("[path] resolved shell PATH ({} entries)", path.matches(':').count() + 1);
+                std::env::set_var("PATH", path.as_ref());
+            }
+        }
+        Ok(output) => {
+            eprintln!("[path] shell exited with {}, keeping default PATH", output.status);
+        }
+        Err(e) => {
+            eprintln!("[path] failed to run {}: {}", shell, e);
+        }
+    }
+}
+
 fn worktree_root() -> Option<PathBuf> {
     // Walk up from exe path to find directory containing .kanna-worktrees
     // (that's the main repo root — our worktree is a child of it)
@@ -313,7 +344,10 @@ pub fn run() {
         .manage(Arc::new(Mutex::new(None)) as DaemonState)
         .setup(|app| {
             #[cfg(target_os = "macos")]
-            setup_fn_f_fullscreen();
+            {
+                fix_path_from_shell();
+                setup_fn_f_fullscreen();
+            }
 
             // Build app menu with full version in About
             let version = env!("KANNA_VERSION");
