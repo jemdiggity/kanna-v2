@@ -24,7 +24,7 @@ import { useKeyboardShortcuts, type ActionName } from "./composables/useKeyboard
 import { startPeriodicBackup } from "./composables/useBackup";
 import { createNavigationHistory } from "./composables/useNavigationHistory";
 import { useOperatorEvents } from "./composables/useOperatorEvents";
-import { activeContext, type ShortcutContext } from "./composables/useShortcutContext";
+import { type ShortcutContext } from "./composables/useShortcutContext";
 import { useCustomTasks } from "./composables/useCustomTasks";
 import { useToast } from "./composables/useToast";
 import { useKannaStore } from "./stores/kanna";
@@ -260,6 +260,15 @@ const paletteDynamicCommands = computed<DynamicCommand[]>(() => {
   return cmds;
 });
 
+// Derive shortcut context from visible modals (more reliable than the global singleton
+// which can be stale if a KeepAlive deactivation resets it after a modal sets it).
+const currentShortcutContext = computed<ShortcutContext>(() => {
+  if (showShellModal.value) return "shell";
+  if (showDiffModal.value) return "diff";
+  if (showFilePreviewModal.value) return "file";
+  return "main";
+});
+
 // Keyboard shortcuts
 const keyboardActions = {
   newTask: () => { showNewTaskModal.value = true; },
@@ -320,7 +329,7 @@ const keyboardActions = {
       return;
     }
     showCommandPalette.value = false;
-    shortcutsContext.value = activeContext.value;
+    shortcutsContext.value = currentShortcutContext.value;
     shortcutsStartFull.value = false;
     showShortcutsModal.value = true;
   },
@@ -331,7 +340,7 @@ const keyboardActions = {
       return;
     }
     showCommandPalette.value = false;
-    shortcutsContext.value = activeContext.value;
+    shortcutsContext.value = currentShortcutContext.value;
     shortcutsStartFull.value = true;
     showShortcutsModal.value = true;
   },
