@@ -58,9 +58,44 @@ showAllShortcuts: () => {
 },
 ```
 
+### `KeyboardShortcutsModal.vue` — sync footer toggle back to parent
+
+The footer toggle link mutates local `showFullMode` but App.vue tracks mode via `shortcutsStartFull`. Without syncing, keyboard shortcuts after a footer click would see stale state and take the wrong action.
+
+Add an `update:fullMode` emit so App.vue stays in sync:
+
+```typescript
+const emit = defineEmits<{
+  (e: "close"): void;
+  (e: "update:hide-on-startup", value: boolean): void;
+  (e: "update:full-mode", value: boolean): void;
+}>();
+```
+
+Update the footer toggle to emit:
+
+```typescript
+function toggleMode() {
+  showFullMode.value = !showFullMode.value;
+  emit("update:full-mode", showFullMode.value);
+}
+```
+
+Template change — footer link uses `@click="toggleMode"` instead of inline `@click="showFullMode = !showFullMode"`.
+
+### `App.vue` — handle `update:full-mode` on the modal
+
+```html
+<KeyboardShortcutsModal
+  v-if="showShortcutsModal"
+  :context="shortcutsContext"
+  :start-in-full-mode="shortcutsStartFull"
+  @close="showShortcutsModal = false"
+  @update:full-mode="shortcutsStartFull = $event"
+/>
+```
+
 ### No other files changed
 
-- `KeyboardShortcutsModal.vue` — already watches `startInFullMode` prop reactively
 - `useKeyboardShortcuts.ts` — shortcut definitions unchanged
 - `useShortcutContext.ts` — context system unchanged
-- Footer toggle link in modal continues to work independently
