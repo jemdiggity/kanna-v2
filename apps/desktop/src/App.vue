@@ -379,6 +379,7 @@ const keyboardActions = {
   importRepo: () => { addRepoInitialTab.value = "import"; showAddRepoModal.value = true; },
   blockTask: () => { handleBlockTask(); },
   editBlockedTask: () => { handleEditBlockedTask(); },
+  openPreferences: () => { showPreferencesPanel.value = true; },
 };
 useKeyboardShortcuts(keyboardActions, {
   beforeAction: (action) => {

@@ -28,7 +28,8 @@ export type ActionName =
   | "importRepo"
   | "blockTask"
   | "editBlockedTask"
-  | "toggleTreeExplorer";
+  | "toggleTreeExplorer"
+  | "openPreferences";
 
 export type KeyboardActions = Record<ActionName, () => void>;
 
@@ -83,6 +84,8 @@ export const shortcuts: ShortcutDef[] = [
   { action: "goBack",       labelKey: "shortcuts.goBack",         groupKey: "shortcuts.groupNavigation", key: "-",                            ctrl: true,               display: "⌃-",       context: ["main"] },
   { action: "goForward",    labelKey: "shortcuts.goForward",      groupKey: "shortcuts.groupNavigation", key: ["_", "-"],                     ctrl: true, shift: true,  display: "⌃⇧-",     context: ["main"] },
   { action: "toggleTreeExplorer", labelKey: "shortcuts.treeExplorer", groupKey: "shortcuts.groupNavigation", key: "e", meta: true, shift: true, display: "⇧⌘E", context: ["main", "shell"] },
+  // Settings
+  { action: "openPreferences", labelKey: "shortcuts.preferences", groupKey: "shortcuts.groupHelp", key: ",",                            meta: true,               display: "⌘,",       context: ["main"] },
   // Help — ⇧⌘/ must come before ⌘/ so the more specific shortcut matches first
   { action: "showAllShortcuts", labelKey: "shortcuts.allShortcuts",       groupKey: "shortcuts.groupHelp",   key: "/",                           meta: true, shift: true,  display: "⇧⌘/",     context: ["main", "diff", "file", "shell"], hidden: true },
   { action: "showShortcuts",  labelKey: "shortcuts.keyboardShortcuts",  groupKey: "shortcuts.groupHelp",   key: "/",                           meta: true,               display: "⌘/",       context: ["main", "diff", "file", "shell"] },
