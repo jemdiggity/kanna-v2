@@ -7,6 +7,7 @@ import type { ParsedInput } from "../utils/parseRepoInput";
 
 const props = defineProps<{
   initialTab: "create" | "import";
+  cloning?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -33,7 +34,6 @@ const localIsGitRepo = ref(false);
 const localLoading = ref(false);
 
 // ── Shared state ──
-const cloning = ref(false);
 const error = ref<string | null>(null);
 const inputRef = ref<HTMLInputElement>();
 
@@ -110,7 +110,7 @@ const displayCloneDestination = computed(() => {
 });
 
 const importDisabled = computed(() => {
-  if (cloning.value) return true;
+  if (props.cloning) return true;
   if (selectedLocalPath.value) return false;
   return parsed.value.type === "unknown";
 });
@@ -187,7 +187,6 @@ function handleSubmit() {
     if (selectedLocalPath.value) {
       emit("import", selectedLocalPath.value, localRepoName.value, localBranch.value);
     } else if (parsed.value.type === "clone" && parsed.value.cloneUrl) {
-      cloning.value = true;
       emit("clone", parsed.value.cloneUrl, cloneDestination.value);
     }
   }

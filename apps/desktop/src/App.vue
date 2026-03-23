@@ -413,13 +413,18 @@ async function handleImportRepo(path: string, name: string, defaultBranch: strin
   showAddRepoModal.value = false;
 }
 
+const cloningRepo = ref(false);
+
 async function handleCloneRepo(url: string, destination: string) {
+  cloningRepo.value = true;
   try {
     await store.cloneAndImportRepo(url, destination);
     showAddRepoModal.value = false;
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
     toast.error(`Clone failed: ${msg}`);
+  } finally {
+    cloningRepo.value = false;
   }
 }
 
@@ -490,6 +495,7 @@ onMounted(async () => {
     <AddRepoModal
       v-if="showAddRepoModal"
       :initial-tab="addRepoInitialTab"
+      :cloning="cloningRepo"
       @create="handleCreateRepo"
       @import="handleImportRepo"
       @clone="handleCloneRepo"
