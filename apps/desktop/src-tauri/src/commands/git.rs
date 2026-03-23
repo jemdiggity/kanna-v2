@@ -303,6 +303,19 @@ pub fn git_worktree_add(
         "[build]\ntarget-dir = \".build\"\n",
     );
 
+    // APFS-clone the main repo's Rust build cache into the worktree so the first
+    // build is incremental (~seconds) instead of a full recompile (~minutes).
+    // `cp -c` uses copy-on-write clonefile(2) — nearly instant and space-efficient.
+    let main_build = std::path::Path::new(&repo_path).join(".build");
+    if main_build.is_dir() {
+        let wt_build = std::path::Path::new(&path).join(".build");
+        let _ = Command::new("cp")
+            .args(["-c", "-R"])
+            .arg(&main_build)
+            .arg(&wt_build)
+            .output();
+    }
+
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
