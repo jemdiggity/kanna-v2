@@ -1,0 +1,407 @@
+<script setup lang="ts">
+import { ref, computed, onMounted, onUnmounted, nextTick, watch } from "vue";
+import { useVirtualList } from "@vueuse/core";
+import { useTreeExplorer, type TreeNode } from "../composables/useTreeExplorer";
+
+const props = defineProps<{
+  worktreePath: string;
+  repoRoot: string;
+}>();
+
+const emit = defineEmits<{
+  (e: "close"): void;
+  (e: "open-file", filePath: string): void;
+}>();
+
+const modalRef = ref<HTMLElement | null>(null);
+
+const {
+  state,
+  filterText,
+  loading,
+  slideDirection,
+  open,
+  handleKey,
+  currentFilePath,
+  jumpToBreadcrumb,
+  reset,
+} = useTreeExplorer(
+  () => props.worktreePath,
+  () => props.repoRoot
+);
+
+// Virtual lists for each column
+const parentSource = computed(() => state.value.columns[0] ?? []);
+const currentSource = computed(() => state.value.columns[1] ?? []);
+const previewSource = computed(() => state.value.columns[2] ?? []);
+
+const parentList = useVirtualList(parentSource, { itemHeight: 28 });
+const currentList = useVirtualList(currentSource, { itemHeight: 28 });
+const previewList = useVirtualList(previewSource, { itemHeight: 28 });
+
+async function onKeydown(e: KeyboardEvent) {
+  if (e.key === "Escape" && !filterText.value) {
+    e.preventDefault();
+    emit("close");
+    return;
+  }
+
+  if (e.key === "y" && !e.metaKey && !e.ctrlKey) {
+    const path = currentFilePath();
+    if (path) {
+      e.preventDefault();
+      await navigator.clipboard.writeText(path);
+      return;
+    }
+  }
+
+  const filePath = await handleKey(e);
+  if (filePath) {
+    emit("open-file", filePath);
+  }
+}
+
+onMounted(async () => {
+  await open();
+  await nextTick();
+  modalRef.value?.focus();
+});
+
+onUnmounted(() => {
+  reset();
+});
+
+// Scroll active item into view when cursor changes
+watch(
+  () => state.value.cursor[1],
+  () => {
+    currentList.scrollTo(state.value.cursor[1]);
+  }
+);
+
+function isInPath(entry: TreeNode, column: number): boolean {
+  if (column === 0) {
+    const bc = state.value.breadcrumb;
+    return bc.length > 0 && entry.name === bc[bc.length - 1];
+  }
+  return false;
+}
+
+function isDimmed(entry: TreeNode): boolean {
+  if (!filterText.value) return false;
+  return !entry.name.toLowerCase().includes(filterText.value.toLowerCase());
+}
+</script>
+
+<template>
+  <div class="modal-overlay" @click.self="emit('close')">
+    <div
+      ref="modalRef"
+      class="tree-modal"
+      tabindex="-1"
+      @keydown="onKeydown"
+    >
+      <!-- Breadcrumb bar -->
+      <div class="breadcrumb-bar">
+        <span
+          class="breadcrumb-segment breadcrumb-root"
+          @click="jumpToBreadcrumb(0)"
+        >~</span>
+        <template v-for="(seg, i) in state.breadcrumb" :key="i">
+          <span class="breadcrumb-sep">/</span>
+          <span
+            class="breadcrumb-segment"
+            @click="jumpToBreadcrumb(i + 1)"
+          >{{ seg }}</span>
+        </template>
+        <span class="breadcrumb-sep">/</span>
+      </div>
+
+      <!-- Miller columns -->
+      <div
+        class="miller-columns"
+        :class="{
+          'slide-left': slideDirection === 'left',
+          'slide-right': slideDirection === 'right',
+        }"
+      >
+        <!-- Parent column -->
+        <div class="miller-col col-parent">
+          <div
+            v-bind="parentList.containerProps"
+            class="col-scroll"
+          >
+            <div v-bind="parentList.wrapperProps">
+              <div
+                v-for="{ data: entry } in parentList.list.value"
+                :key="entry.path"
+                class="tree-item"
+                :class="{
+                  active: isInPath(entry, 0),
+                }"
+              >
+                <span v-if="entry.isDir" class="dir-arrow">{{ isInPath(entry, 0) ? '&#x25BE;' : '&#x25B8;' }}</span>
+                <span class="entry-name">{{ entry.name }}{{ entry.isDir ? '/' : '' }}</span>
+              </div>
+            </div>
+          </div>
+          <div v-if="state.columns[0].length === 0" class="col-empty">(root)</div>
+        </div>
+
+        <!-- Current column (active) -->
+        <div class="miller-col col-current">
+          <div
+            v-bind="currentList.containerProps"
+            class="col-scroll"
+          >
+            <div v-bind="currentList.wrapperProps">
+              <div
+                v-for="{ data: entry, index } in currentList.list.value"
+                :key="entry.path"
+                class="tree-item"
+                :class="{
+                  cursor: index === state.cursor[1],
+                  dimmed: isDimmed(entry),
+                }"
+              >
+                <span v-if="entry.isDir" class="dir-arrow">&#x25B8;</span>
+                <span class="entry-name">{{ entry.name }}{{ entry.isDir ? '/' : '' }}</span>
+              </div>
+            </div>
+          </div>
+          <div v-if="loading" class="col-loading">&middot;&middot;&middot;</div>
+          <div v-else-if="state.columns[1].length === 0" class="col-empty">(empty)</div>
+        </div>
+
+        <!-- Preview column -->
+        <div class="miller-col col-preview">
+          <div
+            v-bind="previewList.containerProps"
+            class="col-scroll"
+          >
+            <div v-bind="previewList.wrapperProps">
+              <div
+                v-for="{ data: entry, index } in previewList.list.value"
+                :key="entry.path"
+                class="tree-item"
+                :class="{
+                  cursor: index === state.cursor[2],
+                }"
+              >
+                <span v-if="entry.isDir" class="dir-arrow">&#x25B8;</span>
+                <span class="entry-name">{{ entry.name }}{{ entry.isDir ? '/' : '' }}</span>
+              </div>
+            </div>
+          </div>
+          <div v-if="state.columns[2].length === 0 && !loading" class="col-empty">
+            {{ state.columns[1].length > 0 ? '(no preview)' : '' }}
+          </div>
+        </div>
+      </div>
+
+      <!-- Filter bar -->
+      <div class="filter-bar">
+        <span v-if="filterText" class="filter-text">
+          filter: <strong>{{ filterText }}</strong>
+          <span class="filter-hint">(Esc to clear)</span>
+        </span>
+        <span v-else class="filter-hint">type to filter &middot; Esc to close</span>
+      </div>
+    </div>
+  </div>
+</template>
+
+<style scoped>
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 10vh;
+  z-index: 1000;
+}
+
+.tree-modal {
+  width: 780px;
+  max-height: 60vh;
+  background: #1e1e1e;
+  border-radius: 10px;
+  border: 1px solid #333;
+  display: flex;
+  flex-direction: column;
+  outline: none;
+  overflow: hidden;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+
+/* Breadcrumb */
+.breadcrumb-bar {
+  padding: 10px 14px;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 12px;
+  color: #888;
+  border-bottom: 1px solid #333;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.breadcrumb-segment {
+  color: #ccc;
+  cursor: pointer;
+}
+
+.breadcrumb-segment:hover {
+  color: #ffcc00;
+}
+
+.breadcrumb-root {
+  color: #888;
+}
+
+.breadcrumb-sep {
+  margin: 0 2px;
+  color: #555;
+}
+
+/* Miller columns */
+.miller-columns {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.miller-columns.slide-left {
+  animation: slide-left 180ms cubic-bezier(0, 0, .2, 1);
+}
+
+.miller-columns.slide-right {
+  animation: slide-right 180ms cubic-bezier(0, 0, .2, 1);
+}
+
+@keyframes slide-left {
+  from { transform: translateX(33.33%); }
+  to { transform: translateX(0); }
+}
+
+@keyframes slide-right {
+  from { transform: translateX(-33.33%); }
+  to { transform: translateX(0); }
+}
+
+.miller-col {
+  flex: 1;
+  min-width: 0;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+
+.miller-col + .miller-col {
+  border-left: 1px solid #333;
+}
+
+.col-current {
+  border-left: 2px solid #0066cc !important;
+}
+
+.col-scroll {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+/* Tree items */
+.tree-item {
+  height: 28px;
+  display: flex;
+  align-items: center;
+  padding: 0 10px;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 12px;
+  color: #888;
+  cursor: default;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tree-item:hover {
+  background: #333;
+}
+
+.tree-item.cursor {
+  background: #0066cc44;
+  border-left: 2px solid #ffcc00;
+  padding-left: 8px;
+  color: #fff;
+}
+
+.tree-item.active {
+  color: #0066cc;
+}
+
+.tree-item.dimmed {
+  opacity: 0.3;
+}
+
+.dir-arrow {
+  width: 14px;
+  flex-shrink: 0;
+  color: #ffcc00;
+  font-size: 10px;
+}
+
+.entry-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Empty / loading states */
+.col-empty,
+.col-loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #555;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 12px;
+  pointer-events: none;
+}
+
+.col-loading {
+  animation: pulse 1s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 0.3; }
+  50% { opacity: 1; }
+}
+
+/* Filter bar */
+.filter-bar {
+  padding: 8px 14px;
+  border-top: 1px solid #333;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 11px;
+  color: #888;
+}
+
+.filter-text {
+  color: #ccc;
+}
+
+.filter-text strong {
+  color: #ffcc00;
+}
+
+.filter-hint {
+  color: #555;
+  margin-left: 4px;
+}
+</style>
