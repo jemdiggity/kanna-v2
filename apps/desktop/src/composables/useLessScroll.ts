@@ -51,30 +51,33 @@ export function useLessScroll(
     }
 
     // Scroll bindings
+    const smooth = (top: number) =>
+      el.scrollTo({ top, behavior: "smooth" });
+
     let handled = true;
     if ((e.key === "j" && noMods(e)) || (e.key === "ArrowDown" && noMods(e))) {
-      el.scrollTop += LINE;
+      smooth(el.scrollTop + LINE);
     } else if ((e.key === "k" && noMods(e)) || (e.key === "ArrowUp" && noMods(e))) {
-      el.scrollTop -= LINE;
+      smooth(el.scrollTop - LINE);
     } else if (
       (e.key === "f" && noMods(e)) ||
       (e.key === " " && noMods(e)) ||
       (e.key === "PageDown" && noMods(e))
     ) {
-      el.scrollTop += page;
+      smooth(el.scrollTop + page);
     } else if (
       (e.key === "b" && noMods(e)) ||
       (e.key === "PageUp" && noMods(e))
     ) {
-      el.scrollTop -= page;
+      smooth(el.scrollTop - page);
     } else if (e.key === "d" && noMods(e)) {
-      el.scrollTop += half;
+      smooth(el.scrollTop + half);
     } else if (e.key === "u" && noMods(e)) {
-      el.scrollTop -= half;
+      smooth(el.scrollTop - half);
     } else if (e.key === "g" && noMods(e)) {
-      el.scrollTop = 0;
+      smooth(0);
     } else if (e.key === "G" && e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
-      el.scrollTop = el.scrollHeight;
+      smooth(el.scrollHeight);
     } else {
       handled = false;
     }
