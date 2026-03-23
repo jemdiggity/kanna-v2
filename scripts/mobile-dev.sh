@@ -45,7 +45,9 @@ RELAY_PORT="$(read_port KANNA_RELAY_PORT 9080)"
 MOBILE_PORT="$(read_port KANNA_MOBILE_PORT 1421)"
 
 # DB path — same as what the desktop Tauri app uses
-DB_PATH="$HOME/Library/Application Support/com.kanna.app/kanna-v2.db"
+# Use the worktree's DB, matching the logic in stores/db.ts
+WT_NAME="$(basename "$ROOT")"
+DB_PATH="$HOME/Library/Application Support/com.kanna.app/kanna-wt-${WT_NAME}.db"
 
 generate_server_config() {
   mkdir -p "$CONFIG_DIR"
