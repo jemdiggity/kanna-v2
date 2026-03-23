@@ -372,6 +372,7 @@ pub fn run() {
             commands::git::git_default_branch,
             commands::git::git_remote_url,
             commands::git::git_push,
+            commands::git::git_fetch,
             commands::git::git_worktree_add,
             commands::git::git_worktree_remove,
             commands::git::git_app_info,
