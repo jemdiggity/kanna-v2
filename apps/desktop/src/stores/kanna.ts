@@ -413,7 +413,16 @@ export const useKannaStore = defineStore("kanna", () => {
     const escapedPrompt = prompt.replace(/'/g, "'\\''");
     const claudeCmd = `claude ${flags.join(" ")} --settings '${hookSettings}' '${escapedPrompt}'`;
     const allSetupCmds = [...setupCmds, ...(options?.setupCmdsOverride || [])];
-    const fullCmd = [...allSetupCmds, claudeCmd].join(" && ");
+    let fullCmd: string;
+    if (allSetupCmds.length > 0) {
+      const setupParts = allSetupCmds.map((cmd) => {
+        const escaped = cmd.replace(/'/g, "'\\''");
+        return `printf '\\033[2m$ %s\\033[0m\\n' '${escaped}' && ${cmd}`;
+      });
+      fullCmd = `printf '\\033[33mRunning startup...\\033[0m\\n' && ${setupParts.join(" && ")} && printf '\\n' && ${claudeCmd}`;
+    } else {
+      fullCmd = claudeCmd;
+    }
 
     await invoke("spawn_session", {
       sessionId,
@@ -539,7 +548,7 @@ export const useKannaStore = defineStore("kanna", () => {
         const escaped = cmd.replace(/'/g, "'\\''");
         return `printf '\\033[2m$ %s\\033[0m\\n' '${escaped}' && ${cmd}`;
       });
-      const fullCmd = `printf '\\033[33mRunning teardown...\\033[0m\\n' && ${scriptParts.join(" && ")}`;
+      const fullCmd = `printf '\\033[33mRunning teardown...\\033[0m\\n' && ${scriptParts.join(" && ")} && printf '\\n'`;
       const tdSessionId = `td-${item.id}`;
       await invoke("spawn_session", {
         sessionId: tdSessionId,
