@@ -1,9 +1,9 @@
 {
   "planPath": "docs/superpowers/plans/2026-03-24-shortcut-menu-toggle.md",
   "tasks": [
-    {"id": 10, "subject": "Task 1: Add update:full-mode emit to KeyboardShortcutsModal", "status": "pending"},
-    {"id": 11, "subject": "Task 2: Update App.vue shortcut handlers and template", "status": "pending", "blockedBy": [10]},
-    {"id": 12, "subject": "Task 3: Manual smoke test", "status": "pending", "blockedBy": [11]}
+    {"id": 10, "subject": "Task 1: Add update:full-mode emit to KeyboardShortcutsModal", "status": "completed"},
+    {"id": 11, "subject": "Task 2: Update App.vue shortcut handlers and template", "status": "completed", "blockedBy": [10]},
+    {"id": 12, "subject": "Task 3: Manual smoke test", "status": "in_progress", "blockedBy": [11]}
   ],
   "lastUpdated": "2026-03-24T00:00:00Z"
 }
