@@ -26,11 +26,20 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
   let unlistenOutput: (() => void) | null = null
   let unlistenExit: (() => void) | null = null
 
+  function handleLinkActivate(_event: MouseEvent, uri: string) {
+    if (isTauri) {
+      openUrl(uri).catch((e) => console.error("[terminal] Failed to open URL:", e))
+    } else {
+      window.open(uri, "_blank")
+    }
+  }
+
   function init(container: HTMLElement) {
     const term = new Terminal({
       fontFamily: '"JetBrains Mono", "SF Mono", Menlo, monospace',
       fontSize: 13,
       lineHeight: 1,
+      linkHandler: { activate: handleLinkActivate },
       theme: {
         background: "#1e1e1e",
         foreground: "#cccccc",
@@ -58,13 +67,7 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
       ...(options?.kittyKeyboard ? { vtExtensions: { kittyKeyboard: true } } : {}),
     })
     term.loadAddon(fitAddon)
-    term.loadAddon(new WebLinksAddon((_event, uri) => {
-      if (isTauri) {
-        openUrl(uri).catch((e) => console.error("[terminal] Failed to open URL:", e))
-      } else {
-        window.open(uri, "_blank")
-      }
-    }))
+    term.loadAddon(new WebLinksAddon(handleLinkActivate))
     try {
       term.loadAddon(new WebglAddon())
     } catch (e) {
