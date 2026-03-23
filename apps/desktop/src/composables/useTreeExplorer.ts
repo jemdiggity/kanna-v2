@@ -248,27 +248,72 @@ export function useTreeExplorer(rootPath: () => string, repoRoot: () => string) 
     }, 50);
   }
 
+  function isVisible(entry: TreeNode): boolean {
+    if (!filterText.value) return true;
+    return entry.name.toLowerCase().includes(filterText.value.toLowerCase());
+  }
+
+  function snapCursorToFirstVisible() {
+    const col = state.value.columns[1];
+    if (!col?.length) return;
+    const idx = col.findIndex((e) => isVisible(e));
+    if (idx >= 0) {
+      state.value.cursor[1] = idx;
+      updatePreview(col[idx]);
+    }
+  }
+
   function moveCursor(delta: number) {
     const col = state.value.columns[1];
     if (!col?.length) return;
-    const newIdx = Math.max(0, Math.min(col.length - 1, state.value.cursor[1] + delta));
-    state.value.cursor[1] = newIdx;
 
-    // Debounced preview update — cursor moves instantly, preview waits for pause
-    updatePreview(col[newIdx]);
+    const current = state.value.cursor[1];
+    let next = current;
+
+    if (filterText.value) {
+      // Skip dimmed entries — find next visible item in the given direction
+      const step = delta > 0 ? 1 : -1;
+      let candidate = current + step;
+      while (candidate >= 0 && candidate < col.length) {
+        if (isVisible(col[candidate])) {
+          next = candidate;
+          break;
+        }
+        candidate += step;
+      }
+    } else {
+      next = Math.max(0, Math.min(col.length - 1, current + delta));
+    }
+
+    state.value.cursor[1] = next;
+    updatePreview(col[next]);
   }
 
   function jumpTop() {
-    state.value.cursor[1] = 0;
-    // Trigger preview update
-    moveCursor(0);
+    const col = state.value.columns[1];
+    if (!col?.length) return;
+    // Find first visible item
+    const idx = filterText.value
+      ? col.findIndex((e) => isVisible(e))
+      : 0;
+    if (idx >= 0) {
+      state.value.cursor[1] = idx;
+      updatePreview(col[idx]);
+    }
   }
 
   function jumpBottom() {
     const col = state.value.columns[1];
     if (!col?.length) return;
-    state.value.cursor[1] = col.length - 1;
-    moveCursor(0);
+    // Find last visible item
+    let idx = col.length - 1;
+    if (filterText.value) {
+      for (let i = col.length - 1; i >= 0; i--) {
+        if (isVisible(col[i])) { idx = i; break; }
+      }
+    }
+    state.value.cursor[1] = idx;
+    updatePreview(col[idx]);
   }
 
   async function jumpToBreadcrumb(index: number) {
@@ -305,15 +350,17 @@ export function useTreeExplorer(rootPath: () => string, repoRoot: () => string) 
         e.preventDefault();
         if (filterText.value.length > 0) {
           filterText.value = filterText.value.slice(0, -1);
+          snapCursorToFirstVisible();
         } else {
           filtering.value = false;
         }
         return null;
       }
-      // Printable characters append to filter
+      // Printable characters append to filter and snap cursor to first match
       if (e.key.length === 1 && !e.metaKey && !e.ctrlKey && !e.altKey) {
         e.preventDefault();
         filterText.value += e.key;
+        snapCursorToFirstVisible();
         return null;
       }
       return null;
