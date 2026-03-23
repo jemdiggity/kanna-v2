@@ -16,8 +16,10 @@ const contentRef = ref<HTMLElement | null>(null);
 const modalRef = ref<HTMLElement | null>(null);
 
 useShortcutContext("file");
+const showLineNumbers = ref(false);
 registerContextShortcuts("file", [
   { label: "Open in IDE", display: "⌘O" },
+  { label: "Toggle Line Numbers", display: "l" },
   ...(props.filePath.toLowerCase().endsWith(".md")
     ? [{ label: "Toggle Markdown", display: "m" }]
     : []),
@@ -37,6 +39,11 @@ const renderMarkdown = ref(false);
 const isMarkdownFile = computed(() =>
   props.filePath.toLowerCase().endsWith(".md")
 );
+
+const lineCount = computed(() => {
+  if (!content.value) return 0;
+  return content.value.split('\n').length;
+});
 
 // Lazy-load shiki to avoid blocking startup
 let highlighter: any = null;
@@ -175,6 +182,18 @@ useLessScroll(contentRef, {
       openInIDE();
       return true;
     }
+    // l — toggle line numbers
+    if (
+      e.key === "l" &&
+      !e.metaKey &&
+      !e.ctrlKey &&
+      !e.altKey &&
+      !e.shiftKey
+    ) {
+      e.preventDefault();
+      showLineNumbers.value = !showLineNumbers.value;
+      return true;
+    }
     // m — toggle markdown rendering
     if (
       e.key === "m" &&
@@ -217,9 +236,18 @@ onMounted(() => {
         v-else
         ref="contentRef"
         class="preview-content"
-        :class="{ 'markdown-rendered': renderMarkdown && isMarkdownFile }"
-        v-html="renderMarkdown && isMarkdownFile ? renderedMarkdown : highlighted"
-      ></div>
+        :class="{ 'markdown-rendered': renderMarkdown && isMarkdownFile, 'with-line-numbers': showLineNumbers && !renderMarkdown }"
+      >
+        <template v-if="showLineNumbers && !renderMarkdown">
+          <div class="line-numbers-gutter">
+            <div v-for="i in lineCount" :key="i" class="line-number">{{ i }}</div>
+          </div>
+          <div class="code-column" v-html="highlighted"></div>
+        </template>
+        <template v-else>
+          <div v-html="renderMarkdown && isMarkdownFile ? renderedMarkdown : highlighted"></div>
+        </template>
+      </div>
     </div>
   </div>
 </template>
@@ -486,5 +514,43 @@ onMounted(() => {
 .preview-content:not(.markdown-rendered) :deep(code) {
   font-family: "SF Mono", Menlo, monospace;
   font-size: 13px;
+}
+
+/* Line numbers grid layout */
+.preview-content.with-line-numbers {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0;
+}
+
+.line-numbers-gutter {
+  display: flex;
+  flex-direction: column;
+  background: #0f0f0f;
+  border-right: 1px solid #333;
+  padding: 12px 8px;
+  user-select: none;
+  line-height: 1.5;
+}
+
+.line-number {
+  font-family: "SF Mono", Menlo, monospace;
+  font-size: 13px;
+  color: #555;
+  text-align: right;
+  min-width: 2em;
+  padding-right: 8px;
+  height: 1.5em;
+}
+
+.code-column {
+  overflow-x: auto;
+}
+
+.preview-content.with-line-numbers :deep(pre) {
+  margin: 0;
+  padding: 12px 16px;
+  background: #1a1a1a !important;
+  min-height: 100%;
 }
 </style>
