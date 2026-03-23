@@ -1,14 +1,10 @@
-import { ref, computed, shallowRef } from "vue";
+import { ref, shallowRef } from "vue";
 import { invoke } from "../invoke";
 
 export interface TreeNode {
   name: string;
   isDir: boolean;
   path: string;
-}
-
-export interface DisplayTreeNode extends TreeNode {
-  dimmed: boolean;
 }
 
 interface DirEntryResponse {
@@ -60,9 +56,10 @@ export function useTreeExplorer(rootPath: () => string, repoRoot: () => string) 
     });
 
     const nodes: TreeNode[] = entries.map((e) => {
-      const rel = dirPath === repoRoot()
+      const root = rootPath();
+      const rel = dirPath === root
         ? e.name
-        : dirPath.replace(repoRoot() + "/", "") + "/" + e.name;
+        : dirPath.slice(root.length + 1) + "/" + e.name;
       return { name: e.name, isDir: e.is_dir, path: rel };
     });
 
@@ -71,13 +68,13 @@ export function useTreeExplorer(rootPath: () => string, repoRoot: () => string) 
   }
 
   function absolutePath(relativePath: string): string {
-    return relativePath ? `${repoRoot()}/${relativePath}` : repoRoot();
+    return relativePath ? `${rootPath()}/${relativePath}` : rootPath();
   }
 
   function breadcrumbToAbsolute(segments: string[]): string {
     return segments.length === 0
-      ? repoRoot()
-      : `${repoRoot()}/${segments.join("/")}`;
+      ? rootPath()
+      : `${rootPath()}/${segments.join("/")}`;
   }
 
   async function prefetch(node: TreeNode) {
@@ -90,25 +87,11 @@ export function useTreeExplorer(rootPath: () => string, repoRoot: () => string) 
     }
   }
 
-  // Filtered entries for the active column
-  const filteredColumn = computed<DisplayTreeNode[]>(() => {
-    const col = state.value.activeColumn;
-    const entries = state.value.columns[col] ?? [];
-    if (!filterText.value) {
-      return entries.map((entry) => ({ ...entry, dimmed: false }));
-    }
-    const lower = filterText.value.toLowerCase();
-    return entries.map((entry) => ({
-      ...entry,
-      dimmed: !entry.name.toLowerCase().includes(lower),
-    }));
-  });
-
   async function open(initialPath?: string) {
     const startPath = initialPath ?? rootPath();
-    const bc = startPath === repoRoot()
+    const bc = startPath === rootPath()
       ? []
-      : startPath.replace(repoRoot() + "/", "").split("/");
+      : startPath.replace(rootPath() + "/", "").split("/");
 
     state.value.breadcrumb = bc;
     loading.value = true;
@@ -271,7 +254,7 @@ export function useTreeExplorer(rootPath: () => string, repoRoot: () => string) 
   async function jumpToBreadcrumb(index: number) {
     const newBc = state.value.breadcrumb.slice(0, index);
     // Re-open at that level
-    const targetPath = newBc.length === 0 ? repoRoot() : `${repoRoot()}/${newBc.join("/")}`;
+    const targetPath = newBc.length === 0 ? rootPath() : `${rootPath()}/${newBc.join("/")}`;
     await open(targetPath);
   }
 
@@ -343,6 +326,12 @@ export function useTreeExplorer(rootPath: () => string, repoRoot: () => string) 
         e.preventDefault();
         // Focus filter — handled by component
         return null;
+      case "Backspace":
+        e.preventDefault();
+        if (filterText.value.length > 0) {
+          filterText.value = filterText.value.slice(0, -1);
+        }
+        return null;
       default:
         // Type-to-filter: printable characters
         if (e.key.length === 1 && !e.metaKey && !e.ctrlKey && !e.altKey) {
@@ -377,7 +366,6 @@ export function useTreeExplorer(rootPath: () => string, repoRoot: () => string) 
     filterText,
     loading,
     slideDirection,
-    filteredColumn,
     open,
     handleKey,
     currentFilePath,

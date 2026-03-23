@@ -116,8 +116,8 @@ pub fn read_dir_entries(path: String, repo_root: String) -> Result<Vec<DirEntry>
         .build()
         .map_err(|e| format!("gitignore error: {}", e))?;
 
-    let read = std::fs::read_dir(dir)
-        .map_err(|e| format!("failed to read dir '{}': {}", path, e))?;
+    let read =
+        std::fs::read_dir(dir).map_err(|e| format!("failed to read dir '{}': {}", path, e))?;
 
     let mut entries: Vec<DirEntry> = Vec::new();
 

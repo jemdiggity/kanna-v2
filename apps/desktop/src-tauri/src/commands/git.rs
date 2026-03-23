@@ -264,7 +264,12 @@ pub fn git_worktree_add(
 ) -> Result<String, String> {
     // Check if the branch already exists — if so, use it directly instead of -b
     let branch_exists = Command::new("git")
-        .args(["show-ref", "--verify", "--quiet", &format!("refs/heads/{}", branch)])
+        .args([
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{}", branch),
+        ])
         .current_dir(&repo_path)
         .status()
         .map(|s| s.success())

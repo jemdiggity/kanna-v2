@@ -307,6 +307,7 @@ const keyboardActions = {
     if (showFilePickerModal.value) { showFilePickerModal.value = false; focusAgentTerminal(); return; }
     if (showDiffModal.value) { showDiffModal.value = false; maximized.value = false; focusAgentTerminal(); return; }
     if (showAnalyticsModal.value) { showAnalyticsModal.value = false; focusAgentTerminal(); return; }
+    if (showTreeExplorer.value) { showTreeExplorer.value = false; focusAgentTerminal(); return; }
     if (showShellModal.value) { return; }
     if (showNewTaskModal.value) { showNewTaskModal.value = false; focusAgentTerminal(); return; }
     if (showAddRepoModal.value) { showAddRepoModal.value = false; focusAgentTerminal(); return; }
