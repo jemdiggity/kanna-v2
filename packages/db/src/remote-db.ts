@@ -15,14 +15,14 @@ export function createRemoteDbHandle(
     ): Promise<{ rowsAffected: number }> {
       const result = await invoke("db_execute", {
         query,
-        bind_values: bindValues ?? [],
+        bindValues: bindValues ?? [],
       });
       return result as { rowsAffected: number };
     },
     async select<T>(query: string, bindValues?: unknown[]): Promise<T[]> {
       const result = await invoke("db_select", {
         query,
-        bind_values: bindValues ?? [],
+        bindValues: bindValues ?? [],
       });
       return result as T[];
     },
