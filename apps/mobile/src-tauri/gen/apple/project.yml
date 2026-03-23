@@ -12,6 +12,7 @@ settingGroups:
     base:
       PRODUCT_NAME: Kanna Mobile
       PRODUCT_BUNDLE_IDENTIFIER: com.kanna.mobile
+      DEVELOPMENT_TEAM: EA4J68749Z
 targetTemplates:
   app:
     type: application
@@ -80,6 +81,7 @@ targets:
       - sdk: UIKit.framework
       - sdk: WebKit.framework
     preBuildScripts:
+          export PATH="$HOME/.nvm/versions/node/v24.13.0/bin:$HOME/.bun/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
       - script: bun tauri ios xcode-script -v --platform ${PLATFORM_DISPLAY_NAME:?} --sdk-root ${SDKROOT:?} --framework-search-paths "${FRAMEWORK_SEARCH_PATHS:?}" --header-search-paths "${HEADER_SEARCH_PATHS:?}" --gcc-preprocessor-definitions "${GCC_PREPROCESSOR_DEFINITIONS:-}" --configuration ${CONFIGURATION:?} ${FORCE_COLOR} ${ARCHS:?}
         name: Build Rust Code
         basedOnDependencyAnalysis: false

@@ -1,32 +1,27 @@
 import { createApp } from "vue";
 import { createPinia } from "pinia";
-import App from "@desktop/App.vue";
 import type { DbHandle } from "@kanna/db";
 
-// Mark this as mobile build — used by shared components for conditional rendering
 declare global {
   const __KANNA_MOBILE__: boolean;
 }
 
-// Mobile uses a stub DB handle for now — relay not connected yet
-// All queries return empty results until relay is set up
+// Stub DB — all queries return empty results
 const db: DbHandle = {
-  async execute(_query: string, _bindValues?: unknown[]): Promise<{ rowsAffected: number }> {
+  async execute(): Promise<{ rowsAffected: number }> {
     return { rowsAffected: 0 };
   },
-  async select<T>(_query: string, _bindValues?: unknown[]): Promise<T[]> {
+  async select<T>(): Promise<T[]> {
     return [];
   },
 };
 
-try {
-  const app = createApp(App);
-  app.use(createPinia());
-  app.provide("db", db);
-  app.provide("dbName", "mobile");
-  app.mount("#app");
-} catch (e) {
-  console.error("[mobile] fatal:", e);
-  const el = document.getElementById("app");
-  if (el) el.textContent = `Failed to initialize: ${e}`;
-}
+// Import App from desktop — shared Vue components
+// __KANNA_MOBILE__ gates desktop-only features
+import App from "@desktop/App.vue";
+
+const app = createApp(App);
+app.use(createPinia());
+app.provide("db", db);
+app.provide("dbName", "mobile");
+app.mount("#app");

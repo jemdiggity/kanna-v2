@@ -4,13 +4,15 @@
   "version": "0.1.0",
   "identifier": "com.kanna.mobile",
   "build": {
+    "beforeDevCommand": "bunx vite --host 0.0.0.0",
+    "devUrl": "http://localhost:1421",
     "frontendDist": "../dist"
   },
   "app": {
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "Kanna",
+        "title": "Kanna Mobile",
         "width": 800,
         "height": 600
       }
