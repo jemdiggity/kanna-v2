@@ -223,17 +223,6 @@ export const useKannaStore = defineStore("kanna", () => {
     const effectiveAgentType = opts?.customTask?.executionMode ?? agentType;
     const displayName = opts?.customTask?.name ?? null;
 
-    // Read .kanna/config.json
-    let repoConfig: RepoConfig = {};
-    try {
-      const configContent = await invoke<string>("read_text_file", {
-        path: `${repoPath}/.kanna/config.json`,
-      });
-      if (configContent) repoConfig = parseRepoConfig(configContent);
-    } catch (e) {
-      console.debug("[store] no .kanna/config.json:", e);
-    }
-
     // Assign port offset
     const usedOffsets = new Set(
       items.value.map((i) => i.port_offset).filter((o): o is number => o != null)
@@ -241,46 +230,7 @@ export const useKannaStore = defineStore("kanna", () => {
     let portOffset = 1;
     while (usedOffsets.has(portOffset)) portOffset++;
 
-    // Create git worktree
-    const worktreeAddCwd = opts?.baseBranch
-      ? `${repoPath}/.kanna-worktrees/${opts.baseBranch}`
-      : repoPath;
-
-    // For new tasks (no baseBranch), fetch origin and branch from origin/{defaultBranch}
-    // so the worktree starts from the latest remote state, not a potentially stale local branch.
-    let startPoint: string | null = opts?.baseBranch ? "HEAD" : null;
-    if (!opts?.baseBranch) {
-      try {
-        const defaultBranch = await invoke<string>("git_default_branch", { repoPath });
-        await invoke("git_fetch", { repoPath, branch: defaultBranch });
-        startPoint = `origin/${defaultBranch}`;
-      } catch (e) {
-        console.debug("[store] fetch origin failed (offline?), using local HEAD:", e);
-      }
-    }
-
-    try {
-      await invoke("git_worktree_add", {
-        repoPath: worktreeAddCwd,
-        branch,
-        path: worktreePath,
-        startPoint,
-      });
-    } catch (e) {
-      console.error("[store] git_worktree_add failed:", e);
-      toast.error(tt('toasts.worktreeFailed'));
-      throw e;
-    }
-
-    // Compute port env
-    const portEnv: Record<string, string> = {};
-    if (repoConfig.ports) {
-      for (const [name, base] of Object.entries(repoConfig.ports)) {
-        portEnv[name] = String(base + portOffset);
-      }
-    }
-
-    // Insert DB record
+    // Insert DB record immediately so the UI updates without waiting on IO
     try {
       await insertPipelineItem(_db, {
         id,
@@ -294,7 +244,7 @@ export const useKannaStore = defineStore("kanna", () => {
         branch,
         agent_type: effectiveAgentType,
         port_offset: portOffset,
-        port_env: Object.keys(portEnv).length > 0 ? JSON.stringify(portEnv) : null,
+        port_env: null,
         activity: "working",
         display_name: displayName,
       });
@@ -306,23 +256,47 @@ export const useKannaStore = defineStore("kanna", () => {
 
     bump();
 
-    // Spawn agent
-    if (effectiveAgentType !== "pty") {
-      await invoke("create_agent_session", {
-        sessionId: id,
-        cwd: worktreePath,
-        prompt: effectivePrompt,
-        systemPrompt: null,
-        permissionMode: opts?.customTask?.permissionMode ?? null,
-        model: opts?.customTask?.model ?? null,
-        allowedTools: opts?.customTask?.allowedTools ?? null,
-        disallowedTools: opts?.customTask?.disallowedTools ?? null,
-        maxTurns: opts?.customTask?.maxTurns ?? null,
-        maxBudgetUsd: opts?.customTask?.maxBudgetUsd ?? null,
-      });
-    } else {
-      try {
-        await spawnPtySession(id, worktreePath, effectivePrompt, 80, 24, {
+    // Worktree creation, config read, and agent spawn run in the background.
+    // Selection is deferred until setup completes so the terminal mounts
+    // only after the session exists in the daemon.
+    setupWorktreeAndSpawn(id, repoPath, worktreePath, branch, portOffset, effectivePrompt, effectiveAgentType, opts);
+  }
+
+  /** Background IO for createItem: read config, create worktree, spawn agent, then select. */
+  async function setupWorktreeAndSpawn(
+    id: string, repoPath: string, worktreePath: string,
+    branch: string, portOffset: number, prompt: string,
+    agentType: "pty" | "sdk",
+    opts?: { baseBranch?: string; tags?: string[]; customTask?: CustomTaskConfig },
+  ) {
+    try {
+      const repoConfig = await readRepoConfig(repoPath);
+      const portEnv = computePortEnv(repoConfig, portOffset);
+
+      if (Object.keys(portEnv).length > 0) {
+        await _db.execute(
+          "UPDATE pipeline_item SET port_env = ? WHERE id = ?",
+          [JSON.stringify(portEnv), id],
+        );
+      }
+
+      await createWorktree(repoPath, branch, worktreePath, opts?.baseBranch);
+
+      if (agentType !== "pty") {
+        await invoke("create_agent_session", {
+          sessionId: id,
+          cwd: worktreePath,
+          prompt,
+          systemPrompt: null,
+          permissionMode: opts?.customTask?.permissionMode ?? null,
+          model: opts?.customTask?.model ?? null,
+          allowedTools: opts?.customTask?.allowedTools ?? null,
+          disallowedTools: opts?.customTask?.disallowedTools ?? null,
+          maxTurns: opts?.customTask?.maxTurns ?? null,
+          maxBudgetUsd: opts?.customTask?.maxBudgetUsd ?? null,
+        });
+      } else {
+        await spawnPtySession(id, worktreePath, prompt, 80, 24, {
           model: opts?.customTask?.model,
           permissionMode: opts?.customTask?.permissionMode,
           allowedTools: opts?.customTask?.allowedTools,
@@ -333,15 +307,64 @@ export const useKannaStore = defineStore("kanna", () => {
           portEnv,
           setupCmds: repoConfig.setup || [],
         });
+      }
+      // Select after setup so the terminal mounts with the session already alive
+      selectedItemId.value = id;
+      emitTaskSelected(id);
+    } catch (e) {
+      console.error("[store] task setup failed:", e);
+      toast.error(`${tt('toasts.agentStartFailed')}: ${e instanceof Error ? e.message : e}`);
+    }
+  }
+
+  async function readRepoConfig(repoPath: string): Promise<RepoConfig> {
+    try {
+      const content = await invoke<string>("read_text_file", {
+        path: `${repoPath}/.kanna/config.json`,
+      });
+      return content ? parseRepoConfig(content) : {};
+    } catch (e) {
+      console.debug("[store] no .kanna/config.json:", e);
+      return {};
+    }
+  }
+
+  function computePortEnv(repoConfig: RepoConfig, portOffset: number): Record<string, string> {
+    const portEnv: Record<string, string> = {};
+    if (repoConfig.ports) {
+      for (const [name, base] of Object.entries(repoConfig.ports)) {
+        portEnv[name] = String(base + portOffset);
+      }
+    }
+    return portEnv;
+  }
+
+  async function createWorktree(repoPath: string, branch: string, worktreePath: string, baseBranch?: string) {
+    const worktreeAddCwd = baseBranch
+      ? `${repoPath}/.kanna-worktrees/${baseBranch}`
+      : repoPath;
+
+    // For new tasks (no baseBranch), fetch origin and branch from origin/{defaultBranch}
+    // so the worktree starts from the latest remote state, not a potentially stale local branch.
+    let startPoint: string | null = baseBranch ? "HEAD" : null;
+    if (!baseBranch) {
+      try {
+        const defaultBranch = await invoke<string>("git_default_branch", { repoPath });
+        await invoke("git_fetch", { repoPath, branch: defaultBranch });
+        startPoint = `origin/${defaultBranch}`;
       } catch (e) {
-        console.warn("[store] PTY pre-spawn failed, will retry on mount:", e);
-        toast.error(`${tt('toasts.agentStartFailed')}: ${e instanceof Error ? e.message : e}`);
+        console.debug("[store] fetch origin failed (offline?), using local HEAD:", e);
       }
     }
 
-    selectedItemId.value = id;
-    emitTaskSelected(id);
+    await invoke("git_worktree_add", {
+      repoPath: worktreeAddCwd,
+      branch,
+      path: worktreePath,
+      startPoint,
+    });
   }
+
 
   async function spawnPtySession(sessionId: string, cwd: string, prompt: string, cols = 80, rows = 24, options?: PtySpawnOptions) {
     let kannaHookPath: string;

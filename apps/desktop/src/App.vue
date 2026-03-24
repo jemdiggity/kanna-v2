@@ -425,9 +425,9 @@ async function handleNewTaskSubmit(prompt: string) {
   }
   const repo = store.repos.find((r) => r.id === store.selectedRepoId);
   if (!repo) return;
+  showNewTaskModal.value = false;
   try {
     await store.createItem(store.selectedRepoId, repo.path, prompt);
-    showNewTaskModal.value = false;
   } catch (e: any) {
     console.error("Task creation failed:", e);
     toast.error(`${t('toasts.taskCreationFailed')}: ${e?.message || e}`);
