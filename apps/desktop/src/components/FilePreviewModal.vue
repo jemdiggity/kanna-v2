@@ -5,8 +5,10 @@ import { invoke } from "../invoke";
 import { useLessScroll } from "../composables/useLessScroll";
 import { useShortcutContext, registerContextShortcuts } from "../composables/useShortcutContext";
 import { useInlineSearch } from "../composables/useInlineSearch";
+import { useModalZIndex } from "../composables/useModalZIndex";
 
 const { t } = useI18n();
+const { zIndex } = useModalZIndex();
 
 const props = defineProps<{
   filePath: string;
@@ -287,7 +289,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="modal-overlay" @click.self="emit('close')">
+  <div class="modal-overlay" :style="{ zIndex }" @click.self="emit('close')">
     <div ref="modalRef" class="preview-modal" tabindex="-1">
       <div class="preview-header">
         <span class="file-path">{{ filePath }}</span>
@@ -344,7 +346,6 @@ onMounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 1000;
 }
 
 .preview-modal {

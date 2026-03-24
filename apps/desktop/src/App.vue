@@ -79,6 +79,8 @@ const diffScopes = new Map<string, "branch" | "commit" | "working">();
 const sidebarHidden = ref(false);
 const maximized = ref(false);
 const sidebarRef = ref<InstanceType<typeof Sidebar> | null>(null);
+const shellModalRef = ref<InstanceType<typeof ShellModal> | null>(null);
+const diffModalRef = ref<InstanceType<typeof DiffModal> | null>(null);
 
 // Navigation
 function selectItemAcrossRepos(itemId: string) {
@@ -338,14 +340,28 @@ const keyboardActions = {
     if (showShortcutsModal.value) { showShortcutsModal.value = false; return; }
     if (showFilePreviewModal.value) { showFilePreviewModal.value = false; return; }
     if (showFilePickerModal.value) { showFilePickerModal.value = false; return; }
+    // Shell before diff: Escape closes the topmost modal first
+    if (showShellModal.value) { return; }
     if (showDiffModal.value) { showDiffModal.value = false; maximized.value = false; return; }
     if (showAnalyticsModal.value) { showAnalyticsModal.value = false; return; }
     if (showTreeExplorer.value) { showTreeExplorer.value = false; return; }
-    if (showShellModal.value) { return; }
     if (showNewTaskModal.value) { showNewTaskModal.value = false; return; }
     if (showAddRepoModal.value) { showAddRepoModal.value = false; return; }
   },
-  openShell: () => { showShellModal.value = !showShellModal.value; },
+  openShell: () => {
+    if (!showShellModal.value) {
+      showShellModal.value = true;
+      return;
+    }
+    // Shell is open — check if it's the topmost modal
+    const shellZ = shellModalRef.value?.zIndex ?? 0;
+    const diffZ = showDiffModal.value ? (diffModalRef.value?.zIndex ?? 0) : 0;
+    if (shellZ >= diffZ) {
+      showShellModal.value = false;
+    } else {
+      shellModalRef.value?.bringToFront();
+    }
+  },
   showDiff: () => { showDiffModal.value = !showDiffModal.value; },
   showShortcuts: () => {
     if (showShortcutsModal.value) {
@@ -612,6 +628,7 @@ onMounted(async () => {
     />
     <KeepAlive :max="10">
       <ShellModal
+        ref="shellModalRef"
         v-if="showShellModal && store.currentItem"
         :key="`shell-${store.currentItem.id}`"
         :session-id="`shell-${store.currentItem.id}`"
@@ -622,6 +639,7 @@ onMounted(async () => {
       />
     </KeepAlive>
     <DiffModal
+      ref="diffModalRef"
       v-if="showDiffModal && store.selectedRepo?.path"
       :repo-path="store.selectedRepo.path"
       :worktree-path="store.currentItem?.branch ? activeWorktreePath : undefined"

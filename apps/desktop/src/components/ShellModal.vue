@@ -3,6 +3,7 @@ import { ref, onMounted, onActivated, onDeactivated, nextTick } from "vue";
 import { invoke } from "../invoke";
 import TerminalView from "./TerminalView.vue";
 import { useShortcutContext, setContext, resetContext } from "../composables/useShortcutContext";
+import { useModalZIndex } from "../composables/useModalZIndex";
 
 const props = defineProps<{
   sessionId: string;
@@ -15,6 +16,8 @@ const emit = defineEmits<{ (e: "close"): void }>();
 const termRef = ref<InstanceType<typeof TerminalView> | null>(null);
 
 useShortcutContext("shell");
+const { zIndex, bringToFront } = useModalZIndex();
+defineExpose({ zIndex, bringToFront });
 
 // KeepAlive: onUnmounted won't fire on hide, so manage context on activate/deactivate too
 onActivated(() => setContext("shell"));
@@ -54,7 +57,7 @@ async function spawnShell(sessionId: string, cwd: string, _prompt: string, cols:
 </script>
 
 <template>
-  <div class="modal-overlay" :class="{ maximized }" @click.self="emit('close')">
+  <div class="modal-overlay" :class="{ maximized }" :style="{ zIndex }" @click.self="emit('close')">
     <div class="shell-modal">
       <TerminalView
         ref="termRef"
@@ -74,7 +77,6 @@ async function spawnShell(sessionId: string, cwd: string, _prompt: string, cols:
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 1000;
 }
 
 .shell-modal {

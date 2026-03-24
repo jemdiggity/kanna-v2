@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { useI18n } from 'vue-i18n'
+import { useModalZIndex } from '../composables/useModalZIndex'
 
 useI18n()
+const { zIndex } = useModalZIndex()
 
 defineProps<{
   preferences: {
@@ -26,7 +28,7 @@ function handleKeydown(e: KeyboardEvent) {
 </script>
 
 <template>
-  <div class="modal-overlay" @click.self="emit('close')" @keydown="handleKeydown">
+  <div class="modal-overlay" :style="{ zIndex }" @click.self="emit('close')" @keydown="handleKeydown">
     <div class="prefs-panel">
       <div class="prefs-header">
         <h3>{{ $t('preferences.title') }}</h3>
@@ -91,7 +93,6 @@ function handleKeydown(e: KeyboardEvent) {
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 1000;
 }
 
 .prefs-panel {

@@ -5,8 +5,10 @@ import { open } from "../dialog";
 import { invoke } from "../invoke";
 import { parseRepoInput } from "../utils/parseRepoInput";
 import type { ParsedInput } from "../utils/parseRepoInput";
+import { useModalZIndex } from "../composables/useModalZIndex";
 
 const { t } = useI18n();
+const { zIndex } = useModalZIndex();
 
 const props = defineProps<{
   initialTab: "create" | "import";
@@ -230,7 +232,7 @@ function switchTab(tab: "create" | "import") {
 </script>
 
 <template>
-  <div class="modal-overlay" @click.self="emit('cancel')">
+  <div class="modal-overlay" :style="{ zIndex }" @click.self="emit('cancel')">
     <div class="modal">
       <div class="tabs">
         <button
@@ -348,7 +350,6 @@ function switchTab(tab: "create" | "import") {
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 1000;
 }
 
 .modal {

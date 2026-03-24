@@ -2,6 +2,7 @@
 import { ref, onMounted, onUnmounted, nextTick, watch, toRef } from "vue";
 import { useTreeExplorer, type TreeNode } from "../composables/useTreeExplorer";
 import { useShortcutContext, registerContextShortcuts } from "../composables/useShortcutContext";
+import { useModalZIndex } from "../composables/useModalZIndex";
 
 useShortcutContext("tree");
 registerContextShortcuts("tree", [
@@ -14,6 +15,8 @@ registerContextShortcuts("tree", [
   { label: "Clear filter", display: "Esc" },
   { label: "Close", display: "Esc" },
 ]);
+
+const { zIndex } = useModalZIndex();
 
 const props = defineProps<{
   worktreePath: string;
@@ -110,7 +113,7 @@ function isDimmed(entry: TreeNode): boolean {
 </script>
 
 <template>
-  <div v-show="!suspended" class="modal-overlay" @click.self="emit('close')">
+  <div v-show="!suspended" class="modal-overlay" :style="{ zIndex }" @click.self="emit('close')">
     <div
       ref="modalRef"
       class="tree-modal"
@@ -222,7 +225,6 @@ function isDimmed(entry: TreeNode): boolean {
   align-items: flex-start;
   justify-content: center;
   padding-top: 10vh;
-  z-index: 1000;
 }
 
 .tree-modal {

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, toRef, onMounted, nextTick } from "vue";
+import { useModalZIndex } from "../composables/useModalZIndex";
 import { useI18n } from "vue-i18n";
 import { Line } from "vue-chartjs";
 import {
@@ -17,6 +18,8 @@ import type { DbHandle } from "@kanna/db";
 import { useAnalytics } from "../composables/useAnalytics";
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend, Filler);
+
+const { zIndex } = useModalZIndex();
 
 const props = defineProps<{
   db: DbHandle | null;
@@ -89,7 +92,7 @@ const lineChartOptions = {
 </script>
 
 <template>
-  <div ref="overlayRef" class="modal-overlay" @click.self="emit('close')" @keydown="handleKeydown" tabindex="0">
+  <div ref="overlayRef" class="modal-overlay" :style="{ zIndex }" @click.self="emit('close')" @keydown="handleKeydown" tabindex="0">
     <div class="analytics-modal">
       <div class="modal-header">
         <h2>{{ viewNames[activeView] }}</h2>
@@ -237,7 +240,6 @@ const lineChartOptions = {
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 1000;
   outline: none;
 }
 

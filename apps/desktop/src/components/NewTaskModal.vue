@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from "vue";
+import { useModalZIndex } from "../composables/useModalZIndex";
+const { zIndex } = useModalZIndex();
 
 const emit = defineEmits<{
   (e: "submit", prompt: string): void;
@@ -33,7 +35,7 @@ function handleKeydown(e: KeyboardEvent) {
 </script>
 
 <template>
-  <div class="modal-overlay" @click.self="emit('cancel')">
+  <div class="modal-overlay" :style="{ zIndex }" @click.self="emit('cancel')">
     <div class="modal">
       <div class="modal-header">
         <h3>{{ $t('tasks.newTask') }}</h3>
@@ -77,7 +79,6 @@ function handleKeydown(e: KeyboardEvent) {
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 1000;
 }
 
 .modal {

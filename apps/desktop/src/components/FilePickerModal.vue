@@ -2,6 +2,8 @@
 import { ref, computed, watch, onMounted, nextTick } from "vue";
 import { invoke } from "../invoke";
 import { fuzzyMatch, type FuzzyResult } from "../utils/fuzzyMatch";
+import { useModalZIndex } from "../composables/useModalZIndex";
+const { zIndex } = useModalZIndex();
 
 const props = defineProps<{
   worktreePath: string;
@@ -107,7 +109,7 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="modal-overlay" @click.self="emit('close')" @keydown="handleKeydown" @mousemove.once="mouseMoved = true">
+  <div class="modal-overlay" :style="{ zIndex }" @click.self="emit('close')" @keydown="handleKeydown" @mousemove.once="mouseMoved = true">
     <div class="picker-modal">
       <input
         ref="inputRef"
@@ -145,7 +147,6 @@ onMounted(async () => {
   align-items: flex-start;
   justify-content: center;
   padding-top: 15vh;
-  z-index: 1000;
 }
 .picker-modal {
   background: #252525;

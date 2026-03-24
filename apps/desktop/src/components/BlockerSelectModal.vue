@@ -3,8 +3,10 @@ import { ref, computed, watch, onMounted, nextTick } from "vue";
 import { useI18n } from "vue-i18n";
 import type { PipelineItem } from "@kanna/db";
 import { hasTag } from "@kanna/core";
+import { useModalZIndex } from "../composables/useModalZIndex";
 
 const { t } = useI18n();
+const { zIndex } = useModalZIndex();
 
 const props = defineProps<{
   candidates: PipelineItem[];
@@ -114,7 +116,7 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="modal-overlay" @click.self="emit('cancel')" @keydown="handleKeydown" @mousemove.once="mouseMoved = true">
+  <div class="modal-overlay" :style="{ zIndex }" @click.self="emit('cancel')" @keydown="handleKeydown" @mousemove.once="mouseMoved = true">
     <div class="palette-modal">
       <div class="palette-header">{{ title }}</div>
 
@@ -177,7 +179,6 @@ onMounted(async () => {
   align-items: flex-start;
   justify-content: center;
   padding-top: 15vh;
-  z-index: 1000;
 }
 .palette-modal {
   background: #252525;

@@ -2,8 +2,10 @@
 import { ref, computed, onMounted, nextTick, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { shortcuts, type ActionName } from "../composables/useKeyboardShortcuts";
+import { useModalZIndex } from "../composables/useModalZIndex";
 
 const { t } = useI18n();
+const { zIndex } = useModalZIndex();
 
 export interface DynamicCommand {
   id: string;
@@ -139,7 +141,7 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="modal-overlay" @click.self="emit('close')" @keydown="handleKeydown" @mousemove.once="mouseMoved = true">
+  <div class="modal-overlay" :style="{ zIndex }" @click.self="emit('close')" @keydown="handleKeydown" @mousemove.once="mouseMoved = true">
     <div class="palette-modal">
       <input
         ref="inputRef"
@@ -182,7 +184,6 @@ onMounted(async () => {
   align-items: flex-start;
   justify-content: center;
   padding-top: 15vh;
-  z-index: 1000;
 }
 .palette-modal {
   background: #252525;

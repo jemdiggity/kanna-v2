@@ -2,7 +2,10 @@
 import { ref, onMounted, nextTick } from "vue";
 import DiffView from "./DiffView.vue";
 import { useShortcutContext } from "../composables/useShortcutContext";
+import { useModalZIndex } from "../composables/useModalZIndex";
 useShortcutContext("diff");
+const { zIndex, bringToFront } = useModalZIndex();
+defineExpose({ zIndex, bringToFront });
 
 const modalRef = ref<HTMLElement | null>(null);
 
@@ -26,7 +29,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="modal-overlay" :class="{ maximized }" @click.self="emit('close')">
+  <div class="modal-overlay" :class="{ maximized }" :style="{ zIndex }" @click.self="emit('close')">
     <div ref="modalRef" class="diff-modal" tabindex="-1">
       <DiffView :repo-path="repoPath" :worktree-path="worktreePath" :initial-scope="initialScope" @scope-change="emit('scope-change', $event)" @close="emit('close')" />
     </div>
@@ -41,7 +44,6 @@ onMounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 1000;
 }
 
 .diff-modal {
