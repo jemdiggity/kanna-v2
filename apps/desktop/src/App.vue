@@ -59,7 +59,7 @@ const previewFilePath = ref("");
 const showDiffModal = ref(false);
 const showTreeExplorer = ref(false);
 const activeWorktreePath = computed(() =>
-  store.currentItem?.branch ? `${store.selectedRepo.path}/.kanna-worktrees/${store.currentItem.branch}` : store.selectedRepo?.path ?? ""
+  store.currentItem?.branch ? `${store.selectedRepo?.path}/.kanna-worktrees/${store.currentItem.branch}` : store.selectedRepo?.path ?? ""
 );
 const showShellModal = ref(false);
 const showCommandPalette = ref(false);
