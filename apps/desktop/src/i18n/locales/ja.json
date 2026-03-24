@@ -98,6 +98,7 @@
     "repoCreationFailed": "リポジトリの作成に失敗しました",
     "cloneFailed": "クローンに失敗しました",
     "worktreeFailed": "ワークツリーの作成に失敗しました",
+    "fetchFailed": "リモートから最新を取得できませんでした — ワークツリーは古いmainに基づいている可能性があります",
     "dbInsertFailed": "データベースへの保存に失敗しました",
     "closeTaskFailed": "タスクのクローズに失敗しました",
     "undoCloseFailed": "クローズの取り消しに失敗しました",

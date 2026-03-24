@@ -360,7 +360,14 @@ export const useKannaStore = defineStore("kanna", () => {
         await invoke("git_fetch", { repoPath, branch: defaultBranch });
         startPoint = `origin/${defaultBranch}`;
       } catch (e) {
-        console.debug("[store] fetch origin failed (offline?), using local HEAD:", e);
+        const msg = e instanceof Error ? e.message : String(e);
+        const isOffline = /could not resolve host|network is unreachable|connection refused|timed out/i.test(msg);
+        if (isOffline) {
+          console.debug("[store] fetch origin failed (offline), using local HEAD");
+        } else {
+          console.warn("[store] fetch origin failed:", msg);
+          toast.warning(tt('toasts.fetchFailed'));
+        }
       }
     }
 

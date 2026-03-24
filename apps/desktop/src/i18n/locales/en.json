@@ -98,6 +98,7 @@
     "repoCreationFailed": "Failed to create repo",
     "cloneFailed": "Clone failed",
     "worktreeFailed": "Failed to create worktree",
+    "fetchFailed": "Could not fetch latest from remote — worktree may be based on stale main",
     "dbInsertFailed": "Failed to save task to database",
     "closeTaskFailed": "Failed to close task",
     "undoCloseFailed": "Failed to undo close",
