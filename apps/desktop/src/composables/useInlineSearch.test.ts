@@ -69,4 +69,79 @@ describe("useInlineSearch", () => {
       expect(inactiveCount).toBe(2);
     });
   });
+
+  describe("navigation", () => {
+    it("nextMatch wraps from last to first", () => {
+      const rawText = ref("aa bb aa");
+      const { query, currentMatch, nextMatch } = useInlineSearch(rawText);
+      query.value = "aa";
+      expect(currentMatch.value).toBe(1);
+      nextMatch();
+      expect(currentMatch.value).toBe(2);
+      nextMatch();
+      expect(currentMatch.value).toBe(1);
+    });
+
+    it("prevMatch wraps from first to last", () => {
+      const rawText = ref("aa bb aa");
+      const { query, currentMatch, prevMatch } = useInlineSearch(rawText);
+      query.value = "aa";
+      expect(currentMatch.value).toBe(1);
+      prevMatch();
+      expect(currentMatch.value).toBe(2);
+    });
+
+    it("nextMatch is no-op with zero matches", () => {
+      const rawText = ref("hello");
+      const { query, currentMatch, nextMatch } = useInlineSearch(rawText);
+      query.value = "xyz";
+      nextMatch();
+      expect(currentMatch.value).toBe(1);
+    });
+
+    it("clamps currentMatch when matches shrink", () => {
+      const rawText = ref("aa bb aa cc aa");
+      const { query, currentMatch, nextMatch, decorations } = useInlineSearch(rawText);
+      query.value = "aa";
+      nextMatch();
+      nextMatch();
+      expect(currentMatch.value).toBe(3);
+      query.value = "bb";
+      expect(decorations.value.length).toBe(1);
+      expect(decorations.value[0].properties.class).toBe("search-hl-active");
+    });
+  });
+
+  describe("openSearch / closeSearch", () => {
+    it("openSearch sets isSearching to true", () => {
+      const rawText = ref("hello");
+      const { isSearching, openSearch } = useInlineSearch(rawText);
+      expect(isSearching.value).toBe(false);
+      openSearch();
+      expect(isSearching.value).toBe(true);
+    });
+
+    it("closeSearch clears query and resets state", () => {
+      const rawText = ref("hello hello");
+      const { query, isSearching, currentMatch, openSearch, closeSearch, nextMatch } = useInlineSearch(rawText);
+      openSearch();
+      query.value = "hello";
+      nextMatch();
+      closeSearch();
+      expect(isSearching.value).toBe(false);
+      expect(query.value).toBe("");
+      expect(currentMatch.value).toBe(1);
+    });
+  });
+
+  describe("rawText reactivity", () => {
+    it("recomputes matches when rawText changes", () => {
+      const rawText = ref("foo bar foo");
+      const { query, matchCount } = useInlineSearch(rawText);
+      query.value = "foo";
+      expect(matchCount.value).toBe(2);
+      rawText.value = "foo";
+      expect(matchCount.value).toBe(1);
+    });
+  });
 });
