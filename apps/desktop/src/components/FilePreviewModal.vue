@@ -4,6 +4,7 @@ import { useI18n } from "vue-i18n";
 import { invoke } from "../invoke";
 import { useLessScroll } from "../composables/useLessScroll";
 import { useShortcutContext, registerContextShortcuts } from "../composables/useShortcutContext";
+import { useInlineSearch } from "../composables/useInlineSearch";
 
 const { t } = useI18n();
 
@@ -19,8 +20,28 @@ const contentRef = ref<HTMLElement | null>(null);
 const modalRef = ref<HTMLElement | null>(null);
 
 useShortcutContext("file");
+
+const content = ref("");
+
+const {
+  isSearching,
+  query: searchQuery,
+  matchCount: searchMatchCount,
+  currentMatch: searchCurrentMatch,
+  decorations: searchDecorations,
+  openSearch,
+  closeSearch,
+  handleSearchKeys,
+  handleInputKeys,
+} = useInlineSearch(content);
+
+const searchInputRef = ref<HTMLInputElement | null>(null);
+
 const showLineNumbers = ref(false);
 registerContextShortcuts("file", [
+  { label: t('filePreview.shortcutSearch'), display: "/" },
+  { label: t('filePreview.shortcutSearchAlt'), display: "⌘F" },
+  { label: t('filePreview.shortcutNextPrevMatch'), display: "n / N" },
   { label: t('filePreview.shortcutOpenIDE'), display: "⌘O" },
   { label: t('filePreview.shortcutToggleLineNumbers'), display: "l" },
   ...(props.filePath.toLowerCase().endsWith(".md")
@@ -32,8 +53,8 @@ registerContextShortcuts("file", [
   { label: t('filePreview.shortcutTopBottom'), display: "g / G" },
   { label: t('filePreview.shortcutClose'), display: "q" },
 ]);
-const content = ref("");
 const highlighted = ref("");
+const currentLang = ref("text");
 const loading = ref(true);
 const error = ref<string | null>(null);
 
@@ -135,12 +156,11 @@ async function loadFile() {
   renderMarkdown.value = false;
   try {
     const fullPath = `${props.worktreePath}/${props.filePath}`;
-    content.value = await invoke<string>("read_text_file", { path: fullPath });
+    const raw = await invoke<string>("read_text_file", { path: fullPath });
 
     const hl = await getHighlighter();
     const lang = langFromPath(props.filePath);
 
-    // Load language if not already loaded
     try {
       await hl.loadLanguage(lang);
     } catch {
@@ -148,23 +168,71 @@ async function loadFile() {
     }
 
     const loadedLangs = hl.getLoadedLanguages();
-    const useLang = loadedLangs.includes(lang) ? lang : "text";
+    // Set lang before content so the watcher fires once with the correct language
+    currentLang.value = loadedLangs.includes(lang) ? lang : "text";
+    content.value = raw;
+  } catch (e: unknown) {
+    error.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    loading.value = false;
+  }
+}
 
-    highlighted.value = hl.codeToHtml(content.value, {
-      lang: useLang,
+// Debounce Shiki re-tokenization: content/lang changes render immediately,
+// but decoration-only changes (search keystrokes) are debounced 150ms.
+let highlightTimer: ReturnType<typeof setTimeout> | null = null;
+let prevContent = "";
+let prevLang = "";
+
+async function renderHighlighted(raw: string, lang: string, decos: typeof searchDecorations.value) {
+  if (!raw) { highlighted.value = ""; return; }
+  try {
+    const hl = await getHighlighter();
+    highlighted.value = hl.codeToHtml(raw, {
+      lang,
       theme: "github-dark",
+      decorations: decos,
       transformers: [{
         pre(node: any) {
           node.properties.style = "white-space:pre-wrap;word-wrap:break-word;";
         },
       }],
     });
-  } catch (e: any) {
-    error.value = e?.message || String(e);
-  } finally {
-    loading.value = false;
+  } catch (e: unknown) {
+    console.error("[FilePreview] highlight failed:", e);
   }
 }
+
+watch([content, currentLang, searchDecorations], ([raw, lang, decos]) => {
+  if (highlightTimer) clearTimeout(highlightTimer);
+  // Content or language changed — render immediately
+  if (raw !== prevContent || lang !== prevLang) {
+    prevContent = raw;
+    prevLang = lang;
+    renderHighlighted(raw, lang, decos);
+  } else {
+    // Decoration-only change (search keystroke) — debounce 150ms
+    highlightTimer = setTimeout(() => renderHighlighted(raw, lang, decos), 150);
+  }
+}, { immediate: false });
+
+watch(() => props.filePath, () => {
+  closeSearch();
+});
+
+watch(highlighted, () => {
+  nextTick(() => {
+    contentRef.value
+      ?.querySelector(".search-hl-active")
+      ?.scrollIntoView({ block: "center" });
+  });
+});
+
+watch(isSearching, (searching) => {
+  if (searching) {
+    nextTick(() => searchInputRef.value?.focus());
+  }
+});
 
 function openInIDE() {
   const cmd = props.ideCommand || "code";
@@ -178,35 +246,32 @@ function openInIDE() {
 
 useLessScroll(contentRef, {
   extraHandler(e) {
+    // Search keys first (disabled in rendered markdown mode)
+    if (!(renderMarkdown.value && isMarkdownFile.value) && handleSearchKeys(e)) {
+      return true;
+    }
+
     const meta = e.metaKey || e.ctrlKey;
-    // Cmd+O — open in IDE
     if (meta && e.key === "o") {
       e.preventDefault();
       openInIDE();
       return true;
     }
-    // l — toggle line numbers
     if (
       e.key === "l" &&
-      !e.metaKey &&
-      !e.ctrlKey &&
-      !e.altKey &&
-      !e.shiftKey
+      !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey
     ) {
       e.preventDefault();
       showLineNumbers.value = !showLineNumbers.value;
       return true;
     }
-    // m — toggle markdown rendering
     if (
       e.key === "m" &&
       isMarkdownFile.value &&
-      !e.metaKey &&
-      !e.ctrlKey &&
-      !e.altKey &&
-      !e.shiftKey
+      !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey
     ) {
       e.preventDefault();
+      if (isSearching.value) closeSearch();
       renderMarkdown.value = !renderMarkdown.value;
       return true;
     }
@@ -251,6 +316,22 @@ onMounted(() => {
           <div v-html="renderMarkdown && isMarkdownFile ? renderedMarkdown : highlighted"></div>
         </template>
       </div>
+      <!-- Search bar (vim/less style, bottom of modal) -->
+      <div v-if="isSearching" class="search-bar">
+        <span class="search-prefix">/</span>
+        <input
+          ref="searchInputRef"
+          v-model="searchQuery"
+          class="search-input"
+          :placeholder="$t('filePreview.searchPlaceholder')"
+          @keydown="handleInputKeys"
+        />
+        <span v-if="searchQuery" class="search-count">
+          {{ searchMatchCount > 0
+            ? `${searchCurrentMatch}/${searchMatchCount}`
+            : $t('filePreview.searchNoMatches') }}
+        </span>
+      </div>
     </div>
   </div>
 </template>
@@ -276,6 +357,7 @@ onMounted(() => {
   flex-direction: column;
   overflow: hidden;
   outline: none;
+  position: relative;
 }
 
 .preview-header {
@@ -555,5 +637,61 @@ onMounted(() => {
   padding: 12px 16px;
   background: #1a1a1a !important;
   min-height: 100%;
+}
+
+/* Search bar */
+.search-bar {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  background: #1e1e1e;
+  border-top: 1px solid #333;
+  border-radius: 0 0 8px 8px;
+  z-index: 10;
+}
+
+.search-prefix {
+  font-family: "SF Mono", Menlo, monospace;
+  font-size: 12px;
+  color: #666;
+  flex-shrink: 0;
+}
+
+.search-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: #e0e0e0;
+  font-family: "SF Mono", Menlo, monospace;
+  font-size: 12px;
+}
+
+.search-input::placeholder {
+  color: #555;
+}
+
+.search-count {
+  font-family: "SF Mono", Menlo, monospace;
+  font-size: 11px;
+  color: #888;
+  flex-shrink: 0;
+}
+
+/* Search highlight styles (inside v-html, needs :deep) */
+.preview-content :deep(.search-hl) {
+  background: rgba(255, 200, 0, 0.25);
+  border-radius: 2px;
+}
+
+.preview-content :deep(.search-hl-active) {
+  background: rgba(255, 200, 0, 0.55);
+  border-radius: 2px;
+  outline: 1px solid rgba(255, 200, 0, 0.8);
 }
 </style>

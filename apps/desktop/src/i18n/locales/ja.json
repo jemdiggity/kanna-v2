@@ -191,7 +191,12 @@
     "shortcutHalfUpDown": "半ページ ↓/↑",
     "shortcutTopBottom": "先頭 / 末尾",
     "shortcutClose": "閉じる",
-    "shortcutToggleLineNumbers": "行番号の切替"
+    "shortcutToggleLineNumbers": "行番号の切替",
+    "shortcutSearch": "検索",
+    "shortcutSearchAlt": "検索（代替）",
+    "shortcutNextPrevMatch": "次 / 前の一致",
+    "searchNoMatches": "一致なし",
+    "searchPlaceholder": "検索..."
   },
   "mainPanel": {
     "taskBlocked": "タスクがブロック中",

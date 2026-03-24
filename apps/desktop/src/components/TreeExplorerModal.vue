@@ -47,11 +47,11 @@ const {
 );
 
 async function onKeydown(e: KeyboardEvent) {
-  // Stop propagation to prevent global shortcut handler from interfering
-  // (except for meta-key combos which should still reach global handlers)
-  if (!e.metaKey) {
-    e.stopPropagation();
-  }
+  // Let meta/ctrl combos bubble to global shortcuts (⌘J, ⌘D, etc.)
+  if (e.metaKey || e.ctrlKey) return;
+
+  // Stop propagation — tree explorer owns all non-meta keys
+  e.stopPropagation();
 
   if (e.key === "Escape" && !filtering.value && !filterText.value) {
     e.preventDefault();
@@ -59,7 +59,7 @@ async function onKeydown(e: KeyboardEvent) {
     return;
   }
 
-  if (e.key === "y" && !e.metaKey && !e.ctrlKey) {
+  if (e.key === "y") {
     const path = currentFilePath();
     if (path) {
       e.preventDefault();

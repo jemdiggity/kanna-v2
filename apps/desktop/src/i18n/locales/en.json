@@ -191,7 +191,12 @@
     "shortcutHalfUpDown": "Half ↓/↑",
     "shortcutTopBottom": "Top / Bottom",
     "shortcutClose": "Close",
-    "shortcutToggleLineNumbers": "Toggle Line Numbers"
+    "shortcutToggleLineNumbers": "Toggle Line Numbers",
+    "shortcutSearch": "Search",
+    "shortcutSearchAlt": "Search (alt)",
+    "shortcutNextPrevMatch": "Next / Prev match",
+    "searchNoMatches": "No matches",
+    "searchPlaceholder": "Search..."
   },
   "mainPanel": {
     "taskBlocked": "Task Blocked",
