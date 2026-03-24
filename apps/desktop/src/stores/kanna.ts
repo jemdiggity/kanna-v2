@@ -1137,7 +1137,7 @@ export const useKannaStore = defineStore("kanna", () => {
           bump();
         }
       } else if (hookEvent === "WaitingForInput") {
-        if (item.activity !== "unread") {
+        if (item.activity !== "unread" && selectedItemId.value !== sessionId) {
           await updatePipelineItemActivity(_db, item.id, "unread");
           bump();
         }
