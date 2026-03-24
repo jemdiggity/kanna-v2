@@ -25,6 +25,7 @@ const emit = defineEmits<{
   (e: "reorder-pinned", repoId: string, orderedIds: string[]): void;
   (e: "rename-item", itemId: string, displayName: string | null): void;
   (e: "hide-repo", repoId: string): void;
+  (e: "rename-done"): void;
 }>();
 
 const collapsedRepos = ref<Set<string>>(new Set());
@@ -95,10 +96,19 @@ function commitRename(itemId: string) {
   const displayName = trimmed && trimmed !== original ? trimmed : null;
   emit("rename-item", itemId, displayName);
   editingItemId.value = null;
+  emit("rename-done");
 }
 
 function cancelRename() {
   editingItemId.value = null;
+  emit("rename-done");
+}
+
+/** Prevent sidebar clicks from stealing focus, except on inputs (rename). */
+function preventFocusSteal(e: MouseEvent) {
+  if (!(e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement)) {
+    e.preventDefault();
+  }
 }
 
 function handleSelectRepo(repoId: string) {
@@ -161,7 +171,7 @@ defineExpose({ renameSelectedItem });
 </script>
 
 <template>
-  <aside class="sidebar">
+  <aside class="sidebar" @mousedown="preventFocusSteal">
     <div class="sidebar-content">
       <div v-if="repos.length === 0" class="empty-state">
         {{ $t('sidebar.noReposYet') }}<br>

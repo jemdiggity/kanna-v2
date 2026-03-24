@@ -31,6 +31,7 @@ import { type ShortcutContext } from "./composables/useShortcutContext";
 import { useCustomTasks } from "./composables/useCustomTasks";
 import { useToast } from "./composables/useToast";
 import { useGc } from "./composables/useGc";
+import { useRestoreFocus } from "./composables/useRestoreFocus";
 import { useKannaStore } from "./stores/kanna";
 import { NEW_CUSTOM_TASK_PROMPT } from "@kanna/core";
 import type { CustomTaskConfig } from "@kanna/core";
@@ -334,15 +335,15 @@ const keyboardActions = {
   toggleMaximize: () => { maximized.value = !maximized.value; },
   dismiss: () => {
     if (showCommandPalette.value) { showCommandPalette.value = false; return; }
-    if (showShortcutsModal.value) { showShortcutsModal.value = false; focusAgentTerminal(); return; }
-    if (showFilePreviewModal.value) { showFilePreviewModal.value = false; if (!showTreeExplorer.value) focusAgentTerminal(); return; }
-    if (showFilePickerModal.value) { showFilePickerModal.value = false; focusAgentTerminal(); return; }
-    if (showDiffModal.value) { showDiffModal.value = false; maximized.value = false; focusAgentTerminal(); return; }
-    if (showAnalyticsModal.value) { showAnalyticsModal.value = false; focusAgentTerminal(); return; }
-    if (showTreeExplorer.value) { showTreeExplorer.value = false; focusAgentTerminal(); return; }
+    if (showShortcutsModal.value) { showShortcutsModal.value = false; return; }
+    if (showFilePreviewModal.value) { showFilePreviewModal.value = false; return; }
+    if (showFilePickerModal.value) { showFilePickerModal.value = false; return; }
+    if (showDiffModal.value) { showDiffModal.value = false; maximized.value = false; return; }
+    if (showAnalyticsModal.value) { showAnalyticsModal.value = false; return; }
+    if (showTreeExplorer.value) { showTreeExplorer.value = false; return; }
     if (showShellModal.value) { return; }
-    if (showNewTaskModal.value) { showNewTaskModal.value = false; focusAgentTerminal(); return; }
-    if (showAddRepoModal.value) { showAddRepoModal.value = false; focusAgentTerminal(); return; }
+    if (showNewTaskModal.value) { showNewTaskModal.value = false; return; }
+    if (showAddRepoModal.value) { showAddRepoModal.value = false; return; }
   },
   openShell: () => { showShellModal.value = !showShellModal.value; },
   showDiff: () => { showDiffModal.value = !showDiffModal.value; },
@@ -418,12 +419,20 @@ function focusAgentTerminal() {
   });
 }
 
+// Auto-restore focus to whatever had it before the modal opened
+const anyModalOpen = computed(() =>
+  showNewTaskModal.value || showAddRepoModal.value || showShortcutsModal.value ||
+  showFilePickerModal.value || showFilePreviewModal.value || showDiffModal.value ||
+  showTreeExplorer.value || showShellModal.value || showAnalyticsModal.value ||
+  showBlockerSelect.value || showPreferencesPanel.value
+);
+useRestoreFocus(anyModalOpen);
+
 function handleSelectItem(itemId: string) {
   if (store.selectedItemId && store.selectedItemId !== itemId) {
     recordNavigation(store.selectedItemId);
   }
   store.selectItem(itemId);
-  focusAgentTerminal();
 }
 
 // Handlers that mix UI state + store
@@ -555,6 +564,7 @@ onMounted(async () => {
       @unpin-item="store.unpinItem"
       @reorder-pinned="store.reorderPinned"
       @rename-item="store.renameItem"
+      @rename-done="focusAgentTerminal"
       @hide-repo="store.hideRepo"
     />
     <MainPanel
@@ -608,7 +618,7 @@ onMounted(async () => {
         :cwd="store.currentItem.branch ? `${store.selectedRepo?.path}/.kanna-worktrees/${store.currentItem.branch}` : store.selectedRepo?.path || '/tmp'"
         :port-env="store.currentItem.port_env"
         :maximized="maximized"
-        @close="showShellModal = false; maximized = false; focusAgentTerminal()"
+        @close="showShellModal = false; maximized = false"
       />
     </KeepAlive>
     <DiffModal
@@ -618,12 +628,12 @@ onMounted(async () => {
       :initial-scope="store.currentItem ? diffScopes.get(store.currentItem.id) : undefined"
       :maximized="maximized"
       @scope-change="(s: any) => { if (store.currentItem) diffScopes.set(store.currentItem.id, s); }"
-      @close="showDiffModal = false; maximized = false; focusAgentTerminal()"
+      @close="showDiffModal = false; maximized = false"
     />
     <FilePickerModal
       v-if="showFilePickerModal && store.selectedRepo?.path"
       :worktree-path="activeWorktreePath"
-      @close="showFilePickerModal = false; focusAgentTerminal()"
+      @close="showFilePickerModal = false"
       @select="(f: string) => { showFilePickerModal = false; previewFilePath = f; showFilePreviewModal = true; }"
     />
     <TreeExplorerModal
@@ -631,7 +641,7 @@ onMounted(async () => {
       :worktree-path="activeWorktreePath"
       :repo-root="activeWorktreePath"
       :suspended="showFilePreviewModal"
-      @close="showTreeExplorer = false; focusAgentTerminal()"
+      @close="showTreeExplorer = false"
       @open-file="(f: string) => { previewFilePath = f; showFilePreviewModal = true; }"
     />
     <FilePreviewModal
@@ -639,7 +649,7 @@ onMounted(async () => {
       :file-path="previewFilePath"
       :worktree-path="activeWorktreePath"
       :ide-command="store.ideCommand"
-      @close="showFilePreviewModal = false; showTreeExplorer ? undefined : focusAgentTerminal()"
+      @close="showFilePreviewModal = false"
     />
     <AnalyticsModal
       v-if="showAnalyticsModal"
