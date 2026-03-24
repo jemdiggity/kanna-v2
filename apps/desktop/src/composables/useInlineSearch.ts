@@ -56,7 +56,8 @@ export function useInlineSearch(rawText: Ref<string>): InlineSearchReturn {
 
   const decorations = computed<DecorationItem[]>(() => {
     if (!matches.value.length) return [];
-    const activeIdx = Math.min(currentMatch.value, matches.value.length) - 1;
+    const clamped = Math.max(1, Math.min(currentMatch.value, matches.value.length));
+    const activeIdx = clamped - 1;
     return matches.value.map((m, i) => ({
       start: m.start,
       end: m.end,
