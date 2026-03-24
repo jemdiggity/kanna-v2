@@ -56,6 +56,9 @@ const showFilePreviewModal = ref(false);
 const previewFilePath = ref("");
 const showDiffModal = ref(false);
 const showTreeExplorer = ref(false);
+const activeWorktreePath = computed(() =>
+  store.currentItem?.branch ? `${store.selectedRepo.path}/.kanna-worktrees/${store.currentItem.branch}` : store.selectedRepo?.path ?? ""
+);
 const showShellModal = ref(false);
 const showCommandPalette = ref(false);
 const commandUsageCounts = ref<Record<string, number>>({});
@@ -598,7 +601,7 @@ onMounted(async () => {
     <DiffModal
       v-if="showDiffModal && store.selectedRepo?.path"
       :repo-path="store.selectedRepo.path"
-      :worktree-path="store.currentItem?.branch ? `${store.selectedRepo.path}/.kanna-worktrees/${store.currentItem.branch}` : undefined"
+      :worktree-path="store.currentItem?.branch ? activeWorktreePath : undefined"
       :initial-scope="store.currentItem ? diffScopes.get(store.currentItem.id) : undefined"
       :maximized="maximized"
       @scope-change="(s: any) => { if (store.currentItem) diffScopes.set(store.currentItem.id, s); }"
@@ -606,14 +609,14 @@ onMounted(async () => {
     />
     <FilePickerModal
       v-if="showFilePickerModal && store.selectedRepo?.path"
-      :worktree-path="store.currentItem?.branch ? `${store.selectedRepo.path}/.kanna-worktrees/${store.currentItem.branch}` : store.selectedRepo.path"
+      :worktree-path="activeWorktreePath"
       @close="showFilePickerModal = false; focusAgentTerminal()"
       @select="(f: string) => { showFilePickerModal = false; previewFilePath = f; showFilePreviewModal = true; }"
     />
     <TreeExplorerModal
       v-if="showTreeExplorer && store.selectedRepo?.path"
-      :worktree-path="store.currentItem?.branch ? `${store.selectedRepo.path}/.kanna-worktrees/${store.currentItem.branch}` : store.selectedRepo.path"
-      :repo-root="store.selectedRepo.path"
+      :worktree-path="activeWorktreePath"
+      :repo-root="activeWorktreePath"
       :suspended="showFilePreviewModal"
       @close="showTreeExplorer = false; focusAgentTerminal()"
       @open-file="(f: string) => { previewFilePath = f; showFilePreviewModal = true; }"
@@ -621,7 +624,7 @@ onMounted(async () => {
     <FilePreviewModal
       v-if="showFilePreviewModal && store.selectedRepo?.path"
       :file-path="previewFilePath"
-      :worktree-path="store.currentItem?.branch ? `${store.selectedRepo.path}/.kanna-worktrees/${store.currentItem.branch}` : store.selectedRepo.path"
+      :worktree-path="activeWorktreePath"
       :ide-command="store.ideCommand"
       @close="showFilePreviewModal = false; showTreeExplorer ? undefined : focusAgentTerminal()"
     />
