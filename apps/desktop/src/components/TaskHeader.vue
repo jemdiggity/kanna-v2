@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref } from "vue";
 import type { PipelineItem } from "@kanna/db";
 import { useI18n } from "vue-i18n";
 import TagBadges from "./TagBadges.vue";
@@ -23,17 +23,25 @@ const ports = computed<number[]>(() => {
     return [];
   }
 });
+
+const copied = ref(false);
+function copyBranch() {
+  if (!props.item.branch) return;
+  navigator.clipboard.writeText(props.item.branch);
+  copied.value = true;
+  setTimeout(() => { copied.value = false; }, 1500);
+}
 </script>
 
 <template>
-  <div class="task-header">
+  <div class="task-header" @mousedown.prevent>
     <div class="header-top">
       <TagBadges :tags="item.tags" />
       <h2 class="task-title">{{ title(item) }}</h2>
     </div>
     <div class="header-meta">
-      <span v-if="item.branch" class="meta-item branch">
-        <span class="meta-label">{{ $t('taskHeader.branchLabel') }}</span> {{ item.branch }}
+      <span v-if="item.branch" class="meta-item branch" @dblclick="copyBranch">
+        <span class="meta-label">{{ $t('taskHeader.branchLabel') }}</span> {{ copied ? $t('taskHeader.copied', 'Copied!') : item.branch }}
       </span>
       <span v-for="port in ports" :key="port" class="meta-item port">
         :{{ port }}
@@ -103,6 +111,7 @@ const ports = computed<number[]>(() => {
   background: #2a2a2a;
   padding: 1px 6px;
   border-radius: 3px;
+  cursor: default;
 }
 
 .port {
