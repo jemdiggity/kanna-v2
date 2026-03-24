@@ -2325,7 +2325,7 @@ dependencies = [
 
 [[package]]
 name = "kanna-desktop"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "base64 0.22.1",
  "block2",
