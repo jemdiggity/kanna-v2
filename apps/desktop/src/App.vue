@@ -348,18 +348,18 @@ const keyboardActions = {
   showDiff: () => { showDiffModal.value = !showDiffModal.value; },
   showShortcuts: () => {
     if (showShortcutsModal.value) {
-      if (shortcutsStartFull.value) {
-        // Showing all → switch to contextual
+      if (shortcutsStartFull.value && currentShortcutContext.value !== "main") {
+        // Showing all in a modal context → switch to contextual
         shortcutsStartFull.value = false;
       } else {
-        // Showing contextual → close
         showShortcutsModal.value = false;
       }
       return;
     }
     showCommandPalette.value = false;
     shortcutsContext.value = currentShortcutContext.value;
-    shortcutsStartFull.value = false;
+    // Main = always full set; modals start in context mode
+    shortcutsStartFull.value = currentShortcutContext.value === "main";
     showShortcutsModal.value = true;
   },
   showAllShortcuts: () => {
@@ -368,7 +368,6 @@ const keyboardActions = {
         // Showing contextual → switch to all
         shortcutsStartFull.value = true;
       } else {
-        // Showing all → close
         showShortcutsModal.value = false;
       }
       return;
