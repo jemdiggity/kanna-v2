@@ -4,7 +4,7 @@
 
 Today, only one Kanna app instance can meaningfully connect to a daemon at a time. When a second app launches (e.g., the installed release build alongside a dev worktree), it spawns a fresh daemon, triggering handoff. The first app's connections silently break — its command connection, event bridge, and per-session attach connections all hit EOF with no recovery path.
 
-The "one client per session" invariant (Attach swaps the ActiveWriter atomically) compounds this: if two apps both try to view the same session, the second steals output from the first.
+The "one client per session" invariant (Attach swaps the ActiveWriter atomically) means if two apps both view the same session, the second silently steals output from the first — the first app's terminal freezes with no error or notification.
 
 ## Goals
 
@@ -14,7 +14,6 @@ The "one client per session" invariant (Attach swaps the ActiveWriter atomically
 
 ## Non-Goals
 
-- Multiple viewers of the same session simultaneously (the one-client-per-session invariant stays)
 - Daemon reuse / skip-handoff optimization (every app launch still spawns fresh)
 - Frontend changes (reconnection is handled entirely in the Tauri backend)
 
@@ -159,11 +158,40 @@ static HAS_SPAWNED: AtomicBool = AtomicBool::new(false);
 
 This prevents the "thundering herd" problem in the common case while still recovering from daemon crashes.
 
-### 7. Daemon: No Changes to Connection Acceptance
+### 7. Daemon: Broadcast Model for Session Output
 
-The daemon already accepts multiple connections in its `loop { listener.accept() }`. Each connection gets its own `handle_connection` task. Multiple apps can connect simultaneously — each gets its own command connection, event bridge (Subscribe), and per-session attach connections.
+Replace the single-writer `ActiveWriter` pattern with a broadcast model where multiple clients can attach to the same session simultaneously. This matches the Swift v1 daemon's proven approach.
 
-The `SessionWriters` HashMap is keyed by `session_id`, and the `ActiveWriter` swap on Attach is per-session. Two apps attaching to different sessions don't interfere with each other. Two apps attaching to the same session — the second wins (existing invariant, unchanged).
+**Current architecture (single writer):**
+```rust
+// One writer slot per session — Attach swaps atomically, previous client silently loses output
+type ActiveWriter = Arc<Mutex<Option<Arc<Mutex<OwnedWriteHalf>>>>>;
+type SessionWriters = Arc<Mutex<HashMap<String, ActiveWriter>>>;
+```
+
+**New architecture (broadcast to all attached clients):**
+```rust
+// Multiple writers per session — Attach adds to the list, all clients receive output
+type SessionWriter = Arc<Mutex<OwnedWriteHalf>>;
+type SessionWriters = Arc<Mutex<HashMap<String, Vec<SessionWriter>>>>;
+```
+
+**Attach:** Adds the new client's writer to the session's writer list. Does not remove or affect existing writers.
+
+**Detach:** Removes the client's writer from the session's writer list.
+
+**`stream_output` changes:** Instead of writing to one `ActiveWriter`, iterate over all writers in the session's list. If a write to any client fails (broken pipe, slow consumer), remove that writer from the list and continue — don't block other clients.
+
+```
+stream_output loop:
+  data = pty.read()
+  writers = session_writers.get(session_id)
+  retain only writers where write_event succeeds
+```
+
+**Pre-attach buffer:** Each new Attach flushes the pre-attach buffer to that specific client (if still available). The buffer is consumed after the first Attach — subsequent clients that attach later won't receive startup output. This is acceptable: the primary consumer (the app that spawned the session) always attaches first.
+
+**Connection acceptance:** The daemon already accepts multiple connections in its `loop { listener.accept() }`. Each connection gets its own `handle_connection` task. Multiple apps can connect simultaneously — each gets its own command connection, event bridge (Subscribe), and per-session attach connections. Two apps attaching to the same session now both receive output.
 
 ## Connection Topology
 
@@ -173,16 +201,17 @@ The `SessionWriters` HashMap is keyed by `session_id`, and the `ActiveWriter` sw
                     │                               │
   App A             │   sessions: HashMap           │            App B
   ─────             │   hook_tx: broadcast          │            ─────
+                    │   writers: HashMap<id, Vec>   │
                     │                               │
   cmd conn ────────►│   conn handler (A-cmd)        │◄──────── cmd conn
   event bridge ────►│   conn handler (A-sub) ◄─hook │◄──────── event bridge
-  attach(s1) ──────►│   conn handler (A-s1)         │◄──────── attach(s2)
+  attach(s1) ──────►│   conn handler (A-s1) ◄─s1──►│◄──────── attach(s1)  ← both see s1
   attach(s3) ──────►│   conn handler (A-s3)         │◄──────── attach(s4)
                     │                               │
                     └──────────────────────────────┘
 ```
 
-Each connection is independent. The daemon doesn't know or care how many apps are connected.
+Each connection is independent. Multiple clients can attach to the same session — all receive output via broadcast.
 
 ## Reconnection Sequence
 
@@ -220,7 +249,8 @@ Current SPEC.md invariants that change:
 | # | Current | New |
 |---|---------|-----|
 | 3 | Always spawn. App always spawns on startup. | Always spawn on first startup. Reconnect (don't spawn) on daemon restart. Spawn again only if reconnect backoff is exhausted (daemon crash recovery). |
-| 6 | One client per session. Attach swaps atomically. | Unchanged — but now multiple apps can each attach to *different* sessions concurrently. |
+| 5 | One reader per session. Single `stream_output` task. | Unchanged — still one reader per session, but output is broadcast to all attached writers. |
+| 6 | One client per session. Attach swaps atomically. | **Multiple clients per session.** Attach adds to writer list. All attached clients receive output via broadcast. |
 
 New invariants:
 
@@ -233,7 +263,7 @@ New invariants:
 
 ### Daemon (`crates/daemon/`)
 - `src/protocol.rs` — Add `ShuttingDown` variant to `Event` enum + serialization test
-- `src/main.rs` — Add `hook_tx` parameter to `handle_handoff`; update call site in `handle_connection`; broadcast `ShuttingDown` before exit; increase exit delay to 500ms
+- `src/main.rs` — Replace `ActiveWriter` (single writer) with `Vec<SessionWriter>` (broadcast list); update `stream_output` to iterate writers and drop failed ones; update `Attach` to push to writer list instead of swapping; update `Detach` to remove from list; add `hook_tx` parameter to `handle_handoff`; update call site in `handle_connection`; broadcast `ShuttingDown` before exit; increase exit delay to 500ms
 
 ### Tauri Backend (`apps/desktop/src-tauri/`)
 - `src/lib.rs` — Rewrite `spawn_event_bridge` with reconnect loop and `daemon_state`/`daemon_ready` coordination; add `AttachedSessions` managed state; add `HAS_SPAWNED` guard with crash recovery fallback; spawn re-attach coordinator listening for `daemon_ready`
@@ -252,4 +282,5 @@ New invariants:
 - **Unit test:** `ShuttingDown` event serialization roundtrip in `protocol.rs`
 - **Integration test:** Spawn daemon, connect two clients (each subscribing), trigger handoff from a third connection, verify both clients receive `ShuttingDown`
 - **Integration test:** Verify crash recovery — kill daemon with SIGKILL (no `ShuttingDown`), confirm app detects EOF and respawns after backoff exhaustion
+- **Integration test:** Spawn a session, attach two clients to the same session, send input, verify both clients receive the same output (broadcast model)
 - **Manual test:** Run release Kanna + dev worktree Kanna simultaneously, restart one, verify the other's terminals recover seamlessly
