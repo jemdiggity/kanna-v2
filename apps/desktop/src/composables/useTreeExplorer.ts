@@ -395,9 +395,6 @@ export function useTreeExplorer(rootPath: () => string, repoRoot: () => string) 
 
     // --- Normal navigation mode ---
 
-    // Let meta/ctrl combos pass through to global shortcuts (e.g. ⌘J, ⌘D)
-    if (e.metaKey || e.ctrlKey) return null;
-
     // gg sequence
     if (pendingG.value) {
       pendingG.value = false;
