@@ -178,7 +178,13 @@ async function loadFile() {
   }
 }
 
-watch([content, currentLang, searchDecorations], async ([raw, lang, decos]) => {
+// Debounce Shiki re-tokenization: content/lang changes render immediately,
+// but decoration-only changes (search keystrokes) are debounced 150ms.
+let highlightTimer: ReturnType<typeof setTimeout> | null = null;
+let prevContent = "";
+let prevLang = "";
+
+async function renderHighlighted(raw: string, lang: string, decos: typeof searchDecorations.value) {
   if (!raw) { highlighted.value = ""; return; }
   try {
     const hl = await getHighlighter();
@@ -194,6 +200,19 @@ watch([content, currentLang, searchDecorations], async ([raw, lang, decos]) => {
     });
   } catch (e: unknown) {
     console.error("[FilePreview] highlight failed:", e);
+  }
+}
+
+watch([content, currentLang, searchDecorations], ([raw, lang, decos]) => {
+  if (highlightTimer) clearTimeout(highlightTimer);
+  // Content or language changed — render immediately
+  if (raw !== prevContent || lang !== prevLang) {
+    prevContent = raw;
+    prevLang = lang;
+    renderHighlighted(raw, lang, decos);
+  } else {
+    // Decoration-only change (search keystroke) — debounce 150ms
+    highlightTimer = setTimeout(() => renderHighlighted(raw, lang, decos), 150);
   }
 }, { immediate: false });
 
