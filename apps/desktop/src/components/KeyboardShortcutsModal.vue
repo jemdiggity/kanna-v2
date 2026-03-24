@@ -81,10 +81,11 @@ function splitKeys(display: string): string[] {
 
       <!-- Footer -->
       <div class="shortcuts-footer">
-        <a class="toggle-link" @click="toggleMode">
+        <a v-if="props.context !== 'main'" class="toggle-link" @click="toggleMode">
           {{ showFullMode ? t('shortcuts.showContext', { context: contextTitle.toLowerCase() }) : t('shortcuts.showAll') }}
           <span class="toggle-hint"><kbd>⇧</kbd><kbd>⌘</kbd><kbd>/</kbd></span>
         </a>
+        <span v-else />
         <label v-if="showFullMode" class="startup-checkbox">
           <input type="checkbox" v-model="hideOnStartup" />
           {{ t('shortcuts.showOnStartup') }}
