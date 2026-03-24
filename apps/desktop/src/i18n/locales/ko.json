@@ -191,7 +191,12 @@
     "shortcutHalfUpDown": "반 페이지 ↓/↑",
     "shortcutTopBottom": "처음 / 끝",
     "shortcutClose": "닫기",
-    "shortcutToggleLineNumbers": "줄 번호 전환"
+    "shortcutToggleLineNumbers": "줄 번호 전환",
+    "shortcutSearch": "검색",
+    "shortcutSearchAlt": "검색 (대체)",
+    "shortcutNextPrevMatch": "다음 / 이전 일치",
+    "searchNoMatches": "일치 없음",
+    "searchPlaceholder": "검색..."
   },
   "mainPanel": {
     "taskBlocked": "작업 차단됨",
