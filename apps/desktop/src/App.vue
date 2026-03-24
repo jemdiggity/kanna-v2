@@ -70,7 +70,6 @@ const preferences = reactive({
   locale: "en",
 });
 const diffScopes = new Map<string, "branch" | "commit" | "working">();
-const zenMode = ref(false);
 const sidebarHidden = ref(false);
 const maximized = ref(false);
 const sidebarRef = ref<InstanceType<typeof Sidebar> | null>(null);
@@ -318,7 +317,6 @@ const keyboardActions = {
   navigateUp: () => navigateItems(-1),
   navigateDown: () => navigateItems(1),
   toggleSidebar: () => { sidebarHidden.value = !sidebarHidden.value; },
-  toggleZen: () => { zenMode.value = !zenMode.value; },
   toggleMaximize: () => { maximized.value = !maximized.value; },
   dismiss: () => {
     if (showCommandPalette.value) { showCommandPalette.value = false; return; }
@@ -524,10 +522,10 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="app" :class="{ zen: zenMode }">
+  <div class="app">
     <Sidebar
       ref="sidebarRef"
-      v-if="!zenMode && !maximized && !sidebarHidden"
+      v-if="!maximized && !sidebarHidden"
       :repos="store.repos"
       :pipeline-items="store.items"
       :selected-repo-id="store.selectedRepoId"

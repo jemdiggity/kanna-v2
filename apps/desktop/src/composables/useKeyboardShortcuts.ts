@@ -11,7 +11,6 @@ export type ActionName =
   | "undoClose"
   | "navigateUp"
   | "navigateDown"
-  | "toggleZen"
   | "dismiss"
   | "openInIDE"
   | "openShell"
@@ -73,7 +72,6 @@ export const shortcuts: ShortcutDef[] = [
   { action: "showDiff",       labelKey: "shortcuts.viewDiff",       groupKey: "shortcuts.groupViews",      key: "d",                         meta: true, display: "⌘D",                       context: ["main"] },
   { action: "openShell",      labelKey: "shortcuts.shellTerminal",  groupKey: "shortcuts.groupViews",      key: "j",                         meta: true,               display: "⌘J",       context: ["main", "shell"] },
   { action: "openInIDE",      labelKey: "shortcuts.openInIDE",      groupKey: "shortcuts.groupViews",      key: "o",                         meta: true,               display: "⌘O",       context: ["main"] },
-  { action: "toggleZen",      labelKey: "shortcuts.zenMode",        groupKey: "shortcuts.groupViews",      key: ["Z", "z"],                  meta: true, shift: true,  display: "⇧⌘Z",     context: ["main"] },
   { action: "toggleMaximize", labelKey: "shortcuts.maximize",       groupKey: "shortcuts.groupViews",      key: "Enter",                     meta: true, shift: true,  display: "⇧⌘Enter", context: ["diff", "shell"] },
   // Window — disabled until #24 (new window state sharing)
   // { action: "newWindow",  labelKey: "shortcuts.newWindow", groupKey: "shortcuts.groupWindow", key: ["N", "n"],                     meta: true, shift: true,  display: "⇧⌘N" },
