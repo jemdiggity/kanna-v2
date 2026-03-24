@@ -297,6 +297,22 @@ onMounted(() => {
           <div v-html="renderMarkdown && isMarkdownFile ? renderedMarkdown : highlighted"></div>
         </template>
       </div>
+      <!-- Search bar (vim/less style, bottom of modal) -->
+      <div v-if="isSearching" class="search-bar">
+        <span class="search-prefix">/</span>
+        <input
+          ref="searchInputRef"
+          v-model="searchQuery"
+          class="search-input"
+          :placeholder="$t('filePreview.searchPlaceholder')"
+          @keydown="handleInputKeys"
+        />
+        <span v-if="searchQuery" class="search-count">
+          {{ searchMatchCount > 0
+            ? `${searchCurrentMatch}/${searchMatchCount}`
+            : $t('filePreview.searchNoMatches') }}
+        </span>
+      </div>
     </div>
   </div>
 </template>
@@ -322,6 +338,7 @@ onMounted(() => {
   flex-direction: column;
   overflow: hidden;
   outline: none;
+  position: relative;
 }
 
 .preview-header {
@@ -601,5 +618,61 @@ onMounted(() => {
   padding: 12px 16px;
   background: #1a1a1a !important;
   min-height: 100%;
+}
+
+/* Search bar */
+.search-bar {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  background: #1e1e1e;
+  border-top: 1px solid #333;
+  border-radius: 0 0 8px 8px;
+  z-index: 10;
+}
+
+.search-prefix {
+  font-family: "SF Mono", Menlo, monospace;
+  font-size: 12px;
+  color: #666;
+  flex-shrink: 0;
+}
+
+.search-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: #e0e0e0;
+  font-family: "SF Mono", Menlo, monospace;
+  font-size: 12px;
+}
+
+.search-input::placeholder {
+  color: #555;
+}
+
+.search-count {
+  font-family: "SF Mono", Menlo, monospace;
+  font-size: 11px;
+  color: #888;
+  flex-shrink: 0;
+}
+
+/* Search highlight styles (inside v-html, needs :deep) */
+.preview-content :deep(.search-hl) {
+  background: rgba(255, 200, 0, 0.25);
+  border-radius: 2px;
+}
+
+.preview-content :deep(.search-hl-active) {
+  background: rgba(255, 200, 0, 0.55);
+  border-radius: 2px;
+  outline: 1px solid rgba(255, 200, 0, 0.8);
 }
 </style>
