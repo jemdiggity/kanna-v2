@@ -34,6 +34,7 @@ registerContextShortcuts("file", [
 ]);
 const content = ref("");
 const highlighted = ref("");
+const currentLang = ref("text");
 const loading = ref(true);
 const error = ref<string | null>(null);
 
@@ -135,12 +136,11 @@ async function loadFile() {
   renderMarkdown.value = false;
   try {
     const fullPath = `${props.worktreePath}/${props.filePath}`;
-    content.value = await invoke<string>("read_text_file", { path: fullPath });
+    const raw = await invoke<string>("read_text_file", { path: fullPath });
 
     const hl = await getHighlighter();
     const lang = langFromPath(props.filePath);
 
-    // Load language if not already loaded
     try {
       await hl.loadLanguage(lang);
     } catch {
@@ -148,10 +148,22 @@ async function loadFile() {
     }
 
     const loadedLangs = hl.getLoadedLanguages();
-    const useLang = loadedLangs.includes(lang) ? lang : "text";
+    // Set lang before content so the watcher fires once with the correct language
+    currentLang.value = loadedLangs.includes(lang) ? lang : "text";
+    content.value = raw;
+  } catch (e: unknown) {
+    error.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    loading.value = false;
+  }
+}
 
-    highlighted.value = hl.codeToHtml(content.value, {
-      lang: useLang,
+watch([content, currentLang], async ([raw, lang]) => {
+  if (!raw) { highlighted.value = ""; return; }
+  try {
+    const hl = await getHighlighter();
+    highlighted.value = hl.codeToHtml(raw, {
+      lang,
       theme: "github-dark",
       transformers: [{
         pre(node: any) {
@@ -159,12 +171,10 @@ async function loadFile() {
         },
       }],
     });
-  } catch (e: any) {
-    error.value = e?.message || String(e);
-  } finally {
-    loading.value = false;
+  } catch (e: unknown) {
+    console.error("[FilePreview] highlight failed:", e);
   }
-}
+}, { immediate: false });
 
 function openInIDE() {
   const cmd = props.ideCommand || "code";
