@@ -208,6 +208,10 @@ export const useKannaStore = defineStore("kanna", () => {
     await insertRepo(_db, { id, path: destination, name, default_branch: defaultBranch });
     bump();
     selectedRepoId.value = id;
+    if (isTauri) {
+      spawnShellSession(`shell-repo-${id}`, destination, null, false)
+        .catch(e => console.error("[store] repo shell pre-warm failed:", e));
+    }
   }
 
   async function hideRepo(repoId: string) {
@@ -1172,6 +1176,7 @@ export const useKannaStore = defineStore("kanna", () => {
     if (isTauri) {
       for (const item of eagerItems) {
         if (!item.branch) continue;
+        if (hasTag(item, "done") || hasTag(item, "merge")) continue;
         const repo = eagerRepos.find(r => r.id === item.repo_id);
         if (!repo) continue;
         const wtPath = `${repo.path}/.kanna-worktrees/${item.branch}`;
