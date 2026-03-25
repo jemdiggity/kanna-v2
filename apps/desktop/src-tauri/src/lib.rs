@@ -351,7 +351,10 @@ pub fn run() {
 
             // Build app menu with full version in About
             let version = env!("KANNA_VERSION");
-            let about = AboutMetadataBuilder::new().version(Some(version)).build();
+            let about = AboutMetadataBuilder::new()
+                .short_version(Some(version))
+                .version(Some(""))
+                .build();
             let app_submenu = SubmenuBuilder::new(app, "Kanna")
                 .about(Some(about))
                 .separator()
