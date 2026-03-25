@@ -7,7 +7,7 @@ Replace the "Add Repo" button in the sidebar footer with a persistent search inp
 ### 1. Sidebar Footer
 
 - Remove the "Add Repo" button and `add-repo` emit from `Sidebar.vue`
-- Replace with a text input bound to a local `searchQuery` ref
+- Replace with a native `<input>` element bound to a local `searchQuery` ref (must be a native input, not a wrapper component, so `preventFocusSteal`'s `instanceof HTMLInputElement` check passes)
 - Placeholder: "Search tasks..." with `⌘F` hint
 - `Escape` clears the query and blurs the input
 - Repo creation remains available via `⌘I` / `⇧⌘I`
@@ -22,22 +22,39 @@ Replace the "Add Repo" button in the sidebar footer with a persistent search inp
 - Within each category group (pinned, merge, PR, in-progress, blocked), matched items keep their existing sort order (no re-ranking by score)
 - When the query is cleared, the full sidebar restores immediately
 
+**Filtering is display-only.** The `pipelineItems` prop stays unfiltered. Computed refs inside Sidebar derive filtered lists for rendering. Drag/drop and pin logic operate on the full unfiltered prop and are unaffected.
+
+**Collapse behavior:** When a search query is active, collapsed repos auto-expand to show results. When the query is cleared, collapse state restores to what it was before.
+
+**Repo count badge:** Shows the filtered count when a search is active, total count otherwise.
+
 ### 3. Keyboard Shortcut
 
-- `⌘F` focuses the search input (added to `useKeyboardShortcuts.ts`)
-- Sidebar exposes a `focusSearch()` method via `defineExpose`
+- Add `"focusSearch"` to the `ActionName` union in `useKeyboardShortcuts.ts`
+- Add a `ShortcutDef` entry: `action: "focusSearch"`, `labelKey: "shortcuts.focusSearch"`, `groupKey: "shortcuts.groupNavigation"`, `key: "f"`, `meta: true`, `display: "⌘F"`, `context: ["main"]`
+- In App.vue's `keyboardActions`, add a `focusSearch` handler that calls `sidebarRef.value?.focusSearch()`
+- Sidebar updates `defineExpose` to include both `renameSelectedItem` and `focusSearch` (merge, not replace)
+- Note: `⌘F` overrides native WKWebView "Find in page" — existing `preventDefault` in the shortcuts system handles this
 
 ### 4. Parent Cleanup
 
-- Remove `@add-repo` handler from the parent component that renders `<Sidebar>`
-- Remove any dead code associated with the old button
+- Remove **only** the `@add-repo` attribute from `<Sidebar>` in App.vue
+- **Preserve** `addRepoInitialTab`, `createRepo`, and `importRepo` keyboard actions — these are independent of the sidebar button and remain the primary way to open the Add Repo modal
+- Remove the `add-repo` emit definition from Sidebar's `defineEmits`
+
+### 5. i18n
+
+All three locale files (`en.json`, `ja.json`, `ko.json`):
+- Add `sidebar.searchPlaceholder` — search input placeholder text
+- Add `shortcuts.focusSearch` — shortcut display label
+- Remove `sidebar.addRepo` and `sidebar.addRepoTooltip`
 
 ## Files Modified
 
-- `apps/desktop/src/components/Sidebar.vue` — replace footer, add search filtering
-- `apps/desktop/src/composables/useKeyboardShortcuts.ts` — add `⌘F` binding
-- Parent of Sidebar (likely `App.vue`) — remove `@add-repo` handler
-- `apps/desktop/src/i18n/locales/en.json` — add search placeholder string, remove `addRepo` string
+- `apps/desktop/src/components/Sidebar.vue` — replace footer, add search filtering, update defineExpose
+- `apps/desktop/src/composables/useKeyboardShortcuts.ts` — add `focusSearch` action and shortcut def
+- `apps/desktop/src/App.vue` — remove `@add-repo`, add `focusSearch` keyboard action handler
+- `apps/desktop/src/i18n/locales/en.json` — add search + shortcut keys, remove addRepo keys
 - `apps/desktop/src/i18n/locales/ja.json` — same
 - `apps/desktop/src/i18n/locales/ko.json` — same
 
