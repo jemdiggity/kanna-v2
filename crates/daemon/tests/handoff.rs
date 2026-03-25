@@ -32,8 +32,13 @@ enum Cmd {
         cols: u16,
         rows: u16,
     },
-    Attach { session_id: String },
-    Input { session_id: String, data: Vec<u8> },
+    Attach {
+        session_id: String,
+    },
+    Input {
+        session_id: String,
+        data: Vec<u8>,
+    },
     List,
 }
 
@@ -41,12 +46,24 @@ enum Cmd {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 enum Evt {
-    Output { session_id: String, data: Vec<u8> },
-    Exit { session_id: String, code: i32 },
-    SessionCreated { session_id: String },
-    SessionList { sessions: Vec<Value> },
+    Output {
+        session_id: String,
+        data: Vec<u8>,
+    },
+    Exit {
+        session_id: String,
+        code: i32,
+    },
+    SessionCreated {
+        session_id: String,
+    },
+    SessionList {
+        sessions: Vec<Value>,
+    },
     Ok,
-    Error { message: String },
+    Error {
+        message: String,
+    },
     #[serde(other)]
     Unknown,
 }
@@ -104,7 +121,9 @@ impl DaemonHandle {
 
     fn connect(&self) -> ClientConn {
         let stream = UnixStream::connect(&self.socket_path).expect("failed to connect");
-        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
         ClientConn {
             reader: BufReader::new(stream.try_clone().unwrap()),
             writer: stream,
@@ -143,9 +162,8 @@ impl ClientConn {
     fn recv(&mut self) -> Evt {
         let mut line = String::new();
         self.reader.read_line(&mut line).expect("read timed out");
-        serde_json::from_str(line.trim()).unwrap_or_else(|e| {
-            panic!("failed to parse: {} — {:?}", e, line.trim())
-        })
+        serde_json::from_str(line.trim())
+            .unwrap_or_else(|e| panic!("failed to parse: {} — {:?}", e, line.trim()))
     }
 
     fn collect_output(&mut self, n: usize) -> Vec<u8> {
@@ -175,7 +193,9 @@ impl ClientConn {
                 Err(_) => break,
             }
         }
-        self.writer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        self.writer
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
         collected
     }
 }
@@ -197,7 +217,9 @@ fn spawn_echo(conn: &mut ClientConn, id: &str) {
 }
 
 fn attach(conn: &mut ClientConn, id: &str) {
-    conn.send(&Cmd::Attach { session_id: id.to_string() });
+    conn.send(&Cmd::Attach {
+        session_id: id.to_string(),
+    });
     match conn.recv() {
         Evt::Ok => {}
         Evt::Error { message } => panic!("attach failed: {}", message),
@@ -206,7 +228,10 @@ fn attach(conn: &mut ClientConn, id: &str) {
 }
 
 fn send_input(conn: &mut ClientConn, id: &str, data: &[u8]) {
-    conn.send(&Cmd::Input { session_id: id.to_string(), data: data.to_vec() });
+    conn.send(&Cmd::Input {
+        session_id: id.to_string(),
+        data: data.to_vec(),
+    });
     loop {
         match conn.recv() {
             Evt::Ok => break,
@@ -218,7 +243,11 @@ fn send_input(conn: &mut ClientConn, id: &str, data: &[u8]) {
 }
 
 fn test_dir(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("kanna-handoff-test-{}-{}", name, std::process::id()))
+    std::env::temp_dir().join(format!(
+        "kanna-handoff-test-{}-{}",
+        name,
+        std::process::id()
+    ))
 }
 
 fn cleanup(dir: &PathBuf) {
@@ -303,7 +332,11 @@ fn test_handoff_multiple_sessions() {
         spawn_echo(&mut conn, &format!("sess-{}", i));
         let mut attach_conn = daemon_a.connect();
         attach(&mut attach_conn, &format!("sess-{}", i));
-        send_input(&mut attach_conn, &format!("sess-{}", i), format!("init-{}\n", i).as_bytes());
+        send_input(
+            &mut attach_conn,
+            &format!("sess-{}", i),
+            format!("init-{}\n", i).as_bytes(),
+        );
         attach_conn.drain_output(Duration::from_millis(200));
     }
 
@@ -317,12 +350,18 @@ fn test_handoff_multiple_sessions() {
     for i in 0..3 {
         let mut c = daemon_b.connect();
         attach(&mut c, &format!("sess-{}", i));
-        send_input(&mut c, &format!("sess-{}", i), format!("via-b-{}\n", i).as_bytes());
+        send_input(
+            &mut c,
+            &format!("sess-{}", i),
+            format!("via-b-{}\n", i).as_bytes(),
+        );
         let output = c.collect_output(6);
         let s = String::from_utf8_lossy(&output);
         assert!(
             s.contains(&format!("via-b-{}", i)),
-            "session {} should work after handoff, got: {:?}", i, s
+            "session {} should work after handoff, got: {:?}",
+            i,
+            s
         );
     }
 

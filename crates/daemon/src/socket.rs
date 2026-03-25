@@ -27,7 +27,10 @@ where
             match serde_json::from_str(trimmed) {
                 Ok(cmd) => Some(cmd),
                 Err(e) => {
-                    eprintln!("failed to deserialize command: {} — input: {:?}", e, trimmed);
+                    eprintln!(
+                        "failed to deserialize command: {} — input: {:?}",
+                        e, trimmed
+                    );
                     None
                 }
             }
@@ -50,4 +53,3 @@ where
     writer.flush().await?;
     Ok(())
 }
-

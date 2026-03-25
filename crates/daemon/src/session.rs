@@ -62,11 +62,7 @@ impl SessionManager {
         }
     }
 
-    pub fn signal(
-        &self,
-        session_id: &str,
-        sig: i32,
-    ) -> std::io::Result<()> {
+    pub fn signal(&self, session_id: &str, sig: i32) -> std::io::Result<()> {
         match self.sessions.get(session_id) {
             Some(session) => session.signal(sig),
             None => Err(std::io::Error::new(
@@ -89,5 +85,4 @@ impl SessionManager {
     pub fn session_ids(&self) -> Vec<String> {
         self.sessions.keys().cloned().collect()
     }
-
 }

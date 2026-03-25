@@ -26,7 +26,15 @@ impl PtySession {
         let mut slave_fd: RawFd = -1;
 
         // Open PTY pair
-        let ret = unsafe { libc::openpty(&mut master_fd, &mut slave_fd, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) };
+        let ret = unsafe {
+            libc::openpty(
+                &mut master_fd,
+                &mut slave_fd,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
         if ret != 0 {
             return Err(io::Error::last_os_error().into());
         }
@@ -74,7 +82,8 @@ impl PtySession {
 
                 // Set environment variables
                 for (k, v) in env {
-                    if let (Ok(k_c), Ok(v_c)) = (CString::new(k.as_str()), CString::new(v.as_str())) {
+                    if let (Ok(k_c), Ok(v_c)) = (CString::new(k.as_str()), CString::new(v.as_str()))
+                    {
                         libc::setenv(k_c.as_ptr(), v_c.as_ptr(), 1);
                     }
                 }
@@ -84,9 +93,12 @@ impl PtySession {
                 let mut argv_c: Vec<CString> = Vec::with_capacity(args.len() + 1);
                 argv_c.push(exec_c.clone());
                 for arg in args {
-                    argv_c.push(CString::new(arg.as_str()).unwrap_or_else(|_| CString::new("").unwrap()));
+                    argv_c.push(
+                        CString::new(arg.as_str()).unwrap_or_else(|_| CString::new("").unwrap()),
+                    );
                 }
-                let mut argv_ptrs: Vec<*const libc::c_char> = argv_c.iter().map(|s| s.as_ptr()).collect();
+                let mut argv_ptrs: Vec<*const libc::c_char> =
+                    argv_c.iter().map(|s| s.as_ptr()).collect();
                 argv_ptrs.push(std::ptr::null());
 
                 libc::execvp(exec_c.as_ptr(), argv_ptrs.as_ptr());
@@ -127,7 +139,11 @@ impl PtySession {
         let mut offset = 0;
         while offset < data.len() {
             let n = unsafe {
-                libc::write(fd, data[offset..].as_ptr() as *const libc::c_void, data.len() - offset)
+                libc::write(
+                    fd,
+                    data[offset..].as_ptr() as *const libc::c_void,
+                    data.len() - offset,
+                )
             };
             if n < 0 {
                 return Err(io::Error::last_os_error());
@@ -139,7 +155,9 @@ impl PtySession {
     }
 
     /// Clone the master fd for a reader. The returned fd is independently owned.
-    pub fn try_clone_reader(&self) -> Result<Box<dyn Read + Send>, Box<dyn std::error::Error + Send + Sync>> {
+    pub fn try_clone_reader(
+        &self,
+    ) -> Result<Box<dyn Read + Send>, Box<dyn std::error::Error + Send + Sync>> {
         let new_fd = unsafe { libc::dup(self.master_fd.as_raw_fd()) };
         if new_fd < 0 {
             return Err(io::Error::last_os_error().into());
@@ -157,7 +175,11 @@ impl PtySession {
         Ok(unsafe { OwnedFd::from_raw_fd(new_fd) })
     }
 
-    pub fn resize(&self, cols: u16, rows: u16) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pub fn resize(
+        &self,
+        cols: u16,
+        rows: u16,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let ws = libc::winsize {
             ws_row: rows,
             ws_col: cols,

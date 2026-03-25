@@ -54,11 +54,7 @@ pub fn send_fds(socket: RawFd, fds: &[RawFd]) -> io::Result<()> {
 
     // Copy fd array into the control message data area
     unsafe {
-        std::ptr::copy_nonoverlapping(
-            fds.as_ptr() as *const u8,
-            libc::CMSG_DATA(cmsg),
-            fds_size,
-        );
+        std::ptr::copy_nonoverlapping(fds.as_ptr() as *const u8, libc::CMSG_DATA(cmsg), fds_size);
     }
 
     let ret = unsafe { libc::sendmsg(socket, &msg, 0) };
@@ -99,7 +95,10 @@ pub fn recv_fds(socket: RawFd, count: usize) -> io::Result<Vec<RawFd>> {
         return Err(io::Error::last_os_error());
     }
     if ret == 0 {
-        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "connection closed"));
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "connection closed",
+        ));
     }
 
     // Extract fds from the control message
@@ -124,11 +123,7 @@ pub fn recv_fds(socket: RawFd, count: usize) -> io::Result<Vec<RawFd>> {
 
     let mut fds = vec![0 as RawFd; count];
     unsafe {
-        std::ptr::copy_nonoverlapping(
-            libc::CMSG_DATA(cmsg),
-            fds.as_mut_ptr() as *mut u8,
-            fds_size,
-        );
+        std::ptr::copy_nonoverlapping(libc::CMSG_DATA(cmsg), fds.as_mut_ptr() as *mut u8, fds_size);
     }
 
     Ok(fds)
@@ -140,7 +135,8 @@ mod tests {
 
     fn socketpair() -> (RawFd, RawFd) {
         let mut fds = [0 as RawFd; 2];
-        let ret = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
+        let ret =
+            unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
         assert_eq!(ret, 0, "socketpair failed");
         (fds[0], fds[1])
     }

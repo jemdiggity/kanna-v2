@@ -4,8 +4,8 @@ mod pty;
 mod session;
 mod socket;
 
-use std::io::Read;
 use std::collections::HashMap;
+use std::io::Read;
 use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -14,12 +14,11 @@ use tokio::io::BufReader;
 use tokio::net::UnixStream;
 use tokio::sync::{broadcast, Mutex};
 
-/// Swappable writer target. stream_output checks this on every read.
-/// None = no client attached (output buffered).
-type ActiveWriter = Arc<Mutex<Option<Arc<Mutex<tokio::net::unix::OwnedWriteHalf>>>>>;
+/// A single client's writer handle.
+type SessionWriter = Arc<Mutex<tokio::net::unix::OwnedWriteHalf>>;
 
-/// Map of session_id → active writer target.
-type SessionWriters = Arc<Mutex<HashMap<String, ActiveWriter>>>;
+/// Map of session_id → all attached writers (broadcast to all on output).
+type SessionWriters = Arc<Mutex<HashMap<String, Vec<SessionWriter>>>>;
 
 /// Pre-attach buffer: collects output between Spawn and first Attach.
 /// Flushed to the client on Attach, then set to None.
@@ -95,7 +94,11 @@ async fn main() {
     if !adopted.is_empty() {
         let mut mgr = sessions.lock().await;
         for (session_id, pty_session) in adopted {
-            log::info!("[handoff] adopted session {} (pid={})", session_id, pty_session.pid());
+            log::info!(
+                "[handoff] adopted session {} (pid={})",
+                session_id,
+                pty_session.pid()
+            );
             mgr.insert(session_id, pty_session);
             // Note: no stream_output started — client must Attach to start streaming
         }
@@ -123,7 +126,14 @@ async fn main() {
                 let writers_clone = session_writers.clone();
                 let buffers_clone = pre_attach_buffers.clone();
                 tokio::spawn(async move {
-                    handle_connection(stream, sessions_clone, hook_tx_clone, writers_clone, buffers_clone).await;
+                    handle_connection(
+                        stream,
+                        sessions_clone,
+                        hook_tx_clone,
+                        writers_clone,
+                        buffers_clone,
+                    )
+                    .await;
                 });
             }
             Err(e) => {
@@ -148,7 +158,10 @@ async fn attempt_handoff(
         Err(_) => return vec![],
     };
 
-    log::info!("[handoff] old daemon detected (pid={}), requesting handoff", old_pid);
+    log::info!(
+        "[handoff] old daemon detected (pid={}), requesting handoff",
+        old_pid
+    );
 
     // Connect to old daemon
     let stream = match tokio::net::UnixStream::connect(socket_path).await {
@@ -184,7 +197,9 @@ async fn attempt_handoff(
     match tokio::time::timeout(
         std::time::Duration::from_secs(5),
         reader.read_line(&mut line),
-    ).await {
+    )
+    .await
+    {
         Ok(Ok(_)) => {}
         _ => {
             log::info!("[handoff] timeout or error reading handoff response");
@@ -204,7 +219,10 @@ async fn attempt_handoff(
     match event.get("type").and_then(|t| t.as_str()) {
         Some("HandoffReady") => {}
         Some("Error") => {
-            let msg = event.get("message").and_then(|m| m.as_str()).unwrap_or("unknown");
+            let msg = event
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("unknown");
             log::info!("[handoff] old daemon refused: {}", msg);
             return vec![];
         }
@@ -239,7 +257,11 @@ async fn attempt_handoff(
     };
 
     if fds.len() != session_infos.len() {
-        log::info!("[handoff] fd count mismatch: got {}, expected {}", fds.len(), session_infos.len());
+        log::info!(
+            "[handoff] fd count mismatch: got {}, expected {}",
+            fds.len(),
+            session_infos.len()
+        );
         return vec![];
     }
 
@@ -247,11 +269,7 @@ async fn attempt_handoff(
     let mut adopted = Vec::new();
     for (info, fd) in session_infos.into_iter().zip(fds) {
         let owned_fd = unsafe { std::os::unix::io::OwnedFd::from_raw_fd(fd) };
-        let session = pty::PtySession::adopt(
-            owned_fd,
-            info.pid as libc::pid_t,
-            info.cwd,
-        );
+        let session = pty::PtySession::adopt(owned_fd, info.pid as libc::pid_t, info.cwd);
         adopted.push((info.session_id, session));
     }
 
@@ -269,7 +287,10 @@ async fn wait_for_exit(pid: i32) {
             return;
         }
     }
-    log::info!("[handoff] old daemon (pid={}) didn't exit, sending SIGTERM", pid);
+    log::info!(
+        "[handoff] old daemon (pid={}) didn't exit, sending SIGTERM",
+        pid
+    );
     unsafe { libc::kill(pid, libc::SIGTERM) };
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     if unsafe { libc::kill(pid, 0) } == 0 {
@@ -298,7 +319,14 @@ async fn handle_connection(
         match cmd {
             None => break,
             Some(Command::Handoff { version }) => {
-                handle_handoff(version, raw_fd, sessions.clone(), session_writers.clone(), writer.clone()).await;
+                handle_handoff(
+                    version,
+                    raw_fd,
+                    sessions.clone(),
+                    session_writers.clone(),
+                    writer.clone(),
+                )
+                .await;
                 break; // Connection ends after handoff
             }
             Some(Command::Subscribe) => {
@@ -319,7 +347,15 @@ async fn handle_connection(
                 let _ = write_event(&mut *writer.lock().await, &Event::Ok).await;
             }
             Some(command) => {
-                handle_command(command, sessions.clone(), writer.clone(), &hook_tx, session_writers.clone(), pre_attach_buffers.clone()).await;
+                handle_command(
+                    command,
+                    sessions.clone(),
+                    writer.clone(),
+                    &hook_tx,
+                    session_writers.clone(),
+                    pre_attach_buffers.clone(),
+                )
+                .await;
             }
         }
     }
@@ -361,17 +397,22 @@ async fn handle_command(
                     // Start stream_output immediately so startup output
                     // (including kitty keyboard mode push) is captured.
                     if let Ok(reader) = pty_reader {
-                        let active_writer: ActiveWriter = Arc::new(Mutex::new(None));
-                        session_writers.lock().await.insert(session_id.clone(), active_writer.clone());
+                        session_writers
+                            .lock()
+                            .await
+                            .insert(session_id.clone(), Vec::new());
 
                         let buffer: PreAttachBuffer = Arc::new(Mutex::new(Some(Vec::new())));
-                        pre_attach_buffers.lock().await.insert(session_id.clone(), buffer.clone());
+                        pre_attach_buffers
+                            .lock()
+                            .await
+                            .insert(session_id.clone(), buffer.clone());
 
                         let sid = session_id.clone();
                         let sessions_exit = sessions.clone();
-                        let writers_cleanup = session_writers.clone();
+                        let writers_for_stream = session_writers.clone();
                         tokio::task::spawn_blocking(move || {
-                            stream_output(sid, reader, active_writer, buffer, sessions_exit, writers_cleanup);
+                            stream_output(sid, reader, writers_for_stream, buffer, sessions_exit);
                         });
                     }
 
@@ -402,14 +443,14 @@ async fn handle_command(
 
             let is_streaming = session_writers.lock().await.contains_key(&session_id);
             if is_streaming {
-                // stream_output already running (started at Spawn) — just swap writer
+                // stream_output already running (started at Spawn) — push writer to broadcast list
                 drop(mgr);
-                let writers = session_writers.lock().await;
-                if let Some(active) = writers.get(&session_id) {
-                    let mut w = active.lock().await;
-                    *w = Some(writer.clone());
+                {
+                    let mut writers = session_writers.lock().await;
+                    if let Some(vec) = writers.get_mut(&session_id) {
+                        vec.push(writer.clone());
+                    }
                 }
-                drop(writers);
 
                 let _ = write_event(&mut *writer.lock().await, &Event::Ok).await;
 
@@ -417,7 +458,11 @@ async fn handle_command(
                 if let Some(buffer) = pre_attach_buffers.lock().await.remove(&session_id) {
                     if let Some(data) = buffer.lock().await.take() {
                         if !data.is_empty() {
-                            log::info!("[attach] flushing {} bytes of pre-attach output for {}", data.len(), session_id);
+                            log::info!(
+                                "[attach] flushing {} bytes of pre-attach output for {}",
+                                data.len(),
+                                session_id
+                            );
                             let evt = Event::Output {
                                 session_id: session_id.clone(),
                                 data,
@@ -441,27 +486,35 @@ async fn handle_command(
                 };
                 drop(mgr);
 
-                let active_writer: ActiveWriter = Arc::new(Mutex::new(Some(writer.clone())));
-                session_writers.lock().await.insert(session_id.clone(), active_writer.clone());
+                session_writers
+                    .lock()
+                    .await
+                    .insert(session_id.clone(), vec![writer.clone()]);
 
                 let _ = write_event(&mut *writer.lock().await, &Event::Ok).await;
 
                 let sid = session_id.clone();
                 let sessions_exit = sessions.clone();
-                let writers_cleanup = session_writers.clone();
+                let writers_for_stream = session_writers.clone();
                 let no_buffer: PreAttachBuffer = Arc::new(Mutex::new(None));
                 tokio::task::spawn_blocking(move || {
-                    stream_output(sid, pty_reader, active_writer, no_buffer, sessions_exit, writers_cleanup);
+                    stream_output(
+                        sid,
+                        pty_reader,
+                        writers_for_stream,
+                        no_buffer,
+                        sessions_exit,
+                    );
                 });
             }
         }
 
         Command::Detach { session_id } => {
             let evt = if sessions.lock().await.contains(&session_id) {
-                let writers = session_writers.lock().await;
-                if let Some(active) = writers.get(&session_id) {
-                    let mut w = active.lock().await;
-                    *w = None;
+                let mut writers = session_writers.lock().await;
+                if let Some(vec) = writers.get_mut(&session_id) {
+                    let ptr = Arc::as_ptr(&writer) as usize;
+                    vec.retain(|w| Arc::as_ptr(w) as usize != ptr);
                 }
                 Event::Ok
             } else {
@@ -498,13 +551,19 @@ async fn handle_command(
             }
         }
 
-        Command::Resize { session_id, cols, rows } => {
+        Command::Resize {
+            session_id,
+            cols,
+            rows,
+        } => {
             let mgr = sessions.lock().await;
             let result = mgr.resize(&session_id, cols, rows);
             drop(mgr);
             let evt = match result {
                 Ok(_) => Event::Ok,
-                Err(e) => Event::Error { message: e.to_string() },
+                Err(e) => Event::Error {
+                    message: e.to_string(),
+                },
             };
             let _ = write_event(&mut *writer.lock().await, &evt).await;
         }
@@ -529,7 +588,9 @@ async fn handle_command(
             drop(mgr);
             let evt = match result {
                 Ok(_) => Event::Ok,
-                Err(e) => Event::Error { message: e.to_string() },
+                Err(e) => Event::Error {
+                    message: e.to_string(),
+                },
             };
             let _ = write_event(&mut *writer.lock().await, &evt).await;
         }
@@ -550,7 +611,9 @@ async fn handle_command(
             session_writers.lock().await.remove(&session_id);
             let evt = match result {
                 Ok(_) => Event::Ok,
-                Err(e) => Event::Error { message: e.to_string() },
+                Err(e) => Event::Error {
+                    message: e.to_string(),
+                },
             };
             let _ = write_event(&mut *writer.lock().await, &evt).await;
         }
@@ -559,7 +622,9 @@ async fn handle_command(
             let mut mgr = sessions.lock().await;
             let sessions_list = mgr.list();
             drop(mgr);
-            let evt = Event::SessionList { sessions: sessions_list };
+            let evt = Event::SessionList {
+                sessions: sessions_list,
+            };
             let _ = write_event(&mut *writer.lock().await, &evt).await;
         }
 
@@ -572,8 +637,16 @@ async fn handle_command(
             let _ = write_event(&mut *writer.lock().await, &Event::Ok).await;
         }
 
-        Command::HookEvent { session_id, event, data } => {
-            let evt = Event::HookEvent { session_id, event, data };
+        Command::HookEvent {
+            session_id,
+            event,
+            data,
+        } => {
+            let evt = Event::HookEvent {
+                session_id,
+                event,
+                data,
+            };
             if let Ok(json) = serde_json::to_string(&evt) {
                 let _ = hook_tx.send(json);
             }
@@ -596,7 +669,10 @@ async fn handle_handoff(
 ) {
     if version != HANDOFF_VERSION {
         let evt = Event::Error {
-            message: format!("handoff version mismatch: expected {}, got {}", HANDOFF_VERSION, version),
+            message: format!(
+                "handoff version mismatch: expected {}, got {}",
+                HANDOFF_VERSION, version
+            ),
         };
         let _ = write_event(&mut *writer.lock().await, &evt).await;
         return;
@@ -671,17 +747,16 @@ async fn handle_handoff(
 const MAX_PRE_ATTACH_BUFFER: usize = 64 * 1024;
 
 /// Runs in a blocking thread for the entire lifetime of a session.
-/// ONE reader per session — never duplicated. Output is sent to whatever
-/// client is currently attached via the swappable ActiveWriter.
+/// ONE reader per session — never duplicated. Output is broadcast to all
+/// currently attached clients via the SessionWriters map.
 /// Buffers output before first Attach so startup sequences (like kitty
 /// keyboard mode push) are replayed to xterm.js on connect.
 fn stream_output(
     session_id: String,
     mut reader: Box<dyn Read + Send>,
-    active_writer: ActiveWriter,
+    session_writers: SessionWriters,
     pre_attach_buffer: PreAttachBuffer,
     sessions: Arc<Mutex<SessionManager>>,
-    session_writers: SessionWriters,
 ) {
     let rt = tokio::runtime::Handle::current();
     let mut buf = [0u8; 4096];
@@ -705,16 +780,27 @@ fn stream_output(
                     }
                 });
                 // Buffer is active — Attach handler will flush it
-                if buffered { continue; }
+                if buffered {
+                    continue;
+                }
 
                 let evt = Event::Output {
                     session_id: session_id.clone(),
                     data,
                 };
                 rt.block_on(async {
-                    let maybe_writer = active_writer.lock().await.clone();
-                    if let Some(w) = maybe_writer {
-                        let _ = write_event(&mut *w.lock().await, &evt).await;
+                    let mut writers = session_writers.lock().await;
+                    if let Some(vec) = writers.get_mut(&session_id) {
+                        let mut failed = Vec::new();
+                        for (i, w) in vec.iter().enumerate() {
+                            if write_event(&mut *w.lock().await, &evt).await.is_err() {
+                                failed.push(i);
+                            }
+                        }
+                        // Remove broken writers in reverse order to preserve indices
+                        for i in failed.into_iter().rev() {
+                            vec.remove(i);
+                        }
                     }
                 });
             }
@@ -740,11 +826,14 @@ fn stream_output(
         code: exit_code,
     };
     rt.block_on(async {
-        let maybe_writer = active_writer.lock().await.clone();
-        if let Some(w) = maybe_writer {
-            let _ = write_event(&mut *w.lock().await, &evt).await;
+        // Broadcast Exit to all attached writers, then remove the session entry.
+        // session_writers and writers_cleanup are the same Arc — use a single lock.
+        let mut writers = session_writers.lock().await;
+        if let Some(vec) = writers.get(&session_id) {
+            for w in vec.iter() {
+                let _ = write_event(&mut *w.lock().await, &evt).await;
+            }
         }
-        session_writers.lock().await.remove(&session_id);
+        writers.remove(&session_id);
     });
 }
-
