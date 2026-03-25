@@ -1,6 +1,6 @@
 [package]
 name = "kanna-desktop"
-version = "0.0.13"
+version = "0.0.14"
 description = "Kanna Desktop App"
 authors = []
 edition = "2021"
