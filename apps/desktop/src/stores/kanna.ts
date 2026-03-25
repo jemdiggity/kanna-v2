@@ -328,7 +328,20 @@ export const useKannaStore = defineStore("kanna", () => {
     agentType: "pty" | "sdk",
     opts?: { baseBranch?: string; tags?: string[]; customTask?: CustomTaskConfig },
   ) {
-    const repoConfig = await readRepoConfig(repoPath);
+    // Read config and create worktree concurrently — they're independent.
+    let repoConfig: RepoConfig;
+    try {
+      const [config] = await Promise.all([
+        readRepoConfig(repoPath),
+        createWorktree(repoPath, branch, worktreePath, opts?.baseBranch),
+      ]);
+      repoConfig = config;
+    } catch (e) {
+      console.error("[store] git_worktree_add failed:", e);
+      toast.error(tt('toasts.worktreeFailed'));
+      return;
+    }
+
     const portEnv = computePortEnv(repoConfig, portOffset);
 
     if (Object.keys(portEnv).length > 0) {
@@ -336,14 +349,6 @@ export const useKannaStore = defineStore("kanna", () => {
         "UPDATE pipeline_item SET port_env = ? WHERE id = ?",
         [JSON.stringify(portEnv), id],
       );
-    }
-
-    try {
-      await createWorktree(repoPath, branch, worktreePath, opts?.baseBranch);
-    } catch (e) {
-      console.error("[store] git_worktree_add failed:", e);
-      toast.error(tt('toasts.worktreeFailed'));
-      return;
     }
 
     // Pre-warm shell for ⌘J — fire-and-forget, runs in parallel with agent spawn
@@ -475,10 +480,17 @@ export const useKannaStore = defineStore("kanna", () => {
     });
   }
 
+  let _kannaHookPathCache: string | null = null;
+  async function resolveKannaHookPath(): Promise<string> {
+    if (_kannaHookPathCache) return _kannaHookPathCache;
+    _kannaHookPathCache = await invoke<string>("which_binary", { name: "kanna-hook" });
+    return _kannaHookPathCache;
+  }
+
   async function spawnPtySession(sessionId: string, cwd: string, prompt: string, cols = 80, rows = 24, options?: PtySpawnOptions) {
     let kannaHookPath: string;
     try {
-      kannaHookPath = await invoke<string>("which_binary", { name: "kanna-hook" });
+      kannaHookPath = await resolveKannaHookPath();
     } catch {
       throw new Error("kanna-hook binary not found. Ensure it is built (cargo build -p kanna-hook).");
     }
@@ -888,17 +900,22 @@ export const useKannaStore = defineStore("kanna", () => {
     } catch (e) {
       console.error("[store] PR agent failed to start:", e);
       toast.error(tt('toasts.prAgentFailed'));
+      return;
     }
-    try {
-      await invoke("kill_session", { sessionId: originalId }).catch((e: unknown) => console.error("[store] kill_session failed:", e));
-      await invoke("kill_session", { sessionId: `shell-wt-${originalId}` }).catch((e: unknown) => console.error("[store] kill shell session failed:", e));
-      await addPipelineItemTag(_db, originalId, "done");
+    // Cleanup runs concurrently in the background — don't block the UI.
+    Promise.all([
+      invoke("kill_session", { sessionId: originalId }).catch((e: unknown) =>
+        console.error("[store] kill_session failed:", e)),
+      invoke("kill_session", { sessionId: `shell-wt-${originalId}` }).catch((e: unknown) =>
+        console.error("[store] kill shell session failed:", e)),
+      addPipelineItemTag(_db, originalId, "done"),
+    ]).then(async () => {
       await checkUnblocked(originalId);
       bump();
-    } catch (e) {
+    }).catch((e) => {
       console.error("[store] failed to close source task:", e);
       toast.error(tt('toasts.closeSourceTaskFailed'));
-    }
+    });
   }
 
   async function mergeQueue() {
