@@ -12,16 +12,10 @@ No daemon changes required.
 
 ## Session ID Convention
 
-Matches the existing IDs generated in `App.vue` line 677:
-
-```
-`shell-${shellRepoRoot ? 'repo' : 'wt'}-${store.currentItem?.id ?? 'repo'}`
-```
+Matches the IDs generated in `App.vue` (after #201):
 
 - **Per-task worktree shell:** `shell-wt-${taskId}` — cwd is the task's worktree path
-- **Repo root shell:** `shell-repo-${taskId}` when a task is selected, `shell-repo-repo` when no task is selected — cwd is always the repo root path
-
-Note: The repo root shell ID is task-scoped (tied to whichever task is selected when `⇧⌘J` is pressed), not repo-scoped. This is the existing convention in `App.vue` and we preserve it. Since a task is almost always selected, the most common repo root shell ID is `shell-repo-${taskId}`. Pre-warming spawns `shell-repo-${taskId}` for each active task (same loop as worktree shells) to cover this primary case.
+- **Repo root shell:** `shell-repo-${repoId}` — one per repo, cwd is the repo root path
 
 ## Pre-spawn Trigger Points
 
@@ -39,7 +33,7 @@ spawnShellSession(`shell-wt-${id}`, worktreePath, JSON.stringify(portEnv))
 At the end of `store.init()`, after repos and items are loaded and selection is restored (line ~1113 of kanna.ts). At this point the daemon is ready — `init()` has already made successful `invoke` calls (e.g., `git_app_info`). The pre-warm logic:
 
 ```typescript
-// Pre-warm shell sessions for active tasks with worktrees
+// Pre-warm worktree shells for active tasks
 for (const item of eagerItems) {
   if (!item.branch) continue;
   const repo = eagerRepos.find(r => r.id === item.repo_id);
@@ -50,13 +44,10 @@ for (const item of eagerItems) {
   ).catch(e => console.error("[store] shell pre-warm failed:", e));
 }
 
-// Pre-warm repo root shells (one per task, same loop)
-for (const item of eagerItems) {
-  if (!item.branch) continue;
-  const repo = eagerRepos.find(r => r.id === item.repo_id);
-  if (!repo) continue;
+// Pre-warm repo root shell for each repo
+for (const repo of eagerRepos) {
   spawnShellSession(
-    `shell-repo-${item.id}`, repo.path, null, false
+    `shell-repo-${repo.id}`, repo.path, null, false
   ).catch(e => console.error("[store] repo shell pre-warm failed:", e));
 }
 ```
@@ -65,7 +56,7 @@ All spawns are fire-and-forget. The daemon rejects duplicate session IDs, provid
 
 ### Repo switch
 
-When `selectedRepoId` changes, spawn a new `shell-repo-repo` session for the new repo (kill the old one first).
+When `selectedRepoId` changes, no action needed — each repo's shell is pre-warmed at startup. If a repo is added mid-session, spawn its `shell-repo-${repoId}` at that point.
 
 ## Shared Helper
 
@@ -112,11 +103,11 @@ Pre-spawned with 80x24 defaults. When the user opens the modal, `useTerminal` at
 
 When `useTerminal` attaches to an existing session, it writes `\x1b[?25l\x1b[2J\x1b[H` (clear display) then does a SIGWINCH double-resize. This exists for Claude TUI reconnection. For pre-warmed shells:
 
-1. Daemon flushes `PreAttachBuffer` (zsh startup output + prompt) as `Output` events via the async event bridge
-2. `useTerminal` synchronously writes the clear-screen sequence to xterm.js
+1. `useTerminal` synchronously writes the clear-screen sequence to xterm.js
+2. Daemon flushes `PreAttachBuffer` (zsh startup output + prompt) — reaches JS asynchronously via daemon socket → Tauri background reader → IPC event bridge
 3. SIGWINCH fires, zsh redraws the prompt
 
-Because the buffer flush is async (Tauri event bridge) and the clear is synchronous, the prompt arrives after the clear — the user sees the prompt appear cleanly. If there's a minor visual flash, it's sub-frame and acceptable. No changes to `useTerminal` needed.
+The buffered output arrives after the clear — the user sees the prompt appear cleanly. No changes to `useTerminal` needed.
 
 ## ShellModal Changes
 
@@ -126,19 +117,15 @@ Because the buffer flush is async (Tauri event bridge) and the clear is synchron
 
 ### Existing bug: kill session ID mismatch
 
-The store currently uses `shell-${item.id}` in kill calls (kanna.ts:584, 598, 780, 992), but `ShellModal` uses `shell-wt-${item.id}`. These kill calls are silently failing today — no shell sessions are actually being cleaned up. Fix all kill calls to use `shell-wt-${item.id}`.
+The store uses `shell-${item.id}` in kill calls (kanna.ts:584, 598, 780, 992), but the actual session ID is `shell-wt-${item.id}`. These kill calls are silently failing today. Fix all to use `shell-wt-${item.id}`.
 
 ### Task close/delete/merge
 
-After fixing the ID mismatch above, the existing kill calls handle cleanup.
+After fixing the ID mismatch above, the existing kill calls handle worktree shell cleanup.
 
 ### Repo root shell
 
-Kill `shell-repo-repo` when switching repos (before spawning the new one).
-
-### Worktree deletion
-
-When a task's worktree is removed (close/delete/merge paths in the store), the pre-warmed shell for that task is killed by the existing `kill_session` call (once the ID mismatch is fixed). No additional cleanup needed.
+No per-task cleanup needed — there's one repo root shell per repo, not per task. Kill `shell-repo-${repoId}` only when a repo is removed from Kanna.
 
 ### Daemon restart / handoff
 
@@ -146,7 +133,7 @@ Pre-warmed shells are normal daemon sessions. They survive `SCM_RIGHTS` handoff.
 
 ## Resource Usage
 
-Each idle zsh process uses ~1 MB of memory and one PTY fd pair. A user with 20 active tasks would have ~20 idle zsh processes plus the repo root shell — roughly 21 MB total. This is negligible. No pool limit or LRU eviction needed.
+Each idle zsh process uses ~1 MB of memory and one PTY fd pair. A user with 20 active tasks across 3 repos would have ~23 idle zsh processes — roughly 23 MB total. Negligible. No pool limit or LRU eviction needed.
 
 ## Edge Cases
 
@@ -164,10 +151,9 @@ The agent PTY spawn (`${id}`) and shell pre-spawn (`shell-wt-${id}`) use differe
 
 ### Worktree deleted while shell is alive
 
-If a worktree is garbage-collected or manually deleted, the pre-warmed shell has a stale cwd. The shell still functions — the user gets a prompt in a deleted directory and can `cd` elsewhere. Worktree removal via the store's close/delete paths kills the shell session as part of cleanup.
+If a worktree is manually deleted, the pre-warmed shell has a stale cwd. The shell still functions — the user gets a prompt in a deleted directory. Worktree removal via the store's close/delete paths kills the shell session as part of cleanup.
 
 ## Files to Modify
 
-- `apps/desktop/src/stores/kanna.ts` — add `spawnShellSession` helper, call it in `setupWorktreeAndSpawn()`, add startup pre-warm in `init()`, add repo-switch pre-warm, fix kill session IDs from `shell-${id}` to `shell-wt-${id}`
+- `apps/desktop/src/stores/kanna.ts` — add `spawnShellSession` helper, call it in `setupWorktreeAndSpawn()`, add startup pre-warm in `init()`, fix kill session IDs from `shell-${id}` to `shell-wt-${id}`
 - `apps/desktop/src/components/ShellModal.vue` — use shared `spawnShellSession` helper as fallback
-- `apps/desktop/src/App.vue` — no changes needed (session IDs and ShellModal props are already correct)
