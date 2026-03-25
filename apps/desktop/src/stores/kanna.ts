@@ -171,6 +171,10 @@ export const useKannaStore = defineStore("kanna", () => {
     await insertRepo(_db, { id, path, name, default_branch: defaultBranch });
     bump();
     selectedRepoId.value = id;
+    if (isTauri) {
+      spawnShellSession(`shell-repo-${id}`, path, null, false)
+        .catch(e => console.error("[store] repo shell pre-warm failed:", e));
+    }
   }
 
   async function createRepo(name: string, path: string) {
@@ -190,6 +194,10 @@ export const useKannaStore = defineStore("kanna", () => {
     await insertRepo(_db, { id, path, name, default_branch: defaultBranch });
     bump();
     selectedRepoId.value = id;
+    if (isTauri) {
+      spawnShellSession(`shell-repo-${id}`, path, null, false)
+        .catch(e => console.error("[store] repo shell pre-warm failed:", e));
+    }
   }
 
   async function cloneAndImportRepo(url: string, destination: string) {
