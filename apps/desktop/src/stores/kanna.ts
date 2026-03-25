@@ -1160,6 +1160,22 @@ export const useKannaStore = defineStore("kanna", () => {
       } catch (e) { console.error("[store] git_app_info failed:", e); }
     }
 
+    // Pre-warm shell sessions so ⌘J / ⇧⌘J are instant
+    if (isTauri) {
+      for (const item of eagerItems) {
+        if (!item.branch) continue;
+        const repo = eagerRepos.find(r => r.id === item.repo_id);
+        if (!repo) continue;
+        const wtPath = `${repo.path}/.kanna-worktrees/${item.branch}`;
+        spawnShellSession(`shell-wt-${item.id}`, wtPath, item.port_env, true)
+          .catch(e => console.error("[store] shell pre-warm failed:", e));
+      }
+      for (const repo of eagerRepos) {
+        spawnShellSession(`shell-repo-${repo.id}`, repo.path, null, false)
+          .catch(e => console.error("[store] repo shell pre-warm failed:", e));
+      }
+    }
+
     // Event listeners
     listen("hook_event", async (event: any) => {
       const payload = event.payload || event;
