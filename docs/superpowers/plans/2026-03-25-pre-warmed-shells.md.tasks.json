@@ -1,0 +1,13 @@
+{
+  "planPath": "docs/superpowers/plans/2026-03-25-pre-warmed-shells.md",
+  "tasks": [
+    {"id": 1, "subject": "Task 1: Fix kill session ID mismatch", "status": "pending"},
+    {"id": 2, "subject": "Task 2: Add spawnShellSession helper", "status": "pending", "blockedBy": [1]},
+    {"id": 3, "subject": "Task 3: Pre-warm worktree shell on task creation", "status": "pending", "blockedBy": [2]},
+    {"id": 4, "subject": "Task 4: Pre-warm shells on app startup", "status": "pending", "blockedBy": [2]},
+    {"id": 5, "subject": "Task 5: Pre-warm repo root shell on repo add", "status": "pending", "blockedBy": [2]},
+    {"id": 6, "subject": "Task 6: Refactor ShellModal to use shared helper", "status": "pending", "blockedBy": [2]},
+    {"id": 7, "subject": "Task 7: Manual verification", "status": "pending", "blockedBy": [3, 4, 5, 6]}
+  ],
+  "lastUpdated": "2026-03-25T17:30:00+09:00"
+}
