@@ -1,0 +1,14 @@
+{
+  "planPath": "docs/superpowers/plans/2026-03-25-concurrent-daemon-connections.md",
+  "tasks": [
+    {"id": 1, "subject": "Task 1: Add ShuttingDown event to protocol", "status": "pending"},
+    {"id": 2, "subject": "Task 2: Replace ActiveWriter with broadcast model", "status": "pending", "blockedBy": [1]},
+    {"id": 3, "subject": "Task 3: Add broadcast integration test", "status": "pending", "blockedBy": [2]},
+    {"id": 4, "subject": "Task 4: Smallest-client-wins resize", "status": "pending", "blockedBy": [2]},
+    {"id": 5, "subject": "Task 5: Broadcast ShuttingDown during handoff", "status": "pending", "blockedBy": [1, 2]},
+    {"id": 6, "subject": "Task 6: Event bridge reconnection", "status": "pending", "blockedBy": [5]},
+    {"id": 7, "subject": "Task 7: AttachedSessions tracking and re-attach coordinator", "status": "pending", "blockedBy": [6]},
+    {"id": 8, "subject": "Task 8: Update SPEC.md, clippy/fmt, full test suite", "status": "pending", "blockedBy": [7]}
+  ],
+  "lastUpdated": "2026-03-25T00:00:00Z"
+}
