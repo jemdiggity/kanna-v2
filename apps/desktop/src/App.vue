@@ -359,6 +359,7 @@ const keyboardActions = {
       const z = shellModalRef.value?.zIndex ?? 0;
       if (isTopModal(z)) {
         showShellModal.value = false;
+        maximizedModal.value = null;
       } else {
         shellModalRef.value?.bringToFront();
       }
@@ -373,6 +374,7 @@ const keyboardActions = {
       const z = shellModalRef.value?.zIndex ?? 0;
       if (isTopModal(z)) {
         showShellModal.value = false;
+        maximizedModal.value = null;
       } else {
         shellModalRef.value?.bringToFront();
       }
@@ -387,6 +389,7 @@ const keyboardActions = {
       const z = diffModalRef.value?.zIndex ?? 0;
       if (isTopModal(z)) {
         showDiffModal.value = false;
+        maximizedModal.value = null;
       } else {
         diffModalRef.value?.bringToFront();
       }
