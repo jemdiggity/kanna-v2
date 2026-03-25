@@ -365,8 +365,9 @@ export const useKannaStore = defineStore("kanna", () => {
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         const isOffline = /could not resolve host|network is unreachable|connection refused|timed out/i.test(msg);
-        if (isOffline) {
-          console.debug("[store] fetch origin failed (offline), using local HEAD");
+        const noRemote = /does not appear to be a git repository|could not find remote|no remote|remote.*not found/i.test(msg);
+        if (isOffline || noRemote) {
+          console.debug("[store] fetch origin failed (offline or no remote), using local HEAD");
         } else {
           console.warn("[store] fetch origin failed:", msg);
           toast.warning(tt('toasts.fetchFailed'));
@@ -646,10 +647,9 @@ export const useKannaStore = defineStore("kanna", () => {
       if (!repo) return;
       await removePipelineItemTag(_db, item.id, "done");
       await updatePipelineItemActivity(_db, item.id, "working");
-      selectedItemId.value = item.id;
-      emitTaskSelected(item.id);
       bump();
-      // Re-spawn session for tasks that have a worktree (blocked tasks don't)
+      // Spawn before selecting so the terminal mounts with the session already alive
+      // (avoids a race where the terminal's spawn-on-mount and this spawn both fire)
       if (item.branch) {
         const worktreePath = `${repo.path}/.kanna-worktrees/${item.branch}`;
         try {
@@ -658,6 +658,8 @@ export const useKannaStore = defineStore("kanna", () => {
           console.warn("[store] session re-spawn after undo failed:", spawnErr);
         }
       }
+      selectedItemId.value = item.id;
+      emitTaskSelected(item.id);
     } catch (e) {
       console.error("[store] undo close failed:", e);
       toast.error(tt('toasts.undoCloseFailed'));
