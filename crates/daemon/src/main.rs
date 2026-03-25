@@ -25,6 +25,10 @@ type SessionWriters = Arc<Mutex<HashMap<String, Vec<SessionWriter>>>>;
 type PreAttachBuffer = Arc<Mutex<Option<Vec<u8>>>>;
 type PreAttachBuffers = Arc<Mutex<HashMap<String, PreAttachBuffer>>>;
 
+/// Per-session size registry: maps client pointer → (cols, rows).
+/// Used to compute min(cols) x min(rows) across all attached clients.
+type SessionSizes = Arc<Mutex<HashMap<String, HashMap<usize, (u16, u16)>>>>;
+
 use protocol::{Command, Event};
 use session::SessionManager;
 use socket::{bind_socket, read_command, write_event};
@@ -89,6 +93,7 @@ async fn main() {
     let sessions: Arc<Mutex<SessionManager>> = Arc::new(Mutex::new(SessionManager::new()));
     let session_writers: SessionWriters = Arc::new(Mutex::new(HashMap::new()));
     let pre_attach_buffers: PreAttachBuffers = Arc::new(Mutex::new(HashMap::new()));
+    let session_sizes: SessionSizes = Arc::new(Mutex::new(HashMap::new()));
 
     // Adopt handed-off sessions
     if !adopted.is_empty() {
@@ -125,6 +130,7 @@ async fn main() {
                 let hook_tx_clone = hook_tx.clone();
                 let writers_clone = session_writers.clone();
                 let buffers_clone = pre_attach_buffers.clone();
+                let sizes_clone = session_sizes.clone();
                 tokio::spawn(async move {
                     handle_connection(
                         stream,
@@ -132,6 +138,7 @@ async fn main() {
                         hook_tx_clone,
                         writers_clone,
                         buffers_clone,
+                        sizes_clone,
                     )
                     .await;
                 });
@@ -305,6 +312,7 @@ async fn handle_connection(
     hook_tx: broadcast::Sender<String>,
     session_writers: SessionWriters,
     pre_attach_buffers: PreAttachBuffers,
+    session_sizes: SessionSizes,
 ) {
     // Keep the raw fd for SCM_RIGHTS (used by Handoff)
     let raw_fd = stream.as_raw_fd();
@@ -324,6 +332,7 @@ async fn handle_connection(
                     raw_fd,
                     sessions.clone(),
                     session_writers.clone(),
+                    session_sizes.clone(),
                     writer.clone(),
                 )
                 .await;
@@ -354,6 +363,7 @@ async fn handle_connection(
                     &hook_tx,
                     session_writers.clone(),
                     pre_attach_buffers.clone(),
+                    session_sizes.clone(),
                 )
                 .await;
             }
@@ -368,6 +378,7 @@ async fn handle_command(
     hook_tx: &broadcast::Sender<String>,
     session_writers: SessionWriters,
     pre_attach_buffers: PreAttachBuffers,
+    session_sizes: SessionSizes,
 ) {
     match command {
         Command::Spawn {
@@ -411,8 +422,16 @@ async fn handle_command(
                         let sid = session_id.clone();
                         let sessions_exit = sessions.clone();
                         let writers_for_stream = session_writers.clone();
+                        let sizes_for_stream = session_sizes.clone();
                         tokio::task::spawn_blocking(move || {
-                            stream_output(sid, reader, writers_for_stream, buffer, sessions_exit);
+                            stream_output(
+                                sid,
+                                reader,
+                                writers_for_stream,
+                                buffer,
+                                sessions_exit,
+                                sizes_for_stream,
+                            );
                         });
                     }
 
@@ -496,6 +515,7 @@ async fn handle_command(
                 let sid = session_id.clone();
                 let sessions_exit = sessions.clone();
                 let writers_for_stream = session_writers.clone();
+                let sizes_for_stream = session_sizes.clone();
                 let no_buffer: PreAttachBuffer = Arc::new(Mutex::new(None));
                 tokio::task::spawn_blocking(move || {
                     stream_output(
@@ -504,6 +524,7 @@ async fn handle_command(
                         writers_for_stream,
                         no_buffer,
                         sessions_exit,
+                        sizes_for_stream,
                     );
                 });
             }
@@ -516,6 +537,26 @@ async fn handle_command(
                     let ptr = Arc::as_ptr(&writer) as usize;
                     vec.retain(|w| Arc::as_ptr(w) as usize != ptr);
                 }
+                drop(writers);
+
+                // Remove this client from the size registry and recompute
+                {
+                    let mut sizes = session_sizes.lock().await;
+                    if let Some(client_sizes) = sizes.get_mut(&session_id) {
+                        let writer_id = Arc::as_ptr(&writer) as usize;
+                        client_sizes.remove(&writer_id);
+                        if !client_sizes.is_empty() {
+                            let min_cols =
+                                client_sizes.values().map(|(c, _)| *c).min().unwrap_or(80);
+                            let min_rows =
+                                client_sizes.values().map(|(_, r)| *r).min().unwrap_or(24);
+                            drop(sizes);
+                            let mgr = sessions.lock().await;
+                            let _ = mgr.resize(&session_id, min_cols, min_rows);
+                        }
+                    }
+                }
+
                 Event::Ok
             } else {
                 Event::Error {
@@ -556,8 +597,30 @@ async fn handle_command(
             cols,
             rows,
         } => {
+            // Update this client's size in the registry
+            let writer_id = Arc::as_ptr(&writer) as usize;
+            {
+                let mut sizes = session_sizes.lock().await;
+                sizes
+                    .entry(session_id.clone())
+                    .or_default()
+                    .insert(writer_id, (cols, rows));
+            }
+
+            // Compute effective size: min across all attached clients
+            let (eff_cols, eff_rows) = {
+                let sizes = session_sizes.lock().await;
+                if let Some(client_sizes) = sizes.get(&session_id) {
+                    let min_cols = client_sizes.values().map(|(c, _)| *c).min().unwrap_or(cols);
+                    let min_rows = client_sizes.values().map(|(_, r)| *r).min().unwrap_or(rows);
+                    (min_cols, min_rows)
+                } else {
+                    (cols, rows)
+                }
+            };
+
             let mgr = sessions.lock().await;
-            let result = mgr.resize(&session_id, cols, rows);
+            let result = mgr.resize(&session_id, eff_cols, eff_rows);
             drop(mgr);
             let evt = match result {
                 Ok(_) => Event::Ok,
@@ -609,6 +672,7 @@ async fn handle_command(
             }
             drop(mgr);
             session_writers.lock().await.remove(&session_id);
+            session_sizes.lock().await.remove(&session_id);
             let evt = match result {
                 Ok(_) => Event::Ok,
                 Err(e) => Event::Error {
@@ -665,6 +729,7 @@ async fn handle_handoff(
     socket_fd: std::os::unix::io::RawFd,
     sessions: Arc<Mutex<SessionManager>>,
     session_writers: SessionWriters,
+    session_sizes: SessionSizes,
     writer: Arc<Mutex<tokio::net::unix::OwnedWriteHalf>>,
 ) {
     if version != HANDOFF_VERSION {
@@ -707,6 +772,7 @@ async fn handle_handoff(
 
     // Clear all writer slots (stream_output tasks will exit on next read failure)
     session_writers.lock().await.clear();
+    session_sizes.lock().await.clear();
 
     log::info!("[handoff] transferring {} sessions", infos.len());
 
@@ -757,6 +823,7 @@ fn stream_output(
     session_writers: SessionWriters,
     pre_attach_buffer: PreAttachBuffer,
     sessions: Arc<Mutex<SessionManager>>,
+    session_sizes: SessionSizes,
 ) {
     let rt = tokio::runtime::Handle::current();
     let mut buf = [0u8; 4096];
@@ -835,5 +902,7 @@ fn stream_output(
             }
         }
         writers.remove(&session_id);
+        drop(writers);
+        session_sizes.lock().await.remove(&session_id);
     });
 }
