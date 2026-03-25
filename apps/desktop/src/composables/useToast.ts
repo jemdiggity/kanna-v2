@@ -6,8 +6,7 @@ export interface Toast {
   message: string
 }
 
-const MAX_VISIBLE = 3
-const DURATIONS = { warning: 3000, error: 5000 } as const
+const DURATIONS = { warning: 5000, error: 8000 } as const
 
 const toasts = ref<Toast[]>([])
 const timers = new Map<number, ReturnType<typeof setTimeout>>()
@@ -26,11 +25,6 @@ function dismiss(id: number) {
 function add(type: Toast['type'], message: string) {
   const id = nextId++
   const toast: Toast = { id, type, message }
-
-  // Evict oldest if at capacity
-  while (toasts.value.length >= MAX_VISIBLE) {
-    dismiss(toasts.value[0].id)
-  }
 
   toasts.value.push(toast)
   timers.set(id, setTimeout(() => dismiss(id), DURATIONS[type]))
