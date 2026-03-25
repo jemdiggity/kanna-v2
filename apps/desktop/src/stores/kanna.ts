@@ -582,7 +582,7 @@ export const useKannaStore = defineStore("kanna", () => {
             await Promise.all([
               invoke("kill_session", { sessionId: item.id }).catch((e: unknown) =>
                 console.error("[store] kill_session failed:", e)),
-              invoke("kill_session", { sessionId: `shell-${item.id}` }).catch((e: unknown) =>
+              invoke("kill_session", { sessionId: `shell-wt-${item.id}` }).catch((e: unknown) =>
                 console.error("[store] kill shell session failed:", e)),
             ]);
             await checkUnblocked(item.id);
@@ -596,7 +596,7 @@ export const useKannaStore = defineStore("kanna", () => {
       await Promise.all([
         invoke("kill_session", { sessionId: item.id }).catch((e: unknown) =>
           console.error("[store] kill_session failed:", e)),
-        invoke("kill_session", { sessionId: `shell-${item.id}` }).catch((e: unknown) =>
+        invoke("kill_session", { sessionId: `shell-wt-${item.id}` }).catch((e: unknown) =>
           console.error("[store] kill shell session failed:", e)),
       ]);
 
@@ -779,7 +779,7 @@ export const useKannaStore = defineStore("kanna", () => {
     }
     try {
       await invoke("kill_session", { sessionId: originalId }).catch((e: unknown) => console.error("[store] kill_session failed:", e));
-      await invoke("kill_session", { sessionId: `shell-${originalId}` }).catch((e: unknown) => console.error("[store] kill shell session failed:", e));
+      await invoke("kill_session", { sessionId: `shell-wt-${originalId}` }).catch((e: unknown) => console.error("[store] kill shell session failed:", e));
       await addPipelineItemTag(_db, originalId, "done");
       await checkUnblocked(originalId);
       bump();
@@ -991,7 +991,7 @@ export const useKannaStore = defineStore("kanna", () => {
       await invoke("kill_session", { sessionId: originalId }).catch((e: unknown) =>
         console.error("[store] kill_session failed:", e)
       );
-      await invoke("kill_session", { sessionId: `shell-${originalId}` }).catch((e: unknown) =>
+      await invoke("kill_session", { sessionId: `shell-wt-${originalId}` }).catch((e: unknown) =>
         console.error("[store] kill shell session failed:", e)
       );
 
