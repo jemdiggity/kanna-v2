@@ -16,7 +16,8 @@ registerContextShortcuts("tree", [
   { label: "Close", display: "Esc" },
 ]);
 
-const { zIndex } = useModalZIndex();
+const { zIndex, bringToFront } = useModalZIndex();
+defineExpose({ zIndex, bringToFront });
 
 const props = defineProps<{
   worktreePath: string;

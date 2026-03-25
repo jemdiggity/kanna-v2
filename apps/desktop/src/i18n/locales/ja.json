@@ -50,6 +50,7 @@
     "commandPalette": "コマンドパレット",
     "viewDiff": "差分表示",
     "shellTerminal": "シェルターミナル",
+    "shellRepoRoot": "リポジトリルートでシェル",
     "openInIDE": "IDEで開く",
     "zenMode": "集中モード",
     "maximize": "最大化",

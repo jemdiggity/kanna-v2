@@ -50,6 +50,7 @@
     "commandPalette": "Command Palette",
     "viewDiff": "View Diff",
     "shellTerminal": "Shell Terminal",
+    "shellRepoRoot": "Shell at Repo Root",
     "openInIDE": "Open in IDE",
     "zenMode": "Zen Mode",
     "maximize": "Maximize",

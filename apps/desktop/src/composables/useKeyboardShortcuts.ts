@@ -28,7 +28,8 @@ export type ActionName =
   | "blockTask"
   | "editBlockedTask"
   | "toggleTreeExplorer"
-  | "openPreferences";
+  | "openPreferences"
+  | "openShellRepoRoot";
 
 export type KeyboardActions = Record<ActionName, () => void>;
 
@@ -69,8 +70,9 @@ export const shortcuts: ShortcutDef[] = [
   { action: "openFile",       labelKey: "shortcuts.filePicker",     groupKey: "shortcuts.groupNavigation", key: "p",                         meta: true,               display: "⌘P",       context: ["main"] },
   { action: "commandPalette", labelKey: "shortcuts.commandPalette", groupKey: "shortcuts.groupNavigation", key: ["P", "p"],                  meta: true, shift: true,  display: "⇧⌘P",     context: ["main"] },
   // Views — panels, modes, and display
-  { action: "showDiff",       labelKey: "shortcuts.viewDiff",       groupKey: "shortcuts.groupViews",      key: "d",                         meta: true, display: "⌘D",                       context: ["main"] },
+  { action: "showDiff",       labelKey: "shortcuts.viewDiff",       groupKey: "shortcuts.groupViews",      key: "d",                         meta: true, display: "⌘D",                       context: ["main", "diff", "shell"] },
   { action: "openShell",      labelKey: "shortcuts.shellTerminal",  groupKey: "shortcuts.groupViews",      key: "j",                         meta: true,               display: "⌘J",       context: ["main", "diff", "shell"] },
+  { action: "openShellRepoRoot", labelKey: "shortcuts.shellRepoRoot", groupKey: "shortcuts.groupViews",   key: ["J", "j"],                  meta: true, shift: true,  display: "⇧⌘J",     context: ["main", "diff", "shell"] },
   { action: "openInIDE",      labelKey: "shortcuts.openInIDE",      groupKey: "shortcuts.groupViews",      key: "o",                         meta: true,               display: "⌘O",       context: ["main"] },
   { action: "toggleMaximize", labelKey: "shortcuts.maximize",       groupKey: "shortcuts.groupViews",      key: "Enter",                     meta: true, shift: true,  display: "⇧⌘Enter", context: ["diff", "file", "shell"] },
   // Window — disabled until #24 (new window state sharing)
@@ -81,12 +83,12 @@ export const shortcuts: ShortcutDef[] = [
   { action: "importRepo",   labelKey: "shortcuts.importClone",    groupKey: "shortcuts.groupNavigation", key: ["I", "i"],                     meta: true, shift: true,  display: "⇧⌘I",     context: ["main"] },
   { action: "goBack",       labelKey: "shortcuts.goBack",         groupKey: "shortcuts.groupNavigation", key: "-",                            ctrl: true,               display: "⌃-",       context: ["main"] },
   { action: "goForward",    labelKey: "shortcuts.goForward",      groupKey: "shortcuts.groupNavigation", key: ["_", "-"],                     ctrl: true, shift: true,  display: "⌃⇧-",     context: ["main"] },
-  { action: "toggleTreeExplorer", labelKey: "shortcuts.treeExplorer", groupKey: "shortcuts.groupNavigation", key: "e", meta: true, shift: true, display: "⇧⌘E", context: ["main", "shell"] },
+  { action: "toggleTreeExplorer", labelKey: "shortcuts.treeExplorer", groupKey: "shortcuts.groupNavigation", key: "e", meta: true, shift: true, display: "⇧⌘E", context: ["main", "diff", "shell"] },
   // Settings
   { action: "openPreferences", labelKey: "shortcuts.preferences", groupKey: "shortcuts.groupHelp", key: ",",                            meta: true,               display: "⌘,",       context: ["main"] },
   // Help — ⇧⌘/ must come before ⌘/ so the more specific shortcut matches first
   { action: "showAllShortcuts", labelKey: "shortcuts.allShortcuts",       groupKey: "shortcuts.groupHelp",   key: "/",                           meta: true, shift: true,  display: "⇧⌘/",     context: ["main", "file", "shell"], hidden: true },
-  { action: "showShortcuts",  labelKey: "shortcuts.keyboardShortcuts",  groupKey: "shortcuts.groupHelp",   key: "/",                           meta: true,               display: "⌘/",       context: ["main"] },
+  { action: "showShortcuts",  labelKey: "shortcuts.keyboardShortcuts",  groupKey: "shortcuts.groupHelp",   key: "/",                           meta: true,               display: "⌘/",       context: ["main", "diff", "file", "shell"] },
   // Escape is special — no meta required
   { action: "dismiss",    labelKey: "shortcuts.dismiss",       groupKey: "shortcuts.groupNavigation", key: "Escape",                                                 display: "Escape",   context: ["main", "diff", "file", "shell"] },
 ];

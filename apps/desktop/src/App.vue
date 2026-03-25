@@ -32,6 +32,7 @@ import { useCustomTasks } from "./composables/useCustomTasks";
 import { useToast } from "./composables/useToast";
 import { useGc } from "./composables/useGc";
 import { useRestoreFocus } from "./composables/useRestoreFocus";
+import { isTopModal } from "./composables/useModalZIndex";
 import { useKannaStore } from "./stores/kanna";
 import { NEW_CUSTOM_TASK_PROMPT } from "@kanna/core";
 import type { CustomTaskConfig } from "@kanna/core";
@@ -63,6 +64,7 @@ const activeWorktreePath = computed(() =>
   store.currentItem?.branch ? `${store.selectedRepo?.path}/.kanna-worktrees/${store.currentItem.branch}` : store.selectedRepo?.path ?? ""
 );
 const showShellModal = ref(false);
+const shellRepoRoot = ref(false);
 const showCommandPalette = ref(false);
 const commandUsageCounts = ref<Record<string, number>>({});
 const showAnalyticsModal = ref(false);
@@ -82,6 +84,7 @@ const maximized = computed(() => maximizedModal.value !== null);
 const sidebarRef = ref<InstanceType<typeof Sidebar> | null>(null);
 const shellModalRef = ref<InstanceType<typeof ShellModal> | null>(null);
 const diffModalRef = ref<InstanceType<typeof DiffModal> | null>(null);
+const treeExplorerRef = ref<InstanceType<typeof TreeExplorerModal> | null>(null);
 
 // Navigation
 function selectItemAcrossRepos(itemId: string) {
@@ -319,7 +322,16 @@ const keyboardActions = {
     }
   },
   toggleTreeExplorer: () => {
-    showTreeExplorer.value = !showTreeExplorer.value;
+    if (showTreeExplorer.value) {
+      const z = treeExplorerRef.value?.zIndex ?? 0;
+      if (isTopModal(z)) {
+        showTreeExplorer.value = false;
+      } else {
+        treeExplorerRef.value?.bringToFront();
+      }
+    } else {
+      showTreeExplorer.value = true;
+    }
   },
   openInIDE: async () => {
     const item = store.currentItem;
@@ -353,20 +365,46 @@ const keyboardActions = {
     if (showAddRepoModal.value) { showAddRepoModal.value = false; return; }
   },
   openShell: () => {
-    if (!showShellModal.value) {
-      showShellModal.value = true;
-      return;
-    }
-    // Shell is open — check if it's the topmost modal
-    const shellZ = shellModalRef.value?.zIndex ?? 0;
-    const diffZ = showDiffModal.value ? (diffModalRef.value?.zIndex ?? 0) : 0;
-    if (shellZ >= diffZ) {
-      showShellModal.value = false;
+    if (!store.selectedRepo || !store.currentItem) return;
+    if (showShellModal.value && !shellRepoRoot.value) {
+      const z = shellModalRef.value?.zIndex ?? 0;
+      if (isTopModal(z)) {
+        showShellModal.value = false;
+      } else {
+        shellModalRef.value?.bringToFront();
+      }
     } else {
-      shellModalRef.value?.bringToFront();
+      shellRepoRoot.value = false;
+      showShellModal.value = true;
     }
   },
-  showDiff: () => { showDiffModal.value = !showDiffModal.value; },
+  openShellRepoRoot: () => {
+    if (!store.selectedRepo) return;
+    if (showShellModal.value && shellRepoRoot.value) {
+      const z = shellModalRef.value?.zIndex ?? 0;
+      if (isTopModal(z)) {
+        showShellModal.value = false;
+      } else {
+        shellModalRef.value?.bringToFront();
+      }
+    } else {
+      shellRepoRoot.value = true;
+      showShellModal.value = true;
+    }
+  },
+  showDiff: () => {
+    if (!store.selectedRepo) return;
+    if (showDiffModal.value) {
+      const z = diffModalRef.value?.zIndex ?? 0;
+      if (isTopModal(z)) {
+        showDiffModal.value = false;
+      } else {
+        diffModalRef.value?.bringToFront();
+      }
+    } else {
+      showDiffModal.value = true;
+    }
+  },
   showShortcuts: () => {
     if (showShortcutsModal.value) {
       if (shortcutsStartFull.value && currentShortcutContext.value !== "main") {
@@ -634,11 +672,11 @@ onMounted(async () => {
     <KeepAlive :max="10">
       <ShellModal
         ref="shellModalRef"
-        v-if="showShellModal && store.currentItem"
-        :key="`shell-${store.currentItem.id}`"
-        :session-id="`shell-${store.currentItem.id}`"
-        :cwd="store.currentItem.branch ? `${store.selectedRepo?.path}/.kanna-worktrees/${store.currentItem.branch}` : store.selectedRepo?.path || '/tmp'"
-        :port-env="store.currentItem.port_env"
+        v-if="showShellModal && store.selectedRepo && (shellRepoRoot || store.currentItem)"
+        :key="`shell-${shellRepoRoot ? 'repo' : 'wt'}-${store.currentItem?.id ?? 'repo'}`"
+        :session-id="`shell-${shellRepoRoot ? 'repo' : 'wt'}-${store.currentItem?.id ?? 'repo'}`"
+        :cwd="shellRepoRoot ? store.selectedRepo.path : (store.currentItem?.branch ? `${store.selectedRepo.path}/.kanna-worktrees/${store.currentItem.branch}` : store.selectedRepo.path)"
+        :port-env="store.currentItem?.port_env"
         :maximized="maximizedModal === 'shell'"
         @close="showShellModal = false; maximizedModal = null"
       />
@@ -660,6 +698,7 @@ onMounted(async () => {
       @select="(f: string) => { showFilePickerModal = false; previewFilePath = f; showFilePreviewModal = true; }"
     />
     <TreeExplorerModal
+      ref="treeExplorerRef"
       v-if="showTreeExplorer && store.selectedRepo?.path"
       :worktree-path="activeWorktreePath"
       :repo-root="activeWorktreePath"

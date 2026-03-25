@@ -96,9 +96,12 @@ export const useKannaStore = defineStore("kanna", () => {
   );
 
   const currentItem = computed(() => {
-    if (!selectedItemId.value) return null;
-    const item = items.value.find((i) => i.id === selectedItemId.value);
-    return item && !hasTag(item, "done") ? item : null;
+    if (selectedItemId.value) {
+      const item = items.value.find((i) => i.id === selectedItemId.value);
+      if (item && !hasTag(item, "done")) return item;
+    }
+    // Auto-select first task in current repo if nothing valid is selected
+    return sortedItemsForCurrentRepo.value[0] ?? null;
   });
 
   function sortItemsForRepo(repoId: string): PipelineItem[] {

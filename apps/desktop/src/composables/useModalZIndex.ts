@@ -2,16 +2,23 @@ import { ref, onMounted, onUnmounted, onActivated, onDeactivated } from "vue";
 import type { Ref } from "vue";
 
 const BASE = 1000;
+let nextZ = BASE;
 const stack = ref<number[]>([]);
 
 function push(): number {
-  const z = BASE + stack.value.length;
+  const z = nextZ++;
   stack.value.push(z);
   return z;
 }
 
 function remove(z: number): void {
   stack.value = stack.value.filter((v) => v !== z);
+}
+
+/** Returns true if the given z-index is the highest in the modal stack. */
+export function isTopModal(z: number): boolean {
+  const s = stack.value;
+  return s.length > 0 && s[s.length - 1] === z;
 }
 
 /**
