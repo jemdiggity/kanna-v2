@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { ref, onMounted, onActivated, onDeactivated, nextTick } from "vue";
-import { invoke } from "../invoke";
 import TerminalView from "./TerminalView.vue";
 import { useShortcutContext, setContext, resetContext } from "../composables/useShortcutContext";
 import { useModalZIndex } from "../composables/useModalZIndex";
+import { useKannaStore } from "../stores/kanna";
 
 const props = defineProps<{
   sessionId: string;
@@ -14,6 +14,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{ (e: "close"): void }>();
 const termRef = ref<InstanceType<typeof TerminalView> | null>(null);
+const store = useKannaStore();
 
 useShortcutContext("shell");
 const { zIndex, bringToFront } = useModalZIndex();
@@ -34,25 +35,9 @@ onActivated(async () => {
   termRef.value?.focus();
 });
 
-async function spawnShell(sessionId: string, cwd: string, _prompt: string, cols: number, rows: number) {
-  const env: Record<string, string> = { TERM: "xterm-256color", KANNA_WORKTREE: "1" };
-  if (props.portEnv) {
-    try { Object.assign(env, JSON.parse(props.portEnv)); } catch {}
-  }
-  // Use Kanna's zsh init dir so we can set defaults (e.g. emacs keybindings)
-  // before the user's .zshrc, which can override them.
-  try {
-    env.ZDOTDIR = await invoke<string>("ensure_term_init");
-  } catch (e) { console.error("[shell] failed to set up term init:", e); }
-  await invoke("spawn_session", {
-    sessionId,
-    cwd,
-    executable: "/bin/zsh",
-    args: ["--login"],
-    env,
-    cols,
-    rows,
-  });
+async function spawnShell(sessionId: string, cwd: string, _prompt: string, _cols: number, _rows: number) {
+  const isWorktree = !sessionId.startsWith("shell-repo-");
+  await store.spawnShellSession(sessionId, cwd, props.portEnv, isWorktree);
 }
 </script>
 
