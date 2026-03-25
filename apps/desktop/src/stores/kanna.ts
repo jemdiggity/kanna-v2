@@ -6,6 +6,7 @@ import { useToast } from '../composables/useToast';
 import { isTauri } from "../tauri-mock";
 import { listen } from "../listen";
 import { parseRepoConfig, parseAgentMd, hasTag } from "@kanna/core";
+import { createNavigationHistory } from "../composables/useNavigationHistory";
 import type { RepoConfig, CustomTaskConfig } from "@kanna/core";
 import type { DbHandle, PipelineItem, Repo } from "@kanna/db";
 import i18n from '../i18n';
@@ -76,9 +77,12 @@ export const useKannaStore = defineStore("kanna", () => {
     return loaded;
   }, []);
 
-  // ── Selection state ──────────────────────────────────────────────
+  // ── Selection & navigation history ──────────────────────────────
   const selectedRepoId = ref<string | null>(null);
   const selectedItemId = ref<string | null>(null);
+  const nav = createNavigationHistory();
+  const canGoBack = nav.canGoBack;
+  const canGoForward = nav.canGoForward;
 
   // ── Preferences ──────────────────────────────────────────────────
   const suspendAfterMinutes = ref(30);
@@ -150,10 +154,49 @@ export const useKannaStore = defineStore("kanna", () => {
     );
   }, { debounce: 1000 });
 
+  /** Select a task, recording the previous one in navigation history. */
   async function selectItem(itemId: string) {
+    nav.select(itemId, selectedItemId.value);
     selectedItemId.value = itemId;
     await setSetting(_db, "selected_item_id", itemId);
     emitTaskSelected(itemId);
+  }
+
+  /** Restore selection without recording history (startup / DB restore). */
+  function restoreSelection(itemId: string) {
+    selectedItemId.value = itemId;
+  }
+
+  /** Navigate back, switching repos if needed. */
+  function goBack() {
+    if (!selectedItemId.value) return;
+    const validIds = new Set(items.value.filter((i) => !hasTag(i, "done")).map((i) => i.id));
+    const taskId = nav.goBack(selectedItemId.value, validIds);
+    if (!taskId) return;
+    const item = items.value.find((i) => i.id === taskId);
+    if (item && item.repo_id !== selectedRepoId.value) {
+      selectedRepoId.value = item.repo_id;
+      setSetting(_db, "selected_repo_id", item.repo_id);
+    }
+    selectedItemId.value = taskId;
+    setSetting(_db, "selected_item_id", taskId);
+    emitTaskSelected(taskId);
+  }
+
+  /** Navigate forward, switching repos if needed. */
+  function goForward() {
+    if (!selectedItemId.value) return;
+    const validIds = new Set(items.value.filter((i) => !hasTag(i, "done")).map((i) => i.id));
+    const taskId = nav.goForward(selectedItemId.value, validIds);
+    if (!taskId) return;
+    const item = items.value.find((i) => i.id === taskId);
+    if (item && item.repo_id !== selectedRepoId.value) {
+      selectedRepoId.value = item.repo_id;
+      setSetting(_db, "selected_repo_id", item.repo_id);
+    }
+    selectedItemId.value = taskId;
+    setSetting(_db, "selected_item_id", taskId);
+    emitTaskSelected(taskId);
   }
 
   // ── Actions: Repo management ─────────────────────────────────────
@@ -323,8 +366,7 @@ export const useKannaStore = defineStore("kanna", () => {
     }
 
     // Select after setup so the terminal mounts with the session already alive
-    selectedItemId.value = id;
-    emitTaskSelected(id);
+    await selectItem(id);
   }
 
   async function readRepoConfig(repoPath: string): Promise<RepoConfig> {
@@ -534,8 +576,12 @@ export const useKannaStore = defineStore("kanna", () => {
     const idx = sorted.findIndex((i) => i.id === closingId);
     const remaining = sorted.filter((i) => i.id !== closingId);
     const nextIdx = idx >= remaining.length ? remaining.length - 1 : idx;
-    selectedItemId.value = remaining[nextIdx]?.id || null;
-    if (selectedItemId.value) emitTaskSelected(selectedItemId.value);
+    const nextId = remaining[nextIdx]?.id || null;
+    if (nextId) {
+      selectItem(nextId);
+    } else {
+      selectedItemId.value = null;
+    }
   }
 
   async function closeTask() {
@@ -647,6 +693,7 @@ export const useKannaStore = defineStore("kanna", () => {
       if (!repo) return;
       await removePipelineItemTag(_db, item.id, "done");
       await updatePipelineItemActivity(_db, item.id, "working");
+      await selectItem(item.id);
       bump();
       // Spawn before selecting so the terminal mounts with the session already alive
       // (avoids a race where the terminal's spawn-on-mount and this spawn both fire)
@@ -1027,8 +1074,7 @@ export const useKannaStore = defineStore("kanna", () => {
     }
 
     bump();
-    selectedItemId.value = newId;
-    emitTaskSelected(newId);
+    await selectItem(newId);
   }
 
   async function editBlockedTask(itemId: string, newBlockerIds: string[]) {
@@ -1107,7 +1153,7 @@ export const useKannaStore = defineStore("kanna", () => {
     if (savedRepo && eagerRepos.some((r) => r.id === savedRepo)) {
       selectedRepoId.value = savedRepo;
       if (savedItem && eagerItems.some((i) => i.id === savedItem)) {
-        selectedItemId.value = savedItem;
+        restoreSelection(savedItem);
       }
     } else if (eagerRepos.length === 1) {
       selectedRepoId.value = eagerRepos[0].id;
@@ -1181,6 +1227,7 @@ export const useKannaStore = defineStore("kanna", () => {
   return {
     // State
     repos, items, selectedRepoId, selectedItemId,
+    canGoBack, canGoForward,
     suspendAfterMinutes, killAfterMinutes,
     ideCommand, gcAfterDays, hideShortcutsOnStartup,
     lastUndoAction, refreshKey,
@@ -1188,7 +1235,7 @@ export const useKannaStore = defineStore("kanna", () => {
     selectedRepo, currentItem, sortedItemsForCurrentRepo, sortedItemsAllRepos,
     // Actions
     bump, init,
-    selectRepo, selectItem,
+    selectRepo, selectItem, goBack, goForward,
     importRepo, createRepo, cloneAndImportRepo, hideRepo,
     createItem, spawnPtySession, closeTask, undoClose,
     startPrAgent, startMergeAgent, makePR, mergeQueue,

@@ -25,7 +25,6 @@ import PreferencesPanel from "./components/PreferencesPanel.vue";
 import ToastContainer from "./components/ToastContainer.vue";
 import { useKeyboardShortcuts, type ActionName } from "./composables/useKeyboardShortcuts";
 import { startPeriodicBackup } from "./composables/useBackup";
-import { createNavigationHistory } from "./composables/useNavigationHistory";
 import { useOperatorEvents } from "./composables/useOperatorEvents";
 import { type ShortcutContext } from "./composables/useShortcutContext";
 import { useCustomTasks } from "./composables/useCustomTasks";
@@ -45,7 +44,6 @@ const db = inject<DbHandle>("db")!;
 const dbName = inject<string>("dbName")!;
 const { tasks: customTasks, scan: scanCustomTasks } = useCustomTasks();
 const gcRef = ref<{ runGc: () => Promise<void> }>();
-const { recordNavigation, goBack, goForward } = createNavigationHistory();
 useOperatorEvents(computed(() => db) as unknown as Ref<DbHandle | null>);
 
 // UI state
@@ -87,14 +85,6 @@ const diffModalRef = ref<InstanceType<typeof DiffModal> | null>(null);
 const treeExplorerRef = ref<InstanceType<typeof TreeExplorerModal> | null>(null);
 
 // Navigation
-function selectItemAcrossRepos(itemId: string) {
-  const item = store.items.find((i) => i.id === itemId);
-  if (item && item.repo_id !== store.selectedRepoId) {
-    store.selectRepo(item.repo_id);
-  }
-  store.selectItem(itemId);
-}
-
 function navigateItems(direction: -1 | 1) {
   const allItems = store.sortedItemsAllRepos;
   if (allItems.length === 0) return;
@@ -109,7 +99,6 @@ function navigateItems(direction: -1 | 1) {
   }
   const nextItem = allItems[nextIndex];
   if (nextItem.id !== store.selectedItemId) {
-    if (store.selectedItemId) recordNavigation(store.selectedItemId);
     if (nextItem.repo_id !== store.selectedRepoId) {
       store.selectRepo(nextItem.repo_id);
     }
@@ -444,18 +433,8 @@ const keyboardActions = {
     }
   },
   showAnalytics: () => { showAnalyticsModal.value = !showAnalyticsModal.value; },
-  goBack: () => {
-    if (!store.selectedItemId) return;
-    const validIds = new Set(store.items.filter((i) => !hasTag(i, "done")).map((i) => i.id));
-    const taskId = goBack(store.selectedItemId, validIds);
-    if (taskId) selectItemAcrossRepos(taskId);
-  },
-  goForward: () => {
-    if (!store.selectedItemId) return;
-    const validIds = new Set(store.items.filter((i) => !hasTag(i, "done")).map((i) => i.id));
-    const taskId = goForward(store.selectedItemId, validIds);
-    if (taskId) selectItemAcrossRepos(taskId);
-  },
+  goBack: () => store.goBack(),
+  goForward: () => store.goForward(),
   createRepo: () => { addRepoInitialTab.value = "create"; showAddRepoModal.value = true; },
   importRepo: () => { addRepoInitialTab.value = "import"; showAddRepoModal.value = true; },
   blockTask: () => { handleBlockTask(); },
@@ -488,9 +467,6 @@ const anyModalOpen = computed(() =>
 useRestoreFocus(anyModalOpen);
 
 function handleSelectItem(itemId: string) {
-  if (store.selectedItemId && store.selectedItemId !== itemId) {
-    recordNavigation(store.selectedItemId);
-  }
   store.selectItem(itemId);
 }
 
