@@ -8,10 +8,12 @@ kanna-daemon manages persistent PTY sessions for Claude CLI agents. It runs as a
 
 1. **One daemon at a time.** Only one daemon process owns the socket. A new daemon always replaces the old one.
 2. **Always handoff.** When a new daemon starts and an old one is running, the new daemon takes over all live sessions via fd transfer. The old daemon exits.
-3. **Always spawn.** The app always spawns a new daemon on startup. It never reuses an existing daemon. This guarantees the running daemon matches the installed binary.
+3. **Always spawn on first startup. Reconnect (don't spawn) on daemon restart. Spawn again only if reconnect backoff is exhausted (daemon crash recovery).**
 4. **Sessions survive upgrades.** Child processes (Claude CLI) are unaware of daemon restarts. Their PTY connections are preserved through fd transfer.
-5. **One reader per session.** Each PTY session has exactly one `stream_output` task. It is created on the first `Attach` and runs for the session's lifetime.
-6. **One client per session.** Only one connection receives output at a time. `Attach` swaps the output target atomically.
+5. **One reader per session.** Each PTY session has exactly one `stream_output` task. It is created on the first `Attach` and runs for the session's lifetime. Still one reader per session, but output is broadcast to all attached writers.
+6. **Multiple clients per session.** Attach adds to writer list. All attached clients receive output via broadcast. Smallest terminal dimensions are used for the PTY.
+7. **Always broadcast.** Before exiting during handoff, the old daemon broadcasts `ShuttingDown` to all subscribers.
+8. **Always reconnect.** Apps detect daemon restart (via `ShuttingDown` or EOF) and automatically reconnect + re-attach all tracked sessions.
 
 ## Startup Sequence
 
@@ -41,24 +43,24 @@ If handoff fails at any step, the new daemon kills the old one and starts fresh.
     Spawn ──► PTY created, session stored
                     │
                     ▼
-    Attach ──► first: clone reader, start stream_output, set writer
-               reattach: swap writer, send resize (SIGWINCH)
+    Attach ──► first: clone reader, start stream_output, add to writer list
+               reattach: add writer to list, send resize (SIGWINCH)
                     │
                     ▼
-              Output flows: PTY → stream_output → ActiveWriter → client
+              Output flows: PTY → stream_output → broadcast → all clients
                     │
               ┌─────┴──────┐
               ▼             ▼
     Tab switch away    Process exits
               │             │
               ▼             ▼
-    Detach (writer=None)   Exit event sent, session removed
+    Detach (remove from writer list)   Exit event sent, session removed
               │
               ▼
     Tab switch back
               │
               ▼
-    Attach (reattach) ──► swap writer, resize → Claude redraws
+    Attach (reattach) ──► add writer to list, resize → Claude redraws
 ```
 
 ## Reconnection
@@ -148,6 +150,7 @@ Line-delimited JSON over Unix domain socket. Each message is one JSON object + `
 | `SessionList` | sessions | Response to List |
 | `HandoffReady` | sessions | Session metadata (followed by SCM_RIGHTS) |
 | `HookEvent` | session_id, event, data | Broadcast hook event |
+| `ShuttingDown` | — | Daemon shutting down (handoff) |
 
 ## Logging
 
