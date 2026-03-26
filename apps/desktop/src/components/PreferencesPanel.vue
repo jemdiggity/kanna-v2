@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useModalZIndex } from '../composables/useModalZIndex'
 
@@ -38,11 +38,17 @@ function handleKeydown(e: KeyboardEvent) {
   }
 }
 
+const overlayRef = ref<HTMLDivElement | null>(null)
+
+onMounted(() => {
+  overlayRef.value?.focus()
+})
+
 defineExpose({ cycleTab })
 </script>
 
 <template>
-  <div class="modal-overlay" :style="{ zIndex }" @click.self="emit('close')" @keydown="handleKeydown">
+  <div ref="overlayRef" class="modal-overlay" :style="{ zIndex }" tabindex="-1" @click.self="emit('close')" @keydown="handleKeydown">
     <div class="prefs-panel">
       <div class="prefs-header">
         <div class="tab-bar">
@@ -130,6 +136,7 @@ defineExpose({ cycleTab })
   display: flex;
   align-items: center;
   justify-content: center;
+  outline: none;
 }
 
 .prefs-panel {
