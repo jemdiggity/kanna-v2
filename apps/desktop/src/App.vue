@@ -476,6 +476,23 @@ const anyModalOpen = computed(() =>
 );
 useRestoreFocus(anyModalOpen);
 
+// Restore focus after native macOS fullscreen exit.
+// WKWebView loses first-responder status during the exit animation, breaking
+// terminal input and keyboard shortcuts. The Rust side calls
+// evaluateJavaScript: after a delay, which triggers becomeFirstResponder on
+// WKWebView (WebKit Bug 143482 fix). We track the last meaningful focused
+// element and expose a global restore function for that call.
+let lastFocusedElement: HTMLElement | null = null;
+document.addEventListener("focusin", (e) => {
+  const el = e.target as HTMLElement;
+  if (el && el !== document.body) lastFocusedElement = el;
+});
+(window as unknown as Record<string, unknown>).__kannaRestoreFocus = () => {
+  if (lastFocusedElement) {
+    lastFocusedElement.focus();
+  }
+};
+
 function handleSelectItem(itemId: string) {
   store.selectItem(itemId);
 }

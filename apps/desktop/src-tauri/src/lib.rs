@@ -15,15 +15,20 @@ use tokio::sync::Mutex;
 /// toggles fullscreen.  The fn/Globe modifier sets NSEventModifierFlagFunction
 /// on the NSEvent, which JavaScript cannot detect — so we must handle it here,
 /// before the event reaches WKWebView / xterm.js.
+///
+/// After toggling fullscreen we schedule a focus-restore: WKWebView loses
+/// first-responder status during the exit animation, and calling
+/// `element.focus()` via `evaluateJavaScript:` triggers `becomeFirstResponder`
+/// on modern WebKit (Bug 143482 fix, 2015).
 #[cfg(target_os = "macos")]
-fn setup_fn_f_fullscreen() {
+fn setup_fn_f_fullscreen(app: tauri::AppHandle) {
     use objc2::msg_send;
     use objc2::rc::Retained;
     use objc2::runtime::{AnyClass, AnyObject};
     use std::ffi::{c_char, CStr};
     use std::ptr::{self, NonNull};
 
-    let block = block2::RcBlock::new(|event: NonNull<AnyObject>| -> *mut AnyObject {
+    let block = block2::RcBlock::new(move |event: NonNull<AnyObject>| -> *mut AnyObject {
         unsafe {
             let flags: usize = msg_send![event.as_ref(), modifierFlags];
 
@@ -40,12 +45,12 @@ fn setup_fn_f_fullscreen() {
                     if !utf8.is_null() {
                         if let Ok(s) = CStr::from_ptr(utf8).to_str() {
                             if s.eq_ignore_ascii_case("f") {
-                                if let Some(ns_app) = AnyClass::get(c"NSApplication") {
-                                    let app: Option<Retained<AnyObject>> =
-                                        msg_send![ns_app, sharedApplication];
-                                    if let Some(app) = app {
+                                if let Some(ns_app_cls) = AnyClass::get(c"NSApplication") {
+                                    let ns_app: Option<Retained<AnyObject>> =
+                                        msg_send![ns_app_cls, sharedApplication];
+                                    if let Some(ns_app) = ns_app {
                                         let win: Option<Retained<AnyObject>> =
-                                            msg_send![&*app, keyWindow];
+                                            msg_send![&*ns_app, keyWindow];
                                         if let Some(win) = win {
                                             let _: () = msg_send![
                                                 &*win,
@@ -54,6 +59,24 @@ fn setup_fn_f_fullscreen() {
                                         }
                                     }
                                 }
+                                // Schedule focus restoration after the ~700ms animation.
+                                // Webview::set_focus() calls wry's focus() which does
+                                // [window makeFirstResponder:webview] — restoring
+                                // keyboard event delivery to the WKWebView.
+                                // NOTE: WebviewWindow::set_focus() only focuses the
+                                // NSWindow; we need AsRef<Webview>::set_focus() to
+                                // reach the WKWebView's makeFirstResponder.
+                                let app_clone = app.clone();
+                                std::thread::spawn(move || {
+                                    std::thread::sleep(std::time::Duration::from_secs(1));
+                                    if let Some(w) = app_clone.get_webview_window("main") {
+                                        let wv: &tauri::Webview<_> = w.as_ref();
+                                        let _ = wv.set_focus();
+                                        let _ = wv.eval(
+                                            "window.__kannaRestoreFocus?.()"
+                                        );
+                                    }
+                                });
                                 return ptr::null_mut(); // consume the event
                             }
                         }
@@ -452,7 +475,7 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             {
                 fix_path_from_shell();
-                setup_fn_f_fullscreen();
+                setup_fn_f_fullscreen(app.handle().clone());
             }
 
             // Build app menu with full version in About
@@ -484,6 +507,25 @@ pub fn run() {
                 .item(&window_submenu)
                 .build()?;
             app.set_menu(menu)?;
+
+            // Restore webview focus when the window gains focus.
+            // This catches fullscreen exit (green button, View menu) and app
+            // switching — the WKWebView may not be first responder after these
+            // transitions.  Webview::set_focus() calls wry's makeFirstResponder.
+            if let Some(main_win) = app.get_webview_window("main") {
+                let mw = main_win.clone();
+                main_win.on_window_event(move |event| {
+                    if let tauri::WindowEvent::Focused(true) = event {
+                        let w = mw.clone();
+                        std::thread::spawn(move || {
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                            let wv: &tauri::Webview<_> = w.as_ref();
+                            let _ = wv.set_focus();
+                            let _ = wv.eval("window.__kannaRestoreFocus?.()");
+                        });
+                    }
+                });
+            }
 
             let handle = app.handle().clone();
             let handle_reattach = handle.clone();
