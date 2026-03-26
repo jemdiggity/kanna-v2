@@ -95,6 +95,12 @@ export const useKannaStore = defineStore("kanna", () => {
   // ── Undo state ───────────────────────────────────────────────────
   const lastUndoAction = ref<{ type: "hideRepo"; repoId: string } | null>(null);
 
+  // Items whose worktree + agent spawn is still in progress.
+  // Excluded from the currentItem auto-select fallback to prevent
+  // the terminal from mounting (and racing to spawn) before the
+  // session actually exists in the daemon.
+  const pendingSetupIds = ref<string[]>([]);
+
   // ── Computed getters ─────────────────────────────────────────────
   const selectedRepo = computed(() =>
     repos.value.find((r) => r.id === selectedRepoId.value) ?? null
@@ -105,8 +111,11 @@ export const useKannaStore = defineStore("kanna", () => {
       const item = items.value.find((i) => i.id === selectedItemId.value);
       if (item && !hasTag(item, "done")) return item;
     }
-    // Auto-select first task in current repo if nothing valid is selected
-    return sortedItemsForCurrentRepo.value[0] ?? null;
+    // Auto-select first task in current repo if nothing valid is selected.
+    // Skip items whose worktree/agent setup is still in progress — their
+    // terminal would race to spawn before the daemon session is ready.
+    return sortedItemsForCurrentRepo.value
+      .find(i => !pendingSetupIds.value.includes(i.id)) ?? null;
   });
 
   function sortItemsForRepo(repoId: string): PipelineItem[] {
@@ -313,6 +322,7 @@ export const useKannaStore = defineStore("kanna", () => {
       throw e;
     }
 
+    pendingSetupIds.value = [...pendingSetupIds.value, id];
     bump();
 
     // Worktree creation, config read, and agent spawn run in the background.
@@ -328,67 +338,71 @@ export const useKannaStore = defineStore("kanna", () => {
     agentType: "pty" | "sdk",
     opts?: { baseBranch?: string; tags?: string[]; customTask?: CustomTaskConfig },
   ) {
-    // Read config and create worktree concurrently — they're independent.
-    let repoConfig: RepoConfig;
     try {
-      const [config] = await Promise.all([
-        readRepoConfig(repoPath),
-        createWorktree(repoPath, branch, worktreePath, opts?.baseBranch),
-      ]);
-      repoConfig = config;
-    } catch (e) {
-      console.error("[store] git_worktree_add failed:", e);
-      toast.error(tt('toasts.worktreeFailed'));
-      return;
-    }
-
-    const portEnv = computePortEnv(repoConfig, portOffset);
-
-    if (Object.keys(portEnv).length > 0) {
-      await _db.execute(
-        "UPDATE pipeline_item SET port_env = ? WHERE id = ?",
-        [JSON.stringify(portEnv), id],
-      );
-    }
-
-    // Pre-warm shell for ⌘J — fire-and-forget, runs in parallel with agent spawn
-    spawnShellSession(`shell-wt-${id}`, worktreePath, JSON.stringify(portEnv))
-      .catch(e => console.error("[store] shell pre-warm failed:", e));
-
-    try {
-      if (agentType !== "pty") {
-        await invoke("create_agent_session", {
-          sessionId: id,
-          cwd: worktreePath,
-          prompt,
-          systemPrompt: null,
-          permissionMode: opts?.customTask?.permissionMode ?? null,
-          model: opts?.customTask?.model ?? null,
-          allowedTools: opts?.customTask?.allowedTools ?? null,
-          disallowedTools: opts?.customTask?.disallowedTools ?? null,
-          maxTurns: opts?.customTask?.maxTurns ?? null,
-          maxBudgetUsd: opts?.customTask?.maxBudgetUsd ?? null,
-        });
-      } else {
-        await spawnPtySession(id, worktreePath, prompt, 80, 24, {
-          model: opts?.customTask?.model,
-          permissionMode: opts?.customTask?.permissionMode,
-          allowedTools: opts?.customTask?.allowedTools,
-          disallowedTools: opts?.customTask?.disallowedTools,
-          maxTurns: opts?.customTask?.maxTurns,
-          maxBudgetUsd: opts?.customTask?.maxBudgetUsd,
-          setupCmdsOverride: opts?.customTask?.setup,
-          portEnv,
-          setupCmds: repoConfig.setup || [],
-        });
+      // Read config and create worktree concurrently — they're independent.
+      let repoConfig: RepoConfig;
+      try {
+        const [config] = await Promise.all([
+          readRepoConfig(repoPath),
+          createWorktree(repoPath, branch, worktreePath, opts?.baseBranch),
+        ]);
+        repoConfig = config;
+      } catch (e) {
+        console.error("[store] git_worktree_add failed:", e);
+        toast.error(tt('toasts.worktreeFailed'));
+        return;
       }
-    } catch (e) {
-      console.error("[store] agent spawn failed:", e);
-      toast.error(`${tt('toasts.agentStartFailed')}: ${e instanceof Error ? e.message : e}`);
-    }
 
-    // Select after setup so the terminal mounts with the session already alive
-    await selectItem(id);
+      const portEnv = computePortEnv(repoConfig, portOffset);
+
+      if (Object.keys(portEnv).length > 0) {
+        await _db.execute(
+          "UPDATE pipeline_item SET port_env = ? WHERE id = ?",
+          [JSON.stringify(portEnv), id],
+        );
+      }
+
+      // Pre-warm shell for ⌘J — fire-and-forget, runs in parallel with agent spawn
+      spawnShellSession(`shell-wt-${id}`, worktreePath, JSON.stringify(portEnv))
+        .catch(e => console.error("[store] shell pre-warm failed:", e));
+
+      try {
+        if (agentType !== "pty") {
+          await invoke("create_agent_session", {
+            sessionId: id,
+            cwd: worktreePath,
+            prompt,
+            systemPrompt: null,
+            permissionMode: opts?.customTask?.permissionMode ?? null,
+            model: opts?.customTask?.model ?? null,
+            allowedTools: opts?.customTask?.allowedTools ?? null,
+            disallowedTools: opts?.customTask?.disallowedTools ?? null,
+            maxTurns: opts?.customTask?.maxTurns ?? null,
+            maxBudgetUsd: opts?.customTask?.maxBudgetUsd ?? null,
+          });
+        } else {
+          await spawnPtySession(id, worktreePath, prompt, 80, 24, {
+            model: opts?.customTask?.model,
+            permissionMode: opts?.customTask?.permissionMode,
+            allowedTools: opts?.customTask?.allowedTools,
+            disallowedTools: opts?.customTask?.disallowedTools,
+            maxTurns: opts?.customTask?.maxTurns,
+            maxBudgetUsd: opts?.customTask?.maxBudgetUsd,
+            setupCmdsOverride: opts?.customTask?.setup,
+            portEnv,
+            setupCmds: repoConfig.setup || [],
+          });
+        }
+      } catch (e) {
+        console.error("[store] agent spawn failed:", e);
+        toast.error(`${tt('toasts.agentStartFailed')}: ${e instanceof Error ? e.message : e}`);
+      }
+
+      // Select after setup so the terminal mounts with the session already alive
+      await selectItem(id);
+    } finally {
+      pendingSetupIds.value = pendingSetupIds.value.filter(pid => pid !== id);
+    }
   }
 
   async function readRepoConfig(repoPath: string): Promise<RepoConfig> {
