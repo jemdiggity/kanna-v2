@@ -12,6 +12,11 @@ pub type AttachedSessions = Arc<Mutex<HashSet<String>>>;
 const CLAUDE_SPINNERS: &[char] = &['✻', '✽', '✶', '✳', '✢', '⏺'];
 const SCAN_BUFFER_CAP: usize = 4096;
 const SCAN_FLUSH_MS: u64 = 150;
+// Claude's status bar marker (⏵, U+23F5). Present in every status bar redraw.
+const STATUS_BAR_MARKER: char = '⏵';
+// Text shown in status bar ONLY while Claude is actively processing.
+// Stripped of ANSI, spaces become empty (cursor movement codes removed).
+const CLAUDE_WORKING_INDICATOR: &str = "esctointerrupt";
 
 #[derive(Clone, Debug, PartialEq)]
 enum AgentProvider {
@@ -28,7 +33,6 @@ enum AgentState {
 struct SessionScanState {
     buffer: String,
     last_data_at: Instant,
-    last_spinner_at: Option<Instant>,
     state: AgentState,
     provider: AgentProvider,
 }
@@ -38,7 +42,6 @@ impl SessionScanState {
         Self {
             buffer: String::new(),
             last_data_at: Instant::now(),
-            last_spinner_at: None,
             state: AgentState::Idle,
             provider,
         }
@@ -53,19 +56,40 @@ impl SessionScanState {
         }
     }
 
-    /// Called on each fragment. Returns events to emit immediately
-    /// (e.g., working transition when spinner first appears).
+    /// Called on each fragment. Returns events to emit.
+    ///
+    /// Claude detection uses two deterministic signals:
+    /// - Spinner chars (✻✽✶✳✢⏺) → Working (immediate)
+    /// - Status bar frame (⏵) without "esctointerrupt" → Idle (deterministic)
     fn on_fragment(&mut self, text: &str) -> Vec<&'static str> {
         let mut events = Vec::new();
 
         match self.provider {
             AgentProvider::Claude => {
-                if text.chars().any(|c| CLAUDE_SPINNERS.contains(&c)) {
-                    self.last_spinner_at = Some(Instant::now());
+                let has_status_bar = text.contains(STATUS_BAR_MARKER);
+
+                if has_status_bar {
+                    // Status bar frame: check for working indicator
+                    if text.contains(CLAUDE_WORKING_INDICATOR) {
+                        if self.state != AgentState::Working {
+                            self.state = AgentState::Working;
+                            events.push("ClaudeWorking");
+                        }
+                    } else if self.state != AgentState::Idle {
+                        // Status bar without "esc to interrupt" → turn is done
+                        self.state = AgentState::Idle;
+                        events.push("ClaudeIdle");
+                    }
+                } else if text.chars().any(|c| CLAUDE_SPINNERS.contains(&c)) {
+                    // Small spinner fragment (no status bar) → working
                     if self.state != AgentState::Working {
                         self.state = AgentState::Working;
                         events.push("ClaudeWorking");
                     }
+                }
+
+                if text.contains("Do you want to allow") {
+                    events.push("WaitingForInput");
                 }
             }
             AgentProvider::Copilot => {
@@ -93,31 +117,15 @@ impl SessionScanState {
             self.state = AgentState::Idle;
             events.push("Interrupted");
         }
-        if text.contains("Do you want to allow") {
-            events.push("WaitingForInput");
-        }
 
         events
     }
 
-    /// Called by the timer. Checks if spinner activity has gone quiet
-    /// and transitions to idle if so.
+    /// Called by the timer. Just clears stale buffer data.
+    /// State transitions are handled deterministically in on_fragment.
     fn check_idle(&mut self) -> Vec<&'static str> {
-        let mut events = Vec::new();
-
-        if self.provider == AgentProvider::Claude && self.state == AgentState::Working {
-            let idle_threshold = std::time::Duration::from_millis(SCAN_FLUSH_MS);
-            let spinner_stale = self.last_spinner_at
-                .map(|t| t.elapsed() >= idle_threshold)
-                .unwrap_or(true);
-            if spinner_stale {
-                self.state = AgentState::Idle;
-                events.push("ClaudeIdle");
-            }
-        }
-
         self.buffer.clear();
-        events
+        Vec::new()
     }
 }
 
