@@ -15,9 +15,9 @@ The current diff view has three scopes (Branch, Last Commit, Working) with issue
 Tabs left to right: **Working** | **Last Commit** | **Branch**
 
 **Working** (default scope):
-- `git_diff(staged: false)` — unstaged + untracked changes
+- `git_diff(staged: false)` — unstaged + untracked changes (`diff_index_to_workdir`)
 - Toggle to include staged changes via `s` key or toolbar button
-- When toggle is on, concatenates unstaged and staged diffs into one view
+- When toggle is on, uses `diff_tree_to_workdir` (HEAD tree vs working directory) — a single coherent diff that includes both staged and unstaged changes
 - Toggle state is per-session (not persisted per-task)
 
 **Last Commit**:
@@ -44,9 +44,9 @@ The stored value is a branch name (not a commit hash), so `git_merge_base` alway
 
 **Out of scope**: detecting when a task is rebased onto a *different* branch (e.g., `main` → `release/1.0`). The stored `base_ref` would be stale in this case. Future work.
 
-### Backend: `git_merge_base` Command
+### Backend Changes
 
-New Tauri command (already implemented):
+**`git_merge_base`** — new Tauri command (already implemented):
 
 ```rust
 #[tauri::command]
@@ -54,6 +54,11 @@ pub fn git_merge_base(repo_path: String, ref_a: String, ref_b: String) -> Result
 ```
 
 Uses `git2::Repository::merge_base()`. Returns the full SHA of the common ancestor. Performance: 1-5ms per call.
+
+**`git_diff`** — update existing command. Replace the `staged: bool` parameter with a `mode: String` parameter accepting:
+- `"unstaged"` — `diff_index_to_workdir()` (current `staged: false` behavior)
+- `"staged"` — `diff_tree_to_index()` (current `staged: true` behavior)
+- `"all"` — `diff_tree_to_workdir()` with untracked file options — single diff from HEAD to working directory, includes both staged and unstaged changes
 
 ### Frontend Changes (DiffView.vue)
 
@@ -63,8 +68,8 @@ Uses `git2::Repository::merge_base()`. Returns the full SHA of the common ancest
 
 **Working scope staged toggle**:
 - New reactive state: `includeStaged: ref(false)`
-- When off: `git_diff(staged: false)` only
-- When on: concatenate `git_diff(staged: false)` + `git_diff(staged: true)`
+- When off: `git_diff(mode: "unstaged")`
+- When on: `git_diff(mode: "all")` — single diff from HEAD to working directory
 - `s` key toggles in the `extraHandler`
 - Toolbar shows toggle button (same style as scope buttons) only when Working scope is active
 
