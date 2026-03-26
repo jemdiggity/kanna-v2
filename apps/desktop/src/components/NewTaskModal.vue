@@ -3,13 +3,25 @@ import { ref, onMounted } from "vue";
 import { useModalZIndex } from "../composables/useModalZIndex";
 const { zIndex } = useModalZIndex();
 
+const props = defineProps<{
+  defaultAgentProvider?: "claude" | "copilot";
+}>();
+
 const emit = defineEmits<{
-  (e: "submit", prompt: string): void;
+  (e: "submit", prompt: string, agentProvider: "claude" | "copilot"): void;
   (e: "cancel"): void;
 }>();
 
 const prompt = ref("");
+const agentProvider = ref<"claude" | "copilot">(props.defaultAgentProvider ?? "claude");
 const textareaRef = ref<HTMLTextAreaElement>();
+
+const providers: Array<"claude" | "copilot"> = ["claude", "copilot"];
+
+function cycleProvider(direction: -1 | 1) {
+  const idx = providers.indexOf(agentProvider.value);
+  agentProvider.value = providers[(idx + direction + providers.length) % providers.length];
+}
 
 onMounted(() => {
   textareaRef.value?.focus();
@@ -18,7 +30,7 @@ onMounted(() => {
 function handleSubmit() {
   const text = prompt.value.trim();
   if (!text) return;
-  emit("submit", text);
+  emit("submit", text, agentProvider.value);
   prompt.value = "";
 }
 
@@ -26,6 +38,19 @@ function handleKeydown(e: KeyboardEvent) {
   if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
     e.preventDefault();
     handleSubmit();
+  }
+  // ⇧⌘[ / ⇧⌘] to switch agent provider
+  if (e.metaKey && e.shiftKey && (e.key === "[" || e.key === "{")) {
+    e.preventDefault();
+    e.stopPropagation();
+    cycleProvider(-1);
+    return;
+  }
+  if (e.metaKey && e.shiftKey && (e.key === "]" || e.key === "}")) {
+    e.preventDefault();
+    e.stopPropagation();
+    cycleProvider(1);
+    return;
   }
   if (e.key === "Escape") {
     e.preventDefault();
@@ -39,6 +64,16 @@ function handleKeydown(e: KeyboardEvent) {
     <div class="modal">
       <div class="modal-header">
         <h3>{{ $t('tasks.newTask') }}</h3>
+        <div class="agent-toggle">
+          <button
+            :class="['toggle-btn', { active: agentProvider === 'claude' }]"
+            @click="agentProvider = 'claude'"
+          >Claude</button>
+          <button
+            :class="['toggle-btn', { active: agentProvider === 'copilot' }]"
+            @click="agentProvider = 'copilot'"
+          >Copilot</button>
+        </div>
       </div>
       <div class="modal-body">
         <textarea
@@ -92,12 +127,43 @@ function handleKeydown(e: KeyboardEvent) {
 
 .modal-header {
   padding: 14px 16px 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
 }
 
 .modal-header h3 {
   margin: 0;
   font-size: 14px;
   font-weight: 600;
+  color: #e0e0e0;
+}
+
+.agent-toggle {
+  display: flex;
+  background: #1a1a1a;
+  border: 1px solid #444;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.toggle-btn {
+  padding: 3px 10px;
+  font-size: 11px;
+  font-weight: 500;
+  color: #888;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.toggle-btn:hover {
+  color: #ccc;
+}
+
+.toggle-btn.active {
+  background: #333;
   color: #e0e0e0;
 }
 

@@ -28,7 +28,8 @@
     "suspendAfter": "一時停止 (分)",
     "killAfter": "強制停止 (分)",
     "ideCommand": "IDEコマンド",
-    "idePlaceholder": "code, cursor, idea..."
+    "idePlaceholder": "code, cursor, idea...",
+    "defaultAgent": "デフォルトエージェントCLI"
   },
   "shortcuts": {
     "title": "キーボードショートカット",

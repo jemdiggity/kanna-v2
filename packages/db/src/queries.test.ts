@@ -328,6 +328,7 @@ describe("pipeline_item queries", () => {
       pr_url: null,
       branch: null,
       agent_type: null,
+      agent_provider: "claude",
       activity: "idle",
       port_offset: null,
       port_env: null,
@@ -349,6 +350,7 @@ describe("pipeline_item queries", () => {
       pr_url: null,
       branch: null,
       agent_type: null,
+      agent_provider: "claude",
       activity: "idle",
       port_offset: null,
       port_env: null,
@@ -369,6 +371,7 @@ describe("pipeline_item queries", () => {
       pr_url: null,
       branch: null,
       agent_type: null,
+      agent_provider: "claude",
       activity: "idle",
       port_offset: null,
       port_env: null,
@@ -390,6 +393,7 @@ describe("pipeline_item queries", () => {
       pr_url: null,
       branch: null,
       agent_type: null,
+      agent_provider: "claude",
       activity: "idle",
       port_offset: null,
       port_env: null,
@@ -411,6 +415,7 @@ describe("pipeline_item queries", () => {
       pr_url: null,
       branch: null,
       agent_type: null,
+      agent_provider: "claude",
       activity: "idle",
       port_offset: null,
       port_env: null,
@@ -432,6 +437,7 @@ describe("pipeline_item queries", () => {
       pr_url: null,
       branch: null,
       agent_type: null,
+      agent_provider: "claude",
       activity: "idle",
       port_offset: null,
       port_env: null,
@@ -453,6 +459,7 @@ describe("pipeline_item queries", () => {
       pr_url: null,
       branch: "feature/x",
       agent_type: null,
+      agent_provider: "claude",
       activity: "idle",
       port_offset: null,
       port_env: null,
@@ -495,17 +502,20 @@ describe("pin queries", () => {
     await insertPipelineItem(db, {
       id: "pi1", repo_id: "r1", issue_number: null, issue_title: null,
       prompt: "task 1", tags: [], pr_number: null, pr_url: null,
-      branch: null, agent_type: null, activity: "idle", port_offset: null, port_env: null,
+      branch: null, agent_type: null,
+      agent_provider: "claude", activity: "idle", port_offset: null, port_env: null,
     });
     await insertPipelineItem(db, {
       id: "pi2", repo_id: "r1", issue_number: null, issue_title: null,
       prompt: "task 2", tags: [], pr_number: null, pr_url: null,
-      branch: null, agent_type: null, activity: "idle", port_offset: null, port_env: null,
+      branch: null, agent_type: null,
+      agent_provider: "claude", activity: "idle", port_offset: null, port_env: null,
     });
     await insertPipelineItem(db, {
       id: "pi3", repo_id: "r1", issue_number: null, issue_title: null,
       prompt: "task 3", tags: [], pr_number: null, pr_url: null,
-      branch: null, agent_type: null, activity: "idle", port_offset: null, port_env: null,
+      branch: null, agent_type: null,
+      agent_provider: "claude", activity: "idle", port_offset: null, port_env: null,
     });
   });
 

@@ -28,7 +28,8 @@
     "suspendAfter": "일시 중지 (분)",
     "killAfter": "강제 종료 (분)",
     "ideCommand": "IDE 명령어",
-    "idePlaceholder": "code, cursor, idea..."
+    "idePlaceholder": "code, cursor, idea...",
+    "defaultAgent": "기본 에이전트 CLI"
   },
   "shortcuts": {
     "title": "키보드 단축키",

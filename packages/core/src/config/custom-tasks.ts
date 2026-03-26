@@ -4,6 +4,7 @@ export type Stage = "in_progress" | "pr" | "merge" | "done";
 export interface CustomTaskConfig {
   name: string;
   description?: string;
+  agentProvider?: "claude" | "copilot";
   model?: string;
   permissionMode?: "dontAsk" | "acceptEdits" | "default";
   executionMode?: "pty" | "sdk";
@@ -35,6 +36,7 @@ Guide the user through defining their custom task by asking about:
 Available frontmatter fields (all optional, defaults shown):
 - name: Display name (default: derived from directory name)
 - description: Short description for the command palette
+- agent_provider: "claude" | "copilot" (default: claude)
 - model: null (uses Kanna default)
 - permission_mode: "dontAsk" | "acceptEdits" | "default" (default: dontAsk)
 - execution_mode: "pty" | "sdk" (default: pty)
@@ -49,6 +51,7 @@ Available frontmatter fields (all optional, defaults shown):
 Once you understand what they want, create the directory and write the agent.md file
 at .kanna/tasks/<taskname>/agent.md. Use a lowercase hyphenated directory name.`;
 
+const VALID_AGENT_PROVIDERS = ["claude", "copilot"] as const;
 const VALID_PERMISSION_MODES = ["dontAsk", "acceptEdits", "default"] as const;
 const VALID_EXECUTION_MODES = ["pty", "sdk"] as const;
 const VALID_STAGES = ["in_progress", "pr", "merge", "done"] as const;
@@ -124,6 +127,10 @@ export function parseAgentMd(content: string, dirName: string): CustomTaskConfig
 
   if (typeof fm.model === "string") {
     config.model = fm.model;
+  }
+
+  if (typeof fm.agent_provider === "string" && (VALID_AGENT_PROVIDERS as readonly string[]).includes(fm.agent_provider)) {
+    config.agentProvider = fm.agent_provider as CustomTaskConfig["agentProvider"];
   }
 
   if (typeof fm.permission_mode === "string" && (VALID_PERMISSION_MODES as readonly string[]).includes(fm.permission_mode)) {

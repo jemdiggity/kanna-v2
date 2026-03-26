@@ -31,6 +31,7 @@ function generateId(): string {
 }
 
 export interface PtySpawnOptions {
+  agentProvider?: "claude" | "copilot";
   model?: string;
   permissionMode?: string;
   allowedTools?: string[];
@@ -280,7 +281,7 @@ export const useKannaStore = defineStore("kanna", () => {
     repoPath: string,
     prompt: string,
     agentType: "pty" | "sdk" = "pty",
-    opts?: { baseBranch?: string; tags?: string[]; customTask?: CustomTaskConfig },
+    opts?: { baseBranch?: string; tags?: string[]; customTask?: CustomTaskConfig; agentProvider?: "claude" | "copilot" },
   ) {
     const id = generateId();
     const branch = `task-${id}`;
@@ -289,6 +290,7 @@ export const useKannaStore = defineStore("kanna", () => {
     // Compute effective values from custom task config
     const effectivePrompt = opts?.customTask?.prompt ?? prompt;
     const effectiveAgentType = opts?.customTask?.executionMode ?? agentType;
+    const effectiveAgentProvider = opts?.customTask?.agentProvider ?? opts?.agentProvider ?? "claude";
     const displayName = opts?.customTask?.name ?? null;
 
     // Assign port offset
@@ -326,6 +328,7 @@ export const useKannaStore = defineStore("kanna", () => {
         pr_url: null,
         branch,
         agent_type: effectiveAgentType,
+        agent_provider: effectiveAgentProvider,
         port_offset: portOffset,
         port_env: null,
         activity: "working",
@@ -352,7 +355,7 @@ export const useKannaStore = defineStore("kanna", () => {
     id: string, repoPath: string, worktreePath: string,
     branch: string, portOffset: number, prompt: string,
     agentType: "pty" | "sdk",
-    opts?: { baseBranch?: string; tags?: string[]; customTask?: CustomTaskConfig },
+    opts?: { baseBranch?: string; tags?: string[]; customTask?: CustomTaskConfig; agentProvider?: "claude" | "copilot" },
   ) {
     try {
       // Read config and create worktree concurrently — they're independent.
@@ -398,6 +401,7 @@ export const useKannaStore = defineStore("kanna", () => {
           });
         } else {
           await spawnPtySession(id, worktreePath, prompt, 80, 24, {
+            agentProvider: opts?.customTask?.agentProvider ?? opts?.agentProvider,
             model: opts?.customTask?.model,
             permissionMode: opts?.customTask?.permissionMode,
             allowedTools: opts?.customTask?.allowedTools,
@@ -586,24 +590,77 @@ export const useKannaStore = defineStore("kanna", () => {
 
     env.KANNA_WORKTREE = "1";
 
-    const flags: string[] = [];
-    if (options?.permissionMode) {
-      flags.push(`--permission-mode ${options.permissionMode}`);
+    const provider = options?.agentProvider ?? "claude";
+    const escapedPrompt = prompt.replace(/'/g, "'\\''");
+    let agentCmd: string;
+
+    if (provider === "copilot") {
+      // Write hook config file to worktree for Copilot to discover
+      const copilotHookConfig = JSON.stringify({
+        version: 1,
+        hooks: {
+          sessionStart: [
+            { type: "command", bash: `${kannaHookPath} SessionStart ${sessionId}` },
+          ],
+          sessionEnd: [
+            { type: "command", bash: `${kannaHookPath} Stop ${sessionId}` },
+          ],
+          postToolUse: [
+            { type: "command", bash: `${kannaHookPath} PostToolUse ${sessionId}` },
+          ],
+          errorOccurred: [
+            { type: "command", bash: `${kannaHookPath} StopFailure ${sessionId}` },
+          ],
+          userPromptSubmitted: [
+            { type: "command", bash: `${kannaHookPath} UserPromptSubmit ${sessionId}` },
+          ],
+        },
+      }, null, 2);
+      await invoke("write_text_file", {
+        path: `${cwd}/.github/hooks/kanna-hooks.json`,
+        content: copilotHookConfig,
+      });
+
+      // Build Copilot flags
+      const copilotFlags: string[] = [];
+      if (!options?.permissionMode || options.permissionMode === "dontAsk") {
+        copilotFlags.push("--yolo");
+      } else {
+        // Copilot doesn't have an exact equivalent of --permission-mode acceptEdits.
+        // Fall back to --yolo for now; users can use --allow-tool/--deny-tool for finer control.
+        copilotFlags.push("--yolo");
+      }
+      if (options?.model) copilotFlags.push(`--model=${options.model}`);
+      if (options?.allowedTools?.length) {
+        for (const tool of options.allowedTools) copilotFlags.push(`--allow-tool=${tool}`);
+      }
+      if (options?.disallowedTools?.length) {
+        for (const tool of options.disallowedTools) copilotFlags.push(`--deny-tool=${tool}`);
+      }
+      // maxTurns and maxBudgetUsd have no Copilot equivalent — skip silently
+
+      agentCmd = `copilot ${copilotFlags.join(" ")} -i '${escapedPrompt}'`;
     } else {
-      flags.push("--dangerously-skip-permissions");
-    }
-    if (options?.model) flags.push(`--model ${options.model}`);
-    if (options?.maxTurns != null) flags.push(`--max-turns ${options.maxTurns}`);
-    if (options?.maxBudgetUsd != null) flags.push(`--max-budget-usd ${options.maxBudgetUsd}`);
-    if (options?.allowedTools?.length) {
-      flags.push(`--allowedTools ${options.allowedTools.join(",")}`);
-    }
-    if (options?.disallowedTools?.length) {
-      flags.push(`--disallowedTools ${options.disallowedTools.join(",")}`);
+      // Claude: inject hooks via --settings flag
+      const flags: string[] = [];
+      if (options?.permissionMode) {
+        flags.push(`--permission-mode ${options.permissionMode}`);
+      } else {
+        flags.push("--dangerously-skip-permissions");
+      }
+      if (options?.model) flags.push(`--model ${options.model}`);
+      if (options?.maxTurns != null) flags.push(`--max-turns ${options.maxTurns}`);
+      if (options?.maxBudgetUsd != null) flags.push(`--max-budget-usd ${options.maxBudgetUsd}`);
+      if (options?.allowedTools?.length) {
+        flags.push(`--allowedTools ${options.allowedTools.join(",")}`);
+      }
+      if (options?.disallowedTools?.length) {
+        flags.push(`--disallowedTools ${options.disallowedTools.join(",")}`);
+      }
+
+      agentCmd = `claude ${flags.join(" ")} --settings '${hookSettings}' '${escapedPrompt}'`;
     }
 
-    const escapedPrompt = prompt.replace(/'/g, "'\\''");
-    const claudeCmd = `claude ${flags.join(" ")} --settings '${hookSettings}' '${escapedPrompt}'`;
     const allSetupCmds = [...setupCmds, ...(options?.setupCmdsOverride || [])];
     let fullCmd: string;
     if (allSetupCmds.length > 0) {
@@ -611,9 +668,9 @@ export const useKannaStore = defineStore("kanna", () => {
         const escaped = cmd.replace(/'/g, "'\\''");
         return `printf '\\033[2m$ %s\\033[0m\\n' '${escaped}' && ${cmd}`;
       });
-      fullCmd = `printf '\\033[33mRunning startup...\\033[0m\\n' && ${setupParts.join(" && ")} && printf '\\n' && ${claudeCmd}`;
+      fullCmd = `printf '\\033[33mRunning startup...\\033[0m\\n' && ${setupParts.join(" && ")} && printf '\\n' && ${agentCmd}`;
     } else {
-      fullCmd = claudeCmd;
+      fullCmd = agentCmd;
     }
 
     await invoke("spawn_session", {
@@ -805,7 +862,9 @@ export const useKannaStore = defineStore("kanna", () => {
       if (item.branch) {
         const worktreePath = `${repo.path}/.kanna-worktrees/${item.branch}`;
         try {
-          await spawnPtySession(item.id, worktreePath, item.prompt || "");
+          await spawnPtySession(item.id, worktreePath, item.prompt || "", 80, 24, {
+            agentProvider: (item.agent_provider as "claude" | "copilot") || "claude",
+          });
         } catch (spawnErr) {
           console.warn("[store] session re-spawn after undo failed:", spawnErr);
         }
@@ -1102,6 +1161,7 @@ export const useKannaStore = defineStore("kanna", () => {
 
     try {
       await spawnPtySession(id, worktreePath, augmentedPrompt, 80, 24, {
+        agentProvider: (item.agent_provider as "claude" | "copilot") || "claude",
         portEnv,
         setupCmds: repoConfig.setup || [],
       });
@@ -1118,6 +1178,7 @@ export const useKannaStore = defineStore("kanna", () => {
     const originalPrompt = item.prompt;
     const originalRepoId = item.repo_id;
     const originalAgentType = item.agent_type;
+    const originalAgentProvider = item.agent_provider;
     const originalDisplayName = item.display_name;
     const originalId = item.id;
 
@@ -1133,6 +1194,7 @@ export const useKannaStore = defineStore("kanna", () => {
       pr_url: null,
       branch: null,
       agent_type: originalAgentType,
+      agent_provider: originalAgentProvider || "claude",
       port_offset: null,
       port_env: null,
       activity: "idle",
@@ -1309,6 +1371,37 @@ export const useKannaStore = defineStore("kanna", () => {
       }
     }
 
+    // Copilot idle detection: debounce-based.
+    // Copilot has no per-response "done" hook like Claude's Stop.
+    // We set "working" on every activity signal and start a timer.
+    // If no activity for COPILOT_IDLE_TIMEOUT_MS, transition to idle.
+    const COPILOT_IDLE_TIMEOUT_MS = 1000;
+    const _copilotIdleTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+    function _resetCopilotIdleTimer(sessionId: string) {
+      _clearCopilotIdleTimer(sessionId);
+      _copilotIdleTimers.set(sessionId, setTimeout(async () => {
+        _copilotIdleTimers.delete(sessionId);
+        const item = items.value.find((i) => i.id === sessionId);
+        if (item && item.activity === "working") {
+          if (selectedItemId.value === sessionId) {
+            await updatePipelineItemActivity(_db, item.id, "idle");
+          } else {
+            await updatePipelineItemActivity(_db, item.id, "unread");
+          }
+          bump();
+        }
+      }, COPILOT_IDLE_TIMEOUT_MS));
+    }
+
+    function _clearCopilotIdleTimer(sessionId: string) {
+      const timer = _copilotIdleTimers.get(sessionId);
+      if (timer) {
+        clearTimeout(timer);
+        _copilotIdleTimers.delete(sessionId);
+      }
+    }
+
     // Event listeners
     listen("hook_event", async (event: any) => {
       const payload = event.payload || event;
@@ -1321,9 +1414,21 @@ export const useKannaStore = defineStore("kanna", () => {
 
       if (hookEvent === "Stop" || hookEvent === "StopFailure") {
         _handleAgentFinished(sessionId);
+        _clearCopilotIdleTimer(sessionId);
       } else if (hookEvent === "Interrupted") {
         if (item.activity === "working") {
           await updatePipelineItemActivity(_db, item.id, "idle");
+          bump();
+        }
+        _clearCopilotIdleTimer(sessionId);
+      } else if (hookEvent === "CopilotIdle") {
+        _clearCopilotIdleTimer(sessionId);
+        if (item.activity === "working") {
+          if (selectedItemId.value === sessionId) {
+            await updatePipelineItemActivity(_db, item.id, "idle");
+          } else {
+            await updatePipelineItemActivity(_db, item.id, "unread");
+          }
           bump();
         }
       } else if (hookEvent === "WaitingForInput") {
@@ -1331,10 +1436,15 @@ export const useKannaStore = defineStore("kanna", () => {
           await updatePipelineItemActivity(_db, item.id, "unread");
           bump();
         }
-      } else if (hookEvent === "PostToolUse") {
+      } else if (hookEvent === "PostToolUse" || hookEvent === "UserPromptSubmit" || hookEvent === "CopilotThinking") {
         if (item.activity !== "working") {
           await updatePipelineItemActivity(_db, item.id, "working");
           bump();
+        }
+        // For Copilot tasks: reset the idle timer on every activity signal.
+        // When no signals arrive for a few seconds, assume copilot is idle.
+        if (item.agent_provider === "copilot") {
+          _resetCopilotIdleTimer(sessionId);
         }
       }
     });

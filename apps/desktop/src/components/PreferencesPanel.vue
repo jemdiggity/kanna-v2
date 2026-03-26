@@ -14,6 +14,7 @@ defineProps<{
     ideCommand: string
     locale: string
     devLingerTerminals: boolean
+    defaultAgentProvider: "claude" | "copilot"
   }
 }>()
 
@@ -107,6 +108,17 @@ defineExpose({ cycleTab })
             :placeholder="$t('preferences.idePlaceholder')"
             @change="emit('update', 'ideCommand', ($event.target as HTMLInputElement).value)"
           />
+        </div>
+
+        <div class="pref-row">
+          <label>{{ $t('preferences.defaultAgent') }}</label>
+          <select
+            :value="preferences.defaultAgentProvider"
+            @change="emit('update', 'defaultAgentProvider', ($event.target as HTMLSelectElement).value)"
+          >
+            <option value="claude">Claude</option>
+            <option value="copilot">Copilot</option>
+          </select>
         </div>
       </div>
 

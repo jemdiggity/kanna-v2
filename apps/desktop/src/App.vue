@@ -75,6 +75,7 @@ const preferences = reactive({
   ideCommand: "code",
   locale: "en",
   devLingerTerminals: false,
+  defaultAgentProvider: "claude" as "claude" | "copilot",
 });
 const diffScopes = new Map<string, "branch" | "commit" | "working">();
 const sidebarHidden = ref(false);
@@ -479,7 +480,7 @@ function handleSelectItem(itemId: string) {
 }
 
 // Handlers that mix UI state + store
-async function handleNewTaskSubmit(prompt: string) {
+async function handleNewTaskSubmit(prompt: string, agentProvider: "claude" | "copilot" = "claude") {
   if (!store.selectedRepoId) {
     if (store.repos.length === 1) {
       store.selectedRepoId = store.repos[0].id;
@@ -492,7 +493,7 @@ async function handleNewTaskSubmit(prompt: string) {
   if (!repo) return;
   showNewTaskModal.value = false;
   try {
-    await store.createItem(store.selectedRepoId, repo.path, prompt);
+    await store.createItem(store.selectedRepoId, repo.path, prompt, "pty", { agentProvider });
   } catch (e: any) {
     console.error("Task creation failed:", e);
     toast.error(`${t('toasts.taskCreationFailed')}: ${e?.message || e}`);
@@ -556,6 +557,8 @@ async function handlePreferenceUpdate(key: string, value: string) {
     preferences.ideCommand = value;
   } else if (key === "dev.lingerTerminals") {
     preferences.devLingerTerminals = value === "true";
+  } else if (key === "defaultAgentProvider") {
+    preferences.defaultAgentProvider = (value === "copilot" ? "copilot" : "claude");
   }
 }
 
@@ -578,6 +581,9 @@ onMounted(async () => {
   preferences.killAfterMinutes = store.killAfterMinutes;
   preferences.ideCommand = store.ideCommand;
   preferences.devLingerTerminals = store.devLingerTerminals;
+
+  const savedAgentProvider = await getSetting(db, "defaultAgentProvider");
+  if (savedAgentProvider === "copilot") preferences.defaultAgentProvider = "copilot";
 
   startPeriodicBackup(dbName, ref(db) as Ref<DbHandle | null>);
   if (!store.hideShortcutsOnStartup) {
@@ -625,6 +631,7 @@ onMounted(async () => {
 
     <NewTaskModal
       v-if="showNewTaskModal"
+      :default-agent-provider="preferences.defaultAgentProvider"
       @submit="handleNewTaskSubmit"
       @cancel="showNewTaskModal = false"
     />

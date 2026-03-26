@@ -256,21 +256,83 @@ pub async fn attach_session_inner(
                             "data_b64": b64,
                         });
                         let _ = app.emit("terminal_output", &payload);
-                        // Detect Claude CLI interrupt from output
-                        if bytes.windows(11).any(|w| w == b"Interrupted") {
+
+                        // Strip ANSI escape sequences to get clean text for pattern matching.
+                        // Copilot's TUI uses per-character color codes (shimmer effect),
+                        // so raw byte matching (e.g. b"Thinking") won't work.
+                        let stripped = {
+                            let mut out = Vec::with_capacity(bytes.len());
+                            let mut i = 0;
+                            while i < bytes.len() {
+                                if bytes[i] == 0x1b {
+                                    i += 1;
+                                    if i < bytes.len() && bytes[i] == b'[' {
+                                        i += 1;
+                                        while i < bytes.len() && !(bytes[i] >= 0x40 && bytes[i] <= 0x7e) { i += 1; }
+                                        if i < bytes.len() { i += 1; }
+                                    } else if i < bytes.len() && bytes[i] == b']' {
+                                        i += 1;
+                                        while i < bytes.len() && bytes[i] != 0x07 && bytes[i] != 0x1b { i += 1; }
+                                        if i < bytes.len() { i += 1; }
+                                        if i < bytes.len() && bytes[i] == b'\\' { i += 1; }
+                                    } else {
+                                        if i < bytes.len() { i += 1; }
+                                    }
+                                } else if bytes[i] >= 0x20 || bytes[i] == b'\n' {
+                                    out.push(bytes[i]);
+                                    i += 1;
+                                } else {
+                                    i += 1;
+                                }
+                            }
+                            out
+                        };
+                        let text = String::from_utf8_lossy(&stripped);
+                        let text = text.trim();
+                        if !text.is_empty() {
+                            eprintln!("[pty-scan] sid={} {:?}", sid, text);
+                        }
+
+                        // Pattern matching on ANSI-stripped text.
+                        // Claude patterns (also work as raw bytes, but use stripped for consistency):
+                        if text.contains("Interrupted") {
                             let hook = serde_json::json!({
                                 "session_id": event.get("session_id"),
                                 "event": "Interrupted",
                             });
                             let _ = app.emit("hook_event", &hook);
                         }
-                        // Detect sandbox/permission prompts waiting for user input.
-                        // These prompts bypass --dangerously-skip-permissions and no
-                        // Claude Code hook fires for them, so we scan PTY output.
-                        if bytes.windows(21).any(|w| w == b"Do you want to allow") {
+                        if text.contains("Do you want to allow") {
                             let hook = serde_json::json!({
                                 "session_id": event.get("session_id"),
                                 "event": "WaitingForInput",
+                            });
+                            let _ = app.emit("hook_event", &hook);
+                        }
+                        // Copilot patterns:
+                        if text.contains("Thinking") {
+                            let hook = serde_json::json!({
+                                "session_id": event.get("session_id"),
+                                "event": "CopilotThinking",
+                            });
+                            let _ = app.emit("hook_event", &hook);
+                        }
+                        if text.contains("Operation cancelled") {
+                            let hook = serde_json::json!({
+                                "session_id": event.get("session_id"),
+                                "event": "Interrupted",
+                            });
+                            let _ = app.emit("hook_event", &hook);
+                        }
+                        // Copilot renders ❯ (U+276F) as the input prompt when idle.
+                        // Only treat as idle if NOT also showing "Thinking" in the
+                        // same frame (the TUI redraws the full screen each frame).
+                        if stripped.windows(3).any(|w| w == "\u{276F}".as_bytes())
+                            && !text.contains("Thinking")
+                        {
+                            let hook = serde_json::json!({
+                                "session_id": event.get("session_id"),
+                                "event": "CopilotIdle",
                             });
                             let _ = app.emit("hook_event", &hook);
                         }

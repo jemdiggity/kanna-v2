@@ -28,7 +28,8 @@
     "suspendAfter": "Suspend After (min)",
     "killAfter": "Kill After (min)",
     "ideCommand": "IDE Command",
-    "idePlaceholder": "code, cursor, idea..."
+    "idePlaceholder": "code, cursor, idea...",
+    "defaultAgent": "Default Agent CLI"
   },
   "shortcuts": {
     "title": "Keyboard Shortcuts",

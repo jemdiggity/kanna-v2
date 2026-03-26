@@ -21,6 +21,7 @@ export interface PipelineItem {
   branch: string | null;
   closed_at: string | null;
   agent_type: string | null;
+  agent_provider: string;  // "claude" | "copilot"
   activity: "working" | "unread" | "idle";
   activity_changed_at: string | null;
   unread_at: string | null;

@@ -67,8 +67,8 @@ export async function insertPipelineItem(
   const tagsJson = JSON.stringify(item.tags ?? []);
   await db.execute(
     `INSERT INTO pipeline_item
-       (id, repo_id, issue_number, issue_title, prompt, stage, tags, pr_number, pr_url, branch, agent_type, port_offset, port_env, activity, activity_changed_at, display_name, base_ref)
-     VALUES (?, ?, ?, ?, ?, 'legacy', ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?)`,
+       (id, repo_id, issue_number, issue_title, prompt, stage, tags, pr_number, pr_url, branch, agent_type, agent_provider, port_offset, port_env, activity, activity_changed_at, display_name, base_ref)
+     VALUES (?, ?, ?, ?, ?, 'legacy', ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?)`,
     [
       item.id,
       item.repo_id,
@@ -80,6 +80,7 @@ export async function insertPipelineItem(
       item.pr_url,
       item.branch,
       item.agent_type,
+      item.agent_provider ?? "claude",
       item.port_offset ?? null,
       item.port_env ?? null,
       item.activity ?? "idle",
