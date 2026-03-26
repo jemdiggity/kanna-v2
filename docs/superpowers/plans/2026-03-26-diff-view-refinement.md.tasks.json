@@ -1,0 +1,11 @@
+{
+  "planPath": "docs/superpowers/plans/2026-03-26-diff-view-refinement.md",
+  "tasks": [
+    {"id": 1, "subject": "Task 1: Update git_diff Rust command — mode parameter", "status": "completed"},
+    {"id": 2, "subject": "Task 2: Add base_ref to pipeline_item", "status": "completed", "blockedBy": [1]},
+    {"id": 3, "subject": "Task 3: Rewrite DiffView scope logic", "status": "completed", "blockedBy": [1, 2]},
+    {"id": 4, "subject": "Task 4: Add staged toggle UI and keyboard shortcut", "status": "completed", "blockedBy": [3]},
+    {"id": 5, "subject": "Task 5: Cleanup and final verification", "status": "completed", "blockedBy": [4]}
+  ],
+  "lastUpdated": "2026-03-26T11:00:00Z"
+}

@@ -7,6 +7,7 @@ import { registerContextShortcuts } from "../composables/useShortcutContext";
 import { FileDiff, parsePatchFiles } from "@pierre/diffs";
 import {
   getOrCreateWorkerPoolSingleton,
+  type WorkerPoolManager,
 } from "@pierre/diffs/worker";
 
 const { t } = useI18n();
@@ -14,6 +15,7 @@ const { t } = useI18n();
 registerContextShortcuts("diff", [
   { label: t('diffView.shortcutScopeNext'), display: "⇧⌘]" },
   { label: t('diffView.shortcutScopePrev'), display: "⇧⌘[" },
+  { label: t('diffView.shortcutToggleStaged'), display: "s" },
   { label: t('diffView.shortcutLineUpDown'), display: "j / k" },
   { label: t('diffView.shortcutPageUpDown'), display: "f / b" },
   { label: t('diffView.shortcutHalfUpDown'), display: "d / u" },
@@ -25,6 +27,7 @@ const props = defineProps<{
   repoPath: string;
   worktreePath?: string;
   initialScope?: "branch" | "commit" | "working";
+  baseRef?: string;
 }>();
 
 const emit = defineEmits<{
@@ -37,9 +40,11 @@ const diffContent = ref("");
 const loading = ref(false);
 const error = ref<string | null>(null);
 const noDiff = ref(false);
-const scope = ref<"branch" | "commit" | "working">(props.initialScope || "branch");
+const noBranchCommits = ref(false);
+const includeStaged = ref(false);
+const scope = ref<"branch" | "commit" | "working">(props.initialScope || "working");
 let fileDiffInstance: FileDiff | null = null;
-let workerPool: any = null;
+let workerPool: WorkerPoolManager | null = null;
 
 async function initWorkerPool() {
   if (workerPool) return workerPool;
@@ -70,40 +75,39 @@ async function loadDiff() {
   loading.value = true;
   error.value = null;
   noDiff.value = false;
+  noBranchCommits.value = false;
 
   try {
     let patch = "";
 
-    if (scope.value === "branch") {
-      // All changes since base branch
-      try {
-        const defaultBranch = await invoke<string>("git_default_branch", { repoPath: path });
-        patch = await invoke<string>("git_diff_range", {
-          repoPath: path,
-          from: defaultBranch,
-          to: "HEAD",
-        });
-      } catch {
-        // Fallback to working changes if branch diff fails
-        patch = await invoke<string>("git_diff", { repoPath: path, staged: false });
-      }
+    if (scope.value === "working") {
+      const mode = includeStaged.value ? "all" : "unstaged";
+      patch = await invoke<string>("git_diff", { repoPath: path, mode });
     } else if (scope.value === "commit") {
-      // Last commit
-      try {
-        patch = await invoke<string>("git_diff_range", {
-          repoPath: path,
-          from: "HEAD~1",
-          to: "HEAD",
-        });
-      } catch {
-        patch = "";
+      const hasBranchCommits = await checkBranchHasCommits(path);
+      if (!hasBranchCommits) {
+        noBranchCommits.value = true;
+        cleanupInstance();
+        return;
       }
+      patch = await invoke<string>("git_diff_range", {
+        repoPath: path,
+        from: "HEAD~1",
+        to: "HEAD",
+      });
     } else {
-      // Working tree changes (unstaged + untracked)
-      patch = await invoke<string>("git_diff", { repoPath: path, staged: false });
-      if (!patch?.trim()) {
-        patch = await invoke<string>("git_diff", { repoPath: path, staged: true });
-      }
+      // "branch" scope — diff from merge base
+      const baseRef = props.baseRef || await detectBaseRef(path);
+      const mergeBase = await invoke<string>("git_merge_base", {
+        repoPath: path,
+        refA: baseRef,
+        refB: "HEAD",
+      });
+      patch = await invoke<string>("git_diff_range", {
+        repoPath: path,
+        from: mergeBase,
+        to: "HEAD",
+      });
     }
 
     if (!patch?.trim()) {
@@ -115,10 +119,45 @@ async function loadDiff() {
 
     diffContent.value = patch;
     await renderDiff(diffContent.value);
-  } catch (e: any) {
-    error.value = e?.message || String(e);
+  } catch (e: unknown) {
+    error.value = e instanceof Error ? e.message : String(e);
   } finally {
     loading.value = false;
+  }
+}
+
+async function checkBranchHasCommits(path: string): Promise<boolean> {
+  try {
+    const baseRef = props.baseRef || await detectBaseRef(path);
+    const mergeBase = await invoke<string>("git_merge_base", {
+      repoPath: path,
+      refA: baseRef,
+      refB: "HEAD",
+    });
+    const branchDiff = await invoke<string>("git_diff_range", {
+      repoPath: path,
+      from: mergeBase,
+      to: "HEAD",
+    });
+    return branchDiff.trim().length > 0;
+  } catch (e: unknown) {
+    console.warn("[DiffView] checkBranchHasCommits failed:", e);
+    return false;
+  }
+}
+
+async function detectBaseRef(path: string): Promise<string> {
+  const defaultBranch = await invoke<string>("git_default_branch", { repoPath: path });
+  try {
+    await invoke<string>("git_merge_base", {
+      repoPath: path,
+      refA: `origin/${defaultBranch}`,
+      refB: "HEAD",
+    });
+    return `origin/${defaultBranch}`;
+  } catch (e: unknown) {
+    console.warn("[DiffView] origin ref not available, using local:", e);
+    return defaultBranch;
   }
 }
 
@@ -139,7 +178,7 @@ async function renderDiff(patch: string) {
   if (!containerRef.value) return;
 
   const patches = parsePatchFiles(patch);
-  const allFiles = patches?.flatMap((p: any) => p.files || []) || [];
+  const allFiles = patches?.flatMap((p) => p.files || []) || [];
   if (allFiles.length === 0) {
     noDiff.value = true;
     cleanupInstance();
@@ -181,7 +220,7 @@ watch(
   { immediate: false }
 );
 
-const scopeOrder: Array<"working" | "branch" | "commit"> = ["working", "branch", "commit"];
+const scopeOrder: Array<"working" | "commit" | "branch"> = ["working", "commit", "branch"];
 
 function cycleScopeForward() {
   const idx = scopeOrder.indexOf(scope.value);
@@ -197,6 +236,15 @@ function cycleScopeBack() {
 
 useLessScroll(containerRef, {
   extraHandler(e) {
+    // s — toggle include staged (only in working scope)
+    if (e.key === "s" && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
+      if (scope.value === "working") {
+        e.preventDefault();
+        includeStaged.value = !includeStaged.value;
+        loadDiff();
+        return true;
+      }
+    }
     // Cmd+Shift+] — next scope
     if (e.key === "]" && e.metaKey && e.shiftKey && !e.ctrlKey && !e.altKey) {
       e.preventDefault();
@@ -225,12 +273,19 @@ defineExpose({ refresh: loadDiff });
   <div class="diff-view">
     <div class="diff-toolbar">
       <div class="scope-selector">
-        <button :class="{ active: scope === 'branch' }" @click="scope = 'branch'; loadDiff()">{{ $t('diffView.scopeBranch') }}</button>
-        <button :class="{ active: scope === 'commit' }" @click="scope = 'commit'; loadDiff()">{{ $t('diffView.scopeLastCommit') }}</button>
         <button :class="{ active: scope === 'working' }" @click="scope = 'working'; loadDiff()">{{ $t('diffView.scopeWorking') }}</button>
+        <button :class="{ active: scope === 'commit' }" @click="scope = 'commit'; loadDiff()">{{ $t('diffView.scopeLastCommit') }}</button>
+        <button :class="{ active: scope === 'branch' }" @click="scope = 'branch'; loadDiff()">{{ $t('diffView.scopeBranch') }}</button>
       </div>
+      <button
+        v-if="scope === 'working'"
+        class="staged-toggle"
+        :class="{ active: includeStaged }"
+        @click="includeStaged = !includeStaged; loadDiff()"
+      >{{ $t('diffView.includeStaged') }}</button>
     </div>
     <div v-if="error" class="diff-status diff-error">{{ error }}</div>
+    <div v-else-if="noBranchCommits && !loading" class="diff-status">{{ $t('diffView.noCommitsSinceBranching') }}</div>
     <div v-else-if="noDiff && !loading" class="diff-status">{{ $t('diffView.noChanges') }}</div>
     <div ref="containerRef" class="diff-container"></div>
   </div>
@@ -275,6 +330,23 @@ defineExpose({ refresh: loadDiff });
 .scope-selector button:not(:first-child) { border-left: none; }
 
 .scope-selector button.active {
+  background: #0066cc;
+  border-color: #0077ee;
+  color: #fff;
+}
+
+.staged-toggle {
+  margin-left: 12px;
+  padding: 3px 10px;
+  background: #2a2a2a;
+  border: 1px solid #444;
+  color: #888;
+  font-size: 11px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.staged-toggle.active {
   background: #0066cc;
   border-color: #0077ee;
   color: #fff;

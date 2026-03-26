@@ -29,6 +29,7 @@ export interface PipelineItem {
   port_env: string | null;  // JSON: {"KANNA_DEV_PORT": "1421", ...}
   pinned: number;          // 0 or 1
   pin_order: number | null;
+  base_ref: string | null;
   created_at: string;
   updated_at: string;
 }

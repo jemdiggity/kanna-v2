@@ -298,6 +298,21 @@ export const useKannaStore = defineStore("kanna", () => {
     let portOffset = 1;
     while (usedOffsets.has(portOffset)) portOffset++;
 
+    // Compute base_ref for merge-base diffing
+    let baseRef: string | null = null;
+    try {
+      const defaultBranch = await invoke<string>("git_default_branch", { repoPath });
+      // Prefer origin ref if remote exists
+      try {
+        await invoke<string>("git_merge_base", { repoPath, refA: `origin/${defaultBranch}`, refB: "HEAD" });
+        baseRef = `origin/${defaultBranch}`;
+      } catch {
+        baseRef = defaultBranch;
+      }
+    } catch (e) {
+      console.warn("[store] failed to compute base_ref:", e);
+    }
+
     // Insert DB record immediately so the UI updates without waiting on IO
     try {
       await insertPipelineItem(_db, {
@@ -315,6 +330,7 @@ export const useKannaStore = defineStore("kanna", () => {
         port_env: null,
         activity: "working",
         display_name: displayName,
+        base_ref: baseRef,
       });
     } catch (e) {
       console.error("[store] DB insert failed:", e);
@@ -1007,6 +1023,7 @@ export const useKannaStore = defineStore("kanna", () => {
     const worktreePath = `${repo.path}/.kanna-worktrees/${branch}`;
 
     const worktreeExists = await invoke<boolean>("file_exists", { path: worktreePath });
+    let resolvedBaseRef: string | null = null;
     if (!worktreeExists) {
       // Fetch origin so the worktree starts from the latest remote state
       let startPoint: string | null = null;
@@ -1014,8 +1031,16 @@ export const useKannaStore = defineStore("kanna", () => {
         const defaultBranch = await invoke<string>("git_default_branch", { repoPath: repo.path });
         await invoke("git_fetch", { repoPath: repo.path, branch: defaultBranch });
         startPoint = `origin/${defaultBranch}`;
+        resolvedBaseRef = startPoint;
       } catch (e) {
         console.debug("[store] fetch origin failed (offline?), using local HEAD:", e);
+        // Try to at least get the default branch name for base_ref
+        try {
+          const defaultBranch = await invoke<string>("git_default_branch", { repoPath: repo.path });
+          resolvedBaseRef = defaultBranch;
+        } catch {
+          // leave resolvedBaseRef as null
+        }
       }
 
       try {
@@ -1066,11 +1091,11 @@ export const useKannaStore = defineStore("kanna", () => {
 
     await _db.execute(
       `UPDATE pipeline_item
-       SET branch = ?, port_offset = ?, port_env = ?,
+       SET branch = ?, port_offset = ?, port_env = ?, base_ref = ?,
            tags = '[]', activity = 'working',
            activity_changed_at = datetime('now'), updated_at = datetime('now')
        WHERE id = ?`,
-      [branch, portOffset, Object.keys(portEnv).length > 0 ? JSON.stringify(portEnv) : null, id],
+      [branch, portOffset, Object.keys(portEnv).length > 0 ? JSON.stringify(portEnv) : null, resolvedBaseRef, id],
     );
 
     bump();
@@ -1111,6 +1136,7 @@ export const useKannaStore = defineStore("kanna", () => {
       port_offset: null,
       port_env: null,
       activity: "idle",
+      base_ref: null,
     });
 
     if (originalDisplayName) {

@@ -103,6 +103,7 @@ export async function runMigrations(db: DbHandle): Promise<void> {
   await addColumn("repo", "hidden", "INTEGER NOT NULL DEFAULT 0");
   await addColumn("pipeline_item", "closed_at", "TEXT");
   await addColumn("pipeline_item", "tags", "TEXT NOT NULL DEFAULT '[]'");
+  await addColumn("pipeline_item", "base_ref", "TEXT");
 
   // Legacy stage → tags migration
   try {

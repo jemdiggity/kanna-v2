@@ -113,14 +113,14 @@ export async function seedDatabase(client: WebDriverClient): Promise<void> {
     `INSERT INTO pipeline_item
        (id, repo_id, issue_number, issue_title, prompt, stage, tags, branch,
         agent_type, activity, activity_changed_at, pinned, pin_order,
-        port_offset, port_env, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        port_offset, port_env, base_ref, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       TASK_AUTH, REPO_KANNA, 42, "Refactor auth middleware",
       "Refactor the auth middleware to use the new token validation library",
       "in_progress", '["in progress"]', "task-seed-auth-refactor",
       "claude", "working", hoursAgo(0.5), 1, 1,
-      1, '{"KANNA_DEV_PORT":"1421"}', daysAgo(3), hoursAgo(0.5),
+      1, '{"KANNA_DEV_PORT":"1421"}', "origin/main", daysAgo(3), hoursAgo(0.5),
     ]
   );
 
@@ -130,14 +130,14 @@ export async function seedDatabase(client: WebDriverClient): Promise<void> {
     `INSERT INTO pipeline_item
        (id, repo_id, issue_number, issue_title, prompt, stage, tags, branch,
         agent_type, activity, activity_changed_at, pinned, pin_order,
-        port_offset, port_env, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        port_offset, port_env, base_ref, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       TASK_DASH, REPO_KANNA, 51, "Analytics dashboard",
       "Build the operator analytics dashboard with time-series charts",
       "in_progress", '["in progress"]', "task-seed-dashboard",
       "claude", "idle", hoursAgo(6), 1, 2,
-      2, '{"KANNA_DEV_PORT":"1422"}', daysAgo(5), hoursAgo(6),
+      2, '{"KANNA_DEV_PORT":"1422"}', "origin/main", daysAgo(5), hoursAgo(6),
     ]
   );
 
@@ -146,14 +146,14 @@ export async function seedDatabase(client: WebDriverClient): Promise<void> {
     client,
     `INSERT INTO pipeline_item
        (id, repo_id, issue_number, issue_title, prompt, stage, tags, branch,
-        agent_type, activity, activity_changed_at, unread_at,
+        agent_type, activity, activity_changed_at, unread_at, base_ref,
         created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       TASK_ONBOARD, REPO_KANNA, 55, "First-run onboarding",
       "Create a first-run onboarding flow that walks users through importing a repo",
       "in_progress", '["in progress"]', "task-seed-onboarding",
-      "claude", "unread", hoursAgo(2), hoursAgo(2),
+      "claude", "unread", hoursAgo(2), hoursAgo(2), "origin/main",
       daysAgo(2), hoursAgo(2),
     ]
   );
@@ -163,14 +163,14 @@ export async function seedDatabase(client: WebDriverClient): Promise<void> {
     client,
     `INSERT INTO pipeline_item
        (id, repo_id, issue_number, issue_title, prompt, stage, tags, branch,
-        agent_type, activity, pr_number, pr_url,
+        agent_type, activity, pr_number, pr_url, base_ref,
         created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       TASK_PERF, REPO_KANNA, 38, "Performance audit",
       "Audit frontend rendering performance and fix the top 3 bottlenecks",
       "pr", '["pr"]', "task-seed-perf-audit",
-      "claude", "idle", 67, "https://github.com/test/kanna-tauri/pull/67",
+      "claude", "idle", 67, "https://github.com/test/kanna-tauri/pull/67", "origin/main",
       daysAgo(7), daysAgo(1),
     ]
   );
@@ -181,14 +181,14 @@ export async function seedDatabase(client: WebDriverClient): Promise<void> {
     `INSERT INTO pipeline_item
        (id, repo_id, issue_number, issue_title, prompt, stage, tags, branch,
         agent_type, activity, activity_changed_at,
-        port_offset, port_env, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        port_offset, port_env, base_ref, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       TASK_SEARCH, REPO_API, 12, "Full-text search",
       "Implement full-text search across task prompts and issue titles",
       "in_progress", '["in progress"]', "task-seed-search",
       "claude", "working", hoursAgo(1),
-      1, '{"KANNA_DEV_PORT":"1421"}', daysAgo(4), hoursAgo(1),
+      1, '{"KANNA_DEV_PORT":"1421"}', "origin/main", daysAgo(4), hoursAgo(1),
     ]
   );
 
@@ -197,14 +197,14 @@ export async function seedDatabase(client: WebDriverClient): Promise<void> {
     client,
     `INSERT INTO pipeline_item
        (id, repo_id, issue_number, issue_title, prompt, stage, tags, branch,
-        agent_type, activity, pr_number, pr_url, closed_at,
+        agent_type, activity, pr_number, pr_url, closed_at, base_ref,
         created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       TASK_NOTIF, REPO_KANNA, 30, "Desktop notifications",
       "Add native desktop notifications when agent runs complete",
       "done", '["done","merge"]', "task-seed-notifications",
-      "claude", "idle", 52, "https://github.com/test/kanna-tauri/pull/52", daysAgo(2),
+      "claude", "idle", 52, "https://github.com/test/kanna-tauri/pull/52", daysAgo(2), "origin/main",
       daysAgo(10), daysAgo(2),
     ]
   );

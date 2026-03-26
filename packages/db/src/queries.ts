@@ -62,13 +62,13 @@ export async function listPipelineItems(
 
 export async function insertPipelineItem(
   db: DbHandle,
-  item: Omit<PipelineItem, "created_at" | "updated_at" | "activity_changed_at" | "unread_at" | "pinned" | "pin_order" | "display_name" | "closed_at" | "stage" | "tags"> & { tags?: string[]; activity?: PipelineItem["activity"]; display_name?: string | null }
+  item: Omit<PipelineItem, "created_at" | "updated_at" | "activity_changed_at" | "unread_at" | "pinned" | "pin_order" | "display_name" | "closed_at" | "stage" | "tags" | "base_ref"> & { tags?: string[]; activity?: PipelineItem["activity"]; display_name?: string | null; base_ref?: string | null }
 ): Promise<void> {
   const tagsJson = JSON.stringify(item.tags ?? []);
   await db.execute(
     `INSERT INTO pipeline_item
-       (id, repo_id, issue_number, issue_title, prompt, stage, tags, pr_number, pr_url, branch, agent_type, port_offset, port_env, activity, activity_changed_at, display_name)
-     VALUES (?, ?, ?, ?, ?, 'legacy', ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?)`,
+       (id, repo_id, issue_number, issue_title, prompt, stage, tags, pr_number, pr_url, branch, agent_type, port_offset, port_env, activity, activity_changed_at, display_name, base_ref)
+     VALUES (?, ?, ?, ?, ?, 'legacy', ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?)`,
     [
       item.id,
       item.repo_id,
@@ -84,6 +84,7 @@ export async function insertPipelineItem(
       item.port_env ?? null,
       item.activity ?? "idle",
       item.display_name ?? null,
+      item.base_ref ?? null,
     ]
   );
   await db.execute(

@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS pipeline_item (
   port_offset INTEGER, port_env TEXT,
   pinned INTEGER NOT NULL DEFAULT 0, pin_order INTEGER,
   display_name TEXT, unread_at TEXT, closed_at TEXT,
+  base_ref TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -118,132 +119,132 @@ VALUES ('repo-seed-docs', '/Users/test/kanna-docs', 'kanna-docs', 'main', 0,
 INSERT INTO pipeline_item
   (id, repo_id, issue_number, issue_title, prompt, stage, tags, branch,
    agent_type, activity, activity_changed_at, pinned, pin_order,
-   port_offset, port_env, created_at, updated_at)
+   port_offset, port_env, base_ref, created_at, updated_at)
 VALUES
   ('task-seed-auth-refactor', 'repo-seed-kanna', 42, 'Refactor auth middleware',
    'Refactor the auth middleware to use the new token validation library',
    'in_progress', '["in progress"]', 'task-seed-auth-refactor',
    'claude', 'working', datetime('now', '-30 minutes'), 1, 1,
-   1, '{"KANNA_DEV_PORT":"1421"}', datetime('now', '-3 days'), datetime('now', '-30 minutes'));
+   1, '{"KANNA_DEV_PORT":"1421"}', 'origin/main', datetime('now', '-3 days'), datetime('now', '-30 minutes'));
 
 -- Dashboard: in progress, idle, pinned
 INSERT INTO pipeline_item
   (id, repo_id, issue_number, issue_title, prompt, stage, tags, branch,
    agent_type, activity, activity_changed_at, pinned, pin_order,
-   port_offset, port_env, created_at, updated_at)
+   port_offset, port_env, base_ref, created_at, updated_at)
 VALUES
   ('task-seed-dashboard', 'repo-seed-kanna', 51, 'Analytics dashboard',
    'Build the operator analytics dashboard with time-series charts',
    'in_progress', '["in progress"]', 'task-seed-dashboard',
    'claude', 'idle', datetime('now', '-6 hours'), 1, 2,
-   2, '{"KANNA_DEV_PORT":"1422"}', datetime('now', '-5 days'), datetime('now', '-6 hours'));
+   2, '{"KANNA_DEV_PORT":"1422"}', 'origin/main', datetime('now', '-5 days'), datetime('now', '-6 hours'));
 
 -- Onboarding: in progress, unread
 INSERT INTO pipeline_item
   (id, repo_id, issue_number, issue_title, prompt, stage, tags, branch,
-   agent_type, activity, activity_changed_at, unread_at,
+   agent_type, activity, activity_changed_at, unread_at, base_ref,
    created_at, updated_at)
 VALUES
   ('task-seed-onboarding', 'repo-seed-kanna', 55, 'First-run onboarding',
    'Create a first-run onboarding flow that walks users through importing a repo',
    'in_progress', '["in progress"]', 'task-seed-onboarding',
-   'claude', 'unread', datetime('now', '-2 hours'), datetime('now', '-2 hours'),
+   'claude', 'unread', datetime('now', '-2 hours'), datetime('now', '-2 hours'), 'origin/main',
    datetime('now', '-2 days'), datetime('now', '-2 hours'));
 
 -- Perf audit: has PR
 INSERT INTO pipeline_item
   (id, repo_id, issue_number, issue_title, prompt, stage, tags, branch,
-   agent_type, activity, pr_number, pr_url,
+   agent_type, activity, pr_number, pr_url, base_ref,
    created_at, updated_at)
 VALUES
   ('task-seed-perf-audit', 'repo-seed-kanna', 38, 'Performance audit',
    'Audit frontend rendering performance and fix the top 3 bottlenecks',
    'pr', '["pr"]', 'task-seed-perf-audit',
-   'claude', 'idle', 67, 'https://github.com/test/kanna-tauri/pull/67',
+   'claude', 'idle', 67, 'https://github.com/test/kanna-tauri/pull/67', 'origin/main',
    datetime('now', '-7 days'), datetime('now', '-1 days'));
 
 -- Search: in progress, working (api repo)
 INSERT INTO pipeline_item
   (id, repo_id, issue_number, issue_title, prompt, stage, tags, branch,
    agent_type, activity, activity_changed_at,
-   port_offset, port_env, created_at, updated_at)
+   port_offset, port_env, base_ref, created_at, updated_at)
 VALUES
   ('task-seed-search', 'repo-seed-api', 12, 'Full-text search',
    'Implement full-text search across task prompts and issue titles',
    'in_progress', '["in progress"]', 'task-seed-search',
    'claude', 'working', datetime('now', '-1 hours'),
-   1, '{"KANNA_DEV_PORT":"1421"}', datetime('now', '-4 days'), datetime('now', '-1 hours'));
+   1, '{"KANNA_DEV_PORT":"1421"}', 'origin/main', datetime('now', '-4 days'), datetime('now', '-1 hours'));
 
 -- Rate limiting: api repo, has PR
 INSERT INTO pipeline_item
   (id, repo_id, issue_number, issue_title, prompt, stage, tags, branch,
-   agent_type, activity, pr_number, pr_url,
+   agent_type, activity, pr_number, pr_url, base_ref,
    created_at, updated_at)
 VALUES
   ('task-seed-rate-limit', 'repo-seed-api', 18, 'Rate limiting middleware',
    'Add rate limiting middleware with configurable per-route limits',
    'pr', '["pr"]', 'task-seed-rate-limit',
-   'claude', 'idle', 23, 'https://github.com/test/kanna-api/pull/23',
+   'claude', 'idle', 23, 'https://github.com/test/kanna-api/pull/23', 'origin/main',
    datetime('now', '-6 days'), datetime('now', '-2 days'));
 
 -- Webhooks: api repo, in progress
 INSERT INTO pipeline_item
   (id, repo_id, issue_number, issue_title, prompt, stage, tags, branch,
-   agent_type, activity, activity_changed_at,
+   agent_type, activity, activity_changed_at, base_ref,
    created_at, updated_at)
 VALUES
   ('task-seed-webhooks', 'repo-seed-api', 21, 'Webhook delivery system',
    'Build a webhook delivery system with retry logic and event filtering',
    'in_progress', '["in progress"]', 'task-seed-webhooks',
-   'claude', 'idle', datetime('now', '-4 hours'),
+   'claude', 'idle', datetime('now', '-4 hours'), 'origin/main',
    datetime('now', '-3 days'), datetime('now', '-4 hours'));
 
 -- API docs: docs repo, in progress, working
 INSERT INTO pipeline_item
   (id, repo_id, issue_number, issue_title, prompt, stage, tags, branch,
-   agent_type, activity, activity_changed_at, pinned, pin_order,
+   agent_type, activity, activity_changed_at, pinned, pin_order, base_ref,
    created_at, updated_at)
 VALUES
   ('task-seed-api-docs', 'repo-seed-docs', 5, 'API reference docs',
    'Write API reference documentation for all public endpoints',
    'in_progress', '["in progress"]', 'task-seed-api-docs',
-   'claude', 'working', datetime('now', '-45 minutes'), 1, 1,
+   'claude', 'working', datetime('now', '-45 minutes'), 1, 1, 'origin/main',
    datetime('now', '-4 days'), datetime('now', '-45 minutes'));
 
 -- Tutorials: docs repo, in progress
 INSERT INTO pipeline_item
   (id, repo_id, issue_number, issue_title, prompt, stage, tags, branch,
-   agent_type, activity, activity_changed_at,
+   agent_type, activity, activity_changed_at, base_ref,
    created_at, updated_at)
 VALUES
   ('task-seed-tutorials', 'repo-seed-docs', 8, 'Getting started tutorials',
    'Create getting started tutorials for common workflows',
    'in_progress', '["in progress"]', 'task-seed-tutorials',
-   'claude', 'idle', datetime('now', '-1 days'),
+   'claude', 'idle', datetime('now', '-1 days'), 'origin/main',
    datetime('now', '-3 days'), datetime('now', '-1 days'));
 
 -- Changelog: docs repo, has PR
 INSERT INTO pipeline_item
   (id, repo_id, issue_number, issue_title, prompt, stage, tags, branch,
-   agent_type, activity, pr_number, pr_url,
+   agent_type, activity, pr_number, pr_url, base_ref,
    created_at, updated_at)
 VALUES
   ('task-seed-changelog', 'repo-seed-docs', 3, 'Auto-generated changelog',
    'Set up auto-generated changelog from git history',
    'pr', '["pr"]', 'task-seed-changelog',
-   'claude', 'idle', 7, 'https://github.com/test/kanna-docs/pull/7',
+   'claude', 'idle', 7, 'https://github.com/test/kanna-docs/pull/7', 'origin/main',
    datetime('now', '-8 days'), datetime('now', '-3 days'));
 
 -- Notifications: done + merged
 INSERT INTO pipeline_item
   (id, repo_id, issue_number, issue_title, prompt, stage, tags, branch,
-   agent_type, activity, pr_number, pr_url, closed_at,
+   agent_type, activity, pr_number, pr_url, closed_at, base_ref,
    created_at, updated_at)
 VALUES
   ('task-seed-notifications', 'repo-seed-kanna', 30, 'Desktop notifications',
    'Add native desktop notifications when agent runs complete',
    'done', '["done","merge"]', 'task-seed-notifications',
-   'claude', 'idle', 52, 'https://github.com/test/kanna-tauri/pull/52', datetime('now', '-2 days'),
+   'claude', 'idle', 52, 'https://github.com/test/kanna-tauri/pull/52', datetime('now', '-2 days'), 'origin/main',
    datetime('now', '-10 days'), datetime('now', '-2 days'));
 
 -- Blocked migration: blocked by auth refactor
