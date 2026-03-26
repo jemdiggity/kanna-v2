@@ -16,22 +16,32 @@ pub struct CommitInfo {
 }
 
 #[tauri::command]
-pub fn git_diff(repo_path: String, staged: bool) -> Result<String, String> {
+pub fn git_diff(repo_path: String, mode: String) -> Result<String, String> {
     let repo = Repository::open(&repo_path).map_err(|e| e.to_string())?;
 
-    let diff = if staged {
-        // Staged diff: HEAD tree vs index
-        let head = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
-        repo.diff_tree_to_index(head.as_ref(), None, None)
-            .map_err(|e| e.to_string())?
-    } else {
-        // Unstaged diff: index vs working directory, including untracked files
-        let mut opts = git2::DiffOptions::new();
-        opts.include_untracked(true)
-            .recurse_untracked_dirs(true)
-            .show_untracked_content(true);
-        repo.diff_index_to_workdir(None, Some(&mut opts))
-            .map_err(|e| e.to_string())?
+    let diff = match mode.as_str() {
+        "staged" => {
+            let head = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
+            repo.diff_tree_to_index(head.as_ref(), None, None)
+                .map_err(|e| e.to_string())?
+        }
+        "all" => {
+            let head = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
+            let mut opts = git2::DiffOptions::new();
+            opts.include_untracked(true)
+                .recurse_untracked_dirs(true)
+                .show_untracked_content(true);
+            repo.diff_tree_to_workdir_with_index(head.as_ref(), Some(&mut opts))
+                .map_err(|e| e.to_string())?
+        }
+        _ => {
+            let mut opts = git2::DiffOptions::new();
+            opts.include_untracked(true)
+                .recurse_untracked_dirs(true)
+                .show_untracked_content(true);
+            repo.diff_index_to_workdir(None, Some(&mut opts))
+                .map_err(|e| e.to_string())?
+        }
     };
 
     let mut output = Vec::new();
@@ -39,7 +49,7 @@ pub fn git_diff(repo_path: String, staged: bool) -> Result<String, String> {
         let origin = line.origin();
         match origin {
             '+' | '-' | ' ' => output.push(origin as u8),
-            _ => {} // File/hunk headers — content already includes the full line
+            _ => {}
         }
         output.extend_from_slice(line.content());
         true
@@ -218,6 +228,26 @@ pub fn git_app_info() -> Result<AppGitInfo, String> {
         commit_hash: hash.to_string(),
         version,
     })
+}
+
+#[tauri::command]
+pub fn git_merge_base(repo_path: String, ref_a: String, ref_b: String) -> Result<String, String> {
+    let repo = Repository::open(&repo_path).map_err(|e| e.to_string())?;
+
+    let oid_a = repo
+        .revparse_single(&ref_a)
+        .map_err(|e| format!("bad ref '{}': {}", ref_a, e))?
+        .id();
+    let oid_b = repo
+        .revparse_single(&ref_b)
+        .map_err(|e| format!("bad ref '{}': {}", ref_b, e))?
+        .id();
+
+    let merge_base = repo
+        .merge_base(oid_a, oid_b)
+        .map_err(|e| format!("no merge base between '{}' and '{}': {}", ref_a, ref_b, e))?;
+
+    Ok(merge_base.to_string())
 }
 
 // --- CLI-based commands (use system git for auth) ---

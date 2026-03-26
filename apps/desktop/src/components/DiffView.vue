@@ -75,34 +75,53 @@ async function loadDiff() {
     let patch = "";
 
     if (scope.value === "branch") {
-      // All changes since base branch
+      // All changes since base branch (merge-base with origin default branch)
       try {
+        let t0 = performance.now();
         const defaultBranch = await invoke<string>("git_default_branch", { repoPath: path });
+        console.log(`[DiffView] git_default_branch: ${(performance.now() - t0).toFixed(1)}ms → ${defaultBranch}`);
+
+        t0 = performance.now();
+        const mergeBase = await invoke<string>("git_merge_base", {
+          repoPath: path,
+          refA: `origin/${defaultBranch}`,
+          refB: "HEAD",
+        });
+        console.log(`[DiffView] git_merge_base: ${(performance.now() - t0).toFixed(1)}ms → ${mergeBase.slice(0, 8)}`);
+
+        t0 = performance.now();
         patch = await invoke<string>("git_diff_range", {
           repoPath: path,
-          from: defaultBranch,
+          from: mergeBase,
           to: "HEAD",
         });
+        console.log(`[DiffView] git_diff_range(branch): ${(performance.now() - t0).toFixed(1)}ms → ${patch.length} bytes`);
       } catch {
         // Fallback to working changes if branch diff fails
-        patch = await invoke<string>("git_diff", { repoPath: path, staged: false });
+        patch = await invoke<string>("git_diff", { repoPath: path, mode: "unstaged" });
       }
     } else if (scope.value === "commit") {
       // Last commit
       try {
+        const t0 = performance.now();
         patch = await invoke<string>("git_diff_range", {
           repoPath: path,
           from: "HEAD~1",
           to: "HEAD",
         });
+        console.log(`[DiffView] git_diff_range(commit): ${(performance.now() - t0).toFixed(1)}ms → ${patch.length} bytes`);
       } catch {
         patch = "";
       }
     } else {
       // Working tree changes (unstaged + untracked)
-      patch = await invoke<string>("git_diff", { repoPath: path, staged: false });
+      let t0 = performance.now();
+      patch = await invoke<string>("git_diff", { repoPath: path, mode: "unstaged" });
+      console.log(`[DiffView] git_diff(unstaged): ${(performance.now() - t0).toFixed(1)}ms → ${patch.length} bytes`);
       if (!patch?.trim()) {
-        patch = await invoke<string>("git_diff", { repoPath: path, staged: true });
+        t0 = performance.now();
+        patch = await invoke<string>("git_diff", { repoPath: path, mode: "staged" });
+        console.log(`[DiffView] git_diff(staged fallback): ${(performance.now() - t0).toFixed(1)}ms → ${patch.length} bytes`);
       }
     }
 
@@ -114,7 +133,9 @@ async function loadDiff() {
     }
 
     diffContent.value = patch;
+    const t0Render = performance.now();
     await renderDiff(diffContent.value);
+    console.log(`[DiffView] renderDiff: ${(performance.now() - t0Render).toFixed(1)}ms`);
   } catch (e: any) {
     error.value = e?.message || String(e);
   } finally {

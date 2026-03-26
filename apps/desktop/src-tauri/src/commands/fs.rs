@@ -203,9 +203,13 @@ pub fn which_binary(name: String) -> Result<String, String> {
 
 pub fn current_target_triple() -> &'static str {
     #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
-    { "aarch64-apple-darwin" }
+    {
+        "aarch64-apple-darwin"
+    }
     #[cfg(all(target_arch = "x86_64", target_os = "macos"))]
-    { "x86_64-apple-darwin" }
+    {
+        "x86_64-apple-darwin"
+    }
 }
 
 #[tauri::command]
@@ -220,8 +224,8 @@ pub fn list_files(path: String) -> Result<Vec<String>, String> {
         return Err(format!("not a directory: {}", path));
     }
 
-    let repo = git2::Repository::discover(root)
-        .map_err(|e| format!("not a git repository: {}", e))?;
+    let repo =
+        git2::Repository::discover(root).map_err(|e| format!("not a git repository: {}", e))?;
     let mut files = Vec::new();
 
     fn walk(

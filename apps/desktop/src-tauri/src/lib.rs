@@ -101,12 +101,18 @@ fn fix_path_from_shell() {
         Ok(output) if output.status.success() => {
             let path = String::from_utf8_lossy(&output.stdout);
             if !path.is_empty() {
-                eprintln!("[path] resolved shell PATH ({} entries)", path.matches(':').count() + 1);
+                eprintln!(
+                    "[path] resolved shell PATH ({} entries)",
+                    path.matches(':').count() + 1
+                );
                 std::env::set_var("PATH", path.as_ref());
             }
         }
         Ok(output) => {
-            eprintln!("[path] shell exited with {}, keeping default PATH", output.status);
+            eprintln!(
+                "[path] shell exited with {}, keeping default PATH",
+                output.status
+            );
         }
         Err(e) => {
             eprintln!("[path] failed to run {}: {}", shell, e);
@@ -409,6 +415,7 @@ pub fn run() {
             // Git commands
             commands::git::git_diff,
             commands::git::git_diff_range,
+            commands::git::git_merge_base,
             commands::git::git_worktree_list,
             commands::git::git_log,
             commands::git::git_default_branch,

@@ -208,7 +208,11 @@ pub async fn get_claude_usage() -> Result<String, String> {
                 "failed to capture usage data (exit={:?}, stdout_len={}, stderr={})",
                 output.status.code(),
                 raw.len(),
-                if stderr.is_empty() { "(empty)" } else { &stderr }
+                if stderr.is_empty() {
+                    "(empty)"
+                } else {
+                    &stderr
+                }
             ));
         }
 
