@@ -826,7 +826,7 @@ export const useKannaStore = defineStore("kanna", () => {
         cols: 120,
         rows: 30,
       });
-      await invoke("attach_session", { sessionId: tdSessionId });
+      await invoke("attach_session", { sessionId: tdSessionId, agentProvider: "claude" });
 
       // 3. Tag and refresh sidebar (strikethrough)
       await addPipelineItemTag(_db, item.id, "teardown");

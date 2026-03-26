@@ -18,6 +18,7 @@ export interface SpawnOptions {
 
 export interface TerminalOptions {
   kittyKeyboard?: boolean
+  agentProvider?: string
 }
 
 export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, options?: TerminalOptions) {
@@ -187,7 +188,7 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
 
     // Try to attach first — session may already exist in daemon (e.g. after app restart)
     try {
-      await invoke("attach_session", { sessionId })
+      await invoke("attach_session", { sessionId, agentProvider: options?.agentProvider })
       attached = true
       // Attach succeeded — session was alive in daemon.
       // Clear display and force SIGWINCH so Claude TUI redraws from scratch.
@@ -219,7 +220,7 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
         return
       }
       // Now attach to the newly spawned session
-      await invoke("attach_session", { sessionId })
+      await invoke("attach_session", { sessionId, agentProvider: options?.agentProvider })
       attached = true
     }
   }
