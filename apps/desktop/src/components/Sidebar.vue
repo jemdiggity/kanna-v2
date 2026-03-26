@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { Repo, PipelineItem } from "@kanna/db";
-import { hasTag } from "@kanna/core";
+import { hasTag, isHidden } from "@kanna/core";
 import { ref, nextTick, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import draggable from "vuedraggable";
@@ -44,7 +44,7 @@ function matchesSearch(item: PipelineItem): boolean {
 
 function sortedPinned(repoId: string): PipelineItem[] {
   return props.pipelineItems
-    .filter((i) => i.repo_id === repoId && !hasTag(i, "done") && i.pinned && matchesSearch(i))
+    .filter((i) => i.repo_id === repoId && !isHidden(i) && i.pinned && matchesSearch(i))
     .sort((a, b) => (a.pin_order ?? 0) - (b.pin_order ?? 0));
 }
 
@@ -54,25 +54,25 @@ function sortByCreatedAt(items: PipelineItem[]): PipelineItem[] {
 
 function sortedPR(repoId: string): PipelineItem[] {
   return sortByCreatedAt(
-    props.pipelineItems.filter((i) => i.repo_id === repoId && hasTag(i, "pr") && !hasTag(i, "done") && !i.pinned && matchesSearch(i))
+    props.pipelineItems.filter((i) => i.repo_id === repoId && hasTag(i, "pr") && !isHidden(i) && !i.pinned && matchesSearch(i))
   );
 }
 
 function sortedMerge(repoId: string): PipelineItem[] {
   return sortByCreatedAt(
-    props.pipelineItems.filter((i) => i.repo_id === repoId && hasTag(i, "merge") && !hasTag(i, "done") && !i.pinned && matchesSearch(i))
+    props.pipelineItems.filter((i) => i.repo_id === repoId && hasTag(i, "merge") && !isHidden(i) && !i.pinned && matchesSearch(i))
   );
 }
 
 function sortedActive(repoId: string): PipelineItem[] {
   return sortByCreatedAt(
-    props.pipelineItems.filter((i) => i.repo_id === repoId && !hasTag(i, "pr") && !hasTag(i, "merge") && !hasTag(i, "blocked") && !hasTag(i, "done") && !i.pinned && matchesSearch(i))
+    props.pipelineItems.filter((i) => i.repo_id === repoId && !hasTag(i, "pr") && !hasTag(i, "merge") && !hasTag(i, "blocked") && !isHidden(i) && !i.pinned && matchesSearch(i))
   );
 }
 
 function sortedBlocked(repoId: string): PipelineItem[] {
   return sortByCreatedAt(
-    props.pipelineItems.filter((i) => i.repo_id === repoId && hasTag(i, "blocked") && !hasTag(i, "done") && !i.pinned && matchesSearch(i))
+    props.pipelineItems.filter((i) => i.repo_id === repoId && hasTag(i, "blocked") && !isHidden(i) && !i.pinned && matchesSearch(i))
   );
 }
 

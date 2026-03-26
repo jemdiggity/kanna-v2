@@ -5,7 +5,7 @@ import { invoke } from "../invoke";
 import { useToast } from '../composables/useToast';
 import { isTauri } from "../tauri-mock";
 import { listen } from "../listen";
-import { parseRepoConfig, parseAgentMd, hasTag } from "@kanna/core";
+import { parseRepoConfig, parseAgentMd, hasTag, isHidden } from "@kanna/core";
 import { createNavigationHistory } from "../composables/useNavigationHistory";
 import type { RepoConfig, CustomTaskConfig } from "@kanna/core";
 import type { DbHandle, PipelineItem, Repo } from "@kanna/db";
@@ -20,7 +20,7 @@ import {
   getRepo, getSetting, setSetting,
   insertTaskBlocker, removeTaskBlocker, removeAllBlockersForItem,
   listBlockersForItem, listBlockedByItem, getUnblockedItems,
-  hasCircularDependency, insertOperatorEvent,
+  hasCircularDependency, insertOperatorEvent, updateClaudeSessionId,
 } from "@kanna/db";
 
 /** Generate an 8-char hex ID (32 bits of randomness). */
@@ -41,6 +41,7 @@ export interface PtySpawnOptions {
   setupCmdsOverride?: string[];
   portEnv?: Record<string, string>;
   setupCmds?: string[];
+  resumeSessionId?: string;
 }
 // Module-level DB handle — set once by init(), never null after that.
 let _db: DbHandle;
@@ -110,7 +111,7 @@ export const useKannaStore = defineStore("kanna", () => {
   const currentItem = computed(() => {
     if (selectedItemId.value) {
       const item = items.value.find((i) => i.id === selectedItemId.value);
-      if (item && !hasTag(item, "done")) return item;
+      if (item && !isHidden(item)) return item;
     }
     // Auto-select first task in current repo if nothing valid is selected.
     // Skip items whose worktree/agent setup is still in progress — their
@@ -121,7 +122,7 @@ export const useKannaStore = defineStore("kanna", () => {
 
   function sortItemsForRepo(repoId: string): PipelineItem[] {
     const repoItems = items.value.filter(
-      (item) => item.repo_id === repoId && !hasTag(item, "done")
+      (item) => item.repo_id === repoId && !isHidden(item)
     );
     const pinned = repoItems
       .filter((i) => i.pinned)
@@ -593,7 +594,23 @@ export const useKannaStore = defineStore("kanna", () => {
         flags.push(`--disallowedTools ${options.disallowedTools.join(",")}`);
       }
 
-      agentCmd = `claude ${flags.join(" ")} '${escapedPrompt}'`;
+      // Session ID: reuse for resume, generate new for fresh sessions
+      const claudeSessionId = options?.resumeSessionId || crypto.randomUUID();
+      if (!options?.resumeSessionId) {
+        await updateClaudeSessionId(_db, sessionId, claudeSessionId);
+      }
+
+      if (options?.resumeSessionId) {
+        flags.push(`--resume ${claudeSessionId}`);
+      } else {
+        flags.push(`--session-id ${claudeSessionId}`);
+      }
+
+      if (options?.resumeSessionId) {
+        agentCmd = `claude ${flags.join(" ")}`;
+      } else {
+        agentCmd = `claude ${flags.join(" ")} '${escapedPrompt}'`;
+      }
     }
 
     const allSetupCmds = [...setupCmds, ...(options?.setupCmdsOverride || [])];
@@ -712,33 +729,33 @@ export const useKannaStore = defineStore("kanna", () => {
       const teardownCmds = await collectTeardownCommands(item, repo);
 
       if (teardownCmds.length === 0) {
-        // No teardown — fast close (or linger if dev hack enabled)
+        // No teardown — archive (or linger if dev hack enabled)
         if (devLingerTerminals.value) {
           await addPipelineItemTag(_db, item.id, "lingering");
         } else {
-          await addPipelineItemTag(_db, item.id, "done");
+          await addPipelineItemTag(_db, item.id, "archived");
           selectNextItem(item.id);
         }
         bump();
         (async () => {
           try {
             await Promise.all([
-              invoke("kill_session", { sessionId: item.id }).catch((e: unknown) =>
-                console.error("[store] kill_session failed:", e)),
+              invoke("signal_session", { sessionId: item.id, signal: "SIGINT" }).catch((e: unknown) =>
+                console.error("[store] signal_session failed:", e)),
               invoke("kill_session", { sessionId: `shell-wt-${item.id}` }).catch((e: unknown) =>
                 console.error("[store] kill shell session failed:", e)),
             ]);
-            if (!devLingerTerminals.value) await checkUnblocked(item.id);
-          } catch (e) { console.error("[store] close cleanup failed:", e); }
+            // NOTE: do not call checkUnblocked — archived ≠ done
+          } catch (e) { console.error("[store] archive cleanup failed:", e); }
         })();
         return;
       }
 
       // Has teardown scripts — enter teardown state
-      // 1. Kill existing sessions
+      // 1. Gracefully stop Claude, kill shell
       await Promise.all([
-        invoke("kill_session", { sessionId: item.id }).catch((e: unknown) =>
-          console.error("[store] kill_session failed:", e)),
+        invoke("signal_session", { sessionId: item.id, signal: "SIGINT" }).catch((e: unknown) =>
+          console.error("[store] signal_session failed:", e)),
         invoke("kill_session", { sessionId: `shell-wt-${item.id}` }).catch((e: unknown) =>
           console.error("[store] kill shell session failed:", e)),
       ]);
@@ -782,13 +799,13 @@ export const useKannaStore = defineStore("kanna", () => {
     }
     try {
       const rows = await _db.select<PipelineItem>(
-        "SELECT * FROM pipeline_item WHERE tags LIKE '%\"done\"%' ORDER BY updated_at DESC LIMIT 1"
+        "SELECT * FROM pipeline_item WHERE tags LIKE '%\"archived\"%' ORDER BY updated_at DESC LIMIT 1"
       );
       const item = rows[0];
       if (!item) return;
       const repo = repos.value.find((r) => r.id === item.repo_id);
       if (!repo) return;
-      await removePipelineItemTag(_db, item.id, "done");
+      await removePipelineItemTag(_db, item.id, "archived");
       await updatePipelineItemActivity(_db, item.id, "working");
       await selectItem(item.id);
       bump();
@@ -799,6 +816,7 @@ export const useKannaStore = defineStore("kanna", () => {
         try {
           await spawnPtySession(item.id, worktreePath, item.prompt || "", 80, 24, {
             agentProvider: (item.agent_provider as "claude" | "copilot") || "claude",
+            ...(item.claude_session_id ? { resumeSessionId: item.claude_session_id } : {}),
           });
         } catch (spawnErr) {
           console.warn("[store] session re-spawn after undo failed:", spawnErr);

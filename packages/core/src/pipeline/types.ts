@@ -1,4 +1,4 @@
-export const SYSTEM_TAGS = ["in progress", "done", "pr", "merge", "blocked", "teardown"] as const;
+export const SYSTEM_TAGS = ["in progress", "done", "pr", "merge", "blocked", "teardown", "archived"] as const;
 export type SystemTag = (typeof SYSTEM_TAGS)[number];
 
 export function parseTags(raw: string | null | undefined): string[] {
@@ -9,4 +9,8 @@ export function parseTags(raw: string | null | undefined): string[] {
 
 export function hasTag(item: { tags: string }, tag: string): boolean {
   return parseTags(item.tags).includes(tag);
+}
+
+export function isHidden(item: { tags: string }): boolean {
+  return hasTag(item, "done") || hasTag(item, "archived");
 }

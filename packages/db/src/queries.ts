@@ -62,7 +62,7 @@ export async function listPipelineItems(
 
 export async function insertPipelineItem(
   db: DbHandle,
-  item: Omit<PipelineItem, "created_at" | "updated_at" | "activity_changed_at" | "unread_at" | "pinned" | "pin_order" | "display_name" | "closed_at" | "stage" | "tags" | "base_ref"> & { tags?: string[]; activity?: PipelineItem["activity"]; display_name?: string | null; base_ref?: string | null }
+  item: Omit<PipelineItem, "created_at" | "updated_at" | "activity_changed_at" | "unread_at" | "pinned" | "pin_order" | "display_name" | "closed_at" | "stage" | "tags" | "base_ref" | "claude_session_id"> & { tags?: string[]; activity?: PipelineItem["activity"]; display_name?: string | null; base_ref?: string | null }
 ): Promise<void> {
   const tagsJson = JSON.stringify(item.tags ?? []);
   await db.execute(
@@ -118,7 +118,7 @@ export async function addPipelineItemTag(
   if (!current.includes(tag)) {
     current.push(tag);
   }
-  const closedAt = tag === "done" ? ", closed_at = datetime('now')" : "";
+  const closedAt = (tag === "done" || tag === "archived") ? ", closed_at = datetime('now')" : "";
   await db.execute(
     `UPDATE pipeline_item SET tags = ?${closedAt}, updated_at = datetime('now') WHERE id = ?`,
     [JSON.stringify(current), id]
@@ -136,7 +136,7 @@ export async function removePipelineItemTag(
   );
   const current: string[] = rows[0]?.tags ? JSON.parse(rows[0].tags) : [];
   const updated = current.filter((t) => t !== tag);
-  const closedAt = tag === "done" ? ", closed_at = NULL" : "";
+  const closedAt = (tag === "done" || tag === "archived") ? ", closed_at = NULL" : "";
   await db.execute(
     `UPDATE pipeline_item SET tags = ?${closedAt}, updated_at = datetime('now') WHERE id = ?`,
     [JSON.stringify(updated), id]
@@ -201,6 +201,17 @@ export async function updatePipelineItemDisplayName(
   await db.execute(
     "UPDATE pipeline_item SET display_name = ?, updated_at = datetime('now') WHERE id = ?",
     [displayName, id]
+  );
+}
+
+export async function updateClaudeSessionId(
+  db: DbHandle,
+  id: string,
+  claudeSessionId: string
+): Promise<void> {
+  await db.execute(
+    "UPDATE pipeline_item SET claude_session_id = ?, updated_at = datetime('now') WHERE id = ?",
+    [claudeSessionId, id]
   );
 }
 

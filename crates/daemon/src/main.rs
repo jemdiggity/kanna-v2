@@ -621,6 +621,7 @@ async fn handle_command(
 
         Command::Signal { session_id, signal } => {
             let sig = match signal.as_str() {
+                "SIGINT" => libc::SIGINT,
                 "SIGTSTP" => libc::SIGTSTP,
                 "SIGCONT" => libc::SIGCONT,
                 "SIGTERM" => libc::SIGTERM,

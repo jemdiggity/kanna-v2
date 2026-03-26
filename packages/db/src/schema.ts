@@ -31,6 +31,7 @@ export interface PipelineItem {
   pinned: number;          // 0 or 1
   pin_order: number | null;
   base_ref: string | null;
+  claude_session_id: string | null;
   created_at: string;
   updated_at: string;
 }
