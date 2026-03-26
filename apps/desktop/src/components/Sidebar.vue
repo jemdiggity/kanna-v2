@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import type { Repo, PipelineItem } from "@kanna/db";
 import { hasTag } from "@kanna/core";
-import { ref, nextTick } from "vue";
+import { ref, nextTick, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import draggable from "vuedraggable";
+import { fuzzyMatch } from "../utils/fuzzyMatch";
 
 const { t } = useI18n();
 
@@ -18,7 +19,6 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: "select-repo", id: string): void;
   (e: "select-item", id: string): void;
-  (e: "add-repo"): void;
   (e: "new-task", repoId: string): void;
   (e: "pin-item", itemId: string, position: number): void;
   (e: "unpin-item", itemId: string): void;
@@ -29,10 +29,22 @@ const emit = defineEmits<{
 }>();
 
 const collapsedRepos = ref<Set<string>>(new Set());
+const searchQuery = ref("");
+const searchInputRef = ref<HTMLInputElement | null>(null);
+const preSearchCollapsed = ref<Set<string> | null>(null);
+
+function matchesSearch(item: PipelineItem): boolean {
+  const q = searchQuery.value.trim();
+  if (!q) return true;
+  const title = item.display_name || item.issue_title || item.prompt;
+  if (title && fuzzyMatch(q, title) !== null) return true;
+  if (item.branch && item.branch.toLowerCase().includes(q.toLowerCase())) return true;
+  return false;
+}
 
 function sortedPinned(repoId: string): PipelineItem[] {
   return props.pipelineItems
-    .filter((i) => i.repo_id === repoId && !hasTag(i, "done") && i.pinned)
+    .filter((i) => i.repo_id === repoId && !hasTag(i, "done") && i.pinned && matchesSearch(i))
     .sort((a, b) => (a.pin_order ?? 0) - (b.pin_order ?? 0));
 }
 
@@ -42,25 +54,25 @@ function sortByCreatedAt(items: PipelineItem[]): PipelineItem[] {
 
 function sortedPR(repoId: string): PipelineItem[] {
   return sortByCreatedAt(
-    props.pipelineItems.filter((i) => i.repo_id === repoId && hasTag(i, "pr") && !hasTag(i, "done") && !i.pinned)
+    props.pipelineItems.filter((i) => i.repo_id === repoId && hasTag(i, "pr") && !hasTag(i, "done") && !i.pinned && matchesSearch(i))
   );
 }
 
 function sortedMerge(repoId: string): PipelineItem[] {
   return sortByCreatedAt(
-    props.pipelineItems.filter((i) => i.repo_id === repoId && hasTag(i, "merge") && !hasTag(i, "done") && !i.pinned)
+    props.pipelineItems.filter((i) => i.repo_id === repoId && hasTag(i, "merge") && !hasTag(i, "done") && !i.pinned && matchesSearch(i))
   );
 }
 
 function sortedActive(repoId: string): PipelineItem[] {
   return sortByCreatedAt(
-    props.pipelineItems.filter((i) => i.repo_id === repoId && !hasTag(i, "pr") && !hasTag(i, "merge") && !hasTag(i, "blocked") && !hasTag(i, "done") && !i.pinned)
+    props.pipelineItems.filter((i) => i.repo_id === repoId && !hasTag(i, "pr") && !hasTag(i, "merge") && !hasTag(i, "blocked") && !hasTag(i, "done") && !i.pinned && matchesSearch(i))
   );
 }
 
 function sortedBlocked(repoId: string): PipelineItem[] {
   return sortByCreatedAt(
-    props.pipelineItems.filter((i) => i.repo_id === repoId && hasTag(i, "blocked") && !hasTag(i, "done") && !i.pinned)
+    props.pipelineItems.filter((i) => i.repo_id === repoId && hasTag(i, "blocked") && !hasTag(i, "done") && !i.pinned && matchesSearch(i))
   );
 }
 
@@ -161,13 +173,31 @@ function onUnpinnedChange(repoId: string, evt: any) {
   }
 }
 
+watch(searchQuery, (q) => {
+  if (q.trim()) {
+    if (!preSearchCollapsed.value) {
+      preSearchCollapsed.value = new Set(collapsedRepos.value);
+    }
+    collapsedRepos.value = new Set();
+  } else {
+    if (preSearchCollapsed.value) {
+      collapsedRepos.value = new Set(preSearchCollapsed.value);
+      preSearchCollapsed.value = null;
+    }
+  }
+});
+
 function renameSelectedItem() {
   if (!props.selectedItemId) return;
   const item = props.pipelineItems.find((i) => i.id === props.selectedItemId);
   if (item) startRename(item);
 }
 
-defineExpose({ renameSelectedItem });
+function focusSearch() {
+  searchInputRef.value?.focus();
+}
+
+defineExpose({ renameSelectedItem, focusSearch });
 </script>
 
 <template>
@@ -178,7 +208,7 @@ defineExpose({ renameSelectedItem });
         {{ $t('sidebar.noReposHint', { shortcut: '⌘I' }) }}
       </div>
 
-      <div v-for="repo in repos" :key="repo.id" class="repo-section">
+      <div v-for="repo in repos" :key="repo.id" v-show="!searchQuery.trim() || itemsForRepo(repo.id).length > 0" class="repo-section">
         <div
           class="repo-header"
           :class="{ selected: selectedRepoId === repo.id }"
@@ -429,9 +459,14 @@ defineExpose({ renameSelectedItem });
     </div>
 
     <div class="sidebar-footer">
-      <button class="btn-import" @click="emit('add-repo')" :title="$t('sidebar.addRepoTooltip')">
-        {{ $t('sidebar.addRepo') }}
-      </button>
+      <input
+        ref="searchInputRef"
+        v-model="searchQuery"
+        type="text"
+        class="search-input"
+        :placeholder="$t('sidebar.searchPlaceholder')"
+        @keydown.escape="searchQuery = ''; searchInputRef?.blur()"
+      />
     </div>
   </aside>
 </template>
@@ -631,20 +666,26 @@ defineExpose({ renameSelectedItem });
   gap: 8px;
 }
 
-.btn-import {
+.search-input {
   flex: 1;
-  padding: 6px 12px;
+  padding: 6px 10px;
   background: #2a2a2a;
   border: 1px solid #444;
   color: #ccc;
   border-radius: 4px;
-  cursor: pointer;
   font-size: 12px;
+  outline: none;
+  font-family: inherit;
+  min-width: 0;
 }
 
-.btn-import:hover {
-  background: #333;
-  color: #e0e0e0;
+.search-input:focus {
+  border-color: #0066cc;
+  background: #1a1a1a;
+}
+
+.search-input::placeholder {
+  color: #555;
 }
 
 .pinned-zone {

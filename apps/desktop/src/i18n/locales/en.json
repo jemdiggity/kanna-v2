@@ -64,7 +64,8 @@
     "keyboardShortcuts": "Keyboard Shortcuts",
     "preferences": "Preferences",
     "dismiss": "Dismiss",
-    "treeExplorer": "Tree Explorer"
+    "treeExplorer": "Tree Explorer",
+    "focusSearch": "Focus Search"
   },
   "shortcutContexts": {
     "main": "Main Shortcuts",
@@ -74,8 +75,7 @@
     "tree": "Tree Explorer Shortcuts"
   },
   "sidebar": {
-    "addRepo": "Add Repo",
-    "addRepoTooltip": "Add Repo (⌘I)",
+    "searchPlaceholder": "Search tasks…  ⌘F",
     "noTasks": "No tasks",
     "noReposYet": "No repos yet.",
     "noReposHint": "Press {shortcut} to create one.",

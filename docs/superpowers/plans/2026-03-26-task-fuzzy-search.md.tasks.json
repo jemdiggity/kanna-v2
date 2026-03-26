@@ -1,0 +1,11 @@
+{
+  "planPath": "docs/superpowers/plans/2026-03-26-task-fuzzy-search.md",
+  "tasks": [
+    {"id": 1, "subject": "Task 1: Add i18n keys", "status": "pending"},
+    {"id": 2, "subject": "Task 2: Add focusSearch keyboard shortcut", "status": "pending", "blockedBy": [1]},
+    {"id": 3, "subject": "Task 3: Replace sidebar footer and add search filtering", "status": "pending", "blockedBy": [1, 2]},
+    {"id": 4, "subject": "Task 4: Clean up parent component", "status": "pending", "blockedBy": [3]},
+    {"id": 5, "subject": "Task 5: Manual verification", "status": "pending", "blockedBy": [4]}
+  ],
+  "lastUpdated": "2026-03-26T00:00:00Z"
+}

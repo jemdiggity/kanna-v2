@@ -64,7 +64,8 @@
     "keyboardShortcuts": "키보드 단축키",
     "preferences": "설정",
     "dismiss": "닫기",
-    "treeExplorer": "트리 탐색기"
+    "treeExplorer": "트리 탐색기",
+    "focusSearch": "검색 포커스"
   },
   "shortcutContexts": {
     "main": "메인 단축키",
@@ -74,8 +75,7 @@
     "tree": "트리 탐색기 단축키"
   },
   "sidebar": {
-    "addRepo": "저장소 추가",
-    "addRepoTooltip": "저장소 추가 (⌘I)",
+    "searchPlaceholder": "작업 검색…  ⌘F",
     "noTasks": "작업 없음",
     "noReposYet": "저장소가 없습니다.",
     "noReposHint": "{shortcut}을 눌러 생성하세요.",

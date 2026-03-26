@@ -274,7 +274,7 @@ User makes PR → GitHub API → DB update → stage transition
 
 SQLite via `tauri-plugin-sql`. Schema defined inline in `stores/db.ts`'s `runMigrations()`. See the Database Tables inventory in the Codebase Overview section for the full table list.
 
-DB name configurable via `KANNA_DB_NAME` env var (defaults to `kanna-v2.db`). E2E tests use `kanna-test.db`.
+DB name configurable via `KANNA_DB_NAME` env var (defaults to `kanna-v2.db`). E2E tests use `kanna-test.db`. Worktrees auto-name their DB `kanna-wt-{worktree-dir}.db` (e.g., `kanna-wt-task-10720bf8.db`). All DBs live in `~/Library/Application Support/com.kanna.app/`.
 
 ## Testing
 

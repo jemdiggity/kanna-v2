@@ -447,6 +447,7 @@ const keyboardActions = {
   openPreferences: () => { showPreferencesPanel.value = true; },
   prevTab: () => { preferencesRef.value?.cycleTab(-1); },
   nextTab: () => { preferencesRef.value?.cycleTab(1); },
+  focusSearch: () => { sidebarRef.value?.focusSearch(); },
 };
 useKeyboardShortcuts(keyboardActions, {
   context: () => currentShortcutContext.value,
@@ -603,7 +604,6 @@ onMounted(async () => {
       :blocker-names="sidebarBlockerNames"
       @select-repo="store.selectRepo"
       @select-item="handleSelectItem"
-      @add-repo="addRepoInitialTab = 'import'; showAddRepoModal = true"
       @new-task="(repoId: string) => { store.selectedRepoId = repoId; showNewTaskModal = true; }"
       @pin-item="store.pinItem"
       @unpin-item="store.unpinItem"

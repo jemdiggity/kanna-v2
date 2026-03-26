@@ -64,7 +64,8 @@
     "keyboardShortcuts": "キーボードショートカット",
     "preferences": "設定",
     "dismiss": "閉じる",
-    "treeExplorer": "ツリーエクスプローラー"
+    "treeExplorer": "ツリーエクスプローラー",
+    "focusSearch": "検索にフォーカス"
   },
   "shortcutContexts": {
     "main": "メインショートカット",
@@ -74,8 +75,7 @@
     "tree": "ツリーエクスプローラーショートカット"
   },
   "sidebar": {
-    "addRepo": "リポジトリ追加",
-    "addRepoTooltip": "リポジトリ追加 (⌘I)",
+    "searchPlaceholder": "タスクを検索…  ⌘F",
     "noTasks": "タスクなし",
     "noReposYet": "リポジトリがありません。",
     "noReposHint": "{shortcut} で作成できます。",

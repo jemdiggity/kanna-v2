@@ -31,7 +31,8 @@ export type ActionName =
   | "openPreferences"
   | "openShellRepoRoot"
   | "prevTab"
-  | "nextTab";
+  | "nextTab"
+  | "focusSearch";
 
 export type KeyboardActions = Record<ActionName, () => void>;
 
@@ -86,6 +87,7 @@ export const shortcuts: ShortcutDef[] = [
   { action: "goBack",       labelKey: "shortcuts.goBack",         groupKey: "shortcuts.groupNavigation", key: "-",                            ctrl: true,               display: "⌃-",       context: ["main"] },
   { action: "goForward",    labelKey: "shortcuts.goForward",      groupKey: "shortcuts.groupNavigation", key: ["_", "-"],                     ctrl: true, shift: true,  display: "⌃⇧-",     context: ["main"] },
   { action: "toggleTreeExplorer", labelKey: "shortcuts.treeExplorer", groupKey: "shortcuts.groupNavigation", key: "e", meta: true, shift: true, display: "⇧⌘E", context: ["main", "diff", "shell"] },
+  { action: "focusSearch", labelKey: "shortcuts.focusSearch", groupKey: "shortcuts.groupNavigation", key: "f", meta: true, display: "⌘F", context: ["main"] },
   // Settings
   { action: "openPreferences", labelKey: "shortcuts.preferences", groupKey: "shortcuts.groupHelp", key: ",",                            meta: true,               display: "⌘,",       context: ["main"] },
   // Help — ⇧⌘/ must come before ⌘/ so the more specific shortcut matches first
