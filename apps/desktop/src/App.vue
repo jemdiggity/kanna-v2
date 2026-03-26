@@ -673,8 +673,9 @@ onMounted(async () => {
       :repo-path="store.selectedRepo.path"
       :worktree-path="store.currentItem?.branch ? activeWorktreePath : undefined"
       :initial-scope="store.currentItem ? diffScopes.get(store.currentItem.id) : undefined"
+      :base-ref="store.currentItem?.base_ref ?? undefined"
       :maximized="maximizedModal === 'diff'"
-      @scope-change="(s: any) => { if (store.currentItem) diffScopes.set(store.currentItem.id, s); }"
+      @scope-change="(s: 'branch' | 'commit' | 'working') => { if (store.currentItem) diffScopes.set(store.currentItem.id, s); }"
       @close="showDiffModal = false; maximizedModal = null"
     />
     <FilePickerModal
