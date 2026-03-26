@@ -514,46 +514,7 @@ export const useKannaStore = defineStore("kanna", () => {
     });
   }
 
-  let _kannaHookPathCache: string | null = null;
-  async function resolveKannaHookPath(): Promise<string> {
-    if (_kannaHookPathCache) return _kannaHookPathCache;
-    _kannaHookPathCache = await invoke<string>("which_binary", { name: "kanna-hook" });
-    return _kannaHookPathCache;
-  }
-
   async function spawnPtySession(sessionId: string, cwd: string, prompt: string, cols = 80, rows = 24, options?: PtySpawnOptions) {
-    let kannaHookPath: string;
-    try {
-      kannaHookPath = await resolveKannaHookPath();
-    } catch {
-      throw new Error("kanna-hook binary not found. Ensure it is built (cargo build -p kanna-hook).");
-    }
-
-    const hookSettings = JSON.stringify({
-      hooks: {
-        SessionStart: [
-          { hooks: [{ type: "command", command: `${kannaHookPath} SessionStart ${sessionId}` }] },
-        ],
-        UserPromptSubmit: [
-          { hooks: [{ type: "command", command: `${kannaHookPath} UserPromptSubmit ${sessionId}` }] },
-        ],
-        Stop: [
-          { hooks: [{ type: "command", command: `${kannaHookPath} Stop ${sessionId}` }] },
-        ],
-        StopFailure: [
-          { hooks: [{ type: "command", command: `${kannaHookPath} StopFailure ${sessionId}` }] },
-        ],
-        PostToolUse: [
-          { matcher: "*", hooks: [{ type: "command", command: `${kannaHookPath} PostToolUse ${sessionId}` }] },
-        ],
-        PreToolUse: [
-          { matcher: "AskUserQuestion", hooks: [{ type: "command", command: `${kannaHookPath} WaitingForInput ${sessionId}` }] },
-        ],
-        Notification: [
-          { hooks: [{ type: "command", command: `${kannaHookPath} WaitingForInput ${sessionId}` }] },
-        ],
-      },
-    });
 
     const env: Record<string, string> = { TERM: "xterm-256color", TERM_PROGRAM: "vscode" };
     let setupCmds: string[] = options?.setupCmds || [];
@@ -595,32 +556,6 @@ export const useKannaStore = defineStore("kanna", () => {
     let agentCmd: string;
 
     if (provider === "copilot") {
-      // Write hook config file to worktree for Copilot to discover
-      const copilotHookConfig = JSON.stringify({
-        version: 1,
-        hooks: {
-          sessionStart: [
-            { type: "command", bash: `${kannaHookPath} SessionStart ${sessionId}` },
-          ],
-          sessionEnd: [
-            { type: "command", bash: `${kannaHookPath} Stop ${sessionId}` },
-          ],
-          postToolUse: [
-            { type: "command", bash: `${kannaHookPath} PostToolUse ${sessionId}` },
-          ],
-          errorOccurred: [
-            { type: "command", bash: `${kannaHookPath} StopFailure ${sessionId}` },
-          ],
-          userPromptSubmitted: [
-            { type: "command", bash: `${kannaHookPath} UserPromptSubmit ${sessionId}` },
-          ],
-        },
-      }, null, 2);
-      await invoke("write_text_file", {
-        path: `${cwd}/.github/hooks/kanna-hooks.json`,
-        content: copilotHookConfig,
-      });
-
       // Build Copilot flags
       const copilotFlags: string[] = [];
       if (!options?.permissionMode || options.permissionMode === "dontAsk") {
@@ -658,7 +593,7 @@ export const useKannaStore = defineStore("kanna", () => {
         flags.push(`--disallowedTools ${options.disallowedTools.join(",")}`);
       }
 
-      agentCmd = `claude ${flags.join(" ")} --settings '${hookSettings}' '${escapedPrompt}'`;
+      agentCmd = `claude ${flags.join(" ")} '${escapedPrompt}'`;
     }
 
     const allSetupCmds = [...setupCmds, ...(options?.setupCmdsOverride || [])];
@@ -1371,37 +1306,6 @@ export const useKannaStore = defineStore("kanna", () => {
       }
     }
 
-    // Copilot idle detection: debounce-based.
-    // Copilot has no per-response "done" hook like Claude's Stop.
-    // We set "working" on every activity signal and start a timer.
-    // If no activity for COPILOT_IDLE_TIMEOUT_MS, transition to idle.
-    const COPILOT_IDLE_TIMEOUT_MS = 1000;
-    const _copilotIdleTimers = new Map<string, ReturnType<typeof setTimeout>>();
-
-    function _resetCopilotIdleTimer(sessionId: string) {
-      _clearCopilotIdleTimer(sessionId);
-      _copilotIdleTimers.set(sessionId, setTimeout(async () => {
-        _copilotIdleTimers.delete(sessionId);
-        const item = items.value.find((i) => i.id === sessionId);
-        if (item && item.activity === "working") {
-          if (selectedItemId.value === sessionId) {
-            await updatePipelineItemActivity(_db, item.id, "idle");
-          } else {
-            await updatePipelineItemActivity(_db, item.id, "unread");
-          }
-          bump();
-        }
-      }, COPILOT_IDLE_TIMEOUT_MS));
-    }
-
-    function _clearCopilotIdleTimer(sessionId: string) {
-      const timer = _copilotIdleTimers.get(sessionId);
-      if (timer) {
-        clearTimeout(timer);
-        _copilotIdleTimers.delete(sessionId);
-      }
-    }
-
     // Event listeners
     listen("hook_event", async (event: any) => {
       const payload = event.payload || event;
@@ -1412,17 +1316,12 @@ export const useKannaStore = defineStore("kanna", () => {
       const item = items.value.find((i) => i.id === sessionId);
       if (!item) return;
 
-      if (hookEvent === "Stop" || hookEvent === "StopFailure") {
-        _handleAgentFinished(sessionId);
-        _clearCopilotIdleTimer(sessionId);
-      } else if (hookEvent === "Interrupted") {
-        if (item.activity === "working") {
-          await updatePipelineItemActivity(_db, item.id, "idle");
+      if (hookEvent === "ClaudeWorking" || hookEvent === "CopilotThinking") {
+        if (item.activity !== "working") {
+          await updatePipelineItemActivity(_db, item.id, "working");
           bump();
         }
-        _clearCopilotIdleTimer(sessionId);
-      } else if (hookEvent === "CopilotIdle") {
-        _clearCopilotIdleTimer(sessionId);
+      } else if (hookEvent === "ClaudeIdle" || hookEvent === "CopilotIdle") {
         if (item.activity === "working") {
           if (selectedItemId.value === sessionId) {
             await updatePipelineItemActivity(_db, item.id, "idle");
@@ -1431,20 +1330,15 @@ export const useKannaStore = defineStore("kanna", () => {
           }
           bump();
         }
+      } else if (hookEvent === "Interrupted") {
+        if (item.activity === "working") {
+          await updatePipelineItemActivity(_db, item.id, "idle");
+          bump();
+        }
       } else if (hookEvent === "WaitingForInput") {
         if (item.activity !== "unread" && selectedItemId.value !== sessionId) {
           await updatePipelineItemActivity(_db, item.id, "unread");
           bump();
-        }
-      } else if (hookEvent === "PostToolUse" || hookEvent === "UserPromptSubmit" || hookEvent === "CopilotThinking") {
-        if (item.activity !== "working") {
-          await updatePipelineItemActivity(_db, item.id, "working");
-          bump();
-        }
-        // For Copilot tasks: reset the idle timer on every activity signal.
-        // When no signals arrive for a few seconds, assume copilot is idle.
-        if (item.agent_provider === "copilot") {
-          _resetCopilotIdleTimer(sessionId);
         }
       }
     });
