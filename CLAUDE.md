@@ -2,9 +2,118 @@
 
 ## Project
 
-Kanna — Tauri v2 desktop app for managing Claude Code agent tasks. Vue 3 frontend, Rust backend, SQLite database. See [PRD.md](PRD.md) for product requirements. Public repository hosted on GitHub.
+Kanna — Tauri v2 desktop app for managing coding agent tasks (Claude Code, GitHub Copilot). Vue 3 frontend, Rust backend, SQLite database. Public repository hosted on GitHub.
 
 Kanna is a product distributed to end users as a signed macOS app. All dependencies must be vendored or statically linked — never depend on libraries installed on the build machine (e.g., Homebrew). Release builds must run on any Mac without developer tools installed.
+
+**Target user:** Software developers who use coding agents (Claude Code, GitHub Copilot) and want to run multiple agent tasks in parallel without juggling terminals and branches.
+
+## Product Behavior
+
+### Core concepts
+
+- **Task** — A unit of work. Has a prompt, a git worktree, a Claude agent session, and a lifecycle stage. One task = one branch = one PR.
+- **Pipeline** — Tag-based workflow: `in progress → pr → merge` or `→ done` (closed).
+- **Daemon** — Standalone process that manages PTY sessions. Survives app restarts. Handles seamless upgrades via fd handoff.
+
+### Workflows
+
+**Create a task:**
+1. Cmd+N → enter prompt (choose Claude or Copilot agent)
+2. App creates git worktree (`{repo}/.kanna-worktrees/task-{uuid}`)
+3. Runs `.kanna/config.json` setup scripts if present (e.g., `bun install`)
+4. Spawns agent CLI in the worktree via daemon
+5. Agent starts working. User watches in real-time terminal.
+
+**Review and merge:**
+1. Agent finishes → task marked as unread (bold in sidebar)
+2. User selects task, presses Cmd+D → diff modal shows all branch changes
+3. Optionally Cmd+P → file picker → preview, Cmd+O → open in IDE, or Cmd+J → shell in worktree
+4. Cmd+S → create GitHub PR, task tagged `pr`
+5. Cmd+M → merge PR, task tagged `merge`
+
+**Manual intervention:**
+1. Cmd+J → shell modal opens in the task's worktree
+2. Run tests, inspect files, debug
+3. Close shell → focus returns to agent terminal
+4. Type in agent terminal to send input to Claude
+
+**Multi-repo:** Import repos via sidebar. Each repo has its own task list. Cmd+Opt+Up/Down navigates tasks in sidebar order.
+
+### Closing a task (Cmd+Delete)
+
+1. Kills the agent PTY session and shell session in the daemon
+2. Marks the task as `done` in the DB
+3. Selects the next task in the sidebar
+4. Closed tasks are hidden from the sidebar immediately
+5. **Garbage collection:** Tasks closed longer than `gcAfterDays` (default: 3, configurable in preferences) are permanently deleted — worktree removed, DB row deleted. GC runs hourly.
+
+### Task activity
+
+| State | Meaning | Sidebar display |
+|-------|---------|-----------------|
+| `idle` | No recent activity | normal |
+| `working` | Agent actively running (PostToolUse hook) | italic |
+| `unread` | Agent finished, user hasn't looked | bold |
+
+Sorted in sidebar: pinned (manual order) → merge → pr → active (by created_at desc) → blocked.
+
+### Pinned tasks
+
+Tasks can be pinned to the top of their repo's task list by dragging above the pin divider. Per-repo scope. Closed tasks disappear regardless of pin state.
+
+### Agent execution
+
+**PTY mode (default):** Agent CLI runs in a real terminal via the daemon. User sees full TUI output in real-time. Interactive — user can type. Hooks (`kanna-hook` binary) report lifecycle events: `Stop` (finished), `StopFailure` (error), `PostToolUse` (marks task as working).
+
+**SDK mode (alternate):** Agent CLI runs headless with `--output-format stream-json`. NDJSON on stdin/stdout. Non-interactive. Used for automation.
+
+### Diff viewer
+
+- Modal (Cmd+D), not a tab
+- Scopes: Branch (all changes since merge-base with default branch), Last Commit, Working (uncommitted)
+- Staged toggle to filter staged-only changes
+- Scope remembered per task
+- Rendered by `@pierre/diffs` with shadow DOM, syntax highlighting via worker pool
+
+### Keyboard shortcuts
+
+| Shortcut | Action |
+|----------|--------|
+| ⇧⌘N | New task |
+| ⌘D | Diff modal |
+| ⌘J | Shell modal |
+| ⇧⌘J | Shell at repo root |
+| ⌘P | File picker |
+| ⌘O | Open in IDE |
+| ⌘S | Make PR |
+| ⇧⌘M | Merge PR |
+| ⌘Delete | Close task |
+| ⌘Z | Undo close |
+| ⌘Opt+Up/Down | Navigate tasks |
+| ⌘B | Toggle sidebar |
+| ⇧⌘P | Command palette |
+| ⇧⌘E | Tree explorer |
+| ⇧⌘Enter | Toggle maximize |
+| ⇧⌘A | Analytics |
+| ⌘/ | Keyboard shortcuts |
+| ⌘, | Preferences |
+| Ctrl+- / Ctrl+Shift+- | Back / Forward |
+| Escape | Dismiss modal |
+
+All shortcuts work even when the terminal has focus.
+
+### Preferences
+
+| Setting | Default |
+|---------|---------|
+| Suspend After (minutes) | 5 |
+| Kill After (minutes) | 30 |
+| IDE Command | code |
+| Locale | en |
+| Default Agent Provider | claude |
+
+Stored in SQLite `settings` table.
 
 ## Package Manager
 
@@ -17,7 +126,12 @@ Use `bun` for all package management and script execution. Not pnpm, not npm.
 - `packages/db/` — database schema types and query helpers
 - `crates/claude-agent-sdk/` — Rust wrapper for Claude CLI (NDJSON streaming)
 - `crates/daemon/` — PTY daemon (Unix socket, session persistence)
+- `crates/kanna-hook/` — lightweight binary that signals events to the daemon
 - `crates/tauri-plugin-delta-updater/` — self-updater plugin (stub)
+- `tests/` — CLI contract tests (`cli-contract/`), PTY test utility (`pty-test/`)
+- `scripts/` — dev server, build, release, and setup scripts
+- `docs/` — planning and spec documents
+- `.cargo/config.toml` — sets `target-dir = ".build"` (shared Rust build cache)
 
 ## Development Workflow
 
@@ -76,9 +190,11 @@ The first `bun dev` in a fresh worktree compiles ~523 Rust crates (the daemon bu
 ## Architecture
 
 - **Tauri commands** in `apps/desktop/src-tauri/src/commands/` — agent, daemon, git, fs, shell
-- **Vue composables** in `apps/desktop/src/composables/` — usePipeline, useRepo, useTerminal, etc.
-- **Daemon** in `crates/daemon/` — standalone PTY session manager. See `crates/daemon/SPEC.md` for full spec, `PRD.md` for product behavior.
+- **Tauri app core** in `apps/desktop/src-tauri/src/lib.rs` — event bridge, reattach coordinator, daemon spawn, macOS integrations
+- **Vue composables** in `apps/desktop/src/composables/` — useTerminal, useKeyboardShortcuts, useBackup, useGc, etc.
+- **Daemon** in `crates/daemon/` — standalone PTY session manager. See `crates/daemon/SPEC.md` for full spec.
 - **Agent SDK** wraps Claude CLI via `--output-format stream-json`, communicates via NDJSON on stdin/stdout
+- **Agent providers** — supports both Claude and Copilot via `agent_provider` field (`"claude"` | `"copilot"`)
 - **Permission mode flags** use camelCase: `dontAsk`, `acceptEdits`, `default` (not kebab-case)
 - **Browser mock layer** (`tauri-mock.ts`, `invoke.ts`, `listen.ts`, `dialog.ts`) enables running the frontend in a regular browser without Tauri APIs
 
@@ -152,18 +268,28 @@ User makes PR → GitHub API → DB update → stage transition
 
 ### Stores (`apps/desktop/src/stores/`)
 
-- **`kanna.ts`** (Pinia) — App state: repo/item selection, sorted items (pinned → merge → pr → active → blocked), debounced activity transitions (unread → idle after 1s), `generateId()` via `crypto.getRandomValues()`, operator event emission, undo support.
+- **`kanna.ts`** (Pinia) — App state: repo/item selection, sorted items (pinned → merge → pr → active → blocked), debounced activity transitions (unread → idle after 1s), `generateId()` via `crypto.getRandomValues()`, operator event emission, undo support. Key interfaces: `PtySpawnOptions` (agentProvider, model, permissionMode, allowedTools, maxTurns, maxBudgetUsd, setupCmds, portEnv).
 - **`db.ts`** — DB setup: `resolveDbName()` from env vars, `loadDatabase()` with mock fallback, `runMigrations()` with all table schemas.
 
 ### Tauri Commands (`apps/desktop/src-tauri/src/commands/`)
 
 | Module | Commands |
 |---|---|
-| `agent.rs` | `create_agent_session` — buffers Claude CLI NDJSON messages, background drainer |
-| `daemon.rs` | `spawn_session`, `attach_session`, `detach_session`, `send_input`, `resize_session`, `signal_session`, `kill_session` |
-| `fs.rs` | `get_app_data_dir`, `copy_file`, `remove_file`, `list_dir`, `read_dir_entries` (gitignore-aware), `read_text_file` |
-| `git.rs` | `git_diff` (staged + unstaged + untracked), `git_worktree_list`, `git_log`, `git_commit` |
+| `agent.rs` | `create_agent_session` (background drainer), `agent_next_message` (poll buffer), `agent_send_message`, `agent_interrupt`, `agent_close_session`, `get_claude_usage` |
+| `daemon.rs` | `spawn_session`, `attach_session`, `detach_session`, `send_input`, `resize_session`, `signal_session`, `kill_session`, `list_sessions` |
+| `fs.rs` | `get_app_data_dir`, `file_exists`, `read_text_file`, `write_text_file`, `copy_file`, `remove_file`, `list_dir`, `list_files` (gitignore-aware), `read_dir_entries`, `read_env_var`, `which_binary`, `ensure_directory`, `append_log` |
+| `git.rs` | `git_diff` (staged + unstaged + untracked), `git_diff_range`, `git_merge_base`, `git_worktree_list`, `git_worktree_add`, `git_worktree_remove`, `git_log`, `git_default_branch`, `git_remote_url`, `git_push`, `git_fetch`, `git_clone`, `git_init`, `git_app_info` |
 | `shell.rs` | `ensure_term_init` (ZDOTDIR proxy), `run_script` |
+
+### Tauri App Core (`apps/desktop/src-tauri/src/lib.rs`)
+
+- **Event bridge** (`spawn_event_bridge`) — background task subscribing to daemon events, auto-reconnects with exponential backoff on daemon restart, emits Tauri events: `terminal_output`, `session_exit`, `hook_event`, `status_changed`, `daemon_ready`
+- **Reattach coordinator** (`spawn_reattach_coordinator`) — listens to `daemon_ready`, re-attaches all tracked sessions, sends Resize to trigger SIGWINCH for Claude TUI redraw
+- **Daemon spawn** (`ensure_daemon_running`) — searches for sidecar binary, spawns with `setsid`, waits for PID file match, handles worktree isolation
+- **macOS fn+F fullscreen** — native event monitor intercepts fn+F without Cmd/Ctrl/Option to toggle fullscreen
+- **PATH resolution** (`fix_path_from_shell`) — runs interactive login shell to capture real PATH (fixes Spotlight-launched app's minimal PATH)
+- **Terminal output patterns** — strips ANSI from PTY output to detect: "Interrupted", "Do you want to allow", Copilot idle/thinking states; broadcasts as hook events
+- **State:** `AgentState` (DashMap of buffered sessions), `DaemonState` (shared daemon connection), `AttachedSessions` (tracks active output streams)
 
 ### Packages
 
@@ -181,9 +307,9 @@ User makes PR → GitHub API → DB update → stage transition
 
 ### Rust Crates
 
-- **`claude-agent-sdk`** — Session builder pattern, NDJSON stream parsing, permission callbacks, `find_claude_binary()`. Types: `PermissionMode` (`DontAsk`/`AcceptEdits`/`Default`), `ThinkingMode`, `Effort` levels.
+- **`claude-agent-sdk`** — Session builder pattern, NDJSON stream parsing, permission callbacks, `find_claude_binary()`. Types: `PermissionMode` (`DontAsk`/`AcceptEdits`/`Default`), `ThinkingMode`, `Effort` levels. Bidirectional control protocol: app sends Interrupt/SetModel/SetPermissionMode, CLI sends CanUseTool for permission checks.
 - **`daemon`** — Raw libc PTY, Unix socket NDJSON protocol, SCM_RIGHTS fd transfer for handoff, session manager with spawn/attach/detach/resize/signal/kill.
-- **`kanna-hook`** — Lightweight binary that signals task completion to the daemon.
+- **`kanna-hook`** — Lightweight binary invoked by Claude Code hooks. Usage: `kanna-hook <event> <session_id> [json_data]`. Computes daemon socket path and sends HookEvent command.
 - **`tauri-plugin-delta-updater`** — Self-updater plugin (stub).
 
 ### Key Third-Party Libraries
@@ -231,8 +357,8 @@ User makes PR → GitHub API → DB update → stage transition
 | Table | Key Columns |
 |---|---|
 | `repo` | id, path, name, default_branch, hidden |
-| `pipeline_item` | id, repo_id, prompt, tags (JSON), pr_number/url, branch, activity, port_env (JSON), pinned, pin_order, display_name |
-| `task_blockers` | blocked_item_id, blocker_item_id |
+| `pipeline_item` | id, repo_id, prompt, tags (JSON), pr_number/url, branch, activity, port_env (JSON), pinned, pin_order, display_name, agent_type, agent_provider, base_ref, issue_number, issue_title, closed_at, port_offset |
+| `task_blocker` | blocked_item_id, blocker_item_id |
 | `worktree` | id, pipeline_item_id, path, branch |
 | `terminal_session` | id, repo_id, pipeline_item_id, label, cwd, daemon_session_id |
 | `agent_run` | id, repo_id, agent_type, status, started_at, finished_at |
@@ -245,10 +371,14 @@ User makes PR → GitHub API → DB update → stage transition
 - Raw libc PTY (not portable-pty) — needed for `SCM_RIGHTS` fd handoff
 - Always spawned fresh on app start, handoff from old daemon preserves sessions
 - App waits for new daemon's PID file before connecting (prevents stale connections)
-- One reader per session, started on first Attach (not on Spawn)
+- One reader per session, started on first Attach (not on Spawn) — prevents byte-splitting across multiple fd readers
+- **Pre-attach buffering** — output between Spawn and first Attach is buffered (max 64KB) so startup sequences (e.g., kitty keyboard mode) are captured and replayed
+- **Broadcast output** — all attached clients receive output simultaneously; attach swaps the active writer without creating new readers
+- **Terminal size coordination** — effective PTY dimensions are `min(cols)` × `min(rows)` across all attached clients
 - No scrollback buffer — reconnection uses SIGWINCH to trigger Claude TUI redraw
 - Logs to `~/Library/Application Support/Kanna/kanna-daemon_*.log` via flexi_logger
 - `KANNA_DAEMON_DIR` env var overrides data directory (used by tests)
+- Protocol: line-delimited JSON over Unix socket. Commands include Spawn, Attach, Detach, Input, Resize, Signal, Kill, List, Subscribe, Handoff, HookEvent
 
 ### Daemon invariants
 
@@ -278,19 +408,28 @@ DB name configurable via `KANNA_DB_NAME` env var (defaults to `kanna-v2.db`). E2
 
 ## Testing
 
-- **Unit tests:** vitest in `packages/core/` and `packages/db/`
+- **Unit tests:** vitest in `packages/core/`, `packages/db/`, and `apps/desktop/src/composables/` (useBackup, useInlineSearch, useNavigationHistory, useShortcutContext have `.test.ts` files)
 - **Integration tests:** Rust tests in `apps/desktop/src-tauri/tests/` (real Claude CLI)
+- **Daemon tests:** `crates/daemon/tests/` — handoff and reconnect tests with real daemon processes
+- **CLI contract tests:** `tests/cli-contract/` — verify Claude and Copilot CLI flag compatibility
 - **E2E tests:** bun test + W3C WebDriver via `tauri-plugin-webdriver` on port 4445
+  - Mock tests (`apps/desktop/tests/e2e/mock/`): action-bar, app-launch, diff-view, import-repo, keyboard-shortcuts, preferences, task-lifecycle
+  - Real tests (`apps/desktop/tests/e2e/real/`): claude-session, diff-after-claude (requires Claude CLI)
 - E2E tests access Vue internals via `__vue_app__._instance.setupState` — dev builds only
 - WebDriver is only available in debug builds (`#[cfg(debug_assertions)]`)
 
 ## Conventions
 
-- Task tags (JSON array on `pipeline_item.tags`): system tags are `in progress`, `done`, `pr`, `merge`, `blocked`. New tasks start with `in progress`.
+- Task tags (JSON array on `pipeline_item.tags`): system tags are `in progress`, `done`, `pr`, `merge`, `blocked`, `teardown`. New tasks start with `in progress`.
 - Git worktrees created at `{repoPath}/.kanna-worktrees/task-{uuid}`
 - Branch names: `task-{uuid}`
 - GitHub labels: `kn:wip`, `kn:pr-ready`, `kn:claimed`
 - API tokens from env: `KANNA_GITHUB_TOKEN`, `KANNA_SLACK_TOKEN`, `KANNA_DISCORD_TOKEN`
+- Agent providers: `"claude"` or `"copilot"` — stored in `pipeline_item.agent_provider`
+- i18n locales: English (`en`), Japanese (`ja`), Korean (`ko`) in `apps/desktop/src/i18n/locales/`
+- Keyboard shortcut contexts: `"main"`, `"diff"`, `"file"`, `"shell"`, `"tree"` — managed by `useShortcutContext`
+- `.kanna/config.json` per repo: `setup` (commands), `teardown` (commands), `test` (commands), `ports` (env var → port mapping)
+- Custom tasks defined in `.kanna/tasks/{slug}/agent.md` with YAML frontmatter
 
 ## Coding Style
 
@@ -336,3 +475,8 @@ Single `VERSION` file generated by `scripts/sync-version.sh` from git tags. Form
 - `tauri-plugin-webdriver` on port 4445 for E2E testing. Only works in debug builds on macOS WKWebView.
 - Daemon must be detached from app process group (`setsid` via `pre_exec`) or Ctrl+C kills it.
 - Frontend console logs go to `/tmp/kanna-webview-*.log` via the log forwarding in `main.ts`. Each instance gets its own log file: worktrees use the directory name (e.g., `kanna-webview-task-abc123.log`), main instances use a cwd path hash (e.g., `kanna-webview-1a2b3c4d.log`).
+- Rust build artifacts go to `.build/` (not `target/`) — configured in `.cargo/config.toml`.
+- Terminal output must be ANSI-stripped before pattern matching — raw escape sequences (colors, cursor movement) interfere with hook detection.
+- The event bridge auto-reconnects to daemon with exponential backoff — don't add manual retry logic on top.
+- KeepAlive is used for ShellModal to preserve xterm buffer across task switches — use `v-show` not `v-if` for terminal-containing components.
+- `agent_next_message` uses a polling pattern — frontend calls it repeatedly to drain the buffered message queue from the background drainer task.
