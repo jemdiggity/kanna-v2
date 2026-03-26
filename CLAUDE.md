@@ -130,7 +130,7 @@ User makes PR → GitHub API → DB update → stage transition
 
 SQLite via `tauri-plugin-sql`. Tables: `repo`, `pipeline_item`, `worktree`, `terminal_session`, `agent_run`, `settings`. Schema defined inline in `App.vue`'s `runMigrations()`.
 
-DB name configurable via `KANNA_DB_NAME` env var (defaults to `kanna-v2.db`). E2E tests use `kanna-test.db`.
+DB name configurable via `KANNA_DB_NAME` env var (defaults to `kanna-v2.db`). E2E tests use `kanna-test.db`. Worktrees auto-name their DB `kanna-wt-{worktree-dir}.db` (e.g., `kanna-wt-task-10720bf8.db`). All DBs live in `~/Library/Application Support/com.kanna.app/`.
 
 ## Testing
 

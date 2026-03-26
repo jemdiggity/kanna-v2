@@ -36,8 +36,10 @@ const preSearchCollapsed = ref<Set<string> | null>(null);
 function matchesSearch(item: PipelineItem): boolean {
   const q = searchQuery.value.trim();
   if (!q) return true;
-  const fields = [item.display_name, item.issue_title, item.prompt, item.branch];
-  return fields.some((f) => f && fuzzyMatch(q, f) !== null);
+  const title = item.display_name || item.issue_title || item.prompt;
+  if (title && fuzzyMatch(q, title) !== null) return true;
+  if (item.branch && item.branch.toLowerCase().includes(q.toLowerCase())) return true;
+  return false;
 }
 
 function sortedPinned(repoId: string): PipelineItem[] {
