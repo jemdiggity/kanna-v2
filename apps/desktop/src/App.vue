@@ -343,6 +343,15 @@ const keyboardActions = {
   undoClose: () => store.undoClose(),
   navigateUp: () => navigateItems(-1),
   navigateDown: () => navigateItems(1),
+  goToOldestUnread: () => {
+    const repoItems = store.sortedItemsForCurrentRepo;
+    const unread = repoItems.filter((i) => i.activity === "unread");
+    if (unread.length === 0) return;
+    const oldest = unread.reduce((a, b) =>
+      (a.activity_changed_at ?? "") < (b.activity_changed_at ?? "") ? a : b,
+    );
+    store.selectItem(oldest.id);
+  },
   toggleSidebar: () => { sidebarHidden.value = !sidebarHidden.value; },
   toggleMaximize: () => {
     const ctx = currentShortcutContext.value;

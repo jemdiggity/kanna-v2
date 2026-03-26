@@ -66,6 +66,7 @@
     "preferences": "Preferences",
     "dismiss": "Dismiss",
     "treeExplorer": "Tree Explorer",
+    "oldestUnread": "Oldest Unread Task",
     "focusSearch": "Focus Search"
   },
   "shortcutContexts": {
