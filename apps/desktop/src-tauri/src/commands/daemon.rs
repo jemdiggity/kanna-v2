@@ -51,7 +51,12 @@ impl SessionScanState {
         self.buffer.push_str(text);
         self.last_data_at = Instant::now();
         if self.buffer.len() > SCAN_BUFFER_CAP {
-            let drain_to = self.buffer.len() - SCAN_BUFFER_CAP;
+            let mut drain_to = self.buffer.len() - SCAN_BUFFER_CAP;
+            // Advance to the next char boundary to avoid panicking on multi-byte
+            // UTF-8 chars (spinners ✻✽✶, emoji 🍌, box-drawing, etc.)
+            while drain_to < self.buffer.len() && !self.buffer.is_char_boundary(drain_to) {
+                drain_to += 1;
+            }
             self.buffer.drain(..drain_to);
         }
     }

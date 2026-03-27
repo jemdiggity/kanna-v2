@@ -417,19 +417,11 @@ fn spawn_reattach_coordinator(app: tauri::AppHandle, attached: AttachedSessions)
                 match commands::daemon::attach_session_inner(&app, sid.clone(), &attached, None).await {
                     Ok(()) => {
                         eprintln!("[reattach] re-attached session {}", sid);
-                        // Send Resize to trigger SIGWINCH so Claude TUI redraws
-                        let resize_cmd = serde_json::json!({
-                            "type": "Resize",
-                            "session_id": sid,
-                            "cols": 80,
-                            "rows": 24,
-                        });
-                        let socket_path = daemon_socket_path();
-                        if let Ok(mut client) = DaemonClient::connect(&socket_path).await {
-                            let json = serde_json::to_string(&resize_cmd).unwrap_or_default();
-                            let _ = client.send_command(&json).await;
-                            let _ = client.read_event().await;
-                        }
+                        // Don't send Resize here — the frontend sends the correct
+                        // dimensions after its TerminalView mounts and calls fit().
+                        // A hardcoded 80×24 resize on a temporary connection would
+                        // leave a stale entry in session_sizes, permanently capping
+                        // the PTY at 80×24 via smallest-client-wins.
                     }
                     Err(e) => {
                         // Only remove from tracking if the session definitively doesn't exist.

@@ -360,6 +360,14 @@ async fn handle_connection(
             }
         }
     }
+
+    // Connection dropped — clean up this client's entries from session_sizes
+    // so stale dimensions don't cap future resize computations.
+    let writer_id = Arc::as_ptr(&writer) as usize;
+    let mut sizes = session_sizes.lock().await;
+    for (_sid, client_sizes) in sizes.iter_mut() {
+        client_sizes.remove(&writer_id);
+    }
 }
 
 async fn handle_command(
@@ -835,9 +843,20 @@ fn stream_output(
                                 failed.push(i);
                             }
                         }
-                        // Remove broken writers in reverse order to preserve indices
-                        for i in failed.into_iter().rev() {
-                            vec.remove(i);
+                        if !failed.is_empty() {
+                            // Collect writer_ids before removing so we can clean session_sizes
+                            let failed_ids: Vec<usize> = failed.iter().map(|&i| Arc::as_ptr(&vec[i]) as usize).collect();
+                            // Remove broken writers in reverse order to preserve indices
+                            for i in failed.into_iter().rev() {
+                                vec.remove(i);
+                            }
+                            // Clean up stale size entries for broken writers
+                            let mut sizes = session_sizes.lock().await;
+                            if let Some(client_sizes) = sizes.get_mut(&session_id) {
+                                for wid in &failed_ids {
+                                    client_sizes.remove(wid);
+                                }
+                            }
                         }
                     }
                 });
