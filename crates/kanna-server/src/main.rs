@@ -282,6 +282,9 @@ async fn main() {
                                 break;
                             }
                         }
+                        RelayMessage::AuthOk { user_id } => {
+                            log::info!("Relay authenticated as user {}", user_id);
+                        }
                         RelayMessage::Error { message } => {
                             log::error!("Relay error: {}", message);
                         }

@@ -1,5 +1,4 @@
 mod fd_transfer;
-mod protocol;
 mod pty;
 mod session;
 mod socket;
@@ -10,6 +9,7 @@ use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use kanna_daemon::protocol;
 use tokio::io::BufReader;
 use tokio::net::UnixStream;
 use tokio::sync::{broadcast, Mutex};

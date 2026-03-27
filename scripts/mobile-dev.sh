@@ -111,9 +111,14 @@ start() {
     "KANNA_SERVER_CONFIG=${SERVER_CONFIG} RUST_LOG=info cargo run --manifest-path crates/kanna-server/Cargo.toml" Enter
 
   # Window: tauri ios dev
+  # --host makes Vite bind to LAN IP so the physical device can reach it.
+  # Tauri sets TAURI_DEV_HOST which also updates __KANNA_RELAY_URL__ in vite.config.ts.
+  # Auto-detect LAN IP for physical device connectivity.
+  LAN_IP=$(ipconfig getifaddr en0 2>/dev/null || echo "localhost")
+  echo "  LAN IP: ${LAN_IP}"
   tmux new-window -t "$SESSION" -n mobile -c "$MOBILE_DIR"
   tmux send-keys -t "$SESSION:mobile" \
-    "KANNA_DEV_PORT=${MOBILE_PORT} bunx tauri ios dev" Enter
+    "KANNA_DEV_PORT=${MOBILE_PORT} KANNA_RELAY_PORT=${RELAY_PORT} bunx tauri ios dev --host ${LAN_IP}" Enter
 
   echo "Started tmux session '$SESSION' with 3 windows: relay, server, mobile"
   echo "Attach with: tmux attach -t $SESSION"

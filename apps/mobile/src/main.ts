@@ -1,52 +1,45 @@
 import { createApp } from "vue";
-import { createPinia } from "pinia";
 import { invoke } from "@tauri-apps/api/core";
-import { createRemoteDbHandle } from "@kanna/db/remote-db";
+import App from "./App.vue";
 
 declare global {
-  const __KANNA_MOBILE__: boolean;
   const __KANNA_RELAY_URL__: string;
 }
 
-// Remote DB — routes SQL queries through the relay to kanna-server
-const db = createRemoteDbHandle(
-  (cmd, args) => invoke(cmd, args) as Promise<unknown>,
-);
+const el = document.getElementById("app")!;
 
-// Connect to relay, then mount the app
+function showStatus(msg: string) {
+  el.style.cssText = "color:#888;font:14px/1.5 monospace;padding:env(safe-area-inset-top, 20px) 20px 20px";
+  el.textContent = msg;
+}
+
+function showError(stage: string, err: unknown) {
+  const msg = err instanceof Error ? err.message : String(err);
+  console.error(`[mobile:${stage}]`, err);
+  el.style.cssText = "color:#ff6b6b;font:14px/1.5 monospace;padding:env(safe-area-inset-top, 20px) 20px 20px;white-space:pre-wrap;word-break:break-all;background:#1a1a1a";
+  el.textContent = `[${stage}] ${msg}`;
+}
+
 async function boot() {
   const relayUrl = __KANNA_RELAY_URL__;
+  showStatus(`Connecting to ${relayUrl}...`);
 
-  // Keep trying until relay is connected
   let connected = false;
   while (!connected) {
     try {
-      await invoke("connect_relay", {
-        relayUrl,
-        idToken: "mobile-dev-token",
-      });
-      console.log("[mobile] Connected to relay at", relayUrl);
+      await invoke("connect_relay", { relayUrl, idToken: "mobile-dev-token" });
       connected = true;
     } catch (e) {
-      console.warn("[mobile] Relay not ready, retrying in 2s:", e);
+      showStatus(`Connecting to ${relayUrl}...\n${e}`);
       await new Promise((r) => setTimeout(r, 2000));
     }
   }
 
-  // Import App from desktop — shared Vue components
-  // __KANNA_MOBILE__ gates desktop-only features
-  const { default: App } = await import("@desktop/App.vue");
+  showStatus("Connected. Mounting app...");
 
   const app = createApp(App);
-  app.use(createPinia());
-  app.provide("db", db);
-  app.provide("dbName", "mobile");
+  app.config.errorHandler = (err) => showError("vue", err);
   app.mount("#app");
-
-  // Poll for data updates every 5 seconds (mobile is read-only, no push events)
-  const { useKannaStore } = await import("@desktop/stores/kanna");
-  const store = useKannaStore();
-  setInterval(() => store.bump(), 5000);
 }
 
-boot();
+boot().catch((e) => showError("boot", e));

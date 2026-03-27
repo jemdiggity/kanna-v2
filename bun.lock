@@ -51,32 +51,14 @@
       "name": "@kanna/mobile",
       "version": "0.0.0",
       "dependencies": {
-        "@pierre/diffs": "^1.1.0",
         "@tauri-apps/api": "^2",
-        "@tauri-apps/plugin-dialog": "^2.6.0",
         "@tauri-apps/plugin-opener": "^2",
-        "@tauri-apps/plugin-shell": "^2",
-        "@tauri-apps/plugin-sql": "^2.3.2",
-        "@vueuse/core": "^14.2.1",
         "@xterm/addon-fit": "0.12.0-beta.100",
-        "@xterm/addon-image": "0.10.0-beta.100",
-        "@xterm/addon-serialize": "0.15.0-beta.100",
-        "@xterm/addon-web-links": "0.13.0-beta.100",
-        "@xterm/addon-webgl": "0.19.0-beta.100",
         "@xterm/xterm": "6.1.0-beta.100",
-        "chart.js": "^4",
-        "markdown-it": "^14.1.0",
-        "markdown-it-strikethrough-alt": "^1.0.0",
-        "markdown-it-task-lists": "^2.1.1",
-        "pinia": "^3.0.4",
-        "shiki": "^4.0.2",
         "vue": "^3.5.13",
-        "vue-chartjs": "^5",
-        "vuedraggable": "^4.1.0",
       },
       "devDependencies": {
         "@tauri-apps/cli": "^2",
-        "@types/markdown-it": "^14.1.1",
         "@vitejs/plugin-vue": "^5.2.1",
         "typescript": "~5.6.2",
         "vite": "^6.0.3",
@@ -639,6 +621,10 @@
     "zwitch": ["zwitch@2.0.4", "", {}, "sha512-bXE4cR/kVZhKZX/RjPEflHaKVhUVl85noU3v6b8apfQEc1x4A+zBxjZ4lN8LqGd6WZ3dl98pY4o717VFmoPp+A=="],
 
     "@kanna/desktop/typescript": ["typescript@5.6.3", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-hjcS1mhfuyi4WW8IWtjP7brDrG2cuDZukyrYrSauoXGNgx0S7zceP07adYkJycEr56BOUTNPzbInooiN3fn1qw=="],
+
+    "@kanna/mobile/@xterm/addon-fit": ["@xterm/addon-fit@0.12.0-beta.100", "", { "peerDependencies": { "@xterm/xterm": "^6.1.0-beta.100" } }, "sha512-FjZ5l/cKbOCGVDmL/ikYgnkH/WZlvk6ObLYaNKc7J//L7POYmh31odZNYKIXFz0rH9gzZoJ6GpkXvvEJwWfZtg=="],
+
+    "@kanna/mobile/@xterm/xterm": ["@xterm/xterm@6.1.0-beta.100", "", {}, "sha512-yTrSoii0jep0ZjwUltOf2izZiql04lVri0/M0vJKg8Lm2YXN0JP5mVGvuhceuaCqzwA1bKUONxM2pyaozd4JMw=="],
 
     "@kanna/mobile/typescript": ["typescript@5.6.3", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-hjcS1mhfuyi4WW8IWtjP7brDrG2cuDZukyrYrSauoXGNgx0S7zceP07adYkJycEr56BOUTNPzbInooiN3fn1qw=="],
 

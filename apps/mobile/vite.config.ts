@@ -12,22 +12,13 @@ const relayPort = process.env.KANNA_RELAY_PORT || "9080";
 export default defineConfig(async () => ({
   plugins: [vue()],
 
-  worker: {
-    format: "es" as const,
-  },
-
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "src"),
-      "@desktop": path.resolve(__dirname, "../desktop/src"),
-      "@kanna/db/remote-db": path.resolve(__dirname, "../../packages/db/src/remote-db"),
-      "@kanna/db": path.resolve(__dirname, "../../packages/db/src"),
-      "@kanna/core": path.resolve(__dirname, "../../packages/core/src"),
     },
   },
 
   define: {
-    __KANNA_MOBILE__: true,
     __KANNA_RELAY_URL__: JSON.stringify(
       host ? `ws://${host}:${relayPort}` : `ws://localhost:${relayPort}`,
     ),

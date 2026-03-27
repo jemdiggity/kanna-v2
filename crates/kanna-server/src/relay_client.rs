@@ -34,6 +34,11 @@ pub enum RelayMessage {
     },
     #[serde(rename = "error")]
     Error { message: String },
+    #[serde(rename = "auth_ok")]
+    AuthOk {
+        #[serde(rename = "userId")]
+        user_id: String,
+    },
 }
 
 pub async fn connect_to_relay(
