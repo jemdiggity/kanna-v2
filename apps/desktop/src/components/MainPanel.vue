@@ -42,6 +42,7 @@ const emit = defineEmits<{
         <TerminalTabs
           :session-id="item.id"
           :agent-type="item.agent_type || 'pty'"
+          :agent-provider="item.agent_provider || 'claude'"
           :repo-path="repoPath"
           :worktree-path="item.branch ? `${repoPath}/.kanna-worktrees/${item.branch}` : undefined"
           :prompt="item.prompt || ''"

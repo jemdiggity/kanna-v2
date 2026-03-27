@@ -414,7 +414,7 @@ fn spawn_reattach_coordinator(app: tauri::AppHandle, attached: AttachedSessions)
                 session_ids.len()
             );
             for sid in session_ids {
-                match commands::daemon::attach_session_inner(&app, sid.clone(), &attached).await {
+                match commands::daemon::attach_session_inner(&app, sid.clone(), &attached, None).await {
                     Ok(()) => {
                         eprintln!("[reattach] re-attached session {}", sid);
                         // Send Resize to trigger SIGWINCH so Claude TUI redraws

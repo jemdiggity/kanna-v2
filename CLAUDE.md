@@ -207,7 +207,7 @@ User creates task → worktree + DB record → daemon Spawn → Attach (start st
 
 User types → xterm.js onData → invoke("send_input") → daemon Input → PTY write
 
-Claude finishes → kanna-hook fires Stop → daemon broadcasts → app updates task activity
+Claude finishes → PTY shows ❯ idle prompt → Tauri detects ClaudeIdle → app updates task activity
 
 User makes PR → GitHub API → DB update → stage transition
 ```
@@ -309,7 +309,6 @@ User makes PR → GitHub API → DB update → stage transition
 
 - **`claude-agent-sdk`** — Session builder pattern, NDJSON stream parsing, permission callbacks, `find_claude_binary()`. Types: `PermissionMode` (`DontAsk`/`AcceptEdits`/`Default`), `ThinkingMode`, `Effort` levels. Bidirectional control protocol: app sends Interrupt/SetModel/SetPermissionMode, CLI sends CanUseTool for permission checks.
 - **`daemon`** — Raw libc PTY, Unix socket NDJSON protocol, SCM_RIGHTS fd transfer for handoff, session manager with spawn/attach/detach/resize/signal/kill.
-- **`kanna-hook`** — Lightweight binary invoked by Claude Code hooks. Usage: `kanna-hook <event> <session_id> [json_data]`. Computes daemon socket path and sends HookEvent command.
 - **`tauri-plugin-delta-updater`** — Self-updater plugin (stub).
 
 ### Key Third-Party Libraries
@@ -337,7 +336,7 @@ User makes PR → GitHub API → DB update → stage transition
 | `install.sh` | Download and install latest release from GitHub (DMG, arch auto-detect) |
 | `ship.sh` | Release automation: version bump, dual-arch build, sign, notarize, publish |
 | `sync-version.sh` | Generate VERSION from git tags, sync to tauri.conf.json |
-| `stage-sidecars.sh` | Stage daemon + hook binaries to Tauri's externalBin with target triples |
+| `stage-sidecars.sh` | Stage daemon binary to Tauri's externalBin with target triples |
 
 ### Environment Variables
 

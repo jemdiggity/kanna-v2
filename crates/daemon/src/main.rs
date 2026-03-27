@@ -109,7 +109,7 @@ async fn main() {
         }
     }
 
-    let (hook_tx, _) = broadcast::channel::<String>(256);
+    let (broadcast_tx, _) = broadcast::channel::<String>(256);
 
     let pid_path_clone = pid_path.clone();
     let socket_path_clone = socket_path.clone();
@@ -127,7 +127,7 @@ async fn main() {
         match listener.accept().await {
             Ok((stream, _addr)) => {
                 let sessions_clone = sessions.clone();
-                let hook_tx_clone = hook_tx.clone();
+                let broadcast_tx_clone = broadcast_tx.clone();
                 let writers_clone = session_writers.clone();
                 let buffers_clone = pre_attach_buffers.clone();
                 let sizes_clone = session_sizes.clone();
@@ -135,7 +135,7 @@ async fn main() {
                     handle_connection(
                         stream,
                         sessions_clone,
-                        hook_tx_clone,
+                        broadcast_tx_clone,
                         writers_clone,
                         buffers_clone,
                         sizes_clone,
@@ -309,7 +309,7 @@ async fn wait_for_exit(pid: i32) {
 async fn handle_connection(
     stream: UnixStream,
     sessions: Arc<Mutex<SessionManager>>,
-    hook_tx: broadcast::Sender<String>,
+    broadcast_tx: broadcast::Sender<String>,
     session_writers: SessionWriters,
     pre_attach_buffers: PreAttachBuffers,
     session_sizes: SessionSizes,
@@ -334,7 +334,7 @@ async fn handle_connection(
                     session_writers.clone(),
                     session_sizes.clone(),
                     writer.clone(),
-                    hook_tx.clone(),
+                    broadcast_tx.clone(),
                 )
                 .await;
                 break; // Connection ends after handoff
@@ -342,12 +342,12 @@ async fn handle_connection(
             Some(Command::Subscribe) => {
                 if !subscribed.load(std::sync::atomic::Ordering::Relaxed) {
                     subscribed.store(true, std::sync::atomic::Ordering::Relaxed);
-                    let mut hook_rx = hook_tx.subscribe();
-                    let writer_hook = writer.clone();
+                    let mut broadcast_rx = broadcast_tx.subscribe();
+                    let writer_broadcast = writer.clone();
                     tokio::spawn(async move {
                         use tokio::io::AsyncWriteExt;
-                        while let Ok(msg) = hook_rx.recv().await {
-                            let mut w = writer_hook.lock().await;
+                        while let Ok(msg) = broadcast_rx.recv().await {
+                            let mut w = writer_broadcast.lock().await;
                             let _ = w.write_all(msg.as_bytes()).await;
                             let _ = w.write_all(b"\n").await;
                             let _ = w.flush().await;
@@ -361,7 +361,6 @@ async fn handle_connection(
                     command,
                     sessions.clone(),
                     writer.clone(),
-                    &hook_tx,
                     session_writers.clone(),
                     pre_attach_buffers.clone(),
                     session_sizes.clone(),
@@ -376,7 +375,6 @@ async fn handle_command(
     command: Command,
     sessions: Arc<Mutex<SessionManager>>,
     writer: Arc<Mutex<tokio::net::unix::OwnedWriteHalf>>,
-    hook_tx: &broadcast::Sender<String>,
     session_writers: SessionWriters,
     pre_attach_buffers: PreAttachBuffers,
     session_sizes: SessionSizes,
@@ -690,22 +688,6 @@ async fn handle_command(
         Command::Subscribe => {
             let _ = write_event(&mut *writer.lock().await, &Event::Ok).await;
         }
-
-        Command::HookEvent {
-            session_id,
-            event,
-            data,
-        } => {
-            let evt = Event::HookEvent {
-                session_id,
-                event,
-                data,
-            };
-            if let Ok(json) = serde_json::to_string(&evt) {
-                let _ = hook_tx.send(json);
-            }
-            let _ = write_event(&mut *writer.lock().await, &Event::Ok).await;
-        }
     }
 }
 
@@ -721,7 +703,7 @@ async fn handle_handoff(
     session_writers: SessionWriters,
     session_sizes: SessionSizes,
     writer: Arc<Mutex<tokio::net::unix::OwnedWriteHalf>>,
-    hook_tx: broadcast::Sender<String>,
+    broadcast_tx: broadcast::Sender<String>,
 ) {
     if version != HANDOFF_VERSION {
         let evt = Event::Error {
@@ -791,7 +773,7 @@ async fn handle_handoff(
     // Broadcast ShuttingDown so subscribed clients know not to reconnect to this daemon.
     let shutdown_evt = Event::ShuttingDown;
     if let Ok(json) = serde_json::to_string(&shutdown_evt) {
-        let _ = hook_tx.send(json);
+        let _ = broadcast_tx.send(json);
     }
 
     log::info!("[handoff] complete, exiting");

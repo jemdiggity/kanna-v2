@@ -40,11 +40,6 @@ pub enum Command {
     Handoff {
         version: u32,
     },
-    HookEvent {
-        session_id: String,
-        event: String,
-        data: Option<serde_json::Value>,
-    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -78,11 +73,6 @@ pub enum Event {
     },
     HandoffUnsupported,
     ShuttingDown,
-    HookEvent {
-        session_id: String,
-        event: String,
-        data: Option<serde_json::Value>,
-    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -261,52 +251,6 @@ mod tests {
             Event::SessionList { sessions } => {
                 assert_eq!(sessions.len(), 1);
                 assert_eq!(sessions[0].session_id, "s1");
-            }
-            _ => panic!("wrong variant"),
-        }
-    }
-
-    #[test]
-    fn test_command_hook_event_roundtrip() {
-        let cmd = Command::HookEvent {
-            session_id: "s1".to_string(),
-            event: "Stop".to_string(),
-            data: Some(serde_json::json!({"key": "val"})),
-        };
-        let json = serde_json::to_string(&cmd).unwrap();
-        let decoded: Command = serde_json::from_str(&json).unwrap();
-        match decoded {
-            Command::HookEvent {
-                session_id,
-                event,
-                data,
-            } => {
-                assert_eq!(session_id, "s1");
-                assert_eq!(event, "Stop");
-                assert!(data.is_some());
-            }
-            _ => panic!("wrong variant"),
-        }
-    }
-
-    #[test]
-    fn test_event_hook_event_roundtrip() {
-        let evt = Event::HookEvent {
-            session_id: "s1".to_string(),
-            event: "Stop".to_string(),
-            data: None,
-        };
-        let json = serde_json::to_string(&evt).unwrap();
-        let decoded: Event = serde_json::from_str(&json).unwrap();
-        match decoded {
-            Event::HookEvent {
-                session_id,
-                event,
-                data,
-            } => {
-                assert_eq!(session_id, "s1");
-                assert_eq!(event, "Stop");
-                assert!(data.is_none());
             }
             _ => panic!("wrong variant"),
         }

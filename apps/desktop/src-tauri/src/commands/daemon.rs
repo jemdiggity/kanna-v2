@@ -1,12 +1,133 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::Mutex;
 
 use crate::daemon_client::DaemonClient;
 
 pub type DaemonState = Arc<Mutex<Option<DaemonClient>>>;
 pub type AttachedSessions = Arc<Mutex<HashSet<String>>>;
+
+const CLAUDE_SPINNERS: &[char] = &['✻', '✽', '✶', '✳', '✢', '⏺'];
+const SCAN_BUFFER_CAP: usize = 4096;
+const SCAN_FLUSH_MS: u64 = 150;
+// Claude's status bar marker (⏵, U+23F5). Present in every status bar redraw.
+const STATUS_BAR_MARKER: char = '⏵';
+// Text shown in status bar ONLY while Claude is actively processing.
+// Stripped of ANSI, spaces become empty (cursor movement codes removed).
+const CLAUDE_WORKING_INDICATOR: &str = "esctointerrupt";
+
+#[derive(Clone, Debug, PartialEq)]
+enum AgentProvider {
+    Claude,
+    Copilot,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum AgentState {
+    Idle,
+    Working,
+}
+
+struct SessionScanState {
+    buffer: String,
+    last_data_at: Instant,
+    state: AgentState,
+    provider: AgentProvider,
+}
+
+impl SessionScanState {
+    fn new(provider: AgentProvider) -> Self {
+        Self {
+            buffer: String::new(),
+            last_data_at: Instant::now(),
+            state: AgentState::Idle,
+            provider,
+        }
+    }
+
+    fn append(&mut self, text: &str) {
+        self.buffer.push_str(text);
+        self.last_data_at = Instant::now();
+        if self.buffer.len() > SCAN_BUFFER_CAP {
+            let drain_to = self.buffer.len() - SCAN_BUFFER_CAP;
+            self.buffer.drain(..drain_to);
+        }
+    }
+
+    /// Called on each fragment. Returns events to emit.
+    ///
+    /// Claude detection uses two deterministic signals:
+    /// - Spinner chars (✻✽✶✳✢⏺) → Working (immediate)
+    /// - Status bar frame (⏵) without "esctointerrupt" → Idle (deterministic)
+    fn on_fragment(&mut self, text: &str) -> Vec<&'static str> {
+        let mut events = Vec::new();
+
+        match self.provider {
+            AgentProvider::Claude => {
+                let has_status_bar = text.contains(STATUS_BAR_MARKER);
+
+                if has_status_bar {
+                    // Status bar frame: check for working indicator
+                    if text.contains(CLAUDE_WORKING_INDICATOR) {
+                        if self.state != AgentState::Working {
+                            self.state = AgentState::Working;
+                            events.push("ClaudeWorking");
+                        }
+                    } else if self.state != AgentState::Idle {
+                        // Status bar without "esc to interrupt" → turn is done
+                        self.state = AgentState::Idle;
+                        events.push("ClaudeIdle");
+                    }
+                } else if text.chars().any(|c| CLAUDE_SPINNERS.contains(&c)) {
+                    // Small spinner fragment (no status bar) → working
+                    if self.state != AgentState::Working {
+                        self.state = AgentState::Working;
+                        events.push("ClaudeWorking");
+                    }
+                }
+
+                if text.contains("Do you want to allow") {
+                    events.push("WaitingForInput");
+                }
+            }
+            AgentProvider::Copilot => {
+                if text.contains("Thinking") {
+                    if self.state != AgentState::Working {
+                        self.state = AgentState::Working;
+                    }
+                    events.push("CopilotThinking");
+                }
+                let has_idle_prompt = text.contains('\u{276F}');
+                if has_idle_prompt && !text.contains("Thinking") {
+                    if self.state != AgentState::Idle {
+                        self.state = AgentState::Idle;
+                    }
+                    events.push("CopilotIdle");
+                }
+                if text.contains("Operation cancelled") {
+                    events.push("Interrupted");
+                }
+            }
+        }
+
+        // Shared text pattern checks
+        if text.contains("Interrupted") {
+            self.state = AgentState::Idle;
+            events.push("Interrupted");
+        }
+
+        events
+    }
+
+    /// Called by the timer. Just clears stale buffer data.
+    /// State transitions are handled deterministically in on_fragment.
+    fn check_idle(&mut self) -> Vec<&'static str> {
+        self.buffer.clear();
+        Vec::new()
+    }
+}
 
 /// Send a command and read the Ok/Error response, discarding it.
 async fn send_and_ack(state: &DaemonState) -> Result<(), String> {
@@ -201,6 +322,7 @@ pub async fn attach_session_inner(
     app: &tauri::AppHandle,
     session_id: String,
     attached: &AttachedSessions,
+    agent_provider: Option<String>,
 ) -> Result<(), String> {
     // Create a dedicated connection for this session's output streaming.
     // This avoids mixing Output events with command responses.
@@ -227,12 +349,44 @@ pub async fn attach_session_inner(
     // Track this session as attached
     attached.lock().await.insert(session_id.clone());
 
+    // Determine the agent provider for pattern matching
+    let provider = match agent_provider.as_deref() {
+        Some("copilot") => AgentProvider::Copilot,
+        _ => AgentProvider::Claude,
+    };
+
     // Spawn a background task to read Output/Exit events and emit Tauri events
     let sid = session_id.clone();
     let app = app.clone();
     let attached_clone = attached.clone();
     use tauri::Emitter;
     tauri::async_runtime::spawn(async move {
+        let scan_state = std::sync::Arc::new(tokio::sync::Mutex::new(SessionScanState::new(provider)));
+
+        // Spawn a flush timer task
+        let scan_state_timer = scan_state.clone();
+        let app_timer = app.clone();
+        let sid_timer = sid.clone();
+        let flush_handle = tauri::async_runtime::spawn(async move {
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_millis(SCAN_FLUSH_MS)).await;
+                let mut state = scan_state_timer.lock().await;
+                if state.buffer.is_empty() {
+                    continue;
+                }
+                if state.last_data_at.elapsed() >= std::time::Duration::from_millis(SCAN_FLUSH_MS) {
+                    let events = state.check_idle();
+                    for event_name in events {
+                        let hook = serde_json::json!({
+                            "session_id": &sid_timer,
+                            "event": event_name,
+                        });
+                        let _ = app_timer.emit("hook_event", &hook);
+                    }
+                }
+            }
+        });
+
         // On Err (connection lost / daemon restart) we intentionally do NOT
         // remove from attached so the re-attach coordinator can re-attach.
         while let Ok(line) = stream_client.read_event().await {
@@ -289,52 +443,24 @@ pub async fn attach_session_inner(
                         };
                         let text = String::from_utf8_lossy(&stripped);
                         let text = text.trim();
+
                         if !text.is_empty() {
                             eprintln!("[pty-scan] sid={} {:?}", sid, text);
-                        }
 
-                        // Pattern matching on ANSI-stripped text.
-                        // Claude patterns (also work as raw bytes, but use stripped for consistency):
-                        if text.contains("Interrupted") {
-                            let hook = serde_json::json!({
-                                "session_id": event.get("session_id"),
-                                "event": "Interrupted",
-                            });
-                            let _ = app.emit("hook_event", &hook);
-                        }
-                        if text.contains("Do you want to allow") {
-                            let hook = serde_json::json!({
-                                "session_id": event.get("session_id"),
-                                "event": "WaitingForInput",
-                            });
-                            let _ = app.emit("hook_event", &hook);
-                        }
-                        // Copilot patterns:
-                        if text.contains("Thinking") {
-                            let hook = serde_json::json!({
-                                "session_id": event.get("session_id"),
-                                "event": "CopilotThinking",
-                            });
-                            let _ = app.emit("hook_event", &hook);
-                        }
-                        if text.contains("Operation cancelled") {
-                            let hook = serde_json::json!({
-                                "session_id": event.get("session_id"),
-                                "event": "Interrupted",
-                            });
-                            let _ = app.emit("hook_event", &hook);
-                        }
-                        // Copilot renders ❯ (U+276F) as the input prompt when idle.
-                        // Only treat as idle if NOT also showing "Thinking" in the
-                        // same frame (the TUI redraws the full screen each frame).
-                        if stripped.windows(3).any(|w| w == "\u{276F}".as_bytes())
-                            && !text.contains("Thinking")
-                        {
-                            let hook = serde_json::json!({
-                                "session_id": event.get("session_id"),
-                                "event": "CopilotIdle",
-                            });
-                            let _ = app.emit("hook_event", &hook);
+                            let mut state = scan_state.lock().await;
+                            state.append(text);
+
+                            // Check fragment for immediate events (spinner → working,
+                            // text patterns like Interrupted/WaitingForInput).
+                            // Idle detection is handled by the timer via check_idle().
+                            let events = state.on_fragment(text);
+                            for event_name in events {
+                                let hook = serde_json::json!({
+                                    "session_id": event.get("session_id"),
+                                    "event": event_name,
+                                });
+                                let _ = app.emit("hook_event", &hook);
+                            }
                         }
                     } else {
                         let _ = app.emit("terminal_output", &event);
@@ -342,6 +468,7 @@ pub async fn attach_session_inner(
                 }
                 Some("Exit") => {
                     // Session exited normally — remove from tracked set
+                    flush_handle.abort();
                     attached_clone.lock().await.remove(&sid);
                     let _ = app.emit("session_exit", &event);
                     break;
@@ -360,8 +487,9 @@ pub async fn attach_session(
     app: tauri::AppHandle,
     attached: tauri::State<'_, AttachedSessions>,
     session_id: String,
+    agent_provider: Option<String>,
 ) -> Result<(), String> {
-    attach_session_inner(&app, session_id, &attached).await
+    attach_session_inner(&app, session_id, &attached, agent_provider).await
 }
 
 #[tauri::command]

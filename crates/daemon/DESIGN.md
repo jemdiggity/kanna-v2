@@ -124,8 +124,6 @@ Line-delimited JSON over Unix socket. Each message is a single JSON object termi
 | `Signal` | Send a Unix signal (SIGTSTP, SIGCONT, etc.) |
 | `Kill` | Terminate and remove a session |
 | `List` | List all sessions with status |
-| `Subscribe` | Opt into broadcast hook events |
-| `HookEvent` | Broadcast a hook event to all subscribers |
 | `Handoff` | Request session transfer (new daemon → old daemon) |
 
 ### Events (daemon → client)
@@ -138,7 +136,6 @@ Line-delimited JSON over Unix socket. Each message is a single JSON object termi
 | `Exit` | Process exited with code |
 | `SessionCreated` | New session ready |
 | `SessionList` | Response to List |
-| `HookEvent` | Broadcast hook event |
 | `HandoffReady` | Session metadata for handoff (followed by SCM_RIGHTS fds) |
 
 ## Daemon Handoff
@@ -170,7 +167,7 @@ Key details:
 
 `bun tauri dev` builds the daemon before starting Vite:
 
-1. `cargo build -p kanna-daemon` (+ kanna-hook)
+1. `cargo build -p kanna-daemon`
 2. Vite starts
 3. Tauri app starts, calls `ensure_daemon_running()`
 4. New daemon spawns, performs handoff from old daemon

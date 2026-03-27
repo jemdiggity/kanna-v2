@@ -6,6 +6,7 @@ import TerminalView from "./TerminalView.vue";
 const props = defineProps<{
   sessionId: string | null;
   agentType?: string;
+  agentProvider?: string;
   worktreePath?: string;
   repoPath?: string;
   prompt?: string;
@@ -20,6 +21,7 @@ const emit = defineEmits<{
 interface PtySessionConfig {
   worktreePath?: string;
   prompt?: string;
+  agentProvider?: string;
 }
 const visitedPtySessions = ref(new Map<string, PtySessionConfig>());
 const termRefs = ref<Record<string, ComponentPublicInstance | null>>({});
@@ -35,6 +37,7 @@ watch(
       visitedPtySessions.value.set(newId, {
         worktreePath: props.worktreePath,
         prompt: props.prompt,
+        agentProvider: props.agentProvider,
       });
     }
 
@@ -75,6 +78,7 @@ function setTermRef(sessionId: string, el: ComponentPublicInstance | null) {
         spawnFn: spawnPtySession,
       } : undefined"
       :kitty-keyboard="!!(spawnPtySession && config.worktreePath && config.prompt)"
+      :agent-provider="config.agentProvider"
     />
     <!-- SDK mode: key by sessionId so switching tasks creates a new view -->
     <AgentView

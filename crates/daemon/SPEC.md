@@ -134,9 +134,7 @@ Line-delimited JSON over Unix domain socket. Each message is one JSON object + `
 | `Signal` | session_id, signal (string) | Send Unix signal |
 | `Kill` | session_id | Terminate and remove session |
 | `List` | — | List all sessions |
-| `Subscribe` | — | Opt into hook event broadcast |
 | `Handoff` | version (u32) | Request session transfer |
-| `HookEvent` | session_id, event, data | Broadcast hook event |
 
 ### Events (daemon → client)
 
@@ -149,7 +147,6 @@ Line-delimited JSON over Unix domain socket. Each message is one JSON object + `
 | `SessionCreated` | session_id | New session ready |
 | `SessionList` | sessions | Response to List |
 | `HandoffReady` | sessions | Session metadata (followed by SCM_RIGHTS) |
-| `HookEvent` | session_id, event, data | Broadcast hook event |
 | `ShuttingDown` | — | Daemon shutting down (handoff) |
 
 ## Logging
@@ -182,11 +179,10 @@ Logs are written to both destinations simultaneously — the file for tooling/de
 `bun tauri dev` executes:
 
 1. `cargo build -p kanna-daemon` — rebuild daemon binary
-2. `cargo build -p kanna-hook` — rebuild hook binary
-3. `vite` — start frontend dev server
-4. Tauri builds and starts the app
-5. App calls `ensure_daemon_running()` — always spawns new daemon
-6. New daemon performs handoff from old daemon (if running)
-7. Claude sessions continue uninterrupted
+2. `vite` — start frontend dev server
+3. Tauri builds and starts the app
+4. App calls `ensure_daemon_running()` — always spawns new daemon
+5. New daemon performs handoff from old daemon (if running)
+6. Claude sessions continue uninterrupted
 
 The daemon binary at `crates/daemon/target/debug/kanna-daemon` is always the latest build. The app always spawns it, and the handoff ensures zero-downtime upgrades during development.

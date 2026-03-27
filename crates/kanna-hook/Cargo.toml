@@ -1,8 +1,0 @@
-[package]
-name = "kanna-hook"
-version = "0.1.0"
-edition = "2021"
-description = "Hook notification binary for Kanna — sends events to the daemon socket"
-
-[dependencies]
-serde_json = "1"
