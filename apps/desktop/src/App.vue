@@ -280,9 +280,47 @@ async function handleCreateCustomTask() {
   if (!repo) return;
   try {
     await store.createItem(store.selectedRepoId, repo.path, NEW_CUSTOM_TASK_PROMPT);
-  } catch (e: any) {
+  } catch (e: unknown) {
     console.error("[App] custom task creation failed:", e);
-    alert(`${t('app.customTaskCreationFailed')}: ${e?.message || e}`);
+    alert(`${t('app.customTaskCreationFailed')}: ${e instanceof Error ? e.message : e}`);
+  }
+}
+
+async function handleCreateAgent() {
+  if (!store.selectedRepoId) {
+    if (store.repos.length === 1) {
+      store.selectedRepoId = store.repos[0].id;
+    } else {
+      alert(t('app.selectRepoFirst'));
+      return;
+    }
+  }
+  const repo = store.repos.find((r) => r.id === store.selectedRepoId);
+  if (!repo) return;
+  try {
+    await store.createItem(store.selectedRepoId, repo.path, "Help me create a new agent definition for this repository.");
+  } catch (e: unknown) {
+    console.error("[App] create agent task failed:", e);
+    alert(`Failed to create agent task: ${e instanceof Error ? e.message : e}`);
+  }
+}
+
+async function handleCreatePipeline() {
+  if (!store.selectedRepoId) {
+    if (store.repos.length === 1) {
+      store.selectedRepoId = store.repos[0].id;
+    } else {
+      alert(t('app.selectRepoFirst'));
+      return;
+    }
+  }
+  const repo = store.repos.find((r) => r.id === store.selectedRepoId);
+  if (!repo) return;
+  try {
+    await store.createItem(store.selectedRepoId, repo.path, "Help me create a new pipeline definition for this repository.");
+  } catch (e: unknown) {
+    console.error("[App] create pipeline task failed:", e);
+    alert(`Failed to create pipeline task: ${e instanceof Error ? e.message : e}`);
   }
 }
 
@@ -296,6 +334,19 @@ const paletteDynamicCommands = computed<DynamicCommand[]>(() => {
       execute: () => sidebarRef.value?.renameSelectedItem(),
     });
   }
+  // Factory commands
+  cmds.push({
+    id: "create-agent",
+    label: "Create Agent",
+    description: "Create a new agent definition",
+    execute: () => { handleCreateAgent().catch((e) => console.error("[App] create agent failed:", e)); },
+  });
+  cmds.push({
+    id: "create-pipeline",
+    label: "Create Pipeline",
+    description: "Create a new pipeline definition",
+    execute: () => { handleCreatePipeline().catch((e) => console.error("[App] create pipeline failed:", e)); },
+  });
   // Always include "New Custom Task" option
   cmds.push({
     id: "custom-task-new",
