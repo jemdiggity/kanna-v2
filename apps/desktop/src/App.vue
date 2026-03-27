@@ -424,8 +424,7 @@ const keyboardActions = {
     const worktreePath = `${repo.path}/.kanna-worktrees/${item.branch}`;
     await invoke("run_script", { script: `${store.ideCommand} "${worktreePath}"`, cwd: worktreePath, env: {} }).catch((e) => console.error("[openInIDE] failed:", e));
   },
-  makePR: () => store.makePR(),
-  mergeQueue: () => store.mergeQueue(),
+  advanceStage: () => { const item = store.currentItem; if (item) void store.advanceStage(item.id); },
   closeTask: () => store.closeTask(),
   undoClose: () => store.undoClose(),
   navigateUp: () => navigateItems(-1),

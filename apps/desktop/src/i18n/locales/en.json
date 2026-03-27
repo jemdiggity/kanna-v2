@@ -1,8 +1,6 @@
 {
   "tasks": {
     "newTask": "New Task",
-    "makePR": "Make PR",
-    "mergeQueue": "Merge Queue",
     "closeTask": "Close / Reject",
     "undoClose": "Undo Close",
     "blockTask": "Block Task",
@@ -41,8 +39,7 @@
     "groupViews": "Views",
     "groupHelp": "Help",
     "newTask": "New Task",
-    "makePR": "Make PR",
-    "mergeQueue": "Merge Queue",
+    "advanceStage": "Advance Stage",
     "closeReject": "Close / Reject",
     "undoClose": "Undo Close",
     "previousTask": "Previous Task",

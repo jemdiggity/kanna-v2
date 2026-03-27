@@ -1,8 +1,6 @@
 {
   "tasks": {
     "newTask": "新規タスク",
-    "makePR": "PR作成",
-    "mergeQueue": "マージキュー",
     "closeTask": "クローズ / 却下",
     "undoClose": "クローズ取り消し",
     "blockTask": "タスクをブロック",
@@ -41,8 +39,7 @@
     "groupViews": "表示",
     "groupHelp": "ヘルプ",
     "newTask": "新規タスク",
-    "makePR": "PR作成",
-    "mergeQueue": "マージキュー",
+    "advanceStage": "ステージを進める",
     "closeReject": "クローズ / 却下",
     "undoClose": "クローズ取り消し",
     "previousTask": "前のタスク",

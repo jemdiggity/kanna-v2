@@ -5,8 +5,7 @@ export type ActionName =
   | "newTask"
   | "newWindow"
   | "openFile"
-  | "makePR"
-  | "mergeQueue"
+  | "advanceStage"
   | "closeTask"
   | "undoClose"
   | "navigateUp"
@@ -67,8 +66,7 @@ interface ShortcutDef {
 export const shortcuts: ShortcutDef[] = [
   // Tasks — lifecycle operations
   { action: "newTask",    labelKey: "shortcuts.newTask",       groupKey: "shortcuts.groupTasks",      key: ["N", "n"],                     meta: true, shift: true,  display: "⇧⌘N",     context: ["main"] },
-  { action: "makePR",     labelKey: "shortcuts.makePR",        groupKey: "shortcuts.groupTasks",      key: "s",                            meta: true, display: "⌘S",                       context: ["main"] },
-  { action: "mergeQueue", labelKey: "shortcuts.mergeQueue",    groupKey: "shortcuts.groupTasks",      key: ["M", "m"],                     meta: true, shift: true,  display: "⇧⌘M",     context: ["main"] },
+  { action: "advanceStage", labelKey: "shortcuts.advanceStage", groupKey: "shortcuts.groupTasks",      key: "s",                            meta: true, display: "⌘S",                       context: ["main"] },
   { action: "closeTask",  labelKey: "shortcuts.closeReject",   groupKey: "shortcuts.groupTasks",      key: ["Backspace", "Delete"],        meta: true,               display: "⌘⌫",       context: ["main"] },
   { action: "undoClose",  labelKey: "shortcuts.undoClose",     groupKey: "shortcuts.groupTasks",      key: ["Z", "z"],                     meta: true,               display: "⌘Z",       context: ["main"] },
   // Navigation — moving between tasks and finding things

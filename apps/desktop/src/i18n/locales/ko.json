@@ -1,8 +1,6 @@
 {
   "tasks": {
     "newTask": "새 작업",
-    "makePR": "PR 생성",
-    "mergeQueue": "머지 큐",
     "closeTask": "닫기 / 거부",
     "undoClose": "닫기 취소",
     "blockTask": "작업 차단",
@@ -41,8 +39,7 @@
     "groupViews": "보기",
     "groupHelp": "도움말",
     "newTask": "새 작업",
-    "makePR": "PR 생성",
-    "mergeQueue": "머지 큐",
+    "advanceStage": "단계 진행",
     "closeReject": "닫기 / 거부",
     "undoClose": "닫기 취소",
     "previousTask": "이전 작업",
