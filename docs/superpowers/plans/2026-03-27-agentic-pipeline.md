@@ -51,8 +51,9 @@
 | `apps/desktop/src/components/CommandPaletteModal.vue` | Add "Create Agent" and "Create Pipeline" entries. |
 | `apps/desktop/src-tauri/src/lib.rs` | Add `kanna.sock` Unix socket listener. |
 | `apps/desktop/src-tauri/src/commands/mod.rs` | Register new pipeline commands if needed. |
-| `apps/desktop/src-tauri/Cargo.toml` | Add kanna-cli as workspace member. |
-| `Cargo.toml` (workspace root) | Add `crates/kanna-cli` to workspace members. |
+| `apps/desktop/src/components/ActionBar.vue` | Replace hardcoded "Make PR" with generic stage advance. |
+| `apps/desktop/src/App.vue` | Replace all `hasTag` usages with stage/blocker checks. |
+| `apps/desktop/src/composables/useGc.ts` | Replace `hasTag(item, "done")` with `closed_at` check. |
 
 ### Files to delete
 
@@ -302,7 +303,7 @@ Expected: FAIL.
 
 - [ ] **Step 3: Implement agent-loader.ts**
 
-Reuse the `parseFrontmatter()` function from `packages/core/src/config/custom-tasks.ts:63-88` — either import it or extract to a shared utility. The AGENT.md format uses the same YAML frontmatter + markdown body pattern.
+The AGENT.md format uses the same YAML frontmatter + markdown body pattern as custom tasks. `parseFrontmatter()` in `packages/core/src/config/custom-tasks.ts:63-88` is not currently exported. First, export it from `custom-tasks.ts`, then import it here. Do NOT duplicate the function.
 
 Functions:
 - `parseAgentDefinition(content: string): AgentDefinition` — parse AGENT.md content
@@ -474,6 +475,8 @@ await safeAlterTable(db, "pipeline_item", "stage_result", "TEXT");
 await db.execute(`UPDATE pipeline_item SET stage = 'in progress' WHERE tags LIKE '%"in progress"%' AND closed_at IS NULL`);
 await db.execute(`UPDATE pipeline_item SET stage = 'pr' WHERE tags LIKE '%"pr"%' AND closed_at IS NULL`);
 await db.execute(`UPDATE pipeline_item SET stage = 'merge' WHERE tags LIKE '%"merge"%' AND closed_at IS NULL`);
+// Catch-all: convert old 'in_progress' (underscored) default to 'in progress' (spaced)
+await db.execute(`UPDATE pipeline_item SET stage = 'in progress' WHERE stage = 'in_progress'`);
 ```
 
 - [ ] **Step 2: Verify migration runs without error on a test DB**
@@ -547,11 +550,9 @@ serde_json = "1"
 tokio = { version = "1", features = ["net", "rt", "io-util"] }
 ```
 
-- [ ] **Step 2: Add to workspace Cargo.toml**
+- [ ] **Step 2: Implement main.rs**
 
-Add `"crates/kanna-cli"` to the `[workspace] members` array.
-
-- [ ] **Step 3: Implement main.rs**
+Note: This crate is standalone (no Cargo workspace in this repo). Build it independently like the daemon crate.
 
 ```rust
 use clap::{Parser, Subcommand};
@@ -576,7 +577,8 @@ enum Commands {
     },
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let cli = Cli::parse();
     match cli.command {
         Commands::StageComplete { task_id, status, summary, metadata } => {
@@ -590,20 +592,20 @@ fn main() {
 }
 ```
 
-- [ ] **Step 4: Build and verify**
+- [ ] **Step 3: Build and verify**
 
 Run: `cd crates/kanna-cli && cargo build`
 Expected: Compiles without errors.
 
-- [ ] **Step 5: Test CLI with --help**
+- [ ] **Step 4: Test CLI with --help**
 
 Run: `./../../.build/debug/kanna-cli stage-complete --help`
 Expected: Shows usage.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add crates/kanna-cli/ Cargo.toml
+git add crates/kanna-cli/
 git commit -m "feat: add kanna-cli crate for stage-complete signaling"
 ```
 
@@ -627,9 +629,12 @@ Add a `spawn_pipeline_listener()` function that:
 
 Add it alongside `spawn_event_bridge()` in the Tauri builder setup.
 
-- [ ] **Step 3: Pass KANNA_SOCKET_PATH to agent spawn**
+- [ ] **Step 3: Pass pipeline env vars to agent spawn**
 
-In `kanna.ts:spawnPtySession()`, add `KANNA_SOCKET_PATH` and `KANNA_DB_PATH` to the env vars passed to the agent.
+In `kanna.ts:spawnPtySession()`, add three env vars to the agent's environment:
+- `KANNA_TASK_ID` — the pipeline_item.id (so agents can call `kanna-cli stage-complete --task-id $KANNA_TASK_ID`)
+- `KANNA_SOCKET_PATH` — path to the app's Unix socket
+- `KANNA_DB_PATH` — path to the SQLite DB file
 
 - [ ] **Step 4: Build and verify**
 
@@ -669,7 +674,7 @@ Modify `createItem()` to:
 Follow the spec's `advanceStage` flow (steps 1-14):
 1. Read task's pipeline and stage from DB
 2. Load pipeline definition
-3. Run environment teardown (if any) via `run_script` Tauri command
+3. Run environment teardown (if any) via the existing `run_script` Tauri command in `commands/shell.rs`
 4. Find next stage
 5. If no next stage: toast "Task at final stage", return
 6. Check blockers
@@ -677,6 +682,8 @@ Follow the spec's `advanceStage` flow (steps 1-14):
 8. Run environment setup (if any)
 9. Spawn agent for new stage
 10. Emit frontend event
+
+Also implement `forceAdvanceStage(taskId)` — same as advanceStage but skips teardown. Used when teardown fails and user wants to continue.
 
 - [ ] **Step 4: Implement rerunStage(taskId)**
 
@@ -829,7 +836,7 @@ Update the `handleNewTask` handler to pass `pipelineName` through to `createItem
 - [ ] **Step 4: Commit**
 
 ```bash
-git add apps/desktop/src/components/NewTaskModal.vue apps/App.vue
+git add apps/desktop/src/components/NewTaskModal.vue apps/desktop/src/App.vue
 git commit -m "feat: add pipeline selector to new task modal"
 ```
 
@@ -843,27 +850,32 @@ git commit -m "feat: add pipeline selector to new task modal"
 
 - [ ] **Step 1: Add "Create Agent" and "Create Pipeline" dynamic commands**
 
-In `App.vue` where dynamic commands are assembled for the command palette, add two entries that create a task pre-configured with the factory agent:
+In `apps/desktop/src/App.vue` where dynamic commands are assembled for the command palette, add two entries that create a task pre-configured with the factory agent. Use the `customTask` option (already supported by `createItem`) to pass the factory agent's config:
 
 ```typescript
 {
   id: "create-agent",
   label: "Create Agent",
   description: "Create a new agent definition",
-  execute: () => store.createItem(repoId, repoPath, "Help me create a new agent", "pty", { agentOverride: "agent-factory" })
+  execute: () => {
+    // Load agent-factory AGENT.md config and pass as customTask
+    store.createItem(repoId, repoPath, "Help me create a new agent", "pty", { customTask: agentFactoryConfig })
+  }
 },
 {
   id: "create-pipeline",
   label: "Create Pipeline",
   description: "Create a new pipeline definition",
-  execute: () => store.createItem(repoId, repoPath, "Help me create a new pipeline", "pty", { agentOverride: "pipeline-factory" })
+  execute: () => {
+    store.createItem(repoId, repoPath, "Help me create a new pipeline", "pty", { customTask: pipelineFactoryConfig })
+  }
 }
 ```
 
 - [ ] **Step 2: Commit**
 
 ```bash
-git add apps/desktop/src/components/CommandPaletteModal.vue apps/App.vue
+git add apps/desktop/src/components/CommandPaletteModal.vue apps/desktop/src/App.vue
 git commit -m "feat: add Create Agent and Create Pipeline to command palette"
 ```
 
@@ -879,9 +891,9 @@ git commit -m "feat: add Create Agent and Create Pipeline to command palette"
 
 Find the existing Cmd+S handler that calls `makePR()`. Replace with `advanceStage(currentItem.id)`.
 
-- [ ] **Step 2: Replace Cmd+Shift+M (mergeQueue) with same**
+- [ ] **Step 2: Remove Cmd+Shift+M (mergeQueue) shortcut**
 
-Find the existing Cmd+Shift+M handler. Replace with `advanceStage(currentItem.id)`.
+Remove the Cmd+Shift+M handler entirely. Cmd+S is now the single "advance stage" shortcut. The merge queue agent is started via a regular task, not a shortcut.
 
 - [ ] **Step 3: Update KeyboardShortcutsModal to show contextual label**
 
@@ -896,7 +908,41 @@ git commit -m "feat: replace PR/merge shortcuts with generic stage advance"
 
 ---
 
-## Task 18: Clean up deprecated tag code
+## Task 18: ActionBar and App.vue stage migration
+
+**Files:**
+- Modify: `apps/desktop/src/components/ActionBar.vue`
+- Modify: `apps/desktop/src/App.vue`
+- Modify: `apps/desktop/src/composables/useGc.ts`
+
+- [ ] **Step 1: Update ActionBar.vue**
+
+Replace the hardcoded "Make PR" button (which uses `hasTag` checks) with a generic "Advance Stage" button. The button label should be contextual based on the current task's next stage name. Emit a generic `advance-stage` event instead of `make-pr`.
+
+- [ ] **Step 2: Update App.vue hasTag usages**
+
+Replace all `hasTag` calls in App.vue (blocking/blocker checks, command palette dynamic commands) with:
+- Blocker checks: use `task_blocker` table queries (already available via `listBlockersForItem`)
+- Stage checks: use `item.stage` field directly (e.g., `item.stage === 'pr'` instead of `hasTag(item, 'pr')`)
+
+- [ ] **Step 3: Update useGc.ts**
+
+Replace `hasTag(item, "done")` with `item.closed_at != null` for GC eligibility. Also update any `isHidden()` equivalent to use `closed_at` instead of tags.
+
+- [ ] **Step 4: Run `bun tsc --noEmit`**
+
+Expected: No type errors.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add apps/desktop/src/components/ActionBar.vue apps/desktop/src/App.vue apps/desktop/src/composables/useGc.ts
+git commit -m "feat: migrate ActionBar, App.vue, and useGc from tags to stages"
+```
+
+---
+
+## Task 19: Clean up deprecated tag code
 
 **Files:**
 - Modify: `packages/core/src/pipeline/types.ts`
@@ -932,7 +978,7 @@ git commit -m "refactor: remove deprecated tag-based code"
 
 ---
 
-## Task 19: Stage sidecar binary for Tauri
+## Task 20: Stage sidecar binary for Tauri
 
 **Files:**
 - Modify: `apps/desktop/src-tauri/tauri.conf.json`
@@ -960,7 +1006,7 @@ git commit -m "feat: package kanna-cli as Tauri sidecar"
 
 ---
 
-## Task 20: Integration test — full pipeline flow
+## Task 21: Integration test — full pipeline flow
 
 **Files:**
 - Create: `apps/desktop/tests/e2e/mock/pipeline-flow.test.ts` (or add to existing)
@@ -1008,15 +1054,16 @@ Task 14 (main panel) — depends on Task 11
 Task 15 (new task modal) — depends on Tasks 5, 11
 Task 16 (command palette) — depends on Task 11
 Task 17 (shortcuts) — depends on Task 11
-Task 18 (cleanup) — depends on Tasks 12, 13, 14, 15, 16, 17
-Task 19 (sidecar packaging) — depends on Task 9
-Task 20 (E2E tests) — depends on all above
+Task 18 (ActionBar/App.vue/useGc) — depends on Task 11
+Task 19 (tag cleanup) — depends on Tasks 12, 13, 14, 15, 16, 17, 18
+Task 20 (sidecar packaging) — depends on Task 9 (move early so kanna-cli is in PATH for testing)
+Task 21 (E2E tests) — depends on Tasks 19, 20
 ```
 
 **Parallelizable groups:**
 - Group A (no deps): Tasks 0, 1, 4, 8
 - Group B (after types): Tasks 2, 3, 6
-- Group C (after loaders + schema): Tasks 5, 7, 9
+- Group C (after loaders + schema): Tasks 5, 7, 9, 20
 - Group D (after infra): Tasks 10, 11
-- Group E (after engine): Tasks 12, 13, 14, 15, 16, 17
-- Group F (cleanup): Tasks 18, 19, 20
+- Group E (after engine): Tasks 12, 13, 14, 15, 16, 17, 18
+- Group F (cleanup + tests): Tasks 19, 21
