@@ -37,7 +37,7 @@ fi
 
 mkdir -p "$BINARIES_DIR"
 
-for BIN in kanna-daemon; do
+for BIN in kanna-daemon kanna-cli; do
     SRC="$SRC_DIR/$BIN"
     DEST="$BINARIES_DIR/${BIN}-${TARGET}"
     if [[ ! -f "$SRC" ]]; then

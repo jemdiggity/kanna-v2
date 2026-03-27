@@ -29,7 +29,8 @@
     "active": true,
     "targets": "all",
     "externalBin": [
-      "binaries/kanna-daemon"
+      "binaries/kanna-daemon",
+      "binaries/kanna-cli"
     ],
     "icon": [
       "icons/32x32.png",
