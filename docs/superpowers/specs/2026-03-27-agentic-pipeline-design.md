@@ -18,18 +18,11 @@ Replace Kanna's hardcoded tag-based workflow with a generic, user-definable agen
 
 Key separation from the current model: **stage != tag**. Stages represent where a task is in the pipeline. Tags (deferred to future work) are user-defined metadata labels for categorization.
 
-## Pipeline Types
+## Pipeline Model
 
-| Type | Scope | Worktree | Instances | Example |
-|------|-------|----------|-----------|---------|
-| `worktree` | per-task | yes, isolated | many concurrent | default (in progress -> pr) |
-| `singleton` | per-repo | yes, shared worktree | one at a time | shipping (merge queue) |
+A pipeline is an ordered list of stages that a task goes through. Each stage has an agent and an environment. Every task runs in its own worktree. Pipelines are independent — they do not chain into each other.
 
-**Worktree pipelines** run independently per-task, each in its own isolated worktree.
-
-**Singleton pipelines** have a single shared agent instance per repo. The agent runs in its own worktree (like the current merge queue agent) and processes multiple tasks. Only one instance of a singleton pipeline runs at a time per repo. Tasks that complete their worktree pipeline and target a singleton are enqueued in the DB (`stage` set to the singleton's first stage). The singleton agent picks them up. If a second task arrives while the singleton is already running, it waits in the queue — the running agent will process it on its next cycle.
-
-Worktree pipelines can chain into singleton pipelines via a `"next"` field. Singleton pipelines cannot chain into other pipelines.
+Cross-pipeline coordination (e.g., a merge agent that processes PRs from multiple tasks) is handled by the agent itself, not by pipeline orchestration. The merge agent's AGENT.md instructs it to scan for PRs; it discovers its own work rather than receiving tasks from another pipeline.
 
 ## File Structure
 
@@ -50,7 +43,6 @@ Built-in (ships with Kanna source) and user-defined (per-repo) share the same la
       AGENT.md
   pipelines/
     default.json
-    shipping.json
   config.json
   tasks/
 ```
@@ -102,12 +94,9 @@ kanna-cli stage-complete --task-id $KANNA_TASK_ID --status failure --summary "wh
 
 ## Pipeline JSON Schema
 
-### Worktree Pipeline
-
 ```json
 {
   "name": "default",
-  "type": "worktree",
   "description": "Standard in progress -> PR flow",
   "environments": {
     "worktree": {
@@ -130,25 +119,6 @@ kanna-cli stage-complete --task-id $KANNA_TASK_ID --status failure --summary "wh
       "environment": "worktree",
       "transition": "manual"
     }
-  ],
-  "next": "shipping"
-}
-```
-
-### Singleton Pipeline
-
-```json
-{
-  "name": "shipping",
-  "type": "singleton",
-  "description": "Merge queue agent processes PRs",
-  "stages": [
-    {
-      "name": "merge",
-      "description": "Agent merges PRs",
-      "agent": "merge",
-      "transition": "auto"
-    }
   ]
 }
 ```
@@ -169,11 +139,9 @@ kanna-cli stage-complete --task-id $KANNA_TASK_ID --status failure --summary "wh
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `name` | string | yes | Pipeline identifier |
-| `type` | `"worktree"` or `"singleton"` | yes | Pipeline type |
 | `description` | string | no | Human-readable description |
 | `environments` | object | no | Named environment definitions with `setup` and `teardown` script arrays |
 | `stages` | array | yes | Ordered list of stages |
-| `next` | string | no | Singleton pipeline to chain into after the last stage completes |
 
 ## Signal CLI: kanna-cli
 
@@ -283,15 +251,14 @@ The pipeline engine is a function in the Kanna store. It runs when:
 4. Run environment teardown scripts (if any) in the task's worktree directory, using the system shell, with all `KANNA_*` env vars forwarded
 5. If teardown fails: stay in current stage, notify user. User can force-advance via a "Skip Teardown" action.
 6. Find next stage in the pipeline
-7. If no next stage and pipeline has `"next"`: update task's `pipeline` to the singleton name, set `stage` to the singleton's first stage. The singleton agent picks it up on its next cycle.
-8. If no next stage and no `"next"`: task stays in final stage until user closes it
-9. Check blockers: if blocked, stop and wait
-10. Update DB: set task's `stage` to next stage, clear `stage_result`
-11. Get next stage's environment
-12. Run environment setup scripts (if any) in the task's worktree directory, using the system shell, with all `KANNA_*` env vars forwarded
-13. If setup fails: stay in new stage but don't spawn agent, notify user
-14. Spawn next stage's agent in the worktree (for worktree pipelines) or in the singleton's shared worktree (for singleton pipelines)
-15. Emit event to frontend to update sidebar/header
+7. If no next stage: task stays in final stage until user closes it
+8. Check blockers: if blocked, stop and wait
+9. Update DB: set task's `stage` to next stage, clear `stage_result`
+10. Get next stage's environment
+11. Run environment setup scripts (if any) in the task's worktree directory, using the system shell, with all `KANNA_*` env vars forwarded
+12. If setup fails: stay in new stage but don't spawn agent, notify user
+13. Spawn next stage's agent in the worktree
+14. Emit event to frontend to update sidebar/header
 
 ### Manual advance
 
@@ -384,7 +351,6 @@ The built-in default pipeline replicates today's hardcoded flow with all manual 
 ```json
 {
   "name": "default",
-  "type": "worktree",
   "description": "Standard in progress -> PR flow",
   "stages": [
     {
@@ -397,24 +363,10 @@ The built-in default pipeline replicates today's hardcoded flow with all manual 
       "agent": "pr",
       "transition": "manual"
     }
-  ],
-  "next": "shipping"
-}
-```
-
-```json
-{
-  "name": "shipping",
-  "type": "singleton",
-  "description": "Merge queue",
-  "stages": [
-    {
-      "name": "merge",
-      "agent": "merge",
-      "transition": "auto"
-    }
   ]
 }
 ```
 
-Users can copy and modify these to create their own pipelines with custom stages, agents, environments, and auto transitions.
+The merge/shipping agent is a separate task the user creates independently. Its AGENT.md instructs it to scan for PRs and merge them. It is not part of this pipeline — it runs its own pipeline (which could be a single-stage pipeline with just an "in progress" stage).
+
+Users can copy and modify the default pipeline to create their own with custom stages, agents, environments, and auto transitions.
