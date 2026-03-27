@@ -1,4 +1,5 @@
 export interface RepoConfig {
+  pipeline?: string;
   setup?: string[];
   teardown?: string[];
   test?: string[];
@@ -8,6 +9,10 @@ export interface RepoConfig {
 export function parseRepoConfig(json: string): RepoConfig {
   const raw = JSON.parse(json) as Record<string, unknown>;
   const config: RepoConfig = {};
+
+  if (typeof raw.pipeline === "string") {
+    config.pipeline = raw.pipeline;
+  }
 
   if (Array.isArray(raw.setup) && raw.setup.every((s) => typeof s === "string")) {
     config.setup = raw.setup as string[];
