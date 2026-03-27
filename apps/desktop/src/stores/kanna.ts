@@ -902,10 +902,14 @@ export const useKannaStore = defineStore("kanna", () => {
     }
   }
 
-  async function closeTask() {
+  async function closeTask(targetItemId?: string) {
     lastUndoAction.value = null;
-    const item = currentItem.value;
-    const repo = selectedRepo.value;
+    const item = targetItemId
+      ? items.value.find(i => i.id === targetItemId)
+      : currentItem.value;
+    const repo = item
+      ? repos.value.find(r => r.id === item.repo_id)
+      : selectedRepo.value;
     if (!item || !repo) return;
     try {
       // Lingering — second close finishes the task
@@ -1116,8 +1120,9 @@ export const useKannaStore = defineStore("kanna", () => {
       }
     }
 
-    // Close the current task, then create a new task for the next stage
-    // This matches the old startPrAgent pattern: new task inherits the branch
+    // Create new task for the next stage, then close the source task.
+    const oldItemId = item.id;
+
     await createItem(repo.id, repo.path, stagePrompt, "pty", {
       baseBranch: item.branch,
       pipelineName: item.pipeline,
@@ -1125,8 +1130,8 @@ export const useKannaStore = defineStore("kanna", () => {
       ...agentOpts,
     });
 
-    // Close the source task
-    await closeTask(taskId);
+    // Close the source task (runs teardown, kills sessions, cleans up)
+    await closeTask(oldItemId);
   }
 
   /** Force advance, skipping teardown scripts. Used when teardown fails. */
