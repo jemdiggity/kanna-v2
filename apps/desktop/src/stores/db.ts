@@ -143,4 +143,17 @@ export async function runMigrations(db: DbHandle): Promise<void> {
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`);
   await db.execute(`CREATE INDEX IF NOT EXISTS idx_operator_event_repo ON operator_event(repo_id, created_at)`);
+
+  // Pipeline stage migration
+  await addColumn("pipeline_item", "pipeline", "TEXT NOT NULL DEFAULT 'default'");
+  await addColumn("pipeline_item", "stage_result", "TEXT");
+
+  // Migrate tags to stage values
+  await db.execute(`UPDATE pipeline_item SET stage = 'in progress' WHERE tags LIKE '%"in progress"%' AND closed_at IS NULL`);
+  await db.execute(`UPDATE pipeline_item SET stage = 'pr' WHERE tags LIKE '%"pr"%' AND closed_at IS NULL`);
+  await db.execute(`UPDATE pipeline_item SET stage = 'merge' WHERE tags LIKE '%"merge"%' AND closed_at IS NULL`);
+  // Catch-all: convert old 'in_progress' (underscored) default to 'in progress' (spaced)
+  await db.execute(`UPDATE pipeline_item SET stage = 'in progress' WHERE stage = 'in_progress'`);
+  // Convert legacy default to the new default
+  await db.execute(`UPDATE pipeline_item SET stage = 'in progress' WHERE stage = 'legacy'`);
 }
