@@ -9,8 +9,7 @@ Replace Kanna's hardcoded tag-based workflow with a generic, user-definable agen
 | Term | Definition |
 |------|-----------|
 | **Agentic Pipeline** | A JSON file defining an ordered sequence of stages with transition rules. The overall process that orchestrates agent work. |
-| **Stage** | A step in an agentic pipeline with actions and a transition type (manual/auto). |
-| **Action** | A unit of work within a stage: spawn agent, run script, wait for condition. |
+| **Stage** | A step in an agentic pipeline with an agent, an environment, and a transition type (manual/auto). |
 | **Agent** | A markdown file defining a role: name, description, allowed tools, instructions. |
 | **Environment** | A reusable definition of setup/teardown scripts referenced by stages. |
 | **Task** | A unit of work (`pipeline_item`) that flows through an agentic pipeline. |
