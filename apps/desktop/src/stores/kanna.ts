@@ -1120,18 +1120,16 @@ export const useKannaStore = defineStore("kanna", () => {
       }
     }
 
-    // Create new task for the next stage, then close the source task.
-    const oldItemId = item.id;
+    // Close the source task first (runs teardown, kills sessions, cleans up)
+    await closeTask(item.id);
 
+    // Create new task for the next stage
     await createItem(repo.id, repo.path, stagePrompt, "pty", {
       baseBranch: item.branch,
       pipelineName: item.pipeline,
       stage: nextStage.name,
       ...agentOpts,
     });
-
-    // Close the source task (runs teardown, kills sessions, cleans up)
-    await closeTask(oldItemId);
   }
 
   /** Force advance, skipping teardown scripts. Used when teardown fails. */
