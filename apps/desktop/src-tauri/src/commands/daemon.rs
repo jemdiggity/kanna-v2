@@ -422,15 +422,32 @@ pub async fn attach_session_inner(
                                     i += 1;
                                     if i < bytes.len() && bytes[i] == b'[' {
                                         i += 1;
-                                        while i < bytes.len() && !(bytes[i] >= 0x40 && bytes[i] <= 0x7e) { i += 1; }
-                                        if i < bytes.len() { i += 1; }
+                                        while i < bytes.len()
+                                            && !(bytes[i] >= 0x40 && bytes[i] <= 0x7e)
+                                        {
+                                            i += 1;
+                                        }
+                                        if i < bytes.len() {
+                                            i += 1;
+                                        }
                                     } else if i < bytes.len() && bytes[i] == b']' {
                                         i += 1;
-                                        while i < bytes.len() && bytes[i] != 0x07 && bytes[i] != 0x1b { i += 1; }
-                                        if i < bytes.len() { i += 1; }
-                                        if i < bytes.len() && bytes[i] == b'\\' { i += 1; }
+                                        while i < bytes.len()
+                                            && bytes[i] != 0x07
+                                            && bytes[i] != 0x1b
+                                        {
+                                            i += 1;
+                                        }
+                                        if i < bytes.len() {
+                                            i += 1;
+                                        }
+                                        if i < bytes.len() && bytes[i] == b'\\' {
+                                            i += 1;
+                                        }
                                     } else {
-                                        if i < bytes.len() { i += 1; }
+                                        if i < bytes.len() {
+                                            i += 1;
+                                        }
                                     }
                                 } else if bytes[i] >= 0x20 || bytes[i] == b'\n' {
                                     out.push(bytes[i]);

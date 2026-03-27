@@ -15,6 +15,16 @@ pub struct CommitInfo {
     pub author: String,
 }
 
+#[derive(Serialize)]
+pub struct GraphCommit {
+    pub hash: String,
+    pub short_hash: String,
+    pub message: String,
+    pub author: String,
+    pub timestamp: i64,
+    pub parents: Vec<String>,
+}
+
 #[tauri::command]
 pub fn git_diff(repo_path: String, mode: String) -> Result<String, String> {
     let repo = Repository::open(&repo_path).map_err(|e| e.to_string())?;
@@ -119,6 +129,55 @@ pub fn git_log(repo_path: String, base: String, head: String) -> Result<Vec<Comm
             hash: format!("{}", oid),
             message,
             author,
+        });
+    }
+
+    Ok(commits)
+}
+
+#[tauri::command]
+pub fn git_graph(repo_path: String, max_count: Option<usize>) -> Result<Vec<GraphCommit>, String> {
+    let repo = Repository::open(&repo_path).map_err(|e| e.to_string())?;
+
+    let mut revwalk = repo.revwalk().map_err(|e| e.to_string())?;
+    revwalk
+        .push_glob("refs/heads/*")
+        .map_err(|e| e.to_string())?;
+    let _ = revwalk.push_glob("refs/remotes/*");
+
+    revwalk
+        .set_sorting(git2::Sort::TOPOLOGICAL | git2::Sort::TIME)
+        .map_err(|e| e.to_string())?;
+
+    let limit = max_count.unwrap_or(usize::MAX);
+    let mut commits = Vec::new();
+
+    for oid in revwalk {
+        if commits.len() >= limit {
+            break;
+        }
+        let oid = oid.map_err(|e| e.to_string())?;
+        let commit = repo.find_commit(oid).map_err(|e| e.to_string())?;
+        let message = commit
+            .message()
+            .unwrap_or("")
+            .lines()
+            .next()
+            .unwrap_or("")
+            .to_string();
+        let author = commit.author().name().unwrap_or("").to_string();
+        let timestamp = commit.time().seconds();
+        let hash = oid.to_string();
+        let short_hash = hash[..7.min(hash.len())].to_string();
+        let parents = commit.parent_ids().map(|p| p.to_string()).collect();
+
+        commits.push(GraphCommit {
+            hash,
+            short_hash,
+            message,
+            author,
+            timestamp,
+            parents,
         });
     }
 

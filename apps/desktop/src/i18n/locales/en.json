@@ -50,6 +50,7 @@
     "filePicker": "File Picker",
     "commandPalette": "Command Palette",
     "viewDiff": "View Diff",
+    "commitGraph": "Commit Graph",
     "shellTerminal": "Shell Terminal",
     "shellRepoRoot": "Shell at Repo Root",
     "openInIDE": "Open in IDE",

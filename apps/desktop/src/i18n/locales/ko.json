@@ -50,6 +50,7 @@
     "filePicker": "파일 검색",
     "commandPalette": "명령 팔레트",
     "viewDiff": "차이 보기",
+    "commitGraph": "커밋 그래프",
     "shellTerminal": "셸 터미널",
     "shellRepoRoot": "리포지토리 루트에서 셸",
     "openInIDE": "IDE에서 열기",

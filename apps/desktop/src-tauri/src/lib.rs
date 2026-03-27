@@ -565,6 +565,7 @@ pub fn run() {
             commands::git::git_merge_base,
             commands::git::git_worktree_list,
             commands::git::git_log,
+            commands::git::git_graph,
             commands::git::git_default_branch,
             commands::git::git_remote_url,
             commands::git::git_push,

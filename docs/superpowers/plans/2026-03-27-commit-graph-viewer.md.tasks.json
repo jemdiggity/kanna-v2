@@ -1,0 +1,33 @@
+{
+  "planPath": "docs/superpowers/plans/2026-03-27-commit-graph-viewer.md",
+  "tasks": [
+    {
+      "id": 8,
+      "subject": "Task 1: Backend — git_graph Tauri Command",
+      "status": "completed",
+      "description": "**Goal:** Add a `git_graph` command that returns commits with parent hashes, short hashes, and timestamps.\n\n**Files:**\n- Modify: `apps/desktop/src-tauri/src/commands/git.rs`\n- Modify: `apps/desktop/src-tauri/src/lib.rs`\n- Modify: `apps/desktop/src/tauri-mock.ts`\n\n**Verify:** `cd apps/desktop/src-tauri && cargo clippy -- -D warnings`\n\n```json:metadata\n{\"files\": [\"apps/desktop/src-tauri/src/commands/git.rs\", \"apps/desktop/src-tauri/src/lib.rs\", \"apps/desktop/src/tauri-mock.ts\"], \"verifyCommand\": \"cd apps/desktop/src-tauri && cargo clippy -- -D warnings\", \"acceptanceCriteria\": [\"git_graph returns GraphCommit with parents and timestamp\", \"topological + time sorting\", \"registered in invoke handler\", \"mock for browser dev\"]}\n```"
+    },
+    {
+      "id": 9,
+      "subject": "Task 2: Layout Algorithm — commitGraph.ts",
+      "status": "completed",
+      "blockedBy": [8],
+      "description": "**Goal:** Implement the commit graph layout algorithm that assigns column positions and colors to commits.\n\n**Files:**\n- Create: `apps/desktop/src/utils/commitGraph.ts`\n- Create: `apps/desktop/src/utils/__tests__/commitGraph.test.ts`\n\n**Verify:** `cd apps/desktop && bun test src/utils/__tests__/commitGraph.test.ts`\n\n```json:metadata\n{\"files\": [\"apps/desktop/src/utils/commitGraph.ts\", \"apps/desktop/src/utils/__tests__/commitGraph.test.ts\"], \"verifyCommand\": \"cd apps/desktop && bun test src/utils/__tests__/commitGraph.test.ts\", \"acceptanceCriteria\": [\"layoutCommitGraph accepts GraphCommit[] returns GraphLayout\", \"topo sort children before parents\", \"three-case column assignment\", \"10-color palette cycling\", \"all tests pass\"]}\n```"
+    },
+    {
+      "id": 10,
+      "subject": "Task 3: SVG Renderer — CommitGraphView.vue",
+      "status": "completed",
+      "blockedBy": [9],
+      "description": "**Goal:** Vue component that renders the positioned commit graph as SVG with virtual scrolling.\n\n**Files:**\n- Create: `apps/desktop/src/components/CommitGraphView.vue`\n\n**Verify:** `cd apps/desktop && bun tsc --noEmit`\n\n```json:metadata\n{\"files\": [\"apps/desktop/src/components/CommitGraphView.vue\"], \"verifyCommand\": \"cd apps/desktop && bun tsc --noEmit\", \"acceptanceCriteria\": [\"SVG circles, lines, Bezier paths\", \"HTML text overlay\", \"virtual scroll with buffer\", \"glow filter\", \"vim scroll\", \"emits close\"]}\n```"
+    },
+    {
+      "id": 11,
+      "subject": "Task 4: Modal Integration — Wire Into App",
+      "status": "completed",
+      "blockedBy": [10],
+      "description": "**Goal:** Add CommitGraphModal.vue, wire into App.vue with ⌘G shortcut.\n\n**Files:**\n- Create: `apps/desktop/src/components/CommitGraphModal.vue`\n- Modify: `apps/desktop/src/App.vue`\n- Modify: `apps/desktop/src/composables/useKeyboardShortcuts.ts`\n- Modify: `apps/desktop/src/i18n/locales/en.json`\n- Modify: `apps/desktop/src/i18n/locales/ja.json`\n- Modify: `apps/desktop/src/i18n/locales/ko.json`\n\n**Verify:** `cd apps/desktop && bun tsc --noEmit`\n\n```json:metadata\n{\"files\": [\"apps/desktop/src/components/CommitGraphModal.vue\", \"apps/desktop/src/App.vue\", \"apps/desktop/src/composables/useKeyboardShortcuts.ts\", \"apps/desktop/src/i18n/locales/en.json\", \"apps/desktop/src/i18n/locales/ja.json\", \"apps/desktop/src/i18n/locales/ko.json\"], \"verifyCommand\": \"cd apps/desktop && bun tsc --noEmit\", \"acceptanceCriteria\": [\"⌘G toggles modal\", \"Escape/q closes\", \"follows modal pattern\", \"dismiss chain + anyModalOpen\", \"i18n labels\"]}\n```"
+    }
+  ],
+  "lastUpdated": "2026-03-27T12:00:00Z"
+}

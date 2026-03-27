@@ -50,6 +50,7 @@
     "filePicker": "ファイル検索",
     "commandPalette": "コマンドパレット",
     "viewDiff": "差分表示",
+    "commitGraph": "コミットグラフ",
     "shellTerminal": "シェルターミナル",
     "shellRepoRoot": "リポジトリルートでシェル",
     "openInIDE": "IDEで開く",

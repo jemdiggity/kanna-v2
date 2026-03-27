@@ -205,6 +205,11 @@ const invokeHandlers: Record<string, (...args: any[]) => any> = {
   git_worktree_remove: () => ({}),
   git_worktree_list: () => [],
   git_log: () => [],
+  git_graph: () => [
+    { hash: "abc1234567890", short_hash: "abc1234", message: "feat: add commit graph", author: "Dev", timestamp: Date.now() / 1000, parents: ["def5678901234"] },
+    { hash: "def5678901234", short_hash: "def5678", message: "fix: resolve issue", author: "Dev", timestamp: Date.now() / 1000 - 3600, parents: ["ghi9012345678"] },
+    { hash: "ghi9012345678", short_hash: "ghi9012", message: "initial commit", author: "Dev", timestamp: Date.now() / 1000 - 7200, parents: [] },
+  ],
   git_push: () => ({}),
   file_exists: () => true,
   read_text_file: () => "",

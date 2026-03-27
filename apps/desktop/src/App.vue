@@ -17,6 +17,7 @@ import FilePickerModal from "./components/FilePickerModal.vue";
 import FilePreviewModal from "./components/FilePreviewModal.vue";
 import TreeExplorerModal from "./components/TreeExplorerModal.vue";
 import DiffModal from "./components/DiffModal.vue";
+import CommitGraphModal from "./components/CommitGraphModal.vue";
 import ShellModal from "./components/ShellModal.vue";
 import CommandPaletteModal from "./components/CommandPaletteModal.vue";
 import AnalyticsModal from "./components/AnalyticsModal.vue";
@@ -84,6 +85,8 @@ const maximized = computed(() => maximizedModal.value !== null);
 const sidebarRef = ref<InstanceType<typeof Sidebar> | null>(null);
 const shellModalRef = ref<InstanceType<typeof ShellModal> | null>(null);
 const diffModalRef = ref<InstanceType<typeof DiffModal> | null>(null);
+const showCommitGraphModal = ref(false);
+const commitGraphModalRef = ref<InstanceType<typeof CommitGraphModal> | null>(null);
 const treeExplorerRef = ref<InstanceType<typeof TreeExplorerModal> | null>(null);
 const filePreviewRef = ref<InstanceType<typeof FilePreviewModal> | null>(null);
 const preferencesRef = ref<InstanceType<typeof PreferencesPanel> | null>(null);
@@ -366,6 +369,7 @@ const keyboardActions = {
     if (showShellModal.value) { return; }
     if (showDiffModal.value) { showDiffModal.value = false; maximizedModal.value = null; return; }
     if (showAnalyticsModal.value) { showAnalyticsModal.value = false; return; }
+    if (showCommitGraphModal.value) { showCommitGraphModal.value = false; return; }
     if (showTreeExplorer.value) { showTreeExplorer.value = false; return; }
     if (showNewTaskModal.value) { showNewTaskModal.value = false; return; }
     if (showAddRepoModal.value) { showAddRepoModal.value = false; return; }
@@ -412,6 +416,19 @@ const keyboardActions = {
       }
     } else {
       showDiffModal.value = true;
+    }
+  },
+  showCommitGraph: () => {
+    if (!store.selectedRepo) return;
+    if (showCommitGraphModal.value) {
+      const z = commitGraphModalRef.value?.zIndex ?? 0;
+      if (isTopModal(z)) {
+        showCommitGraphModal.value = false;
+      } else {
+        commitGraphModalRef.value?.bringToFront();
+      }
+    } else {
+      showCommitGraphModal.value = true;
     }
   },
   showShortcuts: () => {
@@ -485,7 +502,7 @@ const anyModalOpen = computed(() =>
   showNewTaskModal.value || showAddRepoModal.value || showShortcutsModal.value ||
   showFilePickerModal.value || showFilePreviewModal.value || showDiffModal.value ||
   showTreeExplorer.value || showShellModal.value || showAnalyticsModal.value ||
-  showBlockerSelect.value || showPreferencesPanel.value
+  showBlockerSelect.value || showPreferencesPanel.value || showCommitGraphModal.value
 );
 useRestoreFocus(anyModalOpen);
 
@@ -715,6 +732,13 @@ onMounted(async () => {
       :maximized="maximizedModal === 'diff'"
       @scope-change="(s: 'branch' | 'commit' | 'working') => { if (store.currentItem) diffScopes.set(store.currentItem.id, s); }"
       @close="showDiffModal = false; maximizedModal = null"
+    />
+    <CommitGraphModal
+      ref="commitGraphModalRef"
+      v-if="showCommitGraphModal && store.selectedRepo?.path"
+      :repo-path="store.selectedRepo.path"
+      :worktree-path="store.currentItem?.branch ? activeWorktreePath : undefined"
+      @close="showCommitGraphModal = false"
     />
     <FilePickerModal
       v-if="showFilePickerModal && store.selectedRepo?.path"
