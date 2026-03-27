@@ -48,6 +48,41 @@ pub async fn get_pipeline_socket_path(
         .ok_or_else(|| "pipeline socket path not initialized".to_string())
 }
 
+/// Read a file from the app's bundled resources directory.
+/// `relative_path` is relative to the resources root (e.g., ".kanna/pipelines/default.json").
+#[tauri::command]
+pub fn read_builtin_resource(app: AppHandle, relative_path: String) -> Result<String, String> {
+    let resource_path = app
+        .path()
+        .resource_dir()
+        .map_err(|e| format!("failed to get resource dir: {}", e))?
+        .join(&relative_path);
+    std::fs::read_to_string(&resource_path)
+        .map_err(|e| format!("failed to read resource '{}': {}", resource_path.display(), e))
+}
+
+/// List entries in a bundled resources subdirectory.
+/// `relative_path` is relative to the resources root (e.g., ".kanna/agents").
+#[tauri::command]
+pub fn list_builtin_resources(app: AppHandle, relative_path: String) -> Result<Vec<String>, String> {
+    let resource_path = app
+        .path()
+        .resource_dir()
+        .map_err(|e| format!("failed to get resource dir: {}", e))?
+        .join(&relative_path);
+    if !resource_path.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(&resource_path)
+        .map_err(|e| format!("failed to read resource dir '{}': {}", resource_path.display(), e))?
+    {
+        let entry = entry.map_err(|e| format!("failed to read entry: {}", e))?;
+        names.push(entry.file_name().to_string_lossy().to_string());
+    }
+    Ok(names)
+}
+
 #[tauri::command]
 pub fn copy_file(src: String, dst: String) -> Result<(), String> {
     std::fs::copy(&src, &dst)

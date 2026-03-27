@@ -702,6 +702,8 @@ pub fn run() {
             commands::fs::list_dir,
             commands::fs::ensure_directory,
             commands::fs::read_dir_entries,
+            commands::fs::read_builtin_resource,
+            commands::fs::list_builtin_resources,
             // Shell commands
             commands::shell::run_script,
             commands::shell::ensure_term_init,

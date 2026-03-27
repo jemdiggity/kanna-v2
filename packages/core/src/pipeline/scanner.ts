@@ -1,7 +1,6 @@
 import type { AgentDefinition, PipelineDefinition } from "./pipeline-types";
 import { parseAgentDefinition } from "./agent-loader";
 import { parsePipelineJson } from "./pipeline-loader";
-import { getBuiltInAgents, getBuiltInPipelines } from "./built-in";
 
 // Function types matching Tauri's file commands
 type ReadFileFn = (path: string) => Promise<string>;
@@ -77,21 +76,6 @@ export async function scanAgentsAndPipelines(
       result.errors.push(
         `Failed to parse pipeline at ${filePath}: ${err instanceof Error ? err.message : String(err)}`,
       );
-    }
-  }
-
-  // Merge built-in defaults — repo files override built-ins by name
-  const repoAgentNames = new Set(result.agents.map((a) => a.name));
-  for (const builtIn of getBuiltInAgents()) {
-    if (!repoAgentNames.has(builtIn.name)) {
-      result.agents.push(builtIn);
-    }
-  }
-
-  const repoPipelineNames = new Set(result.pipelines.map((p) => p.name));
-  for (const builtIn of getBuiltInPipelines()) {
-    if (!repoPipelineNames.has(builtIn.name)) {
-      result.pipelines.push(builtIn);
     }
   }
 
