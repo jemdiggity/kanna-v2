@@ -79,7 +79,7 @@ const preferences = reactive({
   devLingerTerminals: false,
   defaultAgentProvider: "claude" as "claude" | "copilot",
 });
-const diffScopes = new Map<string, "branch" | "commit" | "working">();
+const diffScopes = new Map<string, "branch" | "working">();
 const sidebarHidden = ref(false);
 const maximizedModal = ref<ShortcutContext | null>(null);
 const maximized = computed(() => maximizedModal.value !== null);
@@ -770,7 +770,7 @@ onMounted(async () => {
       :initial-scope="store.currentItem ? diffScopes.get(store.currentItem.id) : undefined"
       :base-ref="store.currentItem?.base_ref ?? undefined"
       :maximized="maximizedModal === 'diff'"
-      @scope-change="(s: 'branch' | 'commit' | 'working') => { if (store.currentItem) diffScopes.set(store.currentItem.id, s); }"
+      @scope-change="(s: 'branch' | 'working') => { if (store.currentItem) diffScopes.set(store.currentItem.id, s); }"
       @close="showDiffModal = false; maximizedModal = null"
     />
     <CommitGraphModal

@@ -12,14 +12,14 @@ const modalRef = ref<HTMLElement | null>(null);
 defineProps<{
   repoPath: string;
   worktreePath?: string;
-  initialScope?: "branch" | "commit" | "working";
+  initialScope?: "branch" | "working";
   maximized?: boolean;
   baseRef?: string;
 }>();
 
 const emit = defineEmits<{
   (e: "close"): void;
-  (e: "scope-change", scope: "branch" | "commit" | "working"): void;
+  (e: "scope-change", scope: "branch" | "working"): void;
 }>();
 
 // Escape is handled by the centralized dismiss handler in useKeyboardShortcuts

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch, onMounted, onUnmounted } from "vue";
+import { ref, computed, watch, onMounted, onUnmounted } from "vue";
 import { useI18n } from "vue-i18n";
 import { useLessScroll } from "../composables/useLessScroll";
 import { invoke } from "../invoke";
@@ -15,7 +15,7 @@ const { t } = useI18n();
 registerContextShortcuts("diff", [
   { label: t('diffView.shortcutScopeNext'), display: "⇧⌘]" },
   { label: t('diffView.shortcutScopePrev'), display: "⇧⌘[" },
-  { label: t('diffView.shortcutToggleStaged'), display: "s" },
+  { label: t('diffView.shortcutCycleFilter'), display: "s" },
   { label: t('diffView.shortcutLineUpDown'), display: "j / k" },
   { label: t('diffView.shortcutPageUpDown'), display: "f / b" },
   { label: t('diffView.shortcutHalfUpDown'), display: "d / u" },
@@ -23,15 +23,18 @@ registerContextShortcuts("diff", [
   { label: t('diffView.shortcutClose'), display: "q" },
 ]);
 
+type WorkingFilter = "all" | "unstaged" | "staged";
+const workingFilterOrder: WorkingFilter[] = ["all", "unstaged", "staged"];
+
 const props = defineProps<{
   repoPath: string;
   worktreePath?: string;
-  initialScope?: "branch" | "commit" | "working";
+  initialScope?: "branch" | "working";
   baseRef?: string;
 }>();
 
 const emit = defineEmits<{
-  (e: "scope-change", scope: "branch" | "commit" | "working"): void;
+  (e: "scope-change", scope: "branch" | "working"): void;
   (e: "close"): void;
 }>();
 
@@ -40,9 +43,17 @@ const diffContent = ref("");
 const loading = ref(false);
 const error = ref<string | null>(null);
 const noDiff = ref(false);
-const noBranchCommits = ref(false);
-const includeStaged = ref(false);
-const scope = ref<"branch" | "commit" | "working">(props.initialScope || "working");
+const workingFilter = ref<WorkingFilter>("all");
+const scope = ref<"branch" | "working">(props.initialScope === "branch" ? "branch" : "working");
+
+const workingFilterLabel = computed(() => {
+  const labels: Record<WorkingFilter, string> = {
+    all: t('diffView.filterAll'),
+    unstaged: t('diffView.filterUnstaged'),
+    staged: t('diffView.filterStaged'),
+  };
+  return labels[workingFilter.value];
+});
 let fileDiffInstance: FileDiff | null = null;
 let workerPool: WorkerPoolManager | null = null;
 
@@ -75,26 +86,12 @@ async function loadDiff() {
   loading.value = true;
   error.value = null;
   noDiff.value = false;
-  noBranchCommits.value = false;
 
   try {
     let patch = "";
 
     if (scope.value === "working") {
-      const mode = includeStaged.value ? "all" : "unstaged";
-      patch = await invoke<string>("git_diff", { repoPath: path, mode });
-    } else if (scope.value === "commit") {
-      const hasBranchCommits = await checkBranchHasCommits(path);
-      if (!hasBranchCommits) {
-        noBranchCommits.value = true;
-        cleanupInstance();
-        return;
-      }
-      patch = await invoke<string>("git_diff_range", {
-        repoPath: path,
-        from: "HEAD~1",
-        to: "HEAD",
-      });
+      patch = await invoke<string>("git_diff", { repoPath: path, mode: workingFilter.value });
     } else {
       // "branch" scope — diff from merge base
       const baseRef = props.baseRef || await detectBaseRef(path);
@@ -123,26 +120,6 @@ async function loadDiff() {
     error.value = e instanceof Error ? e.message : String(e);
   } finally {
     loading.value = false;
-  }
-}
-
-async function checkBranchHasCommits(path: string): Promise<boolean> {
-  try {
-    const baseRef = props.baseRef || await detectBaseRef(path);
-    const mergeBase = await invoke<string>("git_merge_base", {
-      repoPath: path,
-      refA: baseRef,
-      refB: "HEAD",
-    });
-    const branchDiff = await invoke<string>("git_diff_range", {
-      repoPath: path,
-      from: mergeBase,
-      to: "HEAD",
-    });
-    return branchDiff.trim().length > 0;
-  } catch (e: unknown) {
-    console.warn("[DiffView] checkBranchHasCommits failed:", e);
-    return false;
   }
 }
 
@@ -220,7 +197,7 @@ watch(
   { immediate: false }
 );
 
-const scopeOrder: Array<"working" | "commit" | "branch"> = ["working", "commit", "branch"];
+const scopeOrder: Array<"working" | "branch"> = ["working", "branch"];
 
 function cycleScopeForward() {
   const idx = scopeOrder.indexOf(scope.value);
@@ -234,14 +211,19 @@ function cycleScopeBack() {
   loadDiff();
 }
 
+function cycleWorkingFilter() {
+  const idx = workingFilterOrder.indexOf(workingFilter.value);
+  workingFilter.value = workingFilterOrder[(idx + 1) % workingFilterOrder.length];
+  loadDiff();
+}
+
 useLessScroll(containerRef, {
   extraHandler(e) {
-    // s — toggle include staged (only in working scope)
+    // s — cycle working filter (only in working scope)
     if (e.key === "s" && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
       if (scope.value === "working") {
         e.preventDefault();
-        includeStaged.value = !includeStaged.value;
-        loadDiff();
+        cycleWorkingFilter();
         return true;
       }
     }
@@ -274,18 +256,15 @@ defineExpose({ refresh: loadDiff });
     <div class="diff-toolbar">
       <div class="scope-selector">
         <button :class="{ active: scope === 'working' }" @click="scope = 'working'; loadDiff()">{{ $t('diffView.scopeWorking') }}</button>
-        <button :class="{ active: scope === 'commit' }" @click="scope = 'commit'; loadDiff()">{{ $t('diffView.scopeLastCommit') }}</button>
         <button :class="{ active: scope === 'branch' }" @click="scope = 'branch'; loadDiff()">{{ $t('diffView.scopeBranch') }}</button>
       </div>
       <button
         v-if="scope === 'working'"
         class="staged-toggle"
-        :class="{ active: includeStaged }"
-        @click="includeStaged = !includeStaged; loadDiff()"
-      >{{ $t('diffView.includeStaged') }}</button>
+        @click="cycleWorkingFilter()"
+      >{{ workingFilterLabel }}</button>
     </div>
     <div v-if="error" class="diff-status diff-error">{{ error }}</div>
-    <div v-else-if="noBranchCommits && !loading" class="diff-status">{{ $t('diffView.noCommitsSinceBranching') }}</div>
     <div v-else-if="noDiff && !loading" class="diff-status">{{ $t('diffView.noChanges') }}</div>
     <div ref="containerRef" class="diff-container"></div>
   </div>
@@ -344,12 +323,6 @@ defineExpose({ refresh: loadDiff });
   font-size: 11px;
   border-radius: 4px;
   cursor: pointer;
-}
-
-.staged-toggle.active {
-  background: #0066cc;
-  border-color: #0077ee;
-  color: #fff;
 }
 
 .diff-status {
