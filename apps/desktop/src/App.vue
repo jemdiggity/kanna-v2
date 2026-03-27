@@ -5,7 +5,7 @@ import { useI18n } from "vue-i18n";
 import { computedAsync } from "@vueuse/core";
 import { isTauri } from "./tauri-mock";
 import { invoke } from "./invoke";
-import { hasTag } from "@kanna/core";
+import { hasTag, parseRepoConfig } from "@kanna/core";
 import { getSetting, setSetting, type DbHandle } from "@kanna/db";
 import i18n from "./i18n";
 import Sidebar from "./components/Sidebar.vue";
@@ -49,6 +49,8 @@ useOperatorEvents(computed(() => db) as unknown as Ref<DbHandle | null>);
 
 // UI state
 const showNewTaskModal = ref(false);
+const availablePipelines = ref<string[]>([]);
+const defaultPipelineName = ref<string | undefined>(undefined);
 const showAddRepoModal = ref(false);
 const addRepoInitialTab = ref<"create" | "import">("create");
 const showShortcutsModal = ref(false);
@@ -333,7 +335,7 @@ const currentShortcutContext = computed<ShortcutContext>(() => {
 
 // Keyboard shortcuts
 const keyboardActions = {
-  newTask: () => { showNewTaskModal.value = true; },
+  newTask: () => { openNewTaskModal().catch((e) => console.error("[App] openNewTaskModal failed:", e)); },
   newWindow: async () => {
     if (isTauri) {
       const { WebviewWindow } = await import("@tauri-apps/api/webviewWindow");
@@ -560,8 +562,35 @@ function handleSelectItem(itemId: string) {
   store.selectItem(itemId);
 }
 
+async function openNewTaskModal(repoId?: string) {
+  if (repoId) store.selectedRepoId = repoId;
+  const repoPath = store.repos.find((r) => r.id === (repoId ?? store.selectedRepoId))?.path;
+  if (repoPath) {
+    const pipelinesDir = `${repoPath}/.kanna/pipelines`;
+    const files = await invoke<string[]>("list_dir", { path: pipelinesDir }).catch(() => [] as string[]);
+    availablePipelines.value = files
+      .filter((f) => f.endsWith(".json"))
+      .map((f) => f.replace(/\.json$/, ""));
+    const configContent = await invoke<string>("read_text_file", { path: `${repoPath}/.kanna/config.json` }).catch(() => "");
+    if (configContent) {
+      try {
+        const config = parseRepoConfig(configContent);
+        defaultPipelineName.value = config.pipeline;
+      } catch {
+        defaultPipelineName.value = undefined;
+      }
+    } else {
+      defaultPipelineName.value = undefined;
+    }
+  } else {
+    availablePipelines.value = [];
+    defaultPipelineName.value = undefined;
+  }
+  showNewTaskModal.value = true;
+}
+
 // Handlers that mix UI state + store
-async function handleNewTaskSubmit(prompt: string, agentProvider: "claude" | "copilot" = "claude") {
+async function handleNewTaskSubmit(prompt: string, agentProvider: "claude" | "copilot" = "claude", pipelineName?: string) {
   if (!store.selectedRepoId) {
     if (store.repos.length === 1) {
       store.selectedRepoId = store.repos[0].id;
@@ -574,10 +603,11 @@ async function handleNewTaskSubmit(prompt: string, agentProvider: "claude" | "co
   if (!repo) return;
   showNewTaskModal.value = false;
   try {
-    await store.createItem(store.selectedRepoId, repo.path, prompt, "pty", { agentProvider });
-  } catch (e: any) {
+    await store.createItem(store.selectedRepoId, repo.path, prompt, "pty", { agentProvider, pipelineName });
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
     console.error("Task creation failed:", e);
-    toast.error(`${t('toasts.taskCreationFailed')}: ${e?.message || e}`);
+    toast.error(`${t('toasts.taskCreationFailed')}: ${msg}`);
   }
 }
 
@@ -698,7 +728,7 @@ onMounted(async () => {
       :blocker-names="sidebarBlockerNames"
       @select-repo="store.selectRepo"
       @select-item="handleSelectItem"
-      @new-task="(repoId: string) => { store.selectedRepoId = repoId; showNewTaskModal = true; }"
+      @new-task="(repoId: string) => openNewTaskModal(repoId).catch((e) => console.error('[App] openNewTaskModal failed:', e))"
       @pin-item="store.pinItem"
       @unpin-item="store.unpinItem"
       @reorder-pinned="store.reorderPinned"
@@ -720,7 +750,9 @@ onMounted(async () => {
     <NewTaskModal
       v-if="showNewTaskModal"
       :default-agent-provider="preferences.defaultAgentProvider"
-      @submit="handleNewTaskSubmit"
+      :pipelines="availablePipelines"
+      :default-pipeline="defaultPipelineName"
+      @submit="(prompt, agentProvider, pipelineName) => handleNewTaskSubmit(prompt, agentProvider, pipelineName)"
       @cancel="showNewTaskModal = false"
     />
     <AddRepoModal

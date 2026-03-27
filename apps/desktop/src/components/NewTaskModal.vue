@@ -5,15 +5,18 @@ const { zIndex } = useModalZIndex();
 
 const props = defineProps<{
   defaultAgentProvider?: "claude" | "copilot";
+  pipelines?: string[];
+  defaultPipeline?: string;
 }>();
 
 const emit = defineEmits<{
-  (e: "submit", prompt: string, agentProvider: "claude" | "copilot"): void;
-  (e: "cancel"): void;
+  submit: [prompt: string, agentProvider: "claude" | "copilot", pipelineName: string];
+  cancel: [];
 }>();
 
 const prompt = ref("");
 const agentProvider = ref<"claude" | "copilot">(props.defaultAgentProvider ?? "claude");
+const selectedPipeline = ref<string>(props.defaultPipeline ?? props.pipelines?.[0] ?? "default");
 const textareaRef = ref<HTMLTextAreaElement>();
 
 const providers: Array<"claude" | "copilot"> = ["claude", "copilot"];
@@ -30,7 +33,7 @@ onMounted(() => {
 function handleSubmit() {
   const text = prompt.value.trim();
   if (!text) return;
-  emit("submit", text, agentProvider.value);
+  emit("submit", text, agentProvider.value, selectedPipeline.value);
   prompt.value = "";
 }
 
@@ -88,6 +91,24 @@ function handleKeydown(e: KeyboardEvent) {
           spellcheck="false"
           @keydown="handleKeydown"
         />
+        <div class="pipeline-row">
+          <label class="pipeline-label" for="pipeline-select">Pipeline</label>
+          <select
+            id="pipeline-select"
+            v-model="selectedPipeline"
+            class="pipeline-select"
+          >
+            <option
+              v-if="!pipelines || pipelines.length === 0"
+              value="default"
+            >default</option>
+            <option
+              v-for="name in pipelines"
+              :key="name"
+              :value="name"
+            >{{ name }}</option>
+          </select>
+        </div>
       </div>
       <div class="modal-footer">
         <span class="hint">{{ $t('modals.submitHint', { action: $t('actions.submit').toLowerCase() }) }}</span>
@@ -191,6 +212,35 @@ function handleKeydown(e: KeyboardEvent) {
 
 .prompt-input::placeholder {
   color: #555;
+}
+
+.pipeline-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.pipeline-label {
+  font-size: 11px;
+  color: #888;
+  white-space: nowrap;
+}
+
+.pipeline-select {
+  flex: 1;
+  background: #1a1a1a;
+  border: 1px solid #444;
+  border-radius: 4px;
+  color: #e0e0e0;
+  font-size: 12px;
+  padding: 4px 8px;
+  outline: none;
+  cursor: pointer;
+}
+
+.pipeline-select:focus {
+  border-color: #0066cc;
 }
 
 .modal-footer {
