@@ -2,7 +2,6 @@
 import { computed, ref } from "vue";
 import type { PipelineItem } from "@kanna/db";
 import { useI18n } from "vue-i18n";
-import TagBadges from "./TagBadges.vue";
 
 const { t } = useI18n();
 
@@ -36,7 +35,7 @@ function copyBranch() {
 <template>
   <div class="task-header" @mousedown.prevent>
     <div class="header-top">
-      <TagBadges :tags="item.tags" />
+      <span class="stage-badge">{{ item.stage }}</span>
       <h2 class="task-title">{{ title(item) }}</h2>
     </div>
     <div class="header-meta">
@@ -77,6 +76,19 @@ function copyBranch() {
   display: flex;
   align-items: center;
   gap: 10px;
+}
+
+.stage-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #fff;
+  white-space: nowrap;
+  line-height: 1.4;
+  background: rgba(59, 130, 246, 0.35);
+  flex-shrink: 0;
 }
 
 .task-title {
