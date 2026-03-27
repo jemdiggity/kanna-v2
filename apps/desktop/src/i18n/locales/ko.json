@@ -66,6 +66,7 @@
     "preferences": "설정",
     "dismiss": "닫기",
     "treeExplorer": "트리 탐색기",
+    "oldestUnread": "가장 오래된 읽지 않은 작업",
     "focusSearch": "검색 포커스"
   },
   "shortcutContexts": {

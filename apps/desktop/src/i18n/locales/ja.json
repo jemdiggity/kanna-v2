@@ -66,6 +66,7 @@
     "preferences": "設定",
     "dismiss": "閉じる",
     "treeExplorer": "ツリーエクスプローラー",
+    "oldestUnread": "最も古い未読タスク",
     "focusSearch": "検索にフォーカス"
   },
   "shortcutContexts": {
