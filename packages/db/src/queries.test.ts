@@ -10,6 +10,9 @@ import {
   listPipelineItems,
   insertPipelineItem,
   updatePipelineItemTags,
+  updatePipelineItemStage,
+  updatePipelineItemStageResult,
+  clearPipelineItemStageResult,
   addPipelineItemTag,
   removePipelineItemTag,
   updatePipelineItemPR,
@@ -70,8 +73,7 @@ function createMockDb(): DbHandle & {
         const repo = tables.repo.find((r) => r.id === id);
         if (repo) repo.hidden = 0;
       } else if (q.startsWith("INSERT INTO PIPELINE_ITEM")) {
-        // stage is a literal 'legacy' in the SQL, not a bind param
-        const [id, repo_id, issue_number, issue_title, prompt, tagsJson, pr_number, pr_url, branch, agent_type, port_offset, _port_env, activity] =
+        const [id, repo_id, issue_number, issue_title, prompt, pipeline, stage, tagsJson, pr_number, pr_url, branch, agent_type, _agent_provider, port_offset, _port_env, activity] =
           bindValues as unknown[];
         tables.pipeline_item.push({
           id: id as string,
@@ -79,7 +81,9 @@ function createMockDb(): DbHandle & {
           issue_number: (issue_number as number | null),
           issue_title: (issue_title as string | null),
           prompt: (prompt as string | null),
-          stage: "legacy",
+          pipeline: (pipeline as string) || "default",
+          stage: (stage as string) || "in progress",
+          stage_result: null,
           tags: (tagsJson as string) || "[]",
           pr_number: (pr_number as number | null),
           pr_url: (pr_url as string | null),
@@ -99,6 +103,27 @@ function createMockDb(): DbHandle & {
         const item = tables.pipeline_item.find((p) => p.id === id);
         if (item) {
           item.tags = newTags;
+          item.updated_at = new Date().toISOString();
+        }
+      } else if (q.startsWith("UPDATE PIPELINE_ITEM SET STAGE =")) {
+        const [stage, id] = bindValues as string[];
+        const item = tables.pipeline_item.find((p) => p.id === id);
+        if (item) {
+          item.stage = stage;
+          item.updated_at = new Date().toISOString();
+        }
+      } else if (q.startsWith("UPDATE PIPELINE_ITEM SET STAGE_RESULT = NULL")) {
+        const [id] = bindValues as string[];
+        const item = tables.pipeline_item.find((p) => p.id === id);
+        if (item) {
+          item.stage_result = null;
+          item.updated_at = new Date().toISOString();
+        }
+      } else if (q.startsWith("UPDATE PIPELINE_ITEM SET STAGE_RESULT =")) {
+        const [result, id] = bindValues as string[];
+        const item = tables.pipeline_item.find((p) => p.id === id);
+        if (item) {
+          item.stage_result = result;
           item.updated_at = new Date().toISOString();
         }
       } else if (q.startsWith("UPDATE PIPELINE_ITEM SET PR_NUMBER")) {
@@ -468,6 +493,98 @@ describe("pipeline_item queries", () => {
     const item = db.tables.pipeline_item.find((p) => p.id === "pi1");
     expect(item?.pr_number).toBe(99);
     expect(item?.pr_url).toBe("https://github.com/o/r/pull/99");
+  });
+
+  it("insertPipelineItem defaults pipeline to 'default' and stage to 'in progress'", async () => {
+    await insertPipelineItem(db, {
+      id: "pi1",
+      repo_id: "r1",
+      issue_number: null,
+      issue_title: null,
+      prompt: "do it",
+      tags: [],
+      pr_number: null,
+      pr_url: null,
+      branch: null,
+      agent_type: null,
+      agent_provider: "claude",
+      activity: "idle",
+      port_offset: null,
+      port_env: null,
+    });
+    const item = db.tables.pipeline_item.find((p) => p.id === "pi1");
+    expect(item?.pipeline).toBe("default");
+    expect(item?.stage).toBe("in progress");
+    expect(item?.stage_result).toBeNull();
+  });
+
+  it("insertPipelineItem accepts explicit pipeline and stage", async () => {
+    await insertPipelineItem(db, {
+      id: "pi1",
+      repo_id: "r1",
+      issue_number: null,
+      issue_title: null,
+      prompt: "do it",
+      tags: [],
+      pr_number: null,
+      pr_url: null,
+      branch: null,
+      agent_type: null,
+      agent_provider: "claude",
+      activity: "idle",
+      port_offset: null,
+      port_env: null,
+      pipeline: "custom",
+      stage: "review",
+    });
+    const item = db.tables.pipeline_item.find((p) => p.id === "pi1");
+    expect(item?.pipeline).toBe("custom");
+    expect(item?.stage).toBe("review");
+  });
+});
+
+describe("stage queries", () => {
+  let db: ReturnType<typeof createMockDb>;
+
+  beforeEach(async () => {
+    db = createMockDb();
+    await insertPipelineItem(db, {
+      id: "pi1",
+      repo_id: "r1",
+      issue_number: null,
+      issue_title: null,
+      prompt: "task",
+      tags: [],
+      pr_number: null,
+      pr_url: null,
+      branch: null,
+      agent_type: null,
+      agent_provider: "claude",
+      activity: "idle",
+      port_offset: null,
+      port_env: null,
+    });
+  });
+
+  it("updatePipelineItemStage updates the stage field", async () => {
+    await updatePipelineItemStage(db, "pi1", "review");
+    const item = db.tables.pipeline_item.find((p) => p.id === "pi1");
+    expect(item?.stage).toBe("review");
+  });
+
+  it("updatePipelineItemStageResult sets stage_result", async () => {
+    const result = JSON.stringify({ outcome: "success" });
+    await updatePipelineItemStageResult(db, "pi1", result);
+    const item = db.tables.pipeline_item.find((p) => p.id === "pi1");
+    expect(item?.stage_result).toBe(result);
+  });
+
+  it("clearPipelineItemStageResult sets stage_result to null", async () => {
+    const result = JSON.stringify({ outcome: "success" });
+    await updatePipelineItemStageResult(db, "pi1", result);
+    await clearPipelineItemStageResult(db, "pi1");
+    const item = db.tables.pipeline_item.find((p) => p.id === "pi1");
+    expect(item?.stage_result).toBeNull();
   });
 });
 

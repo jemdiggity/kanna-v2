@@ -62,19 +62,21 @@ export async function listPipelineItems(
 
 export async function insertPipelineItem(
   db: DbHandle,
-  item: Omit<PipelineItem, "created_at" | "updated_at" | "activity_changed_at" | "unread_at" | "pinned" | "pin_order" | "display_name" | "closed_at" | "stage" | "tags" | "base_ref" | "claude_session_id"> & { tags?: string[]; activity?: PipelineItem["activity"]; display_name?: string | null; base_ref?: string | null }
+  item: Omit<PipelineItem, "created_at" | "updated_at" | "activity_changed_at" | "unread_at" | "pinned" | "pin_order" | "display_name" | "closed_at" | "stage" | "stage_result" | "tags" | "base_ref" | "claude_session_id"> & { pipeline?: string; stage?: string; tags?: string[]; activity?: PipelineItem["activity"]; display_name?: string | null; base_ref?: string | null }
 ): Promise<void> {
   const tagsJson = JSON.stringify(item.tags ?? []);
   await db.execute(
     `INSERT INTO pipeline_item
-       (id, repo_id, issue_number, issue_title, prompt, stage, tags, pr_number, pr_url, branch, agent_type, agent_provider, port_offset, port_env, activity, activity_changed_at, display_name, base_ref)
-     VALUES (?, ?, ?, ?, ?, 'legacy', ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?)`,
+       (id, repo_id, issue_number, issue_title, prompt, pipeline, stage, tags, pr_number, pr_url, branch, agent_type, agent_provider, port_offset, port_env, activity, activity_changed_at, display_name, base_ref)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?)`,
     [
       item.id,
       item.repo_id,
       item.issue_number,
       item.issue_title,
       item.prompt,
+      item.pipeline ?? "default",
+      item.stage ?? "in progress",
       tagsJson,
       item.pr_number,
       item.pr_url,
@@ -102,6 +104,38 @@ export async function updatePipelineItemTags(
   await db.execute(
     "UPDATE pipeline_item SET tags = ?, updated_at = datetime('now') WHERE id = ?",
     [JSON.stringify(tags), id]
+  );
+}
+
+export async function updatePipelineItemStage(
+  db: DbHandle,
+  id: string,
+  stage: string
+): Promise<void> {
+  await db.execute(
+    `UPDATE pipeline_item SET stage = ?, updated_at = datetime('now') WHERE id = ?`,
+    [stage, id]
+  );
+}
+
+export async function updatePipelineItemStageResult(
+  db: DbHandle,
+  id: string,
+  result: string
+): Promise<void> {
+  await db.execute(
+    `UPDATE pipeline_item SET stage_result = ?, updated_at = datetime('now') WHERE id = ?`,
+    [result, id]
+  );
+}
+
+export async function clearPipelineItemStageResult(
+  db: DbHandle,
+  id: string
+): Promise<void> {
+  await db.execute(
+    `UPDATE pipeline_item SET stage_result = NULL, updated_at = datetime('now') WHERE id = ?`,
+    [id]
   );
 }
 
