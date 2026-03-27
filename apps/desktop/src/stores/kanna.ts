@@ -410,6 +410,7 @@ export const useKannaStore = defineStore("kanna", () => {
     agentType: "pty" | "sdk" = "pty",
     opts?: { baseBranch?: string; tags?: string[]; pipelineName?: string; stage?: string; customTask?: CustomTaskConfig; agentProvider?: "claude" | "copilot"; model?: string; permissionMode?: string; allowedTools?: string[] },
   ) {
+    const t0 = performance.now();
     const id = generateId();
     const branch = `task-${id}`;
     const worktreePath = `${repoPath}/.kanna-worktrees/${branch}`;
@@ -422,6 +423,7 @@ export const useKannaStore = defineStore("kanna", () => {
 
     // Resolve pipeline name: explicit > repo config > "default"
     let pipelineName = opts?.pipelineName;
+    let t1 = performance.now();
     if (!pipelineName) {
       try {
         const repoConfig = await readRepoConfig(repoPath);
@@ -430,10 +432,12 @@ export const useKannaStore = defineStore("kanna", () => {
         pipelineName = "default";
       }
     }
+    console.log(`[perf:createItem] readRepoConfig: ${(performance.now() - t1).toFixed(1)}ms`);
 
     // Load pipeline definition and resolve stage
     let firstStageName = opts?.stage ?? "in progress";
     let pipelinePrompt = effectivePrompt;
+    t1 = performance.now();
     try {
       const pipeline = await loadPipeline(repoPath, pipelineName);
       if (!opts?.stage && pipeline.stages.length > 0) {
@@ -457,6 +461,7 @@ export const useKannaStore = defineStore("kanna", () => {
       console.error("[store] failed to load pipeline definition:", e);
       // Fall back to defaults — pipeline missing is not fatal at creation time
     }
+    console.log(`[perf:createItem] loadPipeline+loadAgent: ${(performance.now() - t1).toFixed(1)}ms`);
 
     // Assign port offset
     const usedOffsets = new Set(
@@ -466,6 +471,7 @@ export const useKannaStore = defineStore("kanna", () => {
     while (usedOffsets.has(portOffset)) portOffset++;
 
     // Compute base_ref for merge-base diffing
+    t1 = performance.now();
     let baseRef: string | null = null;
     try {
       const defaultBranch = await invoke<string>("git_default_branch", { repoPath });
@@ -479,8 +485,10 @@ export const useKannaStore = defineStore("kanna", () => {
     } catch (e) {
       console.warn("[store] failed to compute base_ref:", e);
     }
+    console.log(`[perf:createItem] git base_ref: ${(performance.now() - t1).toFixed(1)}ms`);
 
     // Insert DB record immediately so the UI updates without waiting on IO
+    t1 = performance.now();
     try {
       await insertPipelineItem(_db, {
         id,
@@ -507,9 +515,11 @@ export const useKannaStore = defineStore("kanna", () => {
       toast.error(tt('toasts.dbInsertFailed'));
       throw e;
     }
+    console.log(`[perf:createItem] DB insert: ${(performance.now() - t1).toFixed(1)}ms`);
 
     pendingSetupIds.value = [...pendingSetupIds.value, id];
     bump();
+    console.log(`[perf:createItem] TOTAL (modal → bump): ${(performance.now() - t0).toFixed(1)}ms`);
 
     // Worktree creation, config read, and agent spawn run in the background.
     // Selection is deferred until setup completes so the terminal mounts
@@ -524,8 +534,10 @@ export const useKannaStore = defineStore("kanna", () => {
     agentType: "pty" | "sdk",
     opts?: { baseBranch?: string; tags?: string[]; pipelineName?: string; stage?: string; customTask?: CustomTaskConfig; agentProvider?: "claude" | "copilot"; model?: string; permissionMode?: string; allowedTools?: string[] },
   ) {
+    const s0 = performance.now();
     try {
       // Read config and create worktree concurrently — they're independent.
+      let s1 = performance.now();
       let repoConfig: RepoConfig;
       try {
         const [config] = await Promise.all([
@@ -538,6 +550,7 @@ export const useKannaStore = defineStore("kanna", () => {
         toast.error(tt('toasts.worktreeFailed'));
         return;
       }
+      console.log(`[perf:setup] readConfig+createWorktree: ${(performance.now() - s1).toFixed(1)}ms`);
 
       const portEnv = computePortEnv(repoConfig, portOffset);
 
@@ -552,6 +565,7 @@ export const useKannaStore = defineStore("kanna", () => {
       spawnShellSession(`shell-wt-${id}`, worktreePath, JSON.stringify(portEnv))
         .catch(e => console.error("[store] shell pre-warm failed:", e));
 
+      s1 = performance.now();
       try {
         if (agentType !== "pty") {
           await invoke("create_agent_session", {
@@ -584,9 +598,13 @@ export const useKannaStore = defineStore("kanna", () => {
         console.error("[store] agent spawn failed:", e);
         toast.error(`${tt('toasts.agentStartFailed')}: ${e instanceof Error ? e.message : e}`);
       }
+      console.log(`[perf:setup] spawnSession: ${(performance.now() - s1).toFixed(1)}ms`);
 
       // Select after setup so the terminal mounts with the session already alive
+      s1 = performance.now();
       await selectItem(id);
+      console.log(`[perf:setup] selectItem: ${(performance.now() - s1).toFixed(1)}ms`);
+      console.log(`[perf:setup] TOTAL (background): ${(performance.now() - s0).toFixed(1)}ms`);
     } finally {
       pendingSetupIds.value = pendingSetupIds.value.filter(pid => pid !== id);
     }
