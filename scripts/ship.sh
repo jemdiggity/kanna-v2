@@ -232,6 +232,7 @@ for i in "${!ARCHS[@]}"; do
             export OPENSSL_DIR="/usr/local/opt/openssl@3"
         fi
         cargo build --release --target "$ARCH" --manifest-path crates/daemon/Cargo.toml
+        cargo build --release --target "$ARCH" --manifest-path crates/kanna-cli/Cargo.toml
     )
     "$ROOT/scripts/stage-sidecars.sh" --release --target "$ARCH"
 
