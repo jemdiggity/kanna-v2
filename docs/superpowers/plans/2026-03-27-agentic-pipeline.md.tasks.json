@@ -1,0 +1,28 @@
+{
+  "planPath": "docs/superpowers/plans/2026-03-27-agentic-pipeline.md",
+  "tasks": [
+    {"id": 0, "subject": "Task 0: Built-in agent and pipeline files", "status": "pending"},
+    {"id": 1, "subject": "Task 1: Pipeline and agent TypeScript types", "status": "pending"},
+    {"id": 2, "subject": "Task 2: Pipeline loader", "status": "pending", "blockedBy": [1]},
+    {"id": 3, "subject": "Task 3: Agent loader", "status": "pending", "blockedBy": [1]},
+    {"id": 4, "subject": "Task 4: Prompt builder", "status": "pending"},
+    {"id": 5, "subject": "Task 5: Agent/pipeline scanner", "status": "pending", "blockedBy": [2, 3]},
+    {"id": 6, "subject": "Task 6: DB schema updates", "status": "pending", "blockedBy": [1]},
+    {"id": 7, "subject": "Task 7: DB migration", "status": "pending", "blockedBy": [6]},
+    {"id": 8, "subject": "Task 8: Repo config pipeline field", "status": "pending"},
+    {"id": 9, "subject": "Task 9: kanna-cli Rust crate", "status": "pending", "blockedBy": [6]},
+    {"id": 10, "subject": "Task 10: App socket listener", "status": "pending", "blockedBy": [9]},
+    {"id": 11, "subject": "Task 11: Pipeline engine in store", "status": "pending", "blockedBy": [2, 3, 4, 5, 6, 7, 8, 10]},
+    {"id": 12, "subject": "Task 12: Sidebar stage-based grouping", "status": "pending", "blockedBy": [11]},
+    {"id": 13, "subject": "Task 13: TaskHeader stage indicator", "status": "pending", "blockedBy": [11]},
+    {"id": 14, "subject": "Task 14: MainPanel blocked check update", "status": "pending", "blockedBy": [11]},
+    {"id": 15, "subject": "Task 15: NewTaskModal pipeline selector", "status": "pending", "blockedBy": [5, 11]},
+    {"id": 16, "subject": "Task 16: Command palette factory entries", "status": "pending", "blockedBy": [11]},
+    {"id": 17, "subject": "Task 17: Stage advance keyboard shortcut", "status": "pending", "blockedBy": [11]},
+    {"id": 18, "subject": "Task 18: ActionBar/App.vue/useGc stage migration", "status": "pending", "blockedBy": [11]},
+    {"id": 19, "subject": "Task 19: Clean up deprecated tag code", "status": "pending", "blockedBy": [12, 13, 14, 15, 16, 17, 18]},
+    {"id": 20, "subject": "Task 20: Stage sidecar packaging", "status": "pending", "blockedBy": [9]},
+    {"id": 21, "subject": "Task 21: Integration tests", "status": "pending", "blockedBy": [19, 20]}
+  ],
+  "lastUpdated": "2026-03-27T00:00:00Z"
+}
