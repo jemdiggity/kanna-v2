@@ -82,6 +82,7 @@ export const useKannaStore = defineStore("kanna", () => {
   // ── Selection & navigation history ──────────────────────────────
   const selectedRepoId = ref<string | null>(null);
   const selectedItemId = ref<string | null>(null);
+  const lastSelectedItemByRepo = ref<Record<string, string>>({});
   const nav = createNavigationHistory();
   const canGoBack = nav.canGoBack;
   const canGoForward = nav.canGoForward;
@@ -170,6 +171,10 @@ export const useKannaStore = defineStore("kanna", () => {
   async function selectItem(itemId: string) {
     nav.select(itemId, selectedItemId.value);
     selectedItemId.value = itemId;
+    const item = items.value.find((i) => i.id === itemId);
+    if (item) {
+      lastSelectedItemByRepo.value[item.repo_id] = itemId;
+    }
     await setSetting(_db, "selected_item_id", itemId);
     emitTaskSelected(itemId);
   }
@@ -177,6 +182,10 @@ export const useKannaStore = defineStore("kanna", () => {
   /** Restore selection without recording history (startup / DB restore). */
   function restoreSelection(itemId: string) {
     selectedItemId.value = itemId;
+    const item = items.value.find((i) => i.id === itemId);
+    if (item) {
+      lastSelectedItemByRepo.value[item.repo_id] = itemId;
+    }
   }
 
   /** Navigate back, switching repos if needed. */
@@ -186,9 +195,12 @@ export const useKannaStore = defineStore("kanna", () => {
     const taskId = nav.goBack(selectedItemId.value, validIds);
     if (!taskId) return;
     const item = items.value.find((i) => i.id === taskId);
-    if (item && item.repo_id !== selectedRepoId.value) {
-      selectedRepoId.value = item.repo_id;
-      setSetting(_db, "selected_repo_id", item.repo_id);
+    if (item) {
+      if (item.repo_id !== selectedRepoId.value) {
+        selectedRepoId.value = item.repo_id;
+        setSetting(_db, "selected_repo_id", item.repo_id);
+      }
+      lastSelectedItemByRepo.value[item.repo_id] = taskId;
     }
     selectedItemId.value = taskId;
     setSetting(_db, "selected_item_id", taskId);
@@ -202,9 +214,12 @@ export const useKannaStore = defineStore("kanna", () => {
     const taskId = nav.goForward(selectedItemId.value, validIds);
     if (!taskId) return;
     const item = items.value.find((i) => i.id === taskId);
-    if (item && item.repo_id !== selectedRepoId.value) {
-      selectedRepoId.value = item.repo_id;
-      setSetting(_db, "selected_repo_id", item.repo_id);
+    if (item) {
+      if (item.repo_id !== selectedRepoId.value) {
+        selectedRepoId.value = item.repo_id;
+        setSetting(_db, "selected_repo_id", item.repo_id);
+      }
+      lastSelectedItemByRepo.value[item.repo_id] = taskId;
     }
     selectedItemId.value = taskId;
     setSetting(_db, "selected_item_id", taskId);
@@ -1391,7 +1406,7 @@ export const useKannaStore = defineStore("kanna", () => {
 
   return {
     // State
-    repos, items, selectedRepoId, selectedItemId,
+    repos, items, selectedRepoId, selectedItemId, lastSelectedItemByRepo,
     canGoBack, canGoForward,
     suspendAfterMinutes, killAfterMinutes,
     ideCommand, gcAfterDays, hideShortcutsOnStartup, devLingerTerminals,

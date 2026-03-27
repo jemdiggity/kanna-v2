@@ -117,6 +117,36 @@ function navigateItems(direction: -1 | 1) {
   }
 }
 
+function navigateRepos(direction: -1 | 1) {
+  const visibleRepos = store.repos;
+  if (visibleRepos.length === 0) return;
+  const currentIndex = visibleRepos.findIndex((r) => r.id === store.selectedRepoId);
+  let nextIndex: number;
+  if (currentIndex === -1) {
+    nextIndex = 0;
+  } else {
+    nextIndex = currentIndex + direction;
+    if (nextIndex < 0 || nextIndex >= visibleRepos.length) return;
+  }
+  const nextRepo = visibleRepos[nextIndex];
+  if (nextRepo.id === store.selectedRepoId) return;
+  store.selectRepo(nextRepo.id);
+
+  // Restore last-selected task for this repo, or fall back to first task
+  const lastItemId = store.lastSelectedItemByRepo[nextRepo.id];
+  const lastItem = lastItemId
+    ? store.items.find((i) => i.id === lastItemId && i.repo_id === nextRepo.id && !hasTag(i, "done"))
+    : undefined;
+  if (lastItem) {
+    store.selectItem(lastItem.id);
+  } else {
+    const sorted = store.sortedItemsAllRepos.filter((i) => i.repo_id === nextRepo.id);
+    if (sorted.length > 0) {
+      store.selectItem(sorted[0].id);
+    }
+  }
+}
+
 function handleBlockTask() {
   blockerSelectMode.value = "block";
   showBlockerSelect.value = true;
@@ -355,6 +385,8 @@ const keyboardActions = {
     );
     store.selectItem(oldest.id);
   },
+  navigateRepoUp: () => navigateRepos(-1),
+  navigateRepoDown: () => navigateRepos(1),
   toggleSidebar: () => { sidebarHidden.value = !sidebarHidden.value; },
   toggleMaximize: () => {
     const ctx = currentShortcutContext.value;

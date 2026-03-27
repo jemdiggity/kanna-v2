@@ -11,6 +11,8 @@ export type ActionName =
   | "undoClose"
   | "navigateUp"
   | "navigateDown"
+  | "navigateRepoUp"
+  | "navigateRepoDown"
   | "dismiss"
   | "openInIDE"
   | "openShell"
@@ -72,6 +74,8 @@ export const shortcuts: ShortcutDef[] = [
   // Navigation — moving between tasks and finding things
   { action: "navigateUp",     labelKey: "shortcuts.previousTask",   groupKey: "shortcuts.groupNavigation", key: "ArrowUp",                   meta: true, alt: true,    display: "⌥⌘↑",     context: ["main"] },
   { action: "navigateDown",   labelKey: "shortcuts.nextTask",       groupKey: "shortcuts.groupNavigation", key: "ArrowDown",                 meta: true, alt: true,    display: "⌥⌘↓",     context: ["main"] },
+  { action: "navigateRepoUp",   labelKey: "shortcuts.previousRepo",   groupKey: "shortcuts.groupNavigation", key: "ArrowUp",                   meta: true, shift: true,  display: "⇧⌘↑",     context: ["main"] },
+  { action: "navigateRepoDown", labelKey: "shortcuts.nextRepo",       groupKey: "shortcuts.groupNavigation", key: "ArrowDown",                 meta: true, shift: true,  display: "⇧⌘↓",     context: ["main"] },
   { action: "openFile",       labelKey: "shortcuts.filePicker",     groupKey: "shortcuts.groupNavigation", key: "p",                         meta: true,               display: "⌘P",       context: ["main"] },
   { action: "commandPalette", labelKey: "shortcuts.commandPalette", groupKey: "shortcuts.groupNavigation", key: ["P", "p"],                  meta: true, shift: true,  display: "⇧⌘P",     context: ["main"] },
   // Views — panels, modes, and display

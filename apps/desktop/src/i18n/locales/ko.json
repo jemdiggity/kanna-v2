@@ -47,6 +47,8 @@
     "undoClose": "닫기 취소",
     "previousTask": "이전 작업",
     "nextTask": "다음 작업",
+    "previousRepo": "이전 리포지토리",
+    "nextRepo": "다음 리포지토리",
     "filePicker": "파일 검색",
     "commandPalette": "명령 팔레트",
     "viewDiff": "차이 보기",

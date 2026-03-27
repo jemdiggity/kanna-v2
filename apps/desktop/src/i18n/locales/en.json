@@ -47,6 +47,8 @@
     "undoClose": "Undo Close",
     "previousTask": "Previous Task",
     "nextTask": "Next Task",
+    "previousRepo": "Previous Repo",
+    "nextRepo": "Next Repo",
     "filePicker": "File Picker",
     "commandPalette": "Command Palette",
     "viewDiff": "View Diff",

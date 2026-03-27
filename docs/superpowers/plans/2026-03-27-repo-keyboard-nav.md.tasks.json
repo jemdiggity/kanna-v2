@@ -1,0 +1,26 @@
+{
+  "planPath": "docs/superpowers/plans/2026-03-27-repo-keyboard-nav.md",
+  "tasks": [
+    {
+      "id": 7,
+      "subject": "Task 1: Add lastSelectedItemByRepo tracking to store",
+      "status": "completed",
+      "description": "**Goal:** Track the most recently selected task per repo so repo jumps can restore it.\n\n**Files:**\n- Modify: `apps/desktop/src/stores/kanna.ts:82-83` (add ref)\n- Modify: `apps/desktop/src/stores/kanna.ts:169-174` (update selectItem)\n- Modify: `apps/desktop/src/stores/kanna.ts:1480-1500` (expose in return)\n\n**Acceptance Criteria:**\n- [ ] `lastSelectedItemByRepo` is a reactive `Record<string, string>` in the store\n- [ ] Every `selectItem()` call updates the map\n- [ ] Exported from the store\n\n**Verify:** `cd apps/desktop && bun tsc --noEmit` → no type errors\n\n```json:metadata\n{\"files\": [\"apps/desktop/src/stores/kanna.ts\"], \"verifyCommand\": \"cd apps/desktop && bun tsc --noEmit\", \"acceptanceCriteria\": [\"lastSelectedItemByRepo ref exists\", \"selectItem updates the map\", \"exported from store\"]}\n```"
+    },
+    {
+      "id": 8,
+      "subject": "Task 2: Register shortcuts and wire navigation",
+      "status": "completed",
+      "blockedBy": [7],
+      "description": "**Goal:** Add ⇧⌘↑/⇧⌘↓ shortcut definitions and navigateRepos() function.\n\n**Files:**\n- Modify: `apps/desktop/src/composables/useKeyboardShortcuts.ts` (ActionName type + shortcut defs)\n- Modify: `apps/desktop/src/App.vue` (navigateRepos function + keyboardActions wiring)\n\n**Acceptance Criteria:**\n- [ ] ⇧⌘↑ jumps to previous repo, ⇧⌘↓ to next\n- [ ] Restores last-selected task or falls back to first task\n- [ ] Boundary clamping (no-op at edges)\n- [ ] Navigation history records the jump\n- [ ] Shortcuts visible in shortcuts modal\n\n**Verify:** `cd apps/desktop && bun tsc --noEmit` → no type errors\n\n```json:metadata\n{\"files\": [\"apps/desktop/src/composables/useKeyboardShortcuts.ts\", \"apps/desktop/src/App.vue\"], \"verifyCommand\": \"cd apps/desktop && bun tsc --noEmit\", \"acceptanceCriteria\": [\"shortcuts registered\", \"navigateRepos function works\", \"boundary clamping\", \"history recorded\", \"modal shows shortcuts\"]}\n```"
+    },
+    {
+      "id": 9,
+      "subject": "Task 3: Add i18n labels",
+      "status": "completed",
+      "blockedBy": [8],
+      "description": "**Goal:** Add translated labels for the new shortcuts in all locale files.\n\n**Files:**\n- Modify: `apps/desktop/src/i18n/locales/en.json`\n- Modify: `apps/desktop/src/i18n/locales/ja.json`\n- Modify: `apps/desktop/src/i18n/locales/ko.json`\n\n**Acceptance Criteria:**\n- [ ] `shortcuts.previousRepo` and `shortcuts.nextRepo` in all 3 locales\n- [ ] Shortcuts modal shows labels under Navigation group\n\n**Verify:** `cd apps/desktop && bun tsc --noEmit` → no type errors\n\n```json:metadata\n{\"files\": [\"apps/desktop/src/i18n/locales/en.json\", \"apps/desktop/src/i18n/locales/ja.json\", \"apps/desktop/src/i18n/locales/ko.json\"], \"verifyCommand\": \"cd apps/desktop && bun tsc --noEmit\", \"acceptanceCriteria\": [\"en labels exist\", \"ja labels exist\", \"ko labels exist\"]}\n```"
+    }
+  ],
+  "lastUpdated": "2026-03-27T12:00:00Z"
+}

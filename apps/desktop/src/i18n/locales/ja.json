@@ -47,6 +47,8 @@
     "undoClose": "クローズ取り消し",
     "previousTask": "前のタスク",
     "nextTask": "次のタスク",
+    "previousRepo": "前のリポジトリ",
+    "nextRepo": "次のリポジトリ",
     "filePicker": "ファイル検索",
     "commandPalette": "コマンドパレット",
     "viewDiff": "差分表示",
