@@ -427,8 +427,9 @@ DB name configurable via `KANNA_DB_NAME` env var (defaults to `kanna-v2.db`). E2
 - Agent providers: `"claude"` or `"copilot"` — stored in `pipeline_item.agent_provider`
 - i18n locales: English (`en`), Japanese (`ja`), Korean (`ko`) in `apps/desktop/src/i18n/locales/`
 - Keyboard shortcut contexts: `"main"`, `"diff"`, `"file"`, `"shell"`, `"tree"` — managed by `useShortcutContext`
-- `.kanna/config.json` per repo: `setup` (commands), `teardown` (commands), `test` (commands), `ports` (env var → port mapping)
-- Custom tasks defined in `.kanna/tasks/{slug}/agent.md` with YAML frontmatter
+- `.kanna/` per repo — project-level Kanna config:
+  - `config.json` — `setup` (commands run in each new worktree), `teardown` (cleanup commands), `test` (test commands), `ports` (env var → base port mapping)
+  - `tasks/{slug}/agent.md` — custom task templates with YAML frontmatter (prompt, model, permissions, allowed tools)
 
 ## Coding Style
 

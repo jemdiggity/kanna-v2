@@ -1,5 +1,8 @@
 {
-  "setup": ["bun install"],
+  "setup": [
+    "bun install",
+    "[ -f ../../.claude/settings.local.json ] && mkdir -p .claude && cp ../../.claude/settings.local.json .claude/"
+  ],
   "teardown": ["./scripts/dev.sh stop -k", "./scripts/clean.sh --all"],
   "test": ["bun test"],
   "ports": {
