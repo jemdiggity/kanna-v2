@@ -48,15 +48,38 @@ pub async fn get_pipeline_socket_path(
         .ok_or_else(|| "pipeline socket path not initialized".to_string())
 }
 
+/// Resolve the built-in resources directory.
+/// In release builds: `$RESOURCE/` (inside the app bundle).
+/// In dev builds: the repo root (3 levels up from src-tauri).
+fn builtin_resource_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    let resource_dir = app
+        .path()
+        .resource_dir()
+        .map_err(|e| format!("failed to get resource dir: {}", e))?;
+
+    // In dev mode, resource_dir points to src-tauri/ which won't have .kanna/.
+    // Walk up to the repo root and check there.
+    let candidates = [
+        resource_dir.clone(),
+        resource_dir.join("../../.."),  // src-tauri -> desktop -> apps -> repo root
+    ];
+
+    for candidate in &candidates {
+        if candidate.join(".kanna").is_dir() {
+            return Ok(candidate.clone());
+        }
+    }
+
+    // Default to resource_dir (will fail gracefully downstream)
+    Ok(resource_dir)
+}
+
 /// Read a file from the app's bundled resources directory.
 /// `relative_path` is relative to the resources root (e.g., ".kanna/pipelines/default.json").
 #[tauri::command]
 pub fn read_builtin_resource(app: AppHandle, relative_path: String) -> Result<String, String> {
-    let resource_path = app
-        .path()
-        .resource_dir()
-        .map_err(|e| format!("failed to get resource dir: {}", e))?
-        .join(&relative_path);
+    let base = builtin_resource_dir(&app)?;
+    let resource_path = base.join(&relative_path);
     std::fs::read_to_string(&resource_path)
         .map_err(|e| format!("failed to read resource '{}': {}", resource_path.display(), e))
 }
@@ -65,11 +88,8 @@ pub fn read_builtin_resource(app: AppHandle, relative_path: String) -> Result<St
 /// `relative_path` is relative to the resources root (e.g., ".kanna/agents").
 #[tauri::command]
 pub fn list_builtin_resources(app: AppHandle, relative_path: String) -> Result<Vec<String>, String> {
-    let resource_path = app
-        .path()
-        .resource_dir()
-        .map_err(|e| format!("failed to get resource dir: {}", e))?
-        .join(&relative_path);
+    let base = builtin_resource_dir(&app)?;
+    let resource_path = base.join(&relative_path);
     if !resource_path.is_dir() {
         return Ok(Vec::new());
     }
