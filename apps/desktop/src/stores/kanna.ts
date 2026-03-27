@@ -8,6 +8,7 @@ import { listen } from "../listen";
 import { parseRepoConfig, parseAgentMd } from "@kanna/core";
 import { parseAgentDefinition } from "../../../../packages/core/src/pipeline/agent-loader";
 import { parsePipelineJson } from "../../../../packages/core/src/pipeline/pipeline-loader";
+import { getBuiltInPipeline, getBuiltInAgent } from "../../../../packages/core/src/pipeline/built-in";
 import { buildStagePrompt } from "../../../../packages/core/src/pipeline/prompt-builder";
 import { getNextStage, getStageIndex } from "../../../../packages/core/src/pipeline/types";
 import type { PipelineDefinition, AgentDefinition, StageCompleteResult } from "../../../../packages/core/src/pipeline/pipeline-types";
@@ -168,9 +169,17 @@ export const useKannaStore = defineStore("kanna", () => {
     const cached = pipelineCache.get(cacheKey);
     if (cached) return cached;
 
-    const path = `${repoPath}/.kanna/pipelines/${pipelineName}.json`;
-    const content = await invoke<string>("read_text_file", { path });
-    const pipeline = parsePipelineJson(content);
+    // Try repo file first, fall back to built-in
+    let pipeline: PipelineDefinition;
+    try {
+      const path = `${repoPath}/.kanna/pipelines/${pipelineName}.json`;
+      const content = await invoke<string>("read_text_file", { path });
+      pipeline = parsePipelineJson(content);
+    } catch {
+      const builtIn = getBuiltInPipeline(pipelineName);
+      if (!builtIn) throw new Error(`Pipeline "${pipelineName}" not found on disk or in built-ins`);
+      pipeline = builtIn;
+    }
     pipelineCache.set(cacheKey, pipeline);
     return pipeline;
   }
@@ -180,9 +189,17 @@ export const useKannaStore = defineStore("kanna", () => {
     const cached = agentCache.get(cacheKey);
     if (cached) return cached;
 
-    const path = `${repoPath}/.kanna/agents/${agentName}/AGENT.md`;
-    const content = await invoke<string>("read_text_file", { path });
-    const agent = parseAgentDefinition(content);
+    // Try repo file first, fall back to built-in
+    let agent: AgentDefinition;
+    try {
+      const path = `${repoPath}/.kanna/agents/${agentName}/AGENT.md`;
+      const content = await invoke<string>("read_text_file", { path });
+      agent = parseAgentDefinition(content);
+    } catch {
+      const builtIn = getBuiltInAgent(agentName);
+      if (!builtIn) throw new Error(`Agent "${agentName}" not found on disk or in built-ins`);
+      agent = builtIn;
+    }
     agentCache.set(cacheKey, agent);
     return agent;
   }
