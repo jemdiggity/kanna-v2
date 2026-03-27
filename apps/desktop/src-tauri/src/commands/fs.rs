@@ -52,14 +52,11 @@ pub async fn get_pipeline_socket_path(
 /// In release builds: `$RESOURCE/` (inside the app bundle).
 /// In dev builds: walk up from cwd to find the repo root containing `.kanna/`.
 fn builtin_resource_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
-    let resource_dir = app
-        .path()
-        .resource_dir()
-        .map_err(|e| format!("failed to get resource dir: {}", e))?;
-
     // Check the bundled resource dir first (works in release builds)
-    if resource_dir.join(".kanna").is_dir() {
-        return Ok(resource_dir);
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        if resource_dir.join(".kanna").is_dir() {
+            return Ok(resource_dir);
+        }
     }
 
     // Dev mode: walk up from cwd to find repo root with .kanna/
@@ -74,7 +71,6 @@ fn builtin_resource_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
         }
     }
 
-    // Last resort
     Err("could not find .kanna/ directory in resource dir or any parent of cwd".to_string())
 }
 

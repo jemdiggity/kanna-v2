@@ -181,7 +181,7 @@ export const useKannaStore = defineStore("kanna", () => {
         });
         pipeline = parsePipelineJson(content);
       } catch (resourceErr) {
-        throw new Error(`Pipeline "${pipelineName}" not found on disk or in bundled resources: ${resourceErr instanceof Error ? resourceErr.message : JSON.stringify(resourceErr)}`);
+        throw new Error(`Pipeline "${pipelineName}" not found: ${resourceErr instanceof Error ? resourceErr.message : JSON.stringify(resourceErr)}`);
       }
     }
     pipelineCache.set(cacheKey, pipeline);
