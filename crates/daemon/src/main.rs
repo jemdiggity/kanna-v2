@@ -115,7 +115,11 @@ async fn main() {
     let socket_path_clone = socket_path.clone();
     let sessions_shutdown = sessions.clone();
     tokio::spawn(async move {
-        tokio::signal::ctrl_c().await.ok();
+        let mut sigterm = tokio::signal::unix::signal(
+            tokio::signal::unix::SignalKind::terminate(),
+        )
+        .expect("failed to register SIGTERM handler");
+        sigterm.recv().await;
         log::info!("kanna-daemon shutting down");
         sessions_shutdown.lock().await.kill_all();
         let _ = std::fs::remove_file(&pid_path_clone);
@@ -175,9 +179,6 @@ async fn attempt_handoff(
         Ok(s) => s,
         Err(e) => {
             log::info!("[handoff] failed to connect to old daemon: {}", e);
-            // Old daemon might be stuck — kill it
-            unsafe { libc::kill(old_pid, libc::SIGTERM) };
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             return vec![];
         }
     };
@@ -210,7 +211,6 @@ async fn attempt_handoff(
         Ok(Ok(_)) => {}
         _ => {
             log::info!("[handoff] timeout or error reading handoff response");
-            unsafe { libc::kill(old_pid, libc::SIGTERM) };
             return vec![];
         }
     }
@@ -294,16 +294,7 @@ async fn wait_for_exit(pid: i32) {
             return;
         }
     }
-    log::info!(
-        "[handoff] old daemon (pid={}) didn't exit, sending SIGTERM",
-        pid
-    );
-    unsafe { libc::kill(pid, libc::SIGTERM) };
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    if unsafe { libc::kill(pid, 0) } == 0 {
-        log::info!("[handoff] old daemon still alive, sending SIGKILL");
-        unsafe { libc::kill(pid, libc::SIGKILL) };
-    }
+    log::info!("[handoff] old daemon (pid={}) still running after 2s", pid);
 }
 
 async fn handle_connection(
