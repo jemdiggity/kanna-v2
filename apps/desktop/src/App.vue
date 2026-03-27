@@ -57,6 +57,7 @@ const shortcutsContext = ref<ShortcutContext>("main");
 const showFilePickerModal = ref(false);
 const showFilePreviewModal = ref(false);
 const previewFilePath = ref("");
+const previewInitialLine = ref<number | undefined>(undefined);
 const showDiffModal = ref(false);
 const showTreeExplorer = ref(false);
 const activeWorktreePath = computed(() =>
@@ -675,6 +676,13 @@ onMounted(async () => {
     try { commandUsageCounts.value = JSON.parse(raw); }
     catch (e) { console.error("[App] corrupt commandPaletteUsage setting:", e); }
   }
+
+  document.addEventListener("file-link-activate", (e: Event) => {
+    const detail = (e as CustomEvent).detail as { path: string; line?: number };
+    previewFilePath.value = detail.path;
+    previewInitialLine.value = detail.line;
+    showFilePreviewModal.value = true;
+  });
 });
 </script>
 
@@ -776,7 +784,7 @@ onMounted(async () => {
       v-if="showFilePickerModal && store.selectedRepo?.path"
       :worktree-path="activeWorktreePath"
       @close="showFilePickerModal = false"
-      @select="(f: string) => { showFilePickerModal = false; previewFilePath = f; showFilePreviewModal = true; }"
+      @select="(f: string) => { showFilePickerModal = false; previewFilePath = f; previewInitialLine = undefined; showFilePreviewModal = true; }"
     />
     <TreeExplorerModal
       ref="treeExplorerRef"
@@ -785,7 +793,7 @@ onMounted(async () => {
       :repo-root="activeWorktreePath"
       :suspended="showFilePreviewModal"
       @close="showTreeExplorer = false"
-      @open-file="(f: string) => { previewFilePath = f; showFilePreviewModal = true; }"
+      @open-file="(f: string) => { previewFilePath = f; previewInitialLine = undefined; showFilePreviewModal = true; }"
     />
     <FilePreviewModal
       ref="filePreviewRef"
@@ -793,6 +801,7 @@ onMounted(async () => {
       :file-path="previewFilePath"
       :worktree-path="activeWorktreePath"
       :ide-command="store.ideCommand"
+      :initial-line="previewInitialLine"
       :maximized="maximizedModal === 'file'"
       @close="showFilePreviewModal = false; maximizedModal = null"
     />

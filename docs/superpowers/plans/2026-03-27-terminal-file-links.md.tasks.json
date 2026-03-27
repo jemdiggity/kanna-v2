@@ -1,0 +1,40 @@
+{
+  "planPath": "docs/superpowers/plans/2026-03-27-terminal-file-links.md",
+  "tasks": [
+    {
+      "id": 4,
+      "subject": "Task 1: File Link Provider in useTerminal",
+      "status": "pending",
+      "description": "**Goal:** Register a custom link provider that detects relative file paths in terminal output, validates them on hover, and activates on Cmd+click.\n\n**Files:**\n- Modify: `apps/desktop/src/composables/useTerminal.ts`\n\n**Acceptance Criteria:**\n- [ ] Relative paths with extensions and at least one `/` are detected\n- [ ] Paths are validated via `file_exists` before being offered as links\n- [ ] Validation results are cached per terminal instance\n- [ ] Only Cmd+click activates the link\n- [ ] A `file-link-activate` CustomEvent is dispatched on the terminal container\n- [ ] Tooltip shows \"Open preview (Cmd+click)\" on hover\n- [ ] Link provider is only registered when `worktreePath` is provided\n- [ ] Cache is cleared on dispose\n\n**Verify:** `cd apps/desktop && bun tsc --noEmit`\n\n```json:metadata\n{\"files\": [\"apps/desktop/src/composables/useTerminal.ts\"], \"verifyCommand\": \"cd apps/desktop && bun tsc --noEmit\", \"acceptanceCriteria\": [\"file paths detected\", \"validation on hover\", \"cache\", \"cmd+click activation\", \"custom event dispatch\", \"tooltip\", \"conditional registration\", \"cache cleared on dispose\"]}\n```"
+    },
+    {
+      "id": 5,
+      "subject": "Task 2: Thread worktreePath through components",
+      "status": "pending",
+      "blockedBy": [4],
+      "description": "**Goal:** Pass `worktreePath` from TerminalTabs through TerminalView to `useTerminal`.\n\n**Files:**\n- Modify: `apps/desktop/src/components/TerminalView.vue`\n- Modify: `apps/desktop/src/components/TerminalTabs.vue`\n\n**Acceptance Criteria:**\n- [ ] TerminalView accepts a `worktreePath` prop\n- [ ] TerminalView passes it to `useTerminal` via `options.worktreePath`\n- [ ] TerminalTabs passes `worktreePath` from session config to TerminalView\n\n**Verify:** `cd apps/desktop && bun tsc --noEmit`\n\n```json:metadata\n{\"files\": [\"apps/desktop/src/components/TerminalView.vue\", \"apps/desktop/src/components/TerminalTabs.vue\"], \"verifyCommand\": \"cd apps/desktop && bun tsc --noEmit\", \"acceptanceCriteria\": [\"TerminalView prop added\", \"passed to useTerminal\", \"TerminalTabs passes through\"]}\n```"
+    },
+    {
+      "id": 6,
+      "subject": "Task 3: Wire App.vue to open file preview from terminal links",
+      "status": "pending",
+      "blockedBy": [4, 5],
+      "description": "**Goal:** Catch the `file-link-activate` event and open the file preview modal at the indicated line.\n\n**Files:**\n- Modify: `apps/desktop/src/App.vue`\n\n**Acceptance Criteria:**\n- [ ] `file-link-activate` event opens file preview modal with correct path\n- [ ] `previewInitialLine` is set from event line number\n- [ ] `initialLine` prop passed to FilePreviewModal\n- [ ] Opening from file picker / tree explorer clears `initialLine`\n\n**Verify:** `cd apps/desktop && bun tsc --noEmit`\n\n```json:metadata\n{\"files\": [\"apps/desktop/src/App.vue\"], \"verifyCommand\": \"cd apps/desktop && bun tsc --noEmit\", \"acceptanceCriteria\": [\"event listener works\", \"initialLine set\", \"prop passed\", \"cleared from other sources\"]}\n```"
+    },
+    {
+      "id": 7,
+      "subject": "Task 4: Scroll-to-line and highlight in FilePreviewModal",
+      "status": "pending",
+      "blockedBy": [6],
+      "description": "**Goal:** When `initialLine` is provided, scroll to that line and highlight it.\n\n**Files:**\n- Modify: `apps/desktop/src/components/FilePreviewModal.vue`\n\n**Acceptance Criteria:**\n- [ ] `initialLine` prop accepted\n- [ ] After content loads, scrolls to center the target line\n- [ ] Target line gets highlight animation (1.5s fade)\n- [ ] Lines tagged with `data-line` via shiki transformer\n- [ ] No change when `initialLine` not provided\n- [ ] Line numbers auto-enabled when `initialLine` provided\n\n**Verify:** `cd apps/desktop && bun tsc --noEmit`\n\n```json:metadata\n{\"files\": [\"apps/desktop/src/components/FilePreviewModal.vue\"], \"verifyCommand\": \"cd apps/desktop && bun tsc --noEmit\", \"acceptanceCriteria\": [\"prop accepted\", \"scroll to line\", \"highlight animation\", \"data-line attributes\", \"unchanged without prop\", \"auto line numbers\"]}\n```"
+    },
+    {
+      "id": 8,
+      "subject": "Task 5: Type check and final verification",
+      "status": "pending",
+      "blockedBy": [4, 5, 6, 7],
+      "description": "**Goal:** Run type checks and fix any issues across all changed files.\n\n**Acceptance Criteria:**\n- [ ] `bun tsc --noEmit` passes\n- [ ] HTTP/HTTPS links still work\n- [ ] Shell modals unaffected\n\n**Verify:** `cd apps/desktop && bun tsc --noEmit`\n\n```json:metadata\n{\"files\": [], \"verifyCommand\": \"cd apps/desktop && bun tsc --noEmit\", \"acceptanceCriteria\": [\"type check passes\", \"URL links work\", \"shell modals unaffected\"]}\n```"
+    }
+  ],
+  "lastUpdated": "2026-03-27T00:00:00Z"
+}

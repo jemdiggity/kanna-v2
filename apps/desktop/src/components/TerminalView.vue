@@ -8,10 +8,11 @@ const props = defineProps<{
   spawnOptions?: SpawnOptions
   kittyKeyboard?: boolean
   agentProvider?: string
+  worktreePath?: string
 }>()
 
 const containerRef = ref<HTMLElement | null>(null)
-const { terminal, init, startListening, fit, fitDeferred, redraw, dispose } = useTerminal(props.sessionId, props.spawnOptions, { kittyKeyboard: props.kittyKeyboard, agentProvider: props.agentProvider })
+const { terminal, init, startListening, fit, fitDeferred, redraw, dispose } = useTerminal(props.sessionId, props.spawnOptions, { kittyKeyboard: props.kittyKeyboard, agentProvider: props.agentProvider, worktreePath: props.worktreePath })
 
 defineExpose({
   focus: () => terminal.value?.focus(),

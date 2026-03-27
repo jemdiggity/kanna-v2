@@ -15,6 +15,7 @@ const props = defineProps<{
   worktreePath: string;
   ideCommand?: string;
   maximized?: boolean;
+  initialLine?: number;
 }>();
 
 const emit = defineEmits<{ (e: "close"): void }>();
@@ -198,6 +199,9 @@ async function renderHighlighted(raw: string, lang: string, decos: typeof search
         pre(node: any) {
           node.properties.style = "white-space:pre-wrap;word-wrap:break-word;";
         },
+        line(node: any, lineNumber: number) {
+          node.properties["data-line"] = lineNumber;
+        },
       }],
     });
   } catch (e: unknown) {
@@ -234,6 +238,26 @@ watch(isSearching, (searching) => {
   if (searching) {
     nextTick(() => searchInputRef.value?.focus());
   }
+});
+
+let scrolledToLine = false;
+
+watch([loading, highlighted], async ([isLoading]) => {
+  if (isLoading || !props.initialLine || scrolledToLine) return;
+  scrolledToLine = true;
+
+  showLineNumbers.value = true;
+
+  await nextTick();
+  const el = contentRef.value?.querySelector(`[data-line="${props.initialLine}"]`) as HTMLElement | null;
+  if (!el) return;
+
+  const scrollContainer = contentRef.value!;
+  const lineTop = el.offsetTop;
+  const containerHeight = scrollContainer.clientHeight;
+  scrollContainer.scrollTop = lineTop - containerHeight / 2;
+
+  el.classList.add("line-highlight-flash");
 });
 
 function openInIDE() {
@@ -705,6 +729,15 @@ onMounted(() => {
   background: rgba(255, 200, 0, 0.55);
   border-radius: 2px;
   outline: 1px solid rgba(255, 200, 0, 0.8);
+}
+
+:deep(.line-highlight-flash) {
+  animation: line-flash 1.5s ease-out;
+}
+
+@keyframes line-flash {
+  0% { background-color: rgba(255, 255, 150, 0.15); }
+  100% { background-color: transparent; }
 }
 
 .maximized { background: none; }

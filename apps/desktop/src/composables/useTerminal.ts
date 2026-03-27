@@ -1,5 +1,5 @@
 import { ref, onUnmounted } from "vue"
-import { Terminal } from "@xterm/xterm"
+import { Terminal, type ILink } from "@xterm/xterm"
 import { FitAddon } from "@xterm/addon-fit"
 import { WebLinksAddon } from "@xterm/addon-web-links"
 import { ImageAddon } from "@xterm/addon-image"
@@ -19,6 +19,7 @@ export interface SpawnOptions {
 export interface TerminalOptions {
   kittyKeyboard?: boolean
   agentProvider?: string
+  worktreePath?: string
 }
 
 export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, options?: TerminalOptions) {
@@ -35,6 +36,35 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
       openUrl(uri).catch((e) => console.error("[terminal] Failed to open URL:", e))
     } else {
       window.open(uri, "_blank")
+    }
+  }
+
+  // --- File link provider ---
+  const FILE_PATH_RE = /(?:^|[\s"'`(])([a-zA-Z0-9_.\-][\w.\-/]*\/[\w.\-/]*\.[a-zA-Z0-9]+(?::\d+)?)/g
+  const fileExistsCache = new Map<string, boolean>()
+
+  function parseFileLink(raw: string): { path: string; line?: number } {
+    const colonIdx = raw.lastIndexOf(":")
+    if (colonIdx > 0) {
+      const maybeLine = raw.slice(colonIdx + 1)
+      if (/^\d+$/.test(maybeLine)) {
+        return { path: raw.slice(0, colonIdx), line: parseInt(maybeLine, 10) }
+      }
+    }
+    return { path: raw }
+  }
+
+  async function checkFileExists(relativePath: string): Promise<boolean> {
+    const worktreePath = options?.worktreePath
+    if (!worktreePath) return false
+    if (fileExistsCache.has(relativePath)) return fileExistsCache.get(relativePath)!
+    try {
+      const exists = await invoke<boolean>("file_exists", { path: `${worktreePath}/${relativePath}` })
+      fileExistsCache.set(relativePath, exists)
+      return exists
+    } catch {
+      fileExistsCache.set(relativePath, false)
+      return false
     }
   }
 
@@ -84,6 +114,81 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
       console.warn("[terminal] WebGL addon failed, falling back to DOM renderer:", e)
     }
     term.loadAddon(new ImageAddon())
+
+    if (options?.worktreePath) {
+      let tooltipEl: HTMLElement | null = null
+
+      term.registerLinkProvider({
+        provideLinks(bufferLineNumber: number, callback: (links: ILink[] | undefined) => void) {
+          const line = term.buffer.active.getLine(bufferLineNumber)
+          if (!line) { callback(undefined); return }
+          const lineText = line.translateToString(true)
+
+          const matches: { text: string; start: number; path: string }[] = []
+          FILE_PATH_RE.lastIndex = 0
+          let m: RegExpExecArray | null
+          while ((m = FILE_PATH_RE.exec(lineText)) !== null) {
+            const fullMatch = m[0]
+            const pathMatch = m[1]
+            const startOffset = m.index + (fullMatch.length - pathMatch.length)
+            const { path } = parseFileLink(pathMatch)
+            matches.push({ text: pathMatch, start: startOffset, path })
+          }
+
+          if (matches.length === 0) { callback(undefined); return }
+
+          Promise.all(matches.map(async (match) => {
+            const exists = await checkFileExists(match.path)
+            if (!exists) return null
+            const link: ILink = {
+              range: {
+                start: { x: match.start + 1, y: bufferLineNumber },
+                end: { x: match.start + match.text.length + 1, y: bufferLineNumber },
+              },
+              text: match.text,
+              activate(event: MouseEvent) {
+                if (!event.metaKey) return
+                const { path, line: lineNum } = parseFileLink(match.text)
+                container?.dispatchEvent(new CustomEvent("file-link-activate", {
+                  bubbles: true,
+                  detail: { path, line: lineNum },
+                }))
+              },
+              hover(event: MouseEvent) {
+                if (!term.element) return
+                tooltipEl = document.createElement("div")
+                tooltipEl.className = "xterm-hover"
+                tooltipEl.textContent = "Open preview (\u2318+click)"
+                tooltipEl.style.cssText = `
+                  position: fixed;
+                  left: ${event.clientX + 8}px;
+                  top: ${event.clientY - 28}px;
+                  background: #252525;
+                  color: #ccc;
+                  font-size: 11px;
+                  padding: 2px 6px;
+                  border-radius: 3px;
+                  border: 1px solid #444;
+                  pointer-events: none;
+                  z-index: 10000;
+                  font-family: "SF Mono", Menlo, monospace;
+                `
+                term.element.appendChild(tooltipEl)
+              },
+              leave() {
+                tooltipEl?.remove()
+                tooltipEl = null
+              },
+            }
+            return link
+          })).then((links) => {
+            const valid = links.filter((l): l is ILink => l !== null)
+            callback(valid.length > 0 ? valid : undefined)
+          })
+        },
+      })
+    }
+
     term.open(container)
 
     // Push kitty keyboard mode so Shift+Enter sends CSI 13;2 u instead of bare CR.
@@ -241,6 +346,7 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
 
   function dispose() {
     attached = false
+    fileExistsCache.clear()
     if (fitRafId) cancelAnimationFrame(fitRafId)
     if (unlistenOutput) unlistenOutput()
     if (unlistenExit) unlistenExit()
