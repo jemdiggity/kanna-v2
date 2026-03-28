@@ -67,6 +67,8 @@ const showFilePickerModal = ref(false);
 const showFilePreviewModal = ref(false);
 const previewFilePath = ref("");
 const previewInitialLine = ref<number | undefined>(undefined);
+const previewHidden = ref(false);
+const previewFromPicker = ref(false);
 const showDiffModal = ref(false);
 const showTreeExplorer = ref(false);
 const activeWorktreePath = computed(() =>
@@ -418,7 +420,10 @@ const keyboardActions = {
   openFile: () => {
     if (showFilePreviewModal.value) {
       showFilePreviewModal.value = false;
-      showFilePickerModal.value = true;
+      previewHidden.value = true;
+    } else if (previewHidden.value) {
+      showFilePreviewModal.value = true;
+      previewHidden.value = false;
     } else {
       showFilePickerModal.value = !showFilePickerModal.value;
     }
@@ -784,6 +789,8 @@ onMounted(async () => {
     previewFilePath.value = detail.path;
     previewInitialLine.value = detail.line;
     showFilePreviewModal.value = true;
+    previewFromPicker.value = false;
+    previewHidden.value = false;
   });
 });
 </script>
@@ -891,7 +898,7 @@ onMounted(async () => {
       v-if="showFilePickerModal && !isMobile && store.selectedRepo?.path"
       :worktree-path="activeWorktreePath"
       @close="showFilePickerModal = false"
-      @select="(f: string) => { showFilePickerModal = false; previewFilePath = f; previewInitialLine = undefined; showFilePreviewModal = true; }"
+      @select="(f: string) => { showFilePickerModal = false; previewFilePath = f; previewInitialLine = undefined; showFilePreviewModal = true; previewFromPicker = true; previewHidden = false; }"
     />
     <TreeExplorerModal
       ref="treeExplorerRef"
@@ -900,7 +907,7 @@ onMounted(async () => {
       :repo-root="activeWorktreePath"
       :suspended="showFilePreviewModal"
       @close="showTreeExplorer = false"
-      @open-file="(f: string) => { previewFilePath = f; previewInitialLine = undefined; showFilePreviewModal = true; }"
+      @open-file="(f: string) => { previewFilePath = f; previewInitialLine = undefined; showFilePreviewModal = true; previewFromPicker = false; previewHidden = false; }"
     />
     <FilePreviewModal
       ref="filePreviewRef"
@@ -910,7 +917,7 @@ onMounted(async () => {
       :ide-command="store.ideCommand"
       :initial-line="previewInitialLine"
       :maximized="maximizedModal === 'file'"
-      @close="showFilePreviewModal = false; maximizedModal = null"
+      @close="showFilePreviewModal = false; maximizedModal = null; previewHidden = false; if (previewFromPicker) { showFilePickerModal = true; previewFromPicker = false; }"
     />
     <AnalyticsModal
       v-if="showAnalyticsModal"
