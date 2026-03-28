@@ -47,14 +47,13 @@ const {
   loading,
   error,
   slideDirection,
-  open,
   handleKey,
   currentFilePath,
   jumpToBreadcrumb,
   reset,
 } = useTreeExplorer(
-  () => props.worktreePath,
-  () => props.repoRoot
+  toRef(props, "worktreePath"),
+  toRef(props, "repoRoot")
 );
 
 async function onKeydown(e: KeyboardEvent) {
@@ -71,24 +70,21 @@ async function onKeydown(e: KeyboardEvent) {
   }
 
   if (e.key === "y") {
-    const path = currentFilePath();
-    if (path) {
+    if (currentFilePath.value) {
       e.preventDefault();
-      await navigator.clipboard.writeText(path);
+      await navigator.clipboard.writeText(currentFilePath.value);
       return;
     }
   }
 
-  const filePath = await handleKey(e);
+  const filePath = handleKey(e);
   if (filePath) {
     emit("open-file", filePath);
   }
 }
 
-onMounted(async () => {
-  await open();
-  await nextTick();
-  modalRef.value?.focus();
+onMounted(() => {
+  nextTick(() => modalRef.value?.focus());
 });
 
 onUnmounted(() => {

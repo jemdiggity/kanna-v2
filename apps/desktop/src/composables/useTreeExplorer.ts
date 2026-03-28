@@ -1,4 +1,5 @@
-import { ref, shallowRef } from "vue";
+import { ref, shallowRef, watch, type Ref, computed } from "vue";
+import { computedAsync, refDebounced } from "@vueuse/core";
 import { invoke } from "../invoke";
 import { useToast } from "./useToast";
 
@@ -20,52 +21,49 @@ export interface MillerState {
   breadcrumb: string[];
 }
 
-export function useTreeExplorer(rootPath: () => string, repoRoot: () => string) {
+export function useTreeExplorer(rootPath: Ref<string>, repoRoot: Ref<string>) {
   const cache = new Map<string, TreeNode[]>();
-  // When rootPath doesn't exist on disk (e.g. deleted worktree), fall back to repoRoot
   const fallbackRoot = ref<string | null>(null);
-  function effectiveRoot(): string {
-    return fallbackRoot.value ?? rootPath();
-  }
+  const effectiveRoot = computed(() => fallbackRoot.value ?? rootPath.value);
 
-  const state = ref<MillerState>({
-    columns: [[], [], []],
-    cursor: [0, 0, 0],
-    activeColumn: 1,
-    breadcrumb: [],
-  });
-
+  // ── User-driven state ──────────────────────────────────────────
+  const breadcrumb = ref<string[]>([]);
+  // Number = direct index, string = find entry by name (for cursor restore after navigateLeft)
+  const requestedCursor = ref<number | string>(0);
   const filterText = ref("");
   const filtering = ref(false);
-  const loading = ref(false);
+  const error = ref<string | null>(null);
   const slideDirection = shallowRef<"left" | "right" | null>(null);
-
-  // Pending g key for gg sequence
   const pendingG = ref(false);
   let pendingGTimer: ReturnType<typeof setTimeout> | null = null;
-
-  // Slide direction cleanup timer
   let slideTimer: ReturnType<typeof setTimeout> | null = null;
 
-  function clearSlideTimer() {
-    if (slideTimer !== null) {
-      clearTimeout(slideTimer);
-      slideTimer = null;
-    }
-  }
+  // ── Derived paths ──────────────────────────────────────────────
+  const currentDirAbs = computed(() => {
+    const root = effectiveRoot.value;
+    const bc = breadcrumb.value;
+    return bc.length === 0 ? root : `${root}/${bc.join("/")}`;
+  });
 
-  const error = ref<string | null>(null);
+  const parentDirAbs = computed(() => {
+    const bc = breadcrumb.value;
+    if (bc.length === 0) return null;
+    const root = effectiveRoot.value;
+    const parentBc = bc.slice(0, -1);
+    return parentBc.length === 0 ? root : `${root}/${parentBc.join("/")}`;
+  });
 
+  // ── Fetcher ────────────────────────────────────────────────────
   async function fetchDir(dirPath: string): Promise<TreeNode[]> {
     if (cache.has(dirPath)) return cache.get(dirPath)!;
 
     const entries = await invoke<DirEntryResponse[]>("read_dir_entries", {
       path: dirPath,
-      repoRoot: repoRoot(),
+      repoRoot: repoRoot.value,
     });
 
+    const root = effectiveRoot.value;
     const nodes: TreeNode[] = entries.map((e) => {
-      const root = effectiveRoot();
       const rel = dirPath === root
         ? e.name
         : dirPath.slice(root.length + 1) + "/" + e.name;
@@ -77,243 +75,162 @@ export function useTreeExplorer(rootPath: () => string, repoRoot: () => string) 
   }
 
   function absolutePath(relativePath: string): string {
-    return relativePath ? `${effectiveRoot()}/${relativePath}` : effectiveRoot();
+    return relativePath ? `${effectiveRoot.value}/${relativePath}` : effectiveRoot.value;
   }
 
-  function breadcrumbToAbsolute(segments: string[]): string {
-    return segments.length === 0
-      ? effectiveRoot()
-      : `${effectiveRoot()}/${segments.join("/")}`;
-  }
+  // ── Reactive columns ───────────────────────────────────────────
+  const loading = ref(false);
 
-  async function prefetch(node: TreeNode) {
-    if (!node.isDir) return;
-    const absPath = absolutePath(node.path);
-    if (!cache.has(absPath)) {
-      fetchDir(absPath).catch(() => {
-      // Prefetch is best-effort — failure is non-fatal
-    });
+  const currentEntries = computedAsync(
+    async () => {
+      const dir = currentDirAbs.value;
+      if (!dir) return [];
+      try {
+        return await fetchDir(dir);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        const rr = repoRoot.value;
+        if (!fallbackRoot.value && effectiveRoot.value !== rr && rr) {
+          console.warn("[tree-explorer] rootPath unavailable, falling back to repo root");
+          useToast().warning("Worktree missing — showing repo root");
+          fallbackRoot.value = rr;
+          return [];
+        }
+        error.value = msg;
+        console.error("[tree-explorer] fetch failed:", msg);
+        return [];
+      }
+    },
+    [],
+    loading,
+  );
+
+  const parentEntries = computedAsync(
+    async () => {
+      const dir = parentDirAbs.value;
+      if (!dir) return [];
+      try {
+        return await fetchDir(dir);
+      } catch {
+        return [];
+      }
+    },
+    [],
+  );
+
+  // Resolve requestedCursor against loaded entries
+  const cursorIndex = computed(() => {
+    const req = requestedCursor.value;
+    const entries = currentEntries.value;
+    if (typeof req === "string") {
+      const idx = entries.findIndex((e) => e.name === req);
+      return idx >= 0 ? idx : 0;
     }
-  }
+    return Math.min(req, Math.max(0, entries.length - 1));
+  });
 
-  async function open(initialPath?: string) {
-    const startPath = initialPath ?? effectiveRoot();
-    const bc = startPath === effectiveRoot()
-      ? []
-      : startPath.replace(effectiveRoot() + "/", "").split("/");
+  const selectedEntry = computed(() => currentEntries.value[cursorIndex.value] ?? null);
 
-    state.value.breadcrumb = bc;
-    loading.value = true;
+  // Debounce cursor for preview so rapid j/k doesn't spam fetches
+  const debouncedCursor = refDebounced(cursorIndex, 50);
+  const previewEntry = computed(() => currentEntries.value[debouncedCursor.value] ?? null);
+
+  const previewEntries = computedAsync(
+    async () => {
+      const entry = previewEntry.value;
+      if (!entry?.isDir) return [];
+      try {
+        return await fetchDir(absolutePath(entry.path));
+      } catch {
+        return [];
+      }
+    },
+    [],
+  );
+
+  // ── Derived cursors ────────────────────────────────────────────
+  const parentCursor = computed(() => {
+    const bc = breadcrumb.value;
+    if (bc.length === 0) return 0;
+    const idx = parentEntries.value.findIndex((e) => e.name === bc[bc.length - 1]);
+    return idx >= 0 ? idx : 0;
+  });
+
+  // ── Assembled state (for template) ─────────────────────────────
+  const state = computed<MillerState>(() => ({
+    columns: [parentEntries.value, currentEntries.value, previewEntries.value],
+    cursor: [parentCursor.value, cursorIndex.value, 0],
+    activeColumn: 1,
+    breadcrumb: breadcrumb.value,
+  }));
+
+  // ── Reset on root change ───────────────────────────────────────
+  watch(rootPath, () => {
+    breadcrumb.value = [];
+    requestedCursor.value = 0;
+    filterText.value = "";
+    filtering.value = false;
     error.value = null;
+    cache.clear();
+    fallbackRoot.value = null;
+  });
 
-    try {
-      const currentAbs = breadcrumbToAbsolute(bc);
-      const currentEntries = await fetchDir(currentAbs);
-
-      // Parent column
-      let parentEntries: TreeNode[] = [];
-      if (bc.length > 0) {
-        const parentBc = bc.slice(0, -1);
-        const parentAbs = breadcrumbToAbsolute(parentBc);
-        parentEntries = await fetchDir(parentAbs);
-      }
-
-      // Preview column (first dir entry's children, or first entry)
-      let previewEntries: TreeNode[] = [];
-      const firstDir = currentEntries.find((e) => e.isDir);
-      if (firstDir) {
-        previewEntries = await fetchDir(absolutePath(firstDir.path));
-      }
-
-      state.value.columns = [parentEntries, currentEntries, previewEntries];
-      state.value.cursor = [
-        // Parent cursor: index of current dir in parent
-        bc.length > 0
-          ? parentEntries.findIndex((e) => e.name === bc[bc.length - 1])
-          : 0,
-        0,
-        0,
-      ];
-      state.value.activeColumn = 1;
-      filterText.value = "";
-
-      // Prefetch one level ahead for visible dirs
-      for (const entry of currentEntries.slice(0, 20)) {
-        prefetch(entry);
-      }
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      // If the browse root doesn't exist and repo root is different, fall back
-      const rr = repoRoot();
-      if (!fallbackRoot.value && effectiveRoot() !== rr && rr) {
-        console.warn("[tree-explorer] rootPath unavailable, falling back to repo root");
-        useToast().warning("Worktree missing — showing repo root");
-        fallbackRoot.value = rr;
-        loading.value = false;
-        return open();
-      }
-      error.value = msg;
-      console.error("[tree-explorer] open failed:", msg);
-    } finally {
-      loading.value = false;
+  // ── Navigation ─────────────────────────────────────────────────
+  function clearSlideTimer() {
+    if (slideTimer !== null) {
+      clearTimeout(slideTimer);
+      slideTimer = null;
     }
   }
 
-  async function navigateRight(): Promise<string | null> {
-    const col = state.value.columns[1];
-    const idx = state.value.cursor[1];
-    const entry = col?.[idx];
-    if (!entry) return null;
-
-    if (!entry.isDir) {
-      // Return file path for opening
-      return entry.path;
-    }
-
-    // Enter directory
-    slideDirection.value = "left";
-    const newBc = [...state.value.breadcrumb, entry.name];
-
-    try {
-      const newCurrentAbs = absolutePath(entry.path);
-      const newCurrentEntries = await fetchDir(newCurrentAbs);
-
-      // Only update breadcrumb after successful fetch
-      state.value.breadcrumb = newBc;
-
-      // Current becomes parent, preview becomes current
-      const oldCurrent = state.value.columns[1];
-      const oldCursorIdx = state.value.cursor[1];
-
-      let previewEntries: TreeNode[] = [];
-      const firstDir = newCurrentEntries.find((e) => e.isDir);
-      if (firstDir) {
-        previewEntries = await fetchDir(absolutePath(firstDir.path));
-      }
-
-      state.value.columns = [oldCurrent, newCurrentEntries, previewEntries];
-      state.value.cursor = [oldCursorIdx, 0, 0];
-      filterText.value = "";
-
-      // Prefetch
-      for (const e of newCurrentEntries.slice(0, 20)) {
-        prefetch(e);
-      }
-    } catch (e) {
-      slideDirection.value = null;
-      const msg = e instanceof Error ? e.message : String(e);
-      error.value = msg;
-      console.error("[tree-explorer] navigateRight failed:", msg);
-      return null;
-    }
-
-    // Clear slide direction after animation
+  function triggerSlide(dir: "left" | "right") {
+    slideDirection.value = dir;
     clearSlideTimer();
     slideTimer = setTimeout(() => { slideDirection.value = null; }, 200);
+  }
+
+  function navigateRight(): string | null {
+    const entry = selectedEntry.value;
+    if (!entry) return null;
+    if (!entry.isDir) return entry.path;
+
+    triggerSlide("left");
+    breadcrumb.value = [...breadcrumb.value, entry.name];
+    requestedCursor.value = 0;
+    filterText.value = "";
     return null;
   }
 
-  async function navigateLeft() {
-    if (state.value.breadcrumb.length === 0) return;
+  function navigateLeft() {
+    if (breadcrumb.value.length === 0) return;
 
-    slideDirection.value = "right";
-    // Capture the dir name we're leaving BEFORE mutating breadcrumb
-    const leavingDirName = state.value.breadcrumb[state.value.breadcrumb.length - 1];
-    const newBc = state.value.breadcrumb.slice(0, -1);
-
-    try {
-      // Parent becomes new current
-      const newCurrentAbs = breadcrumbToAbsolute(newBc);
-      const newCurrentEntries = await fetchDir(newCurrentAbs);
-
-      // Fetch new parent
-      let newParentEntries: TreeNode[] = [];
-      if (newBc.length > 0) {
-        const parentBc = newBc.slice(0, -1);
-        newParentEntries = await fetchDir(breadcrumbToAbsolute(parentBc));
-      }
-
-      // Only update breadcrumb after successful fetch
-      state.value.breadcrumb = newBc;
-
-      // Old current becomes preview (the column we just left)
-      const oldCurrent = state.value.columns[1];
-
-      // Restore cursor to the directory we just navigated out of
-      const restoredIdx = newCurrentEntries.findIndex((e) => e.name === leavingDirName);
-
-      state.value.columns = [newParentEntries, newCurrentEntries, oldCurrent];
-      state.value.cursor = [
-        newBc.length > 0
-          ? newParentEntries.findIndex((e) => e.name === newBc[newBc.length - 1])
-          : 0,
-        restoredIdx >= 0 ? restoredIdx : 0,
-        0,
-      ];
-      filterText.value = "";
-    } catch (e) {
-      slideDirection.value = null;
-      const msg = e instanceof Error ? e.message : String(e);
-      error.value = msg;
-      console.error("[tree-explorer] navigateLeft failed:", msg);
-      return;
-    }
-
-    clearSlideTimer();
-    slideTimer = setTimeout(() => { slideDirection.value = null; }, 200);
+    triggerSlide("right");
+    requestedCursor.value = breadcrumb.value[breadcrumb.value.length - 1];
+    breadcrumb.value = breadcrumb.value.slice(0, -1);
+    filterText.value = "";
   }
 
-  // Debounced preview update — only fires after cursor rests for 50ms
-  let previewTimer: ReturnType<typeof setTimeout> | null = null;
-  let previewSeq = 0;
-
-  function updatePreview(entry: TreeNode | undefined) {
-    if (previewTimer) clearTimeout(previewTimer);
-    const seq = ++previewSeq;
-
-    previewTimer = setTimeout(() => {
-      if (seq !== previewSeq) return;
-
-      if (entry?.isDir) {
-        fetchDir(absolutePath(entry.path)).then((previewEntries) => {
-          if (seq === previewSeq) {
-            state.value.columns[2] = previewEntries;
-            state.value.cursor[2] = 0;
-          }
-        }).catch(() => {
-          // Preview fetch is best-effort
-        });
-      } else {
-        state.value.columns[2] = [];
-        state.value.cursor[2] = 0;
-      }
-    }, 50);
-  }
-
+  // ── Filter / cursor helpers ────────────────────────────────────
   function isVisible(entry: TreeNode): boolean {
     if (!filterText.value) return true;
     return entry.name.toLowerCase().includes(filterText.value.toLowerCase());
   }
 
   function snapCursorToFirstVisible() {
-    const col = state.value.columns[1];
+    const col = currentEntries.value;
     if (!col?.length) return;
     const idx = col.findIndex((e) => isVisible(e));
-    if (idx >= 0) {
-      state.value.cursor[1] = idx;
-      updatePreview(col[idx]);
-    }
+    if (idx >= 0) requestedCursor.value = idx;
   }
 
   function moveCursor(delta: number) {
-    const col = state.value.columns[1];
+    const col = currentEntries.value;
     if (!col?.length) return;
 
-    const current = state.value.cursor[1];
+    const current = cursorIndex.value;
     let next = current;
 
     if (filterText.value) {
-      // Skip dimmed entries — find next visible item in the given direction
       const step = delta > 0 ? 1 : -1;
       let candidate = current + step;
       while (candidate >= 0 && candidate < col.length) {
@@ -327,54 +244,37 @@ export function useTreeExplorer(rootPath: () => string, repoRoot: () => string) 
       next = Math.max(0, Math.min(col.length - 1, current + delta));
     }
 
-    state.value.cursor[1] = next;
-    updatePreview(col[next]);
+    requestedCursor.value = next;
   }
 
   function jumpTop() {
-    const col = state.value.columns[1];
+    const col = currentEntries.value;
     if (!col?.length) return;
-    // Find first visible item
-    const idx = filterText.value
-      ? col.findIndex((e) => isVisible(e))
-      : 0;
-    if (idx >= 0) {
-      state.value.cursor[1] = idx;
-      updatePreview(col[idx]);
-    }
+    const idx = filterText.value ? col.findIndex((e) => isVisible(e)) : 0;
+    if (idx >= 0) requestedCursor.value = idx;
   }
 
   function jumpBottom() {
-    const col = state.value.columns[1];
+    const col = currentEntries.value;
     if (!col?.length) return;
-    // Find last visible item
     let idx = col.length - 1;
     if (filterText.value) {
       for (let i = col.length - 1; i >= 0; i--) {
         if (isVisible(col[i])) { idx = i; break; }
       }
     }
-    state.value.cursor[1] = idx;
-    updatePreview(col[idx]);
+    requestedCursor.value = idx;
   }
 
-  async function jumpToBreadcrumb(index: number) {
-    const newBc = state.value.breadcrumb.slice(0, index);
-    // Re-open at that level
-    const targetPath = newBc.length === 0 ? effectiveRoot() : `${effectiveRoot()}/${newBc.join("/")}`;
-    await open(targetPath);
+  function jumpToBreadcrumb(index: number) {
+    breadcrumb.value = breadcrumb.value.slice(0, index);
+    requestedCursor.value = 0;
   }
 
-  function currentFilePath(): string | null {
-    const col = state.value.columns[1];
-    const idx = state.value.cursor[1];
-    const entry = col?.[idx];
-    return entry?.path ?? null;
-  }
+  const currentFilePath = computed(() => selectedEntry.value?.path ?? null);
 
-  /** Handle a key event. Returns file path string if a file should be opened, null otherwise. */
-  async function handleKey(e: KeyboardEvent): Promise<string | null> {
-    // --- Filter mode: intercept keys when filtering is active ---
+  // ── Keyboard handler ───────────────────────────────────────────
+  function handleKey(e: KeyboardEvent): string | null {
     if (filtering.value) {
       if (e.key === "Escape") {
         e.preventDefault();
@@ -383,7 +283,6 @@ export function useTreeExplorer(rootPath: () => string, repoRoot: () => string) 
         return null;
       }
       if (e.key === "Enter") {
-        // Confirm filter and return to navigation
         e.preventDefault();
         filtering.value = false;
         return null;
@@ -398,7 +297,6 @@ export function useTreeExplorer(rootPath: () => string, repoRoot: () => string) 
         }
         return null;
       }
-      // Printable characters append to filter and snap cursor to first match
       if (e.key.length === 1 && !e.metaKey && !e.ctrlKey && !e.altKey) {
         e.preventDefault();
         filterText.value += e.key;
@@ -407,8 +305,6 @@ export function useTreeExplorer(rootPath: () => string, repoRoot: () => string) 
       }
       return null;
     }
-
-    // --- Normal navigation mode ---
 
     // gg sequence
     if (pendingG.value) {
@@ -437,16 +333,15 @@ export function useTreeExplorer(rootPath: () => string, repoRoot: () => string) 
       case "Enter":
         e.preventDefault();
         filterText.value = "";
-        return await navigateRight();
+        return navigateRight();
       case "h":
       case "ArrowLeft":
         e.preventDefault();
         filterText.value = "";
-        await navigateLeft();
+        navigateLeft();
         return null;
       case "y":
         e.preventDefault();
-        // Yank path handled by component (needs clipboard API)
         return null;
       case "g":
         if (!e.shiftKey) {
@@ -473,23 +368,19 @@ export function useTreeExplorer(rootPath: () => string, repoRoot: () => string) 
 
   function reset() {
     clearSlideTimer();
-    if (previewTimer) { clearTimeout(previewTimer); previewTimer = null; }
     if (pendingGTimer !== null) {
       clearTimeout(pendingGTimer);
       pendingGTimer = null;
     }
-    state.value = {
-      columns: [[], [], []],
-      cursor: [0, 0, 0],
-      activeColumn: 1,
-      breadcrumb: [],
-    };
+    breadcrumb.value = [];
+    requestedCursor.value = 0;
     filterText.value = "";
     filtering.value = false;
     cache.clear();
     fallbackRoot.value = null;
     slideDirection.value = null;
     pendingG.value = false;
+    error.value = null;
   }
 
   return {
@@ -499,7 +390,6 @@ export function useTreeExplorer(rootPath: () => string, repoRoot: () => string) 
     loading,
     error,
     slideDirection,
-    open,
     handleKey,
     currentFilePath,
     jumpToBreadcrumb,
