@@ -23,6 +23,13 @@ pub struct GraphCommit {
     pub author: String,
     pub timestamp: i64,
     pub parents: Vec<String>,
+    pub refs: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct GraphResult {
+    pub commits: Vec<GraphCommit>,
+    pub head_commit: Option<String>,
 }
 
 #[tauri::command]
@@ -136,14 +143,62 @@ pub fn git_log(repo_path: String, base: String, head: String) -> Result<Vec<Comm
 }
 
 #[tauri::command]
-pub fn git_graph(repo_path: String, max_count: Option<usize>) -> Result<Vec<GraphCommit>, String> {
+pub fn git_graph(
+    repo_path: String,
+    max_count: Option<usize>,
+    from_ref: Option<String>,
+) -> Result<GraphResult, String> {
     let repo = Repository::open(&repo_path).map_err(|e| e.to_string())?;
 
+    // Build ref map: oid -> list of human-readable ref names
+    let mut ref_map: std::collections::HashMap<git2::Oid, Vec<String>> =
+        std::collections::HashMap::new();
+    for reference in repo.references().map_err(|e| e.to_string())? {
+        let reference = match reference {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        let name = match reference.name() {
+            Some(n) => n.to_string(),
+            None => continue,
+        };
+        // Resolve to the commit oid (peel through annotated tags)
+        let oid = match reference.peel_to_commit() {
+            Ok(c) => c.id(),
+            Err(_) => continue,
+        };
+        let display = if let Some(rest) = name.strip_prefix("refs/heads/") {
+            rest.to_string()
+        } else if let Some(rest) = name.strip_prefix("refs/remotes/") {
+            rest.to_string()
+        } else if let Some(rest) = name.strip_prefix("refs/tags/") {
+            rest.to_string()
+        } else {
+            continue;
+        };
+        ref_map.entry(oid).or_default().push(display);
+    }
+
+    // Resolve HEAD
+    let head_commit = repo
+        .head()
+        .ok()
+        .and_then(|h| h.peel_to_commit().ok())
+        .map(|c| c.id().to_string());
+
+    // Walk commits
     let mut revwalk = repo.revwalk().map_err(|e| e.to_string())?;
-    revwalk
-        .push_glob("refs/heads/*")
-        .map_err(|e| e.to_string())?;
-    let _ = revwalk.push_glob("refs/remotes/*");
+    if let Some(ref from) = from_ref {
+        let obj = repo
+            .revparse_single(from)
+            .map_err(|e| format!("bad ref '{}': {}", from, e))?;
+        revwalk.push(obj.id()).map_err(|e| e.to_string())?;
+    } else {
+        revwalk
+            .push_glob("refs/heads/*")
+            .map_err(|e| e.to_string())?;
+        let _ = revwalk.push_glob("refs/remotes/*");
+    }
 
     revwalk
         .set_sorting(git2::Sort::TOPOLOGICAL | git2::Sort::TIME)
@@ -170,6 +225,7 @@ pub fn git_graph(repo_path: String, max_count: Option<usize>) -> Result<Vec<Grap
         let hash = oid.to_string();
         let short_hash = hash[..7.min(hash.len())].to_string();
         let parents = commit.parent_ids().map(|p| p.to_string()).collect();
+        let refs = ref_map.remove(&oid).unwrap_or_default();
 
         commits.push(GraphCommit {
             hash,
@@ -178,10 +234,14 @@ pub fn git_graph(repo_path: String, max_count: Option<usize>) -> Result<Vec<Grap
             author,
             timestamp,
             parents,
+            refs,
         });
     }
 
-    Ok(commits)
+    Ok(GraphResult {
+        commits,
+        head_commit,
+    })
 }
 
 #[tauri::command]
