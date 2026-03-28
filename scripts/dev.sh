@@ -111,6 +111,17 @@ MEOF
 }
 
 start() {
+  # SAFETY: never run the dev server against the production database
+  local _db="${KANNA_DB_NAME:-kanna-v2.db}"
+  if [ -n "$KANNA_WORKTREE" ]; then
+    _db="kanna-wt-$(basename "$ROOT").db"
+  fi
+  if [ "$_db" = "kanna-v2.db" ]; then
+    echo "REFUSED: dev.sh will not start against the production database (kanna-v2.db)."
+    echo "Run from a worktree, or set KANNA_DB_NAME to a non-production name."
+    exit 1
+  fi
+
   if tmux has-session -t "$SESSION" 2>/dev/null; then
     echo "Session '$SESSION' already running. Use 'restart' or 'stop'."
     exit 1
