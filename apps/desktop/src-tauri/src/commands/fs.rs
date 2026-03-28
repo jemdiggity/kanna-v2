@@ -199,8 +199,11 @@ pub fn read_dir_entries(path: String, repo_root: String) -> Result<Vec<DirEntry>
         let entry_path = entry.path();
         let is_dir = entry_path.is_dir();
 
-        // Check gitignore — pass the full path and whether it's a directory
-        let matched = gitignore.matched_path_or_any_parents(&entry_path, is_dir);
+        // Check gitignore for this entry only — not ancestors. The tree
+        // explorer already hides ignored directories so users can't navigate
+        // into them; checking ancestors would incorrectly hide all worktree
+        // contents when the worktree sits under a gitignored path.
+        let matched = gitignore.matched(&entry_path, is_dir);
         if matched.is_ignore() {
             continue;
         }

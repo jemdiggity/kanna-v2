@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, nextTick, watch, toRef } from "vue";
+import { ref, computed, onMounted, onUnmounted, nextTick, watch, toRef } from "vue";
 import { useTreeExplorer, type TreeNode } from "../composables/useTreeExplorer";
 import { useShortcutContext, registerContextShortcuts } from "../composables/useShortcutContext";
 import { useModalZIndex } from "../composables/useModalZIndex";
@@ -22,8 +22,15 @@ defineExpose({ zIndex, bringToFront });
 const props = defineProps<{
   worktreePath: string;
   repoRoot: string;
+  homePath?: string;
   suspended?: boolean;
 }>();
+
+const rootLabel = computed(() => {
+  if (props.homePath && props.worktreePath === props.homePath) return "~";
+  const parts = props.worktreePath.split("/");
+  return parts[parts.length - 1] || props.worktreePath;
+});
 
 const emit = defineEmits<{
   (e: "close"): void;
@@ -40,14 +47,13 @@ const {
   loading,
   error,
   slideDirection,
-  open,
   handleKey,
   currentFilePath,
   jumpToBreadcrumb,
   reset,
 } = useTreeExplorer(
-  () => props.worktreePath,
-  () => props.repoRoot
+  toRef(props, "worktreePath"),
+  toRef(props, "repoRoot")
 );
 
 async function onKeydown(e: KeyboardEvent) {
@@ -64,24 +70,21 @@ async function onKeydown(e: KeyboardEvent) {
   }
 
   if (e.key === "y") {
-    const path = currentFilePath();
-    if (path) {
+    if (currentFilePath.value) {
       e.preventDefault();
-      await navigator.clipboard.writeText(path);
+      await navigator.clipboard.writeText(currentFilePath.value);
       return;
     }
   }
 
-  const filePath = await handleKey(e);
+  const filePath = handleKey(e);
   if (filePath) {
     emit("open-file", filePath);
   }
 }
 
-onMounted(async () => {
-  await open();
-  await nextTick();
-  modalRef.value?.focus();
+onMounted(() => {
+  nextTick(() => modalRef.value?.focus());
 });
 
 onUnmounted(() => {
@@ -126,7 +129,7 @@ function isDimmed(entry: TreeNode): boolean {
         <span
           class="breadcrumb-segment breadcrumb-root"
           @click="jumpToBreadcrumb(0)"
-        >~</span>
+        >{{ rootLabel }}</span>
         <template v-for="(seg, i) in state.breadcrumb" :key="i">
           <span class="breadcrumb-sep">/</span>
           <span

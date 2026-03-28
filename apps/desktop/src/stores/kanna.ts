@@ -207,7 +207,7 @@ export const useKannaStore = defineStore("kanna", () => {
   const currentItem = computed(() => {
     if (selectedItemId.value) {
       const item = items.value.find((i) => i.id === selectedItemId.value);
-      if (item && !isItemHidden(item)) return item;
+      if (item && !isItemHidden(item) && item.repo_id === selectedRepoId.value) return item;
     }
     // Auto-select first task in current repo if nothing valid is selected.
     // Skip items whose worktree/agent setup is still in progress — their
@@ -277,6 +277,7 @@ export const useKannaStore = defineStore("kanna", () => {
   // ── Actions: Selection ───────────────────────────────────────────
   async function selectRepo(repoId: string) {
     selectedRepoId.value = repoId;
+    selectedItemId.value = lastSelectedItemByRepo.value[repoId] ?? null;
     await setSetting(_db, "selected_repo_id", repoId);
   }
 
