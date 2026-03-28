@@ -204,7 +204,7 @@ function handleSubmit() {
 }
 
 function handleKeydown(e: KeyboardEvent) {
-  if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+  if (e.key === "Enter") {
     e.preventDefault();
     handleSubmit();
   }
