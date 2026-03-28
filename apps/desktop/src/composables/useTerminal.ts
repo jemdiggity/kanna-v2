@@ -31,6 +31,10 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
   let fitRafId = 0
   let attached = false
 
+  // Scroll-lock: when the user scrolls up, hold their viewport position
+  // instead of letting TUI redraws yank them to the top of the buffer.
+  let isFollowing = true
+
   function handleLinkActivate(_event: MouseEvent, uri: string) {
     if (isTauri) {
       openUrl(uri).catch((e) => console.error("[terminal] Failed to open URL:", e))
@@ -191,6 +195,24 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
 
     term.open(container)
 
+    // --- Scroll-lock tracking ---
+    const viewport = container.querySelector(".xterm-viewport") as HTMLElement | null
+    if (viewport) {
+      viewport.addEventListener("wheel", (e: WheelEvent) => {
+        if (e.deltaY < 0) {
+          // Scrolling up → user wants to browse history
+          isFollowing = false
+        }
+      })
+      viewport.addEventListener("scroll", () => {
+        // If the user scrolled to the bottom, re-enable following
+        const atBottom = viewport.scrollTop + viewport.clientHeight >= viewport.scrollHeight - 5
+        if (atBottom) {
+          isFollowing = true
+        }
+      })
+    }
+
     // Push kitty keyboard mode so Shift+Enter sends CSI 13;2u instead of bare CR.
     // vtExtensions.kittyKeyboard enables protocol support; this push activates it.
     if (options?.kittyKeyboard) {
@@ -253,6 +275,9 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
 
     // Send keystrokes to daemon
     term.onData((data) => {
+      // User typed — snap back to following latest output
+      isFollowing = true
+
       // DEBUG: log what xterm.js encodes for Enter/Shift+Enter
       if (options?.kittyKeyboard && (data === "\r" || data.includes("\x1b[13"))) {
         const core = (term as any)._core
@@ -297,15 +322,22 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
       (event) => {
         const sid = event.payload.session_id
         if ((sid === sessionId || sid === teardownId) && terminal.value) {
+          const savedY = isFollowing ? -1 : terminal.value.buffer.active.viewportY
+          const restore = () => {
+            if (savedY >= 0 && terminal.value) {
+              terminal.value.scrollToLine(savedY)
+            }
+          }
+
           if (event.payload.data_b64) {
             const binary = atob(event.payload.data_b64)
             const bytes = new Uint8Array(binary.length)
             for (let i = 0; i < binary.length; i++) {
               bytes[i] = binary.charCodeAt(i)
             }
-            terminal.value.write(bytes)
+            terminal.value.write(bytes, restore)
           } else if (Array.isArray(event.payload.data)) {
-            terminal.value.write(new Uint8Array(event.payload.data))
+            terminal.value.write(new Uint8Array(event.payload.data), restore)
           }
         }
       }
