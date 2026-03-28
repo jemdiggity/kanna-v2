@@ -208,9 +208,10 @@ pub fn daemon_socket_path() -> PathBuf {
 }
 
 /// Compute the kanna.sock path for the pipeline listener.
-/// Follows the same worktree isolation convention as daemon_data_dir().
+/// Uses short_socket_path to stay under macOS SUN_LEN (104 bytes).
 fn pipeline_socket_path() -> PathBuf {
-    daemon_data_dir().join("kanna.sock")
+    let dir = daemon_data_dir().join("pipeline");
+    short_socket_path(&dir)
 }
 
 /// Spawn a Unix socket listener at kanna.sock that accepts stage-complete
@@ -694,6 +695,8 @@ pub fn run() {
             commands::fs::list_dir,
             commands::fs::ensure_directory,
             commands::fs::read_dir_entries,
+            commands::fs::read_builtin_resource,
+            commands::fs::list_builtin_resources,
             // Shell commands
             commands::shell::run_script,
             commands::shell::ensure_term_init,

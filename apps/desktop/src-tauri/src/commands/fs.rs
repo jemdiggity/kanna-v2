@@ -48,6 +48,61 @@ pub async fn get_pipeline_socket_path(
         .ok_or_else(|| "pipeline socket path not initialized".to_string())
 }
 
+/// Resolve the built-in resources directory.
+/// In release builds: `$RESOURCE/` (inside the app bundle).
+/// In dev builds: walk up from cwd to find the repo root containing `.kanna/`.
+fn builtin_resource_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    // Check the bundled resource dir first (works in release builds)
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        if resource_dir.join(".kanna").is_dir() {
+            return Ok(resource_dir);
+        }
+    }
+
+    // Dev mode: walk up from cwd to find repo root with .kanna/
+    if let Ok(mut dir) = std::env::current_dir() {
+        for _ in 0..10 {
+            if dir.join(".kanna").is_dir() {
+                return Ok(dir);
+            }
+            if !dir.pop() {
+                break;
+            }
+        }
+    }
+
+    Err("could not find .kanna/ directory in resource dir or any parent of cwd".to_string())
+}
+
+/// Read a file from the app's bundled resources directory.
+/// `relative_path` is relative to the resources root (e.g., ".kanna/pipelines/default.json").
+#[tauri::command]
+pub fn read_builtin_resource(app: AppHandle, relative_path: String) -> Result<String, String> {
+    let base = builtin_resource_dir(&app)?;
+    let resource_path = base.join(&relative_path);
+    std::fs::read_to_string(&resource_path)
+        .map_err(|e| format!("failed to read resource '{}': {}", resource_path.display(), e))
+}
+
+/// List entries in a bundled resources subdirectory.
+/// `relative_path` is relative to the resources root (e.g., ".kanna/agents").
+#[tauri::command]
+pub fn list_builtin_resources(app: AppHandle, relative_path: String) -> Result<Vec<String>, String> {
+    let base = builtin_resource_dir(&app)?;
+    let resource_path = base.join(&relative_path);
+    if !resource_path.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(&resource_path)
+        .map_err(|e| format!("failed to read resource dir '{}': {}", resource_path.display(), e))?
+    {
+        let entry = entry.map_err(|e| format!("failed to read entry: {}", e))?;
+        names.push(entry.file_name().to_string_lossy().to_string());
+    }
+    Ok(names)
+}
+
 #[tauri::command]
 pub fn copy_file(src: String, dst: String) -> Result<(), String> {
     std::fs::copy(&src, &dst)

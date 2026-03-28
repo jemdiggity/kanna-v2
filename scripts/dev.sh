@@ -117,7 +117,7 @@ start() {
   fi
   tmux new-session -d -s "$SESSION" -n desktop -c "$ROOT"
   # Forward all KANNA_* env vars into the tmux session
-  EXPORTS="$(env | grep '^KANNA_' | sed 's/^/export /' | tr '\n' ' ')"
+  EXPORTS="$(env | grep '^KANNA_' | sed "s/^\([^=]*\)=\(.*\)/export \1='\2'/" | tr '\n' ' ')"
 
   # In worktrees, write a local Tauri config override with the isolated port
   # (must exist before tauri dev parses --config)

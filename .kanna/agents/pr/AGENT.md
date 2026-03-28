@@ -21,19 +21,3 @@ You are in a worktree branched from the task branch. Your job is to create a Git
 5. **Create the PR**: `gh pr create` — write a clear title and description summarizing the changes.
 
 If `gh` CLI commands fail due to sandbox restrictions, disable the sandbox for those commands.
-
-## Completion
-
-When you have successfully created the PR, run:
-
-```
-kanna-cli stage-complete --task-id $KANNA_TASK_ID --status success --summary "Created PR: <pr_url>"
-```
-
-If you cannot create the PR, run:
-
-```
-kanna-cli stage-complete --task-id $KANNA_TASK_ID --status failure --summary "Brief description of what went wrong"
-```
-
-Always call `kanna-cli stage-complete` before finishing.

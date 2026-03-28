@@ -24,7 +24,7 @@ const VALID_PIPELINE_JSON = JSON.stringify({
 const INVALID_PIPELINE_JSON = `{ not valid json`;
 
 describe("scanAgentsAndPipelines", () => {
-  it("scans and returns all valid agents from .kanna/agents/*/AGENT.md", async () => {
+  it("scans and returns all valid agents", async () => {
     const files: Record<string, string> = {
       "/repo/.kanna/agents/my-agent/AGENT.md": VALID_AGENT_MD,
       "/repo/.kanna/agents/other-agent/AGENT.md": `---
@@ -55,7 +55,7 @@ Do the other task.
     expect(result.errors).toHaveLength(0);
   });
 
-  it("scans and returns all valid pipelines from .kanna/pipelines/*.json", async () => {
+  it("scans and returns all valid pipelines", async () => {
     const pipeline2 = JSON.stringify({
       name: "Second Pipeline",
       stages: [{ name: "Deploy", transition: "auto" }],
