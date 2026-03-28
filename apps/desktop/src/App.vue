@@ -773,10 +773,10 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="app">
+  <div class="app" :class="{ mobile: __KANNA_MOBILE__ }">
     <Sidebar
       ref="sidebarRef"
-      v-if="!maximized && !sidebarHidden"
+      v-if="!maximized && !sidebarHidden && (!__KANNA_MOBILE__ || !store.selectedItemId)"
       :repos="store.repos"
       :pipeline-items="store.items"
       :selected-repo-id="store.selectedRepoId"
@@ -793,6 +793,7 @@ onMounted(async () => {
       @hide-repo="store.hideRepo"
     />
     <MainPanel
+      v-if="!__KANNA_MOBILE__ || store.selectedItemId"
       :item="store.currentItem"
       :repo-path="store.selectedRepo?.path"
       :spawn-pty-session="store.spawnPtySession"
@@ -801,6 +802,7 @@ onMounted(async () => {
       :has-repos="store.repos.length > 0"
       @close-task="store.closeTask"
       @agent-completed="store.bump"
+      @back="store.selectedItemId = null"
     />
 
     <NewTaskModal
@@ -841,7 +843,7 @@ onMounted(async () => {
     <KeepAlive :max="10">
       <ShellModal
         ref="shellModalRef"
-        v-if="showShellModal && store.selectedRepo && (shellRepoRoot || store.currentItem)"
+        v-if="showShellModal && !__KANNA_MOBILE__ && store.selectedRepo && (shellRepoRoot || store.currentItem)"
         :key="`shell-${shellRepoRoot ? `repo-${store.selectedRepo.id}` : `wt-${store.currentItem?.id}`}`"
         :session-id="`shell-${shellRepoRoot ? `repo-${store.selectedRepo.id}` : `wt-${store.currentItem?.id}`}`"
         :cwd="shellRepoRoot ? store.selectedRepo.path : (store.currentItem?.branch ? `${store.selectedRepo.path}/.kanna-worktrees/${store.currentItem.branch}` : store.selectedRepo.path)"
@@ -852,7 +854,7 @@ onMounted(async () => {
     </KeepAlive>
     <DiffModal
       ref="diffModalRef"
-      v-if="showDiffModal && store.selectedRepo?.path"
+      v-if="showDiffModal && !__KANNA_MOBILE__ && store.selectedRepo?.path"
       :repo-path="store.selectedRepo.path"
       :worktree-path="store.currentItem?.branch ? activeWorktreePath : undefined"
       :initial-scope="store.currentItem ? diffScopes.get(store.currentItem.id) : undefined"
@@ -869,7 +871,7 @@ onMounted(async () => {
       @close="showCommitGraphModal = false"
     />
     <FilePickerModal
-      v-if="showFilePickerModal && store.selectedRepo?.path"
+      v-if="showFilePickerModal && !__KANNA_MOBILE__ && store.selectedRepo?.path"
       :worktree-path="activeWorktreePath"
       @close="showFilePickerModal = false"
       @select="(f: string) => { showFilePickerModal = false; previewFilePath = f; previewInitialLine = undefined; showFilePreviewModal = true; }"
@@ -885,7 +887,7 @@ onMounted(async () => {
     />
     <FilePreviewModal
       ref="filePreviewRef"
-      v-if="showFilePreviewModal && store.selectedRepo?.path"
+      v-if="showFilePreviewModal && !__KANNA_MOBILE__ && store.selectedRepo?.path"
       :file-path="previewFilePath"
       :worktree-path="activeWorktreePath"
       :ide-command="store.ideCommand"
@@ -952,5 +954,31 @@ html, body, #app {
   display: flex;
   height: 100%;
   width: 100%;
+}
+
+@media (max-width: 768px) {
+  .app {
+    flex-direction: column;
+  }
+}
+
+.app.mobile {
+  flex-direction: column;
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: env(safe-area-inset-bottom);
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
+}
+
+.app.mobile :deep(.sidebar) {
+  width: 100%;
+  max-width: none;
+  height: 100%;
+  border-right: none;
+}
+
+.app.mobile .main-panel {
+  width: 100%;
+  height: 100%;
 }
 </style>

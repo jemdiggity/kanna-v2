@@ -1,0 +1,10 @@
+{
+  "identifier": "default",
+  "description": "Default capability for the mobile app",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:window:default",
+    "core:webview:default"
+  ]
+}

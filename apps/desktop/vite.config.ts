@@ -21,6 +21,10 @@ export default defineConfig(async () => ({
     },
   },
 
+  define: {
+    __KANNA_MOBILE__: false,
+  },
+
   build: {
     target: "esnext",
   },
