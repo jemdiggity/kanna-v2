@@ -902,7 +902,7 @@ export const useKannaStore = defineStore("kanna", () => {
     }
   }
 
-  async function closeTask(targetItemId?: string, opts?: { selectNext?: boolean }) {
+  async function closeTask(targetItemId?: string, opts?: { selectNext?: boolean; forceClose?: boolean }) {
     lastUndoAction.value = null;
     const item = targetItemId
       ? items.value.find(i => i.id === targetItemId)
@@ -951,8 +951,8 @@ export const useKannaStore = defineStore("kanna", () => {
       const teardownCmds = await collectTeardownCommands(item, repo);
 
       if (teardownCmds.length === 0) {
-        // No teardown — close (or linger if dev hack enabled)
-        if (devLingerTerminals.value) {
+        // No teardown — close (or linger if dev hack enabled and not force-closing)
+        if (devLingerTerminals.value && !opts?.forceClose) {
           await addPipelineItemTag(_db, item.id, "lingering");
         } else {
           await closePipelineItem(_db, item.id);
@@ -1123,7 +1123,7 @@ export const useKannaStore = defineStore("kanna", () => {
     // Close old task first (teardown, graceful SIGINT, mark done) — must
     // complete before createItem to avoid daemon command connection race.
     // selectNext: false because the new task will auto-select itself.
-    await closeTask(item.id, { selectNext: false });
+    await closeTask(item.id, { selectNext: false, forceClose: true });
 
     // Create new task for the next stage
     await createItem(repo.id, repo.path, stagePrompt, "pty", {
