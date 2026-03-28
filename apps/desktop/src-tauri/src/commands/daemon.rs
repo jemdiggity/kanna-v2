@@ -9,14 +9,13 @@ use crate::daemon_client::DaemonClient;
 pub type DaemonState = Arc<Mutex<Option<DaemonClient>>>;
 pub type AttachedSessions = Arc<Mutex<HashSet<String>>>;
 
-const CLAUDE_SPINNERS: &[char] = &['✻', '✽', '✶', '✳', '✢', '⏺'];
 const SCAN_BUFFER_CAP: usize = 4096;
 const SCAN_FLUSH_MS: u64 = 150;
-// Claude's status bar marker (⏵, U+23F5). Present in every status bar redraw.
-const STATUS_BAR_MARKER: char = '⏵';
-// Text shown in status bar ONLY while Claude is actively processing.
-// Stripped of ANSI, spaces become empty (cursor movement codes removed).
+// Text shown in Claude's status bar ONLY while actively processing.
+// After ANSI stripping, cursor-movement codes collapse the spaces.
 const CLAUDE_WORKING_INDICATOR: &str = "esctointerrupt";
+// Claude's idle prompt character (❯, U+276F). Present when waiting for input.
+const CLAUDE_IDLE_PROMPT: char = '\u{276F}';
 
 #[derive(Clone, Debug, PartialEq)]
 enum AgentProvider {
@@ -53,7 +52,7 @@ impl SessionScanState {
         if self.buffer.len() > SCAN_BUFFER_CAP {
             let mut drain_to = self.buffer.len() - SCAN_BUFFER_CAP;
             // Advance to the next char boundary to avoid panicking on multi-byte
-            // UTF-8 chars (spinners ✻✽✶, emoji 🍌, box-drawing, etc.)
+            // UTF-8 chars (emoji, box-drawing, etc.)
             while drain_to < self.buffer.len() && !self.buffer.is_char_boundary(drain_to) {
                 drain_to += 1;
             }
@@ -63,34 +62,25 @@ impl SessionScanState {
 
     /// Called on each fragment. Returns events to emit.
     ///
-    /// Claude detection uses two deterministic signals:
-    /// - Spinner chars (✻✽✶✳✢⏺) → Working (immediate)
-    /// - Status bar frame (⏵) without "esctointerrupt" → Idle (deterministic)
+    /// Claude detection uses two signals:
+    /// - "esctointerrupt" in fragment → Working (status bar text during processing)
+    /// - ❯ (U+276F) idle prompt without "esctointerrupt" → Idle
     fn on_fragment(&mut self, text: &str) -> Vec<&'static str> {
         let mut events = Vec::new();
 
         match self.provider {
             AgentProvider::Claude => {
-                let has_status_bar = text.contains(STATUS_BAR_MARKER);
+                let has_working = text.contains(CLAUDE_WORKING_INDICATOR);
+                let has_idle_prompt = text.contains(CLAUDE_IDLE_PROMPT);
 
-                if has_status_bar {
-                    // Status bar frame: check for working indicator
-                    if text.contains(CLAUDE_WORKING_INDICATOR) {
-                        if self.state != AgentState::Working {
-                            self.state = AgentState::Working;
-                            events.push("ClaudeWorking");
-                        }
-                    } else if self.state != AgentState::Idle {
-                        // Status bar without "esc to interrupt" → turn is done
-                        self.state = AgentState::Idle;
-                        events.push("ClaudeIdle");
-                    }
-                } else if text.chars().any(|c| CLAUDE_SPINNERS.contains(&c)) {
-                    // Small spinner fragment (no status bar) → working
+                if has_working {
                     if self.state != AgentState::Working {
                         self.state = AgentState::Working;
                         events.push("ClaudeWorking");
                     }
+                } else if has_idle_prompt && self.state != AgentState::Idle {
+                    self.state = AgentState::Idle;
+                    events.push("ClaudeIdle");
                 }
 
                 if text.contains("Do you want to allow") {
