@@ -464,18 +464,18 @@ const keyboardActions = {
     maximizedModal.value = maximizedModal.value === ctx ? null : ctx;
   },
   dismiss: () => {
-    if (showCommandPalette.value) { showCommandPalette.value = false; return; }
-    if (showShortcutsModal.value) { showShortcutsModal.value = false; return; }
-    if (showFilePreviewModal.value) { filePreviewRef.value?.dismiss(); return; }
-    if (showFilePickerModal.value) { showFilePickerModal.value = false; return; }
-    // Shell before diff: Escape closes the topmost modal first
+    if (showCommandPalette.value) { showCommandPalette.value = false; return true; }
+    if (showShortcutsModal.value) { showShortcutsModal.value = false; return true; }
+    if (showFilePreviewModal.value) { filePreviewRef.value?.dismiss(); return true; }
+    if (showFilePickerModal.value) { showFilePickerModal.value = false; return true; }
+    // Shell before diff: let Escape reach the shell terminal (vim, etc.)
     if (showShellModal.value) { return; }
-    if (showDiffModal.value) { showDiffModal.value = false; maximizedModal.value = null; return; }
-    if (showAnalyticsModal.value) { showAnalyticsModal.value = false; return; }
-    if (showCommitGraphModal.value) { showCommitGraphModal.value = false; return; }
-    if (showTreeExplorer.value) { showTreeExplorer.value = false; return; }
-    if (showNewTaskModal.value) { showNewTaskModal.value = false; return; }
-    if (showAddRepoModal.value) { showAddRepoModal.value = false; return; }
+    if (showDiffModal.value) { showDiffModal.value = false; maximizedModal.value = null; return true; }
+    if (showAnalyticsModal.value) { showAnalyticsModal.value = false; return true; }
+    if (showCommitGraphModal.value) { showCommitGraphModal.value = false; return true; }
+    if (showTreeExplorer.value) { showTreeExplorer.value = false; return true; }
+    if (showNewTaskModal.value) { showNewTaskModal.value = false; return true; }
+    if (showAddRepoModal.value) { showAddRepoModal.value = false; return true; }
   },
   openShell: () => {
     if (!store.selectedRepo || !store.currentItem) return;

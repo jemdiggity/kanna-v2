@@ -230,7 +230,9 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
     // intercept Cmd+C here and let Cmd+V fall through to the native paste event.
     term.attachCustomKeyEventHandler((e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        // When a modal overlay is visible, let Escape bubble to the app to dismiss it
+        // If this terminal is inside a modal (e.g. ShellModal), consume Escape for the PTY.
+        // Otherwise, when a modal overlay is visible, let Escape bubble to dismiss it.
+        if (container?.closest('.modal-overlay')) return true
         if (document.querySelector('.modal-overlay')) return false
         return true
       }

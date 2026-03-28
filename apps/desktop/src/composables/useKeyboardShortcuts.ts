@@ -37,7 +37,7 @@ export type ActionName =
   | "focusSearch"
   | "goToOldestUnread";
 
-export type KeyboardActions = Record<ActionName, () => void>;
+export type KeyboardActions = Record<ActionName, () => void | boolean>;
 
 interface ShortcutDef {
   action: ActionName;
@@ -145,9 +145,10 @@ export function useKeyboardShortcuts(actions: KeyboardActions, options?: { befor
     for (const def of shortcuts) {
       if (matches(def, e)) {
         if (ctx && !(def.context ?? ["main"]).includes(ctx)) continue;
-        if (def.action !== "dismiss") e.preventDefault();
+        e.preventDefault();
         options?.beforeAction?.(def.action);
-        actions[def.action]();
+        const handled = actions[def.action]();
+        if (def.action === "dismiss" && handled) e.stopPropagation();
         return;
       }
     }
