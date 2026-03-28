@@ -9,5 +9,6 @@
     "KANNA_DEV_PORT": 1420,
     "KANNA_RELAY_PORT": 9080,
     "KANNA_MOBILE_PORT": 1421
-  }
+  },
+  "stage_order": ["merge", "pr", "in progress"]
 }
