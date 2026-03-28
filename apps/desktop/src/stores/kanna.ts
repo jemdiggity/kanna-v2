@@ -726,14 +726,6 @@ export const useKannaStore = defineStore("kanna", () => {
     } catch (e) {
       console.error("[store] failed to get pipeline socket path:", e);
     }
-    try {
-      const appDataDir = await invoke<string>("get_app_data_dir");
-      const dbName = await invoke<string>("read_env_var", { name: "KANNA_DB_NAME" }).catch(() => "kanna-v2.db");
-      env.KANNA_DB_PATH = `${appDataDir}/${dbName}`;
-    } catch (e) {
-      console.error("[store] failed to get DB path:", e);
-    }
-
     const provider = options?.agentProvider ?? "claude";
     const escapedPrompt = prompt.replace(/'/g, "'\\''");
     let agentCmd: string;

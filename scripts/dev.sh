@@ -122,6 +122,9 @@ start() {
     exit 1
   fi
 
+  # Export full DB path so it flows through to agent sessions via the daemon
+  export KANNA_DB_PATH="$HOME/Library/Application Support/com.kanna.app/$_db"
+
   if tmux has-session -t "$SESSION" 2>/dev/null; then
     echo "Session '$SESSION' already running. Use 'restart' or 'stop'."
     exit 1

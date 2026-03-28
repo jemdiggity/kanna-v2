@@ -132,13 +132,10 @@ async fn main() {
             });
 
             // Step 1: Write to DB (critical path)
-            let db_path = match env::var("KANNA_DB_PATH") {
-                Ok(p) => p,
-                Err(_) => {
-                    eprintln!("Error: KANNA_DB_PATH environment variable is not set");
-                    process::exit(1);
-                }
-            };
+            let db_path = env::var("KANNA_DB_PATH").unwrap_or_else(|_| {
+                let home = env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+                format!("{home}/Library/Application Support/com.kanna.app/kanna-v2.db")
+            });
 
             if let Err(e) = write_stage_result_to_db(&db_path, &task_id, &stage_result_str) {
                 eprintln!("Error: {e}");
