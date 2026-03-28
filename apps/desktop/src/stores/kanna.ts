@@ -124,7 +124,7 @@ export const useKannaStore = defineStore("kanna", () => {
   const devLingerTerminals = ref(false);
 
   // ── Undo state ───────────────────────────────────────────────────
-  const lastUndoAction = ref<{ type: "hideRepo"; repoId: string } | null>(null);
+  const lastHiddenRepoId = ref<string | null>(null);
 
   // Items whose worktree + agent spawn is still in progress.
   // Excluded from the currentItem auto-select fallback to prevent
@@ -413,7 +413,7 @@ export const useKannaStore = defineStore("kanna", () => {
   async function hideRepo(repoId: string) {
     await hideRepoQuery(_db, repoId);
     if (selectedRepoId.value === repoId) selectedRepoId.value = null;
-    lastUndoAction.value = { type: "hideRepo", repoId };
+    lastHiddenRepoId.value = repoId;
     bump();
   }
 
@@ -892,7 +892,6 @@ export const useKannaStore = defineStore("kanna", () => {
   }
 
   async function closeTask(targetItemId?: string, opts?: { selectNext?: boolean }) {
-    lastUndoAction.value = null;
     const item = targetItemId
       ? items.value.find(i => i.id === targetItemId)
       : currentItem.value;
@@ -912,6 +911,7 @@ export const useKannaStore = defineStore("kanna", () => {
             console.error("[store] kill teardown session failed:", e)),
         ]);
         await closePipelineItem(_db, item.id);
+
         if (opts?.selectNext !== false) selectNextItem(item.id);
         await checkUnblocked(item.id);
         bump();
@@ -924,6 +924,7 @@ export const useKannaStore = defineStore("kanna", () => {
       if (wasBlocked) {
         await removeAllBlockersForItem(_db, item.id);
         await closePipelineItem(_db, item.id);
+
         if (opts?.selectNext !== false) selectNextItem(item.id);
         bump();
         (async () => {
@@ -984,17 +985,16 @@ export const useKannaStore = defineStore("kanna", () => {
   }
 
   async function undoClose() {
-    if (lastUndoAction.value?.type === "hideRepo") {
-      const repoId = lastUndoAction.value.repoId;
-      lastUndoAction.value = null;
+    if (lastHiddenRepoId.value) {
+      const repoId = lastHiddenRepoId.value;
+      lastHiddenRepoId.value = null;
       await unhideRepoQuery(_db, repoId);
       bump();
       return;
     }
     try {
-      // Find most recently closed item to undo
       const rows = await _db.select<PipelineItem>(
-        "SELECT * FROM pipeline_item WHERE closed_at IS NOT NULL ORDER BY updated_at DESC LIMIT 1"
+        "SELECT * FROM pipeline_item WHERE closed_at IS NOT NULL ORDER BY closed_at DESC LIMIT 1"
       );
       const item = rows[0];
       if (!item) return;
@@ -1004,8 +1004,6 @@ export const useKannaStore = defineStore("kanna", () => {
       await updatePipelineItemActivity(_db, item.id, "working");
       await selectItem(item.id);
       bump();
-      // Spawn before selecting so the terminal mounts with the session already alive
-      // (avoids a race where the terminal's spawn-on-mount and this spawn both fire)
       if (item.branch) {
         const worktreePath = `${repo.path}/.kanna-worktrees/${item.branch}`;
         try {
@@ -1712,7 +1710,7 @@ export const useKannaStore = defineStore("kanna", () => {
     canGoBack, canGoForward,
     suspendAfterMinutes, killAfterMinutes,
     ideCommand, gcAfterDays, hideShortcutsOnStartup, devLingerTerminals,
-    lastUndoAction, refreshKey,
+    lastHiddenRepoId, refreshKey,
     // Getters
     selectedRepo, currentItem, sortedItemsForCurrentRepo, sortedItemsAllRepos,
     // Actions
