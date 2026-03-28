@@ -74,6 +74,11 @@ const showTreeExplorer = ref(false);
 const activeWorktreePath = computed(() =>
   store.currentItem?.branch ? `${store.selectedRepo?.path}/.kanna-worktrees/${store.currentItem.branch}` : store.selectedRepo?.path ?? ""
 );
+const treeExplorerRoot = computed(() => {
+  if (store.currentItem?.branch) return `${store.selectedRepo?.path}/.kanna-worktrees/${store.currentItem.branch}`;
+  if (store.selectedRepo?.path) return store.selectedRepo.path;
+  return homePath.value;
+});
 const showShellModal = ref(false);
 const shellRepoRoot = ref(false);
 const showCommandPalette = ref(false);
@@ -903,9 +908,10 @@ onMounted(async () => {
     />
     <TreeExplorerModal
       ref="treeExplorerRef"
-      v-if="showTreeExplorer && store.selectedRepo?.path"
-      :worktree-path="activeWorktreePath"
-      :repo-root="store.selectedRepo?.path ?? ''"
+      v-if="showTreeExplorer && treeExplorerRoot"
+      :worktree-path="treeExplorerRoot"
+      :repo-root="treeExplorerRoot"
+      :home-path="homePath"
       :suspended="showFilePreviewModal"
       @close="showTreeExplorer = false"
       @open-file="(f: string) => { previewFilePath = f; previewInitialLine = undefined; showFilePreviewModal = true; previewFromPicker = false; previewHidden = false; }"

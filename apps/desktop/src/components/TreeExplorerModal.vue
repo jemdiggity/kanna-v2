@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, nextTick, watch, toRef } from "vue";
+import { ref, computed, onMounted, onUnmounted, nextTick, watch, toRef } from "vue";
 import { useTreeExplorer, type TreeNode } from "../composables/useTreeExplorer";
 import { useShortcutContext, registerContextShortcuts } from "../composables/useShortcutContext";
 import { useModalZIndex } from "../composables/useModalZIndex";
@@ -22,8 +22,15 @@ defineExpose({ zIndex, bringToFront });
 const props = defineProps<{
   worktreePath: string;
   repoRoot: string;
+  homePath?: string;
   suspended?: boolean;
 }>();
+
+const rootLabel = computed(() => {
+  if (props.homePath && props.worktreePath === props.homePath) return "~";
+  const parts = props.worktreePath.split("/");
+  return parts[parts.length - 1] || props.worktreePath;
+});
 
 const emit = defineEmits<{
   (e: "close"): void;
@@ -126,7 +133,7 @@ function isDimmed(entry: TreeNode): boolean {
         <span
           class="breadcrumb-segment breadcrumb-root"
           @click="jumpToBreadcrumb(0)"
-        >~</span>
+        >{{ rootLabel }}</span>
         <template v-for="(seg, i) in state.breadcrumb" :key="i">
           <span class="breadcrumb-sep">/</span>
           <span
