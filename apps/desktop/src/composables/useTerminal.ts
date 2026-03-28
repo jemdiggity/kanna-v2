@@ -191,10 +191,32 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
 
     term.open(container)
 
-    // Push kitty keyboard mode so Shift+Enter sends CSI 13;2 u instead of bare CR.
+    // Push kitty keyboard mode so Shift+Enter sends CSI 13;2u instead of bare CR.
     // vtExtensions.kittyKeyboard enables protocol support; this push activates it.
     if (options?.kittyKeyboard) {
+      const core = (term as any)._core
+      const cs = core?._coreService ?? core?.coreService
+      const kitty = cs?.kittyKeyboard
       term.write("\x1b[>1u")
+      // DEBUG: log kitty flag changes to diagnose dev vs release difference
+      if (kitty) {
+        const initFlags = kitty.flags
+        console.warn(`[kitty] sid=${sessionId} push sent, flags=${initFlags} stack=${JSON.stringify(kitty.mainStack)}`)
+        let _flags = kitty.flags
+        Object.defineProperty(kitty, "flags", {
+          get() { return _flags },
+          set(v: number) {
+            const prev = _flags
+            _flags = v
+            if (prev !== v) {
+              console.warn(`[kitty] sid=${sessionId} flags ${prev}→${v} stack=${JSON.stringify(kitty.mainStack)} t=${Date.now()}`)
+            }
+          },
+          configurable: true,
+        })
+      } else {
+        console.warn(`[kitty] sid=${sessionId} push sent but kitty object not found on coreService`)
+      }
     }
 
     if (container.offsetWidth > 0 && container.offsetHeight > 0) {
@@ -229,6 +251,12 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
 
     // Send keystrokes to daemon
     term.onData((data) => {
+      // DEBUG: log what xterm.js encodes for Enter/Shift+Enter
+      if (options?.kittyKeyboard && (data === "\r" || data.includes("\x1b[13"))) {
+        const core = (term as any)._core
+        const cs = core?._coreService ?? core?.coreService
+        console.warn(`[kitty] sid=${sessionId} onData=${JSON.stringify(data)} flags=${cs?.kittyKeyboard?.flags}`)
+      }
       invoke("send_input", {
         sessionId,
         data: Array.from(new TextEncoder().encode(data)),
