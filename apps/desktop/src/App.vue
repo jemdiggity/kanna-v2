@@ -92,7 +92,9 @@ const diffScopes = new Map<string, "branch" | "working">();
 const sidebarHidden = ref(false);
 const maximizedModal = ref<ShortcutContext | null>(null);
 const maximized = computed(() => maximizedModal.value !== null);
+const homePath = ref("");
 const sidebarRef = ref<InstanceType<typeof Sidebar> | null>(null);
+const mainPanelRef = ref<InstanceType<typeof MainPanel> | null>(null);
 const shellModalRef = ref<InstanceType<typeof ShellModal> | null>(null);
 const diffModalRef = ref<InstanceType<typeof DiffModal> | null>(null);
 const showCommitGraphModal = ref(false);
@@ -392,6 +394,14 @@ const currentShortcutContext = computed<ShortcutContext>(() => {
   return "main";
 });
 
+function onShellClose() {
+  showShellModal.value = false;
+  maximizedModal.value = null;
+  if (!store.repos.length) {
+    mainPanelRef.value?.recheckClis?.();
+  }
+}
+
 // Keyboard shortcuts
 const keyboardActions = {
   newTask: () => { openNewTaskModal().catch((e) => console.error("[App] openNewTaskModal failed:", e)); },
@@ -472,8 +482,7 @@ const keyboardActions = {
     if (showShellModal.value && !shellRepoRoot.value) {
       const z = shellModalRef.value?.zIndex ?? 0;
       if (isTopModal(z)) {
-        showShellModal.value = false;
-        maximizedModal.value = null;
+        onShellClose();
       } else {
         shellModalRef.value?.bringToFront();
       }
@@ -483,12 +492,10 @@ const keyboardActions = {
     }
   },
   openShellRepoRoot: () => {
-    if (!store.selectedRepo) return;
     if (showShellModal.value && shellRepoRoot.value) {
       const z = shellModalRef.value?.zIndex ?? 0;
       if (isTopModal(z)) {
-        showShellModal.value = false;
-        maximizedModal.value = null;
+        onShellClose();
       } else {
         shellModalRef.value?.bringToFront();
       }
@@ -735,6 +742,13 @@ async function handlePreferenceUpdate(key: string, value: string) {
 onMounted(async () => {
   await store.init(db);
 
+  // Cache $HOME for shell-at-home (no repo selected)
+  invoke("read_env_var", { name: "HOME" }).then((val) => {
+    homePath.value = val as string;
+  }).catch(() => {
+    homePath.value = "/Users";
+  });
+
   // GC: async cleanup of stale done tasks, repeats hourly
   gcRef.value = useGc(db);
 
@@ -795,6 +809,7 @@ onMounted(async () => {
       @hide-repo="store.hideRepo"
     />
     <MainPanel
+      ref="mainPanelRef"
       v-if="!isMobile || store.selectedItemId"
       :item="store.currentItem"
       :repo-path="store.selectedRepo?.path"
@@ -845,13 +860,13 @@ onMounted(async () => {
     <KeepAlive :max="10">
       <ShellModal
         ref="shellModalRef"
-        v-if="showShellModal && !isMobile && store.selectedRepo && (shellRepoRoot || store.currentItem)"
-        :key="`shell-${shellRepoRoot ? `repo-${store.selectedRepo.id}` : `wt-${store.currentItem?.id}`}`"
-        :session-id="`shell-${shellRepoRoot ? `repo-${store.selectedRepo.id}` : `wt-${store.currentItem?.id}`}`"
-        :cwd="shellRepoRoot ? store.selectedRepo.path : (store.currentItem?.branch ? `${store.selectedRepo.path}/.kanna-worktrees/${store.currentItem.branch}` : store.selectedRepo.path)"
+        v-if="showShellModal && !isMobile && (store.selectedRepo ? (shellRepoRoot || store.currentItem) : shellRepoRoot)"
+        :key="`shell-${shellRepoRoot && !store.selectedRepo ? 'home' : shellRepoRoot ? `repo-${store.selectedRepo!.id}` : `wt-${store.currentItem?.id}`}`"
+        :session-id="`shell-${shellRepoRoot && !store.selectedRepo ? 'home' : shellRepoRoot ? `repo-${store.selectedRepo!.id}` : `wt-${store.currentItem?.id}`}`"
+        :cwd="shellRepoRoot && !store.selectedRepo ? homePath : shellRepoRoot ? store.selectedRepo!.path : (store.currentItem?.branch ? `${store.selectedRepo!.path}/.kanna-worktrees/${store.currentItem.branch}` : store.selectedRepo!.path)"
         :port-env="shellRepoRoot ? undefined : store.currentItem?.port_env"
         :maximized="maximizedModal === 'shell'"
-        @close="showShellModal = false; maximizedModal = null"
+        @close="onShellClose"
       />
     </KeepAlive>
     <DiffModal

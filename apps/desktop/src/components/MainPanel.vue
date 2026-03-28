@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref, watch } from "vue";
 import type { PipelineItem } from "@kanna/db";
+import { invoke } from "../invoke";
 import TaskHeader from "./TaskHeader.vue";
 import TerminalTabs from "./TerminalTabs.vue";
 
@@ -24,6 +25,65 @@ const isBlocked = computed(() => {
   if (!props.blockers || props.blockers.length === 0) return false;
   return props.blockers.some(b => !b.closed_at);
 });
+
+// --- Agent CLI detection ---
+
+interface AgentCliStatus {
+  installed: boolean;
+  version?: string;
+}
+
+const claude = ref<AgentCliStatus>({ installed: false });
+const copilot = ref<AgentCliStatus>({ installed: false });
+const copiedAgent = ref<string | null>(null);
+
+const INSTALL_COMMANDS: Record<string, string> = {
+  claude: "curl -fsSL https://claude.ai/install.sh | bash",
+  copilot: "curl -fsSL https://gh.io/copilot-install | bash",
+};
+
+function parseSemver(output: string): string | undefined {
+  const match = output.match(/(\d+\.\d+\.\d+)/);
+  return match?.[1];
+}
+
+async function checkCli(name: string): Promise<AgentCliStatus> {
+  try {
+    await invoke("which_binary", { name });
+  } catch {
+    return { installed: false };
+  }
+  try {
+    const output = await invoke("run_script", {
+      script: `${name} --version`,
+      cwd: "/",
+      env: {},
+    }) as string;
+    return { installed: true, version: parseSemver(output) };
+  } catch {
+    return { installed: true };
+  }
+}
+
+async function checkAllClis() {
+  const [c, p] = await Promise.all([checkCli("claude"), checkCli("copilot")]);
+  claude.value = c;
+  copilot.value = p;
+}
+
+watch(() => props.hasRepos, (has) => {
+  if (!has) checkAllClis();
+}, { immediate: true });
+
+defineExpose({ recheckClis: checkAllClis });
+
+async function copyCommand(agent: string) {
+  const cmd = INSTALL_COMMANDS[agent];
+  if (!cmd) return;
+  await navigator.clipboard.writeText(cmd);
+  copiedAgent.value = agent;
+  setTimeout(() => { copiedAgent.value = null; }, 1500);
+}
 </script>
 
 <template>
@@ -65,8 +125,40 @@ const isBlocked = computed(() => {
     </template>
     <div v-else class="empty-state">
       <template v-if="!hasRepos">
-        <p class="empty-title">{{ $t('mainPanel.noReposTitle') }}</p>
-        <p class="empty-hint">{{ $t('mainPanel.noReposHint', { shortcut: '⌘I' }) }}</p>
+        <div class="agent-setup">
+          <p class="setup-title">{{ $t('mainPanel.agentSetupTitle') }}</p>
+          <div class="agent-cards">
+            <div v-for="agent in [
+              { key: 'claude', nameKey: 'mainPanel.agentClaudeName', status: claude },
+              { key: 'copilot', nameKey: 'mainPanel.agentCopilotName', status: copilot },
+            ]" :key="agent.key" class="agent-card">
+              <div class="agent-header">
+                <span class="agent-name">{{ $t(agent.nameKey) }}</span>
+                <span v-if="agent.status.installed" class="agent-badge installed">
+                  <span class="checkmark">✓</span>
+                  {{ $t('mainPanel.agentVersion', { version: agent.status.version || '?' }) }}
+                </span>
+                <span v-else class="agent-badge not-installed">
+                  {{ $t('mainPanel.agentNotInstalled') }}
+                </span>
+              </div>
+              <div v-if="!agent.status.installed" class="install-block">
+                <code class="install-cmd">{{ INSTALL_COMMANDS[agent.key] }}</code>
+                <button
+                  class="copy-btn"
+                  :title="copiedAgent === agent.key ? $t('mainPanel.agentCopied') : 'Copy'"
+                  @click="copyCommand(agent.key)"
+                >
+                  {{ copiedAgent === agent.key ? '✓' : '⧉' }}
+                </button>
+              </div>
+            </div>
+          </div>
+          <p class="setup-hint">
+            {{ $t('mainPanel.agentInstallHint', { shellShortcut: '⇧⌘J' }) }}
+          </p>
+          <p class="empty-hint">{{ $t('mainPanel.noReposHint', { shortcut: '⌘I' }) }}</p>
+        </div>
       </template>
       <template v-else>
         <p class="empty-title">{{ $t('mainPanel.noTaskSelected') }}</p>
@@ -187,6 +279,112 @@ const isBlocked = computed(() => {
   font-size: 11px;
   color: #555;
   margin-top: 8px;
+}
+
+.agent-setup {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  max-width: 480px;
+  margin: 0 auto;
+  padding: 32px;
+}
+
+.setup-title {
+  font-size: 15px;
+  font-weight: 500;
+  color: #888;
+  margin-bottom: 4px;
+}
+
+.agent-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+}
+
+.agent-card {
+  background: #222;
+  border: 1px solid #333;
+  border-radius: 8px;
+  padding: 14px 16px;
+}
+
+.agent-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.agent-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: #ccc;
+}
+
+.agent-badge {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+.agent-badge.installed {
+  color: #4ade80;
+  background: rgba(74, 222, 128, 0.1);
+}
+
+.agent-badge.not-installed {
+  color: #888;
+  background: #2a2a2a;
+}
+
+.checkmark {
+  margin-right: 4px;
+}
+
+.install-block {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.install-cmd {
+  flex: 1;
+  font-size: 11px;
+  font-family: monospace;
+  color: #aaa;
+  background: #1a1a1a;
+  border: 1px solid #333;
+  border-radius: 4px;
+  padding: 6px 10px;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
+.copy-btn {
+  background: #2a2a2a;
+  border: 1px solid #444;
+  border-radius: 4px;
+  color: #aaa;
+  font-size: 13px;
+  padding: 4px 8px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.copy-btn:hover {
+  background: #333;
+  color: #ccc;
+}
+
+.setup-hint {
+  font-size: 12px;
+  color: #555;
 }
 
 .mobile-back-bar {
