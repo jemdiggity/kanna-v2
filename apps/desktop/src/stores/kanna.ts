@@ -19,7 +19,8 @@ import {
   listRepos, insertRepo, findRepoByPath,
   hideRepo as hideRepoQuery, unhideRepo as unhideRepoQuery,
   listPipelineItems, insertPipelineItem,
-  updatePipelineItemActivity, pinPipelineItem, unpinPipelineItem,
+  updatePipelineItemActivity, updatePipelineItemStage,
+  pinPipelineItem, unpinPipelineItem,
   reorderPinnedItems, updatePipelineItemDisplayName,
   clearPipelineItemStageResult,
   closePipelineItem, reopenPipelineItem,
@@ -901,7 +902,7 @@ export const useKannaStore = defineStore("kanna", () => {
     if (!item || !repo) return;
     try {
       // Already torndown — second close kills sessions and finishes
-      if (item.activity === "torndown") {
+      if (item.stage === "torndown") {
         await Promise.all([
           invoke("kill_session", { sessionId: item.id }).catch((e: unknown) =>
             console.error("[store] kill agent session failed:", e)),
@@ -961,7 +962,7 @@ export const useKannaStore = defineStore("kanna", () => {
       }
 
       // 3. Mark torndown — if linger, keep sessions alive for user to review
-      await updatePipelineItemActivity(_db, item.id, "torndown");
+      await updatePipelineItemStage(_db, item.id, "torndown");
       bump();
 
       if (devLingerTerminals.value) {

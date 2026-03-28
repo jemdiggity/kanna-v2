@@ -45,7 +45,7 @@ Kanna is a product distributed to end users as a signed macOS app. All dependenc
 1. Kills the agent PTY session and shell session in the daemon
 2. Marks the task as `done` in the DB
 3. Selects the next task in the sidebar
-4. Closed tasks are hidden from the sidebar immediately
+4. Tasks with `stage = 'done'` are hidden from the sidebar. The sidebar shows all tasks whose stage is not `done`.
 5. **Garbage collection:** Tasks closed longer than `gcAfterDays` (default: 3, configurable in preferences) are permanently deleted — worktree removed, DB row deleted. GC runs hourly.
 
 ### Task activity

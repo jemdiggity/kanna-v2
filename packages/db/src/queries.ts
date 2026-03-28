@@ -143,7 +143,7 @@ export async function updatePipelineItemPR(
 export async function updatePipelineItemActivity(
   db: DbHandle,
   id: string,
-  activity: "working" | "unread" | "idle" | "torndown"
+  activity: "working" | "unread" | "idle"
 ): Promise<void> {
   const unreadClause = activity === "unread" ? ", unread_at = datetime('now')" : "";
   const result = await db.execute(
@@ -205,7 +205,7 @@ export async function closePipelineItem(
   id: string
 ): Promise<void> {
   await db.execute(
-    "UPDATE pipeline_item SET closed_at = datetime('now'), updated_at = datetime('now') WHERE id = ?",
+    "UPDATE pipeline_item SET stage = 'done', closed_at = datetime('now'), updated_at = datetime('now') WHERE id = ?",
     [id]
   );
 }

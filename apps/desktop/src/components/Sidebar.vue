@@ -10,8 +10,8 @@ function hasTag(item: { tags: string }, tag: string): boolean {
   catch { return false; }
 }
 
-function isHidden(item: { closed_at: string | null }): boolean {
-  return item.closed_at !== null;
+function isHidden(item: { stage: string }): boolean {
+  return item.stage === "done";
 }
 
 const { t } = useI18n();
@@ -312,8 +312,8 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch });
                   :style="{
                     fontWeight: element.activity === 'unread' ? 'bold' : 'normal',
                     fontStyle: element.activity === 'working' ? 'italic' : 'normal',
-                    textDecoration: element.activity === 'torndown' ? 'line-through' : 'none',
-                    opacity: element.activity === 'torndown' ? 0.5 : 1,
+                    textDecoration: element.stage === 'torndown' ? 'line-through' : 'none',
+                    opacity: element.stage === 'torndown' ? 0.5 : 1,
                   }"
                 >{{ itemTitle(element) }}</span>
               </div>
@@ -363,8 +363,8 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch });
                     :style="{
                       fontWeight: element.activity === 'unread' ? 'bold' : 'normal',
                       fontStyle: element.activity === 'working' ? 'italic' : 'normal',
-                      textDecoration: element.activity === 'torndown' ? 'line-through' : 'none',
-                      opacity: element.activity === 'torndown' ? 0.5 : 1,
+                      textDecoration: element.stage === 'torndown' ? 'line-through' : 'none',
+                      opacity: element.stage === 'torndown' ? 0.5 : 1,
                     }"
                   >{{ itemTitle(element) }}</span>
                 </div>

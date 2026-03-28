@@ -24,7 +24,7 @@ export interface PipelineItem {
   closed_at: string | null;
   agent_type: string | null;
   agent_provider: string;  // "claude" | "copilot"
-  activity: "working" | "unread" | "idle" | "torndown";
+  activity: "working" | "unread" | "idle";
   activity_changed_at: string | null;
   unread_at: string | null;
   port_offset: number | null;
@@ -81,7 +81,7 @@ export interface Setting {
 export interface ActivityLog {
   id: number;
   pipeline_item_id: string;
-  activity: "working" | "unread" | "idle" | "torndown";
+  activity: "working" | "unread" | "idle";
   started_at: string;
 }
 
