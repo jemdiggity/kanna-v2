@@ -3,8 +3,15 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdirSync, writeFileSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { parseAgentMd } from "./custom-tasks.js";
+import { NEW_CUSTOM_TASK_PROMPT, parseAgentMd } from "./custom-tasks.js";
 import { scanCustomTasks } from "./custom-tasks-scanner.js";
+
+describe("NEW_CUSTOM_TASK_PROMPT", () => {
+  it("documents all supported agent providers without implying omitted-provider fallback behavior", () => {
+    expect(NEW_CUSTOM_TASK_PROMPT).toContain('- agent_provider: "claude" | "copilot" | "codex"');
+    expect(NEW_CUSTOM_TASK_PROMPT).not.toContain("uses app default when omitted");
+  });
+});
 
 describe("parseAgentMd", () => {
   it("parses a full agent.md with all fields", () => {
@@ -127,6 +134,18 @@ Prompt.
     const result = parseAgentMd(content, "test");
     expect(result).not.toBeNull();
     expect(result!.permissionMode).toBeUndefined();
+  });
+
+  it("accepts codex as an agent provider", () => {
+    const content = `---
+agent_provider: codex
+---
+Use Codex for this task.
+`;
+    const result = parseAgentMd(content, "codex-task");
+    expect(result).not.toBeNull();
+    expect(result!.agentProvider).toBe("codex");
+    expect(result!.prompt).toBe("Use Codex for this task.");
   });
 
   it("falls back on type mismatches (bad stage)", () => {
