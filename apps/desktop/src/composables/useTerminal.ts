@@ -9,7 +9,11 @@ import { invoke } from "../invoke"
 import { listen } from "../listen"
 import { isTauri } from "../tauri-mock"
 import { isAppShortcut } from "./useKeyboardShortcuts"
-import { formatAttachFailureMessage, getTerminalRecoveryMode } from "./terminalSessionRecovery"
+import {
+  formatAttachFailureMessage,
+  getTerminalRecoveryMode,
+  shouldReattachOnDaemonReady,
+} from "./terminalSessionRecovery"
 
 export interface SpawnOptions {
   cwd: string
@@ -28,6 +32,7 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
   const fitAddon = new FitAddon()
   let unlistenOutput: (() => void) | null = null
   let unlistenExit: (() => void) | null = null
+  let unlistenDaemonReady: (() => void) | null = null
   let container: HTMLElement | null = null
   let fitRafId = 0
   let attached = false
@@ -315,47 +320,9 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
     }
   }
 
-  async function startListening() {
-    const teardownId = `td-${sessionId}`
+  async function connectSession() {
     const recoveryMode = getTerminalRecoveryMode(spawnOptions, options)
 
-    unlistenOutput = await listen(
-      "terminal_output",
-      (event) => {
-        const sid = event.payload.session_id
-        if ((sid === sessionId || sid === teardownId) && terminal.value) {
-          const savedY = isFollowing ? -1 : terminal.value.buffer.active.viewportY
-          const restore = () => {
-            if (savedY >= 0 && terminal.value) {
-              terminal.value.scrollToLine(savedY)
-            }
-          }
-
-          if (event.payload.data_b64) {
-            const binary = atob(event.payload.data_b64)
-            const bytes = new Uint8Array(binary.length)
-            for (let i = 0; i < binary.length; i++) {
-              bytes[i] = binary.charCodeAt(i)
-            }
-            terminal.value.write(bytes, restore)
-          } else if (Array.isArray(event.payload.data)) {
-            terminal.value.write(new Uint8Array(event.payload.data), restore)
-          }
-        }
-      }
-    )
-
-    unlistenExit = await listen(
-      "session_exit",
-      (event) => {
-        const sid = event.payload.session_id
-        if ((sid === sessionId || sid === teardownId) && terminal.value) {
-          terminal.value.write(`\r\n[Process exited with code ${event.payload.code}]\r\n`)
-        }
-      }
-    )
-
-    // Try to attach first — session may already exist in daemon (e.g. after app restart)
     try {
       await invoke("attach_session", { sessionId, agentProvider: options?.agentProvider })
       attached = true
@@ -398,6 +365,60 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
     }
   }
 
+  async function startListening() {
+    const teardownId = `td-${sessionId}`
+
+    if (!unlistenOutput) {
+      unlistenOutput = await listen(
+        "terminal_output",
+        (event) => {
+          const sid = event.payload.session_id
+          if ((sid === sessionId || sid === teardownId) && terminal.value) {
+            const savedY = isFollowing ? -1 : terminal.value.buffer.active.viewportY
+            const restore = () => {
+              if (savedY >= 0 && terminal.value) {
+                terminal.value.scrollToLine(savedY)
+              }
+            }
+
+            if (event.payload.data_b64) {
+              const binary = atob(event.payload.data_b64)
+              const bytes = new Uint8Array(binary.length)
+              for (let i = 0; i < binary.length; i++) {
+                bytes[i] = binary.charCodeAt(i)
+              }
+              terminal.value.write(bytes, restore)
+            } else if (Array.isArray(event.payload.data)) {
+              terminal.value.write(new Uint8Array(event.payload.data), restore)
+            }
+          }
+        }
+      )
+    }
+
+    if (!unlistenExit) {
+      unlistenExit = await listen(
+        "session_exit",
+        (event) => {
+          const sid = event.payload.session_id
+          if ((sid === sessionId || sid === teardownId) && terminal.value) {
+            terminal.value.write(`\r\n[Process exited with code ${event.payload.code}]\r\n`)
+          }
+        }
+      )
+    }
+
+    if (!unlistenDaemonReady && shouldReattachOnDaemonReady(spawnOptions, options)) {
+      unlistenDaemonReady = await listen("daemon_ready", () => {
+        connectSession().catch((e) =>
+          console.error("[terminal] daemon_ready re-attach failed:", e)
+        )
+      })
+    }
+
+    await connectSession()
+  }
+
   function fit() {
     if (!container || container.offsetWidth === 0 || container.offsetHeight === 0) return
     fitAddon.fit()
@@ -418,6 +439,7 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
     if (fitRafId) cancelAnimationFrame(fitRafId)
     if (unlistenOutput) unlistenOutput()
     if (unlistenExit) unlistenExit()
+    if (unlistenDaemonReady) unlistenDaemonReady()
     terminal.value?.dispose()
   }
 
@@ -445,5 +467,24 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
     await invoke("resize_session", { sessionId, cols, rows }).catch(() => {})
   }
 
-  return { terminal, init, startListening, fit, fitDeferred, redraw, dispose }
+  /** When a hidden terminal becomes visible again, verify the session is still
+   *  attached. If the daemon restarted while it was hidden, reconnect on demand. */
+  async function ensureConnected() {
+    if (!terminal.value) return
+    if (getTerminalRecoveryMode(spawnOptions, options) === "attach-only") {
+      await connectSession()
+      return
+    }
+
+    fit()
+    try {
+      const { cols, rows } = terminal.value
+      await invoke("resize_session", { sessionId, cols, rows })
+    } catch {
+      attached = false
+      await startListening()
+    }
+  }
+
+  return { terminal, init, startListening, fit, fitDeferred, redraw, ensureConnected, dispose }
 }

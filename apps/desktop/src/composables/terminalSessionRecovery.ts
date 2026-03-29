@@ -10,6 +10,13 @@ export function getTerminalRecoveryMode(
   return isTaskTerminal ? "attach-only" : "spawn-on-missing";
 }
 
+export function shouldReattachOnDaemonReady(
+  spawnOptions?: SpawnOptions,
+  options?: TerminalOptions,
+): boolean {
+  return getTerminalRecoveryMode(spawnOptions, options) === "attach-only";
+}
+
 export function formatAttachFailureMessage(message: string): string {
   return `\r\n\x1b[31mFailed to reconnect to existing session: ${message}\x1b[0m\r\n`;
 }

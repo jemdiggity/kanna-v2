@@ -12,12 +12,13 @@ const props = defineProps<{
 }>()
 
 const containerRef = ref<HTMLElement | null>(null)
-const { terminal, init, startListening, fit, fitDeferred, redraw, dispose } = useTerminal(props.sessionId, props.spawnOptions, { kittyKeyboard: props.kittyKeyboard, agentProvider: props.agentProvider, worktreePath: props.worktreePath })
+const { terminal, init, startListening, fit, fitDeferred, redraw, ensureConnected, dispose } = useTerminal(props.sessionId, props.spawnOptions, { kittyKeyboard: props.kittyKeyboard, agentProvider: props.agentProvider, worktreePath: props.worktreePath })
 
 defineExpose({
   focus: () => terminal.value?.focus(),
   fit,
   redraw,
+  ensureConnected,
 })
 
 let resizeObserver: ResizeObserver | null = null

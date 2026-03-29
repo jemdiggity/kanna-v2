@@ -24,34 +24,37 @@ interface PtySessionConfig {
   prompt?: string;
   agentProvider?: string;
 }
+interface TerminalViewInstance extends ComponentPublicInstance {
+  fit?: () => void;
+  focus?: () => void;
+  ensureConnected?: () => Promise<void>;
+}
 const visitedPtySessions = ref(new Map<string, PtySessionConfig>());
-const termRefs = ref<Record<string, ComponentPublicInstance | null>>({});
+const termRefs = ref<Record<string, TerminalViewInstance | null>>({});
 
 watch(
   () => [props.sessionId, props.agentType] as const,
   ([newId, agentType], oldVal) => {
     const oldId = oldVal?.[0];
     if (!newId || agentType !== "pty") return;
+    const wasVisited = visitedPtySessions.value.has(newId);
 
-    // Register new sessions; existing ones keep their original config
-    if (!visitedPtySessions.value.has(newId)) {
-      visitedPtySessions.value.set(newId, {
-        worktreePath: props.worktreePath,
-        prompt: props.prompt,
-        agentProvider: props.agentProvider,
-      });
-    }
+    visitedPtySessions.value.set(newId, {
+      worktreePath: props.worktreePath,
+      prompt: props.prompt,
+      agentProvider: props.agentProvider,
+    });
 
-    // Returning to an already-mounted terminal: just fit + focus.
-    // xterm.js buffer is preserved via v-show, so no SIGWINCH needed.
-    // ResizeObserver handles fit when container becomes visible, but we
-    // call fit() explicitly for the case where dimensions haven't changed.
-    if (newId !== oldId && visitedPtySessions.value.has(newId)) {
-      nextTick(() => {
+    // Returning to an already-mounted terminal: keep the existing xterm buffer,
+    // but probe the backend connection in case the daemon restarted while this
+    // terminal was hidden. Only reconnect on demand.
+    if (oldId && newId !== oldId && wasVisited) {
+      nextTick(async () => {
         const ref = termRefs.value[newId];
         if (ref) {
-          (ref as any).fit?.();
-          (ref as any).focus?.();
+          await ref.ensureConnected?.();
+          ref.fit?.();
+          ref.focus?.();
         }
       });
     }
@@ -59,7 +62,7 @@ watch(
   { immediate: true }
 );
 
-function setTermRef(sessionId: string, el: ComponentPublicInstance | null) {
+function setTermRef(sessionId: string, el: TerminalViewInstance | null) {
   termRefs.value[sessionId] = el;
 }
 

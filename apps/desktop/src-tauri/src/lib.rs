@@ -502,52 +502,6 @@ fn spawn_event_bridge(app: tauri::AppHandle, daemon_state: DaemonState) {
     });
 }
 
-/// Listen for `daemon_ready` events and re-attach all tracked sessions.
-/// After a daemon restart, sessions survive (child processes are unaware),
-/// but the attach streaming connections are lost. This coordinator re-establishes
-/// them so terminal output resumes without user intervention.
-fn spawn_reattach_coordinator(app: tauri::AppHandle, attached: AttachedSessions) {
-    use tauri::Listener;
-    let app_listener = app.clone();
-    let _ = app_listener.listen("daemon_ready", move |_| {
-        let app = app.clone();
-        let attached = attached.clone();
-        tauri::async_runtime::spawn(async move {
-            let session_ids: Vec<String> = attached.lock().await.iter().cloned().collect();
-            if session_ids.is_empty() {
-                return;
-            }
-            eprintln!(
-                "[reattach] re-attaching {} sessions after daemon restart",
-                session_ids.len()
-            );
-            for sid in session_ids {
-                match commands::daemon::attach_session_inner(&app, sid.clone(), &attached, None).await {
-                    Ok(()) => {
-                        eprintln!("[reattach] re-attached session {}", sid);
-                        // Don't send Resize here — the frontend sends the correct
-                        // dimensions after its TerminalView mounts and calls fit().
-                        // A hardcoded 80×24 resize on a temporary connection would
-                        // leave a stale entry in session_sizes, permanently capping
-                        // the PTY at 80×24 via smallest-client-wins.
-                    }
-                    Err(e) => {
-                        // Only remove from tracking if the session definitively doesn't exist.
-                        // Transient errors (connection issues, timing) should leave the session
-                        // tracked so it can be re-attached on the next daemon_ready.
-                        if e.contains("session not found") || e.contains("not found") {
-                            eprintln!("[reattach] session {} not found after handoff, removing from tracking", sid);
-                            attached.lock().await.remove(&sid);
-                        } else {
-                            eprintln!("[reattach] failed to re-attach {} (will retry on next daemon_ready): {}", sid, e);
-                        }
-                    }
-                }
-            }
-        });
-    });
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let mut builder = tauri::Builder::default()
@@ -633,12 +587,8 @@ pub fn run() {
             spawn_pipeline_listener(app.handle());
 
             let handle = app.handle().clone();
-            let handle_reattach = handle.clone();
             let daemon_state: DaemonState = app.handle().state::<DaemonState>().inner().clone();
             let daemon_state_bridge = daemon_state.clone();
-            let attached: AttachedSessions =
-                app.handle().state::<AttachedSessions>().inner().clone();
-            spawn_reattach_coordinator(handle_reattach, attached);
             tauri::async_runtime::spawn(async move {
                 ensure_daemon_running().await;
                 // Clear stale connection so commands reconnect to the new daemon

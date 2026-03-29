@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   formatAttachFailureMessage,
   getTerminalRecoveryMode,
+  shouldReattachOnDaemonReady,
 } from "./terminalSessionRecovery";
 
 describe("getTerminalRecoveryMode", () => {
@@ -31,5 +32,27 @@ describe("formatAttachFailureMessage", () => {
     const message = formatAttachFailureMessage("session not found");
     expect(message).toContain("Failed to reconnect");
     expect(message).toContain("session not found");
+  });
+});
+
+describe("shouldReattachOnDaemonReady", () => {
+  const spawnFn = async () => {};
+
+  it("re-attaches mounted task PTY terminals after daemon restart", () => {
+    expect(
+      shouldReattachOnDaemonReady(
+        { cwd: "/tmp/task", prompt: "do work", spawnFn },
+        { agentProvider: "copilot", worktreePath: "/tmp/task" },
+      )
+    ).toBe(true);
+  });
+
+  it("does not re-attach shell terminals after daemon restart", () => {
+    expect(
+      shouldReattachOnDaemonReady(
+        { cwd: "/tmp/repo", prompt: "", spawnFn },
+        undefined,
+      )
+    ).toBe(false);
   });
 });
