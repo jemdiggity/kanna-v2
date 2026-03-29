@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import {
   getPreferredAgentProviders,
   normalizeAgentProviderCandidates,
+  requireResolvedAgentProvider,
   resolveAgentProvider,
   type AgentProviderAvailability,
 } from "./agent-provider";
@@ -46,6 +47,12 @@ describe("resolveAgentProvider", () => {
       resolveAgentProvider(["codex", "copilot"], { claude: true, copilot: false, codex: false }),
     ).toThrow("None of the configured agent providers are available: codex, copilot.");
   });
+
+  it("single unavailable provider throws with that provider in the message", () => {
+    expect(() =>
+      resolveAgentProvider("codex", { claude: true, copilot: true, codex: false }),
+    ).toThrow("None of the configured agent providers are available: codex.");
+  });
 });
 
 describe("getPreferredAgentProviders", () => {
@@ -72,5 +79,17 @@ describe("getPreferredAgentProviders", () => {
     expect(() =>
       resolveAgentProvider(selected, { claude: true, copilot: true, codex: false }),
     ).toThrow("None of the configured agent providers are available: codex.");
+  });
+});
+
+describe("requireResolvedAgentProvider", () => {
+  it("returns provider when resolved", () => {
+    expect(requireResolvedAgentProvider("codex")).toBe("codex");
+  });
+
+  it("throws when provider is missing", () => {
+    expect(() => requireResolvedAgentProvider(undefined)).toThrow(
+      "No agent provider resolved for PTY spawn.",
+    );
   });
 });

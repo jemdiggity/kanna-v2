@@ -16,6 +16,7 @@ import type { RepoConfig, CustomTaskConfig } from "@kanna/core";
 import type { AgentProvider, DbHandle, PipelineItem, Repo } from "@kanna/db";
 import {
   getPreferredAgentProviders,
+  requireResolvedAgentProvider,
   resolveAgentProvider,
   type AgentProviderAvailability,
 } from "./agent-provider";
@@ -852,7 +853,7 @@ export const useKannaStore = defineStore("kanna", () => {
     } catch (e) {
       console.error("[store] failed to get pipeline socket path:", e);
     }
-    const provider = options?.agentProvider ?? "claude";
+    const provider = requireResolvedAgentProvider(options?.agentProvider);
     const escapedPrompt = prompt.replace(/'/g, "'\\''");
     let agentCmd: string;
 
@@ -1132,18 +1133,26 @@ export const useKannaStore = defineStore("kanna", () => {
       const repo = repos.value.find((r) => r.id === item.repo_id);
       if (!repo) return;
       await reopenPipelineItem(_db, item.id);
-      await updatePipelineItemActivity(_db, item.id, "working");
       await selectItem(item.id);
       bump();
       if (item.branch) {
         const worktreePath = `${repo.path}/.kanna-worktrees/${item.branch}`;
         try {
+          const agentProvider = resolveAgentProvider(
+            item.agent_provider,
+            await getAgentProviderAvailability(),
+          );
           await spawnPtySession(item.id, worktreePath, "", 80, 24, {
-            agentProvider: item.agent_provider || "claude",
+            agentProvider,
             ...(item.claude_session_id ? { resumeSessionId: item.claude_session_id } : {}),
           });
+          await updatePipelineItemActivity(_db, item.id, "working");
+          bump();
         } catch (spawnErr) {
-          console.warn("[store] session re-spawn after undo failed:", spawnErr);
+          await updatePipelineItemActivity(_db, item.id, "idle");
+          bump();
+          console.error("[store] session re-spawn after undo failed:", spawnErr);
+          toast.error(`${tt('toasts.agentStartFailed')}: ${spawnErr instanceof Error ? spawnErr.message : spawnErr}`);
         }
       }
       selectedItemId.value = item.id;
@@ -1518,25 +1527,39 @@ export const useKannaStore = defineStore("kanna", () => {
       }
     }
 
-    await _db.execute(
-      `UPDATE pipeline_item
-       SET branch = ?, port_offset = ?, port_env = ?, base_ref = ?,
-           tags = '[]', activity = 'working',
-           activity_changed_at = datetime('now'), updated_at = datetime('now')
-       WHERE id = ?`,
-      [branch, portOffset, Object.keys(portEnv).length > 0 ? JSON.stringify(portEnv) : null, resolvedBaseRef, id],
-    );
-
-    bump();
+    let agentProvider: AgentProvider;
+    try {
+      agentProvider = resolveAgentProvider(
+        item.agent_provider,
+        await getAgentProviderAvailability(),
+      );
+    } catch (e) {
+      console.error("[store] startBlockedTask: agent provider resolution failed:", e);
+      toast.error(`${tt('toasts.agentStartFailed')}: ${e instanceof Error ? e.message : e}`);
+      return;
+    }
 
     try {
+      await _db.execute(
+        `UPDATE pipeline_item
+         SET branch = ?, port_offset = ?, port_env = ?, base_ref = ?,
+             tags = '[]', activity = 'working',
+             activity_changed_at = datetime('now'), updated_at = datetime('now')
+         WHERE id = ?`,
+        [branch, portOffset, Object.keys(portEnv).length > 0 ? JSON.stringify(portEnv) : null, resolvedBaseRef, id],
+      );
+      bump();
+
       await spawnPtySession(id, worktreePath, augmentedPrompt, 80, 24, {
-        agentProvider: item.agent_provider || "claude",
+        agentProvider,
         portEnv,
         setupCmds: repoConfig.setup || [],
       });
     } catch (e) {
-      console.warn("[store] startBlockedTask PTY pre-spawn failed, will retry on mount:", e);
+      await updatePipelineItemActivity(_db, id, "idle");
+      bump();
+      console.error("[store] startBlockedTask PTY spawn failed:", e);
+      toast.error(`${tt('toasts.agentStartFailed')}: ${e instanceof Error ? e.message : e}`);
     }
   }
 
@@ -1566,7 +1589,7 @@ export const useKannaStore = defineStore("kanna", () => {
       pr_url: null,
       branch: null,
       agent_type: originalAgentType,
-      agent_provider: originalAgentProvider || "claude",
+      agent_provider: originalAgentProvider ?? null,
       port_offset: null,
       port_env: null,
       activity: "idle",

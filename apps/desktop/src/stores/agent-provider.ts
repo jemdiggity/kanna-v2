@@ -45,3 +45,11 @@ export function resolveAgentProvider(
 
   throw new Error(`None of the configured agent providers are available: ${candidates.join(", ")}.`);
 }
+
+export function requireResolvedAgentProvider(provider: AgentProvider | undefined): AgentProvider {
+  if (!provider) {
+    throw new Error("No agent provider resolved for PTY spawn.");
+  }
+
+  return provider;
+}
