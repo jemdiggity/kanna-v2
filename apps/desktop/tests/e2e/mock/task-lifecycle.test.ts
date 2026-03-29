@@ -22,6 +22,53 @@ describe("task lifecycle", () => {
     await client.deleteSession();
   });
 
+  it("logs when the new task becomes visible in store state", async () => {
+    const result = await client.executeAsync<string[] | string>(
+      `const cb = arguments[arguments.length - 1];
+       try {
+         const logs = [];
+         const originalLog = console.log;
+         console.log = function(...args) {
+           const line = args.map(function(arg) {
+             return typeof arg === "string" ? arg : JSON.stringify(arg);
+           }).join(" ");
+           logs.push(line);
+           return originalLog.apply(this, args);
+         };
+         const ctx = document.getElementById("app").__vue_app__._instance.setupState;
+         const repoId = ctx.selectedRepoId.value || ctx.selectedRepoId;
+         const repos = ctx.repos.value || ctx.repos;
+         const repo = repos.find(function(r) { return r.id === repoId; });
+         if (!repo) {
+           console.log = originalLog;
+           cb("no repo");
+           return;
+         }
+         ctx.createItem(repoId, repo.path, "Measure visibility", "sdk")
+           .then(async function() {
+             const deadline = Date.now() + 5000;
+             while (Date.now() < deadline) {
+               if (logs.some(function(line) { return line.includes("[perf:createItem] items refresh -> visible:"); })) {
+                 console.log = originalLog;
+                 cb(logs);
+                 return;
+               }
+               await new Promise(function(resolve) { setTimeout(resolve, 50); });
+             }
+             console.log = originalLog;
+             cb(logs);
+           })
+           .catch(function(e) {
+             console.log = originalLog;
+             cb("err:" + e);
+           });
+       } catch(e) { cb("outer:" + e); }`
+    );
+
+    expect(Array.isArray(result)).toBe(true);
+    expect((result as string[]).some((line) => line.includes("[perf:createItem] items refresh -> visible:"))).toBe(true);
+  });
+
   it("creates a task that appears in sidebar", async () => {
     // Use SDK mode so we can verify AgentView output (PTY mode shows TerminalView)
     const result = await client.executeAsync<string>(

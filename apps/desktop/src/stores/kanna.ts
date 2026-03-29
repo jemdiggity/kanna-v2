@@ -1,4 +1,4 @@
-import { ref, computed } from "vue";
+import { ref, computed, watch, nextTick } from "vue";
 import { defineStore } from "pinia";
 import { computedAsync, watchDebounced } from "@vueuse/core";
 import { invoke } from "../invoke";
@@ -75,6 +75,9 @@ export const useKannaStore = defineStore("kanna", () => {
   const refreshKey = ref(0);
   function bump() { refreshKey.value++; }
 
+  const pendingCreateVisibility = new Map<string, { bumpAt: number }>();
+  let refreshRunId = 0;
+
   function emitTaskSelected(itemId: string) {
     const item = items.value.find((i) => i.id === itemId);
     insertOperatorEvent(_db, "task_selected", itemId, item?.repo_id ?? null).catch((e) =>
@@ -92,9 +95,14 @@ export const useKannaStore = defineStore("kanna", () => {
   const items = computedAsync<PipelineItem[]>(async () => {
     refreshKey.value;
     if (!_db || repos.value.length === 0) return [];
+    const runId = ++refreshRunId;
+    const refreshStart = performance.now();
+    console.log(`[perf:items] refresh start #${runId}: repos=${repos.value.length}`);
     const loaded: PipelineItem[] = [];
     for (const repo of repos.value) {
+      const repoStart = performance.now();
       loaded.push(...await listPipelineItems(_db, repo.id));
+      console.log(`[perf:items] refresh repo #${runId} ${repo.id}: ${(performance.now() - repoStart).toFixed(1)}ms`);
       // Populate stage_order cache from repo config
       if (!stageOrderCache.has(repo.path)) {
         try {
@@ -105,8 +113,31 @@ export const useKannaStore = defineStore("kanna", () => {
         } catch { /* no config — no custom order */ }
       }
     }
+    console.log(
+      `[perf:items] refresh done #${runId}: ${(performance.now() - refreshStart).toFixed(1)}ms total, items=${loaded.length}`
+    );
+    for (const item of loaded) {
+      const pending = pendingCreateVisibility.get(item.id);
+      if (!pending) continue;
+      console.log(`[perf:createItem] items refresh -> visible: ${(performance.now() - pending.bumpAt).toFixed(1)}ms (id=${item.id})`);
+      pendingCreateVisibility.delete(item.id);
+    }
     return loaded;
   }, []);
+
+  watch(items, async (loaded) => {
+    if (!loaded.length) return;
+    const visibleIds = loaded
+      .map((item) => item.id)
+      .filter((id) => pendingCreateVisibility.has(id));
+    if (!visibleIds.length) return;
+    await nextTick();
+    for (const id of visibleIds) {
+      const pending = pendingCreateVisibility.get(id);
+      if (!pending) continue;
+      console.log(`[perf:createItem] nextTick after visible: ${(performance.now() - pending.bumpAt).toFixed(1)}ms (id=${id})`);
+    }
+  });
 
   // ── Selection & navigation history ──────────────────────────────
   const selectedRepoId = ref<string | null>(null);
@@ -539,7 +570,9 @@ export const useKannaStore = defineStore("kanna", () => {
     console.log(`[perf:createItem] DB insert: ${(performance.now() - t1).toFixed(1)}ms`);
 
     pendingSetupIds.value = [...pendingSetupIds.value, id];
+    pendingCreateVisibility.set(id, { bumpAt: performance.now() });
     bump();
+    console.log(`[perf:createItem] bump -> waiting for items refresh (id=${id})`);
     console.log(`[perf:createItem] TOTAL (modal → bump): ${(performance.now() - t0).toFixed(1)}ms`);
 
     // Worktree creation, config read, and agent spawn run in the background.
