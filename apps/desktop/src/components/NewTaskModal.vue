@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted } from "vue";
+import { invoke } from "../invoke";
 import type { AgentProvider } from "@kanna/db";
 import { useModalZIndex } from "../composables/useModalZIndex";
 const { zIndex } = useModalZIndex();
@@ -21,14 +22,35 @@ const selectedPipeline = ref<string>(props.defaultPipeline ?? props.pipelines?.[
 const textareaRef = ref<HTMLTextAreaElement>();
 
 const providers: Array<AgentProvider> = ["claude", "copilot", "codex"];
+const availableProviders = ref<Array<AgentProvider>>([...providers]);
 
 function cycleProvider(direction: -1 | 1) {
-  const idx = providers.indexOf(agentProvider.value);
-  agentProvider.value = providers[(idx + direction + providers.length) % providers.length];
+  const idx = availableProviders.value.indexOf(agentProvider.value);
+  if (idx === -1) return;
+  agentProvider.value = availableProviders.value[(idx + direction + availableProviders.value.length) % availableProviders.value.length];
 }
 
-onMounted(() => {
+onMounted(async () => {
   textareaRef.value?.focus();
+  try {
+    // Detect installed CLIs and filter options
+    const checks = await Promise.all(providers.map(async (p) => {
+      try { await invoke("which_binary", { name: p }); return p; } catch { return null as AgentProvider | null; }
+    }));
+    const found = checks.filter(Boolean) as AgentProvider[];
+    if (found.length > 0) availableProviders.value = found;
+    else availableProviders.value = [...providers]; // if none detected, keep all options
+
+    // Ensure selected provider is available; prefer defaultAgentProvider when provided
+    const preferred = props.defaultAgentProvider ?? agentProvider.value;
+    if (availableProviders.value.includes(preferred)) {
+      agentProvider.value = preferred;
+    } else {
+      agentProvider.value = availableProviders.value[0];
+    }
+  } catch (e) {
+    console.debug("[newtask] cli detection failed:", e);
+  }
 });
 
 function handleSubmit() {
@@ -70,17 +92,11 @@ function handleKeydown(e: KeyboardEvent) {
         <h3>{{ $t('tasks.newTask') }}</h3>
         <div class="agent-toggle">
           <button
-            :class="['toggle-btn', { active: agentProvider === 'claude' }]"
-            @click="agentProvider = 'claude'"
-          >Claude</button>
-          <button
-            :class="['toggle-btn', { active: agentProvider === 'copilot' }]"
-            @click="agentProvider = 'copilot'"
-          >Copilot</button>
-          <button
-            :class="['toggle-btn', { active: agentProvider === 'codex' }]"
-            @click="agentProvider = 'codex'"
-          >Codex</button>
+            v-for="prov in availableProviders"
+            :key="prov"
+            :class="['toggle-btn', { active: agentProvider === prov }]"
+            @click="agentProvider = prov"
+          >{{ prov === 'claude' ? 'Claude' : prov === 'copilot' ? 'Copilot' : 'Codex' }}</button>
         </div>
       </div>
       <div class="modal-body">
