@@ -88,18 +88,11 @@ impl SessionScanState {
                 }
             }
             AgentProvider::Copilot => {
-                if text.contains("Thinking") {
+                if text.contains("Esc to cancel") {
                     if self.state != AgentState::Working {
                         self.state = AgentState::Working;
+                        events.push("CopilotThinking");
                     }
-                    events.push("CopilotThinking");
-                }
-                let has_idle_prompt = text.contains('\u{276F}');
-                if has_idle_prompt && !text.contains("Thinking") {
-                    if self.state != AgentState::Idle {
-                        self.state = AgentState::Idle;
-                    }
-                    events.push("CopilotIdle");
                 }
                 if text.contains("Operation cancelled") {
                     events.push("Interrupted");
@@ -116,11 +109,17 @@ impl SessionScanState {
         events
     }
 
-    /// Called by the timer. Just clears stale buffer data.
-    /// State transitions are handled deterministically in on_fragment.
+    /// Called by the timer after a period of silence.
+    /// For Copilot, used to detect the working→idle transition since Copilot
+    /// doesn't emit a reliable idle prompt — it just stops outputting "Esc to cancel".
     fn check_idle(&mut self) -> Vec<&'static str> {
         self.buffer.clear();
-        Vec::new()
+        let mut events = Vec::new();
+        if self.provider == AgentProvider::Copilot && self.state == AgentState::Working {
+            self.state = AgentState::Idle;
+            events.push("CopilotIdle");
+        }
+        events
     }
 }
 

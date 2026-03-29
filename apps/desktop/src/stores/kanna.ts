@@ -788,7 +788,17 @@ export const useKannaStore = defineStore("kanna", () => {
       }
       // maxTurns and maxBudgetUsd have no Copilot equivalent — skip silently
 
-      agentCmd = `copilot ${copilotFlags.join(" ")} -i '${escapedPrompt}'`;
+      // Session ID: always pass --resume. Copilot creates a new session if the ID
+      // doesn't exist yet, or resumes it if it does.
+      const copilotSessionId = options?.resumeSessionId || crypto.randomUUID();
+      if (!options?.resumeSessionId) {
+        await updateClaudeSessionId(_db, sessionId, copilotSessionId);
+      }
+      copilotFlags.push(`--resume=${copilotSessionId}`);
+
+      agentCmd = options?.resumeSessionId
+        ? `copilot ${copilotFlags.join(" ")}`
+        : `copilot ${copilotFlags.join(" ")} -i '${escapedPrompt}'`;
     } else {
       // Claude: inject hooks via --settings flag
       const flags: string[] = [];
