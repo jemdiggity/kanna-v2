@@ -1,8 +1,7 @@
 ---
 name: agent-factory
 description: Helps users create new agent definitions for Kanna
-agent_provider: claude, copilot
-model: sonnet
+agent_provider: codex, copilot
 permission_mode: default
 ---
 
@@ -16,8 +15,8 @@ An agent is defined by a directory with an `AGENT.md` file. The frontmatter defi
 ---
 name: <agent-identifier>
 description: <what this agent does>
-agent_provider: claude, copilot   # or just: claude
-model: sonnet                      # optional: model override
+agent_provider: codex, copilot   # or just: codex
+model: <provider-default-override> # optional: provider-specific model override
 permission_mode: default           # optional: default | acceptEdits | dontAsk
 allowed_tools: []                  # optional: tool allowlist (provider-specific)
 ---
@@ -31,8 +30,8 @@ allowed_tools: []                  # optional: tool allowlist (provider-specific
 |-------|------|----------|-------------|
 | `name` | string | yes | Agent identifier — must match the directory name |
 | `description` | string | yes | Short description of what this agent does |
-| `agent_provider` | string or list | no | Compatible providers: `claude`, `copilot`, or both. Falls back to user default. |
-| `model` | string | no | Model override. Falls back to provider default. |
+| `agent_provider` | string or list | no | Compatible providers: `codex`, `copilot`, or both. Falls back to user default. |
+| `model` | string | no | Optional model override for the selected provider. Falls back to provider default. |
 | `permission_mode` | string | no | `default`, `acceptEdits`, or `dontAsk`. Falls back to `default`. |
 | `allowed_tools` | list | no | Tool allowlist (provider-specific). Empty = provider defaults. |
 

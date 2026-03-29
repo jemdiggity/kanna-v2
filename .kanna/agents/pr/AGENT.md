@@ -1,8 +1,7 @@
 ---
 name: pr
 description: Creates a GitHub pull request for a completed task branch
-agent_provider: claude, copilot
-model: sonnet
+agent_provider: codex, copilot
 permission_mode: default
 ---
 

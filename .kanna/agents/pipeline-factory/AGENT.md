@@ -1,8 +1,7 @@
 ---
 name: pipeline-factory
 description: Helps users create new pipeline definitions for Kanna
-agent_provider: claude, copilot
-model: sonnet
+agent_provider: codex, copilot
 permission_mode: default
 ---
 
@@ -28,7 +27,7 @@ A pipeline is a JSON file that defines an ordered list of stages a task flows th
       "description": "<human-readable description>",
       "agent": "<agent-directory-name>",
       "prompt": "<stage-specific prompt, can use $TASK_PROMPT and $PREV_RESULT>",
-      "agent_provider": "<optional override: claude | copilot>",
+      "agent_provider": "<optional override: codex | copilot>",
       "environment": "<optional: env-name from environments above>",
       "transition": "manual"
     }
@@ -53,7 +52,7 @@ A pipeline is a JSON file that defines an ordered list of stages a task flows th
 | `description` | string | no | Human-readable description |
 | `agent` | string | no | Agent directory name (resolves to `.kanna/agents/{name}/AGENT.md`). Omit for gate stages (no agent spawns, just waits for manual advance). |
 | `prompt` | string | no | Stage-specific prompt appended to the agent's base instructions. Can reference `$TASK_PROMPT` (user's original task prompt) and `$PREV_RESULT` (previous stage's completion summary). |
-| `agent_provider` | string | no | Override agent provider for this stage: `claude` or `copilot` |
+| `agent_provider` | string | no | Override agent provider for this stage: `codex` or `copilot` |
 | `environment` | string | no | Environment name from the `environments` map. Null = no setup/teardown. |
 | `transition` | `"manual"` or `"auto"` | yes | How the task advances to the next stage. `auto` advances when the agent calls `kanna-cli stage-complete --status success`. `manual` requires user action. |
 
