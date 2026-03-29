@@ -226,6 +226,7 @@
     "agentVersion": "v{version}",
     "agentClaudeName": "Claude Code",
     "agentCopilotName": "GitHub Copilot",
+    "agentCodexName": "OpenAI Codex",
     "agentCopied": "コピーしました！",
     "noTaskSelected": "タスクが選択されていません",
     "noTaskHint": "サイドバーからタスクを選択するか、{shortcut} で新規作成してください。"

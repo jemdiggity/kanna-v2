@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
+import type { AgentProvider } from "@kanna/db"
 import { useModalZIndex } from '../composables/useModalZIndex'
 
 useI18n()
@@ -14,7 +15,7 @@ defineProps<{
     ideCommand: string
     locale: string
     devLingerTerminals: boolean
-    defaultAgentProvider: "claude" | "copilot"
+    defaultAgentProvider: AgentProvider
   }
 }>()
 
@@ -118,6 +119,7 @@ defineExpose({ cycleTab })
           >
             <option value="claude">Claude</option>
             <option value="copilot">Copilot</option>
+            <option value="codex">Codex</option>
           </select>
         </div>
       </div>

@@ -36,11 +36,13 @@ interface AgentCliStatus {
 
 const claude = ref<AgentCliStatus>({ installed: false });
 const copilot = ref<AgentCliStatus>({ installed: false });
+const codex = ref<AgentCliStatus>({ installed: false });
 const copiedAgent = ref<string | null>(null);
 
 const INSTALL_COMMANDS: Record<string, string> = {
   claude: "curl -fsSL https://claude.ai/install.sh | bash",
   copilot: "curl -fsSL https://gh.io/copilot-install | bash",
+  codex: "npm install -g @openai/codex",
 };
 
 function parseSemver(output: string): string | undefined {
@@ -67,9 +69,10 @@ async function checkCli(name: string): Promise<AgentCliStatus> {
 }
 
 async function checkAllClis() {
-  const [c, p] = await Promise.all([checkCli("claude"), checkCli("copilot")]);
+  const [c, p, x] = await Promise.all([checkCli("claude"), checkCli("copilot"), checkCli("codex")]);
   claude.value = c;
   copilot.value = p;
+  codex.value = x;
 }
 
 watch(() => props.hasRepos, (has) => {
@@ -133,6 +136,7 @@ async function copyCommand(agent: string) {
             <div v-for="agent in [
               { key: 'claude', nameKey: 'mainPanel.agentClaudeName', status: claude },
               { key: 'copilot', nameKey: 'mainPanel.agentCopilotName', status: copilot },
+              { key: 'codex', nameKey: 'mainPanel.agentCodexName', status: codex },
             ]" :key="agent.key" class="agent-card">
               <div class="agent-header">
                 <span class="agent-name">{{ $t(agent.nameKey) }}</span>

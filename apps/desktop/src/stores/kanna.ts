@@ -13,7 +13,7 @@ import { getNextStage } from "../../../../packages/core/src/pipeline/types";
 import type { PipelineDefinition, AgentDefinition, StageCompleteResult } from "../../../../packages/core/src/pipeline/pipeline-types";
 import { createNavigationHistory } from "../composables/useNavigationHistory";
 import type { RepoConfig, CustomTaskConfig } from "@kanna/core";
-import type { DbHandle, PipelineItem, Repo } from "@kanna/db";
+import type { AgentProvider, DbHandle, PipelineItem, Repo } from "@kanna/db";
 import i18n from '../i18n';
 import {
   listRepos, insertRepo, findRepoByPath,
@@ -51,7 +51,7 @@ function hasTag(item: { tags: string }, tag: string): boolean {
 
 
 export interface PtySpawnOptions {
-  agentProvider?: "claude" | "copilot";
+  agentProvider?: AgentProvider;
   model?: string;
   permissionMode?: string;
   allowedTools?: string[];
@@ -429,7 +429,7 @@ export const useKannaStore = defineStore("kanna", () => {
     repoPath: string,
     prompt: string,
     agentType: "pty" | "sdk" = "pty",
-    opts?: { baseBranch?: string; tags?: string[]; pipelineName?: string; stage?: string; customTask?: CustomTaskConfig; agentProvider?: "claude" | "copilot"; model?: string; permissionMode?: string; allowedTools?: string[] },
+    opts?: { baseBranch?: string; tags?: string[]; pipelineName?: string; stage?: string; customTask?: CustomTaskConfig; agentProvider?: AgentProvider; model?: string; permissionMode?: string; allowedTools?: string[] },
   ) {
     const t0 = performance.now();
     const id = generateId();
@@ -553,7 +553,7 @@ export const useKannaStore = defineStore("kanna", () => {
     id: string, repoPath: string, worktreePath: string,
     branch: string, portOffset: number, prompt: string,
     agentType: "pty" | "sdk",
-    opts?: { baseBranch?: string; tags?: string[]; pipelineName?: string; stage?: string; customTask?: CustomTaskConfig; agentProvider?: "claude" | "copilot"; model?: string; permissionMode?: string; allowedTools?: string[] },
+    opts?: { baseBranch?: string; tags?: string[]; pipelineName?: string; stage?: string; customTask?: CustomTaskConfig; agentProvider?: AgentProvider; model?: string; permissionMode?: string; allowedTools?: string[] },
   ) {
     const s0 = performance.now();
     try {
@@ -799,6 +799,22 @@ export const useKannaStore = defineStore("kanna", () => {
       agentCmd = options?.resumeSessionId
         ? `copilot ${copilotFlags.join(" ")}`
         : `copilot ${copilotFlags.join(" ")} -i '${escapedPrompt}'`;
+    } else if (provider === "codex") {
+      // Build Codex flags
+      const codexFlags: string[] = [];
+      if (!options?.permissionMode || options.permissionMode === "dontAsk") {
+        // Skip all approvals and sandbox — equivalent to Claude's --dangerously-skip-permissions
+        codexFlags.push("--dangerously-bypass-approvals-and-sandbox");
+      } else {
+        // Auto-approve with workspace-write sandbox (allows edits, asks for risky commands)
+        codexFlags.push("--full-auto");
+      }
+      if (options?.model) codexFlags.push(`-m ${options.model}`);
+      // maxTurns and maxBudgetUsd have no Codex equivalent — skip silently
+
+      agentCmd = escapedPrompt
+        ? `codex ${codexFlags.join(" ")} '${escapedPrompt}'`
+        : `codex ${codexFlags.join(" ")}`;
     } else {
       // Claude: inject hooks via --settings flag
       const flags: string[] = [];
@@ -1036,7 +1052,7 @@ export const useKannaStore = defineStore("kanna", () => {
         const worktreePath = `${repo.path}/.kanna-worktrees/${item.branch}`;
         try {
           await spawnPtySession(item.id, worktreePath, "", 80, 24, {
-            agentProvider: (item.agent_provider as "claude" | "copilot") || "claude",
+            agentProvider: item.agent_provider || "claude",
             ...(item.claude_session_id ? { resumeSessionId: item.claude_session_id } : {}),
           });
         } catch (spawnErr) {
@@ -1088,7 +1104,7 @@ export const useKannaStore = defineStore("kanna", () => {
 
     // Build the next stage's prompt
     let stagePrompt = "";
-    const agentProvider = item.agent_provider as "claude" | "copilot" | undefined;
+    const agentProvider = item.agent_provider;
     let agentOpts: Record<string, unknown> = {};
 
     if (nextStage.agent) {
@@ -1104,7 +1120,7 @@ export const useKannaStore = defineStore("kanna", () => {
         // Determine agent provider: stage override > agent definition > item default
         const resolvedProvider = (nextStage.agent_provider ?? (
           Array.isArray(agent.agent_provider) ? agent.agent_provider[0] : agent.agent_provider
-        ) ?? agentProvider) as "claude" | "copilot" | undefined;
+        ) ?? agentProvider) as AgentProvider | undefined;
 
         agentOpts = {
           agentProvider: resolvedProvider,
@@ -1188,7 +1204,7 @@ export const useKannaStore = defineStore("kanna", () => {
         const worktreePath = `${repo.path}/.kanna-worktrees/${item.branch}`;
         const agentProvider = (currentStage.agent_provider ?? (
           Array.isArray(agent.agent_provider) ? agent.agent_provider[0] : agent.agent_provider
-        ) ?? item.agent_provider) as "claude" | "copilot";
+        ) ?? item.agent_provider) as AgentProvider;
 
         await invoke("kill_session", { sessionId: taskId }).catch((e: unknown) =>
           console.error("[store] kill_session before rerun failed:", e));
@@ -1418,7 +1434,7 @@ export const useKannaStore = defineStore("kanna", () => {
 
     try {
       await spawnPtySession(id, worktreePath, augmentedPrompt, 80, 24, {
-        agentProvider: (item.agent_provider as "claude" | "copilot") || "claude",
+        agentProvider: item.agent_provider || "claude",
         portEnv,
         setupCmds: repoConfig.setup || [],
       });
@@ -1657,12 +1673,12 @@ export const useKannaStore = defineStore("kanna", () => {
       const item = items.value.find((i) => i.id === sessionId);
       if (!item) return;
 
-      if (hookEvent === "ClaudeWorking" || hookEvent === "CopilotThinking") {
+      if (hookEvent === "ClaudeWorking" || hookEvent === "CopilotThinking" || hookEvent === "CodexWorking") {
         if (item.activity !== "working") {
           await updatePipelineItemActivity(_db, item.id, "working");
           bump();
         }
-      } else if (hookEvent === "ClaudeIdle" || hookEvent === "CopilotIdle") {
+      } else if (hookEvent === "ClaudeIdle" || hookEvent === "CopilotIdle" || hookEvent === "CodexIdle") {
         if (item.activity === "working") {
           if (selectedItemId.value === sessionId) {
             await updatePipelineItemActivity(_db, item.id, "idle");
