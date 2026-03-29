@@ -88,7 +88,7 @@ Tasks can be pinned to the top of their repo's task list by dragging above the p
 | ⌘O | Open in IDE |
 | ⌘S | Make PR |
 | ⇧⌘M | Merge PR |
-| ⌘Delete | Close task |
+| ⇧⌘Delete | Close task |
 | ⌘Z | Undo close |
 | ⌘Opt+Up/Down | Navigate tasks |
 | ⌘B | Toggle sidebar |
