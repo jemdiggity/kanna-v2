@@ -14,6 +14,11 @@ import type { PipelineDefinition, AgentDefinition, StageCompleteResult } from ".
 import { createNavigationHistory } from "../composables/useNavigationHistory";
 import type { RepoConfig, CustomTaskConfig } from "@kanna/core";
 import type { AgentProvider, DbHandle, PipelineItem, Repo } from "@kanna/db";
+import {
+  getPreferredAgentProviders,
+  resolveAgentProvider,
+  type AgentProviderAvailability,
+} from "./agent-provider";
 import i18n from '../i18n';
 import {
   listRepos, insertRepo, findRepoByPath,
@@ -470,7 +475,7 @@ export const useKannaStore = defineStore("kanna", () => {
     // Compute effective values from custom task config
     const effectivePrompt = opts?.customTask?.prompt ?? prompt;
     const effectiveAgentType = opts?.customTask?.executionMode ?? agentType;
-    const effectiveAgentProvider = opts?.customTask?.agentProvider ?? opts?.agentProvider ?? "claude";
+    const requestedAgentProviders = opts?.customTask?.agentProvider ?? opts?.agentProvider;
     const displayName = opts?.customTask?.name ?? null;
 
     // Resolve pipeline name: explicit > repo config > "default"
@@ -489,17 +494,21 @@ export const useKannaStore = defineStore("kanna", () => {
     // Load pipeline definition and resolve stage
     let firstStageName = opts?.stage ?? "in progress";
     let pipelinePrompt = effectivePrompt;
+    let firstStageProviders: AgentProvider | AgentProvider[] | undefined;
+    let firstStageAgentProviders: AgentProvider | AgentProvider[] | undefined;
     t1 = performance.now();
     try {
       const pipeline = await loadPipeline(repoPath, pipelineName);
       if (!opts?.stage && pipeline.stages.length > 0) {
         const firstStage = pipeline.stages[0];
         firstStageName = firstStage.name;
+        firstStageProviders = firstStage.agent_provider as AgentProvider | AgentProvider[] | undefined;
 
         // Load the first stage's agent and build prompt (skip if stage was overridden — prompt already built)
         if (firstStage.agent && !opts?.stage) {
           try {
             const agent = await loadAgent(repoPath, firstStage.agent);
+            firstStageAgentProviders = agent.agent_provider as AgentProvider | AgentProvider[] | undefined;
             pipelinePrompt = buildStagePrompt(agent.prompt, firstStage.prompt, {
               taskPrompt: effectivePrompt,
             });
@@ -514,6 +523,20 @@ export const useKannaStore = defineStore("kanna", () => {
       // Fall back to defaults — pipeline missing is not fatal at creation time
     }
     console.log(`[perf:createItem] loadPipeline+loadAgent: ${(performance.now() - t1).toFixed(1)}ms`);
+
+    let effectiveAgentProvider: AgentProvider;
+    try {
+      const candidates = getPreferredAgentProviders({
+        explicit: requestedAgentProviders,
+        stage: firstStageProviders,
+        agent: firstStageAgentProviders,
+      });
+      const availability = await getAgentProviderAvailability();
+      effectiveAgentProvider = resolveAgentProvider(candidates, availability);
+    } catch (e) {
+      console.error("[store] createItem: failed to resolve agent provider:", e);
+      throw e;
+    }
 
     // Assign port offset
     const usedOffsets = new Set(
@@ -578,7 +601,17 @@ export const useKannaStore = defineStore("kanna", () => {
     // Worktree creation, config read, and agent spawn run in the background.
     // Selection is deferred until setup completes so the terminal mounts
     // only after the session exists in the daemon.
-    setupWorktreeAndSpawn(id, repoPath, worktreePath, branch, portOffset, pipelinePrompt, effectiveAgentType, opts);
+    setupWorktreeAndSpawn(
+      id,
+      repoPath,
+      worktreePath,
+      branch,
+      portOffset,
+      pipelinePrompt,
+      effectiveAgentType,
+      effectiveAgentProvider,
+      opts,
+    );
   }
 
   /** Background IO for createItem: read config, create worktree, spawn agent, then select. */
@@ -586,6 +619,7 @@ export const useKannaStore = defineStore("kanna", () => {
     id: string, repoPath: string, worktreePath: string,
     branch: string, portOffset: number, prompt: string,
     agentType: "pty" | "sdk",
+    agentProvider: AgentProvider,
     opts?: { baseBranch?: string; tags?: string[]; pipelineName?: string; stage?: string; customTask?: CustomTaskConfig; agentProvider?: AgentProvider; model?: string; permissionMode?: string; allowedTools?: string[] },
   ) {
     const s0 = performance.now();
@@ -636,7 +670,7 @@ export const useKannaStore = defineStore("kanna", () => {
           });
         } else {
           await spawnPtySession(id, worktreePath, prompt, 80, 24, {
-            agentProvider: opts?.customTask?.agentProvider ?? opts?.agentProvider,
+            agentProvider,
             model: opts?.customTask?.model,
             permissionMode: opts?.customTask?.permissionMode,
             allowedTools: opts?.customTask?.allowedTools,
@@ -684,6 +718,26 @@ export const useKannaStore = defineStore("kanna", () => {
       }
     }
     return portEnv;
+  }
+
+  async function isAgentProviderAvailable(provider: AgentProvider): Promise<boolean> {
+    try {
+      const path = await invoke<string | null>("which_binary", { name: provider });
+      return Boolean(path);
+    } catch (e) {
+      console.debug(`[store] which_binary failed for ${provider}:`, e);
+      return false;
+    }
+  }
+
+  async function getAgentProviderAvailability(): Promise<AgentProviderAvailability> {
+    const [claude, copilot, codex] = await Promise.all([
+      isAgentProviderAvailable("claude"),
+      isAgentProviderAvailable("copilot"),
+      isAgentProviderAvailable("codex"),
+    ]);
+
+    return { claude, copilot, codex };
   }
 
   async function createWorktree(repoPath: string, branch: string, worktreePath: string, baseBranch?: string) {
@@ -1137,8 +1191,7 @@ export const useKannaStore = defineStore("kanna", () => {
 
     // Build the next stage's prompt
     let stagePrompt = "";
-    const agentProvider = item.agent_provider;
-    let agentOpts: Record<string, unknown> = {};
+    let agentOpts: Record<string, unknown> = { agentProvider: item.agent_provider };
 
     if (nextStage.agent) {
       try {
@@ -1150,10 +1203,15 @@ export const useKannaStore = defineStore("kanna", () => {
           branch: item.branch ?? undefined,
         });
 
-        // Determine agent provider: stage override > agent definition > item default
-        const resolvedProvider = (nextStage.agent_provider ?? (
-          Array.isArray(agent.agent_provider) ? agent.agent_provider[0] : agent.agent_provider
-        ) ?? agentProvider) as AgentProvider | undefined;
+        const preferredProviders = getPreferredAgentProviders({
+          stage: nextStage.agent_provider as AgentProvider | AgentProvider[] | undefined,
+          agent: agent.agent_provider as AgentProvider | AgentProvider[] | undefined,
+          item: item.agent_provider,
+        });
+        const resolvedProvider = resolveAgentProvider(
+          preferredProviders,
+          await getAgentProviderAvailability(),
+        );
 
         agentOpts = {
           agentProvider: resolvedProvider,
@@ -1235,9 +1293,15 @@ export const useKannaStore = defineStore("kanna", () => {
           branch: item.branch ?? undefined,
         });
         const worktreePath = `${repo.path}/.kanna-worktrees/${item.branch}`;
-        const agentProvider = (currentStage.agent_provider ?? (
-          Array.isArray(agent.agent_provider) ? agent.agent_provider[0] : agent.agent_provider
-        ) ?? item.agent_provider) as AgentProvider;
+        const preferredProviders = getPreferredAgentProviders({
+          stage: currentStage.agent_provider as AgentProvider | AgentProvider[] | undefined,
+          agent: agent.agent_provider as AgentProvider | AgentProvider[] | undefined,
+          item: item.agent_provider,
+        });
+        const agentProvider = resolveAgentProvider(
+          preferredProviders,
+          await getAgentProviderAvailability(),
+        );
 
         await invoke("kill_session", { sessionId: taskId }).catch((e: unknown) =>
           console.error("[store] kill_session before rerun failed:", e));
