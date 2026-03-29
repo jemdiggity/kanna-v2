@@ -9,6 +9,7 @@ import { invoke } from "../invoke"
 import { listen } from "../listen"
 import { isTauri } from "../tauri-mock"
 import { isAppShortcut } from "./useKeyboardShortcuts"
+import { formatAttachFailureMessage, getTerminalRecoveryMode } from "./terminalSessionRecovery"
 
 export interface SpawnOptions {
   cwd: string
@@ -316,6 +317,7 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
 
   async function startListening() {
     const teardownId = `td-${sessionId}`
+    const recoveryMode = getTerminalRecoveryMode(spawnOptions, options)
 
     unlistenOutput = await listen(
       "terminal_output",
@@ -370,8 +372,12 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
         await invoke("resize_session", { sessionId, cols, rows }).catch(() => {})
       }
       return
-    } catch {
-      // Attach failed — session doesn't exist in daemon
+    } catch (e) {
+      if (recoveryMode === "attach-only") {
+        const msg = e instanceof Error ? e.message : String(e)
+        terminal.value?.write(formatAttachFailureMessage(msg))
+        return
+      }
     }
 
     // No existing session — spawn a new one if we have spawn options
