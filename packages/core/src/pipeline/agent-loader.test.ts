@@ -6,8 +6,8 @@ describe("parseAgentDefinition", () => {
     const content = `---
 name: My Agent
 description: Does something useful
-agent_provider: claude
-model: claude-opus-4-5
+agent_provider: codex
+model: gpt-5
 permission_mode: dontAsk
 allowed_tools:
   - Bash
@@ -19,8 +19,8 @@ You are a helpful agent. Do the task.
     const result = parseAgentDefinition(content);
     expect(result.name).toBe("My Agent");
     expect(result.description).toBe("Does something useful");
-    expect(result.agent_provider).toEqual(["claude"]);
-    expect(result.model).toBe("claude-opus-4-5");
+    expect(result.agent_provider).toEqual(["codex"]);
+    expect(result.model).toBe("gpt-5");
     expect(result.permission_mode).toBe("dontAsk");
     expect(result.allowed_tools).toEqual(["Bash", "Read"]);
     expect(result.prompt).toBe("You are a helpful agent. Do the task.");
@@ -47,26 +47,26 @@ Do the minimal thing.
     const content = `---
 name: Single Provider
 description: Has one provider
-agent_provider: claude
+agent_provider: codex
 ---
 
 Do something.
 `;
     const result = parseAgentDefinition(content);
-    expect(result.agent_provider).toEqual(["claude"]);
+    expect(result.agent_provider).toEqual(["codex"]);
   });
 
   it("parses agent_provider as a comma-separated list into array", () => {
     const content = `---
 name: Multi Provider
 description: Has multiple providers
-agent_provider: "claude, copilot"
+agent_provider: "codex, copilot"
 ---
 
 Do something.
 `;
     const result = parseAgentDefinition(content);
-    expect(result.agent_provider).toEqual(["claude", "copilot"]);
+    expect(result.agent_provider).toEqual(["codex", "copilot"]);
   });
 
   it("parses agent_provider as a YAML array into array", () => {
@@ -74,14 +74,14 @@ Do something.
 name: Array Provider
 description: Has array providers
 agent_provider:
-  - claude
+  - codex
   - copilot
 ---
 
 Do something.
 `;
     const result = parseAgentDefinition(content);
-    expect(result.agent_provider).toEqual(["claude", "copilot"]);
+    expect(result.agent_provider).toEqual(["codex", "copilot"]);
   });
 
   it("uses markdown body as the prompt field", () => {
