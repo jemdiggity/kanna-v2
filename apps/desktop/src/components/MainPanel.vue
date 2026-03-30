@@ -8,6 +8,12 @@ import TerminalTabs from "./TerminalTabs.vue";
 const props = defineProps<{
   item: PipelineItem | null;
   activeSessionIds: Set<string>;
+  activePtySessions?: Array<{
+    sessionId: string;
+    worktreePath?: string;
+    prompt?: string;
+    agentProvider?: string;
+  }>;
   repoPath?: string;
   spawnPtySession?: (sessionId: string, cwd: string, prompt: string, cols: number, rows: number) => Promise<void>;
   maximized?: boolean;
@@ -118,6 +124,7 @@ async function copyCommand(agent: string) {
         <TerminalTabs
           :session-id="item.id"
           :active-session-ids="activeSessionIds"
+          :active-pty-sessions="activePtySessions"
           :agent-type="item.agent_type || 'pty'"
           :agent-provider="item.agent_provider || 'claude'"
           :repo-path="repoPath"

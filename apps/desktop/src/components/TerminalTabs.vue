@@ -6,6 +6,12 @@ import TerminalView from "./TerminalView.vue";
 const props = defineProps<{
   sessionId: string | null;
   activeSessionIds: Set<string>;
+  activePtySessions?: Array<{
+    sessionId: string;
+    worktreePath?: string;
+    prompt?: string;
+    agentProvider?: string;
+  }>;
   agentType?: string;
   agentProvider?: string;
   worktreePath?: string;
@@ -31,6 +37,21 @@ interface TerminalViewInstance extends ComponentPublicInstance {
 }
 const visitedPtySessions = ref(new Map<string, PtySessionConfig>());
 const termRefs = ref<Record<string, TerminalViewInstance | null>>({});
+
+watch(
+  () => props.activePtySessions,
+  (sessions) => {
+    if (props.agentType !== "pty" || !sessions) return;
+    for (const session of sessions) {
+      visitedPtySessions.value.set(session.sessionId, {
+        worktreePath: session.worktreePath,
+        prompt: session.prompt,
+        agentProvider: session.agentProvider,
+      });
+    }
+  },
+  { immediate: true, deep: true },
+);
 
 watch(
   () => [props.sessionId, props.agentType] as const,

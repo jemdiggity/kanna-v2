@@ -228,6 +228,19 @@ const activeSessionIds = computed(() =>
   new Set(store.items.filter((i) => i.stage !== "done").map((i) => i.id))
 );
 
+const activePtySessions = computed(() =>
+  store.items
+    .filter((i) => i.stage !== "done" && (i.agent_type ?? "pty") === "pty")
+    .map((i) => ({
+      sessionId: i.id,
+      worktreePath: i.branch && store.selectedRepo?.path
+        ? `${store.selectedRepo.path}/.kanna-worktrees/${i.branch}`
+        : undefined,
+      prompt: i.prompt || "",
+      agentProvider: i.agent_provider || "claude",
+    }))
+);
+
 // Build a map of blocked item ID → blocker names for the sidebar
 const sidebarBlockerNames = computedAsync(async () => {
   const blockedItems = store.items.filter((i) => hasTag(i, "blocked"));
@@ -833,6 +846,7 @@ onMounted(async () => {
       v-if="!isMobile || store.selectedItemId"
       :item="store.currentItem"
       :active-session-ids="activeSessionIds"
+      :active-pty-sessions="activePtySessions"
       :repo-path="store.selectedRepo?.path"
       :spawn-pty-session="store.spawnPtySession"
       :maximized="maximized"

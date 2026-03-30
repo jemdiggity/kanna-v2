@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>PTY Reattach Harness</title>
+  <title>PTY Restore Harness</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
   <style>
     :root {
@@ -16,9 +16,7 @@
       --accent: #4fb3ff;
       --border: #2d3742;
       --danger: #ff7b72;
-      --ok: #3fb950;
     }
-
     * { box-sizing: border-box; }
     html, body { height: 100%; margin: 0; }
     body {
@@ -28,24 +26,21 @@
       color: var(--text);
       font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
     }
-
     .toolbar {
       display: grid;
-      grid-template-columns: 1fr repeat(9, auto);
+      grid-template-columns: 1fr repeat(7, auto);
       gap: 10px;
       align-items: center;
       padding: 12px;
       border-bottom: 1px solid var(--border);
       background: color-mix(in srgb, var(--panel) 92%, black);
     }
-
     .session-box {
       display: flex;
       gap: 10px;
       align-items: center;
       min-width: 0;
     }
-
     .session-box input, .session-box select {
       min-width: 0;
       width: 100%;
@@ -56,7 +51,6 @@
       padding: 8px 10px;
       font: inherit;
     }
-
     button {
       border: 1px solid var(--border);
       background: var(--panel-2);
@@ -67,35 +61,24 @@
       cursor: pointer;
       white-space: nowrap;
     }
-
     button.primary {
       background: color-mix(in srgb, var(--accent) 22%, var(--panel-2));
       border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
     }
-
     button.danger {
       background: color-mix(in srgb, var(--danger) 18%, var(--panel-2));
       border-color: color-mix(in srgb, var(--danger) 35%, var(--border));
     }
-
-    .controls {
-      display: flex;
-      gap: 8px;
-      align-items: center;
-    }
-
     .status {
       color: var(--muted);
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
     }
-
     .terminal-wrap {
       min-height: 0;
       padding: 12px;
     }
-
     #terminal {
       width: 100%;
       height: 100%;
@@ -103,7 +86,6 @@
       border-radius: 12px;
       overflow: hidden;
       background: #0d1117;
-      box-shadow: inset 0 1px 0 rgba(255,255,255,0.03);
     }
   </style>
 </head>
@@ -122,12 +104,6 @@
     <button id="attachBtn">Attach Fresh Client</button>
     <button id="detachBtn">Detach Client</button>
     <button id="resizeBtn">Resize Wiggle</button>
-    <div class="controls">
-      <button id="ctrlLBtn">Ctrl+L</button>
-      <button id="enterBtn">Enter</button>
-      <button id="escBtn">Esc</button>
-      <button id="doubleWiggleBtn">Double Wiggle</button>
-    </div>
     <button class="danger" id="killBtn">Kill PTY</button>
     <div class="status" id="status">idle</div>
   </div>
@@ -149,10 +125,6 @@
     const attachBtn = document.getElementById("attachBtn");
     const detachBtn = document.getElementById("detachBtn");
     const resizeBtn = document.getElementById("resizeBtn");
-    const ctrlLBtn = document.getElementById("ctrlLBtn");
-    const enterBtn = document.getElementById("enterBtn");
-    const escBtn = document.getElementById("escBtn");
-    const doubleWiggleBtn = document.getElementById("doubleWiggleBtn");
     const killBtn = document.getElementById("killBtn");
     const terminalHost = document.getElementById("terminal");
 
@@ -160,6 +132,7 @@
     let fitAddon;
     let ws = null;
     let detachInput = null;
+    let resizeDisposable = null;
 
     function setStatus(message) {
       statusEl.textContent = message;
@@ -171,7 +144,7 @@
 
     function ensureSessionId() {
       if (!currentSessionId()) {
-        sessionIdInput.value = `pty-${Date.now().toString(36)}`;
+        sessionIdInput.value = `restore-${Date.now().toString(36)}`;
       }
       return currentSessionId();
     }
@@ -193,61 +166,22 @@
       term.loadAddon(fitAddon);
       term.open(terminalHost);
       fitAddon.fit();
-      window.addEventListener("resize", () => fitAddon.fit(), { passive: true });
     }
 
     function profileCommand(profile) {
-      if (profile === "codex") {
-        return {
-          executable: "/bin/zsh",
-          args: ["--login", "-c", "codex"]
-        };
-      }
-      if (profile === "claude") {
-        return {
-          executable: "/bin/zsh",
-          args: ["--login", "-c", "claude"]
-        };
-      }
-      if (profile === "copilot") {
-        return {
-          executable: "/bin/zsh",
-          args: ["--login", "-c", "copilot"]
-        };
-      }
-      return {
-        executable: "/bin/zsh",
-        args: ["--login"]
-      };
+      if (profile === "codex") return { executable: "/bin/zsh", args: ["--login", "-c", "codex"] };
+      if (profile === "claude") return { executable: "/bin/zsh", args: ["--login", "-c", "claude"] };
+      if (profile === "copilot") return { executable: "/bin/zsh", args: ["--login", "-c", "copilot"] };
+      return { executable: "/bin/zsh", args: ["--login"] };
     }
 
     function closeClient() {
-      if (detachInput) {
-        detachInput.dispose();
-        detachInput = null;
-      }
-      if (ws) {
-        ws.close();
-        ws = null;
-      }
-    }
-
-    function sendBytes(bytes) {
-      const sessionId = currentSessionId();
-      if (!sessionId || !ws) return;
-      ws.send(JSON.stringify({
-        type: "input",
-        sessionId,
-        data: Array.from(bytes)
-      }));
-    }
-
-    function wiggle() {
-      const sessionId = currentSessionId();
-      if (!sessionId || !ws || !term) return;
-      const cols = Math.max(20, term.cols - 1);
-      ws.send(JSON.stringify({ type: "resize", sessionId, cols, rows: term.rows }));
-      ws.send(JSON.stringify({ type: "resize", sessionId, cols: term.cols, rows: term.rows }));
+      detachInput?.dispose();
+      detachInput = null;
+      resizeDisposable?.dispose();
+      resizeDisposable = null;
+      ws?.close();
+      ws = null;
     }
 
     function attachFreshClient(sessionId) {
@@ -275,7 +209,7 @@
 
         const msg = JSON.parse(event.data);
         if (msg.type === "attached") {
-          setStatus(`attached ${sessionId}`);
+          setStatus(`attached ${sessionId} with vt100 snapshot restore`);
           detachInput = term.onData((data) => {
             ws?.send(JSON.stringify({
               type: "input",
@@ -283,7 +217,7 @@
               data: Array.from(new TextEncoder().encode(data))
             }));
           });
-          term.onResize(({ cols, rows }) => {
+          resizeDisposable = term.onResize(({ cols, rows }) => {
             ws?.send(JSON.stringify({ type: "resize", sessionId, cols, rows }));
           });
           return;
@@ -292,35 +226,24 @@
           setStatus(`detached ${sessionId}`);
           return;
         }
-        if (msg.type === "exit") {
-          setStatus(`exited ${sessionId} (${msg.code})`);
-          term.write(`\r\n[exit ${msg.code}]\r\n`);
-          return;
-        }
         if (msg.type === "error") {
           setStatus(`error: ${msg.message}`);
           term.write(`\r\n[error] ${msg.message}\r\n`);
         }
       });
-
-      ws.addEventListener("close", () => {
-        setStatus(`client closed ${sessionId}`);
-      });
     }
 
     spawnBtn.addEventListener("click", async () => {
       const sessionId = ensureSessionId();
-      const profile = profileSelect.value;
-      const command = profileCommand(profile);
+      const command = profileCommand(profileSelect.value);
       const response = await fetch("/spawn", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           sessionId,
-          profile,
           executable: command.executable,
           args: command.args,
-          cwd: "/tmp",
+          cwd: "/tmp"
         })
       });
       const data = await response.json();
@@ -331,9 +254,7 @@
       attachFreshClient(sessionId);
     });
 
-    attachBtn.addEventListener("click", () => {
-      attachFreshClient(ensureSessionId());
-    });
+    attachBtn.addEventListener("click", () => attachFreshClient(ensureSessionId()));
 
     detachBtn.addEventListener("click", () => {
       const sessionId = currentSessionId();
@@ -344,24 +265,10 @@
     });
 
     resizeBtn.addEventListener("click", () => {
-      wiggle();
-    });
-
-    ctrlLBtn.addEventListener("click", () => {
-      sendBytes(new Uint8Array([0x0c]));
-    });
-
-    enterBtn.addEventListener("click", () => {
-      sendBytes(new Uint8Array([0x0d]));
-    });
-
-    escBtn.addEventListener("click", () => {
-      sendBytes(new Uint8Array([0x1b]));
-    });
-
-    doubleWiggleBtn.addEventListener("click", () => {
-      wiggle();
-      setTimeout(() => wiggle(), 60);
+      const sessionId = currentSessionId();
+      if (!sessionId || !ws || !term) return;
+      ws.send(JSON.stringify({ type: "resize", sessionId, cols: Math.max(20, term.cols - 1), rows: term.rows }));
+      ws.send(JSON.stringify({ type: "resize", sessionId, cols: term.cols, rows: term.rows }));
     });
 
     killBtn.addEventListener("click", async () => {
@@ -377,7 +284,7 @@
     });
 
     createTerminal();
-    sessionIdInput.value = `pty-${Date.now().toString(36)}`;
+    sessionIdInput.value = `restore-${Date.now().toString(36)}`;
   </script>
 </body>
 </html>

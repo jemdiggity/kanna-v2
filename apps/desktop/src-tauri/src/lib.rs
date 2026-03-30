@@ -613,6 +613,7 @@ pub fn run() {
             commands::daemon::kill_session,
             commands::daemon::list_sessions,
             commands::daemon::attach_session,
+            commands::daemon::start_attached_session_stream,
             commands::daemon::detach_session,
             // Git commands
             commands::git::git_diff,

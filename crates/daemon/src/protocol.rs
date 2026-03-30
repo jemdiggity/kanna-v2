@@ -16,6 +16,9 @@ pub enum Command {
     Attach {
         session_id: String,
     },
+    Restore {
+        session_id: String,
+    },
     Detach {
         session_id: String,
     },
@@ -48,6 +51,12 @@ pub enum Command {
 #[serde(tag = "type")]
 #[allow(clippy::enum_variant_names)]
 pub enum Event {
+    Attached {
+        session_id: String,
+        snapshot: Option<String>,
+        cols: Option<u16>,
+        rows: Option<u16>,
+    },
     Output {
         session_id: String,
         data: Vec<u8>,
@@ -84,6 +93,9 @@ pub struct SessionInfo {
     pub cwd: String,
     pub state: SessionState,
     pub idle_seconds: u64,
+    pub snapshot: Option<String>,
+    pub cols: Option<u16>,
+    pub rows: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -173,6 +185,32 @@ mod tests {
     }
 
     #[test]
+    fn test_event_attached_roundtrip() {
+        let evt = Event::Attached {
+            session_id: "s1".to_string(),
+            snapshot: Some("\u{1b}[Hhello".to_string()),
+            cols: Some(120),
+            rows: Some(36),
+        };
+        let json = serde_json::to_string(&evt).unwrap();
+        let decoded: Event = serde_json::from_str(&json).unwrap();
+        match decoded {
+            Event::Attached {
+                session_id,
+                snapshot,
+                cols,
+                rows,
+            } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(snapshot.as_deref(), Some("\u{1b}[Hhello"));
+                assert_eq!(cols, Some(120));
+                assert_eq!(rows, Some(36));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
     fn test_event_exit_roundtrip() {
         let evt = Event::Exit {
             session_id: "s1".to_string(),
@@ -219,12 +257,18 @@ mod tests {
             cwd: "/home/user".to_string(),
             state: SessionState::Active,
             idle_seconds: 30,
+            snapshot: Some("\u{1b}[Hhello".to_string()),
+            cols: Some(120),
+            rows: Some(36),
         };
         let json = serde_json::to_string(&info).unwrap();
         let decoded: SessionInfo = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.session_id, "s1");
         assert_eq!(decoded.pid, 12345);
         assert_eq!(decoded.idle_seconds, 30);
+        assert_eq!(decoded.snapshot.as_deref(), Some("\u{1b}[Hhello"));
+        assert_eq!(decoded.cols, Some(120));
+        assert_eq!(decoded.rows, Some(36));
         assert!(matches!(decoded.state, SessionState::Active));
     }
 
@@ -245,6 +289,9 @@ mod tests {
                 cwd: "/tmp".to_string(),
                 state: SessionState::Suspended,
                 idle_seconds: 10,
+                snapshot: Some("\u{1b}[Hhello".to_string()),
+                cols: Some(80),
+                rows: Some(24),
             }],
         };
         let json = serde_json::to_string(&evt).unwrap();

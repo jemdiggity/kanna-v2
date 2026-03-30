@@ -12,7 +12,6 @@ import { isAppShortcut } from "./useKeyboardShortcuts"
 import {
   formatAttachFailureMessage,
   getTerminalRecoveryMode,
-  shouldReattachOnDaemonReady,
 } from "./terminalSessionRecovery"
 
 export interface SpawnOptions {
@@ -27,15 +26,21 @@ export interface TerminalOptions {
   worktreePath?: string
 }
 
+interface AttachSessionResult {
+  snapshot: string | null
+  cols: number | null
+  rows: number | null
+}
+
 export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, options?: TerminalOptions) {
   const terminal = ref<Terminal | null>(null)
   const fitAddon = new FitAddon()
   let unlistenOutput: (() => void) | null = null
   let unlistenExit: (() => void) | null = null
-  let unlistenDaemonReady: (() => void) | null = null
   let container: HTMLElement | null = null
   let fitRafId = 0
   let attached = false
+  let connectPromise: Promise<void> | null = null
 
   // Scroll-lock: when the user scrolls up, hold their viewport position
   // instead of letting TUI redraws yank them to the top of the buffer.
@@ -321,23 +326,31 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
   }
 
   async function connectSession() {
+    if (connectPromise) {
+      return connectPromise
+    }
+
+    connectPromise = (async () => {
     const recoveryMode = getTerminalRecoveryMode(spawnOptions, options)
 
     try {
-      await invoke("attach_session", { sessionId, agentProvider: options?.agentProvider })
+      const restore = await invoke<AttachSessionResult>("attach_session", {
+        sessionId,
+        agentProvider: options?.agentProvider,
+      })
       attached = true
-      // Attach succeeded — session was alive in daemon.
-      // Clear display and force SIGWINCH so Claude TUI redraws from scratch.
-      // Use CSI 2 J + CSI H instead of reset() to preserve internal state
-      // (kitty keyboard mode, character attributes, etc.).
       if (terminal.value) {
-        terminal.value.write("\x1b[?25l\x1b[2J\x1b[H") // hide cursor, clear display, cursor home
+        terminal.value.reset()
+        if (restore.snapshot) {
+          terminal.value.write(restore.snapshot)
+        }
         await ensureFitted()
-        const { cols, rows } = terminal.value
-        // Force a size change then restore — guarantees SIGWINCH fires
-        await invoke("resize_session", { sessionId, cols: cols - 1, rows }).catch(() => {})
-        await invoke("resize_session", { sessionId, cols, rows }).catch(() => {})
+        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
       }
+      await invoke("start_attached_session_stream", {
+        sessionId,
+        agentProvider: options?.agentProvider,
+      })
       return
     } catch (e) {
       if (recoveryMode === "attach-only") {
@@ -359,9 +372,28 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
         terminal.value.write(`\r\n\x1b[31mFailed to start agent: ${msg}\x1b[0m\r\n`)
         return
       }
-      // Now attach to the newly spawned session
-      await invoke("attach_session", { sessionId, agentProvider: options?.agentProvider })
+      const restore = await invoke<AttachSessionResult>("attach_session", {
+        sessionId,
+        agentProvider: options?.agentProvider,
+      })
       attached = true
+      terminal.value.reset()
+      if (restore.snapshot) {
+        terminal.value.write(restore.snapshot)
+      }
+      await ensureFitted()
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+      await invoke("start_attached_session_stream", {
+        sessionId,
+        agentProvider: options?.agentProvider,
+      })
+    }
+    })()
+
+    try {
+      await connectPromise
+    } finally {
+      connectPromise = null
     }
   }
 
@@ -408,14 +440,6 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
       )
     }
 
-    if (!unlistenDaemonReady && shouldReattachOnDaemonReady(spawnOptions, options)) {
-      unlistenDaemonReady = await listen("daemon_ready", () => {
-        connectSession().catch((e) =>
-          console.error("[terminal] daemon_ready re-attach failed:", e)
-        )
-      })
-    }
-
     await connectSession()
   }
 
@@ -439,7 +463,6 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
     if (fitRafId) cancelAnimationFrame(fitRafId)
     if (unlistenOutput) unlistenOutput()
     if (unlistenExit) unlistenExit()
-    if (unlistenDaemonReady) unlistenDaemonReady()
     terminal.value?.dispose()
   }
 
@@ -472,6 +495,7 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
   async function ensureConnected() {
     if (!terminal.value) return
     if (getTerminalRecoveryMode(spawnOptions, options) === "attach-only") {
+      if (attached) return
       await connectSession()
       return
     }

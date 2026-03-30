@@ -9,6 +9,13 @@ use crate::daemon_client::DaemonClient;
 pub type DaemonState = Arc<Mutex<Option<DaemonClient>>>;
 pub type AttachedSessions = Arc<Mutex<HashSet<String>>>;
 
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct AttachSessionResult {
+    pub snapshot: Option<String>,
+    pub cols: Option<u16>,
+    pub rows: Option<u16>,
+}
+
 const SCAN_BUFFER_CAP: usize = 4096;
 const SCAN_FLUSH_MS: u64 = 150;
 // Text shown in Claude's status bar ONLY while actively processing.
@@ -334,36 +341,69 @@ pub async fn list_sessions(
 }
 
 pub async fn attach_session_inner(
-    app: &tauri::AppHandle,
+    state: &DaemonState,
     session_id: String,
+) -> Result<AttachSessionResult, String> {
+    ensure_connected(state).await?;
+    let mut guard = state.lock().await;
+    let client = guard.as_mut().unwrap();
+
+    let cmd = serde_json::json!({ "type": "Restore", "session_id": session_id });
+    client
+        .send_command(&serde_json::to_string(&cmd).unwrap())
+        .await?;
+
+    let response = client.read_event().await?;
+    let event: serde_json::Value = serde_json::from_str(&response).map_err(|e| e.to_string())?;
+    match event.get("type").and_then(|t| t.as_str()) {
+        Some("Attached") => Ok(AttachSessionResult {
+            snapshot: event
+                .get("snapshot")
+                .and_then(|s| s.as_str())
+                .map(|s| s.to_string()),
+            cols: event.get("cols").and_then(|v| v.as_u64()).map(|v| v as u16),
+            rows: event.get("rows").and_then(|v| v.as_u64()).map(|v| v as u16),
+        }),
+        Some("Error") => {
+            let msg = event
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("attach failed");
+            Err(msg.to_string())
+        }
+        _ => Err(format!("unexpected attach response: {}", response)),
+    }
+}
+
+async fn start_attached_session_stream_inner(
+    app: &tauri::AppHandle,
     attached: &AttachedSessions,
+    session_id: String,
     agent_provider: Option<String>,
 ) -> Result<(), String> {
-    // Create a dedicated connection for this session's output streaming.
-    // This avoids mixing Output events with command responses.
     let socket_path = daemon_socket_path();
     let mut stream_client = DaemonClient::connect(&socket_path).await?;
 
-    // Send Attach command
     let cmd = serde_json::json!({ "type": "Attach", "session_id": session_id });
     stream_client
         .send_command(&serde_json::to_string(&cmd).unwrap())
         .await?;
 
-    // Read the Ok/Error response
     let response = stream_client.read_event().await?;
     let event: serde_json::Value = serde_json::from_str(&response).map_err(|e| e.to_string())?;
-    if let Some("Error") = event.get("type").and_then(|t| t.as_str()) {
-        let msg = event
-            .get("message")
-            .and_then(|m| m.as_str())
-            .unwrap_or("attach failed");
-        return Err(msg.to_string());
+    match event.get("type").and_then(|t| t.as_str()) {
+        Some("Ok") => {}
+        Some("Error") => {
+            let msg = event
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("attach failed");
+            return Err(msg.to_string());
+        }
+        _ => return Err(format!("unexpected attach response: {}", response)),
     }
 
-    // Track this session as attached
     attached.lock().await.insert(session_id.clone());
-
     // Determine the agent provider for pattern matching
     let provider = match agent_provider.as_deref() {
         Some("copilot") => AgentProvider::Copilot,
@@ -406,7 +446,12 @@ pub async fn attach_session_inner(
 
         // On Err (connection lost / daemon restart) we intentionally do NOT
         // remove from attached so the re-attach coordinator can re-attach.
-        while let Ok(line) = stream_client.read_event().await {
+        loop {
+            let line = match stream_client.read_event().await {
+                Ok(line) => line,
+                Err(_) => break,
+            };
+
             let event: serde_json::Value = match serde_json::from_str(&line) {
                 Ok(v) => v,
                 Err(_) => continue,
@@ -479,14 +524,6 @@ pub async fn attach_session_inner(
                         let text = text.trim();
 
                         if !text.is_empty() {
-                            {
-                                use std::io::Write;
-                                let log_path = crate::daemon_data_dir().join("pty-scan.log");
-                                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
-                                    let _ = writeln!(f, "[pty-scan] sid={} {:?}", sid, text);
-                                }
-                            }
-
                             let mut state = scan_state.lock().await;
                             state.append(text);
 
@@ -507,16 +544,15 @@ pub async fn attach_session_inner(
                     }
                 }
                 Some("Exit") => {
-                    // Session exited normally — remove from tracked set
                     flush_handle.abort();
                     attached_clone.lock().await.remove(&sid);
                     let _ = app.emit("session_exit", &event);
                     break;
                 }
+                Some(_) => {}
                 _ => {}
             }
         }
-        eprintln!("[attach] output stream ended for session {}", sid);
     });
 
     Ok(())
@@ -524,12 +560,21 @@ pub async fn attach_session_inner(
 
 #[tauri::command]
 pub async fn attach_session(
+    state: tauri::State<'_, DaemonState>,
+    session_id: String,
+    _agent_provider: Option<String>,
+) -> Result<AttachSessionResult, String> {
+    attach_session_inner(&state, session_id).await
+}
+
+#[tauri::command]
+pub async fn start_attached_session_stream(
     app: tauri::AppHandle,
     attached: tauri::State<'_, AttachedSessions>,
     session_id: String,
     agent_provider: Option<String>,
 ) -> Result<(), String> {
-    attach_session_inner(&app, session_id, &attached, agent_provider).await
+    start_attached_session_stream_inner(&app, &attached, session_id, agent_provider).await
 }
 
 #[tauri::command]

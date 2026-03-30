@@ -32,6 +32,33 @@ type SessionSizes = Arc<Mutex<HashMap<String, HashMap<usize, (u16, u16)>>>>;
 /// Map of session_id → list of passive observer writers.
 /// Observers receive Output/Exit events but don't claim the Attach writer.
 type SessionObservers = Arc<Mutex<HashMap<String, Vec<Arc<Mutex<tokio::net::unix::OwnedWriteHalf>>>>>>;
+type SessionSnapshots = Arc<Mutex<HashMap<String, Arc<std::sync::Mutex<SessionSnapshotState>>>>>;
+
+struct SessionSnapshotState {
+    parser: vt100::Parser,
+    cols: u16,
+    rows: u16,
+}
+
+impl SessionSnapshotState {
+    fn new(rows: u16, cols: u16, scrollback_len: usize) -> Self {
+        Self {
+            parser: vt100::Parser::new(rows, cols, scrollback_len),
+            cols,
+            rows,
+        }
+    }
+
+    fn snapshot_text(&self) -> String {
+        String::from_utf8_lossy(&self.parser.screen().contents_formatted()).into_owned()
+    }
+
+    fn resize(&mut self, rows: u16, cols: u16) {
+        self.rows = rows;
+        self.cols = cols;
+        self.parser.screen_mut().set_size(rows, cols);
+    }
+}
 
 use protocol::{Command, Event};
 use session::SessionManager;
@@ -99,17 +126,22 @@ async fn main() {
     let pre_attach_buffers: PreAttachBuffers = Arc::new(Mutex::new(HashMap::new()));
     let session_sizes: SessionSizes = Arc::new(Mutex::new(HashMap::new()));
     let session_observers: SessionObservers = Arc::new(Mutex::new(HashMap::new()));
+    let session_snapshots: SessionSnapshots = Arc::new(Mutex::new(HashMap::new()));
 
     // Adopt handed-off sessions
     if !adopted.is_empty() {
         let mut mgr = sessions.lock().await;
-        for (session_id, pty_session) in adopted {
+        for (session_id, pty_session, snapshot_state) in adopted {
             log::info!(
                 "[handoff] adopted session {} (pid={})",
                 session_id,
                 pty_session.pid()
             );
-            mgr.insert(session_id, pty_session);
+            mgr.insert(session_id.clone(), pty_session);
+            session_snapshots
+                .lock()
+                .await
+                .insert(session_id.clone(), Arc::new(std::sync::Mutex::new(snapshot_state)));
             // Note: no stream_output started — client must Attach to start streaming
         }
     }
@@ -141,6 +173,7 @@ async fn main() {
                 let buffers_clone = pre_attach_buffers.clone();
                 let sizes_clone = session_sizes.clone();
                 let observers_clone = session_observers.clone();
+                let snapshots_clone = session_snapshots.clone();
                 tokio::spawn(async move {
                     handle_connection(
                         stream,
@@ -150,6 +183,7 @@ async fn main() {
                         buffers_clone,
                         sizes_clone,
                         observers_clone,
+                        snapshots_clone,
                     )
                     .await;
                 });
@@ -166,7 +200,7 @@ async fn main() {
 async fn attempt_handoff(
     pid_path: &PathBuf,
     socket_path: &PathBuf,
-) -> Vec<(String, pty::PtySession)> {
+) -> Vec<(String, pty::PtySession, SessionSnapshotState)> {
     log::info!(
         "[handoff] checking for old daemon: pid_path={:?}, socket_path={:?}",
         pid_path,
@@ -327,7 +361,15 @@ async fn attempt_handoff(
         );
         let owned_fd = unsafe { std::os::unix::io::OwnedFd::from_raw_fd(fd) };
         let session = pty::PtySession::adopt(owned_fd, info.pid as libc::pid_t, info.cwd);
-        adopted.push((info.session_id, session));
+        let mut snapshot_state = SessionSnapshotState::new(
+            info.rows.unwrap_or(24),
+            info.cols.unwrap_or(80),
+            10_000,
+        );
+        if let Some(snapshot) = info.snapshot {
+            snapshot_state.parser.process(snapshot.as_bytes());
+        }
+        adopted.push((info.session_id, session, snapshot_state));
     }
 
     log::info!("[handoff] complete, adopted {} sessions", adopted.len());
@@ -343,6 +385,7 @@ async fn handle_connection(
     pre_attach_buffers: PreAttachBuffers,
     session_sizes: SessionSizes,
     session_observers: SessionObservers,
+    session_snapshots: SessionSnapshots,
 ) {
     // Keep the raw fd for SCM_RIGHTS (used by Handoff)
     let raw_fd = stream.as_raw_fd();
@@ -364,6 +407,7 @@ async fn handle_connection(
                     session_writers.clone(),
                     session_sizes.clone(),
                     session_observers.clone(),
+                    session_snapshots.clone(),
                     writer.clone(),
                     broadcast_tx.clone(),
                 )
@@ -418,6 +462,7 @@ async fn handle_connection(
                     pre_attach_buffers.clone(),
                     session_sizes.clone(),
                     session_observers.clone(),
+                    session_snapshots.clone(),
                 )
                 .await;
             }
@@ -441,6 +486,7 @@ async fn handle_command(
     pre_attach_buffers: PreAttachBuffers,
     session_sizes: SessionSizes,
     session_observers: SessionObservers,
+    session_snapshots: SessionSnapshots,
 ) {
     match command {
         Command::Spawn {
@@ -482,12 +528,22 @@ async fn handle_command(
                             .lock()
                             .await
                             .insert(session_id.clone(), buffer.clone());
+                        let snapshot = Arc::new(std::sync::Mutex::new(SessionSnapshotState::new(
+                            rows,
+                            cols,
+                            10_000,
+                        )));
+                        session_snapshots
+                            .lock()
+                            .await
+                            .insert(session_id.clone(), snapshot.clone());
 
                         let sid = session_id.clone();
                         let sessions_exit = sessions.clone();
                         let writers_for_stream = session_writers.clone();
                         let sizes_for_stream = session_sizes.clone();
                         let observers_for_stream = session_observers.clone();
+                        let snapshot_for_stream = snapshot;
                         tokio::task::spawn_blocking(move || {
                             stream_output(
                                 sid,
@@ -497,6 +553,7 @@ async fn handle_command(
                                 sessions_exit,
                                 sizes_for_stream,
                                 observers_for_stream,
+                                snapshot_for_stream,
                             );
                         });
                     }
@@ -515,6 +572,64 @@ async fn handle_command(
             }
         }
 
+        Command::Restore { session_id } => {
+            log::info!("[restore] session={}", session_id);
+            let mgr = sessions.lock().await;
+            if !mgr.contains(&session_id) {
+                let evt = Event::Error {
+                    message: format!("session not found: {}", session_id),
+                };
+                drop(mgr);
+                let _ = write_event(&mut *writer.lock().await, &evt).await;
+                return;
+            }
+
+            drop(mgr);
+
+            let restore = session_snapshots
+                .lock()
+                .await
+                .get(&session_id)
+                .cloned()
+                .map(|snapshot| {
+                    let snapshot = snapshot.lock().unwrap();
+                    (snapshot.snapshot_text(), snapshot.cols, snapshot.rows)
+                });
+
+            let (snapshot, cols, rows) = match restore {
+                Some((text, cols, rows)) => (Some(text), Some(cols), Some(rows)),
+                None => (None, None, None),
+            };
+
+            if let Some(ref snapshot_text) = snapshot {
+                log::info!(
+                    "[restore] snapshot session={} bytes={} cols={:?} rows={:?}",
+                    session_id,
+                    snapshot_text.len(),
+                    cols,
+                    rows
+                );
+            } else {
+                log::info!(
+                    "[restore] snapshot session={} bytes=0 cols={:?} rows={:?}",
+                    session_id,
+                    cols,
+                    rows
+                );
+            }
+
+            let _ = write_event(
+                &mut *writer.lock().await,
+                &Event::Attached {
+                    session_id: session_id.clone(),
+                    snapshot,
+                    cols,
+                    rows,
+                },
+            )
+            .await;
+        }
+
         Command::Attach { session_id } => {
             log::info!("[attach] session={}", session_id);
             let mgr = sessions.lock().await;
@@ -529,7 +644,6 @@ async fn handle_command(
 
             let is_streaming = session_writers.lock().await.contains_key(&session_id);
             if is_streaming {
-                // stream_output already running (started at Spawn) — push writer to broadcast list
                 drop(mgr);
                 {
                     let mut writers = session_writers.lock().await;
@@ -538,27 +652,11 @@ async fn handle_command(
                     }
                 }
 
-                let _ = write_event(&mut *writer.lock().await, &Event::Ok).await;
-
-                // Flush pre-attach buffer (startup output including kitty keyboard push)
                 if let Some(buffer) = pre_attach_buffers.lock().await.remove(&session_id) {
-                    if let Some(data) = buffer.lock().await.take() {
-                        if !data.is_empty() {
-                            log::info!(
-                                "[attach] flushing {} bytes of pre-attach output for {}",
-                                data.len(),
-                                session_id
-                            );
-                            let evt = Event::Output {
-                                session_id: session_id.clone(),
-                                data,
-                            };
-                            let _ = write_event(&mut *writer.lock().await, &evt).await;
-                        }
-                    }
+                    let _ = buffer.lock().await.take();
                 }
+                let _ = write_event(&mut *writer.lock().await, &Event::Ok).await;
             } else {
-                // No stream_output yet (adopted session from handoff) — start it now
                 let pty_reader = match mgr.sessions.get(&session_id).unwrap().try_clone_reader() {
                     Ok(r) => r,
                     Err(e) => {
@@ -577,6 +675,14 @@ async fn handle_command(
                     .await
                     .insert(session_id.clone(), vec![writer.clone()]);
 
+                let snapshot = session_snapshots
+                    .lock()
+                    .await
+                    .entry(session_id.clone())
+                    .or_insert_with(|| {
+                        Arc::new(std::sync::Mutex::new(SessionSnapshotState::new(24, 80, 10_000)))
+                    })
+                    .clone();
                 let _ = write_event(&mut *writer.lock().await, &Event::Ok).await;
 
                 let sid = session_id.clone();
@@ -594,6 +700,7 @@ async fn handle_command(
                         sessions_exit,
                         sizes_for_stream,
                         observers_for_stream,
+                        snapshot,
                     );
                 });
             }
@@ -681,6 +788,10 @@ async fn handle_command(
             let mgr = sessions.lock().await;
             let result = mgr.resize(&session_id, eff_cols, eff_rows);
             drop(mgr);
+            if let Some(snapshot) = session_snapshots.lock().await.get(&session_id).cloned() {
+                let mut snapshot = snapshot.lock().unwrap();
+                snapshot.resize(eff_rows, eff_cols);
+            }
             let evt = match result {
                 Ok(_) => Event::Ok,
                 Err(e) => Event::Error {
@@ -736,6 +847,7 @@ async fn handle_command(
             session_writers.lock().await.remove(&session_id);
             session_sizes.lock().await.remove(&session_id);
             session_observers.lock().await.remove(&session_id);
+            session_snapshots.lock().await.remove(&session_id);
             let evt = match result {
                 Ok(_) => Event::Ok,
                 Err(e) => Event::Error {
@@ -783,6 +895,7 @@ async fn handle_handoff(
     session_writers: SessionWriters,
     session_sizes: SessionSizes,
     session_observers: SessionObservers,
+    session_snapshots: SessionSnapshots,
     writer: Arc<Mutex<tokio::net::unix::OwnedWriteHalf>>,
     broadcast_tx: broadcast::Sender<String>,
 ) {
@@ -812,6 +925,8 @@ async fn handle_handoff(
     let mut infos = Vec::new();
     let mut fds = Vec::new();
     let mut dead_count = 0;
+    let snapshot_entries: HashMap<String, Arc<std::sync::Mutex<SessionSnapshotState>>> =
+        session_snapshots.lock().await.clone();
 
     for id in &session_ids {
         if let Some(session) = mgr.remove(id) {
@@ -819,6 +934,10 @@ async fn handle_handoff(
                 let pid = session.pid();
                 let cwd = session.cwd.clone();
                 let (fd, _, _) = session.detach_for_handoff();
+                let snapshot_info = snapshot_entries.get(id).cloned().map(|snapshot| {
+                    let snapshot = snapshot.lock().unwrap();
+                    (snapshot.snapshot_text(), snapshot.cols, snapshot.rows)
+                });
                 log::info!(
                     "[handoff] detached session {} (pid={}, fd={}, cwd={})",
                     id, pid, fd, cwd
@@ -829,6 +948,9 @@ async fn handle_handoff(
                     cwd,
                     state: protocol::SessionState::Active,
                     idle_seconds: 0,
+                    snapshot: snapshot_info.as_ref().map(|(text, _, _)| text.clone()),
+                    cols: snapshot_info.as_ref().map(|(_, cols, _)| *cols),
+                    rows: snapshot_info.as_ref().map(|(_, _, rows)| *rows),
                 });
                 fds.push(fd);
             } else {
@@ -849,6 +971,7 @@ async fn handle_handoff(
     session_writers.lock().await.clear();
     session_sizes.lock().await.clear();
     session_observers.lock().await.clear();
+    session_snapshots.lock().await.clear();
 
     log::info!("[handoff] sending HandoffReady with {} sessions", infos.len());
 
@@ -914,6 +1037,7 @@ fn stream_output(
     sessions: Arc<Mutex<SessionManager>>,
     session_sizes: SessionSizes,
     session_observers: SessionObservers,
+    session_snapshot: Arc<std::sync::Mutex<SessionSnapshotState>>,
 ) {
     let rt = tokio::runtime::Handle::current();
     let mut buf = [0u8; 4096];
@@ -923,6 +1047,10 @@ fn stream_output(
             Ok(0) => break,
             Ok(n) => {
                 let data = buf[..n].to_vec();
+                {
+                    let mut snapshot = session_snapshot.lock().unwrap();
+                    snapshot.parser.process(&data);
+                }
 
                 // If pre-attach buffer is active (Some), append to it
                 let buffered = rt.block_on(async {

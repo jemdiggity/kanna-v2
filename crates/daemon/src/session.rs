@@ -45,6 +45,9 @@ impl SessionManager {
                     cwd: session.cwd.clone(),
                     state,
                     idle_seconds,
+                    snapshot: None,
+                    cols: None,
+                    rows: None,
                 }
             })
             .collect()
