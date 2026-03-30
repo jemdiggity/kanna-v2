@@ -36,7 +36,7 @@ function copyBranch() {
   <div class="task-header" @mousedown.prevent>
     <div class="header-top">
       <span class="stage-badge">{{ item.stage }}</span>
-      <h2 class="task-title">{{ title(item) }}</h2>
+      <h2 class="task-title" @mousedown.stop>{{ title(item) }}</h2>
     </div>
     <div class="header-meta">
       <span v-if="item.branch" class="meta-item branch" @dblclick="copyBranch">
@@ -99,6 +99,8 @@ function copyBranch() {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  user-select: text;
+  cursor: text;
 }
 
 .header-meta {
