@@ -347,6 +347,57 @@ describe("Relay integration", () => {
     await closeAndWait(desktopTwo);
   });
 
+  it("routes mobile task actions only to the requested owner desktop", async () => {
+    const { ws: desktopOne } = await connectAndAuth({
+      desktop_id: "desktop-owner-one",
+      desktop_secret: "secret-one",
+    });
+    const { ws: desktopTwo } = await connectAndAuth({
+      desktop_id: "desktop-owner-two",
+      desktop_secret: "secret-two",
+    });
+    const { ws: phone } = await connectAndAuth({
+      id_token: "user-owner-routing",
+    });
+
+    const unexpectedDesktopOneInvoke = waitForMessage(
+      desktopOne,
+      (msg) => msg.type === "invoke",
+      250
+    ).then(
+      () => "invoke",
+      () => "timeout"
+    );
+    const desktopTwoInvoke = waitForMessage(
+      desktopTwo,
+      (msg) =>
+        msg.type === "invoke" &&
+        msg.desktopId === "desktop-owner-two" &&
+        msg.path === "/v1/tasks/cloud-task-1/input"
+    );
+
+    phone.send(
+      JSON.stringify({
+        type: "invoke",
+        id: "task-action-owner-route",
+        desktopId: "desktop-owner-two",
+        method: "POST",
+        path: "/v1/tasks/cloud-task-1/input",
+        body: { input: "continue\n" },
+      })
+    );
+
+    await expect(desktopTwoInvoke).resolves.toMatchObject({
+      desktopId: "desktop-owner-two",
+      method: "POST",
+    });
+    await expect(unexpectedDesktopOneInvoke).resolves.toBe("timeout");
+
+    await closeAndWait(phone);
+    await closeAndWait(desktopOne);
+    await closeAndWait(desktopTwo);
+  });
+
   it("requires desktopId for HTTP-style invokes when multiple desktops are connected", async () => {
     const { ws: desktopOne } = await connectAndAuth({
       desktop_id: "desktop-one-missing-id",
