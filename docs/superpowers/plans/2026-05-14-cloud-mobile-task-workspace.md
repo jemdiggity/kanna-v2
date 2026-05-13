@@ -39,7 +39,7 @@ Not included in this first plan:
 - Create `services/firebase-functions/test/taskSnapshots.test.ts`: validation and function helper tests.
 - Create `apps/mobile/src/lib/firebase/taskIndex.ts`: Firestore task index reader and mapper.
 - Create `apps/mobile/src/lib/firebase/taskIndex.test.ts`: mobile mapping tests.
-- Modify `apps/mobile/src/appModel.ts`: build cloud transport when auth is signed in and relay URL is configured.
+- Modify `apps/mobile/src/appModel.ts`: build cloud transport as the signed-in default when Firebase and relay config are present.
 - Modify `apps/mobile/src/state/mobileController.ts`: connect cloud after sign-in and refresh cloud task collections.
 - Modify `apps/mobile/src/state/mobileController.test.ts`: cloud bootstrap/sign-in behavior.
 - Create `apps/desktop/src/utils/cloudTaskSnapshot.ts`: map local repo/task rows to cloud snapshot payloads.
@@ -364,31 +364,22 @@ git commit -m "feat: add cloud task snapshot contract"
 
 - [ ] **Step 1: Write failing rules test**
 
-Append to `services/firebase-functions/test/firestore-rules.test.ts`:
+Append to `services/firebase-functions/test/firestore-rules.test.ts` using the existing REST emulator helpers:
 
 ```ts
 it("allows users to read their own task snapshots but blocks direct task writes", async () => {
-  const userDb = testEnv.authenticatedContext("user-1").firestore();
-  const otherDb = testEnv.authenticatedContext("user-2").firestore();
-  const adminDb = testEnv.unauthenticatedContext().firestore();
-
-  await testEnv.withSecurityRulesDisabled(async (context) => {
-    await context.firestore().doc("users/user-1/tasks/cloud-task-1").set({
-      cloudTaskId: "cloud-task-1",
-      ownerDesktopId: "desktop-1",
-      ownerLocalTaskId: "task-1",
-      title: "Cloud task",
-    });
+  await seedDoc("users/user-1/tasks/cloud-task-1", {
+    cloudTaskId: "cloud-task-1",
+    ownerDesktopId: "desktop-1",
+    ownerLocalTaskId: "task-1",
+    title: "Cloud task",
   });
 
-  await expect(userDb.doc("users/user-1/tasks/cloud-task-1").get()).resolves.toBeTruthy();
-  await expect(otherDb.doc("users/user-1/tasks/cloud-task-1").get()).rejects.toThrow();
-  await expect(
-    userDb.doc("users/user-1/tasks/cloud-task-2").set({ title: "spoofed" })
-  ).rejects.toThrow();
-  await expect(
-    adminDb.doc("users/user-1/tasks/cloud-task-3").set({ title: "anonymous" })
-  ).rejects.toThrow();
+  await expectSucceeds(readDoc(mockUserToken("user-1"), "users/user-1/tasks/cloud-task-1"));
+  await expectDenied(readDoc(mockUserToken("user-2"), "users/user-1/tasks/cloud-task-1"));
+  await expectDenied(
+    clientUpdate("user-1", "users/user-1/tasks/cloud-task-2", { title: "spoofed" })
+  );
 });
 ```
 
@@ -420,10 +411,28 @@ match /users/{uid}/transfers/{transferId} {
 
 - [ ] **Step 4: Add endpoint**
 
-In `services/firebase-functions/src/index.ts`, import the helper:
+In `services/firebase-functions/src/index.ts`, import Firebase Auth and the helper:
 
 ```ts
+import { getAuth } from "firebase-admin/auth";
 import { buildTaskSnapshotWrite } from "./taskSnapshots.js";
+```
+
+Add this helper near `ensureFirebaseApp()`:
+
+```ts
+async function requireBearerUidFromHeader(
+  authorization: string | undefined
+): Promise<string> {
+  const match = (authorization ?? "").match(/^Bearer\s+(.+)$/i);
+  if (!match) {
+    throw new Error("Missing bearer token");
+  }
+
+  ensureFirebaseApp();
+  const decoded = await getAuth().verifyIdToken(match[1]!);
+  return decoded.uid;
+}
 ```
 
 Add endpoint:
@@ -435,9 +444,13 @@ export const upsertTaskSnapshot = onRequest(async (request, response) => {
     return;
   }
 
-  const uid = request.header("x-kanna-user-id");
-  if (!uid || uid.trim().length === 0) {
-    response.status(401).json({ error: "Missing user id" });
+  let uid: string;
+  try {
+    uid = await requireBearerUidFromHeader(request.header("authorization"));
+  } catch (error) {
+    response.status(401).json({
+      error: error instanceof Error ? error.message : "Unauthorized",
+    });
     return;
   }
 
@@ -453,8 +466,6 @@ export const upsertTaskSnapshot = onRequest(async (request, response) => {
   }
 });
 ```
-
-This temporary endpoint uses `x-kanna-user-id` only for emulator/dev wiring. Replace it with verified desktop credentials before production release.
 
 - [ ] **Step 5: Run tests**
 
@@ -550,6 +561,14 @@ Expected: fail because `taskIndex.ts` does not exist.
 Create `apps/mobile/src/lib/firebase/taskIndex.ts`:
 
 ```ts
+import {
+  collection,
+  getDocs,
+  getFirestore,
+  query,
+  where,
+  type Firestore
+} from "firebase/firestore";
 import type { TaskSummary } from "../api/types";
 
 export interface CloudTaskSnapshot {
@@ -585,6 +604,24 @@ export function mapCloudTaskSnapshot(snapshot: CloudTaskSnapshot): CloudTaskSumm
   };
 }
 
+export interface CloudTaskIndex {
+  listRecentTasks(uid: string): Promise<CloudTaskSummary[]>;
+}
+
+export function createFirestoreTaskIndex(
+  db: Firestore = getFirestore()
+): CloudTaskIndex {
+  return {
+    async listRecentTasks(uid) {
+      const tasksRef = collection(db, "users", uid, "tasks");
+      const snapshot = await getDocs(query(tasksRef, where("closedAt", "==", null)));
+      return sortCloudTasks(
+        snapshot.docs.map((doc) => doc.data() as CloudTaskSnapshot)
+      ).map(mapCloudTaskSnapshot);
+    },
+  };
+}
+
 export function sortCloudTasks<T extends { updatedAt: string }>(tasks: T[]): T[] {
   return [...tasks].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
 }
@@ -612,6 +649,7 @@ git commit -m "feat: map cloud task index for mobile"
 **Files:**
 - Modify: `apps/mobile/src/appModel.ts`
 - Modify: `apps/mobile/src/state/mobileController.ts`
+- Modify: `apps/mobile/src/lib/transports/remoteTransport.ts`
 - Test: `apps/mobile/src/state/mobileController.test.ts`
 - Test: `apps/mobile/src/App.test.tsx`
 
@@ -688,9 +726,78 @@ export function resolveRelayUrl(env: ExpoPublicEnv = readExpoPublicEnv()): strin
 }
 ```
 
-Keep LAN as the default transport until a follow-up task wires Firestore reads and relay invocations into `createRemoteTransport`.
+- [ ] **Step 5: Build cloud transport as signed-in default**
 
-- [ ] **Step 5: Run mobile tests**
+In `apps/mobile/src/appModel.ts`, import the existing cloud transport pieces:
+
+```ts
+import { createFirestoreTaskIndex } from "./lib/firebase/taskIndex";
+import { createRelayDesktopClient } from "./lib/transports/relayClient";
+import { createRemoteTransport } from "./lib/transports/remoteTransport";
+```
+
+Add cloud transport construction:
+
+```ts
+function createClientForMode({
+  authSession,
+  baseUrl,
+  fetchImpl,
+  getSelectedDesktopId,
+  relayUrl,
+}: {
+  authSession: MobileAuthSession;
+  baseUrl: string;
+  fetchImpl: FetchLike;
+  getSelectedDesktopId(): string | null;
+  relayUrl: string | null;
+}): KannaClient {
+  const authState = authSession.getState();
+  if (authState.status === "signedIn" && relayUrl) {
+    const relayClient = createRelayDesktopClient({
+      relayUrl,
+      getIdToken: (forceRefresh) => authSession.getIdToken(forceRefresh),
+    });
+    const taskIndex = createFirestoreTaskIndex();
+    return createKannaClient(
+      createRemoteTransport({
+        async listDesktopRecords() {
+          return [];
+        },
+        getSelectedDesktopId,
+        invokeDesktop: relayClient.invokeDesktop,
+        observeTaskTerminal: relayClient.observeTaskTerminal,
+        listCloudTasks: () => taskIndex.listRecentTasks(authState.user.uid),
+      })
+    );
+  }
+
+  return createKannaClient(createLanTransport(baseUrl, fetchImpl));
+}
+```
+
+Use this factory inside `createAppModel()` so signed-in sessions with `EXPO_PUBLIC_KANNA_RELAY_URL` use cloud transport by default.
+
+Extend `apps/mobile/src/lib/transports/remoteTransport.ts`:
+
+```ts
+export interface RemoteTransportDependencies {
+  listDesktopRecords(): Promise<RemoteDesktopRecord[]>;
+  getSelectedDesktopId(): string | null;
+  invokeDesktop: RemoteDesktopInvoker;
+  observeTaskTerminal?: RemoteTaskTerminalObserver;
+  listCloudTasks?: () => Promise<TaskSummary[]>;
+}
+```
+
+Change `listRecentTasks` to use the cloud index when available:
+
+```ts
+listRecentTasks: () =>
+  listCloudTasks ? listCloudTasks() : request<TaskSummary[]>("GET", "/v1/tasks/recent", null),
+```
+
+- [ ] **Step 6: Run mobile tests**
 
 Run:
 
@@ -700,10 +807,10 @@ pnpm --dir apps/mobile test -- mobileController.test.ts appModel.test.ts App.tes
 
 Expected: pass.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add apps/mobile/src/appModel.ts apps/mobile/src/state/mobileController.ts apps/mobile/src/state/mobileController.test.ts
+git add apps/mobile/src/appModel.ts apps/mobile/src/state/mobileController.ts apps/mobile/src/lib/transports/remoteTransport.ts apps/mobile/src/state/mobileController.test.ts
 git commit -m "feat: support cloud connection mode on mobile"
 ```
 
@@ -905,7 +1012,7 @@ describe("cloud task publisher", () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 }));
     const publisher = createCloudTaskPublisher({
       endpoint: "http://localhost:5001/upsertTaskSnapshot",
-      getUserId: () => "user-1",
+      getIdToken: async () => "id-token-1",
       fetchImpl: fetchMock,
     });
 
@@ -916,8 +1023,8 @@ describe("cloud task publisher", () => {
       expect.objectContaining({
         method: "POST",
         headers: {
+          authorization: "Bearer id-token-1",
           "content-type": "application/json",
-          "x-kanna-user-id": "user-1",
         },
         body: JSON.stringify({ cloudTaskId: "cloud-task-1", title: "Task" }),
       })
@@ -928,7 +1035,7 @@ describe("cloud task publisher", () => {
     const fetchMock = vi.fn();
     const publisher = createCloudTaskPublisher({
       endpoint: "http://localhost:5001/upsertTaskSnapshot",
-      getUserId: () => null,
+      getIdToken: async () => null,
       fetchImpl: fetchMock,
     });
 
@@ -960,27 +1067,28 @@ export interface CloudTaskPublisher {
 
 export interface CloudTaskPublisherDependencies {
   endpoint: string | null;
-  getUserId(): string | null;
+  getIdToken(): Promise<string | null>;
   fetchImpl?: typeof fetch;
 }
 
 export function createCloudTaskPublisher({
   endpoint,
-  getUserId,
+  getIdToken,
   fetchImpl = fetch,
 }: CloudTaskPublisherDependencies): CloudTaskPublisher {
   return {
     async publish(snapshot) {
-      const userId = getUserId();
-      if (!endpoint || !userId) {
+      if (!endpoint) {
         return;
       }
+      const idToken = await getIdToken();
+      if (!idToken) return;
 
       const response = await fetchImpl(endpoint, {
         method: "POST",
         headers: {
+          authorization: `Bearer ${idToken}`,
           "content-type": "application/json",
-          "x-kanna-user-id": userId,
         },
         body: JSON.stringify(snapshot),
       });
