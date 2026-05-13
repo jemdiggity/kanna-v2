@@ -1,7 +1,16 @@
 import { createKannaClient, type KannaClient } from "./lib/api/client";
 import type { MobileAuthSession } from "./lib/firebase/auth";
 import { createConfiguredMobileAuthSession } from "./lib/firebase/sdk";
+import {
+  createFirestoreTaskIndex,
+  type CloudTaskIndex
+} from "./lib/firebase/taskIndex";
 import { createLanTransport, type FetchLike } from "./lib/transports/lanTransport";
+import {
+  createRelayDesktopClient,
+  type RelayDesktopClient
+} from "./lib/transports/relayClient";
+import { createRemoteTransport } from "./lib/transports/remoteTransport";
 import { createRootNavigator } from "./navigation/RootNavigator";
 import {
   createMobileController,
@@ -19,6 +28,7 @@ const DEFAULT_SERVER_BASE_URL = `http://${DEFAULT_SERVER_HOST}:${DEFAULT_SERVER_
 
 interface ExpoPublicEnv {
   EXPO_PUBLIC_KANNA_SERVER_URL?: string;
+  EXPO_PUBLIC_KANNA_RELAY_URL?: string;
 }
 
 export interface AppModel {
@@ -27,6 +37,15 @@ export interface AppModel {
   initialize(): Promise<void>;
   navigator: ReturnType<typeof createRootNavigator>;
   sessionStore: SessionStore;
+}
+
+interface AppModelOptions {
+  relayUrl?: string | null;
+  taskIndex?: CloudTaskIndex;
+  createRelayClient?: (input: {
+    relayUrl: string;
+    getIdToken(forceRefresh?: boolean): Promise<string | null>;
+  }) => RelayDesktopClient;
 }
 
 function readExpoPublicEnv(): ExpoPublicEnv {
@@ -119,14 +138,31 @@ export function resolveServerBaseUrl(
   return configuredBaseUrl || inferredBaseUrl || DEFAULT_SERVER_BASE_URL;
 }
 
+export function resolveRelayUrl(env: ExpoPublicEnv = readExpoPublicEnv()): string | null {
+  const relayUrl = env.EXPO_PUBLIC_KANNA_RELAY_URL?.trim();
+  return relayUrl && relayUrl.length > 0 ? relayUrl : null;
+}
+
 export function createAppModel(
   baseUrl = resolveServerBaseUrl(),
   fetchImpl = globalThis.fetch as unknown as FetchLike,
   persistence?: SessionPersistence,
-  authSession: MobileAuthSession = createConfiguredMobileAuthSession()
+  authSession: MobileAuthSession = createConfiguredMobileAuthSession(),
+  options: AppModelOptions = {}
 ): AppModel {
-  const client = createKannaClient(createLanTransport(baseUrl, fetchImpl));
   const sessionStore = createSessionStore();
+  const resolveClient = () =>
+    createClientForMode({
+      authSession,
+      baseUrl,
+      createRelayClient: options.createRelayClient ?? createRelayDesktopClient,
+      fetchImpl,
+      getSelectedDesktopId: () => sessionStore.getState().selectedDesktopId,
+      relayUrl: options.relayUrl ?? resolveRelayUrl(),
+      taskIndex: options.taskIndex
+    });
+  let activeClient = resolveClient();
+  const client = createDelegatingClient(() => activeClient);
   const controller = createMobileController(client, sessionStore, authSession);
   let persistencePromise: Promise<SessionPersistence> | null = persistence
     ? Promise.resolve(persistence)
@@ -153,6 +189,9 @@ export function createAppModel(
   };
 
   sessionStore.subscribe(persistContext);
+  authSession.subscribe(() => {
+    activeClient = resolveClient();
+  });
 
   return {
     client,
@@ -169,5 +208,67 @@ export function createAppModel(
     },
     navigator: createRootNavigator(),
     sessionStore
+  };
+}
+
+function createClientForMode({
+  authSession,
+  baseUrl,
+  createRelayClient,
+  fetchImpl,
+  getSelectedDesktopId,
+  relayUrl,
+  taskIndex,
+}: {
+  authSession: MobileAuthSession;
+  baseUrl: string;
+  createRelayClient(input: {
+    relayUrl: string;
+    getIdToken(forceRefresh?: boolean): Promise<string | null>;
+  }): RelayDesktopClient;
+  fetchImpl: FetchLike;
+  getSelectedDesktopId(): string | null;
+  relayUrl: string | null;
+  taskIndex?: CloudTaskIndex;
+}): KannaClient {
+  const authState = authSession.getState();
+  if (authState.status === "signedIn" && relayUrl) {
+    const relayClient = createRelayClient({
+      relayUrl,
+      getIdToken: (forceRefresh) => authSession.getIdToken(forceRefresh),
+    });
+    const resolvedTaskIndex = taskIndex ?? createFirestoreTaskIndex();
+    return createKannaClient(
+      createRemoteTransport({
+        async listDesktopRecords() {
+          return [];
+        },
+        getSelectedDesktopId,
+        invokeDesktop: relayClient.invokeDesktop,
+        observeTaskTerminal: relayClient.observeTaskTerminal,
+        listCloudTasks: () => resolvedTaskIndex.listRecentTasks(authState.user.uid),
+      }),
+    );
+  }
+
+  return createKannaClient(createLanTransport(baseUrl, fetchImpl));
+}
+
+function createDelegatingClient(getClient: () => KannaClient): KannaClient {
+  return {
+    getStatus: () => getClient().getStatus(),
+    listDesktops: () => getClient().listDesktops(),
+    listRepos: () => getClient().listRepos(),
+    listRepoTasks: (repoId) => getClient().listRepoTasks(repoId),
+    listRecentTasks: () => getClient().listRecentTasks(),
+    searchTasks: (query) => getClient().searchTasks(query),
+    createTask: (input) => getClient().createTask(input),
+    runMergeAgent: (taskId) => getClient().runMergeAgent(taskId),
+    advanceTaskStage: (taskId) => getClient().advanceTaskStage(taskId),
+    closeTask: (taskId) => getClient().closeTask(taskId),
+    sendTaskInput: (taskId, input) => getClient().sendTaskInput(taskId, input),
+    observeTaskTerminal: (taskId, listener) =>
+      getClient().observeTaskTerminal(taskId, listener),
+    createPairingSession: () => getClient().createPairingSession()
   };
 }

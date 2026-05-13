@@ -272,6 +272,68 @@ describe("remote transport", () => {
     });
   });
 
+  it("uses the cloud task index for recent tasks when provided", async () => {
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>();
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [],
+      getSelectedDesktopId: () => "desktop-1",
+      invokeDesktop,
+      listCloudTasks: async () => [
+        {
+          id: "cloud-task-1",
+          repoId: "repo-1",
+          title: "Cloud task",
+          stage: "in progress"
+        }
+      ]
+    });
+
+    await expect(transport.listRecentTasks()).resolves.toEqual([
+      {
+        id: "cloud-task-1",
+        repoId: "repo-1",
+        title: "Cloud task",
+        stage: "in progress"
+      }
+    ]);
+    expect(invokeDesktop).not.toHaveBeenCalled();
+  });
+
+  it("serves cloud status and repo task collections without selecting a desktop", async () => {
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>();
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [],
+      getSelectedDesktopId: () => null,
+      invokeDesktop,
+      listCloudTasks: async () => [
+        {
+          id: "cloud-task-1",
+          repoId: "repo-1",
+          title: "Cloud task",
+          stage: "in progress"
+        }
+      ]
+    });
+
+    await expect(transport.getStatus()).resolves.toMatchObject({
+      desktopId: "cloud",
+      desktopName: "Kanna Cloud",
+      lanHost: "cloud"
+    });
+    await expect(transport.listRepos()).resolves.toEqual([
+      { id: "repo-1", name: "repo-1" }
+    ]);
+    await expect(transport.listRepoTasks("repo-1")).resolves.toEqual([
+      {
+        id: "cloud-task-1",
+        repoId: "repo-1",
+        title: "Cloud task",
+        stage: "in progress"
+      }
+    ]);
+    expect(invokeDesktop).not.toHaveBeenCalled();
+  });
+
   it("delegates remote terminal observation to the relay observer dependency", () => {
     const subscription = { close: vi.fn() };
     const observeTaskTerminal = vi.fn<RemoteTaskTerminalObserver>(() => subscription);

@@ -213,7 +213,7 @@ export function createMobileController(
           return;
         }
 
-        store.setConnectionMode("lan");
+        store.setConnectionMode(status.lanHost === "cloud" ? "remote" : "lan");
         store.setConnectionState("connected");
         await loadCollections();
         startBackgroundRefresh();

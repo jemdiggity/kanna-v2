@@ -144,6 +144,45 @@ describe("createMobileController", () => {
     expect(store.getState().repoTasks.map((task) => task.id)).toEqual(["task-1"]);
   });
 
+  it("loads task collections from the signed-in cloud client without LAN pairing", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const auth = createAuthSessionMock();
+    client.getStatus.mockResolvedValueOnce({
+      state: "running",
+      desktopId: "cloud",
+      desktopName: "Kanna Cloud",
+      lanHost: "cloud",
+      lanPort: 0,
+      pairingCode: null
+    });
+    client.listDesktops.mockResolvedValueOnce([
+      { id: "desktop-1", name: "MacBook", online: true, mode: "remote" }
+    ]);
+    client.listRecentTasks.mockResolvedValueOnce([
+      {
+        id: "cloud-task-1",
+        repoId: "repo-1",
+        title: "Cloud task",
+        stage: "in progress"
+      }
+    ]);
+    auth.getState = vi.fn(() => ({
+      status: "signedIn",
+      user: { uid: "user-1", email: "u@example.com", displayName: null }
+    }));
+    const controller = createMobileController(client, store, auth);
+
+    await controller.bootstrap();
+
+    expect(store.getState()).toMatchObject({
+      connectionMode: "remote",
+      connectionState: "connected",
+      desktopName: "Kanna Cloud",
+      recentTasks: [{ id: "cloud-task-1", title: "Cloud task" }]
+    });
+  });
+
   it("searches tasks and switches to the search surface", async () => {
     const store = createSessionStore();
     const controller = createMobileController(createClientMock(), store);

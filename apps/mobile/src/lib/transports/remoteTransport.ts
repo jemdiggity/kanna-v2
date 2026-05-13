@@ -65,13 +65,15 @@ export interface RemoteTransportDependencies {
   getSelectedDesktopId(): string | null;
   invokeDesktop: RemoteDesktopInvoker;
   observeTaskTerminal?: RemoteTaskTerminalObserver;
+  listCloudTasks?: () => Promise<TaskSummary[]>;
 }
 
 export function createRemoteTransport({
   listDesktopRecords,
   getSelectedDesktopId,
   invokeDesktop,
-  observeTaskTerminal
+  observeTaskTerminal,
+  listCloudTasks
 }: RemoteTransportDependencies): KannaTransport {
   const request = async <T>(
     method: RemoteDesktopInvocationRequest["method"],
@@ -90,6 +92,16 @@ export function createRemoteTransport({
 
   return {
     async getStatus(): Promise<MobileServerStatus> {
+      if (listCloudTasks) {
+        return {
+          state: "running",
+          desktopId: "cloud",
+          desktopName: "Kanna Cloud",
+          lanHost: "cloud",
+          lanPort: 0,
+          pairingCode: null
+        };
+      }
       return mapMobileServerStatus(await request("GET", "/v1/status", null));
     },
     async listDesktops(): Promise<DesktopSummary[]> {
@@ -104,14 +116,26 @@ export function createRemoteTransport({
         lastSeenAt: record.lastSeenAt ?? null,
       }));
     },
-    listRepos: () => request<RepoSummary[]>("GET", "/v1/repos", null),
-    listRepoTasks: (repoId: string) =>
-      request<TaskSummary[]>(
+    listRepos: async () => {
+      if (!listCloudTasks) {
+        return request<RepoSummary[]>("GET", "/v1/repos", null);
+      }
+      const tasks = await listCloudTasks();
+      const repoIds = Array.from(new Set(tasks.map((task) => task.repoId)));
+      return repoIds.map((repoId) => ({ id: repoId, name: repoId }));
+    },
+    listRepoTasks: async (repoId: string) => {
+      if (listCloudTasks) {
+        return (await listCloudTasks()).filter((task) => task.repoId === repoId);
+      }
+      return request<TaskSummary[]>(
         "GET",
         `/v1/repos/${encodeURIComponent(repoId)}/tasks`,
         null
-      ),
-    listRecentTasks: () => request<TaskSummary[]>("GET", "/v1/tasks/recent", null),
+      );
+    },
+    listRecentTasks: () =>
+      listCloudTasks ? listCloudTasks() : request<TaskSummary[]>("GET", "/v1/tasks/recent", null),
     searchTasks: (query) =>
       request<TaskSummary[]>(
         "GET",

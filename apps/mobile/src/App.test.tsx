@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { createAppModel, resolveServerBaseUrl } from "./appModel";
+import { createAppModel, resolveRelayUrl, resolveServerBaseUrl } from "./appModel";
+import type { MobileAuthSession } from "./lib/firebase/auth";
 import type { FetchLike } from "./lib/transports/lanTransport";
 
 function createFetchMock(): FetchLike {
@@ -105,6 +106,13 @@ describe("createAppModel", () => {
     expect(resolveServerBaseUrl({}, null)).toBe("http://127.0.0.1:48120");
   });
 
+  it("resolves the relay URL from Expo public env", () => {
+    expect(
+      resolveRelayUrl({ EXPO_PUBLIC_KANNA_RELAY_URL: "wss://relay.example" })
+    ).toBe("wss://relay.example");
+    expect(resolveRelayUrl({ EXPO_PUBLIC_KANNA_RELAY_URL: "   " })).toBeNull();
+  });
+
   it("creates an app model with desktop navigation and a LAN client", async () => {
     const model = createAppModel("http://desktop.test", createFetchMock());
 
@@ -119,6 +127,56 @@ describe("createAppModel", () => {
     ]);
     expect(typeof model.controller.bootstrap).toBe("function");
     expect((await model.client.getStatus()).desktopName).toBe("Studio Mac");
+  });
+
+  it("uses cloud task index for a signed-in model with relay config", async () => {
+    const authSession: MobileAuthSession = {
+      initialize: vi.fn().mockResolvedValue(undefined),
+      getState: vi.fn(() => ({
+        status: "signedIn",
+        user: { uid: "user-1", email: "u@example.com", displayName: null }
+      })),
+      subscribe: vi.fn((listener) => {
+        listener({
+          status: "signedIn",
+          user: { uid: "user-1", email: "u@example.com", displayName: null }
+        });
+        return () => undefined;
+      }),
+      signInWithEmailPassword: vi.fn().mockResolvedValue(undefined),
+      signOut: vi.fn().mockResolvedValue(undefined),
+      getIdToken: vi.fn().mockResolvedValue("id-token-1")
+    };
+    const taskIndex = {
+      listRecentTasks: vi.fn(async () => [
+        {
+          id: "cloud-task-1",
+          repoId: "repo-1",
+          title: "Cloud task",
+          stage: "in progress",
+          ownerDesktopId: "desktop-1",
+          ownerLocalTaskId: "task-1",
+          ownerOnline: false
+        }
+      ])
+    };
+
+    const model = createAppModel(
+      "http://desktop.test",
+      createFetchMock(),
+      undefined,
+      authSession,
+      { relayUrl: "wss://relay.example", taskIndex }
+    );
+
+    await expect(model.client.getStatus()).resolves.toMatchObject({
+      desktopId: "cloud",
+      desktopName: "Kanna Cloud"
+    });
+    await expect(model.client.listRecentTasks()).resolves.toEqual([
+      expect.objectContaining({ id: "cloud-task-1", title: "Cloud task" })
+    ]);
+    expect(taskIndex.listRecentTasks).toHaveBeenCalledWith("user-1");
   });
 
   it("hydrates persisted mobile context before bootstrap", async () => {
