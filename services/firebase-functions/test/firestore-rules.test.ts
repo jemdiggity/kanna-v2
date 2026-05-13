@@ -223,4 +223,19 @@ describeWithEmulator("firestore security rules", () => {
       })
     );
   });
+
+  it("allows users to read their own task snapshots but blocks direct task writes", async () => {
+    await seedDoc("users/user-1/tasks/cloud-task-1", {
+      cloudTaskId: "cloud-task-1",
+      ownerDesktopId: "desktop-1",
+      ownerLocalTaskId: "task-1",
+      title: "Cloud task",
+    });
+
+    await expectSucceeds(readDoc(mockUserToken("user-1"), "users/user-1/tasks/cloud-task-1"));
+    await expectDenied(readDoc(mockUserToken("user-2"), "users/user-1/tasks/cloud-task-1"));
+    await expectDenied(
+      clientUpdate("user-1", "users/user-1/tasks/cloud-task-2", { title: "spoofed" })
+    );
+  });
 });
