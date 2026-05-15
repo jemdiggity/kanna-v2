@@ -1,11 +1,13 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { AgentProvider } from "@kanna/db"
 import { invoke } from "../invoke"
 import { useModalZIndex } from '../composables/useModalZIndex'
 import MobileAccessPanel from './MobileAccessPanel.vue'
 import { macOsTextInputAttrs } from '../utils/textInput'
+import { getConfiguredDesktopAuthSession } from '../services/desktopAuthSdk'
+import type { DesktopAuthSession, DesktopAuthState } from '../services/desktopAuth'
 
 useI18n()
 const { zIndex } = useModalZIndex()
@@ -42,12 +44,27 @@ const emit = defineEmits<{
   close: []
 }>()
 
-const activeTab = ref<'general' | 'developer'>('general')
+const activeTab = ref<'general' | 'account' | 'developer'>('general')
 
-const tabs: Array<'general' | 'developer'> = isDev ? ['general', 'developer'] : ['general']
+const tabs: Array<'general' | 'account' | 'developer'> = isDev
+  ? ['general', 'account', 'developer']
+  : ['general', 'account']
 const mobileDesktopName = ref("This desktop")
 const mobileServerStatus = ref<MobileServerStatus>("stopped")
 const pairingCode = ref<string | null>(null)
+const authSession = ref<DesktopAuthSession | null>(null)
+const authState = ref<DesktopAuthState>({ status: "signedOut" })
+const accountEmail = ref("")
+const accountPassword = ref("")
+const accountMessage = ref("")
+let unsubscribeAuth: (() => void) | null = null
+
+const isSigningIn = computed(() => authState.value.status === "signingIn")
+const signedInUserEmail = computed(() =>
+  authState.value.status === "signedIn"
+    ? authState.value.user.email ?? authState.value.user.uid
+    : null
+)
 
 function cycleTab(direction: -1 | 1) {
   const idx = tabs.indexOf(activeTab.value)
@@ -100,9 +117,47 @@ async function startPairing() {
   }
 }
 
+async function refreshAccountSession() {
+  try {
+    const session = await getConfiguredDesktopAuthSession()
+    authSession.value = session
+    await session.initialize()
+    unsubscribeAuth?.()
+    unsubscribeAuth = session.subscribe((state) => {
+      authState.value = state
+      if (state.status === "signedIn") {
+        accountMessage.value = ""
+        accountPassword.value = ""
+      } else if (state.status === "error") {
+        accountMessage.value = state.message
+      }
+    })
+  } catch (error) {
+    accountMessage.value = error instanceof Error ? error.message : "Failed to initialize sign-in."
+  }
+}
+
+async function signInAccount() {
+  accountMessage.value = ""
+  await authSession.value?.signInWithEmailPassword({
+    email: accountEmail.value,
+    password: accountPassword.value,
+  })
+}
+
+async function signOutAccount() {
+  accountMessage.value = ""
+  await authSession.value?.signOut()
+}
+
 onMounted(() => {
   overlayRef.value?.focus()
   void refreshMobileAccess()
+  void refreshAccountSession()
+})
+
+onBeforeUnmount(() => {
+  unsubscribeAuth?.()
 })
 
 defineExpose({ cycleTab })
@@ -118,6 +173,12 @@ defineExpose({ cycleTab })
             :class="{ active: activeTab === 'general' }"
             @click="activeTab = 'general'"
           >{{ $t('preferences.title') }}</button>
+          <button
+            class="tab"
+            data-testid="preferences-account-tab"
+            :class="{ active: activeTab === 'account' }"
+            @click="activeTab = 'account'"
+          >Account</button>
           <button
             v-if="isDev"
             class="tab"
@@ -182,6 +243,50 @@ defineExpose({ cycleTab })
             <option value="codex">Codex</option>
           </select>
         </div>
+      </div>
+
+      <div v-if="activeTab === 'account'" class="prefs-body">
+        <section class="account-panel">
+          <div v-if="signedInUserEmail" class="account-signed-in">
+            <span class="account-label">Signed in</span>
+            <strong>{{ signedInUserEmail }}</strong>
+            <button type="button" class="secondary-button" @click="signOutAccount">
+              Sign out
+            </button>
+          </div>
+
+          <form v-else class="account-form" data-testid="account-sign-in" @submit.prevent="signInAccount">
+            <label class="account-field">
+              <span>Email</span>
+              <input
+                v-model="accountEmail"
+                data-testid="account-email"
+                v-bind="macOsTextInputAttrs"
+                type="email"
+                autocomplete="email"
+                required
+              />
+            </label>
+
+            <label class="account-field">
+              <span>Password</span>
+              <input
+                v-model="accountPassword"
+                data-testid="account-password"
+                v-bind="macOsTextInputAttrs"
+                type="password"
+                autocomplete="current-password"
+                required
+              />
+            </label>
+
+            <button type="submit" class="primary-button" :disabled="isSigningIn">
+              {{ isSigningIn ? "Signing in..." : "Sign in" }}
+            </button>
+          </form>
+
+          <p v-if="accountMessage" class="account-message">{{ accountMessage }}</p>
+        </section>
       </div>
 
       <div v-if="activeTab === 'developer'" class="prefs-body">
@@ -286,7 +391,8 @@ defineExpose({ cycleTab })
 }
 
 .pref-row input[type="number"],
-.pref-row input[type="text"] {
+.pref-row input[type="text"],
+.account-field input {
   background: #1a1a1a;
   border: 1px solid #444;
   border-radius: 4px;
@@ -311,6 +417,78 @@ defineExpose({ cycleTab })
   width: 14px;
   height: 14px;
   cursor: pointer;
+}
+
+.account-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.account-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.account-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 12px;
+  color: #bbb;
+}
+
+.account-field input {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.account-signed-in {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  color: #e0e0e0;
+}
+
+.account-label {
+  font-size: 11px;
+  color: #8b98a8;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.account-message {
+  margin: 0;
+  color: #ffb39d;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.primary-button,
+.secondary-button {
+  align-self: flex-start;
+  padding: 7px 12px;
+  border-radius: 5px;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.primary-button {
+  border: 1px solid #0077ee;
+  background: #0066cc;
+}
+
+.primary-button:disabled {
+  opacity: 0.65;
+  cursor: default;
+}
+
+.secondary-button {
+  border: 1px solid #555;
+  background: #333;
 }
 
 .pref-row select {

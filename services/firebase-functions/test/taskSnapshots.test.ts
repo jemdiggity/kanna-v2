@@ -27,8 +27,8 @@ describe("task snapshot validation", () => {
       prNumber: null,
       prUrl: null,
       agent: {
-        provider: "claude",
-        type: "pty",
+        provider: "codex",
+        type: "sdk",
       },
       transfer: {
         state: "none",

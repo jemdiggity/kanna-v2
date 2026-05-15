@@ -34,7 +34,10 @@ export function createCloudTaskPublisher({
       });
 
       if (!response.ok) {
-        throw new Error(`cloud task snapshot publish failed with status ${response.status}`);
+        const body = await response.text().catch(() => "");
+        throw new Error(
+          `cloud task snapshot publish failed with status ${response.status}${body ? `: ${body}` : ""}`,
+        );
       }
     },
   };

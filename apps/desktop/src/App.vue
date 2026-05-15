@@ -27,6 +27,9 @@ import PeerPickerModal from "./components/PeerPickerModal.vue";
 import PreferencesPanel from "./components/PreferencesPanel.vue";
 import AppUpdatePrompt from "./components/AppUpdatePrompt.vue";
 import ToastContainer from "./components/ToastContainer.vue";
+import { getConfiguredDesktopAuthSession } from "./services/desktopAuthSdk";
+import type { DesktopAuthSession, DesktopAuthState } from "./services/desktopAuth";
+import { listDesktopCloudTasks, type DesktopCloudSnapshot } from "./services/desktopCloudTaskIndex";
 import { useKeyboardShortcuts, type ActionName } from "./composables/useKeyboardShortcuts";
 import { startPeriodicBackup } from "./composables/useBackup";
 import { useOperatorEvents } from "./composables/useOperatorEvents";
@@ -98,6 +101,11 @@ const appUnlisteners: Array<() => void> = [];
 let closingCurrentWindow = false;
 useOperatorEvents(computed(() => db) as unknown as Ref<DbHandle | null>);
 store.attachWindowWorkspace(windowWorkspace);
+const desktopAuthSession = ref<DesktopAuthSession | null>(null);
+const desktopAuthState = ref<DesktopAuthState>({ status: "signedOut" });
+const cloudSnapshot = ref<DesktopCloudSnapshot>({ repos: [], items: [] });
+let unsubscribeDesktopAuth: (() => void) | null = null;
+let cloudRefreshTimer: ReturnType<typeof setInterval> | null = null;
 
 async function requestCloseCurrentWindow() {
   if (closingCurrentWindow) return;
@@ -177,6 +185,8 @@ const preferences = reactive({
   devLingerTerminals: false,
   defaultAgentProvider: "claude" as AgentProvider,
 });
+const sidebarRepos = computed(() => [...store.repos, ...cloudSnapshot.value.repos]);
+const sidebarItems = computed(() => [...store.items, ...cloudSnapshot.value.items]);
 type DiffScope = "branch" | "working";
 
 interface DiffScrollPositions {
@@ -218,6 +228,33 @@ function buildCurrentFileFlowKey(): string | undefined {
   if (store.currentItem) return `item:${store.currentItem.id}`;
   if (store.selectedRepo) return `repo:${store.selectedRepo.id}`;
   return undefined;
+}
+
+async function refreshCloudTasksForSignedInUser(): Promise<void> {
+  const state = desktopAuthState.value;
+  if (state.status !== "signedIn") {
+    cloudSnapshot.value = { repos: [], items: [] };
+    return;
+  }
+  cloudSnapshot.value = await listDesktopCloudTasks(state.user.uid);
+}
+
+async function initializeDesktopCloudAuth(): Promise<void> {
+  const session = await getConfiguredDesktopAuthSession();
+  desktopAuthSession.value = session;
+  await session.initialize();
+  unsubscribeDesktopAuth?.();
+  unsubscribeDesktopAuth = session.subscribe((state) => {
+    desktopAuthState.value = state;
+    void refreshCloudTasksForSignedInUser().catch((error) =>
+      console.warn("[cloud] failed to refresh cloud tasks:", error),
+    );
+  });
+  cloudRefreshTimer = setInterval(() => {
+    void refreshCloudTasksForSignedInUser().catch((error) =>
+      console.warn("[cloud] failed to refresh cloud tasks:", error),
+    );
+  }, 1000);
 }
 
 const currentFileFlowKey = computed(() => buildCurrentFileFlowKey());
@@ -1388,6 +1425,9 @@ onMounted(async () => {
 
   await restoreSidebarWidth();
   await store.init(db);
+  void initializeDesktopCloudAuth().catch((error) =>
+    console.warn("[cloud] failed to initialize desktop auth:", error),
+  );
   await importPendingIncomingTransfers();
   if (import.meta.env.DEV && window.__KANNA_E2E__) {
     window.__KANNA_E2E__.ready = true;
@@ -1636,6 +1676,10 @@ onUnmounted(() => {
 });
 
 onBeforeUnmount(() => {
+  unsubscribeDesktopAuth?.();
+  if (cloudRefreshTimer) {
+    clearInterval(cloudRefreshTimer);
+  }
   stopSidebarResize();
   window.removeEventListener("dragenter", suppressFileDropNavigation);
   window.removeEventListener("dragover", suppressFileDropNavigation);
@@ -1655,8 +1699,8 @@ onBeforeUnmount(() => {
     >
       <Sidebar
         ref="sidebarRef"
-        :repos="store.repos"
-        :pipeline-items="store.items"
+        :repos="sidebarRepos"
+        :pipeline-items="sidebarItems"
         :selected-repo-id="store.selectedRepoId"
         :selected-item-id="store.selectedItemId"
         :blocker-names="sidebarBlockerNames"

@@ -218,7 +218,10 @@ async function waitForApp(baseUrl: string, timeoutMs: number): Promise<void> {
 }
 
 function needsSecondaryInstance(testTargets: string[]): boolean {
-  return testTargets.some((target) => /real\/local-transfer-.*\.test\.ts$/.test(target));
+  return testTargets.some((target) =>
+    /real\/local-transfer-.*\.test\.ts$/.test(target) ||
+    /real\/cloud-task-sync\.test\.ts$/.test(target)
+  );
 }
 
 function targetNeedsSecondaryInstance(testTarget: string): boolean {
@@ -227,6 +230,10 @@ function targetNeedsSecondaryInstance(testTarget: string): boolean {
 
 function isRealTestTarget(testTarget: string): boolean {
   return testTarget.includes("/real/");
+}
+
+function targetNeedsEmulators(testTarget: string): boolean {
+  return /real\/cloud-task-sync\.test\.ts$/.test(testTarget);
 }
 
 function buildInstanceConfig(input: {
@@ -281,6 +288,17 @@ async function main(): Promise<void> {
   const primaryDevPort = await findFreePort();
   const primaryWebDriverPort = await findFreePort();
   const primaryTransferPort = await findFreePort();
+  const firebaseAuthPort = await findFreePort();
+  const firebaseFirestorePort = await findFreePort();
+  const firebaseFunctionsPort = await findFreePort();
+  const firebaseUiPort = await findFreePort();
+  const firebaseEnv = {
+    KANNA_FIREBASE_AUTH_PORT: String(firebaseAuthPort),
+    KANNA_FIREBASE_FIRESTORE_PORT: String(firebaseFirestorePort),
+    KANNA_FIREBASE_FUNCTIONS_PORT: String(firebaseFunctionsPort),
+    KANNA_FIREBASE_UI_PORT: String(firebaseUiPort),
+    KANNA_E2E_AWAIT_CLOUD_PUBLISH: "1",
+  };
   const primaryDbName = `test-${worktreeName}-primary.db`;
   const primaryDaemonDir = join(repoRoot, ".kanna-daemon-e2e", runSuffix);
   const realE2eRuntimeEnv = realE2eAgentEnv.KANNA_E2E_REAL_AGENT_PROVIDER === "codex"
@@ -297,6 +315,7 @@ async function main(): Promise<void> {
     effectiveWebDriverPort: primaryWebDriverPort,
     envOverrides: {
       ...realE2eRuntimeEnv,
+      ...firebaseEnv,
       KANNA_TRANSFER_DISCOVERY: "registry",
       KANNA_TRANSFER_DISPLAY_NAME: "Primary",
       KANNA_TRANSFER_PEER_ID: "peer-primary",
@@ -327,6 +346,7 @@ async function main(): Promise<void> {
         effectiveWebDriverPort: secondaryWebDriverPort,
         envOverrides: {
           ...realE2eRuntimeEnv,
+          ...firebaseEnv,
           KANNA_TRANSFER_DISCOVERY: "registry",
           KANNA_TRANSFER_DISPLAY_NAME: "Secondary",
           KANNA_TRANSFER_PEER_ID: "peer-secondary",
@@ -360,6 +380,7 @@ async function main(): Promise<void> {
       KANNA_E2E_PERF_OUTPUT_PATH: perfOutputPath,
       KANNA_TRANSFER_REGISTRY_DIR: transferRegistryDir,
       KANNA_WEBDRIVER_PORT: String(primaryWebDriverPort),
+      ...firebaseEnv,
       ...runtimeEnv,
       ...(withSecondary && secondary
         ? { KANNA_E2E_TARGET_WEBDRIVER_PORT: String(secondary.webDriverPort) }
@@ -416,6 +437,94 @@ async function main(): Promise<void> {
     await rm(transferRegistryDir, { recursive: true, force: true }).catch(() => undefined);
   }
 
+  let firebaseEmulatorProcess: ReturnType<typeof spawn> | null = null;
+  let firebaseEmulatorOutput = "";
+
+  async function startFirebaseEmulators(): Promise<void> {
+    if (firebaseEmulatorProcess) return;
+
+    firebaseEmulatorOutput = "";
+    const proc = spawn("./kd", ["emulators", "up"], {
+      cwd: repoRoot,
+      env: { ...primary.env, ...firebaseEnv },
+      detached: true,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    firebaseEmulatorProcess = proc;
+    proc.stdout?.on("data", (chunk: Buffer) => {
+      firebaseEmulatorOutput += chunk.toString();
+    });
+    proc.stderr?.on("data", (chunk: Buffer) => {
+      firebaseEmulatorOutput += chunk.toString();
+    });
+
+    let exited: { code: number | null; signal: NodeJS.Signals | null } | null = null;
+    proc.once("exit", (code, signal) => {
+      exited = { code, signal };
+      if (firebaseEmulatorProcess === proc) firebaseEmulatorProcess = null;
+    });
+
+    const authSignInUrl = `http://127.0.0.1:${firebaseAuthPort}/identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=kanna-local`;
+    const authSignUpUrl = `http://127.0.0.1:${firebaseAuthPort}/identitytoolkit.googleapis.com/v1/accounts:signUp?key=kanna-local`;
+    const credentials = {
+      email: "upvote.sieve.7t@icloud.com",
+      password: "password123",
+      returnSecureToken: true,
+    };
+    const deadline = Date.now() + 90_000;
+    while (Date.now() < deadline) {
+      if (exited) {
+        throw new Error(
+          `Firebase emulators exited before readiness: ${exited.code ?? exited.signal}\n${firebaseEmulatorOutput.trim()}`,
+        );
+      }
+
+      const seedResponse = await fetch(authSignUpUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(credentials),
+      }).catch(() => null);
+      if (seedResponse?.ok) return;
+
+      const signInResponse = await fetch(authSignInUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(credentials),
+      }).catch(() => null);
+      if (signInResponse?.ok) return;
+
+      await sleep(500);
+    }
+    throw new Error(`timed out waiting for Firebase auth emulator\n${firebaseEmulatorOutput.trim()}`);
+  }
+
+  async function stopFirebaseEmulators(): Promise<void> {
+    const proc = firebaseEmulatorProcess;
+    firebaseEmulatorProcess = null;
+    if (proc?.pid) {
+      try {
+        process.kill(-proc.pid, "SIGINT");
+      } catch {
+        proc.kill("SIGINT");
+      }
+      const exited = await Promise.race([
+        new Promise<boolean>((resolveExit) => proc.once("exit", () => resolveExit(true))),
+        sleep(10_000).then(() => false),
+      ]);
+      if (!exited) {
+        try {
+          process.kill(-proc.pid, "SIGKILL");
+        } catch {
+          proc.kill("SIGKILL");
+        }
+      }
+    }
+    await runCommand(["./kd", "emulators", "down"], {
+      cwd: repoRoot,
+      env: { ...primary.env, ...firebaseEnv },
+    }).catch(() => undefined);
+  }
+
   let runningInstances: RunningInstances | null = null;
   let lastTargetWasReal = false;
 
@@ -425,6 +534,7 @@ async function main(): Promise<void> {
     for (const testTarget of testTargets) {
       const targetIsReal = isRealTestTarget(testTarget);
       const needsSecondaryForTarget = targetNeedsSecondaryInstance(testTarget);
+      const needsEmulatorsForTarget = targetNeedsEmulators(testTarget);
       if (targetIsReal) {
         if (!lastTargetWasReal) {
           console.log("\n[e2e] restarting app instances before real test isolation\n");
@@ -433,6 +543,7 @@ async function main(): Promise<void> {
         }
         await stopInstances(runningInstances);
         await resetTransferRegistry();
+        if (needsEmulatorsForTarget) await startFirebaseEmulators();
         runningInstances = await startInstances(
           needsSecondaryForTarget,
           false,
@@ -472,9 +583,14 @@ async function main(): Promise<void> {
     if (secondary) {
       await runCommand(["./kd", "dev", "log"], { cwd: repoRoot, env: secondary.env }).catch(() => undefined);
     }
+    if (firebaseEmulatorOutput.trim()) {
+      console.error("\n[e2e] recent Firebase emulator log:\n");
+      console.error(firebaseEmulatorOutput.trimEnd());
+    }
     throw error;
   } finally {
     await stopInstances(runningInstances);
+    await stopFirebaseEmulators();
     if (secondary) {
       await rm(secondary.daemonDir, { recursive: true, force: true }).catch(() => undefined);
     }

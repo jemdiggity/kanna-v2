@@ -47,6 +47,7 @@ import { getCreateWorktreeStartPoint, getOriginFetchBranch, resolveInitialBaseRe
 import { buildTaskRuntimeEnv, resolveKannaServerBaseUrl } from "./kannaCliEnv";
 import { encodeDaemonInput } from "./daemonInput";
 import { buildWorktreeSessionEnv } from "./worktreeEnv";
+import { publishDesktopTaskSnapshot } from "../services/desktopCloudPublisher";
 import {
   reportCloseSessionError,
   reportPrewarmSessionError,
@@ -728,6 +729,38 @@ export function createTasksApi(
           console.log(`[perf:createItem] DB insert: ${(performance.now() - t1).toFixed(1)}ms`);
 
           await reloadSnapshot();
+          const createdItem = context.state.items.value.find((candidate) => candidate.id === id);
+          const createdRepo = context.state.repos.value.find((candidate) => candidate.id === repoId) ?? null;
+          if (createdItem) {
+            const publishPromise = publishDesktopTaskSnapshot(context.requireDb(), createdItem, createdRepo)
+              .then(() => {
+                if (import.meta.env.DEV && typeof window !== "undefined") {
+                  (window as unknown as { __KANNA_E2E_CLOUD_PUBLISH__?: unknown }).__KANNA_E2E_CLOUD_PUBLISH__ = {
+                    status: "ok",
+                    taskId: id,
+                  };
+                }
+              })
+              .catch((error) => {
+                if (import.meta.env.DEV && typeof window !== "undefined") {
+                  (window as unknown as { __KANNA_E2E_CLOUD_PUBLISH__?: unknown }).__KANNA_E2E_CLOUD_PUBLISH__ = {
+                    status: "error",
+                    taskId: id,
+                    message: error instanceof Error ? error.message : String(error),
+                  };
+                }
+                console.warn("[cloud] failed to publish task snapshot:", error);
+                throw error;
+              });
+            const awaitCloudPublish = import.meta.env.DEV
+              ? await invoke<string>("read_env_var", { name: "KANNA_E2E_AWAIT_CLOUD_PUBLISH" }).catch(() => "")
+              : "";
+            if (awaitCloudPublish === "1") {
+              await publishPromise;
+            } else {
+              void publishPromise.catch(() => undefined);
+            }
+          }
           console.log(`[perf:createItem] reload -> waiting for items refresh (id=${id})`);
           console.log(`[perf:createItem] TOTAL (modal → reload): ${(performance.now() - t0).toFixed(1)}ms`);
           console.log("[tasks:createItem] inserted and reloaded", {

@@ -70,6 +70,15 @@ function parseFlagInput(rest: string[], defaults: Record<string, unknown>): Reco
       index += 1;
       continue;
     }
+    if (arg === "--firebase-env-from") {
+      const value = rest[index + 1];
+      if (!value) {
+        throw new Error("--firebase-env-from requires a value");
+      }
+      input.firebaseEnvFrom = value;
+      index += 1;
+      continue;
+    }
     if (arg === "--out-dir") {
       const value = rest[index + 1];
       if (!value) {
@@ -88,6 +97,9 @@ function parseFlagInput(rest: string[], defaults: Record<string, unknown>): Reco
       throw new Error(`Unknown flag: ${arg}`);
     }
     input[flagName] = true;
+  }
+  if (input.emulators === true && typeof input.firebaseEnvFrom === "string") {
+    throw new Error("--emulators and --firebase-env-from cannot be used together");
   }
   return input;
 }
@@ -192,7 +204,7 @@ function helpText(): string {
     "Usage: kd <command>",
     "",
     "Commands:",
-    "  dev up [--mobile] [--emulators] [--seed] [--attach] [--db <path-or-name>] [--delete-db]",
+    "  dev up [--mobile] [--emulators] [--seed] [--attach] [--db <path-or-name>] [--delete-db] [--firebase-env-from <task-or-path>]",
     "  dev down [--kill-daemon]",
     "  dev restart [--mobile] [--emulators] [--seed] [--attach] [--delete-db]",
     "  dev status",

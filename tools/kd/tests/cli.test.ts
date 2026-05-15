@@ -106,6 +106,27 @@ describe("kd CLI", () => {
     });
   });
 
+  it("parses dev up with a borrowed Firebase emulator environment", () => {
+    expect(parseCliArgs(["dev", "up", "--firebase-env-from", "task-source"])).toEqual({
+      taskId: "dev.up",
+      input: {
+        mobile: false,
+        emulators: false,
+        seed: false,
+        attach: false,
+        deleteDb: false,
+        killDaemon: false,
+        firebaseEnvFrom: "task-source"
+      }
+    });
+  });
+
+  it("rejects starting and borrowing Firebase emulators at the same time", () => {
+    expect(() =>
+      parseCliArgs(["dev", "up", "--emulators", "--firebase-env-from", "task-source"])
+    ).toThrow("--emulators and --firebase-env-from cannot be used together");
+  });
+
   it("registers the dev status task", () => {
     expect(getTaskDefinition("dev.status").description).toBe("Show Kanna dev environment status.");
   });

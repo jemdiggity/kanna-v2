@@ -18,6 +18,9 @@ allowBuilds:
   sharp: false
 onlyBuiltDependencies: []
 packageExtensions:
+  "@apphosting/build@0.1.7":
+    dependencies:
+      yaml: 2.8.3
   "@expo/cli@0.24.24":
     dependencies:
       "@react-native/js-polyfills": 0.79.2

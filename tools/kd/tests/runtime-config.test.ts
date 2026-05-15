@@ -5,6 +5,8 @@ import { describe, expect, it } from "vitest";
 import {
   buildFirebaseCommandEnv,
   buildFirebaseEmulatorArgs,
+  formatMissingFirebaseEmulators,
+  resolveFirebaseEnvFromReference,
   writeFirebaseEmulatorConfig,
 } from "../src/runtime/firebase";
 import { readDesktopBundleIdentifier, writeTauriLocalConfig } from "../src/runtime/tauri";
@@ -83,5 +85,47 @@ describe("runtime config generation", () => {
       NODE_PATH: "/repo/node_modules"
     });
     expect(buildFirebaseCommandEnv("/repo", { NODE_PATH: "/existing" }).NODE_PATH).toBe("/repo/node_modules:/existing");
+  });
+
+  it("resolves Firebase emulator ports from a sibling worktree config", () => {
+    const root = mkdtempSync(join(tmpdir(), "kd-firebase-from-"));
+    const worktreesRoot = join(root, ".kanna-worktrees");
+    const current = join(worktreesRoot, "task-current");
+    const source = join(worktreesRoot, "task-source");
+    mkdirSync(current, { recursive: true });
+    mkdirSync(source, { recursive: true });
+    writeFileSync(join(source, ".firebase-18081.kanna.json"), JSON.stringify({
+      emulators: {
+        auth: { port: 19100 },
+        firestore: { port: 18081 },
+        functions: { port: 15002 },
+        ui: { port: 14001 }
+      }
+    }));
+
+    expect(resolveFirebaseEnvFromReference(current, "task-source")).toEqual({
+      KANNA_FIREBASE_AUTH_PORT: "19100",
+      KANNA_FIREBASE_FIRESTORE_PORT: "18081",
+      KANNA_FIREBASE_FUNCTIONS_PORT: "15002",
+      KANNA_FIREBASE_UI_PORT: "14001"
+    });
+  });
+
+  it("reports a clear error when the borrowed Firebase config is missing", () => {
+    const root = mkdtempSync(join(tmpdir(), "kd-firebase-from-missing-"));
+    const current = join(root, ".kanna-worktrees", "task-current");
+    mkdirSync(current, { recursive: true });
+
+    expect(() => resolveFirebaseEnvFromReference(current, "task-missing")).toThrow(
+      "No Firebase emulator config found for task-missing"
+    );
+  });
+
+  it("formats missing borrowed Firebase emulator listeners", () => {
+    expect(formatMissingFirebaseEmulators("task-source", [
+      { name: "auth", port: 19100, listening: true, pids: ["123"] },
+      { name: "firestore", port: 18081, listening: false, pids: [] },
+      { name: "functions", port: 15002, listening: false, pids: [] }
+    ])).toBe("Firebase emulator ports from task-source are not listening: firestore:18081, functions:15002");
   });
 });

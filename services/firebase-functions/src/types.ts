@@ -72,7 +72,7 @@ export interface CloudTaskSnapshot {
   prNumber: number | null;
   prUrl: string | null;
   agent: {
-    provider: "claude" | "copilot";
+    provider: "claude" | "copilot" | "codex";
     type: string;
   };
   transfer: {

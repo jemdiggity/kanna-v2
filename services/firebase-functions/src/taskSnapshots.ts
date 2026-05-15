@@ -62,7 +62,7 @@ function validateRepo(value: unknown): CloudTaskSnapshot["repo"] {
 
 function validateAgent(value: unknown): CloudTaskSnapshot["agent"] {
   const record = requireRecord(value, "agent");
-  const provider = enumString(record.provider, new Set(["claude", "copilot"]), "agent.provider");
+  const provider = enumString(record.provider, new Set(["claude", "copilot", "codex"]), "agent.provider");
   return {
     provider: provider as CloudTaskSnapshot["agent"]["provider"],
     type: requireString(record, "type"),
