@@ -114,6 +114,7 @@ const desktopAuthSession = ref<DesktopAuthSession | null>(null);
 const desktopAuthState = ref<DesktopAuthState>({ status: "signedOut" });
 const cloudSnapshot = ref<DesktopCloudSnapshot>({ repos: [], items: [], terminalRefs: {} });
 const lanSnapshot = ref<DesktopCloudSnapshot>({ repos: [], items: [], terminalRefs: {} });
+const locallyClosedRemoteTaskIds = ref<Set<string>>(new Set());
 let unsubscribeDesktopAuth: (() => void) | null = null;
 let cloudRefreshTimer: ReturnType<typeof setInterval> | null = null;
 let lanRefreshTimer: ReturnType<typeof setInterval> | null = null;
@@ -215,14 +216,18 @@ const localReposForCloudMatching = computedAsync(async () => {
 })));
 const remoteSnapshot = computed<DesktopCloudSnapshot>(() => ({
   repos: [...cloudSnapshot.value.repos, ...lanSnapshot.value.repos],
-  items: [...cloudSnapshot.value.items, ...lanSnapshot.value.items],
-  terminalRefs: { ...cloudSnapshot.value.terminalRefs, ...lanSnapshot.value.terminalRefs },
+  items: [...cloudSnapshot.value.items, ...lanSnapshot.value.items]
+    .filter((item) => !locallyClosedRemoteTaskIds.value.has(item.id)),
+  terminalRefs: Object.fromEntries(
+    Object.entries({ ...cloudSnapshot.value.terminalRefs, ...lanSnapshot.value.terminalRefs })
+      .filter(([taskId]) => !locallyClosedRemoteTaskIds.value.has(taskId)),
+  ),
 }));
 const workspace = computed(() => buildWorkspace({
   localRepos: localReposForCloudMatching.value,
   localItems: store.items,
-  cloudSnapshot: cloudSnapshot.value,
-  lanSnapshot: lanSnapshot.value,
+  cloudSnapshot: filterClosedRemoteSnapshot(cloudSnapshot.value),
+  lanSnapshot: filterClosedRemoteSnapshot(lanSnapshot.value),
 }));
 const workspaceTasksByItemId = computed(() => {
   const entries: Array<[string, WorkspaceTask]> = [];
@@ -285,6 +290,18 @@ function cloudRepoRemoteUrl(repoId: string | undefined | null): string | null {
   if (!repoId) return null;
   const repo = remoteSnapshot.value.repos.find((candidate) => candidate.id === repoId);
   return repo?.remote_url ?? null;
+}
+
+function filterClosedRemoteSnapshot(snapshot: DesktopCloudSnapshot): DesktopCloudSnapshot {
+  const closedIds = locallyClosedRemoteTaskIds.value;
+  if (closedIds.size === 0) return snapshot;
+  return {
+    repos: snapshot.repos,
+    items: snapshot.items.filter((item) => !closedIds.has(item.id)),
+    terminalRefs: Object.fromEntries(
+      Object.entries(snapshot.terminalRefs).filter(([taskId]) => !closedIds.has(taskId)),
+    ),
+  };
 }
 type DiffScope = "branch" | "working";
 
@@ -1167,6 +1184,15 @@ async function closeSelectedWorkspaceTask() {
       desktopId: remoteRef.ownerDesktopId,
       taskId: remoteRef.ownerLocalTaskId,
     });
+    locallyClosedRemoteTaskIds.value = new Set([
+      ...locallyClosedRemoteTaskIds.value,
+      workspaceTask.item.id,
+      ...workspaceTask.remoteTaskIds,
+      ...workspaceTask.sources.map((source) => source.taskId),
+    ]);
+    if (selectedCloudItemId.value && locallyClosedRemoteTaskIds.value.has(selectedCloudItemId.value)) {
+      selectedCloudItemId.value = null;
+    }
   } catch (error) {
     toast.error(error instanceof Error ? error.message : String(error));
   } finally {
