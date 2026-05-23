@@ -71,7 +71,7 @@ describe("buildWorkspace", () => {
       id: "local:task-local",
       localTaskId: "task-local",
       remoteTaskIds: [],
-      repoKey: "local:repo-local",
+      repoKey: "repo-local",
       owner: { kind: "local" },
       reachability: "local",
       terminal: { kind: "local", localSessionId: "task-local" },
@@ -178,6 +178,95 @@ describe("buildWorkspace", () => {
     });
   });
 
+  it("marks reachable cloud tasks as remotely controllable without local-only actions", () => {
+    const cloudItem = item({
+      id: "cloud:remote-repo:task-control",
+      repo_id: "cloud:remote-repo",
+      branch: "task-control",
+    });
+
+    const result = buildWorkspace({
+      localRepos: [],
+      localItems: [],
+      cloudSnapshot: {
+        repos: [{
+          id: "cloud:remote-repo",
+          path: "cloud",
+          name: "kanna",
+          remote_url: "git@example.com:kanna.git",
+          default_branch: "main",
+          hidden: 0,
+          sort_order: 0,
+          created_at: "2026-05-23T00:00:00.000Z",
+          last_opened_at: "2026-05-23T00:00:00.000Z",
+        }],
+        items: [cloudItem],
+        terminalRefs: {
+          "cloud:remote-repo:task-control": {
+            ownerDesktopId: "desktop-a",
+            ownerLocalTaskId: "task-control",
+            transport: "cloud",
+          },
+        },
+      },
+      lanSnapshot: emptySnapshot(),
+    });
+
+    expect(result.tasks[0]?.capabilities).toMatchObject({
+      canOpenTerminal: true,
+      canSendInput: true,
+      canResizeTerminal: true,
+      canClose: true,
+      canOpenDiff: false,
+      canOpenInIde: false,
+      canOpenShell: false,
+      canAdvanceStage: false,
+      canEditMetadata: true,
+    });
+  });
+
+  it("marks unreachable remote tasks as visible but not controllable", () => {
+    const cloudItem = item({
+      id: "cloud:remote-repo:task-offline",
+      repo_id: "cloud:remote-repo",
+      branch: "task-offline",
+    });
+
+    const result = buildWorkspace({
+      localRepos: [],
+      localItems: [],
+      cloudSnapshot: {
+        repos: [{
+          id: "cloud:remote-repo",
+          path: "cloud",
+          name: "kanna",
+          remote_url: "git@example.com:kanna.git",
+          default_branch: "main",
+          hidden: 0,
+          sort_order: 0,
+          created_at: "2026-05-23T00:00:00.000Z",
+          last_opened_at: "2026-05-23T00:00:00.000Z",
+        }],
+        items: [cloudItem],
+        terminalRefs: {},
+      },
+      lanSnapshot: emptySnapshot(),
+    });
+
+    expect(result.tasks[0]?.reachability).toBe("unknown");
+    expect(result.tasks[0]?.capabilities).toMatchObject({
+      canOpenTerminal: false,
+      canSendInput: false,
+      canResizeTerminal: false,
+      canClose: false,
+      canOpenDiff: false,
+      canOpenInIde: false,
+      canOpenShell: false,
+      canAdvanceStage: false,
+      canEditMetadata: false,
+    });
+  });
+
   it("hides a stale remote task when the matching local task is closed", () => {
     const closed = item({
       id: "task-closed",
@@ -250,10 +339,10 @@ describe("buildWorkspace", () => {
 
     expect(result.repos).toHaveLength(1);
     expect(result.repos[0]).toMatchObject({
-      key: "local:repo-local",
+      key: "repo-local",
       localRepoId: "repo-local",
       source: "mixed",
     });
-    expect(result.tasks[0].repoKey).toBe("local:repo-local");
+    expect(result.tasks[0].repoKey).toBe("repo-local");
   });
 });

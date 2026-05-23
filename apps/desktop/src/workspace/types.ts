@@ -25,12 +25,16 @@ export interface WorkspaceTerminalRoute {
 export interface WorkspaceCapabilities {
   canOpenTerminal: boolean;
   canSendInput: boolean;
+  canResizeTerminal: boolean;
   canClose: boolean;
   canCreateSiblingTask: boolean;
   canPushToMachine: boolean;
   canPullFromMachine: boolean;
   canOpenDiff: boolean;
   canOpenInIde: boolean;
+  canOpenShell: boolean;
+  canAdvanceStage: boolean;
+  canEditMetadata: boolean;
 }
 
 export interface WorkspaceRepo {

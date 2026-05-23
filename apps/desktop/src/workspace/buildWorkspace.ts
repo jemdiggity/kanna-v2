@@ -57,7 +57,7 @@ function buildRepoContext(localRepos: LocalRepoWithRemote[], remoteRepos: Remote
   const remoteRepoKeyById = new Map<string, string>();
 
   for (const entry of localRepos) {
-    const key = `local:${entry.repo.id}`;
+    const key = entry.repo.id;
     localRepoKeyById.set(entry.repo.id, key);
     if (entry.remoteUrlHash) localRepoKeyByRemoteHash.set(entry.remoteUrlHash, key);
     reposByKey.set(key, {
@@ -76,7 +76,7 @@ function buildRepoContext(localRepos: LocalRepoWithRemote[], remoteRepos: Remote
   for (const repo of remoteRepos) {
     const remoteUrlHash = readRemoteUrlHash(repo);
     const matchedLocalKey = remoteUrlHash ? localRepoKeyByRemoteHash.get(remoteUrlHash) : undefined;
-    const key = matchedLocalKey ?? `remote:${repo.id}`;
+    const key = matchedLocalKey ?? repo.id;
     remoteRepoKeyById.set(repo.id, key);
     const existing = reposByKey.get(key);
     if (existing) {
@@ -138,7 +138,7 @@ function remoteCandidates(
     if (item.stage === "done" || item.closed_at) return null;
     const repoKey = repoContext.remoteRepoKeyById.get(item.repo_id)
       ?? repoContext.localRepoKeyById.get(item.repo_id)
-      ?? `remote:${item.repo_id}`;
+      ?? item.repo_id;
     const terminalRef = terminalRefs[item.id];
     const ownerLocalTaskId = terminalRef?.ownerLocalTaskId ?? stripRemoteTaskPrefix(item.id);
     const closedKey = `${repoKey}:owner-local:${ownerLocalTaskId}`;
@@ -265,15 +265,20 @@ function terminalRouteFor(candidate: Candidate): WorkspaceTerminalRoute {
 function capabilitiesFor(candidate: Candidate): WorkspaceCapabilities {
   const isLocal = candidate.source.kind === "local";
   const hasTerminal = isLocal || Boolean(candidate.source.terminalRef);
+  const isReachable = isLocal || Boolean(candidate.source.terminalRef);
   return {
     canOpenTerminal: hasTerminal,
     canSendInput: hasTerminal,
-    canClose: isLocal || hasTerminal,
+    canResizeTerminal: hasTerminal,
+    canClose: isReachable,
     canCreateSiblingTask: true,
     canPushToMachine: isLocal,
     canPullFromMachine: !isLocal,
     canOpenDiff: isLocal,
     canOpenInIde: isLocal,
+    canOpenShell: isLocal,
+    canAdvanceStage: isLocal,
+    canEditMetadata: isReachable,
   };
 }
 
