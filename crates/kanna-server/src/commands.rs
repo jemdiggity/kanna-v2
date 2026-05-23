@@ -23,9 +23,14 @@ async fn kill_session_if_present(
             code: Some(ErrorCode::SessionNotFound),
             ..
         } => Ok(()),
+        DaemonEvent::Error { message, .. } if is_session_not_found(&message) => Ok(()),
         DaemonEvent::Error { message, .. } => Err(format!("daemon error: {}", message)),
         other => Err(format!("unexpected daemon response: {:?}", other)),
     }
+}
+
+fn is_session_not_found(message: &str) -> bool {
+    message.to_ascii_lowercase().contains("session not found")
 }
 
 pub async fn handle_invoke(

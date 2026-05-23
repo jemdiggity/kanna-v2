@@ -62,6 +62,7 @@ async function waitForSidebarTask(text: string, timeoutMs = 30_000): Promise<voi
 
 async function waitForSidebarTaskToDisappear(text: string, timeoutMs = 60_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
+  let lastDiagnostics: unknown = null;
   while (Date.now() < deadline) {
     const items = await sidebarItemsForPrompt(secondary, text);
     if (items.length === 0) return;
@@ -69,9 +70,31 @@ async function waitForSidebarTaskToDisappear(text: string, timeoutMs = 60_000): 
       `return document.querySelector(".sidebar")?.textContent || "";`,
     );
     if (!sidebarText.includes(text)) return;
+    lastDiagnostics = await secondary.executeSync(`
+      const ctx = window.__KANNA_E2E__.setupState;
+      const read = (value) => value?.__v_isRef ? value.value : value;
+      const closed = read(ctx.locallyClosedRemoteTaskIds);
+      return JSON.parse(JSON.stringify({
+        matchingSidebarItems: read(ctx.sidebarItems)?.filter((item) => item.prompt === ${JSON.stringify(text)}).map((item) => ({
+          id: item.id,
+          prompt: item.prompt,
+          repo_id: item.repo_id,
+          stage: item.stage,
+        })) ?? [],
+        selectedCloudItemId: read(ctx.selectedCloudItemId),
+        locallyClosedRemoteTaskIds: closed instanceof Set ? Array.from(closed) : closed,
+        lanSnapshotItems: read(ctx.lanSnapshot)?.items?.filter((item) => item.prompt === ${JSON.stringify(text)}).map((item) => ({
+          id: item.id,
+          prompt: item.prompt,
+          repo_id: item.repo_id,
+          stage: item.stage,
+        })) ?? [],
+        lanTerminalRefIds: Object.keys(read(ctx.lanSnapshot)?.terminalRefs ?? {}),
+      }));
+    `).catch((error: unknown) => ({ diagnosticError: String(error) }));
     await sleep(250);
   }
-  throw new Error(`timed out waiting for LAN task to disappear from secondary sidebar: ${text}`);
+  throw new Error(`timed out waiting for LAN task to disappear from secondary sidebar: ${text}; diagnostics=${JSON.stringify(lastDiagnostics)}`);
 }
 
 async function waitForBodyText(text: string, timeoutMs = 30_000): Promise<void> {

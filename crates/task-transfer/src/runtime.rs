@@ -2511,6 +2511,8 @@ async fn kill_daemon_session_if_present(
             code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
             ..
         } => Ok(()),
+        DaemonEvent::Error { message, .. }
+            if message.to_ascii_lowercase().contains("session not found") => Ok(()),
         DaemonEvent::Error { message, .. } => Err(RuntimeError::Protocol(message)),
         other => Err(RuntimeError::Protocol(format!(
             "unexpected daemon kill response: {:?}",

@@ -1193,6 +1193,9 @@ async fn handle_command(
             drop(mgr);
             let evt = match result {
                 Ok(_) => Event::Ok,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    error_event(Some(protocol::ErrorCode::SessionNotFound), e.to_string())
+                }
                 Err(e) => error_event(None, e.to_string()),
             };
             let _ = write_event(&mut *writer.lock().await, &evt).await;

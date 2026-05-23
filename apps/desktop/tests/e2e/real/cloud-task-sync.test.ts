@@ -50,18 +50,49 @@ async function waitForSidebarTask(client: typeof primary, text: string): Promise
 
 async function waitForSidebarTaskToDisappear(client: typeof primary, text: string): Promise<void> {
   const deadline = Date.now() + 30_000;
+  let lastDiagnostics: unknown = null;
   while (Date.now() < deadline) {
     const sidebarText = await client.executeSync<string>(
       `return document.querySelector(".sidebar")?.textContent || "";`,
     );
     if (!sidebarText.includes(text)) return;
+    lastDiagnostics = await client.executeSync(`
+      const ctx = window.__KANNA_E2E__.setupState;
+      const read = (value) => value?.__v_isRef ? value.value : value;
+      const closed = read(ctx.locallyClosedRemoteTaskIds);
+      return JSON.parse(JSON.stringify({
+        matchingSidebarItems: read(ctx.sidebarItems)?.filter((item) => item.prompt === ${JSON.stringify(text)}).map((item) => ({
+          id: item.id,
+          prompt: item.prompt,
+          repo_id: item.repo_id,
+          stage: item.stage,
+        })) ?? [],
+        selectedCloudItemId: read(ctx.selectedCloudItemId),
+        selectedWorkspaceTask: read(ctx.selectedWorkspaceTask) ? {
+          itemId: read(ctx.selectedWorkspaceTask).item?.id,
+          terminalKind: read(ctx.selectedWorkspaceTask).terminal?.kind,
+          remoteTaskIds: read(ctx.selectedWorkspaceTask).remoteTaskIds,
+          sources: read(ctx.selectedWorkspaceTask).sources?.map((source) => ({ taskId: source.taskId, transport: source.transport })),
+        } : null,
+        locallyClosedRemoteTaskIds: closed instanceof Set ? Array.from(closed) : closed,
+        cloudSnapshotItems: read(ctx.cloudSnapshot)?.items?.filter((item) => item.prompt === ${JSON.stringify(text)}).map((item) => ({
+          id: item.id,
+          prompt: item.prompt,
+          repo_id: item.repo_id,
+          stage: item.stage,
+          closed_at: item.closed_at,
+        })) ?? [],
+        cloudTerminalRefIds: Object.keys(read(ctx.cloudSnapshot)?.terminalRefs ?? {}),
+      }));
+    `).catch((error: unknown) => ({ diagnosticError: String(error) }));
     await sleep(200);
   }
-  throw new Error(`timed out waiting for sidebar text to disappear: ${text}`);
+  throw new Error(`timed out waiting for sidebar text to disappear: ${text}; diagnostics=${JSON.stringify(lastDiagnostics)}`);
 }
 
 async function waitForBodyText(client: typeof primary, text: string, timeoutMs = 30_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
+  let lastDiagnostics: unknown = null;
   while (Date.now() < deadline) {
     const bodyText = await client.executeSync<string>(`
       return [
@@ -71,9 +102,29 @@ async function waitForBodyText(client: typeof primary, text: string, timeoutMs =
       ].join("\\n");
     `);
     if (bodyText.includes(text)) return;
+    lastDiagnostics = await client.executeSync(`
+      const ctx = window.__KANNA_E2E__.setupState;
+      const read = (value) => value?.__v_isRef ? value.value : value;
+      const terminal = document.querySelector(".cloud-terminal-shell");
+      return JSON.parse(JSON.stringify({
+        selectedRepoId: read(ctx.store)?.selectedRepoId,
+        selectedItemId: read(ctx.store)?.selectedItemId,
+        selectedCloudItemId: read(ctx.selectedCloudItemId),
+        mainPanelIsCloudTask: read(ctx.mainPanelIsCloudTask),
+        mainPanelItemId: read(ctx.mainPanelItem)?.id ?? null,
+        mainPanelCloudTerminalRef: read(ctx.mainPanelCloudTerminalRef),
+        terminalStatus: terminal?.getAttribute("data-status") ?? null,
+        terminalText: document.querySelector(".terminal-container")?.textContent ?? "",
+        sidebarItems: read(ctx.sidebarItems)?.map((item) => ({
+          id: item.id,
+          prompt: item.prompt,
+          repo_id: item.repo_id,
+        })) ?? [],
+      }));
+    `).catch((error: unknown) => ({ diagnosticError: String(error) }));
     await sleep(200);
   }
-  throw new Error(`timed out waiting for body text: ${text}`);
+  throw new Error(`timed out waiting for body text: ${text}; diagnostics=${JSON.stringify(lastDiagnostics)}`);
 }
 
 async function countLocalTasks(client: typeof primary): Promise<number> {
@@ -203,7 +254,8 @@ async function waitForCloudTaskSnapshot(
 async function observeSessionThroughRelay(input: {
   ownerDesktopId: string;
   ownerTaskId: string;
-}): Promise<{ error?: string; data?: unknown }> {
+  expectedText?: string;
+}): Promise<{ error?: string; data?: unknown; observedText?: string }> {
   const relayPort = process.env.KANNA_RELAY_PORT;
   if (!relayPort) {
     throw new Error("KANNA_RELAY_PORT is required for cloud task sync E2E");
@@ -212,10 +264,12 @@ async function observeSessionThroughRelay(input: {
   return await new Promise((resolve, reject) => {
     const messages: unknown[] = [];
     const ws = new WebSocket(`ws://127.0.0.1:${relayPort}`);
+    let responseSeen = false;
+    let observedText = "";
     const timeout = setTimeout(() => {
       try { ws.close(); } catch {}
-      reject(new Error(`timed out waiting for relay observe response: ${JSON.stringify(messages)}`));
-    }, 10_000);
+      reject(new Error(`timed out waiting for relay observe${input.expectedText ? " output" : " response"}: ${JSON.stringify(messages)}`));
+    }, input.expectedText ? 20_000 : 10_000);
 
     ws.addEventListener("open", () => {
       ws.send(JSON.stringify({ type: "auth", id_token: "test-user" }));
@@ -239,9 +293,31 @@ async function observeSessionThroughRelay(input: {
         return;
       }
       if (message.type === "response" && message.id === "observe-cloud-sync") {
-        clearTimeout(timeout);
-        try { ws.close(); } catch {}
-        resolve({ error: message.error, data: message.data });
+        responseSeen = true;
+        if (!input.expectedText || message.error) {
+          clearTimeout(timeout);
+          try { ws.close(); } catch {}
+          resolve({ error: message.error, data: message.data, observedText });
+        }
+        return;
+      }
+      if (message.type === "event") {
+        const eventMessage = message as {
+          name?: string;
+          payload?: { data_b64?: string; snapshot?: { vt?: string } };
+        };
+        if (eventMessage.name === "terminal_snapshot") {
+          observedText += eventMessage.payload?.snapshot?.vt ?? "";
+        } else if (eventMessage.name === "terminal_output" && eventMessage.payload?.data_b64) {
+          observedText += new TextDecoder().decode(
+            Uint8Array.from(atob(eventMessage.payload.data_b64), (char) => char.charCodeAt(0)),
+          );
+        }
+        if (responseSeen && input.expectedText && observedText.includes(input.expectedText)) {
+          clearTimeout(timeout);
+          try { ws.close(); } catch {}
+          resolve({ error: message.error, data: message.data, observedText });
+        }
       }
     });
     ws.addEventListener("error", () => {
@@ -385,8 +461,10 @@ describe("cloud task sync", () => {
     const observeResponse = await observeSessionThroughRelay({
       ownerDesktopId: synced.terminalRef.ownerDesktopId,
       ownerTaskId: synced.terminalRef.ownerLocalTaskId,
+      expectedText: "Cloud terminal ready from primary",
     });
     expect(observeResponse.error ?? "").not.toContain("Desktop offline");
+    expect(observeResponse.observedText ?? "").toContain("Cloud terminal ready from primary");
 
     await callVueMethod(secondary, "handleSelectItem", synced.item.id);
     await waitForBodyText(secondary, "Cloud terminal ready from primary");

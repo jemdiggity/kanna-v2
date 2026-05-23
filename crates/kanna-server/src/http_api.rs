@@ -491,6 +491,8 @@ async fn close_task(
                 code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
                 ..
             } => {}
+            DaemonEvent::Error { message, .. }
+                if message.to_ascii_lowercase().contains("session not found") => {}
             DaemonEvent::Error { message, .. } => {
                 return Err((axum::http::StatusCode::INTERNAL_SERVER_ERROR, message));
             }
