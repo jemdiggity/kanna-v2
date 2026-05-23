@@ -39,10 +39,10 @@ describe("runtime config generation", () => {
         runtime: "nodejs24"
       },
       emulators: {
-        auth: { port: 19099 },
-        firestore: { port: 18080 },
-        functions: { port: 15001 },
-        ui: { enabled: true, port: 14000 }
+        auth: { host: "0.0.0.0", port: 19099 },
+        firestore: { host: "0.0.0.0", port: 18080 },
+        functions: { host: "0.0.0.0", port: 15001 },
+        ui: { enabled: true, host: "0.0.0.0", port: 14000 }
       }
     });
     expect(JSON.parse(readFileSync(join(root, "firebase.json"), "utf8"))).toEqual(firebaseJson);

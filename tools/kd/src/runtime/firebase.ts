@@ -29,10 +29,10 @@ export function writeFirebaseEmulatorConfig(repoRoot: string, ports: FirebasePor
     functions: withFunctionsRuntime(source.functions),
     emulators: {
       ...(source.emulators ?? {}),
-      auth: { port: ports.KANNA_FIREBASE_AUTH_PORT },
-      firestore: { port: ports.KANNA_FIREBASE_FIRESTORE_PORT },
-      functions: { port: ports.KANNA_FIREBASE_FUNCTIONS_PORT },
-      ui: { enabled: true, port: ports.KANNA_FIREBASE_UI_PORT }
+      auth: { host: "0.0.0.0", port: ports.KANNA_FIREBASE_AUTH_PORT },
+      firestore: { host: "0.0.0.0", port: ports.KANNA_FIREBASE_FIRESTORE_PORT },
+      functions: { host: "0.0.0.0", port: ports.KANNA_FIREBASE_FUNCTIONS_PORT },
+      ui: { enabled: true, host: "0.0.0.0", port: ports.KANNA_FIREBASE_UI_PORT }
     }
   };
   const path = join(repoRoot, `.firebase-${ports.KANNA_FIREBASE_FIRESTORE_PORT}.kanna.json`);

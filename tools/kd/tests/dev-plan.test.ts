@@ -28,6 +28,7 @@ describe("buildDevPlan", () => {
         KANNA_DEV_PORT: "1421",
         KANNA_DB_PATH: "/tmp/kanna.db",
         KANNA_MOBILE_SERVER_PORT: "48120",
+        KANNA_FIREBASE_AUTH_PORT: "9100",
         KANNA_RELAY_PORT: "9081",
         KANNA_MOBILE_PORT: "8082"
       },
@@ -45,7 +46,13 @@ describe("buildDevPlan", () => {
     expect(plan.windows[1]?.env.SKIP_AUTH).toBe("true");
     expect(plan.windows[1]?.command).toContain("PORT=9081 SKIP_AUTH=true pnpm run dev");
     expect(plan.windows[3]?.command).toContain("EXPO_PUBLIC_KANNA_SERVER_URL=http://192.168.1.5:48120");
+    expect(plan.windows[3]?.command).toContain("EXPO_PUBLIC_KANNA_RELAY_URL=ws://192.168.1.5:9081");
     expect(plan.windows[3]?.command).toContain("RCT_METRO_PORT=8082");
+    expect(plan.windows[3]?.command).toContain("EXPO_PUBLIC_FIREBASE_API_KEY=kanna-local");
+    expect(plan.windows[3]?.command).toContain("EXPO_PUBLIC_FIREBASE_PROJECT_ID=kanna-local");
+    expect(plan.windows[3]?.command).toContain("EXPO_PUBLIC_FIREBASE_APP_ID=kanna-mobile-local");
+    expect(plan.windows[3]?.command).toContain("EXPO_PUBLIC_FIREBASE_AUTH_EMULATOR_HOST=192.168.1.5");
+    expect(plan.windows[3]?.command).toContain("EXPO_PUBLIC_FIREBASE_AUTH_EMULATOR_PORT=9100");
     expect(plan.windows[3]?.command).toContain("unset NO_COLOR;");
   });
 });
