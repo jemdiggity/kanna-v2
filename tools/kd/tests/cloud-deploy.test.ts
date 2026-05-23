@@ -89,7 +89,8 @@ describe("cloud deploy runtime", () => {
             "--only",
             "functions,firestore:rules",
             "--project",
-            "prod-project"
+            "prod-project",
+            "--force"
           ],
           cwd: repoRoot
         }

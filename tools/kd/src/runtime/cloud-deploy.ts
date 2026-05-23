@@ -67,7 +67,8 @@ export async function deployFirebaseCloud(input: CloudDeployInput): Promise<Clou
       "--only",
       "functions,firestore:rules",
       "--project",
-      projectId
+      projectId,
+      "--force"
     ],
     { cwd: input.repoRoot, env: input.env }
   );
