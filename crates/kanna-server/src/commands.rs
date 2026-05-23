@@ -120,6 +120,33 @@ pub async fn handle_invoke(
                 other => Err(format!("unexpected daemon response: {:?}", other)),
             }
         }
+        "resize_session" => {
+            let session_id = args
+                .get("session_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "missing required arg: session_id".to_string())?;
+            let cols = args
+                .get("cols")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| "missing required arg: cols".to_string())?;
+            let rows = args
+                .get("rows")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| "missing required arg: rows".to_string())?;
+            let event = daemon
+                .send_command(&DaemonCommand::Resize {
+                    session_id: session_id.to_string(),
+                    cols: cols.min(u16::MAX as u64) as u16,
+                    rows: rows.min(u16::MAX as u64) as u16,
+                })
+                .await
+                .map_err(|e| format!("daemon error: {}", e))?;
+            match event {
+                DaemonEvent::Ok => Ok(Value::Null),
+                DaemonEvent::Error { message, .. } => Err(format!("daemon error: {}", message)),
+                other => Err(format!("unexpected daemon response: {:?}", other)),
+            }
+        }
         "close_task" => {
             let task_id = args
                 .get("task_id")
