@@ -1,0 +1,88 @@
+import type { PipelineItem, Repo } from "@kanna/db";
+import type {
+  DesktopCloudRepo,
+  DesktopCloudSnapshot,
+  DesktopCloudTerminalRef,
+} from "../services/desktopCloudTaskIndex";
+
+export type WorkspaceSourceKind = "local" | "cloud" | "lan";
+export type WorkspaceRepoSource = "local-only" | "remote-only" | "mixed";
+export type WorkspaceReachability = "local" | "reachable" | "offline" | "unknown" | "stale";
+export type WorkspaceTerminalRouteKind = "local" | "cloud" | "lan" | "none";
+
+export interface WorkspaceOwner {
+  kind: "local" | "remote";
+  id: string;
+  label?: string | null;
+}
+
+export interface WorkspaceTerminalRoute {
+  kind: WorkspaceTerminalRouteKind;
+  localSessionId?: string;
+  remoteRef?: DesktopCloudTerminalRef;
+}
+
+export interface WorkspaceCapabilities {
+  canOpenTerminal: boolean;
+  canSendInput: boolean;
+  canClose: boolean;
+  canCreateSiblingTask: boolean;
+  canPushToMachine: boolean;
+  canPullFromMachine: boolean;
+  canOpenDiff: boolean;
+  canOpenInIde: boolean;
+}
+
+export interface WorkspaceRepo {
+  key: string;
+  localRepoId: string | null;
+  remoteRepoIds: string[];
+  name: string;
+  path: string | null;
+  remoteUrl: string | null;
+  remoteUrlHash: string | null;
+  defaultBranch: string | null;
+  source: WorkspaceRepoSource;
+}
+
+export interface WorkspaceTaskSource {
+  kind: WorkspaceSourceKind;
+  taskId: string;
+  repoId: string;
+  updatedAt: string;
+  terminalRef?: DesktopCloudTerminalRef;
+}
+
+export interface WorkspaceTask {
+  id: string;
+  logicalTaskKey: string;
+  localTaskId: string | null;
+  remoteTaskIds: string[];
+  repoKey: string;
+  item: PipelineItem;
+  owner: WorkspaceOwner;
+  sources: WorkspaceTaskSource[];
+  reachability: WorkspaceReachability;
+  capabilities: WorkspaceCapabilities;
+  terminal: WorkspaceTerminalRoute;
+}
+
+export interface LocalRepoWithRemote {
+  repo: Repo;
+  remoteUrlHash: string | null;
+  remoteUrl?: string | null;
+}
+
+export interface BuildWorkspaceInput {
+  localRepos: LocalRepoWithRemote[];
+  localItems: PipelineItem[];
+  cloudSnapshot: DesktopCloudSnapshot;
+  lanSnapshot: DesktopCloudSnapshot;
+}
+
+export interface BuildWorkspaceResult {
+  repos: WorkspaceRepo[];
+  tasks: WorkspaceTask[];
+}
+
+export type RemoteRepo = DesktopCloudRepo;
