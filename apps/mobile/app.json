@@ -9,8 +9,9 @@
       "android"
     ],
     "ios": {
-      "bundleIdentifier": "build.kanna.mobile",
-      "appleTeamId": "GY3LFAA59P"
+      "bundleIdentifier": "build.kanna.app",
+      "appleTeamId": "GY3LFAA59P",
+      "googleServicesFile": "./GoogleService-Info.plist"
     }
   }
 }

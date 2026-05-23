@@ -5,6 +5,7 @@ export interface DesktopFirebaseAppConfig {
   storageBucket?: string;
   messagingSenderId?: string;
   appId: string;
+  measurementId?: string;
 }
 
 export interface DesktopFirebaseAuthEmulatorConfig {
@@ -70,8 +71,18 @@ function readAppConfig(dev: boolean): DesktopFirebaseAppConfig | null {
     };
   }
 
-  return null;
+  return productionDesktopFirebaseAppConfig;
 }
+
+const productionDesktopFirebaseAppConfig: DesktopFirebaseAppConfig = {
+  apiKey: "AIzaSyCi-PNR-oVOXjEKGJvDOF6wM-1J3Fd3U4k",
+  authDomain: "kanna-build.firebaseapp.com",
+  projectId: "kanna-build",
+  storageBucket: "kanna-build.firebasestorage.app",
+  messagingSenderId: "402613185450",
+  appId: "1:402613185450:web:252b2c98d1ef13bed859d3",
+  measurementId: "G-091WQZN4SS",
+};
 
 function compactAppConfig(config: DesktopFirebaseAppConfig): DesktopFirebaseAppConfig {
   const compacted: DesktopFirebaseAppConfig = {
@@ -83,6 +94,7 @@ function compactAppConfig(config: DesktopFirebaseAppConfig): DesktopFirebaseAppC
   if (config.authDomain) compacted.authDomain = config.authDomain;
   if (config.storageBucket) compacted.storageBucket = config.storageBucket;
   if (config.messagingSenderId) compacted.messagingSenderId = config.messagingSenderId;
+  if (config.measurementId) compacted.measurementId = config.measurementId;
 
   return compacted;
 }

@@ -43,6 +43,23 @@ describe("resolveDesktopFirebaseConfig", () => {
     });
   });
 
+  it("provides production Firebase app config outside dev", async () => {
+    const config = await resolveDesktopFirebaseConfig({
+      readEnv: async () => "",
+      dev: false,
+    });
+
+    expect(config.app).toEqual({
+      apiKey: "AIzaSyCi-PNR-oVOXjEKGJvDOF6wM-1J3Fd3U4k",
+      authDomain: "kanna-build.firebaseapp.com",
+      projectId: "kanna-build",
+      storageBucket: "kanna-build.firebasestorage.app",
+      messagingSenderId: "402613185450",
+      appId: "1:402613185450:web:252b2c98d1ef13bed859d3",
+      measurementId: "G-091WQZN4SS",
+    });
+  });
+
   it("uses workspace-provided firestore and functions ports", async () => {
     const config = await resolveDesktopFirebaseConfig({
       readEnv: async (name) => {
