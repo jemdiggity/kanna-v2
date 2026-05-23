@@ -254,5 +254,9 @@ describe("kd CLI", () => {
       taskId: "release.ship",
       input: { dryRun: true, minor: true, arm64: true }
     });
+    expect(parseCliArgs(["cloud", "deploy", "--production"])).toEqual({
+      taskId: "cloud.deploy",
+      input: { production: true }
+    });
   });
 });

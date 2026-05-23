@@ -4,6 +4,7 @@ import { z } from "zod";
 import { readKannaRepoConfig } from "../config";
 import { resolveKdContext, type KdContext } from "../context";
 import { cleanWorkspace } from "../runtime/clean";
+import { deployFirebaseCloud } from "../runtime/cloud-deploy";
 import { buildDevPlan } from "../runtime/dev-plan";
 import { assertNotProductionDb, resetSqliteDb, seedSqliteDb, type DevDbTarget } from "../runtime/db";
 import { killWorkspaceDaemons } from "../runtime/daemon";
@@ -95,6 +96,10 @@ const releaseShipInputSchema = z.object({
   x86_64: z.boolean().default(false),
   release: z.boolean().default(false),
   dryRun: z.boolean().default(false)
+});
+
+const cloudDeployInputSchema = z.object({
+  production: z.boolean().default(false)
 });
 
 export interface ExecutorInput {
@@ -563,6 +568,29 @@ export const taskDefinitions = [
         runner: nodeCommandRunner
       });
       return { ok: true, message: formatJsonResult(result), data: result };
+    }
+  },
+  {
+    id: "cloud.deploy",
+    description: "Deploy Kanna Firebase cloud services.",
+    inputSchema: cloudDeployInputSchema,
+    execute: async (_context, input) => {
+      const parsed = cloudDeployInputSchema.parse(input);
+      const context = await resolveDefaultContext(process.env);
+      try {
+        const result = await deployFirebaseCloud({
+          repoRoot: context.repoRoot,
+          env: context.env,
+          runner: nodeCommandRunner,
+          production: parsed.production
+        });
+        return { ok: true, message: formatJsonResult(result), data: result };
+      } catch (error) {
+        return {
+          ok: false,
+          message: error instanceof Error ? error.message : String(error)
+        };
+      }
     }
   },
   {

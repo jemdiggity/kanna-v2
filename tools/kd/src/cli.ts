@@ -27,7 +27,8 @@ const booleanFlagMap: Record<string, string> = {
   "--minor": "minor",
   "--patch": "patch",
   "--arm64": "arm64",
-  "--x86_64": "x86_64"
+  "--x86_64": "x86_64",
+  "--production": "production"
 };
 
 const defaultDevUpInput = {
@@ -146,6 +147,9 @@ export function parseCliArgs(args: string[]): ParsedCliCommand {
   if (group === "release" && command === "ship") {
     return { taskId: "release.ship", input: parseFlagInput(rest, {}) };
   }
+  if (group === "cloud" && command === "deploy") {
+    return { taskId: "cloud.deploy", input: parseFlagInput(rest, { production: false }) };
+  }
   if (group === "pages" && command === "build-schema") {
     return { taskId: "pages.build-schema", input: parseFlagInput(rest, {}) };
   }
@@ -223,6 +227,7 @@ function helpText(): string {
     "  build desktop",
     "  build sidecars",
     "  release ship [--dry-run] [--release] [--major|--minor|--patch] [--arm64|--x86_64]",
+    "  cloud deploy --production",
     "  pages build-schema --out-dir <dir>",
     "  test app-update-bundle",
     "  doctor"

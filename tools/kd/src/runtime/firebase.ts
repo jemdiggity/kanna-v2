@@ -106,12 +106,12 @@ function readEmulatorPort(
   if (!Number.isInteger(port)) {
     throw new Error(`Firebase emulator config ${configPath} has invalid ${name}.port`);
   }
-  return port;
+  return port as number;
 }
 
 export function formatMissingFirebaseEmulators(
   reference: string,
-  statuses: Pick<PortStatus, "name" | "port" | "listening">[]
+  statuses: Pick<PortStatus, "name" | "port" | "listening" | "pids">[]
 ): string | null {
   const missing = statuses
     .filter((status) => !status.listening)
