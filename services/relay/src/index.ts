@@ -156,7 +156,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
       } else if (msg.device_token) {
         // Server (kanna-server) auth
         userId = await verifyDeviceToken(msg.device_token);
-        desktopId = msg.device_token;
+        desktopId = msg.desktop_id ?? msg.device_token;
         role = "server";
       } else {
         ws.close(4004, "Missing id_token, device_token, or desktop credentials");
@@ -189,7 +189,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
     }
 
     // --- Post-auth: route messages ---
-    routeMessage(userId!, role!, data);
+    routeMessage(userId!, role!, data, ws, desktopId);
   });
 
   ws.on("close", (code: number, reason: Buffer) => {

@@ -79,7 +79,9 @@ impl MobileServerManager {
         let existing_status = self.fetch_status(&api_base_url).await.ok();
         if let Some(status) = existing_status {
             ensure_server_belongs_to_desktop(&status, &expected_desktop_id)?;
-            if is_current_server_status(&status, &expected_desktop_id, current_server_version()) {
+            if is_current_server_status(&status, &expected_desktop_id, current_server_version())
+                && server_config_matches_runtime(&config_path)
+            {
                 let mut state = self.inner.lock().await;
                 state.started = true;
                 state.status = status.state;
@@ -377,9 +379,11 @@ fn build_server_config(state: &MobileServerState) -> Result<String, String> {
         .ok_or_else(|| "mobile config path missing parent directory".to_string())?
         .join("mobile-pairings.json");
     let device_token = generate_device_token()?;
+    let relay_url = relay_url();
 
     Ok(format!(
-        "relay_url = \"wss://kanna-relay.run.app\"\ndevice_token = \"{}\"\ndaemon_dir = \"{}\"\ndb_path = \"{}\"\ndesktop_id = \"{}\"\ndesktop_name = \"{}\"\nserver_version = \"{}\"\nlan_host = \"0.0.0.0\"\nlan_port = {}\npairing_store_path = \"{}\"\n",
+        "relay_url = \"{}\"\ndevice_token = \"{}\"\ndaemon_dir = \"{}\"\ndb_path = \"{}\"\ndesktop_id = \"{}\"\ndesktop_name = \"{}\"\nserver_version = \"{}\"\nlan_host = \"0.0.0.0\"\nlan_port = {}\npairing_store_path = \"{}\"\n",
+        escape_toml_string(&relay_url),
         escape_toml_string(&device_token),
         escape_toml_string(&daemon_dir),
         escape_toml_string(&db_path.to_string_lossy()),
@@ -389,6 +393,32 @@ fn build_server_config(state: &MobileServerState) -> Result<String, String> {
         local_server_port(),
         escape_toml_string(&pairing_store_path.to_string_lossy()),
     ))
+}
+
+fn server_config_matches_runtime(config_path: &Path) -> bool {
+    let Ok(content) = std::fs::read_to_string(config_path) else {
+        return true;
+    };
+    content.contains(&format!(
+        "relay_url = \"{}\"",
+        escape_toml_string(&relay_url())
+    ))
+}
+
+fn relay_url() -> String {
+    if let Ok(url) = std::env::var("KANNA_RELAY_URL") {
+        let trimmed = url.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    if let Ok(port) = std::env::var("KANNA_RELAY_PORT") {
+        let trimmed = port.trim();
+        if !trimmed.is_empty() {
+            return format!("ws://127.0.0.1:{}", trimmed);
+        }
+    }
+    "wss://kanna-relay.run.app".to_string()
 }
 
 fn resolved_db_path(state: &MobileServerState) -> Result<PathBuf, String> {
@@ -610,10 +640,10 @@ fn escape_toml_string(value: &str) -> String {
 mod tests {
     use super::{
         app_data_dir_for_server_config, build_server_config, current_server_version, desktop_id,
-        escape_toml_string, is_current_server_status, parse_lsof_pids, resolved_db_path,
-        server_base_url, server_config_path_for_app_data_dir, server_lock_path_for_config,
-        server_pids_on_port, stop_server_on_port, stopped_snapshot, try_claim_server_lock,
-        MobileServerManager, MobileServerState, MobileServerStatus,
+        escape_toml_string, is_current_server_status, parse_lsof_pids, relay_url, resolved_db_path,
+        server_base_url, server_config_matches_runtime, server_config_path_for_app_data_dir,
+        server_lock_path_for_config, server_pids_on_port, stop_server_on_port, stopped_snapshot,
+        try_claim_server_lock, MobileServerManager, MobileServerState, MobileServerStatus,
     };
     use std::ffi::CString;
     use std::os::unix::process::ExitStatusExt;
@@ -975,6 +1005,8 @@ mod tests {
         let _guard = env_lock().lock().expect("env lock should not be poisoned");
         unsafe {
             unset_env_var("KANNA_MOBILE_SERVER_PORT");
+            unset_env_var("KANNA_RELAY_PORT");
+            unset_env_var("KANNA_RELAY_URL");
             unset_env_var("KANNA_DB_NAME");
             unset_env_var("KANNA_DB_PATH");
         }
@@ -988,6 +1020,7 @@ mod tests {
         };
 
         let config = build_server_config(&state).unwrap();
+        assert!(config.contains("relay_url = \"wss://kanna-relay.run.app\""));
         assert!(config.contains("desktop_name = \"Studio Mac\""));
         assert!(config.contains(&format!(
             "server_version = \"{}\"",
@@ -1019,6 +1052,74 @@ mod tests {
         }
 
         assert!(config.contains("lan_port = 48129"));
+    }
+
+    #[test]
+    fn build_server_config_uses_local_relay_port_when_provided() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+        unsafe {
+            set_env_var("KANNA_RELAY_PORT", "19083");
+            unset_env_var("KANNA_RELAY_URL");
+        }
+
+        let state = MobileServerState {
+            status: "stopped".to_string(),
+            desktop_name: "Studio Mac".to_string(),
+            api_base_url: server_base_url(48120),
+            config_path: PathBuf::from("/tmp/build.kanna/Kanna/server.toml"),
+            started: false,
+        };
+
+        let config = build_server_config(&state).unwrap();
+
+        unsafe {
+            unset_env_var("KANNA_RELAY_PORT");
+        }
+
+        assert!(config.contains("relay_url = \"ws://127.0.0.1:19083\""));
+    }
+
+    #[test]
+    fn relay_url_prefers_explicit_url() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+        unsafe {
+            set_env_var("KANNA_RELAY_URL", "ws://relay.local:19080");
+            set_env_var("KANNA_RELAY_PORT", "19083");
+        }
+
+        assert_eq!(relay_url(), "ws://relay.local:19080");
+
+        unsafe {
+            unset_env_var("KANNA_RELAY_URL");
+            unset_env_var("KANNA_RELAY_PORT");
+        }
+    }
+
+    #[test]
+    fn server_config_matches_runtime_requires_current_relay_url() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+        unsafe {
+            set_env_var("KANNA_RELAY_PORT", "19083");
+            unset_env_var("KANNA_RELAY_URL");
+        }
+        let path = std::env::temp_dir().join(format!(
+            "kanna-server-config-runtime-{}.toml",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time should be monotonic")
+                .as_nanos()
+        ));
+        std::fs::write(&path, "relay_url = \"wss://kanna-relay.run.app\"\n").unwrap();
+
+        assert!(!server_config_matches_runtime(&path));
+
+        std::fs::write(&path, "relay_url = \"ws://127.0.0.1:19083\"\n").unwrap();
+        assert!(server_config_matches_runtime(&path));
+
+        let _ = std::fs::remove_file(path);
+        unsafe {
+            unset_env_var("KANNA_RELAY_PORT");
+        }
     }
 
     #[test]
@@ -1057,6 +1158,8 @@ mod tests {
             set_env_var("KANNA_DAEMON_DIR", &daemon_dir.to_string_lossy());
             set_env_var("KANNA_TEST_SIDECAR_DIR", &sidecar_dir.to_string_lossy());
             unset_env_var("KANNA_DB_NAME");
+            unset_env_var("KANNA_RELAY_URL");
+            unset_env_var("KANNA_RELAY_PORT");
         }
     }
 
@@ -1067,6 +1170,8 @@ mod tests {
             unset_env_var("KANNA_DAEMON_DIR");
             unset_env_var("KANNA_TEST_SIDECAR_DIR");
             unset_env_var("KANNA_DB_NAME");
+            unset_env_var("KANNA_RELAY_URL");
+            unset_env_var("KANNA_RELAY_PORT");
         }
     }
 
@@ -1115,8 +1220,10 @@ mod tests {
             .map(|version| format!("server_version = \"{}\"\n", escape_toml_string(version)))
             .unwrap_or_default();
         let pairing_store_path = config_path.with_file_name("pairings.json");
+        let relay_url = relay_url();
         let config = format!(
-            "relay_url = \"wss://relay.example.invalid\"\ndevice_token = \"test-token\"\ndaemon_dir = \"{}\"\ndb_path = \"{}\"\ndesktop_id = \"{}\"\ndesktop_name = \"Kanna Test\"\n{}lan_host = \"127.0.0.1\"\nlan_port = {}\npairing_store_path = \"{}\"\n",
+            "relay_url = \"{}\"\ndevice_token = \"test-token\"\ndaemon_dir = \"{}\"\ndb_path = \"{}\"\ndesktop_id = \"{}\"\ndesktop_name = \"Kanna Test\"\n{}lan_host = \"127.0.0.1\"\nlan_port = {}\npairing_store_path = \"{}\"\n",
+            escape_toml_string(&relay_url),
             escape_toml_string(&daemon_dir.to_string_lossy()),
             escape_toml_string(&db_path.to_string_lossy()),
             escape_toml_string(desktop_id),

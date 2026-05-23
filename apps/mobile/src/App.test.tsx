@@ -248,8 +248,8 @@ describe("createAppModel", () => {
     );
 
     await model.initialize();
-    model.controller.selectDesktop("desktop-2");
-    model.controller.selectRepo("repo-2");
+    await model.controller.selectDesktop("desktop-2");
+    await model.controller.selectRepo("repo-2");
     model.controller.openTask("task-2");
     model.controller.showView("more");
     await new Promise((resolve) => setTimeout(resolve, 0));

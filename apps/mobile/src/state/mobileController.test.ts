@@ -257,6 +257,24 @@ describe("createMobileController", () => {
     expect(store.getState().repoTasks.map((task) => task.id)).toEqual(["task-repo-2"]);
   });
 
+  it("selects a desktop and returns to the task list", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    controller.showView("desktops");
+    await controller.selectDesktop("desktop-2");
+
+    expect(store.getState()).toMatchObject({
+      activeView: "tasks",
+      selectedDesktopId: "desktop-2",
+      selectedTaskId: null
+    });
+    expect(client.getStatus).toHaveBeenCalledTimes(2);
+    expect(client.listDesktops).toHaveBeenCalledTimes(2);
+  });
+
   it("creates a pairing session and refreshes the desktop state", async () => {
     const store = createSessionStore();
     const client = createClientMock();
@@ -539,6 +557,21 @@ describe("createMobileController", () => {
       expect.any(Function)
     );
     expect(store.getState().taskTerminalTaskId).toBe("task-1");
+  });
+
+  it("reports explicit refresh progress and completion", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    const refreshPromise = controller.refresh();
+
+    expect(store.getState().refreshStatus).toBe("refreshing");
+
+    await refreshPromise;
+
+    expect(store.getState().refreshStatus).toBe("updated");
   });
 
   it("sends task input to the desktop daemon", async () => {

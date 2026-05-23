@@ -268,10 +268,14 @@ export function createMobileController(
     },
 
     async refresh() {
+      store.setRefreshStatus("refreshing");
       if (store.getState().selectedTaskId) {
         stopTaskTerminal();
       }
       await this.bootstrap();
+      store.setRefreshStatus(
+        store.getState().connectionState === "error" ? "error" : "updated"
+      );
     },
 
     showView(view) {
@@ -284,6 +288,7 @@ export function createMobileController(
       store.setSelectedTask(null);
       store.clearTaskTerminal();
       await this.bootstrap();
+      store.setActiveView("tasks");
     },
 
     async selectRepo(repoId) {

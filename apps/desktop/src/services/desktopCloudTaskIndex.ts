@@ -11,6 +11,7 @@ import { getApps, initializeApp } from "firebase/app";
 import type { PipelineItem, Repo } from "@kanna/db";
 import { invoke } from "../invoke";
 import { resolveDesktopFirebaseConfig } from "./desktopFirebaseConfig";
+import { listActiveDesktopIdsViaRelay } from "./desktopRelayTerminal";
 
 export interface DesktopCloudTaskSnapshot {
   cloudTaskId: string;
@@ -25,6 +26,8 @@ export interface DesktopCloudTaskSnapshot {
   repo: {
     cloudRepoId: string;
     name: string;
+    remoteUrl?: string | null;
+    remoteUrlHash?: string | null;
     defaultBranch?: string | null;
   };
   branch: string | null;
@@ -41,8 +44,28 @@ export interface DesktopCloudTaskSnapshot {
 }
 
 export interface DesktopCloudSnapshot {
-  repos: Repo[];
+  repos: DesktopCloudRepo[];
   items: PipelineItem[];
+  terminalRefs: Record<string, DesktopCloudTerminalRef>;
+}
+
+export type DesktopCloudRepo = Repo & {
+  remote_url?: string | null;
+};
+
+export interface DesktopCloudTerminalRef {
+  ownerDesktopId: string;
+  ownerLocalTaskId: string;
+  transport?: "cloud" | "lan";
+}
+
+export interface DesktopCloudTaskIndexOptions {
+  localRepos?: Array<{
+    repo: Repo;
+    remoteUrlHash: string | null;
+  }>;
+  localItems?: Array<Pick<PipelineItem, "id" | "repo_id" | "stage" | "closed_at">>;
+  activeDesktopIds?: Set<string> | null;
 }
 
 let firestorePromise: Promise<Firestore | null> | null = null;
@@ -77,30 +100,61 @@ export async function getConfiguredDesktopFirestore(): Promise<Firestore | null>
 export async function listDesktopCloudTasks(
   uid: string,
   db?: Firestore | null,
+  options: DesktopCloudTaskIndexOptions = {},
 ): Promise<DesktopCloudSnapshot> {
   const firestore = db === undefined ? await getConfiguredDesktopFirestore() : db;
-  if (!firestore) return { repos: [], items: [] };
+  if (!firestore) return { repos: [], items: [], terminalRefs: {} };
 
   const tasksRef = collection(firestore, "users", uid, "tasks");
-  const snapshot = await getDocs(query(tasksRef, where("closedAt", "==", null)));
+  const [snapshot, activeDesktopIds] = await Promise.all([
+    getDocs(query(tasksRef, where("closedAt", "==", null))),
+    options.activeDesktopIds === undefined
+      ? listActiveDesktopIdsViaRelay().catch(() => null)
+      : Promise.resolve(options.activeDesktopIds),
+  ]);
+  const taskSnapshots = snapshot.docs
+    .map((doc) => doc.data() as DesktopCloudTaskSnapshot)
+    .filter((task) => activeDesktopIds ? activeDesktopIds.has(task.ownerDesktopId) : true);
   return mapDesktopCloudTasks(
-    snapshot.docs.map((doc) => doc.data() as DesktopCloudTaskSnapshot),
+    taskSnapshots,
+    options,
   );
 }
 
 export function mapDesktopCloudTasks(
   snapshots: DesktopCloudTaskSnapshot[],
+  options: DesktopCloudTaskIndexOptions = {},
 ): DesktopCloudSnapshot {
-  const reposById = new Map<string, Repo>();
+  const reposById = new Map<string, DesktopCloudRepo>();
   const items: PipelineItem[] = [];
+  const terminalRefs: Record<string, DesktopCloudTerminalRef> = {};
+  const localRepoByRemoteHash = new Map(
+    (options.localRepos ?? [])
+      .filter((entry): entry is { repo: Repo; remoteUrlHash: string } =>
+        typeof entry.remoteUrlHash === "string" && entry.remoteUrlHash.length > 0,
+      )
+      .map((entry) => [entry.remoteUrlHash, entry.repo]),
+  );
+  const closedLocalItemKeys = new Set(
+    (options.localItems ?? [])
+      .filter((item) => item.stage === "done" || item.closed_at !== null)
+      .map((item) => `${item.repo_id}:${item.id}`),
+  );
 
   for (const snapshot of sortByUpdatedAt(snapshots)) {
-    const repoId = cloudRepoId(snapshot.repo.cloudRepoId);
-    if (!reposById.has(repoId)) {
+    const localRepo = snapshot.repo.remoteUrlHash
+      ? localRepoByRemoteHash.get(snapshot.repo.remoteUrlHash)
+      : undefined;
+    const repoId = localRepo?.id ?? cloudRepoId(snapshot.repo.cloudRepoId);
+    if (closedLocalItemKeys.has(`${repoId}:${snapshot.ownerLocalTaskId}`)) {
+      continue;
+    }
+    if (!localRepo && !reposById.has(repoId)) {
       reposById.set(repoId, {
         id: repoId,
         path: "cloud",
         name: snapshot.repo.name,
+        remote_url: snapshot.repo.remoteUrl ?? null,
         default_branch: snapshot.repo.defaultBranch ?? "main",
         hidden: 0,
         sort_order: 0,
@@ -109,8 +163,15 @@ export function mapDesktopCloudTasks(
       });
     }
 
+    const itemId = cloudTaskId(snapshot.cloudTaskId);
+    terminalRefs[itemId] = {
+      ownerDesktopId: snapshot.ownerDesktopId,
+      ownerLocalTaskId: snapshot.ownerLocalTaskId,
+      transport: "cloud",
+    };
+
     items.push({
-      id: cloudTaskId(snapshot.cloudTaskId),
+      id: itemId,
       repo_id: repoId,
       prompt: snapshot.promptSnippet ?? snapshot.title,
       pipeline: "cloud",
@@ -147,6 +208,7 @@ export function mapDesktopCloudTasks(
   return {
     repos: [...reposById.values()],
     items,
+    terminalRefs,
   };
 }
 

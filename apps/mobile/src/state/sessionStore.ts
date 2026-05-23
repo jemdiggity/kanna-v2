@@ -10,6 +10,7 @@ import type { PersistedSessionContext } from "./sessionPersistence";
 export type ConnectionState = "idle" | "connecting" | "connected" | "error";
 export type MobileView = "tasks" | "recent" | "search" | "desktops" | "more";
 export type TaskTerminalStatus = "idle" | "connecting" | "live" | "closed" | "error";
+export type RefreshStatus = "idle" | "refreshing" | "updated" | "error";
 export type AuthState = MobileAuthState;
 
 export interface SessionState {
@@ -18,6 +19,7 @@ export interface SessionState {
   desktopName: string | null;
   serverStatus: string | null;
   errorMessage: string | null;
+  refreshStatus: RefreshStatus;
   auth: AuthState;
   desktops: DesktopSummary[];
   selectedDesktopId: string | null;
@@ -46,6 +48,7 @@ export interface SessionStore {
   setConnectionState(state: ConnectionState): void;
   setDesktopStatus(status: string | null, desktopName: string | null, pairingCode: string | null): void;
   setErrorMessage(message: string | null): void;
+  setRefreshStatus(status: RefreshStatus): void;
   setAuthState(auth: AuthState): void;
   setDesktops(desktops: DesktopSummary[]): void;
   selectDesktop(desktopId: string): void;
@@ -72,6 +75,7 @@ export function createSessionStore(): SessionStore {
     desktopName: null,
     serverStatus: null,
     errorMessage: null,
+    refreshStatus: "idle",
     auth: { status: "signedOut" },
     desktops: [],
     selectedDesktopId: null,
@@ -172,6 +176,10 @@ export function createSessionStore(): SessionStore {
     },
     setErrorMessage(errorMessage) {
       state = { ...state, errorMessage };
+      publish();
+    },
+    setRefreshStatus(refreshStatus) {
+      state = { ...state, refreshStatus };
       publish();
     },
     setAuthState(auth) {

@@ -236,12 +236,17 @@ function targetNeedsEmulators(testTarget: string): boolean {
   return /real\/cloud-task-sync\.test\.ts$/.test(testTarget);
 }
 
+function targetNeedsRelay(testTarget: string): boolean {
+  return /real\/cloud-task-sync\.test\.ts$/.test(testTarget);
+}
+
 function buildInstanceConfig(input: {
   daemonDir: string;
   dbName: string;
   devPortEnvValue: number;
   effectiveWebDriverPort: number;
   envOverrides?: Record<string, string>;
+  mobileServerPortEnvValue: number;
   sessionName: string;
   transferPortEnvValue: number;
   webDriverPortEnvValue: number;
@@ -250,6 +255,7 @@ function buildInstanceConfig(input: {
     KANNA_DAEMON_DIR: input.daemonDir,
     KANNA_DB_NAME: input.dbName,
     KANNA_DEV_PORT: String(input.devPortEnvValue),
+    KANNA_MOBILE_SERVER_PORT: String(input.mobileServerPortEnvValue),
     KANNA_TMUX_SESSION: input.sessionName,
     KANNA_TRANSFER_PORT: String(input.transferPortEnvValue),
     KANNA_WEBDRIVER_PORT: String(input.webDriverPortEnvValue),
@@ -262,6 +268,7 @@ function buildInstanceConfig(input: {
     devPortEnvValue: input.devPortEnvValue,
     effectiveWebDriverPort: input.effectiveWebDriverPort,
     env,
+    mobileServerPortEnvValue: input.mobileServerPortEnvValue,
     sessionName: input.sessionName,
     transferPortEnvValue: input.transferPortEnvValue,
     webDriverPortEnvValue: input.webDriverPortEnvValue,
@@ -288,6 +295,8 @@ async function main(): Promise<void> {
   const primaryDevPort = await findFreePort();
   const primaryWebDriverPort = await findFreePort();
   const primaryTransferPort = await findFreePort();
+  const primaryMobileServerPort = await findFreePort();
+  const relayPort = await findFreePort();
   const firebaseAuthPort = await findFreePort();
   const firebaseFirestorePort = await findFreePort();
   const firebaseFunctionsPort = await findFreePort();
@@ -298,6 +307,9 @@ async function main(): Promise<void> {
     KANNA_FIREBASE_FUNCTIONS_PORT: String(firebaseFunctionsPort),
     KANNA_FIREBASE_UI_PORT: String(firebaseUiPort),
     KANNA_E2E_AWAIT_CLOUD_PUBLISH: "1",
+  };
+  const relayEnv = {
+    KANNA_RELAY_PORT: String(relayPort),
   };
   const primaryDbName = `test-${worktreeName}-primary.db`;
   const primaryDaemonDir = join(repoRoot, ".kanna-daemon-e2e", runSuffix);
@@ -316,11 +328,13 @@ async function main(): Promise<void> {
     envOverrides: {
       ...realE2eRuntimeEnv,
       ...firebaseEnv,
+      ...relayEnv,
       KANNA_TRANSFER_DISCOVERY: "registry",
       KANNA_TRANSFER_DISPLAY_NAME: "Primary",
       KANNA_TRANSFER_PEER_ID: "peer-primary",
       KANNA_TRANSFER_REGISTRY_DIR: transferRegistryDir,
     },
+    mobileServerPortEnvValue: primaryMobileServerPort,
     sessionName,
     transferPortEnvValue: primaryTransferPort,
     webDriverPortEnvValue: primaryWebDriverPort,
@@ -329,6 +343,7 @@ async function main(): Promise<void> {
   const secondaryDevPort = enableSecondary ? await findFreePort() : null;
   const secondaryWebDriverPort = enableSecondary ? await findFreePort() : null;
   const secondaryTransferPort = enableSecondary ? await findFreePort() : null;
+  const secondaryMobileServerPort = enableSecondary ? await findFreePort() : null;
   const secondaryDbName = enableSecondary ? `test-${worktreeName}-secondary.db` : null;
   const secondaryDaemonDir = enableSecondary
     ? join(repoRoot, ".kanna-daemon-e2e", `${runSuffix}-secondary`)
@@ -337,6 +352,7 @@ async function main(): Promise<void> {
     secondaryDevPort !== null &&
     secondaryWebDriverPort !== null &&
     secondaryTransferPort !== null &&
+    secondaryMobileServerPort !== null &&
     secondaryDbName !== null &&
     secondaryDaemonDir !== null
     ? buildInstanceConfig({
@@ -347,11 +363,13 @@ async function main(): Promise<void> {
         envOverrides: {
           ...realE2eRuntimeEnv,
           ...firebaseEnv,
+          ...relayEnv,
           KANNA_TRANSFER_DISCOVERY: "registry",
           KANNA_TRANSFER_DISPLAY_NAME: "Secondary",
           KANNA_TRANSFER_PEER_ID: "peer-secondary",
           KANNA_TRANSFER_REGISTRY_DIR: transferRegistryDir,
         },
+        mobileServerPortEnvValue: secondaryMobileServerPort,
         sessionName: `${sessionName}-secondary`,
         transferPortEnvValue: secondaryTransferPort,
         webDriverPortEnvValue: secondaryWebDriverPort,
@@ -378,6 +396,7 @@ async function main(): Promise<void> {
       KANNA_DB_NAME: primaryDbName,
       KANNA_DEV_PORT: String(primaryDevPort),
       KANNA_E2E_PERF_OUTPUT_PATH: perfOutputPath,
+      ...relayEnv,
       KANNA_TRANSFER_REGISTRY_DIR: transferRegistryDir,
       KANNA_WEBDRIVER_PORT: String(primaryWebDriverPort),
       ...firebaseEnv,
@@ -525,6 +544,72 @@ async function main(): Promise<void> {
     }).catch(() => undefined);
   }
 
+  let relayProcess: ReturnType<typeof spawn> | null = null;
+  let relayOutput = "";
+
+  async function startRelay(): Promise<void> {
+    if (relayProcess) return;
+
+    relayOutput = "";
+    const proc = spawn("pnpm", ["--dir", "services/relay", "run", "dev"], {
+      cwd: repoRoot,
+      env: { ...primary.env, ...relayEnv, PORT: String(relayPort), SKIP_AUTH: "true" },
+      detached: true,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    relayProcess = proc;
+    proc.stdout?.on("data", (chunk: Buffer) => {
+      relayOutput += chunk.toString();
+    });
+    proc.stderr?.on("data", (chunk: Buffer) => {
+      relayOutput += chunk.toString();
+    });
+
+    let exited: { code: number | null; signal: NodeJS.Signals | null } | null = null;
+    proc.once("exit", (code, signal) => {
+      exited = { code, signal };
+      if (relayProcess === proc) relayProcess = null;
+    });
+
+    const healthUrl = `http://127.0.0.1:${relayPort}/health`;
+    const deadline = Date.now() + 30_000;
+    while (Date.now() < deadline) {
+      if (exited) {
+        throw new Error(
+          `Relay exited before readiness: ${exited.code ?? exited.signal}\n${relayOutput.trim()}`,
+        );
+      }
+      const response = await fetch(healthUrl).catch(() => null);
+      if (response?.ok) return;
+      await sleep(250);
+    }
+
+    throw new Error(`timed out waiting for relay at ${healthUrl}\n${relayOutput.trim()}`);
+  }
+
+  async function stopRelay(): Promise<void> {
+    const proc = relayProcess;
+    relayProcess = null;
+    if (!proc?.pid) return;
+
+    try {
+      process.kill(-proc.pid, "SIGINT");
+    } catch {
+      proc.kill("SIGINT");
+    }
+    const exited = await Promise.race([
+      new Promise<boolean>((resolveExit) => proc.once("exit", () => resolveExit(true))),
+      sleep(5_000).then(() => false),
+    ]);
+    if (!exited) {
+      try {
+        process.kill(-proc.pid, "SIGKILL");
+      } catch {
+        proc.kill("SIGKILL");
+      }
+    }
+  }
+
   let runningInstances: RunningInstances | null = null;
   let lastTargetWasReal = false;
 
@@ -544,6 +629,7 @@ async function main(): Promise<void> {
         await stopInstances(runningInstances);
         await resetTransferRegistry();
         if (needsEmulatorsForTarget) await startFirebaseEmulators();
+        if (targetNeedsRelay(testTarget)) await startRelay();
         runningInstances = await startInstances(
           needsSecondaryForTarget,
           false,
@@ -587,9 +673,14 @@ async function main(): Promise<void> {
       console.error("\n[e2e] recent Firebase emulator log:\n");
       console.error(firebaseEmulatorOutput.trimEnd());
     }
+    if (relayOutput.trim()) {
+      console.error("\n[e2e] recent relay log:\n");
+      console.error(relayOutput.trimEnd());
+    }
     throw error;
   } finally {
     await stopInstances(runningInstances);
+    await stopRelay();
     await stopFirebaseEmulators();
     if (secondary) {
       await rm(secondary.daemonDir, { recursive: true, force: true }).catch(() => undefined);

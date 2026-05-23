@@ -9,6 +9,7 @@ describe("createInstanceConfig", () => {
       devPortEnvValue: 1421,
       env: {},
       effectiveWebDriverPort: 4445,
+      mobileServerPortEnvValue: 48122,
       sessionName: "kanna-e2e-test-session",
       transferPortEnvValue: 48121,
       webDriverPortEnvValue: 4445,

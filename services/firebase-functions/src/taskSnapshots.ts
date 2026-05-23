@@ -55,6 +55,7 @@ function validateRepo(value: unknown): CloudTaskSnapshot["repo"] {
   return {
     cloudRepoId: requireString(record, "cloudRepoId"),
     name: requireString(record, "name"),
+    remoteUrl: nullableString(record.remoteUrl, "remoteUrl"),
     remoteUrlHash: nullableString(record.remoteUrlHash, "remoteUrlHash"),
     defaultBranch: nullableString(record.defaultBranch, "defaultBranch"),
   };

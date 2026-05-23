@@ -19,6 +19,7 @@ describe("task snapshot validation", () => {
       repo: {
         cloudRepoId: "repo-hash-1",
         name: "kanna",
+        remoteUrl: "git@github.com:jemdiggity/kanna.git",
         remoteUrlHash: "remote-hash-1",
         defaultBranch: "main",
       },

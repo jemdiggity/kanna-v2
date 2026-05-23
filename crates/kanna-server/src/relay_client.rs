@@ -95,7 +95,7 @@ fn build_auth_message(config: &Config) -> RelayMessage {
         },
         None => RelayMessage::Auth {
             device_token: Some(config.device_token.clone()),
-            desktop_id: None,
+            desktop_id: Some(config.desktop_id.clone()),
             desktop_secret: None,
         },
     }
@@ -150,7 +150,8 @@ mod tests {
             payload,
             serde_json::json!({
                 "type": "auth",
-                "device_token": "device-token"
+                "device_token": "device-token",
+                "desktop_id": "desktop-1"
             })
         );
     }

@@ -64,6 +64,7 @@ export interface CloudTaskSnapshot {
   repo: {
     cloudRepoId: string;
     name: string;
+    remoteUrl: string | null;
     remoteUrlHash: string | null;
     defaultBranch: string | null;
   };

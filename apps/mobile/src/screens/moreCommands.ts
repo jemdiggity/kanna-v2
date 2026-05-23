@@ -1,4 +1,5 @@
 import type { TaskSummary } from "../lib/api/types";
+import type { RefreshStatus } from "../state/sessionStore";
 
 export interface MoreCommandAction {
   id: "refresh" | "pair" | "desktops" | "compose" | "advance-stage" | "merge-agent" | "close-task";
@@ -21,11 +22,13 @@ export interface MoreCommandPaletteEntry extends MoreCommandAction {
 
 interface BuildMoreCommandSectionsOptions {
   pairingCode: string | null;
+  refreshStatus?: RefreshStatus;
   selectedTask: TaskSummary | null;
 }
 
 export function buildMoreCommandSections({
   pairingCode,
+  refreshStatus = "idle",
   selectedTask
 }: BuildMoreCommandSectionsOptions): MoreCommandSection[] {
   const sections: MoreCommandSection[] = [
@@ -34,12 +37,7 @@ export function buildMoreCommandSections({
       headline: pairingCode ?? "No pairing session",
       detail: "Global commands for the paired desktop.",
       actions: [
-        {
-          id: "refresh",
-          title: "Refresh Data",
-          copy: "Reload desktops, repos, and recent tasks.",
-          keywords: ["reload", "sync", "update"]
-        },
+        getRefreshAction(refreshStatus),
         {
           id: "pair",
           title: "Start Pairing",
@@ -91,6 +89,40 @@ export function buildMoreCommandSections({
   }
 
   return sections;
+}
+
+function getRefreshAction(refreshStatus: RefreshStatus): MoreCommandAction {
+  switch (refreshStatus) {
+    case "refreshing":
+      return {
+        id: "refresh",
+        title: "Refreshing...",
+        copy: "Reloading desktops, repos, and recent tasks.",
+        keywords: ["reload", "sync", "update"]
+      };
+    case "updated":
+      return {
+        id: "refresh",
+        title: "Refresh Data",
+        copy: "Updated just now.",
+        keywords: ["reload", "sync", "update"]
+      };
+    case "error":
+      return {
+        id: "refresh",
+        title: "Retry Refresh",
+        copy: "Refresh failed. Tap to try again.",
+        keywords: ["reload", "sync", "update", "retry"]
+      };
+    case "idle":
+    default:
+      return {
+        id: "refresh",
+        title: "Refresh Data",
+        copy: "Reload desktops, repos, and recent tasks.",
+        keywords: ["reload", "sync", "update"]
+      };
+  }
 }
 
 export function buildMoreCommandPalette(

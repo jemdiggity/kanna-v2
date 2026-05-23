@@ -42,6 +42,7 @@ export async function buildCloudTaskSnapshot(input: CloudTaskSnapshotInput) {
     repo: {
       cloudRepoId: input.repo.id,
       name: input.repo.name,
+      remoteUrl: input.repo.remote_url ?? null,
       remoteUrlHash: await hashRemoteUrl(input.repo.remote_url ?? null),
       defaultBranch: input.repo.default_branch,
     },

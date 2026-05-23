@@ -23,7 +23,7 @@ packageExtensions:
       yaml: 2.8.3
   "@expo/cli@0.24.24":
     dependencies:
-      "@react-native/js-polyfills": 0.79.2
+      "@react-native/js-polyfills": 0.79.6
       expo: 53.0.27
       expo-constants: 17.1.8
       metro: 0.82.5
@@ -36,7 +36,7 @@ packageExtensions:
       "@babel/code-frame": 7.29.0
       "@babel/template": 7.28.6
       "@babel/traverse": 7.29.0
-      "@react-native/js-polyfills": 0.79.2
+      "@react-native/js-polyfills": 0.79.6
       babel-preset-expo: 13.2.5
       expo: 53.0.27
       hermes-parser: 0.25.1
@@ -48,3 +48,25 @@ packageExtensions:
       metro-source-map: 0.82.5
       metro-transform-plugins: 0.82.5
       metro-transform-worker: 0.82.5
+  "@react-native/codegen@0.79.0-rc.4":
+    dependencies:
+      "@babel/parser": 7.29.3
+  "@react-native/codegen@0.79.6":
+    dependencies:
+      "@babel/parser": 7.29.3
+  "appium@2.19.0":
+    dependencies:
+      "@colors/colors": 1.6.0
+  "babel-preset-expo@13.0.0":
+    dependencies:
+      "@babel/core": 7.29.0
+      "@babel/types": 7.29.0
+      expo: 53.0.27
+  "babel-preset-expo@13.2.5":
+    dependencies:
+      "@babel/core": 7.29.0
+      "@babel/types": 7.29.0
+      expo: 53.0.27
+  "expo@53.0.27":
+    dependencies:
+      "@babel/runtime": 7.29.2

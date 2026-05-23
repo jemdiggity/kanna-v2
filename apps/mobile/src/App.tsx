@@ -136,6 +136,7 @@ export default function App() {
         return (
           <MoreScreen
             pairingCode={state.pairingCode}
+            refreshStatus={state.refreshStatus}
             selectedTask={selectedTask}
             onRefresh={() => {
               void controller.refresh();

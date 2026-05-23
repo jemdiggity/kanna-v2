@@ -127,6 +127,39 @@ describe("Relay integration", () => {
     await closeAndWait(ws);
   });
 
+  it("routes legacy device-token servers by supplied desktop id", async () => {
+    const { ws: server } = await connectAndAuth({
+      device_token: "test-token-legacy-desktop-id",
+      desktop_id: "desktop-legacy-route",
+    });
+    const { ws: phone } = await connectAndAuth({
+      id_token: "test-token-legacy-desktop-id",
+    });
+
+    const serverReceivedInvoke = waitForMessage(
+      server,
+      (msg) => msg.type === "invoke" && msg.desktopId === "desktop-legacy-route",
+    );
+
+    phone.send(
+      JSON.stringify({
+        type: "invoke",
+        id: "legacy-desktop-route",
+        desktopId: "desktop-legacy-route",
+        command: "list_sessions",
+        args: {},
+      }),
+    );
+
+    await expect(serverReceivedInvoke).resolves.toMatchObject({
+      id: "legacy-desktop-route",
+      command: "list_sessions",
+    });
+
+    await closeAndWait(phone);
+    await closeAndWait(server);
+  });
+
   it("should authenticate a phone with id_token", async () => {
     const { ws, userId } = await connectAndAuth({
       id_token: "test-firebase-token",
@@ -246,6 +279,173 @@ describe("Relay integration", () => {
     expect((event.payload as Record<string, unknown>).session_id).toBe("s1");
 
     await closeAndWait(phone);
+    await closeAndWait(server);
+  });
+
+  it("routes terminal events only to clients that observe the session", async () => {
+    const { ws: server } = await connectAndAuth({
+      desktop_id: "desktop-terminal-owner",
+      desktop_secret: "secret-terminal-owner",
+    });
+    const { ws: observer } = await connectAndAuth({
+      id_token: "user-terminal-observer",
+    });
+    const { ws: idleClient } = await connectAndAuth({
+      id_token: "user-terminal-observer",
+    });
+
+    const observeInvoke = waitForMessage(
+      server,
+      (msg) =>
+        msg.type === "invoke" &&
+        msg.command === "observe_session" &&
+        msg.desktopId === "desktop-terminal-owner",
+    );
+
+    observer.send(
+      JSON.stringify({
+        type: "invoke",
+        id: "observe-task-1",
+        desktopId: "desktop-terminal-owner",
+        command: "observe_session",
+        args: { session_id: "task-1" },
+      }),
+    );
+
+    const invoke = await observeInvoke;
+    server.send(
+      JSON.stringify({
+        type: "response",
+        id: invoke.id,
+        data: null,
+      }),
+    );
+    await waitForMessage(
+      observer,
+      (msg) => msg.type === "response" && msg.id === "observe-task-1",
+    );
+
+    const observedEvent = waitForMessage(
+      observer,
+      (msg) => msg.type === "event" && msg.name === "terminal_output",
+    );
+    const idleEvent = waitForMessage(
+      idleClient,
+      (msg) => msg.type === "event" && msg.name === "terminal_output",
+      250,
+    ).then(
+      () => "event",
+      () => "timeout",
+    );
+
+    server.send(
+      JSON.stringify({
+        type: "event",
+        name: "terminal_output",
+        payload: { session_id: "task-1", data_b64: "aGVsbG8=" },
+      }),
+    );
+
+    await expect(observedEvent).resolves.toMatchObject({
+      name: "terminal_output",
+    });
+    await expect(idleEvent).resolves.toBe("timeout");
+
+    await closeAndWait(observer);
+    await closeAndWait(idleClient);
+    await closeAndWait(server);
+  });
+
+  it("keeps owner terminal streaming until the last observer unsubscribes", async () => {
+    const { ws: server } = await connectAndAuth({
+      desktop_id: "desktop-terminal-shared",
+      desktop_secret: "secret-terminal-shared",
+    });
+    const { ws: first } = await connectAndAuth({
+      id_token: "user-terminal-shared",
+    });
+    const { ws: second } = await connectAndAuth({
+      id_token: "user-terminal-shared",
+    });
+
+    for (const [client, id] of [[first, "observe-first"], [second, "observe-second"]] as const) {
+      const forwardedObserve = waitForMessage(
+        server,
+        (msg) => msg.type === "invoke" && msg.command === "observe_session" && msg.id === id,
+      );
+      client.send(
+        JSON.stringify({
+          type: "invoke",
+          id,
+          desktopId: "desktop-terminal-shared",
+          command: "observe_session",
+          args: { session_id: "task-shared" },
+        }),
+      );
+      await forwardedObserve;
+      server.send(JSON.stringify({ type: "response", id, data: null }));
+      await waitForMessage(client, (msg) => msg.type === "response" && msg.id === id);
+    }
+
+    const unexpectedUnobserve = waitForMessage(
+      server,
+      (msg) => msg.type === "invoke" && msg.command === "unobserve_session",
+      250,
+    ).then(
+      () => "unobserve",
+      () => "timeout",
+    );
+    first.send(
+      JSON.stringify({
+        type: "invoke",
+        id: "unobserve-first",
+        desktopId: "desktop-terminal-shared",
+        command: "unobserve_session",
+        args: { session_id: "task-shared" },
+      }),
+    );
+    await waitForMessage(first, (msg) => msg.type === "response" && msg.id === "unobserve-first");
+    await expect(unexpectedUnobserve).resolves.toBe("timeout");
+
+    const firstEvent = waitForMessage(
+      first,
+      (msg) => msg.type === "event" && msg.name === "terminal_output",
+      250,
+    ).then(
+      () => "event",
+      () => "timeout",
+    );
+    const secondEvent = waitForMessage(
+      second,
+      (msg) => msg.type === "event" && msg.name === "terminal_output",
+    );
+    server.send(
+      JSON.stringify({
+        type: "event",
+        name: "terminal_output",
+        payload: { session_id: "task-shared", data_b64: "bGl2ZQ==" },
+      }),
+    );
+    await expect(firstEvent).resolves.toBe("timeout");
+    await expect(secondEvent).resolves.toMatchObject({ name: "terminal_output" });
+
+    const forwardedUnobserve = waitForMessage(
+      server,
+      (msg) => msg.type === "invoke" && msg.command === "unobserve_session" && msg.id === "unobserve-second",
+    );
+    second.send(
+      JSON.stringify({
+        type: "invoke",
+        id: "unobserve-second",
+        desktopId: "desktop-terminal-shared",
+        command: "unobserve_session",
+        args: { session_id: "task-shared" },
+      }),
+    );
+    await forwardedUnobserve;
+
+    await closeAndWait(first);
+    await closeAndWait(second);
     await closeAndWait(server);
   });
 
@@ -479,6 +679,61 @@ describe("Relay integration", () => {
 
     await closeAndWait(phone);
     await closeAndWait(desktop);
+  });
+
+  it("lists only active desktop connections for a signed-in user", async () => {
+    const { ws: desktopOne } = await connectAndAuth({
+      desktop_id: "desktop-active-one",
+      desktop_secret: "secret-one",
+    });
+    const { ws: desktopTwo } = await connectAndAuth({
+      desktop_id: "desktop-active-two",
+      desktop_secret: "secret-two",
+    });
+    const { ws: phone } = await connectAndAuth({
+      id_token: "test-user",
+    });
+
+    phone.send(
+      JSON.stringify({
+        type: "invoke",
+        id: "active-desktops",
+        command: "list_active_desktops",
+        args: {},
+      })
+    );
+
+    const response = await waitForMessage(
+      phone,
+      (msg) => msg.type === "response" && msg.id === "active-desktops"
+    );
+    expect(response.data).toEqual({
+      desktopIds: expect.arrayContaining([
+        "desktop-active-one",
+        "desktop-active-two",
+      ]),
+    });
+
+    await closeAndWait(desktopTwo);
+    phone.send(
+      JSON.stringify({
+        type: "invoke",
+        id: "active-desktops-after-close",
+        command: "list_active_desktops",
+        args: {},
+      })
+    );
+
+    const afterClose = await waitForMessage(
+      phone,
+      (msg) => msg.type === "response" && msg.id === "active-desktops-after-close"
+    );
+    expect(afterClose.data).toEqual({
+      desktopIds: ["desktop-active-one"],
+    });
+
+    await closeAndWait(phone);
+    await closeAndWait(desktopOne);
   });
 
   it("routes desktop responses only to phones authenticated as the same user", async () => {

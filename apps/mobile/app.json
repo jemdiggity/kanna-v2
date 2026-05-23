@@ -3,6 +3,7 @@
     "name": "Kanna Mobile",
     "slug": "kanna-mobile",
     "scheme": "kanna",
+    "icon": "./assets/icon.png",
     "platforms": [
       "ios",
       "android"

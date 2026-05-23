@@ -299,6 +299,55 @@ describe("remote transport", () => {
     expect(invokeDesktop).not.toHaveBeenCalled();
   });
 
+  it("routes cloud task actions to the owner desktop and local task id", async () => {
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockResolvedValue(null);
+    const subscription = { close: vi.fn() };
+    const observeTaskTerminal = vi.fn<RemoteTaskTerminalObserver>(() => subscription);
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [],
+      getSelectedDesktopId: () => null,
+      invokeDesktop,
+      observeTaskTerminal,
+      listCloudTasks: async () => [
+        {
+          id: "cloud-task-1",
+          repoId: "repo-1",
+          title: "Cloud task",
+          stage: "in progress",
+          ownerDesktopId: "desktop-owner",
+          ownerLocalTaskId: "local-task-1",
+          ownerOnline: true
+        }
+      ]
+    });
+    const listener = vi.fn();
+
+    await transport.listRecentTasks();
+    expect(transport.observeTaskTerminal("cloud-task-1", listener)).toBe(subscription);
+    await expect(transport.sendTaskInput("cloud-task-1", "continue")).resolves.toBeUndefined();
+    await expect(transport.closeTask("cloud-task-1")).resolves.toBeUndefined();
+
+    expect(observeTaskTerminal).toHaveBeenCalledWith(
+      {
+        desktopId: "desktop-owner",
+        taskId: "local-task-1"
+      },
+      listener
+    );
+    expect(invokeDesktop).toHaveBeenNthCalledWith(1, {
+      desktopId: "desktop-owner",
+      method: "POST",
+      path: "/v1/tasks/local-task-1/input",
+      body: { input: "continue" }
+    });
+    expect(invokeDesktop).toHaveBeenNthCalledWith(2, {
+      desktopId: "desktop-owner",
+      method: "POST",
+      path: "/v1/tasks/local-task-1/actions/close",
+      body: null
+    });
+  });
+
   it("serves cloud status and repo task collections without selecting a desktop", async () => {
     const invokeDesktop = vi.fn<RemoteDesktopInvoker>();
     const transport = createRemoteTransport({

@@ -306,6 +306,40 @@ pub fn git_list_base_branches(repo_path: String) -> Result<Vec<String>, String> 
 }
 
 #[tauri::command]
+pub fn git_list_remote_base_branches(remote_url: String) -> Result<Vec<String>, String> {
+    let output = Command::new("git")
+        .args(["ls-remote", "--symref", &remote_url, "HEAD", "refs/heads/*"])
+        .output()
+        .map_err(|e| format!("Failed to run git ls-remote: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git ls-remote failed: {}", stderr.trim()));
+    }
+
+    Ok(parse_remote_base_branches(&String::from_utf8_lossy(
+        &output.stdout,
+    )))
+}
+
+fn parse_remote_base_branches(output: &str) -> Vec<String> {
+    let mut refs = BTreeSet::new();
+    for line in output.lines() {
+        let Some((_, ref_name)) = line.split_once('\t') else {
+            continue;
+        };
+        let Some(branch) = ref_name.strip_prefix("refs/heads/") else {
+            continue;
+        };
+        if branch.is_empty() {
+            continue;
+        }
+        refs.insert(format!("origin/{}", branch));
+    }
+    refs.into_iter().collect()
+}
+
+#[tauri::command]
 pub fn git_branch_upstream(repo_path: String) -> Result<Option<String>, String> {
     let repo = Repository::open(&repo_path).map_err(|e| e.to_string())?;
     let head = repo.head().map_err(|e| e.to_string())?;
@@ -337,7 +371,7 @@ pub fn git_branch_upstream(repo_path: String) -> Result<Option<String>, String> 
 mod tests {
     use super::{
         format_git_command_failure, git_branch_upstream, git_current_branch, git_default_branch,
-        git_list_base_branches,
+        git_list_base_branches, parse_remote_base_branches,
     };
     use git2::{Repository, Signature};
     use std::{
@@ -455,6 +489,22 @@ mod tests {
                 "origin/main".to_string(),
                 "origin/release/x".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn parse_remote_base_branches_returns_origin_refs_and_skips_head() {
+        let refs = parse_remote_base_branches(
+            "ref: refs/heads/main\tHEAD\n\
+             abc123\tHEAD\n\
+             abc123\trefs/heads/main\n\
+             def456\trefs/heads/release/x\n\
+             fedcba\trefs/tags/v1\n",
+        );
+
+        assert_eq!(
+            refs,
+            vec!["origin/main".to_string(), "origin/release/x".to_string()]
         );
     }
 

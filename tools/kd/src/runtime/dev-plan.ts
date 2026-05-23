@@ -38,6 +38,20 @@ export function buildDevPlan(input: BuildDevPlanInput): DevPlan {
       env: buildFirebaseCommandEnv(input.repoRoot, sharedEnv),
       command: `pnpm --dir services/firebase-functions build && pnpm exec firebase emulators:start --project kanna-local --config ${JSON.stringify(input.firebaseConfigPath)}`
     });
+    const relayEnv = shellEnvPrefix({
+      PORT: input.env.KANNA_RELAY_PORT ?? "9080",
+      SKIP_AUTH: "true"
+    });
+    windows.push({
+      name: "relay",
+      cwd: `${input.repoRoot}/services/relay`,
+      env: {
+        ...sharedEnv,
+        SKIP_AUTH: "true",
+        PORT: input.env.KANNA_RELAY_PORT ?? "9080"
+      },
+      command: `${relayEnv} pnpm run dev`
+    });
   }
 
   const localConfigPath = `${input.repoRoot}/apps/desktop/src-tauri/tauri.conf.local.json`;
@@ -50,13 +64,14 @@ export function buildDevPlan(input: BuildDevPlanInput): DevPlan {
 
   if (input.mobile) {
     const mobileEnv = shellEnvPrefix({
-      EXPO_PUBLIC_KANNA_SERVER_URL: input.mobileServerUrl
+      EXPO_PUBLIC_KANNA_SERVER_URL: input.mobileServerUrl,
+      RCT_METRO_PORT: input.env.KANNA_MOBILE_PORT ?? "8081"
     });
     windows.push({
       name: "mobile",
       cwd: `${input.repoRoot}/apps/mobile`,
       env: sharedEnv,
-      command: `${mobileEnv} pnpm run dev -- --port ${input.env.KANNA_MOBILE_PORT ?? "8081"}`
+      command: `unset NO_COLOR; ${mobileEnv} pnpm run dev -- --port ${input.env.KANNA_MOBILE_PORT ?? "8081"}`
     });
   }
 

@@ -40,7 +40,12 @@ describe("cloud task snapshot mapper", () => {
       ownerLocalTaskId: "task-1",
       title: "Cloud mobile",
       promptSnippet: "Fix cloud mobile task list",
-      repo: { cloudRepoId: "repo-1", name: "kanna", defaultBranch: "main" },
+      repo: {
+        cloudRepoId: "repo-1",
+        name: "kanna",
+        remoteUrl: "git@github.com:jemdiggity/kanna.git",
+        defaultBranch: "main",
+      },
       transfer: { state: "none" },
     });
     expect(snapshot.repo.remoteUrlHash).toHaveLength(64);

@@ -4,6 +4,7 @@ import type { PipelineItem } from "@kanna/db";
 import { invoke } from "../invoke";
 import TaskHeader from "./TaskHeader.vue";
 import TerminalTabs from "./TerminalTabs.vue";
+import CloudTerminalView from "./CloudTerminalView.vue";
 
 const props = defineProps<{
   item: PipelineItem | null;
@@ -13,6 +14,12 @@ const props = defineProps<{
   blockers?: PipelineItem[];
   hasRepos?: boolean;
   pendingSetup?: boolean;
+  cloudTask?: boolean;
+  cloudTerminalRef?: {
+    ownerDesktopId: string;
+    ownerLocalTaskId: string;
+    transport?: "cloud" | "lan";
+  } | null;
 }>();
 
 const emit = defineEmits<{
@@ -148,6 +155,18 @@ function dismissCommandHint() {
           <p class="setup-title">{{ $t('mainPanel.taskSettingUp') }}</p>
         </div>
       </template>
+      <template v-else-if="cloudTask">
+        <CloudTerminalView
+          v-if="cloudTerminalRef"
+          :owner-desktop-id="cloudTerminalRef.ownerDesktopId"
+          :owner-task-id="cloudTerminalRef.ownerLocalTaskId"
+          :transport="cloudTerminalRef.transport"
+        />
+        <div v-else class="cloud-task-placeholder">
+          <p class="cloud-task-title">Task is running on another machine</p>
+          <p class="cloud-task-hint">Cloud sync is showing the task here, but terminal routing information is unavailable.</p>
+        </div>
+      </template>
       <template v-else>
         <TerminalTabs
           :session-id="item.id"
@@ -258,6 +277,30 @@ function dismissCommandHint() {
   justify-content: center;
   color: #777;
   font-size: 13px;
+}
+
+.cloud-task-placeholder {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  color: #9a9a9a;
+  font-size: 13px;
+  text-align: center;
+}
+
+.cloud-task-title {
+  margin: 0;
+  color: #d6d6d6;
+  font-size: 14px;
+}
+
+.cloud-task-hint {
+  margin: 0;
+  max-width: 360px;
+  line-height: 1.4;
 }
 
 .empty-title {

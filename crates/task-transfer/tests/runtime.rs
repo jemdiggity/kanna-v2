@@ -1186,6 +1186,7 @@ async fn next_incoming_transfer_request(
             RuntimeEvent::OutgoingTransferCommitted(_) => {
                 panic!("expected incoming transfer event");
             }
+            RuntimeEvent::TerminalEvent { .. } => {}
         }
     }
 }
@@ -1205,6 +1206,7 @@ async fn next_outgoing_transfer_committed(
             RuntimeEvent::IncomingTransferRequest(_) => {
                 panic!("expected outgoing transfer committed event");
             }
+            RuntimeEvent::TerminalEvent { .. } => {}
         }
     }
 }
@@ -1220,6 +1222,7 @@ async fn consume_pairing_completed(runtime: &TransferRuntime) {
         RuntimeEvent::OutgoingTransferFinalizationRequested(_) => {
             panic!("expected pairing completed event");
         }
+        RuntimeEvent::TerminalEvent { .. } => panic!("expected pairing completed event"),
     }
 }
 
@@ -1257,6 +1260,9 @@ async fn pair_peers(
                     RuntimeEvent::OutgoingTransferFinalizationRequested(_) => {
                         panic!("expected pairing started event");
                     }
+                    RuntimeEvent::TerminalEvent { .. } => {
+                        panic!("expected pairing started event");
+                    }
                 }
             }
             event = target.next_event() => {
@@ -1273,6 +1279,9 @@ async fn pair_peers(
                         panic!("expected pairing request event");
                     }
                     RuntimeEvent::OutgoingTransferFinalizationRequested(_) => {
+                        panic!("expected pairing request event");
+                    }
+                    RuntimeEvent::TerminalEvent { .. } => {
                         panic!("expected pairing request event");
                     }
                 }

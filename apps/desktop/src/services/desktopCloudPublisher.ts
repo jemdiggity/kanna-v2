@@ -1,4 +1,4 @@
-import { getRepo, listBlockersForItem, type PipelineItem, type Repo } from "@kanna/db";
+import { getRepo, listBlockersForItem, listPipelineItems, listRepos, type PipelineItem, type Repo } from "@kanna/db";
 import { invoke } from "../invoke";
 import { buildCloudTaskSnapshot } from "../utils/cloudTaskSnapshot";
 import { getConfiguredDesktopAuthSession } from "./desktopAuthSdk";
@@ -38,7 +38,40 @@ export async function publishDesktopTaskSnapshot(
   }).publish(snapshot);
 }
 
+export interface PublishDesktopTaskSnapshotsOptions {
+  closedSinceDays?: number;
+}
+
+export async function publishDesktopTaskSnapshots(
+  db: DbHandle,
+  options: PublishDesktopTaskSnapshotsOptions = {},
+): Promise<void> {
+  const repos = await listRepos(db);
+  const cutoff = options.closedSinceDays === undefined
+    ? null
+    : Date.now() - options.closedSinceDays * 24 * 60 * 60 * 1000;
+
+  for (const repo of repos) {
+    const items = await listPipelineItems(db, repo.id);
+    for (const item of items) {
+      if (!shouldPublishTaskSnapshot(item, cutoff)) continue;
+      await publishDesktopTaskSnapshot(db, item, repo);
+    }
+  }
+}
+
+function shouldPublishTaskSnapshot(item: PipelineItem, closedCutoffMs: number | null): boolean {
+  if (item.stage !== "done" && !item.closed_at) return true;
+  if (closedCutoffMs === null) return true;
+  if (!item.closed_at) return false;
+  const closedAt = Date.parse(item.closed_at);
+  return Number.isFinite(closedAt) && closedAt >= closedCutoffMs;
+}
+
 async function resolveDesktopId(): Promise<string> {
+  const mobileStatus = await invoke<{ desktopId?: string }>("mobile_server_status").catch(() => null);
+  if (mobileStatus?.desktopId?.trim()) return mobileStatus.desktopId.trim();
+
   const envId = await invoke<string>("read_env_var", { name: "KANNA_TRANSFER_PEER_ID" }).catch(() => "");
   if (envId.trim()) return envId.trim();
 
