@@ -118,12 +118,12 @@ describe("createAppModel", () => {
 
     expect(model.navigator.tabs.map((tab) => tab.label)).toEqual([
       "Tasks",
-      "Recent",
+      "Activity",
       "More"
     ]);
     expect(model.navigator.utilityActions.map((action) => action.label)).toEqual([
       "Search",
-      "New Task"
+      "Add task"
     ]);
     expect(typeof model.controller.bootstrap).toBe("function");
     expect((await model.client.getStatus()).desktopName).toBe("Studio Mac");
@@ -177,6 +177,41 @@ describe("createAppModel", () => {
       expect.objectContaining({ id: "cloud-task-1", title: "Cloud task" })
     ]);
     expect(taskIndex.listRecentTasks).toHaveBeenCalledWith("user-1");
+  });
+
+  it("falls back to LAN tasks for signed-in users before cloud snapshots exist", async () => {
+    const authSession: MobileAuthSession = {
+      initialize: vi.fn().mockResolvedValue(undefined),
+      getState: vi.fn(() => ({
+        status: "signedIn",
+        user: { uid: "user-1", email: "u@example.com", displayName: null }
+      })),
+      subscribe: vi.fn((listener) => {
+        listener({
+          status: "signedIn",
+          user: { uid: "user-1", email: "u@example.com", displayName: null }
+        });
+        return () => undefined;
+      }),
+      signInWithEmailPassword: vi.fn().mockResolvedValue(undefined),
+      signOut: vi.fn().mockResolvedValue(undefined),
+      getIdToken: vi.fn().mockResolvedValue("id-token-1")
+    };
+    const taskIndex = {
+      listRecentTasks: vi.fn(async () => [])
+    };
+    const model = createAppModel(
+      "http://desktop.test",
+      createFetchMock(),
+      undefined,
+      authSession,
+      { relayUrl: "wss://relay.example", taskIndex }
+    );
+
+    await expect(model.client.listRecentTasks()).resolves.toEqual([
+      expect.objectContaining({ id: "task-1", title: "Refactor mobile shell" }),
+      expect.objectContaining({ id: "task-2", title: "Review shell polish" })
+    ]);
   });
 
   it("hydrates persisted mobile context before bootstrap", async () => {

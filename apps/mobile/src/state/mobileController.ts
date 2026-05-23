@@ -123,7 +123,6 @@ export function createMobileController(
             break;
           case "error":
             store.setTaskTerminalStatus(taskId, "error");
-            store.setErrorMessage(event.message);
             break;
         }
       });

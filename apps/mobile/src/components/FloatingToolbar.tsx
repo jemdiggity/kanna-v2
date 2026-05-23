@@ -1,4 +1,5 @@
 import React from "react";
+import { Ionicons } from "@expo/vector-icons";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import type { TabName, TabRoute } from "../navigation/RootNavigator";
 
@@ -8,6 +9,7 @@ interface FloatingToolbarProps {
   utilityActions: {
     name: "search" | "create";
     label: string;
+    icon: string;
   }[];
   onSelectTab(tab: TabName): void;
   onSelectUtilityAction(action: "search" | "create"): void;
@@ -28,9 +30,14 @@ export function FloatingToolbar({
       {searchAction ? (
         <Pressable
           style={styles.utilityButton}
+          accessibilityLabel={searchAction.label}
           onPress={() => onSelectUtilityAction(searchAction.name)}
         >
-          <Text style={styles.utilityLabel}>{searchAction.label}</Text>
+          <Ionicons
+            color="#D5DEEC"
+            name={searchAction.icon as keyof typeof Ionicons.glyphMap}
+            size={30}
+          />
         </Pressable>
       ) : null}
 
@@ -43,6 +50,11 @@ export function FloatingToolbar({
               style={[styles.item, active ? styles.itemActive : null]}
               onPress={() => onSelectTab(tab.name)}
             >
+              <Ionicons
+                color={active ? "#0B1220" : "#D5DEEC"}
+                name={tab.icon as keyof typeof Ionicons.glyphMap}
+                size={23}
+              />
               <Text style={[styles.label, active ? styles.labelActive : null]}>
                 {tab.label}
               </Text>
@@ -54,9 +66,14 @@ export function FloatingToolbar({
       {createAction ? (
         <Pressable
           style={styles.utilityButtonPrimary}
+          accessibilityLabel={createAction.label}
           onPress={() => onSelectUtilityAction(createAction.name)}
         >
-          <Text style={styles.utilityLabelPrimary}>{createAction.label}</Text>
+          <Ionicons
+            color="#0B1220"
+            name={createAction.icon as keyof typeof Ionicons.glyphMap}
+            size={36}
+          />
         </Pressable>
       ) : null}
     </View>
@@ -81,8 +98,8 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     flex: 1,
     justifyContent: "space-between",
-    paddingHorizontal: 8,
-    paddingVertical: 8,
+    paddingHorizontal: 6,
+    paddingVertical: 7,
     shadowColor: "#02060E",
     shadowOffset: { width: 0, height: 14 },
     shadowOpacity: 0.36,
@@ -92,8 +109,11 @@ const styles = StyleSheet.create({
     alignItems: "center",
     borderRadius: 20,
     flex: 1,
-    paddingHorizontal: 10,
-    paddingVertical: 10
+    gap: 3,
+    minHeight: 54,
+    justifyContent: "center",
+    paddingHorizontal: 6,
+    paddingVertical: 7
   },
   itemActive: {
     backgroundColor: "#E8F1FF"
@@ -104,10 +124,9 @@ const styles = StyleSheet.create({
     borderColor: "#1E304C",
     borderRadius: 24,
     borderWidth: 1,
-    minHeight: 52,
+    height: 64,
     justifyContent: "center",
-    minWidth: 62,
-    paddingHorizontal: 12,
+    width: 64,
     shadowColor: "#02060E",
     shadowOffset: { width: 0, height: 14 },
     shadowOpacity: 0.28,
@@ -116,11 +135,10 @@ const styles = StyleSheet.create({
   utilityButtonPrimary: {
     alignItems: "center",
     backgroundColor: "#E8F1FF",
-    borderRadius: 24,
-    minHeight: 52,
+    borderRadius: 32,
+    height: 64,
     justifyContent: "center",
-    minWidth: 74,
-    paddingHorizontal: 12,
+    width: 64,
     shadowColor: "#02060E",
     shadowOffset: { width: 0, height: 14 },
     shadowOpacity: 0.28,
@@ -128,20 +146,10 @@ const styles = StyleSheet.create({
   },
   label: {
     color: "#8EA3C4",
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: "700"
   },
   labelActive: {
     color: "#0B1220"
   },
-  utilityLabel: {
-    color: "#D5DEEC",
-    fontSize: 12,
-    fontWeight: "700"
-  },
-  utilityLabelPrimary: {
-    color: "#0B1220",
-    fontSize: 12,
-    fontWeight: "800"
-  }
 });

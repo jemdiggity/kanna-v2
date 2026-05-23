@@ -238,7 +238,7 @@ function createClientForMode({
       getIdToken: (forceRefresh) => authSession.getIdToken(forceRefresh),
     });
     const resolvedTaskIndex = taskIndex ?? createFirestoreTaskIndex();
-    return createKannaClient(
+    const cloudClient = createKannaClient(
       createRemoteTransport({
         async listDesktopRecords() {
           return [];
@@ -249,9 +249,78 @@ function createClientForMode({
         listCloudTasks: () => resolvedTaskIndex.listRecentTasks(authState.user.uid),
       }),
     );
+    const lanClient = createKannaClient(createLanTransport(baseUrl, fetchImpl));
+
+    return createCloudWithLanFallbackClient(cloudClient, lanClient);
   }
 
   return createKannaClient(createLanTransport(baseUrl, fetchImpl));
+}
+
+function createCloudWithLanFallbackClient(
+  cloudClient: KannaClient,
+  lanClient: KannaClient
+): KannaClient {
+  let cloudHasTasks = false;
+
+  const listRecentTasks = async () => {
+    try {
+      const tasks = await cloudClient.listRecentTasks();
+      cloudHasTasks = tasks.length > 0;
+      return cloudHasTasks ? tasks : lanClient.listRecentTasks();
+    } catch {
+      cloudHasTasks = false;
+      return lanClient.listRecentTasks();
+    }
+  };
+
+  const useLanFallback = () => !cloudHasTasks;
+
+  return {
+    getStatus: () => cloudClient.getStatus(),
+    listDesktops: async () => {
+      const desktops = await cloudClient.listDesktops();
+      return desktops.length ? desktops : lanClient.listDesktops();
+    },
+    listRepos: async () => {
+      if (useLanFallback()) {
+        return lanClient.listRepos();
+      }
+      const repos = await cloudClient.listRepos();
+      return repos.length ? repos : lanClient.listRepos();
+    },
+    listRepoTasks: async (repoId) => {
+      if (useLanFallback()) {
+        return lanClient.listRepoTasks(repoId);
+      }
+      const tasks = await cloudClient.listRepoTasks(repoId);
+      return tasks.length ? tasks : lanClient.listRepoTasks(repoId);
+    },
+    listRecentTasks,
+    searchTasks: (query) =>
+      useLanFallback() ? lanClient.searchTasks(query) : cloudClient.searchTasks(query),
+    createTask: (input) =>
+      useLanFallback() ? lanClient.createTask(input) : cloudClient.createTask(input),
+    runMergeAgent: (taskId) =>
+      useLanFallback()
+        ? lanClient.runMergeAgent(taskId)
+        : cloudClient.runMergeAgent(taskId),
+    advanceTaskStage: (taskId) =>
+      useLanFallback()
+        ? lanClient.advanceTaskStage(taskId)
+        : cloudClient.advanceTaskStage(taskId),
+    closeTask: (taskId) =>
+      useLanFallback() ? lanClient.closeTask(taskId) : cloudClient.closeTask(taskId),
+    sendTaskInput: (taskId, input) =>
+      useLanFallback()
+        ? lanClient.sendTaskInput(taskId, input)
+        : cloudClient.sendTaskInput(taskId, input),
+    observeTaskTerminal: (taskId, listener) =>
+      useLanFallback()
+        ? lanClient.observeTaskTerminal(taskId, listener)
+        : cloudClient.observeTaskTerminal(taskId, listener),
+    createPairingSession: () => lanClient.createPairingSession()
+  };
 }
 
 function createDelegatingClient(getClient: () => KannaClient): KannaClient {

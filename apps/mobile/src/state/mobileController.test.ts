@@ -351,6 +351,26 @@ describe("createMobileController", () => {
     expect(store.getState().taskTerminalOutput).toContain("Second line");
   });
 
+  it("keeps terminal stream errors scoped to the selected task", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    controller.openTask("task-1");
+    client.__terminalStream.emit({
+      type: "error",
+      taskId: "task-1",
+      message: "session not found: task-1"
+    });
+
+    expect(store.getState()).toMatchObject({
+      selectedTaskId: "task-1",
+      taskTerminalStatus: "error",
+      errorMessage: null
+    });
+  });
+
   it("selects a desktop and refreshes status through the active client", async () => {
     const store = createSessionStore();
     const client = createClientMock();

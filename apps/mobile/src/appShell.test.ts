@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { isTaskDetailVisible, shouldShowFloatingToolbar } from "./appShell";
+import {
+  getShellTitle,
+  isTaskDetailVisible,
+  shouldShowFloatingToolbar
+} from "./appShell";
 
 describe("isTaskDetailVisible", () => {
   it("treats a selected task outside More as the pushed detail screen", () => {
@@ -16,5 +20,11 @@ describe("shouldShowFloatingToolbar", () => {
     expect(shouldShowFloatingToolbar("connected", "task-1", "more")).toBe(true);
     expect(shouldShowFloatingToolbar("connected", null, "tasks")).toBe(true);
     expect(shouldShowFloatingToolbar("idle", null, "tasks")).toBe(false);
+  });
+});
+
+describe("getShellTitle", () => {
+  it("uses task-specific copy instead of the product name for the default shell title", () => {
+    expect(getShellTitle("tasks")).toBe("Tasks");
   });
 });
