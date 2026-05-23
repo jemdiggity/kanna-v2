@@ -189,6 +189,15 @@ impl Db {
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+
+            CREATE TABLE terminal_session (
+                id TEXT PRIMARY KEY,
+                repo_id TEXT NOT NULL,
+                pipeline_item_id TEXT,
+                label TEXT,
+                cwd TEXT,
+                daemon_session_id TEXT
+            );
             "#,
         )?;
         Ok(())
@@ -239,6 +248,23 @@ impl Db {
                 updated_at,
                 updated_at,
             ),
+        )?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn insert_test_terminal_session(
+        &self,
+        id: &str,
+        repo_id: &str,
+        pipeline_item_id: &str,
+        label: &str,
+        daemon_session_id: &str,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "INSERT INTO terminal_session (id, repo_id, pipeline_item_id, label, cwd, daemon_session_id)
+             VALUES (?, ?, ?, ?, '/tmp/repo', ?)",
+            (id, repo_id, pipeline_item_id, label, daemon_session_id),
         )?;
         Ok(())
     }
@@ -480,6 +506,32 @@ impl Db {
                 |row| row.get(0),
             )
             .optional()
+    }
+
+    pub fn resolve_task_terminal_session_id(
+        &self,
+        task_or_branch_id: &str,
+    ) -> Result<Option<String>, rusqlite::Error> {
+        let Some(pipeline_item_id) = self.resolve_pipeline_item_id(task_or_branch_id)? else {
+            return Ok(None);
+        };
+
+        let terminal_session_id = self
+            .conn
+            .query_row(
+                "SELECT daemon_session_id
+                 FROM terminal_session
+                 WHERE pipeline_item_id = ?
+                   AND daemon_session_id IS NOT NULL
+                   AND daemon_session_id != ''
+                 ORDER BY CASE WHEN label = 'agent' THEN 0 ELSE 1 END, id
+                 LIMIT 1",
+                [&pipeline_item_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        Ok(terminal_session_id.or(Some(pipeline_item_id)))
     }
 
     pub fn get_repo(&self, id: &str) -> Result<Option<Repo>, rusqlite::Error> {
@@ -1025,6 +1077,86 @@ mod tests {
 
         assert_eq!(
             db.resolve_pipeline_item_id("task-710917fb")
+                .unwrap()
+                .as_deref(),
+            Some("710917fb")
+        );
+    }
+
+    #[test]
+    fn resolves_task_terminal_session_id_from_task_or_branch_name() {
+        let path = Db::test_db_path("resolve-task-terminal-session");
+        let db = Db::open_for_tests(&path).expect("open test db");
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "710917fb",
+            "repo-1",
+            "Review branch",
+            Some("Review branch"),
+            "review",
+            "2026-05-11 10:00:00",
+        )
+        .unwrap();
+        db.update_test_pipeline_item_stage_context(
+            "710917fb",
+            "task-710917fb",
+            "default",
+            None,
+            "claude",
+        )
+        .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO terminal_session (id, repo_id, pipeline_item_id, label, cwd, daemon_session_id)
+                 VALUES ('shell-session', 'repo-1', '710917fb', 'shell', '/tmp/repo', 'daemon-shell'),
+                        ('agent-session', 'repo-1', '710917fb', 'agent', '/tmp/repo', 'daemon-agent')",
+                [],
+            )
+            .unwrap();
+
+        assert_eq!(
+            db.resolve_task_terminal_session_id("710917fb")
+                .unwrap()
+                .as_deref(),
+            Some("daemon-agent")
+        );
+        assert_eq!(
+            db.resolve_task_terminal_session_id("task-710917fb")
+                .unwrap()
+                .as_deref(),
+            Some("daemon-agent")
+        );
+        assert_eq!(
+            db.resolve_task_terminal_session_id("missing").unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn resolves_task_terminal_session_id_to_pipeline_item_when_no_session_row_exists() {
+        let path = Db::test_db_path("resolve-task-terminal-fallback");
+        let db = Db::open_for_tests(&path).expect("open test db");
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "710917fb",
+            "repo-1",
+            "Review branch",
+            Some("Review branch"),
+            "review",
+            "2026-05-11 10:00:00",
+        )
+        .unwrap();
+        db.update_test_pipeline_item_stage_context(
+            "710917fb",
+            "task-710917fb",
+            "default",
+            None,
+            "claude",
+        )
+        .unwrap();
+
+        assert_eq!(
+            db.resolve_task_terminal_session_id("task-710917fb")
                 .unwrap()
                 .as_deref(),
             Some("710917fb")
