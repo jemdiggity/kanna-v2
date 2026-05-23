@@ -30,6 +30,10 @@ import ToastContainer from "./components/ToastContainer.vue";
 import { getConfiguredDesktopAuthSession } from "./services/desktopAuthSdk";
 import type { DesktopAuthSession, DesktopAuthState } from "./services/desktopAuth";
 import { listDesktopCloudTasks, type DesktopCloudSnapshot } from "./services/desktopCloudTaskIndex";
+import { listDesktopLanTasks, publishDesktopLanTaskSnapshot } from "./services/desktopLanTaskIndex";
+import { publishDesktopTaskSnapshots } from "./services/desktopCloudPublisher";
+import { createConfiguredDesktopRelayTerminalClient } from "./services/desktopRelayTerminal";
+import { createConfiguredDesktopLanTerminalClient } from "./services/desktopLanTerminal";
 import { useKeyboardShortcuts, type ActionName } from "./composables/useKeyboardShortcuts";
 import { startPeriodicBackup } from "./composables/useBackup";
 import { useOperatorEvents } from "./composables/useOperatorEvents";
@@ -41,6 +45,11 @@ import { useAppUpdate } from "./composables/useAppUpdate";
 import { isTopModal } from "./composables/useModalZIndex";
 import { selectTaskByActivity } from "./utils/selectTaskByActivity";
 import { getDefaultBaseBranch } from "./utils/baseBranchPicker";
+import { hashRemoteUrl } from "./utils/cloudTaskSnapshot";
+import { parseRepoInput } from "./utils/parseRepoInput";
+import { defaultReposHome } from "./utils/reposHome";
+import { buildWorkspace } from "./workspace/buildWorkspace";
+import type { WorkspaceTask } from "./workspace/types";
 import { isTaskTearingDown } from "./stores/taskStages";
 import {
   parseIncomingTransferRequest,
@@ -103,9 +112,14 @@ useOperatorEvents(computed(() => db) as unknown as Ref<DbHandle | null>);
 store.attachWindowWorkspace(windowWorkspace);
 const desktopAuthSession = ref<DesktopAuthSession | null>(null);
 const desktopAuthState = ref<DesktopAuthState>({ status: "signedOut" });
-const cloudSnapshot = ref<DesktopCloudSnapshot>({ repos: [], items: [] });
+const cloudSnapshot = ref<DesktopCloudSnapshot>({ repos: [], items: [], terminalRefs: {} });
+const lanSnapshot = ref<DesktopCloudSnapshot>({ repos: [], items: [], terminalRefs: {} });
 let unsubscribeDesktopAuth: (() => void) | null = null;
 let cloudRefreshTimer: ReturnType<typeof setInterval> | null = null;
+let lanRefreshTimer: ReturnType<typeof setInterval> | null = null;
+const reconciledCloudSnapshotUsers = new Set<string>();
+const selectedCloudRepoId = ref<string | null>(null);
+const selectedCloudItemId = ref<string | null>(null);
 
 async function requestCloseCurrentWindow() {
   if (closingCurrentWindow) return;
@@ -185,8 +199,93 @@ const preferences = reactive({
   devLingerTerminals: false,
   defaultAgentProvider: "claude" as AgentProvider,
 });
-const sidebarRepos = computed(() => [...store.repos, ...cloudSnapshot.value.repos]);
-const sidebarItems = computed(() => [...store.items, ...cloudSnapshot.value.items]);
+const localReposForCloudMatching = computedAsync(async () => {
+  return Promise.all(store.repos.map(async (repo) => {
+    const remoteUrl = await invoke<string>("git_remote_url", { repoPath: repo.path }).catch(() => null);
+    return {
+      repo,
+      remoteUrl,
+      remoteUrlHash: await hashRemoteUrl(remoteUrl),
+    };
+  }));
+}, store.repos.map((repo) => ({
+  repo,
+  remoteUrl: null,
+  remoteUrlHash: null,
+})));
+const remoteSnapshot = computed<DesktopCloudSnapshot>(() => ({
+  repos: [...cloudSnapshot.value.repos, ...lanSnapshot.value.repos],
+  items: [...cloudSnapshot.value.items, ...lanSnapshot.value.items],
+  terminalRefs: { ...cloudSnapshot.value.terminalRefs, ...lanSnapshot.value.terminalRefs },
+}));
+const workspace = computed(() => buildWorkspace({
+  localRepos: localReposForCloudMatching.value,
+  localItems: store.items,
+  cloudSnapshot: cloudSnapshot.value,
+  lanSnapshot: lanSnapshot.value,
+}));
+const workspaceTasksByItemId = computed(() => {
+  const entries: Array<[string, WorkspaceTask]> = [];
+  for (const task of workspace.value.tasks) {
+    entries.push([task.item.id, task]);
+    if (task.localTaskId) entries.push([task.localTaskId, task]);
+    for (const remoteTaskId of task.remoteTaskIds) entries.push([remoteTaskId, task]);
+  }
+  return new Map(entries);
+});
+const sidebarRepos = computed(() => workspace.value.repos.map((repo) => ({
+  id: repo.key,
+  path: repo.path ?? "cloud",
+  name: repo.name,
+  remote_url: repo.remoteUrl,
+  default_branch: repo.defaultBranch ?? "main",
+  hidden: 0,
+  sort_order: 0,
+  created_at: "",
+  last_opened_at: "",
+})));
+const sidebarItems = computed(() => workspace.value.tasks.map((task) => ({
+  ...task.item,
+  id: task.item.id,
+  repo_id: task.repoKey,
+})));
+const selectedCloudRepo = computed(() =>
+  remoteSnapshot.value.repos.find((repo) => repo.id === (selectedCloudRepoId.value ?? store.selectedRepoId))
+    ?? sidebarRepos.value.find((repo) => repo.id === (selectedCloudRepoId.value ?? store.selectedRepoId) && repo.path === "cloud")
+    ?? null,
+);
+const selectedCloudItem = computed(() => {
+  const selectedItemId = selectedCloudItemId.value ?? store.selectedItemId;
+  if (!selectedItemId) return null;
+  const task = workspaceTasksByItemId.value.get(selectedItemId);
+  if (!task || task.owner.kind === "local") return null;
+  if (task.item.repo_id === (selectedCloudRepoId.value ?? store.selectedRepoId)) return task.item;
+  if (task.repoKey === (selectedCloudRepoId.value ?? store.selectedRepoId)) return task.item;
+  return null;
+});
+const mainPanelRepo = computed(() => selectedCloudRepo.value ?? store.selectedRepo);
+const mainPanelItem = computed(() => selectedCloudItem.value ?? store.currentItem);
+const mainPanelIsCloudTask = computed(() => Boolean(selectedCloudItem.value));
+const selectedWorkspaceTask = computed(() => {
+  const selectedItemId = selectedCloudItemId.value ?? store.selectedItemId;
+  return selectedItemId ? workspaceTasksByItemId.value.get(selectedItemId) ?? null : null;
+});
+const mainPanelCloudTerminalRef = computed(() => {
+  const selectedItemId = selectedCloudItemId.value ?? store.selectedItemId;
+  if (!selectedItemId) return null;
+  const task = workspaceTasksByItemId.value.get(selectedItemId);
+  return task?.terminal.remoteRef ?? null;
+});
+
+function isCloudOnlyRepoId(repoId: string | undefined | null): boolean {
+  return Boolean(repoId && remoteSnapshot.value.repos.some((repo) => repo.id === repoId));
+}
+
+function cloudRepoRemoteUrl(repoId: string | undefined | null): string | null {
+  if (!repoId) return null;
+  const repo = remoteSnapshot.value.repos.find((candidate) => candidate.id === repoId);
+  return repo?.remote_url ?? null;
+}
 type DiffScope = "branch" | "working";
 
 interface DiffScrollPositions {
@@ -233,10 +332,30 @@ function buildCurrentFileFlowKey(): string | undefined {
 async function refreshCloudTasksForSignedInUser(): Promise<void> {
   const state = desktopAuthState.value;
   if (state.status !== "signedIn") {
-    cloudSnapshot.value = { repos: [], items: [] };
+    cloudSnapshot.value = { repos: [], items: [], terminalRefs: {} };
     return;
   }
-  cloudSnapshot.value = await listDesktopCloudTasks(state.user.uid);
+  const snapshot = await listDesktopCloudTasks(state.user.uid, undefined, {
+    localRepos: localReposForCloudMatching.value,
+    localItems: store.items,
+  });
+  cloudSnapshot.value = {
+    repos: snapshot.repos,
+    items: snapshot.items,
+    terminalRefs: snapshot.terminalRefs ?? {},
+  };
+}
+
+async function refreshLanTasks(): Promise<void> {
+  await publishDesktopLanTaskSnapshot(db);
+  const snapshot = await listDesktopLanTasks({
+    localRepos: localReposForCloudMatching.value,
+  });
+  lanSnapshot.value = {
+    repos: snapshot.repos,
+    items: snapshot.items,
+    terminalRefs: snapshot.terminalRefs ?? {},
+  };
 }
 
 async function initializeDesktopCloudAuth(): Promise<void> {
@@ -246,6 +365,12 @@ async function initializeDesktopCloudAuth(): Promise<void> {
   unsubscribeDesktopAuth?.();
   unsubscribeDesktopAuth = session.subscribe((state) => {
     desktopAuthState.value = state;
+    if (state.status === "signedIn" && !reconciledCloudSnapshotUsers.has(state.user.uid)) {
+      reconciledCloudSnapshotUsers.add(state.user.uid);
+      void publishDesktopTaskSnapshots(db, { closedSinceDays: 30 })
+        .catch((error) => console.warn("[cloud] failed to reconcile local task snapshots:", error))
+        .then(() => refreshCloudTasksForSignedInUser());
+    }
     void refreshCloudTasksForSignedInUser().catch((error) =>
       console.warn("[cloud] failed to refresh cloud tasks:", error),
     );
@@ -253,6 +378,17 @@ async function initializeDesktopCloudAuth(): Promise<void> {
   cloudRefreshTimer = setInterval(() => {
     void refreshCloudTasksForSignedInUser().catch((error) =>
       console.warn("[cloud] failed to refresh cloud tasks:", error),
+    );
+  }, 1000);
+}
+
+function initializeDesktopLanTaskSync(): void {
+  void refreshLanTasks().catch((error) =>
+    console.warn("[lan] failed to refresh LAN tasks:", error),
+  );
+  lanRefreshTimer = setInterval(() => {
+    void refreshLanTasks().catch((error) =>
+      console.warn("[lan] failed to refresh LAN tasks:", error),
     );
   }, 1000);
 }
@@ -371,9 +507,30 @@ interface PendingIncomingTransferRow {
   id: string;
 }
 
+function visibleSidebarItemsForRepo(repoId: string, options: { currentRepoScope?: boolean } = {}) {
+  const workspaceItems = sidebarItems.value.filter((item) => item.repo_id === repoId);
+  if (workspaceItems.length === 0 && options.currentRepoScope && repoId === store.selectedRepoId && !repoId.startsWith("cloud:")) {
+    return store.sortedItemsForCurrentRepo;
+  }
+  if (options.currentRepoScope && repoId === store.selectedRepoId && !repoId.startsWith("cloud:")) {
+    return workspaceItems;
+  }
+  return workspaceItems.filter((item) => item.stage !== "done");
+}
+
+function visibleSidebarItemsAllRepos() {
+  const workspaceItems = sidebarRepos.value.flatMap((repo) => visibleSidebarItemsForRepo(repo.id));
+  return workspaceItems.length > 0 ? workspaceItems : store.sortedItemsAllRepos;
+}
+
+function currentRepoVisibleSidebarItems() {
+  const repoId = store.selectedRepoId;
+  return repoId ? visibleSidebarItemsForRepo(repoId, { currentRepoScope: true }) : [];
+}
+
 // Navigation
-function navigateItems(direction: -1 | 1) {
-  const allItems = store.sortedItemsAllRepos;
+async function navigateItems(direction: -1 | 1) {
+  const allItems = visibleSidebarItemsAllRepos();
   const sidebar = sidebarRef.value;
   const visibleItems = sidebar?.searchQuery
     ? allItems.filter((i) => sidebar.matchesSearch(i))
@@ -392,14 +549,14 @@ function navigateItems(direction: -1 | 1) {
   if (nextItem.id !== store.selectedItemId) {
     const previousItemId = store.selectedItemId;
     if (nextItem.repo_id !== store.selectedRepoId) {
-      store.selectRepo(nextItem.repo_id);
+      await handleSelectRepo(nextItem.repo_id);
     }
-    store.selectItem(nextItem.id, { previousItemId });
+    await handleSelectItem(nextItem.id, previousItemId);
   }
 }
 
-function navigateRepos(direction: -1 | 1) {
-  const visibleRepos = store.repos;
+async function navigateRepos(direction: -1 | 1) {
+  const visibleRepos = sidebarRepos.value;
   if (visibleRepos.length === 0) return;
   const currentIndex = visibleRepos.findIndex((r) => r.id === store.selectedRepoId);
   let nextIndex: number;
@@ -412,42 +569,42 @@ function navigateRepos(direction: -1 | 1) {
   const nextRepo = visibleRepos[nextIndex];
   if (nextRepo.id === store.selectedRepoId) return;
   const previousItemId = store.selectedItemId;
-  store.selectRepo(nextRepo.id);
+  await handleSelectRepo(nextRepo.id);
 
   // Restore last-selected task for this repo, or fall back to first task
   const lastItemId = store.lastSelectedItemByRepo[nextRepo.id];
   const lastItem = lastItemId
-    ? store.items.find((i) => i.id === lastItemId && i.repo_id === nextRepo.id && i.stage !== "done")
+    ? sidebarItems.value.find((i) => i.id === lastItemId && i.repo_id === nextRepo.id && i.stage !== "done")
     : undefined;
   if (lastItem) {
-    store.selectItem(lastItem.id, { previousItemId });
+    await handleSelectItem(lastItem.id, previousItemId);
   } else {
-    const sorted = store.sortedItemsAllRepos.filter((i) => i.repo_id === nextRepo.id);
+    const sorted = visibleSidebarItemsForRepo(nextRepo.id);
     if (sorted.length > 0) {
-      store.selectItem(sorted[0].id, { previousItemId });
+      await handleSelectItem(sorted[0].id, previousItemId);
     }
   }
 }
 
 function selectReadTask(mode: "oldest" | "newest") {
   const target = selectTaskByActivity(
-    store.sortedItemsForCurrentRepo.filter((item) => isActivityShortcutCandidate(item) && !hasTag(item, "blocked")),
+    currentRepoVisibleSidebarItems().filter((item) => isActivityShortcutCandidate(item) && !hasTag(item, "blocked")),
     mode,
     "idle",
-    store.currentItem?.created_at,
+    mainPanelItem.value?.created_at,
   );
-  if (target) void store.selectItem(target.id);
+  if (target) void handleSelectItem(target.id);
 }
 
 function selectUnreadTaskWithReadFallback(mode: "oldest" | "newest") {
   const target = selectTaskByActivity(
-    store.sortedItemsForCurrentRepo.filter(isActivityShortcutCandidate),
+    currentRepoVisibleSidebarItems().filter(isActivityShortcutCandidate),
     mode,
     "unread",
-    store.currentItem?.created_at,
+    mainPanelItem.value?.created_at,
   );
   if (target) {
-    void store.selectItem(target.id);
+    void handleSelectItem(target.id);
     return;
   }
   selectReadTask(mode);
@@ -984,10 +1141,43 @@ async function importPendingIncomingTransfers() {
   }
 }
 
+async function closeSelectedWorkspaceTask() {
+  const workspaceTask = selectedWorkspaceTask.value;
+  if (!workspaceTask || workspaceTask.terminal.kind === "local") {
+    await store.closeTask();
+    return;
+  }
+
+  const remoteRef = workspaceTask.terminal.remoteRef;
+  if (!remoteRef || !workspaceTask.capabilities.canClose) {
+    toast.error("Remote task is not reachable.");
+    return;
+  }
+
+  const client = workspaceTask.terminal.kind === "lan"
+    ? await createConfiguredDesktopLanTerminalClient()
+    : await createConfiguredDesktopRelayTerminalClient();
+  if (!client) {
+    toast.error("Remote task owner is unavailable.");
+    return;
+  }
+
+  try {
+    await client.closeTask({
+      desktopId: remoteRef.ownerDesktopId,
+      taskId: remoteRef.ownerLocalTaskId,
+    });
+  } catch (error) {
+    toast.error(error instanceof Error ? error.message : String(error));
+  } finally {
+    client.close();
+  }
+}
+
 // Keyboard shortcuts
 const keyboardActions = {
   newTask: () => {
-    if (store.repos.length === 0) {
+    if (sidebarRepos.value.length === 0) {
       toast.warning(t("toasts.noReposLoaded"));
       return;
     }
@@ -1053,7 +1243,7 @@ const keyboardActions = {
     await invoke("run_script", { script: `${store.ideCommand} "${worktreePath}"`, cwd: worktreePath, env: {} }).catch((e) => console.error("[openInIDE] failed:", e));
   },
   advanceStage: () => { const item = store.currentItem; if (item) void store.advanceStage(item.id); },
-  closeTask: () => store.closeTask(),
+  closeTask: () => closeSelectedWorkspaceTask(),
   undoClose: () => store.undoClose(),
   navigateUp: () => navigateItems(-1),
   navigateDown: () => navigateItems(1),
@@ -1280,13 +1470,50 @@ document.addEventListener("focusin", (e) => {
   }
 };
 
-function handleSelectItem(itemId: string) {
-  store.selectItem(itemId);
+async function handleSelectRepo(repoId: string) {
+  if (repoId.startsWith("cloud:")) {
+    selectedCloudRepoId.value = repoId;
+    store.selectedRepoId = repoId;
+    store.selectedItemId = store.lastSelectedItemByRepo[repoId] ?? null;
+    selectedCloudItemId.value = store.selectedItemId;
+    await windowWorkspace.persistSelection({
+      selectedRepoId: store.selectedRepoId,
+      selectedItemId: store.selectedItemId,
+    });
+    return;
+  }
+  selectedCloudRepoId.value = null;
+  selectedCloudItemId.value = null;
+  await store.selectRepo(repoId);
+}
+
+async function handleSelectItem(itemId: string, previousItemId?: string | null) {
+  const workspaceTask = workspaceTasksByItemId.value.get(itemId);
+  if (workspaceTask && workspaceTask.owner.kind !== "local") {
+    selectedCloudRepoId.value = workspaceTask.repoKey;
+    selectedCloudItemId.value = itemId;
+    store.selectedRepoId = workspaceTask.repoKey;
+    store.selectedItemId = itemId;
+    store.lastSelectedItemByRepo[workspaceTask.repoKey] = itemId;
+    await windowWorkspace.persistSelection({
+      selectedRepoId: store.selectedRepoId,
+      selectedItemId: store.selectedItemId,
+    });
+    return;
+  }
+  selectedCloudRepoId.value = null;
+  selectedCloudItemId.value = null;
+  if (previousItemId !== undefined) {
+    await store.selectItem(itemId, { previousItemId });
+  } else {
+    await store.selectItem(itemId);
+  }
 }
 
 async function openNewTaskModal(repoId?: string) {
-  if (repoId) store.selectedRepoId = repoId;
-  const repoPath = store.repos.find((r) => r.id === (repoId ?? store.selectedRepoId))?.path;
+  const targetRepoId = repoId ?? store.selectedRepoId ?? (sidebarRepos.value.length === 1 ? sidebarRepos.value[0]?.id : undefined);
+  if (targetRepoId) store.selectedRepoId = targetRepoId;
+  const repoPath = store.repos.find((r) => r.id === targetRepoId)?.path;
   if (repoPath) {
     const pipelinesDir = `${repoPath}/.kanna/pipelines`;
     const [files, configContent, defaultBranch, baseBranches] = await Promise.all([
@@ -1312,6 +1539,18 @@ async function openNewTaskModal(repoId?: string) {
     availableBaseBranches.value = baseBranches;
     defaultBaseBranchName.value =
       getDefaultBaseBranch(baseBranches, defaultBranch || "main") || undefined;
+  } else if (isCloudOnlyRepoId(targetRepoId)) {
+    const cloudRepo = remoteSnapshot.value.repos.find((repo) => repo.id === targetRepoId);
+    const remoteUrl = cloudRepo?.remote_url ?? null;
+    const baseBranches = remoteUrl
+      ? await invoke<string[]>("git_list_remote_base_branches", { remoteUrl }).catch(() => [] as string[])
+      : [];
+    availablePipelines.value = [];
+    defaultPipelineName.value = undefined;
+    repoDefaultBranchName.value = cloudRepo?.default_branch || undefined;
+    availableBaseBranches.value = baseBranches;
+    defaultBaseBranchName.value =
+      getDefaultBaseBranch(baseBranches, cloudRepo?.default_branch || "main") || undefined;
   } else {
     availablePipelines.value = [];
     defaultPipelineName.value = undefined;
@@ -1330,14 +1569,38 @@ async function handleNewTaskSubmit(
   baseBranch?: string,
 ) {
   if (!store.selectedRepoId) {
-    if (store.repos.length === 1) {
-      store.selectedRepoId = store.repos[0].id;
+    if (sidebarRepos.value.length === 1) {
+      store.selectedRepoId = sidebarRepos.value[0].id;
     } else {
       toast.warning(t('toasts.selectRepoFirst'));
       return;
     }
   }
-  const repo = store.repos.find((r) => r.id === store.selectedRepoId);
+  let repo = store.repos.find((r) => r.id === store.selectedRepoId);
+  if (!repo && isCloudOnlyRepoId(store.selectedRepoId)) {
+    const cloudRepoId = store.selectedRepoId;
+    const remoteUrl = cloudRepoRemoteUrl(cloudRepoId);
+    if (!remoteUrl) {
+      toast.error(`${t('toasts.taskCreationFailed')}: remote URL is unavailable for this cloud repo`);
+      return;
+    }
+    try {
+      const destination = await allocateCloudRepoClonePath(remoteUrl, cloudRepoId);
+      await store.cloneAndImportRepo(remoteUrl, destination);
+      repo = store.repos.find((candidate) => candidate.id === store.selectedRepoId)
+        ?? store.repos.find((candidate) => candidate.path === destination);
+      if (!repo) {
+        throw new Error("cloned repo was not imported");
+      }
+      selectedCloudRepoId.value = null;
+      selectedCloudItemId.value = null;
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error("Cloud repo clone failed:", e);
+      toast.error(`${t('toasts.cloneFailed')}: ${msg}`);
+      return;
+    }
+  }
   if (!repo) return;
   showNewTaskModal.value = false;
   try {
@@ -1351,6 +1614,32 @@ async function handleNewTaskSubmit(
     console.error("Task creation failed:", e);
     toast.error(`${t('toasts.taskCreationFailed')}: ${msg}`);
   }
+}
+
+async function allocateCloudRepoClonePath(remoteUrl: string, repoId: string): Promise<string> {
+  const homeDir = await invoke<string>("read_env_var", { name: "HOME" }).catch(() => "/Users/unknown");
+  const parentDir = defaultReposHome(homeDir);
+  const baseName = sanitizeCloudRepoName(parseCloudRepoName(remoteUrl) ?? repoId.replace(/^cloud:/, ""));
+  for (let i = 1; i <= 99; i++) {
+    const candidateName = i === 1 ? baseName : `${baseName}-${i}`;
+    const candidatePath = `${parentDir}/${candidateName}`;
+    const exists = await invoke<boolean>("file_exists", { path: candidatePath }).catch(() => false);
+    if (!exists) return candidatePath;
+  }
+  return `${parentDir}/${baseName}-${Date.now()}`;
+}
+
+function parseCloudRepoName(remoteUrl: string): string | null {
+  const parsed = parseRepoInput(remoteUrl);
+  if (parsed.repo) return parsed.repo;
+  const lastSegment = remoteUrl.trim().split(/[/:]/).filter(Boolean).pop();
+  if (!lastSegment) return null;
+  return lastSegment.replace(/\.git$/, "");
+}
+
+function sanitizeCloudRepoName(name: string): string {
+  const sanitized = name.trim().replace(/[\\/]/g, "-");
+  return sanitized.length > 0 ? sanitized : "repo";
 }
 
 async function handleCreateRepo(name: string, path: string) {
@@ -1384,6 +1673,7 @@ async function handleCloneRepo(url: string, destination: string) {
 }
 
 const currentBlockers = computedAsync(async () => {
+  if (mainPanelIsCloudTask.value) return [];
   const item = store.currentItem;
   if (!item) return [];
   return store.listBlockersForItem(item.id);
@@ -1428,6 +1718,7 @@ onMounted(async () => {
   void initializeDesktopCloudAuth().catch((error) =>
     console.warn("[cloud] failed to initialize desktop auth:", error),
   );
+  initializeDesktopLanTaskSync();
   await importPendingIncomingTransfers();
   if (import.meta.env.DEV && window.__KANNA_E2E__) {
     window.__KANNA_E2E__.ready = true;
@@ -1680,6 +1971,9 @@ onBeforeUnmount(() => {
   if (cloudRefreshTimer) {
     clearInterval(cloudRefreshTimer);
   }
+  if (lanRefreshTimer) {
+    clearInterval(lanRefreshTimer);
+  }
   stopSidebarResize();
   window.removeEventListener("dragenter", suppressFileDropNavigation);
   window.removeEventListener("dragover", suppressFileDropNavigation);
@@ -1704,7 +1998,7 @@ onBeforeUnmount(() => {
         :selected-repo-id="store.selectedRepoId"
         :selected-item-id="store.selectedItemId"
         :blocker-names="sidebarBlockerNames"
-        @select-repo="store.selectRepo"
+        @select-repo="handleSelectRepo"
         @select-item="handleSelectItem"
         @new-task="(repoId: string) => openNewTaskModal(repoId).catch((e) => console.error('[App] openNewTaskModal failed:', e))"
         @pin-item="store.pinItem"
@@ -1729,14 +2023,16 @@ onBeforeUnmount(() => {
     <div v-if="!isMobile || store.selectedItemId" class="main-column">
       <MainPanel
         ref="mainPanelRef"
-        :item="store.currentItem"
-        :repo-path="store.selectedRepo?.path"
+        :item="mainPanelItem"
+        :repo-path="mainPanelRepo?.path"
         :spawn-pty-session="store.spawnPtySession"
         :maximized="maximized"
         :blockers="currentBlockers"
-        :has-repos="store.repos.length > 0"
+        :has-repos="sidebarRepos.length > 0"
         :pending-setup="store.currentItem ? (store.pendingSetupIds ?? []).includes(store.currentItem.id) : false"
-        @close-task="store.closeTask"
+        :cloud-task="mainPanelIsCloudTask"
+        :cloud-terminal-ref="mainPanelCloudTerminalRef"
+        @close-task="closeSelectedWorkspaceTask"
         @back="store.selectedItemId = null"
       />
     </div>
