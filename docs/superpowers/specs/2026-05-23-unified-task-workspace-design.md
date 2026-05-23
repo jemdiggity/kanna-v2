@@ -135,11 +135,82 @@ Examples:
 - `canCreateSiblingTask`: repo can be resolved locally or cloned from a remote URL.
 - `canPushToMachine`: task is locally owned and transferable.
 - `canPullFromMachine`: task is remotely owned and the current desktop can import it.
-- `canOpenDiff`: local worktree exists.
+- `canOpenDiff`: local worktree exists, or a reachable owner action route can return a task diff.
 - `canOpenInIde`: local worktree exists.
+- `canOpenShell`: local worktree exists, or a remote scoped shell route exists.
+- `canAdvanceStage`: owner is local, or a reachable remote action route supports stage actions.
+- `canEditMetadata`: owner is local, or a reachable remote action route supports metadata updates.
 
 Components should render disabled states or alternate flows from these flags.
 They should not need to know whether a task came from SQLite, Firestore, or LAN discovery.
+
+## Remote Task Parity
+
+Remote tasks should behave like local tasks whenever the owner machine is reachable and the selected transport can support the requested action.
+The default behavior is to control the task where it already runs.
+Pulling a task to the current machine remains an explicit user action for ownership transfer or offline/local work; it is not required before basic interaction.
+
+### Action Routing
+
+The workspace layer should expose a task action route for each operation.
+Action routing should prefer:
+
+1. local ownership,
+2. trusted LAN route,
+3. cloud relay route.
+
+This mirrors the product priority: free LAN first when available, cloud as paid remote convenience.
+
+Required parity actions:
+
+- **View terminal:** stream the remote PTY snapshot and live output.
+- **Type into terminal:** send input to the owner task session.
+- **Resize terminal:** forward terminal dimensions to the owner task session.
+- **Close task:** close the owner task and kill its related owner sessions; update snapshots so other machines hide it.
+- **Open diff:** if the current machine has the repo/worktree locally, show local diff; otherwise request a rendered/patch diff from the owner machine.
+- **Open file preview:** if local repo/worktree exists, read locally; otherwise request file content from the owner machine.
+- **Open in IDE:** only available when a local worktree exists; otherwise show Pull to This Machine as the route to local ownership.
+- **Shell in worktree:** if local worktree exists, open local shell; otherwise provide a remote shell route only after the same terminal RPC supports scoped shell sessions. Until then, show Pull to This Machine.
+- **Advance stage / PR / merge actions:** route to owner machine when the owner is reachable, because the owner has the active worktree and credentials context.
+- **Blockers and metadata edits:** route to owner machine for remote-owned tasks and then rely on task snapshot refresh to update the current UI.
+- **Push to Machine:** only for local-owned tasks.
+- **Pull from Machine:** only for remote-owned tasks and always targets the current machine.
+
+### Transport Requirements
+
+Cloud and LAN should expose the same command vocabulary where possible:
+
+- observe/unobserve session,
+- send input,
+- resize session,
+- close task,
+- fetch task diff,
+- fetch file content,
+- run task action such as advance stage.
+
+Cloud can route these commands through the relay.
+LAN should route them through the trusted transfer sidecar using the same high-level request names.
+The UI should call one workspace action API and let the route choose the concrete transport.
+
+### Ownership And Snapshot Consistency
+
+Remote mutating actions must execute on the owner machine.
+The owner updates its SQLite DB and republishes cloud/LAN snapshots.
+The observing machine should update optimistically only for local UI responsiveness, then reconcile from the next snapshot.
+If the owner rejects or times out, the observing machine should show the error and leave the task visible with its previous state.
+
+If a remote close succeeds, the current machine should remove the task from the active sidebar once the owner snapshot reports `closed_at` or stops advertising it.
+For usability, the current machine may immediately select the next visible task while waiting for the snapshot refresh.
+
+### Capability Semantics
+
+Remote capability flags should represent action availability, not task source.
+A remote task with a reachable LAN owner should generally have the same interactive capabilities as a cloud-reachable task, without sign-in or subscription.
+A remote task with only an offline cloud snapshot should remain visible but disable mutating actions.
+
+`canOpenDiff` means the app can show a diff through either local files or owner RPC.
+`canOpenInIde` remains local-only because opening an IDE on another machine would be surprising.
+`canOpenShell` should be split from `canOpenTerminal`; agent terminal parity comes first, worktree shell parity can follow once scoped remote shell sessions are supported.
 
 ## Data Flow
 
@@ -261,6 +332,7 @@ Keep local implementations behind action adapters.
 
 Normalize terminal route handling for local daemon, cloud relay, and LAN transport.
 Make missing sessions and offline owners produce structured workspace errors.
+Add remote stdin, resize, and close routing before broadening into diff and stage actions.
 
 ### Phase 5: Cloud/LAN Transfer Expansion
 
