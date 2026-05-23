@@ -2,17 +2,21 @@
 
 Date: 2026-05-23
 Status: Proposed
-Scope: Desktop task model unification for local, cloud, and LAN tasks
+Scope: Desktop task model unification for local, LAN, and cloud tasks
 
 ## Summary
 
-Kanna should present one coherent task workspace across local tasks, signed-in cloud tasks, and trusted LAN tasks.
+Kanna should present one coherent task workspace across local tasks, trusted LAN tasks, and signed-in cloud tasks.
 The user should interact with tasks first, not machines first.
 Machine identity matters for ownership, reachability, diagnostics, and explicit transfer targets, but it should not drive ordinary browsing or task selection.
 
 The current implementation stitches local, cloud, and LAN task lists together in `App.vue`.
 That has produced duplicate sidebar tasks, special-case keyboard navigation, and fragile terminal routing.
 The longer-term goal is to introduce a workspace task model below the UI that normalizes all task sources into one list of task view models with explicit ownership, reachability, capabilities, and terminal routing metadata.
+
+LAN is a first-class free path.
+Users who authorize machines to trust each other on the LAN should get the same task workspace experience as users who sign into cloud, without a subscription and without any cloud dependency.
+Cloud is a paid convenience and remote-access transport for customers who need tasks available outside the LAN or across networks where peer discovery is unavailable.
 
 ## Goals
 
@@ -21,7 +25,10 @@ The longer-term goal is to introduce a workspace task model below the UI that no
 - Make local tasks and remote tasks share the same selection, navigation, and task detail model.
 - Keep desktop task execution locally authoritative.
 - Keep explicit machine selection for Push to Machine and Pull from Machine.
-- Support signed-in cloud task visibility and trusted LAN task visibility without making either transport the UI source of truth.
+- Prioritize free LAN usage by making trusted machines expose the same workspace capabilities as cloud-connected machines wherever the LAN can provide equivalent reachability.
+- Support trusted LAN task visibility without cloud sign-in or subscription.
+- Support signed-in cloud task visibility for paid remote access outside the LAN.
+- Keep LAN and cloud as interchangeable transports from the user's point of view whenever both can provide the same capability.
 - Provide a clear foundation for mobile parity and cloud transfer work after desktop semantics are stable.
 
 ## Non-Goals
@@ -30,6 +37,7 @@ The longer-term goal is to introduce a workspace task model below the UI that no
 - Making Firestore the authoritative task database for local desktop execution.
 - Automatic selection of task transfer destinations.
 - Teams, orgs, sharing, billing, or entitlement logic.
+- Defining the subscription system itself.
 - Replacing the existing SQLite schema in this phase.
 - Solving all task transfer artifact movement in this design.
 
@@ -48,8 +56,15 @@ Each task in the UI has:
 - transport references for terminal and actions.
 
 Local tasks are tasks whose owner is the current desktop.
-Cloud tasks are tasks published by a signed-in desktop and discovered through the cloud index.
 LAN tasks are tasks published by a trusted peer on the local network.
+Cloud tasks are tasks published by a signed-in desktop and discovered through the cloud index.
+
+The workspace experience should be transport-equivalent:
+
+- If machines are trusted on the LAN, the user should see and control reachable LAN tasks without signing in.
+- If machines are signed into cloud, the user should see and control reachable cloud tasks subject to subscription and account state.
+- If both LAN and cloud can reach the same task, the workspace should show one task and prefer the best available route for the action.
+- Differences should appear only when a transport cannot support a capability, such as LAN being unavailable outside the local network or cloud being unavailable without subscription.
 
 The user should usually see only the task title, repo grouping, stage, activity, and any owner/reachability hint needed to explain limitations.
 The owner machine should not be primary UI chrome unless the task is offline, transferring, or the user is choosing a transfer target.
@@ -99,6 +114,9 @@ Primary matches:
 When a local task and remote snapshot match, the local task wins for UI identity and action routing.
 The remote snapshot remains attached as a source for diagnostics and sync state but is not shown as a separate task.
 
+When both LAN and cloud snapshots match the same remote task, the workspace shows one task with both routes attached.
+Action routing should prefer local ownership first, then reachable LAN, then reachable cloud, unless a capability exists only on one route.
+
 When a task has only remote sources, the remote task is shown once under the best matching repo group.
 If no local repo matches, the workspace creates a remote-only repo group.
 
@@ -131,6 +149,7 @@ Inputs:
 - Cloud task snapshots from Firestore.
 - LAN task snapshots from the transfer sidecar.
 - Relay and LAN presence/reachability.
+- Cloud account and subscription state.
 - Local repo remote URL hashes.
 
 Workspace build flow:
@@ -140,7 +159,7 @@ Workspace build flow:
 3. Normalize repo identities.
 4. Normalize task candidates.
 5. Dedupe candidates into workspace tasks.
-6. Compute owner, reachability, terminal route, and capabilities.
+6. Compute owner, reachability, preferred route, terminal route, and capabilities.
 7. Emit sorted repos and tasks for UI consumption.
 
 Outputs:
@@ -170,6 +189,9 @@ It should wire state, call workspace actions, and pass normalized view models to
 Remote task support should not require every component to understand cloud and LAN separately.
 The terminal view may still branch internally on terminal route type, but it should receive a normalized route object.
 
+Cloud subscription state should affect cloud transport capabilities, not the overall workspace model.
+If a user is not signed in or not subscribed, LAN-backed tasks should continue to work normally.
+
 ## Error Handling
 
 The workspace layer should classify remote task problems explicitly:
@@ -177,6 +199,7 @@ The workspace layer should classify remote task problems explicitly:
 - owner offline,
 - relay unreachable,
 - LAN peer unavailable,
+- cloud subscription inactive,
 - terminal session missing,
 - stale snapshot,
 - repo unavailable,
@@ -185,6 +208,7 @@ The workspace layer should classify remote task problems explicitly:
 The sidebar should hide stale duplicates, but the task detail can show actionable errors for a selected remote-only task.
 Stale snapshots that match locally closed tasks should be suppressed from active lists.
 Remote-only tasks whose owner is offline may remain visible with mutating actions disabled.
+LAN availability and cloud subscription errors should be shown as route-specific limitations, not as task model failures.
 
 ## Testing Strategy
 
@@ -196,6 +220,8 @@ Add focused unit tests for the workspace builder:
 - local plus cloud copy dedupes to one local-owned task;
 - local plus LAN copy dedupes to one local-owned task;
 - cloud plus LAN copy dedupes by owner and owner-local task id;
+- matching LAN and cloud copies produce one task with LAN preferred while reachable;
+- cloud subscription inactive disables cloud-only actions but leaves LAN-backed tasks usable;
 - stale open remote snapshot matching a locally closed task is hidden;
 - remote tasks group under matching local repos by remote URL hash;
 - remote-only repos are created when no local repo matches;
@@ -208,6 +234,8 @@ Add E2E sanity suites for real wiring:
 - closing local task removes or hides it remotely;
 - stale offline cloud snapshot does not appear;
 - two trusted LAN desktops: create task on one desktop, it appears once locally and once remotely;
+- trusted LAN task visibility works without cloud sign-in;
+- when both cloud and LAN advertise the same task, the sidebar shows one task;
 - LAN remote terminal can stream;
 - keyboard navigation reaches remote tasks exactly once;
 - New Task modal works from a remote-only repo by listing base branches and cloning/importing before creation.
@@ -236,16 +264,20 @@ Make missing sessions and offline owners produce structured workspace errors.
 
 ### Phase 5: Cloud/LAN Transfer Expansion
 
-After workspace semantics are stable, build richer cloud transfer and mobile parity on top of the same task model.
+After workspace semantics are stable, build richer transfer and mobile parity on top of the same task model.
+LAN transfer and LAN task control remain the free baseline.
+Cloud transfer and remote cloud control are paid transports layered onto the same workspace capabilities.
 
 ## Success Criteria
 
 - A task created locally while signed in appears once in the owner desktop sidebar.
 - The same task appears once in another signed-in desktop sidebar.
 - A task discovered by trusted LAN appears once in the peer sidebar.
+- Trusted LAN task visibility and terminal access work without sign-in or subscription.
+- Cloud-only task visibility and control are gated by cloud account and subscription state.
+- If LAN and cloud both expose the same task, the UI shows one task and chooses the best available route.
 - Local and remote tasks from the same repo group together.
 - Keyboard navigation, task selection, and terminal opening work across local and remote tasks.
 - Task actions are enabled or disabled from capabilities, not transport-specific component checks.
 - E2E tests cover cloud and LAN sanity paths and prevent duplicate sidebar regressions.
 - `App.vue` no longer owns task-source merge and dedupe policy.
-
