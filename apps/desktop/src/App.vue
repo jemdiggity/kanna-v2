@@ -46,6 +46,7 @@ import { isTopModal } from "./composables/useModalZIndex";
 import { selectTaskByActivity } from "./utils/selectTaskByActivity";
 import { getDefaultBaseBranch } from "./utils/baseBranchPicker";
 import { hashRemoteUrl } from "./utils/cloudTaskSnapshot";
+import { remoteTaskClosureAliases, remoteTaskIsLocallyClosed } from "./utils/remoteTaskIdentity";
 import { parseRepoInput } from "./utils/parseRepoInput";
 import { defaultReposHome } from "./utils/reposHome";
 import { buildWorkspace } from "./workspace/buildWorkspace";
@@ -217,10 +218,15 @@ const localReposForCloudMatching = computedAsync(async () => {
 const remoteSnapshot = computed<DesktopCloudSnapshot>(() => ({
   repos: [...cloudSnapshot.value.repos, ...lanSnapshot.value.repos],
   items: [...cloudSnapshot.value.items, ...lanSnapshot.value.items]
-    .filter((item) => !locallyClosedRemoteTaskIds.value.has(item.id)),
+    .filter((item) => {
+      const terminalRef = cloudSnapshot.value.terminalRefs[item.id] ?? lanSnapshot.value.terminalRefs[item.id];
+      return !remoteTaskIsLocallyClosed(item, terminalRef, locallyClosedRemoteTaskIds.value);
+    }),
   terminalRefs: Object.fromEntries(
     Object.entries({ ...cloudSnapshot.value.terminalRefs, ...lanSnapshot.value.terminalRefs })
-      .filter(([taskId]) => !locallyClosedRemoteTaskIds.value.has(taskId)),
+      .filter(([taskId, ref]) =>
+        !remoteTaskIsLocallyClosed({ id: taskId }, ref, locallyClosedRemoteTaskIds.value),
+      ),
   ),
 }));
 const workspace = computed(() => buildWorkspace({
@@ -297,9 +303,13 @@ function filterClosedRemoteSnapshot(snapshot: DesktopCloudSnapshot): DesktopClou
   if (closedIds.size === 0) return snapshot;
   return {
     repos: snapshot.repos,
-    items: snapshot.items.filter((item) => !closedIds.has(item.id)),
+    items: snapshot.items.filter((item) =>
+      !remoteTaskIsLocallyClosed(item, snapshot.terminalRefs[item.id], closedIds),
+    ),
     terminalRefs: Object.fromEntries(
-      Object.entries(snapshot.terminalRefs).filter(([taskId]) => !closedIds.has(taskId)),
+      Object.entries(snapshot.terminalRefs).filter(([taskId, ref]) =>
+        !remoteTaskIsLocallyClosed({ id: taskId }, ref, closedIds),
+      ),
     ),
   };
 }
@@ -1184,11 +1194,18 @@ async function closeSelectedWorkspaceTask() {
       desktopId: remoteRef.ownerDesktopId,
       taskId: remoteRef.ownerLocalTaskId,
     });
+    const closedAliases = new Set<string>();
+    for (const source of workspaceTask.sources) {
+      for (const alias of remoteTaskClosureAliases({ id: source.taskId }, source.terminalRef)) {
+        closedAliases.add(alias);
+      }
+    }
+    for (const alias of remoteTaskClosureAliases(workspaceTask.item, remoteRef)) {
+      closedAliases.add(alias);
+    }
     locallyClosedRemoteTaskIds.value = new Set([
       ...locallyClosedRemoteTaskIds.value,
-      workspaceTask.item.id,
-      ...workspaceTask.remoteTaskIds,
-      ...workspaceTask.sources.map((source) => source.taskId),
+      ...closedAliases,
     ]);
     if (selectedCloudItemId.value && locallyClosedRemoteTaskIds.value.has(selectedCloudItemId.value)) {
       selectedCloudItemId.value = null;
