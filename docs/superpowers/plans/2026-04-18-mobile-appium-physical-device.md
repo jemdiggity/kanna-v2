@@ -53,7 +53,7 @@ it("builds real-device capabilities with the selected UDID", () => {
   expect(
     createPhysicalDeviceCapabilities({
       appiumPort: 4723,
-      bundleId: "build.kanna.mobile",
+      bundleId: "build.kanna.app",
       deviceName: "Jeremy's iPhone",
       deviceUdid: "00008110-001234560E10801E"
     })
@@ -62,7 +62,7 @@ it("builds real-device capabilities with the selected UDID", () => {
     "appium:automationName": "XCUITest",
     "appium:udid": "00008110-001234560E10801E",
     "appium:deviceName": "Jeremy's iPhone",
-    "appium:bundleId": "build.kanna.mobile",
+    "appium:bundleId": "build.kanna.app",
     "appium:wdaLocalPort": 4724
   });
 });
@@ -136,7 +136,7 @@ const target = env.KANNA_IOS_E2E_TARGET?.trim() === "device" ? "device" : "simul
 
 return {
   appiumPort,
-  bundleId: env.KANNA_IOS_BUNDLE_ID?.trim() || "build.kanna.mobile",
+  bundleId: env.KANNA_IOS_BUNDLE_ID?.trim() || "build.kanna.app",
   desktopServerUrl,
   target,
   deviceName: env.KANNA_IOS_SIMULATOR_NAME?.trim() || undefined,

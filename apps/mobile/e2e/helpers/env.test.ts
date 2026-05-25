@@ -31,7 +31,7 @@ describe("resolveRequiredMobileE2eEnv", () => {
     ).toMatchObject({
       appiumPort: 4723,
       metroPort: 1430,
-      bundleId: "build.kanna.mobile",
+      bundleId: "build.kanna.app",
       desktopServerUrl: "http://127.0.0.1:48120"
     });
   });
@@ -79,7 +79,7 @@ describe("resolveRequiredMobileE2eEnv", () => {
     ).toMatchObject({
       xcodeOrgId: "GY3LFAA59P",
       xcodeSigningId: "Apple Development",
-      updatedWdaBundleId: "build.kanna.mobile.webdriveragentrunner"
+      updatedWdaBundleId: "build.kanna.app.webdriveragentrunner"
     });
   });
 });
