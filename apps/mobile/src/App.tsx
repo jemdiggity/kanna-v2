@@ -40,7 +40,9 @@ export default function App() {
   );
   const { controller, navigator } = model;
   const [accountSheetVisible, setAccountSheetVisible] = useState(false);
-  const taskDetailVisible = isTaskDetailVisible(state.selectedTaskId, state.activeView);
+  const taskDetailVisible =
+    state.connectionState === "connected" &&
+    isTaskDetailVisible(state.selectedTaskId, state.activeView);
 
   useEffect(() => {
     void model.initialize();
@@ -70,7 +72,7 @@ export default function App() {
     state.searchResults.find((task) => task.id === state.selectedTaskId) ??
     null;
   const mainContent = (() => {
-    if (state.connectionState !== "connected") {
+    if (state.connectionState !== "connected" && state.activeView === "tasks") {
       return (
         <ConnectionScreen
           auth={state.auth}
@@ -208,7 +210,8 @@ export default function App() {
           </View>
         ) : null}
 
-        {state.connectionState === "connected" && !taskDetailVisible ? (
+        {(state.connectionState === "connected" || state.activeView !== "tasks") &&
+        !taskDetailVisible ? (
           <View style={styles.topBar}>
             <Text numberOfLines={1} style={styles.topBarTitle}>
               {shellTitle}

@@ -1000,12 +1000,12 @@ async fn read_initial_task_terminal_event(
             DaemonEvent::Snapshot { snapshot, .. } => {
                 return Ok(snapshot_output_event(task_id, snapshot));
             }
-            DaemonEvent::Exit {
-                code, ..
-            } => return Ok(Some(TaskTerminalStreamEvent::Exit {
-                task_id: task_id.to_string(),
-                code,
-            })),
+            DaemonEvent::Exit { code, .. } => {
+                return Ok(Some(TaskTerminalStreamEvent::Exit {
+                    task_id: task_id.to_string(),
+                    code,
+                }))
+            }
             DaemonEvent::Error {
                 code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
                 ..
@@ -1038,7 +1038,7 @@ fn daemon_event_to_task_terminal_event(
 ) -> Option<TaskTerminalStreamEvent> {
     match event {
         DaemonEvent::Output { data, .. } => {
-            let text = strip_ansi_for_mobile(&String::from_utf8_lossy(&data));
+            let text = String::from_utf8_lossy(&data).to_string();
             if text.is_empty() {
                 return None;
             }
@@ -1048,9 +1048,7 @@ fn daemon_event_to_task_terminal_event(
                 text,
             })
         }
-        DaemonEvent::Exit {
-            code, ..
-        } => Some(TaskTerminalStreamEvent::Exit {
+        DaemonEvent::Exit { code, .. } => Some(TaskTerminalStreamEvent::Exit {
             task_id: task_id.to_string(),
             code,
         }),
@@ -1066,7 +1064,7 @@ fn snapshot_output_event(
     task_id: &str,
     snapshot: kanna_daemon::protocol::TerminalSnapshot,
 ) -> Option<TaskTerminalStreamEvent> {
-    let text = strip_ansi_for_mobile(&snapshot.vt);
+    let text = snapshot.vt;
     if text.is_empty() {
         return None;
     }
@@ -1105,62 +1103,6 @@ async fn send_task_terminal_event(
         .send(WebSocketMessage::Text(json.into()))
         .await
         .map_err(|_| ())
-}
-
-fn strip_ansi_for_mobile(input: &str) -> String {
-    let mut result = String::with_capacity(input.len());
-    let bytes = input.as_bytes();
-    let len = bytes.len();
-    let mut i = 0;
-
-    while i < len {
-        match bytes[i] {
-            0x1b => {
-                i += 1;
-                if i >= len {
-                    break;
-                }
-                match bytes[i] {
-                    b'[' => {
-                        i += 1;
-                        while i < len && !bytes[i].is_ascii_alphabetic() {
-                            i += 1;
-                        }
-                        if i < len {
-                            let cmd = bytes[i];
-                            i += 1;
-                            match cmd {
-                                b'B' => result.push('\n'),
-                                b'C' => result.push(' '),
-                                _ => {}
-                            }
-                        }
-                    }
-                    b']' => {
-                        i += 1;
-                        while i < len {
-                            if bytes[i] == 0x07 {
-                                i += 1;
-                                break;
-                            }
-                            if bytes[i] == 0x1b && i + 1 < len && bytes[i + 1] == b'\\' {
-                                i += 2;
-                                break;
-                            }
-                            i += 1;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            byte => {
-                result.push(byte as char);
-                i += 1;
-            }
-        }
-    }
-
-    result
 }
 
 pub fn router(state: Arc<AppState>) -> Router {
@@ -3121,13 +3063,7 @@ mod tests {
             "2026-05-11 10:00:00",
         )
         .unwrap();
-        db.insert_test_terminal_session(
-            "terminal-1",
-            "repo-1",
-            "task-1",
-            "agent",
-            "daemon-task-1",
-        )
+        db.insert_test_terminal_session("terminal-1", "repo-1", "task-1", "agent", "daemon-task-1")
             .unwrap();
         let app = super::router(Arc::new(super::AppState::new(config)));
 
@@ -3187,6 +3123,50 @@ mod tests {
             super::TaskTerminalStreamEvent::Output { task_id, text } => {
                 assert_eq!(task_id, "task-1");
                 assert_eq!(text, "hello from snapshot");
+            }
+            other => panic!("expected output event, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn snapshot_output_event_preserves_terminal_control_sequences_for_xterm() {
+        let snapshot = kanna_daemon::protocol::TerminalSnapshot {
+            version: 1,
+            rows: 24,
+            cols: 80,
+            cursor_row: 1,
+            cursor_col: 0,
+            cursor_visible: true,
+            saved_at: 0,
+            sequence: 0,
+            vt: "\u{1b}[2KThinking\u{1b}[1Bstill same terminal frame".to_string(),
+        };
+
+        let event = super::snapshot_output_event("task-1", snapshot)
+            .expect("expected snapshot to produce an output event");
+
+        match event {
+            super::TaskTerminalStreamEvent::Output { text, .. } => {
+                assert_eq!(text, "\u{1b}[2KThinking\u{1b}[1Bstill same terminal frame");
+            }
+            other => panic!("expected output event, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn live_terminal_output_preserves_terminal_control_sequences_for_xterm() {
+        let event = super::daemon_event_to_task_terminal_event(
+            "task-1",
+            kanna_daemon::protocol::Event::Output {
+                session_id: "task-1".to_string(),
+                data: b"\x1b[2KThinking\x1b[1Bstill same terminal frame".to_vec(),
+            },
+        )
+        .expect("expected output event");
+
+        match event {
+            super::TaskTerminalStreamEvent::Output { text, .. } => {
+                assert_eq!(text, "\u{1b}[2KThinking\u{1b}[1Bstill same terminal frame");
             }
             other => panic!("expected output event, got {:?}", other),
         }

@@ -15,6 +15,9 @@ describe("buildTerminalDocument", () => {
     expect(html).toContain('id="viewport"');
     expect(html).toContain('id="terminal-root"');
     expect(html).toContain("padding-bottom: 132px;");
+    expect(html).toContain("overflow-x: auto;");
+    expect(html).toContain("const TERMINAL_COLS = 220;");
+    expect(html).toContain("term.resize(TERMINAL_COLS, proposed.rows)");
     expect(html).toContain("const term = new TerminalCtor(");
     expect(html).toContain("new FitAddonCtor()");
     expect(html).toContain("term.open(root)");
@@ -36,6 +39,13 @@ describe("buildTerminalDocument", () => {
     expect(script).toContain("╭── Claude Code ──╮");
     expect(script).not.toContain("â­");
     expect(script).toContain("window.__replaceTerminalState");
+  });
+
+  it("repairs utf-8 spinner text that arrived as latin-1 mojibake in append scripts", () => {
+    const script = buildTerminalAppendScript("â  Thinking\n");
+
+    expect(script).toContain("⠋ Thinking\\n");
+    expect(script).not.toContain("â ");
   });
 
   it("renders terminal status copy when no output is available", () => {

@@ -434,5 +434,5 @@ function mapCreatedTask(response: CreateTaskResponse): TaskSummary {
 }
 
 function normalizeSubmittedInput(input: string): string {
-  return input.endsWith("\n") ? input : `${input}\n`;
+  return input.endsWith("\r") ? input : `${input}\r`;
 }

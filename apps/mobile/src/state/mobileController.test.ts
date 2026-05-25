@@ -602,7 +602,7 @@ describe("createMobileController", () => {
     await controller.bootstrap();
     await controller.sendTaskInput("task-1", "continue");
 
-    expect(client.sendTaskInput).toHaveBeenCalledWith("task-1", "continue\n");
+    expect(client.sendTaskInput).toHaveBeenCalledWith("task-1", "continue\r");
   });
 
   it("closes the selected desktop task and clears the mobile task view", async () => {

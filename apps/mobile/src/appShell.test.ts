@@ -19,7 +19,8 @@ describe("shouldShowFloatingToolbar", () => {
     expect(shouldShowFloatingToolbar("connected", "task-1", "tasks")).toBe(false);
     expect(shouldShowFloatingToolbar("connected", "task-1", "more")).toBe(true);
     expect(shouldShowFloatingToolbar("connected", null, "tasks")).toBe(true);
-    expect(shouldShowFloatingToolbar("idle", null, "tasks")).toBe(false);
+    expect(shouldShowFloatingToolbar("idle", null, "tasks")).toBe(true);
+    expect(shouldShowFloatingToolbar("idle", "task-1", "tasks")).toBe(true);
   });
 });
 
