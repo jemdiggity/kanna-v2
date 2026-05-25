@@ -1082,4 +1082,3 @@ git commit -m "fix: stabilize workspace task model integration"
 ```
 
 Expected: commit succeeds only if there are new changes.
-

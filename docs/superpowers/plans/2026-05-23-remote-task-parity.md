@@ -1154,4 +1154,3 @@ git status --short
 ```
 
 Expected: no whitespace errors; status only contains intentional branch work.
-
