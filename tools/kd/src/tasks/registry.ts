@@ -99,7 +99,8 @@ const releaseShipInputSchema = z.object({
 });
 
 const cloudDeployInputSchema = z.object({
-  production: z.boolean().default(false)
+  production: z.boolean().default(false),
+  relay: z.boolean().default(false)
 });
 
 export interface ExecutorInput {
@@ -582,7 +583,8 @@ export const taskDefinitions = [
           repoRoot: context.repoRoot,
           env: context.env,
           runner: nodeCommandRunner,
-          production: parsed.production
+          production: parsed.production,
+          relay: parsed.relay
         });
         return { ok: true, message: formatJsonResult(result), data: result };
       } catch (error) {

@@ -256,7 +256,11 @@ describe("kd CLI", () => {
     });
     expect(parseCliArgs(["cloud", "deploy", "--production"])).toEqual({
       taskId: "cloud.deploy",
-      input: { production: true }
+      input: { production: true, relay: false }
+    });
+    expect(parseCliArgs(["cloud", "deploy", "--production", "--relay"])).toEqual({
+      taskId: "cloud.deploy",
+      input: { production: true, relay: true }
     });
   });
 });

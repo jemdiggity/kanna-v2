@@ -384,8 +384,7 @@ export async function resolveDesktopRelayUrl(): Promise<string | null> {
   const port = await invoke<string>("read_env_var", { name: "KANNA_RELAY_PORT" }).catch(() => "");
   if (port.trim()) return `ws://127.0.0.1:${port.trim()}`;
 
-  if (import.meta.env.DEV) return null;
-  return "wss://kanna-relay.run.app";
+  return null;
 }
 
 function parseJsonRecord(raw: string): Record<string, unknown> | null {

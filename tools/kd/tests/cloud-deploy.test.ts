@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  deployRelayCloud,
   deployFirebaseCloud,
   resolveProductionFirebaseProject
 } from "../src/runtime/cloud-deploy";
@@ -91,6 +92,107 @@ describe("cloud deploy runtime", () => {
             "--project",
             "prod-project",
             "--force"
+          ],
+          cwd: repoRoot
+        }
+      ]);
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("deploys the relay to Cloud Run and returns the wss URL", async () => {
+    const repoRoot = mkdtempSync(join(tmpdir(), "kd-cloud-deploy-"));
+    const calls: Array<{ command: string; args: string[]; cwd?: string }> = [];
+    const runner: CommandRunner = {
+      async run(command, args, options) {
+        calls.push({ command, args, cwd: options?.cwd });
+        if (command === "gcloud" && args.includes("services") && args.includes("describe")) {
+          return {
+            exitCode: 0,
+            stdout: "https://kanna-relay-abc-uc.a.run.app\n",
+            stderr: ""
+          };
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+    };
+
+    try {
+      const result = await deployRelayCloud({
+        repoRoot,
+        env: {
+          KANNA_FIREBASE_PRODUCTION_PROJECT: "prod-project",
+          KANNA_CLOUD_RUN_REGION: "us-east1"
+        },
+        runner,
+        production: true
+      });
+
+      expect(result).toEqual({
+        projectId: "prod-project",
+        serviceName: "kanna-relay",
+        region: "us-east1",
+        image: "gcr.io/prod-project/kanna-relay",
+        serviceUrl: "https://kanna-relay-abc-uc.a.run.app",
+        relayUrl: "wss://kanna-relay-abc-uc.a.run.app"
+      });
+      expect(calls).toEqual([
+        {
+          command: "pnpm",
+          args: ["--dir", "services/relay", "build"],
+          cwd: repoRoot
+        },
+        {
+          command: "gcloud",
+          args: [
+            "builds",
+            "submit",
+            ".",
+            "--project",
+            "prod-project",
+            "--config",
+            "services/relay/cloudbuild.yaml",
+            "--substitutions",
+            "_IMAGE=gcr.io/prod-project/kanna-relay"
+          ],
+          cwd: repoRoot
+        },
+        {
+          command: "gcloud",
+          args: [
+            "run",
+            "deploy",
+            "kanna-relay",
+            "--project",
+            "prod-project",
+            "--image",
+            "gcr.io/prod-project/kanna-relay",
+            "--region",
+            "us-east1",
+            "--platform",
+            "managed",
+            "--allow-unauthenticated",
+            "--set-env-vars",
+            "FIREBASE_PROJECT_ID=prod-project"
+          ],
+          cwd: repoRoot
+        },
+        {
+          command: "gcloud",
+          args: [
+            "run",
+            "services",
+            "describe",
+            "kanna-relay",
+            "--project",
+            "prod-project",
+            "--region",
+            "us-east1",
+            "--platform",
+            "managed",
+            "--format",
+            "value(status.url)"
           ],
           cwd: repoRoot
         }

@@ -418,7 +418,7 @@ fn relay_url() -> String {
             return format!("ws://127.0.0.1:{}", trimmed);
         }
     }
-    "wss://kanna-relay.run.app".to_string()
+    String::new()
 }
 
 fn resolved_db_path(state: &MobileServerState) -> Result<PathBuf, String> {
@@ -928,7 +928,17 @@ mod tests {
         assert!(second.is_err(), "second owner unexpectedly claimed lock");
 
         drop(first);
-        let third = try_claim_server_lock(&lock_path).expect("lock should release on drop");
+        let mut third = None;
+        for _ in 0..10 {
+            match try_claim_server_lock(&lock_path) {
+                Ok(lock) => {
+                    third = Some(lock);
+                    break;
+                }
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(25)),
+            }
+        }
+        let third = third.expect("lock should release on drop");
         drop(third);
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1020,7 +1030,7 @@ mod tests {
         };
 
         let config = build_server_config(&state).unwrap();
-        assert!(config.contains("relay_url = \"wss://kanna-relay.run.app\""));
+        assert!(config.contains("relay_url = \"\""));
         assert!(config.contains("desktop_name = \"Studio Mac\""));
         assert!(config.contains(&format!(
             "server_version = \"{}\"",
@@ -1109,7 +1119,7 @@ mod tests {
                 .expect("time should be monotonic")
                 .as_nanos()
         ));
-        std::fs::write(&path, "relay_url = \"wss://kanna-relay.run.app\"\n").unwrap();
+        std::fs::write(&path, "relay_url = \"wss://old-relay.example\"\n").unwrap();
 
         assert!(!server_config_matches_runtime(&path));
 

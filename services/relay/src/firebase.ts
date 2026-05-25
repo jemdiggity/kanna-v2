@@ -18,11 +18,12 @@ export function getFirebaseServices(): { auth: Auth; db: Firestore } {
   }
 
   if (!app) {
-    app = initializeApp({
-      credential: cert(
-        JSON.parse(process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON || "{}")
-      ),
-    });
+    const credentialsJson = process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON?.trim();
+    app = credentialsJson
+      ? initializeApp({
+          credential: cert(JSON.parse(credentialsJson)),
+        })
+      : initializeApp();
     auth = getAuth(app);
     db = getFirestore(app);
   }
