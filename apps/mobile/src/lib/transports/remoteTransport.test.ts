@@ -326,6 +326,8 @@ describe("remote transport", () => {
     expect(transport.observeTaskTerminal("cloud-task-1", listener)).toBe(subscription);
     await expect(transport.sendTaskInput("cloud-task-1", "continue")).resolves.toBeUndefined();
     await expect(transport.closeTask("cloud-task-1")).resolves.toBeUndefined();
+    await expect(transport.runMergeAgent("cloud-task-1")).resolves.toBeNull();
+    await expect(transport.advanceTaskStage("cloud-task-1")).resolves.toBeNull();
 
     expect(observeTaskTerminal).toHaveBeenCalledWith(
       {
@@ -344,6 +346,18 @@ describe("remote transport", () => {
       desktopId: "desktop-owner",
       method: "POST",
       path: "/v1/tasks/local-task-1/actions/close",
+      body: null
+    });
+    expect(invokeDesktop).toHaveBeenNthCalledWith(3, {
+      desktopId: "desktop-owner",
+      method: "POST",
+      path: "/v1/tasks/local-task-1/actions/run-merge-agent",
+      body: null
+    });
+    expect(invokeDesktop).toHaveBeenNthCalledWith(4, {
+      desktopId: "desktop-owner",
+      method: "POST",
+      path: "/v1/tasks/local-task-1/actions/advance-stage",
       body: null
     });
   });
