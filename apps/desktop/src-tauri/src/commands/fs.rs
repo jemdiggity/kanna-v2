@@ -285,35 +285,36 @@ pub fn which_binary(name: String) -> Result<String, String> {
     resolve_binary_from_candidates(&name, sidecar_candidates(&name))
 }
 
-fn requires_instance_local_sidecar(name: &str) -> bool {
-    name == "kanna-cli"
+fn resolve_binary_from_candidates(name: &str, candidates: Vec<PathBuf>) -> Result<String, String> {
+    resolve_binary_from_candidates_with_path_lookup(name, candidates, |name| {
+        let output = Command::new("which")
+            .arg(name)
+            .output()
+            .map_err(|e| format!("failed to run which: {}", e))?;
+
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        } else {
+            Err(format!("binary '{}' not found in PATH", name))
+        }
+    })
 }
 
-fn resolve_binary_from_candidates(name: &str, candidates: Vec<PathBuf>) -> Result<String, String> {
+fn resolve_binary_from_candidates_with_path_lookup<F>(
+    name: &str,
+    candidates: Vec<PathBuf>,
+    path_lookup: F,
+) -> Result<String, String>
+where
+    F: FnOnce(&str) -> Result<String, String>,
+{
     for candidate in candidates {
         if candidate.exists() {
             return Ok(candidate.to_string_lossy().to_string());
         }
     }
 
-    if requires_instance_local_sidecar(name) {
-        return Err(format!(
-            "instance-local binary '{}' not found; run ./kd build sidecars",
-            name
-        ));
-    }
-
-    // Fall back to PATH
-    let output = Command::new("which")
-        .arg(name)
-        .output()
-        .map_err(|e| format!("failed to run which: {}", e))?;
-
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-    } else {
-        Err(format!("binary '{}' not found in PATH", name))
-    }
+    path_lookup(name)
 }
 
 pub fn current_target_triple() -> &'static str {
@@ -439,8 +440,8 @@ pub fn append_log(message: String) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        current_target_triple, format_log_timestamp, requires_instance_local_sidecar,
-        resolve_binary_from_candidates, sidecar_candidates_for_exe,
+        current_target_triple, format_log_timestamp,
+        resolve_binary_from_candidates_with_path_lookup, sidecar_candidates_for_exe,
     };
     use chrono::{Duration, FixedOffset, TimeZone};
     use std::path::Path;
@@ -498,18 +499,27 @@ mod tests {
     }
 
     #[test]
-    fn kanna_cli_requires_instance_local_sidecar() {
-        assert!(requires_instance_local_sidecar("kanna-cli"));
-        assert!(!requires_instance_local_sidecar("claude"));
-        assert!(!requires_instance_local_sidecar("codex"));
+    fn kanna_cli_prefers_instance_local_sidecar_when_available() {
+        let resolved = resolve_binary_from_candidates_with_path_lookup(
+            "kanna-cli",
+            vec![Path::new("/bin/sh").to_path_buf()],
+            |_| Ok("/global/kanna-cli".to_string()),
+        )
+        .expect("existing sidecar candidate should resolve");
+
+        assert_eq!(resolved, "/bin/sh");
     }
 
     #[test]
-    fn kanna_cli_does_not_fallback_to_path() {
-        let error = resolve_binary_from_candidates("kanna-cli", Vec::new())
-            .expect_err("kanna-cli should require a current-instance sidecar");
+    fn kanna_cli_can_fallback_to_path_when_instance_local_sidecar_is_missing() {
+        let resolved = resolve_binary_from_candidates_with_path_lookup(
+            "kanna-cli",
+            Vec::new(),
+            |_| Ok("/global/kanna-cli".to_string()),
+        )
+        .expect("PATH fallback should resolve");
 
-        assert!(error.contains("instance-local binary 'kanna-cli' not found"));
+        assert_eq!(resolved, "/global/kanna-cli");
     }
 }
 
