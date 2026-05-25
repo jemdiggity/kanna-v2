@@ -19,6 +19,7 @@ const exposedTools = [
   ["build_desktop", "build.desktop"],
   ["build_sidecars", "build.sidecars"],
   ["release_ship", "release.ship"],
+  ["cloud_deploy", "cloud.deploy"],
   ["pages_build_schema", "pages.build-schema"],
   ["test_app_update_bundle", "test.app-update-bundle"],
   ["emulators_up", "emulators.up"],

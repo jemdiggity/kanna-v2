@@ -15,6 +15,7 @@ export interface CreateInstanceConfigInput {
   devPortEnvValue: number;
   effectiveWebDriverPort: number;
   env: Record<string, string>;
+  mobileServerPortEnvValue: number;
   sessionName: string;
   transferPortEnvValue: number;
   webDriverPortEnvValue: number;

@@ -18,7 +18,7 @@ function device(name: string, udid: string): AvailablePhysicalDevice {
 describe("selectPhysicalDevice", () => {
   it("builds the install command with the selected Metro port", () => {
     expect(buildPhysicalDeviceInstallCommand("00008130-001015CA1091401C", 1430)).toBe(
-      "pnpm --dir apps/mobile ios --device 00008130-001015CA1091401C --port 1430 --no-bundler"
+      "RCT_METRO_PORT=1430 pnpm --dir apps/mobile ios --device 00008130-001015CA1091401C --no-bundler"
     );
   });
 

@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useSyncExternalStore } from "react";
+import React, { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import {
   AppState,
   type AppStateStatus,
@@ -7,9 +7,15 @@ import {
   Text,
   View
 } from "react-native";
-import { isTaskDetailVisible, shouldShowFloatingToolbar } from "./appShell";
+import {
+  getShellTitle,
+  isTaskDetailVisible,
+  shouldShowFloatingToolbar
+} from "./appShell";
 import { shouldRefreshOnAppStateTransition } from "./appLifecycle";
 import { createAppModel, type AppModel } from "./appModel";
+import { AccountBadge } from "./components/AccountBadge";
+import { AccountSheet } from "./components/AccountSheet";
 import { FloatingToolbar } from "./components/FloatingToolbar";
 import { CreateTaskComposer } from "./components/CreateTaskComposer";
 import { MOBILE_E2E_IDS } from "./e2eTestIds";
@@ -33,7 +39,10 @@ export default function App() {
     model.sessionStore.getState
   );
   const { controller, navigator } = model;
-  const taskDetailVisible = isTaskDetailVisible(state.selectedTaskId, state.activeView);
+  const [accountSheetVisible, setAccountSheetVisible] = useState(false);
+  const taskDetailVisible =
+    state.connectionState === "connected" &&
+    isTaskDetailVisible(state.selectedTaskId, state.activeView);
 
   useEffect(() => {
     void model.initialize();
@@ -63,7 +72,7 @@ export default function App() {
     state.searchResults.find((task) => task.id === state.selectedTaskId) ??
     null;
   const mainContent = (() => {
-    if (state.connectionState !== "connected") {
+    if (state.connectionState !== "connected" && state.activeView === "tasks") {
       return (
         <ConnectionScreen
           auth={state.auth}
@@ -136,6 +145,7 @@ export default function App() {
         return (
           <MoreScreen
             pairingCode={state.pairingCode}
+            refreshStatus={state.refreshStatus}
             selectedTask={selectedTask}
             onRefresh={() => {
               void controller.refresh();
@@ -177,8 +187,9 @@ export default function App() {
     switch (state.activeView) {
       case "recent":
         return "recent";
-      case "more":
       case "desktops":
+        return "desktops";
+      case "more":
         return "more";
       case "search":
       case "tasks":
@@ -186,6 +197,7 @@ export default function App() {
         return "tasks";
     }
   })();
+  const shellTitle = getShellTitle(state.activeView);
 
   return (
     <SafeAreaView style={styles.safeArea} testID={MOBILE_E2E_IDS.appShell}>
@@ -195,6 +207,19 @@ export default function App() {
         {state.errorMessage && state.connectionState === "connected" && !taskDetailVisible ? (
           <View style={styles.errorBanner}>
             <Text style={styles.errorText}>{state.errorMessage}</Text>
+          </View>
+        ) : null}
+
+        {(state.connectionState === "connected" || state.activeView !== "tasks") &&
+        !taskDetailVisible ? (
+          <View style={styles.topBar}>
+            <Text numberOfLines={1} style={styles.topBarTitle}>
+              {shellTitle}
+            </Text>
+            <AccountBadge
+              auth={state.auth}
+              onPress={() => setAccountSheetVisible(true)}
+            />
           </View>
         ) : null}
 
@@ -235,6 +260,17 @@ export default function App() {
             void controller.createTask();
           }}
         />
+        <AccountSheet
+          auth={state.auth}
+          visible={accountSheetVisible}
+          onClose={() => setAccountSheetVisible(false)}
+          onSignIn={(email, password) => {
+            void controller.signInWithEmailPassword(email, password);
+          }}
+          onSignOut={() => {
+            void controller.signOut();
+          }}
+        />
       </View>
     </SafeAreaView>
   );
@@ -273,6 +309,19 @@ const styles = StyleSheet.create({
   shellTaskDetail: {
     paddingHorizontal: 0,
     paddingTop: 0
+  },
+  topBar: {
+    alignItems: "center",
+    flexDirection: "row",
+    gap: 14,
+    justifyContent: "space-between",
+    marginBottom: 18
+  },
+  topBarTitle: {
+    color: "#F5F7FB",
+    flex: 1,
+    fontSize: 30,
+    fontWeight: "800"
   },
   errorBanner: {
     backgroundColor: "rgba(97, 33, 36, 0.38)",

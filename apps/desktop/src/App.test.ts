@@ -46,6 +46,7 @@ function createDeferred<T>(): Deferred<T> {
 const listenHandlers = new Map<string, (event: unknown) => void | Promise<void>>();
 const currentWebviewWindowListenHandlers = new Map<string, (event: unknown) => void | Promise<void>>();
 let closeRequestedHandler: ((event: { preventDefault: () => void }) => void | Promise<void>) | null = null;
+const cloudTasksMock = vi.hoisted(() => vi.fn(async () => ({ repos: [], items: [] })));
 const dbSelectMock = vi.fn(async () => []);
 const dbMock = {
   select: dbSelectMock,
@@ -278,6 +279,23 @@ vi.mock("./composables/useToast", () => ({
     info: toastInfoMock,
     warning: toastWarningMock,
   }),
+}));
+
+vi.mock("./services/desktopAuthSdk", () => ({
+  getConfiguredDesktopAuthSession: vi.fn(async () => ({
+    initialize: vi.fn(async () => {}),
+    subscribe: vi.fn((handler: (state: unknown) => void) => {
+      handler({
+        status: "signedIn",
+        user: { uid: "user-1", email: "upvote.sieve.7t@icloud.com" },
+      });
+      return () => {};
+    }),
+  })),
+}));
+
+vi.mock("./services/desktopCloudTaskIndex", () => ({
+  listDesktopCloudTasks: cloudTasksMock,
 }));
 
 vi.mock("./composables/useRestoreFocus", () => ({
@@ -539,6 +557,8 @@ describe("App", () => {
     toastInfoMock.mockClear();
     toastWarningMock.mockClear();
     toastErrorMock.mockClear();
+    cloudTasksMock.mockReset();
+    cloudTasksMock.mockResolvedValue({ repos: [], items: [] });
     appUpdateStartMock.mockClear();
     appUpdateMock.dispose.mockClear();
     appUpdateMock.dismiss.mockClear();
@@ -677,6 +697,266 @@ describe("App", () => {
     wrapper.unmount();
   });
 
+  it("selects cloud sidebar tasks into the main panel", async () => {
+    cloudTasksMock.mockResolvedValue({
+      repos: [{
+        id: "cloud:repo-remote",
+        path: "cloud",
+        name: "Remote Repo",
+        default_branch: "main",
+        hidden: 0,
+        sort_order: 0,
+        created_at: "2026-05-18T00:00:00.000Z",
+        last_opened_at: "2026-05-18T00:00:00.000Z",
+      }],
+      items: [{
+        id: "cloud:repo-remote:task-remote",
+        repo_id: "cloud:repo-remote",
+        prompt: "Remote task",
+        pipeline: "cloud",
+        stage: "in progress",
+        tags: "[]",
+        pr_number: null,
+        pr_url: null,
+        branch: "task-remote",
+        activity: "idle",
+        activity_changed_at: "2026-05-18T00:00:00.000Z",
+        unread_at: null,
+        port_offset: null,
+        port_env: null,
+        pinned: 0,
+        pin_order: null,
+        display_name: "Remote task",
+        issue_number: null,
+        issue_title: null,
+        closed_at: null,
+        agent_session_id: null,
+        base_ref: "origin/main",
+        agent_provider: "codex",
+        agent_type: "pty",
+        previous_stage: null,
+        stage_result: null,
+        teardown_started_at: null,
+        last_output_preview: null,
+        active_post_action: null,
+        created_at: "2026-05-18T00:00:00.000Z",
+        updated_at: "2026-05-18T00:00:00.000Z",
+      }],
+    });
+
+    const SidebarCloudStub = defineComponent({
+      name: "Sidebar",
+      props: {
+        repos: { type: Array, default: () => [] },
+        pipelineItems: { type: Array, default: () => [] },
+      },
+      emits: ["select-repo", "select-item"],
+      template: `
+        <div data-testid="sidebar">
+          <button
+            v-for="item in pipelineItems"
+            :key="item.id"
+            data-testid="cloud-task"
+            type="button"
+            @click="$emit('select-repo', item.repo_id); $emit('select-item', item.id)"
+          >
+            {{ item.display_name }}
+          </button>
+        </div>
+      `,
+    });
+
+    const MainPanelCloudStub = defineComponent({
+      name: "MainPanel",
+      props: {
+        item: Object,
+        repoPath: String,
+      },
+      template: `
+        <div data-testid="main-panel">
+          <span data-testid="main-item-id">{{ item?.id || "" }}</span>
+          <span data-testid="main-repo-path">{{ repoPath || "" }}</span>
+        </div>
+      `,
+    });
+
+    const wrapper = await mountAppWithOverrides(SidebarCloudStub, {
+      MainPanel: MainPanelCloudStub,
+    });
+    await flushPromises();
+    await flushPromises();
+
+    await wrapper.get('[data-testid="cloud-task"]').trigger("click");
+    await flushPromises();
+
+    expect(wrapper.get('[data-testid="main-item-id"]').text()).toBe("cloud:repo-remote:task-remote");
+    expect(wrapper.get('[data-testid="main-repo-path"]').text()).toBe("cloud");
+
+    wrapper.unmount();
+  });
+
+  it("navigates to cloud tasks with keyboard task shortcuts", async () => {
+    store.repos = [];
+    store.selectedRepoId = null;
+    store.selectedItemId = null;
+    store.selectedRepo = null;
+    cloudTasksMock.mockResolvedValue({
+      repos: [{
+        id: "cloud:repo-remote",
+        path: "cloud",
+        name: "Remote Repo",
+        default_branch: "main",
+        hidden: 0,
+        sort_order: 0,
+        created_at: "2026-05-18T00:00:00.000Z",
+        last_opened_at: "2026-05-18T00:00:00.000Z",
+      }],
+      items: [{
+        id: "cloud:repo-remote:task-remote",
+        repo_id: "cloud:repo-remote",
+        prompt: "Remote task",
+        pipeline: "cloud",
+        stage: "in progress",
+        tags: "[]",
+        pr_number: null,
+        pr_url: null,
+        branch: "task-remote",
+        activity: "idle",
+        activity_changed_at: "2026-05-18T00:00:00.000Z",
+        unread_at: null,
+        port_offset: null,
+        port_env: null,
+        pinned: 0,
+        pin_order: null,
+        display_name: "Remote task",
+        issue_number: null,
+        issue_title: null,
+        closed_at: null,
+        agent_session_id: null,
+        base_ref: "origin/main",
+        agent_provider: "codex",
+        agent_type: "pty",
+        previous_stage: null,
+        stage_result: null,
+        teardown_started_at: null,
+        last_output_preview: null,
+        active_post_action: null,
+        created_at: "2026-05-18T00:00:00.000Z",
+        updated_at: "2026-05-18T00:00:00.000Z",
+      }],
+    });
+
+    const MainPanelCloudStub = defineComponent({
+      name: "MainPanel",
+      props: {
+        item: Object,
+        repoPath: String,
+      },
+      template: `
+        <div data-testid="main-panel">
+          <span data-testid="main-item-id">{{ item?.id || "" }}</span>
+          <span data-testid="main-repo-path">{{ repoPath || "" }}</span>
+        </div>
+      `,
+    });
+
+    const wrapper = await mountAppWithOverrides(SidebarWithoutRepoStub, {
+      MainPanel: MainPanelCloudStub,
+    });
+    await flushPromises();
+    await flushPromises();
+
+    capturedKeyboardActions?.navigateDown();
+    await flushPromises();
+
+    expect(wrapper.get('[data-testid="main-item-id"]').text()).toBe("cloud:repo-remote:task-remote");
+    expect(wrapper.get('[data-testid="main-repo-path"]').text()).toBe("cloud");
+    expect(store.selectItem).not.toHaveBeenCalledWith("cloud:repo-remote:task-remote", expect.anything());
+
+    wrapper.unmount();
+  });
+
+  it("navigates to cloud repos with keyboard repo shortcuts", async () => {
+    store.repos = [];
+    store.selectedRepoId = null;
+    store.selectedItemId = null;
+    store.selectedRepo = null;
+    cloudTasksMock.mockResolvedValue({
+      repos: [{
+        id: "cloud:repo-remote",
+        path: "cloud",
+        name: "Remote Repo",
+        default_branch: "main",
+        hidden: 0,
+        sort_order: 0,
+        created_at: "2026-05-18T00:00:00.000Z",
+        last_opened_at: "2026-05-18T00:00:00.000Z",
+      }],
+      items: [{
+        id: "cloud:repo-remote:task-remote",
+        repo_id: "cloud:repo-remote",
+        prompt: "Remote task",
+        pipeline: "cloud",
+        stage: "in progress",
+        tags: "[]",
+        pr_number: null,
+        pr_url: null,
+        branch: "task-remote",
+        activity: "idle",
+        activity_changed_at: "2026-05-18T00:00:00.000Z",
+        unread_at: null,
+        port_offset: null,
+        port_env: null,
+        pinned: 0,
+        pin_order: null,
+        display_name: "Remote task",
+        issue_number: null,
+        issue_title: null,
+        closed_at: null,
+        agent_session_id: null,
+        base_ref: "origin/main",
+        agent_provider: "codex",
+        agent_type: "pty",
+        previous_stage: null,
+        stage_result: null,
+        teardown_started_at: null,
+        last_output_preview: null,
+        active_post_action: null,
+        created_at: "2026-05-18T00:00:00.000Z",
+        updated_at: "2026-05-18T00:00:00.000Z",
+      }],
+    });
+
+    const MainPanelCloudStub = defineComponent({
+      name: "MainPanel",
+      props: {
+        item: Object,
+        repoPath: String,
+      },
+      template: `
+        <div data-testid="main-panel">
+          <span data-testid="main-item-id">{{ item?.id || "" }}</span>
+          <span data-testid="main-repo-path">{{ repoPath || "" }}</span>
+        </div>
+      `,
+    });
+
+    const wrapper = await mountAppWithOverrides(SidebarWithoutRepoStub, {
+      MainPanel: MainPanelCloudStub,
+    });
+    await flushPromises();
+    await flushPromises();
+
+    capturedKeyboardActions?.navigateRepoDown();
+    await flushPromises();
+
+    expect(wrapper.get('[data-testid="main-item-id"]').text()).toBe("cloud:repo-remote:task-remote");
+    expect(wrapper.get('[data-testid="main-repo-path"]').text()).toBe("cloud");
+    expect(store.selectRepo).not.toHaveBeenCalledWith("cloud:repo-remote");
+
+    wrapper.unmount();
+  });
+
   it("renders the modal with the preferred existing base branch selected", async () => {
     const wrapper = await mountApp(SidebarWithRepoStub);
 
@@ -704,6 +984,170 @@ describe("App", () => {
 
     expect(toastWarningMock).toHaveBeenCalledWith("toasts.noReposLoaded");
     expect(wrapper.find("textarea").exists()).toBe(false);
+
+    wrapper.unmount();
+  });
+
+  it("opens New Task when only cloud tasks make a repo visible", async () => {
+    store.repos = [];
+    store.selectedRepoId = null;
+    store.selectedRepo = null;
+    cloudTasksMock.mockResolvedValue({
+      repos: [{
+        id: "cloud:repo-remote",
+        path: "cloud",
+        name: "Remote Repo",
+        default_branch: "main",
+        hidden: 0,
+        sort_order: 0,
+        created_at: "2026-05-18T00:00:00.000Z",
+        last_opened_at: "2026-05-18T00:00:00.000Z",
+      }],
+      items: [{
+        id: "cloud:repo-remote:task-remote",
+        repo_id: "cloud:repo-remote",
+        prompt: "Remote task",
+        pipeline: "cloud",
+        stage: "in progress",
+        tags: "[]",
+        pr_number: null,
+        pr_url: null,
+        branch: "task-remote",
+        activity: "idle",
+        activity_changed_at: "2026-05-18T00:00:00.000Z",
+        unread_at: null,
+        port_offset: null,
+        port_env: null,
+        pinned: 0,
+        pin_order: null,
+        display_name: "Remote task",
+        issue_number: null,
+        issue_title: null,
+        closed_at: null,
+        agent_session_id: null,
+        base_ref: "origin/main",
+        agent_provider: "codex",
+        agent_type: "pty",
+        previous_stage: null,
+        stage_result: null,
+        teardown_started_at: null,
+        last_output_preview: null,
+        active_post_action: null,
+        created_at: "2026-05-18T00:00:00.000Z",
+        updated_at: "2026-05-18T00:00:00.000Z",
+      }],
+    });
+
+    const wrapper = await mountApp(SidebarWithoutRepoStub);
+
+    await flushPromises();
+    await flushPromises();
+    capturedKeyboardActions?.newTask();
+    await flushPromises();
+
+    expect(toastWarningMock).not.toHaveBeenCalledWith("toasts.noReposLoaded");
+    expect(wrapper.find("textarea").exists()).toBe(true);
+
+    wrapper.unmount();
+  });
+
+  it("loads remote base branches when opening New Task for a cloud-only repo", async () => {
+    store.repos = [];
+    store.selectedRepoId = null;
+    store.selectedRepo = null;
+    cloudTasksMock.mockResolvedValue({
+      repos: [{
+        id: "cloud:repo-remote",
+        path: "cloud",
+        name: "Remote Repo",
+        remote_url: "git@github.com:jemdiggity/remote-repo.git",
+        default_branch: "main",
+        hidden: 0,
+        sort_order: 0,
+        created_at: "2026-05-18T00:00:00.000Z",
+        last_opened_at: "2026-05-18T00:00:00.000Z",
+      }],
+      items: [],
+    });
+    invokeMock.mockImplementation(async (command: string, args?: { name?: string; remoteUrl?: string }) => {
+      if (command === "git_list_remote_base_branches") return ["origin/main", "origin/release/x"];
+      if (command === "read_env_var") return "/Users/test";
+      if (command === "which_binary" && (args?.name === "claude" || args?.name === "codex")) return true;
+      throw new Error(`unexpected invoke: ${command}`);
+    });
+
+    const wrapper = await mountApp(SidebarWithoutRepoStub);
+
+    await flushPromises();
+    await flushPromises();
+    capturedKeyboardActions?.newTask();
+    await flushPromises();
+    await flushPromises();
+
+    expect(invokeMock).toHaveBeenCalledWith("git_list_remote_base_branches", {
+      remoteUrl: "git@github.com:jemdiggity/remote-repo.git",
+    });
+    expect(wrapper.get('[data-testid="base-branch-value"]').text()).toBe("origin/main");
+
+    wrapper.unmount();
+  });
+
+  it("clones and imports a cloud-only repo before creating a task", async () => {
+    store.repos = [];
+    store.selectedRepoId = null;
+    store.selectedRepo = null;
+    store.cloneAndImportRepo.mockImplementation(async (_url: string, destination: string) => {
+      store.repos = [{ id: "repo-imported", path: destination, name: "remote-repo" }];
+      store.selectedRepoId = "repo-imported";
+      store.selectedRepo = { id: "repo-imported", path: destination, name: "remote-repo" };
+    });
+    cloudTasksMock.mockResolvedValue({
+      repos: [{
+        id: "cloud:repo-remote",
+        path: "cloud",
+        name: "Remote Repo",
+        remote_url: "git@github.com:jemdiggity/remote-repo.git",
+        default_branch: "main",
+        hidden: 0,
+        sort_order: 0,
+        created_at: "2026-05-18T00:00:00.000Z",
+        last_opened_at: "2026-05-18T00:00:00.000Z",
+      }],
+      items: [],
+    });
+    invokeMock.mockImplementation(async (command: string, args?: { name?: string; path?: string; remoteUrl?: string }) => {
+      if (command === "git_list_remote_base_branches") return ["origin/main", "origin/release/x"];
+      if (command === "read_env_var") return "/Users/test";
+      if (command === "file_exists") return false;
+      if (command === "which_binary" && (args?.name === "claude" || args?.name === "codex")) return true;
+      throw new Error(`unexpected invoke: ${command}`);
+    });
+
+    const wrapper = await mountApp(SidebarWithoutRepoStub);
+
+    await flushPromises();
+    await flushPromises();
+    capturedKeyboardActions?.newTask();
+    await flushPromises();
+    await flushPromises();
+
+    await wrapper.get("textarea").setValue("Create task from remote repo");
+    await wrapper.get("textarea").trigger("keydown", { key: "Enter", metaKey: true });
+    await flushPromises();
+
+    expect(store.cloneAndImportRepo).toHaveBeenCalledWith(
+      "git@github.com:jemdiggity/remote-repo.git",
+      "/Users/test/.kanna/repos/remote-repo",
+    );
+    expect(store.createItem).toHaveBeenCalledWith(
+      "repo-imported",
+      "/Users/test/.kanna/repos/remote-repo",
+      "Create task from remote repo",
+      "pty",
+      expect.objectContaining({
+        baseBranch: "origin/main",
+      }),
+    );
 
     wrapper.unmount();
   });

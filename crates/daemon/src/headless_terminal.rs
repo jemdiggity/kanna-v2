@@ -109,13 +109,20 @@ impl HeadlessTerminal {
     }
 
     pub fn snapshot(&mut self) -> HeadlessTerminalResult<TerminalSnapshot> {
-        let had_synchronized_output = self.terminal.mode(Mode::SYNC_OUTPUT)?;
+        let had_synchronized_output = self.terminal.mode(Mode::SYNC_OUTPUT).unwrap_or(false);
         if had_synchronized_output {
             self.terminal.set_mode(Mode::SYNC_OUTPUT, false)?;
         }
-        let vt = serialize_terminal(&self.terminal, None)
-            .map_err(|error| std::io::Error::other(error.to_string()))?
-            .serialized_candidate;
+        let vt = match serialize_terminal(&self.terminal, None) {
+            Ok(snapshot) => snapshot.serialized_candidate,
+            Err(error) => {
+                log::warn!(
+                    "[headless-terminal] failed to serialize terminal snapshot, falling back to visible text: {}",
+                    error
+                );
+                self.visible_text_vt(usize::from(self.rows))?
+            }
+        };
         if had_synchronized_output {
             self.terminal.set_mode(Mode::SYNC_OUTPUT, true)?;
         }
@@ -124,13 +131,21 @@ impl HeadlessTerminal {
             version: 1,
             rows: self.rows,
             cols: self.cols,
-            cursor_row: self.terminal.cursor_y()?,
-            cursor_col: self.terminal.cursor_x()?,
-            cursor_visible: self.terminal.is_cursor_visible()?,
+            cursor_row: self.terminal.cursor_y().unwrap_or(0),
+            cursor_col: self.terminal.cursor_x().unwrap_or(0),
+            cursor_visible: self.terminal.is_cursor_visible().unwrap_or(true),
             saved_at: 0,
             sequence: 0,
             vt,
         })
+    }
+
+    fn visible_text_vt(&mut self, rows: usize) -> HeadlessTerminalResult<String> {
+        let lines = self.visible_footer_lines(rows)?;
+        if lines.is_empty() {
+            return Ok(String::new());
+        }
+        Ok(lines.join("\r\n"))
     }
 
     fn visible_footer_lines(&mut self, rows: usize) -> HeadlessTerminalResult<Vec<String>> {

@@ -1,9 +1,18 @@
-import React, { useState } from "react";
-import { Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import React, { useEffect, useState } from "react";
+import {
+  Keyboard,
+  Pressable,
+  StyleSheet,
+  Text,
+  TextInput,
+  View
+} from "react-native";
 import { MOBILE_E2E_IDS } from "../e2eTestIds";
 import type { TaskSummary } from "../lib/api/types";
 import type { TaskTerminalStatus } from "../state/sessionStore";
 import { TerminalWebView } from "./TerminalWebView";
+import { TASK_COMPOSER_TEXT_INPUT_PROPS } from "./taskComposerInput";
+import { getComposerBottomOffset } from "./taskComposerKeyboard";
 import { buildTaskWorkspaceModel } from "./taskWorkspace";
 
 interface TaskScreenProps {
@@ -25,7 +34,31 @@ export function TaskScreen({
 }: TaskScreenProps) {
   const model = buildTaskWorkspaceModel({ task, terminalStatus });
   const [draftInput, setDraftInput] = useState("");
+  const [keyboardHeight, setKeyboardHeight] = useState(0);
   const sendDisabled = model.isComposerDisabled || !draftInput.trim();
+  const sendDraftInput = () => {
+    const nextInput = draftInput.trim();
+    if (!nextInput || model.isComposerDisabled) {
+      return;
+    }
+
+    onSendInput(nextInput);
+    setDraftInput("");
+  };
+
+  useEffect(() => {
+    const showSubscription = Keyboard.addListener("keyboardWillShow", (event) => {
+      setKeyboardHeight(event.endCoordinates.height);
+    });
+    const hideSubscription = Keyboard.addListener("keyboardWillHide", () => {
+      setKeyboardHeight(0);
+    });
+
+    return () => {
+      showSubscription.remove();
+      hideSubscription.remove();
+    };
+  }, []);
 
   return (
     <View style={styles.screen} testID={MOBILE_E2E_IDS.taskDetailScreen}>
@@ -68,7 +101,13 @@ export function TaskScreen({
         </View>
       </View>
 
-      <View style={styles.bottomChrome}>
+      <View
+        pointerEvents="box-none"
+        style={[
+          styles.bottomChrome,
+          { bottom: getComposerBottomOffset(keyboardHeight) }
+        ]}
+      >
         <View style={styles.composerActions}>
           <Pressable
             style={styles.plusButton}
@@ -81,6 +120,7 @@ export function TaskScreen({
 
         <View style={styles.inputComposer}>
           <TextInput
+            {...TASK_COMPOSER_TEXT_INPUT_PROPS}
             editable={!model.isComposerDisabled}
             onChangeText={setDraftInput}
             placeholder="Reply…"
@@ -93,15 +133,7 @@ export function TaskScreen({
             disabled={sendDisabled}
             style={[styles.sendButton, sendDisabled ? styles.sendButtonDisabled : null]}
             testID={MOBILE_E2E_IDS.taskSendButton}
-            onPress={() => {
-              const nextInput = draftInput.trim();
-              if (!nextInput) {
-                return;
-              }
-
-              onSendInput(nextInput);
-              setDraftInput("");
-            }}
+            onPress={sendDraftInput}
           >
             <Text style={styles.sendButtonLabel}>Send</Text>
           </Pressable>
@@ -227,7 +259,6 @@ const styles = StyleSheet.create({
     lineHeight: 17
   },
   bottomChrome: {
-    bottom: 14,
     left: 14,
     position: "absolute",
     right: 14,
@@ -267,8 +298,11 @@ const styles = StyleSheet.create({
     color: "#F5F7FB",
     flex: 1,
     fontSize: 14,
+    maxHeight: 120,
+    minHeight: 40,
     paddingHorizontal: 8,
-    paddingVertical: 10
+    paddingVertical: 10,
+    textAlignVertical: "top"
   },
   inputFieldDisabled: {
     color: "#6F89AE",

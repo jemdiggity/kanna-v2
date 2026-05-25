@@ -47,6 +47,8 @@ import { getCreateWorktreeStartPoint, getOriginFetchBranch, resolveInitialBaseRe
 import { buildTaskRuntimeEnv, resolveKannaServerBaseUrl } from "./kannaCliEnv";
 import { encodeDaemonInput } from "./daemonInput";
 import { buildWorktreeSessionEnv } from "./worktreeEnv";
+import { publishDesktopTaskSnapshot } from "../services/desktopCloudPublisher";
+import { publishDesktopLanTaskSnapshot } from "../services/desktopLanTaskIndex";
 import {
   reportCloseSessionError,
   reportPrewarmSessionError,
@@ -177,6 +179,25 @@ export function createTasksApi(
         ),
       ),
     );
+  }
+
+  async function publishTaskSnapshotBestEffort(itemId: string, repo: Repo): Promise<void> {
+    const rows = await context.requireDb().select<PipelineItem>(
+      "SELECT * FROM pipeline_item WHERE id = ?",
+      [itemId],
+    );
+    const refreshedItem = rows[0];
+    if (!refreshedItem) return;
+
+    await publishDesktopTaskSnapshot(context.requireDb(), refreshedItem, repo).catch((error) => {
+      console.warn("[cloud] failed to publish task snapshot:", error);
+    });
+    void publishDesktopLanTaskSnapshot(context.requireDb());
+  }
+
+  async function closePipelineItemReleasePortsAndPublish(item: PipelineItem, repo: Repo): Promise<void> {
+    await ports.closeTaskAndReleasePorts(item.id, (id) => closePipelineItem(context.requireDb(), id));
+    await publishTaskSnapshotBestEffort(item.id, repo);
   }
 
   function buildBlockedResumeMessage(blockers: PipelineItem[]): string {
@@ -728,6 +749,39 @@ export function createTasksApi(
           console.log(`[perf:createItem] DB insert: ${(performance.now() - t1).toFixed(1)}ms`);
 
           await reloadSnapshot();
+          const createdItem = context.state.items.value.find((candidate) => candidate.id === id);
+          const createdRepo = context.state.repos.value.find((candidate) => candidate.id === repoId) ?? null;
+          if (createdItem) {
+            void publishDesktopLanTaskSnapshot(context.requireDb());
+            const publishPromise = publishDesktopTaskSnapshot(context.requireDb(), createdItem, createdRepo)
+              .then(() => {
+                if (import.meta.env.DEV && typeof window !== "undefined") {
+                  (window as unknown as { __KANNA_E2E_CLOUD_PUBLISH__?: unknown }).__KANNA_E2E_CLOUD_PUBLISH__ = {
+                    status: "ok",
+                    taskId: id,
+                  };
+                }
+              })
+              .catch((error) => {
+                if (import.meta.env.DEV && typeof window !== "undefined") {
+                  (window as unknown as { __KANNA_E2E_CLOUD_PUBLISH__?: unknown }).__KANNA_E2E_CLOUD_PUBLISH__ = {
+                    status: "error",
+                    taskId: id,
+                    message: error instanceof Error ? error.message : String(error),
+                  };
+                }
+                console.warn("[cloud] failed to publish task snapshot:", error);
+                throw error;
+              });
+            const awaitCloudPublish = import.meta.env.DEV
+              ? await invoke<string>("read_env_var", { name: "KANNA_E2E_AWAIT_CLOUD_PUBLISH" }).catch(() => "")
+              : "";
+            if (awaitCloudPublish === "1") {
+              await publishPromise;
+            } else {
+              void publishPromise.catch(() => undefined);
+            }
+          }
           console.log(`[perf:createItem] reload -> waiting for items refresh (id=${id})`);
           console.log(`[perf:createItem] TOTAL (modal → reload): ${(performance.now() - t0).toFixed(1)}ms`);
           console.log("[tasks:createItem] inserted and reloaded", {
@@ -809,7 +863,7 @@ export function createTasksApi(
         if (wasBlocked) {
           await removeAllBlockersForItem(context.requireDb(), item.id);
         }
-        await ports.closeTaskAndReleasePorts(item.id, (id) => closePipelineItem(context.requireDb(), id));
+        await closePipelineItemReleasePortsAndPublish(item, repo);
 
         if (opts?.selectNext !== false) await selectReplacementAfterTaskRemoval(item);
         await checkUnblocked(item.id);
@@ -820,7 +874,7 @@ export function createTasksApi(
 
       if (closeBehavior === "finish" && wasBlocked && !ownsLiveTaskResources) {
         await removeAllBlockersForItem(context.requireDb(), item.id);
-        await ports.closeTaskAndReleasePorts(item.id, (id) => closePipelineItem(context.requireDb(), id));
+        await closePipelineItemReleasePortsAndPublish(item, repo);
 
         if (opts?.selectNext !== false) await selectReplacementAfterTaskRemoval(item);
         await reloadSnapshot();
@@ -851,7 +905,7 @@ export function createTasksApi(
         })) {
           await selectReplacementAfterTaskRemoval(item);
         }
-        await ports.closeTaskAndReleasePorts(item.id, (id) => closePipelineItem(context.requireDb(), id));
+        await closePipelineItemReleasePortsAndPublish(item, repo);
         await checkUnblocked(item.id);
         await reloadSnapshot();
         await invalidateWindowWorkspace("closeTask");

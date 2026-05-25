@@ -5,16 +5,22 @@ use crate::discovery::{
     encode_txt_record, hostname_for_peer, resolved_service_to_peer_entry, SERVICE_TYPE,
 };
 use crate::peer_store::{PeerRecord, PeerStore, PeerStoreError};
-use crate::protocol::{DiscoveredPeer, PairingPeer, PeerRegistryEntry, PeerRequest, PeerResponse};
+use crate::protocol::{
+    DiscoveredPeer, PairingPeer, PeerRegistryEntry, PeerRequest, PeerResponse, PeerTaskSnapshot,
+    PeerTerminalEvent,
+};
 use crate::registry::{PeerRegistry, RegistryError};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use chrono::Utc;
+use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -22,7 +28,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpStream, UnixStream};
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::task::JoinHandle;
 
@@ -38,6 +44,8 @@ pub struct RuntimeConfig {
     pub display_name: String,
     pub registry_dir: PathBuf,
     pub listen_port: u16,
+    daemon_dir: Option<PathBuf>,
+    db_path: Option<PathBuf>,
     discovery_mode: DiscoveryMode,
     pending_transfer_ttl: Duration,
     peer_request_timeout: Duration,
@@ -55,6 +63,8 @@ impl RuntimeConfig {
             display_name: display_name.into(),
             registry_dir: registry_dir.as_ref().to_path_buf(),
             listen_port,
+            daemon_dir: None,
+            db_path: None,
             discovery_mode: DiscoveryMode::Registry,
             pending_transfer_ttl: Duration::from_secs(300),
             peer_request_timeout: Duration::from_secs(15),
@@ -73,6 +83,16 @@ impl RuntimeConfig {
 
     pub fn with_peer_request_timeout(mut self, peer_request_timeout: Duration) -> Self {
         self.peer_request_timeout = peer_request_timeout;
+        self
+    }
+
+    pub fn with_daemon_dir(mut self, daemon_dir: impl AsRef<Path>) -> Self {
+        self.daemon_dir = Some(daemon_dir.as_ref().to_path_buf());
+        self
+    }
+
+    pub fn with_db_path(mut self, db_path: impl AsRef<Path>) -> Self {
+        self.db_path = Some(db_path.as_ref().to_path_buf());
         self
     }
 
@@ -118,6 +138,15 @@ impl RuntimeConfig {
             display_name,
             registry_dir,
             listen_port,
+            daemon_dir: std::env::var("KANNA_DAEMON_DIR")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .map(PathBuf::from),
+            db_path: std::env::var("KANNA_DB_PATH")
+                .or_else(|_| std::env::var("KANNA_CLI_DB_PATH"))
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .map(PathBuf::from),
             discovery_mode,
             pending_transfer_ttl: Duration::from_secs(300),
             peer_request_timeout: Duration::from_secs(15),
@@ -206,6 +235,11 @@ pub enum RuntimeEvent {
     IncomingTransferRequest(IncomingTransferEvent),
     OutgoingTransferCommitted(OutgoingTransferCommittedEvent),
     OutgoingTransferFinalizationRequested(OutgoingTransferFinalizationRequestedEvent),
+    TerminalEvent {
+        peer_id: String,
+        session_id: String,
+        event: PeerTerminalEvent,
+    },
 }
 
 #[derive(Debug, Error)]
@@ -287,6 +321,9 @@ struct ListenerContext {
     pending_outgoing_transfer_finalizations: PendingOutgoingTransferFinalizations,
     incoming_reservations: Arc<Mutex<HashMap<String, IncomingTransferReservation>>>,
     transfer_artifacts: Arc<Mutex<HashMap<String, HashMap<String, TransferArtifactRecord>>>>,
+    task_snapshot: Arc<Mutex<Value>>,
+    daemon_dir: Option<PathBuf>,
+    db_path: Option<PathBuf>,
     request_counter: Arc<AtomicU64>,
     incoming_sender: mpsc::UnboundedSender<RuntimeEvent>,
 }
@@ -300,6 +337,8 @@ pub struct TransferRuntime {
     pending_outgoing_transfer_finalizations: PendingOutgoingTransferFinalizations,
     incoming_reservations: Arc<Mutex<HashMap<String, IncomingTransferReservation>>>,
     transfer_artifacts: Arc<Mutex<HashMap<String, HashMap<String, TransferArtifactRecord>>>>,
+    task_snapshot: Arc<Mutex<Value>>,
+    terminal_observers: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
     incoming_sender: mpsc::UnboundedSender<RuntimeEvent>,
     incoming_events: Mutex<mpsc::UnboundedReceiver<RuntimeEvent>>,
     request_counter: Arc<AtomicU64>,
@@ -462,6 +501,8 @@ impl TransferRuntime {
         let pending_outgoing_transfer_finalizations = Arc::new(Mutex::new(HashMap::new()));
         let incoming_reservations = Arc::new(Mutex::new(HashMap::new()));
         let transfer_artifacts = Arc::new(Mutex::new(HashMap::new()));
+        let task_snapshot = Arc::new(Mutex::new(Value::Null));
+        let terminal_observers = Arc::new(Mutex::new(HashMap::new()));
         let request_counter = Arc::new(AtomicU64::new(1));
         let listener_context = ListenerContext {
             self_peer_id: config.peer_id.clone(),
@@ -478,6 +519,9 @@ impl TransferRuntime {
             ),
             incoming_reservations: Arc::clone(&incoming_reservations),
             transfer_artifacts: Arc::clone(&transfer_artifacts),
+            task_snapshot: Arc::clone(&task_snapshot),
+            daemon_dir: config.daemon_dir.clone(),
+            db_path: config.db_path.clone(),
             request_counter: Arc::clone(&request_counter),
             incoming_sender: incoming_sender.clone(),
         };
@@ -492,6 +536,8 @@ impl TransferRuntime {
             pending_outgoing_transfer_finalizations,
             incoming_reservations,
             transfer_artifacts,
+            task_snapshot,
+            terminal_observers,
             incoming_sender,
             incoming_events: Mutex::new(incoming_receiver),
             request_counter,
@@ -507,6 +553,218 @@ impl TransferRuntime {
             .into_iter()
             .map(|peer| self.discovered_peer(peer))
             .collect()
+    }
+
+    pub async fn set_task_snapshot(&self, snapshot: Value) -> Result<(), RuntimeError> {
+        *self.task_snapshot.lock().await = snapshot;
+        Ok(())
+    }
+
+    pub async fn list_peer_task_snapshots(&self) -> Result<Vec<PeerTaskSnapshot>, RuntimeError> {
+        let peers = self.list_peers().await?;
+        let mut snapshots = Vec::new();
+        for peer in peers.into_iter().filter(|peer| peer.trusted) {
+            let request_id = self.next_request_id("task-snapshot");
+            let response = match self
+                .send_peer_request(
+                    &PeerRegistryEntry {
+                        peer_id: peer.peer_id.clone(),
+                        display_name: peer.display_name.clone(),
+                        endpoint: peer.endpoint.clone(),
+                        pid: peer.pid,
+                        public_key: peer.public_key.clone(),
+                        protocol_version: peer.protocol_version,
+                        accepting_transfers: peer.accepting_transfers,
+                    },
+                    PeerRequest::GetTaskSnapshot {
+                        request_id: request_id.clone(),
+                        requester_peer_id: self.config.peer_id.clone(),
+                    },
+                )
+                .await
+            {
+                Ok(response) => response,
+                Err(error) => {
+                    eprintln!(
+                        "[task-transfer] failed to fetch task snapshot from {}: {}",
+                        peer.peer_id, error
+                    );
+                    continue;
+                }
+            };
+
+            match response {
+                PeerResponse::TaskSnapshot {
+                    request_id: response_request_id,
+                    peer_id,
+                    display_name,
+                    snapshot,
+                } => {
+                    if response_request_id == request_id {
+                        snapshots.push(PeerTaskSnapshot {
+                            peer_id,
+                            display_name,
+                            snapshot,
+                        });
+                    }
+                }
+                PeerResponse::Error { message, .. } => {
+                    eprintln!(
+                        "[task-transfer] peer {} rejected task snapshot request: {}",
+                        peer.peer_id, message
+                    );
+                }
+                other => {
+                    return Err(unexpected_peer_response("task snapshot", &other));
+                }
+            }
+        }
+        Ok(snapshots)
+    }
+
+    pub async fn observe_peer_session(
+        &self,
+        target_peer_id: &str,
+        session_id: &str,
+    ) -> Result<(), RuntimeError> {
+        let target_peer = self.find_peer(target_peer_id).await?;
+        self.ensure_peer_is_trusted(&target_peer.peer_id, &target_peer.public_key)?;
+        let observer_key = terminal_observer_key(target_peer_id, session_id);
+        if let Some(handle) = self.terminal_observers.lock().await.remove(&observer_key) {
+            handle.abort();
+        }
+
+        let request_id = self.next_request_id("observe-session");
+        let self_peer_id = self.config.peer_id.clone();
+        let session_id = session_id.to_owned();
+        let incoming_sender = self.incoming_sender.clone();
+        let peer_for_task = target_peer.clone();
+        let peer_id_for_error = target_peer.peer_id.clone();
+        let session_id_for_error = session_id.clone();
+        let handle = tokio::spawn(async move {
+            if let Err(error) = stream_peer_session(
+                peer_for_task,
+                request_id,
+                self_peer_id,
+                session_id.clone(),
+                incoming_sender.clone(),
+            )
+            .await
+            {
+                let _ = incoming_sender.send(RuntimeEvent::TerminalEvent {
+                    peer_id: peer_id_for_error,
+                    session_id: session_id_for_error.clone(),
+                    event: PeerTerminalEvent::Error {
+                        session_id: session_id_for_error,
+                        message: error.to_string(),
+                    },
+                });
+            }
+        });
+        self.terminal_observers
+            .lock()
+            .await
+            .insert(observer_key, handle);
+        Ok(())
+    }
+
+    pub async fn unobserve_peer_session(
+        &self,
+        target_peer_id: &str,
+        session_id: &str,
+    ) -> Result<(), RuntimeError> {
+        let observer_key = terminal_observer_key(target_peer_id, session_id);
+        if let Some(handle) = self.terminal_observers.lock().await.remove(&observer_key) {
+            handle.abort();
+        }
+        Ok(())
+    }
+
+    pub async fn send_peer_session_input(
+        &self,
+        target_peer_id: &str,
+        session_id: &str,
+        data: Vec<u8>,
+    ) -> Result<(), RuntimeError> {
+        let target_peer = self.find_peer(target_peer_id).await?;
+        self.ensure_peer_is_trusted(&target_peer.peer_id, &target_peer.public_key)?;
+        let request_id = self.next_request_id("send-input");
+        let response = self
+            .send_peer_request(
+                &target_peer,
+                PeerRequest::SendSessionInput {
+                    request_id: request_id.clone(),
+                    requester_peer_id: self.config.peer_id.clone(),
+                    session_id: session_id.to_owned(),
+                    data,
+                },
+            )
+            .await?;
+        match response {
+            PeerResponse::SendSessionInput {
+                request_id: response_request_id,
+            } if response_request_id == request_id => Ok(()),
+            PeerResponse::Error { message, .. } => Err(RuntimeError::Protocol(message)),
+            other => Err(unexpected_peer_response("send-session-input", &other)),
+        }
+    }
+
+    pub async fn resize_peer_session(
+        &self,
+        target_peer_id: &str,
+        session_id: &str,
+        cols: u16,
+        rows: u16,
+    ) -> Result<(), RuntimeError> {
+        let target_peer = self.find_peer(target_peer_id).await?;
+        self.ensure_peer_is_trusted(&target_peer.peer_id, &target_peer.public_key)?;
+        let request_id = self.next_request_id("resize-session");
+        let response = self
+            .send_peer_request(
+                &target_peer,
+                PeerRequest::ResizeSession {
+                    request_id: request_id.clone(),
+                    requester_peer_id: self.config.peer_id.clone(),
+                    session_id: session_id.to_owned(),
+                    cols,
+                    rows,
+                },
+            )
+            .await?;
+        match response {
+            PeerResponse::ResizeSession {
+                request_id: response_request_id,
+            } if response_request_id == request_id => Ok(()),
+            PeerResponse::Error { message, .. } => Err(RuntimeError::Protocol(message)),
+            other => Err(unexpected_peer_response("resize-session", &other)),
+        }
+    }
+
+    pub async fn close_peer_task(
+        &self,
+        target_peer_id: &str,
+        task_id: &str,
+    ) -> Result<(), RuntimeError> {
+        let target_peer = self.find_peer(target_peer_id).await?;
+        self.ensure_peer_is_trusted(&target_peer.peer_id, &target_peer.public_key)?;
+        let request_id = self.next_request_id("close-task");
+        let response = self
+            .send_peer_request(
+                &target_peer,
+                PeerRequest::CloseTask {
+                    request_id: request_id.clone(),
+                    requester_peer_id: self.config.peer_id.clone(),
+                    task_id: task_id.to_owned(),
+                },
+            )
+            .await?;
+        match response {
+            PeerResponse::CloseTask {
+                request_id: response_request_id,
+            } if response_request_id == request_id => Ok(()),
+            PeerResponse::Error { message, .. } => Err(RuntimeError::Protocol(message)),
+            other => Err(unexpected_peer_response("close-task", &other)),
+        }
     }
 
     pub async fn start_pairing(&self, target_peer_id: &str) -> Result<PairingResult, RuntimeError> {
@@ -709,6 +967,15 @@ impl TransferRuntime {
             PeerResponse::FinalizeTransfer { .. } => Err(RuntimeError::Protocol(
                 "unexpected finalize response during preflight".into(),
             )),
+            PeerResponse::TaskSnapshot { .. } => Err(RuntimeError::Protocol(
+                "unexpected task-snapshot response during preflight".into(),
+            )),
+            PeerResponse::ObserveSession { .. }
+            | PeerResponse::SendSessionInput { .. }
+            | PeerResponse::ResizeSession { .. }
+            | PeerResponse::CloseTask { .. } => Err(RuntimeError::Protocol(
+                "unexpected observe-session response during preflight".into(),
+            )),
             PeerResponse::Error {
                 request_id: _,
                 message,
@@ -787,6 +1054,15 @@ impl TransferRuntime {
             PeerResponse::FinalizeTransfer { .. } => Err(RuntimeError::Protocol(
                 "unexpected finalize response during transfer commit".into(),
             )),
+            PeerResponse::TaskSnapshot { .. } => Err(RuntimeError::Protocol(
+                "unexpected task-snapshot response during transfer commit".into(),
+            )),
+            PeerResponse::ObserveSession { .. }
+            | PeerResponse::SendSessionInput { .. }
+            | PeerResponse::ResizeSession { .. }
+            | PeerResponse::CloseTask { .. } => Err(RuntimeError::Protocol(
+                "unexpected observe-session response during transfer commit".into(),
+            )),
             PeerResponse::Error {
                 request_id: _,
                 message,
@@ -864,7 +1140,12 @@ impl TransferRuntime {
             | PeerResponse::PrepareTransfer { .. }
             | PeerResponse::SubmitTransferPayload { .. }
             | PeerResponse::FetchTransferArtifact { .. }
-            | PeerResponse::ImportCommitted { .. } => Err(RuntimeError::Protocol(
+            | PeerResponse::ImportCommitted { .. }
+            | PeerResponse::TaskSnapshot { .. }
+            | PeerResponse::ObserveSession { .. }
+            | PeerResponse::SendSessionInput { .. }
+            | PeerResponse::ResizeSession { .. }
+            | PeerResponse::CloseTask { .. } => Err(RuntimeError::Protocol(
                 "unexpected response while finalizing outgoing transfer".into(),
             )),
             PeerResponse::Error {
@@ -1032,7 +1313,12 @@ impl TransferRuntime {
             | PeerResponse::PrepareTransfer { .. }
             | PeerResponse::SubmitTransferPayload { .. }
             | PeerResponse::ImportCommitted { .. }
-            | PeerResponse::FinalizeTransfer { .. } => Err(RuntimeError::Protocol(
+            | PeerResponse::FinalizeTransfer { .. }
+            | PeerResponse::TaskSnapshot { .. }
+            | PeerResponse::ObserveSession { .. }
+            | PeerResponse::SendSessionInput { .. }
+            | PeerResponse::ResizeSession { .. }
+            | PeerResponse::CloseTask { .. } => Err(RuntimeError::Protocol(
                 "unexpected response while fetching transfer artifact".into(),
             )),
             PeerResponse::Error {
@@ -1112,7 +1398,12 @@ impl TransferRuntime {
             | PeerResponse::PrepareTransfer { .. }
             | PeerResponse::SubmitTransferPayload { .. }
             | PeerResponse::FetchTransferArtifact { .. }
-            | PeerResponse::FinalizeTransfer { .. } => Err(RuntimeError::Protocol(
+            | PeerResponse::FinalizeTransfer { .. }
+            | PeerResponse::TaskSnapshot { .. }
+            | PeerResponse::ObserveSession { .. }
+            | PeerResponse::SendSessionInput { .. }
+            | PeerResponse::ResizeSession { .. }
+            | PeerResponse::CloseTask { .. } => Err(RuntimeError::Protocol(
                 "unexpected response while acknowledging import commit".into(),
             )),
             PeerResponse::Error {
@@ -1281,6 +1572,14 @@ impl Drop for TransferRuntime {
         }
         if let Ok(mut transfer_artifacts) = self.transfer_artifacts.try_lock() {
             transfer_artifacts.clear();
+        }
+        if let Ok(mut task_snapshot) = self.task_snapshot.try_lock() {
+            *task_snapshot = Value::Null;
+        }
+        if let Ok(mut observers) = self.terminal_observers.try_lock() {
+            for (_, handle) in observers.drain() {
+                handle.abort();
+            }
         }
     }
 }
@@ -1829,6 +2128,105 @@ async fn handle_connection(
                 },
             }
         }
+        Ok(PeerRequest::GetTaskSnapshot {
+            request_id,
+            requester_peer_id,
+        }) => match async {
+            let requester_peer = context
+                .discovery
+                .list_peers(&context.self_peer_id)
+                .await?
+                .into_iter()
+                .find(|peer| peer.peer_id == requester_peer_id)
+                .ok_or_else(|| {
+                    RuntimeError::Protocol(format!(
+                        "requester peer {} is not currently discovered",
+                        requester_peer_id
+                    ))
+                })?;
+            ensure_peer_is_trusted_for(
+                &context.registry_root,
+                &context.self_peer_id,
+                &requester_peer_id,
+                &requester_peer.public_key,
+            )?;
+            Ok::<PeerResponse, RuntimeError>(PeerResponse::TaskSnapshot {
+                request_id: request_id.clone(),
+                peer_id: context.self_peer_id.clone(),
+                display_name: context.self_display_name.clone(),
+                snapshot: context.task_snapshot.lock().await.clone(),
+            })
+        }
+        .await
+        {
+            Ok(response) => response,
+            Err(error) => PeerResponse::Error {
+                request_id,
+                message: error.to_string(),
+            },
+        },
+        Ok(PeerRequest::ObserveSession {
+            request_id,
+            requester_peer_id,
+            session_id,
+        }) => {
+            let response =
+                match prepare_session_observer(&context, &requester_peer_id, &session_id).await {
+                    Ok(daemon) => {
+                        write_json_line(
+                            &mut stream,
+                            &PeerResponse::ObserveSession {
+                                request_id,
+                                session_id: session_id.clone(),
+                            },
+                        )
+                        .await?;
+                        stream_daemon_session(daemon, stream, session_id).await?;
+                        return Ok(());
+                    }
+                    Err(error) => PeerResponse::Error {
+                        request_id,
+                        message: error.to_string(),
+                    },
+                };
+            response
+        }
+        Ok(PeerRequest::SendSessionInput {
+            request_id,
+            requester_peer_id,
+            session_id,
+            data,
+        }) => match send_daemon_input(&context, &requester_peer_id, &session_id, data).await {
+            Ok(()) => PeerResponse::SendSessionInput { request_id },
+            Err(error) => PeerResponse::Error {
+                request_id,
+                message: error.to_string(),
+            },
+        },
+        Ok(PeerRequest::ResizeSession {
+            request_id,
+            requester_peer_id,
+            session_id,
+            cols,
+            rows,
+        }) => match resize_daemon_session(&context, &requester_peer_id, &session_id, cols, rows).await {
+            Ok(()) => PeerResponse::ResizeSession { request_id },
+            Err(error) => PeerResponse::Error {
+                request_id,
+                message: error.to_string(),
+            },
+        },
+        Ok(PeerRequest::CloseTask {
+            request_id,
+            requester_peer_id,
+            task_id,
+        }) => match close_owner_task(&context, &requester_peer_id, &task_id).await {
+            Ok(()) => PeerResponse::CloseTask { request_id },
+            Err(error) => PeerResponse::Error {
+                request_id,
+                message: error.to_string(),
+            },
+        },
         Err(error) => PeerResponse::Error {
             request_id,
             message: error.to_string(),
@@ -1893,6 +2291,381 @@ async fn build_incoming_event(
         source_name,
         payload,
     })
+}
+
+struct DaemonConnection {
+    reader: BufReader<tokio::net::unix::OwnedReadHalf>,
+    writer: tokio::net::unix::OwnedWriteHalf,
+}
+
+async fn stream_peer_session(
+    peer: PeerRegistryEntry,
+    request_id: String,
+    requester_peer_id: String,
+    session_id: String,
+    incoming_sender: mpsc::UnboundedSender<RuntimeEvent>,
+) -> Result<(), RuntimeError> {
+    let mut stream = TcpStream::connect(&peer.endpoint).await?;
+    write_json_line(
+        &mut stream,
+        &PeerRequest::ObserveSession {
+            request_id: request_id.clone(),
+            requester_peer_id,
+            session_id: session_id.clone(),
+        },
+    )
+    .await?;
+
+    let mut response_line = String::new();
+    {
+        let mut reader = BufReader::new(&mut stream);
+        let read = reader.read_line(&mut response_line).await?;
+        if read == 0 {
+            return Err(RuntimeError::Protocol(format!(
+                "peer {} closed observe-session before response",
+                peer.peer_id
+            )));
+        }
+    }
+
+    match serde_json::from_str::<PeerResponse>(response_line.trim())? {
+        PeerResponse::ObserveSession {
+            request_id: response_request_id,
+            session_id: response_session_id,
+        } if response_request_id == request_id && response_session_id == session_id => {}
+        PeerResponse::Error { message, .. } => return Err(RuntimeError::Protocol(message)),
+        other => return Err(unexpected_peer_response("observe-session", &other)),
+    }
+
+    let mut reader = BufReader::new(stream);
+    loop {
+        let mut event_line = String::new();
+        let read = reader.read_line(&mut event_line).await?;
+        if read == 0 {
+            return Ok(());
+        }
+        let event = serde_json::from_str::<PeerTerminalEvent>(event_line.trim())?;
+        let event_session_id = peer_terminal_event_session_id(&event).to_owned();
+        incoming_sender
+            .send(RuntimeEvent::TerminalEvent {
+                peer_id: peer.peer_id.clone(),
+                session_id: event_session_id,
+                event,
+            })
+            .map_err(|_| RuntimeError::IncomingEventChannelClosed)?;
+    }
+}
+
+async fn prepare_session_observer(
+    context: &ListenerContext,
+    requester_peer_id: &str,
+    session_id: &str,
+) -> Result<DaemonConnection, RuntimeError> {
+    ensure_requester_peer_trusted(context, requester_peer_id).await?;
+
+    let daemon_dir = context
+        .daemon_dir
+        .as_ref()
+        .ok_or_else(|| RuntimeError::Protocol("daemon directory is not configured".into()))?;
+    let mut daemon = connect_daemon(daemon_dir).await?;
+    send_daemon_command(
+        &mut daemon,
+        &DaemonCommand::Observe {
+            session_id: session_id.to_owned(),
+        },
+    )
+    .await?;
+    match read_daemon_event(&mut daemon).await? {
+        DaemonEvent::Ok => Ok(daemon),
+        DaemonEvent::Error { message, .. } => Err(RuntimeError::Protocol(message)),
+        other => Err(RuntimeError::Protocol(format!(
+            "unexpected daemon observe response: {:?}",
+            other
+        ))),
+    }
+}
+
+async fn ensure_requester_peer_trusted(
+    context: &ListenerContext,
+    requester_peer_id: &str,
+) -> Result<(), RuntimeError> {
+    let requester_peer = context
+        .discovery
+        .list_peers(&context.self_peer_id)
+        .await?
+        .into_iter()
+        .find(|peer| peer.peer_id == requester_peer_id)
+        .ok_or_else(|| {
+            RuntimeError::Protocol(format!(
+                "requester peer {} is not currently discovered",
+                requester_peer_id
+            ))
+        })?;
+    ensure_peer_is_trusted_for(
+        &context.registry_root,
+        &context.self_peer_id,
+        requester_peer_id,
+        &requester_peer.public_key,
+    )?;
+    Ok(())
+}
+
+async fn send_daemon_input(
+    context: &ListenerContext,
+    requester_peer_id: &str,
+    session_id: &str,
+    data: Vec<u8>,
+) -> Result<(), RuntimeError> {
+    ensure_requester_peer_trusted(context, requester_peer_id).await?;
+    let daemon_dir = context
+        .daemon_dir
+        .as_ref()
+        .ok_or_else(|| RuntimeError::Protocol("daemon directory is not configured".into()))?;
+    let mut daemon = connect_daemon(daemon_dir).await?;
+    send_daemon_command(
+        &mut daemon,
+        &DaemonCommand::Input {
+            session_id: session_id.to_owned(),
+            data,
+        },
+    )
+    .await?;
+    match read_daemon_event(&mut daemon).await? {
+        DaemonEvent::Ok => Ok(()),
+        DaemonEvent::Error { message, .. } => Err(RuntimeError::Protocol(message)),
+        other => Err(RuntimeError::Protocol(format!(
+            "unexpected daemon input response: {:?}",
+            other
+        ))),
+    }
+}
+
+async fn resize_daemon_session(
+    context: &ListenerContext,
+    requester_peer_id: &str,
+    session_id: &str,
+    cols: u16,
+    rows: u16,
+) -> Result<(), RuntimeError> {
+    ensure_requester_peer_trusted(context, requester_peer_id).await?;
+    let daemon_dir = context
+        .daemon_dir
+        .as_ref()
+        .ok_or_else(|| RuntimeError::Protocol("daemon directory is not configured".into()))?;
+    let mut daemon = connect_daemon(daemon_dir).await?;
+    send_daemon_command(
+        &mut daemon,
+        &DaemonCommand::Resize {
+            session_id: session_id.to_owned(),
+            cols,
+            rows,
+        },
+    )
+    .await?;
+    match read_daemon_event(&mut daemon).await? {
+        DaemonEvent::Ok => Ok(()),
+        DaemonEvent::Error { message, .. } => Err(RuntimeError::Protocol(message)),
+        other => Err(RuntimeError::Protocol(format!(
+            "unexpected daemon resize response: {:?}",
+            other
+        ))),
+    }
+}
+
+async fn close_owner_task(
+    context: &ListenerContext,
+    requester_peer_id: &str,
+    task_id: &str,
+) -> Result<(), RuntimeError> {
+    ensure_requester_peer_trusted(context, requester_peer_id).await?;
+    for session_id in [
+        task_id.to_owned(),
+        format!("shell-wt-{task_id}"),
+        format!("td-{task_id}"),
+    ] {
+        kill_daemon_session_if_present(context, &session_id).await?;
+    }
+    close_pipeline_item_in_db(context, task_id)?;
+    Ok(())
+}
+
+async fn kill_daemon_session_if_present(
+    context: &ListenerContext,
+    session_id: &str,
+) -> Result<(), RuntimeError> {
+    let daemon_dir = context
+        .daemon_dir
+        .as_ref()
+        .ok_or_else(|| RuntimeError::Protocol("daemon directory is not configured".into()))?;
+    let mut daemon = connect_daemon(daemon_dir).await?;
+    send_daemon_command(
+        &mut daemon,
+        &DaemonCommand::Kill {
+            session_id: session_id.to_owned(),
+        },
+    )
+    .await?;
+    match read_daemon_event(&mut daemon).await? {
+        DaemonEvent::Ok => Ok(()),
+        DaemonEvent::Error {
+            code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
+            ..
+        } => Ok(()),
+        DaemonEvent::Error { message, .. }
+            if message.to_ascii_lowercase().contains("session not found") => Ok(()),
+        DaemonEvent::Error { message, .. } => Err(RuntimeError::Protocol(message)),
+        other => Err(RuntimeError::Protocol(format!(
+            "unexpected daemon kill response: {:?}",
+            other
+        ))),
+    }
+}
+
+fn close_pipeline_item_in_db(context: &ListenerContext, task_id: &str) -> Result<(), RuntimeError> {
+    let db_path = context
+        .db_path
+        .as_ref()
+        .ok_or_else(|| RuntimeError::Protocol("database path is not configured".into()))?;
+    let conn = rusqlite::Connection::open(db_path)
+        .map_err(|error| RuntimeError::Protocol(format!("db error: {error}")))?;
+    let rows = conn
+        .execute(
+            "UPDATE pipeline_item
+             SET previous_stage = COALESCE(previous_stage, stage),
+                 stage = 'done',
+                 closed_at = datetime('now'),
+                 updated_at = datetime('now')
+             WHERE id = ?",
+            [task_id],
+        )
+        .map_err(|error| RuntimeError::Protocol(format!("db error: {error}")))?;
+    if rows == 0 {
+        return Err(RuntimeError::Protocol(format!("task not found: {task_id}")));
+    }
+    Ok(())
+}
+
+async fn stream_daemon_session(
+    mut daemon: DaemonConnection,
+    mut stream: TcpStream,
+    session_id: String,
+) -> Result<(), RuntimeError> {
+    send_daemon_command(
+        &mut daemon,
+        &DaemonCommand::Snapshot {
+            session_id: session_id.clone(),
+        },
+    )
+    .await?;
+
+    loop {
+        match read_daemon_event(&mut daemon).await? {
+            DaemonEvent::Snapshot {
+                session_id: event_session_id,
+                snapshot,
+            } if event_session_id == session_id => {
+                write_json_line(
+                    &mut stream,
+                    &PeerTerminalEvent::Snapshot {
+                        session_id: event_session_id,
+                        snapshot: serde_json::to_value(snapshot)?,
+                    },
+                )
+                .await?;
+            }
+            DaemonEvent::Output {
+                session_id: event_session_id,
+                data,
+            } if event_session_id == session_id => {
+                write_json_line(
+                    &mut stream,
+                    &PeerTerminalEvent::Output {
+                        session_id: event_session_id,
+                        data,
+                    },
+                )
+                .await?;
+            }
+            DaemonEvent::Exit {
+                session_id: event_session_id,
+                code,
+                ..
+            } if event_session_id == session_id => {
+                write_json_line(
+                    &mut stream,
+                    &PeerTerminalEvent::Exit {
+                        session_id: event_session_id,
+                        code,
+                    },
+                )
+                .await?;
+                return Ok(());
+            }
+            DaemonEvent::Error { message, .. } => {
+                write_json_line(
+                    &mut stream,
+                    &PeerTerminalEvent::Error {
+                        session_id,
+                        message,
+                    },
+                )
+                .await?;
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
+}
+
+async fn connect_daemon(daemon_dir: &Path) -> Result<DaemonConnection, RuntimeError> {
+    let stream = UnixStream::connect(daemon_socket_path(daemon_dir)).await?;
+    let (read_half, write_half) = stream.into_split();
+    Ok(DaemonConnection {
+        reader: BufReader::new(read_half),
+        writer: write_half,
+    })
+}
+
+async fn send_daemon_command(
+    daemon: &mut DaemonConnection,
+    command: &DaemonCommand,
+) -> Result<(), RuntimeError> {
+    let encoded = serde_json::to_vec(command)?;
+    daemon.writer.write_all(&encoded).await?;
+    daemon.writer.write_all(b"\n").await?;
+    daemon.writer.flush().await?;
+    Ok(())
+}
+
+async fn read_daemon_event(daemon: &mut DaemonConnection) -> Result<DaemonEvent, RuntimeError> {
+    let mut line = String::new();
+    let read = daemon.reader.read_line(&mut line).await?;
+    if read == 0 {
+        return Err(RuntimeError::Protocol(
+            "daemon closed observer stream".into(),
+        ));
+    }
+    Ok(serde_json::from_str(line.trim())?)
+}
+
+fn daemon_socket_path(daemon_dir: &Path) -> PathBuf {
+    let mut hasher = DefaultHasher::new();
+    daemon_dir.hash(&mut hasher);
+    let hash = hasher.finish() as u32;
+    PathBuf::from(format!("/tmp/kanna-{:08x}.sock", hash))
+}
+
+fn terminal_observer_key(peer_id: &str, session_id: &str) -> String {
+    format!("{peer_id}:{session_id}")
+}
+
+fn peer_terminal_event_session_id(event: &PeerTerminalEvent) -> &str {
+    match event {
+        PeerTerminalEvent::Snapshot { session_id, .. }
+        | PeerTerminalEvent::Output { session_id, .. }
+        | PeerTerminalEvent::Exit { session_id, .. }
+        | PeerTerminalEvent::Error { session_id, .. } => session_id,
+    }
 }
 
 fn extract_request_id(line: &str) -> String {

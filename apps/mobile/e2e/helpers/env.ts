@@ -62,7 +62,7 @@ export function resolveRequiredMobileE2eEnv(
   const target = env.KANNA_IOS_E2E_TARGET?.trim() === "device" ? "device" : "simulator";
   const appConfig = readMobileAppConfig();
   const defaultBundleId =
-    appConfig.expo?.ios?.bundleIdentifier?.trim() || "build.kanna.mobile";
+    appConfig.expo?.ios?.bundleIdentifier?.trim() || "build.kanna.app";
   const bundleId = env.KANNA_IOS_BUNDLE_ID?.trim() || defaultBundleId;
   const xcodeOrgId =
     env.KANNA_IOS_XCODE_ORG_ID?.trim() || appConfig.expo?.ios?.appleTeamId?.trim() || undefined;

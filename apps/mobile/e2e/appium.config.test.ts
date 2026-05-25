@@ -15,13 +15,13 @@ describe("mobile Appium config", () => {
       createSimulatorCapabilities({
         appiumPort: 4723,
         deviceName: "iPhone 15",
-        bundleId: "build.kanna.mobile"
+        bundleId: "build.kanna.app"
       })
     ).toMatchObject({
       platformName: "iOS",
       "appium:automationName": "XCUITest",
       "appium:deviceName": "iPhone 15",
-      "appium:bundleId": "build.kanna.mobile",
+      "appium:bundleId": "build.kanna.app",
       "appium:wdaLocalPort": 4724
     });
   });
@@ -30,24 +30,24 @@ describe("mobile Appium config", () => {
     expect(
       createPhysicalDeviceCapabilities({
         appiumPort: 4723,
-        bundleId: "build.kanna.mobile",
+        bundleId: "build.kanna.app",
         deviceName: "Jeremy's iPhone",
         deviceUdid: "00008110-001234560E10801E",
         xcodeOrgId: "GY3LFAA59P",
-        updatedWdaBundleId: "build.kanna.mobile.webdriveragentrunner"
+        updatedWdaBundleId: "build.kanna.app.webdriveragentrunner"
       })
     ).toMatchObject({
       platformName: "iOS",
       "appium:automationName": "XCUITest",
       "appium:udid": "00008110-001234560E10801E",
       "appium:deviceName": "Jeremy's iPhone",
-      "appium:bundleId": "build.kanna.mobile",
+      "appium:bundleId": "build.kanna.app",
       "appium:wdaLocalPort": 4724,
       "appium:forceAppLaunch": true,
       "appium:shouldTerminateApp": true,
       "appium:xcodeOrgId": "GY3LFAA59P",
       "appium:xcodeSigningId": "Apple Development",
-      "appium:updatedWDABundleId": "build.kanna.mobile.webdriveragentrunner"
+      "appium:updatedWDABundleId": "build.kanna.app.webdriveragentrunner"
     });
   });
 });

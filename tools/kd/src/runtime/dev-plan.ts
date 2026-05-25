@@ -27,6 +27,45 @@ function shellEnvPrefix(env: Record<string, string | undefined>): string {
     .join(" ");
 }
 
+function mobileFirebaseEnv(input: BuildDevPlanInput): Record<string, string | undefined> {
+  const authPort = input.env.KANNA_FIREBASE_AUTH_PORT;
+  if (!authPort) {
+    return {};
+  }
+
+  return {
+    EXPO_PUBLIC_FIREBASE_API_KEY: input.env.EXPO_PUBLIC_FIREBASE_API_KEY ?? "kanna-local",
+    EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN:
+      input.env.EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN ?? "kanna-local.firebaseapp.com",
+    EXPO_PUBLIC_FIREBASE_PROJECT_ID:
+      input.env.EXPO_PUBLIC_FIREBASE_PROJECT_ID ?? "kanna-local",
+    EXPO_PUBLIC_FIREBASE_APP_ID:
+      input.env.EXPO_PUBLIC_FIREBASE_APP_ID ?? "kanna-mobile-local",
+    EXPO_PUBLIC_FIREBASE_AUTH_EMULATOR_HOST:
+      input.env.EXPO_PUBLIC_FIREBASE_AUTH_EMULATOR_HOST ??
+      resolveHostFromUrl(input.mobileServerUrl),
+    EXPO_PUBLIC_FIREBASE_AUTH_EMULATOR_PORT:
+      input.env.EXPO_PUBLIC_FIREBASE_AUTH_EMULATOR_PORT ?? authPort
+  };
+}
+
+function resolveHostFromUrl(url: string): string {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return "127.0.0.1";
+  }
+}
+
+function resolveRelayUrl(input: BuildDevPlanInput): string | undefined {
+  const relayPort = input.env.KANNA_RELAY_PORT;
+  if (!relayPort) {
+    return undefined;
+  }
+
+  return `ws://${resolveHostFromUrl(input.mobileServerUrl)}:${relayPort}`;
+}
+
 export function buildDevPlan(input: BuildDevPlanInput): DevPlan {
   const windows: DevWindow[] = [];
   const sharedEnv = { ...input.env };
@@ -37,6 +76,20 @@ export function buildDevPlan(input: BuildDevPlanInput): DevPlan {
       cwd: input.repoRoot,
       env: buildFirebaseCommandEnv(input.repoRoot, sharedEnv),
       command: `pnpm --dir services/firebase-functions build && pnpm exec firebase emulators:start --project kanna-local --config ${JSON.stringify(input.firebaseConfigPath)}`
+    });
+    const relayEnv = shellEnvPrefix({
+      PORT: input.env.KANNA_RELAY_PORT ?? "9080",
+      SKIP_AUTH: "true"
+    });
+    windows.push({
+      name: "relay",
+      cwd: `${input.repoRoot}/services/relay`,
+      env: {
+        ...sharedEnv,
+        SKIP_AUTH: "true",
+        PORT: input.env.KANNA_RELAY_PORT ?? "9080"
+      },
+      command: `${relayEnv} pnpm run dev`
     });
   }
 
@@ -50,13 +103,16 @@ export function buildDevPlan(input: BuildDevPlanInput): DevPlan {
 
   if (input.mobile) {
     const mobileEnv = shellEnvPrefix({
-      EXPO_PUBLIC_KANNA_SERVER_URL: input.mobileServerUrl
+      EXPO_PUBLIC_KANNA_SERVER_URL: input.mobileServerUrl,
+      EXPO_PUBLIC_KANNA_RELAY_URL: resolveRelayUrl(input),
+      RCT_METRO_PORT: input.env.KANNA_MOBILE_PORT ?? "8081",
+      ...mobileFirebaseEnv(input)
     });
     windows.push({
       name: "mobile",
       cwd: `${input.repoRoot}/apps/mobile`,
       env: sharedEnv,
-      command: `${mobileEnv} pnpm run dev -- --port ${input.env.KANNA_MOBILE_PORT ?? "8081"}`
+      command: `unset NO_COLOR; ${mobileEnv} pnpm run dev -- --port ${input.env.KANNA_MOBILE_PORT ?? "8081"}`
     });
   }
 

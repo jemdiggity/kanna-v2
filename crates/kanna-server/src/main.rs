@@ -28,9 +28,15 @@ async fn main() {
     if args.get(1).map(|s| s.as_str()) == Some("register") {
         let relay_url = args
             .get(2)
-            .map(|s| s.as_str())
-            .unwrap_or("wss://kanna-relay.run.app");
-        if let Err(e) = register::register(relay_url).await {
+            .cloned()
+            .or_else(|| std::env::var("KANNA_RELAY_URL").ok())
+            .map(|url| url.trim().to_string())
+            .filter(|url| !url.is_empty());
+        let Some(relay_url) = relay_url else {
+            eprintln!("Registration requires a relay URL argument or KANNA_RELAY_URL.");
+            std::process::exit(1);
+        };
+        if let Err(e) = register::register(&relay_url).await {
             eprintln!("Registration failed: {}", e);
             std::process::exit(1);
         }
@@ -45,7 +51,15 @@ async fn main() {
         }
     };
 
-    log::info!("kanna-server starting, relay: {}", config.relay_url);
+    let relay_url = config.relay_url.trim().to_string();
+    log::info!(
+        "kanna-server starting, relay: {}",
+        if relay_url.is_empty() {
+            "(disabled)"
+        } else {
+            &relay_url
+        }
+    );
 
     let heartbeat_config = config.clone();
     tokio::spawn(async move {
@@ -67,20 +81,28 @@ async fn main() {
 
     let http_state = Arc::new(http_api::AppState::new(config.clone()));
     let lan_task = tokio::spawn(http_api::serve(Arc::clone(&http_state)));
-    let relay_loop = run_relay_loop(config, db, http_state);
-    tokio::pin!(relay_loop);
-
-    tokio::select! {
-        result = lan_task => match result {
+    if relay_url.is_empty() {
+        match lan_task.await {
             Ok(Ok(())) => log::warn!("LAN API exited unexpectedly"),
             Ok(Err(err)) => log::error!("LAN API failed: {}", err),
             Err(err) => log::error!("LAN API task join error: {}", err),
-        },
-        result = &mut relay_loop => match result {
-            Ok(()) => log::warn!("relay loop exited unexpectedly"),
-            Err(err) => log::error!("relay loop failed: {}", err),
-        },
-    };
+        }
+    } else {
+        let relay_loop = run_relay_loop(config, db, http_state);
+        tokio::pin!(relay_loop);
+
+        tokio::select! {
+            result = lan_task => match result {
+                Ok(Ok(())) => log::warn!("LAN API exited unexpectedly"),
+                Ok(Err(err)) => log::error!("LAN API failed: {}", err),
+                Err(err) => log::error!("LAN API task join error: {}", err),
+            },
+            result = &mut relay_loop => match result {
+                Ok(()) => log::warn!("relay loop exited unexpectedly"),
+                Err(err) => log::error!("relay loop failed: {}", err),
+            },
+        };
+    }
 }
 
 async fn run_relay_loop(

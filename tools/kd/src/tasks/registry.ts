@@ -4,12 +4,13 @@ import { z } from "zod";
 import { readKannaRepoConfig } from "../config";
 import { resolveKdContext, type KdContext } from "../context";
 import { cleanWorkspace } from "../runtime/clean";
+import { deployFirebaseCloud } from "../runtime/cloud-deploy";
 import { buildDevPlan } from "../runtime/dev-plan";
 import { assertNotProductionDb, resetSqliteDb, seedSqliteDb, type DevDbTarget } from "../runtime/db";
 import { killWorkspaceDaemons } from "../runtime/daemon";
 import { checkRequiredCommands } from "../runtime/doctor";
 import { writeCargoConfig } from "../runtime/env-sync";
-import { buildFirebaseCommandEnv, buildFirebaseEmulatorArgs, writeFirebaseEmulatorConfig } from "../runtime/firebase";
+import { buildFirebaseCommandEnv, buildFirebaseEmulatorArgs, formatMissingFirebaseEmulators, resolveFirebaseEnvFromReference, writeFirebaseEmulatorConfig } from "../runtime/firebase";
 import { resolveMobileServerUrl } from "../runtime/mobile";
 import { buildMobileDeviceSmokeCommand, buildMobileTestCommand } from "../runtime/mobile-commands";
 import { buildConfigSchemaPages } from "../runtime/pages";
@@ -34,6 +35,7 @@ export interface DevUpInput {
   db?: string;
   daemonDir?: string;
   transferRoot?: string;
+  firebaseEnvFrom?: string;
 }
 
 export interface DevDownInput {
@@ -49,7 +51,8 @@ export const devUpInputSchema = z.object({
   killDaemon: z.boolean().default(false),
   db: z.string().optional(),
   daemonDir: z.string().optional(),
-  transferRoot: z.string().optional()
+  transferRoot: z.string().optional(),
+  firebaseEnvFrom: z.string().optional()
 });
 
 const devDownInputSchema = z.object({
@@ -95,6 +98,11 @@ const releaseShipInputSchema = z.object({
   dryRun: z.boolean().default(false)
 });
 
+const cloudDeployInputSchema = z.object({
+  production: z.boolean().default(false),
+  relay: z.boolean().default(false)
+});
+
 export interface ExecutorInput {
   runner: CommandRunner;
   context: {
@@ -121,6 +129,7 @@ interface ResolveDefaultContextOptions {
   dbOverride?: string;
   daemonDirOverride?: string;
   transferRootOverride?: string;
+  firebaseEnvFrom?: string;
 }
 
 async function resolveDefaultContext(env: NodeJS.ProcessEnv, options: ResolveDefaultContextOptions = {}): Promise<KdContext> {
@@ -130,10 +139,13 @@ async function resolveDefaultContext(env: NodeJS.ProcessEnv, options: ResolveDef
   const config = readKannaRepoConfig(repoRoot);
   const bundleIdentifier = readDesktopBundleIdentifier(repoRoot);
   const homeDir = env.HOME?.trim() || homedir();
+  const resolvedEnv = options.firebaseEnvFrom
+    ? { ...env, ...resolveFirebaseEnvFromReference(repoRoot, options.firebaseEnvFrom) }
+    : env;
   return resolveKdContext({
     repoRoot,
     homeDir,
-    env,
+    env: resolvedEnv,
     branch,
     commit,
     bundleIdentifier,
@@ -157,10 +169,24 @@ async function executeDevUp(input: DevUpInput): Promise<TaskResult> {
   const context = await resolveDefaultContext(process.env, {
     dbOverride: input.db,
     daemonDirOverride: input.daemonDir,
-    transferRootOverride: input.transferRoot
+    transferRootOverride: input.transferRoot,
+    firebaseEnvFrom: input.firebaseEnvFrom
   });
   const dbTarget = devDbTarget(context);
   assertNotProductionDb(dbTarget);
+
+  if (input.firebaseEnvFrom) {
+    const statuses = await getPortStatuses(nodeCommandRunner, {
+      auth: context.ports.KANNA_FIREBASE_AUTH_PORT,
+      firestore: context.ports.KANNA_FIREBASE_FIRESTORE_PORT,
+      functions: context.ports.KANNA_FIREBASE_FUNCTIONS_PORT,
+      ui: context.ports.KANNA_FIREBASE_UI_PORT
+    });
+    const missing = formatMissingFirebaseEmulators(input.firebaseEnvFrom, statuses);
+    if (missing) {
+      throw new Error(missing);
+    }
+  }
 
   if (input.deleteDb) {
     await resetSqliteDb(nodeCommandRunner, dbTarget);
@@ -334,6 +360,17 @@ export const taskDefinitions = [
     execute: async () => {
       const context = await resolveDefaultContext(process.env);
       const configPath = writeFirebaseEmulatorConfig(context.repoRoot, context.ports);
+      const build = await nodeCommandRunner.run("pnpm", ["--dir", "services/firebase-functions", "build"], {
+        cwd: context.repoRoot,
+        env: context.env,
+      });
+      if (build.exitCode !== 0) {
+        return {
+          ok: false,
+          message: build.stderr || build.stdout || "Firebase functions build failed.",
+          data: { configPath, exitCode: build.exitCode }
+        };
+      }
       const result = await nodeCommandRunner.run("pnpm", buildFirebaseEmulatorArgs(configPath, []), {
         cwd: context.repoRoot,
         env: buildFirebaseCommandEnv(context.repoRoot, context.env)
@@ -532,6 +569,30 @@ export const taskDefinitions = [
         runner: nodeCommandRunner
       });
       return { ok: true, message: formatJsonResult(result), data: result };
+    }
+  },
+  {
+    id: "cloud.deploy",
+    description: "Deploy Kanna Firebase cloud services.",
+    inputSchema: cloudDeployInputSchema,
+    execute: async (_context, input) => {
+      const parsed = cloudDeployInputSchema.parse(input);
+      const context = await resolveDefaultContext(process.env);
+      try {
+        const result = await deployFirebaseCloud({
+          repoRoot: context.repoRoot,
+          env: context.env,
+          runner: nodeCommandRunner,
+          production: parsed.production,
+          relay: parsed.relay
+        });
+        return { ok: true, message: formatJsonResult(result), data: result };
+      } catch (error) {
+        return {
+          ok: false,
+          message: error instanceof Error ? error.message : String(error)
+        };
+      }
     }
   },
   {

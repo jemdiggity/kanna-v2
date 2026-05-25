@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import type { TaskSummary } from "../lib/api/types";
+import type { RefreshStatus } from "../state/sessionStore";
 import {
   buildMoreCommandPalette,
   type MoreCommandAction
@@ -8,6 +9,7 @@ import {
 
 interface MoreScreenProps {
   pairingCode: string | null;
+  refreshStatus: RefreshStatus;
   selectedTask: TaskSummary | null;
   onRefresh(): void;
   onShowDesktops(): void;
@@ -20,6 +22,7 @@ interface MoreScreenProps {
 
 export function MoreScreen({
   pairingCode,
+  refreshStatus,
   selectedTask,
   onRefresh,
   onShowDesktops,
@@ -31,8 +34,8 @@ export function MoreScreen({
 }: MoreScreenProps) {
   const [query, setQuery] = useState("");
   const paletteEntries = useMemo(
-    () => buildMoreCommandPalette({ pairingCode, selectedTask }, query),
-    [pairingCode, query, selectedTask]
+    () => buildMoreCommandPalette({ pairingCode, refreshStatus, selectedTask }, query),
+    [pairingCode, query, refreshStatus, selectedTask]
   );
 
   const handleAction = (action: MoreCommandAction) => {
@@ -99,17 +102,23 @@ export function MoreScreen({
 
           <View style={styles.paletteList}>
             {paletteEntries.length ? (
-              paletteEntries.map((action) => (
-                <Pressable
-                  key={action.id}
-                  style={styles.action}
-                  onPress={() => handleAction(action)}
-                >
-                  <Text style={styles.commandLabel}>{action.sectionTitle}</Text>
-                  <Text style={styles.actionTitle}>{action.title}</Text>
-                  <Text style={styles.actionCopy}>{action.copy}</Text>
-                </Pressable>
-              ))
+              paletteEntries.map((action) => {
+                const isRefreshing =
+                  action.id === "refresh" && refreshStatus === "refreshing";
+
+                return (
+                  <Pressable
+                    disabled={isRefreshing}
+                    key={action.id}
+                    style={[styles.action, isRefreshing ? styles.actionDisabled : null]}
+                    onPress={() => handleAction(action)}
+                  >
+                    <Text style={styles.commandLabel}>{action.sectionTitle}</Text>
+                    <Text style={styles.actionTitle}>{action.title}</Text>
+                    <Text style={styles.actionCopy}>{action.copy}</Text>
+                  </Pressable>
+                );
+              })
             ) : (
               <View style={styles.emptyState}>
                 <Text style={styles.emptyTitle}>No commands matched</Text>
@@ -215,6 +224,9 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     gap: 6,
     padding: 14
+  },
+  actionDisabled: {
+    opacity: 0.65
   },
   actionTitle: {
     color: "#F5F7FB",

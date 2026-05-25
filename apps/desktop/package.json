@@ -35,6 +35,7 @@
     "@xterm/addon-webgl": "0.20.0-beta.194",
     "@xterm/xterm": "6.1.0-beta.195",
     "chart.js": "^4",
+    "firebase": "^12.12.1",
     "markdown-it": "^14.1.0",
     "markdown-it-strikethrough-alt": "^1.0.0",
     "markdown-it-task-lists": "^2.1.1",

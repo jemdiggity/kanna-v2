@@ -36,3 +36,54 @@ export interface DesktopRecord {
   pairingCodeId: string;
   revokedAt: string | null;
 }
+
+export type CloudTaskActivity = "idle" | "working" | "unread";
+export type CloudTaskStatus =
+  | "active"
+  | "blocked"
+  | "pr"
+  | "merge"
+  | "done"
+  | "transferring";
+export type CloudTaskTransferState =
+  | "none"
+  | "outgoing"
+  | "incoming"
+  | "finalization_pending";
+
+export interface CloudTaskSnapshot {
+  cloudTaskId: string;
+  ownerDesktopId: string;
+  ownerLocalTaskId: string;
+  title: string;
+  promptSnippet: string | null;
+  displayName: string | null;
+  stage: string;
+  activity: CloudTaskActivity;
+  status: CloudTaskStatus;
+  repo: {
+    cloudRepoId: string;
+    name: string;
+    remoteUrl: string | null;
+    remoteUrlHash: string | null;
+    defaultBranch: string | null;
+  };
+  branch: string | null;
+  baseRef: string | null;
+  prNumber: number | null;
+  prUrl: string | null;
+  agent: {
+    provider: "claude" | "copilot" | "codex";
+    type: string;
+  };
+  transfer: {
+    state: CloudTaskTransferState;
+    transferId: string | null;
+    sourceDesktopId: string | null;
+    destinationDesktopId: string | null;
+  };
+  blockedByTaskIds: string[];
+  createdAt: string;
+  updatedAt: string;
+  closedAt: string | null;
+}

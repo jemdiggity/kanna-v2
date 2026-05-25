@@ -40,6 +40,16 @@ service cloud.firestore {
       allow get: if isSignedInAs(uid);
       allow list, create, delete: if false;
       allow update: if isSignedInAs(uid) && isExpectedProfileUpdate();
+
+      match /tasks/{taskId} {
+        allow read: if isSignedInAs(uid);
+        allow write: if false;
+      }
+
+      match /transfers/{transferId} {
+        allow read: if isSignedInAs(uid);
+        allow write: if false;
+      }
     }
 
     match /desktopPresence/{desktopId} {

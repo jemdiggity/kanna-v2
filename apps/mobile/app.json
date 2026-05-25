@@ -3,13 +3,15 @@
     "name": "Kanna Mobile",
     "slug": "kanna-mobile",
     "scheme": "kanna",
+    "icon": "./assets/icon.png",
     "platforms": [
       "ios",
       "android"
     ],
     "ios": {
-      "bundleIdentifier": "build.kanna.mobile",
-      "appleTeamId": "GY3LFAA59P"
+      "bundleIdentifier": "build.kanna.app",
+      "appleTeamId": "GY3LFAA59P",
+      "googleServicesFile": "./GoogleService-Info.plist"
     }
   }
 }

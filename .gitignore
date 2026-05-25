@@ -3,8 +3,10 @@ dist/
 target/
 .build/
 .kanna-daemon/
+.kanna-daemon-*/
 .kanna-daemon-e2e/
 .kanna-transfer/
+.kanna-transfer-*/
 *.sqlite
 *.sqlite-journal
 .DS_Store
@@ -21,3 +23,4 @@ apps/mobile/ios/
 bazel-*
 .firebase-*.kanna.json
 firestore-debug.log
+firebase-debug.log

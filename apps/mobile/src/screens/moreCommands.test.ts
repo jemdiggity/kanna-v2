@@ -89,4 +89,21 @@ describe("buildMoreCommandSections", () => {
       "compose"
     ]);
   });
+
+  it("labels the refresh command while refresh is in progress", () => {
+    const entries = buildMoreCommandPalette(
+      {
+        pairingCode: null,
+        refreshStatus: "refreshing",
+        selectedTask: null
+      },
+      ""
+    );
+
+    expect(entries[0]).toMatchObject({
+      id: "refresh",
+      title: "Refreshing...",
+      copy: "Reloading desktops, repos, and recent tasks."
+    });
+  });
 });

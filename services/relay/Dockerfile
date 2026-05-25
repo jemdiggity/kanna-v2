@@ -1,25 +1,24 @@
-# Stage 1: Build
 FROM node:22-alpine AS build
 
 WORKDIR /app
 
-COPY package.json package-lock.json* ./
-RUN npm ci
+RUN corepack enable
 
-COPY tsconfig.json ./
-COPY src/ ./src/
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY services/relay/package.json ./services/relay/package.json
+COPY tools/kd/package.json ./tools/kd/package.json
+COPY services/relay/tsconfig.json ./services/relay/tsconfig.json
+COPY services/relay/src/ ./services/relay/src/
 
-RUN npx tsc
+RUN pnpm install --frozen-lockfile --filter kanna-relay...
+RUN pnpm --dir services/relay build
+RUN pnpm --filter kanna-relay deploy --prod --legacy /relay
 
-# Stage 2: Production
 FROM node:22-alpine
 
 WORKDIR /app
 
-COPY package.json package-lock.json* ./
-RUN npm ci --omit=dev
-
-COPY --from=build /app/dist ./dist
+COPY --from=build /relay ./
 
 USER node
 

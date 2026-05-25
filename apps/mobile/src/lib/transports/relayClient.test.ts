@@ -204,4 +204,64 @@ describe("createRelayDesktopClient", () => {
       })
     );
   });
+
+  it("decodes split utf-8 terminal output across relay chunks", async () => {
+    const socket = createSocket();
+    let nextId = 1;
+    const client = createRelayDesktopClient({
+      createSocket: () => socket,
+      getIdToken: async () => "id-token-1",
+      nextId: () => `invoke-${nextId++}`,
+      relayUrl: "wss://relay.example"
+    });
+    const events: unknown[] = [];
+
+    client.observeTaskTerminal(
+      { desktopId: "desktop-1", taskId: "task-1" },
+      (event) => {
+        events.push(event);
+      }
+    );
+
+    socket.onopen?.();
+    await flushPromises();
+    socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok", userId: "user-1" }) });
+    await flushPromises();
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: "response",
+        id: "invoke-1",
+        data: null
+      })
+    });
+    await flushPromises();
+
+    const spinnerBytes = Buffer.from("⠋");
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: "event",
+        name: "terminal_output",
+        payload: {
+          session_id: "task-1",
+          data_b64: Buffer.from(spinnerBytes.subarray(0, 1)).toString("base64")
+        }
+      })
+    });
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: "event",
+        name: "terminal_output",
+        payload: {
+          session_id: "task-1",
+          data_b64: Buffer.from(spinnerBytes.subarray(1)).toString("base64")
+        }
+      })
+    });
+
+    expect(events).toEqual([
+      { type: "ready", taskId: "task-1" },
+      { type: "output", taskId: "task-1", text: "" },
+      { type: "output", taskId: "task-1", text: "⠋" }
+    ]);
+  });
 });

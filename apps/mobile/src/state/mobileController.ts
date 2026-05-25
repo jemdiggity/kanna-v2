@@ -123,7 +123,6 @@ export function createMobileController(
             break;
           case "error":
             store.setTaskTerminalStatus(taskId, "error");
-            store.setErrorMessage(event.message);
             break;
         }
       });
@@ -213,7 +212,7 @@ export function createMobileController(
           return;
         }
 
-        store.setConnectionMode("lan");
+        store.setConnectionMode(status.lanHost === "cloud" ? "remote" : "lan");
         store.setConnectionState("connected");
         await loadCollections();
         startBackgroundRefresh();
@@ -268,10 +267,14 @@ export function createMobileController(
     },
 
     async refresh() {
+      store.setRefreshStatus("refreshing");
       if (store.getState().selectedTaskId) {
         stopTaskTerminal();
       }
       await this.bootstrap();
+      store.setRefreshStatus(
+        store.getState().connectionState === "error" ? "error" : "updated"
+      );
     },
 
     showView(view) {
@@ -284,6 +287,7 @@ export function createMobileController(
       store.setSelectedTask(null);
       store.clearTaskTerminal();
       await this.bootstrap();
+      store.setActiveView("tasks");
     },
 
     async selectRepo(repoId) {
@@ -430,5 +434,5 @@ function mapCreatedTask(response: CreateTaskResponse): TaskSummary {
 }
 
 function normalizeSubmittedInput(input: string): string {
-  return input.endsWith("\n") ? input : `${input}\n`;
+  return input.endsWith("\r") ? input : `${input}\r`;
 }

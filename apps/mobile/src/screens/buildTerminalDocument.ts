@@ -49,12 +49,14 @@ export function buildTerminalDocument({ bottomInset }: BuildTerminalDocumentOpti
 
       .viewport {
         height: 100%;
-        overflow: hidden;
+        overflow-x: auto;
+        overflow-y: hidden;
         padding-bottom: ${bottomInset}px;
       }
 
       #terminal-root {
         height: 100%;
+        min-width: 1760px;
         width: 100%;
       }
 
@@ -81,9 +83,12 @@ export function buildTerminalDocument({ bottomInset }: BuildTerminalDocumentOpti
     <script>${XTERM_WEBVIEW_FIT_ADDON_SCRIPT}</script>
     <script>
       const root = document.getElementById("terminal-root");
+      const viewport = document.getElementById("viewport");
       const TerminalCtor = globalThis.Terminal;
       const FitAddonCtor = globalThis.FitAddon && globalThis.FitAddon.FitAddon;
+      const TERMINAL_COLS = 220;
       const term = new TerminalCtor({
+        cols: TERMINAL_COLS,
         fontFamily: '"JetBrains Mono", "SF Mono", Menlo, monospace',
         fontSize: 13,
         lineHeight: 1,
@@ -152,7 +157,19 @@ export function buildTerminalDocument({ bottomInset }: BuildTerminalDocumentOpti
 
       function fitTerminal() {
         try {
-          fitAddon.fit();
+          const proposed = fitAddon.proposeDimensions();
+          if (proposed) {
+            term.resize(TERMINAL_COLS, proposed.rows);
+          } else {
+            fitAddon.fit();
+            if (term.cols < TERMINAL_COLS) {
+              term.resize(TERMINAL_COLS, term.rows);
+            }
+          }
+          root.style.width = Math.max(
+            viewport.clientWidth,
+            TERMINAL_COLS * 8
+          ) + "px";
           syncViewport();
         } catch (_error) {
           // WebView layout is still settling. The next resize tick will retry.
@@ -272,7 +289,11 @@ function normalizeTerminalText(input: string): string {
     Uint8Array.from(input, (char) => char.charCodeAt(0) & 0xff)
   );
 
-  return containsTerminalGlyphs(normalized) ? normalized : input;
+  if (containsTerminalGlyphs(normalized)) {
+    return normalized;
+  }
+
+  return mojibakeScore(normalized) < mojibakeScore(input) ? normalized : input;
 }
 
 function looksLikeMojibake(input: string): boolean {
@@ -280,5 +301,10 @@ function looksLikeMojibake(input: string): boolean {
 }
 
 function containsTerminalGlyphs(input: string): boolean {
-  return /[╭╮╰╯│─┌┐└┘├┤┬┴┼]/u.test(input);
+  return /[╭╮╰╯│─┌┐└┘├┤┬┴┼⠁-⣿]/u.test(input);
+}
+
+function mojibakeScore(input: string): number {
+  const matches = input.match(/[âÃð][\u0080-\u00bf]?|�/gu);
+  return matches ? matches.length : 0;
 }

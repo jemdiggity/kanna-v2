@@ -144,6 +144,45 @@ describe("createMobileController", () => {
     expect(store.getState().repoTasks.map((task) => task.id)).toEqual(["task-1"]);
   });
 
+  it("loads task collections from the signed-in cloud client without LAN pairing", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const auth = createAuthSessionMock();
+    client.getStatus.mockResolvedValueOnce({
+      state: "running",
+      desktopId: "cloud",
+      desktopName: "Kanna Cloud",
+      lanHost: "cloud",
+      lanPort: 0,
+      pairingCode: null
+    });
+    client.listDesktops.mockResolvedValueOnce([
+      { id: "desktop-1", name: "MacBook", online: true, mode: "remote" }
+    ]);
+    client.listRecentTasks.mockResolvedValueOnce([
+      {
+        id: "cloud-task-1",
+        repoId: "repo-1",
+        title: "Cloud task",
+        stage: "in progress"
+      }
+    ]);
+    auth.getState = vi.fn(() => ({
+      status: "signedIn",
+      user: { uid: "user-1", email: "u@example.com", displayName: null }
+    }));
+    const controller = createMobileController(client, store, auth);
+
+    await controller.bootstrap();
+
+    expect(store.getState()).toMatchObject({
+      connectionMode: "remote",
+      connectionState: "connected",
+      desktopName: "Kanna Cloud",
+      recentTasks: [{ id: "cloud-task-1", title: "Cloud task" }]
+    });
+  });
+
   it("searches tasks and switches to the search surface", async () => {
     const store = createSessionStore();
     const controller = createMobileController(createClientMock(), store);
@@ -216,6 +255,24 @@ describe("createMobileController", () => {
     expect(client.listRepoTasks).toHaveBeenLastCalledWith("repo-2");
     expect(store.getState().selectedRepoId).toBe("repo-2");
     expect(store.getState().repoTasks.map((task) => task.id)).toEqual(["task-repo-2"]);
+  });
+
+  it("selects a desktop and returns to the task list", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    controller.showView("desktops");
+    await controller.selectDesktop("desktop-2");
+
+    expect(store.getState()).toMatchObject({
+      activeView: "tasks",
+      selectedDesktopId: "desktop-2",
+      selectedTaskId: null
+    });
+    expect(client.getStatus).toHaveBeenCalledTimes(2);
+    expect(client.listDesktops).toHaveBeenCalledTimes(2);
   });
 
   it("creates a pairing session and refreshes the desktop state", async () => {
@@ -292,6 +349,26 @@ describe("createMobileController", () => {
     });
     expect(store.getState().taskTerminalOutput).toContain("First line");
     expect(store.getState().taskTerminalOutput).toContain("Second line");
+  });
+
+  it("keeps terminal stream errors scoped to the selected task", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    controller.openTask("task-1");
+    client.__terminalStream.emit({
+      type: "error",
+      taskId: "task-1",
+      message: "session not found: task-1"
+    });
+
+    expect(store.getState()).toMatchObject({
+      selectedTaskId: "task-1",
+      taskTerminalStatus: "error",
+      errorMessage: null
+    });
   });
 
   it("selects a desktop and refreshes status through the active client", async () => {
@@ -502,6 +579,21 @@ describe("createMobileController", () => {
     expect(store.getState().taskTerminalTaskId).toBe("task-1");
   });
 
+  it("reports explicit refresh progress and completion", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    const refreshPromise = controller.refresh();
+
+    expect(store.getState().refreshStatus).toBe("refreshing");
+
+    await refreshPromise;
+
+    expect(store.getState().refreshStatus).toBe("updated");
+  });
+
   it("sends task input to the desktop daemon", async () => {
     const store = createSessionStore();
     const client = createClientMock();
@@ -510,7 +602,7 @@ describe("createMobileController", () => {
     await controller.bootstrap();
     await controller.sendTaskInput("task-1", "continue");
 
-    expect(client.sendTaskInput).toHaveBeenCalledWith("task-1", "continue\n");
+    expect(client.sendTaskInput).toHaveBeenCalledWith("task-1", "continue\r");
   });
 
   it("closes the selected desktop task and clears the mobile task view", async () => {

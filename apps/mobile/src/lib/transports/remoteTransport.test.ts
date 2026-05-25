@@ -272,6 +272,131 @@ describe("remote transport", () => {
     });
   });
 
+  it("uses the cloud task index for recent tasks when provided", async () => {
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>();
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [],
+      getSelectedDesktopId: () => "desktop-1",
+      invokeDesktop,
+      listCloudTasks: async () => [
+        {
+          id: "cloud-task-1",
+          repoId: "repo-1",
+          title: "Cloud task",
+          stage: "in progress"
+        }
+      ]
+    });
+
+    await expect(transport.listRecentTasks()).resolves.toEqual([
+      {
+        id: "cloud-task-1",
+        repoId: "repo-1",
+        title: "Cloud task",
+        stage: "in progress"
+      }
+    ]);
+    expect(invokeDesktop).not.toHaveBeenCalled();
+  });
+
+  it("routes cloud task actions to the owner desktop and local task id", async () => {
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockResolvedValue(null);
+    const subscription = { close: vi.fn() };
+    const observeTaskTerminal = vi.fn<RemoteTaskTerminalObserver>(() => subscription);
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [],
+      getSelectedDesktopId: () => null,
+      invokeDesktop,
+      observeTaskTerminal,
+      listCloudTasks: async () => [
+        {
+          id: "cloud-task-1",
+          repoId: "repo-1",
+          title: "Cloud task",
+          stage: "in progress",
+          ownerDesktopId: "desktop-owner",
+          ownerLocalTaskId: "local-task-1",
+          ownerOnline: true
+        }
+      ]
+    });
+    const listener = vi.fn();
+
+    await transport.listRecentTasks();
+    expect(transport.observeTaskTerminal("cloud-task-1", listener)).toBe(subscription);
+    await expect(transport.sendTaskInput("cloud-task-1", "continue")).resolves.toBeUndefined();
+    await expect(transport.closeTask("cloud-task-1")).resolves.toBeUndefined();
+    await expect(transport.runMergeAgent("cloud-task-1")).resolves.toBeNull();
+    await expect(transport.advanceTaskStage("cloud-task-1")).resolves.toBeNull();
+
+    expect(observeTaskTerminal).toHaveBeenCalledWith(
+      {
+        desktopId: "desktop-owner",
+        taskId: "local-task-1"
+      },
+      listener
+    );
+    expect(invokeDesktop).toHaveBeenNthCalledWith(1, {
+      desktopId: "desktop-owner",
+      method: "POST",
+      path: "/v1/tasks/local-task-1/input",
+      body: { input: "continue" }
+    });
+    expect(invokeDesktop).toHaveBeenNthCalledWith(2, {
+      desktopId: "desktop-owner",
+      method: "POST",
+      path: "/v1/tasks/local-task-1/actions/close",
+      body: null
+    });
+    expect(invokeDesktop).toHaveBeenNthCalledWith(3, {
+      desktopId: "desktop-owner",
+      method: "POST",
+      path: "/v1/tasks/local-task-1/actions/run-merge-agent",
+      body: null
+    });
+    expect(invokeDesktop).toHaveBeenNthCalledWith(4, {
+      desktopId: "desktop-owner",
+      method: "POST",
+      path: "/v1/tasks/local-task-1/actions/advance-stage",
+      body: null
+    });
+  });
+
+  it("serves cloud status and repo task collections without selecting a desktop", async () => {
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>();
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [],
+      getSelectedDesktopId: () => null,
+      invokeDesktop,
+      listCloudTasks: async () => [
+        {
+          id: "cloud-task-1",
+          repoId: "repo-1",
+          title: "Cloud task",
+          stage: "in progress"
+        }
+      ]
+    });
+
+    await expect(transport.getStatus()).resolves.toMatchObject({
+      desktopId: "cloud",
+      desktopName: "Kanna Cloud",
+      lanHost: "cloud"
+    });
+    await expect(transport.listRepos()).resolves.toEqual([
+      { id: "repo-1", name: "repo-1" }
+    ]);
+    await expect(transport.listRepoTasks("repo-1")).resolves.toEqual([
+      {
+        id: "cloud-task-1",
+        repoId: "repo-1",
+        title: "Cloud task",
+        stage: "in progress"
+      }
+    ]);
+    expect(invokeDesktop).not.toHaveBeenCalled();
+  });
+
   it("delegates remote terminal observation to the relay observer dependency", () => {
     const subscription = { close: vi.fn() };
     const observeTaskTerminal = vi.fn<RemoteTaskTerminalObserver>(() => subscription);

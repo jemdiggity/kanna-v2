@@ -83,6 +83,136 @@ impl TransferSidecarClient {
         Ok(peers)
     }
 
+    pub async fn set_task_snapshot(&mut self, snapshot: Value) -> Result<Value, String> {
+        let request_id = self.next_request_id("set-task-snapshot");
+        self.send_request(
+            json!({
+                "type": "set_task_snapshot",
+                "request_id": request_id,
+                "snapshot": snapshot,
+            }),
+            &request_id,
+        )
+        .await
+    }
+
+    pub async fn list_peer_task_snapshots(&mut self) -> Result<Vec<Value>, String> {
+        let request_id = self.next_request_id("list-task-snapshots");
+        let response = self
+            .send_request(
+                json!({
+                    "type": "list_peer_task_snapshots",
+                    "request_id": request_id,
+                }),
+                &request_id,
+            )
+            .await?;
+        let snapshots = response
+            .get("snapshots")
+            .and_then(Value::as_array)
+            .cloned()
+            .ok_or_else(|| {
+                "transfer sidecar list_peer_task_snapshots response missing snapshots".to_string()
+            })?;
+        Ok(snapshots)
+    }
+
+    pub async fn observe_peer_session(
+        &mut self,
+        peer_id: String,
+        session_id: String,
+    ) -> Result<Value, String> {
+        let request_id = self.next_request_id("observe-session");
+        self.send_request(
+            json!({
+                "type": "observe_peer_session",
+                "request_id": request_id,
+                "target_peer_id": peer_id,
+                "session_id": session_id,
+            }),
+            &request_id,
+        )
+        .await
+    }
+
+    pub async fn unobserve_peer_session(
+        &mut self,
+        peer_id: String,
+        session_id: String,
+    ) -> Result<Value, String> {
+        let request_id = self.next_request_id("unobserve-session");
+        self.send_request(
+            json!({
+                "type": "unobserve_peer_session",
+                "request_id": request_id,
+                "target_peer_id": peer_id,
+                "session_id": session_id,
+            }),
+            &request_id,
+        )
+        .await
+    }
+
+    pub async fn send_peer_session_input(
+        &mut self,
+        peer_id: String,
+        session_id: String,
+        data: String,
+    ) -> Result<Value, String> {
+        let request_id = self.next_request_id("send-input");
+        self.send_request(
+            json!({
+                "type": "send_peer_session_input",
+                "request_id": request_id,
+                "target_peer_id": peer_id,
+                "session_id": session_id,
+                "data": data.as_bytes().to_vec(),
+            }),
+            &request_id,
+        )
+        .await
+    }
+
+    pub async fn resize_peer_session(
+        &mut self,
+        peer_id: String,
+        session_id: String,
+        cols: u16,
+        rows: u16,
+    ) -> Result<Value, String> {
+        let request_id = self.next_request_id("resize-session");
+        self.send_request(
+            json!({
+                "type": "resize_peer_session",
+                "request_id": request_id,
+                "target_peer_id": peer_id,
+                "session_id": session_id,
+                "cols": cols,
+                "rows": rows,
+            }),
+            &request_id,
+        )
+        .await
+    }
+
+    pub async fn close_peer_task(
+        &mut self,
+        peer_id: String,
+        task_id: String,
+    ) -> Result<Value, String> {
+        let request_id = self.next_request_id("close-task");
+        self.send_request(
+            json!({
+                "type": "close_peer_task",
+                "request_id": request_id,
+                "target_peer_id": peer_id,
+                "task_id": task_id,
+            }),
+            &request_id,
+        )
+        .await
+    }
+
     pub async fn start_peer_pairing(&mut self, peer_id: String) -> Result<Value, String> {
         let request_id = self.next_request_id("pair");
         eprintln!(
@@ -502,6 +632,7 @@ fn forwarded_event_name(value: &Value) -> Option<&'static str> {
         Some("outgoing_transfer_finalization_requested") => {
             Some("outgoing-transfer-finalization-requested")
         }
+        Some("terminal_event") => Some("transfer-terminal-event"),
         _ => None,
     }
 }
@@ -515,16 +646,17 @@ fn build_transfer_sidecar_env(
 }
 
 fn build_transfer_sidecar_env_for_root(
-    _app_data_dir: &std::path::Path,
+    app_data_dir: &std::path::Path,
     transfer_root: &std::path::Path,
     machine_name: Option<&str>,
 ) -> Result<HashMap<String, String>, String> {
     let resolved =
         crate::transfer_identity::resolve_transfer_identity_for_root(transfer_root, machine_name)?;
-    build_transfer_sidecar_env_from_resolved(transfer_root, resolved)
+    build_transfer_sidecar_env_from_resolved(app_data_dir, transfer_root, resolved)
 }
 
 fn build_transfer_sidecar_env_from_resolved(
+    app_data_dir: &std::path::Path,
     transfer_root: &std::path::Path,
     resolved: crate::transfer_identity::ResolvedTransferIdentity,
 ) -> Result<HashMap<String, String>, String> {
@@ -563,6 +695,23 @@ fn build_transfer_sidecar_env_from_resolved(
             .filter(|value| !value.trim().is_empty())
             .unwrap_or(resolved.display_name),
     );
+    if let Ok(daemon_dir) = std::env::var("KANNA_DAEMON_DIR") {
+        if !daemon_dir.trim().is_empty() {
+            env.insert("KANNA_DAEMON_DIR".to_string(), daemon_dir);
+        }
+    }
+    let db_path = std::env::var("KANNA_DB_PATH")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| {
+            let db_name = std::env::var("KANNA_DB_NAME")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| "kanna-v2.db".to_string());
+            app_data_dir.join(db_name).to_string_lossy().into_owned()
+        });
+    env.insert("KANNA_DB_PATH".to_string(), db_path.clone());
+    env.insert("KANNA_CLI_DB_PATH".to_string(), db_path);
     Ok(env)
 }
 

@@ -5,6 +5,7 @@ export interface ExpoFirebaseEnv {
   EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET?: string;
   EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID?: string;
   EXPO_PUBLIC_FIREBASE_APP_ID?: string;
+  EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID?: string;
   EXPO_PUBLIC_FIREBASE_AUTH_EMULATOR_HOST?: string;
   EXPO_PUBLIC_FIREBASE_AUTH_EMULATOR_PORT?: string;
 }
@@ -16,6 +17,7 @@ export interface MobileFirebaseAppConfig {
   storageBucket?: string;
   messagingSenderId?: string;
   appId: string;
+  measurementId?: string;
 }
 
 export interface MobileFirebaseAuthEmulatorConfig {
@@ -37,28 +39,50 @@ export function readExpoFirebaseEnv(): ExpoFirebaseEnv {
 export function parseMobileFirebaseConfig(
   env: ExpoFirebaseEnv = readExpoFirebaseEnv()
 ): MobileFirebaseConfig {
-  const apiKey = normalizeEnvValue(env.EXPO_PUBLIC_FIREBASE_API_KEY);
-  const projectId = normalizeEnvValue(env.EXPO_PUBLIC_FIREBASE_PROJECT_ID);
-  const appId = normalizeEnvValue(env.EXPO_PUBLIC_FIREBASE_APP_ID);
+  const authEmulator = parseAuthEmulator(env);
+  const appDefaults = authEmulator ? null : productionMobileFirebaseAppConfig;
+  const apiKey =
+    normalizeEnvValue(env.EXPO_PUBLIC_FIREBASE_API_KEY) ?? appDefaults?.apiKey;
+  const projectId =
+    normalizeEnvValue(env.EXPO_PUBLIC_FIREBASE_PROJECT_ID) ?? appDefaults?.projectId;
+  const appId =
+    normalizeEnvValue(env.EXPO_PUBLIC_FIREBASE_APP_ID) ?? appDefaults?.appId;
   const app =
     apiKey && projectId && appId
       ? compactAppConfig({
           apiKey,
-          authDomain: normalizeEnvValue(env.EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN),
+          authDomain:
+            normalizeEnvValue(env.EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN) ??
+            appDefaults?.authDomain,
           projectId,
-          storageBucket: normalizeEnvValue(env.EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET),
-          messagingSenderId: normalizeEnvValue(
-            env.EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID
-          ),
-          appId
+          storageBucket:
+            normalizeEnvValue(env.EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET) ??
+            appDefaults?.storageBucket,
+          messagingSenderId:
+            normalizeEnvValue(env.EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID) ??
+            appDefaults?.messagingSenderId,
+          appId,
+          measurementId:
+            normalizeEnvValue(env.EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID) ??
+            appDefaults?.measurementId
         })
       : null;
 
   return {
     app,
-    authEmulator: parseAuthEmulator(env)
+    authEmulator
   };
 }
+
+const productionMobileFirebaseAppConfig: MobileFirebaseAppConfig = {
+  apiKey: "AIzaSyCi-PNR-oVOXjEKGJvDOF6wM-1J3Fd3U4k",
+  authDomain: "kanna-build.firebaseapp.com",
+  projectId: "kanna-build",
+  storageBucket: "kanna-build.firebasestorage.app",
+  messagingSenderId: "402613185450",
+  appId: "1:402613185450:web:252b2c98d1ef13bed859d3",
+  measurementId: "G-091WQZN4SS"
+};
 
 function compactAppConfig(config: MobileFirebaseAppConfig): MobileFirebaseAppConfig {
   const compacted: MobileFirebaseAppConfig = {
@@ -75,6 +99,9 @@ function compactAppConfig(config: MobileFirebaseAppConfig): MobileFirebaseAppCon
   }
   if (config.messagingSenderId) {
     compacted.messagingSenderId = config.messagingSenderId;
+  }
+  if (config.measurementId) {
+    compacted.measurementId = config.measurementId;
   }
 
   return compacted;

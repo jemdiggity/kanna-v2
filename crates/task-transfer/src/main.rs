@@ -64,6 +64,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         transfer_id: event.transfer_id,
                     }
                 }
+                RuntimeEvent::TerminalEvent {
+                    peer_id,
+                    session_id,
+                    event,
+                } => SidecarEvent::TerminalEvent {
+                    peer_id,
+                    session_id,
+                    event,
+                },
             };
 
             if write_json_line(&event_stdout, &payload).is_err() {
@@ -98,6 +107,77 @@ async fn handle_request(runtime: &TransferRuntime, request: ControlRequest) -> C
     match request {
         ControlRequest::ListPeers { request_id } => match runtime.list_peers().await {
             Ok(peers) => ControlResponse::ListPeers { request_id, peers },
+            Err(error) => control_error(request_id, error),
+        },
+        ControlRequest::SetTaskSnapshot {
+            request_id,
+            snapshot,
+        } => match runtime.set_task_snapshot(snapshot).await {
+            Ok(()) => ControlResponse::SetTaskSnapshot { request_id },
+            Err(error) => control_error(request_id, error),
+        },
+        ControlRequest::ListPeerTaskSnapshots { request_id } => {
+            match runtime.list_peer_task_snapshots().await {
+                Ok(snapshots) => ControlResponse::ListPeerTaskSnapshots {
+                    request_id,
+                    snapshots,
+                },
+                Err(error) => control_error(request_id, error),
+            }
+        }
+        ControlRequest::ObservePeerSession {
+            request_id,
+            target_peer_id,
+            session_id,
+        } => match runtime
+            .observe_peer_session(&target_peer_id, &session_id)
+            .await
+        {
+            Ok(()) => ControlResponse::ObservePeerSession { request_id },
+            Err(error) => control_error(request_id, error),
+        },
+        ControlRequest::SendPeerSessionInput {
+            request_id,
+            target_peer_id,
+            session_id,
+            data,
+        } => match runtime
+            .send_peer_session_input(&target_peer_id, &session_id, data)
+            .await
+        {
+            Ok(()) => ControlResponse::SendPeerSessionInput { request_id },
+            Err(error) => control_error(request_id, error),
+        },
+        ControlRequest::ResizePeerSession {
+            request_id,
+            target_peer_id,
+            session_id,
+            cols,
+            rows,
+        } => match runtime
+            .resize_peer_session(&target_peer_id, &session_id, cols, rows)
+            .await
+        {
+            Ok(()) => ControlResponse::ResizePeerSession { request_id },
+            Err(error) => control_error(request_id, error),
+        },
+        ControlRequest::ClosePeerTask {
+            request_id,
+            target_peer_id,
+            task_id,
+        } => match runtime.close_peer_task(&target_peer_id, &task_id).await {
+            Ok(()) => ControlResponse::ClosePeerTask { request_id },
+            Err(error) => control_error(request_id, error),
+        },
+        ControlRequest::UnobservePeerSession {
+            request_id,
+            target_peer_id,
+            session_id,
+        } => match runtime
+            .unobserve_peer_session(&target_peer_id, &session_id)
+            .await
+        {
+            Ok(()) => ControlResponse::UnobservePeerSession { request_id },
             Err(error) => control_error(request_id, error),
         },
         ControlRequest::StartPairing {

@@ -39,6 +39,7 @@ interface PendingInvoke {
 }
 
 interface TerminalObserver {
+  decoder: TextDecoder;
   desktopId: string;
   listener(event: TaskTerminalStreamEvent): void;
 }
@@ -221,7 +222,10 @@ export function createRelayDesktopClient({
         observer.listener({
           type: "output",
           taskId: sessionId,
-          text: decodeBase64(getStringField(message.payload, "data_b64") ?? "")
+          text: decodeBase64(
+            getStringField(message.payload, "data_b64") ?? "",
+            observer.decoder
+          )
         });
         break;
       case "session_exit":
@@ -273,7 +277,7 @@ export function createRelayDesktopClient({
       });
     },
     observeTaskTerminal({ desktopId, taskId }, listener) {
-      terminalObservers.set(taskId, { desktopId, listener });
+      terminalObservers.set(taskId, { decoder: new TextDecoder(), desktopId, listener });
       void sendInvoke(desktopId, {
         command: "observe_session",
         args: { session_id: taskId }
@@ -351,12 +355,12 @@ function getNumberField(record: Record<string, unknown>, field: string): number 
   return typeof value === "number" ? value : null;
 }
 
-function decodeBase64(value: string): string {
+function decodeBase64(value: string, decoder = new TextDecoder()): string {
   if (!value) {
     return "";
   }
 
   const binary = globalThis.atob(value);
   const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
-  return new TextDecoder().decode(bytes);
+  return decoder.decode(bytes, { stream: true });
 }

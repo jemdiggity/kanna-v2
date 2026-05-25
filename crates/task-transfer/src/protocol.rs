@@ -6,6 +6,41 @@ pub enum ControlRequest {
     ListPeers {
         request_id: String,
     },
+    SetTaskSnapshot {
+        request_id: String,
+        snapshot: serde_json::Value,
+    },
+    ListPeerTaskSnapshots {
+        request_id: String,
+    },
+    ObservePeerSession {
+        request_id: String,
+        target_peer_id: String,
+        session_id: String,
+    },
+    SendPeerSessionInput {
+        request_id: String,
+        target_peer_id: String,
+        session_id: String,
+        data: Vec<u8>,
+    },
+    ResizePeerSession {
+        request_id: String,
+        target_peer_id: String,
+        session_id: String,
+        cols: u16,
+        rows: u16,
+    },
+    ClosePeerTask {
+        request_id: String,
+        target_peer_id: String,
+        task_id: String,
+    },
+    UnobservePeerSession {
+        request_id: String,
+        target_peer_id: String,
+        session_id: String,
+    },
     StartPairing {
         request_id: String,
         target_peer_id: String,
@@ -65,6 +100,28 @@ pub enum ControlResponse {
     ListPeers {
         request_id: String,
         peers: Vec<DiscoveredPeer>,
+    },
+    SetTaskSnapshot {
+        request_id: String,
+    },
+    ListPeerTaskSnapshots {
+        request_id: String,
+        snapshots: Vec<PeerTaskSnapshot>,
+    },
+    ObservePeerSession {
+        request_id: String,
+    },
+    SendPeerSessionInput {
+        request_id: String,
+    },
+    ResizePeerSession {
+        request_id: String,
+    },
+    ClosePeerTask {
+        request_id: String,
+    },
+    UnobservePeerSession {
+        request_id: String,
     },
     StartPairing {
         request_id: String,
@@ -157,6 +214,33 @@ pub enum PeerRequest {
         requester_peer_id: String,
         sealed_payload: String,
     },
+    GetTaskSnapshot {
+        request_id: String,
+        requester_peer_id: String,
+    },
+    ObserveSession {
+        request_id: String,
+        requester_peer_id: String,
+        session_id: String,
+    },
+    SendSessionInput {
+        request_id: String,
+        requester_peer_id: String,
+        session_id: String,
+        data: Vec<u8>,
+    },
+    ResizeSession {
+        request_id: String,
+        requester_peer_id: String,
+        session_id: String,
+        cols: u16,
+        rows: u16,
+    },
+    CloseTask {
+        request_id: String,
+        requester_peer_id: String,
+        task_id: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -191,8 +275,48 @@ pub enum PeerResponse {
         request_id: String,
         transfer_id: String,
     },
+    TaskSnapshot {
+        request_id: String,
+        peer_id: String,
+        display_name: String,
+        snapshot: serde_json::Value,
+    },
+    ObserveSession {
+        request_id: String,
+        session_id: String,
+    },
+    SendSessionInput {
+        request_id: String,
+    },
+    ResizeSession {
+        request_id: String,
+    },
+    CloseTask {
+        request_id: String,
+    },
     Error {
         request_id: String,
+        message: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PeerTerminalEvent {
+    Snapshot {
+        session_id: String,
+        snapshot: serde_json::Value,
+    },
+    Output {
+        session_id: String,
+        data: Vec<u8>,
+    },
+    Exit {
+        session_id: String,
+        code: i32,
+    },
+    Error {
+        session_id: String,
         message: String,
     },
 }
@@ -218,6 +342,13 @@ pub struct DiscoveredPeer {
     pub protocol_version: u32,
     pub accepting_transfers: bool,
     pub trusted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerTaskSnapshot {
+    pub peer_id: String,
+    pub display_name: String,
+    pub snapshot: serde_json::Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -261,6 +392,11 @@ pub enum SidecarEvent {
     },
     OutgoingTransferFinalizationRequested {
         transfer_id: String,
+    },
+    TerminalEvent {
+        peer_id: String,
+        session_id: String,
+        event: PeerTerminalEvent,
     },
 }
 

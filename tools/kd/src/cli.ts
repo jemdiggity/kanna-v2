@@ -27,7 +27,9 @@ const booleanFlagMap: Record<string, string> = {
   "--minor": "minor",
   "--patch": "patch",
   "--arm64": "arm64",
-  "--x86_64": "x86_64"
+  "--x86_64": "x86_64",
+  "--production": "production",
+  "--relay": "relay"
 };
 
 const defaultDevUpInput = {
@@ -70,6 +72,15 @@ function parseFlagInput(rest: string[], defaults: Record<string, unknown>): Reco
       index += 1;
       continue;
     }
+    if (arg === "--firebase-env-from") {
+      const value = rest[index + 1];
+      if (!value) {
+        throw new Error("--firebase-env-from requires a value");
+      }
+      input.firebaseEnvFrom = value;
+      index += 1;
+      continue;
+    }
     if (arg === "--out-dir") {
       const value = rest[index + 1];
       if (!value) {
@@ -88,6 +99,9 @@ function parseFlagInput(rest: string[], defaults: Record<string, unknown>): Reco
       throw new Error(`Unknown flag: ${arg}`);
     }
     input[flagName] = true;
+  }
+  if (input.emulators === true && typeof input.firebaseEnvFrom === "string") {
+    throw new Error("--emulators and --firebase-env-from cannot be used together");
   }
   return input;
 }
@@ -133,6 +147,9 @@ export function parseCliArgs(args: string[]): ParsedCliCommand {
   }
   if (group === "release" && command === "ship") {
     return { taskId: "release.ship", input: parseFlagInput(rest, {}) };
+  }
+  if (group === "cloud" && command === "deploy") {
+    return { taskId: "cloud.deploy", input: parseFlagInput(rest, { production: false, relay: false }) };
   }
   if (group === "pages" && command === "build-schema") {
     return { taskId: "pages.build-schema", input: parseFlagInput(rest, {}) };
@@ -192,7 +209,7 @@ function helpText(): string {
     "Usage: kd <command>",
     "",
     "Commands:",
-    "  dev up [--mobile] [--emulators] [--seed] [--attach] [--db <path-or-name>] [--delete-db]",
+    "  dev up [--mobile] [--emulators] [--seed] [--attach] [--db <path-or-name>] [--delete-db] [--firebase-env-from <task-or-path>]",
     "  dev down [--kill-daemon]",
     "  dev restart [--mobile] [--emulators] [--seed] [--attach] [--delete-db]",
     "  dev status",
@@ -211,6 +228,7 @@ function helpText(): string {
     "  build desktop",
     "  build sidecars",
     "  release ship [--dry-run] [--release] [--major|--minor|--patch] [--arm64|--x86_64]",
+    "  cloud deploy --production [--relay]",
     "  pages build-schema --out-dir <dir>",
     "  test app-update-bundle",
     "  doctor"

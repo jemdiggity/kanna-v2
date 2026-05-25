@@ -241,6 +241,7 @@ const invokeHandlers: Record<string, (...args: any[]) => any> = {
   git_default_branch: () => "main",
   git_current_branch: () => null,
   git_list_base_branches: () => ["origin/main", "main"],
+  git_list_remote_base_branches: () => ["origin/main", "origin/release/x"],
   git_branch_upstream: () => null,
   git_remote_url: () => "https://github.com/example/repo.git",
   git_clone: () => ({}),
@@ -258,6 +259,11 @@ const invokeHandlers: Record<string, (...args: any[]) => any> = {
     head_commit: "abc1234567890",
   }),
   git_push: () => ({}),
+  list_transfer_peers: () => [],
+  set_transfer_task_snapshot: () => ({ ok: true }),
+  list_transfer_task_snapshots: () => [],
+  observe_transfer_peer_session: () => ({ ok: true }),
+  unobserve_transfer_peer_session: () => ({ ok: true }),
   prepare_outgoing_transfer: (args: { payload?: { phase?: string } }) => {
     if (args?.payload?.phase === "preflight") {
       return {
