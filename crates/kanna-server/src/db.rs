@@ -534,6 +534,33 @@ impl Db {
         }
     }
 
+    pub fn get_pipeline_item_title_by_repo_branch(
+        &self,
+        repo_id: &str,
+        branch: &str,
+    ) -> Result<Option<String>, rusqlite::Error> {
+        self.conn
+            .query_row(
+                "SELECT display_name, issue_title, prompt
+                 FROM pipeline_item
+                 WHERE repo_id = ? AND branch = ?
+                 ORDER BY datetime(created_at) DESC
+                 LIMIT 1",
+                (repo_id, branch),
+                |row| {
+                    let display_name: Option<String> = row.get(0)?;
+                    let issue_title: Option<String> = row.get(1)?;
+                    let prompt: Option<String> = row.get(2)?;
+                    Ok(display_name
+                        .filter(|value| !value.trim().is_empty())
+                        .or_else(|| issue_title.filter(|value| !value.trim().is_empty()))
+                        .or_else(|| prompt.filter(|value| !value.trim().is_empty())))
+                },
+            )
+            .optional()
+            .map(|title| title.flatten())
+    }
+
     pub fn insert_pipeline_item(&self, item: NewPipelineItem<'_>) -> Result<(), rusqlite::Error> {
         self.conn.execute(
             "INSERT INTO pipeline_item

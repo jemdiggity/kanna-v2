@@ -145,7 +145,7 @@ pub(crate) fn prepare_advance_stage_for_api(
     let current_stage = &pipeline.stages[current_stage_index];
     let source_branch =
         resolve_current_source_worktree_branch(&repo.path, source_task.branch.as_deref());
-    let display_name = resolve_inherited_task_title(&source_task);
+    let display_name = resolve_inherited_task_title(db, &source_task)?;
 
     if source_task.active_post_action.is_none() {
         if let Some(post_action) = current_stage.post_action.as_ref() {
@@ -228,12 +228,45 @@ pub(crate) fn prepare_advance_stage_for_api(
     .map(PreparedStageTransition::Spawn)
 }
 
-fn resolve_inherited_task_title(source_task: &TaskStageSource) -> Option<String> {
-    source_task
-        .display_name
-        .clone()
-        .or_else(|| source_task.issue_title.clone())
-        .or_else(|| source_task.prompt.clone())
+fn resolve_inherited_task_title(
+    db: &Db,
+    source_task: &TaskStageSource,
+) -> Result<Option<String>, String> {
+    if let Some(title) = non_empty_string(source_task.display_name.clone()) {
+        return Ok(Some(title));
+    }
+    if let Some(title) = non_empty_string(source_task.issue_title.clone()) {
+        return Ok(Some(title));
+    }
+    if let Some(reviewed_branch) =
+        extract_reviewed_branch_from_prompt(source_task.prompt.as_deref().unwrap_or(""))
+    {
+        if let Some(title) = db
+            .get_pipeline_item_title_by_repo_branch(&source_task.repo_id, reviewed_branch)
+            .map_err(|e| format!("db error: {}", e))?
+        {
+            return Ok(Some(title));
+        }
+    }
+    Ok(non_empty_string(source_task.prompt.clone()))
+}
+
+fn non_empty_string(value: Option<String>) -> Option<String> {
+    value.filter(|candidate| !candidate.trim().is_empty())
+}
+
+fn extract_reviewed_branch_from_prompt(prompt: &str) -> Option<&str> {
+    let marker = "Review branch ";
+    let after_marker = prompt.split_once(marker)?.1;
+    let branch = after_marker
+        .split_whitespace()
+        .next()?
+        .trim_matches(|ch: char| matches!(ch, ',' | '.' | ':' | ';'));
+    if branch.is_empty() {
+        None
+    } else {
+        Some(branch)
+    }
 }
 
 pub(crate) fn prepare_auto_stage_completion_for_api(
@@ -287,7 +320,7 @@ pub(crate) fn prepare_auto_stage_completion_for_api(
     };
     let source_branch =
         resolve_current_source_worktree_branch(&repo.path, source_task.branch.as_deref());
-    let display_name = resolve_inherited_task_title(&source_task);
+    let display_name = resolve_inherited_task_title(db, &source_task)?;
 
     let task_prompt = build_target_stage_prompt(
         &repo.path,
@@ -368,7 +401,7 @@ pub(crate) fn prepare_revision_task_for_api(
         .ok_or_else(|| format!("stage not found in pipeline: {}", target_stage_name))?;
     let source_branch =
         resolve_current_source_worktree_branch(&repo.path, source_task.branch.as_deref());
-    let display_name = resolve_inherited_task_title(&source_task);
+    let display_name = resolve_inherited_task_title(db, &source_task)?;
 
     let task_prompt = build_target_stage_prompt(
         &repo.path,
@@ -2649,5 +2682,150 @@ mod tests {
             Some("Implement revision:\nAdd e2e coverage for task creation.\n\nAdd e2e coverage for task creation.")
         );
         assert!(prepared.cwd.contains(".kanna-worktrees/task-"));
+    }
+
+    #[test]
+    fn prepare_revision_task_recovers_title_from_reviewed_branch_when_review_title_is_missing() {
+        let repo_root = std::env::temp_dir().join(format!(
+            "kanna-stage-revision-title-recovery-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&repo_root);
+        std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+        std::fs::create_dir_all(repo_root.join(".kanna/agents/implement")).unwrap();
+        std::fs::write(repo_root.join("README.md"), "test repo").unwrap();
+        assert!(Command::new("git")
+            .arg("init")
+            .arg("-b")
+            .arg("main")
+            .current_dir(&repo_root)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(&repo_root)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(&repo_root)
+            .status()
+            .unwrap()
+            .success());
+        std::fs::write(
+            repo_root.join(".kanna/pipelines/qa.json"),
+            r#"{
+  "stages": [
+    { "name": "in progress", "transition": "manual", "agent": "implement", "prompt": "$TASK_PROMPT" },
+    { "name": "review", "transition": "auto" },
+    { "name": "pr", "transition": "manual" }
+  ]
+}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            repo_root.join(".kanna/agents/implement/AGENT.md"),
+            "---\nagent_provider: claude\n---\nImplement revision:\n$TASK_PROMPT",
+        )
+        .unwrap();
+        assert!(Command::new("git")
+            .args(["add", "README.md", ".kanna"])
+            .current_dir(&repo_root)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(&repo_root)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["branch", "task-reviewed-branch"])
+            .current_dir(&repo_root)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["branch", "task-review-branch"])
+            .current_dir(&repo_root)
+            .status()
+            .unwrap()
+            .success());
+
+        let config = Config {
+            relay_url: "wss://relay.example".to_string(),
+            device_token: "device-token".to_string(),
+            cloud_base_url: "http://127.0.0.1:5001/kanna-local/us-central1".to_string(),
+            firebase_project_id: "kanna-local".to_string(),
+            firebase_auth_emulator_url: Some("http://127.0.0.1:9099".to_string()),
+            firebase_firestore_emulator_host: Some("127.0.0.1:8080".to_string()),
+            daemon_dir: "/tmp/kanna-daemon".to_string(),
+            db_path: Db::test_db_path("revision-title-recovery"),
+            desktop_id: "desktop-1".to_string(),
+            desktop_secret: Some("desktop-secret".to_string()),
+            desktop_name: "Studio Mac".to_string(),
+            server_version: Some("test-version".to_string()),
+            lan_host: "0.0.0.0".to_string(),
+            lan_port: 48120,
+            pairing_store_path: "/tmp/kanna-pairings.json".to_string(),
+        };
+        let db = Db::open_for_tests(&config.db_path).unwrap();
+        db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+            .unwrap();
+        db.insert_test_pipeline_item(
+            "source-task",
+            "repo-1",
+            "Original implementation instructions",
+            Some("cloud/mobile"),
+            "in progress",
+            "2026-04-17 07:00:00",
+        )
+        .unwrap();
+        db.update_test_pipeline_item_stage_context(
+            "source-task",
+            "task-reviewed-branch",
+            "qa",
+            Some("{\"status\":\"success\",\"summary\":\"implemented\"}"),
+            "codex",
+        )
+        .unwrap();
+        db.insert_test_pipeline_item(
+            "review-task",
+            "repo-1",
+            "You are a QA review agent.\n\nReview branch task-reviewed-branch for task quality and test coverage against base origin/main. Original task: Original implementation instructions.",
+            None,
+            "review",
+            "2026-04-17 07:01:00",
+        )
+        .unwrap();
+        db.update_test_pipeline_item_stage_context(
+            "review-task",
+            "task-review-branch",
+            "qa",
+            Some("{\"status\":\"failure\",\"summary\":\"missing e2e\"}"),
+            "codex",
+        )
+        .unwrap();
+
+        let prepared = prepare_revision_task_for_api(
+            &db,
+            &config,
+            "review-task",
+            "in progress",
+            "Add e2e coverage for task creation.",
+        )
+        .unwrap();
+        let created_source = db
+            .get_pipeline_item(&prepared.created_task.task_id)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(prepared.created_task.title, "cloud/mobile");
+        assert_eq!(created_source.display_name.as_deref(), Some("cloud/mobile"));
+
+        let _ = std::fs::remove_dir_all(&repo_root);
     }
 }
