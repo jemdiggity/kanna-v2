@@ -24,13 +24,12 @@ export function buildWorkspace(input: BuildWorkspaceInput): BuildWorkspaceResult
     ...input.lanSnapshot.repos,
   ]);
   const closedLocalKeys = buildClosedLocalKeys(input.localItems, repoContext.localRepoKeyById);
-  const openLocalKeys = buildOpenLocalKeys(input.localItems, repoContext.localRepoKeyById);
   const candidates = [
     ...input.localItems
       .filter((item) => item.stage !== "done" && !item.closed_at)
       .map((item) => localCandidate(item, repoContext.localRepoKeyById)),
-    ...remoteCandidates(input.cloudSnapshot.items, input.cloudSnapshot.terminalRefs, "cloud", repoContext, closedLocalKeys, openLocalKeys),
-    ...remoteCandidates(input.lanSnapshot.items, input.lanSnapshot.terminalRefs, "lan", repoContext, closedLocalKeys, openLocalKeys),
+    ...remoteCandidates(input.cloudSnapshot.items, input.cloudSnapshot.terminalRefs, "cloud", repoContext, closedLocalKeys),
+    ...remoteCandidates(input.lanSnapshot.items, input.lanSnapshot.terminalRefs, "lan", repoContext, closedLocalKeys),
   ].filter((candidate): candidate is Candidate => candidate !== null);
 
   const tasksByKey = new Map<string, WorkspaceTask>();
@@ -132,7 +131,6 @@ function remoteCandidates(
   kind: "cloud" | "lan",
   repoContext: ReturnType<typeof buildRepoContext>,
   closedLocalKeys: Set<string>,
-  openLocalKeys: Set<string>,
 ): Array<Candidate | null> {
   return items.map((item) => {
     if (item.stage === "done" || item.closed_at) return null;
@@ -147,9 +145,7 @@ function remoteCandidates(
     return {
       item,
       repoKey,
-      logicalKey: openLocalKeys.has(localKey)
-        ? localKey
-        : `${repoKey}:owner:${terminalRef?.ownerDesktopId ?? "unknown"}:${ownerLocalTaskId}`,
+      logicalKey: localKey,
       source: {
         kind,
         taskId: item.id,
@@ -159,19 +155,6 @@ function remoteCandidates(
       },
     };
   });
-}
-
-function buildOpenLocalKeys(
-  items: PipelineItem[],
-  localRepoKeyById: Map<string, string>,
-): Set<string> {
-  const keys = new Set<string>();
-  for (const item of items) {
-    if (item.stage === "done" || item.closed_at) continue;
-    const repoKey = localRepoKeyById.get(item.repo_id);
-    if (repoKey) keys.add(`${repoKey}:owner-local:${item.id}`);
-  }
-  return keys;
 }
 
 function buildClosedLocalKeys(
@@ -227,8 +210,13 @@ function mergeWorkspaceTask(existing: WorkspaceTask, candidate: Candidate): Work
     ? existing.remoteTaskIds
     : [...existing.remoteTaskIds, candidate.item.id];
   const bestRoute = chooseBestRoute([...sources]);
+  const routeItem = !existing.localTaskId && candidate.source.kind === bestRoute.kind
+    ? candidate.item
+    : existing.item;
   return {
     ...existing,
+    id: existing.localTaskId ? existing.id : routeItem.id,
+    item: routeItem,
     remoteTaskIds,
     sources,
     terminal: bestRoute,

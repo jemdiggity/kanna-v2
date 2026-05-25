@@ -140,12 +140,60 @@ async function sidebarItemsForPrompt(client: typeof primary, prompt: string): Pr
 
 async function waitForSidebarTaskGroupedUnderRepo(prompt: string, repoId: string): Promise<void> {
   const deadline = Date.now() + 30_000;
+  let lastDiagnostics: unknown = null;
   while (Date.now() < deadline) {
     const items = await sidebarItemsForPrompt(secondary, prompt);
     if (items.length === 1 && items[0]?.repo_id === repoId) return;
+    lastDiagnostics = await secondary.executeSync(`
+      const ctx = window.__KANNA_E2E__.setupState;
+      const read = (value) => value?.__v_isRef ? value.value : value;
+      const workspace = read(ctx.workspace);
+      const lanSnapshot = read(ctx.lanSnapshot);
+      return JSON.parse(JSON.stringify({
+        expectedRepoId: ${JSON.stringify(repoId)},
+        matchingSidebarItems: read(ctx.sidebarItems)?.filter((item) => item.prompt === ${JSON.stringify(prompt)}).map((item) => ({
+          id: item.id,
+          prompt: item.prompt,
+          repo_id: item.repo_id,
+          stage: item.stage,
+        })) ?? [],
+        workspaceTasks: workspace?.tasks?.filter((task) => task.item?.prompt === ${JSON.stringify(prompt)}).map((task) => ({
+          id: task.id,
+          repoKey: task.repoKey,
+          logicalTaskKey: task.logicalTaskKey,
+          localTaskId: task.localTaskId,
+          remoteTaskIds: task.remoteTaskIds,
+          itemRepoId: task.item?.repo_id,
+          sourceRepoIds: task.sources?.map((source) => ({
+            kind: source.kind,
+            taskId: source.taskId,
+            repoId: source.repoId,
+            ownerLocalTaskId: source.terminalRef?.ownerLocalTaskId,
+          })),
+        })) ?? [],
+        workspaceRepos: workspace?.repos?.map((repo) => ({
+          key: repo.key,
+          localRepoId: repo.localRepoId,
+          remoteRepoIds: repo.remoteRepoIds,
+          remoteUrlHash: repo.remoteUrlHash,
+          source: repo.source,
+        })) ?? [],
+        lanSnapshotItems: lanSnapshot?.items?.filter((item) => item.prompt === ${JSON.stringify(prompt)}).map((item) => ({
+          id: item.id,
+          repo_id: item.repo_id,
+          stage: item.stage,
+        })) ?? [],
+        lanSnapshotRepos: lanSnapshot?.repos?.map((repo) => ({
+          id: repo.id,
+          remote_url: repo.remote_url,
+          remoteUrlHash: repo.remoteUrlHash,
+        })) ?? [],
+        lanTerminalRefs: lanSnapshot?.terminalRefs ?? {},
+      }));
+    `).catch((error: unknown) => ({ diagnosticError: String(error) }));
     await sleep(250);
   }
-  throw new Error(`timed out waiting for LAN task ${prompt} to be grouped under repo ${repoId}`);
+  throw new Error(`timed out waiting for LAN task ${prompt} to be grouped under repo ${repoId}; diagnostics=${JSON.stringify(lastDiagnostics)}`);
 }
 
 describe("local transfer task sync", () => {

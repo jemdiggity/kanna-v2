@@ -178,6 +178,63 @@ describe("buildWorkspace", () => {
     });
   });
 
+  it("dedupes cloud and LAN advertisements for the same local task even when transports use different owner ids", () => {
+    const cloudItem = item({
+      id: "cloud:remote-repo:task-2",
+      repo_id: "repo-local",
+      prompt: "LAN visible task",
+    });
+    const lanItem = item({
+      id: "cloud:lan:peer-primary:remote-repo:task-2",
+      repo_id: "repo-local",
+      prompt: "LAN visible task",
+    });
+
+    const result = buildWorkspace({
+      localRepos: [{ repo: repo({ id: "repo-local" }), remoteUrlHash: "same-hash" }],
+      localItems: [],
+      cloudSnapshot: {
+        repos: [],
+        items: [cloudItem],
+        terminalRefs: {
+          "cloud:remote-repo:task-2": {
+            ownerDesktopId: "desktop-relay-id",
+            ownerLocalTaskId: "task-2",
+            transport: "cloud",
+          },
+        },
+      },
+      lanSnapshot: {
+        repos: [],
+        items: [lanItem],
+        terminalRefs: {
+          "cloud:lan:peer-primary:remote-repo:task-2": {
+            ownerDesktopId: "peer-primary",
+            ownerLocalTaskId: "task-2",
+            transport: "lan",
+          },
+        },
+      },
+    });
+
+    expect(result.tasks).toHaveLength(1);
+    expect(result.tasks[0]).toMatchObject({
+      repoKey: "repo-local",
+      remoteTaskIds: [
+        "cloud:remote-repo:task-2",
+        "cloud:lan:peer-primary:remote-repo:task-2",
+      ],
+      terminal: {
+        kind: "lan",
+        remoteRef: {
+          ownerDesktopId: "peer-primary",
+          ownerLocalTaskId: "task-2",
+          transport: "lan",
+        },
+      },
+    });
+  });
+
   it("marks reachable cloud tasks as remotely controllable without local-only actions", () => {
     const cloudItem = item({
       id: "cloud:remote-repo:task-control",

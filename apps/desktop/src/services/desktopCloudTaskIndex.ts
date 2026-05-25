@@ -51,6 +51,7 @@ export interface DesktopCloudSnapshot {
 
 export type DesktopCloudRepo = Repo & {
   remote_url?: string | null;
+  remoteUrlHash?: string | null;
 };
 
 export interface DesktopCloudTerminalRef {
@@ -155,6 +156,7 @@ export function mapDesktopCloudTasks(
         path: "cloud",
         name: snapshot.repo.name,
         remote_url: snapshot.repo.remoteUrl ?? null,
+        remoteUrlHash: snapshot.repo.remoteUrlHash ?? null,
         default_branch: snapshot.repo.defaultBranch ?? "main",
         hidden: 0,
         sort_order: 0,

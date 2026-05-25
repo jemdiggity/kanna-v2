@@ -109,6 +109,44 @@ describe("mapDesktopCloudTasks", () => {
     ]);
   });
 
+  it("keeps the remote URL hash on unmatched remote repos for later workspace matching", () => {
+    const snapshot = mapDesktopCloudTasks([
+      {
+        cloudTaskId: "remote-repo-id:task-1",
+        ownerDesktopId: "peer-primary",
+        ownerLocalTaskId: "task-1",
+        title: "Remote task",
+        promptSnippet: "Remote task prompt",
+        displayName: null,
+        stage: "in progress",
+        activity: "idle",
+        status: "active",
+        repo: {
+          cloudRepoId: "remote-repo-id",
+          name: "kanna",
+          remoteUrl: "git@github.com:jemdiggity/kanna.git",
+          remoteUrlHash: "same-remote",
+          defaultBranch: "main",
+        },
+        branch: "task-task-1",
+        baseRef: "origin/main",
+        prNumber: null,
+        prUrl: null,
+        agent: { provider: "codex", type: "pty" },
+        createdAt: "2026-05-14T00:00:00.000Z",
+        updatedAt: "2026-05-14T00:01:00.000Z",
+        closedAt: null,
+      },
+    ]);
+
+    expect(snapshot.repos).toMatchObject([
+      {
+        id: "cloud:remote-repo-id",
+        remoteUrlHash: "same-remote",
+      },
+    ]);
+  });
+
   it("omits stale cloud tasks that match a locally closed task", () => {
     const snapshot = mapDesktopCloudTasks([
       {
