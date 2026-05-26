@@ -44,6 +44,7 @@ import { useRestoreFocus } from "./composables/useRestoreFocus";
 import { useAppUpdate } from "./composables/useAppUpdate";
 import { isTopModal } from "./composables/useModalZIndex";
 import { selectTaskByActivity } from "./utils/selectTaskByActivity";
+import { sortSidebarItemsForRepo } from "./utils/sidebarOrdering";
 import { getDefaultBaseBranch } from "./utils/baseBranchPicker";
 import { hashRemoteUrl } from "./utils/cloudTaskSnapshot";
 import { remoteTaskClosureAliases, remoteTaskIsLocallyClosed } from "./utils/remoteTaskIdentity";
@@ -580,13 +581,23 @@ async function claimPendingIncomingTransfer(transferId: string): Promise<boolean
 
 function visibleSidebarItemsForRepo(repoId: string, options: { currentRepoScope?: boolean } = {}) {
   const workspaceItems = sidebarItems.value.filter((item) => item.repo_id === repoId);
+  const searchQuery = sidebarRef.value?.searchQuery ?? "";
+  const sortOptions = {
+    repoId,
+    getStageOrder: store.getStageOrder,
+    searchQuery,
+  };
+  const withRepoId = (items: typeof workspaceItems) => items.map((item) => ({
+    ...item,
+    repo_id: item.repo_id ?? repoId,
+  }));
   if (workspaceItems.length === 0 && options.currentRepoScope && repoId === store.selectedRepoId && !repoId.startsWith("cloud:")) {
-    return store.sortedItemsForCurrentRepo;
+    return sortSidebarItemsForRepo({ ...sortOptions, items: withRepoId(store.sortedItemsForCurrentRepo) });
   }
   if (options.currentRepoScope && repoId === store.selectedRepoId && !repoId.startsWith("cloud:")) {
-    return workspaceItems;
+    return sortSidebarItemsForRepo({ ...sortOptions, items: workspaceItems });
   }
-  return workspaceItems.filter((item) => item.stage !== "done");
+  return sortSidebarItemsForRepo({ ...sortOptions, items: workspaceItems });
 }
 
 function visibleSidebarItemsAllRepos() {
@@ -602,10 +613,7 @@ function currentRepoVisibleSidebarItems() {
 // Navigation
 async function navigateItems(direction: -1 | 1) {
   const allItems = visibleSidebarItemsAllRepos();
-  const sidebar = sidebarRef.value;
-  const visibleItems = sidebar?.searchQuery
-    ? allItems.filter((i) => sidebar.matchesSearch(i))
-    : allItems;
+  const visibleItems = allItems;
   if (visibleItems.length === 0) return;
   const currentIndex = visibleItems.findIndex((i) => i.id === store.selectedItemId);
   let nextIndex: number;
@@ -640,20 +648,24 @@ async function navigateRepos(direction: -1 | 1) {
   const nextRepo = visibleRepos[nextIndex];
   if (nextRepo.id === store.selectedRepoId) return;
   const previousItemId = store.selectedItemId;
-  await handleSelectRepo(nextRepo.id);
 
-  // Restore last-selected task for this repo, or fall back to first task
+  // Restore last-selected task for this repo, or fall back to first task.
   const lastItemId = store.lastSelectedItemByRepo[nextRepo.id];
   const lastItem = lastItemId
     ? sidebarItems.value.find((i) => i.id === lastItemId && i.repo_id === nextRepo.id && i.stage !== "done")
     : undefined;
-  if (lastItem) {
-    await handleSelectItem(lastItem.id, previousItemId);
-  } else {
-    const sorted = visibleSidebarItemsForRepo(nextRepo.id);
-    if (sorted.length > 0) {
-      await handleSelectItem(sorted[0].id, previousItemId);
-    }
+  const targetItem = lastItem ?? visibleSidebarItemsForRepo(nextRepo.id)[0];
+
+  if (targetItem && !nextRepo.id.startsWith("cloud:")) {
+    store.selectedRepoId = nextRepo.id;
+    await handleSelectItem(targetItem.id, previousItemId);
+    await store.selectRepo(nextRepo.id);
+    return;
+  }
+
+  await handleSelectRepo(nextRepo.id);
+  if (targetItem) {
+    await handleSelectItem(targetItem.id, previousItemId);
   }
 }
 

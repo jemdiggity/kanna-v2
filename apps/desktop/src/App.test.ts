@@ -64,6 +64,7 @@ const store = {
   sortedItemsForCurrentRepo: [],
   sortedItemsAllRepos: [],
   lastSelectedItemByRepo: {},
+  getStageOrder: vi.fn(() => ["in progress", "pr", "merge"]),
   suspendAfterMinutes: 30,
   killAfterMinutes: 60,
   ideCommand: "code",
@@ -543,6 +544,7 @@ describe("App", () => {
     store.items = [];
     store.sortedItemsForCurrentRepo = [];
     store.sortedItemsAllRepos = [];
+    store.getStageOrder.mockReturnValue(["in progress", "pr", "merge"]);
     listenHandlers.clear();
     currentWebviewWindowListenHandlers.clear();
     closeRequestedHandler = null;
@@ -1424,6 +1426,42 @@ describe("App", () => {
     await handler?.({});
 
     expect(store.selectItem).toHaveBeenCalledWith("task-old", { previousItemId: "task-new" });
+  });
+
+  it("navigates task shortcuts in the same order the sidebar renders stage groups", async () => {
+    store.selectedRepoId = "repo-1";
+    store.selectedItemId = "task-progress";
+    store.items = [
+      {
+        id: "task-pr",
+        repo_id: "repo-1",
+        prompt: "PR task",
+        stage: "pr",
+        tags: "[]",
+        pinned: 0,
+        pin_order: null,
+        created_at: "2026-04-17T10:01:00.000Z",
+        updated_at: "2026-04-17T10:01:00.000Z",
+      },
+      {
+        id: "task-progress",
+        repo_id: "repo-1",
+        prompt: "In progress task",
+        stage: "in progress",
+        tags: "[]",
+        pinned: 0,
+        pin_order: null,
+        created_at: "2026-04-17T10:00:00.000Z",
+        updated_at: "2026-04-17T10:00:00.000Z",
+      },
+    ];
+
+    await mountApp(SidebarWithRepoStub);
+    expect(capturedKeyboardActions).not.toBeNull();
+
+    capturedKeyboardActions?.navigateDown();
+
+    expect(store.selectItem).toHaveBeenCalledWith("task-pr", { previousItemId: "task-progress" });
   });
 
   it("navigates repos when the native repo-navigation event arrives", async () => {
