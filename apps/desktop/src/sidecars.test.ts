@@ -62,7 +62,7 @@ describe("desktop sidecar packaging", () => {
     expect(moduleBazel).toContain('name = "kanna_server_crates"');
     expect(moduleBazel).toContain('manifests = ["//:Cargo.server.toml"]');
     expect(moduleBazel).toContain('name = "task_transfer_crates"');
-    expect(moduleBazel).toContain('manifests = ["//crates/task-transfer:Cargo.toml"]');
+    expect(moduleBazel).toContain('manifests = ["//:Cargo.task-transfer.toml"]');
   });
 
   it("builds sidecars as a prerequisite and keeps beforeDevCommand limited to vite", () => {
