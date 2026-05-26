@@ -412,6 +412,7 @@ function buildPendingIncomingTransferRow() {
   return {
     id: "transfer-1",
     source_peer_id: "peer-source",
+    source_task_id: "task-source",
     payload_json: JSON.stringify(buildIncomingTransferEvent().payload.payload),
   };
 }
@@ -553,6 +554,8 @@ describe("App", () => {
     mockWindowWorkspace.restoreAdditionalWindows.mockClear();
     dbSelectMock.mockReset();
     dbSelectMock.mockResolvedValue([]);
+    dbMock.execute.mockReset();
+    dbMock.execute.mockResolvedValue({ rowsAffected: 0 });
     invokeMock.mockClear();
     toastInfoMock.mockClear();
     toastWarningMock.mockClear();
@@ -1601,12 +1604,111 @@ describe("App", () => {
         id: "transfer-db-1",
       },
     ]);
+    dbMock.execute.mockResolvedValueOnce({ rowsAffected: 1 });
 
     const wrapper = await mountApp(SidebarWithRepoStub);
     await flushPromises();
 
     expect(store.approveIncomingTransfer).toHaveBeenCalledWith("transfer-db-1");
+    expect(dbMock.execute).toHaveBeenCalledWith(
+      expect.stringContaining("status = 'streaming'"),
+      ["transfer-db-1"],
+    );
     expect(wrapper.text()).not.toContain("peer-source");
+  });
+
+  it("does not auto-import the same pending transfer twice across restored windows", async () => {
+    dbSelectMock.mockResolvedValue([
+      {
+        ...buildPendingIncomingTransferRow(),
+        id: "transfer-db-1",
+      },
+    ]);
+    dbMock.execute
+      .mockResolvedValueOnce({ rowsAffected: 1 })
+      .mockResolvedValueOnce({ rowsAffected: 0 });
+
+    const first = await mountApp(SidebarWithRepoStub);
+    const second = await mountApp(SidebarWithRepoStub);
+    await flushPromises();
+
+    expect(store.approveIncomingTransfer).toHaveBeenCalledTimes(1);
+    expect(store.approveIncomingTransfer).toHaveBeenCalledWith("transfer-db-1");
+
+    first.unmount();
+    second.unmount();
+  });
+
+  it("marks malformed pending incoming transfers failed instead of retrying on startup", async () => {
+    dbSelectMock.mockResolvedValue([
+      {
+        id: "transfer-bad",
+        source_peer_id: null,
+        source_task_id: "task-source",
+        payload_json: JSON.stringify(buildIncomingTransferEvent().payload.payload),
+      },
+    ]);
+    dbMock.execute.mockResolvedValueOnce({ rowsAffected: 1 });
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const wrapper = await mountApp(SidebarWithRepoStub);
+    await flushPromises();
+
+    expect(store.approveIncomingTransfer).not.toHaveBeenCalled();
+    expect(dbMock.execute).toHaveBeenCalledWith(
+      expect.stringContaining("status = 'failed'"),
+      [expect.stringContaining("missing source_peer_id"), "transfer-bad"],
+    );
+    expect(warnSpy).toHaveBeenCalledWith(
+      "[App] disabled malformed pending incoming transfer:",
+      expect.objectContaining({
+        transferId: "transfer-bad",
+        reason: expect.stringContaining("missing source_peer_id"),
+      }),
+    );
+
+    warnSpy.mockRestore();
+    wrapper.unmount();
+  });
+
+  it("marks stale pending incoming transfers failed when sidecar finalization cannot resume", async () => {
+    dbSelectMock.mockResolvedValue([
+      {
+        ...buildPendingIncomingTransferRow(),
+        id: "transfer-stale",
+      },
+    ]);
+    dbMock.execute
+      .mockResolvedValueOnce({ rowsAffected: 1 })
+      .mockResolvedValueOnce({ rowsAffected: 1 });
+    store.approveIncomingTransfer.mockRejectedValueOnce(
+      new Error("protocol error: missing source peer for outgoing transfer finalization transfer-stale"),
+    );
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const wrapper = await mountApp(SidebarWithRepoStub);
+    await flushPromises();
+
+    expect(store.approveIncomingTransfer).toHaveBeenCalledWith("transfer-stale");
+    expect(dbMock.execute).toHaveBeenCalledWith(
+      expect.stringContaining("status = 'failed'"),
+      [
+        "protocol error: missing source peer for outgoing transfer finalization transfer-stale",
+        "transfer-stale",
+      ],
+    );
+    expect(warnSpy).toHaveBeenCalledWith(
+      "[App] failed to auto-import pending incoming transfer; marked failed:",
+      expect.objectContaining({
+        transferId: "transfer-stale",
+        reason: expect.stringContaining("missing source peer"),
+      }),
+    );
+
+    warnSpy.mockRestore();
+    wrapper.unmount();
   });
 
   it("forwards outgoing transfer commit events to the store", async () => {
