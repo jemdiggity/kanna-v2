@@ -809,11 +809,7 @@ fn daemon_support_dir() -> PathBuf {
         return PathBuf::from(dir);
     }
 
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    PathBuf::from(home)
-        .join("Library")
-        .join("Application Support")
-        .join("Kanna")
+    kanna_runtime_defaults::default_daemon_dir()
 }
 
 fn detect_launcher() -> Option<RecoveryLauncher> {

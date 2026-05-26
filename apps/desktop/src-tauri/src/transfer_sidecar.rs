@@ -695,11 +695,15 @@ fn build_transfer_sidecar_env_from_resolved(
             .filter(|value| !value.trim().is_empty())
             .unwrap_or(resolved.display_name),
     );
-    if let Ok(daemon_dir) = std::env::var("KANNA_DAEMON_DIR") {
-        if !daemon_dir.trim().is_empty() {
-            env.insert("KANNA_DAEMON_DIR".to_string(), daemon_dir);
-        }
-    }
+    let daemon_dir = std::env::var("KANNA_DAEMON_DIR")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| {
+            kanna_runtime_defaults::default_daemon_dir()
+                .to_string_lossy()
+                .into_owned()
+        });
+    env.insert("KANNA_DAEMON_DIR".to_string(), daemon_dir);
     let db_path = std::env::var("KANNA_DB_PATH")
         .ok()
         .filter(|value| !value.trim().is_empty())
@@ -741,7 +745,38 @@ fn resolve_sidecar_binary() -> Result<PathBuf, String> {
 mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("env lock should not be poisoned")
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn unset(key: &'static str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(value) = &self.previous {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
 
     struct TestTempDir {
         path: PathBuf,
@@ -818,6 +853,25 @@ mod tests {
         );
         assert!(transfer_root.join("identity.json").exists());
         assert!(!temp.path().join("transfer").join("identity.json").exists());
+    }
+
+    #[test]
+    fn transfer_sidecar_env_defaults_daemon_dir_when_env_is_missing() {
+        let _lock = env_lock();
+        let _guard = EnvVarGuard::unset("KANNA_DAEMON_DIR");
+        let temp = TestTempDir::new();
+
+        let env = build_transfer_sidecar_env(temp.path(), Some("Jeremy's MacBook Pro"))
+            .expect("sidecar env should be built");
+
+        assert_eq!(
+            env.get("KANNA_DAEMON_DIR").map(String::as_str),
+            Some(
+                crate::daemon_data_dir()
+                    .to_str()
+                    .expect("daemon dir should be utf-8")
+            )
+        );
     }
 
     #[test]

@@ -1,9 +1,6 @@
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
-const DESKTOP_BUNDLE_IDENTIFIER: &str = "build.kanna";
-const LEGACY_DESKTOP_BUNDLE_IDENTIFIER: &str = "com.kanna.app";
-
 #[derive(Debug, Clone)]
 pub struct Config {
     pub relay_url: String,
@@ -43,7 +40,9 @@ struct RawConfig {
 }
 
 fn default_daemon_dir_for_root(data_root: &Path) -> String {
-    data_root.join("Kanna").to_string_lossy().to_string()
+    kanna_runtime_defaults::default_daemon_dir_for_app_support_root(data_root)
+        .to_string_lossy()
+        .to_string()
 }
 
 fn default_cloud_base_url() -> String {
@@ -87,15 +86,11 @@ pub fn canonical_db_path() -> PathBuf {
 }
 
 fn canonical_db_path_for_root(data_root: &Path) -> PathBuf {
-    data_root
-        .join(DESKTOP_BUNDLE_IDENTIFIER)
-        .join("kanna-v2.db")
+    kanna_runtime_defaults::canonical_desktop_db_path_for_app_support_root(data_root)
 }
 
 fn legacy_db_path_for_root(data_root: &Path) -> PathBuf {
-    data_root
-        .join(LEGACY_DESKTOP_BUNDLE_IDENTIFIER)
-        .join("kanna-v2.db")
+    kanna_runtime_defaults::legacy_desktop_db_path_for_app_support_root(data_root)
 }
 
 fn preferred_db_path_for_root(data_root: &Path) -> PathBuf {

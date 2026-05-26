@@ -3092,6 +3092,7 @@ dependencies = [
  "flexi_logger",
  "futures",
  "ghostty-xterm-compat-serialize",
+ "kanna-runtime-defaults",
  "libc",
  "libghostty-vt",
  "log",
@@ -3102,7 +3103,7 @@ dependencies = [
 
 [[package]]
 name = "kanna-desktop"
-version = "0.0.48"
+version = "0.0.49"
 dependencies = [
  "arboard",
  "base64 0.22.1",
@@ -3113,6 +3114,7 @@ dependencies = [
  "git2",
  "ignore",
  "image",
+ "kanna-runtime-defaults",
  "libc",
  "objc2",
  "reqwest 0.12.28",
@@ -3143,6 +3145,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "kanna-runtime-defaults"
+version = "0.1.0"
+
+[[package]]
 name = "kanna-server"
 version = "0.1.0"
 dependencies = [
@@ -3152,6 +3158,7 @@ dependencies = [
  "env_logger",
  "futures-util",
  "kanna-daemon",
+ "kanna-runtime-defaults",
  "log",
  "reqwest 0.12.28",
  "rusqlite",
@@ -3174,6 +3181,7 @@ dependencies = [
  "chrono",
  "hkdf",
  "kanna-daemon",
+ "kanna-runtime-defaults",
  "mdns-sd",
  "rand_core 0.6.4",
  "rusqlite",

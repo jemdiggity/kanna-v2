@@ -117,11 +117,7 @@ fn app_support_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("KANNA_DAEMON_DIR") {
         return PathBuf::from(dir);
     }
-    let home = std::env::var("HOME").expect("HOME not set");
-    PathBuf::from(home)
-        .join("Library")
-        .join("Application Support")
-        .join("Kanna")
+    kanna_runtime_defaults::default_daemon_dir()
 }
 
 fn socket_path(dir: &PathBuf) -> PathBuf {
