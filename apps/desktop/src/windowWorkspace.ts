@@ -29,6 +29,7 @@ export interface WindowWorkspaceController {
     selectedItemId: string | null;
   }) => Promise<void>;
   closeWindow: () => Promise<void>;
+  forgetCurrentWindow: () => Promise<void>;
   persistSelection: (selection: {
     selectedRepoId: string | null;
     selectedItemId: string | null;
@@ -193,6 +194,11 @@ export function createWindowWorkspace(input: {
     await writeWorkspaceSnapshot(db, reconcileWorkspaceSnapshot(snapshot, bootstrap.windowId));
   }
 
+  async function forgetCurrentWindow(): Promise<void> {
+    const snapshot = await loadSnapshot();
+    await writeWorkspaceSnapshot(db, removeWindowFromWorkspaceSnapshot(snapshot, bootstrap.windowId));
+  }
+
   async function spawnWindow(state: WindowBootstrap): Promise<void> {
     const url = buildWindowUrl(state);
 
@@ -214,8 +220,8 @@ export function createWindowWorkspace(input: {
 
   async function closeCurrentWindow(): Promise<void> {
     if (isTauri) {
-      const { getCurrentWebviewWindow } = await import("@tauri-apps/api/webviewWindow");
-      await getCurrentWebviewWindow().destroy();
+      const { getCurrentWindow } = await import("@tauri-apps/api/window");
+      await getCurrentWindow().close();
       return;
     }
 
@@ -254,9 +260,9 @@ export function createWindowWorkspace(input: {
       });
       await spawnWindow(nextWindow);
     },
+    forgetCurrentWindow,
     closeWindow: async () => {
-      const snapshot = await loadSnapshot();
-      await writeWorkspaceSnapshot(db, removeWindowFromWorkspaceSnapshot(snapshot, bootstrap.windowId));
+      await forgetCurrentWindow();
       await closeCurrentWindow();
     },
     persistSelection: async (selection) => {

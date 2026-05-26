@@ -423,6 +423,7 @@ describe("kanna runtime status reconciliation", () => {
       saveSnapshot: vi.fn(async () => {}),
       openWindow: vi.fn(async () => {}),
       closeWindow: vi.fn(async () => {}),
+      forgetCurrentWindow: vi.fn(async () => {}),
       persistSelection: vi.fn(async () => {}),
       persistSidebarHidden: vi.fn(async () => {}),
       persistSidebarWidth: vi.fn(async () => {}),

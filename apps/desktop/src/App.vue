@@ -1871,10 +1871,12 @@ onMounted(async () => {
         const { getCurrentWindow } = await import("@tauri-apps/api/window");
         const unlistenNativeWindowCloseRequest = await getCurrentWindow().onCloseRequested(async (event) => {
           if (closingCurrentWindow) return;
-          event.preventDefault();
+          closingCurrentWindow = true;
           try {
-            await requestCloseCurrentWindow();
+            await windowWorkspace.forgetCurrentWindow();
           } catch (error: unknown) {
+            closingCurrentWindow = false;
+            event.preventDefault();
             console.error("[App] native window close request failed:", error);
           }
         });
