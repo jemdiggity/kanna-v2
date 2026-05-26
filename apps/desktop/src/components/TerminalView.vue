@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, onActivated, onDeactivated, watch, nextTick } from "vue"
+import { getCurrentWebview } from "@tauri-apps/api/webview"
 import { useTerminal, type SpawnOptions } from "../composables/useTerminal"
 import { shouldDelayConnectUntilAfterInitialLayout } from "../composables/terminalSessionRecovery"
 import { shouldStartTerminalSession } from "../composables/terminalVisibility"
 import { markTaskSwitchMounted, markTaskSwitchReady } from "../perf/taskSwitchPerf"
+import { isTauri } from "../tauri-mock"
 import "@xterm/xterm/css/xterm.css"
 
 const props = defineProps<{
@@ -51,6 +53,7 @@ async function startWhenActive() {
 async function focusWhenActive() {
   if (!props.active || !terminal.value) return
   await nextTick()
+  await restoreNativeWebviewFocus()
   if (focusRafId) cancelAnimationFrame(focusRafId)
   focusRafId = requestAnimationFrame(() => {
     focusRafId = 0
@@ -60,6 +63,15 @@ async function focusWhenActive() {
     if (document.querySelector(".modal-overlay")) return
     terminal.value.focus()
   })
+}
+
+async function restoreNativeWebviewFocus() {
+  if (!isTauri) return
+  try {
+    await getCurrentWebview().setFocus()
+  } catch (error) {
+    console.warn("[terminal] failed to restore native webview focus:", error)
+  }
 }
 
 function handleWindowBlur() {
