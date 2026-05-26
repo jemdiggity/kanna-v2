@@ -105,11 +105,17 @@ impl RuntimeConfig {
             .map_err(|error| RuntimeError::InvalidConfig(error.to_string()))?
             .unwrap_or(4455);
 
+        let transfer_root = std::env::var("KANNA_TRANSFER_ROOT")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(kanna_runtime_defaults::default_transfer_root);
+
         let registry_dir = std::env::var("KANNA_TRANSFER_REGISTRY_DIR")
             .ok()
             .filter(|value| !value.trim().is_empty())
             .map(PathBuf::from)
-            .unwrap_or(std::env::current_dir()?.join(".kanna-transfer-registry"));
+            .unwrap_or_else(|| transfer_root.join("registry"));
 
         let peer_id = std::env::var("KANNA_TRANSFER_PEER_ID")
             .ok()
@@ -138,15 +144,21 @@ impl RuntimeConfig {
             display_name,
             registry_dir,
             listen_port,
-            daemon_dir: std::env::var("KANNA_DAEMON_DIR")
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-                .map(PathBuf::from),
-            db_path: std::env::var("KANNA_DB_PATH")
-                .or_else(|_| std::env::var("KANNA_CLI_DB_PATH"))
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-                .map(PathBuf::from),
+            daemon_dir: Some(
+                std::env::var("KANNA_DAEMON_DIR")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+                    .map(PathBuf::from)
+                    .unwrap_or_else(kanna_runtime_defaults::default_daemon_dir),
+            ),
+            db_path: Some(
+                std::env::var("KANNA_DB_PATH")
+                    .or_else(|_| std::env::var("KANNA_CLI_DB_PATH"))
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+                    .map(PathBuf::from)
+                    .unwrap_or_else(kanna_runtime_defaults::preferred_desktop_db_path),
+            ),
             discovery_mode,
             pending_transfer_ttl: Duration::from_secs(300),
             peer_request_timeout: Duration::from_secs(15),
@@ -2209,7 +2221,9 @@ async fn handle_connection(
             session_id,
             cols,
             rows,
-        }) => match resize_daemon_session(&context, &requester_peer_id, &session_id, cols, rows).await {
+        }) => match resize_daemon_session(&context, &requester_peer_id, &session_id, cols, rows)
+            .await
+        {
             Ok(()) => PeerResponse::ResizeSession { request_id },
             Err(error) => PeerResponse::Error {
                 request_id,
@@ -2512,7 +2526,10 @@ async fn kill_daemon_session_if_present(
             ..
         } => Ok(()),
         DaemonEvent::Error { message, .. }
-            if message.to_ascii_lowercase().contains("session not found") => Ok(()),
+            if message.to_ascii_lowercase().contains("session not found") =>
+        {
+            Ok(())
+        }
         DaemonEvent::Error { message, .. } => Err(RuntimeError::Protocol(message)),
         other => Err(RuntimeError::Protocol(format!(
             "unexpected daemon kill response: {:?}",
@@ -2832,5 +2849,118 @@ fn sanitize_artifact_filename(filename: &str) -> String {
         "artifact".to_string()
     } else {
         sanitized
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("env lock should not be poisoned")
+    }
+
+    struct EnvGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+
+        fn unset(key: &'static str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(value) = &self.previous {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
+    #[test]
+    fn from_env_uses_production_defaults_when_runtime_paths_are_not_overridden() {
+        let _lock = env_lock();
+        let home = std::env::temp_dir().join(format!(
+            "kanna-task-transfer-defaults-{}",
+            std::process::id()
+        ));
+        let _home_guard = EnvGuard::set("HOME", home.as_os_str());
+        let _daemon_guard = EnvGuard::unset("KANNA_DAEMON_DIR");
+        let _db_guard = EnvGuard::unset("KANNA_DB_PATH");
+        let _cli_db_guard = EnvGuard::unset("KANNA_CLI_DB_PATH");
+        let _transfer_root_guard = EnvGuard::unset("KANNA_TRANSFER_ROOT");
+        let _registry_guard = EnvGuard::unset("KANNA_TRANSFER_REGISTRY_DIR");
+
+        let config = RuntimeConfig::from_env().expect("runtime config should resolve");
+
+        assert_eq!(
+            config.daemon_dir,
+            Some(
+                home.join("Library")
+                    .join("Application Support")
+                    .join("Kanna")
+            )
+        );
+        assert_eq!(
+            config.db_path,
+            Some(
+                home.join("Library")
+                    .join("Application Support")
+                    .join("build.kanna")
+                    .join("kanna-v2.db")
+            )
+        );
+        assert_eq!(
+            config.registry_dir,
+            home.join("Library")
+                .join("Application Support")
+                .join("build.kanna")
+                .join("transfer")
+                .join("registry")
+        );
+
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn from_env_prefers_runtime_path_overrides() {
+        let _lock = env_lock();
+        let home = std::env::temp_dir().join(format!(
+            "kanna-task-transfer-overrides-{}",
+            std::process::id()
+        ));
+        let daemon_dir = home.join("custom-daemon");
+        let db_path = home.join("custom.sqlite");
+        let transfer_root = home.join("custom-transfer");
+        let _home_guard = EnvGuard::set("HOME", home.as_os_str());
+        let _daemon_guard = EnvGuard::set("KANNA_DAEMON_DIR", daemon_dir.as_os_str());
+        let _db_guard = EnvGuard::set("KANNA_DB_PATH", db_path.as_os_str());
+        let _cli_db_guard = EnvGuard::unset("KANNA_CLI_DB_PATH");
+        let _transfer_root_guard = EnvGuard::set("KANNA_TRANSFER_ROOT", transfer_root.as_os_str());
+        let _registry_guard = EnvGuard::unset("KANNA_TRANSFER_REGISTRY_DIR");
+
+        let config = RuntimeConfig::from_env().expect("runtime config should resolve");
+
+        assert_eq!(config.daemon_dir, Some(daemon_dir));
+        assert_eq!(config.db_path, Some(db_path));
+        assert_eq!(config.registry_dir, transfer_root.join("registry"));
+
+        let _ = std::fs::remove_dir_all(home);
     }
 }

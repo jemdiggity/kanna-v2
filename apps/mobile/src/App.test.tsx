@@ -113,6 +113,10 @@ describe("createAppModel", () => {
     expect(resolveRelayUrl({ EXPO_PUBLIC_KANNA_RELAY_URL: "   " })).toBeNull();
   });
 
+  it("uses the production relay URL when no Expo public relay URL is provided", () => {
+    expect(resolveRelayUrl({})).toBe("wss://kanna-relay-402613185450.us-central1.run.app");
+  });
+
   it("creates an app model with desktop navigation and a LAN client", async () => {
     const model = createAppModel("http://desktop.test", createFetchMock());
 

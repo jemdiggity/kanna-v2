@@ -1121,6 +1121,7 @@ dependencies = [
  "flexi_logger",
  "futures",
  "ghostty-xterm-compat-serialize",
+ "kanna-runtime-defaults",
  "libc",
  "libghostty-vt",
  "log",
@@ -1128,6 +1129,10 @@ dependencies = [
  "serde_json",
  "tokio",
 ]
+
+[[package]]
+name = "kanna-runtime-defaults"
+version = "0.1.0"
 
 [[package]]
 name = "kanna-server"
@@ -1139,6 +1144,7 @@ dependencies = [
  "env_logger",
  "futures-util",
  "kanna-daemon",
+ "kanna-runtime-defaults",
  "log",
  "reqwest",
  "rusqlite",

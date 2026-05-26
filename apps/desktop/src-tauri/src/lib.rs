@@ -256,23 +256,14 @@ pub fn daemon_data_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("KANNA_DAEMON_DIR") {
         return PathBuf::from(dir);
     }
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    PathBuf::from(home)
-        .join("Library")
-        .join("Application Support")
-        .join("Kanna")
+    kanna_runtime_defaults::default_daemon_dir()
 }
 
 pub fn daemon_socket_path() -> PathBuf {
     if let Ok(dir) = std::env::var("KANNA_DAEMON_DIR") {
         return short_socket_path(&PathBuf::from(dir));
     }
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    let dir = PathBuf::from(home)
-        .join("Library")
-        .join("Application Support")
-        .join("Kanna");
-    short_socket_path(&dir)
+    short_socket_path(&kanna_runtime_defaults::default_daemon_dir())
 }
 
 #[cfg(debug_assertions)]

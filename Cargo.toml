@@ -5,6 +5,7 @@ members = [
     "crates/daemon",
     "crates/kanna-cli",
     "crates/kanna-mcp",
+    "crates/runtime-defaults",
     "crates/kanna-server",
     "crates/task-transfer",
     "crates/tauri-plugin-delta-updater",

@@ -756,6 +756,7 @@ dependencies = [
  "flexi_logger",
  "futures",
  "ghostty-xterm-compat-serialize",
+ "kanna-runtime-defaults",
  "libc",
  "libghostty-vt",
  "log",
@@ -763,6 +764,10 @@ dependencies = [
  "serde_json",
  "tokio",
 ]
+
+[[package]]
+name = "kanna-runtime-defaults"
+version = "0.1.0"
 
 [[package]]
 name = "kanna-task-transfer"
@@ -773,6 +778,7 @@ dependencies = [
  "chrono",
  "hkdf",
  "kanna-daemon",
+ "kanna-runtime-defaults",
  "mdns-sd",
  "rand_core",
  "rusqlite",

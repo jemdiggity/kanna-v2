@@ -25,6 +25,7 @@ import {
 const DEFAULT_SERVER_HOST = "127.0.0.1";
 const DEFAULT_SERVER_PORT = 48120;
 const DEFAULT_SERVER_BASE_URL = `http://${DEFAULT_SERVER_HOST}:${DEFAULT_SERVER_PORT}`;
+const PRODUCTION_RELAY_URL = "wss://kanna-relay-402613185450.us-central1.run.app";
 
 interface ExpoPublicEnv {
   EXPO_PUBLIC_KANNA_SERVER_URL?: string;
@@ -139,8 +140,13 @@ export function resolveServerBaseUrl(
 }
 
 export function resolveRelayUrl(env: ExpoPublicEnv = readExpoPublicEnv()): string | null {
-  const relayUrl = env.EXPO_PUBLIC_KANNA_RELAY_URL?.trim();
-  return relayUrl && relayUrl.length > 0 ? relayUrl : null;
+  if (env.EXPO_PUBLIC_KANNA_RELAY_URL !== undefined) {
+    const relayUrl = env.EXPO_PUBLIC_KANNA_RELAY_URL.trim();
+    return relayUrl && relayUrl.length > 0 ? relayUrl : null;
+  }
+
+  const relayUrl = readExpoPublicEnv().EXPO_PUBLIC_KANNA_RELAY_URL?.trim();
+  return relayUrl && relayUrl.length > 0 ? relayUrl : PRODUCTION_RELAY_URL;
 }
 
 export function createAppModel(

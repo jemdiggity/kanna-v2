@@ -60,6 +60,17 @@ describe("resolveDesktopFirebaseConfig", () => {
     });
   });
 
+  it("uses the production task snapshot function outside dev", async () => {
+    const config = await resolveDesktopFirebaseConfig({
+      readEnv: async () => "",
+      dev: false,
+    });
+
+    expect(config.functionsEndpoint).toBe(
+      "https://upserttasksnapshot-eyxfartmea-uc.a.run.app",
+    );
+  });
+
   it("uses workspace-provided firestore and functions ports", async () => {
     const config = await resolveDesktopFirebaseConfig({
       readEnv: async (name) => {
