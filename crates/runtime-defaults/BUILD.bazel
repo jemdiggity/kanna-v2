@@ -1,0 +1,22 @@
+load("@rules_rust//rust:defs.bzl", "rust_library")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "Cargo.toml",
+])
+
+filegroup(
+    name = "cargo_srcs",
+    srcs = [
+        "Cargo.toml",
+    ] + glob(["src/**/*.rs"]),
+)
+
+rust_library(
+    name = "kanna_runtime_defaults",
+    srcs = glob(["src/**/*.rs"]),
+    crate_root = "src/lib.rs",
+    crate_name = "kanna_runtime_defaults",
+    edition = "2021",
+)

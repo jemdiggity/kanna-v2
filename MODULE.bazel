@@ -95,7 +95,7 @@ crate.from_cargo(
 crate.from_cargo(
     name = "daemon_crates",
     cargo_lockfile = "//crates/daemon:Cargo.lock",
-    manifests = ["//crates/daemon:Cargo.toml"],
+    manifests = ["//:Cargo.daemon.toml"],
     supported_platform_triples = [
         "aarch64-apple-darwin",
         "x86_64-apple-darwin",

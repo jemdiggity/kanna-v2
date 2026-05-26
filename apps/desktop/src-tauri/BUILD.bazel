@@ -226,6 +226,7 @@ rust_library(
     ) + [
         ":desktop_build_script",
         "//crates/claude-agent-sdk:claude_agent_sdk",
+        "//crates/runtime-defaults:kanna_runtime_defaults",
     ],
     proc_macro_deps = all_crate_deps(
         proc_macro = True,
@@ -253,6 +254,7 @@ rust_library(
         package_name = "apps/desktop/src-tauri",
     ) + [
         "//crates/claude-agent-sdk:claude_agent_sdk",
+        "//crates/runtime-defaults:kanna_runtime_defaults",
     ],
     proc_macro_deps = all_crate_deps(
         proc_macro = True,

@@ -2625,6 +2625,7 @@ dependencies = [
  "git2",
  "ignore",
  "image",
+ "kanna-runtime-defaults",
  "libc",
  "objc2",
  "reqwest 0.12.28",
@@ -2642,6 +2643,10 @@ dependencies = [
  "tauri-plugin-webdriver",
  "tokio",
 ]
+
+[[package]]
+name = "kanna-runtime-defaults"
+version = "0.1.0"
 
 [[package]]
 name = "keyboard-types"
