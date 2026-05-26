@@ -7,6 +7,7 @@ import { dismissStartupShortcutsModal } from "../helpers/startupOverlays";
 import { execDb, getVueState } from "../helpers/vue";
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
 const CTX_SCRIPT = 'window.__KANNA_E2E__.setupState';
+const HISTORY_DWELL_WAIT_MS = 1_250;
 
 describe("keyboard shortcuts", () => {
   const client = new WebDriverClient();
@@ -190,19 +191,19 @@ describe("keyboard shortcuts", () => {
          .catch(function(e) { cb("err:" + e); });`,
     );
     await waitForSelection({ repoId: repoOneId, itemId: repoOneIssueTwo });
-    await sleep(1100);
+    await sleep(HISTORY_DWELL_WAIT_MS);
 
     await pressKey("ArrowDown", { meta: true, alt: true });
     await waitForSelection({ repoId: repoOneId, itemId: repoOneIssueOne });
-    await sleep(1100);
+    await sleep(HISTORY_DWELL_WAIT_MS);
 
     await pressKey("ArrowDown", { meta: true, shift: true });
     await waitForSelection({ repoId: repoTwoId, itemId: repoTwoIssueTwo });
-    await sleep(1100);
+    await sleep(HISTORY_DWELL_WAIT_MS);
 
     await pressKey("ArrowDown", { meta: true, alt: true });
     await waitForSelection({ repoId: repoTwoId, itemId: repoTwoIssueOne });
-    await sleep(1100);
+    await sleep(HISTORY_DWELL_WAIT_MS);
 
     await pressKey("-", { ctrl: true });
     await waitForSelection({ repoId: repoTwoId, itemId: repoTwoIssueTwo });
@@ -222,7 +223,7 @@ describe("keyboard shortcuts", () => {
     await pressKey("-", { ctrl: true, shift: true });
     await waitForSelection({ repoId: repoTwoId, itemId: repoTwoIssueOne });
 
-    await sleep(1100);
+    await sleep(HISTORY_DWELL_WAIT_MS);
     await pressKey("ArrowUp", { meta: true, shift: true });
     await waitForSelection({ repoId: repoOneId, itemId: repoOneIssueOne });
 

@@ -82,6 +82,10 @@ async function switchToWindow(client: WebDriverClient, handle: string): Promise<
   ) {
     throw new Error(`WebDriver error: ${body.value.message ?? "unknown error"}`);
   }
+  await client.executeSync(
+    `window.dispatchEvent(new FocusEvent("focus"));
+     return true;`,
+  );
 }
 
 async function setWindowRect(

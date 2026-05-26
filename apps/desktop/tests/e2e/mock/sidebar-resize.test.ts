@@ -1,8 +1,9 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { resetDatabase } from "../helpers/reset";
-import { queryDb } from "../helpers/vue";
+import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
+import { cleanupWorktrees, importTestRepo, resetDatabase } from "../helpers/reset";
+import { execDb, queryDb } from "../helpers/vue";
 import { WebDriverClient } from "../helpers/webdriver";
 
 interface WorkspaceSnapshot {
@@ -51,16 +52,21 @@ async function readWorkspaceSnapshotFromDb(client: WebDriverClient): Promise<Wor
 
 async function waitForWorkspaceSetting(client: WebDriverClient, timeoutMs = 5_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
+  let lastError: unknown = null;
   while (Date.now() < deadline) {
-    const rows = await queryDb(
-      client,
-      "SELECT key FROM settings WHERE key = ?",
-      ["window_workspace_v1"],
-    );
-    if (rows.length > 0) return;
+    try {
+      const rows = await queryDb(
+        client,
+        "SELECT key FROM settings WHERE key = ?",
+        ["window_workspace_v1"],
+      );
+      if (rows.length > 0) return;
+    } catch (error) {
+      lastError = error;
+    }
     await sleep(100);
   }
-  throw new Error("Timed out waiting for window_workspace_v1 setting");
+  throw new Error(`Timed out waiting for window_workspace_v1 setting; last error was ${String(lastError)}`);
 }
 
 async function getPersistedSidebarWidth(
@@ -95,12 +101,19 @@ async function waitForPersistedSidebarWidth(
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let lastWidth: number | undefined;
+  let lastError: unknown = null;
   while (Date.now() < deadline) {
-    lastWidth = await getPersistedSidebarWidth(client, windowId);
-    if (lastWidth === expected) return;
+    try {
+      lastWidth = await getPersistedSidebarWidth(client, windowId);
+      if (lastWidth === expected) return;
+    } catch (error) {
+      lastError = error;
+    }
     await sleep(100);
   }
-  throw new Error(`Timed out waiting for persisted sidebar width ${expected}; last width was ${lastWidth}`);
+  throw new Error(
+    `Timed out waiting for persisted sidebar width ${expected}; last width was ${lastWidth}; last error was ${String(lastError)}`,
+  );
 }
 
 async function dragSidebarHandleToWidth(
@@ -190,15 +203,29 @@ async function dragSidebarHandleToWidth(
 
 describe("sidebar resize", () => {
   const client = new WebDriverClient();
+  let testRepoPath = "";
+  let repoId = "";
 
   beforeAll(async () => {
     await client.createSession();
     await resetDatabase(client);
+    testRepoPath = await createFixtureRepo("sidebar-resize-test");
+    repoId = await importTestRepo(client, testRepoPath, "sidebar-resize-test");
+    await execDb(
+      client,
+      "INSERT INTO pipeline_item (id, repo_id, prompt, stage, agent_type) VALUES (?, ?, ?, ?, ?)",
+      ["sidebar-resize-task", repoId, "Resize sidebar", "in progress", "sdk"],
+    );
     await client.executeSync("location.reload()");
     await client.waitForAppReady();
+    await client.waitForText(".sidebar", "Resize sidebar");
   });
 
   afterAll(async () => {
+    if (testRepoPath) {
+      await cleanupWorktrees(client, testRepoPath);
+      await cleanupFixtureRepos([testRepoPath]);
+    }
     await client.deleteSession();
   });
 
@@ -223,6 +250,6 @@ describe("sidebar resize", () => {
     await client.waitForAppReady();
     await waitForWorkspaceSetting(client);
     await waitForSidebarWidth(client, 420);
-    expect(await getPersistedSidebarWidth(client, windowId)).toBe(420);
+    await waitForPersistedSidebarWidth(client, windowId, 420);
   });
 });
