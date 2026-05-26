@@ -41,7 +41,9 @@ rust_library(
     crate_root = "src/lib.rs",
     crate_name = "kanna_daemon",
     edition = "2021",
-    deps = all_crate_deps_for_server(normal = True, package_name = "crates/daemon"),
+    deps = all_crate_deps_for_server(normal = True, package_name = "crates/daemon") + [
+        "//crates/runtime-defaults:kanna_runtime_defaults",
+    ],
     proc_macro_deps = all_crate_deps_for_server(proc_macro = True, package_name = "crates/daemon"),
 )
 
@@ -51,7 +53,9 @@ rust_library(
     crate_root = "src/lib.rs",
     crate_name = "kanna_daemon",
     edition = "2021",
-    deps = all_crate_deps_for_task_transfer(normal = True, package_name = "crates/daemon"),
+    deps = all_crate_deps_for_task_transfer(normal = True, package_name = "crates/daemon") + [
+        "//crates/runtime-defaults:kanna_runtime_defaults",
+    ],
     proc_macro_deps = all_crate_deps_for_task_transfer(proc_macro = True, package_name = "crates/daemon"),
 )
 
