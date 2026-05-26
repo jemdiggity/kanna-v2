@@ -35,7 +35,7 @@ import { publishDesktopTaskSnapshots } from "./services/desktopCloudPublisher";
 import { createConfiguredDesktopRelayTerminalClient } from "./services/desktopRelayTerminal";
 import { createConfiguredDesktopLanTerminalClient } from "./services/desktopLanTerminal";
 import { useKeyboardShortcuts, type ActionName } from "./composables/useKeyboardShortcuts";
-import { startPeriodicBackup } from "./composables/useBackup";
+import { scheduleStartupBackup, startPeriodicBackup } from "./composables/useBackup";
 import { useOperatorEvents } from "./composables/useOperatorEvents";
 import { type ShortcutContext } from "./composables/useShortcutContext";
 import { useCustomTasks } from "./composables/useCustomTasks";
@@ -1822,6 +1822,10 @@ onMounted(async () => {
 
   await restoreSidebarWidth();
   await store.init(db);
+  await nextTick();
+  if (windowWorkspace && windowWorkspace.bootstrap.windowId === "main") {
+    scheduleStartupBackup(dbName);
+  }
   void initializeDesktopCloudAuth().catch((error) =>
     console.warn("[cloud] failed to initialize desktop auth:", error),
   );

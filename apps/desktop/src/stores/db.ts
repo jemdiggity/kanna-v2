@@ -1,6 +1,6 @@
 import * as tauriMock from "../tauri-mock";
 import { invoke } from "../invoke";
-import { backupOnStartup, migrateLegacyDatabaseIfNeeded } from "../composables/useBackup";
+import { migrateLegacyDatabaseIfNeeded } from "../composables/useBackup";
 import type { DbHandle } from "@kanna/db";
 
 interface AppliedMigrationRow {
@@ -35,7 +35,6 @@ export async function loadDatabase(): Promise<{ db: DbHandle; dbName: string }> 
 
   console.log("[db] using database:", dbName);
   await migrateLegacyDatabaseIfNeeded(dbName);
-  await backupOnStartup(dbName);
   const { default: Database } = await import("@tauri-apps/plugin-sql");
   const db = (await Database.load(`sqlite:${dbName}`)) as unknown as DbHandle;
   await checkDatabaseHealth(db, "startup");
