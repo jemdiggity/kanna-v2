@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/daemon",
+    "crates/runtime-defaults",
     "crates/task-transfer",
 ]
 resolver = "2"

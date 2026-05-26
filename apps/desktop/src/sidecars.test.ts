@@ -65,6 +65,19 @@ describe("desktop sidecar packaging", () => {
     expect(moduleBazel).toContain('manifests = ["//:Cargo.task-transfer.toml"]');
   });
 
+  it("keeps synthetic sidecar Cargo workspaces aligned with shared runtime defaults", () => {
+    const repoRoot = resolve(import.meta.dirname, "../../..");
+    const serverCargo = readFileSync(resolve(repoRoot, "Cargo.server.toml"), "utf8");
+    const taskTransferCargo = readFileSync(resolve(repoRoot, "Cargo.task-transfer.toml"), "utf8");
+    const serverLock = readFileSync(resolve(repoRoot, "crates/kanna-server/Cargo.lock"), "utf8");
+    const taskTransferLock = readFileSync(resolve(repoRoot, "crates/task-transfer/Cargo.lock"), "utf8");
+
+    expect(serverCargo).toContain('"crates/runtime-defaults"');
+    expect(taskTransferCargo).toContain('"crates/runtime-defaults"');
+    expect(serverLock).toContain('name = "kanna-runtime-defaults"');
+    expect(taskTransferLock).toContain('name = "kanna-runtime-defaults"');
+  });
+
   it("builds sidecars as a prerequisite and keeps beforeDevCommand limited to vite", () => {
     expect(desktopPkg.scripts?.dev).not.toContain("build:sidecars");
     expect(desktopPkg.scripts?.dev).toContain("vite");
