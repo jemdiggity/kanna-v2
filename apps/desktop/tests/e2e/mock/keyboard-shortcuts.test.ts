@@ -74,6 +74,14 @@ describe("keyboard shortcuts", () => {
     repoImported = true;
   }
 
+  async function sidebarTaskTitles(): Promise<string[]> {
+    return await client.executeSync<string[]>(
+      `return Array.from(document.querySelectorAll(".pipeline-item .item-title"))
+        .map(function(element) { return element.textContent?.trim() || ""; })
+        .filter(Boolean);`,
+    );
+  }
+
   it("Shift+Cmd+N shows a warning when no repos are loaded", async () => {
     expect(await client.findElements(".toast.warning")).toHaveLength(0);
     await pressKey("N", { meta: true, shift: true });
@@ -280,6 +288,68 @@ describe("keyboard shortcuts", () => {
 
     await client.emitToWebviewWindow("kanna://native-navigate-task-down");
     await waitForSelection({ repoId, itemId: olderTaskId });
+  });
+
+  it("uses the rendered sidebar order for task navigation", async () => {
+    await resetDatabase(client);
+    await client.executeSync("location.reload()");
+    await client.waitForAppReady();
+    await dismissStartupShortcutsModal(client);
+
+    const repoId = await importTestRepo(client, testRepoPath, "keyboard-visual-order");
+    repoImported = true;
+
+    const inProgressTaskId = "e2e-key-visual-in-progress";
+    const prTaskId = "e2e-key-visual-pr";
+    await execDb(
+      client,
+      `INSERT INTO pipeline_item
+         (id, repo_id, issue_number, issue_title, prompt, stage, tags, branch, agent_type, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        prTaskId,
+        repoId,
+        321,
+        "Visual order PR task",
+        "Prompt for visual order PR task",
+        "pr",
+        "[]",
+        null,
+        "sdk",
+        "2026-04-17T10:01:00.000Z",
+        "2026-04-17T10:01:00.000Z",
+        inProgressTaskId,
+        repoId,
+        322,
+        "Visual order in progress task",
+        "Prompt for visual order in progress task",
+        "in progress",
+        "[]",
+        null,
+        "sdk",
+        "2026-04-17T10:00:00.000Z",
+        "2026-04-17T10:00:00.000Z",
+      ],
+    );
+
+    await client.executeAsync<string>(
+      `const cb = arguments[arguments.length - 1];
+       const ctx = ${CTX_SCRIPT};
+       ctx.refreshAllItems()
+         .then(function() { return ctx.store.selectRepo(${JSON.stringify(repoId)}); })
+         .then(function() { return ctx.store.selectItem(${JSON.stringify(prTaskId)}); })
+         .then(function() { cb("ok"); })
+         .catch(function(e) { cb("err:" + e); });`,
+    );
+    await waitForSelection({ repoId, itemId: prTaskId });
+
+    expect(await sidebarTaskTitles()).toEqual([
+      "Visual order PR task",
+      "Visual order in progress task",
+    ]);
+
+    await pressKey("ArrowDown", { meta: true, alt: true });
+    await waitForSelection({ repoId, itemId: inProgressTaskId });
   });
 
   it("uses native repo-navigation events to navigate repos", async () => {

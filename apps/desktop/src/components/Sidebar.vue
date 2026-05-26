@@ -4,18 +4,15 @@ import { computed, ref, nextTick, onBeforeUnmount, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import draggable from "vuedraggable";
 import { taskSearchMatch } from "../utils/taskSearch";
+import {
+  groupedSidebarItemsByStage,
+  sortedSidebarBlockedItems,
+  sortedSidebarPinnedItems,
+  sortSidebarItemsForRepo,
+} from "../utils/sidebarOrdering";
 import { useKannaStore } from "../stores/kanna";
 import { isTaskTearingDown } from "../stores/taskStages";
 import { macOsTextInputAttrs } from "../utils/textInput";
-
-function hasTag(item: { tags: string }, tag: string): boolean {
-  try { return (JSON.parse(item.tags) as string[]).includes(tag); }
-  catch { return false; }
-}
-
-function isHidden(item: { stage: string }): boolean {
-  return item.stage === "done";
-}
 
 const { t } = useI18n();
 const store = useKannaStore();
@@ -72,37 +69,21 @@ function matchesSearch(item: PipelineItem): boolean {
   return taskSearchMatch(q, item) !== null;
 }
 
-function getSearchScore(item: PipelineItem): number | null {
-  const q = searchQuery.value.trim();
-  if (!q) return null;
-  return taskSearchMatch(q, item)?.score ?? null;
-}
-
-function compareBySearchScore(a: PipelineItem, b: PipelineItem): number {
-  const scoreA = getSearchScore(a) ?? 0;
-  const scoreB = getSearchScore(b) ?? 0;
-  if (scoreA !== scoreB) return scoreB - scoreA;
-  return b.created_at.localeCompare(a.created_at);
+function sidebarOrderingOptions(repoId: string) {
+  return {
+    repoId,
+    items: props.pipelineItems,
+    getStageOrder: store.getStageOrder,
+    searchQuery: searchQuery.value,
+  };
 }
 
 function sortedPinned(repoId: string): PipelineItem[] {
-  return props.pipelineItems
-    .filter((i) => i.repo_id === repoId && !isHidden(i) && i.pinned && matchesSearch(i))
-    .sort((a, b) => {
-      if (searchQuery.value.trim()) return compareBySearchScore(a, b);
-      return (a.pin_order ?? 0) - (b.pin_order ?? 0);
-    });
-}
-
-function sortByCreatedAt(items: PipelineItem[]): PipelineItem[] {
-  return [...items].sort((a, b) => b.created_at.localeCompare(a.created_at));
+  return sortedSidebarPinnedItems(sidebarOrderingOptions(repoId));
 }
 
 function sortedBlocked(repoId: string): PipelineItem[] {
-  const items = props.pipelineItems.filter(
-    (i) => i.repo_id === repoId && hasTag(i, "blocked") && !isHidden(i) && !i.pinned && matchesSearch(i)
-  );
-  return searchQuery.value.trim() ? [...items].sort(compareBySearchScore) : sortByCreatedAt(items);
+  return sortedSidebarBlockedItems(sidebarOrderingOptions(repoId));
 }
 
 interface StageGroup {
@@ -116,49 +97,15 @@ interface StageGroup {
  * Stages not in the configured order sort alphabetically after listed stages.
  */
 function groupedByStage(repoId: string): StageGroup[] {
-  const blockedSet = new Set(
-    props.pipelineItems
-      .filter((i) => i.repo_id === repoId && hasTag(i, "blocked") && !isHidden(i) && !i.pinned)
-      .map((i) => i.id)
-  );
-
-  const stageItems = props.pipelineItems.filter(
-    (i) => i.repo_id === repoId && !isHidden(i) && !i.pinned && !blockedSet.has(i.id) && matchesSearch(i)
-  );
-
-  // Group items by stage
-  const groups = new Map<string, PipelineItem[]>();
-  for (const item of stageItems) {
-    if (!groups.has(item.stage)) groups.set(item.stage, []);
-    groups.get(item.stage)!.push(item);
-  }
-  for (const [, items] of groups) {
-    items.sort(searchQuery.value.trim() ? compareBySearchScore : (a, b) => b.created_at.localeCompare(a.created_at));
-  }
-
-  // Sort stages by configured order; unlisted stages sort alphabetically after
-  const order = store.getStageOrder(repoId);
-  const stageNames = [...groups.keys()].sort((a, b) => {
-    const idxA = order.indexOf(a);
-    const idxB = order.indexOf(b);
-    const orderA = idxA === -1 ? order.length : idxA;
-    const orderB = idxB === -1 ? order.length : idxB;
-    if (orderA !== orderB) return orderA - orderB;
-    return a.localeCompare(b);
-  });
-
-  return stageNames
-    .map((stageName) => ({ stageName, items: groups.get(stageName) ?? [] }))
-    .filter((g) => g.items.length > 0);
+  return groupedSidebarItemsByStage(sidebarOrderingOptions(repoId));
 }
 
 function itemsForRepo(repoId: string): PipelineItem[] {
-  const stageItems = groupedByStage(repoId).flatMap((g) => g.items);
-  return [...sortedPinned(repoId), ...stageItems, ...sortedBlocked(repoId)];
+  return sortSidebarItemsForRepo(sidebarOrderingOptions(repoId));
 }
 
 function totalItemsForRepo(repoId: string): number {
-  return props.pipelineItems.filter((i) => i.repo_id === repoId && !isHidden(i)).length;
+  return props.pipelineItems.filter((i) => i.repo_id === repoId && i.stage !== "done").length;
 }
 
 function repoCountLabel(repoId: string): string {
