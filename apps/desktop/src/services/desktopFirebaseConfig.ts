@@ -41,7 +41,7 @@ export async function resolveDesktopFirebaseConfig({
     app,
     authEmulator: parseAuthEmulatorPort(authPort),
     firestoreEmulator: parseAuthEmulatorPort(firestorePort),
-    functionsEndpoint: parseFunctionsEndpoint(functionsPort),
+    functionsEndpoint: parseFunctionsEndpoint(functionsPort, dev),
   };
 }
 
@@ -84,6 +84,9 @@ const productionDesktopFirebaseAppConfig: DesktopFirebaseAppConfig = {
   measurementId: "G-091WQZN4SS",
 };
 
+const PRODUCTION_FUNCTIONS_ENDPOINT =
+  "https://upserttasksnapshot-eyxfartmea-uc.a.run.app";
+
 function compactAppConfig(config: DesktopFirebaseAppConfig): DesktopFirebaseAppConfig {
   const compacted: DesktopFirebaseAppConfig = {
     apiKey: config.apiKey,
@@ -115,11 +118,13 @@ function parseAuthEmulatorPort(
   };
 }
 
-function parseFunctionsEndpoint(rawPort: string | undefined): string | null {
+function parseFunctionsEndpoint(rawPort: string | undefined, dev: boolean): string | null {
   const parsed = parseAuthEmulatorPort(rawPort);
-  return parsed
-    ? `${parsed.url}/kanna-local/us-central1/upsertTaskSnapshot`
-    : null;
+  if (parsed) {
+    return `${parsed.url}/kanna-local/us-central1/upsertTaskSnapshot`;
+  }
+
+  return dev ? null : PRODUCTION_FUNCTIONS_ENDPOINT;
 }
 
 function normalizeEnvValue(value: string | undefined): string | undefined {
