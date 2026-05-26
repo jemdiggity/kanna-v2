@@ -532,6 +532,50 @@ async function restoreSidebarWidth() {
 
 interface PendingIncomingTransferRow {
   id: string;
+  source_peer_id: string | null;
+  source_task_id: string | null;
+  payload_json: string | null;
+}
+
+function validatePendingIncomingTransferRow(row: PendingIncomingTransferRow): string | null {
+  if (!row.source_peer_id) return "missing source_peer_id";
+  if (!row.source_task_id) return "missing source_task_id";
+  if (!row.payload_json) return "missing payload_json";
+
+  try {
+    const parsed = JSON.parse(row.payload_json) as unknown;
+    if (!parsed || typeof parsed !== "object") return "payload_json did not decode to an object";
+    const record = parsed as { task?: unknown; repo?: unknown };
+    if (!record.task || typeof record.task !== "object") return "payload_json missing task";
+    if (!record.repo || typeof record.repo !== "object") return "payload_json missing repo";
+  } catch (error: unknown) {
+    return `payload_json is invalid: ${error instanceof Error ? error.message : String(error)}`;
+  }
+
+  return null;
+}
+
+async function markPendingIncomingTransferFailed(transferId: string, reason: string): Promise<boolean> {
+  const result = await db.execute(
+    `UPDATE task_transfer
+        SET status = 'failed',
+            completed_at = datetime('now'),
+            error = ?
+      WHERE id = ? AND direction = 'incoming' AND status IN ('pending', 'streaming')`,
+    [reason, transferId],
+  );
+  return result.rowsAffected === 1;
+}
+
+async function claimPendingIncomingTransfer(transferId: string): Promise<boolean> {
+  const result = await db.execute(
+    `UPDATE task_transfer
+        SET status = 'streaming',
+            error = NULL
+      WHERE id = ? AND direction = 'incoming' AND status = 'pending'`,
+    [transferId],
+  );
+  return result.rowsAffected === 1;
 }
 
 function visibleSidebarItemsForRepo(repoId: string, options: { currentRepoScope?: boolean } = {}) {
@@ -1154,16 +1198,36 @@ async function handlePairPeer(peerId: string) {
 
 async function importPendingIncomingTransfers() {
   const rows = await db.select<PendingIncomingTransferRow>(
-    `SELECT id
+    `SELECT id, source_peer_id, source_task_id, payload_json
        FROM task_transfer
       WHERE direction = 'incoming' AND status = 'pending'
       ORDER BY started_at ASC`,
   );
   for (const row of rows) {
+    const invalidReason = validatePendingIncomingTransferRow(row);
+    if (invalidReason) {
+      const reason = `pending incoming transfer is malformed: ${invalidReason}`;
+      if (await markPendingIncomingTransferFailed(row.id, reason)) {
+        console.warn("[App] disabled malformed pending incoming transfer:", { transferId: row.id, reason });
+      }
+      continue;
+    }
+
+    const claimed = await claimPendingIncomingTransfer(row.id);
+    if (!claimed) {
+      continue;
+    }
+
     try {
       await store.approveIncomingTransfer(row.id);
     } catch (error: unknown) {
-      console.error("[App] failed to auto-import pending incoming transfer:", error);
+      const reason = error instanceof Error ? error.message : String(error);
+      if (await markPendingIncomingTransferFailed(row.id, reason)) {
+        console.warn("[App] failed to auto-import pending incoming transfer; marked failed:", {
+          transferId: row.id,
+          reason,
+        });
+      }
     }
   }
 }

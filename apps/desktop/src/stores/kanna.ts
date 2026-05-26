@@ -780,7 +780,7 @@ Use this branch as the default when the user does not specify a target branch. B
     if (transfer.direction !== "incoming") {
       throw new Error(`transfer is not incoming: ${transferId}`);
     }
-    if (transfer.status !== "pending") {
+    if (transfer.status !== "pending" && transfer.status !== "streaming") {
       throw new Error(`incoming transfer is not pending: ${transferId}`);
     }
 
