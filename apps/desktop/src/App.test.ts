@@ -47,6 +47,7 @@ const listenHandlers = new Map<string, (event: unknown) => void | Promise<void>>
 const currentWebviewWindowListenHandlers = new Map<string, (event: unknown) => void | Promise<void>>();
 let closeRequestedHandler: ((event: { preventDefault: () => void }) => void | Promise<void>) | null = null;
 const cloudTasksMock = vi.hoisted(() => vi.fn(async () => ({ repos: [], items: [] })));
+const scheduleStartupBackupMock = vi.hoisted(() => vi.fn(async () => {}));
 const dbSelectMock = vi.fn(async () => []);
 const dbMock = {
   select: dbSelectMock,
@@ -230,6 +231,7 @@ vi.mock("./i18n", () => ({
 }));
 
 vi.mock("./composables/useBackup", () => ({
+  scheduleStartupBackup: scheduleStartupBackupMock,
   startPeriodicBackup: vi.fn(),
 }));
 
@@ -471,6 +473,7 @@ async function mountApp(sidebarStub: typeof SidebarWithRepoStub | typeof Sidebar
   });
   await flushPromises();
   await flushPromises();
+  await flushPromises();
   return wrapper;
 }
 
@@ -513,6 +516,7 @@ async function mountAppWithOverrides(
   });
   await flushPromises();
   await flushPromises();
+  await flushPromises();
   return wrapper;
 }
 
@@ -552,6 +556,7 @@ describe("App", () => {
     mockWindowWorkspace.persistSidebarWidth.mockClear();
     mockWindowWorkspace.invalidateSharedData.mockClear();
     mockWindowWorkspace.restoreAdditionalWindows.mockClear();
+    mockWindowWorkspace.bootstrap.windowId = "main";
     dbSelectMock.mockReset();
     dbSelectMock.mockResolvedValue([]);
     dbMock.execute.mockReset();
@@ -568,6 +573,7 @@ describe("App", () => {
     appUpdateMock.install.mockClear();
     appUpdateMock.status.value = "available";
     appUpdateMock.visible = computed(() => true);
+    scheduleStartupBackupMock.mockClear();
     invokeMock.mockImplementation(async (command: string, args?: { name?: string; repoPath?: string }) => {
       if (command === "list_dir") return ["default.json"];
       if (command === "read_text_file") return "";
@@ -577,6 +583,34 @@ describe("App", () => {
       if (command === "which_binary" && (args?.name === "claude" || args?.name === "codex")) return true;
       throw new Error(`unexpected invoke: ${command}`);
     });
+  });
+
+  it("schedules startup backup only after the main window initial data is loaded", async () => {
+    const initDeferred = createDeferred<void>();
+    store.init.mockImplementationOnce(async () => initDeferred.promise);
+
+    const wrapper = await mountApp(SidebarWithRepoStub);
+
+    expect(scheduleStartupBackupMock).not.toHaveBeenCalled();
+
+    initDeferred.resolve();
+    await flushPromises();
+    await flushPromises();
+
+    expect(scheduleStartupBackupMock).toHaveBeenCalledTimes(1);
+    expect(scheduleStartupBackupMock).toHaveBeenCalledWith("test.db");
+
+    wrapper.unmount();
+  });
+
+  it("does not schedule startup backup from restored secondary windows", async () => {
+    mockWindowWorkspace.bootstrap.windowId = "window-2";
+
+    const wrapper = await mountApp(SidebarWithRepoStub);
+
+    expect(scheduleStartupBackupMock).not.toHaveBeenCalled();
+
+    wrapper.unmount();
   });
 
   it("prevents browser navigation when files are dragged over or dropped on the app shell", async () => {

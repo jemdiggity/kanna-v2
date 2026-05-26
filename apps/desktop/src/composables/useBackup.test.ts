@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
 interface InvokeCall {
   cmd: string;
@@ -36,11 +36,13 @@ const {
   createBackup,
   cleanOldBackups,
   backupOnStartup,
+  scheduleStartupBackup,
   migrateLegacyDatabaseIfNeeded,
 } = await import("./useBackup");
 
 describe("useBackup", () => {
   beforeEach(() => {
+    vi.useRealTimers();
     testState.invokeCalls = [];
     testState.invokeResults = {
       get_app_data_dir: "/mock/data/dir",
@@ -49,6 +51,10 @@ describe("useBackup", () => {
       remove_file: undefined,
       list_dir: [],
     };
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   describe("parseBackupTimestamp", () => {
@@ -264,6 +270,36 @@ describe("useBackup", () => {
 
       // Should not throw
       await backupOnStartup("kanna-v2.db");
+    });
+  });
+
+  describe("scheduleStartupBackup", () => {
+    it("defers and deduplicates startup backups for a database name", async () => {
+      vi.useFakeTimers();
+      const requestAnimationFrameSpy = vi
+        .spyOn(window, "requestAnimationFrame")
+        .mockImplementation((callback) => {
+          callback(0);
+          return 1;
+        });
+
+      scheduleStartupBackup("kanna-v2-scheduled.db");
+      scheduleStartupBackup("kanna-v2-scheduled.db");
+
+      expect(testState.invokeCalls.find((c) => c.cmd === "backup_sqlite_database")).toBeUndefined();
+
+      for (let attempt = 0; attempt < 10; attempt++) {
+        await vi.runOnlyPendingTimersAsync();
+        await Promise.resolve();
+        await Promise.resolve();
+        if (testState.invokeCalls.some((c) => c.cmd === "backup_sqlite_database")) break;
+      }
+
+      const backupCalls = testState.invokeCalls.filter((c) => c.cmd === "backup_sqlite_database");
+      expect(backupCalls).toHaveLength(1);
+      expect(backupCalls[0]!.args).toEqual({ dbName: "kanna-v2-scheduled.db" });
+
+      requestAnimationFrameSpy.mockRestore();
     });
   });
 });

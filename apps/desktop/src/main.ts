@@ -78,7 +78,6 @@ try {
   app.provide("db", db);
   app.provide("dbName", dbName);
   app.provide("windowWorkspace", windowWorkspace);
-  await windowWorkspace.restoreAdditionalWindows();
 
   if (import.meta.env.DEV) {
     const appWithSetupState = app as typeof app & AppWithSetupState;
@@ -139,6 +138,9 @@ try {
   }
 
   app.mount("#app");
+  void windowWorkspace.restoreAdditionalWindows().catch((error) => {
+    console.error("[windowWorkspace] failed to restore additional windows:", error);
+  });
 } catch (e) {
   console.error("[init] fatal:", e);
   const el = document.getElementById("app");

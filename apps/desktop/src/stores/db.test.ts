@@ -2,10 +2,29 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DbHandle } from "@kanna/db";
 
 const readEnvVarMock = vi.fn<(name: string) => Promise<string>>(async () => "");
+const backupOnStartupMock = vi.hoisted(() => vi.fn(async () => {}));
+const migrateLegacyDatabaseIfNeededMock = vi.hoisted(() => vi.fn(async () => {}));
+const pluginSqlState = vi.hoisted(() => ({
+  load: vi.fn(async () => ({
+    execute: vi.fn(async () => ({ rowsAffected: 0 })),
+    select: vi.fn(async () => [{ quick_check: "ok" }]),
+  })),
+}));
 
 vi.mock("../tauri-mock", () => ({
   isTauri: true,
   getMockDatabase: vi.fn(),
+}));
+
+vi.mock("../composables/useBackup", () => ({
+  backupOnStartup: backupOnStartupMock,
+  migrateLegacyDatabaseIfNeeded: migrateLegacyDatabaseIfNeededMock,
+}));
+
+vi.mock("@tauri-apps/plugin-sql", () => ({
+  default: {
+    load: pluginSqlState.load,
+  },
 }));
 
 vi.mock("../invoke", () => ({
@@ -162,16 +181,20 @@ describe("runMigrations", () => {
   let runMigrations: typeof import("./db")["runMigrations"];
   let checkDatabaseHealth: typeof import("./db")["checkDatabaseHealth"];
   let resolveDbName: typeof import("./db")["resolveDbName"];
+  let loadDatabase: typeof import("./db")["loadDatabase"];
   let db: ReturnType<typeof createMigrationDb>;
 
   beforeAll(async () => {
-    ({ runMigrations, checkDatabaseHealth, resolveDbName } = await import("./db"));
+    ({ runMigrations, checkDatabaseHealth, resolveDbName, loadDatabase } = await import("./db"));
   });
 
   beforeEach(() => {
     db = createMigrationDb([]);
     readEnvVarMock.mockReset();
     readEnvVarMock.mockResolvedValue("");
+    backupOnStartupMock.mockClear();
+    migrateLegacyDatabaseIfNeededMock.mockClear();
+    pluginSqlState.load.mockClear();
   });
 
   it("prefers explicit KANNA_DB_NAME over worktree-derived names", async () => {
@@ -185,6 +208,15 @@ describe("runMigrations", () => {
 
   it("falls back to the default database name when KANNA_DB_NAME is unset", async () => {
     await expect(resolveDbName()).resolves.toBe("kanna-v2.db");
+  });
+
+  it("loads the database without waiting for startup backup work", async () => {
+    const loaded = await loadDatabase();
+
+    expect(loaded.dbName).toBe("kanna-v2.db");
+    expect(migrateLegacyDatabaseIfNeededMock).toHaveBeenCalledWith("kanna-v2.db");
+    expect(pluginSqlState.load).toHaveBeenCalledWith("sqlite:kanna-v2.db");
+    expect(backupOnStartupMock).not.toHaveBeenCalled();
   });
 
   it("passes startup health checks when quick_check returns ok", async () => {

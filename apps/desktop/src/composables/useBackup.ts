@@ -6,6 +6,7 @@ import type { DbHandle } from "@kanna/db";
 const RETENTION_DAYS = 7;
 const BACKUP_SUFFIX_REGEX = /\.backup-(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2})(?:-\d+)?$/;
 const LEGACY_APP_DATA_DIR_NAME = "com.kanna.app";
+const scheduledStartupBackups = new Set<string>();
 
 function backupTimestamp(): string {
   return new Date().toISOString().replace(/:/g, "-").replace(/\.\d+Z$/, "");
@@ -110,6 +111,22 @@ export async function backupOnStartup(dbName: string): Promise<void> {
   } catch (e) {
     console.error("[backup] startup backup failed (non-fatal):", e);
   }
+}
+
+export function scheduleStartupBackup(dbName: string): void {
+  if (!isTauri || scheduledStartupBackups.has(dbName)) return;
+  scheduledStartupBackups.add(dbName);
+
+  const run = () => {
+    void backupOnStartup(dbName);
+  };
+
+  if (typeof window !== "undefined" && typeof window.requestAnimationFrame === "function") {
+    window.requestAnimationFrame(() => window.setTimeout(run, 0));
+    return;
+  }
+
+  setTimeout(run, 0);
 }
 
 export function startPeriodicBackup(
