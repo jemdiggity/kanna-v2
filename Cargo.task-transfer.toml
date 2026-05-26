@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "crates/daemon",
+    "crates/task-transfer",
+]
+resolver = "2"

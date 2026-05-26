@@ -113,7 +113,7 @@ crate.from_cargo(
 crate.from_cargo(
     name = "task_transfer_crates",
     cargo_lockfile = "//crates/task-transfer:Cargo.lock",
-    manifests = ["//crates/task-transfer:Cargo.toml"],
+    manifests = ["//:Cargo.task-transfer.toml"],
     supported_platform_triples = [
         "aarch64-apple-darwin",
         "x86_64-apple-darwin",
@@ -163,6 +163,7 @@ crate.annotation(
     repositories = [
         "daemon_crates",
         "kanna_server_crates",
+        "task_transfer_crates",
         "terminal_recovery_crates",
     ],
     build_script_data = [
