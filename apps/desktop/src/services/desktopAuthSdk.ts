@@ -1,11 +1,16 @@
 import { initializeApp, getApps, type FirebaseApp } from "firebase/app";
 import {
+  browserLocalPersistence,
   connectAuthEmulator,
   getAuth,
+  indexedDBLocalPersistence,
+  inMemoryPersistence,
+  initializeAuth,
   onAuthStateChanged,
   signInWithEmailAndPassword,
   signOut as firebaseSignOut,
   type Auth,
+  type Persistence,
   type User,
 } from "firebase/auth";
 import { invoke } from "../invoke";
@@ -37,22 +42,28 @@ async function createConfiguredDesktopAuthSession(): Promise<DesktopAuthSession>
     return createDisabledDesktopAuthSession("Firebase Auth is not configured.");
   }
 
+  let app: FirebaseApp | null = null;
+  let auth: Auth | null = null;
   const storageStatus = await verifyFirebaseAuthIndexedDbStorage();
-  if (!storageStatus.available) {
-    console.warn(
-      `[cloud] Firebase Auth storage unavailable (${storageStatus.operation}): ${storageStatus.message}`,
-    );
-    return createDisabledDesktopAuthSession("Firebase Auth storage is not available.");
-  }
-
-  let app: FirebaseApp;
-  let auth: Auth;
+  const persistence = resolveDesktopAuthPersistence(storageStatus);
   try {
     app = getApps()[0] ?? initializeApp(config.app);
-    auth = getAuth(app);
+    auth = initializeAuth(app, { persistence });
   } catch (error) {
-    console.warn("[cloud] failed to initialize Firebase Auth:", error);
+    if (app && isFirebaseAuthAlreadyInitializedError(error)) {
+      auth = getAuth(app);
+    } else {
+      console.warn("[cloud] failed to initialize Firebase Auth:", error);
+      return createDisabledDesktopAuthSession("Firebase Auth failed to initialize.");
+    }
+  }
+  if (!app || !auth) {
     return createDisabledDesktopAuthSession("Firebase Auth failed to initialize.");
+  }
+  if (!storageStatus.available) {
+    console.warn(
+      `[cloud] Firebase Auth IndexedDB storage unavailable (${storageStatus.operation}); using fallback persistence: ${storageStatus.message}`,
+    );
   }
   if (config.authEmulator && connectedAuthEmulatorUrl !== config.authEmulator.url) {
     connectAuthEmulator(auth, config.authEmulator.url, {
@@ -64,6 +75,21 @@ async function createConfiguredDesktopAuthSession(): Promise<DesktopAuthSession>
   return createDesktopAuthSession({
     sdk: createFirebaseDesktopAuthSdk(auth, app),
   });
+}
+
+function resolveDesktopAuthPersistence(
+  storageStatus: Awaited<ReturnType<typeof verifyFirebaseAuthIndexedDbStorage>>,
+): Persistence[] {
+  const fallbackPersistence = [browserLocalPersistence, inMemoryPersistence];
+  if (!storageStatus.available) return fallbackPersistence;
+  return [indexedDBLocalPersistence, ...fallbackPersistence];
+}
+
+function isFirebaseAuthAlreadyInitializedError(error: unknown): boolean {
+  return typeof error === "object"
+    && error !== null
+    && "code" in error
+    && (error as { code?: unknown }).code === "auth/already-initialized";
 }
 
 export function createFirebaseDesktopAuthSdk(auth: Auth, _app: FirebaseApp): DesktopAuthSdk {

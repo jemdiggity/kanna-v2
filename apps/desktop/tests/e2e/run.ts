@@ -233,11 +233,16 @@ function isRealTestTarget(testTarget: string): boolean {
 }
 
 function targetNeedsEmulators(testTarget: string): boolean {
-  return /real\/cloud-task-sync\.test\.ts$/.test(testTarget);
+  return /real\/cloud-task-sync\.test\.ts$/.test(testTarget) ||
+    /real\/auth-indexeddb-fallback\.test\.ts$/.test(testTarget);
 }
 
 function targetNeedsRelay(testTarget: string): boolean {
   return /real\/cloud-task-sync\.test\.ts$/.test(testTarget);
+}
+
+function targetNeedsAuthIndexedDbOpenFailure(testTarget: string): boolean {
+  return /real\/auth-indexeddb-fallback\.test\.ts$/.test(testTarget);
 }
 
 function buildInstanceConfig(input: {
@@ -382,8 +387,12 @@ async function main(): Promise<void> {
   }
 
   function realE2eRuntimeEnvForTarget(testTarget: string): Record<string, string> {
-    void testTarget;
-    return realE2eRuntimeEnv;
+    return {
+      ...realE2eRuntimeEnv,
+      ...(targetNeedsAuthIndexedDbOpenFailure(testTarget)
+        ? { KANNA_E2E_FIREBASE_AUTH_INDEXEDDB_OPEN_FAILURE: "1" }
+        : {}),
+    };
   }
 
   function buildTestEnv(
