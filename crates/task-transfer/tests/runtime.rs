@@ -176,6 +176,74 @@ async fn start_pairing_times_out_when_peer_accepts_without_replying() {
     server.abort();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn observe_peer_session_reports_empty_peer_response_with_peer_context() {
+    let temp = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let target_identity = TransferIdentity::generate();
+    PeerRegistry::new(temp.path().to_path_buf())
+        .write_entry(&PeerRegistryEntry {
+            peer_id: "peer-target".into(),
+            display_name: "Target".into(),
+            endpoint: format!("127.0.0.1:{port}"),
+            pid: std::process::id(),
+            public_key: public_key_to_string(&target_identity.public_key),
+            protocol_version: 1,
+            accepting_transfers: true,
+        })
+        .unwrap();
+
+    PeerStore::new(trusted_peer_store_path(temp.path(), "peer-primary"))
+        .upsert(PeerRecord {
+            peer_id: "peer-target".into(),
+            display_name: "Target".into(),
+            public_key: public_key_to_string(&target_identity.public_key),
+            capabilities_json: "{\"protocolVersion\":1}".into(),
+            paired_at: "2026-04-17T00:00:00Z".into(),
+            last_seen_at: None,
+            revoked_at: None,
+        })
+        .unwrap();
+
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (reader, mut writer) = stream.into_split();
+        let mut reader = BufReader::new(reader);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        assert!(line.contains("\"observe_session\""));
+        writer.write_all(b"\n").await.unwrap();
+    });
+
+    let primary = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-primary",
+        "Primary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+
+    primary
+        .observe_peer_session("peer-target", "task-1")
+        .await
+        .unwrap();
+    let message = match primary.next_event().await.unwrap() {
+        RuntimeEvent::TerminalEvent { event, .. } => match event {
+            kanna_task_transfer::protocol::PeerTerminalEvent::Error { message, .. } => message,
+            other => panic!("expected terminal error event, got {other:?}"),
+        },
+        other => panic!("expected terminal event, got {other:?}"),
+    };
+    assert!(
+        message.contains("peer peer-target returned an empty response"),
+        "unexpected error: {message}",
+    );
+
+    server.await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn mdns_peers_can_discover_pair_and_transfer() {
     let temp = tempfile::tempdir().unwrap();
