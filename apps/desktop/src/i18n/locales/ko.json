@@ -103,6 +103,7 @@
     "noReposHint": "{shortcut}을 눌러 생성하세요.",
     "newTaskTooltip": "새 작업 (⌘N)",
     "removeRepoTooltip": "저장소 삭제",
+    "remoteTaskTooltip": "원격 작업",
     "sectionMergeQueue": "머지 큐",
     "sectionPullRequests": "풀 리퀘스트",
     "sectionInProgress": "진행 중",

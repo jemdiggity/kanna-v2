@@ -15,6 +15,9 @@ function translate(key: string, params?: Record<string, string>) {
   if (key === "sidebar.noTasks") {
     return "No tasks";
   }
+  if (key === "sidebar.remoteTaskTooltip") {
+    return "Remote task";
+  }
   return key;
 }
 
@@ -193,6 +196,29 @@ describe("Sidebar", () => {
     ]);
 
     expect(wrapper.text()).toContain("... Pinned task");
+  });
+
+  it("marks remote tasks with a leading angle marker and leaves local tasks unmarked", () => {
+    const wrapper = mountSidebar([
+      item("task-remote", {
+        display_name: "LAN visible task",
+        created_at: "2026-01-01T11:00:00.000Z",
+        remote_task: true,
+      } as Partial<PipelineItem>),
+      item("task-local", {
+        display_name: "Local cleanup",
+        created_at: "2026-01-01T10:00:00.000Z",
+      }),
+    ], null);
+
+    const titles = wrapper.findAll(".pipeline-item .item-title");
+    expect(titles).toHaveLength(2);
+    expect(titles[0]?.text()).toBe("< LAN visible task");
+    expect(titles[0]?.attributes("title")).toBe("Remote task");
+    expect(titles[0]?.find(".remote-task-marker").exists()).toBe(true);
+    expect(titles[1]?.text()).toBe("Local cleanup");
+    expect(titles[1]?.attributes("title")).toBeUndefined();
+    expect(titles[1]?.find(".remote-task-marker").exists()).toBe(false);
   });
 
   it("switches the sidebar into a filtered visual state and shows filtered repo counts", async () => {

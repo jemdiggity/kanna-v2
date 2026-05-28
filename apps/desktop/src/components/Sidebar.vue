@@ -17,9 +17,13 @@ import { macOsTextInputAttrs } from "../utils/textInput";
 const { t } = useI18n();
 const store = useKannaStore();
 
+type SidebarPipelineItem = PipelineItem & {
+  remote_task?: boolean;
+};
+
 const props = defineProps<{
   repos: Repo[];
-  pipelineItems: PipelineItem[];
+  pipelineItems: SidebarPipelineItem[];
   selectedRepoId: string | null;
   selectedItemId: string | null;
   blockerNames?: Record<string, string>;
@@ -63,7 +67,7 @@ function isSearchActive(): boolean {
   return searchQuery.value.trim().length > 0;
 }
 
-function matchesSearch(item: PipelineItem): boolean {
+function matchesSearch(item: SidebarPipelineItem): boolean {
   const q = trimmedSearchQuery.value;
   if (!q) return true;
   return taskSearchMatch(q, item) !== null;
@@ -78,17 +82,17 @@ function sidebarOrderingOptions(repoId: string) {
   };
 }
 
-function sortedPinned(repoId: string): PipelineItem[] {
+function sortedPinned(repoId: string): SidebarPipelineItem[] {
   return sortedSidebarPinnedItems(sidebarOrderingOptions(repoId));
 }
 
-function sortedBlocked(repoId: string): PipelineItem[] {
+function sortedBlocked(repoId: string): SidebarPipelineItem[] {
   return sortedSidebarBlockedItems(sidebarOrderingOptions(repoId));
 }
 
 interface StageGroup {
   stageName: string;
-  items: PipelineItem[];
+  items: SidebarPipelineItem[];
 }
 
 /**
@@ -100,7 +104,7 @@ function groupedByStage(repoId: string): StageGroup[] {
   return groupedSidebarItemsByStage(sidebarOrderingOptions(repoId));
 }
 
-function itemsForRepo(repoId: string): PipelineItem[] {
+function itemsForRepo(repoId: string): SidebarPipelineItem[] {
   return sortSidebarItemsForRepo(sidebarOrderingOptions(repoId));
 }
 
@@ -114,10 +118,14 @@ function repoCountLabel(repoId: string): string {
   return `${visible}/${totalItemsForRepo(repoId)}`;
 }
 
-function itemTitle(item: PipelineItem): string {
+function itemTitle(item: SidebarPipelineItem): string {
   const raw = item.display_name || item.issue_title || item.prompt || t('tasks.untitled');
   const truncated = raw.length > 40 ? raw.slice(0, 40) + "..." : raw;
   return item.active_post_action ? `... ${truncated}` : truncated;
+}
+
+function isRemoteTask(item: SidebarPipelineItem): boolean {
+  return item.remote_task === true;
 }
 
 const editingItemId = ref<string | null>(null);
@@ -125,7 +133,7 @@ const editingValue = ref("");
 const editingRepoId = ref<string | null>(null);
 const editingRepoValue = ref("");
 
-function startRename(item: PipelineItem) {
+function startRename(item: SidebarPipelineItem) {
   editingRepoId.value = null;
   editingItemId.value = item.id;
   editingValue.value = item.display_name || item.issue_title || item.prompt || "";
@@ -194,7 +202,7 @@ function handleSelectRepo(repoId: string) {
   emit("select-repo", repoId);
 }
 
-function handleSelectItem(item: PipelineItem) {
+function handleSelectItem(item: SidebarPipelineItem) {
   emit("select-repo", item.repo_id);
   emit("select-item", item.id);
 }
@@ -276,7 +284,7 @@ function startRepoDrag(repoId: string, event: MouseEvent) {
   document.addEventListener("mouseup", handleRepoDragEnd);
 }
 
-function onPinnedChange(repoId: string, evt: DraggableChange<PipelineItem>) {
+function onPinnedChange(repoId: string, evt: DraggableChange<SidebarPipelineItem>) {
   if (isSearchActive()) return;
   if (evt.added) {
     // Item dragged from unpinned to pinned zone
@@ -292,7 +300,7 @@ function onPinnedChange(repoId: string, evt: DraggableChange<PipelineItem>) {
   }
 }
 
-function onUnpinnedChange(repoId: string, evt: DraggableChange<PipelineItem>) {
+function onUnpinnedChange(repoId: string, evt: DraggableChange<SidebarPipelineItem>) {
   if (isSearchActive()) return;
   const added = evt.added;
   if (added) {
@@ -439,7 +447,9 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
                     textDecoration: isTaskTearingDown(element) ? 'line-through' : 'none',
                     opacity: isTaskTearingDown(element) ? 0.5 : 1,
                   }"
-                >{{ itemTitle(element) }}</span>
+                  :title="isRemoteTask(element) ? t('sidebar.remoteTaskTooltip') : undefined"
+                >
+                  <span v-if="isRemoteTask(element)" class="remote-task-marker" :aria-label="t('sidebar.remoteTaskTooltip')">&lt; </span>{{ itemTitle(element) }}</span>
               </div>
             </template>
           </draggable>
@@ -492,7 +502,9 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
                       textDecoration: isTaskTearingDown(element) ? 'line-through' : 'none',
                       opacity: isTaskTearingDown(element) ? 0.5 : 1,
                     }"
-                  >{{ itemTitle(element) }}</span>
+                    :title="isRemoteTask(element) ? t('sidebar.remoteTaskTooltip') : undefined"
+                  >
+                    <span v-if="isRemoteTask(element)" class="remote-task-marker" :aria-label="t('sidebar.remoteTaskTooltip')">&lt; </span>{{ itemTitle(element) }}</span>
                 </div>
               </template>
             </draggable>
@@ -531,7 +543,9 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
                     textDecoration: isTaskTearingDown(element) ? 'line-through' : 'none',
                     opacity: isTaskTearingDown(element) ? 0.5 : 1,
                   }"
-                >{{ itemTitle(element) }}</span>
+                  :title="isRemoteTask(element) ? t('sidebar.remoteTaskTooltip') : undefined"
+                >
+                  <span v-if="isRemoteTask(element)" class="remote-task-marker" :aria-label="t('sidebar.remoteTaskTooltip')">&lt; </span>{{ itemTitle(element) }}</span>
                 <span
                   v-if="blockerNames?.[element.id]"
                   class="blocked-by-text"
@@ -784,6 +798,11 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
   white-space: nowrap;
   flex: 1;
   pointer-events: none;
+}
+
+.remote-task-marker {
+  color: #7fb7e6;
+  font-family: "JetBrains Mono", "SF Mono", Menlo, monospace;
 }
 
 .rename-input {
