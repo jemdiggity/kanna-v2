@@ -1,5 +1,6 @@
 import React from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
+import { MOBILE_E2E_IDS } from "../e2eTestIds";
 import type { AuthState } from "../state/sessionStore";
 import { getAccountBadgePresentation } from "./accountBadgePresentation";
 
@@ -15,6 +16,7 @@ export function AccountBadge({ auth, onPress }: AccountBadgeProps) {
   return (
     <Pressable
       accessibilityLabel={presentation.label}
+      testID={MOBILE_E2E_IDS.accountButton}
       style={styles.badge}
       onPress={onPress}
     >

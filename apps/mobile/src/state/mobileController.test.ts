@@ -183,6 +183,49 @@ describe("createMobileController", () => {
     });
   });
 
+  it("bootstraps the cloud connection after email sign-in", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const auth = createAuthSessionMock();
+    vi.mocked(auth.signInWithEmailPassword).mockImplementation(async () => {
+      vi.mocked(auth.getState).mockReturnValue({
+        status: "signedIn",
+        user: { uid: "user-1", email: "u@example.com", displayName: null }
+      });
+    });
+    client.getStatus.mockResolvedValueOnce({
+      state: "running",
+      desktopId: "cloud",
+      desktopName: "Kanna Cloud",
+      lanHost: "cloud",
+      lanPort: 0,
+      pairingCode: null
+    });
+    client.listRecentTasks.mockResolvedValueOnce([
+      {
+        id: "cloud-task-1",
+        repoId: "repo-1",
+        title: "Cloud task",
+        stage: "in progress"
+      }
+    ]);
+    const controller = createMobileController(client, store, auth);
+
+    await controller.signInWithEmailPassword("u@example.com", "password");
+
+    expect(client.getStatus).toHaveBeenCalledTimes(1);
+    expect(store.getState()).toMatchObject({
+      auth: {
+        status: "signedIn",
+        user: { email: "u@example.com" }
+      },
+      connectionMode: "remote",
+      connectionState: "connected",
+      desktopName: "Kanna Cloud",
+      recentTasks: [{ id: "cloud-task-1", title: "Cloud task" }]
+    });
+  });
+
   it("searches tasks and switches to the search surface", async () => {
     const store = createSessionStore();
     const controller = createMobileController(createClientMock(), store);

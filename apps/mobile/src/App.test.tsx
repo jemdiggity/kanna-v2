@@ -218,6 +218,55 @@ describe("createAppModel", () => {
     ]);
   });
 
+  it("does not fall back to loopback LAN when signed-in production cloud has no tasks yet", async () => {
+    const authSession: MobileAuthSession = {
+      initialize: vi.fn().mockResolvedValue(undefined),
+      getState: vi.fn(() => ({
+        status: "signedIn",
+        user: { uid: "user-1", email: "u@example.com", displayName: null }
+      })),
+      subscribe: vi.fn((listener) => {
+        listener({
+          status: "signedIn",
+          user: { uid: "user-1", email: "u@example.com", displayName: null }
+        });
+        return () => undefined;
+      }),
+      signInWithEmailPassword: vi.fn().mockResolvedValue(undefined),
+      signOut: vi.fn().mockResolvedValue(undefined),
+      getIdToken: vi.fn().mockResolvedValue("id-token-1")
+    };
+    const fetchImpl = vi.fn(async () => {
+      throw new Error("LAN should not be called for standalone production cloud");
+    }) as FetchLike;
+    const taskIndex = {
+      listRecentTasks: vi.fn(async () => [])
+    };
+    const model = createAppModel(
+      "http://127.0.0.1:48120",
+      fetchImpl,
+      {
+        load: vi.fn().mockResolvedValue(null),
+        save: vi.fn().mockResolvedValue(undefined)
+      },
+      authSession,
+      { relayUrl: "wss://relay.example", taskIndex }
+    );
+
+    await model.initialize();
+
+    expect(model.sessionStore.getState()).toMatchObject({
+      connectionMode: "remote",
+      connectionState: "connected",
+      desktopName: "Kanna Cloud",
+      recentTasks: []
+    });
+    await expect(model.client.listDesktops()).resolves.toEqual([]);
+    await expect(model.client.listRepos()).resolves.toEqual([]);
+    await expect(model.client.listRecentTasks()).resolves.toEqual([]);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   it("hydrates persisted mobile context before bootstrap", async () => {
     const persistence = {
       load: vi.fn().mockResolvedValue({

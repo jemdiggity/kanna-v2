@@ -257,7 +257,9 @@ function createClientForMode({
     );
     const lanClient = createKannaClient(createLanTransport(baseUrl, fetchImpl));
 
-    return createCloudWithLanFallbackClient(cloudClient, lanClient);
+    return createCloudWithLanFallbackClient(cloudClient, lanClient, {
+      lanFallbackEnabled: baseUrl !== DEFAULT_SERVER_BASE_URL
+    });
   }
 
   return createKannaClient(createLanTransport(baseUrl, fetchImpl));
@@ -265,7 +267,8 @@ function createClientForMode({
 
 function createCloudWithLanFallbackClient(
   cloudClient: KannaClient,
-  lanClient: KannaClient
+  lanClient: KannaClient,
+  options: { lanFallbackEnabled: boolean }
 ): KannaClient {
   let cloudHasTasks = false;
 
@@ -273,34 +276,43 @@ function createCloudWithLanFallbackClient(
     try {
       const tasks = await cloudClient.listRecentTasks();
       cloudHasTasks = tasks.length > 0;
-      return cloudHasTasks ? tasks : lanClient.listRecentTasks();
+      return cloudHasTasks || !options.lanFallbackEnabled
+        ? tasks
+        : lanClient.listRecentTasks();
     } catch {
       cloudHasTasks = false;
+      if (!options.lanFallbackEnabled) {
+        return [];
+      }
       return lanClient.listRecentTasks();
     }
   };
 
-  const useLanFallback = () => !cloudHasTasks;
+  const useLanFallback = () => options.lanFallbackEnabled && !cloudHasTasks;
 
   return {
     getStatus: () => cloudClient.getStatus(),
     listDesktops: async () => {
       const desktops = await cloudClient.listDesktops();
-      return desktops.length ? desktops : lanClient.listDesktops();
+      return desktops.length || !options.lanFallbackEnabled
+        ? desktops
+        : lanClient.listDesktops();
     },
     listRepos: async () => {
       if (useLanFallback()) {
         return lanClient.listRepos();
       }
       const repos = await cloudClient.listRepos();
-      return repos.length ? repos : lanClient.listRepos();
+      return repos.length || !options.lanFallbackEnabled ? repos : lanClient.listRepos();
     },
     listRepoTasks: async (repoId) => {
       if (useLanFallback()) {
         return lanClient.listRepoTasks(repoId);
       }
       const tasks = await cloudClient.listRepoTasks(repoId);
-      return tasks.length ? tasks : lanClient.listRepoTasks(repoId);
+      return tasks.length || !options.lanFallbackEnabled
+        ? tasks
+        : lanClient.listRepoTasks(repoId);
     },
     listRecentTasks,
     searchTasks: (query) =>
