@@ -20,6 +20,8 @@ interface AppWithSetupState {
   };
 }
 
+const FIREBASE_AUTH_DB_NAME = "firebaseLocalStorageDb";
+
 async function resolveRootComponent() {
   if (shouldMountBaseBranchDropdownPreview(window.location.search, {
     dev: import.meta.env.DEV,
@@ -31,6 +33,58 @@ async function resolveRootComponent() {
   }
 
   return App;
+}
+
+function installFirebaseAuthIndexedDbOpenFailureForE2E(): void {
+  if (!import.meta.env.DEV || window.__KANNA_E2E_AUTH_INDEXEDDB_FAULT__) return;
+
+  const indexedDb = globalThis.indexedDB;
+  if (!indexedDb) return;
+
+  const originalOpen = indexedDb.open.bind(indexedDb);
+  window.__KANNA_E2E_AUTH_INDEXEDDB_FAULT__ = {
+    installed: true,
+    openFailures: 0,
+  };
+
+  const failOrOpen: IDBFactory["open"] = ((name: string, version?: number) => {
+    if (name !== FIREBASE_AUTH_DB_NAME) {
+      return version === undefined ? originalOpen(name) : originalOpen(name, version);
+    }
+
+    const request = {
+      error: new DOMException("The operation was aborted.", "AbortError"),
+      result: undefined,
+      readyState: "done",
+      source: null,
+      transaction: null,
+      onblocked: null,
+      onerror: null,
+      onsuccess: null,
+      onupgradeneeded: null,
+      addEventListener: () => undefined,
+      removeEventListener: () => undefined,
+      dispatchEvent: () => true,
+    } as unknown as IDBOpenDBRequest;
+
+    queueMicrotask(() => {
+      window.__KANNA_E2E_AUTH_INDEXEDDB_FAULT__!.openFailures += 1;
+      request.onerror?.(new Event("error"));
+    });
+
+    return request;
+  }) as IDBFactory["open"];
+
+  Object.defineProperty(globalThis, "indexedDB", {
+    configurable: true,
+    value: new Proxy(indexedDb, {
+      get(target, property, receiver) {
+        if (property === "open") return failOrOpen;
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }),
+  });
 }
 
 if (isTauri) {
@@ -58,6 +112,15 @@ if (isTauri) {
   window.addEventListener("contextmenu", (event) => {
     event.preventDefault();
   });
+
+  if (import.meta.env.DEV) {
+    const failFirebaseAuthIndexedDbOpen = await invoke<string>("read_env_var", {
+      name: "KANNA_E2E_FIREBASE_AUTH_INDEXEDDB_OPEN_FAILURE",
+    }).catch(() => "");
+    if (failFirebaseAuthIndexedDbOpen === "1") {
+      installFirebaseAuthIndexedDbOpenFailureForE2E();
+    }
+  }
 } else {
   console.log("[kanna] Running in browser mode with mock Tauri APIs");
 }

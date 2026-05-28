@@ -35,6 +35,11 @@ interface KannaAppMetricsE2EApi {
   clear: () => void;
 }
 
+interface KannaAuthIndexedDbFaultE2EApi {
+  installed: boolean;
+  openFailures: number;
+}
+
 interface KannaE2EHook {
   ready: boolean;
   setupState: object | null;
@@ -46,4 +51,5 @@ interface KannaE2EHook {
 
 interface Window {
   __KANNA_E2E__?: KannaE2EHook;
+  __KANNA_E2E_AUTH_INDEXEDDB_FAULT__?: KannaAuthIndexedDbFaultE2EApi;
 }
