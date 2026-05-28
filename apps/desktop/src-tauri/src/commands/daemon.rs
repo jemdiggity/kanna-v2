@@ -79,6 +79,7 @@ fn default_sequence() -> u64 {
 }
 
 static NEXT_ATTACH_ID: AtomicU64 = AtomicU64::new(1);
+const UNEXPECTED_ACK_EVENT_CODE: &str = "unexpected_ack_event";
 
 fn register_attached_owner(
     attached: &mut HashMap<String, HashSet<String>>,
@@ -169,10 +170,73 @@ fn parse_error_event(event: &serde_json::Value) -> DaemonCommandError {
 
 fn parse_ack(response: &str) -> Result<(), DaemonCommandError> {
     let event: serde_json::Value = serde_json::from_str(response).unwrap_or_default();
-    if let Some("Error") = event.get("type").and_then(|t| t.as_str()) {
-        return Err(parse_error_event(&event));
+    match event.get("type").and_then(|t| t.as_str()) {
+        Some("Ok") => Ok(()),
+        Some("Error") => Err(parse_error_event(&event)),
+        _ => Err(DaemonCommandError {
+            message: format!("unexpected ack event: {}", response),
+            code: Some(UNEXPECTED_ACK_EVENT_CODE.to_string()),
+        }),
     }
-    Ok(())
+}
+
+fn is_retryable_command_error(error: &DaemonCommandError) -> bool {
+    error.message.starts_with("failed to write command:")
+        || error.message.starts_with("failed to flush command:")
+        || error
+            .message
+            .starts_with("failed to connect to daemon socket:")
+        || error.message == "daemon client unavailable"
+}
+
+fn should_clear_daemon_client_after_error(error: &DaemonCommandError) -> bool {
+    error.code.as_deref() == Some(UNEXPECTED_ACK_EVENT_CODE)
+        || is_retryable_command_error(error)
+        || error.message.starts_with("failed to read event:")
+        || error.message == "connection closed by daemon"
+}
+
+async fn clear_daemon_client(state: &DaemonState) {
+    *state.lock().await = None;
+}
+
+async fn send_command_expect_ack_once(
+    state: &DaemonState,
+    json: &str,
+) -> Result<(), DaemonCommandError> {
+    ensure_connected(state).await?;
+    let mut guard = state.lock().await;
+    let client = require_option_mut(&mut guard, "daemon client")?;
+    client.send_command(json).await?;
+    let response = client.read_event().await?;
+    parse_ack(&response)
+}
+
+async fn clear_client_and_return_error(
+    state: &DaemonState,
+    error: DaemonCommandError,
+) -> Result<(), DaemonCommandError> {
+    if should_clear_daemon_client_after_error(&error) {
+        clear_daemon_client(state).await;
+    }
+    Err(error)
+}
+
+async fn send_command_expect_ack(
+    state: &DaemonState,
+    json: &str,
+) -> Result<(), DaemonCommandError> {
+    match send_command_expect_ack_once(state, json).await {
+        Ok(()) => Ok(()),
+        Err(error) if is_retryable_command_error(&error) => {
+            clear_daemon_client(state).await;
+            match send_command_expect_ack_once(state, json).await {
+                Ok(()) => Ok(()),
+                Err(retry_error) => clear_client_and_return_error(state, retry_error).await,
+            }
+        }
+        Err(error) => clear_client_and_return_error(state, error).await,
+    }
 }
 
 fn parse_agent_provider(
@@ -219,9 +283,10 @@ fn parse_snapshot_response(response: &str) -> Result<TerminalSnapshotPayload, Da
 #[cfg(test)]
 mod tests {
     use super::{
-        attached_owner_count, clear_attached_owners, parse_snapshot_response,
-        register_attached_owner, remove_window_session_size, require_option_mut,
-        unregister_attached_owner, update_window_session_size, TerminalSnapshotPayload,
+        attached_owner_count, clear_attached_owners, is_retryable_command_error, parse_ack,
+        parse_snapshot_response, register_attached_owner, remove_window_session_size,
+        require_option_mut, should_clear_daemon_client_after_error, unregister_attached_owner,
+        update_window_session_size, TerminalSnapshotPayload, UNEXPECTED_ACK_EVENT_CODE,
     };
     use std::collections::HashMap;
 
@@ -279,6 +344,43 @@ mod tests {
         let snapshot = parse_snapshot_response(response).expect("snapshot should parse");
         assert_eq!(snapshot.saved_at, 123);
         assert_eq!(snapshot.sequence, 7);
+    }
+
+    #[test]
+    fn parse_ack_rejects_unexpected_events() {
+        let response = r#"{"type":"Output","session_id":"sess-1","data":[65]}"#;
+
+        let error = parse_ack(response).expect_err("output is not a command ack");
+
+        assert_eq!(
+            error.message,
+            r#"unexpected ack event: {"type":"Output","session_id":"sess-1","data":[65]}"#
+        );
+        assert_eq!(error.code.as_deref(), Some(UNEXPECTED_ACK_EVENT_CODE));
+        assert!(!is_retryable_command_error(&error));
+        assert!(should_clear_daemon_client_after_error(&error));
+    }
+
+    #[test]
+    fn read_failures_are_not_retried_because_command_may_have_run() {
+        let error = super::DaemonCommandError {
+            message: "failed to read event: reset by peer".to_string(),
+            code: None,
+        };
+
+        assert!(!is_retryable_command_error(&error));
+        assert!(should_clear_daemon_client_after_error(&error));
+    }
+
+    #[test]
+    fn stale_write_failures_are_retried_after_reconnect() {
+        let error = super::DaemonCommandError {
+            message: "failed to write command: Broken pipe (os error 32)".to_string(),
+            code: None,
+        };
+
+        assert!(is_retryable_command_error(&error));
+        assert!(should_clear_daemon_client_after_error(&error));
     }
 
     #[test]
@@ -624,12 +726,7 @@ pub async fn seed_session_recovery_state(
         },
     });
     let json = serde_json::to_string(&cmd).map_err(|e| e.to_string())?;
-    ensure_connected(&state).await?;
-    let mut guard = state.lock().await;
-    let client = require_option_mut(&mut guard, "daemon client")?;
-    client.send_command(&json).await?;
-    let response = client.read_event().await?;
-    parse_ack(&response)
+    send_command_expect_ack(&state, &json).await
 }
 
 #[tauri::command]
@@ -644,12 +741,7 @@ pub async fn send_input(
         "data": data,
     });
     let json = serde_json::to_string(&cmd).map_err(|e| e.to_string())?;
-    ensure_connected(&state).await?;
-    let mut guard = state.lock().await;
-    let client = require_option_mut(&mut guard, "daemon client")?;
-    client.send_command(&json).await?;
-    let response = client.read_event().await?;
-    parse_ack(&response)
+    send_command_expect_ack(&state, &json).await
 }
 
 #[tauri::command]
@@ -674,12 +766,7 @@ pub async fn resize_session(
         "rows": rows,
     });
     let json = serde_json::to_string(&cmd).map_err(|e| e.to_string())?;
-    ensure_connected(&state).await?;
-    let mut guard = state.lock().await;
-    let client = require_option_mut(&mut guard, "daemon client")?;
-    client.send_command(&json).await?;
-    let response = client.read_event().await?;
-    parse_ack(&response)
+    send_command_expect_ack(&state, &json).await
 }
 
 #[tauri::command]
@@ -694,12 +781,7 @@ pub async fn signal_session(
         "signal": signal,
     });
     let json = serde_json::to_string(&cmd).map_err(|e| e.to_string())?;
-    ensure_connected(&state).await?;
-    let mut guard = state.lock().await;
-    let client = require_option_mut(&mut guard, "daemon client")?;
-    client.send_command(&json).await?;
-    let response = client.read_event().await?;
-    parse_ack(&response)
+    send_command_expect_ack(&state, &json).await
 }
 
 #[tauri::command]
@@ -713,12 +795,7 @@ pub async fn kill_session(
         "session_id": session_id,
     });
     let json = serde_json::to_string(&cmd).map_err(|e| e.to_string())?;
-    ensure_connected(&state).await?;
-    let mut guard = state.lock().await;
-    let client = require_option_mut(&mut guard, "daemon client")?;
-    client.send_command(&json).await?;
-    let response = client.read_event().await?;
-    let result = parse_ack(&response);
+    let result = send_command_expect_ack(&state, &json).await;
     if result.is_ok() {
         let mut sizes = window_sizes.lock().await;
         sizes.remove(&session_id);
