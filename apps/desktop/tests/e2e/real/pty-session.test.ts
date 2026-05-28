@@ -1,4 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { spawn } from "node:child_process";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { WebDriverClient } from "../helpers/webdriver";
@@ -182,6 +185,95 @@ async function invokeOrThrow(
     throw new Error(String((result as { __error: unknown }).__error));
   }
   return result;
+}
+
+function trackSessionId(sessionIds: string[], sessionId: string): string {
+  sessionIds.push(sessionId);
+  return sessionId;
+}
+
+function utf8Bytes(text: string): number[] {
+  return Array.from(new TextEncoder().encode(text));
+}
+
+async function waitForDaemonPid(
+  daemonDir: string,
+  expectedPid: number,
+  timeoutMs = 10_000,
+): Promise<void> {
+  const pidPath = join(daemonDir, "daemon.pid");
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const pid = await readFile(pidPath, "utf8").catch(() => "");
+    if (pid.trim() === String(expectedPid)) {
+      return;
+    }
+    await sleep(100);
+  }
+  throw new Error(`Timed out waiting for replacement daemon pid ${expectedPid}`);
+}
+
+async function spawnReplacementDaemon(client: WebDriverClient): Promise<number> {
+  const daemonBin = await invokeOrThrow(client, "which_binary", { name: "kanna-daemon" }) as string;
+  const daemonDir = await invokeOrThrow(client, "read_env_var", { name: "KANNA_DAEMON_DIR" }) as string;
+  const child = spawn(daemonBin, [], {
+    detached: true,
+    env: {
+      ...process.env,
+      KANNA_DAEMON_DIR: daemonDir,
+    },
+    stdio: "ignore",
+  });
+  child.unref();
+  if (!child.pid) {
+    throw new Error("Replacement daemon did not expose a pid");
+  }
+  await waitForDaemonPid(daemonDir, child.pid);
+  return child.pid;
+}
+
+async function waitForRecoverySnapshotText(
+  client: WebDriverClient,
+  sessionId: string,
+  text: string,
+  timeoutMs = 10_000,
+): Promise<SessionRecoveryStatePayload> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const snapshot = await invokeOrThrow(client, "get_session_recovery_state", { sessionId });
+    if (
+      snapshot &&
+      typeof snapshot === "object" &&
+      "serialized" in snapshot &&
+      typeof snapshot.serialized === "string" &&
+      snapshot.serialized.includes(text)
+    ) {
+      return snapshot;
+    }
+    await sleep(200);
+  }
+  throw new Error(`Timed out waiting for recovery snapshot text "${text}" in ${sessionId}`);
+}
+
+async function attachSessionWithRetry(
+  client: WebDriverClient,
+  sessionId: string,
+  timeoutMs = 10_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let lastError: unknown = null;
+
+  while (Date.now() < deadline) {
+    try {
+      await invokeOrThrow(client, "attach_session_with_snapshot", { sessionId });
+      return;
+    } catch (error) {
+      lastError = error;
+      await sleep(200);
+    }
+  }
+
+  throw new Error(`Timed out reattaching ${sessionId} after daemon handoff: ${String(lastError)}`);
 }
 
 function escapeRegExp(text: string): string {
@@ -471,8 +563,10 @@ describe("pty session (real CLI)", () => {
   });
 
   it("keeps an existing PTY stream alive when a secondary window attaches and detaches", async () => {
-    const deterministicSessionId = `pty-window-${randomUUID()}`;
-    deterministicSessionIds.push(deterministicSessionId);
+    const deterministicSessionId = trackSessionId(
+      deterministicSessionIds,
+      `pty-window-${randomUUID()}`,
+    );
     const readyMarker = `KREADY_${randomUUID().replaceAll("-", "")}`;
     const liveMarker = `KLIVE_${randomUUID().replaceAll("-", "")}`;
     const afterDetachMarker = `KAFTER_${randomUUID().replaceAll("-", "")}`;
@@ -585,5 +679,71 @@ describe("pty session (real CLI)", () => {
       10_000,
     );
     expect(afterDetachStats.lastMatchingLine).toContain(afterDetachMarker);
+  });
+
+  it("sends input to an existing PTY after daemon handoff replaces the command socket", async () => {
+    const deterministicSessionId = trackSessionId(
+      deterministicSessionIds,
+      `pty-handoff-input-${randomUUID()}`,
+    );
+    const readyMarker = `KHANDOFF_READY_${randomUUID().replaceAll("-", "")}`;
+    const beforeMarker = `KHANDOFF_BEFORE_${randomUUID().replaceAll("-", "")}`;
+    const afterMarker = `KHANDOFF_AFTER_${randomUUID().replaceAll("-", "")}`;
+    const script = [
+      `printf '${readyMarker}\\n'`,
+      "while IFS= read -r line; do printf 'ECHO:%s\\n' \"$line\"; done",
+    ].join("; ");
+
+    await execDb(
+      client,
+      "INSERT INTO pipeline_item (id, repo_id, prompt, stage, agent_type) VALUES (?, ?, ?, ?, ?)",
+      [deterministicSessionId, repoId, "Deterministic PTY handoff echo fixture", "in progress", "pty"],
+    );
+    await invokeOrThrow(client, "spawn_session", {
+      sessionId: deterministicSessionId,
+      cwd: testRepoPath,
+      executable: "/bin/zsh",
+      args: ["-f", "-c", script],
+      env: { TERM: "xterm-256color" },
+      cols: 80,
+      rows: 24,
+    });
+    await callVueMethod(client, "loadItems", repoId);
+    await setSelectedItem(client, deterministicSessionId);
+    await waitForCurrentItemId(client, deterministicSessionId);
+    await waitForTerminalBufferText(client, deterministicSessionId, readyMarker, 15_000);
+
+    await invokeOrThrow(client, "send_input", {
+      sessionId: deterministicSessionId,
+      data: utf8Bytes(`${beforeMarker}\n`),
+    });
+    await waitForTerminalBufferText(client, deterministicSessionId, `ECHO:${beforeMarker}`, 10_000);
+
+    await invokeOrThrow(client, "detach_session", { sessionId: deterministicSessionId });
+    await spawnReplacementDaemon(client);
+    await sleep(1_000);
+    await attachSessionWithRetry(client, deterministicSessionId);
+
+    await invokeOrThrow(client, "send_input", {
+      sessionId: deterministicSessionId,
+      data: utf8Bytes(`${afterMarker}\n`),
+    });
+
+    const echoedText = `ECHO:${afterMarker}`;
+    const afterHandoffStats = await waitForTerminalBufferText(
+      client,
+      deterministicSessionId,
+      echoedText,
+      15_000,
+    );
+    expect(afterHandoffStats.lastMatchingLine).toContain(afterMarker);
+
+    const snapshot = await waitForRecoverySnapshotText(
+      client,
+      deterministicSessionId,
+      echoedText,
+      10_000,
+    );
+    expect(snapshot.serialized).toContain(afterMarker);
   });
 });
