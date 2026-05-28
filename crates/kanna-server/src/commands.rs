@@ -157,16 +157,20 @@ pub async fn handle_invoke(
                 .get("task_id")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| "missing required arg: task_id".to_string())?;
+            let pipeline_item_id = db
+                .resolve_pipeline_item_id(task_id)
+                .map_err(|e| format!("db error: {}", e))?
+                .ok_or_else(|| format!("task not found: {task_id}"))?;
 
             for session_id in [
-                task_id.to_string(),
-                format!("shell-wt-{task_id}"),
-                format!("td-{task_id}"),
+                pipeline_item_id.to_string(),
+                format!("shell-wt-{pipeline_item_id}"),
+                format!("td-{pipeline_item_id}"),
             ] {
                 kill_session_if_present(daemon, &session_id).await?;
             }
 
-            db.close_pipeline_item(task_id)
+            db.close_pipeline_item(&pipeline_item_id)
                 .map_err(|e| format!("db error: {}", e))?;
             Ok(Value::Null)
         }
