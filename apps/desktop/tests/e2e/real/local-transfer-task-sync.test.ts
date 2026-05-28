@@ -1,6 +1,7 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
+import { buildGlobalKeydownScript } from "../helpers/keyboard";
 import { cleanupWorktrees, importTestRepo, resetDatabase } from "../helpers/reset";
 import { createPrimaryAndSecondaryClients } from "../helpers/twoInstance";
 import { pairWithPeerThroughUi } from "../helpers/transferFlow";
@@ -111,6 +112,42 @@ async function waitForBodyText(text: string, timeoutMs = 30_000): Promise<void> 
     await sleep(250);
   }
   throw new Error(`timed out waiting for secondary body text: ${text}`);
+}
+
+async function selectSidebarTaskByTitle(client: typeof primary, title: string): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  let visibleTitles: string[] = [];
+  while (Date.now() < deadline) {
+    const result = await client.executeSync<{ clicked: boolean; titles: string[] }>(`
+      const title = ${JSON.stringify(title)};
+      const titles = Array.from(document.querySelectorAll(".pipeline-item .item-title"))
+        .map((candidate) => (candidate.textContent || "").trim())
+        .filter(Boolean);
+      const element = Array.from(document.querySelectorAll(".pipeline-item .item-title"))
+        .find((candidate) => (candidate.textContent || "").includes(title));
+      element?.closest(".pipeline-item")?.click();
+      return { clicked: Boolean(element), titles };
+    `);
+    visibleTitles = result.titles;
+    if (result.clicked) return;
+    await sleep(100);
+  }
+  throw new Error(`timed out selecting sidebar task ${title}; visible titles: ${JSON.stringify(visibleTitles)}`);
+}
+
+async function waitForSelectedItem(client: typeof primary, itemId: string, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let selectedItemId: string | null = null;
+  while (Date.now() < deadline) {
+    selectedItemId = await client.executeSync<string | null>(`
+      const ctx = window.__KANNA_E2E__.setupState;
+      const store = ctx.store?.__v_isRef ? ctx.store.value : ctx.store;
+      return store?.selectedItemId ?? null;
+    `);
+    if (selectedItemId === itemId) return;
+    await sleep(100);
+  }
+  throw new Error(`timed out waiting for selected item ${itemId}; last selected item was ${selectedItemId}`);
 }
 
 async function countLocalTasksOnSecondary(): Promise<number> {
@@ -291,7 +328,18 @@ describe("local transfer task sync", () => {
     const remoteItemId = Object.entries(snapshot.terminalRefs ?? {})
       .find(([, ref]) => ref.ownerLocalTaskId === createResult)?.[0];
     expect(remoteItemId).toBeTruthy();
-    await callVueMethod(secondary, "handleSelectItem", remoteItemId);
+    await selectSidebarTaskByTitle(secondary, "LAN visible task");
+    await waitForSelectedItem(secondary, remoteItemId);
+    expect(await secondary.findElements(".shell-modal")).toHaveLength(0);
+    await secondary.executeSync(buildGlobalKeydownScript({ key: "j", meta: true }));
+    const warningToast = await secondary.waitForText(
+      ".toast.warning",
+      "Shell is only available for local tasks.",
+      5_000,
+    );
+    expect(await secondary.getText(warningToast)).toContain("Shell is only available for local tasks.");
+    expect(await secondary.findElements(".shell-modal")).toHaveLength(0);
+
     await waitForBodyText("LAN terminal ready from primary");
     const terminalTextarea = await secondary.waitForElement(".xterm-helper-textarea");
     await secondary.sendKeys(terminalTextarea, "hello from secondary\n");

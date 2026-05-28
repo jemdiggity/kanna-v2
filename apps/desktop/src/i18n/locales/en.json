@@ -132,6 +132,7 @@
     "blockTaskFailed": "Failed to block task",
     "selectRepoFirst": "Select a repository first",
     "noReposLoaded": "Load a repository first",
+    "remoteShellUnavailable": "Shell is only available for local tasks.",
     "agentStartFailed": "Agent failed to start",
     "sessionRespawned": "The previous terminal session could not be reattached. A new session was started.",
     "sessionRespawnedWithScrollback": "The previous terminal session could not be reattached. Scrollback was restored and a new session was started.",
