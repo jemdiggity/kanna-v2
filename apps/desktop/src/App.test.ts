@@ -147,6 +147,7 @@ const mockWindowWorkspace = {
   saveSnapshot: vi.fn(async () => {}),
   openWindow: vi.fn(async () => {}),
   closeWindow: vi.fn(async () => {}),
+  forgetCurrentWindow: vi.fn(async () => {}),
   persistSelection: vi.fn(async () => {}),
   persistSidebarHidden: vi.fn(async () => {}),
   persistSidebarWidth: vi.fn(async () => {}),
@@ -553,6 +554,7 @@ describe("App", () => {
     mockWindowWorkspace.saveSnapshot.mockClear();
     mockWindowWorkspace.openWindow.mockClear();
     mockWindowWorkspace.closeWindow.mockClear();
+    mockWindowWorkspace.forgetCurrentWindow.mockClear();
     mockWindowWorkspace.persistSelection.mockClear();
     mockWindowWorkspace.persistSidebarHidden.mockClear();
     mockWindowWorkspace.persistSidebarWidth.mockClear();
@@ -1398,7 +1400,7 @@ describe("App", () => {
     expect(mockWindowWorkspace.closeWindow).toHaveBeenCalledTimes(1);
   });
 
-  it("persists workspace closure before allowing a native window close request", async () => {
+  it("persists workspace closure and lets Tauri finish a native window close request", async () => {
     await mountApp(SidebarWithRepoStub);
     const handler = await waitForNativeCloseRequestedHandler();
     expect(handler).toBeTypeOf("function");
@@ -1406,8 +1408,22 @@ describe("App", () => {
 
     await handler?.(event);
 
+    expect(mockWindowWorkspace.forgetCurrentWindow).toHaveBeenCalledTimes(1);
+    expect(mockWindowWorkspace.closeWindow).not.toHaveBeenCalled();
+    expect(event.preventDefault).not.toHaveBeenCalled();
+  });
+
+  it("keeps the native window open if workspace closure persistence fails", async () => {
+    mockWindowWorkspace.forgetCurrentWindow.mockRejectedValueOnce(new Error("write failed"));
+    await mountApp(SidebarWithRepoStub);
+    const handler = await waitForNativeCloseRequestedHandler();
+    expect(handler).toBeTypeOf("function");
+    const event = { preventDefault: vi.fn() };
+
+    await handler?.(event);
+
+    expect(mockWindowWorkspace.forgetCurrentWindow).toHaveBeenCalledTimes(1);
     expect(event.preventDefault).toHaveBeenCalledTimes(1);
-    expect(mockWindowWorkspace.closeWindow).toHaveBeenCalledTimes(1);
   });
 
   it("navigates tasks when the native task-navigation event arrives", async () => {
