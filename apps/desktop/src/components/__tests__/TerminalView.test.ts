@@ -7,6 +7,7 @@ import TerminalView from "../TerminalView.vue";
 
 const markTaskSwitchMountedMock = vi.fn();
 const markTaskSwitchReadyMock = vi.fn();
+const setWebviewFocusMock = vi.fn(async () => {});
 const useTerminalMock = vi.fn(() => ({
   terminal: ref({ focus: focusMock }),
   init: initMock,
@@ -43,6 +44,16 @@ vi.mock("../../composables/useTerminal", () => ({
   useTerminal: (...args: unknown[]) => useTerminalMock(...args),
 }));
 
+vi.mock("../../tauri-mock", () => ({
+  isTauri: true,
+}));
+
+vi.mock("@tauri-apps/api/webview", () => ({
+  getCurrentWebview: () => ({
+    setFocus: setWebviewFocusMock,
+  }),
+}));
+
 vi.mock("../../composables/terminalSessionRecovery", () => ({
   shouldDelayConnectUntilAfterInitialLayout: () => false,
 }));
@@ -66,6 +77,7 @@ describe("TerminalView", () => {
     disposeMock.mockReset();
     markTaskSwitchMountedMock.mockReset();
     markTaskSwitchReadyMock.mockReset();
+    setWebviewFocusMock.mockClear();
 
     globalThis.ResizeObserver = class ResizeObserver {
       observe = vi.fn();
@@ -198,6 +210,33 @@ describe("TerminalView", () => {
     await flushLifecycle();
 
     expect(startListeningMock).toHaveBeenCalledTimes(2);
+
+    wrapper.unmount();
+  });
+
+  it("restores native webview focus before focusing the terminal after window focus returns", async () => {
+    const wrapper = mount(TerminalView, {
+      attachTo: document.body,
+      props: {
+        sessionId: "session-1",
+        active: true,
+        agentTerminal: true,
+      },
+    });
+    await flushLifecycle();
+    setWebviewFocusMock.mockClear();
+    focusMock.mockClear();
+
+    window.dispatchEvent(new Event("blur"));
+    await flushLifecycle();
+    window.dispatchEvent(new Event("focus"));
+    await flushLifecycle();
+
+    expect(setWebviewFocusMock).toHaveBeenCalledTimes(1);
+    expect(focusMock).toHaveBeenCalledTimes(1);
+    expect(setWebviewFocusMock.mock.invocationCallOrder[0]).toBeLessThan(
+      focusMock.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
+    );
 
     wrapper.unmount();
   });

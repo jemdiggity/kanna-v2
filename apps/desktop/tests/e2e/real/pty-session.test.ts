@@ -8,7 +8,11 @@ import { WebDriverClient } from "../helpers/webdriver";
 import { resetDatabase, importTestRepo, cleanupWorktrees } from "../helpers/reset";
 import { dismissStartupShortcutsModal } from "../helpers/startupOverlays";
 import { submitTaskFromUi } from "../helpers/newTaskFlow";
-import { nudgeTerminalTrustPrompt, sendKeysToActiveTerminal } from "../helpers/terminalInput";
+import {
+  nudgeTerminalTrustPrompt,
+  sendKeysToActiveTerminal,
+  typeTextToFocusedTerminalWindow,
+} from "../helpers/terminalInput";
 import { waitForTaskCreated } from "../helpers/taskCreation";
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
 import { callVueMethod, execDb, getVueState, tauriInvoke } from "../helpers/vue";
@@ -89,6 +93,42 @@ async function switchToWindow(client: WebDriverClient, handle: string): Promise<
     `window.dispatchEvent(new FocusEvent("focus"));
      return true;`,
   );
+}
+
+async function waitForFocusedTerminalReady(
+  client: WebDriverClient,
+  sessionId: string,
+  timeoutMs = 10_000,
+): Promise<void> {
+  await client.executeAsync(
+    `const cb = arguments[arguments.length - 1];
+     window.dispatchEvent(new Event("focus"));
+     requestAnimationFrame(() => setTimeout(() => cb("ok"), 0));`,
+  );
+
+  const deadline = Date.now() + timeoutMs;
+  let latest: unknown = null;
+  while (Date.now() < deadline) {
+    latest = await client.executeSync(
+      `const hook = window.__KANNA_E2E__;
+       return {
+         activeTerminalOutputListeners: hook?.appMetrics?.snapshot?.().activeListenCounts?.terminal_output ?? 0,
+         sessionIds: hook?.terminalBuffers?.sessionIds?.() ?? [],
+       };`,
+    );
+    const state = latest as {
+      activeTerminalOutputListeners?: number;
+      sessionIds?: string[];
+    } | null;
+    if (
+      (state?.activeTerminalOutputListeners ?? 0) > 0 &&
+      (state?.sessionIds ?? []).includes(sessionId)
+    ) {
+      return;
+    }
+    await sleep(200);
+  }
+  throw new Error(`Timed out waiting for focused terminal ${sessionId}; latest=${JSON.stringify(latest)}`);
 }
 
 async function setWindowRect(
@@ -323,6 +363,19 @@ async function waitForTerminalBufferText(
 
   throw new Error(
     `Timed out waiting for terminal buffer text "${text}" in ${sessionId}: ${String(lastError)}`,
+  );
+}
+
+async function getTerminalBufferTextStats(
+  client: WebDriverClient,
+  sessionId: string,
+  text: string,
+): Promise<TerminalBufferStats> {
+  const pattern = escapeRegExp(text);
+  return client.executeSync<TerminalBufferStats>(
+    `const hook = window.__KANNA_E2E__?.terminalBuffers;
+     if (!hook) throw new Error("terminal buffer hook unavailable");
+     return hook.stats(${JSON.stringify(sessionId)}, new RegExp(${JSON.stringify(pattern)}));`,
   );
 }
 
@@ -562,6 +615,121 @@ describe("pty session (real CLI)", () => {
     await waitForSessionRecoveryText(client, sessionId, `ECHO:${inputMarker}`, 10_000);
   });
 
+  it("routes focused-window keyboard input to that window's selected PTY task", async () => {
+    const taskAId = `pty-focus-a-${randomUUID()}`;
+    const taskBId = `pty-focus-b-${randomUUID()}`;
+    deterministicSessionIds.push(taskAId, taskBId);
+    const readyA = `ka${randomUUID().replaceAll("-", "")}`;
+    const readyB = `kb${randomUUID().replaceAll("-", "")}`;
+    const inputA = `ia${randomUUID().replaceAll("-", "")}`;
+    const inputB = `ib${randomUUID().replaceAll("-", "")}`;
+    const scriptA = [
+      `printf '${readyA}\\n'`,
+      "while IFS= read -r line; do printf 'a_echo:%s\\n' \"$line\"; done",
+    ].join("; ");
+    const scriptB = [
+      `printf '${readyB}\\n'`,
+      "while IFS= read -r line; do printf 'b_echo:%s\\n' \"$line\"; done",
+    ].join("; ");
+
+    await execDb(
+      client,
+      "INSERT INTO pipeline_item (id, repo_id, prompt, stage, agent_type) VALUES (?, ?, ?, ?, ?)",
+      [taskAId, repoId, "Focused window PTY fixture A", "in progress", "pty"],
+    );
+    await execDb(
+      client,
+      "INSERT INTO pipeline_item (id, repo_id, prompt, stage, agent_type) VALUES (?, ?, ?, ?, ?)",
+      [taskBId, repoId, "Focused window PTY fixture B", "in progress", "pty"],
+    );
+    await invokeOrThrow(client, "spawn_session", {
+      sessionId: taskAId,
+      cwd: testRepoPath,
+      executable: "/bin/zsh",
+      args: ["-f", "-c", scriptA],
+      env: { TERM: "xterm-256color" },
+      cols: 80,
+      rows: 24,
+    });
+    await invokeOrThrow(client, "spawn_session", {
+      sessionId: taskBId,
+      cwd: testRepoPath,
+      executable: "/bin/zsh",
+      args: ["-f", "-c", scriptB],
+      env: { TERM: "xterm-256color" },
+      cols: 80,
+      rows: 24,
+    });
+
+    await callVueMethod(client, "loadItems", repoId);
+    await setSelectedItem(client, taskAId);
+    await waitForCurrentItemId(client, taskAId);
+    await waitForTerminalBufferText(client, taskAId, readyA, 15_000);
+
+    const initialHandles = await getWindowHandles(client);
+    expect(initialHandles.length).toBeGreaterThanOrEqual(1);
+    const sourceHandle = initialHandles[0];
+    let secondHandle: string | undefined;
+
+    try {
+      await client.executeAsync(
+        `const cb = arguments[arguments.length - 1];
+         const ctx = window.__KANNA_E2E__.setupState;
+         Promise.resolve(
+           ctx.windowWorkspace.openWindow({
+             selectedRepoId: ${JSON.stringify(repoId)},
+             selectedItemId: ${JSON.stringify(taskAId)},
+           })
+         ).then(() => cb("ok"))
+          .catch((error) => cb({ __error: error?.message ?? String(error) }));`,
+      );
+
+      const handles = await waitForWindowCount(client, initialHandles.length + 1);
+      secondHandle = handles.find((handle) => !initialHandles.includes(handle));
+      expect(secondHandle).toBeTruthy();
+
+      await switchToWindow(client, secondHandle ?? "");
+      await client.waitForAppReady();
+      await dismissStartupShortcutsModal(client);
+      await setSelectedItem(client, taskBId);
+      await waitForCurrentItemId(client, taskBId);
+      await waitForTerminalBufferText(client, taskBId, readyB, 15_000);
+
+      await switchToWindow(client, sourceHandle);
+      await client.waitForAppReady();
+      await waitForCurrentItemId(client, taskAId);
+      await waitForTerminalBufferText(client, taskAId, readyA, 15_000);
+      await waitForFocusedTerminalReady(client, taskAId);
+      await typeTextToFocusedTerminalWindow(client, `${inputA}\n`, { initialDelayMs: 500 });
+      await waitForTerminalBufferText(client, taskAId, `a_echo:${inputA}`, 10_000);
+
+      await switchToWindow(client, secondHandle ?? "");
+      await client.waitForAppReady();
+      await waitForCurrentItemId(client, taskBId);
+      await waitForTerminalBufferText(client, taskBId, readyB, 15_000);
+      expect((await getTerminalBufferTextStats(client, taskBId, `b_echo:${inputA}`)).matchingLineCount).toBe(0);
+
+      await waitForFocusedTerminalReady(client, taskBId);
+      await typeTextToFocusedTerminalWindow(client, `${inputB}\n`, { initialDelayMs: 500 });
+      await waitForTerminalBufferText(client, taskBId, `b_echo:${inputB}`, 10_000);
+
+      await switchToWindow(client, sourceHandle);
+      await client.waitForAppReady();
+      await waitForCurrentItemId(client, taskAId);
+      await waitForTerminalBufferText(client, taskAId, readyA, 15_000);
+      expect((await getTerminalBufferTextStats(client, taskAId, `a_echo:${inputB}`)).matchingLineCount).toBe(0);
+    } finally {
+      if (secondHandle) {
+        await switchToWindow(client, secondHandle).catch(() => undefined);
+        await client.waitForAppReady().catch(() => undefined);
+        await closeFocusedWindowThroughAppAction(client).catch(() => undefined);
+        await waitForWindowCount(client, initialHandles.length).catch(() => undefined);
+      }
+      await switchToWindow(client, sourceHandle).catch(() => undefined);
+      await client.waitForAppReady().catch(() => undefined);
+    }
+  });
+
   it("keeps an existing PTY stream alive when a secondary window attaches and detaches", async () => {
     const deterministicSessionId = trackSessionId(
       deterministicSessionIds,
@@ -631,6 +799,7 @@ describe("pty session (real CLI)", () => {
 
     await switchToWindow(client, sourceHandle);
     await client.waitForAppReady();
+    await waitForFocusedTerminalReady(client, deterministicSessionId);
     const sharedSize = await waitForPtySizeDifferentFrom(
       client,
       deterministicSessionId,
@@ -647,12 +816,14 @@ describe("pty session (real CLI)", () => {
 
     await switchToWindow(client, secondHandle ?? "");
     await client.waitForAppReady();
+    await waitForFocusedTerminalReady(client, deterministicSessionId);
     await waitForTerminalBufferText(client, deterministicSessionId, `ECHO:${liveMarker}`, 10_000);
 
     await invokeOrThrow(client, "detach_session", { sessionId: deterministicSessionId });
 
     await switchToWindow(client, sourceHandle);
     await client.waitForAppReady();
+    await waitForFocusedTerminalReady(client, deterministicSessionId);
     const restoredSize = await waitForPtySize(client, deterministicSessionId, sourceSize, 10_000);
     expect(restoredSize).toEqual(sourceSize);
 
@@ -666,6 +837,7 @@ describe("pty session (real CLI)", () => {
 
     await switchToWindow(client, sourceHandle);
     await client.waitForAppReady();
+    await waitForFocusedTerminalReady(client, deterministicSessionId);
     const afterCloseSize = await waitForPtySize(client, deterministicSessionId, sourceSize, 10_000);
     expect(afterCloseSize).toEqual(sourceSize);
 

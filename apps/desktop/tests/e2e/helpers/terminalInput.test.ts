@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { nudgeTerminalTrustPrompt, sendKeysToActiveTerminal } from "./terminalInput";
+import {
+  nudgeTerminalTrustPrompt,
+  sendKeysToActiveTerminal,
+  typeTextToFocusedTerminalWindow,
+} from "./terminalInput";
 
 interface FakeClient {
   executeCalls: string[];
@@ -21,6 +25,9 @@ function createFakeClient(): FakeClient {
     pressKeyCalls: [],
     async executeSync<T = unknown>(script: string): Promise<T> {
       this.executeCalls.push(script);
+      if (script.includes("document.activeElement")) {
+        return true as T;
+      }
       return undefined as T;
     },
     async waitForElement(css: string, timeoutMs = 10_000): Promise<string> {
@@ -59,5 +66,19 @@ describe("nudgeTerminalTrustPrompt", () => {
 
     expect(client.pressKeyCalls).toEqual(["\uE007", "\uE007", "\uE007"]);
     expect(client.sendKeyCalls).toEqual([]);
+  });
+});
+
+describe("typeTextToFocusedTerminalWindow", () => {
+  it("waits for xterm to own DOM focus before sending text to the focused terminal", async () => {
+    const client = createFakeClient();
+
+    await typeTextToFocusedTerminalWindow(client, "ab\n");
+
+    expect(client.waitCalls).toContainEqual({ css: ".terminal-container", timeoutMs: 15_000 });
+    expect(client.executeCalls[0]).toContain("document.activeElement");
+    expect(client.waitCalls).toContainEqual({ css: ".main-panel .xterm-helper-textarea", timeoutMs: 5_000 });
+    expect(client.pressKeyCalls).toEqual([]);
+    expect(client.sendKeyCalls).toEqual([{ elementId: "terminal-input", text: "ab\n" }]);
   });
 });
