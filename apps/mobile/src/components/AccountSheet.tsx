@@ -7,6 +7,7 @@ import {
   TextInput,
   View
 } from "react-native";
+import { MOBILE_E2E_IDS } from "../e2eTestIds";
 import type { AuthState, ConnectionState } from "../state/sessionStore";
 import { getAccountBadgePresentation } from "./accountBadgePresentation";
 
@@ -50,22 +51,40 @@ export function AccountSheet({
     <Modal animationType="slide" transparent visible={visible} onRequestClose={onClose}>
       <View style={styles.backdrop}>
         <Pressable style={styles.scrim} onPress={onClose} />
-        <View style={styles.sheet}>
+        <View style={styles.sheet} testID={MOBILE_E2E_IDS.accountSheet}>
           <View style={styles.header}>
             <View>
               <Text style={styles.title}>{presentation.label}</Text>
               <Text style={styles.detail}>{presentation.detail}</Text>
             </View>
-            <Pressable style={styles.closeButton} onPress={onClose}>
+            <Pressable
+              accessibilityLabel="Close account"
+              style={styles.closeButton}
+              testID={MOBILE_E2E_IDS.accountCloseButton}
+              onPress={onClose}
+            >
               <Text style={styles.closeLabel}>×</Text>
             </Pressable>
           </View>
 
-          <View style={styles.connectionCard}>
+          <View
+            style={styles.connectionCard}
+            testID={MOBILE_E2E_IDS.accountConnectionStatus}
+          >
             <Text style={styles.sectionLabel}>Connection</Text>
-            <Text style={styles.connectionTitle}>{connection.title}</Text>
+            <Text
+              style={styles.connectionTitle}
+              testID={MOBILE_E2E_IDS.accountConnectionTitle}
+            >
+              {connection.title}
+            </Text>
             <Text style={styles.connectionDetail}>{connection.detail}</Text>
-            <Pressable style={styles.secondaryButton} onPress={onConnectLocal}>
+            <Pressable
+              accessibilityLabel="Connect on Local Network"
+              style={styles.secondaryButton}
+              testID={MOBILE_E2E_IDS.accountConnectLocalButton}
+              onPress={onConnectLocal}
+            >
               <Text style={styles.secondaryLabel}>
                 {connectionState === "connecting"
                   ? "Connecting..."
@@ -75,7 +94,12 @@ export function AccountSheet({
           </View>
 
           {auth.status === "signedIn" ? (
-            <Pressable style={styles.secondaryButton} onPress={onSignOut}>
+            <Pressable
+              accessibilityLabel="Sign Out"
+              style={styles.secondaryButton}
+              testID={MOBILE_E2E_IDS.accountSignOutButton}
+              onPress={onSignOut}
+            >
               <Text style={styles.secondaryLabel}>Sign Out</Text>
             </Pressable>
           ) : (
@@ -87,6 +111,7 @@ export function AccountSheet({
                 placeholder="Email"
                 placeholderTextColor="#6A7E9D"
                 style={styles.input}
+                testID={MOBILE_E2E_IDS.accountEmailInput}
                 value={email}
               />
               <TextInput
@@ -96,6 +121,7 @@ export function AccountSheet({
                 placeholderTextColor="#6A7E9D"
                 secureTextEntry
                 style={styles.input}
+                testID={MOBILE_E2E_IDS.accountPasswordInput}
                 value={password}
               />
               {auth.status === "error" ? (
@@ -109,6 +135,7 @@ export function AccountSheet({
                     ? styles.primaryButtonDisabled
                     : null
                 ]}
+                testID={MOBILE_E2E_IDS.accountSignInButton}
                 onPress={() => onSignIn(email.trim(), password)}
               >
                 <Text style={styles.primaryLabel}>

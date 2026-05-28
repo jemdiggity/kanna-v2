@@ -1,3 +1,4 @@
+import { createServer, type Server } from "node:http";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { Browser } from "webdriverio";
@@ -28,13 +29,80 @@ import {
   resolveSimulatorDevice
 } from "./helpers/simulator";
 import { runListDetailBackSmoke } from "./specs/smoke/list-detail-back.e2e";
+import {
+  runProfileConnectionSmoke,
+  runProfileDisconnectedConnectionSmoke
+} from "./specs/smoke/profile-connection.e2e";
 
-export const smokeSpecPaths = ["specs/smoke/list-detail-back.e2e.ts"];
+export const smokeSpecPaths = [
+  "specs/smoke/list-detail-back.e2e.ts",
+  "specs/smoke/profile-connection.e2e.ts"
+];
 export const supportedSmokeTargets = ["simulator", "device"] as const;
+export const supportedSmokeModes = ["smoke", "profile-disconnected"] as const;
+
+interface StoppedDesktopServerHandle {
+  baseUrl: string;
+  close(): Promise<void>;
+}
+
+async function startStoppedDesktopStatusServer(): Promise<StoppedDesktopServerHandle> {
+  const server = createServer((request, response) => {
+    if (request.method === "GET" && request.url === "/v1/status") {
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(
+        JSON.stringify({
+          state: "stopped",
+          desktopId: "offline",
+          desktopName: "Offline Desktop",
+          lanHost: "0.0.0.0",
+          lanPort: 0,
+          pairingCode: null
+        })
+      );
+      return;
+    }
+
+    response.writeHead(404, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({ error: "Not found" }));
+  });
+
+  await new Promise<void>((resolveReady, rejectReady) => {
+    server.once("error", rejectReady);
+    server.listen(0, "0.0.0.0", () => {
+      server.off("error", rejectReady);
+      resolveReady();
+    });
+  });
+
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    await closeServer(server);
+    throw new Error("Could not resolve stopped desktop status server port.");
+  }
+
+  return {
+    baseUrl: `http://127.0.0.1:${address.port}`,
+    close: () => closeServer(server)
+  };
+}
+
+async function closeServer(server: Server): Promise<void> {
+  await new Promise<void>((resolveClosed, rejectClosed) => {
+    server.close((error) => {
+      if (error) {
+        rejectClosed(error);
+        return;
+      }
+
+      resolveClosed();
+    });
+  });
+}
 
 async function main(): Promise<void> {
   const mode = process.argv[2] ?? "smoke";
-  if (mode !== "smoke") {
+  if (!supportedSmokeModes.includes(mode as (typeof supportedSmokeModes)[number])) {
     throw new Error(`Unsupported mobile E2E mode: ${mode}`);
   }
 
@@ -47,18 +115,13 @@ async function main(): Promise<void> {
   );
   process.env.EXPO_PUBLIC_KANNA_SERVER_URL = desktopServerUrl;
   await assertXcuitestDriverInstalled(process.env as Record<string, string | undefined>);
-  await assertDesktopServerReachable(desktopServerUrl);
-  const expoServer = await ensureExpoServer({
-    desktopServerUrl,
-    metroPort: env.metroPort,
-    projectRoot: resolve(dirname(fileURLToPath(import.meta.url)), "..")
-  });
-
   const appiumServer = startLocalAppiumServer(
     env.appiumPort,
     process.env as Record<string, string | undefined>
   );
   let driver: Browser | null = null;
+  let expoServer: Awaited<ReturnType<typeof ensureExpoServer>> | null = null;
+  let stoppedDesktopServer: StoppedDesktopServerHandle | null = null;
 
   try {
     await waitForLocalAppiumServer(env.appiumPort);
@@ -96,18 +159,45 @@ async function main(): Promise<void> {
       });
     }
 
+    const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+    let resolvedDesktopServerUrl = desktopServerUrl;
+    if (mode === "profile-disconnected") {
+      stoppedDesktopServer = await startStoppedDesktopStatusServer();
+      resolvedDesktopServerUrl = resolveDesktopServerUrlForTarget(
+        stoppedDesktopServer.baseUrl,
+        env.target
+      );
+    }
+
+    process.env.EXPO_PUBLIC_KANNA_SERVER_URL = resolvedDesktopServerUrl;
+    if (mode === "smoke") {
+      await assertDesktopServerReachable(resolvedDesktopServerUrl);
+    }
+
+    expoServer = await ensureExpoServer({
+      desktopServerUrl: resolvedDesktopServerUrl,
+      metroPort: env.metroPort,
+      projectRoot
+    });
+
     driver = await createMobileSession({
       port: env.appiumPort,
       capabilities
     });
 
-    await runListDetailBackSmoke(driver);
+    if (mode === "profile-disconnected") {
+      await runProfileDisconnectedConnectionSmoke(driver);
+    } else {
+      await runListDetailBackSmoke(driver);
+      await runProfileConnectionSmoke(driver);
+    }
   } finally {
     if (driver) {
       await driver.deleteSession();
     }
     appiumServer.kill("SIGTERM");
-    await expoServer.stop();
+    await expoServer?.stop();
+    await stoppedDesktopServer?.close();
   }
 }
 
