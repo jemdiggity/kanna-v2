@@ -157,16 +157,20 @@ pub async fn handle_invoke(
                 .get("task_id")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| "missing required arg: task_id".to_string())?;
+            let pipeline_item_id = db
+                .resolve_pipeline_item_id(task_id)
+                .map_err(|e| format!("db error: {}", e))?
+                .ok_or_else(|| format!("task not found: {task_id}"))?;
 
             for session_id in [
-                task_id.to_string(),
-                format!("shell-wt-{task_id}"),
-                format!("td-{task_id}"),
+                pipeline_item_id.to_string(),
+                format!("shell-wt-{pipeline_item_id}"),
+                format!("td-{pipeline_item_id}"),
             ] {
                 kill_session_if_present(daemon, &session_id).await?;
             }
 
-            db.close_pipeline_item(task_id)
+            db.close_pipeline_item(&pipeline_item_id)
                 .map_err(|e| format!("db error: {}", e))?;
             Ok(Value::Null)
         }
@@ -194,5 +198,157 @@ pub async fn handle_invoke(
                 .map_err(|e| format!("db error: {}", e))
         }
         _ => Err(format!("unknown command: {}", command)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+
+    fn daemon_socket_path_for_dir(daemon_dir: &str) -> std::path::PathBuf {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let dir = std::path::PathBuf::from(daemon_dir);
+        let mut hasher = DefaultHasher::new();
+        dir.hash(&mut hasher);
+        let hash = hasher.finish() as u32;
+        std::path::PathBuf::from(format!("/tmp/kanna-{:08x}.sock", hash))
+    }
+
+    fn test_config(unique: &str, db_path: String, daemon_dir: String) -> Config {
+        Config {
+            relay_url: "wss://relay.example".to_string(),
+            device_token: "device-token".to_string(),
+            cloud_base_url: "http://127.0.0.1:5001/kanna-local/us-central1".to_string(),
+            firebase_project_id: "kanna-local".to_string(),
+            firebase_auth_emulator_url: Some("http://127.0.0.1:9099".to_string()),
+            firebase_firestore_emulator_host: Some("127.0.0.1:8080".to_string()),
+            daemon_dir,
+            db_path,
+            desktop_id: "desktop-1".to_string(),
+            desktop_secret: Some("desktop-secret".to_string()),
+            desktop_name: "Studio Mac".to_string(),
+            server_version: Some("test-version".to_string()),
+            lan_host: "0.0.0.0".to_string(),
+            lan_port: 48120,
+            pairing_store_path: format!("/tmp/kanna-pairings-command-close-{unique}.json"),
+        }
+    }
+
+    #[tokio::test]
+    async fn close_task_invoke_resolves_branch_style_task_id_and_kills_canonical_sessions() {
+        let unique = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let daemon_dir = std::env::temp_dir().join(format!("kanna-command-close-daemon-{unique}"));
+        std::fs::create_dir_all(&daemon_dir).unwrap();
+        let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+        let _ = std::fs::remove_file(&socket_path);
+        let daemon_listener = UnixListener::bind(&socket_path).unwrap();
+
+        let db_path = Db::test_db_path(&format!("command-close-branch-{unique}"));
+        let db = Db::open_for_tests(&db_path).expect("open test db");
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "710917fb",
+            "repo-1",
+            "Close this branch-style task",
+            Some("Close this branch-style task"),
+            "in progress",
+            "2026-05-11 10:00:00",
+        )
+        .unwrap();
+        db.update_test_pipeline_item_stage_context(
+            "710917fb",
+            "task-710917fb",
+            "default",
+            None,
+            "claude",
+        )
+        .unwrap();
+
+        let daemon_db_path = db_path.clone();
+        let daemon_server = tokio::spawn(async move {
+            let (stream, _) = daemon_listener.accept().await.unwrap();
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let expected = ["710917fb", "shell-wt-710917fb", "td-710917fb"];
+
+            for expected_session_id in expected {
+                let item = Db::open(&daemon_db_path)
+                    .expect("open db from daemon assertion")
+                    .get_task_stage_source("710917fb")
+                    .expect("read task before kill")
+                    .expect("task exists before kill");
+                assert_eq!(
+                    item.stage.as_deref(),
+                    Some("in progress"),
+                    "close_task marked the DB row done before killing {expected_session_id}"
+                );
+                assert!(
+                    item.closed_at.is_none(),
+                    "close_task set closed_at before killing {expected_session_id}"
+                );
+
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+                match command {
+                    DaemonCommand::Kill { session_id } => {
+                        assert_eq!(session_id, expected_session_id)
+                    }
+                    other => panic!("expected kill command, got {:?}", other),
+                }
+                write_half
+                    .write_all(
+                        format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap())
+                            .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
+
+        let mut daemon = DaemonClient::connect(&daemon_dir.to_string_lossy())
+            .await
+            .expect("connect fake daemon");
+        let config = test_config(
+            &unique,
+            db_path.clone(),
+            daemon_dir.to_string_lossy().to_string(),
+        );
+
+        let result = handle_invoke(
+            "close_task",
+            &serde_json::json!({ "task_id": "task-710917fb" }),
+            &db,
+            &mut daemon,
+            &config,
+        )
+        .await
+        .expect("close task invoke");
+
+        assert_eq!(result, Value::Null);
+        daemon_server.await.unwrap();
+
+        let item = db.get_task_stage_source("710917fb").unwrap().unwrap();
+        assert_eq!(item.stage.as_deref(), Some("done"));
+        assert!(item.closed_at.is_some());
+
+        // Full app E2E for the original untitled-task close regression would need a
+        // running Tauri desktop instance, seeded task/worktree state, and daemon
+        // sidecars. This command-boundary test keeps the legacy relay command,
+        // SQLite persistence, and daemon socket cleanup in scope without relying on
+        // an installed desktop runtime.
+        let _ = std::fs::remove_dir_all(daemon_dir);
+        let _ = std::fs::remove_file(db_path);
     }
 }

@@ -640,6 +640,9 @@ impl Db {
     }
 
     pub fn close_pipeline_item(&self, id: &str) -> Result<(), rusqlite::Error> {
+        let Some(pipeline_item_id) = self.resolve_pipeline_item_id(id)? else {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        };
         let rows_affected = self.conn.execute(
             "UPDATE pipeline_item
              SET previous_stage = COALESCE(previous_stage, stage),
@@ -647,7 +650,7 @@ impl Db {
                  closed_at = datetime('now'),
                  updated_at = datetime('now')
              WHERE id = ?",
-            [id],
+            [&pipeline_item_id],
         )?;
         if rows_affected == 0 {
             return Err(rusqlite::Error::QueryReturnedNoRows);
@@ -1050,6 +1053,36 @@ mod tests {
         assert!(closed_at.is_some());
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn close_pipeline_item_accepts_task_branch_name() {
+        let path = Db::test_db_path("close-task-branch-name");
+        let db = Db::open_for_tests(&path).expect("open test db");
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "710917fb",
+            "repo-1",
+            "",
+            None,
+            "in progress",
+            "2026-05-11 10:00:00",
+        )
+        .unwrap();
+        db.update_test_pipeline_item_stage_context(
+            "710917fb",
+            "task-710917fb",
+            "default",
+            None,
+            "claude",
+        )
+        .unwrap();
+
+        db.close_pipeline_item("task-710917fb")
+            .expect("close task by branch name");
+
+        let item = db.get_pipeline_item("710917fb").unwrap().unwrap();
+        assert_eq!(item.stage.as_deref(), Some("done"));
     }
 
     #[test]
