@@ -1409,6 +1409,11 @@ const keyboardActions = {
     if (showAddRepoModal.value) { showAddRepoModal.value = false; return true; }
   },
   openShell: () => {
+    const workspaceTask = selectedWorkspaceTask.value;
+    if (workspaceTask && !workspaceTask.capabilities.canOpenShell) {
+      toast.warning(t("toasts.remoteShellUnavailable"));
+      return;
+    }
     if (!store.selectedRepo || !store.currentItem) return;
     if (showShellModal.value && !shellRepoRoot.value) {
       const z = shellModalRef.value?.zIndex ?? 0;

@@ -2006,6 +2006,79 @@ describe("App", () => {
     expect(wrapper.get('[data-testid="command-palette"]').text()).toContain("taskTransfer.pushToMachine");
   });
 
+  it("warns instead of silently ignoring Cmd+J for remote tasks", async () => {
+    store.repos = [];
+    store.selectedRepoId = "cloud:repo-remote";
+    store.selectedItemId = "cloud:repo-remote:task-1";
+    store.selectedRepo = null;
+    store.currentItem = null;
+    cloudTasksMock.mockResolvedValue({
+      repos: [{
+        id: "cloud:repo-remote",
+        path: "cloud",
+        name: "remote-repo",
+        remote_url: "git@github.com:owner/remote-repo.git",
+        remoteUrlHash: "remote-hash",
+        default_branch: "main",
+        hidden: 0,
+        sort_order: 0,
+        created_at: "2026-05-01T00:00:00.000Z",
+        last_opened_at: "2026-05-01T00:00:00.000Z",
+      }],
+      items: [{
+        id: "cloud:repo-remote:task-1",
+        repo_id: "cloud:repo-remote",
+        issue_number: null,
+        issue_title: null,
+        prompt: "Fix remote shell",
+        pipeline: "cloud",
+        stage: "in progress",
+        stage_result: null,
+        active_post_action: null,
+        tags: JSON.stringify(["in progress"]),
+        pr_number: null,
+        pr_url: null,
+        branch: "task-1",
+        closed_at: null,
+        agent_type: "pty",
+        agent_provider: "claude",
+        activity: "idle",
+        activity_changed_at: "2026-05-01T00:00:00.000Z",
+        unread_at: null,
+        port_offset: null,
+        display_name: "Remote task",
+        last_output_preview: null,
+        port_env: null,
+        pinned: 0,
+        pin_order: null,
+        base_ref: "main",
+        agent_session_id: null,
+        previous_stage: null,
+        teardown_started_at: null,
+        created_at: "2026-05-01T00:00:00.000Z",
+        updated_at: "2026-05-01T00:00:00.000Z",
+      }],
+      terminalRefs: {
+        "cloud:repo-remote:task-1": {
+          ownerDesktopId: "peer-primary",
+          ownerLocalTaskId: "task-1",
+          transport: "cloud",
+        },
+      },
+    });
+
+    const wrapper = await mountApp(SidebarWithRepoStub);
+    await flushPromises();
+    await flushPromises();
+    expect(capturedKeyboardActions).not.toBeNull();
+
+    capturedKeyboardActions?.openShell();
+    await flushPromises();
+
+    expect(toastWarningMock).toHaveBeenCalledWith("toasts.remoteShellUnavailable");
+    expect(wrapper.findComponent({ name: "ShellModal" }).exists()).toBe(false);
+  });
+
   it("adds Pair Machine to command palette commands independently of task transfer", async () => {
     store.currentItem = null;
 
