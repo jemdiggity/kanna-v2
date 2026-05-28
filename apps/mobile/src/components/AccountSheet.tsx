@@ -7,12 +7,17 @@ import {
   TextInput,
   View
 } from "react-native";
-import type { AuthState } from "../state/sessionStore";
+import type { AuthState, ConnectionState } from "../state/sessionStore";
 import { getAccountBadgePresentation } from "./accountBadgePresentation";
 
 interface AccountSheetProps {
   auth: AuthState;
+  connectionState: ConnectionState;
+  desktopName: string | null;
+  errorMessage: string | null;
+  pairingCode: string | null;
   visible: boolean;
+  onConnectLocal(): void;
   onClose(): void;
   onSignIn(email: string, password: string): void;
   onSignOut(): void;
@@ -20,7 +25,12 @@ interface AccountSheetProps {
 
 export function AccountSheet({
   auth,
+  connectionState,
+  desktopName,
+  errorMessage,
+  pairingCode,
   visible,
+  onConnectLocal,
   onClose,
   onSignIn,
   onSignOut
@@ -28,6 +38,12 @@ export function AccountSheet({
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const presentation = getAccountBadgePresentation(auth);
+  const connection = getConnectionStatusPresentation(
+    connectionState,
+    desktopName,
+    pairingCode,
+    errorMessage
+  );
   const canSubmit = email.trim().length > 3 && password.length > 0;
 
   return (
@@ -42,6 +58,19 @@ export function AccountSheet({
             </View>
             <Pressable style={styles.closeButton} onPress={onClose}>
               <Text style={styles.closeLabel}>×</Text>
+            </Pressable>
+          </View>
+
+          <View style={styles.connectionCard}>
+            <Text style={styles.sectionLabel}>Connection</Text>
+            <Text style={styles.connectionTitle}>{connection.title}</Text>
+            <Text style={styles.connectionDetail}>{connection.detail}</Text>
+            <Pressable style={styles.secondaryButton} onPress={onConnectLocal}>
+              <Text style={styles.secondaryLabel}>
+                {connectionState === "connecting"
+                  ? "Connecting..."
+                  : "Connect on Local Network"}
+              </Text>
             </Pressable>
           </View>
 
@@ -92,6 +121,39 @@ export function AccountSheet({
       </View>
     </Modal>
   );
+}
+
+export function getConnectionStatusPresentation(
+  connectionState: ConnectionState,
+  desktopName: string | null,
+  pairingCode: string | null,
+  errorMessage: string | null
+): { title: string; detail: string } {
+  if (connectionState === "connected") {
+    return {
+      title: desktopName ?? "Connected",
+      detail: pairingCode ? `Pairing code ${pairingCode}` : "Connected"
+    };
+  }
+
+  if (connectionState === "connecting") {
+    return {
+      title: "Connecting",
+      detail: pairingCode ? `Pairing code ${pairingCode}` : "Checking desktop access"
+    };
+  }
+
+  if (connectionState === "error") {
+    return {
+      title: "Not connected",
+      detail: errorMessage ?? "Connection failed"
+    };
+  }
+
+  return {
+    title: "Not connected",
+    detail: pairingCode ? `Pairing code ${pairingCode}` : "No active pairing session"
+  };
 }
 
 const styles = StyleSheet.create({
@@ -147,6 +209,30 @@ const styles = StyleSheet.create({
   },
   form: {
     gap: 12
+  },
+  connectionCard: {
+    backgroundColor: "#10192A",
+    borderColor: "#22304D",
+    borderRadius: 16,
+    borderWidth: 1,
+    gap: 8,
+    padding: 14
+  },
+  sectionLabel: {
+    color: "#7FA7D9",
+    fontSize: 12,
+    fontWeight: "800",
+    textTransform: "uppercase"
+  },
+  connectionTitle: {
+    color: "#F5F7FB",
+    fontSize: 17,
+    fontWeight: "800"
+  },
+  connectionDetail: {
+    color: "#9EB0CA",
+    fontSize: 13,
+    lineHeight: 18
   },
   input: {
     backgroundColor: "#10192A",

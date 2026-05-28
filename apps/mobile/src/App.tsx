@@ -10,7 +10,8 @@ import {
 import {
   getShellTitle,
   isTaskDetailVisible,
-  shouldShowFloatingToolbar
+  shouldShowFloatingToolbar,
+  shouldShowTopBar
 } from "./appShell";
 import { shouldRefreshOnAppStateTransition } from "./appLifecycle";
 import { createAppModel, type AppModel } from "./appModel";
@@ -19,7 +20,6 @@ import { AccountSheet } from "./components/AccountSheet";
 import { FloatingToolbar } from "./components/FloatingToolbar";
 import { CreateTaskComposer } from "./components/CreateTaskComposer";
 import { MOBILE_E2E_IDS } from "./e2eTestIds";
-import { ConnectionScreen } from "./screens/ConnectionScreen";
 import { DesktopsScreen } from "./screens/DesktopsScreen";
 import { MoreScreen } from "./screens/MoreScreen";
 import { SearchScreen } from "./screens/SearchScreen";
@@ -72,27 +72,6 @@ export default function App() {
     state.searchResults.find((task) => task.id === state.selectedTaskId) ??
     null;
   const mainContent = (() => {
-    if (state.connectionState !== "connected" && state.activeView === "tasks") {
-      return (
-        <ConnectionScreen
-          auth={state.auth}
-          connectionState={state.connectionState}
-          desktopName={state.desktopName}
-          errorMessage={state.errorMessage}
-          pairingCode={state.pairingCode}
-          onConnectLocal={() => {
-            void controller.connectLocal();
-          }}
-          onSignIn={(email, password) => {
-            void controller.signInWithEmailPassword(email, password);
-          }}
-          onSignOut={() => {
-            void controller.signOut();
-          }}
-        />
-      );
-    }
-
     if (selectedTask && taskDetailVisible) {
       return (
         <TaskScreen
@@ -210,8 +189,11 @@ export default function App() {
           </View>
         ) : null}
 
-        {(state.connectionState === "connected" || state.activeView !== "tasks") &&
-        !taskDetailVisible ? (
+        {shouldShowTopBar(
+          state.connectionState,
+          state.selectedTaskId,
+          state.activeView
+        ) ? (
           <View style={styles.topBar}>
             <Text numberOfLines={1} style={styles.topBarTitle}>
               {shellTitle}
@@ -262,7 +244,14 @@ export default function App() {
         />
         <AccountSheet
           auth={state.auth}
+          connectionState={state.connectionState}
+          desktopName={state.desktopName}
+          errorMessage={state.errorMessage}
+          pairingCode={state.pairingCode}
           visible={accountSheetVisible}
+          onConnectLocal={() => {
+            void controller.connectLocal();
+          }}
           onClose={() => setAccountSheetVisible(false)}
           onSignIn={(email, password) => {
             void controller.signInWithEmailPassword(email, password);

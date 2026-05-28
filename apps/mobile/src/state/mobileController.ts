@@ -249,7 +249,11 @@ export function createMobileController(
       }
 
       await authSession.signInWithEmailPassword({ email, password });
-      store.setAuthState(authSession.getState());
+      const authState = authSession.getState();
+      store.setAuthState(authState);
+      if (authState.status === "signedIn") {
+        await this.bootstrap();
+      }
     },
 
     async signOut() {

@@ -19,6 +19,14 @@ export function shouldShowFloatingToolbar(
   return !isTaskDetailVisible(selectedTaskId, activeView);
 }
 
+export function shouldShowTopBar(
+  _connectionState: ConnectionState,
+  selectedTaskId: string | null,
+  activeView: MobileView
+): boolean {
+  return !isTaskDetailVisible(selectedTaskId, activeView);
+}
+
 export function getShellTitle(activeView: MobileView): string {
   switch (activeView) {
     case "desktops":

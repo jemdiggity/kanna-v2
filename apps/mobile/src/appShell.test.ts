@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   getShellTitle,
   isTaskDetailVisible,
-  shouldShowFloatingToolbar
+  shouldShowFloatingToolbar,
+  shouldShowTopBar
 } from "./appShell";
 
 describe("isTaskDetailVisible", () => {
@@ -21,6 +22,14 @@ describe("shouldShowFloatingToolbar", () => {
     expect(shouldShowFloatingToolbar("connected", null, "tasks")).toBe(true);
     expect(shouldShowFloatingToolbar("idle", null, "tasks")).toBe(true);
     expect(shouldShowFloatingToolbar("idle", "task-1", "tasks")).toBe(true);
+  });
+});
+
+describe("shouldShowTopBar", () => {
+  it("keeps profile access visible on the disconnected task list", () => {
+    expect(shouldShowTopBar("idle", null, "tasks")).toBe(true);
+    expect(shouldShowTopBar("error", null, "tasks")).toBe(true);
+    expect(shouldShowTopBar("connected", "task-1", "tasks")).toBe(false);
   });
 });
 
