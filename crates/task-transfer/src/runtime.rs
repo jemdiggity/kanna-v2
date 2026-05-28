@@ -1496,8 +1496,7 @@ impl TransferRuntime {
                 )));
             }
 
-            let response = serde_json::from_str::<PeerResponse>(response_line.trim())?;
-            Ok(response)
+            parse_peer_response_line(&peer.peer_id, "peer request", &response_line)
         })
         .await
         .map_err(|_| RuntimeError::PeerRequestTimeout {
@@ -2342,7 +2341,7 @@ async fn stream_peer_session(
         }
     }
 
-    match serde_json::from_str::<PeerResponse>(response_line.trim())? {
+    match parse_peer_response_line(&peer.peer_id, "observe-session", &response_line)? {
         PeerResponse::ObserveSession {
             request_id: response_request_id,
             session_id: response_session_id,
@@ -2358,7 +2357,7 @@ async fn stream_peer_session(
         if read == 0 {
             return Ok(());
         }
-        let event = serde_json::from_str::<PeerTerminalEvent>(event_line.trim())?;
+        let event = parse_peer_terminal_event_line(&peer.peer_id, &session_id, &event_line)?;
         let event_session_id = peer_terminal_event_session_id(&event).to_owned();
         incoming_sender
             .send(RuntimeEvent::TerminalEvent {
@@ -2632,6 +2631,44 @@ async fn stream_daemon_session(
             _ => {}
         }
     }
+}
+
+fn parse_peer_response_line(
+    peer_id: &str,
+    operation: &str,
+    line: &str,
+) -> Result<PeerResponse, RuntimeError> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return Err(RuntimeError::Protocol(format!(
+            "peer {peer_id} returned an empty response for {operation}"
+        )));
+    }
+
+    serde_json::from_str::<PeerResponse>(trimmed).map_err(|error| {
+        RuntimeError::Protocol(format!(
+            "peer {peer_id} returned a non-JSON response for {operation}: {error}"
+        ))
+    })
+}
+
+fn parse_peer_terminal_event_line(
+    peer_id: &str,
+    session_id: &str,
+    line: &str,
+) -> Result<PeerTerminalEvent, RuntimeError> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return Err(RuntimeError::Protocol(format!(
+            "peer {peer_id} returned an empty terminal event for session {session_id}"
+        )));
+    }
+
+    serde_json::from_str::<PeerTerminalEvent>(trimmed).map_err(|error| {
+        RuntimeError::Protocol(format!(
+            "peer {peer_id} returned a non-JSON terminal event for session {session_id}: {error}"
+        ))
+    })
 }
 
 async fn connect_daemon(daemon_dir: &Path) -> Result<DaemonConnection, RuntimeError> {
