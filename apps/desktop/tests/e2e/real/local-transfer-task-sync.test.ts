@@ -175,6 +175,14 @@ async function sidebarItemsForPrompt(client: typeof primary, prompt: string): Pr
   `);
 }
 
+async function sidebarTitleTextsForPrompt(client: typeof primary, prompt: string): Promise<string[]> {
+  return await client.executeSync(`
+    return Array.from(document.querySelectorAll(".sidebar .pipeline-item .item-title"))
+      .map((element) => element.textContent?.trim() ?? "")
+      .filter((text) => text.includes(${JSON.stringify(prompt)}));
+  `);
+}
+
 async function waitForSidebarTaskGroupedUnderRepo(prompt: string, repoId: string): Promise<void> {
   const deadline = Date.now() + 30_000;
   let lastDiagnostics: unknown = null;
@@ -299,6 +307,9 @@ describe("local transfer task sync", () => {
         stage: "in progress",
       }),
     ]);
+    expect(await sidebarTitleTextsForPrompt(primary, "LAN visible task")).toEqual([
+      "LAN visible task",
+    ]);
     expect(await sidebarItemsForPrompt(secondary, "LAN visible task")).toEqual([
       expect.objectContaining({
         id: expect.stringMatching(/^cloud:lan:/),
@@ -307,6 +318,9 @@ describe("local transfer task sync", () => {
         stage: "in progress",
       }),
     ]);
+    const secondarySidebarTitles = await sidebarTitleTextsForPrompt(secondary, "LAN visible task");
+    expect(secondarySidebarTitles).toHaveLength(1);
+    expect(secondarySidebarTitles[0]).toMatch(/^< LAN visible task(?:\s|$)/);
     expect(await countLocalTasksOnSecondary()).toBe(0);
 
     const snapshot = await secondary.executeSync<{
