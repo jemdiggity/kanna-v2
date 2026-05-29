@@ -103,6 +103,7 @@
     "noReposHint": "Press {shortcut} to create one.",
     "newTaskTooltip": "New Task (⌘N)",
     "removeRepoTooltip": "Remove Repo",
+    "remoteTaskTooltip": "Remote task",
     "sectionMergeQueue": "Merge Queue",
     "sectionPullRequests": "Pull Requests",
     "sectionInProgress": "In Progress",

@@ -103,6 +103,7 @@
     "noReposHint": "{shortcut} で作成できます。",
     "newTaskTooltip": "新規タスク (⌘N)",
     "removeRepoTooltip": "リポジトリを削除",
+    "remoteTaskTooltip": "リモートタスク",
     "sectionMergeQueue": "マージキュー",
     "sectionPullRequests": "プルリクエスト",
     "sectionInProgress": "進行中",

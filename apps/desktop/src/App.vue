@@ -7,7 +7,7 @@ import { isTauri } from "./tauri-mock";
 import { invoke } from "./invoke";
 import { listen, listenCurrentWebviewWindow } from "./listen";
 import { parseRepoConfig } from "@kanna/core";
-import { getSetting, setSetting, type AgentProvider, type DbHandle } from "@kanna/db";
+import { getSetting, setSetting, type AgentProvider, type DbHandle, type PipelineItem } from "@kanna/db";
 import i18n from "./i18n";
 import Sidebar from "./components/Sidebar.vue";
 import MainPanel from "./components/MainPanel.vue";
@@ -82,6 +82,10 @@ import {
 } from "./windowWorkspace";
 
 const isMobile = __KANNA_MOBILE__;
+
+type AppSidebarItem = PipelineItem & {
+  remote_task?: boolean;
+};
 
 function hasTag(item: { tags: string }, tag: string): boolean {
   try { return (JSON.parse(item.tags) as string[]).includes(tag); }
@@ -256,10 +260,11 @@ const sidebarRepos = computed(() => workspace.value.repos.map((repo) => ({
   created_at: "",
   last_opened_at: "",
 })));
-const sidebarItems = computed(() => workspace.value.tasks.map((task) => ({
+const sidebarItems = computed<AppSidebarItem[]>(() => workspace.value.tasks.map((task) => ({
   ...task.item,
   id: task.item.id,
   repo_id: task.repoKey,
+  remote_task: task.owner.kind !== "local",
 })));
 const selectedCloudRepo = computed(() =>
   remoteSnapshot.value.repos.find((repo) => repo.id === (selectedCloudRepoId.value ?? store.selectedRepoId))
