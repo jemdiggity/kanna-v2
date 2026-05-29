@@ -22,7 +22,10 @@ import {
   type DesktopAuthUser,
 } from "./desktopAuth";
 import { resolveDesktopFirebaseConfig } from "./desktopFirebaseConfig";
-import { verifyFirebaseAuthIndexedDbStorage } from "./desktopAuthStorage";
+import {
+  createDesktopAuthSettingsPersistence,
+  verifyFirebaseAuthIndexedDbStorage,
+} from "./desktopAuthStorage";
 
 let sessionPromise: Promise<DesktopAuthSession> | null = null;
 let connectedAuthEmulatorUrl: string | null = null;
@@ -80,9 +83,10 @@ async function createConfiguredDesktopAuthSession(): Promise<DesktopAuthSession>
 function resolveDesktopAuthPersistence(
   storageStatus: Awaited<ReturnType<typeof verifyFirebaseAuthIndexedDbStorage>>,
 ): Persistence[] {
-  const fallbackPersistence = [browserLocalPersistence, inMemoryPersistence];
+  const desktopPersistence = createDesktopAuthSettingsPersistence();
+  const fallbackPersistence = [desktopPersistence, browserLocalPersistence, inMemoryPersistence];
   if (!storageStatus.available) return fallbackPersistence;
-  return [indexedDBLocalPersistence, ...fallbackPersistence];
+  return [desktopPersistence, indexedDBLocalPersistence, browserLocalPersistence, inMemoryPersistence];
 }
 
 function isFirebaseAuthAlreadyInitializedError(error: unknown): boolean {
