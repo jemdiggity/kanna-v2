@@ -1366,7 +1366,19 @@ const keyboardActions = {
     const worktreePath = `${repo.path}/.kanna-worktrees/${item.branch}`;
     await invoke("run_script", { script: `${store.ideCommand} "${worktreePath}"`, cwd: worktreePath, env: {} }).catch((e) => console.error("[openInIDE] failed:", e));
   },
-  advanceStage: () => { const item = store.currentItem; if (item) void store.advanceStage(item.id); },
+  advanceStage: () => {
+    const workspaceTask = selectedWorkspaceTask.value;
+    if (workspaceTask) {
+      if (!workspaceTask.capabilities.canAdvanceStage || !workspaceTask.localTaskId) return;
+      void store.advanceStage(workspaceTask.localTaskId);
+      return;
+    }
+
+    const item = store.currentItem;
+    if (!item) return;
+    if (store.selectedItemId && item.id !== store.selectedItemId) return;
+    void store.advanceStage(item.id);
+  },
   closeTask: () => closeSelectedWorkspaceTask(),
   undoClose: () => store.undoClose(),
   navigateUp: () => navigateItems(-1),

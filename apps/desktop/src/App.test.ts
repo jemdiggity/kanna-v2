@@ -118,6 +118,7 @@ const store = {
   attachWindowWorkspace: vi.fn(),
   selectRepo: vi.fn(),
   selectItem: vi.fn(),
+  advanceStage: vi.fn(async () => {}),
   closeTask: vi.fn(async () => {}),
   bump: vi.fn(async () => {}),
   pinItem: vi.fn(async () => {}),
@@ -537,6 +538,7 @@ describe("App", () => {
     store.pushTaskToPeer.mockClear();
     store.loadAgent.mockClear();
     store.selectItem.mockClear();
+    store.advanceStage.mockClear();
     store.repos = [{ id: "repo-1", path: "/tmp/repo", name: "repo" }];
     store.selectedRepoId = "repo-1";
     store.selectedItemId = null;
@@ -994,6 +996,139 @@ describe("App", () => {
     expect(wrapper.get('[data-testid="main-item-id"]').text()).toBe("cloud:repo-remote:task-remote");
     expect(wrapper.get('[data-testid="main-repo-path"]').text()).toBe("cloud");
     expect(store.selectRepo).not.toHaveBeenCalledWith("cloud:repo-remote");
+
+    wrapper.unmount();
+  });
+
+  it("does not advance a local fallback task when a remote workspace task is selected", async () => {
+    const localFallbackItem = {
+      id: "task-local",
+      repo_id: "repo-1",
+      prompt: "Local fallback",
+      pipeline: "default",
+      stage: "in progress",
+      tags: "[]",
+      pr_number: null,
+      pr_url: null,
+      branch: "task-local",
+      activity: "idle",
+      activity_changed_at: "2026-05-18T00:00:00.000Z",
+      unread_at: null,
+      port_offset: null,
+      port_env: null,
+      pinned: 0,
+      pin_order: null,
+      display_name: "Local fallback",
+      issue_number: null,
+      issue_title: null,
+      closed_at: null,
+      agent_session_id: null,
+      base_ref: "origin/main",
+      agent_provider: "codex",
+      agent_type: "pty",
+      previous_stage: null,
+      stage_result: null,
+      teardown_started_at: null,
+      last_output_preview: null,
+      active_post_action: null,
+      created_at: "2026-05-18T00:00:00.000Z",
+      updated_at: "2026-05-18T00:00:00.000Z",
+    };
+    store.items = [localFallbackItem];
+    store.currentItem = localFallbackItem;
+    store.sortedItemsForCurrentRepo = [localFallbackItem];
+    store.sortedItemsAllRepos = [localFallbackItem];
+
+    cloudTasksMock.mockResolvedValue({
+      repos: [{
+        id: "repo-1",
+        path: "cloud",
+        name: "repo",
+        default_branch: "main",
+        hidden: 0,
+        sort_order: 0,
+        created_at: "2026-05-18T00:00:00.000Z",
+        last_opened_at: "2026-05-18T00:00:00.000Z",
+      }],
+      items: [{
+        id: "cloud:repo-1:task-remote",
+        repo_id: "repo-1",
+        prompt: "Remote task",
+        pipeline: "cloud",
+        stage: "in progress",
+        tags: "[]",
+        pr_number: null,
+        pr_url: null,
+        branch: "task-remote",
+        activity: "idle",
+        activity_changed_at: "2026-05-18T00:00:00.000Z",
+        unread_at: null,
+        port_offset: null,
+        port_env: null,
+        pinned: 0,
+        pin_order: null,
+        display_name: "Remote task",
+        issue_number: null,
+        issue_title: null,
+        closed_at: null,
+        agent_session_id: null,
+        base_ref: "origin/main",
+        agent_provider: "codex",
+        agent_type: "pty",
+        previous_stage: null,
+        stage_result: null,
+        teardown_started_at: null,
+        last_output_preview: null,
+        active_post_action: null,
+        created_at: "2026-05-18T00:00:00.000Z",
+        updated_at: "2026-05-18T00:00:00.000Z",
+      }],
+    });
+
+    const SidebarMixedStub = defineComponent({
+      name: "Sidebar",
+      props: {
+        pipelineItems: { type: Array, default: () => [] },
+      },
+      emits: ["select-item"],
+      template: `
+        <div data-testid="sidebar">
+          <button
+            v-for="item in pipelineItems"
+            :key="item.id"
+            :data-testid="\`task-\${item.id}\`"
+            type="button"
+            @click="$emit('select-item', item.id)"
+          >
+            {{ item.display_name }}
+          </button>
+        </div>
+      `,
+    });
+
+    const MainPanelTaskStub = defineComponent({
+      name: "MainPanel",
+      props: {
+        item: Object,
+      },
+      template: '<div data-testid="main-item-id">{{ item?.id || "" }}</div>',
+    });
+
+    const wrapper = await mountAppWithOverrides(SidebarMixedStub, {
+      MainPanel: MainPanelTaskStub,
+    });
+    await flushPromises();
+    await flushPromises();
+
+    await wrapper.get('[data-testid="task-cloud:repo-1:task-remote"]').trigger("click");
+    await flushPromises();
+
+    expect(wrapper.get('[data-testid="main-item-id"]').text()).toBe("cloud:repo-1:task-remote");
+
+    capturedKeyboardActions?.advanceStage();
+    await flushPromises();
+
+    expect(store.advanceStage).not.toHaveBeenCalled();
 
     wrapper.unmount();
   });
