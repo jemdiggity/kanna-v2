@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { verifyFirebaseAuthIndexedDbStorage } from "./desktopAuthStorage";
+import {
+  createDesktopAuthSettingsPersistence,
+  verifyFirebaseAuthIndexedDbStorage,
+} from "./desktopAuthStorage";
+import type { DbHandle } from "@kanna/db";
 
 type FakeRequest<T = unknown> = IDBRequest<T> & {
   result: T;
@@ -127,5 +131,55 @@ describe("verifyFirebaseAuthIndexedDbStorage", () => {
   it("treats a missing Firebase Auth object store as unavailable", async () => {
     await expect(verifyFirebaseAuthIndexedDbStorage(createFakeIndexedDb({ missingStore: true })))
       .resolves.toMatchObject({ available: false, operation: "transaction" });
+  });
+});
+
+function createFakeSettingsDb(): DbHandle {
+  const settings = new Map<string, string>();
+  return {
+    async execute(query, bindValues = []) {
+      if (query.startsWith("CREATE TABLE")) return { rowsAffected: 0 };
+      if (query.startsWith("INSERT INTO settings")) {
+        settings.set(String(bindValues[0]), String(bindValues[1]));
+        return { rowsAffected: 1 };
+      }
+      if (query.startsWith("DELETE FROM settings")) {
+        const deleted = settings.delete(String(bindValues[0]));
+        return { rowsAffected: deleted ? 1 : 0 };
+      }
+      throw new Error(`Unexpected execute: ${query}`);
+    },
+    async select<T>(query: string, bindValues = []) {
+      if (query.startsWith("SELECT value FROM settings")) {
+        const value = settings.get(String(bindValues[0]));
+        return (value === undefined ? [] : [{ value }]) as T[];
+      }
+      throw new Error(`Unexpected select: ${query}`);
+    },
+  };
+}
+
+describe("createDesktopAuthSettingsPersistence", () => {
+  it("persists Firebase Auth values through the desktop settings database", async () => {
+    const db = createFakeSettingsDb();
+    const firstPersistence = createDesktopAuthSettingsPersistence({
+      loadDatabase: async () => ({ db }),
+    });
+    const secondPersistence = createDesktopAuthSettingsPersistence({
+      loadDatabase: async () => ({ db }),
+    });
+    const firstPersistenceInstance = new firstPersistence();
+    const secondPersistenceInstance = new secondPersistence();
+
+    await expect(firstPersistenceInstance._isAvailable()).resolves.toBe(true);
+    await firstPersistenceInstance._set("firebase:user", { uid: "user-1", refreshToken: "token-1" });
+
+    await expect(secondPersistenceInstance._get("firebase:user")).resolves.toEqual({
+      uid: "user-1",
+      refreshToken: "token-1",
+    });
+
+    await secondPersistenceInstance._remove("firebase:user");
+    await expect(firstPersistenceInstance._get("firebase:user")).resolves.toBeNull();
   });
 });
