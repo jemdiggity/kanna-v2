@@ -168,16 +168,18 @@ describe("createDesktopAuthSettingsPersistence", () => {
     const secondPersistence = createDesktopAuthSettingsPersistence({
       loadDatabase: async () => ({ db }),
     });
+    const firstPersistenceInstance = new firstPersistence();
+    const secondPersistenceInstance = new secondPersistence();
 
-    await expect(firstPersistence._isAvailable()).resolves.toBe(true);
-    await firstPersistence._set("firebase:user", { uid: "user-1", refreshToken: "token-1" });
+    await expect(firstPersistenceInstance._isAvailable()).resolves.toBe(true);
+    await firstPersistenceInstance._set("firebase:user", { uid: "user-1", refreshToken: "token-1" });
 
-    await expect(secondPersistence._get("firebase:user")).resolves.toEqual({
+    await expect(secondPersistenceInstance._get("firebase:user")).resolves.toEqual({
       uid: "user-1",
       refreshToken: "token-1",
     });
 
-    await secondPersistence._remove("firebase:user");
-    await expect(firstPersistence._get("firebase:user")).resolves.toBeNull();
+    await secondPersistenceInstance._remove("firebase:user");
+    await expect(firstPersistenceInstance._get("firebase:user")).resolves.toBeNull();
   });
 });

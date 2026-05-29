@@ -15,6 +15,11 @@ const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
 }));
 
+const MockDesktopPersistence = vi.hoisted(() => class {
+  static readonly type = "LOCAL";
+  readonly type = "LOCAL";
+});
+
 vi.mock("firebase/app", () => ({
   getApps: mocks.getApps,
   initializeApp: mocks.initializeApp,
@@ -73,7 +78,7 @@ describe("getConfiguredDesktopAuthSession", () => {
       firestoreEmulator: null,
       functionsEndpoint: "http://127.0.0.1:5001/upsertTaskSnapshot",
     });
-    mocks.createDesktopAuthSettingsPersistence.mockReset().mockReturnValue({ type: "DESKTOP" });
+    mocks.createDesktopAuthSettingsPersistence.mockReset().mockReturnValue(MockDesktopPersistence);
     mocks.verifyFirebaseAuthIndexedDbStorage.mockReset().mockResolvedValue({ available: true });
   });
 
@@ -91,7 +96,7 @@ describe("getConfiguredDesktopAuthSession", () => {
     expect(mocks.initializeAuth).toHaveBeenCalledWith(
       { name: "[DEFAULT]" },
       {
-        persistence: [{ type: "DESKTOP" }, { type: "LOCAL" }, { type: "NONE" }],
+        persistence: [MockDesktopPersistence, { type: "LOCAL" }, { type: "NONE" }],
       },
     );
     expect(mocks.getAuth).not.toHaveBeenCalled();
@@ -107,7 +112,7 @@ describe("getConfiguredDesktopAuthSession", () => {
     expect(mocks.initializeAuth).toHaveBeenCalledWith(
       { name: "[DEFAULT]" },
       {
-        persistence: [{ type: "DESKTOP" }, { type: "INDEXEDDB" }, { type: "LOCAL" }, { type: "NONE" }],
+        persistence: [MockDesktopPersistence, { type: "INDEXEDDB" }, { type: "LOCAL" }, { type: "NONE" }],
       },
     );
     expect(mocks.getAuth).not.toHaveBeenCalled();

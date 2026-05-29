@@ -26,7 +26,8 @@ interface SettingValueRow {
   value: string;
 }
 
-export type DesktopAuthSettingsPersistence = Persistence & {
+export interface DesktopAuthSettingsPersistenceInstance {
+  readonly type: "LOCAL";
   _isAvailable(): Promise<boolean>;
   _set(key: string, value: unknown): Promise<void>;
   _get<T = unknown>(key: string): Promise<T | null>;
@@ -34,6 +35,10 @@ export type DesktopAuthSettingsPersistence = Persistence & {
   _addListener(key: string, listener: (value: unknown) => void): void;
   _removeListener(key: string, listener: (value: unknown) => void): void;
   _shouldAllowMigration?: boolean;
+}
+
+export type DesktopAuthSettingsPersistence = Persistence & {
+  new(): DesktopAuthSettingsPersistenceInstance;
 };
 
 export function createDesktopAuthSettingsPersistence(
@@ -55,9 +60,11 @@ export function createDesktopAuthSettingsPersistence(
 
   const settingsKey = (key: string) => `${SETTINGS_KEY_PREFIX}${key}`;
 
-  return {
-    type: "LOCAL",
-    _shouldAllowMigration: true,
+  class DesktopAuthSettingsPersistenceClass implements DesktopAuthSettingsPersistenceInstance {
+    static readonly type = "LOCAL";
+    readonly type = "LOCAL";
+    readonly _shouldAllowMigration = true;
+
     async _isAvailable() {
       try {
         await ensureSettingsTable(await getDb());
@@ -66,8 +73,9 @@ export function createDesktopAuthSettingsPersistence(
         console.warn("[cloud] desktop auth settings persistence unavailable:", error);
         return false;
       }
-    },
-    async _set(key, value) {
+    }
+
+    async _set(key: string, value: unknown) {
       const db = await getDb();
       await ensureSettingsTable(db);
       await db.execute(
@@ -76,7 +84,8 @@ export function createDesktopAuthSettingsPersistence(
          ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
         [settingsKey(key), JSON.stringify(value)],
       );
-    },
+    }
+
     async _get<T = unknown>(key: string): Promise<T | null> {
       const db = await getDb();
       await ensureSettingsTable(db);
@@ -87,19 +96,24 @@ export function createDesktopAuthSettingsPersistence(
       const raw = rows[0]?.value;
       if (raw === undefined) return null;
       return JSON.parse(raw) as T;
-    },
-    async _remove(key) {
+    }
+
+    async _remove(key: string) {
       const db = await getDb();
       await ensureSettingsTable(db);
       await db.execute("DELETE FROM settings WHERE key = ?", [settingsKey(key)]);
-    },
+    }
+
     _addListener() {
       // Kanna owns a single desktop webview session; cross-tab auth storage events are unnecessary.
-    },
+    }
+
     _removeListener() {
       // See _addListener.
-    },
-  };
+    }
+  }
+
+  return DesktopAuthSettingsPersistenceClass as DesktopAuthSettingsPersistence;
 }
 
 export async function verifyFirebaseAuthIndexedDbStorage(
