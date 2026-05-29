@@ -92,6 +92,24 @@ async function hydrateStoreItem(client: WebDriverClient, taskId: string): Promis
   }
 }
 
+async function injectCloudSnapshot(
+  client: WebDriverClient,
+  snapshot: { repos: Array<Record<string, unknown>>; items: Array<Record<string, unknown>>; terminalRefs?: Record<string, unknown> },
+): Promise<void> {
+  const result = await client.executeSync<string>(
+    `const ctx = window.__KANNA_E2E__.setupState;
+     const snapshot = ${JSON.stringify(snapshot)};
+     const cloudSnapshot = ctx.cloudSnapshot;
+     if (!cloudSnapshot) return "cloud-snapshot-unavailable";
+     if (cloudSnapshot.__v_isRef) cloudSnapshot.value = snapshot;
+     else Object.assign(cloudSnapshot, snapshot);
+     return "ok";`,
+  );
+  if (result !== "ok") {
+    throw new Error(`failed to inject cloud snapshot: ${result}`);
+  }
+}
+
 async function sendPipelineStageComplete(client: WebDriverClient, taskId: string): Promise<void> {
   const socketPath = await tauriInvoke(client, "get_pipeline_socket_path");
   if (typeof socketPath !== "string" || socketPath.length === 0) {
@@ -200,6 +218,28 @@ async function waitForSidebarToExcludeText(
     await sleep(100);
   }
   throw new Error(`timed out waiting for sidebar to remove ${JSON.stringify(text)}; saw ${JSON.stringify(lastSidebarText)}`);
+}
+
+async function clickSidebarItemByTitle(
+  client: WebDriverClient,
+  title: string,
+  timeoutMs = 5_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const clicked = await client.executeSync<boolean>(
+      `const title = ${JSON.stringify(title)};
+       const titles = Array.from(document.querySelectorAll(".sidebar .item-title"));
+       const match = titles.find((element) => element.textContent?.includes(title));
+       const item = match?.closest(".pipeline-item");
+       if (!item) return false;
+       item.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+       return true;`,
+    );
+    if (clicked) return;
+    await sleep(100);
+  }
+  throw new Error(`timed out waiting for sidebar item ${JSON.stringify(title)}`);
 }
 
 async function waitForFileSize(path: string, expectedSize: number, timeoutMs = 5_000): Promise<void> {
@@ -1098,6 +1138,134 @@ describe("stage advance", () => {
 
     await waitForClosedTask(client, taskId);
     await waitForSidebarToExcludeText(client, "Close PR from shortcut");
+  });
+
+  it("does not close a stale local fallback task when Cmd+S is pressed with a remote workspace task selected", async () => {
+    // The mock E2E app has no seeded Firebase/relay peer to publish a true
+    // remote desktop snapshot. A full cloud E2E would need harness support for
+    // publishing a controllable remote task into the primary app before
+    // selection. This regression keeps the narrower UI contract covered:
+    // sidebar selects a remote workspace task, the real global shortcut fires,
+    // and the stale local fallback row stays untouched.
+    const fallbackTaskId = "stale-local-final-stage-shortcut-task";
+    const fallbackBranch = "task-stale-local-final-stage-shortcut";
+    const remoteTaskId = `cloud:${repoId}:remote-shortcut-task`;
+    const createdAt = "2026-05-18T00:00:00.000Z";
+    await tauriInvoke(client, "git_worktree_add", {
+      repoPath: testRepoPath,
+      branch: fallbackBranch,
+      path: join(testRepoPath, ".kanna-worktrees", fallbackBranch),
+      startPoint: "main",
+    });
+    await execDb(
+      client,
+      `INSERT INTO pipeline_item (
+         id, repo_id, prompt, pipeline, stage, stage_result, tags, branch,
+         agent_type, agent_provider, activity, display_name, pinned, pin_order, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        fallbackTaskId,
+        repoId,
+        "Stale local fallback from shortcut",
+        "final-stage-e2e",
+        "pr",
+        null,
+        "[]",
+        fallbackBranch,
+        "pty",
+        "codex",
+        "idle",
+        "Stale local fallback",
+        1,
+        0,
+        createdAt,
+        createdAt,
+      ],
+    );
+    await hydrateStoreItem(client, fallbackTaskId);
+
+    const selectFallbackResult = await callVueMethod(client, "store.selectItem", fallbackTaskId);
+    if (isVueCallError(selectFallbackResult)) throw new Error(selectFallbackResult.__error);
+    await waitForSelectedTask(client, fallbackTaskId);
+
+    await injectCloudSnapshot(client, {
+      repos: [{
+        id: repoId,
+        path: "cloud",
+        name: "Shortcut Remote",
+        default_branch: "main",
+        hidden: 0,
+        sort_order: 0,
+        created_at: createdAt,
+        last_opened_at: createdAt,
+      }],
+      items: [{
+        id: remoteTaskId,
+        repo_id: repoId,
+        prompt: "Remote shortcut task",
+        pipeline: "cloud",
+        stage: "in progress",
+        tags: "[]",
+        pr_number: null,
+        pr_url: null,
+        branch: "remote-shortcut-task",
+        activity: "idle",
+        activity_changed_at: createdAt,
+        unread_at: null,
+        port_offset: null,
+        port_env: null,
+        pinned: 0,
+        pin_order: null,
+        display_name: "Remote shortcut task",
+        issue_number: null,
+        issue_title: null,
+        closed_at: null,
+        agent_session_id: null,
+        base_ref: "origin/main",
+        agent_provider: "codex",
+        agent_type: "pty",
+        previous_stage: null,
+        stage_result: null,
+        teardown_started_at: null,
+        last_output_preview: null,
+        active_post_action: null,
+        created_at: "2026-05-18T00:01:00.000Z",
+        updated_at: "2026-05-18T00:01:00.000Z",
+      }],
+      terminalRefs: {},
+    });
+
+    await clickSidebarItemByTitle(client, "Remote shortcut task");
+    await waitForSelectedTask(client, remoteTaskId);
+
+    const selectedState = await client.executeSync<{
+      selectedItemId: string | null;
+      currentItemId: string | null;
+      selectedWorkspaceTaskId: string | null;
+    }>(
+      `const ctx = window.__KANNA_E2E__.setupState;
+       const read = (value) => value && value.__v_isRef ? value.value : value;
+       return {
+         selectedItemId: read(ctx.store.selectedItemId),
+         currentItemId: read(ctx.store.currentItem)?.id ?? null,
+         selectedWorkspaceTaskId: read(ctx.selectedWorkspaceTask)?.id ?? null,
+       };`,
+    );
+    expect(selectedState).toEqual({
+      selectedItemId: remoteTaskId,
+      currentItemId: fallbackTaskId,
+      selectedWorkspaceTaskId: remoteTaskId,
+    });
+
+    await client.executeSync(buildGlobalKeydownScript({ key: "s", meta: true }));
+    await sleep(500);
+
+    const rows = (await queryDb(
+      client,
+      "SELECT stage, closed_at FROM pipeline_item WHERE id = ?",
+      [fallbackTaskId],
+    )) as Array<{ stage: string | null; closed_at: string | null }>;
+    expect(rows[0]).toEqual({ stage: "pr", closed_at: null });
   });
 
 });
