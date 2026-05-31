@@ -75,6 +75,33 @@ export class WebDriverClient {
     await pauseForSlowMode("webdriver click");
   }
 
+  async pointerDoublePress(elementId: string): Promise<void> {
+    const rect = await this.getElementRect(elementId);
+    const point = {
+      x: Math.round(rect.x + rect.width / 2),
+      y: Math.round(rect.y + rect.height / 2),
+    };
+
+    await this.post(`/session/${this.sid}/actions`, {
+      actions: [
+        {
+          type: "pointer",
+          id: "mouse",
+          parameters: { pointerType: "mouse" },
+          actions: [
+            { type: "pointerMove", duration: 0, origin: "viewport", x: point.x, y: point.y },
+            { type: "pointerDown", button: 0 },
+            { type: "pointerUp", button: 0 },
+            { type: "pause", duration: 40 },
+            { type: "pointerDown", button: 0 },
+            { type: "pointerUp", button: 0 },
+          ],
+        },
+      ],
+    });
+    await pauseForSlowMode("webdriver pointer double press");
+  }
+
   async getText(elementId: string): Promise<string> {
     const res = await this.get(`/session/${this.sid}/element/${elementId}/text`);
     return res.value;
