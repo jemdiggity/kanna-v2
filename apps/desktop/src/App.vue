@@ -607,15 +607,28 @@ function visibleSidebarItemsForRepo(repoId: string, options: { currentRepoScope?
 
 function visibleSidebarItemsAllRepos() {
   const workspaceItems = sidebarRepos.value.flatMap((repo) => visibleSidebarItemsForRepo(repo.id));
-  return workspaceItems.length > 0 ? workspaceItems : store.sortedItemsAllRepos;
-}
-
-function currentRepoVisibleSidebarItems() {
+  if (workspaceItems.length > 0) return workspaceItems;
+  if (store.sortedItemsAllRepos.length > 0) return store.sortedItemsAllRepos;
   const repoId = store.selectedRepoId;
   return repoId ? visibleSidebarItemsForRepo(repoId, { currentRepoScope: true }) : [];
 }
 
 // Navigation
+async function selectSidebarItem(item: Pick<AppSidebarItem, "id" | "repo_id">, previousItemId?: string | null) {
+  if (item.repo_id !== store.selectedRepoId) {
+    const previous = previousItemId !== undefined ? previousItemId : store.selectedItemId;
+    await handleSelectRepo(item.repo_id);
+    await handleSelectItem(item.id, previous);
+    return;
+  }
+
+  if (previousItemId !== undefined) {
+    await handleSelectItem(item.id, previousItemId);
+  } else {
+    await handleSelectItem(item.id);
+  }
+}
+
 async function navigateItems(direction: -1 | 1) {
   const allItems = visibleSidebarItemsAllRepos();
   const visibleItems = allItems;
@@ -632,10 +645,7 @@ async function navigateItems(direction: -1 | 1) {
   const nextItem = visibleItems[nextIndex];
   if (nextItem.id !== store.selectedItemId) {
     const previousItemId = store.selectedItemId;
-    if (nextItem.repo_id !== store.selectedRepoId) {
-      await handleSelectRepo(nextItem.repo_id);
-    }
-    await handleSelectItem(nextItem.id, previousItemId);
+    await selectSidebarItem(nextItem, previousItemId);
   }
 }
 
@@ -674,28 +684,28 @@ async function navigateRepos(direction: -1 | 1) {
   }
 }
 
-function selectReadTask(mode: "oldest" | "newest") {
+async function selectReadTask(mode: "oldest" | "newest") {
   const target = selectTaskByActivity(
-    currentRepoVisibleSidebarItems().filter((item) => isActivityShortcutCandidate(item) && !hasTag(item, "blocked")),
+    visibleSidebarItemsAllRepos().filter((item) => isActivityShortcutCandidate(item) && !hasTag(item, "blocked")),
     mode,
     "idle",
     mainPanelItem.value?.created_at,
   );
-  if (target) void handleSelectItem(target.id);
+  if (target) await selectSidebarItem(target);
 }
 
-function selectUnreadTaskWithReadFallback(mode: "oldest" | "newest") {
+async function selectUnreadTaskWithReadFallback(mode: "oldest" | "newest") {
   const target = selectTaskByActivity(
-    currentRepoVisibleSidebarItems().filter(isActivityShortcutCandidate),
+    visibleSidebarItemsAllRepos().filter(isActivityShortcutCandidate),
     mode,
     "unread",
     mainPanelItem.value?.created_at,
   );
   if (target) {
-    void handleSelectItem(target.id);
+    await selectSidebarItem(target);
     return;
   }
-  selectReadTask(mode);
+  await selectReadTask(mode);
 }
 
 function handleBlockTask() {
@@ -1383,10 +1393,10 @@ const keyboardActions = {
   undoClose: () => store.undoClose(),
   navigateUp: () => navigateItems(-1),
   navigateDown: () => navigateItems(1),
-  goToOldestUnread: () => { selectUnreadTaskWithReadFallback("oldest"); },
-  goToNewestUnread: () => { selectUnreadTaskWithReadFallback("newest"); },
-  goToOldestRead: () => { selectReadTask("oldest"); },
-  goToNewestRead: () => { selectReadTask("newest"); },
+  goToOldestUnread: () => selectUnreadTaskWithReadFallback("oldest"),
+  goToNewestUnread: () => selectUnreadTaskWithReadFallback("newest"),
+  goToOldestRead: () => selectReadTask("oldest"),
+  goToNewestRead: () => selectReadTask("newest"),
   navigateRepoUp: () => navigateRepos(-1),
   navigateRepoDown: () => navigateRepos(1),
   toggleSidebar: () => { sidebarHidden.value = !sidebarHidden.value; },
