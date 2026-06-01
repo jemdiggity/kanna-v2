@@ -1,4 +1,4 @@
-import { ref } from "vue";
+import { computed, ref } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DbHandle, PipelineItem, Repo } from "@kanna/db";
 import { createStoreContext, createStoreState } from "./state";
@@ -147,6 +147,14 @@ function getStageCompleteHandler(): (event: unknown) => Promise<void> {
   return handler;
 }
 
+function getSessionCreatedHandler(): (event: unknown) => Promise<void> {
+  const handler = mockState.listenMock.mock.calls.find(
+    ([eventName]) => eventName === "session_created",
+  )?.[1] as ((event: unknown) => Promise<void>) | undefined;
+  if (!handler) throw new Error("session_created handler was not registered");
+  return handler;
+}
+
 describe("createInitApi", () => {
   beforeEach(() => {
     mockState.reset();
@@ -226,6 +234,75 @@ describe("createInitApi", () => {
 
     expect(state.selectedRepoId.value).toBe("repo-1");
     expect(services.restoreSelection).toHaveBeenCalledWith("task-1");
+  });
+
+  it("refreshes externally spawned tasks without moving focus to the new task", async () => {
+    const currentTask = mockState.makeItem({
+      id: "task-current",
+      tags: "[]",
+      created_at: "2026-04-23T00:01:00.000Z",
+      updated_at: "2026-04-23T00:01:00.000Z",
+    });
+    const externalTask = mockState.makeItem({
+      id: "task-external",
+      tags: "[]",
+      created_at: "2026-04-23T00:02:00.000Z",
+      updated_at: "2026-04-23T00:02:00.000Z",
+    });
+    mockState.items = [currentTask];
+
+    const state = createStoreState();
+    state.repos.value = [...mockState.repos];
+    state.items.value = [currentTask];
+    const services = {
+      loadInitialData: vi.fn(async () => {}),
+      reloadSnapshot: vi.fn(async () => {
+        state.items.value = [externalTask, currentTask];
+      }),
+      currentItem: computed(() => {
+        if (state.selectedItemId.value) {
+          return state.items.value.find((item) => item.id === state.selectedItemId.value) ?? null;
+        }
+        return state.items.value[0] ?? null;
+      }),
+    };
+    const toast = {
+      toasts: ref([]),
+      dismiss: vi.fn(),
+      info: vi.fn(),
+      warning: vi.fn(),
+      error: vi.fn(),
+    };
+    const persistSelection = vi.fn(async () => {});
+    const onSharedInvalidation = vi.fn(async () => () => undefined);
+    const context = createStoreContext(state, toast, {
+      ...services,
+      windowWorkspace: { persistSelection, onSharedInvalidation },
+    } as never);
+    const ports = {
+      closeTaskAndReleasePorts: vi.fn(async () => {}),
+    } as unknown as import("./ports").PortsStore;
+    const initApi = createInitApi(context, ports, {
+      checkUnblocked: vi.fn(async () => {}),
+      handleAgentFinished: vi.fn(),
+      startBlockedTask: vi.fn(async () => {}),
+      restoreUnblockedTask: vi.fn(async () => {}),
+    } as unknown as Parameters<typeof createInitApi>[2]);
+
+    await initApi.init(createDb());
+    expect(state.selectedItemId.value).toBeNull();
+    expect(services.currentItem.value?.id).toBe("task-current");
+
+    await getSessionCreatedHandler()({ payload: { session_id: "task-external" } });
+
+    expect(services.reloadSnapshot).toHaveBeenCalled();
+    expect(state.items.value.map((item) => item.id)).toEqual(["task-external", "task-current"]);
+    expect(state.selectedItemId.value).toBe("task-current");
+    expect(services.currentItem.value?.id).toBe("task-current");
+    expect(persistSelection).toHaveBeenCalledWith({
+      selectedRepoId: "repo-1",
+      selectedItemId: "task-current",
+    });
   });
 
   it("consumes successful auto-stage results once when duplicate stage-complete events arrive", async () => {

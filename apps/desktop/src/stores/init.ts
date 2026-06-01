@@ -27,6 +27,55 @@ export function createInitApi(
   ports: import("./ports").PortsStore,
   tasks: Pick<import("./tasks").TasksApi, "checkUnblocked" | "handleAgentFinished" | "restoreUnblockedTask">,
 ): InitApi {
+  function isVisibleItemInSelectedRepo(item: PipelineItem | null | undefined): item is PipelineItem {
+    return Boolean(
+      item
+      && item.stage !== "done"
+      && item.closed_at === null
+      && item.repo_id === context.state.selectedRepoId.value,
+    );
+  }
+
+  function resolveFocusedTaskIdBeforeExternalRefresh(): string | null {
+    const selectedItem = context.state.selectedItemId.value
+      ? context.state.items.value.find((candidate) => candidate.id === context.state.selectedItemId.value)
+      : null;
+    if (isVisibleItemInSelectedRepo(selectedItem)) return selectedItem.id;
+
+    const currentItem = context.services.currentItem?.value ?? null;
+    if (isVisibleItemInSelectedRepo(currentItem)) return currentItem.id;
+
+    return null;
+  }
+
+  async function preserveFocusedTaskAfterExternalRefresh(taskId: string | null): Promise<void> {
+    if (!taskId) return;
+
+    const selectedItem = context.state.selectedItemId.value
+      ? context.state.items.value.find((candidate) => candidate.id === context.state.selectedItemId.value)
+      : null;
+    if (isVisibleItemInSelectedRepo(selectedItem)) return;
+
+    const focusedItem = context.state.items.value.find((candidate) => candidate.id === taskId);
+    if (!isVisibleItemInSelectedRepo(focusedItem)) return;
+
+    context.state.selectedItemId.value = focusedItem.id;
+    context.state.lastSelectedItemByRepo.value[focusedItem.repo_id] = focusedItem.id;
+    await context.services.windowWorkspace?.persistSelection({
+      selectedRepoId: context.state.selectedRepoId.value,
+      selectedItemId: focusedItem.id,
+    });
+  }
+
+  function readSessionId(event: unknown): string | null {
+    const payload = (event as { payload?: { session_id?: string } }).payload ?? (event as { session_id?: string });
+    return typeof payload.session_id === "string" ? payload.session_id : null;
+  }
+
+  function isTaskAgentSession(sessionId: string): boolean {
+    return !sessionId.startsWith("shell-") && !isTeardownSessionId(sessionId);
+  }
+
   async function loadPreferences() {
     const suspendAfter = await getSetting(context.requireDb(), "suspendAfterMinutes");
     if (suspendAfter) context.state.suspendAfterMinutes.value = parseInt(suspendAfter, 10) || 30;
@@ -153,6 +202,15 @@ export function createInitApi(
     await context.services.windowWorkspace?.onSharedInvalidation(async () => {
       await requireService(context.services.reloadSnapshot, "reloadSnapshot")();
       requireService(context.services.reconcileSelection, "reconcileSelection")();
+    });
+
+    listen("session_created", async (event: unknown) => {
+      const sessionId = readSessionId(event);
+      if (!sessionId || !isTaskAgentSession(sessionId)) return;
+
+      const focusedTaskId = resolveFocusedTaskIdBeforeExternalRefresh();
+      await requireService(context.services.reloadSnapshot, "reloadSnapshot")();
+      await preserveFocusedTaskAfterExternalRefresh(focusedTaskId);
     });
 
     listen("status_changed", async (event: unknown) => {

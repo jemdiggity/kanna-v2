@@ -50,6 +50,7 @@ enum Cmd {
         session_id: String,
     },
     List,
+    Subscribe,
 }
 
 #[allow(dead_code)]
@@ -400,6 +401,25 @@ fn spawn_shell_session(conn: &mut ClientConn, session_id: &str, script: &str) {
     match conn.recv() {
         Evt::SessionCreated { session_id: sid } => assert_eq!(sid, session_id),
         other => panic!("expected SessionCreated, got: {:?}", other),
+    }
+}
+
+#[test]
+fn test_subscriber_receives_session_created_for_spawned_sessions() {
+    let daemon = DaemonHandle::start();
+    let mut subscriber = daemon.connect();
+    subscriber.send(&Cmd::Subscribe);
+    match subscriber.recv() {
+        Evt::Ok => {}
+        other => panic!("expected Ok for Subscribe, got: {:?}", other),
+    }
+
+    let mut creator = daemon.connect();
+    spawn_echo_session(&mut creator, "sess-created-broadcast");
+
+    match subscriber.recv() {
+        Evt::SessionCreated { session_id } => assert_eq!(session_id, "sess-created-broadcast"),
+        other => panic!("expected SessionCreated broadcast, got: {:?}", other),
     }
 }
 
