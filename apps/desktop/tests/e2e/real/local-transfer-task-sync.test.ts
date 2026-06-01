@@ -175,6 +175,27 @@ async function sidebarItemsForPrompt(client: typeof primary, prompt: string): Pr
   `);
 }
 
+async function remoteDiagnosticsForPrompt(
+  client: typeof primary,
+  prompt: string,
+): Promise<Array<{
+  prompt: string;
+  sources: string[];
+  selectedTerminalTransport: string;
+  ownerDesktopId?: string;
+  ownerLocalTaskId?: string;
+}>> {
+  return await client.executeSync(`
+    const ctx = window.__KANNA_E2E__.setupState;
+    const value = ctx.remoteTaskDiagnostics?.__v_isRef
+      ? ctx.remoteTaskDiagnostics.value
+      : ctx.remoteTaskDiagnostics;
+    return JSON.parse(JSON.stringify((value || []).filter((entry) =>
+      entry.prompt === ${JSON.stringify(prompt)}
+    )));
+  `);
+}
+
 async function sidebarTitleTextsForPrompt(client: typeof primary, prompt: string): Promise<string[]> {
   return await client.executeSync(`
     return Array.from(document.querySelectorAll(".sidebar .pipeline-item .item-title"))
@@ -339,6 +360,11 @@ describe("local transfer task sync", () => {
         stage: "in progress",
       }),
     ]);
+    const lanDiagnostics = await remoteDiagnosticsForPrompt(secondary, "LAN visible task");
+    expect(lanDiagnostics).toContainEqual(expect.objectContaining({
+      selectedTerminalTransport: "lan",
+      sources: expect.arrayContaining(["lan"]),
+    }));
     const secondarySidebarTitles = await sidebarTitleTextsForPrompt(secondary, "LAN visible task");
     expect(secondarySidebarTitles).toHaveLength(1);
     expect(secondarySidebarTitles[0]).toMatch(/^< LAN visible task(?:\s|$)/);
