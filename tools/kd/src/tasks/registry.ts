@@ -1,4 +1,6 @@
+import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
+import { connect } from "node:net";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { z } from "zod";
@@ -13,6 +15,7 @@ import {
   requireCloudSmokeEnv,
 } from "../runtime/cloud-test";
 import { buildLanLabPlan, parseLanLabInventory } from "../runtime/lan-lab";
+import { buildLanLabScenarioCommand } from "../runtime/lan-lab-runner";
 import { buildDevPlan } from "../runtime/dev-plan";
 import { assertNotProductionDb, resetSqliteDb, seedSqliteDb, type DevDbTarget } from "../runtime/db";
 import { killWorkspaceDaemons } from "../runtime/daemon";
@@ -316,6 +319,30 @@ async function runBuiltCommand(command: string, args: string[], cwd: string, env
     message: result.exitCode === 0 ? result.stdout || `${command} ${args.join(" ")} completed.` : result.stderr,
     data: { command, args, exitCode: result.exitCode }
   };
+}
+
+async function waitForTcpPort(port: number, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const ok = await new Promise<boolean>((resolvePort) => {
+      const socket = connect({ host: "127.0.0.1", port });
+      socket.once("connect", () => {
+        socket.destroy();
+        resolvePort(true);
+      });
+      socket.once("error", () => {
+        socket.destroy();
+        resolvePort(false);
+      });
+      socket.setTimeout(500, () => {
+        socket.destroy();
+        resolvePort(false);
+      });
+    });
+    if (ok) return;
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 250));
+  }
+  throw new Error(`timed out waiting for WebDriver tunnel on port ${port}`);
 }
 
 export const taskDefinitions = [
@@ -694,9 +721,51 @@ export const taskDefinitions = [
           };
         }
       }
+      const tunnelProcesses = plan.workers.map((worker) =>
+        spawn("ssh", worker.tunnelArgs, { stdio: "ignore" })
+      );
+      try {
+        await Promise.all(plan.workers.map((worker) =>
+          waitForTcpPort(worker.localWebDriverPort, 30_000)
+        ));
+        const [source, observer] = plan.workers;
+        if (!source || !observer) {
+          throw new Error("LAN lab requires at least two hosts");
+        }
+        const scenario = buildLanLabScenarioCommand({
+          prompt: "LAN lab visible task",
+          source: {
+            repo: source.host.repo,
+            peerId: source.peerId,
+            displayName: source.host.name,
+            localWebDriverPort: source.localWebDriverPort,
+          },
+          observer: {
+            repo: observer.host.repo,
+            peerId: observer.peerId,
+            displayName: observer.host.name,
+            localWebDriverPort: observer.localWebDriverPort,
+          },
+        });
+        const scenarioResult = await nodeCommandRunner.run(scenario.command, scenario.args, {
+          cwd: context.repoRoot,
+          env: context.env,
+        });
+        if (scenarioResult.exitCode !== 0) {
+          return {
+            ok: false,
+            message: scenarioResult.stderr || scenarioResult.stdout || "LAN lab scenario failed.",
+            data: { runId, results, scenarioResult },
+          };
+        }
+      } finally {
+        for (const tunnel of tunnelProcesses) {
+          tunnel.kill("SIGTERM");
+        }
+      }
       return {
         ok: true,
-        message: `Started LAN lab run ${runId} on ${plan.workers.length} hosts.`,
+        message: `LAN lab run ${runId} passed.`,
         data: { runId, results },
       };
     }
