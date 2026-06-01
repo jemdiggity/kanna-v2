@@ -71,6 +71,18 @@ export interface WorkspaceTask {
   terminal: WorkspaceTerminalRoute;
 }
 
+export interface RemoteTaskDiagnostics {
+  itemId: string;
+  prompt: string;
+  repoId: string;
+  sources: WorkspaceSourceKind[];
+  selectedTerminalTransport: WorkspaceTerminalRouteKind;
+  ownerDesktopId?: string;
+  ownerLocalTaskId?: string;
+  cloudUpdatedAt?: string;
+  lanUpdatedAt?: string;
+}
+
 export interface LocalRepoWithRemote {
   repo: Repo;
   remoteUrlHash: string | null;
@@ -87,6 +99,7 @@ export interface BuildWorkspaceInput {
 export interface BuildWorkspaceResult {
   repos: WorkspaceRepo[];
   tasks: WorkspaceTask[];
+  diagnostics: RemoteTaskDiagnostics[];
 }
 
 export type RemoteRepo = DesktopCloudRepo;

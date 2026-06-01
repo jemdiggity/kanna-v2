@@ -256,6 +256,7 @@ const workspace = computed(() => buildWorkspace({
   cloudSnapshot: filterClosedRemoteSnapshot(cloudSnapshot.value),
   lanSnapshot: filterClosedRemoteSnapshot(lanSnapshot.value),
 }));
+const remoteTaskDiagnostics = computed(() => workspace.value.diagnostics);
 const workspaceTasksByItemId = computed(() => {
   const entries: Array<[string, WorkspaceTask]> = [];
   for (const task of workspace.value.tasks) {

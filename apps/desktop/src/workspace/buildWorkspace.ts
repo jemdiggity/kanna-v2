@@ -3,6 +3,7 @@ import type {
   BuildWorkspaceInput,
   BuildWorkspaceResult,
   LocalRepoWithRemote,
+  RemoteTaskDiagnostics,
   RemoteRepo,
   WorkspaceCapabilities,
   WorkspaceRepo,
@@ -41,11 +42,14 @@ export function buildWorkspace(input: BuildWorkspaceInput): BuildWorkspaceResult
     tasksByKey.set(candidate.logicalKey, next);
   }
 
+  const tasks = [...tasksByKey.values()].sort((a, b) =>
+    b.item.created_at.localeCompare(a.item.created_at),
+  );
+
   return {
     repos: repoContext.repos,
-    tasks: [...tasksByKey.values()].sort((a, b) =>
-      b.item.created_at.localeCompare(a.item.created_at),
-    ),
+    tasks,
+    diagnostics: tasks.map(diagnosticsForTask),
   };
 }
 
@@ -267,6 +271,29 @@ function capabilitiesFor(candidate: Candidate): WorkspaceCapabilities {
     canOpenShell: isLocal,
     canAdvanceStage: isLocal,
     canEditMetadata: isReachable,
+  };
+}
+
+function diagnosticsForTask(task: WorkspaceTask): RemoteTaskDiagnostics {
+  const selectedRef = task.terminal.kind === "cloud" || task.terminal.kind === "lan"
+    ? task.terminal.remoteRef
+    : undefined;
+  const cloudSource = task.sources.find((source) => source.kind === "cloud");
+  const lanSource = task.sources.find((source) => source.kind === "lan");
+  const sources = task.sources
+    .map((source) => source.kind)
+    .filter((kind, index, all) => all.indexOf(kind) === index);
+
+  return {
+    itemId: task.item.id,
+    prompt: task.item.prompt,
+    repoId: task.repoKey,
+    sources,
+    selectedTerminalTransport: task.terminal.kind,
+    ownerDesktopId: selectedRef?.ownerDesktopId,
+    ownerLocalTaskId: selectedRef?.ownerLocalTaskId,
+    cloudUpdatedAt: cloudSource?.updatedAt,
+    lanUpdatedAt: lanSource?.updatedAt,
   };
 }
 
