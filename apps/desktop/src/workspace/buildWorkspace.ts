@@ -286,7 +286,7 @@ function diagnosticsForTask(task: WorkspaceTask): RemoteTaskDiagnostics {
 
   return {
     itemId: task.item.id,
-    prompt: task.item.prompt,
+    prompt: task.item.prompt ?? "",
     repoId: task.repoKey,
     sources,
     selectedTerminalTransport: task.terminal.kind,

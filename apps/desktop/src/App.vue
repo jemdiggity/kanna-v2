@@ -1949,6 +1949,7 @@ onMounted(async () => {
   initializeDesktopLanTaskSync();
   await importPendingIncomingTransfers();
   if (import.meta.env.DEV && window.__KANNA_E2E__) {
+    void remoteTaskDiagnostics.value;
     window.__KANNA_E2E__.ready = true;
   }
 
