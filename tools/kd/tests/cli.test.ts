@@ -249,6 +249,10 @@ describe("kd CLI", () => {
       taskId: "test.cloud-prod-smoke",
       input: {},
     });
+    expect(parseCliArgs(["test", "lan-lab", "--hosts", ".kanna/lab/macs.json"])).toEqual({
+      taskId: "test.lan-lab",
+      input: { hosts: ".kanna/lab/macs.json" },
+    });
   });
 
   it("parses build, clean, setup, pages, and release commands", () => {

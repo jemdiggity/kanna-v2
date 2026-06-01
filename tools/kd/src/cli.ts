@@ -73,6 +73,15 @@ function parseFlagInput(rest: string[], defaults: Record<string, unknown>): Reco
       index += 1;
       continue;
     }
+    if (arg === "--hosts") {
+      const value = rest[index + 1];
+      if (!value) {
+        throw new Error("--hosts requires a value");
+      }
+      input.hosts = value;
+      index += 1;
+      continue;
+    }
     if (arg === "--firebase-env-from") {
       const value = rest[index + 1];
       if (!value) {
@@ -167,6 +176,9 @@ export function parseCliArgs(args: string[]): ParsedCliCommand {
   if (group === "test" && command === "cloud-prod-smoke") {
     return { taskId: "test.cloud-prod-smoke", input: {} };
   }
+  if (group === "test" && command === "lan-lab") {
+    return { taskId: "test.lan-lab", input: parseFlagInput(rest, {}) };
+  }
   if (group === "setup") {
     return { taskId: "setup", input: parseFlagInput([command, ...rest].filter((arg): arg is string => Boolean(arg)), { check: false }) };
   }
@@ -244,6 +256,7 @@ function helpText(): string {
     "  test cloud-emulator",
     "  test cloud-staging",
     "  test cloud-prod-smoke",
+    "  test lan-lab --hosts <path>",
     "  doctor"
   ].join("\n");
 }

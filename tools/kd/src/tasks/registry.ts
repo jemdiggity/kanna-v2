@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { z } from "zod";
@@ -11,6 +12,7 @@ import {
   buildCloudSmokeEnv,
   requireCloudSmokeEnv,
 } from "../runtime/cloud-test";
+import { buildLanLabPlan, parseLanLabInventory } from "../runtime/lan-lab";
 import { buildDevPlan } from "../runtime/dev-plan";
 import { assertNotProductionDb, resetSqliteDb, seedSqliteDb, type DevDbTarget } from "../runtime/db";
 import { killWorkspaceDaemons } from "../runtime/daemon";
@@ -79,6 +81,10 @@ const emulatorsExecInputSchema = z.object({
 });
 
 const emptyInputSchema = z.object({});
+
+const lanLabInputSchema = z.object({
+  hosts: z.string()
+});
 
 const setupInputSchema = z.object({
   check: z.boolean().default(false)
@@ -656,6 +662,43 @@ export const taskDefinitions = [
       }
       const [command, args] = buildCloudSmokeCommand();
       return runBuiltCommand(command, args, context.repoRoot, buildCloudSmokeEnv(context.env, "production"));
+    }
+  },
+  {
+    id: "test.lan-lab",
+    description: "Run LAN sync tests against physical Macs over SSH.",
+    inputSchema: lanLabInputSchema,
+    execute: async (_context, input) => {
+      const parsed = lanLabInputSchema.parse(input);
+      const context = await resolveDefaultContext(process.env);
+      const inventory = parseLanLabInventory(await readFile(resolve(context.repoRoot, parsed.hosts), "utf8"));
+      const runId = `run-${Date.now()}`;
+      const plan = buildLanLabPlan({ runId, hosts: inventory.hosts, tunnelBasePort: 46000 });
+      const results = [];
+      for (const worker of plan.workers) {
+        const result = await nodeCommandRunner.run("ssh", worker.startSshArgs, {
+          cwd: context.repoRoot,
+          env: context.env,
+        });
+        results.push({
+          host: worker.host.name,
+          exitCode: result.exitCode,
+          stdout: result.stdout,
+          stderr: result.stderr
+        });
+        if (result.exitCode !== 0) {
+          return {
+            ok: false,
+            message: `LAN lab worker ${worker.host.name} failed: ${result.stderr || result.stdout}`,
+            data: { runId, results },
+          };
+        }
+      }
+      return {
+        ok: true,
+        message: `Started LAN lab run ${runId} on ${plan.workers.length} hosts.`,
+        data: { runId, results },
+      };
     }
   },
   {
