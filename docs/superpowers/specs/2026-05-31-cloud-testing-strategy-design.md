@@ -99,23 +99,34 @@ It should not test new behavior, destructive flows, or UI workflows.
 
 ## Commands
 
-Add explicit commands rather than relying on ad hoc environment setup:
+Implemented commands:
 
-- `./kd cloud deploy --staging`
-  Builds and deploys Functions, Firestore rules, and relay to the staging
-  project.
+- `./kd cloud deploy --staging|--production [--relay]`
+  Builds Firebase Functions and deploys Functions plus Firestore rules to the
+  selected Firebase project. The project comes from
+  `KANNA_FIREBASE_STAGING_PROJECT`, `KANNA_FIREBASE_PRODUCTION_PROJECT`, or
+  `.firebaserc.projects.staging|production`. `--relay` additionally builds and
+  deploys the relay Cloud Run service for the same project.
 
 - `./kd test cloud-emulator`
-  Runs the hermetic emulator cloud E2E.
+  Runs `apps/desktop/tests/e2e/real/cloud-task-sync.test.ts` against local
+  Firebase emulators and asserts the remote task selected cloud transport.
 
 - `./kd test cloud-staging`
-  Runs the real cloud E2E against staging endpoints.
+  Requires staging Firebase app config, `KANNA_CLOUD_FUNCTIONS_ENDPOINT`, and
+  `KANNA_CLOUD_TEST_EMAIL` / `KANNA_CLOUD_TEST_PASSWORD`. It runs
+  `apps/desktop/tests/e2e/real/cloud-prod-smoke.test.ts` with
+  `KANNA_CLOUD_ENV=staging`.
 
 - `./kd test lan-lab --hosts .kanna/lab/macs.json`
-  Runs real LAN sync tests against physical Macs over SSH.
+  Reads a physical Mac inventory, starts isolated Kanna workers over SSH, opens
+  controller-side SSH tunnels to each worker's WebDriver port, pairs two peers,
+  creates a task on the source machine, and asserts the observer reports
+  `selectedTerminalTransport: "lan"` with `sources` containing `"lan"`.
 
 - `./kd test cloud-prod-smoke`
-  Runs the minimal production smoke check with a dedicated production test user.
+  Uses the same smoke harness as staging with `KANNA_CLOUD_ENV=production` and
+  a dedicated production test user.
 
 The existing `./kd dev up --emulators` remains the local interactive workflow.
 
@@ -139,6 +150,10 @@ Suggested environment names:
 - `KANNA_FIREBASE_APP_ID`
 - `KANNA_CLOUD_FUNCTIONS_ENDPOINT`
 - `KANNA_RELAY_URL`
+- `KANNA_FIREBASE_STAGING_PROJECT`
+- `KANNA_FIREBASE_PRODUCTION_PROJECT`
+- `KANNA_CLOUD_TEST_EMAIL`
+- `KANNA_CLOUD_TEST_PASSWORD`
 
 Existing emulator-specific port variables continue to work for local tests.
 
@@ -278,17 +293,17 @@ Recommended gates:
 - Do not make cloud fallback count as proof of LAN sync.
 - Do not add broad production data cleanup permissions to the desktop app.
 
-## Open Implementation Notes
+## Implementation Notes
 
-The existing cloud E2E should be adjusted so snapshot publishing goes through
-the desktop runtime publish boundary. Test-only seeding can remain for setup
-fixtures, but at least one assertion path must prove the desktop can publish to
-the configured Function endpoint.
+Remote task diagnostics are exposed to E2E through `remoteTaskDiagnostics`.
+Cloud and LAN tests assert the selected transport directly instead of inferring
+it from sidebar visibility.
 
-The production smoke can start as a non-UI Node or Rust harness using Firebase
-Auth REST plus Firestore SDK or REST. Once the cloud contracts are stable, it can
-be wrapped by `kd`.
+The staging and production smoke harness signs in through Firebase Auth REST,
+publishes a disposable snapshot through the configured Function endpoint, reads
+the document back through Firestore REST, and then publishes a closed snapshot
+for cleanup.
 
-The LAN lab can start as a controller-side script that shells out to SSH and
-`./kd` on each worker. Once the protocol stabilizes, it should move behind
-`./kd test lan-lab` so agents and humans use the same entry point.
+The LAN lab is implemented behind `./kd test lan-lab`. The current runner uses
+the first two configured hosts as source and observer; additional hosts can stay
+in the inventory for future multi-observer expansion.
