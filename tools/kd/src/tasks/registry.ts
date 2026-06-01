@@ -105,6 +105,7 @@ const releaseShipInputSchema = z.object({
 });
 
 const cloudDeployInputSchema = z.object({
+  staging: z.boolean().default(false),
   production: z.boolean().default(false),
   relay: z.boolean().default(false)
 });
@@ -584,12 +585,19 @@ export const taskDefinitions = [
     execute: async (_context, input) => {
       const parsed = cloudDeployInputSchema.parse(input);
       const context = await resolveDefaultContext(process.env);
+      if (parsed.staging && parsed.production) {
+        return { ok: false, message: "cloud deploy accepts only one of --staging or --production." };
+      }
+      if (!parsed.staging && !parsed.production) {
+        return { ok: false, message: "cloud deploy requires --staging or --production." };
+      }
+      const environment = parsed.staging ? "staging" : "production";
       try {
         const result = await deployFirebaseCloud({
           repoRoot: context.repoRoot,
           env: context.env,
           runner: nodeCommandRunner,
-          production: parsed.production,
+          environment,
           relay: parsed.relay
         });
         return { ok: true, message: formatJsonResult(result), data: result };
