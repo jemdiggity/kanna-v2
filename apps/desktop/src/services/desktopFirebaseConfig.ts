@@ -30,22 +30,61 @@ export async function resolveDesktopFirebaseConfig({
   readEnv,
   dev,
 }: ResolveDesktopFirebaseConfigOptions): Promise<DesktopFirebaseConfig> {
-  const app = readAppConfig(dev);
-  const [authPort, firestorePort, functionsPort] = await Promise.all([
+  const [runtimeApp, authPort, firestorePort, functionsPort, runtimeFunctionsEndpoint] = await Promise.all([
+    readRuntimeAppConfig(readEnv),
     readEnv("KANNA_FIREBASE_AUTH_PORT").catch(() => ""),
     readEnv("KANNA_FIREBASE_FIRESTORE_PORT").catch(() => ""),
     readEnv("KANNA_FIREBASE_FUNCTIONS_PORT").catch(() => ""),
+    readEnv("KANNA_CLOUD_FUNCTIONS_ENDPOINT").catch(() => ""),
   ]);
+  const app = runtimeApp ?? readBuildTimeAppConfig(dev);
 
   return {
     app,
     authEmulator: parseAuthEmulatorPort(authPort),
     firestoreEmulator: parseAuthEmulatorPort(firestorePort),
-    functionsEndpoint: parseFunctionsEndpoint(functionsPort, dev),
+    functionsEndpoint: parseFunctionsEndpoint(functionsPort, runtimeFunctionsEndpoint, dev),
   };
 }
 
-function readAppConfig(dev: boolean): DesktopFirebaseAppConfig | null {
+async function readRuntimeAppConfig(
+  readEnv: ResolveDesktopFirebaseConfigOptions["readEnv"],
+): Promise<DesktopFirebaseAppConfig | null> {
+  const [
+    apiKey,
+    authDomain,
+    projectId,
+    appId,
+    storageBucket,
+    messagingSenderId,
+    measurementId,
+  ] = await Promise.all([
+    readEnv("KANNA_FIREBASE_API_KEY").catch(() => ""),
+    readEnv("KANNA_FIREBASE_AUTH_DOMAIN").catch(() => ""),
+    readEnv("KANNA_FIREBASE_PROJECT_ID").catch(() => ""),
+    readEnv("KANNA_FIREBASE_APP_ID").catch(() => ""),
+    readEnv("KANNA_FIREBASE_STORAGE_BUCKET").catch(() => ""),
+    readEnv("KANNA_FIREBASE_MESSAGING_SENDER_ID").catch(() => ""),
+    readEnv("KANNA_FIREBASE_MEASUREMENT_ID").catch(() => ""),
+  ]);
+
+  const normalizedApiKey = normalizeEnvValue(apiKey);
+  const normalizedProjectId = normalizeEnvValue(projectId);
+  const normalizedAppId = normalizeEnvValue(appId);
+  if (!normalizedApiKey || !normalizedProjectId || !normalizedAppId) return null;
+
+  return compactAppConfig({
+    apiKey: normalizedApiKey,
+    authDomain: normalizeEnvValue(authDomain),
+    projectId: normalizedProjectId,
+    storageBucket: normalizeEnvValue(storageBucket),
+    messagingSenderId: normalizeEnvValue(messagingSenderId),
+    appId: normalizedAppId,
+    measurementId: normalizeEnvValue(measurementId),
+  });
+}
+
+function readBuildTimeAppConfig(dev: boolean): DesktopFirebaseAppConfig | null {
   const env = import.meta.env;
   const apiKey = normalizeEnvValue(env.VITE_FIREBASE_API_KEY);
   const projectId = normalizeEnvValue(env.VITE_FIREBASE_PROJECT_ID);
@@ -118,13 +157,32 @@ function parseAuthEmulatorPort(
   };
 }
 
-function parseFunctionsEndpoint(rawPort: string | undefined, dev: boolean): string | null {
+function parseFunctionsEndpoint(
+  rawPort: string | undefined,
+  runtimeEndpoint: string | undefined,
+  dev: boolean,
+): string | null {
   const parsed = parseAuthEmulatorPort(rawPort);
   if (parsed) {
     return `${parsed.url}/kanna-local/us-central1/upsertTaskSnapshot`;
   }
 
+  const runtime = parseRuntimeFunctionsEndpoint(runtimeEndpoint);
+  if (runtime) return runtime;
+
   return dev ? null : PRODUCTION_FUNCTIONS_ENDPOINT;
+}
+
+function parseRuntimeFunctionsEndpoint(rawEndpoint: string | undefined): string | null {
+  const normalized = normalizeEnvValue(rawEndpoint);
+  if (!normalized) return null;
+
+  try {
+    const url = new URL(normalized);
+    return url.protocol === "http:" || url.protocol === "https:" ? normalized : null;
+  } catch {
+    return null;
+  }
 }
 
 function normalizeEnvValue(value: string | undefined): string | undefined {
