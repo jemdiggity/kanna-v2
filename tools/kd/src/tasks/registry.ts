@@ -5,6 +5,12 @@ import { readKannaRepoConfig } from "../config";
 import { resolveKdContext, type KdContext } from "../context";
 import { cleanWorkspace } from "../runtime/clean";
 import { deployFirebaseCloud } from "../runtime/cloud-deploy";
+import {
+  buildCloudEmulatorTestCommand,
+  buildCloudSmokeCommand,
+  buildCloudSmokeEnv,
+  requireCloudSmokeEnv,
+} from "../runtime/cloud-test";
 import { buildDevPlan } from "../runtime/dev-plan";
 import { assertNotProductionDb, resetSqliteDb, seedSqliteDb, type DevDbTarget } from "../runtime/db";
 import { killWorkspaceDaemons } from "../runtime/daemon";
@@ -602,6 +608,46 @@ export const taskDefinitions = [
     execute: async () => {
       const context = await resolveDefaultContext(process.env);
       return runBuiltCommand("bash", ["scripts/app-update-full-bundle-e2e.sh"], context.repoRoot, context.env);
+    }
+  },
+  {
+    id: "test.cloud-emulator",
+    description: "Run cloud sync E2E against Firebase emulators.",
+    inputSchema: emptyInputSchema,
+    execute: async () => {
+      const context = await resolveDefaultContext(process.env);
+      const [command, args] = buildCloudEmulatorTestCommand();
+      return runBuiltCommand(command, args, context.repoRoot, context.env);
+    }
+  },
+  {
+    id: "test.cloud-staging",
+    description: "Run cloud sync E2E against staging cloud services.",
+    inputSchema: emptyInputSchema,
+    execute: async () => {
+      const context = await resolveDefaultContext(process.env);
+      try {
+        requireCloudSmokeEnv(context.env, "staging");
+      } catch (error) {
+        return { ok: false, message: error instanceof Error ? error.message : String(error) };
+      }
+      const [command, args] = buildCloudSmokeCommand();
+      return runBuiltCommand(command, args, context.repoRoot, buildCloudSmokeEnv(context.env, "staging"));
+    }
+  },
+  {
+    id: "test.cloud-prod-smoke",
+    description: "Run minimal cloud smoke against production cloud services.",
+    inputSchema: emptyInputSchema,
+    execute: async () => {
+      const context = await resolveDefaultContext(process.env);
+      try {
+        requireCloudSmokeEnv(context.env, "production");
+      } catch (error) {
+        return { ok: false, message: error instanceof Error ? error.message : String(error) };
+      }
+      const [command, args] = buildCloudSmokeCommand();
+      return runBuiltCommand(command, args, context.repoRoot, buildCloudSmokeEnv(context.env, "production"));
     }
   },
   {

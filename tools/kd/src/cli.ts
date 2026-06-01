@@ -157,6 +157,15 @@ export function parseCliArgs(args: string[]): ParsedCliCommand {
   if (group === "test" && command === "app-update-bundle") {
     return { taskId: "test.app-update-bundle", input: {} };
   }
+  if (group === "test" && command === "cloud-emulator") {
+    return { taskId: "test.cloud-emulator", input: {} };
+  }
+  if (group === "test" && command === "cloud-staging") {
+    return { taskId: "test.cloud-staging", input: {} };
+  }
+  if (group === "test" && command === "cloud-prod-smoke") {
+    return { taskId: "test.cloud-prod-smoke", input: {} };
+  }
   if (group === "setup") {
     return { taskId: "setup", input: parseFlagInput([command, ...rest].filter((arg): arg is string => Boolean(arg)), { check: false }) };
   }
@@ -231,6 +240,9 @@ function helpText(): string {
     "  cloud deploy --production [--relay]",
     "  pages build-schema --out-dir <dir>",
     "  test app-update-bundle",
+    "  test cloud-emulator",
+    "  test cloud-staging",
+    "  test cloud-prod-smoke",
     "  doctor"
   ].join("\n");
 }

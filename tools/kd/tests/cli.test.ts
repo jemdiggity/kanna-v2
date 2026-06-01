@@ -236,6 +236,21 @@ describe("kd CLI", () => {
     });
   });
 
+  it("parses cloud test commands", () => {
+    expect(parseCliArgs(["test", "cloud-emulator"])).toEqual({
+      taskId: "test.cloud-emulator",
+      input: {},
+    });
+    expect(parseCliArgs(["test", "cloud-staging"])).toEqual({
+      taskId: "test.cloud-staging",
+      input: {},
+    });
+    expect(parseCliArgs(["test", "cloud-prod-smoke"])).toEqual({
+      taskId: "test.cloud-prod-smoke",
+      input: {},
+    });
+  });
+
   it("parses build, clean, setup, pages, and release commands", () => {
     expect(parseCliArgs(["build", "desktop"])).toEqual({ taskId: "build.desktop", input: {} });
     expect(parseCliArgs(["clean", "--all", "--dry", "--shared-rust-build"])).toEqual({
