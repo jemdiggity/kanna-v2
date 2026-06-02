@@ -61,6 +61,7 @@ function openLocalhostPort(port: number) {
         :key="port"
         class="meta-item port"
         :title="`Open localhost:${port}`"
+        @mousedown.stop
         @dblclick="openLocalhostPort(port)"
       >
         :{{ port }}

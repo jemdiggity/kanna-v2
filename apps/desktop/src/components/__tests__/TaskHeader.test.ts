@@ -93,4 +93,23 @@ describe("TaskHeader", () => {
 
     expect(openUrl).toHaveBeenCalledWith("http://localhost:1421");
   });
+
+  it("does not let the header mousedown guard cancel port interaction", async () => {
+    const { default: TaskHeader } = await import("../TaskHeader.vue");
+    const wrapper = mount(TaskHeader, {
+      props: {
+        item: makeItem(),
+      },
+      global: {
+        mocks: {
+          $t: (key: string, fallback?: string) => fallback ?? key,
+        },
+      },
+    });
+
+    const event = new MouseEvent("mousedown", { bubbles: true, cancelable: true });
+    wrapper.find(".meta-item.port").element.dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(false);
+  });
 });
