@@ -195,6 +195,7 @@
     "tabCreate": "Create New",
     "tabImport": "Import / Clone",
     "namePlaceholder": "my-awesome-project",
+    "nameNoSpaces": "Repo names cannot contain spaces. Use hyphens instead.",
     "change": "change",
     "importPlaceholder": "owner/repo, URL, or gh repo clone...",
     "chooseLocalFolder": "choose a local folder",
