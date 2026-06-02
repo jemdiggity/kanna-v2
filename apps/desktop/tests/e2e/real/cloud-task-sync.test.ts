@@ -251,6 +251,27 @@ async function waitForCloudTaskSnapshot(
   throw new Error(`timed out waiting for cloud snapshot task: ${prompt}`);
 }
 
+async function cloudSnapshotItemsForPrompt(
+  client: typeof primary,
+  prompt: string,
+): Promise<{
+  items: Array<{ id?: string; prompt?: string }>;
+  terminalRefs: Record<string, { ownerDesktopId?: string; ownerLocalTaskId?: string }>;
+}> {
+  return await client.executeSync(`
+    const ctx = window.__KANNA_E2E__.setupState;
+    const value = ctx.cloudSnapshot?.__v_isRef ? ctx.cloudSnapshot.value : ctx.cloudSnapshot;
+    const snapshot = (() => {
+      try { return JSON.parse(JSON.stringify(value)); } catch { return value; }
+    })() || {};
+    const prompt = ${JSON.stringify(prompt)};
+    return {
+      items: (snapshot.items || []).filter((item) => item.prompt === prompt),
+      terminalRefs: snapshot.terminalRefs || {},
+    };
+  `);
+}
+
 async function observeSessionThroughRelay(input: {
   ownerDesktopId: string;
   ownerTaskId: string;
@@ -408,7 +429,6 @@ describe("cloud task sync", () => {
     }
 
     await waitForSidebarTask(primary, "Cloud sync visible task");
-    await waitForCloudTaskSnapshot(primary, "Cloud sync visible task");
     expect(await countLocalTasks(primary)).toBe(1);
     expect(await sidebarItemsForPrompt(primary, "Cloud sync visible task")).toEqual([
       expect.objectContaining({
@@ -439,6 +459,22 @@ describe("cloud task sync", () => {
       ownerLocalTaskId: result,
     });
     expect(synced.terminalRef.ownerDesktopId).not.toBe("peer-primary");
+
+    expect(await sidebarItemsForPrompt(primary, "Cloud sync visible task")).toEqual([
+      expect.objectContaining({
+        id: result,
+        isRemote: false,
+        stage: "in progress",
+      }),
+    ]);
+    const primaryCloudSnapshot = await cloudSnapshotItemsForPrompt(primary, "Cloud sync visible task");
+    expect(primaryCloudSnapshot.items).toEqual([]);
+    expect(Object.values(primaryCloudSnapshot.terminalRefs)).not.toContainEqual(
+      expect.objectContaining({
+        ownerDesktopId: primaryStatus.desktopId,
+        ownerLocalTaskId: result,
+      }),
+    );
 
     await tauriInvoke(primary, "spawn_session", {
       sessionId: result,

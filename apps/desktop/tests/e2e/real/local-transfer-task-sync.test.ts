@@ -183,6 +183,27 @@ async function sidebarTitleTextsForPrompt(client: typeof primary, prompt: string
   `);
 }
 
+async function lanSnapshotItemsForPrompt(
+  client: typeof primary,
+  prompt: string,
+): Promise<{
+  items: Array<{ id?: string; prompt?: string }>;
+  terminalRefs: Record<string, { ownerDesktopId?: string; ownerLocalTaskId?: string; transport?: string }>;
+}> {
+  return await client.executeSync(`
+    const ctx = window.__KANNA_E2E__.setupState;
+    const value = ctx.lanSnapshot?.__v_isRef ? ctx.lanSnapshot.value : ctx.lanSnapshot;
+    const snapshot = (() => {
+      try { return JSON.parse(JSON.stringify(value)); } catch { return value; }
+    })() || {};
+    const prompt = ${JSON.stringify(prompt)};
+    return {
+      items: (snapshot.items || []).filter((item) => item.prompt === prompt),
+      terminalRefs: snapshot.terminalRefs || {},
+    };
+  `);
+}
+
 async function waitForSidebarTaskGroupedUnderRepo(prompt: string, repoId: string): Promise<void> {
   const deadline = Date.now() + 30_000;
   let lastDiagnostics: unknown = null;
@@ -338,6 +359,16 @@ describe("local transfer task sync", () => {
       ownerLocalTaskId: createResult,
       transport: "lan",
     });
+
+    const primaryLanSnapshot = await lanSnapshotItemsForPrompt(primary, "LAN visible task");
+    expect(primaryLanSnapshot.items).toEqual([]);
+    expect(Object.values(primaryLanSnapshot.terminalRefs)).not.toContainEqual(
+      expect.objectContaining({
+        ownerDesktopId: "peer-primary",
+        ownerLocalTaskId: createResult,
+        transport: "lan",
+      }),
+    );
 
     const remoteItemId = Object.entries(snapshot.terminalRefs ?? {})
       .find(([, ref]) => ref.ownerLocalTaskId === createResult)?.[0];
