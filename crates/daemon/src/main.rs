@@ -882,12 +882,13 @@ async fn handle_command(
                         let sizes_for_stream = session_sizes.clone();
                         let observers_for_stream = session_observers.clone();
                         let recovery_for_stream = recovery_manager.clone();
+                        let broadcast_for_stream = broadcast_tx.clone();
                         tokio::task::spawn_blocking(move || {
                             stream_output(
                                 sid,
                                 reader,
                                 stream_control,
-                                broadcast_tx.clone(),
+                                broadcast_for_stream,
                                 writers_for_stream,
                                 terminal_clients_for_stream,
                                 sessions_exit,
@@ -902,6 +903,9 @@ async fn handle_command(
                         session_id: session_id.clone(),
                     };
                     let _ = write_event(&mut *writer.lock().await, &evt).await;
+                    if let Ok(json) = serde_json::to_string(&evt) {
+                        let _ = broadcast_tx.send(json);
+                    }
                 }
                 Err(e) => {
                     let evt = error_event(

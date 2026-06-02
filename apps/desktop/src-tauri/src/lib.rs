@@ -546,6 +546,9 @@ fn spawn_event_bridge(app: tauri::AppHandle, daemon_state: DaemonState) {
                             Some("StatusChanged") => {
                                 let _ = app.emit("status_changed", &event);
                             }
+                            Some("SessionCreated") => {
+                                let _ = app.emit("session_created", &event);
+                            }
                             _ => {}
                         }
                     }
