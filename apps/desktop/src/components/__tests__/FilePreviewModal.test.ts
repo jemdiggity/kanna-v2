@@ -48,6 +48,46 @@ describe("FilePreviewModal", () => {
     document.body.innerHTML = "";
   });
 
+  it("uses the effective light code theme for Shiki rendering", async () => {
+    const { resetThemeRuntimeForTests, setSystemPrefersDark, setThemePreferences } = await import("../../theme/runtime");
+    resetThemeRuntimeForTests();
+    setSystemPrefersDark(false);
+    setThemePreferences({ appTheme: "light", codeTheme: "match" });
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "read_text_file") {
+        return "const answer = 42;\n";
+      }
+      if (command === "run_script") {
+        return "";
+      }
+      throw new Error(`unexpected invoke: ${command}`);
+    });
+
+    const wrapper = mount(FilePreviewModal, {
+      props: {
+        filePath: "example.ts",
+        worktreePath: "/repo",
+      },
+      attachTo: document.body,
+      global: {
+        mocks: {
+          $t: (key: string) => key,
+        },
+      },
+    });
+
+    await flushPromises();
+    await flushPromises();
+
+    expect(codeToHtmlMock).toHaveBeenCalledWith(
+      "const answer = 42;\n",
+      expect.objectContaining({ theme: "github-light" }),
+    );
+
+    wrapper.unmount();
+    resetThemeRuntimeForTests();
+  });
+
   it("returns focus to the modal after confirming search with Enter", async () => {
     invokeMock.mockImplementation(async (command) => {
       if (command === "read_text_file") {

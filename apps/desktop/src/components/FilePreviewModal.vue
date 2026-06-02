@@ -8,9 +8,13 @@ import { useInlineSearch } from "../composables/useInlineSearch";
 import { useModalZIndex } from "../composables/useModalZIndex";
 import { macOsTextInputAttrs } from "../utils/textInput";
 import { getSyntaxLanguageForPath } from "../utils/syntaxLanguage";
+import { getShikiTheme } from "../theme/theme";
+import { useThemeRuntime } from "../theme/runtime";
 
 const { t } = useI18n();
 const { zIndex, bringToFront } = useModalZIndex();
+const { effectiveCodeTheme } = useThemeRuntime();
+const shikiTheme = computed(() => getShikiTheme(effectiveCodeTheme.value));
 
 const props = defineProps<{
   filePath: string;
@@ -84,7 +88,7 @@ async function getHighlighter() {
   if (highlighter) return highlighter;
   const { createHighlighter } = await import("shiki");
   highlighter = await createHighlighter({
-    themes: ["github-dark"],
+    themes: ["github-dark", "github-light"],
     langs: [],
   });
   return highlighter;
@@ -109,12 +113,12 @@ async function getMarkdownIt() {
     linkify: true,
     typographer: false,
     highlight(str: string, lang: string) {
-      if (!lang) return hl.codeToHtml(str, { lang: "text", theme: "github-dark" });
+      if (!lang) return hl.codeToHtml(str, { lang: "text", theme: shikiTheme.value });
       // Languages are pre-loaded in the watcher before md.render() is called,
       // so getLoadedLanguages() is reliable here (no async needed).
       const loaded = hl.getLoadedLanguages();
       const useLang = loaded.includes(lang) ? lang : "text";
-      return hl.codeToHtml(str, { lang: useLang, theme: "github-dark" });
+      return hl.codeToHtml(str, { lang: useLang, theme: shikiTheme.value });
     },
   });
   md.use(taskLists, { enabled: false });
@@ -124,7 +128,7 @@ async function getMarkdownIt() {
 
 const renderedMarkdown = ref("");
 
-watch([renderMarkdown, content], async ([shouldRender, raw]) => {
+watch([renderMarkdown, content, effectiveCodeTheme], async ([shouldRender, raw]) => {
   if (!shouldRender || !raw) {
     renderedMarkdown.value = "";
     return;
@@ -181,6 +185,7 @@ function toggleMarkdownMode() {
 let highlightTimer: ReturnType<typeof setTimeout> | null = null;
 let prevContent = "";
 let prevLang = "";
+let prevTheme = shikiTheme.value;
 
 async function renderHighlighted(raw: string, lang: string, decos: typeof searchDecorations.value) {
   if (!raw) { highlighted.value = ""; return; }
@@ -188,7 +193,7 @@ async function renderHighlighted(raw: string, lang: string, decos: typeof search
     const hl = await getHighlighter();
     highlighted.value = hl.codeToHtml(raw, {
       lang,
-      theme: "github-dark",
+      theme: shikiTheme.value,
       decorations: decos,
       transformers: [{
         pre(node: any) {
@@ -204,12 +209,14 @@ async function renderHighlighted(raw: string, lang: string, decos: typeof search
   }
 }
 
-watch([content, currentLang, searchDecorations], ([raw, lang, decos]) => {
+watch([content, currentLang, searchDecorations, effectiveCodeTheme], ([raw, lang, decos]) => {
   if (highlightTimer) clearTimeout(highlightTimer);
-  // Content or language changed — render immediately
-  if (raw !== prevContent || lang !== prevLang) {
+  const theme = shikiTheme.value;
+  // Content, language, or theme changed — render immediately
+  if (raw !== prevContent || lang !== prevLang || theme !== prevTheme) {
     prevContent = raw;
     prevLang = lang;
+    prevTheme = theme;
     renderHighlighted(raw, lang, decos);
   } else {
     // Decoration-only change (search keystroke) — debounce 150ms

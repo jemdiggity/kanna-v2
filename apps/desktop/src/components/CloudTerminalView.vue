@@ -9,6 +9,8 @@ import {
   type DesktopRelayTerminalSubscription,
 } from "../services/desktopRelayTerminal";
 import { createConfiguredDesktopLanTerminalClient } from "../services/desktopLanTerminal";
+import { getTerminalTheme } from "../theme/theme";
+import { useThemeRuntime } from "../theme/runtime";
 
 const props = defineProps<{
   ownerDesktopId: string;
@@ -19,6 +21,7 @@ const props = defineProps<{
 const containerRef = ref<HTMLElement | null>(null);
 const status = ref<"connecting" | "live" | "closed" | "error">("connecting");
 const errorMessage = ref<string | null>(null);
+const { effectiveCodeTheme } = useThemeRuntime();
 let terminal: Terminal | null = null;
 let fitAddon: FitAddon | null = null;
 let resizeObserver: ResizeObserver | null = null;
@@ -100,10 +103,7 @@ onMounted(() => {
     disableStdin: false,
     fontFamily: 'Menlo, Monaco, "Courier New", monospace',
     fontSize: 12,
-    theme: {
-      background: "#1a1a1a",
-      foreground: "#d4d4d4",
-    },
+    theme: getTerminalTheme(effectiveCodeTheme.value),
   });
   terminal.onData((data) => {
     const client = relayClient;
@@ -134,6 +134,10 @@ watch(
     void start();
   },
 );
+
+watch(effectiveCodeTheme, (theme) => {
+  terminal?.setOption("theme", getTerminalTheme(theme));
+});
 
 onUnmounted(() => {
   stopSubscription();

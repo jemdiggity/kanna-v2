@@ -26,8 +26,12 @@ import {
   getOrCreateWorkerPoolSingleton,
   type WorkerPoolManager,
 } from "@pierre/diffs/worker";
+import { getDiffTheme } from "../theme/theme";
+import { useThemeRuntime } from "../theme/runtime";
 
 const { t } = useI18n();
+const { effectiveCodeTheme } = useThemeRuntime();
+const diffTheme = computed(() => getDiffTheme(effectiveCodeTheme.value));
 
 registerContextShortcuts("diff", [
   { label: t('diffView.shortcutSearch'), display: "/", groupKey: "shortcuts.groupSearch" },
@@ -313,7 +317,15 @@ function syncViewStateFromProps() {
 }
 
 async function initWorkerPool() {
-  if (workerPool) return workerPool;
+  if (workerPool) {
+    await (workerPool as WorkerPoolManager & {
+      setRenderOptions?: (options: { theme: string; lineDiffType: "word" }) => Promise<void>;
+    }).setRenderOptions?.({
+      theme: diffTheme.value,
+      lineDiffType: "word",
+    });
+    return workerPool;
+  }
   try {
     workerPool = getOrCreateWorkerPoolSingleton({
       poolOptions: {
@@ -324,7 +336,7 @@ async function initWorkerPool() {
           ),
       },
       highlighterOptions: {
-        theme: "github-dark",
+        theme: diffTheme.value,
         lineDiffType: "word",
       },
     });
@@ -545,7 +557,7 @@ function renderDiffFile(
 
   const instance = new FileDiff(
     {
-      theme: "github-dark",
+      theme: diffTheme.value,
       diffStyle: "unified",
       diffIndicators: "classic",
       disableFileHeader: true,
@@ -730,6 +742,14 @@ watch(
   },
   { immediate: false }
 );
+
+watch(effectiveCodeTheme, () => {
+  void initWorkerPool().then(() => {
+    if (diffContent.value.trim()) {
+      return loadDiff({ preserveCurrentScroll: true });
+    }
+  });
+});
 
 const scopeOrder: DiffScope[] = ["working", "branch"];
 

@@ -1,4 +1,4 @@
-import { ref, onUnmounted } from "vue"
+import { ref, onUnmounted, watch } from "vue"
 import { Terminal, type ILink } from "@xterm/xterm"
 import { FitAddon } from "@xterm/addon-fit"
 import { WebLinksAddon } from "@xterm/addon-web-links"
@@ -45,6 +45,8 @@ import { getAppErrorMessage } from "../appError"
 import { markTaskSwitchFirstOutput } from "../perf/taskSwitchPerf"
 import { registerE2ETerminalBuffer } from "../e2eTerminalBuffers"
 import { hasObservedDaemonReady, markDaemonReadyObserved } from "./daemonReadyState"
+import { getTerminalTheme } from "../theme/theme"
+import { useThemeRuntime } from "../theme/runtime"
 
 export interface SpawnOptions {
   cwd: string
@@ -184,6 +186,7 @@ export function resetTerminalOutputSubscriptionsForTests(): void {
 
 export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, options?: TerminalOptions) {
   const toast = useToast()
+  const { effectiveCodeTheme } = useThemeRuntime()
   const terminal = ref<Terminal | null>(null)
   const fitAddon = new FitAddon()
   const instanceId = Math.random().toString(36).slice(2, 10)
@@ -213,6 +216,7 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
   let container: HTMLElement | null = null
   let cleanupContainerEvents: (() => void) | null = null
   let cleanupNativeDropEvents: (() => void) | null = null
+  let stopThemeWatch: (() => void) | null = null
   let fitRafId = 0
   let attached = false
   let connecting = false
@@ -502,28 +506,7 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
       fontSize: 13,
       lineHeight: 1,
       linkHandler: { activate: handleLinkActivate },
-      theme: {
-        background: "#1e1e1e",
-        foreground: "#cccccc",
-        cursor: "#aeafad",
-        selectionBackground: "#264f78",
-        black: "#000000",
-        red: "#cd3131",
-        green: "#0dbc79",
-        yellow: "#e5e510",
-        blue: "#2472c8",
-        magenta: "#bc3fbc",
-        cyan: "#11a8cd",
-        white: "#e5e5e5",
-        brightBlack: "#666666",
-        brightRed: "#f14c4c",
-        brightGreen: "#23d18b",
-        brightYellow: "#f5f543",
-        brightBlue: "#3b8eea",
-        brightMagenta: "#d670d6",
-        brightCyan: "#29b8db",
-        brightWhite: "#e5e5e5",
-      },
+      theme: getTerminalTheme(effectiveCodeTheme.value),
       scrollback: 10000,
       cursorBlink: false,
       ...(shouldSupportKittyKeyboard(options) ? { vtExtensions: { kittyKeyboard: true } } : {}),
@@ -773,6 +756,10 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
     })
 
     terminal.value = term
+    stopThemeWatch?.()
+    stopThemeWatch = watch(effectiveCodeTheme, (theme) => {
+      terminal.value?.setOption("theme", getTerminalTheme(theme))
+    })
     unregisterE2ETerminalBuffer?.()
     unregisterE2ETerminalBuffer = registerE2ETerminalBuffer(sessionId, term)
   }
@@ -1376,6 +1363,8 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
     cleanupContainerEvents = null
     cleanupNativeDropEvents?.()
     cleanupNativeDropEvents = null
+    stopThemeWatch?.()
+    stopThemeWatch = null
     unregisterE2ETerminalBuffer?.()
     unregisterE2ETerminalBuffer = null
     clearPendingClipboardImage()

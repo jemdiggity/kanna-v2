@@ -68,6 +68,7 @@ class FakeTerminal {
   getSelection = vi.fn(() => "");
   scrollToLine = vi.fn();
   scrollToBottom = vi.fn();
+  setOption = vi.fn();
   dispose = vi.fn();
   write = vi.fn((data: string | Uint8Array, callback?: () => void) => {
     if (typeof data === "string") {
@@ -346,6 +347,41 @@ describe("useTerminal", () => {
       "resize_session",
     ]);
     expect(terminal.reset).toHaveBeenCalledTimes(1);
+  });
+
+  it("updates xterm theme when the effective code theme changes", async () => {
+    const { resetThemeRuntimeForTests, setSystemPrefersDark, setThemePreferences } = await import("../theme/runtime");
+    resetThemeRuntimeForTests();
+    setSystemPrefersDark(false);
+    setThemePreferences({ appTheme: "dark", codeTheme: "match" });
+
+    const { useTerminal } = await import("./useTerminal");
+    const TestHarness = defineComponent({
+      setup() {
+        const { init } = useTerminal("session-1");
+        return { init };
+      },
+      render() {
+        return h("div", { ref: "host" });
+      },
+    });
+
+    const wrapper = mount(TestHarness);
+    const element = wrapper.element as HTMLElement;
+    (wrapper.vm as unknown as { init: (el: HTMLElement) => void }).init(element);
+
+    expect(terminals.at(-1)?.setOption).not.toHaveBeenCalled();
+
+    setThemePreferences({ appTheme: "light", codeTheme: "match" });
+    await Promise.resolve();
+
+    expect(terminals.at(-1)?.setOption).toHaveBeenCalledWith(
+      "theme",
+      expect.objectContaining({ background: "#f8fafc" }),
+    );
+
+    wrapper.unmount();
+    resetThemeRuntimeForTests();
   });
 
   it("detaches the active task session stream when the terminal unmounts", async () => {

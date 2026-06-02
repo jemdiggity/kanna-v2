@@ -16,6 +16,8 @@ import {
 } from "chart.js";
 import type { DbHandle } from "@kanna/db";
 import { useAnalytics } from "../composables/useAnalytics";
+import { getChartTheme } from "../theme/theme";
+import { useThemeRuntime } from "../theme/runtime";
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend, Filler);
 
@@ -28,6 +30,8 @@ const props = defineProps<{
 const emit = defineEmits<{ (e: "close"): void }>();
 
 const { t } = useI18n();
+const { effectiveAppTheme } = useThemeRuntime();
+const chartTheme = computed(() => getChartTheme(effectiveAppTheme.value));
 
 const activeView = ref(0);
 const viewCount = 3;
@@ -67,7 +71,7 @@ function formatDuration(seconds: number): string {
   return m > 0 ? `${h}h ${m}m` : `${h}h`;
 }
 
-const lineChartOptions = {
+const lineChartOptions = computed(() => ({
   responsive: true,
   maintainAspectRatio: false,
   interaction: {
@@ -75,20 +79,20 @@ const lineChartOptions = {
     mode: "index" as const,
   },
   plugins: {
-    legend: { labels: { color: "#888" } },
+    legend: { labels: { color: chartTheme.value.label } },
     tooltip: {
-      backgroundColor: "#1e1e1e",
-      borderColor: "#444",
+      backgroundColor: chartTheme.value.tooltipBackground,
+      borderColor: chartTheme.value.tooltipBorder,
       borderWidth: 1,
-      titleColor: "#ccc",
-      bodyColor: "#ccc",
+      titleColor: chartTheme.value.tooltipText,
+      bodyColor: chartTheme.value.tooltipText,
     },
   },
   scales: {
-    x: { ticks: { color: "#888" }, grid: { color: "#333" } },
-    y: { ticks: { color: "#888", stepSize: 1 }, grid: { color: "#333" }, beginAtZero: true },
+    x: { ticks: { color: chartTheme.value.label }, grid: { color: chartTheme.value.grid } },
+    y: { ticks: { color: chartTheme.value.label, stepSize: 1 }, grid: { color: chartTheme.value.grid }, beginAtZero: true },
   },
-};
+}));
 </script>
 
 <template>
@@ -131,8 +135,8 @@ const lineChartOptions = {
                 {
                   label: t('analytics.labelCreated'),
                   data: taskBuckets.map((b) => b.created),
-                  borderColor: '#0066cc',
-                  backgroundColor: 'rgba(0, 102, 204, 0.1)',
+                  borderColor: chartTheme.createdLine,
+                  backgroundColor: chartTheme.createdFill,
                   fill: true,
                   tension: 0.3,
                   pointRadius: 3,
@@ -141,8 +145,8 @@ const lineChartOptions = {
                 {
                   label: t('analytics.labelClosed'),
                   data: taskBuckets.map((b) => b.closed),
-                  borderColor: '#2ea043',
-                  backgroundColor: 'rgba(46, 160, 67, 0.1)',
+                  borderColor: chartTheme.closedLine,
+                  backgroundColor: chartTheme.closedFill,
                   fill: true,
                   tension: 0.3,
                   pointRadius: 3,
