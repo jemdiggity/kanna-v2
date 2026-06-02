@@ -69,6 +69,7 @@ import type { CustomTaskConfig } from "@kanna/core";
 import type { DynamicCommand } from "./components/CommandPaletteModal.vue";
 import {
   applyCurrentDocumentTheme,
+  useThemeRuntime,
   setSystemPrefersDark,
   setThemePreferences,
 } from "./theme/runtime";
@@ -78,6 +79,7 @@ import {
   normalizeAppThemePreference,
   normalizeCodeThemePreference,
 } from "./theme/theme";
+import { syncNativeAppTheme } from "./theme/native";
 import {
   DEFAULT_SIDEBAR_WIDTH,
   MAX_SIDEBAR_WIDTH,
@@ -122,6 +124,7 @@ const db = inject<DbHandle>("db")!;
 const dbName = inject<string>("dbName")!;
 const windowWorkspace = inject<WindowWorkspaceController>("windowWorkspace")!;
 const { tasks: customTasks, scan: scanCustomTasks } = useCustomTasks();
+const { effectiveAppTheme } = useThemeRuntime();
 const appUpdate = useAppUpdate();
 const appUnlisteners: Array<() => void> = [];
 let closingCurrentWindow = false;
@@ -1851,6 +1854,11 @@ function syncThemeRuntime() {
     codeTheme: preferences.codeTheme,
   });
   applyCurrentDocumentTheme();
+  void syncNativeAppTheme(
+    preferences.appTheme === "system" ? null : effectiveAppTheme.value,
+  ).catch((error: unknown) => {
+    console.error("[App] failed to sync native theme:", error);
+  });
 }
 
 function handleSystemThemeChange(event: MediaQueryListEvent) {
