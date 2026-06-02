@@ -136,7 +136,9 @@ watch(
 );
 
 watch(effectiveCodeTheme, (theme) => {
-  terminal?.setOption("theme", getTerminalTheme(theme));
+  if (terminal) {
+    terminal.options.theme = getTerminalTheme(theme);
+  }
 });
 
 onUnmounted(() => {

@@ -758,7 +758,9 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
     terminal.value = term
     stopThemeWatch?.()
     stopThemeWatch = watch(effectiveCodeTheme, (theme) => {
-      terminal.value?.setOption("theme", getTerminalTheme(theme))
+      if (terminal.value) {
+        terminal.value.options.theme = getTerminalTheme(theme)
+      }
     })
     unregisterE2ETerminalBuffer?.()
     unregisterE2ETerminalBuffer = registerE2ETerminalBuffer(sessionId, term)

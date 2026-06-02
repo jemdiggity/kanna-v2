@@ -47,6 +47,7 @@ interface PendingWrite {
 class FakeTerminal {
   cols = 80;
   rows = 24;
+  options: Record<string, unknown> = {};
   buffer = {
     active: {
       baseY: 0,
@@ -68,7 +69,6 @@ class FakeTerminal {
   getSelection = vi.fn(() => "");
   scrollToLine = vi.fn();
   scrollToBottom = vi.fn();
-  setOption = vi.fn();
   dispose = vi.fn();
   write = vi.fn((data: string | Uint8Array, callback?: () => void) => {
     if (typeof data === "string") {
@@ -87,8 +87,9 @@ class FakeTerminal {
 const terminals: FakeTerminal[] = [];
 
 vi.mock("@xterm/xterm", () => ({
-  Terminal: vi.fn(function TerminalMock() {
+  Terminal: vi.fn(function TerminalMock(options?: Record<string, unknown>) {
     const terminal = new FakeTerminal();
+    terminal.options = { ...(options ?? {}) };
     terminals.push(terminal);
     return terminal;
   }),
@@ -370,15 +371,12 @@ describe("useTerminal", () => {
     const element = wrapper.element as HTMLElement;
     (wrapper.vm as unknown as { init: (el: HTMLElement) => void }).init(element);
 
-    expect(terminals.at(-1)?.setOption).not.toHaveBeenCalled();
+    expect(terminals.at(-1)?.options.theme).toMatchObject({ background: "#1e1e1e" });
 
     setThemePreferences({ appTheme: "light", codeTheme: "match" });
     await Promise.resolve();
 
-    expect(terminals.at(-1)?.setOption).toHaveBeenCalledWith(
-      "theme",
-      expect.objectContaining({ background: "#f8fafc" }),
-    );
+    expect(terminals.at(-1)?.options.theme).toMatchObject({ background: "#f8fafc" });
 
     wrapper.unmount();
     resetThemeRuntimeForTests();
