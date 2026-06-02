@@ -1682,6 +1682,31 @@ mod tests {
         PathBuf::from(format!("/tmp/kanna-{:08x}.sock", hash))
     }
 
+    fn pipeline_socket_path_for_daemon_dir(daemon_dir: &str) -> String {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let dir = PathBuf::from(daemon_dir).join("pipeline");
+        let mut hasher = DefaultHasher::new();
+        dir.hash(&mut hasher);
+        let hash = hasher.finish() as u32;
+        format!("/tmp/kanna-{hash:08x}.sock")
+    }
+
+    fn ensure_test_kanna_cli_sidecar() -> (PathBuf, bool) {
+        let sidecar_path = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("kanna-cli");
+        if sidecar_path.exists() {
+            return (sidecar_path, false);
+        }
+
+        std::fs::write(&sidecar_path, "#!/bin/sh\nexit 0\n").unwrap();
+        (sidecar_path, true)
+    }
+
     fn init_test_git_repo(repo_root: &Path) {
         let _ = std::fs::remove_dir_all(repo_root);
         std::fs::create_dir_all(repo_root).unwrap();
@@ -2222,6 +2247,184 @@ mod tests {
         let _ = std::fs::remove_file(&socket_path);
         let _ = std::fs::remove_dir_all(&daemon_dir);
         let _ = std::fs::remove_dir_all(&repo_root);
+    }
+
+    #[tokio::test]
+    async fn create_task_route_sends_kanna_cli_runtime_env_to_daemon_spawn() {
+        use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::UnixListener;
+
+        let unique = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let repo_root = std::env::temp_dir().join(format!("kanna-http-create-env-{unique}"));
+        init_test_git_repo(&repo_root);
+
+        let (kanna_cli_path, created_test_sidecar) = ensure_test_kanna_cli_sidecar();
+        let kanna_cli_path_string = kanna_cli_path.to_string_lossy().to_string();
+        let kanna_cli_dir = kanna_cli_path
+            .parent()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+
+        let daemon_dir =
+            std::env::temp_dir().join(format!("kanna-http-create-env-daemon-{unique}"));
+        std::fs::create_dir_all(&daemon_dir).unwrap();
+        let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+        let pipeline_socket_path =
+            pipeline_socket_path_for_daemon_dir(&daemon_dir.to_string_lossy());
+        let _ = std::fs::remove_file(&socket_path);
+
+        // Full desktop E2E would require launching the Tauri app plus staged sidecars
+        // and a runnable agent CLI. This boundary test keeps the real HTTP handler,
+        // task preparation, DB writes, worktree creation, and daemon Spawn contract in scope.
+        let daemon_listener = UnixListener::bind(&socket_path).unwrap();
+        let daemon_server = tokio::spawn({
+            let expected_cli_path = kanna_cli_path_string.clone();
+            let expected_cli_dir = kanna_cli_dir.clone();
+            let expected_db_path = Db::test_db_path(&format!("http-api-create-env-{unique}"));
+            let expected_socket_path = pipeline_socket_path.clone();
+            async move {
+                let (stream, _) = daemon_listener.accept().await.unwrap();
+                let (read_half, mut write_half) = stream.into_split();
+                let mut reader = BufReader::new(read_half);
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+                let session_id = match command {
+                    DaemonCommand::Spawn {
+                        session_id,
+                        executable,
+                        args,
+                        cwd,
+                        env,
+                        ..
+                    } => {
+                        assert_eq!(executable, "/bin/zsh");
+                        assert!(cwd.contains(".kanna-worktrees/task-"));
+                        assert_eq!(
+                            env.get("KANNA_CLI_PATH").map(String::as_str),
+                            Some(expected_cli_path.as_str())
+                        );
+                        assert_eq!(
+                            env.get("KANNA_CLI_DB_PATH").map(String::as_str),
+                            Some(expected_db_path.as_str())
+                        );
+                        assert_eq!(
+                            env.get("KANNA_SOCKET_PATH").map(String::as_str),
+                            Some(expected_socket_path.as_str())
+                        );
+                        assert_eq!(
+                            env.get("KANNA_SERVER_BASE_URL").map(String::as_str),
+                            Some("http://127.0.0.1:48120")
+                        );
+                        let path = env.get("PATH").expect("PATH should be set for sidecar");
+                        assert_eq!(path.split(':').next(), Some(expected_cli_dir.as_str()));
+                        let shell_command = args.last().expect("zsh -c command should be present");
+                        assert!(
+                            shell_command.contains(&format!(
+                                "export KANNA_CLI_PATH='{}'",
+                                expected_cli_path
+                            )),
+                            "shell command should export KANNA_CLI_PATH: {shell_command}"
+                        );
+                        assert!(
+                            shell_command
+                                .contains(&format!("export PATH='{}':\"$PATH\"", expected_cli_dir)),
+                            "shell command should prepend kanna-cli directory: {shell_command}"
+                        );
+                        session_id
+                    }
+                    other => panic!("expected spawn command, got {:?}", other),
+                };
+                write_half
+                    .write_all(
+                        format!(
+                            "{}\n",
+                            serde_json::to_string(&DaemonEvent::SessionCreated { session_id })
+                                .unwrap()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
+
+        let db_path = Db::test_db_path(&format!("http-api-create-env-{unique}"));
+        let config = Config {
+            relay_url: "wss://relay.example".to_string(),
+            device_token: "device-token".to_string(),
+            cloud_base_url: "http://127.0.0.1:5001/kanna-local/us-central1".to_string(),
+            firebase_project_id: "kanna-local".to_string(),
+            firebase_auth_emulator_url: Some("http://127.0.0.1:9099".to_string()),
+            firebase_firestore_emulator_host: Some("127.0.0.1:8080".to_string()),
+            daemon_dir: daemon_dir.to_string_lossy().to_string(),
+            db_path: db_path.clone(),
+            desktop_id: "desktop-1".to_string(),
+            desktop_secret: Some("desktop-secret".to_string()),
+            desktop_name: "Studio Mac".to_string(),
+            server_version: Some("test-version".to_string()),
+            lan_host: "127.0.0.1".to_string(),
+            lan_port: 48120,
+            pairing_store_path: format!("/tmp/kanna-pairings-create-env-{unique}.json"),
+        };
+        let db = Db::open_for_tests(&config.db_path).unwrap();
+        db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+            .unwrap();
+        drop(db);
+
+        let app = super::router(Arc::new(super::AppState::new(config.clone())));
+        let response = app
+            .oneshot(
+                Request::post("/v1/tasks")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "repoId": "repo-1",
+                            "prompt": "Exercise server-created task spawn env",
+                            "agentProvider": "claude"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        if response.status() != StatusCode::OK {
+            daemon_server.abort();
+            let status = response.status();
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            panic!(
+                "expected create task to send Spawn env, got {status}: {}",
+                String::from_utf8_lossy(&body)
+            );
+        }
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let created: CreateTaskResponse = from_slice(&body).unwrap();
+        assert_eq!(created.repo_id, "repo-1");
+        assert_eq!(created.stage, "in progress");
+
+        daemon_server.await.unwrap();
+        let _ = std::fs::remove_file(&socket_path);
+        let _ = std::fs::remove_dir_all(&daemon_dir);
+        let _ = std::fs::remove_dir_all(&repo_root);
+        if created_test_sidecar {
+            let _ = std::fs::remove_file(&kanna_cli_path);
+        }
     }
 
     #[tokio::test]

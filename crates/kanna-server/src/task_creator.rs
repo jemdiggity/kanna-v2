@@ -1367,25 +1367,107 @@ fn build_spawn_env(
     ]);
     env.extend(port_env.clone());
     if let Some(path) = which_binary("kanna-cli")? {
+        if let Some(parent) = Path::new(&path).parent() {
+            let runtime_path = prepend_path_entry(
+                std::env::var("PATH").ok().as_deref(),
+                parent.to_string_lossy().as_ref(),
+            );
+            env.insert("PATH".to_string(), runtime_path);
+        }
         env.insert("KANNA_CLI_PATH".to_string(), path);
     }
     Ok(env)
 }
 
 fn which_binary(name: &str) -> Result<Option<String>, String> {
-    let output = Command::new("/bin/zsh")
-        .args(["--login", "-i", "-c", &format!("command -v {}", name)])
-        .output()
-        .map_err(|e| format!("failed to locate {}: {}", name, e))?;
-    if !output.status.success() {
-        return Ok(None);
+    resolve_binary_from_candidates(name, sidecar_candidates(name)).map(Some)
+}
+
+fn resolve_binary_from_candidates(name: &str, candidates: Vec<PathBuf>) -> Result<String, String> {
+    resolve_binary_from_candidates_with_path_lookup(name, candidates, |name| {
+        let output = Command::new("/bin/zsh")
+            .args(["--login", "-i", "-c", &format!("command -v {}", name)])
+            .output()
+            .map_err(|e| format!("failed to locate {}: {}", name, e))?;
+
+        if output.status.success() {
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !path.is_empty() {
+                return Ok(path);
+            }
+        }
+
+        Err(format!("binary '{}' not found in PATH", name))
+    })
+}
+
+fn resolve_binary_from_candidates_with_path_lookup<F>(
+    name: &str,
+    candidates: Vec<PathBuf>,
+    path_lookup: F,
+) -> Result<String, String>
+where
+    F: FnOnce(&str) -> Result<String, String>,
+{
+    for candidate in candidates {
+        if candidate.exists() {
+            return Ok(candidate.to_string_lossy().to_string());
+        }
     }
-    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if path.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(path))
+
+    path_lookup(name)
+}
+
+fn current_target_triple() -> &'static str {
+    #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+    {
+        "aarch64-apple-darwin"
     }
+    #[cfg(all(target_arch = "x86_64", target_os = "macos"))]
+    {
+        "x86_64-apple-darwin"
+    }
+}
+
+fn sidecar_candidates(name: &str) -> Vec<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .map(|exe| sidecar_candidates_for_exe(&exe, name))
+        .unwrap_or_default()
+}
+
+fn sidecar_candidates_for_exe(current_exe: &Path, name: &str) -> Vec<PathBuf> {
+    let Some(exe_dir) = current_exe.parent() else {
+        return Vec::new();
+    };
+
+    let sidecar_name = format!("{}-{}", name, current_target_triple());
+    let mut candidates = vec![exe_dir.join(&sidecar_name), exe_dir.join(name)];
+
+    if let (Some(build_root), Some(profile_dir)) = (exe_dir.parent(), exe_dir.file_name()) {
+        if build_root.file_name().is_some_and(|dir| dir == ".build")
+            && matches!(profile_dir.to_str(), Some("debug" | "release"))
+        {
+            let triple_dir = build_root.join(current_target_triple()).join(profile_dir);
+            candidates.push(triple_dir.join(name));
+            candidates.push(triple_dir.join(&sidecar_name));
+        }
+    }
+
+    candidates.push(exe_dir.join("../Resources").join(&sidecar_name));
+    candidates.push(exe_dir.join("../Resources").join(name));
+    candidates
+}
+
+fn prepend_path_entry(path: Option<&str>, entry: &str) -> String {
+    let existing_entries = path
+        .unwrap_or_default()
+        .split(':')
+        .filter(|part| !part.is_empty() && *part != entry);
+    std::iter::once(entry)
+        .chain(existing_entries)
+        .collect::<Vec<_>>()
+        .join(":")
 }
 
 fn build_agent_command(
@@ -1509,14 +1591,16 @@ fn short_socket_path(dir: &PathBuf) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_stage_prompt, continue_prepared_stage_for_api, prepare_advance_stage_for_api,
-        prepare_revision_task_for_api, prepare_task_for_api, read_default_agent_provider_setting,
+        build_spawn_env, build_stage_prompt, continue_prepared_stage_for_api,
+        prepare_advance_stage_for_api, prepare_revision_task_for_api, prepare_task_for_api,
+        read_default_agent_provider_setting, resolve_binary_from_candidates_with_path_lookup,
         PreparedStageTransition, PromptContext,
     };
     use crate::config::Config;
     use crate::daemon_client::DaemonClient;
     use crate::db::Db;
     use crate::mobile_api::CreateTaskRequest;
+    use std::collections::HashMap;
     use std::process::Command;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
@@ -1570,6 +1654,64 @@ mod tests {
             write_half.write_all(b"\n").await.unwrap();
             command
         })
+    }
+
+    fn test_config(label: &str) -> Config {
+        Config {
+            relay_url: "wss://relay.example".to_string(),
+            device_token: "device-token".to_string(),
+            cloud_base_url: "http://127.0.0.1:5001/kanna-local/us-central1".to_string(),
+            firebase_project_id: "kanna-local".to_string(),
+            firebase_auth_emulator_url: Some("http://127.0.0.1:9099".to_string()),
+            firebase_firestore_emulator_host: Some("127.0.0.1:8080".to_string()),
+            daemon_dir: format!("/tmp/kanna-daemon-{label}"),
+            db_path: Db::test_db_path(label),
+            desktop_id: "desktop-1".to_string(),
+            desktop_secret: Some("desktop-secret".to_string()),
+            desktop_name: "Studio Mac".to_string(),
+            server_version: Some("test-version".to_string()),
+            lan_host: "0.0.0.0".to_string(),
+            lan_port: 48120,
+            pairing_store_path: format!("/tmp/kanna-pairings-{label}.json"),
+        }
+    }
+
+    #[test]
+    fn resolve_binary_prefers_sidecar_candidate_before_path_lookup() {
+        let temp_root = std::env::temp_dir().join(format!(
+            "kanna-server-sidecar-resolver-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&temp_root);
+        std::fs::create_dir_all(&temp_root).unwrap();
+        let sidecar = temp_root.join("kanna-cli");
+        std::fs::write(&sidecar, "#!/bin/sh\n").unwrap();
+
+        let resolved = resolve_binary_from_candidates_with_path_lookup(
+            "kanna-cli",
+            vec![sidecar.clone()],
+            |_| Ok("/usr/local/bin/kanna-cli".to_string()),
+        )
+        .expect("sidecar candidate should resolve");
+
+        assert_eq!(resolved, sidecar.to_string_lossy());
+    }
+
+    #[test]
+    fn build_spawn_env_prepends_kanna_cli_directory_to_path() {
+        let config = test_config("spawn-env-kanna-cli-path");
+        let env = build_spawn_env(&config, "task-1", &HashMap::new()).unwrap();
+        let cli_path = env
+            .get("KANNA_CLI_PATH")
+            .expect("test host should resolve kanna-cli");
+        let cli_dir = std::path::Path::new(cli_path)
+            .parent()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let path = env.get("PATH").expect("PATH should be provided");
+
+        assert_eq!(path.split(':').next(), Some(cli_dir.as_str()));
     }
 
     #[test]
