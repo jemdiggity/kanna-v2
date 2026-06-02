@@ -195,6 +195,7 @@
     "tabCreate": "새로 만들기",
     "tabImport": "가져오기 / 복제",
     "namePlaceholder": "my-awesome-project",
+    "nameNoSpaces": "저장소 이름에는 공백을 사용할 수 없습니다. 대신 하이픈을 사용하세요.",
     "change": "변경",
     "importPlaceholder": "owner/repo, URL, 또는 gh repo clone...",
     "chooseLocalFolder": "로컬 폴더 선택",

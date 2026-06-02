@@ -116,7 +116,13 @@ const displayCreatePath = computed(() => {
   return full;
 });
 
-const createDisabled = computed(() => !createName.value.trim());
+const createNameError = computed(() => {
+  const name = createName.value.trim();
+  if (!name) return null;
+  return /\s/.test(name) ? t("addRepo.nameNoSpaces") : null;
+});
+
+const createDisabled = computed(() => !createName.value.trim() || !!createNameError.value);
 
 // ── Import / Clone tab logic ──
 const parsed = computed<ParsedInput>(() => parseRepoInput(importInput.value));
@@ -434,6 +440,7 @@ function switchTab(tab: "create" | "import") {
           :placeholder="$t('addRepo.namePlaceholder')"
           @keydown="submitFromInput"
         />
+        <div v-if="createNameError" class="error-inline">{{ createNameError }}</div>
         <div class="path-hint">
           <span class="path-text">{{ displayCreatePath }}</span>
           <a v-if="createName.trim()" class="change-link" @click="handleChangeCreateDir">{{ $t('addRepo.change') }}</a>

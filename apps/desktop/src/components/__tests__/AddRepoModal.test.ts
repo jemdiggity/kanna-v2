@@ -137,6 +137,25 @@ describe("AddRepoModal", () => {
     ]);
   });
 
+  it("rejects spaces in new repo names", async () => {
+    const wrapper = mountModal("create");
+
+    await flushPromises();
+
+    const createInput = wrapper.get('input[placeholder="addRepo.namePlaceholder"]');
+    await createInput.setValue("my app");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("addRepo.nameNoSpaces");
+    expect(wrapper.get(".btn-primary").attributes("disabled")).toBeDefined();
+
+    await wrapper.get(".btn-primary").trigger("click");
+    await createInput.trigger("keydown", { key: "Enter", metaKey: true });
+    await flushPromises();
+
+    expect(wrapper.emitted("create")).toBeUndefined();
+  });
+
   it("clones a repo with Cmd+Enter in the import input", async () => {
     const wrapper = mountModal();
 

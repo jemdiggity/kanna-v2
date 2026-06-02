@@ -14,6 +14,7 @@ interface RepoOrderRow {
 
 const FIRST_REPO_NAME = "import-repo-primary";
 const SECOND_REPO_NAME = "import-repo-secondary";
+const INVALID_CREATE_REPO_NAME = "repo with spaces";
 
 async function findRepoHeader(client: WebDriverClient, repoName: string): Promise<string> {
   const headers = await client.findElements(".repo-header");
@@ -41,6 +42,25 @@ async function waitForRepoOrder(client: WebDriverClient, expectedNames: string[]
   throw new Error(`timed out waiting for repo order: ${expectedNames.join(", ")}`);
 }
 
+async function openCreateRepoModal(client: WebDriverClient): Promise<void> {
+  const result = await client.executeAsync<string>(
+    `const cb = arguments[arguments.length - 1];
+     const ctx = window.__KANNA_E2E__?.setupState;
+     Promise.resolve(ctx?.keyboardActions?.createRepo?.())
+       .then(() => cb("ok"))
+       .catch((e) => cb("err:" + (e?.message || String(e))));`
+  );
+  expect(result).toBe("ok");
+  await client.waitForText(".modal-overlay .tab.active", "Create New");
+}
+
+async function repoRows(client: WebDriverClient): Promise<RepoOrderRow[]> {
+  return await queryDb(
+    client,
+    "SELECT id, name, sort_order FROM repo WHERE hidden = 0 ORDER BY sort_order ASC, created_at ASC",
+  ) as RepoOrderRow[];
+}
+
 describe("import repo", () => {
   const client = new WebDriverClient();
   let firstRepoRoot = "";
@@ -62,6 +82,38 @@ describe("import repo", () => {
   afterAll(async () => {
     await cleanupFixtureRepos([firstRepoRoot, secondRepoRoot].filter(Boolean));
     await client.deleteSession();
+  });
+
+  it("does not create a repo when the Create New repo name contains spaces", async () => {
+    await openCreateRepoModal(client);
+
+    const input = await client.waitForElement(".modal-overlay input.text-input");
+    await client.sendKeys(input, INVALID_CREATE_REPO_NAME);
+
+    await client.waitForText(
+      ".modal-overlay .error-inline",
+      "Repo names cannot contain spaces. Use hyphens instead.",
+    );
+
+    const createButtonState = await client.executeSync<{ disabled: boolean; text: string }>(
+      `const button = document.querySelector(".modal-overlay .btn-primary");
+       return { disabled: Boolean(button?.disabled), text: button?.textContent?.trim() || "" };`
+    );
+    expect(createButtonState).toEqual({ disabled: true, text: "Create" });
+
+    await client.executeSync(
+      `document.querySelector(".modal-overlay .btn-primary")?.dispatchEvent(
+         new MouseEvent("click", { bubbles: true, cancelable: true })
+       );
+       document.querySelector(".modal-overlay input.text-input")?.dispatchEvent(
+         new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true, metaKey: true })
+       );
+       window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));`
+    );
+
+    await client.waitForElement(".modal-overlay");
+    expect(await repoRows(client)).toEqual([]);
+    expect(await visibleRepoNames(client)).not.toContain(INVALID_CREATE_REPO_NAME);
   });
 
   it("imports a repo and shows it in the sidebar", async () => {
@@ -127,10 +179,7 @@ describe("import repo", () => {
     const names = await visibleRepoNames(client);
     expect(names.slice(0, 2)).toEqual([SECOND_REPO_NAME, FIRST_REPO_NAME]);
 
-    const rows = await queryDb(
-      client,
-      "SELECT id, name, sort_order FROM repo WHERE hidden = 0 ORDER BY sort_order ASC, created_at ASC",
-    ) as RepoOrderRow[];
+    const rows = await repoRows(client);
     expect(rows.map((row) => row.id)).toEqual([secondRepoId, firstRepoId]);
     expect(rows.map((row) => row.sort_order)).toEqual([0, 1]);
   });

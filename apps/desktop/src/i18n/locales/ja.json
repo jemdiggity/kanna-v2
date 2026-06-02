@@ -195,6 +195,7 @@
     "tabCreate": "新規作成",
     "tabImport": "インポート / クローン",
     "namePlaceholder": "my-awesome-project",
+    "nameNoSpaces": "リポジトリ名にスペースは使用できません。代わりにハイフンを使用してください。",
     "change": "変更",
     "importPlaceholder": "owner/repo、URL、または gh repo clone...",
     "chooseLocalFolder": "ローカルフォルダを選択",
