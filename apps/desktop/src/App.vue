@@ -2345,20 +2345,6 @@ onBeforeUnmount(() => {
 </template>
 
 <style>
-:root {
-  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
-  font-size: 13px;
-  line-height: 1.5;
-  font-weight: 400;
-  color-scheme: dark;
-  color: #e0e0e0;
-  background-color: #1a1a1a;
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-}
-
 * {
   margin: 0;
   padding: 0;

@@ -1,6 +1,7 @@
 import { createApp } from "vue";
 import { createPinia } from "pinia";
 import i18n from "./i18n";
+import "./theme/tokens.css";
 import { isTauri } from "./tauri-mock";
 import { loadDatabase, runMigrations } from "./stores/db";
 import { shouldMountBaseBranchDropdownPreview } from "./previewMode";

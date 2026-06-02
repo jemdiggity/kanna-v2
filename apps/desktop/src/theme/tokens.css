@@ -1,0 +1,75 @@
+:root {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+  font-size: 13px;
+  line-height: 1.5;
+  font-weight: 400;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+:root,
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  color: #e0e0e0;
+  background-color: #1a1a1a;
+  --kn-bg-app: #1a1a1a;
+  --kn-bg-sidebar: #1e1e1e;
+  --kn-bg-panel: #252525;
+  --kn-bg-panel-raised: #2a2a2a;
+  --kn-bg-input: #1a1a1a;
+  --kn-bg-hover: #333333;
+  --kn-bg-selected: rgba(59, 142, 234, 0.28);
+  --kn-bg-accent-subtle: rgba(0, 102, 204, 0.12);
+  --kn-text-primary: #e0e0e0;
+  --kn-text-secondary: #bbbbbb;
+  --kn-text-muted: #888888;
+  --kn-text-inverse: #ffffff;
+  --kn-border-default: #333333;
+  --kn-border-strong: #444444;
+  --kn-accent: #0066cc;
+  --kn-accent-hover: #0077ee;
+  --kn-danger: #b62324;
+  --kn-danger-bg: #2a1a1a;
+  --kn-success: #2ea043;
+  --kn-success-bg: rgba(74, 222, 128, 0.1);
+  --kn-warning: #d29922;
+  --kn-warning-bg: #2a2a1a;
+  --kn-overlay-scrim: rgba(0, 0, 0, 0.6);
+  --kn-shadow-modal: 0 8px 32px rgba(0, 0, 0, 0.5);
+  --kn-terminal-bg: #1e1e1e;
+  --kn-code-bg: #1a1a1a;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  color: #1f2937;
+  background-color: #ffffff;
+  --kn-bg-app: #ffffff;
+  --kn-bg-sidebar: #f4f6f8;
+  --kn-bg-panel: #ffffff;
+  --kn-bg-panel-raised: #f8fafc;
+  --kn-bg-input: #ffffff;
+  --kn-bg-hover: #edf2f7;
+  --kn-bg-selected: #dcecff;
+  --kn-bg-accent-subtle: rgba(11, 102, 195, 0.12);
+  --kn-text-primary: #1f2937;
+  --kn-text-secondary: #374151;
+  --kn-text-muted: #687385;
+  --kn-text-inverse: #ffffff;
+  --kn-border-default: #d9dee5;
+  --kn-border-strong: #c2cad4;
+  --kn-accent: #0b66c3;
+  --kn-accent-hover: #0a73dc;
+  --kn-danger: #b42318;
+  --kn-danger-bg: #fff1f0;
+  --kn-success: #16803a;
+  --kn-success-bg: rgba(22, 128, 58, 0.12);
+  --kn-warning: #a15c07;
+  --kn-warning-bg: #fff7df;
+  --kn-overlay-scrim: rgba(15, 23, 42, 0.32);
+  --kn-shadow-modal: 0 16px 42px rgba(20, 30, 45, 0.18);
+  --kn-terminal-bg: #f8fafc;
+  --kn-code-bg: #ffffff;
+}
