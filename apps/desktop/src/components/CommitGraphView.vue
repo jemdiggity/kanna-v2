@@ -493,7 +493,7 @@ onMounted(() => {
   right: 12px;
   font-size: 10px;
   font-weight: 600;
-  color: #888;
+  color: var(--kn-text-muted);
   letter-spacing: 0.05em;
   z-index: 1;
   pointer-events: none;
@@ -508,14 +508,14 @@ onMounted(() => {
   align-items: center;
   gap: 8px;
   padding: 8px 10px;
-  border: 1px solid rgba(88, 166, 255, 0.2);
+  border: 1px solid var(--kn-border-strong);
   border-radius: 6px;
-  background: rgba(17, 24, 39, 0.96);
+  background: var(--kn-bg-panel);
   z-index: 2;
 }
 
 .search-prefix {
-  color: #58a6ff;
+  color: var(--kn-accent);
   font-family: "SF Mono", "Menlo", "Consolas", monospace;
   font-size: 12px;
 }
@@ -525,29 +525,29 @@ onMounted(() => {
   min-width: 0;
   border: none;
   background: transparent;
-  color: #e5e7eb;
+  color: var(--kn-text-primary);
   font-size: 12px;
   outline: none;
 }
 
 .search-input::placeholder {
-  color: #6b7280;
+  color: var(--kn-text-muted);
 }
 
 .search-count {
-  color: #9ca3af;
+  color: var(--kn-text-muted);
   font-size: 12px;
   white-space: nowrap;
 }
 
 .graph-status {
   padding: 24px;
-  color: #888;
+  color: var(--kn-text-muted);
   text-align: center;
 }
 
 .graph-status.error {
-  color: #ff7b72;
+  color: var(--kn-danger);
 }
 
 .graph-canvas {
@@ -563,9 +563,9 @@ onMounted(() => {
 
 .head-node-marker {
   fill: none;
-  stroke: #f0b429;
+  stroke: var(--kn-warning);
   stroke-width: 2.5;
-  filter: drop-shadow(0 0 5px rgba(240, 180, 41, 0.9));
+  filter: none;
 }
 
 .commit-text-layer {
@@ -586,35 +586,35 @@ onMounted(() => {
 }
 
 .commit-row.is-search-match {
-  background: rgba(88, 166, 255, 0.08);
+  background: var(--kn-bg-accent-subtle);
   border-radius: 4px;
 }
 
 .commit-row.is-search-active {
-  background: rgba(88, 166, 255, 0.18);
-  box-shadow: 0 0 0 1px rgba(88, 166, 255, 0.35);
+  background: var(--kn-bg-selected);
+  box-shadow: 0 0 0 1px var(--kn-accent);
 }
 
 .commit-row.is-head {
-  background: rgba(240, 180, 41, 0.1);
+  background: var(--kn-warning-bg);
   border-radius: 4px;
 }
 
 .commit-row.is-head.is-search-match,
 .commit-row.is-head.is-search-active {
-  background: rgba(240, 180, 41, 0.16);
+  background: var(--kn-warning-bg);
   box-shadow:
-    0 0 0 1px rgba(240, 180, 41, 0.35),
-    0 0 0 3px rgba(88, 166, 255, 0.18);
+    0 0 0 1px var(--kn-warning),
+    0 0 0 3px var(--kn-bg-accent-subtle);
 }
 
 .head-pill {
   display: inline-block;
   padding: 0 5px;
-  border: 1px solid rgba(240, 180, 41, 0.48);
+  border: 1px solid var(--kn-warning);
   border-radius: 3px;
-  background: rgba(240, 180, 41, 0.16);
-  color: #f0b429;
+  background: var(--kn-warning-bg);
+  color: var(--kn-warning);
   font-family: "SF Mono", "Menlo", "Consolas", monospace;
   font-size: 10px;
   font-weight: 700;
@@ -634,21 +634,21 @@ onMounted(() => {
 }
 
 .ref-local {
-  background: rgba(88, 166, 255, 0.15);
-  color: #58a6ff;
-  border: 1px solid rgba(88, 166, 255, 0.3);
+  background: var(--kn-bg-accent-subtle);
+  color: var(--kn-accent);
+  border: 1px solid var(--kn-accent);
 }
 
 .ref-remote {
-  background: rgba(136, 136, 136, 0.1);
-  color: #888;
-  border: 1px solid rgba(136, 136, 136, 0.2);
+  background: var(--kn-bg-panel-raised);
+  color: var(--kn-text-muted);
+  border: 1px solid var(--kn-border-default);
 }
 
 .ref-tag {
-  background: rgba(210, 168, 255, 0.1);
-  color: #d2a8ff;
-  border: 1px solid rgba(210, 168, 255, 0.2);
+  background: var(--kn-bg-accent-subtle);
+  color: var(--kn-accent);
+  border: 1px solid var(--kn-accent);
 }
 
 .commit-hash {
@@ -658,19 +658,19 @@ onMounted(() => {
 }
 
 .commit-message {
-  color: #e0e0e0;
+  color: var(--kn-text-primary);
   max-width: 500px;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
 .commit-author {
-  color: #888;
+  color: var(--kn-text-muted);
   font-size: 11px;
 }
 
 .commit-time {
-  color: #666;
+  color: var(--kn-text-muted);
   font-size: 11px;
 }
 </style>

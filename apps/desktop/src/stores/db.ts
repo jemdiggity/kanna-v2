@@ -348,4 +348,15 @@ export async function runMigrations(db: DbHandle): Promise<void> {
         AND closed_at IS NULL
     `);
   });
+
+  await runMigration("017_theme_preferences", async () => {
+    await db.execute(
+      "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)",
+      ["appTheme", "dark"],
+    );
+    await db.execute(
+      "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)",
+      ["codeTheme", "match"],
+    );
+  });
 }

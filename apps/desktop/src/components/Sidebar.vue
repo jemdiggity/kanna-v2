@@ -539,7 +539,7 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
                 <span
                   class="item-title"
                   :style="{
-                    color: '#666',
+                    color: 'var(--kn-text-muted)',
                     textDecoration: isTaskTearingDown(element) ? 'line-through' : 'none',
                     opacity: isTaskTearingDown(element) ? 0.5 : 1,
                   }"
@@ -583,8 +583,8 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
 .sidebar {
   width: 260px;
   min-width: 260px;
-  background: #1e1e1e;
-  border-right: 1px solid #333;
+  background: var(--kn-bg-sidebar);
+  border-right: 1px solid var(--kn-border-default);
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -592,29 +592,29 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
 }
 
 .sidebar.is-filtering {
-  background: linear-gradient(180deg, #1f2123 0%, #1d1f21 100%);
-  border-right-color: #3a4b5d;
+  background: var(--kn-bg-sidebar);
+  border-right-color: var(--kn-accent);
 }
 
 .sidebar.is-filtering .sidebar-content {
-  box-shadow: inset 0 1px 0 #314151;
+  box-shadow: inset 0 1px 0 var(--kn-bg-accent-subtle);
 }
 
 .sidebar.is-filtering .repo-header {
-  background: #202327;
+  background: var(--kn-bg-panel-raised);
 }
 
 .sidebar.is-filtering .repo-count {
-  color: #9fb7cc;
+  color: var(--kn-accent);
 }
 
 .sidebar.is-filtering .search-input {
-  border-color: #4a6278;
-  background: #20252a;
+  border-color: var(--kn-accent);
+  background: var(--kn-bg-input);
 }
 
 .sidebar.is-filtering .search-input::placeholder {
-  color: #71869b;
+  color: var(--kn-text-muted);
 }
 
 .sidebar-content {
@@ -623,7 +623,7 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
 }
 
 .empty-state {
-  color: #666;
+  color: var(--kn-text-muted);
   font-size: 12px;
   padding: 16px 14px;
   text-align: center;
@@ -631,13 +631,13 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
 }
 
 .empty-state kbd {
-  background: #2a2a2a;
-  border: 1px solid #444;
+  background: var(--kn-bg-panel-raised);
+  border: 1px solid var(--kn-border-strong);
   border-radius: 3px;
   padding: 1px 5px;
   font-family: inherit;
   font-size: 11px;
-  color: #999;
+  color: var(--kn-text-muted);
 }
 
 .empty-state kbd + kbd {
@@ -654,17 +654,17 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
   gap: 6px;
   padding: 6px 14px;
   cursor: grab;
-  color: #ccc;
+  color: var(--kn-text-secondary);
   font-size: 13px;
   font-weight: 500;
 }
 
 .repo-header:hover {
-  background: #2a2a2a;
+  background: var(--kn-bg-panel-raised);
 }
 
 .repo-header.selected {
-  background: #2a2a2a;
+  background: var(--kn-bg-panel-raised);
 }
 
 .repo-dragging .repo-header {
@@ -673,7 +673,7 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
 }
 
 .repo-drag-over .repo-header {
-  box-shadow: inset 0 2px 0 #3b8eea;
+  box-shadow: inset 0 2px 0 var(--kn-accent);
 }
 
 .sidebar.is-filtering .repo-header {
@@ -683,7 +683,7 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
 .collapse-btn {
   background: none;
   border: none;
-  color: #666;
+  color: var(--kn-text-muted);
   cursor: pointer;
   font-size: 10px;
   font-family: "JetBrains Mono", "SF Mono", Menlo, monospace;
@@ -704,9 +704,9 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
   min-width: 0;
   font-size: 13px;
   font-weight: 500;
-  color: #eee;
-  background: #2a2a2a;
-  border: 1px solid #0066cc;
+  color: var(--kn-text-primary);
+  background: var(--kn-bg-panel-raised);
+  border: 1px solid var(--kn-accent);
   border-radius: 2px;
   padding: 1px 4px;
   outline: none;
@@ -714,15 +714,15 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
 }
 
 .repo-count {
-  color: #666;
+  color: var(--kn-text-muted);
   font-size: 11px;
 }
 
 .btn-icon {
   -webkit-app-region: no-drag;
   background: none;
-  border: 1px solid #444;
-  color: #aaa;
+  border: 1px solid var(--kn-border-strong);
+  color: var(--kn-text-muted);
   width: 24px;
   height: 24px;
   border-radius: 4px;
@@ -735,8 +735,8 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
 }
 
 .btn-icon:hover {
-  background: #333;
-  color: #e0e0e0;
+  background: var(--kn-bg-hover);
+  color: var(--kn-text-primary);
 }
 
 .btn-add-task {
@@ -782,17 +782,17 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
 }
 
 .pipeline-item:hover {
-  background: #2a2a2a;
+  background: var(--kn-bg-panel-raised);
 }
 
 .pipeline-item.selected {
-  background: rgba(59, 142, 234, 0.28);
-  outline: 1px solid rgba(59, 142, 234, 0.62);
+  background: var(--kn-bg-selected);
+  outline: 1px solid var(--kn-accent);
 }
 
 .item-title {
   font-size: 12px;
-  color: #bbb;
+  color: var(--kn-text-secondary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -801,16 +801,16 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
 }
 
 .remote-task-marker {
-  color: #7fb7e6;
+  color: var(--kn-accent);
   font-family: "JetBrains Mono", "SF Mono", Menlo, monospace;
 }
 
 .rename-input {
   flex: 1;
   font-size: 12px;
-  color: #eee;
-  background: #2a2a2a;
-  border: 1px solid #0066cc;
+  color: var(--kn-text-primary);
+  background: var(--kn-bg-panel-raised);
+  border: 1px solid var(--kn-accent);
   border-radius: 2px;
   padding: 1px 4px;
   outline: none;
@@ -819,14 +819,14 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
 }
 
 .no-items {
-  color: #555;
+  color: var(--kn-text-muted);
   font-size: 11px;
   padding: 4px 14px;
 }
 
 .sidebar-footer {
   padding: 10px 14px;
-  border-top: 1px solid #333;
+  border-top: 1px solid var(--kn-border-default);
   display: flex;
   align-items: center;
   gap: 8px;
@@ -835,9 +835,9 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
 .search-input {
   flex: 1;
   padding: 6px 10px;
-  background: #2a2a2a;
-  border: 1px solid #444;
-  color: #ccc;
+  background: var(--kn-bg-panel-raised);
+  border: 1px solid var(--kn-border-strong);
+  color: var(--kn-text-secondary);
   border-radius: 4px;
   font-size: 12px;
   outline: none;
@@ -846,12 +846,12 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
 }
 
 .search-input:focus {
-  border-color: #0066cc;
-  background: #1a1a1a;
+  border-color: var(--kn-accent);
+  background: var(--kn-bg-input);
 }
 
 .search-input::placeholder {
-  color: #555;
+  color: var(--kn-text-muted);
 }
 
 .pinned-zone {
@@ -869,11 +869,11 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
 
 .pin-divider-line {
   height: 1px;
-  background: #555;
+  background: var(--kn-border-strong);
 }
 
 .section-label {
-  color: #666;
+  color: var(--kn-text-muted);
   font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 0.5px;
@@ -898,7 +898,7 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
 
 .blocked-by-text {
   font-size: 10px;
-  color: #555;
+  color: var(--kn-text-muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -907,7 +907,7 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
 /* Drag classes */
 .sortable-ghost {
   opacity: 0.4;
-  background: #0066cc22;
+  background: var(--kn-bg-accent-subtle);
   border-radius: 4px;
 }
 
@@ -917,9 +917,9 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
 
 .sortable-fallback {
   opacity: 0.9;
-  background: #1e1e1e;
+  background: var(--kn-bg-sidebar);
   border-radius: 4px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+  box-shadow: var(--kn-shadow-modal);
 }
 
 </style>

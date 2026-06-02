@@ -9,6 +9,8 @@ import {
   type DesktopRelayTerminalSubscription,
 } from "../services/desktopRelayTerminal";
 import { createConfiguredDesktopLanTerminalClient } from "../services/desktopLanTerminal";
+import { getTerminalTheme } from "../theme/theme";
+import { useThemeRuntime } from "../theme/runtime";
 
 const props = defineProps<{
   ownerDesktopId: string;
@@ -19,6 +21,7 @@ const props = defineProps<{
 const containerRef = ref<HTMLElement | null>(null);
 const status = ref<"connecting" | "live" | "closed" | "error">("connecting");
 const errorMessage = ref<string | null>(null);
+const { effectiveCodeTheme } = useThemeRuntime();
 let terminal: Terminal | null = null;
 let fitAddon: FitAddon | null = null;
 let resizeObserver: ResizeObserver | null = null;
@@ -100,10 +103,7 @@ onMounted(() => {
     disableStdin: false,
     fontFamily: 'Menlo, Monaco, "Courier New", monospace',
     fontSize: 12,
-    theme: {
-      background: "#1a1a1a",
-      foreground: "#d4d4d4",
-    },
+    theme: getTerminalTheme(effectiveCodeTheme.value),
   });
   terminal.onData((data) => {
     const client = relayClient;
@@ -135,6 +135,12 @@ watch(
   },
 );
 
+watch(effectiveCodeTheme, (theme) => {
+  if (terminal) {
+    terminal.options.theme = getTerminalTheme(theme);
+  }
+});
+
 onUnmounted(() => {
   stopSubscription();
   resizeObserver?.disconnect();
@@ -158,7 +164,7 @@ onUnmounted(() => {
   position: relative;
   flex: 1;
   min-height: 0;
-  background: #1a1a1a;
+  background: var(--kn-terminal-bg);
 }
 
 .terminal-container {
@@ -172,9 +178,9 @@ onUnmounted(() => {
   bottom: 12px;
   max-width: min(520px, calc(100% - 24px));
   padding: 8px 10px;
-  border: 1px solid #5c2b2b;
-  background: #261818;
-  color: #f0b8b8;
+  border: 1px solid var(--kn-danger);
+  background: var(--kn-danger-bg);
+  color: var(--kn-danger);
   font-size: 12px;
 }
 </style>

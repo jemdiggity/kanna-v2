@@ -181,15 +181,15 @@ onMounted(async () => {
 .modal-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.6);
+  background: var(--kn-overlay-scrim);
   display: flex;
   align-items: flex-start;
   justify-content: center;
   padding-top: 15vh;
 }
 .palette-modal {
-  background: #252525;
-  border: 1px solid #444;
+  background: var(--kn-bg-panel);
+  border: 1px solid var(--kn-border-strong);
   border-radius: 8px;
   width: 550px;
   max-width: 90vw;
@@ -198,10 +198,10 @@ onMounted(async () => {
 .palette-input {
   width: 100%;
   padding: 10px 14px;
-  background: #1a1a1a;
+  background: var(--kn-bg-input);
   border: none;
-  border-bottom: 1px solid #333;
-  color: #e0e0e0;
+  border-bottom: 1px solid var(--kn-border-default);
+  color: var(--kn-text-primary);
   font-size: 14px;
   outline: none;
 }
@@ -212,21 +212,21 @@ onMounted(async () => {
 .command-item {
   padding: 8px 14px;
   font-size: 13px;
-  color: #ccc;
+  color: var(--kn-text-secondary);
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: space-between;
 }
 .command-item.selected {
-  background: #0066cc;
-  color: #fff;
+  background: var(--kn-accent);
+  color: var(--kn-text-inverse);
 }
 .command-item:hover {
-  background: #333;
+  background: var(--kn-bg-hover);
 }
 .command-item.selected:hover {
-  background: #0066cc;
+  background: var(--kn-accent);
 }
 .command-label-group {
   display: flex;
@@ -239,7 +239,7 @@ onMounted(async () => {
 }
 .command-description {
   font-size: 11px;
-  color: #888;
+  color: var(--kn-text-muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -262,20 +262,20 @@ onMounted(async () => {
   font-size: 11px;
   min-width: 20px;
   text-align: center;
-  color: #aaa;
-  background: #333;
+  color: var(--kn-text-muted);
+  background: var(--kn-bg-hover);
   padding: 2px 5px;
   border-radius: 4px;
-  border: 1px solid #444;
+  border: 1px solid var(--kn-border-strong);
 }
 .command-item.selected .command-key {
-  color: #fff;
+  color: var(--kn-text-inverse);
   background: rgba(255, 255, 255, 0.15);
   border-color: rgba(255, 255, 255, 0.25);
 }
 .empty {
   padding: 16px;
-  color: #666;
+  color: var(--kn-text-muted);
   text-align: center;
   font-size: 13px;
 }

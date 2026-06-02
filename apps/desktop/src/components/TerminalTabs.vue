@@ -74,7 +74,7 @@ function buildSpawnOptions() {
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #555;
+  color: var(--kn-text-muted);
   font-size: 13px;
 }
 </style>

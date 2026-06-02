@@ -8,6 +8,12 @@ import i18n from "../i18n";
 import { useToast } from "../composables/useToast";
 import { getAppErrorMessage } from "../appError";
 import type { WindowBootstrap, WindowWorkspaceController } from "../windowWorkspace";
+import {
+  DEFAULT_APP_THEME,
+  DEFAULT_CODE_THEME,
+  type AppThemePreference,
+  type CodeThemePreference,
+} from "../theme/theme";
 
 /** Generate an 8-char hex ID (32 bits of randomness). */
 export function generateId(): string {
@@ -101,6 +107,8 @@ export interface StoreState {
   ideCommand: Ref<string>;
   hideShortcutsOnStartup: Ref<boolean>;
   devLingerTerminals: Ref<boolean>;
+  appTheme: Ref<AppThemePreference>;
+  codeTheme: Ref<CodeThemePreference>;
   lastHiddenRepoId: Ref<string | null>;
   pendingSetupIds: Ref<string[]>;
   pipelineCache: Map<string, PipelineDefinition>;
@@ -247,6 +255,8 @@ export function createStoreState(): StoreState {
   const ideCommand = ref("code");
   const hideShortcutsOnStartup = ref(false);
   const devLingerTerminals = ref(false);
+  const appTheme = ref<AppThemePreference>(DEFAULT_APP_THEME);
+  const codeTheme = ref<CodeThemePreference>(DEFAULT_CODE_THEME);
   const lastHiddenRepoId = ref<string | null>(null);
   const pendingSetupIds = ref<string[]>([]);
   const pendingCreateVisibility = new Map<string, { bumpAt: number }>();
@@ -267,6 +277,8 @@ export function createStoreState(): StoreState {
     ideCommand,
     hideShortcutsOnStartup,
     devLingerTerminals,
+    appTheme,
+    codeTheme,
     lastHiddenRepoId,
     pendingSetupIds,
     pipelineCache,

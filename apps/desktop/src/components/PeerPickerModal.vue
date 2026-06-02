@@ -85,7 +85,7 @@ function confirmSelect() {
 .modal-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.6);
+  background: var(--kn-overlay-scrim);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -95,8 +95,8 @@ function confirmSelect() {
   width: 520px;
   max-width: 92vw;
   max-height: 70vh;
-  background: #252525;
-  border: 1px solid #444;
+  background: var(--kn-bg-panel);
+  border: 1px solid var(--kn-border-strong);
   border-radius: 8px;
   display: flex;
   flex-direction: column;
@@ -104,15 +104,15 @@ function confirmSelect() {
 
 .title {
   padding: 14px 16px;
-  border-bottom: 1px solid #333;
+  border-bottom: 1px solid var(--kn-border-default);
   font-size: 14px;
   font-weight: 600;
-  color: #d8d8d8;
+  color: var(--kn-text-primary);
 }
 
 .state-text {
   padding: 16px;
-  color: #999;
+  color: var(--kn-text-muted);
   font-size: 13px;
 }
 
@@ -125,8 +125,8 @@ function confirmSelect() {
   width: 100%;
   background: transparent;
   border: none;
-  border-bottom: 1px solid #2f2f2f;
-  color: #d0d0d0;
+  border-bottom: 1px solid var(--kn-border-default);
+  color: var(--kn-text-secondary);
   text-align: left;
   padding: 10px 14px;
   cursor: pointer;
@@ -136,11 +136,11 @@ function confirmSelect() {
 }
 
 .peer-row:hover {
-  background: #2e2e2e;
+  background: var(--kn-bg-hover);
 }
 
 .peer-row.selected {
-  background: #1f334d;
+  background: var(--kn-bg-selected);
 }
 
 .peer-name {
@@ -150,11 +150,11 @@ function confirmSelect() {
 
 .peer-subtitle {
   font-size: 11px;
-  color: #8f8f8f;
+  color: var(--kn-text-muted);
 }
 
 .actions {
-  border-top: 1px solid #333;
+  border-top: 1px solid var(--kn-border-default);
   padding: 12px 14px;
   display: flex;
   justify-content: flex-end;
@@ -164,17 +164,17 @@ function confirmSelect() {
 .btn {
   padding: 5px 14px;
   border-radius: 4px;
-  border: 1px solid #444;
+  border: 1px solid var(--kn-border-strong);
   font-size: 12px;
   font-weight: 500;
   cursor: pointer;
-  background: #2a2a2a;
-  color: #ccc;
+  background: var(--kn-bg-panel-raised);
+  color: var(--kn-text-secondary);
   transition: background 0.15s;
 }
 
 .btn:hover:enabled {
-  background: #333;
+  background: var(--kn-bg-hover);
 }
 
 .btn:disabled {
@@ -183,24 +183,24 @@ function confirmSelect() {
 }
 
 .btn-primary {
-  background: #0066cc;
-  border-color: #0077ee;
-  color: #fff;
+  background: var(--kn-accent);
+  border-color: var(--kn-accent-hover);
+  color: var(--kn-text-inverse);
 }
 
 .btn-primary:hover:enabled {
-  background: #0077ee;
+  background: var(--kn-accent-hover);
 }
 
 .btn-danger {
-  background: #333;
-  border-color: #555;
-  color: #ccc;
+  background: var(--kn-bg-hover);
+  border-color: var(--kn-border-strong);
+  color: var(--kn-text-secondary);
 }
 
 .btn-danger:hover:enabled {
-  background: #b62324;
-  border-color: #d13435;
-  color: #fff;
+  background: var(--kn-danger);
+  border-color: var(--kn-danger);
+  color: var(--kn-text-inverse);
 }
 </style>

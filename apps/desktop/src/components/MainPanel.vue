@@ -143,7 +143,7 @@ function dismissCommandHint() {
             <div v-for="b in blockers" :key="b.id" class="blocker-item">
               <span
                 class="blocker-status"
-                :style="{ color: b.closed_at != null ? '#666' : '#0066cc' }"
+                :style="{ color: b.closed_at != null ? 'var(--kn-text-muted)' : 'var(--kn-accent)' }"
               >{{ b.closed_at != null ? $t('mainPanel.blockerDone') : $t('mainPanel.blockerActive') }}</span>
               <span class="blocker-name">{{ b.display_name || (b.prompt ? b.prompt.slice(0, 60) : $t('tasks.untitled')) }}</span>
             </div>
@@ -258,7 +258,7 @@ function dismissCommandHint() {
   flex-direction: column;
   min-width: 0;
   min-height: 0;
-  background: #1a1a1a;
+  background: var(--kn-bg-app);
 }
 
 .empty-state {
@@ -275,7 +275,7 @@ function dismissCommandHint() {
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #777;
+  color: var(--kn-text-muted);
   font-size: 13px;
 }
 
@@ -286,14 +286,14 @@ function dismissCommandHint() {
   align-items: center;
   justify-content: center;
   gap: 6px;
-  color: #9a9a9a;
+  color: var(--kn-text-muted);
   font-size: 13px;
   text-align: center;
 }
 
 .cloud-task-title {
   margin: 0;
-  color: #d6d6d6;
+  color: var(--kn-text-primary);
   font-size: 14px;
 }
 
@@ -306,22 +306,22 @@ function dismissCommandHint() {
 .empty-title {
   font-size: 15px;
   font-weight: 500;
-  color: #888;
+  color: var(--kn-text-muted);
 }
 
 .empty-hint {
   font-size: 12px;
-  color: #555;
+  color: var(--kn-text-muted);
 }
 
 .empty-hint kbd {
-  background: #2a2a2a;
-  border: 1px solid #444;
+  background: var(--kn-bg-panel-raised);
+  border: 1px solid var(--kn-border-strong);
   border-radius: 3px;
   padding: 1px 5px;
   font-family: inherit;
   font-size: 11px;
-  color: #999;
+  color: var(--kn-text-muted);
 }
 
 .empty-hint kbd + kbd {
@@ -343,12 +343,12 @@ function dismissCommandHint() {
 .blocked-title {
   font-size: 18px;
   font-weight: 600;
-  color: #888;
+  color: var(--kn-text-muted);
 }
 
 .blocked-prompt {
   font-size: 13px;
-  color: #aaa;
+  color: var(--kn-text-muted);
   text-align: center;
   white-space: pre-wrap;
   max-height: 200px;
@@ -362,7 +362,7 @@ function dismissCommandHint() {
 
 .blocked-by-label {
   font-size: 12px;
-  color: #666;
+  color: var(--kn-text-muted);
   text-transform: uppercase;
   letter-spacing: 0.5px;
   margin-bottom: 6px;
@@ -373,7 +373,7 @@ function dismissCommandHint() {
   align-items: center;
   gap: 8px;
   padding: 6px 10px;
-  background: #252525;
+  background: var(--kn-bg-panel);
   border-radius: 4px;
   margin-bottom: 4px;
 }
@@ -386,7 +386,7 @@ function dismissCommandHint() {
 
 .blocker-name {
   font-size: 12px;
-  color: #bbb;
+  color: var(--kn-text-secondary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -394,7 +394,7 @@ function dismissCommandHint() {
 
 .blocked-hint {
   font-size: 11px;
-  color: #555;
+  color: var(--kn-text-muted);
   margin-top: 8px;
 }
 
@@ -404,9 +404,9 @@ function dismissCommandHint() {
   justify-content: space-between;
   gap: 12px;
   padding: 10px 14px;
-  border-top: 1px solid #2d2d2d;
-  background: #181818;
-  color: #8c8c8c;
+  border-top: 1px solid var(--kn-border-default);
+  background: var(--kn-bg-app);
+  color: var(--kn-text-muted);
   font-size: 12px;
 }
 
@@ -423,13 +423,13 @@ function dismissCommandHint() {
 }
 
 .command-hint-copy kbd {
-  background: #242424;
-  border: 1px solid #3f3f3f;
+  background: var(--kn-bg-panel);
+  border: 1px solid var(--kn-border-strong);
   border-radius: 4px;
   padding: 1px 5px;
   font-family: inherit;
   font-size: 11px;
-  color: #b3b3b3;
+  color: var(--kn-text-secondary);
 }
 
 .command-hint-copy kbd + kbd {
@@ -439,7 +439,7 @@ function dismissCommandHint() {
 .command-hint-dismiss {
   border: 0;
   background: transparent;
-  color: #666;
+  color: var(--kn-text-muted);
   font-size: 16px;
   line-height: 1;
   cursor: pointer;
@@ -447,7 +447,7 @@ function dismissCommandHint() {
 }
 
 .command-hint-dismiss:hover {
-  color: #aaa;
+  color: var(--kn-text-muted);
 }
 
 .agent-setup {
@@ -465,7 +465,7 @@ function dismissCommandHint() {
 .setup-title {
   font-size: 15px;
   font-weight: 500;
-  color: #888;
+  color: var(--kn-text-muted);
   margin-bottom: 4px;
 }
 
@@ -477,8 +477,8 @@ function dismissCommandHint() {
 }
 
 .agent-card {
-  background: #222;
-  border: 1px solid #333;
+  background: var(--kn-bg-panel-raised);
+  border: 1px solid var(--kn-border-default);
   border-radius: 8px;
   padding: 14px 16px;
 }
@@ -492,7 +492,7 @@ function dismissCommandHint() {
 .agent-name {
   font-size: 13px;
   font-weight: 600;
-  color: #ccc;
+  color: var(--kn-text-secondary);
 }
 
 .agent-badge {
@@ -502,13 +502,13 @@ function dismissCommandHint() {
 }
 
 .agent-badge.installed {
-  color: #4ade80;
-  background: rgba(74, 222, 128, 0.1);
+  color: var(--kn-success);
+  background: var(--kn-success-bg);
 }
 
 .agent-badge.not-installed {
-  color: #888;
-  background: #2a2a2a;
+  color: var(--kn-text-muted);
+  background: var(--kn-bg-panel-raised);
 }
 
 .checkmark {
@@ -526,9 +526,9 @@ function dismissCommandHint() {
   flex: 1;
   font-size: 11px;
   font-family: monospace;
-  color: #aaa;
-  background: #1a1a1a;
-  border: 1px solid #333;
+  color: var(--kn-text-muted);
+  background: var(--kn-bg-input);
+  border: 1px solid var(--kn-border-default);
   border-radius: 4px;
   padding: 6px 10px;
   overflow-x: auto;
@@ -536,10 +536,10 @@ function dismissCommandHint() {
 }
 
 .copy-btn {
-  background: #2a2a2a;
-  border: 1px solid #444;
+  background: var(--kn-bg-panel-raised);
+  border: 1px solid var(--kn-border-strong);
   border-radius: 4px;
-  color: #aaa;
+  color: var(--kn-text-muted);
   font-size: 13px;
   padding: 4px 8px;
   cursor: pointer;
@@ -547,13 +547,13 @@ function dismissCommandHint() {
 }
 
 .copy-btn:hover {
-  background: #333;
-  color: #ccc;
+  background: var(--kn-bg-hover);
+  color: var(--kn-text-secondary);
 }
 
 .setup-hint {
   font-size: 12px;
-  color: #555;
+  color: var(--kn-text-muted);
 }
 
 .mobile-back-bar {
@@ -561,9 +561,9 @@ function dismissCommandHint() {
   align-items: center;
   gap: 6px;
   padding: 10px 14px;
-  background: #222;
-  border-bottom: 1px solid #333;
-  color: #4a9eff;
+  background: var(--kn-bg-panel-raised);
+  border-bottom: 1px solid var(--kn-border-default);
+  color: var(--kn-accent);
   font-size: 14px;
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;

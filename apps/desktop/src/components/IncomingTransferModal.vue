@@ -35,7 +35,7 @@ const { zIndex } = useModalZIndex();
 .modal-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.6);
+  background: var(--kn-overlay-scrim);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -44,21 +44,21 @@ const { zIndex } = useModalZIndex();
 .modal-card {
   width: 420px;
   max-width: 90vw;
-  background: #252525;
-  border: 1px solid #444;
+  background: var(--kn-bg-panel);
+  border: 1px solid var(--kn-border-strong);
   border-radius: 8px;
   padding: 16px;
 }
 
 .title {
   font-size: 14px;
-  color: #d8d8d8;
+  color: var(--kn-text-primary);
   margin-bottom: 8px;
 }
 
 .subtitle {
   font-size: 12px;
-  color: #a0a0a0;
+  color: var(--kn-text-muted);
   margin-bottom: 14px;
 }
 
@@ -71,38 +71,38 @@ const { zIndex } = useModalZIndex();
 .btn {
   padding: 5px 14px;
   border-radius: 4px;
-  border: 1px solid #444;
+  border: 1px solid var(--kn-border-strong);
   font-size: 12px;
   font-weight: 500;
   cursor: pointer;
-  background: #2a2a2a;
-  color: #ccc;
+  background: var(--kn-bg-panel-raised);
+  color: var(--kn-text-secondary);
   transition: background 0.15s;
 }
 
 .btn:hover {
-  background: #333;
+  background: var(--kn-bg-hover);
 }
 
 .btn-primary {
-  background: #0066cc;
-  border-color: #0077ee;
-  color: #fff;
+  background: var(--kn-accent);
+  border-color: var(--kn-accent-hover);
+  color: var(--kn-text-inverse);
 }
 
 .btn-primary:hover {
-  background: #0077ee;
+  background: var(--kn-accent-hover);
 }
 
 .btn-danger {
-  background: #333;
-  border-color: #555;
-  color: #ccc;
+  background: var(--kn-bg-hover);
+  border-color: var(--kn-border-strong);
+  color: var(--kn-text-secondary);
 }
 
 .btn-danger:hover {
-  background: #b62324;
-  border-color: #d13435;
-  color: #fff;
+  background: var(--kn-danger);
+  border-color: var(--kn-danger);
+  color: var(--kn-text-inverse);
 }
 </style>

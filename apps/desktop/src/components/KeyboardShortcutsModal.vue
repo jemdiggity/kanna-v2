@@ -266,14 +266,14 @@ function splitKeys(display: string): string[] {
 .modal-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.6);
+  background: var(--kn-overlay-scrim);
   display: flex;
   align-items: center;
   justify-content: center;
 }
 .shortcuts-modal {
-  background: #252525;
-  border: 1px solid #444;
+  background: var(--kn-bg-panel);
+  border: 1px solid var(--kn-border-strong);
   border-radius: 8px;
   padding: 20px 24px;
   width: 900px;
@@ -293,23 +293,23 @@ h3 { margin: 0 0 16px; font-size: 15px; font-weight: 600; }
   align-items: center;
 }
 .shortcut-entry--section h4 {
-  color: #888;
+  color: var(--kn-text-muted);
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.5px;
   margin: 0;
 }
 .shortcut-entry--item { font-size: 13px; }
-.shortcut-action { color: #ccc; margin-right: 8px; }
+.shortcut-action { color: var(--kn-text-secondary); margin-right: 8px; }
 .shortcut-keys { display: flex; gap: 3px; margin-left: auto; }
 kbd {
-  background: #333;
-  border: 1px solid #555;
+  background: var(--kn-bg-hover);
+  border: 1px solid var(--kn-border-strong);
   border-radius: 4px;
   padding: 2px 7px;
   font-family: -apple-system, BlinkMacSystemFont, sans-serif;
   font-size: 12px;
-  color: #aaa;
+  color: var(--kn-text-muted);
   min-width: 20px;
   text-align: center;
   line-height: 1.4;
@@ -320,10 +320,10 @@ kbd {
   justify-content: space-between;
   margin-top: 12px;
   padding-top: 12px;
-  border-top: 1px solid #333;
+  border-top: 1px solid var(--kn-border-default);
 }
 .toggle-link {
-  color: #58a6ff;
+  color: var(--kn-accent);
   font-size: 12px;
   cursor: pointer;
   user-select: none;
@@ -345,7 +345,7 @@ kbd {
   align-items: center;
   gap: 6px;
   font-size: 12px;
-  color: #888;
+  color: var(--kn-text-muted);
   cursor: pointer;
 }
 .startup-checkbox input { cursor: pointer; }

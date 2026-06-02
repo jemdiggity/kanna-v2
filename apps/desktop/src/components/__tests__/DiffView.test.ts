@@ -30,6 +30,7 @@ const diffMocks = vi.hoisted(() => ({
   actualParsePatchFiles: undefined as undefined | typeof import("@pierre/diffs").parsePatchFiles,
   parsePatchFilesMock: vi.fn<(typeof import("@pierre/diffs"))["parsePatchFiles"]>(),
 }));
+const workerPoolOptionsMock = vi.hoisted(() => vi.fn());
 
 vi.mock("../../invoke", () => ({
   invoke: (...args: [string, Record<string, unknown> | undefined]) => invokeMock(...args),
@@ -86,7 +87,12 @@ vi.mock("@pierre/diffs", async () => {
 });
 
 vi.mock("@pierre/diffs/worker", () => ({
-  getOrCreateWorkerPoolSingleton: vi.fn(() => null),
+  getOrCreateWorkerPoolSingleton: vi.fn((options) => {
+    workerPoolOptionsMock(options);
+    return {
+      setRenderOptions: vi.fn(async () => {}),
+    };
+  }),
 }));
 
 async function flushPromises() {
@@ -103,9 +109,47 @@ describe("DiffView", () => {
       diffMocks.parsePatchFilesMock.mockImplementation(diffMocks.actualParsePatchFiles);
     }
     renderMock.mockReset();
+    workerPoolOptionsMock.mockReset();
     clearContextShortcuts("diff");
     resetContext();
     document.body.innerHTML = "";
+  });
+
+  it("uses the effective light code theme for diff rendering and worker highlighting", async () => {
+    const { resetThemeRuntimeForTests, setSystemPrefersDark, setThemePreferences } = await import("../../theme/runtime");
+    resetThemeRuntimeForTests();
+    setSystemPrefersDark(false);
+    setThemePreferences({ appTheme: "light", codeTheme: "match" });
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "git_diff") return "diff --git a/example.ts b/example.ts";
+      return "";
+    });
+
+    const wrapper = mount(DiffView, {
+      props: {
+        repoPath: "/repo",
+        initialScope: "working",
+      },
+      attachTo: document.body,
+      global: {
+        mocks: {
+          $t: (key: string) => key,
+        },
+      },
+    });
+
+    await flushPromises();
+    await flushPromises();
+
+    expect(workerPoolOptionsMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        highlighterOptions: expect.objectContaining({ theme: "github-light" }),
+      }),
+    );
+    expect(renderMock.mock.calls.at(-1)?.[0]).toBeDefined();
+
+    wrapper.unmount();
+    resetThemeRuntimeForTests();
   });
 
   it("labels the combined working diff filter as staged plus unstaged", async () => {
@@ -267,7 +311,7 @@ describe("DiffView", () => {
     wrapper.unmount();
   });
 
-  it("renders a sticky filename header for each diff file", async () => {
+  it("renders a filename header using the tokenized header class", async () => {
     diffMocks.parsePatchFilesMock.mockReturnValueOnce([
       {
         files: [
@@ -303,8 +347,7 @@ describe("DiffView", () => {
     const header = wrapper.get(".diff-file-header");
     expect(header.text()).toBe("src/sticky.ts");
     expect(header.classes()).toContain("diff-file-header");
-    expect((header.element as HTMLElement).style.position).toBe("sticky");
-    expect((header.element as HTMLElement).style.top).toBe("-1px");
+    expect(header.attributes("style")).toBeUndefined();
 
     wrapper.unmount();
   });

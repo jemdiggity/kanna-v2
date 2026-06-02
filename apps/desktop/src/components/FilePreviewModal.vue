@@ -8,9 +8,13 @@ import { useInlineSearch } from "../composables/useInlineSearch";
 import { useModalZIndex } from "../composables/useModalZIndex";
 import { macOsTextInputAttrs } from "../utils/textInput";
 import { getSyntaxLanguageForPath } from "../utils/syntaxLanguage";
+import { getShikiTheme } from "../theme/theme";
+import { useThemeRuntime } from "../theme/runtime";
 
 const { t } = useI18n();
 const { zIndex, bringToFront } = useModalZIndex();
+const { effectiveCodeTheme } = useThemeRuntime();
+const shikiTheme = computed(() => getShikiTheme(effectiveCodeTheme.value));
 
 const props = defineProps<{
   filePath: string;
@@ -84,7 +88,7 @@ async function getHighlighter() {
   if (highlighter) return highlighter;
   const { createHighlighter } = await import("shiki");
   highlighter = await createHighlighter({
-    themes: ["github-dark"],
+    themes: ["github-dark", "github-light"],
     langs: [],
   });
   return highlighter;
@@ -109,12 +113,12 @@ async function getMarkdownIt() {
     linkify: true,
     typographer: false,
     highlight(str: string, lang: string) {
-      if (!lang) return hl.codeToHtml(str, { lang: "text", theme: "github-dark" });
+      if (!lang) return hl.codeToHtml(str, { lang: "text", theme: shikiTheme.value });
       // Languages are pre-loaded in the watcher before md.render() is called,
       // so getLoadedLanguages() is reliable here (no async needed).
       const loaded = hl.getLoadedLanguages();
       const useLang = loaded.includes(lang) ? lang : "text";
-      return hl.codeToHtml(str, { lang: useLang, theme: "github-dark" });
+      return hl.codeToHtml(str, { lang: useLang, theme: shikiTheme.value });
     },
   });
   md.use(taskLists, { enabled: false });
@@ -124,7 +128,7 @@ async function getMarkdownIt() {
 
 const renderedMarkdown = ref("");
 
-watch([renderMarkdown, content], async ([shouldRender, raw]) => {
+watch([renderMarkdown, content, effectiveCodeTheme], async ([shouldRender, raw]) => {
   if (!shouldRender || !raw) {
     renderedMarkdown.value = "";
     return;
@@ -181,6 +185,7 @@ function toggleMarkdownMode() {
 let highlightTimer: ReturnType<typeof setTimeout> | null = null;
 let prevContent = "";
 let prevLang = "";
+let prevTheme = shikiTheme.value;
 
 async function renderHighlighted(raw: string, lang: string, decos: typeof searchDecorations.value) {
   if (!raw) { highlighted.value = ""; return; }
@@ -188,7 +193,7 @@ async function renderHighlighted(raw: string, lang: string, decos: typeof search
     const hl = await getHighlighter();
     highlighted.value = hl.codeToHtml(raw, {
       lang,
-      theme: "github-dark",
+      theme: shikiTheme.value,
       decorations: decos,
       transformers: [{
         pre(node: any) {
@@ -204,12 +209,14 @@ async function renderHighlighted(raw: string, lang: string, decos: typeof search
   }
 }
 
-watch([content, currentLang, searchDecorations], ([raw, lang, decos]) => {
+watch([content, currentLang, searchDecorations, effectiveCodeTheme], ([raw, lang, decos]) => {
   if (highlightTimer) clearTimeout(highlightTimer);
-  // Content or language changed — render immediately
-  if (raw !== prevContent || lang !== prevLang) {
+  const theme = shikiTheme.value;
+  // Content, language, or theme changed — render immediately
+  if (raw !== prevContent || lang !== prevLang || theme !== prevTheme) {
     prevContent = raw;
     prevLang = lang;
+    prevTheme = theme;
     renderHighlighted(raw, lang, decos);
   } else {
     // Decoration-only change (search keystroke) — debounce 150ms
@@ -388,15 +395,15 @@ onMounted(() => {
 .modal-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.6);
+  background: var(--kn-overlay-scrim);
   display: flex;
   align-items: center;
   justify-content: center;
 }
 
 .preview-modal {
-  background: #1a1a1a;
-  border: 1px solid #444;
+  background: var(--kn-bg-panel);
+  border: 1px solid var(--kn-border-strong);
   border-radius: 8px;
   width: 90vw;
   height: 80vh;
@@ -412,15 +419,15 @@ onMounted(() => {
   align-items: center;
   justify-content: space-between;
   padding: 8px 14px;
-  border-bottom: 1px solid #333;
-  background: #1e1e1e;
+  border-bottom: 1px solid var(--kn-border-default);
+  background: var(--kn-bg-sidebar);
   flex-shrink: 0;
 }
 
 .file-path {
   font-family: "SF Mono", Menlo, monospace;
   font-size: 12px;
-  color: #ccc;
+  color: var(--kn-text-secondary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -430,18 +437,18 @@ onMounted(() => {
 
 .btn-open {
   padding: 3px 10px;
-  background: #2a2a2a;
-  border: 1px solid #444;
+  background: var(--kn-bg-panel-raised);
+  border: 1px solid var(--kn-border-strong);
   border-radius: 4px;
-  color: #aaa;
+  color: var(--kn-text-muted);
   font-size: 11px;
   cursor: pointer;
   flex-shrink: 0;
 }
 
 .btn-open:hover {
-  background: #333;
-  color: #fff;
+  background: var(--kn-bg-hover);
+  color: var(--kn-text-primary);
 }
 
 .header-actions {
@@ -453,10 +460,10 @@ onMounted(() => {
 
 .mode-badge {
   padding: 2px 8px;
-  background: #333;
-  border: 1px solid #444;
+  background: var(--kn-bg-hover);
+  border: 1px solid var(--kn-border-strong);
   border-radius: 4px;
-  color: #aaa;
+  color: var(--kn-text-muted);
   font-size: 11px;
   font-family: "SF Mono", Menlo, monospace;
   cursor: pointer;
@@ -464,14 +471,14 @@ onMounted(() => {
 }
 
 .mode-badge:hover {
-  background: #3a3a3a;
-  color: #ccc;
+  background: var(--kn-bg-hover);
+  color: var(--kn-text-secondary);
 }
 
 /* Rendered markdown styles */
 .markdown-rendered {
   padding: 24px 32px;
-  color: #e0e0e0;
+  color: var(--kn-text-primary);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
   font-size: 14px;
   line-height: 1.6;
@@ -483,25 +490,25 @@ onMounted(() => {
 .markdown-rendered :deep(h4),
 .markdown-rendered :deep(h5),
 .markdown-rendered :deep(h6) {
-  color: #e0e0e0;
+  color: var(--kn-text-primary);
   margin: 24px 0 12px;
   font-weight: 600;
   line-height: 1.3;
 }
 
-.markdown-rendered :deep(h1) { font-size: 1.8em; padding-bottom: 8px; border-bottom: 1px solid #333; }
-.markdown-rendered :deep(h2) { font-size: 1.4em; padding-bottom: 6px; border-bottom: 1px solid #333; }
+.markdown-rendered :deep(h1) { font-size: 1.8em; padding-bottom: 8px; border-bottom: 1px solid var(--kn-border-default); }
+.markdown-rendered :deep(h2) { font-size: 1.4em; padding-bottom: 6px; border-bottom: 1px solid var(--kn-border-default); }
 .markdown-rendered :deep(h3) { font-size: 1.2em; }
 .markdown-rendered :deep(h4) { font-size: 1.1em; }
 .markdown-rendered :deep(h5) { font-size: 1em; }
-.markdown-rendered :deep(h6) { font-size: 0.9em; color: #aaa; }
+.markdown-rendered :deep(h6) { font-size: 0.9em; color: var(--kn-text-muted); }
 
 .markdown-rendered :deep(p) {
   margin: 0 0 12px;
 }
 
 .markdown-rendered :deep(a) {
-  color: #58a6ff;
+  color: var(--kn-accent);
   text-decoration: none;
 }
 
@@ -510,15 +517,15 @@ onMounted(() => {
 }
 
 .markdown-rendered :deep(strong) {
-  color: #f0f0f0;
+  color: var(--kn-text-primary);
   font-weight: 600;
 }
 
 .markdown-rendered :deep(blockquote) {
   margin: 0 0 12px;
   padding: 4px 16px;
-  border-left: 3px solid #444;
-  color: #aaa;
+  border-left: 3px solid var(--kn-border-strong);
+  color: var(--kn-text-muted);
 }
 
 .markdown-rendered :deep(blockquote p) {
@@ -554,7 +561,7 @@ onMounted(() => {
 
 .markdown-rendered :deep(hr) {
   border: none;
-  border-top: 1px solid #333;
+  border-top: 1px solid var(--kn-border-default);
   margin: 24px 0;
 }
 
@@ -562,7 +569,7 @@ onMounted(() => {
 .markdown-rendered :deep(pre) {
   margin: 0 0 12px;
   padding: 12px 16px;
-  background: #252525 !important;
+  background: var(--kn-code-bg) !important;
   border-radius: 6px;
   overflow-x: auto;
 }
@@ -579,10 +586,10 @@ onMounted(() => {
 .markdown-rendered :deep(code) {
   font-family: "SF Mono", Menlo, monospace;
   font-size: 0.9em;
-  background: #2a2a2a;
+  background: var(--kn-bg-panel-raised);
   padding: 2px 6px;
   border-radius: 3px;
-  color: #e0e0e0;
+  color: var(--kn-text-primary);
 }
 
 /* Tables */
@@ -594,18 +601,18 @@ onMounted(() => {
 
 .markdown-rendered :deep(th),
 .markdown-rendered :deep(td) {
-  border: 1px solid #333;
+  border: 1px solid var(--kn-border-default);
   padding: 8px 12px;
   text-align: left;
 }
 
 .markdown-rendered :deep(th) {
-  background: #252525;
+  background: var(--kn-bg-panel);
   font-weight: 600;
 }
 
 .markdown-rendered :deep(tr:nth-child(even)) {
-  background: #1e1e1e;
+  background: var(--kn-bg-sidebar);
 }
 
 /* Images */
@@ -615,18 +622,18 @@ onMounted(() => {
 
 /* Strikethrough */
 .markdown-rendered :deep(del) {
-  color: #666;
+  color: var(--kn-text-muted);
 }
 
 .preview-status {
   padding: 24px;
-  color: #666;
+  color: var(--kn-text-muted);
   text-align: center;
   font-size: 13px;
 }
 
 .preview-error {
-  color: #f85149;
+  color: var(--kn-danger);
 }
 
 .preview-content {
@@ -639,7 +646,7 @@ onMounted(() => {
 .preview-content:not(.markdown-rendered) :deep(pre) {
   margin: 0;
   padding: 12px 16px;
-  background: #1a1a1a !important;
+  background: var(--kn-code-bg) !important;
   min-height: 100%;
 }
 
@@ -658,8 +665,8 @@ onMounted(() => {
 .line-numbers-gutter {
   display: flex;
   flex-direction: column;
-  background: #0f0f0f;
-  border-right: 1px solid #333;
+  background: var(--kn-bg-app);
+  border-right: 1px solid var(--kn-border-default);
   padding: 12px 8px;
   user-select: none;
   line-height: 1.5;
@@ -668,7 +675,7 @@ onMounted(() => {
 .line-number {
   font-family: "SF Mono", Menlo, monospace;
   font-size: 13px;
-  color: #555;
+  color: var(--kn-text-muted);
   text-align: right;
   min-width: 2em;
   padding-right: 8px;
@@ -682,7 +689,7 @@ onMounted(() => {
 .preview-content.with-line-numbers :deep(pre) {
   margin: 0;
   padding: 12px 16px;
-  background: #1a1a1a !important;
+  background: var(--kn-code-bg) !important;
   min-height: 100%;
 }
 
@@ -696,8 +703,8 @@ onMounted(() => {
   align-items: center;
   gap: 8px;
   padding: 6px 14px;
-  background: #1e1e1e;
-  border-top: 1px solid #333;
+  background: var(--kn-bg-sidebar);
+  border-top: 1px solid var(--kn-border-default);
   border-radius: 0 0 8px 8px;
   z-index: 10;
 }
@@ -705,7 +712,7 @@ onMounted(() => {
 .search-prefix {
   font-family: "SF Mono", Menlo, monospace;
   font-size: 12px;
-  color: #666;
+  color: var(--kn-text-muted);
   flex-shrink: 0;
 }
 
@@ -714,19 +721,19 @@ onMounted(() => {
   background: transparent;
   border: none;
   outline: none;
-  color: #e0e0e0;
+  color: var(--kn-text-primary);
   font-family: "SF Mono", Menlo, monospace;
   font-size: 12px;
 }
 
 .search-input::placeholder {
-  color: #555;
+  color: var(--kn-text-muted);
 }
 
 .search-count {
   font-family: "SF Mono", Menlo, monospace;
   font-size: 11px;
-  color: #888;
+  color: var(--kn-text-muted);
   flex-shrink: 0;
 }
 

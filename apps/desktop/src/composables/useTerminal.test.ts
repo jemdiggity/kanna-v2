@@ -47,6 +47,7 @@ interface PendingWrite {
 class FakeTerminal {
   cols = 80;
   rows = 24;
+  options: Record<string, unknown> = {};
   buffer = {
     active: {
       baseY: 0,
@@ -86,8 +87,9 @@ class FakeTerminal {
 const terminals: FakeTerminal[] = [];
 
 vi.mock("@xterm/xterm", () => ({
-  Terminal: vi.fn(function TerminalMock() {
+  Terminal: vi.fn(function TerminalMock(options?: Record<string, unknown>) {
     const terminal = new FakeTerminal();
+    terminal.options = { ...(options ?? {}) };
     terminals.push(terminal);
     return terminal;
   }),
@@ -346,6 +348,38 @@ describe("useTerminal", () => {
       "resize_session",
     ]);
     expect(terminal.reset).toHaveBeenCalledTimes(1);
+  });
+
+  it("updates xterm theme when the effective code theme changes", async () => {
+    const { resetThemeRuntimeForTests, setSystemPrefersDark, setThemePreferences } = await import("../theme/runtime");
+    resetThemeRuntimeForTests();
+    setSystemPrefersDark(false);
+    setThemePreferences({ appTheme: "dark", codeTheme: "match" });
+
+    const { useTerminal } = await import("./useTerminal");
+    const TestHarness = defineComponent({
+      setup() {
+        const { init } = useTerminal("session-1");
+        return { init };
+      },
+      render() {
+        return h("div", { ref: "host" });
+      },
+    });
+
+    const wrapper = mount(TestHarness);
+    const element = wrapper.element as HTMLElement;
+    (wrapper.vm as unknown as { init: (el: HTMLElement) => void }).init(element);
+
+    expect(terminals.at(-1)?.options.theme).toMatchObject({ background: "#1e1e1e" });
+
+    setThemePreferences({ appTheme: "light", codeTheme: "match" });
+    await Promise.resolve();
+
+    expect(terminals.at(-1)?.options.theme).toMatchObject({ background: "#f8fafc" });
+
+    wrapper.unmount();
+    resetThemeRuntimeForTests();
   });
 
   it("detaches the active task session stream when the terminal unmounts", async () => {

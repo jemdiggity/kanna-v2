@@ -185,10 +185,8 @@ function handleSearchKeydown(event: KeyboardEvent) {
   min-height: 100vh;
   margin: 0;
   padding: 56px 20px;
-  background:
-    radial-gradient(circle at top left, rgba(34, 98, 176, 0.22), transparent 35%),
-    linear-gradient(180deg, #101722 0%, #0c1118 100%);
-  color: #eef3f8;
+  background: var(--kn-bg-app);
+  color: var(--kn-text-primary);
   font-family: "SF Pro Display", "Inter Tight", "Segoe UI", sans-serif;
 }
 
@@ -199,7 +197,7 @@ function handleSearchKeydown(event: KeyboardEvent) {
 
 .eyebrow {
   margin: 0 0 8px;
-  color: #8eb8ff;
+  color: var(--kn-accent);
   font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.08em;
@@ -215,17 +213,17 @@ function handleSearchKeydown(event: KeyboardEvent) {
 .description {
   max-width: 56ch;
   margin: 12px 0 28px;
-  color: #aebacc;
+  color: var(--kn-text-secondary);
   font-size: 15px;
   line-height: 1.6;
 }
 
 .mock-modal {
   padding: 20px;
-  background: rgba(17, 24, 34, 0.92);
-  border: 1px solid rgba(118, 146, 181, 0.28);
+  background: var(--kn-bg-panel);
+  border: 1px solid var(--kn-border-strong);
   border-radius: 16px;
-  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.42);
+  box-shadow: var(--kn-shadow-modal);
 }
 
 .field {
@@ -235,7 +233,7 @@ function handleSearchKeydown(event: KeyboardEvent) {
 }
 
 .field-label {
-  color: #95a7bf;
+  color: var(--kn-text-muted);
   font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.04em;
@@ -254,10 +252,10 @@ function handleSearchKeydown(event: KeyboardEvent) {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  background: #131c28;
-  border: 1px solid #39506f;
+  background: var(--kn-bg-input);
+  border: 1px solid var(--kn-border-strong);
   border-radius: 10px;
-  color: #eef3f8;
+  color: var(--kn-text-primary);
   cursor: pointer;
   font-family: "JetBrains Mono", "SF Mono", Menlo, monospace;
   font-size: 12px;
@@ -265,11 +263,11 @@ function handleSearchKeydown(event: KeyboardEvent) {
 }
 
 .dropdown-trigger:hover {
-  border-color: #4d6d97;
+  border-color: var(--kn-accent);
 }
 
 .caret {
-  color: #8eb8ff;
+  color: var(--kn-accent);
   font-size: 12px;
 }
 
@@ -280,25 +278,25 @@ function handleSearchKeydown(event: KeyboardEvent) {
   right: 0;
   z-index: 10;
   overflow: hidden;
-  background: #0f1722;
-  border: 1px solid #39506f;
+  background: var(--kn-bg-panel);
+  border: 1px solid var(--kn-border-strong);
   border-radius: 12px;
-  box-shadow: 0 20px 48px rgba(0, 0, 0, 0.45);
+  box-shadow: var(--kn-shadow-modal);
 }
 
 .search-input {
   width: 100%;
   padding: 10px 12px;
-  background: #162231;
+  background: var(--kn-bg-input);
   border: 0;
-  border-bottom: 1px solid #24364c;
-  color: #eef3f8;
+  border-bottom: 1px solid var(--kn-border-default);
+  color: var(--kn-text-primary);
   font-size: 13px;
   outline: none;
 }
 
 .search-input::placeholder {
-  color: #6f85a0;
+  color: var(--kn-text-muted);
 }
 
 .branch-options {
@@ -313,7 +311,7 @@ function handleSearchKeydown(event: KeyboardEvent) {
   align-items: center;
   background: transparent;
   border: 0;
-  color: #dce6f3;
+  color: var(--kn-text-secondary);
   cursor: pointer;
   font-family: "JetBrains Mono", "SF Mono", Menlo, monospace;
   font-size: 12px;
@@ -322,17 +320,17 @@ function handleSearchKeydown(event: KeyboardEvent) {
 
 .branch-option:hover,
 .branch-option.active {
-  background: #1d3147;
+  background: var(--kn-bg-hover);
 }
 
 .branch-option.selected {
-  color: #8fc7ff;
+  color: var(--kn-accent);
   font-weight: 600;
 }
 
 .empty-state {
   padding: 16px 12px;
-  color: #8298b2;
+  color: var(--kn-text-muted);
   font-size: 13px;
 }
 

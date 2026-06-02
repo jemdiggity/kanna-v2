@@ -41,25 +41,25 @@ const { toasts, dismiss } = useToast()
   padding: 8px 12px;
   border-radius: 4px;
   border-left: 3px solid;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
-  color: #e0e0e0;
+  box-shadow: var(--kn-shadow-modal);
+  color: var(--kn-text-primary);
   font-size: 13px;
   pointer-events: auto;
 }
 
 .toast.info {
-  background: #1a2430;
-  border-left-color: #58a6ff;
+  background: var(--kn-bg-accent-subtle);
+  border-left-color: var(--kn-accent);
 }
 
 .toast.warning {
-  background: #2a2a1a;
-  border-left-color: #e3b341;
+  background: var(--kn-warning-bg);
+  border-left-color: var(--kn-warning);
 }
 
 .toast.error {
-  background: #2a1a1a;
-  border-left-color: #f85149;
+  background: var(--kn-danger-bg);
+  border-left-color: var(--kn-danger);
 }
 
 .toast-message {
@@ -72,7 +72,7 @@ const { toasts, dismiss } = useToast()
 .toast-dismiss {
   background: none;
   border: none;
-  color: #888;
+  color: var(--kn-text-muted);
   cursor: pointer;
   font-size: 16px;
   line-height: 1;
@@ -81,7 +81,7 @@ const { toasts, dismiss } = useToast()
 }
 
 .toast-dismiss:hover {
-  color: #e0e0e0;
+  color: var(--kn-text-primary);
 }
 
 /* Suppress TransitionGroup move animation */

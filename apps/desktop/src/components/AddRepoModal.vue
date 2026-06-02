@@ -572,31 +572,31 @@ function switchTab(tab: "create" | "import") {
 .modal-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.6);
+  background: var(--kn-overlay-scrim);
   display: flex;
   align-items: center;
   justify-content: center;
 }
 
 .modal {
-  background: #252525;
-  border: 1px solid #444;
+  background: var(--kn-bg-panel);
+  border: 1px solid var(--kn-border-strong);
   border-radius: 8px;
   width: 480px;
   max-width: 90vw;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  box-shadow: var(--kn-shadow-modal);
 }
 
 .tabs {
   display: flex;
-  border-bottom: 1px solid #444;
+  border-bottom: 1px solid var(--kn-border-strong);
 }
 
 .tab {
   flex: 1;
   padding: 12px 16px;
   font-size: 13px;
-  color: #888;
+  color: var(--kn-text-muted);
   background: none;
   border: none;
   border-bottom: 2px solid transparent;
@@ -605,14 +605,14 @@ function switchTab(tab: "create" | "import") {
 }
 
 .tab:hover {
-  color: #ccc;
+  color: var(--kn-text-secondary);
 }
 
 .tab.active {
-  color: #fff;
+  color: var(--kn-accent);
   font-weight: 500;
-  border-bottom-color: #0066cc;
-  background: rgba(0, 102, 204, 0.08);
+  border-bottom-color: var(--kn-accent);
+  background: var(--kn-bg-accent-subtle);
 }
 
 .modal-body {
@@ -621,21 +621,21 @@ function switchTab(tab: "create" | "import") {
 
 .text-input {
   width: 100%;
-  background: #1a1a1a;
-  border: 1px solid #444;
+  background: var(--kn-bg-input);
+  border: 1px solid var(--kn-border-strong);
   border-radius: 4px;
-  color: #e0e0e0;
+  color: var(--kn-text-primary);
   font-size: 13px;
   padding: 10px;
   outline: none;
 }
 
 .text-input:focus {
-  border-color: #0066cc;
+  border-color: var(--kn-accent);
 }
 
 .text-input::placeholder {
-  color: #555;
+  color: var(--kn-text-muted);
 }
 
 .text-input:disabled {
@@ -644,7 +644,7 @@ function switchTab(tab: "create" | "import") {
 
 .path-hint {
   font-size: 11px;
-  color: #555;
+  color: var(--kn-text-muted);
   padding: 6px 2px 0;
 }
 
@@ -654,19 +654,19 @@ function switchTab(tab: "create" | "import") {
 }
 
 .change-link {
-  color: #0066cc;
+  color: var(--kn-accent);
   cursor: pointer;
   margin-left: 4px;
 }
 
 .change-link:hover {
-  color: #0077ee;
+  color: var(--kn-accent-hover);
   text-decoration: underline;
 }
 
 .resolved-url {
   font-size: 11px;
-  color: #0066cc;
+  color: var(--kn-accent);
   padding: 4px 2px 0;
 }
 
@@ -679,11 +679,11 @@ function switchTab(tab: "create" | "import") {
 }
 
 .repo-name-label {
-  color: #555;
+  color: var(--kn-text-muted);
 }
 
 .repo-name-value {
-  color: #ccc;
+  color: var(--kn-text-secondary);
   font-family: "JetBrains Mono", "SF Mono", Menlo, monospace;
 }
 
@@ -701,16 +701,16 @@ function switchTab(tab: "create" | "import") {
   white-space: nowrap;
   font-family: "JetBrains Mono", "SF Mono", Menlo, monospace;
   font-size: 12px;
-  color: #ccc;
-  background: #1a1a1a;
-  border: 1px solid #444;
+  color: var(--kn-text-secondary);
+  background: var(--kn-bg-input);
+  border: 1px solid var(--kn-border-strong);
   border-radius: 4px;
   padding: 10px;
 }
 
 .error-inline {
   font-size: 11px;
-  color: #f85149;
+  color: var(--kn-danger);
   padding: 6px 2px 0;
 }
 
@@ -723,7 +723,7 @@ function switchTab(tab: "create" | "import") {
 
 .hint {
   font-size: 11px;
-  color: #555;
+  color: var(--kn-text-muted);
 }
 
 .modal-actions {
@@ -734,29 +734,29 @@ function switchTab(tab: "create" | "import") {
 .btn {
   padding: 5px 14px;
   border-radius: 4px;
-  border: 1px solid #444;
+  border: 1px solid var(--kn-border-strong);
   font-size: 12px;
   font-weight: 500;
   cursor: pointer;
 }
 
 .btn-cancel {
-  background: #2a2a2a;
-  color: #ccc;
+  background: var(--kn-bg-panel-raised);
+  color: var(--kn-text-secondary);
 }
 
 .btn-cancel:hover {
-  background: #333;
+  background: var(--kn-bg-hover);
 }
 
 .btn-primary {
-  background: #0066cc;
-  border-color: #0077ee;
-  color: #fff;
+  background: var(--kn-accent);
+  border-color: var(--kn-accent-hover);
+  color: var(--kn-text-inverse);
 }
 
 .btn-primary:hover {
-  background: #0077ee;
+  background: var(--kn-accent-hover);
 }
 
 .btn-primary:disabled {
@@ -768,8 +768,8 @@ function switchTab(tab: "create" | "import") {
   display: inline-block;
   width: 12px;
   height: 12px;
-  border: 2px solid rgba(255, 255, 255, 0.3);
-  border-top-color: #fff;
+  border: 2px solid var(--kn-border-strong);
+  border-top-color: var(--kn-text-inverse);
   border-radius: 50%;
   animation: spin 0.6s linear infinite;
   vertical-align: middle;

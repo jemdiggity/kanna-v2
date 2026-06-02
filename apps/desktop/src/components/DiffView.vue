@@ -26,8 +26,12 @@ import {
   getOrCreateWorkerPoolSingleton,
   type WorkerPoolManager,
 } from "@pierre/diffs/worker";
+import { getDiffTheme } from "../theme/theme";
+import { useThemeRuntime } from "../theme/runtime";
 
 const { t } = useI18n();
+const { effectiveCodeTheme } = useThemeRuntime();
+const diffTheme = computed(() => getDiffTheme(effectiveCodeTheme.value));
 
 registerContextShortcuts("diff", [
   { label: t('diffView.shortcutSearch'), display: "/", groupKey: "shortcuts.groupSearch" },
@@ -313,7 +317,15 @@ function syncViewStateFromProps() {
 }
 
 async function initWorkerPool() {
-  if (workerPool) return workerPool;
+  if (workerPool) {
+    await (workerPool as WorkerPoolManager & {
+      setRenderOptions?: (options: { theme: string; lineDiffType: "word" }) => Promise<void>;
+    }).setRenderOptions?.({
+      theme: diffTheme.value,
+      lineDiffType: "word",
+    });
+    return workerPool;
+  }
   try {
     workerPool = getOrCreateWorkerPoolSingleton({
       poolOptions: {
@@ -324,7 +336,7 @@ async function initWorkerPool() {
           ),
       },
       highlighterOptions: {
-        theme: "github-dark",
+        theme: diffTheme.value,
         lineDiffType: "word",
       },
     });
@@ -498,20 +510,6 @@ function createDiffFileWrapper(entry: { id: string; displayPath: string }): HTML
   header.className = "diff-file-header";
   header.textContent = entry.displayPath;
   header.title = entry.displayPath;
-  header.style.position = "sticky";
-  header.style.top = "-1px";
-  header.style.zIndex = "2";
-  header.style.padding = "7px 12px";
-  header.style.borderBottom = "1px solid #30363d";
-  header.style.background = "#161b22";
-  header.style.color = "#e6edf3";
-  header.style.fontFamily = '"SF Mono", Menlo, monospace';
-  header.style.fontSize = "12px";
-  header.style.lineHeight = "1.4";
-  header.style.whiteSpace = "nowrap";
-  header.style.overflow = "hidden";
-  header.style.textOverflow = "ellipsis";
-  header.style.boxSizing = "border-box";
   wrapper.appendChild(header);
 
   return wrapper;
@@ -545,7 +543,7 @@ function renderDiffFile(
 
   const instance = new FileDiff(
     {
-      theme: "github-dark",
+      theme: diffTheme.value,
       diffStyle: "unified",
       diffIndicators: "classic",
       disableFileHeader: true,
@@ -731,6 +729,14 @@ watch(
   { immediate: false }
 );
 
+watch(effectiveCodeTheme, () => {
+  void initWorkerPool().then(() => {
+    if (diffContent.value.trim()) {
+      return loadDiff({ preserveCurrentScroll: true });
+    }
+  });
+});
+
 const scopeOrder: DiffScope[] = ["working", "branch"];
 
 async function setScope(nextScope: DiffScope) {
@@ -908,7 +914,7 @@ defineExpose({ refresh: loadDiff });
 .diff-view {
   flex: 1;
   overflow: auto;
-  background: #1a1a1a;
+  background: var(--kn-code-bg);
   font-size: 13px;
   min-height: 0;
   display: flex;
@@ -920,8 +926,8 @@ defineExpose({ refresh: loadDiff });
   display: flex;
   align-items: center;
   padding: 6px 12px;
-  border-bottom: 1px solid #333;
-  background: #1e1e1e;
+  border-bottom: 1px solid var(--kn-border-default);
+  background: var(--kn-bg-sidebar);
   flex-shrink: 0;
 }
 
@@ -932,9 +938,9 @@ defineExpose({ refresh: loadDiff });
 
 .scope-selector button {
   padding: 3px 12px;
-  background: #2a2a2a;
-  border: 1px solid #444;
-  color: #888;
+  background: var(--kn-bg-panel-raised);
+  border: 1px solid var(--kn-border-strong);
+  color: var(--kn-text-muted);
   font-size: 11px;
   cursor: pointer;
 }
@@ -944,17 +950,17 @@ defineExpose({ refresh: loadDiff });
 .scope-selector button:not(:first-child) { border-left: none; }
 
 .scope-selector button.active {
-  background: #0066cc;
-  border-color: #0077ee;
-  color: #fff;
+  background: var(--kn-accent);
+  border-color: var(--kn-accent-hover);
+  color: var(--kn-text-inverse);
 }
 
 .staged-toggle {
   margin-left: 12px;
   padding: 3px 10px;
-  background: #2a2a2a;
-  border: 1px solid #444;
-  color: #888;
+  background: var(--kn-bg-panel-raised);
+  border: 1px solid var(--kn-border-strong);
+  color: var(--kn-text-muted);
   font-size: 11px;
   border-radius: 4px;
   cursor: pointer;
@@ -962,13 +968,13 @@ defineExpose({ refresh: loadDiff });
 
 .diff-status {
   padding: 24px;
-  color: #666;
+  color: var(--kn-text-muted);
   text-align: center;
   font-size: 13px;
 }
 
 .diff-error {
-  color: #f85149;
+  color: var(--kn-danger);
 }
 
 .diff-container {
@@ -982,6 +988,23 @@ defineExpose({ refresh: loadDiff });
   margin-bottom: 2px;
 }
 
+.diff-container :deep(.diff-file-header) {
+  position: sticky;
+  top: -1px;
+  z-index: 2;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--kn-border-default);
+  background: var(--kn-bg-panel);
+  color: var(--kn-text-primary);
+  font-family: "SF Mono", Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  box-sizing: border-box;
+}
+
 .diff-container :deep(.diff-file-header.diff-search-match) {
   background: rgba(255, 196, 61, 0.22);
   box-shadow: inset 0 0 0 1px rgba(255, 196, 61, 0.3);
@@ -993,7 +1016,7 @@ defineExpose({ refresh: loadDiff });
 }
 
 .diff-container :deep(diffs-container) {
-  color-scheme: dark;
+  color-scheme: light dark;
 }
 
 .search-bar {
@@ -1001,14 +1024,14 @@ defineExpose({ refresh: loadDiff });
   align-items: center;
   gap: 8px;
   padding: 8px 12px;
-  border-top: 1px solid #333;
-  background: #151515;
+  border-top: 1px solid var(--kn-border-default);
+  background: var(--kn-bg-app);
   flex-shrink: 0;
 }
 
 .search-prefix {
   font-family: "SF Mono", Menlo, monospace;
-  color: #8b949e;
+  color: var(--kn-text-muted);
   font-size: 13px;
 }
 
@@ -1018,17 +1041,17 @@ defineExpose({ refresh: loadDiff });
   background: transparent;
   border: none;
   outline: none;
-  color: #e6edf3;
+  color: var(--kn-text-primary);
   font-size: 13px;
 }
 
 .search-input::placeholder {
-  color: #6e7681;
+  color: var(--kn-text-muted);
 }
 
 .search-count {
   font-size: 12px;
-  color: #8b949e;
+  color: var(--kn-text-muted);
   white-space: nowrap;
 }
 </style>

@@ -453,19 +453,19 @@ function handleKeydown(e: KeyboardEvent) {
 .modal-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.6);
+  background: var(--kn-overlay-scrim);
   display: flex;
   align-items: center;
   justify-content: center;
 }
 
 .modal {
-  background: #252525;
-  border: 1px solid #444;
+  background: var(--kn-bg-panel);
+  border: 1px solid var(--kn-border-strong);
   border-radius: 8px;
   width: 480px;
   max-width: 90vw;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  box-shadow: var(--kn-shadow-modal);
 }
 
 .modal-header {
@@ -479,7 +479,7 @@ function handleKeydown(e: KeyboardEvent) {
   margin: 0;
   font-size: 14px;
   font-weight: 600;
-  color: #e0e0e0;
+  color: var(--kn-text-primary);
 }
 
 .agent-provider {
@@ -488,12 +488,12 @@ function handleKeydown(e: KeyboardEvent) {
   border: none;
   font-size: 11px;
   font-weight: 600;
-  color: #b8b8b8;
+  color: var(--kn-text-secondary);
   cursor: pointer;
 }
 
 .agent-provider:hover {
-  color: #d6d6d6;
+  color: var(--kn-text-primary);
 }
 
 .modal-body {
@@ -502,10 +502,10 @@ function handleKeydown(e: KeyboardEvent) {
 
 .prompt-input {
   width: 100%;
-  background: #1a1a1a;
-  border: 1px solid #444;
+  background: var(--kn-bg-input);
+  border: 1px solid var(--kn-border-strong);
   border-radius: 4px;
-  color: #e0e0e0;
+  color: var(--kn-text-primary);
   font-family: "JetBrains Mono", "SF Mono", Menlo, monospace;
   font-size: 13px;
   padding: 10px;
@@ -515,11 +515,11 @@ function handleKeydown(e: KeyboardEvent) {
 }
 
 .prompt-input:focus {
-  border-color: #0066cc;
+  border-color: var(--kn-accent);
 }
 
 .prompt-input::placeholder {
-  color: #555;
+  color: var(--kn-text-muted);
 }
 
 .sr-only {
@@ -543,7 +543,7 @@ function handleKeydown(e: KeyboardEvent) {
 
 .pipeline-label {
   font-size: 11px;
-  color: #888;
+  color: var(--kn-text-muted);
   white-space: nowrap;
 }
 
@@ -565,7 +565,7 @@ function handleKeydown(e: KeyboardEvent) {
 }
 
 .base-branch-value {
-  color: #e0e0e0;
+  color: var(--kn-text-primary);
   font-family: "JetBrains Mono", "SF Mono", Menlo, monospace;
   font-size: 12px;
   min-width: 0;
@@ -576,20 +576,20 @@ function handleKeydown(e: KeyboardEvent) {
 }
 
 .base-branch-value.invalid {
-  color: #d08b65;
+  color: var(--kn-warning);
 }
 
 .change-link {
   padding: 0;
   background: transparent;
   border: none;
-  color: #0066cc;
+  color: var(--kn-accent);
   cursor: pointer;
   font-size: 11px;
 }
 
 .change-link:hover {
-  color: #0077ee;
+  color: var(--kn-accent-hover);
   text-decoration: underline;
 }
 
@@ -600,30 +600,30 @@ function handleKeydown(e: KeyboardEvent) {
   right: 0;
   z-index: 4;
   overflow: hidden;
-  background: #1a1a1a;
-  border: 1px solid #444;
+  background: var(--kn-bg-panel);
+  border: 1px solid var(--kn-border-strong);
   border-radius: 8px;
-  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.42);
+  box-shadow: var(--kn-shadow-modal);
 }
 
 .text-input {
   width: 100%;
-  background: #1a1a1a;
-  border: 1px solid #444;
+  background: var(--kn-bg-input);
+  border: 1px solid var(--kn-border-strong);
   border-radius: 4px;
-  color: #e0e0e0;
+  color: var(--kn-text-primary);
   font-size: 12px;
   padding: 6px 8px;
   outline: none;
 }
 
 .text-input:focus {
-  border-color: #0066cc;
+  border-color: var(--kn-accent);
 }
 
 .base-branch-search {
   border: none;
-  border-bottom: 1px solid #333;
+  border-bottom: 1px solid var(--kn-border-default);
   border-radius: 0;
 }
 
@@ -646,7 +646,7 @@ function handleKeydown(e: KeyboardEvent) {
   align-items: center;
   background: transparent;
   border: none;
-  color: #b8b8b8;
+  color: var(--kn-text-secondary);
   cursor: pointer;
   font-family: "JetBrains Mono", "SF Mono", Menlo, monospace;
   font-size: 12px;
@@ -655,11 +655,11 @@ function handleKeydown(e: KeyboardEvent) {
 
 .base-branch-option:hover,
 .base-branch-option.active {
-  background: #2d2d2d;
+  background: var(--kn-bg-panel-raised);
 }
 
 .base-branch-option.selected {
-  color: #e0e0e0;
+  color: var(--kn-text-primary);
   font-weight: 600;
 }
 
@@ -672,7 +672,7 @@ function handleKeydown(e: KeyboardEvent) {
 
 .hint {
   font-size: 11px;
-  color: #555;
+  color: var(--kn-text-muted);
 }
 
 .modal-actions {
@@ -683,29 +683,29 @@ function handleKeydown(e: KeyboardEvent) {
 .btn {
   padding: 5px 14px;
   border-radius: 4px;
-  border: 1px solid #444;
+  border: 1px solid var(--kn-border-strong);
   font-size: 12px;
   font-weight: 500;
   cursor: pointer;
 }
 
 .btn-cancel {
-  background: #2a2a2a;
-  color: #ccc;
+  background: var(--kn-bg-panel-raised);
+  color: var(--kn-text-secondary);
 }
 
 .btn-cancel:hover {
-  background: #333;
+  background: var(--kn-bg-hover);
 }
 
 .btn-primary {
-  background: #0066cc;
-  border-color: #0077ee;
-  color: #fff;
+  background: var(--kn-accent);
+  border-color: var(--kn-accent-hover);
+  color: var(--kn-text-inverse);
 }
 
 .btn-primary:hover {
-  background: #0077ee;
+  background: var(--kn-accent-hover);
 }
 
 .btn-primary:disabled {

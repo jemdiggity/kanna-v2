@@ -47,4 +47,50 @@ describe("preferences", () => {
     expect(values).toContain("5");
     expect(values).toContain("30");
   });
+
+  it("persists app and terminal code theme preferences", async () => {
+    await client.executeSync(buildSelectorKeydownScript(".modal-overlay", { key: "Escape" }));
+    await client.waitForNoElement(".prefs-panel", 2_000);
+
+    await client.executeSync(buildGlobalKeydownScript({ key: ",", meta: true }));
+    await client.waitForElement(".prefs-panel", 2_000);
+
+    await client.executeSync(`
+      const appTheme = document.querySelector('[data-testid="app-theme-select"]');
+      const codeTheme = document.querySelector('[data-testid="code-theme-select"]');
+      appTheme.value = "light";
+      appTheme.dispatchEvent(new Event("change", { bubbles: true }));
+      codeTheme.value = "dark";
+      codeTheme.dispatchEvent(new Event("change", { bubbles: true }));
+      return true;
+    `);
+    await client.executeAsync(`
+      const cb = arguments[arguments.length - 1];
+      setTimeout(() => cb(true), 250);
+    `);
+
+    const attrs = await client.executeSync<{ theme?: string; codeTheme?: string }>(`
+      return {
+        theme: document.documentElement.dataset.theme,
+        codeTheme: document.documentElement.dataset.codeTheme,
+      };
+    `);
+    expect(attrs).toEqual({ theme: "light", codeTheme: "dark" });
+
+    await client.executeSync(buildSelectorKeydownScript(".modal-overlay", { key: "Escape" }));
+    await client.waitForNoElement(".prefs-panel", 2_000);
+    await client.deleteSession();
+    await client.createSession();
+
+    const persisted = await client.executeSync<{ appTheme?: string; codeTheme?: string }>(`
+      const unwrap = (value) => value && value.__v_isRef ? value.value : value;
+      return window.__KANNA_E2E__?.setupState
+        ? {
+            appTheme: unwrap(window.__KANNA_E2E__.setupState.store?.appTheme),
+            codeTheme: unwrap(window.__KANNA_E2E__.setupState.store?.codeTheme),
+          }
+        : {};
+    `);
+    expect(persisted).toEqual({ appTheme: "light", codeTheme: "dark" });
+  });
 });

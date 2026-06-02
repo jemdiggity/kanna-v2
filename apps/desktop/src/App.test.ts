@@ -48,6 +48,7 @@ const currentWebviewWindowListenHandlers = new Map<string, (event: unknown) => v
 let closeRequestedHandler: ((event: { preventDefault: () => void }) => void | Promise<void>) | null = null;
 const cloudTasksMock = vi.hoisted(() => vi.fn(async () => ({ repos: [], items: [] })));
 const scheduleStartupBackupMock = vi.hoisted(() => vi.fn(async () => {}));
+const nativeSetThemeMock = vi.hoisted(() => vi.fn(async () => {}));
 const dbSelectMock = vi.fn(async () => []);
 const dbMock = {
   select: dbSelectMock,
@@ -70,6 +71,8 @@ const store = {
   ideCommand: "code",
   devLingerTerminals: false,
   hideShortcutsOnStartup: true,
+  appTheme: "dark",
+  codeTheme: "match",
   init: vi.fn(async () => {}),
   createItem: vi.fn(async () => {}),
   recordIncomingTransfer: vi.fn(async () => {}),
@@ -190,6 +193,10 @@ vi.mock("@tauri-apps/api/window", () => ({
       };
     }),
   }),
+}));
+
+vi.mock("@tauri-apps/api/app", () => ({
+  setTheme: nativeSetThemeMock,
 }));
 
 vi.mock("./listen", () => ({
@@ -378,6 +385,16 @@ const TreeExplorerModalTestStub = defineComponent({
   `,
 });
 
+const PreferencesPanelThemeUpdateStub = defineComponent({
+  name: "PreferencesPanel",
+  emits: ["update"],
+  template: `
+    <button data-testid="set-app-light" @click="$emit('update', 'appTheme', 'light')">
+      light
+    </button>
+  `,
+});
+
 function buildIncomingTransferEvent() {
   return {
     payload: {
@@ -548,6 +565,9 @@ describe("App", () => {
     store.sortedItemsForCurrentRepo = [];
     store.sortedItemsAllRepos = [];
     store.getStageOrder.mockReturnValue(["in progress", "pr", "merge"]);
+    store.appTheme = "dark";
+    store.codeTheme = "match";
+    nativeSetThemeMock.mockClear();
     listenHandlers.clear();
     currentWebviewWindowListenHandlers.clear();
     closeRequestedHandler = null;
@@ -615,6 +635,36 @@ describe("App", () => {
     const wrapper = await mountApp(SidebarWithRepoStub);
 
     expect(scheduleStartupBackupMock).not.toHaveBeenCalled();
+
+    wrapper.unmount();
+  });
+
+  it("applies persisted light app theme and explicit dark code theme to the document", async () => {
+    store.appTheme = "light";
+    store.codeTheme = "dark";
+
+    const wrapper = await mountApp(SidebarWithRepoStub);
+
+    expect(document.documentElement.dataset.theme).toBe("light");
+    expect(document.documentElement.dataset.codeTheme).toBe("dark");
+    expect(nativeSetThemeMock).toHaveBeenCalledWith("light");
+
+    wrapper.unmount();
+  });
+
+  it("syncs app theme preference changes to the native title bar", async () => {
+    const wrapper = await mountAppWithOverrides(SidebarWithRepoStub, {
+      PreferencesPanel: PreferencesPanelThemeUpdateStub,
+    });
+    nativeSetThemeMock.mockClear();
+
+    capturedKeyboardActions?.openPreferences();
+    await nextTick();
+    await wrapper.get('[data-testid="set-app-light"]').trigger("click");
+    await flushPromises();
+
+    expect(store.savePreference).toHaveBeenCalledWith("appTheme", "light");
+    expect(nativeSetThemeMock).toHaveBeenCalledWith("light");
 
     wrapper.unmount();
   });
