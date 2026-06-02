@@ -51,8 +51,14 @@ export async function publishDesktopLanTaskSnapshot(db: DbHandle): Promise<void>
 
 export async function listDesktopLanTasks(options: {
   localRepos?: Array<{ repo: Repo; remoteUrlHash: string | null }>;
+  currentDesktopId?: string | null;
 } = {}): Promise<DesktopCloudSnapshot> {
-  const raw = await invoke<unknown>("list_transfer_task_snapshots").catch(() => []);
+  const [raw, currentDesktopId] = await Promise.all([
+    invoke<unknown>("list_transfer_task_snapshots").catch(() => []),
+    options.currentDesktopId === undefined
+      ? resolveLanDesktopId()
+      : Promise.resolve(options.currentDesktopId),
+  ]);
   const snapshots = Array.isArray(raw) ? raw : [];
   const tasks: DesktopCloudTaskSnapshot[] = [];
 
@@ -70,7 +76,7 @@ export async function listDesktopLanTasks(options: {
     }
   }
 
-  const mapped = mapDesktopCloudTasks(tasks, options);
+  const mapped = mapDesktopCloudTasks(tasks, { ...options, currentDesktopId });
   for (const ref of Object.values(mapped.terminalRefs)) {
     ref.transport = "lan";
   }

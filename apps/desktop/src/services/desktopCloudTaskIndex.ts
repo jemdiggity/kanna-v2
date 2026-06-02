@@ -67,6 +67,7 @@ export interface DesktopCloudTaskIndexOptions {
   }>;
   localItems?: Array<Pick<PipelineItem, "id" | "repo_id" | "stage" | "closed_at">>;
   activeDesktopIds?: Set<string> | null;
+  currentDesktopId?: string | null;
 }
 
 let firestorePromise: Promise<Firestore | null> | null = null;
@@ -107,18 +108,21 @@ export async function listDesktopCloudTasks(
   if (!firestore) return { repos: [], items: [], terminalRefs: {} };
 
   const tasksRef = collection(firestore, "users", uid, "tasks");
-  const [snapshot, activeDesktopIds] = await Promise.all([
+  const [snapshot, activeDesktopIds, currentDesktopId] = await Promise.all([
     getDocs(query(tasksRef, where("closedAt", "==", null))),
     options.activeDesktopIds === undefined
       ? listActiveDesktopIdsViaRelay().catch(() => null)
       : Promise.resolve(options.activeDesktopIds),
+    options.currentDesktopId === undefined
+      ? resolveDesktopId()
+      : Promise.resolve(options.currentDesktopId),
   ]);
   const taskSnapshots = snapshot.docs
     .map((doc) => doc.data() as DesktopCloudTaskSnapshot)
     .filter((task) => activeDesktopIds ? activeDesktopIds.has(task.ownerDesktopId) : true);
   return mapDesktopCloudTasks(
     taskSnapshots,
-    options,
+    { ...options, currentDesktopId },
   );
 }
 
@@ -141,8 +145,10 @@ export function mapDesktopCloudTasks(
       .filter((item) => item.stage === "done" || item.closed_at !== null)
       .map((item) => `${item.repo_id}:${item.id}`),
   );
+  const currentDesktopId = options.currentDesktopId?.trim() || null;
 
   for (const snapshot of sortByUpdatedAt(snapshots)) {
+    if (currentDesktopId && snapshot.ownerDesktopId === currentDesktopId) continue;
     const localRepo = snapshot.repo.remoteUrlHash
       ? localRepoByRemoteHash.get(snapshot.repo.remoteUrlHash)
       : undefined;
@@ -232,4 +238,15 @@ function normalizeActivity(activity: string | undefined): PipelineItem["activity
 
 function normalizeAgentProvider(provider: string | null | undefined): PipelineItem["agent_provider"] {
   return provider === "copilot" || provider === "codex" ? provider : "claude";
+}
+
+async function resolveDesktopId(): Promise<string | null> {
+  const mobileStatus = await invoke<{ desktopId?: string }>("mobile_server_status").catch(() => null);
+  if (mobileStatus?.desktopId?.trim()) return mobileStatus.desktopId.trim();
+
+  const envId = await invoke<string>("read_env_var", { name: "KANNA_TRANSFER_PEER_ID" }).catch(() => "");
+  if (envId.trim()) return envId.trim();
+
+  const dbName = await invoke<string>("read_env_var", { name: "KANNA_DB_NAME" }).catch(() => "");
+  return dbName.trim() || null;
 }
