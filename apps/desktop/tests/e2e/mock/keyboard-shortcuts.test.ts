@@ -69,6 +69,37 @@ describe("keyboard shortcuts", () => {
     );
   }
 
+  async function refreshItemsAndSelect(repoId: string, itemId: string): Promise<void> {
+    const result = await client.executeAsync<string>(
+      `const cb = arguments[arguments.length - 1];
+       const ctx = ${CTX_SCRIPT};
+       const selectRepo = ctx.handleSelectRepo || ctx.store.selectRepo.bind(ctx.store);
+       const selectItem = ctx.handleSelectItem || ctx.store.selectItem.bind(ctx.store);
+       Promise.resolve(ctx.refreshAllItems())
+         .then(function() { return selectRepo(${JSON.stringify(repoId)}); })
+         .then(function() { return selectItem(${JSON.stringify(itemId)}); })
+         .then(function() { cb("ok"); })
+         .catch(function(e) { cb("err:" + (e && e.message ? e.message : e)); });`,
+    );
+    expect(result).toBe("ok");
+    await waitForSelection({ repoId, itemId });
+  }
+
+  async function injectCloudSnapshot(
+    snapshot: { repos: Array<Record<string, unknown>>; items: Array<Record<string, unknown>>; terminalRefs?: Record<string, unknown> },
+  ): Promise<void> {
+    const result = await client.executeSync<string>(
+      `const ctx = ${CTX_SCRIPT};
+       const snapshot = ${JSON.stringify(snapshot)};
+       const cloudSnapshot = ctx.cloudSnapshot;
+       if (!cloudSnapshot) return "cloud-snapshot-unavailable";
+       if (cloudSnapshot.__v_isRef) cloudSnapshot.value = snapshot;
+       else Object.assign(cloudSnapshot, snapshot);
+       return "ok";`,
+    );
+    expect(result).toBe("ok");
+  }
+
   async function ensureRepoImported() {
     if (repoImported) return;
     await importTestRepo(client, testRepoPath, "keyboard-test");
@@ -353,6 +384,49 @@ describe("keyboard shortcuts", () => {
     await waitForSelection({ repoId, itemId: inProgressTaskId });
   });
 
+  it("task shortcuts traverse local repo boundaries in sidebar order", async () => {
+    await resetDatabase(client);
+    await client.executeSync("location.reload()");
+    await client.waitForAppReady();
+    await dismissStartupShortcutsModal(client);
+
+    const repoOneId = await importTestRepo(client, testRepoPath, "keyboard-cross-repo-one");
+    const repoTwoId = await importTestRepo(client, secondTestRepoPath, "keyboard-cross-repo-two");
+    repoImported = true;
+
+    await execDb(client, "UPDATE repo SET sort_order = 0 WHERE id = ?", [repoOneId]);
+    await execDb(client, "UPDATE repo SET sort_order = 1 WHERE id = ?", [repoTwoId]);
+
+    const repoOneNewest = "e2e-cross-repo-one-newest";
+    const repoOneOldest = "e2e-cross-repo-one-oldest";
+    const repoTwoNewest = "e2e-cross-repo-two-newest";
+    const repoTwoOldest = "e2e-cross-repo-two-oldest";
+    const rows = [
+      [repoOneNewest, repoOneId, "Repo one newest", "2026-04-17T10:01:00.000Z"],
+      [repoOneOldest, repoOneId, "Repo one oldest", "2026-04-17T10:00:00.000Z"],
+      [repoTwoNewest, repoTwoId, "Repo two newest", "2026-04-17T10:01:00.000Z"],
+      [repoTwoOldest, repoTwoId, "Repo two oldest", "2026-04-17T10:00:00.000Z"],
+    ] as const;
+
+    for (const row of rows) {
+      await execDb(
+        client,
+        `INSERT INTO pipeline_item
+           (id, repo_id, prompt, stage, activity, created_at, updated_at, agent_type, tags)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [row[0], row[1], row[2], "in progress", "idle", row[3], row[3], "sdk", "[]"],
+      );
+    }
+
+    await refreshItemsAndSelect(repoOneId, repoOneOldest);
+
+    await pressKey("ArrowDown", { meta: true, alt: true });
+    await waitForSelection({ repoId: repoTwoId, itemId: repoTwoNewest });
+
+    await pressKey("ArrowUp", { meta: true, alt: true });
+    await waitForSelection({ repoId: repoOneId, itemId: repoOneOldest });
+  });
+
   it("uses native repo-navigation events to navigate repos", async () => {
     await resetDatabase(client);
     await client.executeSync("location.reload()");
@@ -514,6 +588,174 @@ describe("keyboard shortcuts", () => {
 
     await pressKey("R", { meta: true, shift: true });
     await waitForSelection({ repoId, itemId: "shortcut-read-near-newer" });
+  });
+
+  it("read and unread shortcuts traverse local repo boundaries", async () => {
+    await resetDatabase(client);
+    await client.executeSync("location.reload()");
+    await client.waitForAppReady();
+    await dismissStartupShortcutsModal(client);
+
+    const repoOneId = await importTestRepo(client, testRepoPath, "keyboard-activity-local-one");
+    const repoTwoId = await importTestRepo(client, secondTestRepoPath, "keyboard-activity-local-two");
+    repoImported = true;
+
+    await execDb(client, "UPDATE repo SET sort_order = 0 WHERE id = ?", [repoOneId]);
+    await execDb(client, "UPDATE repo SET sort_order = 1 WHERE id = ?", [repoTwoId]);
+
+    const currentTaskId = "shortcut-cross-local-current";
+    const rows = [
+      [currentTaskId, repoOneId, "Current local task", "idle", "2026-03-31T03:00:00.000Z"],
+      ["shortcut-cross-local-unread-older", repoTwoId, "Cross local unread older", "unread", "2026-03-31T02:00:00.000Z"],
+      ["shortcut-cross-local-unread-newer", repoTwoId, "Cross local unread newer", "unread", "2026-03-31T04:00:00.000Z"],
+      ["shortcut-cross-local-read-older", repoTwoId, "Cross local read older", "idle", "2026-03-31T01:00:00.000Z"],
+      ["shortcut-cross-local-read-newer", repoTwoId, "Cross local read newer", "idle", "2026-03-31T05:00:00.000Z"],
+    ] as const;
+
+    for (const row of rows) {
+      await execDb(
+        client,
+        "INSERT INTO pipeline_item (id, repo_id, prompt, stage, activity, created_at, updated_at, agent_type, tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [row[0], row[1], row[2], "in progress", row[3], row[4], row[4], "sdk", "[]"],
+      );
+    }
+
+    await refreshItemsAndSelect(repoOneId, currentTaskId);
+
+    await pressKey("u", { meta: true });
+    await waitForSelection({ repoId: repoTwoId, itemId: "shortcut-cross-local-unread-older" });
+
+    await refreshItemsAndSelect(repoOneId, currentTaskId);
+    await pressKey("U", { meta: true, shift: true });
+    await waitForSelection({ repoId: repoTwoId, itemId: "shortcut-cross-local-unread-newer" });
+
+    await refreshItemsAndSelect(repoOneId, currentTaskId);
+    await pressKey("r", { meta: true });
+    await waitForSelection({ repoId: repoTwoId, itemId: "shortcut-cross-local-read-older" });
+
+    await refreshItemsAndSelect(repoOneId, currentTaskId);
+    await pressKey("R", { meta: true, shift: true });
+    await waitForSelection({ repoId: repoTwoId, itemId: "shortcut-cross-local-read-newer" });
+  });
+
+  it("read and unread shortcuts traverse remote tasks in remote-only repos", async () => {
+    await resetDatabase(client);
+    await client.executeSync("location.reload()");
+    await client.waitForAppReady();
+    await dismissStartupShortcutsModal(client);
+
+    const localRepoId = await importTestRepo(client, testRepoPath, "keyboard-activity-remote-local");
+    repoImported = true;
+
+    const currentTaskId = "shortcut-cross-remote-current";
+    await execDb(
+      client,
+      "INSERT INTO pipeline_item (id, repo_id, prompt, stage, activity, created_at, updated_at, agent_type, tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      [
+        currentTaskId,
+        localRepoId,
+        "Current local anchor",
+        "in progress",
+        "idle",
+        "2026-03-31T03:00:00.000Z",
+        "2026-03-31T03:00:00.000Z",
+        "sdk",
+        "[]",
+      ],
+    );
+
+    const remoteRepoId = "cloud:keyboard-activity-remote";
+    const remoteRows = [
+      ["remote-unread-older", "Remote unread older", "unread", "2026-03-31T02:00:00.000Z"],
+      ["remote-unread-newer", "Remote unread newer", "unread", "2026-03-31T04:00:00.000Z"],
+      ["remote-read-older", "Remote read older", "idle", "2026-03-31T01:00:00.000Z"],
+      ["remote-read-newer", "Remote read newer", "idle", "2026-03-31T05:00:00.000Z"],
+    ] as const;
+    const remoteItemId = (suffix: string) => `${remoteRepoId}:${suffix}`;
+    const remoteSnapshot = {
+      repos: [{
+        id: remoteRepoId,
+        path: "cloud",
+        name: "Keyboard Remote Activity",
+        remote_url: "https://example.invalid/kanna/keyboard-activity-remote.git",
+        remoteUrlHash: null,
+        default_branch: "main",
+        hidden: 0,
+        sort_order: 1,
+        created_at: "2026-03-31T00:00:00.000Z",
+        last_opened_at: "2026-03-31T05:00:00.000Z",
+      }],
+      items: remoteRows.map(([suffix, title, activity, createdAt]) => ({
+        id: remoteItemId(suffix),
+        repo_id: remoteRepoId,
+        prompt: title,
+        pipeline: "cloud",
+        stage: "in progress",
+        tags: "[]",
+        pr_number: null,
+        pr_url: null,
+        branch: `task-${suffix}`,
+        activity,
+        activity_changed_at: createdAt,
+        unread_at: null,
+        port_offset: null,
+        port_env: null,
+        pinned: 0,
+        pin_order: null,
+        display_name: title,
+        issue_number: null,
+        issue_title: null,
+        closed_at: null,
+        agent_session_id: null,
+        base_ref: "origin/main",
+        agent_provider: "codex",
+        agent_type: "pty",
+        previous_stage: null,
+        stage_result: null,
+        teardown_started_at: null,
+        last_output_preview: null,
+        active_post_action: null,
+        created_at: createdAt,
+        updated_at: createdAt,
+      })),
+      terminalRefs: Object.fromEntries(remoteRows.map(([suffix]) => [
+        remoteItemId(suffix),
+        {
+          ownerDesktopId: "keyboard-remote-peer",
+          ownerLocalTaskId: suffix,
+          transport: "cloud",
+        },
+      ])),
+    };
+
+    try {
+      await refreshItemsAndSelect(localRepoId, currentTaskId);
+
+      await injectCloudSnapshot(remoteSnapshot);
+      await pressKey("u", { meta: true });
+      await waitForSelection({ repoId: remoteRepoId, itemId: remoteItemId("remote-unread-older") });
+
+      await injectCloudSnapshot(remoteSnapshot);
+      await refreshItemsAndSelect(localRepoId, currentTaskId);
+      await injectCloudSnapshot(remoteSnapshot);
+      await pressKey("U", { meta: true, shift: true });
+      await waitForSelection({ repoId: remoteRepoId, itemId: remoteItemId("remote-unread-newer") });
+
+      await injectCloudSnapshot(remoteSnapshot);
+      await refreshItemsAndSelect(localRepoId, currentTaskId);
+      await injectCloudSnapshot(remoteSnapshot);
+      await pressKey("r", { meta: true });
+      await waitForSelection({ repoId: remoteRepoId, itemId: remoteItemId("remote-read-older") });
+
+      await injectCloudSnapshot(remoteSnapshot);
+      await refreshItemsAndSelect(localRepoId, currentTaskId);
+      await injectCloudSnapshot(remoteSnapshot);
+      await pressKey("R", { meta: true, shift: true });
+      await waitForSelection({ repoId: remoteRepoId, itemId: remoteItemId("remote-read-newer") });
+    } finally {
+      await injectCloudSnapshot({ repos: [], items: [], terminalRefs: {} });
+      await refreshItemsAndSelect(localRepoId, currentTaskId).catch(() => undefined);
+    }
   });
 
   it("unread shortcuts fall back to relative read tasks when no unread tasks exist", async () => {

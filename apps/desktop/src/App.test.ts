@@ -1615,6 +1615,102 @@ describe("App", () => {
     expect(store.selectItem).toHaveBeenCalledWith("task-pr", { previousItemId: "task-progress" });
   });
 
+  it("navigates task shortcuts across repo boundaries in sidebar order", async () => {
+    store.repos = [
+      { id: "repo-1", path: "/tmp/repo-1", name: "repo 1" },
+      { id: "repo-2", path: "/tmp/repo-2", name: "repo 2" },
+    ];
+    store.selectedRepoId = "repo-1";
+    store.selectedItemId = "task-one";
+    store.selectedRepo = { id: "repo-1", path: "/tmp/repo-1", name: "repo 1" };
+    store.items = [
+      {
+        id: "task-one",
+        repo_id: "repo-1",
+        prompt: "Repo one task",
+        stage: "in progress",
+        tags: "[]",
+        pinned: 0,
+        pin_order: null,
+        created_at: "2026-04-17T10:00:00.000Z",
+        updated_at: "2026-04-17T10:00:00.000Z",
+      },
+      {
+        id: "task-two",
+        repo_id: "repo-2",
+        prompt: "Repo two task",
+        stage: "in progress",
+        tags: "[]",
+        pinned: 0,
+        pin_order: null,
+        created_at: "2026-04-17T10:01:00.000Z",
+        updated_at: "2026-04-17T10:01:00.000Z",
+      },
+    ];
+
+    await mountApp(SidebarWithRepoStub);
+    expect(capturedKeyboardActions).not.toBeNull();
+
+    await capturedKeyboardActions?.navigateDown();
+    await flushPromises();
+
+    expect(store.selectRepo).toHaveBeenCalledWith("repo-2");
+    expect(store.selectItem).toHaveBeenCalledWith("task-two", { previousItemId: "task-one" });
+  });
+
+  it("navigates unread task shortcuts across repo boundaries before falling back to read tasks", async () => {
+    store.repos = [
+      { id: "repo-1", path: "/tmp/repo-1", name: "repo 1" },
+      { id: "repo-2", path: "/tmp/repo-2", name: "repo 2" },
+    ];
+    store.selectedRepoId = "repo-1";
+    store.selectedItemId = "task-read";
+    store.selectedRepo = { id: "repo-1", path: "/tmp/repo-1", name: "repo 1" };
+    store.currentItem = {
+      id: "task-read",
+      repo_id: "repo-1",
+      activity: "idle",
+      created_at: "2026-04-17T10:00:00.000Z",
+      tags: "[]",
+      stage: "in progress",
+    };
+    store.items = [
+      {
+        id: "task-read",
+        repo_id: "repo-1",
+        prompt: "Repo one read task",
+        stage: "in progress",
+        activity: "idle",
+        tags: "[]",
+        pinned: 0,
+        pin_order: null,
+        created_at: "2026-04-17T10:00:00.000Z",
+        updated_at: "2026-04-17T10:00:00.000Z",
+      },
+      {
+        id: "task-unread-other-repo",
+        repo_id: "repo-2",
+        prompt: "Repo two unread task",
+        stage: "in progress",
+        activity: "unread",
+        tags: "[]",
+        pinned: 0,
+        pin_order: null,
+        created_at: "2026-04-17T10:01:00.000Z",
+        updated_at: "2026-04-17T10:01:00.000Z",
+      },
+    ];
+
+    await mountApp(SidebarWithRepoStub);
+    expect(capturedKeyboardActions).not.toBeNull();
+
+    await capturedKeyboardActions?.goToOldestUnread();
+    await flushPromises();
+
+    expect(store.selectRepo).toHaveBeenCalledWith("repo-2");
+    expect(store.selectItem).toHaveBeenCalledWith("task-unread-other-repo", { previousItemId: "task-read" });
+  });
+
   it("navigates repos when the native repo-navigation event arrives", async () => {
     store.repos = [
       { id: "repo-1", path: "/tmp/repo-1", name: "repo 1" },

@@ -7,12 +7,12 @@ export interface SelectableTask {
 export type TaskSelectionMode = "oldest" | "newest";
 export type TaskSelectionActivity = NonNullable<SelectableTask["activity"]>;
 
-export function selectTaskByActivity(
-  items: readonly SelectableTask[],
+export function selectTaskByActivity<T extends SelectableTask>(
+  items: readonly T[],
   mode: TaskSelectionMode,
   activity: TaskSelectionActivity,
   anchorCreatedAt?: string | null,
-): SelectableTask | null {
+): T | null {
   const matches = items.filter((item) => item.activity === activity);
   if (matches.length === 0) return null;
 
