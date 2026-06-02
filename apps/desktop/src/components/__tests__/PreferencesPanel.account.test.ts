@@ -56,6 +56,8 @@ function mountPreferences() {
         locale: "en",
         devLingerTerminals: false,
         defaultAgentProvider: "claude",
+        appTheme: "dark",
+        codeTheme: "match",
       },
     },
     global: {

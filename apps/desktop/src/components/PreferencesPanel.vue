@@ -8,6 +8,7 @@ import MobileAccessPanel from './MobileAccessPanel.vue'
 import { macOsTextInputAttrs } from '../utils/textInput'
 import { getConfiguredDesktopAuthSession } from '../services/desktopAuthSdk'
 import type { DesktopAuthSession, DesktopAuthState } from '../services/desktopAuth'
+import type { AppThemePreference, CodeThemePreference } from '../theme/theme'
 
 useI18n()
 const { zIndex } = useModalZIndex()
@@ -36,6 +37,8 @@ defineProps<{
     locale: string
     devLingerTerminals: boolean
     defaultAgentProvider: AgentProvider
+    appTheme: AppThemePreference
+    codeTheme: CodeThemePreference
   }
 }>()
 
@@ -198,6 +201,32 @@ defineExpose({ cycleTab })
             <option value="en">English</option>
             <option value="ja">日本語</option>
             <option value="ko">한국어</option>
+          </select>
+        </div>
+
+        <div class="pref-row">
+          <label>{{ $t('preferences.theme') }}</label>
+          <select
+            data-testid="app-theme-select"
+            :value="preferences.appTheme"
+            @change="emit('update', 'appTheme', ($event.target as HTMLSelectElement).value)"
+          >
+            <option value="system">{{ $t('preferences.themeSystem') }}</option>
+            <option value="light">{{ $t('preferences.themeLight') }}</option>
+            <option value="dark">{{ $t('preferences.themeDark') }}</option>
+          </select>
+        </div>
+
+        <div class="pref-row">
+          <label>{{ $t('preferences.codeTheme') }}</label>
+          <select
+            data-testid="code-theme-select"
+            :value="preferences.codeTheme"
+            @change="emit('update', 'codeTheme', ($event.target as HTMLSelectElement).value)"
+          >
+            <option value="match">{{ $t('preferences.codeThemeMatch') }}</option>
+            <option value="light">{{ $t('preferences.codeThemeLight') }}</option>
+            <option value="dark">{{ $t('preferences.codeThemeDark') }}</option>
           </select>
         </div>
 

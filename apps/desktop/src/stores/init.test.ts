@@ -1,6 +1,6 @@
 import { computed, ref } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { DbHandle, PipelineItem, Repo } from "@kanna/db";
+import { getSetting, type DbHandle, type PipelineItem, type Repo } from "@kanna/db";
 import { createStoreContext, createStoreState } from "./state";
 import { createInitApi } from "./init";
 
@@ -158,6 +158,7 @@ function getSessionCreatedHandler(): (event: unknown) => Promise<void> {
 describe("createInitApi", () => {
   beforeEach(() => {
     mockState.reset();
+    vi.mocked(getSetting).mockResolvedValue(null);
   });
 
   it("restores unblocked tasks through the shared blocked-task restore path on startup", async () => {
@@ -303,6 +304,68 @@ describe("createInitApi", () => {
       selectedRepoId: "repo-1",
       selectedItemId: "task-current",
     });
+  });
+
+  it("loads valid theme preferences from settings", async () => {
+    vi.mocked(getSetting).mockImplementation(async (_db, key) => {
+      if (key === "appTheme") return "light";
+      if (key === "codeTheme") return "dark";
+      return null;
+    });
+
+    const state = createStoreState();
+    const services = {
+      loadInitialData: vi.fn(async () => {}),
+    };
+    const context = createStoreContext(state, {
+      toasts: ref([]),
+      dismiss: vi.fn(),
+      info: vi.fn(),
+      warning: vi.fn(),
+      error: vi.fn(),
+    }, services);
+    const initApi = createInitApi(context, {} as import("./ports").PortsStore, {
+      checkUnblocked: vi.fn(async () => {}),
+      handleAgentFinished: vi.fn(),
+      startBlockedTask: vi.fn(async () => {}),
+      restoreUnblockedTask: vi.fn(async () => {}),
+    } as unknown as Parameters<typeof createInitApi>[2]);
+
+    await initApi.init(createDb());
+
+    expect(state.appTheme.value).toBe("light");
+    expect(state.codeTheme.value).toBe("dark");
+  });
+
+  it("falls back when stored theme preferences are invalid", async () => {
+    vi.mocked(getSetting).mockImplementation(async (_db, key) => {
+      if (key === "appTheme") return "sepia";
+      if (key === "codeTheme") return "solarized";
+      return null;
+    });
+
+    const state = createStoreState();
+    const services = {
+      loadInitialData: vi.fn(async () => {}),
+    };
+    const context = createStoreContext(state, {
+      toasts: ref([]),
+      dismiss: vi.fn(),
+      info: vi.fn(),
+      warning: vi.fn(),
+      error: vi.fn(),
+    }, services);
+    const initApi = createInitApi(context, {} as import("./ports").PortsStore, {
+      checkUnblocked: vi.fn(async () => {}),
+      handleAgentFinished: vi.fn(),
+      startBlockedTask: vi.fn(async () => {}),
+      restoreUnblockedTask: vi.fn(async () => {}),
+    } as unknown as Parameters<typeof createInitApi>[2]);
+
+    await initApi.init(createDb());
+
+    expect(state.appTheme.value).toBe("dark");
+    expect(state.codeTheme.value).toBe("match");
   });
 
   it("consumes successful auto-stage results once when duplicate stage-complete events arrive", async () => {

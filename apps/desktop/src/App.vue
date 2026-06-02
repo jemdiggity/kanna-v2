@@ -68,6 +68,17 @@ import { NEW_CUSTOM_TASK_PROMPT } from "@kanna/core";
 import type { CustomTaskConfig } from "@kanna/core";
 import type { DynamicCommand } from "./components/CommandPaletteModal.vue";
 import {
+  applyCurrentDocumentTheme,
+  setSystemPrefersDark,
+  setThemePreferences,
+} from "./theme/runtime";
+import {
+  DEFAULT_APP_THEME,
+  DEFAULT_CODE_THEME,
+  normalizeAppThemePreference,
+  normalizeCodeThemePreference,
+} from "./theme/theme";
+import {
   DEFAULT_SIDEBAR_WIDTH,
   MAX_SIDEBAR_WIDTH,
   MIN_SIDEBAR_WIDTH,
@@ -205,6 +216,8 @@ const preferences = reactive({
   locale: "en",
   devLingerTerminals: false,
   defaultAgentProvider: "claude" as AgentProvider,
+  appTheme: DEFAULT_APP_THEME,
+  codeTheme: DEFAULT_CODE_THEME,
 });
 const localReposForCloudMatching = computedAsync(async () => {
   return Promise.all(store.repos.map(async (repo) => {
@@ -1830,6 +1843,47 @@ const currentBlockers = computedAsync(async () => {
   return store.listBlockersForItem(item.id);
 }, []);
 
+let colorSchemeQuery: MediaQueryList | null = null;
+
+function syncThemeRuntime() {
+  setThemePreferences({
+    appTheme: preferences.appTheme,
+    codeTheme: preferences.codeTheme,
+  });
+  applyCurrentDocumentTheme();
+}
+
+function handleSystemThemeChange(event: MediaQueryListEvent) {
+  setSystemPrefersDark(event.matches);
+  syncThemeRuntime();
+}
+
+function startSystemThemeListener() {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+    setSystemPrefersDark(false);
+    syncThemeRuntime();
+    return;
+  }
+
+  colorSchemeQuery = window.matchMedia("(prefers-color-scheme: dark)");
+  setSystemPrefersDark(colorSchemeQuery.matches);
+  if (typeof colorSchemeQuery.addEventListener === "function") {
+    colorSchemeQuery.addEventListener("change", handleSystemThemeChange);
+  } else {
+    colorSchemeQuery.addListener?.(handleSystemThemeChange);
+  }
+  syncThemeRuntime();
+}
+
+function stopSystemThemeListener() {
+  if (typeof colorSchemeQuery?.removeEventListener === "function") {
+    colorSchemeQuery.removeEventListener("change", handleSystemThemeChange);
+  } else {
+    colorSchemeQuery?.removeListener?.(handleSystemThemeChange);
+  }
+  colorSchemeQuery = null;
+}
+
 async function trackCommandUsage(commandId: string) {
   const counts = { ...commandUsageCounts.value };
   counts[commandId] = (counts[commandId] || 0) + 1;
@@ -1853,6 +1907,12 @@ async function handlePreferenceUpdate(key: string, value: string) {
     preferences.devLingerTerminals = value === "true";
   } else if (key === "defaultAgentProvider") {
     preferences.defaultAgentProvider = (value === "copilot" ? "copilot" : value === "codex" ? "codex" : "claude");
+  } else if (key === "appTheme") {
+    preferences.appTheme = normalizeAppThemePreference(value);
+    syncThemeRuntime();
+  } else if (key === "codeTheme") {
+    preferences.codeTheme = normalizeCodeThemePreference(value);
+    syncThemeRuntime();
   }
 }
 
@@ -1866,6 +1926,9 @@ onMounted(async () => {
 
   await restoreSidebarWidth();
   await store.init(db);
+  preferences.appTheme = normalizeAppThemePreference(store.appTheme);
+  preferences.codeTheme = normalizeCodeThemePreference(store.codeTheme);
+  startSystemThemeListener();
   await nextTick();
   if (windowWorkspace && windowWorkspace.bootstrap.windowId === "main") {
     scheduleStartupBackup(dbName);
@@ -2136,6 +2199,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("dragover", suppressFileDropNavigation);
   window.removeEventListener("drop", suppressFileDropNavigation);
   document.removeEventListener("file-link-activate", handleFileLinkActivate);
+  stopSystemThemeListener();
   appUpdate.dispose();
 });
 </script>

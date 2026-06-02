@@ -55,6 +55,11 @@ interface RepoRow {
   sort_order: number | null;
 }
 
+interface SettingRow {
+  key: string;
+  value: string;
+}
+
 function normalizeSql(query: string): string {
   return query.replace(/\s+/g, " ").trim();
 }
@@ -65,17 +70,20 @@ function createMigrationDb(
 ): DbHandle & {
   pipelineItems: PipelineItemRow[];
   repos: RepoRow[];
+  settings: SettingRow[];
   schemaMigrations: SchemaMigrationRow[];
   activityLogDrops: number;
 } {
   const pipelineItems = initialRows.map((row) => ({ ...row }));
   const repos = initialRepos.map((repo) => ({ ...repo }));
+  const settings: SettingRow[] = [];
   const schemaMigrations: SchemaMigrationRow[] = [];
   let activityLogDrops = 0;
 
   return {
     pipelineItems,
     repos,
+    settings,
     schemaMigrations,
     get activityLogDrops() {
       return activityLogDrops;
@@ -98,6 +106,18 @@ function createMigrationDb(
         if (repo) repo.sort_order = sortOrder;
       } else if (sql === "DROP TABLE IF EXISTS activity_log") {
         activityLogDrops++;
+      } else if (sql === "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)") {
+        const [key, value] = bindValues as [string, string];
+        if (!settings.some((setting) => setting.key === key)) {
+          settings.push({ key, value });
+        }
+      } else if (sql.startsWith("INSERT OR IGNORE INTO settings (key, value) VALUES")) {
+        const matches = [...query.matchAll(/\('([^']+)', '([^']+)'\)/g)];
+        for (const [, key, value] of matches) {
+          if (!settings.some((setting) => setting.key === key)) {
+            settings.push({ key, value });
+          }
+        }
       } else if (sql === `UPDATE pipeline_item SET stage = 'in_progress' WHERE stage = 'queued'`) {
         for (const item of pipelineItems) {
           if (item.stage === "queued") item.stage = "in_progress";
@@ -247,6 +267,18 @@ describe("runMigrations", () => {
 
     expect(db.activityLogDrops).toBe(1);
     expect(db.schemaMigrations.length).toBeGreaterThan(0);
+  });
+
+  it("adds default theme preferences for existing databases", async () => {
+    await runMigrations(db);
+
+    expect(db.settings).toEqual(
+      expect.arrayContaining([
+        { key: "appTheme", value: "dark" },
+        { key: "codeTheme", value: "match" },
+      ]),
+    );
+    expect(db.schemaMigrations).toContainEqual({ id: "017_theme_preferences" });
   });
 
   it("does not overwrite a canonical pr stage from stale legacy tags", async () => {

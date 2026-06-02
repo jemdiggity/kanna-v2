@@ -15,6 +15,7 @@ import {
 import { formatAppWindowTitle, type AppBuildInfo } from "./windowTitle";
 import { isTaskTearingDown } from "./taskStages";
 import { requireService, type StoreContext } from "./state";
+import { normalizeAppThemePreference, normalizeCodeThemePreference } from "../theme/theme";
 
 export interface InitApi {
   init: (db: DbHandle) => Promise<void>;
@@ -87,6 +88,10 @@ export function createInitApi(
     context.state.hideShortcutsOnStartup.value = hideShortcuts === "true";
     const linger = await getSetting(context.requireDb(), "dev.lingerTerminals");
     context.state.devLingerTerminals.value = linger === "true";
+    const appTheme = await getSetting(context.requireDb(), "appTheme");
+    context.state.appTheme.value = normalizeAppThemePreference(appTheme);
+    const codeTheme = await getSetting(context.requireDb(), "codeTheme");
+    context.state.codeTheme.value = normalizeCodeThemePreference(codeTheme);
   }
 
   async function savePreference(key: string, value: string) {

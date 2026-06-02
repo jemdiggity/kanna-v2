@@ -70,6 +70,8 @@ const store = {
   ideCommand: "code",
   devLingerTerminals: false,
   hideShortcutsOnStartup: true,
+  appTheme: "dark",
+  codeTheme: "match",
   init: vi.fn(async () => {}),
   createItem: vi.fn(async () => {}),
   recordIncomingTransfer: vi.fn(async () => {}),
@@ -548,6 +550,8 @@ describe("App", () => {
     store.sortedItemsForCurrentRepo = [];
     store.sortedItemsAllRepos = [];
     store.getStageOrder.mockReturnValue(["in progress", "pr", "merge"]);
+    store.appTheme = "dark";
+    store.codeTheme = "match";
     listenHandlers.clear();
     currentWebviewWindowListenHandlers.clear();
     closeRequestedHandler = null;
@@ -615,6 +619,18 @@ describe("App", () => {
     const wrapper = await mountApp(SidebarWithRepoStub);
 
     expect(scheduleStartupBackupMock).not.toHaveBeenCalled();
+
+    wrapper.unmount();
+  });
+
+  it("applies persisted light app theme and explicit dark code theme to the document", async () => {
+    store.appTheme = "light";
+    store.codeTheme = "dark";
+
+    const wrapper = await mountApp(SidebarWithRepoStub);
+
+    expect(document.documentElement.dataset.theme).toBe("light");
+    expect(document.documentElement.dataset.codeTheme).toBe("dark");
 
     wrapper.unmount();
   });
