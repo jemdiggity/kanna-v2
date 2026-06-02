@@ -60,15 +60,15 @@ async function spawnShell(sessionId: string, cwd: string, _prompt: string, _cols
 .modal-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.6);
+  background: var(--kn-overlay-scrim);
   display: flex;
   align-items: center;
   justify-content: center;
 }
 
 .shell-modal {
-  background: #1a1a1a;
-  border: 1px solid #444;
+  background: var(--kn-terminal-bg);
+  border: 1px solid var(--kn-border-strong);
   border-radius: 8px;
   width: 90vw;
   height: 80vh;

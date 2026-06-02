@@ -175,13 +175,12 @@ async function restartUpdate() {
   max-height: min(640px, calc(100vh - 32px));
   box-sizing: border-box;
   padding: 16px;
-  border: 1px solid rgba(88, 166, 255, 0.28);
+  border: 1px solid var(--kn-border-strong);
   border-radius: 16px;
-  background:
-    linear-gradient(180deg, rgba(30, 34, 44, 0.96), rgba(20, 23, 30, 0.98));
-  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45);
+  background: var(--kn-bg-panel);
+  box-shadow: var(--kn-shadow-modal);
   backdrop-filter: blur(16px);
-  color: #e6edf3;
+  color: var(--kn-text-primary);
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
 }
@@ -198,7 +197,7 @@ async function restartUpdate() {
 }
 
 .update-prompt__eyebrow {
-  color: #7d8590;
+  color: var(--kn-text-muted);
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.08em;
@@ -221,7 +220,7 @@ async function restartUpdate() {
   height: 28px;
   border: none;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--kn-bg-hover);
   color: inherit;
   font-size: 18px;
   line-height: 1;
@@ -238,7 +237,7 @@ async function restartUpdate() {
 }
 
 .update-prompt__version {
-  color: #c9d1d9;
+  color: var(--kn-text-secondary);
   font-size: 13px;
   font-weight: 600;
 }
@@ -246,7 +245,7 @@ async function restartUpdate() {
 .update-prompt__meta,
 .update-prompt__notes,
 .update-prompt__progress-text {
-  color: #a8b3c0;
+  color: var(--kn-text-muted);
   font-size: 13px;
 }
 
@@ -264,7 +263,7 @@ async function restartUpdate() {
 .update-prompt__progress {
   width: 100%;
   height: 10px;
-  accent-color: #58a6ff;
+  accent-color: var(--kn-accent);
 }
 
 .update-prompt__actions {
@@ -275,9 +274,9 @@ async function restartUpdate() {
 }
 
 .update-prompt__button {
-  border: 1px solid rgba(201, 209, 217, 0.18);
+  border: 1px solid var(--kn-border-strong);
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--kn-bg-panel-raised);
   color: inherit;
   cursor: pointer;
   font-size: 13px;
@@ -291,8 +290,8 @@ async function restartUpdate() {
 }
 
 .update-prompt__button--primary {
-  border-color: rgba(88, 166, 255, 0.35);
-  background: rgba(88, 166, 255, 0.15);
+  border-color: var(--kn-accent);
+  background: var(--kn-bg-accent-subtle);
 }
 
 .update-prompt-enter-active,

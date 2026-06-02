@@ -162,7 +162,7 @@ onUnmounted(() => {
   position: relative;
   flex: 1;
   min-height: 0;
-  background: #1a1a1a;
+  background: var(--kn-terminal-bg);
 }
 
 .terminal-container {
@@ -176,9 +176,9 @@ onUnmounted(() => {
   bottom: 12px;
   max-width: min(520px, calc(100% - 24px));
   padding: 8px 10px;
-  border: 1px solid #5c2b2b;
-  background: #261818;
-  color: #f0b8b8;
+  border: 1px solid var(--kn-danger);
+  background: var(--kn-danger-bg);
+  color: var(--kn-danger);
   font-size: 12px;
 }
 </style>

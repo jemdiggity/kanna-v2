@@ -573,12 +573,12 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
                   position: fixed;
                   left: ${event.clientX + 8}px;
                   top: ${event.clientY - 28}px;
-                  background: #252525;
-                  color: #ccc;
+                  background: var(--kn-bg-panel);
+                  color: var(--kn-text-secondary);
                   font-size: 11px;
                   padding: 2px 6px;
                   border-radius: 3px;
-                  border: 1px solid #444;
+                  border: 1px solid var(--kn-border-strong);
                   pointer-events: none;
                   z-index: 10000;
                   font-family: "SF Mono", Menlo, monospace;

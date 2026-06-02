@@ -180,15 +180,15 @@ onMounted(async () => {
 .modal-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.6);
+  background: var(--kn-overlay-scrim);
   display: flex;
   align-items: flex-start;
   justify-content: center;
   padding-top: 15vh;
 }
 .palette-modal {
-  background: #252525;
-  border: 1px solid #444;
+  background: var(--kn-bg-panel);
+  border: 1px solid var(--kn-border-strong);
   border-radius: 8px;
   width: 550px;
   max-width: 90vw;
@@ -198,7 +198,7 @@ onMounted(async () => {
   padding: 10px 14px 0;
   font-size: 13px;
   font-weight: 600;
-  color: #aaa;
+  color: var(--kn-text-muted);
 }
 .input-area {
   display: flex;
@@ -206,8 +206,8 @@ onMounted(async () => {
   align-items: center;
   gap: 4px;
   padding: 8px 14px;
-  background: #1a1a1a;
-  border-bottom: 1px solid #333;
+  background: var(--kn-bg-input);
+  border-bottom: 1px solid var(--kn-border-default);
   cursor: text;
   min-height: 38px;
 }
@@ -215,8 +215,8 @@ onMounted(async () => {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  background: #0066cc;
-  color: #fff;
+  background: var(--kn-accent);
+  color: var(--kn-text-inverse);
   border-radius: 4px;
   padding: 2px 6px 2px 8px;
   font-size: 12px;
@@ -238,7 +238,7 @@ onMounted(async () => {
   border-radius: 2px;
 }
 .chip-remove:hover {
-  color: #fff;
+  color: var(--kn-text-inverse);
   background: rgba(255, 255, 255, 0.15);
 }
 .inline-input {
@@ -246,7 +246,7 @@ onMounted(async () => {
   min-width: 80px;
   background: none;
   border: none;
-  color: #e0e0e0;
+  color: var(--kn-text-primary);
   font-size: 14px;
   outline: none;
   padding: 2px 0;
@@ -258,21 +258,21 @@ onMounted(async () => {
 .command-item {
   padding: 8px 14px;
   font-size: 13px;
-  color: #ccc;
+  color: var(--kn-text-secondary);
   cursor: pointer;
   display: flex;
   align-items: center;
   gap: 8px;
 }
 .command-item.highlighted {
-  background: #0066cc;
-  color: #fff;
+  background: var(--kn-accent);
+  color: var(--kn-text-inverse);
 }
 .command-item:hover {
-  background: #333;
+  background: var(--kn-bg-hover);
 }
 .command-item.highlighted:hover {
-  background: #0066cc;
+  background: var(--kn-accent);
 }
 .command-item.disabled {
   opacity: 0.4;
@@ -290,22 +290,22 @@ onMounted(async () => {
 }
 .tag-label {
   font-size: 11px;
-  color: #888;
+  color: var(--kn-text-muted);
 }
 .command-item.highlighted .tag-label {
-  color: #ccc;
+  color: var(--kn-text-secondary);
 }
 .palette-footer {
   padding: 8px 14px;
-  border-top: 1px solid #333;
+  border-top: 1px solid var(--kn-border-default);
 }
 .hint {
   font-size: 11px;
-  color: #666;
+  color: var(--kn-text-muted);
 }
 .empty {
   padding: 16px;
-  color: #666;
+  color: var(--kn-text-muted);
   text-align: center;
   font-size: 13px;
 }

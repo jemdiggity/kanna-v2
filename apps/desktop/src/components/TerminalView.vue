@@ -192,7 +192,7 @@ onUnmounted(() => {
   flex: 1;
   min-height: 0;
   overflow: hidden;
-  background: #1e1e1e;
+  background: var(--kn-terminal-bg);
   padding: 8px 12px;
 }
 .terminal-container {

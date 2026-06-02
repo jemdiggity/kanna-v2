@@ -54,10 +54,9 @@ const statusClass = computed(() => `status-${props.serverStatus}`);
 .mobile-access-panel {
   margin-top: 14px;
   padding: 14px;
-  border: 1px solid #36506c;
+  border: 1px solid var(--kn-border-strong);
   border-radius: 10px;
-  background: linear-gradient(180deg, rgba(19, 28, 40, 0.98), rgba(16, 22, 32, 0.98));
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+  background: var(--kn-bg-panel-raised);
 }
 
 .panel-header {
@@ -72,14 +71,14 @@ const statusClass = computed(() => `status-${props.serverStatus}`);
   font-size: 11px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: #78a8d8;
+  color: var(--kn-accent);
 }
 
 .desktop-name {
   margin: 0;
   font-size: 15px;
   font-weight: 600;
-  color: #edf3ff;
+  color: var(--kn-text-primary);
 }
 
 .status-pill {
@@ -93,28 +92,28 @@ const statusClass = computed(() => `status-${props.serverStatus}`);
 }
 
 .status-running {
-  color: #8be1b5;
-  background: rgba(28, 80, 52, 0.6);
-  border-color: rgba(139, 225, 181, 0.24);
+  color: var(--kn-success);
+  background: var(--kn-success-bg);
+  border-color: var(--kn-success);
 }
 
 .status-stopped {
-  color: #c9d3e1;
-  background: rgba(66, 76, 92, 0.45);
-  border-color: rgba(201, 211, 225, 0.18);
+  color: var(--kn-text-muted);
+  background: var(--kn-bg-panel);
+  border-color: var(--kn-border-default);
 }
 
 .status-error {
-  color: #ffb39d;
-  background: rgba(84, 42, 32, 0.55);
-  border-color: rgba(255, 179, 157, 0.22);
+  color: var(--kn-danger);
+  background: var(--kn-danger-bg);
+  border-color: var(--kn-danger);
 }
 
 .description {
   margin: 10px 0 0;
   font-size: 12px;
   line-height: 1.5;
-  color: #9aa7b8;
+  color: var(--kn-text-secondary);
 }
 
 .pairing-area {
@@ -134,7 +133,7 @@ const statusClass = computed(() => `status-${props.serverStatus}`);
 
 .label {
   font-size: 11px;
-  color: #7f8ea3;
+  color: var(--kn-text-muted);
   text-transform: uppercase;
   letter-spacing: 0.06em;
 }
@@ -144,36 +143,36 @@ const statusClass = computed(() => `status-${props.serverStatus}`);
   align-self: flex-start;
   padding: 5px 8px;
   border-radius: 6px;
-  border: 1px solid #3b5168;
-  background: rgba(10, 16, 24, 0.9);
-  color: #eaf2ff;
+  border: 1px solid var(--kn-border-strong);
+  background: var(--kn-bg-input);
+  color: var(--kn-text-primary);
   font-size: 12px;
   letter-spacing: 0.08em;
 }
 
 .placeholder {
   font-size: 12px;
-  color: #667689;
+  color: var(--kn-text-muted);
 }
 
 .start-pairing {
   flex: none;
   padding: 8px 12px;
-  border: 1px solid #2c79cd;
+  border: 1px solid var(--kn-accent-hover);
   border-radius: 7px;
-  background: linear-gradient(180deg, #2d84e0, #2364aa);
-  color: #fff;
+  background: var(--kn-accent);
+  color: var(--kn-text-inverse);
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
 }
 
 .start-pairing:hover {
-  background: linear-gradient(180deg, #3890ec, #2770bb);
+  background: var(--kn-accent-hover);
 }
 
 .start-pairing:focus-visible {
-  outline: 2px solid rgba(121, 177, 240, 0.8);
+  outline: 2px solid var(--kn-accent);
   outline-offset: 2px;
 }
 </style>

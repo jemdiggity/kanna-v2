@@ -89,8 +89,8 @@ function openLocalhostPort(port: number) {
 <style scoped>
 .task-header {
   padding: 12px 16px;
-  border-bottom: 1px solid #333;
-  background: #1e1e1e;
+  border-bottom: 1px solid var(--kn-border-default);
+  background: var(--kn-bg-sidebar);
 }
 
 .header-top {
@@ -105,17 +105,17 @@ function openLocalhostPort(port: number) {
   border-radius: 3px;
   font-size: 11px;
   font-weight: 600;
-  color: #fff;
+  color: var(--kn-accent);
   white-space: nowrap;
   line-height: 1.4;
-  background: rgba(59, 130, 246, 0.35);
+  background: var(--kn-bg-accent-subtle);
   flex-shrink: 0;
 }
 
 .task-title {
   font-size: 14px;
   font-weight: 600;
-  color: #e0e0e0;
+  color: var(--kn-text-primary);
   margin: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -133,17 +133,17 @@ function openLocalhostPort(port: number) {
 }
 
 .meta-item {
-  color: #888;
+  color: var(--kn-text-muted);
 }
 
 .meta-label {
-  color: #666;
+  color: var(--kn-text-muted);
 }
 
 .branch {
   font-family: "JetBrains Mono", "SF Mono", Menlo, monospace;
   font-size: 11px;
-  background: #2a2a2a;
+  background: var(--kn-bg-panel-raised);
   padding: 1px 6px;
   border-radius: 3px;
   cursor: default;
@@ -152,15 +152,15 @@ function openLocalhostPort(port: number) {
 .port {
   font-family: "JetBrains Mono", "SF Mono", Menlo, monospace;
   font-size: 11px;
-  background: #2a2a2a;
+  background: var(--kn-bg-panel-raised);
   padding: 1px 6px;
   border-radius: 3px;
-  color: #8a8;
+  color: var(--kn-success);
   cursor: pointer;
 }
 
 .link {
-  color: #4a9eff;
+  color: var(--kn-accent);
   text-decoration: none;
 }
 

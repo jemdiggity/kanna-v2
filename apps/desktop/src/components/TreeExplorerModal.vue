@@ -264,7 +264,7 @@ function isDimmed(entry: TreeNode): boolean {
 .modal-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.6);
+  background: var(--kn-overlay-scrim);
   display: flex;
   align-items: flex-start;
   justify-content: center;
@@ -274,14 +274,14 @@ function isDimmed(entry: TreeNode): boolean {
 .tree-modal {
   width: 780px;
   height: 60vh;
-  background: #1e1e1e;
+  background: var(--kn-bg-panel);
   border-radius: 10px;
-  border: 1px solid #333;
+  border: 1px solid var(--kn-border-default);
   display: flex;
   flex-direction: column;
   outline: none;
   overflow: hidden;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  box-shadow: var(--kn-shadow-modal);
 }
 
 .maximized {
@@ -303,29 +303,29 @@ function isDimmed(entry: TreeNode): boolean {
   padding: 10px 14px;
   font-family: "JetBrains Mono", monospace;
   font-size: 12px;
-  color: #888;
-  border-bottom: 1px solid #333;
+  color: var(--kn-text-muted);
+  border-bottom: 1px solid var(--kn-border-default);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
 .breadcrumb-segment {
-  color: #ccc;
+  color: var(--kn-text-secondary);
   cursor: pointer;
 }
 
 .breadcrumb-segment:hover {
-  color: #ffcc00;
+  color: var(--kn-warning);
 }
 
 .breadcrumb-root {
-  color: #888;
+  color: var(--kn-text-muted);
 }
 
 .breadcrumb-sep {
   margin: 0 2px;
-  color: #555;
+  color: var(--kn-text-muted);
 }
 
 /* Miller columns */
@@ -363,11 +363,11 @@ function isDimmed(entry: TreeNode): boolean {
 }
 
 .miller-col + .miller-col {
-  border-left: 1px solid #333;
+  border-left: 1px solid var(--kn-border-default);
 }
 
 .col-current {
-  border-left: 2px solid #0066cc !important;
+  border-left: 2px solid var(--kn-accent) !important;
 }
 
 .col-scroll {
@@ -384,7 +384,7 @@ function isDimmed(entry: TreeNode): boolean {
   padding: 0 10px;
   font-family: "JetBrains Mono", monospace;
   font-size: 12px;
-  color: #888;
+  color: var(--kn-text-muted);
   cursor: default;
   white-space: nowrap;
   overflow: hidden;
@@ -392,18 +392,18 @@ function isDimmed(entry: TreeNode): boolean {
 }
 
 .tree-item:hover {
-  background: #333;
+  background: var(--kn-bg-hover);
 }
 
 .tree-item.cursor {
-  background: #0066cc44;
-  border-left: 2px solid #ffcc00;
+  background: var(--kn-bg-accent-subtle);
+  border-left: 2px solid var(--kn-warning);
   padding-left: 8px;
-  color: #fff;
+  color: var(--kn-text-primary);
 }
 
 .tree-item.active {
-  color: #0066cc;
+  color: var(--kn-accent);
 }
 
 .tree-item.dimmed {
@@ -413,7 +413,7 @@ function isDimmed(entry: TreeNode): boolean {
 .dir-arrow {
   width: 14px;
   flex-shrink: 0;
-  color: #ffcc00;
+  color: var(--kn-warning);
   font-size: 10px;
 }
 
@@ -430,7 +430,7 @@ function isDimmed(entry: TreeNode): boolean {
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #555;
+  color: var(--kn-text-muted);
   font-family: "JetBrains Mono", monospace;
   font-size: 12px;
   pointer-events: none;
@@ -442,7 +442,7 @@ function isDimmed(entry: TreeNode): boolean {
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #e55;
+  color: var(--kn-danger);
   font-family: "JetBrains Mono", monospace;
   font-size: 11px;
   padding: 12px;
@@ -462,10 +462,10 @@ function isDimmed(entry: TreeNode): boolean {
 /* Filter bar */
 .filter-bar {
   padding: 8px 14px;
-  border-top: 1px solid #333;
+  border-top: 1px solid var(--kn-border-default);
   font-family: "JetBrains Mono", monospace;
   font-size: 11px;
-  color: #888;
+  color: var(--kn-text-muted);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -473,20 +473,20 @@ function isDimmed(entry: TreeNode): boolean {
 }
 
 .filter-text {
-  color: #ccc;
+  color: var(--kn-text-secondary);
 }
 
 .filter-text strong {
-  color: #ffcc00;
+  color: var(--kn-warning);
 }
 
 .filter-bar.filter-active {
-  background: #1a1a1a;
-  border-top-color: #0066cc;
+  background: var(--kn-bg-input);
+  border-top-color: var(--kn-accent);
 }
 
 .filter-caret {
-  color: #ffcc00;
+  color: var(--kn-warning);
   animation: blink 1s step-end infinite;
 }
 
@@ -495,7 +495,7 @@ function isDimmed(entry: TreeNode): boolean {
 }
 
 .filter-hint {
-  color: #555;
+  color: var(--kn-text-muted);
   margin-left: 4px;
 }
 
@@ -504,13 +504,13 @@ function isDimmed(entry: TreeNode): boolean {
   align-items: center;
   margin-left: auto;
   gap: 8px;
-  color: #ccc;
+  color: var(--kn-text-secondary);
 }
 
 .show-all-toggle {
-  border: 1px solid #444;
-  background: #222;
-  color: #ddd;
+  border: 1px solid var(--kn-border-strong);
+  background: var(--kn-bg-panel-raised);
+  color: var(--kn-text-primary);
   border-radius: 999px;
   padding: 2px 10px;
   font-size: 10px;
@@ -519,11 +519,11 @@ function isDimmed(entry: TreeNode): boolean {
 }
 
 .show-all-toggle:hover {
-  background: #2d2d2d;
+  background: var(--kn-bg-panel-raised);
 }
 
 .show-all-toggle.active {
-  border-color: #ffcc00;
-  color: #ffcc00;
+  border-color: var(--kn-warning);
+  color: var(--kn-warning);
 }
 </style>

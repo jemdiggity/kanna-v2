@@ -347,7 +347,7 @@ defineExpose({ cycleTab })
 .modal-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.6);
+  background: var(--kn-overlay-scrim);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -355,20 +355,20 @@ defineExpose({ cycleTab })
 }
 
 .prefs-panel {
-  background: #252525;
-  border: 1px solid #444;
+  background: var(--kn-bg-panel);
+  border: 1px solid var(--kn-border-strong);
   border-radius: 8px;
   width: 420px;
   max-width: 90vw;
   min-height: 280px;
   display: flex;
   flex-direction: column;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  box-shadow: var(--kn-shadow-modal);
 }
 
 
 .prefs-header {
-  border-bottom: 1px solid #333;
+  border-bottom: 1px solid var(--kn-border-default);
 }
 
 .tab-bar {
@@ -380,7 +380,7 @@ defineExpose({ cycleTab })
   padding: 10px 12px 8px;
   font-size: 13px;
   font-weight: 500;
-  color: #888;
+  color: var(--kn-text-muted);
   background: none;
   border: none;
   border-bottom: 2px solid transparent;
@@ -389,12 +389,12 @@ defineExpose({ cycleTab })
 }
 
 .tab:hover {
-  color: #ccc;
+  color: var(--kn-text-secondary);
 }
 
 .tab.active {
-  color: #e0e0e0;
-  border-bottom-color: #0066cc;
+  color: var(--kn-text-primary);
+  border-bottom-color: var(--kn-accent);
 }
 
 .prefs-body {
@@ -414,7 +414,7 @@ defineExpose({ cycleTab })
 
 .pref-row label {
   font-size: 13px;
-  color: #bbb;
+  color: var(--kn-text-secondary);
   flex: 1;
   white-space: nowrap;
 }
@@ -422,10 +422,10 @@ defineExpose({ cycleTab })
 .pref-row input[type="number"],
 .pref-row input[type="text"],
 .account-field input {
-  background: #1a1a1a;
-  border: 1px solid #444;
+  background: var(--kn-bg-input);
+  border: 1px solid var(--kn-border-strong);
   border-radius: 4px;
-  color: #e0e0e0;
+  color: var(--kn-text-primary);
   font-size: 12px;
   padding: 5px 8px;
   width: 160px;
@@ -438,11 +438,11 @@ defineExpose({ cycleTab })
 }
 
 .pref-row input:focus {
-  border-color: #0066cc;
+  border-color: var(--kn-accent);
 }
 
 .pref-row input[type="checkbox"] {
-  accent-color: #0066cc;
+  accent-color: var(--kn-accent);
   width: 14px;
   height: 14px;
   cursor: pointer;
@@ -465,7 +465,7 @@ defineExpose({ cycleTab })
   flex-direction: column;
   gap: 5px;
   font-size: 12px;
-  color: #bbb;
+  color: var(--kn-text-secondary);
 }
 
 .account-field input {
@@ -477,19 +477,19 @@ defineExpose({ cycleTab })
   display: flex;
   flex-direction: column;
   gap: 8px;
-  color: #e0e0e0;
+  color: var(--kn-text-primary);
 }
 
 .account-label {
   font-size: 11px;
-  color: #8b98a8;
+  color: var(--kn-text-muted);
   text-transform: uppercase;
   letter-spacing: 0.06em;
 }
 
 .account-message {
   margin: 0;
-  color: #ffb39d;
+  color: var(--kn-danger);
   font-size: 12px;
   line-height: 1.4;
 }
@@ -499,15 +499,15 @@ defineExpose({ cycleTab })
   align-self: flex-start;
   padding: 7px 12px;
   border-radius: 5px;
-  color: #fff;
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
 }
 
 .primary-button {
-  border: 1px solid #0077ee;
-  background: #0066cc;
+  border: 1px solid var(--kn-accent-hover);
+  background: var(--kn-accent);
+  color: var(--kn-text-inverse);
 }
 
 .primary-button:disabled {
@@ -516,15 +516,16 @@ defineExpose({ cycleTab })
 }
 
 .secondary-button {
-  border: 1px solid #555;
-  background: #333;
+  border: 1px solid var(--kn-border-strong);
+  background: var(--kn-bg-hover);
+  color: var(--kn-text-secondary);
 }
 
 .pref-row select {
-  background: #1a1a1a;
-  border: 1px solid #444;
+  background: var(--kn-bg-input);
+  border: 1px solid var(--kn-border-strong);
   border-radius: 4px;
-  color: #e0e0e0;
+  color: var(--kn-text-primary);
   font-size: 12px;
   padding: 5px 8px;
   width: 160px;
@@ -533,28 +534,28 @@ defineExpose({ cycleTab })
 }
 
 .pref-row select:focus {
-  border-color: #0066cc;
+  border-color: var(--kn-accent);
 }
 
 .prefs-footer {
   display: flex;
   justify-content: flex-end;
   padding: 10px 16px 14px;
-  border-top: 1px solid #333;
+  border-top: 1px solid var(--kn-border-default);
 }
 
 .btn-done {
   padding: 5px 20px;
-  background: #0066cc;
-  border: 1px solid #0077ee;
+  background: var(--kn-accent);
+  border: 1px solid var(--kn-accent-hover);
   border-radius: 4px;
-  color: #fff;
+  color: var(--kn-text-inverse);
   font-size: 12px;
   font-weight: 500;
   cursor: pointer;
 }
 
 .btn-done:hover {
-  background: #0077ee;
+  background: var(--kn-accent-hover);
 }
 </style>

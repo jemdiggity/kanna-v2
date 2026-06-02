@@ -2464,7 +2464,7 @@ html, body, #app {
 
 .sidebar-resize-handle:hover::after,
 .sidebar-resize-handle:focus-visible::after {
-  background: #4a90e2;
+  background: var(--kn-accent);
 }
 
 :global(body.is-resizing-sidebar) {

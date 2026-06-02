@@ -240,7 +240,7 @@ const lineChartOptions = computed(() => ({
 .modal-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.6);
+  background: var(--kn-overlay-scrim);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -248,8 +248,8 @@ const lineChartOptions = computed(() => ({
 }
 
 .analytics-modal {
-  background: #252525;
-  border: 1px solid #444;
+  background: var(--kn-bg-panel);
+  border: 1px solid var(--kn-border-strong);
   border-radius: 8px;
   width: 720px;
   max-width: 90vw;
@@ -270,12 +270,12 @@ const lineChartOptions = computed(() => ({
 .modal-header h2 {
   font-size: 16px;
   font-weight: 600;
-  color: #ccc;
+  color: var(--kn-text-secondary);
 }
 
 .hint {
   font-size: 11px;
-  color: #666;
+  color: var(--kn-text-muted);
 }
 
 .headline-cards {
@@ -285,26 +285,26 @@ const lineChartOptions = computed(() => ({
 
 .card {
   flex: 1;
-  background: #1e1e1e;
-  border: 1px solid #333;
+  background: var(--kn-bg-sidebar);
+  border: 1px solid var(--kn-border-default);
   border-radius: 6px;
   padding: 12px;
   text-align: center;
 }
 
-.card.busy { border-color: #0066cc; }
-.card.unread { border-color: #d29922; }
-.card.idle { border-color: #555; }
+.card.busy { border-color: var(--kn-accent); }
+.card.unread { border-color: var(--kn-warning); }
+.card.idle { border-color: var(--kn-border-strong); }
 
 .card-value {
   font-size: 24px;
   font-weight: 600;
-  color: #ccc;
+  color: var(--kn-text-secondary);
 }
 
 .card-label {
   font-size: 11px;
-  color: #888;
+  color: var(--kn-text-muted);
   margin-top: 4px;
 }
 
@@ -326,16 +326,16 @@ const lineChartOptions = computed(() => ({
   transition: flex 0.3s ease;
 }
 
-.state-segment.busy { background: #0066cc; }
-.state-segment.unread { background: #d29922; }
-.state-segment.idle { background: #555; }
+.state-segment.busy { background: var(--kn-accent); }
+.state-segment.unread { background: var(--kn-warning); }
+.state-segment.idle { background: var(--kn-border-strong); }
 
 .state-bar-labels {
   display: flex;
   justify-content: center;
   gap: 16px;
   font-size: 11px;
-  color: #888;
+  color: var(--kn-text-muted);
 }
 
 .bar-label {
@@ -350,13 +350,13 @@ const lineChartOptions = computed(() => ({
   border-radius: 50%;
 }
 
-.bar-label .dot.busy { background: #0066cc; }
-.bar-label .dot.unread { background: #d29922; }
-.bar-label .dot.idle { background: #555; }
+.bar-label .dot.busy { background: var(--kn-accent); }
+.bar-label .dot.unread { background: var(--kn-warning); }
+.bar-label .dot.idle { background: var(--kn-border-strong); }
 
 .empty-state {
   text-align: center;
-  color: #666;
+  color: var(--kn-text-muted);
   padding: 48px 0;
   font-size: 14px;
 }
@@ -371,10 +371,10 @@ const lineChartOptions = computed(() => ({
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: #555;
+  background: var(--kn-border-strong);
 }
 
 .dots > .dot.active {
-  background: #0066cc;
+  background: var(--kn-accent);
 }
 </style>

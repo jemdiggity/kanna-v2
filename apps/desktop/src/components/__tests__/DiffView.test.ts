@@ -311,7 +311,7 @@ describe("DiffView", () => {
     wrapper.unmount();
   });
 
-  it("renders a sticky filename header for each diff file", async () => {
+  it("renders a filename header using the tokenized header class", async () => {
     diffMocks.parsePatchFilesMock.mockReturnValueOnce([
       {
         files: [
@@ -347,8 +347,7 @@ describe("DiffView", () => {
     const header = wrapper.get(".diff-file-header");
     expect(header.text()).toBe("src/sticky.ts");
     expect(header.classes()).toContain("diff-file-header");
-    expect((header.element as HTMLElement).style.position).toBe("sticky");
-    expect((header.element as HTMLElement).style.top).toBe("-1px");
+    expect(header.attributes("style")).toBeUndefined();
 
     wrapper.unmount();
   });

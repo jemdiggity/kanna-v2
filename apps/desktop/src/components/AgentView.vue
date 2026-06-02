@@ -199,12 +199,12 @@ onUnmounted(() => {
 .agent-view {
   flex: 1;
   overflow-y: auto;
-  background: #1a1a1a;
+  background: var(--kn-bg-app);
   font-family: "JetBrains Mono", "SF Mono", Menlo, monospace;
   font-size: 13px;
   line-height: 1.5;
   padding: 12px 16px;
-  color: #e0e0e0;
+  color: var(--kn-text-primary);
 }
 
 .message-block {
@@ -220,32 +220,32 @@ onUnmounted(() => {
 /* Tool calls */
 .tool-block {
   margin: 6px 0;
-  border-left: 2px solid #0066cc;
+  border-left: 2px solid var(--kn-accent);
   padding-left: 12px;
 }
 
 .tool-header {
-  color: #4ec9b0;
+  color: var(--kn-success);
   font-weight: 600;
   margin-bottom: 2px;
 }
 
 .tool-icon {
   margin-right: 6px;
-  color: #888;
+  color: var(--kn-text-muted);
 }
 
 .tool-name {
-  color: #4ec9b0;
+  color: var(--kn-success);
 }
 
 .tool-input {
-  color: #888;
+  color: var(--kn-text-muted);
   font-size: 12px;
   margin: 4px 0;
   max-height: 200px;
   overflow-y: auto;
-  background: #111;
+  background: var(--kn-code-bg);
   padding: 6px 8px;
   border-radius: 4px;
 }
@@ -253,12 +253,12 @@ onUnmounted(() => {
 /* Tool results */
 .tool-result-block {
   margin: 4px 0 4px 14px;
-  border-left: 2px solid #333;
+  border-left: 2px solid var(--kn-border-default);
   padding-left: 12px;
 }
 
 .tool-result-content {
-  color: #999;
+  color: var(--kn-text-muted);
   font-size: 12px;
   white-space: pre-wrap;
   max-height: 200px;
@@ -271,14 +271,14 @@ onUnmounted(() => {
 }
 
 .thinking-summary {
-  color: #666;
+  color: var(--kn-text-muted);
   cursor: pointer;
   font-style: italic;
   font-size: 12px;
 }
 
 .thinking-content {
-  color: #666;
+  color: var(--kn-text-muted);
   font-size: 12px;
   margin-top: 4px;
   white-space: pre-wrap;
@@ -291,17 +291,17 @@ onUnmounted(() => {
   margin: 12px 0;
   padding: 8px 12px;
   border-radius: 4px;
-  border: 1px solid #333;
+  border: 1px solid var(--kn-border-default);
 }
 
 .result-block.success {
-  border-color: #2ea04366;
-  background: #2ea04311;
+  border-color: var(--kn-success);
+  background: var(--kn-success-bg);
 }
 
 .result-block.error {
-  border-color: #f8514966;
-  background: #f8514911;
+  border-color: var(--kn-danger);
+  background: var(--kn-danger-bg);
 }
 
 .result-header {
@@ -310,22 +310,22 @@ onUnmounted(() => {
 }
 
 .result-block.success .result-header {
-  color: #2ea043;
+  color: var(--kn-success);
 }
 .result-block.error .result-header {
-  color: #f85149;
+  color: var(--kn-danger);
 }
 
 .result-details {
   font-size: 12px;
-  color: #888;
+  color: var(--kn-text-muted);
   margin-bottom: 4px;
 }
 
 .result-text {
   white-space: pre-wrap;
   font-size: 12px;
-  color: #aaa;
+  color: var(--kn-text-muted);
   margin-top: 4px;
 }
 
@@ -334,14 +334,14 @@ onUnmounted(() => {
 }
 
 .result-error {
-  color: #f85149;
+  color: var(--kn-danger);
   font-size: 12px;
   padding: 2px 0;
 }
 
 /* System */
 .system-block {
-  color: #666;
+  color: var(--kn-text-muted);
   font-size: 12px;
   font-style: italic;
   padding: 2px 0;
@@ -349,13 +349,13 @@ onUnmounted(() => {
 
 /* Progress */
 .progress-block {
-  color: #888;
+  color: var(--kn-text-muted);
   font-size: 12px;
 }
 
 /* Running indicator */
 .running-indicator {
-  color: #4ec9b0;
+  color: var(--kn-success);
   font-size: 12px;
   padding: 8px 0;
   display: flex;
@@ -366,7 +366,7 @@ onUnmounted(() => {
 .pulse {
   width: 8px;
   height: 8px;
-  background: #4ec9b0;
+  background: var(--kn-success);
   border-radius: 50%;
   animation: pulse 1.5s infinite;
 }
