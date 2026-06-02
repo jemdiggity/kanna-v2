@@ -199,4 +199,40 @@ describe("mapDesktopCloudTasks", () => {
     expect(snapshot.items).toEqual([]);
     expect(snapshot.terminalRefs).toEqual({});
   });
+
+  it("omits snapshots owned by the current desktop", () => {
+    const snapshot = mapDesktopCloudTasks([
+      {
+        cloudTaskId: "remote-repo-id:task-own",
+        ownerDesktopId: "desktop-current",
+        ownerLocalTaskId: "task-own",
+        title: "Own task",
+        promptSnippet: "Own task prompt",
+        displayName: null,
+        stage: "in progress",
+        activity: "working",
+        status: "active",
+        repo: {
+          cloudRepoId: "remote-repo-id",
+          name: "kanna",
+          defaultBranch: "main",
+          remoteUrlHash: "same-remote",
+        },
+        branch: "task-task-own",
+        baseRef: "origin/main",
+        prNumber: null,
+        prUrl: null,
+        agent: { provider: "claude", type: "pty" },
+        createdAt: "2026-05-14T00:00:00.000Z",
+        updatedAt: "2026-05-14T00:01:00.000Z",
+        closedAt: null,
+      },
+    ], {
+      currentDesktopId: "desktop-current",
+    });
+
+    expect(snapshot.repos).toEqual([]);
+    expect(snapshot.items).toEqual([]);
+    expect(snapshot.terminalRefs).toEqual({});
+  });
 });
