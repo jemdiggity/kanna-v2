@@ -25,8 +25,6 @@ export function encodeAgentStageInput(
   stagePrompt: string,
   options: AgentStageInputOptions,
 ): number[] {
-  const submit = options.agentProvider === "claude" && options.kittyKeyboard
-    ? "\x1b[13u"
-    : "\r";
-  return encodeDaemonInput(`\x1b[200~${stagePrompt}\x1b[201~${submit}`);
+  void options;
+  return encodeDaemonInput(`\x1b[200~${stagePrompt}\x1b[201~\r`);
 }

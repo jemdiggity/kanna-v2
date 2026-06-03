@@ -1992,6 +1992,40 @@ describe("useTerminal", () => {
     expect(invokeMock).toHaveBeenCalledWith("read_clipboard_image_png", {});
   });
 
+  it("does not force-push kitty keyboard mode when creating a Claude terminal", async () => {
+    const { useTerminal } = await import("./useTerminal");
+
+    const TestHarness = defineComponent({
+      setup() {
+        const { init } = useTerminal(
+          "session-1",
+          undefined,
+          {
+            agentProvider: "claude",
+            kittyKeyboard: true,
+            agentTerminal: true,
+          },
+        );
+
+        return { init };
+      },
+      render() {
+        return h("div");
+      },
+    });
+
+    const wrapper = mount(TestHarness);
+    const terminalElement = document.createElement("div");
+    Object.defineProperty(terminalElement, "offsetWidth", { configurable: true, value: 800 });
+    Object.defineProperty(terminalElement, "offsetHeight", { configurable: true, value: 600 });
+    terminalElement.querySelector = vi.fn(() => null) as typeof terminalElement.querySelector;
+    terminalElement.closest = vi.fn(() => null) as typeof terminalElement.closest;
+    wrapper.vm.init(terminalElement);
+
+    const terminal = terminals[0];
+    expect(terminal.write).not.toHaveBeenCalledWith("\x1b[>1u");
+  });
+
   it("responds to kitty clipboard image reads after an explicit paste", async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === "read_clipboard_image_png") {
