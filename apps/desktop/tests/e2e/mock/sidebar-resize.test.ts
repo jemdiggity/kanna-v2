@@ -15,12 +15,52 @@ interface WorkspaceSnapshot {
 
 const SIDEBAR_SELECTOR = '[data-testid="sidebar-shell"]';
 const RESIZE_HANDLE_SELECTOR = '[data-testid="sidebar-resize-handle"]';
+const LONG_TASK_TITLE = [
+  "Investigate sidebar resizing with an intentionally long revision task title",
+  "that should keep its full text in the DOM while the visible label clips",
+  "differently as the user drags the sidebar.",
+].join(" ");
+
+interface TitleLayoutSnapshot {
+  text: string;
+  clientWidth: number;
+  scrollWidth: number;
+  rectWidth: number;
+  itemRectWidth: number;
+  overflow: string;
+  textOverflow: string;
+  whiteSpace: string;
+}
 
 async function getSidebarWidth(client: WebDriverClient): Promise<number> {
   return client.executeSync<number>(
     `const sidebar = document.querySelector(${JSON.stringify(SIDEBAR_SELECTOR)});
      return sidebar ? Math.round(sidebar.getBoundingClientRect().width) : 0;`,
   );
+}
+
+async function getTaskTitleLayout(client: WebDriverClient): Promise<TitleLayoutSnapshot> {
+  const result = await client.executeSync<TitleLayoutSnapshot | { __error: string }>(
+    `const title = document.querySelector(".sidebar .pipeline-item .item-title");
+     if (!title) return { __error: "sidebar task title not found" };
+     const item = title.closest(".pipeline-item");
+     if (!item) return { __error: "sidebar pipeline item not found" };
+     const style = getComputedStyle(title);
+     return {
+       text: title.textContent || "",
+       clientWidth: Math.round(title.clientWidth),
+       scrollWidth: Math.round(title.scrollWidth),
+       rectWidth: Math.round(title.getBoundingClientRect().width),
+       itemRectWidth: Math.round(item.getBoundingClientRect().width),
+       overflow: style.overflow,
+       textOverflow: style.textOverflow,
+       whiteSpace: style.whiteSpace,
+     };`,
+  );
+  if (typeof result === "object" && result !== null && "__error" in result) {
+    throw new Error(result.__error);
+  }
+  return result;
 }
 
 async function getCurrentWindowId(client: WebDriverClient): Promise<string> {
@@ -214,11 +254,11 @@ describe("sidebar resize", () => {
     await execDb(
       client,
       "INSERT INTO pipeline_item (id, repo_id, prompt, stage, agent_type) VALUES (?, ?, ?, ?, ?)",
-      ["sidebar-resize-task", repoId, "Resize sidebar", "in progress", "sdk"],
+      ["sidebar-resize-task", repoId, LONG_TASK_TITLE, "in progress", "sdk"],
     );
     await client.executeSync("location.reload()");
     await client.waitForAppReady();
-    await client.waitForText(".sidebar", "Resize sidebar");
+    await client.waitForText(".sidebar", "Investigate sidebar resizing");
   });
 
   afterAll(async () => {
@@ -251,5 +291,35 @@ describe("sidebar resize", () => {
     await waitForWorkspaceSetting(client);
     await waitForSidebarWidth(client, 420);
     await waitForPersistedSidebarWidth(client, windowId, 420);
+  });
+
+  it("clips long task titles with ellipsis according to the resized sidebar width", async () => {
+    await client.waitForElement(RESIZE_HANDLE_SELECTOR, 2_000);
+    await client.waitForText(".sidebar", "Investigate sidebar resizing");
+
+    await dragSidebarHandleToWidth(client, 50);
+    await waitForSidebarWidth(client, 220);
+    const narrow = await getTaskTitleLayout(client);
+
+    await dragSidebarHandleToWidth(client, 600);
+    await waitForSidebarWidth(client, 420);
+    const wide = await getTaskTitleLayout(client);
+
+    expect(narrow.text).toBe(LONG_TASK_TITLE);
+    expect(wide.text).toBe(LONG_TASK_TITLE);
+    expect(narrow.text.length).toBeGreaterThan(40);
+    expect(narrow.textOverflow).toBe("ellipsis");
+    expect(wide.textOverflow).toBe("ellipsis");
+    expect(narrow.overflow).toBe("hidden");
+    expect(wide.overflow).toBe("hidden");
+    expect(narrow.whiteSpace).toBe("nowrap");
+    expect(wide.whiteSpace).toBe("nowrap");
+    expect(narrow.scrollWidth).toBeGreaterThan(narrow.clientWidth);
+    expect(wide.scrollWidth).toBeGreaterThan(wide.clientWidth);
+    expect(narrow.rectWidth).toBeLessThanOrEqual(narrow.itemRectWidth);
+    expect(wide.rectWidth).toBeLessThanOrEqual(wide.itemRectWidth);
+    expect(wide.clientWidth).toBeGreaterThan(narrow.clientWidth + 150);
+    expect(wide.scrollWidth).toBe(narrow.scrollWidth);
+    expect(wide.scrollWidth - wide.clientWidth).toBeLessThan(narrow.scrollWidth - narrow.clientWidth);
   });
 });

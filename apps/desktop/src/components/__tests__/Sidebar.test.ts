@@ -198,6 +198,17 @@ describe("Sidebar", () => {
     expect(wrapper.text()).toContain("... Pinned task");
   });
 
+  it("renders full task titles so sidebar width controls visual truncation", () => {
+    const longTitle = "Investigate resizing the sidebar so task titles can use the available space";
+    const wrapper = mountSidebar([
+      item("task-1", {
+        display_name: longTitle,
+      }),
+    ]);
+
+    expect(wrapper.get(".pipeline-item .item-title").text()).toBe(longTitle);
+  });
+
   it("marks remote tasks with a leading angle marker and leaves local tasks unmarked", () => {
     const wrapper = mountSidebar([
       item("task-remote", {
