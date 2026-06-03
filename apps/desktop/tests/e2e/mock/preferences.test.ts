@@ -35,6 +35,15 @@ describe("preferences", () => {
     await client.waitForNoElement(".prefs-panel", 2_000);
   });
 
+  it("toggles the preferences panel closed from the keyboard shortcut", async () => {
+    await client.executeSync(buildGlobalKeydownScript({ key: ",", meta: true }));
+    const panel = await client.waitForElement(".prefs-panel", 2_000);
+    expect(panel).toBeTruthy();
+
+    await client.executeSync(buildGlobalKeydownScript({ key: ",", meta: true }));
+    await client.waitForNoElement(".prefs-panel", 2_000);
+  });
+
   it("shows default settings in the UI", async () => {
     await client.executeSync(buildGlobalKeydownScript({ key: ",", meta: true }));
     const panel = await client.waitForElement(".prefs-panel", 2_000);
