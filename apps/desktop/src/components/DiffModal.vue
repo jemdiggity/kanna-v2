@@ -14,6 +14,7 @@ defineProps<{
   worktreePath?: string;
   initialScope?: "branch" | "working";
   initialScrollPositions?: Partial<Record<"branch" | "working", number>>;
+  initialBranchInclude?: "none" | "staged" | "all";
   maximized?: boolean;
   baseRef?: string;
   viewKey?: string;
@@ -23,6 +24,7 @@ const emit = defineEmits<{
   (e: "close"): void;
   (e: "scope-change", scope: "branch" | "working"): void;
   (e: "scroll-state-change", positions: Partial<Record<"branch" | "working", number>>): void;
+  (e: "branch-include-change", include: "none" | "staged" | "all"): void;
 }>();
 
 // Escape is handled by the centralized dismiss handler in useKeyboardShortcuts
@@ -40,10 +42,12 @@ onMounted(() => {
         :worktree-path="worktreePath"
         :initial-scope="initialScope"
         :initial-scroll-positions="initialScrollPositions"
+        :initial-branch-include="initialBranchInclude"
         :base-ref="baseRef"
         :view-key="viewKey"
         @scope-change="emit('scope-change', $event)"
         @scroll-state-change="emit('scroll-state-change', $event)"
+        @branch-include-change="emit('branch-include-change', $event)"
         @close="emit('close')"
       />
     </div>

@@ -48,15 +48,18 @@ registerContextShortcuts("diff", [
 ]);
 
 type WorkingFilter = "all" | "unstaged" | "staged";
+type BranchInclude = "none" | "staged" | "all";
 type DiffScope = "branch" | "working";
 type DiffScrollPositions = Partial<Record<DiffScope, number>>;
 const workingFilterOrder: WorkingFilter[] = ["all", "unstaged", "staged"];
+const branchIncludeOrder: BranchInclude[] = ["none", "staged", "all"];
 
 const props = defineProps<{
   repoPath: string;
   worktreePath?: string;
   initialScope?: DiffScope;
   initialScrollPositions?: DiffScrollPositions;
+  initialBranchInclude?: BranchInclude;
   baseRef?: string;
   viewKey?: string;
 }>();
@@ -64,6 +67,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: "scope-change", scope: DiffScope): void;
   (e: "scroll-state-change", positions: DiffScrollPositions): void;
+  (e: "branch-include-change", include: BranchInclude): void;
   (e: "close"): void;
 }>();
 
@@ -75,6 +79,7 @@ const loading = ref(false);
 const error = ref<string | null>(null);
 const noDiff = ref(false);
 const workingFilter = ref<WorkingFilter>("all");
+const branchInclude = ref<BranchInclude>(normalizeBranchInclude(props.initialBranchInclude));
 const scope = ref<DiffScope>(props.initialScope === "branch" ? "branch" : "working");
 const scrollPositions = ref<DiffScrollPositions>(cloneScrollPositions(props.initialScrollPositions));
 const renderedFiles = ref<DiffSearchFile[]>([]);
@@ -89,6 +94,15 @@ const workingFilterLabel = computed(() => {
     staged: t('diffView.filterStaged'),
   };
   return labels[workingFilter.value];
+});
+
+const branchIncludeLabel = computed(() => {
+  const labels: Record<BranchInclude, string> = {
+    none: t('diffView.branchIncludeNone'),
+    staged: t('diffView.filterStaged'),
+    all: t('diffView.filterAll'),
+  };
+  return labels[branchInclude.value];
 });
 let workerPool: WorkerPoolManager | null = null;
 
@@ -287,6 +301,10 @@ function cloneScrollPositions(positions?: DiffScrollPositions): DiffScrollPositi
   return positions ? { ...positions } : {};
 }
 
+function normalizeBranchInclude(include?: BranchInclude): BranchInclude {
+  return include === "staged" || include === "all" ? include : "none";
+}
+
 function emitScrollStateChange() {
   emit("scroll-state-change", { ...scrollPositions.value });
 }
@@ -314,6 +332,7 @@ function restoreScrollPosition() {
 function syncViewStateFromProps() {
   scope.value = props.initialScope === "branch" ? "branch" : "working";
   scrollPositions.value = cloneScrollPositions(props.initialScrollPositions);
+  branchInclude.value = normalizeBranchInclude(props.initialBranchInclude);
 }
 
 async function initWorkerPool() {
@@ -369,6 +388,7 @@ async function loadDiff(options: { preserveCurrentScroll?: boolean } = {}) {
     path,
     hasExplicitBaseRef: Boolean(props.baseRef),
     workingFilter: scope.value === "working" ? workingFilter.value : undefined,
+    branchInclude: scope.value === "branch" ? branchInclude.value : undefined,
   });
 
   try {
@@ -403,13 +423,14 @@ async function loadDiff(options: { preserveCurrentScroll?: boolean } = {}) {
       });
 
       const diffRangeStartedAt = performance.now();
-      patch = await invoke<string>("git_diff_range", {
+      patch = await invoke<string>("git_diff_branch_range", {
         repoPath: path,
         from: mergeBase,
-        to: "HEAD",
+        mode: branchInclude.value,
       });
-      logDiffPerf(loadId, "git_diff_range:done", {
+      logDiffPerf(loadId, "git_diff_branch_range:done", {
         durationMs: roundDuration(performance.now() - diffRangeStartedAt),
+        mode: branchInclude.value,
       });
     }
 
@@ -762,6 +783,13 @@ function cycleWorkingFilter() {
   void loadDiff();
 }
 
+function cycleBranchInclude() {
+  const idx = branchIncludeOrder.indexOf(branchInclude.value);
+  branchInclude.value = branchIncludeOrder[(idx + 1) % branchIncludeOrder.length];
+  emit("branch-include-change", branchInclude.value);
+  void loadDiff();
+}
+
 function handleScroll() {
   saveCurrentScrollPosition();
 }
@@ -891,6 +919,11 @@ defineExpose({ refresh: loadDiff });
         class="staged-toggle"
         @click="cycleWorkingFilter()"
       >{{ workingFilterLabel }}</button>
+      <button
+        v-if="scope === 'branch'"
+        class="branch-include-toggle staged-toggle"
+        @click="cycleBranchInclude()"
+      >{{ branchIncludeLabel }}</button>
     </div>
     <div v-if="error" class="diff-status diff-error">{{ error }}</div>
     <div v-else-if="noDiff && !loading" class="diff-status">{{ $t('diffView.noChanges') }}</div>

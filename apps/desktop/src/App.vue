@@ -337,6 +337,7 @@ function filterClosedRemoteSnapshot(snapshot: DesktopCloudSnapshot): DesktopClou
   };
 }
 type DiffScope = "branch" | "working";
+type BranchInclude = "none" | "staged" | "all";
 
 interface DiffScrollPositions {
   branch?: number;
@@ -346,6 +347,7 @@ interface DiffScrollPositions {
 interface DiffViewState {
   scope?: DiffScope;
   scrollPositions?: DiffScrollPositions;
+  branchInclude?: BranchInclude;
 }
 
 interface FilePreviewRecallState {
@@ -2347,11 +2349,13 @@ onBeforeUnmount(() => {
       :worktree-path="store.currentItem?.branch ? activeWorktreePath : undefined"
       :initial-scope="currentDiffViewState?.scope"
       :initial-scroll-positions="currentDiffViewState?.scrollPositions"
+      :initial-branch-include="currentDiffViewState?.branchInclude"
       :base-ref="store.currentItem?.base_ref ?? undefined"
       :view-key="currentDiffViewKey"
       :maximized="maximizedModal === 'diff'"
       @scope-change="(scope: DiffScope) => updateCurrentDiffViewState({ scope })"
       @scroll-state-change="(scrollPositions: DiffScrollPositions) => updateCurrentDiffViewState({ scrollPositions })"
+      @branch-include-change="(branchInclude: BranchInclude) => updateCurrentDiffViewState({ branchInclude })"
       @close="showDiffModal = false; maximizedModal = null"
     />
     <CommitGraphModal

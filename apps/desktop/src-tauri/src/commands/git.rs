@@ -37,6 +37,22 @@ fn discover_repo(repo_path: &str) -> Result<Repository, String> {
     Repository::discover(repo_path).map_err(|e| e.to_string())
 }
 
+fn diff_to_patch(diff: git2::Diff<'_>) -> Result<String, String> {
+    let mut output = Vec::new();
+    diff.print(git2::DiffFormat::Patch, |_delta, _hunk, line| {
+        let origin = line.origin();
+        match origin {
+            '+' | '-' | ' ' => output.push(origin as u8),
+            _ => {}
+        }
+        output.extend_from_slice(line.content());
+        true
+    })
+    .map_err(|e| e.to_string())?;
+
+    String::from_utf8(output).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn git_diff(repo_path: String, mode: String) -> Result<String, String> {
     let repo = Repository::open(&repo_path).map_err(|e| e.to_string())?;
@@ -66,19 +82,7 @@ pub fn git_diff(repo_path: String, mode: String) -> Result<String, String> {
         }
     };
 
-    let mut output = Vec::new();
-    diff.print(git2::DiffFormat::Patch, |_delta, _hunk, line| {
-        let origin = line.origin();
-        match origin {
-            '+' | '-' | ' ' => output.push(origin as u8),
-            _ => {}
-        }
-        output.extend_from_slice(line.content());
-        true
-    })
-    .map_err(|e| e.to_string())?;
-
-    String::from_utf8(output).map_err(|e| e.to_string())
+    diff_to_patch(diff)
 }
 
 #[tauri::command]
@@ -675,19 +679,52 @@ pub fn git_diff_range(repo_path: String, from: String, to: String) -> Result<Str
         .diff_tree_to_tree(Some(&from_tree), Some(&to_tree), None)
         .map_err(|e| e.to_string())?;
 
-    let mut output = Vec::new();
-    diff.print(git2::DiffFormat::Patch, |_delta, _hunk, line| {
-        let origin = line.origin();
-        match origin {
-            '+' | '-' | ' ' => output.push(origin as u8),
-            _ => {}
-        }
-        output.extend_from_slice(line.content());
-        true
-    })
-    .map_err(|e| e.to_string())?;
+    diff_to_patch(diff)
+}
 
-    String::from_utf8(output).map_err(|e| e.to_string())
+#[tauri::command]
+pub fn git_diff_branch_range(
+    repo_path: String,
+    from: String,
+    mode: String,
+) -> Result<String, String> {
+    let repo = Repository::open(&repo_path).map_err(|e| e.to_string())?;
+
+    let from_obj = repo
+        .revparse_single(&from)
+        .map_err(|e| format!("bad ref '{}': {}", from, e))?;
+    let from_tree = from_obj
+        .peel_to_tree()
+        .map_err(|e| format!("can't peel '{}' to tree: {}", from, e))?;
+
+    let diff = match mode.as_str() {
+        "none" => {
+            let head_obj = repo
+                .revparse_single("HEAD")
+                .map_err(|e| format!("bad ref 'HEAD': {}", e))?;
+            let head_tree = head_obj
+                .peel_to_tree()
+                .map_err(|e| format!("can't peel 'HEAD' to tree: {}", e))?;
+            repo.diff_tree_to_tree(Some(&from_tree), Some(&head_tree), None)
+                .map_err(|e| e.to_string())?
+        }
+        "staged" => {
+            let mut index = repo.index().map_err(|e| e.to_string())?;
+            repo.diff_tree_to_index(Some(&from_tree), Some(&mut index), None)
+                .map_err(|e| e.to_string())?
+        }
+        "all" => {
+            let mut opts = git2::DiffOptions::new();
+            opts.include_untracked(true)
+                .recurse_untracked_dirs(true)
+                .show_untracked_content(true);
+            repo.diff_tree_to_workdir_with_index(Some(&from_tree), Some(&mut opts))
+                .map_err(|e| e.to_string())?
+        }
+        other => return Err(format!("unsupported branch diff mode '{}'", other)),
+    };
+
+    diff_to_patch(diff)
 }
 
 #[derive(Serialize)]

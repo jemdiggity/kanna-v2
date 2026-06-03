@@ -214,6 +214,7 @@
     "filterAll": "스테이지+미스테이지",
     "filterUnstaged": "미스테이지",
     "filterStaged": "스테이지",
+    "branchIncludeNone": "없음",
     "searchPlaceholder": "검색...",
     "searchNoMatches": "일치 없음",
     "shortcutSearch": "검색",

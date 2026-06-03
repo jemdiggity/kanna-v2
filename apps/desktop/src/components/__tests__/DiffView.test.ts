@@ -233,7 +233,7 @@ describe("DiffView", () => {
   it("renders branch diffs with quoted Git patch paths", async () => {
     invokeMock.mockImplementation(async (command) => {
       if (command === "git_merge_base") return "abc123";
-      if (command === "git_diff_range") {
+      if (command === "git_diff_branch_range") {
         return [
           'diff --git "a/file name.txt" "b/file name.txt"',
           "index 7898192..6178079 100644",
@@ -280,7 +280,7 @@ describe("DiffView", () => {
         expect(args?.refA).toBe("origin/release");
         return "release-base";
       }
-      if (command === "git_diff_range") return "diff --git a/rebased.txt b/rebased.txt";
+      if (command === "git_diff_branch_range") return "diff --git a/rebased.txt b/rebased.txt";
       throw new Error(`unexpected command: ${command}`);
     });
 
@@ -307,6 +307,67 @@ describe("DiffView", () => {
       refA: "origin/release",
       refB: "HEAD",
     });
+
+    wrapper.unmount();
+  });
+
+  it("cycles branch include modes and reloads the branch diff", async () => {
+    invokeMock.mockImplementation(async (command, args) => {
+      if (command === "git_branch_upstream") return null;
+      if (command === "git_merge_base") return "base-sha";
+      if (command === "git_diff_branch_range") {
+        return `diff --git a/${args?.mode}.txt b/${args?.mode}.txt`;
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    const wrapper = mount(DiffView, {
+      props: {
+        repoPath: "/repo",
+        initialScope: "branch",
+        baseRef: "origin/main",
+      },
+      attachTo: document.body,
+      global: {
+        mocks: {
+          $t: (key: string) => key,
+        },
+      },
+    });
+
+    await flushPromises();
+    await flushPromises();
+
+    expect(invokeMock).toHaveBeenCalledWith("git_diff_branch_range", {
+      repoPath: "/repo",
+      from: "base-sha",
+      mode: "none",
+    });
+
+    const includeButton = wrapper.get(".branch-include-toggle");
+    expect(includeButton.text()).toBe("None");
+
+    await includeButton.trigger("click");
+    await flushPromises();
+    await flushPromises();
+
+    expect(invokeMock).toHaveBeenCalledWith("git_diff_branch_range", {
+      repoPath: "/repo",
+      from: "base-sha",
+      mode: "staged",
+    });
+    expect(includeButton.text()).toBe("Staged");
+
+    await includeButton.trigger("click");
+    await flushPromises();
+    await flushPromises();
+
+    expect(invokeMock).toHaveBeenCalledWith("git_diff_branch_range", {
+      repoPath: "/repo",
+      from: "base-sha",
+      mode: "all",
+    });
+    expect(includeButton.text()).toBe("Staged+Unstaged");
 
     wrapper.unmount();
   });
@@ -357,7 +418,7 @@ describe("DiffView", () => {
       if (command === "git_diff") return "diff --git a/working.txt b/working.txt";
       if (command === "git_default_branch") return "main";
       if (command === "git_merge_base") return "base-sha";
-      if (command === "git_diff_range") return "diff --git a/branch.txt b/branch.txt";
+      if (command === "git_diff_branch_range") return "diff --git a/branch.txt b/branch.txt";
       return "";
     });
     renderMock.mockImplementation(({ containerWrapper }: { containerWrapper?: HTMLElement }) => {
