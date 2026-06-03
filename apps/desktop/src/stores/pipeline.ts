@@ -312,6 +312,7 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
   async function advanceStage(taskId: string, options: AdvanceStageOptions = {}): Promise<void> {
     const item = context.state.items.value.find((candidate) => candidate.id === taskId);
     if (!item?.branch) return;
+    if (item.closed_at != null) return;
 
     const repo = context.state.repos.value.find((candidate) => candidate.id === item.repo_id)
       ?? await getRepo(context.requireDb(), item.repo_id);

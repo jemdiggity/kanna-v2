@@ -109,7 +109,7 @@ function itemsForRepo(repoId: string): SidebarPipelineItem[] {
 }
 
 function totalItemsForRepo(repoId: string): number {
-  return props.pipelineItems.filter((i) => i.repo_id === repoId && i.stage !== "done").length;
+  return props.pipelineItems.filter((i) => i.repo_id === repoId && i.stage !== "done" && i.closed_at == null).length;
 }
 
 function repoCountLabel(repoId: string): string {

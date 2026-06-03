@@ -255,7 +255,7 @@ function createMockDb(): DbHandle & {
       } else if (q.startsWith("UPDATE PIPELINE_ITEM SET STAGE =")) {
         const [stage, id] = bindValues as string[];
         const item = tables.pipeline_item.find((p) => p.id === id);
-        if (item) {
+        if (item && (!q.includes("CLOSED_AT IS NULL") || item.closed_at === null)) {
           item.stage = stage;
           item.updated_at = new Date().toISOString();
         }
@@ -365,7 +365,12 @@ function createMockDb(): DbHandle & {
       } else if (q.startsWith("SELECT * FROM PIPELINE_ITEM WHERE REPO_ID") && q.includes("STAGE != 'DONE'")) {
         const [repoId] = bindValues as string[];
         return tables.pipeline_item.filter(
-          (p) => p.repo_id === repoId && p.stage !== "done"
+          (p) => p.repo_id === repoId && p.stage !== "done" && p.closed_at === null
+        ) as unknown as T[];
+      } else if (q.startsWith("SELECT * FROM PIPELINE_ITEM WHERE REPO_ID") && q.includes("CLOSED_AT IS NULL")) {
+        const [repoId] = bindValues as string[];
+        return tables.pipeline_item.filter(
+          (p) => p.repo_id === repoId && p.closed_at === null
         ) as unknown as T[];
       } else if (q.startsWith("SELECT * FROM PIPELINE_ITEM WHERE REPO_ID")) {
         const [repoId] = bindValues as string[];
@@ -622,6 +627,50 @@ describe("pipeline_item queries", () => {
     expect(items[0].tags).toBe("[]");
   });
 
+  it("listPipelineItems excludes closed rows even when stage is still active", async () => {
+    await insertPipelineItem(db, {
+      id: "open",
+      repo_id: "r1",
+      issue_number: null,
+      issue_title: null,
+      prompt: "open",
+      tags: [],
+      pr_number: null,
+      pr_url: null,
+      branch: "task-open",
+      agent_type: "pty",
+      agent_provider: "claude",
+      activity: "idle",
+      port_offset: null,
+      port_env: null,
+    });
+    await insertPipelineItem(db, {
+      id: "closed-pr",
+      repo_id: "r1",
+      issue_number: null,
+      issue_title: null,
+      prompt: "closed",
+      stage: "pr",
+      tags: [],
+      pr_number: null,
+      pr_url: null,
+      branch: "task-closed-pr",
+      agent_type: "pty",
+      agent_provider: "claude",
+      activity: "idle",
+      port_offset: null,
+      port_env: null,
+    });
+    const closed = db.tables.pipeline_item.find((item) => item.id === "closed-pr");
+    if (closed) {
+      closed.closed_at = "2026-05-31 10:56:44";
+    }
+
+    const items = await listPipelineItems(db, "r1");
+
+    expect(items.map((item) => item.id)).toEqual(["open"]);
+  });
+
   it("listTaskPorts returns ports in ascending order", async () => {
     db.tables.task_port.push(
       { port: 5174, pipeline_item_id: "pi2", env_name: "KANNA_DEV_PORT", created_at: new Date().toISOString() },
@@ -798,6 +847,19 @@ describe("stage queries", () => {
     await updatePipelineItemStage(db, "pi1", "review");
     const item = db.tables.pipeline_item.find((p) => p.id === "pi1");
     expect(item?.stage).toBe("review");
+  });
+
+  it("updatePipelineItemStage does not mutate closed rows", async () => {
+    const item = db.tables.pipeline_item.find((p) => p.id === "pi1");
+    if (item) {
+      item.stage = "review";
+      item.closed_at = "2026-06-03 00:02:25";
+    }
+
+    await updatePipelineItemStage(db, "pi1", "pr");
+
+    expect(item?.stage).toBe("review");
+    expect(item?.closed_at).toBe("2026-06-03 00:02:25");
   });
 
   it("markPipelineItemTearingDown marks teardown state without changing stage", async () => {

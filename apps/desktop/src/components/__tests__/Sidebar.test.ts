@@ -253,6 +253,32 @@ describe("Sidebar", () => {
     expect(wrapper.text()).not.toContain('Filtering tasks: "visibility"');
   });
 
+  it("excludes closed tasks from filtered repo count totals", async () => {
+    const pipelineItems = [
+      item("task-open", {
+        prompt: "Fix sidebar search visibility",
+        display_name: "Sidebar visibility fix",
+        branch: "task-open",
+      }),
+      item("task-closed", {
+        prompt: "Closed sidebar search visibility",
+        display_name: "Closed visibility task",
+        branch: "task-closed",
+        stage: "pr",
+        closed_at: "2026-05-31 10:56:44",
+      }),
+    ];
+
+    const wrapper = mountSidebar(pipelineItems);
+
+    await wrapper.get(".search-input").setValue("visibility");
+
+    expect(wrapper.get(".repo-count").text()).toBe("1/1");
+    expect(wrapper.findAll(".pipeline-item .item-title").map((el) => el.text())).toEqual([
+      "Sidebar visibility fix",
+    ]);
+  });
+
   it("shows a search-aware empty state when no tasks match the search query", async () => {
     const pipelineItems = [
       item("task-1", {

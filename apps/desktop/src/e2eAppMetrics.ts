@@ -1,12 +1,13 @@
 export interface E2EAppMetricsSnapshot {
   invokeCounts: Record<string, number>;
+  invokeCalls: Array<{ command: string; args: unknown }>;
   listenCounts: Record<string, number>;
   unlistenCounts: Record<string, number>;
   activeListenCounts: Record<string, number>;
 }
 
 interface E2EAppMetricsApi {
-  recordInvoke: (command: string) => void;
+  recordInvoke: (command: string, args?: unknown) => void;
   recordListen: (event: string) => () => void;
   snapshot: () => E2EAppMetricsSnapshot;
   clear: () => void;
@@ -20,14 +21,20 @@ function toRecord(map: Map<string, number>): Record<string, number> {
   return Object.fromEntries(map.entries());
 }
 
+const MAX_INVOKE_CALLS = 500;
 const invokeCounts = new Map<string, number>();
+const invokeCalls: Array<{ command: string; args: unknown }> = [];
 const listenCounts = new Map<string, number>();
 const unlistenCounts = new Map<string, number>();
 const activeListenCounts = new Map<string, number>();
 
 export const e2eAppMetrics: E2EAppMetricsApi = {
-  recordInvoke(command: string): void {
+  recordInvoke(command: string, args?: unknown): void {
     increment(invokeCounts, command);
+    invokeCalls.push({ command, args: args ?? null });
+    while (invokeCalls.length > MAX_INVOKE_CALLS) {
+      invokeCalls.shift();
+    }
   },
 
   recordListen(event: string): () => void {
@@ -46,6 +53,7 @@ export const e2eAppMetrics: E2EAppMetricsApi = {
   snapshot(): E2EAppMetricsSnapshot {
     return {
       invokeCounts: toRecord(invokeCounts),
+      invokeCalls: [...invokeCalls],
       listenCounts: toRecord(listenCounts),
       unlistenCounts: toRecord(unlistenCounts),
       activeListenCounts: toRecord(activeListenCounts),
@@ -54,6 +62,7 @@ export const e2eAppMetrics: E2EAppMetricsApi = {
 
   clear(): void {
     invokeCounts.clear();
+    invokeCalls.length = 0;
     listenCounts.clear();
     unlistenCounts.clear();
   },

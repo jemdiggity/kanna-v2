@@ -207,6 +207,44 @@ describe("createSelectionApi", () => {
     expect(state.selectedItemId.value).toBe("task-1");
   });
 
+  it("hides closed tasks even when their stage is not done", () => {
+    const state = createStoreState();
+    state.db.value = createDb();
+    state.repos.value = [createRepo()];
+    state.items.value = [
+      createItem({
+        id: "task-closed-pr",
+        stage: "pr",
+        closed_at: "2026-05-31 10:56:44",
+      }),
+      createItem({
+        id: "task-open",
+        stage: "in progress",
+        closed_at: null,
+        created_at: "2026-04-29T00:01:00.000Z",
+      }),
+    ];
+    state.selectedRepoId.value = "repo-1";
+    state.selectedItemId.value = "task-closed-pr";
+
+    const context = createStoreContext(
+      state,
+      {
+        toasts: ref([]),
+        dismiss: vi.fn(),
+        info: vi.fn(),
+        warning: vi.fn(),
+        error: vi.fn(),
+      },
+      {} as never,
+    );
+
+    const api = createSelectionApi(context);
+
+    expect(api.sortedItemsForCurrentRepo.value.map((item) => item.id)).toEqual(["task-open"]);
+    expect(api.currentItem.value?.id).toBe("task-open");
+  });
+
   it("uses the built-in stage order when a repo has no stage_order override", () => {
     const state = createStoreState();
     state.db.value = createDb();

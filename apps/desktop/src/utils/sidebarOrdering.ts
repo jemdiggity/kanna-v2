@@ -21,8 +21,8 @@ function hasTag(item: { tags: string }, tag: string): boolean {
   }
 }
 
-function isHidden(item: { stage: string }): boolean {
-  return item.stage === "done";
+function isHidden(item: { stage: string; closed_at?: string | null }): boolean {
+  return item.stage === "done" || item.closed_at != null;
 }
 
 function matchesSearch(query: string, item: PipelineItem): boolean {
@@ -132,4 +132,3 @@ export function sortSidebarItemsForRepo(options: SidebarOrderingOptions): Pipeli
     ...sortedSidebarBlockedItems(options),
   ];
 }
-

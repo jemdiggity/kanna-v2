@@ -686,7 +686,7 @@ impl Db {
 
     pub fn update_pipeline_item_stage(&self, id: &str, stage: &str) -> Result<(), rusqlite::Error> {
         let rows_affected = self.conn.execute(
-            "UPDATE pipeline_item SET stage = ?, updated_at = datetime('now') WHERE id = ?",
+            "UPDATE pipeline_item SET stage = ?, updated_at = datetime('now') WHERE id = ? AND closed_at IS NULL",
             (stage, id),
         )?;
         if rows_affected == 0 {
@@ -702,7 +702,7 @@ impl Db {
         stage_result: Option<&str>,
     ) -> Result<(), rusqlite::Error> {
         let rows_affected = self.conn.execute(
-            "UPDATE pipeline_item SET stage = ?, stage_result = ?, updated_at = datetime('now') WHERE id = ?",
+            "UPDATE pipeline_item SET stage = ?, stage_result = ?, updated_at = datetime('now') WHERE id = ? AND closed_at IS NULL",
             (stage, stage_result, id),
         )?;
         if rows_affected == 0 {
@@ -1083,6 +1083,87 @@ mod tests {
 
         let item = db.get_pipeline_item("710917fb").unwrap().unwrap();
         assert_eq!(item.stage.as_deref(), Some("done"));
+    }
+
+    #[test]
+    fn update_pipeline_item_stage_does_not_mutate_closed_rows() {
+        let path = temp_db_path();
+        let conn = Connection::open(&path).expect("open temp db");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE pipeline_item (
+              id TEXT PRIMARY KEY,
+              stage TEXT NOT NULL,
+              stage_result TEXT,
+              closed_at TEXT,
+              updated_at TEXT
+            );
+            INSERT INTO pipeline_item (id, stage, closed_at)
+            VALUES ('task-1', 'review', '2026-06-03 00:02:25');
+            "#,
+        )
+        .expect("seed db");
+        drop(conn);
+
+        let db = Db::open(path.to_str().expect("utf8 path")).expect("open db");
+        let err = db
+            .update_pipeline_item_stage("task-1", "pr")
+            .expect_err("closed task should not be stage-mutated");
+
+        assert!(matches!(err, rusqlite::Error::QueryReturnedNoRows));
+        let conn = Connection::open(&path).expect("re-open db");
+        let (stage, closed_at): (String, Option<String>) = conn
+            .query_row(
+                "SELECT stage, closed_at FROM pipeline_item WHERE id = 'task-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("query row");
+        assert_eq!(stage, "review");
+        assert_eq!(closed_at.as_deref(), Some("2026-06-03 00:02:25"));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn update_pipeline_item_stage_state_does_not_mutate_closed_rows() {
+        let path = temp_db_path();
+        let conn = Connection::open(&path).expect("open temp db");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE pipeline_item (
+              id TEXT PRIMARY KEY,
+              stage TEXT NOT NULL,
+              stage_result TEXT,
+              closed_at TEXT,
+              updated_at TEXT
+            );
+            INSERT INTO pipeline_item (id, stage, stage_result, closed_at)
+            VALUES ('task-1', 'pr', '{"status":"success"}', '2026-06-03 00:02:25');
+            "#,
+        )
+        .expect("seed db");
+        drop(conn);
+
+        let db = Db::open(path.to_str().expect("utf8 path")).expect("open db");
+        let err = db
+            .update_pipeline_item_stage_state("task-1", "review", None)
+            .expect_err("closed task should not be stage-state-mutated");
+
+        assert!(matches!(err, rusqlite::Error::QueryReturnedNoRows));
+        let conn = Connection::open(&path).expect("re-open db");
+        let (stage, stage_result, closed_at): (String, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT stage, stage_result, closed_at FROM pipeline_item WHERE id = 'task-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("query row");
+        assert_eq!(stage, "pr");
+        assert_eq!(stage_result.as_deref(), Some("{\"status\":\"success\"}"));
+        assert_eq!(closed_at.as_deref(), Some("2026-06-03 00:02:25"));
+
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

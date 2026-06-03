@@ -75,7 +75,7 @@ export async function listPipelineItems(
   repoId: string
 ): Promise<PipelineItem[]> {
   return db.select<PipelineItem>(
-    "SELECT * FROM pipeline_item WHERE repo_id = ? ORDER BY created_at DESC",
+    "SELECT * FROM pipeline_item WHERE repo_id = ? AND closed_at IS NULL ORDER BY created_at DESC",
     [repoId]
   );
 }
@@ -142,7 +142,7 @@ export async function updatePipelineItemStage(
   stage: string
 ): Promise<void> {
   await db.execute(
-    `UPDATE pipeline_item SET stage = ?, updated_at = datetime('now') WHERE id = ?`,
+    `UPDATE pipeline_item SET stage = ?, updated_at = datetime('now') WHERE id = ? AND closed_at IS NULL`,
     [stage, id]
   );
 }
