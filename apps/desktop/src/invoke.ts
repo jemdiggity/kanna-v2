@@ -12,7 +12,7 @@ export async function invoke<T = unknown>(
 ): Promise<T> {
   try {
     if (import.meta.env.DEV && window.__KANNA_E2E__) {
-      e2eAppMetrics.recordInvoke(cmd);
+      e2eAppMetrics.recordInvoke(cmd, args);
     }
     return await tauriInvoke<T>(cmd, args);
   } catch (error) {
