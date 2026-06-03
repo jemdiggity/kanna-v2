@@ -8,6 +8,19 @@ import { execDb, getVueState } from "../helpers/vue";
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
 const CTX_SCRIPT = 'window.__KANNA_E2E__.setupState';
 const HISTORY_DWELL_WAIT_MS = 1_250;
+const SIDEBAR_SCROLL_STYLE_ID = "e2e-sidebar-scroll-viewport";
+
+interface SidebarScrollMetrics {
+  scrollTop: number;
+  clientHeight: number;
+  scrollHeight: number;
+  selectedText: string;
+  selectedTop: number;
+  selectedBottom: number;
+  contentTop: number;
+  contentBottom: number;
+  isSelectedVisible: boolean;
+}
 
 describe("keyboard shortcuts", () => {
   const client = new WebDriverClient();
@@ -111,6 +124,73 @@ describe("keyboard shortcuts", () => {
       `return Array.from(document.querySelectorAll(".pipeline-item .item-title"))
         .map(function(element) { return element.textContent?.trim() || ""; })
         .filter(Boolean);`,
+    );
+  }
+
+  async function getSidebarScrollMetrics(): Promise<SidebarScrollMetrics> {
+    return await client.executeSync<SidebarScrollMetrics>(
+      `const content = document.querySelector(".sidebar-content");
+       const selected = content?.querySelector(".pipeline-item.selected");
+       if (!(content instanceof HTMLElement) || !(selected instanceof HTMLElement)) {
+         return {
+           scrollTop: -1,
+           clientHeight: 0,
+           scrollHeight: 0,
+           selectedText: "",
+           selectedTop: 0,
+           selectedBottom: 0,
+           contentTop: 0,
+           contentBottom: 0,
+           isSelectedVisible: false,
+         };
+       }
+       const contentRect = content.getBoundingClientRect();
+       const selectedRect = selected.getBoundingClientRect();
+       return {
+         scrollTop: content.scrollTop,
+         clientHeight: content.clientHeight,
+         scrollHeight: content.scrollHeight,
+         selectedText: selected.textContent?.trim() || "",
+         selectedTop: selectedRect.top,
+         selectedBottom: selectedRect.bottom,
+         contentTop: contentRect.top,
+         contentBottom: contentRect.bottom,
+         isSelectedVisible: selectedRect.top >= contentRect.top - 1
+           && selectedRect.bottom <= contentRect.bottom + 1,
+       };`,
+    );
+  }
+
+  async function waitForSidebarSelectionVisible(expectedText: string, timeoutMs = 3000): Promise<SidebarScrollMetrics> {
+    const deadline = Date.now() + timeoutMs;
+    let lastMetrics: SidebarScrollMetrics | null = null;
+    while (Date.now() < deadline) {
+      lastMetrics = await getSidebarScrollMetrics();
+      if (
+        lastMetrics.selectedText.includes(expectedText)
+        && lastMetrics.scrollTop > 0
+        && lastMetrics.isSelectedVisible
+      ) {
+        return lastMetrics;
+      }
+      await sleep(100);
+    }
+    throw new Error(
+      `Timed out waiting for selected sidebar task "${expectedText}" to be visible; last metrics were ${
+        JSON.stringify(lastMetrics)
+      }`,
+    );
+  }
+
+  async function constrainSidebarHeightForScrollTest(): Promise<void> {
+    await client.executeSync(
+      `document.getElementById(${JSON.stringify(SIDEBAR_SCROLL_STYLE_ID)})?.remove();
+       const style = document.createElement("style");
+       style.id = ${JSON.stringify(SIDEBAR_SCROLL_STYLE_ID)};
+       style.textContent = ".sidebar { height: 220px !important; }";
+       document.head.appendChild(style);
+       const content = document.querySelector(".sidebar-content");
+       if (content instanceof HTMLElement) content.scrollTop = 0;`,
     );
   }
 
@@ -425,6 +505,73 @@ describe("keyboard shortcuts", () => {
 
     await pressKey("ArrowUp", { meta: true, alt: true });
     await waitForSelection({ repoId: repoOneId, itemId: repoOneOldest });
+  });
+
+  it("scrolls the real sidebar scroller when keyboard navigation selects an offscreen task", async () => {
+    await resetDatabase(client);
+    await client.executeSync("location.reload()");
+    await client.waitForAppReady();
+    await dismissStartupShortcutsModal(client);
+
+    const repoId = await importTestRepo(client, testRepoPath, "keyboard-sidebar-scroll");
+    repoImported = true;
+
+    const taskCount = 28;
+    const targetIndex = 18;
+    const taskId = (index: number) => `sidebar-scroll-task-${String(index).padStart(2, "0")}`;
+    const taskTitle = (index: number) => `Sidebar overflow task ${String(index).padStart(2, "0")}`;
+
+    await execDb(client, "DELETE FROM pipeline_item WHERE repo_id = ?", [repoId]);
+    for (let index = 0; index < taskCount; index += 1) {
+      const createdAt = new Date(Date.UTC(2026, 3, 17, 10, 0, taskCount - index)).toISOString();
+      await execDb(
+        client,
+        `INSERT INTO pipeline_item
+           (id, repo_id, issue_number, issue_title, prompt, stage, tags, branch, agent_type, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          taskId(index),
+          repoId,
+          700 + index,
+          taskTitle(index),
+          `Prompt for ${taskTitle(index)}`,
+          "in progress",
+          "[]",
+          null,
+          "sdk",
+          createdAt,
+          createdAt,
+        ],
+      );
+    }
+
+    await client.executeAsync<string>(
+      `const cb = arguments[arguments.length - 1];
+       const ctx = ${CTX_SCRIPT};
+       ctx.refreshAllItems()
+         .then(function() { return ctx.store.selectRepo(${JSON.stringify(repoId)}); })
+         .then(function() { return ctx.store.selectItem(${JSON.stringify(taskId(0))}); })
+         .then(function() { cb("ok"); })
+         .catch(function(e) { cb("err:" + e); });`,
+    );
+    await waitForSelection({ repoId, itemId: taskId(0) });
+    await constrainSidebarHeightForScrollTest();
+
+    const initialMetrics = await getSidebarScrollMetrics();
+    expect(initialMetrics.selectedText).toContain(taskTitle(0));
+    expect(initialMetrics.scrollHeight).toBeGreaterThan(initialMetrics.clientHeight);
+    expect(initialMetrics.scrollTop).toBe(0);
+    expect(initialMetrics.isSelectedVisible).toBe(true);
+
+    for (let index = 1; index <= targetIndex; index += 1) {
+      await pressKey("ArrowDown", { meta: true, alt: true });
+      await waitForSelection({ repoId, itemId: taskId(index) });
+    }
+
+    const finalMetrics = await waitForSidebarSelectionVisible(taskTitle(targetIndex));
+    expect(finalMetrics.scrollTop).toBeGreaterThan(initialMetrics.scrollTop);
+    expect(finalMetrics.selectedTop).toBeGreaterThanOrEqual(finalMetrics.contentTop - 1);
+    expect(finalMetrics.selectedBottom).toBeLessThanOrEqual(finalMetrics.contentBottom + 1);
   });
 
   it("uses native repo-navigation events to navigate repos", async () => {
