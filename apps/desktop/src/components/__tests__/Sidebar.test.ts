@@ -385,6 +385,49 @@ describe("Sidebar", () => {
     }
   });
 
+  it("scrolls when a selected active-stage task becomes unclosed and visible", async () => {
+    const scrollIntoView = vi.fn();
+    const originalDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollIntoView");
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: scrollIntoView,
+    });
+
+    try {
+      const wrapper = mountSidebar([
+        item("task-closed", {
+          display_name: "Closed task",
+          stage: "pr",
+          closed_at: "2026-06-03T01:05:00.000Z",
+        }),
+      ], "task-closed");
+
+      await flushPromises();
+      scrollIntoView.mockClear();
+
+      await wrapper.setProps({
+        pipelineItems: [
+          item("task-closed", {
+            display_name: "Closed task",
+            stage: "pr",
+            closed_at: null,
+          }),
+        ],
+      });
+      await flushPromises();
+
+      const selected = wrapper.get(".pipeline-item.selected");
+      expect(selected.text()).toContain("Closed task");
+      expect(scrollIntoView.mock.contexts[0]).toBe(selected.element);
+    } finally {
+      if (originalDescriptor) {
+        Object.defineProperty(HTMLElement.prototype, "scrollIntoView", originalDescriptor);
+      } else {
+        delete (HTMLElement.prototype as Partial<HTMLElement>).scrollIntoView;
+      }
+    }
+  });
+
   it("keeps a tearing-down task in its pipeline stage section with strikethrough styling", async () => {
     const pipelineItems = [
       item("task-1", {

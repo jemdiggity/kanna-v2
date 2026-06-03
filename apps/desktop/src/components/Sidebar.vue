@@ -67,7 +67,7 @@ const selectedVisibleTaskId = computed(() => {
   const item = props.selectedItemId
     ? props.pipelineItems.find((candidate) => candidate.id === props.selectedItemId)
     : null;
-  return item && item.stage !== "done" ? item.id : null;
+  return item && item.stage !== "done" && item.closed_at == null ? item.id : null;
 });
 
 function isSearchActive(): boolean {
