@@ -127,8 +127,7 @@ function repoCountLabel(repoId: string): string {
 
 function itemTitle(item: SidebarPipelineItem): string {
   const raw = item.display_name || item.issue_title || item.prompt || t('tasks.untitled');
-  const truncated = raw.length > 40 ? raw.slice(0, 40) + "..." : raw;
-  return item.active_post_action ? `... ${truncated}` : truncated;
+  return item.active_post_action ? `... ${raw}` : raw;
 }
 
 function isRemoteTask(item: SidebarPipelineItem): boolean {
@@ -820,6 +819,7 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
   text-overflow: ellipsis;
   white-space: nowrap;
   flex: 1;
+  min-width: 0;
   pointer-events: none;
 }
 
