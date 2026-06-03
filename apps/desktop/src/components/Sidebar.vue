@@ -57,11 +57,18 @@ interface DraggableChange<T extends { id: string }> {
 const collapsedRepos = ref<Set<string>>(new Set());
 const searchQuery = ref("");
 const searchInputRef = ref<HTMLInputElement | null>(null);
+const sidebarContentRef = ref<HTMLElement | null>(null);
 const preSearchCollapsed = ref<Set<string> | null>(null);
 const repoDrag = ref<{ repoId: string; startY: number; active: boolean; overRepoId: string | null } | null>(null);
 const suppressNextRepoClick = ref(false);
 const trimmedSearchQuery = computed(() => searchQuery.value.trim());
 const hasActiveSearch = computed(() => trimmedSearchQuery.value.length > 0);
+const selectedVisibleTaskId = computed(() => {
+  const item = props.selectedItemId
+    ? props.pipelineItems.find((candidate) => candidate.id === props.selectedItemId)
+    : null;
+  return item && item.stage !== "done" ? item.id : null;
+});
 
 function isSearchActive(): boolean {
   return searchQuery.value.trim().length > 0;
@@ -330,6 +337,22 @@ watch(searchQuery, (q) => {
   }
 });
 
+async function scrollSelectedTaskIntoView() {
+  if (!props.selectedItemId) return;
+  await nextTick();
+  sidebarContentRef.value
+    ?.querySelector<HTMLElement>(".pipeline-item.selected")
+    ?.scrollIntoView({ block: "nearest", inline: "nearest" });
+}
+
+watch(
+  [() => props.selectedItemId, selectedVisibleTaskId],
+  () => {
+    void scrollSelectedTaskIntoView();
+  },
+  { immediate: true, flush: "post" },
+);
+
 function renameSelectedItem() {
   if (!props.selectedItemId) return;
   const item = props.pipelineItems.find((i) => i.id === props.selectedItemId);
@@ -347,7 +370,7 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
 
 <template>
   <aside class="sidebar" :class="{ 'is-filtering': hasActiveSearch }" @mousedown="preventFocusSteal">
-    <div class="sidebar-content">
+    <div ref="sidebarContentRef" class="sidebar-content">
       <div v-if="repos.length === 0" class="empty-state">
         {{ $t('sidebar.noReposYet') }}<br>
         {{ $t('sidebar.noReposHint', { shortcut: '⌘I' }) }}
