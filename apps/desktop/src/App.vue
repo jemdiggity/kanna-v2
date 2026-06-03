@@ -683,7 +683,7 @@ async function navigateRepos(direction: -1 | 1) {
   // Restore last-selected task for this repo, or fall back to first task.
   const lastItemId = store.lastSelectedItemByRepo[nextRepo.id];
   const lastItem = lastItemId
-    ? sidebarItems.value.find((i) => i.id === lastItemId && i.repo_id === nextRepo.id && i.stage !== "done")
+    ? sidebarItems.value.find((i) => i.id === lastItemId && i.repo_id === nextRepo.id && i.stage !== "done" && i.closed_at == null)
     : undefined;
   const targetItem = lastItem ?? visibleSidebarItemsForRepo(nextRepo.id)[0];
 
@@ -740,6 +740,7 @@ const blockerCandidates = computed(() => {
   return store.items.filter((i) =>
     i.id !== item.id &&
     i.stage !== "done" &&
+    i.closed_at == null &&
     i.repo_id === store.selectedRepoId
   );
 });
@@ -748,7 +749,7 @@ const blockerCandidates = computed(() => {
 const disabledBlockerIds = computedAsync(async () => {
   const item = store.currentItem;
   if (!item) return [];
-  if (item.stage !== "done") {
+  if (item.stage !== "done" && item.closed_at == null) {
     const dependents = await collectDependents(item.id);
     return [...dependents];
   }
@@ -812,7 +813,7 @@ async function onBlockerConfirm(selectedIds: string[]) {
 const paletteExtraCommands = computed(() => {
   const cmds: Array<{ action: ActionName; label: string; group: string; shortcut: string }> = [];
   const item = store.currentItem;
-  if (item && item.stage !== "done" && !hasTag(item, "blocked")) {
+  if (item && item.stage !== "done" && item.closed_at == null && !hasTag(item, "blocked")) {
     cmds.push({ action: "blockTask", label: t('tasks.blockTask'), group: t('shortcuts.groupTasks'), shortcut: "" });
   }
   if (item && hasTag(item, "blocked")) {
@@ -965,7 +966,7 @@ const paletteDynamicCommands = computed<DynamicCommand[]>(() => {
       execute: () => sidebarRef.value?.renameSelectedItem(),
     });
   }
-  if (store.currentItem && store.currentItem.stage !== "done") {
+  if (store.currentItem && store.currentItem.stage !== "done" && store.currentItem.closed_at == null) {
     cmds.push({
       id: "push-to-machine",
       label: t('taskTransfer.pushToMachine'),

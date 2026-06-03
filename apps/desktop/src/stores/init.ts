@@ -122,7 +122,7 @@ export function createInitApi(
 
     if (isTauri) {
       for (const item of eagerItems) {
-        if (!item.branch || item.stage === "done") continue;
+        if (!item.branch || item.stage === "done" || item.closed_at !== null) continue;
         const repo = eagerRepos.find((candidate) => candidate.id === item.repo_id);
         if (!repo) continue;
         const worktreePath = `${repo.path}/.kanna-worktrees/${item.branch}`;
@@ -157,6 +157,7 @@ export function createInitApi(
       && eagerItems.some((item) =>
         item.id === bootstrapItemId
         && item.stage !== "done"
+        && item.closed_at === null
         && item.repo_id === context.state.selectedRepoId.value)
     ) {
       requireService(context.services.restoreSelection, "restoreSelection")(bootstrapItemId);
@@ -187,7 +188,7 @@ export function createInitApi(
 
     if (isTauri) {
       for (const item of eagerItems) {
-        if (!item.branch || item.stage === "done") continue;
+        if (!item.branch || item.stage === "done" || item.closed_at !== null) continue;
         const repo = eagerRepos.find((candidate) => candidate.id === item.repo_id);
         if (!repo) continue;
         const worktreePath = `${repo.path}/.kanna-worktrees/${item.branch}`;

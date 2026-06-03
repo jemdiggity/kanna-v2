@@ -1430,6 +1430,38 @@ describe("kanna store task base branch integration", () => {
     });
   });
 
+  it("does not advance a closed task even when its stage is still active", async () => {
+    mockState.pipelineDefinition = {
+      name: "default",
+      stages: [
+        { name: "review", transition: "manual" },
+        { name: "pr", transition: "manual" },
+      ],
+    };
+    mockState.pipelineItems = [
+      mockState.makeItem({
+        id: "item-closed-review",
+        branch: "task-closed-review",
+        stage: "review",
+        closed_at: "2026-06-03 00:02:25",
+      }),
+    ];
+
+    const store = await createStore();
+    await vi.waitFor(() => {
+      expect(store.items).toHaveLength(1);
+    });
+
+    await store.advanceStage("item-closed-review");
+
+    expect(mockState.invokeMock).not.toHaveBeenCalledWith(
+      "git_worktree_add",
+      expect.anything(),
+    );
+    expect(mockState.pipelineItems[0]?.stage).toBe("review");
+    expect(mockState.pipelineItems[0]?.closed_at).toBe("2026-06-03 00:02:25");
+  });
+
   it("preserves the original base ref while advancing stages from the source branch", async () => {
     mockState.pipelineDefinition = {
       name: "qa",

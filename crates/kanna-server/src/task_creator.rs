@@ -123,6 +123,9 @@ pub(crate) fn prepare_advance_stage_for_api(
         .get_task_stage_source(source_task_id)
         .map_err(|e| format!("db error: {}", e))?
         .ok_or_else(|| format!("task not found: {}", source_task_id))?;
+    if source_task.closed_at.is_some() {
+        return Err(format!("task is closed: {}", source_task_id));
+    }
     let repo = db
         .get_repo(&source_task.repo_id)
         .map_err(|e| format!("db error: {}", e))?
@@ -384,6 +387,9 @@ pub(crate) fn prepare_revision_task_for_api(
         .get_task_stage_source(source_task_id)
         .map_err(|e| format!("db error: {}", e))?
         .ok_or_else(|| format!("task not found: {}", source_task_id))?;
+    if source_task.closed_at.is_some() {
+        return Err(format!("task is closed: {}", source_task_id));
+    }
     let repo = db
         .get_repo(&source_task.repo_id)
         .map_err(|e| format!("db error: {}", e))?
@@ -1600,6 +1606,7 @@ mod tests {
     use crate::daemon_client::DaemonClient;
     use crate::db::Db;
     use crate::mobile_api::CreateTaskRequest;
+    use rusqlite::Connection;
     use std::collections::HashMap;
     use std::process::Command;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -2157,6 +2164,67 @@ mod tests {
         assert_eq!(updated_source.stage_result, None);
         assert_eq!(updated_source.closed_at, None);
         assert_eq!(db.list_pipeline_items("repo-1").unwrap().len(), 1);
+
+        let _ = std::fs::remove_dir_all(&repo_root);
+    }
+
+    #[test]
+    fn prepare_advance_stage_rejects_closed_source_task_even_when_stage_is_active() {
+        let repo_root = std::env::temp_dir().join(format!(
+            "kanna-stage-advance-closed-source-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&repo_root);
+        std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+        std::fs::write(
+            repo_root.join(".kanna/pipelines/default.json"),
+            r#"{
+  "stages": [
+    { "name": "review", "transition": "manual" },
+    { "name": "pr", "transition": "manual", "mode": "continue" }
+  ]
+}"#,
+        )
+        .unwrap();
+
+        let config = test_config("advance-stage-closed-source");
+        let db = Db::open_for_tests(&config.db_path).unwrap();
+        db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+            .unwrap();
+        db.insert_test_pipeline_item(
+            "task-1",
+            "repo-1",
+            "Fix stage promotion",
+            Some("Fix stage promotion"),
+            "review",
+            "2026-04-17 07:00:00",
+        )
+        .unwrap();
+        db.update_test_pipeline_item_stage_context(
+            "task-1",
+            "task-source",
+            "default",
+            Some("{\"status\":\"success\",\"summary\":\"reviewed\"}"),
+            "claude",
+        )
+        .unwrap();
+        Connection::open(&config.db_path)
+            .unwrap()
+            .execute(
+                "UPDATE pipeline_item SET closed_at = datetime('now') WHERE id = ?",
+                ["task-1"],
+            )
+            .unwrap();
+
+        let err = match prepare_advance_stage_for_api(&db, &config, "task-1") {
+            Ok(_) => panic!("closed task should not prepare a stage transition"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.contains("task is closed: task-1"),
+            "unexpected error: {err}"
+        );
 
         let _ = std::fs::remove_dir_all(&repo_root);
     }
@@ -2824,6 +2892,74 @@ mod tests {
             Some("Implement revision:\nAdd e2e coverage for task creation.\n\nAdd e2e coverage for task creation.")
         );
         assert!(prepared.cwd.contains(".kanna-worktrees/task-"));
+    }
+
+    #[test]
+    fn prepare_revision_task_rejects_closed_source_task_even_when_stage_is_active() {
+        let repo_root = std::env::temp_dir().join(format!(
+            "kanna-stage-revision-closed-source-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&repo_root);
+        std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+        std::fs::write(
+            repo_root.join(".kanna/pipelines/qa.json"),
+            r#"{
+  "stages": [
+    { "name": "in progress", "transition": "manual" },
+    { "name": "review", "transition": "manual" },
+    { "name": "pr", "transition": "manual" }
+  ]
+}"#,
+        )
+        .unwrap();
+
+        let config = test_config("revision-stage-closed-source");
+        let db = Db::open_for_tests(&config.db_path).unwrap();
+        db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+            .unwrap();
+        db.insert_test_pipeline_item(
+            "review-task",
+            "repo-1",
+            "Fix the mobile shell",
+            Some("Mobile shell"),
+            "review",
+            "2026-04-17 07:00:00",
+        )
+        .unwrap();
+        db.update_test_pipeline_item_stage_context(
+            "review-task",
+            "task-reviewed-branch",
+            "qa",
+            Some("{\"status\":\"failure\",\"summary\":\"needs revision\"}"),
+            "claude",
+        )
+        .unwrap();
+        Connection::open(&config.db_path)
+            .unwrap()
+            .execute(
+                "UPDATE pipeline_item SET closed_at = datetime('now') WHERE id = ?",
+                ["review-task"],
+            )
+            .unwrap();
+
+        let err = match prepare_revision_task_for_api(
+            &db,
+            &config,
+            "review-task",
+            "in progress",
+            "Add more tests",
+        ) {
+            Ok(_) => panic!("closed task should not prepare a revision task"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.contains("task is closed: review-task"),
+            "unexpected error: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(&repo_root);
     }
 
     #[test]

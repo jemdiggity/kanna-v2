@@ -60,7 +60,7 @@ export function createSelectionApi(context: StoreContext): SelectionApi {
   }
 
   function isItemHidden(item: PipelineItem): boolean {
-    return item.stage === "done";
+    return item.stage === "done" || item.closed_at != null;
   }
 
   const selectedRepo = computed(() =>
