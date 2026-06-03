@@ -1556,7 +1556,7 @@ const keyboardActions = {
   importRepo: () => { addRepoInitialTab.value = "import"; showAddRepoModal.value = true; },
   blockTask: () => { handleBlockTask(); },
   editBlockedTask: () => { handleEditBlockedTask(); },
-  openPreferences: () => { showPreferencesPanel.value = true; },
+  openPreferences: () => { showPreferencesPanel.value = !showPreferencesPanel.value; },
   prevTab: () => { preferencesRef.value?.cycleTab(-1); },
   nextTab: () => { preferencesRef.value?.cycleTab(1); },
   focusSearch: () => { sidebarRef.value?.focusSearch(); },

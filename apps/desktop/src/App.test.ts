@@ -700,6 +700,25 @@ describe("App", () => {
     wrapper.unmount();
   });
 
+  it("toggles preferences with the preferences shortcut action", async () => {
+    const wrapper = await mountApp(SidebarWithRepoStub);
+
+    expect(capturedKeyboardActions).not.toBeNull();
+    expect(wrapper.findComponent({ name: "PreferencesPanel" }).exists()).toBe(false);
+
+    capturedKeyboardActions?.openPreferences();
+    await flushPromises();
+
+    expect(wrapper.findComponent({ name: "PreferencesPanel" }).exists()).toBe(true);
+
+    capturedKeyboardActions?.openPreferences();
+    await flushPromises();
+
+    expect(wrapper.findComponent({ name: "PreferencesPanel" }).exists()).toBe(false);
+
+    wrapper.unmount();
+  });
+
   it("restores the saved sidebar width for the current window", async () => {
     mockWindowWorkspace.loadSnapshot.mockResolvedValueOnce({
       windows: [
