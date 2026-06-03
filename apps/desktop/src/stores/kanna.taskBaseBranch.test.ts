@@ -2160,7 +2160,7 @@ describe("kanna store task base branch integration", () => {
     });
   });
 
-  it("submits continue-mode prompts to Claude with the terminal Enter sequence", async () => {
+  it("submits continue-mode prompts to Claude with carriage return", async () => {
     mockState.pipelineDefinition = {
       name: "default",
       stages: [
@@ -2183,7 +2183,7 @@ describe("kanna store task base branch integration", () => {
 
     expect(mockState.invokeMock).toHaveBeenCalledWith("send_input", {
       sessionId: "item-source",
-      data: Array.from(new TextEncoder().encode("\x1b[200~Stage prompt\x1b[201~\x1b[13u")),
+      data: Array.from(new TextEncoder().encode("\x1b[200~Stage prompt\x1b[201~\r")),
     });
   });
 

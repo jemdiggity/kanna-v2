@@ -970,12 +970,8 @@ fn prepare_post_action_stage(
 }
 
 fn encode_agent_stage_input(stage_prompt: &str, agent_provider: Option<&str>) -> Vec<u8> {
-    let submit = if agent_provider == Some("claude") {
-        "\u{1b}[13u"
-    } else {
-        "\r"
-    };
-    format!("\u{1b}[200~{stage_prompt}\u{1b}[201~{submit}").into_bytes()
+    let _ = agent_provider;
+    format!("\u{1b}[200~{stage_prompt}\u{1b}[201~\r").into_bytes()
 }
 
 fn resolve_current_source_worktree_branch(
@@ -2137,7 +2133,7 @@ mod tests {
         assert_eq!(continuation.next_stage, "commit");
         assert_eq!(
             String::from_utf8(continuation.input.clone()).unwrap(),
-            "\u{1b}[200~Commit agent\n\nCommit Fix stage promotion from task-source after {\"status\":\"success\",\"summary\":\"implemented\"}\u{1b}[201~\u{1b}[13u"
+            "\u{1b}[200~Commit agent\n\nCommit Fix stage promotion from task-source after {\"status\":\"success\",\"summary\":\"implemented\"}\u{1b}[201~\r"
         );
         assert_eq!(db.list_pipeline_items("repo-1").unwrap().len(), 1);
 
@@ -2153,7 +2149,7 @@ mod tests {
                 assert_eq!(session_id, "task-1");
                 assert_eq!(
                     String::from_utf8(data).unwrap(),
-                    "\u{1b}[200~Commit agent\n\nCommit Fix stage promotion from task-source after {\"status\":\"success\",\"summary\":\"implemented\"}\u{1b}[201~\u{1b}[13u"
+                    "\u{1b}[200~Commit agent\n\nCommit Fix stage promotion from task-source after {\"status\":\"success\",\"summary\":\"implemented\"}\u{1b}[201~\r"
                 );
             }
             other => panic!("expected daemon input command, got {:?}", other),
@@ -2368,7 +2364,7 @@ mod tests {
         assert_eq!(continuation.active_post_action.as_deref(), Some("commit"));
         assert_eq!(
             String::from_utf8(continuation.input.clone()).unwrap(),
-            "\u{1b}[200~Commit agent\n\nCommit Fix stage promotion from task-source after {\"status\":\"success\",\"summary\":\"implemented\"}\u{1b}[201~\u{1b}[13u"
+            "\u{1b}[200~Commit agent\n\nCommit Fix stage promotion from task-source after {\"status\":\"success\",\"summary\":\"implemented\"}\u{1b}[201~\r"
         );
 
         let fake_daemon = spawn_fake_daemon_once(config.daemon_dir.clone()).await;
@@ -2383,7 +2379,7 @@ mod tests {
                 assert_eq!(session_id, "task-1");
                 assert_eq!(
                     String::from_utf8(data).unwrap(),
-                    "\u{1b}[200~Commit agent\n\nCommit Fix stage promotion from task-source after {\"status\":\"success\",\"summary\":\"implemented\"}\u{1b}[201~\u{1b}[13u"
+                    "\u{1b}[200~Commit agent\n\nCommit Fix stage promotion from task-source after {\"status\":\"success\",\"summary\":\"implemented\"}\u{1b}[201~\r"
                 );
             }
             other => panic!("expected daemon input command, got {:?}", other),

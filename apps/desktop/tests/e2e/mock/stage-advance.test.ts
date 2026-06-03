@@ -611,7 +611,7 @@ describe("stage advance", () => {
       "",
       "Commit stage marker for Write the server commit",
     ].join("\n");
-    const expectedInput = Buffer.from(`\x1b[200~${expectedPrompt}\x1b[201~\x1b[13u`, "utf8");
+    const expectedInput = Buffer.from(`\x1b[200~${expectedPrompt}\x1b[201~\r`, "utf8");
 
     await tauriInvoke(client, "git_worktree_add", {
       repoPath: testRepoPath,
@@ -804,7 +804,7 @@ describe("stage advance", () => {
     }
   });
 
-  it("submits a Claude commit post-action with the terminal Enter sequence", async () => {
+  it("submits a Claude commit post-action with carriage return", async () => {
     const taskId = "continue-stage-claude-enter-task";
     const inputCapturePath = join(testRepoPath, ".kanna", "continue-stage-claude-enter-input.bin");
     const expectedPrompt = [
@@ -812,7 +812,7 @@ describe("stage advance", () => {
       "",
       "Commit stage marker for Write the commit",
     ].join("\n");
-    const expectedInput = Buffer.from(`\x1b[200~${expectedPrompt}\x1b[201~\x1b[13u`, "utf8");
+    const expectedInput = Buffer.from(`\x1b[200~${expectedPrompt}\x1b[201~\r`, "utf8");
     await execDb(
       client,
       `INSERT INTO pipeline_item (
