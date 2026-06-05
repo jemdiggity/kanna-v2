@@ -6,7 +6,7 @@ describe("resolveRequiredMobileE2eEnv", () => {
     expect(
       resolveRequiredMobileE2eEnv({
         KANNA_APPIUM_PORT: "4723",
-        EXPO_PUBLIC_KANNA_SERVER_URL: "http://127.0.0.1:48120"
+        KANNA_E2E_DESKTOP_SERVER_URL: "http://127.0.0.1:48120"
       })
     ).toMatchObject({
       target: "simulator"
@@ -16,7 +16,7 @@ describe("resolveRequiredMobileE2eEnv", () => {
   it("throws a clear error when KANNA_APPIUM_PORT is missing", () => {
     expect(() =>
       resolveRequiredMobileE2eEnv({
-        EXPO_PUBLIC_KANNA_SERVER_URL: "http://127.0.0.1:48120"
+        KANNA_E2E_DESKTOP_SERVER_URL: "http://127.0.0.1:48120"
       })
     ).toThrow("KANNA_APPIUM_PORT");
   });
@@ -26,7 +26,7 @@ describe("resolveRequiredMobileE2eEnv", () => {
       resolveRequiredMobileE2eEnv({
         KANNA_APPIUM_PORT: "4723",
         KANNA_MOBILE_PORT: "1430",
-        EXPO_PUBLIC_KANNA_SERVER_URL: "http://127.0.0.1:48120"
+        KANNA_E2E_DESKTOP_SERVER_URL: "http://127.0.0.1:48120"
       })
     ).toMatchObject({
       appiumPort: 4723,
@@ -40,7 +40,7 @@ describe("resolveRequiredMobileE2eEnv", () => {
     expect(
       resolveRequiredMobileE2eEnv({
         KANNA_APPIUM_PORT: "4723",
-        EXPO_PUBLIC_KANNA_SERVER_URL: "http://127.0.0.1:48120"
+        KANNA_E2E_DESKTOP_SERVER_URL: "http://127.0.0.1:48120"
       })
     ).toMatchObject({
       metroPort: 8081
@@ -51,7 +51,7 @@ describe("resolveRequiredMobileE2eEnv", () => {
     expect(
       resolveRequiredMobileE2eEnv({
         KANNA_APPIUM_PORT: "4723",
-        EXPO_PUBLIC_KANNA_SERVER_URL: "http://127.0.0.1:48120",
+        KANNA_E2E_DESKTOP_SERVER_URL: "http://127.0.0.1:48120",
         KANNA_IOS_E2E_TARGET: "device",
         KANNA_IOS_DEVICE_UDID: "00008110-001234560E10801E",
         KANNA_IOS_PHYSICAL_DEVICE_NAME: "Jerome's iPhone 15",
@@ -73,7 +73,7 @@ describe("resolveRequiredMobileE2eEnv", () => {
     expect(
       resolveRequiredMobileE2eEnv({
         KANNA_APPIUM_PORT: "4723",
-        EXPO_PUBLIC_KANNA_SERVER_URL: "http://127.0.0.1:48120",
+        KANNA_E2E_DESKTOP_SERVER_URL: "http://127.0.0.1:48120",
         KANNA_IOS_E2E_TARGET: "device"
       })
     ).toMatchObject({

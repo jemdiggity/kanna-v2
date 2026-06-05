@@ -52,10 +52,10 @@ export function resolveRequiredMobileE2eEnv(
     throw new Error(`KANNA_MOBILE_PORT must be an integer, got: ${rawMetroPort}`);
   }
 
-  const desktopServerUrl = env.EXPO_PUBLIC_KANNA_SERVER_URL?.trim();
+  const desktopServerUrl = env.KANNA_E2E_DESKTOP_SERVER_URL?.trim();
   if (!desktopServerUrl) {
     throw new Error(
-      "EXPO_PUBLIC_KANNA_SERVER_URL is required. Start Kanna with ./kd dev up --mobile."
+      "KANNA_E2E_DESKTOP_SERVER_URL is required. Start Kanna with ./kd dev up --mobile."
     );
   }
 

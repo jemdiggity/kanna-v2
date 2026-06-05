@@ -25,7 +25,6 @@ async function main(): Promise<void> {
     env.desktopServerUrl,
     env.target
   );
-  process.env.EXPO_PUBLIC_KANNA_SERVER_URL = desktopServerUrl;
   await assertXcuitestDriverInstalled(processEnv);
 
   const driverSummary = await listInstalledAppiumDrivers(processEnv);

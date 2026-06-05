@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   assertDesktopServerReachable,
+  readDesktopIdentity,
   resolveDesktopServerUrlForTarget
 } from "./desktop";
 
@@ -28,6 +29,36 @@ describe("assertDesktopServerReachable", () => {
     ).rejects.toThrow(
       "Desktop mobile server check failed for http://127.0.0.1:48120/v1/status: 503"
     );
+  });
+});
+
+describe("readDesktopIdentity", () => {
+  it("returns desktop identity from status", async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        desktopId: "desktop-1",
+        desktopName: "Studio Mac"
+      })
+    }));
+
+    await expect(readDesktopIdentity("http://127.0.0.1:48120", fetchMock)).resolves.toEqual({
+      desktopId: "desktop-1",
+      desktopName: "Studio Mac"
+    });
+  });
+
+  it("rejects status without desktop identity", async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ state: "running" })
+    }));
+
+    await expect(
+      readDesktopIdentity("http://127.0.0.1:48120", fetchMock)
+    ).rejects.toThrow("Desktop status did not include desktopId and desktopName.");
   });
 });
 

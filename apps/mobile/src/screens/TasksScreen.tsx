@@ -5,7 +5,7 @@ import type { RepoSummary, TaskSummary } from "../lib/api/types";
 import { TaskList } from "../components/TaskList";
 
 interface TasksScreenProps {
-  heading: string;
+  heading?: string | null;
   repos: RepoSummary[];
   selectedRepoId: string | null;
   tasks: TaskSummary[];
@@ -34,7 +34,7 @@ export function TasksScreen({
       showsVerticalScrollIndicator={false}
     >
       <View style={styles.wrap}>
-        <Text style={styles.heading}>{heading}</Text>
+        {heading ? <Text style={styles.heading}>{heading}</Text> : null}
 
         {repos.length > 1 ? (
           <ScrollView

@@ -36,6 +36,7 @@
   },
   "devDependencies": {
     "@babel/parser": "^7.29.3",
+    "@expo/config-plugins": "~10.1.2",
     "@types/node": "^24.0.0",
     "@types/react": "^19.0.14",
     "appium": "^2.19.0",

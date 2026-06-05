@@ -226,6 +226,65 @@ describe("createMobileController", () => {
     });
   });
 
+  it("bootstraps the cloud connection when persisted auth is restored after startup", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const auth = createAuthSessionMock();
+    let authListener: Parameters<MobileAuthSession["subscribe"]>[0] | null = null;
+    vi.mocked(auth.subscribe).mockImplementation((listener) => {
+      authListener = listener;
+      listener({ status: "signedOut" });
+      return () => undefined;
+    });
+    vi.mocked(auth.getState).mockReturnValue({ status: "signedOut" });
+    client.getStatus
+      .mockResolvedValueOnce({
+        state: "stopped",
+        desktopId: "none",
+        desktopName: "No desktop",
+        lanHost: "none",
+        lanPort: 0,
+        pairingCode: null
+      })
+      .mockResolvedValueOnce({
+        state: "running",
+        desktopId: "cloud",
+        desktopName: "Kanna Cloud",
+        lanHost: "cloud",
+        lanPort: 0,
+        pairingCode: null
+      });
+    client.listRecentTasks.mockResolvedValueOnce([
+      {
+        id: "cloud-task-1",
+        repoId: "repo-1",
+        title: "Cloud task",
+        stage: "in progress"
+      }
+    ]);
+    const controller = createMobileController(client, store, auth);
+
+    await controller.bootstrap();
+    expect(store.getState().connectionState).toBe("idle");
+
+    authListener?.({
+      status: "signedIn",
+      user: { uid: "user-1", email: "u@example.com", displayName: null }
+    });
+
+    await vi.waitFor(() => {
+      expect(store.getState().recentTasks).toEqual([
+        expect.objectContaining({ id: "cloud-task-1" })
+      ]);
+    });
+    expect(client.getStatus).toHaveBeenCalledTimes(2);
+    expect(store.getState()).toMatchObject({
+      connectionMode: "remote",
+      connectionState: "connected",
+      desktopName: "Kanna Cloud"
+    });
+  });
+
   it("searches tasks and switches to the search surface", async () => {
     const store = createSessionStore();
     const controller = createMobileController(createClientMock(), store);
@@ -637,7 +696,7 @@ describe("createMobileController", () => {
     expect(store.getState().refreshStatus).toBe("updated");
   });
 
-  it("sends task input to the desktop daemon", async () => {
+  it("sends task input as a bracketed paste and Claude Kitty enter sequence", async () => {
     const store = createSessionStore();
     const client = createClientMock();
     const controller = createMobileController(client, store);
@@ -645,7 +704,10 @@ describe("createMobileController", () => {
     await controller.bootstrap();
     await controller.sendTaskInput("task-1", "continue");
 
-    expect(client.sendTaskInput).toHaveBeenCalledWith("task-1", "continue\r");
+    expect(client.sendTaskInput).toHaveBeenCalledWith(
+      "task-1",
+      "\x1b[200~continue\x1b[201~\x1b[13u"
+    );
   });
 
   it("closes the selected desktop task and clears the mobile task view", async () => {

@@ -17,7 +17,6 @@ export interface ExpoServerHandle {
 }
 
 interface EnsureExpoServerOptions {
-  desktopServerUrl: string;
   metroPort: number;
   projectRoot: string;
 }
@@ -40,7 +39,6 @@ export function extractEnvVarFromCommandLine(commandLine: string): Record<string
 export function shouldReuseExpoServer(
   existing: RunningExpoProcess,
   expected: {
-    desktopServerUrl: string;
     projectRoot: string;
   }
 ): boolean {
@@ -52,8 +50,7 @@ export function shouldReuseExpoServer(
     return false;
   }
 
-  const envVars = extractEnvVarFromCommandLine(existing.commandLine);
-  return envVars.EXPO_PUBLIC_KANNA_SERVER_URL === expected.desktopServerUrl;
+  return true;
 }
 
 export function buildExpoStartCommand(port: number): string[] {
@@ -69,7 +66,6 @@ export async function ensureExpoServer(
     if (
       existing &&
       shouldReuseExpoServer(existing, {
-        desktopServerUrl: options.desktopServerUrl,
         projectRoot: options.projectRoot
       })
     ) {
@@ -91,7 +87,7 @@ export async function ensureExpoServer(
     env: {
       ...process.env,
       CI: "1",
-      EXPO_PUBLIC_KANNA_SERVER_URL: options.desktopServerUrl
+      EXPO_PUBLIC_KANNA_ENABLE_E2E_TRUST_SEED: "1"
     },
     stdio: "inherit"
   });

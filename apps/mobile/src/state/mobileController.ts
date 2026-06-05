@@ -42,6 +42,7 @@ export function createMobileController(
   let backgroundRefreshTimer: ReturnType<typeof setInterval> | null = null;
   let backgroundRefreshInFlight = false;
   let authUnsubscribe: (() => void) | null = null;
+  let bootstrapInFlight: Promise<void> | null = null;
 
   const setTerminalStartupError = (taskId: string, error: unknown) => {
     store.setTaskTerminalStatus(taskId, "error");
@@ -193,19 +194,36 @@ export function createMobileController(
     store.setAuthState(authSession.getState());
     if (!authUnsubscribe) {
       authUnsubscribe = authSession.subscribe((authState) => {
+        const previousAuthStatus = store.getState().auth.status;
         store.setAuthState(authState);
+        if (previousAuthStatus !== "signedIn" && authState.status === "signedIn") {
+          void bootstrap().catch(fail);
+        }
       });
     }
   };
 
-  return {
-    async bootstrap() {
+  const bootstrap = (): Promise<void> => {
+    if (!bootstrapInFlight) {
+      bootstrapInFlight = doBootstrap().finally(() => {
+        bootstrapInFlight = null;
+      });
+    }
+    return bootstrapInFlight;
+  };
+
+  const doBootstrap = async () => {
       store.setErrorMessage(null);
       await initializeAuth();
 
       try {
         const status = await client.getStatus();
-        store.setDesktopStatus(status.state, status.desktopName, status.pairingCode);
+        store.setDesktopStatus(
+          status.state,
+          status.desktopName,
+          status.pairingCode,
+          status.desktopId
+        );
 
         if (status.state !== "running") {
           store.setConnectionState("idle");
@@ -223,7 +241,10 @@ export function createMobileController(
       } catch (error) {
         fail(error);
       }
-    },
+    };
+
+  return {
+    bootstrap,
 
     async connectLocal() {
       store.setConnectionState("connecting");
@@ -231,7 +252,7 @@ export function createMobileController(
 
       try {
         const pairing = await client.createPairingSession();
-        await this.bootstrap();
+        await bootstrap();
         store.setPairingCode(pairing.code);
       } catch (error) {
         fail(error);
@@ -252,7 +273,7 @@ export function createMobileController(
       const authState = authSession.getState();
       store.setAuthState(authState);
       if (authState.status === "signedIn") {
-        await this.bootstrap();
+        await bootstrap();
       }
     },
 
@@ -405,7 +426,7 @@ export function createMobileController(
       }
 
       try {
-        await client.sendTaskInput(taskId, normalizeSubmittedInput(input));
+        await client.sendTaskInput(taskId, encodeSubmittedTaskInput(input, findTask(taskId)));
         store.setErrorMessage(null);
       } catch (error) {
         fail(error);
@@ -437,6 +458,7 @@ function mapCreatedTask(response: CreateTaskResponse): TaskSummary {
   };
 }
 
-function normalizeSubmittedInput(input: string): string {
-  return input.endsWith("\r") ? input : `${input}\r`;
+function encodeSubmittedTaskInput(input: string, task: TaskSummary | null): string {
+  const submit = task?.agentProvider && task.agentProvider !== "claude" ? "\r" : "\x1b[13u";
+  return `\x1b[200~${input}\x1b[201~${submit}`;
 }

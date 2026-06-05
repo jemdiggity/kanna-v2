@@ -1,3 +1,4 @@
+mod bonjour;
 mod cloud_client;
 mod commands;
 mod config;
@@ -78,6 +79,17 @@ async fn main() {
     };
 
     log::info!("Database opened: {}", config.db_path);
+
+    let _mobile_bonjour = bonjour::MobileBonjourAdvertisement::start(
+        &config.desktop_name,
+        &config.desktop_id,
+        config.lan_port,
+    )
+    .map_err(|error| {
+        log::warn!("mobile Bonjour advertisement unavailable: {}", error);
+        error
+    })
+    .ok();
 
     let http_state = Arc::new(http_api::AppState::new(config.clone()));
     let lan_task = tokio::spawn(http_api::serve(Arc::clone(&http_state)));

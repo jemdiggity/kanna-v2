@@ -68,4 +68,5 @@ export interface TaskSummary {
   title: string;
   stage: string | null;
   snippet?: string | null;
+  agentProvider?: string | null;
 }

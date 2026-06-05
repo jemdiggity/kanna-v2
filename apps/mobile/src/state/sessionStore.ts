@@ -5,7 +5,10 @@ import type {
   TaskSummary
 } from "../lib/api/types";
 import type { MobileAuthState } from "../lib/firebase/auth";
-import type { PersistedSessionContext } from "./sessionPersistence";
+import type {
+  PersistedSessionContext,
+  TrustedDesktopRecord
+} from "./sessionPersistence";
 
 export type ConnectionState = "idle" | "connecting" | "connected" | "error";
 export type MobileView = "tasks" | "recent" | "search" | "desktops" | "more";
@@ -16,12 +19,14 @@ export type AuthState = MobileAuthState;
 export interface SessionState {
   connectionMode: DesktopMode | null;
   connectionState: ConnectionState;
+  desktopId: string | null;
   desktopName: string | null;
   serverStatus: string | null;
   errorMessage: string | null;
   refreshStatus: RefreshStatus;
   auth: AuthState;
   desktops: DesktopSummary[];
+  trustedDesktops: TrustedDesktopRecord[];
   selectedDesktopId: string | null;
   repos: RepoSummary[];
   selectedRepoId: string | null;
@@ -46,11 +51,13 @@ export interface SessionStore {
   hydrateContext(context: PersistedSessionContext): void;
   setConnectionMode(mode: DesktopMode | null): void;
   setConnectionState(state: ConnectionState): void;
-  setDesktopStatus(status: string | null, desktopName: string | null, pairingCode: string | null): void;
+  setDesktopStatus(status: string | null, desktopName: string | null, pairingCode: string | null, desktopId?: string | null): void;
   setErrorMessage(message: string | null): void;
   setRefreshStatus(status: RefreshStatus): void;
   setAuthState(auth: AuthState): void;
   setDesktops(desktops: DesktopSummary[]): void;
+  setTrustedDesktops(desktops: TrustedDesktopRecord[]): void;
+  upsertTrustedDesktop(desktop: TrustedDesktopRecord): void;
   selectDesktop(desktopId: string): void;
   setRepos(repos: RepoSummary[]): void;
   selectRepo(repoId: string): void;
@@ -72,12 +79,14 @@ export function createSessionStore(): SessionStore {
   let state: SessionState = {
     connectionMode: null,
     connectionState: "idle",
+    desktopId: null,
     desktopName: null,
     serverStatus: null,
     errorMessage: null,
     refreshStatus: "idle",
     auth: { status: "signedOut" },
     desktops: [],
+    trustedDesktops: [],
     selectedDesktopId: null,
     repos: [],
     selectedRepoId: null,
@@ -146,7 +155,8 @@ export function createSessionStore(): SessionStore {
         selectedRepoId: state.selectedRepoId,
         selectedTaskId: state.selectedTaskId,
         activeView: state.activeView,
-        authUser: state.auth.status === "signedIn" ? state.auth.user : null
+        authUser: state.auth.status === "signedIn" ? state.auth.user : null,
+        trustedDesktops: state.trustedDesktops
       };
     },
     hydrateContext(context) {
@@ -158,7 +168,8 @@ export function createSessionStore(): SessionStore {
         activeView: context.activeView,
         auth: context.authUser
           ? { status: "signedIn", user: context.authUser }
-          : state.auth
+          : state.auth,
+        trustedDesktops: context.trustedDesktops ?? []
       };
       publish();
     },
@@ -170,8 +181,8 @@ export function createSessionStore(): SessionStore {
       state = { ...state, connectionState };
       publish();
     },
-    setDesktopStatus(serverStatus, desktopName, pairingCode) {
-      state = { ...state, serverStatus, desktopName, pairingCode };
+    setDesktopStatus(serverStatus, desktopName, pairingCode, desktopId = state.desktopId) {
+      state = { ...state, serverStatus, desktopName, pairingCode, desktopId };
       publish();
     },
     setErrorMessage(errorMessage) {
@@ -197,6 +208,29 @@ export function createSessionStore(): SessionStore {
           ? state.selectedDesktopId
           : desktops[0]?.id ?? null
       };
+      publish();
+    },
+    setTrustedDesktops(trustedDesktops) {
+      state = { ...state, trustedDesktops };
+      publish();
+    },
+    upsertTrustedDesktop(desktop) {
+      const existing = state.trustedDesktops.find(
+        (candidate) => candidate.desktopId === desktop.desktopId
+      );
+      const trustedDesktops = existing
+        ? state.trustedDesktops.map((candidate) =>
+            candidate.desktopId === desktop.desktopId
+              ? mergeTrustedDesktop(candidate, desktop)
+              : candidate
+          )
+        : [desktop, ...state.trustedDesktops];
+
+      if (areTrustedDesktopListsEqual(state.trustedDesktops, trustedDesktops)) {
+        return;
+      }
+
+      state = { ...state, trustedDesktops };
       publish();
     },
     selectDesktop(desktopId) {
@@ -334,4 +368,34 @@ export function createSessionStore(): SessionStore {
       publish();
     }
   };
+}
+
+function mergeTrustedDesktop(
+  existing: TrustedDesktopRecord,
+  incoming: TrustedDesktopRecord
+): TrustedDesktopRecord {
+  const endpointByUrl = new Map(
+    existing.lanEndpoints.map((endpoint) => [endpoint.baseUrl, endpoint])
+  );
+  for (const endpoint of incoming.lanEndpoints) {
+    endpointByUrl.set(endpoint.baseUrl, endpoint);
+  }
+
+  const lastSeenAt = [existing.lastSeenAt, incoming.lastSeenAt].sort()[1] ?? incoming.lastSeenAt;
+
+  return {
+    desktopId: existing.desktopId,
+    displayName: incoming.displayName || existing.displayName,
+    lanEndpoints: Array.from(endpointByUrl.values()).sort((left, right) =>
+      right.lastSeenAt.localeCompare(left.lastSeenAt)
+    ),
+    lastSeenAt
+  };
+}
+
+function areTrustedDesktopListsEqual(
+  left: readonly TrustedDesktopRecord[],
+  right: readonly TrustedDesktopRecord[]
+): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
 }

@@ -172,4 +172,15 @@ describe("publishDesktopTaskSnapshot", () => {
       closedAt: "2026-05-22T00:02:00.000Z",
     }));
   });
+
+  it("continues reconciling task snapshots after one publish fails", async () => {
+    mocks.publish.mockRejectedValueOnce(new Error("temporary publish failure"));
+
+    await publishDesktopTaskSnapshots(null as never);
+
+    expect(mocks.publish).toHaveBeenCalledTimes(2);
+    expect(mocks.publish).toHaveBeenLastCalledWith(expect.objectContaining({
+      ownerLocalTaskId: "task-closed",
+    }));
+  });
 });

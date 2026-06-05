@@ -48,10 +48,12 @@ export function buildTerminalDocument({ bottomInset }: BuildTerminalDocumentOpti
       }
 
       .viewport {
+        -webkit-overflow-scrolling: touch;
         height: 100%;
         overflow-x: auto;
         overflow-y: hidden;
         padding-bottom: ${bottomInset}px;
+        touch-action: pan-x pan-y;
       }
 
       #terminal-root {
@@ -72,6 +74,7 @@ export function buildTerminalDocument({ bottomInset }: BuildTerminalDocumentOpti
 
       .xterm .xterm-viewport {
         overscroll-behavior: contain;
+        touch-action: pan-y;
       }
     </style>
   </head>
@@ -95,6 +98,7 @@ export function buildTerminalDocument({ bottomInset }: BuildTerminalDocumentOpti
         letterSpacing: 0,
         cursorBlink: false,
         scrollback: 10000,
+        vtExtensions: { kittyKeyboard: true },
         theme: {
           background: "#09111d",
           foreground: "#dfe9f7",
@@ -132,6 +136,7 @@ export function buildTerminalDocument({ bottomInset }: BuildTerminalDocumentOpti
         }
 
         terminalViewport = nextViewport;
+        terminalViewport.style.overflowX = "visible";
         applyViewportInset();
 
         if (terminalViewport.dataset.kannaScrollBound !== "1") {
@@ -221,6 +226,16 @@ export function buildTerminalDocument({ bottomInset }: BuildTerminalDocumentOpti
         window.ReactNativeWebView.postMessage(JSON.stringify({ type: "terminal-ready" }));
       }
 
+      function notifyTerminalTap() {
+        if (!window.ReactNativeWebView || !window.ReactNativeWebView.postMessage) {
+          return;
+        }
+
+        window.ReactNativeWebView.postMessage(JSON.stringify({ type: "terminal-tap" }));
+      }
+
+      viewport.addEventListener("pointerdown", notifyTerminalTap, { passive: true });
+
       window.__replaceTerminalState = function replaceTerminalState(state) {
         const shouldStick = stickyToBottom || isNearBottom();
         term.reset();
@@ -281,19 +296,28 @@ function getStatusCopy(status: TaskTerminalStatus): string {
 }
 
 function normalizeTerminalText(input: string): string {
-  if (!looksLikeMojibake(input)) {
-    return input;
+  const cleaned = removeEchoedTerminalInputControls(input);
+  if (!looksLikeMojibake(cleaned)) {
+    return cleaned;
   }
 
   const normalized = new TextDecoder("utf-8", { fatal: false }).decode(
-    Uint8Array.from(input, (char) => char.charCodeAt(0) & 0xff)
+    Uint8Array.from(cleaned, (char) => char.charCodeAt(0) & 0xff)
   );
 
   if (containsTerminalGlyphs(normalized)) {
     return normalized;
   }
 
-  return mojibakeScore(normalized) < mojibakeScore(input) ? normalized : input;
+  return mojibakeScore(normalized) < mojibakeScore(cleaned) ? normalized : cleaned;
+}
+
+function removeEchoedTerminalInputControls(input: string): string {
+  return input
+    .replace(/\x1b\[200~/g, "")
+    .replace(/\x1b\[201~/g, "")
+    .replace(/\x1b\[>[0-9;]*u/g, "")
+    .replace(/\x1b\[[0-9;]*u/g, "");
 }
 
 function looksLikeMojibake(input: string): boolean {

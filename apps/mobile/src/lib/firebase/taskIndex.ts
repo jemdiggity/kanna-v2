@@ -18,11 +18,13 @@ export interface CloudTaskSnapshot {
   stage: string;
   status: string;
   repo: { cloudRepoId: string; name: string };
+  agent?: { provider?: string | null; type?: string | null } | null;
   updatedAt: string;
   closedAt: string | null;
 }
 
 export interface CloudTaskSummary extends TaskSummary {
+  repoName: string;
   ownerDesktopId: string;
   ownerLocalTaskId: string;
   ownerOnline: boolean;
@@ -50,9 +52,11 @@ export function mapCloudTaskSnapshot(snapshot: CloudTaskSnapshot): CloudTaskSumm
   return {
     id: snapshot.cloudTaskId,
     repoId: snapshot.repo.cloudRepoId,
+    repoName: snapshot.repo.name,
     title: snapshot.displayName ?? snapshot.title,
     stage: snapshot.stage,
     snippet: snapshot.promptSnippet ?? undefined,
+    agentProvider: snapshot.agent?.provider ?? null,
     ownerDesktopId: snapshot.ownerDesktopId,
     ownerLocalTaskId: snapshot.ownerLocalTaskId,
     ownerOnline: false,

@@ -9,6 +9,19 @@ export interface PersistedSessionContext {
   selectedTaskId: string | null;
   activeView: MobileView;
   authUser?: MobileAuthUser | null;
+  trustedDesktops?: TrustedDesktopRecord[];
+}
+
+export interface TrustedDesktopLanEndpoint {
+  baseUrl: string;
+  lastSeenAt: string;
+}
+
+export interface TrustedDesktopRecord {
+  desktopId: string;
+  displayName: string;
+  lanEndpoints: TrustedDesktopLanEndpoint[];
+  lastSeenAt: string;
 }
 
 export interface SessionPersistence {
@@ -59,7 +72,8 @@ function parsePersistedSessionContext(
       selectedRepoId: normalizeNullableString(parsed.selectedRepoId),
       selectedTaskId: normalizeNullableString(parsed.selectedTaskId),
       activeView: parsed.activeView,
-      authUser: parsePersistedAuthUser(parsed.authUser)
+      authUser: parsePersistedAuthUser(parsed.authUser),
+      trustedDesktops: parseTrustedDesktops(parsed.trustedDesktops)
     };
   } catch {
     return null;
@@ -95,4 +109,65 @@ function parsePersistedAuthUser(value: unknown): MobileAuthUser | null {
     email: normalizeNullableString(candidate.email),
     displayName: normalizeNullableString(candidate.displayName)
   };
+}
+
+function parseTrustedDesktops(value: unknown): TrustedDesktopRecord[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.flatMap((entry) => {
+    if (!entry || typeof entry !== "object") {
+      return [];
+    }
+
+    const candidate = entry as Partial<TrustedDesktopRecord>;
+    if (
+      typeof candidate.desktopId !== "string" ||
+      typeof candidate.displayName !== "string"
+    ) {
+      return [];
+    }
+
+    const lanEndpoints = parseTrustedDesktopLanEndpoints(candidate.lanEndpoints);
+
+    return [
+      {
+        desktopId: candidate.desktopId,
+        displayName: candidate.displayName,
+        lanEndpoints,
+        lastSeenAt:
+          typeof candidate.lastSeenAt === "string"
+            ? candidate.lastSeenAt
+            : lanEndpoints[0]?.lastSeenAt ?? new Date(0).toISOString()
+      }
+    ];
+  });
+}
+
+function parseTrustedDesktopLanEndpoints(value: unknown): TrustedDesktopLanEndpoint[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.flatMap((entry) => {
+    if (!entry || typeof entry !== "object") {
+      return [];
+    }
+
+    const candidate = entry as Partial<TrustedDesktopLanEndpoint>;
+    if (
+      typeof candidate.baseUrl !== "string" ||
+      typeof candidate.lastSeenAt !== "string"
+    ) {
+      return [];
+    }
+
+    return [
+      {
+        baseUrl: candidate.baseUrl,
+        lastSeenAt: candidate.lastSeenAt
+      }
+    ];
+  });
 }

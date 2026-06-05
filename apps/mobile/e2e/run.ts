@@ -14,6 +14,7 @@ import {
 } from "./helpers/appium";
 import {
   assertDesktopServerReachable,
+  readDesktopIdentity,
   resolveDesktopServerUrlForTarget
 } from "./helpers/desktop";
 import { ensureExpoServer } from "./helpers/metro";
@@ -23,6 +24,7 @@ import {
 } from "./helpers/device";
 import { resolveRequiredMobileE2eEnv } from "./helpers/env";
 import { createMobileSession } from "./helpers/session";
+import { seedTrustedDesktopThroughDeepLink } from "./helpers/trust-seed";
 import {
   assertSimulatorAppInstalled,
   bootSimulator,
@@ -113,7 +115,6 @@ async function main(): Promise<void> {
     env.desktopServerUrl,
     env.target
   );
-  process.env.EXPO_PUBLIC_KANNA_SERVER_URL = desktopServerUrl;
   await assertXcuitestDriverInstalled(process.env as Record<string, string | undefined>);
   const appiumServer = startLocalAppiumServer(
     env.appiumPort,
@@ -169,13 +170,11 @@ async function main(): Promise<void> {
       );
     }
 
-    process.env.EXPO_PUBLIC_KANNA_SERVER_URL = resolvedDesktopServerUrl;
     if (mode === "smoke") {
       await assertDesktopServerReachable(resolvedDesktopServerUrl);
     }
 
     expoServer = await ensureExpoServer({
-      desktopServerUrl: resolvedDesktopServerUrl,
       metroPort: env.metroPort,
       projectRoot
     });
@@ -188,6 +187,15 @@ async function main(): Promise<void> {
     if (mode === "profile-disconnected") {
       await runProfileDisconnectedConnectionSmoke(driver);
     } else {
+      const desktopIdentity = await readDesktopIdentity(resolvedDesktopServerUrl);
+      await seedTrustedDesktopThroughDeepLink({
+        bundleId: env.bundleId,
+        driver,
+        desktop: {
+          desktopId: desktopIdentity.desktopId,
+          displayName: desktopIdentity.desktopName
+        }
+      });
       await runListDetailBackSmoke(driver);
       await runProfileConnectionSmoke(driver);
     }

@@ -264,4 +264,47 @@ describe("createRelayDesktopClient", () => {
       { type: "output", taskId: "task-1", text: "⠋" }
     ]);
   });
+
+  it("sends terminal input through relay command invokes", async () => {
+    const socket = createSocket();
+    let nextId = 1;
+    const client = createRelayDesktopClient({
+      createSocket: () => socket,
+      getIdToken: async () => "id-token-1",
+      nextId: () => `invoke-${nextId++}`,
+      relayUrl: "wss://relay.example"
+    });
+
+    const input = client.sendTaskInput({
+      desktopId: "desktop-1",
+      taskId: "task-1",
+      data: "continue\n"
+    });
+
+    socket.onopen?.();
+    await flushPromises();
+    socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok", userId: "user-1" }) });
+    await flushPromises();
+
+    expect(socket.send).toHaveBeenNthCalledWith(
+      2,
+      JSON.stringify({
+        type: "invoke",
+        id: "invoke-1",
+        desktopId: "desktop-1",
+        command: "send_input",
+        args: { session_id: "task-1", data: "continue\n" }
+      })
+    );
+
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: "response",
+        id: "invoke-1",
+        data: null
+      })
+    });
+
+    await expect(input).resolves.toBeUndefined();
+  });
 });
