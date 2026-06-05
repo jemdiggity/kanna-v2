@@ -6,12 +6,14 @@ export interface CloudTaskPublisherDependencies {
   endpoint: string | null;
   getIdToken(): Promise<string | null>;
   fetchImpl?: typeof fetch;
+  postJson?: (endpoint: string, idToken: string, snapshot: unknown) => Promise<void>;
 }
 
 export function createCloudTaskPublisher({
   endpoint,
   getIdToken,
   fetchImpl = fetch,
+  postJson,
 }: CloudTaskPublisherDependencies): CloudTaskPublisher {
   return {
     async publish(snapshot) {
@@ -21,6 +23,11 @@ export function createCloudTaskPublisher({
 
       const idToken = await getIdToken();
       if (!idToken) {
+        return;
+      }
+
+      if (postJson) {
+        await postJson(endpoint, idToken, snapshot);
         return;
       }
 

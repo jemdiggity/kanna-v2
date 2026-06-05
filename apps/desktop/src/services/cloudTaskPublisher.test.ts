@@ -25,6 +25,23 @@ describe("cloud task publisher", () => {
     );
   });
 
+  it("uses the provided JSON poster so desktop builds can avoid webview CORS", async () => {
+    const postJson = vi.fn(async () => undefined);
+    const publisher = createCloudTaskPublisher({
+      endpoint: "https://upserttasksnapshot.example",
+      getIdToken: async () => "id-token-1",
+      postJson,
+    });
+
+    await publisher.publish({ cloudTaskId: "cloud-task-1", title: "Task" });
+
+    expect(postJson).toHaveBeenCalledWith(
+      "https://upserttasksnapshot.example",
+      "id-token-1",
+      { cloudTaskId: "cloud-task-1", title: "Task" },
+    );
+  });
+
   it("skips publishing when the user is signed out", async () => {
     const fetchMock = vi.fn();
     const publisher = createCloudTaskPublisher({

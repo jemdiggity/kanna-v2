@@ -4,15 +4,18 @@ import type { CommandRunner } from "./process";
 
 interface Firebaserc {
   projects?: {
+    staging?: string;
     production?: string;
   };
 }
+
+export type CloudDeployEnvironment = "staging" | "production";
 
 export interface CloudDeployInput {
   repoRoot: string;
   env: NodeJS.ProcessEnv;
   runner: CommandRunner;
-  production: boolean;
+  environment: CloudDeployEnvironment;
 }
 
 export interface CloudDeployResult {
@@ -30,36 +33,53 @@ export interface RelayDeployResult {
   relayUrl: string;
 }
 
-export function resolveProductionFirebaseProject(
+function assertCloudDeployEnvironment(environment: unknown): asserts environment is CloudDeployEnvironment {
+  if (environment !== "staging" && environment !== "production") {
+    throw new Error("cloud deploy requires staging or production");
+  }
+}
+
+export function resolveFirebaseProject(
   repoRoot: string,
-  env: NodeJS.ProcessEnv
+  env: NodeJS.ProcessEnv,
+  environment: CloudDeployEnvironment
 ): string {
-  const envProject = env.KANNA_FIREBASE_PRODUCTION_PROJECT?.trim();
+  assertCloudDeployEnvironment(environment);
+
+  const envVarName = environment === "staging"
+    ? "KANNA_FIREBASE_STAGING_PROJECT"
+    : "KANNA_FIREBASE_PRODUCTION_PROJECT";
+  const envProject = env[envVarName]?.trim();
   if (envProject) {
     return envProject;
   }
 
   try {
     const firebaserc = JSON.parse(readFileSync(join(repoRoot, ".firebaserc"), "utf8")) as Firebaserc;
-    const productionProject = firebaserc.projects?.production?.trim();
-    if (productionProject) {
-      return productionProject;
+    const configuredProject = firebaserc.projects?.[environment]?.trim();
+    if (configuredProject) {
+      return configuredProject;
     }
   } catch {
     // Fall through to the explicit error below.
   }
 
   throw new Error(
-    "No production Firebase project configured. Set KANNA_FIREBASE_PRODUCTION_PROJECT or add projects.production to .firebaserc."
+    `No ${environment} Firebase project configured. Set ${envVarName} or add projects.${environment} to .firebaserc.`
   );
 }
 
-export async function deployFirebaseCloud(input: CloudDeployInput & { relay?: boolean }): Promise<CloudDeployResult> {
-  if (!input.production) {
-    throw new Error("Refusing to deploy cloud services without --production.");
-  }
+export function resolveProductionFirebaseProject(
+  repoRoot: string,
+  env: NodeJS.ProcessEnv
+): string {
+  return resolveFirebaseProject(repoRoot, env, "production");
+}
 
-  const projectId = resolveProductionFirebaseProject(input.repoRoot, input.env);
+export async function deployFirebaseCloud(input: CloudDeployInput & { relay?: boolean }): Promise<CloudDeployResult> {
+  assertCloudDeployEnvironment(input.environment);
+
+  const projectId = resolveFirebaseProject(input.repoRoot, input.env, input.environment);
   const build = await input.runner.run("pnpm", ["--dir", "services/firebase-functions", "build"], {
     cwd: input.repoRoot,
     env: input.env
@@ -94,11 +114,9 @@ export async function deployFirebaseCloud(input: CloudDeployInput & { relay?: bo
 }
 
 export async function deployRelayCloud(input: CloudDeployInput): Promise<RelayDeployResult> {
-  if (!input.production) {
-    throw new Error("Refusing to deploy relay without --production.");
-  }
+  assertCloudDeployEnvironment(input.environment);
 
-  const projectId = resolveProductionFirebaseProject(input.repoRoot, input.env);
+  const projectId = resolveFirebaseProject(input.repoRoot, input.env, input.environment);
   const region = input.env.KANNA_CLOUD_RUN_REGION?.trim() || "us-central1";
   const serviceName = input.env.KANNA_RELAY_SERVICE_NAME?.trim() || "kanna-relay";
   const image = `gcr.io/${projectId}/${serviceName}`;

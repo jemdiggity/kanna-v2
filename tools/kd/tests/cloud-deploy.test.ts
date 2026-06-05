@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import {
   deployRelayCloud,
   deployFirebaseCloud,
+  resolveFirebaseProject,
   resolveProductionFirebaseProject
 } from "../src/runtime/cloud-deploy";
 import type { CommandRunner } from "../src/runtime/process";
@@ -42,6 +43,14 @@ describe("cloud deploy runtime", () => {
     }
   });
 
+  it("resolves the staging Firebase project from env", () => {
+    expect(
+      resolveFirebaseProject("/repo", {
+        KANNA_FIREBASE_STAGING_PROJECT: "kanna-staging"
+      }, "staging")
+    ).toBe("kanna-staging");
+  });
+
   it("refuses production deploys without an explicit production project", () => {
     const repoRoot = mkdtempSync(join(tmpdir(), "kd-cloud-deploy-"));
     writeFileSync(join(repoRoot, ".firebaserc"), JSON.stringify({ projects: { default: "kanna-local" } }));
@@ -53,6 +62,24 @@ describe("cloud deploy runtime", () => {
     } finally {
       rmSync(repoRoot, { recursive: true, force: true });
     }
+  });
+
+  it("refuses cloud deploys without an explicit environment", async () => {
+    const runner: CommandRunner = {
+      async run() {
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+    };
+
+    await expect(
+      deployFirebaseCloud({
+        repoRoot: "/repo",
+        env: {},
+        runner,
+        environment: "none" as never,
+        relay: false
+      })
+    ).rejects.toThrow("cloud deploy requires staging or production");
   });
 
   it("builds functions before deploying Firebase cloud services", async () => {
@@ -71,7 +98,7 @@ describe("cloud deploy runtime", () => {
         repoRoot,
         env: { KANNA_FIREBASE_PRODUCTION_PROJECT: "prod-project" },
         runner,
-        production: true
+        environment: "production"
       });
 
       expect(result).toEqual({ projectId: "prod-project", deployed: true });
@@ -126,7 +153,7 @@ describe("cloud deploy runtime", () => {
           KANNA_CLOUD_RUN_REGION: "us-east1"
         },
         runner,
-        production: true
+        environment: "production"
       });
 
       expect(result).toEqual({

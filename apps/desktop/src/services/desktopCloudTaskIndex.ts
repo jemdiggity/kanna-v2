@@ -118,11 +118,10 @@ export async function listDesktopCloudTasks(
       : Promise.resolve(options.currentDesktopId),
   ]);
   const taskSnapshots = snapshot.docs
-    .map((doc) => doc.data() as DesktopCloudTaskSnapshot)
-    .filter((task) => activeDesktopIds ? activeDesktopIds.has(task.ownerDesktopId) : true);
+    .map((doc) => doc.data() as DesktopCloudTaskSnapshot);
   return mapDesktopCloudTasks(
     taskSnapshots,
-    { ...options, currentDesktopId },
+    { ...options, activeDesktopIds, currentDesktopId },
   );
 }
 
@@ -172,11 +171,13 @@ export function mapDesktopCloudTasks(
     }
 
     const itemId = cloudTaskId(snapshot.cloudTaskId);
-    terminalRefs[itemId] = {
-      ownerDesktopId: snapshot.ownerDesktopId,
-      ownerLocalTaskId: snapshot.ownerLocalTaskId,
-      transport: "cloud",
-    };
+    if (ownerDesktopIsReachable(snapshot.ownerDesktopId, options.activeDesktopIds)) {
+      terminalRefs[itemId] = {
+        ownerDesktopId: snapshot.ownerDesktopId,
+        ownerLocalTaskId: snapshot.ownerLocalTaskId,
+        transport: "cloud",
+      };
+    }
 
     items.push({
       id: itemId,
@@ -220,6 +221,10 @@ export function mapDesktopCloudTasks(
   };
 }
 
+function ownerDesktopIsReachable(ownerDesktopId: string, activeDesktopIds: Set<string> | null | undefined): boolean {
+  return activeDesktopIds === undefined || activeDesktopIds === null || activeDesktopIds.has(ownerDesktopId);
+}
+
 function sortByUpdatedAt<T extends { updatedAt: string }>(snapshots: T[]): T[] {
   return [...snapshots].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
@@ -244,9 +249,14 @@ async function resolveDesktopId(): Promise<string | null> {
   const mobileStatus = await invoke<{ desktopId?: string }>("mobile_server_status").catch(() => null);
   if (mobileStatus?.desktopId?.trim()) return mobileStatus.desktopId.trim();
 
-  const envId = await invoke<string>("read_env_var", { name: "KANNA_TRANSFER_PEER_ID" }).catch(() => "");
+  const envId = await readEnvString("KANNA_TRANSFER_PEER_ID");
   if (envId.trim()) return envId.trim();
 
-  const dbName = await invoke<string>("read_env_var", { name: "KANNA_DB_NAME" }).catch(() => "");
+  const dbName = await readEnvString("KANNA_DB_NAME");
   return dbName.trim() || null;
+}
+
+async function readEnvString(name: string): Promise<string> {
+  const value = await invoke<unknown>("read_env_var", { name }).catch(() => "");
+  return typeof value === "string" ? value : "";
 }

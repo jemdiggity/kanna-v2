@@ -153,6 +153,27 @@ async function sidebarItemsForPrompt(client: typeof primary, prompt: string): Pr
   `);
 }
 
+async function remoteDiagnosticsForPrompt(
+  client: typeof primary,
+  prompt: string,
+): Promise<Array<{
+  prompt: string;
+  sources: string[];
+  selectedTerminalTransport: string;
+  ownerDesktopId?: string;
+  ownerLocalTaskId?: string;
+}>> {
+  return await client.executeSync(`
+    const ctx = window.__KANNA_E2E__.setupState;
+    const value = ctx.remoteTaskDiagnostics?.__v_isRef
+      ? ctx.remoteTaskDiagnostics.value
+      : ctx.remoteTaskDiagnostics;
+    return JSON.parse(JSON.stringify((value || []).filter((entry) =>
+      entry.prompt === ${JSON.stringify(prompt)}
+    )));
+  `);
+}
+
 async function waitForSidebarTaskGroupedUnderRepo(
   client: typeof primary,
   prompt: string,
@@ -449,8 +470,24 @@ describe("cloud task sync", () => {
         stage: "in progress",
       }),
     ]);
+    const cloudDiagnostics = await remoteDiagnosticsForPrompt(secondary, "Cloud sync visible task");
+    expect(cloudDiagnostics).toContainEqual(expect.objectContaining({
+      selectedTerminalTransport: "cloud",
+      sources: expect.arrayContaining(["cloud"]),
+    }));
     const secondaryTextAfterSync = await secondary.executeSync<string>("return document.body.innerText;");
-    expect(secondaryTextAfterSync).not.toContain("Stale offline task");
+    expect(secondaryTextAfterSync).toContain("Stale offline task");
+    expect(await sidebarItemsForPrompt(secondary, "Stale offline task")).toEqual([
+      expect.objectContaining({
+        id: "cloud:stale-cloud-task",
+        isRemote: true,
+        stage: "in progress",
+      }),
+    ]);
+    expect(await remoteDiagnosticsForPrompt(secondary, "Stale offline task")).toContainEqual(expect.objectContaining({
+      selectedTerminalTransport: "none",
+      sources: expect.arrayContaining(["cloud"]),
+    }));
     expect(await countLocalTasks(secondary)).toBe(0);
 
     const synced = await waitForCloudTaskSnapshot(secondary, "Cloud sync visible task");

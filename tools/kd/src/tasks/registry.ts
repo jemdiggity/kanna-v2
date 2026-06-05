@@ -1,3 +1,6 @@
+import { spawn } from "node:child_process";
+import { readFile } from "node:fs/promises";
+import { connect } from "node:net";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { z } from "zod";
@@ -5,6 +8,14 @@ import { readKannaRepoConfig } from "../config";
 import { resolveKdContext, type KdContext } from "../context";
 import { cleanWorkspace } from "../runtime/clean";
 import { deployFirebaseCloud } from "../runtime/cloud-deploy";
+import {
+  buildCloudEmulatorTestCommand,
+  buildCloudSmokeCommand,
+  buildCloudSmokeEnv,
+  requireCloudSmokeEnv,
+} from "../runtime/cloud-test";
+import { buildLanLabPlan, parseLanLabInventory } from "../runtime/lan-lab";
+import { buildLanLabScenarioCommand } from "../runtime/lan-lab-runner";
 import { buildDevPlan } from "../runtime/dev-plan";
 import { assertNotProductionDb, resetSqliteDb, seedSqliteDb, type DevDbTarget } from "../runtime/db";
 import { killWorkspaceDaemons } from "../runtime/daemon";
@@ -74,6 +85,10 @@ const emulatorsExecInputSchema = z.object({
 
 const emptyInputSchema = z.object({});
 
+const lanLabInputSchema = z.object({
+  hosts: z.string()
+});
+
 const setupInputSchema = z.object({
   check: z.boolean().default(false)
 });
@@ -99,6 +114,7 @@ const releaseShipInputSchema = z.object({
 });
 
 const cloudDeployInputSchema = z.object({
+  staging: z.boolean().default(false),
   production: z.boolean().default(false),
   relay: z.boolean().default(false)
 });
@@ -303,6 +319,30 @@ async function runBuiltCommand(command: string, args: string[], cwd: string, env
     message: result.exitCode === 0 ? result.stdout || `${command} ${args.join(" ")} completed.` : result.stderr,
     data: { command, args, exitCode: result.exitCode }
   };
+}
+
+async function waitForTcpPort(port: number, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const ok = await new Promise<boolean>((resolvePort) => {
+      const socket = connect({ host: "127.0.0.1", port });
+      socket.once("connect", () => {
+        socket.destroy();
+        resolvePort(true);
+      });
+      socket.once("error", () => {
+        socket.destroy();
+        resolvePort(false);
+      });
+      socket.setTimeout(500, () => {
+        socket.destroy();
+        resolvePort(false);
+      });
+    });
+    if (ok) return;
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 250));
+  }
+  throw new Error(`timed out waiting for WebDriver tunnel on port ${port}`);
 }
 
 export const taskDefinitions = [
@@ -578,12 +618,19 @@ export const taskDefinitions = [
     execute: async (_context, input) => {
       const parsed = cloudDeployInputSchema.parse(input);
       const context = await resolveDefaultContext(process.env);
+      if (parsed.staging && parsed.production) {
+        return { ok: false, message: "cloud deploy accepts only one of --staging or --production." };
+      }
+      if (!parsed.staging && !parsed.production) {
+        return { ok: false, message: "cloud deploy requires --staging or --production." };
+      }
+      const environment = parsed.staging ? "staging" : "production";
       try {
         const result = await deployFirebaseCloud({
           repoRoot: context.repoRoot,
           env: context.env,
           runner: nodeCommandRunner,
-          production: parsed.production,
+          environment,
           relay: parsed.relay
         });
         return { ok: true, message: formatJsonResult(result), data: result };
@@ -602,6 +649,125 @@ export const taskDefinitions = [
     execute: async () => {
       const context = await resolveDefaultContext(process.env);
       return runBuiltCommand("bash", ["scripts/app-update-full-bundle-e2e.sh"], context.repoRoot, context.env);
+    }
+  },
+  {
+    id: "test.cloud-emulator",
+    description: "Run cloud sync E2E against Firebase emulators.",
+    inputSchema: emptyInputSchema,
+    execute: async () => {
+      const context = await resolveDefaultContext(process.env);
+      const [command, args] = buildCloudEmulatorTestCommand();
+      return runBuiltCommand(command, args, context.repoRoot, context.env);
+    }
+  },
+  {
+    id: "test.cloud-staging",
+    description: "Run cloud sync E2E against staging cloud services.",
+    inputSchema: emptyInputSchema,
+    execute: async () => {
+      const context = await resolveDefaultContext(process.env);
+      try {
+        requireCloudSmokeEnv(context.env, "staging");
+      } catch (error) {
+        return { ok: false, message: error instanceof Error ? error.message : String(error) };
+      }
+      const [command, args] = buildCloudSmokeCommand();
+      return runBuiltCommand(command, args, context.repoRoot, buildCloudSmokeEnv(context.env, "staging"));
+    }
+  },
+  {
+    id: "test.cloud-prod-smoke",
+    description: "Run minimal cloud smoke against production cloud services.",
+    inputSchema: emptyInputSchema,
+    execute: async () => {
+      const context = await resolveDefaultContext(process.env);
+      try {
+        requireCloudSmokeEnv(context.env, "production");
+      } catch (error) {
+        return { ok: false, message: error instanceof Error ? error.message : String(error) };
+      }
+      const [command, args] = buildCloudSmokeCommand();
+      return runBuiltCommand(command, args, context.repoRoot, buildCloudSmokeEnv(context.env, "production"));
+    }
+  },
+  {
+    id: "test.lan-lab",
+    description: "Run LAN sync tests against physical Macs over SSH.",
+    inputSchema: lanLabInputSchema,
+    execute: async (_context, input) => {
+      const parsed = lanLabInputSchema.parse(input);
+      const context = await resolveDefaultContext(process.env);
+      const inventory = parseLanLabInventory(await readFile(resolve(context.repoRoot, parsed.hosts), "utf8"));
+      const runId = `run-${Date.now()}`;
+      const plan = buildLanLabPlan({ runId, hosts: inventory.hosts, tunnelBasePort: 46000 });
+      const results = [];
+      for (const worker of plan.workers) {
+        const result = await nodeCommandRunner.run("ssh", worker.startSshArgs, {
+          cwd: context.repoRoot,
+          env: context.env,
+        });
+        results.push({
+          host: worker.host.name,
+          exitCode: result.exitCode,
+          stdout: result.stdout,
+          stderr: result.stderr
+        });
+        if (result.exitCode !== 0) {
+          return {
+            ok: false,
+            message: `LAN lab worker ${worker.host.name} failed: ${result.stderr || result.stdout}`,
+            data: { runId, results },
+          };
+        }
+      }
+      const tunnelProcesses = plan.workers.map((worker) =>
+        spawn("ssh", worker.tunnelArgs, { stdio: "ignore" })
+      );
+      try {
+        await Promise.all(plan.workers.map((worker) =>
+          waitForTcpPort(worker.localWebDriverPort, 30_000)
+        ));
+        const [source, observer] = plan.workers;
+        if (!source || !observer) {
+          throw new Error("LAN lab requires at least two hosts");
+        }
+        const scenario = buildLanLabScenarioCommand({
+          prompt: "LAN lab visible task",
+          source: {
+            repo: source.host.repo,
+            peerId: source.peerId,
+            displayName: source.host.name,
+            localWebDriverPort: source.localWebDriverPort,
+          },
+          observer: {
+            repo: observer.host.repo,
+            peerId: observer.peerId,
+            displayName: observer.host.name,
+            localWebDriverPort: observer.localWebDriverPort,
+          },
+        });
+        const scenarioResult = await nodeCommandRunner.run(scenario.command, scenario.args, {
+          cwd: context.repoRoot,
+          env: context.env,
+        });
+        if (scenarioResult.exitCode !== 0) {
+          return {
+            ok: false,
+            message: scenarioResult.stderr || scenarioResult.stdout || "LAN lab scenario failed.",
+            data: { runId, results, scenarioResult },
+          };
+        }
+      } finally {
+        for (const tunnel of tunnelProcesses) {
+          tunnel.kill("SIGTERM");
+        }
+      }
+      return {
+        ok: true,
+        message: `LAN lab run ${runId} passed.`,
+        data: { runId, results },
+      };
     }
   },
   {

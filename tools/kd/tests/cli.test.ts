@@ -236,6 +236,25 @@ describe("kd CLI", () => {
     });
   });
 
+  it("parses cloud test commands", () => {
+    expect(parseCliArgs(["test", "cloud-emulator"])).toEqual({
+      taskId: "test.cloud-emulator",
+      input: {},
+    });
+    expect(parseCliArgs(["test", "cloud-staging"])).toEqual({
+      taskId: "test.cloud-staging",
+      input: {},
+    });
+    expect(parseCliArgs(["test", "cloud-prod-smoke"])).toEqual({
+      taskId: "test.cloud-prod-smoke",
+      input: {},
+    });
+    expect(parseCliArgs(["test", "lan-lab", "--hosts", ".kanna/lab/macs.json"])).toEqual({
+      taskId: "test.lan-lab",
+      input: { hosts: ".kanna/lab/macs.json" },
+    });
+  });
+
   it("parses build, clean, setup, pages, and release commands", () => {
     expect(parseCliArgs(["build", "desktop"])).toEqual({ taskId: "build.desktop", input: {} });
     expect(parseCliArgs(["clean", "--all", "--dry", "--shared-rust-build"])).toEqual({
@@ -256,11 +275,15 @@ describe("kd CLI", () => {
     });
     expect(parseCliArgs(["cloud", "deploy", "--production"])).toEqual({
       taskId: "cloud.deploy",
-      input: { production: true, relay: false }
+      input: { staging: false, production: true, relay: false }
     });
     expect(parseCliArgs(["cloud", "deploy", "--production", "--relay"])).toEqual({
       taskId: "cloud.deploy",
-      input: { production: true, relay: true }
+      input: { staging: false, production: true, relay: true }
+    });
+    expect(parseCliArgs(["cloud", "deploy", "--staging", "--relay"])).toEqual({
+      taskId: "cloud.deploy",
+      input: { staging: true, production: false, relay: true }
     });
   });
 });

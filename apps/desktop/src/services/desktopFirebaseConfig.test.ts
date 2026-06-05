@@ -90,4 +90,39 @@ describe("resolveDesktopFirebaseConfig", () => {
       "http://127.0.0.1:15002/kanna-local/us-central1/upsertTaskSnapshot",
     );
   });
+
+  it("uses runtime Firebase app config overrides when provided", async () => {
+    const config = await resolveDesktopFirebaseConfig({
+      dev: false,
+      readEnv: async (name) => ({
+        KANNA_FIREBASE_API_KEY: "runtime-key",
+        KANNA_FIREBASE_AUTH_DOMAIN: "runtime.firebaseapp.com",
+        KANNA_FIREBASE_PROJECT_ID: "runtime-project",
+        KANNA_FIREBASE_APP_ID: "runtime-app-id",
+        KANNA_CLOUD_FUNCTIONS_ENDPOINT: "https://runtime.example/upsertTaskSnapshot",
+      })[name] ?? "",
+    });
+
+    expect(config.app).toMatchObject({
+      apiKey: "runtime-key",
+      authDomain: "runtime.firebaseapp.com",
+      projectId: "runtime-project",
+      appId: "runtime-app-id",
+    });
+    expect(config.functionsEndpoint).toBe("https://runtime.example/upsertTaskSnapshot");
+  });
+
+  it("keeps emulator ports ahead of runtime function endpoint in local tests", async () => {
+    const config = await resolveDesktopFirebaseConfig({
+      dev: true,
+      readEnv: async (name) => ({
+        KANNA_FIREBASE_FUNCTIONS_PORT: "15002",
+        KANNA_CLOUD_FUNCTIONS_ENDPOINT: "https://runtime.example/upsertTaskSnapshot",
+      })[name] ?? "",
+    });
+
+    expect(config.functionsEndpoint).toBe(
+      "http://127.0.0.1:15002/kanna-local/us-central1/upsertTaskSnapshot",
+    );
+  });
 });

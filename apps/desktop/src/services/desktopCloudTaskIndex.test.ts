@@ -1,5 +1,55 @@
-import { describe, expect, it } from "vitest";
-import { mapDesktopCloudTasks } from "./desktopCloudTaskIndex";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("firebase/firestore", () => ({
+  collection: vi.fn(() => "tasks-ref"),
+  connectFirestoreEmulator: vi.fn(),
+  getDocs: vi.fn(),
+  getFirestore: vi.fn(),
+  query: vi.fn(() => "query-ref"),
+  where: vi.fn(() => "where-ref"),
+}));
+
+vi.mock("./desktopRelayTerminal", () => ({
+  listActiveDesktopIdsViaRelay: vi.fn(),
+}));
+
+import { getDocs } from "firebase/firestore";
+import { listActiveDesktopIdsViaRelay } from "./desktopRelayTerminal";
+import { listDesktopCloudTasks, mapDesktopCloudTasks, type DesktopCloudTaskSnapshot } from "./desktopCloudTaskIndex";
+
+function remoteTaskSnapshot(overrides: Partial<DesktopCloudTaskSnapshot> = {}): DesktopCloudTaskSnapshot {
+  return {
+    cloudTaskId: "remote-repo-id:task-1",
+    ownerDesktopId: "peer-primary",
+    ownerLocalTaskId: "task-1",
+    title: "Remote task",
+    promptSnippet: "Remote task prompt",
+    displayName: null,
+    stage: "in progress",
+    activity: "idle",
+    status: "active",
+    repo: {
+      cloudRepoId: "remote-repo-id",
+      name: "kanna",
+      defaultBranch: "main",
+      remoteUrlHash: "same-remote",
+    },
+    branch: "task-task-1",
+    baseRef: "origin/main",
+    prNumber: null,
+    prUrl: null,
+    agent: { provider: "codex", type: "pty" },
+    createdAt: "2026-05-14T00:00:00.000Z",
+    updatedAt: "2026-05-14T00:01:00.000Z",
+    closedAt: null,
+    ...overrides,
+  };
+}
+
+beforeEach(() => {
+  vi.mocked(getDocs).mockReset();
+  vi.mocked(listActiveDesktopIdsViaRelay).mockReset();
+});
 
 describe("mapDesktopCloudTasks", () => {
   it("maps cloud snapshots into sidebar-compatible repos and tasks", () => {
@@ -145,6 +195,47 @@ describe("mapDesktopCloudTasks", () => {
         remoteUrlHash: "same-remote",
       },
     ]);
+  });
+
+  it("keeps inactive cloud tasks visible without a live terminal ref", () => {
+    const snapshot = mapDesktopCloudTasks([remoteTaskSnapshot({
+      ownerDesktopId: "peer-offline",
+      title: "Offline remote task",
+      promptSnippet: "Offline remote task prompt",
+    })], {
+      activeDesktopIds: new Set(["peer-online"]),
+    });
+
+    expect(snapshot.items).toMatchObject([
+      {
+        id: "cloud:remote-repo-id:task-1",
+        prompt: "Offline remote task prompt",
+      },
+    ]);
+    expect(snapshot.terminalRefs).toEqual({});
+  });
+
+  it("does not remove cloud tasks when relay presence misses the owner", async () => {
+    vi.mocked(getDocs).mockResolvedValue({
+      docs: [{
+        data: () => remoteTaskSnapshot({
+          ownerDesktopId: "peer-offline",
+          title: "Offline remote task",
+          promptSnippet: "Offline remote task prompt",
+        }),
+      }],
+    } as never);
+    vi.mocked(listActiveDesktopIdsViaRelay).mockResolvedValue(new Set(["peer-online"]));
+
+    const snapshot = await listDesktopCloudTasks("user-1", {} as never);
+
+    expect(snapshot.items).toMatchObject([
+      {
+        id: "cloud:remote-repo-id:task-1",
+        prompt: "Offline remote task prompt",
+      },
+    ]);
+    expect(snapshot.terminalRefs).toEqual({});
   });
 
   it("omits stale cloud tasks that match a locally closed task", () => {

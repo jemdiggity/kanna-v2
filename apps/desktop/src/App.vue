@@ -256,6 +256,7 @@ const workspace = computed(() => buildWorkspace({
   cloudSnapshot: filterClosedRemoteSnapshot(cloudSnapshot.value),
   lanSnapshot: filterClosedRemoteSnapshot(lanSnapshot.value),
 }));
+const remoteTaskDiagnostics = computed(() => workspace.value.diagnostics);
 const workspaceTasksByItemId = computed(() => {
   const entries: Array<[string, WorkspaceTask]> = [];
   for (const task of workspace.value.tasks) {
@@ -1948,6 +1949,7 @@ onMounted(async () => {
   initializeDesktopLanTaskSync();
   await importPendingIncomingTransfers();
   if (import.meta.env.DEV && window.__KANNA_E2E__) {
+    void remoteTaskDiagnostics.value;
     window.__KANNA_E2E__.ready = true;
   }
 

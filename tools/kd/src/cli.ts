@@ -28,6 +28,7 @@ const booleanFlagMap: Record<string, string> = {
   "--patch": "patch",
   "--arm64": "arm64",
   "--x86_64": "x86_64",
+  "--staging": "staging",
   "--production": "production",
   "--relay": "relay"
 };
@@ -69,6 +70,15 @@ function parseFlagInput(rest: string[], defaults: Record<string, unknown>): Reco
         throw new Error("--transfer-root requires a value");
       }
       input.transferRoot = value;
+      index += 1;
+      continue;
+    }
+    if (arg === "--hosts") {
+      const value = rest[index + 1];
+      if (!value) {
+        throw new Error("--hosts requires a value");
+      }
+      input.hosts = value;
       index += 1;
       continue;
     }
@@ -149,13 +159,25 @@ export function parseCliArgs(args: string[]): ParsedCliCommand {
     return { taskId: "release.ship", input: parseFlagInput(rest, {}) };
   }
   if (group === "cloud" && command === "deploy") {
-    return { taskId: "cloud.deploy", input: parseFlagInput(rest, { production: false, relay: false }) };
+    return { taskId: "cloud.deploy", input: parseFlagInput(rest, { staging: false, production: false, relay: false }) };
   }
   if (group === "pages" && command === "build-schema") {
     return { taskId: "pages.build-schema", input: parseFlagInput(rest, {}) };
   }
   if (group === "test" && command === "app-update-bundle") {
     return { taskId: "test.app-update-bundle", input: {} };
+  }
+  if (group === "test" && command === "cloud-emulator") {
+    return { taskId: "test.cloud-emulator", input: {} };
+  }
+  if (group === "test" && command === "cloud-staging") {
+    return { taskId: "test.cloud-staging", input: {} };
+  }
+  if (group === "test" && command === "cloud-prod-smoke") {
+    return { taskId: "test.cloud-prod-smoke", input: {} };
+  }
+  if (group === "test" && command === "lan-lab") {
+    return { taskId: "test.lan-lab", input: parseFlagInput(rest, {}) };
   }
   if (group === "setup") {
     return { taskId: "setup", input: parseFlagInput([command, ...rest].filter((arg): arg is string => Boolean(arg)), { check: false }) };
@@ -228,9 +250,13 @@ function helpText(): string {
     "  build desktop",
     "  build sidecars",
     "  release ship [--dry-run] [--release] [--major|--minor|--patch] [--arm64|--x86_64]",
-    "  cloud deploy --production [--relay]",
+    "  cloud deploy --staging|--production [--relay]",
     "  pages build-schema --out-dir <dir>",
     "  test app-update-bundle",
+    "  test cloud-emulator",
+    "  test cloud-staging",
+    "  test cloud-prod-smoke",
+    "  test lan-lab --hosts <path>",
     "  doctor"
   ].join("\n");
 }

@@ -1,0 +1,22 @@
+{
+  "hosts": [
+    {
+      "name": "desktop-a",
+      "ssh": "desktop-a.local",
+      "repo": "/Users/jeremy/kanna",
+      "webDriverPort": 4445
+    },
+    {
+      "name": "desktop-b",
+      "ssh": "desktop-b.local",
+      "repo": "/Users/jeremy/kanna",
+      "webDriverPort": 4445
+    },
+    {
+      "name": "laptop",
+      "ssh": "laptop.local",
+      "repo": "/Users/jeremy/kanna",
+      "webDriverPort": 4445
+    }
+  ]
+}

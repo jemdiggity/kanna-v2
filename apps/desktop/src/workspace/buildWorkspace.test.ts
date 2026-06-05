@@ -178,6 +178,99 @@ describe("buildWorkspace", () => {
     });
   });
 
+  it("reports cloud transport diagnostics for cloud-only tasks", () => {
+    const cloudItem = item({
+      id: "cloud:remote-repo:task-cloud",
+      repo_id: "cloud:remote-repo",
+      prompt: "Cloud diagnostic task",
+    });
+
+    const result = buildWorkspace({
+      localRepos: [],
+      localItems: [],
+      cloudSnapshot: {
+        repos: [{
+          id: "cloud:remote-repo",
+          path: "cloud",
+          name: "kanna",
+          remote_url: "git@example.com:kanna.git",
+          default_branch: "main",
+          hidden: 0,
+          sort_order: 0,
+          created_at: "2026-06-01T00:00:00.000Z",
+          last_opened_at: "2026-06-01T00:00:00.000Z",
+        }],
+        items: [cloudItem],
+        terminalRefs: {
+          "cloud:remote-repo:task-cloud": {
+            ownerDesktopId: "desktop-cloud",
+            ownerLocalTaskId: "task-cloud",
+            transport: "cloud",
+          },
+        },
+      },
+      lanSnapshot: emptySnapshot(),
+    });
+
+    expect(result.diagnostics).toContainEqual(expect.objectContaining({
+      itemId: "cloud:remote-repo:task-cloud",
+      prompt: "Cloud diagnostic task",
+      repoId: "cloud:remote-repo",
+      sources: ["cloud"],
+      selectedTerminalTransport: "cloud",
+      ownerDesktopId: "desktop-cloud",
+      ownerLocalTaskId: "task-cloud",
+    }));
+  });
+
+  it("reports LAN as the selected transport when cloud and LAN advertise the same task", () => {
+    const cloudItem = item({
+      id: "cloud:remote-repo:task-shared",
+      repo_id: "repo-local",
+      prompt: "Shared diagnostic task",
+    });
+    const lanItem = item({
+      id: "cloud:lan:peer-primary:remote-repo:task-shared",
+      repo_id: "repo-local",
+      prompt: "Shared diagnostic task",
+    });
+
+    const result = buildWorkspace({
+      localRepos: [{ repo: repo({ id: "repo-local" }), remoteUrlHash: "same-hash" }],
+      localItems: [],
+      cloudSnapshot: {
+        repos: [],
+        items: [cloudItem],
+        terminalRefs: {
+          "cloud:remote-repo:task-shared": {
+            ownerDesktopId: "desktop-cloud",
+            ownerLocalTaskId: "task-shared",
+            transport: "cloud",
+          },
+        },
+      },
+      lanSnapshot: {
+        repos: [],
+        items: [lanItem],
+        terminalRefs: {
+          "cloud:lan:peer-primary:remote-repo:task-shared": {
+            ownerDesktopId: "peer-primary",
+            ownerLocalTaskId: "task-shared",
+            transport: "lan",
+          },
+        },
+      },
+    });
+
+    expect(result.diagnostics).toContainEqual(expect.objectContaining({
+      prompt: "Shared diagnostic task",
+      sources: ["cloud", "lan"],
+      selectedTerminalTransport: "lan",
+      ownerDesktopId: "peer-primary",
+      ownerLocalTaskId: "task-shared",
+    }));
+  });
+
   it("dedupes cloud and LAN advertisements for the same local task even when transports use different owner ids", () => {
     const cloudItem = item({
       id: "cloud:remote-repo:task-2",
