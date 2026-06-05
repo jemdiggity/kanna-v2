@@ -3,6 +3,7 @@ import { publishDesktopTaskSnapshot, publishDesktopTaskSnapshots } from "./deskt
 
 const mocks = vi.hoisted(() => ({
   publish: vi.fn(),
+  createCloudTaskPublisher: vi.fn(),
   invoke: vi.fn(),
 }));
 
@@ -75,7 +76,7 @@ vi.mock("./desktopFirebaseConfig", () => ({
 }));
 
 vi.mock("./cloudTaskPublisher", () => ({
-  createCloudTaskPublisher: vi.fn(() => ({
+  createCloudTaskPublisher: mocks.createCloudTaskPublisher.mockImplementation(() => ({
     publish: mocks.publish,
   })),
 }));
@@ -83,6 +84,7 @@ vi.mock("./cloudTaskPublisher", () => ({
 describe("publishDesktopTaskSnapshot", () => {
   beforeEach(() => {
     mocks.publish.mockClear();
+    mocks.createCloudTaskPublisher.mockClear();
     mocks.invoke.mockReset();
     mocks.invoke.mockImplementation(async (command: string) => {
       if (command === "mobile_server_status") {
@@ -120,6 +122,41 @@ describe("publishDesktopTaskSnapshot", () => {
         ownerLocalTaskId: "task-1",
       }),
     );
+  });
+
+  it("posts snapshots through the native Tauri command to avoid webview CORS", async () => {
+    await publishDesktopTaskSnapshot(null as never, {
+      id: "task-native-post",
+      repo_id: "repo-1",
+      prompt: "Publish through native command",
+      stage: "in progress",
+      activity: "working",
+      branch: "task-native-post",
+      base_ref: "main",
+      pr_number: null,
+      pr_url: null,
+      display_name: null,
+      agent_provider: "claude",
+      agent_type: "pty",
+      created_at: "2026-05-22T00:00:00.000Z",
+      updated_at: "2026-05-22T00:01:00.000Z",
+      closed_at: null,
+    } as never);
+
+    const publisherOptions = mocks.createCloudTaskPublisher.mock.calls[0]?.[0] as {
+      postJson?: (endpoint: string, idToken: string, snapshot: unknown) => Promise<void>;
+    };
+    expect(publisherOptions.postJson).toBeTypeOf("function");
+
+    await publisherOptions.postJson?.("https://upserttasksnapshot.example", "id-token-1", {
+      cloudTaskId: "task-native-post",
+    });
+
+    expect(mocks.invoke).toHaveBeenCalledWith("post_cloud_task_snapshot", {
+      endpoint: "https://upserttasksnapshot.example",
+      idToken: "id-token-1",
+      snapshot: { cloudTaskId: "task-native-post" },
+    });
   });
 
   it("publishes open and recently closed local task snapshots during reconciliation", async () => {

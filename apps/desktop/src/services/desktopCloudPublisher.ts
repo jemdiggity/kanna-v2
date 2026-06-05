@@ -35,6 +35,8 @@ export async function publishDesktopTaskSnapshot(
   await createCloudTaskPublisher({
     endpoint: config.functionsEndpoint,
     getIdToken: (forceRefresh?: boolean) => authSession.getIdToken(forceRefresh),
+    postJson: (endpoint, idToken, snapshot) =>
+      invoke("post_cloud_task_snapshot", { endpoint, idToken, snapshot }),
   }).publish(snapshot);
 }
 
