@@ -2,12 +2,15 @@ import { initializeApp, getApps, type FirebaseApp } from "firebase/app";
 import {
   connectAuthEmulator,
   getAuth,
+  inMemoryPersistence,
+  initializeAuth,
   onAuthStateChanged,
   signInWithEmailAndPassword,
   signOut as firebaseSignOut,
   type Auth,
   type User
 } from "firebase/auth";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
   parseMobileFirebaseConfig,
   type MobileFirebaseConfig
@@ -19,6 +22,7 @@ import {
   type MobileAuthSession,
   type MobileAuthUser
 } from "./auth";
+import { createReactNativeAuthPersistence } from "./authPersistence";
 
 export function createConfiguredMobileAuthSession(
   config: MobileFirebaseConfig = parseMobileFirebaseConfig()
@@ -28,7 +32,7 @@ export function createConfiguredMobileAuthSession(
   }
 
   const app = getApps()[0] ?? initializeApp(config.app);
-  const auth = getAuth(app);
+  const auth = initializeMobileAuth(app);
   if (config.authEmulator) {
     connectAuthEmulator(auth, config.authEmulator.url, {
       disableWarnings: true
@@ -38,6 +42,37 @@ export function createConfiguredMobileAuthSession(
   return createMobileAuthSession({
     sdk: createFirebaseMobileAuthSdk(auth, app)
   });
+}
+
+function initializeMobileAuth(app: FirebaseApp): Auth {
+  try {
+    return initializeAuth(app, {
+      persistence: isReactNativeRuntime()
+        ? createReactNativeAuthPersistence(AsyncStorage)
+        : inMemoryPersistence
+    });
+  } catch (error) {
+    if (isFirebaseAuthAlreadyInitializedError(error)) {
+      return getAuth(app);
+    }
+    throw error;
+  }
+}
+
+function isFirebaseAuthAlreadyInitializedError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { code?: unknown }).code === "auth/already-initialized"
+  );
+}
+
+function isReactNativeRuntime(): boolean {
+  return (
+    typeof navigator !== "undefined" &&
+    (navigator as { product?: string }).product === "ReactNative"
+  );
 }
 
 export function createFirebaseMobileAuthSdk(auth: Auth, _app: FirebaseApp): MobileAuthSdk {

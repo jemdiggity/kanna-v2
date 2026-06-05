@@ -18,6 +18,7 @@ interface TerminalWebViewProps {
   output: string;
   status: TaskTerminalStatus;
   fullscreen?: boolean;
+  onConsolePress?: () => void;
 }
 
 const FULLSCREEN_BOTTOM_INSET = 132;
@@ -34,7 +35,8 @@ export function TerminalWebView({
   taskId,
   output,
   status,
-  fullscreen = false
+  fullscreen = false,
+  onConsolePress
 }: TerminalWebViewProps) {
   const webViewRef = useRef<TerminalWebViewHandle>(null);
   const bridgeReadyRef = useRef(false);
@@ -114,6 +116,11 @@ export function TerminalWebView({
     try {
       payload = JSON.parse(event.nativeEvent.data) as { type?: string };
     } catch {
+      return;
+    }
+
+    if (payload?.type === "terminal-tap") {
+      onConsolePress?.();
       return;
     }
 

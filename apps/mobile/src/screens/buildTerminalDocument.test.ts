@@ -16,9 +16,13 @@ describe("buildTerminalDocument", () => {
     expect(html).toContain('id="terminal-root"');
     expect(html).toContain("padding-bottom: 132px;");
     expect(html).toContain("overflow-x: auto;");
+    expect(html).toContain("-webkit-overflow-scrolling: touch;");
+    expect(html).toContain("touch-action: pan-x pan-y;");
+    expect(html).toContain("terminalViewport.style.overflowX = \"visible\"");
     expect(html).toContain("const TERMINAL_COLS = 220;");
     expect(html).toContain("term.resize(TERMINAL_COLS, proposed.rows)");
     expect(html).toContain("const term = new TerminalCtor(");
+    expect(html).toContain("vtExtensions: { kittyKeyboard: true }");
     expect(html).toContain("new FitAddonCtor()");
     expect(html).toContain("term.open(root)");
     expect(html).toContain("term.scrollToBottom()");
@@ -26,6 +30,8 @@ describe("buildTerminalDocument", () => {
     expect(html).toContain("window.__appendTerminalChunk");
     expect(html).toContain("window.ReactNativeWebView.postMessage");
     expect(html).toContain('type: "terminal-ready"');
+    expect(html).toContain('type: "terminal-tap"');
+    expect(html).toContain('viewport.addEventListener("pointerdown"');
     expect(html).toContain("terminalViewport.style.bottom = stickyToBottom");
     expect(html).not.toContain("<pre id=\"terminal\"></pre>");
   });
@@ -67,5 +73,20 @@ describe("buildTerminalDocument", () => {
 
     expect(script).toContain("window.__appendTerminalChunk");
     expect(script).toContain("Second line\\n");
+  });
+
+  it("removes echoed terminal input protocol wrappers from update scripts", () => {
+    const replaceScript = buildTerminalReplaceScript({
+      output: "\u001b[200~continue\u001b[201~\u001b[13u\nClaude response\n",
+      status: "live"
+    });
+    const appendScript = buildTerminalAppendScript("\u001b[>1u\u001b[13;5u");
+
+    expect(replaceScript).toContain("continue\\nClaude response");
+    expect(replaceScript).not.toContain("[200~");
+    expect(replaceScript).not.toContain("[201~");
+    expect(replaceScript).not.toContain("[13u");
+    expect(appendScript).not.toContain("[>1u");
+    expect(appendScript).not.toContain("[13;5u");
   });
 });

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { createAppModel, resolveRelayUrl, resolveServerBaseUrl } from "./appModel";
+import { createAppModel, resolveRelayUrl } from "./appModel";
+import { createStaticBonjourBrowser } from "./lib/discovery/bonjour";
 import type { MobileAuthSession } from "./lib/firebase/auth";
 import type { FetchLike } from "./lib/transports/lanTransport";
 
@@ -69,43 +70,150 @@ function createFetchMock(): FetchLike {
   }) as FetchLike;
 }
 
+function createTrustedDesktopFetchMock(): FetchLike {
+  return vi.fn(async (input) => {
+    const url = typeof input === "string" ? input : input.toString();
+
+    if (!url.startsWith("http://trusted.lan:48120")) {
+      throw new Error(`Unexpected request: ${url}`);
+    }
+
+    if (url.endsWith("/v1/status")) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          state: "running",
+          desktopId: "desktop-trusted",
+          desktopName: "Trusted Mac",
+          lanHost: "0.0.0.0",
+          lanPort: 48120,
+          pairingCode: null
+        })
+      } as Response;
+    }
+
+    if (url.endsWith("/v1/desktops")) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => [
+          { id: "desktop-trusted", name: "Trusted Mac", connectionMode: "lan" }
+        ]
+      } as Response;
+    }
+
+    if (url.endsWith("/v1/repos")) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => [{ id: "repo-trusted", name: "Trusted Repo" }]
+      } as Response;
+    }
+
+    if (url.endsWith("/v1/tasks/recent")) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => [
+          {
+            id: "task-trusted",
+            repoId: "repo-trusted",
+            title: "Trusted LAN task",
+            stage: "in progress"
+          }
+        ]
+      } as Response;
+    }
+
+    if (url.endsWith("/v1/repos/repo-trusted/tasks")) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => [
+          {
+            id: "task-trusted",
+            repoId: "repo-trusted",
+            title: "Trusted LAN task",
+            stage: "in progress"
+          }
+        ]
+      } as Response;
+    }
+
+    throw new Error(`Unexpected request: ${url}`);
+  }) as FetchLike;
+}
+
+function createSignedInAuthSession(): MobileAuthSession {
+  return {
+    initialize: vi.fn().mockResolvedValue(undefined),
+    getState: vi.fn(() => ({
+      status: "signedIn",
+      user: { uid: "user-1", email: "u@example.com", displayName: null }
+    })),
+    subscribe: vi.fn((listener) => {
+      listener({
+        status: "signedIn",
+        user: { uid: "user-1", email: "u@example.com", displayName: null }
+      });
+      return () => undefined;
+    }),
+    signInWithEmailPassword: vi.fn().mockResolvedValue(undefined),
+    signOut: vi.fn().mockResolvedValue(undefined),
+    getIdToken: vi.fn().mockResolvedValue("id-token-1")
+  };
+}
+
+function createSignedOutAuthSession(): MobileAuthSession {
+  return {
+    initialize: vi.fn().mockResolvedValue(undefined),
+    getState: vi.fn(() => ({ status: "signedOut" })),
+    subscribe: vi.fn(() => () => undefined),
+    signInWithEmailPassword: vi.fn().mockResolvedValue(undefined),
+    signOut: vi.fn().mockResolvedValue(undefined),
+    getIdToken: vi.fn().mockResolvedValue(null)
+  };
+}
+
+function createTrustedDesktopContext(
+  desktopId = "desktop-1",
+  displayName = "Studio Mac"
+) {
+  return {
+    selectedDesktopId: desktopId,
+    selectedRepoId: null,
+    selectedTaskId: null,
+    activeView: "tasks" as const,
+    trustedDesktops: [
+      {
+        desktopId,
+        displayName,
+        lanEndpoints: [],
+        lastSeenAt: "2026-06-01T00:00:00.000Z"
+      }
+    ]
+  };
+}
+
+function createBonjourForDesktop(
+  desktopId = "desktop-1",
+  name = "Studio Mac",
+  host = "desktop.test",
+  port = 48120
+) {
+  return createStaticBonjourBrowser([
+    {
+      name,
+      type: "_kanna-mobile._tcp.",
+      host,
+      port,
+      txt: { desktopId }
+    }
+  ]);
+}
+
 describe("createAppModel", () => {
-  it("resolves the mobile server URL from Expo public env", () => {
-    vi.stubEnv("EXPO_PUBLIC_KANNA_SERVER_URL", "http://desktop.lan:48120");
-
-    expect(resolveServerBaseUrl()).toBe("http://desktop.lan:48120");
-
-    vi.unstubAllEnvs();
-  });
-
-  it("infers the mobile server host from the Metro bundle URL when no Expo public server URL is provided", () => {
-    vi.unstubAllEnvs();
-
-    expect(
-      resolveServerBaseUrl(
-        {},
-        "http://192.168.68.56:8081/.expo/.virtual-metro-entry.bundle?platform=ios"
-      )
-    ).toBe("http://192.168.68.56:48120");
-  });
-
-  it("prefers the Metro-derived LAN host over a loopback Expo public server URL", () => {
-    vi.unstubAllEnvs();
-
-    expect(
-      resolveServerBaseUrl(
-        { EXPO_PUBLIC_KANNA_SERVER_URL: "http://127.0.0.1:48120" },
-        "http://192.168.68.56:8081/.expo/.virtual-metro-entry.bundle?platform=ios"
-      )
-    ).toBe("http://192.168.68.56:48120");
-  });
-
-  it("falls back to localhost when no Expo public server URL is provided", () => {
-    vi.unstubAllEnvs();
-
-    expect(resolveServerBaseUrl({}, null)).toBe("http://127.0.0.1:48120");
-  });
-
   it("resolves the relay URL from Expo public env", () => {
     expect(
       resolveRelayUrl({ EXPO_PUBLIC_KANNA_RELAY_URL: "wss://relay.example" })
@@ -118,7 +226,15 @@ describe("createAppModel", () => {
   });
 
   it("creates an app model with desktop navigation and a LAN client", async () => {
-    const model = createAppModel("http://desktop.test", createFetchMock());
+    const model = createAppModel({
+      fetchImpl: createFetchMock(),
+      persistence: {
+        load: vi.fn().mockResolvedValue(createTrustedDesktopContext()),
+        save: vi.fn().mockResolvedValue(undefined)
+      },
+      authSession: createSignedOutAuthSession(),
+      options: { bonjourBrowser: createBonjourForDesktop() }
+    });
 
     expect(model.navigator.tabs.map((tab) => tab.label)).toEqual([
       "Tasks",
@@ -130,6 +246,7 @@ describe("createAppModel", () => {
       "Add task"
     ]);
     expect(typeof model.controller.bootstrap).toBe("function");
+    await model.initialize();
     expect((await model.client.getStatus()).desktopName).toBe("Studio Mac");
   });
 
@@ -165,13 +282,11 @@ describe("createAppModel", () => {
       ])
     };
 
-    const model = createAppModel(
-      "http://desktop.test",
-      createFetchMock(),
-      undefined,
+    const model = createAppModel({
+      fetchImpl: createFetchMock(),
       authSession,
-      { relayUrl: "wss://relay.example", taskIndex }
-    );
+      options: { relayUrl: "wss://relay.example", taskIndex }
+    });
 
     await expect(model.client.getStatus()).resolves.toMatchObject({
       desktopId: "cloud",
@@ -204,18 +319,56 @@ describe("createAppModel", () => {
     const taskIndex = {
       listRecentTasks: vi.fn(async () => [])
     };
-    const model = createAppModel(
-      "http://desktop.test",
-      createFetchMock(),
-      undefined,
+    const model = createAppModel({
+      fetchImpl: createFetchMock(),
+      persistence: {
+        load: vi.fn().mockResolvedValue(createTrustedDesktopContext()),
+        save: vi.fn().mockResolvedValue(undefined)
+      },
       authSession,
-      { relayUrl: "wss://relay.example", taskIndex }
-    );
+      options: {
+        relayUrl: "wss://relay.example",
+        taskIndex,
+        bonjourBrowser: createBonjourForDesktop()
+      }
+    });
+
+    await model.initialize();
 
     await expect(model.client.listRecentTasks()).resolves.toEqual([
       expect.objectContaining({ id: "task-1", title: "Refactor mobile shell" }),
       expect.objectContaining({ id: "task-2", title: "Review shell polish" })
     ]);
+  });
+
+  it("does not call localhost when signed out with no trusted desktops", async () => {
+    const fetchImpl = vi.fn(async () => {
+      throw new Error("runtime URL fallback must not be used");
+    }) as FetchLike;
+    const model = createAppModel({
+      fetchImpl,
+      persistence: {
+        load: vi.fn().mockResolvedValue({
+          selectedDesktopId: null,
+          selectedRepoId: null,
+          selectedTaskId: null,
+          activeView: "tasks",
+          trustedDesktops: []
+        }),
+        save: vi.fn().mockResolvedValue(undefined)
+      },
+      authSession: createSignedOutAuthSession(),
+      options: { bonjourBrowser: createStaticBonjourBrowser([]) }
+    });
+
+    await model.initialize();
+
+    expect(model.sessionStore.getState()).toMatchObject({
+      connectionState: "idle",
+      recentTasks: [],
+      repoTasks: []
+    });
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 
   it("does not fall back to loopback LAN when signed-in production cloud has no tasks yet", async () => {
@@ -242,19 +395,19 @@ describe("createAppModel", () => {
     const taskIndex = {
       listRecentTasks: vi.fn(async () => [])
     };
-    const model = createAppModel(
-      "http://127.0.0.1:48120",
+    const model = createAppModel({
       fetchImpl,
-      {
+      persistence: {
         load: vi.fn().mockResolvedValue(null),
         save: vi.fn().mockResolvedValue(undefined)
       },
       authSession,
-      { relayUrl: "wss://relay.example", taskIndex }
-    );
+      options: { relayUrl: "wss://relay.example", taskIndex }
+    });
 
     await model.initialize();
 
+    expect(model.sessionStore.getState().errorMessage).toBeNull();
     expect(model.sessionStore.getState()).toMatchObject({
       connectionMode: "remote",
       connectionState: "connected",
@@ -267,6 +420,162 @@ describe("createAppModel", () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
+  it("falls back to a trusted Bonjour LAN endpoint when signed-in cloud has no tasks", async () => {
+    const authSession = createSignedInAuthSession();
+    const taskIndex = {
+      listRecentTasks: vi.fn(async () => [])
+    };
+    const fetchImpl = createTrustedDesktopFetchMock();
+    const model = createAppModel({
+      fetchImpl,
+      persistence: {
+        load: vi.fn().mockResolvedValue({
+          selectedDesktopId: "desktop-trusted",
+          selectedRepoId: null,
+          selectedTaskId: null,
+          activeView: "tasks",
+          trustedDesktops: [
+            {
+              desktopId: "desktop-trusted",
+              displayName: "Trusted Mac",
+              lanEndpoints: [
+                {
+                  baseUrl: "http://trusted.lan:48120",
+                  lastSeenAt: "2026-05-31T00:00:00.000Z"
+                }
+              ],
+              lastSeenAt: "2026-05-31T00:00:00.000Z"
+            }
+          ]
+        }),
+        save: vi.fn().mockResolvedValue(undefined)
+      },
+      authSession,
+      options: {
+        relayUrl: "wss://relay.example",
+        taskIndex,
+        bonjourBrowser: createBonjourForDesktop(
+          "desktop-trusted",
+          "Trusted Mac",
+          "trusted.lan",
+          48120
+        )
+      }
+    });
+
+    await model.initialize();
+
+    expect(model.sessionStore.getState().errorMessage).toBeNull();
+    expect(model.sessionStore.getState()).toMatchObject({
+      connectionMode: "lan",
+      connectionState: "connected",
+      desktopName: "Trusted Mac",
+      recentTasks: [
+        expect.objectContaining({ id: "task-trusted", title: "Trusted LAN task" })
+      ]
+    });
+  });
+
+  it("skips Bonjour LAN endpoints whose status belongs to a different desktop", async () => {
+    const authSession = createSignedInAuthSession();
+    const taskIndex = {
+      listRecentTasks: vi.fn(async () => [])
+    };
+    const fetchImpl = vi.fn(async (input) => {
+      const url = typeof input === "string" ? input : input.toString();
+
+      if (url === "http://right.lan:48120/v1/status") {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            state: "running",
+            desktopId: "desktop-trusted",
+            desktopName: "Trusted Mac",
+            lanHost: "0.0.0.0",
+            lanPort: 48120,
+            pairingCode: null
+          })
+        } as Response;
+      }
+
+      if (url === "http://right.lan:48120/v1/tasks/recent") {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => [
+            {
+              id: "task-trusted",
+              repoId: "repo-trusted",
+              title: "Trusted LAN task",
+              stage: "in progress"
+            }
+          ]
+        } as Response;
+      }
+
+      throw new Error(`Unexpected request: ${url}`);
+    }) as FetchLike;
+    const model = createAppModel({
+      fetchImpl,
+      persistence: {
+        load: vi.fn().mockResolvedValue({
+          selectedDesktopId: "desktop-trusted",
+          selectedRepoId: null,
+          selectedTaskId: null,
+          activeView: "tasks",
+          trustedDesktops: [
+            {
+              desktopId: "desktop-trusted",
+              displayName: "Trusted Mac",
+              lanEndpoints: [
+                {
+                  baseUrl: "http://wrong.lan:48120",
+                  lastSeenAt: "2026-05-31T00:00:00.000Z"
+                },
+                {
+                  baseUrl: "http://right.lan:48120",
+                  lastSeenAt: "2026-05-31T00:00:00.000Z"
+                }
+              ],
+              lastSeenAt: "2026-05-31T00:00:00.000Z"
+            }
+          ]
+        }),
+        save: vi.fn().mockResolvedValue(undefined)
+      },
+      authSession,
+      options: {
+        relayUrl: "wss://relay.example",
+        taskIndex,
+        bonjourBrowser: createStaticBonjourBrowser([
+          {
+            name: "Wrong Mac",
+            type: "_kanna-mobile._tcp.",
+            host: "wrong.lan",
+            port: 48120,
+            txt: { desktopId: "desktop-other" }
+          },
+          {
+            name: "Trusted Mac",
+            type: "_kanna-mobile._tcp.",
+            host: "right.lan",
+            port: 48120,
+            txt: { desktopId: "desktop-trusted" }
+          }
+        ])
+      }
+    });
+
+    await model.initialize();
+
+    await expect(model.client.listRecentTasks()).resolves.toEqual([
+      expect.objectContaining({ id: "task-trusted", title: "Trusted LAN task" })
+    ]);
+    expect(fetchImpl).not.toHaveBeenCalledWith("http://wrong.lan:48120/v1/status");
+    expect(fetchImpl).toHaveBeenCalledWith("http://right.lan:48120/v1/status");
+  });
+
   it("hydrates persisted mobile context before bootstrap", async () => {
     const persistence = {
       load: vi.fn().mockResolvedValue({
@@ -277,11 +586,12 @@ describe("createAppModel", () => {
       }),
       save: vi.fn().mockResolvedValue(undefined)
     };
-    const model = createAppModel(
-      "http://desktop.test",
-      createFetchMock(),
-      persistence
-    );
+    const model = createAppModel({
+      fetchImpl: createFetchMock(),
+      persistence,
+      authSession: createSignedOutAuthSession(),
+      options: { bonjourBrowser: createStaticBonjourBrowser([]) }
+    });
 
     await model.initialize();
 
@@ -303,11 +613,12 @@ describe("createAppModel", () => {
       }),
       save: vi.fn().mockResolvedValue(undefined)
     };
-    const model = createAppModel(
-      "http://desktop.test",
-      createFetchMock(),
-      persistence
-    );
+    const model = createAppModel({
+      fetchImpl: createFetchMock(),
+      persistence,
+      authSession: createSignedOutAuthSession(),
+      options: { bonjourBrowser: createStaticBonjourBrowser([]) }
+    });
 
     await model.initialize();
 
@@ -329,11 +640,12 @@ describe("createAppModel", () => {
       load: vi.fn().mockResolvedValue(null),
       save: vi.fn().mockResolvedValue(undefined)
     };
-    const model = createAppModel(
-      "http://desktop.test",
-      createFetchMock(),
-      persistence
-    );
+    const model = createAppModel({
+      fetchImpl: createFetchMock(),
+      persistence,
+      authSession: createSignedOutAuthSession(),
+      options: { bonjourBrowser: createStaticBonjourBrowser([]) }
+    });
 
     await model.initialize();
     await model.controller.selectDesktop("desktop-2");
@@ -342,12 +654,14 @@ describe("createAppModel", () => {
     model.controller.showView("more");
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(persistence.save).toHaveBeenLastCalledWith({
-      selectedDesktopId: "desktop-2",
-      selectedRepoId: "repo-2",
-      selectedTaskId: "task-2",
-      activeView: "more",
-      authUser: null
-    });
+    expect(persistence.save).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        selectedDesktopId: "desktop-2",
+        selectedRepoId: "repo-2",
+        selectedTaskId: "task-2",
+        activeView: "more",
+        authUser: null
+      })
+    );
   });
 });

@@ -57,7 +57,12 @@ export async function publishDesktopTaskSnapshots(
     const items = await listPipelineItems(db, repo.id);
     for (const item of items) {
       if (!shouldPublishTaskSnapshot(item, cutoff)) continue;
-      await publishDesktopTaskSnapshot(db, item, repo);
+      await publishDesktopTaskSnapshot(db, item, repo).catch((error) => {
+        console.warn(
+          `[cloud] failed to publish task snapshot for ${item.id}:`,
+          error,
+        );
+      });
     }
   }
 }

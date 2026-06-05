@@ -22,3 +22,4 @@ kanna-runtime-defaults = { path = "../runtime-defaults" }
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["cors"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+mdns-sd = "0.19"

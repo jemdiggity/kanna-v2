@@ -1,6 +1,8 @@
 import React, { useState } from "react";
 import {
+  KeyboardAvoidingView,
   Modal,
+  Platform,
   Pressable,
   StyleSheet,
   Text,
@@ -49,7 +51,10 @@ export function AccountSheet({
 
   return (
     <Modal animationType="slide" transparent visible={visible} onRequestClose={onClose}>
-      <View style={styles.backdrop}>
+      <KeyboardAvoidingView
+        behavior={Platform.OS === "ios" ? "padding" : undefined}
+        style={styles.backdrop}
+      >
         <Pressable style={styles.scrim} onPress={onClose} />
         <View style={styles.sheet} testID={MOBILE_E2E_IDS.accountSheet}>
           <View style={styles.header}>
@@ -145,7 +150,7 @@ export function AccountSheet({
             </View>
           )}
         </View>
-      </View>
+      </KeyboardAvoidingView>
     </Modal>
   );
 }

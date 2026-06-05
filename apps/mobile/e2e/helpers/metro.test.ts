@@ -9,40 +9,36 @@ describe("mobile Metro helpers", () => {
   it("extracts Expo public env vars from a ps command line", () => {
     expect(
       extractEnvVarFromCommandLine(
-        "node expo EXPO_PUBLIC_KANNA_SERVER_URL=http://192.168.1.5:48129 KANNA_MOBILE_PORT=8081"
+        "node expo EXPO_PUBLIC_KANNA_ENABLE_E2E_TRUST_SEED=1 KANNA_MOBILE_PORT=8081"
       )
     ).toMatchObject({
-      EXPO_PUBLIC_KANNA_SERVER_URL: "http://192.168.1.5:48129",
+      EXPO_PUBLIC_KANNA_ENABLE_E2E_TRUST_SEED: "1",
       KANNA_MOBILE_PORT: "8081"
     });
   });
 
-  it("reuses an Expo server from the same project root and desktop target", () => {
+  it("reuses an Expo server from the same project root", () => {
     expect(
       shouldReuseExpoServer(
         {
-          commandLine:
-            "node expo start EXPO_PUBLIC_KANNA_SERVER_URL=http://192.168.1.5:48129",
+          commandLine: "node expo start",
           cwd: "/tmp/kanna/apps/mobile"
         },
         {
-          desktopServerUrl: "http://192.168.1.5:48129",
           projectRoot: "/tmp/kanna/apps/mobile"
         }
       )
     ).toBe(true);
   });
 
-  it("restarts an Expo server when it targets a different desktop URL", () => {
+  it("does not reuse an Expo server from another project root", () => {
     expect(
       shouldReuseExpoServer(
         {
-          commandLine:
-            "node expo start EXPO_PUBLIC_KANNA_SERVER_URL=http://192.168.1.5:48120",
-          cwd: "/tmp/kanna/apps/mobile"
+          commandLine: "node expo start",
+          cwd: "/tmp/other/apps/mobile"
         },
         {
-          desktopServerUrl: "http://192.168.1.5:48129",
           projectRoot: "/tmp/kanna/apps/mobile"
         }
       )

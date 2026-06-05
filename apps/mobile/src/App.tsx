@@ -29,7 +29,12 @@ import { TasksScreen } from "./screens/TasksScreen";
 export default function App() {
   const modelRef = useRef<AppModel | null>(null);
   if (!modelRef.current) {
-    modelRef.current = createAppModel();
+    modelRef.current = createAppModel({
+      options: {
+        enableE2eTrustSeed:
+          process.env.EXPO_PUBLIC_KANNA_ENABLE_E2E_TRUST_SEED === "1"
+      }
+    });
   }
 
   const model = modelRef.current;
@@ -149,7 +154,6 @@ export default function App() {
       default:
         return (
           <TasksScreen
-            heading="Tasks"
             repos={state.repos}
             selectedRepoId={state.selectedRepoId}
             tasks={state.repoTasks}

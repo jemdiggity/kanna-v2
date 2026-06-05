@@ -26,8 +26,5 @@ export function detectLanHost(env: NodeJS.ProcessEnv): string {
 }
 
 export function resolveMobileServerUrl(env: NodeJS.ProcessEnv): string {
-  if (env.KANNA_MOBILE_SERVER_URL?.trim()) {
-    return env.KANNA_MOBILE_SERVER_URL;
-  }
   return `http://${detectLanHost(env)}:${env.KANNA_MOBILE_SERVER_PORT ?? "48120"}`;
 }

@@ -54,7 +54,7 @@ export function resolveDesktopServerUrlForTarget(
   if (!lanAddress) {
     throw new Error(
       `Could not determine a host LAN IP address for physical-device mobile E2E. ` +
-        `Set EXPO_PUBLIC_KANNA_SERVER_URL to http://<mac-lan-ip>${parsedUrl.port ? `:${parsedUrl.port}` : ""}.`
+        `Connect the phone to the same network as this Mac or set KANNA_MOBILE_SERVER_HOST.`
     );
   }
 
@@ -82,4 +82,28 @@ export async function assertDesktopServerReachable(
     Object.assign(wrappedError, { cause: error });
     throw wrappedError;
   }
+}
+
+export async function readDesktopIdentity(
+  baseUrl: string,
+  fetchImpl: FetchLike = fetch
+): Promise<{ desktopId: string; desktopName: string }> {
+  const statusUrl = `${baseUrl}/v1/status`;
+  const response = await fetchImpl(statusUrl);
+  if (!response.ok) {
+    throw new Error(`Desktop mobile server check failed for ${statusUrl}: ${response.status}`);
+  }
+
+  const body = (await response.json()) as {
+    desktopId?: string;
+    desktopName?: string;
+  };
+  if (!body.desktopId || !body.desktopName) {
+    throw new Error("Desktop status did not include desktopId and desktopName.");
+  }
+
+  return {
+    desktopId: body.desktopId,
+    desktopName: body.desktopName
+  };
 }

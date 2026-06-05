@@ -28,6 +28,10 @@ function shellEnvPrefix(env: Record<string, string | undefined>): string {
 }
 
 function mobileFirebaseEnv(input: BuildDevPlanInput): Record<string, string | undefined> {
+  if (!input.emulators) {
+    return {};
+  }
+
   const authPort = input.env.KANNA_FIREBASE_AUTH_PORT;
   if (!authPort) {
     return {};
@@ -58,6 +62,14 @@ function resolveHostFromUrl(url: string): string {
 }
 
 function resolveRelayUrl(input: BuildDevPlanInput): string | undefined {
+  if (input.env.EXPO_PUBLIC_KANNA_RELAY_URL?.trim()) {
+    return input.env.EXPO_PUBLIC_KANNA_RELAY_URL;
+  }
+
+  if (!input.emulators) {
+    return undefined;
+  }
+
   const relayPort = input.env.KANNA_RELAY_PORT;
   if (!relayPort) {
     return undefined;
@@ -103,7 +115,6 @@ export function buildDevPlan(input: BuildDevPlanInput): DevPlan {
 
   if (input.mobile) {
     const mobileEnv = shellEnvPrefix({
-      EXPO_PUBLIC_KANNA_SERVER_URL: input.mobileServerUrl,
       EXPO_PUBLIC_KANNA_RELAY_URL: resolveRelayUrl(input),
       RCT_METRO_PORT: input.env.KANNA_MOBILE_PORT ?? "8081",
       ...mobileFirebaseEnv(input)

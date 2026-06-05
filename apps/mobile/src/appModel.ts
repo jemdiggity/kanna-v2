@@ -1,4 +1,9 @@
 import { createKannaClient, type KannaClient } from "./lib/api/client";
+import {
+  createBonjourBrowser,
+  type BonjourBrowser
+} from "./lib/discovery/bonjour";
+import { resolveTrustedBonjourEndpoint } from "./lib/discovery/trustedBonjour";
 import type { MobileAuthSession } from "./lib/firebase/auth";
 import { createConfiguredMobileAuthSession } from "./lib/firebase/sdk";
 import {
@@ -12,6 +17,7 @@ import {
 } from "./lib/transports/relayClient";
 import { createRemoteTransport } from "./lib/transports/remoteTransport";
 import { createRootNavigator } from "./navigation/RootNavigator";
+import { installE2eTrustSeedHandler } from "./e2eTrustSeed";
 import {
   createMobileController,
   type MobileController
@@ -19,16 +25,13 @@ import {
 import { createSessionStore, type SessionStore } from "./state/sessionStore";
 import {
   createDefaultSessionPersistence,
-  type SessionPersistence
+  type SessionPersistence,
+  type TrustedDesktopRecord
 } from "./state/sessionPersistence";
 
-const DEFAULT_SERVER_HOST = "127.0.0.1";
-const DEFAULT_SERVER_PORT = 48120;
-const DEFAULT_SERVER_BASE_URL = `http://${DEFAULT_SERVER_HOST}:${DEFAULT_SERVER_PORT}`;
 const PRODUCTION_RELAY_URL = "wss://kanna-relay-402613185450.us-central1.run.app";
 
 interface ExpoPublicEnv {
-  EXPO_PUBLIC_KANNA_SERVER_URL?: string;
   EXPO_PUBLIC_KANNA_RELAY_URL?: string;
 }
 
@@ -43,100 +46,24 @@ export interface AppModel {
 interface AppModelOptions {
   relayUrl?: string | null;
   taskIndex?: CloudTaskIndex;
+  bonjourBrowser?: BonjourBrowser;
+  enableE2eTrustSeed?: boolean;
   createRelayClient?: (input: {
     relayUrl: string;
     getIdToken(forceRefresh?: boolean): Promise<string | null>;
   }) => RelayDesktopClient;
 }
 
+export interface CreateAppModelInput {
+  fetchImpl?: FetchLike;
+  persistence?: SessionPersistence;
+  authSession?: MobileAuthSession;
+  options?: AppModelOptions;
+}
+
 function readExpoPublicEnv(): ExpoPublicEnv {
   const globalEnv = (globalThis as { process?: { env?: ExpoPublicEnv } }).process?.env;
   return globalEnv ?? {};
-}
-
-interface SourceCodeModule {
-  getConstants?: () => { scriptURL?: string | null };
-  scriptURL?: string | null;
-}
-
-interface BatchedBridgeModuleConfig {
-  0?: string;
-  1?: { scriptURL?: string | null } | null;
-}
-
-function readReactNativeBundleUrl(): string | null {
-  const runtime = globalThis as {
-    __fbBatchedBridgeConfig?: {
-      remoteModuleConfig?: BatchedBridgeModuleConfig[];
-    };
-    nativeModuleProxy?: { SourceCode?: SourceCodeModule };
-  };
-
-  const sourceCodeModule = runtime.nativeModuleProxy?.SourceCode;
-  const sourceCodeConstants = sourceCodeModule?.getConstants?.();
-  const scriptUrl = sourceCodeConstants?.scriptURL ?? sourceCodeModule?.scriptURL;
-  if (typeof scriptUrl === "string" && scriptUrl.length > 0) {
-    return scriptUrl;
-  }
-
-  const sourceCodeBridgeConfig = runtime.__fbBatchedBridgeConfig?.remoteModuleConfig?.find(
-    (entry) => entry[0] === "SourceCode"
-  );
-  const bridgeScriptUrl = sourceCodeBridgeConfig?.[1]?.scriptURL;
-  if (typeof bridgeScriptUrl === "string" && bridgeScriptUrl.length > 0) {
-    return bridgeScriptUrl;
-  }
-
-  return typeof scriptUrl === "string" && scriptUrl.length > 0 ? scriptUrl : null;
-}
-
-function inferServerBaseUrl(bundleUrl: string | null): string | null {
-  if (!bundleUrl) {
-    return null;
-  }
-
-  try {
-    const parsedUrl = new URL(bundleUrl);
-    if (!parsedUrl.hostname) {
-      return null;
-    }
-
-    return `http://${parsedUrl.hostname}:${DEFAULT_SERVER_PORT}`;
-  } catch {
-    return null;
-  }
-}
-
-function isLoopbackBaseUrl(baseUrl: string): boolean {
-  try {
-    const parsedUrl = new URL(baseUrl);
-    return (
-      parsedUrl.hostname === "127.0.0.1" ||
-      parsedUrl.hostname === "localhost" ||
-      parsedUrl.hostname === "::1"
-    );
-  } catch {
-    return false;
-  }
-}
-
-export function resolveServerBaseUrl(
-  env: ExpoPublicEnv = readExpoPublicEnv(),
-  bundleUrl: string | null = readReactNativeBundleUrl()
-): string {
-  const configuredBaseUrl = env.EXPO_PUBLIC_KANNA_SERVER_URL?.trim();
-  const inferredBaseUrl = inferServerBaseUrl(bundleUrl);
-
-  if (
-    configuredBaseUrl &&
-    inferredBaseUrl &&
-    isLoopbackBaseUrl(configuredBaseUrl) &&
-    !isLoopbackBaseUrl(inferredBaseUrl)
-  ) {
-    return inferredBaseUrl;
-  }
-
-  return configuredBaseUrl || inferredBaseUrl || DEFAULT_SERVER_BASE_URL;
 }
 
 export function resolveRelayUrl(env: ExpoPublicEnv = readExpoPublicEnv()): string | null {
@@ -149,21 +76,21 @@ export function resolveRelayUrl(env: ExpoPublicEnv = readExpoPublicEnv()): strin
   return relayUrl && relayUrl.length > 0 ? relayUrl : PRODUCTION_RELAY_URL;
 }
 
-export function createAppModel(
-  baseUrl = resolveServerBaseUrl(),
-  fetchImpl = globalThis.fetch as unknown as FetchLike,
-  persistence?: SessionPersistence,
-  authSession: MobileAuthSession = createConfiguredMobileAuthSession(),
-  options: AppModelOptions = {}
-): AppModel {
+export function createAppModel(input: CreateAppModelInput = {}): AppModel {
+  const fetchImpl = input.fetchImpl ?? (globalThis.fetch as unknown as FetchLike);
+  const persistence = input.persistence;
+  const authSession = input.authSession ?? createConfiguredMobileAuthSession();
+  const options = input.options ?? {};
+  const bonjourBrowser = options.bonjourBrowser ?? createBonjourBrowser();
   const sessionStore = createSessionStore();
   const resolveClient = () =>
     createClientForMode({
       authSession,
-      baseUrl,
+      bonjourBrowser,
       createRelayClient: options.createRelayClient ?? createRelayDesktopClient,
       fetchImpl,
       getSelectedDesktopId: () => sessionStore.getState().selectedDesktopId,
+      getTrustedDesktops: () => sessionStore.getState().trustedDesktops,
       relayUrl: options.relayUrl ?? resolveRelayUrl(),
       taskIndex: options.taskIndex
     });
@@ -183,6 +110,15 @@ export function createAppModel(
   };
 
   let lastSavedContextJson: string | null = null;
+  const hydratePersistedContext = async () => {
+    const resolvedPersistence = await getPersistence();
+    const persistedContext = await resolvedPersistence.load();
+    if (persistedContext) {
+      sessionStore.hydrateContext(persistedContext);
+      lastSavedContextJson = JSON.stringify(persistedContext);
+    }
+    activeClient = resolveClient();
+  };
   const persistContext = () => {
     const context = sessionStore.getPersistedContext();
     const serializedContext = JSON.stringify(context);
@@ -199,17 +135,22 @@ export function createAppModel(
     activeClient = resolveClient();
   });
 
+  if (options.enableE2eTrustSeed) {
+    installE2eTrustSeedHandler({
+      getPersistence,
+      async reload() {
+        await hydratePersistedContext();
+        await controller.bootstrap();
+      }
+    });
+  }
+
   return {
     client,
     controller,
     async initialize() {
-      const resolvedPersistence = await getPersistence();
-      const persistedContext = await resolvedPersistence.load();
-      if (persistedContext) {
-        sessionStore.hydrateContext(persistedContext);
-        lastSavedContextJson = JSON.stringify(persistedContext);
-      }
-
+      bonjourBrowser.start();
+      await hydratePersistedContext();
       await controller.bootstrap();
     },
     navigator: createRootNavigator(),
@@ -219,21 +160,23 @@ export function createAppModel(
 
 function createClientForMode({
   authSession,
-  baseUrl,
+  bonjourBrowser,
   createRelayClient,
   fetchImpl,
   getSelectedDesktopId,
+  getTrustedDesktops,
   relayUrl,
   taskIndex,
 }: {
   authSession: MobileAuthSession;
-  baseUrl: string;
+  bonjourBrowser: BonjourBrowser;
   createRelayClient(input: {
     relayUrl: string;
     getIdToken(forceRefresh?: boolean): Promise<string | null>;
   }): RelayDesktopClient;
   fetchImpl: FetchLike;
   getSelectedDesktopId(): string | null;
+  getTrustedDesktops(): readonly TrustedDesktopRecord[];
   relayUrl: string | null;
   taskIndex?: CloudTaskIndex;
 }): KannaClient {
@@ -247,72 +190,142 @@ function createClientForMode({
     const cloudClient = createKannaClient(
       createRemoteTransport({
         async listDesktopRecords() {
-          return [];
+          return getTrustedDesktops().map(mapTrustedDesktopRecord);
         },
         getSelectedDesktopId,
         invokeDesktop: relayClient.invokeDesktop,
         observeTaskTerminal: relayClient.observeTaskTerminal,
+        sendTaskInput: relayClient.sendTaskInput,
         listCloudTasks: () => resolvedTaskIndex.listRecentTasks(authState.user.uid),
       }),
     );
-    const lanClient = createKannaClient(createLanTransport(baseUrl, fetchImpl));
+    const lanClient = createTrustedLanFallbackClient({
+      bonjourBrowser,
+      fetchImpl,
+      getSelectedDesktopId,
+      getTrustedDesktops
+    });
 
     return createCloudWithLanFallbackClient(cloudClient, lanClient, {
-      lanFallbackEnabled: baseUrl !== DEFAULT_SERVER_BASE_URL
+      isLanFallbackEnabled: () => hasTrustedLanPeer(getTrustedDesktops())
     });
   }
 
-  return createKannaClient(createLanTransport(baseUrl, fetchImpl));
+  if (hasTrustedLanPeer(getTrustedDesktops())) {
+    return createTrustedLanFallbackClient({
+      bonjourBrowser,
+      fetchImpl,
+      getSelectedDesktopId,
+      getTrustedDesktops
+    });
+  }
+
+  return createDisconnectedClient();
+}
+
+function createDisconnectedClient(): KannaClient {
+  const unavailable = async () => {
+    throw new Error("No trusted desktop is available. Sign in or pair a desktop.");
+  };
+
+  return {
+    getStatus: async () => ({
+      state: "stopped",
+      desktopId: "none",
+      desktopName: "No desktop",
+      lanHost: "none",
+      lanPort: 0,
+      pairingCode: null
+    }),
+    listDesktops: async () => [],
+    listRepos: async () => [],
+    listRepoTasks: async () => [],
+    listRecentTasks: async () => [],
+    searchTasks: async () => [],
+    createTask: unavailable,
+    runMergeAgent: unavailable,
+    advanceTaskStage: unavailable,
+    closeTask: unavailable,
+    sendTaskInput: unavailable,
+    observeTaskTerminal(taskId, listener) {
+      listener({
+        type: "error",
+        taskId,
+        message: "No trusted desktop is available."
+      });
+      return { close() {} };
+    },
+    createPairingSession: unavailable
+  };
 }
 
 function createCloudWithLanFallbackClient(
   cloudClient: KannaClient,
   lanClient: KannaClient,
-  options: { lanFallbackEnabled: boolean }
+  options: { isLanFallbackEnabled(): boolean }
 ): KannaClient {
   let cloudHasTasks = false;
+  const lanFallbackEnabled = () => options.isLanFallbackEnabled();
 
   const listRecentTasks = async () => {
     try {
       const tasks = await cloudClient.listRecentTasks();
       cloudHasTasks = tasks.length > 0;
-      return cloudHasTasks || !options.lanFallbackEnabled
+      return cloudHasTasks || !lanFallbackEnabled()
         ? tasks
         : lanClient.listRecentTasks();
     } catch {
       cloudHasTasks = false;
-      if (!options.lanFallbackEnabled) {
+      if (!lanFallbackEnabled()) {
         return [];
       }
       return lanClient.listRecentTasks();
     }
   };
 
-  const useLanFallback = () => options.lanFallbackEnabled && !cloudHasTasks;
+  const useLanFallback = () => lanFallbackEnabled() && !cloudHasTasks;
 
   return {
-    getStatus: () => cloudClient.getStatus(),
+    getStatus: async () => {
+      if (!lanFallbackEnabled()) {
+        return cloudClient.getStatus();
+      }
+
+      try {
+        const tasks = await cloudClient.listRecentTasks();
+        cloudHasTasks = tasks.length > 0;
+        if (cloudHasTasks) {
+          return cloudClient.getStatus();
+        }
+      } catch {
+        cloudHasTasks = false;
+      }
+
+      return lanClient.getStatus().catch(() => cloudClient.getStatus());
+    },
     listDesktops: async () => {
       const desktops = await cloudClient.listDesktops();
-      return desktops.length || !options.lanFallbackEnabled
+      return desktops.length || !lanFallbackEnabled()
         ? desktops
-        : lanClient.listDesktops();
+        : lanClient.listDesktops().catch(() => desktops);
     },
     listRepos: async () => {
       if (useLanFallback()) {
         return lanClient.listRepos();
       }
       const repos = await cloudClient.listRepos();
-      return repos.length || !options.lanFallbackEnabled ? repos : lanClient.listRepos();
+      return repos.length || !lanFallbackEnabled()
+        ? repos
+        : lanClient.listRepos().catch(() => repos);
     },
     listRepoTasks: async (repoId) => {
       if (useLanFallback()) {
         return lanClient.listRepoTasks(repoId);
       }
       const tasks = await cloudClient.listRepoTasks(repoId);
-      return tasks.length || !options.lanFallbackEnabled
+      return tasks.length || !lanFallbackEnabled()
         ? tasks
-        : lanClient.listRepoTasks(repoId);
+        : lanClient.listRepoTasks(repoId).catch(() => tasks);
     },
     listRecentTasks,
     searchTasks: (query) =>
@@ -338,6 +351,72 @@ function createCloudWithLanFallbackClient(
         ? lanClient.observeTaskTerminal(taskId, listener)
         : cloudClient.observeTaskTerminal(taskId, listener),
     createPairingSession: () => lanClient.createPairingSession()
+  };
+}
+
+function createTrustedLanFallbackClient({
+  bonjourBrowser,
+  fetchImpl,
+  getSelectedDesktopId,
+  getTrustedDesktops
+}: {
+  bonjourBrowser: BonjourBrowser;
+  fetchImpl: FetchLike;
+  getSelectedDesktopId(): string | null;
+  getTrustedDesktops(): readonly TrustedDesktopRecord[];
+}): KannaClient {
+  let validatedBaseUrl: string | null = null;
+  const clientForBaseUrl = (resolvedBaseUrl: string) =>
+    createKannaClient(createLanTransport(resolvedBaseUrl, fetchImpl));
+  const resolveClient = async () => {
+    const endpoint = await resolveTrustedBonjourEndpoint({
+      fetchImpl,
+      services: bonjourBrowser.getServices(),
+      selectedDesktopId: getSelectedDesktopId(),
+      trustedDesktops: getTrustedDesktops()
+    });
+    if (!endpoint) {
+      return createDisconnectedClient();
+    }
+    validatedBaseUrl = endpoint.baseUrl;
+    return clientForBaseUrl(endpoint.baseUrl);
+  };
+  const currentClient = () =>
+    validatedBaseUrl ? clientForBaseUrl(validatedBaseUrl) : createDisconnectedClient();
+
+  return {
+    getStatus: async () => (await resolveClient()).getStatus(),
+    listDesktops: async () => (await resolveClient()).listDesktops(),
+    listRepos: async () => (await resolveClient()).listRepos(),
+    listRepoTasks: async (repoId) => (await resolveClient()).listRepoTasks(repoId),
+    listRecentTasks: async () => (await resolveClient()).listRecentTasks(),
+    searchTasks: async (query) => (await resolveClient()).searchTasks(query),
+    createTask: async (input) => (await resolveClient()).createTask(input),
+    runMergeAgent: async (taskId) => (await resolveClient()).runMergeAgent(taskId),
+    advanceTaskStage: async (taskId) => (await resolveClient()).advanceTaskStage(taskId),
+    closeTask: async (taskId) => (await resolveClient()).closeTask(taskId),
+    sendTaskInput: async (taskId, input) =>
+      (await resolveClient()).sendTaskInput(taskId, input),
+    observeTaskTerminal: (taskId, listener) =>
+      currentClient().observeTaskTerminal(taskId, listener),
+    createPairingSession: async () => (await resolveClient()).createPairingSession()
+  };
+}
+
+function hasTrustedLanPeer(
+  trustedDesktops: readonly TrustedDesktopRecord[]
+): boolean {
+  return trustedDesktops.length > 0;
+}
+
+function mapTrustedDesktopRecord(desktop: TrustedDesktopRecord) {
+  return {
+    desktopId: desktop.desktopId,
+    displayName: desktop.displayName,
+    online: true,
+    reachableViaRelay: false,
+    connectionMode: "lan" as const,
+    lastSeenAt: desktop.lastSeenAt
   };
 }
 

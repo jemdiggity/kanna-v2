@@ -405,7 +405,13 @@ fn server_config_matches_runtime(config_path: &Path) -> bool {
     ))
 }
 
+const PRODUCTION_RELAY_URL: &str = "wss://kanna-relay-402613185450.us-central1.run.app";
+
 fn relay_url() -> String {
+    relay_url_for_mode(cfg!(debug_assertions))
+}
+
+fn relay_url_for_mode(debug_assertions: bool) -> String {
     if let Ok(url) = std::env::var("KANNA_RELAY_URL") {
         let trimmed = url.trim();
         if !trimmed.is_empty() {
@@ -417,6 +423,9 @@ fn relay_url() -> String {
         if !trimmed.is_empty() {
             return format!("ws://127.0.0.1:{}", trimmed);
         }
+    }
+    if !debug_assertions {
+        return PRODUCTION_RELAY_URL.to_string();
     }
     String::new()
 }
@@ -1103,6 +1112,20 @@ mod tests {
             unset_env_var("KANNA_RELAY_URL");
             unset_env_var("KANNA_RELAY_PORT");
         }
+    }
+
+    #[test]
+    fn relay_url_defaults_to_production_relay_for_release_builds() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+        unsafe {
+            unset_env_var("KANNA_RELAY_URL");
+            unset_env_var("KANNA_RELAY_PORT");
+        }
+
+        assert_eq!(
+            super::relay_url_for_mode(false),
+            "wss://kanna-relay-402613185450.us-central1.run.app"
+        );
     }
 
     #[test]

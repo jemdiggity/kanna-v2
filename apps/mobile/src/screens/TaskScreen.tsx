@@ -70,6 +70,7 @@ export function TaskScreen({
             output={terminalOutput}
             status={terminalStatus}
             taskId={task.id}
+            onConsolePress={Keyboard.dismiss}
           />
         ) : (
           <View style={styles.terminalSkeleton}>

@@ -3160,6 +3160,7 @@ dependencies = [
  "kanna-daemon",
  "kanna-runtime-defaults",
  "log",
+ "mdns-sd",
  "reqwest 0.12.28",
  "rusqlite",
  "serde",

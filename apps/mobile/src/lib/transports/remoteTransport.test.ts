@@ -3,6 +3,7 @@ import {
   createRemoteTransport,
   RemoteTransportError,
   type RemoteDesktopInvoker,
+  type RemoteTaskInputSender,
   type RemoteTaskTerminalObserver
 } from "./remoteTransport";
 
@@ -299,6 +300,63 @@ describe("remote transport", () => {
     expect(invokeDesktop).not.toHaveBeenCalled();
   });
 
+  it("drops stale cloud tasks that are missing from a reachable owner desktop", async () => {
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockResolvedValue([
+      {
+        id: "local-task-open",
+        repoId: "repo-1",
+        title: "Still open",
+        stage: "in progress"
+      }
+    ]);
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [],
+      getSelectedDesktopId: () => null,
+      invokeDesktop,
+      listCloudTasks: async () => [
+        {
+          id: "repo-1:local-task-stale",
+          repoId: "repo-1",
+          repoName: "Repo One",
+          title: "Closed but stale",
+          stage: "in progress",
+          ownerDesktopId: "desktop-owner",
+          ownerLocalTaskId: "local-task-stale",
+          ownerOnline: true
+        },
+        {
+          id: "repo-1:local-task-open",
+          repoId: "repo-1",
+          repoName: "Repo One",
+          title: "Still open",
+          stage: "in progress",
+          ownerDesktopId: "desktop-owner",
+          ownerLocalTaskId: "local-task-open",
+          ownerOnline: true
+        }
+      ]
+    });
+
+    await expect(transport.listRecentTasks()).resolves.toEqual([
+      {
+        id: "repo-1:local-task-open",
+        repoId: "repo-1",
+        repoName: "Repo One",
+        title: "Still open",
+        stage: "in progress",
+        ownerDesktopId: "desktop-owner",
+        ownerLocalTaskId: "local-task-open",
+        ownerOnline: true
+      }
+    ]);
+    expect(invokeDesktop).toHaveBeenCalledWith({
+      desktopId: "desktop-owner",
+      method: "GET",
+      path: "/v1/tasks/recent",
+      body: null
+    });
+  });
+
   it("routes cloud task actions to the owner desktop and local task id", async () => {
     const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockResolvedValue(null);
     const subscription = { close: vi.fn() };
@@ -323,6 +381,7 @@ describe("remote transport", () => {
     const listener = vi.fn();
 
     await transport.listRecentTasks();
+    invokeDesktop.mockClear();
     expect(transport.observeTaskTerminal("cloud-task-1", listener)).toBe(subscription);
     await expect(transport.sendTaskInput("cloud-task-1", "continue")).resolves.toBeUndefined();
     await expect(transport.closeTask("cloud-task-1")).resolves.toBeUndefined();
@@ -362,6 +421,81 @@ describe("remote transport", () => {
     });
   });
 
+  it("sends cloud task input through the owner terminal command channel", async () => {
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockResolvedValue(null);
+    const sendTaskInput = vi.fn<RemoteTaskInputSender>().mockResolvedValue(undefined);
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [],
+      getSelectedDesktopId: () => null,
+      invokeDesktop,
+      sendTaskInput,
+      listCloudTasks: async () => [
+        {
+          id: "cloud-task-1",
+          repoId: "repo-1",
+          title: "Cloud task",
+          stage: "in progress",
+          ownerDesktopId: "desktop-owner",
+          ownerLocalTaskId: "local-task-1",
+          ownerOnline: true
+        }
+      ]
+    });
+
+    await transport.listRecentTasks();
+    invokeDesktop.mockClear();
+    await expect(transport.sendTaskInput("cloud-task-1", "continue\n")).resolves.toBeUndefined();
+
+    expect(sendTaskInput).toHaveBeenCalledWith({
+      desktopId: "desktop-owner",
+      taskId: "local-task-1",
+      data: "continue\n"
+    });
+    expect(invokeDesktop).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        method: "POST",
+        path: "/v1/tasks/local-task-1/input"
+      })
+    );
+  });
+
+  it("resolves a cloud task route before observing an uncached terminal", async () => {
+    const subscription = { close: vi.fn() };
+    const observeTaskTerminal = vi.fn<RemoteTaskTerminalObserver>(() => subscription);
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [],
+      getSelectedDesktopId: () => null,
+      invokeDesktop: async () => null,
+      observeTaskTerminal,
+      listCloudTasks: async () => [
+        {
+          id: "cloud-task-1",
+          repoId: "repo-1",
+          title: "Cloud task",
+          stage: "in progress",
+          ownerDesktopId: "desktop-owner",
+          ownerLocalTaskId: "local-task-1",
+          ownerOnline: true
+        }
+      ]
+    });
+    const listener = vi.fn();
+
+    const returnedSubscription = transport.observeTaskTerminal("cloud-task-1", listener);
+    await vi.waitFor(() => {
+      expect(observeTaskTerminal).toHaveBeenCalledWith(
+        {
+          desktopId: "desktop-owner",
+          taskId: "local-task-1"
+        },
+        listener
+      );
+    });
+
+    returnedSubscription.close();
+    expect(subscription.close).toHaveBeenCalled();
+  });
+
   it("serves cloud status and repo task collections without selecting a desktop", async () => {
     const invokeDesktop = vi.fn<RemoteDesktopInvoker>();
     const transport = createRemoteTransport({
@@ -372,6 +506,7 @@ describe("remote transport", () => {
         {
           id: "cloud-task-1",
           repoId: "repo-1",
+          repoName: "Repo One",
           title: "Cloud task",
           stage: "in progress"
         }
@@ -384,12 +519,13 @@ describe("remote transport", () => {
       lanHost: "cloud"
     });
     await expect(transport.listRepos()).resolves.toEqual([
-      { id: "repo-1", name: "repo-1" }
+      { id: "repo-1", name: "Repo One" }
     ]);
     await expect(transport.listRepoTasks("repo-1")).resolves.toEqual([
       {
         id: "cloud-task-1",
         repoId: "repo-1",
+        repoName: "Repo One",
         title: "Cloud task",
         stage: "in progress"
       }

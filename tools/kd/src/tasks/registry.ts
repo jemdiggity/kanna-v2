@@ -491,6 +491,7 @@ export const taskDefinitions = [
     inputSchema: emptyInputSchema,
     execute: async () => {
       const context = await resolveDefaultContext(process.env);
+      context.env.KANNA_E2E_DESKTOP_SERVER_URL = resolveMobileServerUrl(context.env);
       const command = buildMobileDeviceSmokeCommand(context.repoRoot);
       return runBuiltCommand(command.command, command.args, context.repoRoot, context.env);
     }

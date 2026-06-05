@@ -39,9 +39,11 @@ describe("cloud task index", () => {
     ).toEqual({
       id: "cloud-task-1",
       repoId: "repo-1",
+      repoName: "kanna",
       title: "Mobile cloud",
       stage: "in progress",
       snippet: "Fix mobile cloud",
+      agentProvider: "claude",
       ownerDesktopId: "desktop-1",
       ownerLocalTaskId: "task-1",
       ownerOnline: false,

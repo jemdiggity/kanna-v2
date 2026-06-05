@@ -4,6 +4,9 @@
     "slug": "kanna-mobile",
     "scheme": "kanna",
     "icon": "./assets/icon.png",
+    "plugins": [
+      "./plugins/withKannaBonjour"
+    ],
     "platforms": [
       "ios",
       "android"

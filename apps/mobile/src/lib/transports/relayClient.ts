@@ -24,6 +24,7 @@ export interface RelayDesktopClient {
   close(): void;
   invokeDesktop: RemoteDesktopInvoker;
   observeTaskTerminal: RemoteTaskTerminalObserver;
+  sendTaskInput(options: { desktopId: string; taskId: string; data: string }): Promise<void>;
 }
 
 export interface RelayDesktopClientDependencies {
@@ -302,6 +303,12 @@ export function createRelayDesktopClient({
           }).catch(() => undefined);
         }
       } satisfies TaskTerminalSubscription;
+    },
+    async sendTaskInput({ desktopId, taskId, data }) {
+      await sendInvoke(desktopId, {
+        command: "send_input",
+        args: { session_id: taskId, data }
+      });
     }
   };
 }
