@@ -375,7 +375,7 @@ pub fn git_branch_upstream(repo_path: String) -> Result<Option<String>, String> 
 mod tests {
     use super::{
         format_git_command_failure, git_branch_upstream, git_current_branch, git_default_branch,
-        git_list_base_branches, parse_remote_base_branches,
+        git_diff_branch_range, git_list_base_branches, parse_remote_base_branches,
     };
     use git2::{Repository, Signature};
     use std::{
@@ -425,6 +425,78 @@ mod tests {
 
         repo.commit(Some("HEAD"), &signature, &signature, "initial", &tree, &[])
             .expect("initial commit should succeed")
+    }
+
+    fn commit_paths(repo: &Repository, paths: &[&str], message: &str) -> git2::Oid {
+        let mut index = repo.index().expect("index should open");
+        for path in paths {
+            index
+                .add_path(Path::new(path))
+                .expect("path should be added to index");
+        }
+        index.write().expect("index should be written");
+        let tree_id = index.write_tree().expect("tree should be written");
+        let tree = repo.find_tree(tree_id).expect("tree should exist");
+        let signature =
+            Signature::now("Kanna Tests", "tests@kanna.dev").expect("signature should build");
+        let parent = repo
+            .head()
+            .expect("HEAD should exist")
+            .peel_to_commit()
+            .expect("HEAD should peel to commit");
+
+        repo.commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            message,
+            &tree,
+            &[&parent],
+        )
+        .expect("commit should succeed")
+    }
+
+    fn create_branch_diff_fixture(prefix: &str) -> (TempRepo, git2::Oid) {
+        let temp_repo = TempRepo::new(prefix);
+        let repo = Repository::init(&temp_repo.path).expect("repo should initialize");
+        let base_commit = create_commit(&repo, &temp_repo.path);
+
+        fs::write(
+            temp_repo.path.join("committed.txt"),
+            "committed branch mode marker\n",
+        )
+        .expect("committed fixture file should be written");
+        fs::write(
+            temp_repo.path.join("unstaged.txt"),
+            "unstaged base marker\n",
+        )
+        .expect("unstaged base file should be written");
+        commit_paths(
+            &repo,
+            &["committed.txt", "unstaged.txt"],
+            "branch fixture commit",
+        );
+
+        fs::write(temp_repo.path.join("staged.txt"), "staged mode marker\n")
+            .expect("staged fixture file should be written");
+        let mut index = repo.index().expect("index should open");
+        index
+            .add_path(Path::new("staged.txt"))
+            .expect("staged file should be added");
+        index.write().expect("index should be written");
+
+        fs::write(
+            temp_repo.path.join("unstaged.txt"),
+            "unstaged base marker\nunstaged mode marker\n",
+        )
+        .expect("unstaged fixture file should be updated");
+        fs::write(
+            temp_repo.path.join("untracked.txt"),
+            "untracked mode marker\n",
+        )
+        .expect("untracked fixture file should be written");
+
+        (temp_repo, base_commit)
     }
 
     #[test]
@@ -616,6 +688,71 @@ mod tests {
             .expect("upstream lookup should succeed");
 
         assert_eq!(upstream, None);
+    }
+
+    #[test]
+    fn git_diff_branch_range_none_excludes_index_and_worktree_changes() {
+        let (temp_repo, base_commit) = create_branch_diff_fixture("branch-diff-none");
+
+        let patch = git_diff_branch_range(
+            temp_repo.path.to_string_lossy().into_owned(),
+            base_commit.to_string(),
+            "none".to_string(),
+        )
+        .expect("branch diff should succeed");
+
+        assert!(patch.contains("committed branch mode marker"));
+        assert!(!patch.contains("staged mode marker"));
+        assert!(!patch.contains("unstaged mode marker"));
+        assert!(!patch.contains("untracked mode marker"));
+    }
+
+    #[test]
+    fn git_diff_branch_range_staged_includes_index_changes_only() {
+        let (temp_repo, base_commit) = create_branch_diff_fixture("branch-diff-staged");
+
+        let patch = git_diff_branch_range(
+            temp_repo.path.to_string_lossy().into_owned(),
+            base_commit.to_string(),
+            "staged".to_string(),
+        )
+        .expect("branch diff should succeed");
+
+        assert!(patch.contains("committed branch mode marker"));
+        assert!(patch.contains("staged mode marker"));
+        assert!(!patch.contains("unstaged mode marker"));
+        assert!(!patch.contains("untracked mode marker"));
+    }
+
+    #[test]
+    fn git_diff_branch_range_all_includes_index_and_worktree_changes() {
+        let (temp_repo, base_commit) = create_branch_diff_fixture("branch-diff-all");
+
+        let patch = git_diff_branch_range(
+            temp_repo.path.to_string_lossy().into_owned(),
+            base_commit.to_string(),
+            "all".to_string(),
+        )
+        .expect("branch diff should succeed");
+
+        assert!(patch.contains("committed branch mode marker"));
+        assert!(patch.contains("staged mode marker"));
+        assert!(patch.contains("unstaged mode marker"));
+        assert!(patch.contains("untracked mode marker"));
+    }
+
+    #[test]
+    fn git_diff_branch_range_rejects_invalid_mode() {
+        let (temp_repo, base_commit) = create_branch_diff_fixture("branch-diff-invalid");
+
+        let error = git_diff_branch_range(
+            temp_repo.path.to_string_lossy().into_owned(),
+            base_commit.to_string(),
+            "workspace".to_string(),
+        )
+        .expect_err("invalid branch diff mode should fail");
+
+        assert!(error.contains("unsupported branch diff mode 'workspace'"));
     }
 
     #[test]
