@@ -74,9 +74,14 @@ async function resolveDesktopId(): Promise<string> {
   const mobileStatus = await invoke<{ desktopId?: string }>("mobile_server_status").catch(() => null);
   if (mobileStatus?.desktopId?.trim()) return mobileStatus.desktopId.trim();
 
-  const envId = await invoke<string>("read_env_var", { name: "KANNA_TRANSFER_PEER_ID" }).catch(() => "");
+  const envId = await readEnvString("KANNA_TRANSFER_PEER_ID");
   if (envId.trim()) return envId.trim();
 
-  const dbName = await invoke<string>("read_env_var", { name: "KANNA_DB_NAME" }).catch(() => "");
+  const dbName = await readEnvString("KANNA_DB_NAME");
   return dbName.trim() || "desktop-local";
+}
+
+async function readEnvString(name: string): Promise<string> {
+  const value = await invoke<unknown>("read_env_var", { name }).catch(() => "");
+  return typeof value === "string" ? value : "";
 }
