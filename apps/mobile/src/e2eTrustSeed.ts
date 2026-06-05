@@ -35,7 +35,7 @@ export function installE2eTrustSeedHandler(input: {
   return () => subscription.remove();
 }
 
-async function seedTrustedDesktopFromUrl(
+export async function seedTrustedDesktopFromUrl(
   url: string,
   input: {
     getPersistence(): Promise<SessionPersistence>;

@@ -6,6 +6,10 @@ export interface BonjourService {
   txt: Record<string, string>;
 }
 
+interface BonjourServiceEvent extends BonjourService {
+  removed?: boolean;
+}
+
 export interface BonjourBrowser {
   getServices(): readonly BonjourService[];
   start(): void;
@@ -50,11 +54,9 @@ export function createBonjourBrowser(): BonjourBrowser {
     }
   };
   const subscription = emitter.addListener("kannaBonjourServiceChanged", (event) => {
-    const service = normalizeBonjourService(event);
-    if (!service) {
+    if (!applyBonjourServiceEvent(services, event)) {
       return;
     }
-    services.set(`${service.name}:${service.host}:${service.port}`, service);
     notify();
   });
 
@@ -95,12 +97,35 @@ export function createStaticBonjourBrowser(
   };
 }
 
-function normalizeBonjourService(event: unknown): BonjourService | null {
+export function applyBonjourServiceEvent(
+  services: Map<string, BonjourService>,
+  event: unknown
+): boolean {
+  const service = normalizeBonjourService(event);
+  if (!service) {
+    return false;
+  }
+
+  const key = getBonjourServiceKey(service);
+  if (service.removed === true) {
+    const existed = services.delete(key);
+    return existed;
+  }
+
+  services.set(key, service);
+  return true;
+}
+
+function getBonjourServiceKey(service: BonjourService): string {
+  return `${service.name}:${service.host}:${service.port}`;
+}
+
+function normalizeBonjourService(event: unknown): BonjourServiceEvent | null {
   if (!event || typeof event !== "object") {
     return null;
   }
 
-  const record = event as Partial<BonjourService>;
+  const record = event as Partial<BonjourServiceEvent>;
   if (
     typeof record.name !== "string" ||
     typeof record.type !== "string" ||
@@ -115,6 +140,7 @@ function normalizeBonjourService(event: unknown): BonjourService | null {
     type: record.type,
     host: record.host,
     port: record.port,
-    txt: record.txt && typeof record.txt === "object" ? record.txt : {}
+    txt: record.txt && typeof record.txt === "object" ? record.txt : {},
+    removed: record.removed === true
   };
 }
