@@ -118,11 +118,10 @@ export async function listDesktopCloudTasks(
       : Promise.resolve(options.currentDesktopId),
   ]);
   const taskSnapshots = snapshot.docs
-    .map((doc) => doc.data() as DesktopCloudTaskSnapshot)
-    .filter((task) => activeDesktopIds ? activeDesktopIds.has(task.ownerDesktopId) : true);
+    .map((doc) => doc.data() as DesktopCloudTaskSnapshot);
   return mapDesktopCloudTasks(
     taskSnapshots,
-    { ...options, currentDesktopId },
+    { ...options, activeDesktopIds, currentDesktopId },
   );
 }
 
@@ -172,11 +171,13 @@ export function mapDesktopCloudTasks(
     }
 
     const itemId = cloudTaskId(snapshot.cloudTaskId);
-    terminalRefs[itemId] = {
-      ownerDesktopId: snapshot.ownerDesktopId,
-      ownerLocalTaskId: snapshot.ownerLocalTaskId,
-      transport: "cloud",
-    };
+    if (ownerDesktopIsReachable(snapshot.ownerDesktopId, options.activeDesktopIds)) {
+      terminalRefs[itemId] = {
+        ownerDesktopId: snapshot.ownerDesktopId,
+        ownerLocalTaskId: snapshot.ownerLocalTaskId,
+        transport: "cloud",
+      };
+    }
 
     items.push({
       id: itemId,
@@ -218,6 +219,10 @@ export function mapDesktopCloudTasks(
     items,
     terminalRefs,
   };
+}
+
+function ownerDesktopIsReachable(ownerDesktopId: string, activeDesktopIds: Set<string> | null | undefined): boolean {
+  return activeDesktopIds === undefined || activeDesktopIds === null || activeDesktopIds.has(ownerDesktopId);
 }
 
 function sortByUpdatedAt<T extends { updatedAt: string }>(snapshots: T[]): T[] {

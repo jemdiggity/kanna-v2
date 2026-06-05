@@ -476,7 +476,18 @@ describe("cloud task sync", () => {
       sources: expect.arrayContaining(["cloud"]),
     }));
     const secondaryTextAfterSync = await secondary.executeSync<string>("return document.body.innerText;");
-    expect(secondaryTextAfterSync).not.toContain("Stale offline task");
+    expect(secondaryTextAfterSync).toContain("Stale offline task");
+    expect(await sidebarItemsForPrompt(secondary, "Stale offline task")).toEqual([
+      expect.objectContaining({
+        id: "cloud:stale-cloud-task",
+        isRemote: true,
+        stage: "in progress",
+      }),
+    ]);
+    expect(await remoteDiagnosticsForPrompt(secondary, "Stale offline task")).toContainEqual(expect.objectContaining({
+      selectedTerminalTransport: "none",
+      sources: expect.arrayContaining(["cloud"]),
+    }));
     expect(await countLocalTasks(secondary)).toBe(0);
 
     const synced = await waitForCloudTaskSnapshot(secondary, "Cloud sync visible task");
