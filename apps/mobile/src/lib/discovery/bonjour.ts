@@ -10,6 +10,12 @@ interface BonjourServiceEvent extends BonjourService {
   removed?: boolean;
 }
 
+interface BonjourRemovalEvent {
+  name: string;
+  type?: string;
+  removed: true;
+}
+
 export interface BonjourBrowser {
   getServices(): readonly BonjourService[];
   start(): void;
@@ -101,7 +107,7 @@ export function applyBonjourServiceEvent(
   services: Map<string, BonjourService>,
   event: unknown
 ): boolean {
-  const service = normalizeBonjourService(event);
+  const service = normalizeBonjourServiceEvent(event);
   if (!service) {
     return false;
   }
@@ -116,16 +122,28 @@ export function applyBonjourServiceEvent(
   return true;
 }
 
-function getBonjourServiceKey(service: BonjourService): string {
-  return `${service.name}:${service.host}:${service.port}`;
+function getBonjourServiceKey(service: Pick<BonjourService, "name">): string {
+  return service.name;
 }
 
-function normalizeBonjourService(event: unknown): BonjourServiceEvent | null {
+function normalizeBonjourServiceEvent(
+  event: unknown
+): BonjourServiceEvent | BonjourRemovalEvent | null {
   if (!event || typeof event !== "object") {
     return null;
   }
 
   const record = event as Partial<BonjourServiceEvent>;
+  if (record.removed === true) {
+    return typeof record.name === "string"
+      ? {
+          name: record.name,
+          type: typeof record.type === "string" ? record.type : undefined,
+          removed: true
+        }
+      : null;
+  }
+
   if (
     typeof record.name !== "string" ||
     typeof record.type !== "string" ||
