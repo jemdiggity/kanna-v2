@@ -392,6 +392,16 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
         opencodeParts.push(`'${escapedPrompt}'`);
       }
       agentCmd = opencodeParts.join(" ");
+      if (escapedPrompt) {
+        const opencodePreambleParts = [
+          opencodeExecutable,
+          "run",
+          "--interactive",
+          ...opencodeFlags,
+          `'${escapedPromptWithPreamble}'`,
+        ];
+        agentCmdPreamble = opencodePreambleParts.join(" ");
+      }
     } else {
       const flags: string[] = [...permissionFlags];
       flags.push(`--append-system-prompt '${escapedSystemPrompt}'`);
