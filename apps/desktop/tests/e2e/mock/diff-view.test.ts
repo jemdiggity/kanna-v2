@@ -1,5 +1,5 @@
 import { setTimeout as sleep } from "node:timers/promises";
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
 import { WebDriverClient } from "../helpers/webdriver";
 import { resetDatabase, importTestRepo, cleanupWorktrees } from "../helpers/reset";
 import { getVueState, tauriInvoke } from "../helpers/vue";
@@ -186,6 +186,53 @@ describe("diff view", () => {
   const client = new WebDriverClient();
   let fixtureRepoRoot = "";
   let testRepoPath = "";
+  let taskWorktreePath = "";
+  let taskWorktreeBaselineRef = "";
+
+  async function getSelectedTaskBranch(): Promise<string> {
+    const branch = await client.executeSync<string | null>(
+      `const ctx = window.__KANNA_E2E__.setupState;
+       const item = ctx.selectedItem();
+       return item ? (item.branch?.value || item.branch) : null;`
+    );
+    if (!branch) {
+      throw new Error("expected selected task to have a worktree branch");
+    }
+    return branch;
+  }
+
+  async function resetTaskWorktreeDiffState(): Promise<void> {
+    if (!taskWorktreePath || !taskWorktreeBaselineRef) return;
+
+    await client.executeSync(
+      `const ctx = window.__KANNA_E2E__.setupState;
+       const setRef = (key, value) => {
+         const current = ctx?.[key];
+         if (current?.__v_isRef) current.value = value;
+         else if (ctx && key in ctx) ctx[key] = value;
+       };
+       setRef("showDiffModal", false);
+       setRef("maximizedModal", null);
+       const key = ctx?.currentDiffViewKey?.value ?? ctx?.currentDiffViewKey;
+       if (key && ctx?.diffViewStates) {
+         ctx.diffViewStates[key] = {
+           scope: "working",
+           scrollPositions: { working: 0, branch: 0 },
+         };
+       }`
+    ).catch(() => undefined);
+    await client.waitForNoElement(".diff-view", 2_000).catch(() => undefined);
+    await tauriInvoke(client, "run_script", {
+      script: [
+        'git reset --hard "$KANNA_E2E_DIFF_BASELINE_REF"',
+        "git clean -fd -- .cargo diff-oversized diff-perf",
+      ].join("\n"),
+      cwd: taskWorktreePath,
+      env: {
+        KANNA_E2E_DIFF_BASELINE_REF: taskWorktreeBaselineRef,
+      },
+    });
+  }
 
   beforeAll(async () => {
     await client.createSession();
@@ -199,6 +246,7 @@ describe("diff view", () => {
     const id = crypto.randomUUID();
     const branch = `task-${id}`;
     const worktreePath = `${testRepoPath}/.kanna-worktrees/${branch}`;
+    taskWorktreePath = worktreePath;
 
     // Internal setup only: diff tests need a deterministic worktree-backed task
     // without starting a real agent session.
@@ -220,6 +268,24 @@ describe("diff view", () => {
          .catch(function(e) { cb("err:" + e); });`
     );
     await client.waitForText(".sidebar", "Say OK");
+
+    const baselineRef = await tauriInvoke(client, "run_script", {
+      script: "git rev-parse HEAD",
+      cwd: taskWorktreePath,
+      env: {},
+    });
+    if (typeof baselineRef !== "string" || baselineRef.trim().length === 0) {
+      throw new Error(`expected worktree baseline ref, got: ${JSON.stringify(baselineRef)}`);
+    }
+    taskWorktreeBaselineRef = baselineRef.trim();
+  });
+
+  afterEach(async () => {
+    await resetTaskWorktreeDiffState();
+  });
+
+  beforeEach(async () => {
+    await resetTaskWorktreeDiffState();
   });
 
   afterAll(async () => {
@@ -240,15 +306,7 @@ describe("diff view", () => {
 
   it("loads diff content after editing a tracked file", async () => {
     // Get the worktree path from the selected item
-    const branch = await client.executeSync<string | null>(
-      `const ctx = window.__KANNA_E2E__.setupState;
-       const item = ctx.selectedItem();
-       return item ? (item.branch?.value || item.branch) : null;`
-    );
-    if (!branch) {
-      console.warn("No task selected, skipping diff content test");
-      return;
-    }
+    const branch = await getSelectedTaskBranch();
 
     const worktreePath = `${testRepoPath}/.kanna-worktrees/${branch}`;
 
@@ -269,15 +327,121 @@ describe("diff view", () => {
     expect(String(patch)).toContain("# diff test marker");
   });
 
-  it("keeps the sticky diff file header flush with the diff scroller", async () => {
-    const branch = await client.executeSync<string | null>(
-      `const ctx = window.__KANNA_E2E__.setupState;
-       const item = ctx.selectedItem();
-       return item ? (item.branch?.value || item.branch) : null;`
+  it("skips an oversized diff line while rendering a normal changed file", async () => {
+    const branch = await getSelectedTaskBranch();
+
+    const worktreePath = `${testRepoPath}/.kanna-worktrees/${branch}`;
+    const oversizedScript = [
+      "mkdir -p diff-oversized",
+      "printf 'normal baseline\\n' > diff-oversized/normal.txt",
+      "printf 'small baseline\\n' > diff-oversized/huge.txt",
+      "git add diff-oversized/normal.txt diff-oversized/huge.txt",
+      "git commit -m 'add oversized diff e2e fixtures'",
+      "printf 'normal changed marker\\n' > diff-oversized/normal.txt",
+      "awk 'BEGIN { for (i = 0; i < 260001; i++) printf \"x\"; printf \"\\n\" }' > diff-oversized/huge.txt",
+    ].join("\n");
+
+    await tauriInvoke(client, "run_script", {
+      script: oversizedScript,
+      cwd: worktreePath,
+      env: {},
+    });
+
+    const patch = await tauriInvoke(client, "git_diff", {
+      repoPath: worktreePath,
+      mode: "all",
+    });
+    expect(typeof patch).toBe("string");
+    expect(String(patch)).toContain("diff --git a/diff-oversized/normal.txt b/diff-oversized/normal.txt");
+    expect(String(patch)).toContain("diff --git a/diff-oversized/huge.txt b/diff-oversized/huge.txt");
+
+    await client.executeSync(buildGlobalKeydownScript({ key: "Escape" }));
+    await client.waitForNoElement(".diff-view", 2_000);
+    await sleep(250);
+    await client.executeSync(buildGlobalKeydownScript({ key: "d", meta: true }));
+    await client.waitForElement(".diff-view", 5_000);
+
+    const result = await client.executeAsync<{
+      normalHeaderVisible: boolean;
+      normalRendered: boolean;
+      oversizedHeaderVisible: boolean;
+      oversizedSkipped: boolean;
+      oversizedRendered: boolean;
+      skippedText: string;
+      timedOut?: boolean;
+      headers?: string[];
+    }>(
+      `const cb = arguments[arguments.length - 1];
+       let done = false;
+       const finish = (value) => {
+         if (done) return;
+         done = true;
+         clearInterval(interval);
+         clearTimeout(timeout);
+         cb(value);
+       };
+       const readWrapper = (path) => {
+         const wrappers = Array.from(document.querySelectorAll(".diff-container .diff-file"));
+         const wrapper = wrappers.find((candidate) => {
+           const header = candidate.querySelector(".diff-file-header");
+           return (header?.getAttribute("title") || header?.textContent || "") === path;
+         });
+         if (!wrapper) return null;
+         const renderedText = Array.from(wrapper.querySelectorAll("diffs-container"))
+           .map((container) => container.shadowRoot?.textContent || container.textContent || "")
+           .join("\\n");
+         const skipped = wrapper.querySelector(".diff-file-skipped");
+         return {
+           renderedText,
+           skippedText: skipped?.textContent || "",
+           hasRenderedContainer: Boolean(wrapper.querySelector("diffs-container")),
+         };
+       };
+       const snapshot = () => {
+         const normal = readWrapper("diff-oversized/normal.txt");
+         const oversized = readWrapper("diff-oversized/huge.txt");
+         return {
+           normalHeaderVisible: Boolean(normal),
+           normalRendered: Boolean(normal?.renderedText.includes("normal changed marker")),
+           oversizedHeaderVisible: Boolean(oversized),
+           oversizedSkipped: oversized?.skippedText === "Large diff omitted to keep the viewer responsive.",
+           oversizedRendered: Boolean(oversized?.hasRenderedContainer),
+           skippedText: oversized?.skippedText || "",
+         };
+       };
+       const maybeFinish = () => {
+         const current = snapshot();
+         if (current.normalRendered && current.oversizedSkipped) finish(current);
+       };
+       const interval = setInterval(maybeFinish, 25);
+       const timeout = setTimeout(() => {
+         finish({
+           ...snapshot(),
+           timedOut: true,
+           headers: Array.from(document.querySelectorAll(".diff-file-header"))
+             .map((header) => header.getAttribute("title") || header.textContent || ""),
+         });
+       }, 10000);
+       maybeFinish();`
     );
-    if (!branch) {
-      throw new Error("expected selected task to have a worktree branch");
+
+    if (result.timedOut) {
+      throw new Error(`timed out waiting for oversized diff guard: ${JSON.stringify(result)}`);
     }
+
+    expect(result.normalHeaderVisible).toBe(true);
+    expect(result.normalRendered).toBe(true);
+    expect(result.oversizedHeaderVisible).toBe(true);
+    expect(result.oversizedSkipped).toBe(true);
+    expect(result.oversizedRendered).toBe(false);
+    expect(result.skippedText).toBe("Large diff omitted to keep the viewer responsive.");
+
+    await client.executeSync(buildGlobalKeydownScript({ key: "Escape" }));
+    await client.waitForNoElement(".diff-view", 2_000);
+  });
+
+  it("keeps the sticky diff file header flush with the diff scroller", async () => {
+    const branch = await getSelectedTaskBranch();
 
     const worktreePath = `${testRepoPath}/.kanna-worktrees/${branch}`;
 
@@ -314,34 +478,47 @@ describe("diff view", () => {
          clearTimeout(timeout);
          cb(value);
        };
-       const measure = () => {
+       const readWrapper = () => {
          const container = document.querySelector(".diff-container");
          const wrappers = Array.from(document.querySelectorAll(".diff-file"));
-         const renderedWrappers = wrappers.filter((element) =>
-           element.querySelector(".diff-file-header") &&
-           element.querySelector("diffs-container") &&
-           element.getBoundingClientRect().height > 140
-         );
-         const wrapper = renderedWrappers[0];
+         const wrapper = wrappers.find((element) => {
+           const header = element.querySelector(".diff-file-header");
+           return (header?.getAttribute("title") || header?.textContent || "") === "VERSION";
+         });
          const header = wrapper?.querySelector(".diff-file-header");
+         const renderedText = Array.from(wrapper?.querySelectorAll("diffs-container") ?? [])
+           .map((container) => container.shadowRoot?.textContent || container.textContent || "")
+           .join("\\n");
+         return { container, wrapper, header, renderedText };
+       };
+       const measure = () => {
+         const { container, wrapper, header, renderedText } = readWrapper();
          if (!(container instanceof HTMLElement) || !(wrapper instanceof HTMLElement) || !(header instanceof HTMLElement)) return;
+         if (!renderedText.includes("sticky visual e2e 120")) return;
+         if (wrapper.getBoundingClientRect().height <= 140) return;
 
          container.scrollTop = wrapper.offsetTop + 40;
-         setTimeout(() => {
-           const containerRect = container.getBoundingClientRect();
-           const headerRect = header.getBoundingClientRect();
-           const headers = Array.from(document.querySelectorAll(".diff-file-header"));
-           finish({
-             containerTop: containerRect.top,
-             headerTop: headerRect.top,
-             headerBottom: headerRect.bottom,
-             scrollTop: container.scrollTop,
-             stickyTop: getComputedStyle(header).top,
-             headerCount: headers.length,
-             renderedHeaderCount: renderedWrappers.length,
-             wrapperHeight: wrapper.getBoundingClientRect().height,
+         requestAnimationFrame(() => {
+           requestAnimationFrame(() => {
+             const containerRect = container.getBoundingClientRect();
+             const headerRect = header.getBoundingClientRect();
+             const headers = Array.from(document.querySelectorAll(".diff-file-header"));
+             finish({
+               containerTop: containerRect.top,
+               headerTop: headerRect.top,
+               headerBottom: headerRect.bottom,
+               scrollTop: container.scrollTop,
+               stickyTop: getComputedStyle(header).top,
+               headerCount: headers.length,
+               renderedHeaderCount: Array.from(document.querySelectorAll(".diff-file"))
+                 .filter((element) =>
+                   element.querySelector(".diff-file-header") &&
+                   element.querySelector("diffs-container")
+                 ).length,
+               wrapperHeight: wrapper.getBoundingClientRect().height,
+             });
            });
-         }, 50);
+         });
        };
        const interval = setInterval(measure, 25);
        const timeout = setTimeout(() => {
@@ -356,8 +533,7 @@ describe("diff view", () => {
            renderedHeaderCount: Array.from(document.querySelectorAll(".diff-file"))
              .filter((element) =>
                element.querySelector(".diff-file-header") &&
-               element.querySelector("diffs-container") &&
-               element.getBoundingClientRect().height > 140
+               element.querySelector("diffs-container")
              ).length,
            headerLabels: Array.from(document.querySelectorAll(".diff-file-header"))
              .map((element) => element.getAttribute("title") || element.textContent || ""),
@@ -571,14 +747,7 @@ describe("diff view", () => {
   });
 
   it("shows first diff content before rendering an entire broad diff", async () => {
-    const branch = await client.executeSync<string | null>(
-      `const ctx = window.__KANNA_E2E__.setupState;
-       const item = ctx.selectedItem();
-       return item ? (item.branch?.value || item.branch) : null;`
-    );
-    if (!branch) {
-      throw new Error("expected selected task to have a worktree branch");
-    }
+    const branch = await getSelectedTaskBranch();
 
     const fileCount = getDiffPerfFileCount();
     const linesPerFile = getDiffPerfLinesPerFile();
@@ -691,5 +860,6 @@ describe("diff view", () => {
     expect(result.firstContentMs).toBeLessThan(thresholdMs);
     expect(result.renderedContainerCount).toBeGreaterThan(0);
     expect(result.fileWrapperCount).toBeGreaterThan(0);
+    expect(result.renderedContainerCount).toBeLessThan(result.fileWrapperCount);
   });
 });

@@ -217,6 +217,7 @@
     "branchIncludeNone": "なし",
     "searchPlaceholder": "検索...",
     "searchNoMatches": "一致なし",
+    "fileSkippedTooLarge": "ビューアの応答性を保つため、大きな差分を省略しました。",
     "shortcutSearch": "検索",
     "shortcutSearchAlt": "検索 (代替)",
     "shortcutNextPrevMatch": "次 / 前の一致",

@@ -137,6 +137,7 @@ interface DiffRenderFileEntry {
   rawFileMeta: FileDiffMetadata & DiffFilePathMetadata;
   displayPath: string;
   wrapper: HTMLDivElement;
+  skipReason?: "oversized";
 }
 
 interface DiffRenderProgress {
@@ -162,6 +163,8 @@ let scrollRestorePendingLoadId = 0;
 
 const DIFF_RENDER_BATCH_SIZE = 12;
 const DIFF_INITIAL_RENDER_BATCH_SIZE = 1;
+const MAX_RENDERABLE_DIFF_LINE_LENGTH = 250_000;
+const MAX_RENDERABLE_DIFF_FILE_CONTENT_LENGTH = 2_000_000;
 
 function roundDuration(durationMs: number): number {
   return Math.round(durationMs * 10) / 10;
@@ -179,7 +182,7 @@ async function waitForRenderTurn(): Promise<void> {
 
 async function waitForFirstRenderedFile(
   progress: DiffRenderProgress,
-  timeoutMs = 1000,
+  timeoutMs = 5000,
 ): Promise<void> {
   if (progress.firstCompletedAt != null) return;
 
@@ -582,6 +585,45 @@ function createDiffFileWrapper(entry: { id: string; displayPath: string }): HTML
   return wrapper;
 }
 
+function getDiffLineCollections(fileMeta: FileDiffMetadata): string[][] {
+  const maybeLineCollections = fileMeta as FileDiffMetadata & {
+    additionLines?: string[];
+    deletionLines?: string[];
+  };
+  return [
+    maybeLineCollections.additionLines ?? [],
+    maybeLineCollections.deletionLines ?? [],
+  ];
+}
+
+function shouldSkipDiffFileRender(fileMeta: FileDiffMetadata): boolean {
+  let totalContentLength = 0;
+  for (const lines of getDiffLineCollections(fileMeta)) {
+    for (const line of lines) {
+      if (line.length > MAX_RENDERABLE_DIFF_LINE_LENGTH) {
+        return true;
+      }
+      totalContentLength += line.length;
+      if (totalContentLength > MAX_RENDERABLE_DIFF_FILE_CONTENT_LENGTH) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function renderSkippedDiffFile(entry: DiffRenderFileEntry, context: DiffRenderContext): void {
+  const skipped = document.createElement("div");
+  skipped.className = "diff-file-skipped";
+  skipped.textContent = t("diffView.fileSkippedTooLarge");
+  entry.wrapper.appendChild(skipped);
+
+  logDiffPerf(context.loadId, "render:file_skipped", {
+    path: entry.displayPath,
+    reason: entry.skipReason,
+  });
+}
+
 function resolveRenderableFileMeta(
   rawFileMeta: FileDiffMetadata & DiffFilePathMetadata,
   displayPath: string,
@@ -720,10 +762,13 @@ async function renderDiff(patch: string, context: DiffRenderContext) {
       rawFileMeta: typedFileMeta,
       displayPath,
       wrapper: createDiffFileWrapper({ id, displayPath }),
+      skipReason: shouldSkipDiffFileRender(typedFileMeta) ? "oversized" : undefined,
     };
   });
 
-  renderedFiles.value = renderEntries.map((entry) => ({
+  const renderableEntries = renderEntries.filter((entry) => entry.skipReason == null);
+
+  renderedFiles.value = renderableEntries.map((entry) => ({
     id: entry.id,
     fileDiff: entry.rawFileMeta,
   }));
@@ -752,13 +797,19 @@ async function renderDiff(patch: string, context: DiffRenderContext) {
     firstCompletedWaiters: [],
   };
 
-  for (let batchStart = 0; batchStart < renderEntries.length;) {
+  for (const entry of renderEntries) {
+    if (entry.skipReason) {
+      renderSkippedDiffFile(entry, context);
+    }
+  }
+
+  for (let batchStart = 0; batchStart < renderableEntries.length;) {
     if (!isActiveDiffLoad(context.loadId)) {
       return;
     }
 
     const batchSize = batchStart === 0 ? DIFF_INITIAL_RENDER_BATCH_SIZE : DIFF_RENDER_BATCH_SIZE;
-    const batch = renderEntries.slice(batchStart, batchStart + batchSize);
+    const batch = renderableEntries.slice(batchStart, batchStart + batchSize);
     const batchStartedAt = performance.now();
 
     for (const [batchIndex, entry] of batch.entries()) {
@@ -766,7 +817,7 @@ async function renderDiff(patch: string, context: DiffRenderContext) {
         entry,
         pool,
         context,
-        renderEntries.length,
+        renderableEntries.length,
         progress,
         batchStart + batchIndex,
       );
@@ -775,13 +826,13 @@ async function renderDiff(patch: string, context: DiffRenderContext) {
     logDiffPerf(context.loadId, "render:batch_invoked", {
       batchIndex: Math.floor(batchStart / DIFF_RENDER_BATCH_SIZE),
       batchSize: batch.length,
-      renderedCount: Math.min(batchStart + batch.length, renderEntries.length),
-      fileCount: renderEntries.length,
+      renderedCount: Math.min(batchStart + batch.length, renderableEntries.length),
+      fileCount: renderableEntries.length,
       durationMs: roundDuration(performance.now() - batchStartedAt),
       workerStats: getWorkerPoolStatsSnapshot(pool),
     });
 
-    if (batchStart + batch.length < renderEntries.length) {
+    if (batchStart + batch.length < renderableEntries.length) {
       if (batchStart === 0) {
         await waitForFirstRenderedFile(progress);
       }
@@ -793,7 +844,8 @@ async function renderDiff(patch: string, context: DiffRenderContext) {
 
   logDiffPerf(context.loadId, "render:scheduled", {
     totalMs: roundDuration(performance.now() - context.loadStartedAt),
-    fileCount: renderEntries.length,
+    fileCount: renderableEntries.length,
+    skippedFileCount: renderEntries.length - renderableEntries.length,
     workerStats: getWorkerPoolStatsSnapshot(pool),
   });
 }
@@ -1108,6 +1160,15 @@ defineExpose({ refresh: loadDiff });
 .diff-container :deep(.diff-file-header.diff-search-active) {
   background: rgba(255, 196, 61, 0.4);
   box-shadow: inset 0 0 0 1px rgba(255, 196, 61, 0.85);
+}
+
+.diff-container :deep(.diff-file-skipped) {
+  padding: 12px;
+  border-bottom: 1px solid var(--kn-border-default);
+  background: var(--kn-bg-app);
+  color: var(--kn-text-muted);
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .diff-container :deep(diffs-container) {

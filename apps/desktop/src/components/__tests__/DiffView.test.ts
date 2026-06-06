@@ -526,6 +526,161 @@ describe("DiffView", () => {
     }
   });
 
+  it("skips rendering files with oversized diff lines while keeping other files visible", async () => {
+    const patch = [
+      "diff --git a/src/normal.ts b/src/normal.ts",
+      "index 7898192..6178079 100644",
+      "--- a/src/normal.ts",
+      "+++ b/src/normal.ts",
+      "@@ -1 +1 @@",
+      "-const ok = false;",
+      "+const ok = true;",
+      "diff --git a/artifacts/raw-capture.json b/artifacts/raw-capture.json",
+      "index 7898192..6178079 100644",
+      "--- a/artifacts/raw-capture.json",
+      "+++ b/artifacts/raw-capture.json",
+      "@@ -1 +1 @@",
+      "-{}",
+      `+${"x".repeat(300_000)}`,
+      "",
+    ].join("\n");
+
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "git_diff") return patch;
+      return "";
+    });
+
+    const wrapper = mount(DiffView, {
+      props: {
+        repoPath: "/repo",
+        initialScope: "working",
+      },
+      attachTo: document.body,
+      global: {
+        mocks: {
+          $t: (key: string) => key,
+        },
+      },
+    });
+
+    await flushPromises();
+    await flushPromises();
+
+    expect(renderMock).toHaveBeenCalledTimes(1);
+    expect(renderMock.mock.calls[0][0].fileDiff).toMatchObject({
+      name: "src/normal.ts",
+    });
+    expect(wrapper.findAll(".diff-file-header").map((header) => header.text())).toEqual([
+      "src/normal.ts",
+      "artifacts/raw-capture.json",
+    ]);
+    expect(wrapper.get(".diff-file-skipped").text()).toBe(
+      "Large diff omitted to keep the viewer responsive.",
+    );
+
+    wrapper.unmount();
+  });
+
+  it("yields after the first file render so broad diffs can paint early", async () => {
+    vi.useFakeTimers();
+    diffMocks.parsePatchFilesMock.mockReturnValueOnce([
+      {
+        files: [
+          { name: "diff-perf/Cargo-0001.lock", hunks: [] },
+          { name: "diff-perf/Cargo-0002.lock", hunks: [] },
+          { name: "diff-perf/Cargo-0003.lock", hunks: [] },
+        ],
+      },
+    ]);
+
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "git_diff") return "diff --git a/perf b/perf";
+      return "";
+    });
+
+    let wrapper: ReturnType<typeof mount<typeof DiffView>> | null = null;
+
+    try {
+      wrapper = mount(DiffView, {
+        props: {
+          repoPath: "/repo",
+        },
+        attachTo: document.body,
+        global: {
+          mocks: {
+            $t: (key: string) => key,
+          },
+        },
+      });
+
+      await flushPromises();
+      await flushPromises();
+
+      expect(renderMock).toHaveBeenCalledTimes(1);
+    } finally {
+      wrapper?.unmount();
+      vi.useRealTimers();
+    }
+  });
+
+  it("waits for the first file post-render before scheduling the remaining broad diff", async () => {
+    vi.useFakeTimers();
+    diffMocks.parsePatchFilesMock.mockReturnValueOnce([
+      {
+        files: [
+          {
+            name: "diff-perf/Cargo-0001.lock",
+            hunks: [],
+            __deferPostRender: true,
+            __postRenderDelayMs: 50,
+          },
+          { name: "diff-perf/Cargo-0002.lock", hunks: [] },
+          { name: "diff-perf/Cargo-0003.lock", hunks: [] },
+        ],
+      },
+    ]);
+
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "git_diff") return "diff --git a/perf b/perf";
+      return "";
+    });
+
+    let wrapper: ReturnType<typeof mount<typeof DiffView>> | null = null;
+
+    try {
+      wrapper = mount(DiffView, {
+        props: {
+          repoPath: "/repo",
+          initialScope: "working",
+        },
+        attachTo: document.body,
+        global: {
+          mocks: {
+            $t: (key: string) => key,
+          },
+        },
+      });
+
+      await flushPromises();
+      await flushPromises();
+
+      expect(renderMock).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(0);
+      await flushPromises();
+      expect(renderMock).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(50);
+      await flushPromises();
+      await vi.runOnlyPendingTimersAsync();
+      await flushPromises();
+      expect(renderMock).toHaveBeenCalledTimes(3);
+    } finally {
+      wrapper?.unmount();
+      vi.useRealTimers();
+    }
+  });
+
   it("restores the previous scroll position when switching diff scopes", async () => {
     invokeMock.mockImplementation(async (command) => {
       if (command === "git_diff") return "diff --git a/working.txt b/working.txt";

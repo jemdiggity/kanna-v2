@@ -217,6 +217,7 @@
     "branchIncludeNone": "없음",
     "searchPlaceholder": "검색...",
     "searchNoMatches": "일치 없음",
+    "fileSkippedTooLarge": "뷰어 응답성을 유지하기 위해 큰 diff를 생략했습니다.",
     "shortcutSearch": "검색",
     "shortcutSearchAlt": "검색 (대체)",
     "shortcutNextPrevMatch": "다음 / 이전 일치",
