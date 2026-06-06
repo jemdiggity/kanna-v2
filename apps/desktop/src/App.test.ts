@@ -49,6 +49,7 @@ let closeRequestedHandler: ((event: { preventDefault: () => void }) => void | Pr
 const cloudTasksMock = vi.hoisted(() => vi.fn(async () => ({ repos: [], items: [] })));
 const scheduleStartupBackupMock = vi.hoisted(() => vi.fn(async () => {}));
 const nativeSetThemeMock = vi.hoisted(() => vi.fn(async () => {}));
+const nativeWindowSetThemeMock = vi.hoisted(() => vi.fn(async () => {}));
 const dbSelectMock = vi.fn(async () => []);
 const dbMock = {
   select: dbSelectMock,
@@ -186,6 +187,7 @@ vi.mock("./tauri-mock", () => ({
 
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({
+    setTheme: nativeWindowSetThemeMock,
     onCloseRequested: vi.fn(async (handler: (event: { preventDefault: () => void }) => void | Promise<void>) => {
       closeRequestedHandler = handler;
       return () => {
@@ -648,6 +650,7 @@ describe("App", () => {
     expect(document.documentElement.dataset.theme).toBe("light");
     expect(document.documentElement.dataset.codeTheme).toBe("dark");
     expect(nativeSetThemeMock).toHaveBeenCalledWith("light");
+    expect(nativeWindowSetThemeMock).toHaveBeenCalledWith("light");
 
     wrapper.unmount();
   });
@@ -665,6 +668,7 @@ describe("App", () => {
 
     expect(store.savePreference).toHaveBeenCalledWith("appTheme", "light");
     expect(nativeSetThemeMock).toHaveBeenCalledWith("light");
+    expect(nativeWindowSetThemeMock).toHaveBeenCalledWith("light");
 
     wrapper.unmount();
   });

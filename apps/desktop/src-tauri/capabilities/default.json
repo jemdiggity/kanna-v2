@@ -5,9 +5,11 @@
   "windows": ["main", "window-*"],
   "permissions": [
     "core:default",
+    "core:app:allow-set-app-theme",
     "core:window:allow-create",
     "core:window:allow-close",
     "core:window:allow-destroy",
+    "core:window:allow-set-theme",
     "core:window:allow-set-title",
     "core:webview:allow-create-webview-window",
     "opener:default",
