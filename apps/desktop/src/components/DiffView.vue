@@ -182,7 +182,7 @@ async function waitForRenderTurn(): Promise<void> {
 
 async function waitForFirstRenderedFile(
   progress: DiffRenderProgress,
-  timeoutMs = 1000,
+  timeoutMs = 5000,
 ): Promise<void> {
   if (progress.firstCompletedAt != null) return;
 

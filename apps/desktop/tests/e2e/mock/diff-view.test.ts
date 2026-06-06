@@ -1,5 +1,5 @@
 import { setTimeout as sleep } from "node:timers/promises";
-import { describe, it, expect, beforeAll, afterAll, afterEach } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
 import { WebDriverClient } from "../helpers/webdriver";
 import { resetDatabase, importTestRepo, cleanupWorktrees } from "../helpers/reset";
 import { getVueState, tauriInvoke } from "../helpers/vue";
@@ -204,12 +204,28 @@ describe("diff view", () => {
   async function resetTaskWorktreeDiffState(): Promise<void> {
     if (!taskWorktreePath || !taskWorktreeBaselineRef) return;
 
-    await client.executeSync(buildGlobalKeydownScript({ key: "Escape" })).catch(() => undefined);
+    await client.executeSync(
+      `const ctx = window.__KANNA_E2E__.setupState;
+       const setRef = (key, value) => {
+         const current = ctx?.[key];
+         if (current?.__v_isRef) current.value = value;
+         else if (ctx && key in ctx) ctx[key] = value;
+       };
+       setRef("showDiffModal", false);
+       setRef("maximizedModal", null);
+       const key = ctx?.currentDiffViewKey?.value ?? ctx?.currentDiffViewKey;
+       if (key && ctx?.diffViewStates) {
+         ctx.diffViewStates[key] = {
+           scope: "working",
+           scrollPositions: { working: 0, branch: 0 },
+         };
+       }`
+    ).catch(() => undefined);
     await client.waitForNoElement(".diff-view", 2_000).catch(() => undefined);
     await tauriInvoke(client, "run_script", {
       script: [
         'git reset --hard "$KANNA_E2E_DIFF_BASELINE_REF"',
-        "git clean -fd -- diff-oversized diff-perf",
+        "git clean -fd -- .cargo diff-oversized diff-perf",
       ].join("\n"),
       cwd: taskWorktreePath,
       env: {
@@ -265,6 +281,10 @@ describe("diff view", () => {
   });
 
   afterEach(async () => {
+    await resetTaskWorktreeDiffState();
+  });
+
+  beforeEach(async () => {
     await resetTaskWorktreeDiffState();
   });
 
@@ -458,34 +478,47 @@ describe("diff view", () => {
          clearTimeout(timeout);
          cb(value);
        };
-       const measure = () => {
+       const readWrapper = () => {
          const container = document.querySelector(".diff-container");
          const wrappers = Array.from(document.querySelectorAll(".diff-file"));
-         const renderedWrappers = wrappers.filter((element) =>
-           element.querySelector(".diff-file-header") &&
-           element.querySelector("diffs-container") &&
-           element.getBoundingClientRect().height > 140
-         );
-         const wrapper = renderedWrappers[0];
+         const wrapper = wrappers.find((element) => {
+           const header = element.querySelector(".diff-file-header");
+           return (header?.getAttribute("title") || header?.textContent || "") === "VERSION";
+         });
          const header = wrapper?.querySelector(".diff-file-header");
+         const renderedText = Array.from(wrapper?.querySelectorAll("diffs-container") ?? [])
+           .map((container) => container.shadowRoot?.textContent || container.textContent || "")
+           .join("\\n");
+         return { container, wrapper, header, renderedText };
+       };
+       const measure = () => {
+         const { container, wrapper, header, renderedText } = readWrapper();
          if (!(container instanceof HTMLElement) || !(wrapper instanceof HTMLElement) || !(header instanceof HTMLElement)) return;
+         if (!renderedText.includes("sticky visual e2e 120")) return;
+         if (wrapper.getBoundingClientRect().height <= 140) return;
 
          container.scrollTop = wrapper.offsetTop + 40;
-         setTimeout(() => {
-           const containerRect = container.getBoundingClientRect();
-           const headerRect = header.getBoundingClientRect();
-           const headers = Array.from(document.querySelectorAll(".diff-file-header"));
-           finish({
-             containerTop: containerRect.top,
-             headerTop: headerRect.top,
-             headerBottom: headerRect.bottom,
-             scrollTop: container.scrollTop,
-             stickyTop: getComputedStyle(header).top,
-             headerCount: headers.length,
-             renderedHeaderCount: renderedWrappers.length,
-             wrapperHeight: wrapper.getBoundingClientRect().height,
+         requestAnimationFrame(() => {
+           requestAnimationFrame(() => {
+             const containerRect = container.getBoundingClientRect();
+             const headerRect = header.getBoundingClientRect();
+             const headers = Array.from(document.querySelectorAll(".diff-file-header"));
+             finish({
+               containerTop: containerRect.top,
+               headerTop: headerRect.top,
+               headerBottom: headerRect.bottom,
+               scrollTop: container.scrollTop,
+               stickyTop: getComputedStyle(header).top,
+               headerCount: headers.length,
+               renderedHeaderCount: Array.from(document.querySelectorAll(".diff-file"))
+                 .filter((element) =>
+                   element.querySelector(".diff-file-header") &&
+                   element.querySelector("diffs-container")
+                 ).length,
+               wrapperHeight: wrapper.getBoundingClientRect().height,
+             });
            });
-         }, 50);
+         });
        };
        const interval = setInterval(measure, 25);
        const timeout = setTimeout(() => {
@@ -500,8 +533,7 @@ describe("diff view", () => {
            renderedHeaderCount: Array.from(document.querySelectorAll(".diff-file"))
              .filter((element) =>
                element.querySelector(".diff-file-header") &&
-               element.querySelector("diffs-container") &&
-               element.getBoundingClientRect().height > 140
+               element.querySelector("diffs-container")
              ).length,
            headerLabels: Array.from(document.querySelectorAll(".diff-file-header"))
              .map((element) => element.getAttribute("title") || element.textContent || ""),
@@ -828,5 +860,6 @@ describe("diff view", () => {
     expect(result.firstContentMs).toBeLessThan(thresholdMs);
     expect(result.renderedContainerCount).toBeGreaterThan(0);
     expect(result.fileWrapperCount).toBeGreaterThan(0);
+    expect(result.renderedContainerCount).toBeLessThan(result.fileWrapperCount);
   });
 });
