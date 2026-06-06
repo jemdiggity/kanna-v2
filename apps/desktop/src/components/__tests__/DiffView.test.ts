@@ -24,6 +24,8 @@ interface MockFileDiff {
   newName?: string;
   name?: string;
   __searchRows?: MockSearchRow[];
+  __deferPostRender?: boolean;
+  __postRenderDelayMs?: number;
 }
 
 const diffMocks = vi.hoisted(() => ({
@@ -55,6 +57,12 @@ vi.mock("@pierre/diffs", async () => {
     ...actual,
     parsePatchFiles: (...args: Parameters<typeof actual.parsePatchFiles>) => diffMocks.parsePatchFilesMock(...args),
     FileDiff: class {
+      private options?: { onPostRender?: () => void };
+
+      constructor(options?: { onPostRender?: () => void }) {
+        this.options = options;
+      }
+
       render = (...args: [Record<string, unknown>]) => {
         const [{ containerWrapper, fileDiff }] = args;
         const wrapper = containerWrapper as HTMLElement | undefined;
@@ -80,6 +88,11 @@ vi.mock("@pierre/diffs", async () => {
         }
 
         renderMock(...args);
+        if (diffMeta?.__deferPostRender) {
+          setTimeout(() => this.options?.onPostRender?.(), diffMeta.__postRenderDelayMs ?? 0);
+        } else {
+          this.options?.onPostRender?.();
+        }
       };
     },
     setLanguageOverride: (...args: [Record<string, unknown>, string]) => setLanguageOverrideMock(...args),
@@ -413,6 +426,106 @@ describe("DiffView", () => {
     wrapper.unmount();
   });
 
+  it("yields after the first file render so broad diffs can paint early", async () => {
+    vi.useFakeTimers();
+    diffMocks.parsePatchFilesMock.mockReturnValueOnce([
+      {
+        files: [
+          { name: "diff-perf/Cargo-0001.lock", hunks: [] },
+          { name: "diff-perf/Cargo-0002.lock", hunks: [] },
+          { name: "diff-perf/Cargo-0003.lock", hunks: [] },
+        ],
+      },
+    ]);
+
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "git_diff") return "diff --git a/perf b/perf";
+      return "";
+    });
+
+    let wrapper: ReturnType<typeof mount<typeof DiffView>> | null = null;
+
+    try {
+      wrapper = mount(DiffView, {
+        props: {
+          repoPath: "/repo",
+        },
+        attachTo: document.body,
+        global: {
+          mocks: {
+            $t: (key: string) => key,
+          },
+        },
+      });
+
+      await flushPromises();
+      await flushPromises();
+
+      expect(renderMock).toHaveBeenCalledTimes(1);
+    } finally {
+      wrapper?.unmount();
+      vi.useRealTimers();
+    }
+  });
+
+  it("waits for the first file post-render before scheduling the remaining broad diff", async () => {
+    vi.useFakeTimers();
+    diffMocks.parsePatchFilesMock.mockReturnValueOnce([
+      {
+        files: [
+          {
+            name: "diff-perf/Cargo-0001.lock",
+            hunks: [],
+            __deferPostRender: true,
+            __postRenderDelayMs: 50,
+          },
+          { name: "diff-perf/Cargo-0002.lock", hunks: [] },
+          { name: "diff-perf/Cargo-0003.lock", hunks: [] },
+        ],
+      },
+    ]);
+
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "git_diff") return "diff --git a/perf b/perf";
+      return "";
+    });
+
+    let wrapper: ReturnType<typeof mount<typeof DiffView>> | null = null;
+
+    try {
+      wrapper = mount(DiffView, {
+        props: {
+          repoPath: "/repo",
+          initialScope: "working",
+        },
+        attachTo: document.body,
+        global: {
+          mocks: {
+            $t: (key: string) => key,
+          },
+        },
+      });
+
+      await flushPromises();
+      await flushPromises();
+
+      expect(renderMock).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(0);
+      await flushPromises();
+      expect(renderMock).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(50);
+      await flushPromises();
+      await vi.runOnlyPendingTimersAsync();
+      await flushPromises();
+      expect(renderMock).toHaveBeenCalledTimes(3);
+    } finally {
+      wrapper?.unmount();
+      vi.useRealTimers();
+    }
+  });
+
   it("restores the previous scroll position when switching diff scopes", async () => {
     invokeMock.mockImplementation(async (command) => {
       if (command === "git_diff") return "diff --git a/working.txt b/working.txt";
@@ -466,6 +579,115 @@ describe("DiffView", () => {
     await flushPromises();
 
     expect(container.scrollTop).toBe(520);
+
+    wrapper.unmount();
+  });
+
+  it("reapplies restored scroll position after async diff content renders", async () => {
+    vi.useFakeTimers();
+    diffMocks.parsePatchFilesMock.mockReturnValueOnce([
+      {
+        files: [
+          {
+            name: "async-working.txt",
+            hunks: [],
+            __deferPostRender: true,
+          },
+        ],
+      },
+    ]);
+
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "git_diff") return "diff --git a/async-working.txt b/async-working.txt";
+      return "";
+    });
+
+    let wrapper: ReturnType<typeof mount<typeof DiffView>> | null = null;
+
+    try {
+      wrapper = mount(DiffView, {
+        props: {
+          repoPath: "/repo",
+          initialScope: "working",
+          initialScrollPositions: { working: 640 },
+        },
+        attachTo: document.body,
+        global: {
+          mocks: {
+            $t: (key: string) => key,
+          },
+        },
+      });
+      const container = wrapper.get(".diff-container").element as HTMLElement;
+      const scrollTo = vi.fn(({ top }: ScrollToOptions) => {
+        container.scrollTop = top ?? 0;
+      });
+      container.scrollTo = scrollTo;
+
+      await flushPromises();
+      await flushPromises();
+
+      expect(scrollTo).toHaveBeenCalledTimes(1);
+      expect(scrollTo).toHaveBeenLastCalledWith({ top: 640, behavior: "auto" });
+
+      await vi.runOnlyPendingTimersAsync();
+      await flushPromises();
+
+      expect(scrollTo.mock.calls.length).toBeGreaterThanOrEqual(2);
+      expect(scrollTo).toHaveBeenLastCalledWith({ top: 640, behavior: "auto" });
+    } finally {
+      wrapper?.unmount();
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not overwrite saved scroll positions with render-time scroll events", async () => {
+    diffMocks.parsePatchFilesMock.mockReturnValueOnce([
+      {
+        files: [
+          {
+            name: "render-scroll-reset.txt",
+            hunks: [],
+          },
+        ],
+      },
+    ]);
+
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "git_diff") return "diff --git a/render-scroll-reset.txt b/render-scroll-reset.txt";
+      return "";
+    });
+    renderMock.mockImplementation(({ containerWrapper }: { containerWrapper?: HTMLElement }) => {
+      const container = containerWrapper?.parentElement;
+      if (container instanceof HTMLElement) {
+        container.scrollTop = 0;
+        container.dispatchEvent(new Event("scroll", { bubbles: true }));
+      }
+    });
+
+    const wrapper = mount(DiffView, {
+      props: {
+        repoPath: "/repo",
+        initialScope: "working",
+        initialScrollPositions: { working: 640 },
+      },
+      attachTo: document.body,
+      global: {
+        mocks: {
+          $t: (key: string) => key,
+        },
+      },
+    });
+    const container = wrapper.get(".diff-container").element as HTMLElement;
+    const scrollTo = vi.fn(({ top }: ScrollToOptions) => {
+      container.scrollTop = top ?? 0;
+    });
+    container.scrollTo = scrollTo;
+
+    await flushPromises();
+    await flushPromises();
+
+    expect(scrollTo).toHaveBeenLastCalledWith({ top: 640, behavior: "auto" });
 
     wrapper.unmount();
   });

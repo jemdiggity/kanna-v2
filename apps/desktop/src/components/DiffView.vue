@@ -139,6 +139,13 @@ interface DiffRenderFileEntry {
   wrapper: HTMLDivElement;
 }
 
+interface DiffRenderProgress {
+  completedFiles: number;
+  firstCompletedAt: number | null;
+  completedAllLogged: boolean;
+  firstCompletedWaiters: Array<() => void>;
+}
+
 const searchTargets = computed(() => buildDiffSearchTargets(renderedFiles.value));
 const searchMatches = computed(() => findDiffSearchMatches(searchTargets.value, searchQuery.value));
 const searchMatchCount = computed(() => searchMatches.value.length);
@@ -151,8 +158,10 @@ const searchCountLabel = computed(() => {
 let nextDiffLoadId = 0;
 let activeDiffLoadId = 0;
 let fileDiffInstances: FileDiff[] = [];
+let scrollRestorePendingLoadId = 0;
 
 const DIFF_RENDER_BATCH_SIZE = 12;
+const DIFF_INITIAL_RENDER_BATCH_SIZE = 1;
 
 function roundDuration(durationMs: number): number {
   return Math.round(durationMs * 10) / 10;
@@ -164,7 +173,29 @@ function isActiveDiffLoad(loadId: number): boolean {
 
 async function waitForRenderTurn(): Promise<void> {
   await new Promise<void>((resolve) => {
-    window.setTimeout(resolve, 0);
+    setTimeout(resolve, 0);
+  });
+}
+
+async function waitForFirstRenderedFile(
+  progress: DiffRenderProgress,
+  timeoutMs = 1000,
+): Promise<void> {
+  if (progress.firstCompletedAt != null) return;
+
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      const index = progress.firstCompletedWaiters.indexOf(finish);
+      if (index >= 0) {
+        progress.firstCompletedWaiters.splice(index, 1);
+      }
+      resolve();
+    };
+    progress.firstCompletedWaiters.push(finish);
+    setTimeout(finish, timeoutMs);
   });
 }
 
@@ -329,6 +360,18 @@ function restoreScrollPosition() {
   containerRef.value.scrollTo({ top, behavior: "auto" });
 }
 
+function restoreScrollPositionForActiveLoad(context: DiffRenderContext) {
+  if (!isActiveDiffLoad(context.loadId)) return;
+  if ((scrollPositions.value[scope.value] ?? 0) <= 0) return;
+  restoreScrollPosition();
+}
+
+function finishPendingScrollRestore(context: DiffRenderContext) {
+  if (scrollRestorePendingLoadId !== context.loadId) return;
+  restoreScrollPositionForActiveLoad(context);
+  scrollRestorePendingLoadId = 0;
+}
+
 function syncViewStateFromProps() {
   scope.value = props.initialScope === "branch" ? "branch" : "working";
   scrollPositions.value = cloneScrollPositions(props.initialScrollPositions);
@@ -383,6 +426,7 @@ async function loadDiff(options: { preserveCurrentScroll?: boolean } = {}) {
   loading.value = true;
   error.value = null;
   noDiff.value = false;
+  scrollRestorePendingLoadId = (scrollPositions.value[scope.value] ?? 0) > 0 ? loadId : 0;
   logDiffPerf(loadId, "start", {
     scope: scope.value,
     path,
@@ -443,6 +487,7 @@ async function loadDiff(options: { preserveCurrentScroll?: boolean } = {}) {
       diffContent.value = "";
       renderedFiles.value = [];
       cleanupInstance();
+      scrollRestorePendingLoadId = 0;
       logDiffPerf(loadId, "empty", {
         totalMs: roundDuration(performance.now() - loadStartedAt),
       });
@@ -466,6 +511,7 @@ async function loadDiff(options: { preserveCurrentScroll?: boolean } = {}) {
       return;
     }
     error.value = e instanceof Error ? e.message : String(e);
+    scrollRestorePendingLoadId = 0;
     logDiffPerf(loadId, "error", {
       totalMs: roundDuration(performance.now() - loadStartedAt),
       error: error.value,
@@ -555,7 +601,7 @@ function renderDiffFile(
   pool: WorkerPoolManager | null,
   context: DiffRenderContext,
   allFilesCount: number,
-  progress: { completedFiles: number; firstCompletedAt: number | null; completedAllLogged: boolean },
+  progress: DiffRenderProgress,
   fileIndex: number,
 ): void {
   const fileRenderStartedAt = performance.now();
@@ -571,13 +617,19 @@ function renderDiffFile(
       onPostRender: () => {
         if (didLogPostRender || !isActiveDiffLoad(context.loadId)) return;
         didLogPostRender = true;
-        nextTick(() => applySearchHighlights());
+        nextTick(() => {
+          restoreScrollPositionForActiveLoad(context);
+          applySearchHighlights();
+        });
         const completedAt = performance.now();
         const sinceFileStartMs = completedAt - fileRenderStartedAt;
         const sinceLoadStartMs = completedAt - context.loadStartedAt;
         progress.completedFiles += 1;
         if (progress.firstCompletedAt == null) {
           progress.firstCompletedAt = completedAt;
+          for (const resolve of progress.firstCompletedWaiters.splice(0)) {
+            resolve();
+          }
           logDiffPerf(context.loadId, "content:first_file_ready", {
             durationMs: roundDuration(sinceLoadStartMs),
             fileIndex,
@@ -598,6 +650,7 @@ function renderDiffFile(
         }
         if (!progress.completedAllLogged && progress.completedFiles === allFilesCount) {
           progress.completedAllLogged = true;
+          finishPendingScrollRestore(context);
           logDiffPerf(context.loadId, "content:all_files_ready", {
             durationMs: roundDuration(sinceLoadStartMs),
             fileCount: allFilesCount,
@@ -696,14 +749,16 @@ async function renderDiff(patch: string, context: DiffRenderContext) {
     completedFiles: 0,
     firstCompletedAt: null as number | null,
     completedAllLogged: false,
+    firstCompletedWaiters: [],
   };
 
-  for (let batchStart = 0; batchStart < renderEntries.length; batchStart += DIFF_RENDER_BATCH_SIZE) {
+  for (let batchStart = 0; batchStart < renderEntries.length;) {
     if (!isActiveDiffLoad(context.loadId)) {
       return;
     }
 
-    const batch = renderEntries.slice(batchStart, batchStart + DIFF_RENDER_BATCH_SIZE);
+    const batchSize = batchStart === 0 ? DIFF_INITIAL_RENDER_BATCH_SIZE : DIFF_RENDER_BATCH_SIZE;
+    const batch = renderEntries.slice(batchStart, batchStart + batchSize);
     const batchStartedAt = performance.now();
 
     for (const [batchIndex, entry] of batch.entries()) {
@@ -727,8 +782,13 @@ async function renderDiff(patch: string, context: DiffRenderContext) {
     });
 
     if (batchStart + batch.length < renderEntries.length) {
+      if (batchStart === 0) {
+        await waitForFirstRenderedFile(progress);
+      }
       await waitForRenderTurn();
     }
+
+    batchStart += batch.length;
   }
 
   logDiffPerf(context.loadId, "render:scheduled", {
@@ -791,6 +851,7 @@ function cycleBranchInclude() {
 }
 
 function handleScroll() {
+  if (loading.value || scrollRestorePendingLoadId === activeDiffLoadId) return;
   saveCurrentScrollPosition();
 }
 
@@ -901,6 +962,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   activeDiffLoadId = 0;
+  scrollRestorePendingLoadId = 0;
   cleanupInstance();
 });
 
