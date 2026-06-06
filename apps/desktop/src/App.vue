@@ -1849,16 +1849,36 @@ const currentBlockers = computedAsync(async () => {
 }, []);
 
 let colorSchemeQuery: MediaQueryList | null = null;
+let themeSyncRevision = 0;
+
+function readSystemPrefersDark(): boolean {
+  if (colorSchemeQuery) return colorSchemeQuery.matches;
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") return false;
+  return window.matchMedia("(prefers-color-scheme: dark)").matches;
+}
 
 function syncThemeRuntime() {
+  const revision = ++themeSyncRevision;
   setThemePreferences({
     appTheme: preferences.appTheme,
     codeTheme: preferences.codeTheme,
   });
+
+  if (preferences.appTheme === "system") {
+    void syncNativeAppTheme(null)
+      .catch((error: unknown) => {
+        console.error("[App] failed to sync native theme:", error);
+      })
+      .then(() => {
+        if (revision !== themeSyncRevision) return;
+        setSystemPrefersDark(readSystemPrefersDark());
+        applyCurrentDocumentTheme();
+      });
+    return;
+  }
+
   applyCurrentDocumentTheme();
-  void syncNativeAppTheme(
-    preferences.appTheme === "system" ? null : effectiveAppTheme.value,
-  ).catch((error: unknown) => {
+  void syncNativeAppTheme(effectiveAppTheme.value).catch((error: unknown) => {
     console.error("[App] failed to sync native theme:", error);
   });
 }
