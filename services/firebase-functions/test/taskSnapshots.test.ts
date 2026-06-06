@@ -54,6 +54,47 @@ describe("task snapshot validation", () => {
     });
   });
 
+  it("accepts an OpenCode agent task snapshot", () => {
+    const input = {
+      cloudTaskId: "repo:task-opencode",
+      ownerDesktopId: "desktop-1",
+      ownerLocalTaskId: "task-opencode",
+      title: "OpenCode task",
+      promptSnippet: null,
+      displayName: null,
+      stage: "in progress",
+      activity: "idle",
+      status: "active",
+      repo: {
+        cloudRepoId: "repo",
+        name: "kanna",
+        remoteUrl: null,
+        remoteUrlHash: null,
+        defaultBranch: "main",
+      },
+      branch: "task-opencode",
+      baseRef: "origin/main",
+      prNumber: null,
+      prUrl: null,
+      agent: {
+        provider: "opencode",
+        type: "pty",
+      },
+      transfer: {
+        state: "none",
+        transferId: null,
+        sourceDesktopId: null,
+        destinationDesktopId: null,
+      },
+      blockedByTaskIds: [],
+      createdAt: "2026-06-06T00:00:00.000Z",
+      updatedAt: "2026-06-06T00:00:00.000Z",
+      closedAt: null,
+    };
+
+    expect(validateTaskSnapshotInput(input).agent.provider).toBe("opencode");
+  });
+
   it("rejects snapshots that do not route to an owner desktop", () => {
     expect(() =>
       validateTaskSnapshotInput({

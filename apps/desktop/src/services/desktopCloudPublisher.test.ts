@@ -159,6 +159,36 @@ describe("publishDesktopTaskSnapshot", () => {
     });
   });
 
+  it("publishes OpenCode task snapshots with the OpenCode agent provider", async () => {
+    await publishDesktopTaskSnapshot(null as never, {
+      id: "task-opencode",
+      repo_id: "repo-1",
+      prompt: "Run OpenCode from the cloud publisher",
+      stage: "in progress",
+      activity: "idle",
+      branch: "task-opencode",
+      base_ref: "main",
+      pr_number: null,
+      pr_url: null,
+      display_name: null,
+      agent_provider: "opencode",
+      agent_type: "pty",
+      created_at: "2026-06-06T00:00:00.000Z",
+      updated_at: "2026-06-06T00:00:00.000Z",
+      closed_at: null,
+    } as never);
+
+    expect(mocks.publish).toHaveBeenCalledWith(
+      expect.objectContaining({
+        ownerLocalTaskId: "task-opencode",
+        agent: {
+          provider: "opencode",
+          type: "pty",
+        },
+      }),
+    );
+  });
+
   it("publishes open and recently closed local task snapshots during reconciliation", async () => {
     await publishDesktopTaskSnapshots(null as never);
 
