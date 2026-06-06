@@ -718,6 +718,7 @@ describe("App", () => {
 
     expect(store.savePreference).toHaveBeenCalledWith("appTheme", "system");
     expect(nativeSetThemeMock).toHaveBeenCalledWith(null);
+    expect(nativeWindowSetThemeMock).toHaveBeenCalledWith(null);
     expect(document.documentElement.dataset.theme).toBe("light");
 
     wrapper.unmount();
