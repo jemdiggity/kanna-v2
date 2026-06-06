@@ -46,6 +46,11 @@ struct MobileServerState {
     started: bool,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct DesktopIdentityFile {
+    desktop_id: String,
+}
+
 impl MobileServerManager {
     pub fn new(app_data_dir: PathBuf) -> Self {
         let config_path = server_config_path_for_app_data_dir(&app_data_dir);
@@ -617,12 +622,119 @@ async fn wait_for_server_port_to_close(port: u16, attempts: usize) -> Result<(),
 }
 
 fn desktop_id(config_path: &Path) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
+    let identity_path = desktop_identity_path(config_path);
+    if let Some(identity) = read_desktop_identity(&identity_path) {
+        return identity;
+    }
 
-    let mut hasher = DefaultHasher::new();
-    config_path.hash(&mut hasher);
-    format!("desktop-{:08x}", hasher.finish() as u32)
+    let identity = format!("desktop-{}", generate_uuid_v4());
+    match write_desktop_identity(&identity_path, &identity) {
+        Ok(()) => identity,
+        Err(error) if error.starts_with("desktop identity already exists") => {
+            read_desktop_identity(&identity_path).unwrap_or(identity)
+        }
+        Err(error) => {
+            eprintln!(
+                "[mobile] failed to persist desktop identity at {}: {}",
+                identity_path.display(),
+                error
+            );
+            identity
+        }
+    }
+}
+
+fn desktop_identity_path(config_path: &Path) -> PathBuf {
+    config_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("desktop-identity.json")
+}
+
+fn read_desktop_identity(path: &Path) -> Option<String> {
+    let body = std::fs::read_to_string(path).ok()?;
+    let parsed = serde_json::from_str::<DesktopIdentityFile>(&body).ok()?;
+    if is_desktop_uuid(&parsed.desktop_id) {
+        Some(parsed.desktop_id)
+    } else {
+        None
+    }
+}
+
+fn write_desktop_identity(path: &Path, desktop_id: &str) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("failed to create desktop identity dir: {}", e))?;
+    }
+    let body = serde_json::to_string_pretty(&DesktopIdentityFile {
+        desktop_id: desktop_id.to_string(),
+    })
+    .map_err(|e| format!("failed to encode desktop identity: {}", e))?;
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .and_then(|mut file| {
+            use std::io::Write;
+            file.write_all(body.as_bytes())
+        })
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                "desktop identity already exists".to_string()
+            } else {
+                format!("failed to write desktop identity: {}", e)
+            }
+        })
+}
+
+fn generate_uuid_v4() -> String {
+    use std::io::Read;
+
+    let mut bytes = [0u8; 16];
+    File::open("/dev/urandom")
+        .and_then(|mut file| file.read_exact(&mut bytes))
+        .unwrap_or_else(|error| panic!("failed to generate desktop identity: {}", error));
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0],
+        bytes[1],
+        bytes[2],
+        bytes[3],
+        bytes[4],
+        bytes[5],
+        bytes[6],
+        bytes[7],
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15],
+    )
+}
+
+fn is_desktop_uuid(value: &str) -> bool {
+    let Some(uuid) = value.strip_prefix("desktop-") else {
+        return false;
+    };
+    let bytes = uuid.as_bytes();
+    if bytes.len() != 36 {
+        return false;
+    }
+    for (index, byte) in bytes.iter().enumerate() {
+        if matches!(index, 8 | 13 | 18 | 23) {
+            if *byte != b'-' {
+                return false;
+            }
+        } else if !byte.is_ascii_hexdigit() {
+            return false;
+        }
+    }
+    true
 }
 
 fn generate_device_token() -> Result<String, String> {
@@ -874,9 +986,27 @@ mod tests {
     }
 
     #[test]
-    fn desktop_id_is_stable_for_the_same_path() {
-        let path = std::path::Path::new("/tmp/kanna/server.toml");
-        assert_eq!(desktop_id(path), desktop_id(path));
+    fn desktop_id_is_persisted_per_app_instance_scope() {
+        let root = unique_test_root("desktop-id");
+        let first_config = root.join("main/Kanna/server.toml");
+        let second_config = root.join("worktree/Kanna/servers/kanna-wt-task/server.toml");
+
+        let first_id = desktop_id(&first_config);
+        let first_again = desktop_id(&first_config);
+        let second_id = desktop_id(&second_config);
+
+        assert_eq!(first_id, first_again);
+        assert_ne!(first_id, second_id);
+        assert!(first_id.starts_with("desktop-"));
+        assert_eq!(first_id.len(), "desktop-".len() + 36);
+        assert_eq!(
+            std::fs::read_to_string(root.join("main/Kanna/desktop-identity.json"))
+                .unwrap()
+                .contains(&first_id),
+            true
+        );
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

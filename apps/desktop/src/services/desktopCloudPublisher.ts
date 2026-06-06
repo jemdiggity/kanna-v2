@@ -82,8 +82,7 @@ async function resolveDesktopId(): Promise<string> {
   const envId = await readEnvString("KANNA_TRANSFER_PEER_ID");
   if (envId.trim()) return envId.trim();
 
-  const dbName = await readEnvString("KANNA_DB_NAME");
-  return dbName.trim() || "desktop-local";
+  return "desktop-local";
 }
 
 async function readEnvString(name: string): Promise<string> {

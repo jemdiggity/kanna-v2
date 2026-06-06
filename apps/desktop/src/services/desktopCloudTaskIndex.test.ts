@@ -323,7 +323,7 @@ describe("mapDesktopCloudTasks", () => {
     expect(snapshot.terminalRefs).toEqual({});
   });
 
-  it("omits snapshots owned by the current desktop", () => {
+  it("keeps same-owner snapshots visible when no local task matches", () => {
     const snapshot = mapDesktopCloudTasks([
       {
         cloudTaskId: "remote-repo-id:task-own",
@@ -354,8 +354,16 @@ describe("mapDesktopCloudTasks", () => {
       currentDesktopId: "desktop-current",
     });
 
-    expect(snapshot.repos).toEqual([]);
-    expect(snapshot.items).toEqual([]);
-    expect(snapshot.terminalRefs).toEqual({});
+    expect(snapshot.items).toMatchObject([
+      {
+        id: "cloud:remote-repo-id:task-own",
+        prompt: "Own task prompt",
+      },
+    ]);
+    expect(snapshot.terminalRefs["cloud:remote-repo-id:task-own"]).toEqual({
+      ownerDesktopId: "desktop-current",
+      ownerLocalTaskId: "task-own",
+      transport: "cloud",
+    });
   });
 });
