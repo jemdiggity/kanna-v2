@@ -97,6 +97,12 @@ export function createDesktopLanTerminalClient(): DesktopRelayTerminalClient {
         taskId: options.taskId,
       });
     },
+    async advanceStage(options) {
+      await invoke("advance_transfer_peer_task_stage", {
+        peerId: options.desktopId,
+        taskId: options.taskId,
+      });
+    },
   };
 }
 

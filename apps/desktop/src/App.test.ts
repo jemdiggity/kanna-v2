@@ -50,6 +50,8 @@ const cloudTasksMock = vi.hoisted(() => vi.fn(async () => ({ repos: [], items: [
 const scheduleStartupBackupMock = vi.hoisted(() => vi.fn(async () => {}));
 const nativeSetThemeMock = vi.hoisted(() => vi.fn(async () => {}));
 const nativeWindowSetThemeMock = vi.hoisted(() => vi.fn(async () => {}));
+const relayAdvanceStageMock = vi.hoisted(() => vi.fn(async () => {}));
+const relayCloseMock = vi.hoisted(() => vi.fn());
 const dbSelectMock = vi.fn(async () => []);
 const dbMock = {
   select: dbSelectMock,
@@ -312,6 +314,20 @@ vi.mock("./services/desktopCloudTaskIndex", () => ({
   listDesktopCloudTasks: cloudTasksMock,
 }));
 
+vi.mock("./services/desktopRelayTerminal", () => ({
+  createConfiguredDesktopRelayTerminalClient: vi.fn(async () => ({
+    advanceStage: relayAdvanceStageMock,
+    close: relayCloseMock,
+  })),
+}));
+
+vi.mock("./services/desktopLanTerminal", () => ({
+  createConfiguredDesktopLanTerminalClient: vi.fn(async () => ({
+    advanceStage: relayAdvanceStageMock,
+    close: relayCloseMock,
+  })),
+}));
+
 vi.mock("./composables/useRestoreFocus", () => ({
   useRestoreFocus: vi.fn(),
 }));
@@ -568,6 +584,8 @@ describe("App", () => {
     store.loadAgent.mockClear();
     store.selectItem.mockClear();
     store.advanceStage.mockClear();
+    relayAdvanceStageMock.mockClear();
+    relayCloseMock.mockClear();
     store.repos = [{ id: "repo-1", path: "/tmp/repo", name: "repo" }];
     store.selectedRepoId = "repo-1";
     store.selectedItemId = null;
@@ -1130,7 +1148,7 @@ describe("App", () => {
     wrapper.unmount();
   });
 
-  it("does not advance a local fallback task when a remote workspace task is selected", async () => {
+  it("routes Cmd+S to the owner when a reachable remote workspace task is selected", async () => {
     const localFallbackItem = {
       id: "task-local",
       repo_id: "repo-1",
@@ -1213,6 +1231,13 @@ describe("App", () => {
         created_at: "2026-05-18T00:00:00.000Z",
         updated_at: "2026-05-18T00:00:00.000Z",
       }],
+      terminalRefs: {
+        "cloud:repo-1:task-remote": {
+          ownerDesktopId: "desktop-owner",
+          ownerLocalTaskId: "task-owner",
+          transport: "cloud",
+        },
+      },
     });
 
     const SidebarMixedStub = defineComponent({
@@ -1259,6 +1284,11 @@ describe("App", () => {
     await flushPromises();
 
     expect(store.advanceStage).not.toHaveBeenCalled();
+    expect(relayAdvanceStageMock).toHaveBeenCalledWith({
+      desktopId: "desktop-owner",
+      taskId: "task-owner",
+    });
+    expect(relayCloseMock).toHaveBeenCalled();
 
     wrapper.unmount();
   });

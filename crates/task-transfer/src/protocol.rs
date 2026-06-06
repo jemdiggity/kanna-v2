@@ -36,6 +36,11 @@ pub enum ControlRequest {
         target_peer_id: String,
         task_id: String,
     },
+    AdvancePeerTaskStage {
+        request_id: String,
+        target_peer_id: String,
+        task_id: String,
+    },
     UnobservePeerSession {
         request_id: String,
         target_peer_id: String,
@@ -118,6 +123,9 @@ pub enum ControlResponse {
         request_id: String,
     },
     ClosePeerTask {
+        request_id: String,
+    },
+    AdvancePeerTaskStage {
         request_id: String,
     },
     UnobservePeerSession {
@@ -241,6 +249,11 @@ pub enum PeerRequest {
         requester_peer_id: String,
         task_id: String,
     },
+    AdvanceTaskStage {
+        request_id: String,
+        requester_peer_id: String,
+        task_id: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -292,6 +305,9 @@ pub enum PeerResponse {
         request_id: String,
     },
     CloseTask {
+        request_id: String,
+    },
+    AdvanceTaskStage {
         request_id: String,
     },
     Error {

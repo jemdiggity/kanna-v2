@@ -1328,6 +1328,33 @@ async function closeSelectedWorkspaceTask() {
   }
 }
 
+async function advanceSelectedRemoteWorkspaceTask(workspaceTask: NonNullable<typeof selectedWorkspaceTask.value>) {
+  const remoteRef = workspaceTask.terminal.remoteRef;
+  if (!remoteRef || !workspaceTask.capabilities.canAdvanceStage) {
+    toast.error("Remote task is not reachable.");
+    return;
+  }
+
+  const client = workspaceTask.terminal.kind === "lan"
+    ? await createConfiguredDesktopLanTerminalClient()
+    : await createConfiguredDesktopRelayTerminalClient();
+  if (!client) {
+    toast.error("Remote task owner is unavailable.");
+    return;
+  }
+
+  try {
+    await client.advanceStage({
+      desktopId: remoteRef.ownerDesktopId,
+      taskId: remoteRef.ownerLocalTaskId,
+    });
+  } catch (error) {
+    toast.error(error instanceof Error ? error.message : String(error));
+  } finally {
+    client.close();
+  }
+}
+
 // Keyboard shortcuts
 const keyboardActions = {
   newTask: () => {
@@ -1399,7 +1426,11 @@ const keyboardActions = {
   advanceStage: () => {
     const workspaceTask = selectedWorkspaceTask.value;
     if (workspaceTask) {
-      if (!workspaceTask.capabilities.canAdvanceStage || !workspaceTask.localTaskId) return;
+      if (!workspaceTask.capabilities.canAdvanceStage) return;
+      if (!workspaceTask.localTaskId) {
+        void advanceSelectedRemoteWorkspaceTask(workspaceTask);
+        return;
+      }
       void store.advanceStage(workspaceTask.localTaskId);
       return;
     }

@@ -104,6 +104,49 @@ fn control_and_peer_message_roundtrips_with_request_ids() {
 }
 
 #[test]
+fn remote_task_advance_messages_use_expected_wire_names() {
+    let control_request = ControlRequest::AdvancePeerTaskStage {
+        request_id: "req-advance-control".into(),
+        target_peer_id: "peer-owner".into(),
+        task_id: "task-owner".into(),
+    };
+    assert_eq!(
+        serde_json::to_value(&control_request).unwrap(),
+        json!({
+            "type": "advance_peer_task_stage",
+            "request_id": "req-advance-control",
+            "target_peer_id": "peer-owner",
+            "task_id": "task-owner",
+        })
+    );
+    assert_roundtrip(control_request);
+
+    assert_roundtrip(ControlResponse::AdvancePeerTaskStage {
+        request_id: "req-advance-control".into(),
+    });
+
+    let peer_request = PeerRequest::AdvanceTaskStage {
+        request_id: "req-advance-peer".into(),
+        requester_peer_id: "peer-secondary".into(),
+        task_id: "task-owner".into(),
+    };
+    assert_eq!(
+        serde_json::to_value(&peer_request).unwrap(),
+        json!({
+            "type": "advance_task_stage",
+            "request_id": "req-advance-peer",
+            "requester_peer_id": "peer-secondary",
+            "task_id": "task-owner",
+        })
+    );
+    assert_roundtrip(peer_request);
+
+    assert_roundtrip(PeerResponse::AdvanceTaskStage {
+        request_id: "req-advance-peer".into(),
+    });
+}
+
+#[test]
 fn transfer_artifact_control_messages_roundtrip() {
     assert_roundtrip(ControlRequest::StageTransferArtifact {
         request_id: "req-stage".into(),

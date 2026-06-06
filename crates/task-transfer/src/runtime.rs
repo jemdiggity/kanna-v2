@@ -27,7 +27,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use thiserror::Error;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream, UnixStream};
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::task::JoinHandle;
@@ -46,6 +46,7 @@ pub struct RuntimeConfig {
     pub listen_port: u16,
     daemon_dir: Option<PathBuf>,
     db_path: Option<PathBuf>,
+    kanna_server_port: Option<u16>,
     discovery_mode: DiscoveryMode,
     pending_transfer_ttl: Duration,
     peer_request_timeout: Duration,
@@ -65,6 +66,7 @@ impl RuntimeConfig {
             listen_port,
             daemon_dir: None,
             db_path: None,
+            kanna_server_port: None,
             discovery_mode: DiscoveryMode::Registry,
             pending_transfer_ttl: Duration::from_secs(300),
             peer_request_timeout: Duration::from_secs(15),
@@ -93,6 +95,11 @@ impl RuntimeConfig {
 
     pub fn with_db_path(mut self, db_path: impl AsRef<Path>) -> Self {
         self.db_path = Some(db_path.as_ref().to_path_buf());
+        self
+    }
+
+    pub fn with_kanna_server_port(mut self, port: u16) -> Self {
+        self.kanna_server_port = Some(port);
         self
     }
 
@@ -159,6 +166,12 @@ impl RuntimeConfig {
                     .map(PathBuf::from)
                     .unwrap_or_else(kanna_runtime_defaults::preferred_desktop_db_path),
             ),
+            kanna_server_port: std::env::var("KANNA_MOBILE_SERVER_PORT")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .map(|value| value.parse::<u16>())
+                .transpose()
+                .map_err(|error| RuntimeError::InvalidConfig(error.to_string()))?,
             discovery_mode,
             pending_transfer_ttl: Duration::from_secs(300),
             peer_request_timeout: Duration::from_secs(15),
@@ -336,6 +349,7 @@ struct ListenerContext {
     task_snapshot: Arc<Mutex<Value>>,
     daemon_dir: Option<PathBuf>,
     db_path: Option<PathBuf>,
+    kanna_server_port: Option<u16>,
     request_counter: Arc<AtomicU64>,
     incoming_sender: mpsc::UnboundedSender<RuntimeEvent>,
 }
@@ -534,6 +548,7 @@ impl TransferRuntime {
             task_snapshot: Arc::clone(&task_snapshot),
             daemon_dir: config.daemon_dir.clone(),
             db_path: config.db_path.clone(),
+            kanna_server_port: config.kanna_server_port,
             request_counter: Arc::clone(&request_counter),
             incoming_sender: incoming_sender.clone(),
         };
@@ -779,6 +794,33 @@ impl TransferRuntime {
         }
     }
 
+    pub async fn advance_peer_task_stage(
+        &self,
+        target_peer_id: &str,
+        task_id: &str,
+    ) -> Result<(), RuntimeError> {
+        let target_peer = self.find_peer(target_peer_id).await?;
+        self.ensure_peer_is_trusted(&target_peer.peer_id, &target_peer.public_key)?;
+        let request_id = self.next_request_id("advance-stage");
+        let response = self
+            .send_peer_request(
+                &target_peer,
+                PeerRequest::AdvanceTaskStage {
+                    request_id: request_id.clone(),
+                    requester_peer_id: self.config.peer_id.clone(),
+                    task_id: task_id.to_owned(),
+                },
+            )
+            .await?;
+        match response {
+            PeerResponse::AdvanceTaskStage {
+                request_id: response_request_id,
+            } if response_request_id == request_id => Ok(()),
+            PeerResponse::Error { message, .. } => Err(RuntimeError::Protocol(message)),
+            other => Err(unexpected_peer_response("advance-stage", &other)),
+        }
+    }
+
     pub async fn start_pairing(&self, target_peer_id: &str) -> Result<PairingResult, RuntimeError> {
         let target_peer = self.find_peer(target_peer_id).await?;
         let request_id = self.next_request_id("pair");
@@ -985,7 +1027,8 @@ impl TransferRuntime {
             PeerResponse::ObserveSession { .. }
             | PeerResponse::SendSessionInput { .. }
             | PeerResponse::ResizeSession { .. }
-            | PeerResponse::CloseTask { .. } => Err(RuntimeError::Protocol(
+            | PeerResponse::CloseTask { .. }
+            | PeerResponse::AdvanceTaskStage { .. } => Err(RuntimeError::Protocol(
                 "unexpected observe-session response during preflight".into(),
             )),
             PeerResponse::Error {
@@ -1072,7 +1115,8 @@ impl TransferRuntime {
             PeerResponse::ObserveSession { .. }
             | PeerResponse::SendSessionInput { .. }
             | PeerResponse::ResizeSession { .. }
-            | PeerResponse::CloseTask { .. } => Err(RuntimeError::Protocol(
+            | PeerResponse::CloseTask { .. }
+            | PeerResponse::AdvanceTaskStage { .. } => Err(RuntimeError::Protocol(
                 "unexpected observe-session response during transfer commit".into(),
             )),
             PeerResponse::Error {
@@ -1157,7 +1201,8 @@ impl TransferRuntime {
             | PeerResponse::ObserveSession { .. }
             | PeerResponse::SendSessionInput { .. }
             | PeerResponse::ResizeSession { .. }
-            | PeerResponse::CloseTask { .. } => Err(RuntimeError::Protocol(
+            | PeerResponse::CloseTask { .. }
+            | PeerResponse::AdvanceTaskStage { .. } => Err(RuntimeError::Protocol(
                 "unexpected response while finalizing outgoing transfer".into(),
             )),
             PeerResponse::Error {
@@ -1330,7 +1375,8 @@ impl TransferRuntime {
             | PeerResponse::ObserveSession { .. }
             | PeerResponse::SendSessionInput { .. }
             | PeerResponse::ResizeSession { .. }
-            | PeerResponse::CloseTask { .. } => Err(RuntimeError::Protocol(
+            | PeerResponse::CloseTask { .. }
+            | PeerResponse::AdvanceTaskStage { .. } => Err(RuntimeError::Protocol(
                 "unexpected response while fetching transfer artifact".into(),
             )),
             PeerResponse::Error {
@@ -1415,7 +1461,8 @@ impl TransferRuntime {
             | PeerResponse::ObserveSession { .. }
             | PeerResponse::SendSessionInput { .. }
             | PeerResponse::ResizeSession { .. }
-            | PeerResponse::CloseTask { .. } => Err(RuntimeError::Protocol(
+            | PeerResponse::CloseTask { .. }
+            | PeerResponse::AdvanceTaskStage { .. } => Err(RuntimeError::Protocol(
                 "unexpected response while acknowledging import commit".into(),
             )),
             PeerResponse::Error {
@@ -2240,6 +2287,17 @@ async fn handle_connection(
                 message: error.to_string(),
             },
         },
+        Ok(PeerRequest::AdvanceTaskStage {
+            request_id,
+            requester_peer_id,
+            task_id,
+        }) => match advance_owner_task_stage(&context, &requester_peer_id, &task_id).await {
+            Ok(()) => PeerResponse::AdvanceTaskStage { request_id },
+            Err(error) => PeerResponse::Error {
+                request_id,
+                message: error.to_string(),
+            },
+        },
         Err(error) => PeerResponse::Error {
             request_id,
             message: error.to_string(),
@@ -2500,6 +2558,52 @@ async fn close_owner_task(
     }
     close_pipeline_item_in_db(context, task_id)?;
     Ok(())
+}
+
+async fn advance_owner_task_stage(
+    context: &ListenerContext,
+    requester_peer_id: &str,
+    task_id: &str,
+) -> Result<(), RuntimeError> {
+    ensure_requester_peer_trusted(context, requester_peer_id).await?;
+    let port = context
+        .kanna_server_port
+        .ok_or_else(|| RuntimeError::Protocol("Kanna server port is not configured".into()))?;
+    post_local_kanna_task_action(port, task_id, "advance-stage").await
+}
+
+async fn post_local_kanna_task_action(
+    port: u16,
+    task_id: &str,
+    action: &str,
+) -> Result<(), RuntimeError> {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).await?;
+    let path = format!("/v1/tasks/{task_id}/actions/{action}");
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}",
+    );
+    stream.write_all(request.as_bytes()).await?;
+
+    let mut reader = BufReader::new(stream);
+    let mut status_line = String::new();
+    let read = reader.read_line(&mut status_line).await?;
+    if read == 0 {
+        return Err(RuntimeError::Protocol("Kanna server closed without a response".into()));
+    }
+    let status = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|value| value.parse::<u16>().ok())
+        .ok_or_else(|| RuntimeError::Protocol(format!("invalid Kanna server response: {status_line}")))?;
+    if (200..300).contains(&status) {
+        return Ok(());
+    }
+
+    let mut response = String::new();
+    reader.read_to_string(&mut response).await?;
+    Err(RuntimeError::Protocol(format!(
+        "Kanna server task action failed with HTTP {status}: {response}"
+    )))
 }
 
 async fn kill_daemon_session_if_present(
