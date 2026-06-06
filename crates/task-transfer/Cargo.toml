@@ -21,4 +21,5 @@ kanna-daemon = { path = "../daemon" }
 kanna-runtime-defaults = { path = "../runtime-defaults" }
 
 [dev-dependencies]
+if-addrs = "0.15"
 tempfile = "3"

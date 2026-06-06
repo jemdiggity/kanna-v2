@@ -2,7 +2,7 @@ use crate::protocol::PeerRegistryEntry;
 use mdns_sd::{ResolvedService, ScopedIp, ServiceInfo};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use thiserror::Error;
 
 pub const SERVICE_TYPE: &str = "_kanna-xfer._tcp.local.";
@@ -124,8 +124,7 @@ pub fn resolved_service_to_peer_entry(
     service: &ResolvedService,
 ) -> Result<PeerRegistryEntry, DiscoveryError> {
     let record = decode_txt_record(&txt_record_from_resolved_service(service)?)?;
-    let endpoint =
-        SocketAddr::new(select_endpoint_address(service)?, service.get_port()).to_string();
+    let endpoint = select_endpoint_socket_addr(service)?.to_string();
 
     Ok(PeerRegistryEntry {
         peer_id: record.peer_id,
@@ -143,7 +142,8 @@ pub fn service_info_to_peer_entry(
 ) -> Result<PeerRegistryEntry, DiscoveryError> {
     let record = decode_txt_record(&txt_record_from_service_info(service)?)?;
     let endpoint =
-        SocketAddr::new(select_service_info_address(service)?, service.get_port()).to_string();
+        socket_addr_with_scope(select_service_info_address(service)?, service.get_port(), 0)
+            .to_string();
 
     Ok(PeerRegistryEntry {
         peer_id: record.peer_id,
@@ -267,7 +267,8 @@ fn read_service_info_property(
     Ok((key.to_owned(), value.to_owned()))
 }
 
-fn select_endpoint_address(service: &ResolvedService) -> Result<IpAddr, DiscoveryError> {
+fn select_endpoint_socket_addr(service: &ResolvedService) -> Result<SocketAddr, DiscoveryError> {
+    let port = service.get_port();
     service
         .get_addresses()
         .iter()
@@ -278,14 +279,9 @@ fn select_endpoint_address(service: &ResolvedService) -> Result<IpAddr, Discover
                 .iter()
                 .find_map(non_loopback_address)
         })
-        .or_else(|| {
-            service
-                .get_addresses()
-                .iter()
-                .next()
-                .map(ScopedIp::to_ip_addr)
-        })
+        .or_else(|| service.get_addresses().iter().next().map(scoped_ip_addr))
         .ok_or(DiscoveryError::MissingAddress)
+        .map(|(ip, scope_id)| socket_addr_with_scope(ip, port, scope_id))
 }
 
 fn select_service_info_address(service: &ServiceInfo) -> Result<IpAddr, DiscoveryError> {
@@ -299,16 +295,31 @@ fn select_service_info_address(service: &ServiceInfo) -> Result<IpAddr, Discover
         .ok_or(DiscoveryError::MissingAddress)
 }
 
-fn preferred_address(address: &ScopedIp) -> Option<IpAddr> {
+fn preferred_address(address: &ScopedIp) -> Option<(IpAddr, u32)> {
     match address {
-        ScopedIp::V4(v4) if !v4.addr().is_loopback() => Some(IpAddr::V4(*v4.addr())),
+        ScopedIp::V4(v4) if !v4.addr().is_loopback() => Some((IpAddr::V4(*v4.addr()), 0)),
         _ => None,
     }
 }
 
-fn non_loopback_address(address: &ScopedIp) -> Option<IpAddr> {
-    let ip = address.to_ip_addr();
-    (!ip.is_loopback()).then_some(ip)
+fn non_loopback_address(address: &ScopedIp) -> Option<(IpAddr, u32)> {
+    let (ip, scope_id) = scoped_ip_addr(address);
+    (!ip.is_loopback()).then_some((ip, scope_id))
+}
+
+fn scoped_ip_addr(address: &ScopedIp) -> (IpAddr, u32) {
+    match address {
+        ScopedIp::V4(v4) => (IpAddr::V4(*v4.addr()), 0),
+        ScopedIp::V6(v6) => (IpAddr::V6(*v6.addr()), v6.scope_id().index),
+        _ => (address.to_ip_addr(), 0),
+    }
+}
+
+fn socket_addr_with_scope(ip: IpAddr, port: u16, scope_id: u32) -> SocketAddr {
+    match ip {
+        IpAddr::V4(addr) => SocketAddr::V4(SocketAddrV4::new(addr, port)),
+        IpAddr::V6(addr) => SocketAddr::V6(SocketAddrV6::new(addr, port, 0, scope_id)),
+    }
 }
 
 fn validate_txt_entries(txt: &BTreeMap<String, String>) -> Result<(), DiscoveryError> {
@@ -323,4 +334,20 @@ fn validate_txt_entries(txt: &BTreeMap<String, String>) -> Result<(), DiscoveryE
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv6Addr};
+
+    #[test]
+    fn socket_addr_preserves_ipv6_scope_id() {
+        let link_local = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1);
+
+        assert_eq!(
+            socket_addr_with_scope(IpAddr::V6(link_local), 4455, 14).to_string(),
+            "[fe80::1%14]:4455"
+        );
+    }
 }

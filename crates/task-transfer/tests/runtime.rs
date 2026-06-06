@@ -246,6 +246,14 @@ async fn observe_peer_session_reports_empty_peer_response_with_peer_context() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn mdns_peers_can_discover_pair_and_transfer() {
+    // This covers the runtime's mDNS discovery/listing/connection path on one
+    // host. A true scoped IPv6 E2E needs two independently networked macOS
+    // hosts on the same L2 segment with Local Network permission granted,
+    // Bonjour/mDNS enabled, deterministic link-local IPv6 interfaces, and a
+    // harness that can launch and coordinate both Kanna instances. The current
+    // Rust and desktop E2E infrastructure starts peers on one machine, so it
+    // cannot prove cross-Mac link-local scope routing. See the focused
+    // discovery test for the scoped ResolvedService endpoint conversion.
     let temp = tempfile::tempdir().unwrap();
 
     let secondary = TransferRuntime::spawn(
