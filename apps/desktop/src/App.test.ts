@@ -397,6 +397,16 @@ const PreferencesPanelThemeUpdateStub = defineComponent({
   `,
 });
 
+const PreferencesPanelSystemThemeUpdateStub = defineComponent({
+  name: "PreferencesPanel",
+  emits: ["update"],
+  template: `
+    <button data-testid="set-app-system" @click="$emit('update', 'appTheme', 'system')">
+      system
+    </button>
+  `,
+});
+
 function buildIncomingTransferEvent() {
   return {
     payload: {
@@ -671,6 +681,52 @@ describe("App", () => {
     expect(nativeWindowSetThemeMock).toHaveBeenCalledWith("light");
 
     wrapper.unmount();
+  });
+
+  it("re-reads the system color scheme after clearing a forced native theme", async () => {
+    let prefersDark = true;
+    const originalMatchMedia = window.matchMedia;
+    const mediaQuery = {
+      get matches() {
+        return prefersDark;
+      },
+      media: "(prefers-color-scheme: dark)",
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(() => true),
+    };
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      value: vi.fn(() => mediaQuery),
+    });
+    nativeSetThemeMock.mockImplementation(async (theme: "dark" | "light" | null) => {
+      if (theme === null) prefersDark = false;
+    });
+
+    const wrapper = await mountAppWithOverrides(SidebarWithRepoStub, {
+      PreferencesPanel: PreferencesPanelSystemThemeUpdateStub,
+    });
+    nativeSetThemeMock.mockClear();
+
+    capturedKeyboardActions?.openPreferences();
+    await nextTick();
+    await wrapper.get('[data-testid="set-app-system"]').trigger("click");
+    await flushPromises();
+
+    expect(store.savePreference).toHaveBeenCalledWith("appTheme", "system");
+    expect(nativeSetThemeMock).toHaveBeenCalledWith(null);
+    expect(document.documentElement.dataset.theme).toBe("light");
+
+    wrapper.unmount();
+    nativeSetThemeMock.mockReset();
+    nativeSetThemeMock.mockImplementation(async () => {});
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      value: originalMatchMedia,
+    });
   });
 
   it("prevents browser navigation when files are dragged over or dropped on the app shell", async () => {
