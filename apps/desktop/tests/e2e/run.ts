@@ -8,6 +8,13 @@ import { fileURLToPath } from "node:url";
 import { buildRealE2eAgentEnv } from "./runEnv";
 import { createInstanceConfig, type InstanceConfig } from "./runConfig";
 import { pauseBeforeTestTarget, pauseForAppReady } from "./helpers/runSlowMode";
+import { isRealTestTarget, shouldStartInitialInstances } from "./runPlan";
+import {
+  buildFirebaseCommandEnv,
+  buildFirebaseEmulatorCommand,
+  buildFirebaseEmulatorConfig,
+  buildFirebaseEmulatorConfigPath,
+} from "../../../../tools/kd/src/runtime/firebase";
 
 interface CommandOptions {
   cwd: string;
@@ -226,10 +233,6 @@ function needsSecondaryInstance(testTargets: string[]): boolean {
 
 function targetNeedsSecondaryInstance(testTarget: string): boolean {
   return needsSecondaryInstance([testTarget]);
-}
-
-function isRealTestTarget(testTarget: string): boolean {
-  return testTarget.includes("/real/");
 }
 
 function targetNeedsEmulators(testTarget: string): boolean {
@@ -472,9 +475,29 @@ async function main(): Promise<void> {
     if (firebaseEmulatorProcess) return;
 
     firebaseEmulatorOutput = "";
-    const proc = spawn("./kd", ["emulators", "up"], {
+    const configPath = buildFirebaseEmulatorConfigPath(repoRoot, firebaseFirestorePort);
+    await writeFile(
+      configPath,
+      JSON.stringify(
+        buildFirebaseEmulatorConfig({
+          KANNA_FIREBASE_AUTH_PORT: firebaseAuthPort,
+          KANNA_FIREBASE_FIRESTORE_PORT: firebaseFirestorePort,
+          KANNA_FIREBASE_FUNCTIONS_PORT: firebaseFunctionsPort,
+          KANNA_FIREBASE_UI_PORT: firebaseUiPort,
+        }),
+        null,
+        2,
+      ),
+    );
+    await runCommand(["pnpm", "--dir", "services/firebase-functions", "build"], {
       cwd: repoRoot,
-      env: { ...primary.env, ...firebaseEnv },
+      env: primary.env,
+    });
+
+    const emulatorCommand = buildFirebaseEmulatorCommand(configPath);
+    const proc = spawn(emulatorCommand.command, emulatorCommand.args, {
+      cwd: repoRoot,
+      env: buildFirebaseCommandEnv(repoRoot, { ...primary.env, ...firebaseEnv }),
       detached: true,
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -623,7 +646,9 @@ async function main(): Promise<void> {
   let lastTargetWasReal = false;
 
   try {
-    runningInstances = await startInstances(false, !isRealTestTarget(testTargets[0] ?? ""));
+    if (shouldStartInitialInstances(testTargets[0])) {
+      runningInstances = await startInstances(false, true);
+    }
 
     for (const testTarget of testTargets) {
       const targetIsReal = isRealTestTarget(testTarget);

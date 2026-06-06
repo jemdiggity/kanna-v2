@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
+import { missingCloudSmokeEnv } from "./cloudSmokeEnv";
 
 const cloudEnv = process.env.KANNA_CLOUD_ENV ?? "staging";
+const missingEnv = missingCloudSmokeEnv(process.env);
 
 function requireEnv(name: string): string {
   const value = process.env[name]?.trim();
@@ -103,7 +105,7 @@ async function publishSnapshot(
   }
 }
 
-describe("cloud production/staging smoke", () => {
+describe.skipIf(missingEnv.length > 0)("cloud production/staging smoke", () => {
   it("publishes a smoke task through the deployed function and reads it from Firestore", async () => {
     const runId = randomUUID().slice(0, 8);
     const { idToken, localId } = await signInForIdToken();

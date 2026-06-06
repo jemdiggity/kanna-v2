@@ -15,6 +15,12 @@ interface FirebaseConfig {
   emulators?: Record<string, unknown>;
 }
 
+const defaultJavaBinDirs = [
+  "/opt/homebrew/opt/openjdk/bin",
+  "/opt/homebrew/opt/openjdk@25/bin",
+  "/opt/homebrew/opt/openjdk@21/bin",
+];
+
 function withFunctionsRuntime(functions: unknown): unknown {
   if (functions && typeof functions === "object" && !Array.isArray(functions)) {
     return { ...functions, runtime: "nodejs24" };
@@ -23,8 +29,27 @@ function withFunctionsRuntime(functions: unknown): unknown {
 }
 
 export function writeFirebaseEmulatorConfig(repoRoot: string, ports: FirebasePortInput): string {
-  const source = readJsonFile(join(repoRoot, "firebase.json")) as FirebaseConfig;
-  const generated = {
+  const path = buildFirebaseEmulatorConfigPath(repoRoot, ports.KANNA_FIREBASE_FIRESTORE_PORT);
+  writeJsonFile(path, buildFirebaseEmulatorConfig(ports, readJsonFile(join(repoRoot, "firebase.json")) as FirebaseConfig));
+  return path;
+}
+
+export function buildFirebaseEmulatorConfigPath(repoRoot: string, firestorePort: number): string {
+  return join(repoRoot, `.firebase-${firestorePort}.kanna.json`);
+}
+
+export function buildFirebaseEmulatorConfig(
+  ports: FirebasePortInput,
+  source: FirebaseConfig = {
+    firestore: {
+      rules: "firestore.rules",
+    },
+    functions: {
+      source: "services/firebase-functions",
+    },
+  } as FirebaseConfig
+): Record<string, unknown> {
+  return {
     ...source,
     functions: withFunctionsRuntime(source.functions),
     emulators: {
@@ -35,20 +60,33 @@ export function writeFirebaseEmulatorConfig(repoRoot: string, ports: FirebasePor
       ui: { enabled: true, host: "0.0.0.0", port: ports.KANNA_FIREBASE_UI_PORT }
     }
   };
-  const path = join(repoRoot, `.firebase-${ports.KANNA_FIREBASE_FIRESTORE_PORT}.kanna.json`);
-  writeJsonFile(path, generated);
-  return path;
 }
 
 export function buildFirebaseEmulatorArgs(configPath: string, extraArgs: string[]): string[] {
   return ["exec", "firebase", "emulators:start", "--project", "kanna-local", "--config", configPath, ...extraArgs];
 }
 
-export function buildFirebaseCommandEnv(repoRoot: string, env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+export function buildFirebaseEmulatorCommand(configPath: string): { command: string; args: string[] } {
+  return {
+    command: "pnpm",
+    args: buildFirebaseEmulatorArgs(configPath, [])
+  };
+}
+
+export function buildFirebaseCommandEnv(
+  repoRoot: string,
+  env: NodeJS.ProcessEnv,
+  javaBinDirs: string[] = defaultJavaBinDirs
+): NodeJS.ProcessEnv {
   const repoNodeModules = join(repoRoot, "node_modules");
+  const pathEntries = [
+    ...javaBinDirs,
+    ...(env.PATH ? env.PATH.split(":") : [])
+  ].filter((entry, index, entries) => entry && entries.indexOf(entry) === index);
   return {
     ...env,
-    NODE_PATH: env.NODE_PATH ? `${repoNodeModules}:${env.NODE_PATH}` : repoNodeModules
+    NODE_PATH: env.NODE_PATH ? `${repoNodeModules}:${env.NODE_PATH}` : repoNodeModules,
+    PATH: pathEntries.join(":")
   };
 }
 
