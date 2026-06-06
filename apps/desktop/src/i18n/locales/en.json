@@ -217,6 +217,7 @@
     "branchIncludeNone": "None",
     "searchPlaceholder": "Search...",
     "searchNoMatches": "No matches",
+    "fileSkippedTooLarge": "Large diff omitted to keep the viewer responsive.",
     "shortcutSearch": "Search",
     "shortcutSearchAlt": "Search (alt)",
     "shortcutNextPrevMatch": "Next / Prev match",

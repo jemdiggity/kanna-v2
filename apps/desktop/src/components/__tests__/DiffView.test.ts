@@ -526,6 +526,62 @@ describe("DiffView", () => {
     }
   });
 
+  it("skips rendering files with oversized diff lines while keeping other files visible", async () => {
+    diffMocks.parsePatchFilesMock.mockReturnValueOnce([
+      {
+        files: [
+          {
+            name: "src/normal.ts",
+            hunks: [],
+            additionLines: ["const ok = true;"],
+            deletionLines: [],
+          },
+          {
+            name: "artifacts/raw-capture.json",
+            hunks: [],
+            additionLines: ["x".repeat(300_000)],
+            deletionLines: [],
+          },
+        ],
+      },
+    ]);
+
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "git_diff") return "diff --git a/src/normal.ts b/src/normal.ts";
+      return "";
+    });
+
+    const wrapper = mount(DiffView, {
+      props: {
+        repoPath: "/repo",
+        initialScope: "working",
+      },
+      attachTo: document.body,
+      global: {
+        mocks: {
+          $t: (key: string) => key,
+        },
+      },
+    });
+
+    await flushPromises();
+    await flushPromises();
+
+    expect(renderMock).toHaveBeenCalledTimes(1);
+    expect(renderMock.mock.calls[0][0].fileDiff).toMatchObject({
+      name: "src/normal.ts",
+    });
+    expect(wrapper.findAll(".diff-file-header").map((header) => header.text())).toEqual([
+      "src/normal.ts",
+      "artifacts/raw-capture.json",
+    ]);
+    expect(wrapper.get(".diff-file-skipped").text()).toBe(
+      "Large diff omitted to keep the viewer responsive.",
+    );
+
+    wrapper.unmount();
+  });
+
   it("restores the previous scroll position when switching diff scopes", async () => {
     invokeMock.mockImplementation(async (command) => {
       if (command === "git_diff") return "diff --git a/working.txt b/working.txt";
