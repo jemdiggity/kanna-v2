@@ -328,6 +328,58 @@ describe("buildWorkspace", () => {
     });
   });
 
+  it("keeps remote actions enabled when one source is reachable and another duplicate source has no terminal ref", () => {
+    const cloudItem = item({
+      id: "cloud:remote-repo:task-2",
+      repo_id: "repo-local",
+      prompt: "Partially reachable task",
+    });
+    const lanItem = item({
+      id: "cloud:lan:peer-primary:remote-repo:task-2",
+      repo_id: "repo-local",
+      prompt: "Partially reachable task",
+    });
+
+    const result = buildWorkspace({
+      localRepos: [{ repo: repo({ id: "repo-local" }), remoteUrlHash: "same-hash" }],
+      localItems: [],
+      cloudSnapshot: {
+        repos: [],
+        items: [cloudItem],
+        terminalRefs: {
+          "cloud:remote-repo:task-2": {
+            ownerDesktopId: "desktop-relay-id",
+            ownerLocalTaskId: "task-2",
+            transport: "cloud",
+          },
+        },
+      },
+      lanSnapshot: {
+        repos: [],
+        items: [lanItem],
+        terminalRefs: {},
+      },
+    });
+
+    expect(result.tasks).toHaveLength(1);
+    expect(result.tasks[0]).toMatchObject({
+      reachability: "reachable",
+      terminal: {
+        kind: "cloud",
+        remoteRef: {
+          ownerDesktopId: "desktop-relay-id",
+          ownerLocalTaskId: "task-2",
+          transport: "cloud",
+        },
+      },
+      capabilities: {
+        canAdvanceStage: true,
+        canClose: true,
+        canSendInput: true,
+      },
+    });
+  });
+
   it("marks reachable cloud tasks as remotely controllable without local-only actions", () => {
     const cloudItem = item({
       id: "cloud:remote-repo:task-control",
@@ -370,7 +422,7 @@ describe("buildWorkspace", () => {
       canOpenDiff: false,
       canOpenInIde: false,
       canOpenShell: false,
-      canAdvanceStage: false,
+      canAdvanceStage: true,
       canEditMetadata: true,
     });
   });

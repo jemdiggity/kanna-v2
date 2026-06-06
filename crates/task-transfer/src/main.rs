@@ -169,6 +169,17 @@ async fn handle_request(runtime: &TransferRuntime, request: ControlRequest) -> C
             Ok(()) => ControlResponse::ClosePeerTask { request_id },
             Err(error) => control_error(request_id, error),
         },
+        ControlRequest::AdvancePeerTaskStage {
+            request_id,
+            target_peer_id,
+            task_id,
+        } => match runtime
+            .advance_peer_task_stage(&target_peer_id, &task_id)
+            .await
+        {
+            Ok(()) => ControlResponse::AdvancePeerTaskStage { request_id },
+            Err(error) => control_error(request_id, error),
+        },
         ControlRequest::UnobservePeerSession {
             request_id,
             target_peer_id,

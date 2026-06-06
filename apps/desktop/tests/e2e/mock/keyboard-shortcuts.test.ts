@@ -574,6 +574,87 @@ describe("keyboard shortcuts", () => {
     expect(finalMetrics.selectedBottom).toBeLessThanOrEqual(finalMetrics.contentBottom + 1);
   });
 
+  it("routes Cmd+S for a reachable remote task through the owning peer action", async () => {
+    await resetDatabase(client);
+    await client.executeSync("location.reload()");
+    await client.waitForAppReady();
+    await dismissStartupShortcutsModal(client);
+
+    const remoteRepoId = "cloud:keyboard-remote-repo";
+    const remoteTaskId = "cloud:lan:peer-owner:keyboard-remote-repo:task-remote";
+    const ownerTaskId = "task-remote";
+    const seedResult = await client.executeAsync<string>(
+      `const cb = arguments[arguments.length - 1];
+       const ctx = ${CTX_SCRIPT};
+       window.__KANNA_E2E__.appMetrics.clear();
+       ctx.lanSnapshot = {
+         repos: [{
+           id: ${JSON.stringify(remoteRepoId)},
+           path: "lan",
+           name: "keyboard-remote",
+           remote_url: "git@example.com:keyboard/remote.git",
+           default_branch: "main",
+           hidden: 0,
+           sort_order: 0,
+           created_at: "2026-04-17T10:00:00.000Z",
+           last_opened_at: "2026-04-17T10:00:00.000Z"
+         }],
+         items: [{
+           id: ${JSON.stringify(remoteTaskId)},
+           repo_id: ${JSON.stringify(remoteRepoId)},
+           prompt: "Remote Cmd+S task",
+           pipeline: "default",
+           stage: "in progress",
+           tags: "[]",
+           pr_number: null,
+           pr_url: null,
+           branch: ${JSON.stringify(ownerTaskId)},
+           activity: "idle",
+           activity_changed_at: "2026-04-17T10:00:00.000Z",
+           unread_at: null,
+           port_offset: null,
+           port_env: null,
+           pinned: 0,
+           pin_order: null,
+           display_name: "Remote Cmd+S task",
+           issue_number: null,
+           issue_title: null,
+           closed_at: null,
+           agent_session_id: null,
+           base_ref: "origin/main",
+           agent_provider: "codex",
+           agent_type: "pty",
+           previous_stage: null,
+           stage_result: null,
+           teardown_started_at: null,
+           last_output_preview: null,
+           active_post_action: null,
+           created_at: "2026-04-17T10:00:00.000Z",
+           updated_at: "2026-04-17T10:00:00.000Z"
+         }],
+         terminalRefs: {
+           [${JSON.stringify(remoteTaskId)}]: {
+             ownerDesktopId: "peer-owner",
+             ownerLocalTaskId: ${JSON.stringify(ownerTaskId)},
+             transport: "lan"
+           }
+         }
+       };
+       ctx.selectedCloudRepoId = ${JSON.stringify(remoteRepoId)};
+       ctx.selectedCloudItemId = ${JSON.stringify(remoteTaskId)};
+       cb("ok");`,
+    );
+    expect(seedResult).toBe("ok");
+
+    await pressKey("s", { meta: true });
+    await sleep(300);
+
+    const metrics = await client.executeSync<{ invokeCounts: Record<string, number> }>(
+      "return window.__KANNA_E2E__.appMetrics.snapshot();",
+    );
+    expect(metrics.invokeCounts.advance_transfer_peer_task_stage ?? 0).toBeGreaterThan(0);
+  });
+
   it("uses native repo-navigation events to navigate repos", async () => {
     await resetDatabase(client);
     await client.executeSync("location.reload()");

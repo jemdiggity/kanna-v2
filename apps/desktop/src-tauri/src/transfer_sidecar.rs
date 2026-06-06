@@ -213,6 +213,24 @@ impl TransferSidecarClient {
         .await
     }
 
+    pub async fn advance_peer_task_stage(
+        &mut self,
+        peer_id: String,
+        task_id: String,
+    ) -> Result<Value, String> {
+        let request_id = self.next_request_id("advance-stage");
+        self.send_request(
+            json!({
+                "type": "advance_peer_task_stage",
+                "request_id": request_id,
+                "target_peer_id": peer_id,
+                "task_id": task_id,
+            }),
+            &request_id,
+        )
+        .await
+    }
+
     pub async fn start_peer_pairing(&mut self, peer_id: String) -> Result<Value, String> {
         let request_id = self.next_request_id("pair");
         eprintln!(
@@ -712,6 +730,10 @@ fn build_transfer_sidecar_env_from_resolved(
         });
     env.insert("KANNA_DB_PATH".to_string(), db_path.clone());
     env.insert("KANNA_CLI_DB_PATH".to_string(), db_path);
+    env.insert(
+        "KANNA_MOBILE_SERVER_PORT".to_string(),
+        std::env::var("KANNA_MOBILE_SERVER_PORT").unwrap_or_else(|_| "48120".to_string()),
+    );
     Ok(env)
 }
 
@@ -760,6 +782,12 @@ mod tests {
         fn unset(key: &'static str) -> Self {
             let previous = std::env::var(key).ok();
             std::env::remove_var(key);
+            Self { key, previous }
+        }
+
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
             Self { key, previous }
         }
     }
@@ -867,6 +895,21 @@ mod tests {
                     .to_str()
                     .expect("daemon dir should be utf-8")
             )
+        );
+    }
+
+    #[test]
+    fn transfer_sidecar_env_forwards_mobile_server_port_for_peer_actions() {
+        let _lock = env_lock();
+        let _guard = EnvVarGuard::set("KANNA_MOBILE_SERVER_PORT", "48129");
+        let temp = TestTempDir::new();
+
+        let env = build_transfer_sidecar_env(temp.path(), Some("Jeremy's MacBook Pro"))
+            .expect("sidecar env should be built");
+
+        assert_eq!(
+            env.get("KANNA_MOBILE_SERVER_PORT").map(String::as_str),
+            Some("48129")
         );
     }
 

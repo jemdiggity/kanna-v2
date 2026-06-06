@@ -174,6 +174,34 @@ pub async fn handle_invoke(
                 .map_err(|e| format!("db error: {}", e))?;
             Ok(Value::Null)
         }
+        "advance_stage" => {
+            let task_id = args
+                .get("task_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "missing required arg: task_id".to_string())?;
+            let transition = {
+                let db = Db::open(&config.db_path).map_err(|e| format!("db error: {}", e))?;
+                task_creator::prepare_advance_stage_for_api(&db, config, task_id)?
+            };
+            match transition {
+                task_creator::PreparedStageTransition::Spawn(prepared) => {
+                    let created = task_creator::spawn_prepared_task_for_api(daemon, prepared).await?;
+                    let db = Db::open(&config.db_path).map_err(|e| format!("db error: {}", e))?;
+                    db.close_pipeline_item(task_id)
+                        .map_err(|e| format!("db error: {}", e))?;
+                    Ok(serde_json::json!({ "task_id": created.task_id }))
+                }
+                task_creator::PreparedStageTransition::Continue(prepared) => {
+                    let continued = task_creator::continue_prepared_stage_for_api(
+                        &config.db_path,
+                        daemon,
+                        prepared,
+                    )
+                    .await?;
+                    serde_json::to_value(continued).map_err(|e| format!("serialize error: {}", e))
+                }
+            }
+        }
         "run_merge_agent" => {
             let task_id = args
                 .get("task_id")

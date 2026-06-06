@@ -1,3 +1,5 @@
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
@@ -10,6 +12,7 @@ import { callVueMethod, queryDb, tauriInvoke } from "../helpers/vue";
 interface TransferPeer {
   peer_id?: string;
   peerId?: string;
+  trusted?: boolean;
 }
 
 interface VueCallError {
@@ -19,6 +22,7 @@ interface VueCallError {
 const { primary, secondary } = createPrimaryAndSecondaryClients();
 let testRepoPath = "";
 let secondaryRepoId = "";
+const pipelineName = "lan-advance-stage-e2e";
 
 function isVueCallError(value: unknown): value is VueCallError {
   return Boolean(
@@ -47,6 +51,20 @@ async function waitForPeer(peerId: string, timeoutMs = 20_000): Promise<void> {
   }
 
   throw new Error(`timed out waiting for peer ${peerId}`);
+}
+
+async function ensurePairedPeers(): Promise<void> {
+  await waitForPeer("peer-secondary");
+  const raw = await tauriInvoke(primary, "list_transfer_peers");
+  const peer = Array.isArray(raw)
+    ? raw.find((candidate) => readPeerId(candidate as TransferPeer) === "peer-secondary") as TransferPeer | undefined
+    : undefined;
+  if (peer?.trusted) return;
+
+  await pairWithPeerThroughUi(primary, "Secondary", "peer-secondary", {
+    promptClient: secondary,
+    promptPeerId: "peer-primary",
+  });
 }
 
 async function waitForSidebarTask(text: string, timeoutMs = 30_000): Promise<void> {
@@ -283,6 +301,34 @@ async function waitForSidebarTaskGroupedUnderRepo(prompt: string, repoId: string
   throw new Error(`timed out waiting for LAN task ${prompt} to be grouped under repo ${repoId}; diagnostics=${JSON.stringify(lastDiagnostics)}`);
 }
 
+async function waitForPrimaryTaskStage(taskId: string, stage: string, timeoutMs = 30_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let lastRows: unknown[] = [];
+  while (Date.now() < deadline) {
+    lastRows = await queryDb(
+      primary,
+      "SELECT stage, closed_at FROM pipeline_item WHERE id = ?",
+      [taskId],
+    );
+    const row = lastRows[0] as { stage?: string; closed_at?: string | null } | undefined;
+    if (row?.stage === stage && row.closed_at === null) return;
+    await sleep(250);
+  }
+  throw new Error(`timed out waiting for owner task ${taskId} stage ${stage}; rows=${JSON.stringify(lastRows)}`);
+}
+
+async function waitForSecondaryRemoteTaskStage(prompt: string, stage: string, timeoutMs = 30_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let lastItems: unknown[] = [];
+  while (Date.now() < deadline) {
+    lastItems = await sidebarItemsForPrompt(secondary, prompt);
+    const item = lastItems[0] as { stage?: string; isRemote?: boolean } | undefined;
+    if (lastItems.length === 1 && item?.stage === stage && item.isRemote === true) return;
+    await sleep(250);
+  }
+  throw new Error(`timed out waiting for secondary remote task ${prompt} stage ${stage}; items=${JSON.stringify(lastItems)}`);
+}
+
 describe("local transfer task sync", () => {
   let repoId = "";
 
@@ -292,8 +338,26 @@ describe("local transfer task sync", () => {
     await resetDatabase(primary);
     await resetDatabase(secondary);
     testRepoPath = await createFixtureRepo("local-transfer-task-sync");
+    const kannaDir = join(testRepoPath, ".kanna");
+    await mkdir(join(kannaDir, "pipelines"), { recursive: true });
+    await writeFile(
+      join(kannaDir, "pipelines", `${pipelineName}.json`),
+      JSON.stringify({
+        name: "LAN Advance Stage E2E",
+        stages: [
+          { name: "in progress", transition: "manual" },
+          {
+            name: "qa",
+            transition: "manual",
+            mode: "continue",
+            prompt: "Continue LAN remote stage advance",
+          },
+        ],
+      }),
+    );
     repoId = await importTestRepo(primary, testRepoPath, "local-transfer-task-sync-source");
     secondaryRepoId = await importTestRepo(secondary, testRepoPath, "local-transfer-task-sync-secondary");
+    await ensurePairedPeers();
   });
 
   afterAll(async () => {
@@ -306,11 +370,6 @@ describe("local transfer task sync", () => {
 
   it("shows a primary task on a paired LAN peer without importing it locally", async () => {
     expect(await countLocalTasksOnSecondary()).toBe(0);
-    await waitForPeer("peer-secondary");
-    await pairWithPeerThroughUi(primary, "Secondary", "peer-secondary", {
-      promptClient: secondary,
-      promptPeerId: "peer-primary",
-    });
 
     const createResult = await callVueMethod(
       primary,
@@ -421,5 +480,78 @@ describe("local transfer task sync", () => {
       throw new Error(closeResult.__error);
     }
     await waitForSidebarTaskToDisappear("LAN visible task");
+  });
+
+  it("advances a reachable LAN task on the owning desktop when secondary presses Cmd+S", async () => {
+    expect(await countLocalTasksOnSecondary()).toBe(0);
+
+    const createResult = await callVueMethod(
+      primary,
+      "store.createItem",
+      repoId,
+      testRepoPath,
+      "LAN advance stage task",
+      "sdk",
+      {
+        agentProvider: "codex",
+        baseRef: "origin/main",
+        pipelineName,
+      },
+    );
+    if (isVueCallError(createResult)) {
+      throw new Error(createResult.__error);
+    }
+    const taskId = String(createResult);
+
+    await tauriInvoke(primary, "spawn_session", {
+      sessionId: taskId,
+      cwd: testRepoPath,
+      executable: "/bin/zsh",
+      args: [
+        "--login",
+        "-c",
+        "printf 'LAN advance terminal ready\\n'; while IFS= read -r line; do printf 'LAN advance input:%s\\n' \"$line\"; done",
+      ],
+      env: {},
+      cols: 80,
+      rows: 24,
+      agentProvider: "codex",
+    });
+
+    await waitForSidebarTask("LAN advance stage task");
+    await waitForSidebarTaskGroupedUnderRepo("LAN advance stage task", secondaryRepoId);
+    expect(await sidebarItemsForPrompt(primary, "LAN advance stage task")).toEqual([
+      expect.objectContaining({
+        id: taskId,
+        repo_id: repoId,
+        isRemote: false,
+        stage: "in progress",
+      }),
+    ]);
+    expect(await sidebarItemsForPrompt(secondary, "LAN advance stage task")).toEqual([
+      expect.objectContaining({
+        id: expect.stringMatching(/^cloud:lan:/),
+        repo_id: secondaryRepoId,
+        isRemote: true,
+        stage: "in progress",
+      }),
+    ]);
+    expect(await countLocalTasksOnSecondary()).toBe(0);
+
+    await selectSidebarTaskByTitle(secondary, "LAN advance stage task");
+    await secondary.executeSync(buildGlobalKeydownScript({ key: "s", meta: true }));
+
+    await waitForPrimaryTaskStage(taskId, "qa");
+    await waitForSecondaryRemoteTaskStage("LAN advance stage task", "qa");
+
+    expect(await countLocalTasksOnSecondary()).toBe(0);
+    expect(await sidebarItemsForPrompt(secondary, "LAN advance stage task")).toEqual([
+      expect.objectContaining({
+        id: expect.stringMatching(/^cloud:lan:/),
+        repo_id: secondaryRepoId,
+        isRemote: true,
+        stage: "qa",
+      }),
+    ]);
   });
 });

@@ -59,6 +59,7 @@ export interface DesktopRelayTerminalClient {
   sendInput(options: SendRemoteTerminalInputOptions): Promise<void>;
   resize(options: ResizeRemoteTerminalOptions): Promise<void>;
   closeTask(options: RemoteTerminalActionOptions): Promise<void>;
+  advanceStage(options: RemoteTerminalActionOptions): Promise<void>;
 }
 
 export async function createConfiguredDesktopRelayTerminalClient(): Promise<DesktopRelayTerminalClient | null> {
@@ -279,6 +280,12 @@ export function createDesktopRelayTerminalClient({
     async closeTask(options) {
       await sendInvoke(options.desktopId, {
         command: "close_task",
+        args: { task_id: options.taskId },
+      });
+    },
+    async advanceStage(options) {
+      await sendInvoke(options.desktopId, {
+        command: "advance_stage",
         args: { task_id: options.taskId },
       });
     },

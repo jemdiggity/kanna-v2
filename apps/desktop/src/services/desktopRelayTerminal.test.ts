@@ -129,7 +129,7 @@ describe("createDesktopRelayTerminalClient", () => {
     await expect(promise).resolves.toBeUndefined();
   });
 
-  it("sends terminal resize and close task through the relay", async () => {
+  it("sends terminal resize, close task, and advance stage through the relay", async () => {
     const socket = new FakeSocket();
     const client = createDesktopRelayTerminalClient({
       createSocket: () => socket,
@@ -144,6 +144,10 @@ describe("createDesktopRelayTerminalClient", () => {
       rows: 32,
     });
     const closePromise = client.closeTask({
+      desktopId: "desktop-owner",
+      taskId: "task-1",
+    });
+    const advancePromise = client.advanceStage({
       desktopId: "desktop-owner",
       taskId: "task-1",
     });
@@ -166,13 +170,20 @@ describe("createDesktopRelayTerminalClient", () => {
       command: "close_task",
       args: { task_id: "task-1" },
     }));
+    expect(sent).toContainEqual(expect.objectContaining({
+      type: "invoke",
+      desktopId: "desktop-owner",
+      command: "advance_stage",
+      args: { task_id: "task-1" },
+    }));
 
-    for (const command of ["resize_session", "close_task"]) {
+    for (const command of ["resize_session", "close_task", "advance_stage"]) {
       const invokeId = sent.find((entry) => entry.command === command).id;
       socket.onmessage?.({ data: JSON.stringify({ type: "response", id: invokeId, data: null }) });
     }
 
     await expect(resizePromise).resolves.toBeUndefined();
     await expect(closePromise).resolves.toBeUndefined();
+    await expect(advancePromise).resolves.toBeUndefined();
   });
 });

@@ -227,7 +227,7 @@ function mergeWorkspaceTask(existing: WorkspaceTask, candidate: Candidate): Work
     reachability: existing.reachability === "local" ? "local" : bestRoute.kind === "none" ? "unknown" : "reachable",
     capabilities: existing.localTaskId
       ? existing.capabilities
-      : capabilitiesFor(candidate),
+      : capabilitiesForRoute(bestRoute),
   };
 }
 
@@ -258,19 +258,34 @@ function capabilitiesFor(candidate: Candidate): WorkspaceCapabilities {
   const isLocal = candidate.source.kind === "local";
   const hasTerminal = isLocal || Boolean(candidate.source.terminalRef);
   const isReachable = isLocal || Boolean(candidate.source.terminalRef);
+  return buildCapabilities({ isLocal, hasTerminal, isReachable });
+}
+
+function capabilitiesForRoute(route: WorkspaceTerminalRoute): WorkspaceCapabilities {
+  const isLocal = route.kind === "local";
+  const hasTerminal = route.kind !== "none";
+  const isReachable = route.kind !== "none";
+  return buildCapabilities({ isLocal, hasTerminal, isReachable });
+}
+
+function buildCapabilities(input: {
+  isLocal: boolean;
+  hasTerminal: boolean;
+  isReachable: boolean;
+}): WorkspaceCapabilities {
   return {
-    canOpenTerminal: hasTerminal,
-    canSendInput: hasTerminal,
-    canResizeTerminal: hasTerminal,
-    canClose: isReachable,
+    canOpenTerminal: input.hasTerminal,
+    canSendInput: input.hasTerminal,
+    canResizeTerminal: input.hasTerminal,
+    canClose: input.isReachable,
     canCreateSiblingTask: true,
-    canPushToMachine: isLocal,
-    canPullFromMachine: !isLocal,
-    canOpenDiff: isLocal,
-    canOpenInIde: isLocal,
-    canOpenShell: isLocal,
-    canAdvanceStage: isLocal,
-    canEditMetadata: isReachable,
+    canPushToMachine: input.isLocal,
+    canPullFromMachine: !input.isLocal,
+    canOpenDiff: input.isLocal,
+    canOpenInIde: input.isLocal,
+    canOpenShell: input.isLocal,
+    canAdvanceStage: input.isReachable,
+    canEditMetadata: input.isReachable,
   };
 }
 
