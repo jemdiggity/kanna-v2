@@ -269,6 +269,126 @@ describe("diff view", () => {
     expect(String(patch)).toContain("# diff test marker");
   });
 
+  it("skips an oversized diff line while rendering a normal changed file", async () => {
+    const branch = await client.executeSync<string | null>(
+      `const ctx = window.__KANNA_E2E__.setupState;
+       const item = ctx.selectedItem();
+       return item ? (item.branch?.value || item.branch) : null;`
+    );
+    if (!branch) {
+      throw new Error("expected selected task to have a worktree branch");
+    }
+
+    const worktreePath = `${testRepoPath}/.kanna-worktrees/${branch}`;
+    const oversizedScript = [
+      "mkdir -p diff-oversized",
+      "printf 'normal baseline\\n' > diff-oversized/normal.txt",
+      "printf 'small baseline\\n' > diff-oversized/huge.txt",
+      "git add diff-oversized/normal.txt diff-oversized/huge.txt",
+      "git commit -m 'add oversized diff e2e fixtures'",
+      "printf 'normal changed marker\\n' > diff-oversized/normal.txt",
+      "awk 'BEGIN { for (i = 0; i < 260001; i++) printf \"x\"; printf \"\\n\" }' > diff-oversized/huge.txt",
+    ].join("\n");
+
+    await tauriInvoke(client, "run_script", {
+      script: oversizedScript,
+      cwd: worktreePath,
+      env: {},
+    });
+
+    const patch = await tauriInvoke(client, "git_diff", {
+      repoPath: worktreePath,
+      mode: "all",
+    });
+    expect(typeof patch).toBe("string");
+    expect(String(patch)).toContain("diff --git a/diff-oversized/normal.txt b/diff-oversized/normal.txt");
+    expect(String(patch)).toContain("diff --git a/diff-oversized/huge.txt b/diff-oversized/huge.txt");
+
+    await client.executeSync(buildGlobalKeydownScript({ key: "Escape" }));
+    await client.waitForNoElement(".diff-view", 2_000);
+    await sleep(250);
+    await client.executeSync(buildGlobalKeydownScript({ key: "d", meta: true }));
+    await client.waitForElement(".diff-view", 5_000);
+
+    const result = await client.executeAsync<{
+      normalHeaderVisible: boolean;
+      normalRendered: boolean;
+      oversizedHeaderVisible: boolean;
+      oversizedSkipped: boolean;
+      oversizedRendered: boolean;
+      skippedText: string;
+      timedOut?: boolean;
+      headers?: string[];
+    }>(
+      `const cb = arguments[arguments.length - 1];
+       let done = false;
+       const finish = (value) => {
+         if (done) return;
+         done = true;
+         clearInterval(interval);
+         clearTimeout(timeout);
+         cb(value);
+       };
+       const readWrapper = (path) => {
+         const wrappers = Array.from(document.querySelectorAll(".diff-container .diff-file"));
+         const wrapper = wrappers.find((candidate) => {
+           const header = candidate.querySelector(".diff-file-header");
+           return (header?.getAttribute("title") || header?.textContent || "") === path;
+         });
+         if (!wrapper) return null;
+         const renderedText = Array.from(wrapper.querySelectorAll("diffs-container"))
+           .map((container) => container.shadowRoot?.textContent || container.textContent || "")
+           .join("\\n");
+         const skipped = wrapper.querySelector(".diff-file-skipped");
+         return {
+           renderedText,
+           skippedText: skipped?.textContent || "",
+           hasRenderedContainer: Boolean(wrapper.querySelector("diffs-container")),
+         };
+       };
+       const snapshot = () => {
+         const normal = readWrapper("diff-oversized/normal.txt");
+         const oversized = readWrapper("diff-oversized/huge.txt");
+         return {
+           normalHeaderVisible: Boolean(normal),
+           normalRendered: Boolean(normal?.renderedText.includes("normal changed marker")),
+           oversizedHeaderVisible: Boolean(oversized),
+           oversizedSkipped: oversized?.skippedText === "Large diff omitted to keep the viewer responsive.",
+           oversizedRendered: Boolean(oversized?.hasRenderedContainer),
+           skippedText: oversized?.skippedText || "",
+         };
+       };
+       const maybeFinish = () => {
+         const current = snapshot();
+         if (current.normalRendered && current.oversizedSkipped) finish(current);
+       };
+       const interval = setInterval(maybeFinish, 25);
+       const timeout = setTimeout(() => {
+         finish({
+           ...snapshot(),
+           timedOut: true,
+           headers: Array.from(document.querySelectorAll(".diff-file-header"))
+             .map((header) => header.getAttribute("title") || header.textContent || ""),
+         });
+       }, 10000);
+       maybeFinish();`
+    );
+
+    if (result.timedOut) {
+      throw new Error(`timed out waiting for oversized diff guard: ${JSON.stringify(result)}`);
+    }
+
+    expect(result.normalHeaderVisible).toBe(true);
+    expect(result.normalRendered).toBe(true);
+    expect(result.oversizedHeaderVisible).toBe(true);
+    expect(result.oversizedSkipped).toBe(true);
+    expect(result.oversizedRendered).toBe(false);
+    expect(result.skippedText).toBe("Large diff omitted to keep the viewer responsive.");
+
+    await client.executeSync(buildGlobalKeydownScript({ key: "Escape" }));
+    await client.waitForNoElement(".diff-view", 2_000);
+  });
+
   it("keeps the sticky diff file header flush with the diff scroller", async () => {
     const branch = await client.executeSync<string | null>(
       `const ctx = window.__KANNA_E2E__.setupState;

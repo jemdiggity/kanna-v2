@@ -527,27 +527,26 @@ describe("DiffView", () => {
   });
 
   it("skips rendering files with oversized diff lines while keeping other files visible", async () => {
-    diffMocks.parsePatchFilesMock.mockReturnValueOnce([
-      {
-        files: [
-          {
-            name: "src/normal.ts",
-            hunks: [],
-            additionLines: ["const ok = true;"],
-            deletionLines: [],
-          },
-          {
-            name: "artifacts/raw-capture.json",
-            hunks: [],
-            additionLines: ["x".repeat(300_000)],
-            deletionLines: [],
-          },
-        ],
-      },
-    ]);
+    const patch = [
+      "diff --git a/src/normal.ts b/src/normal.ts",
+      "index 7898192..6178079 100644",
+      "--- a/src/normal.ts",
+      "+++ b/src/normal.ts",
+      "@@ -1 +1 @@",
+      "-const ok = false;",
+      "+const ok = true;",
+      "diff --git a/artifacts/raw-capture.json b/artifacts/raw-capture.json",
+      "index 7898192..6178079 100644",
+      "--- a/artifacts/raw-capture.json",
+      "+++ b/artifacts/raw-capture.json",
+      "@@ -1 +1 @@",
+      "-{}",
+      `+${"x".repeat(300_000)}`,
+      "",
+    ].join("\n");
 
     invokeMock.mockImplementation(async (command) => {
-      if (command === "git_diff") return "diff --git a/src/normal.ts b/src/normal.ts";
+      if (command === "git_diff") return patch;
       return "";
     });
 
