@@ -113,7 +113,7 @@ fn main() {
             ),
         ];
         panic!(
-            "tauri_build failed: {error:#}\ncwd={cwd:?}\nCARGO_MANIFEST_DIR={manifest_dir:?}\npath_diagnostics={diagnostics:?}"
+            "tauri_build failed: {error:#}\ncwd={cwd:?}\nCARGO_MANIFEST_DIR={manifest_dir:?}\npath_diagnostics={diagnostics:?}\nIf this is a focused desktop Rust test from a fresh worktree, run `./kd build sidecars` first so Tauri externalBin inputs exist."
         );
     }
 }

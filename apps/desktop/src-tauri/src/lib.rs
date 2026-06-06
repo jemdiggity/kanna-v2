@@ -253,17 +253,11 @@ fn short_socket_path(dir: &PathBuf) -> PathBuf {
 
 /// Directory where daemon stores PID file and logs.
 pub fn daemon_data_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("KANNA_DAEMON_DIR") {
-        return PathBuf::from(dir);
-    }
-    kanna_runtime_defaults::default_daemon_dir()
+    kanna_runtime_defaults::daemon_dir_for_current_runtime()
 }
 
 pub fn daemon_socket_path() -> PathBuf {
-    if let Ok(dir) = std::env::var("KANNA_DAEMON_DIR") {
-        return short_socket_path(&PathBuf::from(dir));
-    }
-    short_socket_path(&kanna_runtime_defaults::default_daemon_dir())
+    short_socket_path(&daemon_data_dir())
 }
 
 #[cfg(debug_assertions)]
@@ -413,10 +407,18 @@ async fn ensure_daemon_running() {
         return;
     };
 
-    let is_worktree = std::env::var("KANNA_WORKTREE").is_ok();
+    let daemon_dir = daemon_data_dir();
+    let inferred_worktree = kanna_runtime_defaults::worktree_root_for_path(&daemon_bin)
+        .or_else(|| {
+            std::env::current_exe()
+                .ok()
+                .and_then(|path| kanna_runtime_defaults::worktree_root_for_path(&path))
+        })
+        .is_some();
+    let is_worktree = std::env::var("KANNA_WORKTREE").is_ok() || inferred_worktree;
     eprintln!(
-        "[daemon] spawning {:?} (worktree={})",
-        daemon_bin, is_worktree
+        "[daemon] spawning {:?} (worktree={}, daemon_dir={:?})",
+        daemon_bin, is_worktree, daemon_dir
     );
     use std::os::unix::process::CommandExt;
     // setsid() detaches daemon from our process group so Ctrl+C doesn't kill it
@@ -425,9 +427,10 @@ async fn ensure_daemon_running() {
     if is_worktree {
         explicit_env.push(("KANNA_WORKTREE".to_string(), "1".to_string()));
     }
-    if let Ok(daemon_dir) = std::env::var("KANNA_DAEMON_DIR") {
-        explicit_env.push(("KANNA_DAEMON_DIR".to_string(), daemon_dir));
-    }
+    explicit_env.push((
+        "KANNA_DAEMON_DIR".to_string(),
+        daemon_dir.to_string_lossy().to_string(),
+    ));
     subprocess_env::apply_child_env(&mut cmd, explicit_env);
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -441,7 +444,7 @@ async fn ensure_daemon_running() {
     } {
         Ok(child) => {
             let expected_pid = child.id().to_string();
-            let pid_path = daemon_data_dir().join("daemon.pid");
+            let pid_path = daemon_dir.join("daemon.pid");
 
             // Wait for the NEW daemon to be ready:
             // PID file must match our child AND socket must be connectable.

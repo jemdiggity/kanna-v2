@@ -17,6 +17,50 @@ pub fn default_daemon_dir() -> PathBuf {
     default_daemon_dir_for_home(&home_dir())
 }
 
+pub fn daemon_dir_for_runtime(
+    explicit_daemon_dir: Option<&Path>,
+    current_exe: &Path,
+    current_dir: &Path,
+    home: &Path,
+) -> PathBuf {
+    let worktree_root =
+        worktree_root_for_path(current_exe).or_else(|| worktree_root_for_path(current_dir));
+    if let Some(dir) = explicit_daemon_dir {
+        let production_dir = default_daemon_dir_for_home(home);
+        if worktree_root.is_none() || dir != production_dir {
+            return dir.to_path_buf();
+        }
+    }
+
+    if let Some(worktree_root) = worktree_root {
+        return worktree_root.join(".kanna-daemon");
+    }
+
+    default_daemon_dir_for_home(home)
+}
+
+pub fn daemon_dir_for_current_runtime() -> PathBuf {
+    let explicit = std::env::var_os("KANNA_DAEMON_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    let current_exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::new());
+    let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::new());
+    daemon_dir_for_runtime(explicit.as_deref(), &current_exe, &current_dir, &home_dir())
+}
+
+pub fn worktree_root_for_path(path: &Path) -> Option<PathBuf> {
+    for candidate in path.ancestors() {
+        if candidate.parent().is_some_and(|parent| {
+            parent
+                .file_name()
+                .is_some_and(|name| name == ".kanna-worktrees")
+        }) {
+            return Some(candidate.to_path_buf());
+        }
+    }
+    None
+}
+
 pub fn canonical_desktop_app_data_dir_for_home(home: &Path) -> PathBuf {
     macos_app_support_dir_for_home(home).join(DESKTOP_BUNDLE_IDENTIFIER)
 }
@@ -120,6 +164,64 @@ mod tests {
 
         assert_eq!(
             default_daemon_dir_for_home(home),
+            PathBuf::from("/Users/tester/Library/Application Support/Kanna")
+        );
+    }
+
+    #[test]
+    fn daemon_dir_infers_worktree_from_runtime_path_when_env_is_missing() {
+        let home = Path::new("/Users/tester");
+        let current_exe = Path::new("/repo/.kanna-worktrees/task-1234/.build/debug/kanna-desktop");
+        let current_dir = Path::new("/repo/.kanna-worktrees/task-1234/apps/desktop");
+
+        assert_eq!(
+            daemon_dir_for_runtime(None, current_exe, current_dir, home),
+            PathBuf::from("/repo/.kanna-worktrees/task-1234/.kanna-daemon")
+        );
+    }
+
+    #[test]
+    fn daemon_dir_explicit_env_wins_inside_worktree() {
+        let home = Path::new("/Users/tester");
+        let current_exe = Path::new("/repo/.kanna-worktrees/task-1234/.build/debug/kanna-desktop");
+        let current_dir = Path::new("/repo/.kanna-worktrees/task-1234/apps/desktop");
+
+        assert_eq!(
+            daemon_dir_for_runtime(
+                Some(Path::new("/tmp/kanna-e2e-daemon")),
+                current_exe,
+                current_dir,
+                home,
+            ),
+            PathBuf::from("/tmp/kanna-e2e-daemon")
+        );
+    }
+
+    #[test]
+    fn daemon_dir_ignores_production_env_inside_worktree() {
+        let home = Path::new("/Users/tester");
+        let current_exe = Path::new("/repo/.kanna-worktrees/task-1234/.build/debug/kanna-desktop");
+        let current_dir = Path::new("/repo/.kanna-worktrees/task-1234/apps/desktop");
+
+        assert_eq!(
+            daemon_dir_for_runtime(
+                Some(Path::new("/Users/tester/Library/Application Support/Kanna")),
+                current_exe,
+                current_dir,
+                home,
+            ),
+            PathBuf::from("/repo/.kanna-worktrees/task-1234/.kanna-daemon")
+        );
+    }
+
+    #[test]
+    fn daemon_dir_uses_production_default_outside_worktree() {
+        let home = Path::new("/Users/tester");
+        let current_exe = Path::new("/Applications/Kanna.app/Contents/MacOS/kanna-desktop");
+        let current_dir = Path::new("/Users/tester/.kanna/repos/kanna");
+
+        assert_eq!(
+            daemon_dir_for_runtime(None, current_exe, current_dir, home),
             PathBuf::from("/Users/tester/Library/Application Support/Kanna")
         );
     }
