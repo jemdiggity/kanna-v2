@@ -28,7 +28,7 @@ import {
   type PipelineItem,
   type Repo,
 } from "@kanna/db";
-import { buildStagePrompt } from "../../../../packages/core/src/pipeline/prompt-builder";
+import { buildKannaRuntimeSystemPrompt, buildStagePrompt } from "../../../../packages/core/src/pipeline/prompt-builder";
 import { invoke } from "../invoke";
 import { isTauri } from "../tauri-mock";
 import { buildTaskShellCommand } from "../composables/terminalSessionRecovery";
@@ -448,7 +448,7 @@ export function createTasksApi(
             cwd: worktreePath,
             prompt,
             env: sdkEnv,
-            systemPrompt: null,
+            systemPrompt: buildKannaRuntimeSystemPrompt(),
             permissionMode: opts?.customTask?.permissionMode ?? null,
             model: resolvedModel,
             allowedTools: opts?.customTask?.allowedTools ?? null,
@@ -457,7 +457,7 @@ export function createTasksApi(
             maxBudgetUsd: opts?.customTask?.maxBudgetUsd ?? null,
           });
         } else {
-          const { env, setupCmds, agentCmd, kannaCliPath } = await requireService(context.services.preparePtySession, "preparePtySession")(
+          const { env, setupCmds, agentCmd, agentCmdPreamble, kannaCliPath } = await requireService(context.services.preparePtySession, "preparePtySession")(
             id,
             prompt,
             {
@@ -480,7 +480,7 @@ export function createTasksApi(
             worktreePath,
             visibleBootstrapSteps: worktreeBootstrap?.visibleBootstrapSteps ?? [],
             setupCmds,
-            agentCmd: buildTaskShellCommand(agentCmd, [], { kannaCliPath }),
+            agentCmd: buildTaskShellCommand(agentCmd, [], { kannaCliPath, agentCmdPreamble }),
           });
           await invoke("spawn_session", {
             sessionId: id,

@@ -20,6 +20,7 @@ export interface TaskTerminalEnv {
 
 export interface TaskShellCommandOptions {
   kannaCliPath?: string;
+  agentCmdPreamble?: string;
 }
 
 export interface TerminalGeometry {
@@ -140,9 +141,10 @@ export function buildTaskShellCommand(
   if (setupParts.length > 0) {
     commandParts.push(`printf '\\033[33mRunning startup...\\033[0m\\n' && ${setupParts.join(" && ")} && printf '\\n'`);
   }
-  const visibleAgentCmd = shellSingleQuote(truncateVisibleShellCommand(agentCmd));
-  commandParts.push(`printf '\\033[2m$ %s\\033[0m\\n' '${visibleAgentCmd}'`);
-  commandParts.push(agentCmd);
+  const printedAgentCmd = shellSingleQuote(truncateVisibleShellCommand(agentCmd));
+  const launchAgentCmd = options?.agentCmdPreamble ?? agentCmd;
+  commandParts.push(`printf '\\033[2m$ %s\\033[0m\\n' '${printedAgentCmd}'`);
+  commandParts.push(launchAgentCmd);
 
   return commandParts.join(" && ");
 }
