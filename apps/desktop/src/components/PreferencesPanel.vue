@@ -270,6 +270,7 @@ defineExpose({ cycleTab })
             <option value="claude">Claude</option>
             <option value="copilot">Copilot</option>
             <option value="codex">Codex</option>
+            <option value="opencode">OpenCode</option>
           </select>
         </div>
       </div>

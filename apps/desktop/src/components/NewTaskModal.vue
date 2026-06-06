@@ -70,8 +70,15 @@ const MAX_VISIBLE_BRANCH_ROWS = 7;
 const BRANCH_ROW_HEIGHT_PX = 36;
 const baseBranchOptionsMaxHeight = `${MAX_VISIBLE_BRANCH_ROWS * BRANCH_ROW_HEIGHT_PX}px`;
 
-const providers: Array<AgentProvider> = ["claude", "copilot", "codex"];
+const providers: Array<AgentProvider> = ["claude", "copilot", "codex", "opencode"];
 const availableProviders = ref<Array<AgentProvider>>([...providers]);
+
+function providerLabel(provider: AgentProvider): string {
+  if (provider === "claude") return "Claude";
+  if (provider === "copilot") return "Copilot";
+  if (provider === "codex") return "Codex";
+  return "OpenCode";
+}
 
 function cycleProvider(direction: -1 | 1) {
   const idx = availableProviders.value.indexOf(agentProvider.value);
@@ -301,7 +308,7 @@ function handleKeydown(e: KeyboardEvent) {
       <div class="modal-header">
         <h3>{{ $t('tasks.newTask') }}</h3>
         <button class="agent-provider" type="button" @mousedown.prevent @click="cycleProvider(1)">
-          {{ agentProvider === 'claude' ? 'Claude' : agentProvider === 'copilot' ? 'Copilot' : 'Codex' }}
+          {{ providerLabel(agentProvider) }}
         </button>
       </div>
       <div class="modal-body">

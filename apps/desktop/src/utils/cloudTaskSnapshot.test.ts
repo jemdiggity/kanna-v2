@@ -50,4 +50,40 @@ describe("cloud task snapshot mapper", () => {
     });
     expect(snapshot.repo.remoteUrlHash).toHaveLength(64);
   });
+
+  it("publishes OpenCode from the local task agent provider", async () => {
+    const snapshot = await buildCloudTaskSnapshot({
+      desktopId: "desktop-1",
+      item: {
+        id: "task-opencode",
+        repo_id: "repo-1",
+        prompt: "Ship the OpenCode cloud snapshot",
+        stage: "in progress",
+        activity: "idle",
+        branch: "task-opencode",
+        base_ref: "origin/main",
+        pr_number: null,
+        pr_url: null,
+        display_name: null,
+        agent_provider: "opencode",
+        agent_type: "pty",
+        created_at: "2026-06-06T00:00:00.000Z",
+        updated_at: "2026-06-06T00:00:00.000Z",
+        closed_at: null,
+      },
+      repo: {
+        id: "repo-1",
+        name: "kanna",
+        path: "/Users/test/kanna",
+        default_branch: "main",
+        remote_url: null,
+      },
+      blockedByTaskIds: [],
+    });
+
+    expect(snapshot.agent).toEqual({
+      provider: "opencode",
+      type: "pty",
+    });
+  });
 });

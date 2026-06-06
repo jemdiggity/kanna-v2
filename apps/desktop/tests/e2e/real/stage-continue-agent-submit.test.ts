@@ -98,7 +98,7 @@ describe("real continue-stage agent submission", () => {
             transition: "auto",
             mode: "continue",
             agent: "commit-real",
-            prompt: "Create a file named continue-stage-real-submit.txt in the current directory containing exactly: submitted. Then run: kanna-cli stage-complete --task-id \"$KANNA_TASK_ID\" --status success --summary 'continue submitted'. Do not wait for any additional input.",
+            prompt: "Create a file named continue-stage-real-submit.txt in the current directory containing exactly the text submitted with no punctuation. Then run: kanna-cli stage-complete --task-id \"$KANNA_TASK_ID\" --status success --summary 'continue submitted'. Do not wait for any additional input.",
           },
         ],
       }),
@@ -179,6 +179,6 @@ describe("real continue-stage agent submission", () => {
     await waitForFile(markerPath, 180_000, 1_000);
     expect((await readFile(markerPath, "utf8")).trimEnd()).toBe("submitted");
 
-    expect(["codex", "claude", "copilot"]).toContain(initialRow.agent_provider);
+    expect(["codex", "claude", "copilot", "opencode"]).toContain(initialRow.agent_provider);
   }, 300_000);
 });

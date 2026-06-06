@@ -2001,6 +2001,7 @@ fn format_status_observation_log(
         Some(protocol::AgentProvider::Claude) => "claude",
         Some(protocol::AgentProvider::Copilot) => "copilot",
         Some(protocol::AgentProvider::Codex) => "codex",
+        Some(protocol::AgentProvider::Opencode) => "opencode",
         None => "none",
     };
     let detected = match detected_status {

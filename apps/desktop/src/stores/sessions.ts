@@ -143,13 +143,14 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
   }
 
   async function getAgentProviderAvailability(): Promise<AgentProviderAvailability> {
-    const [claude, copilot, codex] = await Promise.all([
+    const [claude, copilot, codex, opencode] = await Promise.all([
       isAgentProviderAvailable("claude"),
       isAgentProviderAvailable("copilot"),
       isAgentProviderAvailable("codex"),
+      isAgentProviderAvailable("opencode"),
     ]);
 
-    return { claude, copilot, codex };
+    return { claude, copilot, codex, opencode };
   }
 
   async function waitForSessionExit(sessionId: string): Promise<void> {
@@ -363,6 +364,21 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
           ? `codex ${codexFlags.join(" ")} '${escapedPrompt}'`
           : `codex ${codexFlags.join(" ")}`;
       }
+    } else if (provider === "opencode") {
+      const opencodePath = await invoke<string>("which_binary", { name: "opencode" })
+        .catch(() => "opencode");
+      const opencodeExecutable = `'${opencodePath.replace(/'/g, "'\\''")}'`;
+      const opencodeFlags: string[] = [...permissionFlags];
+      if (options?.model) opencodeFlags.push(`-m ${options.model}`);
+      if (options?.resumeSessionId) {
+        const escapedResumeSessionId = options.resumeSessionId.replace(/'/g, "'\\''");
+        opencodeFlags.push(`--session '${escapedResumeSessionId}'`);
+      }
+      const opencodeParts = [opencodeExecutable, "run", "--interactive", ...opencodeFlags];
+      if (escapedPrompt) {
+        opencodeParts.push(`'${escapedPrompt}'`);
+      }
+      agentCmd = opencodeParts.join(" ");
     } else {
       const flags: string[] = [...permissionFlags];
       if (options?.model) flags.push(`--model ${options.model}`);

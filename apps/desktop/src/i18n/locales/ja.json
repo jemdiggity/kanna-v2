@@ -283,6 +283,7 @@
     "agentClaudeName": "Claude Code",
     "agentCopilotName": "GitHub Copilot",
     "agentCodexName": "OpenAI Codex",
+    "agentOpenCodeName": "OpenCode",
     "agentCopied": "コピーしました！",
     "commandHintPrefix": "",
     "commandHintSuffix": "で利用可能なコマンドを表示できます。",

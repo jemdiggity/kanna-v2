@@ -537,7 +537,7 @@ describe("pty session (real CLI)", () => {
     await submitTaskFromUi(client, prompt);
 
     const task = await waitForTaskCreated(client, prompt);
-    expect(task.agent_provider).toBe("codex");
+    expect(task.agent_provider).toBe("opencode");
     await nudgeTerminalTrustPrompt(client, {
       initialDelayMs: 5_000,
       attempts: 4,

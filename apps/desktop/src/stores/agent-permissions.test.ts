@@ -40,4 +40,11 @@ describe("getAgentPermissionFlags", () => {
     expect(getAgentPermissionFlags("codex", "dontAsk")).toEqual(["--yolo"]);
     expect(getAgentPermissionFlags("codex", "acceptEdits")).toEqual(["--full-auto"]);
   });
+
+  it("maps OpenCode default-like permissions to its skip-permissions flag", () => {
+    expect(getAgentPermissionFlags("opencode")).toEqual(["--dangerously-skip-permissions"]);
+    expect(getAgentPermissionFlags("opencode", "default")).toEqual(["--dangerously-skip-permissions"]);
+    expect(getAgentPermissionFlags("opencode", "dontAsk")).toEqual(["--dangerously-skip-permissions"]);
+    expect(getAgentPermissionFlags("opencode", "acceptEdits")).toEqual([]);
+  });
 });

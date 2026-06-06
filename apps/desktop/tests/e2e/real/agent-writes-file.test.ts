@@ -102,7 +102,7 @@ describe("agent writes file (real CLI)", () => {
         `diagnostics=${JSON.stringify(diagnostics)}`,
       );
     }
-    expect(task.agent_provider).toBe("codex");
+    expect(task.agent_provider).toBe("opencode");
 
     const worktreePath = await waitForNewTaskWorktree(testRepoPath, worktreeBaseline, 60_000);
 

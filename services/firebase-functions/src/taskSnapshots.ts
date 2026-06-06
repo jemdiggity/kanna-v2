@@ -3,6 +3,7 @@ import type { CloudTaskSnapshot } from "./types.js";
 const ACTIVITIES = new Set(["idle", "working", "unread"]);
 const STATUSES = new Set(["active", "blocked", "pr", "merge", "done", "transferring"]);
 const TRANSFER_STATES = new Set(["none", "outgoing", "incoming", "finalization_pending"]);
+const AGENT_PROVIDERS = new Set(["claude", "copilot", "codex", "opencode"]);
 
 export interface TaskSnapshotWrite {
   path: string;
@@ -63,7 +64,7 @@ function validateRepo(value: unknown): CloudTaskSnapshot["repo"] {
 
 function validateAgent(value: unknown): CloudTaskSnapshot["agent"] {
   const record = requireRecord(value, "agent");
-  const provider = enumString(record.provider, new Set(["claude", "copilot", "codex"]), "agent.provider");
+  const provider = enumString(record.provider, AGENT_PROVIDERS, "agent.provider");
   return {
     provider: provider as CloudTaskSnapshot["agent"]["provider"],
     type: requireString(record, "type"),

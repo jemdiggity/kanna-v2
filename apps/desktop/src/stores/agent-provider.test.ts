@@ -26,14 +26,16 @@ describe("resolveAgentProvider", () => {
     claude: true,
     copilot: true,
     codex: true,
+    opencode: true,
   };
 
   it("single available provider resolves", () => {
     expect(resolveAgentProvider("codex", allAvailable)).toBe("codex");
+    expect(resolveAgentProvider("opencode", allAvailable)).toBe("opencode");
   });
 
   it("ordered list returns first available", () => {
-    expect(resolveAgentProvider(["codex", "copilot"], { claude: true, copilot: true, codex: false })).toBe("copilot");
+    expect(resolveAgentProvider(["opencode", "copilot"], { claude: true, copilot: true, codex: false, opencode: false })).toBe("copilot");
   });
 
   it("missing providers throws No agent provider configured for this request.", () => {
@@ -44,13 +46,13 @@ describe("resolveAgentProvider", () => {
 
   it("unavailable providers throws None of the configured agent providers are available: codex, copilot.", () => {
     expect(() =>
-      resolveAgentProvider(["codex", "copilot"], { claude: true, copilot: false, codex: false }),
+      resolveAgentProvider(["codex", "copilot"], { claude: true, copilot: false, codex: false, opencode: true }),
     ).toThrow("None of the configured agent providers are available: codex, copilot.");
   });
 
   it("single unavailable provider throws with that provider in the message", () => {
     expect(() =>
-      resolveAgentProvider("codex", { claude: true, copilot: true, codex: false }),
+      resolveAgentProvider("codex", { claude: true, copilot: true, codex: false, opencode: true }),
     ).toThrow("None of the configured agent providers are available: codex.");
   });
 });
@@ -59,11 +61,11 @@ describe("getPreferredAgentProviders", () => {
   it("returns explicit providers when present", () => {
     expect(
       getPreferredAgentProviders({
-        explicit: ["copilot", "codex"],
+        explicit: ["opencode", "codex"],
         stage: ["claude", "copilot"],
         item: "claude",
       }),
-    ).toEqual(["copilot", "codex"]);
+    ).toEqual(["opencode", "codex"]);
   });
 
   it("falls back to stage when explicit source is missing", () => {
@@ -77,7 +79,7 @@ describe("getPreferredAgentProviders", () => {
   it("does not fall through to lower-precedence sources when selected source is unavailable", () => {
     const selected = getPreferredAgentProviders({ stage: ["codex"], agent: ["copilot"], item: "claude" });
     expect(() =>
-      resolveAgentProvider(selected, { claude: true, copilot: true, codex: false }),
+      resolveAgentProvider(selected, { claude: true, copilot: true, codex: false, opencode: true }),
     ).toThrow("None of the configured agent providers are available: codex.");
   });
 });

@@ -46,12 +46,14 @@ interface AgentCliStatus {
 const claude = ref<AgentCliStatus>({ installed: false });
 const copilot = ref<AgentCliStatus>({ installed: false });
 const codex = ref<AgentCliStatus>({ installed: false });
+const opencode = ref<AgentCliStatus>({ installed: false });
 const copiedAgent = ref<string | null>(null);
 
 const INSTALL_COMMANDS: Record<string, string> = {
   claude: "curl -fsSL https://claude.ai/install.sh | bash",
   copilot: "curl -fsSL https://gh.io/copilot-install | bash",
   codex: "npm install -g @openai/codex",
+  opencode: "curl -fsSL https://opencode.ai/install | bash",
 };
 
 function parseSemver(output: string): string | undefined {
@@ -93,10 +95,11 @@ async function checkCli(name: string): Promise<AgentCliStatus> {
 }
 
 async function checkAllClis() {
-  const [c, p, x] = await Promise.all([checkCli("claude"), checkCli("copilot"), checkCli("codex")]);
+  const [c, p, x, o] = await Promise.all([checkCli("claude"), checkCli("copilot"), checkCli("codex"), checkCli("opencode")]);
   claude.value = c;
   copilot.value = p;
   codex.value = x;
+  opencode.value = o;
 }
 
 watch(() => props.hasRepos, (has) => {
@@ -188,6 +191,7 @@ function dismissCommandHint() {
               { key: 'claude', nameKey: 'mainPanel.agentClaudeName', status: claude },
               { key: 'copilot', nameKey: 'mainPanel.agentCopilotName', status: copilot },
               { key: 'codex', nameKey: 'mainPanel.agentCodexName', status: codex },
+              { key: 'opencode', nameKey: 'mainPanel.agentOpenCodeName', status: opencode },
             ]" :key="agent.key" class="agent-card">
               <div class="agent-header">
                 <span class="agent-name">{{ $t(agent.nameKey) }}</span>

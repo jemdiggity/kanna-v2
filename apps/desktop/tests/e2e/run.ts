@@ -35,6 +35,7 @@ function agentCliVersionFixtureEnv(): Record<string, string> {
     KANNA_E2E_AGENT_CLI_VERSION_CLAUDE: "2.1.118 (Claude Code)\n",
     KANNA_E2E_AGENT_CLI_VERSION_COPILOT: "GitHub Copilot CLI 1.0.32.\nRun 'copilot update' to check for updates.\n",
     KANNA_E2E_AGENT_CLI_VERSION_CODEX: "codex-cli 0.125.0-beta.1+20260429\n",
+    KANNA_E2E_AGENT_CLI_VERSION_OPENCODE: "1.4.3\n",
   };
 }
 

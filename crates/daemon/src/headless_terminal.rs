@@ -237,7 +237,7 @@ impl HeadlessTerminal {
                     None
                 }
             }
-            AgentProvider::Codex => {
+            AgentProvider::Codex | AgentProvider::Opencode => {
                 if has_interrupt_marker {
                     Some(SessionStatus::Busy)
                 } else if line_starts_with_prompt(last_line, &[CODEX_IDLE_PROMPT]) {
@@ -641,6 +641,47 @@ mod tests {
     }
 
     #[test]
+    fn opencode_status_comes_from_visible_footer_content() {
+        let mut headless_terminal = HeadlessTerminal::new(80, 4, 10_000).unwrap();
+        headless_terminal.write(
+            "Header\r\nBody\r\n• Working(0s • esc to interrupt)\r\n› Review the implementation"
+                .as_bytes(),
+        );
+
+        assert_eq!(
+            headless_terminal
+                .visible_status(Some(AgentProvider::Opencode))
+                .unwrap(),
+            Some(SessionStatus::Busy)
+        );
+
+        headless_terminal.write("\x1b[2J\x1b[HHeader\r\nBody\r\nAll done\r\n›".as_bytes());
+
+        assert_eq!(
+            headless_terminal
+                .visible_status(Some(AgentProvider::Opencode))
+                .unwrap(),
+            Some(SessionStatus::Idle)
+        );
+    }
+
+    #[test]
+    fn opencode_prompt_does_not_force_idle_while_interrupt_marker_is_visible() {
+        let mut headless_terminal = HeadlessTerminal::new(80, 4, 10_000).unwrap();
+        headless_terminal.write(
+            "Header\r\nBody\r\n• Working(0s • esc to interrupt)\r\n› The tests are failing"
+                .as_bytes(),
+        );
+
+        assert_eq!(
+            headless_terminal
+                .visible_status(Some(AgentProvider::Opencode))
+                .unwrap(),
+            Some(SessionStatus::Busy)
+        );
+    }
+
+    #[test]
     fn codex_resume_session_id_comes_from_visible_footer_content() {
         let mut headless_terminal = HeadlessTerminal::new(48, 6, 10_000).unwrap();
         headless_terminal.write(
@@ -809,6 +850,10 @@ mod tests {
         );
         assert_eq!(
             initial_session_status(Some(AgentProvider::Codex)),
+            SessionStatus::Busy
+        );
+        assert_eq!(
+            initial_session_status(Some(AgentProvider::Opencode)),
             SessionStatus::Busy
         );
         assert_eq!(initial_session_status(None), SessionStatus::Idle);

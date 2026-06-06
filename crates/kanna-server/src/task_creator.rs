@@ -534,7 +534,7 @@ fn read_default_agent_provider_setting(db: &Db) -> Result<Option<String>, String
         .get_setting("defaultAgentProvider")
         .map_err(|e| format!("db error: {}", e))?;
     Ok(match provider.as_deref() {
-        Some("claude" | "copilot" | "codex") => provider,
+        Some("claude" | "copilot" | "codex" | "opencode") => provider,
         _ => Some("claude".to_string()),
     })
 }
@@ -1148,6 +1148,7 @@ enum AgentProvider {
     Claude,
     Copilot,
     Codex,
+    Opencode,
 }
 
 impl AgentProvider {
@@ -1156,6 +1157,7 @@ impl AgentProvider {
             Self::Claude => "claude",
             Self::Copilot => "copilot",
             Self::Codex => "codex",
+            Self::Opencode => "opencode",
         }
     }
 
@@ -1164,6 +1166,7 @@ impl AgentProvider {
             Self::Claude => DaemonAgentProvider::Claude,
             Self::Copilot => DaemonAgentProvider::Copilot,
             Self::Codex => DaemonAgentProvider::Codex,
+            Self::Opencode => DaemonAgentProvider::Opencode,
         }
     }
 }
@@ -1198,6 +1201,7 @@ fn resolve_agent_provider(
             "claude" => Some(AgentProvider::Claude),
             "copilot" => Some(AgentProvider::Copilot),
             "codex" => Some(AgentProvider::Codex),
+            "opencode" => Some(AgentProvider::Opencode),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -1510,6 +1514,26 @@ fn build_agent_command(
             }
             format!("codex {} '{}'", flags.join(" "), escaped_prompt)
         }
+        AgentProvider::Opencode => {
+            let mut flags = get_agent_permission_flags(*provider, permission_mode);
+            if let Some(model) = model {
+                flags.push(format!("-m {}", model));
+            }
+            let executable = which_binary("opencode")
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| "opencode".to_string());
+            let mut parts = vec![
+                format!("'{}'", shell_single_quote(&executable)),
+                "run".to_string(),
+                "--interactive".to_string(),
+            ];
+            parts.extend(flags);
+            if !prompt.is_empty() {
+                parts.push(format!("'{}'", escaped_prompt));
+            }
+            parts.join(" ")
+        }
     }
 }
 
@@ -1531,6 +1555,10 @@ fn get_agent_permission_flags(
         AgentProvider::Codex => match normalized {
             None | Some("dontAsk") => vec!["--yolo".to_string()],
             Some(_) => vec!["--full-auto".to_string()],
+        },
+        AgentProvider::Opencode => match normalized {
+            None | Some("dontAsk") => vec!["--dangerously-skip-permissions".to_string()],
+            Some(_) => Vec::new(),
         },
     }
 }
