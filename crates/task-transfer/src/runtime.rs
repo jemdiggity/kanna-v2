@@ -2920,6 +2920,24 @@ mod tests {
         }
     }
 
+    struct CwdGuard {
+        previous: std::path::PathBuf,
+    }
+
+    impl CwdGuard {
+        fn set(path: impl AsRef<std::path::Path>) -> Self {
+            let previous = std::env::current_dir().expect("current dir should resolve");
+            std::env::set_current_dir(path).expect("test cwd should be set");
+            Self { previous }
+        }
+    }
+
+    impl Drop for CwdGuard {
+        fn drop(&mut self) {
+            std::env::set_current_dir(&self.previous).expect("test cwd should be restored");
+        }
+    }
+
     impl Drop for EnvGuard {
         fn drop(&mut self) {
             if let Some(value) = &self.previous {
@@ -2931,12 +2949,64 @@ mod tests {
     }
 
     #[test]
-    fn from_env_uses_production_defaults_when_runtime_paths_are_not_overridden() {
+    fn from_env_uses_worktree_daemon_dir_when_runtime_paths_are_not_overridden_inside_worktree() {
         let _lock = env_lock();
         let home = std::env::temp_dir().join(format!(
-            "kanna-task-transfer-defaults-{}",
+            "kanna-task-transfer-worktree-defaults-{}",
             std::process::id()
         ));
+        let worktree = home
+            .join("repo")
+            .join(".kanna-worktrees")
+            .join("task-transfer-test");
+        std::fs::create_dir_all(&worktree).expect("worktree test dir should be created");
+        let _cwd_guard = CwdGuard::set(&worktree);
+        let resolved_worktree =
+            std::env::current_dir().expect("resolved worktree cwd should be available");
+        let _home_guard = EnvGuard::set("HOME", home.as_os_str());
+        let _daemon_guard = EnvGuard::unset("KANNA_DAEMON_DIR");
+        let _db_guard = EnvGuard::unset("KANNA_DB_PATH");
+        let _cli_db_guard = EnvGuard::unset("KANNA_CLI_DB_PATH");
+        let _transfer_root_guard = EnvGuard::unset("KANNA_TRANSFER_ROOT");
+        let _registry_guard = EnvGuard::unset("KANNA_TRANSFER_REGISTRY_DIR");
+
+        let config = RuntimeConfig::from_env().expect("runtime config should resolve");
+
+        assert_eq!(
+            config.daemon_dir,
+            Some(resolved_worktree.join(".kanna-daemon"))
+        );
+        assert_eq!(
+            config.db_path,
+            Some(
+                home.join("Library")
+                    .join("Application Support")
+                    .join("build.kanna")
+                    .join("kanna-v2.db")
+            )
+        );
+        assert_eq!(
+            config.registry_dir,
+            home.join("Library")
+                .join("Application Support")
+                .join("build.kanna")
+                .join("transfer")
+                .join("registry")
+        );
+
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn from_env_uses_production_defaults_when_runtime_paths_are_not_overridden_outside_worktree() {
+        let _lock = env_lock();
+        let home = std::env::temp_dir().join(format!(
+            "kanna-task-transfer-production-defaults-{}",
+            std::process::id()
+        ));
+        let cwd = home.join("plain-repo");
+        std::fs::create_dir_all(&cwd).expect("plain test cwd should be created");
+        let _cwd_guard = CwdGuard::set(&cwd);
         let _home_guard = EnvGuard::set("HOME", home.as_os_str());
         let _daemon_guard = EnvGuard::unset("KANNA_DAEMON_DIR");
         let _db_guard = EnvGuard::unset("KANNA_DB_PATH");
