@@ -1931,15 +1931,17 @@ describe("App", () => {
       props: {
         initialScope: String,
         initialScrollPositions: Object,
+        initialBranchInclude: String,
       },
-      emits: ["scope-change", "scroll-state-change", "close"],
+      emits: ["scope-change", "scroll-state-change", "branch-include-change", "close"],
       template: `
         <div data-testid="diff-modal">
           <span data-testid="diff-scope">{{ initialScope ?? '' }}</span>
           <span data-testid="diff-working-scroll">{{ initialScrollPositions?.working ?? '' }}</span>
+          <span data-testid="diff-branch-include">{{ initialBranchInclude ?? '' }}</span>
           <button
             data-testid="remember-diff-state"
-            @click="$emit('scope-change', 'branch'); $emit('scroll-state-change', { working: 240, branch: 520 })"
+            @click="$emit('scope-change', 'branch'); $emit('scroll-state-change', { working: 240, branch: 520 }); $emit('branch-include-change', 'all')"
           >
             remember
           </button>
@@ -2000,6 +2002,7 @@ describe("App", () => {
 
     expect(wrapper.get('[data-testid="diff-scope"]').text()).toBe("branch");
     expect(wrapper.get('[data-testid="diff-working-scroll"]').text()).toBe("240");
+    expect(wrapper.get('[data-testid="diff-branch-include"]').text()).toBe("all");
   });
   it("starts the updater controller and renders the global update prompt", async () => {
     const wrapper = await mountApp(SidebarWithRepoStub);

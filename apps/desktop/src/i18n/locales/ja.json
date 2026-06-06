@@ -214,6 +214,7 @@
     "filterAll": "ステージ済み+未ステージ",
     "filterUnstaged": "未ステージ",
     "filterStaged": "ステージ済み",
+    "branchIncludeNone": "なし",
     "searchPlaceholder": "検索...",
     "searchNoMatches": "一致なし",
     "shortcutSearch": "検索",

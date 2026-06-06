@@ -37,6 +37,151 @@ function getDiffFirstContentThresholdMs(): number {
   return parsed;
 }
 
+async function getSelectedWorktreePath(
+  client: WebDriverClient,
+  testRepoPath: string,
+): Promise<string> {
+  const branch = await client.executeSync<string | null>(
+    `const ctx = window.__KANNA_E2E__.setupState;
+     const item = ctx.selectedItem();
+     return item ? (item.branch?.value || item.branch) : null;`
+  );
+  if (!branch) {
+    throw new Error("expected selected task to have a worktree branch");
+  }
+  return `${testRepoPath}/.kanna-worktrees/${branch}`;
+}
+
+async function closeDiffModalIfOpen(client: WebDriverClient): Promise<void> {
+  const isOpen = await client.executeSync<boolean>(
+    `return Boolean(document.querySelector(".diff-view"));`
+  );
+  if (!isOpen) return;
+  await client.executeSync(buildGlobalKeydownScript({ key: "Escape" }));
+  await client.waitForNoElement(".diff-view", 2_000);
+}
+
+async function openDiffModal(client: WebDriverClient): Promise<void> {
+  await closeDiffModalIfOpen(client);
+  await client.executeSync(buildGlobalKeydownScript({ key: "d", meta: true }));
+  await client.waitForElement(".diff-view", 5_000);
+}
+
+async function resetSelectedDiffViewState(client: WebDriverClient): Promise<void> {
+  await closeDiffModalIfOpen(client);
+  await client.executeSync(
+    `const ctx = window.__KANNA_E2E__.setupState;
+     const keyRef = ctx.currentDiffViewKey;
+     const key = keyRef?.__v_isRef ? keyRef.value : keyRef;
+     if (key && ctx.diffViewStates) {
+       delete ctx.diffViewStates[key];
+     }`
+  );
+}
+
+async function clickDiffToolbarButton(client: WebDriverClient, label: string): Promise<void> {
+  const clicked = await client.executeSync<boolean>(
+    `const label = ${JSON.stringify(label)};
+     const buttons = Array.from(document.querySelectorAll(".diff-toolbar button"));
+     const button = buttons.find((element) => (element.textContent || "").trim() === label);
+     if (!(button instanceof HTMLButtonElement)) return false;
+     button.click();
+     return true;`
+  );
+  if (!clicked) {
+    throw new Error(`diff toolbar button not found: ${label}`);
+  }
+}
+
+async function setDiffScope(client: WebDriverClient, scope: "Working" | "Branch"): Promise<void> {
+  const active = await client.executeSync<boolean>(
+    `const scope = ${JSON.stringify(scope)};
+     const button = Array.from(document.querySelectorAll(".scope-selector button"))
+       .find((element) => (element.textContent || "").trim() === scope);
+     return button?.classList.contains("active") ?? false;`
+  );
+  if (active) return;
+  await clickDiffToolbarButton(client, scope);
+}
+
+async function waitForDiffText(
+  client: WebDriverClient,
+  predicateSource: string,
+  timeoutMs = 10_000,
+): Promise<string> {
+  return client.executeAsync<string>(
+    `const cb = arguments[arguments.length - 1];
+     const predicate = new Function("text", ${JSON.stringify(predicateSource)});
+     function collectText(node) {
+       let text = "";
+       if (node.nodeType === Node.TEXT_NODE) {
+         text += node.textContent || "";
+       }
+       if (node instanceof Element || node instanceof ShadowRoot || node instanceof DocumentFragment) {
+         if (node instanceof Element && node.shadowRoot) {
+           text += collectText(node.shadowRoot);
+         }
+         for (const child of Array.from(node.childNodes)) {
+           text += collectText(child);
+         }
+       }
+       return text;
+     }
+     let done = false;
+     const finish = (value) => {
+       if (done) return;
+       done = true;
+       clearInterval(interval);
+       clearTimeout(timeout);
+       cb(value);
+     };
+     const read = () => {
+       const container = document.querySelector(".diff-container");
+       return container ? collectText(container) : "";
+     };
+     const check = () => {
+       const text = read();
+       if (predicate(text)) finish(text);
+     };
+     const interval = setInterval(check, 100);
+     const timeout = setTimeout(() => finish("__TIMEOUT__\\n" + read()), ${timeoutMs});
+     check();`
+  );
+}
+
+async function waitForDiffScrollHeight(
+  client: WebDriverClient,
+  minScrollHeight: number,
+  timeoutMs = 10_000,
+): Promise<number> {
+  const result = await client.executeAsync<number>(
+    `const cb = arguments[arguments.length - 1];
+     let done = false;
+     const finish = (value) => {
+       if (done) return;
+       done = true;
+       clearInterval(interval);
+       clearTimeout(timeout);
+       cb(value);
+     };
+     const check = () => {
+       const container = document.querySelector(".diff-container");
+       const scrollHeight = container instanceof HTMLElement ? container.scrollHeight : 0;
+       if (scrollHeight >= ${minScrollHeight}) finish(scrollHeight);
+     };
+     const interval = setInterval(check, 100);
+     const timeout = setTimeout(() => {
+       const container = document.querySelector(".diff-container");
+       finish(container instanceof HTMLElement ? container.scrollHeight : 0);
+     }, ${timeoutMs});
+     check();`
+  );
+  if (result < minScrollHeight) {
+    throw new Error(`diff scrollHeight ${result} never reached ${minScrollHeight}`);
+  }
+  return result;
+}
+
 describe("diff view", () => {
   const client = new WebDriverClient();
   let fixtureRepoRoot = "";
@@ -182,23 +327,21 @@ describe("diff view", () => {
          if (!(container instanceof HTMLElement) || !(wrapper instanceof HTMLElement) || !(header instanceof HTMLElement)) return;
 
          container.scrollTop = wrapper.offsetTop + 40;
-         requestAnimationFrame(() => {
-           requestAnimationFrame(() => {
-             const containerRect = container.getBoundingClientRect();
-             const headerRect = header.getBoundingClientRect();
-             const headers = Array.from(document.querySelectorAll(".diff-file-header"));
-             finish({
-               containerTop: containerRect.top,
-               headerTop: headerRect.top,
-               headerBottom: headerRect.bottom,
-               scrollTop: container.scrollTop,
-               stickyTop: getComputedStyle(header).top,
-               headerCount: headers.length,
-               renderedHeaderCount: renderedWrappers.length,
-               wrapperHeight: wrapper.getBoundingClientRect().height,
-             });
+         setTimeout(() => {
+           const containerRect = container.getBoundingClientRect();
+           const headerRect = header.getBoundingClientRect();
+           const headers = Array.from(document.querySelectorAll(".diff-file-header"));
+           finish({
+             containerTop: containerRect.top,
+             headerTop: headerRect.top,
+             headerBottom: headerRect.bottom,
+             scrollTop: container.scrollTop,
+             stickyTop: getComputedStyle(header).top,
+             headerCount: headers.length,
+             renderedHeaderCount: renderedWrappers.length,
+             wrapperHeight: wrapper.getBoundingClientRect().height,
            });
-         });
+         }, 50);
        };
        const interval = setInterval(measure, 25);
        const timeout = setTimeout(() => {
@@ -233,6 +376,200 @@ describe("diff view", () => {
     expect(result.headerBottom).toBeGreaterThan(result.containerTop);
   });
 
+  it("restores per-scope scroll positions when switching Working and Branch diffs", async () => {
+    const worktreePath = await getSelectedWorktreePath(client, testRepoPath);
+    const scrollSetupScript = [
+      "cat > e2e-scroll-branch.txt <<'EOF'",
+      "branch scroll marker",
+      "EOF",
+      "for i in $(seq 1 260); do printf 'branch scroll line %03d\\n' \"$i\" >> e2e-scroll-branch.txt; done",
+      "git add e2e-scroll-branch.txt",
+      "git commit -m 'e2e branch scroll content'",
+      "cat > e2e-scroll-working.txt <<'EOF'",
+      "working scroll marker",
+      "EOF",
+      "for i in $(seq 1 260); do printf 'working scroll line %03d\\n' \"$i\" >> e2e-scroll-working.txt; done",
+    ].join("\n");
+
+    await tauriInvoke(client, "run_script", {
+      script: scrollSetupScript,
+      cwd: worktreePath,
+      env: {},
+    });
+
+    try {
+      await openDiffModal(client);
+      await setDiffScope(client, "Working");
+      await waitForDiffText(client, `return text.includes("working scroll marker");`);
+      await waitForDiffScrollHeight(client, 1_200);
+
+      const workingScrollTop = await client.executeSync<number>(
+        `const container = document.querySelector(".diff-container");
+         if (!(container instanceof HTMLElement)) return 0;
+         container.scrollTop = 640;
+         container.dispatchEvent(new Event("scroll", { bubbles: true }));
+         return container.scrollTop;`
+      );
+      expect(workingScrollTop).toBeGreaterThan(0);
+
+      await setDiffScope(client, "Branch");
+      await waitForDiffText(client, `return text.includes("branch scroll marker");`);
+      await waitForDiffScrollHeight(client, 1_200);
+
+      const branchScrollTop = await client.executeSync<number>(
+        `const container = document.querySelector(".diff-container");
+         if (!(container instanceof HTMLElement)) return 0;
+         container.scrollTop = 420;
+         container.dispatchEvent(new Event("scroll", { bubbles: true }));
+         return container.scrollTop;`
+      );
+      expect(branchScrollTop).toBeGreaterThan(0);
+
+      await setDiffScope(client, "Working");
+      await waitForDiffText(client, `return text.includes("working scroll marker");`);
+      const restoredWorking = await client.executeAsync<number>(
+        `const cb = arguments[arguments.length - 1];
+         const expected = ${workingScrollTop};
+         const read = () => {
+           const container = document.querySelector(".diff-container");
+           return container instanceof HTMLElement ? container.scrollTop : 0;
+         };
+         let done = false;
+         const finish = (value) => {
+           if (done) return;
+           done = true;
+           clearInterval(interval);
+           clearTimeout(timeout);
+           cb(value);
+         };
+         const check = () => {
+           const current = read();
+           if (Math.abs(current - expected) <= 2) finish(current);
+         };
+         const interval = setInterval(check, 50);
+         const timeout = setTimeout(() => finish(read()), 3000);
+         check();`
+      );
+      expect(Math.abs(restoredWorking - workingScrollTop)).toBeLessThanOrEqual(2);
+
+      await setDiffScope(client, "Branch");
+      await waitForDiffText(client, `return text.includes("branch scroll marker");`);
+      const restoredBranch = await client.executeAsync<number>(
+        `const cb = arguments[arguments.length - 1];
+         const expected = ${branchScrollTop};
+         const read = () => {
+           const container = document.querySelector(".diff-container");
+           return container instanceof HTMLElement ? container.scrollTop : 0;
+         };
+         let done = false;
+         const finish = (value) => {
+           if (done) return;
+           done = true;
+           clearInterval(interval);
+           clearTimeout(timeout);
+           cb(value);
+         };
+         const check = () => {
+           const current = read();
+           if (Math.abs(current - expected) <= 2) finish(current);
+         };
+         const interval = setInterval(check, 50);
+         const timeout = setTimeout(() => finish(read()), 3000);
+         check();`
+      );
+      expect(Math.abs(restoredBranch - branchScrollTop)).toBeLessThanOrEqual(2);
+    } finally {
+      await tauriInvoke(client, "run_script", {
+        script: [
+          "if [ \"$(git log -1 --pretty=%s)\" = 'e2e branch scroll content' ]; then git reset --hard HEAD~1; fi",
+          "rm -f e2e-scroll-working.txt",
+          "git clean -fd -- e2e-scroll-working.txt",
+        ].join("\n"),
+        cwd: worktreePath,
+        env: {},
+      });
+    }
+  });
+
+  it("loads Branch include modes through the real git diff command path", async () => {
+    const worktreePath = await getSelectedWorktreePath(client, testRepoPath);
+    const setupScript = [
+      "cat > e2e-branch-include-committed.txt <<'EOF'",
+      "committed branch include marker",
+      "EOF",
+      "cat > e2e-branch-include-unstaged.txt <<'EOF'",
+      "unstaged base marker",
+      "EOF",
+      "git add e2e-branch-include-committed.txt e2e-branch-include-unstaged.txt",
+      "git commit -m 'e2e branch include committed content'",
+      "cat > e2e-branch-include-staged.txt <<'EOF'",
+      "staged branch include marker",
+      "EOF",
+      "git add e2e-branch-include-staged.txt",
+      "printf '\\nunstaged branch include marker\\n' >> e2e-branch-include-unstaged.txt",
+      "cat > e2e-branch-include-untracked.txt <<'EOF'",
+      "untracked branch include marker",
+      "EOF",
+    ].join("\n");
+
+    await tauriInvoke(client, "run_script", {
+      script: setupScript,
+      cwd: worktreePath,
+      env: {},
+    });
+
+    try {
+      await openDiffModal(client);
+      await setDiffScope(client, "Branch");
+
+      const noneText = await waitForDiffText(
+        client,
+        `return text.includes("committed branch include marker")
+          && !text.includes("staged branch include marker")
+          && !text.includes("unstaged branch include marker")
+          && !text.includes("untracked branch include marker");`,
+      );
+      expect(noneText).toContain("committed branch include marker");
+      expect(noneText).not.toContain("staged branch include marker");
+      expect(noneText).not.toContain("unstaged branch include marker");
+      expect(noneText).not.toContain("untracked branch include marker");
+
+      await clickDiffToolbarButton(client, "None");
+      const stagedText = await waitForDiffText(
+        client,
+        `return text.includes("staged branch include marker")
+          && !text.includes("unstaged branch include marker")
+          && !text.includes("untracked branch include marker");`,
+      );
+      expect(stagedText).toContain("committed branch include marker");
+      expect(stagedText).toContain("staged branch include marker");
+      expect(stagedText).not.toContain("unstaged branch include marker");
+      expect(stagedText).not.toContain("untracked branch include marker");
+
+      await clickDiffToolbarButton(client, "Staged");
+      const allText = await waitForDiffText(
+        client,
+        `return text.includes("staged branch include marker")
+          && text.includes("unstaged branch include marker")
+          && text.includes("untracked branch include marker");`,
+      );
+      expect(allText).toContain("committed branch include marker");
+      expect(allText).toContain("staged branch include marker");
+      expect(allText).toContain("unstaged branch include marker");
+      expect(allText).toContain("untracked branch include marker");
+    } finally {
+      await tauriInvoke(client, "run_script", {
+        script: [
+          "git reset --hard HEAD",
+          "if [ \"$(git log -1 --pretty=%s)\" = 'e2e branch include committed content' ]; then git reset --hard HEAD~1; fi",
+          "git clean -fd -- e2e-branch-include-committed.txt e2e-branch-include-staged.txt e2e-branch-include-unstaged.txt e2e-branch-include-untracked.txt",
+        ].join("\n"),
+        cwd: worktreePath,
+        env: {},
+      });
+    }
+  });
+
   it("shows first diff content before rendering an entire broad diff", async () => {
     const branch = await client.executeSync<string | null>(
       `const ctx = window.__KANNA_E2E__.setupState;
@@ -249,6 +586,8 @@ describe("diff view", () => {
     const totalChangedLines = fileCount * (linesPerFile + 1);
     const worktreePath = `${testRepoPath}/.kanna-worktrees/${branch}`;
     const createFilesScript = [
+      "git add -A",
+      "if ! git diff --cached --quiet; then git commit -m 'e2e diff perf baseline'; fi",
       "mkdir -p diff-perf",
       "rm -f diff-perf/Cargo-*.lock",
       `for i in $(seq 1 ${fileCount}); do`,
@@ -266,7 +605,7 @@ describe("diff view", () => {
       env: {},
     });
 
-    await client.executeSync(buildGlobalKeydownScript({ key: "Escape" }));
+    await resetSelectedDiffViewState(client);
     await sleep(250);
 
     const result = await client.executeAsync<{

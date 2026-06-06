@@ -742,6 +742,7 @@ pub fn run() {
             commands::daemon::detach_session,
             // Git commands
             commands::git::git_diff,
+            commands::git::git_diff_branch_range,
             commands::git::git_diff_range,
             commands::git::git_merge_base,
             commands::git::git_worktree_list,

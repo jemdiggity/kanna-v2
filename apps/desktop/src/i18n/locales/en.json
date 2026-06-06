@@ -214,6 +214,7 @@
     "filterAll": "Staged+Unstaged",
     "filterUnstaged": "Unstaged",
     "filterStaged": "Staged",
+    "branchIncludeNone": "None",
     "searchPlaceholder": "Search...",
     "searchNoMatches": "No matches",
     "shortcutSearch": "Search",

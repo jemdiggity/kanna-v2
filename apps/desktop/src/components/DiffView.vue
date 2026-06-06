@@ -48,15 +48,18 @@ registerContextShortcuts("diff", [
 ]);
 
 type WorkingFilter = "all" | "unstaged" | "staged";
+type BranchInclude = "none" | "staged" | "all";
 type DiffScope = "branch" | "working";
 type DiffScrollPositions = Partial<Record<DiffScope, number>>;
 const workingFilterOrder: WorkingFilter[] = ["all", "unstaged", "staged"];
+const branchIncludeOrder: BranchInclude[] = ["none", "staged", "all"];
 
 const props = defineProps<{
   repoPath: string;
   worktreePath?: string;
   initialScope?: DiffScope;
   initialScrollPositions?: DiffScrollPositions;
+  initialBranchInclude?: BranchInclude;
   baseRef?: string;
   viewKey?: string;
 }>();
@@ -64,6 +67,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: "scope-change", scope: DiffScope): void;
   (e: "scroll-state-change", positions: DiffScrollPositions): void;
+  (e: "branch-include-change", include: BranchInclude): void;
   (e: "close"): void;
 }>();
 
@@ -75,6 +79,7 @@ const loading = ref(false);
 const error = ref<string | null>(null);
 const noDiff = ref(false);
 const workingFilter = ref<WorkingFilter>("all");
+const branchInclude = ref<BranchInclude>(normalizeBranchInclude(props.initialBranchInclude));
 const scope = ref<DiffScope>(props.initialScope === "branch" ? "branch" : "working");
 const scrollPositions = ref<DiffScrollPositions>(cloneScrollPositions(props.initialScrollPositions));
 const renderedFiles = ref<DiffSearchFile[]>([]);
@@ -89,6 +94,15 @@ const workingFilterLabel = computed(() => {
     staged: t('diffView.filterStaged'),
   };
   return labels[workingFilter.value];
+});
+
+const branchIncludeLabel = computed(() => {
+  const labels: Record<BranchInclude, string> = {
+    none: t('diffView.branchIncludeNone'),
+    staged: t('diffView.filterStaged'),
+    all: t('diffView.filterAll'),
+  };
+  return labels[branchInclude.value];
 });
 let workerPool: WorkerPoolManager | null = null;
 
@@ -125,6 +139,13 @@ interface DiffRenderFileEntry {
   wrapper: HTMLDivElement;
 }
 
+interface DiffRenderProgress {
+  completedFiles: number;
+  firstCompletedAt: number | null;
+  completedAllLogged: boolean;
+  firstCompletedWaiters: Array<() => void>;
+}
+
 const searchTargets = computed(() => buildDiffSearchTargets(renderedFiles.value));
 const searchMatches = computed(() => findDiffSearchMatches(searchTargets.value, searchQuery.value));
 const searchMatchCount = computed(() => searchMatches.value.length);
@@ -137,8 +158,10 @@ const searchCountLabel = computed(() => {
 let nextDiffLoadId = 0;
 let activeDiffLoadId = 0;
 let fileDiffInstances: FileDiff[] = [];
+let scrollRestorePendingLoadId = 0;
 
 const DIFF_RENDER_BATCH_SIZE = 12;
+const DIFF_INITIAL_RENDER_BATCH_SIZE = 1;
 
 function roundDuration(durationMs: number): number {
   return Math.round(durationMs * 10) / 10;
@@ -150,7 +173,29 @@ function isActiveDiffLoad(loadId: number): boolean {
 
 async function waitForRenderTurn(): Promise<void> {
   await new Promise<void>((resolve) => {
-    window.setTimeout(resolve, 0);
+    setTimeout(resolve, 0);
+  });
+}
+
+async function waitForFirstRenderedFile(
+  progress: DiffRenderProgress,
+  timeoutMs = 1000,
+): Promise<void> {
+  if (progress.firstCompletedAt != null) return;
+
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      const index = progress.firstCompletedWaiters.indexOf(finish);
+      if (index >= 0) {
+        progress.firstCompletedWaiters.splice(index, 1);
+      }
+      resolve();
+    };
+    progress.firstCompletedWaiters.push(finish);
+    setTimeout(finish, timeoutMs);
   });
 }
 
@@ -287,6 +332,10 @@ function cloneScrollPositions(positions?: DiffScrollPositions): DiffScrollPositi
   return positions ? { ...positions } : {};
 }
 
+function normalizeBranchInclude(include?: BranchInclude): BranchInclude {
+  return include === "staged" || include === "all" ? include : "none";
+}
+
 function emitScrollStateChange() {
   emit("scroll-state-change", { ...scrollPositions.value });
 }
@@ -311,9 +360,22 @@ function restoreScrollPosition() {
   containerRef.value.scrollTo({ top, behavior: "auto" });
 }
 
+function restoreScrollPositionForActiveLoad(context: DiffRenderContext) {
+  if (!isActiveDiffLoad(context.loadId)) return;
+  if ((scrollPositions.value[scope.value] ?? 0) <= 0) return;
+  restoreScrollPosition();
+}
+
+function finishPendingScrollRestore(context: DiffRenderContext) {
+  if (scrollRestorePendingLoadId !== context.loadId) return;
+  restoreScrollPositionForActiveLoad(context);
+  scrollRestorePendingLoadId = 0;
+}
+
 function syncViewStateFromProps() {
   scope.value = props.initialScope === "branch" ? "branch" : "working";
   scrollPositions.value = cloneScrollPositions(props.initialScrollPositions);
+  branchInclude.value = normalizeBranchInclude(props.initialBranchInclude);
 }
 
 async function initWorkerPool() {
@@ -364,11 +426,13 @@ async function loadDiff(options: { preserveCurrentScroll?: boolean } = {}) {
   loading.value = true;
   error.value = null;
   noDiff.value = false;
+  scrollRestorePendingLoadId = (scrollPositions.value[scope.value] ?? 0) > 0 ? loadId : 0;
   logDiffPerf(loadId, "start", {
     scope: scope.value,
     path,
     hasExplicitBaseRef: Boolean(props.baseRef),
     workingFilter: scope.value === "working" ? workingFilter.value : undefined,
+    branchInclude: scope.value === "branch" ? branchInclude.value : undefined,
   });
 
   try {
@@ -403,13 +467,14 @@ async function loadDiff(options: { preserveCurrentScroll?: boolean } = {}) {
       });
 
       const diffRangeStartedAt = performance.now();
-      patch = await invoke<string>("git_diff_range", {
+      patch = await invoke<string>("git_diff_branch_range", {
         repoPath: path,
         from: mergeBase,
-        to: "HEAD",
+        mode: branchInclude.value,
       });
-      logDiffPerf(loadId, "git_diff_range:done", {
+      logDiffPerf(loadId, "git_diff_branch_range:done", {
         durationMs: roundDuration(performance.now() - diffRangeStartedAt),
+        mode: branchInclude.value,
       });
     }
 
@@ -422,6 +487,7 @@ async function loadDiff(options: { preserveCurrentScroll?: boolean } = {}) {
       diffContent.value = "";
       renderedFiles.value = [];
       cleanupInstance();
+      scrollRestorePendingLoadId = 0;
       logDiffPerf(loadId, "empty", {
         totalMs: roundDuration(performance.now() - loadStartedAt),
       });
@@ -445,6 +511,7 @@ async function loadDiff(options: { preserveCurrentScroll?: boolean } = {}) {
       return;
     }
     error.value = e instanceof Error ? e.message : String(e);
+    scrollRestorePendingLoadId = 0;
     logDiffPerf(loadId, "error", {
       totalMs: roundDuration(performance.now() - loadStartedAt),
       error: error.value,
@@ -534,7 +601,7 @@ function renderDiffFile(
   pool: WorkerPoolManager | null,
   context: DiffRenderContext,
   allFilesCount: number,
-  progress: { completedFiles: number; firstCompletedAt: number | null; completedAllLogged: boolean },
+  progress: DiffRenderProgress,
   fileIndex: number,
 ): void {
   const fileRenderStartedAt = performance.now();
@@ -550,13 +617,19 @@ function renderDiffFile(
       onPostRender: () => {
         if (didLogPostRender || !isActiveDiffLoad(context.loadId)) return;
         didLogPostRender = true;
-        nextTick(() => applySearchHighlights());
+        nextTick(() => {
+          restoreScrollPositionForActiveLoad(context);
+          applySearchHighlights();
+        });
         const completedAt = performance.now();
         const sinceFileStartMs = completedAt - fileRenderStartedAt;
         const sinceLoadStartMs = completedAt - context.loadStartedAt;
         progress.completedFiles += 1;
         if (progress.firstCompletedAt == null) {
           progress.firstCompletedAt = completedAt;
+          for (const resolve of progress.firstCompletedWaiters.splice(0)) {
+            resolve();
+          }
           logDiffPerf(context.loadId, "content:first_file_ready", {
             durationMs: roundDuration(sinceLoadStartMs),
             fileIndex,
@@ -577,6 +650,7 @@ function renderDiffFile(
         }
         if (!progress.completedAllLogged && progress.completedFiles === allFilesCount) {
           progress.completedAllLogged = true;
+          finishPendingScrollRestore(context);
           logDiffPerf(context.loadId, "content:all_files_ready", {
             durationMs: roundDuration(sinceLoadStartMs),
             fileCount: allFilesCount,
@@ -675,14 +749,16 @@ async function renderDiff(patch: string, context: DiffRenderContext) {
     completedFiles: 0,
     firstCompletedAt: null as number | null,
     completedAllLogged: false,
+    firstCompletedWaiters: [],
   };
 
-  for (let batchStart = 0; batchStart < renderEntries.length; batchStart += DIFF_RENDER_BATCH_SIZE) {
+  for (let batchStart = 0; batchStart < renderEntries.length;) {
     if (!isActiveDiffLoad(context.loadId)) {
       return;
     }
 
-    const batch = renderEntries.slice(batchStart, batchStart + DIFF_RENDER_BATCH_SIZE);
+    const batchSize = batchStart === 0 ? DIFF_INITIAL_RENDER_BATCH_SIZE : DIFF_RENDER_BATCH_SIZE;
+    const batch = renderEntries.slice(batchStart, batchStart + batchSize);
     const batchStartedAt = performance.now();
 
     for (const [batchIndex, entry] of batch.entries()) {
@@ -706,8 +782,13 @@ async function renderDiff(patch: string, context: DiffRenderContext) {
     });
 
     if (batchStart + batch.length < renderEntries.length) {
+      if (batchStart === 0) {
+        await waitForFirstRenderedFile(progress);
+      }
       await waitForRenderTurn();
     }
+
+    batchStart += batch.length;
   }
 
   logDiffPerf(context.loadId, "render:scheduled", {
@@ -762,7 +843,15 @@ function cycleWorkingFilter() {
   void loadDiff();
 }
 
+function cycleBranchInclude() {
+  const idx = branchIncludeOrder.indexOf(branchInclude.value);
+  branchInclude.value = branchIncludeOrder[(idx + 1) % branchIncludeOrder.length];
+  emit("branch-include-change", branchInclude.value);
+  void loadDiff();
+}
+
 function handleScroll() {
+  if (loading.value || scrollRestorePendingLoadId === activeDiffLoadId) return;
   saveCurrentScrollPosition();
 }
 
@@ -873,6 +962,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   activeDiffLoadId = 0;
+  scrollRestorePendingLoadId = 0;
   cleanupInstance();
 });
 
@@ -891,6 +981,11 @@ defineExpose({ refresh: loadDiff });
         class="staged-toggle"
         @click="cycleWorkingFilter()"
       >{{ workingFilterLabel }}</button>
+      <button
+        v-if="scope === 'branch'"
+        class="branch-include-toggle staged-toggle"
+        @click="cycleBranchInclude()"
+      >{{ branchIncludeLabel }}</button>
     </div>
     <div v-if="error" class="diff-status diff-error">{{ error }}</div>
     <div v-else-if="noDiff && !loading" class="diff-status">{{ $t('diffView.noChanges') }}</div>
