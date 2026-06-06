@@ -90,6 +90,5 @@ async function resolveLanDesktopId(): Promise<string> {
   const mobileStatus = await invoke<{ desktopId?: string }>("mobile_server_status").catch(() => null);
   if (mobileStatus?.desktopId?.trim()) return mobileStatus.desktopId.trim();
 
-  const dbName = await invoke<string>("read_env_var", { name: "KANNA_DB_NAME" }).catch(() => "");
-  return dbName.trim() || "peer-local";
+  return "peer-local";
 }

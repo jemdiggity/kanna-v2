@@ -144,10 +144,7 @@ export function mapDesktopCloudTasks(
       .filter((item) => item.stage === "done" || item.closed_at !== null)
       .map((item) => `${item.repo_id}:${item.id}`),
   );
-  const currentDesktopId = options.currentDesktopId?.trim() || null;
-
   for (const snapshot of sortByUpdatedAt(snapshots)) {
-    if (currentDesktopId && snapshot.ownerDesktopId === currentDesktopId) continue;
     const localRepo = snapshot.repo.remoteUrlHash
       ? localRepoByRemoteHash.get(snapshot.repo.remoteUrlHash)
       : undefined;
@@ -252,8 +249,7 @@ async function resolveDesktopId(): Promise<string | null> {
   const envId = await readEnvString("KANNA_TRANSFER_PEER_ID");
   if (envId.trim()) return envId.trim();
 
-  const dbName = await readEnvString("KANNA_DB_NAME");
-  return dbName.trim() || null;
+  return null;
 }
 
 async function readEnvString(name: string): Promise<string> {

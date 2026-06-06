@@ -1,4 +1,5 @@
 import { setTimeout as sleep } from "node:timers/promises";
+import { createHash } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
 import { cleanupWorktrees, importTestRepo, resetDatabase } from "../helpers/reset";
@@ -186,6 +187,45 @@ async function waitForSidebarTaskGroupedUnderRepo(
     await sleep(200);
   }
   throw new Error(`timed out waiting for ${prompt} to be grouped under repo ${repoId}`);
+}
+
+async function waitForSingleSidebarTask(
+  client: typeof primary,
+  prompt: string,
+): Promise<Array<{
+  id: string;
+  prompt: string;
+  repo_id: string;
+  stage: string;
+  isRemote: boolean;
+}>> {
+  const deadline = Date.now() + 30_000;
+  let items: Awaited<ReturnType<typeof sidebarItemsForPrompt>> = [];
+  while (Date.now() < deadline) {
+    items = await sidebarItemsForPrompt(client, prompt);
+    if (items.length === 1) return items;
+    await sleep(200);
+  }
+  throw new Error(`timed out waiting for exactly one sidebar item for ${prompt}; last items=${JSON.stringify(items)}`);
+}
+
+function hashRemoteUrl(remoteUrl: string | null | undefined): string | null {
+  if (!remoteUrl) return null;
+  return createHash("sha256").update(remoteUrl.trim()).digest("hex");
+}
+
+async function waitForRunningMobileServerStatus(client: typeof primary): Promise<{ desktopId: string }> {
+  const deadline = Date.now() + 30_000;
+  let lastStatus: unknown = null;
+  while (Date.now() < deadline) {
+    lastStatus = await tauriInvoke(client, "mobile_server_status").catch((error) => ({ error: String(error) }));
+    const status = lastStatus as { state?: string; desktopId?: string };
+    if (status.state === "running" && status.desktopId?.match(/^desktop-/)) {
+      return { desktopId: status.desktopId };
+    }
+    await sleep(250);
+  }
+  throw new Error(`timed out waiting for running mobile server status; last status=${JSON.stringify(lastStatus)}`);
 }
 
 async function seedCloudTaskSnapshot(snapshot: Record<string, unknown>): Promise<void> {
@@ -393,8 +433,83 @@ describe("cloud task sync", () => {
     expect(await countLocalTasks(primary)).toBe(0);
     expect(await countLocalTasks(secondary)).toBe(0);
 
-    const primaryStatus = await tauriInvoke(primary, "mobile_server_status") as { desktopId?: string };
-    expect(primaryStatus.desktopId).toMatch(/^desktop-/);
+    const primaryStatus = await waitForRunningMobileServerStatus(primary);
+
+    const repoId = await importTestRepo(primary, testRepoPath, "cloud-sync-repo");
+    const remoteUrl = await tauriInvoke(primary, "git_remote_url", { repoPath: testRepoPath }) as string | null;
+    const remoteUrlHash = hashRemoteUrl(remoteUrl);
+    expect(remoteUrlHash).toMatch(/^[a-f0-9]{64}$/);
+
+    const sameOwnerMissingPrompt = "Cloud sync same-owner missing local task";
+    const sameOwnerMissingTaskId = `missing-local-${Date.now()}`;
+    await seedCloudTaskSnapshot({
+      cloudTaskId: `${repoId}:${sameOwnerMissingTaskId}`,
+      ownerDesktopId: primaryStatus.desktopId,
+      ownerLocalTaskId: sameOwnerMissingTaskId,
+      title: sameOwnerMissingPrompt,
+      promptSnippet: sameOwnerMissingPrompt,
+      displayName: null,
+      stage: "in progress",
+      activity: "working",
+      status: "active",
+      repo: {
+        cloudRepoId: repoId,
+        name: "cloud-sync-repo",
+        remoteUrl,
+        remoteUrlHash,
+        defaultBranch: "main",
+      },
+      branch: `task-${sameOwnerMissingTaskId}`,
+      baseRef: "origin/main",
+      prNumber: null,
+      prUrl: null,
+      agent: { provider: "codex", type: "pty" },
+      transfer: {
+        state: "none",
+        transferId: null,
+        sourceDesktopId: null,
+        destinationDesktopId: null,
+      },
+      blockedByTaskIds: [],
+      createdAt: "2026-05-02T00:00:00.000Z",
+      updatedAt: new Date().toISOString(),
+      closedAt: null,
+    });
+
+    await waitForSidebarTask(primary, sameOwnerMissingPrompt);
+    await waitForSidebarTaskGroupedUnderRepo(primary, sameOwnerMissingPrompt, repoId);
+    expect(await waitForSingleSidebarTask(primary, sameOwnerMissingPrompt)).toEqual([
+      expect.objectContaining({
+        id: `cloud:${repoId}:${sameOwnerMissingTaskId}`,
+        repo_id: repoId,
+        isRemote: true,
+        stage: "in progress",
+      }),
+    ]);
+    expect(await remoteDiagnosticsForPrompt(primary, sameOwnerMissingPrompt)).toContainEqual(expect.objectContaining({
+      selectedTerminalTransport: "cloud",
+      sources: expect.arrayContaining(["cloud"]),
+      ownerDesktopId: primaryStatus.desktopId,
+      ownerLocalTaskId: sameOwnerMissingTaskId,
+    }));
+    expect(await countLocalTasks(primary)).toBe(0);
+
+    await waitForSidebarTask(secondary, sameOwnerMissingPrompt);
+    await waitForSidebarTaskGroupedUnderRepo(secondary, sameOwnerMissingPrompt, secondaryRepoId);
+    expect(await waitForSingleSidebarTask(secondary, sameOwnerMissingPrompt)).toEqual([
+      expect.objectContaining({
+        id: `cloud:${repoId}:${sameOwnerMissingTaskId}`,
+        repo_id: secondaryRepoId,
+        isRemote: true,
+        stage: "in progress",
+      }),
+    ]);
+    expect(await remoteDiagnosticsForPrompt(secondary, sameOwnerMissingPrompt)).toContainEqual(expect.objectContaining({
+      selectedTerminalTransport: "cloud",
+      sources: expect.arrayContaining(["cloud"]),
+      ownerDesktopId: primaryStatus.desktopId,
+      ownerLocalTaskId: sameOwnerMissingTaskId,
+    }));
 
     await seedCloudTaskSnapshot({
       cloudTaskId: "stale-cloud-task",
@@ -430,7 +545,6 @@ describe("cloud task sync", () => {
       closedAt: null,
     });
 
-    const repoId = await importTestRepo(primary, testRepoPath, "cloud-sync-repo");
     await setSetupState(primary, "maximized", false);
     await setSetupState(primary, "sidebarHidden", false);
     const result = await callVueMethod(
@@ -505,13 +619,20 @@ describe("cloud task sync", () => {
       }),
     ]);
     const primaryCloudSnapshot = await cloudSnapshotItemsForPrompt(primary, "Cloud sync visible task");
-    expect(primaryCloudSnapshot.items).toEqual([]);
-    expect(Object.values(primaryCloudSnapshot.terminalRefs)).not.toContainEqual(
-      expect.objectContaining({
+    if (primaryCloudSnapshot.items.length > 0) {
+      expect(primaryCloudSnapshot.items).toHaveLength(1);
+      expect(Object.values(primaryCloudSnapshot.terminalRefs)).toContainEqual(expect.objectContaining({
         ownerDesktopId: primaryStatus.desktopId,
         ownerLocalTaskId: result,
+      }));
+    }
+    expect(await waitForSingleSidebarTask(primary, "Cloud sync visible task")).toEqual([
+      expect.objectContaining({
+        id: result,
+        isRemote: false,
+        stage: "in progress",
       }),
-    );
+    ]);
 
     await tauriInvoke(primary, "spawn_session", {
       sessionId: result,
