@@ -67,6 +67,18 @@ async function openDiffModal(client: WebDriverClient): Promise<void> {
   await client.waitForElement(".diff-view", 5_000);
 }
 
+async function resetSelectedDiffViewState(client: WebDriverClient): Promise<void> {
+  await closeDiffModalIfOpen(client);
+  await client.executeSync(
+    `const ctx = window.__KANNA_E2E__.setupState;
+     const keyRef = ctx.currentDiffViewKey;
+     const key = keyRef?.__v_isRef ? keyRef.value : keyRef;
+     if (key && ctx.diffViewStates) {
+       delete ctx.diffViewStates[key];
+     }`
+  );
+}
+
 async function clickDiffToolbarButton(client: WebDriverClient, label: string): Promise<void> {
   const clicked = await client.executeSync<boolean>(
     `const label = ${JSON.stringify(label)};
@@ -315,23 +327,21 @@ describe("diff view", () => {
          if (!(container instanceof HTMLElement) || !(wrapper instanceof HTMLElement) || !(header instanceof HTMLElement)) return;
 
          container.scrollTop = wrapper.offsetTop + 40;
-         requestAnimationFrame(() => {
-           requestAnimationFrame(() => {
-             const containerRect = container.getBoundingClientRect();
-             const headerRect = header.getBoundingClientRect();
-             const headers = Array.from(document.querySelectorAll(".diff-file-header"));
-             finish({
-               containerTop: containerRect.top,
-               headerTop: headerRect.top,
-               headerBottom: headerRect.bottom,
-               scrollTop: container.scrollTop,
-               stickyTop: getComputedStyle(header).top,
-               headerCount: headers.length,
-               renderedHeaderCount: renderedWrappers.length,
-               wrapperHeight: wrapper.getBoundingClientRect().height,
-             });
+         setTimeout(() => {
+           const containerRect = container.getBoundingClientRect();
+           const headerRect = header.getBoundingClientRect();
+           const headers = Array.from(document.querySelectorAll(".diff-file-header"));
+           finish({
+             containerTop: containerRect.top,
+             headerTop: headerRect.top,
+             headerBottom: headerRect.bottom,
+             scrollTop: container.scrollTop,
+             stickyTop: getComputedStyle(header).top,
+             headerCount: headers.length,
+             renderedHeaderCount: renderedWrappers.length,
+             wrapperHeight: wrapper.getBoundingClientRect().height,
            });
-         });
+         }, 50);
        };
        const interval = setInterval(measure, 25);
        const timeout = setTimeout(() => {
@@ -576,6 +586,8 @@ describe("diff view", () => {
     const totalChangedLines = fileCount * (linesPerFile + 1);
     const worktreePath = `${testRepoPath}/.kanna-worktrees/${branch}`;
     const createFilesScript = [
+      "git add -A",
+      "if ! git diff --cached --quiet; then git commit -m 'e2e diff perf baseline'; fi",
       "mkdir -p diff-perf",
       "rm -f diff-perf/Cargo-*.lock",
       `for i in $(seq 1 ${fileCount}); do`,
@@ -593,7 +605,7 @@ describe("diff view", () => {
       env: {},
     });
 
-    await client.executeSync(buildGlobalKeydownScript({ key: "Escape" }));
+    await resetSelectedDiffViewState(client);
     await sleep(250);
 
     const result = await client.executeAsync<{
