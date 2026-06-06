@@ -1,5 +1,5 @@
 import { setTimeout as sleep } from "node:timers/promises";
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, afterEach } from "vitest";
 import { WebDriverClient } from "../helpers/webdriver";
 import { resetDatabase, importTestRepo, cleanupWorktrees } from "../helpers/reset";
 import { getVueState, tauriInvoke } from "../helpers/vue";
@@ -186,6 +186,37 @@ describe("diff view", () => {
   const client = new WebDriverClient();
   let fixtureRepoRoot = "";
   let testRepoPath = "";
+  let taskWorktreePath = "";
+  let taskWorktreeBaselineRef = "";
+
+  async function getSelectedTaskBranch(): Promise<string> {
+    const branch = await client.executeSync<string | null>(
+      `const ctx = window.__KANNA_E2E__.setupState;
+       const item = ctx.selectedItem();
+       return item ? (item.branch?.value || item.branch) : null;`
+    );
+    if (!branch) {
+      throw new Error("expected selected task to have a worktree branch");
+    }
+    return branch;
+  }
+
+  async function resetTaskWorktreeDiffState(): Promise<void> {
+    if (!taskWorktreePath || !taskWorktreeBaselineRef) return;
+
+    await client.executeSync(buildGlobalKeydownScript({ key: "Escape" })).catch(() => undefined);
+    await client.waitForNoElement(".diff-view", 2_000).catch(() => undefined);
+    await tauriInvoke(client, "run_script", {
+      script: [
+        'git reset --hard "$KANNA_E2E_DIFF_BASELINE_REF"',
+        "git clean -fd -- diff-oversized diff-perf",
+      ].join("\n"),
+      cwd: taskWorktreePath,
+      env: {
+        KANNA_E2E_DIFF_BASELINE_REF: taskWorktreeBaselineRef,
+      },
+    });
+  }
 
   beforeAll(async () => {
     await client.createSession();
@@ -199,6 +230,7 @@ describe("diff view", () => {
     const id = crypto.randomUUID();
     const branch = `task-${id}`;
     const worktreePath = `${testRepoPath}/.kanna-worktrees/${branch}`;
+    taskWorktreePath = worktreePath;
 
     // Internal setup only: diff tests need a deterministic worktree-backed task
     // without starting a real agent session.
@@ -220,6 +252,20 @@ describe("diff view", () => {
          .catch(function(e) { cb("err:" + e); });`
     );
     await client.waitForText(".sidebar", "Say OK");
+
+    const baselineRef = await tauriInvoke(client, "run_script", {
+      script: "git rev-parse HEAD",
+      cwd: taskWorktreePath,
+      env: {},
+    });
+    if (typeof baselineRef !== "string" || baselineRef.trim().length === 0) {
+      throw new Error(`expected worktree baseline ref, got: ${JSON.stringify(baselineRef)}`);
+    }
+    taskWorktreeBaselineRef = baselineRef.trim();
+  });
+
+  afterEach(async () => {
+    await resetTaskWorktreeDiffState();
   });
 
   afterAll(async () => {
@@ -240,15 +286,7 @@ describe("diff view", () => {
 
   it("loads diff content after editing a tracked file", async () => {
     // Get the worktree path from the selected item
-    const branch = await client.executeSync<string | null>(
-      `const ctx = window.__KANNA_E2E__.setupState;
-       const item = ctx.selectedItem();
-       return item ? (item.branch?.value || item.branch) : null;`
-    );
-    if (!branch) {
-      console.warn("No task selected, skipping diff content test");
-      return;
-    }
+    const branch = await getSelectedTaskBranch();
 
     const worktreePath = `${testRepoPath}/.kanna-worktrees/${branch}`;
 
@@ -270,14 +308,7 @@ describe("diff view", () => {
   });
 
   it("skips an oversized diff line while rendering a normal changed file", async () => {
-    const branch = await client.executeSync<string | null>(
-      `const ctx = window.__KANNA_E2E__.setupState;
-       const item = ctx.selectedItem();
-       return item ? (item.branch?.value || item.branch) : null;`
-    );
-    if (!branch) {
-      throw new Error("expected selected task to have a worktree branch");
-    }
+    const branch = await getSelectedTaskBranch();
 
     const worktreePath = `${testRepoPath}/.kanna-worktrees/${branch}`;
     const oversizedScript = [
@@ -390,14 +421,7 @@ describe("diff view", () => {
   });
 
   it("keeps the sticky diff file header flush with the diff scroller", async () => {
-    const branch = await client.executeSync<string | null>(
-      `const ctx = window.__KANNA_E2E__.setupState;
-       const item = ctx.selectedItem();
-       return item ? (item.branch?.value || item.branch) : null;`
-    );
-    if (!branch) {
-      throw new Error("expected selected task to have a worktree branch");
-    }
+    const branch = await getSelectedTaskBranch();
 
     const worktreePath = `${testRepoPath}/.kanna-worktrees/${branch}`;
 
@@ -691,14 +715,7 @@ describe("diff view", () => {
   });
 
   it("shows first diff content before rendering an entire broad diff", async () => {
-    const branch = await client.executeSync<string | null>(
-      `const ctx = window.__KANNA_E2E__.setupState;
-       const item = ctx.selectedItem();
-       return item ? (item.branch?.value || item.branch) : null;`
-    );
-    if (!branch) {
-      throw new Error("expected selected task to have a worktree branch");
-    }
+    const branch = await getSelectedTaskBranch();
 
     const fileCount = getDiffPerfFileCount();
     const linesPerFile = getDiffPerfLinesPerFile();
