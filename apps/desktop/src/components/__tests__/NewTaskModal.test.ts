@@ -13,7 +13,7 @@ async function flushPromises() {
 
 vi.mock("../../invoke", () => ({
   invoke: vi.fn(async (command: string, args?: { name?: string; repoPath?: string }) => {
-    if (command === "which_binary" && (args?.name === "claude" || args?.name === "codex")) {
+    if (command === "which_binary" && (args?.name === "claude" || args?.name === "codex" || args?.name === "opencode")) {
       return true;
     }
     throw new Error("missing");
@@ -71,6 +71,27 @@ describe("NewTaskModal", () => {
     await flushPromises();
 
     expect(wrapper.text()).toContain("Codex");
+  });
+
+  it("includes OpenCode in the agent cycle when installed", async () => {
+    const wrapper = mount(NewTaskModal, {
+      props: { defaultAgentProvider: "codex" },
+      global: {
+        mocks: {
+          $t: (key: string) => key,
+        },
+      },
+    });
+
+    await flushPromises();
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("Codex");
+
+    await wrapper.get(".agent-provider").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("OpenCode");
   });
 
   it("prevents mouse down default on the agent indicator so focus stays on the prompt", async () => {

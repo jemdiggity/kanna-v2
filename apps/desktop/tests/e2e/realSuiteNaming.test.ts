@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-const PROVIDER_NAME_PATTERN = /(claude|copilot|codex)/i;
+const PROVIDER_NAME_PATTERN = /(claude|copilot|codex|opencode)/i;
 
 describe("default real E2E suite naming", () => {
   it("does not use provider names in top-level real suite filenames", async () => {

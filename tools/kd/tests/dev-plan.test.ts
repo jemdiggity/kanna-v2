@@ -21,6 +21,27 @@ describe("buildDevPlan", () => {
     expect(plan.windows[0]?.command).toContain("pnpm run build:sidecars");
   });
 
+  it("prefixes desktop command with E2E agent override environment", () => {
+    const plan = buildDevPlan({
+      repoRoot: "/repo",
+      env: {
+        KANNA_DEV_PORT: "1421",
+        KANNA_DB_PATH: "/tmp/kanna.db",
+        KANNA_MOBILE_SERVER_PORT: "48120",
+        KANNA_E2E_REAL_AGENT_PROVIDER: "opencode",
+        KANNA_E2E_REAL_AGENT_MODEL: "opencode/big-pickle",
+      },
+      mobile: false,
+      emulators: false,
+      firebaseConfigPath: "/repo/.firebase-8080.kanna.json",
+      mobileServerUrl: "http://127.0.0.1:48120"
+    });
+
+    expect(plan.windows[0]?.command).toContain("KANNA_E2E_REAL_AGENT_PROVIDER=opencode");
+    expect(plan.windows[0]?.command).toContain("KANNA_E2E_REAL_AGENT_MODEL=opencode/big-pickle");
+    expect(plan.windows[0]?.command).toContain("pnpm run build:sidecars");
+  });
+
   it("starts emulators before desktop and mobile when requested", () => {
     const plan = buildDevPlan({
       repoRoot: "/repo",

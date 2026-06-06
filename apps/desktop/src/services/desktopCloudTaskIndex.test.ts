@@ -106,6 +106,38 @@ describe("mapDesktopCloudTasks", () => {
     });
   });
 
+  it("preserves OpenCode as the cloud task agent provider", () => {
+    const snapshot = mapDesktopCloudTasks([
+      {
+        cloudTaskId: "repo-1:task-opencode",
+        ownerDesktopId: "peer-primary",
+        ownerLocalTaskId: "task-opencode",
+        title: "OpenCode cloud task",
+        promptSnippet: "Cloud task prompt",
+        displayName: null,
+        stage: "in progress",
+        activity: "working",
+        status: "active",
+        repo: {
+          cloudRepoId: "repo-1",
+          name: "kanna",
+          remoteUrl: "git@github.com:jemdiggity/kanna.git",
+          defaultBranch: "main",
+        },
+        branch: "task-opencode",
+        baseRef: "origin/main",
+        prNumber: null,
+        prUrl: null,
+        agent: { provider: "opencode", type: "pty" },
+        createdAt: "2026-05-14T00:00:00.000Z",
+        updatedAt: "2026-05-14T00:01:00.000Z",
+        closedAt: null,
+      },
+    ]);
+
+    expect(snapshot.items[0]?.agent_provider).toBe("opencode");
+  });
+
   it("groups cloud tasks under a local repo when the remote URL hash matches", () => {
     const snapshot = mapDesktopCloudTasks([
       {

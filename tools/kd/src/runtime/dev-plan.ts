@@ -78,6 +78,11 @@ function resolveRelayUrl(input: BuildDevPlanInput): string | undefined {
   return `ws://${resolveHostFromUrl(input.mobileServerUrl)}:${relayPort}`;
 }
 
+function e2eEnv(input: BuildDevPlanInput): Record<string, string | undefined> {
+  const entries = Object.entries(input.env).filter(([key]) => key.startsWith("KANNA_E2E_"));
+  return Object.fromEntries(entries);
+}
+
 export function buildDevPlan(input: BuildDevPlanInput): DevPlan {
   const windows: DevWindow[] = [];
   const sharedEnv = { ...input.env };
@@ -106,11 +111,12 @@ export function buildDevPlan(input: BuildDevPlanInput): DevPlan {
   }
 
   const localConfigPath = `${input.repoRoot}/apps/desktop/src-tauri/tauri.conf.local.json`;
+  const desktopEnv = shellEnvPrefix(e2eEnv(input));
   windows.push({
     name: "desktop",
     cwd: `${input.repoRoot}/apps/desktop`,
     env: sharedEnv,
-    command: `pnpm run build:sidecars && pnpm exec tauri dev --config ${JSON.stringify(localConfigPath)}`
+    command: `${desktopEnv ? `${desktopEnv} ` : ""}pnpm run build:sidecars && ${desktopEnv ? `${desktopEnv} ` : ""}pnpm exec tauri dev --config ${JSON.stringify(localConfigPath)}`
   });
 
   if (input.mobile) {

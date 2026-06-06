@@ -113,7 +113,7 @@ function isActivityShortcutCandidate(item: { stage?: string; teardown_started_at
 function firstSupportedAgentProvider(agentProvider: AgentProvider | AgentProvider[] | string | string[] | undefined): AgentProvider | undefined {
   const providers = Array.isArray(agentProvider) ? agentProvider : [agentProvider];
   return providers.find((provider): provider is AgentProvider =>
-    provider === "claude" || provider === "copilot" || provider === "codex"
+    provider === "claude" || provider === "copilot" || provider === "codex" || provider === "opencode"
   );
 }
 
@@ -1938,7 +1938,7 @@ async function handlePreferenceUpdate(key: string, value: string) {
   } else if (key === "dev.lingerTerminals") {
     preferences.devLingerTerminals = value === "true";
   } else if (key === "defaultAgentProvider") {
-    preferences.defaultAgentProvider = (value === "copilot" ? "copilot" : value === "codex" ? "codex" : "claude");
+    preferences.defaultAgentProvider = firstSupportedAgentProvider(value) ?? "claude";
   } else if (key === "appTheme") {
     preferences.appTheme = normalizeAppThemePreference(value);
     syncThemeRuntime();
@@ -2194,6 +2194,7 @@ onMounted(async () => {
   const savedAgentProvider = await getSetting(db, "defaultAgentProvider");
   if (savedAgentProvider === "copilot") preferences.defaultAgentProvider = "copilot";
   else if (savedAgentProvider === "codex") preferences.defaultAgentProvider = "codex";
+  else if (savedAgentProvider === "opencode") preferences.defaultAgentProvider = "opencode";
 
   startPeriodicBackup(dbName, ref(db) as Ref<DbHandle | null>);
   if (!store.hideShortcutsOnStartup) {

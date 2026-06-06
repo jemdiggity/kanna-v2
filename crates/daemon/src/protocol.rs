@@ -63,6 +63,7 @@ pub enum AgentProvider {
     Claude,
     Copilot,
     Codex,
+    Opencode,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]

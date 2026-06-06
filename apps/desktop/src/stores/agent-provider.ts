@@ -4,6 +4,7 @@ export interface AgentProviderAvailability {
   claude: boolean;
   copilot: boolean;
   codex: boolean;
+  opencode: boolean;
 }
 
 export interface AgentProviderPrecedenceSources {

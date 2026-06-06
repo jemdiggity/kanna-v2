@@ -8,10 +8,11 @@ import { scanCustomTasks } from "./custom-tasks-scanner.js";
 
 describe("NEW_CUSTOM_TASK_PROMPT", () => {
   it("documents all supported agent providers and provider-specific yolo-equivalent permission defaults", () => {
-    expect(NEW_CUSTOM_TASK_PROMPT).toContain('- agent_provider: "claude" | "copilot" | "codex"');
+    expect(NEW_CUSTOM_TASK_PROMPT).toContain('- agent_provider: "claude" | "copilot" | "codex" | "opencode"');
     expect(NEW_CUSTOM_TASK_PROMPT).toContain('permission_mode: "dontAsk" | "acceptEdits" | "default"');
     expect(NEW_CUSTOM_TASK_PROMPT).toContain("default: provider-specific yolo-equivalent");
     expect(NEW_CUSTOM_TASK_PROMPT).toContain("Codex -> --yolo");
+    expect(NEW_CUSTOM_TASK_PROMPT).toContain("OpenCode -> --dangerously-skip-permissions");
     expect(NEW_CUSTOM_TASK_PROMPT).not.toContain("uses app default when omitted");
     expect(NEW_CUSTOM_TASK_PROMPT).not.toContain("default: dontAsk");
     expect(NEW_CUSTOM_TASK_PROMPT).not.toContain("Codex -> --dangerously-bypass-approvals-and-sandbox");
@@ -151,6 +152,18 @@ Use Codex for this task.
     expect(result).not.toBeNull();
     expect(result!.agentProvider).toBe("codex");
     expect(result!.prompt).toBe("Use Codex for this task.");
+  });
+
+  it("accepts opencode as an agent provider", () => {
+    const content = `---
+agent_provider: opencode
+---
+Use OpenCode for this task.
+`;
+    const result = parseAgentMd(content, "opencode-task");
+    expect(result).not.toBeNull();
+    expect(result!.agentProvider).toBe("opencode");
+    expect(result!.prompt).toBe("Use OpenCode for this task.");
   });
 
   it("accepts an agent-backed task with no prompt body", () => {

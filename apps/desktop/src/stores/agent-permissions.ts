@@ -33,6 +33,12 @@ export function getAgentPermissionFlags(
     return ["--yolo"];
   }
 
+  if (provider === "opencode") {
+    return shouldUseYoloPermissionDefaults(permissionMode)
+      ? ["--dangerously-skip-permissions"]
+      : [];
+  }
+
   if (shouldUseYoloPermissionDefaults(permissionMode)) {
     return ["--yolo"];
   }

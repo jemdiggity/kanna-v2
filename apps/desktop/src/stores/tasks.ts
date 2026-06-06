@@ -506,6 +506,13 @@ export function createTasksApi(
           await requireService(context.services.syncTaskStatusesFromDaemon, "syncTaskStatusesFromDaemon")();
         }
       } catch (error) {
+        if (import.meta.env.DEV && typeof window !== "undefined") {
+          (window as unknown as { __KANNA_E2E_LAST_AGENT_SPAWN_ERROR__?: unknown }).__KANNA_E2E_LAST_AGENT_SPAWN_ERROR__ = {
+            taskId: id,
+            message: error instanceof Error ? error.message : String(error),
+            error,
+          };
+        }
         await markSetupFailed(
           error,
           "[store] agent spawn failed:",

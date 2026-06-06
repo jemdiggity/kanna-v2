@@ -13,7 +13,7 @@ export interface RealE2eAgentOverride {
 }
 
 function isAgentProvider(value: string): value is AgentProvider {
-  return value === "claude" || value === "copilot" || value === "codex";
+  return value === "claude" || value === "copilot" || value === "codex" || value === "opencode";
 }
 
 async function readEnv(name: string): Promise<string> {

@@ -8,7 +8,7 @@ export function buildRealE2eAgentEnv(
   }
 
   return {
-    KANNA_E2E_REAL_AGENT_PROVIDER: env.KANNA_E2E_REAL_AGENT_PROVIDER || "codex",
-    KANNA_E2E_REAL_AGENT_MODEL: env.KANNA_E2E_REAL_AGENT_MODEL || "gpt-5.4-mini",
+    KANNA_E2E_REAL_AGENT_PROVIDER: env.KANNA_E2E_REAL_AGENT_PROVIDER || "opencode",
+    KANNA_E2E_REAL_AGENT_MODEL: env.KANNA_E2E_REAL_AGENT_MODEL || "opencode/big-pickle",
   };
 }
