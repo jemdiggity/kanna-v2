@@ -107,6 +107,9 @@ describe("createSessionsApi", () => {
     });
 
     expect(prepared.agentCmd).toBe("'/usr/bin/opencode' run --interactive --dangerously-skip-permissions -m opencode/gpt-5.1-codex 'Ship it'");
+    expect(prepared.agentCmdPreamble).toContain("'/usr/bin/opencode' run --interactive --dangerously-skip-permissions -m opencode/gpt-5.1-codex");
+    expect(prepared.agentCmdPreamble).toContain("Ship it");
+    expect(prepared.agentCmdPreamble).toContain("This session was launched by Kanna");
     expect(prepared.agentProvider).toBe("opencode");
     expect(mocks.updateAgentSessionIdMock).not.toHaveBeenCalled();
   });
@@ -120,5 +123,8 @@ describe("createSessionsApi", () => {
     });
 
     expect(prepared.agentCmd).toBe("'/usr/bin/opencode' run --interactive --dangerously-skip-permissions --session 'ses_123' 'Continue'");
+    expect(prepared.agentCmdPreamble).toContain("'/usr/bin/opencode' run --interactive --dangerously-skip-permissions --session 'ses_123'");
+    expect(prepared.agentCmdPreamble).toContain("Continue");
+    expect(prepared.agentCmdPreamble).toContain("This session was launched by Kanna");
   });
 });

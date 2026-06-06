@@ -46,6 +46,10 @@ interface KannaE2EHook {
   dbName: string;
   taskSwitchPerf: KannaTaskSwitchPerfE2EApi;
   appMetrics: KannaAppMetricsE2EApi;
+  invokes?: {
+    clear(): void;
+    getAll(): Array<{ cmd: string; args?: unknown }>;
+  };
   terminalBuffers?: KannaTerminalBuffersE2EApi;
 }
 

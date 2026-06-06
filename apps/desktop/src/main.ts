@@ -14,6 +14,7 @@ import {
 import App from "./App.vue";
 import { createWindowWorkspace, parseWindowBootstrap, resolveWindowBootstrap } from "./windowWorkspace";
 import { e2eAppMetrics } from "./e2eAppMetrics";
+import { e2eInvokeHistory } from "./e2eInvokeHistory";
 
 interface AppWithSetupState {
   _instance?: {
@@ -198,6 +199,7 @@ try {
         clear: () => clearTaskSwitchPerfRecords(),
       },
       appMetrics: e2eAppMetrics,
+      invokes: e2eInvokeHistory,
     };
   }
 

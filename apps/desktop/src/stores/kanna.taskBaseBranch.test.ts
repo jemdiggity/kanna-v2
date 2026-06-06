@@ -378,6 +378,8 @@ vi.mock("../../../../packages/core/src/pipeline/pipeline-loader", () => ({
 
 vi.mock("../../../../packages/core/src/pipeline/prompt-builder", () => ({
   buildStagePrompt: vi.fn(() => "Stage prompt"),
+  buildKannaRuntimeSystemPrompt: vi.fn(() => "This session was launched by Kanna."),
+  buildKannaRuntimeUserPrompt: vi.fn((prompt: string) => `This session was launched by Kanna.\n\n${prompt}`),
 }));
 
 vi.mock("../composables/useToast", () => ({
@@ -388,7 +390,7 @@ vi.mock("../composables/useToast", () => ({
 }));
 
 vi.mock("../composables/terminalSessionRecovery", () => ({
-  buildTaskShellCommand: vi.fn((agentCmd: string) => agentCmd),
+  buildTaskShellCommand: vi.fn((agentCmd: string, _setupCmds: string[], options?: { agentCmdPreamble?: string }) => options?.agentCmdPreamble ?? agentCmd),
   getTaskTerminalEnv: vi.fn(() => ({})),
 }));
 
@@ -910,6 +912,8 @@ describe("kanna store task base branch integration", () => {
         "create_agent_session",
         expect.objectContaining({
           sessionId: createdItem?.id,
+          prompt: "Ship sdk env",
+          systemPrompt: expect.stringContaining("This session was launched by Kanna."),
           env: expect.objectContaining({
             KANNA_WORKTREE: "1",
             KANNA_DEV_PORT: "1421",
@@ -1036,6 +1040,9 @@ describe("kanna store task base branch integration", () => {
       }),
     );
     const spawnCall = mockState.invokeMock.mock.calls.find(([command]) => command === "spawn_session");
+    expect(spawnCall?.[1]?.args?.join(" ")).toContain("--append-system-prompt");
+    expect(spawnCall?.[1]?.args?.join(" ")).toContain("This session was launched by Kanna.");
+    expect(spawnCall?.[1]?.args?.join(" ")).not.toContain("Ship PTY env\\n\\nThis session was launched by Kanna.");
     const env = spawnCall?.[1]?.env as Record<string, string> | undefined;
     expect(env).not.toHaveProperty("KANNA_SERVER_BASE_URL");
   });
@@ -1054,6 +1061,7 @@ describe("kanna store task base branch integration", () => {
       expect.anything(),
       expect.objectContaining({
         agent_provider: "codex",
+        prompt: "Use cheap real e2e agent",
       }),
     );
 
@@ -1064,6 +1072,8 @@ describe("kanna store task base branch integration", () => {
           agentProvider: "codex",
           args: expect.arrayContaining([
             expect.stringContaining("codex -m gpt-5.4-mini"),
+            expect.stringContaining("This session was launched by Kanna."),
+            expect.stringContaining("Use cheap real e2e agent"),
           ]),
         }),
       );

@@ -1,5 +1,6 @@
 import type { AgentProvider } from "@kanna/db";
 import { getRepo, updateAgentSessionId, updatePipelineItemActivity } from "@kanna/db";
+import { buildKannaRuntimeSystemPrompt, buildKannaRuntimeUserPrompt } from "../../../../packages/core/src/pipeline/prompt-builder";
 import { invoke } from "../invoke";
 import { isTauri } from "../tauri-mock";
 import { buildTaskShellCommand, getTaskTerminalEnv } from "../composables/terminalSessionRecovery";
@@ -329,7 +330,10 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
     }
 
     const escapedPrompt = prompt.replace(/'/g, "'\\''");
+    const escapedSystemPrompt = buildKannaRuntimeSystemPrompt().replace(/'/g, "'\\''");
+    const escapedPromptWithPreamble = buildKannaRuntimeUserPrompt(prompt).replace(/'/g, "'\\''");
     let agentCmd: string;
+    let agentCmdPreamble: string | undefined;
     const permissionFlags = getAgentPermissionFlags(provider, options?.permissionMode);
 
     if (provider === "copilot") {
@@ -351,6 +355,9 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
       agentCmd = options?.resumeSessionId
         ? `copilot ${copilotFlags.join(" ")}`
         : `copilot ${copilotFlags.join(" ")} -i '${escapedPrompt}'`;
+      agentCmdPreamble = options?.resumeSessionId
+        ? undefined
+        : `copilot ${copilotFlags.join(" ")} -i '${escapedPromptWithPreamble}'`;
     } else if (provider === "codex") {
       const codexFlags: string[] = [...permissionFlags];
       if (options?.model) codexFlags.push(`-m ${options.model}`);
@@ -359,10 +366,16 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
         agentCmd = escapedPrompt
           ? `codex resume ${codexFlags.join(" ")} '${escapedResumeSessionId}' '${escapedPrompt}'`
           : `codex resume ${codexFlags.join(" ")} '${escapedResumeSessionId}'`;
+        agentCmdPreamble = escapedPrompt
+          ? `codex resume ${codexFlags.join(" ")} '${escapedResumeSessionId}' '${escapedPromptWithPreamble}'`
+          : undefined;
       } else {
         agentCmd = escapedPrompt
           ? `codex ${codexFlags.join(" ")} '${escapedPrompt}'`
           : `codex ${codexFlags.join(" ")}`;
+        agentCmdPreamble = escapedPrompt
+          ? `codex ${codexFlags.join(" ")} '${escapedPromptWithPreamble}'`
+          : undefined;
       }
     } else if (provider === "opencode") {
       const opencodePath = await invoke<string>("which_binary", { name: "opencode" })
@@ -379,8 +392,19 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
         opencodeParts.push(`'${escapedPrompt}'`);
       }
       agentCmd = opencodeParts.join(" ");
+      if (escapedPrompt) {
+        const opencodePreambleParts = [
+          opencodeExecutable,
+          "run",
+          "--interactive",
+          ...opencodeFlags,
+          `'${escapedPromptWithPreamble}'`,
+        ];
+        agentCmdPreamble = opencodePreambleParts.join(" ");
+      }
     } else {
       const flags: string[] = [...permissionFlags];
+      flags.push(`--append-system-prompt '${escapedSystemPrompt}'`);
       if (options?.model) flags.push(`--model ${options.model}`);
       if (options?.maxTurns != null) flags.push(`--max-turns ${options.maxTurns}`);
       if (options?.maxBudgetUsd != null) flags.push(`--max-budget-usd ${options.maxBudgetUsd}`);
@@ -413,6 +437,7 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
       env,
       setupCmds: [...setupCmds, ...(options?.setupCmdsOverride || [])],
       agentCmd,
+      agentCmdPreamble,
       agentProvider: provider,
       kannaCliPath,
     };
@@ -426,11 +451,11 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
     rows = 24,
     options?: PtySpawnOptions,
   ) {
-    const { env, setupCmds, agentCmd, agentProvider, kannaCliPath } = await preparePtySession(sessionId, prompt, {
+    const { env, setupCmds, agentCmd, agentCmdPreamble, agentProvider, kannaCliPath } = await preparePtySession(sessionId, prompt, {
       ...options,
       worktreePath: options?.worktreePath ?? cwd,
     });
-    const fullCmd = buildTaskShellCommand(agentCmd, setupCmds, { kannaCliPath });
+    const fullCmd = buildTaskShellCommand(agentCmd, setupCmds, { kannaCliPath, agentCmdPreamble });
 
     await invoke("spawn_session", {
       sessionId,

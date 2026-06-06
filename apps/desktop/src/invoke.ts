@@ -1,6 +1,7 @@
 import { isTauri, mockInvoke } from "./tauri-mock";
 import { normalizeAppError } from "./appError";
 import { e2eAppMetrics } from "./e2eAppMetrics";
+import { e2eInvokeHistory } from "./e2eInvokeHistory";
 
 const tauriInvoke = isTauri
   ? (await import("@tauri-apps/api/core")).invoke
@@ -13,6 +14,7 @@ export async function invoke<T = unknown>(
   try {
     if (import.meta.env.DEV && window.__KANNA_E2E__) {
       e2eAppMetrics.recordInvoke(cmd, args);
+      e2eInvokeHistory.record(cmd, args);
     }
     return await tauriInvoke<T>(cmd, args);
   } catch (error) {

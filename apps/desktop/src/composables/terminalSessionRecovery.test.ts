@@ -405,6 +405,15 @@ describe("buildTaskShellCommand", () => {
     expect(command).toContain("&& codex 'ship it'");
   });
 
+  it("can print the agent command while launching it with a preamble", () => {
+    const command = buildTaskShellCommand("codex 'ship it'", [], {
+      agentCmdPreamble: "codex 'Kanna context\n\nship it'",
+    });
+
+    expect(command).toContain("printf '\\033[2m$ %s\\033[0m\\n' 'codex '\\''ship it'\\'''");
+    expect(command).toContain("&& codex 'Kanna context\n\nship it'");
+  });
+
   it("continues to the agent when a setup command fails", () => {
     const dir = mkdtempSync(join(tmpdir(), "kanna-setup-failure-"));
     const marker = join(dir, "agent-started");

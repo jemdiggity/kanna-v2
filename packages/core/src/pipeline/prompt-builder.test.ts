@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildStagePrompt } from "./prompt-builder";
+import { buildKannaRuntimeSystemPrompt, buildKannaRuntimeUserPrompt, buildStagePrompt } from "./prompt-builder";
 
 describe("buildStagePrompt", () => {
   it("replaces $TASK_PROMPT with the user's original prompt", () => {
@@ -101,5 +101,26 @@ describe("buildStagePrompt", () => {
       { taskPrompt: "hello" }
     );
     expect(result).toBe("Base.\n\nhello and also hello");
+  });
+});
+
+describe("buildKannaRuntimeSystemPrompt", () => {
+  it("builds Kanna discovery guidance for hidden agent instructions", () => {
+    const result = buildKannaRuntimeSystemPrompt();
+
+    expect(result).toContain("This session was launched by Kanna");
+    expect(result).toContain("The current Kanna task id is in `KANNA_TASK_ID`.");
+    expect(result).toContain("Kanna MCP tools are named `kanna_*`");
+    expect(result).toContain("The bundled `kanna-cli` is on PATH");
+  });
+});
+
+describe("buildKannaRuntimeUserPrompt", () => {
+  it("prepends Kanna discovery guidance to visible-prompt-only agents", () => {
+    const result = buildKannaRuntimeUserPrompt("Ship the feature");
+
+    expect(result).toContain("This session was launched by Kanna");
+    expect(result).toContain("The bundled `kanna-cli` is on PATH");
+    expect(result).toMatch(/\n\nShip the feature$/);
   });
 });

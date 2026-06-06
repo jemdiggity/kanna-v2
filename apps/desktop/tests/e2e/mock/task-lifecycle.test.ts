@@ -2,7 +2,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { WebDriverClient } from "../helpers/webdriver";
 import { resetDatabase, importTestRepo, cleanupWorktrees } from "../helpers/reset";
-import { execDb, getVueState, queryDb, tauriInvoke } from "../helpers/vue";
+import { callVueMethod, execDb, getVueState, queryDb, tauriInvoke } from "../helpers/vue";
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
 import { buildGlobalKeydownScript } from "../helpers/keyboard";
 
@@ -105,6 +105,28 @@ async function getAppInvokeMetrics(client: WebDriverClient): Promise<{
   );
 }
 
+async function waitForE2EInvoke<T>(
+  client: WebDriverClient,
+  predicateSource: string,
+  timeoutMs = 5_000,
+): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  let calls: unknown[] = [];
+
+  while (Date.now() < deadline) {
+    const result = await client.executeSync<{ match: T | null; calls: unknown[] }>(
+      `const calls = window.__KANNA_E2E__.invokes.getAll();
+       const match = calls.find(${predicateSource});
+       return { match: match ? JSON.parse(JSON.stringify(match.args)) : null, calls };`
+    );
+    calls = result.calls;
+    if (result.match) return result.match;
+    await sleep(100);
+  }
+
+  throw new Error(`Timed out waiting for E2E invoke; calls were ${JSON.stringify(calls)}`);
+}
+
 describe("task lifecycle", () => {
   const client = new WebDriverClient();
   let repoId = "";
@@ -168,15 +190,62 @@ describe("task lifecycle", () => {
     expect(exists).toBe(true);
   });
 
+  it("launches a new PTY task with runtime guidance without persisting or displaying it as the user prompt", async () => {
+    const prompt = "Inspect the runtime guidance launch path";
+    const createResult = await client.executeAsync<string>(
+      `const cb = arguments[arguments.length - 1];
+       const ctx = window.__KANNA_E2E__.setupState;
+       window.__KANNA_E2E__.invokes.clear();
+       ctx.createItem(${JSON.stringify(repoId)}, ${JSON.stringify(testRepoPath)}, ${JSON.stringify(prompt)}, "pty", {
+         agentProvider: "codex",
+       })
+         .then(() => cb("ok"))
+         .catch((error) => cb("err:" + error));`
+    );
+    expect(createResult).toBe("ok");
+
+    const rows = (await queryDb(
+      client,
+      "SELECT id, prompt FROM pipeline_item WHERE repo_id = ? AND prompt = ? ORDER BY created_at DESC LIMIT 1",
+      [repoId, prompt],
+    )) as Array<{ id: string; prompt: string }>;
+    expect(rows[0]?.prompt).toBe(prompt);
+
+    const spawnCall = await waitForE2EInvoke<{ args?: string[]; env?: Record<string, string> }>(
+      client,
+      `(call) => call.cmd === "spawn_session" && call.args?.sessionId === ${JSON.stringify(rows[0]?.id)}`,
+    );
+    expect(spawnCall).toBeTruthy();
+
+    const firstTaskRows = (await queryDb(
+      client,
+      "SELECT id FROM pipeline_item WHERE repo_id = ? AND prompt = ? ORDER BY created_at DESC LIMIT 1",
+      [repoId, "Say OK"],
+    )) as Array<{ id: string }>;
+    await callVueMethod(client, "store.selectItem", firstTaskRows[0]?.id);
+
+    const command = spawnCall?.args?.join(" ") ?? "";
+    expect(command).toMatch(/This\s+session\s+was\s+launched\s+by\s+Kanna/);
+    expect(command).toContain(prompt);
+    expect(command).toContain(`$ %s\\033[0m\\n' 'codex `);
+
+    const visibleCommandMatch = command.match(/printf '\\033\[2m\$ %s\\033\[0m\\n' 'codex ([\s\S]*?)' && codex /);
+    expect(visibleCommandMatch?.[1]).toContain(prompt.replace(/'/g, "'\\''"));
+    expect(visibleCommandMatch?.[1]).not.toMatch(/This\s+session\s+was\s+launched\s+by\s+Kanna/);
+    expect(spawnCall?.env?.KANNA_TASK_ID).toBe(rows[0]?.id);
+  });
+
   it("closes into teardown and stays visible when teardown commands exist", async () => {
     const rows = (await queryDb(
       client,
-      "SELECT branch FROM pipeline_item WHERE repo_id = ? AND prompt = ? ORDER BY created_at DESC LIMIT 1",
+      "SELECT id, branch FROM pipeline_item WHERE repo_id = ? AND prompt = ? ORDER BY created_at DESC LIMIT 1",
       [repoId, "Say OK"],
-    )) as Array<{ branch: string }>;
+    )) as Array<{ id: string; branch: string }>;
+    const taskId = rows[0]?.id;
     const branch = rows[0]?.branch;
+    expect(taskId).toBeTruthy();
     expect(branch).toBeTruthy();
-    if (!branch) {
+    if (!taskId || !branch) {
       throw new Error("expected the created task to have a branch");
     }
 
@@ -187,6 +256,8 @@ describe("task lifecycle", () => {
         teardown: ["printf 'teardown\\n' && sleep 2"],
       }),
     });
+
+    await callVueMethod(client, "store.selectItem", taskId);
 
     await client.executeSync(buildGlobalKeydownScript({
       key: "Delete",
