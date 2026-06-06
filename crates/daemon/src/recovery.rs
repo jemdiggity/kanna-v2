@@ -805,11 +805,7 @@ fn test_slow_recovery_write_delay() -> Option<std::time::Duration> {
 }
 
 fn daemon_support_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("KANNA_DAEMON_DIR") {
-        return PathBuf::from(dir);
-    }
-
-    kanna_runtime_defaults::default_daemon_dir()
+    kanna_runtime_defaults::daemon_dir_for_current_runtime()
 }
 
 fn detect_launcher() -> Option<RecoveryLauncher> {

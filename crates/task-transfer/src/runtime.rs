@@ -149,7 +149,7 @@ impl RuntimeConfig {
                     .ok()
                     .filter(|value| !value.trim().is_empty())
                     .map(PathBuf::from)
-                    .unwrap_or_else(kanna_runtime_defaults::default_daemon_dir),
+                    .unwrap_or_else(kanna_runtime_defaults::daemon_dir_for_current_runtime),
             ),
             db_path: Some(
                 std::env::var("KANNA_DB_PATH")

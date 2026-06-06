@@ -698,11 +698,7 @@ fn build_transfer_sidecar_env_from_resolved(
     let daemon_dir = std::env::var("KANNA_DAEMON_DIR")
         .ok()
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| {
-            kanna_runtime_defaults::default_daemon_dir()
-                .to_string_lossy()
-                .into_owned()
-        });
+        .unwrap_or_else(|| crate::daemon_data_dir().to_string_lossy().into_owned());
     env.insert("KANNA_DAEMON_DIR".to_string(), daemon_dir);
     let db_path = std::env::var("KANNA_DB_PATH")
         .ok()

@@ -341,7 +341,7 @@ pub fn sidecar_candidates_for_exe(current_exe: &Path, name: &str) -> Vec<PathBuf
     };
 
     let sidecar_name = format!("{}-{}", name, current_target_triple());
-    let mut candidates = vec![exe_dir.join(&sidecar_name), exe_dir.join(name)];
+    let mut candidates = vec![exe_dir.join(name), exe_dir.join(&sidecar_name)];
 
     if let (Some(build_root), Some(profile_dir)) = (exe_dir.parent(), exe_dir.file_name()) {
         if build_root.file_name().is_some_and(|dir| dir == ".build")
@@ -463,14 +463,14 @@ mod tests {
         let current_exe = Path::new("/repo/.build/debug/kanna-desktop");
         let candidates = sidecar_candidates_for_exe(current_exe, "kanna-daemon");
 
+        assert_eq!(candidates[0], Path::new("/repo/.build/debug/kanna-daemon"));
         assert_eq!(
-            candidates[0],
+            candidates[1],
             Path::new(&format!(
                 "/repo/.build/debug/kanna-daemon-{}",
                 current_target_triple()
             ))
         );
-        assert_eq!(candidates[1], Path::new("/repo/.build/debug/kanna-daemon"));
         assert!(candidates.contains(
             &Path::new(&format!(
                 "/repo/.build/{}/debug/kanna-daemon",
@@ -485,6 +485,17 @@ mod tests {
         let current_exe = Path::new("/Applications/Kanna.app/Contents/MacOS/kanna-desktop");
         let candidates = sidecar_candidates_for_exe(current_exe, "kanna-server");
 
+        assert_eq!(
+            candidates[0],
+            Path::new("/Applications/Kanna.app/Contents/MacOS/kanna-server")
+        );
+        assert_eq!(
+            candidates[1],
+            Path::new(&format!(
+                "/Applications/Kanna.app/Contents/MacOS/kanna-server-{}",
+                current_target_triple()
+            ))
+        );
         assert!(candidates.contains(
             &Path::new(&format!(
                 "/Applications/Kanna.app/Contents/MacOS/../Resources/kanna-server-{}",

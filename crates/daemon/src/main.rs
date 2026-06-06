@@ -9,7 +9,7 @@ mod socket;
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::os::unix::io::{AsRawFd, FromRawFd};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -114,10 +114,7 @@ fn recovery_snapshot_to_terminal_snapshot(
 }
 
 fn app_support_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("KANNA_DAEMON_DIR") {
-        return PathBuf::from(dir);
-    }
-    kanna_runtime_defaults::default_daemon_dir()
+    kanna_runtime_defaults::daemon_dir_for_current_runtime()
 }
 
 fn socket_path(dir: &PathBuf) -> PathBuf {
@@ -127,6 +124,36 @@ fn socket_path(dir: &PathBuf) -> PathBuf {
     dir.hash(&mut hasher);
     let hash = hasher.finish() as u32;
     PathBuf::from(format!("/tmp/kanna-{:08x}.sock", hash))
+}
+
+fn panic_log_path(dir: &Path, pid: u32, timestamp_secs: u64) -> PathBuf {
+    dir.join(format!("kanna-daemon-panic_{pid}_{timestamp_secs}.log"))
+}
+
+fn install_panic_hook(dir: PathBuf) {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        let timestamp_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0);
+        let path = panic_log_path(&dir, std::process::id(), timestamp_secs);
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        let thread = std::thread::current();
+        let thread_name = thread.name().unwrap_or("<unnamed>");
+        let message = format!(
+            "kanna-daemon panic\npid={}\nthread={}\ninfo={}\n\nbacktrace:\n{}\n",
+            std::process::id(),
+            thread_name,
+            panic_info,
+            backtrace
+        );
+
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(&path, message);
+        eprintln!("[panic] wrote daemon crash log to {}", path.display());
+        previous(panic_info);
+    }));
 }
 
 fn handoff_loss_message(reason: impl Into<String>) -> String {
@@ -334,6 +361,7 @@ async fn request_handoff(
 async fn main() {
     let dir = app_support_dir();
     std::fs::create_dir_all(&dir).expect("Failed to create app support dir");
+    install_panic_hook(dir.clone());
 
     // Log to file + stderr
     let _ = flexi_logger::Logger::try_with_env_or_str("info")
@@ -2158,6 +2186,14 @@ mod tests {
     fn recovery_output_is_mirrored_even_with_live_terminal_client() {
         assert!(should_mirror_output_to_recovery(false));
         assert!(should_mirror_output_to_recovery(true));
+    }
+
+    #[test]
+    fn panic_log_path_lives_under_daemon_dir() {
+        assert_eq!(
+            panic_log_path(Path::new("/tmp/kanna-daemon-test"), 42, 1234),
+            PathBuf::from("/tmp/kanna-daemon-test/kanna-daemon-panic_42_1234.log")
+        );
     }
 
     #[test]
