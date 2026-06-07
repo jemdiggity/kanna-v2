@@ -90,6 +90,16 @@ describe("copilot CLI flags", () => {
     expect(result.stderr).not.toContain("unknown flag");
   });
 
+  it("--session-id flag is recognized", async () => {
+    const result = await runCopilotRaw([
+      "-p", "Say OK",
+      "--yolo",
+      "--silent",
+      "--session-id=5fc2bd17-1d1b-4ae9-bed8-011fa4011100",
+    ], { timeoutMs: 10000 });
+    expect(result.stderr).not.toContain("unknown flag");
+  });
+
   it("--continue flag is recognized", async () => {
     const result = await runCopilotRaw([
       "--continue",

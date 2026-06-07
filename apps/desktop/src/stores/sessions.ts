@@ -346,11 +346,15 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
         for (const tool of options.disallowedTools) copilotFlags.push(`--deny-tool=${tool}`);
       }
 
-      const copilotSessionId = options?.resumeSessionId || crypto.randomUUID();
-      if (!options?.resumeSessionId) {
+      if (options?.resumeSessionId) {
+        const escapedResumeSessionId = options.resumeSessionId.replace(/'/g, "'\\''");
+        copilotFlags.push(`--resume='${escapedResumeSessionId}'`);
+      } else {
+        const copilotSessionId = crypto.randomUUID();
         await updateAgentSessionId(context.requireDb(), sessionId, copilotSessionId);
+        const escapedSessionId = copilotSessionId.replace(/'/g, "'\\''");
+        copilotFlags.push(`--session-id='${escapedSessionId}'`);
       }
-      copilotFlags.push(`--resume=${copilotSessionId}`);
 
       agentCmd = options?.resumeSessionId
         ? `copilot ${copilotFlags.join(" ")}`
