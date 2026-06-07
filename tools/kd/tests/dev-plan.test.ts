@@ -157,9 +157,9 @@ describe("buildDevPlan", () => {
     expect(plan.windows.map((window) => window.name)).toEqual(["mobile"]);
     expect(plan.windows[0]?.cwd).toBe("/repo/apps/mobile");
     expect(plan.windows[0]?.command).not.toContain("EXPO_PUBLIC_KANNA_SERVER_URL");
-    expect(plan.windows[0]?.command).toContain("EXPO_PUBLIC_KANNA_RELAY_URL=wss://relay.prod.example");
-    expect(plan.windows[0]?.command).toContain("EXPO_PUBLIC_FIREBASE_PROJECT_ID=kanna-prod");
-    expect(plan.windows[0]?.command).toContain("RCT_METRO_PORT=8083");
+    expect(plan.windows[0]?.command).toContain("EXPO_PUBLIC_KANNA_RELAY_URL='wss://relay.prod.example'");
+    expect(plan.windows[0]?.command).toContain("EXPO_PUBLIC_FIREBASE_PROJECT_ID='kanna-prod'");
+    expect(plan.windows[0]?.command).toContain("RCT_METRO_PORT='8083'");
     expect(plan.windows[0]?.command).toContain("pnpm run dev -- --port 8083");
     expect(plan.windows[0]?.command).not.toContain("EXPO_PUBLIC_FIREBASE_AUTH_EMULATOR_HOST");
   });
