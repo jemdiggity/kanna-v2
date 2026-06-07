@@ -402,12 +402,40 @@ fn build_server_config(state: &MobileServerState) -> Result<String, String> {
 
 fn server_config_matches_runtime(config_path: &Path) -> bool {
     let Ok(content) = std::fs::read_to_string(config_path) else {
-        return true;
+        return false;
     };
-    content.contains(&format!(
-        "relay_url = \"{}\"",
-        escape_toml_string(&relay_url())
-    ))
+    let state = MobileServerState {
+        status: "stopped".to_string(),
+        desktop_name: default_desktop_name(),
+        api_base_url: server_base_url(local_server_port()),
+        config_path: config_path.to_path_buf(),
+        started: false,
+    };
+    let Ok(db_path) = resolved_db_path(&state) else {
+        return false;
+    };
+    let daemon_dir = std::env::var("KANNA_DAEMON_DIR")
+        .unwrap_or_else(|_| crate::daemon_data_dir().to_string_lossy().to_string());
+
+    [
+        format!("relay_url = \"{}\"", escape_toml_string(&relay_url())),
+        format!("daemon_dir = \"{}\"", escape_toml_string(&daemon_dir)),
+        format!(
+            "db_path = \"{}\"",
+            escape_toml_string(&db_path.to_string_lossy())
+        ),
+        format!(
+            "desktop_id = \"{}\"",
+            escape_toml_string(&desktop_id(config_path))
+        ),
+        format!(
+            "server_version = \"{}\"",
+            escape_toml_string(current_server_version())
+        ),
+        format!("lan_port = {}", local_server_port()),
+    ]
+    .iter()
+    .all(|line| content.contains(line))
 }
 
 const PRODUCTION_RELAY_URL: &str = "wss://kanna-relay-402613185450.us-central1.run.app";
@@ -769,9 +797,11 @@ mod tests {
     use std::ffi::CString;
     use std::os::unix::process::ExitStatusExt;
     use std::path::PathBuf;
-    use std::process::Stdio;
+    use std::process::{Command as StdCommand, Stdio};
     use std::sync::{Mutex, OnceLock};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
     use tokio::process::{Child, Command};
 
     fn env_lock() -> &'static Mutex<()> {
@@ -899,13 +929,12 @@ mod tests {
         let app_data_dir = root.join("app-data");
         let db_path = root.join("kanna-test.db");
         let daemon_dir = root.join("daemon");
-        let existing_config_path = root.join("existing-server.toml");
         configure_process_test_env(port, &db_path, &daemon_dir);
         create_test_database(&db_path);
         let manager = MobileServerManager::new(app_data_dir.clone());
-        let expected_desktop_id = {
+        let (expected_desktop_id, existing_config_path) = {
             let state = manager.inner.lock().await;
-            desktop_id(&state.config_path)
+            (desktop_id(&state.config_path), state.config_path.clone())
         };
         write_test_server_config(
             &existing_config_path,
@@ -945,6 +974,88 @@ mod tests {
             .expect("cleanup should stop server");
         let _ = existing_server.wait().await;
         cleanup_process_test_env();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn manager_replaces_current_server_with_stale_runtime_config_before_task_create() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+        let root = unique_test_root("replace-current-stale-runtime");
+        let port = free_loopback_port();
+        let app_data_dir = root.join("app-data");
+        let intended_db_path = root.join("intended.db");
+        let stale_db_path = root.join("stale.db");
+        let intended_daemon_dir = root.join("intended-daemon");
+        let stale_daemon_dir = root.join("stale-daemon");
+        let repo_root = root.join("repo");
+        let stale_config_path = root.join("stale-server.toml");
+        init_test_git_repo(&repo_root);
+        create_task_server_test_database(&stale_db_path, &repo_root, "claude");
+        create_task_server_test_database(&intended_db_path, &repo_root, "copilot");
+        let daemon_socket = daemon_socket_path_for_dir(&intended_daemon_dir);
+        let daemon_server = spawn_one_task_create_daemon(&daemon_socket, "copilot").await;
+
+        configure_process_test_env(port, &intended_db_path, &intended_daemon_dir);
+        let manager = MobileServerManager::new(app_data_dir.clone());
+        let expected_desktop_id = {
+            let state = manager.inner.lock().await;
+            desktop_id(&state.config_path)
+        };
+        write_test_server_config(
+            &stale_config_path,
+            &stale_db_path,
+            &stale_daemon_dir,
+            &expected_desktop_id,
+            Some(current_server_version()),
+            port,
+        );
+        let mut stale_server = start_test_kanna_server(&stale_config_path, port).await;
+        let stale_pid = stale_server.id().expect("stale server should have pid");
+
+        manager
+            .start()
+            .await
+            .expect("manager should replace same-version server with stale runtime config");
+        stale_server
+            .wait()
+            .await
+            .expect("stale server should have been reaped");
+        assert!(
+            !process_is_running(stale_pid),
+            "same-version kanna-server with stale runtime config should be stopped"
+        );
+
+        let response = reqwest::Client::new()
+            .post(format!("{}/v1/tasks", server_base_url(port)))
+            .json(&serde_json::json!({
+                "repoId": "repo-1",
+                "prompt": "Use intended DB default provider"
+            }))
+            .send()
+            .await
+            .expect("task create request should reach replacement server");
+        assert!(
+            response.status().is_success(),
+            "task create should succeed through replacement server: {}",
+            response.text().await.unwrap_or_default()
+        );
+
+        let intended_provider = read_created_task_agent_provider(&intended_db_path);
+        let stale_provider = read_created_task_agent_provider(&stale_db_path);
+        assert_eq!(intended_provider.as_deref(), Some("copilot"));
+        assert!(
+            stale_provider.is_none(),
+            "stale DB should not receive CLI-created task after manager replacement"
+        );
+        daemon_server
+            .await
+            .expect("fake daemon should observe copilot spawn");
+
+        stop_server_on_port(port)
+            .await
+            .expect("cleanup should stop server");
+        cleanup_process_test_env();
+        let _ = std::fs::remove_file(daemon_socket);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1272,16 +1383,71 @@ mod tests {
                 .expect("time should be monotonic")
                 .as_nanos()
         ));
-        std::fs::write(&path, "relay_url = \"wss://old-relay.example\"\n").unwrap();
+        let state = MobileServerState {
+            status: "stopped".to_string(),
+            desktop_name: "Studio Mac".to_string(),
+            api_base_url: server_base_url(48120),
+            config_path: path.clone(),
+            started: false,
+        };
+        let correct_config = build_server_config(&state).unwrap();
+        let stale_config = correct_config.replace(
+            "relay_url = \"ws://127.0.0.1:19083\"",
+            "relay_url = \"wss://old-relay.example\"",
+        );
+        std::fs::write(&path, stale_config).unwrap();
 
         assert!(!server_config_matches_runtime(&path));
 
-        std::fs::write(&path, "relay_url = \"ws://127.0.0.1:19083\"\n").unwrap();
+        std::fs::write(&path, correct_config).unwrap();
         assert!(server_config_matches_runtime(&path));
 
         let _ = std::fs::remove_file(path);
         unsafe {
             unset_env_var("KANNA_RELAY_PORT");
+        }
+    }
+
+    #[test]
+    fn server_config_matches_runtime_rejects_wrong_db_path() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+        unsafe {
+            unset_env_var("KANNA_RELAY_PORT");
+            unset_env_var("KANNA_RELAY_URL");
+            set_env_var("KANNA_DB_NAME", "kanna-wt-task-1234.db");
+        }
+        let root = std::env::temp_dir().join(format!(
+            "kanna-server-config-db-runtime-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time should be monotonic")
+                .as_nanos()
+        ));
+        let path = root.join("Kanna/servers/kanna-wt-task-1234/server.toml");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let state = MobileServerState {
+            status: "stopped".to_string(),
+            desktop_name: "Studio Mac".to_string(),
+            api_base_url: server_base_url(48120),
+            config_path: path.clone(),
+            started: false,
+        };
+        let correct_config = build_server_config(&state).unwrap();
+        let correct_db_path = root.join("kanna-wt-task-1234.db");
+        let stale_config = correct_config.replace(
+            &format!("db_path = \"{}\"", correct_db_path.to_string_lossy()),
+            "db_path = \"/tmp/build.kanna/kanna-v2.db\"",
+        );
+        std::fs::write(&path, stale_config).unwrap();
+
+        assert!(!server_config_matches_runtime(&path));
+
+        std::fs::write(&path, correct_config).unwrap();
+        assert!(server_config_matches_runtime(&path));
+
+        let _ = std::fs::remove_dir_all(root);
+        unsafe {
+            unset_env_var("KANNA_DB_NAME");
         }
     }
 
@@ -1366,6 +1532,208 @@ mod tests {
             row.get::<_, String>(0)
         })
         .expect("test db should enable WAL");
+    }
+
+    fn create_task_server_test_database(
+        path: &std::path::Path,
+        repo_path: &std::path::Path,
+        default_provider: &str,
+    ) {
+        create_test_database(path);
+        let conn = rusqlite::Connection::open(path).expect("test db should open");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE repo (
+                id TEXT PRIMARY KEY,
+                path TEXT NOT NULL,
+                name TEXT NOT NULL,
+                default_branch TEXT,
+                hidden INTEGER,
+                created_at TEXT,
+                last_opened_at TEXT
+            );
+
+            CREATE TABLE pipeline_item (
+                id TEXT PRIMARY KEY,
+                repo_id TEXT NOT NULL,
+                issue_number INTEGER,
+                issue_title TEXT,
+                prompt TEXT,
+                stage TEXT,
+                pr_number INTEGER,
+                pr_url TEXT,
+                branch TEXT,
+                agent_type TEXT,
+                activity TEXT,
+                activity_changed_at TEXT,
+                pinned INTEGER,
+                pin_order INTEGER,
+                display_name TEXT,
+                last_output_preview TEXT,
+                created_at TEXT,
+                updated_at TEXT,
+                previous_stage TEXT,
+                closed_at TEXT,
+                pipeline TEXT,
+                stage_result TEXT,
+                active_post_action TEXT,
+                tags TEXT,
+                agent_provider TEXT,
+                port_offset INTEGER,
+                port_env TEXT,
+                base_ref TEXT
+            );
+
+            CREATE TABLE worktree (
+                id TEXT PRIMARY KEY,
+                pipeline_item_id TEXT NOT NULL,
+                path TEXT NOT NULL,
+                branch TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+
+            CREATE TABLE terminal_session (
+                id TEXT PRIMARY KEY,
+                repo_id TEXT NOT NULL,
+                pipeline_item_id TEXT,
+                label TEXT,
+                cwd TEXT,
+                daemon_session_id TEXT
+            );
+
+            CREATE TABLE task_port (
+                pipeline_item_id TEXT NOT NULL,
+                env_name TEXT NOT NULL,
+                port INTEGER NOT NULL,
+                PRIMARY KEY (pipeline_item_id, env_name),
+                UNIQUE (port)
+            );
+            "#,
+        )
+        .expect("test schema should be created");
+        conn.execute(
+            "INSERT INTO repo (id, path, name, default_branch, hidden, created_at, last_opened_at)
+             VALUES ('repo-1', ?, 'Repo One', 'main', 0, datetime('now'), datetime('now'))",
+            [repo_path.to_string_lossy().as_ref()],
+        )
+        .expect("test repo should be inserted");
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES ('defaultAgentProvider', ?)",
+            [default_provider],
+        )
+        .expect("default provider setting should be inserted");
+    }
+
+    fn read_created_task_agent_provider(path: &std::path::Path) -> Option<String> {
+        let conn = rusqlite::Connection::open(path).expect("test db should open");
+        conn.query_row(
+            "SELECT agent_provider FROM pipeline_item ORDER BY created_at DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .ok()
+    }
+
+    fn daemon_socket_path_for_dir(daemon_dir: &std::path::Path) -> PathBuf {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = DefaultHasher::new();
+        daemon_dir.hash(&mut hasher);
+        let hash = hasher.finish() as u32;
+        PathBuf::from(format!("/tmp/kanna-{hash:08x}.sock"))
+    }
+
+    async fn spawn_one_task_create_daemon(
+        socket_path: &std::path::Path,
+        expected_agent_provider: &str,
+    ) -> tokio::task::JoinHandle<()> {
+        if let Some(parent) = socket_path.parent() {
+            std::fs::create_dir_all(parent).expect("daemon socket parent should exist");
+        }
+        let _ = std::fs::remove_file(socket_path);
+        let listener = UnixListener::bind(socket_path).expect("fake daemon socket should bind");
+        let expected_agent_provider = expected_agent_provider.to_string();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("daemon should accept spawn");
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let mut line = String::new();
+            reader
+                .read_line(&mut line)
+                .await
+                .expect("daemon command should be readable");
+            let command: serde_json::Value =
+                serde_json::from_str(line.trim()).expect("daemon command should be JSON");
+            assert_eq!(
+                command.get("type").and_then(|value| value.as_str()),
+                Some("Spawn")
+            );
+            assert_eq!(
+                command
+                    .get("agent_provider")
+                    .and_then(|value| value.as_str()),
+                Some(expected_agent_provider.as_str())
+            );
+            let session_id = command
+                .get("session_id")
+                .and_then(|value| value.as_str())
+                .expect("spawn should include session id");
+            write_half
+                .write_all(
+                    format!(
+                        "{{\"type\":\"SessionCreated\",\"session_id\":{}}}\n",
+                        serde_json::to_string(session_id).unwrap()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .expect("daemon response should be written");
+        })
+    }
+
+    fn init_test_git_repo(repo_root: &std::path::Path) {
+        let _ = std::fs::remove_dir_all(repo_root);
+        std::fs::create_dir_all(repo_root).expect("repo directory should be created");
+        std::fs::write(repo_root.join("README.md"), "test repo")
+            .expect("repo seed file should be written");
+        assert!(StdCommand::new("git")
+            .arg("init")
+            .arg("-b")
+            .arg("main")
+            .current_dir(repo_root)
+            .status()
+            .expect("git init should run")
+            .success());
+        assert!(StdCommand::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(repo_root)
+            .status()
+            .expect("git config user.email should run")
+            .success());
+        assert!(StdCommand::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(repo_root)
+            .status()
+            .expect("git config user.name should run")
+            .success());
+        assert!(StdCommand::new("git")
+            .args(["add", "README.md"])
+            .current_dir(repo_root)
+            .status()
+            .expect("git add should run")
+            .success());
+        assert!(StdCommand::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(repo_root)
+            .status()
+            .expect("git commit should run")
+            .success());
     }
 
     fn write_test_server_config(

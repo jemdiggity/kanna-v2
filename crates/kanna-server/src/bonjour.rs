@@ -37,8 +37,8 @@ pub struct MobileBonjourAdvertisement {
 
 impl MobileBonjourAdvertisement {
     pub fn start(desktop_name: &str, desktop_id: &str, port: u16) -> Result<Self, String> {
-        let daemon =
-            ServiceDaemon::new().map_err(|error| format!("failed to start mDNS daemon: {error}"))?;
+        let daemon = ServiceDaemon::new()
+            .map_err(|error| format!("failed to start mDNS daemon: {error}"))?;
         let service = build_mobile_service_info(desktop_name, desktop_id, port)?;
         let fullname = service.get_fullname().to_string();
         daemon

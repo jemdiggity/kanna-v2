@@ -523,12 +523,11 @@ mod tests {
 
     #[test]
     fn kanna_cli_can_fallback_to_path_when_instance_local_sidecar_is_missing() {
-        let resolved = resolve_binary_from_candidates_with_path_lookup(
-            "kanna-cli",
-            Vec::new(),
-            |_| Ok("/global/kanna-cli".to_string()),
-        )
-        .expect("PATH fallback should resolve");
+        let resolved =
+            resolve_binary_from_candidates_with_path_lookup("kanna-cli", Vec::new(), |_| {
+                Ok("/global/kanna-cli".to_string())
+            })
+            .expect("PATH fallback should resolve");
 
         assert_eq!(resolved, "/global/kanna-cli");
     }

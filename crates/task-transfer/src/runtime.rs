@@ -2588,13 +2588,17 @@ async fn post_local_kanna_task_action(
     let mut status_line = String::new();
     let read = reader.read_line(&mut status_line).await?;
     if read == 0 {
-        return Err(RuntimeError::Protocol("Kanna server closed without a response".into()));
+        return Err(RuntimeError::Protocol(
+            "Kanna server closed without a response".into(),
+        ));
     }
     let status = status_line
         .split_whitespace()
         .nth(1)
         .and_then(|value| value.parse::<u16>().ok())
-        .ok_or_else(|| RuntimeError::Protocol(format!("invalid Kanna server response: {status_line}")))?;
+        .ok_or_else(|| {
+            RuntimeError::Protocol(format!("invalid Kanna server response: {status_line}"))
+        })?;
     if (200..300).contains(&status) {
         return Ok(());
     }
