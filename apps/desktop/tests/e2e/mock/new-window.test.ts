@@ -175,6 +175,37 @@ async function readWorkspaceWindowIds(client: WebDriverClient): Promise<string[]
     .filter((windowId): windowId is string => typeof windowId === "string" && windowId.length > 0);
 }
 
+async function closeFocusedWindowThroughAppActionWithoutDestroyingHarness(
+  client: WebDriverClient,
+): Promise<{ closeInvocations: Array<{ cmd: string; args: unknown }> }> {
+  const result = await client.executeAsync(
+    `const cb = arguments[arguments.length - 1];
+     const originalInvoke = window.__TAURI_INTERNALS__.invoke;
+     const closeInvocations = [];
+     window.__TAURI_INTERNALS__.invoke = function(cmd, args, options) {
+       if (cmd === "plugin:window|close") {
+         closeInvocations.push({ cmd, args });
+         return Promise.resolve(null);
+       }
+       return originalInvoke.call(this, cmd, args, options);
+     };
+     const ctx = window.__KANNA_E2E__.setupState;
+     Promise.resolve(ctx.keyboardActions?.closeWindow?.() ?? ctx.windowWorkspace.closeWindow())
+       .then(() => {
+         window.__TAURI_INTERNALS__.invoke = originalInvoke;
+         cb({ closeInvocations });
+       })
+       .catch((error) => {
+         window.__TAURI_INTERNALS__.invoke = originalInvoke;
+         cb({ __error: error?.message ?? String(error), closeInvocations });
+       });`,
+  ) as { closeInvocations?: Array<{ cmd: string; args: unknown }>; __error?: string };
+  if (result.__error) {
+    throw new Error(result.__error);
+  }
+  return { closeInvocations: result.closeInvocations ?? [] };
+}
+
 describe("new window", () => {
   const client = new WebDriverClient();
   let fixtureRepoRoot = "";
@@ -392,6 +423,73 @@ describe("new window", () => {
 
     const sourceWindowCurrentItem = await getVueState(client, "currentItem") as { id: string };
     expect(sourceWindowCurrentItem.id).toBe(taskAId);
+  });
+
+  it("prunes stale saved secondary windows when the only live main window closes", async () => {
+    const repoId = await importTestRepo(client, testRepoPath, "new-window-close-stale-snapshot-test");
+    const taskId = randomUUID();
+
+    await execDb(
+      client,
+      "INSERT INTO pipeline_item (id, repo_id, prompt, stage, agent_type) VALUES (?, ?, ?, ?, ?)",
+      [taskId, repoId, "Live Main Task", "in progress", "sdk"],
+    );
+    await callVueMethod(client, "loadItems", repoId);
+    await setSelectedItem(client, taskId);
+    await waitForCurrentItemId(client, taskId);
+
+    const handles = await waitForWindowCount(client, 1);
+    await switchToWindow(client, handles[0] ?? "");
+    await client.waitForAppReady();
+
+    const liveWindowId = await client.executeSync<string>(
+      "return window.__KANNA_E2E__.setupState.windowWorkspace.bootstrap.windowId;",
+    );
+    expect(liveWindowId).toBe("main");
+
+    const staleWindowId = `stale-${randomUUID()}`;
+    const snapshot = {
+      windows: [
+        {
+          windowId: "main",
+          selectedRepoId: repoId,
+          selectedItemId: taskId,
+          order: 0,
+          sidebarHidden: false,
+          sidebarWidth: 260,
+        },
+        {
+          windowId: staleWindowId,
+          selectedRepoId: repoId,
+          selectedItemId: taskId,
+          order: 1,
+          sidebarHidden: false,
+          sidebarWidth: 260,
+        },
+      ],
+    };
+    await execDb(
+      client,
+      "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+      ["window_workspace_v1", JSON.stringify(snapshot)],
+    );
+    expect(await readWorkspaceWindowIds(client)).toEqual(["main", staleWindowId]);
+
+    // The WebDriver harness has no API to relaunch the Tauri app after closing
+    // the last native window, and DB helpers run through the live webview. Stub
+    // only the final native close IPC so this still exercises app close handling,
+    // live Tauri webview enumeration, and settings persistence before teardown.
+    const { closeInvocations } =
+      await closeFocusedWindowThroughAppActionWithoutDestroyingHarness(client);
+
+    expect(closeInvocations).toEqual([
+      { cmd: "plugin:window|close", args: { label: "main" } },
+    ]);
+    expect(await readWorkspaceWindowIds(client)).toEqual([]);
+
+    await client.executeSync("location.reload()");
+    await client.waitForAppReady();
+    await dismissStartupShortcutsModal(client);
   });
 
   it("closes the source window while keeping the secondary window alive", async () => {
