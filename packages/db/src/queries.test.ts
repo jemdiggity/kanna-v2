@@ -12,6 +12,8 @@ import {
   listTaskPorts,
   listTaskPortsForItem,
   deleteTaskPortsForItem,
+  insertWorktree,
+  upsertTerminalSession,
   insertPipelineItem,
   updatePipelineItemStage,
   markPipelineItemTearingDown,
@@ -46,9 +48,11 @@ import type {
   Setting,
   OperatorEvent,
   TaskPort,
+  TerminalSession,
   TrustedPeer,
   TaskTransfer,
   TaskTransferProvenance,
+  Worktree,
 } from "./schema.js";
 
 // ---------------------------------------------------------------------------
@@ -60,6 +64,8 @@ function createMockDb(): DbHandle & {
     repo: Repo[];
     pipeline_item: PipelineItem[];
     task_port: TaskPort[];
+    terminal_session: TerminalSession[];
+    worktree: Worktree[];
     trusted_peer: TrustedPeer[];
     task_transfer: TaskTransfer[];
     task_transfer_provenance: TaskTransferProvenance[];
@@ -71,6 +77,8 @@ function createMockDb(): DbHandle & {
     repo: [] as Repo[],
     pipeline_item: [] as PipelineItem[],
     task_port: [] as TaskPort[],
+    terminal_session: [] as TerminalSession[],
+    worktree: [] as Worktree[],
     trusted_peer: [] as TrustedPeer[],
     task_transfer: [] as TaskTransfer[],
     task_transfer_provenance: [] as TaskTransferProvenance[],
@@ -157,6 +165,49 @@ function createMockDb(): DbHandle & {
             port,
             pipeline_item_id,
             env_name,
+            created_at: new Date().toISOString(),
+          });
+        }
+      } else if (q.startsWith("INSERT INTO WORKTREE")) {
+        const [id, pipeline_item_id, path, branch] = bindValues as [string, string, string, string];
+        const existing = tables.worktree.find((row) => row.id === id);
+        if (existing) {
+          existing.pipeline_item_id = pipeline_item_id;
+          existing.path = path;
+          existing.branch = branch;
+        } else {
+          tables.worktree.push({
+            id,
+            pipeline_item_id,
+            path,
+            branch,
+            created_at: new Date().toISOString(),
+          });
+        }
+      } else if (q.startsWith("INSERT INTO TERMINAL_SESSION")) {
+        const [id, repo_id, pipeline_item_id, label, cwd, daemon_session_id] = bindValues as [
+          string,
+          string,
+          string | null,
+          string | null,
+          string | null,
+          string | null,
+        ];
+        const existing = tables.terminal_session.find((row) => row.id === id);
+        if (existing) {
+          existing.repo_id = repo_id;
+          existing.pipeline_item_id = pipeline_item_id;
+          existing.label = label;
+          existing.cwd = cwd;
+          existing.daemon_session_id = daemon_session_id;
+        } else {
+          tables.terminal_session.push({
+            id,
+            repo_id,
+            pipeline_item_id,
+            label,
+            cwd,
+            daemon_session_id,
             created_at: new Date().toISOString(),
           });
         }
@@ -817,6 +868,68 @@ describe("pipeline_item queries", () => {
     const item = db.tables.pipeline_item.find((p) => p.id === "pi1");
     expect(item?.pipeline).toBe("custom");
     expect(item?.stage).toBe("review");
+  });
+});
+
+describe("task resource queries", () => {
+  let db: ReturnType<typeof createMockDb>;
+
+  beforeEach(() => {
+    db = createMockDb();
+  });
+
+  it("upserts task worktree rows by id", async () => {
+    await insertWorktree(db, {
+      id: "wt-task-1",
+      pipeline_item_id: "task-1",
+      path: "/tmp/repo/.kanna-worktrees/task-1",
+      branch: "task-1",
+    });
+    await insertWorktree(db, {
+      id: "wt-task-1",
+      pipeline_item_id: "task-1",
+      path: "/tmp/repo/.kanna-worktrees/task-1-renamed",
+      branch: "task-1-renamed",
+    });
+
+    expect(db.tables.worktree).toEqual([
+      expect.objectContaining({
+        id: "wt-task-1",
+        pipeline_item_id: "task-1",
+        path: "/tmp/repo/.kanna-worktrees/task-1-renamed",
+        branch: "task-1-renamed",
+      }),
+    ]);
+  });
+
+  it("upserts terminal session rows with daemon session ids", async () => {
+    await upsertTerminalSession(db, {
+      id: "agent-task-1",
+      repo_id: "repo-1",
+      pipeline_item_id: "task-1",
+      label: "agent",
+      cwd: "/tmp/repo/.kanna-worktrees/task-1",
+      daemon_session_id: "daemon-task-1",
+    });
+    await upsertTerminalSession(db, {
+      id: "agent-task-1",
+      repo_id: "repo-1",
+      pipeline_item_id: "task-1",
+      label: "agent",
+      cwd: "/tmp/repo/.kanna-worktrees/task-1-renamed",
+      daemon_session_id: "daemon-task-1",
+    });
+
+    expect(db.tables.terminal_session).toEqual([
+      expect.objectContaining({
+        id: "agent-task-1",
+        repo_id: "repo-1",
+        pipeline_item_id: "task-1",
+        label: "agent",
+        cwd: "/tmp/repo/.kanna-worktrees/task-1-renamed",
+        daemon_session_id: "daemon-task-1",
+      }),
+    ]);
   });
 });
 

@@ -667,6 +667,17 @@ fn prepare_task_spawn(
         .clone()
         .or_else(|| fetch_start_point(&repo.path, repo.default_branch.as_deref()));
     create_worktree(&repo.path, &branch, &worktree_path, start_point.as_deref())?;
+    db.upsert_worktree(&format!("wt-{task_id}"), &task_id, &worktree_path, &branch)
+        .map_err(|e| format!("db error: {}", e))?;
+    db.upsert_terminal_session(
+        &format!("agent-{task_id}"),
+        &repo.id,
+        Some(&task_id),
+        Some("agent"),
+        Some(&worktree_path),
+        Some(&task_id),
+    )
+    .map_err(|e| format!("db error: {}", e))?;
     let worktree_repo_config = read_repo_config(&worktree_path)?;
     let spawn_env = build_spawn_env(config, &task_id, &port_env)?;
     let agent_cmd = build_agent_command(
@@ -2738,6 +2749,19 @@ mod tests {
 
         assert_eq!(prepared.created_task.stage, "in progress");
         assert_eq!(prepared.created_task.title, "Implement the fallback");
+        let branch = format!("task-{}", prepared.session_id);
+        let worktree_count = db
+            .count_test_worktrees_for_task(
+                &prepared.created_task.task_id,
+                &prepared.cwd,
+                &branch,
+            )
+            .unwrap();
+        assert_eq!(worktree_count, 1);
+        let terminal_session_id = db
+            .resolve_task_terminal_session_id(&prepared.created_task.task_id)
+            .unwrap();
+        assert_eq!(terminal_session_id.as_deref(), Some(prepared.session_id.as_str()));
     }
 
     #[test]

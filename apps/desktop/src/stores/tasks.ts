@@ -8,6 +8,7 @@ import {
   insertPipelineItem,
   insertRepo,
   insertTaskBlocker,
+  insertWorktree,
   listBlockedByItem,
   listBlockersForItem,
   removeAllBlockersForItem,
@@ -21,6 +22,7 @@ import {
   markPipelineItemTearingDown,
   updatePipelineItemTags,
   updateRepoName,
+  upsertTerminalSession,
   pinPipelineItem,
   reorderRepos as reorderReposQuery,
   unpinPipelineItem,
@@ -357,6 +359,7 @@ export function createTasksApi(
 
   async function setupWorktreeAndSpawn(
     id: string,
+    repoId: string,
     repoPath: string,
     worktreePath: string,
     branch: string,
@@ -386,6 +389,12 @@ export function createTasksApi(
       let ptySetupCmds: string[] = [];
       try {
         worktreeBootstrap = await createWorktree(repoPath, branch, worktreePath, opts?.baseBranch ?? opts?.baseRef ?? null);
+        await insertWorktree(context.requireDb(), {
+          id: `wt-${id}`,
+          pipeline_item_id: id,
+          path: worktreePath,
+          branch,
+        });
         repoConfig = await readRepoConfig(worktreePath);
         ptySetupCmds = repoConfig.setup || [];
       } catch (error) {
@@ -491,6 +500,14 @@ export function createTasksApi(
             cols: 80,
             rows: 24,
             agentProvider,
+          });
+          await upsertTerminalSession(context.requireDb(), {
+            id: `agent-${id}`,
+            repo_id: repoId,
+            pipeline_item_id: id,
+            label: "agent",
+            cwd: worktreePath,
+            daemon_session_id: id,
           });
           if (opts?.recoverySnapshot) {
             await invoke("seed_session_recovery_state", {
@@ -800,6 +817,7 @@ export function createTasksApi(
 
           void setupWorktreeAndSpawn(
             id,
+            repoId,
             repoPath,
             worktreePath,
             branch,

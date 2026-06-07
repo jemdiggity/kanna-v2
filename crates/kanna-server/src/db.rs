@@ -185,6 +185,14 @@ impl Db {
                 base_ref TEXT
             );
 
+            CREATE TABLE worktree (
+                id TEXT PRIMARY KEY,
+                pipeline_item_id TEXT NOT NULL,
+                path TEXT NOT NULL,
+                branch TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
             CREATE TABLE settings (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -267,6 +275,20 @@ impl Db {
             (id, repo_id, pipeline_item_id, label, daemon_session_id),
         )?;
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn count_test_worktrees_for_task(
+        &self,
+        pipeline_item_id: &str,
+        path: &str,
+        branch: &str,
+    ) -> Result<i64, rusqlite::Error> {
+        self.conn.query_row(
+            "SELECT COUNT(*) FROM worktree WHERE pipeline_item_id = ? AND path = ? AND branch = ?",
+            (pipeline_item_id, path, branch),
+            |row| row.get(0),
+        )
     }
 
     #[cfg(test)]
@@ -635,6 +657,48 @@ impl Db {
                 item.port_env_json,
                 item.base_ref,
             ),
+        )?;
+        Ok(())
+    }
+
+    pub fn upsert_worktree(
+        &self,
+        id: &str,
+        pipeline_item_id: &str,
+        path: &str,
+        branch: &str,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "INSERT INTO worktree (id, pipeline_item_id, path, branch)
+             VALUES (?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET
+               pipeline_item_id = excluded.pipeline_item_id,
+               path = excluded.path,
+               branch = excluded.branch",
+            (id, pipeline_item_id, path, branch),
+        )?;
+        Ok(())
+    }
+
+    pub fn upsert_terminal_session(
+        &self,
+        id: &str,
+        repo_id: &str,
+        pipeline_item_id: Option<&str>,
+        label: Option<&str>,
+        cwd: Option<&str>,
+        daemon_session_id: Option<&str>,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "INSERT INTO terminal_session (id, repo_id, pipeline_item_id, label, cwd, daemon_session_id)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET
+               repo_id = excluded.repo_id,
+               pipeline_item_id = excluded.pipeline_item_id,
+               label = excluded.label,
+               cwd = excluded.cwd,
+               daemon_session_id = excluded.daemon_session_id",
+            (id, repo_id, pipeline_item_id, label, cwd, daemon_session_id),
         )?;
         Ok(())
     }
