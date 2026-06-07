@@ -337,6 +337,18 @@ const invokeHandlers: Record<string, (...args: any[]) => any> = {
   run_script: () => "",
   append_log: () => ({}),
   read_clipboard_image_png: () => null,
+  mobile_server_status: () => ({
+    state: "running",
+    desktopId: "desktop-mock-current",
+    desktopName: "Mock Desktop",
+    pairingCode: null,
+  }),
+  create_mobile_pairing_session: () => ({
+    state: "running",
+    desktopId: "desktop-mock-current",
+    desktopName: "Mock Desktop",
+    pairingCode: "123456",
+  }),
   // Claude agent SDK commands
   create_agent_session: () => ({ session_id: "mock-session" }),
   send_agent_message: () => ({}),
