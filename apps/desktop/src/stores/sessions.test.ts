@@ -133,6 +133,7 @@ describe("createSessionsApi", () => {
     expect(prepared.agentCmdPreamble).toContain("Continue");
     expect(prepared.agentCmdPreamble).toContain("This session was launched by Kanna");
   });
+
   it("builds a fresh Copilot command with a new session id instead of resume", async () => {
     const sessions = createSessionsApi(makeContext());
 
