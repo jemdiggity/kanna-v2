@@ -177,7 +177,7 @@ stage: merge
     expect(result).not.toBeNull();
     expect(result!.name).toBe("Merge Master");
     expect(result!.agent).toBe("merge");
-    expect(result!.stage).toBe("merge");
+    expect(result!.stage).toBeUndefined();
     expect(result!.prompt).toBe("");
   });
 
@@ -365,7 +365,7 @@ stage: merge
     expect(result.tasks).toHaveLength(1);
     expect(result.errors).toHaveLength(0);
     expect(result.tasks[0].agent).toBe("merge");
-    expect(result.tasks[0].stage).toBe("merge");
+    expect(result.tasks[0].stage).toBeUndefined();
   });
 
   it("supports cancellation via AbortSignal (pre-aborted)", async () => {

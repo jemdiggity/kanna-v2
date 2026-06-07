@@ -86,4 +86,38 @@ describe("cloud task snapshot mapper", () => {
       type: "pty",
     });
   });
+
+  it("treats legacy merge stage as active status", async () => {
+    const snapshot = await buildCloudTaskSnapshot({
+      desktopId: "desktop-1",
+      item: {
+        id: "task-merge",
+        repo_id: "repo-1",
+        prompt: "Merge queued PRs",
+        stage: "merge",
+        activity: "working",
+        branch: "task-merge",
+        base_ref: "origin/main",
+        pr_number: null,
+        pr_url: null,
+        display_name: "Merge Master",
+        agent_provider: "claude",
+        agent_type: "pty",
+        created_at: "2026-06-07T00:00:00.000Z",
+        updated_at: "2026-06-07T00:00:00.000Z",
+        closed_at: null,
+      },
+      repo: {
+        id: "repo-1",
+        name: "kanna",
+        path: "/Users/test/kanna",
+        default_branch: "main",
+        remote_url: null,
+      },
+      blockedByTaskIds: [],
+    });
+
+    expect(snapshot.stage).toBe("merge");
+    expect(snapshot.status).toBe("active");
+  });
 });

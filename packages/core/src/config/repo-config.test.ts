@@ -4,8 +4,9 @@ import { DEFAULT_STAGE_ORDER, parseRepoConfig } from "./repo-config.js";
 
 describe("parseRepoConfig", () => {
   it("omits commit from the built-in stage display order", () => {
-    expect(DEFAULT_STAGE_ORDER).toEqual(["merge", "pr", "review", "in progress"]);
+    expect(DEFAULT_STAGE_ORDER).toEqual(["pr", "review", "in progress"]);
     expect(DEFAULT_STAGE_ORDER).not.toContain("commit");
+    expect(DEFAULT_STAGE_ORDER).not.toContain("merge");
   });
 
   it("parses a full config", () => {

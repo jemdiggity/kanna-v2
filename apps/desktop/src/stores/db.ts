@@ -180,6 +180,7 @@ export async function runMigrations(db: DbHandle): Promise<void> {
       await db.execute(`UPDATE pipeline_item SET tags = '["done"]' WHERE stage = 'done' AND tags = '[]'`);
       await db.execute(`UPDATE pipeline_item SET tags = '["pr"]' WHERE stage = 'pr' AND tags = '[]'`);
       await db.execute(`UPDATE pipeline_item SET tags = '["merge"]' WHERE stage = 'merge' AND tags = '[]'`);
+      await db.execute(`UPDATE pipeline_item SET stage = 'in_progress' WHERE stage = 'merge' AND closed_at IS NULL`);
       await db.execute(`UPDATE pipeline_item SET tags = '["blocked"]' WHERE stage = 'blocked' AND tags = '[]'`);
     } catch (e) {
       console.debug("[db] stage/tags migration:", e);
@@ -235,8 +236,9 @@ export async function runMigrations(db: DbHandle): Promise<void> {
   await runMigration("008_tags_to_stage_backfill", async () => {
     await db.execute(`UPDATE pipeline_item SET stage = 'in progress' WHERE tags LIKE '%"in progress"%' AND closed_at IS NULL AND stage IN ('in_progress', 'legacy')`);
     await db.execute(`UPDATE pipeline_item SET stage = 'pr' WHERE tags LIKE '%"pr"%' AND closed_at IS NULL AND stage IN ('in_progress', 'legacy')`);
-    await db.execute(`UPDATE pipeline_item SET stage = 'merge' WHERE tags LIKE '%"merge"%' AND closed_at IS NULL AND stage IN ('in_progress', 'legacy')`);
+    await db.execute(`UPDATE pipeline_item SET stage = 'in progress' WHERE tags LIKE '%"merge"%' AND closed_at IS NULL AND stage IN ('in_progress', 'legacy', 'merge')`);
     await db.execute(`UPDATE pipeline_item SET stage = 'in progress' WHERE stage = 'in_progress'`);
+    await db.execute(`UPDATE pipeline_item SET stage = 'in progress' WHERE stage = 'merge' AND closed_at IS NULL`);
     await db.execute(`UPDATE pipeline_item SET stage = 'in progress' WHERE stage = 'legacy'`);
   });
 

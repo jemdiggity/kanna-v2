@@ -406,7 +406,7 @@ describe("createMobileController", () => {
           id: "task-merge",
           repoId: "repo-1",
           title: "Merge task",
-          stage: "merge"
+          stage: "in progress"
         }
       ]);
     const controller = createMobileController(client, store);
@@ -606,7 +606,7 @@ describe("createMobileController", () => {
           id: "task-search-updated",
           repoId: "repo-1",
           title: "Updated search result",
-          stage: "merge"
+          stage: "in progress"
         }
       ]);
     const controller = createMobileController(client, store);

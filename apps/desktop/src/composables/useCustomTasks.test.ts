@@ -34,7 +34,6 @@ describe("useCustomTasks", () => {
 name: Merge Master
 description: Built-in merge task
 agent: merge
-stage: merge
 ---
 `;
       }
@@ -53,7 +52,6 @@ stage: merge
       name: "Merge Master",
       description: "Built-in merge task",
       agent: "merge",
-      stage: "merge",
       prompt: "",
     });
   });

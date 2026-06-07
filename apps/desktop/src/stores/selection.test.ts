@@ -285,7 +285,7 @@ describe("createSelectionApi", () => {
 
     const api = createSelectionApi(context);
 
-    expect(api.getStageOrder("repo-1")).toEqual(["merge", "pr", "review", "in progress"]);
+    expect(api.getStageOrder("repo-1")).toEqual(["pr", "review", "in progress"]);
     expect(api.sortedItemsForCurrentRepo.value.map((item) => item.id)).toEqual([
       "task-review",
       "task-progress",

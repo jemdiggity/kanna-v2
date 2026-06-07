@@ -2,7 +2,7 @@
  * Built-in stage display order used when no repo-level override is configured.
  * Stages not listed here sort alphabetically after the listed ones.
  */
-export const DEFAULT_STAGE_ORDER: readonly string[] = ["merge", "pr", "review", "in progress"];
+export const DEFAULT_STAGE_ORDER: readonly string[] = ["pr", "review", "in progress"];
 
 export interface RepoWorkspacePathConfig {
   prepend?: string[];
