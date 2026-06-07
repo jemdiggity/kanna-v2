@@ -526,7 +526,7 @@ When something doesn't work, find the architectural reason and fix it at the rig
 
 - **Run `cargo clippy`** and fix all warnings. Clippy is right until proven otherwise.
 - **No `unwrap()` in production code.** Use `?`, `unwrap_or`, `unwrap_or_else`, or proper error handling. `unwrap()` is acceptable in tests.
-- **Run `cargo fmt`** before committing Rust changes.
+- **Run `cargo fmt --all` from the repo root** before committing Rust changes. The repo pins the Rust formatter via `rust-toolchain.toml`.
 
 ### Vue
 
