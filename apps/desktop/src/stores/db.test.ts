@@ -313,6 +313,26 @@ describe("runMigrations", () => {
     expect(db.pipelineItems[2]?.stage).toBe("in progress");
   });
 
+  it("normalizes open merge-stage rows even when older stage migrations already ran", async () => {
+    db = createMigrationDb([
+      { stage: "merge", tags: `["merge"]`, closed_at: null },
+      { stage: "merge", tags: `["merge"]`, closed_at: "2026-05-02T00:00:00.000Z" },
+    ]);
+    db.schemaMigrations.push(
+      { id: "003_legacy_stage_to_tags_backfill" },
+      { id: "008_tags_to_stage_backfill" },
+    );
+
+    await runMigrations(db);
+
+    expect(db.pipelineItems[0]).toMatchObject({
+      stage: "in progress",
+      tags: `["merge"]`,
+      closed_at: null,
+    });
+    expect(db.pipelineItems[1]?.stage).toBe("merge");
+  });
+
   it("migrates open legacy torndown rows to teardown state", async () => {
     db = createMigrationDb([
       { stage: "torndown", tags: "[]", closed_at: null },

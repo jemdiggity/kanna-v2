@@ -361,4 +361,8 @@ export async function runMigrations(db: DbHandle): Promise<void> {
       ["codeTheme", "match"],
     );
   });
+
+  await runMigration("018_merge_stage_to_in_progress", async () => {
+    await db.execute(`UPDATE pipeline_item SET stage = 'in progress' WHERE stage = 'merge' AND closed_at IS NULL`);
+  });
 }
