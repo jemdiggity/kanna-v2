@@ -53,7 +53,9 @@ fn ghostty_terminal_keeps_ten_thousand_scrollback_lines() {
     let scrollback_rows = terminal
         .scrollback_rows()
         .expect("scrollback rows should be readable");
-    let total_rows = terminal.total_rows().expect("total rows should be readable");
+    let total_rows = terminal
+        .total_rows()
+        .expect("total rows should be readable");
 
     assert!(
         scrollback_rows >= 10_000,
