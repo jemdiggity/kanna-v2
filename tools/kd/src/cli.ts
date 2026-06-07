@@ -42,6 +42,23 @@ const defaultDevUpInput = {
   killDaemon: false
 };
 
+function parseMobileUpInput(rest: string[]): ParsedCliCommand {
+  const input = parseFlagInput(rest, { production: false, staging: false });
+  const unsupportedFlags = Object.entries(input)
+    .filter(([key, value]) => !["production", "staging"].includes(key) && value === true)
+    .map(([key]) => key);
+  if (unsupportedFlags.length > 0) {
+    throw new Error("mobile up only accepts --production");
+  }
+  if (input.staging === true) {
+    throw new Error("mobile up --staging is not supported yet");
+  }
+  if (input.production === true) {
+    return { taskId: "mobile.up", input: { production: true } };
+  }
+  return { taskId: "dev.up", input: { ...defaultDevUpInput, mobile: true } };
+}
+
 function parseFlagInput(rest: string[], defaults: Record<string, unknown>): Record<string, unknown> {
   const input: Record<string, unknown> = { ...defaults };
   for (let index = 0; index < rest.length; index += 1) {
@@ -130,6 +147,9 @@ export function parseCliArgs(args: string[]): ParsedCliCommand {
   if (group === "dev" && command === "up") {
     return { taskId: "dev.up", input: parseFlagInput(rest, defaultDevUpInput) };
   }
+  if (group === "mobile" && command === "up") {
+    return parseMobileUpInput(rest);
+  }
   if (group === "dev" && command === "restart") {
     return { taskId: "dev.restart", input: parseFlagInput(rest, defaultDevUpInput) };
   }
@@ -206,7 +226,6 @@ export function parseCliArgs(args: string[]): ParsedCliCommand {
   }
 
   const aliases: Record<string, ParsedCliCommand> = {
-    "mobile up": { taskId: "dev.up", input: { ...defaultDevUpInput, mobile: true } },
     "mobile test": { taskId: "mobile.test", input: {} },
     "mobile device-smoke": { taskId: "mobile.device-smoke", input: {} },
     "emulators up": { taskId: "emulators.up", input: {} },
@@ -238,7 +257,7 @@ function helpText(): string {
     "  dev log [window]",
     "  dev seed [--db <path-or-name>] [--delete-db]",
     "  daemon kill",
-    "  mobile up",
+    "  mobile up [--production]",
     "  mobile test",
     "  mobile device-smoke",
     "  emulators up|down|status",

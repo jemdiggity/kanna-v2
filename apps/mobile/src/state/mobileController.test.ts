@@ -339,6 +339,7 @@ describe("createMobileController", () => {
       selectedTaskId: "task-3",
       taskTerminalTaskId: "task-3",
       taskTerminalStatus: "error",
+      taskTerminalErrorMessage: "websocket bootstrap failed",
       isComposerOpen: false,
       composerPrompt: ""
     });
@@ -463,12 +464,13 @@ describe("createMobileController", () => {
     client.__terminalStream.emit({
       type: "error",
       taskId: "task-1",
-      message: "session not found: task-1"
+      message: "No terminal session is available for this task"
     });
 
     expect(store.getState()).toMatchObject({
       selectedTaskId: "task-1",
       taskTerminalStatus: "error",
+      taskTerminalErrorMessage: "No terminal session is available for this task",
       errorMessage: null
     });
   });

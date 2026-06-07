@@ -45,10 +45,10 @@ export function createMobileController(
   let bootstrapInFlight: Promise<void> | null = null;
 
   const setTerminalStartupError = (taskId: string, error: unknown) => {
-    store.setTaskTerminalStatus(taskId, "error");
-    store.setErrorMessage(
-      error instanceof Error ? error.message : "Terminal stream failed to start"
-    );
+    const message =
+      error instanceof Error ? error.message : "Terminal stream failed to start";
+    store.setTaskTerminalError(taskId, message);
+    store.setErrorMessage(message);
   };
 
   const findTask = (taskId: string): TaskSummary | null => {
@@ -123,7 +123,7 @@ export function createMobileController(
             store.setTaskTerminalStatus(taskId, "closed");
             break;
           case "error":
-            store.setTaskTerminalStatus(taskId, "error");
+            store.setTaskTerminalError(taskId, event.message);
             break;
         }
       });

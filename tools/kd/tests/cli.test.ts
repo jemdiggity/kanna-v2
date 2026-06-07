@@ -157,6 +157,18 @@ describe("kd CLI", () => {
         killDaemon: false
       }
     });
+    expect(parseCliArgs(["mobile", "up", "--production"])).toEqual({
+      taskId: "mobile.up",
+      input: {
+        production: true
+      }
+    });
+    expect(() => parseCliArgs(["mobile", "up", "--staging"])).toThrow(
+      "mobile up --staging is not supported yet"
+    );
+    expect(() => parseCliArgs(["mobile", "up", "--production", "--emulators"])).toThrow(
+      "mobile up only accepts --production"
+    );
     expect(parseCliArgs(["emulators", "up"])).toEqual({
       taskId: "emulators.up",
       input: {}

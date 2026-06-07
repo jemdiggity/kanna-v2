@@ -42,6 +42,7 @@ export interface SessionState {
   taskTerminalTaskId: string | null;
   taskTerminalStatus: TaskTerminalStatus;
   taskTerminalOutput: string;
+  taskTerminalErrorMessage: string | null;
 }
 
 export interface SessionStore {
@@ -71,6 +72,7 @@ export interface SessionStore {
   beginTaskTerminal(taskId: string, initialOutput: string): void;
   appendTaskTerminal(taskId: string, chunk: string): void;
   setTaskTerminalStatus(taskId: string, status: TaskTerminalStatus): void;
+  setTaskTerminalError(taskId: string, message: string): void;
   reconcileSelectedTask(): void;
   clearTaskTerminal(): void;
 }
@@ -101,7 +103,8 @@ export function createSessionStore(): SessionStore {
     composerPrompt: "",
     taskTerminalTaskId: null,
     taskTerminalStatus: "idle",
-    taskTerminalOutput: ""
+    taskTerminalOutput: "",
+    taskTerminalErrorMessage: null
   };
 
   const listeners = new Set<() => void>();
@@ -295,7 +298,9 @@ export function createSessionStore(): SessionStore {
         taskTerminalStatus:
           selectedTaskId === null ? "idle" : state.taskTerminalStatus,
         taskTerminalOutput:
-          selectedTaskId === null ? "" : state.taskTerminalOutput
+          selectedTaskId === null ? "" : state.taskTerminalOutput,
+        taskTerminalErrorMessage:
+          selectedTaskId === null ? null : state.taskTerminalErrorMessage
       };
       publish();
     },
@@ -316,7 +321,8 @@ export function createSessionStore(): SessionStore {
         ...state,
         taskTerminalTaskId: taskId,
         taskTerminalStatus: "connecting",
-        taskTerminalOutput: initialOutput
+        taskTerminalOutput: initialOutput,
+        taskTerminalErrorMessage: null
       };
       publish();
     },
@@ -329,7 +335,8 @@ export function createSessionStore(): SessionStore {
       state = {
         ...state,
         taskTerminalStatus: "live",
-        taskTerminalOutput: nextOutput.slice(-12000)
+        taskTerminalOutput: nextOutput.slice(-12000),
+        taskTerminalErrorMessage: null
       };
       publish();
     },
@@ -340,7 +347,21 @@ export function createSessionStore(): SessionStore {
 
       state = {
         ...state,
-        taskTerminalStatus
+        taskTerminalStatus,
+        taskTerminalErrorMessage:
+          taskTerminalStatus === "error" ? state.taskTerminalErrorMessage : null
+      };
+      publish();
+    },
+    setTaskTerminalError(taskId, taskTerminalErrorMessage) {
+      if (state.taskTerminalTaskId !== taskId) {
+        return;
+      }
+
+      state = {
+        ...state,
+        taskTerminalStatus: "error",
+        taskTerminalErrorMessage
       };
       publish();
     },
@@ -354,7 +375,8 @@ export function createSessionStore(): SessionStore {
         selectedTaskId: null,
         taskTerminalTaskId: null,
         taskTerminalStatus: "idle",
-        taskTerminalOutput: ""
+        taskTerminalOutput: "",
+        taskTerminalErrorMessage: null
       };
       publish();
     },
@@ -363,7 +385,8 @@ export function createSessionStore(): SessionStore {
         ...state,
         taskTerminalTaskId: null,
         taskTerminalStatus: "idle",
-        taskTerminalOutput: ""
+        taskTerminalOutput: "",
+        taskTerminalErrorMessage: null
       };
       publish();
     }

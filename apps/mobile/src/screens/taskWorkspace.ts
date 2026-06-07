@@ -15,17 +15,19 @@ export interface TaskWorkspaceModel {
 interface BuildTaskWorkspaceModelOptions {
   task: TaskSummary;
   terminalStatus: TaskTerminalStatus;
+  terminalErrorMessage?: string | null;
 }
 
 export function buildTaskWorkspaceModel({
   task,
-  terminalStatus
+  terminalStatus,
+  terminalErrorMessage = null
 }: BuildTaskWorkspaceModelOptions): TaskWorkspaceModel {
   return {
     stageLabel: task.stage ?? "unknown",
     title: task.title,
     isTerminalHealthy: terminalStatus === "live",
-    overlayLabel: getOverlayLabel(terminalStatus),
+    overlayLabel: getOverlayLabel(terminalStatus, terminalErrorMessage),
     isComposerDisabled: terminalStatus !== "live",
     chromeStyle: "floating",
     terminalLayout: "fullscreen",
@@ -33,14 +35,17 @@ export function buildTaskWorkspaceModel({
   };
 }
 
-function getOverlayLabel(status: TaskTerminalStatus): string | null {
+function getOverlayLabel(
+  status: TaskTerminalStatus,
+  terminalErrorMessage: string | null
+): string | null {
   switch (status) {
     case "connecting":
       return "Connecting";
     case "closed":
       return "Offline";
     case "error":
-      return "Error";
+      return terminalErrorMessage?.trim() || "Error";
     case "idle":
       return "Connecting";
     case "live":

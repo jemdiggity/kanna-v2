@@ -75,6 +75,30 @@ describe("createSessionStore", () => {
     });
   });
 
+  it("preserves terminal stream error messages on the active terminal only", () => {
+    const store = createSessionStore();
+
+    store.beginTaskTerminal("task-1", "Existing output");
+    store.setTaskTerminalError("task-1", "No terminal session is available for this task");
+    store.setTaskTerminalError("task-2", "Desktop offline");
+
+    expect(store.getState()).toMatchObject({
+      taskTerminalTaskId: "task-1",
+      taskTerminalStatus: "error",
+      taskTerminalErrorMessage: "No terminal session is available for this task",
+      taskTerminalOutput: "Existing output"
+    });
+
+    store.clearTaskTerminal();
+
+    expect(store.getState()).toMatchObject({
+      taskTerminalTaskId: null,
+      taskTerminalStatus: "idle",
+      taskTerminalErrorMessage: null,
+      taskTerminalOutput: ""
+    });
+  });
+
   it("does not publish when repo tasks are refreshed with identical data", () => {
     const store = createSessionStore();
     let publishes = 0;

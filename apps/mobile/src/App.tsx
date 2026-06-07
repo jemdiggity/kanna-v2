@@ -81,6 +81,7 @@ export default function App() {
       return (
         <TaskScreen
           task={selectedTask}
+          terminalErrorMessage={state.taskTerminalErrorMessage}
           terminalOutput={state.taskTerminalOutput}
           terminalStatus={state.taskTerminalStatus}
           onBack={() => controller.closeTask()}

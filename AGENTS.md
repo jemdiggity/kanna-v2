@@ -168,6 +168,8 @@ One concrete example: when changing the desktop sidecar build pipeline, preserve
 
 For mobile development, the same rule applies at the app level: use `./kd dev up --mobile` or `./kd mobile up` for end-to-end testing instead of launching Expo directly from `apps/mobile`. The desktop app startup path is what spawns the desktop-side `kanna-server` LAN API on the resolved `KANNA_MOBILE_SERVER_PORT`. Running `pnpm run dev -- --ios` or `expo start` inside `apps/mobile` is only appropriate for UI-only work when the desktop-side mobile server is already running elsewhere; by itself it will not start `kanna-server`, so the mobile app will boot but fail to connect to desktop data.
 
+When asked to launch the mobile app against production, use `./kd mobile up --production`. Production desktop mobile API comes from the installed `/Applications/Kanna.app/Contents/MacOS/kanna-server`, not the current worktree desktop server. The production launch path verifies `curl http://127.0.0.1:48120/v1/status`, checks `~/Library/Application Support/build.kanna/Kanna/server.toml`, starts only the mobile Metro/Expo window, and uses production Firebase/relay defaults from the installed desktop status and mobile app defaults. Plain `./kd mobile up` remains a development workflow that starts the worktree desktop plus mobile; do not assume it targets production. `./kd mobile up --staging` is not wired until there is a concrete staging desktop/server identity to verify.
+
 ```bash
 # Development (from repo root or worktree root)
 ./kd dev up                  # start in tmux (auto-detects worktree)
@@ -180,6 +182,7 @@ For mobile development, the same rule applies at the app level: use `./kd dev up
 ./kd dev status              # inspect tmux session status
 ./kd dev log                 # print recent desktop tmux output
 ./kd dev log mobile          # print recent mobile tmux output
+./kd mobile up --production  # start mobile with installed /Applications/Kanna.app production status/relay defaults
 ./kd dev up --attach         # start and attach to tmux session
 ./kd env print               # print resolved ports, DB, daemon dir, transfer root
 ./kd doctor                  # check local prerequisites

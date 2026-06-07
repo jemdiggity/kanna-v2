@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { executeDevDownWithContext, executeDevStatus } from "../src/tasks/registry";
+import {
+  executeDevDownWithContext,
+  executeDevStatus,
+  executeProductionMobileUpWithContext
+} from "../src/tasks/registry";
 import type { CommandRunner } from "../src/runtime/process";
 
 describe("task executors", () => {
@@ -74,5 +78,59 @@ describe("task executors", () => {
       "tmux -L kanna-task-abc has-session -t kanna-task-abc",
       "ps -axo pid=,command="
     ]);
+  });
+
+  it("verifies the production desktop server before starting the mobile window", async () => {
+    const calls: string[] = [];
+    const runner: CommandRunner = {
+      async run(command, args) {
+        calls.push(`${command} ${args.join(" ")}`);
+        if (command === "curl") {
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({
+              desktopId: "desktop-ea554bc4",
+              version: "0.0.53",
+              relay_url: "wss://kanna-relay.example",
+              state: "running"
+            }),
+            stderr: ""
+          };
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+    };
+
+    const result = await executeProductionMobileUpWithContext(
+      { production: true },
+      {
+        runner,
+        context: {
+          repoRoot: "/repo",
+          tmux: { server: "kanna-task-abc", session: "kanna-task-abc" },
+          ports: { KANNA_MOBILE_PORT: 8083 },
+          env: {
+            KANNA_MOBILE_PORT: "8083",
+            EXPO_PUBLIC_KANNA_RELAY_URL: "wss://kanna-relay.example"
+          }
+        }
+      }
+    );
+
+    expect(result).toMatchObject({
+      ok: true,
+      message: "Started mobile against production desktop desktop-ea554bc4 (0.0.53).",
+      data: {
+        desktopId: "desktop-ea554bc4",
+        version: "0.0.53",
+        windows: ["mobile"]
+      }
+    });
+    expect(calls[0]).toBe("curl --fail --silent --show-error http://127.0.0.1:48120/v1/status");
+    expect(calls[1]).toContain("test -f ");
+    expect(calls[1]).toContain("Library/Application Support/build.kanna/Kanna/server.toml");
+    expect(calls[2]).toContain("tmux -L kanna-task-abc new-session");
+    expect(calls[2]).not.toContain("EXPO_PUBLIC_KANNA_SERVER_URL");
+    expect(calls.join("\n")).not.toContain("apps/desktop");
   });
 });

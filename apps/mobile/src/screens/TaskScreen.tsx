@@ -19,6 +19,7 @@ interface TaskScreenProps {
   task: TaskSummary;
   terminalOutput: string;
   terminalStatus: TaskTerminalStatus;
+  terminalErrorMessage: string | null;
   onBack(): void;
   onOpenMore(): void;
   onSendInput(input: string): void;
@@ -28,11 +29,16 @@ export function TaskScreen({
   task,
   terminalOutput,
   terminalStatus,
+  terminalErrorMessage,
   onBack,
   onOpenMore,
   onSendInput
 }: TaskScreenProps) {
-  const model = buildTaskWorkspaceModel({ task, terminalStatus });
+  const model = buildTaskWorkspaceModel({
+    task,
+    terminalStatus,
+    terminalErrorMessage
+  });
   const [draftInput, setDraftInput] = useState("");
   const [keyboardHeight, setKeyboardHeight] = useState(0);
   const sendDisabled = model.isComposerDisabled || !draftInput.trim();
