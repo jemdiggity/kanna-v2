@@ -63,6 +63,28 @@ describe("buildDevPlan", () => {
     expect(plan.windows[0]?.command).toContain("pnpm run build:sidecars");
   });
 
+  it("shell-quotes E2E agent override environment values", () => {
+    const plan = buildDevPlan({
+      repoRoot: "/repo",
+      env: {
+        KANNA_DEV_PORT: "1421",
+        KANNA_DB_PATH: "/tmp/kanna.db",
+        KANNA_MOBILE_SERVER_PORT: "48120",
+        KANNA_E2E_AGENT_CLI_VERSION_CLAUDE: "2.1.118 (Claude Code)\n",
+        KANNA_E2E_AGENT_CLI_VERSION_COPILOT: "GitHub Copilot CLI 1.0.32.\nRun 'copilot update' to check for updates.\n",
+      },
+      mobile: false,
+      emulators: false,
+      firebaseConfigPath: "/repo/.firebase-8080.kanna.json",
+      mobileServerUrl: "http://127.0.0.1:48120"
+    });
+
+    expect(plan.windows[0]?.command).toContain("KANNA_E2E_AGENT_CLI_VERSION_CLAUDE='2.1.118 (Claude Code)");
+    expect(plan.windows[0]?.command).toContain(`KANNA_E2E_AGENT_CLI_VERSION_COPILOT='GitHub Copilot CLI 1.0.32.
+Run '\\''copilot update'\\'' to check for updates.
+'`);
+  });
+
   it("starts emulators before desktop and mobile when requested", () => {
     const plan = buildDevPlan({
       repoRoot: "/repo",
