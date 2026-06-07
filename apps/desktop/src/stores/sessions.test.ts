@@ -127,4 +127,24 @@ describe("createSessionsApi", () => {
     expect(prepared.agentCmdPreamble).toContain("Continue");
     expect(prepared.agentCmdPreamble).toContain("This session was launched by Kanna");
   });
+
+  it("builds a fresh Copilot command with a new session id instead of resume", async () => {
+    const sessions = createSessionsApi(makeContext());
+
+    const prepared = await sessions.preparePtySession("task-1", "Ship it", {
+      agentProvider: "copilot",
+    });
+
+    expect(prepared.agentCmd).toMatch(/^copilot --yolo --session-id='[0-9a-f-]+' -i 'Ship it'$/);
+    expect(prepared.agentCmdPreamble).toMatch(/^copilot --yolo --session-id='[0-9a-f-]+' -i /);
+    expect(prepared.agentCmdPreamble).toContain("Ship it");
+    expect(prepared.agentCmdPreamble).toContain("This session was launched by Kanna");
+    expect(prepared.agentCmd).not.toContain("--resume");
+    expect(prepared.agentCmdPreamble).not.toContain("--resume");
+    expect(mocks.updateAgentSessionIdMock).toHaveBeenCalledWith(
+      expect.anything(),
+      "task-1",
+      expect.stringMatching(/^[0-9a-f-]+$/),
+    );
+  });
 });
