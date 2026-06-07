@@ -17,12 +17,14 @@ const isDev = import.meta.env.DEV
 type MobileServerStatus = "running" | "stopped" | "error"
 
 interface MobileServerStatusResponse {
+  desktopId?: string
   desktopName?: string
   state?: string
   pairingCode?: string | null
 }
 
 interface PairingSessionResponse {
+  desktopId?: string
   pairingCode?: string | null
   code?: string | null
   desktopName?: string
@@ -53,6 +55,7 @@ const tabs: Array<'general' | 'account' | 'developer'> = isDev
   ? ['general', 'account', 'developer']
   : ['general', 'account']
 const mobileDesktopName = ref("This desktop")
+const mobileDesktopId = ref("")
 const mobileServerStatus = ref<MobileServerStatus>("stopped")
 const pairingCode = ref<string | null>(null)
 const authSession = ref<DesktopAuthSession | null>(null)
@@ -93,6 +96,7 @@ function normalizeMobileServerStatus(status?: string): MobileServerStatus {
 async function refreshMobileAccess() {
   try {
     const status = await invoke<MobileServerStatusResponse>("mobile_server_status")
+    mobileDesktopId.value = status.desktopId?.trim() ?? ""
     if (status.desktopName) {
       mobileDesktopName.value = status.desktopName
     }
@@ -107,6 +111,7 @@ async function refreshMobileAccess() {
 async function startPairing() {
   try {
     const session = await invoke<PairingSessionResponse>("create_mobile_pairing_session")
+    mobileDesktopId.value = session.desktopId?.trim() ?? mobileDesktopId.value
     if (session.desktopName) {
       mobileDesktopName.value = session.desktopName
     }
@@ -277,6 +282,11 @@ defineExpose({ cycleTab })
 
       <div v-if="activeTab === 'account'" class="prefs-body">
         <section class="account-panel">
+          <div v-if="mobileDesktopId" class="desktop-identity">
+            <span class="account-label">Desktop ID</span>
+            <code>{{ mobileDesktopId }}</code>
+          </div>
+
           <div v-if="signedInUserEmail" class="account-signed-in">
             <span class="account-label">Signed in</span>
             <strong>{{ signedInUserEmail }}</strong>
@@ -479,6 +489,26 @@ defineExpose({ cycleTab })
   flex-direction: column;
   gap: 8px;
   color: var(--kn-text-primary);
+}
+
+.desktop-identity {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.desktop-identity code {
+  align-self: flex-start;
+  max-width: 100%;
+  box-sizing: border-box;
+  padding: 5px 8px;
+  border: 1px solid var(--kn-border-strong);
+  border-radius: 5px;
+  background: var(--kn-bg-input);
+  color: var(--kn-text-primary);
+  font-size: 12px;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
 }
 
 .account-label {

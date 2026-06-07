@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { buildGlobalKeydownScript, buildSelectorKeydownScript } from "../helpers/keyboard";
 import { WebDriverClient } from "../helpers/webdriver";
 import { resetDatabase } from "../helpers/reset";
+import { tauriInvoke } from "../helpers/vue";
 
 describe("preferences", () => {
   const client = new WebDriverClient();
@@ -55,6 +56,24 @@ describe("preferences", () => {
     );
     expect(values).toContain("5");
     expect(values).toContain("30");
+  });
+
+  it("shows the current desktop ID on the Account tab", async () => {
+    await client.executeSync(buildSelectorKeydownScript(".modal-overlay", { key: "Escape" }));
+    await client.waitForNoElement(".prefs-panel", 2_000);
+
+    const status = await tauriInvoke(client, "mobile_server_status") as { desktopId?: string };
+    expect(status.desktopId?.trim()).toBeTruthy();
+    const desktopId = status.desktopId!.trim();
+
+    await client.executeSync(buildGlobalKeydownScript({ key: ",", meta: true }));
+    await client.waitForElement(".prefs-panel", 2_000);
+
+    const accountTab = await client.findElement('[data-testid="preferences-account-tab"]');
+    await client.click(accountTab);
+
+    await client.waitForText(".prefs-panel", "Desktop ID", 2_000);
+    await client.waitForText(".prefs-panel", desktopId, 2_000);
   });
 
   it("persists app and terminal code theme preferences", async () => {
