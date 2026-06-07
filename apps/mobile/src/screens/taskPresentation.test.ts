@@ -55,6 +55,21 @@ describe("buildTaskListItemModel", () => {
 
     expect(model.preview).toBe("Open the task for the latest output.");
   });
+
+  it("does not treat legacy merge stage as a separate lifecycle state", () => {
+    const model = buildTaskListItemModel(
+      {
+        id: "task-merge",
+        repoId: "repo-1",
+        title: "Merge Master",
+        stage: "merge"
+      },
+      "repo-one",
+      false
+    );
+
+    expect(model.preview).toBe("Open the task for the latest output.");
+  });
 });
 
 describe("buildTaskWorkspaceHeaderModel", () => {

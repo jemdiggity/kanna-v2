@@ -1,5 +1,5 @@
 import { parse as parseYaml } from "yaml";
-export type Stage = "in_progress" | "pr" | "merge" | "done";
+export type Stage = "in_progress" | "pr" | "done";
 
 export interface CustomTaskConfig {
   name: string;
@@ -57,7 +57,7 @@ at .kanna/tasks/<taskname>/agent.md. Use a lowercase hyphenated directory name.`
 const VALID_AGENT_PROVIDERS = ["claude", "copilot", "codex", "opencode"] as const;
 const VALID_PERMISSION_MODES = ["dontAsk", "acceptEdits", "default"] as const;
 const VALID_EXECUTION_MODES = ["pty", "sdk"] as const;
-const VALID_STAGES = ["in_progress", "pr", "merge", "done"] as const;
+const VALID_STAGES = ["in_progress", "pr", "done"] as const;
 
 function slugToDisplayName(slug: string): string {
   return slug

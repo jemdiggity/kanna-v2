@@ -138,6 +138,10 @@ function createMigrationDb(
         for (const item of pipelineItems) {
           if (item.stage === "merge" && item.tags === "[]") item.tags = `["merge"]`;
         }
+      } else if (sql === `UPDATE pipeline_item SET stage = 'in_progress' WHERE stage = 'merge' AND closed_at IS NULL`) {
+        for (const item of pipelineItems) {
+          if (item.stage === "merge" && item.closed_at === null) item.stage = "in_progress";
+        }
       } else if (sql === `UPDATE pipeline_item SET tags = '["blocked"]' WHERE stage = 'blocked' AND tags = '[]'`) {
         for (const item of pipelineItems) {
           if (item.stage === "blocked" && item.tags === "[]") item.tags = `["blocked"]`;
@@ -150,13 +154,17 @@ function createMigrationDb(
         for (const item of pipelineItems) {
           if (item.closed_at === null && item.tags.includes(`"pr"`) && ["in_progress", "legacy"].includes(item.stage)) item.stage = "pr";
         }
-      } else if (sql === `UPDATE pipeline_item SET stage = 'merge' WHERE tags LIKE '%"merge"%' AND closed_at IS NULL AND stage IN ('in_progress', 'legacy')`) {
+      } else if (sql === `UPDATE pipeline_item SET stage = 'in progress' WHERE tags LIKE '%"merge"%' AND closed_at IS NULL AND stage IN ('in_progress', 'legacy', 'merge')`) {
         for (const item of pipelineItems) {
-          if (item.closed_at === null && item.tags.includes(`"merge"`) && ["in_progress", "legacy"].includes(item.stage)) item.stage = "merge";
+          if (item.closed_at === null && item.tags.includes(`"merge"`) && ["in_progress", "legacy", "merge"].includes(item.stage)) item.stage = "in progress";
         }
       } else if (sql === `UPDATE pipeline_item SET stage = 'in progress' WHERE stage = 'in_progress'`) {
         for (const item of pipelineItems) {
           if (item.stage === "in_progress") item.stage = "in progress";
+        }
+      } else if (sql === `UPDATE pipeline_item SET stage = 'in progress' WHERE stage = 'merge' AND closed_at IS NULL`) {
+        for (const item of pipelineItems) {
+          if (item.stage === "merge" && item.closed_at === null) item.stage = "in progress";
         }
       } else if (sql === `UPDATE pipeline_item SET stage = 'in progress' WHERE stage = 'legacy'`) {
         for (const item of pipelineItems) {
@@ -295,11 +303,33 @@ describe("runMigrations", () => {
     db = createMigrationDb([
       { stage: "in_progress", tags: `["pr"]`, closed_at: null },
       { stage: "legacy", tags: `["merge"]`, closed_at: null },
+      { stage: "merge", tags: `["merge"]`, closed_at: null },
     ]);
 
     await runMigrations(db);
 
     expect(db.pipelineItems[0]?.stage).toBe("pr");
+    expect(db.pipelineItems[1]?.stage).toBe("in progress");
+    expect(db.pipelineItems[2]?.stage).toBe("in progress");
+  });
+
+  it("normalizes open merge-stage rows even when older stage migrations already ran", async () => {
+    db = createMigrationDb([
+      { stage: "merge", tags: `["merge"]`, closed_at: null },
+      { stage: "merge", tags: `["merge"]`, closed_at: "2026-05-02T00:00:00.000Z" },
+    ]);
+    db.schemaMigrations.push(
+      { id: "003_legacy_stage_to_tags_backfill" },
+      { id: "008_tags_to_stage_backfill" },
+    );
+
+    await runMigrations(db);
+
+    expect(db.pipelineItems[0]).toMatchObject({
+      stage: "in progress",
+      tags: `["merge"]`,
+      closed_at: null,
+    });
     expect(db.pipelineItems[1]?.stage).toBe("merge");
   });
 

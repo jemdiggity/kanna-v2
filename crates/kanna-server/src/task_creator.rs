@@ -1622,9 +1622,9 @@ fn short_socket_path(dir: &PathBuf) -> PathBuf {
 mod tests {
     use super::{
         build_spawn_env, build_stage_prompt, continue_prepared_stage_for_api,
-        prepare_advance_stage_for_api, prepare_revision_task_for_api, prepare_task_for_api,
-        read_default_agent_provider_setting, resolve_binary_from_candidates_with_path_lookup,
-        PreparedStageTransition, PromptContext,
+        prepare_advance_stage_for_api, prepare_merge_agent_for_api, prepare_revision_task_for_api,
+        prepare_task_for_api, read_default_agent_provider_setting,
+        resolve_binary_from_candidates_with_path_lookup, PreparedStageTransition, PromptContext,
     };
     use crate::config::Config;
     use crate::daemon_client::DaemonClient;
@@ -1743,6 +1743,77 @@ mod tests {
         let path = env.get("PATH").expect("PATH should be provided");
 
         assert_eq!(path.split(':').next(), Some(cli_dir.as_str()));
+    }
+
+    #[test]
+    fn prepare_merge_agent_creates_in_progress_task() {
+        let repo_root =
+            std::env::temp_dir().join(format!("kanna-merge-agent-task-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&repo_root);
+        std::fs::create_dir_all(&repo_root).unwrap();
+        std::fs::write(repo_root.join("README.md"), "test repo").unwrap();
+        assert!(Command::new("git")
+            .arg("init")
+            .arg("-b")
+            .arg("main")
+            .current_dir(&repo_root)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(&repo_root)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(&repo_root)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["add", "README.md"])
+            .current_dir(&repo_root)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(&repo_root)
+            .status()
+            .unwrap()
+            .success());
+
+        let config = test_config("prepare-merge-agent-in-progress");
+        let db = Db::open_for_tests(&config.db_path).unwrap();
+        db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+            .unwrap();
+        db.insert_test_pipeline_item(
+            "task-1",
+            "repo-1",
+            "Create a PR",
+            Some("Create a PR"),
+            "pr",
+            "2026-06-07 00:00:00",
+        )
+        .unwrap();
+        db.update_test_pipeline_item_stage_context(
+            "task-1",
+            "task-task-1",
+            "default",
+            None,
+            "claude",
+        )
+        .unwrap();
+
+        let prepared = prepare_merge_agent_for_api(&db, &config, "task-1").unwrap();
+
+        assert_eq!(prepared.created_task.repo_id, "repo-1");
+        assert_eq!(prepared.created_task.stage, "in progress");
+        assert!(prepared.created_task.title.contains("merge agent"));
+
+        let _ = std::fs::remove_dir_all(&repo_root);
     }
 
     #[test]

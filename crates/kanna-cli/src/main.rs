@@ -1138,7 +1138,7 @@ mod tests {
                 id: "task-123-extra".to_string(),
                 repo_id: "repo-1".to_string(),
                 title: "Wrong".to_string(),
-                stage: Some("merge".to_string()),
+                stage: Some("in progress".to_string()),
                 snippet: None,
             },
         ];

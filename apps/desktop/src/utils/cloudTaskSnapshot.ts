@@ -80,10 +80,9 @@ function deriveStatus(
   stage: string,
   closedAt: string | null,
   blockedByTaskIds: string[],
-): "active" | "blocked" | "pr" | "merge" | "done" {
+): "active" | "blocked" | "pr" | "done" {
   if (closedAt) return "done";
   if (blockedByTaskIds.length > 0) return "blocked";
   if (stage === "pr") return "pr";
-  if (stage === "merge") return "merge";
   return "active";
 }

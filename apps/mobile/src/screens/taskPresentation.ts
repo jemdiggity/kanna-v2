@@ -53,9 +53,5 @@ function resolveTaskPreview(task: TaskSummary): string {
     return "Ready for review.";
   }
 
-  if (task.stage === "merge") {
-    return "Merge follow-up active.";
-  }
-
   return "Open the task for the latest output.";
 }
