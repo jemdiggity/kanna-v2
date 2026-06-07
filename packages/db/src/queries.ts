@@ -4,9 +4,11 @@ import type {
   Setting,
   TaskBlocker,
   TaskPort,
+  TerminalSession,
   TrustedPeer,
   TaskTransfer,
   TaskTransferProvenance,
+  Worktree,
 } from "./schema.js";
 
 export type DbHandle = {
@@ -99,6 +101,45 @@ export async function deleteTaskPortsForItem(
   itemId: string,
 ): Promise<void> {
   await db.execute("DELETE FROM task_port WHERE pipeline_item_id = ?", [itemId]);
+}
+
+export async function insertWorktree(
+  db: DbHandle,
+  worktree: Omit<Worktree, "created_at">,
+): Promise<void> {
+  await db.execute(
+    `INSERT INTO worktree (id, pipeline_item_id, path, branch)
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       pipeline_item_id = excluded.pipeline_item_id,
+       path = excluded.path,
+       branch = excluded.branch`,
+    [worktree.id, worktree.pipeline_item_id, worktree.path, worktree.branch],
+  );
+}
+
+export async function upsertTerminalSession(
+  db: DbHandle,
+  session: Omit<TerminalSession, "created_at">,
+): Promise<void> {
+  await db.execute(
+    `INSERT INTO terminal_session (id, repo_id, pipeline_item_id, label, cwd, daemon_session_id)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       repo_id = excluded.repo_id,
+       pipeline_item_id = excluded.pipeline_item_id,
+       label = excluded.label,
+       cwd = excluded.cwd,
+       daemon_session_id = excluded.daemon_session_id`,
+    [
+      session.id,
+      session.repo_id,
+      session.pipeline_item_id,
+      session.label,
+      session.cwd,
+      session.daemon_session_id,
+    ],
+  );
 }
 
 export async function insertPipelineItem(

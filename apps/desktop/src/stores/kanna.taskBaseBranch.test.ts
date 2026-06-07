@@ -87,6 +87,8 @@ const mockState = vi.hoisted(() => {
       item.updated_at = now;
     }
   });
+  const insertWorktreeMock = vi.fn(async () => {});
+  const upsertTerminalSessionMock = vi.fn(async () => {});
 
   function defer(): { promise: Promise<void>; resolve: () => void } {
     let resolve = () => {};
@@ -247,6 +249,8 @@ const mockState = vi.hoisted(() => {
     listBlockedByItemMock.mockClear();
     setSettingMock.mockClear();
     updatePipelineItemTagsMock.mockClear();
+    insertWorktreeMock.mockClear();
+    upsertTerminalSessionMock.mockClear();
     listBlockersForItemMock.mockResolvedValue([]);
     listBlockedByItemMock.mockResolvedValue([]);
   }
@@ -327,6 +331,8 @@ const mockState = vi.hoisted(() => {
     listBlockedByItemMock,
     setSettingMock,
     updatePipelineItemTagsMock,
+    insertWorktreeMock,
+    upsertTerminalSessionMock,
     get blockCleanupGate() {
       return blockCleanupGate;
     },
@@ -496,6 +502,8 @@ vi.mock("@kanna/db", () => ({
     mockState.pipelineItems.filter((item) => item.repo_id === repoId)
   ),
   insertPipelineItem: mockState.insertPipelineItemMock,
+  insertWorktree: mockState.insertWorktreeMock,
+  upsertTerminalSession: mockState.upsertTerminalSessionMock,
   updatePipelineItemActivity: mockState.updatePipelineItemActivityMock,
   markPipelineItemTearingDown: vi.fn(async () => {}),
   updatePipelineItemStage: mockState.updatePipelineItemStageMock,
@@ -993,6 +1001,37 @@ describe("kanna store task base branch integration", () => {
           }),
         }),
       );
+    });
+  });
+
+  it("persists worktree and agent terminal session mappings for created PTY tasks", async () => {
+    const store = await createStore();
+
+    const taskId = await store.createItem("repo-1", "/tmp/repo", "Ship mobile terminal streaming", "pty", {
+      agentProvider: "codex",
+    });
+
+    await vi.waitFor(() => {
+      expect(mockState.invokeMock).toHaveBeenCalledWith(
+        "spawn_session",
+        expect.objectContaining({ sessionId: taskId }),
+      );
+    });
+
+    const worktreePath = `/tmp/repo/.kanna-worktrees/task-${taskId}`;
+    expect(mockState.insertWorktreeMock).toHaveBeenCalledWith(expect.anything(), {
+      id: `wt-${taskId}`,
+      pipeline_item_id: taskId,
+      path: worktreePath,
+      branch: `task-${taskId}`,
+    });
+    expect(mockState.upsertTerminalSessionMock).toHaveBeenCalledWith(expect.anything(), {
+      id: `agent-${taskId}`,
+      repo_id: "repo-1",
+      pipeline_item_id: taskId,
+      label: "agent",
+      cwd: worktreePath,
+      daemon_session_id: taskId,
     });
   });
 
