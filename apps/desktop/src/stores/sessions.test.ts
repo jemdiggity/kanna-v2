@@ -147,4 +147,18 @@ describe("createSessionsApi", () => {
       expect.stringMatching(/^[0-9a-f-]+$/),
     );
   });
+
+  it("builds a Copilot resume command with the stored session id", async () => {
+    const sessions = createSessionsApi(makeContext());
+
+    const prepared = await sessions.preparePtySession("task-1", "Continue", {
+      agentProvider: "copilot",
+      resumeSessionId: "5fc2bd17-1d1b-4ae9-bed8-011fa4011100",
+    });
+
+    expect(prepared.agentCmd).toBe("copilot --yolo --resume='5fc2bd17-1d1b-4ae9-bed8-011fa4011100'");
+    expect(prepared.agentCmdPreamble).toBeUndefined();
+    expect(prepared.agentProvider).toBe("copilot");
+    expect(mocks.updateAgentSessionIdMock).not.toHaveBeenCalled();
+  });
 });

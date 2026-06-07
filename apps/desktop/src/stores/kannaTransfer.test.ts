@@ -2219,7 +2219,7 @@ describe("incoming transfer approval", () => {
         sessionId: localTaskId,
         agentProvider: "copilot",
         args: expect.arrayContaining([
-          expect.stringContaining("--resume=5fc2bd17-1d1b-4ae9-bed8-011fa4011100"),
+          expect.stringContaining("--resume='5fc2bd17-1d1b-4ae9-bed8-011fa4011100'"),
         ]),
       }),
     );
