@@ -127,6 +127,33 @@ async function waitForE2EInvoke<T>(
   throw new Error(`Timed out waiting for E2E invoke; calls were ${JSON.stringify(calls)}`);
 }
 
+async function waitForE2EInvokes<T>(
+  client: WebDriverClient,
+  predicateSource: string,
+  description: string,
+  timeoutMs = 5_000,
+): Promise<T[]> {
+  const deadline = Date.now() + timeoutMs;
+  let calls: unknown[] = [];
+
+  while (Date.now() < deadline) {
+    const result = await client.executeSync<{ matches: T[]; calls: unknown[] }>(
+      `const calls = window.__KANNA_E2E__.invokes.getAll();
+       const matches = calls.filter(${predicateSource}).map((call) => call.args);
+       return { matches: JSON.parse(JSON.stringify(matches)), calls };`
+    );
+    calls = result.calls;
+    if (result.matches.length > 0) return result.matches;
+    await sleep(100);
+  }
+
+  throw new Error(`Timed out waiting for ${description}; calls were ${JSON.stringify(calls)}`);
+}
+
+function encodeInput(text: string): number[] {
+  return Array.from(new TextEncoder().encode(text));
+}
+
 describe("task lifecycle", () => {
   const client = new WebDriverClient();
   let repoId = "";
@@ -233,6 +260,31 @@ describe("task lifecycle", () => {
     expect(visibleCommandMatch?.[1]).toContain(prompt.replace(/'/g, "'\\''"));
     expect(visibleCommandMatch?.[1]).not.toMatch(/This\s+session\s+was\s+launched\s+by\s+Kanna/);
     expect(spawnCall?.env?.KANNA_TASK_ID).toBe(rows[0]?.id);
+
+    const sendInputCalls = await waitForE2EInvokes<{ sessionId?: string; data?: number[] }>(
+      client,
+      `(call) => call.cmd === "send_input" &&
+        call.args?.sessionId === ${JSON.stringify(rows[0]?.id)} &&
+        JSON.stringify(call.args?.data) === ${JSON.stringify(JSON.stringify(encodeInput("\r")))}`,
+      "Codex PTY task creation submit input",
+      7_000,
+    );
+    expect(sendInputCalls).toContainEqual({
+      sessionId: rows[0]?.id,
+      data: encodeInput("\r"),
+    });
+
+    await sleep(250);
+    const finalSendInputCalls = await client.executeSync<Array<{ sessionId?: string; data?: number[] }>>(
+      `const calls = window.__KANNA_E2E__.invokes.getAll();
+       return calls
+         .filter((call) => call.cmd === "send_input" && call.args?.sessionId === ${JSON.stringify(rows[0]?.id)})
+         .map((call) => JSON.parse(JSON.stringify(call.args)));`
+    );
+    expect(finalSendInputCalls).not.toContainEqual({
+      sessionId: rows[0]?.id,
+      data: encodeInput("\x1b[13u"),
+    });
   });
 
   it("closes into teardown and stays visible when teardown commands exist", async () => {
