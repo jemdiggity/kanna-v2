@@ -402,12 +402,40 @@ fn build_server_config(state: &MobileServerState) -> Result<String, String> {
 
 fn server_config_matches_runtime(config_path: &Path) -> bool {
     let Ok(content) = std::fs::read_to_string(config_path) else {
-        return true;
+        return false;
     };
-    content.contains(&format!(
-        "relay_url = \"{}\"",
-        escape_toml_string(&relay_url())
-    ))
+    let state = MobileServerState {
+        status: "stopped".to_string(),
+        desktop_name: default_desktop_name(),
+        api_base_url: server_base_url(local_server_port()),
+        config_path: config_path.to_path_buf(),
+        started: false,
+    };
+    let Ok(db_path) = resolved_db_path(&state) else {
+        return false;
+    };
+    let daemon_dir = std::env::var("KANNA_DAEMON_DIR")
+        .unwrap_or_else(|_| crate::daemon_data_dir().to_string_lossy().to_string());
+
+    [
+        format!("relay_url = \"{}\"", escape_toml_string(&relay_url())),
+        format!("daemon_dir = \"{}\"", escape_toml_string(&daemon_dir)),
+        format!(
+            "db_path = \"{}\"",
+            escape_toml_string(&db_path.to_string_lossy())
+        ),
+        format!(
+            "desktop_id = \"{}\"",
+            escape_toml_string(&desktop_id(config_path))
+        ),
+        format!(
+            "server_version = \"{}\"",
+            escape_toml_string(current_server_version())
+        ),
+        format!("lan_port = {}", local_server_port()),
+    ]
+    .iter()
+    .all(|line| content.contains(line))
 }
 
 const PRODUCTION_RELAY_URL: &str = "wss://kanna-relay-402613185450.us-central1.run.app";
@@ -899,13 +927,12 @@ mod tests {
         let app_data_dir = root.join("app-data");
         let db_path = root.join("kanna-test.db");
         let daemon_dir = root.join("daemon");
-        let existing_config_path = root.join("existing-server.toml");
         configure_process_test_env(port, &db_path, &daemon_dir);
         create_test_database(&db_path);
         let manager = MobileServerManager::new(app_data_dir.clone());
-        let expected_desktop_id = {
+        let (expected_desktop_id, existing_config_path) = {
             let state = manager.inner.lock().await;
-            desktop_id(&state.config_path)
+            (desktop_id(&state.config_path), state.config_path.clone())
         };
         write_test_server_config(
             &existing_config_path,
@@ -1272,16 +1299,71 @@ mod tests {
                 .expect("time should be monotonic")
                 .as_nanos()
         ));
-        std::fs::write(&path, "relay_url = \"wss://old-relay.example\"\n").unwrap();
+        let state = MobileServerState {
+            status: "stopped".to_string(),
+            desktop_name: "Studio Mac".to_string(),
+            api_base_url: server_base_url(48120),
+            config_path: path.clone(),
+            started: false,
+        };
+        let correct_config = build_server_config(&state).unwrap();
+        let stale_config = correct_config.replace(
+            "relay_url = \"ws://127.0.0.1:19083\"",
+            "relay_url = \"wss://old-relay.example\"",
+        );
+        std::fs::write(&path, stale_config).unwrap();
 
         assert!(!server_config_matches_runtime(&path));
 
-        std::fs::write(&path, "relay_url = \"ws://127.0.0.1:19083\"\n").unwrap();
+        std::fs::write(&path, correct_config).unwrap();
         assert!(server_config_matches_runtime(&path));
 
         let _ = std::fs::remove_file(path);
         unsafe {
             unset_env_var("KANNA_RELAY_PORT");
+        }
+    }
+
+    #[test]
+    fn server_config_matches_runtime_rejects_wrong_db_path() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+        unsafe {
+            unset_env_var("KANNA_RELAY_PORT");
+            unset_env_var("KANNA_RELAY_URL");
+            set_env_var("KANNA_DB_NAME", "kanna-wt-task-1234.db");
+        }
+        let root = std::env::temp_dir().join(format!(
+            "kanna-server-config-db-runtime-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time should be monotonic")
+                .as_nanos()
+        ));
+        let path = root.join("Kanna/servers/kanna-wt-task-1234/server.toml");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let state = MobileServerState {
+            status: "stopped".to_string(),
+            desktop_name: "Studio Mac".to_string(),
+            api_base_url: server_base_url(48120),
+            config_path: path.clone(),
+            started: false,
+        };
+        let correct_config = build_server_config(&state).unwrap();
+        let correct_db_path = root.join("kanna-wt-task-1234.db");
+        let stale_config = correct_config.replace(
+            &format!("db_path = \"{}\"", correct_db_path.to_string_lossy()),
+            "db_path = \"/tmp/build.kanna/kanna-v2.db\"",
+        );
+        std::fs::write(&path, stale_config).unwrap();
+
+        assert!(!server_config_matches_runtime(&path));
+
+        std::fs::write(&path, correct_config).unwrap();
+        assert!(server_config_matches_runtime(&path));
+
+        let _ = std::fs::remove_dir_all(root);
+        unsafe {
+            unset_env_var("KANNA_DB_NAME");
         }
     }
 
