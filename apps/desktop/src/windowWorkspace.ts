@@ -133,6 +133,28 @@ function createWindowId(): string {
   return `window-${Date.now()}`;
 }
 
+function windowIdFromWebviewLabel(label: string): string | null {
+  if (label === "main") return "main";
+  return label.startsWith("window-") ? label.slice("window-".length) : null;
+}
+
+async function readOpenWorkspaceWindowIds(): Promise<Set<string> | null> {
+  if (!isTauri) return null;
+
+  try {
+    const { getAllWebviewWindows } = await import("@tauri-apps/api/webviewWindow");
+    const ids = new Set<string>();
+    for (const window of await getAllWebviewWindows()) {
+      const id = windowIdFromWebviewLabel(window.label);
+      if (id) ids.add(id);
+    }
+    return ids;
+  } catch (error) {
+    console.warn("[windowWorkspace] failed to inspect open windows:", error);
+    return null;
+  }
+}
+
 export async function readWorkspaceSnapshot(db: DbHandle): Promise<WorkspaceSnapshot> {
   const raw = await getSetting(db, WINDOW_WORKSPACE_SETTINGS_KEY);
   if (!raw) return { windows: [] };
@@ -196,7 +218,13 @@ export function createWindowWorkspace(input: {
 
   async function forgetCurrentWindow(): Promise<void> {
     const snapshot = await loadSnapshot();
-    await writeWorkspaceSnapshot(db, removeWindowFromWorkspaceSnapshot(snapshot, bootstrap.windowId));
+    const openWindowIds = await readOpenWorkspaceWindowIds();
+    const liveSnapshot = openWindowIds
+      ? {
+          windows: snapshot.windows.filter((entry) => openWindowIds.has(entry.windowId)),
+        }
+      : snapshot;
+    await writeWorkspaceSnapshot(db, removeWindowFromWorkspaceSnapshot(liveSnapshot, bootstrap.windowId));
   }
 
   async function spawnWindow(state: WindowBootstrap): Promise<void> {
