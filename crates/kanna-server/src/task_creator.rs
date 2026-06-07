@@ -2751,17 +2751,16 @@ mod tests {
         assert_eq!(prepared.created_task.title, "Implement the fallback");
         let branch = format!("task-{}", prepared.session_id);
         let worktree_count = db
-            .count_test_worktrees_for_task(
-                &prepared.created_task.task_id,
-                &prepared.cwd,
-                &branch,
-            )
+            .count_test_worktrees_for_task(&prepared.created_task.task_id, &prepared.cwd, &branch)
             .unwrap();
         assert_eq!(worktree_count, 1);
         let terminal_session_id = db
             .resolve_task_terminal_session_id(&prepared.created_task.task_id)
             .unwrap();
-        assert_eq!(terminal_session_id.as_deref(), Some(prepared.session_id.as_str()));
+        assert_eq!(
+            terminal_session_id.as_deref(),
+            Some(prepared.session_id.as_str())
+        );
     }
 
     #[test]
