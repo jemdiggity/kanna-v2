@@ -21,6 +21,8 @@ interface TerminalBufferStats {
   lastMatchingLine: string | null;
   hasEndMarker: boolean;
   tailLines?: string[];
+  bufferTailLines?: string[];
+  lastSpawnError?: unknown;
 }
 
 interface SessionRecoveryState {
@@ -325,7 +327,9 @@ async function readTerminalStats(
      const tailLines = Array.from(document.querySelectorAll(".main-panel .xterm-rows > div"))
        .map((el) => el.textContent || "")
        .slice(-20);
-     return { ...stats, tailLines };`,
+     const bufferTailLines = hook.lines(${JSON.stringify(sessionId)}).slice(-20);
+     const lastSpawnError = window.__KANNA_E2E_LAST_AGENT_SPAWN_ERROR__ ?? null;
+     return { ...stats, tailLines, bufferTailLines, lastSpawnError };`,
   );
 }
 
