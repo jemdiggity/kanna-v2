@@ -1584,6 +1584,14 @@ mod tests {
                 base_ref TEXT
             );
 
+            CREATE TABLE worktree (
+                id TEXT PRIMARY KEY,
+                pipeline_item_id TEXT NOT NULL,
+                path TEXT NOT NULL,
+                branch TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
             CREATE TABLE settings (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
