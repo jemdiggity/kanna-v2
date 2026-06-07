@@ -21,6 +21,8 @@ interface TerminalBufferStats {
   lastMatchingLine: string | null;
   hasEndMarker: boolean;
   tailLines?: string[];
+  bufferTailLines?: string[];
+  lastSpawnError?: unknown;
 }
 
 interface SessionRecoveryState {
@@ -56,7 +58,33 @@ describe("terminal recovery", () => {
     await client.deleteSession();
   });
 
-  it("replays recovery scrollback and respawns a task terminal after daemon_ready", async () => {
+  it("does not respawn a normally exited task terminal after daemon_ready", async () => {
+    const taskId = await createRecoverableTask(client, {
+      repoId,
+      repoPath: testRepoPath,
+      prompt: "Do not recover a completed PTY session",
+    });
+    taskIds.push(taskId);
+
+    await waitForSessionPresence(client, taskId, true);
+    await selectTask(client, taskId);
+    await client.waitForElement(".main-panel .terminal-container", 15_000);
+    await waitForTerminalEndMarker(client, taskId, "ORIGINAL_READY", "^ORIGINAL_READY$", 15_000);
+    await clearE2EInvokes(client);
+
+    await strictTauriInvoke(client, "kill_session", { sessionId: taskId });
+    await waitForSessionPresence(client, taskId, false);
+    await emitTauriEvent(client, "session_exit", { session_id: taskId, code: 0 });
+    await waitForTerminalEndMarker(client, taskId, "[Process exited with code 0]", "\\[Process exited with code 0\\]", 15_000);
+
+    await emitTauriEvent(client, "daemon_ready");
+    await sleep(1_000);
+
+    expect(await getSpawnSessionCount(client, taskId)).toBe(0);
+    expect(await findRespawnToasts(client)).toEqual([]);
+  });
+
+  it("replays recovery scrollback and respawns a lost task terminal after stream loss", async () => {
     const taskId = await createRecoverableTask(client, {
       repoId,
       repoPath: testRepoPath,
@@ -69,16 +97,21 @@ describe("terminal recovery", () => {
     await client.waitForElement(".main-panel .terminal-container", 15_000);
     await waitForTerminalEndMarker(client, taskId, "ORIGINAL_READY", "^ORIGINAL_READY$", 15_000);
 
+    await strictTauriInvoke(client, "detach_session", { sessionId: taskId });
+    await sleep(300);
     await strictTauriInvoke(client, "kill_session", { sessionId: taskId });
     await waitForSessionPresence(client, taskId, false);
-    await strictTauriInvoke(client, "detach_session", { sessionId: taskId });
-    await emitTauriEvent(client, "session_exit", { session_id: taskId, code: 0 });
-    await waitForTerminalEndMarker(client, taskId, "[Process exited with code 0]", "\\[Process exited", 15_000);
 
     const recoverySnapshot = buildRecoverySnapshot(2_000);
     await seedAndWaitForRecoveryState(client, taskId, recoverySnapshot);
 
+    await clearE2EInvokes(client);
+    await emitTauriEvent(client, "session_stream_lost", { session_id: taskId });
     await emitTauriEvent(client, "daemon_ready");
+    await waitForRespawnToast(
+      client,
+      "The previous terminal session could not be reattached. Scrollback was restored and a new session was started.",
+    );
 
     await waitForSessionPresence(client, taskId, true, 20_000);
     const recoveredStats = await waitForTerminalEndMarker(
@@ -100,6 +133,7 @@ describe("terminal recovery", () => {
     expect(recoveredStats.firstMatchingLine).toBe("RECOVERY_LINE0001");
     expect(recoveredStats.lastMatchingLine).toBe("RECOVERY_LINE2000");
     expect(respawnStats.hasEndMarker).toBe(true);
+    expect(await getSpawnSessionCount(client, taskId)).toBe(1);
   });
 });
 
@@ -293,8 +327,41 @@ async function readTerminalStats(
      const tailLines = Array.from(document.querySelectorAll(".main-panel .xterm-rows > div"))
        .map((el) => el.textContent || "")
        .slice(-20);
-     return { ...stats, tailLines };`,
+     const bufferTailLines = hook.lines(${JSON.stringify(sessionId)}).slice(-20);
+     const lastSpawnError = window.__KANNA_E2E_LAST_AGENT_SPAWN_ERROR__ ?? null;
+     return { ...stats, tailLines, bufferTailLines, lastSpawnError };`,
   );
+}
+
+async function clearE2EInvokes(client: WebDriverClient): Promise<void> {
+  await client.executeSync("window.__KANNA_E2E__.invokes.clear();");
+}
+
+async function getSpawnSessionCount(client: WebDriverClient, sessionId: string): Promise<number> {
+  return await client.executeSync<number>(
+    `return window.__KANNA_E2E__.invokes.getAll()
+      .filter((call) => call.cmd === "spawn_session" && call.args?.sessionId === ${JSON.stringify(sessionId)})
+      .length;`,
+  );
+}
+
+async function findRespawnToasts(client: WebDriverClient): Promise<string[]> {
+  return await client.executeSync<string[]>(
+    `return Array.from(document.querySelectorAll(".toast.warning .toast-message"))
+      .map((el) => el.textContent || "")
+      .filter((text) => text.includes("terminal session could not be reattached"));`,
+  );
+}
+
+async function waitForRespawnToast(client: WebDriverClient, expectedMessage: string): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  let latest: string[] = [];
+  while (Date.now() < deadline) {
+    latest = await findRespawnToasts(client);
+    if (latest.includes(expectedMessage)) return;
+    await sleep(100);
+  }
+  throw new Error(`timed out waiting for respawn toast; latest=${JSON.stringify(latest)}`);
 }
 
 async function strictTauriInvoke(

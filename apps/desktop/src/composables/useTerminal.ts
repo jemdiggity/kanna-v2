@@ -224,6 +224,7 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
   let connectionGeneration = 0
   let disposed = false
   let hasAttachedOnce = false
+  let sessionExited = false
   let preserveRecoveredScrollbackForNextSnapshot = false
   let bracketedPasteMode = false
   let hasObservedBracketedPasteMode = false
@@ -892,6 +893,7 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
 
   async function connectSession() {
     if (paused) return
+    if (sessionExited) return
     if (shouldSkipReconnect(connecting, attached)) return
     const generation = connectionGeneration
     connecting = true
@@ -953,6 +955,7 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
       }
       attached = true
       hasAttachedOnce = true
+      sessionExited = false
       return
     } catch (e) {
       const msg = getAppErrorMessage(e)
@@ -1067,6 +1070,7 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
         }
         attached = true
         hasAttachedOnce = true
+        sessionExited = false
         const attachedTerminal = getLiveTerminal()
         if (attachedTerminal && shouldPushKittyKeyboardOnFreshAttach(options)) {
           attachedTerminal.write("\x1b[>1u")
@@ -1174,6 +1178,7 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
           if (sid === sessionId || sid === teardownId) {
             if (sid === sessionId) {
               attached = false
+              sessionExited = true
             }
             if (terminal.value) {
               terminal.value.write(`\r\n[Process exited with code ${event.payload.code}]\r\n`)

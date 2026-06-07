@@ -28,8 +28,12 @@ export interface BuildProductionMobilePlanInput {
 function shellEnvPrefix(env: Record<string, string | undefined>): string {
   return Object.entries(env)
     .filter((entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].length > 0)
-    .map(([key, value]) => `${key}=${value}`)
+    .map(([key, value]) => `${key}=${shellQuote(value)}`)
     .join(" ");
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
 function mobileFirebaseEnv(input: BuildDevPlanInput): Record<string, string | undefined> {
