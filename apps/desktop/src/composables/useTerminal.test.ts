@@ -1205,7 +1205,7 @@ describe("useTerminal", () => {
     expect(terminal.reset).toHaveBeenCalledTimes(2);
   });
 
-  it("marks the terminal detached after session_exit so ensureConnected rechecks the daemon", async () => {
+  it("marks the terminal ended after session_exit so ensureConnected does not reattach", async () => {
     const callOrder: string[] = [];
     const { useTerminal } = await import("./useTerminal");
     let resizeCount = 0;
@@ -1303,9 +1303,77 @@ describe("useTerminal", () => {
     expect(callOrder).toEqual([
       "attach_session_with_snapshot",
       "resize_session",
-      "attach_session_with_snapshot",
-      "resize_session",
     ]);
+  });
+
+  it("does not respawn a task terminal after the agent process exits normally", async () => {
+    const spawnFn = vi.fn(async () => {});
+    const { useTerminal } = await import("./useTerminal");
+    let exited = false;
+
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "attach_session_with_snapshot") {
+        if (exited) {
+          throw new AppError("session not found: session-1", "session_not_found");
+        }
+        emitTerminalSnapshot("session-1");
+        return null;
+      }
+      if (cmd === "get_session_recovery_state") {
+        return null;
+      }
+      return null;
+    });
+
+    const TestHarness = defineComponent({
+      setup() {
+        const { init, startListening } = useTerminal(
+          "session-1",
+          {
+            cwd: "/tmp/task",
+            prompt: "hello",
+            spawnFn,
+          },
+          {
+            agentProvider: "codex",
+            worktreePath: "/tmp/task",
+          },
+        );
+
+        return { init, startListening };
+      },
+      render() {
+        return h("div");
+      },
+    });
+
+    const wrapper = mount(TestHarness);
+    const terminalElement = document.createElement("div");
+    Object.defineProperty(terminalElement, "offsetWidth", { configurable: true, value: 800 });
+    Object.defineProperty(terminalElement, "offsetHeight", { configurable: true, value: 600 });
+    terminalElement.querySelector = vi.fn(() => null) as typeof terminalElement.querySelector;
+    terminalElement.closest = vi.fn(() => null) as typeof terminalElement.closest;
+    wrapper.vm.init(terminalElement);
+
+    await wrapper.vm.startListening();
+
+    const exitListeners = eventListeners.get("session_exit") ?? [];
+    const daemonReadyListeners = eventListeners.get("daemon_ready") ?? [];
+    expect(exitListeners).toHaveLength(1);
+    expect(daemonReadyListeners).toHaveLength(1);
+
+    exited = true;
+    exitListeners[0]({ payload: { session_id: "session-1", code: 0 } });
+    daemonReadyListeners[0]({ payload: {} });
+
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await Promise.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+
+    expect(spawnFn).not.toHaveBeenCalled();
+    expect(warningToastMock).not.toHaveBeenCalled();
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === "attach_session_with_snapshot")).toHaveLength(1);
   });
 
   it("re-attaches during daemon turnover without depending on snapshot replay", async () => {
