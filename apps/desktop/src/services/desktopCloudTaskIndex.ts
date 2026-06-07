@@ -132,6 +132,9 @@ export function mapDesktopCloudTasks(
   const reposById = new Map<string, DesktopCloudRepo>();
   const items: PipelineItem[] = [];
   const terminalRefs: Record<string, DesktopCloudTerminalRef> = {};
+  const localRepoById = new Map(
+    (options.localRepos ?? []).map((entry) => [entry.repo.id, entry.repo]),
+  );
   const localRepoByRemoteHash = new Map(
     (options.localRepos ?? [])
       .filter((entry): entry is { repo: Repo; remoteUrlHash: string } =>
@@ -145,9 +148,10 @@ export function mapDesktopCloudTasks(
       .map((item) => `${item.repo_id}:${item.id}`),
   );
   for (const snapshot of sortByUpdatedAt(snapshots)) {
-    const localRepo = snapshot.repo.remoteUrlHash
+    const exactLocalRepo = localRepoById.get(snapshot.repo.cloudRepoId);
+    const localRepo = exactLocalRepo ?? (snapshot.repo.remoteUrlHash
       ? localRepoByRemoteHash.get(snapshot.repo.remoteUrlHash)
-      : undefined;
+      : undefined);
     const repoId = localRepo?.id ?? cloudRepoId(snapshot.repo.cloudRepoId);
     if (closedLocalItemKeys.has(`${repoId}:${snapshot.ownerLocalTaskId}`)) {
       continue;

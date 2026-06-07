@@ -191,6 +191,74 @@ describe("mapDesktopCloudTasks", () => {
     ]);
   });
 
+  it("prefers an exact local repo id over a duplicate remote URL hash match", () => {
+    const snapshot = mapDesktopCloudTasks([
+      {
+        cloudTaskId: "kanna-local:task-1",
+        ownerDesktopId: "peer-primary",
+        ownerLocalTaskId: "task-1",
+        title: "Remote task",
+        promptSnippet: "Remote task prompt",
+        displayName: null,
+        stage: "in progress",
+        activity: "idle",
+        status: "active",
+        repo: {
+          cloudRepoId: "kanna-local",
+          name: "kanna",
+          defaultBranch: "main",
+          remoteUrlHash: "same-remote",
+        },
+        branch: "task-task-1",
+        baseRef: "origin/main",
+        prNumber: null,
+        prUrl: null,
+        agent: { provider: "codex", type: "pty" },
+        createdAt: "2026-05-14T00:00:00.000Z",
+        updatedAt: "2026-05-14T00:01:00.000Z",
+        closedAt: null,
+      },
+    ], {
+      localRepos: [
+        {
+          repo: {
+            id: "kanna-local",
+            path: "/Users/test/.kanna/repos/kanna",
+            name: "kanna",
+            default_branch: "main",
+            hidden: 0,
+            sort_order: 0,
+            created_at: "2026-05-13T00:00:00.000Z",
+            last_opened_at: "2026-05-13T00:00:00.000Z",
+          },
+          remoteUrlHash: "same-remote",
+        },
+        {
+          repo: {
+            id: "kanna-tauri-stale",
+            path: "/Users/test/Documents/work/jemdiggity/kanna-tauri",
+            name: "kanna-tauri",
+            default_branch: "main",
+            hidden: 0,
+            sort_order: 3,
+            created_at: "2026-03-21T00:00:00.000Z",
+            last_opened_at: "2026-03-21T00:00:00.000Z",
+          },
+          remoteUrlHash: "same-remote",
+        },
+      ],
+    });
+
+    expect(snapshot.repos).toEqual([]);
+    expect(snapshot.items).toMatchObject([
+      {
+        id: "cloud:kanna-local:task-1",
+        repo_id: "kanna-local",
+        display_name: "Remote task (peer-primary)",
+      },
+    ]);
+  });
+
   it("keeps the remote URL hash on unmatched remote repos for later workspace matching", () => {
     const snapshot = mapDesktopCloudTasks([
       {
