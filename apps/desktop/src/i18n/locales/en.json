@@ -214,7 +214,7 @@
     "filterAll": "Staged+Unstaged",
     "filterUnstaged": "Unstaged",
     "filterStaged": "Staged",
-    "branchIncludeNone": "None",
+    "branchIncludeNone": "Committed",
     "searchPlaceholder": "Search...",
     "searchNoMatches": "No matches",
     "fileSkippedTooLarge": "Large diff omitted to keep the viewer responsive.",

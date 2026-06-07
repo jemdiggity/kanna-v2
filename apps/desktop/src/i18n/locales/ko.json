@@ -214,7 +214,7 @@
     "filterAll": "스테이지+미스테이지",
     "filterUnstaged": "미스테이지",
     "filterStaged": "스테이지",
-    "branchIncludeNone": "없음",
+    "branchIncludeNone": "커밋됨",
     "searchPlaceholder": "검색...",
     "searchNoMatches": "일치 없음",
     "fileSkippedTooLarge": "뷰어 응답성을 유지하기 위해 큰 diff를 생략했습니다.",

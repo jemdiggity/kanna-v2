@@ -214,7 +214,7 @@
     "filterAll": "ステージ済み+未ステージ",
     "filterUnstaged": "未ステージ",
     "filterStaged": "ステージ済み",
-    "branchIncludeNone": "なし",
+    "branchIncludeNone": "コミット済み",
     "searchPlaceholder": "検索...",
     "searchNoMatches": "一致なし",
     "fileSkippedTooLarge": "ビューアの応答性を保つため、大きな差分を省略しました。",

@@ -358,7 +358,7 @@ describe("DiffView", () => {
     });
 
     const includeButton = wrapper.get(".branch-include-toggle");
-    expect(includeButton.text()).toBe("None");
+    expect(includeButton.text()).toBe("Committed");
 
     await includeButton.trigger("click");
     await flushPromises();
