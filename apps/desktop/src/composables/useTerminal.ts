@@ -688,6 +688,19 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
     // and sent to the PTY instead of triggering clipboard operations —
     // intercept Cmd+C here and let Cmd+V fall through to the native paste event.
     term.attachCustomKeyEventHandler((e: KeyboardEvent) => {
+      if (
+        options?.agentTerminal &&
+        e.type === "keydown" &&
+        e.key === "Enter" &&
+        e.shiftKey &&
+        !e.metaKey &&
+        !e.altKey &&
+        !e.ctrlKey
+      ) {
+        e.preventDefault()
+        void sendInputBytes(new TextEncoder().encode("\x1b[13;2u"))
+        return false
+      }
       if (e.key === "Escape") {
         // If this terminal is inside a modal (e.g. ShellModal), consume Escape for the PTY.
         // Otherwise, when a modal overlay is visible, let Escape bubble to dismiss it.

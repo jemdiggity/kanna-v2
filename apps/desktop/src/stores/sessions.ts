@@ -24,7 +24,6 @@ interface DaemonSessionInfo {
 }
 
 const CODEX_SPAWN_SUBMIT_DELAY_MS = 5_000;
-const CODEX_SPAWN_COMPOSER_SUBMIT_DELAY_MS = 1_000;
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -476,11 +475,6 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
       await invoke("send_input", {
         sessionId,
         data: encodeDaemonInput("\r"),
-      });
-      await delay(CODEX_SPAWN_COMPOSER_SUBMIT_DELAY_MS);
-      await invoke("send_input", {
-        sessionId,
-        data: encodeDaemonInput("\x1b[13u"),
       });
     }
     await syncTaskStatusesFromDaemon();

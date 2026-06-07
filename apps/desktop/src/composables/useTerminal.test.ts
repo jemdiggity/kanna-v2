@@ -2094,6 +2094,58 @@ describe("useTerminal", () => {
     expect(terminal.write).not.toHaveBeenCalledWith("\x1b[>1u");
   });
 
+  it("sends Shift+Enter as kitty CSI-u modified Enter for agent terminals", async () => {
+    const { useTerminal } = await import("./useTerminal");
+
+    const TestHarness = defineComponent({
+      setup() {
+        const { init } = useTerminal(
+          "session-1",
+          undefined,
+          {
+            agentProvider: "claude",
+            agentTerminal: true,
+          },
+        );
+
+        return { init };
+      },
+      render() {
+        return h("div");
+      },
+    });
+
+    const wrapper = mount(TestHarness);
+    const terminalElement = document.createElement("div");
+    Object.defineProperty(terminalElement, "offsetWidth", { configurable: true, value: 800 });
+    Object.defineProperty(terminalElement, "offsetHeight", { configurable: true, value: 600 });
+    terminalElement.querySelector = vi.fn(() => null) as typeof terminalElement.querySelector;
+    terminalElement.closest = vi.fn(() => null) as typeof terminalElement.closest;
+    wrapper.vm.init(terminalElement);
+
+    const terminal = terminals[0];
+    const keyHandler = terminal.attachCustomKeyEventHandler.mock.calls[0][0] as (event: KeyboardEvent) => boolean;
+    const keyboardEvent = {
+      type: "keydown",
+      key: "Enter",
+      shiftKey: true,
+      metaKey: false,
+      altKey: false,
+      ctrlKey: false,
+      preventDefault: vi.fn(),
+    } as unknown as KeyboardEvent;
+
+    const allowed = keyHandler(keyboardEvent);
+    await Promise.resolve();
+
+    expect(allowed).toBe(false);
+    expect(keyboardEvent.preventDefault).toHaveBeenCalled();
+    expect(invokeMock).toHaveBeenCalledWith("send_input", {
+      sessionId: "session-1",
+      data: Array.from(new TextEncoder().encode("\x1b[13;2u")),
+    });
+  });
+
   it("responds to kitty clipboard image reads after an explicit paste", async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === "read_clipboard_image_png") {

@@ -17,6 +17,11 @@ const mocks = vi.hoisted(() => {
         return "/tmp/kanna.sock";
       case "read_text_file":
         return "{}";
+      case "spawn_session":
+      case "send_input":
+        return undefined;
+      case "list_sessions":
+        return [];
       default:
         throw new Error(`unexpected invoke: ${command}`);
     }
@@ -83,6 +88,7 @@ function makeContext(): StoreContext {
 
 describe("createSessionsApi", () => {
   beforeEach(() => {
+    vi.useRealTimers();
     mocks.invokeMock.mockClear();
     mocks.updateAgentSessionIdMock.mockClear();
   });
@@ -160,5 +166,26 @@ describe("createSessionsApi", () => {
     expect(prepared.agentCmdPreamble).toBeUndefined();
     expect(prepared.agentProvider).toBe("copilot");
     expect(mocks.updateAgentSessionIdMock).not.toHaveBeenCalled();
+  });
+
+  it("does not send kitty CSI-u enter when spawning a Codex PTY task", async () => {
+    vi.useFakeTimers();
+    const sessions = createSessionsApi(makeContext());
+
+    const spawn = sessions.spawnPtySession("task-1", "/tmp/repo/.kanna-worktrees/task-1", "Ship it", 80, 24, {
+      agentProvider: "codex",
+    });
+
+    await vi.advanceTimersByTimeAsync(6_000);
+    await spawn;
+
+    expect(mocks.invokeMock).toHaveBeenCalledWith("send_input", {
+      sessionId: "task-1",
+      data: Array.from(new TextEncoder().encode("\r")),
+    });
+    expect(mocks.invokeMock).not.toHaveBeenCalledWith("send_input", {
+      sessionId: "task-1",
+      data: Array.from(new TextEncoder().encode("\x1b[13u")),
+    });
   });
 });

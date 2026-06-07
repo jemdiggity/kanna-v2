@@ -93,6 +93,37 @@ export async function typeTextToFocusedTerminalWindow(
   await client.sendKeys(input, text);
 }
 
+export async function pressShiftEnterInActiveTerminal(
+  client: TerminalInputClient,
+  options: TerminalInputOptions = {},
+): Promise<void> {
+  await client.waitForElement(TERMINAL_CONTAINER_SELECTOR, 15_000);
+
+  const initialDelayMs = options.initialDelayMs ?? 0;
+  if (initialDelayMs > 0) {
+    await sleep(initialDelayMs);
+  }
+
+  await client.executeSync(
+    `const el = document.querySelector(${JSON.stringify(TERMINAL_INPUT_SELECTOR)});
+     if (el instanceof HTMLElement) el.focus();`,
+  );
+
+  await client.waitForElement(TERMINAL_INPUT_SELECTOR, 5_000);
+  await waitForTerminalDomFocus(client, options.timeoutMs ?? 5_000);
+  await client.executeSync(
+    `const el = document.querySelector(${JSON.stringify(TERMINAL_INPUT_SELECTOR)});
+     if (!el) throw new Error("active terminal input not found");
+     el.dispatchEvent(new KeyboardEvent("keydown", {
+       key: "Enter",
+       code: "Enter",
+       shiftKey: true,
+       bubbles: true,
+       cancelable: true,
+     }));`,
+  );
+}
+
 async function waitForTerminalDomFocus(
   client: TerminalInputClient,
   timeoutMs: number,

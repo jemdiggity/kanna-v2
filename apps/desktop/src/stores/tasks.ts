@@ -75,7 +75,6 @@ const INSTANCE_SCOPED_WORKTREE_ENV_KEYS = [
 ] as const;
 
 const CODEX_SPAWN_SUBMIT_DELAY_MS = 5_000;
-const CODEX_SPAWN_COMPOSER_SUBMIT_DELAY_MS = 1_000;
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -561,11 +560,6 @@ export function createTasksApi(
         await invoke("send_input", {
           sessionId: id,
           data: encodeDaemonInput("\r"),
-        });
-        await delay(CODEX_SPAWN_COMPOSER_SUBMIT_DELAY_MS);
-        await invoke("send_input", {
-          sessionId: id,
-          data: encodeDaemonInput("\x1b[13u"),
         });
       }
       console.log(`[perf:setup] TOTAL (background): ${(performance.now() - s0).toFixed(1)}ms`);
