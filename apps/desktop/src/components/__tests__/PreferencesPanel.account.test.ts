@@ -22,7 +22,11 @@ vi.mock("vue-i18n", () => ({
 }));
 
 vi.mock("../../invoke", () => ({
-  invoke: vi.fn(async () => ({ state: "stopped" })),
+  invoke: vi.fn(async () => ({
+    state: "stopped",
+    desktopId: "desktop-current",
+    desktopName: "Studio Mac",
+  })),
 }));
 
 function signedOutSession(): DesktopAuthSession {
@@ -93,5 +97,15 @@ describe("PreferencesPanel account sign-in", () => {
       password: "password123",
     });
     expect(wrapper.text()).toContain("upvote.sieve.7t@icloud.com");
+  });
+
+  it("shows the current desktop id on the Account tab", async () => {
+    const wrapper = mountPreferences();
+    await flushPromises();
+
+    await wrapper.get('[data-testid="preferences-account-tab"]').trigger("click");
+
+    expect(wrapper.text()).toContain("Desktop ID");
+    expect(wrapper.text()).toContain("desktop-current");
   });
 });
