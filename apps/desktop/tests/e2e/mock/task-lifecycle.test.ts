@@ -274,7 +274,8 @@ describe("task lifecycle", () => {
       data: encodeInput("\r"),
     });
 
-    await sleep(250);
+    const oldCsiUFollowUpDelayMs = 1_000;
+    await sleep(oldCsiUFollowUpDelayMs + 250);
     const finalSendInputCalls = await client.executeSync<Array<{ sessionId?: string; data?: number[] }>>(
       `const calls = window.__KANNA_E2E__.invokes.getAll();
        return calls
