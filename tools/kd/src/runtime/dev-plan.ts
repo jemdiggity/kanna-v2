@@ -20,6 +20,11 @@ export interface BuildDevPlanInput {
   mobileServerUrl: string;
 }
 
+export interface BuildProductionMobilePlanInput {
+  repoRoot: string;
+  env: NodeJS.ProcessEnv;
+}
+
 function shellEnvPrefix(env: Record<string, string | undefined>): string {
   return Object.entries(env)
     .filter((entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].length > 0)
@@ -83,6 +88,21 @@ function e2eEnv(input: BuildDevPlanInput): Record<string, string | undefined> {
   return Object.fromEntries(entries);
 }
 
+function productionMobileEnv(input: BuildProductionMobilePlanInput): Record<string, string | undefined> {
+  return {
+    EXPO_PUBLIC_KANNA_RELAY_URL: input.env.EXPO_PUBLIC_KANNA_RELAY_URL,
+    EXPO_PUBLIC_FIREBASE_API_KEY: input.env.EXPO_PUBLIC_FIREBASE_API_KEY,
+    EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN: input.env.EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN,
+    EXPO_PUBLIC_FIREBASE_PROJECT_ID: input.env.EXPO_PUBLIC_FIREBASE_PROJECT_ID,
+    EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET: input.env.EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET,
+    EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID:
+      input.env.EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
+    EXPO_PUBLIC_FIREBASE_APP_ID: input.env.EXPO_PUBLIC_FIREBASE_APP_ID,
+    EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID: input.env.EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID,
+    RCT_METRO_PORT: input.env.KANNA_MOBILE_PORT ?? "8081"
+  };
+}
+
 export function buildDevPlan(input: BuildDevPlanInput): DevPlan {
   const windows: DevWindow[] = [];
   const sharedEnv = { ...input.env };
@@ -134,4 +154,18 @@ export function buildDevPlan(input: BuildDevPlanInput): DevPlan {
   }
 
   return { windows };
+}
+
+export function buildProductionMobilePlan(input: BuildProductionMobilePlanInput): DevPlan {
+  const mobileEnv = shellEnvPrefix(productionMobileEnv(input));
+  return {
+    windows: [
+      {
+        name: "mobile",
+        cwd: `${input.repoRoot}/apps/mobile`,
+        env: { ...input.env },
+        command: `unset NO_COLOR; ${mobileEnv} pnpm run dev -- --port ${input.env.KANNA_MOBILE_PORT ?? "8081"}`
+      }
+    ]
+  };
 }

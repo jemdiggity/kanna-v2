@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { connect } from "node:net";
 import { homedir } from "node:os";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { z } from "zod";
 import { readKannaRepoConfig } from "../config";
 import { resolveKdContext, type KdContext } from "../context";
@@ -16,7 +16,7 @@ import {
 } from "../runtime/cloud-test";
 import { buildLanLabPlan, parseLanLabInventory } from "../runtime/lan-lab";
 import { buildLanLabScenarioCommand } from "../runtime/lan-lab-runner";
-import { buildDevPlan } from "../runtime/dev-plan";
+import { buildDevPlan, buildProductionMobilePlan } from "../runtime/dev-plan";
 import { assertNotProductionDb, resetSqliteDb, seedSqliteDb, type DevDbTarget } from "../runtime/db";
 import { killWorkspaceDaemons } from "../runtime/daemon";
 import { checkRequiredCommands } from "../runtime/doctor";
@@ -53,6 +53,10 @@ export interface DevDownInput {
   killDaemon: boolean;
 }
 
+export interface MobileUpInput {
+  production: boolean;
+}
+
 export const devUpInputSchema = z.object({
   mobile: z.boolean().default(false),
   emulators: z.boolean().default(false),
@@ -68,6 +72,10 @@ export const devUpInputSchema = z.object({
 
 const devDownInputSchema = z.object({
   killDaemon: z.boolean().default(false)
+});
+
+const mobileUpInputSchema = z.object({
+  production: z.boolean().default(false)
 });
 
 const logInputSchema = z.object({
@@ -234,6 +242,105 @@ async function executeDevUp(input: DevUpInput): Promise<TaskResult> {
   };
 }
 
+interface ProductionDesktopStatus {
+  desktopId?: string;
+  version?: string;
+  relay_url?: string;
+  relayUrl?: string;
+  state?: string;
+}
+
+async function readProductionDesktopStatus(runner: CommandRunner): Promise<ProductionDesktopStatus> {
+  const result = await runner.run("curl", [
+    "--fail",
+    "--silent",
+    "--show-error",
+    "http://127.0.0.1:48120/v1/status"
+  ]);
+  if (result.exitCode !== 0) {
+    throw new Error(
+      result.stderr.trim() ||
+        "Production desktop server is not reachable at http://127.0.0.1:48120/v1/status"
+    );
+  }
+
+  try {
+    return JSON.parse(result.stdout) as ProductionDesktopStatus;
+  } catch {
+    throw new Error("Production desktop server returned invalid JSON from /v1/status.");
+  }
+}
+
+async function assertProductionServerConfig(runner: CommandRunner, env: NodeJS.ProcessEnv): Promise<string> {
+  const homeDir = env.HOME?.trim() || homedir();
+  const serverConfigPath = join(
+    homeDir,
+    "Library",
+    "Application Support",
+    "build.kanna",
+    "Kanna",
+    "server.toml"
+  );
+  const result = await runner.run("test", ["-f", serverConfigPath]);
+  if (result.exitCode !== 0) {
+    throw new Error(`Production mobile server config not found at ${serverConfigPath}`);
+  }
+  return serverConfigPath;
+}
+
+export async function executeProductionMobileUpWithContext(
+  input: MobileUpInput,
+  executor: ExecutorInput
+): Promise<TaskResult> {
+  if (!input.production) {
+    throw new Error("mobile.up currently supports --production only.");
+  }
+
+  const [status, serverConfigPath] = await Promise.all([
+    readProductionDesktopStatus(executor.runner),
+    assertProductionServerConfig(executor.runner, executor.context.env)
+  ]);
+  const relayUrl = status.relay_url ?? status.relayUrl;
+  const env = {
+    ...executor.context.env,
+    EXPO_PUBLIC_KANNA_RELAY_URL:
+      executor.context.env.EXPO_PUBLIC_KANNA_RELAY_URL ?? relayUrl
+  };
+  const plan = buildProductionMobilePlan({
+    repoRoot: executor.context.repoRoot,
+    env
+  });
+
+  await startTmuxSession(executor.runner, executor.context.tmux, plan.windows);
+
+  const desktopId = status.desktopId ?? "unknown desktop";
+  const version = status.version ?? "unknown version";
+  return {
+    ok: true,
+    message: `Started mobile against production desktop ${desktopId} (${version}).`,
+    data: {
+      desktopId: status.desktopId,
+      version: status.version,
+      relayUrl,
+      serverConfigPath,
+      windows: plan.windows.map((window) => window.name)
+    }
+  };
+}
+
+async function executeProductionMobileUp(input: MobileUpInput): Promise<TaskResult> {
+  const context = await resolveDefaultContext(process.env);
+  return executeProductionMobileUpWithContext(input, {
+    runner: nodeCommandRunner,
+    context: {
+      repoRoot: context.repoRoot,
+      tmux: context.tmux,
+      ports: context.ports,
+      env: context.env
+    }
+  });
+}
+
 export async function executeDevDownWithContext(
   input: DevDownInput,
   executor: ExecutorInput,
@@ -392,6 +499,12 @@ export const taskDefinitions = [
     description: "Seed the Kanna dev database.",
     inputSchema: seedInputSchema,
     execute: async (_context, input) => executeDevSeed(seedInputSchema.parse(input))
+  },
+  {
+    id: "mobile.up",
+    description: "Start Kanna mobile against the installed production desktop app.",
+    inputSchema: mobileUpInputSchema,
+    execute: async (_context, input) => executeProductionMobileUp(mobileUpInputSchema.parse(input))
   },
   {
     id: "emulators.up",

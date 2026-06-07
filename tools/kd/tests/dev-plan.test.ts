@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildDevPlan } from "../src/runtime/dev-plan";
+import { buildDevPlan, buildProductionMobilePlan } from "../src/runtime/dev-plan";
 
 describe("buildDevPlan", () => {
   it("starts desktop only by default", () => {
@@ -121,5 +121,25 @@ describe("buildDevPlan", () => {
 
     expect(plan.windows[1]?.command).toContain("EXPO_PUBLIC_KANNA_RELAY_URL=wss://relay.example");
     expect(plan.windows[1]?.command).not.toContain("EXPO_PUBLIC_FIREBASE_AUTH_EMULATOR_HOST");
+  });
+
+  it("starts only mobile against the production desktop server", () => {
+    const plan = buildProductionMobilePlan({
+      repoRoot: "/repo",
+      env: {
+        KANNA_MOBILE_PORT: "8083",
+        EXPO_PUBLIC_FIREBASE_PROJECT_ID: "kanna-prod",
+        EXPO_PUBLIC_KANNA_RELAY_URL: "wss://relay.prod.example"
+      }
+    });
+
+    expect(plan.windows.map((window) => window.name)).toEqual(["mobile"]);
+    expect(plan.windows[0]?.cwd).toBe("/repo/apps/mobile");
+    expect(plan.windows[0]?.command).not.toContain("EXPO_PUBLIC_KANNA_SERVER_URL");
+    expect(plan.windows[0]?.command).toContain("EXPO_PUBLIC_KANNA_RELAY_URL=wss://relay.prod.example");
+    expect(plan.windows[0]?.command).toContain("EXPO_PUBLIC_FIREBASE_PROJECT_ID=kanna-prod");
+    expect(plan.windows[0]?.command).toContain("RCT_METRO_PORT=8083");
+    expect(plan.windows[0]?.command).toContain("pnpm run dev -- --port 8083");
+    expect(plan.windows[0]?.command).not.toContain("EXPO_PUBLIC_FIREBASE_AUTH_EMULATOR_HOST");
   });
 });

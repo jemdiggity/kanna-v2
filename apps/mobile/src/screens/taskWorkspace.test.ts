@@ -54,7 +54,23 @@ describe("buildTaskWorkspaceModel", () => {
           title: "Reconnect the terminal",
           stage: "in progress"
         },
-        terminalStatus: "error"
+        terminalStatus: "error",
+        terminalErrorMessage: "Relay connection closed"
+      }).overlayLabel
+    ).toBe("Relay connection closed");
+  });
+
+  it("falls back to generic terminal error copy when no stream message is available", () => {
+    expect(
+      buildTaskWorkspaceModel({
+        task: {
+          id: "task-error",
+          repoId: "repo-1",
+          title: "Reconnect the terminal",
+          stage: "in progress"
+        },
+        terminalStatus: "error",
+        terminalErrorMessage: null
       }).overlayLabel
     ).toBe("Error");
   });
