@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   nudgeTerminalTrustPrompt,
+  pressShiftEnterInActiveTerminal,
   sendKeysToActiveTerminal,
   typeTextToFocusedTerminalWindow,
 } from "./terminalInput";
@@ -80,5 +81,19 @@ describe("typeTextToFocusedTerminalWindow", () => {
     expect(client.waitCalls).toContainEqual({ css: ".main-panel .xterm-helper-textarea", timeoutMs: 5_000 });
     expect(client.pressKeyCalls).toEqual([]);
     expect(client.sendKeyCalls).toEqual([{ elementId: "terminal-input", text: "ab\n" }]);
+  });
+});
+
+describe("pressShiftEnterInActiveTerminal", () => {
+  it("focuses the active terminal input and dispatches Shift+Enter to xterm", async () => {
+    const client = createFakeClient();
+
+    await pressShiftEnterInActiveTerminal(client);
+
+    expect(client.waitCalls).toContainEqual({ css: ".terminal-container", timeoutMs: 15_000 });
+    expect(client.executeCalls[0]).toContain('document.querySelector(".main-panel .xterm-helper-textarea")');
+    expect(client.waitCalls).toContainEqual({ css: ".main-panel .xterm-helper-textarea", timeoutMs: 5_000 });
+    expect(client.executeCalls.some((script) => script.includes('key: "Enter"'))).toBe(true);
+    expect(client.executeCalls.some((script) => script.includes("shiftKey: true"))).toBe(true);
   });
 });
