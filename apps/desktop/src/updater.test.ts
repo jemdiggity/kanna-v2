@@ -12,6 +12,7 @@ describe("desktop updater runtime", () => {
   it("adds the official updater and process JavaScript plugins", () => {
     expect(desktopPkg.dependencies?.["@tauri-apps/plugin-updater"]).toBeDefined();
     expect(desktopPkg.dependencies?.["@tauri-apps/plugin-process"]).toBeDefined();
+    expect(desktopPkg.dependencies?.["@tauri-apps/plugin-window-state"]).toBeDefined();
   });
 
   it("enables updater artifact generation and configures the release endpoint", () => {
@@ -28,6 +29,7 @@ describe("desktop updater runtime", () => {
 
     expect(capability).toContain('"updater:default"');
     expect(capability).toContain('"process:allow-restart"');
+    expect(capability).toContain('"window-state:default"');
   });
 
   it("injects the updater pubkey and registers the official Rust plugins", () => {
@@ -64,6 +66,7 @@ describe("desktop updater runtime", () => {
 
     expect(cargoToml).toContain('tauri-plugin-process = "2"');
     expect(cargoToml).toContain('tauri-plugin-updater = "2"');
+    expect(cargoToml).toContain('tauri-plugin-window-state = "2"');
     expect(cargoToml).toContain('serde_json = "1"');
     expect(cargoToml).not.toContain("tauri-plugin-delta-updater");
     expect(buildScript).toContain("cargo:rerun-if-env-changed=KANNA_UPDATER_PUBKEY");
@@ -74,6 +77,7 @@ describe("desktop updater runtime", () => {
     expect(buildScript).not.toContain("cargo:rustc-env=KANNA_UPDATER_PUBKEY=");
     expect(desktopLib).toContain("tauri_plugin_process::init()");
     expect(desktopLib).toContain("tauri_plugin_updater::Builder::new()");
+    expect(desktopLib).toContain("tauri_plugin_window_state::Builder::default()");
     expect(desktopLib).not.toContain('env!("KANNA_UPDATER_PUBKEY")');
     expect(desktopLib).not.toContain(".pubkey(");
     expect(desktopLib).not.toContain(".updater_builder()");

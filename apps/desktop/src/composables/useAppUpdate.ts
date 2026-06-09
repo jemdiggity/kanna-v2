@@ -1,6 +1,7 @@
 import { computed, getCurrentInstance, onBeforeUnmount, ref, shallowRef } from "vue";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type DownloadEvent } from "@tauri-apps/plugin-updater";
+import { saveWindowState, StateFlags } from "@tauri-apps/plugin-window-state";
 import { invoke } from "../invoke";
 import { isTauri } from "../tauri-mock";
 
@@ -208,6 +209,7 @@ export function useAppUpdate() {
 
   async function restartNow() {
     if (status.value !== "readyToRestart") return;
+    await saveWindowState(StateFlags.ALL);
     await relaunch();
   }
 

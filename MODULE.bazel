@@ -202,6 +202,7 @@ use_repo(
     "desktop_crates__tauri-plugin-sql-2.4.0",
     "desktop_crates__tauri-plugin-updater-2.10.1",
     "desktop_crates__tauri-plugin-webdriver-0.2.1",
+    "desktop_crates__tauri-plugin-window-state-2.4.1",
     "kanna_mcp_crates",
     "kanna_server_crates",
     "task_transfer_crates",
