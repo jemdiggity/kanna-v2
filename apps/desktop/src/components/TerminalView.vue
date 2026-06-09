@@ -36,7 +36,6 @@ defineExpose({
 let resizeObserver: ResizeObserver | null = null
 let started = false
 let focusRafId = 0
-let observingWindowFocus = false
 
 async function startWhenActive() {
   if (!shouldStartTerminalSession(props.active) || started || !containerRef.value) return
@@ -74,38 +73,6 @@ async function restoreNativeWebviewFocus() {
   }
 }
 
-function handleWindowBlur() {
-  if (focusRafId) {
-    cancelAnimationFrame(focusRafId)
-    focusRafId = 0
-  }
-  pause()
-  started = false
-}
-
-function handleWindowFocus() {
-  startWhenActive()
-    .then(() => {
-      fitDeferred()
-      return focusWhenActive()
-    })
-    .catch((error) => console.error("[terminal] window focus reconnect failed:", error))
-}
-
-function startObservingWindowFocus() {
-  if (observingWindowFocus) return
-  observingWindowFocus = true
-  window.addEventListener("blur", handleWindowBlur)
-  window.addEventListener("focus", handleWindowFocus)
-}
-
-function stopObservingWindowFocus() {
-  if (!observingWindowFocus) return
-  observingWindowFocus = false
-  window.removeEventListener("blur", handleWindowBlur)
-  window.removeEventListener("focus", handleWindowFocus)
-}
-
 async function waitForStableLayout(el: HTMLElement) {
   let last = { width: 0, height: 0 }
   for (let i = 0; i < 10; i++) {
@@ -128,7 +95,6 @@ onMounted(async () => {
     init(containerRef.value)
     resizeObserver = new ResizeObserver(() => fitDeferred())
     resizeObserver.observe(containerRef.value)
-    startObservingWindowFocus()
     if (props.agentTerminal && props.active !== false) {
       markTaskSwitchMounted(props.sessionId)
     }
@@ -141,7 +107,6 @@ onMounted(async () => {
 })
 
 onActivated(async () => {
-  startObservingWindowFocus()
   if (props.agentTerminal && props.active !== false) {
     markTaskSwitchMounted(props.sessionId)
   }
@@ -154,7 +119,6 @@ onActivated(async () => {
 })
 
 onDeactivated(() => {
-  stopObservingWindowFocus()
   if (focusRafId) {
     cancelAnimationFrame(focusRafId)
     focusRafId = 0
@@ -174,7 +138,6 @@ watch(
 )
 
 onUnmounted(() => {
-  stopObservingWindowFocus()
   if (focusRafId) cancelAnimationFrame(focusRafId)
   resizeObserver?.disconnect()
   dispose()
