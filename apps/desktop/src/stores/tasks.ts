@@ -192,8 +192,22 @@ export function createTasksApi(
 
     await publishDesktopTaskSnapshot(context.requireDb(), refreshedItem, repo).catch((error) => {
       console.warn("[cloud] failed to publish task snapshot:", error);
+      showCloudPublishErrorToast(error);
     });
     void publishDesktopLanTaskSnapshot(context.requireDb());
+  }
+
+  function showCloudPublishErrorToast(error: unknown) {
+    context.toast.error(`Cloud publish failed: ${cloudPublishErrorLabel(error)}`);
+  }
+
+  function cloudPublishErrorLabel(error: unknown): string {
+    if (typeof error === "object" && error !== null && "code" in error) {
+      const code = (error as { code?: unknown }).code;
+      if (typeof code === "string" && code.trim()) return code.trim();
+    }
+    if (error instanceof Error && error.message.trim()) return error.message.trim();
+    return String(error);
   }
 
   async function closePipelineItemReleasePortsAndPublish(item: PipelineItem, repo: Repo): Promise<void> {
@@ -789,6 +803,7 @@ export function createTasksApi(
                   };
                 }
                 console.warn("[cloud] failed to publish task snapshot:", error);
+                showCloudPublishErrorToast(error);
                 throw error;
               });
             const awaitCloudPublish = import.meta.env.DEV

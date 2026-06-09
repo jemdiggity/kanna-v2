@@ -12,13 +12,18 @@ SQLite is the source of truth for local task lifecycle and history. Firestore is
 
 ## Cloud Data Model
 
-The Firestore collection remains:
+The Firestore path is scoped by desktop:
 
 ```text
-users/{uid}/tasks/{auto_id}
+users/{uid}/desktops/{desktopDocId}/tasks/{auto_id}
 ```
 
-Each document represents exactly one currently open task owned by one desktop. Firestore should generate the document id. Kanna identity lives in fields, not in the document path.
+Each task document represents exactly one currently open task owned by one desktop. Firestore should generate both the desktop document id and task document id. Kanna identity lives in fields, not in deterministic document ids.
+
+The desktop document stores the stable desktop identity:
+
+- `desktopId`: current desktop identity
+- `updatedAt`: server timestamp for the last publisher touch
 
 Required fields:
 
@@ -54,15 +59,16 @@ On sign-in/startup and periodic cloud sync:
 1. Resolve the current `desktopId`.
 2. Load local repos and open local tasks.
 3. Publish current open local tasks.
-4. Query Firestore documents owned by the current `desktopId`.
-5. Delete any owned document whose `{localRepoId}:{ownerLocalTaskId}` is not in the open local set.
-6. For duplicate owned documents with the same `{localRepoId}:{ownerLocalTaskId}`, keep the newest valid document and delete the rest.
+4. Resolve `users/{uid}/desktops/{desktopDocId}` by `desktopId`.
+5. Query that desktop document's `tasks` subcollection.
+6. Delete any owned document whose `{localRepoId}:{ownerLocalTaskId}` is not in the open local set.
+7. For duplicate owned documents with the same `{localRepoId}:{ownerLocalTaskId}`, keep the newest valid document and delete the rest.
 
 This makes the system self-healing after crashes, offline closes, app upgrades, or older builds that failed to delete documents.
 
 ## Read Contract
 
-The desktop sidebar reads Firestore as a remote live index. It should ignore legacy documents with `closedAt` set while migration is in progress. It should not need closed local rows to suppress owned stale cloud tasks once reconciliation deletes stale owned documents at the source.
+The desktop sidebar reads Firestore as a remote live index by listing `users/{uid}/desktops/*/tasks` and flattening the task snapshots. It should ignore legacy documents with `closedAt` set while migration is in progress. It should not need closed local rows to suppress owned stale cloud tasks once reconciliation deletes stale owned documents at the source.
 
 Remote tasks should still be grouped with local repos by remote URL hash when possible. Reachability remains derived from relay/LAN presence and `ownerDesktopId`.
 
@@ -85,4 +91,6 @@ The E2E is required because this crosses SQLite, Firestore, relay/LAN ownership,
 
 ## Migration
 
-Existing production Firestore documents with `closedAt = null` but no matching open local task should be removed by reconciliation when their `ownerDesktopId` matches the current desktop. Legacy readers should continue filtering `closedAt != null` until old clients are no longer relevant.
+Existing production Firestore documents under the old flat `users/{uid}/tasks/*` path are legacy data. Current writers should publish only to `users/{uid}/desktops/{desktopDocId}/tasks/*`; current readers should use the nested path. Legacy flat documents can be cleaned up separately once old clients and deployed functions that might read or write them are no longer relevant.
+
+Existing nested documents with `closedAt = null` but no matching open local task should be removed by reconciliation when their `ownerDesktopId` matches the current desktop. Legacy readers should continue filtering `closedAt != null` until old clients are no longer relevant.

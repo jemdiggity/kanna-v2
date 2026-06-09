@@ -100,7 +100,7 @@ export async function deployFirebaseCloud(input: CloudDeployInput & { relay?: bo
       projectId,
       "--force"
     ],
-    { cwd: input.repoRoot, env: input.env }
+    { cwd: input.repoRoot, env: input.env, streamOutput: true }
   );
   if (deploy.exitCode !== 0) {
     throw new Error(deploy.stderr || deploy.stdout || "Firebase deploy failed.");
@@ -142,7 +142,7 @@ export async function deployRelayCloud(input: CloudDeployInput): Promise<RelayDe
       "--substitutions",
       `_IMAGE=${image}`
     ],
-    { cwd: input.repoRoot, env: input.env }
+    { cwd: input.repoRoot, env: input.env, streamOutput: true }
   );
   if (submit.exitCode !== 0) {
     throw new Error(submit.stderr || submit.stdout || "Relay Cloud Build submit failed.");
@@ -166,7 +166,7 @@ export async function deployRelayCloud(input: CloudDeployInput): Promise<RelayDe
       "--set-env-vars",
       `FIREBASE_PROJECT_ID=${projectId}`
     ],
-    { cwd: input.repoRoot, env: input.env }
+    { cwd: input.repoRoot, env: input.env, streamOutput: true }
   );
   if (deploy.exitCode !== 0) {
     throw new Error(deploy.stderr || deploy.stdout || "Relay Cloud Run deploy failed.");

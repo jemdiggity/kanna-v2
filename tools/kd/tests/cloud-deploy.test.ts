@@ -85,10 +85,15 @@ describe("cloud deploy runtime", () => {
   it("builds functions before deploying Firebase cloud services", async () => {
     const repoRoot = mkdtempSync(join(tmpdir(), "kd-cloud-deploy-"));
     mkdirSync(join(repoRoot, "services/firebase-functions"), { recursive: true });
-    const calls: Array<{ command: string; args: string[]; cwd?: string }> = [];
+    const calls: Array<{ command: string; args: string[]; cwd?: string; streamOutput?: boolean }> = [];
     const runner: CommandRunner = {
       async run(command, args, options) {
-        calls.push({ command, args, cwd: options?.cwd });
+        calls.push({
+          command,
+          args,
+          cwd: options?.cwd,
+          ...(options?.streamOutput === undefined ? {} : { streamOutput: options.streamOutput })
+        });
         return { exitCode: 0, stdout: "", stderr: "" };
       }
     };
@@ -120,7 +125,8 @@ describe("cloud deploy runtime", () => {
             "prod-project",
             "--force"
           ],
-          cwd: repoRoot
+          cwd: repoRoot,
+          streamOutput: true
         }
       ]);
     } finally {
@@ -130,10 +136,15 @@ describe("cloud deploy runtime", () => {
 
   it("deploys the relay to Cloud Run and returns the wss URL", async () => {
     const repoRoot = mkdtempSync(join(tmpdir(), "kd-cloud-deploy-"));
-    const calls: Array<{ command: string; args: string[]; cwd?: string }> = [];
+    const calls: Array<{ command: string; args: string[]; cwd?: string; streamOutput?: boolean }> = [];
     const runner: CommandRunner = {
       async run(command, args, options) {
-        calls.push({ command, args, cwd: options?.cwd });
+        calls.push({
+          command,
+          args,
+          cwd: options?.cwd,
+          ...(options?.streamOutput === undefined ? {} : { streamOutput: options.streamOutput })
+        });
         if (command === "gcloud" && args.includes("services") && args.includes("describe")) {
           return {
             exitCode: 0,
@@ -183,7 +194,8 @@ describe("cloud deploy runtime", () => {
             "--substitutions",
             "_IMAGE=gcr.io/prod-project/kanna-relay"
           ],
-          cwd: repoRoot
+          cwd: repoRoot,
+          streamOutput: true
         },
         {
           command: "gcloud",
@@ -203,7 +215,8 @@ describe("cloud deploy runtime", () => {
             "--set-env-vars",
             "FIREBASE_PROJECT_ID=prod-project"
           ],
-          cwd: repoRoot
+          cwd: repoRoot,
+          streamOutput: true
         },
         {
           command: "gcloud",

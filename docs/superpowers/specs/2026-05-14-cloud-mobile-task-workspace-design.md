@@ -99,7 +99,15 @@ Fields:
 - `presence.lastRelaySeenAt`
 - `revokedAt`
 
-### `users/{uid}/tasks/{cloudTaskId}`
+### Superseded: `users/{uid}/tasks/{cloudTaskId}`
+
+This flat task collection was the initial mobile workspace design. It has been superseded by the per-desktop live task index at:
+
+```text
+users/{uid}/desktops/{desktopDocId}/tasks/{taskDocId}
+```
+
+The flat path may still exist in old production data and rules for migration compatibility, but current desktop and mobile clients should publish and read the nested path.
 
 Purpose: lightweight cloud-readable task snapshot.
 
@@ -192,7 +200,7 @@ The desktop publishes relay presence and refreshes cloud task snapshots from its
 ### Mobile Task List
 
 Mobile defaults to cloud mode after sign-in.
-It reads `users/{uid}/tasks` and shows tasks across all signed-in desktops in one list.
+It reads task snapshots from each signed-in desktop's nested task subcollection and shows them across all signed-in desktops in one list.
 The owner desktop can appear as secondary metadata when useful, but it is not the primary grouping.
 
 ### Mobile Task Actions

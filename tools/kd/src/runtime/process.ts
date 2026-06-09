@@ -7,7 +7,11 @@ export interface CommandResult {
 }
 
 export interface CommandRunner {
-  run: (command: string, args: string[], options?: { cwd?: string; env?: NodeJS.ProcessEnv }) => Promise<CommandResult>;
+  run: (
+    command: string,
+    args: string[],
+    options?: { cwd?: string; env?: NodeJS.ProcessEnv; streamOutput?: boolean }
+  ) => Promise<CommandResult>;
 }
 
 export const nodeCommandRunner: CommandRunner = {
@@ -24,9 +28,15 @@ export const nodeCommandRunner: CommandRunner = {
       child.stderr.setEncoding("utf8");
       child.stdout.on("data", (chunk: string) => {
         stdout += chunk;
+        if (options?.streamOutput) {
+          process.stdout.write(chunk);
+        }
       });
       child.stderr.on("data", (chunk: string) => {
         stderr += chunk;
+        if (options?.streamOutput) {
+          process.stderr.write(chunk);
+        }
       });
       child.on("error", reject);
       child.on("close", (exitCode) => {

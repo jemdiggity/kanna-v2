@@ -6,6 +6,9 @@ import type { PipelineDefinition } from "../../../../packages/core/src/pipeline/
 import type { CustomTaskConfig, RepoConfig } from "@kanna/core";
 import { buildStagePrompt } from "../../../../packages/core/src/pipeline/prompt-builder";
 
+const toastErrorMock = vi.hoisted(() => vi.fn());
+const publishDesktopTaskSnapshotMock = vi.hoisted(() => vi.fn(async () => {}));
+
 const mockState = vi.hoisted(() => {
   const repoPath = "/tmp/repo";
   const now = "2026-04-14T00:00:00.000Z";
@@ -390,9 +393,13 @@ vi.mock("../../../../packages/core/src/pipeline/prompt-builder", () => ({
 
 vi.mock("../composables/useToast", () => ({
   useToast: () => ({
-    error: vi.fn(),
+    error: toastErrorMock,
     warning: vi.fn(),
   }),
+}));
+
+vi.mock("../services/desktopCloudPublisher", () => ({
+  publishDesktopTaskSnapshot: publishDesktopTaskSnapshotMock,
 }));
 
 vi.mock("../composables/terminalSessionRecovery", () => ({
@@ -624,6 +631,9 @@ async function createStore() {
 describe("kanna store task base branch integration", () => {
   beforeEach(() => {
     mockState.reset();
+    toastErrorMock.mockClear();
+    publishDesktopTaskSnapshotMock.mockReset();
+    publishDesktopTaskSnapshotMock.mockResolvedValue(undefined);
   });
 
   it("passes the repo default branch into the merge agent prompt", async () => {
@@ -714,6 +724,21 @@ describe("kanna store task base branch integration", () => {
         (args as { startPoint?: unknown }).startPoint === "main"
       ),
     ).toBe(false);
+  });
+
+  it("shows a toast when cloud task snapshot publish fails after local task creation", async () => {
+    publishDesktopTaskSnapshotMock.mockRejectedValue(
+      Object.assign(new Error("Missing or insufficient permissions."), { code: "permission-denied" }),
+    );
+    const store = await createStore();
+
+    await store.createItem("repo-1", "/tmp/repo", "Ship cloud-visible task", "sdk", {
+      agentProvider: "claude",
+    });
+
+    await vi.waitFor(() => {
+      expect(toastErrorMock).toHaveBeenCalledWith("Cloud publish failed: permission-denied");
+    });
   });
 
   it("prefers origin/dev for the dev default branch and uses that remote ref as the worktree start point", async () => {
