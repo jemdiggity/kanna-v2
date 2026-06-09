@@ -1,11 +1,17 @@
 import { randomBytes } from "node:crypto";
 import { initializeApp, getApps } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
-import { getFirestore } from "firebase-admin/firestore";
+import { getFirestore, type Firestore } from "firebase-admin/firestore";
 import { onRequest } from "firebase-functions/v2/https";
 import { buildPairingArtifacts } from "./pairing.js";
-import { buildTaskSnapshotWrite } from "./taskSnapshots.js";
-import { emulatorPorts, type CreatePairingCodeRequest } from "./types.js";
+import {
+  buildTaskSnapshotMutations,
+  buildTaskSnapshotRequest,
+  taskSnapshotIdentityMatchesData,
+  type ExistingTaskSnapshotDoc,
+  type TaskSnapshotIdentity,
+} from "./taskSnapshots.js";
+import { emulatorPorts, type CloudTaskSnapshot, type CreatePairingCodeRequest } from "./types.js";
 
 const PAIRING_TTL_MS = 5 * 60 * 1000;
 
@@ -86,10 +92,24 @@ export const upsertTaskSnapshot = onRequest(async (request, response) => {
   }
 
   try {
-    const write = buildTaskSnapshotWrite(uid, request.body);
+    const taskRequest = buildTaskSnapshotRequest(request.body);
     ensureFirebaseApp();
-    await getFirestore().doc(write.path).set(write.data, { merge: true });
-    response.status(200).json({ ok: true, cloudTaskId: write.data.cloudTaskId });
+    const db = getFirestore();
+
+    if (taskRequest.action === "delete") {
+      const deleted = await deleteTaskSnapshotsByIdentity(db, uid, taskRequest.identity);
+      response.status(200).json({ ok: true, deleted });
+      return;
+    }
+
+    if (taskRequest.action === "reconcile") {
+      const result = await reconcileTaskSnapshots(db, uid, taskRequest.ownerDesktopId, taskRequest.snapshots);
+      response.status(200).json({ ok: true, ...result });
+      return;
+    }
+
+    const result = await reconcileTaskSnapshots(db, uid, taskRequest.snapshot.ownerDesktopId, [taskRequest.snapshot]);
+    response.status(200).json({ ok: true, ...result });
   } catch (error) {
     response.status(400).json({
       error: error instanceof Error ? error.message : "Invalid task snapshot",
@@ -98,3 +118,62 @@ export const upsertTaskSnapshot = onRequest(async (request, response) => {
 });
 
 export { buildPairingArtifacts, emulatorPorts };
+
+async function reconcileTaskSnapshots(
+  db: Firestore,
+  uid: string,
+  ownerDesktopId: string,
+  snapshots: CloudTaskSnapshot[],
+): Promise<{ created: number; updated: number; deleted: number }> {
+  const existingDocs = await listOwnedTaskSnapshotDocs(db, uid, ownerDesktopId);
+  const mutations = buildTaskSnapshotMutations({ existingDocs, snapshots });
+  const tasksRef = db.collection("users").doc(uid).collection("tasks");
+  let created = 0;
+  let updated = 0;
+  let deleted = 0;
+
+  for (const mutation of mutations) {
+    if (mutation.type === "create") {
+      await tasksRef.add(mutation.data);
+      created += 1;
+    } else if (mutation.type === "update") {
+      await tasksRef.doc(mutation.docId).set(mutation.data, { merge: true });
+      updated += 1;
+    } else {
+      await tasksRef.doc(mutation.docId).delete();
+      deleted += 1;
+    }
+  }
+
+  return { created, updated, deleted };
+}
+
+async function deleteTaskSnapshotsByIdentity(
+  db: Firestore,
+  uid: string,
+  identity: TaskSnapshotIdentity,
+): Promise<number> {
+  const existingDocs = await listOwnedTaskSnapshotDocs(db, uid, identity.ownerDesktopId);
+  const tasksRef = db.collection("users").doc(uid).collection("tasks");
+  const matches = existingDocs.filter((doc) => taskSnapshotIdentityMatchesData(identity, doc.data));
+  await Promise.all(matches.map((doc) => tasksRef.doc(doc.id).delete()));
+  return matches.length;
+}
+
+async function listOwnedTaskSnapshotDocs(
+  db: Firestore,
+  uid: string,
+  ownerDesktopId: string,
+): Promise<ExistingTaskSnapshotDoc[]> {
+  const snapshot = await db
+    .collection("users")
+    .doc(uid)
+    .collection("tasks")
+    .where("ownerDesktopId", "==", ownerDesktopId)
+    .get();
+
+  return snapshot.docs.map((doc) => ({
+    id: doc.id,
+    data: doc.data(),
+  }));
+}

@@ -96,6 +96,10 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
   }
 
   async function applyTaskRuntimeStatus(item: import("@kanna/db").PipelineItem, status: string) {
+    if (item.stage === "done" || item.closed_at !== null) {
+      return;
+    }
+
     if (shouldIgnoreRuntimeStatusDuringSetup(status, context.state.pendingSetupIds.value.includes(item.id))) {
       return;
     }

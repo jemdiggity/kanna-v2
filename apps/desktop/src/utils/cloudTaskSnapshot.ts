@@ -30,7 +30,7 @@ export async function buildCloudTaskSnapshot(input: CloudTaskSnapshotInput) {
   const prompt = input.item.prompt ?? "";
   const title = input.item.display_name || prompt.split("\n")[0]?.trim() || input.item.id;
   return {
-    cloudTaskId: `${input.repo.id}:${input.item.id}`,
+    localRepoId: input.repo.id,
     ownerDesktopId: input.desktopId,
     ownerLocalTaskId: input.item.id,
     title,

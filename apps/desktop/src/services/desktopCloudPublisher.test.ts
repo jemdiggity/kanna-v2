@@ -1,61 +1,19 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { publishDesktopTaskSnapshot, publishDesktopTaskSnapshots } from "./desktopCloudPublisher";
+import {
+  deleteRemoteTaskSnapshots,
+  publishDesktopTaskSnapshot,
+  reconcileDesktopTaskSnapshots,
+} from "./desktopCloudPublisher";
 
 const mocks = vi.hoisted(() => ({
-  publish: vi.fn(),
-  createCloudTaskPublisher: vi.fn(),
   invoke: vi.fn(),
+  publish: vi.fn(),
 }));
 
 vi.mock("@kanna/db", () => ({
-  getRepo: vi.fn(async () => ({
-    id: "repo-1",
-    name: "Repo One",
-    path: "/repo",
-    default_branch: "main",
-  })),
-  listPipelineItems: vi.fn(async () => [
-    {
-      id: "task-open",
-      repo_id: "repo-1",
-      prompt: "Open task",
-      stage: "in progress",
-      activity: "working",
-      branch: "task-open",
-      base_ref: "main",
-      pr_number: null,
-      pr_url: null,
-      display_name: null,
-      agent_provider: "claude",
-      agent_type: "pty",
-      created_at: "2026-05-22T00:00:00.000Z",
-      updated_at: "2026-05-22T00:01:00.000Z",
-      closed_at: null,
-    },
-    {
-      id: "task-closed",
-      repo_id: "repo-1",
-      prompt: "Closed task",
-      stage: "done",
-      activity: "idle",
-      branch: "task-closed",
-      base_ref: "main",
-      pr_number: null,
-      pr_url: null,
-      display_name: null,
-      agent_provider: "claude",
-      agent_type: "pty",
-      created_at: "2026-05-22T00:00:00.000Z",
-      updated_at: "2026-05-22T00:02:00.000Z",
-      closed_at: "2026-05-22T00:02:00.000Z",
-    },
-  ]),
-  listRepos: vi.fn(async () => [{
-    id: "repo-1",
-    name: "Repo One",
-    path: "/repo",
-    default_branch: "main",
-  }]),
+  getRepo: vi.fn(async () => repo()),
+  listPipelineItems: vi.fn(async () => [openItem("task-open")]),
+  listRepos: vi.fn(async () => [repo()]),
   listBlockersForItem: vi.fn(async () => []),
 }));
 
@@ -63,8 +21,18 @@ vi.mock("../invoke", () => ({
   invoke: (...args: unknown[]) => mocks.invoke(...args),
 }));
 
+vi.mock("./cloudTaskPublisher", () => ({
+  createCloudTaskPublisher: vi.fn(() => ({
+    publish: (payload: unknown) => mocks.publish(payload),
+  })),
+}));
+
 vi.mock("./desktopAuthSdk", () => ({
   getConfiguredDesktopAuthSession: vi.fn(async () => ({
+    getState: () => ({
+      status: "signedIn",
+      user: { uid: "user-1", email: "user@example.com", displayName: null },
+    }),
     getIdToken: vi.fn(async () => "id-token"),
   })),
 }));
@@ -75,17 +43,49 @@ vi.mock("./desktopFirebaseConfig", () => ({
   })),
 }));
 
-vi.mock("./cloudTaskPublisher", () => ({
-  createCloudTaskPublisher: mocks.createCloudTaskPublisher.mockImplementation(() => ({
-    publish: mocks.publish,
-  })),
-}));
+function repo() {
+  return {
+    id: "repo-1",
+    name: "Repo One",
+    path: "/repo",
+    default_branch: "main",
+  };
+}
 
-describe("publishDesktopTaskSnapshot", () => {
+function openItem(id: string, overrides: Record<string, unknown> = {}) {
+  return {
+    id,
+    repo_id: "repo-1",
+    prompt: "Open task",
+    stage: "in progress",
+    activity: "working",
+    branch: id,
+    base_ref: "main",
+    pr_number: null,
+    pr_url: null,
+    display_name: null,
+    agent_provider: "claude",
+    agent_type: "pty",
+    created_at: "2026-05-22T00:00:00.000Z",
+    updated_at: "2026-05-22T00:01:00.000Z",
+    closed_at: null,
+    ...overrides,
+  };
+}
+
+function closedItem(id: string) {
+  return openItem(id, {
+    stage: "done",
+    activity: "idle",
+    closed_at: "2026-05-22T00:02:00.000Z",
+    updated_at: "2026-05-22T00:02:00.000Z",
+  });
+}
+
+describe("desktop cloud live task index publisher", () => {
   beforeEach(() => {
-    mocks.publish.mockClear();
-    mocks.createCloudTaskPublisher.mockClear();
     mocks.invoke.mockReset();
+    mocks.publish.mockReset();
     mocks.invoke.mockImplementation(async (command: string) => {
       if (command === "mobile_server_status") {
         return { desktopId: "desktop-owner" };
@@ -97,120 +97,65 @@ describe("publishDesktopTaskSnapshot", () => {
     });
   });
 
-  it("publishes the mobile server desktop id used for relay routing", async () => {
-    await publishDesktopTaskSnapshot(null as never, {
-      id: "task-1",
-      repo_id: "repo-1",
-      prompt: "Implement relay terminal streaming",
-      stage: "in progress",
-      activity: "working",
-      branch: "task-1",
-      base_ref: "main",
-      pr_number: null,
-      pr_url: null,
-      display_name: null,
-      agent_provider: "claude",
-      agent_type: "pty",
-      created_at: "2026-05-22T00:00:00.000Z",
-      updated_at: "2026-05-22T00:01:00.000Z",
-      closed_at: null,
-    } as never);
+  it("publishes open local task metadata as an upsert action", async () => {
+    await publishDesktopTaskSnapshot(null as never, openItem("task-new") as never, repo() as never);
 
-    expect(mocks.publish).toHaveBeenCalledWith(
-      expect.objectContaining({
+    expect(mocks.publish).toHaveBeenCalledWith({
+      action: "upsert",
+      snapshot: expect.objectContaining({
+        localRepoId: "repo-1",
         ownerDesktopId: "desktop-owner",
-        ownerLocalTaskId: "task-1",
+        ownerLocalTaskId: "task-new",
+        closedAt: null,
       }),
-    );
-  });
-
-  it("posts snapshots through the native Tauri command to avoid webview CORS", async () => {
-    await publishDesktopTaskSnapshot(null as never, {
-      id: "task-native-post",
-      repo_id: "repo-1",
-      prompt: "Publish through native command",
-      stage: "in progress",
-      activity: "working",
-      branch: "task-native-post",
-      base_ref: "main",
-      pr_number: null,
-      pr_url: null,
-      display_name: null,
-      agent_provider: "claude",
-      agent_type: "pty",
-      created_at: "2026-05-22T00:00:00.000Z",
-      updated_at: "2026-05-22T00:01:00.000Z",
-      closed_at: null,
-    } as never);
-
-    const publisherOptions = mocks.createCloudTaskPublisher.mock.calls[0]?.[0] as {
-      postJson?: (endpoint: string, idToken: string, snapshot: unknown) => Promise<void>;
-    };
-    expect(publisherOptions.postJson).toBeTypeOf("function");
-
-    await publisherOptions.postJson?.("https://upserttasksnapshot.example", "id-token-1", {
-      cloudTaskId: "task-native-post",
-    });
-
-    expect(mocks.invoke).toHaveBeenCalledWith("post_cloud_task_snapshot", {
-      endpoint: "https://upserttasksnapshot.example",
-      idToken: "id-token-1",
-      snapshot: { cloudTaskId: "task-native-post" },
     });
   });
 
-  it("publishes OpenCode task snapshots with the OpenCode agent provider", async () => {
-    await publishDesktopTaskSnapshot(null as never, {
-      id: "task-opencode",
-      repo_id: "repo-1",
-      prompt: "Run OpenCode from the cloud publisher",
-      stage: "in progress",
-      activity: "idle",
-      branch: "task-opencode",
-      base_ref: "main",
-      pr_number: null,
-      pr_url: null,
-      display_name: null,
-      agent_provider: "opencode",
-      agent_type: "pty",
-      created_at: "2026-06-06T00:00:00.000Z",
-      updated_at: "2026-06-06T00:00:00.000Z",
-      closed_at: null,
-    } as never);
+  it("deletes cloud metadata instead of publishing a closed task snapshot", async () => {
+    await publishDesktopTaskSnapshot(null as never, closedItem("task-closed") as never, repo() as never);
 
-    expect(mocks.publish).toHaveBeenCalledWith(
-      expect.objectContaining({
-        ownerLocalTaskId: "task-opencode",
-        agent: {
-          provider: "opencode",
-          type: "pty",
-        },
-      }),
-    );
+    expect(mocks.publish).toHaveBeenCalledWith({
+      action: "delete",
+      identity: {
+        ownerDesktopId: "desktop-owner",
+        localRepoId: "repo-1",
+        ownerLocalTaskId: "task-closed",
+      },
+    });
   });
 
-  it("publishes open and recently closed local task snapshots during reconciliation", async () => {
-    await publishDesktopTaskSnapshots(null as never);
+  it("deletes remote task metadata by owner identity", async () => {
+    await deleteRemoteTaskSnapshots({
+      ownerDesktopId: "desktop-owner",
+      localRepoId: "repo-1",
+      ownerLocalTaskId: "task-remote",
+    });
 
-    expect(mocks.publish).toHaveBeenCalledWith(expect.objectContaining({
-      ownerLocalTaskId: "task-open",
-      closedAt: null,
-    }));
-    expect(mocks.publish).toHaveBeenCalledWith(expect.objectContaining({
-      ownerLocalTaskId: "task-closed",
-      stage: "done",
-      closedAt: "2026-05-22T00:02:00.000Z",
-    }));
+    expect(mocks.publish).toHaveBeenCalledWith({
+      action: "delete",
+      identity: {
+        ownerDesktopId: "desktop-owner",
+        localRepoId: "repo-1",
+        ownerLocalTaskId: "task-remote",
+      },
+    });
   });
 
-  it("continues reconciling task snapshots after one publish fails", async () => {
-    mocks.publish.mockRejectedValueOnce(new Error("temporary publish failure"));
+  it("reconciles the owned cloud index to the current open local task set", async () => {
+    await reconcileDesktopTaskSnapshots(null as never);
 
-    await publishDesktopTaskSnapshots(null as never);
-
-    expect(mocks.publish).toHaveBeenCalledTimes(2);
-    expect(mocks.publish).toHaveBeenLastCalledWith(expect.objectContaining({
-      ownerLocalTaskId: "task-closed",
-    }));
+    expect(mocks.publish).toHaveBeenCalledTimes(1);
+    expect(mocks.publish).toHaveBeenCalledWith({
+      action: "reconcile",
+      ownerDesktopId: "desktop-owner",
+      snapshots: [
+        expect.objectContaining({
+          localRepoId: "repo-1",
+          ownerDesktopId: "desktop-owner",
+          ownerLocalTaskId: "task-open",
+          closedAt: null,
+        }),
+      ],
+    });
   });
 });

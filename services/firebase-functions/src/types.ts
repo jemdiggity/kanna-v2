@@ -52,8 +52,9 @@ export type CloudTaskTransferState =
   | "finalization_pending";
 
 export interface CloudTaskSnapshot {
-  cloudTaskId: string;
+  cloudTaskId?: string;
   ownerDesktopId: string;
+  localRepoId: string;
   ownerLocalTaskId: string;
   title: string;
   promptSnippet: string | null;

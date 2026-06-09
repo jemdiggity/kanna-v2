@@ -1,10 +1,32 @@
-import { getRepo, listBlockersForItem, listPipelineItems, listRepos, type PipelineItem, type Repo } from "@kanna/db";
+import {
+  getRepo,
+  listBlockersForItem,
+  listPipelineItems,
+  listRepos,
+  type PipelineItem,
+  type Repo,
+} from "@kanna/db";
+import type { DbHandle } from "@kanna/db";
 import { invoke } from "../invoke";
 import { buildCloudTaskSnapshot } from "../utils/cloudTaskSnapshot";
+import { createCloudTaskPublisher, type CloudTaskPublisher } from "./cloudTaskPublisher";
 import { getConfiguredDesktopAuthSession } from "./desktopAuthSdk";
 import { resolveDesktopFirebaseConfig } from "./desktopFirebaseConfig";
-import { createCloudTaskPublisher } from "./cloudTaskPublisher";
-import type { DbHandle } from "@kanna/db";
+
+export interface RemoteTaskSnapshotIdentity {
+  ownerDesktopId: string;
+  localRepoId: string;
+  ownerLocalTaskId: string;
+}
+
+export interface PublishDesktopTaskSnapshotsOptions {
+  closedSinceDays?: number;
+}
+
+interface CloudWriteContext {
+  desktopId: string;
+  publisher: CloudTaskPublisher;
+}
 
 export async function publishDesktopTaskSnapshot(
   db: DbHandle,
@@ -14,65 +36,102 @@ export async function publishDesktopTaskSnapshot(
   const targetRepo = repo ?? await getRepo(db, item.repo_id);
   if (!targetRepo) return;
 
-  const [authSession, config, desktopId, blockers, remoteUrl] = await Promise.all([
+  const context = await getCloudWriteContext();
+  if (!context) return;
+
+  const identity = {
+    ownerDesktopId: context.desktopId,
+    localRepoId: targetRepo.id,
+    ownerLocalTaskId: item.id,
+  };
+
+  if (item.stage === "done" || item.closed_at !== null) {
+    await context.publisher.publish({ action: "delete", identity });
+    return;
+  }
+
+  const snapshot = await buildSnapshot(db, item, targetRepo, context.desktopId);
+  await context.publisher.publish({ action: "upsert", snapshot });
+}
+
+export async function deleteRemoteTaskSnapshots(identity: RemoteTaskSnapshotIdentity): Promise<void> {
+  const context = await getCloudWriteContext();
+  if (!context) return;
+  await context.publisher.publish({ action: "delete", identity });
+}
+
+export async function reconcileDesktopTaskSnapshots(db: DbHandle): Promise<void> {
+  const context = await getCloudWriteContext();
+  if (!context) return;
+
+  const snapshots: unknown[] = [];
+  const repos = await listRepos(db);
+  for (const repo of repos) {
+    const items = await listPipelineItems(db, repo.id);
+    for (const item of items) {
+      if (item.stage === "done" || item.closed_at !== null) continue;
+      try {
+        snapshots.push(await buildSnapshot(db, item, repo, context.desktopId));
+      } catch (error) {
+        console.warn(`[cloud] failed to build task snapshot for ${item.id}:`, error);
+      }
+    }
+  }
+
+  await context.publisher.publish({
+    action: "reconcile",
+    ownerDesktopId: context.desktopId,
+    snapshots,
+  });
+}
+
+export async function publishDesktopTaskSnapshots(
+  db: DbHandle,
+  _options: PublishDesktopTaskSnapshotsOptions = {},
+): Promise<void> {
+  await reconcileDesktopTaskSnapshots(db);
+}
+
+async function buildSnapshot(
+  db: DbHandle,
+  item: PipelineItem,
+  repo: Repo,
+  desktopId: string,
+): Promise<unknown> {
+  const [blockers, remoteUrl] = await Promise.all([
+    listBlockersForItem(db, item.id),
+    invoke<string>("git_remote_url", { repoPath: repo.path }).catch(() => null),
+  ]);
+
+  return buildCloudTaskSnapshot({
+    desktopId,
+    item,
+    repo: { ...repo, remote_url: remoteUrl },
+    blockedByTaskIds: blockers.map((blocker) => blocker.id),
+  });
+}
+
+async function getCloudWriteContext(): Promise<CloudWriteContext | null> {
+  const [authSession, config, desktopId] = await Promise.all([
     getConfiguredDesktopAuthSession(),
     resolveDesktopFirebaseConfig({
       readEnv: (name) => invoke<string>("read_env_var", { name }),
       dev: import.meta.env.DEV,
     }),
     resolveDesktopId(),
-    listBlockersForItem(db, item.id),
-    invoke<string>("git_remote_url", { repoPath: targetRepo.path }).catch(() => null),
   ]);
+  const state = authSession.getState();
+  if (state.status !== "signedIn") return null;
 
-  const snapshot = await buildCloudTaskSnapshot({
+  return {
     desktopId,
-    item,
-    repo: { ...targetRepo, remote_url: remoteUrl },
-    blockedByTaskIds: blockers.map((blocker) => blocker.id),
-  });
-
-  await createCloudTaskPublisher({
-    endpoint: config.functionsEndpoint,
-    getIdToken: (forceRefresh?: boolean) => authSession.getIdToken(forceRefresh),
-    postJson: (endpoint, idToken, snapshot) =>
-      invoke("post_cloud_task_snapshot", { endpoint, idToken, snapshot }),
-  }).publish(snapshot);
-}
-
-export interface PublishDesktopTaskSnapshotsOptions {
-  closedSinceDays?: number;
-}
-
-export async function publishDesktopTaskSnapshots(
-  db: DbHandle,
-  options: PublishDesktopTaskSnapshotsOptions = {},
-): Promise<void> {
-  const repos = await listRepos(db);
-  const cutoff = options.closedSinceDays === undefined
-    ? null
-    : Date.now() - options.closedSinceDays * 24 * 60 * 60 * 1000;
-
-  for (const repo of repos) {
-    const items = await listPipelineItems(db, repo.id);
-    for (const item of items) {
-      if (!shouldPublishTaskSnapshot(item, cutoff)) continue;
-      await publishDesktopTaskSnapshot(db, item, repo).catch((error) => {
-        console.warn(
-          `[cloud] failed to publish task snapshot for ${item.id}:`,
-          error,
-        );
-      });
-    }
-  }
-}
-
-function shouldPublishTaskSnapshot(item: PipelineItem, closedCutoffMs: number | null): boolean {
-  if (item.stage !== "done" && !item.closed_at) return true;
-  if (closedCutoffMs === null) return true;
-  if (!item.closed_at) return false;
-  const closedAt = Date.parse(item.closed_at);
-  return Number.isFinite(closedAt) && closedAt >= closedCutoffMs;
+    publisher: createCloudTaskPublisher({
+      endpoint: config.functionsEndpoint,
+      getIdToken: (forceRefresh?: boolean) => authSession.getIdToken(forceRefresh),
+      postJson: (endpoint, idToken, snapshot) =>
+        invoke("post_cloud_task_snapshot", { endpoint, idToken, snapshot }),
+    }),
+  };
 }
 
 async function resolveDesktopId(): Promise<string> {

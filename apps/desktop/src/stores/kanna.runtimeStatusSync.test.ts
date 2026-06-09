@@ -392,6 +392,34 @@ describe("kanna runtime status reconciliation", () => {
     expect(mockState.pipelineItems[0]?.activity).toBe("idle");
   });
 
+  it("ignores daemon status changes for closed tasks", async () => {
+    mockState.pipelineItems = [
+      {
+        ...mockState.pipelineItems[0]!,
+        stage: "done",
+        closed_at: "2026-06-06 05:38:31",
+        activity: "idle",
+      },
+    ];
+
+    await createStore();
+    await flushStore();
+
+    mockState.emit("status_changed", {
+      session_id: "task-1",
+      status: "busy",
+    });
+
+    await flushStore();
+
+    expect(mockState.updatePipelineItemActivityMock).not.toHaveBeenCalledWith(
+      expect.anything(),
+      "task-1",
+      "working",
+    );
+    expect(mockState.pipelineItems[0]?.activity).toBe("idle");
+  });
+
   it("keeps an exited task read when another open window has it selected", async () => {
     const store = await createStore();
     store.attachWindowWorkspace({
@@ -445,6 +473,35 @@ describe("kanna runtime status reconciliation", () => {
       expect.anything(),
       "task-1",
       "idle",
+    );
+    expect(mockState.pipelineItems[0]?.activity).toBe("idle");
+  });
+
+  it("ignores session exits for closed tasks", async () => {
+    mockState.pipelineItems = [
+      {
+        ...mockState.pipelineItems[0]!,
+        stage: "done",
+        closed_at: "2026-06-06 05:38:31",
+        activity: "idle",
+      },
+    ];
+
+    await createStore();
+    await flushStore();
+
+    mockState.emit("session_exit", {
+      session_id: "task-1",
+      code: 0,
+      resume_session_id: null,
+    });
+
+    await flushStore();
+
+    expect(mockState.updatePipelineItemActivityMock).not.toHaveBeenCalledWith(
+      expect.anything(),
+      "task-1",
+      "unread",
     );
     expect(mockState.pipelineItems[0]?.activity).toBe("idle");
   });

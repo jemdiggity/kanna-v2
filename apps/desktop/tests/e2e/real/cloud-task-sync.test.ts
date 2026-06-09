@@ -333,6 +333,33 @@ async function cloudSnapshotItemsForPrompt(
   `);
 }
 
+async function waitForCloudTaskToStayGoneAfterRefresh(
+  client: typeof primary,
+  prompt: string,
+): Promise<void> {
+  const deadline = Date.now() + 30_000;
+  let lastSnapshot: unknown = null;
+  while (Date.now() < deadline) {
+    await client.executeSync(`
+      const ctx = window.__KANNA_E2E__.setupState;
+      if (ctx.locallyClosedRemoteTaskIds?.__v_isRef) {
+        ctx.locallyClosedRemoteTaskIds.value = new Set();
+      } else {
+        ctx.locallyClosedRemoteTaskIds = new Set();
+      }
+    `);
+    await callVueMethod(client, "refreshCloudTasksForSignedInUser");
+    const snapshot = await cloudSnapshotItemsForPrompt(client, prompt);
+    lastSnapshot = snapshot;
+    if (snapshot.items.length === 0) {
+      await waitForSidebarTaskToDisappear(client, prompt);
+      return;
+    }
+    await sleep(500);
+  }
+  throw new Error(`timed out waiting for cloud task tombstone: ${prompt}; snapshot=${JSON.stringify(lastSnapshot)}`);
+}
+
 async function observeSessionThroughRelay(input: {
   ownerDesktopId: string;
   ownerTaskId: string;
@@ -671,5 +698,6 @@ describe("cloud task sync", () => {
       throw new Error(String((closeResult as { __error: string }).__error));
     }
     await waitForSidebarTaskToDisappear(secondary, "Cloud sync visible task");
+    await waitForCloudTaskToStayGoneAfterRefresh(secondary, "Cloud sync visible task");
   });
 });
