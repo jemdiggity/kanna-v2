@@ -46,6 +46,14 @@ service cloud.firestore {
         allow write: if false;
       }
 
+      match /desktops/{desktopDocId} {
+        allow read, write: if isSignedInAs(uid);
+
+        match /tasks/{taskDocId} {
+          allow read, write: if isSignedInAs(uid);
+        }
+      }
+
       match /transfers/{transferId} {
         allow read: if isSignedInAs(uid);
         allow write: if false;

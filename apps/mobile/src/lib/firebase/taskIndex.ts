@@ -9,7 +9,8 @@ import {
 import type { TaskSummary } from "../api/types";
 
 export interface CloudTaskSnapshot {
-  cloudTaskId: string;
+  cloudTaskId?: string;
+  localRepoId?: string;
   ownerDesktopId: string;
   ownerLocalTaskId: string;
   title: string;
@@ -39,10 +40,15 @@ export function createFirestoreTaskIndex(
 ): CloudTaskIndex {
   return {
     async listRecentTasks(uid) {
-      const tasksRef = collection(db, "users", uid, "tasks");
-      const snapshot = await getDocs(query(tasksRef, where("closedAt", "==", null)));
+      const desktopsRef = collection(db, "users", uid, "desktops");
+      const desktops = await getDocs(desktopsRef);
+      const snapshots = await Promise.all(desktops.docs.map(async (desktopDoc) => {
+        const tasksRef = collection(desktopDoc.ref, "tasks");
+        const snapshot = await getDocs(query(tasksRef, where("closedAt", "==", null)));
+        return snapshot.docs.map((doc) => doc.data() as CloudTaskSnapshot);
+      }));
       return sortCloudTasks(
-        snapshot.docs.map((doc) => doc.data() as CloudTaskSnapshot),
+        snapshots.flat(),
       ).map(mapCloudTaskSnapshot);
     },
   };
@@ -50,7 +56,7 @@ export function createFirestoreTaskIndex(
 
 export function mapCloudTaskSnapshot(snapshot: CloudTaskSnapshot): CloudTaskSummary {
   return {
-    id: snapshot.cloudTaskId,
+    id: snapshot.cloudTaskId ?? cloudTaskId(`${snapshot.ownerDesktopId}:${snapshot.localRepoId ?? snapshot.repo.cloudRepoId}:${snapshot.ownerLocalTaskId}`),
     repoId: snapshot.repo.cloudRepoId,
     repoName: snapshot.repo.name,
     title: snapshot.displayName ?? snapshot.title,
@@ -61,6 +67,10 @@ export function mapCloudTaskSnapshot(snapshot: CloudTaskSnapshot): CloudTaskSumm
     ownerLocalTaskId: snapshot.ownerLocalTaskId,
     ownerOnline: false,
   };
+}
+
+function cloudTaskId(id: string): string {
+  return `cloud:${id}`;
 }
 
 export function sortCloudTasks<T extends { updatedAt: string }>(tasks: T[]): T[] {
