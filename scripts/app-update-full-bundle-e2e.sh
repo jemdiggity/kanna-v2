@@ -15,6 +15,9 @@ cleanup() {
         kill "$APP_PID" >/dev/null 2>&1 || true
         wait "$APP_PID" >/dev/null 2>&1 || true
     fi
+    if [[ -n "${INSTALLED_APP:-}" ]]; then
+        pkill -f "$INSTALLED_APP/Contents/MacOS/kanna-desktop" >/dev/null 2>&1 || true
+    fi
     if [[ -n "$SERVER_PID" ]]; then
         kill "$SERVER_PID" >/dev/null 2>&1 || true
         wait "$SERVER_PID" >/dev/null 2>&1 || true
@@ -23,6 +26,7 @@ cleanup() {
         echo "[update-e2e] preserving temp root after failure: $TMP_ROOT" >&2
         echo "[update-e2e] app log: $APP_LOG" >&2
     else
+        chmod -R u+w "$TMP_ROOT" >/dev/null 2>&1 || true
         rm -rf "$TMP_ROOT"
     fi
     exit "$status"
@@ -234,6 +238,8 @@ const oldVersion = process.env.OLD_VERSION;
 const newVersion = process.env.NEW_VERSION;
 const baseUrl = `http://127.0.0.1:${port}`;
 const elementKey = "element-6066-11e4-a52e-4f735466cecf";
+const EXPECTED_WINDOW_RECT = { x: 120, y: 90, width: 980, height: 720 };
+const RECT_TOLERANCE = 16;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -265,6 +271,19 @@ async function waitForStatus() {
     await sleep(500);
   }
   throw new Error(`WebDriver did not become available at ${baseUrl}`);
+}
+
+async function waitForSessionGone(sessionId) {
+  const deadline = Date.now() + 60000;
+  while (Date.now() < deadline) {
+    const value = await request("POST", `/session/${sessionId}/execute/sync`, {
+      script: "return document.readyState;",
+      args: [],
+    }).catch(() => null);
+    if (value === null) return;
+    await sleep(500);
+  }
+  throw new Error("Timed out waiting for updater relaunch to close the original WebDriver session.");
 }
 
 async function waitForText(sessionId, text, timeoutMs = 45000) {
@@ -307,10 +326,62 @@ async function click(sessionId, selector) {
   await request("POST", `/session/${sessionId}/element/${element[elementKey]}/click`, {});
 }
 
+async function getWindowRect(sessionId) {
+  return request("GET", `/session/${sessionId}/window/rect`);
+}
+
+async function setWindowRect(sessionId, rect) {
+  await request("POST", `/session/${sessionId}/window/rect`, rect);
+}
+
+function rectDelta(actual, expected) {
+  return {
+    x: Math.abs(actual.x - expected.x),
+    y: Math.abs(actual.y - expected.y),
+    width: Math.abs(actual.width - expected.width),
+    height: Math.abs(actual.height - expected.height),
+  };
+}
+
+function isRectClose(actual, expected) {
+  const delta = rectDelta(actual, expected);
+  return Object.values(delta).every((value) => value <= RECT_TOLERANCE);
+}
+
+async function waitForWindowRect(sessionId, expectedRect, timeoutMs = 10000) {
+  const deadline = Date.now() + timeoutMs;
+  let latest = null;
+  while (Date.now() < deadline) {
+    latest = await getWindowRect(sessionId);
+    if (isRectClose(latest, expectedRect)) return latest;
+    await sleep(250);
+  }
+  throw new Error(
+    `Window rect did not reach expected bounds before updater restart. expected=${JSON.stringify(expectedRect)} actual=${JSON.stringify(latest)} delta=${JSON.stringify(rectDelta(latest, expectedRect))}`
+  );
+}
+
+async function assertRestoredWindowRect(sessionId, expectedRect) {
+  const deadline = Date.now() + 20000;
+  let actual = null;
+  while (Date.now() < deadline) {
+    actual = await getWindowRect(sessionId);
+    if (isRectClose(actual, expectedRect)) return;
+    await sleep(250);
+  }
+  throw new Error(
+    `Window state was not restored after updater relaunch. expected=${JSON.stringify(expectedRect)} actual=${JSON.stringify(actual)} delta=${JSON.stringify(rectDelta(actual, expectedRect))}`
+  );
+}
+
 await waitForStatus();
 const session = await request("POST", "/session", { capabilities: {} });
 const sessionId = session.sessionId;
+let relaunchedSessionId = null;
 try {
+  const expectedRect = EXPECTED_WINDOW_RECT;
+  await setWindowRect(sessionId, expectedRect);
+  await waitForWindowRect(sessionId, expectedRect);
   await waitForText(sessionId, "Update available");
   await waitForText(sessionId, newVersion);
   const body = await request("POST", `/session/${sessionId}/execute/sync`, {
@@ -322,7 +393,16 @@ try {
   }
   await click(sessionId, "[data-testid=\"update-install\"]");
   await waitForText(sessionId, "Ready to restart", 60000);
+  await click(sessionId, '[data-testid="update-restart"]');
+  await waitForSessionGone(sessionId);
+  await waitForStatus();
+  const relaunchedSession = await request("POST", "/session", { capabilities: {} });
+  relaunchedSessionId = relaunchedSession.sessionId;
+  await assertRestoredWindowRect(relaunchedSessionId, expectedRect);
 } finally {
+  if (relaunchedSessionId) {
+    await fetch(`${baseUrl}/session/${relaunchedSessionId}`, { method: "DELETE" }).catch(() => undefined);
+  }
   await fetch(`${baseUrl}/session/${sessionId}`, { method: "DELETE" }).catch(() => undefined);
 }
 EOF

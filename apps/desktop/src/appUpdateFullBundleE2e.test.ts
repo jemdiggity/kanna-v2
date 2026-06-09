@@ -49,4 +49,14 @@ describe("full-bundle app update E2E script", () => {
     expect(script).toContain("update-install");
     expect(script).toContain("raw updater check");
   });
+
+  it("verifies native window bounds and position survive the updater restart", () => {
+    expect(script).toContain("EXPECTED_WINDOW_RECT");
+    expect(script).toContain("setWindowRect(sessionId, expectedRect)");
+    expect(script).toContain("await click(sessionId, '[data-testid=\"update-restart\"]')");
+    expect(script).toContain("await waitForSessionGone(sessionId)");
+    expect(script).toContain("const relaunchedSession = await request(\"POST\", \"/session\", { capabilities: {} })");
+    expect(script).toContain("assertRestoredWindowRect(relaunchedSessionId, expectedRect)");
+    expect(script).toContain("Window state was not restored after updater relaunch");
+  });
 });
