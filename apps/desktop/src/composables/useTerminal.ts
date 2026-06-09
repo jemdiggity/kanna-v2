@@ -64,6 +64,7 @@ export interface TerminalOptions {
 
 const CLIPBOARD_IMAGE_TTL_MS = 30_000
 const NATIVE_DROP_DEDUPE_WINDOW_MS = 100
+const INPUT_BATCH_WINDOW_MS = 8
 const BRACKETED_PASTE_CONTROL_SEQUENCE = /\u001b\[\?2004[hl]/
 
 interface TerminalOutputPayload {
@@ -218,6 +219,10 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
   let cleanupNativeDropEvents: (() => void) | null = null
   let stopThemeWatch: (() => void) | null = null
   let fitRafId = 0
+  let pendingInputFlushTimer: ReturnType<typeof setTimeout> | null = null
+  let pendingInputBytes: number[] = []
+  let inputWriteChain: Promise<void> = Promise.resolve()
+  let inputWriteInFlight = false
   let attached = false
   let connecting = false
   let paused = false
@@ -330,11 +335,65 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
     pendingClipboardImageExpiresAt = Date.now() + CLIPBOARD_IMAGE_TTL_MS
   }
 
-  async function sendInputBytes(bytes: Uint8Array) {
+  async function sendInputBytesNow(bytes: Uint8Array) {
     await invoke("send_input", {
       sessionId,
       data: Array.from(bytes),
     })
+  }
+
+  function queueInputWrite(bytes: Uint8Array): Promise<void> {
+    const runWrite = async () => {
+      inputWriteInFlight = true
+      try {
+        await sendInputBytesNow(bytes)
+      } finally {
+        inputWriteInFlight = false
+      }
+    }
+
+    if (!inputWriteInFlight && pendingInputBytes.length === 0 && !pendingInputFlushTimer) {
+      inputWriteChain = runWrite()
+      return inputWriteChain
+    }
+
+    inputWriteChain = inputWriteChain
+      .catch(() => {})
+      .then(runWrite)
+    return inputWriteChain
+  }
+
+  function flushQueuedInput(): Promise<void> {
+    if (pendingInputFlushTimer) {
+      clearTimeout(pendingInputFlushTimer)
+      pendingInputFlushTimer = null
+    }
+    if (pendingInputBytes.length === 0) {
+      return inputWriteChain
+    }
+    const bytes = new Uint8Array(pendingInputBytes)
+    pendingInputBytes = []
+    return queueInputWrite(bytes)
+  }
+
+  function queueInputBytes(bytes: Uint8Array): void {
+    pendingInputBytes.push(...bytes)
+    if (pendingInputFlushTimer) {
+      return
+    }
+    pendingInputFlushTimer = setTimeout(() => {
+      pendingInputFlushTimer = null
+      void flushQueuedInput()
+    }, INPUT_BATCH_WINDOW_MS)
+  }
+
+  async function sendInputBytes(bytes: Uint8Array, config?: { immediate?: boolean }) {
+    if (config?.immediate) {
+      await flushQueuedInput()
+      await queueInputWrite(bytes)
+      return
+    }
+    queueInputBytes(bytes)
   }
 
   async function maybeReadClipboardImage() {
@@ -400,7 +459,7 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
 
     clearPendingClipboardImage()
     const response = buildKittyClipboardResponse(payload)
-    await sendInputBytes(new TextEncoder().encode(response))
+    await sendInputBytes(new TextEncoder().encode(response), { immediate: true })
   }
 
   function handleTerminalOutputControlSequences(bytes: Uint8Array) {
@@ -443,7 +502,7 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
     if (paths.length === 0) return
     const text = formatDroppedPathsForPaste(paths)
     const bytes = encodeTerminalPasteBytes(text, shouldUseBracketedPasteForDrop())
-    void sendInputBytes(bytes)
+    void sendInputBytes(bytes, { immediate: true })
   }
 
   function shouldHandleNativeDrop(paths: string[]) {
@@ -698,7 +757,7 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
         !e.ctrlKey
       ) {
         e.preventDefault()
-        void sendInputBytes(new TextEncoder().encode("\x1b[13;2u"))
+        void sendInputBytes(new TextEncoder().encode("\x1b[13;2u"), { immediate: true })
         return false
       }
       if (e.key === "Escape") {
@@ -1252,6 +1311,7 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
   function pause() {
     paused = true
     connectionGeneration += 1
+    void flushQueuedInput()
     const shouldDetach = attached || connecting || hasAttachedOnce
     attached = false
     connecting = false
@@ -1340,6 +1400,7 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
       hasDaemonReadyListener: unlistenDaemonReady != null,
       hasStreamLostListener: unlistenStreamLost != null,
     })
+    void flushQueuedInput()
     if (attached || connecting || hasAttachedOnce) {
       invoke("detach_session", { sessionId }).catch((error) => {
         console.warn("[terminal] Failed to detach session during dispose:", error)
@@ -1349,6 +1410,10 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
     attached = false
     fileExistsCache.clear()
     if (fitRafId) cancelAnimationFrame(fitRafId)
+    if (pendingInputFlushTimer) {
+      clearTimeout(pendingInputFlushTimer)
+      pendingInputFlushTimer = null
+    }
     cleanupContainerEvents?.()
     cleanupContainerEvents = null
     cleanupNativeDropEvents?.()

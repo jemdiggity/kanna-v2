@@ -16,6 +16,12 @@ let nativeWebviewDragDropHandler: ((event: any) => void) | null = null;
 let nativeWindowDragDropHandler: ((event: any) => void) | null = null;
 let isTauriMock = false;
 
+async function waitForQueuedInputFlush() {
+  await Promise.resolve();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  await Promise.resolve();
+}
+
 function emitTerminalSnapshot(
   sessionId: string,
   vt = "restored scrollback",
@@ -1495,6 +1501,7 @@ describe("useTerminal", () => {
     dropEvent.stopPropagation = vi.fn();
 
     terminalElement.dispatchEvent(dropEvent);
+    await waitForQueuedInputFlush();
 
     expect(dropEvent.preventDefault).toHaveBeenCalled();
     expect(dropEvent.stopPropagation).toHaveBeenCalled();
@@ -1580,6 +1587,7 @@ describe("useTerminal", () => {
     dropEvent.stopPropagation = vi.fn();
 
     terminalElement.dispatchEvent(dropEvent);
+    await waitForQueuedInputFlush();
 
     expect(invokeMock).toHaveBeenCalledWith("send_input", {
       sessionId: "session-1",
@@ -1677,6 +1685,7 @@ describe("useTerminal", () => {
         },
       },
     });
+    await waitForQueuedInputFlush();
 
     expect(invokeMock).toHaveBeenCalledWith("send_input", {
       sessionId: "session-1",
@@ -1775,6 +1784,7 @@ describe("useTerminal", () => {
         },
       },
     });
+    await waitForQueuedInputFlush();
 
     expect(invokeMock).toHaveBeenCalledWith("send_input", {
       sessionId: "session-1",
@@ -1874,6 +1884,7 @@ describe("useTerminal", () => {
 
     nativeWindowDragDropHandler?.(dropEvent);
     nativeWebviewDragDropHandler?.(dropEvent);
+    await waitForQueuedInputFlush();
 
     expect(invokeMock).toHaveBeenCalledTimes(1);
     expect(invokeMock).toHaveBeenCalledWith("send_input", {
@@ -1962,6 +1973,7 @@ describe("useTerminal", () => {
         },
       },
     });
+    await waitForQueuedInputFlush();
 
     expect(invokeMock).toHaveBeenCalledWith("send_input", {
       sessionId: "session-1",
@@ -2054,7 +2066,7 @@ describe("useTerminal", () => {
     } as unknown as KeyboardEvent;
 
     const allowed = keyHandler(keyboardEvent);
-    await Promise.resolve();
+    await waitForQueuedInputFlush();
 
     expect(allowed).toBe(false);
     expect(invokeMock).toHaveBeenCalledWith("read_clipboard_image_png", {});
@@ -2144,6 +2156,57 @@ describe("useTerminal", () => {
       sessionId: "session-1",
       data: Array.from(new TextEncoder().encode("\x1b[13;2u")),
     });
+  });
+
+  it("batches rapid terminal keystrokes into a single daemon write", async () => {
+    const { useTerminal } = await import("./useTerminal");
+
+    const TestHarness = defineComponent({
+      setup() {
+        const { init } = useTerminal(
+          "session-1",
+          undefined,
+          {
+            agentProvider: "claude",
+            agentTerminal: true,
+          },
+        );
+
+        return { init };
+      },
+      render() {
+        return h("div");
+      },
+    });
+
+    const wrapper = mount(TestHarness);
+    const terminalElement = document.createElement("div");
+    Object.defineProperty(terminalElement, "offsetWidth", { configurable: true, value: 800 });
+    Object.defineProperty(terminalElement, "offsetHeight", { configurable: true, value: 600 });
+    terminalElement.querySelector = vi.fn(() => null) as typeof terminalElement.querySelector;
+    terminalElement.closest = vi.fn(() => null) as typeof terminalElement.closest;
+    wrapper.vm.init(terminalElement);
+
+    const terminal = terminals[0];
+    const onData = terminal.onData.mock.calls[0][0] as (data: string) => void;
+
+    onData("a");
+    onData("b");
+    onData("c");
+
+    expect(invokeMock).not.toHaveBeenCalledWith("send_input", expect.anything());
+
+    await waitForQueuedInputFlush();
+
+    const sendInputCalls = invokeMock.mock.calls.filter(([cmd]) => cmd === "send_input");
+    expect(sendInputCalls).toHaveLength(1);
+    expect(sendInputCalls[0]).toEqual([
+      "send_input",
+      {
+        sessionId: "session-1",
+        data: Array.from(new TextEncoder().encode("abc")),
+      },
+    ]);
   });
 
   it("responds to kitty clipboard image reads after an explicit paste", async () => {
