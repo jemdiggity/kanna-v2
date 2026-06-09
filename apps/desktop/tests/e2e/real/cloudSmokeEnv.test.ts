@@ -8,7 +8,6 @@ describe("missingCloudSmokeEnv", () => {
       "KANNA_CLOUD_TEST_EMAIL",
       "KANNA_CLOUD_TEST_PASSWORD",
       "KANNA_FIREBASE_PROJECT_ID",
-      "KANNA_CLOUD_FUNCTIONS_ENDPOINT",
     ]);
   });
 

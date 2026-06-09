@@ -113,8 +113,8 @@ Implemented commands:
   Firebase emulators and asserts the remote task selected cloud transport.
 
 - `./kd test cloud-staging`
-  Requires staging Firebase app config, `KANNA_CLOUD_FUNCTIONS_ENDPOINT`, and
-  `KANNA_CLOUD_TEST_EMAIL` / `KANNA_CLOUD_TEST_PASSWORD`. It runs
+  Requires staging Firebase app config and `KANNA_CLOUD_TEST_EMAIL` /
+  `KANNA_CLOUD_TEST_PASSWORD`. It runs
   `apps/desktop/tests/e2e/real/cloud-prod-smoke.test.ts` with
   `KANNA_CLOUD_ENV=staging`.
 
@@ -139,7 +139,7 @@ Required config surface:
 - Firebase app config: API key, auth domain, project ID, app ID
 - Firebase Auth emulator override for local tests
 - Firestore emulator override for local tests
-- Functions endpoint override
+- Functions endpoint override for pairing and other remaining function-backed flows
 - Relay URL override
 
 Suggested environment names:
@@ -148,7 +148,6 @@ Suggested environment names:
 - `KANNA_FIREBASE_API_KEY`
 - `KANNA_FIREBASE_AUTH_DOMAIN`
 - `KANNA_FIREBASE_APP_ID`
-- `KANNA_CLOUD_FUNCTIONS_ENDPOINT`
 - `KANNA_RELAY_URL`
 - `KANNA_FIREBASE_STAGING_PROJECT`
 - `KANNA_FIREBASE_PRODUCTION_PROJECT`
