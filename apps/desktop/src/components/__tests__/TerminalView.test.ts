@@ -188,7 +188,7 @@ describe("TerminalView", () => {
     wrapper.unmount();
   });
 
-  it("pauses the daemon stream while the app window is unfocused", async () => {
+  it("does not pause the active terminal when the app window loses focus", async () => {
     const wrapper = mount(TerminalView, {
       attachTo: document.body,
       props: {
@@ -203,18 +203,16 @@ describe("TerminalView", () => {
 
     window.dispatchEvent(new Event("blur"));
     await flushLifecycle();
-
-    expect(pauseMock).toHaveBeenCalledTimes(1);
-
     window.dispatchEvent(new Event("focus"));
     await flushLifecycle();
 
-    expect(startListeningMock).toHaveBeenCalledTimes(2);
+    expect(pauseMock).not.toHaveBeenCalled();
+    expect(startListeningMock).toHaveBeenCalledTimes(1);
 
     wrapper.unmount();
   });
 
-  it("restores native webview focus before focusing the terminal after window focus returns", async () => {
+  it("restores native webview focus before focusing the terminal on mount", async () => {
     const wrapper = mount(TerminalView, {
       attachTo: document.body,
       props: {
@@ -223,13 +221,6 @@ describe("TerminalView", () => {
         agentTerminal: true,
       },
     });
-    await flushLifecycle();
-    setWebviewFocusMock.mockClear();
-    focusMock.mockClear();
-
-    window.dispatchEvent(new Event("blur"));
-    await flushLifecycle();
-    window.dispatchEvent(new Event("focus"));
     await flushLifecycle();
 
     expect(setWebviewFocusMock).toHaveBeenCalledTimes(1);

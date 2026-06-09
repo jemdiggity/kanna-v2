@@ -21,24 +21,6 @@ interface PerfTask {
   prompt: string;
 }
 
-interface TerminalBufferStats {
-  sessionId: string;
-  lineCount: number;
-  baseY: number;
-  viewportY: number;
-  matchingLineCount: number;
-  firstMatchingLine: string | null;
-  lastMatchingLine: string | null;
-  hasEndMarker: boolean;
-}
-
-interface DaemonSnapshotStats {
-  matchCount: number;
-  firstMatchingLine: string | null;
-  lastMatchingLine: string | null;
-  lastMatchingLineNumber: number;
-}
-
 function buildStreamingSetupCommand(label: string): string {
   return [
     "i=1",
@@ -167,91 +149,6 @@ async function clearMetrics(client: WebDriverClient): Promise<void> {
   }
 }
 
-async function readTerminalBufferStats(
-  client: WebDriverClient,
-  sessionId: string,
-  matcherSource: string,
-): Promise<TerminalBufferStats> {
-  return await client.executeSync<TerminalBufferStats>(
-    `const hook = window.__KANNA_E2E__?.terminalBuffers;
-     if (!hook) throw new Error("terminalBuffers E2E hook is not available");
-     return hook.stats(${JSON.stringify(sessionId)}, new RegExp(${JSON.stringify(matcherSource)}));`,
-  );
-}
-
-async function waitForTerminalMatchCount(
-  client: WebDriverClient,
-  options: {
-    sessionId: string;
-    matcherSource: string;
-    minMatches: number;
-    timeoutMs: number;
-  },
-): Promise<TerminalBufferStats> {
-  const deadline = Date.now() + options.timeoutMs;
-  let latest: TerminalBufferStats | null = null;
-  while (Date.now() < deadline) {
-    latest = await readTerminalBufferStats(client, options.sessionId, options.matcherSource);
-    if (latest.matchingLineCount >= options.minMatches) return latest;
-    await sleep(100);
-  }
-  throw new Error(`timed out waiting for terminal buffer matches; latest=${JSON.stringify(latest)}`);
-}
-
-async function waitForTerminalLastLineAtLeast(
-  client: WebDriverClient,
-  options: {
-    sessionId: string;
-    matcherSource: string;
-    minLineNumber: number;
-    timeoutMs: number;
-  },
-): Promise<TerminalBufferStats> {
-  const deadline = Date.now() + options.timeoutMs;
-  let latest: TerminalBufferStats | null = null;
-  while (Date.now() < deadline) {
-    latest = await readTerminalBufferStats(client, options.sessionId, options.matcherSource);
-    if (parseStreamingLineNumber(latest.lastMatchingLine) >= options.minLineNumber) return latest;
-    await sleep(100);
-  }
-  throw new Error(`timed out waiting for focused terminal catch-up; latest=${JSON.stringify(latest)}`);
-}
-
-async function waitForDaemonSnapshotLineAfter(
-  client: WebDriverClient,
-  options: {
-    sessionId: string;
-    matcherSource: string;
-    minLineNumber: number;
-    timeoutMs: number;
-  },
-): Promise<DaemonSnapshotStats> {
-  const deadline = Date.now() + options.timeoutMs;
-  let latest: DaemonSnapshotStats | null = null;
-  while (Date.now() < deadline) {
-    const snapshot = await tauriInvoke(client, "get_session_recovery_state", {
-      sessionId: options.sessionId,
-    }).catch(() => null) as { serialized?: string } | null;
-    const serialized = snapshot?.serialized ?? "";
-    const matches = serialized.match(new RegExp(options.matcherSource, "g")) ?? [];
-    const lastMatchingLine = matches.at(-1) ?? null;
-    latest = {
-      matchCount: matches.length,
-      firstMatchingLine: matches[0] ?? null,
-      lastMatchingLine,
-      lastMatchingLineNumber: parseStreamingLineNumber(lastMatchingLine),
-    };
-    if (latest.lastMatchingLineNumber >= options.minLineNumber) return latest;
-    await sleep(100);
-  }
-  throw new Error(`timed out waiting for daemon snapshot catch-up; latest=${JSON.stringify(latest)}`);
-}
-
-function parseStreamingLineNumber(line: string | null): number {
-  const match = /(\d{5})$/.exec(line ?? "");
-  return match ? Number.parseInt(match[1], 10) : Number.NEGATIVE_INFINITY;
-}
-
 describe("terminal output performance", () => {
   const client = new WebDriverClient();
   let fixtureRepoRoot = "";
@@ -306,11 +203,11 @@ describe("terminal output performance", () => {
     expect(snapshot.listenCounts.terminal_output ?? 0).toBe(0);
   });
 
-  it("pauses live PTY output on window blur and catches up from daemon snapshot on focus", async () => {
+  it("keeps the terminal_output listener active when the app window loses focus", async () => {
     const task = await createStreamingTask(client, {
       repoId,
       repoPath: testRepoPath,
-      prompt: "Blur Pause",
+      prompt: "Blur Keep",
     });
     taskIds.push(task.id);
 
@@ -318,53 +215,22 @@ describe("terminal output performance", () => {
     await selectTask(client, task);
     await client.waitForElement(".main-panel .terminal-container", 15_000);
 
-    const matcherSource = "^Blur Pause live output \\d{5}$";
-    const visibleStats = await waitForTerminalMatchCount(client, {
-      sessionId: task.id,
-      matcherSource,
-      minMatches: 3,
-      timeoutMs: 10_000,
-    });
-    expect(parseStreamingLineNumber(visibleStats.lastMatchingLine)).toBeGreaterThanOrEqual(3);
-
-    await clearMetrics(client);
-    await client.executeSync("window.dispatchEvent(new Event('blur'))");
-    await waitForMetrics(
-      client,
-      (snapshot) => (snapshot.activeListenCounts.terminal_output ?? 0) === 0,
-      "terminal_output listener removal after blur",
-    );
-
-    const hiddenBaseline = await readTerminalBufferStats(client, task.id, matcherSource);
-    await sleep(500);
-    const hiddenAfterWait = await readTerminalBufferStats(client, task.id, matcherSource);
-    expect(hiddenAfterWait.matchingLineCount).toBe(hiddenBaseline.matchingLineCount);
-    expect(hiddenAfterWait.lastMatchingLine).toBe(hiddenBaseline.lastMatchingLine);
-
-    const hiddenLineNumber = parseStreamingLineNumber(hiddenBaseline.lastMatchingLine);
-    const daemonSnapshot = await waitForDaemonSnapshotLineAfter(client, {
-      sessionId: task.id,
-      matcherSource: "Blur Pause live output \\d{5}",
-      minLineNumber: hiddenLineNumber + 3,
-      timeoutMs: 10_000,
-    });
-
-    await clearMetrics(client);
-    await client.executeSync("window.dispatchEvent(new Event('focus'))");
     await waitForMetrics(
       client,
       (snapshot) => (snapshot.activeListenCounts.terminal_output ?? 0) === 1,
-      "terminal_output listener registration after focus",
+      "terminal_output listener registered after select",
     );
 
-    const refocusedStats = await waitForTerminalLastLineAtLeast(client, {
-      sessionId: task.id,
-      matcherSource,
-      minLineNumber: daemonSnapshot.lastMatchingLineNumber,
-      timeoutMs: 10_000,
-    });
+    await client.executeSync("window.dispatchEvent(new Event('blur'))");
+    await sleep(500);
 
-    expect(parseStreamingLineNumber(refocusedStats.lastMatchingLine))
-      .toBeGreaterThanOrEqual(daemonSnapshot.lastMatchingLineNumber);
+    const afterBlur = await readMetrics(client);
+    expect(afterBlur.activeListenCounts.terminal_output ?? 0).toBe(1);
+
+    await client.executeSync("window.dispatchEvent(new Event('focus'))");
+    await sleep(250);
+
+    const afterFocus = await readMetrics(client);
+    expect(afterFocus.activeListenCounts.terminal_output ?? 0).toBe(1);
   });
 });
