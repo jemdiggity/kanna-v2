@@ -69,28 +69,58 @@ function smokeSnapshot(runId: string) {
 
 async function readFirestoreDocument(
   uid: string,
-  cloudTaskId: string,
+  snapshot: ReturnType<typeof smokeSnapshot>,
   idToken: string,
 ): Promise<Record<string, unknown>> {
   const projectId = requireEnv("KANNA_FIREBASE_PROJECT_ID");
-  const encodedPath = `users/${uid}/tasks/${cloudTaskId}`.split("/").map(encodeURIComponent).join("/");
+  const desktops = await listFirestoreDocuments(projectId, idToken, `users/${uid}/desktops`);
+  const desktop = desktops.find((doc) =>
+    readFirestoreString(doc, "desktopId") === snapshot.ownerDesktopId
+  );
+  if (!desktop?.name) {
+    throw new Error(`failed to find smoke desktop document for ${snapshot.ownerDesktopId}`);
+  }
+
+  const desktopPath = String(desktop.name).split("/documents/")[1];
+  if (!desktopPath) {
+    throw new Error(`smoke desktop document has unexpected name: ${String(desktop.name)}`);
+  }
+  const tasks = await listFirestoreDocuments(projectId, idToken, `${desktopPath}/tasks`);
+  const task = tasks.find((doc) =>
+    readFirestoreString(doc, "cloudTaskId") === snapshot.cloudTaskId
+  );
+  if (!task) {
+    throw new Error(`failed to find nested smoke task document for ${snapshot.cloudTaskId}`);
+  }
+  return task;
+}
+
+async function listFirestoreDocuments(
+  projectId: string,
+  idToken: string,
+  path: string,
+): Promise<Array<Record<string, unknown>>> {
+  const encodedPath = path.split("/").map(encodeURIComponent).join("/");
   const response = await fetch(
     `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents/${encodedPath}`,
-    {
-      headers: { Authorization: `Bearer ${idToken}` },
-    },
+    { headers: { Authorization: `Bearer ${idToken}` } },
   );
-  const body = await response.json().catch(() => null) as Record<string, unknown> | null;
+  const body = await response.json().catch(() => null) as { documents?: Array<Record<string, unknown>> } | null;
   if (!response.ok || !body) {
-    throw new Error(`failed to read smoke snapshot: ${response.status} ${JSON.stringify(body)}`);
+    throw new Error(`failed to list Firestore documents at ${path}: ${response.status} ${JSON.stringify(body)}`);
   }
-  return body;
+  return body.documents ?? [];
+}
+
+function readFirestoreString(document: Record<string, unknown>, field: string): string | null {
+  const fields = document.fields as Record<string, { stringValue?: string }> | undefined;
+  return fields?.[field]?.stringValue ?? null;
 }
 
 async function publishSnapshot(
   endpoint: string,
   idToken: string,
-  snapshot: ReturnType<typeof smokeSnapshot>,
+  body: Record<string, unknown>,
 ): Promise<void> {
   const response = await fetch(endpoint, {
     method: "POST",
@@ -98,7 +128,7 @@ async function publishSnapshot(
       Authorization: `Bearer ${idToken}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify(snapshot),
+    body: JSON.stringify(body),
   });
   if (response.status !== 200) {
     throw new Error(`failed to publish smoke snapshot: ${response.status} ${await response.text()}`);
@@ -113,16 +143,16 @@ describe.skipIf(missingEnv.length > 0)("cloud production/staging smoke", () => {
     const snapshot = smokeSnapshot(runId);
     try {
       await publishSnapshot(endpoint, idToken, snapshot);
-      const document = await readFirestoreDocument(localId, snapshot.cloudTaskId, idToken);
+      const document = await readFirestoreDocument(localId, snapshot, idToken);
       expect(JSON.stringify(document)).toContain(snapshot.title);
     } finally {
-      const now = new Date().toISOString();
       await publishSnapshot(endpoint, idToken, {
-        ...snapshot,
-        stage: "done",
-        status: "done",
-        updatedAt: now,
-        closedAt: now,
+        action: "delete",
+        identity: {
+          ownerDesktopId: snapshot.ownerDesktopId,
+          localRepoId: snapshot.repo.cloudRepoId,
+          ownerLocalTaskId: snapshot.ownerLocalTaskId,
+        },
       }).catch(() => undefined);
     }
   });

@@ -100,17 +100,37 @@ async function waitForBodyText(client: typeof primary, text: string, timeoutMs =
   let lastDiagnostics: unknown = null;
   while (Date.now() < deadline) {
     const bodyText = await client.executeSync<string>(`
+      const buffers = window.__KANNA_E2E__?.terminalBuffers;
+      const terminalBufferText = (() => {
+        if (!buffers) return "";
+        try {
+          return buffers.sessionIds().flatMap((id) => buffers.lines(id)).join("\\n");
+        } catch {
+          return "";
+        }
+      })();
       return [
         document.body.innerText || "",
         document.querySelector(".xterm-rows")?.textContent || "",
         document.querySelector(".terminal-container")?.textContent || "",
+        terminalBufferText,
       ].join("\\n");
     `);
     if (bodyText.includes(text)) return;
     lastDiagnostics = await client.executeSync(`
       const ctx = window.__KANNA_E2E__.setupState;
+      const buffers = window.__KANNA_E2E__?.terminalBuffers;
       const read = (value) => value?.__v_isRef ? value.value : value;
       const terminal = document.querySelector(".cloud-terminal-shell");
+      const terminalBufferSessionIds = buffers?.sessionIds() ?? [];
+      const terminalBufferText = (() => {
+        if (!buffers) return "";
+        try {
+          return terminalBufferSessionIds.flatMap((id) => buffers.lines(id)).join("\\n");
+        } catch (error) {
+          return String(error);
+        }
+      })();
       return JSON.parse(JSON.stringify({
         selectedRepoId: read(ctx.store)?.selectedRepoId,
         selectedItemId: read(ctx.store)?.selectedItemId,
@@ -120,6 +140,8 @@ async function waitForBodyText(client: typeof primary, text: string, timeoutMs =
         mainPanelCloudTerminalRef: read(ctx.mainPanelCloudTerminalRef),
         terminalStatus: terminal?.getAttribute("data-status") ?? null,
         terminalText: document.querySelector(".terminal-container")?.textContent ?? "",
+        terminalBufferSessionIds,
+        terminalBufferText,
         sidebarItems: read(ctx.sidebarItems)?.map((item) => ({
           id: item.id,
           prompt: item.prompt,
@@ -257,28 +279,45 @@ async function waitForRunningMobileServerStatus(client: typeof primary): Promise
 }
 
 async function seedCloudTaskSnapshot(snapshot: Record<string, unknown>): Promise<void> {
-  const functionsPort = process.env.KANNA_FIREBASE_FUNCTIONS_PORT;
-  if (!functionsPort) {
-    throw new Error("KANNA_FIREBASE_FUNCTIONS_PORT is required for cloud task sync E2E");
+  const firestorePort = process.env.KANNA_FIREBASE_FIRESTORE_PORT;
+  if (!firestorePort) {
+    throw new Error("KANNA_FIREBASE_FIRESTORE_PORT is required for cloud task sync E2E");
   }
-  const idToken = await signInForIdToken();
-  const response = await fetch(
-    `http://127.0.0.1:${functionsPort}/kanna-local/us-central1/upsertTaskSnapshot`,
-    {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${idToken}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(snapshot),
+  const { idToken, localId } = await signInForIdToken();
+  const ownerDesktopId = readRequiredString(snapshot, "ownerDesktopId");
+  const desktopDocId = deterministicFirestoreDocId(`desktop:${ownerDesktopId}`);
+  const cloudTaskId = typeof snapshot.cloudTaskId === "string"
+    ? snapshot.cloudTaskId
+    : `${ownerDesktopId}:${readRequiredString(snapshot, "ownerLocalTaskId")}`;
+  const taskDocId = deterministicFirestoreDocId(`task:${cloudTaskId}`);
+
+  await writeFirestoreEmulatorDocument({
+    idToken,
+    firestorePort,
+    path: `users/${localId}/desktops/${desktopDocId}`,
+    data: {
+      desktopId: ownerDesktopId,
+      updatedAt: readRequiredString(snapshot, "updatedAt"),
     },
-  );
-  if (!response.ok) {
-    throw new Error(`failed to seed cloud task snapshot: ${response.status} ${await response.text()}`);
+  });
+  await writeFirestoreEmulatorDocument({
+    idToken,
+    firestorePort,
+    path: `users/${localId}/desktops/${desktopDocId}/tasks/${taskDocId}`,
+    data: snapshot,
+  });
+
+  const seeded = await readFirestoreEmulatorDocument({
+    idToken,
+    firestorePort,
+    path: `users/${localId}/desktops/${desktopDocId}/tasks/${taskDocId}`,
+  });
+  if (!JSON.stringify(seeded).includes(readRequiredString(snapshot, "title"))) {
+    throw new Error(`seeded nested cloud task is unreadable at desktop task path: ${JSON.stringify(seeded)}`);
   }
 }
 
-async function signInForIdToken(): Promise<string> {
+async function signInForIdToken(): Promise<{ idToken: string; localId: string }> {
   const authPort = process.env.KANNA_FIREBASE_AUTH_PORT;
   if (!authPort) {
     throw new Error("KANNA_FIREBASE_AUTH_PORT is required for cloud task sync E2E");
@@ -295,11 +334,81 @@ async function signInForIdToken(): Promise<string> {
       }),
     },
   );
-  const body = await response.json().catch(() => null) as { idToken?: string } | null;
-  if (!response.ok || !body?.idToken) {
+  const body = await response.json().catch(() => null) as { idToken?: string; localId?: string } | null;
+  if (!response.ok || !body?.idToken || !body.localId) {
     throw new Error(`failed to sign into auth emulator for cloud seed: ${response.status} ${JSON.stringify(body)}`);
   }
-  return body.idToken;
+  return { idToken: body.idToken, localId: body.localId };
+}
+
+function deterministicFirestoreDocId(input: string): string {
+  return `e2e-${createHash("sha256").update(input).digest("hex").slice(0, 24)}`;
+}
+
+function readRequiredString(record: Record<string, unknown>, key: string): string {
+  const value = record[key];
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error(`cloud seed snapshot is missing ${key}`);
+  }
+  return value;
+}
+
+async function writeFirestoreEmulatorDocument(input: {
+  idToken: string;
+  firestorePort: string;
+  path: string;
+  data: Record<string, unknown>;
+}): Promise<void> {
+  const response = await fetch(firestoreDocumentUrl(input.firestorePort, input.path), {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bearer ${input.idToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ fields: toFirestoreFields(input.data) }),
+  });
+  if (!response.ok) {
+    throw new Error(`failed to write Firestore seed document ${input.path}: ${response.status} ${await response.text()}`);
+  }
+}
+
+async function readFirestoreEmulatorDocument(input: {
+  idToken: string;
+  firestorePort: string;
+  path: string;
+}): Promise<Record<string, unknown>> {
+  const response = await fetch(firestoreDocumentUrl(input.firestorePort, input.path), {
+    headers: { Authorization: `Bearer ${input.idToken}` },
+  });
+  const body = await response.json().catch(() => null) as Record<string, unknown> | null;
+  if (!response.ok || !body) {
+    throw new Error(`failed to read Firestore seed document ${input.path}: ${response.status} ${JSON.stringify(body)}`);
+  }
+  return body;
+}
+
+function firestoreDocumentUrl(firestorePort: string, path: string): string {
+  const encodedPath = path.split("/").map(encodeURIComponent).join("/");
+  return `http://127.0.0.1:${firestorePort}/v1/projects/kanna-local/databases/(default)/documents/${encodedPath}`;
+}
+
+function toFirestoreFields(data: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(data).map(([key, value]) => [key, toFirestoreValue(value)]));
+}
+
+function toFirestoreValue(value: unknown): Record<string, unknown> {
+  if (typeof value === "string") return { stringValue: value };
+  if (typeof value === "boolean") return { booleanValue: value };
+  if (typeof value === "number" && Number.isInteger(value)) return { integerValue: String(value) };
+  if (typeof value === "number") return { doubleValue: value };
+  if (value === null) return { nullValue: null };
+  if (Array.isArray(value)) {
+    return { arrayValue: { values: value.map(toFirestoreValue) } };
+  }
+  if (value && typeof value === "object") {
+    return { mapValue: { fields: toFirestoreFields(value as Record<string, unknown>) } };
+  }
+  throw new Error(`unsupported Firestore seed value: ${String(value)}`);
 }
 
 async function waitForCloudTaskSnapshot(
@@ -579,7 +688,7 @@ describe("cloud task sync", () => {
 
     await signIn(primary);
     await signIn(secondary);
-  });
+  }, 240_000);
 
   afterAll(async () => {
     await cleanupWorktrees(primary, testRepoPath).catch(() => undefined);
