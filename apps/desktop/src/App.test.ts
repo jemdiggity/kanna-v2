@@ -47,6 +47,7 @@ const listenHandlers = new Map<string, (event: unknown) => void | Promise<void>>
 const currentWebviewWindowListenHandlers = new Map<string, (event: unknown) => void | Promise<void>>();
 let closeRequestedHandler: ((event: { preventDefault: () => void }) => void | Promise<void>) | null = null;
 const cloudTasksMock = vi.hoisted(() => vi.fn(async () => ({ repos: [], items: [] })));
+const reconcileDesktopTaskSnapshotsMock = vi.hoisted(() => vi.fn(async () => {}));
 const scheduleStartupBackupMock = vi.hoisted(() => vi.fn(async () => {}));
 const nativeSetThemeMock = vi.hoisted(() => vi.fn(async () => {}));
 const nativeWindowSetThemeMock = vi.hoisted(() => vi.fn(async () => {}));
@@ -312,6 +313,11 @@ vi.mock("./services/desktopAuthSdk", () => ({
 
 vi.mock("./services/desktopCloudTaskIndex", () => ({
   listDesktopCloudTasks: cloudTasksMock,
+}));
+
+vi.mock("./services/desktopCloudPublisher", () => ({
+  deleteRemoteTaskSnapshots: vi.fn(async () => {}),
+  reconcileDesktopTaskSnapshots: reconcileDesktopTaskSnapshotsMock,
 }));
 
 vi.mock("./services/desktopRelayTerminal", () => ({
@@ -623,6 +629,7 @@ describe("App", () => {
     toastErrorMock.mockClear();
     cloudTasksMock.mockReset();
     cloudTasksMock.mockResolvedValue({ repos: [], items: [] });
+    reconcileDesktopTaskSnapshotsMock.mockClear();
     appUpdateStartMock.mockClear();
     appUpdateMock.dispose.mockClear();
     appUpdateMock.dismiss.mockClear();
@@ -665,6 +672,22 @@ describe("App", () => {
     const wrapper = await mountApp(SidebarWithRepoStub);
 
     expect(scheduleStartupBackupMock).not.toHaveBeenCalled();
+
+    wrapper.unmount();
+  });
+
+  it("reconciles cloud task snapshots during periodic cloud sync", async () => {
+    vi.useFakeTimers();
+
+    const wrapper = await mountApp(SidebarWithRepoStub);
+    reconcileDesktopTaskSnapshotsMock.mockClear();
+    cloudTasksMock.mockClear();
+
+    await vi.advanceTimersByTimeAsync(1000);
+    await flushPromises();
+
+    expect(reconcileDesktopTaskSnapshotsMock).toHaveBeenCalledWith(dbMock);
+    expect(cloudTasksMock).toHaveBeenCalledTimes(1);
 
     wrapper.unmount();
   });

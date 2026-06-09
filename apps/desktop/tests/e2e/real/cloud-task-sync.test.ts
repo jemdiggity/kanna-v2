@@ -4,11 +4,15 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
 import { cleanupWorktrees, importTestRepo, resetDatabase } from "../helpers/reset";
 import { createPrimaryAndSecondaryClients } from "../helpers/twoInstance";
-import { callVueMethod, queryDb, tauriInvoke } from "../helpers/vue";
+import { callVueMethod, execDb, queryDb, tauriInvoke } from "../helpers/vue";
 
 const { primary, secondary } = createPrimaryAndSecondaryClients();
 let testRepoPath = "";
 let secondaryRepoId = "";
+let primaryRepoId = "";
+let primaryDesktopId = "";
+let testRepoRemoteUrl: string | null = null;
+let testRepoRemoteUrlHash: string | null = null;
 
 async function setSetupState(client: typeof primary, key: string, value: unknown): Promise<void> {
   await client.executeSync(`
@@ -132,6 +136,30 @@ async function countLocalTasks(client: typeof primary): Promise<number> {
   const rows = await queryDb(client, "select count(*) as count from pipeline_item");
   const first = rows[0] as { count?: number | string } | undefined;
   return Number(first?.count ?? 0);
+}
+
+async function countOpenLocalTasks(client: typeof primary): Promise<number> {
+  const rows = await queryDb(client, "select count(*) as count from pipeline_item where closed_at is null");
+  const first = rows[0] as { count?: number | string } | undefined;
+  return Number(first?.count ?? 0);
+}
+
+async function signOut(client: typeof primary): Promise<void> {
+  const result = await client.executeAsync(`
+    const cb = arguments[arguments.length - 1];
+    const ctx = window.__KANNA_E2E__.setupState;
+    const session = ctx.desktopAuthSession?.__v_isRef ? ctx.desktopAuthSession.value : ctx.desktopAuthSession;
+    if (!session) {
+      cb({ __error: "desktop auth session is unavailable" });
+      return;
+    }
+    Promise.resolve(session.signOut())
+      .then(() => cb("ok"))
+      .catch((error) => cb({ __error: error?.message || String(error) }));
+  `);
+  if (result && typeof result === "object" && "__error" in result) {
+    throw new Error(String((result as { __error: string }).__error));
+  }
 }
 
 async function sidebarItemsForPrompt(client: typeof primary, prompt: string): Promise<Array<{
@@ -333,6 +361,35 @@ async function cloudSnapshotItemsForPrompt(
   `);
 }
 
+async function waitForCloudTaskToBeAbsentAfterRefresh(
+  client: typeof primary,
+  prompt: string,
+): Promise<void> {
+  const deadline = Date.now() + 30_000;
+  let lastSnapshot: unknown = null;
+  let lastSidebarItems: unknown = null;
+  while (Date.now() < deadline) {
+    await client.executeSync(`
+      const ctx = window.__KANNA_E2E__.setupState;
+      if (ctx.locallyClosedRemoteTaskIds?.__v_isRef) {
+        ctx.locallyClosedRemoteTaskIds.value = new Set();
+      } else {
+        ctx.locallyClosedRemoteTaskIds = new Set();
+      }
+    `);
+    await callVueMethod(client, "refreshCloudTasksForSignedInUser");
+    const snapshot = await cloudSnapshotItemsForPrompt(client, prompt);
+    const sidebarItems = await sidebarItemsForPrompt(client, prompt);
+    lastSnapshot = snapshot;
+    lastSidebarItems = sidebarItems;
+    if (snapshot.items.length === 0 && sidebarItems.length === 0) return;
+    await sleep(500);
+  }
+  throw new Error(
+    `timed out waiting for cloud task to be absent: ${prompt}; snapshot=${JSON.stringify(lastSnapshot)} sidebarItems=${JSON.stringify(lastSidebarItems)}`,
+  );
+}
+
 async function waitForCloudTaskToStayGoneAfterRefresh(
   client: typeof primary,
   prompt: string,
@@ -442,51 +499,68 @@ describe("cloud task sync", () => {
     await secondary.createSession();
     await resetDatabase(primary);
     await resetDatabase(secondary);
-    await signIn(primary);
-    await signIn(secondary);
     testRepoPath = await createFixtureRepo("cloud-task-sync-source");
+    primaryDesktopId = (await waitForRunningMobileServerStatus(primary)).desktopId;
+    primaryRepoId = await importTestRepo(primary, testRepoPath, "cloud-sync-repo");
     secondaryRepoId = await importTestRepo(secondary, testRepoPath, "cloud-sync-repo-secondary");
-  });
+    testRepoRemoteUrl = await tauriInvoke(primary, "git_remote_url", { repoPath: testRepoPath }) as string | null;
+    testRepoRemoteUrlHash = hashRemoteUrl(testRepoRemoteUrl);
+    expect(testRepoRemoteUrlHash).toMatch(/^[a-f0-9]{64}$/);
 
-  afterAll(async () => {
-    await cleanupWorktrees(primary, testRepoPath).catch(() => undefined);
-    await cleanupWorktrees(secondary, testRepoPath).catch(() => undefined);
-    await cleanupFixtureRepos(testRepoPath ? [testRepoPath] : []).catch(() => undefined);
-    await primary.deleteSession().catch(() => undefined);
-    await secondary.deleteSession().catch(() => undefined);
-  });
+    await signOut(primary);
+    await signOut(secondary);
 
-  it("shows a task created on one signed-in desktop on another signed-in desktop", async () => {
-    expect(await countLocalTasks(primary)).toBe(0);
-    expect(await countLocalTasks(secondary)).toBe(0);
+    await execDb(
+      primary,
+      `INSERT INTO pipeline_item
+         (id, repo_id, issue_number, issue_title, prompt, pipeline, stage, tags, pr_number, pr_url,
+          branch, agent_type, agent_provider, port_offset, port_env, activity, activity_changed_at,
+          display_name, base_ref, closed_at, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        "stale-owned-closed-task",
+        primaryRepoId,
+        null,
+        null,
+        "Stale owned closed cloud task",
+        "default",
+        "done",
+        JSON.stringify(["done"]),
+        null,
+        null,
+        "task-stale-owned-closed-task",
+        "pty",
+        "codex",
+        null,
+        null,
+        "idle",
+        "2026-05-03T00:00:00.000Z",
+        null,
+        "origin/main",
+        "2026-05-03T00:01:00.000Z",
+        "2026-05-03T00:00:00.000Z",
+        "2026-05-03T00:01:00.000Z",
+      ],
+    );
 
-    const primaryStatus = await waitForRunningMobileServerStatus(primary);
-
-    const repoId = await importTestRepo(primary, testRepoPath, "cloud-sync-repo");
-    const remoteUrl = await tauriInvoke(primary, "git_remote_url", { repoPath: testRepoPath }) as string | null;
-    const remoteUrlHash = hashRemoteUrl(remoteUrl);
-    expect(remoteUrlHash).toMatch(/^[a-f0-9]{64}$/);
-
-    const sameOwnerMissingPrompt = "Cloud sync same-owner missing local task";
-    const sameOwnerMissingTaskId = `missing-local-${Date.now()}`;
     await seedCloudTaskSnapshot({
-      cloudTaskId: `${repoId}:${sameOwnerMissingTaskId}`,
-      ownerDesktopId: primaryStatus.desktopId,
-      ownerLocalTaskId: sameOwnerMissingTaskId,
-      title: sameOwnerMissingPrompt,
-      promptSnippet: sameOwnerMissingPrompt,
+      cloudTaskId: `${primaryRepoId}:stale-owned-closed-task`,
+      ownerDesktopId: primaryDesktopId,
+      ownerLocalTaskId: "stale-owned-closed-task",
+      title: "Stale owned closed cloud task",
+      promptSnippet: "Stale owned closed cloud task",
       displayName: null,
       stage: "in progress",
       activity: "working",
       status: "active",
       repo: {
-        cloudRepoId: repoId,
+        cloudRepoId: primaryRepoId,
         name: "cloud-sync-repo",
-        remoteUrl,
-        remoteUrlHash,
+        remoteUrl: testRepoRemoteUrl,
+        remoteUrlHash: testRepoRemoteUrlHash,
         defaultBranch: "main",
       },
-      branch: `task-${sameOwnerMissingTaskId}`,
+      branch: "task-stale-owned-closed-task",
       baseRef: "origin/main",
       prNumber: null,
       prUrl: null,
@@ -498,45 +572,47 @@ describe("cloud task sync", () => {
         destinationDesktopId: null,
       },
       blockedByTaskIds: [],
-      createdAt: "2026-05-02T00:00:00.000Z",
-      updatedAt: new Date().toISOString(),
+      createdAt: "2026-05-03T00:00:00.000Z",
+      updatedAt: "2026-05-03T00:01:00.000Z",
       closedAt: null,
     });
 
-    await waitForSidebarTask(primary, sameOwnerMissingPrompt);
-    await waitForSidebarTaskGroupedUnderRepo(primary, sameOwnerMissingPrompt, repoId);
-    expect(await waitForSingleSidebarTask(primary, sameOwnerMissingPrompt)).toEqual([
-      expect.objectContaining({
-        id: `cloud:${repoId}:${sameOwnerMissingTaskId}`,
-        repo_id: repoId,
-        isRemote: true,
-        stage: "in progress",
-      }),
-    ]);
-    expect(await remoteDiagnosticsForPrompt(primary, sameOwnerMissingPrompt)).toContainEqual(expect.objectContaining({
-      selectedTerminalTransport: "cloud",
-      sources: expect.arrayContaining(["cloud"]),
-      ownerDesktopId: primaryStatus.desktopId,
-      ownerLocalTaskId: sameOwnerMissingTaskId,
-    }));
-    expect(await countLocalTasks(primary)).toBe(0);
+    await signIn(primary);
+    await signIn(secondary);
+  });
 
-    await waitForSidebarTask(secondary, sameOwnerMissingPrompt);
-    await waitForSidebarTaskGroupedUnderRepo(secondary, sameOwnerMissingPrompt, secondaryRepoId);
-    expect(await waitForSingleSidebarTask(secondary, sameOwnerMissingPrompt)).toEqual([
+  afterAll(async () => {
+    await cleanupWorktrees(primary, testRepoPath).catch(() => undefined);
+    await cleanupWorktrees(secondary, testRepoPath).catch(() => undefined);
+    await cleanupFixtureRepos(testRepoPath ? [testRepoPath] : []).catch(() => undefined);
+    await primary.deleteSession().catch(() => undefined);
+    await secondary.deleteSession().catch(() => undefined);
+  });
+
+  it("removes a stale owned cloud task whose local task is already closed during sign-in reconciliation", async () => {
+    expect(await queryDb(
+      primary,
+      "SELECT stage, closed_at FROM pipeline_item WHERE id = ?",
+      ["stale-owned-closed-task"],
+    )).toEqual([
       expect.objectContaining({
-        id: `cloud:${repoId}:${sameOwnerMissingTaskId}`,
-        repo_id: secondaryRepoId,
-        isRemote: true,
-        stage: "in progress",
+        stage: "done",
+        closed_at: "2026-05-03T00:01:00.000Z",
       }),
     ]);
-    expect(await remoteDiagnosticsForPrompt(secondary, sameOwnerMissingPrompt)).toContainEqual(expect.objectContaining({
-      selectedTerminalTransport: "cloud",
-      sources: expect.arrayContaining(["cloud"]),
-      ownerDesktopId: primaryStatus.desktopId,
-      ownerLocalTaskId: sameOwnerMissingTaskId,
-    }));
+
+    await waitForCloudTaskToBeAbsentAfterRefresh(primary, "Stale owned closed cloud task");
+    expect(await cloudSnapshotItemsForPrompt(primary, "Stale owned closed cloud task")).toEqual({
+      items: [],
+      terminalRefs: expect.any(Object),
+    });
+    expect(await sidebarItemsForPrompt(primary, "Stale owned closed cloud task")).toEqual([]);
+  });
+
+  it("shows a task created on one signed-in desktop on another signed-in desktop", async () => {
+    expect(await countLocalTasks(primary)).toBe(1);
+    expect(await countOpenLocalTasks(primary)).toBe(0);
+    expect(await countLocalTasks(secondary)).toBe(0);
 
     await seedCloudTaskSnapshot({
       cloudTaskId: "stale-cloud-task",
@@ -577,7 +653,7 @@ describe("cloud task sync", () => {
     const result = await callVueMethod(
       primary,
       "store.createItem",
-      repoId,
+      primaryRepoId,
       testRepoPath,
       "Cloud sync visible task",
       "sdk",
@@ -591,7 +667,8 @@ describe("cloud task sync", () => {
     }
 
     await waitForSidebarTask(primary, "Cloud sync visible task");
-    expect(await countLocalTasks(primary)).toBe(1);
+    expect(await countLocalTasks(primary)).toBe(2);
+    expect(await countOpenLocalTasks(primary)).toBe(1);
     expect(await sidebarItemsForPrompt(primary, "Cloud sync visible task")).toEqual([
       expect.objectContaining({
         id: result,
@@ -633,7 +710,7 @@ describe("cloud task sync", () => {
 
     const synced = await waitForCloudTaskSnapshot(secondary, "Cloud sync visible task");
     expect(synced.terminalRef).toEqual({
-      ownerDesktopId: primaryStatus.desktopId,
+      ownerDesktopId: primaryDesktopId,
       ownerLocalTaskId: result,
     });
     expect(synced.terminalRef.ownerDesktopId).not.toBe("peer-primary");
@@ -649,7 +726,7 @@ describe("cloud task sync", () => {
     if (primaryCloudSnapshot.items.length > 0) {
       expect(primaryCloudSnapshot.items).toHaveLength(1);
       expect(Object.values(primaryCloudSnapshot.terminalRefs)).toContainEqual(expect.objectContaining({
-        ownerDesktopId: primaryStatus.desktopId,
+        ownerDesktopId: primaryDesktopId,
         ownerLocalTaskId: result,
       }));
     }

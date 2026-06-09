@@ -398,6 +398,17 @@ async function refreshCloudTasksForSignedInUser(): Promise<void> {
   };
 }
 
+async function syncCloudTasksForSignedInUser(): Promise<void> {
+  if (desktopAuthState.value.status !== "signedIn") {
+    await refreshCloudTasksForSignedInUser();
+    return;
+  }
+  await reconcileDesktopTaskSnapshots(db).catch((error) =>
+    console.warn("[cloud] failed to reconcile local task snapshots:", error),
+  );
+  await refreshCloudTasksForSignedInUser();
+}
+
 async function refreshLanTasks(): Promise<void> {
   await publishDesktopLanTaskSnapshot(db);
   const snapshot = await listDesktopLanTasks({
@@ -428,8 +439,8 @@ async function initializeDesktopCloudAuth(): Promise<void> {
     );
   });
   cloudRefreshTimer = setInterval(() => {
-    void refreshCloudTasksForSignedInUser().catch((error) =>
-      console.warn("[cloud] failed to refresh cloud tasks:", error),
+    void syncCloudTasksForSignedInUser().catch((error) =>
+      console.warn("[cloud] failed to sync cloud tasks:", error),
     );
   }, 1000);
 }
