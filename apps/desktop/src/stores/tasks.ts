@@ -1046,6 +1046,7 @@ export function createTasksApi(
   async function handleAgentFinished(sessionId: string) {
     const item = context.state.items.value.find((candidate) => candidate.id === sessionId);
     if (!item) return;
+    if (item.stage === "done" || item.closed_at !== null) return;
     const activity = await isTaskSelectedInAnyWindow(context, sessionId) ? "idle" : "unread";
     try {
       await updatePipelineItemActivity(context.requireDb(), item.id, activity);

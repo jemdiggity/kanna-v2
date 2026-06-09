@@ -14,7 +14,8 @@ import { resolveDesktopFirebaseConfig } from "./desktopFirebaseConfig";
 import { listActiveDesktopIdsViaRelay } from "./desktopRelayTerminal";
 
 export interface DesktopCloudTaskSnapshot {
-  cloudTaskId: string;
+  cloudTaskId?: string;
+  localRepoId?: string;
   ownerDesktopId: string;
   ownerLocalTaskId: string;
   title: string;
@@ -40,7 +41,7 @@ export interface DesktopCloudTaskSnapshot {
   };
   createdAt: string;
   updatedAt: string;
-  closedAt: string | null;
+  closedAt?: string | null;
 }
 
 export interface DesktopCloudSnapshot {
@@ -56,6 +57,7 @@ export type DesktopCloudRepo = Repo & {
 
 export interface DesktopCloudTerminalRef {
   ownerDesktopId: string;
+  ownerLocalRepoId?: string;
   ownerLocalTaskId: string;
   transport?: "cloud" | "lan";
 }
@@ -148,11 +150,12 @@ export function mapDesktopCloudTasks(
       .map((item) => `${item.repo_id}:${item.id}`),
   );
   for (const snapshot of sortByUpdatedAt(snapshots)) {
-    const exactLocalRepo = localRepoById.get(snapshot.repo.cloudRepoId);
+    const snapshotLocalRepoId = snapshot.localRepoId ?? snapshot.repo.cloudRepoId;
+    const exactLocalRepo = localRepoById.get(snapshotLocalRepoId);
     const localRepo = exactLocalRepo ?? (snapshot.repo.remoteUrlHash
       ? localRepoByRemoteHash.get(snapshot.repo.remoteUrlHash)
       : undefined);
-    const repoId = localRepo?.id ?? cloudRepoId(snapshot.repo.cloudRepoId);
+    const repoId = localRepo?.id ?? cloudRepoId(snapshotLocalRepoId);
     if (closedLocalItemKeys.has(`${repoId}:${snapshot.ownerLocalTaskId}`)) {
       continue;
     }
@@ -171,10 +174,13 @@ export function mapDesktopCloudTasks(
       });
     }
 
-    const itemId = cloudTaskId(snapshot.cloudTaskId);
+    const itemId = snapshot.cloudTaskId
+      ? cloudTaskId(snapshot.cloudTaskId)
+      : cloudTaskId(`${snapshot.ownerDesktopId}:${snapshotLocalRepoId}:${snapshot.ownerLocalTaskId}`);
     if (ownerDesktopIsReachable(snapshot.ownerDesktopId, options.activeDesktopIds)) {
       terminalRefs[itemId] = {
         ownerDesktopId: snapshot.ownerDesktopId,
+        ownerLocalRepoId: snapshotLocalRepoId,
         ownerLocalTaskId: snapshot.ownerLocalTaskId,
         transport: "cloud",
       };
@@ -200,7 +206,7 @@ export function mapDesktopCloudTasks(
       display_name: snapshot.displayName ?? `${snapshot.title} (${snapshot.ownerDesktopId})`,
       issue_number: null,
       issue_title: null,
-      closed_at: snapshot.closedAt,
+      closed_at: snapshot.closedAt ?? null,
       agent_session_id: null,
       base_ref: snapshot.baseRef,
       agent_provider: normalizeAgentProvider(snapshot.agent?.provider),

@@ -35,7 +35,7 @@ describe("cloud task snapshot mapper", () => {
     });
 
     expect(snapshot).toMatchObject({
-      cloudTaskId: "repo-1:task-1",
+      localRepoId: "repo-1",
       ownerDesktopId: "desktop-1",
       ownerLocalTaskId: "task-1",
       title: "Cloud mobile",
@@ -48,6 +48,7 @@ describe("cloud task snapshot mapper", () => {
       },
       transfer: { state: "none" },
     });
+    expect(snapshot).not.toHaveProperty("cloudTaskId");
     expect(snapshot.repo.remoteUrlHash).toHaveLength(64);
   });
 

@@ -31,7 +31,7 @@ import { getConfiguredDesktopAuthSession } from "./services/desktopAuthSdk";
 import type { DesktopAuthSession, DesktopAuthState } from "./services/desktopAuth";
 import { listDesktopCloudTasks, type DesktopCloudSnapshot } from "./services/desktopCloudTaskIndex";
 import { listDesktopLanTasks, publishDesktopLanTaskSnapshot } from "./services/desktopLanTaskIndex";
-import { publishDesktopTaskSnapshots } from "./services/desktopCloudPublisher";
+import { deleteRemoteTaskSnapshots, reconcileDesktopTaskSnapshots } from "./services/desktopCloudPublisher";
 import { createConfiguredDesktopRelayTerminalClient } from "./services/desktopRelayTerminal";
 import { createConfiguredDesktopLanTerminalClient } from "./services/desktopLanTerminal";
 import { useKeyboardShortcuts, type ActionName } from "./composables/useKeyboardShortcuts";
@@ -398,6 +398,17 @@ async function refreshCloudTasksForSignedInUser(): Promise<void> {
   };
 }
 
+async function syncCloudTasksForSignedInUser(): Promise<void> {
+  if (desktopAuthState.value.status !== "signedIn") {
+    await refreshCloudTasksForSignedInUser();
+    return;
+  }
+  await reconcileDesktopTaskSnapshots(db).catch((error) =>
+    console.warn("[cloud] failed to reconcile local task snapshots:", error),
+  );
+  await refreshCloudTasksForSignedInUser();
+}
+
 async function refreshLanTasks(): Promise<void> {
   await publishDesktopLanTaskSnapshot(db);
   const snapshot = await listDesktopLanTasks({
@@ -419,7 +430,7 @@ async function initializeDesktopCloudAuth(): Promise<void> {
     desktopAuthState.value = state;
     if (state.status === "signedIn" && !reconciledCloudSnapshotUsers.has(state.user.uid)) {
       reconciledCloudSnapshotUsers.add(state.user.uid);
-      void publishDesktopTaskSnapshots(db, { closedSinceDays: 30 })
+      void reconcileDesktopTaskSnapshots(db)
         .catch((error) => console.warn("[cloud] failed to reconcile local task snapshots:", error))
         .then(() => refreshCloudTasksForSignedInUser());
     }
@@ -428,8 +439,8 @@ async function initializeDesktopCloudAuth(): Promise<void> {
     );
   });
   cloudRefreshTimer = setInterval(() => {
-    void refreshCloudTasksForSignedInUser().catch((error) =>
-      console.warn("[cloud] failed to refresh cloud tasks:", error),
+    void syncCloudTasksForSignedInUser().catch((error) =>
+      console.warn("[cloud] failed to sync cloud tasks:", error),
     );
   }, 1000);
 }
@@ -1305,6 +1316,7 @@ async function closeSelectedWorkspaceTask() {
       desktopId: remoteRef.ownerDesktopId,
       taskId: remoteRef.ownerLocalTaskId,
     });
+    deleteRemoteCloudTaskMetadata(workspaceTask);
     const closedAliases = new Set<string>();
     for (const source of workspaceTask.sources) {
       for (const alias of remoteTaskClosureAliases({ id: source.taskId }, source.terminalRef)) {
@@ -1326,6 +1338,35 @@ async function closeSelectedWorkspaceTask() {
   } finally {
     client.close();
   }
+}
+
+function deleteRemoteCloudTaskMetadata(workspaceTask: WorkspaceTask): void {
+  for (const source of workspaceTask.sources) {
+    if (source.kind !== "cloud" || !source.terminalRef) continue;
+    void deleteRemoteTaskSnapshots({
+      ownerDesktopId: source.terminalRef.ownerDesktopId,
+      localRepoId: source.terminalRef.ownerLocalRepoId
+        ?? resolveRemoteCloseLocalRepoId(workspaceTask, source.taskId, source.terminalRef.ownerLocalTaskId),
+      ownerLocalTaskId: source.terminalRef.ownerLocalTaskId,
+    }).catch((error) => {
+      console.warn("[cloud] failed to delete remote task metadata:", error);
+    });
+  }
+}
+
+function resolveRemoteCloseLocalRepoId(
+  workspaceTask: WorkspaceTask,
+  sourceTaskId: string,
+  ownerLocalTaskId: string,
+): string {
+  if (!workspaceTask.item.repo_id.startsWith("cloud:")) return workspaceTask.item.repo_id;
+  const unprefixed = sourceTaskId.startsWith("cloud:")
+    ? sourceTaskId.slice("cloud:".length)
+    : sourceTaskId;
+  const suffix = `:${ownerLocalTaskId}`;
+  return unprefixed.endsWith(suffix)
+    ? unprefixed.slice(0, -suffix.length)
+    : workspaceTask.item.repo_id.slice("cloud:".length);
 }
 
 async function advanceSelectedRemoteWorkspaceTask(workspaceTask: NonNullable<typeof selectedWorkspaceTask.value>) {

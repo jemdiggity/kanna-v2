@@ -277,12 +277,12 @@ export async function updatePipelineItemActivity(
   await db.execute(
     `INSERT INTO activity_log (pipeline_item_id, activity, seconds)
      SELECT id, activity, CAST((julianday('now') - julianday(COALESCE(activity_changed_at, created_at))) * 86400 AS INTEGER)
-     FROM pipeline_item WHERE id = ? AND activity != ?
+     FROM pipeline_item WHERE id = ? AND activity != ? AND closed_at IS NULL
      ON CONFLICT (pipeline_item_id, activity) DO UPDATE SET seconds = seconds + excluded.seconds`,
     [id, activity]
   );
   const result = await db.execute(
-    `UPDATE pipeline_item SET activity = ?, activity_changed_at = datetime('now')${unreadClause}, updated_at = datetime('now') WHERE id = ? AND activity != ?`,
+    `UPDATE pipeline_item SET activity = ?, activity_changed_at = datetime('now')${unreadClause}, updated_at = datetime('now') WHERE id = ? AND activity != ? AND closed_at IS NULL`,
     [activity, id, activity]
   );
   if (result.rowsAffected === 0) return;
