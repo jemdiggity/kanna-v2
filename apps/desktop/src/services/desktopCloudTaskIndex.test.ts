@@ -1,12 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("firebase/firestore", () => ({
-  collection: vi.fn(() => "tasks-ref"),
+  collection: vi.fn((...segments: unknown[]) => ({ kind: "collection", segments })),
   connectFirestoreEmulator: vi.fn(),
   getDocs: vi.fn(),
   getFirestore: vi.fn(),
-  query: vi.fn(() => "query-ref"),
-  where: vi.fn(() => "where-ref"),
+  query: vi.fn((collectionRef: unknown, ...constraints: unknown[]) => ({ kind: "query", collectionRef, constraints })),
+  where: vi.fn((field: string, op: string, value: unknown) => ({ kind: "where", field, op, value })),
 }));
 
 vi.mock("./desktopRelayTerminal", () => ({
@@ -376,7 +376,14 @@ describe("mapDesktopCloudTasks", () => {
   });
 
   it("does not remove cloud tasks when relay presence misses the owner", async () => {
-    vi.mocked(getDocs).mockResolvedValue({
+    vi.mocked(getDocs)
+      .mockResolvedValueOnce({
+        docs: [{
+          ref: { kind: "desktop-ref", id: "desktop-doc" },
+          data: () => ({ desktopId: "peer-offline" }),
+        }],
+      } as never)
+      .mockResolvedValueOnce({
       docs: [{
         data: () => remoteTaskSnapshot({
           ownerDesktopId: "peer-offline",
@@ -396,6 +403,7 @@ describe("mapDesktopCloudTasks", () => {
       },
     ]);
     expect(snapshot.terminalRefs).toEqual({});
+    expect(vi.mocked(getDocs)).toHaveBeenCalledTimes(2);
   });
 
   it("omits stale cloud tasks that match a locally closed task", () => {

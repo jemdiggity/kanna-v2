@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { initializeApp, getApps } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
-import { getFirestore, type Firestore } from "firebase-admin/firestore";
+import { FieldValue, getFirestore, type Firestore, type DocumentReference } from "firebase-admin/firestore";
 import { onRequest } from "firebase-functions/v2/https";
 import { buildPairingArtifacts } from "./pairing.js";
 import {
@@ -125,9 +125,11 @@ async function reconcileTaskSnapshots(
   ownerDesktopId: string,
   snapshots: CloudTaskSnapshot[],
 ): Promise<{ created: number; updated: number; deleted: number }> {
-  const existingDocs = await listOwnedTaskSnapshotDocs(db, uid, ownerDesktopId);
+  const desktopDoc = await resolveDesktopDocument(db, uid, ownerDesktopId, { create: true });
+  if (!desktopDoc) return { created: 0, updated: 0, deleted: 0 };
+  const existingDocs = await listOwnedTaskSnapshotDocs(desktopDoc);
   const mutations = buildTaskSnapshotMutations({ existingDocs, snapshots });
-  const tasksRef = db.collection("users").doc(uid).collection("tasks");
+  const tasksRef = desktopDoc.collection("tasks");
   let created = 0;
   let updated = 0;
   let deleted = 0;
@@ -153,24 +155,39 @@ async function deleteTaskSnapshotsByIdentity(
   uid: string,
   identity: TaskSnapshotIdentity,
 ): Promise<number> {
-  const existingDocs = await listOwnedTaskSnapshotDocs(db, uid, identity.ownerDesktopId);
-  const tasksRef = db.collection("users").doc(uid).collection("tasks");
+  const desktopDoc = await resolveDesktopDocument(db, uid, identity.ownerDesktopId, { create: false });
+  if (!desktopDoc) return 0;
+  const existingDocs = await listOwnedTaskSnapshotDocs(desktopDoc);
+  const tasksRef = desktopDoc.collection("tasks");
   const matches = existingDocs.filter((doc) => taskSnapshotIdentityMatchesData(identity, doc.data));
   await Promise.all(matches.map((doc) => tasksRef.doc(doc.id).delete()));
   return matches.length;
 }
 
-async function listOwnedTaskSnapshotDocs(
+async function resolveDesktopDocument(
   db: Firestore,
   uid: string,
   ownerDesktopId: string,
-): Promise<ExistingTaskSnapshotDoc[]> {
-  const snapshot = await db
-    .collection("users")
-    .doc(uid)
-    .collection("tasks")
-    .where("ownerDesktopId", "==", ownerDesktopId)
+  options: { create: boolean },
+): Promise<DocumentReference | null> {
+  const desktopsRef = db.collection("users").doc(uid).collection("desktops");
+  const existing = await desktopsRef
+    .where("desktopId", "==", ownerDesktopId)
+    .limit(1)
     .get();
+  const desktopDoc = existing.docs[0];
+  if (desktopDoc) return desktopDoc.ref;
+  if (!options.create) return null;
+  return desktopsRef.add({
+    desktopId: ownerDesktopId,
+    updatedAt: FieldValue.serverTimestamp(),
+  });
+}
+
+async function listOwnedTaskSnapshotDocs(
+  desktopDoc: DocumentReference,
+): Promise<ExistingTaskSnapshotDoc[]> {
+  const snapshot = await desktopDoc.collection("tasks").get();
 
   return snapshot.docs.map((doc) => ({
     id: doc.id,

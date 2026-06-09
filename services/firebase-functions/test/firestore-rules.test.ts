@@ -115,6 +115,13 @@ async function readDoc(bearerToken: string, path: string): Promise<Response> {
   });
 }
 
+async function deleteDoc(uid: string, path: string): Promise<Response> {
+  return fetch(`${baseUrl()}/${path}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${mockUserToken(uid)}` },
+  });
+}
+
 async function expectSucceeds(response: Promise<Response>): Promise<Response> {
   const resolved = await response;
   expect(resolved.status).toBeGreaterThanOrEqual(200);
@@ -224,16 +231,39 @@ describeWithEmulator("firestore security rules", () => {
     );
   });
 
-  it("allows users to read their own task snapshots but blocks direct task writes", async () => {
-    await seedDoc("users/user-1/tasks/cloud-task-1", {
+  it("allows users to manage their own desktop task snapshots but keeps flat task writes denied", async () => {
+    await seedDoc("users/user-1/desktops/desktop-doc-1/tasks/task-doc-1", {
       cloudTaskId: "cloud-task-1",
       ownerDesktopId: "desktop-1",
+      localRepoId: "repo-1",
       ownerLocalTaskId: "task-1",
       title: "Cloud task",
     });
 
-    await expectSucceeds(readDoc(mockUserToken("user-1"), "users/user-1/tasks/cloud-task-1"));
-    await expectDenied(readDoc(mockUserToken("user-2"), "users/user-1/tasks/cloud-task-1"));
+    await expectSucceeds(readDoc(mockUserToken("user-1"), "users/user-1/desktops/desktop-doc-1/tasks/task-doc-1"));
+    await expectDenied(readDoc(mockUserToken("user-2"), "users/user-1/desktops/desktop-doc-1/tasks/task-doc-1"));
+    await expectSucceeds(
+      clientUpdate("user-1", "users/user-1/desktops/desktop-doc-2", {
+        desktopId: "desktop-2",
+        updatedAt: "2026-05-08T00:00:00.000Z",
+      })
+    );
+    await expectSucceeds(
+      clientUpdate("user-1", "users/user-1/desktops/desktop-doc-2/tasks/task-doc-2", {
+        cloudTaskId: "cloud-task-2",
+        ownerDesktopId: "desktop-2",
+        localRepoId: "repo-1",
+        ownerLocalTaskId: "task-2",
+        title: "Cloud task 2",
+      })
+    );
+    await expectSucceeds(deleteDoc("user-1", "users/user-1/desktops/desktop-doc-2/tasks/task-doc-2"));
+    await expectDenied(
+      clientUpdate("user-2", "users/user-1/desktops/desktop-doc-3", {
+        desktopId: "desktop-3",
+        updatedAt: "2026-05-08T00:00:00.000Z",
+      })
+    );
     await expectDenied(
       clientUpdate("user-1", "users/user-1/tasks/cloud-task-2", { title: "spoofed" })
     );

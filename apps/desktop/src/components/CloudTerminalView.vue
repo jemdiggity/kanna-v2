@@ -11,6 +11,7 @@ import {
 import { createConfiguredDesktopLanTerminalClient } from "../services/desktopLanTerminal";
 import { getTerminalTheme } from "../theme/theme";
 import { useThemeRuntime } from "../theme/runtime";
+import { registerE2ETerminalBuffer } from "../e2eTerminalBuffers";
 
 const props = defineProps<{
   ownerDesktopId: string;
@@ -27,6 +28,7 @@ let fitAddon: FitAddon | null = null;
 let resizeObserver: ResizeObserver | null = null;
 let relayClient: DesktopRelayTerminalClient | null = null;
 let subscription: DesktopRelayTerminalSubscription | null = null;
+let unregisterE2ETerminalBuffer: (() => void) | null = null;
 
 function writeRemoteTerminalError(message: string) {
   status.value = "error";
@@ -95,6 +97,13 @@ function stopSubscription() {
   relayClient = null;
 }
 
+function registerTerminalBufferForE2E() {
+  unregisterE2ETerminalBuffer?.();
+  unregisterE2ETerminalBuffer = terminal
+    ? registerE2ETerminalBuffer(props.ownerTaskId, terminal)
+    : null;
+}
+
 onMounted(() => {
   terminal = new Terminal({
     allowProposedApi: true,
@@ -121,6 +130,7 @@ onMounted(() => {
   terminal.loadAddon(fitAddon);
   if (containerRef.value) {
     terminal.open(containerRef.value);
+    registerTerminalBufferForE2E();
     fitAndResizeRemote();
     resizeObserver = new ResizeObserver(() => fitAndResizeRemote());
     resizeObserver.observe(containerRef.value);
@@ -131,6 +141,7 @@ onMounted(() => {
 watch(
   () => [props.ownerDesktopId, props.ownerTaskId, props.transport],
   () => {
+    registerTerminalBufferForE2E();
     void start();
   },
 );
@@ -143,6 +154,8 @@ watch(effectiveCodeTheme, (theme) => {
 
 onUnmounted(() => {
   stopSubscription();
+  unregisterE2ETerminalBuffer?.();
+  unregisterE2ETerminalBuffer = null;
   resizeObserver?.disconnect();
   terminal?.dispose();
   terminal = null;

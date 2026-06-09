@@ -109,9 +109,9 @@ export async function listDesktopCloudTasks(
   const firestore = db === undefined ? await getConfiguredDesktopFirestore() : db;
   if (!firestore) return { repos: [], items: [], terminalRefs: {} };
 
-  const tasksRef = collection(firestore, "users", uid, "tasks");
-  const [snapshot, activeDesktopIds, currentDesktopId] = await Promise.all([
-    getDocs(query(tasksRef, where("closedAt", "==", null))),
+  const desktopsRef = collection(firestore, "users", uid, "desktops");
+  const [desktopSnapshot, activeDesktopIds, currentDesktopId] = await Promise.all([
+    getDocs(desktopsRef),
     options.activeDesktopIds === undefined
       ? listActiveDesktopIdsViaRelay().catch(() => null)
       : Promise.resolve(options.activeDesktopIds),
@@ -119,8 +119,12 @@ export async function listDesktopCloudTasks(
       ? resolveDesktopId()
       : Promise.resolve(options.currentDesktopId),
   ]);
-  const taskSnapshots = snapshot.docs
-    .map((doc) => doc.data() as DesktopCloudTaskSnapshot);
+  const nestedSnapshots = await Promise.all(desktopSnapshot.docs.map(async (desktopDoc) => {
+    const tasksRef = collection(desktopDoc.ref, "tasks");
+    const snapshot = await getDocs(query(tasksRef, where("closedAt", "==", null)));
+    return snapshot.docs.map((doc) => doc.data() as DesktopCloudTaskSnapshot);
+  }));
+  const taskSnapshots = nestedSnapshots.flat();
   return mapDesktopCloudTasks(
     taskSnapshots,
     { ...options, activeDesktopIds, currentDesktopId },
