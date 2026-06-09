@@ -15,14 +15,14 @@ SQLite is the source of truth for local task lifecycle and history. Firestore is
 The Firestore collection remains:
 
 ```text
-users/{uid}/tasks/{repo_id}:{task_id}
+users/{uid}/tasks/{auto_id}
 ```
 
-Each document represents exactly one currently open task owned by one desktop. The document id stays deterministic so all writers agree on the same record for the same local task.
+Each document represents exactly one currently open task owned by one desktop. Firestore should generate the document id. Kanna identity lives in fields, not in the document path.
 
 Required fields:
 
-- `cloudTaskId`: `{repo_id}:{task_id}`
+- `localRepoId`: local `repo.id`
 - `ownerDesktopId`: current desktop identity
 - `ownerLocalTaskId`: local `pipeline_item.id`
 - `title`, `promptSnippet`, `displayName`
@@ -35,11 +35,17 @@ Closed task fields are not part of the steady-state live index. During migration
 
 ## Write Contract
 
-When a local task is created or updated while open, publish or replace its Firestore document.
+When a local task is created or updated while open, publish or replace its Firestore document. The publisher finds an existing document by:
+
+- `ownerDesktopId`
+- `localRepoId`
+- `ownerLocalTaskId`
+
+If one exists, update it. If none exists, create a new document with an auto-generated id. If multiple exist for the same local task identity, keep the newest valid document and delete the duplicates during reconciliation.
 
 When a local task is closed, delete its Firestore document after the SQLite close succeeds. Close is still durable locally; cloud deletion only removes the remote metadata projection.
 
-Remote close follows the same contract. The remote command closes the owner SQLite row, and the initiating desktop or owner-side close path deletes the matching Firestore document id.
+Remote close follows the same contract. The remote command closes the owner SQLite row, and the initiating desktop or owner-side close path deletes any Firestore documents matching the owner desktop id, local repo id, and owner local task id.
 
 ## Reconciliation
 
@@ -49,7 +55,8 @@ On sign-in/startup and periodic cloud sync:
 2. Load local repos and open local tasks.
 3. Publish current open local tasks.
 4. Query Firestore documents owned by the current `desktopId`.
-5. Delete any owned document whose `{repo_id}:{task_id}` is not in the open local set.
+5. Delete any owned document whose `{localRepoId}:{ownerLocalTaskId}` is not in the open local set.
+6. For duplicate owned documents with the same `{localRepoId}:{ownerLocalTaskId}`, keep the newest valid document and delete the rest.
 
 This makes the system self-healing after crashes, offline closes, app upgrades, or older builds that failed to delete documents.
 
