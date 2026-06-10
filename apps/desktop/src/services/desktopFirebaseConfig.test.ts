@@ -77,6 +77,21 @@ describe("resolveDesktopFirebaseConfig", () => {
     });
   });
 
+  it("ignores workspace emulator ports when a remote cloud profile is selected", async () => {
+    const config = await resolveDesktopFirebaseConfig({
+      readEnv: async (name) => ({
+        KANNA_CLOUD_ENV: "staging",
+        KANNA_FIREBASE_AUTH_PORT: "9370",
+        KANNA_FIREBASE_FIRESTORE_PORT: "8364",
+      })[name] ?? "",
+      dev: true,
+    });
+
+    expect(config.app?.projectId).toBe("kanna-staging");
+    expect(config.authEmulator).toBeNull();
+    expect(config.firestoreEmulator).toBeNull();
+  });
+
   it("does not configure a task snapshot function outside dev", async () => {
     const config = await resolveDesktopFirebaseConfig({
       readEnv: async () => "",

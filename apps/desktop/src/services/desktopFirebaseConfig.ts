@@ -30,34 +30,45 @@ export async function resolveDesktopFirebaseConfig({
   readEnv,
   dev,
 }: ResolveDesktopFirebaseConfigOptions): Promise<DesktopFirebaseConfig> {
-  const [runtimeApp, authPort, firestorePort, runtimeFunctionsEndpoint] = await Promise.all([
+  const [runtimeApp, cloudEnv, authPort, firestorePort, runtimeFunctionsEndpoint] = await Promise.all([
     readRuntimeAppConfig(readEnv),
+    readCloudEnv(readEnv),
     readEnv("KANNA_FIREBASE_AUTH_PORT").catch(() => ""),
     readEnv("KANNA_FIREBASE_FIRESTORE_PORT").catch(() => ""),
     readEnv("KANNA_CLOUD_FUNCTIONS_ENDPOINT").catch(() => ""),
   ]);
   const app =
-    runtimeApp ?? await readProfileAppConfig(readEnv, dev) ?? readBuildTimeAppConfig(dev);
+    runtimeApp ?? readProfileAppConfig(cloudEnv, dev) ?? readBuildTimeAppConfig(dev);
+  const useEmulators = !isRemoteCloudEnv(cloudEnv);
 
   return {
     app,
-    authEmulator: parseAuthEmulatorPort(authPort),
-    firestoreEmulator: parseAuthEmulatorPort(firestorePort),
+    authEmulator: useEmulators ? parseAuthEmulatorPort(authPort) : null,
+    firestoreEmulator: useEmulators ? parseAuthEmulatorPort(firestorePort) : null,
     functionsEndpoint: parseFunctionsEndpoint(runtimeFunctionsEndpoint),
   };
 }
 
-async function readProfileAppConfig(
+async function readCloudEnv(
   readEnv: ResolveDesktopFirebaseConfigOptions["readEnv"],
+): Promise<string | undefined> {
+  return normalizeEnvValue(await readEnv("KANNA_CLOUD_ENV").catch(() => ""));
+}
+
+function readProfileAppConfig(
+  cloudEnv: string | undefined,
   dev: boolean,
-): Promise<DesktopFirebaseAppConfig | null> {
-  const cloudEnv = normalizeEnvValue(await readEnv("KANNA_CLOUD_ENV").catch(() => ""));
+): DesktopFirebaseAppConfig | null {
   if (cloudEnv === "staging") return stagingDesktopFirebaseAppConfig;
   if (cloudEnv === "production") return productionDesktopFirebaseAppConfig;
   if (cloudEnv === "local" && dev) {
     return localDesktopFirebaseAppConfig;
   }
   return null;
+}
+
+function isRemoteCloudEnv(cloudEnv: string | undefined): boolean {
+  return cloudEnv === "staging" || cloudEnv === "production";
 }
 
 async function readRuntimeAppConfig(
