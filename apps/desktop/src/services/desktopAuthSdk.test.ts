@@ -76,7 +76,7 @@ describe("getConfiguredDesktopAuthSession", () => {
       },
       authEmulator: null,
       firestoreEmulator: null,
-      functionsEndpoint: "http://127.0.0.1:5001/upsertTaskSnapshot",
+      functionsEndpoint: null,
     });
     mocks.createDesktopAuthSettingsPersistence.mockReset().mockReturnValue(MockDesktopPersistence);
     mocks.verifyFirebaseAuthIndexedDbStorage.mockReset().mockResolvedValue({ available: true });

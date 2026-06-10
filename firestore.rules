@@ -11,6 +11,7 @@ service cloud.firestore {
         'displayName',
         'photoURL',
         'locale',
+        'primaryEmail',
         'updatedAt',
       ];
     }
@@ -33,12 +34,27 @@ service cloud.firestore {
 
     function isExpectedProfileUpdate() {
       return changedUserFields().hasOnly(expectedProfileFields())
-        && !changedUserFields().hasAny(privilegedUserFields());
+        && !changedUserFields().hasAny(privilegedUserFields())
+        && isExpectedPrimaryEmail();
+    }
+
+    function isExpectedProfileCreate() {
+      return request.resource.data.keys().hasOnly(expectedProfileFields())
+        && isExpectedPrimaryEmail();
+    }
+
+    function isExpectedPrimaryEmail() {
+      return !request.resource.data.keys().hasAny(['primaryEmail'])
+        || (
+          request.auth.token.email is string
+          && request.resource.data.primaryEmail == request.auth.token.email
+        );
     }
 
     match /users/{uid} {
       allow get: if isSignedInAs(uid);
-      allow list, create, delete: if false;
+      allow list, delete: if false;
+      allow create: if isSignedInAs(uid) && isExpectedProfileCreate();
       allow update: if isSignedInAs(uid) && isExpectedProfileUpdate();
 
       match /tasks/{taskId} {

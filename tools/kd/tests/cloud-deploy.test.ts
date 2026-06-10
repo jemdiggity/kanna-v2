@@ -85,10 +85,15 @@ describe("cloud deploy runtime", () => {
   it("builds functions before deploying Firebase cloud services", async () => {
     const repoRoot = mkdtempSync(join(tmpdir(), "kd-cloud-deploy-"));
     mkdirSync(join(repoRoot, "services/firebase-functions"), { recursive: true });
-    const calls: Array<{ command: string; args: string[]; cwd?: string }> = [];
+    const calls: Array<{ command: string; args: string[]; cwd?: string; streamOutput?: boolean }> = [];
     const runner: CommandRunner = {
       async run(command, args, options) {
-        calls.push({ command, args, cwd: options?.cwd });
+        calls.push({
+          command,
+          args,
+          cwd: options?.cwd,
+          ...(options?.streamOutput === undefined ? {} : { streamOutput: options.streamOutput })
+        });
         return { exitCode: 0, stdout: "", stderr: "" };
       }
     };
@@ -103,6 +108,11 @@ describe("cloud deploy runtime", () => {
 
       expect(result).toEqual({ projectId: "prod-project", deployed: true });
       expect(calls).toEqual([
+        {
+          command: "git",
+          args: ["status", "--porcelain"],
+          cwd: repoRoot
+        },
         {
           command: "pnpm",
           args: ["--dir", "services/firebase-functions", "build"],
@@ -120,6 +130,46 @@ describe("cloud deploy runtime", () => {
             "prod-project",
             "--force"
           ],
+          cwd: repoRoot,
+          streamOutput: true
+        }
+      ]);
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to deploy Firebase cloud services from a dirty git worktree", async () => {
+    const repoRoot = mkdtempSync(join(tmpdir(), "kd-cloud-deploy-"));
+    const calls: Array<{ command: string; args: string[]; cwd?: string }> = [];
+    const runner: CommandRunner = {
+      async run(command, args, options) {
+        calls.push({
+          command,
+          args,
+          cwd: options?.cwd
+        });
+        if (command === "git" && args.join(" ") === "status --porcelain") {
+          return { exitCode: 0, stdout: " M tools/kd/src/runtime/cloud-deploy.ts\n", stderr: "" };
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+    };
+
+    try {
+      await expect(
+        deployFirebaseCloud({
+          repoRoot,
+          env: { KANNA_FIREBASE_PRODUCTION_PROJECT: "prod-project" },
+          runner,
+          environment: "production"
+        })
+      ).rejects.toThrow("Refusing to deploy cloud services from a dirty git worktree");
+
+      expect(calls).toEqual([
+        {
+          command: "git",
+          args: ["status", "--porcelain"],
           cwd: repoRoot
         }
       ]);
@@ -130,10 +180,15 @@ describe("cloud deploy runtime", () => {
 
   it("deploys the relay to Cloud Run and returns the wss URL", async () => {
     const repoRoot = mkdtempSync(join(tmpdir(), "kd-cloud-deploy-"));
-    const calls: Array<{ command: string; args: string[]; cwd?: string }> = [];
+    const calls: Array<{ command: string; args: string[]; cwd?: string; streamOutput?: boolean }> = [];
     const runner: CommandRunner = {
       async run(command, args, options) {
-        calls.push({ command, args, cwd: options?.cwd });
+        calls.push({
+          command,
+          args,
+          cwd: options?.cwd,
+          ...(options?.streamOutput === undefined ? {} : { streamOutput: options.streamOutput })
+        });
         if (command === "gcloud" && args.includes("services") && args.includes("describe")) {
           return {
             exitCode: 0,
@@ -183,7 +238,8 @@ describe("cloud deploy runtime", () => {
             "--substitutions",
             "_IMAGE=gcr.io/prod-project/kanna-relay"
           ],
-          cwd: repoRoot
+          cwd: repoRoot,
+          streamOutput: true
         },
         {
           command: "gcloud",
@@ -203,7 +259,8 @@ describe("cloud deploy runtime", () => {
             "--set-env-vars",
             "FIREBASE_PROJECT_ID=prod-project"
           ],
-          cwd: repoRoot
+          cwd: repoRoot,
+          streamOutput: true
         },
         {
           command: "gcloud",

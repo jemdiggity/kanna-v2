@@ -629,7 +629,8 @@ describe("App", () => {
     toastErrorMock.mockClear();
     cloudTasksMock.mockReset();
     cloudTasksMock.mockResolvedValue({ repos: [], items: [] });
-    reconcileDesktopTaskSnapshotsMock.mockClear();
+    reconcileDesktopTaskSnapshotsMock.mockReset();
+    reconcileDesktopTaskSnapshotsMock.mockResolvedValue(undefined);
     appUpdateStartMock.mockClear();
     appUpdateMock.dispose.mockClear();
     appUpdateMock.dismiss.mockClear();
@@ -688,6 +689,48 @@ describe("App", () => {
 
     expect(reconcileDesktopTaskSnapshotsMock).toHaveBeenCalledWith(dbMock);
     expect(cloudTasksMock).toHaveBeenCalledTimes(1);
+
+    wrapper.unmount();
+  });
+
+  it("shows one toast when periodic cloud reconciliation fails", async () => {
+    vi.useFakeTimers();
+
+    const wrapper = await mountApp(SidebarWithRepoStub);
+    reconcileDesktopTaskSnapshotsMock.mockClear();
+    toastErrorMock.mockClear();
+    reconcileDesktopTaskSnapshotsMock.mockRejectedValue(
+      Object.assign(new Error("Missing or insufficient permissions."), { code: "permission-denied" }),
+    );
+
+    await vi.advanceTimersByTimeAsync(1000);
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(1000);
+    await flushPromises();
+
+    expect(toastErrorMock).toHaveBeenCalledTimes(1);
+    expect(toastErrorMock).toHaveBeenCalledWith("Cloud sync failed: permission-denied");
+
+    wrapper.unmount();
+  });
+
+  it("shows one toast when periodic cloud task refresh fails", async () => {
+    vi.useFakeTimers();
+
+    const wrapper = await mountApp(SidebarWithRepoStub);
+    cloudTasksMock.mockClear();
+    toastErrorMock.mockClear();
+    cloudTasksMock.mockRejectedValue(
+      Object.assign(new Error("Missing or insufficient permissions."), { code: "permission-denied" }),
+    );
+
+    await vi.advanceTimersByTimeAsync(1000);
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(1000);
+    await flushPromises();
+
+    expect(toastErrorMock).toHaveBeenCalledTimes(1);
+    expect(toastErrorMock).toHaveBeenCalledWith("Cloud sync failed: permission-denied");
 
     wrapper.unmount();
   });

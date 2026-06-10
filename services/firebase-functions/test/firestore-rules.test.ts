@@ -35,7 +35,7 @@ function emulatorUrl(): string {
   return `http://${firestoreHost}/emulator/v1/projects/${PROJECT_ID}/databases/(default)/documents`;
 }
 
-function mockUserToken(uid: string): string {
+function mockUserToken(uid: string, email?: string): string {
   const iat = 0;
   const header = { alg: "none", type: "JWT" };
   const payload = {
@@ -46,6 +46,7 @@ function mockUserToken(uid: string): string {
     auth_time: iat,
     sub: uid,
     user_id: uid,
+    ...(email ? { email } : {}),
     firebase: {
       sign_in_provider: "custom",
       identities: {},
@@ -85,8 +86,8 @@ async function seedDoc(path: string, data: Record<string, unknown>): Promise<Res
   return writeDoc("owner", path, data);
 }
 
-async function clientUpdate(uid: string, path: string, data: Record<string, unknown>): Promise<Response> {
-  return writeDoc(mockUserToken(uid), path, data, Object.keys(data));
+async function clientUpdate(uid: string, path: string, data: Record<string, unknown>, email?: string): Promise<Response> {
+  return writeDoc(mockUserToken(uid, email), path, data, Object.keys(data));
 }
 
 async function writeDoc(
@@ -151,8 +152,9 @@ describeWithEmulator("firestore security rules", () => {
         displayName: "Alice",
         photoURL: "https://example.com/alice.png",
         locale: "en",
+        primaryEmail: "alice@example.com",
         updatedAt: "2026-05-08T00:00:00.000Z",
-      })
+      }, "alice@example.com")
     );
 
     const response = await expectSucceeds(readDoc("owner", "users/alice"));
@@ -161,8 +163,18 @@ describeWithEmulator("firestore security rules", () => {
       displayName: { stringValue: "Alice" },
       photoURL: { stringValue: "https://example.com/alice.png" },
       locale: { stringValue: "en" },
+      primaryEmail: { stringValue: "alice@example.com" },
       updatedAt: { stringValue: "2026-05-08T00:00:00.000Z" },
     });
+  });
+
+  it("allows authenticated users to create their own user document with their email address", async () => {
+    await expectSucceeds(
+      clientUpdate("alice", "users/alice", {
+        primaryEmail: "alice@example.com",
+        updatedAt: "2026-05-08T00:00:00.000Z",
+      }, "alice@example.com")
+    );
   });
 
   it("denies updates to other users", async () => {
@@ -194,7 +206,7 @@ describeWithEmulator("firestore security rules", () => {
     );
   });
 
-  it("denies user updates outside the expected profile field set", async () => {
+  it("denies user updates that spoof a different primary email", async () => {
     await seedDoc("users/alice", {
       createdAt: "2026-05-01T00:00:00.000Z",
       primaryEmail: "alice@example.com",
@@ -204,7 +216,7 @@ describeWithEmulator("firestore security rules", () => {
       clientUpdate("alice", "users/alice", {
         primaryEmail: "new-alice@example.com",
         updatedAt: "2026-05-08T00:00:00.000Z",
-      })
+      }, "alice@example.com")
     );
   });
 

@@ -60,22 +60,19 @@ describe("resolveDesktopFirebaseConfig", () => {
     });
   });
 
-  it("uses the production task snapshot function outside dev", async () => {
+  it("does not configure a task snapshot function outside dev", async () => {
     const config = await resolveDesktopFirebaseConfig({
       readEnv: async () => "",
       dev: false,
     });
 
-    expect(config.functionsEndpoint).toBe(
-      "https://upserttasksnapshot-eyxfartmea-uc.a.run.app",
-    );
+    expect(config.functionsEndpoint).toBeNull();
   });
 
-  it("uses workspace-provided firestore and functions ports", async () => {
+  it("uses the workspace-provided firestore port", async () => {
     const config = await resolveDesktopFirebaseConfig({
       readEnv: async (name) => {
         if (name === "KANNA_FIREBASE_FIRESTORE_PORT") return "18081";
-        if (name === "KANNA_FIREBASE_FUNCTIONS_PORT") return "15002";
         return "";
       },
       dev: true,
@@ -86,9 +83,7 @@ describe("resolveDesktopFirebaseConfig", () => {
       port: 18081,
       url: "http://127.0.0.1:18081",
     });
-    expect(config.functionsEndpoint).toBe(
-      "http://127.0.0.1:15002/kanna-local/us-central1/upsertTaskSnapshot",
-    );
+    expect(config.functionsEndpoint).toBeNull();
   });
 
   it("uses runtime Firebase app config overrides when provided", async () => {
@@ -99,7 +94,7 @@ describe("resolveDesktopFirebaseConfig", () => {
         KANNA_FIREBASE_AUTH_DOMAIN: "runtime.firebaseapp.com",
         KANNA_FIREBASE_PROJECT_ID: "runtime-project",
         KANNA_FIREBASE_APP_ID: "runtime-app-id",
-        KANNA_CLOUD_FUNCTIONS_ENDPOINT: "https://runtime.example/upsertTaskSnapshot",
+        KANNA_CLOUD_FUNCTIONS_ENDPOINT: "https://runtime.example/createPairingCode",
       })[name] ?? "",
     });
 
@@ -109,20 +104,18 @@ describe("resolveDesktopFirebaseConfig", () => {
       projectId: "runtime-project",
       appId: "runtime-app-id",
     });
-    expect(config.functionsEndpoint).toBe("https://runtime.example/upsertTaskSnapshot");
+    expect(config.functionsEndpoint).toBe("https://runtime.example/createPairingCode");
   });
 
-  it("keeps emulator ports ahead of runtime function endpoint in local tests", async () => {
+  it("keeps explicit runtime function endpoints available in local tests", async () => {
     const config = await resolveDesktopFirebaseConfig({
       dev: true,
       readEnv: async (name) => ({
         KANNA_FIREBASE_FUNCTIONS_PORT: "15002",
-        KANNA_CLOUD_FUNCTIONS_ENDPOINT: "https://runtime.example/upsertTaskSnapshot",
+        KANNA_CLOUD_FUNCTIONS_ENDPOINT: "https://runtime.example/createPairingCode",
       })[name] ?? "",
     });
 
-    expect(config.functionsEndpoint).toBe(
-      "http://127.0.0.1:15002/kanna-local/us-central1/upsertTaskSnapshot",
-    );
+    expect(config.functionsEndpoint).toBe("https://runtime.example/createPairingCode");
   });
 });

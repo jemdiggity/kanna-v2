@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
   getDocs: vi.fn(),
   addDoc: vi.fn(),
+  setDoc: vi.fn(),
   set: vi.fn(),
   delete: vi.fn(),
   commit: vi.fn(),
@@ -35,6 +36,7 @@ vi.mock("firebase/firestore", () => ({
   limit: (...args: unknown[]) => mocks.limit(...args),
   query: (...args: unknown[]) => mocks.query(...args),
   serverTimestamp: (...args: unknown[]) => mocks.serverTimestamp(...args),
+  setDoc: (...args: unknown[]) => mocks.setDoc(...args),
   where: (...args: unknown[]) => mocks.where(...args),
   writeBatch: vi.fn(() => ({
     set: (...args: unknown[]) => mocks.set(...args),
@@ -108,7 +110,17 @@ function docSnapshot(id: string, data: Record<string, unknown>) {
 }
 
 function mockDesktopDoc(id = "desktop-doc") {
-  return docSnapshot(id, { desktopId: "desktop-owner" });
+  return docSnapshot(id, { desktopId: "desktop-owner", displayName: null });
+}
+
+function taskDocAllocations(): unknown[][] {
+  return mocks.doc.mock.calls.filter(([collectionRef]) => {
+    if (!collectionRef || typeof collectionRef !== "object" || !("segments" in collectionRef)) {
+      return false;
+    }
+    const segments = (collectionRef as { segments?: unknown[] }).segments;
+    return Array.isArray(segments) && segments.at(-1) === "tasks";
+  });
 }
 
 describe("desktop cloud live task index publisher", () => {
@@ -124,8 +136,9 @@ describe("desktop cloud live task index publisher", () => {
     mocks.serverTimestamp.mockReturnValue("SERVER_TIMESTAMP");
     mocks.commit.mockResolvedValue(undefined);
     mocks.addDoc.mockResolvedValue({ kind: "doc-ref", id: "created-desktop" });
+    mocks.setDoc.mockResolvedValue(undefined);
     mocks.invoke.mockImplementation(async (command: string) => {
-      if (command === "mobile_server_status") return { desktopId: "desktop-owner" };
+      if (command === "mobile_server_status") return { desktopId: "desktop-owner", desktopName: "Studio Mac" };
       if (command === "git_remote_url") return "git@github.com:owner/repo.git";
       return "";
     });
@@ -152,8 +165,57 @@ describe("desktop cloud live task index publisher", () => {
         closedAt: null,
       }),
     );
-    expect(mocks.doc).not.toHaveBeenCalled();
+    expect(taskDocAllocations()).toHaveLength(0);
     expect(mocks.commit).toHaveBeenCalledTimes(1);
+  });
+
+  it("deletes duplicate task documents for the same local identity", async () => {
+    mocks.getDocs
+      .mockResolvedValueOnce({ docs: [mockDesktopDoc()] })
+      .mockResolvedValueOnce({ docs: [
+        docSnapshot("task-doc-primary", {
+          localRepoId: "repo-1",
+          ownerLocalTaskId: "task-duplicate",
+        }),
+        docSnapshot("task-doc-duplicate", {
+          localRepoId: "repo-1",
+          ownerLocalTaskId: "task-duplicate",
+        }),
+      ] });
+
+    await publishDesktopTaskSnapshot(null as never, openItem("task-duplicate") as never, repo() as never);
+
+    expect(mocks.set).toHaveBeenCalledWith(
+      { kind: "doc-ref", id: "task-doc-primary" },
+      expect.objectContaining({
+        localRepoId: "repo-1",
+        ownerLocalTaskId: "task-duplicate",
+      }),
+    );
+    expect(mocks.delete).toHaveBeenCalledWith({ kind: "doc-ref", id: "task-doc-duplicate" });
+    expect(mocks.commit).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves OpenCode as the task agent provider in direct Firestore writes", async () => {
+    mocks.getDocs
+      .mockResolvedValueOnce({ docs: [mockDesktopDoc()] })
+      .mockResolvedValueOnce({ docs: [] });
+
+    await publishDesktopTaskSnapshot(
+      null as never,
+      openItem("task-opencode", { agent_provider: "opencode" }) as never,
+      repo() as never,
+    );
+
+    expect(mocks.set).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.objectContaining({
+        agent: {
+          provider: "opencode",
+          type: "pty",
+        },
+      }),
+    );
   });
 
   it("creates the desktop document and task document with auto ids when missing", async () => {
@@ -167,6 +229,7 @@ describe("desktop cloud live task index publisher", () => {
       expect.objectContaining({ kind: "collection" }),
       {
         desktopId: "desktop-owner",
+        displayName: "Studio Mac",
         updatedAt: "SERVER_TIMESTAMP",
       },
     );
@@ -177,6 +240,45 @@ describe("desktop cloud live task index publisher", () => {
         localRepoId: "repo-1",
         ownerLocalTaskId: "task-new",
       }),
+    );
+  });
+
+  it("updates the signed-in user's Firestore profile with their email address", async () => {
+    mocks.getDocs
+      .mockResolvedValueOnce({ docs: [mockDesktopDoc()] })
+      .mockResolvedValueOnce({ docs: [] });
+
+    await publishDesktopTaskSnapshot(null as never, openItem("task-new") as never, repo() as never);
+
+    expect(mocks.doc).toHaveBeenCalledWith(
+      { app: "firestore" },
+      "users",
+      "user-1",
+    );
+    expect(mocks.setDoc).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "doc" }),
+      {
+        primaryEmail: "user@example.com",
+        updatedAt: "SERVER_TIMESTAMP",
+      },
+      { merge: true },
+    );
+  });
+
+  it("refreshes the existing desktop document with a friendly machine name", async () => {
+    mocks.getDocs
+      .mockResolvedValueOnce({ docs: [mockDesktopDoc()] })
+      .mockResolvedValueOnce({ docs: [] });
+
+    await publishDesktopTaskSnapshot(null as never, openItem("task-new") as never, repo() as never);
+
+    expect(mocks.setDoc).toHaveBeenCalledWith(
+      { kind: "doc-ref", id: "desktop-doc" },
+      {
+        displayName: "Studio Mac",
+        updatedAt: "SERVER_TIMESTAMP",
+      },
+      { merge: true },
     );
   });
 

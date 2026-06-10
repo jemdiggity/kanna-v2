@@ -6,6 +6,7 @@ import {
   limit,
   query,
   serverTimestamp,
+  setDoc,
   where,
   writeBatch,
   type DocumentReference,
@@ -37,8 +38,10 @@ export interface PublishDesktopTaskSnapshotsOptions {
 }
 
 interface CloudWriteContext {
+  desktopDisplayName: string;
   desktopId: string;
   firestore: Firestore;
+  primaryEmail: string | null;
   uid: string;
 }
 
@@ -127,17 +130,19 @@ async function buildSnapshot(
 }
 
 async function getCloudWriteContext(): Promise<CloudWriteContext | null> {
-  const [authSession, firestore, desktopId] = await Promise.all([
+  const [authSession, firestore, desktopIdentity] = await Promise.all([
     getConfiguredDesktopAuthSession(),
     getConfiguredDesktopFirestore(),
-    resolveDesktopId(),
+    resolveDesktopIdentity(),
   ]);
   const state = authSession.getState();
   if (state.status !== "signedIn" || !firestore) return null;
 
   return {
-    desktopId,
+    desktopDisplayName: desktopIdentity.displayName,
+    desktopId: desktopIdentity.desktopId,
     firestore,
+    primaryEmail: state.user.email,
     uid: state.user.uid,
   };
 }
@@ -147,6 +152,7 @@ async function upsertTaskSnapshots(
   snapshots: TaskSnapshotDocument[],
   options: { deleteStale: boolean },
 ): Promise<void> {
+  await updateUserProfileDocument(context);
   const desktopDoc = await resolveDesktopDocument(context, context.desktopId, { create: true });
   if (!desktopDoc) return;
 
@@ -213,12 +219,27 @@ async function resolveDesktopDocument(
     limit(1),
   ));
   const existing = snapshot.docs[0] as QueryDocumentSnapshot | undefined;
-  if (existing) return existing.ref;
+  if (existing) {
+    await setDoc(existing.ref, {
+      displayName: context.desktopDisplayName,
+      updatedAt: serverTimestamp(),
+    }, { merge: true });
+    return existing.ref;
+  }
   if (!options.create) return null;
   return addDoc(desktopsRef, {
     desktopId,
+    displayName: context.desktopDisplayName,
     updatedAt: serverTimestamp(),
   });
+}
+
+async function updateUserProfileDocument(context: CloudWriteContext): Promise<void> {
+  if (!context.primaryEmail) return;
+  await setDoc(doc(context.firestore, "users", context.uid), {
+    primaryEmail: context.primaryEmail,
+    updatedAt: serverTimestamp(),
+  }, { merge: true });
 }
 
 function groupTaskDocsByIdentity(
@@ -248,14 +269,41 @@ function identityKey(localRepoId: string, ownerLocalTaskId: string): string {
   return `${localRepoId}\u0000${ownerLocalTaskId}`;
 }
 
-async function resolveDesktopId(): Promise<string> {
-  const mobileStatus = await invoke<{ desktopId?: string }>("mobile_server_status").catch(() => null);
-  if (mobileStatus?.desktopId?.trim()) return mobileStatus.desktopId.trim();
+interface DesktopIdentity {
+  desktopId: string;
+  displayName: string;
+}
+
+async function resolveDesktopIdentity(): Promise<DesktopIdentity> {
+  const mobileStatus = await invoke<{ desktopId?: string; desktopName?: string }>("mobile_server_status").catch(() => null);
+  const desktopName = mobileStatus?.desktopName?.trim();
+  if (mobileStatus?.desktopId?.trim()) {
+    return {
+      desktopId: mobileStatus.desktopId.trim(),
+      displayName: desktopName || await resolveFallbackDesktopDisplayName(),
+    };
+  }
 
   const envId = await readEnvString("KANNA_TRANSFER_PEER_ID");
-  if (envId.trim()) return envId.trim();
+  if (envId.trim()) {
+    return {
+      desktopId: envId.trim(),
+      displayName: desktopName || await resolveFallbackDesktopDisplayName(),
+    };
+  }
 
-  return "desktop-local";
+  return {
+    desktopId: "desktop-local",
+    displayName: desktopName || await resolveFallbackDesktopDisplayName(),
+  };
+}
+
+async function resolveFallbackDesktopDisplayName(): Promise<string> {
+  const hostName = await readEnvString("HOSTNAME");
+  if (hostName.trim()) return hostName.trim();
+  const computerName = await readEnvString("COMPUTERNAME");
+  if (computerName.trim()) return computerName.trim();
+  return "Kanna Desktop";
 }
 
 async function readEnvString(name: string): Promise<string> {

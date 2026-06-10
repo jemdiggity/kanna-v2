@@ -139,6 +139,8 @@ let unsubscribeDesktopAuth: (() => void) | null = null;
 let cloudRefreshTimer: ReturnType<typeof setInterval> | null = null;
 let lanRefreshTimer: ReturnType<typeof setInterval> | null = null;
 const reconciledCloudSnapshotUsers = new Set<string>();
+let lastCloudBackendErrorToastAt: number | null = null;
+const CLOUD_BACKEND_ERROR_TOAST_INTERVAL_MS = 30_000;
 const selectedCloudRepoId = ref<string | null>(null);
 const selectedCloudItemId = ref<string | null>(null);
 
@@ -375,6 +377,27 @@ function updateCurrentDiffViewState(partial: DiffViewState) {
   diffViewStates[key] = { ...current, ...partial };
 }
 
+function showCloudBackendErrorToast(error: unknown) {
+  const now = Date.now();
+  if (
+    lastCloudBackendErrorToastAt !== null
+    && now - lastCloudBackendErrorToastAt < CLOUD_BACKEND_ERROR_TOAST_INTERVAL_MS
+  ) {
+    return;
+  }
+  lastCloudBackendErrorToastAt = now;
+  toast.error(`Cloud sync failed: ${cloudBackendErrorLabel(error)}`);
+}
+
+function cloudBackendErrorLabel(error: unknown): string {
+  if (typeof error === "object" && error !== null && "code" in error) {
+    const code = (error as { code?: unknown }).code;
+    if (typeof code === "string" && code.trim()) return code.trim();
+  }
+  if (error instanceof Error && error.message.trim()) return error.message.trim();
+  return String(error);
+}
+
 function buildCurrentFileFlowKey(): string | undefined {
   if (store.currentItem) return `item:${store.currentItem.id}`;
   if (store.selectedRepo) return `repo:${store.selectedRepo.id}`;
@@ -403,9 +426,10 @@ async function syncCloudTasksForSignedInUser(): Promise<void> {
     await refreshCloudTasksForSignedInUser();
     return;
   }
-  await reconcileDesktopTaskSnapshots(db).catch((error) =>
-    console.warn("[cloud] failed to reconcile local task snapshots:", error),
-  );
+  await reconcileDesktopTaskSnapshots(db).catch((error) => {
+    console.warn("[cloud] failed to reconcile local task snapshots:", error);
+    showCloudBackendErrorToast(error);
+  });
   await refreshCloudTasksForSignedInUser();
 }
 
@@ -431,17 +455,22 @@ async function initializeDesktopCloudAuth(): Promise<void> {
     if (state.status === "signedIn" && !reconciledCloudSnapshotUsers.has(state.user.uid)) {
       reconciledCloudSnapshotUsers.add(state.user.uid);
       void reconcileDesktopTaskSnapshots(db)
-        .catch((error) => console.warn("[cloud] failed to reconcile local task snapshots:", error))
+        .catch((error) => {
+          console.warn("[cloud] failed to reconcile local task snapshots:", error);
+          showCloudBackendErrorToast(error);
+        })
         .then(() => refreshCloudTasksForSignedInUser());
     }
-    void refreshCloudTasksForSignedInUser().catch((error) =>
-      console.warn("[cloud] failed to refresh cloud tasks:", error),
-    );
+    void refreshCloudTasksForSignedInUser().catch((error) => {
+      console.warn("[cloud] failed to refresh cloud tasks:", error);
+      showCloudBackendErrorToast(error);
+    });
   });
   cloudRefreshTimer = setInterval(() => {
-    void syncCloudTasksForSignedInUser().catch((error) =>
-      console.warn("[cloud] failed to sync cloud tasks:", error),
-    );
+    void syncCloudTasksForSignedInUser().catch((error) => {
+      console.warn("[cloud] failed to sync cloud tasks:", error);
+      showCloudBackendErrorToast(error);
+    });
   }, 1000);
 }
 

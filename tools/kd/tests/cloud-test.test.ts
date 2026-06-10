@@ -13,12 +13,11 @@ describe("cloud test runtime", () => {
     ]);
   });
 
-  it("requires staging cloud endpoint configuration", () => {
+  it("requires staging Firebase configuration without a Functions endpoint", () => {
     expect(() => requireCloudSmokeEnv({
       KANNA_FIREBASE_API_KEY: "key",
       KANNA_FIREBASE_PROJECT_ID: "project",
       KANNA_FIREBASE_APP_ID: "app",
-      KANNA_CLOUD_FUNCTIONS_ENDPOINT: "https://example/upsert",
       KANNA_CLOUD_TEST_EMAIL: "test@example.com",
       KANNA_CLOUD_TEST_PASSWORD: "password",
     }, "staging")).not.toThrow();

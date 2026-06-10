@@ -30,11 +30,10 @@ export async function resolveDesktopFirebaseConfig({
   readEnv,
   dev,
 }: ResolveDesktopFirebaseConfigOptions): Promise<DesktopFirebaseConfig> {
-  const [runtimeApp, authPort, firestorePort, functionsPort, runtimeFunctionsEndpoint] = await Promise.all([
+  const [runtimeApp, authPort, firestorePort, runtimeFunctionsEndpoint] = await Promise.all([
     readRuntimeAppConfig(readEnv),
     readEnv("KANNA_FIREBASE_AUTH_PORT").catch(() => ""),
     readEnv("KANNA_FIREBASE_FIRESTORE_PORT").catch(() => ""),
-    readEnv("KANNA_FIREBASE_FUNCTIONS_PORT").catch(() => ""),
     readEnv("KANNA_CLOUD_FUNCTIONS_ENDPOINT").catch(() => ""),
   ]);
   const app = runtimeApp ?? readBuildTimeAppConfig(dev);
@@ -43,7 +42,7 @@ export async function resolveDesktopFirebaseConfig({
     app,
     authEmulator: parseAuthEmulatorPort(authPort),
     firestoreEmulator: parseAuthEmulatorPort(firestorePort),
-    functionsEndpoint: parseFunctionsEndpoint(functionsPort, runtimeFunctionsEndpoint, dev),
+    functionsEndpoint: parseFunctionsEndpoint(runtimeFunctionsEndpoint),
   };
 }
 
@@ -123,9 +122,6 @@ const productionDesktopFirebaseAppConfig: DesktopFirebaseAppConfig = {
   measurementId: "G-091WQZN4SS",
 };
 
-const PRODUCTION_FUNCTIONS_ENDPOINT =
-  "https://upserttasksnapshot-eyxfartmea-uc.a.run.app";
-
 function compactAppConfig(config: DesktopFirebaseAppConfig): DesktopFirebaseAppConfig {
   const compacted: DesktopFirebaseAppConfig = {
     apiKey: config.apiKey,
@@ -158,19 +154,12 @@ function parseAuthEmulatorPort(
 }
 
 function parseFunctionsEndpoint(
-  rawPort: string | undefined,
   runtimeEndpoint: string | undefined,
-  dev: boolean,
 ): string | null {
-  const parsed = parseAuthEmulatorPort(rawPort);
-  if (parsed) {
-    return `${parsed.url}/kanna-local/us-central1/upsertTaskSnapshot`;
-  }
-
   const runtime = parseRuntimeFunctionsEndpoint(runtimeEndpoint);
   if (runtime) return runtime;
 
-  return dev ? null : PRODUCTION_FUNCTIONS_ENDPOINT;
+  return null;
 }
 
 function parseRuntimeFunctionsEndpoint(rawEndpoint: string | undefined): string | null {

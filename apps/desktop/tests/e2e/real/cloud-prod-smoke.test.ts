@@ -5,13 +5,27 @@ import { missingCloudSmokeEnv } from "./cloudSmokeEnv";
 const cloudEnv = process.env.KANNA_CLOUD_ENV ?? "staging";
 const missingEnv = missingCloudSmokeEnv(process.env);
 
+type FirestoreValue =
+  | { nullValue: null }
+  | { stringValue: string }
+  | { integerValue: string }
+  | { arrayValue: { values?: FirestoreValue[] } }
+  | { mapValue: { fields: FirestoreFields } };
+
+type FirestoreFields = Record<string, FirestoreValue>;
+
+interface FirestoreDocument {
+  name: string;
+  fields?: FirestoreFields;
+}
+
 function requireEnv(name: string): string {
   const value = process.env[name]?.trim();
   if (!value) throw new Error(`${name} is required for cloud smoke tests`);
   return value;
 }
 
-async function signInForIdToken(): Promise<{ idToken: string; localId: string }> {
+async function signInForIdToken(): Promise<{ idToken: string; localId: string; email: string }> {
   const apiKey = requireEnv("KANNA_FIREBASE_API_KEY");
   const email = requireEnv("KANNA_CLOUD_TEST_EMAIL");
   const password = requireEnv("KANNA_CLOUD_TEST_PASSWORD");
@@ -23,22 +37,27 @@ async function signInForIdToken(): Promise<{ idToken: string; localId: string }>
       body: JSON.stringify({ email, password, returnSecureToken: true }),
     },
   );
-  const body = await response.json().catch(() => null) as { idToken?: string; localId?: string } | null;
+  const body = await response.json().catch(() => null) as {
+    idToken?: string;
+    localId?: string;
+    email?: string;
+  } | null;
   if (!response.ok || !body?.idToken || !body.localId) {
     throw new Error(`failed to sign in cloud smoke user: ${response.status} ${JSON.stringify(body)}`);
   }
-  return { idToken: body.idToken, localId: body.localId };
+  return { idToken: body.idToken, localId: body.localId, email: body.email ?? email };
 }
 
-function smokeSnapshot(runId: string) {
+function smokeSnapshot(runId: string, title: string) {
   const now = new Date().toISOString();
   return {
     cloudTaskId: `${cloudEnv}:smoke:${runId}`,
+    localRepoId: `repo-smoke-${runId}`,
     ownerDesktopId: `desktop-smoke-${runId}`,
     ownerLocalTaskId: `task-smoke-${runId}`,
-    title: `Kanna cloud smoke ${runId}`,
+    title,
     promptSnippet: "Kanna cloud smoke",
-    displayName: `Kanna cloud smoke ${runId}`,
+    displayName: title,
     stage: "in progress",
     activity: "idle",
     status: "active",
@@ -67,93 +86,169 @@ function smokeSnapshot(runId: string) {
   };
 }
 
-async function readFirestoreDocument(
-  uid: string,
-  snapshot: ReturnType<typeof smokeSnapshot>,
-  idToken: string,
-): Promise<Record<string, unknown>> {
+function firestoreBaseUrl(): string {
   const projectId = requireEnv("KANNA_FIREBASE_PROJECT_ID");
-  const desktops = await listFirestoreDocuments(projectId, idToken, `users/${uid}/desktops`);
-  const desktop = desktops.find((doc) =>
-    readFirestoreString(doc, "desktopId") === snapshot.ownerDesktopId
-  );
-  if (!desktop?.name) {
-    throw new Error(`failed to find smoke desktop document for ${snapshot.ownerDesktopId}`);
-  }
-
-  const desktopPath = String(desktop.name).split("/documents/")[1];
-  if (!desktopPath) {
-    throw new Error(`smoke desktop document has unexpected name: ${String(desktop.name)}`);
-  }
-  const tasks = await listFirestoreDocuments(projectId, idToken, `${desktopPath}/tasks`);
-  const task = tasks.find((doc) =>
-    readFirestoreString(doc, "cloudTaskId") === snapshot.cloudTaskId
-  );
-  if (!task) {
-    throw new Error(`failed to find nested smoke task document for ${snapshot.cloudTaskId}`);
-  }
-  return task;
+  return `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents`;
 }
 
-async function listFirestoreDocuments(
-  projectId: string,
+function documentUrl(path: string): string {
+  const encodedPath = path.split("/").map(encodeURIComponent).join("/");
+  return `${firestoreBaseUrl()}/${encodedPath}`;
+}
+
+function collectionUrl(path: string): string {
+  return documentUrl(path);
+}
+
+function authHeaders(idToken: string): Record<string, string> {
+  return {
+    Authorization: `Bearer ${idToken}`,
+    "Content-Type": "application/json",
+  };
+}
+
+async function patchFirestoreDocument(
   idToken: string,
   path: string,
-): Promise<Array<Record<string, unknown>>> {
-  const encodedPath = path.split("/").map(encodeURIComponent).join("/");
-  const response = await fetch(
-    `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents/${encodedPath}`,
-    { headers: { Authorization: `Bearer ${idToken}` } },
-  );
-  const body = await response.json().catch(() => null) as { documents?: Array<Record<string, unknown>> } | null;
-  if (!response.ok || !body) {
-    throw new Error(`failed to list Firestore documents at ${path}: ${response.status} ${JSON.stringify(body)}`);
-  }
-  return body.documents ?? [];
-}
-
-function readFirestoreString(document: Record<string, unknown>, field: string): string | null {
-  const fields = document.fields as Record<string, { stringValue?: string }> | undefined;
-  return fields?.[field]?.stringValue ?? null;
-}
-
-async function publishSnapshot(
-  endpoint: string,
-  idToken: string,
-  body: Record<string, unknown>,
-): Promise<void> {
-  const response = await fetch(endpoint, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${idToken}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(body),
+  fields: FirestoreFields,
+): Promise<FirestoreDocument> {
+  const mask = Object.keys(fields).map((field) => `updateMask.fieldPaths=${encodeURIComponent(field)}`).join("&");
+  const response = await fetch(`${documentUrl(path)}?${mask}`, {
+    method: "PATCH",
+    headers: authHeaders(idToken),
+    body: JSON.stringify({ fields }),
   });
-  if (response.status !== 200) {
-    throw new Error(`failed to publish smoke snapshot: ${response.status} ${await response.text()}`);
+  return readFirestoreResponse(response, `failed to patch Firestore document at ${path}`);
+}
+
+async function createFirestoreDocument(
+  idToken: string,
+  collectionPath: string,
+  fields: FirestoreFields,
+): Promise<FirestoreDocument> {
+  const response = await fetch(collectionUrl(collectionPath), {
+    method: "POST",
+    headers: authHeaders(idToken),
+    body: JSON.stringify({ fields }),
+  });
+  return readFirestoreResponse(response, `failed to create Firestore document under ${collectionPath}`);
+}
+
+async function getFirestoreDocument(
+  idToken: string,
+  path: string,
+): Promise<FirestoreDocument> {
+  const response = await fetch(documentUrl(path), {
+    headers: { Authorization: `Bearer ${idToken}` },
+  });
+  return readFirestoreResponse(response, `failed to read Firestore document at ${path}`);
+}
+
+async function deleteFirestoreDocument(
+  idToken: string,
+  path: string,
+): Promise<void> {
+  const response = await fetch(documentUrl(path), {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${idToken}` },
+  });
+  if (!response.ok && response.status !== 404) {
+    throw new Error(`failed to delete Firestore document at ${path}: ${response.status} ${await response.text()}`);
   }
+}
+
+async function expectFirestoreWriteDenied(
+  idToken: string,
+  path: string,
+  fields: FirestoreFields,
+): Promise<void> {
+  const response = await fetch(documentUrl(path), {
+    method: "PATCH",
+    headers: authHeaders(idToken),
+    body: JSON.stringify({ fields }),
+  });
+  if (response.ok) await deleteFirestoreDocument(idToken, path).catch(() => undefined);
+  expect(response.status).toBe(403);
+}
+
+async function readFirestoreResponse(response: Response, message: string): Promise<FirestoreDocument> {
+  const body = await response.json().catch(() => null) as FirestoreDocument | Record<string, unknown> | null;
+  if (!response.ok || !body || typeof body.name !== "string") {
+    throw new Error(`${message}: ${response.status} ${JSON.stringify(body)}`);
+  }
+  return body as FirestoreDocument;
+}
+
+function documentPath(document: FirestoreDocument): string {
+  const path = document.name.split("/documents/")[1];
+  if (!path) throw new Error(`Firestore document has unexpected name: ${document.name}`);
+  return path;
+}
+
+function snapshotFields(snapshot: ReturnType<typeof smokeSnapshot>): FirestoreFields {
+  return toFirestoreFields(snapshot);
+}
+
+function toFirestoreFields(value: Record<string, unknown>): FirestoreFields {
+  return Object.fromEntries(
+    Object.entries(value).map(([key, entry]) => [key, toFirestoreValue(entry)]),
+  );
+}
+
+function toFirestoreValue(value: unknown): FirestoreValue {
+  if (value === null || value === undefined) return { nullValue: null };
+  if (typeof value === "string") return { stringValue: value };
+  if (typeof value === "number") return { integerValue: String(value) };
+  if (Array.isArray(value)) return { arrayValue: { values: value.map(toFirestoreValue) } };
+  if (typeof value === "object") return { mapValue: { fields: toFirestoreFields(value as Record<string, unknown>) } };
+  throw new Error(`unsupported Firestore smoke value: ${String(value)}`);
+}
+
+function readFirestoreString(document: FirestoreDocument, field: string): string | null {
+  const value = document.fields?.[field];
+  return value && "stringValue" in value ? value.stringValue : null;
 }
 
 describe.skipIf(missingEnv.length > 0)("cloud production/staging smoke", () => {
-  it("publishes a smoke task through the deployed function and reads it from Firestore", async () => {
+  it("writes and reads nested desktop task snapshots through direct Firestore rules", async () => {
     const runId = randomUUID().slice(0, 8);
-    const { idToken, localId } = await signInForIdToken();
-    const endpoint = requireEnv("KANNA_CLOUD_FUNCTIONS_ENDPOINT");
-    const snapshot = smokeSnapshot(runId);
+    const { idToken, localId, email } = await signInForIdToken();
+    const title = `Kanna cloud smoke ${runId}`;
+    const updatedTitle = `${title} updated`;
+    let desktopPath: string | null = null;
+    let taskPath: string | null = null;
+
     try {
-      await publishSnapshot(endpoint, idToken, snapshot);
-      const document = await readFirestoreDocument(localId, snapshot, idToken);
-      expect(JSON.stringify(document)).toContain(snapshot.title);
+      await patchFirestoreDocument(idToken, `users/${localId}`, {
+        primaryEmail: { stringValue: email },
+        updatedAt: { stringValue: new Date().toISOString() },
+      });
+
+      const desktop = await createFirestoreDocument(idToken, `users/${localId}/desktops`, {
+        desktopId: { stringValue: `desktop-smoke-${runId}` },
+        displayName: { stringValue: "Kanna Smoke Desktop" },
+        updatedAt: { stringValue: new Date().toISOString() },
+      });
+      desktopPath = documentPath(desktop);
+
+      const task = await createFirestoreDocument(idToken, `${desktopPath}/tasks`, snapshotFields(smokeSnapshot(runId, title)));
+      taskPath = documentPath(task);
+
+      const createdTask = await getFirestoreDocument(idToken, taskPath);
+      expect(readFirestoreString(createdTask, "title")).toBe(title);
+      expect(readFirestoreString(createdTask, "ownerLocalTaskId")).toBe(`task-smoke-${runId}`);
+      expect(readFirestoreString(createdTask, "localRepoId")).toBe(`repo-smoke-${runId}`);
+
+      await patchFirestoreDocument(idToken, taskPath, snapshotFields(smokeSnapshot(runId, updatedTitle)));
+      const updatedTask = await getFirestoreDocument(idToken, taskPath);
+      expect(readFirestoreString(updatedTask, "title")).toBe(updatedTitle);
+
+      await expectFirestoreWriteDenied(idToken, `users/${localId}/tasks/${runId}`, {
+        title: { stringValue: "flat task writes stay denied" },
+      });
     } finally {
-      await publishSnapshot(endpoint, idToken, {
-        action: "delete",
-        identity: {
-          ownerDesktopId: snapshot.ownerDesktopId,
-          localRepoId: snapshot.repo.cloudRepoId,
-          ownerLocalTaskId: snapshot.ownerLocalTaskId,
-        },
-      }).catch(() => undefined);
+      if (taskPath) await deleteFirestoreDocument(idToken, taskPath).catch(() => undefined);
+      if (desktopPath) await deleteFirestoreDocument(idToken, desktopPath).catch(() => undefined);
     }
   });
 });

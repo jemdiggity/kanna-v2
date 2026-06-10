@@ -197,6 +197,10 @@ When asked to launch the mobile app against production, use `./kd mobile up --pr
 ./kd release ship --dry-run  # build/sign release artifacts without publishing
 ./kd release ship --release  # tag, publish, and upload updater manifest
 
+# Cloud deploy
+./kd cloud deploy --staging     # deploy Firebase cloud services to staging
+./kd cloud deploy --production  # deploy Firebase cloud services to production
+
 # Unit tests
 pnpm test                     # all packages via turborepo
 cd packages/core && pnpm test # core package only
@@ -232,6 +236,10 @@ cd apps/desktop/src-tauri && cargo test --test agent_cli_integration -- --ignore
 ### First build in a worktree
 
 The first `./kd dev up` in a fresh worktree compiles ~523 Rust crates (the daemon builds quickly, but the full Tauri app takes several minutes). Subsequent builds are incremental.
+
+### Cloud deployment
+
+Always use `./kd cloud deploy --staging` or `./kd cloud deploy --production` for Firebase backend deployments. Do not run `firebase deploy`, `pnpm exec firebase deploy`, or other Firebase CLI deploy commands directly. If `kd cloud deploy` hangs, hides necessary output, or otherwise fails, fix the `kd` deployment workflow and rerun the deployment through `kd`.
 
 ## Architecture
 
