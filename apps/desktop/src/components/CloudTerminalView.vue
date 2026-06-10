@@ -59,7 +59,7 @@ async function start() {
       ? await createConfiguredDesktopLanTerminalClient()
       : await createConfiguredDesktopRelayTerminalClient();
     if (!relayClient) {
-      throw new Error(props.transport === "lan" ? "LAN terminal is unavailable." : "Relay is not configured for this desktop.");
+      throw new Error(props.transport === "lan" ? "LAN terminal is unavailable." : "Cloud transport is not configured for this desktop.");
     }
     subscription = relayClient.observeTerminal({
       desktopId: props.ownerDesktopId,
