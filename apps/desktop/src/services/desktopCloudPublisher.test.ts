@@ -139,6 +139,7 @@ describe("desktop cloud live task index publisher", () => {
     mocks.setDoc.mockResolvedValue(undefined);
     mocks.invoke.mockImplementation(async (command: string) => {
       if (command === "mobile_server_status") return { desktopId: "desktop-owner", desktopName: "Studio Mac" };
+      if (command === "read_env_var") return "";
       if (command === "git_remote_url") return "git@github.com:owner/repo.git";
       return "";
     });
@@ -239,6 +240,41 @@ describe("desktop cloud live task index publisher", () => {
       expect.objectContaining({
         localRepoId: "repo-1",
         ownerLocalTaskId: "task-new",
+      }),
+    );
+  });
+
+  it("publishes saved desktop credentials into the desktop document for relay auth", async () => {
+    mocks.invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (command === "read_env_var" && args?.name === "KANNA_DAEMON_DIR") return "/daemon";
+      if (command === "read_text_file" && args?.path === "/daemon/desktop-identity.json") {
+        return JSON.stringify({
+          desktop_id: "desktop-cloud",
+          desktop_secret: "secret-cloud",
+        });
+      }
+      if (command === "mobile_server_status") return { desktopId: "desktop-local", desktopName: "Studio Mac" };
+      if (command === "git_remote_url") return "git@github.com:owner/repo.git";
+      return "";
+    });
+    mocks.getDocs
+      .mockResolvedValueOnce({ docs: [docSnapshot("desktop-doc", { desktopId: "desktop-cloud" })] })
+      .mockResolvedValueOnce({ docs: [] });
+
+    await publishDesktopTaskSnapshot(null as never, openItem("task-new") as never, repo() as never);
+
+    expect(mocks.setDoc).toHaveBeenCalledWith(
+      { kind: "doc-ref", id: "desktop-doc" },
+      expect.objectContaining({
+        displayName: "Studio Mac",
+        desktopSecret: "secret-cloud",
+      }),
+      { merge: true },
+    );
+    expect(mocks.set).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.objectContaining({
+        ownerDesktopId: "desktop-cloud",
       }),
     );
   });

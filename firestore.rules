@@ -80,6 +80,20 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    match /desktopCredentials/{desktopId} {
+      allow read, delete: if false;
+      allow create, update: if request.auth != null
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.desktopId == desktopId
+        && request.resource.data.keys().hasOnly([
+          'desktopId',
+          'desktopSecret',
+          'displayName',
+          'uid',
+          'updatedAt',
+        ]);
+    }
+
     match /{document=**} {
       allow read, write: if false;
     }

@@ -243,6 +243,37 @@ describeWithEmulator("firestore security rules", () => {
     );
   });
 
+  it("allows owners to write desktop credential docs while denying client reads", async () => {
+    await expectSucceeds(
+      clientUpdate("alice", "desktopCredentials/desktop-1", {
+        desktopId: "desktop-1",
+        desktopSecret: "secret-1",
+        displayName: "Alice Mac",
+        uid: "alice",
+        updatedAt: "2026-05-08T00:00:00.000Z",
+      })
+    );
+    await expectDenied(readDoc(mockUserToken("alice"), "desktopCredentials/desktop-1"));
+    await expectDenied(
+      clientUpdate("bob", "desktopCredentials/desktop-1", {
+        desktopId: "desktop-1",
+        desktopSecret: "secret-2",
+        displayName: "Bob Mac",
+        uid: "alice",
+        updatedAt: "2026-05-08T00:00:01.000Z",
+      })
+    );
+    await expectDenied(
+      clientUpdate("alice", "desktopCredentials/desktop-2", {
+        desktopId: "desktop-1",
+        desktopSecret: "secret-1",
+        displayName: "Alice Mac",
+        uid: "alice",
+        updatedAt: "2026-05-08T00:00:02.000Z",
+      })
+    );
+  });
+
   it("allows users to manage their own desktop task snapshots but keeps flat task writes denied", async () => {
     await seedDoc("users/user-1/desktops/desktop-doc-1/tasks/task-doc-1", {
       cloudTaskId: "cloud-task-1",

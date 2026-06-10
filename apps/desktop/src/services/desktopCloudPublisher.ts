@@ -40,6 +40,7 @@ export interface PublishDesktopTaskSnapshotsOptions {
 interface CloudWriteContext {
   desktopDisplayName: string;
   desktopId: string;
+  desktopSecret: string | null;
   firestore: Firestore;
   primaryEmail: string | null;
   uid: string;
@@ -141,6 +142,7 @@ async function getCloudWriteContext(): Promise<CloudWriteContext | null> {
   return {
     desktopDisplayName: desktopIdentity.displayName,
     desktopId: desktopIdentity.desktopId,
+    desktopSecret: desktopIdentity.desktopSecret,
     firestore,
     primaryEmail: state.user.email,
     uid: state.user.uid,
@@ -155,6 +157,7 @@ async function upsertTaskSnapshots(
   await updateUserProfileDocument(context);
   const desktopDoc = await resolveDesktopDocument(context, context.desktopId, { create: true });
   if (!desktopDoc) return;
+  await publishDesktopCredential(context);
 
   const tasksRef = collection(desktopDoc, "tasks");
   const existingDocs = await getDocs(tasksRef);
@@ -222,6 +225,7 @@ async function resolveDesktopDocument(
   if (existing) {
     await setDoc(existing.ref, {
       displayName: context.desktopDisplayName,
+      ...(context.desktopSecret ? { desktopSecret: context.desktopSecret } : {}),
       updatedAt: serverTimestamp(),
     }, { merge: true });
     return existing.ref;
@@ -230,8 +234,20 @@ async function resolveDesktopDocument(
   return addDoc(desktopsRef, {
     desktopId,
     displayName: context.desktopDisplayName,
+    ...(context.desktopSecret ? { desktopSecret: context.desktopSecret } : {}),
     updatedAt: serverTimestamp(),
   });
+}
+
+async function publishDesktopCredential(context: CloudWriteContext): Promise<void> {
+  if (!context.desktopSecret) return;
+  await setDoc(doc(context.firestore, "desktopCredentials", context.desktopId), {
+    desktopId: context.desktopId,
+    desktopSecret: context.desktopSecret,
+    displayName: context.desktopDisplayName,
+    uid: context.uid,
+    updatedAt: serverTimestamp(),
+  }, { merge: true });
 }
 
 async function updateUserProfileDocument(context: CloudWriteContext): Promise<void> {
@@ -272,14 +288,24 @@ function identityKey(localRepoId: string, ownerLocalTaskId: string): string {
 interface DesktopIdentity {
   desktopId: string;
   displayName: string;
+  desktopSecret: string | null;
 }
 
 async function resolveDesktopIdentity(): Promise<DesktopIdentity> {
+  const savedIdentity = await readSavedDesktopIdentity();
   const mobileStatus = await invoke<{ desktopId?: string; desktopName?: string }>("mobile_server_status").catch(() => null);
   const desktopName = mobileStatus?.desktopName?.trim();
+  if (savedIdentity?.desktopId) {
+    return {
+      desktopId: savedIdentity.desktopId,
+      desktopSecret: savedIdentity.desktopSecret,
+      displayName: desktopName || await resolveFallbackDesktopDisplayName(),
+    };
+  }
   if (mobileStatus?.desktopId?.trim()) {
     return {
       desktopId: mobileStatus.desktopId.trim(),
+      desktopSecret: null,
       displayName: desktopName || await resolveFallbackDesktopDisplayName(),
     };
   }
@@ -288,14 +314,37 @@ async function resolveDesktopIdentity(): Promise<DesktopIdentity> {
   if (envId.trim()) {
     return {
       desktopId: envId.trim(),
+      desktopSecret: null,
       displayName: desktopName || await resolveFallbackDesktopDisplayName(),
     };
   }
 
   return {
     desktopId: "desktop-local",
+    desktopSecret: null,
     displayName: desktopName || await resolveFallbackDesktopDisplayName(),
   };
+}
+
+async function readSavedDesktopIdentity(): Promise<{ desktopId: string; desktopSecret: string } | null> {
+  const daemonDir = await readEnvString("KANNA_DAEMON_DIR");
+  if (!daemonDir.trim()) return null;
+  const raw = await invoke<string>("read_text_file", {
+    path: `${daemonDir.trim()}/desktop-identity.json`,
+  }).catch(() => "");
+  if (!raw.trim()) return null;
+  try {
+    const parsed = JSON.parse(raw) as { desktop_id?: unknown; desktop_secret?: unknown };
+    if (typeof parsed.desktop_id !== "string" || typeof parsed.desktop_secret !== "string") {
+      return null;
+    }
+    return {
+      desktopId: parsed.desktop_id,
+      desktopSecret: parsed.desktop_secret,
+    };
+  } catch {
+    return null;
+  }
 }
 
 async function resolveFallbackDesktopDisplayName(): Promise<string> {
