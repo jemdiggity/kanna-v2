@@ -1,4 +1,5 @@
 export interface ExpoFirebaseEnv {
+  EXPO_PUBLIC_KANNA_CLOUD_ENV?: string;
   EXPO_PUBLIC_FIREBASE_API_KEY?: string;
   EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN?: string;
   EXPO_PUBLIC_FIREBASE_PROJECT_ID?: string;
@@ -40,7 +41,7 @@ export function parseMobileFirebaseConfig(
   env: ExpoFirebaseEnv = readExpoFirebaseEnv()
 ): MobileFirebaseConfig {
   const authEmulator = parseAuthEmulator(env);
-  const appDefaults = authEmulator ? null : productionMobileFirebaseAppConfig;
+  const appDefaults = authEmulator ? null : profileMobileFirebaseAppConfig(env);
   const apiKey =
     normalizeEnvValue(env.EXPO_PUBLIC_FIREBASE_API_KEY) ?? appDefaults?.apiKey;
   const projectId =
@@ -73,6 +74,34 @@ export function parseMobileFirebaseConfig(
     authEmulator
   };
 }
+
+function profileMobileFirebaseAppConfig(env: ExpoFirebaseEnv): MobileFirebaseAppConfig {
+  const cloudEnv = normalizeEnvValue(env.EXPO_PUBLIC_KANNA_CLOUD_ENV);
+  if (cloudEnv === "staging") {
+    return stagingMobileFirebaseAppConfig;
+  }
+  if (cloudEnv === "local") {
+    return localMobileFirebaseAppConfig;
+  }
+  return productionMobileFirebaseAppConfig;
+}
+
+const localMobileFirebaseAppConfig: MobileFirebaseAppConfig = {
+  apiKey: "kanna-local",
+  authDomain: "kanna-local.firebaseapp.com",
+  projectId: "kanna-local",
+  appId: "kanna-mobile-local"
+};
+
+const stagingMobileFirebaseAppConfig: MobileFirebaseAppConfig = {
+  apiKey: "AIzaSyCWjrhJDZobI1LUwL70ACSZg_GewcYnn3Q",
+  authDomain: "kanna-staging.firebaseapp.com",
+  projectId: "kanna-staging",
+  storageBucket: "kanna-staging.firebasestorage.app",
+  messagingSenderId: "1073113006696",
+  appId: "1:1073113006696:web:3bca4e7586f5587e1c71dd",
+  measurementId: "G-BZNH6TMDCK"
+};
 
 const productionMobileFirebaseAppConfig: MobileFirebaseAppConfig = {
   apiKey: "AIzaSyCi-PNR-oVOXjEKGJvDOF6wM-1J3Fd3U4k",

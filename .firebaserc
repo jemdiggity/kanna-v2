@@ -1,6 +1,7 @@
 {
   "projects": {
     "default": "kanna-local",
+    "staging": "kanna-staging",
     "production": "kanna-build"
   }
 }

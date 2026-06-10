@@ -36,7 +36,8 @@ export async function resolveDesktopFirebaseConfig({
     readEnv("KANNA_FIREBASE_FIRESTORE_PORT").catch(() => ""),
     readEnv("KANNA_CLOUD_FUNCTIONS_ENDPOINT").catch(() => ""),
   ]);
-  const app = runtimeApp ?? readBuildTimeAppConfig(dev);
+  const app =
+    runtimeApp ?? await readProfileAppConfig(readEnv, dev) ?? readBuildTimeAppConfig(dev);
 
   return {
     app,
@@ -44,6 +45,19 @@ export async function resolveDesktopFirebaseConfig({
     firestoreEmulator: parseAuthEmulatorPort(firestorePort),
     functionsEndpoint: parseFunctionsEndpoint(runtimeFunctionsEndpoint),
   };
+}
+
+async function readProfileAppConfig(
+  readEnv: ResolveDesktopFirebaseConfigOptions["readEnv"],
+  dev: boolean,
+): Promise<DesktopFirebaseAppConfig | null> {
+  const cloudEnv = normalizeEnvValue(await readEnv("KANNA_CLOUD_ENV").catch(() => ""));
+  if (cloudEnv === "staging") return stagingDesktopFirebaseAppConfig;
+  if (cloudEnv === "production") return productionDesktopFirebaseAppConfig;
+  if (cloudEnv === "local" && dev) {
+    return localDesktopFirebaseAppConfig;
+  }
+  return null;
 }
 
 async function readRuntimeAppConfig(
@@ -101,16 +115,28 @@ function readBuildTimeAppConfig(dev: boolean): DesktopFirebaseAppConfig | null {
   }
 
   if (dev) {
-    return {
-      apiKey: "kanna-local",
-      authDomain: "kanna-local.firebaseapp.com",
-      projectId: "kanna-local",
-      appId: "kanna-desktop-local",
-    };
+    return localDesktopFirebaseAppConfig;
   }
 
   return productionDesktopFirebaseAppConfig;
 }
+
+const localDesktopFirebaseAppConfig: DesktopFirebaseAppConfig = {
+  apiKey: "kanna-local",
+  authDomain: "kanna-local.firebaseapp.com",
+  projectId: "kanna-local",
+  appId: "kanna-desktop-local",
+};
+
+const stagingDesktopFirebaseAppConfig: DesktopFirebaseAppConfig = {
+  apiKey: "AIzaSyCWjrhJDZobI1LUwL70ACSZg_GewcYnn3Q",
+  authDomain: "kanna-staging.firebaseapp.com",
+  projectId: "kanna-staging",
+  storageBucket: "kanna-staging.firebasestorage.app",
+  messagingSenderId: "1073113006696",
+  appId: "1:1073113006696:web:3bca4e7586f5587e1c71dd",
+  measurementId: "G-BZNH6TMDCK",
+};
 
 const productionDesktopFirebaseAppConfig: DesktopFirebaseAppConfig = {
   apiKey: "AIzaSyCi-PNR-oVOXjEKGJvDOF6wM-1J3Fd3U4k",
