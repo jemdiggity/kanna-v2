@@ -15,6 +15,8 @@ import {
   insertWorktree,
   upsertTerminalSession,
   insertPipelineItem,
+  insertTaskBlocker,
+  hasCircularDependency,
   updatePipelineItemStage,
   markPipelineItemTearingDown,
   updatePipelineItemTags,
@@ -48,6 +50,7 @@ import type {
   PipelineItem,
   Setting,
   OperatorEvent,
+  TaskBlocker,
   TaskPort,
   TerminalSession,
   TrustedPeer,
@@ -64,6 +67,7 @@ function createMockDb(): DbHandle & {
   tables: {
     repo: Repo[];
     pipeline_item: PipelineItem[];
+    task_blocker: TaskBlocker[];
     task_port: TaskPort[];
     terminal_session: TerminalSession[];
     worktree: Worktree[];
@@ -73,10 +77,14 @@ function createMockDb(): DbHandle & {
     settings: Setting[];
     operator_event: Omit<OperatorEvent, "id" | "created_at">[];
   };
+  setNow: (isoTimestamp: string) => void;
 } {
+  let nowIso = "2026-01-01T00:00:00.000Z";
+  const currentTimestamp = () => nowIso;
   const tables = {
     repo: [] as Repo[],
     pipeline_item: [] as PipelineItem[],
+    task_blocker: [] as TaskBlocker[],
     task_port: [] as TaskPort[],
     terminal_session: [] as TerminalSession[],
     worktree: [] as Worktree[],
@@ -89,6 +97,9 @@ function createMockDb(): DbHandle & {
 
   return {
     tables,
+    setNow(isoTimestamp: string) {
+      nowIso = isoTimestamp;
+    },
     async execute(query: string, bindValues?: unknown[]) {
       const q = query.trim().toUpperCase();
 
@@ -101,8 +112,8 @@ function createMockDb(): DbHandle & {
           default_branch,
           hidden: 0,
           sort_order: tables.repo.length,
-          created_at: new Date().toISOString(),
-          last_opened_at: new Date().toISOString(),
+          created_at: currentTimestamp(),
+          last_opened_at: currentTimestamp(),
         });
       } else if (q.startsWith("DELETE FROM REPO")) {
         const [id] = bindValues as string[];
@@ -145,19 +156,28 @@ function createMockDb(): DbHandle & {
           port_offset: (port_offset as number | null) ?? null,
           port_env: (port_env as string | null) ?? null,
           activity: (activity as string) || "idle",
-          activity_changed_at: new Date().toISOString(),
+          activity_changed_at: currentTimestamp(),
           unread_at: null,
           closed_at: null,
           display_name: null,
+          last_output_preview: null,
           base_ref: null,
           agent_session_id: null,
           previous_stage: null,
           teardown_started_at: null,
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
+          created_at: currentTimestamp(),
+          updated_at: currentTimestamp(),
           pinned: 0,
           pin_order: null,
         } as PipelineItem);
+      } else if (q.startsWith("INSERT OR IGNORE INTO TASK_BLOCKER")) {
+        const [blocked_item_id, blocker_item_id] = bindValues as [string, string];
+        const existing = tables.task_blocker.find(
+          (row) => row.blocked_item_id === blocked_item_id && row.blocker_item_id === blocker_item_id,
+        );
+        if (!existing) {
+          tables.task_blocker.push({ blocked_item_id, blocker_item_id });
+        }
       } else if (q.startsWith("INSERT OR IGNORE INTO TASK_PORT")) {
         const [port, pipeline_item_id, env_name] = bindValues as [number, string, string];
         const existing = tables.task_port.find((p) => p.port === port);
@@ -440,6 +460,11 @@ function createMockDb(): DbHandle & {
         return tables.pipeline_item.filter(
           (p) => p.repo_id === repoId
         ) as unknown as T[];
+      } else if (q.startsWith("SELECT * FROM TASK_BLOCKER WHERE BLOCKED_ITEM_ID")) {
+        const [blockedItemId] = bindValues as [string];
+        return tables.task_blocker.filter(
+          (row) => row.blocked_item_id === blockedItemId
+        ) as unknown as T[];
       } else if (q.startsWith("SELECT * FROM TASK_PORT WHERE PIPELINE_ITEM_ID")) {
         const [itemId] = bindValues as [string];
         return tables.task_port.filter(
@@ -514,13 +539,14 @@ describe("repo queries", () => {
   });
 
   it("listRepos keeps newly added repos at the bottom", async () => {
+    db.setNow("2026-01-01T00:00:00.000Z");
     await insertRepo(db, {
       id: "r1",
       path: "/home/user/project-a",
       name: "project-a",
       default_branch: "main",
     });
-    await new Promise((resolve) => setTimeout(resolve, 5));
+    db.setNow("2026-01-01T00:00:01.000Z");
     await insertRepo(db, {
       id: "r2",
       path: "/home/user/project-b",
@@ -942,6 +968,44 @@ describe("task resource queries", () => {
         daemon_session_id: "daemon-task-1",
       }),
     ]);
+  });
+});
+
+describe("task blocker cycle detection", () => {
+  let db: ReturnType<typeof createMockDb>;
+
+  beforeEach(() => {
+    db = createMockDb();
+  });
+
+  it("returns false when the proposed blocker has no path back to the blocked item", async () => {
+    await insertTaskBlocker(db, "B", "C");
+
+    await expect(hasCircularDependency(db, "A", ["B"])).resolves.toBe(false);
+  });
+
+  it("returns true for a direct cycle", async () => {
+    await insertTaskBlocker(db, "B", "A");
+
+    await expect(hasCircularDependency(db, "A", ["B"])).resolves.toBe(true);
+  });
+
+  it("returns true for a transitive cycle", async () => {
+    await insertTaskBlocker(db, "B", "C");
+    await insertTaskBlocker(db, "C", "A");
+
+    await expect(hasCircularDependency(db, "A", ["B"])).resolves.toBe(true);
+  });
+
+  it("returns true for self-blocking", async () => {
+    await expect(hasCircularDependency(db, "A", ["A"])).resolves.toBe(true);
+  });
+
+  it("returns false for diamond-shaped non-cycles", async () => {
+    await insertTaskBlocker(db, "B", "D");
+    await insertTaskBlocker(db, "C", "D");
+
+    await expect(hasCircularDependency(db, "A", ["B", "C"])).resolves.toBe(false);
   });
 });
 
