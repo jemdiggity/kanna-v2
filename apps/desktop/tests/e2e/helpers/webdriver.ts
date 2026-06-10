@@ -22,6 +22,20 @@ interface ElementRect {
   height: number;
 }
 
+export interface WindowRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface WindowRectInput {
+  x?: number;
+  y?: number;
+  width: number;
+  height: number;
+}
+
 export class WebDriverClient {
   private baseUrl: string;
   private sessionId: string | null = null;
@@ -152,6 +166,15 @@ export class WebDriverClient {
   async getElementRect(elementId: string): Promise<ElementRect> {
     const res = await this.get(`/session/${this.sid}/element/${elementId}/rect`);
     return res.value as ElementRect;
+  }
+
+  async getWindowRect(): Promise<WindowRect> {
+    const res = await this.get(`/session/${this.sid}/window/rect`);
+    return res.value as WindowRect;
+  }
+
+  async setWindowRect(rect: WindowRectInput): Promise<void> {
+    await this.post(`/session/${this.sid}/window/rect`, rect);
   }
 
   async dragElementToElement(sourceElementId: string, targetElementId: string): Promise<void> {

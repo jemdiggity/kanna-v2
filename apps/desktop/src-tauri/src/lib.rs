@@ -57,7 +57,10 @@ fn should_restore_default_window_size(width: u32, height: u32, policy: &WindowSi
     width < policy.min_width || height < policy.min_height
 }
 
-fn restore_default_size_if_too_small(window: &tauri::WebviewWindow, policy: &WindowSizePolicy) {
+fn restore_default_size_if_too_small<R: tauri::Runtime>(
+    window: &tauri::Window<R>,
+    policy: &WindowSizePolicy,
+) {
     match window.inner_size() {
         Ok(size) if should_restore_default_window_size(size.width, size.height, policy) => {
             if let Err(error) = window.set_size(tauri::PhysicalSize {
@@ -72,6 +75,27 @@ fn restore_default_size_if_too_small(window: &tauri::WebviewWindow, policy: &Win
             eprintln!("[window] failed to read restored window size: {}", error);
         }
     }
+}
+
+fn schedule_restore_default_size_if_too_small<R: tauri::Runtime + 'static>(
+    window: tauri::Window<R>,
+    policy: &'static WindowSizePolicy,
+) {
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        restore_default_size_if_too_small(&window, policy);
+    });
+}
+
+fn window_size_guard_plugin<R: tauri::Runtime + 'static>() -> tauri::plugin::TauriPlugin<R> {
+    tauri::plugin::Builder::new("kanna-window-size-guard")
+        .on_window_ready(|window| {
+            if window.label() == "main" {
+                restore_default_size_if_too_small(&window, &MAIN_WINDOW_SIZE_POLICY);
+                schedule_restore_default_size_if_too_small(window, &MAIN_WINDOW_SIZE_POLICY);
+            }
+        })
+        .build()
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -619,6 +643,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
+        .plugin(window_size_guard_plugin())
         .plugin(tauri_plugin_updater::Builder::new().build());
 
     #[cfg(debug_assertions)]
@@ -652,7 +677,15 @@ pub fn run() {
                 setup_fn_f_fullscreen(app.handle().clone());
             }
             if let Some(main_win) = app.get_webview_window("main") {
-                restore_default_size_if_too_small(&main_win, &MAIN_WINDOW_SIZE_POLICY);
+                let native_window = main_win.as_ref().window();
+                restore_default_size_if_too_small(
+                    &native_window,
+                    &MAIN_WINDOW_SIZE_POLICY,
+                );
+                schedule_restore_default_size_if_too_small(
+                    native_window,
+                    &MAIN_WINDOW_SIZE_POLICY,
+                );
             }
 
             // Build app menu with full version in About
