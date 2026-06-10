@@ -14,6 +14,7 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -251,6 +252,17 @@ struct ClientConn {
 }
 
 impl ClientConn {
+    fn connect(socket_path: &Path) -> Self {
+        let stream = UnixStream::connect(socket_path).expect("failed to connect to daemon");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        ClientConn {
+            reader: BufReader::new(stream.try_clone().unwrap()),
+            writer: stream,
+        }
+    }
+
     fn send(&mut self, cmd: &Cmd) {
         let mut json = serde_json::to_string(cmd).unwrap();
         json.push('\n');
@@ -871,6 +883,61 @@ fn test_broadcast_both_clients_receive_output() {
         String::from_utf8_lossy(&output_b).contains("BROADCAST"),
         "client B should receive broadcast output, got: {:?}",
         String::from_utf8_lossy(&output_b)
+    );
+}
+
+#[test]
+fn test_concurrent_attach_snapshot_cutover_keeps_snapshot_first_and_streaming_live_output() {
+    let daemon = DaemonHandle::start();
+    let mut shared = daemon.connect();
+    spawn_shell_session(
+        &mut shared,
+        "sess-cutover",
+        "i=0; while true; do i=$((i + 1)); printf 'CUTOVER-%04d\\r\\n' \"$i\"; sleep 0.01; done",
+    );
+
+    let mut observer = daemon.connect();
+    wait_for_snapshot(&mut observer, "sess-cutover", "CUTOVER-");
+
+    let mut handles = Vec::new();
+    for index in 0..8 {
+        let socket_path = daemon.socket_path.clone();
+        handles.push(thread::spawn(move || {
+            let mut conn = ClientConn::connect(&socket_path);
+            let snapshot = attach_snapshot_and_capture(&mut conn, "sess-cutover");
+            assert!(
+                snapshot.vt.contains("CUTOVER-"),
+                "attach {index} snapshot should include the current terminal state, got {:?}",
+                snapshot.vt
+            );
+
+            let output = conn.collect_output_until_contains_with_timeout(
+                "CUTOVER-",
+                Duration::from_secs(2),
+            );
+            assert!(
+                String::from_utf8_lossy(&output).contains("CUTOVER-"),
+                "attach {index} should keep receiving live output after cutover"
+            );
+        }));
+    }
+
+    for handle in handles {
+        handle.join().expect("attach worker should not panic");
+    }
+
+    let mut final_attach = daemon.connect();
+    let final_snapshot = attach_snapshot_and_capture(&mut final_attach, "sess-cutover");
+    assert!(
+        final_snapshot.vt.contains("CUTOVER-"),
+        "final attach should still receive a snapshot after concurrent cutovers, got {:?}",
+        final_snapshot.vt
+    );
+    let output =
+        final_attach.collect_output_until_contains_with_timeout("CUTOVER-", Duration::from_secs(2));
+    assert!(
+        String::from_utf8_lossy(&output).contains("CUTOVER-"),
+        "final attach should still receive live output after concurrent cutovers"
     );
 }
 
