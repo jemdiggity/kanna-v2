@@ -225,6 +225,11 @@ describe("createAppModel", () => {
     expect(resolveRelayUrl({})).toBe("wss://kanna-relay-402613185450.us-central1.run.app");
   });
 
+  it("does not use the production relay URL in dev mode without an explicit override", () => {
+    expect(resolveRelayUrl({}, { dev: true })).toBeNull();
+    expect(resolveRelayUrl({ EXPO_PUBLIC_KANNA_RELAY_URL: "wss://relay.example" }, { dev: true })).toBe("wss://relay.example");
+  });
+
   it("creates an app model with desktop navigation and a LAN client", async () => {
     const model = createAppModel({
       fetchImpl: createFetchMock(),

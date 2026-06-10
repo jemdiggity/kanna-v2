@@ -35,6 +35,10 @@ interface ExpoPublicEnv {
   EXPO_PUBLIC_KANNA_RELAY_URL?: string;
 }
 
+interface RelayUrlOptions {
+  dev?: boolean;
+}
+
 export interface AppModel {
   client: KannaClient;
   controller: MobileController;
@@ -66,14 +70,22 @@ function readExpoPublicEnv(): ExpoPublicEnv {
   return globalEnv ?? {};
 }
 
-export function resolveRelayUrl(env: ExpoPublicEnv = readExpoPublicEnv()): string | null {
+function isDevRuntime(): boolean {
+  return (globalThis as { __DEV__?: boolean }).__DEV__ === true;
+}
+
+export function resolveRelayUrl(
+  env: ExpoPublicEnv = readExpoPublicEnv(),
+  options: RelayUrlOptions = {},
+): string | null {
   if (env.EXPO_PUBLIC_KANNA_RELAY_URL !== undefined) {
     const relayUrl = env.EXPO_PUBLIC_KANNA_RELAY_URL.trim();
     return relayUrl && relayUrl.length > 0 ? relayUrl : null;
   }
 
-  const relayUrl = readExpoPublicEnv().EXPO_PUBLIC_KANNA_RELAY_URL?.trim();
-  return relayUrl && relayUrl.length > 0 ? relayUrl : PRODUCTION_RELAY_URL;
+  if (options.dev ?? isDevRuntime()) return null;
+
+  return PRODUCTION_RELAY_URL;
 }
 
 export function createAppModel(input: CreateAppModelInput = {}): AppModel {

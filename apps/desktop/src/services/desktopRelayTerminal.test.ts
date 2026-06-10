@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { createDesktopRelayTerminalClient, type DesktopRelayTerminalEvent } from "./desktopRelayTerminal";
+import {
+  PRODUCTION_CLOUD_TRANSPORT_URL,
+  createDesktopRelayTerminalClient,
+  resolveDesktopCloudTransportUrlFromEnv,
+  type DesktopRelayTerminalEvent,
+} from "./desktopRelayTerminal";
 
 class FakeSocket {
   readyState = 1;
@@ -185,5 +190,23 @@ describe("createDesktopRelayTerminalClient", () => {
     await expect(resizePromise).resolves.toBeUndefined();
     await expect(closePromise).resolves.toBeUndefined();
     await expect(advancePromise).resolves.toBeUndefined();
+  });
+});
+
+describe("resolveDesktopCloudTransportUrlFromEnv", () => {
+  it("uses explicit URL and local port overrides before defaults", () => {
+    expect(resolveDesktopCloudTransportUrlFromEnv({
+      KANNA_RELAY_URL: " wss://cloud.example ",
+      KANNA_RELAY_PORT: "19083",
+    }, { dev: false })).toBe("wss://cloud.example");
+
+    expect(resolveDesktopCloudTransportUrlFromEnv({
+      KANNA_RELAY_PORT: "19083",
+    }, { dev: false })).toBe("ws://127.0.0.1:19083");
+  });
+
+  it("uses the production cloud transport default only outside dev builds", () => {
+    expect(resolveDesktopCloudTransportUrlFromEnv({}, { dev: false })).toBe(PRODUCTION_CLOUD_TRANSPORT_URL);
+    expect(resolveDesktopCloudTransportUrlFromEnv({}, { dev: true })).toBeNull();
   });
 });

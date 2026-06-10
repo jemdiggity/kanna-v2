@@ -1,6 +1,8 @@
 import { getConfiguredDesktopAuthSession } from "./desktopAuthSdk";
 import { invoke } from "../invoke";
 
+export const PRODUCTION_CLOUD_TRANSPORT_URL = "wss://kanna-relay-402613185450.us-central1.run.app";
+
 export type DesktopRelayTerminalEvent =
   | { type: "ready"; taskId: string }
   | { type: "output"; taskId: string; text: string }
@@ -386,10 +388,24 @@ function createDesktopRelayRpcClient({
 
 export async function resolveDesktopRelayUrl(): Promise<string | null> {
   const configured = await invoke<string>("read_env_var", { name: "KANNA_RELAY_URL" }).catch(() => "");
-  if (configured.trim()) return configured.trim();
-
   const port = await invoke<string>("read_env_var", { name: "KANNA_RELAY_PORT" }).catch(() => "");
-  if (port.trim()) return `ws://127.0.0.1:${port.trim()}`;
+  return resolveDesktopCloudTransportUrlFromEnv({
+    KANNA_RELAY_URL: configured,
+    KANNA_RELAY_PORT: port,
+  }, { dev: import.meta.env.DEV });
+}
+
+export function resolveDesktopCloudTransportUrlFromEnv(
+  env: { KANNA_RELAY_URL?: string | null; KANNA_RELAY_PORT?: string | null },
+  options: { dev: boolean },
+): string | null {
+  const configured = env.KANNA_RELAY_URL?.trim();
+  if (configured) return configured;
+
+  const port = env.KANNA_RELAY_PORT?.trim();
+  if (port) return `ws://127.0.0.1:${port}`;
+
+  if (!options.dev) return PRODUCTION_CLOUD_TRANSPORT_URL;
 
   return null;
 }
