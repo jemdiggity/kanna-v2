@@ -27,44 +27,78 @@ interface AssistantContent {
   model?: string
 }
 
-interface AgentMessage {
-  type: string
-  // assistant
-  message?: AssistantContent
-  // tool_progress
+interface AssistantSdkMessage {
+  type: "assistant"
+  content: ContentBlock[]
+  model?: string
+}
+
+interface AssistantAgentMessage {
+  type: "assistant"
+  message: AssistantContent
+  content?: ContentBlock[]
+  model?: string
+}
+
+interface ToolProgressAgentMessage {
+  type: "tool_progress"
   tool_use_id?: string
   content?: string
-  // result
+}
+
+interface ResultAgentMessage {
+  type: "result"
   subtype?: string
   result?: string
   num_turns?: number
   duration_ms?: number
   total_cost_usd?: number
   errors?: string[]
-  // system
-  message_text?: string
-  // generic extra fields
-  [key: string]: unknown
 }
+
+interface SystemAgentMessage {
+  type: "system"
+  subtype?: string
+  message?: string
+  message_text?: string
+}
+
+type SdkAgentMessage =
+  | AssistantSdkMessage
+  | AssistantAgentMessage
+  | ToolProgressAgentMessage
+  | ResultAgentMessage
+  | SystemAgentMessage
+
+type AgentMessage =
+  | AssistantAgentMessage
+  | ToolProgressAgentMessage
+  | ResultAgentMessage
+  | SystemAgentMessage
 
 const messages = ref<AgentMessage[]>([])
 const isRunning = ref(true)
 const scrollContainer = ref<HTMLElement | null>(null)
 let polling = true
 
-function normalizeMessage(raw: Record<string, unknown>): AgentMessage {
+function normalizeMessage(raw: SdkAgentMessage): AgentMessage {
   // The SDK serializes assistant messages with content at the top level
   // (not nested under "message"), so we normalize here for the template.
-  const msg = raw as AgentMessage
-
-  if (msg.type === "assistant" && !msg.message && Array.isArray((raw as any).content)) {
-    msg.message = {
-      content: (raw as any).content as ContentBlock[],
-      model: (raw as any).model as string | undefined,
+  if (raw.type === "assistant" && !("message" in raw)) {
+    return {
+      ...raw,
+      message: {
+        content: raw.content,
+        model: raw.model,
+      },
     }
   }
 
-  return msg
+  return raw
+}
+
+function formatSystemMessage(msg: SystemAgentMessage): string {
+  return msg.message ?? msg.message_text ?? msg.subtype ?? "system"
 }
 
 async function pollMessages() {
@@ -72,7 +106,7 @@ async function pollMessages() {
   while (polling) {
     try {
       console.log(`[AgentView] Calling agent_next_message...`)
-      const raw = await invoke<Record<string, unknown> | null>("agent_next_message", {
+      const raw = await invoke<SdkAgentMessage | null>("agent_next_message", {
         sessionId: props.sessionId,
       })
       console.log(`[AgentView] Got message:`, raw ? raw.type : "null")
@@ -93,10 +127,10 @@ async function pollMessages() {
         isRunning.value = false
         break
       }
-    } catch (e: any) {
+    } catch (e: unknown) {
       console.error("Agent message error:", e)
       isRunning.value = false
-      emit("error", e?.message || String(e))
+      emit("error", e instanceof Error ? e.message : String(e))
       break
     }
   }
@@ -185,7 +219,7 @@ onUnmounted(() => {
 
       <!-- System messages -->
       <template v-else-if="msg.type === 'system'">
-        <div class="system-block">{{ (msg as any).message || msg.subtype || 'system' }}</div>
+        <div class="system-block">{{ formatSystemMessage(msg) }}</div>
       </template>
     </div>
 

@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import type MarkdownIt from "markdown-it";
+import type { ShikiTransformer } from "shiki";
 import { ref, computed, onMounted, nextTick, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { invoke } from "../invoke";
@@ -81,8 +83,12 @@ const lineCount = computed(() => {
   return content.value.split('\n').length;
 });
 
+type ShikiModule = typeof import("shiki");
+type ShikiHighlighter = Awaited<ReturnType<ShikiModule["createHighlighter"]>>;
+type HastElement = Parameters<NonNullable<ShikiTransformer["pre"]>>[0];
+
 // Lazy-load shiki to avoid blocking startup
-let highlighter: any = null;
+let highlighter: ShikiHighlighter | null = null;
 
 async function getHighlighter() {
   if (highlighter) return highlighter;
@@ -95,7 +101,7 @@ async function getHighlighter() {
 }
 
 // Lazy-load markdown-it to avoid blocking startup
-let md: any = null;
+let md: MarkdownIt | null = null;
 
 async function getMarkdownIt() {
   if (md) return md;
@@ -191,18 +197,19 @@ async function renderHighlighted(raw: string, lang: string, decos: typeof search
   if (!raw) { highlighted.value = ""; return; }
   try {
     const hl = await getHighlighter();
+    const wrapTransformer: ShikiTransformer = {
+      pre(node: HastElement) {
+        node.properties.style = "white-space:pre-wrap;word-wrap:break-word;";
+      },
+      line(node: HastElement, lineNumber: number) {
+        node.properties["data-line"] = lineNumber;
+      },
+    };
     highlighted.value = hl.codeToHtml(raw, {
       lang,
       theme: shikiTheme.value,
       decorations: decos,
-      transformers: [{
-        pre(node: any) {
-          node.properties.style = "white-space:pre-wrap;word-wrap:break-word;";
-        },
-        line(node: any, lineNumber: number) {
-          node.properties["data-line"] = lineNumber;
-        },
-      }],
+      transformers: [wrapTransformer],
     });
   } catch (e: unknown) {
     console.error("[FilePreview] highlight failed:", e);
@@ -254,7 +261,8 @@ watch([loading, highlighted], async ([isLoading]) => {
   const el = contentRef.value?.querySelector(`[data-line="${props.initialLine}"]`) as HTMLElement | null;
   if (!el) return;
 
-  const scrollContainer = contentRef.value!;
+  const scrollContainer = contentRef.value;
+  if (!scrollContainer) return;
   const lineTop = el.offsetTop;
   const containerHeight = scrollContainer.clientHeight;
   scrollContainer.scrollTop = lineTop - containerHeight / 2;

@@ -44,10 +44,11 @@ function installFirebaseAuthIndexedDbOpenFailureForE2E(): void {
   if (!indexedDb) return;
 
   const originalOpen = indexedDb.open.bind(indexedDb);
-  window.__KANNA_E2E_AUTH_INDEXEDDB_FAULT__ = {
+  const authIndexedDbFault = {
     installed: true,
     openFailures: 0,
   };
+  window.__KANNA_E2E_AUTH_INDEXEDDB_FAULT__ = authIndexedDbFault;
 
   const failOrOpen: IDBFactory["open"] = ((name: string, version?: number) => {
     if (name !== FIREBASE_AUTH_DB_NAME) {
@@ -70,7 +71,7 @@ function installFirebaseAuthIndexedDbOpenFailureForE2E(): void {
     } as unknown as IDBOpenDBRequest;
 
     queueMicrotask(() => {
-      window.__KANNA_E2E_AUTH_INDEXEDDB_FAULT__!.openFailures += 1;
+      authIndexedDbFault.openFailures += 1;
       request.onerror?.(new Event("error"));
     });
 
@@ -92,8 +93,8 @@ function installFirebaseAuthIndexedDbOpenFailureForE2E(): void {
 if (isTauri) {
   const { invoke } = await import("@tauri-apps/api/core");
 
-  function forwardLog(level: string, origFn: (...args: any[]) => void) {
-    return (...args: any[]) => {
+  function forwardLog(level: string, origFn: (...args: unknown[]) => void) {
+    return (...args: unknown[]) => {
       origFn.apply(console, args);
       const msg = args.map((arg) => formatLogArgument(arg)).join(" ");
       invoke("append_log", { message: `[${level}] ${msg}` }).catch(() => {});
