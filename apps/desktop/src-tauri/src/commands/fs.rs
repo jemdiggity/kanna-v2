@@ -204,7 +204,13 @@ pub fn read_dir_entries(
     fn add_gitignores(builder: &mut GitignoreBuilder, dir: &std::path::Path) {
         let gi = dir.join(".gitignore");
         if gi.exists() {
-            let _ = builder.add(gi);
+            if let Some(error) = builder.add(&gi) {
+                eprintln!(
+                    "[fs] failed to parse gitignore '{}': {}",
+                    gi.display(),
+                    error
+                );
+            }
         }
     }
 
@@ -223,7 +229,13 @@ pub fn read_dir_entries(
     // Add global gitignore if it exists
     if let Some(global_path) = ignore::gitignore::gitconfig_excludes_path() {
         if global_path.is_file() {
-            let _ = builder.add(global_path);
+            if let Some(error) = builder.add(&global_path) {
+                eprintln!(
+                    "[fs] failed to parse global gitignore '{}': {}",
+                    global_path.display(),
+                    error
+                );
+            }
         }
     }
 

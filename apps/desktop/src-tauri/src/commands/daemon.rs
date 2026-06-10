@@ -811,7 +811,7 @@ pub async fn list_sessions(
     let json = serde_json::to_string(&cmd).map_err(|e| e.to_string())?;
     ensure_connected(&state).await?;
     let mut guard = state.lock().await;
-    let client = guard.as_mut().unwrap();
+    let client = require_option_mut(&mut guard, "daemon client")?;
     client.send_command(&json).await?;
     let response = client.read_event().await?;
 
@@ -852,9 +852,8 @@ pub async fn attach_session_with_snapshot(
         "session_id": session_id,
         "emulate_terminal": true,
     });
-    stream_client
-        .send_command(&serde_json::to_string(&cmd).unwrap())
-        .await?;
+    let json = serde_json::to_string(&cmd).map_err(|e| e.to_string())?;
+    stream_client.send_command(&json).await?;
 
     let response = stream_client.read_event().await?;
     let snapshot = parse_snapshot_response(&response)?;
