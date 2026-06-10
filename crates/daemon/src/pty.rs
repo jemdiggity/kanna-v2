@@ -4,6 +4,22 @@ use std::io::{self, Read};
 use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::time::Instant;
 
+const CHILD_EXIT_SETSID: libc::c_int = 120;
+const CHILD_EXIT_CONTROLLING_TTY: libc::c_int = 121;
+const CHILD_EXIT_DUP_STDIO: libc::c_int = 122;
+const CHILD_EXIT_CHDIR: libc::c_int = 123;
+
+fn child_fatal(message: &'static [u8], code: libc::c_int) -> ! {
+    unsafe {
+        let _ = libc::write(
+            libc::STDERR_FILENO,
+            message.as_ptr() as *const libc::c_void,
+            message.len(),
+        );
+        libc::_exit(code);
+    }
+}
+
 fn validate_cwd(cwd: &str) -> io::Result<()> {
     let path = std::path::Path::new(cwd);
     if !path.is_dir() {
@@ -38,6 +54,53 @@ impl PtySession {
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         validate_cwd(cwd)?;
         let stripped_env_keys = crate::subprocess_env::inherited_env_keys_to_strip();
+        let stripped_env_keys_c: Vec<CString> = stripped_env_keys
+            .iter()
+            .map(|key| {
+                CString::new(key.as_str()).map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("environment key to strip contains NUL byte: {key:?}"),
+                    )
+                })
+            })
+            .collect::<io::Result<_>>()?;
+        let env_c: Vec<(CString, CString)> = env
+            .iter()
+            .map(|(key, value)| {
+                let key_c = CString::new(key.as_str()).map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("environment key contains NUL byte: {key:?}"),
+                    )
+                })?;
+                let value_c = CString::new(value.as_str()).map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("environment value for {key:?} contains NUL byte"),
+                    )
+                })?;
+                Ok((key_c, value_c))
+            })
+            .collect::<io::Result<_>>()?;
+        let cwd_c = CString::new(cwd)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "cwd contains NUL byte"))?;
+        let exec_c = CString::new(executable).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "executable contains NUL byte")
+        })?;
+        let mut argv_c = Vec::with_capacity(args.len() + 1);
+        argv_c.push(exec_c.clone());
+        for (index, arg) in args.iter().enumerate() {
+            argv_c.push(CString::new(arg.as_str()).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("argument {index} contains NUL byte"),
+                )
+            })?);
+        }
+        let mut argv_ptrs: Vec<*const libc::c_char> =
+            argv_c.iter().map(|arg| arg.as_ptr()).collect();
+        argv_ptrs.push(std::ptr::null());
 
         let mut master_fd: RawFd = -1;
         let mut slave_fd: RawFd = -1;
@@ -63,7 +126,15 @@ impl PtySession {
             ws_xpixel: 0,
             ws_ypixel: 0,
         };
-        unsafe { libc::ioctl(master_fd, libc::TIOCSWINSZ, &ws) };
+        let ret = unsafe { libc::ioctl(master_fd, libc::TIOCSWINSZ, &ws) };
+        if ret != 0 {
+            log::warn!(
+                "failed to set initial PTY size to {}x{}: {}",
+                cols,
+                rows,
+                io::Error::last_os_error()
+            );
+        }
 
         // Fork
         let pid = unsafe { libc::fork() };
@@ -82,52 +153,59 @@ impl PtySession {
                 libc::close(master_fd);
 
                 // Create new session and set controlling terminal
-                libc::setsid();
-                libc::ioctl(slave_fd, libc::TIOCSCTTY as _, 0);
+                if libc::setsid() < 0 {
+                    child_fatal(
+                        b"kanna-daemon: failed to create child session with setsid\n",
+                        CHILD_EXIT_SETSID,
+                    );
+                }
+                if libc::ioctl(slave_fd, libc::TIOCSCTTY as _, 0) < 0 {
+                    child_fatal(
+                        b"kanna-daemon: failed to set PTY controlling terminal\n",
+                        CHILD_EXIT_CONTROLLING_TTY,
+                    );
+                }
 
                 // Redirect stdio to slave
-                libc::dup2(slave_fd, 0);
-                libc::dup2(slave_fd, 1);
-                libc::dup2(slave_fd, 2);
+                if libc::dup2(slave_fd, 0) < 0
+                    || libc::dup2(slave_fd, 1) < 0
+                    || libc::dup2(slave_fd, 2) < 0
+                {
+                    child_fatal(
+                        b"kanna-daemon: failed to connect child stdio to PTY\n",
+                        CHILD_EXIT_DUP_STDIO,
+                    );
+                }
                 if slave_fd > 2 {
                     libc::close(slave_fd);
                 }
 
                 // Change directory
-                let cwd_c = CString::new(cwd).unwrap_or_else(|_| CString::new("/tmp").unwrap());
-                libc::chdir(cwd_c.as_ptr());
+                if libc::chdir(cwd_c.as_ptr()) < 0 {
+                    child_fatal(
+                        b"kanna-daemon: failed to change child working directory\n",
+                        CHILD_EXIT_CHDIR,
+                    );
+                }
 
-                for key in &stripped_env_keys {
-                    if let Ok(key_c) = CString::new(key.as_str()) {
-                        libc::unsetenv(key_c.as_ptr());
-                    }
+                for key_c in &stripped_env_keys_c {
+                    libc::unsetenv(key_c.as_ptr());
                 }
 
                 // Re-apply explicit per-session overrides after scrubbing any
                 // inherited KANNA_/webdriver control-plane env vars.
-                for (k, v) in env {
-                    if let (Ok(k_c), Ok(v_c)) = (CString::new(k.as_str()), CString::new(v.as_str()))
-                    {
-                        libc::setenv(k_c.as_ptr(), v_c.as_ptr(), 1);
-                    }
+                for (k_c, v_c) in &env_c {
+                    libc::setenv(k_c.as_ptr(), v_c.as_ptr(), 1);
                 }
-
-                // Build argv
-                let exec_c = CString::new(executable).unwrap();
-                let mut argv_c: Vec<CString> = Vec::with_capacity(args.len() + 1);
-                argv_c.push(exec_c.clone());
-                for arg in args {
-                    argv_c.push(
-                        CString::new(arg.as_str()).unwrap_or_else(|_| CString::new("").unwrap()),
-                    );
-                }
-                let mut argv_ptrs: Vec<*const libc::c_char> =
-                    argv_c.iter().map(|s| s.as_ptr()).collect();
-                argv_ptrs.push(std::ptr::null());
 
                 libc::execvp(exec_c.as_ptr(), argv_ptrs.as_ptr());
 
                 // If exec fails, exit
+                let _ = libc::write(
+                    libc::STDERR_FILENO,
+                    b"kanna-daemon: failed to exec child command\n".as_ptr() as *const libc::c_void,
+                    b"kanna-daemon: failed to exec child command\n".len(),
+                );
                 libc::_exit(127);
             }
         }
@@ -340,6 +418,46 @@ mod tests {
         match result {
             Ok(_) => panic!("spawn should fail for a missing cwd"),
             Err(error) => assert!(error.to_string().contains("cwd is not a directory")),
+        }
+    }
+
+    #[test]
+    fn spawn_rejects_executable_paths_with_nul_bytes_before_fork() {
+        let result = PtySession::spawn(
+            "/bin/sh\0nope",
+            &["-lc".to_string(), "exit 0".to_string()],
+            "/tmp",
+            &HashMap::new(),
+            80,
+            24,
+        );
+
+        match result {
+            Ok(_) => panic!("spawn should fail before fork for an executable path with NUL bytes"),
+            Err(error) => assert!(
+                error.to_string().contains("executable contains NUL byte"),
+                "unexpected error: {error}"
+            ),
+        }
+    }
+
+    #[test]
+    fn spawn_rejects_arguments_with_nul_bytes_before_fork() {
+        let result = PtySession::spawn(
+            "/bin/sh",
+            &["-lc".to_string(), "printf nope\0ignored".to_string()],
+            "/tmp",
+            &HashMap::new(),
+            80,
+            24,
+        );
+
+        match result {
+            Ok(_) => panic!("spawn should fail before fork for argv with NUL bytes"),
+            Err(error) => assert!(
+                error.to_string().contains("argument 1 contains NUL byte"),
+                "unexpected error: {error}"
+            ),
         }
     }
 

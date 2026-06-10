@@ -316,7 +316,8 @@ async fn request_handoff(
     let mut writer = write_half;
 
     let cmd = serde_json::json!({ "type": "Handoff", "version": version });
-    let mut json = serde_json::to_string(&cmd).unwrap();
+    let mut json = serde_json::to_string(&cmd)
+        .map_err(|e| format!("failed to serialize handoff command: {}", e))?;
     json.push('\n');
     use tokio::io::AsyncWriteExt;
     writer
@@ -1542,20 +1543,35 @@ async fn handle_handoff(
         let evt = HandoffEventV1::HandoffReady {
             sessions: compat_sessions,
         };
-        let mut compat_json = serde_json::to_string(&evt).unwrap();
-        compat_json.push('\n');
-        use tokio::io::AsyncWriteExt;
-        let _ = writer.lock().await.write_all(compat_json.as_bytes()).await;
+        match serde_json::to_string(&evt) {
+            Ok(mut compat_json) => {
+                compat_json.push('\n');
+                use tokio::io::AsyncWriteExt;
+                if let Err(error) = writer.lock().await.write_all(compat_json.as_bytes()).await {
+                    log::error!("[handoff] failed to write compat HandoffReady: {}", error);
+                }
+            }
+            Err(error) => {
+                log::error!(
+                    "[handoff] failed to serialize compat HandoffReady: {}",
+                    error
+                );
+            }
+        }
     } else {
         // Send HandoffReady with session metadata
         let evt = Event::HandoffReady { sessions: infos };
-        let _ = write_event(&mut *writer.lock().await, &evt).await;
+        if let Err(error) = write_event(&mut *writer.lock().await, &evt).await {
+            log::error!("[handoff] failed to write HandoffReady: {}", error);
+        }
     }
 
     // Flush the writer before sending fds
     {
         use tokio::io::AsyncWriteExt;
-        let _ = writer.lock().await.flush().await;
+        if let Err(error) = writer.lock().await.flush().await {
+            log::error!("[handoff] failed to flush HandoffReady: {}", error);
+        }
     }
     log::info!("[handoff] HandoffReady sent and flushed");
 
@@ -1573,7 +1589,14 @@ async fn handle_handoff(
         }
         // Close our copies — the new daemon owns them now
         for fd in &fds {
-            unsafe { libc::close(*fd) };
+            let ret = unsafe { libc::close(*fd) };
+            if ret != 0 {
+                log::warn!(
+                    "[handoff] failed to close transferred fd {}: {}",
+                    fd,
+                    std::io::Error::last_os_error()
+                );
+            }
         }
         log::info!("[handoff] closed our fd copies");
     } else {
