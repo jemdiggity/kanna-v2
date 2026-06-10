@@ -76,10 +76,23 @@ export function resolveProductionFirebaseProject(
   return resolveFirebaseProject(repoRoot, env, "production");
 }
 
+async function assertCleanGitWorktree(repoRoot: string, runner: CommandRunner): Promise<void> {
+  const status = await runner.run("git", ["status", "--porcelain"], { cwd: repoRoot });
+  if (status.exitCode !== 0) {
+    throw new Error(status.stderr || status.stdout || "Failed to inspect git worktree status.");
+  }
+  if (status.stdout.trim().length > 0) {
+    throw new Error(
+      "Refusing to deploy cloud services from a dirty git worktree. Commit or stash changes first."
+    );
+  }
+}
+
 export async function deployFirebaseCloud(input: CloudDeployInput & { relay?: boolean }): Promise<CloudDeployResult> {
   assertCloudDeployEnvironment(input.environment);
 
   const projectId = resolveFirebaseProject(input.repoRoot, input.env, input.environment);
+  await assertCleanGitWorktree(input.repoRoot, input.runner);
   const build = await input.runner.run("pnpm", ["--dir", "services/firebase-functions", "build"], {
     cwd: input.repoRoot,
     env: input.env

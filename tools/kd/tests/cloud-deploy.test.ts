@@ -109,6 +109,11 @@ describe("cloud deploy runtime", () => {
       expect(result).toEqual({ projectId: "prod-project", deployed: true });
       expect(calls).toEqual([
         {
+          command: "git",
+          args: ["status", "--porcelain"],
+          cwd: repoRoot
+        },
+        {
           command: "pnpm",
           args: ["--dir", "services/firebase-functions", "build"],
           cwd: repoRoot
@@ -127,6 +132,45 @@ describe("cloud deploy runtime", () => {
           ],
           cwd: repoRoot,
           streamOutput: true
+        }
+      ]);
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to deploy Firebase cloud services from a dirty git worktree", async () => {
+    const repoRoot = mkdtempSync(join(tmpdir(), "kd-cloud-deploy-"));
+    const calls: Array<{ command: string; args: string[]; cwd?: string }> = [];
+    const runner: CommandRunner = {
+      async run(command, args, options) {
+        calls.push({
+          command,
+          args,
+          cwd: options?.cwd
+        });
+        if (command === "git" && args.join(" ") === "status --porcelain") {
+          return { exitCode: 0, stdout: " M tools/kd/src/runtime/cloud-deploy.ts\n", stderr: "" };
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+    };
+
+    try {
+      await expect(
+        deployFirebaseCloud({
+          repoRoot,
+          env: { KANNA_FIREBASE_PRODUCTION_PROJECT: "prod-project" },
+          runner,
+          environment: "production"
+        })
+      ).rejects.toThrow("Refusing to deploy cloud services from a dirty git worktree");
+
+      expect(calls).toEqual([
+        {
+          command: "git",
+          args: ["status", "--porcelain"],
+          cwd: repoRoot
         }
       ]);
     } finally {
