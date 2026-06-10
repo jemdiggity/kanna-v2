@@ -150,6 +150,29 @@ async function waitForE2EInvokes<T>(
   throw new Error(`Timed out waiting for ${description}; calls were ${JSON.stringify(calls)}`);
 }
 
+async function expectNoE2EInvoke(
+  client: WebDriverClient,
+  predicateSource: string,
+  description: string,
+  timeoutMs = 5_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let calls: unknown[] = [];
+
+  while (Date.now() < deadline) {
+    const result = await client.executeSync<{ match: unknown | null; calls: unknown[] }>(
+      `const calls = window.__KANNA_E2E__.invokes.getAll();
+       const match = calls.find(${predicateSource});
+       return { match: match ? JSON.parse(JSON.stringify(match.args)) : null, calls };`
+    );
+    calls = result.calls;
+    if (result.match) {
+      throw new Error(`Unexpected ${description}: ${JSON.stringify(result.match)}; calls were ${JSON.stringify(calls)}`);
+    }
+    await sleep(100);
+  }
+}
+
 function encodeInput(text: string): number[] {
   return Array.from(new TextEncoder().encode(text));
 }
@@ -275,17 +298,14 @@ describe("task lifecycle", () => {
     });
 
     const oldCsiUFollowUpDelayMs = 1_000;
-    await sleep(oldCsiUFollowUpDelayMs + 250);
-    const finalSendInputCalls = await client.executeSync<Array<{ sessionId?: string; data?: number[] }>>(
-      `const calls = window.__KANNA_E2E__.invokes.getAll();
-       return calls
-         .filter((call) => call.cmd === "send_input" && call.args?.sessionId === ${JSON.stringify(rows[0]?.id)})
-         .map((call) => JSON.parse(JSON.stringify(call.args)));`
+    await expectNoE2EInvoke(
+      client,
+      `(call) => call.cmd === "send_input" &&
+        call.args?.sessionId === ${JSON.stringify(rows[0]?.id)} &&
+        JSON.stringify(call.args?.data) === ${JSON.stringify(JSON.stringify(encodeInput("\x1b[13u")))}`,
+      "Codex PTY task creation CSI-u follow-up input",
+      oldCsiUFollowUpDelayMs + 250,
     );
-    expect(finalSendInputCalls).not.toContainEqual({
-      sessionId: rows[0]?.id,
-      data: encodeInput("\x1b[13u"),
-    });
   });
 
   it("closes into teardown and stays visible when teardown commands exist", async () => {
