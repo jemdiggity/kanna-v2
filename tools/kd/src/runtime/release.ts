@@ -92,12 +92,39 @@ function syncVersionFiles(repoRoot: string, version: string): void {
   writeFileSync(cargoPath, readFileSync(cargoPath, "utf8").replace(/^version = "[^"]*"/m, `version = "${version}"`));
 }
 
+function versionFilePaths(repoRoot: string): string[] {
+  return [
+    join(repoRoot, "VERSION"),
+    join(repoRoot, "apps", "desktop", "src-tauri", "tauri.conf.json"),
+    join(repoRoot, "apps", "desktop", "src-tauri", "Cargo.toml")
+  ];
+}
+
+function snapshotVersionFiles(repoRoot: string): Array<{ path: string; contents: string }> {
+  return versionFilePaths(repoRoot).map((path) => ({ path, contents: readFileSync(path, "utf8") }));
+}
+
+function restoreVersionFiles(snapshot: Array<{ path: string; contents: string }>): void {
+  for (const file of snapshot) {
+    writeFileSync(file.path, file.contents);
+  }
+}
+
 async function mustRun(runner: CommandRunner, command: string, args: string[], cwd: string, env?: NodeJS.ProcessEnv): Promise<string> {
   const result = await runner.run(command, args, { cwd, env });
   if (result.exitCode !== 0) {
     throw new Error(result.stderr || result.stdout || `${command} ${args.join(" ")} failed`);
   }
   return result.stdout.trim();
+}
+
+async function assertCleanGitWorktree(repoRoot: string, runner: CommandRunner, env?: NodeJS.ProcessEnv): Promise<void> {
+  const status = await mustRun(runner, "git", ["status", "--porcelain"], repoRoot, env);
+  if (status.trim().length > 0) {
+    throw new Error(
+      "Refusing to ship a release from a dirty git worktree. Commit or stash changes first."
+    );
+  }
 }
 
 async function resolveBazelOutput(input: ReleaseShipInput, target: string): Promise<string> {
@@ -135,14 +162,21 @@ export async function shipRelease(input: ReleaseShipInput): Promise<ReleaseShipR
   if (!input.env.KANNA_UPDATER_PUBKEY) throw new Error("Missing KANNA_UPDATER_PUBKEY.");
   if (!input.env.TAURI_PRIVATE_KEY_PATH) throw new Error("Missing TAURI_PRIVATE_KEY_PATH.");
   if (!existsSync(input.env.TAURI_PRIVATE_KEY_PATH)) throw new Error(`Tauri updater private key not found: ${input.env.TAURI_PRIVATE_KEY_PATH}`);
+  await assertCleanGitWorktree(input.repoRoot, input.runner, input.env);
 
   const sourceVersion = readCurrentVersion(input.repoRoot);
   const version = bumpVersion(sourceVersion, input.bump);
-  syncVersionFiles(input.repoRoot, version);
 
   const bazelArgs = [input.dryRun ? "-c" : "--config=notarize", input.dryRun ? "opt" : "-c", ...(input.dryRun ? [] : ["opt"])];
   const targets = input.archLabels.flatMap((label) => [bazelTargetForLabel(label, input.dryRun), updaterBundleTargetForLabel(label)]);
-  await mustRun(input.runner, "bazel", ["build", ...bazelArgs, ...targets], input.repoRoot, input.env);
+  const versionFileSnapshot = snapshotVersionFiles(input.repoRoot);
+  try {
+    syncVersionFiles(input.repoRoot, version);
+    await mustRun(input.runner, "bazel", ["build", ...bazelArgs, ...targets], input.repoRoot, input.env);
+  } catch (error) {
+    restoreVersionFiles(versionFileSnapshot);
+    throw error;
+  }
 
   const releaseDir = join(input.repoRoot, ".build", "release");
   mkdirSync(releaseDir, { recursive: true });
@@ -178,8 +212,8 @@ export async function shipRelease(input: ReleaseShipInput): Promise<ReleaseShipR
 
   if (input.release) {
     await mustRun(input.runner, "git", ["add", "-f", "VERSION", "apps/desktop/src-tauri/tauri.conf.json", "apps/desktop/src-tauri/Cargo.toml", "apps/desktop/src-tauri/Cargo.lock"], input.repoRoot, input.env);
-    await input.runner.run("git", ["commit", "-m", `release: v${version}`], { cwd: input.repoRoot, env: input.env });
-    await input.runner.run("git", ["tag", `v${version}`], { cwd: input.repoRoot, env: input.env });
+    await mustRun(input.runner, "git", ["commit", "-m", `release: v${version}`], input.repoRoot, input.env);
+    await mustRun(input.runner, "git", ["tag", `v${version}`], input.repoRoot, input.env);
     await mustRun(input.runner, "gh", ["release", "create", `v${version}`, ...dmgPaths, ...updaterPaths, "--title", `Kanna v${version}`, "--notes", notes], input.repoRoot, input.env);
     await mustRun(input.runner, "gh", ["release", "upload", `v${version}`, latestJson, "--clobber"], input.repoRoot, input.env);
   }
