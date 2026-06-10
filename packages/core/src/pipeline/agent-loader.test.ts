@@ -101,6 +101,19 @@ Finish the task.
     expect(result.prompt).toContain("# Agent Instructions");
     expect(result.prompt).toContain("Finish the task.");
   });
+
+  it("rejects invalid permission_mode values from frontmatter", () => {
+    const content = `---
+name: Bad Permission Agent
+description: Has an invalid permission mode
+permission_mode: neverAsk
+---
+
+Do something.
+`;
+
+    expect(() => parseAgentDefinition(content)).toThrow(/permission_mode.*neverAsk/);
+  });
 });
 
 describe("validateAgentDefinition", () => {

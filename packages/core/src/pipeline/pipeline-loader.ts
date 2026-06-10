@@ -1,5 +1,46 @@
 import type { PipelineDefinition, PipelineStage } from "./pipeline-types";
 
+function formatRawValue(value: unknown): string {
+  if (value === undefined) {
+    return "undefined";
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  return JSON.stringify(value) ?? String(value);
+}
+
+function validationError(message: string): Error {
+  return new Error(`Pipeline validation failed:\n  - ${message}`);
+}
+
+function parseTransition(
+  value: unknown,
+  describeInvalid: (value: string) => string
+): PipelineStage["transition"] {
+  if (value === "manual" || value === "auto") {
+    return value;
+  }
+
+  throw validationError(describeInvalid(formatRawValue(value)));
+}
+
+function parseStageMode(
+  value: unknown,
+  stageName: string
+): PipelineStage["mode"] | undefined {
+  if (value === undefined || typeof value !== "string") {
+    return undefined;
+  }
+  if (value === "new_task" || value === "continue") {
+    return value;
+  }
+
+  throw validationError(
+    `Stage "${stageName}" has invalid mode "${value}"; must be "new_task" or "continue"`
+  );
+}
+
 /**
  * Validate a PipelineDefinition and return a list of validation error messages.
  * An empty array means the definition is valid.
@@ -110,15 +151,20 @@ export function parsePipelineJson(raw: string): PipelineDefinition {
   return def;
 }
 
-function extractPostAction(value: unknown): PipelineStage["post_action"] | undefined {
+function extractPostAction(value: unknown, stageName: string): PipelineStage["post_action"] | undefined {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     return undefined;
   }
 
   const raw = value as Record<string, unknown>;
+  const name = typeof raw["name"] === "string" ? raw["name"] : "";
   const postAction: PipelineStage["post_action"] = {
-    name: typeof raw["name"] === "string" ? raw["name"] : "",
-    transition: (raw["transition"] as "manual" | "auto") ?? "",
+    name,
+    transition: parseTransition(
+      raw["transition"],
+      (transition) =>
+        `Stage "${stageName}" has post_action "${name || "(unnamed)"}" with invalid transition "${transition}"; must be "manual" or "auto"`
+    ),
   };
 
   if (typeof raw["description"] === "string") {
@@ -150,10 +196,15 @@ function extractStages(obj: Record<string, unknown>): PipelineStage[] {
       throw new Error(`Stage at index ${index} must be an object`);
     }
     const s = item as Record<string, unknown>;
+    const name = typeof s["name"] === "string" ? s["name"] : "";
 
     const stage: PipelineStage = {
-      name: typeof s["name"] === "string" ? s["name"] : "",
-      transition: (s["transition"] as "manual" | "auto") ?? "",
+      name,
+      transition: parseTransition(
+        s["transition"],
+        (transition) =>
+          `Stage "${name || "(unnamed)"}" has invalid transition "${transition}"; must be "manual" or "auto"`
+      ),
     };
 
     if (typeof s["description"] === "string") {
@@ -174,10 +225,11 @@ function extractStages(obj: Record<string, unknown>): PipelineStage[] {
     if (typeof s["follow_task"] === "boolean") {
       stage.follow_task = s["follow_task"];
     }
-    if (typeof s["mode"] === "string") {
-      stage.mode = s["mode"] as PipelineStage["mode"];
+    const mode = parseStageMode(s["mode"], stage.name || "(unnamed)");
+    if (mode !== undefined) {
+      stage.mode = mode;
     }
-    const postAction = extractPostAction(s["post_action"]);
+    const postAction = extractPostAction(s["post_action"], stage.name || "(unnamed)");
     if (postAction) {
       stage.post_action = postAction;
     }

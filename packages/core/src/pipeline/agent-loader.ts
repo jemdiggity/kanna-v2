@@ -2,6 +2,20 @@ import type { AgentDefinition } from "./pipeline-types";
 import { parseFrontmatter } from "../config/custom-tasks";
 
 const VALID_PERMISSION_MODES = ["default", "acceptEdits", "dontAsk"] as const;
+type PermissionMode = AgentDefinition["permission_mode"];
+
+function parsePermissionMode(value: unknown): PermissionMode | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  if ((VALID_PERMISSION_MODES as readonly string[]).includes(value)) {
+    return value as PermissionMode;
+  }
+
+  throw new Error(
+    `Invalid AGENT.md: permission_mode must be one of: ${VALID_PERMISSION_MODES.join(", ")} (got "${value}")`
+  );
+}
 
 export function parseAgentDefinition(content: string): AgentDefinition {
   const { frontmatter, body } = parseFrontmatter(content);
@@ -19,8 +33,9 @@ export function parseAgentDefinition(content: string): AgentDefinition {
     def.model = fm.model;
   }
 
-  if (typeof fm.permission_mode === "string") {
-    def.permission_mode = fm.permission_mode as AgentDefinition["permission_mode"];
+  const permissionMode = parsePermissionMode(fm.permission_mode);
+  if (permissionMode !== undefined) {
+    def.permission_mode = permissionMode;
   }
 
   if (Array.isArray(fm.allowed_tools) && fm.allowed_tools.every((t: unknown) => typeof t === "string")) {

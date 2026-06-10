@@ -5,12 +5,26 @@ export interface SlackMessage {
   thread_ts?: string;
 }
 
+export interface SlackClientOptions {
+  timeoutMs?: number;
+}
+
+const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
+
 export class SlackClient {
-  constructor(private readonly token: string) {}
+  constructor(
+    private readonly token: string,
+    private readonly options: SlackClientOptions = {}
+  ) {}
+
+  private requestSignal(): AbortSignal {
+    return AbortSignal.timeout(this.options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS);
+  }
 
   async postMessage(channel: string, text: string): Promise<void> {
     const response = await fetch("https://slack.com/api/chat.postMessage", {
       method: "POST",
+      signal: this.requestSignal(),
       headers: {
         Authorization: `Bearer ${this.token}`,
         "Content-Type": "application/json",
@@ -40,6 +54,7 @@ export class SlackClient {
     const response = await fetch(
       `https://slack.com/api/conversations.history?${params.toString()}`,
       {
+        signal: this.requestSignal(),
         headers: {
           Authorization: `Bearer ${this.token}`,
         },
