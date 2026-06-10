@@ -169,6 +169,55 @@ describe("desktop cloud live task index publisher", () => {
     expect(mocks.commit).toHaveBeenCalledTimes(1);
   });
 
+  it("deletes duplicate task documents for the same local identity", async () => {
+    mocks.getDocs
+      .mockResolvedValueOnce({ docs: [mockDesktopDoc()] })
+      .mockResolvedValueOnce({ docs: [
+        docSnapshot("task-doc-primary", {
+          localRepoId: "repo-1",
+          ownerLocalTaskId: "task-duplicate",
+        }),
+        docSnapshot("task-doc-duplicate", {
+          localRepoId: "repo-1",
+          ownerLocalTaskId: "task-duplicate",
+        }),
+      ] });
+
+    await publishDesktopTaskSnapshot(null as never, openItem("task-duplicate") as never, repo() as never);
+
+    expect(mocks.set).toHaveBeenCalledWith(
+      { kind: "doc-ref", id: "task-doc-primary" },
+      expect.objectContaining({
+        localRepoId: "repo-1",
+        ownerLocalTaskId: "task-duplicate",
+      }),
+    );
+    expect(mocks.delete).toHaveBeenCalledWith({ kind: "doc-ref", id: "task-doc-duplicate" });
+    expect(mocks.commit).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves OpenCode as the task agent provider in direct Firestore writes", async () => {
+    mocks.getDocs
+      .mockResolvedValueOnce({ docs: [mockDesktopDoc()] })
+      .mockResolvedValueOnce({ docs: [] });
+
+    await publishDesktopTaskSnapshot(
+      null as never,
+      openItem("task-opencode", { agent_provider: "opencode" }) as never,
+      repo() as never,
+    );
+
+    expect(mocks.set).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.objectContaining({
+        agent: {
+          provider: "opencode",
+          type: "pty",
+        },
+      }),
+    );
+  });
+
   it("creates the desktop document and task document with auto ids when missing", async () => {
     mocks.getDocs
       .mockResolvedValueOnce({ docs: [] })
