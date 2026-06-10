@@ -1,6 +1,6 @@
 use serde::Serialize;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 use tauri::AppHandle;
@@ -105,12 +105,29 @@ fn builtin_resource_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
     Err("could not find .kanna/ directory in resource dir or any parent of cwd".to_string())
 }
 
+fn resolve_builtin_resource_path(base: &Path, relative_path: &str) -> Result<PathBuf, String> {
+    let path = Path::new(relative_path);
+    if path.components().any(|component| {
+        matches!(
+            component,
+            Component::Prefix(_) | Component::RootDir | Component::ParentDir
+        )
+    }) {
+        return Err(format!(
+            "invalid resource path '{}': path must be relative and must not contain '..'",
+            relative_path
+        ));
+    }
+
+    Ok(base.join(path))
+}
+
 /// Read a file from the app's bundled resources directory.
 /// `relative_path` is relative to the resources root (e.g., ".kanna/pipelines/default.json").
 #[tauri::command]
 pub fn read_builtin_resource(app: AppHandle, relative_path: String) -> Result<String, String> {
     let base = builtin_resource_dir(&app)?;
-    let resource_path = base.join(&relative_path);
+    let resource_path = resolve_builtin_resource_path(&base, &relative_path)?;
     std::fs::read_to_string(&resource_path).map_err(|e| {
         format!(
             "failed to read resource '{}': {}",
@@ -128,7 +145,7 @@ pub fn list_builtin_resources(
     relative_path: String,
 ) -> Result<Vec<String>, String> {
     let base = builtin_resource_dir(&app)?;
-    let resource_path = base.join(&relative_path);
+    let resource_path = resolve_builtin_resource_path(&base, &relative_path)?;
     if !resource_path.is_dir() {
         return Ok(Vec::new());
     }
@@ -453,7 +470,8 @@ pub fn append_log(message: String) -> Result<(), String> {
 mod tests {
     use super::{
         current_target_triple, format_log_timestamp,
-        resolve_binary_from_candidates_with_path_lookup, sidecar_candidates_for_exe,
+        resolve_binary_from_candidates_with_path_lookup, resolve_builtin_resource_path,
+        sidecar_candidates_for_exe,
     };
     use chrono::{Duration, FixedOffset, TimeZone};
     use std::path::Path;
@@ -542,6 +560,39 @@ mod tests {
             .expect("PATH fallback should resolve");
 
         assert_eq!(resolved, "/global/kanna-cli");
+    }
+
+    #[test]
+    fn builtin_resource_path_accepts_normal_relative_paths() {
+        let base = Path::new("/repo/resources");
+
+        let resolved = resolve_builtin_resource_path(base, ".kanna/pipelines/default.json")
+            .expect("normal relative resource path should resolve");
+
+        assert_eq!(
+            resolved,
+            Path::new("/repo/resources/.kanna/pipelines/default.json")
+        );
+    }
+
+    #[test]
+    fn builtin_resource_path_rejects_parent_dir_traversal() {
+        let base = Path::new("/repo/resources");
+
+        let error = resolve_builtin_resource_path(base, ".kanna/../../../etc/passwd")
+            .expect_err("parent directory traversal should be rejected");
+
+        assert!(error.contains("invalid resource path"));
+    }
+
+    #[test]
+    fn builtin_resource_path_rejects_absolute_paths() {
+        let base = Path::new("/repo/resources");
+
+        let error = resolve_builtin_resource_path(base, "/etc/passwd")
+            .expect_err("absolute resource paths should be rejected");
+
+        assert!(error.contains("invalid resource path"));
     }
 }
 
