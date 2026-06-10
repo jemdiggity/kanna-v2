@@ -80,12 +80,12 @@ impl MobileServerManager {
             )
         };
 
-        let expected_desktop_id = desktop_id(&config_path);
+        let expected_desktop_id = desktop_id(&config_path)?;
         let existing_status = self.fetch_status(&api_base_url).await.ok();
         if let Some(status) = existing_status {
             ensure_server_belongs_to_desktop(&status, &expected_desktop_id)?;
             if is_current_server_status(&status, &expected_desktop_id, current_server_version())
-                && server_config_matches_runtime(&config_path)
+                && server_config_matches_runtime(&config_path, &expected_desktop_id)
             {
                 let mut state = self.inner.lock().await;
                 state.started = true;
@@ -182,7 +182,7 @@ impl MobileServerManager {
     pub async fn snapshot(&self) -> Result<MobileServerStatus, String> {
         let state = self.inner.lock().await;
         if !state.started {
-            return Ok(stopped_snapshot(&state));
+            return stopped_snapshot(&state);
         }
         let api_base_url = state.api_base_url.clone();
         drop(state);
@@ -392,7 +392,7 @@ fn build_server_config(state: &MobileServerState) -> Result<String, String> {
         escape_toml_string(&device_token),
         escape_toml_string(&daemon_dir),
         escape_toml_string(&db_path.to_string_lossy()),
-        escape_toml_string(&desktop_id(&state.config_path)),
+        escape_toml_string(&desktop_id(&state.config_path)?),
         escape_toml_string(&state.desktop_name),
         escape_toml_string(current_server_version()),
         local_server_port(),
@@ -400,7 +400,7 @@ fn build_server_config(state: &MobileServerState) -> Result<String, String> {
     ))
 }
 
-fn server_config_matches_runtime(config_path: &Path) -> bool {
+fn server_config_matches_runtime(config_path: &Path, desktop_id: &str) -> bool {
     let Ok(content) = std::fs::read_to_string(config_path) else {
         return false;
     };
@@ -424,10 +424,7 @@ fn server_config_matches_runtime(config_path: &Path) -> bool {
             "db_path = \"{}\"",
             escape_toml_string(&db_path.to_string_lossy())
         ),
-        format!(
-            "desktop_id = \"{}\"",
-            escape_toml_string(&desktop_id(config_path))
-        ),
+        format!("desktop_id = \"{}\"", escape_toml_string(desktop_id)),
         format!(
             "server_version = \"{}\"",
             escape_toml_string(current_server_version())
@@ -546,16 +543,16 @@ fn server_base_url(port: u16) -> String {
     format!("http://{}:{}", LOCAL_SERVER_HOST, port)
 }
 
-fn stopped_snapshot(state: &MobileServerState) -> MobileServerStatus {
-    MobileServerStatus {
+fn stopped_snapshot(state: &MobileServerState) -> Result<MobileServerStatus, String> {
+    Ok(MobileServerStatus {
         state: state.status.clone(),
-        desktop_id: desktop_id(&state.config_path),
+        desktop_id: desktop_id(&state.config_path)?,
         desktop_name: state.desktop_name.clone(),
         server_version: Some(current_server_version().to_string()),
         lan_host: "0.0.0.0".to_string(),
         lan_port: local_server_port(),
         pairing_code: None,
-    }
+    })
 }
 
 fn current_server_version() -> &'static str {
@@ -649,17 +646,17 @@ async fn wait_for_server_port_to_close(port: u16, attempts: usize) -> Result<(),
     Err(format!("stale kanna-server did not stop on port {}", port))
 }
 
-fn desktop_id(config_path: &Path) -> String {
+fn desktop_id(config_path: &Path) -> Result<String, String> {
     let identity_path = desktop_identity_path(config_path);
     if let Some(identity) = read_desktop_identity(&identity_path) {
-        return identity;
+        return Ok(identity);
     }
 
-    let identity = format!("desktop-{}", generate_uuid_v4());
+    let identity = format!("desktop-{}", generate_uuid_v4()?);
     match write_desktop_identity(&identity_path, &identity) {
-        Ok(()) => identity,
+        Ok(()) => Ok(identity),
         Err(error) if error.starts_with("desktop identity already exists") => {
-            read_desktop_identity(&identity_path).unwrap_or(identity)
+            Ok(read_desktop_identity(&identity_path).unwrap_or(identity))
         }
         Err(error) => {
             eprintln!(
@@ -667,7 +664,7 @@ fn desktop_id(config_path: &Path) -> String {
                 identity_path.display(),
                 error
             );
-            identity
+            Ok(identity)
         }
     }
 }
@@ -715,16 +712,20 @@ fn write_desktop_identity(path: &Path, desktop_id: &str) -> Result<(), String> {
         })
 }
 
-fn generate_uuid_v4() -> String {
-    use std::io::Read;
+fn generate_uuid_v4() -> Result<String, String> {
+    let file = File::open("/dev/urandom")
+        .map_err(|error| format!("failed to generate desktop identity: {}", error))?;
+    generate_uuid_v4_from_reader(file)
+}
 
+fn generate_uuid_v4_from_reader(mut reader: impl std::io::Read) -> Result<String, String> {
     let mut bytes = [0u8; 16];
-    File::open("/dev/urandom")
-        .and_then(|mut file| file.read_exact(&mut bytes))
-        .unwrap_or_else(|error| panic!("failed to generate desktop identity: {}", error));
+    reader
+        .read_exact(&mut bytes)
+        .map_err(|error| format!("failed to generate desktop identity: {}", error))?;
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    format!(
+    Ok(format!(
         "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
         bytes[0],
         bytes[1],
@@ -742,7 +743,7 @@ fn generate_uuid_v4() -> String {
         bytes[13],
         bytes[14],
         bytes[15],
-    )
+    ))
 }
 
 fn is_desktop_uuid(value: &str) -> bool {
@@ -789,8 +790,9 @@ fn escape_toml_string(value: &str) -> String {
 mod tests {
     use super::{
         app_data_dir_for_server_config, build_server_config, current_server_version, desktop_id,
-        escape_toml_string, is_current_server_status, parse_lsof_pids, relay_url, resolved_db_path,
-        server_base_url, server_config_matches_runtime, server_config_path_for_app_data_dir,
+        escape_toml_string, generate_uuid_v4_from_reader, is_current_server_status,
+        parse_lsof_pids, relay_url, resolved_db_path, server_base_url,
+        server_config_matches_runtime, server_config_path_for_app_data_dir,
         server_lock_path_for_config, server_pids_on_port, stop_server_on_port, stopped_snapshot,
         try_claim_server_lock, MobileServerManager, MobileServerState, MobileServerStatus,
     };
@@ -878,7 +880,7 @@ mod tests {
         let manager = MobileServerManager::new(app_data_dir.clone());
         let expected_desktop_id = {
             let state = manager.inner.lock().await;
-            desktop_id(&state.config_path)
+            desktop_id(&state.config_path).expect("desktop identity should be generated")
         };
         write_test_server_config(
             &stale_config_path,
@@ -934,7 +936,10 @@ mod tests {
         let manager = MobileServerManager::new(app_data_dir.clone());
         let (expected_desktop_id, existing_config_path) = {
             let state = manager.inner.lock().await;
-            (desktop_id(&state.config_path), state.config_path.clone())
+            (
+                desktop_id(&state.config_path).expect("desktop identity should be generated"),
+                state.config_path.clone(),
+            )
         };
         write_test_server_config(
             &existing_config_path,
@@ -999,7 +1004,7 @@ mod tests {
         let manager = MobileServerManager::new(app_data_dir.clone());
         let expected_desktop_id = {
             let state = manager.inner.lock().await;
-            desktop_id(&state.config_path)
+            desktop_id(&state.config_path).expect("desktop identity should be generated")
         };
         write_test_server_config(
             &stale_config_path,
@@ -1102,9 +1107,10 @@ mod tests {
         let first_config = root.join("main/Kanna/server.toml");
         let second_config = root.join("worktree/Kanna/servers/kanna-wt-task/server.toml");
 
-        let first_id = desktop_id(&first_config);
-        let first_again = desktop_id(&first_config);
-        let second_id = desktop_id(&second_config);
+        let first_id = desktop_id(&first_config).expect("first desktop identity should generate");
+        let first_again = desktop_id(&first_config).expect("first desktop identity should be read");
+        let second_id =
+            desktop_id(&second_config).expect("second desktop identity should generate");
 
         assert_eq!(first_id, first_again);
         assert_ne!(first_id, second_id);
@@ -1118,6 +1124,22 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn uuid_generation_propagates_entropy_read_errors() {
+        struct FailingReader;
+
+        impl std::io::Read for FailingReader {
+            fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("entropy unavailable"))
+            }
+        }
+
+        let error = generate_uuid_v4_from_reader(FailingReader).unwrap_err();
+
+        assert!(error.contains("failed to generate desktop identity"));
+        assert!(error.contains("entropy unavailable"));
     }
 
     #[test]
@@ -1397,10 +1419,13 @@ mod tests {
         );
         std::fs::write(&path, stale_config).unwrap();
 
-        assert!(!server_config_matches_runtime(&path));
+        let desktop_id =
+            desktop_id(&state.config_path).expect("desktop identity should be generated");
+
+        assert!(!server_config_matches_runtime(&path, &desktop_id));
 
         std::fs::write(&path, correct_config).unwrap();
-        assert!(server_config_matches_runtime(&path));
+        assert!(server_config_matches_runtime(&path, &desktop_id));
 
         let _ = std::fs::remove_file(path);
         unsafe {
@@ -1440,10 +1465,13 @@ mod tests {
         );
         std::fs::write(&path, stale_config).unwrap();
 
-        assert!(!server_config_matches_runtime(&path));
+        let desktop_id =
+            desktop_id(&state.config_path).expect("desktop identity should be generated");
+
+        assert!(!server_config_matches_runtime(&path, &desktop_id));
 
         std::fs::write(&path, correct_config).unwrap();
-        assert!(server_config_matches_runtime(&path));
+        assert!(server_config_matches_runtime(&path, &desktop_id));
 
         let _ = std::fs::remove_dir_all(root);
         unsafe {
@@ -1466,7 +1494,7 @@ mod tests {
             started: false,
         };
 
-        let snapshot = stopped_snapshot(&state);
+        let snapshot = stopped_snapshot(&state).expect("stopped snapshot should build");
         assert_eq!(snapshot.state, "stopped");
         assert_eq!(snapshot.desktop_name, "Studio Mac");
         assert_eq!(snapshot.lan_port, 48120);
