@@ -254,6 +254,15 @@ describeWithEmulator("firestore security rules", () => {
       })
     );
     await expectDenied(readDoc(mockUserToken("alice"), "desktopCredentials/desktop-1"));
+    await expectSucceeds(
+      clientUpdate("alice", "desktopCredentials/desktop-1", {
+        desktopId: "desktop-1",
+        desktopSecret: "secret-1-rotated",
+        displayName: "Alice Mac",
+        uid: "alice",
+        updatedAt: "2026-05-08T00:00:01.000Z",
+      })
+    );
     await expectDenied(
       clientUpdate("bob", "desktopCredentials/desktop-1", {
         desktopId: "desktop-1",
@@ -264,12 +273,21 @@ describeWithEmulator("firestore security rules", () => {
       })
     );
     await expectDenied(
+      clientUpdate("bob", "desktopCredentials/desktop-1", {
+        desktopId: "desktop-1",
+        desktopSecret: "bob-takeover-secret",
+        displayName: "Bob Mac",
+        uid: "bob",
+        updatedAt: "2026-05-08T00:00:02.000Z",
+      })
+    );
+    await expectDenied(
       clientUpdate("alice", "desktopCredentials/desktop-2", {
         desktopId: "desktop-1",
         desktopSecret: "secret-1",
         displayName: "Alice Mac",
         uid: "alice",
-        updatedAt: "2026-05-08T00:00:02.000Z",
+        updatedAt: "2026-05-08T00:00:03.000Z",
       })
     );
   });
