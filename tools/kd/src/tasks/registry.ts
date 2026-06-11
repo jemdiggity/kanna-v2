@@ -757,6 +757,20 @@ export const taskDefinitions = [
     }
   },
   {
+    id: "cloud.relay-provision",
+    description: "One-time provisioning of the kanna-relay VM (SA, static IP, firewall, e2-micro).",
+    inputSchema: emptyInputSchema,
+    execute: async () => {
+      const context = await resolveDefaultContext(process.env);
+      return runBuiltCommand(
+        "bash",
+        ["services/relay/deploy/provision.sh"],
+        context.repoRoot,
+        context.env
+      );
+    }
+  },
+  {
     id: "test.app-update-bundle",
     description: "Run the full-bundle app update E2E test.",
     inputSchema: emptyInputSchema,

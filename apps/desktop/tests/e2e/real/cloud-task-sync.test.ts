@@ -886,4 +886,93 @@ describe("cloud task sync", () => {
     await waitForSidebarTaskToDisappear(secondary, "Cloud sync visible task");
     await waitForCloudTaskToStayGoneAfterRefresh(secondary, "Cloud sync visible task");
   });
+
+  it("streams live terminal output from the owning desktop through the relay", async () => {
+    const prompt = "Relay live stream task";
+
+    await setSetupState(primary, "maximized", false);
+    await setSetupState(primary, "sidebarHidden", false);
+    const result = await callVueMethod(
+      primary,
+      "store.createItem",
+      primaryRepoId,
+      testRepoPath,
+      prompt,
+      "sdk",
+      { agentProvider: "codex", baseRef: "origin/main" },
+    );
+    if (result && typeof result === "object" && "__error" in result) {
+      throw new Error(String((result as { __error: string }).__error));
+    }
+    if (typeof result !== "string") {
+      throw new Error(`expected created task id, got ${JSON.stringify(result)}`);
+    }
+    await waitForSidebarTask(primary, prompt);
+
+    const synced = await waitForCloudTaskSnapshot(secondary, prompt);
+    expect(synced.terminalRef).toEqual({
+      ownerDesktopId: primaryDesktopId,
+      ownerLocalTaskId: result,
+    });
+
+    // The PTY prints a marker at spawn time (visible via attach snapshot), then
+    // prints a second marker only after it receives a line of input.
+    await tauriInvoke(primary, "spawn_session", {
+      sessionId: result,
+      cwd: testRepoPath,
+      executable: "/bin/zsh",
+      args: [
+        "--login",
+        "-c",
+        "printf 'Relay stream attach marker\\n'; read line; printf 'Relay live event:%s\\n' \"$line\"; sleep 60",
+      ],
+      env: {},
+      cols: 80,
+      rows: 24,
+      agentProvider: "codex",
+    });
+
+    await waitForSidebarTask(secondary, prompt);
+    expect(await sidebarItemsForPrompt(secondary, prompt)).toEqual([
+      expect.objectContaining({
+        id: expect.stringMatching(/^cloud:/),
+        isRemote: true,
+        stage: "in progress",
+      }),
+    ]);
+    // The secondary holds no local copy of this task and no LAN/local route to
+    // the primary's daemon in this harness: its only terminal transport for the
+    // remote task is "cloud", i.e. the relay websocket (desktopRelayTerminal.ts
+    // observe_session over KANNA_RELAY_PORT). Everything asserted below from
+    // the secondary's terminal therefore traversed the relay.
+    expect(await countLocalTasks(secondary)).toBe(0);
+    expect(await remoteDiagnosticsForPrompt(secondary, prompt)).toContainEqual(
+      expect.objectContaining({
+        selectedTerminalTransport: "cloud",
+        ownerDesktopId: primaryDesktopId,
+      }),
+    );
+
+    await callVueMethod(secondary, "handleSelectItem", synced.item.id);
+    await waitForBodyText(secondary, "Relay stream attach marker");
+
+    // Produce NEW output on the owning desktop only after the secondary has
+    // attached. The secondary sends nothing here, so the marker below cannot
+    // come from attach-snapshot hydration or from a secondary-initiated invoke:
+    // it can only arrive as relay `type:"event"` terminal_output messages
+    // routed by sessionId to the observing secondary (services/relay/src/router.ts).
+    const liveInput = "through-the-relay\n";
+    await tauriInvoke(primary, "send_input", {
+      sessionId: result,
+      data: Array.from(new TextEncoder().encode(liveInput)),
+    });
+    await waitForBodyText(secondary, "Relay live event:through-the-relay");
+
+    const closeResult = await callVueMethod(secondary, "closeSelectedWorkspaceTask");
+    if (closeResult && typeof closeResult === "object" && "__error" in closeResult) {
+      throw new Error(String((closeResult as { __error: string }).__error));
+    }
+    await waitForSidebarTaskToDisappear(secondary, prompt);
+    await waitForCloudTaskToStayGoneAfterRefresh(secondary, prompt);
+  });
 });

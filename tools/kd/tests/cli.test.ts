@@ -297,5 +297,9 @@ describe("kd CLI", () => {
       taskId: "cloud.deploy",
       input: { staging: true, production: false, relay: true }
     });
+    expect(parseCliArgs(["cloud", "relay-provision"])).toEqual({
+      taskId: "cloud.relay-provision",
+      input: {}
+    });
   });
 });

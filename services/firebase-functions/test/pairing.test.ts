@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
+import * as firebaseFunctions from "../src/index";
 import { buildPairingArtifacts } from "../src/pairing";
 import { emulatorPorts } from "../src/types";
+
+describe("firebase functions exports", () => {
+  it("does not export createPairingCode as a deployable Cloud Function", () => {
+    expect(firebaseFunctions).not.toHaveProperty("createPairingCode");
+  });
+});
 
 describe("firebase emulator configuration", () => {
   it("exposes the expected emulator ports for auth, firestore, and functions", () => {

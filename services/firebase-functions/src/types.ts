@@ -4,11 +4,7 @@ export const emulatorPorts = {
   functions: 5001,
 } as const;
 
-export interface CreatePairingCodeRequest {
-  desktopDisplayName: string;
-}
-
-export interface CreatePairingCodeResponse {
+export interface PairingResponse {
   pairingCode: string;
   pairingCodeId: string;
   desktopId: string;

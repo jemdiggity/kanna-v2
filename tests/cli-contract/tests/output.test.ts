@@ -20,8 +20,13 @@ describe("output format", () => {
   });
 
   it("result subtype is error_max_turns with --max-turns 1", async () => {
-    // Contract: Claude treats hitting max_turns as an error, not success
-    const result = await runClaude({ prompt: "Say OK" });
+    // Contract: Claude treats hitting max_turns as an error, not success.
+    // A simple one-turn prompt can now complete successfully with --max-turns 1,
+    // so force a tool result that requires a follow-up turn.
+    const result = await runClaude({
+      prompt: "Use the Bash tool to run pwd, then after seeing the output say DONE.",
+      flags: ["--permission-mode", "dontAsk"],
+    });
     if (isClaudeUnavailable(result)) return;
     const resultMsg = result.lines.find((l) => l.type === "result") as any;
     expect(resultMsg.subtype).toBe("error_max_turns");

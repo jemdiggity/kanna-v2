@@ -222,7 +222,7 @@ describe("createAppModel", () => {
   });
 
   it("uses the production relay URL when no Expo public relay URL is provided", () => {
-    expect(resolveRelayUrl({})).toBe("wss://kanna-relay-402613185450.us-central1.run.app");
+    expect(resolveRelayUrl({})).toBe("wss://relay.kanna.build");
   });
 
   it("does not use the production relay URL in dev mode without an explicit override", () => {

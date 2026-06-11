@@ -10,6 +10,6 @@ To make this end-to-end testable, the harness needs a release-mode app launch pa
 
 Narrower coverage added in the meantime:
 
-- `apps/desktop/src/services/desktopRelayTerminal.test.ts` verifies that `createConfiguredDesktopRelayTerminalClient()` and `listActiveDesktopIdsViaRelay()` read absent relay env vars in production mode, construct WebSockets against `wss://kanna-relay-402613185450.us-central1.run.app`, authenticate, and send the expected relay terminal/RPC commands instead of returning `null`.
+- `apps/desktop/src/services/desktopRelayTerminal.test.ts` verifies that `createConfiguredDesktopRelayTerminalClient()` and `listActiveDesktopIdsViaRelay()` read absent relay env vars in production mode, construct WebSockets against `wss://relay.kanna.build`, authenticate, and send the expected relay terminal/RPC commands instead of returning `null`.
 - `apps/mobile/src/App.test.tsx` verifies the mobile production relay default and signed-in remote model behavior without falling back to loopback LAN.
 - `apps/desktop/src-tauri/src/commands/mobile.rs` tests verify the desktop sidecar server config defaults to the production relay outside debug builds when relay env vars are absent.

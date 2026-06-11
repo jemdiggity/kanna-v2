@@ -26,10 +26,9 @@ export interface CloudDeployResult {
 
 export interface RelayDeployResult {
   projectId: string;
-  serviceName: string;
-  region: string;
+  vmName: string;
+  zone: string;
   image: string;
-  serviceUrl: string;
   relayUrl: string;
 }
 
@@ -90,16 +89,16 @@ async function assertCleanGitWorktree(repoRoot: string, runner: CommandRunner): 
 
 export async function deployFirebaseCloud(input: CloudDeployInput & { relay?: boolean }): Promise<CloudDeployResult> {
   assertCloudDeployEnvironment(input.environment);
+  // Reject staging relay requests before any git check, build, or deploy runs
+  // so the Firebase staging deploy is never mutated as a partial outcome.
+  if (input.relay && input.environment === "staging") {
+    throw new Error(
+      "staging relay is retired; use the local relay via emulators (ws://127.0.0.1:18080)."
+    );
+  }
 
   const projectId = resolveFirebaseProject(input.repoRoot, input.env, input.environment);
   await assertCleanGitWorktree(input.repoRoot, input.runner);
-  const build = await input.runner.run("pnpm", ["--dir", "services/firebase-functions", "build"], {
-    cwd: input.repoRoot,
-    env: input.env
-  });
-  if (build.exitCode !== 0) {
-    throw new Error(build.stderr || build.stdout || "Firebase functions build failed.");
-  }
 
   const deploy = await input.runner.run(
     "pnpm",
@@ -108,7 +107,7 @@ export async function deployFirebaseCloud(input: CloudDeployInput & { relay?: bo
       "firebase",
       "deploy",
       "--only",
-      "functions,firestore:rules",
+      "firestore:rules",
       "--project",
       projectId,
       "--force"
@@ -128,11 +127,22 @@ export async function deployFirebaseCloud(input: CloudDeployInput & { relay?: bo
 
 export async function deployRelayCloud(input: CloudDeployInput): Promise<RelayDeployResult> {
   assertCloudDeployEnvironment(input.environment);
+  if (input.environment === "staging") {
+    throw new Error(
+      "staging relay is retired; use the local relay via emulators (ws://127.0.0.1:18080)."
+    );
+  }
 
   const projectId = resolveFirebaseProject(input.repoRoot, input.env, input.environment);
-  const region = input.env.KANNA_CLOUD_RUN_REGION?.trim() || "us-central1";
-  const serviceName = input.env.KANNA_RELAY_SERVICE_NAME?.trim() || "kanna-relay";
-  const image = `gcr.io/${projectId}/${serviceName}`;
+  const vmName = input.env.KANNA_RELAY_VM_NAME?.trim() || "kanna-relay-vm";
+  const zone = input.env.KANNA_RELAY_VM_ZONE?.trim() || "us-central1-a";
+  const hostname = input.env.KANNA_RELAY_HOSTNAME?.trim() || "relay.kanna.build";
+  const image = `gcr.io/${projectId}/kanna-relay`;
+  if (projectId !== "kanna-build") {
+    throw new Error(
+      `Relay VM compose stack pins gcr.io/kanna-build/kanna-relay; deploying for project ${projectId} would run a stale image. Update services/relay/deploy/compose.yaml first.`
+    );
+  }
 
   const build = await input.runner.run("pnpm", ["--dir", "services/relay", "build"], {
     cwd: input.repoRoot,
@@ -161,63 +171,67 @@ export async function deployRelayCloud(input: CloudDeployInput): Promise<RelayDe
     throw new Error(submit.stderr || submit.stdout || "Relay Cloud Build submit failed.");
   }
 
-  const deploy = await input.runner.run(
+  // Ship the deploy stack (compose.yaml, Caddyfile, vm-deploy.sh) so the repo
+  // stays the source of truth for what runs on the VM. The destination is
+  // recreated first: scp's directory semantics differ depending on whether
+  // the destination already exists, so copy named files into a fresh dir.
+  const prep = await input.runner.run(
     "gcloud",
     [
-      "run",
-      "deploy",
-      serviceName,
+      "compute",
+      "ssh",
+      vmName,
       "--project",
       projectId,
-      "--image",
-      image,
-      "--region",
-      region,
-      "--platform",
-      "managed",
-      "--allow-unauthenticated",
-      "--set-env-vars",
-      `FIREBASE_PROJECT_ID=${projectId}`
+      "--zone",
+      zone,
+      "--command",
+      "rm -rf ~/kanna-relay && mkdir -p ~/kanna-relay"
     ],
     { cwd: input.repoRoot, env: input.env, streamOutput: true }
   );
-  if (deploy.exitCode !== 0) {
-    throw new Error(deploy.stderr || deploy.stdout || "Relay Cloud Run deploy failed.");
+  if (prep.exitCode !== 0) {
+    throw new Error(prep.stderr || prep.stdout || "Relay VM deploy-dir prep failed.");
   }
 
-  const describe = await input.runner.run(
+  const scp = await input.runner.run(
     "gcloud",
     [
-      "run",
-      "services",
-      "describe",
-      serviceName,
+      "compute",
+      "scp",
+      "services/relay/deploy/compose.yaml",
+      "services/relay/deploy/Caddyfile",
+      "services/relay/deploy/vm-deploy.sh",
+      `${vmName}:~/kanna-relay/`,
       "--project",
       projectId,
-      "--region",
-      region,
-      "--platform",
-      "managed",
-      "--format",
-      "value(status.url)"
+      "--zone",
+      zone
     ],
-    { cwd: input.repoRoot, env: input.env }
+    { cwd: input.repoRoot, env: input.env, streamOutput: true }
   );
-  if (describe.exitCode !== 0) {
-    throw new Error(describe.stderr || describe.stdout || "Relay Cloud Run describe failed.");
+  if (scp.exitCode !== 0) {
+    throw new Error(scp.stderr || scp.stdout || "Relay deploy file transfer failed.");
   }
 
-  const serviceUrl = describe.stdout.trim();
-  if (!serviceUrl) {
-    throw new Error("Relay Cloud Run deploy succeeded but no service URL was returned.");
+  const ssh = await input.runner.run(
+    "gcloud",
+    [
+      "compute",
+      "ssh",
+      vmName,
+      "--project",
+      projectId,
+      "--zone",
+      zone,
+      "--command",
+      "sudo bash ~/kanna-relay/vm-deploy.sh"
+    ],
+    { cwd: input.repoRoot, env: input.env, streamOutput: true }
+  );
+  if (ssh.exitCode !== 0) {
+    throw new Error(ssh.stderr || ssh.stdout || "Relay VM deploy failed.");
   }
 
-  return {
-    projectId,
-    serviceName,
-    region,
-    image,
-    serviceUrl,
-    relayUrl: serviceUrl.replace(/^https:\/\//, "wss://").replace(/^http:\/\//, "ws://")
-  };
+  return { projectId, vmName, zone, image, relayUrl: `wss://${hostname}` };
 }

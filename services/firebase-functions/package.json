@@ -5,11 +5,7 @@
   "main": "dist/src/index.js",
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "pnpm exec vitest run"
-  },
-  "dependencies": {
-    "firebase-admin": "^13.0.0",
-    "firebase-functions": "^6.5.0"
+    "test": "pnpm exec vitest run --exclude dist/**"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
