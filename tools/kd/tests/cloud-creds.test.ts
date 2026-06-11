@@ -71,4 +71,18 @@ describe("cloud test credentials", () => {
     const defaulted = applyProductionCloudEnv({});
     expect(defaulted.KANNA_RELAY_URL).toBe("wss://relay.kanna.build");
   });
+
+  it("strips local emulator pointers so the app does not dial a missing emulator", () => {
+    const applied = applyProductionCloudEnv({
+      KANNA_FIREBASE_AUTH_PORT: "9394",
+      KANNA_FIREBASE_FIRESTORE_PORT: "8389",
+      KANNA_CLOUD_FUNCTIONS_ENDPOINT: "http://127.0.0.1:5152/createPairingCode",
+      KANNA_RELAY_PORT: "9393",
+    });
+    expect(applied.KANNA_FIREBASE_AUTH_PORT).toBeUndefined();
+    expect(applied.KANNA_FIREBASE_FIRESTORE_PORT).toBeUndefined();
+    expect(applied.KANNA_CLOUD_FUNCTIONS_ENDPOINT).toBeUndefined();
+    expect(applied.KANNA_RELAY_PORT).toBeUndefined();
+    expect(applied.KANNA_RELAY_URL).toBe("wss://relay.kanna.build");
+  });
 });
