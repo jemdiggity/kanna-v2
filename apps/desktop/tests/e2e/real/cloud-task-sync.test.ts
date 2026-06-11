@@ -5,6 +5,7 @@ import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo"
 import { cleanupWorktrees, importTestRepo, resetDatabase } from "../helpers/reset";
 import { createPrimaryAndSecondaryClients } from "../helpers/twoInstance";
 import { callVueMethod, execDb, queryDb, tauriInvoke } from "../helpers/vue";
+import { buildGlobalKeydownScript } from "../helpers/keyboard";
 
 const { primary, secondary } = createPrimaryAndSecondaryClients();
 let testRepoPath = "";
@@ -886,7 +887,6 @@ describe("cloud task sync", () => {
     await waitForSidebarTaskToDisappear(secondary, "Cloud sync visible task");
     await waitForCloudTaskToStayGoneAfterRefresh(secondary, "Cloud sync visible task");
   });
-
   it("streams live terminal output from the owning desktop through the relay", async () => {
     const prompt = "Relay live stream task";
 
@@ -974,5 +974,126 @@ describe("cloud task sync", () => {
     }
     await waitForSidebarTaskToDisappear(secondary, prompt);
     await waitForCloudTaskToStayGoneAfterRefresh(secondary, prompt);
+  });
+
+  it("does not flash a matching stale remote task after closing a local task from the sidebar shortcut", async () => {
+    const prompt = "Local close stale cloud copy";
+    const createResult = await callVueMethod(
+      primary,
+      "store.createItem",
+      primaryRepoId,
+      testRepoPath,
+      prompt,
+      "sdk",
+      { agentProvider: "codex", baseRef: "origin/main" },
+    );
+    if (createResult && typeof createResult === "object" && "__error" in createResult) {
+      throw new Error(String((createResult as { __error: string }).__error));
+    }
+    if (typeof createResult !== "string") {
+      throw new Error(`expected created task id, got ${JSON.stringify(createResult)}`);
+    }
+
+    const taskRows = await queryDb(
+      primary,
+      "SELECT branch FROM pipeline_item WHERE id = ?",
+      [createResult],
+    ) as Array<{ branch?: string | null }>;
+    const branch = taskRows[0]?.branch;
+    if (!branch) {
+      throw new Error(`expected ${createResult} to have a branch`);
+    }
+    await tauriInvoke(primary, "write_text_file", {
+      path: `${testRepoPath}/.kanna-worktrees/${branch}/.kanna/config.json`,
+      content: JSON.stringify({ setup: [] }),
+    });
+
+    await seedCloudTaskSnapshot({
+      cloudTaskId: `${primaryRepoId}:${createResult}`,
+      ownerDesktopId: primaryDesktopId,
+      ownerLocalTaskId: createResult,
+      title: prompt,
+      promptSnippet: prompt,
+      displayName: null,
+      stage: "in progress",
+      activity: "idle",
+      status: "active",
+      repo: {
+        cloudRepoId: primaryRepoId,
+        name: "cloud-sync-repo",
+        remoteUrl: testRepoRemoteUrl,
+        remoteUrlHash: testRepoRemoteUrlHash,
+        defaultBranch: "main",
+      },
+      branch,
+      baseRef: "origin/main",
+      prNumber: null,
+      prUrl: null,
+      agent: { provider: "codex", type: "sdk" },
+      transfer: {
+        state: "none",
+        transferId: null,
+        sourceDesktopId: null,
+        destinationDesktopId: null,
+      },
+      blockedByTaskIds: [],
+      createdAt: "2026-05-04T00:00:00.000Z",
+      updatedAt: "2026-05-04T00:01:00.000Z",
+      closedAt: null,
+    });
+
+    await callVueMethod(primary, "store.selectRepo", primaryRepoId);
+    await callVueMethod(primary, "store.selectItem", createResult);
+    await callVueMethod(primary, "refreshCloudTasksForSignedInUser");
+    const mergedItems = await waitForSingleSidebarTask(primary, prompt);
+    expect(mergedItems).toEqual([
+      expect.objectContaining({
+        id: createResult,
+        isRemote: false,
+        stage: "in progress",
+      }),
+    ]);
+    expect(await cloudSnapshotItemsForPrompt(primary, prompt)).toEqual(expect.objectContaining({
+      items: expect.arrayContaining([expect.objectContaining({ prompt })]),
+    }));
+
+    const observedStates = await primary.executeAsync<Array<Array<{ id: string; isRemote: boolean }>>>(
+      `const cb = arguments[arguments.length - 1];
+       const prompt = ${JSON.stringify(prompt)};
+       const states = [];
+       const read = () => {
+         const ctx = window.__KANNA_E2E__.setupState;
+         const value = ctx.sidebarItems?.__v_isRef ? ctx.sidebarItems.value : ctx.sidebarItems;
+         states.push(JSON.parse(JSON.stringify((value || [])
+           .filter((item) => item.prompt === prompt)
+           .map((item) => ({ id: item.id, isRemote: item.remote_task === true })))));
+       };
+       read();
+       const sampler = setInterval(read, 10);
+       ${buildGlobalKeydownScript({ key: "Delete", meta: true, shift: true })}
+       const deadline = Date.now() + 10000;
+       const wait = () => {
+         read();
+         const latest = states[states.length - 1] || [];
+         if (latest.length === 0) {
+           clearInterval(sampler);
+           cb(states);
+           return;
+         }
+         if (Date.now() > deadline) {
+           clearInterval(sampler);
+           cb(states);
+           return;
+         }
+         setTimeout(wait, 20);
+       };
+       wait();`
+    );
+
+    expect(observedStates.at(-1)).toEqual([]);
+    expect(observedStates.some((state) =>
+      state.some((item) => item.isRemote || item.id.startsWith("cloud:") || item.id.startsWith("lan:"))
+    )).toBe(false);
+    await waitForSidebarTaskToDisappear(primary, prompt);
   });
 });
