@@ -83,11 +83,16 @@ const LOCAL_CLOUD_ENV_VARS = [
  * client config and relay URL without overriding explicit values, and strip
  * local emulator pointers.
  */
-export function applyProductionCloudEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const merged: NodeJS.ProcessEnv = { ...env };
+export function stripLocalCloudEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const stripped: NodeJS.ProcessEnv = { ...env };
   for (const key of LOCAL_CLOUD_ENV_VARS) {
-    delete merged[key];
+    delete stripped[key];
   }
+  return stripped;
+}
+
+export function applyProductionCloudEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const merged = stripLocalCloudEnv(env);
   for (const [key, value] of Object.entries(PRODUCTION_FIREBASE_CLIENT_ENV)) {
     if (!merged[key]?.trim()) merged[key] = value;
   }
