@@ -195,13 +195,39 @@ async function waitForCreatedStageTask(
 }
 
 async function waitForSelectedTask(client: WebDriverClient, expectedTaskId: string, timeoutMs = 10_000): Promise<void> {
+  await waitForSelectedTaskId(client, expectedTaskId, timeoutMs);
+}
+
+async function waitForSelectedTaskId(
+  client: WebDriverClient,
+  expectedTaskId: string | null,
+  timeoutMs = 10_000,
+): Promise<void> {
   const deadline = Date.now() + timeoutMs;
+  let lastSelectedTaskId: unknown = undefined;
   while (Date.now() < deadline) {
     const selectedTaskId = await getVueState(client, "selectedItemId");
+    lastSelectedTaskId = selectedTaskId;
     if (selectedTaskId === expectedTaskId) return;
     await sleep(100);
   }
-  throw new Error(`timed out waiting for selected task ${expectedTaskId}`);
+  throw new Error(`timed out waiting for selected task ${expectedTaskId}; saw ${JSON.stringify(lastSelectedTaskId)}`);
+}
+
+async function emitExternalSharedInvalidation(client: WebDriverClient, reason: string): Promise<void> {
+  const result = await client.executeAsync<string | { __error: string }>(
+    `const cb = arguments[arguments.length - 1];
+     import("/src/emit.ts")
+       .then(({ emit }) => emit("kanna://window-workspace-invalidated", {
+         reason: ${JSON.stringify(reason)},
+         sourceWindowId: "e2e-peer-window",
+       }))
+       .then(() => cb("ok"))
+       .catch((error) => cb({ __error: error?.message || String(error) }));`,
+  );
+  if (isVueCallError(result)) {
+    throw new Error(`failed to emit shared invalidation: ${result.__error}`);
+  }
 }
 
 async function waitForSidebarToExcludeText(
@@ -734,6 +760,9 @@ describe("stage advance", () => {
       ],
     );
     await hydrateStoreItem(client, taskId);
+    const selectResult = await callVueMethod(client, "store.selectItem", taskId);
+    if (isVueCallError(selectResult)) throw new Error(selectResult.__error);
+    await waitForSelectedTask(client, taskId);
 
     const existingInProgressTaskIds = await getStageTaskIds(client, repoId, "in progress");
     const server = await startTestKannaServer(client, join(testRepoPath, ".kanna"));
@@ -787,6 +816,9 @@ describe("stage advance", () => {
       const capturedArgs = await readFile(capturedArgsPath, "utf8");
       expect(capturedArgs).toContain("--yolo\n");
       expect(capturedArgs).toContain(`${expectedAgentPrompt}\n`);
+      await emitExternalSharedInvalidation(client, "requestRevision");
+      await waitForSelectedTaskId(client, null);
+      expect(await getVueState(client, "selectedItemId")).not.toBe(revisionTaskId);
 
       const tasksResponse = await fetch(`${server.baseUrl}/v1/repos/${encodeURIComponent(repoId)}/tasks`);
       if (!tasksResponse.ok) {
@@ -799,6 +831,112 @@ describe("stage advance", () => {
         title: originalTitle,
         stage: "in progress",
       });
+    } finally {
+      server.child.kill();
+    }
+  });
+
+  it("requests a revision through the server API without stealing focus from another selected task", async () => {
+    const taskId = "server-request-revision-focus-task";
+    const branch = "task-server-request-revision-focus";
+    const worktreePath = join(testRepoPath, ".kanna-worktrees", branch);
+    const activeTaskId = "server-request-revision-focused-active";
+    const revisionPrompt = "Keep the unrelated selected task focused.";
+
+    await tauriInvoke(client, "git_worktree_add", {
+      repoPath: testRepoPath,
+      branch,
+      path: worktreePath,
+      startPoint: "main",
+    });
+    await execDb(
+      client,
+      `INSERT INTO pipeline_item (
+         id, repo_id, prompt, pipeline, stage, stage_result, tags, branch,
+         agent_type, agent_provider, activity, display_name, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        taskId,
+        repoId,
+        "Review task that needs a revision",
+        "revision-e2e",
+        "review",
+        JSON.stringify({ status: "success", summary: "ready for review" }),
+        "[]",
+        branch,
+        "pty",
+        "codex",
+        "idle",
+        "Request revision focus source",
+        "2026-05-06T00:02:00.000Z",
+        "2026-05-06T00:02:00.000Z",
+      ],
+    );
+    await execDb(
+      client,
+      `INSERT INTO pipeline_item (
+         id, repo_id, prompt, pipeline, stage, stage_result, tags, branch,
+         agent_type, agent_provider, activity, display_name, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        activeTaskId,
+        repoId,
+        "Keep this unrelated task selected",
+        "revision-e2e",
+        "in progress",
+        null,
+        "[]",
+        null,
+        "sdk",
+        "codex",
+        "idle",
+        "Selected task should stay focused",
+        "2026-05-06T00:03:00.000Z",
+        "2026-05-06T00:03:00.000Z",
+      ],
+    );
+    await hydrateStoreItem(client, taskId);
+    await hydrateStoreItem(client, activeTaskId);
+
+    const selectResult = await callVueMethod(client, "store.selectItem", activeTaskId);
+    if (isVueCallError(selectResult)) throw new Error(selectResult.__error);
+    await waitForSelectedTask(client, activeTaskId);
+
+    const existingInProgressTaskIds = await getStageTaskIds(client, repoId, "in progress");
+    const server = await startTestKannaServer(client, join(testRepoPath, ".kanna"));
+    try {
+      const response = await fetch(`${server.baseUrl}/v1/tasks/${encodeURIComponent(taskId)}/actions/request-revision`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          targetStage: "in progress",
+          summary: "focus regression coverage",
+          prompt: revisionPrompt,
+          metadata: { source: "e2e" },
+        }),
+      });
+      if (!response.ok) {
+        throw new Error(`request-revision failed: ${response.status} ${await response.text()}`);
+      }
+
+      const body = await response.json() as { taskId: string };
+      const revisionTaskId = body.taskId;
+      expect(revisionTaskId).toBeTruthy();
+      expect(existingInProgressTaskIds.has(revisionTaskId)).toBe(false);
+
+      await emitExternalSharedInvalidation(client, "requestRevision");
+      await waitForSelectedTask(client, activeTaskId);
+      expect(await getVueState(client, "selectedItemId")).not.toBe(revisionTaskId);
+
+      const rows = (await queryDb(
+        client,
+        "SELECT id, stage, closed_at FROM pipeline_item WHERE id IN (?, ?, ?)",
+        [taskId, activeTaskId, revisionTaskId],
+      )) as Array<{ id: string | null; stage: string | null; closed_at: string | null }>;
+      expect(rows.find((row) => row.id === taskId)?.stage).toBe("done");
+      expect(rows.find((row) => row.id === taskId)?.closed_at).toBeTruthy();
+      expect(rows.find((row) => row.id === activeTaskId)?.stage).toBe("in progress");
+      expect(rows.find((row) => row.id === revisionTaskId)?.stage).toBe("in progress");
     } finally {
       server.child.kill();
     }
