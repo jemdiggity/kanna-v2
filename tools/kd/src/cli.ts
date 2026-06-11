@@ -181,6 +181,9 @@ export function parseCliArgs(args: string[]): ParsedCliCommand {
   if (group === "cloud" && command === "deploy") {
     return { taskId: "cloud.deploy", input: parseFlagInput(rest, { staging: false, production: false, relay: false }) };
   }
+  if (group === "cloud" && command === "relay-provision") {
+    return { taskId: "cloud.relay-provision", input: {} };
+  }
   if (group === "pages" && command === "build-schema") {
     return { taskId: "pages.build-schema", input: parseFlagInput(rest, {}) };
   }
@@ -270,6 +273,7 @@ function helpText(): string {
     "  build sidecars",
     "  release ship [--dry-run] [--release] [--major|--minor|--patch] [--arm64|--x86_64]",
     "  cloud deploy --staging|--production [--relay]",
+    "  cloud relay-provision",
     "  pages build-schema --out-dir <dir>",
     "  test app-update-bundle",
     "  test cloud-emulator",

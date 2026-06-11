@@ -89,6 +89,13 @@ async function assertCleanGitWorktree(repoRoot: string, runner: CommandRunner): 
 
 export async function deployFirebaseCloud(input: CloudDeployInput & { relay?: boolean }): Promise<CloudDeployResult> {
   assertCloudDeployEnvironment(input.environment);
+  // Reject staging relay requests before any git check, build, or deploy runs
+  // so the Firebase staging deploy is never mutated as a partial outcome.
+  if (input.relay && input.environment === "staging") {
+    throw new Error(
+      "staging relay is retired; use the local relay via emulators (ws://127.0.0.1:18080)."
+    );
+  }
 
   const projectId = resolveFirebaseProject(input.repoRoot, input.env, input.environment);
   await assertCleanGitWorktree(input.repoRoot, input.runner);

@@ -286,8 +286,10 @@ describe("cloud deploy runtime", () => {
   });
 
   it("refuses staging relay deploys", async () => {
+    const calls: Array<{ command: string; args: string[] }> = [];
     const runner: CommandRunner = {
-      async run() {
+      async run(command, args) {
+        calls.push({ command, args });
         return { exitCode: 0, stdout: "", stderr: "" };
       }
     };
@@ -300,5 +302,27 @@ describe("cloud deploy runtime", () => {
         environment: "staging"
       })
     ).rejects.toThrow("staging relay is retired");
+    expect(calls.length).toBe(0);
+  });
+
+  it("refuses staging Firebase deploys with --relay before doing any work", async () => {
+    const calls: Array<{ command: string; args: string[] }> = [];
+    const runner: CommandRunner = {
+      async run(command, args) {
+        calls.push({ command, args });
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+    };
+
+    await expect(
+      deployFirebaseCloud({
+        repoRoot: "/repo",
+        env: { KANNA_FIREBASE_STAGING_PROJECT: "kanna-staging" },
+        runner,
+        environment: "staging",
+        relay: true
+      })
+    ).rejects.toThrow("staging relay is retired");
+    expect(calls.length).toBe(0);
   });
 });
