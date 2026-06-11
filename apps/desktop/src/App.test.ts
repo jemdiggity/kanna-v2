@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { computed, defineComponent, h, nextTick, ref } from "vue";
+import { computed, defineComponent, h, nextTick, reactive, ref } from "vue";
 import { mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { KeyboardActions } from "./composables/useKeyboardShortcuts";
@@ -1210,6 +1210,97 @@ describe("App", () => {
     expect(wrapper.get('[data-testid="main-item-id"]').text()).toBe("cloud:repo-remote:task-remote");
     expect(wrapper.get('[data-testid="main-repo-path"]').text()).toBe("cloud");
     expect(store.selectRepo).not.toHaveBeenCalledWith("cloud:repo-remote");
+
+    wrapper.unmount();
+  });
+
+  it("hides stale remote copies immediately after closing a matching local task", async () => {
+    const localItems = reactive([{
+      id: "task-local",
+      repo_id: "repo-1",
+      prompt: "Close local task",
+      pipeline: "default",
+      stage: "in progress",
+      tags: "[]",
+      pr_number: null,
+      pr_url: null,
+      branch: "task-local",
+      activity: "idle",
+      activity_changed_at: "2026-05-18T00:00:00.000Z",
+      unread_at: null,
+      port_offset: null,
+      port_env: null,
+      pinned: 0,
+      pin_order: null,
+      display_name: "Local task",
+      issue_number: null,
+      issue_title: null,
+      closed_at: null,
+      agent_session_id: null,
+      base_ref: "origin/main",
+      agent_provider: "claude",
+      agent_type: "pty",
+      previous_stage: null,
+      stage_result: null,
+      teardown_started_at: null,
+      last_output_preview: null,
+      active_post_action: null,
+      created_at: "2026-05-18T00:00:00.000Z",
+      updated_at: "2026-05-18T00:00:00.000Z",
+    }]);
+    store.items = localItems;
+    store.currentItem = store.items[0];
+    store.selectedItemId = "task-local";
+    store.closeTask.mockImplementationOnce(async () => {
+      localItems.splice(0);
+      store.currentItem = null;
+      store.selectedItemId = null;
+    });
+    cloudTasksMock.mockResolvedValue({
+      repos: [],
+      items: [{
+        ...store.items[0],
+        id: "cloud:repo-1:task-local",
+        pipeline: "cloud",
+        display_name: "Remote copy",
+      }],
+      terminalRefs: {
+        "cloud:repo-1:task-local": {
+          ownerDesktopId: "desktop-a",
+          ownerLocalRepoId: "repo-1",
+          ownerLocalTaskId: "task-local",
+          transport: "cloud",
+        },
+      },
+    });
+
+    const SidebarCaptureStub = defineComponent({
+      name: "Sidebar",
+      props: {
+        pipelineItems: { type: Array, default: () => [] },
+      },
+      template: `
+        <div data-testid="sidebar-items">
+          <span v-for="item in pipelineItems" :key="item.id" data-testid="sidebar-item">
+            {{ item.id }}:{{ String(item.remote_task) }}
+          </span>
+        </div>
+      `,
+    });
+
+    const wrapper = await mountApp(SidebarCaptureStub);
+    await flushPromises();
+    await flushPromises();
+    expect(wrapper.findAll('[data-testid="sidebar-item"]').map((node) => node.text())).toEqual([
+      "task-local:false",
+    ]);
+
+    expect(capturedKeyboardActions).not.toBeNull();
+    await capturedKeyboardActions?.closeTask();
+    await flushPromises();
+
+    expect(store.closeTask).toHaveBeenCalled();
+    expect(wrapper.findAll('[data-testid="sidebar-item"]').map((node) => node.text())).toEqual([]);
 
     wrapper.unmount();
   });

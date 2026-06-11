@@ -338,6 +338,26 @@ function filterClosedRemoteSnapshot(snapshot: DesktopCloudSnapshot): DesktopClou
     ),
   };
 }
+
+function markWorkspaceTaskLocallyClosed(workspaceTask: WorkspaceTask): void {
+  const closedAliases = new Set<string>();
+  for (const source of workspaceTask.sources) {
+    for (const alias of remoteTaskClosureAliases({ id: source.taskId }, source.terminalRef)) {
+      closedAliases.add(alias);
+    }
+  }
+  if (workspaceTask.terminal.remoteRef) {
+    for (const alias of remoteTaskClosureAliases(workspaceTask.item, workspaceTask.terminal.remoteRef)) {
+      closedAliases.add(alias);
+    }
+  } else {
+    closedAliases.add(workspaceTask.item.id);
+  }
+  locallyClosedRemoteTaskIds.value = new Set([
+    ...locallyClosedRemoteTaskIds.value,
+    ...closedAliases,
+  ]);
+}
 type DiffScope = "branch" | "working";
 type BranchInclude = "none" | "staged" | "all";
 
@@ -1322,6 +1342,9 @@ async function importPendingIncomingTransfers() {
 async function closeSelectedWorkspaceTask() {
   const workspaceTask = selectedWorkspaceTask.value;
   if (!workspaceTask || workspaceTask.terminal.kind === "local") {
+    if (workspaceTask) {
+      markWorkspaceTaskLocallyClosed(workspaceTask);
+    }
     await store.closeTask();
     return;
   }
@@ -1346,19 +1369,7 @@ async function closeSelectedWorkspaceTask() {
       taskId: remoteRef.ownerLocalTaskId,
     });
     deleteRemoteCloudTaskMetadata(workspaceTask);
-    const closedAliases = new Set<string>();
-    for (const source of workspaceTask.sources) {
-      for (const alias of remoteTaskClosureAliases({ id: source.taskId }, source.terminalRef)) {
-        closedAliases.add(alias);
-      }
-    }
-    for (const alias of remoteTaskClosureAliases(workspaceTask.item, remoteRef)) {
-      closedAliases.add(alias);
-    }
-    locallyClosedRemoteTaskIds.value = new Set([
-      ...locallyClosedRemoteTaskIds.value,
-      ...closedAliases,
-    ]);
+    markWorkspaceTaskLocallyClosed(workspaceTask);
     if (selectedCloudItemId.value && locallyClosedRemoteTaskIds.value.has(selectedCloudItemId.value)) {
       selectedCloudItemId.value = null;
     }
