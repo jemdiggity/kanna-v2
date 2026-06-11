@@ -155,6 +155,14 @@ function getSessionCreatedHandler(): (event: unknown) => Promise<void> {
   return handler;
 }
 
+function getSharedInvalidationHandler(
+  onSharedInvalidation: ReturnType<typeof vi.fn>,
+): () => Promise<void> {
+  const handler = onSharedInvalidation.mock.calls[0]?.[0] as (() => Promise<void>) | undefined;
+  if (!handler) throw new Error("shared invalidation handler was not registered");
+  return handler;
+}
+
 describe("createInitApi", () => {
   beforeEach(() => {
     mockState.reset();
@@ -303,6 +311,87 @@ describe("createInitApi", () => {
     expect(persistSelection).toHaveBeenCalledWith({
       selectedRepoId: "repo-1",
       selectedItemId: "task-current",
+    });
+  });
+
+  it("does not select a replacement task when an external refresh closes the selected task", async () => {
+    const reviewTask = mockState.makeItem({
+      id: "task-review",
+      stage: "review",
+      tags: "[]",
+      created_at: "2026-04-23T00:01:00.000Z",
+      updated_at: "2026-04-23T00:01:00.000Z",
+    });
+    const closedReviewTask = {
+      ...reviewTask,
+      stage: "done",
+      closed_at: "2026-04-23T00:03:00.000Z",
+    };
+    const revisionTask = mockState.makeItem({
+      id: "task-revision",
+      stage: "in progress",
+      tags: "[]",
+      created_at: "2026-04-23T00:04:00.000Z",
+      updated_at: "2026-04-23T00:04:00.000Z",
+    });
+    mockState.items = [reviewTask];
+
+    const state = createStoreState();
+    state.repos.value = [...mockState.repos];
+    state.items.value = [reviewTask];
+    state.selectedRepoId.value = "repo-1";
+    state.selectedItemId.value = "task-review";
+    state.lastSelectedItemByRepo.value = { "repo-1": "task-review" };
+    const reloadSnapshot = vi.fn(async () => {
+      state.items.value = [revisionTask, closedReviewTask];
+    });
+    const reconcileSelection = vi.fn(() => {
+      const selectedItem = state.selectedItemId.value
+        ? state.items.value.find((item) => item.id === state.selectedItemId.value)
+        : null;
+      const selectedValid = selectedItem
+        && selectedItem.stage !== "done"
+        && selectedItem.closed_at === null
+        && selectedItem.repo_id === state.selectedRepoId.value;
+      if (selectedValid) return;
+      state.selectedItemId.value = state.items.value.find((item) =>
+        item.repo_id === state.selectedRepoId.value
+        && item.stage !== "done"
+        && item.closed_at === null
+      )?.id ?? null;
+    });
+    const onSharedInvalidation = vi.fn(async () => () => undefined);
+    const persistSelection = vi.fn(async () => {});
+    const services = {
+      loadInitialData: vi.fn(async () => {}),
+      reloadSnapshot,
+      reconcileSelection,
+      windowWorkspace: { onSharedInvalidation, persistSelection },
+    };
+    const context = createStoreContext(state, {
+      toasts: ref([]),
+      dismiss: vi.fn(),
+      info: vi.fn(),
+      warning: vi.fn(),
+      error: vi.fn(),
+    }, services);
+    const initApi = createInitApi(context, {} as import("./ports").PortsStore, {
+      checkUnblocked: vi.fn(async () => {}),
+      handleAgentFinished: vi.fn(),
+      startBlockedTask: vi.fn(async () => {}),
+      restoreUnblockedTask: vi.fn(async () => {}),
+    } as unknown as Parameters<typeof createInitApi>[2]);
+
+    await initApi.init(createDb());
+    await getSharedInvalidationHandler(onSharedInvalidation)();
+
+    expect(reloadSnapshot).toHaveBeenCalled();
+    expect(reconcileSelection).not.toHaveBeenCalled();
+    expect(state.selectedItemId.value).toBeNull();
+    expect(state.lastSelectedItemByRepo.value["repo-1"]).toBeUndefined();
+    expect(persistSelection).toHaveBeenCalledWith({
+      selectedRepoId: "repo-1",
+      selectedItemId: null,
     });
   });
 
