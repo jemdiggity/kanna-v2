@@ -16,6 +16,11 @@ gcloud services enable compute.googleapis.com --project "$PROJECT"
 echo "==> Service account"
 gcloud iam service-accounts describe "$SA" --project "$PROJECT" >/dev/null 2>&1 \
   || gcloud iam service-accounts create "$SA_ID" --project "$PROJECT" --display-name "Kanna relay VM"
+for i in $(seq 1 12); do
+  gcloud iam service-accounts describe "$SA" --project "$PROJECT" >/dev/null 2>&1 && break
+  echo "    waiting for service account to propagate (${i}/12)..."
+  sleep 5
+done
 gcloud projects add-iam-policy-binding "$PROJECT" \
   --member "serviceAccount:$SA" --role roles/datastore.user --condition=None >/dev/null
 gcloud projects add-iam-policy-binding "$PROJECT" \
