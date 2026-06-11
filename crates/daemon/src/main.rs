@@ -280,19 +280,21 @@ async fn finish_attach_cutover(
     emulate_terminal: bool,
     initial_event: &Event,
 ) {
-    let mut writer_guard = writer.lock().await;
     {
         let mut writers = session_writers.lock().await;
+        let mut writer_guard = writer.lock().await;
         writers
             .entry(session_id.to_string())
             .or_default()
             .push(writer.clone());
-    }
-    if emulate_terminal {
-        register_terminal_emulator_client(terminal_emulator_clients, session_id, writer).await;
-    }
+        drop(writers);
 
-    let _ = write_event(&mut *writer_guard, initial_event).await;
+        if emulate_terminal {
+            register_terminal_emulator_client(terminal_emulator_clients, session_id, writer).await;
+        }
+
+        let _ = write_event(&mut *writer_guard, initial_event).await;
+    }
 }
 
 async fn request_handoff(
@@ -2245,6 +2247,37 @@ mod tests {
         assert!(
             live_delivery_index < recovery_write_index,
             "live terminal output should be emitted before recovery persistence so interactive echo is not delayed by bookkeeping",
+        );
+    }
+
+    #[test]
+    fn attach_cutover_locks_session_writer_registry_before_client_writer() {
+        let source = include_str!("main.rs");
+        let cutover_body = source
+            .split("async fn finish_attach_cutover(")
+            .nth(1)
+            .expect("finish_attach_cutover function should exist")
+            .split("async fn request_handoff(")
+            .next()
+            .expect("finish_attach_cutover body should be bounded by request_handoff");
+
+        let registry_lock_index = cutover_body
+            .find("let mut writers = session_writers.lock().await")
+            .expect("attach cutover should lock the session writer registry");
+        let writer_lock_index = cutover_body
+            .find("let mut writer_guard = writer.lock().await")
+            .expect("attach cutover should lock the client writer");
+        let write_initial_event_index = cutover_body
+            .find("write_event(&mut *writer_guard, initial_event)")
+            .expect("attach cutover should write the initial snapshot while holding the writer");
+
+        assert!(
+            registry_lock_index < writer_lock_index,
+            "attach cutover must not hold a client writer while waiting for the session writer registry; stream_output takes those locks in registry -> writer order",
+        );
+        assert!(
+            writer_lock_index < write_initial_event_index,
+            "attach cutover must hold the client writer until the initial snapshot is written so live output cannot precede the Snapshot response",
         );
     }
 

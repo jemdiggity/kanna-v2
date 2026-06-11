@@ -30,20 +30,45 @@ export async function resolveDesktopFirebaseConfig({
   readEnv,
   dev,
 }: ResolveDesktopFirebaseConfigOptions): Promise<DesktopFirebaseConfig> {
-  const [runtimeApp, authPort, firestorePort, runtimeFunctionsEndpoint] = await Promise.all([
+  const [runtimeApp, cloudEnv, authPort, firestorePort, runtimeFunctionsEndpoint] = await Promise.all([
     readRuntimeAppConfig(readEnv),
+    readCloudEnv(readEnv),
     readEnv("KANNA_FIREBASE_AUTH_PORT").catch(() => ""),
     readEnv("KANNA_FIREBASE_FIRESTORE_PORT").catch(() => ""),
     readEnv("KANNA_CLOUD_FUNCTIONS_ENDPOINT").catch(() => ""),
   ]);
-  const app = runtimeApp ?? readBuildTimeAppConfig(dev);
+  const app =
+    runtimeApp ?? readProfileAppConfig(cloudEnv, dev) ?? readBuildTimeAppConfig(dev);
+  const useEmulators = !isRemoteCloudEnv(cloudEnv);
 
   return {
     app,
-    authEmulator: parseAuthEmulatorPort(authPort),
-    firestoreEmulator: parseAuthEmulatorPort(firestorePort),
+    authEmulator: useEmulators ? parseAuthEmulatorPort(authPort) : null,
+    firestoreEmulator: useEmulators ? parseAuthEmulatorPort(firestorePort) : null,
     functionsEndpoint: parseFunctionsEndpoint(runtimeFunctionsEndpoint),
   };
+}
+
+async function readCloudEnv(
+  readEnv: ResolveDesktopFirebaseConfigOptions["readEnv"],
+): Promise<string | undefined> {
+  return normalizeEnvValue(await readEnv("KANNA_CLOUD_ENV").catch(() => ""));
+}
+
+function readProfileAppConfig(
+  cloudEnv: string | undefined,
+  dev: boolean,
+): DesktopFirebaseAppConfig | null {
+  if (cloudEnv === "staging") return stagingDesktopFirebaseAppConfig;
+  if (cloudEnv === "production") return productionDesktopFirebaseAppConfig;
+  if (cloudEnv === "local" && dev) {
+    return localDesktopFirebaseAppConfig;
+  }
+  return null;
+}
+
+function isRemoteCloudEnv(cloudEnv: string | undefined): boolean {
+  return cloudEnv === "staging" || cloudEnv === "production";
 }
 
 async function readRuntimeAppConfig(
@@ -101,16 +126,28 @@ function readBuildTimeAppConfig(dev: boolean): DesktopFirebaseAppConfig | null {
   }
 
   if (dev) {
-    return {
-      apiKey: "kanna-local",
-      authDomain: "kanna-local.firebaseapp.com",
-      projectId: "kanna-local",
-      appId: "kanna-desktop-local",
-    };
+    return localDesktopFirebaseAppConfig;
   }
 
   return productionDesktopFirebaseAppConfig;
 }
+
+const localDesktopFirebaseAppConfig: DesktopFirebaseAppConfig = {
+  apiKey: "kanna-local",
+  authDomain: "kanna-local.firebaseapp.com",
+  projectId: "kanna-local",
+  appId: "kanna-desktop-local",
+};
+
+const stagingDesktopFirebaseAppConfig: DesktopFirebaseAppConfig = {
+  apiKey: "AIzaSyCWjrhJDZobI1LUwL70ACSZg_GewcYnn3Q",
+  authDomain: "kanna-staging.firebaseapp.com",
+  projectId: "kanna-staging",
+  storageBucket: "kanna-staging.firebasestorage.app",
+  messagingSenderId: "1073113006696",
+  appId: "1:1073113006696:web:3bca4e7586f5587e1c71dd",
+  measurementId: "G-BZNH6TMDCK",
+};
 
 const productionDesktopFirebaseAppConfig: DesktopFirebaseAppConfig = {
   apiKey: "AIzaSyCi-PNR-oVOXjEKGJvDOF6wM-1J3Fd3U4k",

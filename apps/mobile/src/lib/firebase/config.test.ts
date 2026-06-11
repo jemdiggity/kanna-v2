@@ -41,6 +41,39 @@ describe("parseMobileFirebaseConfig", () => {
     });
   });
 
+  it("uses the staging Firebase app profile when EXPO_PUBLIC_KANNA_CLOUD_ENV is staging", () => {
+    const config = parseMobileFirebaseConfig({
+      EXPO_PUBLIC_KANNA_CLOUD_ENV: "staging"
+    });
+
+    expect(config.app).toEqual({
+      apiKey: "AIzaSyCWjrhJDZobI1LUwL70ACSZg_GewcYnn3Q",
+      authDomain: "kanna-staging.firebaseapp.com",
+      projectId: "kanna-staging",
+      storageBucket: "kanna-staging.firebasestorage.app",
+      messagingSenderId: "1073113006696",
+      appId: "1:1073113006696:web:3bca4e7586f5587e1c71dd",
+      measurementId: "G-BZNH6TMDCK"
+    });
+  });
+
+  it("uses explicit Expo Firebase env over the staging profile", () => {
+    const config = parseMobileFirebaseConfig({
+      EXPO_PUBLIC_KANNA_CLOUD_ENV: "staging",
+      EXPO_PUBLIC_FIREBASE_API_KEY: "override-key",
+      EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN: "override.firebaseapp.com",
+      EXPO_PUBLIC_FIREBASE_PROJECT_ID: "override-project",
+      EXPO_PUBLIC_FIREBASE_APP_ID: "override-app"
+    });
+
+    expect(config.app).toMatchObject({
+      apiKey: "override-key",
+      authDomain: "override.firebaseapp.com",
+      projectId: "override-project",
+      appId: "override-app"
+    });
+  });
+
   it("parses an auth emulator URL from host and port env vars", () => {
     const config = parseMobileFirebaseConfig({
       EXPO_PUBLIC_FIREBASE_API_KEY: "api-key",

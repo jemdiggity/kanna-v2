@@ -80,10 +80,11 @@ impl MobileServerManager {
             )
         };
 
-        let expected_desktop_id = desktop_id(&config_path)?;
+        let config_desktop_id = desktop_id(&config_path)?;
+        let expected_desktop_id = runtime_desktop_id(&config_path)?;
         let existing_status = self.fetch_status(&api_base_url).await.ok();
         if let Some(status) = existing_status {
-            ensure_server_belongs_to_desktop(&status, &expected_desktop_id)?;
+            ensure_server_belongs_to_desktop(&status, &expected_desktop_id, &config_desktop_id)?;
             if is_current_server_status(&status, &expected_desktop_id, current_server_version())
                 && server_config_matches_runtime(&config_path, &expected_desktop_id)
             {
@@ -385,11 +386,15 @@ fn build_server_config(state: &MobileServerState) -> Result<String, String> {
         .join("mobile-pairings.json");
     let device_token = generate_device_token()?;
     let relay_url = relay_url();
+    let cloud_base_url = cloud_base_url();
+    let firebase_project_id = firebase_project_id();
 
     Ok(format!(
-        "relay_url = \"{}\"\ndevice_token = \"{}\"\ndaemon_dir = \"{}\"\ndb_path = \"{}\"\ndesktop_id = \"{}\"\ndesktop_name = \"{}\"\nserver_version = \"{}\"\nlan_host = \"0.0.0.0\"\nlan_port = {}\npairing_store_path = \"{}\"\n",
+        "relay_url = \"{}\"\ndevice_token = \"{}\"\ncloud_base_url = \"{}\"\nfirebase_project_id = \"{}\"\ndaemon_dir = \"{}\"\ndb_path = \"{}\"\ndesktop_id = \"{}\"\ndesktop_name = \"{}\"\nserver_version = \"{}\"\nlan_host = \"0.0.0.0\"\nlan_port = {}\npairing_store_path = \"{}\"\n",
         escape_toml_string(&relay_url),
         escape_toml_string(&device_token),
+        escape_toml_string(&cloud_base_url),
+        escape_toml_string(&firebase_project_id),
         escape_toml_string(&daemon_dir),
         escape_toml_string(&db_path.to_string_lossy()),
         escape_toml_string(&desktop_id(&state.config_path)?),
@@ -419,6 +424,14 @@ fn server_config_matches_runtime(config_path: &Path, desktop_id: &str) -> bool {
 
     [
         format!("relay_url = \"{}\"", escape_toml_string(&relay_url())),
+        format!(
+            "cloud_base_url = \"{}\"",
+            escape_toml_string(&cloud_base_url())
+        ),
+        format!(
+            "firebase_project_id = \"{}\"",
+            escape_toml_string(&firebase_project_id())
+        ),
         format!("daemon_dir = \"{}\"", escape_toml_string(&daemon_dir)),
         format!(
             "db_path = \"{}\"",
@@ -436,6 +449,8 @@ fn server_config_matches_runtime(config_path: &Path, desktop_id: &str) -> bool {
 }
 
 const PRODUCTION_RELAY_URL: &str = "wss://kanna-relay-402613185450.us-central1.run.app";
+const PRODUCTION_CLOUD_BASE_URL: &str = "https://us-central1-kanna-build.cloudfunctions.net";
+const STAGING_CLOUD_BASE_URL: &str = "https://us-central1-kanna-staging.cloudfunctions.net";
 
 fn relay_url() -> String {
     relay_url_for_mode(cfg!(debug_assertions))
@@ -458,6 +473,50 @@ fn relay_url_for_mode(debug_assertions: bool) -> String {
         return PRODUCTION_RELAY_URL.to_string();
     }
     String::new()
+}
+
+fn cloud_base_url() -> String {
+    if let Ok(url) = std::env::var("KANNA_CLOUD_BASE_URL") {
+        let trimmed = url.trim();
+        if !trimmed.is_empty() {
+            return trimmed.trim_end_matches('/').to_string();
+        }
+    }
+    if let Ok(endpoint) = std::env::var("KANNA_CLOUD_FUNCTIONS_ENDPOINT") {
+        let trimmed = endpoint.trim().trim_end_matches('/');
+        if let Some(base) = trimmed.strip_suffix("/createPairingCode") {
+            if !base.is_empty() {
+                return base.to_string();
+            }
+        }
+    }
+    match std::env::var("KANNA_CLOUD_ENV")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .as_deref()
+    {
+        Some("staging") => STAGING_CLOUD_BASE_URL.to_string(),
+        Some("production") => PRODUCTION_CLOUD_BASE_URL.to_string(),
+        _ => "http://127.0.0.1:5001/kanna-local/us-central1".to_string(),
+    }
+}
+
+fn firebase_project_id() -> String {
+    if let Ok(project_id) = std::env::var("KANNA_FIREBASE_PROJECT_ID") {
+        let trimmed = project_id.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    match std::env::var("KANNA_CLOUD_ENV")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .as_deref()
+    {
+        Some("staging") => "kanna-staging".to_string(),
+        Some("production") => "kanna-build".to_string(),
+        _ => "kanna-local".to_string(),
+    }
 }
 
 fn resolved_db_path(state: &MobileServerState) -> Result<PathBuf, String> {
@@ -546,7 +605,7 @@ fn server_base_url(port: u16) -> String {
 fn stopped_snapshot(state: &MobileServerState) -> Result<MobileServerStatus, String> {
     Ok(MobileServerStatus {
         state: state.status.clone(),
-        desktop_id: desktop_id(&state.config_path)?,
+        desktop_id: runtime_desktop_id(&state.config_path)?,
         desktop_name: state.desktop_name.clone(),
         server_version: Some(current_server_version().to_string()),
         lan_host: "0.0.0.0".to_string(),
@@ -571,8 +630,9 @@ fn is_current_server_status(
 fn ensure_server_belongs_to_desktop(
     status: &MobileServerStatus,
     expected_desktop_id: &str,
+    fallback_desktop_id: &str,
 ) -> Result<(), String> {
-    if status.desktop_id == expected_desktop_id {
+    if status.desktop_id == expected_desktop_id || status.desktop_id == fallback_desktop_id {
         return Ok(());
     }
     Err(format!(
@@ -667,6 +727,16 @@ fn desktop_id(config_path: &Path) -> Result<String, String> {
             Ok(identity)
         }
     }
+}
+
+fn runtime_desktop_id(config_path: &Path) -> Result<String, String> {
+    saved_cloud_desktop_id().map_or_else(|| desktop_id(config_path), Ok)
+}
+
+fn saved_cloud_desktop_id() -> Option<String> {
+    let daemon_dir = std::env::var("KANNA_DAEMON_DIR")
+        .unwrap_or_else(|_| crate::daemon_data_dir().to_string_lossy().to_string());
+    read_desktop_identity(&Path::new(&daemon_dir).join("desktop-identity.json"))
 }
 
 fn desktop_identity_path(config_path: &Path) -> PathBuf {
@@ -789,10 +859,11 @@ fn escape_toml_string(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        app_data_dir_for_server_config, build_server_config, current_server_version, desktop_id,
-        escape_toml_string, generate_uuid_v4_from_reader, is_current_server_status,
-        parse_lsof_pids, relay_url, resolved_db_path, server_base_url,
-        server_config_matches_runtime, server_config_path_for_app_data_dir,
+        app_data_dir_for_server_config, build_server_config, cloud_base_url,
+        current_server_version, desktop_id, escape_toml_string, firebase_project_id,
+        generate_uuid_v4_from_reader,
+        is_current_server_status, parse_lsof_pids, relay_url, resolved_db_path, runtime_desktop_id,
+        server_base_url, server_config_matches_runtime, server_config_path_for_app_data_dir,
         server_lock_path_for_config, server_pids_on_port, stop_server_on_port, stopped_snapshot,
         try_claim_server_lock, MobileServerManager, MobileServerState, MobileServerStatus,
     };
@@ -1103,6 +1174,10 @@ mod tests {
 
     #[test]
     fn desktop_id_is_persisted_per_app_instance_scope() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+        unsafe {
+            unset_env_var("KANNA_DAEMON_DIR");
+        }
         let root = unique_test_root("desktop-id");
         let first_config = root.join("main/Kanna/server.toml");
         let second_config = root.join("worktree/Kanna/servers/kanna-wt-task/server.toml");
@@ -1140,6 +1215,37 @@ mod tests {
 
         assert!(error.contains("failed to generate desktop identity"));
         assert!(error.contains("entropy unavailable"));
+    }
+
+    #[test]
+    fn runtime_desktop_id_prefers_saved_cloud_identity() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+        let root = unique_test_root("runtime-desktop-id");
+        let daemon_dir = root.join("daemon");
+        std::fs::create_dir_all(&daemon_dir).unwrap();
+        std::fs::write(
+            daemon_dir.join("desktop-identity.json"),
+            r#"{
+  "desktop_id": "desktop-11111111-1111-4111-8111-111111111111",
+  "desktop_secret": "secret-cloud"
+}"#,
+        )
+        .unwrap();
+        unsafe {
+            set_env_var("KANNA_DAEMON_DIR", daemon_dir.to_str().unwrap());
+        }
+        let config_path = root.join("Kanna/server.toml");
+        let config_id = desktop_id(&config_path).expect("config identity should generate");
+
+        let runtime_id = runtime_desktop_id(&config_path).expect("runtime identity should resolve");
+
+        assert_ne!(runtime_id, config_id);
+        assert_eq!(runtime_id, "desktop-11111111-1111-4111-8111-111111111111");
+
+        unsafe {
+            unset_env_var("KANNA_DAEMON_DIR");
+        }
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -1362,6 +1468,57 @@ mod tests {
     }
 
     #[test]
+    fn build_server_config_uses_staging_cloud_profile() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+        unsafe {
+            set_env_var("KANNA_CLOUD_ENV", "staging");
+            set_env_var("KANNA_RELAY_URL", "wss://staging-relay.example");
+            unset_env_var("KANNA_CLOUD_BASE_URL");
+            unset_env_var("KANNA_CLOUD_FUNCTIONS_ENDPOINT");
+            unset_env_var("KANNA_FIREBASE_PROJECT_ID");
+        }
+
+        let state = MobileServerState {
+            status: "stopped".to_string(),
+            desktop_name: "Studio Mac".to_string(),
+            api_base_url: server_base_url(48120),
+            config_path: PathBuf::from("/tmp/build.kanna/Kanna/server.toml"),
+            started: false,
+        };
+
+        let config = build_server_config(&state).unwrap();
+
+        unsafe {
+            unset_env_var("KANNA_CLOUD_ENV");
+            unset_env_var("KANNA_RELAY_URL");
+        }
+
+        assert!(config.contains("relay_url = \"wss://staging-relay.example\""));
+        assert!(config
+            .contains("cloud_base_url = \"https://us-central1-kanna-staging.cloudfunctions.net\""));
+        assert!(config.contains("firebase_project_id = \"kanna-staging\""));
+    }
+
+    #[test]
+    fn cloud_base_url_strips_create_pairing_code_endpoint_override() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+        unsafe {
+            set_env_var(
+                "KANNA_CLOUD_FUNCTIONS_ENDPOINT",
+                "https://functions.example/createPairingCode",
+            );
+            unset_env_var("KANNA_CLOUD_BASE_URL");
+            unset_env_var("KANNA_CLOUD_ENV");
+        }
+
+        assert_eq!(cloud_base_url(), "https://functions.example");
+
+        unsafe {
+            unset_env_var("KANNA_CLOUD_FUNCTIONS_ENDPOINT");
+        }
+    }
+
+    #[test]
     fn relay_url_prefers_explicit_url() {
         let _guard = env_lock().lock().expect("env lock should not be poisoned");
         unsafe {
@@ -1484,6 +1641,7 @@ mod tests {
         let _guard = env_lock().lock().expect("env lock should not be poisoned");
         unsafe {
             unset_env_var("KANNA_MOBILE_SERVER_PORT");
+            unset_env_var("KANNA_DAEMON_DIR");
         }
 
         let state = MobileServerState {
@@ -1780,9 +1938,13 @@ mod tests {
             .unwrap_or_default();
         let pairing_store_path = config_path.with_file_name("pairings.json");
         let relay_url = relay_url();
+        let cloud_base_url = cloud_base_url();
+        let firebase_project_id = firebase_project_id();
         let config = format!(
-            "relay_url = \"{}\"\ndevice_token = \"test-token\"\ndaemon_dir = \"{}\"\ndb_path = \"{}\"\ndesktop_id = \"{}\"\ndesktop_name = \"Kanna Test\"\n{}lan_host = \"127.0.0.1\"\nlan_port = {}\npairing_store_path = \"{}\"\n",
+            "relay_url = \"{}\"\ndevice_token = \"test-token\"\ncloud_base_url = \"{}\"\nfirebase_project_id = \"{}\"\ndaemon_dir = \"{}\"\ndb_path = \"{}\"\ndesktop_id = \"{}\"\ndesktop_name = \"Kanna Test\"\n{}lan_host = \"127.0.0.1\"\nlan_port = {}\npairing_store_path = \"{}\"\n",
             escape_toml_string(&relay_url),
+            escape_toml_string(&cloud_base_url),
+            escape_toml_string(&firebase_project_id),
             escape_toml_string(&daemon_dir.to_string_lossy()),
             escape_toml_string(&db_path.to_string_lossy()),
             escape_toml_string(desktop_id),

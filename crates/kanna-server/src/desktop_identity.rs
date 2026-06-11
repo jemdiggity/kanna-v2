@@ -20,6 +20,18 @@ pub fn save_identity(path: &Path, identity: &DesktopIdentity) -> Result<(), Stri
     std::fs::write(path, body).map_err(|e| e.to_string())
 }
 
+pub fn load_identity(path: &Path) -> Result<Option<DesktopIdentity>, String> {
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let body = std::fs::read_to_string(path)
+        .map_err(|e| format!("failed to read desktop identity {}: {}", path.display(), e))?;
+    let identity = serde_json::from_str(&body)
+        .map_err(|e| format!("failed to parse desktop identity {}: {}", path.display(), e))?;
+    Ok(Some(identity))
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -48,6 +60,20 @@ mod tests {
         let written = std::fs::read_to_string(&path).unwrap();
         assert!(written.contains("\"desktop_id\": \"desktop-1\""));
         assert!(written.contains("\"desktop_secret\": \"desktop-secret\""));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn load_identity_reads_saved_json_payload() {
+        let path = unique_identity_path();
+        let identity = super::DesktopIdentity {
+            desktop_id: "desktop-1".to_string(),
+            desktop_secret: "desktop-secret".to_string(),
+        };
+        super::save_identity(&path, &identity).unwrap();
+
+        assert_eq!(super::load_identity(&path).unwrap(), Some(identity));
 
         let _ = std::fs::remove_file(path);
     }

@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  __resetDesktopCloudPublisherCachesForTests,
   deleteRemoteTaskSnapshots,
   publishDesktopTaskSnapshot,
   reconcileDesktopTaskSnapshots,
@@ -7,6 +8,7 @@ import {
 
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
+  getDoc: vi.fn(),
   getDocs: vi.fn(),
   addDoc: vi.fn(),
   setDoc: vi.fn(),
@@ -32,6 +34,7 @@ vi.mock("firebase/firestore", () => ({
   addDoc: (...args: unknown[]) => mocks.addDoc(...args),
   collection: (...args: unknown[]) => mocks.collection(...args),
   doc: (...args: unknown[]) => mocks.doc(...args),
+  getDoc: (...args: unknown[]) => mocks.getDoc(...args),
   getDocs: (...args: unknown[]) => mocks.getDocs(...args),
   limit: (...args: unknown[]) => mocks.limit(...args),
   query: (...args: unknown[]) => mocks.query(...args),
@@ -106,6 +109,14 @@ function docSnapshot(id: string, data: Record<string, unknown>) {
     id,
     ref: { kind: "doc-ref", id },
     data: () => data,
+    exists: () => true,
+  };
+}
+
+function missingDocSnapshot() {
+  return {
+    exists: () => false,
+    data: () => undefined,
   };
 }
 
@@ -125,6 +136,7 @@ function taskDocAllocations(): unknown[][] {
 
 describe("desktop cloud live task index publisher", () => {
   beforeEach(() => {
+    __resetDesktopCloudPublisherCachesForTests();
     for (const mock of Object.values(mocks)) {
       if (typeof mock === "function" && "mockReset" in mock) mock.mockReset();
     }
@@ -137,8 +149,11 @@ describe("desktop cloud live task index publisher", () => {
     mocks.commit.mockResolvedValue(undefined);
     mocks.addDoc.mockResolvedValue({ kind: "doc-ref", id: "created-desktop" });
     mocks.setDoc.mockResolvedValue(undefined);
+    mocks.getDoc.mockResolvedValue(missingDocSnapshot());
+    mocks.getDocs.mockResolvedValue({ docs: [] });
     mocks.invoke.mockImplementation(async (command: string) => {
       if (command === "mobile_server_status") return { desktopId: "desktop-owner", desktopName: "Studio Mac" };
+      if (command === "read_env_var") return "";
       if (command === "git_remote_url") return "git@github.com:owner/repo.git";
       return "";
     });
@@ -239,6 +254,41 @@ describe("desktop cloud live task index publisher", () => {
       expect.objectContaining({
         localRepoId: "repo-1",
         ownerLocalTaskId: "task-new",
+      }),
+    );
+  });
+
+  it("publishes saved desktop credentials into the desktop document for relay auth", async () => {
+    mocks.invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (command === "read_env_var" && args?.name === "KANNA_DAEMON_DIR") return "/daemon";
+      if (command === "read_text_file" && args?.path === "/daemon/desktop-identity.json") {
+        return JSON.stringify({
+          desktop_id: "desktop-cloud",
+          desktop_secret: "secret-cloud",
+        });
+      }
+      if (command === "mobile_server_status") return { desktopId: "desktop-local", desktopName: "Studio Mac" };
+      if (command === "git_remote_url") return "git@github.com:owner/repo.git";
+      return "";
+    });
+    mocks.getDocs
+      .mockResolvedValueOnce({ docs: [docSnapshot("desktop-doc", { desktopId: "desktop-cloud" })] })
+      .mockResolvedValueOnce({ docs: [] });
+
+    await publishDesktopTaskSnapshot(null as never, openItem("task-new") as never, repo() as never);
+
+    expect(mocks.setDoc).toHaveBeenCalledWith(
+      { kind: "doc-ref", id: "desktop-doc" },
+      expect.objectContaining({
+        displayName: "Studio Mac",
+        desktopSecret: "secret-cloud",
+      }),
+      { merge: true },
+    );
+    expect(mocks.set).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.objectContaining({
+        ownerDesktopId: "desktop-cloud",
       }),
     );
   });
@@ -346,5 +396,96 @@ describe("desktop cloud live task index publisher", () => {
     );
     expect(mocks.delete).toHaveBeenCalledWith({ kind: "doc-ref", id: "task-stale-doc" });
     expect(mocks.commit).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not rewrite unchanged profile, credential, desktop, or task documents during reconcile", async () => {
+    mocks.invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (command === "read_env_var" && args?.name === "KANNA_DAEMON_DIR") return "/daemon";
+      if (command === "read_text_file" && args?.path === "/daemon/desktop-identity.json") {
+        return JSON.stringify({
+          desktop_id: "desktop-noop",
+          desktop_secret: "secret-noop",
+        });
+      }
+      if (command === "mobile_server_status") return { desktopId: "desktop-noop", desktopName: "Studio Mac" };
+      if (command === "git_remote_url") return "git@github.com:owner/repo.git";
+      return "";
+    });
+    const remoteUrl = "git@github.com:owner/repo.git";
+    const remoteUrlHash = await crypto.subtle.digest(
+      "SHA-256",
+      new TextEncoder().encode(remoteUrl),
+    ).then((digest) =>
+      Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("")
+    );
+    const unchangedTask = {
+      localRepoId: "repo-1",
+      ownerDesktopId: "desktop-noop",
+      ownerLocalTaskId: "task-open",
+      title: "Open task",
+      promptSnippet: "Open task",
+      displayName: null,
+      stage: "in progress",
+      activity: "working",
+      status: "active",
+      repo: {
+        cloudRepoId: "repo-1",
+        name: "Repo One",
+        remoteUrl,
+        remoteUrlHash,
+        defaultBranch: "main",
+      },
+      branch: "task-open",
+      baseRef: "main",
+      prNumber: null,
+      prUrl: null,
+      agent: {
+        provider: "claude",
+        type: "pty",
+      },
+      transfer: {
+        state: "none",
+        transferId: null,
+        sourceDesktopId: null,
+        destinationDesktopId: null,
+      },
+      blockedByTaskIds: [],
+      createdAt: "2026-05-22T00:00:00.000Z",
+      updatedAt: "2026-05-22T00:01:00.000Z",
+      closedAt: null,
+    };
+    mocks.getDoc
+      .mockResolvedValueOnce(docSnapshot("user-1", { primaryEmail: "user@example.com" }))
+      .mockResolvedValueOnce(docSnapshot("user-1", { primaryEmail: "user@example.com" }));
+    mocks.getDocs
+      .mockResolvedValueOnce({ docs: [docSnapshot("desktop-doc", {
+        desktopId: "desktop-noop",
+        desktopSecret: "secret-noop",
+        displayName: "Studio Mac",
+      })] })
+      .mockResolvedValueOnce({ docs: [docSnapshot("task-open-doc", unchangedTask)] })
+      .mockResolvedValueOnce({ docs: [docSnapshot("desktop-doc", {
+        desktopId: "desktop-noop",
+        desktopSecret: "secret-noop",
+        displayName: "Studio Mac",
+      })] })
+      .mockResolvedValueOnce({ docs: [docSnapshot("task-open-doc", unchangedTask)] });
+
+    await reconcileDesktopTaskSnapshots(null as never);
+    expect(mocks.setDoc).toHaveBeenCalledTimes(1);
+
+    mocks.getDoc.mockClear();
+    mocks.setDoc.mockClear();
+    mocks.set.mockClear();
+    mocks.delete.mockClear();
+    mocks.commit.mockClear();
+
+    await reconcileDesktopTaskSnapshots(null as never);
+
+    expect(mocks.setDoc).not.toHaveBeenCalled();
+    expect(mocks.getDoc).not.toHaveBeenCalled();
+    expect(mocks.set).not.toHaveBeenCalled();
+    expect(mocks.delete).not.toHaveBeenCalled();
+    expect(mocks.commit).not.toHaveBeenCalled();
   });
 });

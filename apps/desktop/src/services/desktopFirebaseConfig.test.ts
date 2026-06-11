@@ -60,6 +60,38 @@ describe("resolveDesktopFirebaseConfig", () => {
     });
   });
 
+  it("uses the staging Firebase app profile when KANNA_CLOUD_ENV is staging", async () => {
+    const config = await resolveDesktopFirebaseConfig({
+      readEnv: async (name) => name === "KANNA_CLOUD_ENV" ? "staging" : "",
+      dev: false,
+    });
+
+    expect(config.app).toEqual({
+      apiKey: "AIzaSyCWjrhJDZobI1LUwL70ACSZg_GewcYnn3Q",
+      authDomain: "kanna-staging.firebaseapp.com",
+      projectId: "kanna-staging",
+      storageBucket: "kanna-staging.firebasestorage.app",
+      messagingSenderId: "1073113006696",
+      appId: "1:1073113006696:web:3bca4e7586f5587e1c71dd",
+      measurementId: "G-BZNH6TMDCK",
+    });
+  });
+
+  it("ignores workspace emulator ports when a remote cloud profile is selected", async () => {
+    const config = await resolveDesktopFirebaseConfig({
+      readEnv: async (name) => ({
+        KANNA_CLOUD_ENV: "staging",
+        KANNA_FIREBASE_AUTH_PORT: "9370",
+        KANNA_FIREBASE_FIRESTORE_PORT: "8364",
+      })[name] ?? "",
+      dev: true,
+    });
+
+    expect(config.app?.projectId).toBe("kanna-staging");
+    expect(config.authEmulator).toBeNull();
+    expect(config.firestoreEmulator).toBeNull();
+  });
+
   it("does not configure a task snapshot function outside dev", async () => {
     const config = await resolveDesktopFirebaseConfig({
       readEnv: async () => "",
@@ -90,6 +122,7 @@ describe("resolveDesktopFirebaseConfig", () => {
     const config = await resolveDesktopFirebaseConfig({
       dev: false,
       readEnv: async (name) => ({
+        KANNA_CLOUD_ENV: "staging",
         KANNA_FIREBASE_API_KEY: "runtime-key",
         KANNA_FIREBASE_AUTH_DOMAIN: "runtime.firebaseapp.com",
         KANNA_FIREBASE_PROJECT_ID: "runtime-project",
