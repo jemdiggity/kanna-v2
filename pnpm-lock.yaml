@@ -278,6 +278,9 @@ importers:
       '@modelcontextprotocol/sdk':
         specifier: ^1.21.0
         version: 1.29.0(zod@4.4.3)
+      smol-toml:
+        specifier: ^1.6.1
+        version: 1.6.1
       zod:
         specifier: ^4.1.12
         version: 4.4.3
@@ -11149,13 +11152,10 @@ snapshots:
     transitivePeerDependencies:
       - '@expo/dom-webview'
       - '@expo/metro-runtime'
-      - bufferutil
-      - graphql
       - react
       - react-native
       - react-native-webview
       - supports-color
-      - utf-8-validate
 
   babel-preset-jest@29.6.3(@babel/core@7.29.0):
     dependencies:

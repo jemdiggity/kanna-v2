@@ -1,162 +1,181 @@
+import { createHash } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const mocks = vi.hoisted(() => ({
-  getFirebaseServices: vi.fn(),
-  isAuthBypassed: vi.fn(() => false),
+const { mockIsAuthBypassed, mockGetFirebaseServices } = vi.hoisted(() => ({
+  mockIsAuthBypassed: vi.fn(() => false),
+  mockGetFirebaseServices: vi.fn(),
 }));
 
 vi.mock("../src/firebase.js", () => ({
-  getFirebaseServices: mocks.getFirebaseServices,
-  isAuthBypassed: mocks.isAuthBypassed,
+  isAuthBypassed: mockIsAuthBypassed,
+  getFirebaseServices: mockGetFirebaseServices,
 }));
 
-const { verifyDesktopCredentials } = await import("../src/auth.js");
+import { verifyDesktopCredentials } from "../src/auth.js";
 
-type MockDoc = {
-  exists: boolean;
-  data: () => Record<string, unknown> | undefined;
-};
+function sha256Hex(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
 
-function desktopCredentialDoc(data?: Record<string, unknown>): MockDoc {
+interface FakeDesktopDoc {
+  userId: string;
+  data: Record<string, unknown>;
+}
+
+function fakeSnapshotDoc(doc: FakeDesktopDoc) {
   return {
-    exists: data !== undefined,
-    data: () => data,
+    data: () => doc.data,
+    ref: { parent: { parent: { id: doc.userId } } },
   };
 }
 
-function collectionGroupDoc(
-  data: Record<string, unknown>,
-  userId: string | null,
-) {
-  return {
-    data: () => data,
-    ref: {
-      parent: {
-        parent: userId ? { id: userId } : null,
-      },
-    },
-  };
-}
-
-function mockFirestore(input: {
-  desktopCredential?: Record<string, unknown>;
-  fallbackDocs?: Array<ReturnType<typeof collectionGroupDoc>>;
-}) {
-  const credentialGet = vi.fn(async () =>
-    desktopCredentialDoc(input.desktopCredential),
-  );
-  const fallbackGet = vi.fn(async () => {
-    const docs = input.fallbackDocs ?? [];
-    return { empty: docs.length === 0, docs };
+function mockDesktopQuery(docs: FakeDesktopDoc[], options: { capturedLimit?: number[] } = {}) {
+  const get = vi.fn(async () => ({
+    empty: docs.length === 0,
+    docs: docs.map(fakeSnapshotDoc),
+  }));
+  const limit = vi.fn((value: number) => {
+    options.capturedLimit?.push(value);
+    return { get };
   });
-  const where = vi.fn(() => ({ limit: vi.fn(() => ({ get: fallbackGet })) }));
+  const where = vi.fn(() => ({ limit }));
   const collectionGroup = vi.fn(() => ({ where }));
-  const doc = vi.fn(() => ({ get: credentialGet }));
-  const collection = vi.fn(() => ({ doc }));
-  const db = { collection, collectionGroup };
-
-  mocks.getFirebaseServices.mockReturnValue({ auth: {}, db });
-
-  return {
-    collection,
-    collectionGroup,
-    doc,
-    credentialGet,
-    where,
-    fallbackGet,
-  };
+  mockGetFirebaseServices.mockReturnValue({ db: { collectionGroup }, auth: {} });
+  return { collectionGroup, where, limit, get };
 }
 
-describe("desktop credential auth", () => {
+describe("verifyDesktopCredentials", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mocks.isAuthBypassed.mockReturnValue(false);
+    mockIsAuthBypassed.mockReturnValue(false);
   });
 
-  it("authenticates top-level desktopCredentials with a matching secret", async () => {
-    const db = mockFirestore({
-      desktopCredential: {
-        desktopId: "desktop-1",
-        desktopSecret: "secret-1",
-        uid: "user-1",
+  it("returns the owning user when the secret hash matches", async () => {
+    mockDesktopQuery([
+      {
+        userId: "user-1",
+        data: {
+          desktopId: "desktop-1",
+          desktopSecretHash: sha256Hex("desktop-secret"),
+          revokedAt: null,
+        },
       },
+    ]);
+
+    const principal = await verifyDesktopCredentials("desktop-1", "desktop-secret");
+
+    expect(principal).toEqual({ userId: "user-1", desktopId: "desktop-1" });
+  });
+
+  it("queries the desktops collection group by desktopId with a bounded limit", async () => {
+    const capturedLimit: number[] = [];
+    const { collectionGroup, where } = mockDesktopQuery([], { capturedLimit });
+
+    await verifyDesktopCredentials("desktop-1", "desktop-secret");
+
+    expect(collectionGroup).toHaveBeenCalledWith("desktops");
+    expect(where).toHaveBeenCalledWith("desktopId", "==", "desktop-1");
+    expect(capturedLimit).toEqual([10]);
+  });
+
+  it("rejects a wrong secret", async () => {
+    mockDesktopQuery([
+      {
+        userId: "user-1",
+        data: {
+          desktopId: "desktop-1",
+          desktopSecretHash: sha256Hex("desktop-secret"),
+          revokedAt: null,
+        },
+      },
+    ]);
+
+    expect(await verifyDesktopCredentials("desktop-1", "wrong-secret")).toBeNull();
+  });
+
+  it("rejects revoked desktop credentials even when the hash matches", async () => {
+    mockDesktopQuery([
+      {
+        userId: "user-1",
+        data: {
+          desktopId: "desktop-1",
+          desktopSecretHash: sha256Hex("desktop-secret"),
+          revokedAt: "2026-06-01T00:00:00Z",
+        },
+      },
+    ]);
+
+    expect(await verifyDesktopCredentials("desktop-1", "desktop-secret")).toBeNull();
+  });
+
+  it("rejects desktop docs without a stored secret hash", async () => {
+    mockDesktopQuery([
+      {
+        userId: "user-1",
+        data: {
+          desktopId: "desktop-1",
+          desktopSecret: "desktop-secret",
+          revokedAt: null,
+        },
+      },
+    ]);
+
+    expect(await verifyDesktopCredentials("desktop-1", "desktop-secret")).toBeNull();
+  });
+
+  it("authenticates against the matching doc when another user squats the same desktopId", async () => {
+    mockDesktopQuery([
+      {
+        userId: "attacker",
+        data: {
+          desktopId: "desktop-1",
+          desktopSecretHash: sha256Hex("attacker-secret"),
+          revokedAt: null,
+        },
+      },
+      {
+        userId: "owner",
+        data: {
+          desktopId: "desktop-1",
+          desktopSecretHash: sha256Hex("owner-secret"),
+          revokedAt: null,
+        },
+      },
+    ]);
+
+    const principal = await verifyDesktopCredentials("desktop-1", "owner-secret");
+
+    expect(principal).toEqual({ userId: "owner", desktopId: "desktop-1" });
+  });
+
+  it("returns null when no desktop doc matches", async () => {
+    mockDesktopQuery([]);
+
+    expect(await verifyDesktopCredentials("desktop-unknown", "desktop-secret")).toBeNull();
+  });
+
+  it("returns null when the Firestore query fails", async () => {
+    const get = vi.fn(async () => {
+      throw new Error("9 FAILED_PRECONDITION: missing index");
+    });
+    mockGetFirebaseServices.mockReturnValue({
+      db: { collectionGroup: () => ({ where: () => ({ limit: () => ({ get }) }) }) },
+      auth: {},
     });
 
-    await expect(
-      verifyDesktopCredentials("desktop-1", "secret-1"),
-    ).resolves.toEqual({
-      userId: "user-1",
+    expect(await verifyDesktopCredentials("desktop-1", "desktop-secret")).toBeNull();
+  });
+
+  it("derives the bypass user from the secret prefix when SKIP_AUTH is enabled", async () => {
+    mockIsAuthBypassed.mockReturnValue(true);
+
+    expect(await verifyDesktopCredentials("desktop-1", "user-a:anything")).toEqual({
+      userId: "user-a",
       desktopId: "desktop-1",
     });
-
-    expect(db.collection).toHaveBeenCalledWith("desktopCredentials");
-    expect(db.doc).toHaveBeenCalledWith("desktop-1");
-    expect(db.collectionGroup).not.toHaveBeenCalled();
-  });
-
-  it("rejects a wrong top-level desktopCredentials secret", async () => {
-    mockFirestore({
-      desktopCredential: {
-        desktopId: "desktop-1",
-        desktopSecret: "correct-secret",
-        uid: "user-1",
-      },
+    expect(await verifyDesktopCredentials("desktop-1", "opaque-secret")).toEqual({
+      userId: "test-user",
+      desktopId: "desktop-1",
     });
-
-    await expect(
-      verifyDesktopCredentials("desktop-1", "wrong-secret"),
-    ).resolves.toBeNull();
-  });
-
-  it("rejects a revoked top-level desktopCredentials document", async () => {
-    mockFirestore({
-      desktopCredential: {
-        desktopId: "desktop-1",
-        desktopSecret: "secret-1",
-        uid: "user-1",
-        revokedAt: "2026-06-10T00:00:00.000Z",
-      },
-    });
-
-    await expect(
-      verifyDesktopCredentials("desktop-1", "secret-1"),
-    ).resolves.toBeNull();
-  });
-
-  it("rejects a top-level desktopCredentials document without a uid", async () => {
-    mockFirestore({
-      desktopCredential: {
-        desktopId: "desktop-1",
-        desktopSecret: "secret-1",
-      },
-    });
-
-    await expect(
-      verifyDesktopCredentials("desktop-1", "secret-1"),
-    ).resolves.toBeNull();
-  });
-
-  it("falls back to users/*/desktops when top-level desktopCredentials is missing", async () => {
-    const db = mockFirestore({
-      fallbackDocs: [
-        collectionGroupDoc(
-          {
-            desktopId: "desktop-legacy",
-            desktopSecret: "legacy-secret",
-          },
-          "legacy-user",
-        ),
-      ],
-    });
-
-    await expect(
-      verifyDesktopCredentials("desktop-legacy", "legacy-secret"),
-    ).resolves.toEqual({
-      userId: "legacy-user",
-      desktopId: "desktop-legacy",
-    });
-
-    expect(db.collectionGroup).toHaveBeenCalledWith("desktops");
-    expect(db.where).toHaveBeenCalledWith("desktopId", "==", "desktop-legacy");
   });
 });

@@ -14,6 +14,11 @@ import {
   buildCloudSmokeEnv,
   requireCloudSmokeEnv,
 } from "../runtime/cloud-test";
+import {
+  applyCloudTestCredentialEnv,
+  applyProductionCloudEnv,
+  readCloudTestCredentials,
+} from "../runtime/cloud-creds";
 import { buildLanLabPlan, parseLanLabInventory } from "../runtime/lan-lab";
 import { buildLanLabScenarioCommand } from "../runtime/lan-lab-runner";
 import { buildDevPlan, buildProductionMobilePlan } from "../runtime/dev-plan";
@@ -47,6 +52,7 @@ export interface DevUpInput {
   daemonDir?: string;
   transferRoot?: string;
   firebaseEnvFrom?: string;
+  cloud?: "production";
 }
 
 export interface DevDownInput {
@@ -67,7 +73,8 @@ export const devUpInputSchema = z.object({
   db: z.string().optional(),
   daemonDir: z.string().optional(),
   transferRoot: z.string().optional(),
-  firebaseEnvFrom: z.string().optional()
+  firebaseEnvFrom: z.string().optional(),
+  cloud: z.literal("production").optional()
 });
 
 const devDownInputSchema = z.object({
@@ -190,7 +197,11 @@ export async function executeDevStatus(input: ExecutorInput): Promise<TaskResult
 }
 
 async function executeDevUp(input: DevUpInput): Promise<TaskResult> {
-  const context = await resolveDefaultContext(process.env, {
+  // --cloud production points the dev instance at the real cloud: production
+  // Firebase web client config plus the deployed relay URL. Explicit env vars
+  // still win so individual pieces can be overridden.
+  const baseEnv = input.cloud === "production" ? applyProductionCloudEnv(process.env) : process.env;
+  const context = await resolveDefaultContext(baseEnv, {
     dbOverride: input.db,
     daemonDirOverride: input.daemonDir,
     transferRootOverride: input.transferRoot,
@@ -810,13 +821,20 @@ export const taskDefinitions = [
     inputSchema: emptyInputSchema,
     execute: async () => {
       const context = await resolveDefaultContext(process.env);
+      // Credentials come from env when set, otherwise from the local-only
+      // ~/.kanna/dev/creds.toml; production Firebase client values default
+      // to the committed public web config.
+      let env: NodeJS.ProcessEnv;
       try {
-        requireCloudSmokeEnv(context.env, "production");
+        env = applyProductionCloudEnv(
+          applyCloudTestCredentialEnv(context.env, readCloudTestCredentials()),
+        );
+        requireCloudSmokeEnv(env, "production");
       } catch (error) {
         return { ok: false, message: error instanceof Error ? error.message : String(error) };
       }
       const [command, args] = buildCloudSmokeCommand();
-      return runBuiltCommand(command, args, context.repoRoot, buildCloudSmokeEnv(context.env, "production"));
+      return runBuiltCommand(command, args, context.repoRoot, buildCloudSmokeEnv(env, "production"));
     }
   },
   {

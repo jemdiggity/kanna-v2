@@ -1,10 +1,8 @@
 mod bonjour;
-mod cloud_client;
 mod commands;
 mod config;
 mod daemon_client;
 mod db;
-mod desktop_identity;
 mod http_api;
 mod mobile_api;
 mod pairing;

@@ -108,6 +108,18 @@ function parseFlagInput(rest: string[], defaults: Record<string, unknown>): Reco
       index += 1;
       continue;
     }
+    if (arg === "--cloud") {
+      const value = rest[index + 1];
+      if (!value) {
+        throw new Error("--cloud requires a value");
+      }
+      if (value !== "production") {
+        throw new Error("--cloud only supports 'production' (staging cloud is retired; use --emulators)");
+      }
+      input.cloud = value;
+      index += 1;
+      continue;
+    }
     if (arg === "--out-dir") {
       const value = rest[index + 1];
       if (!value) {
@@ -129,6 +141,9 @@ function parseFlagInput(rest: string[], defaults: Record<string, unknown>): Reco
   }
   if (input.emulators === true && typeof input.firebaseEnvFrom === "string") {
     throw new Error("--emulators and --firebase-env-from cannot be used together");
+  }
+  if (typeof input.cloud === "string" && (input.emulators === true || typeof input.firebaseEnvFrom === "string")) {
+    throw new Error("--cloud cannot be combined with --emulators or --firebase-env-from");
   }
   return input;
 }
@@ -253,7 +268,7 @@ function helpText(): string {
     "Usage: kd <command>",
     "",
     "Commands:",
-    "  dev up [--mobile] [--emulators] [--seed] [--attach] [--db <path-or-name>] [--delete-db] [--firebase-env-from <task-or-path>]",
+    "  dev up [--mobile] [--emulators] [--cloud production] [--seed] [--attach] [--db <path-or-name>] [--delete-db] [--firebase-env-from <task-or-path>]",
     "  dev down [--kill-daemon]",
     "  dev restart [--mobile] [--emulators] [--seed] [--attach] [--delete-db]",
     "  dev status",

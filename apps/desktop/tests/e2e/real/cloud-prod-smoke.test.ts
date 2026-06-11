@@ -250,5 +250,5 @@ describe.skipIf(missingEnv.length > 0)("cloud production/staging smoke", () => {
       if (taskPath) await deleteFirestoreDocument(idToken, taskPath).catch(() => undefined);
       if (desktopPath) await deleteFirestoreDocument(idToken, desktopPath).catch(() => undefined);
     }
-  });
+  }, 60_000);
 });

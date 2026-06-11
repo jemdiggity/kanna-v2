@@ -125,10 +125,6 @@ mod tests {
         Config {
             relay_url: "ws://127.0.0.1:9080".to_string(),
             device_token: "device-token".to_string(),
-            cloud_base_url: "http://127.0.0.1:5001/kanna-local/us-central1".to_string(),
-            firebase_project_id: "kanna-local".to_string(),
-            firebase_auth_emulator_url: Some("http://127.0.0.1:9099".to_string()),
-            firebase_firestore_emulator_host: Some("127.0.0.1:8080".to_string()),
             daemon_dir: "/tmp/kanna-daemon".to_string(),
             db_path: "/tmp/kanna.db".to_string(),
             desktop_id: "desktop-1".to_string(),
