@@ -467,6 +467,7 @@ struct CreatedTask {
 
 pub(crate) struct PreparedTaskSpawn {
     created_task: CreatedTask,
+    branch: String,
     session_id: String,
     executable: String,
     args: Vec<String>,
@@ -704,6 +705,7 @@ fn prepare_task_spawn(
             title,
             stage: stage_name,
         },
+        branch,
         session_id: task_id,
         executable: "/bin/zsh".to_string(),
         args: vec![
@@ -718,6 +720,72 @@ fn prepare_task_spawn(
         rows: 24,
         agent_provider: provider.to_daemon_provider(),
     })
+}
+
+pub(crate) fn prepared_task_id(prepared: &PreparedTaskSpawn) -> &str {
+    &prepared.created_task.task_id
+}
+
+pub(crate) fn rollback_prepared_task_for_api(
+    db: &Db,
+    prepared: &PreparedTaskSpawn,
+) -> Result<(), String> {
+    let task_id = prepared_task_id(prepared);
+    let db_result = db
+        .delete_task_creation_artifacts(task_id)
+        .map_err(|e| format!("db rollback error: {}", e));
+    let worktree_result = remove_prepared_worktree(&prepared.cwd, &prepared.branch);
+
+    match (db_result, worktree_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(db_err), Ok(())) => Err(db_err),
+        (Ok(()), Err(worktree_err)) => Err(worktree_err),
+        (Err(db_err), Err(worktree_err)) => Err(format!("{db_err}; {worktree_err}")),
+    }
+}
+
+fn remove_prepared_worktree(worktree_path: &str, branch: &str) -> Result<(), String> {
+    let worktree = Path::new(worktree_path);
+    let repo_path = worktree
+        .parent()
+        .and_then(|parent| {
+            if parent.file_name().and_then(|name| name.to_str()) == Some(".kanna-worktrees") {
+                parent.parent()
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| format!("cannot derive repo path from worktree path: {worktree_path}"))?;
+
+    let remove_output = Command::new("git")
+        .args(["worktree", "remove", "--force", worktree_path])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("failed to run git worktree remove: {}", e))?;
+    if !remove_output.status.success() {
+        let fallback_result = std::fs::remove_dir_all(worktree_path);
+        if let Err(err) = fallback_result {
+            return Err(format!(
+                "failed to remove worktree: {}; fallback remove_dir_all failed: {}",
+                String::from_utf8_lossy(&remove_output.stderr).trim(),
+                err
+            ));
+        }
+    }
+
+    let delete_output = Command::new("git")
+        .args(["branch", "-D", branch])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("failed to run git branch delete: {}", e))?;
+    if !delete_output.status.success() {
+        let message = String::from_utf8_lossy(&delete_output.stderr);
+        if !message.contains("not found") && !message.contains("not a branch") {
+            return Err(format!("failed to delete task branch: {}", message.trim()));
+        }
+    }
+
+    Ok(())
 }
 
 async fn spawn_prepared_task(
@@ -2714,6 +2782,7 @@ mod tests {
                 model: None,
                 permission_mode: None,
                 allowed_tools: None,
+                blocker_task_ids: None,
             },
         );
         std::env::set_current_dir(original_cwd).unwrap();
@@ -2809,6 +2878,7 @@ mod tests {
                 model: None,
                 permission_mode: None,
                 allowed_tools: None,
+                blocker_task_ids: None,
             },
         )
         .unwrap();
@@ -2832,6 +2902,7 @@ mod tests {
                 model: None,
                 permission_mode: None,
                 allowed_tools: None,
+                blocker_task_ids: None,
             },
         )
         .unwrap();

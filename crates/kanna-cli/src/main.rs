@@ -122,6 +122,10 @@ enum TaskCommands {
         /// Allowed tool override. Repeat to pass multiple values.
         #[arg(long)]
         allowed_tool: Vec<String>,
+
+        /// Task that blocks this task. Repeat to pass multiple blockers.
+        #[arg(long)]
+        blocker_task_id: Vec<String>,
     },
     /// Request a new revision task from an existing task branch
     RequestRevision {
@@ -166,6 +170,30 @@ enum TaskCommands {
     /// Advance an accepted task to the next pipeline stage
     AdvanceStage {
         /// The accepted task/pipeline_item ID
+        #[arg(long)]
+        task_id: String,
+
+        /// Override the local Kanna server base URL
+        #[arg(long)]
+        server_url: Option<String>,
+    },
+    /// Mark a task as blocked by one or more tasks
+    Block {
+        /// The task/pipeline_item ID to block
+        #[arg(long)]
+        task_id: String,
+
+        /// Task that blocks this task. Repeat to pass multiple blockers.
+        #[arg(long)]
+        blocker_task_id: Vec<String>,
+
+        /// Override the local Kanna server base URL
+        #[arg(long)]
+        server_url: Option<String>,
+    },
+    /// Remove all blockers from a task
+    Unblock {
+        /// The task/pipeline_item ID to unblock
         #[arg(long)]
         task_id: String,
 
@@ -219,6 +247,8 @@ struct CreateTaskRequest {
     permission_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     allowed_tools: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    blocker_task_ids: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -257,6 +287,12 @@ struct TaskInputRequest {
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+struct BlockTaskRequest {
+    blocker_task_ids: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 struct TaskInputResponse {
     ok: bool,
 }
@@ -277,6 +313,7 @@ struct TaskCreateOptions {
     model: Option<String>,
     permission_mode: Option<String>,
     allowed_tool: Vec<String>,
+    blocker_task_id: Vec<String>,
 }
 
 fn write_stage_result_to_db(
@@ -389,6 +426,7 @@ fn build_create_task_request(options: TaskCreateOptions) -> CreateTaskRequest {
         model: options.model,
         permission_mode: options.permission_mode,
         allowed_tools: (!options.allowed_tool.is_empty()).then_some(options.allowed_tool),
+        blocker_task_ids: (!options.blocker_task_id.is_empty()).then_some(options.blocker_task_id),
     }
 }
 
@@ -425,6 +463,10 @@ fn build_send_task_input_request(message: String) -> TaskInputRequest {
         format!("{message}\n")
     };
     TaskInputRequest { input }
+}
+
+fn build_block_task_request(blocker_task_ids: Vec<String>) -> BlockTaskRequest {
+    BlockTaskRequest { blocker_task_ids }
 }
 
 fn parse_metadata_json(metadata: &Option<String>) -> Result<Option<Value>, String> {
@@ -560,6 +602,28 @@ async fn advance_stage_via_api(
     post_json(
         base_url,
         &format!("/v1/tasks/{task_id}/actions/advance-stage"),
+        &serde_json::json!({}),
+    )
+    .await
+}
+
+async fn block_task_via_api(
+    base_url: &str,
+    task_id: &str,
+    request: &BlockTaskRequest,
+) -> Result<TaskActionResponse, String> {
+    post_json(
+        base_url,
+        &format!("/v1/tasks/{task_id}/actions/block"),
+        request,
+    )
+    .await
+}
+
+async fn unblock_task_via_api(base_url: &str, task_id: &str) -> Result<TaskActionResponse, String> {
+    post_json(
+        base_url,
+        &format!("/v1/tasks/{task_id}/actions/unblock"),
         &serde_json::json!({}),
     )
     .await
@@ -759,6 +823,7 @@ async fn main() {
                 model,
                 permission_mode,
                 allowed_tool,
+                blocker_task_id,
             } => {
                 let base_url = resolve_server_base_url_from_env(server_url.as_deref());
                 let request = build_create_task_request(TaskCreateOptions {
@@ -771,6 +836,7 @@ async fn main() {
                     model,
                     permission_mode,
                     allowed_tool,
+                    blocker_task_id,
                 });
                 let created = create_task_via_api(&base_url, &request)
                     .await
@@ -856,6 +922,44 @@ async fn main() {
                     process::exit(1);
                 }
             }
+            TaskCommands::Block {
+                task_id,
+                blocker_task_id,
+                server_url,
+            } => {
+                if blocker_task_id.is_empty() {
+                    eprintln!("Error: at least one --blocker-task-id is required");
+                    process::exit(1);
+                }
+                let base_url = resolve_server_base_url_from_env(server_url.as_deref());
+                let request = build_block_task_request(blocker_task_id);
+                let blocked = block_task_via_api(&base_url, &task_id, &request)
+                    .await
+                    .unwrap_or_else(|e| {
+                        eprintln!("Error: {e}");
+                        process::exit(1);
+                    });
+                if let Err(e) = print_json(&blocked) {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                }
+            }
+            TaskCommands::Unblock {
+                task_id,
+                server_url,
+            } => {
+                let base_url = resolve_server_base_url_from_env(server_url.as_deref());
+                let unblocked = unblock_task_via_api(&base_url, &task_id)
+                    .await
+                    .unwrap_or_else(|e| {
+                        eprintln!("Error: {e}");
+                        process::exit(1);
+                    });
+                if let Err(e) = print_json(&unblocked) {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                }
+            }
         },
     }
 }
@@ -863,12 +967,12 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        advance_stage_via_api, build_complete_stage_request, build_create_task_request,
-        build_request_revision_request, build_send_task_input_request, create_task_via_api,
-        find_task_status_row, format_task_list, format_task_status,
-        resolve_optional_server_base_url, resolve_server_base_url, resolve_stage_db_path,
-        send_task_input_via_api, task_list_path, task_not_found_error, TaskCreateOptions,
-        TaskInputResponse, TaskSummary,
+        advance_stage_via_api, block_task_via_api, build_block_task_request,
+        build_complete_stage_request, build_create_task_request, build_request_revision_request,
+        build_send_task_input_request, create_task_via_api, find_task_status_row, format_task_list,
+        format_task_status, resolve_optional_server_base_url, resolve_server_base_url,
+        resolve_stage_db_path, send_task_input_via_api, task_list_path, task_not_found_error,
+        unblock_task_via_api, TaskCreateOptions, TaskInputResponse, TaskSummary,
     };
     use serde_json::json;
     use std::io::{Read, Write};
@@ -1062,6 +1166,7 @@ mod tests {
             model: Some("sonnet".to_string()),
             permission_mode: Some("dontAsk".to_string()),
             allowed_tool: vec!["Bash".to_string(), "Edit".to_string()],
+            blocker_task_id: vec!["blocker-1".to_string(), "blocker-2".to_string()],
         });
 
         assert_eq!(
@@ -1076,6 +1181,7 @@ mod tests {
                 "model": "sonnet",
                 "permissionMode": "dontAsk",
                 "allowedTools": ["Bash", "Edit"],
+                "blockerTaskIds": ["blocker-1", "blocker-2"],
             })
         );
     }
@@ -1217,6 +1323,51 @@ mod tests {
     }
 
     #[test]
+    fn builds_block_task_payload() {
+        let request =
+            build_block_task_request(vec!["blocker-1".to_string(), "blocker-2".to_string()]);
+
+        assert_eq!(
+            serde_json::to_value(request).unwrap(),
+            json!({
+                "blockerTaskIds": ["blocker-1", "blocker-2"],
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn block_task_posts_to_task_action_path() {
+        let response = http_json_response("200 OK", "{\"taskId\":\"task-123\"}");
+        let (base_url, handle) = serve_single_http_response(response).await;
+
+        let action = block_task_via_api(
+            &base_url,
+            "task-123",
+            &build_block_task_request(vec!["blocker-1".to_string()]),
+        )
+        .await
+        .unwrap();
+        let request = handle.await.unwrap();
+
+        assert_eq!(action.task_id, "task-123");
+        assert!(request.starts_with("POST /v1/tasks/task-123/actions/block HTTP/1.1"));
+        assert!(request.contains(r#"{"blockerTaskIds":["blocker-1"]}"#));
+    }
+
+    #[tokio::test]
+    async fn unblock_task_posts_to_task_action_path() {
+        let response = http_json_response("200 OK", "{\"taskId\":\"task-123\"}");
+        let (base_url, handle) = serve_single_http_response(response).await;
+
+        let action = unblock_task_via_api(&base_url, "task-123").await.unwrap();
+        let request = handle.await.unwrap();
+
+        assert_eq!(action.task_id, "task-123");
+        assert!(request.starts_with("POST /v1/tasks/task-123/actions/unblock HTTP/1.1"));
+        assert!(request.ends_with("{}"));
+    }
+
+    #[test]
     fn builds_task_request_omits_agent_provider_when_flag_absent() {
         let request = build_create_task_request(TaskCreateOptions {
             repo_id: "repo-1".to_string(),
@@ -1228,6 +1379,7 @@ mod tests {
             model: None,
             permission_mode: None,
             allowed_tool: Vec::new(),
+            blocker_task_id: Vec::new(),
         });
 
         assert_eq!(
@@ -1304,6 +1456,7 @@ mod tests {
             model: None,
             permission_mode: None,
             allowed_tool: Vec::new(),
+            blocker_task_id: Vec::new(),
         });
 
         let created = create_task_via_api(&format!("http://{addr}"), &request)
