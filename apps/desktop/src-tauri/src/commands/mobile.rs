@@ -49,6 +49,24 @@ struct MobileServerState {
 #[derive(Debug, Serialize, Deserialize)]
 struct DesktopIdentityFile {
     desktop_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    desktop_secret: Option<String>,
+}
+
+/// Local desktop relay credential: a stable per-instance id plus the secret
+/// that proves it. The plain secret only ever lives in the identity file and
+/// the generated `server.toml`; everything cloud-facing sees its SHA-256 hash.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DesktopCredential {
+    desktop_id: String,
+    desktop_secret: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopCloudCredential {
+    pub desktop_id: String,
+    pub desktop_secret_hash: String,
 }
 
 impl MobileServerManager {
@@ -80,11 +98,10 @@ impl MobileServerManager {
             )
         };
 
-        let config_desktop_id = desktop_id(&config_path)?;
-        let expected_desktop_id = runtime_desktop_id(&config_path)?;
+        let expected_desktop_id = desktop_id(&config_path)?;
         let existing_status = self.fetch_status(&api_base_url).await.ok();
         if let Some(status) = existing_status {
-            ensure_server_belongs_to_desktop(&status, &expected_desktop_id, &config_desktop_id)?;
+            ensure_server_belongs_to_desktop(&status, &expected_desktop_id)?;
             if is_current_server_status(&status, &expected_desktop_id, current_server_version())
                 && server_config_matches_runtime(&config_path, &expected_desktop_id)
             {
@@ -272,6 +289,26 @@ pub async fn create_mobile_pairing_session(
     manager.create_pairing_session().await
 }
 
+/// Expose the desktop's cloud credential to the frontend so a signed-in user
+/// can register this desktop in Firestore (`users/{uid}/desktops`). Only the
+/// SHA-256 hash of the secret crosses into the webview; the relay compares
+/// the hash, so the plain secret never leaves the Rust side.
+#[tauri::command]
+pub async fn desktop_cloud_credential(
+    app: tauri::AppHandle,
+) -> Result<DesktopCloudCredential, String> {
+    let manager = app.state::<MobileServerManager>();
+    let config_path = {
+        let state = manager.inner.lock().await;
+        state.config_path.clone()
+    };
+    let credential = desktop_credential(&config_path)?;
+    Ok(DesktopCloudCredential {
+        desktop_id: credential.desktop_id,
+        desktop_secret_hash: sha256_hex(&credential.desktop_secret),
+    })
+}
+
 fn write_server_config(state: &MobileServerState) -> Result<(), String> {
     let config = build_server_config(state)?;
     if let Some(parent) = state.config_path.parent() {
@@ -386,18 +423,16 @@ fn build_server_config(state: &MobileServerState) -> Result<String, String> {
         .join("mobile-pairings.json");
     let device_token = generate_device_token()?;
     let relay_url = relay_url();
-    let cloud_base_url = cloud_base_url();
-    let firebase_project_id = firebase_project_id();
+    let credential = desktop_credential(&state.config_path)?;
 
     Ok(format!(
-        "relay_url = \"{}\"\ndevice_token = \"{}\"\ncloud_base_url = \"{}\"\nfirebase_project_id = \"{}\"\ndaemon_dir = \"{}\"\ndb_path = \"{}\"\ndesktop_id = \"{}\"\ndesktop_name = \"{}\"\nserver_version = \"{}\"\nlan_host = \"0.0.0.0\"\nlan_port = {}\npairing_store_path = \"{}\"\n",
+        "relay_url = \"{}\"\ndevice_token = \"{}\"\ndaemon_dir = \"{}\"\ndb_path = \"{}\"\ndesktop_id = \"{}\"\ndesktop_secret = \"{}\"\ndesktop_name = \"{}\"\nserver_version = \"{}\"\nlan_host = \"0.0.0.0\"\nlan_port = {}\npairing_store_path = \"{}\"\n",
         escape_toml_string(&relay_url),
         escape_toml_string(&device_token),
-        escape_toml_string(&cloud_base_url),
-        escape_toml_string(&firebase_project_id),
         escape_toml_string(&daemon_dir),
         escape_toml_string(&db_path.to_string_lossy()),
-        escape_toml_string(&desktop_id(&state.config_path)?),
+        escape_toml_string(&credential.desktop_id),
+        escape_toml_string(&credential.desktop_secret),
         escape_toml_string(&state.desktop_name),
         escape_toml_string(current_server_version()),
         local_server_port(),
@@ -421,23 +456,22 @@ fn server_config_matches_runtime(config_path: &Path, desktop_id: &str) -> bool {
     };
     let daemon_dir = std::env::var("KANNA_DAEMON_DIR")
         .unwrap_or_else(|_| crate::daemon_data_dir().to_string_lossy().to_string());
+    let Ok(credential) = desktop_credential(config_path) else {
+        return false;
+    };
 
     [
         format!("relay_url = \"{}\"", escape_toml_string(&relay_url())),
-        format!(
-            "cloud_base_url = \"{}\"",
-            escape_toml_string(&cloud_base_url())
-        ),
-        format!(
-            "firebase_project_id = \"{}\"",
-            escape_toml_string(&firebase_project_id())
-        ),
         format!("daemon_dir = \"{}\"", escape_toml_string(&daemon_dir)),
         format!(
             "db_path = \"{}\"",
             escape_toml_string(&db_path.to_string_lossy())
         ),
         format!("desktop_id = \"{}\"", escape_toml_string(desktop_id)),
+        format!(
+            "desktop_secret = \"{}\"",
+            escape_toml_string(&credential.desktop_secret)
+        ),
         format!(
             "server_version = \"{}\"",
             escape_toml_string(current_server_version())
@@ -449,8 +483,6 @@ fn server_config_matches_runtime(config_path: &Path, desktop_id: &str) -> bool {
 }
 
 const PRODUCTION_RELAY_URL: &str = "wss://relay.kanna.build";
-const PRODUCTION_CLOUD_BASE_URL: &str = "https://us-central1-kanna-build.cloudfunctions.net";
-const STAGING_CLOUD_BASE_URL: &str = "https://us-central1-kanna-staging.cloudfunctions.net";
 
 fn relay_url() -> String {
     relay_url_for_mode(cfg!(debug_assertions))
@@ -473,50 +505,6 @@ fn relay_url_for_mode(debug_assertions: bool) -> String {
         return PRODUCTION_RELAY_URL.to_string();
     }
     String::new()
-}
-
-fn cloud_base_url() -> String {
-    if let Ok(url) = std::env::var("KANNA_CLOUD_BASE_URL") {
-        let trimmed = url.trim();
-        if !trimmed.is_empty() {
-            return trimmed.trim_end_matches('/').to_string();
-        }
-    }
-    if let Ok(endpoint) = std::env::var("KANNA_CLOUD_FUNCTIONS_ENDPOINT") {
-        let trimmed = endpoint.trim().trim_end_matches('/');
-        if let Some(base) = trimmed.strip_suffix("/createPairingCode") {
-            if !base.is_empty() {
-                return base.to_string();
-            }
-        }
-    }
-    match std::env::var("KANNA_CLOUD_ENV")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .as_deref()
-    {
-        Some("staging") => STAGING_CLOUD_BASE_URL.to_string(),
-        Some("production") => PRODUCTION_CLOUD_BASE_URL.to_string(),
-        _ => "http://127.0.0.1:5001/kanna-local/us-central1".to_string(),
-    }
-}
-
-fn firebase_project_id() -> String {
-    if let Ok(project_id) = std::env::var("KANNA_FIREBASE_PROJECT_ID") {
-        let trimmed = project_id.trim();
-        if !trimmed.is_empty() {
-            return trimmed.to_string();
-        }
-    }
-    match std::env::var("KANNA_CLOUD_ENV")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .as_deref()
-    {
-        Some("staging") => "kanna-staging".to_string(),
-        Some("production") => "kanna-build".to_string(),
-        _ => "kanna-local".to_string(),
-    }
 }
 
 fn resolved_db_path(state: &MobileServerState) -> Result<PathBuf, String> {
@@ -605,7 +593,7 @@ fn server_base_url(port: u16) -> String {
 fn stopped_snapshot(state: &MobileServerState) -> Result<MobileServerStatus, String> {
     Ok(MobileServerStatus {
         state: state.status.clone(),
-        desktop_id: runtime_desktop_id(&state.config_path)?,
+        desktop_id: desktop_id(&state.config_path)?,
         desktop_name: state.desktop_name.clone(),
         server_version: Some(current_server_version().to_string()),
         lan_host: "0.0.0.0".to_string(),
@@ -630,9 +618,8 @@ fn is_current_server_status(
 fn ensure_server_belongs_to_desktop(
     status: &MobileServerStatus,
     expected_desktop_id: &str,
-    fallback_desktop_id: &str,
 ) -> Result<(), String> {
-    if status.desktop_id == expected_desktop_id || status.desktop_id == fallback_desktop_id {
+    if status.desktop_id == expected_desktop_id {
         return Ok(());
     }
     Err(format!(
@@ -707,16 +694,28 @@ async fn wait_for_server_port_to_close(port: u16, attempts: usize) -> Result<(),
 }
 
 fn desktop_id(config_path: &Path) -> Result<String, String> {
+    Ok(desktop_credential(config_path)?.desktop_id)
+}
+
+fn desktop_credential(config_path: &Path) -> Result<DesktopCredential, String> {
     let identity_path = desktop_identity_path(config_path);
     if let Some(identity) = read_desktop_identity(&identity_path) {
-        return Ok(identity);
+        return credential_from_identity(&identity_path, identity);
     }
 
-    let identity = format!("desktop-{}", generate_uuid_v4()?);
-    match write_desktop_identity(&identity_path, &identity) {
-        Ok(()) => Ok(identity),
+    let credential = DesktopCredential {
+        desktop_id: format!("desktop-{}", generate_uuid_v4()?),
+        desktop_secret: generate_desktop_secret()?,
+    };
+    match write_desktop_identity(&identity_path, &credential) {
+        Ok(()) => Ok(credential),
         Err(error) if error.starts_with("desktop identity already exists") => {
-            Ok(read_desktop_identity(&identity_path).unwrap_or(identity))
+            // Lost a creation race to another process in this scope; adopt the
+            // winner's identity, attaching a secret if it predates credentials.
+            match read_desktop_identity(&identity_path) {
+                Some(identity) => credential_from_identity(&identity_path, identity),
+                None => Ok(credential),
+            }
         }
         Err(error) => {
             eprintln!(
@@ -724,19 +723,40 @@ fn desktop_id(config_path: &Path) -> Result<String, String> {
                 identity_path.display(),
                 error
             );
-            Ok(identity)
+            Ok(credential)
         }
     }
 }
 
-fn runtime_desktop_id(config_path: &Path) -> Result<String, String> {
-    saved_cloud_desktop_id().map_or_else(|| desktop_id(config_path), Ok)
-}
+fn credential_from_identity(
+    identity_path: &Path,
+    identity: DesktopIdentityFile,
+) -> Result<DesktopCredential, String> {
+    if let Some(secret) = identity
+        .desktop_secret
+        .as_deref()
+        .filter(|secret| !secret.is_empty())
+    {
+        return Ok(DesktopCredential {
+            desktop_id: identity.desktop_id,
+            desktop_secret: secret.to_string(),
+        });
+    }
 
-fn saved_cloud_desktop_id() -> Option<String> {
-    let daemon_dir = std::env::var("KANNA_DAEMON_DIR")
-        .unwrap_or_else(|_| crate::daemon_data_dir().to_string_lossy().to_string());
-    read_desktop_identity(&Path::new(&daemon_dir).join("desktop-identity.json"))
+    // Identity files written before desktop credentials existed only carry the
+    // id. Keep the id stable and attach a freshly generated secret.
+    let credential = DesktopCredential {
+        desktop_id: identity.desktop_id,
+        desktop_secret: generate_desktop_secret()?,
+    };
+    if let Err(error) = rewrite_desktop_identity(identity_path, &credential) {
+        eprintln!(
+            "[mobile] failed to persist desktop secret at {}: {}",
+            identity_path.display(),
+            error
+        );
+    }
+    Ok(credential)
 }
 
 fn desktop_identity_path(config_path: &Path) -> PathBuf {
@@ -746,25 +766,30 @@ fn desktop_identity_path(config_path: &Path) -> PathBuf {
         .join("desktop-identity.json")
 }
 
-fn read_desktop_identity(path: &Path) -> Option<String> {
+fn read_desktop_identity(path: &Path) -> Option<DesktopIdentityFile> {
     let body = std::fs::read_to_string(path).ok()?;
     let parsed = serde_json::from_str::<DesktopIdentityFile>(&body).ok()?;
     if is_desktop_uuid(&parsed.desktop_id) {
-        Some(parsed.desktop_id)
+        Some(parsed)
     } else {
         None
     }
 }
 
-fn write_desktop_identity(path: &Path, desktop_id: &str) -> Result<(), String> {
+fn encode_desktop_identity(credential: &DesktopCredential) -> Result<String, String> {
+    serde_json::to_string_pretty(&DesktopIdentityFile {
+        desktop_id: credential.desktop_id.clone(),
+        desktop_secret: Some(credential.desktop_secret.clone()),
+    })
+    .map_err(|e| format!("failed to encode desktop identity: {}", e))
+}
+
+fn write_desktop_identity(path: &Path, credential: &DesktopCredential) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("failed to create desktop identity dir: {}", e))?;
     }
-    let body = serde_json::to_string_pretty(&DesktopIdentityFile {
-        desktop_id: desktop_id.to_string(),
-    })
-    .map_err(|e| format!("failed to encode desktop identity: {}", e))?;
+    let body = encode_desktop_identity(credential)?;
     OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -780,6 +805,11 @@ fn write_desktop_identity(path: &Path, desktop_id: &str) -> Result<(), String> {
                 format!("failed to write desktop identity: {}", e)
             }
         })
+}
+
+fn rewrite_desktop_identity(path: &Path, credential: &DesktopCredential) -> Result<(), String> {
+    let body = encode_desktop_identity(credential)?;
+    std::fs::write(path, body).map_err(|e| format!("failed to write desktop identity: {}", e))
 }
 
 fn generate_uuid_v4() -> Result<String, String> {
@@ -837,15 +867,30 @@ fn is_desktop_uuid(value: &str) -> bool {
 }
 
 fn generate_device_token() -> Result<String, String> {
+    generate_random_hex(16)
+}
+
+fn generate_desktop_secret() -> Result<String, String> {
+    generate_random_hex(32)
+}
+
+fn generate_random_hex(byte_count: usize) -> Result<String, String> {
     use std::fs::File;
     use std::io::Read;
 
-    let mut bytes = [0u8; 16];
+    let mut bytes = vec![0u8; byte_count];
     File::open("/dev/urandom")
         .map_err(|e| format!("failed to open /dev/urandom: {}", e))?
         .read_exact(&mut bytes)
         .map_err(|e| format!("failed to read random bytes: {}", e))?;
     Ok(bytes.iter().map(|b| format!("{:02x}", b)).collect())
+}
+
+fn sha256_hex(value: &str) -> String {
+    use sha2::{Digest, Sha256};
+
+    let digest = Sha256::digest(value.as_bytes());
+    digest.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
 fn default_desktop_name() -> String {
@@ -859,11 +904,10 @@ fn escape_toml_string(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        app_data_dir_for_server_config, build_server_config, cloud_base_url,
-        current_server_version, desktop_id, escape_toml_string, firebase_project_id,
-        generate_uuid_v4_from_reader,
-        is_current_server_status, parse_lsof_pids, relay_url, resolved_db_path, runtime_desktop_id,
-        server_base_url, server_config_matches_runtime, server_config_path_for_app_data_dir,
+        app_data_dir_for_server_config, build_server_config, current_server_version, desktop_id,
+        escape_toml_string, generate_uuid_v4_from_reader, is_current_server_status,
+        parse_lsof_pids, relay_url, resolved_db_path, server_base_url,
+        server_config_matches_runtime, server_config_path_for_app_data_dir,
         server_lock_path_for_config, server_pids_on_port, stop_server_on_port, stopped_snapshot,
         try_claim_server_lock, MobileServerManager, MobileServerState, MobileServerStatus,
     };
@@ -871,15 +915,14 @@ mod tests {
     use std::os::unix::process::ExitStatusExt;
     use std::path::PathBuf;
     use std::process::{Command as StdCommand, Stdio};
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::Mutex;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
     use tokio::process::{Child, Command};
 
     fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+        crate::test_env_lock()
     }
 
     unsafe fn set_env_var(key: &str, value: &str) {
@@ -959,6 +1002,7 @@ mod tests {
             &daemon_dir,
             &expected_desktop_id,
             None,
+            None,
             port,
         );
         let mut stale_server = start_test_kanna_server(&stale_config_path, port).await;
@@ -1005,18 +1049,21 @@ mod tests {
         configure_process_test_env(port, &db_path, &daemon_dir);
         create_test_database(&db_path);
         let manager = MobileServerManager::new(app_data_dir.clone());
-        let (expected_desktop_id, existing_config_path) = {
+        let (expected_credential, existing_config_path) = {
             let state = manager.inner.lock().await;
             (
-                desktop_id(&state.config_path).expect("desktop identity should be generated"),
+                super::desktop_credential(&state.config_path)
+                    .expect("desktop credential should be generated"),
                 state.config_path.clone(),
             )
         };
+        let expected_desktop_id = expected_credential.desktop_id.clone();
         write_test_server_config(
             &existing_config_path,
             &db_path,
             &daemon_dir,
             &expected_desktop_id,
+            Some(&expected_credential.desktop_secret),
             Some(current_server_version()),
             port,
         );
@@ -1082,6 +1129,7 @@ mod tests {
             &stale_db_path,
             &stale_daemon_dir,
             &expected_desktop_id,
+            None,
             Some(current_server_version()),
             port,
         );
@@ -1174,10 +1222,6 @@ mod tests {
 
     #[test]
     fn desktop_id_is_persisted_per_app_instance_scope() {
-        let _guard = env_lock().lock().expect("env lock should not be poisoned");
-        unsafe {
-            unset_env_var("KANNA_DAEMON_DIR");
-        }
         let root = unique_test_root("desktop-id");
         let first_config = root.join("main/Kanna/server.toml");
         let second_config = root.join("worktree/Kanna/servers/kanna-wt-task/server.toml");
@@ -1202,6 +1246,59 @@ mod tests {
     }
 
     #[test]
+    fn desktop_credential_persists_secret_and_stays_stable() {
+        let root = unique_test_root("desktop-credential");
+        let config_path = root.join("main/Kanna/server.toml");
+
+        let first = super::desktop_credential(&config_path).expect("credential should generate");
+        let second = super::desktop_credential(&config_path).expect("credential should re-read");
+
+        assert_eq!(first, second);
+        assert_eq!(first.desktop_secret.len(), 64);
+        let written =
+            std::fs::read_to_string(root.join("main/Kanna/desktop-identity.json")).unwrap();
+        assert!(written.contains(&first.desktop_id));
+        assert!(written.contains(&first.desktop_secret));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn desktop_credential_migrates_legacy_identity_preserving_id() {
+        let root = unique_test_root("desktop-credential-migrate");
+        let config_path = root.join("main/Kanna/server.toml");
+        let identity_path = root.join("main/Kanna/desktop-identity.json");
+        std::fs::create_dir_all(identity_path.parent().unwrap()).unwrap();
+        let legacy_id = "desktop-12345678-1234-4234-8234-123456789abc";
+        std::fs::write(
+            &identity_path,
+            format!("{{\n  \"desktop_id\": \"{legacy_id}\"\n}}"),
+        )
+        .unwrap();
+
+        let credential =
+            super::desktop_credential(&config_path).expect("legacy identity should migrate");
+
+        assert_eq!(credential.desktop_id, legacy_id);
+        assert_eq!(credential.desktop_secret.len(), 64);
+        let rewritten = std::fs::read_to_string(&identity_path).unwrap();
+        assert!(rewritten.contains(&credential.desktop_secret));
+
+        let again = super::desktop_credential(&config_path).unwrap();
+        assert_eq!(again, credential);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn sha256_hex_matches_known_vector() {
+        assert_eq!(
+            super::sha256_hex("abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
     fn uuid_generation_propagates_entropy_read_errors() {
         struct FailingReader;
 
@@ -1215,37 +1312,6 @@ mod tests {
 
         assert!(error.contains("failed to generate desktop identity"));
         assert!(error.contains("entropy unavailable"));
-    }
-
-    #[test]
-    fn runtime_desktop_id_prefers_saved_cloud_identity() {
-        let _guard = env_lock().lock().expect("env lock should not be poisoned");
-        let root = unique_test_root("runtime-desktop-id");
-        let daemon_dir = root.join("daemon");
-        std::fs::create_dir_all(&daemon_dir).unwrap();
-        std::fs::write(
-            daemon_dir.join("desktop-identity.json"),
-            r#"{
-  "desktop_id": "desktop-11111111-1111-4111-8111-111111111111",
-  "desktop_secret": "secret-cloud"
-}"#,
-        )
-        .unwrap();
-        unsafe {
-            set_env_var("KANNA_DAEMON_DIR", daemon_dir.to_str().unwrap());
-        }
-        let config_path = root.join("Kanna/server.toml");
-        let config_id = desktop_id(&config_path).expect("config identity should generate");
-
-        let runtime_id = runtime_desktop_id(&config_path).expect("runtime identity should resolve");
-
-        assert_ne!(runtime_id, config_id);
-        assert_eq!(runtime_id, "desktop-11111111-1111-4111-8111-111111111111");
-
-        unsafe {
-            unset_env_var("KANNA_DAEMON_DIR");
-        }
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -1410,6 +1476,11 @@ mod tests {
         let config = build_server_config(&state).unwrap();
         assert!(config.contains("relay_url = \"\""));
         assert!(config.contains("desktop_name = \"Studio Mac\""));
+        let credential = super::desktop_credential(&state.config_path).unwrap();
+        assert!(config.contains(&format!(
+            "desktop_secret = \"{}\"",
+            credential.desktop_secret
+        )));
         assert!(config.contains(&format!(
             "server_version = \"{}\"",
             current_server_version()
@@ -1468,57 +1539,6 @@ mod tests {
     }
 
     #[test]
-    fn build_server_config_uses_staging_cloud_profile() {
-        let _guard = env_lock().lock().expect("env lock should not be poisoned");
-        unsafe {
-            set_env_var("KANNA_CLOUD_ENV", "staging");
-            set_env_var("KANNA_RELAY_URL", "wss://staging-relay.example");
-            unset_env_var("KANNA_CLOUD_BASE_URL");
-            unset_env_var("KANNA_CLOUD_FUNCTIONS_ENDPOINT");
-            unset_env_var("KANNA_FIREBASE_PROJECT_ID");
-        }
-
-        let state = MobileServerState {
-            status: "stopped".to_string(),
-            desktop_name: "Studio Mac".to_string(),
-            api_base_url: server_base_url(48120),
-            config_path: PathBuf::from("/tmp/build.kanna/Kanna/server.toml"),
-            started: false,
-        };
-
-        let config = build_server_config(&state).unwrap();
-
-        unsafe {
-            unset_env_var("KANNA_CLOUD_ENV");
-            unset_env_var("KANNA_RELAY_URL");
-        }
-
-        assert!(config.contains("relay_url = \"wss://staging-relay.example\""));
-        assert!(config
-            .contains("cloud_base_url = \"https://us-central1-kanna-staging.cloudfunctions.net\""));
-        assert!(config.contains("firebase_project_id = \"kanna-staging\""));
-    }
-
-    #[test]
-    fn cloud_base_url_strips_create_pairing_code_endpoint_override() {
-        let _guard = env_lock().lock().expect("env lock should not be poisoned");
-        unsafe {
-            set_env_var(
-                "KANNA_CLOUD_FUNCTIONS_ENDPOINT",
-                "https://functions.example/createPairingCode",
-            );
-            unset_env_var("KANNA_CLOUD_BASE_URL");
-            unset_env_var("KANNA_CLOUD_ENV");
-        }
-
-        assert_eq!(cloud_base_url(), "https://functions.example");
-
-        unsafe {
-            unset_env_var("KANNA_CLOUD_FUNCTIONS_ENDPOINT");
-        }
-    }
-
-    #[test]
     fn relay_url_prefers_explicit_url() {
         let _guard = env_lock().lock().expect("env lock should not be poisoned");
         unsafe {
@@ -1542,10 +1562,7 @@ mod tests {
             unset_env_var("KANNA_RELAY_PORT");
         }
 
-        assert_eq!(
-            super::relay_url_for_mode(false),
-            "wss://relay.kanna.build"
-        );
+        assert_eq!(super::relay_url_for_mode(false), "wss://relay.kanna.build");
     }
 
     #[test]
@@ -1637,11 +1654,47 @@ mod tests {
     }
 
     #[test]
+    fn server_config_matches_runtime_requires_desktop_secret() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+        unsafe {
+            unset_env_var("KANNA_RELAY_PORT");
+            unset_env_var("KANNA_RELAY_URL");
+            unset_env_var("KANNA_DB_NAME");
+            unset_env_var("KANNA_DB_PATH");
+        }
+        let root = unique_test_root("config-secret-runtime");
+        let path = root.join("Kanna/server.toml");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let state = MobileServerState {
+            status: "stopped".to_string(),
+            desktop_name: "Studio Mac".to_string(),
+            api_base_url: server_base_url(48120),
+            config_path: path.clone(),
+            started: false,
+        };
+        let correct_config = build_server_config(&state).unwrap();
+        let credential = super::desktop_credential(&path).unwrap();
+        let desktop_id = credential.desktop_id.clone();
+        let stale_config = correct_config.replace(
+            &format!("desktop_secret = \"{}\"\n", credential.desktop_secret),
+            "",
+        );
+        assert_ne!(stale_config, correct_config);
+        std::fs::write(&path, stale_config).unwrap();
+
+        assert!(!server_config_matches_runtime(&path, &desktop_id));
+
+        std::fs::write(&path, correct_config).unwrap();
+        assert!(server_config_matches_runtime(&path, &desktop_id));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn stopped_snapshot_reflects_local_state() {
         let _guard = env_lock().lock().expect("env lock should not be poisoned");
         unsafe {
             unset_env_var("KANNA_MOBILE_SERVER_PORT");
-            unset_env_var("KANNA_DAEMON_DIR");
         }
 
         let state = MobileServerState {
@@ -1927,27 +1980,28 @@ mod tests {
         db_path: &std::path::Path,
         daemon_dir: &std::path::Path,
         desktop_id: &str,
+        desktop_secret: Option<&str>,
         server_version: Option<&str>,
         port: u16,
     ) {
         if let Some(parent) = config_path.parent() {
             std::fs::create_dir_all(parent).expect("server config directory should be created");
         }
+        let secret_line = desktop_secret
+            .map(|secret| format!("desktop_secret = \"{}\"\n", escape_toml_string(secret)))
+            .unwrap_or_default();
         let version_line = server_version
             .map(|version| format!("server_version = \"{}\"\n", escape_toml_string(version)))
             .unwrap_or_default();
         let pairing_store_path = config_path.with_file_name("pairings.json");
         let relay_url = relay_url();
-        let cloud_base_url = cloud_base_url();
-        let firebase_project_id = firebase_project_id();
         let config = format!(
-            "relay_url = \"{}\"\ndevice_token = \"test-token\"\ncloud_base_url = \"{}\"\nfirebase_project_id = \"{}\"\ndaemon_dir = \"{}\"\ndb_path = \"{}\"\ndesktop_id = \"{}\"\ndesktop_name = \"Kanna Test\"\n{}lan_host = \"127.0.0.1\"\nlan_port = {}\npairing_store_path = \"{}\"\n",
+            "relay_url = \"{}\"\ndevice_token = \"test-token\"\ndaemon_dir = \"{}\"\ndb_path = \"{}\"\ndesktop_id = \"{}\"\n{}desktop_name = \"Kanna Test\"\n{}lan_host = \"127.0.0.1\"\nlan_port = {}\npairing_store_path = \"{}\"\n",
             escape_toml_string(&relay_url),
-            escape_toml_string(&cloud_base_url),
-            escape_toml_string(&firebase_project_id),
             escape_toml_string(&daemon_dir.to_string_lossy()),
             escape_toml_string(&db_path.to_string_lossy()),
             escape_toml_string(desktop_id),
+            secret_line,
             version_line,
             port,
             escape_toml_string(&pairing_store_path.to_string_lossy()),

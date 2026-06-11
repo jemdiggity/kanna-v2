@@ -94,11 +94,10 @@ mod tests {
     use super::run_script_sync;
     use std::collections::HashMap;
     use std::ffi::CString;
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::Mutex;
 
     fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+        crate::test_env_lock()
     }
 
     unsafe fn set_env_var(key: &str, value: &str) {

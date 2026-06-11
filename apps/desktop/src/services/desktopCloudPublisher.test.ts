@@ -152,6 +152,9 @@ describe("desktop cloud live task index publisher", () => {
     mocks.getDoc.mockResolvedValue(missingDocSnapshot());
     mocks.getDocs.mockResolvedValue({ docs: [] });
     mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "desktop_cloud_credential") {
+        return { desktopId: "desktop-owner", desktopSecretHash: "secret-hash-1" };
+      }
       if (command === "mobile_server_status") return { desktopId: "desktop-owner", desktopName: "Studio Mac" };
       if (command === "read_env_var") return "";
       if (command === "git_remote_url") return "git@github.com:owner/repo.git";
@@ -246,6 +249,7 @@ describe("desktop cloud live task index publisher", () => {
         desktopId: "desktop-owner",
         displayName: "Studio Mac",
         updatedAt: "SERVER_TIMESTAMP",
+        desktopSecretHash: "secret-hash-1",
       },
     );
     expect(mocks.doc).toHaveBeenCalled();
@@ -324,6 +328,51 @@ describe("desktop cloud live task index publisher", () => {
 
     expect(mocks.setDoc).toHaveBeenCalledWith(
       { kind: "doc-ref", id: "desktop-doc" },
+      {
+        displayName: "Studio Mac",
+        updatedAt: "SERVER_TIMESTAMP",
+        desktopSecretHash: "secret-hash-1",
+      },
+      { merge: true },
+    );
+  });
+
+  it("omits the desktop secret hash when the credential command is unavailable", async () => {
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "desktop_cloud_credential") throw new Error("not available in browser mock");
+      if (command === "mobile_server_status") return { desktopId: "desktop-owner", desktopName: "Studio Mac" };
+      if (command === "git_remote_url") return "git@github.com:owner/repo.git";
+      return "";
+    });
+    mocks.getDocs
+      .mockResolvedValueOnce({ docs: [] })
+      .mockResolvedValueOnce({ docs: [] });
+
+    await publishDesktopTaskSnapshot(null as never, openItem("task-new") as never, repo() as never);
+
+    expect(mocks.addDoc).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "collection" }),
+      {
+        desktopId: "desktop-owner",
+        displayName: "Studio Mac",
+        updatedAt: "SERVER_TIMESTAMP",
+      },
+    );
+  });
+
+  it("does not attach this desktop's secret hash to another desktop's document", async () => {
+    mocks.getDocs
+      .mockResolvedValueOnce({ docs: [docSnapshot("other-desktop-doc", { desktopId: "desktop-other", displayName: null })] })
+      .mockResolvedValueOnce({ docs: [] });
+
+    await deleteRemoteTaskSnapshots({
+      ownerDesktopId: "desktop-other",
+      localRepoId: "repo-1",
+      ownerLocalTaskId: "task-remote",
+    });
+
+    expect(mocks.setDoc).toHaveBeenCalledWith(
+      { kind: "doc-ref", id: "other-desktop-doc" },
       {
         displayName: "Studio Mac",
         updatedAt: "SERVER_TIMESTAMP",

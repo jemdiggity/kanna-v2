@@ -763,12 +763,11 @@ fn resolve_sidecar_binary() -> Result<PathBuf, String> {
 mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
-    use std::sync::{Mutex, OnceLock};
+
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+        crate::test_env_lock()
             .lock()
             .expect("env lock should not be poisoned")
     }

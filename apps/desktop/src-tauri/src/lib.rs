@@ -25,6 +25,16 @@ pub(crate) const KANNA_BUILD_COMMIT: &str = env!("KANNA_BUILD_COMMIT");
 pub(crate) const KANNA_BUILD_WORKTREE: &str = env!("KANNA_BUILD_WORKTREE");
 pub(crate) const KANNA_BUILD_INFO: &str = env!("KANNA_BUILD_INFO");
 pub type TransferServiceState = Arc<Mutex<Option<transfer_sidecar::TransferSidecarClient>>>;
+
+/// Process-wide lock serializing tests that read or mutate process env vars.
+/// Per-module locks cannot serialize against each other, so env-dependent
+/// tests in different modules raced (e.g. shell.rs flipping KANNA_DB_NAME
+/// while mobile.rs asserted on a config derived from it).
+#[cfg(test)]
+pub(crate) fn test_env_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
 const MENU_ID_NEW_WINDOW: &str = "workspace-new-window";
 const MENU_ID_CLOSE_WINDOW: &str = "workspace-close-window";
 const MENU_ID_NAVIGATE_TASK_UP: &str = "navigate-task-up";
@@ -678,14 +688,8 @@ pub fn run() {
             }
             if let Some(main_win) = app.get_webview_window("main") {
                 let native_window = main_win.as_ref().window();
-                restore_default_size_if_too_small(
-                    &native_window,
-                    &MAIN_WINDOW_SIZE_POLICY,
-                );
-                schedule_restore_default_size_if_too_small(
-                    native_window,
-                    &MAIN_WINDOW_SIZE_POLICY,
-                );
+                restore_default_size_if_too_small(&native_window, &MAIN_WINDOW_SIZE_POLICY);
+                schedule_restore_default_size_if_too_small(native_window, &MAIN_WINDOW_SIZE_POLICY);
             }
 
             // Build app menu with full version in About
@@ -864,6 +868,7 @@ pub fn run() {
             // Mobile commands
             commands::mobile::mobile_server_status,
             commands::mobile::create_mobile_pairing_session,
+            commands::mobile::desktop_cloud_credential,
             // Shell commands
             commands::shell::run_script,
             commands::shell::ensure_term_init,
