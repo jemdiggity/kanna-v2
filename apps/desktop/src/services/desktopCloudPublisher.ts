@@ -111,6 +111,11 @@ export async function publishDesktopTaskSnapshots(
   await reconcileDesktopTaskSnapshots(db);
 }
 
+export function __resetDesktopCloudPublisherCachesForTests(): void {
+  // This module currently avoids process-wide caches; keep a stable test hook
+  // so tests can reset publisher state without knowing that implementation detail.
+}
+
 async function buildSnapshot(
   db: DbHandle,
   item: PipelineItem,

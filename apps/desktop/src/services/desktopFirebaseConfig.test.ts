@@ -118,7 +118,7 @@ describe("resolveDesktopFirebaseConfig", () => {
     expect(config.functionsEndpoint).toBeNull();
   });
 
-  it("uses runtime Firebase app config overrides when provided", async () => {
+  it("uses runtime Firebase app config overrides when provided under a remote cloud env", async () => {
     const config = await resolveDesktopFirebaseConfig({
       dev: false,
       readEnv: async (name) => ({
@@ -137,7 +137,7 @@ describe("resolveDesktopFirebaseConfig", () => {
       projectId: "runtime-project",
       appId: "runtime-app-id",
     });
-    expect(config.functionsEndpoint).toBe("https://runtime.example/createPairingCode");
+    expect(config.functionsEndpoint).toBeNull();
   });
 
   it("keeps explicit runtime function endpoints available in local tests", async () => {

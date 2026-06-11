@@ -264,12 +264,11 @@ describe("desktop cloud live task index publisher", () => {
 
   it("publishes saved desktop credentials into the desktop document for relay auth", async () => {
     mocks.invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
-      if (command === "read_env_var" && args?.name === "KANNA_DAEMON_DIR") return "/daemon";
-      if (command === "read_text_file" && args?.path === "/daemon/desktop-identity.json") {
-        return JSON.stringify({
-          desktop_id: "desktop-cloud",
-          desktop_secret: "secret-cloud",
-        });
+      if (command === "desktop_cloud_credential") {
+        return {
+          desktopId: "desktop-cloud",
+          desktopSecretHash: "secret-cloud-hash",
+        };
       }
       if (command === "mobile_server_status") return { desktopId: "desktop-local", desktopName: "Studio Mac" };
       if (command === "git_remote_url") return "git@github.com:owner/repo.git";
@@ -285,7 +284,7 @@ describe("desktop cloud live task index publisher", () => {
       { kind: "doc-ref", id: "desktop-doc" },
       expect.objectContaining({
         displayName: "Studio Mac",
-        desktopSecret: "secret-cloud",
+        desktopSecretHash: "secret-cloud-hash",
       }),
       { merge: true },
     );
@@ -447,14 +446,13 @@ describe("desktop cloud live task index publisher", () => {
     expect(mocks.commit).toHaveBeenCalledTimes(1);
   });
 
-  it("does not rewrite unchanged profile, credential, desktop, or task documents during reconcile", async () => {
+  it("refreshes profile, desktop, and task documents during reconcile without deleting unchanged tasks", async () => {
     mocks.invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
-      if (command === "read_env_var" && args?.name === "KANNA_DAEMON_DIR") return "/daemon";
-      if (command === "read_text_file" && args?.path === "/daemon/desktop-identity.json") {
-        return JSON.stringify({
-          desktop_id: "desktop-noop",
-          desktop_secret: "secret-noop",
-        });
+      if (command === "desktop_cloud_credential") {
+        return {
+          desktopId: "desktop-noop",
+          desktopSecretHash: "secret-noop-hash",
+        };
       }
       if (command === "mobile_server_status") return { desktopId: "desktop-noop", desktopName: "Studio Mac" };
       if (command === "git_remote_url") return "git@github.com:owner/repo.git";
@@ -509,19 +507,22 @@ describe("desktop cloud live task index publisher", () => {
     mocks.getDocs
       .mockResolvedValueOnce({ docs: [docSnapshot("desktop-doc", {
         desktopId: "desktop-noop",
-        desktopSecret: "secret-noop",
+        desktopSecretHash: "secret-noop-hash",
         displayName: "Studio Mac",
       })] })
       .mockResolvedValueOnce({ docs: [docSnapshot("task-open-doc", unchangedTask)] })
       .mockResolvedValueOnce({ docs: [docSnapshot("desktop-doc", {
         desktopId: "desktop-noop",
-        desktopSecret: "secret-noop",
+        desktopSecretHash: "secret-noop-hash",
         displayName: "Studio Mac",
       })] })
       .mockResolvedValueOnce({ docs: [docSnapshot("task-open-doc", unchangedTask)] });
 
     await reconcileDesktopTaskSnapshots(null as never);
-    expect(mocks.setDoc).toHaveBeenCalledTimes(1);
+    expect(mocks.setDoc).toHaveBeenCalledTimes(2);
+    expect(mocks.set).toHaveBeenCalledTimes(1);
+    expect(mocks.delete).not.toHaveBeenCalled();
+    expect(mocks.commit).toHaveBeenCalledTimes(1);
 
     mocks.getDoc.mockClear();
     mocks.setDoc.mockClear();
@@ -531,10 +532,10 @@ describe("desktop cloud live task index publisher", () => {
 
     await reconcileDesktopTaskSnapshots(null as never);
 
-    expect(mocks.setDoc).not.toHaveBeenCalled();
+    expect(mocks.setDoc).toHaveBeenCalledTimes(2);
     expect(mocks.getDoc).not.toHaveBeenCalled();
-    expect(mocks.set).not.toHaveBeenCalled();
+    expect(mocks.set).toHaveBeenCalledTimes(1);
     expect(mocks.delete).not.toHaveBeenCalled();
-    expect(mocks.commit).not.toHaveBeenCalled();
+    expect(mocks.commit).toHaveBeenCalledTimes(1);
   });
 });
