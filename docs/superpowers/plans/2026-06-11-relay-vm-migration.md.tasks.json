@@ -4,26 +4,26 @@
     {
       "id": 9,
       "subject": "Task 1: Relay VM deploy stack files",
-      "status": "pending",
+      "status": "completed",
       "description": "**Goal:** Add the Compose stack, Caddyfile, and on-VM deploy script that run the relay behind Caddy TLS.\n\n**Files:**\n- Create: `services/relay/deploy/compose.yaml`\n- Create: `services/relay/deploy/Caddyfile`\n- Create: `services/relay/deploy/vm-deploy.sh`\n\n**Acceptance Criteria:**\n- [ ] `docker compose -f services/relay/deploy/compose.yaml config` parses without error\n- [ ] `bash -n services/relay/deploy/vm-deploy.sh` exits 0\n- [ ] Caddyfile serves `relay.kanna.build` and proxies to `relay:8080`\n\n**Verify:** `docker compose -f services/relay/deploy/compose.yaml config --quiet && bash -n services/relay/deploy/vm-deploy.sh && echo OK` → `OK`\n\n**Steps:** Full code in plan doc Task 1.\n\n```json:metadata\n{\"files\": [\"services/relay/deploy/compose.yaml\", \"services/relay/deploy/Caddyfile\", \"services/relay/deploy/vm-deploy.sh\"], \"verifyCommand\": \"docker compose -f services/relay/deploy/compose.yaml config --quiet && bash -n services/relay/deploy/vm-deploy.sh && echo OK\", \"acceptanceCriteria\": [\"compose config parses\", \"vm-deploy.sh bash -n exits 0\", \"Caddyfile proxies relay.kanna.build to relay:8080\"]}\n```"
     },
     {
       "id": 10,
       "subject": "Task 2: Provision script for the relay VM",
-      "status": "pending",
+      "status": "completed",
       "blockedBy": [9],
       "description": "**Goal:** One-time idempotent script that creates the service account, static IP, firewall rule, and e2-micro VM.\n\n**Files:**\n- Create: `services/relay/deploy/provision.sh`\n\n**Acceptance Criteria:**\n- [ ] `bash -n services/relay/deploy/provision.sh` exits 0\n- [ ] Script is idempotent (every `create` tolerates already-exists)\n- [ ] Script prints the static IP and the DNS instruction at the end\n\n**Verify:** `bash -n services/relay/deploy/provision.sh && echo OK` → `OK`\n\n**Steps:** Full code in plan doc Task 2. chmod +x provision.sh and vm-deploy.sh.\n\n```json:metadata\n{\"files\": [\"services/relay/deploy/provision.sh\"], \"verifyCommand\": \"bash -n services/relay/deploy/provision.sh && echo OK\", \"acceptanceCriteria\": [\"bash -n exits 0\", \"idempotent creates\", \"prints static IP and DNS instruction\"]}\n```"
     },
     {
       "id": 11,
       "subject": "Task 3: Retarget kd cloud deploy --relay to VM, error on staging, add provision command",
-      "status": "pending",
+      "status": "completed",
       "description": "**Goal:** Production relay deploys go to the VM (ssh prep + scp + ssh run); staging relay deploys error; `kd cloud relay-provision` wraps provision.sh. TDD against the existing mock-runner test pattern.\n\n**Files:**\n- Modify: `tools/kd/src/runtime/cloud-deploy.ts` (`deployRelayCloud`, `RelayDeployResult`)\n- Modify: `tools/kd/src/tasks/registry.ts` (new `cloud.relay-provision` task near `cloud.deploy` ~line 729)\n- Test: `tools/kd/tests/cloud-deploy.test.ts`\n\n**Acceptance Criteria:**\n- [ ] production `deployRelayCloud` runs in order: relay build → gcloud builds submit (unchanged) → ssh `rm -rf ~/kanna-relay && mkdir -p ~/kanna-relay` → scp the three deploy files into `~/kanna-relay/` → ssh `sudo bash ~/kanna-relay/vm-deploy.sh`\n- [ ] staging `deployRelayCloud` rejects with \"staging relay is retired\"\n- [ ] result is `{projectId, vmName, zone, image, relayUrl: \"wss://relay.kanna.build\"}` (KANNA_RELAY_HOSTNAME/KANNA_RELAY_VM_NAME/KANNA_RELAY_VM_ZONE overrides)\n- [ ] `cloud.relay-provision` registry task executes `bash services/relay/deploy/provision.sh`\n- [ ] `cd tools/kd && pnpm test` passes; `pnpm exec tsc --noEmit` clean\n\n**Verify:** `cd tools/kd && pnpm exec tsc --noEmit && pnpm test -- cloud-deploy` → all pass\n\n**Steps:** TDD per plan doc Task 3 — tests first (exact call arrays), FAIL, implement, PASS, registry entry, full check.\n\n```json:metadata\n{\"files\": [\"tools/kd/src/runtime/cloud-deploy.ts\", \"tools/kd/src/tasks/registry.ts\", \"tools/kd/tests/cloud-deploy.test.ts\"], \"verifyCommand\": \"cd tools/kd && pnpm exec tsc --noEmit && pnpm test\", \"acceptanceCriteria\": [\"production deploy sequence: build, builds submit, ssh prep, scp three files, ssh vm-deploy\", \"staging relay deploy rejects with 'staging relay is retired'\", \"relayUrl wss://relay.kanna.build\", \"cloud.relay-provision registered\", \"kd tests + typecheck pass\"]}\n```"
     },
     {
       "id": 12,
       "subject": "Task 4: Point clients at wss://relay.kanna.build",
-      "status": "pending",
+      "status": "completed",
       "description": "**Goal:** Replace the hardcoded Cloud Run relay URL in all three clients (and the Rust test asserting it).\n\n**Files:**\n- Modify: `apps/desktop/src-tauri/src/commands/mobile.rs:438` (`PRODUCTION_RELAY_URL`) and `:1390` (test assertion)\n- Modify: `apps/desktop/src/services/desktopRelayTerminal.ts:4` (`PRODUCTION_CLOUD_TRANSPORT_URL`)\n- Modify: `apps/mobile/src/appModel.ts:32` (`PRODUCTION_RELAY_URL`)\n\n**Acceptance Criteria:**\n- [ ] All three constants equal `wss://relay.kanna.build`\n- [ ] `grep -rn \"kanna-relay-402613185450\" apps/ crates/ packages/ tools/ | grep -v node_modules | grep -v .build` → no output\n- [ ] `cargo test relay_url` passes in apps/desktop/src-tauri\n- [ ] `pnpm exec tsc --noEmit` clean in apps/desktop and apps/mobile\n\n**Verify:** `cd apps/desktop/src-tauri && cargo test relay_url` → PASS; tsc clean in desktop + mobile\n\n**Steps:** TDD per plan doc Task 4 — Rust test assertion first, FAIL, update three constants, PASS + typechecks + grep.\n\n```json:metadata\n{\"files\": [\"apps/desktop/src-tauri/src/commands/mobile.rs\", \"apps/desktop/src/services/desktopRelayTerminal.ts\", \"apps/mobile/src/appModel.ts\"], \"verifyCommand\": \"cd apps/desktop/src-tauri && cargo test relay_url\", \"acceptanceCriteria\": [\"three constants equal wss://relay.kanna.build\", \"no kanna-relay-402613185450 references remain\", \"cargo test relay_url passes\", \"tsc clean in desktop and mobile\"]}\n```"
     },
     {
