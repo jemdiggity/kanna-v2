@@ -14,6 +14,7 @@ services:
     image: gcr.io/kanna-build/kanna-relay:latest
     restart: always
     environment:
+      GOOGLE_CLOUD_PROJECT: kanna-build
       FIREBASE_PROJECT_ID: kanna-build
     expose:
       - "8080"

@@ -10,6 +10,7 @@ TOKEN=$(curl -fsS -H "Metadata-Flavor: Google" \
 echo "$TOKEN" | docker login -u oauth2accesstoken --password-stdin https://gcr.io
 
 docker compose pull
+docker logout https://gcr.io
 docker compose up -d
 docker image prune -f
 docker compose ps
