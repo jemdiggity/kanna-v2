@@ -97,30 +97,6 @@ export async function verifyDesktopCredentials(
 
   try {
     const { db } = getFirebaseServices();
-    const credentialDoc = await db
-      .collection("desktopCredentials")
-      .doc(desktopId)
-      .get();
-    if (credentialDoc.exists) {
-      const data = credentialDoc.data();
-      if (data?.revokedAt) {
-        console.warn("[auth] Desktop revoked:", desktopId);
-        return null;
-      }
-      if (data?.desktopSecret !== desktopSecret) {
-        console.warn("[auth] Desktop secret mismatch:", desktopId);
-        return null;
-      }
-      if (typeof data?.uid !== "string") {
-        console.warn("[auth] Desktop credential missing uid:", desktopId);
-        return null;
-      }
-      return {
-        userId: data.uid,
-        desktopId,
-      };
-    }
-
     const snapshot = await db
       .collectionGroup("desktops")
       .where("desktopId", "==", desktopId)
