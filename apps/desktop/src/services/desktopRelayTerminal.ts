@@ -1,7 +1,7 @@
 import { getConfiguredDesktopAuthSession } from "./desktopAuthSdk";
 import { invoke } from "../invoke";
 
-export const PRODUCTION_CLOUD_TRANSPORT_URL = "wss://kanna-relay-402613185450.us-central1.run.app";
+export const PRODUCTION_CLOUD_TRANSPORT_URL = "wss://relay.kanna.build";
 
 export type DesktopRelayTerminalEvent =
   | { type: "ready"; taskId: string }

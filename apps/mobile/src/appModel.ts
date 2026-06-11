@@ -29,7 +29,7 @@ import {
   type TrustedDesktopRecord
 } from "./state/sessionPersistence";
 
-const PRODUCTION_RELAY_URL = "wss://kanna-relay-402613185450.us-central1.run.app";
+const PRODUCTION_RELAY_URL = "wss://relay.kanna.build";
 
 interface ExpoPublicEnv {
   EXPO_PUBLIC_KANNA_RELAY_URL?: string;

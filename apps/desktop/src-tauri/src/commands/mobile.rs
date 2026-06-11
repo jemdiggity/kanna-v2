@@ -448,7 +448,7 @@ fn server_config_matches_runtime(config_path: &Path, desktop_id: &str) -> bool {
     .all(|line| content.contains(line))
 }
 
-const PRODUCTION_RELAY_URL: &str = "wss://kanna-relay-402613185450.us-central1.run.app";
+const PRODUCTION_RELAY_URL: &str = "wss://relay.kanna.build";
 const PRODUCTION_CLOUD_BASE_URL: &str = "https://us-central1-kanna-build.cloudfunctions.net";
 const STAGING_CLOUD_BASE_URL: &str = "https://us-central1-kanna-staging.cloudfunctions.net";
 
@@ -1544,7 +1544,7 @@ mod tests {
 
         assert_eq!(
             super::relay_url_for_mode(false),
-            "wss://kanna-relay-402613185450.us-central1.run.app"
+            "wss://relay.kanna.build"
         );
     }
 
