@@ -1,16 +1,10 @@
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
-use crate::desktop_identity::{identity_path_for_daemon_dir, load_identity};
-
 #[derive(Debug, Clone)]
 pub struct Config {
     pub relay_url: String,
     pub device_token: String,
-    pub cloud_base_url: String,
-    pub firebase_project_id: String,
-    pub firebase_auth_emulator_url: Option<String>,
-    pub firebase_firestore_emulator_host: Option<String>,
     pub daemon_dir: String,
     pub db_path: String,
     pub desktop_id: String,
@@ -26,10 +20,6 @@ pub struct Config {
 struct RawConfig {
     relay_url: String,
     device_token: String,
-    cloud_base_url: Option<String>,
-    firebase_project_id: Option<String>,
-    firebase_auth_emulator_url: Option<String>,
-    firebase_firestore_emulator_host: Option<String>,
     daemon_dir: Option<String>,
     db_path: Option<String>,
     desktop_id: Option<String>,
@@ -45,14 +35,6 @@ fn default_daemon_dir_for_root(data_root: &Path) -> String {
     kanna_runtime_defaults::default_daemon_dir_for_app_support_root(data_root)
         .to_string_lossy()
         .to_string()
-}
-
-fn default_cloud_base_url() -> String {
-    "http://127.0.0.1:5001/kanna-local/us-central1".to_string()
-}
-
-fn default_firebase_project_id() -> String {
-    "kanna-local".to_string()
 }
 
 fn default_desktop_id() -> String {
@@ -145,38 +127,15 @@ fn load_from_path(
             .to_string(),
     };
 
-    let daemon_dir = raw
-        .daemon_dir
-        .unwrap_or_else(|| default_daemon_dir_for_root(data_root));
-    let saved_identity = load_identity(&identity_path_for_daemon_dir(&daemon_dir))
-        .map_err(|e| format!("failed to load desktop identity: {e}"))?;
-    let raw_desktop_secret = raw.desktop_secret;
-    let saved_desktop_id = saved_identity
-        .as_ref()
-        .map(|identity| identity.desktop_id.clone());
-    let saved_desktop_secret = saved_identity.map(|identity| identity.desktop_secret);
-    let desktop_id = if raw_desktop_secret.is_some() {
-        raw.desktop_id.unwrap_or_else(default_desktop_id)
-    } else {
-        saved_desktop_id
-            .or(raw.desktop_id)
-            .unwrap_or_else(default_desktop_id)
-    };
-    let desktop_secret = raw_desktop_secret.or(saved_desktop_secret);
-
     Ok(Config {
         relay_url: raw.relay_url,
         device_token: raw.device_token,
-        cloud_base_url: raw.cloud_base_url.unwrap_or_else(default_cloud_base_url),
-        firebase_project_id: raw
-            .firebase_project_id
-            .unwrap_or_else(default_firebase_project_id),
-        firebase_auth_emulator_url: raw.firebase_auth_emulator_url,
-        firebase_firestore_emulator_host: raw.firebase_firestore_emulator_host,
-        daemon_dir,
+        daemon_dir: raw
+            .daemon_dir
+            .unwrap_or_else(|| default_daemon_dir_for_root(data_root)),
         db_path,
-        desktop_id,
-        desktop_secret,
+        desktop_id: raw.desktop_id.unwrap_or_else(default_desktop_id),
+        desktop_secret: raw.desktop_secret,
         desktop_name: raw.desktop_name.unwrap_or_else(default_desktop_name),
         server_version: raw.server_version,
         lan_host: raw.lan_host.unwrap_or_else(default_lan_host),
@@ -272,17 +231,13 @@ mod tests {
     }
 
     #[test]
-    fn load_from_path_reads_cloud_and_emulator_identity_fields() {
-        let root = unique_test_dir("cloud");
+    fn load_from_path_reads_desktop_credential_fields() {
+        let root = unique_test_dir("credentials");
         let config_path = root.join("server.toml");
         fs::write(
             &config_path,
             "relay_url = \"ws://127.0.0.1:18080\"\n\
              device_token = \"device-token\"\n\
-             cloud_base_url = \"http://127.0.0.1:5001/kanna-local/us-central1\"\n\
-             firebase_project_id = \"kanna-local\"\n\
-             firebase_auth_emulator_url = \"http://127.0.0.1:9099\"\n\
-             firebase_firestore_emulator_host = \"127.0.0.1:8080\"\n\
              desktop_id = \"desktop-1\"\n\
              desktop_secret = \"desktop-secret\"\n",
         )
@@ -290,85 +245,26 @@ mod tests {
 
         let config = load_from_path(&config_path, &root).unwrap();
 
-        assert_eq!(
-            config.cloud_base_url,
-            "http://127.0.0.1:5001/kanna-local/us-central1"
-        );
-        assert_eq!(config.firebase_project_id, "kanna-local");
-        assert_eq!(
-            config.firebase_auth_emulator_url.as_deref(),
-            Some("http://127.0.0.1:9099")
-        );
-        assert_eq!(
-            config.firebase_firestore_emulator_host.as_deref(),
-            Some("127.0.0.1:8080")
-        );
         assert_eq!(config.desktop_id, "desktop-1");
         assert_eq!(config.desktop_secret.as_deref(), Some("desktop-secret"));
     }
 
     #[test]
-    fn load_from_path_uses_saved_desktop_identity_when_config_secret_is_missing() {
-        let root = unique_test_dir("saved-identity");
-        let daemon_dir = root.join("daemon");
-        fs::create_dir_all(&daemon_dir).unwrap();
-        fs::write(
-            daemon_dir.join("desktop-identity.json"),
-            r#"{
-  "desktop_id": "desktop-saved",
-  "desktop_secret": "secret-saved"
-}"#,
-        )
-        .unwrap();
+    fn load_from_path_ignores_retired_cloud_bootstrap_fields() {
+        let root = unique_test_dir("retired-fields");
         let config_path = root.join("server.toml");
         fs::write(
             &config_path,
-            format!(
-                "relay_url = \"wss://relay.example\"\n\
-                 device_token = \"device-token\"\n\
-                 desktop_id = \"desktop-generated\"\n\
-                 daemon_dir = \"{}\"\n",
-                daemon_dir.display()
-            ),
+            "relay_url = \"ws://127.0.0.1:18080\"\n\
+             device_token = \"device-token\"\n\
+             cloud_base_url = \"http://127.0.0.1:5001/kanna-local/us-central1\"\n\
+             firebase_project_id = \"kanna-local\"\n\
+             desktop_id = \"desktop-1\"\n",
         )
         .unwrap();
 
         let config = load_from_path(&config_path, &root).unwrap();
 
-        assert_eq!(config.desktop_id, "desktop-saved");
-        assert_eq!(config.desktop_secret.as_deref(), Some("secret-saved"));
-    }
-
-    #[test]
-    fn load_from_path_keeps_explicit_config_credentials() {
-        let root = unique_test_dir("explicit-identity");
-        let daemon_dir = root.join("daemon");
-        fs::create_dir_all(&daemon_dir).unwrap();
-        fs::write(
-            daemon_dir.join("desktop-identity.json"),
-            r#"{
-  "desktop_id": "desktop-saved",
-  "desktop_secret": "secret-saved"
-}"#,
-        )
-        .unwrap();
-        let config_path = root.join("server.toml");
-        fs::write(
-            &config_path,
-            format!(
-                "relay_url = \"wss://relay.example\"\n\
-                 device_token = \"device-token\"\n\
-                 desktop_id = \"desktop-config\"\n\
-                 desktop_secret = \"secret-config\"\n\
-                 daemon_dir = \"{}\"\n",
-                daemon_dir.display()
-            ),
-        )
-        .unwrap();
-
-        let config = load_from_path(&config_path, &root).unwrap();
-
-        assert_eq!(config.desktop_id, "desktop-config");
-        assert_eq!(config.desktop_secret.as_deref(), Some("secret-config"));
+        assert_eq!(config.desktop_id, "desktop-1");
     }
 }

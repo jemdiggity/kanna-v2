@@ -1,5 +1,4 @@
 use crate::config::Config;
-use crate::desktop_identity::{identity_path_for_daemon_dir, save_identity, DesktopIdentity};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -93,33 +92,6 @@ pub fn create_pairing_session(config: &Config) -> Result<PairingSession, String>
     })
 }
 
-pub async fn create_cloud_pairing_session(config: &Config) -> Result<PairingSession, String> {
-    let pairing = crate::cloud_client::create_pairing_code(config).await?;
-    let identity_path = identity_path_for_daemon_dir(&config.daemon_dir);
-
-    save_identity(
-        &identity_path,
-        &DesktopIdentity {
-            desktop_id: pairing.desktop_id.clone(),
-            desktop_secret: pairing.desktop_secret,
-        },
-    )?;
-
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|e| format!("system clock error: {}", e))?
-        .as_millis() as u64;
-
-    Ok(PairingSession {
-        code: pairing.pairing_code,
-        desktop_id: pairing.desktop_id,
-        desktop_name: config.desktop_name.clone(),
-        lan_host: config.lan_host.clone(),
-        lan_port: config.lan_port,
-        expires_at_unix_ms: now_ms + 5 * 60 * 1000,
-    })
-}
-
 pub fn active_pairing_code(session: Option<&PairingSession>) -> Option<String> {
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -145,9 +117,6 @@ fn generate_pairing_code() -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use crate::config::Config;
-    use axum::{routing::post, Json, Router};
-    use serde_json::Value;
-    use std::net::SocketAddr;
     use std::path::PathBuf;
 
     #[test]
@@ -179,10 +148,6 @@ mod tests {
         let config = Config {
             relay_url: "wss://relay.example".to_string(),
             device_token: "device-token".to_string(),
-            cloud_base_url: "http://127.0.0.1:5001/kanna-local/us-central1".to_string(),
-            firebase_project_id: "kanna-local".to_string(),
-            firebase_auth_emulator_url: Some("http://127.0.0.1:9099".to_string()),
-            firebase_firestore_emulator_host: Some("127.0.0.1:8080".to_string()),
             daemon_dir: "/tmp/kanna-daemon".to_string(),
             db_path: "/tmp/kanna.db".to_string(),
             desktop_id: "desktop-1".to_string(),
@@ -202,72 +167,5 @@ mod tests {
         assert_eq!(session.desktop_name, "Studio Mac");
         assert_eq!(session.lan_port, 48120);
         assert_eq!(session.code.len(), 6);
-    }
-
-    #[tokio::test]
-    async fn create_cloud_pairing_session_uses_cloud_response_and_persists_identity() {
-        async fn handler(Json(payload): Json<Value>) -> Json<Value> {
-            assert_eq!(
-                payload,
-                serde_json::json!({
-                    "desktopDisplayName": "Studio Mac"
-                })
-            );
-
-            Json(serde_json::json!({
-                "pairingCode": "ABC123",
-                "pairingCodeId": "pairing-code-1",
-                "desktopId": "desktop-cloud",
-                "desktopSecret": "desktop-secret",
-                "desktopClaimToken": "claim-token",
-                "expiresAt": "2026-04-19T00:05:00Z"
-            }))
-        }
-
-        let app = Router::new().route("/createPairingCode", post(handler));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr: SocketAddr = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-
-        let daemon_dir =
-            std::env::temp_dir().join(format!("kanna-daemon-cloud-pairing-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&daemon_dir);
-
-        let config = Config {
-            relay_url: "wss://relay.example".to_string(),
-            device_token: "device-token".to_string(),
-            cloud_base_url: format!("http://{addr}"),
-            firebase_project_id: "kanna-local".to_string(),
-            firebase_auth_emulator_url: Some("http://127.0.0.1:9099".to_string()),
-            firebase_firestore_emulator_host: Some("127.0.0.1:8080".to_string()),
-            daemon_dir: daemon_dir.to_string_lossy().to_string(),
-            db_path: "/tmp/kanna.db".to_string(),
-            desktop_id: "desktop-local".to_string(),
-            desktop_secret: None,
-            desktop_name: "Studio Mac".to_string(),
-            server_version: Some("test-version".to_string()),
-            lan_host: "0.0.0.0".to_string(),
-            lan_port: 48120,
-            pairing_store_path: PathBuf::from("/tmp/kanna-pairings.json")
-                .to_string_lossy()
-                .to_string(),
-        };
-
-        let session = super::create_cloud_pairing_session(&config).await.unwrap();
-
-        assert_eq!(session.code, "ABC123");
-        assert_eq!(session.desktop_id, "desktop-cloud");
-        assert_eq!(session.desktop_name, "Studio Mac");
-        assert_eq!(session.lan_port, 48120);
-
-        let identity_path = daemon_dir.join("desktop-identity.json");
-        let written = std::fs::read_to_string(identity_path).unwrap();
-        assert!(written.contains("\"desktop_id\": \"desktop-cloud\""));
-        assert!(written.contains("\"desktop_secret\": \"desktop-secret\""));
-
-        server.abort();
-        let _ = std::fs::remove_dir_all(daemon_dir);
     }
 }

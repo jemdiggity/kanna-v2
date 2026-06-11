@@ -318,14 +318,8 @@ async fn search_tasks(
 async fn create_pairing_session(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<PairingSession>, (axum::http::StatusCode, String)> {
-    let session = if state.config.desktop_secret.is_some() {
-        pairing::create_pairing_session(&state.config)
-            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?
-    } else {
-        pairing::create_cloud_pairing_session(&state.config)
-            .await
-            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?
-    };
+    let session = pairing::create_pairing_session(&state.config)
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
     {
         let mut pairing_session = state.pairing_session.lock().await;
         *pairing_session = Some(session.clone());
@@ -1278,10 +1272,6 @@ fn test_router(desktop_id: &str, desktop_name: &str) -> Router {
     let config = Config {
         relay_url: "wss://relay.example".to_string(),
         device_token: "device-token".to_string(),
-        cloud_base_url: "http://127.0.0.1:5001/kanna-local/us-central1".to_string(),
-        firebase_project_id: "kanna-local".to_string(),
-        firebase_auth_emulator_url: Some("http://127.0.0.1:9099".to_string()),
-        firebase_firestore_emulator_host: Some("127.0.0.1:8080".to_string()),
         daemon_dir: "/tmp/kanna-daemon".to_string(),
         db_path: Db::test_db_path(&format!("http-api-{desktop_id}-{test_db_id}")),
         desktop_id: desktop_id.to_string(),
@@ -1305,10 +1295,6 @@ fn test_router_with_seed(desktop_id: &str, desktop_name: &str, seed: impl FnOnce
     let config = Config {
         relay_url: "wss://relay.example".to_string(),
         device_token: "device-token".to_string(),
-        cloud_base_url: "http://127.0.0.1:5001/kanna-local/us-central1".to_string(),
-        firebase_project_id: "kanna-local".to_string(),
-        firebase_auth_emulator_url: Some("http://127.0.0.1:9099".to_string()),
-        firebase_firestore_emulator_host: Some("127.0.0.1:8080".to_string()),
         daemon_dir: "/tmp/kanna-daemon".to_string(),
         db_path: Db::test_db_path(&format!("http-api-{desktop_id}-{test_db_id}")),
         desktop_id: desktop_id.to_string(),
@@ -1337,10 +1323,6 @@ fn test_state_with_seed(
     let config = Config {
         relay_url: "wss://relay.example".to_string(),
         device_token: "device-token".to_string(),
-        cloud_base_url: "http://127.0.0.1:5001/kanna-local/us-central1".to_string(),
-        firebase_project_id: "kanna-local".to_string(),
-        firebase_auth_emulator_url: Some("http://127.0.0.1:9099".to_string()),
-        firebase_firestore_emulator_host: Some("127.0.0.1:8080".to_string()),
         daemon_dir: "/tmp/kanna-daemon".to_string(),
         db_path: Db::test_db_path(&format!("http-invoke-{desktop_id}-{test_db_id}")),
         desktop_id: desktop_id.to_string(),
@@ -1369,10 +1351,6 @@ fn test_state_with_task_input_sender(
     let config = Config {
         relay_url: "wss://relay.example".to_string(),
         device_token: "device-token".to_string(),
-        cloud_base_url: "http://127.0.0.1:5001/kanna-local/us-central1".to_string(),
-        firebase_project_id: "kanna-local".to_string(),
-        firebase_auth_emulator_url: Some("http://127.0.0.1:9099".to_string()),
-        firebase_firestore_emulator_host: Some("127.0.0.1:8080".to_string()),
         daemon_dir: "/tmp/kanna-daemon".to_string(),
         db_path: Db::test_db_path(&format!("http-invoke-input-{desktop_id}-{test_db_id}")),
         desktop_id: desktop_id.to_string(),
@@ -1402,10 +1380,6 @@ fn test_router_with_task_creator(
     let config = Config {
         relay_url: "wss://relay.example".to_string(),
         device_token: "device-token".to_string(),
-        cloud_base_url: "http://127.0.0.1:5001/kanna-local/us-central1".to_string(),
-        firebase_project_id: "kanna-local".to_string(),
-        firebase_auth_emulator_url: Some("http://127.0.0.1:9099".to_string()),
-        firebase_firestore_emulator_host: Some("127.0.0.1:8080".to_string()),
         daemon_dir: "/tmp/kanna-daemon".to_string(),
         db_path: Db::test_db_path(&format!("http-api-{desktop_id}-{test_db_id}")),
         desktop_id: desktop_id.to_string(),
@@ -1433,10 +1407,6 @@ fn test_router_with_merge_agent_runner(
     let config = Config {
         relay_url: "wss://relay.example".to_string(),
         device_token: "device-token".to_string(),
-        cloud_base_url: "http://127.0.0.1:5001/kanna-local/us-central1".to_string(),
-        firebase_project_id: "kanna-local".to_string(),
-        firebase_auth_emulator_url: Some("http://127.0.0.1:9099".to_string()),
-        firebase_firestore_emulator_host: Some("127.0.0.1:8080".to_string()),
         daemon_dir: "/tmp/kanna-daemon".to_string(),
         db_path: Db::test_db_path(&format!("http-api-{desktop_id}-{test_db_id}")),
         desktop_id: desktop_id.to_string(),
@@ -1467,10 +1437,6 @@ fn test_router_with_task_input_sender(
     let config = Config {
         relay_url: "wss://relay.example".to_string(),
         device_token: "device-token".to_string(),
-        cloud_base_url: "http://127.0.0.1:5001/kanna-local/us-central1".to_string(),
-        firebase_project_id: "kanna-local".to_string(),
-        firebase_auth_emulator_url: Some("http://127.0.0.1:9099".to_string()),
-        firebase_firestore_emulator_host: Some("127.0.0.1:8080".to_string()),
         daemon_dir: "/tmp/kanna-daemon".to_string(),
         db_path: Db::test_db_path(&format!("http-api-{desktop_id}-{test_db_id}")),
         desktop_id: desktop_id.to_string(),
@@ -1501,10 +1467,6 @@ fn test_router_with_task_closer(
     let config = Config {
         relay_url: "wss://relay.example".to_string(),
         device_token: "device-token".to_string(),
-        cloud_base_url: "http://127.0.0.1:5001/kanna-local/us-central1".to_string(),
-        firebase_project_id: "kanna-local".to_string(),
-        firebase_auth_emulator_url: Some("http://127.0.0.1:9099".to_string()),
-        firebase_firestore_emulator_host: Some("127.0.0.1:8080".to_string()),
         daemon_dir: "/tmp/kanna-daemon".to_string(),
         db_path: Db::test_db_path(&format!("http-api-{desktop_id}-{test_db_id}")),
         desktop_id: desktop_id.to_string(),
@@ -1532,10 +1494,6 @@ fn test_router_with_stage_advancer(
     let config = Config {
         relay_url: "wss://relay.example".to_string(),
         device_token: "device-token".to_string(),
-        cloud_base_url: "http://127.0.0.1:5001/kanna-local/us-central1".to_string(),
-        firebase_project_id: "kanna-local".to_string(),
-        firebase_auth_emulator_url: Some("http://127.0.0.1:9099".to_string()),
-        firebase_firestore_emulator_host: Some("127.0.0.1:8080".to_string()),
         daemon_dir: "/tmp/kanna-daemon".to_string(),
         db_path: Db::test_db_path(&format!("http-api-{desktop_id}-{test_db_id}")),
         desktop_id: desktop_id.to_string(),
@@ -1566,10 +1524,6 @@ fn test_router_with_stage_completer(
     let config = Config {
         relay_url: "wss://relay.example".to_string(),
         device_token: "device-token".to_string(),
-        cloud_base_url: "http://127.0.0.1:5001/kanna-local/us-central1".to_string(),
-        firebase_project_id: "kanna-local".to_string(),
-        firebase_auth_emulator_url: Some("http://127.0.0.1:9099".to_string()),
-        firebase_firestore_emulator_host: Some("127.0.0.1:8080".to_string()),
         daemon_dir: "/tmp/kanna-daemon".to_string(),
         db_path: Db::test_db_path(&format!("http-api-{desktop_id}-{test_db_id}")),
         desktop_id: desktop_id.to_string(),
@@ -1600,10 +1554,6 @@ fn test_router_with_revision_requester(
     let config = Config {
         relay_url: "wss://relay.example".to_string(),
         device_token: "device-token".to_string(),
-        cloud_base_url: "http://127.0.0.1:5001/kanna-local/us-central1".to_string(),
-        firebase_project_id: "kanna-local".to_string(),
-        firebase_auth_emulator_url: Some("http://127.0.0.1:9099".to_string()),
-        firebase_firestore_emulator_host: Some("127.0.0.1:8080".to_string()),
         daemon_dir: "/tmp/kanna-daemon".to_string(),
         db_path: Db::test_db_path(&format!("http-api-{desktop_id}-{test_db_id}")),
         desktop_id: desktop_id.to_string(),
@@ -1634,10 +1584,6 @@ fn test_router_with_terminal_streamer(
     let config = Config {
         relay_url: "wss://relay.example".to_string(),
         device_token: "device-token".to_string(),
-        cloud_base_url: "http://127.0.0.1:5001/kanna-local/us-central1".to_string(),
-        firebase_project_id: "kanna-local".to_string(),
-        firebase_auth_emulator_url: Some("http://127.0.0.1:9099".to_string()),
-        firebase_firestore_emulator_host: Some("127.0.0.1:8080".to_string()),
         daemon_dir: "/tmp/kanna-daemon".to_string(),
         db_path: Db::test_db_path(&format!("http-api-{desktop_id}-{test_db_id}")),
         desktop_id: desktop_id.to_string(),
@@ -1662,10 +1608,7 @@ mod tests {
     use crate::mobile_api::{CreateTaskResponse, MobileServerStatus, TaskActionResponse};
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
-    use axum::{routing::post, Json, Router};
     use serde_json::from_slice;
-    use serde_json::Value;
-    use std::net::SocketAddr;
     use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::sync::Arc;
@@ -2014,52 +1957,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_pairing_session_route_bootstraps_from_cloud_when_identity_missing() {
-        async fn handler(Json(payload): Json<Value>) -> Json<Value> {
-            assert_eq!(
-                payload,
-                serde_json::json!({
-                    "desktopDisplayName": "Studio Mac"
-                })
-            );
-
-            Json(serde_json::json!({
-                "pairingCode": "ABC123",
-                "pairingCodeId": "pairing-code-1",
-                "desktopId": "desktop-cloud",
-                "desktopSecret": "desktop-secret",
-                "desktopClaimToken": "claim-token",
-                "expiresAt": "2026-04-19T00:05:00Z"
-            }))
-        }
-
-        let cloud_app = Router::new().route("/createPairingCode", post(handler));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr: SocketAddr = listener.local_addr().unwrap();
-        let cloud_server = tokio::spawn(async move {
-            axum::serve(listener, cloud_app).await.unwrap();
-        });
-
+    async fn create_pairing_session_route_uses_local_identity_without_desktop_secret() {
         let daemon_dir =
-            std::env::temp_dir().join(format!("kanna-http-cloud-pairing-{}", std::process::id()));
+            std::env::temp_dir().join(format!("kanna-http-local-pairing-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&daemon_dir);
 
         let config = Config {
             relay_url: "wss://relay.example".to_string(),
             device_token: "device-token".to_string(),
-            cloud_base_url: format!("http://{addr}"),
-            firebase_project_id: "kanna-local".to_string(),
-            firebase_auth_emulator_url: Some("http://127.0.0.1:9099".to_string()),
-            firebase_firestore_emulator_host: Some("127.0.0.1:8080".to_string()),
             daemon_dir: daemon_dir.to_string_lossy().to_string(),
-            db_path: crate::db::Db::test_db_path("http-cloud-pairing"),
+            db_path: crate::db::Db::test_db_path("http-local-pairing"),
             desktop_id: "desktop-local".to_string(),
             desktop_secret: None,
             desktop_name: "Studio Mac".to_string(),
             server_version: Some("test-version".to_string()),
             lan_host: "127.0.0.1".to_string(),
             lan_port: 48120,
-            pairing_store_path: PathBuf::from("/tmp/kanna-pairings-http-cloud.json")
+            pairing_store_path: PathBuf::from("/tmp/kanna-pairings-http-local.json")
                 .to_string_lossy()
                 .to_string(),
         };
@@ -2080,15 +1994,10 @@ mod tests {
             .await
             .unwrap();
         let pairing: crate::pairing::PairingSession = from_slice(&body).unwrap();
-        assert_eq!(pairing.code, "ABC123");
-        assert_eq!(pairing.desktop_id, "desktop-cloud");
+        assert_eq!(pairing.desktop_id, "desktop-local");
+        assert_eq!(pairing.desktop_name, "Studio Mac");
+        assert_eq!(pairing.code.len(), 6);
 
-        let identity_path = daemon_dir.join("desktop-identity.json");
-        let identity = std::fs::read_to_string(identity_path).unwrap();
-        assert!(identity.contains("\"desktop_id\": \"desktop-cloud\""));
-        assert!(identity.contains("\"desktop_secret\": \"desktop-secret\""));
-
-        cloud_server.abort();
         let _ = std::fs::remove_dir_all(daemon_dir);
     }
 
@@ -2196,10 +2105,6 @@ mod tests {
         let config = Config {
             relay_url: "wss://relay.example".to_string(),
             device_token: "device-token".to_string(),
-            cloud_base_url: "http://127.0.0.1:5001/kanna-local/us-central1".to_string(),
-            firebase_project_id: "kanna-local".to_string(),
-            firebase_auth_emulator_url: Some("http://127.0.0.1:9099".to_string()),
-            firebase_firestore_emulator_host: Some("127.0.0.1:8080".to_string()),
             daemon_dir: daemon_dir.to_string_lossy().to_string(),
             db_path: Db::test_db_path(&format!("http-api-default-provider-{unique}")),
             desktop_id: "desktop-1".to_string(),
@@ -2362,10 +2267,6 @@ mod tests {
         let config = Config {
             relay_url: "wss://relay.example".to_string(),
             device_token: "device-token".to_string(),
-            cloud_base_url: "http://127.0.0.1:5001/kanna-local/us-central1".to_string(),
-            firebase_project_id: "kanna-local".to_string(),
-            firebase_auth_emulator_url: Some("http://127.0.0.1:9099".to_string()),
-            firebase_firestore_emulator_host: Some("127.0.0.1:8080".to_string()),
             daemon_dir: daemon_dir.to_string_lossy().to_string(),
             db_path: db_path.clone(),
             desktop_id: "desktop-1".to_string(),
@@ -2611,10 +2512,6 @@ mod tests {
         let config = Config {
             relay_url: "wss://relay.example".to_string(),
             device_token: "device-token".to_string(),
-            cloud_base_url: "http://127.0.0.1:5001/kanna-local/us-central1".to_string(),
-            firebase_project_id: "kanna-local".to_string(),
-            firebase_auth_emulator_url: Some("http://127.0.0.1:9099".to_string()),
-            firebase_firestore_emulator_host: Some("127.0.0.1:8080".to_string()),
             daemon_dir: daemon_dir.to_string_lossy().to_string(),
             db_path: db_path.clone(),
             desktop_id: "desktop-1".to_string(),
@@ -2918,10 +2815,6 @@ mod tests {
         let config = Config {
             relay_url: "wss://relay.example".to_string(),
             device_token: "device-token".to_string(),
-            cloud_base_url: "http://127.0.0.1:5001/kanna-local/us-central1".to_string(),
-            firebase_project_id: "kanna-local".to_string(),
-            firebase_auth_emulator_url: Some("http://127.0.0.1:9099".to_string()),
-            firebase_firestore_emulator_host: Some("127.0.0.1:8080".to_string()),
             daemon_dir: daemon_dir.to_string_lossy().to_string(),
             db_path: Db::test_db_path(&format!("http-api-revision-branch-{unique}")),
             desktop_id: "desktop-1".to_string(),
@@ -3123,10 +3016,6 @@ mod tests {
         let config = Config {
             relay_url: "wss://relay.example".to_string(),
             device_token: "device-token".to_string(),
-            cloud_base_url: "http://127.0.0.1:5001/kanna-local/us-central1".to_string(),
-            firebase_project_id: "kanna-local".to_string(),
-            firebase_auth_emulator_url: Some("http://127.0.0.1:9099".to_string()),
-            firebase_firestore_emulator_host: Some("127.0.0.1:8080".to_string()),
             daemon_dir: daemon_dir.to_string_lossy().to_string(),
             db_path: Db::test_db_path(&format!("http-api-revision-title-{unique}")),
             desktop_id: "desktop-1".to_string(),
@@ -3362,10 +3251,6 @@ mod tests {
         let config = crate::config::Config {
             relay_url: "wss://relay.example".to_string(),
             device_token: "device-token".to_string(),
-            cloud_base_url: "http://127.0.0.1:5001/kanna-local/us-central1".to_string(),
-            firebase_project_id: "kanna-local".to_string(),
-            firebase_auth_emulator_url: Some("http://127.0.0.1:9099".to_string()),
-            firebase_firestore_emulator_host: Some("127.0.0.1:8080".to_string()),
             daemon_dir: daemon_dir.to_string_lossy().to_string(),
             db_path: crate::db::Db::test_db_path(&format!("http-api-snapshot-race-{test_id}")),
             desktop_id: "desktop-1".to_string(),
