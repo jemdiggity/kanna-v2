@@ -65,34 +65,14 @@ export const PRODUCTION_FIREBASE_CLIENT_ENV: Readonly<Record<string, string>> = 
 export const PRODUCTION_RELAY_URL = "wss://relay.kanna.build";
 
 /**
- * Env vars that point the app at local emulators or a local relay. They leak
- * into dev sessions from the surrounding environment (e.g. a Kanna agent
- * session exports this worktree's emulator ports), and the desktop app treats
- * their presence as "use the emulator" — so a production-cloud session must
- * drop them or Firebase auth dials a 127.0.0.1 emulator that is not running.
+ * Point an environment at the production cloud. KANNA_CLOUD_ENV is the
+ * explicit selector the app honors — when it names a remote cloud, the app
+ * itself ignores any emulator pointer env vars that leak in from dev
+ * workspaces (see desktopFirebaseConfig.ts). The Firebase client values and
+ * relay URL fill in without overriding explicit values.
  */
-const LOCAL_CLOUD_ENV_VARS = [
-  "KANNA_FIREBASE_AUTH_PORT",
-  "KANNA_FIREBASE_FIRESTORE_PORT",
-  "KANNA_CLOUD_FUNCTIONS_ENDPOINT",
-  "KANNA_RELAY_PORT",
-] as const;
-
-/**
- * Point an environment at the production cloud: fill the public Firebase web
- * client config and relay URL without overriding explicit values, and strip
- * local emulator pointers.
- */
-export function stripLocalCloudEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const stripped: NodeJS.ProcessEnv = { ...env };
-  for (const key of LOCAL_CLOUD_ENV_VARS) {
-    delete stripped[key];
-  }
-  return stripped;
-}
-
 export function applyProductionCloudEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const merged = stripLocalCloudEnv(env);
+  const merged: NodeJS.ProcessEnv = { ...env, KANNA_CLOUD_ENV: "production" };
   for (const [key, value] of Object.entries(PRODUCTION_FIREBASE_CLIENT_ENV)) {
     if (!merged[key]?.trim()) merged[key] = value;
   }

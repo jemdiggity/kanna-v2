@@ -72,17 +72,14 @@ describe("cloud test credentials", () => {
     expect(defaulted.KANNA_RELAY_URL).toBe("wss://relay.kanna.build");
   });
 
-  it("strips local emulator pointers so the app does not dial a missing emulator", () => {
+  it("selects the production cloud via KANNA_CLOUD_ENV (the app ignores emulator env under it)", () => {
     const applied = applyProductionCloudEnv({
-      KANNA_FIREBASE_AUTH_PORT: "9394",
-      KANNA_FIREBASE_FIRESTORE_PORT: "8389",
-      KANNA_CLOUD_FUNCTIONS_ENDPOINT: "http://127.0.0.1:5152/createPairingCode",
-      KANNA_RELAY_PORT: "9393",
+      KANNA_FIREBASE_AUTH_PORT: "9099",
+      KANNA_CLOUD_ENV: "local",
     });
-    expect(applied.KANNA_FIREBASE_AUTH_PORT).toBeUndefined();
-    expect(applied.KANNA_FIREBASE_FIRESTORE_PORT).toBeUndefined();
-    expect(applied.KANNA_CLOUD_FUNCTIONS_ENDPOINT).toBeUndefined();
-    expect(applied.KANNA_RELAY_PORT).toBeUndefined();
-    expect(applied.KANNA_RELAY_URL).toBe("wss://relay.kanna.build");
+    expect(applied.KANNA_CLOUD_ENV).toBe("production");
+    // Emulator pointers stay in the env; the app's KANNA_CLOUD_ENV gate is
+    // what makes them inert (desktopFirebaseConfig.ts).
+    expect(applied.KANNA_FIREBASE_AUTH_PORT).toBe("9099");
   });
 });

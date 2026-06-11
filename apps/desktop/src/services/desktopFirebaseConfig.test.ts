@@ -151,4 +151,58 @@ describe("resolveDesktopFirebaseConfig", () => {
 
     expect(config.functionsEndpoint).toBe("https://runtime.example/createPairingCode");
   });
+
+  it.each(["production", "staging", " Production "])(
+    "ignores emulator pointers when KANNA_CLOUD_ENV is %s",
+    async (cloudEnv) => {
+      const config = await resolveDesktopFirebaseConfig({
+        dev: true,
+        readEnv: async (name) => ({
+          KANNA_CLOUD_ENV: cloudEnv,
+          KANNA_FIREBASE_AUTH_PORT: "9099",
+          KANNA_FIREBASE_FIRESTORE_PORT: "8080",
+          KANNA_CLOUD_FUNCTIONS_ENDPOINT: "http://127.0.0.1:5001/legacy",
+        })[name] ?? "",
+      });
+
+      expect(config.authEmulator).toBeNull();
+      expect(config.firestoreEmulator).toBeNull();
+      expect(config.functionsEndpoint).toBeNull();
+    },
+  );
+
+  it("falls back to the production app config in dev when KANNA_CLOUD_ENV is production", async () => {
+    const config = await resolveDesktopFirebaseConfig({
+      dev: true,
+      readEnv: async (name) => (name === "KANNA_CLOUD_ENV" ? "production" : ""),
+    });
+
+    expect(config.app).toMatchObject({ projectId: "kanna-build" });
+  });
+
+  it("prefers runtime app config overrides under a remote cloud env", async () => {
+    const config = await resolveDesktopFirebaseConfig({
+      dev: true,
+      readEnv: async (name) => ({
+        KANNA_CLOUD_ENV: "staging",
+        KANNA_FIREBASE_API_KEY: "staging-key",
+        KANNA_FIREBASE_PROJECT_ID: "kanna-staging",
+        KANNA_FIREBASE_APP_ID: "staging-app-id",
+      })[name] ?? "",
+    });
+
+    expect(config.app).toMatchObject({ projectId: "kanna-staging" });
+  });
+
+  it("still configures emulators when KANNA_CLOUD_ENV is unset or local", async () => {
+    const config = await resolveDesktopFirebaseConfig({
+      dev: true,
+      readEnv: async (name) => ({
+        KANNA_CLOUD_ENV: "local",
+        KANNA_FIREBASE_AUTH_PORT: "19100",
+      })[name] ?? "",
+    });
+
+    expect(config.authEmulator).toMatchObject({ port: 19100 });
+  });
 });

@@ -18,7 +18,6 @@ import {
   applyCloudTestCredentialEnv,
   applyProductionCloudEnv,
   readCloudTestCredentials,
-  stripLocalCloudEnv,
 } from "../runtime/cloud-creds";
 import { buildLanLabPlan, parseLanLabInventory } from "../runtime/lan-lab";
 import { buildLanLabScenarioCommand } from "../runtime/lan-lab-runner";
@@ -230,13 +229,9 @@ async function executeDevUp(input: DevUpInput): Promise<TaskResult> {
 
   const firebaseConfigPath = writeFirebaseEmulatorConfig(context.repoRoot, context.ports);
   writeTauriLocalConfig(context.repoRoot, context.ports.KANNA_DEV_PORT);
-  // Context resolution injects every resolved port (including Firebase
-  // emulator defaults) into the env; a production-cloud session must not
-  // hand those to the app or it dials a missing local emulator.
-  const planEnv = input.cloud === "production" ? stripLocalCloudEnv(context.env) : context.env;
   const plan = buildDevPlan({
     repoRoot: context.repoRoot,
-    env: planEnv,
+    env: context.env,
     mobile: input.mobile,
     emulators: input.emulators,
     firebaseConfigPath,

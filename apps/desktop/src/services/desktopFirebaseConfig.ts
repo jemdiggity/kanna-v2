@@ -30,21 +30,33 @@ export async function resolveDesktopFirebaseConfig({
   readEnv,
   dev,
 }: ResolveDesktopFirebaseConfigOptions): Promise<DesktopFirebaseConfig> {
-  const [runtimeApp, cloudEnv, authPort, firestorePort, runtimeFunctionsEndpoint] = await Promise.all([
-    readRuntimeAppConfig(readEnv),
+  const [cloudEnv, runtimeApp, authPort, firestorePort, runtimeFunctionsEndpoint] = await Promise.all([
     readCloudEnv(readEnv),
+    readRuntimeAppConfig(readEnv),
     readEnv("KANNA_FIREBASE_AUTH_PORT").catch(() => ""),
     readEnv("KANNA_FIREBASE_FIRESTORE_PORT").catch(() => ""),
     readEnv("KANNA_CLOUD_FUNCTIONS_ENDPOINT").catch(() => ""),
   ]);
+
+  // KANNA_CLOUD_ENV is the explicit cloud selector. When it names a remote
+  // cloud, emulator pointer env vars are ignored entirely — dev workspaces
+  // export emulator ports as a matter of course, and their mere presence must
+  // not drag a production/staging session onto a local emulator.
   const app =
     runtimeApp ?? readProfileAppConfig(cloudEnv, dev) ?? readBuildTimeAppConfig(dev);
-  const useEmulators = !isRemoteCloudEnv(cloudEnv);
+  if (isRemoteCloudEnv(cloudEnv)) {
+    return {
+      app,
+      authEmulator: null,
+      firestoreEmulator: null,
+      functionsEndpoint: null,
+    };
+  }
 
   return {
     app,
-    authEmulator: useEmulators ? parseAuthEmulatorPort(authPort) : null,
-    firestoreEmulator: useEmulators ? parseAuthEmulatorPort(firestorePort) : null,
+    authEmulator: parseAuthEmulatorPort(authPort),
+    firestoreEmulator: parseAuthEmulatorPort(firestorePort),
     functionsEndpoint: parseFunctionsEndpoint(runtimeFunctionsEndpoint),
   };
 }
@@ -52,7 +64,7 @@ export async function resolveDesktopFirebaseConfig({
 async function readCloudEnv(
   readEnv: ResolveDesktopFirebaseConfigOptions["readEnv"],
 ): Promise<string | undefined> {
-  return normalizeEnvValue(await readEnv("KANNA_CLOUD_ENV").catch(() => ""));
+  return normalizeEnvValue(await readEnv("KANNA_CLOUD_ENV").catch(() => ""))?.toLowerCase();
 }
 
 function readProfileAppConfig(
