@@ -68,6 +68,26 @@ export function createInitApi(
     });
   }
 
+  async function preserveExplicitSelectionAfterExternalRefresh(
+    selectedItemIdBeforeRefresh: string | null,
+  ): Promise<void> {
+    if (!selectedItemIdBeforeRefresh) return;
+
+    const selectedItem = context.state.items.value.find((candidate) => candidate.id === selectedItemIdBeforeRefresh);
+    if (isVisibleItemInSelectedRepo(selectedItem)) return;
+
+    const selectedRepoId = context.state.selectedRepoId.value;
+    context.state.selectedItemId.value = null;
+    if (selectedRepoId && context.state.lastSelectedItemByRepo.value[selectedRepoId] === selectedItemIdBeforeRefresh) {
+      const { [selectedRepoId]: _removed, ...remaining } = context.state.lastSelectedItemByRepo.value;
+      context.state.lastSelectedItemByRepo.value = remaining;
+    }
+    await context.services.windowWorkspace?.persistSelection({
+      selectedRepoId,
+      selectedItemId: null,
+    });
+  }
+
   function readSessionId(event: unknown): string | null {
     const payload = (event as { payload?: { session_id?: string } }).payload ?? (event as { session_id?: string });
     return typeof payload.session_id === "string" ? payload.session_id : null;
@@ -206,8 +226,9 @@ export function createInitApi(
     }
 
     await context.services.windowWorkspace?.onSharedInvalidation(async () => {
+      const selectedItemIdBeforeRefresh = context.state.selectedItemId.value;
       await requireService(context.services.reloadSnapshot, "reloadSnapshot")();
-      requireService(context.services.reconcileSelection, "reconcileSelection")();
+      await preserveExplicitSelectionAfterExternalRefresh(selectedItemIdBeforeRefresh);
     });
 
     listen("session_created", async (event: unknown) => {
