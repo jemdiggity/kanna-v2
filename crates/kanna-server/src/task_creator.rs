@@ -2714,6 +2714,7 @@ mod tests {
                 model: None,
                 permission_mode: None,
                 allowed_tools: None,
+                blocker_task_ids: None,
             },
         );
         std::env::set_current_dir(original_cwd).unwrap();
@@ -2809,6 +2810,7 @@ mod tests {
                 model: None,
                 permission_mode: None,
                 allowed_tools: None,
+                blocker_task_ids: None,
             },
         )
         .unwrap();
@@ -2832,6 +2834,7 @@ mod tests {
                 model: None,
                 permission_mode: None,
                 allowed_tools: None,
+                blocker_task_ids: None,
             },
         )
         .unwrap();

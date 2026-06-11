@@ -117,7 +117,8 @@ fn mcp_tools() -> Value {
                     "agent_provider": { "type": "string" },
                     "model": { "type": "string" },
                     "permission_mode": { "type": "string" },
-                    "allowed_tools": { "type": "array", "items": { "type": "string" } }
+                    "allowed_tools": { "type": "array", "items": { "type": "string" } },
+                    "blocker_task_ids": { "type": "array", "items": { "type": "string" } }
                 },
                 "required": ["repo_id", "prompt"]
             }
@@ -146,6 +147,27 @@ fn mcp_tools() -> Value {
         {
             "name": "kanna_advance_stage",
             "description": "Advance a Kanna task to the next pipeline stage.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "task_id": { "type": "string" } },
+                "required": ["task_id"]
+            }
+        },
+        {
+            "name": "kanna_block_task",
+            "description": "Mark a Kanna task as blocked by one or more tasks.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string" },
+                    "blocker_task_ids": { "type": "array", "items": { "type": "string" } }
+                },
+                "required": ["task_id", "blocker_task_ids"]
+            }
+        },
+        {
+            "name": "kanna_unblock_task",
+            "description": "Remove all blockers from a Kanna task.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "task_id": { "type": "string" } },
@@ -295,6 +317,7 @@ fn build_tool_request(name: &str, args: Value) -> Result<ToolRequest, String> {
         }
         "kanna_create_task" => {
             let allowed_tools = optional_string_array(&args, "allowed_tools")?;
+            let blocker_task_ids = optional_string_array(&args, "blocker_task_ids")?;
             let mut body = serde_json::Map::new();
             body.insert(
                 "repoId".to_string(),
@@ -322,6 +345,12 @@ fn build_tool_request(name: &str, args: Value) -> Result<ToolRequest, String> {
                     Value::Array(values.into_iter().map(Value::String).collect()),
                 );
             }
+            if let Some(values) = blocker_task_ids {
+                body.insert(
+                    "blockerTaskIds".to_string(),
+                    Value::Array(values.into_iter().map(Value::String).collect()),
+                );
+            }
             Ok(ToolRequest::PostJson {
                 path: "/v1/tasks".to_string(),
                 body: Value::Object(body),
@@ -346,6 +375,22 @@ fn build_tool_request(name: &str, args: Value) -> Result<ToolRequest, String> {
             let task_id = encode_path_segment(&required_string(&args, "task_id")?);
             Ok(ToolRequest::PostJson {
                 path: format!("/v1/tasks/{task_id}/actions/advance-stage"),
+                body: serde_json::json!({}),
+            })
+        }
+        "kanna_block_task" => {
+            let task_id = encode_path_segment(&required_string(&args, "task_id")?);
+            let blocker_task_ids = optional_string_array(&args, "blocker_task_ids")?
+                .ok_or_else(|| "missing required argument: blocker_task_ids".to_string())?;
+            Ok(ToolRequest::PostJson {
+                path: format!("/v1/tasks/{task_id}/actions/block"),
+                body: serde_json::json!({ "blockerTaskIds": blocker_task_ids }),
+            })
+        }
+        "kanna_unblock_task" => {
+            let task_id = encode_path_segment(&required_string(&args, "task_id")?);
+            Ok(ToolRequest::PostJson {
+                path: format!("/v1/tasks/{task_id}/actions/unblock"),
                 body: serde_json::json!({}),
             })
         }
@@ -537,6 +582,8 @@ mod tests {
                 "kanna_send_task_input",
                 "kanna_close_task",
                 "kanna_advance_stage",
+                "kanna_block_task",
+                "kanna_unblock_task",
                 "kanna_complete_stage",
                 "kanna_request_revision",
             ]
@@ -604,6 +651,43 @@ mod route_tests {
             build_tool_request("kanna_close_task", json!({ "task_id": "task-1" })).unwrap(),
             ToolRequest::PostJson {
                 path: "/v1/tasks/task-1/actions/close".to_string(),
+                body: json!({})
+            }
+        );
+        assert_eq!(
+            build_tool_request(
+                "kanna_create_task",
+                json!({
+                    "repo_id": "repo-1",
+                    "prompt": "Blocked work",
+                    "blocker_task_ids": ["blocker-1", "blocker-2"]
+                })
+            )
+            .unwrap(),
+            ToolRequest::PostJson {
+                path: "/v1/tasks".to_string(),
+                body: json!({
+                    "repoId": "repo-1",
+                    "prompt": "Blocked work",
+                    "blockerTaskIds": ["blocker-1", "blocker-2"]
+                })
+            }
+        );
+        assert_eq!(
+            build_tool_request(
+                "kanna_block_task",
+                json!({ "task_id": "task-1", "blocker_task_ids": ["blocker-1"] })
+            )
+            .unwrap(),
+            ToolRequest::PostJson {
+                path: "/v1/tasks/task-1/actions/block".to_string(),
+                body: json!({ "blockerTaskIds": ["blocker-1"] })
+            }
+        );
+        assert_eq!(
+            build_tool_request("kanna_unblock_task", json!({ "task_id": "task-1" })).unwrap(),
+            ToolRequest::PostJson {
+                path: "/v1/tasks/task-1/actions/unblock".to_string(),
                 body: json!({})
             }
         );
