@@ -99,13 +99,6 @@ export async function deployFirebaseCloud(input: CloudDeployInput & { relay?: bo
 
   const projectId = resolveFirebaseProject(input.repoRoot, input.env, input.environment);
   await assertCleanGitWorktree(input.repoRoot, input.runner);
-  const build = await input.runner.run("pnpm", ["--dir", "services/firebase-functions", "build"], {
-    cwd: input.repoRoot,
-    env: input.env
-  });
-  if (build.exitCode !== 0) {
-    throw new Error(build.stderr || build.stdout || "Firebase functions build failed.");
-  }
 
   const deploy = await input.runner.run(
     "pnpm",
@@ -114,7 +107,7 @@ export async function deployFirebaseCloud(input: CloudDeployInput & { relay?: bo
       "firebase",
       "deploy",
       "--only",
-      "functions,firestore:rules",
+      "firestore:rules",
       "--project",
       projectId,
       "--force"

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type {
-  CreatePairingCodeResponse,
   DesktopRecord,
+  PairingResponse,
   PairingCodeRecord,
 } from "./types.js";
 
@@ -17,7 +17,7 @@ export interface BuildPairingArtifactsInput {
 }
 
 export interface PairingArtifacts {
-  response: CreatePairingCodeResponse;
+  response: PairingResponse;
   pairingRecord: PairingCodeRecord;
   desktopRecord: DesktopRecord;
 }

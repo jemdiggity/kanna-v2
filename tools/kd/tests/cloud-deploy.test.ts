@@ -82,7 +82,7 @@ describe("cloud deploy runtime", () => {
     ).rejects.toThrow("cloud deploy requires staging or production");
   });
 
-  it("builds functions before deploying Firebase cloud services", async () => {
+  it("deploys Firestore rules without redeploying Firebase functions", async () => {
     const repoRoot = mkdtempSync(join(tmpdir(), "kd-cloud-deploy-"));
     mkdirSync(join(repoRoot, "services/firebase-functions"), { recursive: true });
     const calls: Array<{ command: string; args: string[]; cwd?: string; streamOutput?: boolean }> = [];
@@ -115,17 +115,12 @@ describe("cloud deploy runtime", () => {
         },
         {
           command: "pnpm",
-          args: ["--dir", "services/firebase-functions", "build"],
-          cwd: repoRoot
-        },
-        {
-          command: "pnpm",
           args: [
             "exec",
             "firebase",
             "deploy",
             "--only",
-            "functions,firestore:rules",
+            "firestore:rules",
             "--project",
             "prod-project",
             "--force"
