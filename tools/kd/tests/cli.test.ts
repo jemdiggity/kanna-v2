@@ -127,6 +127,30 @@ describe("kd CLI", () => {
     ).toThrow("--emulators and --firebase-env-from cannot be used together");
   });
 
+  it("parses dev up against the production cloud", () => {
+    expect(parseCliArgs(["dev", "up", "--cloud", "production"])).toEqual({
+      taskId: "dev.up",
+      input: {
+        mobile: false,
+        emulators: false,
+        seed: false,
+        attach: false,
+        deleteDb: false,
+        killDaemon: false,
+        cloud: "production"
+      }
+    });
+  });
+
+  it("rejects unsupported cloud targets and emulator combinations", () => {
+    expect(() => parseCliArgs(["dev", "up", "--cloud", "staging"])).toThrow(
+      "--cloud only supports 'production'"
+    );
+    expect(() => parseCliArgs(["dev", "up", "--cloud", "production", "--emulators"])).toThrow(
+      "--cloud cannot be combined with --emulators or --firebase-env-from"
+    );
+  });
+
   it("registers the dev status task", () => {
     expect(getTaskDefinition("dev.status").description).toBe("Show Kanna dev environment status.");
   });
