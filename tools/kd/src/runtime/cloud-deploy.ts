@@ -145,6 +145,11 @@ export async function deployRelayCloud(input: CloudDeployInput): Promise<RelayDe
   const zone = input.env.KANNA_RELAY_VM_ZONE?.trim() || "us-central1-a";
   const hostname = input.env.KANNA_RELAY_HOSTNAME?.trim() || "relay.kanna.build";
   const image = `gcr.io/${projectId}/kanna-relay`;
+  if (projectId !== "kanna-build") {
+    throw new Error(
+      `Relay VM compose stack pins gcr.io/kanna-build/kanna-relay; deploying for project ${projectId} would run a stale image. Update services/relay/deploy/compose.yaml first.`
+    );
+  }
 
   const build = await input.runner.run("pnpm", ["--dir", "services/relay", "build"], {
     cwd: input.repoRoot,

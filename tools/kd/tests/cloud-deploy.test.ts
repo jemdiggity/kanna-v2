@@ -196,16 +196,16 @@ describe("cloud deploy runtime", () => {
     try {
       const result = await deployRelayCloud({
         repoRoot,
-        env: { KANNA_FIREBASE_PRODUCTION_PROJECT: "prod-project" },
+        env: { KANNA_FIREBASE_PRODUCTION_PROJECT: "kanna-build" },
         runner,
         environment: "production"
       });
 
       expect(result).toEqual({
-        projectId: "prod-project",
+        projectId: "kanna-build",
         vmName: "kanna-relay-vm",
         zone: "us-central1-a",
-        image: "gcr.io/prod-project/kanna-relay",
+        image: "gcr.io/kanna-build/kanna-relay",
         relayUrl: "wss://relay.kanna.build"
       });
       expect(calls).toEqual([
@@ -221,11 +221,11 @@ describe("cloud deploy runtime", () => {
             "submit",
             ".",
             "--project",
-            "prod-project",
+            "kanna-build",
             "--config",
             "services/relay/cloudbuild.yaml",
             "--substitutions",
-            "_IMAGE=gcr.io/prod-project/kanna-relay"
+            "_IMAGE=gcr.io/kanna-build/kanna-relay"
           ],
           cwd: repoRoot,
           streamOutput: true
@@ -237,7 +237,7 @@ describe("cloud deploy runtime", () => {
             "ssh",
             "kanna-relay-vm",
             "--project",
-            "prod-project",
+            "kanna-build",
             "--zone",
             "us-central1-a",
             "--command",
@@ -256,7 +256,7 @@ describe("cloud deploy runtime", () => {
             "services/relay/deploy/vm-deploy.sh",
             "kanna-relay-vm:~/kanna-relay/",
             "--project",
-            "prod-project",
+            "kanna-build",
             "--zone",
             "us-central1-a"
           ],
@@ -270,7 +270,7 @@ describe("cloud deploy runtime", () => {
             "ssh",
             "kanna-relay-vm",
             "--project",
-            "prod-project",
+            "kanna-build",
             "--zone",
             "us-central1-a",
             "--command",
@@ -283,6 +283,26 @@ describe("cloud deploy runtime", () => {
     } finally {
       rmSync(repoRoot, { recursive: true, force: true });
     }
+  });
+
+  it("refuses relay deploys for projects other than the compose-pinned kanna-build image", async () => {
+    const calls: Array<{ command: string; args: string[] }> = [];
+    const runner: CommandRunner = {
+      async run(command, args) {
+        calls.push({ command, args });
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+    };
+
+    await expect(
+      deployRelayCloud({
+        repoRoot: "/repo",
+        env: { KANNA_FIREBASE_PRODUCTION_PROJECT: "other-project" },
+        runner,
+        environment: "production"
+      })
+    ).rejects.toThrow("stale image");
+    expect(calls.length).toBe(0);
   });
 
   it("refuses staging relay deploys", async () => {

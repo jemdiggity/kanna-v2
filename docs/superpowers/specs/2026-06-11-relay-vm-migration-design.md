@@ -27,7 +27,7 @@ desktop ──wss://relay.kanna.build┘      Firestore (ADC via metadata server
 - **Hostname:** `relay.kanna.build`. A record at the user's DNS provider → static IPv4. DNS is managed outside GCP (no Cloud DNS zones exist); the record is added manually once the static IP is provisioned.
 - **VM:** `kanna-relay-vm`, e2-micro, Debian 12, 30 GB standard PD, us-central1, in project `kanna-build`. Free tier. Static external IPv4 (worst case ~$4/mo if the free-tier IP exemption doesn't apply — accepted).
 - **TLS:** Caddy with automatic Let's Encrypt issuance/renewal for `relay.kanna.build`. Caddy proxies WebSocket upgrades natively. No cert maintenance.
-- **Relay service:** code, Dockerfile, and `cloudbuild.yaml` unchanged. Image built via `gcloud builds submit` to Artifact Registry (us-central1 — same-region pulls are free), run via Docker Compose with `FIREBASE_PROJECT_ID=kanna-build`.
+- **Relay service:** code, Dockerfile, and `cloudbuild.yaml` unchanged. Image built via `gcloud builds submit` to gcr.io-hosted Artifact Registry (US multi-region), run via Docker Compose with `FIREBASE_PROJECT_ID=kanna-build`.
 - **Credentials:** dedicated service account on the VM with `roles/datastore.user` (Firestore) and `roles/artifactregistry.reader` (image pulls). `firebase-admin` picks up Application Default Credentials from the metadata server — zero relay code changes.
 - **Firewall:** allow tcp:80,443 to the VM (tag `kanna-relay`). SSH via standard `gcloud compute ssh` (IAP/OS Login defaults).
 - **Resilience:** `restart: always` on both compose services; VM auto-restarts on host maintenance; Caddy auto-renews certs. Single instance — same availability profile as today's `maxScale: 1`.
@@ -38,8 +38,8 @@ desktop ──wss://relay.kanna.build┘      Firestore (ADC via metadata server
 |---|---|
 | `services/relay/deploy/compose.yaml` | New — caddy + relay services, restart policies, env |
 | `services/relay/deploy/Caddyfile` | New — `relay.kanna.build` site, `reverse_proxy relay:8080` |
-| `services/relay/deploy/provision.sh` | New — one-time: enable APIs, create SA + IAM bindings, static IP, firewall rule, VM with startup script (installs Docker, writes compose stack, `docker compose up -d`) |
-| `tools/kd/src/runtime/cloud-deploy.ts` | `--relay` production path: keep `gcloud builds submit` step; replace `gcloud run deploy` with: `gcloud compute scp` the `services/relay/deploy/` files to the VM (so Caddyfile/compose changes ship with deploys, repo stays the source of truth), then `gcloud compute ssh kanna-relay-vm -- docker compose pull && docker compose up -d`. `--staging --relay` becomes an explicit error: "staging relay is retired; use the local relay via emulators". New one-time `kd cloud relay provision` command wrapping `provision.sh`. |
+| `services/relay/deploy/provision.sh` | New — one-time: enable APIs, create SA + IAM bindings, static IP, firewall rule, VM with startup script (installs Docker only; the compose stack ships at deploy time via scp) |
+| `tools/kd/src/runtime/cloud-deploy.ts` | `--relay` production path: keep `gcloud builds submit` step; replace `gcloud run deploy` with: `gcloud compute scp` the `services/relay/deploy/` files to the VM (so Caddyfile/compose changes ship with deploys, repo stays the source of truth), then `gcloud compute ssh kanna-relay-vm -- docker compose pull && docker compose up -d`. `--staging --relay` becomes an explicit error: "staging relay is retired; use the local relay via emulators". New one-time `kd cloud relay-provision` command wrapping `provision.sh`. |
 | `apps/desktop/src-tauri/src/commands/mobile.rs:438` | `PRODUCTION_RELAY_URL` → `wss://relay.kanna.build` (and the test at `:1390`) |
 | `apps/desktop/src/services/desktopRelayTerminal.ts:4` | `PRODUCTION_CLOUD_TRANSPORT_URL` → `wss://relay.kanna.build` |
 | `apps/mobile/src/appModel.ts:32` | `PRODUCTION_RELAY_URL` → `wss://relay.kanna.build` |
@@ -53,7 +53,7 @@ desktop ──wss://relay.kanna.build┘      Firestore (ADC via metadata server
 
 ## Cutover plan (hard cutover, same day — sole user is the maintainer)
 
-1. Run `kd cloud relay provision` → VM, SA, static IP, firewall created. Note the IP.
+1. Run `kd cloud relay-provision` → VM, SA, static IP, firewall created. Note the IP.
 2. Add the A record `relay.kanna.build → <static IP>` at the DNS provider; wait for propagation.
 3. `kd cloud deploy --production --relay` → image built, VM pulls and starts the stack. Caddy obtains the cert on first request.
 4. Verify: `curl https://relay.kanna.build/health` returns connection count; wss smoke test (desktop connects, phone pairs, terminal roundtrip).

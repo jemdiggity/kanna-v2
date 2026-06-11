@@ -8,9 +8,9 @@ TOKEN=$(curl -fsS -H "Metadata-Flavor: Google" \
   "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token" \
   | python3 -c "import json,sys; print(json.load(sys.stdin)['access_token'])")
 echo "$TOKEN" | docker login -u oauth2accesstoken --password-stdin https://gcr.io
+trap 'docker logout https://gcr.io >/dev/null 2>&1 || true' EXIT
 
 docker compose pull
-docker logout https://gcr.io
 docker compose up -d
 docker image prune -f
 docker compose ps
