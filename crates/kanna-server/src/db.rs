@@ -193,6 +193,12 @@ impl Db {
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
 
+            CREATE TABLE task_port (
+                port INTEGER PRIMARY KEY,
+                pipeline_item_id TEXT NOT NULL,
+                env_name TEXT NOT NULL
+            );
+
             CREATE TABLE settings (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -293,6 +299,42 @@ impl Db {
         self.conn.query_row(
             "SELECT COUNT(*) FROM worktree WHERE pipeline_item_id = ? AND path = ? AND branch = ?",
             (pipeline_item_id, path, branch),
+            |row| row.get(0),
+        )
+    }
+
+    #[cfg(test)]
+    pub fn count_test_pipeline_items_for_repo(
+        &self,
+        repo_id: &str,
+    ) -> Result<i64, rusqlite::Error> {
+        self.conn.query_row(
+            "SELECT COUNT(*) FROM pipeline_item WHERE repo_id = ?",
+            [repo_id],
+            |row| row.get(0),
+        )
+    }
+
+    #[cfg(test)]
+    pub fn count_test_worktrees_for_repo(&self, repo_id: &str) -> Result<i64, rusqlite::Error> {
+        self.conn.query_row(
+            "SELECT COUNT(*)
+             FROM worktree
+             JOIN pipeline_item ON pipeline_item.id = worktree.pipeline_item_id
+             WHERE pipeline_item.repo_id = ?",
+            [repo_id],
+            |row| row.get(0),
+        )
+    }
+
+    #[cfg(test)]
+    pub fn count_test_terminal_sessions_for_repo(
+        &self,
+        repo_id: &str,
+    ) -> Result<i64, rusqlite::Error> {
+        self.conn.query_row(
+            "SELECT COUNT(*) FROM terminal_session WHERE repo_id = ?",
+            [repo_id],
             |row| row.get(0),
         )
     }
@@ -742,6 +784,26 @@ impl Db {
                daemon_session_id = excluded.daemon_session_id",
             (id, repo_id, pipeline_item_id, label, cwd, daemon_session_id),
         )?;
+        Ok(())
+    }
+
+    pub fn delete_task_creation_artifacts(&self, item_id: &str) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "DELETE FROM terminal_session WHERE pipeline_item_id = ?",
+            [item_id],
+        )?;
+        self.conn
+            .execute("DELETE FROM worktree WHERE pipeline_item_id = ?", [item_id])?;
+        self.conn.execute(
+            "DELETE FROM task_blocker WHERE blocked_item_id = ? OR blocker_item_id = ?",
+            (item_id, item_id),
+        )?;
+        self.conn.execute(
+            "DELETE FROM task_port WHERE pipeline_item_id = ?",
+            [item_id],
+        )?;
+        self.conn
+            .execute("DELETE FROM pipeline_item WHERE id = ?", [item_id])?;
         Ok(())
     }
 

@@ -339,6 +339,17 @@ async fn create_task(
     }
 
     let blocker_task_ids = payload.blocker_task_ids.clone().unwrap_or_default();
+    let resolved_blocker_ids = if blocker_task_ids.is_empty() {
+        Vec::new()
+    } else {
+        let db = Db::open(&state.config.db_path).map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("db error: {}", e),
+            )
+        })?;
+        resolve_task_blocker_ids(&db, &blocker_task_ids)?
+    };
     let prepared = {
         let db = Db::open(&state.config.db_path).map_err(|e| {
             (
@@ -349,6 +360,29 @@ async fn create_task(
         crate::task_creator::prepare_task_for_api(&db, &state.config, payload)
             .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?
     };
+    if !resolved_blocker_ids.is_empty() {
+        let db = Db::open(&state.config.db_path).map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("db error: {}", e),
+            )
+        })?;
+        if let Err(err) = persist_resolved_task_blockers(
+            &db,
+            crate::task_creator::prepared_task_id(&prepared),
+            &resolved_blocker_ids,
+        ) {
+            let rollback_result =
+                crate::task_creator::rollback_prepared_task_for_api(&db, &prepared);
+            return Err(match rollback_result {
+                Ok(()) => err,
+                Err(rollback_err) => (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("{}; rollback failed: {}", err.1, rollback_err),
+                ),
+            });
+        }
+    }
     let mut daemon = crate::daemon_client::DaemonClient::connect(&state.config.daemon_dir)
         .await
         .map_err(|e| {
@@ -360,15 +394,6 @@ async fn create_task(
     let created = crate::task_creator::spawn_prepared_task_for_api(&mut daemon, prepared)
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    if !blocker_task_ids.is_empty() {
-        let db = Db::open(&state.config.db_path).map_err(|e| {
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("db error: {}", e),
-            )
-        })?;
-        apply_task_blockers(&db, &created.task_id, &blocker_task_ids)?;
-    }
     Ok(Json(created))
 }
 
@@ -425,6 +450,34 @@ fn resolve_existing_task_id(
         })
 }
 
+fn resolve_task_blocker_ids(
+    db: &Db,
+    blocker_task_ids: &[String],
+) -> Result<Vec<String>, (axum::http::StatusCode, String)> {
+    let mut resolved_blocker_ids = Vec::new();
+    for blocker_task_id in blocker_task_ids {
+        let blocker_id = resolve_existing_task_id(db, blocker_task_id)?;
+        if !resolved_blocker_ids.contains(&blocker_id) {
+            resolved_blocker_ids.push(blocker_id);
+        }
+    }
+    Ok(resolved_blocker_ids)
+}
+
+fn persist_resolved_task_blockers(
+    db: &Db,
+    task_id: &str,
+    resolved_blocker_ids: &[String],
+) -> Result<(), (axum::http::StatusCode, String)> {
+    for blocker_id in resolved_blocker_ids {
+        db.insert_task_blocker(task_id, blocker_id)
+            .map_err(|e| db_write_error("db error", e))?;
+    }
+    add_blocked_tag(db, task_id)?;
+    db.update_pipeline_item_activity(task_id, "idle")
+        .map_err(|e| db_write_error("db error", e))
+}
+
 fn apply_task_blockers(
     db: &Db,
     task_or_branch_id: &str,
@@ -438,10 +491,9 @@ fn apply_task_blockers(
     }
 
     let task_id = resolve_existing_task_id(db, task_or_branch_id)?;
-    let mut resolved_blocker_ids = Vec::new();
-    for blocker_task_id in blocker_task_ids {
-        let blocker_id = resolve_existing_task_id(db, blocker_task_id)?;
-        if blocker_id == task_id {
+    let resolved_blocker_ids = resolve_task_blocker_ids(db, blocker_task_ids)?;
+    for blocker_id in &resolved_blocker_ids {
+        if blocker_id == &task_id {
             return Err((
                 axum::http::StatusCode::BAD_REQUEST,
                 "task cannot block itself".to_string(),
@@ -456,18 +508,9 @@ fn apply_task_blockers(
                 "cannot add blocker because it would create a circular dependency".to_string(),
             ));
         }
-        if !resolved_blocker_ids.contains(&blocker_id) {
-            resolved_blocker_ids.push(blocker_id);
-        }
     }
 
-    for blocker_id in resolved_blocker_ids {
-        db.insert_task_blocker(&task_id, &blocker_id)
-            .map_err(|e| db_write_error("db error", e))?;
-    }
-    add_blocked_tag(db, &task_id)?;
-    db.update_pipeline_item_activity(&task_id, "idle")
-        .map_err(|e| db_write_error("db error", e))?;
+    persist_resolved_task_blockers(db, &task_id, &resolved_blocker_ids)?;
     Ok(task_id)
 }
 
@@ -2474,6 +2517,222 @@ mod tests {
         if created_test_sidecar {
             let _ = std::fs::remove_file(&kanna_cli_path);
         }
+    }
+
+    #[tokio::test]
+    async fn create_task_route_rejects_invalid_blocker_before_creating_task_or_spawning() {
+        let unique = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let repo_root =
+            std::env::temp_dir().join(format!("kanna-http-create-invalid-blocker-{unique}"));
+        init_test_git_repo(&repo_root);
+
+        let daemon_dir =
+            std::env::temp_dir().join(format!("kanna-http-create-invalid-blocker-daemon-{unique}"));
+        std::fs::create_dir_all(&daemon_dir).unwrap();
+        let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+        let _ = std::fs::remove_file(&socket_path);
+
+        let config = Config {
+            relay_url: "wss://relay.example".to_string(),
+            device_token: "device-token".to_string(),
+            daemon_dir: daemon_dir.to_string_lossy().to_string(),
+            db_path: Db::test_db_path(&format!("http-api-invalid-blocker-{unique}")),
+            desktop_id: "desktop-1".to_string(),
+            desktop_secret: Some("desktop-secret".to_string()),
+            desktop_name: "Studio Mac".to_string(),
+            server_version: Some("test-version".to_string()),
+            lan_host: "127.0.0.1".to_string(),
+            lan_port: 48120,
+            pairing_store_path: format!("/tmp/kanna-pairings-invalid-blocker-{unique}.json"),
+        };
+        let db = Db::open_for_tests(&config.db_path).unwrap();
+        db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+            .unwrap();
+        drop(db);
+
+        let app = super::router(Arc::new(super::AppState::new(config.clone())));
+        let response = app
+            .oneshot(
+                Request::post("/v1/tasks")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "repoId": "repo-1",
+                            "prompt": "Do not create this task",
+                            "blockerTaskIds": ["missing-blocker"]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&body).contains("task not found: missing-blocker"),
+            "unexpected body: {}",
+            String::from_utf8_lossy(&body)
+        );
+        assert!(
+            !socket_path.exists(),
+            "route should reject before daemon connection can be required"
+        );
+        let db = Db::open(&config.db_path).unwrap();
+        assert_eq!(db.count_test_pipeline_items_for_repo("repo-1").unwrap(), 0);
+        assert_eq!(db.count_test_worktrees_for_repo("repo-1").unwrap(), 0);
+        assert_eq!(
+            db.count_test_terminal_sessions_for_repo("repo-1").unwrap(),
+            0
+        );
+        assert!(
+            !repo_root.join(".kanna-worktrees").exists(),
+            "route should reject before creating a git worktree"
+        );
+
+        let _ = std::fs::remove_dir_all(&daemon_dir);
+        let _ = std::fs::remove_dir_all(&repo_root);
+    }
+
+    #[tokio::test]
+    async fn create_task_route_persists_blocker_before_daemon_spawn() {
+        use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::UnixListener;
+
+        let unique = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let repo_root = std::env::temp_dir().join(format!("kanna-http-create-blocker-{unique}"));
+        init_test_git_repo(&repo_root);
+
+        let daemon_dir =
+            std::env::temp_dir().join(format!("kanna-http-create-blocker-daemon-{unique}"));
+        std::fs::create_dir_all(&daemon_dir).unwrap();
+        let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+        let _ = std::fs::remove_file(&socket_path);
+
+        let db_path = Db::test_db_path(&format!("http-api-create-blocker-{unique}"));
+        let db_path_for_daemon = db_path.clone();
+        let daemon_listener = UnixListener::bind(&socket_path).unwrap();
+        let daemon_server = tokio::spawn(async move {
+            let (stream, _) = daemon_listener.accept().await.unwrap();
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+            let session_id = match command {
+                DaemonCommand::Spawn {
+                    session_id, cwd, ..
+                } => {
+                    assert!(cwd.contains(".kanna-worktrees/task-"));
+                    let db = Db::open(&db_path_for_daemon).unwrap();
+                    assert_eq!(
+                        db.count_test_task_blockers(&session_id, "blocker-1")
+                            .unwrap(),
+                        1,
+                        "blocker row must exist before daemon spawn is issued"
+                    );
+                    session_id
+                }
+                other => panic!("expected spawn command, got {:?}", other),
+            };
+            write_half
+                .write_all(
+                    format!(
+                        "{}\n",
+                        serde_json::to_string(&DaemonEvent::SessionCreated { session_id }).unwrap()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+
+        let config = Config {
+            relay_url: "wss://relay.example".to_string(),
+            device_token: "device-token".to_string(),
+            daemon_dir: daemon_dir.to_string_lossy().to_string(),
+            db_path: db_path.clone(),
+            desktop_id: "desktop-1".to_string(),
+            desktop_secret: Some("desktop-secret".to_string()),
+            desktop_name: "Studio Mac".to_string(),
+            server_version: Some("test-version".to_string()),
+            lan_host: "127.0.0.1".to_string(),
+            lan_port: 48120,
+            pairing_store_path: format!("/tmp/kanna-pairings-create-blocker-{unique}.json"),
+        };
+        let db = Db::open_for_tests(&config.db_path).unwrap();
+        db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+            .unwrap();
+        db.insert_test_pipeline_item(
+            "blocker-1",
+            "repo-1",
+            "blocker prompt",
+            Some("Blocker Task"),
+            "in progress",
+            "2026-04-17 08:00:00",
+        )
+        .unwrap();
+        drop(db);
+
+        let app = super::router(Arc::new(super::AppState::new(config.clone())));
+        let response = app
+            .oneshot(
+                Request::post("/v1/tasks")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "repoId": "repo-1",
+                            "prompt": "Create after blocker validation",
+                            "blockerTaskIds": ["blocker-1"]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let created: CreateTaskResponse = from_slice(&body).unwrap();
+        assert_eq!(created.repo_id, "repo-1");
+        assert_eq!(created.stage, "in progress");
+
+        daemon_server.await.unwrap();
+        let db = Db::open(&config.db_path).unwrap();
+        assert_eq!(
+            db.count_test_task_blockers(&created.task_id, "blocker-1")
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            db.get_test_pipeline_item_tags(&created.task_id).unwrap(),
+            "[\"in progress\",\"blocked\"]"
+        );
+
+        let _ = std::fs::remove_file(&socket_path);
+        let _ = std::fs::remove_dir_all(&daemon_dir);
+        let _ = std::fs::remove_dir_all(&repo_root);
     }
 
     #[tokio::test]
