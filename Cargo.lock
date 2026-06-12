@@ -3121,7 +3121,6 @@ dependencies = [
  "block2",
  "chrono",
  "claude-agent-sdk",
- "dashmap",
  "git2",
  "ignore",
  "image",

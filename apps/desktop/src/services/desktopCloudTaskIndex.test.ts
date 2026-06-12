@@ -74,7 +74,7 @@ describe("mapDesktopCloudTasks", () => {
         baseRef: "origin/main",
         prNumber: null,
         prUrl: null,
-        agent: { provider: "codex", type: "sdk" },
+        agent: { provider: "codex", type: "agent" },
         createdAt: "2026-05-14T00:00:00.000Z",
         updatedAt: "2026-05-14T00:01:00.000Z",
         closedAt: null,
@@ -96,7 +96,7 @@ describe("mapDesktopCloudTasks", () => {
         display_name: "Cloud task (peer-primary)",
         prompt: "Cloud task prompt",
         agent_provider: "codex",
-        agent_type: "sdk",
+        agent_type: "agent",
       },
     ]);
     expect(snapshot.terminalRefs["cloud:repo-1:task-1"]).toEqual({

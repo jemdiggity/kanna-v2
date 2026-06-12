@@ -116,7 +116,7 @@ const mockState = vi.hoisted(() => {
       case "git_worktree_remove":
       case "spawn_session":
       case "signal_session":
-      case "create_agent_session":
+      case "spawn_agent_session":
       case "kill_session":
       case "detach_session":
       case "attach_session_with_snapshot":
@@ -655,7 +655,7 @@ describe("kanna store task base branch integration", () => {
     mockState.baseBranchResponse = ["feature/task-base-branch", "origin/main", "main"];
     const store = await createStore();
 
-    await store.createItem("repo-1", "/tmp/repo", "Ship explicit base branch", "sdk", {
+    await store.createItem("repo-1", "/tmp/repo", "Ship explicit base branch", "agent", {
       baseBranch: "feature/task-base-branch",
       agentProvider: "claude",
     });
@@ -682,7 +682,7 @@ describe("kanna store task base branch integration", () => {
     mockState.baseBranchResponse = ["feature/x", "main", "origin/main"];
     const store = await createStore();
 
-    await store.createItem("repo-1", "/tmp/repo", "Ship default branch task", "sdk", {
+    await store.createItem("repo-1", "/tmp/repo", "Ship default branch task", "agent", {
       agentProvider: "claude",
     });
 
@@ -732,7 +732,7 @@ describe("kanna store task base branch integration", () => {
     );
     const store = await createStore();
 
-    await store.createItem("repo-1", "/tmp/repo", "Ship cloud-visible task", "sdk", {
+    await store.createItem("repo-1", "/tmp/repo", "Ship cloud-visible task", "agent", {
       agentProvider: "claude",
     });
 
@@ -747,7 +747,7 @@ describe("kanna store task base branch integration", () => {
     mockState.repos = [mockState.makeRepo({ default_branch: "dev" })];
     const store = await createStore();
 
-    await store.createItem("repo-1", "/tmp/repo", "Ship dev default branch task", "sdk", {
+    await store.createItem("repo-1", "/tmp/repo", "Ship dev default branch task", "agent", {
       agentProvider: "claude",
     });
 
@@ -774,7 +774,7 @@ describe("kanna store task base branch integration", () => {
     mockState.baseBranchResponse = ["dev", "origin/dev"];
     const store = await createStore();
 
-    await store.createItem("repo-1", "/tmp/repo", "Ship explicit remote base branch task", "sdk", {
+    await store.createItem("repo-1", "/tmp/repo", "Ship explicit remote base branch task", "agent", {
       baseBranch: "origin/dev",
       agentProvider: "claude",
     });
@@ -813,7 +813,7 @@ describe("kanna store task base branch integration", () => {
     mockState.baseBranchResponse = new Error("git_list_base_branches failed");
     const store = await createStore();
 
-    await expect(store.createItem("repo-1", "/tmp/repo", "Ship fallback task", "sdk", {
+    await expect(store.createItem("repo-1", "/tmp/repo", "Ship fallback task", "agent", {
       agentProvider: "claude",
     })).rejects.toThrow("No valid base branch");
 
@@ -824,7 +824,7 @@ describe("kanna store task base branch integration", () => {
     mockState.baseBranchResponse = ["feature/x"];
     const store = await createStore();
 
-    await expect(store.createItem("repo-1", "/tmp/repo", "Ship missing base task", "sdk", {
+    await expect(store.createItem("repo-1", "/tmp/repo", "Ship missing base task", "agent", {
       agentProvider: "claude",
     })).rejects.toThrow("No valid base branch");
 
@@ -840,7 +840,7 @@ describe("kanna store task base branch integration", () => {
     };
     const store = await createStore();
 
-    await store.createItem("repo-1", "/tmp/repo", "Ship reserved ports", "sdk", {
+    await store.createItem("repo-1", "/tmp/repo", "Ship reserved ports", "agent", {
       agentProvider: "claude",
     });
 
@@ -877,7 +877,7 @@ describe("kanna store task base branch integration", () => {
     };
     const store = await createStore();
 
-    await store.createItem("repo-1", "/tmp/repo", "Ship worktree-scoped ports", "sdk", {
+    await store.createItem("repo-1", "/tmp/repo", "Ship worktree-scoped ports", "agent", {
       agentProvider: "claude",
     });
 
@@ -904,10 +904,10 @@ describe("kanna store task base branch integration", () => {
     };
     const store = await createStore();
 
-    await store.createItem("repo-1", "/tmp/repo", "First task", "sdk", {
+    await store.createItem("repo-1", "/tmp/repo", "First task", "agent", {
       agentProvider: "claude",
     });
-    await store.createItem("repo-1", "/tmp/repo", "Second task", "sdk", {
+    await store.createItem("repo-1", "/tmp/repo", "Second task", "agent", {
       agentProvider: "claude",
     });
 
@@ -921,7 +921,7 @@ describe("kanna store task base branch integration", () => {
     });
   });
 
-  it("passes task-scoped port and kanna-cli env to sdk agent sessions", async () => {
+  it("passes task-scoped port and kanna-cli env to agent sessions", async () => {
     mockState.readEnvVarOverrides = {
       ...mockState.readEnvVarOverrides,
       PATH: "/usr/local/bin:/bin",
@@ -934,7 +934,7 @@ describe("kanna store task base branch integration", () => {
     };
     const store = await createStore();
 
-    await store.createItem("repo-1", "/tmp/repo", "Ship sdk env", "sdk", {
+    await store.createItem("repo-1", "/tmp/repo", "Ship agent env", "agent", {
       agentProvider: "claude",
     });
 
@@ -942,10 +942,10 @@ describe("kanna store task base branch integration", () => {
       const createdItem = mockState.pipelineItems.at(-1);
       expect(createdItem).toBeTruthy();
       expect(mockState.invokeMock).toHaveBeenCalledWith(
-        "create_agent_session",
+        "spawn_agent_session",
         expect.objectContaining({
           sessionId: createdItem?.id,
-          prompt: "Ship sdk env",
+          prompt: "Ship agent env",
           systemPrompt: expect.stringContaining("This session was launched by Kanna."),
           env: expect.objectContaining({
             KANNA_WORKTREE: "1",
@@ -960,19 +960,19 @@ describe("kanna store task base branch integration", () => {
         }),
       );
     });
-    const createAgentCall = mockState.invokeMock.mock.calls.find(([command]) => command === "create_agent_session");
+    const createAgentCall = mockState.invokeMock.mock.calls.find(([command]) => command === "spawn_agent_session");
     const env = createAgentCall?.[1]?.env as Record<string, string> | undefined;
     expect(env).not.toHaveProperty("KANNA_SERVER_BASE_URL");
   });
 
-  it("passes a non-default app mobile server URL to sdk agent sessions", async () => {
+  it("passes a non-default app mobile server URL to agent sessions", async () => {
     mockState.readEnvVarOverrides = {
       ...mockState.readEnvVarOverrides,
       KANNA_MOBILE_SERVER_PORT: "48129",
     };
     const store = await createStore();
 
-    await store.createItem("repo-1", "/tmp/repo", "Ship dev server env", "sdk", {
+    await store.createItem("repo-1", "/tmp/repo", "Ship dev server env", "agent", {
       agentProvider: "claude",
     });
 
@@ -980,7 +980,7 @@ describe("kanna store task base branch integration", () => {
       const createdItem = mockState.pipelineItems.at(-1);
       expect(createdItem).toBeTruthy();
       expect(mockState.invokeMock).toHaveBeenCalledWith(
-        "create_agent_session",
+        "spawn_agent_session",
         expect.objectContaining({
           sessionId: createdItem?.id,
           env: expect.objectContaining({
@@ -991,7 +991,7 @@ describe("kanna store task base branch integration", () => {
     });
   });
 
-  it("passes workspace env and PATH updates to sdk agent sessions", async () => {
+  it("passes workspace env and PATH updates to agent sessions", async () => {
     mockState.repoConfigResolver = (path: string) => {
       if (path.includes("/.kanna-worktrees/") && path.endsWith("/.kanna/config.json")) {
         return {
@@ -1010,7 +1010,7 @@ describe("kanna store task base branch integration", () => {
     };
     const store = await createStore();
 
-    await store.createItem("repo-1", "/tmp/repo", "Ship sdk env", "sdk", {
+    await store.createItem("repo-1", "/tmp/repo", "Ship agent env", "agent", {
       agentProvider: "claude",
     });
 
@@ -1018,7 +1018,7 @@ describe("kanna store task base branch integration", () => {
       const createdItem = mockState.pipelineItems.at(-1);
       expect(createdItem).toBeTruthy();
       expect(mockState.invokeMock).toHaveBeenCalledWith(
-        "create_agent_session",
+        "spawn_agent_session",
         expect.objectContaining({
           env: expect.objectContaining({
             FOO: "bar",
@@ -2120,7 +2120,7 @@ describe("kanna store task base branch integration", () => {
         id: "item-source",
         branch: "task-source",
         stage: "in progress",
-        agent_type: "sdk",
+        agent_type: "agent",
         agent_provider: "codex",
         agent_session_id: "019d9a8c-9f39-7240-818f-88367a7c31df",
       }),
@@ -2417,14 +2417,14 @@ describe("kanna store task base branch integration", () => {
     await store.selectItem("item-active");
     await flushStore();
 
-    await store.createItem("repo-1", "/tmp/repo", "Spawn without follow", "sdk", {
+    await store.createItem("repo-1", "/tmp/repo", "Spawn without follow", "agent", {
       agentProvider: "claude",
       selectOnCreate: false,
     });
 
     await vi.waitFor(() => {
       expect(mockState.invokeMock).toHaveBeenCalledWith(
-        "create_agent_session",
+        "spawn_agent_session",
         expect.objectContaining({ prompt: "Spawn without follow" }),
       );
     });

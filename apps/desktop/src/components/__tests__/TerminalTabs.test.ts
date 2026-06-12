@@ -20,7 +20,7 @@ describe("TerminalTabs", () => {
             props: ["agentTerminal"],
             template: "<div class='terminal-view-stub' />",
           },
-          AgentView: true,
+          AgentMessageView: true,
         },
       },
     })
@@ -58,7 +58,7 @@ describe("TerminalTabs", () => {
       global: {
         stubs: {
           TerminalView: TerminalViewStub,
-          AgentView: true,
+          AgentMessageView: true,
         },
       },
     })
@@ -111,7 +111,7 @@ describe("TerminalTabs", () => {
       global: {
         stubs: {
           TerminalView: TerminalViewStub,
-          AgentView: true,
+          AgentMessageView: true,
         },
       },
     })

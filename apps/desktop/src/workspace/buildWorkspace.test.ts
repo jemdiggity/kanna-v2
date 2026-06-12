@@ -41,7 +41,7 @@ function item(overrides: Partial<PipelineItem> = {}): PipelineItem {
     agent_session_id: null,
     base_ref: "origin/main",
     agent_provider: "codex",
-    agent_type: "sdk",
+    agent_type: "agent",
     previous_stage: null,
     stage_result: null,
     teardown_started_at: null,

@@ -846,8 +846,8 @@ pub fn git_diff_branch_range(
                 .map_err(|e| e.to_string())?
         }
         "staged" => {
-            let mut index = repo.index().map_err(|e| e.to_string())?;
-            repo.diff_tree_to_index(Some(&from_tree), Some(&mut index), None)
+            let index = repo.index().map_err(|e| e.to_string())?;
+            repo.diff_tree_to_index(Some(&from_tree), Some(&index), None)
                 .map_err(|e| e.to_string())?
         }
         "all" => {

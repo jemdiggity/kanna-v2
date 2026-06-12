@@ -14,6 +14,9 @@ import {
   type AppThemePreference,
   type CodeThemePreference,
 } from "../theme/theme";
+import type { AgentExecutionType } from "./agentExecutionType";
+
+export type AgentMessageStyle = "chat" | "log" | "terminal";
 
 /** Generate an 8-char hex ID (32 bits of randomness). */
 export function generateId(): string {
@@ -110,6 +113,7 @@ export interface StoreState {
   devLingerTerminals: Ref<boolean>;
   appTheme: Ref<AppThemePreference>;
   codeTheme: Ref<CodeThemePreference>;
+  agentMessageStyle: Ref<AgentMessageStyle>;
   lastHiddenRepoId: Ref<string | null>;
   pendingSetupIds: Ref<string[]>;
   pipelineCache: Map<string, PipelineDefinition>;
@@ -181,7 +185,7 @@ export interface StoreServices {
     repoId: string,
     repoPath: string,
     prompt: string,
-    agentType?: "pty" | "sdk",
+    agentType?: AgentExecutionType,
     opts?: CreateItemOptions,
   ) => Promise<string>;
   closeTask?: (targetItemId?: string, opts?: { selectNext?: boolean }) => Promise<void>;
@@ -258,6 +262,7 @@ export function createStoreState(): StoreState {
   const devLingerTerminals = ref(false);
   const appTheme = ref<AppThemePreference>(DEFAULT_APP_THEME);
   const codeTheme = ref<CodeThemePreference>(DEFAULT_CODE_THEME);
+  const agentMessageStyle = ref<AgentMessageStyle>("chat");
   const lastHiddenRepoId = ref<string | null>(null);
   const pendingSetupIds = ref<string[]>([]);
   const pendingCreateVisibility = new Map<string, { bumpAt: number }>();
@@ -280,6 +285,7 @@ export function createStoreState(): StoreState {
     devLingerTerminals,
     appTheme,
     codeTheme,
+    agentMessageStyle,
     lastHiddenRepoId,
     pendingSetupIds,
     pipelineCache,

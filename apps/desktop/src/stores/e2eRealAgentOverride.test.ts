@@ -131,7 +131,7 @@ describe("resolveRealE2eAgentOverride", () => {
 
     await expect(
       resolveRealE2eAgentOverride({
-        agentType: "sdk",
+        agentType: "agent",
         explicitAgentProvider: undefined,
         explicitModel: undefined,
       }),

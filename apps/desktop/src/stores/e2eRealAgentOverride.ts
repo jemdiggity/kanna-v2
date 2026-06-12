@@ -1,8 +1,9 @@
 import type { AgentProvider } from "@kanna/db";
 import { invoke } from "../invoke";
+import type { AgentExecutionType } from "./agentExecutionType";
 
 export interface RealE2eAgentOverrideInput {
-  agentType: "pty" | "sdk";
+  agentType: AgentExecutionType;
   explicitAgentProvider?: AgentProvider | AgentProvider[];
   explicitModel?: string;
 }

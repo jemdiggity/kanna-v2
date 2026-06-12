@@ -448,7 +448,7 @@ function buildIncomingTransferEvent() {
           pipeline: "default",
           display_name: "Transferred task",
           base_ref: "main",
-          agent_type: "sdk",
+          agent_type: "agent",
           agent_provider: "claude",
         },
         repo: {
@@ -1545,7 +1545,7 @@ describe("App", () => {
       "repo-imported",
       "/Users/test/.kanna/repos/remote-repo",
       "Create task from remote repo",
-      "pty",
+      "agent",
       expect.objectContaining({
         baseBranch: "origin/main",
       }),
@@ -1570,7 +1570,7 @@ describe("App", () => {
       "repo-1",
       "/tmp/repo",
       "Create default-base task",
-      "pty",
+      "agent",
       expect.objectContaining({
         agentProvider: "claude",
         pipelineName: "default",
@@ -1663,7 +1663,7 @@ describe("App", () => {
       "repo-1",
       "/tmp/repo",
       "Create local default task",
-      "pty",
+      "agent",
       expect.objectContaining({
         baseBranch: "main",
       }),

@@ -867,6 +867,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::await_holding_lock)]
     async fn manager_replaces_stale_server_with_same_desktop_id() {
         let _guard = env_lock().lock().expect("env lock should not be poisoned");
         let root = unique_test_root("replace-stale");
@@ -924,6 +925,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::await_holding_lock)]
     async fn manager_reuses_current_server_with_same_desktop_id() {
         let _guard = env_lock().lock().expect("env lock should not be poisoned");
         let root = unique_test_root("reuse-current");
@@ -983,6 +985,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::await_holding_lock)]
     async fn manager_replaces_current_server_with_stale_runtime_config_before_task_create() {
         let _guard = env_lock().lock().expect("env lock should not be poisoned");
         let root = unique_test_root("replace-current-stale-runtime");
@@ -1116,11 +1119,10 @@ mod tests {
         assert_ne!(first_id, second_id);
         assert!(first_id.starts_with("desktop-"));
         assert_eq!(first_id.len(), "desktop-".len() + 36);
-        assert_eq!(
+        assert!(
             std::fs::read_to_string(root.join("main/Kanna/desktop-identity.json"))
                 .unwrap()
-                .contains(&first_id),
-            true
+                .contains(&first_id)
         );
 
         let _ = std::fs::remove_dir_all(root);
