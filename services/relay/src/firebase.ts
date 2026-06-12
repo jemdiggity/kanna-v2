@@ -2,18 +2,26 @@ import { initializeApp, cert, type App } from "firebase-admin/app";
 import { getAuth, type Auth } from "firebase-admin/auth";
 import { getFirestore, type Firestore } from "firebase-admin/firestore";
 
-const SKIP_AUTH = process.env.SKIP_AUTH === "true";
-
 let app: App | undefined;
 let auth: Auth | undefined;
 let db: Firestore | undefined;
 
 export function isAuthBypassed(): boolean {
-  return SKIP_AUTH;
+  if (process.env.SKIP_AUTH !== "true") {
+    return false;
+  }
+  if (process.env.NODE_ENV === "production") {
+    return false;
+  }
+
+  return Boolean(
+    process.env.FIREBASE_AUTH_EMULATOR_HOST ||
+      process.env.KANNA_RELAY_ALLOW_AUTH_BYPASS === "true"
+  );
 }
 
 export function getFirebaseServices(): { auth: Auth; db: Firestore } {
-  if (SKIP_AUTH) {
+  if (isAuthBypassed()) {
     throw new Error("Firebase services are unavailable when SKIP_AUTH=true");
   }
 

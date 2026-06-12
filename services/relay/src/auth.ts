@@ -86,7 +86,7 @@ export async function verifyDesktopCredentials(
 ): Promise<DesktopPrincipal | null> {
   if (isAuthBypassed()) {
     return {
-      userId: "test-user",
+      userId: bypassUserIdFromToken(desktopSecret),
       desktopId,
     };
   }
@@ -96,7 +96,7 @@ export async function verifyDesktopCredentials(
     const snapshot = await db
       .collectionGroup("desktops")
       .where("desktopId", "==", desktopId)
-      .limit(1)
+      .limit(5)
       .get();
 
     if (snapshot.empty) {
@@ -104,29 +104,31 @@ export async function verifyDesktopCredentials(
       return null;
     }
 
-    const doc = snapshot.docs[0]!;
-    const data = doc.data();
-    if (data.revokedAt) {
-      console.warn("[auth] Desktop revoked:", desktopId);
-      return null;
+    for (const doc of snapshot.docs) {
+      const data = doc.data();
+      if (data.revokedAt) {
+        continue;
+      }
+
+      if (!desktopSecretMatchesHash(desktopSecret, data.desktopSecretHash)) {
+        continue;
+      }
+
+      const desktopDoc = doc.ref;
+      const userDoc = desktopDoc.parent.parent;
+      if (!userDoc) {
+        console.warn("[auth] Desktop missing parent user:", desktopId);
+        return null;
+      }
+
+      return {
+        userId: userDoc.id,
+        desktopId,
+      };
     }
 
-    if (!desktopSecretMatchesHash(desktopSecret, data.desktopSecretHash)) {
-      console.warn("[auth] Desktop secret mismatch:", desktopId);
-      return null;
-    }
-
-    const desktopDoc = doc.ref;
-    const userDoc = desktopDoc.parent.parent;
-    if (!userDoc) {
-      console.warn("[auth] Desktop missing parent user:", desktopId);
-      return null;
-    }
-
-    return {
-      userId: userDoc.id,
-      desktopId,
-    };
+    console.warn("[auth] Desktop secret mismatch or revoked:", desktopId);
+    return null;
   } catch (err) {
     console.error("[auth] Failed to verify desktop credentials:", err);
     return null;

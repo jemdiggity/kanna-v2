@@ -129,7 +129,12 @@ describe("Relay integration", () => {
   beforeAll(async () => {
     relayProcess = spawn("pnpm", ["exec", "tsx", "src/index.ts"], {
       cwd: fileURLToPath(new URL("..", import.meta.url)),
-      env: { ...process.env, SKIP_AUTH: "true", PORT: String(RELAY_PORT) },
+      env: {
+        ...process.env,
+        SKIP_AUTH: "true",
+        KANNA_RELAY_ALLOW_AUTH_BYPASS: "true",
+        PORT: String(RELAY_PORT),
+      },
       stdio: "pipe",
     });
 

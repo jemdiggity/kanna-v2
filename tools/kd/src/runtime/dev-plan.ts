@@ -120,7 +120,8 @@ export function buildDevPlan(input: BuildDevPlanInput): DevPlan {
     });
     const relayEnv = shellEnvPrefix({
       PORT: input.env.KANNA_RELAY_PORT ?? "9080",
-      SKIP_AUTH: "true"
+      SKIP_AUTH: "true",
+      KANNA_RELAY_ALLOW_AUTH_BYPASS: "true"
     });
     windows.push({
       name: "relay",
@@ -128,6 +129,7 @@ export function buildDevPlan(input: BuildDevPlanInput): DevPlan {
       env: {
         ...sharedEnv,
         SKIP_AUTH: "true",
+        KANNA_RELAY_ALLOW_AUTH_BYPASS: "true",
         PORT: input.env.KANNA_RELAY_PORT ?? "9080"
       },
       command: `${relayEnv} pnpm run dev`
