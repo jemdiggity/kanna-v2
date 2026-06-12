@@ -1,0 +1,9 @@
+{"type":"thread.started","thread_id":"019eba69-1858-70a1-b740-8bce01ef9e7e"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"Checking the skill file first."}}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -lc \"sed -n '1,160p' /tmp/fixture/SKILL.md\"","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -lc \"sed -n '1,160p' /tmp/fixture/SKILL.md\"","aggregated_output":"---\nname: using-superpowers\n---\n","exit_code":0,"status":"completed"}}
+{"type":"item.started","item":{"id":"item_2","type":"command_execution","command":"/bin/zsh -lc 'echo kanna-fixture'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_2","type":"command_execution","command":"/bin/zsh -lc 'echo kanna-fixture'","aggregated_output":"kanna-fixture\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_3","type":"agent_message","text":"done"}}
+{"type":"turn.completed","usage":{"input_tokens":38046,"cached_input_tokens":31872,"output_tokens":129,"reasoning_output_tokens":0}}

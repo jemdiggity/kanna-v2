@@ -329,11 +329,24 @@ pub enum Message {
 }
 
 /// Input message sent from the SDK to the CLI via stdin.
+///
+/// With `--input-format stream-json` the CLI only accepts the enveloped
+/// shape `{"type":"user","message":{"role":"user","content":...}}` —
+/// top-level `content` is silently ignored.
 #[derive(Debug, Clone, Serialize)]
 pub struct UserInput {
     /// Always "user".
     #[serde(rename = "type")]
     pub type_field: String,
+    /// The enveloped message.
+    pub message: UserInputMessage,
+}
+
+/// The message envelope inside a [`UserInput`].
+#[derive(Debug, Clone, Serialize)]
+pub struct UserInputMessage {
+    /// Always "user".
+    pub role: String,
     /// The message content — either a string or content blocks.
     pub content: serde_json::Value,
 }
@@ -343,7 +356,10 @@ impl UserInput {
     pub fn text(message: impl Into<String>) -> Self {
         Self {
             type_field: "user".to_string(),
-            content: serde_json::Value::String(message.into()),
+            message: UserInputMessage {
+                role: "user".to_string(),
+                content: serde_json::Value::String(message.into()),
+            },
         }
     }
 }
@@ -694,7 +710,8 @@ mod tests {
         let json = serde_json::to_string(&input).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["type"], "user");
-        assert_eq!(value["content"], "Fix the bug");
+        assert_eq!(value["message"]["role"], "user");
+        assert_eq!(value["message"]["content"], "Fix the bug");
     }
 
     #[test]
