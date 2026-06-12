@@ -116,6 +116,10 @@ fn db_write_error(message_prefix: &str, err: rusqlite::Error) -> (axum::http::St
 }
 
 impl AppState {
+    pub(crate) fn config(&self) -> &Config {
+        &self.config
+    }
+
     pub fn new(config: Config) -> Self {
         if let Err(err) = pairing::PairingStore::load(Path::new(&config.pairing_store_path)) {
             log::warn!(
@@ -803,6 +807,13 @@ async fn task_terminal(
     ws.on_upgrade(move |socket| stream_task_terminal(socket, state, task_id))
 }
 
+async fn ksp_stream(
+    ws: WebSocketUpgrade,
+    State(state): State<Arc<AppState>>,
+) -> axum::response::Response {
+    ws.on_upgrade(move |socket| crate::ksp::handle_stream(socket, state))
+}
+
 async fn stream_task_terminal(socket: WebSocket, state: Arc<AppState>, task_id: String) {
     #[cfg(test)]
     if let Some(task_terminal_streamer) = state.task_terminal_streamer.clone() {
@@ -1123,6 +1134,7 @@ async fn send_task_terminal_event(
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/v1/status", get(status))
+        .route("/v1/stream", get(ksp_stream))
         .route("/v1/desktops", get(list_desktops))
         .route("/v1/repos", get(list_repos))
         .route("/v1/repos/{repo_id}/tasks", get(list_repo_tasks))
@@ -1270,7 +1282,7 @@ pub async fn serve(state: Arc<AppState>) -> Result<(), String> {
 }
 
 #[cfg(test)]
-fn test_router(desktop_id: &str, desktop_name: &str) -> Router {
+pub(crate) fn test_router(desktop_id: &str, desktop_name: &str) -> Router {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static NEXT_TEST_DB_ID: AtomicUsize = AtomicUsize::new(1);
