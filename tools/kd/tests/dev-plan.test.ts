@@ -108,7 +108,10 @@ Run '\\''copilot update'\\'' to check for updates.
     expect(plan.windows[1]?.cwd).toBe("/repo/services/relay");
     expect(plan.windows[1]?.env.PORT).toBe("9081");
     expect(plan.windows[1]?.env.SKIP_AUTH).toBe("true");
-    expect(plan.windows[1]?.command).toContain("PORT='9081' SKIP_AUTH='true' pnpm run dev");
+    expect(plan.windows[1]?.env.KANNA_RELAY_ALLOW_AUTH_BYPASS).toBe("true");
+    expect(plan.windows[1]?.command).toContain(
+      "PORT='9081' SKIP_AUTH='true' KANNA_RELAY_ALLOW_AUTH_BYPASS='true' pnpm run dev"
+    );
     expect(plan.windows[3]?.command).not.toContain("EXPO_PUBLIC_KANNA_SERVER_URL");
     expect(plan.windows[3]?.command).toContain("EXPO_PUBLIC_KANNA_RELAY_URL='ws://192.168.1.5:9081'");
     expect(plan.windows[3]?.command).toContain("RCT_METRO_PORT='8082'");
