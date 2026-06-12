@@ -42,13 +42,15 @@ function connectAndAuth(
     ws.on("open", () => {
       ws.send(JSON.stringify({ type: "auth", ...authPayload }));
     });
-    ws.on("message", (raw: Buffer) => {
+    const handler = (raw: Buffer) => {
       const msg = JSON.parse(raw.toString());
       if (msg.type === "auth_ok") {
         clearTimeout(timeout);
+        ws.off("message", handler);
         resolve({ ws, userId: msg.userId });
       }
-    });
+    };
+    ws.on("message", handler);
     ws.on("error", (err) => {
       clearTimeout(timeout);
       reject(err);
@@ -70,11 +72,37 @@ function waitForMessage(
     }, timeoutMs);
 
     const handler = (raw: Buffer) => {
-      const msg = JSON.parse(raw.toString());
+      let msg: Record<string, unknown>;
+      try {
+        msg = JSON.parse(raw.toString());
+      } catch {
+        return;
+      }
       if (predicate(msg)) {
         clearTimeout(timeout);
         ws.off("message", handler);
         resolve(msg);
+      }
+    };
+    ws.on("message", handler);
+  });
+}
+
+function waitForRawMessage(
+  ws: WebSocket,
+  predicate: (data: Buffer) => boolean,
+  timeoutMs = 5_000
+): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      reject(new Error("waitForRawMessage timed out"));
+    }, timeoutMs);
+
+    const handler = (raw: Buffer) => {
+      if (predicate(raw)) {
+        clearTimeout(timeout);
+        ws.off("message", handler);
+        resolve(raw);
       }
     };
     ws.on("message", handler);
@@ -245,6 +273,95 @@ describe("Relay integration", () => {
 
     await closeAndWait(phone);
     await closeAndWait(server);
+  });
+
+  it("pairs a requested tunnel and splices text and binary frames without parsing them", async () => {
+    const { ws: desktopControl } = await connectAndAuth({
+      desktop_id: "desktop-tunnel",
+      desktop_secret: "secret-tunnel",
+    });
+    const { ws: clientTunnel } = await connectAndAuth({
+      id_token: "user-tunnel",
+    });
+
+    const establishSignal = waitForMessage(
+      desktopControl,
+      (msg) => msg.type === "tunnel_establish" && msg.desktopId === "desktop-tunnel",
+    );
+
+    clientTunnel.send(
+      JSON.stringify({
+        type: "tunnel_request",
+        id: "open-tunnel-1",
+        desktopId: "desktop-tunnel",
+      }),
+    );
+
+    const signal = await establishSignal;
+    expect(signal.tunnelId).toEqual(expect.any(String));
+
+    const desktopTunnel = new WebSocket(RELAY_URL);
+    const desktopReady = waitForMessage(
+      desktopTunnel,
+      (msg) => msg.type === "tunnel_ready" && msg.tunnelId === signal.tunnelId,
+    );
+    const clientReady = waitForMessage(
+      clientTunnel,
+      (msg) => msg.type === "tunnel_ready" && msg.tunnelId === signal.tunnelId,
+    );
+
+    await new Promise<void>((resolve) => desktopTunnel.on("open", resolve));
+    desktopTunnel.send(
+      JSON.stringify({
+        type: "auth",
+        desktop_id: "desktop-tunnel",
+        desktop_secret: "secret-tunnel",
+        tunnel_id: signal.tunnelId,
+      }),
+    );
+
+    await expect(desktopReady).resolves.toMatchObject({ type: "tunnel_ready" });
+    await expect(clientReady).resolves.toMatchObject({ type: "tunnel_ready" });
+
+    const desktopSawJson = waitForRawMessage(
+      desktopTunnel,
+      (raw) => raw.toString() === '{"type":"ksp_auth","credential":"opaque"}',
+    );
+    clientTunnel.send('{"type":"ksp_auth","credential":"opaque"}');
+    await expect(desktopSawJson).resolves.toBeInstanceOf(Buffer);
+
+    const clientSawBinary = waitForRawMessage(
+      clientTunnel,
+      (raw) => raw.equals(Buffer.from([0, 1, 2, 255])),
+    );
+    desktopTunnel.send(Buffer.from([0, 1, 2, 255]));
+    await expect(clientSawBinary).resolves.toBeInstanceOf(Buffer);
+
+    await closeAndWait(clientTunnel);
+    await closeAndWait(desktopTunnel);
+    await closeAndWait(desktopControl);
+  });
+
+  it("rejects tunnel requests for an offline desktop", async () => {
+    const { ws: client } = await connectAndAuth({
+      id_token: "user-tunnel-offline",
+    });
+
+    client.send(
+      JSON.stringify({
+        type: "tunnel_request",
+        id: "offline-tunnel",
+        desktopId: "missing-desktop",
+      }),
+    );
+
+    const response = await waitForMessage(
+      client,
+      (msg) => msg.type === "response" && msg.id === "offline-tunnel",
+    );
+    expect(response.error).toBe("Desktop offline");
+
+    await closeAndWait(client);
   });
 
   it("should route events from server to phone", async () => {

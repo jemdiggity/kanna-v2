@@ -1,4 +1,5 @@
 import { getFirebaseServices, isAuthBypassed } from "./firebase.js";
+import { createHash, timingSafeEqual } from "node:crypto";
 
 function bypassUserIdFromToken(token: string): string {
   const separator = token.indexOf(":");
@@ -62,6 +63,23 @@ export interface DesktopPrincipal {
   desktopId: string;
 }
 
+export function hashDesktopSecret(desktopSecret: string): string {
+  return createHash("sha256").update(desktopSecret, "utf8").digest("hex");
+}
+
+export function desktopSecretMatchesHash(
+  desktopSecret: string,
+  desktopSecretHash: unknown
+): boolean {
+  if (typeof desktopSecretHash !== "string" || desktopSecretHash.length === 0) {
+    return false;
+  }
+
+  const actual = Buffer.from(hashDesktopSecret(desktopSecret), "hex");
+  const expected = Buffer.from(desktopSecretHash, "hex");
+  return actual.length === expected.length && timingSafeEqual(actual, expected);
+}
+
 export async function verifyDesktopCredentials(
   desktopId: string,
   desktopSecret: string
@@ -93,7 +111,7 @@ export async function verifyDesktopCredentials(
       return null;
     }
 
-    if (data.desktopSecret !== desktopSecret) {
+    if (!desktopSecretMatchesHash(desktopSecret, data.desktopSecretHash)) {
       console.warn("[auth] Desktop secret mismatch:", desktopId);
       return null;
     }

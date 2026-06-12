@@ -3,6 +3,7 @@ import {
   createRemoteTransport,
   RemoteTransportError,
   type RemoteDesktopInvoker,
+  type RemoteTaskAgentObserver,
   type RemoteTaskInputSender,
   type RemoteTaskTerminalObserver
 } from "./remoteTransport";
@@ -547,6 +548,33 @@ describe("remote transport", () => {
     expect(transport.observeTaskTerminal("task-1", listener)).toBe(subscription);
 
     expect(observeTaskTerminal).toHaveBeenCalledWith(
+      {
+        desktopId: "desktop-1",
+        taskId: "task-1"
+      },
+      listener
+    );
+  });
+
+  it("delegates remote agent observation to the relay stream observer dependency", () => {
+    const subscription = {
+      close: vi.fn(),
+      sendInput: vi.fn(),
+      sendPermission: vi.fn(),
+      interrupt: vi.fn()
+    };
+    const observeTaskAgent = vi.fn<RemoteTaskAgentObserver>(() => subscription);
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [],
+      getSelectedDesktopId: () => "desktop-1",
+      invokeDesktop: async () => null,
+      observeTaskAgent
+    });
+    const listener = vi.fn();
+
+    expect(transport.observeTaskAgent("task-1", listener)).toBe(subscription);
+
+    expect(observeTaskAgent).toHaveBeenCalledWith(
       {
         desktopId: "desktop-1",
         taskId: "task-1"

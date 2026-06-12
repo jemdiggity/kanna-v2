@@ -207,6 +207,7 @@ function createClientForMode({
         getSelectedDesktopId,
         invokeDesktop: relayClient.invokeDesktop,
         observeTaskTerminal: relayClient.observeTaskTerminal,
+        observeTaskAgent: relayClient.observeTaskAgent,
         sendTaskInput: relayClient.sendTaskInput,
         listCloudTasks: () => resolvedTaskIndex.listRecentTasks(authState.user.uid),
       }),

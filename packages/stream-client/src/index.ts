@@ -48,6 +48,7 @@ export interface StreamClientOptions {
   /** e.g. ws://127.0.0.1:48120/v1/stream */
   url: string;
   credential?: string;
+  credentialProvider?: () => Promise<string | undefined | null>;
   webSocketFactory?: WebSocketFactory;
   /** Reconnect backoff schedule; the last entry repeats. */
   reconnectDelaysMs?: number[];
@@ -182,7 +183,7 @@ export class StreamClient {
     this.socket = socket;
 
     socket.onopen = () => {
-      this.rawSend({ type: "auth", ...(this.options.credential ? { credential: this.options.credential } : {}) });
+      void this.sendAuthFrame();
     };
     socket.onmessage = (event) => {
       if (typeof event.data !== "string") return;
@@ -220,6 +221,14 @@ export class StreamClient {
       pending.reject(reason);
     }
     this.pendingRequests.clear();
+  }
+
+  private async sendAuthFrame(): Promise<void> {
+    const provided = this.options.credentialProvider
+      ? await this.options.credentialProvider()
+      : this.options.credential;
+    const credential = provided && provided.trim().length > 0 ? provided : undefined;
+    this.rawSend({ type: "auth", ...(credential ? { credential } : {}) });
   }
 
   private handleFrame(frame: ServerFrame): void {
@@ -340,4 +349,128 @@ function parseAttachmentKey(key: string): { taskId: string; kind: StreamKind } {
     kind: key.slice(0, separator) as StreamKind,
     taskId: key.slice(separator + 1),
   };
+}
+
+export interface RelayTunnelOptions {
+  relayUrl: string;
+  desktopId: string;
+  getIdentityToken(): Promise<string | null | undefined>;
+  webSocketFactory?: WebSocketFactory;
+  nextId?: () => string;
+}
+
+export function createRelayTunnelWebSocketFactory({
+  relayUrl,
+  desktopId,
+  getIdentityToken,
+  webSocketFactory = defaultFactory,
+  nextId = createSequentialTunnelId,
+}: RelayTunnelOptions): WebSocketFactory {
+  return () =>
+    new RelayTunnelSocket(
+      relayUrl,
+      desktopId,
+      getIdentityToken,
+      webSocketFactory,
+      nextId,
+    );
+}
+
+class RelayTunnelSocket implements WebSocketLike {
+  private readonly socket: WebSocketLike;
+  private readonly queued: string[] = [];
+  private ready = false;
+  private closed = false;
+  onopen: ((event: unknown) => void) | null = null;
+  onmessage: ((event: { data: unknown }) => void) | null = null;
+  onclose: ((event: unknown) => void) | null = null;
+  onerror: ((event: unknown) => void) | null = null;
+
+  constructor(
+    relayUrl: string,
+    private readonly desktopId: string,
+    private readonly getIdentityToken: () => Promise<string | null | undefined>,
+    webSocketFactory: WebSocketFactory,
+    private readonly nextId: () => string,
+  ) {
+    this.socket = webSocketFactory(relayUrl);
+    this.socket.onopen = () => {
+      void this.authenticate();
+    };
+    this.socket.onmessage = (event) => this.handleMessage(event.data);
+    this.socket.onerror = (event) => this.onerror?.(event);
+    this.socket.onclose = (event) => this.onclose?.(event);
+  }
+
+  send(data: string): void {
+    if (!this.ready) {
+      this.queued.push(data);
+      return;
+    }
+    this.socket.send(data);
+  }
+
+  close(): void {
+    this.closed = true;
+    this.socket.close();
+  }
+
+  private async authenticate(): Promise<void> {
+    try {
+      const token = await this.getIdentityToken();
+      if (!token) {
+        throw new Error("Sign in before opening a relay tunnel.");
+      }
+      this.socket.send(JSON.stringify({ type: "auth", id_token: token }));
+    } catch (error) {
+      this.onerror?.(error);
+      this.close();
+    }
+  }
+
+  private handleMessage(data: unknown): void {
+    if (this.ready) {
+      this.onmessage?.({ data });
+      return;
+    }
+    if (typeof data !== "string") {
+      return;
+    }
+
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(data) as Record<string, unknown>;
+    } catch {
+      return;
+    }
+
+    if (parsed.type === "auth_ok") {
+      this.socket.send(
+        JSON.stringify({
+          type: "tunnel_request",
+          id: this.nextId(),
+          desktopId: this.desktopId,
+        }),
+      );
+      return;
+    }
+
+    if (parsed.type === "tunnel_ready") {
+      this.ready = true;
+      this.onopen?.({});
+      for (const frame of this.queued.splice(0)) {
+        this.socket.send(frame);
+      }
+      return;
+    }
+
+    if (parsed.type === "response" && typeof parsed.error === "string") {
+      this.onerror?.(new Error(parsed.error));
+      if (!this.closed) this.close();
+    }
+  }
+}
+
+function createSequentialTunnelId(): string {
+  return `tunnel-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
