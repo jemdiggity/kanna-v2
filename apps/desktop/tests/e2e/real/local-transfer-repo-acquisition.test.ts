@@ -125,7 +125,7 @@ async function deleteSessionIfRunning(client: { deleteSession(): Promise<void> }
 async function createSourceTask(repoId: string, repoPath: string, prompt: string): Promise<string> {
   // Direct task creation is setup-only: the product has no UI path for creating an inert
   // transfer fixture task without also launching a real agent session.
-  const createResult = await callVueMethod(primary, "store.createItem", repoId, repoPath, prompt, "sdk");
+  const createResult = await callVueMethod(primary, "store.createItem", repoId, repoPath, prompt, "agent");
   if (isVueCallError(createResult)) {
     throw new Error(createResult.__error);
   }

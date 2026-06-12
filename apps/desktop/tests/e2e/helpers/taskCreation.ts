@@ -6,6 +6,7 @@ import type { WebDriverClient } from "./webdriver";
 export interface PipelineItemRow {
   id: string;
   agent_provider: string | null;
+  agent_type: string | null;
 }
 
 export async function waitForTaskCreated(
@@ -18,7 +19,7 @@ export async function waitForTaskCreated(
   while (Date.now() < deadline) {
     const rows = (await queryDb(
       client,
-      "SELECT id, agent_provider FROM pipeline_item WHERE prompt = ? ORDER BY created_at DESC LIMIT 1",
+      "SELECT id, agent_provider, agent_type FROM pipeline_item WHERE prompt = ? ORDER BY created_at DESC LIMIT 1",
       [prompt],
     )) as PipelineItemRow[];
     if (rows[0]?.id) {

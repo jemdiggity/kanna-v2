@@ -1,12 +1,13 @@
 import type { AgentProvider, PipelineItem } from "@kanna/db";
 import { normalizeAgentProviderCandidates } from "./agent-provider";
+import type { AgentExecutionType } from "./agentExecutionType";
 
 interface BuildPendingTaskPlaceholderOptions {
   id: string;
   repoId: string;
   prompt: string;
   branch: string;
-  agentType: "pty" | "sdk";
+  agentType: AgentExecutionType;
   requestedAgentProviders?: AgentProvider | AgentProvider[];
   pipelineName?: string;
   stage?: string;

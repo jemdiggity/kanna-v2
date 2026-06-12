@@ -106,7 +106,7 @@ describe("task base branch", () => {
     const localMainHead = await git(testRepoPath, ["rev-parse", "main"]);
     expect(localMainHead).not.toBe(originMainHead);
 
-    const createResult = await callVueMethod(client, "store.createItem", repoId, testRepoPath, prompt, "sdk");
+    const createResult = await callVueMethod(client, "store.createItem", repoId, testRepoPath, prompt, "agent");
     if (isVueCallError(createResult)) {
       throw new Error(createResult.__error);
     }

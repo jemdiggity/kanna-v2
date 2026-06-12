@@ -1839,6 +1839,7 @@ async function handleNewTaskSubmit(
   agentProvider: AgentProvider,
   pipelineName?: string,
   baseBranch?: string,
+  agentType: "pty" | "agent" = "pty",
 ) {
   if (!store.selectedRepoId) {
     if (sidebarRepos.value.length === 1) {
@@ -1876,7 +1877,7 @@ async function handleNewTaskSubmit(
   if (!repo) return;
   showNewTaskModal.value = false;
   try {
-    await store.createItem(store.selectedRepoId, repo.path, prompt, "pty", {
+    await store.createItem(store.selectedRepoId, repo.path, prompt, agentType, {
       agentProvider,
       pipelineName,
       baseBranch,
@@ -2401,7 +2402,7 @@ onBeforeUnmount(() => {
       :base-branches="availableBaseBranches"
       :default-base-branch="defaultBaseBranchName"
       :default-branch-name="repoDefaultBranchName"
-      @submit="(prompt, agentProvider, pipelineName, baseBranch) => handleNewTaskSubmit(prompt, agentProvider, pipelineName, baseBranch)"
+      @submit="(prompt, agentProvider, pipelineName, baseBranch, agentType) => handleNewTaskSubmit(prompt, agentProvider, pipelineName, baseBranch, agentType)"
       @cancel="showNewTaskModal = false"
     />
     <AddRepoModal

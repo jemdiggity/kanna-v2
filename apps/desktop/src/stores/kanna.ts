@@ -794,7 +794,7 @@ Use this branch as the default when the user does not specify a target branch. B
       repoId,
       repoPath,
       payload.task.prompt ?? "",
-      payload.task.agent_type === "sdk" ? "sdk" : "pty",
+      payload.task.agent_type === "agent" || payload.task.agent_type === "sdk" ? "agent" : "pty",
       {
         agentProvider: payload.task.agent_provider,
         baseBranch: resolveIncomingTransferBaseBranch(payload),
@@ -887,6 +887,7 @@ Use this branch as the default when the user does not specify a target branch. B
     devLingerTerminals: state.devLingerTerminals,
     appTheme: state.appTheme,
     codeTheme: state.codeTheme,
+    agentMessageStyle: state.agentMessageStyle,
     pendingSetupIds: state.pendingSetupIds,
     lastHiddenRepoId: state.lastHiddenRepoId,
     selectedRepo: selection.selectedRepo,

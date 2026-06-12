@@ -16,6 +16,7 @@ import { formatAppWindowTitle, type AppBuildInfo } from "./windowTitle";
 import { isTaskTearingDown } from "./taskStages";
 import { requireService, type StoreContext } from "./state";
 import { normalizeAppThemePreference, normalizeCodeThemePreference } from "../theme/theme";
+import type { AgentMessageStyle } from "./state";
 
 export interface InitApi {
   init: (db: DbHandle) => Promise<void>;
@@ -77,6 +78,11 @@ export function createInitApi(
     return !sessionId.startsWith("shell-") && !isTeardownSessionId(sessionId);
   }
 
+  function normalizeAgentMessageStyle(value: string | null): AgentMessageStyle {
+    if (value === "log" || value === "terminal") return value;
+    return "chat";
+  }
+
   async function loadPreferences() {
     const suspendAfter = await getSetting(context.requireDb(), "suspendAfterMinutes");
     if (suspendAfter) context.state.suspendAfterMinutes.value = parseInt(suspendAfter, 10) || 30;
@@ -92,6 +98,8 @@ export function createInitApi(
     context.state.appTheme.value = normalizeAppThemePreference(appTheme);
     const codeTheme = await getSetting(context.requireDb(), "codeTheme");
     context.state.codeTheme.value = normalizeCodeThemePreference(codeTheme);
+    const agentMessageStyle = await getSetting(context.requireDb(), "agentMessageStyle");
+    context.state.agentMessageStyle.value = normalizeAgentMessageStyle(agentMessageStyle);
   }
 
   async function savePreference(key: string, value: string) {

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { AgentProvider } from "@kanna/db";
-import AgentView from "./AgentView.vue";
+import AgentMessageView from "./AgentMessageView.vue";
 import TerminalView from "./TerminalView.vue";
 import { shouldEnableKittyKeyboard } from "../composables/terminalSessionRecovery";
 import { buildTerminalSpawnOptions } from "../composables/terminalSpawnOptions";
@@ -49,9 +49,8 @@ function buildSpawnOptions() {
         :agent-terminal="true"
       />
     </KeepAlive>
-    <!-- SDK mode: key by sessionId so switching tasks creates a new view -->
-    <AgentView
-      v-if="sessionId && agentType !== 'pty'"
+    <AgentMessageView
+      v-if="sessionId && agentType === 'agent'"
       :key="sessionId"
       :session-id="sessionId"
     />

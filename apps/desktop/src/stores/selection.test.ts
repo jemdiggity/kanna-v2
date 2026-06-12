@@ -66,7 +66,7 @@ function createItem(overrides: Partial<PipelineItem> = {}): PipelineItem {
     pr_url: null,
     branch: "task-task-1",
     closed_at: null,
-    agent_type: "sdk",
+    agent_type: "agent",
     agent_provider: "claude",
     activity: "idle",
     activity_changed_at: "2026-04-29T00:00:00.000Z",

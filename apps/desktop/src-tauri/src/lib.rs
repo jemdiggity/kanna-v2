@@ -4,12 +4,10 @@ mod subprocess_env;
 mod transfer_identity;
 mod transfer_sidecar;
 
-use commands::agent::AgentState;
 use commands::daemon::{
     ActiveAttachedStream, ActiveAttachedStreams, AttachedSessions, DaemonState, WindowSessionSizes,
 };
 use daemon_client::DaemonClient;
-use dashmap::DashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::menu::{AboutMetadataBuilder, MenuBuilder, MenuItemBuilder, SubmenuBuilder};
@@ -654,7 +652,6 @@ pub fn run() {
     }
 
     builder
-        .manage(Arc::new(DashMap::new()) as AgentState)
         .manage(Arc::new(Mutex::new(None)) as DaemonState)
         .manage(Arc::new(Mutex::new(std::collections::HashMap::<
             String,
@@ -796,11 +793,6 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             // Agent commands
-            commands::agent::create_agent_session,
-            commands::agent::agent_next_message,
-            commands::agent::agent_send_message,
-            commands::agent::agent_interrupt,
-            commands::agent::agent_close_session,
             commands::agent::get_claude_usage,
             // Daemon commands
             commands::daemon::spawn_session,
