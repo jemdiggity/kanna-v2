@@ -254,6 +254,51 @@ describe("NewTaskModal", () => {
     expect(wrapper.emitted("submit")).toEqual([["Ship pipeline picker", "claude", "review", "origin/main", "agent"]]);
   });
 
+  it("restores Themed after a PTY-only provider forced Raw but preserves explicit Raw", async () => {
+    const wrapper = mount(NewTaskModal, {
+      props: {
+        defaultAgentProvider: "claude",
+        pipelines: ["default"],
+        defaultPipeline: "default",
+        baseBranches: ["origin/main"],
+        defaultBaseBranch: "origin/main",
+      },
+      global: { mocks: { $t: (key: string) => key } },
+    });
+
+    await flushPromises();
+    await flushPromises();
+
+    expect(wrapper.get('[data-testid="display-mode-themed"]').classes()).toContain("selected");
+
+    await wrapper.get(".agent-provider").trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("Codex");
+
+    await wrapper.get(".agent-provider").trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("OpenCode");
+    expect(wrapper.get('[data-testid="display-mode-raw"]').classes()).toContain("selected");
+
+    await wrapper.get(".agent-provider").trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("Claude");
+    expect(wrapper.get('[data-testid="display-mode-themed"]').classes()).toContain("selected");
+
+    await wrapper.get('[data-testid="display-mode-raw"]').trigger("click");
+    await wrapper.get(".agent-provider").trigger("click");
+    await wrapper.get(".agent-provider").trigger("click");
+    await wrapper.get(".agent-provider").trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("Claude");
+    expect(wrapper.get('[data-testid="display-mode-raw"]').classes()).toContain("selected");
+
+    await wrapper.get("textarea").setValue("Keep raw");
+    await wrapper.get("textarea").trigger("keydown", { key: "Enter", metaKey: true });
+
+    expect(wrapper.emitted("submit")?.at(-1)).toEqual(["Keep raw", "claude", "default", "origin/main", "pty"]);
+  });
+
   it("supports keyboard navigation in the pipeline picker and returns focus to the toggle", async () => {
     const wrapper = mount(NewTaskModal, {
       props: {

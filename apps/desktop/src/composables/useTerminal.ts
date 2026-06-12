@@ -8,10 +8,6 @@ import { openUrl } from "@tauri-apps/plugin-opener"
 import { invoke } from "../invoke"
 import { listen } from "../listen"
 import { isTauri } from "../tauri-mock"
-import {
-  loadSessionRecoveryState,
-  shouldApplyRecoverySnapshot,
-} from "./sessionRecoveryState"
 import { isAppShortcut } from "./useKeyboardShortcuts"
 import {
   formatAttachFailureMessage,
@@ -24,7 +20,6 @@ import {
   isMissingDaemonSessionFailure,
   shouldRespawnAfterAttachFailure,
   shouldPushKittyKeyboardOnFreshAttach,
-  shouldRestoreRecoveryState,
   shouldRunTerminalDispose,
   shouldSupportKittyKeyboard,
   shouldSkipReconnect,
@@ -39,14 +34,16 @@ import {
   formatDroppedPathsForPaste,
   updateBracketedPasteMode,
 } from "./terminalMediaBridge"
-import { useToast } from "./useToast"
-import i18n from "../i18n"
 import { getAppErrorMessage } from "../appError"
 import { markTaskSwitchFirstOutput } from "../perf/taskSwitchPerf"
 import { registerE2ETerminalBuffer } from "../e2eTerminalBuffers"
-import { hasObservedDaemonReady, markDaemonReadyObserved } from "./daemonReadyState"
+import { markDaemonReadyObserved } from "./daemonReadyState"
 import { getTerminalTheme } from "../theme/theme"
 import { useThemeRuntime } from "../theme/runtime"
+import { getSharedStreamClient, onSharedStreamConnectionChange } from "./desktopStreamClient"
+import type { StreamClient } from "@kanna/stream-client"
+import { loadSessionRecoveryState } from "./sessionRecoveryState"
+import { useToast } from "./useToast"
 
 export interface SpawnOptions {
   cwd: string
@@ -67,152 +64,22 @@ const NATIVE_DROP_DEDUPE_WINDOW_MS = 100
 const INPUT_BATCH_WINDOW_MS = 8
 const BRACKETED_PASTE_CONTROL_SEQUENCE = /\u001b\[\?2004[hl]/
 
-interface TerminalOutputPayload {
-  session_id?: string
-  data_b64?: string
-  data?: unknown
-}
-
-interface TauriEventPayload<T> {
-  payload?: T
-}
-
-type TerminalOutputHandler = (payload: TerminalOutputPayload) => void
-type TerminalOutputEvent = TauriEventPayload<TerminalOutputPayload> | TerminalOutputPayload
-
-const terminalOutputSubscribers = new Map<string, Set<TerminalOutputHandler>>()
-let unlistenSharedTerminalOutput: (() => void) | null = null
-let sharedTerminalOutputListenPromise: Promise<void> | null = null
-
-function hasEventPayload(event: TerminalOutputEvent): event is TauriEventPayload<TerminalOutputPayload> {
-  return Object.prototype.hasOwnProperty.call(event, "payload")
-}
-
-function payloadFromTerminalOutputEvent(event: TerminalOutputEvent): TerminalOutputPayload {
-  if (hasEventPayload(event)) {
-    return event.payload ?? {}
-  }
-  return event
-}
-
-function terminalOutputSubscriberCount(): number {
-  let count = 0
-  for (const handlers of terminalOutputSubscribers.values()) {
-    count += handlers.size
-  }
-  return count
-}
-
-function isByteArray(data: unknown): data is number[] {
-  return Array.isArray(data) && data.every((value) => typeof value === "number")
-}
-
-async function ensureSharedTerminalOutputListener(): Promise<void> {
-  if (unlistenSharedTerminalOutput || sharedTerminalOutputListenPromise) {
-    return sharedTerminalOutputListenPromise ?? Promise.resolve()
-  }
-
-  sharedTerminalOutputListenPromise = listen(
-    "terminal_output",
-    (event: TerminalOutputEvent) => {
-      const payload = payloadFromTerminalOutputEvent(event)
-      const sid = payload.session_id
-      if (!sid) return
-      const handlers = terminalOutputSubscribers.get(sid)
-      if (!handlers) return
-      for (const handler of [...handlers]) {
-        handler(payload)
-      }
-    },
-  ).then((unlisten) => {
-    unlistenSharedTerminalOutput = () => {
-      unlisten()
-      unlistenSharedTerminalOutput = null
-      sharedTerminalOutputListenPromise = null
-    }
-    if (terminalOutputSubscriberCount() === 0) {
-      unlistenSharedTerminalOutput()
-    }
-  }).catch((error) => {
-    sharedTerminalOutputListenPromise = null
-    console.warn("[terminal][event] failed to register shared terminal_output listener", error)
-  })
-
-  return sharedTerminalOutputListenPromise
-}
-
-async function subscribeTerminalOutput(
-  sessionIds: readonly string[],
-  handler: TerminalOutputHandler,
-): Promise<() => void> {
-  for (const sid of sessionIds) {
-    const handlers = terminalOutputSubscribers.get(sid) ?? new Set<TerminalOutputHandler>()
-    handlers.add(handler)
-    terminalOutputSubscribers.set(sid, handlers)
-  }
-
-  let active = true
-  const unsubscribe = () => {
-    if (!active) return
-    active = false
-    for (const sid of sessionIds) {
-      const handlers = terminalOutputSubscribers.get(sid)
-      if (!handlers) continue
-      handlers.delete(handler)
-      if (handlers.size === 0) {
-        terminalOutputSubscribers.delete(sid)
-      }
-    }
-    if (terminalOutputSubscriberCount() === 0 && unlistenSharedTerminalOutput) {
-      unlistenSharedTerminalOutput()
-    }
-  }
-
-  await ensureSharedTerminalOutputListener()
-  if (!active) {
-    unsubscribe()
-  }
-
-  return unsubscribe
-}
-
 export function resetTerminalOutputSubscriptionsForTests(): void {
-  terminalOutputSubscribers.clear()
-  if (unlistenSharedTerminalOutput) {
-    unlistenSharedTerminalOutput()
-  }
-  unlistenSharedTerminalOutput = null
-  sharedTerminalOutputListenPromise = null
+  // Kept as a compatibility test hook; terminal output no longer uses Tauri
+  // event subscriptions after the KSP migration.
 }
 
 export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, options?: TerminalOptions) {
-  const toast = useToast()
   const { effectiveCodeTheme } = useThemeRuntime()
+  const toast = useToast()
   const terminal = ref<Terminal | null>(null)
   const fitAddon = new FitAddon()
   const instanceId = Math.random().toString(36).slice(2, 10)
   const outputDecoder = new TextDecoder()
-  interface RecoverySnapshotFetchResult {
-    snapshot: Awaited<ReturnType<typeof loadSessionRecoveryState>>
-    failed: boolean
-  }
-  interface TerminalSnapshotEventPayload {
-    session_id: string
-    snapshot: {
-      version: number
-      rows: number
-      cols: number
-      cursor_row: number
-      cursor_col: number
-      cursor_visible: boolean
-      vt: string
-    }
-  }
-  let unlistenOutput: (() => void) | null = null
-  let unlistenSnapshot: (() => void) | null = null
   let unlistenExit: (() => void) | null = null
   let unlistenDaemonReady: (() => void) | null = null
   let unlistenStreamLost: (() => void) | null = null
+  let unlistenSharedStreamConnection: (() => void) | null = null
   let unregisterE2ETerminalBuffer: (() => void) | null = null
   let container: HTMLElement | null = null
   let cleanupContainerEvents: (() => void) | null = null
@@ -224,6 +91,7 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
   let inputWriteChain: Promise<void> = Promise.resolve()
   let inputWriteInFlight = false
   let attached = false
+  let terminalStreamAttached = false
   let connecting = false
   let paused = false
   let connectionGeneration = 0
@@ -239,6 +107,8 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
   let pendingClipboardImageLoad: Promise<ClipboardImagePayload | null> | null = null
   let lastNativeDropSignature: string | null = null
   let lastNativeDropAt = 0
+  let streamClient: StreamClient | null = null
+  let respawningAfterAttachFailure = false
 
   function getLiveTerminal(): Terminal | null {
     return disposed ? null : terminal.value
@@ -335,11 +205,31 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
     pendingClipboardImageExpiresAt = Date.now() + CLIPBOARD_IMAGE_TTL_MS
   }
 
+  function bytesToBase64(bytes: Uint8Array): string {
+    let binary = ""
+    for (const byte of bytes) {
+      binary += String.fromCharCode(byte)
+    }
+    return btoa(binary)
+  }
+
+  function base64ToBytes(dataB64: string): Uint8Array {
+    const binary = atob(dataB64)
+    const bytes = new Uint8Array(binary.length)
+    for (let i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i)
+    }
+    return bytes
+  }
+
+  async function getTerminalStreamClient(): Promise<StreamClient> {
+    streamClient ??= await getSharedStreamClient()
+    return streamClient
+  }
+
   async function sendInputBytesNow(bytes: Uint8Array) {
-    await invoke("send_input", {
-      sessionId,
-      data: Array.from(bytes),
-    })
+    const client = await getTerminalStreamClient()
+    client.sendTermInput(sessionId, bytesToBase64(bytes))
   }
 
   function queueInputWrite(bytes: Uint8Array): Promise<void> {
@@ -794,7 +684,7 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
     // otherwise the invoke fails silently and the resize is lost.
     term.onResize(({ cols, rows }) => {
       if (attached) {
-        invoke("resize_session", { sessionId, cols, rows })
+        streamClient?.sendTermResize(sessionId, cols, rows)
       }
     })
 
@@ -867,6 +757,7 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
   }
 
   async function resizeLiveSession(cols: number, rows: number, forceDouble: boolean) {
+    const client = await getTerminalStreamClient()
     if (forceDouble) {
       const shrinkCols = Math.max(1, cols - 1)
       console.warn("[terminal][connect] resize:double", {
@@ -875,8 +766,8 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
         cols,
         rows,
       })
-      await invoke("resize_session", { sessionId, cols: shrinkCols, rows }).catch(() => {})
-      await invoke("resize_session", { sessionId, cols, rows }).catch(() => {})
+      client.sendTermResize(sessionId, shrinkCols, rows)
+      client.sendTermResize(sessionId, cols, rows)
       return
     }
 
@@ -886,81 +777,7 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
       cols,
       rows,
     })
-    await invoke("resize_session", { sessionId, cols, rows }).catch(() => {})
-  }
-
-  async function fetchDaemonSnapshot(): Promise<RecoverySnapshotFetchResult> {
-    try {
-      console.warn("[terminal][recovery] fetch:start", {
-        sessionId,
-        attached,
-        connecting,
-        hasAttachedOnce,
-      })
-      const snapshot = await loadSessionRecoveryState(sessionId)
-      console.warn("[terminal][recovery] fetch:done", {
-        sessionId,
-        hasSnapshot: snapshot != null,
-        cols: snapshot?.cols ?? null,
-        rows: snapshot?.rows ?? null,
-        sequence: snapshot?.sequence ?? null,
-        serializedLength: snapshot?.serialized.length ?? null,
-      })
-      return { snapshot, failed: false }
-    } catch (error) {
-      console.error("[terminal] Failed to load recovery snapshot:", error)
-      return { snapshot: null, failed: true }
-    }
-  }
-
-  async function taskWorktreeExists(): Promise<boolean> {
-    const worktreePath = options?.worktreePath
-    if (!worktreePath) return false
-    try {
-      return await invoke<boolean>("file_exists", { path: worktreePath })
-    } catch (error) {
-      console.warn("[terminal][connect] worktree existence check failed", {
-        sessionId,
-        worktreePath,
-        error: getAppErrorMessage(error),
-      })
-      return false
-    }
-  }
-
-  async function applyRecoveryStateIfNeeded(
-    recoveryState: Awaited<ReturnType<typeof loadSessionRecoveryState>>,
-    shouldApplyReconnectEffects: boolean,
-  ): Promise<boolean> {
-    if (
-      !terminal.value ||
-      !shouldApplyReconnectEffects ||
-      !recoveryState ||
-      !shouldApplyRecoverySnapshot(recoveryState, {
-        cols: terminal.value.cols,
-        rows: terminal.value.rows,
-      })
-    ) {
-      return false
-    }
-
-    const applyStartedAt = performance.now()
-    console.warn("[terminal][connect] recovery:apply", {
-      sessionId,
-      sequence: recoveryState.sequence,
-      serializedLength: recoveryState.serialized.length,
-    })
-    const recoveryTerminal = terminal.value
-    recoveryTerminal.reset()
-    restoreTerminalModesFromSnapshot(recoveryState.serialized)
-    recoveryTerminal.write(recoveryState.serialized, () => {
-      console.warn("[terminal][connect] recovery:applied", {
-        sessionId,
-        durationMs: Math.round(performance.now() - applyStartedAt),
-        sequence: recoveryState.sequence,
-      })
-    })
-    return true
+    client.sendTermResize(sessionId, cols, rows)
   }
 
   async function connectSession() {
@@ -969,11 +786,10 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
     if (shouldSkipReconnect(connecting, attached)) return
     const generation = connectionGeneration
     connecting = true
-    const recoveryMode = getTerminalRecoveryMode(spawnOptions, options)
     const shouldApplyReconnectEffects = hasAttachedOnce
     console.warn("[terminal][connect] start", {
       sessionId,
-      recoveryMode,
+      recoveryMode: getTerminalRecoveryMode(spawnOptions, options),
       attached,
       connecting,
       hasAttachedOnce,
@@ -982,23 +798,61 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
       shouldApplyReconnectEffects,
       agentProvider: options?.agentProvider ?? null,
     })
-    let recoveryState = null as Awaited<ReturnType<typeof loadSessionRecoveryState>>
-    let shouldSpawnRecoverySession = false
-    let appliedRecoveryState = false
 
     try {
-      const shouldHydrateFromSnapshot = true
-      await invoke("attach_session_with_snapshot", { sessionId })
-      if (paused || generation !== connectionGeneration) {
-        await invoke("detach_session", { sessionId }).catch(() => {})
-        return
+      const client = await getTerminalStreamClient()
+      if (paused || generation !== connectionGeneration) return
+
+      if (!hasAttachedOnce && getTerminalRecoveryMode(spawnOptions, options) === "spawn-on-missing" && spawnOptions) {
+        const liveTerminal = getLiveTerminal()
+        if (liveTerminal) {
+          await ensureFitted()
+          const fittedTerminal = getLiveTerminal()
+          if (!fittedTerminal) return
+          const { cols, rows } = fittedTerminal
+          await spawnOptions.spawnFn(sessionId, spawnOptions.cwd, spawnOptions.prompt, cols, rows)
+        }
       }
+
+      if (!terminalStreamAttached) {
+        client.attachTerminal(sessionId, {
+          onSnapshot: (_cols, _rows, dataB64) => {
+            const liveTerminal = getLiveTerminal()
+            if (!liveTerminal) return
+            const vt = new TextDecoder().decode(base64ToBytes(dataB64))
+            if (!preserveRecoveredScrollbackForNextSnapshot) {
+              liveTerminal.reset()
+            }
+            preserveRecoveredScrollbackForNextSnapshot = false
+            restoreTerminalModesFromSnapshot(vt)
+            liveTerminal.write(vt)
+          },
+          onOutput: (dataB64) => {
+            const liveTerminal = getLiveTerminal()
+            if (!liveTerminal) return
+            markTaskSwitchFirstOutput(sessionId)
+            const bytes = base64ToBytes(dataB64)
+            handleTerminalOutputControlSequences(bytes)
+            liveTerminal.write(bytes)
+          },
+          onSessionExit: (code) => {
+            attached = false
+            sessionExited = true
+            terminal.value?.write(`\r\n[Process exited with code ${code}]\r\n`)
+          },
+          onError: (code, message) => {
+            void handleAttachError({ code, message })
+          },
+        })
+        terminalStreamAttached = true
+      }
+
       console.warn("[terminal][connect] attach:ok", {
         sessionId,
         instanceId,
         shouldApplyReconnectEffects,
       })
-      // AttachSnapshot succeeded — session was alive in daemon.
+
       const liveTerminal = getLiveTerminal()
       if (liveTerminal) {
         const reconnectKeyboardPush = getReconnectKeyboardPush({
@@ -1018,136 +872,24 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
           await waitForReconnectResizeDelay()
           await resizeLiveSession(cols, rows, shouldForceDoubleResizeOnReconnect(options))
         } else {
-          await resizeLiveSession(
-            cols,
-            rows,
-            shouldHydrateFromSnapshot && shouldForceDoubleResizeOnReconnect(options),
-          )
+          await resizeLiveSession(cols, rows, shouldForceDoubleResizeOnReconnect(options))
         }
       }
+
       attached = true
       hasAttachedOnce = true
       sessionExited = false
-      return
     } catch (e) {
       const msg = getAppErrorMessage(e)
       console.warn("[terminal][connect] attach:error", {
         sessionId,
         instanceId,
-        recoveryMode,
         error: msg,
       })
-      if (recoveryMode === "attach-only") {
-        if (
-          shouldRestoreRecoveryState(spawnOptions, options) &&
-          (isMissingDaemonSessionFailure(e) || shouldRespawnAfterAttachFailure(
-            e,
-            hasAttachedOnce,
-            false,
-            spawnOptions,
-            options,
-          ))
-        ) {
-          await ensureFitted()
-          if (!getLiveTerminal()) return
-          const recoveryFetchResult = await fetchDaemonSnapshot()
-          recoveryState = recoveryFetchResult.snapshot
-          appliedRecoveryState = await applyRecoveryStateIfNeeded(
-            recoveryState,
-            true,
-          )
-        }
-        let missingInitialTaskWorktreeExists = false
-        if (!hasAttachedOnce && isMissingDaemonSessionFailure(e)) {
-          missingInitialTaskWorktreeExists = await taskWorktreeExists()
-        }
-
-        const shouldRespawnMissingInitialTaskSession =
-          !hasAttachedOnce &&
-          isMissingDaemonSessionFailure(e) &&
-          recoveryState == null &&
-          hasObservedDaemonReady() &&
-          missingInitialTaskWorktreeExists
-
-        const shouldWaitForDaemonReadyBeforeInitialRespawn =
-          !hasAttachedOnce &&
-          isMissingDaemonSessionFailure(e) &&
-          !hasObservedDaemonReady() &&
-          missingInitialTaskWorktreeExists
-
-        if (shouldWaitForDaemonReadyBeforeInitialRespawn) {
-          console.warn("[terminal][connect] missing_initial_session:waiting_for_daemon_ready", {
-            sessionId,
-            instanceId,
-          })
-          return
-        }
-
-        if (shouldRespawnMissingInitialTaskSession) {
-          console.warn("[terminal][connect] missing_initial_session:respawn", {
-            sessionId,
-            instanceId,
-          })
-          toast.warning(i18n.global.t("toasts.sessionRespawned"))
-          shouldSpawnRecoverySession = true
-        } else if (!hasAttachedOnce && isMissingDaemonSessionFailure(e)) {
-          terminal.value?.write(formatMissingInitialTaskSessionMessage())
-        }
-        if (hasAttachedOnce || !isMissingDaemonSessionFailure(e)) {
-          terminal.value?.write(formatAttachFailureMessage(msg))
-        }
-        if (shouldRespawnAfterAttachFailure(
-          e,
-          hasAttachedOnce,
-          recoveryState != null,
-          spawnOptions,
-          options,
-        )) {
-          console.warn("[terminal][connect] pty_lost:respawn", {
-            sessionId,
-            error: msg,
-            hasAttachedOnce,
-            hasRecoveryState: recoveryState != null,
-          })
-          toast.warning(i18n.global.t(getRespawnToastKey(e, recoveryState != null)))
-          shouldSpawnRecoverySession = true
-        } else if (!shouldSpawnRecoverySession) {
-          return
-        }
-      } else {
-        shouldSpawnRecoverySession = true
+      if (isMissingDaemonSessionFailure(e) && getTerminalRecoveryMode(spawnOptions, options) === "spawn-on-missing") {
+        terminalStreamAttached = false
       }
-      // No existing session — spawn a new one if we have spawn options
-      if (shouldSpawnRecoverySession && spawnOptions && getLiveTerminal()) {
-        if (appliedRecoveryState) {
-          preserveRecoveredScrollbackForNextSnapshot = true
-        }
-        await ensureFitted()
-        const spawnTerminal = getLiveTerminal()
-        if (!spawnTerminal) return
-        const { cols, rows } = spawnTerminal
-        try {
-          await spawnOptions.spawnFn(sessionId, spawnOptions.cwd, spawnOptions.prompt, cols, rows)
-        } catch (e) {
-          preserveRecoveredScrollbackForNextSnapshot = false
-          const msg = e instanceof Error ? e.message : String(e)
-          console.error("[terminal] PTY spawn failed:", e)
-          spawnTerminal.write(`\r\n\x1b[31mFailed to start agent: ${msg}\x1b[0m\r\n`)
-          return
-        }
-        await invoke("attach_session_with_snapshot", { sessionId })
-        if (paused || generation !== connectionGeneration) {
-          await invoke("detach_session", { sessionId }).catch(() => {})
-          return
-        }
-        attached = true
-        hasAttachedOnce = true
-        sessionExited = false
-        const attachedTerminal = getLiveTerminal()
-        if (attachedTerminal && shouldPushKittyKeyboardOnFreshAttach(options)) {
-          attachedTerminal.write("\x1b[>1u")
-        }
-      }
+      terminal.value?.write(formatAttachFailureMessage(msg))
     } finally {
       connecting = false
       console.warn("[terminal][connect] end", {
@@ -1160,6 +902,58 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
     }
   }
 
+  async function handleAttachError(error: { code?: string; message: string }) {
+    if (respawningAfterAttachFailure) return
+    const normalizedError = {
+      ...error,
+      code: error.code === "no_session" ? "session_not_found" : error.code,
+    }
+    attached = false
+    terminalStreamAttached = false
+
+    const recoveryState = await loadSessionRecoveryState(sessionId).catch(() => null)
+    const hasRecoveryState = Boolean(recoveryState?.serialized)
+    if (!shouldRespawnAfterAttachFailure(normalizedError, hasAttachedOnce, hasRecoveryState, spawnOptions, options)) {
+      terminal.value?.write(
+        isMissingDaemonSessionFailure(normalizedError) && getTerminalRecoveryMode(spawnOptions, options) === "attach-only"
+          ? formatMissingInitialTaskSessionMessage()
+          : formatAttachFailureMessage(normalizedError.message)
+      )
+      return
+    }
+
+    const liveTerminal = getLiveTerminal()
+    if (!spawnOptions || !liveTerminal) return
+
+    respawningAfterAttachFailure = true
+    try {
+      if (recoveryState?.serialized) {
+        liveTerminal.reset()
+        restoreTerminalModesFromSnapshot(recoveryState.serialized)
+        liveTerminal.write(recoveryState.serialized)
+        preserveRecoveredScrollbackForNextSnapshot = true
+      }
+      toast.warning(getRespawnToastKey(normalizedError, hasRecoveryState))
+      await ensureFitted()
+      const fittedTerminal = getLiveTerminal()
+      if (!fittedTerminal) return
+      await spawnOptions.spawnFn(
+        sessionId,
+        spawnOptions.cwd,
+        spawnOptions.prompt,
+        fittedTerminal.cols,
+        fittedTerminal.rows,
+      )
+      attached = false
+      terminalStreamAttached = false
+      connecting = false
+      sessionExited = false
+      await connectSession()
+    } finally {
+      respawningAfterAttachFailure = false
+    }
+  }
+
   async function startListening() {
     paused = false
     connectionGeneration += 1
@@ -1169,7 +963,6 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
       sessionId,
       teardownId,
       instanceId,
-      hasOutputListener: unlistenOutput != null,
       hasExitListener: unlistenExit != null,
       hasDaemonReadyListener: unlistenDaemonReady != null,
       hasStreamLostListener: unlistenStreamLost != null,
@@ -1177,70 +970,6 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
       connecting,
       hasAttachedOnce,
     })
-
-    if (!unlistenOutput) {
-      let outputChunkCount = 0
-      const outputUnlisten = await subscribeTerminalOutput([sessionId, teardownId], (payload) => {
-        const sid = payload.session_id
-        if (!sid || !terminal.value) return
-        outputChunkCount += 1
-        if (sid === sessionId) {
-          markTaskSwitchFirstOutput(sessionId)
-        }
-
-        if (payload.data_b64) {
-          const binary = atob(payload.data_b64)
-          const bytes = new Uint8Array(binary.length)
-          for (let i = 0; i < binary.length; i++) {
-            bytes[i] = binary.charCodeAt(i)
-          }
-          handleTerminalOutputControlSequences(bytes)
-          if (outputChunkCount <= 5) {
-            console.warn("[terminal][output] chunk", {
-              sessionId,
-              instanceId,
-              chunk: outputChunkCount,
-              byteLength: bytes.length,
-            })
-          }
-          terminal.value.write(bytes)
-        } else if (isByteArray(payload.data)) {
-          const bytes = new Uint8Array(payload.data)
-          handleTerminalOutputControlSequences(bytes)
-          if (outputChunkCount <= 5) {
-            console.warn("[terminal][output] chunk", {
-              sessionId,
-              instanceId,
-              chunk: outputChunkCount,
-              byteLength: payload.data.length,
-            })
-          }
-          terminal.value.write(bytes)
-        }
-      })
-      if (!acceptRegisteredListener(listeningGeneration, "terminal_output", outputUnlisten)) return
-      unlistenOutput = outputUnlisten
-    }
-
-    if (!unlistenSnapshot) {
-      const snapshotUnlisten = await listen("terminal_snapshot", (event) => {
-        const payload = event.payload as TerminalSnapshotEventPayload | undefined
-        const sid = payload?.session_id
-        if (!payload?.snapshot) return
-        if ((sid === sessionId || sid === teardownId) && terminal.value) {
-          const preserveRecoveredScrollback =
-            sid === sessionId && preserveRecoveredScrollbackForNextSnapshot
-          preserveRecoveredScrollbackForNextSnapshot = false
-          if (!preserveRecoveredScrollback) {
-            terminal.value.reset()
-          }
-          restoreTerminalModesFromSnapshot(payload.snapshot.vt)
-          terminal.value.write(payload.snapshot.vt)
-        }
-      })
-      if (!acceptRegisteredListener(listeningGeneration, "terminal_snapshot", snapshotUnlisten)) return
-      unlistenSnapshot = snapshotUnlisten
-    }
 
     if (!unlistenExit) {
       const exitUnlisten = await listen(
@@ -1286,6 +1015,7 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
         const sid = event.payload?.session_id
         if (sid === sessionId) {
           attached = false
+          terminalStreamAttached = false
           console.warn("[terminal][event] session_stream_lost", {
             sessionId,
             instanceId,
@@ -1304,6 +1034,17 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
       unlistenStreamLost = streamLostUnlisten
     }
 
+    if (!unlistenSharedStreamConnection) {
+      unlistenSharedStreamConnection = onSharedStreamConnectionChange((connected) => {
+        if (!connected || paused || disposed || !hasAttachedOnce) return
+        attached = true
+        const liveTerminal = getLiveTerminal()
+        if (!liveTerminal || connecting) return
+        fit()
+        void resizeLiveSession(liveTerminal.cols, liveTerminal.rows, shouldForceDoubleResizeOnReconnect(options))
+      })
+    }
+
     if (!isCurrentListeningGeneration(listeningGeneration)) return
     await connectSession()
   }
@@ -1314,29 +1055,10 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
     void flushQueuedInput()
     const shouldDetach = attached || connecting || hasAttachedOnce
     attached = false
+    terminalStreamAttached = false
     connecting = false
     if (shouldDetach) {
-      invoke("detach_session", { sessionId }).catch((error) => {
-        console.warn("[terminal] Failed to detach session during pause:", error)
-      })
-    }
-    if (unlistenOutput) {
-      unlistenOutput()
-      console.warn("[terminal][instance] listener:remove", {
-        sessionId,
-        instanceId,
-        event: "terminal_output",
-      })
-      unlistenOutput = null
-    }
-    if (unlistenSnapshot) {
-      unlistenSnapshot()
-      console.warn("[terminal][instance] listener:remove", {
-        sessionId,
-        instanceId,
-        event: "terminal_snapshot",
-      })
-      unlistenSnapshot = null
+      streamClient?.detach(sessionId, "terminal")
     }
     if (unlistenExit) {
       unlistenExit()
@@ -1364,6 +1086,10 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
         event: "session_stream_lost",
       })
       unlistenStreamLost = null
+    }
+    if (unlistenSharedStreamConnection) {
+      unlistenSharedStreamConnection()
+      unlistenSharedStreamConnection = null
     }
   }
 
@@ -1394,20 +1120,17 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
       attached,
       connecting,
       hasAttachedOnce,
-      hasOutputListener: unlistenOutput != null,
-      hasSnapshotListener: unlistenSnapshot != null,
       hasExitListener: unlistenExit != null,
       hasDaemonReadyListener: unlistenDaemonReady != null,
       hasStreamLostListener: unlistenStreamLost != null,
     })
     void flushQueuedInput()
     if (attached || connecting || hasAttachedOnce) {
-      invoke("detach_session", { sessionId }).catch((error) => {
-        console.warn("[terminal] Failed to detach session during dispose:", error)
-      })
+      streamClient?.detach(sessionId, "terminal")
     }
     disposed = true
     attached = false
+    terminalStreamAttached = false
     fileExistsCache.clear()
     if (fitRafId) cancelAnimationFrame(fitRafId)
     if (pendingInputFlushTimer) {
@@ -1429,22 +1152,6 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
     hasObservedBracketedPasteMode = false
     lastNativeDropSignature = null
     lastNativeDropAt = 0
-    if (unlistenOutput) {
-      unlistenOutput()
-      console.warn("[terminal][instance] listener:remove", {
-        sessionId,
-        instanceId,
-        event: "terminal_output",
-      })
-    }
-    if (unlistenSnapshot) {
-      unlistenSnapshot()
-      console.warn("[terminal][instance] listener:remove", {
-        sessionId,
-        instanceId,
-        event: "terminal_snapshot",
-      })
-    }
     if (unlistenExit) {
       unlistenExit()
       console.warn("[terminal][instance] listener:remove", {
@@ -1469,13 +1176,15 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
         event: "session_stream_lost",
       })
     }
+    if (unlistenSharedStreamConnection) {
+      unlistenSharedStreamConnection()
+    }
     terminal.value?.dispose()
     terminal.value = null
-    unlistenOutput = null
-    unlistenSnapshot = null
     unlistenExit = null
     unlistenDaemonReady = null
     unlistenStreamLost = null
+    unlistenSharedStreamConnection = null
     container = null
     console.warn("[terminal][instance] dispose:end", {
       sessionId,
@@ -1492,19 +1201,16 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
   async function redraw() {
     if (!terminal.value) return
     fit()
-    // Try resize — if it fails, the session is dead → re-run startListening
+    // Try resize; if it fails, the session is dead, so re-run startListening.
     try {
       const { cols, rows } = terminal.value
-      await invoke("resize_session", { sessionId, cols, rows })
+      await resizeLiveSession(cols, rows, false)
     } catch {
-      // Session dead — re-spawn
       await startListening()
       return
     }
-    // Session alive — just send SIGWINCH
     const { cols, rows } = terminal.value
-    await invoke("resize_session", { sessionId, cols: cols - 1, rows }).catch(() => {})
-    await invoke("resize_session", { sessionId, cols, rows }).catch(() => {})
+    await resizeLiveSession(cols, rows, true).catch(() => {})
   }
 
   /** When a hidden terminal becomes visible again, verify the session is still
@@ -1519,7 +1225,7 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
     fit()
     try {
       const { cols, rows } = terminal.value
-      await invoke("resize_session", { sessionId, cols, rows })
+      await resizeLiveSession(cols, rows, false)
     } catch {
       attached = false
       await startListening()

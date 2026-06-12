@@ -112,18 +112,13 @@ async function waitForFocusedTerminalReady(
     latest = await client.executeSync(
       `const hook = window.__KANNA_E2E__;
        return {
-         activeTerminalOutputListeners: hook?.appMetrics?.snapshot?.().activeListenCounts?.terminal_output ?? 0,
          sessionIds: hook?.terminalBuffers?.sessionIds?.() ?? [],
        };`,
     );
     const state = latest as {
-      activeTerminalOutputListeners?: number;
       sessionIds?: string[];
     } | null;
-    if (
-      (state?.activeTerminalOutputListeners ?? 0) > 0 &&
-      (state?.sessionIds ?? []).includes(sessionId)
-    ) {
+    if ((state?.sessionIds ?? []).includes(sessionId)) {
       return;
     }
     await sleep(200);

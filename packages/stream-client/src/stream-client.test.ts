@@ -169,6 +169,62 @@ describe("StreamClient", () => {
     client.close();
   });
 
+  it("reattaches terminal streams after reconnect and routes snapshot before output", () => {
+    const { client, socket } = connectedClient();
+    const events: string[] = [];
+
+    client.attachTerminal("task-pty", {
+      onSnapshot: (_cols, _rows, dataB64) => events.push(`snapshot:${dataB64}`),
+      onOutput: (dataB64) => events.push(`output:${dataB64}`),
+    });
+    expect(socket.sent.at(-1)).toEqual({
+      type: "attach",
+      task_id: "task-pty",
+      kind: "terminal",
+      from_seq: 0,
+    });
+
+    socket.receive({
+      type: "term_snapshot",
+      task_id: "task-pty",
+      cols: 80,
+      rows: 24,
+      data_b64: "c25hcA==",
+    });
+    socket.receive({
+      type: "term_output",
+      task_id: "task-pty",
+      data_b64: "bGl2ZQ==",
+    });
+
+    expect(events).toEqual(["snapshot:c25hcA==", "output:bGl2ZQ=="]);
+
+    socket.drop();
+    vi.advanceTimersByTime(250);
+    const socket2 = sockets[1];
+    socket2.open();
+    socket2.receive({ type: "auth_ok" });
+
+    expect(socket2.sent).toEqual([
+      { type: "auth" },
+      { type: "attach", task_id: "task-pty", kind: "terminal", from_seq: 0 },
+    ]);
+    client.close();
+  });
+
+  it("sends terminal input and resize frames over the stream", () => {
+    const { client, socket } = connectedClient();
+
+    client.sendTermInput("task-pty", "YQ==");
+    client.sendTermResize("task-pty", 120, 40);
+
+    expect(socket.sent.slice(1)).toEqual([
+      { type: "term_input", task_id: "task-pty", data_b64: "YQ==" },
+      { type: "term_resize", task_id: "task-pty", cols: 120, rows: 40 },
+    ]);
+    client.close();
+  });
+
   it("stops reconnecting after close", () => {
     const { client, socket } = connectedClient();
     client.close();

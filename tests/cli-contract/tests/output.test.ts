@@ -19,12 +19,13 @@ describe("output format", () => {
     expect(resultMsg.duration_ms).toBeGreaterThan(0);
   });
 
-  it("result subtype is error_max_turns with --max-turns 1", async () => {
-    // Contract: Claude treats hitting max_turns as an error, not success
+  it("result subtype is success with --max-turns 1 when the prompt completes in one turn", async () => {
+    // Current Claude CLI behavior: max_turns still limits the run, but a
+    // prompt that completes within that turn reports success.
     const result = await runClaude({ prompt: "Say OK" });
     if (isClaudeUnavailable(result)) return;
     const resultMsg = result.lines.find((l) => l.type === "result") as any;
-    expect(resultMsg.subtype).toBe("error_max_turns");
+    expect(resultMsg.subtype).toBe("success");
   });
 
   it("system init message has session_id and cwd", async () => {
