@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import type { ClientFrame, ServerFrame } from "@kanna/agent-protocol";
 import {
   createLanTransport,
   type FetchLike,
@@ -16,7 +17,8 @@ describe("createLanTransport", () => {
           repoId: "repo-1",
           title: "Refactor mobile shell",
           stage: "in progress",
-          snippet: "Latest agent output preview"
+          snippet: "Latest agent output preview",
+          agentType: "agent"
         }]
       })
       .mockResolvedValueOnce({
@@ -77,7 +79,8 @@ describe("createLanTransport", () => {
         repoId: "repo-1",
         title: "Refactor mobile shell",
         stage: "in progress",
-        snippet: "Latest agent output preview"
+        snippet: "Latest agent output preview",
+        agentType: "agent"
       }
     ]);
     await expect(transport.listRepos()).resolves.toEqual([
@@ -173,6 +176,7 @@ describe("createLanTransport", () => {
   it("observes task terminal output over the LAN websocket route", () => {
     const fetchImpl = vi.fn<FetchLike>();
     const socket: WebSocketLike = {
+      send: vi.fn(),
       close: vi.fn(),
       onopen: null,
       onclose: null,
@@ -216,6 +220,93 @@ describe("createLanTransport", () => {
       { type: "ready", taskId: "task-1" },
       { type: "output", taskId: "task-1", text: "hello from daemon" },
       { type: "exit", taskId: "task-1", code: 0 }
+    ]);
+    expect(socket.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("observes agent events over the LAN KSP websocket route", () => {
+    const fetchImpl = vi.fn<FetchLike>();
+    const sent: ClientFrame[] = [];
+    const socket: WebSocketLike = {
+      send: vi.fn((payload: string) => {
+        sent.push(JSON.parse(payload) as ClientFrame);
+      }),
+      close: vi.fn(),
+      onopen: null,
+      onclose: null,
+      onerror: null,
+      onmessage: null
+    };
+    const socketFactory = vi.fn(() => socket);
+    const transport = createLanTransport(
+      "http://127.0.0.1:48120",
+      fetchImpl,
+      socketFactory
+    );
+    const events: unknown[] = [];
+
+    const subscription = transport.observeTaskAgent("task-1", (event) => {
+      events.push(event);
+    });
+
+    socket.onopen?.();
+    socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok" } satisfies ServerFrame) });
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: "agent_snapshot",
+        task_id: "task-1",
+        next_seq: 1,
+        events: [{ seq: 0, event: { type: "user_message", text: "hello" } }]
+      } satisfies ServerFrame)
+    });
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: "agent_event",
+        task_id: "task-1",
+        seq: 1,
+        event: { type: "assistant_text", text: "hi", truncated: false }
+      } satisfies ServerFrame)
+    });
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: "status_changed",
+        task_id: "task-1",
+        status: "busy"
+      } satisfies ServerFrame)
+    });
+
+    subscription.sendInput("continue");
+    subscription.sendPermission("perm-1", { kind: "allow_session" });
+    subscription.interrupt();
+    subscription.close();
+
+    expect(socketFactory).toHaveBeenCalledWith("ws://127.0.0.1:48120/v1/stream");
+    expect(sent).toEqual([
+      { type: "auth" },
+      { type: "attach", task_id: "task-1", kind: "agent", from_seq: 0 },
+      { type: "agent_input", task_id: "task-1", text: "continue" },
+      {
+        type: "agent_permission",
+        task_id: "task-1",
+        request_id: "perm-1",
+        decision: { kind: "allow_session" }
+      },
+      { type: "agent_interrupt", task_id: "task-1" }
+    ]);
+    expect(events).toEqual([
+      {
+        type: "snapshot",
+        taskId: "task-1",
+        events: [{ seq: 0, event: { type: "user_message", text: "hello" } }],
+        nextSeq: 1
+      },
+      {
+        type: "event",
+        taskId: "task-1",
+        seq: 1,
+        event: { type: "assistant_text", text: "hi", truncated: false }
+      },
+      { type: "status", taskId: "task-1", status: "busy" }
     ]);
     expect(socket.close).toHaveBeenCalledTimes(1);
   });

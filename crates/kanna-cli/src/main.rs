@@ -274,6 +274,8 @@ struct CreateTaskResponse {
     repo_id: String,
     title: String,
     stage: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    agent_type: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]

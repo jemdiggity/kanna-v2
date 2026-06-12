@@ -2214,6 +2214,7 @@ mod tests {
                     repo_id: payload.repo_id,
                     title: payload.prompt,
                     stage: "in progress".to_string(),
+                    agent_type: "agent".to_string(),
                 })
             }),
         );

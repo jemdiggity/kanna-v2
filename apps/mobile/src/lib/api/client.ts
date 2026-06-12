@@ -1,4 +1,9 @@
 import type {
+  AgentEvent,
+  FrameAgentEvent,
+  PermissionDecision,
+} from "@kanna/agent-protocol";
+import type {
   CreateTaskRequest,
   CreateTaskResponse,
   RepoSummary,
@@ -19,6 +24,20 @@ export interface TaskTerminalSubscription {
   close(): void;
 }
 
+export type TaskAgentStreamEvent =
+  | { type: "snapshot"; taskId: string; events: FrameAgentEvent[]; nextSeq: number }
+  | { type: "event"; taskId: string; seq: number; event: AgentEvent }
+  | { type: "status"; taskId: string; status: string }
+  | { type: "exit"; taskId: string; code: number }
+  | { type: "error"; taskId: string; message: string };
+
+export interface TaskAgentSubscription {
+  close(): void;
+  sendInput(input: string): void;
+  sendPermission(requestId: string, decision: PermissionDecision): void;
+  interrupt(): void;
+}
+
 export interface KannaTransport {
   getStatus(): Promise<MobileServerStatus>;
   listDesktops(): Promise<DesktopSummary[]>;
@@ -35,6 +54,10 @@ export interface KannaTransport {
     taskId: string,
     listener: (event: TaskTerminalStreamEvent) => void
   ): TaskTerminalSubscription;
+  observeTaskAgent(
+    taskId: string,
+    listener: (event: TaskAgentStreamEvent) => void
+  ): TaskAgentSubscription;
   createPairingSession(): Promise<PairingSession>;
 }
 
@@ -54,6 +77,10 @@ export interface KannaClient {
     taskId: string,
     listener: (event: TaskTerminalStreamEvent) => void
   ): TaskTerminalSubscription;
+  observeTaskAgent(
+    taskId: string,
+    listener: (event: TaskAgentStreamEvent) => void
+  ): TaskAgentSubscription;
   createPairingSession(): Promise<PairingSession>;
 }
 
@@ -72,6 +99,8 @@ export function createKannaClient(transport: KannaTransport): KannaClient {
     sendTaskInput: (taskId, input) => transport.sendTaskInput(taskId, input),
     observeTaskTerminal: (taskId, listener) =>
       transport.observeTaskTerminal(taskId, listener),
+    observeTaskAgent: (taskId, listener) =>
+      transport.observeTaskAgent(taskId, listener),
     createPairingSession: () => transport.createPairingSession()
   };
 }
