@@ -93,7 +93,7 @@ describe("pipeline title preservation", () => {
       repoId,
       testRepoPath,
       originalTitle,
-      "sdk",
+      "agent",
       { pipelineName, agentProvider: "claude" },
     );
     if (isVueCallError(createResult)) throw new Error(createResult.__error);

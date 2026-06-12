@@ -766,7 +766,7 @@ describe("cloud task sync", () => {
       primaryRepoId,
       testRepoPath,
       "Cloud sync visible task",
-      "sdk",
+      "agent",
       { agentProvider: "codex", baseRef: "origin/main" },
     );
     if (result && typeof result === "object" && "__error" in result) {

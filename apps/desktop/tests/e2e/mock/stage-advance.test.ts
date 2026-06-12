@@ -473,7 +473,7 @@ describe("stage advance", () => {
         null,
         "[]",
         null,
-        "sdk",
+        "agent",
         "codex",
         "idle",
         null,

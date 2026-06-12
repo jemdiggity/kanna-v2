@@ -181,7 +181,7 @@ describe("local transfer source handoff failure", () => {
 
     // Direct task creation is setup-only: the product has no UI path for creating an inert
     // transfer fixture task without also launching a real agent session.
-    const createResult = await callVueMethod(primary, "store.createItem", repoId, testRepoPath, "Keep source open", "sdk");
+    const createResult = await callVueMethod(primary, "store.createItem", repoId, testRepoPath, "Keep source open", "agent");
     if (isVueCallError(createResult)) {
       throw new Error(createResult.__error);
     }

@@ -241,7 +241,7 @@ describe("diff view", () => {
     testRepoPath = fixtureRepoRoot;
     await importTestRepo(client, testRepoPath, "diff-test");
 
-    // Create a task with worktree but no Claude session (SDK mode, will fail gracefully)
+    // Create a task with worktree but no Claude session (Agent mode, will fail gracefully)
     const repoId = await getVueState(client, "selectedRepoId") as string;
     const id = crypto.randomUUID();
     const branch = `task-${id}`;
@@ -261,7 +261,7 @@ describe("diff view", () => {
        const ctx = window.__KANNA_E2E__.setupState;
        const db = ctx.db.value || ctx.db;
        db.execute("INSERT INTO pipeline_item (id, repo_id, prompt, stage, branch, agent_type) VALUES (?, ?, ?, ?, ?, ?)",
-         ["${id}", "${repoId}", "Say OK", "in progress", "${branch}", "sdk"])
+         ["${id}", "${repoId}", "Say OK", "in progress", "${branch}", "agent"])
          .then(function() { return ctx.loadItems("${repoId}"); })
          .then(function() { ctx.handleSelectItem("${id}"); return ctx.refreshAllItems(); })
          .then(function() { cb("ok"); })

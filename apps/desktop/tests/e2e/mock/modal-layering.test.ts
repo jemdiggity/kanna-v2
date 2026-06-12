@@ -109,7 +109,7 @@ describe("modal layering", () => {
        const ctx = window.__KANNA_E2E__.setupState;
        const db = ctx.db.value || ctx.db;
        db.execute("INSERT INTO pipeline_item (id, repo_id, prompt, stage, branch, agent_type) VALUES (?, ?, ?, ?, ?, ?)",
-         ["${id}", "${repoId}", "Modal layering task", "in progress", "${branch}", "sdk"])
+         ["${id}", "${repoId}", "Modal layering task", "in progress", "${branch}", "agent"])
          .then(function() { return ctx.loadItems("${repoId}"); })
          .then(function() { ctx.handleSelectItem("${id}"); return ctx.refreshAllItems(); })
          .then(function() { cb("ok"); })

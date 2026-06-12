@@ -144,7 +144,7 @@ describe("task header port badge", () => {
         "Open the task dev server",
         "in progress",
         '["in progress"]',
-        "sdk",
+        "agent",
         "idle",
         1,
         JSON.stringify({
