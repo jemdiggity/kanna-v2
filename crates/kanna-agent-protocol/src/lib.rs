@@ -14,6 +14,7 @@ mod adapter;
 pub mod claude;
 pub mod codex;
 mod events;
+pub mod frames;
 
 pub use adapter::{Capabilities, InterruptAction, ProviderAdapter, SpawnCtx, SpawnSpec, TurnModel};
 pub use claude::ClaudeAdapter;
@@ -22,3 +23,4 @@ pub use events::{
     truncate_text, truncate_text_to, AgentEvent, PermissionDecision, SessionEndReason, TurnStats,
     TurnStatus, MAX_TEXT_BYTES,
 };
+pub use frames::{ClientFrame, FrameAgentEvent, ServerFrame, StreamKind};
