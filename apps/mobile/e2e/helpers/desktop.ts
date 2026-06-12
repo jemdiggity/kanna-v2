@@ -8,7 +8,7 @@ function isLoopbackHostname(hostname: string): boolean {
   return hostname === "127.0.0.1" || hostname === "localhost" || hostname === "::1";
 }
 
-function selectPreferredLanAddress(): string | undefined {
+export function selectPreferredLanAddress(): string | undefined {
   const interfaces = networkInterfaces();
   const preferredInterfaceNames = ["en0", "en1", "bridge100"];
 
