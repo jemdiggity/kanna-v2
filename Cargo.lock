@@ -3102,6 +3102,7 @@ dependencies = [
  "flexi_logger",
  "futures",
  "ghostty-xterm-compat-serialize",
+ "kanna-agent-protocol",
  "kanna-runtime-defaults",
  "libc",
  "libghostty-vt",

@@ -14,6 +14,7 @@ futures = "0.3"
 libghostty-vt = { git = "https://github.com/jemdiggity/libghostty-rs.git", rev = "61ae57d7b42821e1b19ad325abc7ff49c80fc880", package = "libghostty-vt" }
 ghostty-xterm-compat-serialize = { git = "https://github.com/jemdiggity/ghostty-xterm-compat-serialize.git", rev = "135f988f408de703d5c4f6ae45de6902f3403f7c" }
 kanna-runtime-defaults = { path = "../runtime-defaults" }
+kanna-agent-protocol = { path = "../kanna-agent-protocol" }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
