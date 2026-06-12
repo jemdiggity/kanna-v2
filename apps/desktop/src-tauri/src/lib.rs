@@ -804,6 +804,7 @@ pub fn run() {
             commands::agent::get_claude_usage,
             // Daemon commands
             commands::daemon::spawn_session,
+            commands::daemon::spawn_agent_session,
             commands::daemon::send_input,
             commands::daemon::resize_session,
             commands::daemon::signal_session,
