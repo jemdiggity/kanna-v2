@@ -35,9 +35,11 @@ pub fn truncate_text_to(mut text: String, max_bytes: usize) -> (String, bool) {
 pub struct TurnStats {
     /// Wall-clock duration of the turn in milliseconds.
     #[serde(default)]
+    #[cfg_attr(feature = "typescript", ts(type = "number"))]
     pub duration_ms: u64,
     /// API-call duration in milliseconds, when the provider reports it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "typescript", ts(type = "number | null"))]
     pub duration_api_ms: Option<u64>,
     /// Number of conversation turns so far.
     #[serde(default)]
@@ -47,9 +49,11 @@ pub struct TurnStats {
     pub total_cost_usd: Option<f64>,
     /// Input tokens consumed, when the provider reports it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "typescript", ts(type = "number | null"))]
     pub input_tokens: Option<u64>,
     /// Output tokens produced, when the provider reports it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "typescript", ts(type = "number | null"))]
     pub output_tokens: Option<u64>,
 }
 

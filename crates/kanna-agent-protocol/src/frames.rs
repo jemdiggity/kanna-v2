@@ -29,6 +29,7 @@ pub enum StreamKind {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript", derive(TS), ts(export))]
 pub struct FrameAgentEvent {
+    #[cfg_attr(feature = "typescript", ts(type = "number"))]
     pub seq: u64,
     pub event: AgentEvent,
 }
@@ -51,6 +52,7 @@ pub enum ClientFrame {
         task_id: String,
         kind: StreamKind,
         #[serde(default)]
+        #[cfg_attr(feature = "typescript", ts(type = "number"))]
         from_seq: u64,
     },
     Detach {
@@ -83,6 +85,7 @@ pub enum ClientFrame {
     /// Request/response escape hatch for the task API (list/create/actions).
     /// Replaces both REST calls and the legacy relay Invoke vocabulary.
     Request {
+        #[cfg_attr(feature = "typescript", ts(type = "number"))]
         id: u64,
         method: String,
         path: String,
@@ -103,11 +106,13 @@ pub enum ServerFrame {
     /// as `from_seq`.
     AgentSnapshot {
         task_id: String,
+        #[cfg_attr(feature = "typescript", ts(type = "number"))]
         next_seq: u64,
         events: Vec<FrameAgentEvent>,
     },
     AgentEvent {
         task_id: String,
+        #[cfg_attr(feature = "typescript", ts(type = "number"))]
         seq: u64,
         event: AgentEvent,
     },
@@ -132,6 +137,7 @@ pub enum ServerFrame {
         code: i32,
     },
     Response {
+        #[cfg_attr(feature = "typescript", ts(type = "number"))]
         id: u64,
         status: u16,
         #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -236,6 +236,19 @@ importers:
         specifier: ^3
         version: 3.2.4(@types/node@25.6.0)(happy-dom@20.8.9)(jiti@2.6.1)(lightningcss@1.27.0)(terser@5.46.1)(tsx@4.21.0)(yaml@2.8.3)
 
+  packages/stream-client:
+    dependencies:
+      '@kanna/agent-protocol':
+        specifier: workspace:*
+        version: link:../agent-protocol
+    devDependencies:
+      typescript:
+        specifier: ^5
+        version: 5.9.3
+      vitest:
+        specifier: ^3
+        version: 3.2.4(@types/node@25.6.0)(happy-dom@20.8.9)(jiti@2.6.1)(lightningcss@1.27.0)(terser@5.46.1)(tsx@4.21.0)(yaml@2.8.3)
+
   services/firebase-functions:
     dependencies:
       firebase-admin:
