@@ -45,6 +45,7 @@ pub struct SpawnCtx {
     /// adapter maps it onto its provider's flags or config.
     pub permission_mode: Option<String>,
     pub allowed_tools: Vec<String>,
+    pub disallowed_tools: Vec<String>,
     pub max_turns: Option<u32>,
     pub max_budget_usd: Option<f64>,
     pub system_prompt: Option<String>,

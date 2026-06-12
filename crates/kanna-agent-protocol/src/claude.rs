@@ -43,6 +43,9 @@ impl ClaudeAdapter {
         if !ctx.allowed_tools.is_empty() {
             builder = builder.allowed_tools(ctx.allowed_tools.clone());
         }
+        if !ctx.disallowed_tools.is_empty() {
+            builder = builder.disallowed_tools(ctx.disallowed_tools.clone());
+        }
         if let Some(max_turns) = ctx.max_turns {
             builder = builder.max_turns(max_turns);
         }

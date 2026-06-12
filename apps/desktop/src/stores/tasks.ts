@@ -476,6 +476,7 @@ export function createTasksApi(
             permissionMode: opts?.customTask?.permissionMode ?? null,
             model: resolvedModel,
             allowedTools: opts?.customTask?.allowedTools ?? null,
+            disallowedTools: opts?.customTask?.disallowedTools ?? null,
             maxTurns: opts?.customTask?.maxTurns ?? null,
             maxBudgetUsd: opts?.customTask?.maxBudgetUsd ?? null,
             executable: null,
