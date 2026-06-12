@@ -2,7 +2,8 @@ use crate::config::Config;
 use crate::daemon_client::DaemonClient;
 use crate::db::{Db, NewPipelineItem, Repo, TaskStageSource};
 use kanna_daemon::protocol::{
-    AgentProvider as DaemonAgentProvider, Command as DaemonCommand, Event as DaemonEvent,
+    AgentProvider as DaemonAgentProvider, AgentSpawnParams, Command as DaemonCommand,
+    Event as DaemonEvent,
 };
 use serde::Deserialize;
 use serde_yaml::Value as YamlValue;
@@ -107,6 +108,7 @@ pub(crate) fn prepare_merge_agent_for_api(
             stage_override: None,
             explicit_provider: None,
             default_provider: None,
+            agent_type: None,
             model: None,
             permission_mode: None,
             allowed_tools: Vec::new(),
@@ -223,6 +225,7 @@ pub(crate) fn prepare_advance_stage_for_api(
             stage_override: Some(next_stage.name.clone()),
             explicit_provider,
             default_provider: None,
+            agent_type: None,
             model: None,
             permission_mode: None,
             allowed_tools: Vec::new(),
@@ -367,6 +370,7 @@ pub(crate) fn prepare_auto_stage_completion_for_api(
             stage_override: Some(next_stage.name.clone()),
             explicit_provider,
             default_provider: None,
+            agent_type: None,
             model: None,
             permission_mode: None,
             allowed_tools: Vec::new(),
@@ -437,6 +441,7 @@ pub(crate) fn prepare_revision_task_for_api(
             stage_override: Some(target_stage.name.clone()),
             explicit_provider,
             default_provider: None,
+            agent_type: None,
             model: None,
             permission_mode: None,
             allowed_tools: Vec::new(),
@@ -453,6 +458,7 @@ struct TaskCreationRequest {
     stage_override: Option<String>,
     explicit_provider: Option<String>,
     default_provider: Option<String>,
+    agent_type: Option<String>,
     model: Option<String>,
     permission_mode: Option<String>,
     allowed_tools: Vec<String>,
@@ -468,13 +474,26 @@ struct CreatedTask {
 pub(crate) struct PreparedTaskSpawn {
     created_task: CreatedTask,
     session_id: String,
-    executable: String,
-    args: Vec<String>,
     cwd: String,
     env: HashMap<String, String>,
-    cols: u16,
-    rows: u16,
-    agent_provider: DaemonAgentProvider,
+    session: PreparedSessionSpawn,
+}
+
+pub(crate) enum PreparedSessionSpawn {
+    Pty {
+        executable: String,
+        args: Vec<String>,
+        cols: u16,
+        rows: u16,
+        agent_provider: DaemonAgentProvider,
+    },
+    Agent {
+        agent_provider: DaemonAgentProvider,
+        prompt: String,
+        model: Option<String>,
+        permission_mode: Option<String>,
+        allowed_tools: Vec<String>,
+    },
 }
 
 pub(crate) enum PreparedStageTransition {
@@ -522,6 +541,7 @@ pub(crate) fn prepare_task_for_api(
             stage_override: request.stage,
             explicit_provider,
             default_provider,
+            agent_type: request.agent_type,
             model: request.model,
             permission_mode: request.permission_mode,
             allowed_tools: request.allowed_tools.unwrap_or_default(),
@@ -616,6 +636,7 @@ fn prepare_task_spawn(
     } else {
         request.allowed_tools
     };
+    let agent_type = resolve_agent_type(request.agent_type.as_deref(), provider)?;
 
     let task_id = generate_task_id()?;
     let branch = format!("task-{}", task_id);
@@ -637,7 +658,7 @@ fn prepare_task_spawn(
         stage: &stage_name,
         tags_json: &tags_json,
         branch: &branch,
-        agent_type: "pty",
+        agent_type: agent_type.as_str(),
         agent_provider: provider.as_str(),
         activity: "working",
         port_offset: None,
@@ -680,18 +701,41 @@ fn prepare_task_spawn(
     .map_err(|e| format!("db error: {}", e))?;
     let worktree_repo_config = read_repo_config(&worktree_path)?;
     let spawn_env = build_spawn_env(config, &task_id, &port_env)?;
-    let agent_cmd = build_agent_command(
-        &provider,
-        &final_prompt,
-        model.as_deref(),
-        permission_mode.as_deref(),
-        &allowed_tools,
-    );
-    let full_cmd = build_task_shell_command(
-        &agent_cmd,
-        worktree_repo_config.setup.as_deref().unwrap_or(&[]),
-        spawn_env.get("KANNA_CLI_PATH").map(String::as_str),
-    );
+    let session = match agent_type {
+        AgentSessionType::Pty => {
+            let agent_cmd = build_agent_command(
+                &provider,
+                &final_prompt,
+                model.as_deref(),
+                permission_mode.as_deref(),
+                &allowed_tools,
+            );
+            let full_cmd = build_task_shell_command(
+                &agent_cmd,
+                worktree_repo_config.setup.as_deref().unwrap_or(&[]),
+                spawn_env.get("KANNA_CLI_PATH").map(String::as_str),
+            );
+            PreparedSessionSpawn::Pty {
+                executable: "/bin/zsh".to_string(),
+                args: vec![
+                    "--login".to_string(),
+                    "-i".to_string(),
+                    "-c".to_string(),
+                    full_cmd,
+                ],
+                cols: 80,
+                rows: 24,
+                agent_provider: provider.to_daemon_provider(),
+            }
+        }
+        AgentSessionType::Agent => PreparedSessionSpawn::Agent {
+            agent_provider: provider.to_daemon_provider(),
+            prompt: final_prompt,
+            model,
+            permission_mode,
+            allowed_tools,
+        },
+    };
     let title = request
         .display_name
         .clone()
@@ -705,18 +749,9 @@ fn prepare_task_spawn(
             stage: stage_name,
         },
         session_id: task_id,
-        executable: "/bin/zsh".to_string(),
-        args: vec![
-            "--login".to_string(),
-            "-i".to_string(),
-            "-c".to_string(),
-            full_cmd,
-        ],
         cwd: worktree_path,
         env: spawn_env,
-        cols: 80,
-        rows: 24,
-        agent_provider: provider.to_daemon_provider(),
+        session,
     })
 }
 
@@ -724,17 +759,49 @@ async fn spawn_prepared_task(
     daemon: &mut DaemonClient,
     prepared: PreparedTaskSpawn,
 ) -> Result<CreatedTask, String> {
-    let event = daemon
-        .send_command(&DaemonCommand::Spawn {
+    let command = match prepared.session {
+        PreparedSessionSpawn::Pty {
+            executable,
+            args,
+            cols,
+            rows,
+            agent_provider,
+        } => DaemonCommand::Spawn {
             session_id: prepared.session_id,
-            executable: prepared.executable,
-            args: prepared.args,
+            executable,
+            args,
             cwd: prepared.cwd,
             env: prepared.env,
-            cols: prepared.cols,
-            rows: prepared.rows,
-            agent_provider: Some(prepared.agent_provider),
-        })
+            cols,
+            rows,
+            agent_provider: Some(agent_provider),
+        },
+        PreparedSessionSpawn::Agent {
+            agent_provider,
+            prompt,
+            model,
+            permission_mode,
+            allowed_tools,
+        } => DaemonCommand::SpawnAgent {
+            session_id: prepared.session_id,
+            params: AgentSpawnParams {
+                agent_provider,
+                prompt,
+                cwd: prepared.cwd,
+                env: prepared.env,
+                model,
+                permission_mode,
+                allowed_tools,
+                max_turns: None,
+                max_budget_usd: None,
+                system_prompt: Some(build_kanna_runtime_system_prompt()),
+                executable: None,
+            },
+        },
+    };
+
+    let event = daemon
+        .send_command(&command)
         .await
         .map_err(|e| format!("daemon error: {}", e))?;
 
@@ -1162,6 +1229,21 @@ enum AgentProvider {
     Opencode,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AgentSessionType {
+    Pty,
+    Agent,
+}
+
+impl AgentSessionType {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Pty => "pty",
+            Self::Agent => "agent",
+        }
+    }
+}
+
 impl AgentProvider {
     fn as_str(self) -> &'static str {
         match self {
@@ -1179,6 +1261,21 @@ impl AgentProvider {
             Self::Codex => DaemonAgentProvider::Codex,
             Self::Opencode => DaemonAgentProvider::Opencode,
         }
+    }
+}
+
+fn resolve_agent_type(
+    explicit_agent_type: Option<&str>,
+    provider: AgentProvider,
+) -> Result<AgentSessionType, String> {
+    match explicit_agent_type {
+        Some("pty") => Ok(AgentSessionType::Pty),
+        Some("agent") => Ok(AgentSessionType::Agent),
+        Some(other) => Err(format!("unsupported agent_type: {}", other)),
+        None => Ok(match provider {
+            AgentProvider::Claude | AgentProvider::Codex => AgentSessionType::Agent,
+            AgentProvider::Copilot | AgentProvider::Opencode => AgentSessionType::Pty,
+        }),
     }
 }
 
@@ -1611,6 +1708,19 @@ fn build_task_shell_command(
     command_parts.join(" && ")
 }
 
+fn build_kanna_runtime_system_prompt() -> String {
+    [
+        "## Kanna Task Environment",
+        "",
+        "This session was launched by Kanna, a desktop app that manages agent tasks, worktrees, and pipeline stages.",
+        "",
+        "- The current Kanna task id is in `KANNA_TASK_ID`.",
+        "- Kanna MCP tools are named `kanna_*` when your agent client exposes them.",
+        "- The bundled `kanna-cli` is on PATH for Kanna task operations from the shell.",
+    ]
+    .join("\n")
+}
+
 fn shell_single_quote(value: &str) -> String {
     value.replace('\'', "'\\''")
 }
@@ -1635,7 +1745,9 @@ mod tests {
         build_spawn_env, build_stage_prompt, continue_prepared_stage_for_api,
         prepare_advance_stage_for_api, prepare_merge_agent_for_api, prepare_revision_task_for_api,
         prepare_task_for_api, read_default_agent_provider_setting,
-        resolve_binary_from_candidates_with_path_lookup, PreparedStageTransition, PromptContext,
+        resolve_binary_from_candidates_with_path_lookup, spawn_prepared_task, CreatedTask,
+        DaemonAgentProvider, PreparedSessionSpawn, PreparedStageTransition, PreparedTaskSpawn,
+        PromptContext,
     };
     use crate::config::Config;
     use crate::daemon_client::DaemonClient;
@@ -1698,6 +1810,30 @@ mod tests {
         })
     }
 
+    async fn spawn_fake_daemon_session_created_once(
+        daemon_dir: String,
+    ) -> tokio::task::JoinHandle<kanna_daemon::protocol::Command> {
+        let socket_path = test_daemon_socket_path(&daemon_dir);
+        let _ = std::fs::remove_file(&socket_path);
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let command: kanna_daemon::protocol::Command =
+                serde_json::from_str(line.trim()).unwrap();
+            let response = serde_json::to_string(&kanna_daemon::protocol::Event::SessionCreated {
+                session_id: "task-1".to_string(),
+            })
+            .unwrap();
+            write_half.write_all(response.as_bytes()).await.unwrap();
+            write_half.write_all(b"\n").await.unwrap();
+            command
+        })
+    }
+
     fn test_config(label: &str) -> Config {
         Config {
             relay_url: "wss://relay.example".to_string(),
@@ -1716,6 +1852,49 @@ mod tests {
             lan_port: 48120,
             pairing_store_path: format!("/tmp/kanna-pairings-{label}.json"),
         }
+    }
+
+    fn init_git_repo(label: &str) -> std::path::PathBuf {
+        let repo_root = std::env::temp_dir().join(format!(
+            "kanna-task-{label}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&repo_root);
+        std::fs::create_dir_all(&repo_root).unwrap();
+        std::fs::write(repo_root.join("README.md"), "test repo").unwrap();
+        assert!(Command::new("git")
+            .arg("init")
+            .arg("-b")
+            .arg("main")
+            .current_dir(&repo_root)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(&repo_root)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(&repo_root)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["add", "README.md"])
+            .current_dir(&repo_root)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(&repo_root)
+            .status()
+            .unwrap()
+            .success());
+        repo_root
     }
 
     #[test]
@@ -1754,6 +1933,127 @@ mod tests {
         let path = env.get("PATH").expect("PATH should be provided");
 
         assert_eq!(path.split(':').next(), Some(cli_dir.as_str()));
+    }
+
+    #[test]
+    fn prepare_task_defaults_to_agent_session_for_claude_and_codex() {
+        for provider in ["claude", "codex"] {
+            let label = format!("agent-default-{provider}");
+            let repo_root = init_git_repo(&label);
+            let config = test_config(&label);
+            let db = Db::open_for_tests(&config.db_path).unwrap();
+            db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+                .unwrap();
+
+            let prepared = prepare_task_for_api(
+                &db,
+                &config,
+                CreateTaskRequest {
+                    repo_id: "repo-1".to_string(),
+                    prompt: format!("Use {provider}"),
+                    pipeline_name: None,
+                    base_ref: None,
+                    stage: None,
+                    agent_provider: Some(provider.to_string()),
+                    agent_type: None,
+                    model: Some("model-a".to_string()),
+                    permission_mode: Some("dontAsk".to_string()),
+                    allowed_tools: Some(vec!["Bash".to_string()]),
+                },
+            )
+            .unwrap();
+
+            let created = db
+                .list_pipeline_items("repo-1")
+                .unwrap()
+                .into_iter()
+                .find(|item| item.id == prepared.created_task.task_id)
+                .unwrap();
+            assert_eq!(created.agent_type.as_deref(), Some("agent"));
+            assert!(matches!(prepared.session, PreparedSessionSpawn::Agent { .. }));
+
+            let _ = std::fs::remove_dir_all(&repo_root);
+        }
+    }
+
+    #[test]
+    fn prepare_task_defaults_to_pty_session_for_copilot() {
+        let repo_root = init_git_repo("copilot-pty-default");
+        let config = test_config("copilot-pty-default");
+        let db = Db::open_for_tests(&config.db_path).unwrap();
+        db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+            .unwrap();
+
+        let prepared = prepare_task_for_api(
+            &db,
+            &config,
+            CreateTaskRequest {
+                repo_id: "repo-1".to_string(),
+                prompt: "Use copilot".to_string(),
+                pipeline_name: None,
+                base_ref: None,
+                stage: None,
+                agent_provider: Some("copilot".to_string()),
+                agent_type: None,
+                model: None,
+                permission_mode: None,
+                allowed_tools: None,
+            },
+        )
+        .unwrap();
+
+        let created = db
+            .list_pipeline_items("repo-1")
+            .unwrap()
+            .into_iter()
+            .find(|item| item.id == prepared.created_task.task_id)
+            .unwrap();
+        assert_eq!(created.agent_type.as_deref(), Some("pty"));
+        assert!(matches!(prepared.session, PreparedSessionSpawn::Pty { .. }));
+
+        let _ = std::fs::remove_dir_all(&repo_root);
+    }
+
+    #[tokio::test]
+    async fn spawn_prepared_task_sends_spawn_agent_for_agent_sessions() {
+        let config = test_config("spawn-prepared-agent-command");
+        let daemon = spawn_fake_daemon_session_created_once(config.daemon_dir.clone()).await;
+        let mut client = DaemonClient::connect(&config.daemon_dir).await.unwrap();
+        let prepared = PreparedTaskSpawn {
+            created_task: CreatedTask {
+                task_id: "task-1".to_string(),
+                repo_id: "repo-1".to_string(),
+                title: "Agent task".to_string(),
+                stage: "in progress".to_string(),
+            },
+            session_id: "task-1".to_string(),
+            cwd: "/tmp/repo/.kanna-worktrees/task-1".to_string(),
+            env: HashMap::new(),
+            session: PreparedSessionSpawn::Agent {
+                agent_provider: DaemonAgentProvider::Claude,
+                prompt: "Do work".to_string(),
+                model: Some("sonnet".to_string()),
+                permission_mode: Some("dontAsk".to_string()),
+                allowed_tools: vec!["Bash".to_string()],
+            },
+        };
+
+        let created = spawn_prepared_task(&mut client, prepared).await.unwrap();
+        let command = daemon.await.unwrap();
+
+        assert_eq!(created.task_id, "task-1");
+        match command {
+            kanna_daemon::protocol::Command::SpawnAgent { session_id, params } => {
+                assert_eq!(session_id, "task-1");
+                assert_eq!(params.agent_provider, DaemonAgentProvider::Claude);
+                assert_eq!(params.prompt, "Do work");
+                assert_eq!(params.model.as_deref(), Some("sonnet"));
+                assert_eq!(params.permission_mode.as_deref(), Some("dontAsk"));
+                assert_eq!(params.allowed_tools, vec!["Bash".to_string()]);
+                assert_eq!(params.cwd, "/tmp/repo/.kanna-worktrees/task-1");
+            }
+            other => panic!("expected SpawnAgent, got {other:?}"),
+        }
     }
 
     #[test]
@@ -2739,6 +3039,7 @@ mod tests {
                 base_ref: None,
                 stage: None,
                 agent_provider: Some("codex".to_string()),
+                agent_type: None,
                 model: None,
                 permission_mode: None,
                 allowed_tools: None,
@@ -2838,6 +3139,7 @@ mod tests {
                 base_ref: None,
                 stage: None,
                 agent_provider: None,
+                agent_type: None,
                 model: None,
                 permission_mode: None,
                 allowed_tools: None,
@@ -2861,6 +3163,7 @@ mod tests {
                 base_ref: None,
                 stage: None,
                 agent_provider: Some("codex".to_string()),
+                agent_type: None,
                 model: None,
                 permission_mode: None,
                 allowed_tools: None,
