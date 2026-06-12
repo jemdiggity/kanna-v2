@@ -48,7 +48,7 @@ export function AgentMessageView({
             <Text style={styles.debugTitle}>Debug</Text>
             {debugEvents.map((item) => (
               <Text key={item.seq} style={styles.debugText}>
-                {item.event.type === "diagnostic" ? item.event.message : item.event.line}
+                {formatDebugEvent(item.event)}
               </Text>
             ))}
           </View>
@@ -135,6 +135,16 @@ function formatValue(value: unknown): string {
   } catch {
     return String(value);
   }
+}
+
+function formatDebugEvent(event: AgentEvent): string {
+  if (event.type === "diagnostic") {
+    return event.message;
+  }
+  if (event.type === "raw") {
+    return event.line;
+  }
+  return "";
 }
 
 function formatStats(stats: TurnStats): string {

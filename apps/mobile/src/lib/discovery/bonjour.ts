@@ -159,6 +159,6 @@ function normalizeBonjourServiceEvent(
     host: record.host,
     port: record.port,
     txt: record.txt && typeof record.txt === "object" ? record.txt : {},
-    removed: record.removed === true
+    removed: Boolean(record.removed)
   };
 }
