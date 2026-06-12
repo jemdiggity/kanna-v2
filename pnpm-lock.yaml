@@ -208,6 +208,12 @@ importers:
         specifier: ^9.20.0
         version: 9.27.0
 
+  packages/agent-protocol:
+    devDependencies:
+      typescript:
+        specifier: ^5
+        version: 5.9.3
+
   packages/core:
     dependencies:
       smol-toml:
@@ -11249,13 +11255,10 @@ snapshots:
     transitivePeerDependencies:
       - '@expo/dom-webview'
       - '@expo/metro-runtime'
-      - bufferutil
-      - graphql
       - react
       - react-native
       - react-native-webview
       - supports-color
-      - utf-8-validate
 
   babel-preset-jest@29.6.3(@babel/core@7.29.0):
     dependencies:

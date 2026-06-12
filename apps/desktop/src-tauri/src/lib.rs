@@ -678,14 +678,8 @@ pub fn run() {
             }
             if let Some(main_win) = app.get_webview_window("main") {
                 let native_window = main_win.as_ref().window();
-                restore_default_size_if_too_small(
-                    &native_window,
-                    &MAIN_WINDOW_SIZE_POLICY,
-                );
-                schedule_restore_default_size_if_too_small(
-                    native_window,
-                    &MAIN_WINDOW_SIZE_POLICY,
-                );
+                restore_default_size_if_too_small(&native_window, &MAIN_WINDOW_SIZE_POLICY);
+                schedule_restore_default_size_if_too_small(native_window, &MAIN_WINDOW_SIZE_POLICY);
             }
 
             // Build app menu with full version in About

@@ -1,0 +1,13 @@
+[package]
+name = "kanna-agent-protocol"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+claude-agent-sdk = { path = "../claude-agent-sdk" }
+ts-rs = { version = "12", optional = true }
+
+[features]
+typescript = ["dep:ts-rs"]

@@ -3,6 +3,7 @@ members = [
     "apps/desktop/src-tauri",
     "crates/claude-agent-sdk",
     "crates/daemon",
+    "crates/kanna-agent-protocol",
     "crates/kanna-cli",
     "crates/kanna-mcp",
     "crates/runtime-defaults",

@@ -149,6 +149,84 @@ export function isClaudeUnavailable(result: ClaudeResult): boolean {
 }
 
 /**
+ * Run claude CLI in stream-json input mode, delivering messages over stdin.
+ *
+ * In this mode the CLI ignores any `-p` prompt argument: the prompt must be
+ * written to stdin as `{"type":"user","message":{"role":"user","content":...}}`.
+ * Stdin is closed after the lines are written; the CLI drains queued
+ * messages before exiting on EOF.
+ */
+export async function runClaudeStreamInput(opts: {
+  stdinLines: string[];
+  flags?: string[];
+  cwd?: string;
+  timeoutMs?: number;
+}): Promise<ClaudeResult> {
+  const binary = await findClaudeBinary();
+  const args = [
+    "-p",
+    "--output-format", "stream-json",
+    "--input-format", "stream-json",
+    "--verbose",
+    "--model", "haiku",
+    "--max-turns", "1",
+    ...(opts.flags || []),
+  ];
+
+  const start = Date.now();
+  const { stdout, stderr, exitCode } = await new Promise<{
+    stdout: string;
+    stderr: string;
+    exitCode: number;
+  }>((resolve, reject) => {
+    const child = spawn(binary, args, {
+      cwd: opts.cwd ?? "/tmp",
+      env: process.env,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdoutBuf = "";
+    let stderrBuf = "";
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk: string) => {
+      stdoutBuf += chunk;
+    });
+    child.stderr?.on("data", (chunk: string) => {
+      stderrBuf += chunk;
+    });
+    child.on("error", reject);
+
+    for (const line of opts.stdinLines) {
+      child.stdin?.write(`${line}\n`);
+    }
+    child.stdin?.end();
+
+    const timer = setTimeout(() => {
+      child.kill();
+    }, opts.timeoutMs ?? 60000);
+
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      resolve({ stdout: stdoutBuf, stderr: stderrBuf, exitCode: code ?? -1 });
+    });
+  });
+
+  const lines: Array<Record<string, unknown>> = [];
+  for (const line of stdout.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      lines.push(JSON.parse(trimmed));
+    } catch {
+      // Not JSON — skip
+    }
+  }
+
+  return { stdout, stderr, exitCode, lines, duration: Date.now() - start };
+}
+
+/**
  * Run claude CLI with raw flags (no --output-format, no -p).
  * For testing flag validation and error cases.
  */
