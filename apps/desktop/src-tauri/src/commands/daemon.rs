@@ -550,21 +550,9 @@ async fn spawn_attached_stream_task(
                             sid, output_event_count, byte_len
                         );
                     }
-                    if let Some(data) = event.get("data").and_then(|d| d.as_array()) {
-                        let bytes: Vec<u8> = data
-                            .iter()
-                            .filter_map(|v| v.as_u64().map(|n| n as u8))
-                            .collect();
-                        use base64::Engine;
-                        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-                        let payload = serde_json::json!({
-                            "session_id": event.get("session_id"),
-                            "data_b64": b64,
-                        });
-                        let _ = app.emit("terminal_output", &payload);
-                    } else {
-                        let _ = app.emit("terminal_output", &event);
-                    }
+                    // Terminal bytes are delivered through kanna-server KSP
+                    // term_output frames. This legacy stream task remains only
+                    // for lifecycle forwarding until the command is fully retired.
                 }
                 Some("Exit") => {
                     {
@@ -685,6 +673,7 @@ pub async fn spawn_agent_session(
     model: Option<String>,
     permission_mode: Option<String>,
     allowed_tools: Option<Vec<String>>,
+    disallowed_tools: Option<Vec<String>>,
     max_turns: Option<u32>,
     max_budget_usd: Option<f64>,
     system_prompt: Option<String>,
@@ -702,6 +691,7 @@ pub async fn spawn_agent_session(
             "model": model,
             "permission_mode": permission_mode,
             "allowed_tools": allowed_tools.unwrap_or_default(),
+            "disallowed_tools": disallowed_tools.unwrap_or_default(),
             "max_turns": max_turns,
             "max_budget_usd": max_budget_usd,
             "system_prompt": system_prompt,

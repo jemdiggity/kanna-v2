@@ -553,9 +553,11 @@ async fn connect_with_backoff() -> Option<DaemonClient> {
     None
 }
 
-/// Spawn the event bridge: a background task that reads events from a dedicated
-/// daemon connection and emits them as Tauri events. Automatically reconnects
-/// when the daemon restarts.
+/// Spawn the lifecycle bridge: a background task that reads non-output events
+/// from a dedicated daemon subscription and emits them as Tauri events.
+/// Terminal bytes now flow through KSP `term_*` frames on kanna-server.
+/// This bridge stays until daemon_ready, hooks, status, and session exits have
+/// KSP equivalents for the desktop app.
 fn spawn_event_bridge(app: tauri::AppHandle, daemon_state: DaemonState) {
     tauri::async_runtime::spawn(async move {
         loop {
@@ -600,9 +602,6 @@ fn spawn_event_bridge(app: tauri::AppHandle, daemon_state: DaemonState) {
                             Some("ShuttingDown") => {
                                 eprintln!("[event-bridge] received ShuttingDown, reconnecting...");
                                 break;
-                            }
-                            Some("Output") => {
-                                let _ = app.emit("terminal_output", &event);
                             }
                             Some("Exit") => {
                                 let _ = app.emit("session_exit", &event);

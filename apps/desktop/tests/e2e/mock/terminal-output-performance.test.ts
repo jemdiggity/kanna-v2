@@ -149,6 +149,26 @@ async function clearMetrics(client: WebDriverClient): Promise<void> {
   }
 }
 
+async function waitForTerminalBufferText(
+  client: WebDriverClient,
+  sessionId: string,
+  text: string,
+  timeoutMs = 10_000,
+): Promise<string[]> {
+  const deadline = Date.now() + timeoutMs;
+  let latest: string[] = [];
+  while (Date.now() < deadline) {
+    latest = await client.executeSync<string[]>(
+      `const hook = window.__KANNA_E2E__?.terminalBuffers;
+       if (!hook) throw new Error("terminal buffer hook unavailable");
+       return hook.lines(${JSON.stringify(sessionId)}).slice(-80);`,
+    );
+    if (latest.some((line) => line.includes(text))) return latest;
+    await sleep(100);
+  }
+  throw new Error(`timed out waiting for terminal buffer text "${text}" in ${sessionId}; latest=${JSON.stringify(latest)}`);
+}
+
 describe("terminal output performance", () => {
   const client = new WebDriverClient();
   let fixtureRepoRoot = "";
@@ -187,23 +207,26 @@ describe("terminal output performance", () => {
 
     await waitForSessions(client, taskIds);
 
-    for (const task of tasks) {
-      await selectTask(client, task);
-      await sleep(250);
-    }
+    await selectTask(client, tasks[0]);
+    await waitForTerminalBufferText(client, tasks[0].id, "Output Perf A live output");
+    await selectTask(client, tasks[1]);
+    await waitForTerminalBufferText(client, tasks[1].id, "Output Perf B live output");
+    await selectTask(client, tasks[0]);
+    await waitForTerminalBufferText(client, tasks[0].id, "Output Perf A live output");
+    await selectTask(client, tasks[2]);
+    await waitForTerminalBufferText(client, tasks[2].id, "Output Perf C live output");
 
     await clearMetrics(client);
     await sleep(1250);
 
     const snapshot = await readMetrics(client);
-    console.log("[e2e][terminal-output-perf]", JSON.stringify(snapshot));
 
     expect(snapshot.invokeCounts.list_sessions ?? 0).toBe(0);
-    expect(snapshot.activeListenCounts.terminal_output ?? 0).toBe(1);
+    expect(snapshot.activeListenCounts.terminal_output ?? 0).toBe(0);
     expect(snapshot.listenCounts.terminal_output ?? 0).toBe(0);
   });
 
-  it("keeps the terminal_output listener active when the app window loses focus", async () => {
+  it("does not reinstall the retired terminal_output listener when the app window loses focus", async () => {
     const task = await createStreamingTask(client, {
       repoId,
       repoPath: testRepoPath,
@@ -217,20 +240,20 @@ describe("terminal output performance", () => {
 
     await waitForMetrics(
       client,
-      (snapshot) => (snapshot.activeListenCounts.terminal_output ?? 0) === 1,
-      "terminal_output listener registered after select",
+      (snapshot) => (snapshot.activeListenCounts.terminal_output ?? 0) === 0,
+      "terminal_output listener remains retired after select",
     );
 
     await client.executeSync("window.dispatchEvent(new Event('blur'))");
     await sleep(500);
 
     const afterBlur = await readMetrics(client);
-    expect(afterBlur.activeListenCounts.terminal_output ?? 0).toBe(1);
+    expect(afterBlur.activeListenCounts.terminal_output ?? 0).toBe(0);
 
     await client.executeSync("window.dispatchEvent(new Event('focus'))");
     await sleep(250);
 
     const afterFocus = await readMetrics(client);
-    expect(afterFocus.activeListenCounts.terminal_output ?? 0).toBe(1);
+    expect(afterFocus.activeListenCounts.terminal_output ?? 0).toBe(0);
   });
 });

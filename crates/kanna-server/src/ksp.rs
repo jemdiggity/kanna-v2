@@ -453,38 +453,14 @@ async fn stream_agent(
     }
 }
 
-/// Terminal stream: snapshot (separate connection) then raw output via the
-/// daemon's Observe path, base64-framed.
+/// Terminal stream: daemon AttachSnapshot returns the authoritative headless
+/// terminal snapshot first, then the same connection receives live Output.
 async fn stream_terminal(
     daemon_dir: String,
     task_id: String,
     session_id: String,
     frame_tx: mpsc::Sender<ServerFrame>,
 ) {
-    // Snapshot first so xterm hydrates before live bytes.
-    let snap_connected = DaemonClient::connect(&daemon_dir)
-        .await
-        .map_err(|error| error.to_string());
-    if let Ok(mut snap_client) = snap_connected {
-        let snap_reply = snap_client
-            .send_command(&DaemonCommand::Snapshot {
-                session_id: session_id.clone(),
-            })
-            .await
-            .map_err(|error| error.to_string());
-        if let Ok(DaemonEvent::Snapshot { snapshot, .. }) = snap_reply {
-            let frame = ServerFrame::TermSnapshot {
-                task_id: task_id.clone(),
-                cols: snapshot.cols,
-                rows: snapshot.rows,
-                data_b64: b64(snapshot.vt.as_bytes()),
-            };
-            if frame_tx.send(frame).await.is_err() {
-                return;
-            }
-        }
-    }
-
     let connected = DaemonClient::connect(&daemon_dir)
         .await
         .map_err(|error| error.to_string());
@@ -501,25 +477,60 @@ async fn stream_terminal(
             return;
         }
     };
-    let observe_reply = client
-        .send_command(&DaemonCommand::Observe {
+    let attach_reply = client
+        .send_command(&DaemonCommand::AttachSnapshot {
             session_id: session_id.clone(),
+            emulate_terminal: true,
         })
         .await
         .map_err(|error| error.to_string());
-    match observe_reply {
-        Ok(DaemonEvent::Ok) => {}
+    match attach_reply {
+        Ok(DaemonEvent::Snapshot { snapshot, .. }) => {
+            let frame = ServerFrame::TermSnapshot {
+                task_id: task_id.clone(),
+                cols: snapshot.cols,
+                rows: snapshot.rows,
+                data_b64: b64(snapshot.vt.as_bytes()),
+            };
+            if frame_tx.send(frame).await.is_err() {
+                return;
+            }
+        }
         Ok(DaemonEvent::Error { message, .. }) => {
+            let code = if message.contains("session not found") {
+                "session_not_found"
+            } else {
+                "daemon"
+            };
             let _ = frame_tx
                 .send(ServerFrame::Error {
                     task_id: Some(task_id),
-                    code: "daemon".to_string(),
+                    code: code.to_string(),
                     message,
                 })
                 .await;
             return;
         }
-        _ => return,
+        Ok(other) => {
+            let _ = frame_tx
+                .send(ServerFrame::Error {
+                    task_id: Some(task_id),
+                    code: "daemon".to_string(),
+                    message: format!("unexpected attach reply: {other:?}"),
+                })
+                .await;
+            return;
+        }
+        Err(error) => {
+            let _ = frame_tx
+                .send(ServerFrame::Error {
+                    task_id: Some(task_id),
+                    code: "daemon".to_string(),
+                    message: format!("daemon error: {error}"),
+                })
+                .await;
+            return;
+        }
     }
 
     loop {
