@@ -1,12 +1,15 @@
 import type {
+  TaskAgentSubscription,
   TaskTerminalStreamEvent,
   TaskTerminalSubscription
 } from "../api/client";
 import type {
   RemoteDesktopInvocationRequest,
   RemoteDesktopInvoker,
+  RemoteTaskAgentObserver,
   RemoteTaskTerminalObserver
 } from "./remoteTransport";
+import { createRelayTunnelWebSocketFactory, StreamClient } from "@kanna/stream-client";
 
 export interface RelaySocketLike {
   readyState: number;
@@ -14,7 +17,7 @@ export interface RelaySocketLike {
   send(data: string): void;
   onclose: ((event?: unknown) => void) | null;
   onerror: ((event?: unknown) => void) | null;
-  onmessage: ((event: { data: string }) => void) | null;
+  onmessage: ((event: { data: unknown }) => void) | null;
   onopen: (() => void) | null;
 }
 
@@ -24,6 +27,7 @@ export interface RelayDesktopClient {
   close(): void;
   invokeDesktop: RemoteDesktopInvoker;
   observeTaskTerminal: RemoteTaskTerminalObserver;
+  observeTaskAgent: RemoteTaskAgentObserver;
   sendTaskInput(options: { desktopId: string; taskId: string; data: string }): Promise<void>;
 }
 
@@ -144,7 +148,10 @@ export function createRelayDesktopClient({
     return promise;
   };
 
-  const handleRelayMessage = (raw: string) => {
+  const handleRelayMessage = (raw: unknown) => {
+    if (typeof raw !== "string") {
+      return;
+    }
     const parsed = parseJsonRecord(raw);
     if (!parsed) {
       return;
@@ -303,6 +310,52 @@ export function createRelayDesktopClient({
           }).catch(() => undefined);
         }
       } satisfies TaskTerminalSubscription;
+    },
+    observeTaskAgent({ desktopId, taskId }, listener) {
+      const client = new StreamClient({
+        url: relayUrl,
+        credentialProvider: () => getIdToken(),
+        webSocketFactory: createRelayTunnelWebSocketFactory({
+          relayUrl,
+          desktopId,
+          getIdentityToken: () => getIdToken(),
+          webSocketFactory: createSocket,
+        }),
+        reconnectDelaysMs: [250, 500, 1000, 2000],
+      });
+
+      client.attachAgent(taskId, {
+        onSnapshot(events, nextSeq) {
+          listener({ type: "snapshot", taskId, events, nextSeq });
+        },
+        onEvent(seq, event) {
+          listener({ type: "event", taskId, seq, event });
+        },
+        onStatus(status) {
+          listener({ type: "status", taskId, status });
+        },
+        onSessionExit(code) {
+          listener({ type: "exit", taskId, code });
+        },
+        onError(_code, message) {
+          listener({ type: "error", taskId, message });
+        },
+      });
+
+      return {
+        close() {
+          client.close();
+        },
+        sendInput(input: string) {
+          client.sendAgentInput(taskId, input);
+        },
+        sendPermission(requestId, decision) {
+          client.sendAgentPermission(taskId, requestId, decision);
+        },
+        interrupt() {
+          client.sendAgentInterrupt(taskId);
+        },
+      } satisfies TaskAgentSubscription;
     },
     async sendTaskInput({ desktopId, taskId, data }) {
       await sendInvoke(desktopId, {

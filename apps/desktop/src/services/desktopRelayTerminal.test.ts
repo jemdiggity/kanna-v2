@@ -26,7 +26,7 @@ class FakeSocket {
   readyState = 1;
   onclose: ((event?: unknown) => void) | null = null;
   onerror: ((event?: unknown) => void) | null = null;
-  onmessage: ((event: { data: string }) => void) | null = null;
+  onmessage: ((event: { data: unknown }) => void) | null = null;
   onopen: (() => void) | null = null;
   sent: string[] = [];
 
@@ -38,6 +38,21 @@ class FakeSocket {
   send(data: string) {
     this.sent.push(data);
   }
+}
+
+async function openRelayTunnel(socket: FakeSocket) {
+  socket.onopen?.();
+  await Promise.resolve();
+  socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok", userId: "user-1" }) });
+  await Promise.resolve();
+  socket.onmessage?.({
+    data: JSON.stringify({
+      type: "tunnel_ready",
+      tunnelId: "tunnel-1",
+      desktopId: "desktop-owner",
+    }),
+  });
+  await Promise.resolve();
 }
 
 describe("configured desktop relay helpers", () => {
@@ -79,22 +94,23 @@ describe("configured desktop relay helpers", () => {
       taskId: "task-1",
       data: "hello\n",
     });
-    socket.onopen?.();
-    await Promise.resolve();
-    socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok", userId: "user-1" }) });
+    await openRelayTunnel(socket);
+    socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok" }) });
     await Promise.resolve();
 
     expect(webSocketMock).toHaveBeenCalledWith(PRODUCTION_CLOUD_TRANSPORT_URL);
     const sent = socket.sent.map((entry) => JSON.parse(entry));
     expect(sent).toContainEqual({ type: "auth", id_token: "id-token" });
-    const invoke = sent.find((entry) => entry.command === "send_input");
-    expect(invoke).toMatchObject({
-      type: "invoke",
+    expect(sent).toContainEqual(expect.objectContaining({
+      type: "tunnel_request",
       desktopId: "desktop-owner",
-      command: "send_input",
-      args: { session_id: "task-1", data: "hello\n" },
+    }));
+    expect(sent).toContainEqual({ type: "auth", credential: "id-token" });
+    expect(sent).toContainEqual({
+      type: "term_input",
+      task_id: "task-1",
+      data_b64: "aGVsbG8K",
     });
-    socket.onmessage?.({ data: JSON.stringify({ type: "response", id: invoke.id, data: null }) });
 
     await expect(sendPromise).resolves.toBeUndefined();
   });
@@ -151,31 +167,41 @@ describe("createDesktopRelayTerminalClient", () => {
       listener: (event) => events.push(event),
     });
 
-    socket.onopen?.();
-    await Promise.resolve();
+    await openRelayTunnel(socket);
     expect(JSON.parse(socket.sent[0])).toEqual({ type: "auth", id_token: "id-token" });
-
-    socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok", userId: "user-1" }) });
-    await Promise.resolve();
     expect(JSON.parse(socket.sent[1])).toMatchObject({
-      type: "invoke",
+      type: "tunnel_request",
       desktopId: "desktop-owner",
-      command: "observe_session",
-      args: { session_id: "task-1" },
     });
 
-    const observeId = JSON.parse(socket.sent[1]).id;
-    socket.onmessage?.({ data: JSON.stringify({ type: "response", id: observeId, data: null }) });
+    expect(JSON.parse(socket.sent[2])).toEqual({ type: "auth", credential: "id-token" });
+    socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok" }) });
     await Promise.resolve();
+    expect(JSON.parse(socket.sent[3])).toEqual({
+      type: "attach",
+      task_id: "task-1",
+      kind: "terminal",
+      from_seq: 0,
+    });
     socket.onmessage?.({
       data: JSON.stringify({
-        type: "event",
-        name: "terminal_output",
-        payload: { session_id: "task-1", data_b64: "aGVsbG8=" },
+        type: "term_snapshot",
+        task_id: "task-1",
+        cols: 80,
+        rows: 24,
+        data_b64: "",
+      }),
+    });
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: "term_output",
+        task_id: "task-1",
+        data_b64: "aGVsbG8=",
       }),
     });
 
     expect(events).toEqual([
+      { type: "output", taskId: "task-1", text: "" },
       { type: "ready", taskId: "task-1" },
       { type: "output", taskId: "task-1", text: "hello" },
     ]);
@@ -195,21 +221,15 @@ describe("createDesktopRelayTerminalClient", () => {
       listener: vi.fn(),
     });
 
-    socket.onopen?.();
-    await Promise.resolve();
-    socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok", userId: "user-1" }) });
+    await openRelayTunnel(socket);
+    socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok" }) });
     await Promise.resolve();
 
     subscription.close();
     await Promise.resolve();
 
     expect(socket.sent.map((entry) => JSON.parse(entry))).toContainEqual(
-      expect.objectContaining({
-        type: "invoke",
-        desktopId: "desktop-owner",
-        command: "unobserve_session",
-        args: { session_id: "task-1" },
-      }),
+      { type: "detach", task_id: "task-1", kind: "terminal" },
     );
   });
 
@@ -227,20 +247,16 @@ describe("createDesktopRelayTerminalClient", () => {
       data: "hello\n",
     });
 
-    socket.onopen?.();
-    await Promise.resolve();
-    socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok", userId: "user-1" }) });
+    await openRelayTunnel(socket);
+    socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok" }) });
     await Promise.resolve();
 
     const sent = socket.sent.map((entry) => JSON.parse(entry));
-    expect(sent).toContainEqual(expect.objectContaining({
-      type: "invoke",
-      desktopId: "desktop-owner",
-      command: "send_input",
-      args: { session_id: "task-1", data: "hello\n" },
-    }));
-    const invokeId = sent.find((entry) => entry.command === "send_input").id;
-    socket.onmessage?.({ data: JSON.stringify({ type: "response", id: invokeId, data: null }) });
+    expect(sent).toContainEqual({
+      type: "term_input",
+      task_id: "task-1",
+      data_b64: "aGVsbG8K",
+    });
 
     await expect(promise).resolves.toBeUndefined();
   });
@@ -268,35 +284,24 @@ describe("createDesktopRelayTerminalClient", () => {
       taskId: "task-1",
     });
 
-    socket.onopen?.();
-    await Promise.resolve();
-    socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok", userId: "user-1" }) });
+    await openRelayTunnel(socket);
+    socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok" }) });
     await Promise.resolve();
 
     const sent = socket.sent.map((entry) => JSON.parse(entry));
-    expect(sent).toContainEqual(expect.objectContaining({
-      type: "invoke",
-      desktopId: "desktop-owner",
-      command: "resize_session",
-      args: { session_id: "task-1", cols: 100, rows: 32 },
-    }));
-    expect(sent).toContainEqual(expect.objectContaining({
-      type: "invoke",
-      desktopId: "desktop-owner",
-      command: "close_task",
-      args: { task_id: "task-1" },
-    }));
-    expect(sent).toContainEqual(expect.objectContaining({
-      type: "invoke",
-      desktopId: "desktop-owner",
-      command: "advance_stage",
-      args: { task_id: "task-1" },
-    }));
+    expect(sent).toContainEqual({
+      type: "term_resize",
+      task_id: "task-1",
+      cols: 100,
+      rows: 32,
+    });
+    const closeRequest = sent.find((entry) => entry.path === "/v1/tasks/task-1/actions/close");
+    const advanceRequest = sent.find((entry) => entry.path === "/v1/tasks/task-1/actions/advance-stage");
+    expect(closeRequest).toMatchObject({ type: "request", method: "POST", body: null });
+    expect(advanceRequest).toMatchObject({ type: "request", method: "POST", body: null });
 
-    for (const command of ["resize_session", "close_task", "advance_stage"]) {
-      const invokeId = sent.find((entry) => entry.command === command).id;
-      socket.onmessage?.({ data: JSON.stringify({ type: "response", id: invokeId, data: null }) });
-    }
+    socket.onmessage?.({ data: JSON.stringify({ type: "response", id: closeRequest.id, status: 200, body: null }) });
+    socket.onmessage?.({ data: JSON.stringify({ type: "response", id: advanceRequest.id, status: 200, body: null }) });
 
     await expect(resizePromise).resolves.toBeUndefined();
     await expect(closePromise).resolves.toBeUndefined();
