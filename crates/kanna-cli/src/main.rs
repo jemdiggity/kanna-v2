@@ -173,6 +173,16 @@ enum TaskCommands {
         #[arg(long)]
         server_url: Option<String>,
     },
+    /// Close a task (kills its sessions and hides it from the sidebar)
+    Close {
+        /// The task/pipeline_item ID to close
+        #[arg(long)]
+        task_id: String,
+
+        /// Override the local Kanna server base URL
+        #[arg(long)]
+        server_url: Option<String>,
+    },
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -565,6 +575,15 @@ async fn advance_stage_via_api(
     .await
 }
 
+async fn close_task_via_api(base_url: &str, task_id: &str) -> Result<(), String> {
+    post_no_content_json(
+        base_url,
+        &format!("/v1/tasks/{task_id}/actions/close"),
+        &serde_json::json!({}),
+    )
+    .await
+}
+
 fn print_json<T: Serialize>(value: &T) -> Result<(), String> {
     let rendered =
         serde_json::to_string_pretty(value).map_err(|e| format!("failed to render json: {e}"))?;
@@ -856,6 +875,24 @@ async fn main() {
                     process::exit(1);
                 }
             }
+            TaskCommands::Close {
+                task_id,
+                server_url,
+            } => {
+                let base_url = resolve_server_base_url_from_env(server_url.as_deref());
+                close_task_via_api(&base_url, &task_id)
+                    .await
+                    .unwrap_or_else(|e| {
+                        eprintln!("Error: {e}");
+                        process::exit(1);
+                    });
+                if let Err(e) =
+                    print_json(&serde_json::json!({ "taskId": task_id, "closed": true }))
+                {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                }
+            }
         },
     }
 }
@@ -864,8 +901,8 @@ async fn main() {
 mod tests {
     use super::{
         advance_stage_via_api, build_complete_stage_request, build_create_task_request,
-        build_request_revision_request, build_send_task_input_request, create_task_via_api,
-        find_task_status_row, format_task_list, format_task_status,
+        build_request_revision_request, build_send_task_input_request, close_task_via_api,
+        create_task_via_api, find_task_status_row, format_task_list, format_task_status,
         resolve_optional_server_base_url, resolve_server_base_url, resolve_stage_db_path,
         send_task_input_via_api, task_list_path, task_not_found_error, TaskCreateOptions,
         TaskInputResponse, TaskSummary,
@@ -1200,6 +1237,17 @@ mod tests {
         assert!(request.starts_with("POST /v1/tasks/task-123/actions/advance-stage HTTP/1.1"));
         assert!(request.contains("content-type: application/json"));
         assert!(request.ends_with("{}"));
+    }
+
+    #[tokio::test]
+    async fn close_task_posts_to_close_action_path() {
+        let response = "HTTP/1.1 204 No Content\r\ncontent-length: 0\r\n\r\n".to_string();
+        let (base_url, handle) = serve_single_http_response(response).await;
+
+        close_task_via_api(&base_url, "task-123").await.unwrap();
+        let request = handle.await.unwrap();
+
+        assert!(request.starts_with("POST /v1/tasks/task-123/actions/close HTTP/1.1"));
     }
 
     #[tokio::test]
