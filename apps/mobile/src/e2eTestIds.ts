@@ -6,6 +6,8 @@ export const MOBILE_E2E_IDS = {
   taskMoreButton: "mobile.task-more-button",
   taskInput: "mobile.task-input",
   taskSendButton: "mobile.task-send-button",
+  taskStopButton: "mobile.task-stop-button",
+  agentMessageView: "mobile.agent-message-view",
   terminalOverlay: "mobile.terminal-overlay",
   accountButton: "mobile.account-button",
   accountSheet: "mobile.account-sheet",

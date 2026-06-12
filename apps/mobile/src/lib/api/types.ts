@@ -46,6 +46,7 @@ export interface CreateTaskRequest {
   baseRef?: string;
   stage?: string;
   agentProvider?: string;
+  agentType?: "pty" | "agent";
   model?: string;
   permissionMode?: string;
   allowedTools?: string[];
@@ -56,6 +57,7 @@ export interface CreateTaskResponse {
   repoId: string;
   title: string;
   stage: string;
+  agentType?: "pty" | "agent" | null;
 }
 
 export interface TaskActionResponse {
@@ -69,4 +71,5 @@ export interface TaskSummary {
   stage: string | null;
   snippet?: string | null;
   agentProvider?: string | null;
+  agentType?: "pty" | "agent" | null;
 }

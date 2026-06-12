@@ -1,5 +1,9 @@
 import type { CreateTaskResponse, TaskSummary } from "../lib/api/types";
-import type { KannaClient, TaskTerminalSubscription } from "../lib/api/client";
+import type {
+  KannaClient,
+  TaskAgentSubscription,
+  TaskTerminalSubscription
+} from "../lib/api/client";
 import type { MobileAuthSession } from "../lib/firebase/auth";
 import type { MobileView, SessionStore } from "./sessionStore";
 
@@ -23,6 +27,8 @@ export interface MobileController {
   runMergeAgent(taskId: string): Promise<void>;
   advanceDesktopTaskStage(taskId: string): Promise<void>;
   sendTaskInput(taskId: string, input: string): Promise<void>;
+  sendTaskAgentPermission(taskId: string, requestId: string, decision: Parameters<TaskAgentSubscription["sendPermission"]>[1]): void;
+  interruptTaskAgent(taskId: string): void;
   closeDesktopTask(taskId: string): Promise<void>;
 }
 
@@ -37,6 +43,12 @@ export function createMobileController(
     | {
         taskId: string;
         subscription: TaskTerminalSubscription;
+      }
+    | null = null;
+  let activeTaskAgent:
+    | {
+        taskId: string;
+        subscription: TaskAgentSubscription;
       }
     | null = null;
   let backgroundRefreshTimer: ReturnType<typeof setInterval> | null = null;
@@ -66,13 +78,23 @@ export function createMobileController(
     activeTaskTerminal = null;
   };
 
+  const stopTaskAgent = () => {
+    activeTaskAgent?.subscription.close();
+    activeTaskAgent = null;
+  };
+
+  const stopTaskSession = () => {
+    stopTaskTerminal();
+    stopTaskAgent();
+  };
+
   const reconcileSelectedTask = () => {
     const selectedTaskId = store.getState().selectedTaskId;
     if (!selectedTaskId || findTask(selectedTaskId)) {
       return;
     }
 
-    stopTaskTerminal();
+    stopTaskSession();
     store.reconcileSelectedTask();
   };
 
@@ -131,6 +153,40 @@ export function createMobileController(
       activeTaskTerminal = { taskId, subscription };
     } catch (error) {
       setTerminalStartupError(taskId, error);
+    }
+  };
+
+  const startTaskAgent = (taskId: string) => {
+    if (activeTaskAgent?.taskId === taskId) {
+      return;
+    }
+
+    stopTaskSession();
+    store.clearTaskTerminal();
+    store.beginTaskAgent(taskId);
+
+    try {
+      const subscription = client.observeTaskAgent(taskId, (event) => {
+        store.applyTaskAgentStreamEvent(taskId, event);
+      });
+
+      activeTaskAgent = { taskId, subscription };
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Agent stream failed to start";
+      store.applyTaskAgentStreamEvent(taskId, { type: "error", message });
+      store.setErrorMessage(message);
+    }
+  };
+
+  const startTaskView = (taskId: string) => {
+    const task = findTask(taskId);
+    if (task?.agentType === "agent") {
+      startTaskAgent(taskId);
+    } else {
+      stopTaskAgent();
+      store.clearTaskAgent();
+      startTaskTerminal(taskId);
     }
   };
 
@@ -236,7 +292,7 @@ export function createMobileController(
         startBackgroundRefresh();
         const selectedTaskId = store.getState().selectedTaskId;
         if (selectedTaskId) {
-          startTaskTerminal(selectedTaskId);
+          startTaskView(selectedTaskId);
         }
       } catch (error) {
         fail(error);
@@ -294,7 +350,7 @@ export function createMobileController(
     async refresh() {
       store.setRefreshStatus("refreshing");
       if (store.getState().selectedTaskId) {
-        stopTaskTerminal();
+        stopTaskSession();
       }
       await this.bootstrap();
       store.setRefreshStatus(
@@ -307,10 +363,11 @@ export function createMobileController(
     },
 
     async selectDesktop(desktopId) {
-      stopTaskTerminal();
+      stopTaskSession();
       store.selectDesktop(desktopId);
       store.setSelectedTask(null);
       store.clearTaskTerminal();
+      store.clearTaskAgent();
       await this.bootstrap();
       store.setActiveView("tasks");
     },
@@ -328,13 +385,14 @@ export function createMobileController(
     openTask(taskId) {
       store.setSelectedTask(taskId);
       store.setActiveView("tasks");
-      startTaskTerminal(taskId);
+      startTaskView(taskId);
     },
 
     closeTask() {
-      stopTaskTerminal();
+      stopTaskSession();
       store.setSelectedTask(null);
       store.clearTaskTerminal();
+      store.clearTaskAgent();
     },
 
     openComposer() {
@@ -426,20 +484,40 @@ export function createMobileController(
       }
 
       try {
-        await client.sendTaskInput(taskId, encodeSubmittedTaskInput(input, findTask(taskId)));
+        const task = findTask(taskId);
+        if (task?.agentType === "agent" && activeTaskAgent?.taskId === taskId) {
+          activeTaskAgent.subscription.sendInput(input.trim());
+        } else {
+          await client.sendTaskInput(taskId, encodeSubmittedTaskInput(input, task));
+        }
         store.setErrorMessage(null);
       } catch (error) {
         fail(error);
       }
     },
 
+    sendTaskAgentPermission(taskId, requestId, decision) {
+      if (activeTaskAgent?.taskId !== taskId) {
+        return;
+      }
+      activeTaskAgent.subscription.sendPermission(requestId, decision);
+    },
+
+    interruptTaskAgent(taskId) {
+      if (activeTaskAgent?.taskId !== taskId) {
+        return;
+      }
+      activeTaskAgent.subscription.interrupt();
+    },
+
     async closeDesktopTask(taskId) {
       try {
         await client.closeTask(taskId);
-        stopTaskTerminal();
+        stopTaskSession();
         await refreshTaskCollections();
         store.setSelectedTask(null);
         store.clearTaskTerminal();
+        store.clearTaskAgent();
         store.setActiveView("tasks");
         store.setErrorMessage(null);
       } catch (error) {
@@ -454,7 +532,8 @@ function mapCreatedTask(response: CreateTaskResponse): TaskSummary {
     id: response.taskId,
     repoId: response.repoId,
     title: response.title,
-    stage: response.stage
+    stage: response.stage,
+    agentType: response.agentType ?? null
   };
 }
 

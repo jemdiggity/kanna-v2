@@ -2115,6 +2115,7 @@ mod tests {
                     repo_id: payload.repo_id,
                     title: payload.prompt,
                     stage: "in progress".to_string(),
+                    agent_type: "agent".to_string(),
                 })
             }),
         );
@@ -2311,16 +2312,9 @@ mod tests {
                 reader.read_line(&mut line).await.unwrap();
                 let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
                 let session_id = match command {
-                    DaemonCommand::Spawn {
-                        session_id,
-                        executable,
-                        args,
-                        cwd,
-                        env,
-                        ..
-                    } => {
-                        assert_eq!(executable, "/bin/zsh");
-                        assert!(cwd.contains(".kanna-worktrees/task-"));
+                    DaemonCommand::SpawnAgent { session_id, params } => {
+                        assert!(params.cwd.contains(".kanna-worktrees/task-"));
+                        let env = params.env;
                         assert_eq!(
                             env.get("KANNA_CLI_PATH").map(String::as_str),
                             Some(expected_cli_path.as_str())
@@ -2339,22 +2333,9 @@ mod tests {
                         );
                         let path = env.get("PATH").expect("PATH should be set for sidecar");
                         assert_eq!(path.split(':').next(), Some(expected_cli_dir.as_str()));
-                        let shell_command = args.last().expect("zsh -c command should be present");
-                        assert!(
-                            shell_command.contains(&format!(
-                                "export KANNA_CLI_PATH='{}'",
-                                expected_cli_path
-                            )),
-                            "shell command should export KANNA_CLI_PATH: {shell_command}"
-                        );
-                        assert!(
-                            shell_command
-                                .contains(&format!("export PATH='{}':\"$PATH\"", expected_cli_dir)),
-                            "shell command should prepend kanna-cli directory: {shell_command}"
-                        );
                         session_id
                     }
-                    other => panic!("expected spawn command, got {:?}", other),
+                    other => panic!("expected SpawnAgent command, got {:?}", other),
                 };
                 write_half
                     .write_all(
@@ -2907,13 +2888,11 @@ mod tests {
             reader.read_line(&mut line).await.unwrap();
             let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
             let session_id = match command {
-                DaemonCommand::Spawn {
-                    session_id, cwd, ..
-                } => {
-                    assert!(cwd.contains(".kanna-worktrees/task-"));
+                DaemonCommand::SpawnAgent { session_id, params } => {
+                    assert!(params.cwd.contains(".kanna-worktrees/task-"));
                     session_id
                 }
-                other => panic!("expected spawn command, got {:?}", other),
+                other => panic!("expected SpawnAgent command, got {:?}", other),
             };
             write_half
                 .write_all(
@@ -3103,22 +3082,19 @@ mod tests {
             reader.read_line(&mut line).await.unwrap();
             let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
             let session_id = match command {
-                DaemonCommand::Spawn {
-                    session_id,
-                    cwd,
-                    args,
-                    agent_provider,
-                    ..
-                } => {
-                    assert_eq!(agent_provider, Some(AgentProvider::Codex));
-                    assert!(cwd.contains(".kanna-worktrees/task-"));
-                    let shell_command = args.join(" ");
-                    assert!(shell_command.contains("Implement revision:"));
-                    assert!(shell_command.contains("Add E2E coverage for title preservation."));
-                    assert!(!shell_command.contains("Review prompt that should stay hidden."));
+                DaemonCommand::SpawnAgent { session_id, params } => {
+                    assert_eq!(params.agent_provider, AgentProvider::Codex);
+                    assert!(params.cwd.contains(".kanna-worktrees/task-"));
+                    assert!(params.prompt.contains("Implement revision:"));
+                    assert!(params
+                        .prompt
+                        .contains("Add E2E coverage for title preservation."));
+                    assert!(!params
+                        .prompt
+                        .contains("Review prompt that should stay hidden."));
                     session_id
                 }
-                other => panic!("expected spawn command, got {:?}", other),
+                other => panic!("expected SpawnAgent command, got {:?}", other),
             };
             write_half
                 .write_all(

@@ -109,6 +109,8 @@ pub struct AgentSpawnParams {
     #[serde(default)]
     pub allowed_tools: Vec<String>,
     #[serde(default)]
+    pub disallowed_tools: Vec<String>,
+    #[serde(default)]
     pub max_turns: Option<u32>,
     #[serde(default)]
     pub max_budget_usd: Option<f64>,

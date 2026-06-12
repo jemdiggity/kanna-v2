@@ -75,8 +75,10 @@ describe("ensureTaskListVisible", () => {
 describe("waitForTaskTerminalLive", () => {
   it("waits for the terminal overlay to disappear after opening a task", async () => {
     let overlayVisible = true;
+    const agentMessageView = createElement(() => false);
     const overlay = createElement(() => overlayVisible);
     const ui = {
+      getAgentMessageView: vi.fn(async () => agentMessageView),
       getTerminalOverlay: vi.fn(async () => overlay),
       waitUntil: vi.fn(async (condition: () => Promise<boolean>, options) => {
         if (!(await condition())) {
@@ -94,5 +96,26 @@ describe("waitForTaskTerminalLive", () => {
     await waitForTaskTerminalLive(ui);
 
     expect(ui.getTerminalOverlay).toHaveBeenCalled();
+  });
+
+  it("accepts an agent message view after opening a task", async () => {
+    const agentMessageView = createElement(() => true);
+    const overlay = createElement(() => true);
+    const ui = {
+      getAgentMessageView: vi.fn(async () => agentMessageView),
+      getTerminalOverlay: vi.fn(async () => overlay),
+      waitUntil: vi.fn(async (condition: () => Promise<boolean>, options) => {
+        if (await condition()) {
+          return;
+        }
+
+        throw new Error(options.timeoutMsg);
+      })
+    };
+
+    await waitForTaskTerminalLive(ui);
+
+    expect(ui.getAgentMessageView).toHaveBeenCalled();
+    expect(ui.getTerminalOverlay).not.toHaveBeenCalled();
   });
 });

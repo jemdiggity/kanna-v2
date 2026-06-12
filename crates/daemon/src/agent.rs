@@ -43,6 +43,7 @@ pub fn params_to_ctx(params: &AgentSpawnParams) -> SpawnCtx {
         model: params.model.clone(),
         permission_mode: params.permission_mode.clone(),
         allowed_tools: params.allowed_tools.clone(),
+        disallowed_tools: params.disallowed_tools.clone(),
         max_turns: params.max_turns,
         max_budget_usd: params.max_budget_usd,
         system_prompt: params.system_prompt.clone(),

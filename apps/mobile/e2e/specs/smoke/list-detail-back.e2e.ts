@@ -11,6 +11,7 @@ interface SmokeElement {
 }
 
 interface SmokeUi {
+  getAgentMessageView(): Promise<SmokeElement>;
   getBackButton(): Promise<SmokeElement>;
   getTerminalOverlay(): Promise<SmokeElement>;
   getTaskRows(): Promise<SmokeElement[]>;
@@ -27,6 +28,9 @@ interface SmokeUi {
 
 function createSmokeUi(driver: Browser): SmokeUi {
   return {
+    async getAgentMessageView() {
+      return driver.$(selectors.agentMessageView);
+    },
     async getBackButton() {
       return driver.$(selectors.taskBackButton);
     },
@@ -49,13 +53,17 @@ function createSmokeUi(driver: Browser): SmokeUi {
 export async function waitForTaskTerminalLive(ui: SmokeUi): Promise<void> {
   await ui.waitUntil(
     async () => {
+      const agentMessageView = await ui.getAgentMessageView();
+      if (await agentMessageView.isExisting()) {
+        return true;
+      }
       const overlay = await ui.getTerminalOverlay();
       return !(await overlay.isExisting());
     },
     {
       interval: POLL_INTERVAL_MS,
       timeout: SCREEN_TIMEOUT_MS,
-      timeoutMsg: "Expected the mobile task terminal to become live after opening a task"
+      timeoutMsg: "Expected the mobile task terminal or agent view to become live after opening a task"
     }
   );
 }

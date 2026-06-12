@@ -10,6 +10,8 @@ import {
 import { MOBILE_E2E_IDS } from "../e2eTestIds";
 import type { TaskSummary } from "../lib/api/types";
 import type { TaskTerminalStatus } from "../state/sessionStore";
+import type { FrameAgentEvent, PermissionDecision } from "@kanna/agent-protocol";
+import { AgentMessageView } from "./AgentMessageView";
 import { TerminalWebView } from "./TerminalWebView";
 import { TASK_COMPOSER_TEXT_INPUT_PROPS } from "./taskComposerInput";
 import { getComposerBottomOffset } from "./taskComposerKeyboard";
@@ -20,9 +22,14 @@ interface TaskScreenProps {
   terminalOutput: string;
   terminalStatus: TaskTerminalStatus;
   terminalErrorMessage: string | null;
+  agentEvents: FrameAgentEvent[];
+  agentStatus: TaskTerminalStatus;
+  agentErrorMessage: string | null;
   onBack(): void;
   onOpenMore(): void;
   onSendInput(input: string): void;
+  onStopAgent(): void;
+  onResolveAgentPermission(requestId: string, decision: PermissionDecision): void;
 }
 
 export function TaskScreen({
@@ -30,9 +37,14 @@ export function TaskScreen({
   terminalOutput,
   terminalStatus,
   terminalErrorMessage,
+  agentEvents,
+  agentStatus,
+  agentErrorMessage,
   onBack,
   onOpenMore,
-  onSendInput
+  onSendInput,
+  onStopAgent,
+  onResolveAgentPermission
 }: TaskScreenProps) {
   const model = buildTaskWorkspaceModel({
     task,
@@ -41,10 +53,14 @@ export function TaskScreen({
   });
   const [draftInput, setDraftInput] = useState("");
   const [keyboardHeight, setKeyboardHeight] = useState(0);
-  const sendDisabled = model.isComposerDisabled || !draftInput.trim();
+  const isAgentTask = task.agentType === "agent";
+  const isComposerDisabled = isAgentTask
+    ? agentStatus === "connecting" || agentStatus === "error"
+    : model.isComposerDisabled;
+  const sendDisabled = isComposerDisabled || !draftInput.trim();
   const sendDraftInput = () => {
     const nextInput = draftInput.trim();
-    if (!nextInput || model.isComposerDisabled) {
+    if (!nextInput || isComposerDisabled) {
       return;
     }
 
@@ -69,7 +85,15 @@ export function TaskScreen({
   return (
     <View style={styles.screen} testID={MOBILE_E2E_IDS.taskDetailScreen}>
       <View style={styles.terminalCanvas}>
-        {model.isTerminalHealthy ? (
+        {task.agentType === "agent" ? (
+          <AgentMessageView
+            errorMessage={agentErrorMessage}
+            events={agentEvents}
+            status={agentStatus}
+            onInterrupt={onStopAgent}
+            onResolvePermission={onResolveAgentPermission}
+          />
+        ) : model.isTerminalHealthy ? (
           <TerminalWebView
             fullscreen
             key={task.id}
@@ -128,11 +152,11 @@ export function TaskScreen({
         <View style={styles.inputComposer}>
           <TextInput
             {...TASK_COMPOSER_TEXT_INPUT_PROPS}
-            editable={!model.isComposerDisabled}
+            editable={!isComposerDisabled}
             onChangeText={setDraftInput}
             placeholder="Reply…"
             placeholderTextColor="#6F89AE"
-            style={[styles.inputField, model.isComposerDisabled ? styles.inputFieldDisabled : null]}
+            style={[styles.inputField, isComposerDisabled ? styles.inputFieldDisabled : null]}
             testID={MOBILE_E2E_IDS.taskInput}
             value={draftInput}
           />
