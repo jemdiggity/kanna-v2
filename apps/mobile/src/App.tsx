@@ -84,10 +84,17 @@ export default function App() {
           terminalErrorMessage={state.taskTerminalErrorMessage}
           terminalOutput={state.taskTerminalOutput}
           terminalStatus={state.taskTerminalStatus}
+          agentErrorMessage={state.taskAgentErrorMessage}
+          agentEvents={state.taskAgentEvents}
+          agentStatus={state.taskAgentStatus}
           onBack={() => controller.closeTask()}
           onOpenMore={() => controller.showView("more")}
           onSendInput={(input) => {
             void controller.sendTaskInput(selectedTask.id, input);
+          }}
+          onStopAgent={() => controller.interruptTaskAgent(selectedTask.id)}
+          onResolveAgentPermission={(requestId, decision) => {
+            controller.sendTaskAgentPermission(selectedTask.id, requestId, decision);
           }}
         />
       );
