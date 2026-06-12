@@ -182,7 +182,7 @@ describe("external task creation", () => {
         null,
         "[]",
         null,
-        "sdk",
+        "agent",
         "codex",
         "idle",
         null,

@@ -26,7 +26,7 @@ describe("action bar", () => {
        const db = ctx.db.value || ctx.db;
        var id = crypto.randomUUID();
        db.execute("INSERT INTO pipeline_item (id, repo_id, prompt, stage, agent_type) VALUES (?, ?, ?, ?, ?)",
-         [id, "${repoId}", "Say OK", "in progress", "sdk"])
+         [id, "${repoId}", "Say OK", "in progress", "agent"])
          .then(function() { return ctx.loadItems("${repoId}"); })
          .then(function() { ctx.handleSelectItem(id); return ctx.refreshAllItems(); })
          .then(function() { cb("ok"); })

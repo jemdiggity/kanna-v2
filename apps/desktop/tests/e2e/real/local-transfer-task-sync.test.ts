@@ -377,7 +377,7 @@ describe("local transfer task sync", () => {
       repoId,
       testRepoPath,
       "LAN visible task",
-      "sdk",
+      "agent",
       { agentProvider: "codex", baseRef: "origin/main" },
     );
     if (isVueCallError(createResult)) {
@@ -491,7 +491,7 @@ describe("local transfer task sync", () => {
       repoId,
       testRepoPath,
       "LAN advance stage task",
-      "sdk",
+      "agent",
       {
         agentProvider: "codex",
         baseRef: "origin/main",

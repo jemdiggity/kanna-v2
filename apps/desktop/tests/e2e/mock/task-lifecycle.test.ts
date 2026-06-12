@@ -206,7 +206,7 @@ describe("task lifecycle", () => {
       `const cb = arguments[arguments.length - 1];
        try {
          const ctx = window.__KANNA_E2E__.setupState;
-         ctx.createItem(${JSON.stringify(repoId)}, ${JSON.stringify(testRepoPath)}, "Say OK", "sdk")
+         ctx.createItem(${JSON.stringify(repoId)}, ${JSON.stringify(testRepoPath)}, "Say OK", "agent")
            .then(function() { cb("ok"); })
            .catch(function(e) { cb("err:" + e); });
        } catch(e) { cb("outer:" + e); }`
@@ -367,7 +367,7 @@ describe("task lifecycle", () => {
     const createResult = await client.executeAsync<string>(
       `const cb = arguments[arguments.length - 1];
        const ctx = window.__KANNA_E2E__.setupState;
-       ctx.createItem(${JSON.stringify(repoId)}, ${JSON.stringify(testRepoPath)}, "Close Fast", "sdk")
+       ctx.createItem(${JSON.stringify(repoId)}, ${JSON.stringify(testRepoPath)}, "Close Fast", "agent")
          .then(() => cb("ok"))
          .catch((error) => cb("err:" + error));`
     );

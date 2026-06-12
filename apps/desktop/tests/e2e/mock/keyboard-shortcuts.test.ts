@@ -265,7 +265,7 @@ describe("keyboard shortcuts", () => {
           "in progress",
           "[]",
           null,
-          "sdk",
+          "agent",
           createdAt,
           createdAt,
         ],
@@ -370,7 +370,7 @@ describe("keyboard shortcuts", () => {
         "in progress",
         "[]",
         null,
-        "sdk",
+        "agent",
         "2026-04-17T10:00:00.000Z",
         "2026-04-17T10:00:00.000Z",
         newerTaskId,
@@ -381,7 +381,7 @@ describe("keyboard shortcuts", () => {
         "in progress",
         "[]",
         null,
-        "sdk",
+        "agent",
         "2026-04-17T10:01:00.000Z",
         "2026-04-17T10:01:00.000Z",
       ],
@@ -427,7 +427,7 @@ describe("keyboard shortcuts", () => {
         "pr",
         "[]",
         null,
-        "sdk",
+        "agent",
         "2026-04-17T10:01:00.000Z",
         "2026-04-17T10:01:00.000Z",
         inProgressTaskId,
@@ -438,7 +438,7 @@ describe("keyboard shortcuts", () => {
         "in progress",
         "[]",
         null,
-        "sdk",
+        "agent",
         "2026-04-17T10:00:00.000Z",
         "2026-04-17T10:00:00.000Z",
       ],
@@ -494,7 +494,7 @@ describe("keyboard shortcuts", () => {
         `INSERT INTO pipeline_item
            (id, repo_id, prompt, stage, activity, created_at, updated_at, agent_type, tags)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [row[0], row[1], row[2], "in progress", "idle", row[3], row[3], "sdk", "[]"],
+        [row[0], row[1], row[2], "in progress", "idle", row[3], row[3], "agent", "[]"],
       );
     }
 
@@ -538,7 +538,7 @@ describe("keyboard shortcuts", () => {
           "in progress",
           "[]",
           null,
-          "sdk",
+          "agent",
           createdAt,
           createdAt,
         ],
@@ -684,7 +684,7 @@ describe("keyboard shortcuts", () => {
         "in progress",
         "[]",
         null,
-        "sdk",
+        "agent",
         "2026-04-17T10:00:00.000Z",
         "2026-04-17T10:00:00.000Z",
         repoTwoTaskId,
@@ -695,7 +695,7 @@ describe("keyboard shortcuts", () => {
         "in progress",
         "[]",
         null,
-        "sdk",
+        "agent",
         "2026-04-17T10:01:00.000Z",
         "2026-04-17T10:01:00.000Z",
       ],
@@ -737,7 +737,7 @@ describe("keyboard shortcuts", () => {
        Promise.all(rows.map(function(row) {
          return db.execute(
            "INSERT OR REPLACE INTO pipeline_item (id, repo_id, prompt, stage, activity, created_at, teardown_started_at, agent_type, tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-           [row[0], row[1], row[2], row[3], row[4], row[5], row[6], "sdk", "[]"]
+           [row[0], row[1], row[2], row[3], row[4], row[5], row[6], "agent", "[]"]
          );
        }))
          .then(function() { return ctx.loadItems("${repoId}"); })
@@ -773,7 +773,7 @@ describe("keyboard shortcuts", () => {
       await execDb(
         client,
         "INSERT INTO pipeline_item (id, repo_id, prompt, stage, activity, created_at, agent_type, tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        [row[0], row[1], row[2], row[3], row[4], row[5], "sdk", row[6]],
+        [row[0], row[1], row[2], row[3], row[4], row[5], "agent", row[6]],
       );
     }
 
@@ -844,7 +844,7 @@ describe("keyboard shortcuts", () => {
       await execDb(
         client,
         "INSERT INTO pipeline_item (id, repo_id, prompt, stage, activity, created_at, updated_at, agent_type, tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        [row[0], row[1], row[2], "in progress", row[3], row[4], row[4], "sdk", "[]"],
+        [row[0], row[1], row[2], "in progress", row[3], row[4], row[4], "agent", "[]"],
       );
     }
 
@@ -887,7 +887,7 @@ describe("keyboard shortcuts", () => {
         "idle",
         "2026-03-31T03:00:00.000Z",
         "2026-03-31T03:00:00.000Z",
-        "sdk",
+        "agent",
         "[]",
       ],
     );
@@ -1008,7 +1008,7 @@ describe("keyboard shortcuts", () => {
            return Promise.all(rows.map(function(row) {
              return db.execute(
                "INSERT INTO pipeline_item (id, repo_id, prompt, stage, activity, created_at, agent_type, tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-               [row[0], row[1], row[2], row[3], row[4], row[5], "sdk", row[6]]
+               [row[0], row[1], row[2], row[3], row[4], row[5], "agent", row[6]]
              );
            }));
          })
