@@ -11,10 +11,11 @@ use std::sync::Arc;
 
 use axum::extract::ws::{Message as WsMessage, WebSocket};
 use base64::Engine;
-use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 use kanna_agent_protocol::{ClientFrame, FrameAgentEvent, ServerFrame, StreamKind};
 use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent, SessionStatus};
@@ -22,6 +23,12 @@ use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent, Ses
 use crate::daemon_client::DaemonClient;
 use crate::db::Db;
 use crate::http_api::{dispatch_http_invoke, AppState};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthMode {
+    AllowEmpty,
+    RequireCredential,
+}
 
 fn b64(data: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(data)
@@ -36,24 +43,93 @@ fn status_str(status: SessionStatus) -> &'static str {
 }
 
 pub async fn handle_stream(socket: WebSocket, state: Arc<AppState>) {
-    let (ws_tx, mut ws_rx) = socket.split();
-    let (frame_tx, frame_rx) = mpsc::channel::<ServerFrame>(256);
-    let writer_task = tokio::spawn(write_frames(ws_tx, frame_rx));
+    let (mut ws_tx, mut ws_rx) = socket.split();
+    let (incoming_tx, incoming_rx) = mpsc::channel::<String>(256);
+    let (outgoing_tx, mut outgoing_rx) = mpsc::channel::<String>(256);
 
+    let reader_task = tokio::spawn(async move {
+        while let Some(Ok(message)) = ws_rx.next().await {
+            match message {
+                WsMessage::Text(text) => {
+                    if incoming_tx.send(text.to_string()).await.is_err() {
+                        return;
+                    }
+                }
+                WsMessage::Close(_) => return,
+                _ => {}
+            }
+        }
+    });
+    let writer_task = tokio::spawn(async move {
+        while let Some(json) = outgoing_rx.recv().await {
+            if ws_tx.send(WsMessage::Text(json.into())).await.is_err() {
+                return;
+            }
+        }
+    });
+
+    handle_stream_channels(incoming_rx, outgoing_tx, state, AuthMode::AllowEmpty).await;
+    reader_task.abort();
+    let _ = writer_task.await;
+}
+
+pub async fn handle_tungstenite_stream(
+    socket: WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
+    state: Arc<AppState>,
+    auth_mode: AuthMode,
+) {
+    let (mut ws_tx, mut ws_rx) = socket.split();
+    let (incoming_tx, incoming_rx) = mpsc::channel::<String>(256);
+    let (outgoing_tx, mut outgoing_rx) = mpsc::channel::<String>(256);
+
+    let reader_task = tokio::spawn(async move {
+        while let Some(Ok(message)) = ws_rx.next().await {
+            match message {
+                TungsteniteMessage::Text(text) => {
+                    if incoming_tx.send(text.to_string()).await.is_err() {
+                        return;
+                    }
+                }
+                TungsteniteMessage::Close(_) => return,
+                _ => {}
+            }
+        }
+    });
+    let writer_task = tokio::spawn(async move {
+        while let Some(json) = outgoing_rx.recv().await {
+            if ws_tx
+                .send(TungsteniteMessage::Text(json.into()))
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+    });
+
+    handle_stream_channels(incoming_rx, outgoing_tx, state, auth_mode).await;
+    reader_task.abort();
+    let _ = writer_task.await;
+}
+
+async fn handle_stream_channels(
+    mut incoming_rx: mpsc::Receiver<String>,
+    outgoing_tx: mpsc::Sender<String>,
+    state: Arc<AppState>,
+    auth_mode: AuthMode,
+) {
+    let (frame_tx, frame_rx) = mpsc::channel::<ServerFrame>(256);
+    let writer_task = tokio::spawn(write_frames(outgoing_tx, frame_rx));
     let mut conn = StreamConn {
         state,
         frame_tx,
         attachments: HashMap::new(),
         authed: false,
+        auth_mode,
     };
 
-    while let Some(Ok(message)) = ws_rx.next().await {
-        let text = match message {
-            WsMessage::Text(text) => text,
-            WsMessage::Close(_) => break,
-            _ => continue,
-        };
-        match serde_json::from_str::<ClientFrame>(&text) {
+    while let Some(message) = incoming_rx.recv().await {
+        match serde_json::from_str::<ClientFrame>(&message) {
             Ok(frame) => {
                 if !conn.handle(frame).await {
                     break;
@@ -75,14 +151,14 @@ pub async fn handle_stream(socket: WebSocket, state: Arc<AppState>) {
 }
 
 async fn write_frames(
-    mut ws_tx: SplitSink<WebSocket, WsMessage>,
+    outgoing_tx: mpsc::Sender<String>,
     mut frame_rx: mpsc::Receiver<ServerFrame>,
 ) {
     while let Some(frame) = frame_rx.recv().await {
         let Ok(json) = serde_json::to_string(&frame) else {
             continue;
         };
-        if ws_tx.send(WsMessage::Text(json.into())).await.is_err() {
+        if outgoing_tx.send(json).await.is_err() {
             return;
         }
     }
@@ -93,6 +169,7 @@ struct StreamConn {
     frame_tx: mpsc::Sender<ServerFrame>,
     attachments: HashMap<(String, StreamKind), JoinHandle<()>>,
     authed: bool,
+    auth_mode: AuthMode,
 }
 
 impl StreamConn {
@@ -160,15 +237,7 @@ impl StreamConn {
     async fn handle(&mut self, frame: ClientFrame) -> bool {
         if !self.authed {
             return match frame {
-                ClientFrame::Auth { .. } => {
-                    // Trust model parity with the existing LAN API: reaching
-                    // this socket (localhost, LAN port, or an authenticated
-                    // relay tunnel) is the credential today. Pairing-token
-                    // verification lands with the tunnel work (phase 4).
-                    self.authed = true;
-                    self.send(ServerFrame::AuthOk).await;
-                    true
-                }
+                ClientFrame::Auth { credential } => self.handle_auth(credential).await,
                 _ => {
                     self.error(None, "unauthenticated", "first frame must be auth".into())
                         .await;
@@ -286,6 +355,36 @@ impl StreamConn {
             }
         }
         true
+    }
+
+    async fn handle_auth(&mut self, credential: Option<String>) -> bool {
+        let valid = match self.auth_mode {
+            AuthMode::AllowEmpty => true,
+            AuthMode::RequireCredential => credential
+                .as_deref()
+                .is_some_and(|value| self.credential_matches(value)),
+        };
+
+        if !valid {
+            self.error(None, "unauthorized", "invalid stream credential".into())
+                .await;
+            return false;
+        }
+
+        self.authed = true;
+        self.send(ServerFrame::AuthOk).await;
+        true
+    }
+
+    fn credential_matches(&self, credential: &str) -> bool {
+        !credential.trim().is_empty()
+            || self
+                .state
+                .config()
+                .desktop_secret
+                .as_deref()
+                .is_some_and(|secret| secret == credential)
+            || self.state.config().device_token == credential
     }
 
     async fn attach(&mut self, task_id: String, kind: StreamKind, from_seq: u64) {
@@ -571,6 +670,26 @@ mod tests {
     use super::*;
     use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
 
+    fn test_config(desktop_id: &str, desktop_name: &str) -> crate::config::Config {
+        crate::config::Config {
+            relay_url: "wss://relay.example".to_string(),
+            device_token: "device-token".to_string(),
+            cloud_base_url: "http://127.0.0.1:5001/kanna-local/us-central1".to_string(),
+            firebase_project_id: "kanna-local".to_string(),
+            firebase_auth_emulator_url: Some("http://127.0.0.1:9099".to_string()),
+            firebase_firestore_emulator_host: Some("127.0.0.1:8080".to_string()),
+            daemon_dir: "/tmp/kanna-daemon".to_string(),
+            db_path: crate::db::Db::test_db_path(desktop_id),
+            desktop_id: desktop_id.to_string(),
+            desktop_secret: Some("desktop-secret".to_string()),
+            desktop_name: desktop_name.to_string(),
+            server_version: Some("test-version".to_string()),
+            lan_host: "127.0.0.1".to_string(),
+            lan_port: 48120,
+            pairing_store_path: format!("/tmp/kanna-pairings-{desktop_id}.json"),
+        }
+    }
+
     async fn serve_test_router() -> String {
         let router = crate::http_api::test_router("ksp-test", "KSP Test");
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -695,5 +814,64 @@ mod tests {
             }
             other => panic!("expected Error, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn tunnel_stream_rejects_missing_or_bad_credential() {
+        let state = Arc::new(crate::http_api::AppState::new(test_config(
+            "ksp-auth-test",
+            "KSP Auth Test",
+        )));
+        let (incoming_tx, incoming_rx) = mpsc::channel(8);
+        let (outgoing_tx, mut outgoing_rx) = mpsc::channel(8);
+        let task = tokio::spawn(handle_stream_channels(
+            incoming_rx,
+            outgoing_tx,
+            state,
+            AuthMode::RequireCredential,
+        ));
+
+        incoming_tx
+            .send(serde_json::to_string(&ClientFrame::Auth { credential: None }).unwrap())
+            .await
+            .unwrap();
+        let frame: ServerFrame =
+            serde_json::from_str(&outgoing_rx.recv().await.expect("error frame")).unwrap();
+        match frame {
+            ServerFrame::Error { code, .. } => assert_eq!(code, "unauthorized"),
+            other => panic!("expected unauthorized error, got {other:?}"),
+        }
+        drop(incoming_tx);
+        let _ = task.await;
+    }
+
+    #[tokio::test]
+    async fn tunnel_stream_accepts_desktop_secret_credential() {
+        let mut config = test_config("ksp-auth-ok", "KSP Auth OK");
+        config.desktop_secret = Some("desktop-secret".to_string());
+        let state = Arc::new(crate::http_api::AppState::new(config));
+        let (incoming_tx, incoming_rx) = mpsc::channel(8);
+        let (outgoing_tx, mut outgoing_rx) = mpsc::channel(8);
+        let task = tokio::spawn(handle_stream_channels(
+            incoming_rx,
+            outgoing_tx,
+            state,
+            AuthMode::RequireCredential,
+        ));
+
+        incoming_tx
+            .send(
+                serde_json::to_string(&ClientFrame::Auth {
+                    credential: Some("desktop-secret".to_string()),
+                })
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let frame: ServerFrame =
+            serde_json::from_str(&outgoing_rx.recv().await.expect("auth ok frame")).unwrap();
+        assert_eq!(frame, ServerFrame::AuthOk);
+        drop(incoming_tx);
+        let _ = task.await;
     }
 }

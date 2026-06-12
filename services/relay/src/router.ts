@@ -1,10 +1,17 @@
-import type { WebSocket } from "ws";
+import type { RawData, WebSocket } from "ws";
+import { randomUUID } from "node:crypto";
 
 interface ConnectionPair {
   clients: Set<WebSocket>;
   desktops: Map<string, WebSocket>;
+  pendingTunnels: Map<string, PendingTunnel>;
   pendingResponses: Map<string, WebSocket>;
   terminalObservers: Map<string, Set<WebSocket>>;
+}
+
+interface PendingTunnel {
+  client: WebSocket;
+  desktopId: string;
 }
 
 interface RelayMessage {
@@ -19,6 +26,8 @@ interface RelayMessage {
 
 /** In-memory map of userId → client and desktop WebSocket connections. */
 const connections = new Map<string, ConnectionPair>();
+const tunnelPeers = new WeakMap<WebSocket, WebSocket>();
+const tunnelSockets = new WeakSet<WebSocket>();
 
 function parseRelayMessage(data: string): RelayMessage | null {
   try {
@@ -164,6 +173,27 @@ function removeClient(pair: ConnectionPair, ws: WebSocket): void {
   }
 }
 
+function closeTunnelPeer(ws: WebSocket): void {
+  const peer = tunnelPeers.get(ws);
+  tunnelPeers.delete(ws);
+  if (peer) {
+    tunnelPeers.delete(peer);
+    if (peer.readyState <= 1) {
+      peer.close(1000, "Tunnel peer closed");
+    }
+  }
+}
+
+function newConnectionPair(): ConnectionPair {
+  return {
+    clients: new Set(),
+    desktops: new Map(),
+    pendingTunnels: new Map(),
+    pendingResponses: new Map(),
+    terminalObservers: new Map(),
+  };
+}
+
 /**
  * Store the phone-side WebSocket for a user.
  * Closes any existing phone connection for this user.
@@ -172,12 +202,7 @@ function removeClient(pair: ConnectionPair, ws: WebSocket): void {
 export function setPhoneConnection(userId: string, ws: WebSocket): void {
   let pair = connections.get(userId);
   if (!pair) {
-    pair = {
-      clients: new Set(),
-      desktops: new Map(),
-      pendingResponses: new Map(),
-      terminalObservers: new Map(),
-    };
+    pair = newConnectionPair();
     connections.set(userId, pair);
   }
 
@@ -189,6 +214,11 @@ export function setPhoneConnection(userId: string, ws: WebSocket): void {
     const current = connections.get(userId);
     if (current?.clients.has(ws)) {
       removeClient(current, ws);
+      for (const [tunnelId, tunnel] of current.pendingTunnels.entries()) {
+        if (tunnel.client === ws) {
+          current.pendingTunnels.delete(tunnelId);
+        }
+      }
       if (current.desktops.size === 0) {
         connections.delete(userId);
       }
@@ -208,12 +238,7 @@ export function setServerConnection(
 ): void {
   let pair = connections.get(userId);
   if (!pair) {
-    pair = {
-      clients: new Set(),
-      desktops: new Map(),
-      pendingResponses: new Map(),
-      terminalObservers: new Map(),
-    };
+    pair = newConnectionPair();
     connections.set(userId, pair);
   }
 
@@ -233,12 +258,61 @@ export function setServerConnection(
     const current = connections.get(userId);
     if (current?.desktops.get(desktopId) === ws) {
       current.desktops.delete(desktopId);
+      for (const [tunnelId, tunnel] of current.pendingTunnels.entries()) {
+        if (tunnel.desktopId === desktopId) {
+          tunnel.client.close(1011, "Desktop disconnected before tunnel opened");
+          current.pendingTunnels.delete(tunnelId);
+        }
+      }
       // Clean up map entry if both sides are gone
       if (current.clients.size === 0) {
         connections.delete(userId);
       }
     }
   });
+}
+
+export function isTunnelSocket(ws: WebSocket): boolean {
+  return tunnelSockets.has(ws);
+}
+
+export function forwardTunnelData(source: WebSocket, data: RawData): void {
+  const peer = tunnelPeers.get(source);
+  if (!peer || peer.readyState !== 1) {
+    return;
+  }
+  peer.send(data);
+}
+
+export function attachDesktopTunnel(
+  userId: string,
+  desktopId: string,
+  tunnelId: string,
+  ws: WebSocket
+): boolean {
+  const pair = connections.get(userId);
+  const tunnel = pair?.pendingTunnels.get(tunnelId);
+  if (!pair || !tunnel || tunnel.desktopId !== desktopId) {
+    ws.close(4404, "Tunnel not found");
+    return false;
+  }
+
+  pair.pendingTunnels.delete(tunnelId);
+  tunnelSockets.add(tunnel.client);
+  tunnelSockets.add(ws);
+  tunnelPeers.set(tunnel.client, ws);
+  tunnelPeers.set(ws, tunnel.client);
+  ws.on("close", () => closeTunnelPeer(ws));
+  tunnel.client.on("close", () => closeTunnelPeer(tunnel.client));
+
+  const ready = JSON.stringify({
+    type: "tunnel_ready",
+    tunnelId,
+    desktopId,
+  });
+  tunnel.client.send(ready);
+  ws.send(ready);
+  return true;
 }
 
 /**
@@ -259,6 +333,33 @@ export function routeMessage(
   const parsed = parseRelayMessage(data);
 
   if (from === "phone") {
+    if (parsed?.type === "tunnel_request") {
+      const id = parsed.id;
+      const desktopId =
+        typeof parsed.desktopId === "string" ? parsed.desktopId : undefined;
+      const target = desktopId ? pair.desktops.get(desktopId) : undefined;
+      if (!desktopId || !target || target.readyState !== 1) {
+        sendErrorResponse(source, id, "Desktop offline");
+        return;
+      }
+      if (!source || source.readyState !== 1) {
+        return;
+      }
+
+      const tunnelId = randomUUID();
+      pair.pendingTunnels.set(tunnelId, { client: source, desktopId });
+      tunnelSockets.add(source);
+      target.send(
+        JSON.stringify({
+          type: "tunnel_establish",
+          id,
+          desktopId,
+          tunnelId,
+        })
+      );
+      return;
+    }
+
     if (parsed?.command === "list_active_desktops") {
       sendDataResponse(source, parsed.id, {
         desktopIds: Array.from(pair.desktops.entries())

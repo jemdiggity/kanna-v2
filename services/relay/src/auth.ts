@@ -9,19 +9,6 @@ import { getFirebaseServices, isAuthBypassed } from "./firebase.js";
  */
 const DESKTOP_LOOKUP_LIMIT = 10;
 
-function sha256Hex(value: string): string {
-  return createHash("sha256").update(value).digest("hex");
-}
-
-function hashesMatch(storedHex: string, presentedHex: string): boolean {
-  const stored = Buffer.from(storedHex, "hex");
-  const presented = Buffer.from(presentedHex, "hex");
-  if (stored.length !== presented.length || stored.length === 0) {
-    return false;
-  }
-  return timingSafeEqual(stored, presented);
-}
-
 function bypassUserIdFromToken(token: string): string {
   const separator = token.indexOf(":");
   if (separator > 0) {
@@ -84,6 +71,23 @@ export interface DesktopPrincipal {
   desktopId: string;
 }
 
+export function hashDesktopSecret(desktopSecret: string): string {
+  return createHash("sha256").update(desktopSecret, "utf8").digest("hex");
+}
+
+export function desktopSecretMatchesHash(
+  desktopSecret: string,
+  desktopSecretHash: unknown
+): boolean {
+  if (typeof desktopSecretHash !== "string" || desktopSecretHash.length === 0) {
+    return false;
+  }
+
+  const actual = Buffer.from(hashDesktopSecret(desktopSecret), "hex");
+  const expected = Buffer.from(desktopSecretHash, "hex");
+  return actual.length === expected.length && timingSafeEqual(actual, expected);
+}
+
 export async function verifyDesktopCredentials(
   desktopId: string,
   desktopSecret: string
@@ -108,15 +112,13 @@ export async function verifyDesktopCredentials(
       return null;
     }
 
-    const presentedHash = sha256Hex(desktopSecret);
     for (const doc of snapshot.docs) {
       const data = doc.data();
       if (data.revokedAt) {
         continue;
       }
 
-      const storedHash = data.desktopSecretHash;
-      if (typeof storedHash !== "string" || !hashesMatch(storedHash, presentedHash)) {
+      if (!desktopSecretMatchesHash(desktopSecret, data.desktopSecretHash)) {
         continue;
       }
 
