@@ -164,7 +164,7 @@ describe("NewTaskModal", () => {
     await wrapper.get("textarea").trigger("keydown", { key: "Enter", metaKey: true });
 
     expect(wrapper.emitted("submit")).toEqual([
-      ["Ship branch picker", "claude", "default", "feature/task-base-branch"],
+      ["Ship branch picker", "claude", "default", "feature/task-base-branch", "agent"],
     ]);
   });
 
@@ -184,7 +184,7 @@ describe("NewTaskModal", () => {
 
     const labels = wrapper.findAll(".pipeline-row .pipeline-label").map((label) => label.text());
 
-    expect(labels).toEqual(["tasks.baseBranch", "Pipeline"]);
+    expect(labels).toEqual(["tasks.baseBranch", "Pipeline", "Display"]);
   });
 
   it("shows the selected pipeline inline before the picker is opened", async () => {
@@ -251,7 +251,7 @@ describe("NewTaskModal", () => {
     expect(wrapper.find('[data-testid="pipeline-option-review"]').exists()).toBe(false);
     await wrapper.get("textarea").trigger("keydown", { key: "Enter", metaKey: true });
 
-    expect(wrapper.emitted("submit")).toEqual([["Ship pipeline picker", "claude", "review", "origin/main"]]);
+    expect(wrapper.emitted("submit")).toEqual([["Ship pipeline picker", "claude", "review", "origin/main", "agent"]]);
   });
 
   it("supports keyboard navigation in the pipeline picker and returns focus to the toggle", async () => {
@@ -413,7 +413,7 @@ describe("NewTaskModal", () => {
     await search.trigger("keydown", { key: "Enter", metaKey: true });
 
     expect(wrapper.emitted("submit")).toEqual([
-      ["Ship branch picker submit", "claude", "default", "origin/main"],
+      ["Ship branch picker submit", "claude", "default", "origin/main", "agent"],
     ]);
 
     wrapper.unmount();
@@ -504,7 +504,7 @@ describe("NewTaskModal", () => {
     await wrapper.get("textarea").trigger("keydown", { key: "Enter", metaKey: true });
 
     expect(wrapper.emitted("submit")).toEqual([
-      ["Ship branch fallback", "claude", "default", "origin/main"],
+      ["Ship branch fallback", "claude", "default", "origin/main", "agent"],
     ]);
   });
 

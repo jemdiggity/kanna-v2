@@ -61,6 +61,7 @@ import { isTaskSelectedInAnyWindow } from "./windowSelection";
 import { resolveDbName } from "./db";
 import { readRepoConfig, requireService, type CreateItemOptions, type StoreContext, type WorktreeBootstrapResult } from "./state";
 import { debugLog } from "../utils/debugLog";
+import { normalizeAgentExecutionType, type AgentExecutionType } from "./agentExecutionType";
 
 const INSTANCE_SCOPED_WORKTREE_ENV_KEYS = [
   "KANNA_TMUX_SESSION",
@@ -100,7 +101,7 @@ export interface TasksApi {
     repoId: string,
     repoPath: string,
     prompt: string,
-    agentType?: "pty" | "sdk",
+    agentType?: AgentExecutionType,
     opts?: CreateItemOptions,
   ) => Promise<string>;
   closeTask: (targetItemId?: string, opts?: { selectNext?: boolean }) => Promise<void>;
@@ -386,7 +387,7 @@ export function createTasksApi(
     worktreePath: string,
     branch: string,
     prompt: string,
-    agentType: "pty" | "sdk",
+    agentType: AgentExecutionType,
     agentProvider: AgentProvider,
     opts?: CreateItemOptions,
   ) {
@@ -452,19 +453,19 @@ export function createTasksApi(
           ).catch((error) => reportPrewarmSessionError("[store] shell pre-warm failed:", error));
         }
 
-        if (agentType !== "pty") {
+        if (agentType === "agent") {
           const inheritedPath = await invoke<string>("read_env_var", { name: "PATH" }).catch((error) => {
             console.debug("[store] PATH not available while creating SDK task env:", error);
             return null;
           });
-          const sdkBaseEnv = buildWorktreeSessionEnv({
+          const agentBaseEnv = buildWorktreeSessionEnv({
             worktreePath,
             repoConfig,
             portEnv,
             inheritedPath,
           });
-          const sdkEnv = {
-            ...sdkBaseEnv,
+          const agentEnv = {
+            ...agentBaseEnv,
             ...buildTaskRuntimeEnv({
               taskId: id,
               dbName: await resolveDbName(),
@@ -480,21 +481,30 @@ export function createTasksApi(
                 console.debug("[store] kanna-cli not available while creating SDK task env:", error);
                 return null;
               }),
-              path: sdkBaseEnv.PATH ?? inheritedPath,
+              path: agentBaseEnv.PATH ?? inheritedPath,
             }),
           };
-          await invoke("create_agent_session", {
+          await invoke("spawn_agent_session", {
             sessionId: id,
             cwd: worktreePath,
             prompt,
-            env: sdkEnv,
+            env: agentEnv,
+            agentProvider,
             systemPrompt: buildKannaRuntimeSystemPrompt(),
             permissionMode: opts?.customTask?.permissionMode ?? null,
             model: resolvedModel,
             allowedTools: opts?.customTask?.allowedTools ?? null,
-            disallowedTools: opts?.customTask?.disallowedTools ?? null,
             maxTurns: opts?.customTask?.maxTurns ?? null,
             maxBudgetUsd: opts?.customTask?.maxBudgetUsd ?? null,
+            executable: null,
+          });
+          await upsertTerminalSession(context.requireDb(), {
+            id: `agent-${id}`,
+            repo_id: repoId,
+            pipeline_item_id: id,
+            label: "agent",
+            cwd: worktreePath,
+            daemon_session_id: id,
           });
         } else {
           const { env, setupCmds, agentCmd, agentCmdPreamble, kannaCliPath } = await requireService(context.services.preparePtySession, "preparePtySession")(
@@ -605,7 +615,7 @@ export function createTasksApi(
     repoId: string,
     repoPath: string,
     prompt: string,
-    agentType: "pty" | "sdk" = "pty",
+    agentType: AgentExecutionType = "pty",
     opts?: CreateItemOptions,
   ): Promise<string> {
     const t0 = performance.now();
@@ -613,7 +623,7 @@ export function createTasksApi(
     const branch = `task-${id}`;
     const worktreePath = `${repoPath}/.kanna-worktrees/${branch}`;
     const effectivePrompt = opts?.customTask?.prompt ?? prompt;
-    const effectiveAgentType = opts?.customTask?.executionMode ?? agentType;
+    const effectiveAgentType = normalizeAgentExecutionType(opts?.customTask?.executionMode ?? agentType);
     const customTaskAgentProvider = opts?.customTask?.agentProvider;
     const customTaskModel = opts?.customTask?.model;
     const requestedAgentProviders = customTaskAgentProvider ?? opts?.agentProvider;

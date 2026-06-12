@@ -25,8 +25,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 git2 = { version = "0.19", features = ["vendored-libgit2", "vendored-openssl"] }
 tokio = { version = "1", features = ["full"] }
-dashmap = "6"
-claude-agent-sdk = { path = "../../../crates/claude-agent-sdk" }
 kanna-runtime-defaults = { path = "../../../crates/runtime-defaults" }
 chrono = "0.4"
 libc = "0.2"
@@ -36,6 +34,9 @@ tauri-plugin-webdriver = "0.2"
 ignore = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rusqlite = { version = "0.32.1", features = ["bundled"] }
+
+[dev-dependencies]
+claude-agent-sdk = { path = "../../../crates/claude-agent-sdk" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 arboard = { version = "3.6", default-features = false, features = ["image-data"] }

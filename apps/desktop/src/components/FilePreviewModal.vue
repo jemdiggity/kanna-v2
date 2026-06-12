@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type MarkdownIt from "markdown-it";
-import type { ShikiTransformer } from "shiki";
+import type { BundledLanguage, ShikiTransformer } from "shiki";
 import { ref, computed, onMounted, nextTick, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { invoke } from "../invoke";
@@ -86,6 +86,11 @@ const lineCount = computed(() => {
 type ShikiModule = typeof import("shiki");
 type ShikiHighlighter = Awaited<ReturnType<ShikiModule["createHighlighter"]>>;
 type HastElement = Parameters<NonNullable<ShikiTransformer["pre"]>>[0];
+type ShikiLanguage = BundledLanguage | "text";
+
+function toShikiLanguage(lang: string): ShikiLanguage {
+  return lang === "text" ? "text" : lang as BundledLanguage;
+}
 
 // Lazy-load shiki to avoid blocking startup
 let highlighter: ShikiHighlighter | null = null;
@@ -123,7 +128,7 @@ async function getMarkdownIt() {
       // Languages are pre-loaded in the watcher before md.render() is called,
       // so getLoadedLanguages() is reliable here (no async needed).
       const loaded = hl.getLoadedLanguages();
-      const useLang = loaded.includes(lang) ? lang : "text";
+      const useLang = loaded.includes(toShikiLanguage(lang)) ? toShikiLanguage(lang) : "text";
       return hl.codeToHtml(str, { lang: useLang, theme: shikiTheme.value });
     },
   });
@@ -148,7 +153,7 @@ watch([renderMarkdown, content, effectiveCodeTheme], async ([shouldRender, raw])
   const langs = [...new Set([...langMatches].map((m) => m[1]))];
   await Promise.all(
     langs.map((lang) =>
-      hl.loadLanguage(lang).catch((error: unknown) => {
+      hl.loadLanguage(toShikiLanguage(lang)).catch((error: unknown) => {
         console.debug(`[file-preview] failed to preload markdown code language "${lang}"; using text fallback:`, error);
       })
     )
@@ -168,7 +173,7 @@ async function loadFile() {
     const lang = getSyntaxLanguageForPath(props.filePath);
 
     try {
-      await hl.loadLanguage(lang);
+      await hl.loadLanguage(toShikiLanguage(lang));
     } catch (error) {
       console.debug(`[file-preview] failed to load syntax language "${lang}"; using text fallback:`, error);
       // Language not available — fall back to text
@@ -176,7 +181,7 @@ async function loadFile() {
 
     const loadedLangs = hl.getLoadedLanguages();
     // Set lang before content so the watcher fires once with the correct language
-    currentLang.value = loadedLangs.includes(lang) ? lang : "text";
+    currentLang.value = loadedLangs.includes(toShikiLanguage(lang)) ? lang : "text";
     content.value = raw;
   } catch (e: unknown) {
     error.value = e instanceof Error ? e.message : String(e);
@@ -211,7 +216,7 @@ async function renderHighlighted(raw: string, lang: string, decos: typeof search
       },
     };
     highlighted.value = hl.codeToHtml(raw, {
-      lang,
+      lang: toShikiLanguage(lang),
       theme: shikiTheme.value,
       decorations: decos,
       transformers: [wrapTransformer],
