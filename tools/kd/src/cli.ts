@@ -48,13 +48,13 @@ function parseMobileUpInput(rest: string[]): ParsedCliCommand {
     .filter(([key, value]) => !["production", "staging"].includes(key) && value === true)
     .map(([key]) => key);
   if (unsupportedFlags.length > 0) {
-    throw new Error("mobile up only accepts --production");
+    throw new Error("mobile up only accepts --production or --staging");
   }
-  if (input.staging === true) {
-    throw new Error("mobile up --staging is not supported yet");
+  if (input.production === true && input.staging === true) {
+    throw new Error("mobile up accepts only one of --production or --staging");
   }
-  if (input.production === true) {
-    return { taskId: "mobile.up", input: { production: true } };
+  if (input.production === true || input.staging === true) {
+    return { taskId: "mobile.up", input: { production: input.production === true, staging: input.staging === true } };
   }
   return { taskId: "dev.up", input: { ...defaultDevUpInput, mobile: true } };
 }
@@ -181,6 +181,9 @@ export function parseCliArgs(args: string[]): ParsedCliCommand {
   if (group === "cloud" && command === "deploy") {
     return { taskId: "cloud.deploy", input: parseFlagInput(rest, { staging: false, production: false, relay: false }) };
   }
+  if (group === "cloud" && command === "relay-provision") {
+    return { taskId: "cloud.relay-provision", input: parseFlagInput(rest, { staging: false, production: false }) };
+  }
   if (group === "pages" && command === "build-schema") {
     return { taskId: "pages.build-schema", input: parseFlagInput(rest, {}) };
   }
@@ -257,7 +260,7 @@ function helpText(): string {
     "  dev log [window]",
     "  dev seed [--db <path-or-name>] [--delete-db]",
     "  daemon kill",
-    "  mobile up [--production]",
+    "  mobile up [--production|--staging]",
     "  mobile test",
     "  mobile device-smoke",
     "  emulators up|down|status",
@@ -270,6 +273,7 @@ function helpText(): string {
     "  build sidecars",
     "  release ship [--dry-run] [--release] [--major|--minor|--patch] [--arm64|--x86_64]",
     "  cloud deploy --staging|--production [--relay]",
+    "  cloud relay-provision --staging|--production",
     "  pages build-schema --out-dir <dir>",
     "  test app-update-bundle",
     "  test cloud-emulator",

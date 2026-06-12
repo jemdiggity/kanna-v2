@@ -102,7 +102,7 @@ describe("task executors", () => {
     };
 
     const result = await executeProductionMobileUpWithContext(
-      { production: true },
+      { production: true, staging: false },
       {
         runner,
         context: {
@@ -132,5 +132,46 @@ describe("task executors", () => {
     expect(calls[2]).toContain("tmux -L kanna-task-abc new-session");
     expect(calls[2]).not.toContain("EXPO_PUBLIC_KANNA_SERVER_URL");
     expect(calls.join("\n")).not.toContain("apps/desktop");
+  });
+
+  it("starts mobile against staging cloud env without requiring production desktop status", async () => {
+    const calls: string[] = [];
+    const runner: CommandRunner = {
+      async run(command, args) {
+        calls.push(`${command} ${args.join(" ")}`);
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+    };
+
+    const result = await executeProductionMobileUpWithContext(
+      { production: false, staging: true },
+      {
+        runner,
+        context: {
+          repoRoot: "/repo",
+          tmux: { server: "kanna-task-abc", session: "kanna-task-abc" },
+          ports: { KANNA_MOBILE_PORT: 8084 },
+          env: {
+            KANNA_MOBILE_PORT: "8084",
+            EXPO_PUBLIC_FIREBASE_API_KEY: "staging-api-key",
+            EXPO_PUBLIC_FIREBASE_APP_ID: "staging-app-id"
+          }
+        }
+      }
+    );
+
+    expect(result).toMatchObject({
+      ok: true,
+      message: "Started mobile against staging cloud environment.",
+      data: {
+        relayUrl: "wss://relay-staging.kanna.build",
+        windows: ["mobile"]
+      }
+    });
+    expect(calls[0]).toContain("tmux -L kanna-task-abc new-session");
+    expect(calls[0]).toContain("KANNA_APP_ENV='staging'");
+    expect(calls[0]).toContain("EXPO_PUBLIC_FIREBASE_PROJECT_ID='kanna-staging'");
+    expect(calls[0]).toContain("EXPO_PUBLIC_KANNA_RELAY_URL='wss://relay-staging.kanna.build'");
+    expect(calls.join("\n")).not.toContain("curl --fail");
   });
 });
