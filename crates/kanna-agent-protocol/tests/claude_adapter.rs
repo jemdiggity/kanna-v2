@@ -143,6 +143,7 @@ fn spawn_args_pin_the_stream_json_contract() {
         model: Some("claude-fable-5".to_string()),
         permission_mode: Some("acceptEdits".to_string()),
         allowed_tools: vec!["Bash".to_string()],
+        disallowed_tools: Vec::new(),
         max_turns: None,
         max_budget_usd: None,
         system_prompt: None,

@@ -3532,8 +3532,12 @@ mod tests {
                     assert_eq!(params.agent_provider, AgentProvider::Codex);
                     assert!(params.cwd.contains(".kanna-worktrees/task-"));
                     assert!(params.prompt.contains("Implement revision:"));
-                    assert!(params.prompt.contains("Add E2E coverage for title preservation."));
-                    assert!(!params.prompt.contains("Review prompt that should stay hidden."));
+                    assert!(params
+                        .prompt
+                        .contains("Add E2E coverage for title preservation."));
+                    assert!(!params
+                        .prompt
+                        .contains("Review prompt that should stay hidden."));
                     session_id
                 }
                 other => panic!("expected SpawnAgent command, got {:?}", other),

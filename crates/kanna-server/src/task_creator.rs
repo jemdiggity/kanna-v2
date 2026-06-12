@@ -862,6 +862,7 @@ async fn spawn_prepared_task(
                 model,
                 permission_mode,
                 allowed_tools,
+                disallowed_tools: Vec::new(),
                 max_turns: None,
                 max_budget_usd: None,
                 system_prompt: Some(build_kanna_runtime_system_prompt()),
@@ -1922,10 +1923,8 @@ mod tests {
     }
 
     fn init_git_repo(label: &str) -> std::path::PathBuf {
-        let repo_root = std::env::temp_dir().join(format!(
-            "kanna-task-{label}-{}",
-            std::process::id()
-        ));
+        let repo_root =
+            std::env::temp_dir().join(format!("kanna-task-{label}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&repo_root);
         std::fs::create_dir_all(&repo_root).unwrap();
         std::fs::write(repo_root.join("README.md"), "test repo").unwrap();
@@ -2037,7 +2036,10 @@ mod tests {
                 .find(|item| item.id == prepared.created_task.task_id)
                 .unwrap();
             assert_eq!(created.agent_type.as_deref(), Some("agent"));
-            assert!(matches!(prepared.session, PreparedSessionSpawn::Agent { .. }));
+            assert!(matches!(
+                prepared.session,
+                PreparedSessionSpawn::Agent { .. }
+            ));
 
             let _ = std::fs::remove_dir_all(&repo_root);
         }

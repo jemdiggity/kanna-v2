@@ -172,6 +172,7 @@ fn spawn_params(cwd: &Path, executable: &Path, prompt: &str) -> AgentSpawnParams
         model: None,
         permission_mode: None,
         allowed_tools: Vec::new(),
+        disallowed_tools: Vec::new(),
         max_turns: None,
         max_budget_usd: None,
         system_prompt: None,
