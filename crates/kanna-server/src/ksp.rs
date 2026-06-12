@@ -34,6 +34,20 @@ fn b64(data: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(data)
 }
 
+/// Length-aware constant-time byte comparison. Returns false for differing
+/// lengths without leaking which byte differs via early exit. Avoids a crate
+/// dependency for this single credential check.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 fn status_str(status: SessionStatus) -> &'static str {
     match status {
         SessionStatus::Busy => "busy",
@@ -377,14 +391,20 @@ impl StreamConn {
     }
 
     fn credential_matches(&self, credential: &str) -> bool {
-        !credential.trim().is_empty()
-            || self
-                .state
-                .config()
-                .desktop_secret
-                .as_deref()
-                .is_some_and(|secret| secret == credential)
-            || self.state.config().device_token == credential
+        // A non-empty credential is a precondition, not a pass: the secret
+        // comparison is the actual gate. Compared in constant time so a
+        // remote (tunnel) caller cannot use response timing as an oracle.
+        if credential.is_empty() {
+            return false;
+        }
+        let config = self.state.config();
+        let secret_ok = config
+            .desktop_secret
+            .as_deref()
+            .is_some_and(|secret| constant_time_eq(secret.as_bytes(), credential.as_bytes()));
+        let token_ok = !config.device_token.is_empty()
+            && constant_time_eq(config.device_token.as_bytes(), credential.as_bytes());
+        secret_ok || token_ok
     }
 
     async fn attach(&mut self, task_id: String, kind: StreamKind, from_seq: u64) {
@@ -871,6 +891,41 @@ mod tests {
         let frame: ServerFrame =
             serde_json::from_str(&outgoing_rx.recv().await.expect("auth ok frame")).unwrap();
         assert_eq!(frame, ServerFrame::AuthOk);
+        drop(incoming_tx);
+        let _ = task.await;
+    }
+
+    #[tokio::test]
+    async fn tunnel_stream_rejects_wrong_nonempty_credential() {
+        // Regression guard: a non-empty credential must not pass on the
+        // strength of being non-empty — the secret comparison is the gate.
+        let mut config = test_config("ksp-auth-wrong", "KSP Auth Wrong");
+        config.desktop_secret = Some("desktop-secret".to_string());
+        let state = Arc::new(crate::http_api::AppState::new(config));
+        let (incoming_tx, incoming_rx) = mpsc::channel(8);
+        let (outgoing_tx, mut outgoing_rx) = mpsc::channel(8);
+        let task = tokio::spawn(handle_stream_channels(
+            incoming_rx,
+            outgoing_tx,
+            state,
+            AuthMode::RequireCredential,
+        ));
+
+        incoming_tx
+            .send(
+                serde_json::to_string(&ClientFrame::Auth {
+                    credential: Some("not-the-secret".to_string()),
+                })
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let frame: ServerFrame =
+            serde_json::from_str(&outgoing_rx.recv().await.expect("error frame")).unwrap();
+        match frame {
+            ServerFrame::Error { code, .. } => assert_eq!(code, "unauthorized"),
+            other => panic!("expected unauthorized error, got {other:?}"),
+        }
         drop(incoming_tx);
         let _ = task.await;
     }
