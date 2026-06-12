@@ -30,6 +30,7 @@ const emit = defineEmits<{
 const prompt = ref("");
 const agentProvider = ref<AgentProvider>(props.defaultAgentProvider ?? "claude");
 const displayMode = ref<AgentExecutionType>("agent");
+const rawModeExplicitlySelected = ref(false);
 const pipelineOptions = computed(() => {
   if (props.pipelines && props.pipelines.length > 0) return props.pipelines;
   return ["default"];
@@ -85,8 +86,20 @@ function providerLabel(provider: AgentProvider): string {
 const supportsThemedMode = computed(() => agentProvider.value === "claude" || agentProvider.value === "codex");
 
 watch(supportsThemedMode, (supported) => {
-  if (!supported) displayMode.value = "pty";
+  if (!supported) {
+    displayMode.value = "pty";
+    return;
+  }
+  if (!rawModeExplicitlySelected.value) {
+    displayMode.value = "agent";
+  }
 }, { immediate: true });
+
+function selectDisplayMode(mode: AgentExecutionType) {
+  if (mode === "agent" && !supportsThemedMode.value) return;
+  displayMode.value = mode;
+  rawModeExplicitlySelected.value = mode === "pty";
+}
 
 function cycleProvider(direction: -1 | 1) {
   const idx = availableProviders.value.indexOf(agentProvider.value);
@@ -462,7 +475,7 @@ function handleKeydown(e: KeyboardEvent) {
               :class="{ selected: displayMode === 'agent' }"
               :disabled="!supportsThemedMode"
               data-testid="display-mode-themed"
-              @click="displayMode = 'agent'"
+              @click="selectDisplayMode('agent')"
             >
               Themed
             </button>
@@ -471,7 +484,7 @@ function handleKeydown(e: KeyboardEvent) {
               class="display-mode-option"
               :class="{ selected: displayMode === 'pty' }"
               data-testid="display-mode-raw"
-              @click="displayMode = 'pty'"
+              @click="selectDisplayMode('pty')"
             >
               Raw terminal
             </button>
