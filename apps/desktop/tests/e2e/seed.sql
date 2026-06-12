@@ -70,11 +70,13 @@ CREATE TABLE IF NOT EXISTS agent_run (
 
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
+-- Accumulator schema (matches db.ts migration 004): one row per
+-- (pipeline_item_id, activity) holding total seconds spent in that activity.
 CREATE TABLE IF NOT EXISTS activity_log (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
   pipeline_item_id TEXT NOT NULL REFERENCES pipeline_item(id) ON DELETE CASCADE,
   activity TEXT NOT NULL,
-  started_at TEXT NOT NULL DEFAULT (datetime('now'))
+  seconds INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (pipeline_item_id, activity)
 );
 CREATE INDEX IF NOT EXISTS idx_activity_log_item ON activity_log(pipeline_item_id);
 
@@ -351,26 +353,14 @@ VALUES ('task-seed-blocked-migration', 'task-seed-auth-refactor');
 
 -- ── Activity log ────────────────────────────────────────────────────────────
 
-INSERT INTO activity_log (pipeline_item_id, activity, started_at)
-VALUES ('task-seed-auth-refactor', 'working', datetime('now', '-3 days'));
-INSERT INTO activity_log (pipeline_item_id, activity, started_at)
-VALUES ('task-seed-auth-refactor', 'idle', datetime('now', '-2 days'));
-INSERT INTO activity_log (pipeline_item_id, activity, started_at)
-VALUES ('task-seed-auth-refactor', 'working', datetime('now', '-30 minutes'));
-
-INSERT INTO activity_log (pipeline_item_id, activity, started_at)
-VALUES ('task-seed-dashboard', 'working', datetime('now', '-5 days'));
-INSERT INTO activity_log (pipeline_item_id, activity, started_at)
-VALUES ('task-seed-dashboard', 'idle', datetime('now', '-4 days'));
-INSERT INTO activity_log (pipeline_item_id, activity, started_at)
-VALUES ('task-seed-dashboard', 'working', datetime('now', '-1 days'));
-INSERT INTO activity_log (pipeline_item_id, activity, started_at)
-VALUES ('task-seed-dashboard', 'idle', datetime('now', '-6 hours'));
-
-INSERT INTO activity_log (pipeline_item_id, activity, started_at)
-VALUES ('task-seed-onboarding', 'working', datetime('now', '-2 days'));
-INSERT INTO activity_log (pipeline_item_id, activity, started_at)
-VALUES ('task-seed-onboarding', 'unread', datetime('now', '-2 hours'));
+-- Accumulated seconds per (task, activity) — one row per pair (PK).
+INSERT INTO activity_log (pipeline_item_id, activity, seconds) VALUES
+  ('task-seed-auth-refactor', 'working', 12600),
+  ('task-seed-auth-refactor', 'idle', 3600),
+  ('task-seed-dashboard', 'working', 18000),
+  ('task-seed-dashboard', 'idle', 9000),
+  ('task-seed-onboarding', 'working', 7200),
+  ('task-seed-onboarding', 'unread', 1800);
 
 -- ── Operator events ─────────────────────────────────────────────────────────
 
