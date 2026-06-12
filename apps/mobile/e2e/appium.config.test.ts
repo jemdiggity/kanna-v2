@@ -10,6 +10,28 @@ describe("mobile Appium config", () => {
     expect(deriveWdaLocalPort(4723)).toBe(4724);
   });
 
+  it("skips reserved kd ports so WDA does not collide with the transfer port", () => {
+    // kd assigns appium 4915 / transfer 4916 adjacently; +1 would collide
+    // with KANNA_TRANSFER_PORT held by the running desktop server.
+    expect(deriveWdaLocalPort(4915, [4916])).toBe(4917);
+    // Skips a run of reserved ports.
+    expect(deriveWdaLocalPort(4915, [4916, 4917, 4918])).toBe(4919);
+  });
+
+  it("passes reserved ports through to physical-device capabilities", () => {
+    expect(
+      createPhysicalDeviceCapabilities({
+        appiumPort: 4915,
+        bundleId: "build.kanna.app",
+        deviceName: "Jerome's iPhone 15",
+        deviceUdid: "00008130-001015CA1091401C",
+        reservedPorts: [4916]
+      })
+    ).toMatchObject({
+      "appium:wdaLocalPort": 4917
+    });
+  });
+
   it("builds simulator capabilities with the configured bundle id", () => {
     expect(
       createSimulatorCapabilities({

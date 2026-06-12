@@ -24,6 +24,30 @@ export interface MobileE2eEnv {
   xcodeOrgId?: string;
   xcodeSigningId?: string;
   updatedWdaBundleId?: string;
+  /**
+   * Other kd-assigned ports the WDA forwarding port must avoid (transfer,
+   * webdriver, relay, firebase, etc.). The dev stack holds these while the
+   * mobile run depends on it.
+   */
+  reservedPorts: number[];
+}
+
+/**
+ * Collect every numeric `KANNA_*_PORT` env value except the Appium port, so
+ * the WDA port can route around them.
+ */
+function collectReservedKannaPorts(
+  env: Record<string, string | undefined>,
+  appiumPort: number
+): number[] {
+  const ports = new Set<number>();
+  for (const [key, value] of Object.entries(env)) {
+    if (!/^KANNA_.*PORT$/.test(key)) continue;
+    const port = Number.parseInt(value?.trim() ?? "", 10);
+    if (Number.isNaN(port) || port === appiumPort) continue;
+    ports.add(port);
+  }
+  return [...ports];
 }
 
 function readMobileAppConfig(): MobileAppConfig {
@@ -81,6 +105,7 @@ export function resolveRequiredMobileE2eEnv(
     physicalDeviceName: env.KANNA_IOS_PHYSICAL_DEVICE_NAME?.trim() || undefined,
     xcodeOrgId,
     xcodeSigningId,
-    updatedWdaBundleId
+    updatedWdaBundleId,
+    reservedPorts: collectReservedKannaPorts(env, appiumPort)
   };
 }

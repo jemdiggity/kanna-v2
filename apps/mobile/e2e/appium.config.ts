@@ -3,6 +3,7 @@ export interface SimulatorCapabilityInput {
   bundleId: string;
   deviceName: string;
   platformVersion?: string;
+  reservedPorts?: number[];
 }
 
 export interface PhysicalDeviceCapabilityInput {
@@ -14,10 +15,27 @@ export interface PhysicalDeviceCapabilityInput {
   xcodeOrgId?: string;
   xcodeSigningId?: string;
   updatedWdaBundleId?: string;
+  reservedPorts?: number[];
 }
 
-export function deriveWdaLocalPort(appiumPort: number): number {
-  return appiumPort + 1;
+/**
+ * Pick the WDA forwarding port, normally appiumPort + 1, but skipping any
+ * reserved port. The kd dev stack assigns adjacent ports (e.g. appium 4915,
+ * transfer 4916), so the naive +1 collides with KANNA_TRANSFER_PORT while the
+ * desktop server — which the mobile run depends on — is holding it. Threading
+ * the reserved kd ports through here keeps the device smoke runnable with the
+ * dev stack up.
+ */
+export function deriveWdaLocalPort(
+  appiumPort: number,
+  reservedPorts: number[] = []
+): number {
+  const reserved = new Set([appiumPort, ...reservedPorts]);
+  let candidate = appiumPort + 1;
+  while (reserved.has(candidate)) {
+    candidate += 1;
+  }
+  return candidate;
 }
 
 export function createSimulatorCapabilities(input: SimulatorCapabilityInput) {
@@ -26,7 +44,10 @@ export function createSimulatorCapabilities(input: SimulatorCapabilityInput) {
     "appium:automationName": "XCUITest",
     "appium:deviceName": input.deviceName,
     "appium:bundleId": input.bundleId,
-    "appium:wdaLocalPort": deriveWdaLocalPort(input.appiumPort),
+    "appium:wdaLocalPort": deriveWdaLocalPort(
+      input.appiumPort,
+      input.reservedPorts
+    ),
     "appium:newCommandTimeout": 120,
     "appium:noReset": true,
     ...(input.platformVersion
@@ -46,7 +67,10 @@ export function createPhysicalDeviceCapabilities(
     "appium:udid": input.deviceUdid,
     "appium:deviceName": input.deviceName,
     "appium:bundleId": input.bundleId,
-    "appium:wdaLocalPort": deriveWdaLocalPort(input.appiumPort),
+    "appium:wdaLocalPort": deriveWdaLocalPort(
+      input.appiumPort,
+      input.reservedPorts
+    ),
     "appium:newCommandTimeout": 120,
     "appium:noReset": true,
     "appium:forceAppLaunch": true,

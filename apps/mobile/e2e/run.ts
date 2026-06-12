@@ -147,7 +147,8 @@ async function main(): Promise<void> {
         platformVersion: device.platformVersion,
         xcodeOrgId: env.xcodeOrgId,
         xcodeSigningId: env.xcodeSigningId,
-        updatedWdaBundleId: env.updatedWdaBundleId
+        updatedWdaBundleId: env.updatedWdaBundleId,
+        reservedPorts: env.reservedPorts
       });
     } else {
       const device = await resolveSimulatorDevice(env.deviceName);
@@ -156,7 +157,8 @@ async function main(): Promise<void> {
       capabilities = createSimulatorCapabilities({
         appiumPort: env.appiumPort,
         bundleId: env.bundleId,
-        deviceName: device.name
+        deviceName: device.name,
+        reservedPorts: env.reservedPorts
       });
     }
 
