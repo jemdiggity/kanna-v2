@@ -16,7 +16,7 @@ use ts_rs::TS;
 use crate::events::{AgentEvent, PermissionDecision};
 
 /// Which stream of a task to attach.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "typescript", derive(TS), ts(export))]
 pub enum StreamKind {
@@ -58,15 +58,23 @@ pub enum ClientFrame {
         kind: StreamKind,
     },
     /// Send a user message to a themed task (works mid-run — steering).
-    AgentInput { task_id: String, text: String },
+    AgentInput {
+        task_id: String,
+        text: String,
+    },
     AgentPermission {
         task_id: String,
         request_id: String,
         decision: PermissionDecision,
     },
-    AgentInterrupt { task_id: String },
+    AgentInterrupt {
+        task_id: String,
+    },
     /// Raw terminal input for PTY tasks (base64 bytes).
-    TermInput { task_id: String, data_b64: String },
+    TermInput {
+        task_id: String,
+        data_b64: String,
+    },
     TermResize {
         task_id: String,
         cols: u16,
@@ -110,13 +118,19 @@ pub enum ServerFrame {
         rows: u16,
         data_b64: String,
     },
-    TermOutput { task_id: String, data_b64: String },
+    TermOutput {
+        task_id: String,
+        data_b64: String,
+    },
     StatusChanged {
         task_id: String,
         /// `busy` | `waiting` | `idle` (mirrors daemon SessionStatus).
         status: String,
     },
-    SessionExit { task_id: String, code: i32 },
+    SessionExit {
+        task_id: String,
+        code: i32,
+    },
     Response {
         id: u64,
         status: u16,
