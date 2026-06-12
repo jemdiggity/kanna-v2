@@ -267,6 +267,19 @@ function createDisconnectedClient(): KannaClient {
       });
       return { close() {} };
     },
+    observeTaskAgent(taskId, listener) {
+      listener({
+        type: "error",
+        taskId,
+        message: "No trusted desktop is available."
+      });
+      return {
+        close() {},
+        sendInput() {},
+        sendPermission() {},
+        interrupt() {}
+      };
+    },
     createPairingSession: unavailable
   };
 }
@@ -362,6 +375,10 @@ function createCloudWithLanFallbackClient(
       useLanFallback()
         ? lanClient.observeTaskTerminal(taskId, listener)
         : cloudClient.observeTaskTerminal(taskId, listener),
+    observeTaskAgent: (taskId, listener) =>
+      useLanFallback()
+        ? lanClient.observeTaskAgent(taskId, listener)
+        : cloudClient.observeTaskAgent(taskId, listener),
     createPairingSession: () => lanClient.createPairingSession()
   };
 }
@@ -411,6 +428,8 @@ function createTrustedLanFallbackClient({
       (await resolveClient()).sendTaskInput(taskId, input),
     observeTaskTerminal: (taskId, listener) =>
       currentClient().observeTaskTerminal(taskId, listener),
+    observeTaskAgent: (taskId, listener) =>
+      currentClient().observeTaskAgent(taskId, listener),
     createPairingSession: async () => (await resolveClient()).createPairingSession()
   };
 }
@@ -447,6 +466,8 @@ function createDelegatingClient(getClient: () => KannaClient): KannaClient {
     sendTaskInput: (taskId, input) => getClient().sendTaskInput(taskId, input),
     observeTaskTerminal: (taskId, listener) =>
       getClient().observeTaskTerminal(taskId, listener),
+    observeTaskAgent: (taskId, listener) =>
+      getClient().observeTaskAgent(taskId, listener),
     createPairingSession: () => getClient().createPairingSession()
   };
 }
