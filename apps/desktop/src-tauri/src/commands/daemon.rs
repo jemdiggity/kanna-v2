@@ -669,6 +669,64 @@ pub async fn spawn_session(
     }
 }
 
+/// Spawn a headless agent session (themed task) in the daemon. The daemon
+/// builds the provider command via the kanna-agent-protocol adapters,
+/// journals the neutral event stream, and survives app restarts like PTY
+/// sessions.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn spawn_agent_session(
+    state: tauri::State<'_, DaemonState>,
+    session_id: String,
+    cwd: String,
+    env: HashMap<String, String>,
+    agent_provider: String,
+    prompt: String,
+    model: Option<String>,
+    permission_mode: Option<String>,
+    allowed_tools: Option<Vec<String>>,
+    max_turns: Option<u32>,
+    max_budget_usd: Option<f64>,
+    system_prompt: Option<String>,
+    executable: Option<String>,
+) -> Result<(), DaemonCommandError> {
+    let agent_provider = parse_agent_provider(Some(agent_provider))?;
+    let cmd = serde_json::json!({
+        "type": "SpawnAgent",
+        "session_id": session_id,
+        "params": {
+            "agent_provider": agent_provider,
+            "prompt": prompt,
+            "cwd": cwd,
+            "env": env,
+            "model": model,
+            "permission_mode": permission_mode,
+            "allowed_tools": allowed_tools.unwrap_or_default(),
+            "max_turns": max_turns,
+            "max_budget_usd": max_budget_usd,
+            "system_prompt": system_prompt,
+            "executable": executable,
+        },
+    });
+    let json = serde_json::to_string(&cmd).map_err(|e| e.to_string())?;
+    ensure_connected(&state).await?;
+    let mut guard = state.lock().await;
+    let client = require_option_mut(&mut guard, "daemon client")?;
+    client.send_command(&json).await?;
+
+    let response = client.read_event().await?;
+    let event: serde_json::Value =
+        serde_json::from_str(&response).map_err(|e| format!("bad response: {}", e))?;
+    match event.get("type").and_then(|t| t.as_str()) {
+        Some("SessionCreated") => Ok(()),
+        Some("Error") => Err(parse_error_event(&event)),
+        _ => Err(DaemonCommandError {
+            message: format!("unexpected spawn response: {}", response),
+            code: None,
+        }),
+    }
+}
+
 #[tauri::command]
 pub async fn get_session_recovery_state(
     state: tauri::State<'_, DaemonState>,
