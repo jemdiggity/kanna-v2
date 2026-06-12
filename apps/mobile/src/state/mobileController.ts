@@ -27,6 +27,8 @@ export interface MobileController {
   runMergeAgent(taskId: string): Promise<void>;
   advanceDesktopTaskStage(taskId: string): Promise<void>;
   sendTaskInput(taskId: string, input: string): Promise<void>;
+  sendTaskAgentPermission(taskId: string, requestId: string, decision: Parameters<TaskAgentSubscription["sendPermission"]>[1]): void;
+  interruptTaskAgent(taskId: string): void;
   closeDesktopTask(taskId: string): Promise<void>;
 }
 
@@ -492,6 +494,20 @@ export function createMobileController(
       } catch (error) {
         fail(error);
       }
+    },
+
+    sendTaskAgentPermission(taskId, requestId, decision) {
+      if (activeTaskAgent?.taskId !== taskId) {
+        return;
+      }
+      activeTaskAgent.subscription.sendPermission(requestId, decision);
+    },
+
+    interruptTaskAgent(taskId) {
+      if (activeTaskAgent?.taskId !== taskId) {
+        return;
+      }
+      activeTaskAgent.subscription.interrupt();
     },
 
     async closeDesktopTask(taskId) {
