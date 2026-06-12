@@ -7,10 +7,13 @@ import {
   registerDevice,
 } from "./auth.js";
 import {
+  attachDesktopTunnel,
+  forwardTunnelData,
   setPhoneConnection,
   setServerConnection,
   routeMessage,
   getConnectionCount,
+  isTunnelSocket,
 } from "./router.js";
 
 const PORT = parseInt(process.env.PORT || "8080", 10);
@@ -125,6 +128,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
         device_token?: string;
         desktop_id?: string;
         desktop_secret?: string;
+        tunnel_id?: string;
       };
 
       try {
@@ -173,6 +177,14 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
       authenticated = true;
       clearTimeout(authTimer);
 
+      if (role === "server" && desktopId && msg.tunnel_id) {
+        attachDesktopTunnel(userId, desktopId, msg.tunnel_id, ws);
+        console.log(
+          `[ws] Authenticated tunnel socket for ${userId}/${desktopId} from ${remoteAddr}`
+        );
+        return;
+      }
+
       // Register the connection with the router
       if (role === "phone") {
         setPhoneConnection(userId, ws);
@@ -189,6 +201,10 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
     }
 
     // --- Post-auth: route messages ---
+    if (isTunnelSocket(ws)) {
+      forwardTunnelData(ws, raw);
+      return;
+    }
     routeMessage(userId!, role!, data, ws, desktopId);
   });
 

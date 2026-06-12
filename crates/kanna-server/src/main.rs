@@ -381,6 +381,47 @@ async fn run_relay_loop(
                         RelayMessage::AuthOk { user_id } => {
                             log::info!("Relay authenticated as user {}", user_id);
                         }
+                        RelayMessage::TunnelEstablish {
+                            desktop_id,
+                            tunnel_id,
+                        } => {
+                            if desktop_id != config.desktop_id {
+                                log::warn!(
+                                    "Ignoring tunnel {} for unexpected desktop {}",
+                                    tunnel_id,
+                                    desktop_id
+                                );
+                                continue;
+                            }
+                            let tunnel_config = config.clone();
+                            let tunnel_state = Arc::clone(&http_state);
+                            tokio::spawn(async move {
+                                log::info!("Dialing relay tunnel {}", tunnel_id);
+                                match relay_client::connect_tunnel_to_relay(
+                                    &tunnel_config,
+                                    tunnel_id.clone(),
+                                )
+                                .await
+                                {
+                                    Ok(socket) => {
+                                        crate::ksp::handle_tungstenite_stream(
+                                            socket,
+                                            tunnel_state,
+                                            crate::ksp::AuthMode::RequireCredential,
+                                        )
+                                        .await;
+                                        log::info!("Relay tunnel {} closed", tunnel_id);
+                                    }
+                                    Err(error) => {
+                                        log::error!(
+                                            "Failed to establish relay tunnel {}: {}",
+                                            tunnel_id,
+                                            error
+                                        );
+                                    }
+                                }
+                            });
+                        }
                         RelayMessage::Error { message } => {
                             log::error!("Relay error: {}", message);
                         }
