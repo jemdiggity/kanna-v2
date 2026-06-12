@@ -7,21 +7,17 @@ import { z } from "zod";
 import { readKannaRepoConfig } from "../config";
 import { resolveKdContext, type KdContext } from "../context";
 import { cleanWorkspace } from "../runtime/clean";
-import { deployFirebaseCloud } from "../runtime/cloud-deploy";
+import { buildRelayProvisionPlan, deployFirebaseCloud } from "../runtime/cloud-deploy";
 import {
   buildCloudEmulatorTestCommand,
   buildCloudSmokeCommand,
   buildCloudSmokeEnv,
   requireCloudSmokeEnv,
 } from "../runtime/cloud-test";
-import {
-  applyCloudTestCredentialEnv,
-  applyProductionCloudEnv,
-  readCloudTestCredentials,
-} from "../runtime/cloud-creds";
 import { buildLanLabPlan, parseLanLabInventory } from "../runtime/lan-lab";
 import { buildLanLabScenarioCommand } from "../runtime/lan-lab-runner";
 import { buildDevPlan, buildProductionMobilePlan } from "../runtime/dev-plan";
+import { resolveKdEnvironment } from "../runtime/environment";
 import { assertNotProductionDb, resetSqliteDb, seedSqliteDb, type DevDbTarget } from "../runtime/db";
 import { killWorkspaceDaemons } from "../runtime/daemon";
 import { checkRequiredCommands } from "../runtime/doctor";
@@ -52,7 +48,6 @@ export interface DevUpInput {
   daemonDir?: string;
   transferRoot?: string;
   firebaseEnvFrom?: string;
-  cloud?: "production";
 }
 
 export interface DevDownInput {
@@ -61,6 +56,7 @@ export interface DevDownInput {
 
 export interface MobileUpInput {
   production: boolean;
+  staging: boolean;
 }
 
 export const devUpInputSchema = z.object({
@@ -73,8 +69,7 @@ export const devUpInputSchema = z.object({
   db: z.string().optional(),
   daemonDir: z.string().optional(),
   transferRoot: z.string().optional(),
-  firebaseEnvFrom: z.string().optional(),
-  cloud: z.literal("production").optional()
+  firebaseEnvFrom: z.string().optional()
 });
 
 const devDownInputSchema = z.object({
@@ -82,7 +77,8 @@ const devDownInputSchema = z.object({
 });
 
 const mobileUpInputSchema = z.object({
-  production: z.boolean().default(false)
+  production: z.boolean().default(false),
+  staging: z.boolean().default(false)
 });
 
 const logInputSchema = z.object({
@@ -132,6 +128,11 @@ const cloudDeployInputSchema = z.object({
   staging: z.boolean().default(false),
   production: z.boolean().default(false),
   relay: z.boolean().default(false)
+});
+
+const cloudRelayProvisionInputSchema = z.object({
+  staging: z.boolean().default(false),
+  production: z.boolean().default(false)
 });
 
 export interface ExecutorInput {
@@ -197,11 +198,7 @@ export async function executeDevStatus(input: ExecutorInput): Promise<TaskResult
 }
 
 async function executeDevUp(input: DevUpInput): Promise<TaskResult> {
-  // --cloud production points the dev instance at the real cloud: production
-  // Firebase web client config plus the deployed relay URL. Explicit env vars
-  // still win so individual pieces can be overridden.
-  const baseEnv = input.cloud === "production" ? applyProductionCloudEnv(process.env) : process.env;
-  const context = await resolveDefaultContext(baseEnv, {
+  const context = await resolveDefaultContext(process.env, {
     dbOverride: input.db,
     daemonDirOverride: input.daemonDir,
     transferRootOverride: input.transferRoot,
@@ -303,8 +300,35 @@ export async function executeProductionMobileUpWithContext(
   input: MobileUpInput,
   executor: ExecutorInput
 ): Promise<TaskResult> {
-  if (!input.production) {
-    throw new Error("mobile.up currently supports --production only.");
+  if (input.production && input.staging) {
+    throw new Error("mobile.up accepts only one of --production or --staging.");
+  }
+  if (!input.production && !input.staging) {
+    throw new Error("mobile.up requires --production or --staging.");
+  }
+
+  if (input.staging) {
+    const staging = resolveKdEnvironment("staging");
+    const env = {
+      ...executor.context.env,
+      KANNA_APP_ENV: executor.context.env.KANNA_APP_ENV ?? "staging"
+    };
+    const plan = buildProductionMobilePlan({
+      repoRoot: executor.context.repoRoot,
+      env,
+      environment: "staging"
+    });
+
+    await startTmuxSession(executor.runner, executor.context.tmux, plan.windows);
+
+    return {
+      ok: true,
+      message: "Started mobile against staging cloud environment.",
+      data: {
+        relayUrl: staging.relayUrl,
+        windows: plan.windows.map((window) => window.name)
+      }
+    };
   }
 
   const [status, serverConfigPath] = await Promise.all([
@@ -319,7 +343,8 @@ export async function executeProductionMobileUpWithContext(
   };
   const plan = buildProductionMobilePlan({
     repoRoot: executor.context.repoRoot,
-    env
+    env,
+    environment: "production"
   });
 
   await startTmuxSession(executor.runner, executor.context.tmux, plan.windows);
@@ -769,16 +794,23 @@ export const taskDefinitions = [
   },
   {
     id: "cloud.relay-provision",
-    description: "One-time provisioning of the kanna-relay VM (SA, static IP, firewall, e2-micro).",
-    inputSchema: emptyInputSchema,
-    execute: async () => {
-      const context = await resolveDefaultContext(process.env);
-      return runBuiltCommand(
-        "bash",
-        ["services/relay/deploy/provision.sh"],
-        context.repoRoot,
-        context.env
-      );
+    description: "Build the relay VM provisioning command plan.",
+    inputSchema: cloudRelayProvisionInputSchema,
+    execute: async (_context, input) => {
+      const parsed = cloudRelayProvisionInputSchema.parse(input);
+      if (parsed.staging && parsed.production) {
+        return { ok: false, message: "cloud relay-provision accepts only one of --staging or --production." };
+      }
+      if (!parsed.staging && !parsed.production) {
+        return { ok: false, message: "cloud relay-provision requires --staging or --production." };
+      }
+      const environment = parsed.staging ? "staging" : "production";
+      const plan = buildRelayProvisionPlan({ environment });
+      return {
+        ok: true,
+        message: formatJsonResult(plan),
+        data: plan
+      };
     }
   },
   {
@@ -821,20 +853,13 @@ export const taskDefinitions = [
     inputSchema: emptyInputSchema,
     execute: async () => {
       const context = await resolveDefaultContext(process.env);
-      // Credentials come from env when set, otherwise from the local-only
-      // ~/.kanna/dev/creds.toml; production Firebase client values default
-      // to the committed public web config.
-      let env: NodeJS.ProcessEnv;
       try {
-        env = applyProductionCloudEnv(
-          applyCloudTestCredentialEnv(context.env, readCloudTestCredentials()),
-        );
-        requireCloudSmokeEnv(env, "production");
+        requireCloudSmokeEnv(context.env, "production");
       } catch (error) {
         return { ok: false, message: error instanceof Error ? error.message : String(error) };
       }
       const [command, args] = buildCloudSmokeCommand();
-      return runBuiltCommand(command, args, context.repoRoot, buildCloudSmokeEnv(env, "production"));
+      return runBuiltCommand(command, args, context.repoRoot, buildCloudSmokeEnv(context.env, "production"));
     }
   },
   {

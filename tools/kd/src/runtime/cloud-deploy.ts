@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { cloudEnvironmentToKdEnvironment, resolveKdEnvironment } from "./environment";
 import type { CommandRunner } from "./process";
 
 interface Firebaserc {
@@ -28,8 +29,32 @@ export interface RelayDeployResult {
   projectId: string;
   vmName: string;
   zone: string;
-  image: string;
   relayUrl: string;
+}
+
+export interface RelayCommandPlanStep {
+  command: string;
+  args: string[];
+  cwd?: string;
+  streamOutput?: boolean;
+}
+
+export interface RelayProvisionPlan {
+  projectId: string;
+  domain: string;
+  vmName: string;
+  zone: string;
+  region: string;
+  staticIpName: string;
+  commands: RelayCommandPlanStep[];
+}
+
+export interface RelayDeployPlan {
+  projectId: string;
+  vmName: string;
+  zone: string;
+  relayUrl: string;
+  commands: RelayCommandPlanStep[];
 }
 
 function assertCloudDeployEnvironment(environment: unknown): asserts environment is CloudDeployEnvironment {
@@ -63,9 +88,7 @@ export function resolveFirebaseProject(
     // Fall through to the explicit error below.
   }
 
-  throw new Error(
-    `No ${environment} Firebase project configured. Set ${envVarName} or add projects.${environment} to .firebaserc.`
-  );
+  return resolveKdEnvironment(cloudEnvironmentToKdEnvironment(environment)).firebaseProjectId;
 }
 
 export function resolveProductionFirebaseProject(
@@ -89,16 +112,16 @@ async function assertCleanGitWorktree(repoRoot: string, runner: CommandRunner): 
 
 export async function deployFirebaseCloud(input: CloudDeployInput & { relay?: boolean }): Promise<CloudDeployResult> {
   assertCloudDeployEnvironment(input.environment);
-  // Reject staging relay requests before any git check, build, or deploy runs
-  // so the Firebase staging deploy is never mutated as a partial outcome.
-  if (input.relay && input.environment === "staging") {
-    throw new Error(
-      "staging relay is retired; use the local relay via emulators (ws://127.0.0.1:18080)."
-    );
-  }
 
   const projectId = resolveFirebaseProject(input.repoRoot, input.env, input.environment);
   await assertCleanGitWorktree(input.repoRoot, input.runner);
+  const build = await input.runner.run("pnpm", ["--dir", "services/firebase-functions", "build"], {
+    cwd: input.repoRoot,
+    env: input.env
+  });
+  if (build.exitCode !== 0) {
+    throw new Error(build.stderr || build.stdout || "Firebase functions build failed.");
+  }
 
   const deploy = await input.runner.run(
     "pnpm",
@@ -107,7 +130,7 @@ export async function deployFirebaseCloud(input: CloudDeployInput & { relay?: bo
       "firebase",
       "deploy",
       "--only",
-      "firestore:rules,firestore:indexes",
+      "functions,firestore:rules",
       "--project",
       projectId,
       "--force"
@@ -127,111 +150,228 @@ export async function deployFirebaseCloud(input: CloudDeployInput & { relay?: bo
 
 export async function deployRelayCloud(input: CloudDeployInput): Promise<RelayDeployResult> {
   assertCloudDeployEnvironment(input.environment);
-  if (input.environment === "staging") {
-    throw new Error(
-      "staging relay is retired; use the local relay via emulators (ws://127.0.0.1:18080)."
-    );
-  }
 
-  const projectId = resolveFirebaseProject(input.repoRoot, input.env, input.environment);
-  const vmName = input.env.KANNA_RELAY_VM_NAME?.trim() || "kanna-relay-vm";
-  const zone = input.env.KANNA_RELAY_VM_ZONE?.trim() || "us-central1-a";
-  const hostname = input.env.KANNA_RELAY_HOSTNAME?.trim() || "relay.kanna.build";
-  const image = `gcr.io/${projectId}/kanna-relay`;
-  if (projectId !== "kanna-build") {
-    throw new Error(
-      `Relay VM compose stack pins gcr.io/kanna-build/kanna-relay; deploying for project ${projectId} would run a stale image. Update services/relay/deploy/compose.yaml first.`
-    );
-  }
-
-  const build = await input.runner.run("pnpm", ["--dir", "services/relay", "build"], {
-    cwd: input.repoRoot,
-    env: input.env
+  const plan = buildRelayDeployPlan({
+    repoRoot: input.repoRoot,
+    environment: input.environment
   });
-  if (build.exitCode !== 0) {
-    throw new Error(build.stderr || build.stdout || "Relay build failed.");
+  for (const step of plan.commands) {
+    const result = await input.runner.run(step.command, step.args, {
+      cwd: step.cwd,
+      env: input.env,
+      streamOutput: step.streamOutput
+    });
+    if (result.exitCode !== 0) {
+      throw new Error(result.stderr || result.stdout || `Relay VM deploy step failed: ${step.command} ${step.args.join(" ")}`);
+    }
+  }
+  return {
+    projectId: plan.projectId,
+    vmName: plan.vmName,
+    zone: plan.zone,
+    relayUrl: plan.relayUrl
+  };
+}
+
+export function buildRelayProvisionPlan(input: { environment: CloudDeployEnvironment }): RelayProvisionPlan {
+  assertCloudDeployEnvironment(input.environment);
+
+  const identity = resolveKdEnvironment(cloudEnvironmentToKdEnvironment(input.environment));
+  if (!identity.relayDomain || !identity.gceVmName) {
+    throw new Error(`Relay VM provisioning is not configured for ${input.environment}.`);
   }
 
-  const submit = await input.runner.run(
-    "gcloud",
-    [
-      "builds",
-      "submit",
-      ".",
-      "--project",
-      projectId,
-      "--config",
-      "services/relay/cloudbuild.yaml",
-      "--substitutions",
-      `_IMAGE=${image}`
-    ],
-    { cwd: input.repoRoot, env: input.env, streamOutput: true }
-  );
-  if (submit.exitCode !== 0) {
-    throw new Error(submit.stderr || submit.stdout || "Relay Cloud Build submit failed.");
+  const projectId = identity.firebaseProjectId;
+  const region = "us-central1";
+  const zone = "us-central1-a";
+  const vmName = identity.gceVmName;
+  const staticIpName = `${vmName}-ip`;
+  const tag = vmName;
+  const startupScript = buildRelayStartupScript();
+
+  return {
+    projectId,
+    domain: identity.relayDomain,
+    vmName,
+    zone,
+    region,
+    staticIpName,
+    commands: [
+      {
+        command: "gcloud",
+        args: [
+          "compute",
+          "addresses",
+          "create",
+          staticIpName,
+          "--project",
+          projectId,
+          "--region",
+          region
+        ]
+      },
+      {
+        command: "gcloud",
+        args: [
+          "compute",
+          "instances",
+          "create",
+          vmName,
+          "--project",
+          projectId,
+          "--zone",
+          zone,
+          "--machine-type",
+          "e2-micro",
+          "--address",
+          staticIpName,
+          "--tags",
+          tag,
+          "--metadata",
+          [
+            `kanna-relay-domain=${identity.relayDomain}`,
+            `firebase-project-id=${projectId}`,
+            `startup-script=${startupScript}`
+          ].join(",")
+        ]
+      },
+      {
+        command: "gcloud",
+        args: [
+          "compute",
+          "firewall-rules",
+          "create",
+          `allow-${vmName}-web`,
+          "--project",
+          projectId,
+          "--allow",
+          "tcp:80,tcp:443",
+          "--target-tags",
+          tag,
+          "--description",
+          `Allow HTTP and HTTPS for Kanna ${input.environment} relay`
+        ]
+      }
+    ]
+  };
+}
+
+export function buildRelayDeployPlan(input: {
+  repoRoot: string;
+  environment: CloudDeployEnvironment;
+}): RelayDeployPlan {
+  assertCloudDeployEnvironment(input.environment);
+
+  const identity = resolveKdEnvironment(cloudEnvironmentToKdEnvironment(input.environment));
+  if (!identity.relayDomain || !identity.gceVmName) {
+    throw new Error(`Relay VM deploy is not configured for ${input.environment}.`);
   }
 
-  // Ship the deploy stack (compose.yaml, Caddyfile, vm-deploy.sh) so the repo
-  // stays the source of truth for what runs on the VM. The destination is
-  // recreated first: scp's directory semantics differ depending on whether
-  // the destination already exists, so copy named files into a fresh dir.
-  const prep = await input.runner.run(
-    "gcloud",
-    [
-      "compute",
-      "ssh",
-      vmName,
-      "--project",
-      projectId,
-      "--zone",
-      zone,
-      "--command",
-      "rm -rf ~/kanna-relay && mkdir -p ~/kanna-relay"
-    ],
-    { cwd: input.repoRoot, env: input.env, streamOutput: true }
-  );
-  if (prep.exitCode !== 0) {
-    throw new Error(prep.stderr || prep.stdout || "Relay VM deploy-dir prep failed.");
-  }
+  const projectId = identity.firebaseProjectId;
+  const zone = "us-central1-a";
+  const deployDir = join(input.repoRoot, "services/relay/deploy");
 
-  const scp = await input.runner.run(
-    "gcloud",
-    [
-      "compute",
-      "scp",
-      "services/relay/deploy/compose.yaml",
-      "services/relay/deploy/Caddyfile",
-      "services/relay/deploy/vm-deploy.sh",
-      `${vmName}:~/kanna-relay/`,
-      "--project",
-      projectId,
-      "--zone",
-      zone
-    ],
-    { cwd: input.repoRoot, env: input.env, streamOutput: true }
-  );
-  if (scp.exitCode !== 0) {
-    throw new Error(scp.stderr || scp.stdout || "Relay deploy file transfer failed.");
-  }
+  return {
+    projectId,
+    vmName: identity.gceVmName,
+    zone,
+    relayUrl: identity.relayUrl,
+    commands: [
+      {
+        command: "pnpm",
+        args: ["--dir", "services/relay", "build"],
+        cwd: input.repoRoot
+      },
+      {
+        command: "gcloud",
+        args: [
+          "compute",
+          "scp",
+          "--recurse",
+          "--project",
+          projectId,
+          "--zone",
+          zone,
+          join(input.repoRoot, "package.json"),
+          join(input.repoRoot, "pnpm-lock.yaml"),
+          join(input.repoRoot, "pnpm-workspace.yaml"),
+          join(input.repoRoot, "services/relay"),
+          join(input.repoRoot, "tools/kd/package.json"),
+          `${identity.gceVmName}:/opt/kanna-relay/source/`
+        ],
+        cwd: input.repoRoot,
+        streamOutput: true
+      },
+      {
+        command: "gcloud",
+        args: [
+          "compute",
+          "scp",
+          "--project",
+          projectId,
+          "--zone",
+          zone,
+          join(deployDir, "docker-compose.yml"),
+          join(deployDir, "Caddyfile"),
+          join(deployDir, "startup-script.sh"),
+          `${identity.gceVmName}:/opt/kanna-relay/`
+        ],
+        cwd: input.repoRoot,
+        streamOutput: true
+      },
+      {
+        command: "gcloud",
+        args: [
+          "compute",
+          "ssh",
+          identity.gceVmName,
+          "--project",
+          projectId,
+          "--zone",
+          zone,
+          "--command",
+          buildRemoteRelayDeployCommand(identity.relayDomain, projectId)
+        ],
+        cwd: input.repoRoot,
+        streamOutput: true
+      }
+    ]
+  };
+}
 
-  const ssh = await input.runner.run(
-    "gcloud",
-    [
-      "compute",
-      "ssh",
-      vmName,
-      "--project",
-      projectId,
-      "--zone",
-      zone,
-      "--command",
-      "sudo bash ~/kanna-relay/vm-deploy.sh"
-    ],
-    { cwd: input.repoRoot, env: input.env, streamOutput: true }
-  );
-  if (ssh.exitCode !== 0) {
-    throw new Error(ssh.stderr || ssh.stdout || "Relay VM deploy failed.");
-  }
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
 
-  return { projectId, vmName, zone, image, relayUrl: `wss://${hostname}` };
+function buildRemoteRelayDeployCommand(domain: string, projectId: string): string {
+  const script = [
+    "touch .env",
+    'grep -v -E "^(KANNA_RELAY_DOMAIN|FIREBASE_PROJECT_ID)=" .env > .env.tmp',
+    `printf "%s\\n" ${shellQuote(`KANNA_RELAY_DOMAIN=${domain}`)} ${shellQuote(`FIREBASE_PROJECT_ID=${projectId}`)} >> .env.tmp`,
+    "mv .env.tmp .env",
+    "docker compose up --build -d"
+  ].join(" && ");
+  return `cd /opt/kanna-relay && sudo sh -c ${shellQuote(script)}`;
+}
+
+function buildRelayStartupScript(): string {
+  return [
+    "#!/usr/bin/env bash",
+    "set -euo pipefail",
+    "export DEBIAN_FRONTEND=noninteractive",
+    "apt-get update",
+    "apt-get install -y ca-certificates curl gnupg",
+    "install -m 0755 -d /etc/apt/keyrings",
+    "if [ ! -f /etc/apt/keyrings/docker.gpg ]; then",
+    "  curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg",
+    "  chmod a+r /etc/apt/keyrings/docker.gpg",
+    "fi",
+    ". /etc/os-release",
+    "echo \"deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian ${VERSION_CODENAME} stable\" > /etc/apt/sources.list.d/docker.list",
+    "apt-get update",
+    "apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin",
+    "systemctl enable --now docker",
+    "mkdir -p /opt/kanna-relay/source",
+    "docker pull caddy:2-alpine"
+  ].join("\n");
 }

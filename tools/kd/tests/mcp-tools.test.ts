@@ -15,6 +15,7 @@ describe("MCP tool registry", () => {
       "build_sidecars",
       "release_ship",
       "cloud_deploy",
+      "cloud_relay_provision",
       "pages_build_schema",
       "test_app_update_bundle",
       "emulators_up",

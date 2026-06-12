@@ -48,13 +48,13 @@ function parseMobileUpInput(rest: string[]): ParsedCliCommand {
     .filter(([key, value]) => !["production", "staging"].includes(key) && value === true)
     .map(([key]) => key);
   if (unsupportedFlags.length > 0) {
-    throw new Error("mobile up only accepts --production");
+    throw new Error("mobile up only accepts --production or --staging");
   }
-  if (input.staging === true) {
-    throw new Error("mobile up --staging is not supported yet");
+  if (input.production === true && input.staging === true) {
+    throw new Error("mobile up accepts only one of --production or --staging");
   }
-  if (input.production === true) {
-    return { taskId: "mobile.up", input: { production: true } };
+  if (input.production === true || input.staging === true) {
+    return { taskId: "mobile.up", input: { production: input.production === true, staging: input.staging === true } };
   }
   return { taskId: "dev.up", input: { ...defaultDevUpInput, mobile: true } };
 }
@@ -108,18 +108,6 @@ function parseFlagInput(rest: string[], defaults: Record<string, unknown>): Reco
       index += 1;
       continue;
     }
-    if (arg === "--cloud") {
-      const value = rest[index + 1];
-      if (!value) {
-        throw new Error("--cloud requires a value");
-      }
-      if (value !== "production") {
-        throw new Error("--cloud only supports 'production' (staging cloud is retired; use --emulators)");
-      }
-      input.cloud = value;
-      index += 1;
-      continue;
-    }
     if (arg === "--out-dir") {
       const value = rest[index + 1];
       if (!value) {
@@ -141,9 +129,6 @@ function parseFlagInput(rest: string[], defaults: Record<string, unknown>): Reco
   }
   if (input.emulators === true && typeof input.firebaseEnvFrom === "string") {
     throw new Error("--emulators and --firebase-env-from cannot be used together");
-  }
-  if (typeof input.cloud === "string" && (input.emulators === true || typeof input.firebaseEnvFrom === "string")) {
-    throw new Error("--cloud cannot be combined with --emulators or --firebase-env-from");
   }
   return input;
 }
@@ -197,7 +182,7 @@ export function parseCliArgs(args: string[]): ParsedCliCommand {
     return { taskId: "cloud.deploy", input: parseFlagInput(rest, { staging: false, production: false, relay: false }) };
   }
   if (group === "cloud" && command === "relay-provision") {
-    return { taskId: "cloud.relay-provision", input: {} };
+    return { taskId: "cloud.relay-provision", input: parseFlagInput(rest, { staging: false, production: false }) };
   }
   if (group === "pages" && command === "build-schema") {
     return { taskId: "pages.build-schema", input: parseFlagInput(rest, {}) };
@@ -268,14 +253,14 @@ function helpText(): string {
     "Usage: kd <command>",
     "",
     "Commands:",
-    "  dev up [--mobile] [--emulators] [--cloud production] [--seed] [--attach] [--db <path-or-name>] [--delete-db] [--firebase-env-from <task-or-path>]",
+    "  dev up [--mobile] [--emulators] [--seed] [--attach] [--db <path-or-name>] [--delete-db] [--firebase-env-from <task-or-path>]",
     "  dev down [--kill-daemon]",
     "  dev restart [--mobile] [--emulators] [--seed] [--attach] [--delete-db]",
     "  dev status",
     "  dev log [window]",
     "  dev seed [--db <path-or-name>] [--delete-db]",
     "  daemon kill",
-    "  mobile up [--production]",
+    "  mobile up [--production|--staging]",
     "  mobile test",
     "  mobile device-smoke",
     "  emulators up|down|status",
@@ -288,7 +273,7 @@ function helpText(): string {
     "  build sidecars",
     "  release ship [--dry-run] [--release] [--major|--minor|--patch] [--arm64|--x86_64]",
     "  cloud deploy --staging|--production [--relay]",
-    "  cloud relay-provision",
+    "  cloud relay-provision --staging|--production",
     "  pages build-schema --out-dir <dir>",
     "  test app-update-bundle",
     "  test cloud-emulator",
