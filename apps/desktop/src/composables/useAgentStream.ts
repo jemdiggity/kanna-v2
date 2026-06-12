@@ -1,7 +1,6 @@
 import { computed, onUnmounted, ref, shallowRef, type ComputedRef, type Ref } from "vue";
-import { StreamClient } from "@kanna/stream-client";
 import type { AgentEvent, FrameAgentEvent, PermissionDecision } from "@kanna/agent-protocol";
-import { invoke } from "../invoke";
+import { getSharedStreamClient, onSharedStreamConnectionChange } from "./desktopStreamClient";
 
 export interface JournaledAgentEvent {
   seq: number;
@@ -20,11 +19,6 @@ export interface UseAgentStreamResult {
   close: () => void;
 }
 
-function streamUrlFromPort(port: string | null): string {
-  const resolvedPort = port && port.trim().length > 0 ? port.trim() : "48120";
-  return `ws://127.0.0.1:${resolvedPort}/v1/stream`;
-}
-
 function mergeSnapshot(existing: JournaledAgentEvent[], snapshot: FrameAgentEvent[]): JournaledAgentEvent[] {
   const bySeq = new Map<number, JournaledAgentEvent>();
   for (const item of existing) bySeq.set(item.seq, item);
@@ -39,13 +33,10 @@ export async function createAgentStream(taskId: string): Promise<UseAgentStreamR
   const error = ref<string | null>(null);
   let nextSeq = 0;
 
-  const port = await invoke<string>("read_env_var", { name: "KANNA_MOBILE_SERVER_PORT" }).catch(() => null);
-  const client = new StreamClient({
-    url: streamUrlFromPort(port),
-    onConnectionChange: (value: boolean) => {
-      connected.value = value;
-    },
+  const stopConnectionListener = onSharedStreamConnectionChange((value: boolean) => {
+    connected.value = value;
   });
+  const client = await getSharedStreamClient();
 
   client.attachAgent(taskId, {
     onSnapshot: (snapshot: FrameAgentEvent[], next: number) => {
@@ -88,7 +79,7 @@ export async function createAgentStream(taskId: string): Promise<UseAgentStreamR
     interrupt: () => client.sendAgentInterrupt(taskId),
     close: () => {
       client.detach(taskId, "agent");
-      client.close();
+      stopConnectionListener();
     },
   };
 }
