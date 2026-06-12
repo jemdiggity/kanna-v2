@@ -1,3 +1,4 @@
+pub mod agent;
 pub mod bench;
 pub mod headless_terminal;
 pub mod protocol;

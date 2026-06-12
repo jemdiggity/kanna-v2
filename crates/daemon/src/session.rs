@@ -135,6 +135,7 @@ impl SessionManager {
                     state,
                     idle_seconds,
                     status: session.status,
+                    kind: crate::protocol::SessionKind::Pty,
                 }
             })
             .collect()
