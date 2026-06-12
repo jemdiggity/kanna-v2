@@ -1,5 +1,6 @@
 import { getConfiguredDesktopAuthSession } from "./desktopAuthSdk";
 import { invoke } from "../invoke";
+import { createRelayTunnelWebSocketFactory, StreamClient } from "@kanna/stream-client";
 
 export const PRODUCTION_CLOUD_TRANSPORT_URL = "wss://kanna-relay-402613185450.us-central1.run.app";
 
@@ -19,7 +20,7 @@ interface RelaySocketLike {
   send(data: string): void;
   onclose: ((event?: unknown) => void) | null;
   onerror: ((event?: unknown) => void) | null;
-  onmessage: ((event: { data: string }) => void) | null;
+  onmessage: ((event: { data: unknown }) => void) | null;
   onopen: (() => void) | null;
 }
 
@@ -101,6 +102,78 @@ export function createDesktopRelayTerminalClient({
   getIdToken,
   relayUrl,
 }: DesktopRelayTerminalClientOptions): DesktopRelayTerminalClient {
+  const clients = new Map<string, StreamClient>();
+
+  const clientForDesktop = (desktopId: string): StreamClient => {
+    const existing = clients.get(desktopId);
+    if (existing) return existing;
+    const client = new StreamClient({
+      url: relayUrl,
+      credentialProvider: () => getIdToken(),
+      webSocketFactory: createRelayTunnelWebSocketFactory({
+        relayUrl,
+        desktopId,
+        getIdentityToken: () => getIdToken(),
+        webSocketFactory: createSocket,
+      }),
+      reconnectDelaysMs: [250, 500, 1000, 2000],
+    });
+    clients.set(desktopId, client);
+    return client;
+  };
+
+  return {
+    close() {
+      for (const client of clients.values()) {
+        client.close();
+      }
+      clients.clear();
+    },
+    observeTerminal(options) {
+      const client = clientForDesktop(options.desktopId);
+      client.attachTerminal(options.taskId, {
+        onSnapshot(_cols, _rows, dataB64) {
+          options.listener({ type: "output", taskId: options.taskId, text: decodeBase64(dataB64) });
+          options.listener({ type: "ready", taskId: options.taskId });
+        },
+        onOutput(dataB64) {
+          options.listener({ type: "output", taskId: options.taskId, text: decodeBase64(dataB64) });
+        },
+        onSessionExit(code) {
+          options.listener({ type: "exit", taskId: options.taskId, code });
+        },
+        onError(_code, message) {
+          options.listener({ type: "error", taskId: options.taskId, message });
+        },
+      });
+      return {
+        close() {
+          client.detach(options.taskId, "terminal");
+        },
+      };
+    },
+    async sendInput(options) {
+      clientForDesktop(options.desktopId).sendTermInput(options.taskId, encodeBase64(options.data));
+    },
+    async resize(options) {
+      clientForDesktop(options.desktopId).sendTermResize(options.taskId, options.cols, options.rows);
+    },
+    async closeTask(options) {
+      await clientForDesktop(options.desktopId).request(
+        "POST",
+        `/v1/tasks/${encodeURIComponent(options.taskId)}/actions/close`,
+        null,
+      );
+    },
+    async advanceStage(options) {
+      await clientForDesktop(options.desktopId).request(
+        "POST",
+        `/v1/tasks/${encodeURIComponent(options.taskId)}/actions/advance-stage`,
+        null,
+      );
+    },
+  };
+
   let socket: RelaySocketLike | null = null;
   let readyPromise: Promise<void> | null = null;
   let resolveReady: (() => void) | null = null;
@@ -162,7 +235,8 @@ export function createDesktopRelayTerminalClient({
     return promise;
   };
 
-  const handleRelayMessage = (raw: string) => {
+  const handleRelayMessage = (raw: unknown) => {
+    if (typeof raw !== "string") return;
     const parsed = parseJsonRecord(raw);
     if (!parsed) return;
     if (parsed.type === "auth_ok") {
@@ -325,6 +399,7 @@ function createDesktopRelayRpcClient({
     }
   };
   socket.onmessage = (event) => {
+    if (typeof event.data !== "string") return;
     const parsed = parseJsonRecord(event.data);
     if (!parsed) return;
     if (parsed.type === "auth_ok") {
@@ -444,4 +519,13 @@ function decodeBase64(value: string): string {
   const binary = globalThis.atob(value);
   const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
   return new TextDecoder().decode(bytes);
+}
+
+function encodeBase64(value: string): string {
+  const bytes = new TextEncoder().encode(value);
+  let binary = "";
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return globalThis.btoa(binary);
 }

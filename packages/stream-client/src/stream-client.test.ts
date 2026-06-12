@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentEvent, ClientFrame, ServerFrame } from "@kanna/agent-protocol";
-import { StreamClient, type WebSocketLike } from "./index";
+import {
+  createRelayTunnelWebSocketFactory,
+  StreamClient,
+  type WebSocketLike,
+} from "./index";
 
 class MockSocket implements WebSocketLike {
   sent: ClientFrame[] = [];
@@ -231,5 +235,48 @@ describe("StreamClient", () => {
     socket.drop();
     vi.advanceTimersByTime(60_000);
     expect(sockets.length).toBe(1);
+  });
+
+  it("opens relay tunnel before sending KSP auth frames", async () => {
+    const tunnelFactory = createRelayTunnelWebSocketFactory({
+      relayUrl: "ws://relay",
+      desktopId: "desktop-1",
+      getIdentityToken: async () => "id-token",
+      webSocketFactory: factory,
+      nextId: () => "tunnel-request-1",
+    });
+    const client = new StreamClient({
+      url: "ignored-by-tunnel-factory",
+      credentialProvider: async () => "id-token",
+      webSocketFactory: tunnelFactory,
+    });
+
+    const socket = sockets[0];
+    socket.open();
+    await Promise.resolve();
+    expect(socket.sent).toEqual([
+      { type: "auth", id_token: "id-token" } as unknown as ClientFrame,
+    ]);
+
+    socket.receive({ type: "auth_ok" } as ServerFrame);
+    expect(socket.sent.at(-1)).toEqual({
+      type: "tunnel_request",
+      id: "tunnel-request-1",
+      desktopId: "desktop-1",
+    } as unknown as ClientFrame);
+
+    socket.receive({
+      type: "tunnel_ready",
+      tunnelId: "relay-tunnel-1",
+      desktopId: "desktop-1",
+    } as unknown as ServerFrame);
+    await Promise.resolve();
+
+    expect(socket.sent.at(-1)).toEqual({
+      type: "auth",
+      credential: "id-token",
+    });
+    socket.receive({ type: "auth_ok" });
+    client.close();
   });
 });
