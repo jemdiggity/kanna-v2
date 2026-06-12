@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { WebSocketServer, type WebSocket } from "ws";
+import { WebSocketServer, type RawData, type WebSocket } from "ws";
 import {
   verifyPhoneToken,
   verifyDeviceToken,
@@ -117,8 +117,8 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
     }
   }, AUTH_TIMEOUT_MS);
 
-  ws.on("message", async (raw: Buffer | string) => {
-    const data = typeof raw === "string" ? raw : raw.toString();
+  ws.on("message", async (raw: RawData) => {
+    const data = raw.toString();
 
     // --- Auth handshake (first message) ---
     if (!authenticated) {
