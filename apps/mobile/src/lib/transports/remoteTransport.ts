@@ -401,6 +401,12 @@ export function createRemoteTransport({
       const desktopId = getSelectedDesktopOrThrow(getSelectedDesktopId);
       return observeTaskTerminal({ desktopId, taskId }, listener);
     },
+    observeTaskAgent() {
+      throw new RemoteTransportError(
+        "remote_invocation_failed",
+        "Remote agent stream transport is not available yet."
+      );
+    },
     async createPairingSession(): Promise<PairingSession> {
       throw new Error(
         "Cloud pairing session is not created from the mobile transport"

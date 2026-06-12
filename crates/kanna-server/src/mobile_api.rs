@@ -42,6 +42,7 @@ pub struct TaskSummary {
     pub title: String,
     pub stage: Option<String>,
     pub snippet: Option<String>,
+    pub agent_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -66,6 +67,7 @@ pub struct CreateTaskResponse {
     pub repo_id: String,
     pub title: String,
     pub stage: String,
+    pub agent_type: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -145,6 +147,7 @@ fn map_task_summary(item: crate::db::PipelineItem) -> TaskSummary {
         title,
         stage: item.stage,
         snippet: item.last_output_preview,
+        agent_type: item.agent_type,
     }
 }
 

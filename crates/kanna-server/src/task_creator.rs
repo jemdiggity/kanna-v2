@@ -469,6 +469,7 @@ struct CreatedTask {
     repo_id: String,
     title: String,
     stage: String,
+    agent_type: String,
 }
 
 pub(crate) struct PreparedTaskSpawn {
@@ -747,6 +748,7 @@ fn prepare_task_spawn(
             repo_id: repo.id.clone(),
             title,
             stage: stage_name,
+            agent_type: agent_type.as_str().to_string(),
         },
         session_id: task_id,
         cwd: worktree_path,
@@ -822,6 +824,7 @@ pub(crate) async fn spawn_prepared_task_for_api(
         repo_id: created.repo_id,
         title: created.title,
         stage: created.stage,
+        agent_type: created.agent_type,
     })
 }
 
@@ -2025,6 +2028,7 @@ mod tests {
                 repo_id: "repo-1".to_string(),
                 title: "Agent task".to_string(),
                 stage: "in progress".to_string(),
+                agent_type: "agent".to_string(),
             },
             session_id: "task-1".to_string(),
             cwd: "/tmp/repo/.kanna-worktrees/task-1".to_string(),
