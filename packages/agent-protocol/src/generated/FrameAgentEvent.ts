@@ -5,4 +5,4 @@ import type { AgentEvent } from "./AgentEvent";
  * A journaled agent event paired with its sequence number (wire mirror of
  * the daemon's journal entries).
  */
-export type FrameAgentEvent = { seq: bigint, event: AgentEvent, };
+export type FrameAgentEvent = { seq: number, event: AgentEvent, };

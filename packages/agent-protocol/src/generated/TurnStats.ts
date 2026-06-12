@@ -7,11 +7,11 @@ export type TurnStats = {
 /**
  * Wall-clock duration of the turn in milliseconds.
  */
-duration_ms: bigint, 
+duration_ms: number, 
 /**
  * API-call duration in milliseconds, when the provider reports it.
  */
-duration_api_ms?: bigint | null, 
+duration_api_ms?: number | null, 
 /**
  * Number of conversation turns so far.
  */
@@ -23,8 +23,8 @@ total_cost_usd?: number | null,
 /**
  * Input tokens consumed, when the provider reports it.
  */
-input_tokens?: bigint | null, 
+input_tokens?: number | null, 
 /**
  * Output tokens produced, when the provider reports it.
  */
-output_tokens?: bigint | null, };
+output_tokens?: number | null, };
