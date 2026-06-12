@@ -53,6 +53,7 @@ pub struct CreateTaskRequest {
     pub base_ref: Option<String>,
     pub stage: Option<String>,
     pub agent_provider: Option<String>,
+    pub agent_type: Option<String>,
     pub model: Option<String>,
     pub permission_mode: Option<String>,
     pub allowed_tools: Option<Vec<String>>,
@@ -178,8 +179,38 @@ pub fn build_mobile_server_status(
 
 #[cfg(test)]
 mod tests {
+    use super::CreateTaskRequest;
     use crate::config::Config;
     use crate::db::Db;
+    use serde_json::json;
+
+    #[test]
+    fn create_task_request_uses_agent_type_camel_case() {
+        let request: CreateTaskRequest = serde_json::from_value(json!({
+            "repoId": "repo-1",
+            "prompt": "Build the view",
+            "agentProvider": "claude",
+            "agentType": "agent"
+        }))
+        .unwrap();
+
+        assert_eq!(request.agent_type.as_deref(), Some("agent"));
+        assert_eq!(
+            serde_json::to_value(request).unwrap(),
+            json!({
+                "repoId": "repo-1",
+                "prompt": "Build the view",
+                "pipelineName": null,
+                "baseRef": null,
+                "stage": null,
+                "agentProvider": "claude",
+                "agentType": "agent",
+                "model": null,
+                "permissionMode": null,
+                "allowedTools": null
+            })
+        );
+    }
 
     #[test]
     fn list_desktops_returns_configured_descriptor() {

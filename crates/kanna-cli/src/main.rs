@@ -111,6 +111,10 @@ enum TaskCommands {
         #[arg(long)]
         agent_provider: Option<String>,
 
+        /// Task session type: "agent" for themed headless sessions or "pty" for raw terminal
+        #[arg(long)]
+        agent_type: Option<String>,
+
         /// Optional model override
         #[arg(long)]
         model: Option<String>,
@@ -252,6 +256,8 @@ struct CreateTaskRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     agent_provider: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    agent_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     permission_mode: Option<String>,
@@ -320,6 +326,7 @@ struct TaskCreateOptions {
     base_ref: Option<String>,
     stage: Option<String>,
     agent_provider: Option<String>,
+    agent_type: Option<String>,
     model: Option<String>,
     permission_mode: Option<String>,
     allowed_tool: Vec<String>,
@@ -433,6 +440,7 @@ fn build_create_task_request(options: TaskCreateOptions) -> CreateTaskRequest {
         base_ref: options.base_ref,
         stage: options.stage,
         agent_provider: options.agent_provider,
+        agent_type: options.agent_type,
         model: options.model,
         permission_mode: options.permission_mode,
         allowed_tools: (!options.allowed_tool.is_empty()).then_some(options.allowed_tool),
@@ -839,6 +847,7 @@ async fn main() {
                 base_ref,
                 stage,
                 agent_provider,
+                agent_type,
                 model,
                 permission_mode,
                 allowed_tool,
@@ -852,6 +861,7 @@ async fn main() {
                     base_ref,
                     stage,
                     agent_provider,
+                    agent_type,
                     model,
                     permission_mode,
                     allowed_tool,
@@ -1201,6 +1211,7 @@ mod tests {
             base_ref: Some("origin/main".to_string()),
             stage: Some("pr".to_string()),
             agent_provider: Some("claude".to_string()),
+            agent_type: Some("agent".to_string()),
             model: Some("sonnet".to_string()),
             permission_mode: Some("dontAsk".to_string()),
             allowed_tool: vec!["Bash".to_string(), "Edit".to_string()],
@@ -1216,6 +1227,7 @@ mod tests {
                 "baseRef": "origin/main",
                 "stage": "pr",
                 "agentProvider": "claude",
+                "agentType": "agent",
                 "model": "sonnet",
                 "permissionMode": "dontAsk",
                 "allowedTools": ["Bash", "Edit"],
@@ -1425,6 +1437,7 @@ mod tests {
             base_ref: None,
             stage: None,
             agent_provider: None,
+            agent_type: None,
             model: None,
             permission_mode: None,
             allowed_tool: Vec::new(),
@@ -1502,6 +1515,7 @@ mod tests {
             base_ref: None,
             stage: None,
             agent_provider: None,
+            agent_type: None,
             model: None,
             permission_mode: None,
             allowed_tool: Vec::new(),
