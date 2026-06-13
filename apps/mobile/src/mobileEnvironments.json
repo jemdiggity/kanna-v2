@@ -1,0 +1,50 @@
+{
+  "dev": {
+    "name": "dev",
+    "displayName": "Kanna Dev",
+    "scheme": "kanna-dev",
+    "iosBundleId": "build.kanna.app.dev",
+    "iosGoogleServicesFile": "./firebase/GoogleService-Info.production.plist",
+    "firebase": {
+      "apiKey": "kanna-local",
+      "authDomain": "kanna-local.firebaseapp.com",
+      "projectId": "kanna-local",
+      "storageBucket": "kanna-local.firebasestorage.app",
+      "messagingSenderId": "0",
+      "appId": "kanna-mobile-local"
+    },
+    "relayUrl": "ws://127.0.0.1:9080"
+  },
+  "staging": {
+    "name": "staging",
+    "displayName": "Kanna Staging",
+    "scheme": "kanna-staging",
+    "iosBundleId": "build.kanna.app.staging",
+    "iosGoogleServicesFile": "./firebase/GoogleService-Info.staging.plist",
+    "firebase": {
+      "apiKey": "AIzaSyCRsov6oQu8Fg0clB2mdB5RgwM8GGwCQXk",
+      "authDomain": "kanna-staging.firebaseapp.com",
+      "projectId": "kanna-staging",
+      "storageBucket": "kanna-staging.firebasestorage.app",
+      "messagingSenderId": "1073113006696",
+      "appId": "1:1073113006696:ios:612ea270319b137c1c71dd"
+    },
+    "relayUrl": "wss://relay-staging.kanna.build"
+  },
+  "prod": {
+    "name": "prod",
+    "displayName": "Kanna",
+    "scheme": "kanna",
+    "iosBundleId": "build.kanna.app",
+    "iosGoogleServicesFile": "./firebase/GoogleService-Info.production.plist",
+    "firebase": {
+      "apiKey": "AIzaSyDvGtzo25dQO2zr5itGsDL-adr5dhrfm2c",
+      "authDomain": "kanna-build.firebaseapp.com",
+      "projectId": "kanna-build",
+      "storageBucket": "kanna-build.firebasestorage.app",
+      "messagingSenderId": "402613185450",
+      "appId": "1:402613185450:ios:adcedeadcd241285d859d3"
+    },
+    "relayUrl": "wss://relay.kanna.build"
+  }
+}

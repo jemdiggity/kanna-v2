@@ -1,5 +1,47 @@
-import type { MobileAppEnvironment } from "./src/mobileEnvironment";
-import { resolveMobileAppEnvironment } from "./src/mobileEnvironment";
+// Read environment data straight from JSON. The Expo config loader transpiles
+// only this file and then require()s its imports as plain JS, so it cannot
+// resolve a sibling .ts module — JSON is resolvable by both the config loader
+// and the typed runtime layer (src/mobileEnvironment.ts), keeping one data
+// source. Do NOT import ./src/mobileEnvironment here.
+import environments from "./src/mobileEnvironments.json";
+
+type KannaAppEnvironmentName = "dev" | "staging" | "prod";
+
+interface MobileFirebaseExtraConfig {
+  apiKey: string;
+  authDomain?: string;
+  projectId: string;
+  storageBucket?: string;
+  messagingSenderId?: string;
+  appId: string;
+  measurementId?: string;
+}
+
+interface MobileAppEnvironment {
+  name: KannaAppEnvironmentName;
+  displayName: string;
+  scheme: string;
+  iosBundleId: string;
+  iosGoogleServicesFile: string;
+  firebase: MobileFirebaseExtraConfig;
+  relayUrl: string;
+}
+
+const registry = environments as Record<
+  KannaAppEnvironmentName,
+  MobileAppEnvironment
+>;
+
+export function resolveMobileAppEnvironment(
+  rawName: string | undefined
+): MobileAppEnvironment {
+  const name = rawName?.trim();
+  if (name === "dev" || name === "staging" || name === "prod") {
+    return registry[name];
+  }
+
+  return registry.prod;
+}
 
 interface ExpoConfig {
   name: string;
@@ -48,7 +90,5 @@ export function createExpoConfig(
     }
   };
 }
-
-export { resolveMobileAppEnvironment };
 
 export default createExpoConfig(process.env);
