@@ -283,6 +283,25 @@ export function buildRelayDeployPlan(input: {
         cwd: input.repoRoot
       },
       {
+        // The startup script creates /opt/kanna-relay as root; make it
+        // writable by the scp (SSH) user so the source/config upload below
+        // does not hit "Permission denied".
+        command: "gcloud",
+        args: [
+          "compute",
+          "ssh",
+          identity.gceVmName,
+          "--project",
+          projectId,
+          "--zone",
+          zone,
+          "--command",
+          'sudo mkdir -p /opt/kanna-relay/source && sudo chown -R "$(id -un):$(id -gn)" /opt/kanna-relay'
+        ],
+        cwd: input.repoRoot,
+        streamOutput: true
+      },
+      {
         command: "gcloud",
         args: [
           "compute",

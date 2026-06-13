@@ -233,6 +233,22 @@ describe("cloud deploy runtime", () => {
         command: "gcloud",
         args: [
           "compute",
+          "ssh",
+          "kanna-relay-vm",
+          "--project",
+          "kanna-build",
+          "--zone",
+          "us-central1-a",
+          "--command",
+          'sudo mkdir -p /opt/kanna-relay/source && sudo chown -R "$(id -un):$(id -gn)" /opt/kanna-relay'
+        ],
+        cwd: "/repo",
+        streamOutput: true
+      },
+      {
+        command: "gcloud",
+        args: [
+          "compute",
           "scp",
           "--recurse",
           "--project",
@@ -319,6 +335,22 @@ describe("cloud deploy runtime", () => {
           command: "pnpm",
           args: ["--dir", "services/relay", "build"],
           cwd: repoRoot
+        },
+        {
+          command: "gcloud",
+          args: [
+            "compute",
+            "ssh",
+            "kanna-relay-vm",
+            "--project",
+            "kanna-build",
+            "--zone",
+            "us-central1-a",
+            "--command",
+            'sudo mkdir -p /opt/kanna-relay/source && sudo chown -R "$(id -un):$(id -gn)" /opt/kanna-relay'
+          ],
+          cwd: repoRoot,
+          streamOutput: true
         },
         {
           command: "gcloud",
