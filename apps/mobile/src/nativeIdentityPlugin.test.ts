@@ -48,21 +48,21 @@ describe("withKannaNativeIdentity internals", () => {
     __internal.setAppTargetBuildSetting(
       project,
       "PRODUCT_BUNDLE_IDENTIFIER",
-      "$(KANNA_BUNDLE_ID)"
+      "build.kanna.app.staging"
     );
     __internal.setAppTargetBuildSetting(
       project,
       "INFOPLIST_KEY_CFBundleDisplayName",
-      "$(KANNA_DISPLAY_NAME)"
+      "Kanna Staging"
     );
 
     expect(project.hash.project.objects.XCBuildConfiguration.appDebug.buildSettings).toEqual({
-      PRODUCT_BUNDLE_IDENTIFIER: "$(KANNA_BUNDLE_ID)",
-      INFOPLIST_KEY_CFBundleDisplayName: "$(KANNA_DISPLAY_NAME)"
+      PRODUCT_BUNDLE_IDENTIFIER: "build.kanna.app.staging",
+      INFOPLIST_KEY_CFBundleDisplayName: "Kanna Staging"
     });
     expect(project.hash.project.objects.XCBuildConfiguration.appRelease.buildSettings).toEqual({
-      PRODUCT_BUNDLE_IDENTIFIER: "$(KANNA_BUNDLE_ID)",
-      INFOPLIST_KEY_CFBundleDisplayName: "$(KANNA_DISPLAY_NAME)"
+      PRODUCT_BUNDLE_IDENTIFIER: "build.kanna.app.staging",
+      INFOPLIST_KEY_CFBundleDisplayName: "Kanna Staging"
     });
     expect(project.hash.project.objects.XCBuildConfiguration.testDebug.buildSettings).toEqual({
       PRODUCT_BUNDLE_IDENTIFIER: "build.kanna.app.KannaMobileTests"

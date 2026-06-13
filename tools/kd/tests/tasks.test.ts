@@ -269,16 +269,37 @@ describe("task executors", () => {
       (call) => call.command === "tmux" && call.args.includes("new-session")
     );
     const installIndex = calls.findIndex(
-      (call) => call.command === "pnpm" && call.args.includes("ios")
+      (call) => call.command === "pnpm" && call.args[2] === "ios"
+    );
+    const prebuildIndex = calls.findIndex(
+      (call) => call.command === "pnpm" && call.args.includes("prebuild")
     );
     expect(calls[tmuxStartIndex]).toMatchObject({
       command: "tmux",
       args: expect.arrayContaining(["new-session", "-n", "emulators"])
     });
     expect(tmuxStartIndex).toBeGreaterThan(-1);
+    expect(prebuildIndex).toBeGreaterThan(tmuxStartIndex);
     expect(installIndex).toBeGreaterThan(tmuxStartIndex);
+    expect(installIndex).toBeGreaterThan(prebuildIndex);
     expect(calls.some((call) => call.command === "curl" && call.args.at(-1) === "http://172.16.0.193:1430/status")).toBe(true);
-    expect(calls.at(-1)).toMatchObject({
+    expect(calls[prebuildIndex]).toMatchObject({
+      command: "pnpm",
+      args: [
+        "--dir",
+        `${repoRoot}/apps/mobile`,
+        "exec",
+        "expo",
+        "prebuild",
+        "--platform",
+        "ios"
+      ],
+      cwd: repoRoot
+    });
+    expect(calls[prebuildIndex]?.env?.KANNA_APP_ENV).toBe("dev");
+    expect(calls[prebuildIndex]?.env?.KANNA_BUNDLE_ID).toBeUndefined();
+    expect(calls[prebuildIndex]?.env?.KANNA_DISPLAY_NAME).toBeUndefined();
+    expect(calls[installIndex]).toMatchObject({
       command: "pnpm",
       args: [
         "--dir",
@@ -291,7 +312,7 @@ describe("task executors", () => {
       ],
       cwd: repoRoot
     });
-    expect(calls.at(-1)?.env?.REACT_NATIVE_PACKAGER_HOSTNAME).toBe("172.16.0.193");
+    expect(calls[installIndex]?.env?.REACT_NATIVE_PACKAGER_HOSTNAME).toBe("172.16.0.193");
   });
 
   it("runs physical-device mobile doctor checks without building or launching the app", async () => {

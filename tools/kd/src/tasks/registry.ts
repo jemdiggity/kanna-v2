@@ -27,11 +27,11 @@ import { buildFirebaseCommandEnv, buildFirebaseEmulatorArgs, formatMissingFireba
 import { resolveMobileServerUrl } from "../runtime/mobile";
 import { buildMobileDeviceSmokeCommand, buildMobileTestCommand } from "../runtime/mobile-commands";
 import {
+  buildMobileDevicePrebuildCommand,
   buildMobileDeviceRunCommand,
   checkPhysicalDeviceRunPreflight,
   resolveMobileNativeIdentity,
-  resolvePhysicalDevice,
-  writeMobileNativeIdentityConfig
+  resolvePhysicalDevice
 } from "../runtime/mobile-device";
 import { buildConfigSchemaPages } from "../runtime/pages";
 import { getPortStatuses } from "../runtime/port-status";
@@ -482,13 +482,38 @@ export async function executeMobileDeviceRunWithContext(
     throw new Error(`KANNA_MOBILE_PORT must be an integer, got: ${env.KANNA_MOBILE_PORT}`);
   }
 
-  const nativeIdentity = await writeMobileNativeIdentityConfig(executor.context.repoRoot, env);
+  const nativeIdentity = resolveMobileNativeIdentity(env);
   const preflight = await checkPhysicalDeviceRunPreflight(executor.runner, {
     bundleId: nativeIdentity.bundleId,
     device,
     lanHost,
     metroPort
   });
+  const prebuildCommand = buildMobileDevicePrebuildCommand({
+    repoRoot: executor.context.repoRoot,
+    nativeIdentity
+  });
+  const prebuildResult = await executor.runner.run(prebuildCommand.command, prebuildCommand.args, {
+    cwd: prebuildCommand.cwd,
+    env: { ...env, ...prebuildCommand.env },
+    streamOutput: true
+  });
+  if (prebuildResult.exitCode !== 0) {
+    return {
+      ok: false,
+      message:
+        prebuildResult.stderr ||
+        prebuildResult.stdout ||
+        `Failed to prebuild Kanna mobile for ${nativeIdentity.bundleId}.`,
+      data: {
+        bundleId: nativeIdentity.bundleId,
+        device,
+        metroUrl: preflight.metroUrl,
+        preflight,
+        windows: plan.windows.map((window) => window.name)
+      }
+    };
+  }
 
   const runCommand = buildMobileDeviceRunCommand({
     repoRoot: executor.context.repoRoot,
@@ -864,10 +889,7 @@ export const taskDefinitions = [
     execute: async () => {
       const context = await resolveDefaultContext(process.env);
       context.env.KANNA_APP_ENV = context.env.KANNA_APP_ENV ?? "dev";
-      const nativeIdentity = await writeMobileNativeIdentityConfig(context.repoRoot, context.env);
       context.env.KANNA_E2E_DESKTOP_SERVER_URL = resolveMobileServerUrl(context.env);
-      context.env.KANNA_BUNDLE_ID = nativeIdentity.bundleId;
-      context.env.KANNA_DISPLAY_NAME = nativeIdentity.displayName;
       const command = buildMobileDeviceSmokeCommand(context.repoRoot);
       return runBuiltCommand(command.command, command.args, context.repoRoot, context.env);
     }
