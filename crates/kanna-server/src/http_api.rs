@@ -325,6 +325,54 @@ struct TaskInputRequest {
     input: String,
 }
 
+/// Delay between typing a task-input message and the synthesized Enter.
+///
+/// The agent CLI coalesces a single bulk write (message text plus a trailing
+/// carriage return) as a *paste*, where the CR is folded into the buffer as a
+/// literal newline and the message is never submitted. Writing the text and the
+/// carriage return as two Input commands separated by a short pause makes the CR
+/// register as a discrete Enter keystroke — exactly how a human types then
+/// presses Enter. 150ms was validated against the live Claude CLI.
+const SUBMIT_ENTER_DELAY_MS: u64 = 150;
+
+/// The message portion of a `/v1/tasks/{id}/input` payload: the caller's text
+/// with any trailing CR/LF stripped (callers vary — the CLI may append `\r`, the
+/// MCP appends nothing). The Enter is synthesized separately by the handler.
+fn task_input_message(input: &str) -> &str {
+    input.trim_end_matches(['\r', '\n'])
+}
+
+/// Send one raw Input command to a daemon session, mapping daemon failures to
+/// an HTTP error.
+async fn send_session_input(
+    daemon: &mut crate::daemon_client::DaemonClient,
+    session_id: &str,
+    data: Vec<u8>,
+) -> Result<(), (axum::http::StatusCode, String)> {
+    let event = daemon
+        .send_command(&DaemonCommand::Input {
+            session_id: session_id.to_string(),
+            data,
+        })
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("daemon error: {}", e),
+            )
+        })?;
+    match event {
+        DaemonEvent::Ok => Ok(()),
+        DaemonEvent::Error { message, .. } => {
+            Err((axum::http::StatusCode::INTERNAL_SERVER_ERROR, message))
+        }
+        other => Err((
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("unexpected daemon response: {:?}", other),
+        )),
+    }
+}
+
 async fn search_tasks(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(query): axum::extract::Query<SearchTasksQuery>,
@@ -630,29 +678,19 @@ async fn send_task_input(
                 format!("daemon error: {}", e),
             )
         })?;
-    let event = daemon
-        .send_command(&DaemonCommand::Input {
-            session_id: task_id,
-            data: payload.input.into_bytes(),
-        })
-        .await
-        .map_err(|e| {
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("daemon error: {}", e),
-            )
-        })?;
 
-    match event {
-        DaemonEvent::Ok => Ok(axum::http::StatusCode::NO_CONTENT),
-        DaemonEvent::Error { message, .. } => {
-            Err((axum::http::StatusCode::INTERNAL_SERVER_ERROR, message))
-        }
-        other => Err((
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("unexpected daemon response: {:?}", other),
-        )),
+    // Type the message, then press Enter as a discrete keystroke (see
+    // SUBMIT_ENTER_DELAY_MS). The daemon stays a raw byte pipe; this submission
+    // policy lives here so every client — kanna-cli, kanna-mcp, mobile —
+    // submits consistently.
+    let message = task_input_message(&payload.input);
+    if !message.is_empty() {
+        send_session_input(&mut daemon, &task_id, message.as_bytes().to_vec()).await?;
+        tokio::time::sleep(std::time::Duration::from_millis(SUBMIT_ENTER_DELAY_MS)).await;
     }
+    send_session_input(&mut daemon, &task_id, vec![b'\r']).await?;
+
+    Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
 async fn close_task(
@@ -2877,6 +2915,19 @@ mod tests {
             .unwrap();
         let created: TaskActionResponse = from_slice(&body).unwrap();
         assert_eq!(created.task_id, "merge-task-1");
+    }
+
+    #[test]
+    fn task_input_message_strips_trailing_terminators() {
+        // The Enter is synthesized separately, so the message carries no
+        // terminator regardless of what the caller appended.
+        assert_eq!(super::task_input_message("continue"), "continue");
+        assert_eq!(super::task_input_message("continue\n"), "continue");
+        assert_eq!(super::task_input_message("continue\r"), "continue");
+        assert_eq!(super::task_input_message("continue\r\n\n"), "continue");
+        assert_eq!(super::task_input_message(""), "");
+        // Internal newlines are preserved (only trailing ones are stripped).
+        assert_eq!(super::task_input_message("a\nb\n"), "a\nb");
     }
 
     #[tokio::test]

@@ -505,12 +505,11 @@ fn build_request_revision_request(
 }
 
 fn build_send_task_input_request(message: String) -> TaskInputRequest {
-    let input = if message.ends_with('\n') {
-        message
-    } else {
-        format!("{message}\n")
-    };
-    TaskInputRequest { input }
+    // Send the message text as-is. Submitting it to the agent terminal (typing
+    // the text, then a discrete Enter keystroke) is the desktop server's job at
+    // /v1/tasks/{id}/input — keeping that policy server-side means kanna-cli,
+    // kanna-mcp, and the mobile app all submit consistently.
+    TaskInputRequest { input: message }
 }
 
 fn build_block_task_request(blocker_task_ids: Vec<String>) -> BlockTaskRequest {
@@ -1205,13 +1204,14 @@ mod tests {
         assert_eq!(
             serde_json::to_value(request).unwrap(),
             json!({
-                "input": "Please fix the failing typecheck\n",
+                "input": "Please fix the failing typecheck",
             })
         );
     }
 
     #[test]
-    fn preserves_existing_send_task_input_newline() {
+    fn send_task_input_payload_passes_message_through_unchanged() {
+        // The server owns submission; the CLI sends the message verbatim.
         let request = build_send_task_input_request("continue\n".to_string());
 
         assert_eq!(
@@ -1232,7 +1232,7 @@ mod tests {
             let bytes_read = stream.read(&mut buffer).unwrap();
             let request = String::from_utf8_lossy(&buffer[..bytes_read]);
             assert!(request.starts_with("POST /v1/tasks/task-1/input HTTP/1.1"));
-            assert!(request.contains(r#"{"input":"continue\n"}"#));
+            assert!(request.contains(r#"{"input":"continue"}"#));
 
             stream
                 .write_all(b"HTTP/1.1 204 No Content\r\ncontent-length: 0\r\n\r\n")
