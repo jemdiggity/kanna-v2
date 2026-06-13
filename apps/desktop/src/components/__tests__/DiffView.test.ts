@@ -113,6 +113,11 @@ async function flushPromises() {
   await nextTick();
 }
 
+async function waitForTimerTurn() {
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  await flushPromises();
+}
+
 describe("DiffView", () => {
   afterEach(() => {
     invokeMock.mockReset();
@@ -381,6 +386,50 @@ describe("DiffView", () => {
       mode: "all",
     });
     expect(includeButton.text()).toBe("Staged+Unstaged");
+
+    wrapper.unmount();
+  });
+
+  it("refreshes an open branch diff when the view regains focus after history changes", async () => {
+    let branchPatchName = "before-rebase.txt";
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "git_branch_upstream") return null;
+      if (command === "git_merge_base") return "base-sha";
+      if (command === "git_diff_branch_range") {
+        return `diff --git a/${branchPatchName} b/${branchPatchName}`;
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    const wrapper = mount(DiffView, {
+      props: {
+        repoPath: "/repo",
+        initialScope: "branch",
+        baseRef: "origin/main",
+      },
+      attachTo: document.body,
+      global: {
+        mocks: {
+          $t: (key: string) => key,
+        },
+      },
+    });
+
+    await flushPromises();
+    await flushPromises();
+
+    expect(renderMock.mock.calls.at(-1)?.[0]?.fileDiff).toMatchObject({
+      name: "before-rebase.txt",
+    });
+
+    await waitForTimerTurn();
+    branchPatchName = "after-rebase.txt";
+    window.dispatchEvent(new Event("focus"));
+    await waitForTimerTurn();
+
+    expect(renderMock.mock.calls.at(-1)?.[0]?.fileDiff).toMatchObject({
+      name: "after-rebase.txt",
+    });
 
     wrapper.unmount();
   });
