@@ -29,7 +29,11 @@ import AppUpdatePrompt from "./components/AppUpdatePrompt.vue";
 import ToastContainer from "./components/ToastContainer.vue";
 import { getConfiguredDesktopAuthSession } from "./services/desktopAuthSdk";
 import type { DesktopAuthSession, DesktopAuthState } from "./services/desktopAuth";
-import { listDesktopCloudTasks, type DesktopCloudSnapshot } from "./services/desktopCloudTaskIndex";
+import {
+  listDesktopCloudTasks,
+  subscribeDesktopCloudTasks,
+  type DesktopCloudSnapshot,
+} from "./services/desktopCloudTaskIndex";
 import { listDesktopLanTasks, publishDesktopLanTaskSnapshot } from "./services/desktopLanTaskIndex";
 import { deleteRemoteTaskSnapshots, reconcileDesktopTaskSnapshots } from "./services/desktopCloudPublisher";
 import { getCachedRepoRemoteMetadata } from "./services/repoRemoteUrl";
@@ -141,7 +145,8 @@ const cloudSnapshot = ref<DesktopCloudSnapshot>({ repos: [], items: [], terminal
 const lanSnapshot = ref<DesktopCloudSnapshot>({ repos: [], items: [], terminalRefs: {} });
 const locallyClosedRemoteTaskIds = ref<Set<string>>(new Set());
 let unsubscribeDesktopAuth: (() => void) | null = null;
-let cloudRefreshTimer: ReturnType<typeof setInterval> | null = null;
+let cloudTasksUnsubscribe: (() => void) | null = null;
+let subscribedCloudUid: string | null = null;
 let lanRefreshTimer: ReturnType<typeof setInterval> | null = null;
 const reconciledCloudSnapshotUsers = new Set<string>();
 let lastPublishedTaskFingerprint: string | null = null;
@@ -448,25 +453,51 @@ async function refreshCloudTasksForSignedInUser(): Promise<void> {
   };
 }
 
-async function syncCloudTasksForSignedInUser(): Promise<void> {
-  if (desktopAuthState.value.status !== "signedIn") {
-    await refreshCloudTasksForSignedInUser();
-    return;
-  }
-  // Only publish (reconcile) when the local open-task set actually changed.
-  // The periodic poll runs every second purely to READ peers' tasks; without
-  // this guard it re-published the full snapshot — and rewrote users/{uid} —
-  // on every tick.
-  const fingerprint = computeTaskSnapshotFingerprint(store.items);
-  if (fingerprint !== lastPublishedTaskFingerprint) {
-    await reconcileDesktopTaskSnapshots(db).catch((error) => {
-      console.warn("[cloud] failed to reconcile local task snapshots:", error);
-      showCloudBackendErrorToast(error);
-    });
-    lastPublishedTaskFingerprint = fingerprint;
-  }
-  await refreshCloudTasksForSignedInUser();
+function startCloudTaskSubscription(uid: string): void {
+  if (subscribedCloudUid === uid && cloudTasksUnsubscribe) return;
+  stopCloudTaskSubscription();
+  subscribedCloudUid = uid;
+  cloudTasksUnsubscribe = subscribeDesktopCloudTasks(
+    uid,
+    (snapshot) => {
+      cloudSnapshot.value = {
+        repos: snapshot.repos,
+        items: snapshot.items,
+        terminalRefs: snapshot.terminalRefs ?? {},
+      };
+    },
+    {
+      getOptions: () => ({
+        localRepos: localReposForCloudMatching.value,
+        localItems: store.items,
+      }),
+    },
+  );
 }
+
+function stopCloudTaskSubscription(): void {
+  cloudTasksUnsubscribe?.();
+  cloudTasksUnsubscribe = null;
+  subscribedCloudUid = null;
+}
+
+// Publish (reconcile) only when the local open-task set actually changed.
+// Writes are event-driven now — no periodic reconcile poll.
+function publishLocalTaskChangesIfNeeded(): void {
+  if (desktopAuthState.value.status !== "signedIn") return;
+  const fingerprint = computeTaskSnapshotFingerprint(store.items);
+  if (fingerprint === lastPublishedTaskFingerprint) return;
+  lastPublishedTaskFingerprint = fingerprint;
+  void reconcileDesktopTaskSnapshots(db).catch((error) => {
+    console.warn("[cloud] failed to publish local task snapshot change:", error);
+    showCloudBackendErrorToast(error);
+  });
+}
+
+watch(
+  () => computeTaskSnapshotFingerprint(store.items),
+  () => publishLocalTaskChangesIfNeeded(),
+);
 
 async function refreshLanTasks(): Promise<void> {
   await publishDesktopLanTaskSnapshot(db);
@@ -487,31 +518,31 @@ async function initializeDesktopCloudAuth(): Promise<void> {
   unsubscribeDesktopAuth?.();
   unsubscribeDesktopAuth = session.subscribe((state) => {
     desktopAuthState.value = state;
-    if (state.status === "signedIn" && !reconciledCloudSnapshotUsers.has(state.user.uid)) {
-      reconciledCloudSnapshotUsers.add(state.user.uid);
-      void reconcileDesktopTaskSnapshots(db)
-        .then(() => {
-          // Record what we just published so the periodic poll doesn't
-          // immediately re-publish the same snapshot on its next tick.
-          lastPublishedTaskFingerprint = computeTaskSnapshotFingerprint(store.items);
-        })
-        .catch((error) => {
-          console.warn("[cloud] failed to reconcile local task snapshots:", error);
-          showCloudBackendErrorToast(error);
-        })
-        .then(() => refreshCloudTasksForSignedInUser());
+    if (state.status === "signedIn") {
+      if (!reconciledCloudSnapshotUsers.has(state.user.uid)) {
+        reconciledCloudSnapshotUsers.add(state.user.uid);
+        void reconcileDesktopTaskSnapshots(db)
+          .then(() => {
+            // Seed the fingerprint so the change watcher doesn't immediately
+            // republish what we just reconciled on sign-in.
+            lastPublishedTaskFingerprint = computeTaskSnapshotFingerprint(store.items);
+          })
+          .catch((error) => {
+            console.warn("[cloud] failed to reconcile local task snapshots:", error);
+            showCloudBackendErrorToast(error);
+          });
+      }
+      // One-shot read for immediate data, then live onSnapshot updates.
+      void refreshCloudTasksForSignedInUser().catch((error) => {
+        console.warn("[cloud] failed to refresh cloud tasks:", error);
+        showCloudBackendErrorToast(error);
+      });
+      startCloudTaskSubscription(state.user.uid);
+    } else {
+      stopCloudTaskSubscription();
+      cloudSnapshot.value = { repos: [], items: [], terminalRefs: {} };
     }
-    void refreshCloudTasksForSignedInUser().catch((error) => {
-      console.warn("[cloud] failed to refresh cloud tasks:", error);
-      showCloudBackendErrorToast(error);
-    });
   });
-  cloudRefreshTimer = setInterval(() => {
-    void syncCloudTasksForSignedInUser().catch((error) => {
-      console.warn("[cloud] failed to sync cloud tasks:", error);
-      showCloudBackendErrorToast(error);
-    });
-  }, 1000);
 }
 
 function initializeDesktopLanTaskSync(): void {
@@ -2377,9 +2408,7 @@ onUnmounted(() => {
 
 onBeforeUnmount(() => {
   unsubscribeDesktopAuth?.();
-  if (cloudRefreshTimer) {
-    clearInterval(cloudRefreshTimer);
-  }
+  stopCloudTaskSubscription();
   if (lanRefreshTimer) {
     clearInterval(lanRefreshTimer);
   }
