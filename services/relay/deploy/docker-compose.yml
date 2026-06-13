@@ -1,8 +1,6 @@
 services:
   relay:
-    build:
-      context: ./source
-      dockerfile: services/relay/Dockerfile
+    image: ${KANNA_RELAY_IMAGE:?KANNA_RELAY_IMAGE is required}
     restart: unless-stopped
     environment:
       NODE_ENV: production

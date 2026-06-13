@@ -8,6 +8,7 @@ export interface KdEnvironmentIdentity {
   relayUrl: string;
   relayDomain?: string;
   gceVmName?: string;
+  artifactRegistryImage?: string;
   /**
    * Reserved static external IP resource name in GCP. Explicit per env so it
    * matches the actual reservation (prod `kanna-relay-ip`, staging
@@ -30,6 +31,7 @@ const environmentRegistry: Record<KdEnvironmentName, KdEnvironmentIdentity> = {
     relayUrl: "wss://relay-staging.kanna.build",
     relayDomain: "relay-staging.kanna.build",
     gceVmName: "kanna-relay-staging",
+    artifactRegistryImage: "us-central1-docker.pkg.dev/kanna-staging/kanna-relay/relay:latest",
     staticIpName: "relay-staging-ip"
   },
   prod: {
@@ -39,6 +41,7 @@ const environmentRegistry: Record<KdEnvironmentName, KdEnvironmentIdentity> = {
     relayUrl: "wss://relay.kanna.build",
     relayDomain: "relay.kanna.build",
     gceVmName: "kanna-relay-vm",
+    artifactRegistryImage: "us-central1-docker.pkg.dev/kanna-build/kanna-relay/relay:latest",
     staticIpName: "kanna-relay-ip"
   }
 };

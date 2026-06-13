@@ -21,10 +21,11 @@ apt-get update
 apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 
 systemctl enable --now docker
-mkdir -p /opt/kanna-relay/source
+mkdir -p /opt/kanna-relay
 docker pull caddy:2-alpine
 
 if [ -f /opt/kanna-relay/docker-compose.yml ] && [ -f /opt/kanna-relay/Caddyfile ]; then
   cd /opt/kanna-relay
-  docker compose up --build -d
+  docker compose pull
+  docker compose up -d
 fi

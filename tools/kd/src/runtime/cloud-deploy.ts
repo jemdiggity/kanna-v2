@@ -54,6 +54,7 @@ export interface RelayDeployPlan {
   vmName: string;
   zone: string;
   relayUrl: string;
+  artifactRegistryImage: string;
   commands: RelayCommandPlanStep[];
 }
 
@@ -263,29 +264,41 @@ export function buildRelayDeployPlan(input: {
   assertCloudDeployEnvironment(input.environment);
 
   const identity = resolveKdEnvironment(cloudEnvironmentToKdEnvironment(input.environment));
-  if (!identity.relayDomain || !identity.gceVmName) {
+  if (!identity.relayDomain || !identity.gceVmName || !identity.artifactRegistryImage) {
     throw new Error(`Relay VM deploy is not configured for ${input.environment}.`);
   }
 
   const projectId = identity.firebaseProjectId;
   const zone = "us-central1-a";
   const deployDir = join(input.repoRoot, "services/relay/deploy");
+  const registryHost = getArtifactRegistryHost(identity.artifactRegistryImage);
 
   return {
     projectId,
     vmName: identity.gceVmName,
     zone,
     relayUrl: identity.relayUrl,
+    artifactRegistryImage: identity.artifactRegistryImage,
     commands: [
       {
-        command: "pnpm",
-        args: ["--dir", "services/relay", "build"],
-        cwd: input.repoRoot
+        command: "gcloud",
+        args: [
+          "builds",
+          "submit",
+          "--project",
+          projectId,
+          "--config",
+          "services/relay/cloudbuild.yaml",
+          "--substitutions",
+          `_IMAGE=${identity.artifactRegistryImage}`,
+          "."
+        ],
+        cwd: input.repoRoot,
+        streamOutput: true
       },
       {
-        // The startup script creates /opt/kanna-relay as root; make it
-        // writable by the scp (SSH) user so the source/config upload below
-        // does not hit "Permission denied".
+        // The startup script creates /opt/kanna-relay as root; make it writable
+        // by the scp user for deploy asset uploads.
         command: "gcloud",
         args: [
           "compute",
@@ -296,27 +309,7 @@ export function buildRelayDeployPlan(input: {
           "--zone",
           zone,
           "--command",
-          'sudo mkdir -p /opt/kanna-relay/source && sudo chown -R "$(id -un):$(id -gn)" /opt/kanna-relay'
-        ],
-        cwd: input.repoRoot,
-        streamOutput: true
-      },
-      {
-        command: "gcloud",
-        args: [
-          "compute",
-          "scp",
-          "--recurse",
-          "--project",
-          projectId,
-          "--zone",
-          zone,
-          join(input.repoRoot, "package.json"),
-          join(input.repoRoot, "pnpm-lock.yaml"),
-          join(input.repoRoot, "pnpm-workspace.yaml"),
-          join(input.repoRoot, "services/relay"),
-          join(input.repoRoot, "tools/kd/package.json"),
-          `${identity.gceVmName}:/opt/kanna-relay/source/`
+          'sudo mkdir -p /opt/kanna-relay && sudo chown -R "$(id -un):$(id -gn)" /opt/kanna-relay'
         ],
         cwd: input.repoRoot,
         streamOutput: true
@@ -332,7 +325,6 @@ export function buildRelayDeployPlan(input: {
           zone,
           join(deployDir, "docker-compose.yml"),
           join(deployDir, "Caddyfile"),
-          join(deployDir, "startup-script.sh"),
           `${identity.gceVmName}:/opt/kanna-relay/`
         ],
         cwd: input.repoRoot,
@@ -349,7 +341,12 @@ export function buildRelayDeployPlan(input: {
           "--zone",
           zone,
           "--command",
-          buildRemoteRelayDeployCommand(identity.relayDomain, projectId)
+          buildRemoteRelayDeployCommand({
+            domain: identity.relayDomain,
+            projectId,
+            image: identity.artifactRegistryImage,
+            registryHost
+          })
         ],
         cwd: input.repoRoot,
         streamOutput: true
@@ -358,19 +355,34 @@ export function buildRelayDeployPlan(input: {
   };
 }
 
-function shellQuote(value: string): string {
-  return `'${value.replaceAll("'", "'\\''")}'`;
+function getArtifactRegistryHost(image: string): string {
+  const [host] = image.split("/");
+  if (!host) {
+    throw new Error(`Invalid Artifact Registry image ref: ${image}`);
+  }
+  return host;
 }
 
-function buildRemoteRelayDeployCommand(domain: string, projectId: string): string {
-  const script = [
-    "touch .env",
-    'grep -v -E "^(KANNA_RELAY_DOMAIN|FIREBASE_PROJECT_ID)=" .env > .env.tmp',
-    `printf "%s\\n" ${shellQuote(`KANNA_RELAY_DOMAIN=${domain}`)} ${shellQuote(`FIREBASE_PROJECT_ID=${projectId}`)} >> .env.tmp`,
-    "mv .env.tmp .env",
-    "docker compose up --build -d"
-  ].join(" && ");
-  return `cd /opt/kanna-relay && sudo sh -c ${shellQuote(script)}`;
+function buildRemoteRelayDeployCommand(input: {
+  domain: string;
+  projectId: string;
+  image: string;
+  registryHost: string;
+}): string {
+  return [
+    "cd /opt/kanna-relay",
+    "TOKEN=$(curl -fsS -H 'Metadata-Flavor: Google' 'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token' | sed -n 's/.*\"access_token\":\"\\([^\"]*\\)\".*/\\1/p')",
+    `printf '%s' "$TOKEN" | docker login -u oauth2accesstoken --password-stdin https://${input.registryHost}`,
+    "cat > .env.tmp <<'KANNA_RELAY_ENV'",
+    `KANNA_RELAY_DOMAIN=${input.domain}`,
+    `FIREBASE_PROJECT_ID=${input.projectId}`,
+    `KANNA_RELAY_IMAGE=${input.image}`,
+    "KANNA_RELAY_ENV",
+    "sudo install -m 0644 .env.tmp /opt/kanna-relay/.env",
+    "rm .env.tmp",
+    "docker compose pull",
+    "docker compose up -d"
+  ].join("\n");
 }
 
 function buildRelayStartupScript(): string {
@@ -390,7 +402,7 @@ function buildRelayStartupScript(): string {
     "apt-get update",
     "apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin",
     "systemctl enable --now docker",
-    "mkdir -p /opt/kanna-relay/source",
+    "mkdir -p /opt/kanna-relay",
     "docker pull caddy:2-alpine"
   ].join("\n");
 }
