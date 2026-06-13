@@ -52,6 +52,10 @@ export function shouldReuseExpoServer(
     return false;
   }
 
+  if (existing.commandLine.includes("--dev-client")) {
+    return true;
+  }
+
   const existingEnv = extractEnvVarFromCommandLine(existing.commandLine);
   for (const [key, value] of Object.entries(expected.env ?? {})) {
     if (existingEnv[key] !== value) {

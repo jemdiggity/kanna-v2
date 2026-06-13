@@ -47,6 +47,21 @@ describe("mobile Metro helpers", () => {
     ).toBe(false);
   });
 
+  it("reuses a kd-managed dev-client Metro even when ps does not expose inline env vars", () => {
+    expect(
+      shouldReuseExpoServer(
+        {
+          commandLine: "node expo start --port 1430 --dev-client",
+          cwd: "/tmp/kanna/apps/mobile"
+        },
+        {
+          projectRoot: "/tmp/kanna/apps/mobile",
+          env: { KANNA_APP_ENV: "dev" }
+        }
+      )
+    ).toBe(true);
+  });
+
   it("does not reuse an Expo server from another project root", () => {
     expect(
       shouldReuseExpoServer(
