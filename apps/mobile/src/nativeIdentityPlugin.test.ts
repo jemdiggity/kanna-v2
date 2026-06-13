@@ -56,16 +56,25 @@ describe("withKannaNativeIdentity internals", () => {
       "Kanna Staging"
     );
 
+    // The display name has a space, so it must be quoted in the pbxproj or
+    // Xcode reports the project as damaged. The bundle id is a bare value.
     expect(project.hash.project.objects.XCBuildConfiguration.appDebug.buildSettings).toEqual({
       PRODUCT_BUNDLE_IDENTIFIER: "build.kanna.app.staging",
-      INFOPLIST_KEY_CFBundleDisplayName: "Kanna Staging"
+      INFOPLIST_KEY_CFBundleDisplayName: '"Kanna Staging"'
     });
     expect(project.hash.project.objects.XCBuildConfiguration.appRelease.buildSettings).toEqual({
       PRODUCT_BUNDLE_IDENTIFIER: "build.kanna.app.staging",
-      INFOPLIST_KEY_CFBundleDisplayName: "Kanna Staging"
+      INFOPLIST_KEY_CFBundleDisplayName: '"Kanna Staging"'
     });
     expect(project.hash.project.objects.XCBuildConfiguration.testDebug.buildSettings).toEqual({
       PRODUCT_BUNDLE_IDENTIFIER: "build.kanna.app.KannaMobileTests"
     });
+  });
+
+  it("quotes pbxproj values with spaces but leaves bare identifiers unquoted", () => {
+    expect(__internal.quotePbxprojValue("Kanna Staging")).toBe('"Kanna Staging"');
+    expect(__internal.quotePbxprojValue("Kanna Dev")).toBe('"Kanna Dev"');
+    expect(__internal.quotePbxprojValue("build.kanna.app.dev")).toBe("build.kanna.app.dev");
+    expect(__internal.quotePbxprojValue("build.kanna.app")).toBe("build.kanna.app");
   });
 });

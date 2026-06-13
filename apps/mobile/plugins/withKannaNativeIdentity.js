@@ -20,6 +20,19 @@ function findAppTargetConfigurationIds(project) {
     .filter(Boolean);
 }
 
+// pbxproj build-setting values that are not bare identifiers (e.g. a display
+// name with a space like "Kanna Staging") MUST be double-quoted, or Xcode
+// reports the project as "damaged ... parse error" and the build fails. The
+// underlying xcode writer does not add quotes for a directly-assigned value, so
+// quote them here. Bare values (a bundle id like build.kanna.app.dev) are left
+// as-is.
+function quotePbxprojValue(value) {
+  if (/^[A-Za-z0-9_.$/()-]+$/.test(value)) {
+    return value;
+  }
+  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+
 function setAppTargetBuildSetting(project, key, value) {
   const section = project.hash.project.objects.XCBuildConfiguration || {};
   for (const configId of findAppTargetConfigurationIds(project)) {
@@ -28,7 +41,7 @@ function setAppTargetBuildSetting(project, key, value) {
       continue;
     }
     config.buildSettings ||= {};
-    config.buildSettings[key] = value;
+    config.buildSettings[key] = quotePbxprojValue(value);
   }
 }
 
@@ -52,5 +65,6 @@ function withKannaNativeIdentity(config, options = {}) {
 module.exports = withKannaNativeIdentity;
 module.exports.__internal = {
   findAppTargetConfigurationIds,
-  setAppTargetBuildSetting
+  setAppTargetBuildSetting,
+  quotePbxprojValue
 };
