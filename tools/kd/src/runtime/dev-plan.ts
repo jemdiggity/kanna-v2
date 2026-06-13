@@ -1,4 +1,10 @@
 import { buildFirebaseCommandEnv } from "./firebase";
+import {
+  cloudEnvironmentToKdEnvironment,
+  resolveCloudRuntimeEnv,
+  resolveKdEnvironment,
+  type CloudEnvironmentName
+} from "./environment";
 
 export interface DevWindow {
   name: string;
@@ -23,6 +29,7 @@ export interface BuildDevPlanInput {
 export interface BuildProductionMobilePlanInput {
   repoRoot: string;
   env: NodeJS.ProcessEnv;
+  environment?: CloudEnvironmentName;
 }
 
 function shellEnvPrefix(env: Record<string, string | undefined>): string {
@@ -93,11 +100,15 @@ function e2eEnv(input: BuildDevPlanInput): Record<string, string | undefined> {
 }
 
 function productionMobileEnv(input: BuildProductionMobilePlanInput): Record<string, string | undefined> {
+  const identity = input.environment
+    ? resolveKdEnvironment(cloudEnvironmentToKdEnvironment(input.environment))
+    : undefined;
   return {
-    EXPO_PUBLIC_KANNA_RELAY_URL: input.env.EXPO_PUBLIC_KANNA_RELAY_URL,
+    KANNA_APP_ENV: identity?.name === "prod" ? "production" : identity?.name,
+    EXPO_PUBLIC_KANNA_RELAY_URL: input.env.EXPO_PUBLIC_KANNA_RELAY_URL ?? identity?.relayUrl,
     EXPO_PUBLIC_FIREBASE_API_KEY: input.env.EXPO_PUBLIC_FIREBASE_API_KEY,
     EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN: input.env.EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN,
-    EXPO_PUBLIC_FIREBASE_PROJECT_ID: input.env.EXPO_PUBLIC_FIREBASE_PROJECT_ID,
+    EXPO_PUBLIC_FIREBASE_PROJECT_ID: input.env.EXPO_PUBLIC_FIREBASE_PROJECT_ID ?? identity?.firebaseProjectId,
     EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET: input.env.EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET,
     EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID:
       input.env.EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
@@ -109,7 +120,7 @@ function productionMobileEnv(input: BuildProductionMobilePlanInput): Record<stri
 
 export function buildDevPlan(input: BuildDevPlanInput): DevPlan {
   const windows: DevWindow[] = [];
-  const sharedEnv = { ...input.env };
+  const sharedEnv = resolveCloudRuntimeEnv(input.env);
 
   if (input.emulators) {
     windows.push({

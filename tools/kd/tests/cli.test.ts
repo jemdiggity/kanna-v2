@@ -160,14 +160,19 @@ describe("kd CLI", () => {
     expect(parseCliArgs(["mobile", "up", "--production"])).toEqual({
       taskId: "mobile.up",
       input: {
-        production: true
+        production: true,
+        staging: false
       }
     });
-    expect(() => parseCliArgs(["mobile", "up", "--staging"])).toThrow(
-      "mobile up --staging is not supported yet"
-    );
+    expect(parseCliArgs(["mobile", "up", "--staging"])).toEqual({
+      taskId: "mobile.up",
+      input: {
+        production: false,
+        staging: true
+      }
+    });
     expect(() => parseCliArgs(["mobile", "up", "--production", "--emulators"])).toThrow(
-      "mobile up only accepts --production"
+      "mobile up only accepts --production or --staging"
     );
     expect(parseCliArgs(["emulators", "up"])).toEqual({
       taskId: "emulators.up",
@@ -296,6 +301,10 @@ describe("kd CLI", () => {
     expect(parseCliArgs(["cloud", "deploy", "--staging", "--relay"])).toEqual({
       taskId: "cloud.deploy",
       input: { staging: true, production: false, relay: true }
+    });
+    expect(parseCliArgs(["cloud", "relay-provision", "--staging"])).toEqual({
+      taskId: "cloud.relay-provision",
+      input: { staging: true, production: false }
     });
   });
 });

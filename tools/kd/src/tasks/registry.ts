@@ -7,7 +7,7 @@ import { z } from "zod";
 import { readKannaRepoConfig } from "../config";
 import { resolveKdContext, type KdContext } from "../context";
 import { cleanWorkspace } from "../runtime/clean";
-import { deployFirebaseCloud } from "../runtime/cloud-deploy";
+import { buildRelayProvisionPlan, deployFirebaseCloud } from "../runtime/cloud-deploy";
 import {
   buildCloudEmulatorTestCommand,
   buildCloudSmokeCommand,
@@ -17,6 +17,7 @@ import {
 import { buildLanLabPlan, parseLanLabInventory } from "../runtime/lan-lab";
 import { buildLanLabScenarioCommand } from "../runtime/lan-lab-runner";
 import { buildDevPlan, buildProductionMobilePlan } from "../runtime/dev-plan";
+import { resolveKdEnvironment } from "../runtime/environment";
 import { assertNotProductionDb, resetSqliteDb, seedSqliteDb, type DevDbTarget } from "../runtime/db";
 import { killWorkspaceDaemons } from "../runtime/daemon";
 import { checkRequiredCommands } from "../runtime/doctor";
@@ -55,6 +56,7 @@ export interface DevDownInput {
 
 export interface MobileUpInput {
   production: boolean;
+  staging: boolean;
 }
 
 export const devUpInputSchema = z.object({
@@ -75,7 +77,8 @@ const devDownInputSchema = z.object({
 });
 
 const mobileUpInputSchema = z.object({
-  production: z.boolean().default(false)
+  production: z.boolean().default(false),
+  staging: z.boolean().default(false)
 });
 
 const logInputSchema = z.object({
@@ -125,6 +128,11 @@ const cloudDeployInputSchema = z.object({
   staging: z.boolean().default(false),
   production: z.boolean().default(false),
   relay: z.boolean().default(false)
+});
+
+const cloudRelayProvisionInputSchema = z.object({
+  staging: z.boolean().default(false),
+  production: z.boolean().default(false)
 });
 
 export interface ExecutorInput {
@@ -292,8 +300,35 @@ export async function executeProductionMobileUpWithContext(
   input: MobileUpInput,
   executor: ExecutorInput
 ): Promise<TaskResult> {
-  if (!input.production) {
-    throw new Error("mobile.up currently supports --production only.");
+  if (input.production && input.staging) {
+    throw new Error("mobile.up accepts only one of --production or --staging.");
+  }
+  if (!input.production && !input.staging) {
+    throw new Error("mobile.up requires --production or --staging.");
+  }
+
+  if (input.staging) {
+    const staging = resolveKdEnvironment("staging");
+    const env = {
+      ...executor.context.env,
+      KANNA_APP_ENV: executor.context.env.KANNA_APP_ENV ?? "staging"
+    };
+    const plan = buildProductionMobilePlan({
+      repoRoot: executor.context.repoRoot,
+      env,
+      environment: "staging"
+    });
+
+    await startTmuxSession(executor.runner, executor.context.tmux, plan.windows);
+
+    return {
+      ok: true,
+      message: "Started mobile against staging cloud environment.",
+      data: {
+        relayUrl: staging.relayUrl,
+        windows: plan.windows.map((window) => window.name)
+      }
+    };
   }
 
   const [status, serverConfigPath] = await Promise.all([
@@ -308,7 +343,8 @@ export async function executeProductionMobileUpWithContext(
   };
   const plan = buildProductionMobilePlan({
     repoRoot: executor.context.repoRoot,
-    env
+    env,
+    environment: "production"
   });
 
   await startTmuxSession(executor.runner, executor.context.tmux, plan.windows);
@@ -754,6 +790,27 @@ export const taskDefinitions = [
           message: error instanceof Error ? error.message : String(error)
         };
       }
+    }
+  },
+  {
+    id: "cloud.relay-provision",
+    description: "Build the relay VM provisioning command plan.",
+    inputSchema: cloudRelayProvisionInputSchema,
+    execute: async (_context, input) => {
+      const parsed = cloudRelayProvisionInputSchema.parse(input);
+      if (parsed.staging && parsed.production) {
+        return { ok: false, message: "cloud relay-provision accepts only one of --staging or --production." };
+      }
+      if (!parsed.staging && !parsed.production) {
+        return { ok: false, message: "cloud relay-provision requires --staging or --production." };
+      }
+      const environment = parsed.staging ? "staging" : "production";
+      const plan = buildRelayProvisionPlan({ environment });
+      return {
+        ok: true,
+        message: formatJsonResult(plan),
+        data: plan
+      };
     }
   },
   {

@@ -176,7 +176,8 @@ Run '\\''copilot update'\\'' to check for updates.
         KANNA_MOBILE_PORT: "8083",
         EXPO_PUBLIC_FIREBASE_PROJECT_ID: "kanna-prod",
         EXPO_PUBLIC_KANNA_RELAY_URL: "wss://relay.prod.example"
-      }
+      },
+      environment: "production"
     });
 
     expect(plan.windows.map((window) => window.name)).toEqual(["mobile"]);
@@ -187,5 +188,42 @@ Run '\\''copilot update'\\'' to check for updates.
     expect(plan.windows[0]?.command).toContain("RCT_METRO_PORT='8083'");
     expect(plan.windows[0]?.command).toContain("pnpm run dev -- --port 8083");
     expect(plan.windows[0]?.command).not.toContain("EXPO_PUBLIC_FIREBASE_AUTH_EMULATOR_HOST");
+  });
+
+  it("sets staging mobile cloud env from the kd registry", () => {
+    const plan = buildProductionMobilePlan({
+      repoRoot: "/repo",
+      env: {
+        KANNA_MOBILE_PORT: "8084",
+        EXPO_PUBLIC_FIREBASE_API_KEY: "staging-api-key",
+        EXPO_PUBLIC_FIREBASE_APP_ID: "staging-app-id"
+      },
+      environment: "staging"
+    });
+
+    expect(plan.windows[0]?.command).toContain("KANNA_APP_ENV='staging'");
+    expect(plan.windows[0]?.command).toContain("EXPO_PUBLIC_KANNA_RELAY_URL='wss://relay-staging.kanna.build'");
+    expect(plan.windows[0]?.command).toContain("EXPO_PUBLIC_FIREBASE_PROJECT_ID='kanna-staging'");
+    expect(plan.windows[0]?.command).toContain("EXPO_PUBLIC_FIREBASE_API_KEY='staging-api-key'");
+    expect(plan.windows[0]?.command).toContain("RCT_METRO_PORT='8084'");
+  });
+
+  it("exports staging desktop relay settings when KANNA_CLOUD_ENV is staging", () => {
+    const plan = buildDevPlan({
+      repoRoot: "/repo",
+      env: {
+        KANNA_CLOUD_ENV: "staging",
+        KANNA_DEV_PORT: "1421",
+        KANNA_DB_PATH: "/tmp/kanna.db",
+        KANNA_MOBILE_SERVER_PORT: "48120"
+      },
+      mobile: false,
+      emulators: false,
+      firebaseConfigPath: "/repo/.firebase-8080.kanna.json",
+      mobileServerUrl: "http://127.0.0.1:48120"
+    });
+
+    expect(plan.windows[0]?.env.KANNA_FIREBASE_PROJECT_ID).toBe("kanna-staging");
+    expect(plan.windows[0]?.env.KANNA_RELAY_URL).toBe("wss://relay-staging.kanna.build");
   });
 });

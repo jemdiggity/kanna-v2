@@ -3,6 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  buildRelayDeployPlan,
+  buildRelayProvisionPlan,
   deployRelayCloud,
   deployFirebaseCloud,
   resolveFirebaseProject,
@@ -51,14 +53,12 @@ describe("cloud deploy runtime", () => {
     ).toBe("kanna-staging");
   });
 
-  it("refuses production deploys without an explicit production project", () => {
+  it("falls back to the registry production Firebase project", () => {
     const repoRoot = mkdtempSync(join(tmpdir(), "kd-cloud-deploy-"));
     writeFileSync(join(repoRoot, ".firebaserc"), JSON.stringify({ projects: { default: "kanna-local" } }));
 
     try {
-      expect(() => resolveProductionFirebaseProject(repoRoot, {})).toThrow(
-        "No production Firebase project configured"
-      );
+      expect(resolveProductionFirebaseProject(repoRoot, {})).toBe("kanna-build");
     } finally {
       rmSync(repoRoot, { recursive: true, force: true });
     }
@@ -178,7 +178,114 @@ describe("cloud deploy runtime", () => {
     }
   });
 
-  it("deploys the relay to Cloud Run and returns the wss URL", async () => {
+  it("builds a staging relay VM provision plan without executing it", () => {
+    const plan = buildRelayProvisionPlan({ environment: "staging" });
+
+    expect(plan.projectId).toBe("kanna-staging");
+    expect(plan.domain).toBe("relay-staging.kanna.build");
+    expect(plan.vmName).toBe("kanna-relay-staging");
+    expect(plan.commands.map((command) => command.command)).toEqual(["gcloud", "gcloud", "gcloud"]);
+    expect(plan.commands[0]?.args).toEqual([
+      "compute",
+      "addresses",
+      "create",
+      "kanna-relay-staging-ip",
+      "--project",
+      "kanna-staging",
+      "--region",
+      "us-central1"
+    ]);
+    expect(plan.commands[1]?.args).toContain("kanna-relay-staging");
+    expect(plan.commands[1]?.args).toContain("--machine-type");
+    expect(plan.commands[1]?.args).toContain("e2-micro");
+    expect(plan.commands[1]?.args).toContain("--zone");
+    expect(plan.commands[1]?.args).toContain("us-central1-a");
+    expect(plan.commands[1]?.args.join("\n")).toContain("startup-script");
+    expect(plan.commands[1]?.args.join("\n")).toContain("relay-staging.kanna.build");
+    expect(plan.commands[2]?.args).toEqual([
+      "compute",
+      "firewall-rules",
+      "create",
+      "allow-kanna-relay-staging-web",
+      "--project",
+      "kanna-staging",
+      "--allow",
+      "tcp:80,tcp:443",
+      "--target-tags",
+      "kanna-relay-staging",
+      "--description",
+      "Allow HTTP and HTTPS for Kanna staging relay"
+    ]);
+  });
+
+  it("builds a production relay VM deploy plan", () => {
+    const plan = buildRelayDeployPlan({ repoRoot: "/repo", environment: "production" });
+
+    expect(plan.projectId).toBe("kanna-build");
+    expect(plan.relayUrl).toBe("wss://relay.kanna.build");
+    expect(plan.commands).toEqual([
+      {
+        command: "pnpm",
+        args: ["--dir", "services/relay", "build"],
+        cwd: "/repo"
+      },
+      {
+        command: "gcloud",
+        args: [
+          "compute",
+          "scp",
+          "--recurse",
+          "--project",
+          "kanna-build",
+          "--zone",
+          "us-central1-a",
+          "/repo/package.json",
+          "/repo/pnpm-lock.yaml",
+          "/repo/pnpm-workspace.yaml",
+          "/repo/services/relay",
+          "/repo/tools/kd/package.json",
+          "kanna-relay-prod:/opt/kanna-relay/source/"
+        ],
+        cwd: "/repo",
+        streamOutput: true
+      },
+      {
+        command: "gcloud",
+        args: [
+          "compute",
+          "scp",
+          "--project",
+          "kanna-build",
+          "--zone",
+          "us-central1-a",
+          "/repo/services/relay/deploy/docker-compose.yml",
+          "/repo/services/relay/deploy/Caddyfile",
+          "/repo/services/relay/deploy/startup-script.sh",
+          "kanna-relay-prod:/opt/kanna-relay/"
+        ],
+        cwd: "/repo",
+        streamOutput: true
+      },
+      {
+        command: "gcloud",
+        args: [
+          "compute",
+          "ssh",
+          "kanna-relay-prod",
+          "--project",
+          "kanna-build",
+          "--zone",
+          "us-central1-a",
+          "--command",
+          "cd /opt/kanna-relay && sudo sh -c 'touch .env && grep -v -E \"^(KANNA_RELAY_DOMAIN|FIREBASE_PROJECT_ID)=\" .env > .env.tmp && printf \"%s\\n\" '\\''KANNA_RELAY_DOMAIN=relay.kanna.build'\\'' '\\''FIREBASE_PROJECT_ID=kanna-build'\\'' >> .env.tmp && mv .env.tmp .env && docker compose up --build -d'"
+        ],
+        cwd: "/repo",
+        streamOutput: true
+      }
+    ]);
+  });
+
+  it("deploys the relay to the environment VM and returns the registry wss URL", async () => {
     const repoRoot = mkdtempSync(join(tmpdir(), "kd-cloud-deploy-"));
     const calls: Array<{ command: string; args: string[]; cwd?: string; streamOutput?: boolean }> = [];
     const runner: CommandRunner = {
@@ -189,13 +296,6 @@ describe("cloud deploy runtime", () => {
           cwd: options?.cwd,
           ...(options?.streamOutput === undefined ? {} : { streamOutput: options.streamOutput })
         });
-        if (command === "gcloud" && args.includes("services") && args.includes("describe")) {
-          return {
-            exitCode: 0,
-            stdout: "https://kanna-relay-abc-uc.a.run.app\n",
-            stderr: ""
-          };
-        }
         return { exitCode: 0, stdout: "", stderr: "" };
       }
     };
@@ -203,21 +303,16 @@ describe("cloud deploy runtime", () => {
     try {
       const result = await deployRelayCloud({
         repoRoot,
-        env: {
-          KANNA_FIREBASE_PRODUCTION_PROJECT: "prod-project",
-          KANNA_CLOUD_RUN_REGION: "us-east1"
-        },
+        env: {},
         runner,
         environment: "production"
       });
 
       expect(result).toEqual({
-        projectId: "prod-project",
-        serviceName: "kanna-relay",
-        region: "us-east1",
-        image: "gcr.io/prod-project/kanna-relay",
-        serviceUrl: "https://kanna-relay-abc-uc.a.run.app",
-        relayUrl: "wss://kanna-relay-abc-uc.a.run.app"
+        projectId: "kanna-build",
+        vmName: "kanna-relay-prod",
+        zone: "us-central1-a",
+        relayUrl: "wss://relay.kanna.build"
       });
       expect(calls).toEqual([
         {
@@ -228,15 +323,19 @@ describe("cloud deploy runtime", () => {
         {
           command: "gcloud",
           args: [
-            "builds",
-            "submit",
-            ".",
+            "compute",
+            "scp",
+            "--recurse",
             "--project",
-            "prod-project",
-            "--config",
-            "services/relay/cloudbuild.yaml",
-            "--substitutions",
-            "_IMAGE=gcr.io/prod-project/kanna-relay"
+            "kanna-build",
+            "--zone",
+            "us-central1-a",
+            join(repoRoot, "package.json"),
+            join(repoRoot, "pnpm-lock.yaml"),
+            join(repoRoot, "pnpm-workspace.yaml"),
+            join(repoRoot, "services/relay"),
+            join(repoRoot, "tools/kd/package.json"),
+            "kanna-relay-prod:/opt/kanna-relay/source/"
           ],
           cwd: repoRoot,
           streamOutput: true
@@ -244,20 +343,16 @@ describe("cloud deploy runtime", () => {
         {
           command: "gcloud",
           args: [
-            "run",
-            "deploy",
-            "kanna-relay",
+            "compute",
+            "scp",
             "--project",
-            "prod-project",
-            "--image",
-            "gcr.io/prod-project/kanna-relay",
-            "--region",
-            "us-east1",
-            "--platform",
-            "managed",
-            "--allow-unauthenticated",
-            "--set-env-vars",
-            "FIREBASE_PROJECT_ID=prod-project"
+            "kanna-build",
+            "--zone",
+            "us-central1-a",
+            join(repoRoot, "services/relay/deploy/docker-compose.yml"),
+            join(repoRoot, "services/relay/deploy/Caddyfile"),
+            join(repoRoot, "services/relay/deploy/startup-script.sh"),
+            "kanna-relay-prod:/opt/kanna-relay/"
           ],
           cwd: repoRoot,
           streamOutput: true
@@ -265,20 +360,18 @@ describe("cloud deploy runtime", () => {
         {
           command: "gcloud",
           args: [
-            "run",
-            "services",
-            "describe",
-            "kanna-relay",
+            "compute",
+            "ssh",
+            "kanna-relay-prod",
             "--project",
-            "prod-project",
-            "--region",
-            "us-east1",
-            "--platform",
-            "managed",
-            "--format",
-            "value(status.url)"
+            "kanna-build",
+            "--zone",
+            "us-central1-a",
+            "--command",
+            "cd /opt/kanna-relay && sudo sh -c 'touch .env && grep -v -E \"^(KANNA_RELAY_DOMAIN|FIREBASE_PROJECT_ID)=\" .env > .env.tmp && printf \"%s\\n\" '\\''KANNA_RELAY_DOMAIN=relay.kanna.build'\\'' '\\''FIREBASE_PROJECT_ID=kanna-build'\\'' >> .env.tmp && mv .env.tmp .env && docker compose up --build -d'"
           ],
-          cwd: repoRoot
+          cwd: repoRoot,
+          streamOutput: true
         }
       ]);
     } finally {

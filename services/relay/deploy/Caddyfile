@@ -1,0 +1,7 @@
+{
+	email ops@kanna.build
+}
+
+{$KANNA_RELAY_DOMAIN} {
+	reverse_proxy relay:8080
+}

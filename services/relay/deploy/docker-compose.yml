@@ -1,0 +1,30 @@
+services:
+  relay:
+    build:
+      context: ./source
+      dockerfile: services/relay/Dockerfile
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:?FIREBASE_PROJECT_ID is required}
+      GOOGLE_APPLICATION_CREDENTIALS_JSON: ${GOOGLE_APPLICATION_CREDENTIALS_JSON:?GOOGLE_APPLICATION_CREDENTIALS_JSON is required}
+      PORT: "8080"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - relay
+    environment:
+      KANNA_RELAY_DOMAIN: ${KANNA_RELAY_DOMAIN:?KANNA_RELAY_DOMAIN is required}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  caddy-data:
+  caddy-config:
