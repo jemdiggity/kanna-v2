@@ -1,3 +1,9 @@
+import {
+  readKannaExpoExtra,
+  type MobileFirebaseExtraConfig
+} from "../../mobileEnvironment";
+import { readExpoConfig } from "../expoConfig";
+
 export interface ExpoFirebaseEnv {
   EXPO_PUBLIC_KANNA_CLOUD_ENV?: string;
   EXPO_PUBLIC_FIREBASE_API_KEY?: string;
@@ -32,47 +38,60 @@ export interface MobileFirebaseConfig {
   authEmulator: MobileFirebaseAuthEmulatorConfig | null;
 }
 
+type ExpoFirebaseExtra = Partial<MobileFirebaseExtraConfig>;
+
 export function readExpoFirebaseEnv(): ExpoFirebaseEnv {
   const globalEnv = (globalThis as { process?: { env?: ExpoFirebaseEnv } }).process?.env;
   return globalEnv ?? {};
 }
 
 export function parseMobileFirebaseConfig(
-  env: ExpoFirebaseEnv = readExpoFirebaseEnv()
+  env: ExpoFirebaseEnv = readExpoFirebaseEnv(),
+  extra: ExpoFirebaseExtra | null | undefined = readKannaExpoExtra(readExpoConfig())
+    ?.firebase
 ): MobileFirebaseConfig {
   const authEmulator = parseAuthEmulator(env);
-  const appDefaults = authEmulator ? null : profileMobileFirebaseAppConfig(env);
+  const profileDefaults = profileMobileFirebaseAppConfig(env);
+  const appDefaults = authEmulator
+    ? extra ?? null
+    : extra ?? profileDefaults;
+  const app = resolveMobileFirebaseAppConfig(env, appDefaults);
+
+  return {
+    app,
+    authEmulator
+  };
+}
+
+export function resolveMobileFirebaseAppConfig(
+  env: ExpoFirebaseEnv,
+  appDefaults: ExpoFirebaseExtra | null | undefined
+): MobileFirebaseAppConfig | null {
   const apiKey =
     normalizeEnvValue(env.EXPO_PUBLIC_FIREBASE_API_KEY) ?? appDefaults?.apiKey;
   const projectId =
     normalizeEnvValue(env.EXPO_PUBLIC_FIREBASE_PROJECT_ID) ?? appDefaults?.projectId;
   const appId =
     normalizeEnvValue(env.EXPO_PUBLIC_FIREBASE_APP_ID) ?? appDefaults?.appId;
-  const app =
-    apiKey && projectId && appId
-      ? compactAppConfig({
-          apiKey,
-          authDomain:
-            normalizeEnvValue(env.EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN) ??
-            appDefaults?.authDomain,
-          projectId,
-          storageBucket:
-            normalizeEnvValue(env.EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET) ??
-            appDefaults?.storageBucket,
-          messagingSenderId:
-            normalizeEnvValue(env.EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID) ??
-            appDefaults?.messagingSenderId,
-          appId,
-          measurementId:
-            normalizeEnvValue(env.EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID) ??
-            appDefaults?.measurementId
-        })
-      : null;
-
-  return {
-    app,
-    authEmulator
-  };
+  return apiKey && projectId && appId
+    ? compactAppConfig({
+        apiKey,
+        authDomain:
+          normalizeEnvValue(env.EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN) ??
+          appDefaults?.authDomain,
+        projectId,
+        storageBucket:
+          normalizeEnvValue(env.EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET) ??
+          appDefaults?.storageBucket,
+        messagingSenderId:
+          normalizeEnvValue(env.EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID) ??
+          appDefaults?.messagingSenderId,
+        appId,
+        measurementId:
+          normalizeEnvValue(env.EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID) ??
+          appDefaults?.measurementId
+      })
+    : null;
 }
 
 function profileMobileFirebaseAppConfig(env: ExpoFirebaseEnv): MobileFirebaseAppConfig {

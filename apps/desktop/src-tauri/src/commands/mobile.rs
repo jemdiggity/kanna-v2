@@ -1564,7 +1564,10 @@ mod tests {
             unset_env_var("KANNA_RELAY_PORT");
         }
 
-        assert_eq!(super::relay_url_for_mode(false), "wss://relay.kanna.build");
+        assert_eq!(
+            super::relay_url_for_mode(false),
+            "wss://relay.kanna.build"
+        );
     }
 
     #[test]

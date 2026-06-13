@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { createAppModel, resolveRelayUrl } from "./appModel";
+import {
+  createAppModel,
+  resolveForceCloud,
+  resolveRelayUrl
+} from "./appModel";
 import { createStaticBonjourBrowser } from "./lib/discovery/bonjour";
 import type { MobileAuthSession } from "./lib/firebase/auth";
 import type { FetchLike } from "./lib/transports/lanTransport";
@@ -228,6 +232,25 @@ describe("createAppModel", () => {
   it("does not use the production relay URL in dev mode without an explicit override", () => {
     expect(resolveRelayUrl({}, { dev: true })).toBeNull();
     expect(resolveRelayUrl({ EXPO_PUBLIC_KANNA_RELAY_URL: "wss://relay.example" }, { dev: true })).toBe("wss://relay.example");
+  });
+
+  it("resolves relay URL from Expo extra before production defaults", () => {
+    expect(resolveRelayUrl({}, { extraRelayUrl: "wss://relay-staging.kanna.build" }))
+      .toBe("wss://relay-staging.kanna.build");
+  });
+
+  it("lets Expo public relay URL override Expo extra", () => {
+    expect(
+      resolveRelayUrl(
+        { EXPO_PUBLIC_KANNA_RELAY_URL: "wss://relay.env.example" },
+        { extraRelayUrl: "wss://relay-extra.example" }
+      )
+    ).toBe("wss://relay.env.example");
+  });
+
+  it("parses the force-cloud override from Expo public env", () => {
+    expect(resolveForceCloud({ EXPO_PUBLIC_KANNA_FORCE_CLOUD: "1" })).toBe(true);
+    expect(resolveForceCloud({ EXPO_PUBLIC_KANNA_FORCE_CLOUD: "false" })).toBe(false);
   });
 
   it("creates an app model with desktop navigation and a LAN client", async () => {
@@ -479,6 +502,61 @@ describe("createAppModel", () => {
         expect.objectContaining({ id: "task-trusted", title: "Trusted LAN task" })
       ]
     });
+  });
+
+  it("uses cloud instead of trusted LAN fallback when force-cloud is enabled", async () => {
+    const authSession = createSignedInAuthSession();
+    const taskIndex = {
+      listRecentTasks: vi.fn(async () => [])
+    };
+    const fetchImpl = createTrustedDesktopFetchMock();
+    const model = createAppModel({
+      fetchImpl,
+      persistence: {
+        load: vi.fn().mockResolvedValue({
+          selectedDesktopId: "desktop-trusted",
+          selectedRepoId: null,
+          selectedTaskId: null,
+          activeView: "tasks",
+          trustedDesktops: [
+            {
+              desktopId: "desktop-trusted",
+              displayName: "Trusted Mac",
+              lanEndpoints: [
+                {
+                  baseUrl: "http://trusted.lan:48120",
+                  lastSeenAt: "2026-05-31T00:00:00.000Z"
+                }
+              ],
+              lastSeenAt: "2026-05-31T00:00:00.000Z"
+            }
+          ]
+        }),
+        save: vi.fn().mockResolvedValue(undefined)
+      },
+      authSession,
+      options: {
+        forceCloud: true,
+        relayUrl: "wss://relay.example",
+        taskIndex,
+        bonjourBrowser: createBonjourForDesktop(
+          "desktop-trusted",
+          "Trusted Mac",
+          "trusted.lan",
+          48120
+        )
+      }
+    });
+
+    await model.initialize();
+
+    expect(model.sessionStore.getState()).toMatchObject({
+      connectionMode: "remote",
+      connectionState: "connected",
+      desktopName: "Kanna Cloud",
+      recentTasks: []
+    });
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 
   it("skips Bonjour LAN endpoints whose status belongs to a different desktop", async () => {

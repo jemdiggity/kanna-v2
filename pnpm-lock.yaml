@@ -179,6 +179,12 @@ importers:
       expo:
         specifier: ~53.0.0
         version: 53.0.27(react-native-webview@13.13.5(react-native@0.79.6(@babel/core@7.29.0)(@types/react@19.0.14)(react@19.0.0))(react@19.0.0))(react-native@0.79.6(@babel/core@7.29.0)(@types/react@19.0.14)(react@19.0.0))(react@19.0.0)
+      expo-constants:
+        specifier: 17.1.8
+        version: 17.1.8(expo@53.0.27(react-native-webview@13.13.5(react-native@0.79.6(@babel/core@7.29.0)(@types/react@19.0.14)(react@19.0.0))(react@19.0.0))(react-native@0.79.6(@babel/core@7.29.0)(@types/react@19.0.14)(react@19.0.0))(react@19.0.0))(react-native@0.79.6(@babel/core@7.29.0)(@types/react@19.0.14)(react@19.0.0))
+      expo-modules-core:
+        specifier: 2.5.0
+        version: 2.5.0
       firebase:
         specifier: ^12.12.1
         version: 12.12.1(@react-native-async-storage/async-storage@2.1.2(react-native@0.79.6(@babel/core@7.29.0)(@types/react@19.0.14)(react@19.0.0)))
@@ -8822,7 +8828,6 @@ snapshots:
       - '@expo/metro-runtime'
       - babel-plugin-react-compiler
       - bufferutil
-      - graphql
       - react
       - react-native
       - react-native-webview
@@ -11174,10 +11179,12 @@ snapshots:
     transitivePeerDependencies:
       - '@expo/dom-webview'
       - '@expo/metro-runtime'
+      - bufferutil
       - react
       - react-native
       - react-native-webview
       - supports-color
+      - utf-8-validate
 
   babel-preset-jest@29.6.3(@babel/core@7.29.0):
     dependencies:

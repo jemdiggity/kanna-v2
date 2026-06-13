@@ -15,6 +15,7 @@ export const MOBILE_E2E_IDS = {
   accountConnectionStatus: "mobile.account-connection-status",
   accountConnectionTitle: "mobile.account-connection-title",
   accountConnectLocalButton: "mobile.account-connect-local",
+  accountForceCloudToggle: "mobile.account-force-cloud",
   accountEmailInput: "mobile.account-email",
   accountPasswordInput: "mobile.account-password",
   accountSignInButton: "mobile.account-sign-in",

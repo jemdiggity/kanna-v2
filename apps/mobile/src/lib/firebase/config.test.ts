@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { parseMobileFirebaseConfig } from "./config";
+import {
+  parseMobileFirebaseConfig,
+  resolveMobileFirebaseAppConfig
+} from "./config";
 
 describe("parseMobileFirebaseConfig", () => {
   it("reads Firebase app config from Expo public env", () => {
@@ -115,6 +118,52 @@ describe("parseMobileFirebaseConfig", () => {
       authDomain: "kanna-local.firebaseapp.com",
       projectId: "kanna-local",
       appId: "kanna-mobile-local"
+    });
+  });
+
+  it("reads Firebase app config from Expo extra before production defaults", () => {
+    const app = resolveMobileFirebaseAppConfig(
+      {},
+      {
+        apiKey: "staging-key",
+        authDomain: "kanna-staging.firebaseapp.com",
+        projectId: "kanna-staging",
+        storageBucket: "kanna-staging.firebasestorage.app",
+        messagingSenderId: "sender-staging",
+        appId: "staging-app",
+        measurementId: "G-STAGING"
+      }
+    );
+
+    expect(app).toEqual({
+      apiKey: "staging-key",
+      authDomain: "kanna-staging.firebaseapp.com",
+      projectId: "kanna-staging",
+      storageBucket: "kanna-staging.firebasestorage.app",
+      messagingSenderId: "sender-staging",
+      appId: "staging-app",
+      measurementId: "G-STAGING"
+    });
+  });
+
+  it("lets Expo public env override Expo extra Firebase config", () => {
+    const app = resolveMobileFirebaseAppConfig(
+      {
+        EXPO_PUBLIC_FIREBASE_API_KEY: "env-key",
+        EXPO_PUBLIC_FIREBASE_PROJECT_ID: "env-project",
+        EXPO_PUBLIC_FIREBASE_APP_ID: "env-app"
+      },
+      {
+        apiKey: "extra-key",
+        projectId: "extra-project",
+        appId: "extra-app"
+      }
+    );
+
+    expect(app).toMatchObject({
+      apiKey: "env-key",
+      projectId: "env-project",
+      appId: "env-app"
     });
   });
 });

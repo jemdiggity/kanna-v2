@@ -20,8 +20,11 @@ interface AccountSheetProps {
   errorMessage: string | null;
   pairingCode: string | null;
   visible: boolean;
+  forceCloudEnabled: boolean;
+  showDevForceCloudToggle: boolean;
   onConnectLocal(): void;
   onClose(): void;
+  onForceCloudChange(enabled: boolean): void;
   onSignIn(email: string, password: string): void;
   onSignOut(): void;
 }
@@ -31,10 +34,13 @@ export function AccountSheet({
   connectionState,
   desktopName,
   errorMessage,
+  forceCloudEnabled,
   pairingCode,
+  showDevForceCloudToggle,
   visible,
   onConnectLocal,
   onClose,
+  onForceCloudChange,
   onSignIn,
   onSignOut
 }: AccountSheetProps) {
@@ -70,6 +76,28 @@ export function AccountSheet({
             >
               <Text style={styles.closeLabel}>×</Text>
             </Pressable>
+            {showDevForceCloudToggle ? (
+              <Pressable
+                accessibilityLabel="Force Cloud"
+                accessibilityState={{ checked: forceCloudEnabled }}
+                style={styles.devToggle}
+                testID={MOBILE_E2E_IDS.accountForceCloudToggle}
+                onPress={() => onForceCloudChange(!forceCloudEnabled)}
+              >
+                <View
+                  style={[
+                    styles.devToggleIndicator,
+                    forceCloudEnabled ? styles.devToggleIndicatorActive : null
+                  ]}
+                />
+                <View style={styles.devToggleText}>
+                  <Text style={styles.devToggleTitle}>Force Cloud</Text>
+                  <Text style={styles.devToggleDetail}>
+                    {forceCloudEnabled ? "Relay only" : "LAN fallback allowed"}
+                  </Text>
+                </View>
+              </Pressable>
+            ) : null}
           </View>
 
           <View
@@ -249,6 +277,41 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     gap: 8,
     padding: 14
+  },
+  devToggle: {
+    alignItems: "center",
+    borderColor: "#2D4166",
+    borderRadius: 12,
+    borderWidth: 1,
+    flexDirection: "row",
+    gap: 10,
+    marginTop: 4,
+    padding: 10
+  },
+  devToggleDetail: {
+    color: "#8FA4C0",
+    fontSize: 12,
+    marginTop: 2
+  },
+  devToggleIndicator: {
+    backgroundColor: "#1A2740",
+    borderColor: "#3B5278",
+    borderRadius: 7,
+    borderWidth: 1,
+    height: 14,
+    width: 14
+  },
+  devToggleIndicatorActive: {
+    backgroundColor: "#56A2FF",
+    borderColor: "#8EC2FF"
+  },
+  devToggleText: {
+    flex: 1
+  },
+  devToggleTitle: {
+    color: "#F5F7FB",
+    fontSize: 13,
+    fontWeight: "700"
   },
   sectionLabel: {
     color: "#7FA7D9",
