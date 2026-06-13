@@ -47,6 +47,7 @@ import { isTopModal } from "./composables/useModalZIndex";
 import { selectTaskByActivity } from "./utils/selectTaskByActivity";
 import { sortSidebarItemsForRepo } from "./utils/sidebarOrdering";
 import { getDefaultBaseBranch } from "./utils/baseBranchPicker";
+import { computeTaskSnapshotFingerprint } from "./utils/cloudTaskFingerprint";
 import { remoteTaskClosureAliases, remoteTaskIsLocallyClosed } from "./utils/remoteTaskIdentity";
 import { parseRepoInput } from "./utils/parseRepoInput";
 import { defaultReposHome } from "./utils/reposHome";
@@ -143,6 +144,7 @@ let unsubscribeDesktopAuth: (() => void) | null = null;
 let cloudRefreshTimer: ReturnType<typeof setInterval> | null = null;
 let lanRefreshTimer: ReturnType<typeof setInterval> | null = null;
 const reconciledCloudSnapshotUsers = new Set<string>();
+let lastPublishedTaskFingerprint: string | null = null;
 let lastCloudBackendErrorToastAt: number | null = null;
 const CLOUD_BACKEND_ERROR_TOAST_INTERVAL_MS = 30_000;
 const selectedCloudRepoId = ref<string | null>(null);
@@ -451,10 +453,18 @@ async function syncCloudTasksForSignedInUser(): Promise<void> {
     await refreshCloudTasksForSignedInUser();
     return;
   }
-  await reconcileDesktopTaskSnapshots(db).catch((error) => {
-    console.warn("[cloud] failed to reconcile local task snapshots:", error);
-    showCloudBackendErrorToast(error);
-  });
+  // Only publish (reconcile) when the local open-task set actually changed.
+  // The periodic poll runs every second purely to READ peers' tasks; without
+  // this guard it re-published the full snapshot — and rewrote users/{uid} —
+  // on every tick.
+  const fingerprint = computeTaskSnapshotFingerprint(store.items);
+  if (fingerprint !== lastPublishedTaskFingerprint) {
+    await reconcileDesktopTaskSnapshots(db).catch((error) => {
+      console.warn("[cloud] failed to reconcile local task snapshots:", error);
+      showCloudBackendErrorToast(error);
+    });
+    lastPublishedTaskFingerprint = fingerprint;
+  }
   await refreshCloudTasksForSignedInUser();
 }
 
@@ -480,6 +490,11 @@ async function initializeDesktopCloudAuth(): Promise<void> {
     if (state.status === "signedIn" && !reconciledCloudSnapshotUsers.has(state.user.uid)) {
       reconciledCloudSnapshotUsers.add(state.user.uid);
       void reconcileDesktopTaskSnapshots(db)
+        .then(() => {
+          // Record what we just published so the periodic poll doesn't
+          // immediately re-publish the same snapshot on its next tick.
+          lastPublishedTaskFingerprint = computeTaskSnapshotFingerprint(store.items);
+        })
         .catch((error) => {
           console.warn("[cloud] failed to reconcile local task snapshots:", error);
           showCloudBackendErrorToast(error);
