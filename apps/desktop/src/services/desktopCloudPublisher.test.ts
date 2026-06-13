@@ -10,13 +10,16 @@ const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
   getDoc: vi.fn(),
   getDocs: vi.fn(),
-  addDoc: vi.fn(),
   setDoc: vi.fn(),
   set: vi.fn(),
   delete: vi.fn(),
   commit: vi.fn(),
   collection: vi.fn((...segments: unknown[]) => ({ kind: "collection", segments })),
-  doc: vi.fn((collectionRef: unknown) => ({ kind: "doc", collectionRef, id: "new-auto-task" })),
+  doc: vi.fn((collectionRef: unknown, explicitId?: unknown) => ({
+    kind: "doc",
+    collectionRef,
+    id: explicitId ?? "new-auto-task",
+  })),
   query: vi.fn((collectionRef: unknown, ...constraints: unknown[]) => ({ kind: "query", collectionRef, constraints })),
   where: vi.fn((field: string, op: string, value: unknown) => ({ kind: "where", field, op, value })),
   limit: vi.fn((count: number) => ({ kind: "limit", count })),
@@ -32,7 +35,6 @@ vi.mock("@kanna/db", () => ({
 }));
 
 vi.mock("firebase/firestore", () => ({
-  addDoc: (...args: unknown[]) => mocks.addDoc(...args),
   collection: (...args: unknown[]) => mocks.collection(...args),
   doc: (...args: unknown[]) => mocks.doc(...args),
   getDoc: (...args: unknown[]) => mocks.getDoc(...args),
@@ -123,9 +125,14 @@ function missingDocSnapshot() {
   };
 }
 
-function mockDesktopDoc(id = "desktop-doc") {
-  return docSnapshot(id, { desktopId: "desktop-owner", displayName: null });
+// The desktop id resolves to "desktop-owner" (mobile_server_status), so the
+// canonical deterministic desktop document id is "desktop-owner".
+function canonicalDesktopDoc() {
+  return docSnapshot("desktop-owner", { desktopId: "desktop-owner", displayName: null });
 }
+
+// The deterministic desktop document reference the publisher writes to.
+const desktopRef = { kind: "doc", collectionRef: expect.any(Object), id: "desktop-owner" };
 
 function taskDocAllocations(): unknown[][] {
   return mocks.doc.mock.calls.filter(([collectionRef]) => {
@@ -144,13 +151,16 @@ describe("desktop cloud live task index publisher", () => {
       if (typeof mock === "function" && "mockReset" in mock) mock.mockReset();
     }
     mocks.collection.mockImplementation((...segments: unknown[]) => ({ kind: "collection", segments }));
-    mocks.doc.mockImplementation((collectionRef: unknown) => ({ kind: "doc", collectionRef, id: "new-auto-task" }));
+    mocks.doc.mockImplementation((collectionRef: unknown, explicitId?: unknown) => ({
+      kind: "doc",
+      collectionRef,
+      id: explicitId ?? "new-auto-task",
+    }));
     mocks.query.mockImplementation((collectionRef: unknown, ...constraints: unknown[]) => ({ kind: "query", collectionRef, constraints }));
     mocks.where.mockImplementation((field: string, op: string, value: unknown) => ({ kind: "where", field, op, value }));
     mocks.limit.mockImplementation((count: number) => ({ kind: "limit", count }));
     mocks.serverTimestamp.mockReturnValue("SERVER_TIMESTAMP");
     mocks.commit.mockResolvedValue(undefined);
-    mocks.addDoc.mockResolvedValue({ kind: "doc-ref", id: "created-desktop" });
     mocks.setDoc.mockResolvedValue(undefined);
     mocks.getDoc.mockResolvedValue(missingDocSnapshot());
     mocks.getDocs.mockResolvedValue({ docs: [] });
@@ -165,9 +175,9 @@ describe("desktop cloud live task index publisher", () => {
     });
   });
 
-  it("updates an existing auto-id task document for an open local task", async () => {
+  it("updates an existing task document for an open local task", async () => {
     mocks.getDocs
-      .mockResolvedValueOnce({ docs: [mockDesktopDoc()] })
+      .mockResolvedValueOnce({ docs: [canonicalDesktopDoc()] }) // duplicate-desktop sweep: only canonical
       .mockResolvedValueOnce({ docs: [
         docSnapshot("task-doc", {
           localRepoId: "repo-1",
@@ -192,7 +202,7 @@ describe("desktop cloud live task index publisher", () => {
 
   it("deletes duplicate task documents for the same local identity", async () => {
     mocks.getDocs
-      .mockResolvedValueOnce({ docs: [mockDesktopDoc()] })
+      .mockResolvedValueOnce({ docs: [canonicalDesktopDoc()] })
       .mockResolvedValueOnce({ docs: [
         docSnapshot("task-doc-primary", {
           localRepoId: "repo-1",
@@ -219,7 +229,7 @@ describe("desktop cloud live task index publisher", () => {
 
   it("preserves OpenCode as the task agent provider in direct Firestore writes", async () => {
     mocks.getDocs
-      .mockResolvedValueOnce({ docs: [mockDesktopDoc()] })
+      .mockResolvedValueOnce({ docs: [canonicalDesktopDoc()] })
       .mockResolvedValueOnce({ docs: [] });
 
     await publishDesktopTaskSnapshot(
@@ -239,23 +249,29 @@ describe("desktop cloud live task index publisher", () => {
     );
   });
 
-  it("creates the desktop document and task document with auto ids when missing", async () => {
+  it("writes the desktop document to a deterministic id keyed by the desktop id", async () => {
     mocks.getDocs
-      .mockResolvedValueOnce({ docs: [] })
+      .mockResolvedValueOnce({ docs: [] }) // duplicate sweep finds nothing
       .mockResolvedValueOnce({ docs: [] });
 
     await publishDesktopTaskSnapshot(null as never, openItem("task-new") as never, repo() as never);
 
-    expect(mocks.addDoc).toHaveBeenCalledWith(
+    // No addDoc: the desktop document id is derived from the desktop id so
+    // concurrent publishers converge instead of racing to create their own.
+    expect(mocks.doc).toHaveBeenCalledWith(
       expect.objectContaining({ kind: "collection" }),
+      "desktop-owner",
+    );
+    expect(mocks.setDoc).toHaveBeenCalledWith(
+      desktopRef,
       {
         desktopId: "desktop-owner",
         displayName: "Studio Mac",
         updatedAt: "SERVER_TIMESTAMP",
         desktopSecretHash: "secret-hash-1",
       },
+      { merge: true },
     );
-    expect(mocks.doc).toHaveBeenCalled();
     expect(mocks.set).toHaveBeenCalledWith(
       { kind: "doc", collectionRef: expect.any(Object), id: "new-auto-task" },
       expect.objectContaining({
@@ -266,7 +282,7 @@ describe("desktop cloud live task index publisher", () => {
   });
 
   it("publishes saved desktop credentials into the desktop document for relay auth", async () => {
-    mocks.invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+    mocks.invoke.mockImplementation(async (command: string) => {
       if (command === "desktop_cloud_credential") {
         return {
           desktopId: "desktop-cloud",
@@ -278,14 +294,15 @@ describe("desktop cloud live task index publisher", () => {
       return "";
     });
     mocks.getDocs
-      .mockResolvedValueOnce({ docs: [docSnapshot("desktop-doc", { desktopId: "desktop-cloud" })] })
+      .mockResolvedValueOnce({ docs: [] })
       .mockResolvedValueOnce({ docs: [] });
 
     await publishDesktopTaskSnapshot(null as never, openItem("task-new") as never, repo() as never);
 
     expect(mocks.setDoc).toHaveBeenCalledWith(
-      { kind: "doc-ref", id: "desktop-doc" },
+      { kind: "doc", collectionRef: expect.any(Object), id: "desktop-cloud" },
       expect.objectContaining({
+        desktopId: "desktop-cloud",
         displayName: "Studio Mac",
         desktopSecretHash: "secret-cloud-hash",
       }),
@@ -299,9 +316,26 @@ describe("desktop cloud live task index publisher", () => {
     );
   });
 
+  it("removes duplicate desktop documents for the same desktop id, including their tasks", async () => {
+    mocks.getDocs
+      .mockResolvedValueOnce({ docs: [
+        canonicalDesktopDoc(),
+        docSnapshot("legacy-auto-id", { desktopId: "desktop-owner", displayName: null }),
+      ] })
+      .mockResolvedValueOnce({ docs: [docSnapshot("legacy-task", {})] }) // legacy desktop's tasks
+      .mockResolvedValueOnce({ docs: [] }); // canonical desktop's tasks
+
+    await publishDesktopTaskSnapshot(null as never, openItem("task-new") as never, repo() as never);
+
+    expect(mocks.delete).toHaveBeenCalledWith({ kind: "doc-ref", id: "legacy-task" });
+    expect(mocks.delete).toHaveBeenCalledWith({ kind: "doc-ref", id: "legacy-auto-id" });
+    // one commit to clean the duplicate desktop + one for the task batch
+    expect(mocks.commit).toHaveBeenCalledTimes(2);
+  });
+
   it("updates the signed-in user's Firestore profile with their email address", async () => {
     mocks.getDocs
-      .mockResolvedValueOnce({ docs: [mockDesktopDoc()] })
+      .mockResolvedValueOnce({ docs: [canonicalDesktopDoc()] })
       .mockResolvedValueOnce({ docs: [] });
 
     await publishDesktopTaskSnapshot(null as never, openItem("task-new") as never, repo() as never);
@@ -323,14 +357,15 @@ describe("desktop cloud live task index publisher", () => {
 
   it("refreshes the existing desktop document with a friendly machine name", async () => {
     mocks.getDocs
-      .mockResolvedValueOnce({ docs: [mockDesktopDoc()] })
+      .mockResolvedValueOnce({ docs: [] })
       .mockResolvedValueOnce({ docs: [] });
 
     await publishDesktopTaskSnapshot(null as never, openItem("task-new") as never, repo() as never);
 
     expect(mocks.setDoc).toHaveBeenCalledWith(
-      { kind: "doc-ref", id: "desktop-doc" },
+      desktopRef,
       {
+        desktopId: "desktop-owner",
         displayName: "Studio Mac",
         updatedAt: "SERVER_TIMESTAMP",
         desktopSecretHash: "secret-hash-1",
@@ -352,13 +387,14 @@ describe("desktop cloud live task index publisher", () => {
 
     await publishDesktopTaskSnapshot(null as never, openItem("task-new") as never, repo() as never);
 
-    expect(mocks.addDoc).toHaveBeenCalledWith(
-      expect.objectContaining({ kind: "collection" }),
+    expect(mocks.setDoc).toHaveBeenCalledWith(
+      desktopRef,
       {
         desktopId: "desktop-owner",
         displayName: "Studio Mac",
         updatedAt: "SERVER_TIMESTAMP",
       },
+      { merge: true },
     );
   });
 
@@ -374,7 +410,7 @@ describe("desktop cloud live task index publisher", () => {
     });
 
     expect(mocks.setDoc).toHaveBeenCalledWith(
-      { kind: "doc-ref", id: "other-desktop-doc" },
+      { kind: "doc", collectionRef: expect.any(Object), id: "desktop-other" },
       {
         displayName: "Studio Mac",
         updatedAt: "SERVER_TIMESTAMP",
@@ -382,16 +418,16 @@ describe("desktop cloud live task index publisher", () => {
       { merge: true },
     );
   });
-
   it("deletes matching auto-id task metadata instead of publishing a closed task snapshot", async () => {
-    mocks.getDocs
-      .mockResolvedValueOnce({ docs: [mockDesktopDoc()] })
-      .mockResolvedValueOnce({ docs: [
-        docSnapshot("task-closed-doc", {
-          localRepoId: "repo-1",
-          ownerLocalTaskId: "task-closed",
-        }),
-      ] });
+    // Closed task → delete path uses create:false, which reads the desktop doc
+    // by deterministic id (getDoc) rather than the duplicate sweep.
+    mocks.getDoc.mockResolvedValue({ exists: () => true });
+    mocks.getDocs.mockResolvedValueOnce({ docs: [
+      docSnapshot("task-closed-doc", {
+        localRepoId: "repo-1",
+        ownerLocalTaskId: "task-closed",
+      }),
+    ] });
 
     await publishDesktopTaskSnapshot(null as never, closedItem("task-closed") as never, repo() as never);
 
@@ -401,14 +437,13 @@ describe("desktop cloud live task index publisher", () => {
   });
 
   it("deletes remote task metadata by owner identity", async () => {
-    mocks.getDocs
-      .mockResolvedValueOnce({ docs: [mockDesktopDoc()] })
-      .mockResolvedValueOnce({ docs: [
-        docSnapshot("task-remote-doc", {
-          localRepoId: "repo-1",
-          ownerLocalTaskId: "task-remote",
-        }),
-      ] });
+    mocks.getDoc.mockResolvedValue({ exists: () => true });
+    mocks.getDocs.mockResolvedValueOnce({ docs: [
+      docSnapshot("task-remote-doc", {
+        localRepoId: "repo-1",
+        ownerLocalTaskId: "task-remote",
+      }),
+    ] });
 
     await deleteRemoteTaskSnapshots({
       ownerDesktopId: "desktop-owner",
@@ -422,7 +457,7 @@ describe("desktop cloud live task index publisher", () => {
 
   it("reconciles the owned cloud index to the current open local task set", async () => {
     mocks.getDocs
-      .mockResolvedValueOnce({ docs: [mockDesktopDoc()] })
+      .mockResolvedValueOnce({ docs: [canonicalDesktopDoc()] })
       .mockResolvedValueOnce({ docs: [
         docSnapshot("task-open-doc", {
           localRepoId: "repo-1",
@@ -450,7 +485,7 @@ describe("desktop cloud live task index publisher", () => {
   });
 
   it("refreshes profile, desktop, and task documents during reconcile without deleting unchanged tasks", async () => {
-    mocks.invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+    mocks.invoke.mockImplementation(async (command: string) => {
       if (command === "desktop_cloud_credential") {
         return {
           desktopId: "desktop-noop",
