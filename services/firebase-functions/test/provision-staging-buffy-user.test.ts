@@ -10,17 +10,19 @@ describe("staging Buffy user provisioning script", () => {
   it("describes the persistent staging Buffy user and relay device document", async () => {
     const script = await import(scriptUrl);
 
+    // The password is sourced from KANNA_STAGING_TEST_PASSWORD and is never
+    // committed; with no env set it defaults to an empty placeholder.
     expect(script.BUFFY_USER).toEqual({
       projectId: "kanna-staging",
-      email: "upvote.sieve.7t@icloud.com",
-      password: "password123",
+      email: "glass_galleon.3m@icloud.com",
+      password: "",
       displayName: "Buffy the Bug Slayer",
       photoURL: "file://services/firebase/emulator-seed/assets/buffy-avatar.jpg",
       deviceToken: "staging-buffy-device-token"
     });
     expect(script.buildDeviceDocument("buffy-user-uid")).toMatchObject({
       userId: "buffy-user-uid",
-      email: "upvote.sieve.7t@icloud.com",
+      email: "glass_galleon.3m@icloud.com",
       displayName: "Buffy the Bug Slayer",
       environment: "staging"
     });

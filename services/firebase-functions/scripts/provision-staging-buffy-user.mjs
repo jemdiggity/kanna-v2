@@ -1,9 +1,12 @@
 #!/usr/bin/env node
 
 export const BUFFY_USER = {
-  projectId: "kanna-staging",
-  email: "upvote.sieve.7t@icloud.com",
-  password: "password123",
+  projectId: process.env.KANNA_STAGING_PROJECT_ID || "kanna-staging",
+  email: process.env.KANNA_STAGING_TEST_EMAIL || "glass_galleon.3m@icloud.com",
+  // The password is a real credential — NEVER commit it (this repo is public).
+  // Pass it at provision time via KANNA_STAGING_TEST_PASSWORD; the committed
+  // default is an empty placeholder that the real run requires you to override.
+  password: process.env.KANNA_STAGING_TEST_PASSWORD || "",
   displayName: "Buffy the Bug Slayer",
   photoURL: "file://services/firebase/emulator-seed/assets/buffy-avatar.jpg",
   deviceToken: "staging-buffy-device-token",
@@ -107,6 +110,12 @@ async function main(argv = process.argv.slice(2)) {
   if (dryRun) {
     console.log(JSON.stringify(buildDryRunResult(), null, 2));
     return;
+  }
+
+  if (!BUFFY_USER.password) {
+    throw new Error(
+      "Set KANNA_STAGING_TEST_PASSWORD (the Buffy staging password is not stored in the repo)."
+    );
   }
 
   const { default: admin } = await import("firebase-admin");
