@@ -209,6 +209,20 @@ describe("Sidebar", () => {
     expect(wrapper.get(".pipeline-item .item-title").text()).toBe(longTitle);
   });
 
+  it("uses the full task prompt as the sidebar title tooltip", () => {
+    const prompt = "Add tooltip to task titles so hovering shows the full task prompt even when the sidebar truncates the visible title";
+    const wrapper = mountSidebar([
+      item("task-1", {
+        display_name: "Tooltip task titles",
+        prompt,
+      }),
+    ]);
+
+    const title = wrapper.get(".pipeline-item .item-title");
+    expect(title.text()).toBe("Tooltip task titles");
+    expect(title.attributes("title")).toBe(prompt);
+  });
+
   it("marks remote tasks with a leading angle marker and leaves local tasks unmarked", () => {
     const wrapper = mountSidebar([
       item("task-remote", {

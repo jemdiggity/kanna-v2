@@ -130,6 +130,10 @@ function itemTitle(item: SidebarPipelineItem): string {
   return item.active_post_action ? `... ${raw}` : raw;
 }
 
+function itemTooltip(item: SidebarPipelineItem): string | undefined {
+  return item.prompt || (isRemoteTask(item) ? t('sidebar.remoteTaskTooltip') : undefined);
+}
+
 function isRemoteTask(item: SidebarPipelineItem): boolean {
   return item.remote_task === true;
 }
@@ -469,7 +473,7 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
                     textDecoration: isTaskTearingDown(element) ? 'line-through' : 'none',
                     opacity: isTaskTearingDown(element) ? 0.5 : 1,
                   }"
-                  :title="isRemoteTask(element) ? t('sidebar.remoteTaskTooltip') : undefined"
+                  :title="itemTooltip(element)"
                 >
                   <span v-if="isRemoteTask(element)" class="remote-task-marker" :aria-label="t('sidebar.remoteTaskTooltip')">&lt; </span>{{ itemTitle(element) }}</span>
               </div>
@@ -524,7 +528,7 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
                       textDecoration: isTaskTearingDown(element) ? 'line-through' : 'none',
                       opacity: isTaskTearingDown(element) ? 0.5 : 1,
                     }"
-                    :title="isRemoteTask(element) ? t('sidebar.remoteTaskTooltip') : undefined"
+                    :title="itemTooltip(element)"
                   >
                     <span v-if="isRemoteTask(element)" class="remote-task-marker" :aria-label="t('sidebar.remoteTaskTooltip')">&lt; </span>{{ itemTitle(element) }}</span>
                 </div>
@@ -565,7 +569,7 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
                     textDecoration: isTaskTearingDown(element) ? 'line-through' : 'none',
                     opacity: isTaskTearingDown(element) ? 0.5 : 1,
                   }"
-                  :title="isRemoteTask(element) ? t('sidebar.remoteTaskTooltip') : undefined"
+                  :title="itemTooltip(element)"
                 >
                   <span v-if="isRemoteTask(element)" class="remote-task-marker" :aria-label="t('sidebar.remoteTaskTooltip')">&lt; </span>{{ itemTitle(element) }}</span>
                 <span

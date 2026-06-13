@@ -15,6 +15,10 @@ function title(item: PipelineItem): string {
   return item.display_name || item.issue_title || item.prompt || t('tasks.untitled');
 }
 
+function taskPromptTooltip(item: PipelineItem): string | undefined {
+  return item.prompt || undefined;
+}
+
 const ports = computed<number[]>(() => {
   if (!props.item.port_env) return [];
   try {
@@ -50,7 +54,7 @@ function openLocalhostPort(port: number) {
   <div class="task-header" @mousedown.prevent>
     <div class="header-top">
       <span class="stage-badge">{{ item.stage }}</span>
-      <h2 class="task-title" @mousedown.stop>{{ title(item) }}</h2>
+      <h2 class="task-title" :title="taskPromptTooltip(item)" @mousedown.stop>{{ title(item) }}</h2>
     </div>
     <div class="header-meta">
       <span v-if="item.branch" class="meta-item branch" @dblclick="copyBranch">

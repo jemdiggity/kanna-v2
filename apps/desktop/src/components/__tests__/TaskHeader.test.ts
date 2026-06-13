@@ -76,6 +76,27 @@ describe("TaskHeader", () => {
     ).toEqual([":1421", ":3001"]);
   });
 
+  it("uses the full task prompt as the truncated title tooltip", async () => {
+    const { default: TaskHeader } = await import("../TaskHeader.vue");
+    const prompt = "Add a tooltip to task titles so long prompts remain inspectable when the visible title is truncated";
+    const wrapper = mount(TaskHeader, {
+      props: {
+        item: makeItem({
+          display_name: "Tooltip task titles",
+          prompt,
+        }),
+      },
+      global: {
+        mocks: {
+          $t: (key: string, fallback?: string) => fallback ?? key,
+        },
+      },
+    });
+
+    expect(wrapper.get(".task-title").text()).toBe("Tooltip task titles");
+    expect(wrapper.get(".task-title").attributes("title")).toBe(prompt);
+  });
+
   it("opens localhost for a port badge on double click", async () => {
     const { default: TaskHeader } = await import("../TaskHeader.vue");
     const wrapper = mount(TaskHeader, {
