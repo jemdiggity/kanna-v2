@@ -70,6 +70,15 @@ Tasks can be pinned to the top of their repo's task list by dragging above the p
 
 **Sending input to a running task:** Use `kanna-cli task send-input --task-id <TASK_ID> --message "Please fix the failing typecheck"` to send feedback or instructions to an already-running agent task through the desktop-backed local API. The command posts to `/v1/tasks/{task_id}/input` and appends Enter to the message when needed.
 
+### MCP task management
+
+Project-scoped MCP servers are registered in `.mcp.json` so Claude Code, Codex, and other MCP-aware agent clients launched from this repo can discover both Kanna task tools and kd development tools.
+
+- **`kanna-mcp`** exposes `kanna_*` task-management tools backed by the desktop local API at `http://127.0.0.1:48120`. Prefer these tools for task management: create tasks, fetch task status/detail, list/search tasks, close tasks, send input, request revision, advance stage, and complete stage.
+- **`kd-mcp`** exposes kd development workflow tools. Prefer these tools over shelling out when an MCP client has them available.
+
+Do not read or write the SQLite database directly for orchestration. Use `kanna-mcp` first, then `kanna-cli` as the fallback for clients without MCP support.
+
 ### Diff viewer
 
 - Modal (Cmd+D), not a tab
