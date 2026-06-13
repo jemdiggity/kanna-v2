@@ -27,7 +27,7 @@ describe("kd environment registry", () => {
       iosBundleId: "build.kanna.app",
       relayDomain: "relay.kanna.build",
       relayUrl: "wss://relay.kanna.build",
-      gceVmName: "kanna-relay-prod"
+      gceVmName: "kanna-relay-vm"
     });
   });
 

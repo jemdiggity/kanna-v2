@@ -8,6 +8,12 @@ export interface KdEnvironmentIdentity {
   relayUrl: string;
   relayDomain?: string;
   gceVmName?: string;
+  /**
+   * Reserved static external IP resource name in GCP. Explicit per env so it
+   * matches the actual reservation (prod `kanna-relay-ip`, staging
+   * `relay-staging-ip`) rather than being derived from the VM name.
+   */
+  staticIpName?: string;
 }
 
 const environmentRegistry: Record<KdEnvironmentName, KdEnvironmentIdentity> = {
@@ -23,7 +29,8 @@ const environmentRegistry: Record<KdEnvironmentName, KdEnvironmentIdentity> = {
     iosBundleId: "build.kanna.app.staging",
     relayUrl: "wss://relay-staging.kanna.build",
     relayDomain: "relay-staging.kanna.build",
-    gceVmName: "kanna-relay-staging"
+    gceVmName: "kanna-relay-staging",
+    staticIpName: "relay-staging-ip"
   },
   prod: {
     name: "prod",
@@ -31,7 +38,8 @@ const environmentRegistry: Record<KdEnvironmentName, KdEnvironmentIdentity> = {
     iosBundleId: "build.kanna.app",
     relayUrl: "wss://relay.kanna.build",
     relayDomain: "relay.kanna.build",
-    gceVmName: "kanna-relay-prod"
+    gceVmName: "kanna-relay-vm",
+    staticIpName: "kanna-relay-ip"
   }
 };
 

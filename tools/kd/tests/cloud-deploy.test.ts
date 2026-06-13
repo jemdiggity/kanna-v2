@@ -189,7 +189,7 @@ describe("cloud deploy runtime", () => {
       "compute",
       "addresses",
       "create",
-      "kanna-relay-staging-ip",
+      "relay-staging-ip",
       "--project",
       "kanna-staging",
       "--region",
@@ -244,7 +244,7 @@ describe("cloud deploy runtime", () => {
           "/repo/pnpm-workspace.yaml",
           "/repo/services/relay",
           "/repo/tools/kd/package.json",
-          "kanna-relay-prod:/opt/kanna-relay/source/"
+          "kanna-relay-vm:/opt/kanna-relay/source/"
         ],
         cwd: "/repo",
         streamOutput: true
@@ -261,7 +261,7 @@ describe("cloud deploy runtime", () => {
           "/repo/services/relay/deploy/docker-compose.yml",
           "/repo/services/relay/deploy/Caddyfile",
           "/repo/services/relay/deploy/startup-script.sh",
-          "kanna-relay-prod:/opt/kanna-relay/"
+          "kanna-relay-vm:/opt/kanna-relay/"
         ],
         cwd: "/repo",
         streamOutput: true
@@ -271,7 +271,7 @@ describe("cloud deploy runtime", () => {
         args: [
           "compute",
           "ssh",
-          "kanna-relay-prod",
+          "kanna-relay-vm",
           "--project",
           "kanna-build",
           "--zone",
@@ -310,7 +310,7 @@ describe("cloud deploy runtime", () => {
 
       expect(result).toEqual({
         projectId: "kanna-build",
-        vmName: "kanna-relay-prod",
+        vmName: "kanna-relay-vm",
         zone: "us-central1-a",
         relayUrl: "wss://relay.kanna.build"
       });
@@ -335,7 +335,7 @@ describe("cloud deploy runtime", () => {
             join(repoRoot, "pnpm-workspace.yaml"),
             join(repoRoot, "services/relay"),
             join(repoRoot, "tools/kd/package.json"),
-            "kanna-relay-prod:/opt/kanna-relay/source/"
+            "kanna-relay-vm:/opt/kanna-relay/source/"
           ],
           cwd: repoRoot,
           streamOutput: true
@@ -352,7 +352,7 @@ describe("cloud deploy runtime", () => {
             join(repoRoot, "services/relay/deploy/docker-compose.yml"),
             join(repoRoot, "services/relay/deploy/Caddyfile"),
             join(repoRoot, "services/relay/deploy/startup-script.sh"),
-            "kanna-relay-prod:/opt/kanna-relay/"
+            "kanna-relay-vm:/opt/kanna-relay/"
           ],
           cwd: repoRoot,
           streamOutput: true
@@ -362,7 +362,7 @@ describe("cloud deploy runtime", () => {
           args: [
             "compute",
             "ssh",
-            "kanna-relay-prod",
+            "kanna-relay-vm",
             "--project",
             "kanna-build",
             "--zone",
