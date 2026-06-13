@@ -22,8 +22,10 @@ pub struct PipelineItem {
     pub pr_url: Option<String>,
     pub branch: Option<String>,
     pub agent_type: Option<String>,
+    pub agent_provider: Option<String>,
     pub activity: Option<String>,
     pub activity_changed_at: Option<String>,
+    pub closed_at: Option<String>,
     pub pinned: Option<i64>,
     pub pin_order: Option<i64>,
     pub display_name: Option<String>,
@@ -432,8 +434,8 @@ impl Db {
     pub fn list_recent_pipeline_items(&self) -> Result<Vec<PipelineItem>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo_id, issue_number, issue_title, prompt, stage,
-             pr_number, pr_url, branch, agent_type, activity, activity_changed_at,
-             pinned, pin_order, display_name, last_output_preview, created_at, updated_at
+             pr_number, pr_url, branch, agent_type, agent_provider, activity, activity_changed_at,
+             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at
              FROM pipeline_item
              WHERE closed_at IS NULL
              ORDER BY updated_at DESC, created_at DESC",
@@ -450,14 +452,16 @@ impl Db {
                 pr_url: row.get(7)?,
                 branch: row.get(8)?,
                 agent_type: row.get(9)?,
-                activity: row.get(10)?,
-                activity_changed_at: row.get(11)?,
-                pinned: row.get(12)?,
-                pin_order: row.get(13)?,
-                display_name: row.get(14)?,
-                last_output_preview: row.get(15)?,
-                created_at: row.get(16)?,
-                updated_at: row.get(17)?,
+                agent_provider: row.get(10)?,
+                activity: row.get(11)?,
+                activity_changed_at: row.get(12)?,
+                closed_at: row.get(13)?,
+                pinned: row.get(14)?,
+                pin_order: row.get(15)?,
+                display_name: row.get(16)?,
+                last_output_preview: row.get(17)?,
+                created_at: row.get(18)?,
+                updated_at: row.get(19)?,
             })
         })?;
         rows.collect()
@@ -467,8 +471,8 @@ impl Db {
         let like_query = format!("%{}%", query.to_lowercase());
         let mut stmt = self.conn.prepare(
             "SELECT id, repo_id, issue_number, issue_title, prompt, stage,
-             pr_number, pr_url, branch, agent_type, activity, activity_changed_at,
-             pinned, pin_order, display_name, last_output_preview, created_at, updated_at
+             pr_number, pr_url, branch, agent_type, agent_provider, activity, activity_changed_at,
+             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at
              FROM pipeline_item
              WHERE closed_at IS NULL
                AND (
@@ -489,14 +493,16 @@ impl Db {
                 pr_url: row.get(7)?,
                 branch: row.get(8)?,
                 agent_type: row.get(9)?,
-                activity: row.get(10)?,
-                activity_changed_at: row.get(11)?,
-                pinned: row.get(12)?,
-                pin_order: row.get(13)?,
-                display_name: row.get(14)?,
-                last_output_preview: row.get(15)?,
-                created_at: row.get(16)?,
-                updated_at: row.get(17)?,
+                agent_provider: row.get(10)?,
+                activity: row.get(11)?,
+                activity_changed_at: row.get(12)?,
+                closed_at: row.get(13)?,
+                pinned: row.get(14)?,
+                pin_order: row.get(15)?,
+                display_name: row.get(16)?,
+                last_output_preview: row.get(17)?,
+                created_at: row.get(18)?,
+                updated_at: row.get(19)?,
             })
         })?;
         rows.collect()
@@ -524,8 +530,8 @@ impl Db {
     pub fn list_pipeline_items(&self, repo_id: &str) -> Result<Vec<PipelineItem>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo_id, issue_number, issue_title, prompt, stage, \
-             pr_number, pr_url, branch, agent_type, activity, activity_changed_at, \
-             pinned, pin_order, display_name, last_output_preview, created_at, updated_at \
+             pr_number, pr_url, branch, agent_type, agent_provider, activity, activity_changed_at, \
+             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at \
              FROM pipeline_item WHERE repo_id = ? AND closed_at IS NULL \
              ORDER BY pin_order ASC, created_at DESC",
         )?;
@@ -541,14 +547,16 @@ impl Db {
                 pr_url: row.get(7)?,
                 branch: row.get(8)?,
                 agent_type: row.get(9)?,
-                activity: row.get(10)?,
-                activity_changed_at: row.get(11)?,
-                pinned: row.get(12)?,
-                pin_order: row.get(13)?,
-                display_name: row.get(14)?,
-                last_output_preview: row.get(15)?,
-                created_at: row.get(16)?,
-                updated_at: row.get(17)?,
+                agent_provider: row.get(10)?,
+                activity: row.get(11)?,
+                activity_changed_at: row.get(12)?,
+                closed_at: row.get(13)?,
+                pinned: row.get(14)?,
+                pin_order: row.get(15)?,
+                display_name: row.get(16)?,
+                last_output_preview: row.get(17)?,
+                created_at: row.get(18)?,
+                updated_at: row.get(19)?,
             })
         })?;
         rows.collect()
@@ -557,8 +565,8 @@ impl Db {
     pub fn get_pipeline_item(&self, id: &str) -> Result<Option<PipelineItem>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo_id, issue_number, issue_title, prompt, stage, \
-             pr_number, pr_url, branch, agent_type, activity, activity_changed_at, \
-             pinned, pin_order, display_name, last_output_preview, created_at, updated_at \
+             pr_number, pr_url, branch, agent_type, agent_provider, activity, activity_changed_at, \
+             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at \
              FROM pipeline_item WHERE id = ?",
         )?;
         let mut rows = stmt.query_map([id], |row| {
@@ -573,14 +581,16 @@ impl Db {
                 pr_url: row.get(7)?,
                 branch: row.get(8)?,
                 agent_type: row.get(9)?,
-                activity: row.get(10)?,
-                activity_changed_at: row.get(11)?,
-                pinned: row.get(12)?,
-                pin_order: row.get(13)?,
-                display_name: row.get(14)?,
-                last_output_preview: row.get(15)?,
-                created_at: row.get(16)?,
-                updated_at: row.get(17)?,
+                agent_provider: row.get(10)?,
+                activity: row.get(11)?,
+                activity_changed_at: row.get(12)?,
+                closed_at: row.get(13)?,
+                pinned: row.get(14)?,
+                pin_order: row.get(15)?,
+                display_name: row.get(16)?,
+                last_output_preview: row.get(17)?,
+                created_at: row.get(18)?,
+                updated_at: row.get(19)?,
             })
         })?;
         match rows.next() {

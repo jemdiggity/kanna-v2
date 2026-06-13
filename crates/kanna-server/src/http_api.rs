@@ -290,6 +290,29 @@ async fn list_recent_tasks(
     Ok(Json(tasks))
 }
 
+async fn get_task(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+) -> Result<Json<crate::mobile_api::TaskDetail>, (axum::http::StatusCode, String)> {
+    let db = Db::open(&state.config.db_path).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("db error: {}", e),
+        )
+    })?;
+    let api = MobileApi::new(state.config.clone(), db);
+    let task = api
+        .get_task(&task_id)
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .ok_or_else(|| {
+            (
+                axum::http::StatusCode::NOT_FOUND,
+                format!("task not found: {task_id}"),
+            )
+        })?;
+    Ok(Json(task))
+}
+
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SearchTasksQuery {
@@ -1319,6 +1342,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/tasks/recent", get(list_recent_tasks))
         .route("/v1/tasks/search", get(search_tasks))
         .route("/v1/tasks", post(create_task))
+        .route("/v1/tasks/{task_id}", get(get_task))
         .route("/v1/tasks/{task_id}/terminal", get(task_terminal))
         .route("/v1/tasks/{task_id}/input", post(send_task_input))
         .route("/v1/tasks/{task_id}/actions/block", post(block_task))
@@ -1971,6 +1995,7 @@ mod tests {
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].id, "task-repo-1");
         assert_eq!(tasks[0].repo_id, "repo-1");
+        assert_eq!(tasks[0].activity.as_deref(), Some("idle"));
     }
 
     #[tokio::test]
@@ -2029,7 +2054,102 @@ mod tests {
             tasks[0].snippet.as_deref(),
             Some("Latest agent output preview")
         );
+        assert_eq!(tasks[0].activity.as_deref(), Some("idle"));
         assert_eq!(tasks[1].id, "task-older");
+    }
+
+    #[tokio::test]
+    async fn get_task_route_returns_full_task_detail_by_id() {
+        let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
+            db.insert_test_repo("repo-1", "Repo One").unwrap();
+            db.insert_test_pipeline_item(
+                "task-1",
+                "repo-1",
+                "Review MCP task detail",
+                Some("Review MCP"),
+                "in progress",
+                "2026-04-18 10:00:00",
+            )
+            .unwrap();
+        });
+
+        let response = app
+            .oneshot(
+                Request::get("/v1/tasks/task-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let task: crate::mobile_api::TaskDetail = from_slice(&body).unwrap();
+
+        assert_eq!(task.id, "task-1");
+        assert_eq!(task.repo_id, "repo-1");
+        assert_eq!(task.title, "Review MCP");
+        assert_eq!(task.stage.as_deref(), Some("in progress"));
+        assert_eq!(task.activity.as_deref(), Some("idle"));
+        assert_eq!(task.agent_type.as_deref(), Some("pty"));
+        assert_eq!(task.agent_provider.as_deref(), Some("claude"));
+        assert_eq!(task.branch.as_deref(), Some("branch-task-1"));
+        assert_eq!(task.pr_url, None);
+        assert_eq!(task.closed_at, None);
+    }
+
+    #[tokio::test]
+    async fn get_task_route_accepts_branch_name_alias() {
+        let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
+            db.insert_test_repo("repo-1", "Repo One").unwrap();
+            db.insert_test_pipeline_item(
+                "task-1",
+                "repo-1",
+                "Review MCP task detail",
+                Some("Review MCP"),
+                "in progress",
+                "2026-04-18 10:00:00",
+            )
+            .unwrap();
+        });
+
+        let response = app
+            .oneshot(
+                Request::get("/v1/tasks/branch-task-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let task: crate::mobile_api::TaskDetail = from_slice(&body).unwrap();
+
+        assert_eq!(task.id, "task-1");
+        assert_eq!(task.branch.as_deref(), Some("branch-task-1"));
+    }
+
+    #[tokio::test]
+    async fn get_task_route_returns_not_found_for_unknown_task() {
+        let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
+            db.insert_test_repo("repo-1", "Repo One").unwrap();
+        });
+
+        let response = app
+            .oneshot(
+                Request::get("/v1/tasks/missing-task")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -2075,6 +2195,7 @@ mod tests {
         .await;
         assert_eq!(recent.status, 200);
         assert_eq!(recent.body.as_ref().unwrap()[0]["id"], "task-newer");
+        assert_eq!(recent.body.as_ref().unwrap()[0]["activity"], "idle");
         assert_eq!(recent.error, None);
     }
 
@@ -2129,6 +2250,7 @@ mod tests {
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].id, "task-merge");
         assert_eq!(tasks[0].title, "Merge Cleanup");
+        assert_eq!(tasks[0].activity.as_deref(), Some("idle"));
     }
 
     #[tokio::test]

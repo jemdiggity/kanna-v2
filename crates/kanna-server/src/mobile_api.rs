@@ -41,8 +41,25 @@ pub struct TaskSummary {
     pub repo_id: String,
     pub title: String,
     pub stage: Option<String>,
+    pub activity: Option<String>,
     pub snippet: Option<String>,
     pub agent_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskDetail {
+    pub id: String,
+    pub repo_id: String,
+    pub title: String,
+    pub stage: Option<String>,
+    pub activity: Option<String>,
+    pub snippet: Option<String>,
+    pub agent_type: Option<String>,
+    pub agent_provider: Option<String>,
+    pub branch: Option<String>,
+    pub pr_url: Option<String>,
+    pub closed_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -140,6 +157,20 @@ impl MobileApi {
             .map(|items| items.into_iter().map(map_task_summary).collect())
             .map_err(|e| format!("db error: {}", e))
     }
+
+    pub fn get_task(&self, task_or_branch_id: &str) -> Result<Option<TaskDetail>, String> {
+        let task_id = self
+            ._db
+            .resolve_pipeline_item_id(task_or_branch_id)
+            .map_err(|e| format!("db error: {}", e))?;
+        let Some(task_id) = task_id else {
+            return Ok(None);
+        };
+        self._db
+            .get_pipeline_item(&task_id)
+            .map(|item| item.map(map_task_detail))
+            .map_err(|e| format!("db error: {}", e))
+    }
 }
 
 fn map_task_summary(item: crate::db::PipelineItem) -> TaskSummary {
@@ -153,8 +184,30 @@ fn map_task_summary(item: crate::db::PipelineItem) -> TaskSummary {
         repo_id: item.repo_id,
         title,
         stage: item.stage,
+        activity: item.activity,
         snippet: item.last_output_preview,
         agent_type: item.agent_type,
+    }
+}
+
+fn map_task_detail(item: crate::db::PipelineItem) -> TaskDetail {
+    let title = item
+        .display_name
+        .clone()
+        .or(item.prompt.clone())
+        .unwrap_or_else(|| item.id.clone());
+    TaskDetail {
+        id: item.id,
+        repo_id: item.repo_id,
+        title,
+        stage: item.stage,
+        activity: item.activity,
+        snippet: item.last_output_preview,
+        agent_type: item.agent_type,
+        agent_provider: item.agent_provider,
+        branch: item.branch,
+        pr_url: item.pr_url,
+        closed_at: item.closed_at,
     }
 }
 
