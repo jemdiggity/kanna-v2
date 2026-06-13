@@ -5,6 +5,7 @@ import {
   resolveKdEnvironment,
   type CloudEnvironmentName
 } from "./environment";
+import { selectPreferredLanAddress } from "./lan-address";
 
 export interface DevWindow {
   name: string;
@@ -24,6 +25,7 @@ export interface BuildDevPlanInput {
   emulators: boolean;
   firebaseConfigPath: string;
   mobileServerUrl: string;
+  resolveLanAddress?: () => string | undefined;
 }
 
 export interface BuildProductionMobilePlanInput {
@@ -41,6 +43,43 @@ function shellEnvPrefix(env: Record<string, string | undefined>): string {
 
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+function isPhysicalDeviceTarget(env: NodeJS.ProcessEnv): boolean {
+  return Boolean(env.KANNA_IOS_DEVICE_UDID?.trim() || env.KANNA_IOS_PHYSICAL_DEVICE_NAME?.trim());
+}
+
+function isLoopbackHostname(hostname: string): boolean {
+  return hostname === "127.0.0.1" || hostname === "localhost" || hostname === "::1";
+}
+
+function resolveMobileHost(input: BuildDevPlanInput): string {
+  const host = resolveHostFromUrl(input.mobileServerUrl);
+  if (!isPhysicalDeviceTarget(input.env) || !isLoopbackHostname(host)) {
+    return host;
+  }
+
+  const lanAddress = (input.resolveLanAddress ?? selectPreferredLanAddress)();
+  if (!lanAddress) {
+    throw new Error(
+      "Could not determine a host LAN IP address for physical-device mobile dev. " +
+        "Connect the phone to the same network as this Mac or set EXPO_PUBLIC_KANNA_SERVER_URL explicitly."
+    );
+  }
+  return lanAddress;
+}
+
+function resolveMobileServerUrl(input: BuildDevPlanInput): string {
+  const parsedUrl = new URL(input.mobileServerUrl);
+  parsedUrl.hostname = resolveMobileHost(input);
+  return parsedUrl.toString().replace(/\/$/, "");
+}
+
+function resolveMobileServerUrlEnv(input: BuildDevPlanInput): string | undefined {
+  if (input.env.EXPO_PUBLIC_KANNA_SERVER_URL?.trim()) {
+    return input.env.EXPO_PUBLIC_KANNA_SERVER_URL;
+  }
+  return isPhysicalDeviceTarget(input.env) ? resolveMobileServerUrl(input) : undefined;
 }
 
 function mobileFirebaseEnv(input: BuildDevPlanInput): Record<string, string | undefined> {
@@ -63,7 +102,7 @@ function mobileFirebaseEnv(input: BuildDevPlanInput): Record<string, string | un
       input.env.EXPO_PUBLIC_FIREBASE_APP_ID ?? "kanna-mobile-local",
     EXPO_PUBLIC_FIREBASE_AUTH_EMULATOR_HOST:
       input.env.EXPO_PUBLIC_FIREBASE_AUTH_EMULATOR_HOST ??
-      resolveHostFromUrl(input.mobileServerUrl),
+      resolveMobileHost(input),
     EXPO_PUBLIC_FIREBASE_AUTH_EMULATOR_PORT:
       input.env.EXPO_PUBLIC_FIREBASE_AUTH_EMULATOR_PORT ?? authPort
   };
@@ -91,7 +130,7 @@ function resolveRelayUrl(input: BuildDevPlanInput): string | undefined {
     return undefined;
   }
 
-  return `ws://${resolveHostFromUrl(input.mobileServerUrl)}:${relayPort}`;
+  return `ws://${resolveMobileHost(input)}:${relayPort}`;
 }
 
 function relayFirebaseEnv(input: BuildDevPlanInput): Record<string, string | undefined> {
@@ -166,6 +205,7 @@ export function buildDevPlan(input: BuildDevPlanInput): DevPlan {
 
   if (input.mobile) {
     const mobileEnv = shellEnvPrefix({
+      EXPO_PUBLIC_KANNA_SERVER_URL: resolveMobileServerUrlEnv(input),
       EXPO_PUBLIC_KANNA_RELAY_URL: resolveRelayUrl(input),
       RCT_METRO_PORT: input.env.KANNA_MOBILE_PORT ?? "8081",
       ...mobileFirebaseEnv(input)
@@ -174,7 +214,7 @@ export function buildDevPlan(input: BuildDevPlanInput): DevPlan {
       name: "mobile",
       cwd: `${input.repoRoot}/apps/mobile`,
       env: sharedEnv,
-      command: `unset NO_COLOR; ${mobileEnv} pnpm run dev -- --port ${input.env.KANNA_MOBILE_PORT ?? "8081"}`
+      command: `unset NO_COLOR; ${mobileEnv} pnpm run dev -- --port ${input.env.KANNA_MOBILE_PORT ?? "8081"} --dev-client`
     });
   }
 
