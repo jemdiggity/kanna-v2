@@ -190,6 +190,10 @@ enum TaskCommands {
         /// Task that blocks this task. Repeat to pass multiple blockers.
         #[arg(long)]
         blocker_task_id: Vec<String>,
+
+        /// Task to notify when this task reaches a terminal state
+        #[arg(long)]
+        notify_task: Option<String>,
     },
     /// Request a new revision task from an existing task branch
     RequestRevision {
@@ -368,6 +372,8 @@ struct CreateTaskRequest {
     allowed_tools: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     blocker_task_ids: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    notify_task_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -438,6 +444,7 @@ struct TaskCreateOptions {
     permission_mode: Option<String>,
     allowed_tool: Vec<String>,
     blocker_task_id: Vec<String>,
+    notify_task: Option<String>,
 }
 
 fn write_stage_result_to_db(
@@ -552,6 +559,7 @@ fn build_create_task_request(options: TaskCreateOptions) -> CreateTaskRequest {
         permission_mode: options.permission_mode,
         allowed_tools: (!options.allowed_tool.is_empty()).then_some(options.allowed_tool),
         blocker_task_ids: (!options.blocker_task_id.is_empty()).then_some(options.blocker_task_id),
+        notify_task_id: options.notify_task,
     }
 }
 
@@ -1149,6 +1157,7 @@ async fn main() {
                 permission_mode,
                 allowed_tool,
                 blocker_task_id,
+                notify_task,
             } => {
                 let base_url = resolve_server_base_url_from_env(server_url.as_deref());
                 let request = build_create_task_request(TaskCreateOptions {
@@ -1163,6 +1172,7 @@ async fn main() {
                     permission_mode,
                     allowed_tool,
                     blocker_task_id,
+                    notify_task,
                 });
                 let created = create_task_via_api(&base_url, &request)
                     .await
@@ -1512,6 +1522,35 @@ mod tests {
         let cli = super::Cli::try_parse_from([
             "kanna-cli",
             "task",
+            "create",
+            "--repo-id",
+            "repo-1",
+            "--prompt",
+            "Child",
+            "--notify-task",
+            "task-parent",
+        ])
+        .unwrap();
+        match cli.command {
+            super::Commands::Task {
+                command:
+                    super::TaskCommands::Create {
+                        repo_id,
+                        prompt,
+                        notify_task,
+                        ..
+                    },
+            } => {
+                assert_eq!(repo_id, "repo-1");
+                assert_eq!(prompt, "Child");
+                assert_eq!(notify_task.as_deref(), Some("task-parent"));
+            }
+            _ => panic!("expected task create command"),
+        }
+
+        let cli = super::Cli::try_parse_from([
+            "kanna-cli",
+            "task",
             "logs",
             "--task-id",
             "task-1",
@@ -1615,6 +1654,7 @@ mod tests {
             permission_mode: Some("dontAsk".to_string()),
             allowed_tool: vec!["Bash".to_string(), "Edit".to_string()],
             blocker_task_id: vec!["blocker-1".to_string(), "blocker-2".to_string()],
+            notify_task: Some("orchestrator-1".to_string()),
         });
 
         assert_eq!(
@@ -1631,6 +1671,7 @@ mod tests {
                 "permissionMode": "dontAsk",
                 "allowedTools": ["Bash", "Edit"],
                 "blockerTaskIds": ["blocker-1", "blocker-2"],
+                "notifyTaskId": "orchestrator-1",
             })
         );
     }
@@ -1956,6 +1997,7 @@ mod tests {
             permission_mode: None,
             allowed_tool: Vec::new(),
             blocker_task_id: Vec::new(),
+            notify_task: None,
         });
 
         assert_eq!(
@@ -2034,6 +2076,7 @@ mod tests {
             permission_mode: None,
             allowed_tool: Vec::new(),
             blocker_task_id: Vec::new(),
+            notify_task: None,
         });
 
         let created = create_task_via_api(&format!("http://{addr}"), &request)

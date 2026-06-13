@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS pipeline_item (
   display_name TEXT, unread_at TEXT, closed_at TEXT,
   base_ref TEXT,
   teardown_started_at TEXT,
+  notify_task_id TEXT, notified_at TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );

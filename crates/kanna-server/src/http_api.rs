@@ -406,6 +406,24 @@ async fn send_session_input(
     }
 }
 
+pub(crate) async fn submit_task_input(
+    daemon: &mut crate::daemon_client::DaemonClient,
+    session_id: &str,
+    input: &str,
+) -> Result<(), (axum::http::StatusCode, String)> {
+    // Type the message, then press Enter as a discrete keystroke (see
+    // SUBMIT_ENTER_DELAY_MS). The daemon stays a raw byte pipe; this submission
+    // policy lives here so every client — kanna-cli, kanna-mcp, mobile, and
+    // server-side notifications — submits consistently.
+    let message = task_input_message(input);
+    if !message.is_empty() {
+        send_session_input(daemon, session_id, message.as_bytes().to_vec()).await?;
+        tokio::time::sleep(std::time::Duration::from_millis(SUBMIT_ENTER_DELAY_MS)).await;
+    }
+    send_session_input(daemon, session_id, vec![b'\r']).await?;
+    Ok(())
+}
+
 async fn search_tasks(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(query): axum::extract::Query<SearchTasksQuery>,
@@ -712,18 +730,55 @@ async fn send_task_input(
             )
         })?;
 
-    // Type the message, then press Enter as a discrete keystroke (see
-    // SUBMIT_ENTER_DELAY_MS). The daemon stays a raw byte pipe; this submission
-    // policy lives here so every client — kanna-cli, kanna-mcp, mobile —
-    // submits consistently.
-    let message = task_input_message(&payload.input);
-    if !message.is_empty() {
-        send_session_input(&mut daemon, &task_id, message.as_bytes().to_vec()).await?;
-        tokio::time::sleep(std::time::Duration::from_millis(SUBMIT_ENTER_DELAY_MS)).await;
-    }
-    send_session_input(&mut daemon, &task_id, vec![b'\r']).await?;
+    submit_task_input(&mut daemon, &task_id, &payload.input).await?;
 
     Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+pub(crate) async fn handle_task_terminal_state(
+    config: &Config,
+    task_id: &str,
+    success: bool,
+) -> Result<(), String> {
+    let pipeline_item_id = {
+        let db = Db::open(&config.db_path).map_err(|e| format!("db error: {}", e))?;
+        let Some(pipeline_item_id) = db
+            .resolve_pipeline_item_id(task_id)
+            .map_err(|e| format!("db error: {}", e))?
+        else {
+            return Ok(());
+        };
+        db.update_pipeline_item_activity(&pipeline_item_id, "unread")
+            .map_err(|e| format!("db error: {}", e))?;
+        pipeline_item_id
+    };
+    notify_task_completion(config, &pipeline_item_id, success).await
+}
+
+async fn notify_task_completion(
+    config: &Config,
+    child_id: &str,
+    success: bool,
+) -> Result<(), String> {
+    let notification = {
+        let db = Db::open(&config.db_path).map_err(|e| format!("db error: {}", e))?;
+        db.claim_task_notification(child_id)
+            .map_err(|e| format!("db error: {}", e))?
+    };
+    let Some(notification) = notification else {
+        return Ok(());
+    };
+    let status = if success { "success" } else { "failure" };
+    let message = format!(
+        "TASK {} DONE [{}]: {}",
+        notification.child_id, status, notification.title
+    );
+    let mut daemon = crate::daemon_client::DaemonClient::connect(&config.daemon_dir)
+        .await
+        .map_err(|e| format!("daemon error: {}", e))?;
+    submit_task_input(&mut daemon, &notification.notify_task_id, &message)
+        .await
+        .map_err(|(_, message)| message)
 }
 
 async fn task_logs(
@@ -951,6 +1006,9 @@ async fn close_task(
             format!("db error: {}", e),
         )
     })?;
+    notify_task_completion(&state.config, &pipeline_item_id, false)
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
@@ -3412,6 +3470,168 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn submit_task_input_sends_text_then_enter_as_discrete_inputs() {
+        use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::UnixListener;
+
+        let unique = format!(
+            "kanna-submit-input-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let daemon_dir = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&daemon_dir).unwrap();
+        let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+        let _ = std::fs::remove_file(&socket_path);
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let mut inputs = Vec::new();
+            for _ in 0..2 {
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+                match command {
+                    DaemonCommand::Input { session_id, data } => {
+                        assert_eq!(session_id, "task-target");
+                        inputs.push(data);
+                    }
+                    other => panic!("expected Input command, got {other:?}"),
+                }
+                write_half
+                    .write_all(
+                        format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap())
+                            .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+            inputs
+        });
+
+        let mut daemon = crate::daemon_client::DaemonClient::connect(&daemon_dir.to_string_lossy())
+            .await
+            .unwrap();
+        super::submit_task_input(&mut daemon, "task-target", "hello\n")
+            .await
+            .unwrap();
+        let inputs = server.await.unwrap();
+
+        assert_eq!(inputs, vec![b"hello".to_vec(), vec![b'\r']]);
+
+        let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_dir_all(daemon_dir);
+    }
+
+    #[tokio::test]
+    async fn terminal_state_notification_sends_once_to_notify_target() {
+        use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::UnixListener;
+
+        let unique = format!(
+            "kanna-notify-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        std::fs::create_dir_all(&daemon_dir).unwrap();
+        let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+        let _ = std::fs::remove_file(&socket_path);
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let mut inputs = Vec::new();
+            for _ in 0..2 {
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+                match command {
+                    DaemonCommand::Input { session_id, data } => {
+                        assert_eq!(session_id, "task-parent");
+                        inputs.push(data);
+                    }
+                    other => panic!("expected Input command, got {other:?}"),
+                }
+                write_half
+                    .write_all(
+                        format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap())
+                            .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+            inputs
+        });
+
+        let config = Config {
+            relay_url: "wss://relay.example".to_string(),
+            device_token: "device-token".to_string(),
+            cloud_base_url: "http://127.0.0.1:5001/kanna-local/us-central1".to_string(),
+            firebase_project_id: "kanna-local".to_string(),
+            firebase_auth_emulator_url: Some("http://127.0.0.1:9099".to_string()),
+            firebase_firestore_emulator_host: Some("127.0.0.1:8080".to_string()),
+            daemon_dir: daemon_dir.to_string_lossy().to_string(),
+            db_path: Db::test_db_path(&unique),
+            desktop_id: "desktop-1".to_string(),
+            desktop_secret: Some("desktop-secret".to_string()),
+            desktop_name: "Studio Mac".to_string(),
+            server_version: Some("test-version".to_string()),
+            lan_host: "127.0.0.1".to_string(),
+            lan_port: 48120,
+            pairing_store_path: format!("/tmp/kanna-pairings-{unique}.json"),
+        };
+        let db = Db::open_for_tests(&config.db_path).unwrap();
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "task-child",
+            "repo-1",
+            "Child prompt first line\nsecond line",
+            Some("Child Display"),
+            "in progress",
+            "2026-04-18 10:00:00",
+        )
+        .unwrap();
+        db.update_test_pipeline_item_notify_task("task-child", "task-parent")
+            .unwrap();
+        drop(db);
+
+        super::handle_task_terminal_state(&config, "task-child", true)
+            .await
+            .unwrap();
+        let inputs = server.await.unwrap();
+        assert_eq!(
+            inputs,
+            vec![
+                b"TASK task-child DONE [success]: Child Display".to_vec(),
+                vec![b'\r']
+            ]
+        );
+
+        super::handle_task_terminal_state(&config, "task-child", true)
+            .await
+            .unwrap();
+        let db = Db::open(&config.db_path).unwrap();
+        let task = db.get_pipeline_item("task-child").unwrap().unwrap();
+        assert_eq!(task.activity.as_deref(), Some("unread"));
+        assert!(task.notified_at.is_some());
+
+        let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_dir_all(daemon_dir);
     }
 
     #[tokio::test]

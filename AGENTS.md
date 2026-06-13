@@ -530,6 +530,12 @@ When something doesn't work, find the architectural reason and fix it at the rig
 - If two systems disagree on the source of truth (e.g., `stage` vs `closed_at` for visibility), pick one and make everything use it.
 - If a resource needs cleanup, clean it up where the lifecycle owns it — don't leave stale state for another layer to work around.
 
+### Server-side completion notify boundary
+
+`kanna-server` subscribes directly to daemon terminal-state events and treats daemon `Exit` for a task session as the headless completion signal. That path updates task activity to `unread`, claims `pipeline_item.notify_task_id` by setting `notified_at`, and delivers `TASK <child-id> DONE [success|failure]: <title>` through the same two-step input submission helper used by `/v1/tasks/{task_id}/input`. Keep this boundary server/daemon-side; do not depend on the desktop frontend event bridge being open for completion notifications.
+
+Current E2E status: notify has server boundary coverage with a fake daemon asserting the exact two `Input` writes and the once-only DB guard. A full desktop E2E would require a runnable daemon plus agent task that exits under the packaged app/WebDriver harness; add that when the E2E harness can deterministically drive agent completion without external Claude/Copilot credentials.
+
 ## Coding Style
 
 ### TypeScript

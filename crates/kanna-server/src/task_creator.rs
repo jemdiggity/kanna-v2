@@ -112,6 +112,7 @@ pub(crate) fn prepare_merge_agent_for_api(
             model: None,
             permission_mode: None,
             allowed_tools: Vec::new(),
+            notify_task_id: None,
         },
     )
 }
@@ -229,6 +230,7 @@ pub(crate) fn prepare_advance_stage_for_api(
             model: None,
             permission_mode: None,
             allowed_tools: Vec::new(),
+            notify_task_id: None,
         },
     )
     .map(PreparedStageTransition::Spawn)
@@ -374,6 +376,7 @@ pub(crate) fn prepare_auto_stage_completion_for_api(
             model: None,
             permission_mode: None,
             allowed_tools: Vec::new(),
+            notify_task_id: None,
         },
     )
     .map(PreparedStageTransition::Spawn)
@@ -445,6 +448,7 @@ pub(crate) fn prepare_revision_task_for_api(
             model: None,
             permission_mode: None,
             allowed_tools: Vec::new(),
+            notify_task_id: None,
         },
     )
 }
@@ -462,6 +466,7 @@ struct TaskCreationRequest {
     model: Option<String>,
     permission_mode: Option<String>,
     allowed_tools: Vec<String>,
+    notify_task_id: Option<String>,
 }
 
 struct CreatedTask {
@@ -548,6 +553,7 @@ pub(crate) fn prepare_task_for_api(
             model: request.model,
             permission_mode: request.permission_mode,
             allowed_tools: request.allowed_tools.unwrap_or_default(),
+            notify_task_id: request.notify_task_id,
         },
     )
 }
@@ -670,6 +676,7 @@ fn prepare_task_spawn(
             .stored_base_ref
             .as_deref()
             .or(request.base_ref.as_deref()),
+        notify_task_id: request.notify_task_id.as_deref(),
     })
     .map_err(|e| format!("db error: {}", e))?;
 
@@ -2028,6 +2035,7 @@ mod tests {
                     model: Some("model-a".to_string()),
                     permission_mode: Some("dontAsk".to_string()),
                     allowed_tools: Some(vec!["Bash".to_string()]),
+                    notify_task_id: None,
                 },
             )
             .unwrap();
@@ -2070,6 +2078,7 @@ mod tests {
                 model: None,
                 permission_mode: None,
                 allowed_tools: None,
+                notify_task_id: None,
             },
         )
         .unwrap();
@@ -3094,6 +3103,7 @@ mod tests {
                 permission_mode: None,
                 allowed_tools: None,
                 blocker_task_ids: None,
+                notify_task_id: None,
             },
         );
         std::env::set_current_dir(original_cwd).unwrap();
@@ -3191,6 +3201,7 @@ mod tests {
                 permission_mode: None,
                 allowed_tools: None,
                 blocker_task_ids: None,
+                notify_task_id: None,
             },
         )
         .unwrap();
@@ -3216,6 +3227,7 @@ mod tests {
                 permission_mode: None,
                 allowed_tools: None,
                 blocker_task_ids: None,
+                notify_task_id: None,
             },
         )
         .unwrap();

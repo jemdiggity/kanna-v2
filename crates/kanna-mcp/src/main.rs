@@ -164,6 +164,7 @@ fn mcp_tools() -> Value {
                     "agent_provider": { "type": "string" },
                     "model": { "type": "string" },
                     "permission_mode": { "type": "string" },
+                    "notify_task_id": { "type": "string" },
                     "allowed_tools": { "type": "array", "items": { "type": "string" } },
                     "blocker_task_ids": { "type": "array", "items": { "type": "string" } }
                 },
@@ -463,6 +464,7 @@ fn build_tool_request(name: &str, args: Value) -> Result<ToolRequest, String> {
                 ("agent_provider", "agentProvider"),
                 ("model", "model"),
                 ("permission_mode", "permissionMode"),
+                ("notify_task_id", "notifyTaskId"),
             ] {
                 if let Some(value) = optional_string(&args, arg_name) {
                     body.insert(body_name.to_string(), Value::String(value));
@@ -906,6 +908,25 @@ mod route_tests {
             ToolRequest::PostJson {
                 path: "/v1/tasks/task-1/actions/unblock".to_string(),
                 body: json!({})
+            }
+        );
+        assert_eq!(
+            build_tool_request(
+                "kanna_create_task",
+                json!({
+                    "repo_id": "repo-1",
+                    "prompt": "Child",
+                    "notify_task_id": "task-parent"
+                })
+            )
+            .unwrap(),
+            ToolRequest::PostJson {
+                path: "/v1/tasks".to_string(),
+                body: json!({
+                    "repoId": "repo-1",
+                    "prompt": "Child",
+                    "notifyTaskId": "task-parent"
+                })
             }
         );
     }

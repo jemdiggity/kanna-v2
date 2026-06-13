@@ -383,4 +383,9 @@ export async function runMigrations(db: DbHandle): Promise<void> {
       ["agentMessageStyle", "chat"],
     );
   });
+
+  await runMigration("020_pipeline_item_notify_task", async () => {
+    await addColumn("pipeline_item", "notify_task_id", "TEXT");
+    await addColumn("pipeline_item", "notified_at", "TEXT");
+  });
 }

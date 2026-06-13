@@ -103,6 +103,7 @@ pub struct CreateTaskRequest {
     pub permission_mode: Option<String>,
     pub allowed_tools: Option<Vec<String>>,
     pub blocker_task_ids: Option<Vec<String>>,
+    pub notify_task_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -524,7 +525,8 @@ mod tests {
                 "agentType": "agent",
                 "model": null,
                 "permissionMode": null,
-                "allowedTools": null
+                "allowedTools": null,
+                "notifyTaskId": null
             })
         );
     }
