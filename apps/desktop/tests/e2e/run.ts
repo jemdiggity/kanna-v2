@@ -640,7 +640,18 @@ async function main(): Promise<void> {
     relayOutput = "";
     const proc = spawn("pnpm", ["--dir", "services/relay", "run", "dev"], {
       cwd: repoRoot,
-      env: { ...primary.env, ...relayEnv, PORT: String(relayPort), SKIP_AUTH: "true" },
+      // SKIP_AUTH alone is inert: isAuthBypassed() also requires an explicit
+      // non-prod opt-in (FIREBASE_AUTH_EMULATOR_HOST or the allow flag) so a
+      // stray SKIP_AUTH can never bypass auth in production. The e2e relay runs
+      // against the Firebase emulator and exercises transport/sync, not auth, so
+      // it opts into the bypass explicitly here.
+      env: {
+        ...primary.env,
+        ...relayEnv,
+        PORT: String(relayPort),
+        SKIP_AUTH: "true",
+        KANNA_RELAY_ALLOW_AUTH_BYPASS: "true",
+      },
       detached: true,
       stdio: ["ignore", "pipe", "pipe"],
     });
