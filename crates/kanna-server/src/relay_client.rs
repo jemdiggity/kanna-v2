@@ -146,23 +146,7 @@ pub async fn connect_tunnel_to_relay(
         .send(Message::Text(serde_json::to_string(&auth)?.into()))
         .await?;
 
-    while let Some(message) = ws_stream.next().await {
-        let message = message?;
-        let Message::Text(text) = message else {
-            continue;
-        };
-        let parsed: RelayMessage = serde_json::from_str(&text)?;
-        match parsed {
-            RelayMessage::TunnelReady {
-                tunnel_id: ready_id,
-                ..
-            } if ready_id == tunnel_id => return Ok(ws_stream),
-            RelayMessage::Error { message } => return Err(message.into()),
-            _ => {}
-        }
-    }
-
-    Err("relay tunnel closed before ready".into())
+    Ok(ws_stream)
 }
 
 #[cfg(test)]

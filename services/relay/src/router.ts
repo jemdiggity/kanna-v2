@@ -27,6 +27,7 @@ interface RelayMessage {
 /** In-memory map of userId → client and desktop WebSocket connections. */
 const connections = new Map<string, ConnectionPair>();
 const tunnelPeers = new WeakMap<WebSocket, WebSocket>();
+const tunnelLabels = new WeakMap<WebSocket, "client" | "desktop">();
 const tunnelSockets = new WeakSet<WebSocket>();
 
 function parseRelayMessage(data: string): RelayMessage | null {
@@ -140,6 +141,20 @@ function buildUnobserveMessage(sessionId: string, id: string): string {
   });
 }
 
+function rawDataToString(data: RawData): string {
+  if (typeof data === "string") return data;
+  if (Buffer.isBuffer(data)) return data.toString();
+  if (Array.isArray(data)) return Buffer.concat(data).toString();
+  return Buffer.from(data).toString();
+}
+
+function rawDataByteLength(data: RawData): number {
+  if (typeof data === "string") return Buffer.byteLength(data);
+  if (Buffer.isBuffer(data)) return data.length;
+  if (Array.isArray(data)) return data.reduce((total, chunk) => total + chunk.length, 0);
+  return data.byteLength;
+}
+
 function forwardUnobserveIfLastObserverGone(
   pair: ConnectionPair,
   key: string,
@@ -176,8 +191,10 @@ function removeClient(pair: ConnectionPair, ws: WebSocket): void {
 function closeTunnelPeer(ws: WebSocket): void {
   const peer = tunnelPeers.get(ws);
   tunnelPeers.delete(ws);
+  tunnelLabels.delete(ws);
   if (peer) {
     tunnelPeers.delete(peer);
+    tunnelLabels.delete(peer);
     if (peer.readyState <= 1) {
       peer.close(1000, "Tunnel peer closed");
     }
@@ -276,12 +293,26 @@ export function isTunnelSocket(ws: WebSocket): boolean {
   return tunnelSockets.has(ws);
 }
 
-export function forwardTunnelData(source: WebSocket, data: RawData): void {
+export function forwardTunnelData(source: WebSocket, data: RawData, isBinary = false): void {
   const peer = tunnelPeers.get(source);
   if (!peer || peer.readyState !== 1) {
     return;
   }
-  peer.send(data);
+  const payload = isBinary ? data : rawDataToString(data);
+  if (process.env.KANNA_RELAY_DEBUG_TUNNEL === "1") {
+    const direction = tunnelLabels.get(source) === "client" ? "client->desktop" : "desktop->client";
+    let summary = `<${rawDataByteLength(data)} bytes>`;
+    try {
+      const parsed = JSON.parse(rawDataToString(data)) as Record<string, unknown>;
+      summary = typeof parsed.type === "string" ? parsed.type : "json";
+      if (typeof parsed.task_id === "string") summary += ` task=${parsed.task_id}`;
+      if (typeof parsed.code === "string") summary += ` code=${parsed.code}`;
+    } catch {
+      // Raw terminal bytes can be binary; keep the byte count summary.
+    }
+    console.log(`[router] Tunnel ${direction}: ${summary}`);
+  }
+  peer.send(payload, { binary: isBinary });
 }
 
 export function attachDesktopTunnel(
@@ -302,6 +333,8 @@ export function attachDesktopTunnel(
   tunnelSockets.add(ws);
   tunnelPeers.set(tunnel.client, ws);
   tunnelPeers.set(ws, tunnel.client);
+  tunnelLabels.set(tunnel.client, "client");
+  tunnelLabels.set(ws, "desktop");
   ws.on("close", () => closeTunnelPeer(ws));
   tunnel.client.on("close", () => closeTunnelPeer(tunnel.client));
 
@@ -310,8 +343,8 @@ export function attachDesktopTunnel(
     tunnelId,
     desktopId,
   });
-  tunnel.client.send(ready);
   ws.send(ready);
+  tunnel.client.send(ready);
   return true;
 }
 

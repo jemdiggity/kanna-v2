@@ -117,7 +117,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
     }
   }, AUTH_TIMEOUT_MS);
 
-  ws.on("message", async (raw: RawData) => {
+  ws.on("message", async (raw: RawData, isBinary: boolean) => {
     const data = raw.toString();
 
     // --- Auth handshake (first message) ---
@@ -202,7 +202,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
 
     // --- Post-auth: route messages ---
     if (isTunnelSocket(ws)) {
-      forwardTunnelData(ws, raw);
+      forwardTunnelData(ws, raw, isBinary);
       return;
     }
     routeMessage(userId!, role!, data, ws, desktopId);

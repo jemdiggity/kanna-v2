@@ -24,6 +24,11 @@ use crate::daemon_client::DaemonClient;
 use crate::db::Db;
 use crate::http_api::{dispatch_http_invoke, AppState};
 
+#[derive(Debug, serde::Deserialize)]
+struct FirebaseLookupResponse {
+    users: Option<Vec<serde_json::Value>>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthMode {
     AllowEmpty,
@@ -143,6 +148,9 @@ async fn handle_stream_channels(
     };
 
     while let Some(message) = incoming_rx.recv().await {
+        if is_relay_tunnel_control_message(&message) {
+            continue;
+        }
         match serde_json::from_str::<ClientFrame>(&message) {
             Ok(frame) => {
                 if !conn.handle(frame).await {
@@ -162,6 +170,18 @@ async fn handle_stream_channels(
     conn.shutdown();
     drop(conn);
     let _ = writer_task.await;
+}
+
+fn is_relay_tunnel_control_message(message: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(message)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("type")
+                .and_then(|kind| kind.as_str())
+                .map(str::to_string)
+        })
+        .is_some_and(|kind| kind == "tunnel_ready")
 }
 
 async fn write_frames(
@@ -374,9 +394,10 @@ impl StreamConn {
     async fn handle_auth(&mut self, credential: Option<String>) -> bool {
         let valid = match self.auth_mode {
             AuthMode::AllowEmpty => true,
-            AuthMode::RequireCredential => credential
-                .as_deref()
-                .is_some_and(|value| self.credential_matches(value)),
+            AuthMode::RequireCredential => match credential.as_deref() {
+                Some(value) => self.credential_matches(value).await,
+                None => false,
+            },
         };
 
         if !valid {
@@ -390,7 +411,7 @@ impl StreamConn {
         true
     }
 
-    fn credential_matches(&self, credential: &str) -> bool {
+    async fn credential_matches(&self, credential: &str) -> bool {
         // A non-empty credential is a precondition, not a pass: the secret
         // comparison is the actual gate. Compared in constant time so a
         // remote (tunnel) caller cannot use response timing as an oracle.
@@ -404,7 +425,17 @@ impl StreamConn {
             .is_some_and(|secret| constant_time_eq(secret.as_bytes(), credential.as_bytes()));
         let token_ok = !config.device_token.is_empty()
             && constant_time_eq(config.device_token.as_bytes(), credential.as_bytes());
-        secret_ok || token_ok
+        if secret_ok || token_ok {
+            return true;
+        }
+
+        match verify_firebase_id_token_against_auth_emulator(config, credential).await {
+            Ok(valid) => valid,
+            Err(error) => {
+                log::warn!("failed to verify KSP Firebase credential: {error}");
+                false
+            }
+        }
     }
 
     async fn attach(&mut self, task_id: String, kind: StreamKind, from_seq: u64) {
@@ -434,6 +465,42 @@ impl StreamConn {
         };
         self.attachments.insert(key, task);
     }
+}
+
+async fn verify_firebase_id_token_against_auth_emulator(
+    config: &crate::config::Config,
+    id_token: &str,
+) -> Result<bool, String> {
+    let Some(auth_emulator_url) = config.firebase_auth_emulator_url.as_deref() else {
+        return Ok(false);
+    };
+    let base_url = auth_emulator_url.trim().trim_end_matches('/');
+    if base_url.is_empty() {
+        return Ok(false);
+    }
+
+    let url = format!(
+        "{base_url}/identitytoolkit.googleapis.com/v1/accounts:lookup?key={}",
+        config.firebase_project_id
+    );
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|error| format!("failed to build Firebase ID token verifier: {error}"))?;
+    let response = client
+        .post(url)
+        .json(&serde_json::json!({ "idToken": id_token }))
+        .send()
+        .await
+        .map_err(|error| format!("failed to verify Firebase ID token: {error}"))?;
+    if !response.status().is_success() {
+        return Ok(false);
+    }
+    let body = response
+        .json::<FirebaseLookupResponse>()
+        .await
+        .map_err(|error| format!("failed to parse Firebase ID token lookup response: {error}"))?;
+    Ok(body.users.is_some_and(|users| !users.is_empty()))
 }
 
 /// Per-attachment forwarding task: its own daemon connection attaches to the
@@ -834,6 +901,16 @@ mod tests {
             }
             other => panic!("expected Error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn relay_tunnel_control_frames_are_ignored_by_ksp() {
+        assert!(is_relay_tunnel_control_message(
+            r#"{"type":"tunnel_ready","tunnelId":"t1","desktopId":"desktop-1"}"#
+        ));
+        assert!(!is_relay_tunnel_control_message(
+            r#"{"type":"auth","credential":"token"}"#
+        ));
     }
 
     #[tokio::test]

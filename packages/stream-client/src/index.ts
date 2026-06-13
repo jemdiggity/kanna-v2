@@ -302,6 +302,10 @@ export class StreamClient {
         if (frame.task_id) {
           this.agentAttachment(frame.task_id)?.handlers.onError?.(frame.code, frame.message);
           this.terminalAttachment(frame.task_id)?.handlers.onError?.(frame.code, frame.message);
+        } else {
+          for (const attachment of this.attachments.values()) {
+            attachment.handlers.onError?.(frame.code, frame.message);
+          }
         }
         return;
       }
@@ -379,6 +383,7 @@ export function createRelayTunnelWebSocketFactory({
 class RelayTunnelSocket implements WebSocketLike {
   private readonly socket: WebSocketLike;
   private readonly queued: string[] = [];
+  private identityToken: string | null = null;
   private ready = false;
   private closed = false;
   onopen: ((event: unknown) => void) | null = null;
@@ -407,7 +412,7 @@ class RelayTunnelSocket implements WebSocketLike {
       this.queued.push(data);
       return;
     }
-    this.socket.send(data);
+    this.sendTunnelData(data);
   }
 
   close(): void {
@@ -421,6 +426,7 @@ class RelayTunnelSocket implements WebSocketLike {
       if (!token) {
         throw new Error("Sign in before opening a relay tunnel.");
       }
+      this.identityToken = token;
       this.socket.send(JSON.stringify({ type: "auth", id_token: token }));
     } catch (error) {
       this.onerror?.(error);
@@ -459,7 +465,7 @@ class RelayTunnelSocket implements WebSocketLike {
       this.ready = true;
       this.onopen?.({});
       for (const frame of this.queued.splice(0)) {
-        this.socket.send(frame);
+        this.sendTunnelData(frame);
       }
       return;
     }
@@ -467,6 +473,24 @@ class RelayTunnelSocket implements WebSocketLike {
     if (parsed.type === "response" && typeof parsed.error === "string") {
       this.onerror?.(new Error(parsed.error));
       if (!this.closed) this.close();
+    }
+  }
+
+  private sendTunnelData(data: string): void {
+    this.socket.send(this.withIdentityCredential(data));
+  }
+
+  private withIdentityCredential(data: string): string {
+    if (!this.identityToken) return data;
+    try {
+      const frame = JSON.parse(data) as Record<string, unknown>;
+      if (frame.type !== "auth") return data;
+      if (typeof frame.credential === "string" && frame.credential.trim().length > 0) {
+        return data;
+      }
+      return JSON.stringify({ ...frame, credential: this.identityToken });
+    } catch {
+      return data;
     }
   }
 }

@@ -173,6 +173,24 @@ describe("StreamClient", () => {
     client.close();
   });
 
+  it("routes connection errors to active attachment handlers", () => {
+    const { client, socket } = connectedClient();
+    const errors: string[] = [];
+    client.attachTerminal("task-1", {
+      onOutput: () => {},
+      onError: (code, message) => errors.push(`${code}:${message}`),
+    });
+    socket.receive({
+      type: "error",
+      code: "unauthorized",
+      message: "invalid stream credential",
+    });
+
+    expect(errors).toEqual(["unauthorized:invalid stream credential"]);
+    client.close();
+  });
+
+
   it("reattaches terminal streams after reconnect and routes snapshot before output", () => {
     const { client, socket } = connectedClient();
     const events: string[] = [];
@@ -277,6 +295,42 @@ describe("StreamClient", () => {
       credential: "id-token",
     });
     socket.receive({ type: "auth_ok" });
+    client.close();
+  });
+
+  it("uses the relay identity token as the tunneled KSP credential", async () => {
+    const tunnelFactory = createRelayTunnelWebSocketFactory({
+      relayUrl: "ws://relay",
+      desktopId: "desktop-1",
+      getIdentityToken: async () => "relay-id-token",
+      webSocketFactory: factory,
+      nextId: () => "tunnel-request-1",
+    });
+    const client = new StreamClient({
+      url: "ignored-by-tunnel-factory",
+      credentialProvider: async () => null,
+      webSocketFactory: tunnelFactory,
+    });
+
+    const socket = sockets[0];
+    socket.open();
+    await Promise.resolve();
+    expect(socket.sent).toEqual([
+      { type: "auth", id_token: "relay-id-token" } as unknown as ClientFrame,
+    ]);
+
+    socket.receive({ type: "auth_ok" } as ServerFrame);
+    socket.receive({
+      type: "tunnel_ready",
+      tunnelId: "relay-tunnel-1",
+      desktopId: "desktop-1",
+    } as unknown as ServerFrame);
+    await Promise.resolve();
+
+    expect(socket.sent.at(-1)).toEqual({
+      type: "auth",
+      credential: "relay-id-token",
+    });
     client.close();
   });
 });
