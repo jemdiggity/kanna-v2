@@ -48,7 +48,7 @@ interface ExpoConfig {
   slug: string;
   scheme: string;
   icon: string;
-  plugins: string[];
+  plugins: (string | [string, { displayName: string; iosBundleId: string }])[];
   platforms: string[];
   ios: {
     bundleIdentifier: string;
@@ -74,7 +74,16 @@ export function createExpoConfig(
     slug: "kanna-mobile",
     scheme: appEnvironment.scheme,
     icon: "./assets/icon.png",
-    plugins: ["./plugins/withKannaBonjour"],
+    plugins: [
+      [
+        "./plugins/withKannaNativeIdentity",
+        {
+          displayName: appEnvironment.displayName,
+          iosBundleId: appEnvironment.iosBundleId
+        }
+      ],
+      "./plugins/withKannaBonjour"
+    ],
     platforms: ["ios", "android"],
     ios: {
       bundleIdentifier: appEnvironment.iosBundleId,

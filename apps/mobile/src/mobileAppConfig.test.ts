@@ -26,6 +26,13 @@ describe("mobile app config", () => {
 
     expect(config.name).toBe("Kanna Dev");
     expect(config.scheme).toBe("kanna-dev");
+    expect(config.plugins).toContainEqual([
+      "./plugins/withKannaNativeIdentity",
+      {
+        displayName: "Kanna Dev",
+        iosBundleId: "build.kanna.app.dev"
+      }
+    ]);
     expect(config.ios?.bundleIdentifier).toBe("build.kanna.app.dev");
     expect(config.ios?.googleServicesFile).toBe(
       "./firebase/GoogleService-Info.production.plist"
@@ -43,6 +50,13 @@ describe("mobile app config", () => {
     expect(config.name).toBe("Kanna Staging");
     expect(config.scheme).toBe("kanna-staging");
     expect(config.ios?.bundleIdentifier).toBe("build.kanna.app.staging");
+    expect(config.plugins).toContainEqual([
+      "./plugins/withKannaNativeIdentity",
+      {
+        displayName: "Kanna Staging",
+        iosBundleId: "build.kanna.app.staging"
+      }
+    ]);
     expect(config.ios?.googleServicesFile).toBe(
       "./firebase/GoogleService-Info.staging.plist"
     );
