@@ -86,6 +86,15 @@ fn mcp_tools() -> Value {
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
+            "name": "kanna_get_task",
+            "description": "Fetch one Kanna task by task ID or branch name.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "task_id": { "type": "string" } },
+                "required": ["task_id"]
+            }
+        },
+        {
             "name": "kanna_search_tasks",
             "description": "Search Kanna tasks by query text.",
             "inputSchema": {
@@ -307,6 +316,10 @@ fn build_tool_request(name: &str, args: Value) -> Result<ToolRequest, String> {
     match name {
         "kanna_list_repos" => Ok(ToolRequest::Get("/v1/repos".to_string())),
         "kanna_list_recent_tasks" => Ok(ToolRequest::Get("/v1/tasks/recent".to_string())),
+        "kanna_get_task" => {
+            let task_id = encode_path_segment(&required_string(&args, "task_id")?);
+            Ok(ToolRequest::Get(format!("/v1/tasks/{task_id}")))
+        }
         "kanna_search_tasks" => {
             let query = encode_path_segment(&required_string(&args, "query")?);
             Ok(ToolRequest::Get(format!("/v1/tasks/search?query={query}")))
@@ -576,6 +589,7 @@ mod tests {
             vec![
                 "kanna_list_repos",
                 "kanna_list_recent_tasks",
+                "kanna_get_task",
                 "kanna_search_tasks",
                 "kanna_list_repo_tasks",
                 "kanna_create_task",
@@ -638,6 +652,10 @@ mod route_tests {
         assert_eq!(
             build_tool_request("kanna_list_recent_tasks", json!({})).unwrap(),
             ToolRequest::Get("/v1/tasks/recent".to_string())
+        );
+        assert_eq!(
+            build_tool_request("kanna_get_task", json!({ "task_id": "task 1" })).unwrap(),
+            ToolRequest::Get("/v1/tasks/task%201".to_string())
         );
         assert_eq!(
             build_tool_request("kanna_search_tasks", json!({ "query": "review me" })).unwrap(),
