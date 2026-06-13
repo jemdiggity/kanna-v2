@@ -2,6 +2,16 @@
 
 This runbook provisions and deploys the Kanna relay VM for staging or production. Do not run these steps until the target environment and DNS change are approved.
 
+The relay deploy is build-and-pull:
+
+1. `kd` submits the monorepo Docker build to Cloud Build with `services/relay/cloudbuild.yaml`.
+2. Cloud Build pushes the image to Artifact Registry.
+3. The VM logs in to Artifact Registry with its attached service account metadata token.
+4. `kd` uploads only `services/relay/deploy/docker-compose.yml` and `Caddyfile`.
+5. The VM writes `/opt/kanna-relay/.env`, runs `docker compose pull`, then `docker compose up -d`.
+
+Do not build the relay image on the VM and do not upload the source tree to `/opt/kanna-relay`.
+
 ## Staging
 
 1. Build the provisioning plan:
@@ -22,17 +32,38 @@ This runbook provisions and deploys the Kanna relay VM for staging or production
 
 5. Run the remaining provision commands from the plan to create the VM and firewall rule.
 
-6. Add the staging Firebase service account JSON to `/opt/kanna-relay/.env` on the VM:
+6. Grant the VM service account permission to pull from Artifact Registry.
+
+   The VM uses Application Default Credentials for Firebase and an access token from the metadata server for Docker login. The attached VM service account must have `roles/artifactregistry.reader` on the environment project or repository. Apply that IAM grant through the approved GCP change process; `kd` does not execute IAM changes.
+
+   The remote Docker login performed by deploy is equivalent to:
 
    ```bash
-   sudo install -d -m 0755 /opt/kanna-relay
-   sudo sh -c 'printf "%s\n" "GOOGLE_APPLICATION_CREDENTIALS_JSON=<service-account-json>" >> /opt/kanna-relay/.env'
+   TOKEN=$(curl -fsS -H 'Metadata-Flavor: Google' \
+     'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token' \
+     | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')
+   printf '%s' "$TOKEN" \
+     | docker login -u oauth2accesstoken --password-stdin https://us-central1-docker.pkg.dev
    ```
 
 7. Deploy the relay:
 
    ```bash
    ./kd cloud deploy --staging --relay
+   ```
+
+   For staging this builds and pushes:
+
+   ```text
+   us-central1-docker.pkg.dev/kanna-staging/kanna-relay/relay:latest
+   ```
+
+   The deploy command writes `/opt/kanna-relay/.env` with:
+
+   ```text
+   FIREBASE_PROJECT_ID=kanna-staging
+   KANNA_RELAY_DOMAIN=relay-staging.kanna.build
+   KANNA_RELAY_IMAGE=us-central1-docker.pkg.dev/kanna-staging/kanna-relay/relay:latest
    ```
 
 8. Wire staging apps to:
@@ -56,4 +87,10 @@ Use the production plan only when intentionally changing production infrastructu
 ```bash
 ./kd cloud relay-provision --production
 ./kd cloud deploy --production --relay
+```
+
+Production deploy builds and pushes:
+
+```text
+us-central1-docker.pkg.dev/kanna-build/kanna-relay/relay:latest
 ```
