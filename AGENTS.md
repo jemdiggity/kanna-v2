@@ -177,7 +177,9 @@ One concrete example: when changing the desktop sidecar build pipeline, preserve
 
 For mobile development, the same rule applies at the app level: use `./kd dev up --mobile` or `./kd mobile up` for end-to-end testing instead of launching Expo directly from `apps/mobile`. The desktop app startup path is what spawns the desktop-side `kanna-server` LAN API on the resolved `KANNA_MOBILE_SERVER_PORT`. Running `pnpm run dev -- --ios` or `expo start` inside `apps/mobile` is only appropriate for UI-only work when the desktop-side mobile server is already running elsewhere; by itself it will not start `kanna-server`, so the mobile app will boot but fail to connect to desktop data.
 
-For physical iPhone dev-build testing, set `KANNA_IOS_DEVICE_UDID` or `KANNA_IOS_PHYSICAL_DEVICE_NAME`, then run `./kd dev up --mobile --emulators` and the physical-device smoke (`pnpm --dir apps/mobile run test:e2e:device:smoke`). `kd` starts Metro in dev-client mode and auto-resolves the Mac's LAN IP for the mobile server, relay, and Firebase emulator hosts so the phone does not receive loopback URLs.
+For physical iPhone dev-build launches, set `KANNA_IOS_DEVICE_UDID` or `KANNA_IOS_PHYSICAL_DEVICE_NAME`, then run `./kd mobile run --device` from a worktree. This is the canonical single-command flow: it starts or augments the worktree dev stack with Firebase emulators, relay, desktop, and a resilient dev-client Metro on `KANNA_MOBILE_PORT`; resolves the Mac LAN IP; prints the exact Metro URL (`http://<LAN-IP>:<KANNA_MOBILE_PORT>`); then runs `expo run:ios --device <udid> --port <KANNA_MOBILE_PORT>` with `REACT_NATIVE_PACKAGER_HOSTNAME=<LAN-IP>`. It reuses the kd-managed Metro and does not kill Metro after launch. Use `./kd mobile doctor --device` to run the same on-device preflight without building or launching.
+
+iOS requires a one-time Local Network permission grant for the dev build: Settings -> Privacy & Security -> Local Network -> Kanna = ON. If this permission is denied or dismissed, the app can show "Could not connect to development server" even when the Metro URL is correct. Troubleshooting map: "No script URL provided" means Metro is down or the app launched against the wrong port; "Could not connect to development server" means Metro is down, the phone cannot reach the printed LAN URL, or Local Network permission is off.
 
 When asked to launch the mobile app against production, use `./kd mobile up --production`. Production desktop mobile API comes from the installed `/Applications/Kanna.app/Contents/MacOS/kanna-server`, not the current worktree desktop server. The production launch path verifies `curl http://127.0.0.1:48120/v1/status`, checks `~/Library/Application Support/build.kanna/Kanna/server.toml`, starts only the mobile Metro/Expo window, and uses production Firebase/relay defaults from the installed desktop status and mobile app defaults. Plain `./kd mobile up` remains a development workflow that starts the worktree desktop plus mobile; do not assume it targets production.
 
@@ -203,6 +205,8 @@ The script is idempotent: it upserts the Firebase Auth user `upvote.sieve.7t@icl
 ./kd dev status              # inspect tmux session status
 ./kd dev log                 # print recent desktop tmux output
 ./kd dev log mobile          # print recent mobile tmux output
+./kd mobile run --device     # start dev stack + install/launch on a physical iPhone
+./kd mobile doctor --device  # check physical iPhone Metro reachability, install state, and Local Network guidance
 ./kd mobile up --production  # start mobile with installed /Applications/Kanna.app production status/relay defaults
 ./kd mobile up --staging     # start worktree desktop + mobile against kanna-staging cloud/relay
 ./kd dev up --attach         # start and attach to tmux session
@@ -240,18 +244,15 @@ cd apps/desktop/src-tauri && cargo test --test agent_cli_integration -- --ignore
 # Mobile Appium E2E (local only)
 # Simulator: pnpm --dir apps/mobile run test:e2e:preflight
 # Simulator: pnpm --dir apps/mobile run test:e2e:smoke
-# Physical device: pnpm --dir apps/mobile run test:e2e:device:preflight
-# Physical device: pnpm --dir apps/mobile run test:e2e:device:smoke
-# Physical-device runs assume local Xcode signing already works and the app is installed.
-# Device smoke now starts or reuses Metro on KANNA_MOBILE_PORT automatically and
-# force-relaunches the app so stale Expo bundles do not leak across runs.
-# If the app is missing on the device, install it with the same Metro port:
-# pnpm --dir apps/mobile ios --device <udid> --port "$KANNA_MOBILE_PORT" --no-bundler
-# If EXPO_PUBLIC_KANNA_SERVER_URL points at loopback (for example 127.0.0.1),
-# the physical-device Appium harness rewrites it to the host Mac's LAN IP before
-# preflight and smoke checks so the phone can reach the desktop-side mobile server.
+# Physical device launch: ./kd mobile run --device
+# Physical device preflight only: ./kd mobile doctor --device
+# Physical device Appium smoke is local/human-only after the app is installed:
+# pnpm --dir apps/mobile run test:e2e:device:preflight
+# pnpm --dir apps/mobile run test:e2e:device:smoke
+# Device smoke reuses an existing kd-managed Metro on KANNA_MOBILE_PORT and
+# only stops Metro when the smoke runner started that Metro itself.
 # Use KANNA_IOS_DEVICE_UDID for an exact device, or KANNA_IOS_PHYSICAL_DEVICE_NAME
-# to target the visible phone name (for example "Jerome’s iPhone 15").
+# to target the visible phone name (for example "Jerome's iPhone 15").
 # Set one of them when more than one iPhone is attached.
 ```
 
