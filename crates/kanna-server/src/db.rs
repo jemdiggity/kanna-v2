@@ -32,6 +32,7 @@ pub struct PipelineItem {
     pub last_output_preview: Option<String>,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
+    pub base_ref: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -41,8 +42,16 @@ pub struct Repo {
     pub name: String,
     pub default_branch: Option<String>,
     pub hidden: Option<i64>,
+    pub sort_order: Option<i64>,
     pub created_at: Option<String>,
     pub last_opened_at: Option<String>,
+}
+
+pub struct NewRepo<'a> {
+    pub id: &'a str,
+    pub path: &'a str,
+    pub name: &'a str,
+    pub default_branch: Option<&'a str>,
 }
 
 pub struct TaskStageSource {
@@ -152,6 +161,7 @@ impl Db {
                 name TEXT NOT NULL,
                 default_branch TEXT,
                 hidden INTEGER,
+                sort_order INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT,
                 last_opened_at TEXT
             );
@@ -238,8 +248,8 @@ impl Db {
         name: &str,
     ) -> Result<(), rusqlite::Error> {
         self.conn.execute(
-            "INSERT INTO repo (id, path, name, default_branch, hidden, created_at, last_opened_at)
-             VALUES (?, ?, ?, 'main', 0, datetime('now'), datetime('now'))",
+            "INSERT INTO repo (id, path, name, default_branch, hidden, sort_order, created_at, last_opened_at)
+             VALUES (?, ?, ?, 'main', 0, 0, datetime('now'), datetime('now'))",
             (id, path, name),
         )?;
         Ok(())
@@ -373,6 +383,19 @@ impl Db {
     }
 
     #[cfg(test)]
+    pub fn update_test_pipeline_item_agent_type(
+        &self,
+        id: &str,
+        agent_type: &str,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE pipeline_item SET agent_type = ? WHERE id = ?",
+            (agent_type, id),
+        )?;
+        Ok(())
+    }
+
+    #[cfg(test)]
     pub fn update_test_pipeline_item_base_ref(
         &self,
         id: &str,
@@ -435,7 +458,7 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo_id, issue_number, issue_title, prompt, stage,
              pr_number, pr_url, branch, agent_type, agent_provider, activity, activity_changed_at,
-             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at
+             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref
              FROM pipeline_item
              WHERE closed_at IS NULL
              ORDER BY updated_at DESC, created_at DESC",
@@ -462,6 +485,7 @@ impl Db {
                 last_output_preview: row.get(17)?,
                 created_at: row.get(18)?,
                 updated_at: row.get(19)?,
+                base_ref: row.get(20)?,
             })
         })?;
         rows.collect()
@@ -472,7 +496,7 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo_id, issue_number, issue_title, prompt, stage,
              pr_number, pr_url, branch, agent_type, agent_provider, activity, activity_changed_at,
-             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at
+             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref
              FROM pipeline_item
              WHERE closed_at IS NULL
                AND (
@@ -503,6 +527,7 @@ impl Db {
                 last_output_preview: row.get(17)?,
                 created_at: row.get(18)?,
                 updated_at: row.get(19)?,
+                base_ref: row.get(20)?,
             })
         })?;
         rows.collect()
@@ -510,7 +535,7 @@ impl Db {
 
     pub fn list_repos(&self) -> Result<Vec<Repo>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, path, name, default_branch, hidden, created_at, last_opened_at \
+            "SELECT id, path, name, default_branch, hidden, sort_order, created_at, last_opened_at \
              FROM repo WHERE hidden = 0 OR hidden IS NULL ORDER BY last_opened_at DESC",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -520,8 +545,9 @@ impl Db {
                 name: row.get(2)?,
                 default_branch: row.get(3)?,
                 hidden: row.get(4)?,
-                created_at: row.get(5)?,
-                last_opened_at: row.get(6)?,
+                sort_order: row.get(5)?,
+                created_at: row.get(6)?,
+                last_opened_at: row.get(7)?,
             })
         })?;
         rows.collect()
@@ -531,7 +557,7 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo_id, issue_number, issue_title, prompt, stage, \
              pr_number, pr_url, branch, agent_type, agent_provider, activity, activity_changed_at, \
-             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at \
+             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref \
              FROM pipeline_item WHERE repo_id = ? AND closed_at IS NULL \
              ORDER BY pin_order ASC, created_at DESC",
         )?;
@@ -557,6 +583,7 @@ impl Db {
                 last_output_preview: row.get(17)?,
                 created_at: row.get(18)?,
                 updated_at: row.get(19)?,
+                base_ref: row.get(20)?,
             })
         })?;
         rows.collect()
@@ -566,7 +593,7 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo_id, issue_number, issue_title, prompt, stage, \
              pr_number, pr_url, branch, agent_type, agent_provider, activity, activity_changed_at, \
-             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at \
+             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref \
              FROM pipeline_item WHERE id = ?",
         )?;
         let mut rows = stmt.query_map([id], |row| {
@@ -591,6 +618,7 @@ impl Db {
                 last_output_preview: row.get(17)?,
                 created_at: row.get(18)?,
                 updated_at: row.get(19)?,
+                base_ref: row.get(20)?,
             })
         })?;
         match rows.next() {
@@ -652,7 +680,7 @@ impl Db {
 
     pub fn get_repo(&self, id: &str) -> Result<Option<Repo>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, path, name, default_branch, hidden, created_at, last_opened_at
+            "SELECT id, path, name, default_branch, hidden, sort_order, created_at, last_opened_at
              FROM repo WHERE id = ?",
         )?;
         let mut rows = stmt.query_map([id], |row| {
@@ -662,8 +690,9 @@ impl Db {
                 name: row.get(2)?,
                 default_branch: row.get(3)?,
                 hidden: row.get(4)?,
-                created_at: row.get(5)?,
-                last_opened_at: row.get(6)?,
+                sort_order: row.get(5)?,
+                created_at: row.get(6)?,
+                last_opened_at: row.get(7)?,
             })
         })?;
         match rows.next() {
@@ -753,6 +782,48 @@ impl Db {
             ),
         )?;
         Ok(())
+    }
+
+    pub fn insert_repo(&self, repo: NewRepo<'_>) -> Result<(), rusqlite::Error> {
+        let sort_order: i64 = self.conn.query_row(
+            "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM repo",
+            [],
+            |row| row.get(0),
+        )?;
+        self.conn.execute(
+            "INSERT INTO repo (id, path, name, default_branch, hidden, sort_order, created_at, last_opened_at)
+             VALUES (?, ?, ?, ?, 0, ?, datetime('now'), datetime('now'))",
+            (
+                repo.id,
+                repo.path,
+                repo.name,
+                repo.default_branch,
+                sort_order,
+            ),
+        )?;
+        Ok(())
+    }
+
+    pub fn repo_path_exists(&self, path: &str) -> Result<bool, rusqlite::Error> {
+        let count: i64 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM repo WHERE path = ?", [path], |row| {
+                    row.get(0)
+                })?;
+        Ok(count > 0)
+    }
+
+    pub fn get_task_worktree_path(
+        &self,
+        pipeline_item_id: &str,
+    ) -> Result<Option<String>, rusqlite::Error> {
+        self.conn
+            .query_row(
+                "SELECT path FROM worktree WHERE pipeline_item_id = ? ORDER BY created_at DESC LIMIT 1",
+                [pipeline_item_id],
+                |row| row.get(0),
+            )
+            .optional()
     }
 
     pub fn upsert_worktree(

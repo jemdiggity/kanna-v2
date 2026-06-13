@@ -61,6 +61,20 @@ enum RepoCommands {
         #[arg(long)]
         server_url: Option<String>,
     },
+    /// Register an existing local git repository with the running desktop server
+    Add {
+        /// Existing local git repository path
+        #[arg(long)]
+        path: String,
+
+        /// Optional display name
+        #[arg(long)]
+        name: Option<String>,
+
+        /// Override the local Kanna server base URL
+        #[arg(long)]
+        server_url: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -86,6 +100,42 @@ enum TaskCommands {
         /// The task/pipeline_item ID
         #[arg(long)]
         task_id: String,
+
+        /// Override the local Kanna server base URL
+        #[arg(long)]
+        server_url: Option<String>,
+    },
+    /// Wait for a task to finish or close
+    Wait {
+        /// The task/pipeline_item ID
+        #[arg(long)]
+        task_id: String,
+
+        /// Maximum seconds to wait
+        #[arg(long, default_value_t = 600)]
+        timeout_secs: u64,
+
+        /// Poll interval in seconds
+        #[arg(long, default_value_t = 3)]
+        poll_secs: u64,
+
+        /// Condition to wait for: finished or closed
+        #[arg(long, default_value = "finished")]
+        until: String,
+
+        /// Override the local Kanna server base URL
+        #[arg(long)]
+        server_url: Option<String>,
+    },
+    /// Print recent task logs
+    Logs {
+        /// The task/pipeline_item ID
+        #[arg(long)]
+        task_id: String,
+
+        /// Number of recent relevant log events
+        #[arg(long)]
+        tail: Option<usize>,
 
         /// Override the local Kanna server base URL
         #[arg(long)]
@@ -233,6 +283,27 @@ struct RepoSummary {
     name: String,
 }
 
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct RepoDetail {
+    id: String,
+    path: String,
+    name: String,
+    default_branch: Option<String>,
+    hidden: Option<i64>,
+    sort_order: Option<i64>,
+    created_at: Option<String>,
+    last_opened_at: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct AddRepoRequest {
+    path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 struct TaskSummary {
@@ -258,6 +329,10 @@ struct TaskDetail {
     branch: Option<String>,
     pr_url: Option<String>,
     closed_at: Option<String>,
+    worktree_path: Option<String>,
+    commits_ahead: i64,
+    commits_behind: i64,
+    dirty: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -304,6 +379,8 @@ struct CreateTaskResponse {
     stage: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     agent_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    worktree_path: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -516,6 +593,10 @@ fn build_block_task_request(blocker_task_ids: Vec<String>) -> BlockTaskRequest {
     BlockTaskRequest { blocker_task_ids }
 }
 
+fn build_add_repo_request(path: String, name: Option<String>) -> AddRepoRequest {
+    AddRepoRequest { path, name }
+}
+
 fn parse_metadata_json(metadata: &Option<String>) -> Result<Option<Value>, String> {
     match metadata {
         Some(json_str) => serde_json::from_str(json_str)
@@ -549,6 +630,14 @@ fn task_get_path(task_id: &str) -> String {
     format!("/v1/tasks/{}", encode_path_segment(task_id))
 }
 
+fn task_logs_path(task_id: &str, tail: Option<usize>) -> String {
+    let task_id = encode_path_segment(task_id);
+    match tail {
+        Some(tail) => format!("/v1/tasks/{task_id}/logs?tail={tail}"),
+        None => format!("/v1/tasks/{task_id}/logs"),
+    }
+}
+
 async fn get_json<T: DeserializeOwned>(base_url: &str, path: &str) -> Result<T, String> {
     let response = reqwest::Client::new()
         .get(join_server_url(base_url, path))
@@ -560,6 +649,26 @@ async fn get_json<T: DeserializeOwned>(base_url: &str, path: &str) -> Result<T, 
         .map_err(|e| format!("request failed: {e}"))?;
     response
         .json::<T>()
+        .await
+        .map_err(|e| format!("failed to decode response: {e}"))
+}
+
+async fn get_text(base_url: &str, path: &str) -> Result<String, String> {
+    let response = reqwest::Client::new()
+        .get(join_server_url(base_url, path))
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {e}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|e| format!("failed to read error body: {e}"));
+        return Err(format!("request failed with status {status}: {body}"));
+    }
+    response
+        .text()
         .await
         .map_err(|e| format!("failed to decode response: {e}"))
 }
@@ -611,12 +720,68 @@ async fn list_repos_via_api(base_url: &str) -> Result<Vec<RepoSummary>, String> 
     get_json(base_url, "/v1/repos").await
 }
 
+async fn add_repo_via_api(base_url: &str, request: &AddRepoRequest) -> Result<RepoDetail, String> {
+    post_json(base_url, "/v1/repos", request).await
+}
+
 async fn list_tasks_via_api(base_url: &str) -> Result<Vec<TaskSummary>, String> {
     get_json(base_url, task_list_path()).await
 }
 
 async fn get_task_via_api(base_url: &str, task_id: &str) -> Result<TaskDetail, String> {
     get_json(base_url, &task_get_path(task_id)).await
+}
+
+async fn task_logs_via_api(
+    base_url: &str,
+    task_id: &str,
+    tail: Option<usize>,
+) -> Result<String, String> {
+    get_text(base_url, &task_logs_path(task_id, tail)).await
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WaitUntil {
+    Finished,
+    Closed,
+}
+
+fn parse_wait_until(value: &str) -> Result<WaitUntil, String> {
+    match value {
+        "finished" => Ok(WaitUntil::Finished),
+        "closed" => Ok(WaitUntil::Closed),
+        other => Err(format!("--until must be finished or closed, got {other}")),
+    }
+}
+
+fn task_matches_wait_until(task: &TaskDetail, until: WaitUntil) -> bool {
+    match until {
+        WaitUntil::Finished => {
+            task.closed_at.is_some() || task.activity.as_deref() == Some("unread")
+        }
+        WaitUntil::Closed => task.closed_at.is_some(),
+    }
+}
+
+async fn wait_task_via_api(
+    base_url: &str,
+    task_id: &str,
+    timeout_secs: u64,
+    poll_secs: u64,
+    until: WaitUntil,
+) -> Result<TaskDetail, String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    let poll_interval = std::time::Duration::from_secs(poll_secs.max(1));
+    loop {
+        let task = get_task_via_api(base_url, task_id).await?;
+        if task_matches_wait_until(&task, until) {
+            return Ok(task);
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(format!("timed out waiting for task {task_id}"));
+        }
+        tokio::time::sleep(poll_interval).await;
+    }
 }
 
 async fn create_task_via_api(
@@ -868,6 +1033,24 @@ async fn main() {
                     process::exit(1);
                 }
             }
+            RepoCommands::Add {
+                path,
+                name,
+                server_url,
+            } => {
+                let base_url = resolve_server_base_url_from_env(server_url.as_deref());
+                let request = build_add_repo_request(path, name);
+                let repo = add_repo_via_api(&base_url, &request)
+                    .await
+                    .unwrap_or_else(|e| {
+                        eprintln!("Error: {e}");
+                        process::exit(1);
+                    });
+                if let Err(e) = print_json(&repo) {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                }
+            }
         },
         Commands::Task { command } => match command {
             TaskCommands::List { server_url } => {
@@ -915,6 +1098,43 @@ async fn main() {
                     eprintln!("Error: {e}");
                     process::exit(1);
                 }
+            }
+            TaskCommands::Wait {
+                task_id,
+                timeout_secs,
+                poll_secs,
+                until,
+                server_url,
+            } => {
+                let until = parse_wait_until(&until).unwrap_or_else(|e| {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                });
+                let base_url = resolve_server_base_url_from_env(server_url.as_deref());
+                let task = wait_task_via_api(&base_url, &task_id, timeout_secs, poll_secs, until)
+                    .await
+                    .unwrap_or_else(|e| {
+                        eprintln!("Error: {e}");
+                        process::exit(1);
+                    });
+                if let Err(e) = print_json(&task) {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                }
+            }
+            TaskCommands::Logs {
+                task_id,
+                tail,
+                server_url,
+            } => {
+                let base_url = resolve_server_base_url_from_env(server_url.as_deref());
+                let logs = task_logs_via_api(&base_url, &task_id, tail)
+                    .await
+                    .unwrap_or_else(|e| {
+                        eprintln!("Error: {e}");
+                        process::exit(1);
+                    });
+                println!("{logs}");
             }
             TaskCommands::Create {
                 repo_id,
@@ -1091,14 +1311,17 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        advance_stage_via_api, block_task_via_api, build_block_task_request,
-        build_complete_stage_request, build_create_task_request, build_request_revision_request,
-        build_send_task_input_request, create_task_via_api, find_task_status_row, format_task_list,
-        get_task_via_api, resolve_optional_server_base_url, resolve_server_base_url,
-        resolve_stage_db_path, send_task_input_via_api, task_get_path, task_list_path,
-        task_not_found_error, unblock_task_via_api, close_task_via_api, TaskCreateOptions,
-        TaskDetail, TaskInputResponse, TaskSummary,
+        advance_stage_via_api, block_task_via_api, build_add_repo_request,
+        build_block_task_request, build_complete_stage_request, build_create_task_request,
+        build_request_revision_request, build_send_task_input_request, close_task_via_api,
+        create_task_via_api, find_task_status_row, format_task_list, format_task_status,
+        get_task_via_api, parse_wait_until, resolve_optional_server_base_url,
+        resolve_server_base_url, resolve_stage_db_path, send_task_input_via_api,
+        task_get_path, task_list_path, task_logs_path, task_matches_wait_until,
+        task_not_found_error, unblock_task_via_api, TaskCreateOptions, TaskDetail,
+        TaskInputResponse, TaskSummary, WaitUntil,
     };
+    use clap::Parser;
     use serde_json::json;
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -1207,6 +1430,104 @@ mod tests {
                 "input": "Please fix the failing typecheck",
             })
         );
+    }
+
+    #[test]
+    fn builds_add_repo_payload() {
+        let request =
+            build_add_repo_request("/Users/me/project".to_string(), Some("Project".to_string()));
+
+        assert_eq!(
+            serde_json::to_value(request).unwrap(),
+            json!({
+                "path": "/Users/me/project",
+                "name": "Project",
+            })
+        );
+    }
+
+    #[test]
+    fn parses_new_repo_and_task_subcommands() {
+        let cli = super::Cli::try_parse_from([
+            "kanna-cli",
+            "repo",
+            "add",
+            "--path",
+            "/tmp/project",
+            "--name",
+            "Project",
+            "--server-url",
+            "http://127.0.0.1:48120",
+        ])
+        .unwrap();
+        match cli.command {
+            super::Commands::Repo {
+                command:
+                    super::RepoCommands::Add {
+                        path,
+                        name,
+                        server_url,
+                    },
+            } => {
+                assert_eq!(path, "/tmp/project");
+                assert_eq!(name.as_deref(), Some("Project"));
+                assert_eq!(server_url.as_deref(), Some("http://127.0.0.1:48120"));
+            }
+            _ => panic!("expected repo add command"),
+        }
+
+        let cli = super::Cli::try_parse_from([
+            "kanna-cli",
+            "task",
+            "wait",
+            "--task-id",
+            "task-1",
+            "--timeout-secs",
+            "5",
+            "--poll-secs",
+            "1",
+            "--until",
+            "closed",
+        ])
+        .unwrap();
+        match cli.command {
+            super::Commands::Task {
+                command:
+                    super::TaskCommands::Wait {
+                        task_id,
+                        timeout_secs,
+                        poll_secs,
+                        until,
+                        ..
+                    },
+            } => {
+                assert_eq!(task_id, "task-1");
+                assert_eq!(timeout_secs, 5);
+                assert_eq!(poll_secs, 1);
+                assert_eq!(until, "closed");
+            }
+            _ => panic!("expected task wait command"),
+        }
+
+        let cli = super::Cli::try_parse_from([
+            "kanna-cli",
+            "task",
+            "logs",
+            "--task-id",
+            "task-1",
+            "--tail",
+            "25",
+        ])
+        .unwrap();
+        match cli.command {
+            super::Commands::Task {
+                command: super::TaskCommands::Logs { task_id, tail, .. },
+            } => {
+                assert_eq!(task_id, "task-1");
+                assert_eq!(tail, Some(25));
+            }
+            _ => panic!("expected task logs command"),
+        }
     }
 
     #[test]
@@ -1324,6 +1645,46 @@ mod tests {
     }
 
     #[test]
+    fn task_logs_uses_task_logs_endpoint() {
+        assert_eq!(
+            task_logs_path("task 1", Some(25)),
+            "/v1/tasks/task%201/logs?tail=25"
+        );
+        assert_eq!(task_logs_path("task-1", None), "/v1/tasks/task-1/logs");
+    }
+
+    #[test]
+    fn wait_until_matches_finished_and_closed_states() {
+        let mut task: TaskDetail = serde_json::from_value(json!({
+            "id": "task-1",
+            "repoId": "repo-1",
+            "title": "Wait",
+            "stage": "in progress",
+            "activity": "working",
+            "snippet": null,
+            "agentType": "pty",
+            "agentProvider": "claude",
+            "branch": "task-task-1",
+            "prUrl": null,
+            "closedAt": null,
+            "worktreePath": null,
+            "commitsAhead": 0,
+            "commitsBehind": 0,
+            "dirty": false
+        }))
+        .unwrap();
+
+        assert_eq!(parse_wait_until("finished"), Ok(WaitUntil::Finished));
+        assert_eq!(parse_wait_until("closed"), Ok(WaitUntil::Closed));
+        assert!(!task_matches_wait_until(&task, WaitUntil::Finished));
+        task.activity = Some("unread".to_string());
+        assert!(task_matches_wait_until(&task, WaitUntil::Finished));
+        assert!(!task_matches_wait_until(&task, WaitUntil::Closed));
+        task.closed_at = Some("2026-06-13 00:00:00".to_string());
+        assert!(task_matches_wait_until(&task, WaitUntil::Closed));
+    }
+
+    #[test]
     fn parses_task_summary_response_shape() {
         let task: TaskSummary = serde_json::from_value(json!({
             "id": "task-1",
@@ -1355,7 +1716,11 @@ mod tests {
             "agentProvider": "claude",
             "branch": "task-task-1",
             "prUrl": null,
-            "closedAt": null
+            "closedAt": null,
+            "worktreePath": "/tmp/worktree",
+            "commitsAhead": 2,
+            "commitsBehind": 1,
+            "dirty": true
         }))
         .unwrap();
 
@@ -1363,6 +1728,10 @@ mod tests {
         assert_eq!(task.activity.as_deref(), Some("working"));
         assert_eq!(task.agent_provider.as_deref(), Some("claude"));
         assert_eq!(task.branch.as_deref(), Some("task-task-1"));
+        assert_eq!(task.worktree_path.as_deref(), Some("/tmp/worktree"));
+        assert_eq!(task.commits_ahead, 2);
+        assert_eq!(task.commits_behind, 1);
+        assert!(task.dirty);
     }
 
     #[test]
@@ -1486,7 +1855,11 @@ mod tests {
                 "agentProvider": "claude",
                 "branch": "task-task-123",
                 "prUrl": "https://github.com/acme/kanna/pull/1",
-                "closedAt": null
+                "closedAt": null,
+                "worktreePath": null,
+                "commitsAhead": 0,
+                "commitsBehind": 0,
+                "dirty": false
             }"#,
         );
         let (base_url, handle) = serve_single_http_response(response).await;
