@@ -113,6 +113,13 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
   const sessionStore = createSessionStore();
   const extra = readKannaExpoExtra(readExpoConfig());
   let forceCloud = options.forceCloud ?? resolveForceCloud();
+  // Lazily create the cloud task index only when the live subscription is
+  // actually used (sign-in time, when Firebase is initialized). Creating it
+  // eagerly would call getFirestore() before any Firebase app exists in
+  // LAN-only / no-Firebase paths.
+  let cloudTaskIndex: ReturnType<typeof createFirestoreTaskIndex> | null = null;
+  const getCloudTaskIndex = () =>
+    (cloudTaskIndex ??= options.taskIndex ?? createFirestoreTaskIndex());
   const resolveClient = () =>
     createClientForMode({
       authSession,
@@ -129,7 +136,9 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
     });
   let activeClient = resolveClient();
   const client = createDelegatingClient(() => activeClient);
-  const controller = createMobileController(client, sessionStore, authSession);
+  const controller = createMobileController(client, sessionStore, authSession, {
+    subscribeCloudTasks: (uid, onUpdate) => getCloudTaskIndex().subscribeRecentTasks(uid, onUpdate),
+  });
   let persistencePromise: Promise<SessionPersistence> | null = persistence
     ? Promise.resolve(persistence)
     : null;

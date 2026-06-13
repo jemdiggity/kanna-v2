@@ -307,7 +307,8 @@ describe("createAppModel", () => {
           ownerLocalTaskId: "task-1",
           ownerOnline: false
         }
-      ])
+      ]),
+      subscribeRecentTasks: vi.fn(() => () => {})
     };
 
     const model = createAppModel({
@@ -345,7 +346,8 @@ describe("createAppModel", () => {
       getIdToken: vi.fn().mockResolvedValue("id-token-1")
     };
     const taskIndex = {
-      listRecentTasks: vi.fn(async () => [])
+      listRecentTasks: vi.fn(async () => []),
+      subscribeRecentTasks: vi.fn(() => () => {})
     };
     const model = createAppModel({
       fetchImpl: createFetchMock(),
@@ -421,7 +423,8 @@ describe("createAppModel", () => {
       throw new Error("LAN should not be called for standalone production cloud");
     }) as FetchLike;
     const taskIndex = {
-      listRecentTasks: vi.fn(async () => [])
+      listRecentTasks: vi.fn(async () => []),
+      subscribeRecentTasks: vi.fn(() => () => {})
     };
     const model = createAppModel({
       fetchImpl,
@@ -451,7 +454,8 @@ describe("createAppModel", () => {
   it("falls back to a trusted Bonjour LAN endpoint when signed-in cloud has no tasks", async () => {
     const authSession = createSignedInAuthSession();
     const taskIndex = {
-      listRecentTasks: vi.fn(async () => [])
+      listRecentTasks: vi.fn(async () => []),
+      subscribeRecentTasks: vi.fn(() => () => {})
     };
     const fetchImpl = createTrustedDesktopFetchMock();
     const model = createAppModel({
@@ -507,7 +511,8 @@ describe("createAppModel", () => {
   it("uses cloud instead of trusted LAN fallback when force-cloud is enabled", async () => {
     const authSession = createSignedInAuthSession();
     const taskIndex = {
-      listRecentTasks: vi.fn(async () => [])
+      listRecentTasks: vi.fn(async () => []),
+      subscribeRecentTasks: vi.fn(() => () => {})
     };
     const fetchImpl = createTrustedDesktopFetchMock();
     const model = createAppModel({
@@ -562,7 +567,8 @@ describe("createAppModel", () => {
   it("skips Bonjour LAN endpoints whose status belongs to a different desktop", async () => {
     const authSession = createSignedInAuthSession();
     const taskIndex = {
-      listRecentTasks: vi.fn(async () => [])
+      listRecentTasks: vi.fn(async () => []),
+      subscribeRecentTasks: vi.fn(() => () => {})
     };
     const fetchImpl = vi.fn(async (input) => {
       const url = typeof input === "string" ? input : input.toString();

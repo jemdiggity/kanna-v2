@@ -34,10 +34,20 @@ export interface MobileController {
 
 const BACKGROUND_REFRESH_INTERVAL_MS = 3_000;
 
+export interface MobileControllerOptions {
+  // Live cloud task subscription (onSnapshot). When provided and signed in,
+  // the controller reads tasks via this push stream instead of polling.
+  subscribeCloudTasks?: (
+    uid: string,
+    onUpdate: (tasks: TaskSummary[]) => void,
+  ) => () => void;
+}
+
 export function createMobileController(
   client: KannaClient,
   store: SessionStore,
-  authSession?: MobileAuthSession
+  authSession?: MobileAuthSession,
+  options: MobileControllerOptions = {}
 ): MobileController {
   let activeTaskTerminal:
     | {
@@ -54,6 +64,7 @@ export function createMobileController(
   let backgroundRefreshTimer: ReturnType<typeof setInterval> | null = null;
   let backgroundRefreshInFlight = false;
   let authUnsubscribe: (() => void) | null = null;
+  let cloudTasksUnsubscribe: (() => void) | null = null;
   let bootstrapInFlight: Promise<void> | null = null;
 
   const setTerminalStartupError = (taskId: string, error: unknown) => {
@@ -217,6 +228,28 @@ export function createMobileController(
     reconcileSelectedTask();
   };
 
+  const applyLiveCloudTasks = (tasks: TaskSummary[]) => {
+    store.setRecentTasks(tasks);
+    const selectedRepoId = store.getState().selectedRepoId;
+    store.setRepoTasks(
+      selectedRepoId ? tasks.filter((task) => task.repoId === selectedRepoId) : [],
+    );
+    void refreshSearchResults();
+    reconcileSelectedTask();
+  };
+
+  const startCloudTaskSubscription = (uid: string): boolean => {
+    if (!options.subscribeCloudTasks) return false;
+    stopCloudTaskSubscription();
+    cloudTasksUnsubscribe = options.subscribeCloudTasks(uid, applyLiveCloudTasks);
+    return true;
+  };
+
+  const stopCloudTaskSubscription = () => {
+    cloudTasksUnsubscribe?.();
+    cloudTasksUnsubscribe = null;
+  };
+
   const startBackgroundRefresh = () => {
     if (backgroundRefreshTimer) {
       return;
@@ -252,6 +285,9 @@ export function createMobileController(
       authUnsubscribe = authSession.subscribe((authState) => {
         const previousAuthStatus = store.getState().auth.status;
         store.setAuthState(authState);
+        if (authState.status !== "signedIn") {
+          stopCloudTaskSubscription();
+        }
         if (previousAuthStatus !== "signedIn" && authState.status === "signedIn") {
           void bootstrap().catch(fail);
         }
@@ -289,7 +325,18 @@ export function createMobileController(
         store.setConnectionMode(status.lanHost === "cloud" ? "remote" : "lan");
         store.setConnectionState("connected");
         await loadCollections();
-        startBackgroundRefresh();
+        // When connected to the cloud and signed in, read tasks via a live
+        // onSnapshot subscription. In LAN mode (including cloud→LAN fallback)
+        // keep polling — the live cloud stream would otherwise clobber LAN
+        // tasks with empty cloud data.
+        const auth = authSession?.getState();
+        const useLiveCloudTasks =
+          store.getState().connectionMode === "remote" &&
+          auth?.status === "signedIn" &&
+          startCloudTaskSubscription(auth.user.uid);
+        if (!useLiveCloudTasks) {
+          startBackgroundRefresh();
+        }
         const selectedTaskId = store.getState().selectedTaskId;
         if (selectedTaskId) {
           startTaskView(selectedTaskId);
