@@ -9,10 +9,12 @@
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::process::{Child, Command};
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -56,6 +58,21 @@ enum SessionStatus {
 }
 
 #[allow(dead_code)]
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum ErrorCode {
+    SessionNotFound,
+    SessionAlreadyExists,
+    HandoffLost,
+    HandoffVersionMismatch,
+    PtySpawnFailed,
+    PtyCloneFailed,
+    HeadlessTerminalInitFailed,
+    WriteFailed,
+    UnknownSignal,
+}
+
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 enum Evt {
@@ -83,6 +100,7 @@ enum Evt {
     },
     Ok,
     Error {
+        code: Option<ErrorCode>,
         message: String,
     },
     ShuttingDown,
@@ -196,18 +214,6 @@ impl ClientConn {
             .unwrap_or_else(|e| panic!("failed to parse: {} — {:?}", e, line.trim()))
     }
 
-    fn collect_output(&mut self, n: usize) -> Vec<u8> {
-        let mut collected = Vec::new();
-        while collected.len() < n {
-            match self.recv() {
-                Evt::Output { data, .. } => collected.extend_from_slice(&data),
-                Evt::Exit { .. } => break,
-                _ => {}
-            }
-        }
-        collected
-    }
-
     fn drain_output(&mut self, timeout: Duration) -> Vec<u8> {
         self.writer.set_read_timeout(Some(timeout)).unwrap();
         let mut collected = Vec::new();
@@ -254,26 +260,49 @@ fn attach(conn: &mut ClientConn, id: &str) {
         match conn.recv() {
             Evt::Snapshot { .. } => break,
             Evt::StatusChanged { .. } => continue,
-            Evt::Error { message } => panic!("attach failed: {}", message),
+            Evt::Error { code, message } => panic!("attach failed: {:?}: {}", code, message),
             other => panic!("expected Snapshot, got: {:?}", other),
         }
     }
 }
 
-fn send_input(conn: &mut ClientConn, id: &str, data: &[u8]) {
+fn send_input(conn: &mut ClientConn, id: &str, data: &[u8]) -> Vec<u8> {
     conn.send(&Cmd::Input {
         session_id: id.to_string(),
         data: data.to_vec(),
     });
+    let mut output = Vec::new();
     loop {
         match conn.recv() {
-            Evt::Ok => break,
-            Evt::Output { .. } => continue,
+            Evt::Ok => break output,
+            Evt::Output { data, .. } => output.extend_from_slice(&data),
             Evt::StatusChanged { .. } => continue,
-            Evt::Error { message } => panic!("input failed: {}", message),
+            Evt::Error { code, message } => panic!("input failed: {:?}: {}", code, message),
             other => panic!("expected Ok, got: {:?}", other),
         }
     }
+}
+
+fn send_input_and_wait_for_echo(conn: &mut ClientConn, id: &str, data: &[u8], expected: &str) {
+    let mut output = send_input(conn, id, data);
+    while !String::from_utf8_lossy(&output).contains(expected) {
+        match conn.recv() {
+            Evt::Output { data, .. } => output.extend_from_slice(&data),
+            Evt::StatusChanged { .. } => continue,
+            Evt::Exit { .. } => break,
+            other => panic!(
+                "expected Output while waiting for {:?}, got: {:?}",
+                expected, other
+            ),
+        }
+    }
+    let output_str = String::from_utf8_lossy(&output);
+    assert!(
+        output_str.contains(expected),
+        "expected output {:?}, got: {:?}",
+        expected,
+        output_str
+    );
 }
 
 fn request_snapshot(conn: &mut ClientConn, id: &str) -> SnapshotPayload {
@@ -288,7 +317,7 @@ fn request_snapshot(conn: &mut ClientConn, id: &str) -> SnapshotPayload {
             assert_eq!(session_id, id);
             snapshot
         }
-        Evt::Error { message } => panic!("snapshot failed: {}", message),
+        Evt::Error { code, message } => panic!("snapshot failed: {:?}: {}", code, message),
         other => panic!("expected Snapshot, got: {:?}", other),
     }
 }
@@ -302,10 +331,250 @@ fn test_dir(name: &str) -> PathBuf {
 }
 
 fn cleanup(dir: &PathBuf) {
+    let _ = std::fs::remove_file(compute_socket_path(dir));
     let _ = std::fs::remove_dir_all(dir);
 }
 
+struct FakeOldDaemon {
+    requests: Arc<Mutex<Vec<u32>>>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl FakeOldDaemon {
+    fn start(
+        dir: &PathBuf,
+        handler: impl Fn(UnixStream, Arc<Mutex<Vec<u32>>>) + Send + 'static,
+    ) -> Self {
+        cleanup(dir);
+        std::fs::create_dir_all(dir).unwrap();
+        let socket_path = compute_socket_path(dir);
+        let pid_path = dir.join("daemon.pid");
+        let _ = std::fs::remove_file(&socket_path);
+        std::fs::write(&pid_path, std::process::id().to_string()).unwrap();
+        let listener = UnixListener::bind(&socket_path).expect("failed to bind fake daemon socket");
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let requests_for_thread = requests.clone();
+        let handle = std::thread::spawn(move || {
+            handler(
+                listener
+                    .accept()
+                    .expect("fake daemon should receive first handoff request")
+                    .0,
+                requests_for_thread.clone(),
+            );
+            listener.set_nonblocking(true).unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while std::time::Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        handler(stream, requests_for_thread);
+                        break;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("fake daemon accept failed: {}", error),
+                }
+            }
+        });
+        Self {
+            requests,
+            handle: Some(handle),
+        }
+    }
+
+    fn request_versions(&self) -> Vec<u32> {
+        self.requests.lock().unwrap().clone()
+    }
+
+    fn join(mut self) -> Vec<u32> {
+        if let Some(handle) = self.handle.take() {
+            handle.join().expect("fake daemon thread panicked");
+        }
+        self.request_versions()
+    }
+}
+
+impl Drop for FakeOldDaemon {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+fn read_handoff_version(stream: &mut UnixStream) -> u32 {
+    let mut line = String::new();
+    BufReader::new(stream.try_clone().unwrap())
+        .read_line(&mut line)
+        .expect("failed to read handoff request");
+    let value: Value = serde_json::from_str(line.trim()).expect("invalid handoff command json");
+    assert_eq!(value["type"], "Handoff");
+    value["version"].as_u64().expect("missing handoff version") as u32
+}
+
+fn write_event_line(stream: &mut UnixStream, value: Value) {
+    let mut line = serde_json::to_string(&value).unwrap();
+    line.push('\n');
+    stream.write_all(line.as_bytes()).unwrap();
+    stream.flush().unwrap();
+}
+
+fn unique_session_id(prefix: &str) -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    format!("{}-{}-{}", prefix, std::process::id(), nanos)
+}
+
 // ---- Tests ----
+
+/// If the old daemon accepts the v2 handoff command and then drops the
+/// connection, the new daemon cannot know whether sessions were detached.
+/// It must not send a second compat handoff request.
+#[test]
+fn test_handoff_ambiguous_post_send_failure_does_not_retry_compat() {
+    let dir = test_dir("ambiguous-no-retry");
+    let fake = FakeOldDaemon::start(&dir, |mut stream, requests| {
+        let version = read_handoff_version(&mut stream);
+        requests.lock().unwrap().push(version);
+        drop(stream);
+    });
+
+    let daemon = DaemonHandle::start_in(&dir);
+    let requests = fake.join();
+    assert_eq!(
+        requests,
+        vec![2],
+        "ambiguous failure after sending Handoff must not retry compat"
+    );
+
+    let mut conn = daemon.connect();
+    spawn_echo(&mut conn, "fresh-after-ambiguous-handoff");
+    attach(&mut conn, "fresh-after-ambiguous-handoff");
+
+    drop(daemon);
+    cleanup(&dir);
+}
+
+/// If the new daemon receives session metadata but the SCM_RIGHTS fd transfer
+/// fails, it should retain the lost session id so attach can report the
+/// specific handoff-loss condition instead of a generic missing session.
+#[test]
+fn test_handoff_fd_transfer_failure_reports_handoff_lost_on_attach() {
+    let dir = test_dir("fd-transfer-lost");
+    let lost_session_id = unique_session_id("lost-session");
+    let fake_session_id = lost_session_id.clone();
+    let fake = FakeOldDaemon::start(&dir, move |mut stream, requests| {
+        let version = read_handoff_version(&mut stream);
+        requests.lock().unwrap().push(version);
+        write_event_line(
+            &mut stream,
+            serde_json::json!({
+                "type": "HandoffReady",
+                "sessions": [{
+                    "session_id": fake_session_id,
+                    "pid": std::process::id(),
+                    "cwd": "/tmp",
+                    "rows": 24,
+                    "cols": 80,
+                    "snapshot": {
+                        "version": 1,
+                        "rows": 24,
+                        "cols": 80,
+                        "cursor_row": 0,
+                        "cursor_col": 0,
+                        "cursor_visible": true,
+                        "saved_at": 0,
+                        "sequence": 0,
+                        "vt": "metadata survived handoff failure"
+                    },
+                    "status": "idle"
+                }]
+            }),
+        );
+        drop(stream);
+    });
+
+    let daemon = DaemonHandle::start_in(&dir);
+    let requests = fake.join();
+    assert_eq!(
+        requests,
+        vec![2],
+        "fd transfer failure after metadata must not retry compat"
+    );
+
+    let mut conn = daemon.connect();
+    conn.send(&Cmd::AttachSnapshot {
+        session_id: lost_session_id.clone(),
+    });
+    match conn.recv() {
+        Evt::Error {
+            code: Some(ErrorCode::HandoffLost),
+            message,
+        } => {
+            assert!(
+                message.contains("session lost during daemon handoff"),
+                "expected handoff-loss message, got: {:?}",
+                message
+            );
+            assert!(
+                message.contains("failed to receive PTY fd"),
+                "expected fd-transfer reason, got: {:?}",
+                message
+            );
+        }
+        other => panic!("expected HandoffLost attach error, got: {:?}", other),
+    }
+
+    drop(daemon);
+    cleanup(&dir);
+}
+
+/// Explicit protocol version mismatch is the safe case for falling back to the
+/// compat handoff version.
+#[test]
+fn test_handoff_explicit_version_mismatch_retries_compat() {
+    let dir = test_dir("version-mismatch-compat");
+    let fake = FakeOldDaemon::start(&dir, |mut stream, requests| {
+        let version = read_handoff_version(&mut stream);
+        requests.lock().unwrap().push(version);
+        if version == 2 {
+            write_event_line(
+                &mut stream,
+                serde_json::json!({
+                    "type": "Error",
+                    "code": "handoff_version_mismatch",
+                    "message": "handoff version mismatch: expected 1, got 2"
+                }),
+            );
+        } else {
+            write_event_line(
+                &mut stream,
+                serde_json::json!({
+                    "type": "HandoffReady",
+                    "sessions": []
+                }),
+            );
+        }
+    });
+
+    let daemon = DaemonHandle::start_in(&dir);
+    let requests = fake.join();
+    assert_eq!(
+        requests,
+        vec![2, 1],
+        "explicit version mismatch should retry exactly once with compat"
+    );
+
+    let mut conn = daemon.connect();
+    spawn_echo(&mut conn, "fresh-after-compat-fallback");
+    attach(&mut conn, "fresh-after-compat-fallback");
+
+    drop(daemon);
+    cleanup(&dir);
+}
 
 /// Handoff transfers a live session to the new daemon.
 /// Child process (/bin/cat) survives and I/O works through daemon B.
@@ -331,13 +600,11 @@ fn test_handoff_transfers_session() {
     attach(&mut conn_b, "sess-handoff");
 
     // Send input — should work through daemon B
-    send_input(&mut conn_b, "sess-handoff", b"after-handoff\n");
-    let output = conn_b.collect_output(13);
-    let output_str = String::from_utf8_lossy(&output);
-    assert!(
-        output_str.contains("after-handoff"),
-        "I/O should work after handoff, got: {:?}",
-        output_str
+    send_input_and_wait_for_echo(
+        &mut conn_b,
+        "sess-handoff",
+        b"after-handoff\n",
+        "after-handoff",
     );
 
     drop(daemon_b);
@@ -377,14 +644,11 @@ fn test_handoff_keeps_live_session_when_snapshot_fails() {
     let daemon_b = DaemonHandle::start_in(&dir);
     let mut conn_b = daemon_b.connect();
     attach(&mut conn_b, "sess-degraded");
-    send_input(&mut conn_b, "sess-degraded", b"after-handoff\n");
-
-    let output = conn_b.collect_output(13);
-    let output_str = String::from_utf8_lossy(&output);
-    assert!(
-        output_str.contains("after-handoff"),
-        "degraded session should survive handoff, got: {:?}",
-        output_str
+    send_input_and_wait_for_echo(
+        &mut conn_b,
+        "sess-degraded",
+        b"after-handoff\n",
+        "after-handoff",
     );
 
     let snapshot = request_snapshot(&mut conn_b, "sess-degraded");
@@ -403,14 +667,11 @@ fn test_handoff_keeps_live_session_when_snapshot_fails() {
     let daemon_c = DaemonHandle::start_in(&dir);
     let mut conn_c = daemon_c.connect();
     attach(&mut conn_c, "sess-degraded");
-    send_input(&mut conn_c, "sess-degraded", b"after-second-handoff\n");
-
-    let output = conn_c.collect_output(20);
-    let output_str = String::from_utf8_lossy(&output);
-    assert!(
-        output_str.contains("after-second-handoff"),
-        "degraded session should remain live after adoption, got: {:?}",
-        output_str
+    send_input_and_wait_for_echo(
+        &mut conn_c,
+        "sess-degraded",
+        b"after-second-handoff\n",
+        "after-second-handoff",
     );
 
     drop(daemon_c);
@@ -432,12 +693,7 @@ fn test_handoff_empty() {
     let mut conn = daemon_b.connect();
     spawn_echo(&mut conn, "fresh-session");
     attach(&mut conn, "fresh-session");
-    send_input(&mut conn, "fresh-session", b"works\n");
-    let output = conn.collect_output(5);
-    assert!(
-        String::from_utf8_lossy(&output).contains("works"),
-        "fresh session should work after empty handoff"
-    );
+    send_input_and_wait_for_echo(&mut conn, "fresh-session", b"works\n", "works");
 
     drop(daemon_b);
     cleanup(&dir);
@@ -474,18 +730,11 @@ fn test_handoff_multiple_sessions() {
     for i in 0..3 {
         let mut c = daemon_b.connect();
         attach(&mut c, &format!("sess-{}", i));
-        send_input(
+        send_input_and_wait_for_echo(
             &mut c,
             &format!("sess-{}", i),
             format!("via-b-{}\n", i).as_bytes(),
-        );
-        let output = c.collect_output(6);
-        let s = String::from_utf8_lossy(&output);
-        assert!(
-            s.contains(&format!("via-b-{}", i)),
-            "session {} should work after handoff, got: {:?}",
-            i,
-            s
+            &format!("via-b-{}", i),
         );
     }
 
