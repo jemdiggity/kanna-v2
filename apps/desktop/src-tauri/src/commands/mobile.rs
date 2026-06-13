@@ -424,9 +424,34 @@ fn build_server_config(state: &MobileServerState) -> Result<String, String> {
     let device_token = generate_device_token()?;
     let relay_url = relay_url();
     let credential = desktop_credential(&state.config_path)?;
+    let firebase_auth_emulator_url = firebase_auth_emulator_url();
+    let firebase_firestore_emulator_host = firebase_firestore_emulator_host();
+    let firebase_project_id = std::env::var("KANNA_FIREBASE_PROJECT_ID")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "kanna-local".to_string());
+    let firebase_config = format!(
+        "firebase_project_id = \"{}\"\n{}{}",
+        escape_toml_string(&firebase_project_id),
+        firebase_auth_emulator_url
+            .as_ref()
+            .map(|url| format!(
+                "firebase_auth_emulator_url = \"{}\"\n",
+                escape_toml_string(url)
+            ))
+            .unwrap_or_default(),
+        firebase_firestore_emulator_host
+            .as_ref()
+            .map(|host| format!(
+                "firebase_firestore_emulator_host = \"{}\"\n",
+                escape_toml_string(host)
+            ))
+            .unwrap_or_default(),
+    );
 
     Ok(format!(
-        "relay_url = \"{}\"\ndevice_token = \"{}\"\ndaemon_dir = \"{}\"\ndb_path = \"{}\"\ndesktop_id = \"{}\"\ndesktop_secret = \"{}\"\ndesktop_name = \"{}\"\nserver_version = \"{}\"\nlan_host = \"0.0.0.0\"\nlan_port = {}\npairing_store_path = \"{}\"\n",
+        "relay_url = \"{}\"\ndevice_token = \"{}\"\ndaemon_dir = \"{}\"\ndb_path = \"{}\"\ndesktop_id = \"{}\"\ndesktop_secret = \"{}\"\ndesktop_name = \"{}\"\nserver_version = \"{}\"\n{}lan_host = \"0.0.0.0\"\nlan_port = {}\npairing_store_path = \"{}\"\n",
         escape_toml_string(&relay_url),
         escape_toml_string(&device_token),
         escape_toml_string(&daemon_dir),
@@ -435,6 +460,7 @@ fn build_server_config(state: &MobileServerState) -> Result<String, String> {
         escape_toml_string(&credential.desktop_secret),
         escape_toml_string(&state.desktop_name),
         escape_toml_string(current_server_version()),
+        firebase_config,
         local_server_port(),
         escape_toml_string(&pairing_store_path.to_string_lossy()),
     ))
@@ -459,8 +485,17 @@ fn server_config_matches_runtime(config_path: &Path, desktop_id: &str) -> bool {
     let Ok(credential) = desktop_credential(config_path) else {
         return false;
     };
+    let expected_device_token = std::env::var("KANNA_E2E_DEVICE_TOKEN")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let expected_firebase_project_id = std::env::var("KANNA_FIREBASE_PROJECT_ID")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "kanna-local".to_string());
 
-    [
+    let mut required_lines = vec![
         format!("relay_url = \"{}\"", escape_toml_string(&relay_url())),
         format!("daemon_dir = \"{}\"", escape_toml_string(&daemon_dir)),
         format!(
@@ -476,10 +511,32 @@ fn server_config_matches_runtime(config_path: &Path, desktop_id: &str) -> bool {
             "server_version = \"{}\"",
             escape_toml_string(current_server_version())
         ),
+        format!(
+            "firebase_project_id = \"{}\"",
+            escape_toml_string(&expected_firebase_project_id)
+        ),
         format!("lan_port = {}", local_server_port()),
-    ]
-    .iter()
-    .all(|line| content.contains(line))
+    ];
+    if let Some(device_token) = expected_device_token {
+        required_lines.push(format!(
+            "device_token = \"{}\"",
+            escape_toml_string(&device_token)
+        ));
+    }
+    if let Some(url) = firebase_auth_emulator_url() {
+        required_lines.push(format!(
+            "firebase_auth_emulator_url = \"{}\"",
+            escape_toml_string(&url)
+        ));
+    }
+    if let Some(host) = firebase_firestore_emulator_host() {
+        required_lines.push(format!(
+            "firebase_firestore_emulator_host = \"{}\"",
+            escape_toml_string(&host)
+        ));
+    }
+
+    required_lines.iter().all(|line| content.contains(line))
 }
 
 const PRODUCTION_RELAY_URL: &str = "wss://relay.kanna.build";
@@ -505,6 +562,43 @@ fn relay_url_for_mode(debug_assertions: bool) -> String {
         return PRODUCTION_RELAY_URL.to_string();
     }
     String::new()
+}
+
+fn firebase_auth_emulator_url() -> Option<String> {
+    if let Ok(host) = std::env::var("FIREBASE_AUTH_EMULATOR_HOST") {
+        let trimmed = host.trim();
+        if !trimmed.is_empty() {
+            return Some(format!(
+                "http://{}",
+                trimmed
+                    .trim_start_matches("http://")
+                    .trim_start_matches("https://")
+            ));
+        }
+    }
+    if let Ok(port) = std::env::var("KANNA_FIREBASE_AUTH_PORT") {
+        let trimmed = port.trim();
+        if !trimmed.is_empty() {
+            return Some(format!("http://127.0.0.1:{trimmed}"));
+        }
+    }
+    None
+}
+
+fn firebase_firestore_emulator_host() -> Option<String> {
+    if let Ok(host) = std::env::var("FIRESTORE_EMULATOR_HOST") {
+        let trimmed = host.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    if let Ok(port) = std::env::var("KANNA_FIREBASE_FIRESTORE_PORT") {
+        let trimmed = port.trim();
+        if !trimmed.is_empty() {
+            return Some(format!("127.0.0.1:{trimmed}"));
+        }
+    }
+    None
 }
 
 fn resolved_db_path(state: &MobileServerState) -> Result<PathBuf, String> {
@@ -867,6 +961,13 @@ fn is_desktop_uuid(value: &str) -> bool {
 }
 
 fn generate_device_token() -> Result<String, String> {
+    if let Ok(token) = std::env::var("KANNA_E2E_DEVICE_TOKEN") {
+        let trimmed = token.trim();
+        if !trimmed.is_empty() {
+            return Ok(trimmed.to_string());
+        }
+    }
+
     generate_random_hex(16)
 }
 
@@ -1465,6 +1566,12 @@ mod tests {
             unset_env_var("KANNA_RELAY_URL");
             unset_env_var("KANNA_DB_NAME");
             unset_env_var("KANNA_DB_PATH");
+            unset_env_var("KANNA_E2E_DEVICE_TOKEN");
+            unset_env_var("KANNA_FIREBASE_PROJECT_ID");
+            unset_env_var("KANNA_FIREBASE_AUTH_PORT");
+            unset_env_var("KANNA_FIREBASE_FIRESTORE_PORT");
+            unset_env_var("FIREBASE_AUTH_EMULATOR_HOST");
+            unset_env_var("FIRESTORE_EMULATOR_HOST");
         }
 
         let state = MobileServerState {
@@ -1489,6 +1596,70 @@ mod tests {
         )));
         assert!(config.contains("db_path = \"/tmp/build.kanna/kanna-v2.db\""));
         assert!(config.contains("lan_port = 48120"));
+    }
+
+    #[test]
+    fn build_server_config_includes_firebase_emulator_settings_when_provided() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+        unsafe {
+            set_env_var("KANNA_FIREBASE_PROJECT_ID", "kanna-local");
+            set_env_var("KANNA_FIREBASE_AUTH_PORT", "19099");
+            set_env_var("KANNA_FIREBASE_FIRESTORE_PORT", "18080");
+            unset_env_var("FIREBASE_AUTH_EMULATOR_HOST");
+            unset_env_var("FIRESTORE_EMULATOR_HOST");
+            unset_env_var("KANNA_E2E_DEVICE_TOKEN");
+        }
+
+        let state = MobileServerState {
+            status: "stopped".to_string(),
+            desktop_name: "Studio Mac".to_string(),
+            api_base_url: server_base_url(48120),
+            config_path: PathBuf::from("/tmp/build.kanna/Kanna/server.toml"),
+            started: false,
+        };
+
+        let config = build_server_config(&state).unwrap();
+        assert!(config.contains("firebase_project_id = \"kanna-local\""));
+        assert!(config.contains("firebase_auth_emulator_url = \"http://127.0.0.1:19099\""));
+        assert!(config.contains("firebase_firestore_emulator_host = \"127.0.0.1:18080\""));
+
+        unsafe {
+            unset_env_var("KANNA_FIREBASE_PROJECT_ID");
+            unset_env_var("KANNA_FIREBASE_AUTH_PORT");
+            unset_env_var("KANNA_FIREBASE_FIRESTORE_PORT");
+        }
+    }
+
+    #[test]
+    fn build_server_config_uses_seeded_e2e_device_token_when_provided() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+        unsafe {
+            set_env_var("KANNA_E2E_DEVICE_TOKEN", "e2e-token");
+            unset_env_var("KANNA_MOBILE_SERVER_PORT");
+            unset_env_var("KANNA_RELAY_PORT");
+            unset_env_var("KANNA_RELAY_URL");
+            unset_env_var("KANNA_DB_NAME");
+            unset_env_var("KANNA_DB_PATH");
+            unset_env_var("KANNA_FIREBASE_AUTH_PORT");
+            unset_env_var("KANNA_FIREBASE_FIRESTORE_PORT");
+            unset_env_var("FIREBASE_AUTH_EMULATOR_HOST");
+            unset_env_var("FIRESTORE_EMULATOR_HOST");
+        }
+
+        let state = MobileServerState {
+            status: "stopped".to_string(),
+            desktop_name: "Studio Mac".to_string(),
+            api_base_url: server_base_url(48120),
+            config_path: PathBuf::from("/tmp/build.kanna/Kanna/server.toml"),
+            started: false,
+        };
+
+        let config = build_server_config(&state).unwrap();
+        assert!(config.contains("device_token = \"e2e-token\""));
+
+        unsafe {
+            unset_env_var("KANNA_E2E_DEVICE_TOKEN");
+        }
     }
 
     #[test]

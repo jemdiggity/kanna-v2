@@ -369,10 +369,18 @@ async function main(): Promise<void> {
     KANNA_FIREBASE_FIRESTORE_PORT: String(firebaseFirestorePort),
     KANNA_FIREBASE_FUNCTIONS_PORT: String(firebaseFunctionsPort),
     KANNA_FIREBASE_UI_PORT: String(firebaseUiPort),
+    KANNA_FIREBASE_PROJECT_ID: "kanna-local",
+    FIREBASE_PROJECT_ID: "kanna-local",
+    FIREBASE_AUTH_EMULATOR_HOST: `127.0.0.1:${firebaseAuthPort}`,
+    FIRESTORE_EMULATOR_HOST: `127.0.0.1:${firebaseFirestorePort}`,
+    KANNA_E2E_DEVICE_TOKEN: "e2e-token",
     KANNA_E2E_AWAIT_CLOUD_PUBLISH: "1",
+    RUST_LOG: process.env.RUST_LOG ?? "kanna_server::ksp=warn",
   };
+  const relayUrl = `ws://127.0.0.1:${relayPort}`;
   const relayEnv = {
     KANNA_RELAY_PORT: String(relayPort),
+    KANNA_RELAY_URL: relayUrl,
   };
   const primaryDbName = `test-${worktreeName}-primary.db`;
   const primaryDaemonDir = join(repoRoot, ".kanna-daemon-e2e", runSuffix);
@@ -571,7 +579,6 @@ async function main(): Promise<void> {
     });
 
     const authSignInUrl = `http://127.0.0.1:${firebaseAuthPort}/identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=kanna-local`;
-    const authSignUpUrl = `http://127.0.0.1:${firebaseAuthPort}/identitytoolkit.googleapis.com/v1/accounts:signUp?key=kanna-local`;
     const credentials = {
       email: "upvote.sieve.7t@icloud.com",
       password: "password123",
@@ -584,13 +591,6 @@ async function main(): Promise<void> {
           `Firebase emulators exited before readiness: ${exited.code ?? exited.signal}\n${firebaseEmulatorOutput.trim()}`,
         );
       }
-
-      const seedResponse = await fetch(authSignUpUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(credentials),
-      }).catch(() => null);
-      if (seedResponse?.ok) return;
 
       const signInResponse = await fetch(authSignInUrl, {
         method: "POST",
@@ -640,17 +640,11 @@ async function main(): Promise<void> {
     relayOutput = "";
     const proc = spawn("pnpm", ["--dir", "services/relay", "run", "dev"], {
       cwd: repoRoot,
-      // SKIP_AUTH alone is inert: isAuthBypassed() also requires an explicit
-      // non-prod opt-in (FIREBASE_AUTH_EMULATOR_HOST or the allow flag) so a
-      // stray SKIP_AUTH can never bypass auth in production. The e2e relay runs
-      // against the Firebase emulator and exercises transport/sync, not auth, so
-      // it opts into the bypass explicitly here.
       env: {
         ...primary.env,
+        ...firebaseEnv,
         ...relayEnv,
         PORT: String(relayPort),
-        SKIP_AUTH: "true",
-        KANNA_RELAY_ALLOW_AUTH_BYPASS: "true",
       },
       detached: true,
       stdio: ["ignore", "pipe", "pipe"],

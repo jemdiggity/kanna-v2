@@ -111,12 +111,14 @@ export async function startTestKannaServer(
   if (!daemonDir) throw new Error("KANNA_DAEMON_DIR is required for server E2E");
 
   const port = await findFreePort();
+  const relayUrl = process.env.KANNA_RELAY_URL?.trim() ||
+    (process.env.KANNA_RELAY_PORT ? `ws://127.0.0.1:${process.env.KANNA_RELAY_PORT}` : "");
   const configPath = join(configDir, "server-api-e2e.toml");
   const pairingStorePath = join(configDir, "server-api-e2e-pairings.json");
   await writeFile(
     configPath,
     [
-      'relay_url = "wss://relay.example.invalid"',
+      `relay_url = "${escapeTomlString(relayUrl)}"`,
       'device_token = "e2e-token"',
       `daemon_dir = "${escapeTomlString(daemonDir)}"`,
       `db_path = "${escapeTomlString(join(appDataDir, dbName))}"`,
