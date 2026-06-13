@@ -19,7 +19,8 @@ describe("kd environment registry", () => {
       iosBundleId: "build.kanna.app.staging",
       relayDomain: "relay-staging.kanna.build",
       relayUrl: "wss://relay-staging.kanna.build",
-      gceVmName: "kanna-relay-staging"
+      gceVmName: "kanna-relay-staging",
+      artifactRegistryImage: "us-central1-docker.pkg.dev/kanna-staging/kanna-relay/relay:latest"
     });
     expect(resolveKdEnvironment("prod")).toMatchObject({
       name: "prod",
@@ -27,7 +28,8 @@ describe("kd environment registry", () => {
       iosBundleId: "build.kanna.app",
       relayDomain: "relay.kanna.build",
       relayUrl: "wss://relay.kanna.build",
-      gceVmName: "kanna-relay-vm"
+      gceVmName: "kanna-relay-vm",
+      artifactRegistryImage: "us-central1-docker.pkg.dev/kanna-build/kanna-relay/relay:latest"
     });
   });
 
