@@ -61,9 +61,20 @@ export function resolveCloudRuntimeEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEn
   }
 
   const identity = resolveKdEnvironment(cloudEnv === "staging" ? "staging" : "prod");
-  return {
+  const resolved: NodeJS.ProcessEnv = {
     ...env,
     KANNA_FIREBASE_PROJECT_ID: env.KANNA_FIREBASE_PROJECT_ID ?? identity.firebaseProjectId,
     KANNA_RELAY_URL: env.KANNA_RELAY_URL ?? identity.relayUrl
   };
+
+  // Firebase emulators are a local-development concept. A process pointed at a
+  // real cloud environment must not inherit emulator host/port env vars from
+  // the workspace, or clients will try to reach a local emulator that isn't
+  // running — Firebase Auth surfaces this as auth/network-request-failed.
+  delete resolved.KANNA_FIREBASE_AUTH_PORT;
+  delete resolved.KANNA_FIREBASE_FIRESTORE_PORT;
+  delete resolved.FIREBASE_AUTH_EMULATOR_HOST;
+  delete resolved.FIRESTORE_EMULATOR_HOST;
+
+  return resolved;
 }

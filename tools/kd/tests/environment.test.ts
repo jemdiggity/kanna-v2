@@ -44,4 +44,29 @@ describe("kd environment registry", () => {
       KANNA_RELAY_URL: "wss://relay-staging.kanna.build"
     });
   });
+
+  it("strips local Firebase emulator host/port env vars in cloud environments", () => {
+    const resolved = resolveCloudRuntimeEnv({
+      KANNA_CLOUD_ENV: "staging",
+      KANNA_FIREBASE_AUTH_PORT: "9396",
+      KANNA_FIREBASE_FIRESTORE_PORT: "8391",
+      FIREBASE_AUTH_EMULATOR_HOST: "127.0.0.1:9396",
+      FIRESTORE_EMULATOR_HOST: "127.0.0.1:8391"
+    });
+
+    expect(resolved.KANNA_FIREBASE_AUTH_PORT).toBeUndefined();
+    expect(resolved.KANNA_FIREBASE_FIRESTORE_PORT).toBeUndefined();
+    expect(resolved.FIREBASE_AUTH_EMULATOR_HOST).toBeUndefined();
+    expect(resolved.FIRESTORE_EMULATOR_HOST).toBeUndefined();
+  });
+
+  it("preserves Firebase emulator env vars when not in a cloud environment", () => {
+    const resolved = resolveCloudRuntimeEnv({
+      KANNA_FIREBASE_AUTH_PORT: "9100",
+      KANNA_FIREBASE_FIRESTORE_PORT: "8081"
+    });
+
+    expect(resolved.KANNA_FIREBASE_AUTH_PORT).toBe("9100");
+    expect(resolved.KANNA_FIREBASE_FIRESTORE_PORT).toBe("8081");
+  });
 });

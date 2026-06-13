@@ -26,61 +26,43 @@ export interface ResolveDesktopFirebaseConfigOptions {
   dev: boolean;
 }
 
+type DesktopCloudEnv = "staging" | "production";
+
 export async function resolveDesktopFirebaseConfig({
   readEnv,
   dev,
 }: ResolveDesktopFirebaseConfigOptions): Promise<DesktopFirebaseConfig> {
-  const [cloudEnv, runtimeApp, authPort, firestorePort, runtimeFunctionsEndpoint] = await Promise.all([
-    readCloudEnv(readEnv),
-    readRuntimeAppConfig(readEnv),
-    readEnv("KANNA_FIREBASE_AUTH_PORT").catch(() => ""),
-    readEnv("KANNA_FIREBASE_FIRESTORE_PORT").catch(() => ""),
-    readEnv("KANNA_CLOUD_FUNCTIONS_ENDPOINT").catch(() => ""),
-  ]);
+  const [runtimeApp, authPort, firestorePort, runtimeFunctionsEndpoint, cloudEnvRaw] =
+    await Promise.all([
+      readRuntimeAppConfig(readEnv),
+      readEnv("KANNA_FIREBASE_AUTH_PORT").catch(() => ""),
+      readEnv("KANNA_FIREBASE_FIRESTORE_PORT").catch(() => ""),
+      readEnv("KANNA_CLOUD_FUNCTIONS_ENDPOINT").catch(() => ""),
+      readEnv("KANNA_CLOUD_ENV").catch(() => ""),
+    ]);
 
-  // KANNA_CLOUD_ENV is the explicit cloud selector. When it names a remote
-  // cloud, emulator pointer env vars are ignored entirely — dev workspaces
-  // export emulator ports as a matter of course, and their mere presence must
-  // not drag a production/staging session onto a local emulator.
+  const cloudEnv = normalizeCloudEnv(cloudEnvRaw);
   const app =
-    runtimeApp ?? readProfileAppConfig(cloudEnv, dev) ?? readBuildTimeAppConfig(dev);
-  if (isRemoteCloudEnv(cloudEnv)) {
-    return {
-      app,
-      authEmulator: null,
-      firestoreEmulator: null,
-      functionsEndpoint: null,
-    };
-  }
+    runtimeApp ?? (cloudEnv ? cloudDesktopFirebaseAppConfig[cloudEnv] : readBuildTimeAppConfig(dev));
+
+  // Firebase emulators are a local-development concept. When the desktop is
+  // pointed at a real cloud environment, leaked workspace emulator env vars
+  // must not drag the session onto localhost.
+  const useEmulators = cloudEnv === null;
 
   return {
     app,
-    authEmulator: parseAuthEmulatorPort(authPort),
-    firestoreEmulator: parseAuthEmulatorPort(firestorePort),
-    functionsEndpoint: parseFunctionsEndpoint(runtimeFunctionsEndpoint),
+    authEmulator: useEmulators ? parseAuthEmulatorPort(authPort) : null,
+    firestoreEmulator: useEmulators ? parseAuthEmulatorPort(firestorePort) : null,
+    functionsEndpoint: useEmulators ? parseFunctionsEndpoint(runtimeFunctionsEndpoint) : null,
   };
 }
 
-async function readCloudEnv(
-  readEnv: ResolveDesktopFirebaseConfigOptions["readEnv"],
-): Promise<string | undefined> {
-  return normalizeEnvValue(await readEnv("KANNA_CLOUD_ENV").catch(() => ""))?.toLowerCase();
-}
-
-function readProfileAppConfig(
-  cloudEnv: string | undefined,
-  dev: boolean,
-): DesktopFirebaseAppConfig | null {
-  if (cloudEnv === "staging") return stagingDesktopFirebaseAppConfig;
-  if (cloudEnv === "production") return productionDesktopFirebaseAppConfig;
-  if (cloudEnv === "local" && dev) {
-    return localDesktopFirebaseAppConfig;
-  }
+function normalizeCloudEnv(raw: string | undefined): DesktopCloudEnv | null {
+  const normalized = raw?.trim().toLowerCase();
+  if (normalized === "staging") return "staging";
+  if (normalized === "production" || normalized === "prod") return "production";
   return null;
-}
-
-function isRemoteCloudEnv(cloudEnv: string | undefined): boolean {
-  return cloudEnv === "staging" || cloudEnv === "production";
 }
 
 async function readRuntimeAppConfig(
@@ -169,6 +151,11 @@ const productionDesktopFirebaseAppConfig: DesktopFirebaseAppConfig = {
   messagingSenderId: "402613185450",
   appId: "1:402613185450:web:252b2c98d1ef13bed859d3",
   measurementId: "G-091WQZN4SS",
+};
+
+const cloudDesktopFirebaseAppConfig: Record<DesktopCloudEnv, DesktopFirebaseAppConfig> = {
+  staging: stagingDesktopFirebaseAppConfig,
+  production: productionDesktopFirebaseAppConfig,
 };
 
 function compactAppConfig(config: DesktopFirebaseAppConfig): DesktopFirebaseAppConfig {
