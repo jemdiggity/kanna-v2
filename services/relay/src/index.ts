@@ -225,6 +225,6 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
 server.listen(PORT, () => {
   console.log(`[relay] Listening on port ${PORT}`);
   console.log(
-    `[relay] SKIP_AUTH=${process.env.SKIP_AUTH === "true" ? "true" : "false"}`
+    `[relay] Firebase project=${process.env.FIREBASE_PROJECT_ID?.trim() || "(default)"}`
   );
 });

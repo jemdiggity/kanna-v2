@@ -1,5 +1,5 @@
 import { createHash, timingSafeEqual } from "node:crypto";
-import { getFirebaseServices, isAuthBypassed } from "./firebase.js";
+import { getFirebaseServices } from "./firebase.js";
 
 /**
  * Upper bound on desktops docs fetched per credential check. A desktopId is a
@@ -9,15 +9,6 @@ import { getFirebaseServices, isAuthBypassed } from "./firebase.js";
  */
 const DESKTOP_LOOKUP_LIMIT = 10;
 
-function bypassUserIdFromToken(token: string): string {
-  const separator = token.indexOf(":");
-  if (separator > 0) {
-    return token.slice(0, separator);
-  }
-
-  return "test-user";
-}
-
 /**
  * Verify a Firebase Auth ID token (sent by the phone client).
  * Returns the userId or null if verification fails.
@@ -25,10 +16,6 @@ function bypassUserIdFromToken(token: string): string {
 export async function verifyPhoneToken(
   idToken: string
 ): Promise<string | null> {
-  if (isAuthBypassed()) {
-    return bypassUserIdFromToken(idToken);
-  }
-
   try {
     const { auth } = getFirebaseServices();
     const decoded = await auth.verifyIdToken(idToken);
@@ -47,10 +34,6 @@ export async function verifyPhoneToken(
 export async function verifyDeviceToken(
   deviceToken: string
 ): Promise<string | null> {
-  if (isAuthBypassed()) {
-    return bypassUserIdFromToken(deviceToken);
-  }
-
   try {
     const { db } = getFirebaseServices();
     const doc = await db.collection("devices").doc(deviceToken).get();
@@ -92,13 +75,6 @@ export async function verifyDesktopCredentials(
   desktopId: string,
   desktopSecret: string
 ): Promise<DesktopPrincipal | null> {
-  if (isAuthBypassed()) {
-    return {
-      userId: bypassUserIdFromToken(desktopSecret),
-      desktopId,
-    };
-  }
-
   try {
     const { db } = getFirebaseServices();
     const snapshot = await db
@@ -150,13 +126,6 @@ export async function registerDevice(
   userId: string,
   deviceToken: string
 ): Promise<void> {
-  if (isAuthBypassed()) {
-    console.log(
-      `[auth] SKIP_AUTH — would register device ${deviceToken} for user ${userId}`
-    );
-    return;
-  }
-
   try {
     const { db } = getFirebaseServices();
     await db.collection("devices").doc(deviceToken).set({
