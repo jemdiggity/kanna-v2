@@ -241,7 +241,7 @@ export function buildProductionMobilePlan(input: BuildProductionMobilePlanInput)
         name: "mobile",
         cwd: `${input.repoRoot}/apps/mobile`,
         env: { ...input.env },
-        command: `unset NO_COLOR; ${mobileEnv} pnpm run dev -- --port ${input.env.KANNA_MOBILE_PORT ?? "8081"}`
+        command: `unset NO_COLOR; ${mobileEnv} pnpm run dev -- --port ${input.env.KANNA_MOBILE_PORT ?? "8081"} --dev-client`
       }
     ]
   };
