@@ -94,6 +94,16 @@ function resolveRelayUrl(input: BuildDevPlanInput): string | undefined {
   return `ws://${resolveHostFromUrl(input.mobileServerUrl)}:${relayPort}`;
 }
 
+function relayFirebaseEnv(input: BuildDevPlanInput): Record<string, string | undefined> {
+  return {
+    FIREBASE_PROJECT_ID: input.env.FIREBASE_PROJECT_ID ?? "kanna-local",
+    FIREBASE_AUTH_EMULATOR_HOST: input.env.FIREBASE_AUTH_EMULATOR_HOST ??
+      (input.env.KANNA_FIREBASE_AUTH_PORT ? `127.0.0.1:${input.env.KANNA_FIREBASE_AUTH_PORT}` : undefined),
+    FIRESTORE_EMULATOR_HOST: input.env.FIRESTORE_EMULATOR_HOST ??
+      (input.env.KANNA_FIREBASE_FIRESTORE_PORT ? `127.0.0.1:${input.env.KANNA_FIREBASE_FIRESTORE_PORT}` : undefined),
+  };
+}
+
 function e2eEnv(input: BuildDevPlanInput): Record<string, string | undefined> {
   const entries = Object.entries(input.env).filter(([key]) => key.startsWith("KANNA_E2E_"));
   return Object.fromEntries(entries);
@@ -129,19 +139,17 @@ export function buildDevPlan(input: BuildDevPlanInput): DevPlan {
       env: buildFirebaseCommandEnv(input.repoRoot, sharedEnv),
       command: `pnpm --dir services/firebase-functions build && pnpm exec firebase emulators:start --project kanna-local --config ${JSON.stringify(input.firebaseConfigPath)}`
     });
-    const relayEnv = shellEnvPrefix({
+    const relayProcessEnv = {
       PORT: input.env.KANNA_RELAY_PORT ?? "9080",
-      SKIP_AUTH: "true",
-      KANNA_RELAY_ALLOW_AUTH_BYPASS: "true"
-    });
+      ...relayFirebaseEnv(input),
+    };
+    const relayEnv = shellEnvPrefix(relayProcessEnv);
     windows.push({
       name: "relay",
       cwd: `${input.repoRoot}/services/relay`,
       env: {
         ...sharedEnv,
-        SKIP_AUTH: "true",
-        KANNA_RELAY_ALLOW_AUTH_BYPASS: "true",
-        PORT: input.env.KANNA_RELAY_PORT ?? "9080"
+        ...relayProcessEnv,
       },
       command: `${relayEnv} pnpm run dev`
     });

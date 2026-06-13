@@ -63,7 +63,19 @@ export function buildFirebaseEmulatorConfig(
 }
 
 export function buildFirebaseEmulatorArgs(configPath: string, extraArgs: string[]): string[] {
-  return ["exec", "firebase", "emulators:start", "--project", "kanna-local", "--config", configPath, ...extraArgs];
+  const repoRoot = configPath.replace(/\/\.firebase-\d+\.kanna\.json$/, "");
+  return [
+    "exec",
+    "firebase",
+    "emulators:start",
+    "--project",
+    "kanna-local",
+    "--config",
+    configPath,
+    "--import",
+    join(repoRoot, "services/firebase/emulator-seed"),
+    ...extraArgs,
+  ];
 }
 
 export function buildFirebaseEmulatorCommand(configPath: string): { command: string; args: string[] } {

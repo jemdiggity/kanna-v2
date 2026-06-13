@@ -93,6 +93,7 @@ Run '\\''copilot update'\\'' to check for updates.
         KANNA_DB_PATH: "/tmp/kanna.db",
         KANNA_MOBILE_SERVER_PORT: "48120",
         KANNA_FIREBASE_AUTH_PORT: "9100",
+        KANNA_FIREBASE_FIRESTORE_PORT: "9101",
         KANNA_RELAY_PORT: "9081",
         KANNA_MOBILE_PORT: "8082"
       },
@@ -107,10 +108,11 @@ Run '\\''copilot update'\\'' to check for updates.
     expect(plan.windows[0]?.command).toContain("firebase emulators:start");
     expect(plan.windows[1]?.cwd).toBe("/repo/services/relay");
     expect(plan.windows[1]?.env.PORT).toBe("9081");
-    expect(plan.windows[1]?.env.SKIP_AUTH).toBe("true");
-    expect(plan.windows[1]?.env.KANNA_RELAY_ALLOW_AUTH_BYPASS).toBe("true");
+    expect(plan.windows[1]?.env.FIREBASE_PROJECT_ID).toBe("kanna-local");
+    expect(plan.windows[1]?.env.FIREBASE_AUTH_EMULATOR_HOST).toBe("127.0.0.1:9100");
+    expect(plan.windows[1]?.env.FIRESTORE_EMULATOR_HOST).toBe("127.0.0.1:9101");
     expect(plan.windows[1]?.command).toContain(
-      "PORT='9081' SKIP_AUTH='true' KANNA_RELAY_ALLOW_AUTH_BYPASS='true' pnpm run dev"
+      "PORT='9081' FIREBASE_PROJECT_ID='kanna-local' FIREBASE_AUTH_EMULATOR_HOST='127.0.0.1:9100' FIRESTORE_EMULATOR_HOST='127.0.0.1:9101' pnpm run dev"
     );
     expect(plan.windows[3]?.command).not.toContain("EXPO_PUBLIC_KANNA_SERVER_URL");
     expect(plan.windows[3]?.command).toContain("EXPO_PUBLIC_KANNA_RELAY_URL='ws://192.168.1.5:9081'");
