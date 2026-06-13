@@ -29,8 +29,9 @@ import { buildMobileDeviceSmokeCommand, buildMobileTestCommand } from "../runtim
 import {
   buildMobileDeviceRunCommand,
   checkPhysicalDeviceRunPreflight,
-  resolveMobileBundleId,
-  resolvePhysicalDevice
+  resolveMobileNativeIdentity,
+  resolvePhysicalDevice,
+  writeMobileNativeIdentityConfig
 } from "../runtime/mobile-device";
 import { buildConfigSchemaPages } from "../runtime/pages";
 import { getPortStatuses } from "../runtime/port-status";
@@ -481,9 +482,9 @@ export async function executeMobileDeviceRunWithContext(
     throw new Error(`KANNA_MOBILE_PORT must be an integer, got: ${env.KANNA_MOBILE_PORT}`);
   }
 
-  const bundleId = resolveMobileBundleId(env);
+  const nativeIdentity = await writeMobileNativeIdentityConfig(executor.context.repoRoot, env);
   const preflight = await checkPhysicalDeviceRunPreflight(executor.runner, {
-    bundleId,
+    bundleId: nativeIdentity.bundleId,
     device,
     lanHost,
     metroPort
@@ -493,7 +494,8 @@ export async function executeMobileDeviceRunWithContext(
     repoRoot: executor.context.repoRoot,
     deviceUdid: device.udid,
     lanHost,
-    metroPort
+    metroPort,
+    nativeIdentity
   });
   const runResult = await executor.runner.run(runCommand.command, runCommand.args, {
     cwd: runCommand.cwd,
@@ -508,7 +510,7 @@ export async function executeMobileDeviceRunWithContext(
         ? `Launched Kanna mobile on ${device.name}. Metro: ${preflight.metroUrl}\n${formatPhysicalDevicePreflight(preflight.checks)}`
         : runResult.stderr || runResult.stdout || `Failed to launch Kanna mobile on ${device.name}. Metro: ${preflight.metroUrl}`,
     data: {
-      bundleId,
+      bundleId: nativeIdentity.bundleId,
       device,
       metroUrl: preflight.metroUrl,
       preflight,
@@ -535,12 +537,12 @@ export async function executeMobileDeviceDoctorWithContext(
   if (Number.isNaN(metroPort)) {
     throw new Error(`KANNA_MOBILE_PORT must be an integer, got: ${executor.context.env.KANNA_MOBILE_PORT}`);
   }
-  const bundleId = resolveMobileBundleId({
+  const nativeIdentity = resolveMobileNativeIdentity({
     ...executor.context.env,
     KANNA_APP_ENV: executor.context.env.KANNA_APP_ENV ?? "dev"
   });
   const preflight = await checkPhysicalDeviceRunPreflight(executor.runner, {
-    bundleId,
+    bundleId: nativeIdentity.bundleId,
     device,
     lanHost,
     metroPort
@@ -550,7 +552,7 @@ export async function executeMobileDeviceDoctorWithContext(
     ok: preflight.ok,
     message: `Physical-device mobile doctor for ${device.name}. Metro: ${preflight.metroUrl}\n${formatPhysicalDevicePreflight(preflight.checks)}`,
     data: {
-      bundleId,
+      bundleId: nativeIdentity.bundleId,
       device,
       metroUrl: preflight.metroUrl,
       preflight
@@ -861,7 +863,11 @@ export const taskDefinitions = [
     inputSchema: emptyInputSchema,
     execute: async () => {
       const context = await resolveDefaultContext(process.env);
+      context.env.KANNA_APP_ENV = context.env.KANNA_APP_ENV ?? "dev";
+      const nativeIdentity = await writeMobileNativeIdentityConfig(context.repoRoot, context.env);
       context.env.KANNA_E2E_DESKTOP_SERVER_URL = resolveMobileServerUrl(context.env);
+      context.env.KANNA_BUNDLE_ID = nativeIdentity.bundleId;
+      context.env.KANNA_DISPLAY_NAME = nativeIdentity.displayName;
       const command = buildMobileDeviceSmokeCommand(context.repoRoot);
       return runBuiltCommand(command.command, command.args, context.repoRoot, context.env);
     }

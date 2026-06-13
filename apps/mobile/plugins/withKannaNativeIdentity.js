@@ -1,11 +1,33 @@
 const { withInfoPlist, withXcodeProject } = require("@expo/config-plugins");
 
-function setBuildSetting(project, key, value) {
+function findAppTargetConfigurationIds(project) {
+  const objects = project.hash.project.objects;
+  const targets = objects.PBXNativeTarget || {};
+  const configurationLists = objects.XCConfigurationList || {};
+  const appTarget = Object.values(targets).find(
+    (target) => target && typeof target === "object" && target.name === "KannaMobile"
+  );
+  if (!appTarget?.buildConfigurationList) {
+    return [];
+  }
+
+  const configurationList = configurationLists[appTarget.buildConfigurationList];
+  const buildConfigurations = configurationList?.buildConfigurations || [];
+  return buildConfigurations
+    .map((configuration) =>
+      typeof configuration === "string" ? configuration : configuration?.value
+    )
+    .filter(Boolean);
+}
+
+function setAppTargetBuildSetting(project, key, value) {
   const section = project.hash.project.objects.XCBuildConfiguration || {};
-  for (const config of Object.values(section)) {
-    if (!config || typeof config !== "object" || !config.buildSettings) {
+  for (const configId of findAppTargetConfigurationIds(project)) {
+    const config = section[configId];
+    if (!config || typeof config !== "object") {
       continue;
     }
+    config.buildSettings ||= {};
     config.buildSettings[key] = value;
   }
 }
@@ -21,10 +43,14 @@ function withKannaNativeIdentity(config, options = {}) {
   });
 
   return withXcodeProject(config, (config) => {
-    setBuildSetting(config.modResults, "PRODUCT_BUNDLE_IDENTIFIER", iosBundleId);
-    setBuildSetting(config.modResults, "INFOPLIST_KEY_CFBundleDisplayName", displayName);
+    setAppTargetBuildSetting(config.modResults, "PRODUCT_BUNDLE_IDENTIFIER", iosBundleId);
+    setAppTargetBuildSetting(config.modResults, "INFOPLIST_KEY_CFBundleDisplayName", displayName);
     return config;
   });
 }
 
 module.exports = withKannaNativeIdentity;
+module.exports.__internal = {
+  findAppTargetConfigurationIds,
+  setAppTargetBuildSetting
+};
