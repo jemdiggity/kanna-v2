@@ -32,6 +32,7 @@ import type { DesktopAuthSession, DesktopAuthState } from "./services/desktopAut
 import { listDesktopCloudTasks, type DesktopCloudSnapshot } from "./services/desktopCloudTaskIndex";
 import { listDesktopLanTasks, publishDesktopLanTaskSnapshot } from "./services/desktopLanTaskIndex";
 import { deleteRemoteTaskSnapshots, reconcileDesktopTaskSnapshots } from "./services/desktopCloudPublisher";
+import { getCachedRepoRemoteMetadata } from "./services/repoRemoteUrl";
 import { createConfiguredDesktopRelayTerminalClient } from "./services/desktopRelayTerminal";
 import { createConfiguredDesktopLanTerminalClient } from "./services/desktopLanTerminal";
 import { useKeyboardShortcuts, type ActionName } from "./composables/useKeyboardShortcuts";
@@ -46,7 +47,6 @@ import { isTopModal } from "./composables/useModalZIndex";
 import { selectTaskByActivity } from "./utils/selectTaskByActivity";
 import { sortSidebarItemsForRepo } from "./utils/sidebarOrdering";
 import { getDefaultBaseBranch } from "./utils/baseBranchPicker";
-import { hashRemoteUrl } from "./utils/cloudTaskSnapshot";
 import { remoteTaskClosureAliases, remoteTaskIsLocallyClosed } from "./utils/remoteTaskIdentity";
 import { parseRepoInput } from "./utils/parseRepoInput";
 import { defaultReposHome } from "./utils/reposHome";
@@ -226,11 +226,11 @@ const preferences = reactive({
 });
 const localReposForCloudMatching = computedAsync(async () => {
   return Promise.all(store.repos.map(async (repo) => {
-    const remoteUrl = await invoke<string>("git_remote_url", { repoPath: repo.path }).catch(() => null);
+    const metadata = await getCachedRepoRemoteMetadata(db, repo);
     return {
       repo,
-      remoteUrl,
-      remoteUrlHash: await hashRemoteUrl(remoteUrl),
+      remoteUrl: metadata.remoteUrl,
+      remoteUrlHash: metadata.remoteUrlHash,
     };
   }));
 }, store.repos.map((repo) => ({
@@ -273,6 +273,7 @@ const sidebarRepos = computed(() => workspace.value.repos.map((repo) => ({
   path: repo.path ?? "cloud",
   name: repo.name,
   remote_url: repo.remoteUrl,
+  remote_url_hash: repo.remoteUrlHash,
   default_branch: repo.defaultBranch ?? "main",
   hidden: 0,
   sort_order: 0,

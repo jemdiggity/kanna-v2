@@ -26,6 +26,7 @@ import { invoke } from "../invoke";
 import { buildCloudTaskSnapshot } from "../utils/cloudTaskSnapshot";
 import { getConfiguredDesktopFirestore } from "./desktopCloudTaskIndex";
 import { getConfiguredDesktopAuthSession } from "./desktopAuthSdk";
+import { getCachedRepoRemoteUrl, __resetRepoRemoteUrlCacheForTests } from "./repoRemoteUrl";
 
 export interface RemoteTaskSnapshotIdentity {
   ownerDesktopId: string;
@@ -112,8 +113,7 @@ export async function publishDesktopTaskSnapshots(
 }
 
 export function __resetDesktopCloudPublisherCachesForTests(): void {
-  // This module currently avoids process-wide caches; keep a stable test hook
-  // so tests can reset publisher state without knowing that implementation detail.
+  __resetRepoRemoteUrlCacheForTests();
 }
 
 async function buildSnapshot(
@@ -124,7 +124,7 @@ async function buildSnapshot(
 ): Promise<TaskSnapshotDocument> {
   const [blockers, remoteUrl] = await Promise.all([
     listBlockersForItem(db, item.id),
-    invoke<string>("git_remote_url", { repoPath: repo.path }).catch(() => null),
+    getCachedRepoRemoteUrl(db, repo),
   ]);
 
   return await buildCloudTaskSnapshot({

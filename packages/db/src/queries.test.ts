@@ -7,6 +7,7 @@ import {
   hideRepo,
   unhideRepo,
   updateRepoName,
+  updateRepoRemoteMetadata,
   findRepoByPath,
   listPipelineItems,
   listTaskPorts,
@@ -104,12 +105,14 @@ function createMockDb(): DbHandle & {
       const q = query.trim().toUpperCase();
 
       if (q.startsWith("INSERT INTO REPO")) {
-        const [id, path, name, default_branch] = bindValues as string[];
+        const [id, path, name, default_branch, remote_url, remote_url_hash] = bindValues as (string | null)[];
         tables.repo.push({
-          id,
-          path,
-          name,
-          default_branch,
+          id: id!,
+          path: path!,
+          name: name!,
+          default_branch: default_branch!,
+          remote_url,
+          remote_url_hash,
           hidden: 0,
           sort_order: tables.repo.length,
           created_at: currentTimestamp(),
@@ -134,6 +137,13 @@ function createMockDb(): DbHandle & {
         const [name, id] = bindValues as [string, string];
         const repo = tables.repo.find((r) => r.id === id);
         if (repo) repo.name = name;
+      } else if (q.startsWith("UPDATE REPO SET REMOTE_URL")) {
+        const [remoteUrl, remoteUrlHash, id] = bindValues as [string | null, string | null, string];
+        const repo = tables.repo.find((r) => r.id === id);
+        if (repo) {
+          repo.remote_url = remoteUrl;
+          repo.remote_url_hash = remoteUrlHash;
+        }
       } else if (q.startsWith("INSERT INTO PIPELINE_ITEM")) {
         const [id, repo_id, issue_number, issue_title, prompt, pipeline, stage, tagsJson, pr_number, pr_url, branch, agent_type, agent_provider, port_offset, port_env, activity] =
           bindValues as unknown[];
@@ -599,6 +609,30 @@ describe("repo queries", () => {
     expect(updated?.name).toBe("Client App");
     expect(updated?.path).toBe("/home/user/project");
     expect(updated?.default_branch).toBe("main");
+  });
+
+  it("stores and updates repository remote metadata", async () => {
+    await insertRepo(db, {
+      id: "r1",
+      path: "/home/user/project",
+      name: "project",
+      default_branch: "main",
+      remote_url: "git@github.com:owner/project.git",
+      remote_url_hash: "hash-1",
+    });
+
+    let repo = await getRepo(db, "r1");
+    expect(repo?.remote_url).toBe("git@github.com:owner/project.git");
+    expect(repo?.remote_url_hash).toBe("hash-1");
+
+    await updateRepoRemoteMetadata(db, "r1", {
+      remote_url: "https://github.com/owner/project.git",
+      remote_url_hash: "hash-2",
+    });
+
+    repo = await getRepo(db, "r1");
+    expect(repo?.remote_url).toBe("https://github.com/owner/project.git");
+    expect(repo?.remote_url_hash).toBe("hash-2");
   });
 
   it("getRepo returns the correct repo", async () => {

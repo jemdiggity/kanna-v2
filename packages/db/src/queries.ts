@@ -31,12 +31,19 @@ export async function getRepo(db: DbHandle, id: string): Promise<Repo | null> {
 
 export async function insertRepo(
   db: DbHandle,
-  repo: Omit<Repo, "created_at" | "last_opened_at" | "hidden" | "sort_order">
+  repo: Omit<Repo, "created_at" | "last_opened_at" | "hidden" | "sort_order" | "remote_url" | "remote_url_hash"> & Partial<Pick<Repo, "remote_url" | "remote_url_hash">>
 ): Promise<void> {
   await db.execute(
-    `INSERT INTO repo (id, path, name, default_branch, sort_order)
-     VALUES (?, ?, ?, ?, COALESCE((SELECT MAX(sort_order) + 1 FROM repo), 0))`,
-    [repo.id, repo.path, repo.name, repo.default_branch]
+    `INSERT INTO repo (id, path, name, default_branch, remote_url, remote_url_hash, sort_order)
+     VALUES (?, ?, ?, ?, ?, ?, COALESCE((SELECT MAX(sort_order) + 1 FROM repo), 0))`,
+    [
+      repo.id,
+      repo.path,
+      repo.name,
+      repo.default_branch,
+      repo.remote_url ?? null,
+      repo.remote_url_hash ?? null,
+    ]
   );
 }
 
@@ -54,6 +61,17 @@ export async function unhideRepo(db: DbHandle, id: string): Promise<void> {
 
 export async function updateRepoName(db: DbHandle, id: string, name: string): Promise<void> {
   await db.execute("UPDATE repo SET name = ? WHERE id = ?", [name, id]);
+}
+
+export async function updateRepoRemoteMetadata(
+  db: DbHandle,
+  id: string,
+  metadata: Pick<Repo, "remote_url" | "remote_url_hash">,
+): Promise<void> {
+  await db.execute(
+    "UPDATE repo SET remote_url = ?, remote_url_hash = ? WHERE id = ?",
+    [metadata.remote_url, metadata.remote_url_hash, id],
+  );
 }
 
 export async function reorderRepos(db: DbHandle, orderedIds: string[]): Promise<void> {

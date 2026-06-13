@@ -169,6 +169,7 @@ export function mapDesktopCloudTasks(
         path: "cloud",
         name: snapshot.repo.name,
         remote_url: snapshot.repo.remoteUrl ?? null,
+        remote_url_hash: snapshot.repo.remoteUrlHash ?? null,
         remoteUrlHash: snapshot.repo.remoteUrlHash ?? null,
         default_branch: snapshot.repo.defaultBranch ?? "main",
         hidden: 0,
