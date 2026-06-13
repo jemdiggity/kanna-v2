@@ -62,6 +62,16 @@ async function upsertBuffyUser({ admin, dryRun = false }) {
   };
 }
 
+// Real Firebase Auth requires photoURL to be a valid http(s) URL. The seeded
+// avatar is a local file (file://...), which the emulator tolerates but real
+// Auth rejects (auth/invalid-photo-url), so only forward an actual http(s) URL
+// and otherwise omit it — the displayName carries the identity.
+function authProfilePhoto() {
+  return /^https?:\/\//i.test(BUFFY_USER.photoURL)
+    ? { photoURL: BUFFY_USER.photoURL }
+    : {};
+}
+
 async function getOrCreateUser(auth, dryRun) {
   try {
     const existing = await auth.getUserByEmail(BUFFY_USER.email);
@@ -69,7 +79,7 @@ async function getOrCreateUser(auth, dryRun) {
       await auth.updateUser(existing.uid, {
         password: BUFFY_USER.password,
         displayName: BUFFY_USER.displayName,
-        photoURL: BUFFY_USER.photoURL,
+        ...authProfilePhoto(),
         emailVerified: true,
       });
     }
@@ -85,7 +95,7 @@ async function getOrCreateUser(auth, dryRun) {
       email: BUFFY_USER.email,
       password: BUFFY_USER.password,
       displayName: BUFFY_USER.displayName,
-      photoURL: BUFFY_USER.photoURL,
+      ...authProfilePhoto(),
       emailVerified: true,
     });
     return { uid: created.uid };
