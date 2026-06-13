@@ -197,8 +197,8 @@ Make these exact replacements:
 -    (cd "$ROOT/services/relay" && bun install)
 +    (cd "$ROOT/services/relay" && pnpm install)
 
--    "PORT=${RELAY_PORT} SKIP_AUTH=true bun run dev" Enter
-+    "PORT=${RELAY_PORT} SKIP_AUTH=true pnpm run dev" Enter
+-    "PORT=${RELAY_PORT} FIREBASE_PROJECT_ID=kanna-local FIREBASE_AUTH_EMULATOR_HOST=127.0.0.1:${AUTH_PORT} FIRESTORE_EMULATOR_HOST=127.0.0.1:${FIRESTORE_PORT} bun run dev" Enter
++    "PORT=${RELAY_PORT} FIREBASE_PROJECT_ID=kanna-local FIREBASE_AUTH_EMULATOR_HOST=127.0.0.1:${AUTH_PORT} FIRESTORE_EMULATOR_HOST=127.0.0.1:${FIRESTORE_PORT} pnpm run dev" Enter
 
 -    "KANNA_DEV_PORT=${MOBILE_PORT} KANNA_RELAY_PORT=${RELAY_PORT} bunx tauri ios dev" Enter
 +    "KANNA_DEV_PORT=${MOBILE_PORT} KANNA_RELAY_PORT=${RELAY_PORT} pnpm exec tauri ios dev" Enter
@@ -218,8 +218,8 @@ Make these exact replacements:
 -    (cd "$RELAY_DIR" && bun install)
 +    (cd "$RELAY_DIR" && pnpm install)
 
--    "PORT=${RELAY_PORT} SKIP_AUTH=true bun run dev" Enter
-+    "PORT=${RELAY_PORT} SKIP_AUTH=true pnpm run dev" Enter
+-    "PORT=${RELAY_PORT} FIREBASE_PROJECT_ID=kanna-local FIREBASE_AUTH_EMULATOR_HOST=127.0.0.1:${AUTH_PORT} FIRESTORE_EMULATOR_HOST=127.0.0.1:${FIRESTORE_PORT} bun run dev" Enter
++    "PORT=${RELAY_PORT} FIREBASE_PROJECT_ID=kanna-local FIREBASE_AUTH_EMULATOR_HOST=127.0.0.1:${AUTH_PORT} FIRESTORE_EMULATOR_HOST=127.0.0.1:${FIRESTORE_PORT} pnpm run dev" Enter
 
 -    "KANNA_DEV_PORT=${MOBILE_PORT} KANNA_RELAY_PORT=${RELAY_PORT} bunx tauri ios dev --host ${LAN_IP}" Enter
 +    "KANNA_DEV_PORT=${MOBILE_PORT} KANNA_RELAY_PORT=${RELAY_PORT} pnpm exec tauri ios dev --host ${LAN_IP}" Enter
@@ -769,4 +769,3 @@ Expected: PASS if both files still exist. If they were already removed earlier, 
 git add -A
 git commit -m "build: complete pnpm migration"
 ```
-

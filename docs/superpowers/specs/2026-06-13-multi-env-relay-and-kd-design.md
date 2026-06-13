@@ -11,7 +11,7 @@ Sign-in and data flow must work across **dev (Firebase emulator + local relay), 
 
 | Env | Firebase project | iOS bundle ID | Relay |
 |---|---|---|---|
-| dev | `kanna-local` (emulator) | `build.kanna.app.dev` | local `services/relay` (`SKIP_AUTH`) via `kd dev up --emulators` |
+| dev | `kanna-local` (emulator) | `build.kanna.app.dev` | local `services/relay` with Firebase Auth/Firestore emulators and committed seeded test users via `kd dev up --emulators` |
 | staging | `kanna-staging` | `build.kanna.app.staging` | **to provision** — VM `relay-staging.kanna.build` (mirror of prod) |
 | production | `kanna-build` | `build.kanna.app` | GCE VM `relay.kanna.build` → `34.133.233.111` (live) |
 
@@ -28,7 +28,7 @@ Sign-in and data flow must work across **dev (Firebase emulator + local relay), 
 
 1. Reserve a static IP in GCP project `kanna-staging` (or wherever the operator chooses).
 2. Operator adds DNS: `relay-staging.kanna.build` **A** → `<reserved IP>` (GoDaddy; the value is only known after step 1).
-3. Provision an e2-micro VM (us-central1-a), Docker + Caddy (Let's Encrypt for `relay-staging.kanna.build` — needs DNS resolving first), deploy the `services/relay` container configured for `kanna-staging` Firebase (real auth/Firestore, `NODE_ENV=production`, no `SKIP_AUTH`, staging service-account credential).
+3. Provision an e2-micro VM (us-central1-a), Docker + Caddy (Let's Encrypt for `relay-staging.kanna.build` — needs DNS resolving first), deploy the `services/relay` container configured for `kanna-staging` Firebase (real auth/Firestore, `NODE_ENV=production`, staging service-account credential).
 4. Apps in staging point at `wss://relay-staging.kanna.build` via the env model.
 
 The DNS record value (the IP) is gated on step 1; nothing can be added at GoDaddy until the IP is reserved.

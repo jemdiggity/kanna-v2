@@ -2020,36 +2020,39 @@ describe('Relay message routing', () => {
 });
 ```
 
-Note: This test needs mock auth or a test Firebase project. For local development, add a `SKIP_AUTH=true` env var to the relay that bypasses token verification.
+Note: This test uses the local Firebase Auth and Firestore emulators with committed seeded test users. Relay token verification remains real: Firebase Admin verifies emulator-issued ID tokens and reads seeded `devices/{deviceToken}` documents from the Firestore emulator.
 
-- [ ] **Step 2: Add SKIP_AUTH mode to relay**
+- [ ] **Step 2: Add emulator-backed relay auth tests**
 
 In `services/relay/src/auth.ts`, add:
 
 ```typescript
-const SKIP_AUTH = process.env.SKIP_AUTH === 'true';
+const auth = getAuth();
+const db = getFirestore();
 
 export async function verifyPhoneToken(idToken: string): Promise<string | null> {
-  if (SKIP_AUTH) return 'test-user';
+  const decoded = await auth.verifyIdToken(idToken);
+  return decoded.uid;
   // ... existing implementation
 }
 
 export async function verifyDeviceToken(deviceToken: string): Promise<string | null> {
-  if (SKIP_AUTH) return 'test-user';
+  const doc = await db.collection('devices').doc(deviceToken).get();
+  return doc.data()?.userId ?? null;
   // ... existing implementation
 }
 ```
 
 - [ ] **Step 3: Run integration test**
 
-Run: `cd services/relay && SKIP_AUTH=true bun run dev &` then `bun test test/integration.test.ts`
+Run Firebase emulators with the committed import seed, then `cd services/relay && pnpm test`.
 Expected: Test passes
 
 - [ ] **Step 4: Commit**
 
 ```bash
 git add services/relay/
-git commit -m "test(relay): add integration test with SKIP_AUTH mode"
+git commit -m "test(relay): add emulator-backed auth integration tests"
 ```
 
 ---
