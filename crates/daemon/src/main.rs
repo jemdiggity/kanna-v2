@@ -7,6 +7,7 @@ mod session;
 mod socket;
 
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::io::Read;
 use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::path::{Path, PathBuf};
@@ -45,6 +46,32 @@ type LostHandoffSessions = Arc<Mutex<HashMap<String, String>>>;
 struct HandoffResult {
     adopted: Vec<(String, pty::PtySession, protocol::HandoffSession)>,
     lost: HashMap<String, String>,
+}
+
+#[derive(Debug)]
+enum HandoffRequestError {
+    ResponseTimeout,
+    OldDaemonRefused(String),
+    TransferFailed {
+        message: String,
+        session_infos: Vec<protocol::HandoffSession>,
+    },
+    Other(String),
+}
+
+impl fmt::Display for HandoffRequestError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            HandoffRequestError::ResponseTimeout => {
+                write!(f, "timeout reading handoff response")
+            }
+            HandoffRequestError::OldDaemonRefused(message) => {
+                write!(f, "old daemon refused: {}", message)
+            }
+            HandoffRequestError::TransferFailed { message, .. } => write!(f, "{}", message),
+            HandoffRequestError::Other(message) => write!(f, "{}", message),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -300,14 +327,14 @@ async fn finish_attach_cutover(
 async fn request_handoff(
     socket_path: &PathBuf,
     version: u32,
-) -> Result<(Vec<protocol::HandoffSession>, Vec<std::os::fd::RawFd>), String> {
+) -> Result<(Vec<protocol::HandoffSession>, Vec<std::os::fd::RawFd>), HandoffRequestError> {
     let stream = tokio::net::UnixStream::connect(socket_path)
         .await
         .map_err(|e| {
-            format!(
+            HandoffRequestError::Other(format!(
                 "failed to connect to old daemon at {:?}: {}",
                 socket_path, e
-            )
+            ))
         })?;
 
     log::info!("[handoff] connected to old daemon");
@@ -318,33 +345,31 @@ async fn request_handoff(
     let mut writer = write_half;
 
     let cmd = serde_json::json!({ "type": "Handoff", "version": version });
-    let mut json = serde_json::to_string(&cmd)
-        .map_err(|e| format!("failed to serialize handoff command: {}", e))?;
+    let mut json = serde_json::to_string(&cmd).map_err(|e| {
+        HandoffRequestError::Other(format!("failed to serialize handoff command: {}", e))
+    })?;
     json.push('\n');
     use tokio::io::AsyncWriteExt;
-    writer
-        .write_all(json.as_bytes())
-        .await
-        .map_err(|e| format!("failed to send handoff command: {}", e))?;
-    writer
-        .flush()
-        .await
-        .map_err(|e| format!("failed to flush handoff command: {}", e))?;
+    writer.write_all(json.as_bytes()).await.map_err(|e| {
+        HandoffRequestError::Other(format!("failed to send handoff command: {}", e))
+    })?;
+    writer.flush().await.map_err(|e| {
+        HandoffRequestError::Other(format!("failed to flush handoff command: {}", e))
+    })?;
     log::info!("[handoff] sent Handoff command (version={})", version);
 
     let mut line = String::new();
     use tokio::io::AsyncBufReadExt;
-    tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        reader.read_line(&mut line),
-    )
-    .await
-    .map_err(|_| "timeout reading handoff response".to_string())?
-    .map_err(|e| format!("error reading handoff response: {}", e))?;
+    tokio::time::timeout(HANDOFF_RESPONSE_TIMEOUT, reader.read_line(&mut line))
+        .await
+        .map_err(|_| HandoffRequestError::ResponseTimeout)?
+        .map_err(|e| {
+            HandoffRequestError::Other(format!("error reading handoff response: {}", e))
+        })?;
 
     log::info!("[handoff] received response: {}", line.trim());
-    let session_infos = parse_handoff_response(line.trim())
-        .map_err(|message| format!("old daemon refused: {}", message))?;
+    let session_infos =
+        parse_handoff_response(line.trim()).map_err(HandoffRequestError::OldDaemonRefused)?;
 
     if session_infos.is_empty() {
         return Ok((vec![], vec![]));
@@ -355,8 +380,12 @@ async fn request_handoff(
         session_infos.len(),
         raw_fd
     );
-    let fds = fd_transfer::recv_fds(raw_fd, session_infos.len())
-        .map_err(|e| format!("failed to receive PTY fd: {}", e))?;
+    let fds = fd_transfer::recv_fds(raw_fd, session_infos.len()).map_err(|e| {
+        HandoffRequestError::TransferFailed {
+            message: format!("failed to receive PTY fd: {}", e),
+            session_infos: session_infos.clone(),
+        }
+    })?;
     Ok((session_infos, fds))
 }
 
@@ -538,6 +567,33 @@ async fn main() {
     }
 }
 
+fn should_try_compat_handoff_after_error(error: &HandoffRequestError) -> bool {
+    match error {
+        HandoffRequestError::OldDaemonRefused(message) => {
+            message.contains("handoff version mismatch")
+        }
+        HandoffRequestError::ResponseTimeout
+        | HandoffRequestError::TransferFailed { .. }
+        | HandoffRequestError::Other(_) => false,
+    }
+}
+
+fn lost_sessions_from_handoff_error(error: &HandoffRequestError) -> HashMap<String, String> {
+    match error {
+        HandoffRequestError::TransferFailed {
+            message,
+            session_infos,
+        } => {
+            let reason = handoff_loss_message(message);
+            session_infos
+                .iter()
+                .map(|info| (info.session_id.clone(), reason.clone()))
+                .collect()
+        }
+        _ => HashMap::new(),
+    }
+}
+
 /// Try to take over sessions from an existing daemon.
 /// Returns adopted (session_id, PtySession, TerminalSnapshot) tuples plus any
 /// sessions that were lost during daemon handoff.
@@ -585,33 +641,44 @@ async fn attempt_handoff(pid_path: &PathBuf, socket_path: &PathBuf) -> HandoffRe
         socket_path
     );
 
-    let (session_infos, fds, used_version) =
-        match request_handoff(socket_path, HANDOFF_VERSION).await {
-            Ok((session_infos, fds)) => (session_infos, fds, HANDOFF_VERSION),
-            Err(error) => {
-                log::info!("[handoff] version {} failed: {}", HANDOFF_VERSION, error);
-                match request_handoff(socket_path, HANDOFF_COMPAT_VERSION).await {
-                    Ok((session_infos, fds)) => {
-                        log::info!(
-                            "[handoff] fell back to compatible handoff version {}",
-                            HANDOFF_COMPAT_VERSION
-                        );
-                        (session_infos, fds, HANDOFF_COMPAT_VERSION)
-                    }
-                    Err(compat_error) => {
-                        log::info!(
-                            "[handoff] compatible handoff version {} also failed: {}",
-                            HANDOFF_COMPAT_VERSION,
-                            compat_error
-                        );
-                        return HandoffResult {
-                            adopted: vec![],
-                            lost: HashMap::new(),
-                        };
-                    }
+    let (session_infos, fds, used_version) = match request_handoff(socket_path, HANDOFF_VERSION)
+        .await
+    {
+        Ok((session_infos, fds)) => (session_infos, fds, HANDOFF_VERSION),
+        Err(error) => {
+            log::info!("[handoff] version {} failed: {}", HANDOFF_VERSION, error);
+            if !should_try_compat_handoff_after_error(&error) {
+                log::info!(
+                    "[handoff] not attempting compatible fallback after ambiguous version {} failure",
+                    HANDOFF_VERSION
+                );
+                return HandoffResult {
+                    adopted: vec![],
+                    lost: lost_sessions_from_handoff_error(&error),
+                };
+            }
+            match request_handoff(socket_path, HANDOFF_COMPAT_VERSION).await {
+                Ok((session_infos, fds)) => {
+                    log::info!(
+                        "[handoff] fell back to compatible handoff version {}",
+                        HANDOFF_COMPAT_VERSION
+                    );
+                    (session_infos, fds, HANDOFF_COMPAT_VERSION)
+                }
+                Err(compat_error) => {
+                    log::info!(
+                        "[handoff] compatible handoff version {} also failed: {}",
+                        HANDOFF_COMPAT_VERSION,
+                        compat_error
+                    );
+                    return HandoffResult {
+                        adopted: vec![],
+                        lost: lost_sessions_from_handoff_error(&compat_error),
+                    };
                 }
             }
-        };
+        }
+    };
 
     if session_infos.is_empty() {
         log::info!("[handoff] no sessions to adopt");
@@ -1370,6 +1437,7 @@ async fn handle_command(
 /// Current handoff protocol version. Both sides must agree.
 const HANDOFF_VERSION: u32 = 2;
 const HANDOFF_COMPAT_VERSION: u32 = 1;
+const HANDOFF_RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Handle a handoff request from a new daemon.
 /// Collects all live sessions, sends metadata + master fds, then exits.
@@ -2284,5 +2352,21 @@ mod tests {
     #[test]
     fn live_terminal_transitions_do_not_rebuild_recovery_sessions() {
         assert!(!should_rebuild_recovery_session_on_live_terminal_transition());
+    }
+
+    #[test]
+    fn timeout_after_handoff_command_is_not_safe_for_compat_retry() {
+        assert!(!should_try_compat_handoff_after_error(
+            &HandoffRequestError::ResponseTimeout
+        ));
+    }
+
+    #[test]
+    fn explicit_handoff_version_mismatch_is_safe_for_compat_retry() {
+        assert!(should_try_compat_handoff_after_error(
+            &HandoffRequestError::OldDaemonRefused(
+                "handoff version mismatch: expected 1, got 2".to_string(),
+            )
+        ));
     }
 }
