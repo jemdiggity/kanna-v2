@@ -185,7 +185,7 @@ export function buildRelayProvisionPlan(input: { environment: CloudDeployEnviron
   const region = "us-central1";
   const zone = "us-central1-a";
   const vmName = identity.gceVmName;
-  const staticIpName = `${vmName}-ip`;
+  const staticIpName = identity.staticIpName ?? `${vmName}-ip`;
   const tag = vmName;
   const startupScript = buildRelayStartupScript();
 
