@@ -7,7 +7,9 @@ services:
     environment:
       NODE_ENV: production
       FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:?FIREBASE_PROJECT_ID is required}
-      GOOGLE_APPLICATION_CREDENTIALS_JSON: ${GOOGLE_APPLICATION_CREDENTIALS_JSON:?GOOGLE_APPLICATION_CREDENTIALS_JSON is required}
+      # Optional: when empty the relay uses Application Default Credentials
+      # (the VM's attached service account). Set it only for a key-based deploy.
+      GOOGLE_APPLICATION_CREDENTIALS_JSON: ${GOOGLE_APPLICATION_CREDENTIALS_JSON:-}
       PORT: "8080"
 
   caddy:
