@@ -179,7 +179,17 @@ For mobile development, the same rule applies at the app level: use `./kd dev up
 
 For physical iPhone dev-build testing, set `KANNA_IOS_DEVICE_UDID` or `KANNA_IOS_PHYSICAL_DEVICE_NAME`, then run `./kd dev up --mobile --emulators` and the physical-device smoke (`pnpm --dir apps/mobile run test:e2e:device:smoke`). `kd` starts Metro in dev-client mode and auto-resolves the Mac's LAN IP for the mobile server, relay, and Firebase emulator hosts so the phone does not receive loopback URLs.
 
-When asked to launch the mobile app against production, use `./kd mobile up --production`. Production desktop mobile API comes from the installed `/Applications/Kanna.app/Contents/MacOS/kanna-server`, not the current worktree desktop server. The production launch path verifies `curl http://127.0.0.1:48120/v1/status`, checks `~/Library/Application Support/build.kanna/Kanna/server.toml`, starts only the mobile Metro/Expo window, and uses production Firebase/relay defaults from the installed desktop status and mobile app defaults. Plain `./kd mobile up` remains a development workflow that starts the worktree desktop plus mobile; do not assume it targets production. `./kd mobile up --staging` is not wired until there is a concrete staging desktop/server identity to verify.
+When asked to launch the mobile app against production, use `./kd mobile up --production`. Production desktop mobile API comes from the installed `/Applications/Kanna.app/Contents/MacOS/kanna-server`, not the current worktree desktop server. The production launch path verifies `curl http://127.0.0.1:48120/v1/status`, checks `~/Library/Application Support/build.kanna/Kanna/server.toml`, starts only the mobile Metro/Expo window, and uses production Firebase/relay defaults from the installed desktop status and mobile app defaults. Plain `./kd mobile up` remains a development workflow that starts the worktree desktop plus mobile; do not assume it targets production.
+
+When asked to launch mobile against staging on a physical device, use `./kd mobile up --staging` from a worktree. This starts the worktree desktop with `KANNA_CLOUD_ENV=staging`, which resolves Firebase to `kanna-staging` and the relay to `wss://relay-staging.kanna.build`, then starts the staging mobile Metro/Expo window with `KANNA_APP_ENV=staging`. To use the committed persistent Link test identity, a human with `kanna-staging` credentials first provisions the real staging Firebase data with:
+
+```bash
+gcloud auth application-default login
+pnpm --dir services/firebase-functions exec node scripts/provision-staging-link-user.mjs
+KANNA_E2E_DEVICE_TOKEN=staging-link-device-token ./kd mobile up --staging
+```
+
+The script is idempotent: it upserts the Firebase Auth user `upvote.sieve.7t@icloud.com` / `password123` with display name `Link`, stores the committed avatar reference `file://services/firebase/emulator-seed/assets/link-avatar.png`, and merges `devices/staging-link-device-token` in `kanna-staging` Firestore so the staging relay can authenticate the desktop when that token is supplied. Use `--dry-run` on the script to print the planned Auth user and Firestore document without writing staging data. Do not run physical-device Appium or install/launch the attached device from agent automation; humans verify on-device after merge.
 
 ```bash
 # Development (from repo root or worktree root)
@@ -194,6 +204,7 @@ When asked to launch the mobile app against production, use `./kd mobile up --pr
 ./kd dev log                 # print recent desktop tmux output
 ./kd dev log mobile          # print recent mobile tmux output
 ./kd mobile up --production  # start mobile with installed /Applications/Kanna.app production status/relay defaults
+./kd mobile up --staging     # start worktree desktop + mobile against kanna-staging cloud/relay
 ./kd dev up --attach         # start and attach to tmux session
 ./kd env print               # print resolved ports, DB, daemon dir, transfer root
 ./kd doctor                  # check local prerequisites

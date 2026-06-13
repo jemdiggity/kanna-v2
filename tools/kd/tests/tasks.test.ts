@@ -1,4 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { mkdir, mkdtemp } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import {
   executeDevDownWithContext,
   executeDevStatus,
@@ -134,11 +137,13 @@ describe("task executors", () => {
     expect(calls.join("\n")).not.toContain("apps/desktop");
   });
 
-  it("starts mobile against staging cloud env without requiring production desktop status", async () => {
-    const calls: string[] = [];
+  it("starts the worktree desktop and mobile against staging cloud env without requiring production desktop status", async () => {
+    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-kd-staging-"));
+    await mkdir(join(repoRoot, "apps", "desktop", "src-tauri"), { recursive: true });
+    const calls: Array<{ command: string; args: string[]; env?: NodeJS.ProcessEnv }> = [];
     const runner: CommandRunner = {
-      async run(command, args) {
-        calls.push(`${command} ${args.join(" ")}`);
+      async run(command, args, options) {
+        calls.push({ command, args, env: options?.env });
         return { exitCode: 0, stdout: "", stderr: "" };
       }
     };
@@ -148,10 +153,11 @@ describe("task executors", () => {
       {
         runner,
         context: {
-          repoRoot: "/repo",
+          repoRoot,
           tmux: { server: "kanna-task-abc", session: "kanna-task-abc" },
-          ports: { KANNA_MOBILE_PORT: 8084 },
+          ports: { KANNA_DEV_PORT: 1421, KANNA_MOBILE_PORT: 8084 },
           env: {
+            KANNA_DEV_PORT: "1421",
             KANNA_MOBILE_PORT: "8084",
             EXPO_PUBLIC_FIREBASE_API_KEY: "staging-api-key",
             EXPO_PUBLIC_FIREBASE_APP_ID: "staging-app-id"
@@ -165,13 +171,23 @@ describe("task executors", () => {
       message: "Started mobile against staging cloud environment.",
       data: {
         relayUrl: "wss://relay-staging.kanna.build",
-        windows: ["mobile"]
+        windows: ["desktop", "mobile"]
       }
     });
-    expect(calls[0]).toContain("tmux -L kanna-task-abc new-session");
-    expect(calls[0]).toContain("KANNA_APP_ENV='staging'");
-    expect(calls[0]).toContain("EXPO_PUBLIC_FIREBASE_PROJECT_ID='kanna-staging'");
-    expect(calls[0]).toContain("EXPO_PUBLIC_KANNA_RELAY_URL='wss://relay-staging.kanna.build'");
-    expect(calls.join("\n")).not.toContain("curl --fail");
+    expect(calls[0]).toMatchObject({
+      command: "tmux",
+      args: expect.arrayContaining(["new-session", "-n", "desktop", "-c", `${repoRoot}/apps/desktop`])
+    });
+    expect(calls[0]?.env?.KANNA_CLOUD_ENV).toBe("staging");
+    expect(calls[0]?.env?.KANNA_FIREBASE_PROJECT_ID).toBe("kanna-staging");
+    expect(calls[0]?.env?.KANNA_RELAY_URL).toBe("wss://relay-staging.kanna.build");
+    expect(calls[2]).toMatchObject({
+      command: "tmux",
+      args: expect.arrayContaining(["new-window", "-n", "mobile", "-c", `${repoRoot}/apps/mobile`])
+    });
+    expect(calls[2]?.args.join(" ")).toContain("KANNA_APP_ENV='staging'");
+    expect(calls[2]?.args.join(" ")).toContain("EXPO_PUBLIC_FIREBASE_PROJECT_ID='kanna-staging'");
+    expect(calls[2]?.args.join(" ")).toContain("EXPO_PUBLIC_KANNA_RELAY_URL='wss://relay-staging.kanna.build'");
+    expect(calls.map((call) => `${call.command} ${call.args.join(" ")}`).join("\n")).not.toContain("curl --fail");
   });
 });

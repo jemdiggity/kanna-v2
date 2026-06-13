@@ -311,13 +311,24 @@ export async function executeProductionMobileUpWithContext(
     const staging = resolveKdEnvironment("staging");
     const env = {
       ...executor.context.env,
+      KANNA_CLOUD_ENV: "staging",
       KANNA_APP_ENV: executor.context.env.KANNA_APP_ENV ?? "staging"
     };
-    const plan = buildProductionMobilePlan({
+    writeTauriLocalConfig(executor.context.repoRoot, executor.context.ports.KANNA_DEV_PORT);
+    const desktopPlan = buildDevPlan({
+      repoRoot: executor.context.repoRoot,
+      env,
+      mobile: false,
+      emulators: false,
+      firebaseConfigPath: "",
+      mobileServerUrl: resolveMobileServerUrl(env)
+    });
+    const mobilePlan = buildProductionMobilePlan({
       repoRoot: executor.context.repoRoot,
       env,
       environment: "staging"
     });
+    const plan = { windows: [...desktopPlan.windows, ...mobilePlan.windows] };
 
     await startTmuxSession(executor.runner, executor.context.tmux, plan.windows);
 
@@ -538,7 +549,7 @@ export const taskDefinitions = [
   },
   {
     id: "mobile.up",
-    description: "Start Kanna mobile against the installed production desktop app.",
+    description: "Start Kanna mobile against production or staging cloud.",
     inputSchema: mobileUpInputSchema,
     execute: async (_context, input) => executeProductionMobileUp(mobileUpInputSchema.parse(input))
   },
