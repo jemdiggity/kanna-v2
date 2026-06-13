@@ -82,6 +82,13 @@ function resolveMobileServerUrlEnv(input: BuildDevPlanInput): string | undefined
   return isPhysicalDeviceTarget(input.env) ? resolveMobileServerUrl(input) : undefined;
 }
 
+function resolveReactNativePackagerHostname(input: BuildDevPlanInput): string | undefined {
+  if (!isPhysicalDeviceTarget(input.env)) {
+    return undefined;
+  }
+  return resolveMobileHost(input);
+}
+
 function mobileFirebaseEnv(input: BuildDevPlanInput): Record<string, string | undefined> {
   if (!input.emulators) {
     return {};
@@ -207,14 +214,19 @@ export function buildDevPlan(input: BuildDevPlanInput): DevPlan {
     const mobileEnv = shellEnvPrefix({
       EXPO_PUBLIC_KANNA_SERVER_URL: resolveMobileServerUrlEnv(input),
       EXPO_PUBLIC_KANNA_RELAY_URL: resolveRelayUrl(input),
+      REACT_NATIVE_PACKAGER_HOSTNAME: resolveReactNativePackagerHostname(input),
       RCT_METRO_PORT: input.env.KANNA_MOBILE_PORT ?? "8081",
       ...mobileFirebaseEnv(input)
     });
+    const startCommand = `${mobileEnv} pnpm run dev -- --port ${input.env.KANNA_MOBILE_PORT ?? "8081"} --dev-client`;
+    const resilientStartCommand = isPhysicalDeviceTarget(input.env)
+      ? `while true; do ${startCommand}; echo 'Metro exited; restarting in 2s'; sleep 2; done`
+      : startCommand;
     windows.push({
       name: "mobile",
       cwd: `${input.repoRoot}/apps/mobile`,
       env: sharedEnv,
-      command: `unset NO_COLOR; ${mobileEnv} pnpm run dev -- --port ${input.env.KANNA_MOBILE_PORT ?? "8081"} --dev-client`
+      command: `unset NO_COLOR; ${resilientStartCommand}`
     });
   }
 

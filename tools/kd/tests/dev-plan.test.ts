@@ -126,6 +126,29 @@ Run '\\''copilot update'\\'' to check for updates.
     expect(plan.windows[3]?.command).toContain("pnpm run dev -- --port 8082 --dev-client");
   });
 
+  it("keeps the mobile Metro window alive for physical-device sessions", () => {
+    const plan = buildDevPlan({
+      repoRoot: "/repo",
+      env: {
+        KANNA_DEV_PORT: "1421",
+        KANNA_DB_PATH: "/tmp/kanna.db",
+        KANNA_MOBILE_SERVER_PORT: "48120",
+        KANNA_MOBILE_PORT: "8082",
+        KANNA_IOS_DEVICE_UDID: "00008130-001015CA1091401C"
+      },
+      mobile: true,
+      emulators: false,
+      firebaseConfigPath: "/repo/.firebase-8080.kanna.json",
+      mobileServerUrl: "http://127.0.0.1:48120",
+      resolveLanAddress: () => "172.16.0.193"
+    });
+
+    expect(plan.windows[1]?.command).toContain("REACT_NATIVE_PACKAGER_HOSTNAME='172.16.0.193'");
+    expect(plan.windows[1]?.command).toContain("while true; do");
+    expect(plan.windows[1]?.command).toContain("pnpm run dev -- --port 8082 --dev-client");
+    expect(plan.windows[1]?.command).toContain("sleep 2");
+  });
+
   it("uses the Mac LAN host for physical-device mobile dev endpoints", () => {
     const plan = buildDevPlan({
       repoRoot: "/repo",

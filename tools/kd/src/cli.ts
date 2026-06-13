@@ -30,7 +30,8 @@ const booleanFlagMap: Record<string, string> = {
   "--x86_64": "x86_64",
   "--staging": "staging",
   "--production": "production",
-  "--relay": "relay"
+  "--relay": "relay",
+  "--device": "device"
 };
 
 const defaultDevUpInput = {
@@ -57,6 +58,20 @@ function parseMobileUpInput(rest: string[]): ParsedCliCommand {
     return { taskId: "mobile.up", input: { production: input.production === true, staging: input.staging === true } };
   }
   return { taskId: "dev.up", input: { ...defaultDevUpInput, mobile: true } };
+}
+
+function parseMobileRunInput(rest: string[]): ParsedCliCommand {
+  const input = parseFlagInput(rest, { device: false });
+  const unsupportedFlags = Object.entries(input)
+    .filter(([key, value]) => key !== "device" && value === true)
+    .map(([key]) => key);
+  if (unsupportedFlags.length > 0) {
+    throw new Error("mobile run only accepts --device");
+  }
+  if (input.device !== true) {
+    throw new Error("mobile run requires --device");
+  }
+  return { taskId: "mobile.run", input: { device: true } };
 }
 
 function parseFlagInput(rest: string[], defaults: Record<string, unknown>): Record<string, unknown> {
@@ -149,6 +164,13 @@ export function parseCliArgs(args: string[]): ParsedCliCommand {
   }
   if (group === "mobile" && command === "up") {
     return parseMobileUpInput(rest);
+  }
+  if (group === "mobile" && command === "run") {
+    return parseMobileRunInput(rest);
+  }
+  if (group === "mobile" && command === "doctor") {
+    const parsed = parseMobileRunInput(rest);
+    return { taskId: "mobile.doctor", input: parsed.input };
   }
   if (group === "dev" && command === "restart") {
     return { taskId: "dev.restart", input: parseFlagInput(rest, defaultDevUpInput) };
@@ -261,6 +283,8 @@ function helpText(): string {
     "  dev seed [--db <path-or-name>] [--delete-db]",
     "  daemon kill",
     "  mobile up [--production|--staging]",
+    "  mobile run --device",
+    "  mobile doctor --device",
     "  mobile test",
     "  mobile device-smoke",
     "  emulators up|down|status",

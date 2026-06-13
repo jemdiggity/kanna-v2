@@ -27,6 +27,8 @@ const exposedTools = [
   ["emulators_down", "emulators.down"],
   ["emulators_status", "emulators.status"],
   ["daemon_kill", "daemon.kill"],
+  ["mobile_run", "mobile.run"],
+  ["mobile_doctor", "mobile.doctor"],
   ["mobile_device_smoke", "mobile.device-smoke"],
   ["doctor", "doctor"]
 ] as const;

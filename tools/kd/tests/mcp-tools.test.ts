@@ -22,6 +22,8 @@ describe("MCP tool registry", () => {
       "emulators_down",
       "emulators_status",
       "daemon_kill",
+      "mobile_run",
+      "mobile_doctor",
       "mobile_device_smoke",
       "doctor"
     ]);

@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { mkdir, mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   executeDevDownWithContext,
   executeDevStatus,
+  executeMobileDeviceDoctorWithContext,
+  executeMobileDeviceRunWithContext,
   executeProductionMobileUpWithContext
 } from "../src/tasks/registry";
 import type { CommandRunner } from "../src/runtime/process";
@@ -189,5 +191,160 @@ describe("task executors", () => {
     expect(calls[2]?.args.join(" ")).toContain("EXPO_PUBLIC_FIREBASE_PROJECT_ID='kanna-staging'");
     expect(calls[2]?.args.join(" ")).toContain("EXPO_PUBLIC_KANNA_RELAY_URL='wss://relay-staging.kanna.build'");
     expect(calls.map((call) => `${call.command} ${call.args.join(" ")}`).join("\n")).not.toContain("curl --fail");
+  });
+
+  it("starts dev mobile with emulators before building and launching on a physical device", async () => {
+    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-kd-device-run-"));
+    await mkdir(join(repoRoot, "apps", "desktop", "src-tauri"), { recursive: true });
+    await writeFile(
+      join(repoRoot, "firebase.json"),
+      JSON.stringify({ functions: { source: "services/firebase-functions" }, emulators: {} })
+    );
+    const calls: Array<{ command: string; args: string[]; env?: NodeJS.ProcessEnv; cwd?: string }> = [];
+    const runner: CommandRunner = {
+      async run(command, args, options) {
+        calls.push({ command, args, env: options?.env, cwd: options?.cwd });
+        if (command === "xcrun" && args.join(" ") === "xcdevice list") {
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify([
+              {
+                available: true,
+                identifier: "00008130-001015CA1091401C",
+                name: "Jerome's iPhone 15",
+                operatingSystemVersion: "17.5 (21F79)",
+                platform: "com.apple.platform.iphoneos",
+                simulator: false
+              }
+            ]),
+            stderr: ""
+          };
+        }
+        if (command === "curl") {
+          return { exitCode: 0, stdout: "packager-status:running\n", stderr: "" };
+        }
+        if (command === "xcrun" && args.includes("devicectl")) {
+          return { exitCode: 0, stdout: "build.kanna.app.dev\n", stderr: "" };
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+    };
+
+    const result = await executeMobileDeviceRunWithContext(
+      { device: true },
+      {
+        runner,
+        context: {
+          repoRoot,
+          tmux: { server: "kanna-task-abc", session: "kanna-task-abc" },
+          ports: {
+            KANNA_DEV_PORT: 1421,
+            KANNA_MOBILE_PORT: 1430,
+            KANNA_FIREBASE_AUTH_PORT: 9100,
+            KANNA_FIREBASE_FIRESTORE_PORT: 9101,
+            KANNA_FIREBASE_FUNCTIONS_PORT: 9102,
+            KANNA_FIREBASE_UI_PORT: 9103,
+            KANNA_RELAY_PORT: 9081
+          },
+          env: {
+            KANNA_DEV_PORT: "1421",
+            KANNA_MOBILE_PORT: "1430",
+            KANNA_MOBILE_SERVER_PORT: "48120",
+            KANNA_FIREBASE_AUTH_PORT: "9100",
+            KANNA_FIREBASE_FIRESTORE_PORT: "9101",
+            KANNA_FIREBASE_FUNCTIONS_PORT: "9102",
+            KANNA_FIREBASE_UI_PORT: "9103",
+            KANNA_RELAY_PORT: "9081",
+            KANNA_IOS_DEVICE_UDID: "00008130-001015CA1091401C"
+          }
+        }
+      },
+      { resolveLanAddress: () => "172.16.0.193" }
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.message).toContain("Launched Kanna mobile on Jerome's iPhone 15.");
+    expect(result.message).toContain("Metro: http://172.16.0.193:1430");
+    const tmuxStartIndex = calls.findIndex(
+      (call) => call.command === "tmux" && call.args.includes("new-session")
+    );
+    const installIndex = calls.findIndex(
+      (call) => call.command === "pnpm" && call.args.includes("ios")
+    );
+    expect(calls[tmuxStartIndex]).toMatchObject({
+      command: "tmux",
+      args: expect.arrayContaining(["new-session", "-n", "emulators"])
+    });
+    expect(tmuxStartIndex).toBeGreaterThan(-1);
+    expect(installIndex).toBeGreaterThan(tmuxStartIndex);
+    expect(calls.some((call) => call.command === "curl" && call.args.at(-1) === "http://172.16.0.193:1430/status")).toBe(true);
+    expect(calls.at(-1)).toMatchObject({
+      command: "pnpm",
+      args: [
+        "--dir",
+        `${repoRoot}/apps/mobile`,
+        "ios",
+        "--device",
+        "00008130-001015CA1091401C",
+        "--port",
+        "1430"
+      ],
+      cwd: repoRoot
+    });
+    expect(calls.at(-1)?.env?.REACT_NATIVE_PACKAGER_HOSTNAME).toBe("172.16.0.193");
+  });
+
+  it("runs physical-device mobile doctor checks without building or launching the app", async () => {
+    const calls: string[] = [];
+    const runner: CommandRunner = {
+      async run(command, args) {
+        calls.push(`${command} ${args.join(" ")}`);
+        if (command === "xcrun" && args.join(" ") === "xcdevice list") {
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify([
+              {
+                available: true,
+                identifier: "00008130-001015CA1091401C",
+                name: "Jerome's iPhone 15",
+                operatingSystemVersion: "17.5 (21F79)",
+                platform: "com.apple.platform.iphoneos",
+                simulator: false
+              }
+            ]),
+            stderr: ""
+          };
+        }
+        if (command === "curl") {
+          return { exitCode: 0, stdout: "packager-status:running\n", stderr: "" };
+        }
+        if (command === "xcrun" && args.includes("devicectl")) {
+          return { exitCode: 0, stdout: "build.kanna.app.dev\n", stderr: "" };
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+    };
+
+    const result = await executeMobileDeviceDoctorWithContext(
+      { device: true },
+      {
+        runner,
+        context: {
+          repoRoot: "/repo",
+          tmux: { server: "kanna-task-abc", session: "kanna-task-abc" },
+          ports: { KANNA_MOBILE_PORT: 1430 },
+          env: {
+            KANNA_MOBILE_PORT: "1430",
+            KANNA_IOS_DEVICE_UDID: "00008130-001015CA1091401C"
+          }
+        }
+      },
+      { resolveLanAddress: () => "172.16.0.193" }
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.message).toContain("Metro is reachable at http://172.16.0.193:1430/status.");
+    expect(result.message).toContain("Local Network");
+    expect(calls).not.toContain("pnpm --dir /repo/apps/mobile ios");
   });
 });

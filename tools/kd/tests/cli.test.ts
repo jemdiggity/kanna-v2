@@ -180,6 +180,17 @@ describe("kd CLI", () => {
     });
   });
 
+  it("parses the physical-device mobile run command", () => {
+    expect(parseCliArgs(["mobile", "run", "--device"])).toEqual({
+      taskId: "mobile.run",
+      input: { device: true }
+    });
+    expect(parseCliArgs(["mobile", "doctor", "--device"])).toEqual({
+      taskId: "mobile.doctor",
+      input: { device: true }
+    });
+  });
+
   it("maps retired wrapper argument shapes to kd tasks", () => {
     expect(parseCliArgs([])).toEqual({
       taskId: "dev.up",
