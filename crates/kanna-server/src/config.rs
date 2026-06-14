@@ -7,6 +7,7 @@ pub struct Config {
     pub device_token: String,
     pub daemon_dir: String,
     pub db_path: String,
+    pub kanna_cli_path: Option<String>,
     pub desktop_id: String,
     pub desktop_secret: Option<String>,
     pub desktop_name: String,
@@ -22,6 +23,7 @@ struct RawConfig {
     device_token: String,
     daemon_dir: Option<String>,
     db_path: Option<String>,
+    kanna_cli_path: Option<String>,
     desktop_id: Option<String>,
     desktop_secret: Option<String>,
     desktop_name: Option<String>,
@@ -134,6 +136,7 @@ fn load_from_path(
             .daemon_dir
             .unwrap_or_else(|| default_daemon_dir_for_root(data_root)),
         db_path,
+        kanna_cli_path: raw.kanna_cli_path,
         desktop_id: raw.desktop_id.unwrap_or_else(default_desktop_id),
         desktop_secret: raw.desktop_secret,
         desktop_name: raw.desktop_name.unwrap_or_else(default_desktop_name),
@@ -247,6 +250,27 @@ mod tests {
 
         assert_eq!(config.desktop_id, "desktop-1");
         assert_eq!(config.desktop_secret.as_deref(), Some("desktop-secret"));
+    }
+
+    #[test]
+    fn load_from_path_reads_desktop_resolved_kanna_cli_path() {
+        let root = unique_test_dir("kanna-cli-path");
+        let config_path = root.join("server.toml");
+        fs::write(
+            &config_path,
+            "relay_url = \"ws://127.0.0.1:18080\"\n\
+             device_token = \"device-token\"\n\
+             desktop_id = \"desktop-1\"\n\
+             kanna_cli_path = \"/Applications/Kanna.app/Contents/MacOS/kanna-cli\"\n",
+        )
+        .unwrap();
+
+        let config = load_from_path(&config_path, &root).unwrap();
+
+        assert_eq!(
+            config.kanna_cli_path.as_deref(),
+            Some("/Applications/Kanna.app/Contents/MacOS/kanna-cli")
+        );
     }
 
     #[test]
