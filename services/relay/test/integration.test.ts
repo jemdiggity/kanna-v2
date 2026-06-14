@@ -246,7 +246,7 @@ describe("Relay integration", () => {
     });
 
     await waitForRelay();
-  });
+  }, 30_000);
 
   afterAll(async () => {
     relayProcess?.kill("SIGTERM");

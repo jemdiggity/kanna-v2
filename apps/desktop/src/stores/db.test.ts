@@ -288,7 +288,7 @@ describe("runMigrations", () => {
       ]),
     );
     expect(db.schemaMigrations).toContainEqual({ id: "017_theme_preferences" });
-    expect(db.schemaMigrations).toContainEqual({ id: "019_agent_message_style_preference" });
+    expect(db.schemaMigrations).toContainEqual({ id: "020_agent_message_style_preference" });
   });
 
   it("does not overwrite a canonical pr stage from stale legacy tags", async () => {

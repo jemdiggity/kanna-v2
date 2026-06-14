@@ -47,6 +47,12 @@ const listenHandlers = new Map<string, (event: unknown) => void | Promise<void>>
 const currentWebviewWindowListenHandlers = new Map<string, (event: unknown) => void | Promise<void>>();
 let closeRequestedHandler: ((event: { preventDefault: () => void }) => void | Promise<void>) | null = null;
 const cloudTasksMock = vi.hoisted(() => vi.fn(async () => ({ repos: [], items: [] })));
+const subscribeDesktopCloudTasksMock = vi.hoisted(() =>
+  vi.fn((_uid: string, onSnapshot: (snapshot: { repos: unknown[]; items: unknown[]; terminalRefs: Record<string, unknown> }) => void) => {
+    onSnapshot({ repos: [], items: [], terminalRefs: {} });
+    return vi.fn();
+  }),
+);
 const reconcileDesktopTaskSnapshotsMock = vi.hoisted(() => vi.fn(async () => {}));
 const scheduleStartupBackupMock = vi.hoisted(() => vi.fn(async () => {}));
 const nativeSetThemeMock = vi.hoisted(() => vi.fn(async () => {}));
@@ -227,6 +233,9 @@ vi.mock("@kanna/core", () => ({
 vi.mock("@kanna/db", () => ({
   getSetting: vi.fn(async () => null),
   setSetting: vi.fn(async () => {}),
+  listRepos: vi.fn(async () => []),
+  listPipelineItems: vi.fn(async () => []),
+  listBlockersForItem: vi.fn(async () => []),
 }));
 
 vi.mock("vue-i18n", () => ({
@@ -313,6 +322,8 @@ vi.mock("./services/desktopAuthSdk", () => ({
 
 vi.mock("./services/desktopCloudTaskIndex", () => ({
   listDesktopCloudTasks: cloudTasksMock,
+  mapDesktopCloudTasks: vi.fn((tasks: unknown[]) => ({ repos: [], items: tasks, terminalRefs: {} })),
+  subscribeDesktopCloudTasks: subscribeDesktopCloudTasksMock,
 }));
 
 vi.mock("./services/desktopCloudPublisher", () => ({
@@ -629,6 +640,7 @@ describe("App", () => {
     toastErrorMock.mockClear();
     cloudTasksMock.mockReset();
     cloudTasksMock.mockResolvedValue({ repos: [], items: [] });
+    subscribeDesktopCloudTasksMock.mockClear();
     reconcileDesktopTaskSnapshotsMock.mockReset();
     reconcileDesktopTaskSnapshotsMock.mockResolvedValue(undefined);
     appUpdateStartMock.mockClear();
@@ -677,35 +689,33 @@ describe("App", () => {
     wrapper.unmount();
   });
 
-  it("reconciles cloud task snapshots during periodic cloud sync", async () => {
+  it("reconciles cloud task snapshots on sign-in without periodic writes", async () => {
     vi.useFakeTimers();
 
     const wrapper = await mountApp(SidebarWithRepoStub);
+    await flushPromises();
+
+    expect(reconcileDesktopTaskSnapshotsMock).toHaveBeenCalledWith(dbMock);
+
     reconcileDesktopTaskSnapshotsMock.mockClear();
     cloudTasksMock.mockClear();
 
     await vi.advanceTimersByTimeAsync(1000);
     await flushPromises();
 
-    expect(reconcileDesktopTaskSnapshotsMock).toHaveBeenCalledWith(dbMock);
-    expect(cloudTasksMock).toHaveBeenCalledTimes(1);
+    expect(reconcileDesktopTaskSnapshotsMock).not.toHaveBeenCalled();
+    expect(cloudTasksMock).not.toHaveBeenCalled();
 
     wrapper.unmount();
   });
 
-  it("shows one toast when periodic cloud reconciliation fails", async () => {
+  it("shows one toast when sign-in cloud reconciliation fails", async () => {
     vi.useFakeTimers();
-
-    const wrapper = await mountApp(SidebarWithRepoStub);
-    reconcileDesktopTaskSnapshotsMock.mockClear();
-    toastErrorMock.mockClear();
-    reconcileDesktopTaskSnapshotsMock.mockRejectedValue(
+    reconcileDesktopTaskSnapshotsMock.mockRejectedValueOnce(
       Object.assign(new Error("Missing or insufficient permissions."), { code: "permission-denied" }),
     );
 
-    await vi.advanceTimersByTimeAsync(1000);
-    await flushPromises();
-    await vi.advanceTimersByTimeAsync(1000);
+    const wrapper = await mountApp(SidebarWithRepoStub);
     await flushPromises();
 
     expect(toastErrorMock).toHaveBeenCalledTimes(1);
@@ -714,19 +724,13 @@ describe("App", () => {
     wrapper.unmount();
   });
 
-  it("shows one toast when periodic cloud task refresh fails", async () => {
+  it("shows one toast when sign-in cloud task refresh fails", async () => {
     vi.useFakeTimers();
-
-    const wrapper = await mountApp(SidebarWithRepoStub);
-    cloudTasksMock.mockClear();
-    toastErrorMock.mockClear();
-    cloudTasksMock.mockRejectedValue(
+    cloudTasksMock.mockRejectedValueOnce(
       Object.assign(new Error("Missing or insufficient permissions."), { code: "permission-denied" }),
     );
 
-    await vi.advanceTimersByTimeAsync(1000);
-    await flushPromises();
-    await vi.advanceTimersByTimeAsync(1000);
+    const wrapper = await mountApp(SidebarWithRepoStub);
     await flushPromises();
 
     expect(toastErrorMock).toHaveBeenCalledTimes(1);
