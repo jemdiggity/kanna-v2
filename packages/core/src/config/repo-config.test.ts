@@ -58,8 +58,8 @@ describe("parseRepoConfig", () => {
     expect(config.ports).toBeUndefined();
   });
 
-  it("returns empty config for invalid JSON", () => {
-    expect(parseRepoConfig("not json")).toEqual({});
+  it("throws for invalid JSON", () => {
+    expect(() => parseRepoConfig("not json")).toThrow();
   });
 
   it("ignores unknown top-level keys", () => {

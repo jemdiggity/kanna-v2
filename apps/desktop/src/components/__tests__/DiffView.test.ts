@@ -113,6 +113,11 @@ async function flushPromises() {
   await nextTick();
 }
 
+async function waitForTimerTurn() {
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  await flushPromises();
+}
+
 describe("DiffView", () => {
   afterEach(() => {
     invokeMock.mockReset();
@@ -381,6 +386,50 @@ describe("DiffView", () => {
       mode: "all",
     });
     expect(includeButton.text()).toBe("Staged+Unstaged");
+
+    wrapper.unmount();
+  });
+
+  it("refreshes an open branch diff when the view regains focus after history changes", async () => {
+    let branchPatchName = "before-rebase.txt";
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "git_branch_upstream") return null;
+      if (command === "git_merge_base") return "base-sha";
+      if (command === "git_diff_branch_range") {
+        return `diff --git a/${branchPatchName} b/${branchPatchName}`;
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    const wrapper = mount(DiffView, {
+      props: {
+        repoPath: "/repo",
+        initialScope: "branch",
+        baseRef: "origin/main",
+      },
+      attachTo: document.body,
+      global: {
+        mocks: {
+          $t: (key: string) => key,
+        },
+      },
+    });
+
+    await flushPromises();
+    await flushPromises();
+
+    expect(renderMock.mock.calls.at(-1)?.[0]?.fileDiff).toMatchObject({
+      name: "before-rebase.txt",
+    });
+
+    await waitForTimerTurn();
+    branchPatchName = "after-rebase.txt";
+    window.dispatchEvent(new Event("focus"));
+    await waitForTimerTurn();
+
+    expect(renderMock.mock.calls.at(-1)?.[0]?.fileDiff).toMatchObject({
+      name: "after-rebase.txt",
+    });
 
     wrapper.unmount();
   });
@@ -983,6 +1032,90 @@ describe("DiffView", () => {
     await flushPromises();
 
     expect(document.activeElement).toBe(wrapper.get(".diff-view").element);
+
+    wrapper.unmount();
+  });
+
+  it("keeps branch search open after Enter without reloading the branch diff", async () => {
+    diffMocks.parsePatchFilesMock.mockReturnValue([
+      {
+        files: [
+          {
+            name: "src/example.ts",
+            oldName: "src/example.ts",
+            newName: "src/example.ts",
+            hunks: [
+              {
+                hunkSpecs: "@@ -1,1 +1,1 @@",
+                hunkContext: "function demo()",
+                unifiedLineStart: 0,
+                hunkContent: [
+                  {
+                    type: "change",
+                    deletions: 1,
+                    deletionLineIndex: 0,
+                    additions: 1,
+                    additionLineIndex: 0,
+                  },
+                ],
+              },
+            ],
+            additionLines: ["const alpha = 2;"],
+            deletionLines: ["const alpha = 1;"],
+            __searchRows: [
+              { lineIndex: "0,0", text: "const alpha = 1;" },
+              { lineIndex: "1,0", text: "const alpha = 2;" },
+            ],
+          },
+        ],
+      },
+    ]);
+
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "git_branch_upstream") return null;
+      if (command === "git_merge_base") return "base-sha";
+      if (command === "git_diff_branch_range") return "diff --git a/src/example.ts b/src/example.ts";
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    const wrapper = mount(DiffView, {
+      props: {
+        repoPath: "/repo",
+        initialScope: "branch",
+        baseRef: "origin/main",
+      },
+      attachTo: document.body,
+      global: {
+        mocks: {
+          $t: (key: string) => key,
+        },
+      },
+    });
+
+    await flushPromises();
+    await flushPromises();
+
+    const branchDiffRangeCallsBeforeEnter = invokeMock.mock.calls.filter(
+      ([command]) => command === "git_diff_branch_range",
+    );
+    expect(branchDiffRangeCallsBeforeEnter).toHaveLength(1);
+
+    window.dispatchEvent(new KeyboardEvent("keydown", {
+      key: "/",
+      bubbles: true,
+    }));
+    await flushPromises();
+
+    const input = wrapper.get(".search-input");
+    await input.setValue("alpha");
+    await input.trigger("keydown", { key: "Enter" });
+    await flushPromises();
+    await waitForTimerTurn();
+
+    expect((wrapper.get(".search-input").element as HTMLInputElement).value).toBe("alpha");
+    expect(wrapper.get(".search-count").text()).toBe("2/2");
+    expect(document.activeElement).toBe(wrapper.get(".diff-view").element);
+    expect(invokeMock.mock.calls.filter(([command]) => command === "git_diff_branch_range")).toHaveLength(1);
 
     wrapper.unmount();
   });

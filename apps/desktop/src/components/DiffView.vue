@@ -902,6 +902,11 @@ function cycleBranchInclude() {
   void loadDiff();
 }
 
+function refreshBranchDiffOnWindowFocus() {
+  if (scope.value !== "branch" || loading.value) return;
+  void loadDiff({ preserveCurrentScroll: true });
+}
+
 function handleScroll() {
   if (loading.value || scrollRestorePendingLoadId === activeDiffLoadId) return;
   saveCurrentScrollPosition();
@@ -1009,12 +1014,14 @@ watch(isSearching, (searching) => {
 onMounted(() => {
   syncViewStateFromProps();
   void loadDiff({ preserveCurrentScroll: false });
+  window.addEventListener("focus", refreshBranchDiffOnWindowFocus);
   nextTick(() => diffViewRef.value?.focus());
 });
 
 onUnmounted(() => {
   activeDiffLoadId = 0;
   scrollRestorePendingLoadId = 0;
+  window.removeEventListener("focus", refreshBranchDiffOnWindowFocus);
   cleanupInstance();
 });
 

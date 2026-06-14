@@ -710,7 +710,7 @@ describe("diff view", () => {
       expect(noneText).not.toContain("unstaged branch include marker");
       expect(noneText).not.toContain("untracked branch include marker");
 
-      await clickDiffToolbarButton(client, "None");
+      await clickDiffToolbarButton(client, "Committed");
       const stagedText = await waitForDiffText(
         client,
         `return text.includes("staged branch include marker")
@@ -742,6 +742,69 @@ describe("diff view", () => {
         ].join("\n"),
         cwd: worktreePath,
         env: {},
+      });
+    }
+  });
+
+  it("refreshes an open Branch diff after the task branch history is rewritten", async () => {
+    const worktreePath = await getSelectedWorktreePath(client, testRepoPath);
+    const setupBeforeScript = [
+      "cat > e2e-branch-refresh-before.txt <<'EOF'",
+      "branch refresh before rebase marker",
+      "EOF",
+      "git add e2e-branch-refresh-before.txt",
+      "git commit -m 'e2e branch refresh before rewrite'",
+    ].join("\n");
+
+    await tauriInvoke(client, "run_script", {
+      script: setupBeforeScript,
+      cwd: worktreePath,
+      env: {},
+    });
+
+    try {
+      await openDiffModal(client);
+      await setDiffScope(client, "Branch");
+      await waitForDiffText(
+        client,
+        `return text.includes("branch refresh before rebase marker");`,
+      );
+
+      await tauriInvoke(client, "run_script", {
+        script: [
+          'git reset --hard "$KANNA_E2E_DIFF_BASELINE_REF"',
+          "rm -f e2e-branch-refresh-before.txt",
+          "cat > e2e-branch-refresh-after.txt <<'EOF'",
+          "branch refresh after rebase marker",
+          "EOF",
+          "git add e2e-branch-refresh-after.txt",
+          "git commit -m 'e2e branch refresh after rewrite'",
+        ].join("\n"),
+        cwd: worktreePath,
+        env: {
+          KANNA_E2E_DIFF_BASELINE_REF: taskWorktreeBaselineRef,
+        },
+      });
+
+      await client.executeSync("window.dispatchEvent(new Event('focus'));");
+      const refreshedText = await waitForDiffText(
+        client,
+        `return text.includes("branch refresh after rebase marker")
+          && !text.includes("branch refresh before rebase marker");`,
+      );
+
+      expect(refreshedText).toContain("branch refresh after rebase marker");
+      expect(refreshedText).not.toContain("branch refresh before rebase marker");
+    } finally {
+      await tauriInvoke(client, "run_script", {
+        script: [
+          'git reset --hard "$KANNA_E2E_DIFF_BASELINE_REF"',
+          "git clean -fd -- e2e-branch-refresh-before.txt e2e-branch-refresh-after.txt",
+        ].join("\n"),
+        cwd: worktreePath,
+        env: {
+          KANNA_E2E_DIFF_BASELINE_REF: taskWorktreeBaselineRef,
+        },
       });
     }
   });

@@ -25,12 +25,7 @@ export interface RepoConfig {
 }
 
 export function parseRepoConfig(json: string): RepoConfig {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(json);
-  } catch {
-    return {};
-  }
+  const parsed: unknown = JSON.parse(json);
 
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
     return {};
