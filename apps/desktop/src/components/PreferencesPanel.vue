@@ -64,6 +64,7 @@ const authSession = ref<DesktopAuthSession | null>(null)
 const authState = ref<DesktopAuthState>({ status: "signedOut" })
 const accountEmail = ref("")
 const accountPassword = ref("")
+const accountPasswordVisible = ref(false)
 const accountMessage = ref("")
 let unsubscribeAuth: (() => void) | null = null
 
@@ -325,14 +326,25 @@ defineExpose({ cycleTab })
 
             <label class="account-field">
               <span>Password</span>
-              <input
-                v-model="accountPassword"
-                data-testid="account-password"
-                v-bind="macOsTextInputAttrs"
-                type="password"
-                autocomplete="current-password"
-                required
-              />
+              <span class="password-input-row">
+                <input
+                  v-model="accountPassword"
+                  data-testid="account-password"
+                  v-bind="macOsTextInputAttrs"
+                  :type="accountPasswordVisible ? 'text' : 'password'"
+                  autocomplete="current-password"
+                  required
+                />
+                <button
+                  type="button"
+                  class="password-toggle"
+                  data-testid="account-toggle-password"
+                  :aria-label="accountPasswordVisible ? 'Hide password' : 'Show password'"
+                  @click="accountPasswordVisible = !accountPasswordVisible"
+                >
+                  {{ accountPasswordVisible ? "Hide" : "Show" }}
+                </button>
+              </span>
             </label>
 
             <button type="submit" class="primary-button" :disabled="isSigningIn">
@@ -497,6 +509,32 @@ defineExpose({ cycleTab })
 .account-field input {
   width: 100%;
   box-sizing: border-box;
+}
+
+.password-input-row {
+  display: flex;
+  gap: 6px;
+}
+
+.password-input-row input {
+  flex: 1;
+  min-width: 0;
+}
+
+.password-toggle {
+  border: 1px solid var(--kn-border-strong);
+  border-radius: 4px;
+  background: var(--kn-bg-hover);
+  color: var(--kn-text-secondary);
+  cursor: pointer;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 5px 9px;
+}
+
+.password-toggle:hover {
+  color: var(--kn-text-primary);
 }
 
 .account-signed-in {

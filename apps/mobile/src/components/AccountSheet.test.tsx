@@ -87,6 +87,24 @@ function findNodeByTestId(node: ElementNode, testID: string): ElementNode | null
   return null;
 }
 
+function findNodeByAccessibilityLabel(
+  node: ElementNode,
+  accessibilityLabel: string
+): ElementNode | null {
+  if (node.props?.accessibilityLabel === accessibilityLabel) {
+    return node;
+  }
+
+  for (const child of flattenChildren(node.props?.children)) {
+    const match = findNodeByAccessibilityLabel(child, accessibilityLabel);
+    if (match) {
+      return match;
+    }
+  }
+
+  return null;
+}
+
 function renderSignedOutSheet(): ElementNode {
   if (!AccountSheet) {
     throw new Error("AccountSheet was not loaded");
@@ -169,5 +187,14 @@ describe("AccountSheet", () => {
     }) as ElementNode;
 
     expect(findNodeByTestId(visibleTree, "mobile.account-force-cloud")).not.toBeNull();
+  });
+
+  it("starts with a hidden password and renders a show-password control", () => {
+    const tree = renderSignedOutSheet();
+    const passwordInput = findNodeByTestId(tree, "mobile.account-password");
+    const toggle = findNodeByAccessibilityLabel(tree, "Show password");
+
+    expect(passwordInput?.props?.secureTextEntry).toBe(true);
+    expect(toggle).not.toBeNull();
   });
 });
