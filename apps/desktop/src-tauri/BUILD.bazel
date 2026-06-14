@@ -109,7 +109,6 @@ tauri_acl_prep_dir(
         "@desktop_crates__tauri-plugin-sql-2.4.0//:build_script_build",
         "@desktop_crates__tauri-plugin-updater-2.10.1//:build_script_build",
         "@desktop_crates__tauri-plugin-webdriver-0.2.1//:build_script_build",
-        "@desktop_crates__tauri-plugin-window-state-2.4.1//:build_script_build",
     ],
     frontend_dist = "//:frontend_dist",
     tauri_build_data = ":tauri_build_data",
@@ -190,7 +189,6 @@ cargo_build_script(
         "@desktop_crates//:tauri-plugin-sql",
         "@desktop_crates//:tauri-plugin-updater",
         "@desktop_crates//:tauri-plugin-webdriver",
-        "@desktop_crates//:tauri-plugin-window-state",
     ],
     proc_macro_deps = all_crate_deps(
         build_proc_macro = True,

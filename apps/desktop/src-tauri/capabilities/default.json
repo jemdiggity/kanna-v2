@@ -22,7 +22,6 @@
     "sql:allow-close",
     "dialog:default",
     "updater:default",
-    "window-state:default",
     "process:allow-restart"
   ]
 }

@@ -49,66 +49,6 @@ const WINDOW_WORKSPACE_NATIVE_NAVIGATE_REPO_UP_EVENT: &str = "kanna://native-nav
 const WINDOW_WORKSPACE_NATIVE_NAVIGATE_REPO_DOWN_EVENT: &str = "kanna://native-navigate-repo-down";
 
 #[derive(Debug, PartialEq, Eq)]
-struct WindowSizePolicy {
-    default_width: u32,
-    default_height: u32,
-    min_width: u32,
-    min_height: u32,
-}
-
-const MAIN_WINDOW_SIZE_POLICY: WindowSizePolicy = WindowSizePolicy {
-    default_width: 1200,
-    default_height: 800,
-    min_width: 800,
-    min_height: 600,
-};
-
-fn should_restore_default_window_size(width: u32, height: u32, policy: &WindowSizePolicy) -> bool {
-    width < policy.min_width || height < policy.min_height
-}
-
-fn restore_default_size_if_too_small<R: tauri::Runtime>(
-    window: &tauri::Window<R>,
-    policy: &WindowSizePolicy,
-) {
-    match window.inner_size() {
-        Ok(size) if should_restore_default_window_size(size.width, size.height, policy) => {
-            if let Err(error) = window.set_size(tauri::PhysicalSize {
-                width: policy.default_width,
-                height: policy.default_height,
-            }) {
-                eprintln!("[window] failed to restore default window size: {}", error);
-            }
-        }
-        Ok(_) => {}
-        Err(error) => {
-            eprintln!("[window] failed to read restored window size: {}", error);
-        }
-    }
-}
-
-fn schedule_restore_default_size_if_too_small<R: tauri::Runtime + 'static>(
-    window: tauri::Window<R>,
-    policy: &'static WindowSizePolicy,
-) {
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        restore_default_size_if_too_small(&window, policy);
-    });
-}
-
-fn window_size_guard_plugin<R: tauri::Runtime + 'static>() -> tauri::plugin::TauriPlugin<R> {
-    tauri::plugin::Builder::new("kanna-window-size-guard")
-        .on_window_ready(|window| {
-            if window.label() == "main" {
-                restore_default_size_if_too_small(&window, &MAIN_WINDOW_SIZE_POLICY);
-                schedule_restore_default_size_if_too_small(window, &MAIN_WINDOW_SIZE_POLICY);
-            }
-        })
-        .build()
-}
-
-#[derive(Debug, PartialEq, Eq)]
 enum NativeWorkspaceMenuAction {
     DispatchToFocused { label: String, event: &'static str },
     CreateRootWindow,
@@ -152,14 +92,8 @@ fn resolve_native_workspace_menu_action(
 fn create_root_kanna_window(app: &tauri::AppHandle) -> tauri::Result<()> {
     tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::App("/".into()))
         .title("")
-        .inner_size(
-            MAIN_WINDOW_SIZE_POLICY.default_width as f64,
-            MAIN_WINDOW_SIZE_POLICY.default_height as f64,
-        )
-        .min_inner_size(
-            MAIN_WINDOW_SIZE_POLICY.min_width as f64,
-            MAIN_WINDOW_SIZE_POLICY.min_height as f64,
-        )
+        .inner_size(1200.0, 800.0)
+        .min_inner_size(800.0, 600.0)
         .build()?;
     Ok(())
 }
@@ -652,8 +586,6 @@ pub fn run() {
         .plugin(tauri_plugin_sql::Builder::default().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
-        .plugin(tauri_plugin_window_state::Builder::default().build())
-        .plugin(window_size_guard_plugin())
         .plugin(tauri_plugin_updater::Builder::new().build());
 
     #[cfg(debug_assertions)]
@@ -686,12 +618,6 @@ pub fn run() {
                 fix_path_from_shell();
                 setup_fn_f_fullscreen(app.handle().clone());
             }
-            if let Some(main_win) = app.get_webview_window("main") {
-                let native_window = main_win.as_ref().window();
-                restore_default_size_if_too_small(&native_window, &MAIN_WINDOW_SIZE_POLICY);
-                schedule_restore_default_size_if_too_small(native_window, &MAIN_WINDOW_SIZE_POLICY);
-            }
-
             // Build app menu with full version in About
             let about = AboutMetadataBuilder::new()
                 .short_version(Some(KANNA_VERSION))
@@ -899,8 +825,7 @@ pub fn run() {
 #[cfg(all(test, debug_assertions))]
 mod tests {
     use super::{
-        resolve_native_workspace_menu_action, resolve_webdriver_port,
-        should_restore_default_window_size, NativeWorkspaceMenuAction, WindowSizePolicy,
+        resolve_native_workspace_menu_action, resolve_webdriver_port, NativeWorkspaceMenuAction,
         MENU_ID_CLOSE_WINDOW, MENU_ID_NAVIGATE_REPO_DOWN, MENU_ID_NAVIGATE_REPO_UP,
         MENU_ID_NAVIGATE_TASK_DOWN, MENU_ID_NAVIGATE_TASK_UP, MENU_ID_NEW_WINDOW,
         WINDOW_WORKSPACE_NATIVE_CLOSE_WINDOW_EVENT,
@@ -1009,18 +934,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn restored_window_size_is_rejected_only_when_below_minimum() {
-        let policy = WindowSizePolicy {
-            default_width: 1200,
-            default_height: 800,
-            min_width: 800,
-            min_height: 600,
-        };
-
-        assert!(should_restore_default_window_size(799, 800, &policy));
-        assert!(should_restore_default_window_size(1200, 599, &policy));
-        assert!(!should_restore_default_window_size(800, 600, &policy));
-        assert!(!should_restore_default_window_size(1024, 700, &policy));
-    }
 }
