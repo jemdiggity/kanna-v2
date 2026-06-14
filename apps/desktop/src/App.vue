@@ -234,6 +234,7 @@ const preferences = reactive({
   defaultAgentProvider: "claude" as AgentProvider,
   appTheme: DEFAULT_APP_THEME,
   codeTheme: DEFAULT_CODE_THEME,
+  agentMessageAppearance: "chat" as import("./stores/state").AgentMessageAppearance,
 });
 const localReposForCloudMatching = computedAsync(async () => {
   return Promise.all(store.repos.map(async (repo) => {
@@ -2131,6 +2132,9 @@ async function handlePreferenceUpdate(key: string, value: string) {
   } else if (key === "codeTheme") {
     preferences.codeTheme = normalizeCodeThemePreference(value);
     syncThemeRuntime();
+  } else if (key === "agentMessageAppearance") {
+    preferences.agentMessageAppearance =
+      value === "log" || value === "terminal" ? value : "chat";
   }
 }
 
@@ -2376,6 +2380,7 @@ onMounted(async () => {
   preferences.killAfterMinutes = store.killAfterMinutes;
   preferences.ideCommand = store.ideCommand;
   preferences.devLingerTerminals = store.devLingerTerminals;
+  preferences.agentMessageAppearance = store.agentMessageAppearance;
 
   const savedAgentProvider = await getSetting(db, "defaultAgentProvider");
   if (savedAgentProvider === "copilot") preferences.defaultAgentProvider = "copilot";

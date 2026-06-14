@@ -426,6 +426,36 @@ describe("createInitApi", () => {
     expect(state.codeTheme.value).toBe("dark");
   });
 
+  it("loads agent message appearance and falls back to the legacy style setting", async () => {
+    vi.mocked(getSetting).mockImplementation(async (_db, key) => {
+      if (key === "agentMessageAppearance") return null;
+      if (key === "agentMessageStyle") return "terminal";
+      return null;
+    });
+
+    const state = createStoreState();
+    const services = {
+      loadInitialData: vi.fn(async () => {}),
+    };
+    const context = createStoreContext(state, {
+      toasts: ref([]),
+      dismiss: vi.fn(),
+      info: vi.fn(),
+      warning: vi.fn(),
+      error: vi.fn(),
+    }, services);
+    const initApi = createInitApi(context, {} as import("./ports").PortsStore, {
+      checkUnblocked: vi.fn(async () => {}),
+      handleAgentFinished: vi.fn(),
+      startBlockedTask: vi.fn(async () => {}),
+      restoreUnblockedTask: vi.fn(async () => {}),
+    } as unknown as Parameters<typeof createInitApi>[2]);
+
+    await initApi.init(createDb());
+
+    expect(state.agentMessageAppearance.value).toBe("terminal");
+  });
+
   it("falls back when stored theme preferences are invalid", async () => {
     vi.mocked(getSetting).mockImplementation(async (_db, key) => {
       if (key === "appTheme") return "sepia";

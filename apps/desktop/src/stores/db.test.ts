@@ -284,11 +284,11 @@ describe("runMigrations", () => {
       expect.arrayContaining([
         { key: "appTheme", value: "dark" },
         { key: "codeTheme", value: "match" },
-        { key: "agentMessageStyle", value: "chat" },
+        { key: "agentMessageAppearance", value: "chat" },
       ]),
     );
     expect(db.schemaMigrations).toContainEqual({ id: "017_theme_preferences" });
-    expect(db.schemaMigrations).toContainEqual({ id: "020_agent_message_style_preference" });
+    expect(db.schemaMigrations).toContainEqual({ id: "020_agent_message_appearance_preference" });
   });
 
   it("does not overwrite a canonical pr stage from stale legacy tags", async () => {

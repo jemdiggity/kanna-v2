@@ -44,7 +44,8 @@ describe("AgentMessageView", () => {
     localStorage.clear();
   });
 
-  it("renders events in all three styles", async () => {
+  it("renders using the user appearance preference without local style controls", async () => {
+    useKannaStore().agentMessageAppearance = "log";
     events.value = [
       { seq: 1, event: { type: "assistant_text", text: "Hello **agent**", truncated: false } },
       { seq: 2, event: { type: "tool_call", call_id: "tool-1", tool_name: "Bash", input: { command: "pnpm test" } } },
@@ -53,14 +54,8 @@ describe("AgentMessageView", () => {
     const wrapper = mount(AgentMessageView, { props: { sessionId: "task-1" } });
 
     expect(wrapper.get('[data-testid="agent-message-view"]').text()).toContain("Hello agent");
-    expect(wrapper.classes()).toContain("skin-chat");
-
-    await wrapper.get(".style-switcher button:nth-child(2)").trigger("click");
     expect(wrapper.classes()).toContain("skin-log");
-
-    await wrapper.get(".style-switcher button:nth-child(3)").trigger("click");
-    expect(wrapper.classes()).toContain("skin-terminal");
-    expect(useKannaStore().agentMessageStyle).toBe("terminal");
+    expect(wrapper.find(".style-switcher").exists()).toBe(false);
   });
 
   it("sends composer input and interrupts", async () => {

@@ -62,6 +62,7 @@ function mountPreferences() {
         defaultAgentProvider: "claude",
         appTheme: "dark",
         codeTheme: "match",
+        agentMessageAppearance: "chat",
       },
     },
     global: {

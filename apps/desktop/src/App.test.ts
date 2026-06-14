@@ -83,6 +83,7 @@ const store = {
   hideShortcutsOnStartup: true,
   appTheme: "dark",
   codeTheme: "match",
+  agentMessageAppearance: "chat",
   init: vi.fn(async () => {}),
   createItem: vi.fn(async () => {}),
   recordIncomingTransfer: vi.fn(async () => {}),

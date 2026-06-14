@@ -914,7 +914,7 @@ Use this branch as the default when the user does not specify a target branch. B
     devLingerTerminals: state.devLingerTerminals,
     appTheme: state.appTheme,
     codeTheme: state.codeTheme,
-    agentMessageStyle: state.agentMessageStyle,
+    agentMessageAppearance: state.agentMessageAppearance,
     pendingSetupIds: state.pendingSetupIds,
     lastHiddenRepoId: state.lastHiddenRepoId,
     selectedRepo: selection.selectedRepo,
