@@ -121,6 +121,7 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
   let cloudTaskIndex: ReturnType<typeof createFirestoreTaskIndex> | null = null;
   let liveCloudHasTasks = false;
   let liveCloudTasks: TaskSummary[] = [];
+  let liveCloudSubscriptionActive = false;
   const getCloudTaskIndex = () =>
     (cloudTaskIndex ??= options.taskIndex ?? createFirestoreTaskIndex());
   const resolveClient = () =>
@@ -134,6 +135,7 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
       getTrustedDesktops: () => sessionStore.getState().trustedDesktops,
       getLiveCloudTasks: () => liveCloudTasks,
       hasLiveCloudTasks: () => liveCloudHasTasks,
+      isLiveCloudSubscriptionActive: () => liveCloudSubscriptionActive,
       relayUrl: options.relayUrl ?? resolveRelayUrl(readExpoPublicEnv(), {
         extraRelayUrl: extra?.relayUrl
       }),
@@ -142,12 +144,20 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
   let activeClient = resolveClient();
   const client = createDelegatingClient(() => activeClient);
   const controller = createMobileController(client, sessionStore, authSession, {
-    subscribeCloudTasks: (uid, onUpdate) =>
-      getCloudTaskIndex().subscribeRecentTasks(uid, (tasks) => {
+    subscribeCloudTasks: (uid, onUpdate) => {
+      liveCloudSubscriptionActive = true;
+      const unsubscribe = getCloudTaskIndex().subscribeRecentTasks(uid, (tasks) => {
         liveCloudTasks = tasks;
         liveCloudHasTasks = tasks.length > 0;
         onUpdate(tasks);
-      }),
+      });
+      return () => {
+        liveCloudSubscriptionActive = false;
+        liveCloudTasks = [];
+        liveCloudHasTasks = false;
+        unsubscribe();
+      };
+    },
   });
   let persistencePromise: Promise<SessionPersistence> | null = persistence
     ? Promise.resolve(persistence)
@@ -224,6 +234,7 @@ function createClientForMode({
   getTrustedDesktops,
   getLiveCloudTasks,
   hasLiveCloudTasks,
+  isLiveCloudSubscriptionActive,
   relayUrl,
   taskIndex,
 }: {
@@ -239,6 +250,7 @@ function createClientForMode({
   getTrustedDesktops(): readonly TrustedDesktopRecord[];
   getLiveCloudTasks(): TaskSummary[];
   hasLiveCloudTasks(): boolean;
+  isLiveCloudSubscriptionActive(): boolean;
   relayUrl: string | null;
   taskIndex?: CloudTaskIndex;
 }): KannaClient {
@@ -279,6 +291,7 @@ function createClientForMode({
     return createCloudWithLanFallbackClient(cloudClient, lanClient, {
       getLiveCloudTasks,
       hasLiveCloudTasks,
+      isLiveCloudSubscriptionActive,
       isLanFallbackEnabled: () =>
         !forceCloud && hasTrustedLanPeer(getTrustedDesktops())
     });
@@ -353,6 +366,7 @@ function createDisconnectedClient(): KannaClient {
 export interface CloudWithLanFallbackOptions {
   getLiveCloudTasks?: () => TaskSummary[];
   hasLiveCloudTasks?: () => boolean;
+  isLiveCloudSubscriptionActive?: () => boolean;
   isLanFallbackEnabled(): boolean;
 }
 
@@ -365,12 +379,18 @@ export function createCloudWithLanFallbackClient(
   const liveCloudTasks = () => options.getLiveCloudTasks?.() ?? [];
   const cloudHasVisibleTasks = () =>
     liveCloudTasks().length > 0 || options.hasLiveCloudTasks?.() === true;
+  const liveCloudSubscriptionActive = () =>
+    options.isLiveCloudSubscriptionActive?.() === true;
 
   const listRecentTasks = async () => {
     const tasks = liveCloudTasks();
-    if (tasks.length > 0 || !lanFallbackEnabled()) {
+    if (tasks.length > 0) {
       return tasks;
     }
+    if (liveCloudSubscriptionActive()) {
+      return lanFallbackEnabled() ? lanClient.listRecentTasks() : [];
+    }
+    if (!lanFallbackEnabled()) return cloudClient.listRecentTasks();
     return lanClient.listRecentTasks();
   };
 
@@ -399,9 +419,13 @@ export function createCloudWithLanFallbackClient(
     },
     listRepos: async () => {
       const repos = reposFromTasks(liveCloudTasks());
-      if (repos.length > 0 || !lanFallbackEnabled()) {
+      if (repos.length > 0) {
         return repos;
       }
+      if (liveCloudSubscriptionActive()) {
+        return lanFallbackEnabled() ? lanClient.listRepos() : [];
+      }
+      if (!lanFallbackEnabled()) return cloudClient.listRepos();
       if (useLanFallback()) {
         return lanClient.listRepos();
       }
@@ -409,9 +433,13 @@ export function createCloudWithLanFallbackClient(
     },
     listRepoTasks: async (repoId) => {
       const tasks = liveCloudTasks();
-      if (tasks.length > 0 || !lanFallbackEnabled()) {
+      if (tasks.length > 0) {
         return tasks.filter((task) => task.repoId === repoId);
       }
+      if (liveCloudSubscriptionActive()) {
+        return lanFallbackEnabled() ? lanClient.listRepoTasks(repoId) : [];
+      }
+      if (!lanFallbackEnabled()) return cloudClient.listRepoTasks(repoId);
       if (useLanFallback()) {
         return lanClient.listRepoTasks(repoId);
       }

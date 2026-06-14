@@ -66,6 +66,7 @@ export function createMobileController(
   let authUnsubscribe: (() => void) | null = null;
   let cloudTasksUnsubscribe: (() => void) | null = null;
   let bootstrapInFlight: Promise<void> | null = null;
+  let liveCloudTasksApplied = false;
 
   const setTerminalStartupError = (taskId: string, error: unknown) => {
     const message =
@@ -230,6 +231,8 @@ export function createMobileController(
   };
 
   const applyLiveCloudTasks = (tasks: TaskSummary[]) => {
+    liveCloudTasksApplied = true;
+    tasks = uniqueTasksById(tasks);
     store.setRepos(mergeReposWithTaskRepos(store.getState().repos, tasks));
     store.setRecentTasks(tasks);
     let selectedRepoId = store.getState().selectedRepoId;
@@ -269,6 +272,15 @@ export function createMobileController(
     return Array.from(mergedRepos, ([id, name]) => ({ id, name }));
   };
 
+  const uniqueTasksById = (tasks: TaskSummary[]): TaskSummary[] => {
+    const seen = new Set<string>();
+    return tasks.filter((task) => {
+      if (seen.has(task.id)) return false;
+      seen.add(task.id);
+      return true;
+    });
+  };
+
   const startCloudTaskSubscription = (uid: string): boolean => {
     if (!options.subscribeCloudTasks) return false;
     stopCloudTaskSubscription();
@@ -279,6 +291,7 @@ export function createMobileController(
   const stopCloudTaskSubscription = () => {
     cloudTasksUnsubscribe?.();
     cloudTasksUnsubscribe = null;
+    liveCloudTasksApplied = false;
   };
 
   const startBackgroundRefresh = () => {
@@ -355,7 +368,6 @@ export function createMobileController(
 
         store.setConnectionMode(status.lanHost === "cloud" ? "remote" : "lan");
         store.setConnectionState("connected");
-        await loadCollections();
         // When connected to the cloud and signed in, read tasks via a live
         // onSnapshot subscription. In LAN mode (including cloud→LAN fallback)
         // keep polling — the live cloud stream would otherwise clobber LAN
@@ -365,6 +377,13 @@ export function createMobileController(
           store.getState().connectionMode === "remote" &&
           auth?.status === "signedIn" &&
           startCloudTaskSubscription(auth.user.uid);
+        if (liveCloudTasksApplied) {
+          store.setDesktops(await client.listDesktops());
+          await refreshSearchResults();
+          reconcileSelectedTask();
+        } else {
+          await loadCollections();
+        }
         if (!useLiveCloudTasks) {
           startBackgroundRefresh();
         }
