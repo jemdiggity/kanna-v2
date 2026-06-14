@@ -5,6 +5,9 @@ use std::path::{Path, PathBuf};
 pub struct Config {
     pub relay_url: String,
     pub device_token: String,
+    pub firebase_project_id: String,
+    pub firebase_auth_emulator_url: Option<String>,
+    pub firebase_firestore_emulator_host: Option<String>,
     pub daemon_dir: String,
     pub db_path: String,
     pub kanna_cli_path: Option<String>,
@@ -21,6 +24,9 @@ pub struct Config {
 struct RawConfig {
     relay_url: String,
     device_token: String,
+    firebase_project_id: Option<String>,
+    firebase_auth_emulator_url: Option<String>,
+    firebase_firestore_emulator_host: Option<String>,
     daemon_dir: Option<String>,
     db_path: Option<String>,
     kanna_cli_path: Option<String>,
@@ -53,6 +59,10 @@ fn default_lan_host() -> String {
 
 fn default_lan_port() -> u16 {
     48_120
+}
+
+fn default_firebase_project_id() -> String {
+    "kanna-local".to_string()
 }
 
 fn default_pairing_store_path_for_root(data_root: &Path) -> String {
@@ -132,6 +142,11 @@ fn load_from_path(
     Ok(Config {
         relay_url: raw.relay_url,
         device_token: raw.device_token,
+        firebase_project_id: raw
+            .firebase_project_id
+            .unwrap_or_else(default_firebase_project_id),
+        firebase_auth_emulator_url: raw.firebase_auth_emulator_url,
+        firebase_firestore_emulator_host: raw.firebase_firestore_emulator_host,
         daemon_dir: raw
             .daemon_dir
             .unwrap_or_else(|| default_daemon_dir_for_root(data_root)),
