@@ -150,8 +150,6 @@ fn spawn_args_pin_the_exec_json_contract() {
             "exec",
             "-m",
             "gpt-5.3-codex",
-            "--sandbox",
-            "workspace-write",
             "--json",
             "fix the bug",
         ]
@@ -166,8 +164,6 @@ fn spawn_args_pin_the_exec_json_contract() {
             "thread-1",
             "-m",
             "gpt-5.3-codex",
-            "--sandbox",
-            "workspace-write",
             "--json",
             "now add tests",
         ]

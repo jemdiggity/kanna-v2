@@ -38,12 +38,6 @@ impl CodexAdapter {
             args.push("-m".to_string());
             args.push(model.clone());
         }
-        // Kanna tasks run inside git worktrees; workspace-write matches the
-        // PTY-mode behavior of letting the agent edit its own worktree.
-        // permission_mode is intentionally not mapped — exec mode has no
-        // interactive approvals (see module docs).
-        args.push("--sandbox".to_string());
-        args.push("workspace-write".to_string());
         args.push("--json".to_string());
         args
     }
@@ -245,8 +239,6 @@ impl ProviderAdapter for CodexAdapter {
             args.push("-m".to_string());
             args.push(model.clone());
         }
-        args.push("--sandbox".to_string());
-        args.push("workspace-write".to_string());
         args.push("--json".to_string());
         args.push(message.to_string());
         SpawnSpec {
