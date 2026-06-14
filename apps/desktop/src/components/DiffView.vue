@@ -902,7 +902,7 @@ function cycleBranchInclude() {
   void loadDiff();
 }
 
-function refreshBranchDiffOnFocus() {
+function refreshBranchDiffOnWindowFocus() {
   if (scope.value !== "branch" || loading.value) return;
   void loadDiff({ preserveCurrentScroll: true });
 }
@@ -1014,14 +1014,14 @@ watch(isSearching, (searching) => {
 onMounted(() => {
   syncViewStateFromProps();
   void loadDiff({ preserveCurrentScroll: false });
-  window.addEventListener("focus", refreshBranchDiffOnFocus);
+  window.addEventListener("focus", refreshBranchDiffOnWindowFocus);
   nextTick(() => diffViewRef.value?.focus());
 });
 
 onUnmounted(() => {
   activeDiffLoadId = 0;
   scrollRestorePendingLoadId = 0;
-  window.removeEventListener("focus", refreshBranchDiffOnFocus);
+  window.removeEventListener("focus", refreshBranchDiffOnWindowFocus);
   cleanupInstance();
 });
 
@@ -1029,7 +1029,7 @@ defineExpose({ refresh: loadDiff });
 </script>
 
 <template>
-  <div ref="diffViewRef" class="diff-view" tabindex="-1" @focus="refreshBranchDiffOnFocus">
+  <div ref="diffViewRef" class="diff-view" tabindex="-1">
     <div class="diff-toolbar">
       <div class="scope-selector">
         <button :class="{ active: scope === 'working' }" @click="setScope('working')">{{ $t('diffView.scopeWorking') }}</button>

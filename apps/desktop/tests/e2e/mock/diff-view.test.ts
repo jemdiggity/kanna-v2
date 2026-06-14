@@ -710,7 +710,7 @@ describe("diff view", () => {
       expect(noneText).not.toContain("unstaged branch include marker");
       expect(noneText).not.toContain("untracked branch include marker");
 
-      await clickDiffToolbarButton(client, "None");
+      await clickDiffToolbarButton(client, "Committed");
       const stagedText = await waitForDiffText(
         client,
         `return text.includes("staged branch include marker")
