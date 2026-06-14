@@ -145,6 +145,18 @@ export function createSessionStore(): SessionStore {
       );
     });
   };
+  const dedupeTasksById = (tasks: readonly TaskSummary[]): TaskSummary[] => {
+    const seen = new Set<string>();
+    const uniqueTasks: TaskSummary[] = [];
+    for (const task of tasks) {
+      if (seen.has(task.id)) {
+        continue;
+      }
+      seen.add(task.id);
+      uniqueTasks.push(task);
+    }
+    return uniqueTasks;
+  };
   const hasTaskInCollections = (taskId: string | null) => {
     if (!taskId) {
       return false;
@@ -273,32 +285,35 @@ export function createSessionStore(): SessionStore {
       publish();
     },
     setRepoTasks(repoTasks) {
-      if (areTaskListsEqual(state.repoTasks, repoTasks)) {
+      const uniqueTasks = dedupeTasksById(repoTasks);
+      if (areTaskListsEqual(state.repoTasks, uniqueTasks)) {
         return;
       }
 
       state = {
         ...state,
-        repoTasks
+        repoTasks: uniqueTasks
       };
       publish();
     },
     setRecentTasks(tasks) {
-      if (areTaskListsEqual(state.recentTasks, tasks)) {
+      const uniqueTasks = dedupeTasksById(tasks);
+      if (areTaskListsEqual(state.recentTasks, uniqueTasks)) {
         return;
       }
 
       state = {
         ...state,
-        recentTasks: tasks
+        recentTasks: uniqueTasks
       };
       publish();
     },
     setSearchResults(query, results) {
+      const uniqueResults = dedupeTasksById(results);
       state = {
         ...state,
         searchQuery: query,
-        searchResults: results
+        searchResults: uniqueResults
       };
       publish();
     },

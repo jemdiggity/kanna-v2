@@ -125,7 +125,8 @@ export function createRemoteTransport({
     }
 
     const tasks = rememberCloudTasks(await listCloudTasks());
-    return cloudTaskRoutes.get(taskId) ?? findCloudTaskRoute(tasks, taskId);
+    const route = cloudTaskRoutes.get(taskId) ?? findCloudTaskRoute(tasks, taskId);
+    return route;
   };
 
   const listFreshCloudTasks = async (): Promise<CloudIndexedTaskSummary[]> => {
@@ -133,57 +134,7 @@ export function createRemoteTransport({
       return [];
     }
 
-    const tasks = rememberCloudTasks(await listCloudTasks());
-    return filterCloudTasksThroughReachableOwners(tasks);
-  };
-
-  const filterCloudTasksThroughReachableOwners = async (
-    tasks: CloudIndexedTaskSummary[]
-  ): Promise<CloudIndexedTaskSummary[]> => {
-    const tasksByOwner = new Map<string, CloudIndexedTaskSummary[]>();
-    for (const task of tasks) {
-      if (!isCloudTaskRoute(task)) {
-        continue;
-      }
-      const ownerTasks = tasksByOwner.get(task.ownerDesktopId) ?? [];
-      ownerTasks.push(task);
-      tasksByOwner.set(task.ownerDesktopId, ownerTasks);
-    }
-
-    if (!tasksByOwner.size) {
-      return tasks;
-    }
-
-    const staleTaskIds = new Set<string>();
-    await Promise.all(
-      Array.from(tasksByOwner.entries()).map(async ([desktopId, ownerTasks]) => {
-        let liveTasks: TaskSummary[];
-        try {
-          liveTasks = await requestDesktop<TaskSummary[]>(
-            desktopId,
-            "GET",
-            "/v1/tasks/recent",
-            null
-          );
-        } catch {
-          return;
-        }
-        if (!Array.isArray(liveTasks)) {
-          return;
-        }
-
-        const liveLocalTaskIds = new Set(liveTasks.map((task) => task.id));
-        for (const task of ownerTasks) {
-          if (isCloudTaskRoute(task) && !liveLocalTaskIds.has(task.ownerLocalTaskId)) {
-            staleTaskIds.add(task.id);
-          }
-        }
-      })
-    );
-
-    return staleTaskIds.size
-      ? tasks.filter((task) => !staleTaskIds.has(task.id))
-      : tasks;
+    return rememberCloudTasks(await listCloudTasks());
   };
 
   const requestDesktop = async <T>(

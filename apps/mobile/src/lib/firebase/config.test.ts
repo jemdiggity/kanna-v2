@@ -26,7 +26,8 @@ describe("parseMobileFirebaseConfig", () => {
         appId: "app-1",
         measurementId: "measure-1"
       },
-      authEmulator: null
+      authEmulator: null,
+      firestoreEmulator: null
     });
   });
 
@@ -94,6 +95,18 @@ describe("parseMobileFirebaseConfig", () => {
     });
   });
 
+  it("parses a Firestore emulator from host and port env vars", () => {
+    const config = parseMobileFirebaseConfig({
+      EXPO_PUBLIC_FIREBASE_FIRESTORE_EMULATOR_HOST: "172.16.0.193",
+      EXPO_PUBLIC_FIREBASE_FIRESTORE_EMULATOR_PORT: "8080"
+    });
+
+    expect(config.firestoreEmulator).toEqual({
+      host: "172.16.0.193",
+      port: 8080
+    });
+  });
+
   it("ignores an invalid auth emulator port", () => {
     const config = parseMobileFirebaseConfig({
       EXPO_PUBLIC_FIREBASE_AUTH_EMULATOR_HOST: "127.0.0.1",
@@ -101,6 +114,15 @@ describe("parseMobileFirebaseConfig", () => {
     });
 
     expect(config.authEmulator).toBeNull();
+  });
+
+  it("ignores an invalid Firestore emulator port", () => {
+    const config = parseMobileFirebaseConfig({
+      EXPO_PUBLIC_FIREBASE_FIRESTORE_EMULATOR_HOST: "127.0.0.1",
+      EXPO_PUBLIC_FIREBASE_FIRESTORE_EMULATOR_PORT: "invalid"
+    });
+
+    expect(config.firestoreEmulator).toBeNull();
   });
 
   it("keeps emulator app config local when emulator env vars are present", () => {

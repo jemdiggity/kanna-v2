@@ -590,6 +590,157 @@ describe("createMobileController", () => {
     });
   });
 
+  it("selects the first repo when live cloud tasks arrive without a selected repo", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const auth = createAuthSessionMock();
+    const liveCloudTasks = [
+      {
+        id: "cloud-task-1",
+        repoId: "repo-cloud-1",
+        title: "First cloud task",
+        stage: "in progress",
+        ownerDesktopId: "desktop-owner",
+        ownerLocalTaskId: "local-task-1",
+        ownerOnline: true
+      },
+      {
+        id: "cloud-task-2",
+        repoId: "repo-cloud-2",
+        title: "Second cloud task",
+        stage: "in progress",
+        ownerDesktopId: "desktop-owner",
+        ownerLocalTaskId: "local-task-2",
+        ownerOnline: true
+      }
+    ];
+    const subscribeCloudTasks = vi.fn((
+      _uid: string,
+      onUpdate: (tasks: typeof liveCloudTasks) => void
+    ) => {
+      onUpdate(liveCloudTasks);
+      return vi.fn();
+    });
+    auth.getState = vi.fn(() => ({
+      status: "signedIn",
+      user: { uid: "user-1", email: "u@example.com", displayName: null }
+    }));
+    client.getStatus.mockResolvedValueOnce({
+      state: "running",
+      desktopId: "cloud",
+      desktopName: "Kanna Cloud",
+      lanHost: "cloud",
+      lanPort: 0,
+      pairingCode: null
+    });
+    const controller = createMobileController(client, store, auth, {
+      subscribeCloudTasks
+    });
+
+    await controller.bootstrap();
+
+    expect(store.getState()).toMatchObject({
+      selectedRepoId: "repo-cloud-1",
+      recentTasks: liveCloudTasks,
+      repoTasks: [liveCloudTasks[0]]
+    });
+  });
+
+  it("deduplicates live cloud tasks by id before updating task lists", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const auth = createAuthSessionMock();
+    const duplicateTask = {
+      id: "cloud:desktop-1:repo-1:task-1",
+      repoId: "repo-1",
+      repoName: "Repo One",
+      title: "foobar",
+      stage: "in progress",
+      ownerDesktopId: "desktop-1",
+      ownerLocalTaskId: "task-1",
+      ownerOnline: true
+    };
+    const subscribeCloudTasks = vi.fn((
+      _uid: string,
+      onUpdate: (tasks: typeof duplicateTask[]) => void
+    ) => {
+      onUpdate([duplicateTask, { ...duplicateTask }, { ...duplicateTask }]);
+      return vi.fn();
+    });
+    auth.getState = vi.fn(() => ({
+      status: "signedIn",
+      user: { uid: "user-1", email: "u@example.com", displayName: null }
+    }));
+    client.getStatus.mockResolvedValueOnce({
+      state: "running",
+      desktopId: "cloud",
+      desktopName: "Kanna Cloud",
+      lanHost: "cloud",
+      lanPort: 0,
+      pairingCode: null
+    });
+    const controller = createMobileController(client, store, auth, {
+      subscribeCloudTasks
+    });
+
+    await controller.bootstrap();
+
+    expect(store.getState().recentTasks.map((task) => task.id)).toEqual([
+      duplicateTask.id
+    ]);
+    expect(store.getState().repoTasks.map((task) => task.id)).toEqual([
+      duplicateTask.id
+    ]);
+  });
+
+  it("derives repo list from live cloud tasks when the initial repo list is empty", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const auth = createAuthSessionMock();
+    const liveCloudTasks = [
+      {
+        id: "cloud-task-1",
+        repoId: "repo-cloud-1",
+        repoName: "Cloud Repo",
+        title: "First cloud task",
+        stage: "in progress",
+        ownerDesktopId: "desktop-owner",
+        ownerLocalTaskId: "local-task-1",
+        ownerOnline: true
+      }
+    ];
+    client.listRepos.mockResolvedValueOnce([]);
+    client.listRecentTasks.mockResolvedValueOnce([]);
+    client.getStatus.mockResolvedValueOnce({
+      state: "running",
+      desktopId: "cloud",
+      desktopName: "Kanna Cloud",
+      lanHost: "cloud",
+      lanPort: 0,
+      pairingCode: null
+    });
+    const subscribeCloudTasks = vi.fn((
+      _uid: string,
+      onUpdate: (tasks: typeof liveCloudTasks) => void
+    ) => {
+      onUpdate(liveCloudTasks);
+      return vi.fn();
+    });
+    auth.getState = vi.fn(() => ({
+      status: "signedIn",
+      user: { uid: "user-1", email: "u@example.com", displayName: null }
+    }));
+    const controller = createMobileController(client, store, auth, {
+      subscribeCloudTasks
+    });
+
+    await controller.bootstrap();
+
+    expect(store.getState().repos).toEqual([
+      { id: "repo-cloud-1", name: "Cloud Repo" }
+    ]);
+  });
+
   it("keeps terminal stream errors scoped to the selected task", async () => {
     const store = createSessionStore();
     const client = createClientMock();

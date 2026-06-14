@@ -15,6 +15,8 @@ export interface ExpoFirebaseEnv {
   EXPO_PUBLIC_FIREBASE_MEASUREMENT_ID?: string;
   EXPO_PUBLIC_FIREBASE_AUTH_EMULATOR_HOST?: string;
   EXPO_PUBLIC_FIREBASE_AUTH_EMULATOR_PORT?: string;
+  EXPO_PUBLIC_FIREBASE_FIRESTORE_EMULATOR_HOST?: string;
+  EXPO_PUBLIC_FIREBASE_FIRESTORE_EMULATOR_PORT?: string;
 }
 
 export interface MobileFirebaseAppConfig {
@@ -33,9 +35,15 @@ export interface MobileFirebaseAuthEmulatorConfig {
   url: string;
 }
 
+export interface MobileFirestoreEmulatorConfig {
+  host: string;
+  port: number;
+}
+
 export interface MobileFirebaseConfig {
   app: MobileFirebaseAppConfig | null;
   authEmulator: MobileFirebaseAuthEmulatorConfig | null;
+  firestoreEmulator: MobileFirestoreEmulatorConfig | null;
 }
 
 type ExpoFirebaseExtra = Partial<MobileFirebaseExtraConfig>;
@@ -51,6 +59,7 @@ export function parseMobileFirebaseConfig(
     ?.firebase
 ): MobileFirebaseConfig {
   const authEmulator = parseAuthEmulator(env);
+  const firestoreEmulator = parseFirestoreEmulator(env);
   const profileDefaults = profileMobileFirebaseAppConfig(env);
   const appDefaults = authEmulator
     ? extra ?? null
@@ -59,7 +68,8 @@ export function parseMobileFirebaseConfig(
 
   return {
     app,
-    authEmulator
+    authEmulator,
+    firestoreEmulator
   };
 }
 
@@ -158,21 +168,45 @@ function compactAppConfig(config: MobileFirebaseAppConfig): MobileFirebaseAppCon
 function parseAuthEmulator(
   env: ExpoFirebaseEnv
 ): MobileFirebaseAuthEmulatorConfig | null {
-  const host = normalizeEnvValue(env.EXPO_PUBLIC_FIREBASE_AUTH_EMULATOR_HOST);
-  const rawPort = normalizeEnvValue(env.EXPO_PUBLIC_FIREBASE_AUTH_EMULATOR_PORT);
-  if (!host || !rawPort) {
+  const emulator = parseEmulator(
+    env.EXPO_PUBLIC_FIREBASE_AUTH_EMULATOR_HOST,
+    env.EXPO_PUBLIC_FIREBASE_AUTH_EMULATOR_PORT
+  );
+  return emulator
+    ? {
+        ...emulator,
+        url: `http://${emulator.host}:${emulator.port}`
+      }
+    : null;
+}
+
+function parseFirestoreEmulator(
+  env: ExpoFirebaseEnv
+): MobileFirestoreEmulatorConfig | null {
+  return parseEmulator(
+    env.EXPO_PUBLIC_FIREBASE_FIRESTORE_EMULATOR_HOST,
+    env.EXPO_PUBLIC_FIREBASE_FIRESTORE_EMULATOR_PORT
+  );
+}
+
+function parseEmulator(
+  rawHost: string | undefined,
+  rawPort: string | undefined
+): MobileFirestoreEmulatorConfig | null {
+  const host = normalizeEnvValue(rawHost);
+  const rawPortValue = normalizeEnvValue(rawPort);
+  if (!host || !rawPortValue) {
     return null;
   }
 
-  const port = Number(rawPort);
+  const port = Number(rawPortValue);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     return null;
   }
 
   return {
     host,
-    port,
-    url: `http://${host}:${port}`
+    port
   };
 }
 

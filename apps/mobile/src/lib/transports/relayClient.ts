@@ -76,6 +76,28 @@ export function createRelayDesktopClient({
   let rejectReady: ((error: Error) => void) | null = null;
   const pendingInvokes = new Map<string, PendingInvoke>();
   const terminalObservers = new Map<string, TerminalObserver>();
+  const streamClients = new Map<string, StreamClient>();
+
+  const streamClientForDesktop = (desktopId: string) => {
+    const existing = streamClients.get(desktopId);
+    if (existing) {
+      return existing;
+    }
+
+    const client = new StreamClient({
+      url: relayUrl,
+      credentialProvider: () => getIdToken(),
+      webSocketFactory: createRelayTunnelWebSocketFactory({
+        relayUrl,
+        desktopId,
+        getIdentityToken: () => getIdToken(),
+        webSocketFactory: createSocket,
+      }),
+      reconnectDelaysMs: [250, 500, 1000, 2000],
+    });
+    streamClients.set(desktopId, client);
+    return client;
+  };
 
   const ensureSocket = () => {
     if (socket) {
@@ -276,6 +298,10 @@ export function createRelayDesktopClient({
   return {
     close() {
       socket?.close();
+      for (const client of streamClients.values()) {
+        client.close();
+      }
+      streamClients.clear();
     },
     invokeDesktop(request: RemoteDesktopInvocationRequest) {
       return sendInvoke(request.desktopId, {
@@ -285,29 +311,35 @@ export function createRelayDesktopClient({
       });
     },
     observeTaskTerminal({ desktopId, taskId }, listener) {
-      terminalObservers.set(taskId, { decoder: new TextDecoder(), desktopId, listener });
-      void sendInvoke(desktopId, {
-        command: "observe_session",
-        args: { session_id: taskId }
-      })
-        .then(() => {
+      const decoder = new TextDecoder();
+      const client = streamClientForDesktop(desktopId);
+      client.attachTerminal(taskId, {
+        onSnapshot(_cols, _rows, dataB64) {
           listener({ type: "ready", taskId });
-        })
-        .catch((error: unknown) => {
           listener({
-            type: "error",
+            type: "output",
             taskId,
-            message: error instanceof Error ? error.message : "Remote terminal failed"
+            text: decodeBase64(dataB64, decoder)
           });
-        });
+        },
+        onOutput(dataB64) {
+          listener({
+            type: "output",
+            taskId,
+            text: decodeBase64(dataB64, decoder)
+          });
+        },
+        onSessionExit(code) {
+          listener({ type: "exit", taskId, code });
+        },
+        onError(_code, message) {
+          listener({ type: "error", taskId, message });
+        }
+      });
 
       return {
         close() {
-          terminalObservers.delete(taskId);
-          void sendInvoke(desktopId, {
-            command: "unobserve_session",
-            args: { session_id: taskId }
-          }).catch(() => undefined);
+          client.detach(taskId, "terminal");
         }
       } satisfies TaskTerminalSubscription;
     },
@@ -358,10 +390,7 @@ export function createRelayDesktopClient({
       } satisfies TaskAgentSubscription;
     },
     async sendTaskInput({ desktopId, taskId, data }) {
-      await sendInvoke(desktopId, {
-        command: "send_input",
-        args: { session_id: taskId, data }
-      });
+      streamClientForDesktop(desktopId).sendTermInput(taskId, encodeBase64(data));
     }
   };
 }
@@ -423,4 +452,13 @@ function decodeBase64(value: string, decoder = new TextDecoder()): string {
   const binary = globalThis.atob(value);
   const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
   return decoder.decode(bytes, { stream: true });
+}
+
+function encodeBase64(value: string): string {
+  const bytes = new TextEncoder().encode(value);
+  let binary = "";
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return globalThis.btoa(binary);
 }

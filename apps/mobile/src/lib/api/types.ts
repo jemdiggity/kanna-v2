@@ -67,6 +67,7 @@ export interface TaskActionResponse {
 export interface TaskSummary {
   id: string;
   repoId: string;
+  repoName?: string | null;
   title: string;
   stage: string | null;
   snippet?: string | null;

@@ -301,7 +301,7 @@ describe("remote transport", () => {
     expect(invokeDesktop).not.toHaveBeenCalled();
   });
 
-  it("drops stale cloud tasks that are missing from a reachable owner desktop", async () => {
+  it("keeps Firestore cloud tasks visible even when the owner desktop recent-task relay is stale", async () => {
     const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockResolvedValue([
       {
         id: "local-task-open",
@@ -340,6 +340,16 @@ describe("remote transport", () => {
 
     await expect(transport.listRecentTasks()).resolves.toEqual([
       {
+        id: "repo-1:local-task-stale",
+        repoId: "repo-1",
+        repoName: "Repo One",
+        title: "Closed but stale",
+        stage: "in progress",
+        ownerDesktopId: "desktop-owner",
+        ownerLocalTaskId: "local-task-stale",
+        ownerOnline: true
+      },
+      {
         id: "repo-1:local-task-open",
         repoId: "repo-1",
         repoName: "Repo One",
@@ -350,12 +360,7 @@ describe("remote transport", () => {
         ownerOnline: true
       }
     ]);
-    expect(invokeDesktop).toHaveBeenCalledWith({
-      desktopId: "desktop-owner",
-      method: "GET",
-      path: "/v1/tasks/recent",
-      body: null
-    });
+    expect(invokeDesktop).not.toHaveBeenCalled();
   });
 
   it("routes cloud task actions to the owner desktop and local task id", async () => {

@@ -30,6 +30,7 @@ import {
   type TrustedDesktopRecord
 } from "./state/sessionPersistence";
 import { readKannaExpoExtra } from "./mobileEnvironment";
+import type { RepoSummary, TaskSummary } from "./lib/api/types";
 
 const PRODUCTION_RELAY_URL = "wss://relay.kanna.build";
 
@@ -118,6 +119,8 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
   // eagerly would call getFirestore() before any Firebase app exists in
   // LAN-only / no-Firebase paths.
   let cloudTaskIndex: ReturnType<typeof createFirestoreTaskIndex> | null = null;
+  let liveCloudHasTasks = false;
+  let liveCloudTasks: TaskSummary[] = [];
   const getCloudTaskIndex = () =>
     (cloudTaskIndex ??= options.taskIndex ?? createFirestoreTaskIndex());
   const resolveClient = () =>
@@ -129,6 +132,8 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
       forceCloud,
       getSelectedDesktopId: () => sessionStore.getState().selectedDesktopId,
       getTrustedDesktops: () => sessionStore.getState().trustedDesktops,
+      getLiveCloudTasks: () => liveCloudTasks,
+      hasLiveCloudTasks: () => liveCloudHasTasks,
       relayUrl: options.relayUrl ?? resolveRelayUrl(readExpoPublicEnv(), {
         extraRelayUrl: extra?.relayUrl
       }),
@@ -137,7 +142,12 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
   let activeClient = resolveClient();
   const client = createDelegatingClient(() => activeClient);
   const controller = createMobileController(client, sessionStore, authSession, {
-    subscribeCloudTasks: (uid, onUpdate) => getCloudTaskIndex().subscribeRecentTasks(uid, onUpdate),
+    subscribeCloudTasks: (uid, onUpdate) =>
+      getCloudTaskIndex().subscribeRecentTasks(uid, (tasks) => {
+        liveCloudTasks = tasks;
+        liveCloudHasTasks = tasks.length > 0;
+        onUpdate(tasks);
+      }),
   });
   let persistencePromise: Promise<SessionPersistence> | null = persistence
     ? Promise.resolve(persistence)
@@ -212,6 +222,8 @@ function createClientForMode({
   forceCloud,
   getSelectedDesktopId,
   getTrustedDesktops,
+  getLiveCloudTasks,
+  hasLiveCloudTasks,
   relayUrl,
   taskIndex,
 }: {
@@ -225,6 +237,8 @@ function createClientForMode({
   forceCloud: boolean;
   getSelectedDesktopId(): string | null;
   getTrustedDesktops(): readonly TrustedDesktopRecord[];
+  getLiveCloudTasks(): TaskSummary[];
+  hasLiveCloudTasks(): boolean;
   relayUrl: string | null;
   taskIndex?: CloudTaskIndex;
 }): KannaClient {
@@ -235,6 +249,13 @@ function createClientForMode({
       getIdToken: (forceRefresh) => authSession.getIdToken(forceRefresh),
     });
     const resolvedTaskIndex = taskIndex ?? createFirestoreTaskIndex();
+    const listCloudTasksForRouting = async () => {
+      const liveTasks = getLiveCloudTasks();
+      if (liveTasks.length > 0 || hasLiveCloudTasks()) {
+        return liveTasks;
+      }
+      return resolvedTaskIndex.listRecentTasks(authState.user.uid);
+    };
     const cloudClient = createKannaClient(
       createRemoteTransport({
         async listDesktopRecords() {
@@ -245,7 +266,7 @@ function createClientForMode({
         observeTaskTerminal: relayClient.observeTaskTerminal,
         observeTaskAgent: relayClient.observeTaskAgent,
         sendTaskInput: relayClient.sendTaskInput,
-        listCloudTasks: () => resolvedTaskIndex.listRecentTasks(authState.user.uid),
+        listCloudTasks: listCloudTasksForRouting,
       }),
     );
     const lanClient = createTrustedLanFallbackClient({
@@ -256,6 +277,8 @@ function createClientForMode({
     });
 
     return createCloudWithLanFallbackClient(cloudClient, lanClient, {
+      getLiveCloudTasks,
+      hasLiveCloudTasks,
       isLanFallbackEnabled: () =>
         !forceCloud && hasTrustedLanPeer(getTrustedDesktops())
     });
@@ -327,31 +350,31 @@ function createDisconnectedClient(): KannaClient {
   };
 }
 
-function createCloudWithLanFallbackClient(
+export interface CloudWithLanFallbackOptions {
+  getLiveCloudTasks?: () => TaskSummary[];
+  hasLiveCloudTasks?: () => boolean;
+  isLanFallbackEnabled(): boolean;
+}
+
+export function createCloudWithLanFallbackClient(
   cloudClient: KannaClient,
   lanClient: KannaClient,
-  options: { isLanFallbackEnabled(): boolean }
+  options: CloudWithLanFallbackOptions
 ): KannaClient {
-  let cloudHasTasks = false;
   const lanFallbackEnabled = () => options.isLanFallbackEnabled();
+  const liveCloudTasks = () => options.getLiveCloudTasks?.() ?? [];
+  const cloudHasVisibleTasks = () =>
+    liveCloudTasks().length > 0 || options.hasLiveCloudTasks?.() === true;
 
   const listRecentTasks = async () => {
-    try {
-      const tasks = await cloudClient.listRecentTasks();
-      cloudHasTasks = tasks.length > 0;
-      return cloudHasTasks || !lanFallbackEnabled()
-        ? tasks
-        : lanClient.listRecentTasks();
-    } catch {
-      cloudHasTasks = false;
-      if (!lanFallbackEnabled()) {
-        return [];
-      }
-      return lanClient.listRecentTasks();
+    const tasks = liveCloudTasks();
+    if (tasks.length > 0 || !lanFallbackEnabled()) {
+      return tasks;
     }
+    return lanClient.listRecentTasks();
   };
 
-  const useLanFallback = () => lanFallbackEnabled() && !cloudHasTasks;
+  const useLanFallback = () => lanFallbackEnabled() && !cloudHasVisibleTasks();
 
   return {
     getStatus: async () => {
@@ -360,13 +383,10 @@ function createCloudWithLanFallbackClient(
       }
 
       try {
-        const tasks = await cloudClient.listRecentTasks();
-        cloudHasTasks = tasks.length > 0;
-        if (cloudHasTasks) {
+        if (cloudHasVisibleTasks()) {
           return cloudClient.getStatus();
         }
       } catch {
-        cloudHasTasks = false;
       }
 
       return lanClient.getStatus().catch(() => cloudClient.getStatus());
@@ -378,22 +398,24 @@ function createCloudWithLanFallbackClient(
         : lanClient.listDesktops().catch(() => desktops);
     },
     listRepos: async () => {
+      const repos = reposFromTasks(liveCloudTasks());
+      if (repos.length > 0 || !lanFallbackEnabled()) {
+        return repos;
+      }
       if (useLanFallback()) {
         return lanClient.listRepos();
       }
-      const repos = await cloudClient.listRepos();
-      return repos.length || !lanFallbackEnabled()
-        ? repos
-        : lanClient.listRepos().catch(() => repos);
+      return [];
     },
     listRepoTasks: async (repoId) => {
+      const tasks = liveCloudTasks();
+      if (tasks.length > 0 || !lanFallbackEnabled()) {
+        return tasks.filter((task) => task.repoId === repoId);
+      }
       if (useLanFallback()) {
         return lanClient.listRepoTasks(repoId);
       }
-      const tasks = await cloudClient.listRepoTasks(repoId);
-      return tasks.length || !lanFallbackEnabled()
-        ? tasks
-        : lanClient.listRepoTasks(repoId).catch(() => tasks);
+      return [];
     },
     listRecentTasks,
     searchTasks: (query) =>
@@ -481,6 +503,15 @@ function hasTrustedLanPeer(
   trustedDesktops: readonly TrustedDesktopRecord[]
 ): boolean {
   return trustedDesktops.length > 0;
+}
+
+function reposFromTasks(tasks: readonly TaskSummary[]): RepoSummary[] {
+  const reposById = new Map<string, string>();
+  for (const task of tasks) {
+    if (reposById.has(task.repoId)) continue;
+    reposById.set(task.repoId, task.repoName?.trim() || task.repoId);
+  }
+  return Array.from(reposById, ([id, name]) => ({ id, name }));
 }
 
 function mapTrustedDesktopRecord(desktop: TrustedDesktopRecord) {
