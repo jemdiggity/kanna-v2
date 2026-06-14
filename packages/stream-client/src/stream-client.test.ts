@@ -255,6 +255,37 @@ describe("StreamClient", () => {
     expect(sockets.length).toBe(1);
   });
 
+  it("does not let stale socket auth resolve onto a reconnected socket", async () => {
+    const credentialResolvers: Array<(value: string) => void> = [];
+    const client = new StreamClient({
+      url: "ws://test/v1/stream",
+      webSocketFactory: factory,
+      credentialProvider: () =>
+        new Promise<string>((resolve) => {
+          credentialResolvers.push(resolve);
+        }),
+    });
+
+    const socket1 = sockets[0];
+    socket1.open();
+    expect(credentialResolvers).toHaveLength(1);
+
+    socket1.drop();
+    vi.advanceTimersByTime(250);
+    const socket2 = sockets[1];
+    socket2.open();
+    expect(credentialResolvers).toHaveLength(2);
+
+    credentialResolvers[0]("stale-token");
+    await Promise.resolve();
+    expect(socket2.sent).toEqual([]);
+
+    credentialResolvers[1]("current-token");
+    await Promise.resolve();
+    expect(socket2.sent).toEqual([{ type: "auth", credential: "current-token" }]);
+    client.close();
+  });
+
   it("opens relay tunnel before sending KSP auth frames", async () => {
     const tunnelFactory = createRelayTunnelWebSocketFactory({
       relayUrl: "ws://relay",
