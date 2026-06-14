@@ -532,6 +532,7 @@ vi.mock("@kanna/db", () => ({
   getRepo: vi.fn(async (_db: DbHandle, repoId: string) =>
     mockState.repos.find((repo) => repo.id === repoId) ?? null
   ),
+  updateRepoRemoteMetadata: vi.fn(async () => {}),
   getSetting: vi.fn(async () => null),
   setSetting: mockState.setSettingMock,
   insertTaskBlocker: vi.fn(async () => {}),
