@@ -82,6 +82,8 @@ export async function runMigrations(db: DbHandle): Promise<void> {
   await db.execute(`CREATE TABLE IF NOT EXISTS repo (
     id TEXT PRIMARY KEY, path TEXT NOT NULL, name TEXT NOT NULL,
     default_branch TEXT NOT NULL DEFAULT 'main',
+    remote_url TEXT,
+    remote_url_hash TEXT,
     sort_order INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     last_opened_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -364,5 +366,10 @@ export async function runMigrations(db: DbHandle): Promise<void> {
 
   await runMigration("018_merge_stage_to_in_progress", async () => {
     await db.execute(`UPDATE pipeline_item SET stage = 'in progress' WHERE stage = 'merge' AND closed_at IS NULL`);
+  });
+
+  await runMigration("019_repo_remote_metadata_columns", async () => {
+    await addColumn("repo", "remote_url", "TEXT");
+    await addColumn("repo", "remote_url_hash", "TEXT");
   });
 }

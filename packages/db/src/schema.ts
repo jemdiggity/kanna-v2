@@ -5,6 +5,8 @@ export interface Repo {
   path: string;
   name: string;
   default_branch: string;
+  remote_url: string | null;
+  remote_url_hash: string | null;
   hidden: number;       // 0 = visible, 1 = hidden
   sort_order: number;
   created_at: string;

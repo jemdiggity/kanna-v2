@@ -28,6 +28,7 @@ vi.mock("@kanna/db", () => ({
   listPipelineItems: vi.fn(async () => [openItem("task-open")]),
   listRepos: vi.fn(async () => [repo()]),
   listBlockersForItem: vi.fn(async () => []),
+  updateRepoRemoteMetadata: vi.fn(async () => {}),
 }));
 
 vi.mock("firebase/firestore", () => ({
@@ -71,6 +72,8 @@ function repo() {
     name: "Repo One",
     path: "/repo",
     default_branch: "main",
+    remote_url: "git@github.com:owner/repo.git",
+    remote_url_hash: "b1cd17c6cfc6f18ca212b7e8ac47cfe7429102823006de2bc18203527bfb711e",
   };
 }
 
@@ -529,6 +532,7 @@ describe("desktop cloud live task index publisher", () => {
     mocks.set.mockClear();
     mocks.delete.mockClear();
     mocks.commit.mockClear();
+    mocks.invoke.mockClear();
 
     await reconcileDesktopTaskSnapshots(null as never);
 
@@ -537,5 +541,6 @@ describe("desktop cloud live task index publisher", () => {
     expect(mocks.set).toHaveBeenCalledTimes(1);
     expect(mocks.delete).not.toHaveBeenCalled();
     expect(mocks.commit).toHaveBeenCalledTimes(1);
+    expect(mocks.invoke.mock.calls.some(([command]) => command === "git_remote_url")).toBe(false);
   });
 });

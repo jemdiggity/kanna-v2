@@ -2,6 +2,7 @@ import { listBlockersForItem, listPipelineItems, listRepos, type DbHandle, type 
 import { invoke } from "../invoke";
 import { buildCloudTaskSnapshot } from "../utils/cloudTaskSnapshot";
 import { mapDesktopCloudTasks, type DesktopCloudSnapshot, type DesktopCloudTaskSnapshot } from "./desktopCloudTaskIndex";
+import { getCachedRepoRemoteUrl } from "./repoRemoteUrl";
 
 interface PeerTaskSnapshotEnvelope {
   peer_id?: string;
@@ -25,7 +26,7 @@ export async function publishDesktopLanTaskSnapshot(db: DbHandle): Promise<void>
   for (const repo of repos) {
     const [items, remoteUrl] = await Promise.all([
       listPipelineItems(db, repo.id),
-      invoke<string>("git_remote_url", { repoPath: repo.path }).catch(() => null),
+      getCachedRepoRemoteUrl(db, repo),
     ]);
     for (const item of items.filter((candidate) => !candidate.closed_at && candidate.stage !== "done")) {
       const blockers = await listBlockersForItem(db, item.id);

@@ -51,6 +51,7 @@ import { encodeDaemonInput } from "./daemonInput";
 import { buildWorktreeSessionEnv } from "./worktreeEnv";
 import { publishDesktopTaskSnapshot } from "../services/desktopCloudPublisher";
 import { publishDesktopLanTaskSnapshot } from "../services/desktopLanTaskIndex";
+import { refreshRepoRemoteMetadata } from "../services/repoRemoteUrl";
 import {
   reportCloseSessionError,
   reportPrewarmSessionError,
@@ -244,6 +245,7 @@ export function createTasksApi(
     }
     const id = crypto.randomUUID().slice(0, 8);
     await insertRepo(context.requireDb(), { id, path, name, default_branch: defaultBranch });
+    await refreshRepoRemoteMetadata(context.requireDb(), { id, path });
     await reloadSnapshot();
     await invalidateWindowWorkspace("importRepo");
     context.state.selectedRepoId.value = id;
@@ -270,6 +272,7 @@ export function createTasksApi(
     const defaultBranch = await invoke<string>("git_default_branch", { repoPath: path }).catch(() => "main");
     const id = crypto.randomUUID().slice(0, 8);
     await insertRepo(context.requireDb(), { id, path, name, default_branch: defaultBranch });
+    await refreshRepoRemoteMetadata(context.requireDb(), { id, path });
     await reloadSnapshot();
     await invalidateWindowWorkspace("createRepo");
     context.state.selectedRepoId.value = id;
@@ -285,6 +288,7 @@ export function createTasksApi(
     const defaultBranch = await invoke<string>("git_default_branch", { repoPath: destination }).catch(() => "main");
     const id = crypto.randomUUID().slice(0, 8);
     await insertRepo(context.requireDb(), { id, path: destination, name, default_branch: defaultBranch });
+    await refreshRepoRemoteMetadata(context.requireDb(), { id, path: destination });
     await reloadSnapshot();
     await invalidateWindowWorkspace("cloneAndImportRepo");
     context.state.selectedRepoId.value = id;
