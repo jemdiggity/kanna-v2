@@ -147,6 +147,45 @@ describe("terminal recovery", () => {
     expect(respawnStats.hasEndMarker).toBe(true);
     expect(await getSpawnSessionCount(client, taskId)).toBe(1);
   });
+
+  it("keeps Codex scrollback when a reconnect snapshot only partially redraws", async () => {
+    const taskId = await createRecoverableTask(client, {
+      repoId,
+      repoPath: testRepoPath,
+      prompt: "Preserve Codex scrollback across a partial snapshot redraw",
+      agentProvider: "codex",
+    });
+    taskIds.push(taskId);
+
+    await waitForSessionPresence(client, taskId, true);
+    await selectTask(client, taskId);
+    await client.waitForElement(".main-panel .terminal-container", 15_000);
+    await waitForTerminalEndMarker(client, taskId, "ORIGINAL_READY", "^ORIGINAL_READY$", 15_000);
+
+    await emitTauriEvent(client, "terminal_snapshot", {
+      session_id: taskId,
+      snapshot: {
+        version: 1,
+        rows: 24,
+        cols: 80,
+        cursor_row: 0,
+        cursor_col: 0,
+        cursor_visible: true,
+        vt: "CODEX_PARTIAL_REDRAW\r\n",
+      },
+    });
+
+    const stats = await waitForTerminalEndMarker(
+      client,
+      taskId,
+      "CODEX_PARTIAL_REDRAW",
+      "^ORIGINAL_READY$",
+      5_000,
+    );
+
+    expect(stats.hasEndMarker).toBe(true);
+    expect(stats.matchingLineCount).toBeGreaterThanOrEqual(1);
+  });
 });
 
 async function seedAndWaitForRecoveryState(
@@ -189,15 +228,17 @@ async function createRecoverableTask(
     repoId: string;
     repoPath: string;
     prompt: string;
+    agentProvider?: "claude" | "codex";
   },
 ): Promise<string> {
+  const agentProvider = options.agentProvider ?? "claude";
   const taskId = await client.executeAsync<string>(
     `const cb = arguments[arguments.length - 1];
      const ctx = window.__KANNA_E2E__.setupState;
      Promise.resolve(
        ctx.createItem(${JSON.stringify(options.repoId)}, ${JSON.stringify(options.repoPath)}, ${JSON.stringify(options.prompt)}, "pty", {
          selectOnCreate: false,
-         agentProvider: "claude",
+         agentProvider: ${JSON.stringify(agentProvider)},
        })
      ).then((id) => cb(id)).catch((error) => cb("__error:" + (error?.message || String(error))));`,
   );
