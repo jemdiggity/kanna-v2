@@ -100,6 +100,22 @@ describe("PreferencesPanel account sign-in", () => {
     expect(wrapper.text()).toContain("upvote.sieve.7t@icloud.com");
   });
 
+  it("toggles password visibility on the Account tab", async () => {
+    const wrapper = mountPreferences();
+    await flushPromises();
+
+    await wrapper.get('[data-testid="preferences-account-tab"]').trigger("click");
+    const passwordInput = wrapper.get<HTMLInputElement>('[data-testid="account-password"]');
+
+    expect(passwordInput.element.type).toBe("password");
+
+    await wrapper.get('[data-testid="account-toggle-password"]').trigger("click");
+    expect(passwordInput.element.type).toBe("text");
+
+    await wrapper.get('[data-testid="account-toggle-password"]').trigger("click");
+    expect(passwordInput.element.type).toBe("password");
+  });
+
   it("shows the current desktop id on the Account tab", async () => {
     const wrapper = mountPreferences();
     await flushPromises();
