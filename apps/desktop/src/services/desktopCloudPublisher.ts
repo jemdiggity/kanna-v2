@@ -257,7 +257,14 @@ async function resolveDesktopDocument(
   // Legacy fallback: a pre-deterministic auto-id document may still hold this
   // desktopId. Honour it for reads/deletes until the next create migrates it.
   const legacy = await getDocs(query(desktopsRef, where("desktopId", "==", desktopId), limit(1)));
-  return legacy.docs[0]?.ref ?? null;
+  const legacyDoc = legacy.docs[0];
+  if (!legacyDoc) return null;
+
+  await setDoc(legacyDoc.ref, {
+    displayName: context.desktopDisplayName,
+    updatedAt: serverTimestamp(),
+  }, { merge: true });
+  return legacyDoc.ref;
 }
 
 // Firestore document ids may not contain "/" (and a few reserved forms). Desktop

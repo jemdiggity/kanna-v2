@@ -410,7 +410,7 @@ describe("desktop cloud live task index publisher", () => {
     });
 
     expect(mocks.setDoc).toHaveBeenCalledWith(
-      { kind: "doc", collectionRef: expect.any(Object), id: "desktop-other" },
+      { kind: "doc-ref", id: "other-desktop-doc" },
       {
         displayName: "Studio Mac",
         updatedAt: "SERVER_TIMESTAMP",
@@ -543,13 +543,13 @@ describe("desktop cloud live task index publisher", () => {
       .mockResolvedValueOnce(docSnapshot("user-1", { primaryEmail: "user@example.com" }))
       .mockResolvedValueOnce(docSnapshot("user-1", { primaryEmail: "user@example.com" }));
     mocks.getDocs
-      .mockResolvedValueOnce({ docs: [docSnapshot("desktop-doc", {
+      .mockResolvedValueOnce({ docs: [docSnapshot("desktop-noop", {
         desktopId: "desktop-noop",
         desktopSecretHash: "secret-noop-hash",
         displayName: "Studio Mac",
       })] })
       .mockResolvedValueOnce({ docs: [docSnapshot("task-open-doc", unchangedTask)] })
-      .mockResolvedValueOnce({ docs: [docSnapshot("desktop-doc", {
+      .mockResolvedValueOnce({ docs: [docSnapshot("desktop-noop", {
         desktopId: "desktop-noop",
         desktopSecretHash: "secret-noop-hash",
         displayName: "Studio Mac",
