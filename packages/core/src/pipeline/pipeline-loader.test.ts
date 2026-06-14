@@ -51,6 +51,15 @@ describe("parsePipelineJson", () => {
     expect(() => parsePipelineJson(json)).toThrow();
   });
 
+  it("reports missing transition as undefined instead of an empty string", () => {
+    const json = JSON.stringify({
+      name: "My Pipeline",
+      stages: [{ name: "Stage 1" }],
+    });
+
+    expect(() => parsePipelineJson(json)).toThrow(/invalid transition "undefined"/);
+  });
+
   it("validates environment references exist", () => {
     const json = JSON.stringify({
       name: "My Pipeline",
@@ -141,6 +150,15 @@ describe("parsePipelineJson", () => {
     expect(result.stages[0].mode).toBeUndefined();
   });
 
+  it("rejects invalid stage mode values", () => {
+    const json = JSON.stringify({
+      name: "My Pipeline",
+      stages: [{ name: "Commit", transition: "auto", mode: "sideways" }],
+    });
+
+    expect(() => parsePipelineJson(json)).toThrow(/invalid mode "sideways"/);
+  });
+
   it("parses a stage post_action", () => {
     const json = JSON.stringify({
       name: "My Pipeline",
@@ -171,6 +189,23 @@ describe("parsePipelineJson", () => {
       agent_provider: ["codex", "claude"],
       transition: "auto",
     });
+  });
+
+  it("reports missing post_action transition as undefined instead of an empty string", () => {
+    const json = JSON.stringify({
+      name: "My Pipeline",
+      stages: [
+        {
+          name: "in progress",
+          transition: "manual",
+          post_action: {
+            name: "commit",
+          },
+        },
+      ],
+    });
+
+    expect(() => parsePipelineJson(json)).toThrow(/invalid transition "undefined"/);
   });
 
   it("ignores non-object post_action values", () => {

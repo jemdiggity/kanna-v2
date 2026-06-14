@@ -9,10 +9,17 @@ export interface DiscordClientOptions {
   webhookUrl?: string;
   botToken?: string;
   channelId?: string;
+  timeoutMs?: number;
 }
+
+const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 
 export class DiscordClient {
   constructor(private readonly opts: DiscordClientOptions) {}
+
+  private requestSignal(): AbortSignal {
+    return AbortSignal.timeout(this.opts.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS);
+  }
 
   async postMessage(content: string): Promise<void> {
     if (this.opts.webhookUrl) {
@@ -29,6 +36,7 @@ export class DiscordClient {
   private async postViaWebhook(content: string): Promise<void> {
     const response = await fetch(this.opts.webhookUrl!, {
       method: "POST",
+      signal: this.requestSignal(),
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ content }),
     });
@@ -46,6 +54,7 @@ export class DiscordClient {
       `https://discord.com/api/v10/channels/${this.opts.channelId}/messages`,
       {
         method: "POST",
+        signal: this.requestSignal(),
         headers: {
           Authorization: `Bot ${this.opts.botToken}`,
           "Content-Type": "application/json",
@@ -75,6 +84,7 @@ export class DiscordClient {
     const response = await fetch(
       `https://discord.com/api/v10/channels/${this.opts.channelId}/messages?${params.toString()}`,
       {
+        signal: this.requestSignal(),
         headers: {
           Authorization: `Bot ${this.opts.botToken}`,
         },

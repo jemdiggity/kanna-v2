@@ -25,7 +25,18 @@ export interface RepoConfig {
 }
 
 export function parseRepoConfig(json: string): RepoConfig {
-  const raw = JSON.parse(json) as Record<string, unknown>;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json);
+  } catch {
+    return {};
+  }
+
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return {};
+  }
+
+  const raw = parsed as Record<string, unknown>;
   const config: RepoConfig = {};
 
   if (typeof raw.pipeline === "string") {
