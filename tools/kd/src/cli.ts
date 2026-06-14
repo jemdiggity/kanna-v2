@@ -43,6 +43,30 @@ const defaultDevUpInput = {
   killDaemon: false
 };
 
+const defaultDevRestartInput = {
+  ...defaultDevUpInput,
+  staging: false,
+  production: false
+};
+
+const restartComponents = new Set(["desktop", "mobile", "backend"]);
+
+function parseDevRestartInput(rest: string[]): ParsedCliCommand {
+  const [first, ...remaining] = rest;
+  const hasComponent = typeof first === "string" && !first.startsWith("-");
+  if (hasComponent && !restartComponents.has(first)) {
+    throw new Error(`Unknown restart component: ${first}`);
+  }
+  const input = parseFlagInput(hasComponent ? remaining : rest, defaultDevRestartInput);
+  if (input.production === true && input.staging === true) {
+    throw new Error("dev restart accepts only one of --production or --staging");
+  }
+  if (hasComponent) {
+    input.component = first;
+  }
+  return { taskId: "dev.restart", input };
+}
+
 function parseMobileUpInput(rest: string[]): ParsedCliCommand {
   const input = parseFlagInput(rest, { production: false, staging: false });
   const unsupportedFlags = Object.entries(input)
@@ -183,7 +207,7 @@ export function parseCliArgs(args: string[]): ParsedCliCommand {
     return { taskId: "mobile.doctor", input: parsed.input };
   }
   if (group === "dev" && command === "restart") {
-    return { taskId: "dev.restart", input: parseFlagInput(rest, defaultDevUpInput) };
+    return parseDevRestartInput(rest);
   }
   if (group === "dev" && command === "down") {
     return { taskId: "dev.down", input: { killDaemon: rest.includes("--kill-daemon") || rest.includes("-k") } };
@@ -244,7 +268,7 @@ export function parseCliArgs(args: string[]): ParsedCliCommand {
     return { taskId: "dev.up", input: parseFlagInput([command, ...rest].filter((arg): arg is string => Boolean(arg)), defaultDevUpInput) };
   }
   if (group === "restart") {
-    return { taskId: "dev.restart", input: parseFlagInput([command, ...rest].filter((arg): arg is string => Boolean(arg)), defaultDevUpInput) };
+    return parseDevRestartInput([command, ...rest].filter((arg): arg is string => Boolean(arg)));
   }
   if (group === "stop") {
     const legacyRest = [command, ...rest].filter((arg): arg is string => Boolean(arg));
@@ -287,7 +311,7 @@ function helpText(): string {
     "Commands:",
     "  dev up [--mobile] [--emulators] [--seed] [--attach] [--db <path-or-name>] [--delete-db] [--firebase-env-from <task-or-path>]",
     "  dev down [--kill-daemon]",
-    "  dev restart [--mobile] [--emulators] [--seed] [--attach] [--delete-db]",
+    "  dev restart [desktop|mobile|backend] [--staging|--production] [--mobile] [--emulators] [--seed] [--attach] [--delete-db]",
     "  dev status",
     "  dev log [window]",
     "  dev seed [--db <path-or-name>] [--delete-db]",

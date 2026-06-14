@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { checkRequiredCommands } from "../src/runtime/doctor";
 import { buildMobileDeviceSmokeCommand, buildMobileTestCommand } from "../src/runtime/mobile-commands";
 import { getPortStatuses } from "../src/runtime/port-status";
-import { startTmuxSession, stopTmuxWindow } from "../src/runtime/tmux";
+import { respawnTmuxWindow, startTmuxSession, stopTmuxWindow } from "../src/runtime/tmux";
 import type { CommandRunner } from "../src/runtime/process";
 
 describe("command runtime helpers", () => {
@@ -78,6 +78,55 @@ describe("command runtime helpers", () => {
       "tmux -L kanna-task list-windows -t kanna-task -F #{window_name}",
       "tmux -L kanna-task send-keys -t kanna-task:emulators C-c",
       "tmux -L kanna-task kill-window -t kanna-task:emulators"
+    ]);
+  });
+
+  it("respawns a single tmux window with the resolved window env", async () => {
+    const calls: Array<{ command: string; args: string[]; env?: NodeJS.ProcessEnv }> = [];
+    const runner: CommandRunner = {
+      async run(command, args, options) {
+        calls.push({ command, args, env: options?.env });
+        if (args.includes("list-windows")) {
+          return { exitCode: 0, stdout: "desktop\nmobile\n", stderr: "" };
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+    };
+
+    await expect(
+      respawnTmuxWindow(
+        runner,
+        { server: "kanna-task", session: "kanna-task" },
+        {
+          name: "desktop",
+          cwd: "/repo/apps/desktop",
+          command: "pnpm exec tauri dev",
+          env: { KANNA_CLOUD_ENV: "staging" }
+        }
+      )
+    ).resolves.toBe(true);
+
+    expect(calls).toEqual([
+      {
+        command: "tmux",
+        args: ["-L", "kanna-task", "list-windows", "-t", "kanna-task", "-F", "#{window_name}"],
+        env: undefined
+      },
+      {
+        command: "tmux",
+        args: [
+          "-L",
+          "kanna-task",
+          "respawn-window",
+          "-k",
+          "-t",
+          "kanna-task:desktop",
+          "-c",
+          "/repo/apps/desktop",
+          "pnpm exec tauri dev"
+        ],
+        env: { KANNA_CLOUD_ENV: "staging" }
+      }
     ]);
   });
 

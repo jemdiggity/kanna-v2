@@ -138,6 +138,41 @@ export async function stopTmuxWindow(runner: CommandRunner, target: TmuxTarget, 
   return true;
 }
 
+export async function respawnTmuxWindow(runner: CommandRunner, target: TmuxTarget, window: DevWindow): Promise<boolean> {
+  const list = await runner.run("tmux", ["-L", target.server, "list-windows", "-t", target.session, "-F", "#{window_name}"]);
+  if (list.exitCode !== 0) {
+    return false;
+  }
+  const exists = list.stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .includes(window.name);
+  if (!exists) {
+    return false;
+  }
+
+  const result = await runner.run(
+    "tmux",
+    [
+      "-L",
+      target.server,
+      "respawn-window",
+      "-k",
+      "-t",
+      `${target.session}:${window.name}`,
+      "-c",
+      window.cwd,
+      window.command
+    ],
+    { env: window.env }
+  );
+  if (result.exitCode !== 0) {
+    throw new Error(`tmux failed to respawn ${target.session}:${window.name}: ${result.stderr}`);
+  }
+  return true;
+}
+
 export async function captureTmuxLog(runner: CommandRunner, target: TmuxTarget, window: string): Promise<string> {
   const result = await runner.run("tmux", [
     "-L",

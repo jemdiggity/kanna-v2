@@ -40,7 +40,7 @@ import { shipRelease } from "../runtime/release";
 import { buildDesktopSidecars } from "../runtime/sidecars";
 import { checkSetupPrerequisites, installSetupDependencies } from "../runtime/setup";
 import { getDevStatus } from "../runtime/status";
-import { captureTmuxLog, startTmuxSession, stopTmuxSession, stopTmuxWindow } from "../runtime/tmux";
+import { captureTmuxLog, respawnTmuxWindow, startTmuxSession, stopTmuxSession, stopTmuxWindow } from "../runtime/tmux";
 import { readDesktopBundleIdentifier, writeTauriLocalConfig } from "../runtime/tauri";
 import type { KdPorts } from "../ports";
 import type { TaskDefinition, TaskResult } from "./types";
@@ -56,6 +56,14 @@ export interface DevUpInput {
   daemonDir?: string;
   transferRoot?: string;
   firebaseEnvFrom?: string;
+}
+
+export type RestartComponent = "desktop" | "mobile" | "backend";
+
+export interface DevRestartInput extends DevUpInput {
+  component?: RestartComponent;
+  staging: boolean;
+  production: boolean;
 }
 
 export interface DevDownInput {
@@ -84,6 +92,12 @@ export const devUpInputSchema = z.object({
   daemonDir: z.string().optional(),
   transferRoot: z.string().optional(),
   firebaseEnvFrom: z.string().optional()
+});
+
+const devRestartInputSchema = devUpInputSchema.extend({
+  component: z.enum(["desktop", "mobile", "backend"]).optional(),
+  staging: z.boolean().default(false),
+  production: z.boolean().default(false)
 });
 
 const devDownInputSchema = z.object({
@@ -271,6 +285,135 @@ async function executeDevUp(input: DevUpInput): Promise<TaskResult> {
     ok: true,
     message: `Started tmux session '${context.tmux.session}'.`,
     data: { windows: plan.windows.map((window) => window.name) }
+  };
+}
+
+type ResolvedRestartEnvironment = "dev" | "staging" | "production";
+
+function resolveRestartEnvironment(input: DevRestartInput): ResolvedRestartEnvironment {
+  if (input.staging && input.production) {
+    throw new Error("dev.restart accepts only one of --production or --staging.");
+  }
+  if (input.staging) {
+    return "staging";
+  }
+  if (input.production) {
+    return "production";
+  }
+  return "dev";
+}
+
+async function buildRestartWindow(
+  input: DevRestartInput,
+  executor: ExecutorInput,
+  environment: ResolvedRestartEnvironment
+) {
+  const component = input.component;
+  if (!component) {
+    throw new Error("A restart component is required.");
+  }
+
+  if (component === "backend") {
+    return undefined;
+  }
+
+  if (environment === "production" && component === "mobile") {
+    const [status, serverConfigPath] = await Promise.all([
+      readProductionDesktopStatus(executor.runner),
+      assertProductionServerConfig(executor.runner, executor.context.env)
+    ]);
+    const env = {
+      ...executor.context.env,
+      EXPO_PUBLIC_KANNA_RELAY_URL:
+        executor.context.env.EXPO_PUBLIC_KANNA_RELAY_URL ?? status.relay_url ?? status.relayUrl
+    };
+    const plan = buildProductionMobilePlan({
+      repoRoot: executor.context.repoRoot,
+      env,
+      environment: "production"
+    });
+    return { window: plan.windows.find((window) => window.name === component), data: { serverConfigPath } };
+  }
+
+  const env: NodeJS.ProcessEnv = {
+    ...executor.context.env,
+    ...(environment === "dev"
+      ? {}
+      : {
+          KANNA_CLOUD_ENV: environment,
+          KANNA_APP_ENV: executor.context.env.KANNA_APP_ENV ?? environment
+        })
+  };
+
+  if (environment !== "dev" && component === "mobile") {
+    const plan = buildProductionMobilePlan({
+      repoRoot: executor.context.repoRoot,
+      env,
+      environment
+    });
+    return { window: plan.windows.find((window) => window.name === component), data: {} };
+  }
+
+  if (component === "desktop") {
+    writeTauriLocalConfig(executor.context.repoRoot, requireNumberPort(executor.context.ports, "KANNA_DEV_PORT"));
+  }
+  const firebaseConfigPath = input.emulators
+    ? writeFirebaseEmulatorConfig(executor.context.repoRoot, requireMobileDeviceDevPorts(executor.context.ports))
+    : "";
+  const plan = buildDevPlan({
+    repoRoot: executor.context.repoRoot,
+    env,
+    mobile: component === "mobile",
+    emulators: input.emulators,
+    firebaseConfigPath,
+    mobileServerUrl: resolveMobileServerUrl(env)
+  });
+  return { window: plan.windows.find((window) => window.name === component), data: {} };
+}
+
+export async function executeDevRestartWithContext(
+  input: DevRestartInput,
+  executor: ExecutorInput
+): Promise<TaskResult> {
+  if (!input.component) {
+    const stopped = await executeDevDownWithContext({ killDaemon: input.killDaemon }, executor);
+    return {
+      ok: false,
+      message: "Whole-stack restart requires the default kd executor so dev up can resolve the current repo context.",
+      data: stopped.data
+    };
+  }
+
+  if (input.component === "backend") {
+    return {
+      ok: false,
+      message: "Component restart for backend is not supported yet. Backend processes are owned by the desktop window; restart desktop instead.",
+      data: { component: input.component }
+    };
+  }
+
+  const environment = resolveRestartEnvironment(input);
+  const restart = await buildRestartWindow(input, executor, environment);
+  const window = restart?.window;
+  if (!window) {
+    return {
+      ok: false,
+      message: `Could not resolve ${input.component} restart plan.`,
+      data: { component: input.component, environment }
+    };
+  }
+
+  const restarted = await respawnTmuxWindow(executor.runner, executor.context.tmux, window);
+  return {
+    ok: restarted,
+    message: restarted
+      ? `Restarted ${input.component} tmux window.`
+      : `No running ${input.component} tmux window found in session '${executor.context.tmux.session}'.`,
+    data: {
+      component: input.component,
+      environment,
+      ...restart.data
+    }
   };
 }
 
@@ -816,12 +959,29 @@ export const taskDefinitions = [
   },
   {
     id: "dev.restart",
-    description: "Restart the Kanna dev environment.",
-    inputSchema: devUpInputSchema,
+    description: "Restart the Kanna dev environment or one tmux component window.",
+    inputSchema: devRestartInputSchema,
     execute: async (_context, input) => {
-      const parsed = devUpInputSchema.parse(input);
-      await executeDevDown({ killDaemon: parsed.killDaemon });
-      return executeDevUp(parsed);
+      const parsed = devRestartInputSchema.parse(input);
+      if (!parsed.component) {
+        await executeDevDown({ killDaemon: parsed.killDaemon });
+        return executeDevUp(parsed);
+      }
+      const context = await resolveDefaultContext(process.env, {
+        dbOverride: parsed.db,
+        daemonDirOverride: parsed.daemonDir,
+        transferRootOverride: parsed.transferRoot,
+        firebaseEnvFrom: parsed.firebaseEnvFrom
+      });
+      return executeDevRestartWithContext(parsed, {
+        runner: nodeCommandRunner,
+        context: {
+          repoRoot: context.repoRoot,
+          tmux: context.tmux,
+          ports: context.ports,
+          env: context.env
+        }
+      });
     }
   },
   {

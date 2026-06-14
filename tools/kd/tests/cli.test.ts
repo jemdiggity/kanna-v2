@@ -138,6 +138,53 @@ describe("kd CLI", () => {
     });
   });
 
+  it("parses component-scoped dev restart commands", () => {
+    expect(parseCliArgs(["dev", "restart", "desktop"])).toEqual({
+      taskId: "dev.restart",
+      input: {
+        component: "desktop",
+        mobile: false,
+        emulators: false,
+        seed: false,
+        attach: false,
+        deleteDb: false,
+        killDaemon: false,
+        staging: false,
+        production: false
+      }
+    });
+    expect(parseCliArgs(["restart", "mobile", "--staging"])).toEqual({
+      taskId: "dev.restart",
+      input: {
+        component: "mobile",
+        mobile: false,
+        emulators: false,
+        seed: false,
+        attach: false,
+        deleteDb: false,
+        killDaemon: false,
+        staging: true,
+        production: false
+      }
+    });
+  });
+
+  it("keeps no-arg dev restart as a whole-stack restart", () => {
+    expect(parseCliArgs(["dev", "restart"])).toEqual({
+      taskId: "dev.restart",
+      input: {
+        mobile: false,
+        emulators: false,
+        seed: false,
+        attach: false,
+        deleteDb: false,
+        killDaemon: false,
+        staging: false,
+        production: false
+      }
+    });
+  });
+
   it("parses dev log window argument", () => {
     expect(parseCliArgs(["dev", "log", "mobile"])).toEqual({
       taskId: "dev.log",

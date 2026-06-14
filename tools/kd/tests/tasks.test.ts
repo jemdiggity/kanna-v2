@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   executeDevDownWithContext,
+  executeDevRestartWithContext,
   executeDevStatus,
   executeMobileDeviceDoctorWithContext,
   executeMobileDeviceRunWithContext,
@@ -191,6 +192,148 @@ describe("task executors", () => {
     expect(calls[2]?.args.join(" ")).toContain("EXPO_PUBLIC_FIREBASE_PROJECT_ID='kanna-staging'");
     expect(calls[2]?.args.join(" ")).toContain("EXPO_PUBLIC_KANNA_RELAY_URL='wss://relay-staging.kanna.build'");
     expect(calls.map((call) => `${call.command} ${call.args.join(" ")}`).join("\n")).not.toContain("curl --fail");
+  });
+
+  it("restarts only the desktop tmux window against staging cloud env", async () => {
+    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-kd-restart-staging-"));
+    await mkdir(join(repoRoot, "apps", "desktop", "src-tauri"), { recursive: true });
+    const calls: Array<{ command: string; args: string[]; env?: NodeJS.ProcessEnv }> = [];
+    const runner: CommandRunner = {
+      async run(command, args, options) {
+        calls.push({ command, args, env: options?.env });
+        if (args.includes("list-windows")) {
+          return { exitCode: 0, stdout: "desktop\nmobile\n", stderr: "" };
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+    };
+
+    const result = await executeDevRestartWithContext(
+      {
+        component: "desktop",
+        mobile: false,
+        emulators: false,
+        seed: false,
+        attach: false,
+        deleteDb: false,
+        killDaemon: false,
+        staging: true,
+        production: false
+      },
+      {
+        runner,
+        context: {
+          repoRoot,
+          tmux: { server: "kanna-task-abc", session: "kanna-task-abc" },
+          ports: { KANNA_DEV_PORT: 1421, KANNA_MOBILE_PORT: 8084 },
+          env: {
+            KANNA_DEV_PORT: "1421",
+            KANNA_MOBILE_PORT: "8084",
+            EXPO_PUBLIC_FIREBASE_API_KEY: "staging-api-key",
+            EXPO_PUBLIC_FIREBASE_APP_ID: "staging-app-id"
+          }
+        }
+      }
+    );
+
+    expect(result).toMatchObject({
+      ok: true,
+      message: "Restarted desktop tmux window.",
+      data: {
+        component: "desktop",
+        environment: "staging"
+      }
+    });
+    expect(calls.map((call) => call.args[2])).toEqual(["list-windows", "respawn-window"]);
+    expect(calls[1]).toMatchObject({
+      command: "tmux",
+      args: expect.arrayContaining(["respawn-window", "-t", "kanna-task-abc:desktop", "-c", `${repoRoot}/apps/desktop`])
+    });
+    expect(calls[1]?.env?.KANNA_CLOUD_ENV).toBe("staging");
+    expect(calls[1]?.env?.KANNA_FIREBASE_PROJECT_ID).toBe("kanna-staging");
+    expect(calls[1]?.env?.KANNA_RELAY_URL).toBe("wss://relay-staging.kanna.build");
+    expect(calls.map((call) => call.args.join(" ")).join("\n")).not.toContain("mobile");
+  });
+
+  it("restarts only the mobile tmux window without respawning desktop", async () => {
+    const calls: Array<{ command: string; args: string[]; env?: NodeJS.ProcessEnv }> = [];
+    const runner: CommandRunner = {
+      async run(command, args, options) {
+        calls.push({ command, args, env: options?.env });
+        if (args.includes("list-windows")) {
+          return { exitCode: 0, stdout: "desktop\nmobile\nemulators\n", stderr: "" };
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+    };
+
+    const result = await executeDevRestartWithContext(
+      {
+        component: "mobile",
+        mobile: false,
+        emulators: false,
+        seed: false,
+        attach: false,
+        deleteDb: false,
+        killDaemon: false,
+        staging: false,
+        production: false
+      },
+      {
+        runner,
+        context: {
+          repoRoot: "/repo",
+          tmux: { server: "kanna-task-abc", session: "kanna-task-abc" },
+          ports: { KANNA_DEV_PORT: 1421, KANNA_MOBILE_PORT: 8084 },
+          env: { KANNA_DEV_PORT: "1421", KANNA_MOBILE_PORT: "8084" }
+        }
+      }
+    );
+
+    expect(result.ok).toBe(true);
+    expect(calls.map((call) => call.args[2])).toEqual(["list-windows", "respawn-window"]);
+    expect(calls[1]?.args).toEqual(
+      expect.arrayContaining(["respawn-window", "-t", "kanna-task-abc:mobile", "-c", "/repo/apps/mobile"])
+    );
+    expect(calls[1]?.args.join(" ")).toContain("pnpm run dev -- --port 8084 --dev-client");
+    expect(calls[1]?.args.join(" ")).not.toContain("apps/desktop");
+  });
+
+  it("reports backend component restart as unsupported until it has a clean pane boundary", async () => {
+    const runner: CommandRunner = {
+      async run() {
+        throw new Error("backend restart should not run tmux commands");
+      }
+    };
+
+    const result = await executeDevRestartWithContext(
+      {
+        component: "backend",
+        mobile: false,
+        emulators: false,
+        seed: false,
+        attach: false,
+        deleteDb: false,
+        killDaemon: false,
+        staging: false,
+        production: false
+      },
+      {
+        runner,
+        context: {
+          repoRoot: "/repo",
+          tmux: { server: "kanna-task-abc", session: "kanna-task-abc" },
+          ports: {},
+          env: {}
+        }
+      }
+    );
+
+    expect(result).toEqual({
+      ok: false,
+      message: "Component restart for backend is not supported yet. Backend processes are owned by the desktop window; restart desktop instead.",
+      data: { component: "backend" }
+    });
   });
 
   it("starts dev mobile with emulators before building and launching on a physical device", async () => {
