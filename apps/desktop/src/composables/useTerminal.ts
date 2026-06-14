@@ -821,7 +821,7 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
             const liveTerminal = getLiveTerminal()
             if (!liveTerminal) return
             const vt = new TextDecoder().decode(base64ToBytes(dataB64))
-            if (!preserveRecoveredScrollbackForNextSnapshot) {
+            if (!preserveRecoveredScrollbackForNextSnapshot && shouldResetTerminalOnReconnect(options)) {
               liveTerminal.reset()
             }
             preserveRecoveredScrollbackForNextSnapshot = false
@@ -971,70 +971,6 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
       connecting,
       hasAttachedOnce,
     })
-
-    if (!unlistenOutput) {
-      let outputChunkCount = 0
-      const outputUnlisten = await subscribeTerminalOutput([sessionId, teardownId], (payload) => {
-        const sid = payload.session_id
-        if (!sid || !terminal.value) return
-        outputChunkCount += 1
-        if (sid === sessionId) {
-          markTaskSwitchFirstOutput(sessionId)
-        }
-
-        if (payload.data_b64) {
-          const binary = atob(payload.data_b64)
-          const bytes = new Uint8Array(binary.length)
-          for (let i = 0; i < binary.length; i++) {
-            bytes[i] = binary.charCodeAt(i)
-          }
-          handleTerminalOutputControlSequences(bytes)
-          if (outputChunkCount <= 5) {
-            console.warn("[terminal][output] chunk", {
-              sessionId,
-              instanceId,
-              chunk: outputChunkCount,
-              byteLength: bytes.length,
-            })
-          }
-          terminal.value.write(bytes)
-        } else if (isByteArray(payload.data)) {
-          const bytes = new Uint8Array(payload.data)
-          handleTerminalOutputControlSequences(bytes)
-          if (outputChunkCount <= 5) {
-            console.warn("[terminal][output] chunk", {
-              sessionId,
-              instanceId,
-              chunk: outputChunkCount,
-              byteLength: payload.data.length,
-            })
-          }
-          terminal.value.write(bytes)
-        }
-      })
-      if (!acceptRegisteredListener(listeningGeneration, "terminal_output", outputUnlisten)) return
-      unlistenOutput = outputUnlisten
-    }
-
-    if (!unlistenSnapshot) {
-      const snapshotUnlisten = await listen("terminal_snapshot", (event) => {
-        const payload = event.payload as TerminalSnapshotEventPayload | undefined
-        const sid = payload?.session_id
-        if (!payload?.snapshot) return
-        if ((sid === sessionId || sid === teardownId) && terminal.value) {
-          const preserveRecoveredScrollback =
-            sid === sessionId && preserveRecoveredScrollbackForNextSnapshot
-          preserveRecoveredScrollbackForNextSnapshot = false
-          if (!preserveRecoveredScrollback && shouldResetTerminalOnReconnect(options)) {
-            terminal.value.reset()
-          }
-          restoreTerminalModesFromSnapshot(payload.snapshot.vt)
-          terminal.value.write(payload.snapshot.vt)
-        }
-      })
-      if (!acceptRegisteredListener(listeningGeneration, "terminal_snapshot", snapshotUnlisten)) return
-      unlistenSnapshot = snapshotUnlisten
-    }
 
     if (!unlistenExit) {
       const exitUnlisten = await listen(

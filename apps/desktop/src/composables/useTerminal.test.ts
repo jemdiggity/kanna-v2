@@ -474,6 +474,20 @@ describe("useTerminal", () => {
   });
 
   it("preserves Codex scrollback when applying daemon snapshots", async () => {
+    let terminalHandlers: {
+      onSnapshot?: (cols: number, rows: number, dataB64: string) => void;
+      onOutput: (dataB64: string) => void;
+      onSessionExit?: (code: number) => void;
+    } | null = null;
+    const attachTerminal = vi.fn((_taskId: string, handlers: NonNullable<typeof terminalHandlers>) => {
+      terminalHandlers = handlers;
+    });
+    streamClientMock.getSharedStreamClient.mockResolvedValue({
+      attachTerminal,
+      sendTermInput: vi.fn(),
+      sendTermResize: vi.fn(),
+      detach: vi.fn(),
+    });
     const { useTerminal } = await import("./useTerminal");
 
     const TestHarness = defineComponent({
@@ -511,7 +525,7 @@ describe("useTerminal", () => {
     expect(terminal).toBeDefined();
     terminal.reset.mockClear();
 
-    emitTerminalSnapshot("session-1", "codex partial redraw");
+    terminalHandlers?.onSnapshot?.(80, 24, btoa("codex partial redraw"));
 
     expect(terminal.reset).not.toHaveBeenCalled();
     expect(terminal.write).toHaveBeenCalledWith("codex partial redraw");
