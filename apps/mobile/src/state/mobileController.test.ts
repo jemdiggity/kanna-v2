@@ -538,6 +538,58 @@ describe("createMobileController", () => {
     ]);
   });
 
+  it("opens a signed-in live cloud agent task through the agent stream", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const auth = createAuthSessionMock();
+    const liveCloudTask = {
+      id: "cloud-task-agent",
+      repoId: "repo-1",
+      title: "Cloud themed task",
+      stage: "in progress",
+      agentType: "agent" as const,
+      ownerDesktopId: "desktop-owner",
+      ownerLocalTaskId: "local-task-agent",
+      ownerOnline: true
+    };
+    const subscribeCloudTasks = vi.fn((
+      _uid: string,
+      onUpdate: (tasks: typeof liveCloudTask[]) => void
+    ) => {
+      onUpdate([liveCloudTask]);
+      return vi.fn();
+    });
+    auth.getState = vi.fn(() => ({
+      status: "signedIn",
+      user: { uid: "user-1", email: "u@example.com", displayName: null }
+    }));
+    client.getStatus.mockResolvedValueOnce({
+      state: "running",
+      desktopId: "cloud",
+      desktopName: "Kanna Cloud",
+      lanHost: "cloud",
+      lanPort: 0,
+      pairingCode: null
+    });
+    const controller = createMobileController(client, store, auth, {
+      subscribeCloudTasks
+    });
+
+    await controller.bootstrap();
+    controller.openTask("cloud-task-agent");
+
+    expect(subscribeCloudTasks).toHaveBeenCalledWith("user-1", expect.any(Function));
+    expect(client.observeTaskAgent).toHaveBeenCalledWith(
+      "cloud-task-agent",
+      expect.any(Function)
+    );
+    expect(client.observeTaskTerminal).not.toHaveBeenCalled();
+    expect(store.getState()).toMatchObject({
+      selectedTaskId: "cloud-task-agent",
+      taskAgentTaskId: "cloud-task-agent"
+    });
+  });
+
   it("keeps terminal stream errors scoped to the selected task", async () => {
     const store = createSessionStore();
     const client = createClientMock();

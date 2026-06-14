@@ -121,10 +121,15 @@ export function mapCloudTaskSnapshot(snapshot: CloudTaskSnapshot): CloudTaskSumm
     stage: snapshot.stage,
     snippet: snapshot.promptSnippet ?? undefined,
     agentProvider: snapshot.agent?.provider ?? null,
+    agentType: normalizeAgentType(snapshot.agent?.type),
     ownerDesktopId: snapshot.ownerDesktopId,
     ownerLocalTaskId: snapshot.ownerLocalTaskId,
     ownerOnline: false,
   };
+}
+
+function normalizeAgentType(type: string | null | undefined): TaskSummary["agentType"] {
+  return type === "agent" || type === "pty" ? type : null;
 }
 
 function cloudTaskId(id: string): string {
