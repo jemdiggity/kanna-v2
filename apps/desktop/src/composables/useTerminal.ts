@@ -25,6 +25,7 @@ import {
   shouldSkipReconnect,
   shouldForceDoubleResizeOnReconnect,
   shouldReattachOnDaemonReady,
+  shouldResetTerminalOnReconnect,
 } from "./terminalSessionRecovery"
 import {
   buildKittyClipboardResponse,
@@ -820,7 +821,7 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
             const liveTerminal = getLiveTerminal()
             if (!liveTerminal) return
             const vt = new TextDecoder().decode(base64ToBytes(dataB64))
-            if (!preserveRecoveredScrollbackForNextSnapshot) {
+            if (!preserveRecoveredScrollbackForNextSnapshot && shouldResetTerminalOnReconnect(options)) {
               liveTerminal.reset()
             }
             preserveRecoveredScrollbackForNextSnapshot = false
