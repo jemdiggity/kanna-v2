@@ -1,12 +1,34 @@
-import { beforeAll, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AuthState } from "../state/sessionStore";
+
+const reactState = vi.hoisted(() => ({
+  index: 0,
+  values: [] as unknown[]
+}));
 
 vi.mock("react", async (importActual) => {
   const actual = await importActual<typeof import("react")>();
 
   return {
     ...actual,
-    useState: <T,>(initialValue: T) => [initialValue, vi.fn()] as const
+    useState: <T,>(initialValue: T) => {
+      const stateIndex = reactState.index;
+      reactState.index += 1;
+      if (reactState.values.length <= stateIndex) {
+        reactState.values[stateIndex] = initialValue;
+      }
+
+      return [
+        reactState.values[stateIndex] as T,
+        (nextValue: T | ((currentValue: T) => T)) => {
+          const currentValue = reactState.values[stateIndex] as T;
+          reactState.values[stateIndex] =
+            typeof nextValue === "function"
+              ? (nextValue as (value: T) => T)(currentValue)
+              : nextValue;
+        }
+      ] as const;
+    }
   };
 });
 
@@ -29,6 +51,11 @@ beforeAll(async () => {
   const module = await import("./ConnectionScreen");
   ConnectionScreen = module.ConnectionScreen;
   getConnectionAuthSummary = module.getConnectionAuthSummary;
+});
+
+beforeEach(() => {
+  reactState.index = 0;
+  reactState.values = [];
 });
 
 interface ElementNode {
@@ -86,6 +113,33 @@ function findPasswordInput(node: ElementNode): ElementNode | null {
   return null;
 }
 
+function renderSignedOutScreen(): ElementNode {
+  if (!ConnectionScreen) {
+    throw new Error("ConnectionScreen was not loaded");
+  }
+
+  reactState.index = 0;
+  return ConnectionScreen({
+    auth: { status: "signedOut" },
+    connectionState: "idle",
+    desktopName: null,
+    errorMessage: null,
+    pairingCode: null,
+    onConnectLocal: vi.fn(),
+    onSignIn: vi.fn(),
+    onSignOut: vi.fn()
+  }) as ElementNode;
+}
+
+function textContent(
+  node: ElementNode | ElementNode[] | string | null | undefined
+): string {
+  if (!node) return "";
+  if (typeof node === "string") return node;
+  if (Array.isArray(node)) return node.map(textContent).join("");
+  return textContent(node.props?.children);
+}
+
 function renderAuthText(auth: AuthState): string {
   if (!getConnectionAuthSummary) {
     throw new Error("ConnectionScreen was not loaded");
@@ -115,22 +169,37 @@ describe("ConnectionScreen", () => {
   });
 
   it("starts with a hidden password and renders a show-password control", () => {
-    if (!ConnectionScreen) {
-      throw new Error("ConnectionScreen was not loaded");
-    }
-
-    const tree = ConnectionScreen({
-      auth: { status: "signedOut" },
-      connectionState: "idle",
-      desktopName: null,
-      errorMessage: null,
-      pairingCode: null,
-      onConnectLocal: vi.fn(),
-      onSignIn: vi.fn(),
-      onSignOut: vi.fn()
-    }) as ElementNode;
+    const tree = renderSignedOutScreen();
 
     expect(findPasswordInput(tree)?.props?.secureTextEntry).toBe(true);
-    expect(findNodeByAccessibilityLabel(tree, "Show password")).not.toBeNull();
+    expect(textContent(findNodeByAccessibilityLabel(tree, "Show password"))).toBe(
+      "Show"
+    );
+  });
+
+  it("reveals and hides the password when the visibility control is pressed", () => {
+    let tree = renderSignedOutScreen();
+    let passwordInput = findPasswordInput(tree);
+    const showToggle = findNodeByAccessibilityLabel(tree, "Show password");
+
+    expect(passwordInput?.props?.secureTextEntry).toBe(true);
+    showToggle?.props?.onPress?.();
+
+    tree = renderSignedOutScreen();
+    passwordInput = findPasswordInput(tree);
+    const hideToggle = findNodeByAccessibilityLabel(tree, "Hide password");
+
+    expect(passwordInput?.props?.secureTextEntry).toBe(false);
+    expect(textContent(hideToggle)).toBe("Hide");
+
+    hideToggle?.props?.onPress?.();
+
+    tree = renderSignedOutScreen();
+    passwordInput = findPasswordInput(tree);
+
+    expect(passwordInput?.props?.secureTextEntry).toBe(true);
+    expect(textContent(findNodeByAccessibilityLabel(tree, "Show password"))).toBe(
+      "Show"
+    );
   });
 });

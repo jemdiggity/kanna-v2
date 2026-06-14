@@ -162,6 +162,7 @@ export function AccountSheet({
                 <Pressable
                   accessibilityLabel={isPasswordVisible ? "Hide password" : "Show password"}
                   style={styles.passwordToggle}
+                  testID={MOBILE_E2E_IDS.accountPasswordToggle}
                   onPress={() => setIsPasswordVisible((visible) => !visible)}
                 >
                   <Text style={styles.passwordToggleLabel}>

@@ -12,6 +12,12 @@ async function openAccountPreferences(): Promise<void> {
   await client.click(await client.waitForElement('[data-testid="preferences-account-tab"]'));
 }
 
+async function accountPasswordType(): Promise<string | null> {
+  return await client.executeSync(`
+    return document.querySelector('[data-testid="account-password"]')?.getAttribute("type") ?? null;
+  `);
+}
+
 async function desktopAuthState(): Promise<{ status?: string; message?: string; user?: { email?: string | null } }> {
   return await client.executeSync(`
     const ctx = window.__KANNA_E2E__.setupState;
@@ -78,6 +84,12 @@ describe("desktop auth IndexedDB fallback", () => {
     expect(fault?.installed).toBe(true);
 
     await openAccountPreferences();
+    expect(await accountPasswordType()).toBe("password");
+    await client.click(await client.waitForElement('[data-testid="account-toggle-password"]'));
+    expect(await accountPasswordType()).toBe("text");
+    await client.click(await client.waitForElement('[data-testid="account-toggle-password"]'));
+    expect(await accountPasswordType()).toBe("password");
+
     await client.sendKeys(await client.waitForElement('[data-testid="account-email"]'), "upvote.sieve.7t@icloud.com");
     await client.sendKeys(await client.waitForElement('[data-testid="account-password"]'), "password123");
     await client.click(await client.waitForElement('[data-testid="account-sign-in"] .primary-button'));

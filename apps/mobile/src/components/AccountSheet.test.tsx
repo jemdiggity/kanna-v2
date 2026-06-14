@@ -1,11 +1,33 @@
-import { beforeAll, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+
+const reactState = vi.hoisted(() => ({
+  index: 0,
+  values: [] as unknown[]
+}));
 
 vi.mock("react", async (importActual) => {
   const actual = await importActual<typeof import("react")>();
 
   return {
     ...actual,
-    useState: <T,>(initialValue: T) => [initialValue, vi.fn()] as const
+    useState: <T,>(initialValue: T) => {
+      const stateIndex = reactState.index;
+      reactState.index += 1;
+      if (reactState.values.length <= stateIndex) {
+        reactState.values[stateIndex] = initialValue;
+      }
+
+      return [
+        reactState.values[stateIndex] as T,
+        (nextValue: T | ((currentValue: T) => T)) => {
+          const currentValue = reactState.values[stateIndex] as T;
+          reactState.values[stateIndex] =
+            typeof nextValue === "function"
+              ? (nextValue as (value: T) => T)(currentValue)
+              : nextValue;
+        }
+      ] as const;
+    }
   };
 });
 
@@ -33,6 +55,11 @@ beforeAll(async () => {
   const module = await import("./AccountSheet");
   AccountSheet = module.AccountSheet;
   getConnectionStatusPresentation = module.getConnectionStatusPresentation;
+});
+
+beforeEach(() => {
+  reactState.index = 0;
+  reactState.values = [];
 });
 
 interface ElementNode {
@@ -110,6 +137,7 @@ function renderSignedOutSheet(): ElementNode {
     throw new Error("AccountSheet was not loaded");
   }
 
+  reactState.index = 0;
   return AccountSheet({
     auth: { status: "signedOut" },
     connectionState: "idle",
@@ -137,6 +165,15 @@ function connectionText(
   const presentation = getConnectionStatusPresentation(...input);
 
   return `${presentation.title} ${presentation.detail}`;
+}
+
+function textContent(
+  node: ElementNode | ElementNode[] | string | null | undefined
+): string {
+  if (!node) return "";
+  if (typeof node === "string") return node;
+  if (Array.isArray(node)) return node.map(textContent).join("");
+  return textContent(node.props?.children);
 }
 
 describe("getConnectionStatusPresentation", () => {
@@ -192,9 +229,37 @@ describe("AccountSheet", () => {
   it("starts with a hidden password and renders a show-password control", () => {
     const tree = renderSignedOutSheet();
     const passwordInput = findNodeByTestId(tree, "mobile.account-password");
-    const toggle = findNodeByAccessibilityLabel(tree, "Show password");
+    const toggle = findNodeByTestId(tree, "mobile.account-toggle-password");
 
     expect(passwordInput?.props?.secureTextEntry).toBe(true);
-    expect(toggle).not.toBeNull();
+    expect(toggle?.props?.accessibilityLabel).toBe("Show password");
+    expect(textContent(toggle)).toBe("Show");
+  });
+
+  it("reveals and hides the password when the visibility control is pressed", () => {
+    let tree = renderSignedOutSheet();
+    let passwordInput = findNodeByTestId(tree, "mobile.account-password");
+    const showToggle = findNodeByTestId(tree, "mobile.account-toggle-password");
+
+    expect(passwordInput?.props?.secureTextEntry).toBe(true);
+    showToggle?.props?.onPress?.();
+
+    tree = renderSignedOutSheet();
+    passwordInput = findNodeByTestId(tree, "mobile.account-password");
+    const hideToggle = findNodeByTestId(tree, "mobile.account-toggle-password");
+
+    expect(passwordInput?.props?.secureTextEntry).toBe(false);
+    expect(hideToggle?.props?.accessibilityLabel).toBe("Hide password");
+    expect(textContent(hideToggle)).toBe("Hide");
+
+    hideToggle?.props?.onPress?.();
+
+    tree = renderSignedOutSheet();
+    passwordInput = findNodeByTestId(tree, "mobile.account-password");
+    const finalToggle = findNodeByTestId(tree, "mobile.account-toggle-password");
+
+    expect(passwordInput?.props?.secureTextEntry).toBe(true);
+    expect(finalToggle?.props?.accessibilityLabel).toBe("Show password");
+    expect(textContent(finalToggle)).toBe("Show");
   });
 });

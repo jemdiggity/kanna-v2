@@ -18,6 +18,7 @@ export const MOBILE_E2E_IDS = {
   accountForceCloudToggle: "mobile.account-force-cloud",
   accountEmailInput: "mobile.account-email",
   accountPasswordInput: "mobile.account-password",
+  accountPasswordToggle: "mobile.account-toggle-password",
   accountSignInButton: "mobile.account-sign-in",
   accountSignOutButton: "mobile.account-sign-out",
   taskListItem(taskId: string): string {
