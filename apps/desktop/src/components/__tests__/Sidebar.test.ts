@@ -410,6 +410,35 @@ describe("Sidebar", () => {
     }
   });
 
+  it("marks the repository that contains the selected task", () => {
+    const repos = [
+      repo,
+      {
+        ...repo,
+        id: "repo-2",
+        path: "/repo-2",
+        name: "second",
+        created_at: "2026-01-02T00:00:00.000Z",
+      },
+    ];
+    const pipelineItems = [
+      item("task-1", {
+        repo_id: repo.id,
+        display_name: "First repo task",
+      }),
+      item("task-2", {
+        repo_id: "repo-2",
+        display_name: "Second repo task",
+      }),
+    ];
+
+    const wrapper = mountSidebarWithRepos(repos, pipelineItems, "task-2");
+
+    const headers = wrapper.findAll(".repo-header");
+    expect(headers[0]?.classes()).not.toContain("contains-selected-task");
+    expect(headers[1]?.classes()).toContain("contains-selected-task");
+  });
+
   it("scrolls when a selected active-stage task becomes unclosed and visible", async () => {
     const scrollIntoView = vi.fn();
     const originalDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollIntoView");
