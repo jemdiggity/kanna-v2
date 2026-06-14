@@ -91,7 +91,13 @@ onMounted(async () => {
   try {
     // Detect installed CLIs and filter options
     const checks = await Promise.all(providers.map(async (p) => {
-      try { await invoke("which_binary", { name: p }); return p; } catch { return null as AgentProvider | null; }
+      try {
+        await invoke("which_binary", { name: p });
+        return p;
+      } catch (error) {
+        console.debug(`[newtask] CLI binary not found or unavailable: ${p}`, error);
+        return null as AgentProvider | null;
+      }
     }));
     const found = checks.filter(Boolean) as AgentProvider[];
     if (found.length > 0) availableProviders.value = found;

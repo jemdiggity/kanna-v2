@@ -58,7 +58,7 @@ export async function migrateLegacyDatabaseIfNeeded(dbName: string): Promise<voi
   await copyIfExists(`${legacyDbPath}-wal`, `${dbPath}-wal`);
   await copyIfExists(`${legacyDbPath}-shm`, `${dbPath}-shm`);
 
-  console.log(`[db] migrated legacy database: ${legacyDbPath} -> ${dbPath}`);
+  console.info(`[db] migrated legacy database: ${legacyDbPath} -> ${dbPath}`);
 }
 
 export async function createBackup(
@@ -71,7 +71,7 @@ export async function createBackup(
 
   const backupPath = await invoke<string>("backup_sqlite_database", { dbName });
 
-  console.log(`[backup] created: ${backupPath}`);
+  console.info(`[backup] created: ${backupPath}`);
 
   // Run retention cleanup
   await cleanOldBackups(dbName);
@@ -95,9 +95,13 @@ export async function cleanOldBackups(dbName: string): Promise<void> {
     try {
       await invoke("remove_file", { path: fullPath });
       // Also remove sidecars
-      await invoke("remove_file", { path: `${fullPath}-wal` }).catch(() => {});
-      await invoke("remove_file", { path: `${fullPath}-shm` }).catch(() => {});
-      console.log(`[backup] cleaned old backup: ${file}`);
+      await invoke("remove_file", { path: `${fullPath}-wal` }).catch((error) => {
+        console.debug(`[backup] sidecar WAL cleanup skipped for ${file}:`, error);
+      });
+      await invoke("remove_file", { path: `${fullPath}-shm` }).catch((error) => {
+        console.debug(`[backup] sidecar SHM cleanup skipped for ${file}:`, error);
+      });
+      console.info(`[backup] cleaned old backup: ${file}`);
     } catch (e) {
       console.warn(`[backup] failed to remove ${file}:`, e);
     }

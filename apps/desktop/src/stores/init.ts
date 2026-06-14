@@ -186,10 +186,22 @@ export function createInitApi(
     if (isTauri) {
       try {
         const [branch, commitHash, worktree, gitInfo] = await Promise.all([
-          invoke<string>("read_env_var", { name: "KANNA_BUILD_BRANCH" }).catch(() => ""),
-          invoke<string>("read_env_var", { name: "KANNA_BUILD_COMMIT" }).catch(() => ""),
-          invoke<string>("read_env_var", { name: "KANNA_BUILD_WORKTREE" }).catch(() => ""),
-          invoke<{ version: string }>("git_app_info").catch(() => ({ version: "" })),
+          invoke<string>("read_env_var", { name: "KANNA_BUILD_BRANCH" }).catch((error) => {
+            console.debug("[store] KANNA_BUILD_BRANCH not set:", error);
+            return "";
+          }),
+          invoke<string>("read_env_var", { name: "KANNA_BUILD_COMMIT" }).catch((error) => {
+            console.debug("[store] KANNA_BUILD_COMMIT not set:", error);
+            return "";
+          }),
+          invoke<string>("read_env_var", { name: "KANNA_BUILD_WORKTREE" }).catch((error) => {
+            console.debug("[store] KANNA_BUILD_WORKTREE not set:", error);
+            return "";
+          }),
+          invoke<{ version: string }>("git_app_info").catch((error) => {
+            console.debug("[store] failed to read git app info:", error);
+            return { version: "" };
+          }),
         ]);
         const title = formatAppWindowTitle({
           branch,

@@ -13,6 +13,7 @@ import {
 } from "./agent-provider";
 import { resolveDbName } from "./db";
 import { requireService, type AdvanceStageOptions, type StoreContext } from "./state";
+import { debugLog } from "../utils/debugLog";
 
 const CODEX_STAGE_SUBMIT_DELAY_MS = 250;
 
@@ -78,7 +79,7 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
       const item = context.state.items.value.find((candidate) => candidate.id === itemId);
       const isItemHidden = requireService(context.services.isItemHidden, "isItemHidden");
       if (item && !isItemHidden(item) && item.repo_id === context.state.selectedRepoId.value) {
-        console.log("[pipeline:advanceStage] restoring selection", {
+        debugLog("[pipeline:advanceStage] restoring selection", {
           targetItemId: itemId,
           targetStage: item.stage,
           targetBranch: item.branch,
@@ -89,7 +90,7 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
       }
     }
 
-    console.log("[pipeline:advanceStage] clearing selection during restore", {
+    debugLog("[pipeline:advanceStage] clearing selection during restore", {
       requestedItemId: itemId,
       selectedBefore: context.state.selectedItemId.value,
     });
@@ -254,7 +255,8 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
       const path = `${repoPath}/.kanna/pipelines/${pipelineName}.json`;
       const content = await invoke<string>("read_text_file", { path });
       pipeline = parsePipelineJson(content);
-    } catch {
+    } catch (error) {
+      console.debug(`[pipeline] failed to load pipeline "${pipelineName}" from repo; trying bundled resource:`, error);
       try {
         const content = await invoke<string>("read_builtin_resource", {
           relativePath: `.kanna/pipelines/${pipelineName}.json`,
@@ -286,7 +288,8 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
       const path = `${repoPath}/.kanna/agents/${agentName}/AGENT.md`;
       const content = await invoke<string>("read_text_file", { path });
       agent = parseAgentDefinition(content);
-    } catch {
+    } catch (error) {
+      console.debug(`[pipeline] failed to load agent "${agentName}" from repo; trying bundled resource:`, error);
       try {
         const content = await invoke<string>("read_builtin_resource", {
           relativePath: `.kanna/agents/${agentName}/AGENT.md`,
@@ -344,7 +347,7 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
     const shouldFollowTask = nextStage.follow_task ?? (options.initiatedBy !== "auto");
     const sourceTaskIsSelected = context.state.selectedItemId.value === item.id;
     const fallbackSelectionId = computeNextVisibleItemId(item.id);
-    console.log("[pipeline:advanceStage] selection policy", {
+    debugLog("[pipeline:advanceStage] selection policy", {
       taskId,
       currentStage: item.stage,
       nextStage: nextStage.name,
@@ -430,12 +433,12 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
       await restoreStageAdvanceSelection(fallbackSelectionId);
     }
 
-    console.log("[pipeline:advanceStage] closing source task", {
+    debugLog("[pipeline:advanceStage] closing source task", {
       taskId: item.id,
       selectedBeforeClose: context.state.selectedItemId.value,
     });
     await requireService(context.services.closeTask, "closeTask")(item.id, { selectNext: false });
-    console.log("[pipeline:advanceStage] creating next-stage task", {
+    debugLog("[pipeline:advanceStage] creating next-stage task", {
       taskId: item.id,
       nextStage: nextStage.name,
       selectOnCreate: shouldFollowTask,
@@ -450,7 +453,7 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
       displayName: resolveInheritedTaskTitle(item),
       ...agentOpts,
     });
-    console.log("[pipeline:advanceStage] created next-stage task", {
+    debugLog("[pipeline:advanceStage] created next-stage task", {
       taskId: item.id,
       createdItemId,
       nextStage: nextStage.name,
@@ -507,17 +510,26 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
         const worktreePath = buildWorktreePath(repo.path, item.branch);
         try {
           const portEnv = parseTaskPortEnv(item.port_env);
-          const inheritedPath = await invoke<string>("read_env_var", { name: "PATH" }).catch(() => null);
+          const inheritedPath = await invoke<string>("read_env_var", { name: "PATH" }).catch((error) => {
+            console.debug("[pipeline] PATH not available while building setup env:", error);
+            return null;
+          });
           const scriptEnv = buildTaskRuntimeEnv({
             taskId,
             dbName: await resolveDbName(),
             appDataDir: await invoke<string>("get_app_data_dir"),
             socketPath: await invoke<string>("get_pipeline_socket_path"),
             serverBaseUrl: resolveKannaServerBaseUrl(
-              await invoke<string>("read_env_var", { name: "KANNA_MOBILE_SERVER_PORT" }).catch(() => null),
+              await invoke<string>("read_env_var", { name: "KANNA_MOBILE_SERVER_PORT" }).catch((error) => {
+                console.debug("[pipeline] KANNA_MOBILE_SERVER_PORT not set while building setup env:", error);
+                return null;
+              }),
             ),
             portEnv,
-            kannaCliPath: await invoke<string>("which_binary", { name: "kanna-cli" }).catch(() => null),
+            kannaCliPath: await invoke<string>("which_binary", { name: "kanna-cli" }).catch((error) => {
+              console.debug("[pipeline] kanna-cli not available while building setup env:", error);
+              return null;
+            }),
             path: inheritedPath,
           });
           for (const script of env.setup) {

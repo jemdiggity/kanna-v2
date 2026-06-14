@@ -102,14 +102,14 @@ function formatSystemMessage(msg: SystemAgentMessage): string {
 }
 
 async function pollMessages() {
-  console.log(`[AgentView] Starting poll for session: ${props.sessionId}`)
+  console.debug(`[AgentView] Starting poll for session: ${props.sessionId}`)
   while (polling) {
     try {
-      console.log(`[AgentView] Calling agent_next_message...`)
+      console.debug(`[AgentView] Calling agent_next_message...`)
       const raw = await invoke<SdkAgentMessage | null>("agent_next_message", {
         sessionId: props.sessionId,
       })
-      console.log(`[AgentView] Got message:`, raw ? raw.type : "null")
+      console.debug(`[AgentView] Got message:`, raw ? raw.type : "null")
       if (raw) {
         const msg = normalizeMessage(raw)
         messages.value.push(msg)
@@ -123,7 +123,7 @@ async function pollMessages() {
         }
       } else {
         // null means session ended
-        console.log(`[AgentView] Session ended (null message)`)
+        console.debug(`[AgentView] Session ended (null message)`)
         isRunning.value = false
         break
       }
@@ -146,7 +146,8 @@ function formatToolInput(input: unknown): string {
   if (typeof input === "string") return input
   try {
     return JSON.stringify(input, null, 2)
-  } catch {
+  } catch (error) {
+    console.debug("[AgentView] failed to stringify tool input; using String fallback:", error)
     return String(input)
   }
 }

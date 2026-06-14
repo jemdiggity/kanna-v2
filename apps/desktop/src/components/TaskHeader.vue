@@ -27,7 +27,8 @@ const ports = computed<number[]>(() => {
       .map(Number)
       .filter((n) => !Number.isNaN(n))
       .sort((a, b) => a - b);
-  } catch {
+  } catch (error) {
+    console.debug("[task-header] failed to parse task port_env:", error);
     return [];
   }
 });

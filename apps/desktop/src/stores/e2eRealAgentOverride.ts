@@ -19,7 +19,8 @@ function isAgentProvider(value: string): value is AgentProvider {
 async function readEnv(name: string): Promise<string> {
   try {
     return (await invoke<string>("read_env_var", { name })) || "";
-  } catch {
+  } catch (error) {
+    console.debug(`[e2e-real-agent] env override ${name} not set:`, error);
     return "";
   }
 }
