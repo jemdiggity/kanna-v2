@@ -69,6 +69,12 @@ const selectedVisibleTaskId = computed(() => {
     : null;
   return item && item.stage !== "done" && item.closed_at == null ? item.id : null;
 });
+const selectedTaskRepoId = computed(() => {
+  const item = props.selectedItemId
+    ? props.pipelineItems.find((candidate) => candidate.id === props.selectedItemId)
+    : null;
+  return item && item.stage !== "done" && item.closed_at == null ? item.repo_id : null;
+});
 
 function isSearchActive(): boolean {
   return searchQuery.value.trim().length > 0;
@@ -393,7 +399,10 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
         >
           <div
             class="repo-header"
-            :class="{ selected: selectedRepoId === repo.id }"
+            :class="{
+              selected: selectedRepoId === repo.id,
+              'contains-selected-task': selectedTaskRepoId === repo.id,
+            }"
             @mousedown="startRepoDrag(repo.id, $event)"
             @click="handleSelectRepo(repo.id)"
           >
@@ -691,6 +700,11 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
 
 .repo-header.selected {
   background: var(--kn-bg-panel-raised);
+}
+
+.repo-header.contains-selected-task {
+  background: var(--kn-bg-selected);
+  outline: 1px solid var(--kn-accent);
 }
 
 .repo-dragging .repo-header {
