@@ -106,6 +106,7 @@ Run '\\''copilot update'\\'' to check for updates.
     expect(plan.windows.map((window) => window.name)).toEqual(["emulators", "relay", "desktop", "mobile"]);
     expect(plan.windows[0]?.command).toContain("pnpm --dir services/firebase-functions build");
     expect(plan.windows[0]?.command).toContain("firebase emulators:start");
+    expect(plan.windows[0]?.command).toContain("--import '/repo/services/firebase/emulator-seed'");
     expect(plan.windows[1]?.cwd).toBe("/repo/services/relay");
     expect(plan.windows[1]?.env.PORT).toBe("9081");
     expect(plan.windows[1]?.env.FIREBASE_PROJECT_ID).toBe("kanna-local");
@@ -122,6 +123,8 @@ Run '\\''copilot update'\\'' to check for updates.
     expect(plan.windows[3]?.command).toContain("EXPO_PUBLIC_FIREBASE_APP_ID='kanna-mobile-local'");
     expect(plan.windows[3]?.command).toContain("EXPO_PUBLIC_FIREBASE_AUTH_EMULATOR_HOST='192.168.1.5'");
     expect(plan.windows[3]?.command).toContain("EXPO_PUBLIC_FIREBASE_AUTH_EMULATOR_PORT='9100'");
+    expect(plan.windows[3]?.command).toContain("EXPO_PUBLIC_FIREBASE_FIRESTORE_EMULATOR_HOST='192.168.1.5'");
+    expect(plan.windows[3]?.command).toContain("EXPO_PUBLIC_FIREBASE_FIRESTORE_EMULATOR_PORT='9101'");
     expect(plan.windows[3]?.command).toContain("unset NO_COLOR;");
     expect(plan.windows[3]?.command).toContain("pnpm run dev -- --port 8082 --dev-client");
   });
@@ -172,6 +175,7 @@ Run '\\''copilot update'\\'' to check for updates.
     expect(plan.windows[3]?.command).toContain("EXPO_PUBLIC_KANNA_SERVER_URL='http://172.16.0.193:48120'");
     expect(plan.windows[3]?.command).toContain("EXPO_PUBLIC_KANNA_RELAY_URL='ws://172.16.0.193:9081'");
     expect(plan.windows[3]?.command).toContain("EXPO_PUBLIC_FIREBASE_AUTH_EMULATOR_HOST='172.16.0.193'");
+    expect(plan.windows[3]?.command).toContain("EXPO_PUBLIC_FIREBASE_FIRESTORE_EMULATOR_HOST='172.16.0.193'");
   });
 
   it("does not point mobile auth at local emulators unless emulators are running", () => {
@@ -196,6 +200,8 @@ Run '\\''copilot update'\\'' to check for updates.
     expect(plan.windows[1]?.command).not.toContain("EXPO_PUBLIC_FIREBASE_API_KEY=kanna-local");
     expect(plan.windows[1]?.command).not.toContain("EXPO_PUBLIC_FIREBASE_AUTH_EMULATOR_HOST");
     expect(plan.windows[1]?.command).not.toContain("EXPO_PUBLIC_FIREBASE_AUTH_EMULATOR_PORT");
+    expect(plan.windows[1]?.command).not.toContain("EXPO_PUBLIC_FIREBASE_FIRESTORE_EMULATOR_HOST");
+    expect(plan.windows[1]?.command).not.toContain("EXPO_PUBLIC_FIREBASE_FIRESTORE_EMULATOR_PORT");
   });
 
   it("allows an explicit production relay override without enabling emulators", () => {

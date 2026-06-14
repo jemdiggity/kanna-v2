@@ -1,4 +1,4 @@
-import type { CreateTaskResponse, TaskSummary } from "../lib/api/types";
+import type { CreateTaskResponse, RepoSummary, TaskSummary } from "../lib/api/types";
 import type {
   KannaClient,
   TaskAgentSubscription,
@@ -66,6 +66,7 @@ export function createMobileController(
   let authUnsubscribe: (() => void) | null = null;
   let cloudTasksUnsubscribe: (() => void) | null = null;
   let bootstrapInFlight: Promise<void> | null = null;
+  let liveCloudTasksApplied = false;
 
   const setTerminalStartupError = (taskId: string, error: unknown) => {
     const message =
@@ -209,7 +210,7 @@ export function createMobileController(
     ]);
 
     store.setDesktops(desktops);
-    store.setRepos(repos);
+    store.setRepos(mergeReposWithTaskRepos(repos, recentTasks));
     store.setRecentTasks(recentTasks);
     await loadRepoTasks(store.getState().selectedRepoId);
     await refreshSearchResults();
@@ -222,6 +223,7 @@ export function createMobileController(
       client.listRecentTasks(),
       selectedRepoId ? client.listRepoTasks(selectedRepoId) : Promise.resolve([])
     ]);
+    store.setRepos(mergeReposWithTaskRepos(store.getState().repos, recentTasks));
     store.setRecentTasks(recentTasks);
     store.setRepoTasks(repoTasks);
     await refreshSearchResults();
@@ -229,13 +231,54 @@ export function createMobileController(
   };
 
   const applyLiveCloudTasks = (tasks: TaskSummary[]) => {
+    liveCloudTasksApplied = true;
+    tasks = uniqueTasksById(tasks);
+    store.setRepos(mergeReposWithTaskRepos(store.getState().repos, tasks));
     store.setRecentTasks(tasks);
-    const selectedRepoId = store.getState().selectedRepoId;
+    let selectedRepoId = store.getState().selectedRepoId;
+    const selectedRepoHasTasks = tasks.some((task) => task.repoId === selectedRepoId);
+    if (!selectedRepoId || !selectedRepoHasTasks) {
+      selectedRepoId = tasks[0]?.repoId ?? null;
+      if (selectedRepoId) {
+        store.selectRepo(selectedRepoId);
+      }
+    }
     store.setRepoTasks(
       selectedRepoId ? tasks.filter((task) => task.repoId === selectedRepoId) : [],
     );
     void refreshSearchResults();
     reconcileSelectedTask();
+  };
+
+  const reposFromTasks = (tasks: TaskSummary[]): RepoSummary[] => {
+    const reposById = new Map<string, string>();
+    for (const task of tasks) {
+      if (reposById.has(task.repoId)) continue;
+      reposById.set(task.repoId, task.repoName?.trim() || task.repoId);
+    }
+    return Array.from(reposById, ([id, name]) => ({ id, name }));
+  };
+
+  const mergeReposWithTaskRepos = (
+    repos: RepoSummary[],
+    tasks: TaskSummary[]
+  ): RepoSummary[] => {
+    const mergedRepos = new Map(repos.map((repo) => [repo.id, repo.name]));
+    for (const repo of reposFromTasks(tasks)) {
+      if (!mergedRepos.has(repo.id)) {
+        mergedRepos.set(repo.id, repo.name);
+      }
+    }
+    return Array.from(mergedRepos, ([id, name]) => ({ id, name }));
+  };
+
+  const uniqueTasksById = (tasks: TaskSummary[]): TaskSummary[] => {
+    const seen = new Set<string>();
+    return tasks.filter((task) => {
+      if (seen.has(task.id)) return false;
+      seen.add(task.id);
+      return true;
+    });
   };
 
   const startCloudTaskSubscription = (uid: string): boolean => {
@@ -248,6 +291,7 @@ export function createMobileController(
   const stopCloudTaskSubscription = () => {
     cloudTasksUnsubscribe?.();
     cloudTasksUnsubscribe = null;
+    liveCloudTasksApplied = false;
   };
 
   const startBackgroundRefresh = () => {
@@ -324,7 +368,6 @@ export function createMobileController(
 
         store.setConnectionMode(status.lanHost === "cloud" ? "remote" : "lan");
         store.setConnectionState("connected");
-        await loadCollections();
         // When connected to the cloud and signed in, read tasks via a live
         // onSnapshot subscription. In LAN mode (including cloud→LAN fallback)
         // keep polling — the live cloud stream would otherwise clobber LAN
@@ -334,6 +377,13 @@ export function createMobileController(
           store.getState().connectionMode === "remote" &&
           auth?.status === "signedIn" &&
           startCloudTaskSubscription(auth.user.uid);
+        if (liveCloudTasksApplied) {
+          store.setDesktops(await client.listDesktops());
+          await refreshSearchResults();
+          reconcileSelectedTask();
+        } else {
+          await loadCollections();
+        }
         if (!useLiveCloudTasks) {
           startBackgroundRefresh();
         }

@@ -6,7 +6,7 @@ import { getActivePinia } from "pinia";
 import type { BundledLanguage } from "shiki";
 import { useAgentStream } from "../composables/useAgentStream";
 import { useKannaStore } from "../stores/kanna";
-import type { AgentMessageStyle } from "../stores/state";
+import type { AgentMessageAppearance } from "../stores/state";
 import { getShikiTheme } from "../theme/theme";
 import { useThemeRuntime } from "../theme/runtime";
 
@@ -29,7 +29,7 @@ const shikiTheme = computed(() => getShikiTheme(themeRuntime.effectiveCodeTheme.
 const composer = ref("");
 const denyReasons = ref<Record<string, string>>({});
 const scrollContainer = ref<HTMLElement | null>(null);
-const style = ref<AgentMessageStyle>(normalizeStyle(store?.agentMessageStyle ?? null));
+const appearance = ref<AgentMessageAppearance>(normalizeAppearance(store?.agentMessageAppearance ?? null));
 const renderedAssistant = ref<Record<number, string>>({});
 const stream = useAgentStream(props.sessionId);
 let highlighterPromise: Promise<MarkdownHighlighter> | null = null;
@@ -47,8 +47,8 @@ const lastStats = computed(() => {
   return completed?.event.type === "turn_completed" ? completed.event.stats : null;
 });
 
-watch(() => store?.agentMessageStyle, (nextStyle) => {
-  if (nextStyle) style.value = normalizeStyle(nextStyle);
+watch(() => store?.agentMessageAppearance, (nextAppearance) => {
+  if (nextAppearance) appearance.value = normalizeAppearance(nextAppearance);
 });
 
 watch([() => stream.events.value, shikiTheme], () => {
@@ -62,7 +62,7 @@ watch(() => stream.events.value.length, async () => {
   }
 });
 
-function normalizeStyle(value: string | null | undefined): AgentMessageStyle {
+function normalizeAppearance(value: string | null | undefined): AgentMessageAppearance {
   if (value === "log" || value === "terminal") return value;
   return "chat";
 }
@@ -169,14 +169,6 @@ function resolvePermission(requestId: string, decision: PermissionDecision) {
   stream.sendPermission(requestId, decision);
 }
 
-function setStyle(nextStyle: AgentMessageStyle) {
-  style.value = nextStyle;
-  if (store) {
-    store.agentMessageStyle = nextStyle;
-    void store.savePreference("agentMessageStyle", nextStyle).catch(() => undefined);
-  }
-}
-
 function statsLabel(stats: TurnStats | null): string {
   if (!stats) return "";
   const parts = [`${stats.num_turns} turns`, `${(stats.duration_ms / 1000).toFixed(1)}s`];
@@ -191,7 +183,7 @@ function statsLabel(stats: TurnStats | null): string {
 </script>
 
 <template>
-  <section class="agent-message-view" :class="`skin-${style}`">
+  <section class="agent-message-view" :class="`skin-${appearance}`">
     <div ref="scrollContainer" class="agent-scroll" data-testid="agent-message-view">
       <article
         v-for="item in displayEvents"
@@ -277,11 +269,6 @@ function statsLabel(stats: TurnStats | null): string {
     </div>
 
     <footer class="agent-footer">
-      <div class="style-switcher" role="group" aria-label="Agent view style">
-        <button type="button" :class="{ active: style === 'chat' }" @click="setStyle('chat')">Chat</button>
-        <button type="button" :class="{ active: style === 'log' }" @click="setStyle('log')">Log</button>
-        <button type="button" :class="{ active: style === 'terminal' }" @click="setStyle('terminal')">Terminal</button>
-      </div>
       <span class="turn-stats">{{ statsLabel(lastStats) }}</span>
       <button type="button" class="stop-button" @click="stream.interrupt">Stop</button>
       <textarea
@@ -397,7 +384,7 @@ pre {
 
 .agent-footer {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto minmax(220px, 520px) auto;
+  grid-template-columns: minmax(0, 1fr) auto minmax(220px, 520px) auto;
   gap: 8px;
   align-items: center;
   border-top: 1px solid var(--agent-border);
@@ -405,7 +392,6 @@ pre {
   background: var(--agent-panel);
 }
 
-.style-switcher,
 .permission-actions {
   display: flex;
   align-items: center;

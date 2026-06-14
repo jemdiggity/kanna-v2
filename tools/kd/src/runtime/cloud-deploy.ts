@@ -131,7 +131,7 @@ export async function deployFirebaseCloud(input: CloudDeployInput & { relay?: bo
       "firebase",
       "deploy",
       "--only",
-      "functions,firestore:rules",
+      "functions,firestore:rules,firestore:indexes",
       "--project",
       projectId,
       "--force"

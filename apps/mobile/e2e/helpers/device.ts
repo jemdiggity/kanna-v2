@@ -161,7 +161,7 @@ export function buildPhysicalDeviceInstallCommand(
   const hostPrefix = packagerHostname
     ? `REACT_NATIVE_PACKAGER_HOSTNAME=${packagerHostname} `
     : "";
-  return `${hostPrefix}pnpm --dir apps/mobile ios --device ${deviceUdid} --port ${metroPort}`;
+  return `${hostPrefix}RCT_METRO_PORT=${metroPort} pnpm --dir apps/mobile ios --device ${deviceUdid} --port ${metroPort}`;
 }
 
 export async function assertPhysicalDeviceAppInstalled(

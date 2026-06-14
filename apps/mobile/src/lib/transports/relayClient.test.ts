@@ -112,13 +112,11 @@ describe("createRelayDesktopClient", () => {
     await expect(invocation).rejects.toThrow("desktop failed");
   });
 
-  it("observes terminal events through relay command invokes", async () => {
+  it("observes terminal events through the KSP relay tunnel", async () => {
     const socket = createSocket();
-    let nextId = 1;
     const client = createRelayDesktopClient({
       createSocket: () => socket,
       getIdToken: async () => "id-token-1",
-      nextId: () => `invoke-${nextId++}`,
       relayUrl: "wss://relay.example"
     });
     const events: unknown[] = [];
@@ -132,55 +130,57 @@ describe("createRelayDesktopClient", () => {
 
     socket.onopen?.();
     await flushPromises();
+    expect(socket.send).toHaveBeenNthCalledWith(
+      1,
+      JSON.stringify({
+        type: "auth",
+        id_token: "id-token-1"
+      })
+    );
+
     socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok", userId: "user-1" }) });
+    socket.onmessage?.({ data: JSON.stringify({ type: "tunnel_ready" }) });
     await flushPromises();
     expect(socket.send).toHaveBeenNthCalledWith(
-      2,
+      3,
       JSON.stringify({
-        type: "invoke",
-        id: "invoke-1",
-        desktopId: "desktop-1",
-        command: "observe_session",
-        args: { session_id: "task-1" }
+        type: "auth",
+        credential: "id-token-1"
+      })
+    );
+    socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok" }) });
+    await flushPromises();
+    expect(socket.send).toHaveBeenNthCalledWith(
+      4,
+      JSON.stringify({
+        type: "attach",
+        task_id: "task-1",
+        kind: "terminal",
+        from_seq: 0
       })
     );
 
     socket.onmessage?.({
       data: JSON.stringify({
-        type: "response",
-        id: "invoke-1",
-        data: null
-      })
-    });
-    await flushPromises();
-    socket.onmessage?.({
-      data: JSON.stringify({
-        type: "event",
-        name: "terminal_snapshot",
-        payload: {
-          session_id: "task-1",
-          snapshot: { vt: "restored output" }
-        }
+        type: "term_snapshot",
+        task_id: "task-1",
+        cols: 80,
+        rows: 24,
+        data_b64: Buffer.from("restored output").toString("base64")
       })
     });
     socket.onmessage?.({
       data: JSON.stringify({
-        type: "event",
-        name: "terminal_output",
-        payload: {
-          session_id: "task-1",
-          data_b64: "bGl2ZSBvdXRwdXQ="
-        }
+        type: "term_output",
+        task_id: "task-1",
+        data_b64: "bGl2ZSBvdXRwdXQ="
       })
     });
     socket.onmessage?.({
       data: JSON.stringify({
-        type: "event",
-        name: "session_exit",
-        payload: {
-          session_id: "task-1",
-          code: 0
-        }
+        type: "session_exit",
+        task_id: "task-1",
+        code: 0
       })
     });
 
@@ -193,25 +193,16 @@ describe("createRelayDesktopClient", () => {
 
     subscription.close();
     await flushPromises();
-    expect(socket.send).toHaveBeenNthCalledWith(
-      3,
-      JSON.stringify({
-        type: "invoke",
-        id: "invoke-2",
-        desktopId: "desktop-1",
-        command: "unobserve_session",
-        args: { session_id: "task-1" }
-      })
+    expect(socket.send).toHaveBeenLastCalledWith(
+      JSON.stringify({ type: "detach", task_id: "task-1", kind: "terminal" })
     );
   });
 
   it("decodes split utf-8 terminal output across relay chunks", async () => {
     const socket = createSocket();
-    let nextId = 1;
     const client = createRelayDesktopClient({
       createSocket: () => socket,
       getIdToken: async () => "id-token-1",
-      nextId: () => `invoke-${nextId++}`,
       relayUrl: "wss://relay.example"
     });
     const events: unknown[] = [];
@@ -226,40 +217,39 @@ describe("createRelayDesktopClient", () => {
     socket.onopen?.();
     await flushPromises();
     socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok", userId: "user-1" }) });
+    socket.onmessage?.({ data: JSON.stringify({ type: "tunnel_ready" }) });
     await flushPromises();
-    socket.onmessage?.({
-      data: JSON.stringify({
-        type: "response",
-        id: "invoke-1",
-        data: null
-      })
-    });
+    socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok" }) });
     await flushPromises();
 
     const spinnerBytes = Buffer.from("⠋");
     socket.onmessage?.({
       data: JSON.stringify({
-        type: "event",
-        name: "terminal_output",
-        payload: {
-          session_id: "task-1",
-          data_b64: Buffer.from(spinnerBytes.subarray(0, 1)).toString("base64")
-        }
+        type: "term_snapshot",
+        task_id: "task-1",
+        cols: 80,
+        rows: 24,
+        data_b64: ""
       })
     });
     socket.onmessage?.({
       data: JSON.stringify({
-        type: "event",
-        name: "terminal_output",
-        payload: {
-          session_id: "task-1",
-          data_b64: Buffer.from(spinnerBytes.subarray(1)).toString("base64")
-        }
+        type: "term_output",
+        task_id: "task-1",
+        data_b64: Buffer.from(spinnerBytes.subarray(0, 1)).toString("base64")
+      })
+    });
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: "term_output",
+        task_id: "task-1",
+        data_b64: Buffer.from(spinnerBytes.subarray(1)).toString("base64")
       })
     });
 
     expect(events).toEqual([
       { type: "ready", taskId: "task-1" },
+      { type: "output", taskId: "task-1", text: "" },
       { type: "output", taskId: "task-1", text: "" },
       { type: "output", taskId: "task-1", text: "⠋" }
     ]);
@@ -267,11 +257,9 @@ describe("createRelayDesktopClient", () => {
 
   it("sends terminal input through relay command invokes", async () => {
     const socket = createSocket();
-    let nextId = 1;
     const client = createRelayDesktopClient({
       createSocket: () => socket,
       getIdToken: async () => "id-token-1",
-      nextId: () => `invoke-${nextId++}`,
       relayUrl: "wss://relay.example"
     });
 
@@ -284,26 +272,18 @@ describe("createRelayDesktopClient", () => {
     socket.onopen?.();
     await flushPromises();
     socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok", userId: "user-1" }) });
+    socket.onmessage?.({ data: JSON.stringify({ type: "tunnel_ready" }) });
+    await flushPromises();
+    socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok" }) });
     await flushPromises();
 
-    expect(socket.send).toHaveBeenNthCalledWith(
-      2,
+    expect(socket.send).toHaveBeenLastCalledWith(
       JSON.stringify({
-        type: "invoke",
-        id: "invoke-1",
-        desktopId: "desktop-1",
-        command: "send_input",
-        args: { session_id: "task-1", data: "continue\n" }
+        type: "term_input",
+        task_id: "task-1",
+        data_b64: Buffer.from("continue\n").toString("base64")
       })
     );
-
-    socket.onmessage?.({
-      data: JSON.stringify({
-        type: "response",
-        id: "invoke-1",
-        data: null
-      })
-    });
 
     await expect(input).resolves.toBeUndefined();
   });

@@ -20,7 +20,7 @@ describe("selectPhysicalDevice", () => {
     expect(
       buildPhysicalDeviceInstallCommand("00008130-001015CA1091401C", 1430, () => "172.16.0.193")
     ).toBe(
-      "REACT_NATIVE_PACKAGER_HOSTNAME=172.16.0.193 pnpm --dir apps/mobile ios --device 00008130-001015CA1091401C --port 1430"
+      "REACT_NATIVE_PACKAGER_HOSTNAME=172.16.0.193 RCT_METRO_PORT=1430 pnpm --dir apps/mobile ios --device 00008130-001015CA1091401C --port 1430"
     );
   });
 
@@ -28,7 +28,7 @@ describe("selectPhysicalDevice", () => {
     expect(
       buildPhysicalDeviceInstallCommand("00008130-001015CA1091401C", 1430, () => undefined)
     ).toBe(
-      "pnpm --dir apps/mobile ios --device 00008130-001015CA1091401C --port 1430"
+      "RCT_METRO_PORT=1430 pnpm --dir apps/mobile ios --device 00008130-001015CA1091401C --port 1430"
     );
   });
 

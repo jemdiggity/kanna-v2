@@ -148,6 +148,9 @@ mod tests {
         let config = Config {
             relay_url: "wss://relay.example".to_string(),
             device_token: "device-token".to_string(),
+            firebase_project_id: "kanna-local".to_string(),
+            firebase_auth_emulator_url: None,
+            firebase_firestore_emulator_host: None,
             daemon_dir: "/tmp/kanna-daemon".to_string(),
             db_path: "/tmp/kanna.db".to_string(),
             kanna_cli_path: None,

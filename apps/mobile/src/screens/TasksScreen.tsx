@@ -36,7 +36,7 @@ export function TasksScreen({
       <View style={styles.wrap}>
         {heading ? <Text style={styles.heading}>{heading}</Text> : null}
 
-        {repos.length > 1 ? (
+        {repos.length > 0 ? (
           <ScrollView
             contentContainerStyle={styles.repoRow}
             horizontal

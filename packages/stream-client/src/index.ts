@@ -183,9 +183,10 @@ export class StreamClient {
     this.socket = socket;
 
     socket.onopen = () => {
-      void this.sendAuthFrame();
+      void this.sendAuthFrame(socket);
     };
     socket.onmessage = (event) => {
+      if (socket !== this.socket) return;
       if (typeof event.data !== "string") return;
       let frame: ServerFrame;
       try {
@@ -195,14 +196,14 @@ export class StreamClient {
       }
       this.handleFrame(frame);
     };
-    socket.onclose = () => this.handleDisconnect();
+    socket.onclose = () => this.handleDisconnect(socket);
     socket.onerror = () => {
       // onclose follows; nothing to do here.
     };
   }
 
-  private handleDisconnect(): void {
-    if (this.closed) return;
+  private handleDisconnect(socket: WebSocketLike): void {
+    if (this.closed || socket !== this.socket) return;
     this.socket = null;
     this.authed = false;
     this.options.onConnectionChange?.(false);
@@ -223,12 +224,13 @@ export class StreamClient {
     this.pendingRequests.clear();
   }
 
-  private async sendAuthFrame(): Promise<void> {
+  private async sendAuthFrame(socket: WebSocketLike): Promise<void> {
     const provided = this.options.credentialProvider
       ? await this.options.credentialProvider()
       : this.options.credential;
+    if (this.closed || socket !== this.socket) return;
     const credential = provided && provided.trim().length > 0 ? provided : undefined;
-    this.rawSend({ type: "auth", ...(credential ? { credential } : {}) });
+    this.rawSend({ type: "auth", ...(credential ? { credential } : {}) }, socket);
   }
 
   private handleFrame(frame: ServerFrame): void {
@@ -334,9 +336,10 @@ export class StreamClient {
     this.rawSend(frame);
   }
 
-  private rawSend(frame: ClientFrame): void {
+  private rawSend(frame: ClientFrame, socket = this.socket): void {
     try {
-      this.socket?.send(JSON.stringify(frame));
+      if (socket !== this.socket) return;
+      socket?.send(JSON.stringify(frame));
     } catch {
       // Socket died between checks; the close handler reconnects.
     }

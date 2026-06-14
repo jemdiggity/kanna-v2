@@ -526,6 +526,7 @@ mod tests {
                 "model": null,
                 "permissionMode": null,
                 "allowedTools": null,
+                "blockerTaskIds": null,
                 "notifyTaskId": null
             })
         );
@@ -536,6 +537,9 @@ mod tests {
         let config = Config {
             relay_url: "wss://relay.example".to_string(),
             device_token: "device-token".to_string(),
+            firebase_project_id: "kanna-local".to_string(),
+            firebase_auth_emulator_url: None,
+            firebase_firestore_emulator_host: None,
             daemon_dir: "/tmp/kanna-daemon".to_string(),
             db_path: Db::test_db_path("desktop-list"),
             kanna_cli_path: None,
@@ -563,6 +567,9 @@ mod tests {
         let config = Config {
             relay_url: "wss://relay.example".to_string(),
             device_token: "device-token".to_string(),
+            firebase_project_id: "kanna-local".to_string(),
+            firebase_auth_emulator_url: None,
+            firebase_firestore_emulator_host: None,
             daemon_dir: "/tmp/kanna-daemon".to_string(),
             db_path: Db::test_db_path("repo-summaries"),
             kanna_cli_path: None,
@@ -602,6 +609,9 @@ mod tests {
         let config = Config {
             relay_url: "wss://relay.example".to_string(),
             device_token: "device-token".to_string(),
+            firebase_project_id: "kanna-local".to_string(),
+            firebase_auth_emulator_url: None,
+            firebase_firestore_emulator_host: None,
             daemon_dir: "/tmp/kanna-daemon".to_string(),
             db_path: Db::test_db_path("recent-tasks"),
             kanna_cli_path: None,
@@ -658,6 +668,9 @@ mod tests {
         let config = Config {
             relay_url: "wss://relay.example".to_string(),
             device_token: "device-token".to_string(),
+            firebase_project_id: "kanna-local".to_string(),
+            firebase_auth_emulator_url: None,
+            firebase_firestore_emulator_host: None,
             daemon_dir: "/tmp/kanna-daemon".to_string(),
             db_path: Db::test_db_path("repo-tasks"),
             kanna_cli_path: None,
@@ -705,6 +718,9 @@ mod tests {
         let config = Config {
             relay_url: "wss://relay.example".to_string(),
             device_token: "device-token".to_string(),
+            firebase_project_id: "kanna-local".to_string(),
+            firebase_auth_emulator_url: None,
+            firebase_firestore_emulator_host: None,
             daemon_dir: "/tmp/kanna-daemon".to_string(),
             db_path: Db::test_db_path("recent-task-snippet"),
             kanna_cli_path: None,
@@ -746,6 +762,9 @@ mod tests {
         let config = Config {
             relay_url: "wss://relay.example".to_string(),
             device_token: "device-token".to_string(),
+            firebase_project_id: "kanna-local".to_string(),
+            firebase_auth_emulator_url: None,
+            firebase_firestore_emulator_host: None,
             daemon_dir: "/tmp/kanna-daemon".to_string(),
             db_path: Db::test_db_path("search-tasks"),
             kanna_cli_path: None,
@@ -802,6 +821,9 @@ mod tests {
         let config = Config {
             relay_url: "wss://relay.example".to_string(),
             device_token: "device-token".to_string(),
+            firebase_project_id: "kanna-local".to_string(),
+            firebase_auth_emulator_url: None,
+            firebase_firestore_emulator_host: None,
             daemon_dir: "/tmp/kanna-daemon".to_string(),
             db_path: Db::test_db_path("status"),
             kanna_cli_path: None,

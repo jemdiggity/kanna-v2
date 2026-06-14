@@ -57,7 +57,8 @@ describe("createConfiguredMobileAuthSession", () => {
         projectId: "project-id",
         appId: "app-id"
       },
-      authEmulator: null
+      authEmulator: null,
+      firestoreEmulator: null
     });
 
     await session.initialize();

@@ -125,7 +125,7 @@ describe("cloud deploy runtime", () => {
             "firebase",
             "deploy",
             "--only",
-            "functions,firestore:rules",
+            "functions,firestore:rules,firestore:indexes",
             "--project",
             "prod-project",
             "--force"

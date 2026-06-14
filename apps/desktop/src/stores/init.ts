@@ -16,7 +16,7 @@ import { formatAppWindowTitle, type AppBuildInfo } from "./windowTitle";
 import { isTaskTearingDown } from "./taskStages";
 import { requireService, type StoreContext } from "./state";
 import { normalizeAppThemePreference, normalizeCodeThemePreference } from "../theme/theme";
-import type { AgentMessageStyle } from "./state";
+import type { AgentMessageAppearance } from "./state";
 
 export interface InitApi {
   init: (db: DbHandle) => Promise<void>;
@@ -98,7 +98,7 @@ export function createInitApi(
     return !sessionId.startsWith("shell-") && !isTeardownSessionId(sessionId);
   }
 
-  function normalizeAgentMessageStyle(value: string | null): AgentMessageStyle {
+  function normalizeAgentMessageAppearance(value: string | null): AgentMessageAppearance {
     if (value === "log" || value === "terminal") return value;
     return "chat";
   }
@@ -118,8 +118,13 @@ export function createInitApi(
     context.state.appTheme.value = normalizeAppThemePreference(appTheme);
     const codeTheme = await getSetting(context.requireDb(), "codeTheme");
     context.state.codeTheme.value = normalizeCodeThemePreference(codeTheme);
-    const agentMessageStyle = await getSetting(context.requireDb(), "agentMessageStyle");
-    context.state.agentMessageStyle.value = normalizeAgentMessageStyle(agentMessageStyle);
+    const agentMessageAppearance = await getSetting(context.requireDb(), "agentMessageAppearance");
+    const legacyAgentMessageStyle = agentMessageAppearance
+      ? null
+      : await getSetting(context.requireDb(), "agentMessageStyle");
+    context.state.agentMessageAppearance.value = normalizeAgentMessageAppearance(
+      agentMessageAppearance ?? legacyAgentMessageStyle,
+    );
   }
 
   async function savePreference(key: string, value: string) {

@@ -1,5 +1,6 @@
 import {
   collection,
+  connectFirestoreEmulator,
   getDocs,
   getFirestore,
   onSnapshot,
@@ -8,6 +9,10 @@ import {
   type Firestore,
 } from "firebase/firestore";
 import type { TaskSummary } from "../api/types";
+import {
+  parseMobileFirebaseConfig,
+  type MobileFirestoreEmulatorConfig
+} from "./config";
 
 export interface CloudTaskSnapshot {
   cloudTaskId?: string;
@@ -43,7 +48,7 @@ export interface CloudTaskIndex {
 }
 
 export function createFirestoreTaskIndex(
-  db: Firestore = getFirestore(),
+  db: Firestore = getConfiguredFirestore(),
 ): CloudTaskIndex {
   return {
     async listRecentTasks(uid) {
@@ -110,6 +115,25 @@ export function createFirestoreTaskIndex(
       };
     },
   };
+}
+
+const connectedFirestoreEmulators = new Set<string>();
+
+function getConfiguredFirestore(): Firestore {
+  const db = getFirestore();
+  connectConfiguredFirestoreEmulator(db, parseMobileFirebaseConfig().firestoreEmulator);
+  return db;
+}
+
+function connectConfiguredFirestoreEmulator(
+  db: Firestore,
+  emulator: MobileFirestoreEmulatorConfig | null
+): void {
+  if (!emulator) return;
+  const key = `${emulator.host}:${emulator.port}`;
+  if (connectedFirestoreEmulators.has(key)) return;
+  connectFirestoreEmulator(db, emulator.host, emulator.port);
+  connectedFirestoreEmulators.add(key);
 }
 
 export function mapCloudTaskSnapshot(snapshot: CloudTaskSnapshot): CloudTaskSummary {

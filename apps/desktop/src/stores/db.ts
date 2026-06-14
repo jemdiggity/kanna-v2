@@ -377,10 +377,10 @@ export async function runMigrations(db: DbHandle): Promise<void> {
     await addColumn("repo", "remote_url_hash", "TEXT");
   });
 
-  await runMigration("020_agent_message_style_preference", async () => {
+  await runMigration("020_agent_message_appearance_preference", async () => {
     await db.execute(
       "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)",
-      ["agentMessageStyle", "chat"],
+      ["agentMessageAppearance", "chat"],
     );
   });
 

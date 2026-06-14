@@ -1930,6 +1930,9 @@ mod tests {
         Config {
             relay_url: "wss://relay.example".to_string(),
             device_token: "device-token".to_string(),
+            firebase_project_id: "kanna-local".to_string(),
+            firebase_auth_emulator_url: None,
+            firebase_firestore_emulator_host: None,
             daemon_dir: format!("/tmp/kanna-daemon-{label}"),
             db_path: Db::test_db_path(label),
             kanna_cli_path: None,
@@ -2047,6 +2050,7 @@ mod tests {
                     permission_mode: Some("dontAsk".to_string()),
                     allowed_tools: Some(vec!["Bash".to_string()]),
                     notify_task_id: None,
+                    blocker_task_ids: None,
                 },
             )
             .unwrap();
@@ -2090,6 +2094,7 @@ mod tests {
                 permission_mode: None,
                 allowed_tools: None,
                 notify_task_id: None,
+                blocker_task_ids: None,
             },
         )
         .unwrap();
@@ -2120,6 +2125,7 @@ mod tests {
                 agent_type: "agent".to_string(),
                 worktree_path: "/tmp/worktree".to_string(),
             },
+            branch: "task-1".to_string(),
             session_id: "task-1".to_string(),
             cwd: "/tmp/repo/.kanna-worktrees/task-1".to_string(),
             env: HashMap::new(),
@@ -2316,6 +2322,9 @@ mod tests {
         let config = Config {
             relay_url: "wss://relay.example".to_string(),
             device_token: "device-token".to_string(),
+            firebase_project_id: "kanna-local".to_string(),
+            firebase_auth_emulator_url: None,
+            firebase_firestore_emulator_host: None,
             daemon_dir: "/tmp/kanna-daemon".to_string(),
             db_path: Db::test_db_path("advance-stage-helper"),
             kanna_cli_path: None,
@@ -2464,6 +2473,9 @@ mod tests {
         let config = Config {
             relay_url: "wss://relay.example".to_string(),
             device_token: "device-token".to_string(),
+            firebase_project_id: "kanna-local".to_string(),
+            firebase_auth_emulator_url: None,
+            firebase_firestore_emulator_host: None,
             daemon_dir: std::env::temp_dir()
                 .join(format!("kanna-daemon-continue-{}", std::process::id()))
                 .to_string_lossy()
@@ -2603,6 +2615,9 @@ mod tests {
         let config = Config {
             relay_url: "wss://relay.example".to_string(),
             device_token: "device-token".to_string(),
+            firebase_project_id: "kanna-local".to_string(),
+            firebase_auth_emulator_url: None,
+            firebase_firestore_emulator_host: None,
             daemon_dir: "/tmp/kanna-daemon".to_string(),
             db_path: Db::test_db_path("advance-stage-continue"),
             kanna_cli_path: None,
@@ -2827,6 +2842,9 @@ mod tests {
         let config = Config {
             relay_url: "wss://relay.example".to_string(),
             device_token: "device-token".to_string(),
+            firebase_project_id: "kanna-local".to_string(),
+            firebase_auth_emulator_url: None,
+            firebase_firestore_emulator_host: None,
             daemon_dir: std::env::temp_dir()
                 .join(format!("kanna-daemon-post-action-{}", std::process::id()))
                 .to_string_lossy()
@@ -2985,6 +3003,9 @@ mod tests {
         let config = Config {
             relay_url: "wss://relay.example".to_string(),
             device_token: "device-token".to_string(),
+            firebase_project_id: "kanna-local".to_string(),
+            firebase_auth_emulator_url: None,
+            firebase_firestore_emulator_host: None,
             daemon_dir: "/tmp/kanna-daemon".to_string(),
             db_path: Db::test_db_path("auto-pr-after-continue"),
             kanna_cli_path: None,
@@ -3099,6 +3120,9 @@ mod tests {
         let config = Config {
             relay_url: "wss://relay.example".to_string(),
             device_token: "device-token".to_string(),
+            firebase_project_id: "kanna-local".to_string(),
+            firebase_auth_emulator_url: None,
+            firebase_firestore_emulator_host: None,
             daemon_dir: "/tmp/kanna-daemon".to_string(),
             db_path: Db::test_db_path("default-pipeline-fallback"),
             kanna_cli_path: None,
@@ -3205,6 +3229,9 @@ mod tests {
         let config = Config {
             relay_url: "wss://relay.example".to_string(),
             device_token: "device-token".to_string(),
+            firebase_project_id: "kanna-local".to_string(),
+            firebase_auth_emulator_url: None,
+            firebase_firestore_emulator_host: None,
             daemon_dir: "/tmp/kanna-daemon".to_string(),
             db_path: Db::test_db_path("default-agent-provider"),
             kanna_cli_path: None,
@@ -3353,6 +3380,9 @@ mod tests {
         let config = Config {
             relay_url: "wss://relay.example".to_string(),
             device_token: "device-token".to_string(),
+            firebase_project_id: "kanna-local".to_string(),
+            firebase_auth_emulator_url: None,
+            firebase_firestore_emulator_host: None,
             daemon_dir: "/tmp/kanna-daemon".to_string(),
             db_path: Db::test_db_path("revision-stage-helper"),
             kanna_cli_path: None,
@@ -3551,6 +3581,9 @@ mod tests {
         let config = Config {
             relay_url: "wss://relay.example".to_string(),
             device_token: "device-token".to_string(),
+            firebase_project_id: "kanna-local".to_string(),
+            firebase_auth_emulator_url: None,
+            firebase_firestore_emulator_host: None,
             daemon_dir: "/tmp/kanna-daemon".to_string(),
             db_path: Db::test_db_path("revision-title-recovery"),
             kanna_cli_path: None,

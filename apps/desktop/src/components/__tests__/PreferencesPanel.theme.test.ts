@@ -34,6 +34,7 @@ function mountPreferences() {
         defaultAgentProvider: "claude",
         appTheme: "dark",
         codeTheme: "match",
+        agentMessageAppearance: "chat",
       },
     },
     global: {
@@ -45,25 +46,30 @@ function mountPreferences() {
 }
 
 describe("PreferencesPanel theme controls", () => {
-  it("renders app and terminal/code theme selectors", () => {
+  it("renders app, code, and agent message appearance selectors", () => {
     const wrapper = mountPreferences();
 
     const appTheme = wrapper.get('[data-testid="app-theme-select"]');
     const codeTheme = wrapper.get('[data-testid="code-theme-select"]');
+    const appearance = wrapper.get('[data-testid="agent-message-appearance-select"]');
 
     expect(appTheme.element).toHaveProperty("value", "dark");
     expect(codeTheme.element).toHaveProperty("value", "match");
+    expect(appearance.element).toHaveProperty("value", "chat");
     expect(wrapper.text()).toContain("preferences.theme");
     expect(wrapper.text()).toContain("preferences.codeTheme");
+    expect(wrapper.text()).toContain("preferences.agentMessageAppearance");
   });
 
-  it("emits theme preference updates", async () => {
+  it("emits theme and appearance preference updates", async () => {
     const wrapper = mountPreferences();
 
     await wrapper.get('[data-testid="app-theme-select"]').setValue("light");
     await wrapper.get('[data-testid="code-theme-select"]').setValue("dark");
+    await wrapper.get('[data-testid="agent-message-appearance-select"]').setValue("terminal");
 
     expect(wrapper.emitted("update")).toContainEqual(["appTheme", "light"]);
     expect(wrapper.emitted("update")).toContainEqual(["codeTheme", "dark"]);
+    expect(wrapper.emitted("update")).toContainEqual(["agentMessageAppearance", "terminal"]);
   });
 });

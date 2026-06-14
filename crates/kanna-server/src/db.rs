@@ -1081,23 +1081,6 @@ impl Db {
         Ok(())
     }
 
-    pub fn update_pipeline_item_activity(
-        &self,
-        id: &str,
-        activity: &str,
-    ) -> Result<(), rusqlite::Error> {
-        let rows_affected = self.conn.execute(
-            "UPDATE pipeline_item
-             SET activity = ?, activity_changed_at = datetime('now'), updated_at = datetime('now')
-             WHERE id = ?",
-            (activity, id),
-        )?;
-        if rows_affected == 0 {
-            return Err(rusqlite::Error::QueryReturnedNoRows);
-        }
-        Ok(())
-    }
-
     pub fn insert_task_blocker(
         &self,
         blocked_item_id: &str,

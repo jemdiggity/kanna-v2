@@ -9,6 +9,7 @@ import { macOsTextInputAttrs } from '../utils/textInput'
 import { getConfiguredDesktopAuthSession } from '../services/desktopAuthSdk'
 import type { DesktopAuthSession, DesktopAuthState } from '../services/desktopAuth'
 import type { AppThemePreference, CodeThemePreference } from '../theme/theme'
+import type { AgentMessageAppearance } from '../stores/state'
 
 useI18n()
 const { zIndex } = useModalZIndex()
@@ -41,6 +42,7 @@ defineProps<{
     defaultAgentProvider: AgentProvider
     appTheme: AppThemePreference
     codeTheme: CodeThemePreference
+    agentMessageAppearance: AgentMessageAppearance
   }
 }>()
 
@@ -232,6 +234,19 @@ defineExpose({ cycleTab })
             <option value="match">{{ $t('preferences.codeThemeMatch') }}</option>
             <option value="light">{{ $t('preferences.codeThemeLight') }}</option>
             <option value="dark">{{ $t('preferences.codeThemeDark') }}</option>
+          </select>
+        </div>
+
+        <div class="pref-row">
+          <label>{{ $t('preferences.agentMessageAppearance') }}</label>
+          <select
+            data-testid="agent-message-appearance-select"
+            :value="preferences.agentMessageAppearance"
+            @change="emit('update', 'agentMessageAppearance', ($event.target as HTMLSelectElement).value)"
+          >
+            <option value="chat">{{ $t('preferences.agentMessageAppearanceChat') }}</option>
+            <option value="log">{{ $t('preferences.agentMessageAppearanceLog') }}</option>
+            <option value="terminal">{{ $t('preferences.agentMessageAppearanceTerminal') }}</option>
           </select>
         </div>
 

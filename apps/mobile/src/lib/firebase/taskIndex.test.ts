@@ -1,17 +1,21 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 const firestoreMocks = vi.hoisted(() => ({
   collection: vi.fn((...segments: unknown[]) => ({ kind: "collection", segments })),
+  connectFirestoreEmulator: vi.fn(),
   getDocs: vi.fn(),
   getFirestore: vi.fn(() => ({ kind: "firestore" })),
+  onSnapshot: vi.fn(),
   query: vi.fn((collectionRef: unknown, ...constraints: unknown[]) => ({ kind: "query", collectionRef, constraints })),
   where: vi.fn((field: string, op: string, value: unknown) => ({ kind: "where", field, op, value })),
 }));
 
 vi.mock("firebase/firestore", () => ({
   collection: (...args: unknown[]) => firestoreMocks.collection(...args),
+  connectFirestoreEmulator: (...args: unknown[]) => firestoreMocks.connectFirestoreEmulator(...args),
   getDocs: (...args: unknown[]) => firestoreMocks.getDocs(...args),
   getFirestore: (...args: unknown[]) => firestoreMocks.getFirestore(...args),
+  onSnapshot: (...args: unknown[]) => firestoreMocks.onSnapshot(...args),
   query: (...args: unknown[]) => firestoreMocks.query(...args),
   where: (...args: unknown[]) => firestoreMocks.where(...args),
 }));
@@ -19,6 +23,18 @@ vi.mock("firebase/firestore", () => ({
 import { createFirestoreTaskIndex, mapCloudTaskSnapshot, sortCloudTasks } from "./taskIndex";
 
 describe("cloud task index", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.resetModules();
+    firestoreMocks.collection.mockClear();
+    firestoreMocks.connectFirestoreEmulator.mockClear();
+    firestoreMocks.getDocs.mockReset();
+    firestoreMocks.getFirestore.mockClear();
+    firestoreMocks.onSnapshot.mockClear();
+    firestoreMocks.query.mockClear();
+    firestoreMocks.where.mockClear();
+  });
+
   it("maps cloud snapshots into mobile task summaries", () => {
     expect(
       mapCloudTaskSnapshot({
@@ -135,5 +151,21 @@ describe("cloud task index", () => {
       ownerLocalTaskId: "task-1",
     }]);
     expect(firestoreMocks.getDocs).toHaveBeenCalledTimes(2);
+  });
+
+  it("connects the default Firestore client to the configured emulator", async () => {
+    vi.stubEnv("EXPO_PUBLIC_FIREBASE_FIRESTORE_EMULATOR_HOST", "172.16.0.193");
+    vi.stubEnv("EXPO_PUBLIC_FIREBASE_FIRESTORE_EMULATOR_PORT", "8437");
+    firestoreMocks.getDocs.mockResolvedValueOnce({ docs: [] });
+
+    const { createFirestoreTaskIndex: createIndex } = await import("./taskIndex");
+    await createIndex().listRecentTasks("user-1");
+
+    expect(firestoreMocks.getFirestore).toHaveBeenCalledTimes(1);
+    expect(firestoreMocks.connectFirestoreEmulator).toHaveBeenCalledWith(
+      { kind: "firestore" },
+      "172.16.0.193",
+      8437
+    );
   });
 });

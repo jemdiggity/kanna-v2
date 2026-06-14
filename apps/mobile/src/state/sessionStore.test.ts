@@ -161,6 +161,24 @@ describe("createSessionStore", () => {
     expect(publishes).toBe(0);
   });
 
+  it("deduplicates task lists by id before publishing state", () => {
+    const store = createSessionStore();
+    const task = {
+      id: "cloud:desktop-1:repo-1:task-1",
+      repoId: "repo-1",
+      title: "foobar",
+      stage: "in progress"
+    };
+
+    store.setRecentTasks([task, { ...task }]);
+    store.setRepoTasks([task, { ...task }, { ...task }]);
+    store.setSearchResults("foobar", [task, { ...task }]);
+
+    expect(store.getState().recentTasks.map((item) => item.id)).toEqual([task.id]);
+    expect(store.getState().repoTasks.map((item) => item.id)).toEqual([task.id]);
+    expect(store.getState().searchResults.map((item) => item.id)).toEqual([task.id]);
+  });
+
   it("persists the signed-in auth user snapshot for reload", () => {
     const store = createSessionStore();
 

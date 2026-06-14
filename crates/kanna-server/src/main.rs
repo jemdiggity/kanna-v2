@@ -463,7 +463,7 @@ async fn run_relay_loop(
                                         crate::ksp::handle_tungstenite_stream(
                                             socket,
                                             tunnel_state,
-                                            crate::ksp::AuthMode::RequireCredential,
+                                            relay_tunnel_ksp_auth_mode(),
                                         )
                                         .await;
                                         log::info!("Relay tunnel {} closed", tunnel_id);
@@ -603,6 +603,10 @@ fn relay_error_event(session_id: &str, message: String) -> RelayMessage {
             "message": message,
         }),
     }
+}
+
+fn relay_tunnel_ksp_auth_mode() -> crate::ksp::AuthMode {
+    crate::ksp::AuthMode::AllowEmpty
 }
 
 async fn send_relay_event(sink: &Arc<Mutex<relay_client::WsSink>>, event: RelayMessage) -> bool {
@@ -805,5 +809,10 @@ mod tests {
             }
             other => panic!("expected terminal_output relay event, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn relay_tunnel_ksp_auth_is_already_satisfied_by_relay() {
+        assert_eq!(relay_tunnel_ksp_auth_mode(), crate::ksp::AuthMode::AllowEmpty);
     }
 }
