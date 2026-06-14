@@ -14,8 +14,8 @@ function getStorageKey(sessionId: string): string {
 export function saveCachedTerminalState(sessionId: string, state: CachedTerminalState): void {
   try {
     localStorage.setItem(getStorageKey(sessionId), JSON.stringify(state));
-  } catch {
-    // Best-effort cache: ignore storage quota or availability failures.
+  } catch (error) {
+    console.debug("[terminal-state-cache] failed to save cached terminal state:", error);
   }
 }
 
@@ -33,7 +33,8 @@ export function loadCachedTerminalState(sessionId: string): CachedTerminalState 
       return null;
     }
     return parsed;
-  } catch {
+  } catch (error) {
+    console.debug("[terminal-state-cache] failed to parse cached terminal state:", error);
     return null;
   }
 }

@@ -60,6 +60,7 @@ import { isTaskTearingDown } from "./taskStages";
 import { isTaskSelectedInAnyWindow } from "./windowSelection";
 import { resolveDbName } from "./db";
 import { readRepoConfig, requireService, type CreateItemOptions, type StoreContext, type WorktreeBootstrapResult } from "./state";
+import { debugLog } from "../utils/debugLog";
 
 const INSTANCE_SCOPED_WORKTREE_ENV_KEYS = [
   "KANNA_TMUX_SESSION",
@@ -121,13 +122,17 @@ export async function collectTeardownCommands(item: PipelineItem, repo: Repo): P
   if (item.display_name) {
     try {
       const tasksDir = `${repo.path}/.kanna/tasks`;
-      const entries = await invoke<string[]>("list_dir", { path: tasksDir }).catch(() => [] as string[]);
+      const entries = await invoke<string[]>("list_dir", { path: tasksDir }).catch((error) => {
+        console.debug("[store] no custom task teardown directory:", error);
+        return [] as string[];
+      });
       for (const entry of entries) {
         const agentMdPath = `${tasksDir}/${entry}/agent.md`;
         let content: string;
         try {
           content = await invoke<string>("read_text_file", { path: agentMdPath });
-        } catch {
+        } catch (error) {
+          console.debug(`[store] failed to read custom task teardown config ${agentMdPath}:`, error);
           continue;
         }
         const config = parseAgentMd(content, entry);
@@ -418,7 +423,7 @@ export function createTasksApi(
         await markSetupFailed(error, "[store] failed to read repo config or create worktree:", context.tt("toasts.worktreeFailed"));
         return;
       }
-      console.log(`[perf:setup] readConfig+createWorktree: ${(performance.now() - s1).toFixed(1)}ms`);
+      debugLog(`[perf:setup] readConfig+createWorktree: ${(performance.now() - s1).toFixed(1)}ms`);
 
       s1 = performance.now();
       try {
@@ -434,7 +439,7 @@ export function createTasksApi(
         await markSetupFailed(error, "[store] task port allocation failed:", `${context.tt("toasts.agentStartFailed")}: ${error instanceof Error ? error.message : error}`);
         return;
       }
-      console.log(`[perf:setup] portAllocation: ${(performance.now() - s1).toFixed(1)}ms`);
+      debugLog(`[perf:setup] portAllocation: ${(performance.now() - s1).toFixed(1)}ms`);
 
       s1 = performance.now();
       try {
@@ -448,7 +453,10 @@ export function createTasksApi(
         }
 
         if (agentType !== "pty") {
-          const inheritedPath = await invoke<string>("read_env_var", { name: "PATH" }).catch(() => null);
+          const inheritedPath = await invoke<string>("read_env_var", { name: "PATH" }).catch((error) => {
+            console.debug("[store] PATH not available while creating SDK task env:", error);
+            return null;
+          });
           const sdkBaseEnv = buildWorktreeSessionEnv({
             worktreePath,
             repoConfig,
@@ -463,9 +471,15 @@ export function createTasksApi(
               appDataDir: await invoke<string>("get_app_data_dir"),
               socketPath: await invoke<string>("get_pipeline_socket_path"),
               serverBaseUrl: resolveKannaServerBaseUrl(
-                await invoke<string>("read_env_var", { name: "KANNA_MOBILE_SERVER_PORT" }).catch(() => null),
+                await invoke<string>("read_env_var", { name: "KANNA_MOBILE_SERVER_PORT" }).catch((error) => {
+                  console.debug("[store] KANNA_MOBILE_SERVER_PORT not set while creating SDK task env:", error);
+                  return null;
+                }),
               ),
-              kannaCliPath: await invoke<string>("which_binary", { name: "kanna-cli" }).catch(() => null),
+              kannaCliPath: await invoke<string>("which_binary", { name: "kanna-cli" }).catch((error) => {
+                console.debug("[store] kanna-cli not available while creating SDK task env:", error);
+                return null;
+              }),
               path: sdkBaseEnv.PATH ?? inheritedPath,
             }),
           };
@@ -554,11 +568,11 @@ export function createTasksApi(
         );
         return;
       }
-      console.log(`[perf:setup] spawnSession: ${(performance.now() - s1).toFixed(1)}ms`);
+      debugLog(`[perf:setup] spawnSession: ${(performance.now() - s1).toFixed(1)}ms`);
 
       s1 = performance.now();
       finishPendingSetup();
-      console.log("[tasks:createItem] setup selection policy", {
+      debugLog("[tasks:createItem] setup selection policy", {
         taskId: id,
         stage: opts?.stage,
         selectOnCreate: opts?.selectOnCreate,
@@ -566,9 +580,9 @@ export function createTasksApi(
       });
       if (opts?.selectOnCreate !== false) {
         await requireService(context.services.selectItem, "selectItem")(id);
-        console.log(`[perf:setup] selectItem: ${(performance.now() - s1).toFixed(1)}ms`);
+        debugLog(`[perf:setup] selectItem: ${(performance.now() - s1).toFixed(1)}ms`);
       } else {
-        console.log("[tasks:createItem] skipped setup auto-select", {
+        debugLog("[tasks:createItem] skipped setup auto-select", {
           taskId: id,
           selectedAfterSkip: context.state.selectedItemId.value,
         });
@@ -580,7 +594,7 @@ export function createTasksApi(
           data: encodeDaemonInput("\r"),
         });
       }
-      console.log(`[perf:setup] TOTAL (background): ${(performance.now() - s0).toFixed(1)}ms`);
+      debugLog(`[perf:setup] TOTAL (background): ${(performance.now() - s0).toFixed(1)}ms`);
     } finally {
       finishPendingSetup();
       await requireService(context.services.syncTaskStatusesFromDaemon, "syncTaskStatusesFromDaemon")();
@@ -605,7 +619,7 @@ export function createTasksApi(
     const requestedAgentProviders = customTaskAgentProvider ?? opts?.agentProvider;
     const requestedModel = customTaskModel ?? opts?.model;
     const displayName = opts?.customTask?.name ?? opts?.displayName ?? null;
-    console.log("[tasks:createItem] start", {
+    debugLog("[tasks:createItem] start", {
       taskId: id,
       repoId,
       agentType: effectiveAgentType,
@@ -648,11 +662,12 @@ export function createTasksApi(
       try {
         repoConfig = await readRepoConfig(repoPath);
         pipelineName = repoConfig.pipeline ?? "default";
-      } catch {
+      } catch (error) {
+        console.debug("[store] no repo config while creating task; using default pipeline:", error);
         pipelineName = "default";
       }
     }
-    console.log(`[perf:createItem] readRepoConfig: ${(performance.now() - t1).toFixed(1)}ms`);
+    debugLog(`[perf:createItem] readRepoConfig: ${(performance.now() - t1).toFixed(1)}ms`);
 
     let firstStageName = opts?.stage ?? "in progress";
     let pipelinePrompt = effectivePrompt;
@@ -682,12 +697,13 @@ export function createTasksApi(
     } catch (error) {
       console.error("[store] failed to load pipeline definition:", error);
     }
-    console.log(`[perf:createItem] loadPipeline+loadAgent: ${(performance.now() - t1).toFixed(1)}ms`);
+    debugLog(`[perf:createItem] loadPipeline+loadAgent: ${(performance.now() - t1).toFixed(1)}ms`);
 
     if (Object.keys(repoConfig).length === 0) {
       try {
         repoConfig = await readRepoConfig(repoPath);
-      } catch {
+      } catch (error) {
+        console.debug("[store] no repo config while creating task; using empty config:", error);
         repoConfig = {};
       }
     }
@@ -744,7 +760,7 @@ export function createTasksApi(
             if (!baseRef) {
               throw new Error("No valid base branch selected");
             }
-            console.log(`[perf:createItem] git base_ref: ${(performance.now() - t1).toFixed(1)}ms`);
+            debugLog(`[perf:createItem] git base_ref: ${(performance.now() - t1).toFixed(1)}ms`);
 
             t1 = performance.now();
             await insertPipelineItem(context.requireDb(), {
@@ -774,15 +790,19 @@ export function createTasksApi(
             }
           } catch (error) {
             if (pipelineItemInserted) {
-              await context.requireDb().execute("DELETE FROM pipeline_item WHERE id = ?", [id]).catch(() => undefined);
+              await context.requireDb().execute("DELETE FROM pipeline_item WHERE id = ?", [id]).catch((cleanupError) => {
+                console.debug("[store] failed to clean up partially inserted pipeline item:", cleanupError);
+              });
             }
-            await ports.releaseTaskPorts(id).catch(() => undefined);
+            await ports.releaseTaskPorts(id).catch((cleanupError) => {
+              console.debug("[store] failed to release ports after task creation failure:", cleanupError);
+            });
             console.error("[store] task creation failed:", error);
             const message = error instanceof Error ? error.message : String(error);
             context.toast.error(message === "No valid base branch selected" ? message : context.tt("toasts.dbInsertFailed"));
             throw error;
           }
-          console.log(`[perf:createItem] DB insert: ${(performance.now() - t1).toFixed(1)}ms`);
+          debugLog(`[perf:createItem] DB insert: ${(performance.now() - t1).toFixed(1)}ms`);
 
           await reloadSnapshot();
           const createdItem = context.state.items.value.find((candidate) => candidate.id === id);
@@ -811,17 +831,22 @@ export function createTasksApi(
                 throw error;
               });
             const awaitCloudPublish = import.meta.env.DEV
-              ? await invoke<string>("read_env_var", { name: "KANNA_E2E_AWAIT_CLOUD_PUBLISH" }).catch(() => "")
+              ? await invoke<string>("read_env_var", { name: "KANNA_E2E_AWAIT_CLOUD_PUBLISH" }).catch((error) => {
+                  console.debug("[store] E2E cloud publish await flag not set:", error);
+                  return "";
+                })
               : "";
             if (awaitCloudPublish === "1") {
               await publishPromise;
             } else {
-              void publishPromise.catch(() => undefined);
+              void publishPromise.catch((error) => {
+                console.debug("[cloud] async publish task snapshot failed after non-awaited path:", error);
+              });
             }
           }
-          console.log(`[perf:createItem] reload -> waiting for items refresh (id=${id})`);
-          console.log(`[perf:createItem] TOTAL (modal → reload): ${(performance.now() - t0).toFixed(1)}ms`);
-          console.log("[tasks:createItem] inserted and reloaded", {
+          debugLog(`[perf:createItem] reload -> waiting for items refresh (id=${id})`);
+          debugLog(`[perf:createItem] TOTAL (modal → reload): ${(performance.now() - t0).toFixed(1)}ms`);
+          debugLog("[tasks:createItem] inserted and reloaded", {
             taskId: id,
             stage: firstStageName,
             selectOnCreate: opts?.selectOnCreate,
@@ -850,7 +875,7 @@ export function createTasksApi(
       removePendingPlaceholder();
       throw error;
     }
-    console.log("[tasks:createItem] returning", {
+    debugLog("[tasks:createItem] returning", {
       taskId: id,
       selectOnCreate: opts?.selectOnCreate,
       selectedBeforeReturn: context.state.selectedItemId.value,
@@ -1025,7 +1050,9 @@ export function createTasksApi(
           [portOffset, Object.keys(portEnv).length > 0 ? JSON.stringify(portEnv) : null, item.id],
         );
       } catch (error) {
-        await ports.releaseTaskPorts(item.id).catch(() => undefined);
+        await ports.releaseTaskPorts(item.id).catch((cleanupError) => {
+          console.debug("[store] failed to release ports after undo close allocation failure:", cleanupError);
+        });
         portAllocationFailed = true;
         console.error("[store] undo close port allocation failed:", error);
         context.toast.error(`${context.tt("toasts.agentStartFailed")}: ${error instanceof Error ? error.message : error}`);
@@ -1165,7 +1192,8 @@ export function createTasksApi(
         try {
           const defaultBranch = await invoke<string>("git_default_branch", { repoPath: repo.path });
           resolvedBaseRef = defaultBranch;
-        } catch {
+        } catch (defaultBranchError) {
+          console.debug("[store] failed to resolve default branch after fetch fallback:", defaultBranchError);
           resolvedBaseRef = null;
         }
       }

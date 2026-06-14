@@ -66,7 +66,8 @@ async function readE2eCliVersion(name: string): Promise<string | undefined> {
   const envName = `KANNA_E2E_AGENT_CLI_VERSION_${name.toUpperCase().replace(/[^A-Z0-9_]/g, "_")}`;
   try {
     return await invoke<string>("read_env_var", { name: envName });
-  } catch {
+  } catch (error) {
+    console.debug(`[main-panel] E2E CLI version override not set for ${name}:`, error);
     return undefined;
   }
 }
@@ -79,7 +80,8 @@ async function checkCli(name: string): Promise<AgentCliStatus> {
 
   try {
     await invoke("which_binary", { name });
-  } catch {
+  } catch (error) {
+    console.debug(`[main-panel] CLI binary not found: ${name}`, error);
     return { installed: false };
   }
   try {
@@ -89,7 +91,8 @@ async function checkCli(name: string): Promise<AgentCliStatus> {
       env: {},
     }) as string;
     return { installed: true, version: parseSemver(output) };
-  } catch {
+  } catch (error) {
+    console.debug(`[main-panel] failed to read CLI version for ${name}:`, error);
     return { installed: true };
   }
 }

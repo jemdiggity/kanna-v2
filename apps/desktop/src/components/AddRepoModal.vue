@@ -77,7 +77,8 @@ onMounted(async () => {
     const { homeDir: tauri_homeDir } = await import("@tauri-apps/api/path");
     const raw = await tauri_homeDir();
     homeDir.value = raw.endsWith("/") ? raw : raw + "/";
-  } catch {
+  } catch (error) {
+    console.debug("[add-repo] failed to resolve home directory; using fallback:", error);
     homeDir.value = "/Users/unknown/";
   }
   createParentDir.value = defaultReposHome(homeDir.value);
@@ -205,7 +206,8 @@ async function findAvailableName(parentDir: string, baseName: string): Promise<s
       if (!candidateExists) return candidate;
     }
     return `${baseName}-${Date.now()}`;
-  } catch {
+  } catch (error) {
+    console.debug("[add-repo] failed to enumerate available repo name; using base name:", error);
     return baseName;
   }
 }
@@ -277,11 +279,13 @@ async function inspectLocalPath(dirPath: string) {
         const remote = await invoke<string>("git_remote_url", { repoPath: canonicalDirPath });
         if (inspectionId !== localInspectVersion.value) return;
         localRemote.value = remote;
-      } catch {
+      } catch (error) {
+        console.debug("[add-repo] failed to inspect repo remote; treating as no remote:", error);
         if (inspectionId !== localInspectVersion.value) return;
         localRemote.value = "";
       }
-    } catch {
+    } catch (error) {
+      console.debug("[add-repo] failed to inspect default branch; treating path as non-git repo:", error);
       if (inspectionId !== localInspectVersion.value) return;
       localIsGitRepo.value = false;
       localBranch.value = "main";

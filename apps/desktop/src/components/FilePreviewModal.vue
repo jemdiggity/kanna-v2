@@ -147,7 +147,11 @@ watch([renderMarkdown, content, effectiveCodeTheme], async ([shouldRender, raw])
   const langMatches = raw.matchAll(/^```(\w+)/gm);
   const langs = [...new Set([...langMatches].map((m) => m[1]))];
   await Promise.all(
-    langs.map((lang) => hl.loadLanguage(lang).catch(() => {}))
+    langs.map((lang) =>
+      hl.loadLanguage(lang).catch((error: unknown) => {
+        console.debug(`[file-preview] failed to preload markdown code language "${lang}"; using text fallback:`, error);
+      })
+    )
   );
 
   renderedMarkdown.value = parser.render(raw);
@@ -165,7 +169,8 @@ async function loadFile() {
 
     try {
       await hl.loadLanguage(lang);
-    } catch {
+    } catch (error) {
+      console.debug(`[file-preview] failed to load syntax language "${lang}"; using text fallback:`, error);
       // Language not available — fall back to text
     }
 

@@ -218,7 +218,8 @@ function parseRuntimeFunctionsEndpoint(rawEndpoint: string | undefined): string 
   try {
     const url = new URL(normalized);
     return url.protocol === "http:" || url.protocol === "https:" ? normalized : null;
-  } catch {
+  } catch (error) {
+    console.debug("[firebase-config] invalid runtime functions endpoint:", error);
     return null;
   }
 }

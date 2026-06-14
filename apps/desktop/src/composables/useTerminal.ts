@@ -308,7 +308,8 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
       const exists = await invoke<boolean>("file_exists", { path: `${worktreePath}/${relativePath}` })
       fileExistsCache.set(relativePath, exists)
       return exists
-    } catch {
+    } catch (error) {
+      console.debug("[terminal] failed to check file existence; caching false:", { relativePath, error })
       fileExistsCache.set(relativePath, false)
       return false
     }
@@ -358,7 +359,9 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
     }
 
     inputWriteChain = inputWriteChain
-      .catch(() => {})
+      .catch((error) => {
+        console.debug("[terminal] previous queued input write failed; continuing queue:", { sessionId, error })
+      })
       .then(runWrite)
     return inputWriteChain
   }
@@ -875,8 +878,12 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
         cols,
         rows,
       })
-      await invoke("resize_session", { sessionId, cols: shrinkCols, rows }).catch(() => {})
-      await invoke("resize_session", { sessionId, cols, rows }).catch(() => {})
+      await invoke("resize_session", { sessionId, cols: shrinkCols, rows }).catch((error) => {
+        console.debug("[terminal][connect] shrink resize failed:", { sessionId, error })
+      })
+      await invoke("resize_session", { sessionId, cols, rows }).catch((error) => {
+        console.debug("[terminal][connect] restore resize failed:", { sessionId, error })
+      })
       return
     }
 
@@ -886,7 +893,9 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
       cols,
       rows,
     })
-    await invoke("resize_session", { sessionId, cols, rows }).catch(() => {})
+    await invoke("resize_session", { sessionId, cols, rows }).catch((error) => {
+      console.debug("[terminal][connect] resize failed:", { sessionId, error })
+    })
   }
 
   async function fetchDaemonSnapshot(): Promise<RecoverySnapshotFetchResult> {
@@ -990,7 +999,9 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
       const shouldHydrateFromSnapshot = true
       await invoke("attach_session_with_snapshot", { sessionId })
       if (paused || generation !== connectionGeneration) {
-        await invoke("detach_session", { sessionId }).catch(() => {})
+        await invoke("detach_session", { sessionId }).catch((error) => {
+          console.debug("[terminal][connect] detach after stale attach failed:", { sessionId, error })
+        })
         return
       }
       console.warn("[terminal][connect] attach:ok", {
@@ -1137,7 +1148,9 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
         }
         await invoke("attach_session_with_snapshot", { sessionId })
         if (paused || generation !== connectionGeneration) {
-          await invoke("detach_session", { sessionId }).catch(() => {})
+          await invoke("detach_session", { sessionId }).catch((error) => {
+            console.debug("[terminal][connect] detach after stale recovery attach failed:", { sessionId, error })
+          })
           return
         }
         attached = true
@@ -1496,15 +1509,20 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
     try {
       const { cols, rows } = terminal.value
       await invoke("resize_session", { sessionId, cols, rows })
-    } catch {
+    } catch (error) {
+      console.debug("[terminal] resize probe failed; respawning session:", { sessionId, error })
       // Session dead — re-spawn
       await startListening()
       return
     }
     // Session alive — just send SIGWINCH
     const { cols, rows } = terminal.value
-    await invoke("resize_session", { sessionId, cols: cols - 1, rows }).catch(() => {})
-    await invoke("resize_session", { sessionId, cols, rows }).catch(() => {})
+    await invoke("resize_session", { sessionId, cols: cols - 1, rows }).catch((error) => {
+      console.debug("[terminal] reconnect nudge shrink resize failed:", { sessionId, error })
+    })
+    await invoke("resize_session", { sessionId, cols, rows }).catch((error) => {
+      console.debug("[terminal] reconnect nudge restore resize failed:", { sessionId, error })
+    })
   }
 
   /** When a hidden terminal becomes visible again, verify the session is still
@@ -1520,7 +1538,8 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
     try {
       const { cols, rows } = terminal.value
       await invoke("resize_session", { sessionId, cols, rows })
-    } catch {
+    } catch (error) {
+      console.debug("[terminal] ensureConnected attach probe failed; reconnecting:", { sessionId, error })
       attached = false
       await startListening()
     }

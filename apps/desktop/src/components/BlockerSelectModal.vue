@@ -27,8 +27,12 @@ const inputRef = ref<HTMLInputElement | null>(null);
 const mouseMoved = ref(false);
 
 function hasTag(item: { tags: string }, tag: string): boolean {
-  try { return (JSON.parse(item.tags) as string[]).includes(tag); }
-  catch { return false; }
+  try {
+    return (JSON.parse(item.tags) as string[]).includes(tag);
+  } catch (error) {
+    console.debug("[blocker-select] failed to parse task tags:", error);
+    return false;
+  }
 }
 
 const disabledSet = computed(() => new Set(props.disabledIds || []));

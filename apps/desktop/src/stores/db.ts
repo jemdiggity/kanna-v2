@@ -1,6 +1,7 @@
 import * as tauriMock from "../tauri-mock";
 import { invoke } from "../invoke";
 import { migrateLegacyDatabaseIfNeeded } from "../composables/useBackup";
+import { debugLog } from "../utils/debugLog";
 import type { DbHandle } from "@kanna/db";
 
 interface AppliedMigrationRow {
@@ -33,7 +34,7 @@ export async function loadDatabase(): Promise<{ db: DbHandle; dbName: string }> 
     return { db, dbName };
   }
 
-  console.log("[db] using database:", dbName);
+  debugLog("[db] using database:", dbName);
   await migrateLegacyDatabaseIfNeeded(dbName);
   const { default: Database } = await import("@tauri-apps/plugin-sql");
   const db = (await Database.load(`sqlite:${dbName}`)) as unknown as DbHandle;
@@ -144,8 +145,11 @@ export async function runMigrations(db: DbHandle): Promise<void> {
   };
 
   const addColumn = async (table: string, col: string, def: string) => {
-    try { await db.execute(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`); }
-    catch { console.debug(`[db] column ${table}.${col} already exists`); }
+    try {
+      await db.execute(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`);
+    } catch (error) {
+      console.debug(`[db] column ${table}.${col} already exists:`, error);
+    }
   };
 
   await runMigration("001_default_settings", async () => {

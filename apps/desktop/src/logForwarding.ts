@@ -6,9 +6,14 @@ export function formatLogArgument(arg: unknown): string {
     return `${arg.name}: ${arg.message}${code}${stack}`;
   }
 
-  try {
-    return typeof arg === "string" ? arg : JSON.stringify(arg);
-  } catch {
-    return String(arg);
-  }
+  if (typeof arg === "string") return arg;
+
+  const seen = new WeakSet<object>();
+  return JSON.stringify(arg, (_key, value: unknown) => {
+    if (typeof value === "bigint") return value.toString();
+    if (typeof value !== "object" || value === null) return value;
+    if (seen.has(value)) return "[Circular]";
+    seen.add(value);
+    return value;
+  }) ?? String(arg);
 }

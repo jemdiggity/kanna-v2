@@ -69,7 +69,10 @@ export function useAppUpdate() {
       if (!isTauri) return false;
       if (import.meta.env.MODE === "development") return false;
 
-      const worktree = await invoke<string>("read_env_var", { name: "KANNA_WORKTREE" }).catch(() => "");
+      const worktree = await invoke<string>("read_env_var", { name: "KANNA_WORKTREE" }).catch((error) => {
+        console.debug("[app-update] KANNA_WORKTREE not set; assuming production update checks are allowed:", error);
+        return "";
+      });
       return worktree !== "1";
     })().then((enabled) => {
       updaterEnabled = enabled;

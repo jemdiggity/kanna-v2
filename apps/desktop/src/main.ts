@@ -92,24 +92,41 @@ function installFirebaseAuthIndexedDbOpenFailureForE2E(): void {
 
 if (isTauri) {
   const { invoke } = await import("@tauri-apps/api/core");
+  const originalConsoleDebug = console.debug;
+  const originalConsoleLog = console.log;
+  const originalConsoleInfo = console.info;
+  const originalConsoleWarn = console.warn;
+  const originalConsoleError = console.error;
+
+  function appendFrontendLog(message: string, onFailure: (error: unknown) => void) {
+    invoke("append_log", { message }).catch(onFailure);
+  }
 
   function forwardLog(level: string, origFn: (...args: unknown[]) => void) {
     return (...args: unknown[]) => {
       origFn.apply(console, args);
       const msg = args.map((arg) => formatLogArgument(arg)).join(" ");
-      invoke("append_log", { message: `[${level}] ${msg}` }).catch(() => {});
+      appendFrontendLog(`[${level}] ${msg}`, (error) => {
+        originalConsoleWarn("[log-forwarding] failed to append frontend log:", error);
+      });
     };
   }
 
-  console.log = forwardLog("LOG", console.log);
-  console.warn = forwardLog("WARN", console.warn);
-  console.error = forwardLog("ERROR", console.error);
+  console.debug = forwardLog("DEBUG", originalConsoleDebug);
+  console.log = forwardLog("LOG", originalConsoleLog);
+  console.info = forwardLog("INFO", originalConsoleInfo);
+  console.warn = forwardLog("WARN", originalConsoleWarn);
+  console.error = forwardLog("ERROR", originalConsoleError);
 
   window.addEventListener("error", (e) => {
-    invoke("append_log", { message: `[UNCAUGHT] ${e.message} at ${e.filename}:${e.lineno}` }).catch(() => {});
+    appendFrontendLog(`[UNCAUGHT] ${e.message} at ${e.filename}:${e.lineno}`, (error) => {
+      originalConsoleWarn("[log-forwarding] failed to append uncaught error:", error);
+    });
   });
   window.addEventListener("unhandledrejection", (e) => {
-    invoke("append_log", { message: `[UNHANDLED_REJECTION] ${e.reason}` }).catch(() => {});
+    appendFrontendLog(`[UNHANDLED_REJECTION] ${e.reason}`, (error) => {
+      originalConsoleWarn("[log-forwarding] failed to append unhandled rejection:", error);
+    });
   });
 
   window.addEventListener("contextmenu", (event) => {
@@ -119,13 +136,16 @@ if (isTauri) {
   if (import.meta.env.DEV) {
     const failFirebaseAuthIndexedDbOpen = await invoke<string>("read_env_var", {
       name: "KANNA_E2E_FIREBASE_AUTH_INDEXEDDB_OPEN_FAILURE",
-    }).catch(() => "");
+    }).catch((error) => {
+      console.debug("[main] E2E Firebase auth IndexedDB fault flag not set:", error);
+      return "";
+    });
     if (failFirebaseAuthIndexedDbOpen === "1") {
       installFirebaseAuthIndexedDbOpenFailureForE2E();
     }
   }
 } else {
-  console.log("[kanna] Running in browser mode with mock Tauri APIs");
+  console.debug("[kanna] Running in browser mode with mock Tauri APIs");
 }
 
 try {

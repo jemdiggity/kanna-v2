@@ -147,7 +147,8 @@ export async function verifyFirebaseAuthIndexedDbStorage(
 function readGlobalIndexedDb(): IDBFactory | undefined {
   try {
     return globalThis.indexedDB;
-  } catch {
+  } catch (error) {
+    console.debug("[cloud] IndexedDB global is unavailable:", error);
     return undefined;
   }
 }

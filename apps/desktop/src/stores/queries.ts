@@ -1,6 +1,7 @@
 import { computed, ref, type ComputedRef, type Ref } from "vue";
 import { listPipelineItems, listRepos, type PipelineItem, type Repo } from "@kanna/db";
 import { readRepoConfig, type KannaSnapshot, type RepoSnapshotEntry, type StoreContext } from "./state";
+import { debugLog } from "../utils/debugLog";
 
 interface OptimisticItemOverlay {
   key: string;
@@ -66,14 +67,14 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
       const entries: RepoSnapshotEntry[] = [];
       const loadedItems: PipelineItem[] = [];
 
-      console.log(`[perf:items] refresh start #${runId}: repos=${loadedRepos.length}`);
+      debugLog(`[perf:items] refresh start #${runId}: repos=${loadedRepos.length}`);
 
       for (const repo of loadedRepos) {
         const repoStart = performance.now();
         const repoItems = await listPipelineItems(context.requireDb(), repo.id);
         entries.push({ repo, items: repoItems });
         loadedItems.push(...repoItems);
-        console.log(`[perf:items] refresh repo #${runId} ${repo.id}: ${(performance.now() - repoStart).toFixed(1)}ms`);
+        debugLog(`[perf:items] refresh repo #${runId} ${repo.id}: ${(performance.now() - repoStart).toFixed(1)}ms`);
 
         if (!context.state.stageOrderCache.has(repo.path)) {
           try {
@@ -81,13 +82,13 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
             if (config.stage_order) {
               context.state.stageOrderCache.set(repo.path, config.stage_order);
             }
-          } catch {
-            // ignore missing config
+          } catch (error) {
+            console.debug("[store] no repo config while refreshing stage order cache:", error);
           }
         }
       }
 
-      console.log(
+      debugLog(
         `[perf:items] refresh done #${runId}: ${(performance.now() - refreshStart).toFixed(1)}ms total, items=${loadedItems.length}`,
       );
 
@@ -97,7 +98,7 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
       for (const item of loadedItems) {
         const pending = context.state.pendingCreateVisibility.get(item.id);
         if (!pending) continue;
-        console.log(
+        debugLog(
           `[perf:createItem] items refresh -> visible: ${(performance.now() - pending.bumpAt).toFixed(1)}ms (id=${item.id})`,
         );
         context.state.pendingCreateVisibility.delete(item.id);

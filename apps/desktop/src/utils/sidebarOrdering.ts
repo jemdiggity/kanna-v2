@@ -16,7 +16,8 @@ interface SidebarOrderingOptions {
 function hasTag(item: { tags: string }, tag: string): boolean {
   try {
     return (JSON.parse(item.tags) as string[]).includes(tag);
-  } catch {
+  } catch (error) {
+    console.debug("[sidebar-ordering] failed to parse task tags:", error);
     return false;
   }
 }

@@ -101,8 +101,12 @@ type AppSidebarItem = PipelineItem & {
 };
 
 function hasTag(item: { tags: string }, tag: string): boolean {
-  try { return (JSON.parse(item.tags) as string[]).includes(tag); }
-  catch { return false; }
+  try {
+    return (JSON.parse(item.tags) as string[]).includes(tag);
+  } catch (error) {
+    console.debug("[App] failed to parse task tags:", error);
+    return false;
+  }
 }
 
 function isActivityShortcutCandidate(item: { stage?: string; teardown_started_at?: string | null }): boolean {
@@ -1237,7 +1241,7 @@ async function warmTransferSidecar() {
 }
 
 function openPeerPicker(taskId: string) {
-  console.log("[transfer] opening push-to-machine picker", { taskId });
+  console.debug("[transfer] opening push-to-machine picker", { taskId });
   selectedTransferTaskId.value = taskId;
   peerPickerMode.value = "push";
   transferPeerActionPending.value = false;
@@ -1246,7 +1250,7 @@ function openPeerPicker(taskId: string) {
 }
 
 function openPairPeerPicker() {
-  console.log("[transfer] opening pair-machine picker");
+  console.debug("[transfer] opening pair-machine picker");
   selectedTransferTaskId.value = null;
   peerPickerMode.value = "pair";
   transferPeerActionPending.value = false;
@@ -1286,9 +1290,9 @@ async function handlePairPeer(peerId: string) {
   if (transferPeerActionPending.value) return;
   try {
     transferPeerActionPending.value = true;
-    console.log("[transfer] pair-machine request started", { peerId });
+    console.debug("[transfer] pair-machine request started", { peerId });
     const result = parsePairingResult(await invoke("start_peer_pairing", { peerId }));
-    console.log("[transfer] pair-machine request completed", {
+    console.debug("[transfer] pair-machine request completed", {
       peerId,
       pairedPeerId: result.peer.id,
       pairedPeerName: result.peer.name,
@@ -1801,10 +1805,22 @@ async function openNewTaskModal(repoId?: string) {
   if (repoPath) {
     const pipelinesDir = `${repoPath}/.kanna/pipelines`;
     const [files, configContent, defaultBranch, baseBranches] = await Promise.all([
-      invoke<string[]>("list_dir", { path: pipelinesDir }).catch(() => [] as string[]),
-      invoke<string>("read_text_file", { path: `${repoPath}/.kanna/config.json` }).catch(() => ""),
-      invoke<string>("git_default_branch", { repoPath }).catch(() => ""),
-      invoke<string[]>("git_list_base_branches", { repoPath }).catch(() => [] as string[]),
+      invoke<string[]>("list_dir", { path: pipelinesDir }).catch((error) => {
+        console.debug("[App] no custom pipelines directory available for new task modal:", error);
+        return [] as string[];
+      }),
+      invoke<string>("read_text_file", { path: `${repoPath}/.kanna/config.json` }).catch((error) => {
+        console.debug("[App] no repo config available for new task modal:", error);
+        return "";
+      }),
+      invoke<string>("git_default_branch", { repoPath }).catch((error) => {
+        console.debug("[App] failed to read default branch for new task modal:", error);
+        return "";
+      }),
+      invoke<string[]>("git_list_base_branches", { repoPath }).catch((error) => {
+        console.debug("[App] failed to list base branches for new task modal:", error);
+        return [] as string[];
+      }),
     ]);
     availablePipelines.value = files
       .filter((f) => f.endsWith(".json") && f !== "schema.json")
@@ -1813,7 +1829,8 @@ async function openNewTaskModal(repoId?: string) {
       try {
         const config = parseRepoConfig(configContent);
         defaultPipelineName.value = config.pipeline;
-      } catch {
+      } catch (error) {
+        console.debug("[App] failed to parse repo config while opening new task modal:", error);
         defaultPipelineName.value = undefined;
       }
     } else {
@@ -1827,7 +1844,10 @@ async function openNewTaskModal(repoId?: string) {
     const cloudRepo = remoteSnapshot.value.repos.find((repo) => repo.id === targetRepoId);
     const remoteUrl = cloudRepo?.remote_url ?? null;
     const baseBranches = remoteUrl
-      ? await invoke<string[]>("git_list_remote_base_branches", { remoteUrl }).catch(() => [] as string[])
+      ? await invoke<string[]>("git_list_remote_base_branches", { remoteUrl }).catch((error) => {
+          console.debug("[App] failed to list remote base branches for cloud repo:", error);
+          return [] as string[];
+        })
       : [];
     availablePipelines.value = [];
     defaultPipelineName.value = undefined;
@@ -1901,13 +1921,19 @@ async function handleNewTaskSubmit(
 }
 
 async function allocateCloudRepoClonePath(remoteUrl: string, repoId: string): Promise<string> {
-  const homeDir = await invoke<string>("read_env_var", { name: "HOME" }).catch(() => "/Users/unknown");
+  const homeDir = await invoke<string>("read_env_var", { name: "HOME" }).catch((error) => {
+    console.debug("[App] failed to read HOME while allocating cloud repo clone path:", error);
+    return "/Users/unknown";
+  });
   const parentDir = defaultReposHome(homeDir);
   const baseName = sanitizeCloudRepoName(parseCloudRepoName(remoteUrl) ?? repoId.replace(/^cloud:/, ""));
   for (let i = 1; i <= 99; i++) {
     const candidateName = i === 1 ? baseName : `${baseName}-${i}`;
     const candidatePath = `${parentDir}/${candidateName}`;
-    const exists = await invoke<boolean>("file_exists", { path: candidatePath }).catch(() => false);
+    const exists = await invoke<boolean>("file_exists", { path: candidatePath }).catch((error) => {
+      console.debug("[App] failed to check candidate cloud clone path; treating as available:", error);
+      return false;
+    });
     if (!exists) return candidatePath;
   }
   return `${parentDir}/${baseName}-${Date.now()}`;
@@ -2224,7 +2250,7 @@ onMounted(async () => {
       try {
         const payload = (event as { payload?: unknown })?.payload ?? event;
         const pairing = parsePairingCompletedEvent(payload);
-        console.log("[transfer] pairing-completed event received", {
+        console.debug("[transfer] pairing-completed event received", {
           peerId: pairing.peerId,
           displayName: pairing.displayName,
         });

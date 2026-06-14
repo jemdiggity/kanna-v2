@@ -414,7 +414,8 @@ function parseJsonRecord(raw: string): Record<string, unknown> | null {
   try {
     const parsed: unknown = JSON.parse(raw);
     return isRecord(parsed) ? parsed : null;
-  } catch {
+  } catch (error) {
+    console.debug("[relay-terminal] failed to parse JSON record:", error);
     return null;
   }
 }

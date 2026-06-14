@@ -323,7 +323,10 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
         appDataDir,
         socketPath,
         serverBaseUrl: resolveKannaServerBaseUrl(
-          await invoke<string>("read_env_var", { name: "KANNA_MOBILE_SERVER_PORT" }).catch(() => null),
+          await invoke<string>("read_env_var", { name: "KANNA_MOBILE_SERVER_PORT" }).catch((error) => {
+            console.debug("[store] KANNA_MOBILE_SERVER_PORT not set while building session env:", error);
+            return null;
+          }),
         ),
         kannaCliPath: resolvedKannaCliPath,
         path: runtimePath,

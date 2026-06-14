@@ -171,7 +171,8 @@ export async function readWorkspaceSnapshot(db: DbHandle): Promise<WorkspaceSnap
         order: typeof entry?.order === "number" ? entry.order : index,
       })) : [],
     });
-  } catch {
+  } catch (error) {
+    console.debug("[windowWorkspace] failed to parse workspace snapshot:", error);
     return { windows: [] };
   }
 }

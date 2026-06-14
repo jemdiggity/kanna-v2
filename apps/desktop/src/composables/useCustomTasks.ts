@@ -40,12 +40,13 @@ export function useCustomTasks() {
             const config = await readBuiltinTaskConfig(agentMdPath, entry);
             if (config) found.set(entry, config);
             else console.warn(`[useCustomTasks] Skipped malformed built-in ${agentMdPath}`);
-          } catch {
+          } catch (error) {
+            console.debug(`[useCustomTasks] Failed to read built-in task ${agentMdPath}:`, error);
             continue;
           }
         }
-      } catch {
-        // No bundled tasks available in this runtime.
+      } catch (error) {
+        console.debug("[useCustomTasks] No bundled tasks available in this runtime:", error);
       }
 
       const tasksDir = `${repoPath}/.kanna/tasks`;
@@ -59,12 +60,13 @@ export function useCustomTasks() {
             const config = await readTaskConfig(agentMdPath, entry);
             if (config) found.set(entry, config);
             else console.warn(`[useCustomTasks] Skipped malformed ${agentMdPath}`);
-          } catch {
+          } catch (error) {
+            console.debug(`[useCustomTasks] Failed to read custom task ${agentMdPath}:`, error);
             continue;
           }
         }
-      } catch {
-        // Repo has no custom tasks; keep bundled defaults.
+      } catch (error) {
+        console.debug("[useCustomTasks] Repo has no custom tasks; keeping bundled defaults:", error);
       }
 
       if (!controller.signal.aborted) {

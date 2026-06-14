@@ -9,7 +9,8 @@ export async function isReadableDirectory(path: string): Promise<boolean> {
   try {
     await invoke<string[]>("list_dir", { path });
     return true;
-  } catch {
+  } catch (error) {
+    console.debug("[shell-cwd] directory is not readable:", { path, error });
     return false;
   }
 }

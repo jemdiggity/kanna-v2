@@ -60,11 +60,15 @@ onMounted(async () => {
     invoke("send_input", {
       sessionId,
       data: Array.from(new TextEncoder().encode(data)),
-    }).catch(() => {})
+    }).catch((error) => {
+      console.debug("[pty-test] failed to send input:", error)
+    })
   })
 
   term.onResize(({ cols, rows }) => {
-    invoke("resize_session", { sessionId, cols, rows }).catch(() => {})
+    invoke("resize_session", { sessionId, cols, rows }).catch((error) => {
+      console.debug("[pty-test] failed to resize session:", error)
+    })
   })
 
   // 4. Spawn Claude in PTY

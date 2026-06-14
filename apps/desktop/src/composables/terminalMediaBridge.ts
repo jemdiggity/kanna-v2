@@ -94,7 +94,8 @@ function parseKittyClipboardReadRequest(body: string): KittyClipboardReadRequest
       .map((value) => value.trim())
       .filter((value) => value.length > 0)
     return { mimeTypes }
-  } catch {
+  } catch (error) {
+    console.debug("[terminal-media] failed to decode clipboard MIME payload:", error)
     return null
   }
 }

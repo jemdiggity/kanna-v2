@@ -116,7 +116,8 @@ export function useTreeExplorer(rootPath: Ref<string>, repoRoot: Ref<string>) {
       try {
         const includeIgnored = showAllFiles.value;
         return await fetchDir(dir, includeIgnored);
-      } catch {
+      } catch (error) {
+        console.debug("[tree-explorer] failed to load parent entries:", error);
         return [];
       }
     },
@@ -147,7 +148,8 @@ export function useTreeExplorer(rootPath: Ref<string>, repoRoot: Ref<string>) {
       try {
         const includeIgnored = showAllFiles.value;
         return await fetchDir(absolutePath(entry.path), includeIgnored);
-      } catch {
+      } catch (error) {
+        console.debug("[tree-explorer] failed to load preview entries:", error);
         return [];
       }
     },

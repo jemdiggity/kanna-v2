@@ -44,7 +44,9 @@ function fitAndResizeRemote() {
     taskId: props.ownerTaskId,
     cols: terminal.cols,
     rows: terminal.rows,
-  }).catch(() => undefined);
+  }).catch((error) => {
+    console.debug("[cloud-terminal] failed to resize remote terminal:", error);
+  });
 }
 
 async function start() {

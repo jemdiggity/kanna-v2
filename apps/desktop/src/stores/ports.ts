@@ -2,6 +2,7 @@ import type { RepoConfig } from "@kanna/core";
 import { deleteTaskPortsForItem, listTaskPorts, listTaskPortsForItem } from "@kanna/db";
 import { formatTaskPortAllocationLog, type PortAllocationLogEntry } from "./portAllocationLog";
 import { closePipelineItemAndClearCachedTerminalState } from "./kannaCleanup";
+import { debugLog } from "../utils/debugLog";
 import type { StoreContext } from "./state";
 
 export interface AllocatedPorts {
@@ -131,7 +132,7 @@ export function createPortsStore(context: StoreContext): PortsStore {
         }
 
         if (logEntries.length > 0) {
-          console.log(formatTaskPortAllocationLog(itemId, logEntries));
+          debugLog(formatTaskPortAllocationLog(itemId, logEntries));
         }
 
         return { portEnv, firstPort };
