@@ -350,7 +350,7 @@ const invokeHandlers: Record<string, (...args: any[]) => any> = {
     pairingCode: "123456",
   }),
   // Claude agent SDK commands
-  create_agent_session: () => ({ session_id: "mock-session" }),
+  spawn_agent_session: () => ({ session_id: "mock-session" }),
   send_agent_message: () => ({}),
   abort_agent_session: () => ({}),
   destroy_agent_session: () => ({}),

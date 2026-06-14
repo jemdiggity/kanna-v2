@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { selectPreferredLanAddress } from "./desktop";
 
 const execFileAsync = promisify(execFile);
 
@@ -142,9 +143,25 @@ export async function resolvePhysicalDevice(
 
 export function buildPhysicalDeviceInstallCommand(
   deviceUdid: string,
-  metroPort: number
+  metroPort: number,
+  resolvePackagerHostname: () => string | undefined = selectPreferredLanAddress
 ): string {
-  return `RCT_METRO_PORT=${metroPort} pnpm --dir apps/mobile ios --device ${deviceUdid} --no-bundler`;
+  // Pin REACT_NATIVE_PACKAGER_HOSTNAME to the Mac's LAN IP so the dev build
+  // bakes a reachable Metro host. Without it RN defaults to 127.0.0.1, which
+  // on the phone is the phone itself — producing "No script URL provided" and
+  // a blank app that never mounts the shell.
+  //
+  // Pass --port (the worktree's Kanna-allocated KANNA_MOBILE_PORT, near the
+  // .kanna/config.json base) so `expo run:ios` launches the dev build connected
+  // to THIS worktree's Metro. expo run:ios otherwise targets its default 8081,
+  // which is not where kd runs Metro — the app then launches against an empty
+  // port and shows "No script URL provided". `expo run:ios` auto-skips its own
+  // bundler when it detects the dev server already running on that port.
+  const packagerHostname = resolvePackagerHostname();
+  const hostPrefix = packagerHostname
+    ? `REACT_NATIVE_PACKAGER_HOSTNAME=${packagerHostname} `
+    : "";
+  return `${hostPrefix}pnpm --dir apps/mobile ios --device ${deviceUdid} --port ${metroPort}`;
 }
 
 export async function assertPhysicalDeviceAppInstalled(

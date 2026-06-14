@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "kanna-mcp": {
+      "command": "cargo",
+      "args": ["run", "-p", "kanna-mcp", "--quiet", "--", "serve"],
+      "env": {
+        "KANNA_SERVER_BASE_URL": "http://127.0.0.1:48120"
+      }
+    },
+    "kd-mcp": {
+      "command": "./tools/kd/bin/kd-mcp",
+      "args": []
+    }
+  }
+}

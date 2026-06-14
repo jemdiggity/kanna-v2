@@ -1,5 +1,9 @@
 import type { CreateTaskResponse, TaskSummary } from "../lib/api/types";
-import type { KannaClient, TaskTerminalSubscription } from "../lib/api/client";
+import type {
+  KannaClient,
+  TaskAgentSubscription,
+  TaskTerminalSubscription
+} from "../lib/api/client";
 import type { MobileAuthSession } from "../lib/firebase/auth";
 import type { MobileView, SessionStore } from "./sessionStore";
 
@@ -23,15 +27,27 @@ export interface MobileController {
   runMergeAgent(taskId: string): Promise<void>;
   advanceDesktopTaskStage(taskId: string): Promise<void>;
   sendTaskInput(taskId: string, input: string): Promise<void>;
+  sendTaskAgentPermission(taskId: string, requestId: string, decision: Parameters<TaskAgentSubscription["sendPermission"]>[1]): void;
+  interruptTaskAgent(taskId: string): void;
   closeDesktopTask(taskId: string): Promise<void>;
 }
 
 const BACKGROUND_REFRESH_INTERVAL_MS = 3_000;
 
+export interface MobileControllerOptions {
+  // Live cloud task subscription (onSnapshot). When provided and signed in,
+  // the controller reads tasks via this push stream instead of polling.
+  subscribeCloudTasks?: (
+    uid: string,
+    onUpdate: (tasks: TaskSummary[]) => void,
+  ) => () => void;
+}
+
 export function createMobileController(
   client: KannaClient,
   store: SessionStore,
-  authSession?: MobileAuthSession
+  authSession?: MobileAuthSession,
+  options: MobileControllerOptions = {}
 ): MobileController {
   let activeTaskTerminal:
     | {
@@ -39,9 +55,16 @@ export function createMobileController(
         subscription: TaskTerminalSubscription;
       }
     | null = null;
+  let activeTaskAgent:
+    | {
+        taskId: string;
+        subscription: TaskAgentSubscription;
+      }
+    | null = null;
   let backgroundRefreshTimer: ReturnType<typeof setInterval> | null = null;
   let backgroundRefreshInFlight = false;
   let authUnsubscribe: (() => void) | null = null;
+  let cloudTasksUnsubscribe: (() => void) | null = null;
   let bootstrapInFlight: Promise<void> | null = null;
 
   const setTerminalStartupError = (taskId: string, error: unknown) => {
@@ -66,13 +89,23 @@ export function createMobileController(
     activeTaskTerminal = null;
   };
 
+  const stopTaskAgent = () => {
+    activeTaskAgent?.subscription.close();
+    activeTaskAgent = null;
+  };
+
+  const stopTaskSession = () => {
+    stopTaskTerminal();
+    stopTaskAgent();
+  };
+
   const reconcileSelectedTask = () => {
     const selectedTaskId = store.getState().selectedTaskId;
     if (!selectedTaskId || findTask(selectedTaskId)) {
       return;
     }
 
-    stopTaskTerminal();
+    stopTaskSession();
     store.reconcileSelectedTask();
   };
 
@@ -134,6 +167,40 @@ export function createMobileController(
     }
   };
 
+  const startTaskAgent = (taskId: string) => {
+    if (activeTaskAgent?.taskId === taskId) {
+      return;
+    }
+
+    stopTaskSession();
+    store.clearTaskTerminal();
+    store.beginTaskAgent(taskId);
+
+    try {
+      const subscription = client.observeTaskAgent(taskId, (event) => {
+        store.applyTaskAgentStreamEvent(taskId, event);
+      });
+
+      activeTaskAgent = { taskId, subscription };
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Agent stream failed to start";
+      store.applyTaskAgentStreamEvent(taskId, { type: "error", message });
+      store.setErrorMessage(message);
+    }
+  };
+
+  const startTaskView = (taskId: string) => {
+    const task = findTask(taskId);
+    if (task?.agentType === "agent") {
+      startTaskAgent(taskId);
+    } else {
+      stopTaskAgent();
+      store.clearTaskAgent();
+      startTaskTerminal(taskId);
+    }
+  };
+
   const loadCollections = async () => {
     const [desktops, repos, recentTasks] = await Promise.all([
       client.listDesktops(),
@@ -159,6 +226,28 @@ export function createMobileController(
     store.setRepoTasks(repoTasks);
     await refreshSearchResults();
     reconcileSelectedTask();
+  };
+
+  const applyLiveCloudTasks = (tasks: TaskSummary[]) => {
+    store.setRecentTasks(tasks);
+    const selectedRepoId = store.getState().selectedRepoId;
+    store.setRepoTasks(
+      selectedRepoId ? tasks.filter((task) => task.repoId === selectedRepoId) : [],
+    );
+    void refreshSearchResults();
+    reconcileSelectedTask();
+  };
+
+  const startCloudTaskSubscription = (uid: string): boolean => {
+    if (!options.subscribeCloudTasks) return false;
+    stopCloudTaskSubscription();
+    cloudTasksUnsubscribe = options.subscribeCloudTasks(uid, applyLiveCloudTasks);
+    return true;
+  };
+
+  const stopCloudTaskSubscription = () => {
+    cloudTasksUnsubscribe?.();
+    cloudTasksUnsubscribe = null;
   };
 
   const startBackgroundRefresh = () => {
@@ -196,6 +285,9 @@ export function createMobileController(
       authUnsubscribe = authSession.subscribe((authState) => {
         const previousAuthStatus = store.getState().auth.status;
         store.setAuthState(authState);
+        if (authState.status !== "signedIn") {
+          stopCloudTaskSubscription();
+        }
         if (previousAuthStatus !== "signedIn" && authState.status === "signedIn") {
           void bootstrap().catch(fail);
         }
@@ -233,10 +325,21 @@ export function createMobileController(
         store.setConnectionMode(status.lanHost === "cloud" ? "remote" : "lan");
         store.setConnectionState("connected");
         await loadCollections();
-        startBackgroundRefresh();
+        // When connected to the cloud and signed in, read tasks via a live
+        // onSnapshot subscription. In LAN mode (including cloud→LAN fallback)
+        // keep polling — the live cloud stream would otherwise clobber LAN
+        // tasks with empty cloud data.
+        const auth = authSession?.getState();
+        const useLiveCloudTasks =
+          store.getState().connectionMode === "remote" &&
+          auth?.status === "signedIn" &&
+          startCloudTaskSubscription(auth.user.uid);
+        if (!useLiveCloudTasks) {
+          startBackgroundRefresh();
+        }
         const selectedTaskId = store.getState().selectedTaskId;
         if (selectedTaskId) {
-          startTaskTerminal(selectedTaskId);
+          startTaskView(selectedTaskId);
         }
       } catch (error) {
         fail(error);
@@ -294,7 +397,7 @@ export function createMobileController(
     async refresh() {
       store.setRefreshStatus("refreshing");
       if (store.getState().selectedTaskId) {
-        stopTaskTerminal();
+        stopTaskSession();
       }
       await this.bootstrap();
       store.setRefreshStatus(
@@ -307,10 +410,11 @@ export function createMobileController(
     },
 
     async selectDesktop(desktopId) {
-      stopTaskTerminal();
+      stopTaskSession();
       store.selectDesktop(desktopId);
       store.setSelectedTask(null);
       store.clearTaskTerminal();
+      store.clearTaskAgent();
       await this.bootstrap();
       store.setActiveView("tasks");
     },
@@ -328,13 +432,14 @@ export function createMobileController(
     openTask(taskId) {
       store.setSelectedTask(taskId);
       store.setActiveView("tasks");
-      startTaskTerminal(taskId);
+      startTaskView(taskId);
     },
 
     closeTask() {
-      stopTaskTerminal();
+      stopTaskSession();
       store.setSelectedTask(null);
       store.clearTaskTerminal();
+      store.clearTaskAgent();
     },
 
     openComposer() {
@@ -426,20 +531,40 @@ export function createMobileController(
       }
 
       try {
-        await client.sendTaskInput(taskId, encodeSubmittedTaskInput(input, findTask(taskId)));
+        const task = findTask(taskId);
+        if (task?.agentType === "agent" && activeTaskAgent?.taskId === taskId) {
+          activeTaskAgent.subscription.sendInput(input.trim());
+        } else {
+          await client.sendTaskInput(taskId, encodeSubmittedTaskInput(input, task));
+        }
         store.setErrorMessage(null);
       } catch (error) {
         fail(error);
       }
     },
 
+    sendTaskAgentPermission(taskId, requestId, decision) {
+      if (activeTaskAgent?.taskId !== taskId) {
+        return;
+      }
+      activeTaskAgent.subscription.sendPermission(requestId, decision);
+    },
+
+    interruptTaskAgent(taskId) {
+      if (activeTaskAgent?.taskId !== taskId) {
+        return;
+      }
+      activeTaskAgent.subscription.interrupt();
+    },
+
     async closeDesktopTask(taskId) {
       try {
         await client.closeTask(taskId);
-        stopTaskTerminal();
+        stopTaskSession();
         await refreshTaskCollections();
         store.setSelectedTask(null);
         store.clearTaskTerminal();
+        store.clearTaskAgent();
         store.setActiveView("tasks");
         store.setErrorMessage(null);
       } catch (error) {
@@ -454,7 +579,8 @@ function mapCreatedTask(response: CreateTaskResponse): TaskSummary {
     id: response.taskId,
     repoId: response.repoId,
     title: response.title,
-    stage: response.stage
+    stage: response.stage,
+    agentType: response.agentType ?? null
   };
 }
 

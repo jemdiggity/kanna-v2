@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { checkRequiredCommands } from "../src/runtime/doctor";
 import { buildMobileDeviceSmokeCommand, buildMobileTestCommand } from "../src/runtime/mobile-commands";
 import { getPortStatuses } from "../src/runtime/port-status";
-import { stopTmuxWindow } from "../src/runtime/tmux";
+import { startTmuxSession, stopTmuxWindow } from "../src/runtime/tmux";
 import type { CommandRunner } from "../src/runtime/process";
 
 describe("command runtime helpers", () => {
@@ -78,6 +78,39 @@ describe("command runtime helpers", () => {
       "tmux -L kanna-task list-windows -t kanna-task -F #{window_name}",
       "tmux -L kanna-task send-keys -t kanna-task:emulators C-c",
       "tmux -L kanna-task kill-window -t kanna-task:emulators"
+    ]);
+  });
+
+  it("adds missing windows when the tmux dev session is already running", async () => {
+    const calls: string[] = [];
+    const runner: CommandRunner = {
+      async run(command, args) {
+        calls.push(`${command} ${args.join(" ")}`);
+        if (args.includes("new-session")) {
+          return { exitCode: 1, stdout: "", stderr: "duplicate session: kanna-task" };
+        }
+        if (args.includes("list-windows")) {
+          return { exitCode: 0, stdout: "desktop\n", stderr: "" };
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+    };
+
+    await startTmuxSession(
+      runner,
+      { server: "kanna-task", session: "kanna-task" },
+      [
+        { name: "desktop", cwd: "/repo/apps/desktop", command: "desktop", env: {} },
+        { name: "mobile", cwd: "/repo/apps/mobile", command: "mobile", env: {} },
+        { name: "emulators", cwd: "/repo", command: "emulators", env: {} }
+      ]
+    );
+
+    expect(calls).toEqual([
+      "tmux -L kanna-task new-session -d -s kanna-task -n desktop -c /repo/apps/desktop desktop",
+      "tmux -L kanna-task list-windows -t kanna-task -F #{window_name}",
+      "tmux -L kanna-task new-window -t kanna-task -n mobile -c /repo/apps/mobile mobile",
+      "tmux -L kanna-task new-window -t kanna-task -n emulators -c /repo emulators"
     ]);
   });
 });

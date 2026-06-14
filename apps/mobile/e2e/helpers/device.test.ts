@@ -16,9 +16,19 @@ function device(name: string, udid: string): AvailablePhysicalDevice {
 }
 
 describe("selectPhysicalDevice", () => {
-  it("builds the install command with the selected Metro port", () => {
-    expect(buildPhysicalDeviceInstallCommand("00008130-001015CA1091401C", 1430)).toBe(
-      "RCT_METRO_PORT=1430 pnpm --dir apps/mobile ios --device 00008130-001015CA1091401C --no-bundler"
+  it("bakes the LAN host and points run:ios at the worktree Metro port", () => {
+    expect(
+      buildPhysicalDeviceInstallCommand("00008130-001015CA1091401C", 1430, () => "172.16.0.193")
+    ).toBe(
+      "REACT_NATIVE_PACKAGER_HOSTNAME=172.16.0.193 pnpm --dir apps/mobile ios --device 00008130-001015CA1091401C --port 1430"
+    );
+  });
+
+  it("omits the packager host prefix when no LAN address is available", () => {
+    expect(
+      buildPhysicalDeviceInstallCommand("00008130-001015CA1091401C", 1430, () => undefined)
+    ).toBe(
+      "pnpm --dir apps/mobile ios --device 00008130-001015CA1091401C --port 1430"
     );
   });
 

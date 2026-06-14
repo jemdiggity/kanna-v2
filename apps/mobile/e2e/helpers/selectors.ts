@@ -5,6 +5,7 @@ export const selectors = {
   tasksScreen: `~${MOBILE_E2E_IDS.tasksScreen}`,
   taskDetailScreen: `~${MOBILE_E2E_IDS.taskDetailScreen}`,
   taskBackButton: `~${MOBILE_E2E_IDS.taskBackButton}`,
+  agentMessageView: `~${MOBILE_E2E_IDS.agentMessageView}`,
   terminalOverlay: `~${MOBILE_E2E_IDS.terminalOverlay}`,
   accountButton: `~${MOBILE_E2E_IDS.accountButton}`,
   accountSheet: `~${MOBILE_E2E_IDS.accountSheet}`,

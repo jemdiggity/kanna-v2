@@ -9,7 +9,20 @@ const invokeMock = vi.fn();
 const listenMock = vi.fn();
 const warningToastMock = vi.fn();
 const errorToastMock = vi.fn();
+const streamClientMock = vi.hoisted(() => ({
+  getSharedStreamClient: vi.fn(),
+  onSharedStreamConnectionChange: vi.fn(),
+  resetSharedStreamClientForTests: vi.fn(),
+}));
 const eventListeners = new Map<string, ((event: any) => void)[]>();
+interface TerminalStreamHandlers {
+  onSnapshot?: (cols: number, rows: number, dataB64: string) => void;
+  onOutput: (dataB64: string) => void;
+  onSessionExit?: (code: number) => void;
+  onError?: (code: string, message: string) => void;
+}
+
+const terminalStreamHandlers = new Map<string, TerminalStreamHandlers>();
 const onWebviewDragDropEventMock = vi.fn();
 const onWindowDragDropEventMock = vi.fn();
 let nativeWebviewDragDropHandler: ((event: any) => void) | null = null;
@@ -26,6 +39,7 @@ function emitTerminalSnapshot(
   sessionId: string,
   vt = "restored scrollback",
 ) {
+  terminalStreamHandlers.get(sessionId)?.onSnapshot?.(80, 24, btoa(vt));
   const listeners = eventListeners.get("terminal_snapshot") ?? [];
   for (const listener of listeners) {
     listener({
@@ -42,6 +56,33 @@ function emitTerminalSnapshot(
         },
       },
     });
+  }
+}
+
+function installKspStreamClient(options: {
+  onAttach?: (taskId: string, handlers: TerminalStreamHandlers) => void;
+} = {}) {
+  const attachTerminal = vi.fn((taskId: string, handlers: TerminalStreamHandlers) => {
+    terminalStreamHandlers.set(taskId, handlers);
+    options.onAttach?.(taskId, handlers);
+  });
+  const sendTermInput = vi.fn();
+  const sendTermResize = vi.fn();
+  const detach = vi.fn();
+  const client = {
+    attachTerminal,
+    sendTermInput,
+    sendTermResize,
+    detach,
+  };
+  streamClientMock.getSharedStreamClient.mockResolvedValue(client);
+  return client;
+}
+
+async function flushAsyncWork(attempts = 20) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    await Promise.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 0));
   }
 }
 
@@ -158,6 +199,8 @@ vi.mock("../tauri-mock", () => ({
   mockListen: listenMock,
 }));
 
+vi.mock("./desktopStreamClient", () => streamClientMock);
+
 vi.mock("./useToast", () => ({
   useToast: () => ({
     warning: warningToastMock,
@@ -190,6 +233,7 @@ describe("useTerminal", () => {
     warningToastMock.mockReset();
     errorToastMock.mockReset();
     eventListeners.clear();
+    terminalStreamHandlers.clear();
     nativeWebviewDragDropHandler = null;
     nativeWindowDragDropHandler = null;
     isTauriMock = false;
@@ -214,6 +258,38 @@ describe("useTerminal", () => {
     terminals.length = 0;
     markTaskSwitchFirstOutputMock.mockReset();
     resetDaemonReadyObservationForTests();
+    streamClientMock.getSharedStreamClient.mockReset();
+    streamClientMock.onSharedStreamConnectionChange.mockReset();
+    streamClientMock.resetSharedStreamClientForTests.mockReset();
+    streamClientMock.getSharedStreamClient.mockResolvedValue({
+      attachTerminal: vi.fn((taskId: string, handlers: {
+        onSnapshot?: (cols: number, rows: number, dataB64: string) => void;
+        onOutput: (dataB64: string) => void;
+        onSessionExit?: (code: number) => void;
+        onError?: (code: string, message: string) => void;
+      }) => {
+        terminalStreamHandlers.set(taskId, handlers);
+        void invokeMock("attach_session_with_snapshot", { sessionId: taskId }).catch((error: unknown) => {
+          const message = error instanceof Error ? error.message : String(error);
+          handlers.onError?.("daemon", message);
+        });
+        handlers.onSnapshot?.(80, 24, btoa("restored scrollback"));
+      }),
+      sendTermInput: vi.fn((taskId: string, dataB64: string) => {
+        const binary = atob(dataB64);
+        invokeMock("send_input", {
+          sessionId: taskId,
+          data: Array.from(binary, (char) => char.charCodeAt(0)),
+        });
+      }),
+      sendTermResize: vi.fn((taskId: string, cols: number, rows: number) => {
+        invokeMock("resize_session", { sessionId: taskId, cols, rows });
+      }),
+      detach: vi.fn((taskId: string) => {
+        invokeMock("detach_session", { sessionId: taskId });
+      }),
+    });
+    streamClientMock.onSharedStreamConnectionChange.mockReturnValue(() => {});
     listenMock.mockImplementation(async (eventName: string, handler: (event: any) => void) => {
       const listeners = eventListeners.get(eventName) ?? [];
       listeners.push(handler);
@@ -250,6 +326,9 @@ describe("useTerminal", () => {
   afterEach(async () => {
     const { resetTerminalOutputSubscriptionsForTests } = await import("./useTerminal");
     resetTerminalOutputSubscriptionsForTests();
+    streamClientMock.getSharedStreamClient.mockReset();
+    streamClientMock.onSharedStreamConnectionChange.mockReset();
+    streamClientMock.resetSharedStreamClientForTests.mockReset();
     invokeMock.mockReset();
     invokeMock.mockResolvedValue(null);
     listenMock.mockReset();
@@ -259,16 +338,92 @@ describe("useTerminal", () => {
     vi.clearAllMocks();
   });
 
-  it("applies the initial task snapshot from the ordered stream without a resume step", async () => {
-    const callOrder: string[] = [];
-    const { useTerminal } = await import("./useTerminal");
-    invokeMock.mockImplementation(async (cmd: string) => {
-      callOrder.push(cmd);
-      if (cmd === "attach_session_with_snapshot") {
-        return null;
-      }
-      return null;
+  it("attaches local PTY terminals over KSP frames and sends input and resize through the stream client", async () => {
+    let terminalHandlers: {
+      onSnapshot?: (cols: number, rows: number, dataB64: string) => void;
+      onOutput: (dataB64: string) => void;
+      onSessionExit?: (code: number) => void;
+    } | null = null;
+    const attachTerminal = vi.fn((_taskId: string, handlers: NonNullable<typeof terminalHandlers>) => {
+      terminalHandlers = handlers;
+      handlers.onSnapshot?.(80, 24, btoa("restored over ksp"));
     });
+    const sendTermInput = vi.fn();
+    const sendTermResize = vi.fn();
+    const detach = vi.fn();
+    streamClientMock.getSharedStreamClient.mockResolvedValue({
+      attachTerminal,
+      sendTermInput,
+      sendTermResize,
+      detach,
+    });
+
+    const { useTerminal } = await import("./useTerminal");
+    const TestHarness = defineComponent({
+      setup() {
+        const { init, startListening } = useTerminal(
+          "session-1",
+          {
+            cwd: "/tmp/task",
+            prompt: "hello",
+            spawnFn: async () => {},
+          },
+          {
+            agentProvider: "claude",
+            worktreePath: "/tmp/task",
+          },
+        );
+
+        return { init, startListening };
+      },
+      render() {
+        return h("div");
+      },
+    });
+
+    const wrapper = mount(TestHarness);
+    const terminalElement = document.createElement("div");
+    Object.defineProperty(terminalElement, "offsetWidth", { configurable: true, value: 800 });
+    Object.defineProperty(terminalElement, "offsetHeight", { configurable: true, value: 600 });
+    terminalElement.querySelector = vi.fn(() => null) as typeof terminalElement.querySelector;
+    terminalElement.closest = vi.fn(() => null) as typeof terminalElement.closest;
+    wrapper.vm.init(terminalElement);
+
+    await wrapper.vm.startListening();
+
+    const terminal = terminals[0];
+    expect(terminal).toBeDefined();
+    expect(attachTerminal).toHaveBeenCalledWith("session-1", expect.objectContaining({
+      onOutput: expect.any(Function),
+    }));
+    expect(listenMock).not.toHaveBeenCalledWith("terminal_output", expect.any(Function));
+    expect(invokeMock).not.toHaveBeenCalledWith("attach_session_with_snapshot", expect.anything());
+
+    const onData = terminal.onData.mock.calls[0]?.[0];
+    expect(onData).toBeDefined();
+    onData("x");
+    await waitForQueuedInputFlush();
+    expect(sendTermInput).toHaveBeenCalledWith("session-1", btoa("x"));
+
+    const onResize = terminal.onResize.mock.calls[0]?.[0];
+    expect(onResize).toBeDefined();
+    onResize({ cols: 100, rows: 32 });
+    expect(sendTermResize).toHaveBeenCalledWith("session-1", 100, 32);
+
+    terminalHandlers?.onOutput(btoa("live over ksp"));
+    expect(terminal.write).toHaveBeenCalledWith(expect.any(Uint8Array));
+
+    wrapper.unmount();
+    expect(detach).toHaveBeenCalledWith("session-1", "terminal");
+  });
+
+  it("applies the initial task snapshot from the ordered stream without a resume step", async () => {
+    const client = installKspStreamClient({
+      onAttach: (_taskId, handlers) => {
+        handlers.onSnapshot?.(80, 24, btoa("restored scrollback"));
+      },
+    });
+    const { useTerminal } = await import("./useTerminal");
 
     const TestHarness = defineComponent({
       setup() {
@@ -300,60 +455,22 @@ describe("useTerminal", () => {
     terminalElement.closest = vi.fn(() => null) as typeof terminalElement.closest;
     wrapper.vm.init(terminalElement);
 
-    const startPromise = wrapper.vm.startListening();
+    await wrapper.vm.startListening();
+
     const terminal = terminals[0];
     expect(terminal).toBeDefined();
-    for (let attempt = 0; attempt < 10 && terminal.pendingStringWrites.length === 0; attempt += 1) {
-      await Promise.resolve();
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    }
-    let startSettled = false;
-    startPromise.finally(() => {
-      startSettled = true;
-    });
-    for (let attempt = 0; attempt < 50 && !startSettled; attempt += 1) {
-      while (terminal.pendingStringWrites.length > 0) {
-        terminal.flushNextStringWrite();
-        await Promise.resolve();
-      }
-      await Promise.resolve();
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    }
-    await startPromise;
 
-    const snapshotListeners = eventListeners.get("terminal_snapshot") ?? [];
-    expect(snapshotListeners).toHaveLength(1);
-
-    snapshotListeners[0]({
-      payload: {
-        session_id: "session-1",
-        snapshot: {
-          version: 1,
-          rows: 24,
-          cols: 80,
-          cursor_row: 0,
-          cursor_col: 0,
-          cursor_visible: true,
-          vt: "restored scrollback",
-        },
-      },
-    });
-
-    for (let attempt = 0; attempt < 10 && terminal.pendingStringWrites.length === 0; attempt += 1) {
-      await Promise.resolve();
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    }
-    while (terminal.pendingStringWrites.length > 0) {
-      terminal.flushNextStringWrite();
-      await Promise.resolve();
-    }
-
-    expect(callOrder).toEqual([
-      "attach_session_with_snapshot",
-      "resize_session",
-      "resize_session",
-    ]);
+    expect(client.attachTerminal).toHaveBeenCalledWith("session-1", expect.objectContaining({
+      onSnapshot: expect.any(Function),
+      onOutput: expect.any(Function),
+    }));
+    expect(client.sendTermResize).toHaveBeenCalledTimes(2);
+    expect(client.sendTermResize).toHaveBeenNthCalledWith(1, "session-1", 79, 24);
+    expect(client.sendTermResize).toHaveBeenNthCalledWith(2, "session-1", 80, 24);
+    expect(invokeMock).not.toHaveBeenCalledWith("attach_session_with_snapshot", expect.anything());
+    expect(invokeMock).not.toHaveBeenCalledWith("resume_session_stream", expect.anything());
     expect(terminal.reset).toHaveBeenCalledTimes(1);
+    expect(terminal.pendingStringWrites.some((write) => write.data === "restored scrollback")).toBe(true);
   });
 
   it("updates xterm theme when the effective code theme changes", async () => {
@@ -458,14 +575,18 @@ describe("useTerminal", () => {
     ]);
   });
 
-  it("waits for daemon_ready before respawning a task terminal when scrollback exists but the PTY is gone", async () => {
+  it("respawns a task terminal from a KSP missing-session error when recovery scrollback exists", async () => {
     const spawnFn = vi.fn(async () => {});
     const { useTerminal } = await import("./useTerminal");
+    const client = installKspStreamClient({
+      onAttach: (_taskId, handlers) => {
+        if (client.attachTerminal.mock.calls.length > 1) {
+          handlers.onSnapshot?.(80, 24, btoa("fresh session output"));
+        }
+      },
+    });
 
     invokeMock.mockImplementation(async (cmd: string) => {
-      if (cmd === "file_exists") {
-        return true;
-      }
       if (cmd === "get_session_recovery_state") {
         return {
           serialized: "restored scrollback",
@@ -478,13 +599,6 @@ describe("useTerminal", () => {
           sequence: 7,
         };
       }
-      if (cmd === "attach_session_with_snapshot") {
-        if (spawnFn.mock.calls.length === 0) {
-          throw new AppError("session not found: session-1", "session_not_found");
-        }
-        emitTerminalSnapshot("session-1");
-        return null;
-      }
       return null;
     });
 
@@ -518,42 +632,21 @@ describe("useTerminal", () => {
     terminalElement.closest = vi.fn(() => null) as typeof terminalElement.closest;
     wrapper.vm.init(terminalElement);
 
-    const startPromise = wrapper.vm.startListening();
+    await wrapper.vm.startListening();
     const terminal = terminals[0];
     expect(terminal).toBeDefined();
-
-    for (let attempt = 0; attempt < 10 && terminal.pendingStringWrites.length === 0; attempt += 1) {
-      await Promise.resolve();
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    }
-
-    while (terminal.pendingStringWrites.length > 0) {
-      terminal.flushNextStringWrite();
-      await Promise.resolve();
-    }
-    await startPromise;
 
     expect(spawnFn).not.toHaveBeenCalled();
     expect(warningToastMock).not.toHaveBeenCalled();
 
-    const daemonReadyListeners = eventListeners.get("daemon_ready") ?? [];
-    expect(daemonReadyListeners).toHaveLength(1);
-    daemonReadyListeners[0]({ payload: {} });
-
-    for (let attempt = 0; attempt < 20 && (spawnFn.mock.calls.length === 0 || warningToastMock.mock.calls.length === 0); attempt += 1) {
-      while (terminal.pendingStringWrites.length > 0) {
-        terminal.flushNextStringWrite();
-        await Promise.resolve();
-      }
-      await Promise.resolve();
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    }
+    terminalStreamHandlers.get("session-1")?.onError?.("session_not_found", "session not found: session-1");
+    await flushAsyncWork();
 
     expect(warningToastMock).toHaveBeenCalledWith("toasts.sessionRespawnedWithScrollback");
     expect(errorToastMock).not.toHaveBeenCalled();
     expect(spawnFn).toHaveBeenCalledTimes(1);
-    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === "attach_session_with_snapshot")).toHaveLength(3);
-    expect(terminal.write).toHaveBeenCalledWith("restored scrollback", expect.any(Function));
+    expect(client.attachTerminal).toHaveBeenCalledTimes(2);
+    expect(terminal.write).toHaveBeenCalledWith("restored scrollback");
     expect(
       terminal.write.mock.calls.some(
         ([data]) =>
@@ -566,11 +659,15 @@ describe("useTerminal", () => {
   it("does not block task respawn on recovery scrollback replay", async () => {
     const spawnFn = vi.fn(async () => {});
     const { useTerminal } = await import("./useTerminal");
+    const client = installKspStreamClient({
+      onAttach: (_taskId, handlers) => {
+        if (client.attachTerminal.mock.calls.length > 1) {
+          handlers.onSnapshot?.(80, 24, btoa("fresh session output"));
+        }
+      },
+    });
 
     invokeMock.mockImplementation(async (cmd: string) => {
-      if (cmd === "file_exists") {
-        return true;
-      }
       if (cmd === "get_session_recovery_state") {
         return {
           serialized: "large restored scrollback",
@@ -583,13 +680,6 @@ describe("useTerminal", () => {
           sequence: 7,
         };
       }
-      if (cmd === "attach_session_with_snapshot") {
-        if (spawnFn.mock.calls.length === 0) {
-          throw new AppError("session not found: session-1", "session_not_found");
-        }
-        emitTerminalSnapshot("session-1", "fresh session output");
-        return null;
-      }
       return null;
     });
 
@@ -627,33 +717,27 @@ describe("useTerminal", () => {
 
     const terminal = terminals[0];
     expect(terminal).toBeDefined();
-    const daemonReadyListeners = eventListeners.get("daemon_ready") ?? [];
-    expect(daemonReadyListeners).toHaveLength(1);
-    daemonReadyListeners[0]({ payload: {} });
-
-    for (let attempt = 0; attempt < 20 && spawnFn.mock.calls.length === 0; attempt += 1) {
-      await Promise.resolve();
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    }
+    terminalStreamHandlers.get("session-1")?.onError?.("session_not_found", "session not found: session-1");
+    await flushAsyncWork();
 
     expect(terminal.pendingStringWrites.some((write) => write.data === "large restored scrollback")).toBe(true);
     expect(terminal.pendingStringWrites.some((write) => write.data === "fresh session output")).toBe(true);
-    expect(terminal.reset).toHaveBeenCalledTimes(2);
+    expect(terminal.reset).toHaveBeenCalledTimes(1);
     expect(spawnFn).toHaveBeenCalledTimes(1);
+    expect(client.attachTerminal).toHaveBeenCalledTimes(2);
     expect(warningToastMock).toHaveBeenCalledWith("toasts.sessionRespawnedWithScrollback");
   });
 
-  it("leaves a terminal message when the first task attach cannot find a live PTY", async () => {
+  it("respawns when the KSP stream reports a missing task session after initial attach", async () => {
     const spawnFn = vi.fn(async () => {});
     const { useTerminal } = await import("./useTerminal");
+    installKspStreamClient({
+      onAttach: (_taskId, handlers) => {
+        handlers.onError?.("session_not_found", "session not found: session-1");
+      },
+    });
 
     invokeMock.mockImplementation(async (cmd: string) => {
-      if (cmd === "file_exists") {
-        return false;
-      }
-      if (cmd === "attach_session_with_snapshot") {
-        throw new AppError("session not found: session-1", "session_not_found");
-      }
       if (cmd === "get_session_recovery_state") {
         return null;
       }
@@ -691,11 +775,12 @@ describe("useTerminal", () => {
     wrapper.vm.init(terminalElement);
 
     await wrapper.vm.startListening();
+    await flushAsyncWork();
 
     const terminal = terminals[0];
     expect(terminal).toBeDefined();
-    expect(spawnFn).not.toHaveBeenCalled();
-    expect(warningToastMock).not.toHaveBeenCalled();
+    expect(spawnFn).toHaveBeenCalledTimes(1);
+    expect(warningToastMock).toHaveBeenCalledWith("toasts.sessionRespawned");
     expect(errorToastMock).not.toHaveBeenCalled();
     expect(
       terminal.write.mock.calls.some(
@@ -703,24 +788,23 @@ describe("useTerminal", () => {
           typeof data === "string" &&
           data.includes("Knock, knock, Neo."),
       ),
-    ).toBe(true);
+    ).toBe(false);
   });
 
-  it("waits for daemon_ready before respawning a missing task session on first attach when the worktree still exists", async () => {
+  it("respawns a task session after a KSP handoff-lost error when the worktree still exists", async () => {
     const spawnFn = vi.fn(async () => {});
     const { useTerminal } = await import("./useTerminal");
+    const client = installKspStreamClient({
+      onAttach: (_taskId, handlers) => {
+        if (client.attachTerminal.mock.calls.length === 1) {
+          handlers.onError?.("handoff_lost", "handoff lost for session-1");
+          return;
+        }
+        handlers.onSnapshot?.(80, 24, btoa("fresh session output"));
+      },
+    });
 
     invokeMock.mockImplementation(async (cmd: string) => {
-      if (cmd === "file_exists") {
-        return true;
-      }
-      if (cmd === "attach_session_with_snapshot") {
-        if (spawnFn.mock.calls.length === 0) {
-          throw new AppError("session not found: session-1", "session_not_found");
-        }
-        emitTerminalSnapshot("session-1", "fresh session output");
-        return null;
-      }
       if (cmd === "get_session_recovery_state") {
         return null;
       }
@@ -757,32 +841,15 @@ describe("useTerminal", () => {
     terminalElement.closest = vi.fn(() => null) as typeof terminalElement.closest;
     wrapper.vm.init(terminalElement);
 
-    const startPromise = wrapper.vm.startListening();
+    await wrapper.vm.startListening();
+    await flushAsyncWork();
     const terminal = terminals[0];
     expect(terminal).toBeDefined();
 
-    await startPromise;
-
-    expect(spawnFn).not.toHaveBeenCalled();
-    expect(warningToastMock).not.toHaveBeenCalled();
-
-    const daemonReadyListeners = eventListeners.get("daemon_ready") ?? [];
-    expect(daemonReadyListeners).toHaveLength(1);
-    daemonReadyListeners[0]({ payload: {} });
-
-    for (let attempt = 0; attempt < 20 && (spawnFn.mock.calls.length === 0 || warningToastMock.mock.calls.length === 0); attempt += 1) {
-      while (terminal.pendingStringWrites.length > 0) {
-        terminal.flushNextStringWrite();
-        await Promise.resolve();
-      }
-      await Promise.resolve();
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    }
-
     expect(spawnFn).toHaveBeenCalledTimes(1);
-    expect(warningToastMock).toHaveBeenCalledWith("toasts.sessionRespawned");
+    expect(warningToastMock).toHaveBeenCalledWith("toasts.daemonHandoffRespawned");
     expect(errorToastMock).not.toHaveBeenCalled();
-    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === "attach_session_with_snapshot")).toHaveLength(3);
+    expect(client.attachTerminal).toHaveBeenCalledTimes(2);
     expect(terminal.write.mock.calls.some(([data]) => data === "fresh session output")).toBe(true);
     expect(
       terminal.write.mock.calls.some(
@@ -793,21 +860,20 @@ describe("useTerminal", () => {
     ).toBe(false);
   });
 
-  it("attaches freshly spawned task sessions from a headless terminal snapshot after daemon_ready", async () => {
+  it("attaches freshly spawned task sessions from a KSP snapshot after respawn", async () => {
     const spawnFn = vi.fn(async () => {});
     const { useTerminal } = await import("./useTerminal");
+    const client = installKspStreamClient({
+      onAttach: (_taskId, handlers) => {
+        if (client.attachTerminal.mock.calls.length === 1) {
+          handlers.onError?.("handoff_lost", "handoff lost for session-1");
+          return;
+        }
+        handlers.onSnapshot?.(80, 24, btoa("fresh session output"));
+      },
+    });
 
     invokeMock.mockImplementation(async (cmd: string) => {
-      if (cmd === "attach_session_with_snapshot") {
-        if (spawnFn.mock.calls.length === 0) {
-          throw new AppError("session not found: session-1", "session_not_found");
-        }
-        emitTerminalSnapshot("session-1", "fresh session output");
-        return null;
-      }
-      if (cmd === "file_exists") {
-        return true;
-      }
       if (cmd === "get_session_recovery_state") {
         return null;
       }
@@ -845,20 +911,10 @@ describe("useTerminal", () => {
     wrapper.vm.init(terminalElement);
 
     await wrapper.vm.startListening();
-
-    expect(spawnFn).not.toHaveBeenCalled();
-
-    const daemonReadyListeners = eventListeners.get("daemon_ready") ?? [];
-    expect(daemonReadyListeners).toHaveLength(1);
-    daemonReadyListeners[0]({ payload: {} });
-
-    for (let attempt = 0; attempt < 20 && spawnFn.mock.calls.length === 0; attempt += 1) {
-      await Promise.resolve();
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    }
+    await flushAsyncWork();
 
     expect(spawnFn).toHaveBeenCalledTimes(1);
-    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === "attach_session_with_snapshot")).toHaveLength(3);
+    expect(client.attachTerminal).toHaveBeenCalledTimes(2);
     expect(invokeMock.mock.calls.filter(([cmd]) => cmd === "resume_session_stream")).toHaveLength(0);
     expect(terminals[0]?.reset).toHaveBeenCalledTimes(1);
   });
@@ -866,16 +922,7 @@ describe("useTerminal", () => {
   it("spawns a shell terminal when no pre-warmed session exists", async () => {
     const spawnFn = vi.fn(async () => {});
     const { useTerminal } = await import("./useTerminal");
-
-    invokeMock.mockImplementation(async (cmd: string) => {
-      if (cmd === "attach_session_with_snapshot") {
-        if (spawnFn.mock.calls.length === 0) {
-          throw new Error("session not found: shell-wt-1");
-        }
-        return null;
-      }
-      return null;
-    });
+    const client = installKspStreamClient();
 
     const TestHarness = defineComponent({
       setup() {
@@ -909,23 +956,28 @@ describe("useTerminal", () => {
     expect(spawnFn).toHaveBeenCalledTimes(1);
     expect(spawnFn).toHaveBeenCalledWith("shell-wt-1", "/tmp/task", "", 80, 24);
     expect(errorToastMock).not.toHaveBeenCalled();
-    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === "attach_session_with_snapshot")).toHaveLength(2);
+    expect(client.attachTerminal).toHaveBeenCalledWith("shell-wt-1", expect.objectContaining({
+      onOutput: expect.any(Function),
+    }));
   });
 
-  it("respawns once when a previously attached task session disappears and daemon_ready fires", async () => {
-    let attachCount = 0;
-    let resolveSpawn: (() => void) | null = null;
-    let spawnCompleted = false;
-    const spawnFn = vi.fn(
-      async () =>
-        await new Promise<void>((resolve) => {
-          resolveSpawn = () => {
-            spawnCompleted = true;
-            resolve();
-          };
-        }),
-    );
+  it("respawns once when a previously attached task session disappears from the KSP stream", async () => {
+    const spawnFn = vi.fn(async () => {});
     const { useTerminal } = await import("./useTerminal");
+    const client = installKspStreamClient({
+      onAttach: (_taskId, handlers) => {
+        const attachCount = client.attachTerminal.mock.calls.length;
+        if (attachCount === 1) {
+          handlers.onSnapshot?.(80, 24, btoa("initial scrollback"));
+          return;
+        }
+        if (attachCount === 2) {
+          handlers.onError?.("session_not_found", "session not found: session-1");
+          return;
+        }
+        handlers.onSnapshot?.(80, 24, btoa("respawned scrollback"));
+      },
+    });
 
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === "get_session_recovery_state") {
@@ -939,17 +991,6 @@ describe("useTerminal", () => {
           savedAt: 1,
           sequence: 7,
         };
-      }
-      if (cmd === "attach_session_with_snapshot") {
-        attachCount += 1;
-        if (attachCount === 1) {
-          emitTerminalSnapshot("session-1");
-          return null;
-        }
-        if (!spawnCompleted) {
-          throw new AppError("session not found: session-1", "session_not_found");
-        }
-        emitTerminalSnapshot("session-1");
       }
       return null;
     });
@@ -984,66 +1025,18 @@ describe("useTerminal", () => {
     terminalElement.closest = vi.fn(() => null) as typeof terminalElement.closest;
     wrapper.vm.init(terminalElement);
 
-    const startPromise = wrapper.vm.startListening();
+    await wrapper.vm.startListening();
     const terminal = terminals[0];
     expect(terminal).toBeDefined();
 
-    for (let attempt = 0; attempt < 10 && terminal.pendingStringWrites.length === 0; attempt += 1) {
-      await Promise.resolve();
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    }
-
-    while (terminal.pendingStringWrites.length > 0) {
-      terminal.flushNextStringWrite();
-      await Promise.resolve();
-    }
-    await startPromise;
-
     const streamLostListeners = eventListeners.get("session_stream_lost") ?? [];
-    const daemonReadyListeners = eventListeners.get("daemon_ready") ?? [];
     expect(streamLostListeners).toHaveLength(1);
-    expect(daemonReadyListeners).toHaveLength(1);
 
     streamLostListeners[0]({ payload: { session_id: "session-1" } });
-
-    for (let attempt = 0; attempt < 10 && terminal.pendingStringWrites.length === 0; attempt += 1) {
-      await Promise.resolve();
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    }
-
-    terminal.flushNextStringWrite();
-
-    for (let attempt = 0; attempt < 10 && spawnFn.mock.calls.length === 0; attempt += 1) {
-      await Promise.resolve();
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    }
-
-    daemonReadyListeners[0]({ payload: {} });
-
-    for (let attempt = 0; attempt < 10; attempt += 1) {
-      await Promise.resolve();
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    }
-
-    while (terminal.pendingStringWrites.length > 0) {
-      terminal.flushNextStringWrite();
-      await Promise.resolve();
-    }
-
-    resolveSpawn?.();
-
-    for (
-      let attempt = 0;
-      attempt < 10 &&
-      (spawnFn.mock.calls.length === 0 ||
-        invokeMock.mock.calls.filter(([cmd]) => cmd === "attach_session_with_snapshot").length < 3);
-      attempt += 1
-    ) {
-      await Promise.resolve();
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    }
+    await flushAsyncWork();
 
     expect(spawnFn).toHaveBeenCalledTimes(1);
+    expect(client.attachTerminal).toHaveBeenCalledTimes(3);
     expect(warningToastMock).toHaveBeenCalledWith("toasts.sessionRespawnedWithScrollback");
   });
 
@@ -1106,19 +1099,18 @@ describe("useTerminal", () => {
       "attach_session_with_snapshot",
       "resize_session",
     ]);
-    expect(terminal.reset).toHaveBeenCalledTimes(1);
+    expect(terminal.reset).toHaveBeenCalledTimes(2);
   });
 
   it("reconnects immediately after session_stream_lost for task terminals", async () => {
-    const callOrder: string[] = [];
+    const client = installKspStreamClient({
+      onAttach: (_taskId, handlers) => {
+        handlers.onSnapshot?.(80, 24, btoa("restored copilot scrollback"));
+      },
+    });
     const { useTerminal } = await import("./useTerminal");
 
     invokeMock.mockImplementation(async (cmd: string) => {
-      callOrder.push(cmd);
-      if (cmd === "attach_session_with_snapshot") {
-        emitTerminalSnapshot("session-1", "restored copilot scrollback");
-        return null;
-      }
       if (cmd === "get_session_recovery_state") {
         return {
           serialized: "restored copilot scrollback",
@@ -1179,10 +1171,7 @@ describe("useTerminal", () => {
     }
     await startPromise;
 
-    expect(callOrder).toEqual([
-      "attach_session_with_snapshot",
-      "resize_session",
-    ]);
+    expect(client.attachTerminal).toHaveBeenCalledTimes(1);
 
     const streamLostListeners = eventListeners.get("session_stream_lost") ?? [];
     const daemonReadyListeners = eventListeners.get("daemon_ready") ?? [];
@@ -1190,24 +1179,10 @@ describe("useTerminal", () => {
     expect(daemonReadyListeners).toHaveLength(1);
 
     streamLostListeners[0]({ payload: { session_id: "session-1" } });
+    await flushAsyncWork();
 
-    for (let attempt = 0; attempt < 10 && terminal.pendingStringWrites.length === 0; attempt += 1) {
-      await Promise.resolve();
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    }
-    terminal.flushNextStringWrite();
-
-    for (let attempt = 0; attempt < 10 && callOrder.length < 5; attempt += 1) {
-      await Promise.resolve();
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    }
-
-    expect(callOrder).toEqual([
-      "attach_session_with_snapshot",
-      "resize_session",
-      "attach_session_with_snapshot",
-      "resize_session",
-    ]);
+    expect(client.attachTerminal).toHaveBeenCalledTimes(2);
+    expect(client.sendTermResize).toHaveBeenCalledTimes(2);
     expect(terminal.reset).toHaveBeenCalledTimes(2);
   });
 
@@ -1383,16 +1358,12 @@ describe("useTerminal", () => {
   });
 
   it("re-attaches during daemon turnover without depending on snapshot replay", async () => {
-    const callOrder: string[] = [];
-    const { useTerminal } = await import("./useTerminal");
-    invokeMock.mockImplementation(async (cmd: string) => {
-      callOrder.push(cmd);
-      if (cmd === "attach_session_with_snapshot") {
-        emitTerminalSnapshot("session-1", "restored copilot scrollback");
-        return null;
-      }
-      return null;
+    const client = installKspStreamClient({
+      onAttach: (_taskId, handlers) => {
+        handlers.onSnapshot?.(80, 24, btoa("restored copilot scrollback"));
+      },
     });
+    const { useTerminal } = await import("./useTerminal");
 
     const TestHarness = defineComponent({
       setup() {
@@ -1442,21 +1413,10 @@ describe("useTerminal", () => {
     expect(streamLostListeners).toHaveLength(1);
     streamLostListeners[0]({ payload: { session_id: "session-1" } });
 
-    for (let attempt = 0; attempt < 10 && callOrder.length < 6; attempt += 1) {
-      while (terminal.pendingStringWrites.length > 0) {
-        terminal.flushNextStringWrite();
-        await Promise.resolve();
-      }
-      await Promise.resolve();
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    }
+    await flushAsyncWork();
 
-    expect(callOrder).toEqual([
-      "attach_session_with_snapshot",
-      "resize_session",
-      "attach_session_with_snapshot",
-      "resize_session",
-    ]);
+    expect(client.attachTerminal).toHaveBeenCalledTimes(2);
+    expect(client.sendTermResize).toHaveBeenCalledTimes(2);
     expect(terminal.reset).toHaveBeenCalledTimes(2);
   });
 
@@ -2148,7 +2108,7 @@ describe("useTerminal", () => {
     } as unknown as KeyboardEvent;
 
     const allowed = keyHandler(keyboardEvent);
-    await Promise.resolve();
+    await waitForQueuedInputFlush();
 
     expect(allowed).toBe(false);
     expect(keyboardEvent.preventDefault).toHaveBeenCalled();
@@ -2269,13 +2229,8 @@ describe("useTerminal", () => {
     } as unknown as KeyboardEvent);
     await Promise.resolve();
 
-    const outputListener = eventListeners.get("terminal_output")?.[0];
-    outputListener?.({
-      payload: {
-        session_id: "session-1",
-        data: Array.from(new TextEncoder().encode("\u001b]5522;type=read;aW1hZ2UvcG5n\u0007")),
-      },
-    });
+    const kittyRequest = new TextEncoder().encode("\u001b]5522;type=read;aW1hZ2UvcG5n\u0007");
+    terminalStreamHandlers.get("session-1")?.onOutput(btoa(String.fromCharCode(...kittyRequest)));
 
     for (let attempt = 0; attempt < 10 && !invokeMock.mock.calls.some(([cmd]) => cmd === "send_input"); attempt += 1) {
       await Promise.resolve();
@@ -2342,7 +2297,8 @@ describe("useTerminal", () => {
     expect(terminal.scrollToLine).not.toHaveBeenCalled();
   });
 
-  it("shares one terminal output listener across mounted terminals in the window", async () => {
+  it("routes KSP terminal output to the matching mounted terminal only", async () => {
+    const client = installKspStreamClient();
     const { useTerminal } = await import("./useTerminal");
 
     const TestHarness = defineComponent({
@@ -2375,16 +2331,10 @@ describe("useTerminal", () => {
     await first.vm.startListening();
     await second.vm.startListening();
 
-    const terminalOutputListenCalls = listenMock.mock.calls.filter(([eventName]) => eventName === "terminal_output");
-    expect(terminalOutputListenCalls).toHaveLength(1);
+    expect(client.attachTerminal).toHaveBeenCalledTimes(2);
+    expect(listenMock.mock.calls.filter(([eventName]) => eventName === "terminal_output")).toHaveLength(0);
 
-    const outputListener = eventListeners.get("terminal_output")?.[0];
-    outputListener?.({
-      payload: {
-        session_id: "session-2",
-        data: Array.from(new TextEncoder().encode("streaming output")),
-      },
-    });
+    terminalStreamHandlers.get("session-2")?.onOutput(btoa("streaming output"));
 
     expect(terminals[0]?.write).not.toHaveBeenCalledWith(expect.any(Uint8Array));
     expect(terminals[1]?.write).toHaveBeenCalledWith(expect.any(Uint8Array));
@@ -2393,7 +2343,8 @@ describe("useTerminal", () => {
     second.unmount();
   });
 
-  it("pauses a kept-alive terminal by detaching and removing live output listeners", async () => {
+  it("pauses a kept-alive terminal by detaching its KSP terminal stream", async () => {
+    const client = installKspStreamClient();
     const { useTerminal } = await import("./useTerminal");
 
     const TestHarness = defineComponent({
@@ -2415,63 +2366,33 @@ describe("useTerminal", () => {
     wrapper.vm.init(terminalElement);
     await wrapper.vm.startListening();
 
-    expect(eventListeners.get("terminal_output")).toHaveLength(1);
+    expect(client.attachTerminal).toHaveBeenCalledWith("session-1", expect.objectContaining({
+      onOutput: expect.any(Function),
+    }));
 
-    const terminal = terminals[0];
-    terminal.write.mockClear();
     wrapper.vm.pause();
 
-    expect(invokeMock).toHaveBeenCalledWith("detach_session", { sessionId: "session-1" });
-    expect(eventListeners.get("terminal_output")).toHaveLength(0);
-
-    const outputListener = eventListeners.get("terminal_output")?.[0];
-    outputListener?.({
-      payload: {
-        session_id: "session-1",
-        data: Array.from(new TextEncoder().encode("hidden output")),
-      },
-    });
-
-    expect(terminal.write).not.toHaveBeenCalled();
+    expect(client.detach).toHaveBeenCalledWith("session-1", "terminal");
+    expect(eventListeners.get("terminal_output") ?? []).toHaveLength(0);
 
     wrapper.unmount();
   });
 
-  it("removes terminal output listeners that finish registering after pause", async () => {
+  it("does not attach a KSP terminal stream when startListening is paused before connect", async () => {
     const { useTerminal } = await import("./useTerminal");
-    let resolveTerminalOutputListen: ((unlisten: () => void) => void) | null = null;
-    const lateTerminalOutputUnlisten = vi.fn();
-
-    listenMock.mockImplementation((eventName: string, handler: (event: unknown) => void) => {
-      if (eventName === "terminal_output") {
-        return new Promise<() => void>((resolve) => {
-          resolveTerminalOutputListen = (unlisten) => {
-            const listeners = eventListeners.get(eventName) ?? [];
-            listeners.push(handler);
-            eventListeners.set(eventName, listeners);
-            resolve(() => {
-              unlisten();
-              const current = eventListeners.get(eventName) ?? [];
-              eventListeners.set(
-                eventName,
-                current.filter((listener) => listener !== handler),
-              );
-            });
-          };
-        });
-      }
-
-      const listeners = eventListeners.get(eventName) ?? [];
-      listeners.push(handler);
-      eventListeners.set(eventName, listeners);
-      return Promise.resolve(() => {
-        const current = eventListeners.get(eventName) ?? [];
-        eventListeners.set(
-          eventName,
-          current.filter((listener) => listener !== handler),
-        );
-      });
-    });
+    let resolveStreamClient: ((client: ReturnType<typeof installKspStreamClient>) => void) | null = null;
+    const attachTerminal = vi.fn();
+    const client = {
+      attachTerminal,
+      sendTermInput: vi.fn(),
+      sendTermResize: vi.fn(),
+      detach: vi.fn(),
+    };
+    streamClientMock.getSharedStreamClient.mockReturnValue(
+      new Promise((resolve) => {
+        resolveStreamClient = resolve;
+      }),
+    );
 
     const TestHarness = defineComponent({
       setup() {
@@ -2495,23 +2416,14 @@ describe("useTerminal", () => {
     await Promise.resolve();
     wrapper.vm.pause();
 
-    resolveTerminalOutputListen?.(lateTerminalOutputUnlisten);
+    resolveStreamClient?.(client);
     await startPromise;
 
-    expect(lateTerminalOutputUnlisten).toHaveBeenCalledTimes(1);
-    expect(eventListeners.get("terminal_output")).toHaveLength(0);
-    expect(eventListeners.get("terminal_snapshot") ?? []).toHaveLength(0);
-    expect(invokeMock).not.toHaveBeenCalledWith("attach_session_with_snapshot", { sessionId: "session-1" });
+    expect(attachTerminal).not.toHaveBeenCalled();
+    expect(eventListeners.get("terminal_output") ?? []).toHaveLength(0);
 
     const terminal = terminals[0];
     terminal.write.mockClear();
-    const outputListener = eventListeners.get("terminal_output")?.[0];
-    outputListener?.({
-      payload: {
-        session_id: "session-1",
-        data: Array.from(new TextEncoder().encode("hidden late output")),
-      },
-    });
 
     expect(terminal.write).not.toHaveBeenCalled();
 
@@ -2575,6 +2487,7 @@ describe("useTerminal", () => {
   });
 
   it("marks the first live output once per selected terminal session", async () => {
+    installKspStreamClient();
     const { useTerminal } = await import("./useTerminal");
 
     const TestHarness = defineComponent({
@@ -2608,25 +2521,8 @@ describe("useTerminal", () => {
     wrapper.vm.init(terminalElement);
     await wrapper.vm.startListening();
 
-    const outputListener = eventListeners.get("terminal_output")?.[0];
-    outputListener?.({
-      payload: {
-        session_id: "session-1",
-        data: Array.from(new TextEncoder().encode("streaming output")),
-      },
-    });
-    outputListener?.({
-      payload: {
-        session_id: "session-1",
-        data: Array.from(new TextEncoder().encode("more output")),
-      },
-    });
-    outputListener?.({
-      payload: {
-        session_id: "td-session-1",
-        data: Array.from(new TextEncoder().encode("teardown output")),
-      },
-    });
+    terminalStreamHandlers.get("session-1")?.onOutput(btoa("streaming output"));
+    terminalStreamHandlers.get("session-1")?.onOutput(btoa("more output"));
 
     expect(markTaskSwitchFirstOutputMock).toHaveBeenCalledTimes(2);
     expect(markTaskSwitchFirstOutputMock).toHaveBeenNthCalledWith(1, "session-1");

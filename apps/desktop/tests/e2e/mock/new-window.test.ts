@@ -234,12 +234,12 @@ describe("new window", () => {
     await execDb(
       client,
       "INSERT INTO pipeline_item (id, repo_id, prompt, stage, agent_type) VALUES (?, ?, ?, ?, ?)",
-      [taskAId, repoId, "Task A", "in progress", "sdk"],
+      [taskAId, repoId, "Task A", "in progress", "agent"],
     );
     await execDb(
       client,
       "INSERT INTO pipeline_item (id, repo_id, prompt, stage, agent_type) VALUES (?, ?, ?, ?, ?)",
-      [taskBId, repoId, "Task B", "in progress", "sdk"],
+      [taskBId, repoId, "Task B", "in progress", "agent"],
     );
     await callVueMethod(client, "loadItems", repoId);
     await setSelectedItem(client, taskAId);
@@ -306,12 +306,12 @@ describe("new window", () => {
     await execDb(
       client,
       "INSERT INTO pipeline_item (id, repo_id, prompt, stage, agent_type, activity, activity_changed_at, unread_at) VALUES (?, ?, ?, ?, ?, ?, datetime('now', '-10 minutes'), NULL)",
-      [idleTaskId, repoId, "Read Sync Idle", "in progress", "sdk", "idle"],
+      [idleTaskId, repoId, "Read Sync Idle", "in progress", "agent", "idle"],
     );
     await execDb(
       client,
       "INSERT INTO pipeline_item (id, repo_id, prompt, stage, agent_type, activity, activity_changed_at, unread_at) VALUES (?, ?, ?, ?, ?, ?, datetime('now', '-10 minutes'), datetime('now', '-10 minutes'))",
-      [unreadTaskId, repoId, "Read Sync Unread", "in progress", "sdk", "unread"],
+      [unreadTaskId, repoId, "Read Sync Unread", "in progress", "agent", "unread"],
     );
     await callVueMethod(client, "loadItems", repoId);
     await setSelectedItem(client, idleTaskId);
@@ -368,12 +368,12 @@ describe("new window", () => {
     await execDb(
       client,
       "INSERT INTO pipeline_item (id, repo_id, prompt, stage, agent_type) VALUES (?, ?, ?, ?, ?)",
-      [taskAId, repoId, "Task A", "in progress", "sdk"],
+      [taskAId, repoId, "Task A", "in progress", "agent"],
     );
     await execDb(
       client,
       "INSERT INTO pipeline_item (id, repo_id, prompt, stage, agent_type) VALUES (?, ?, ?, ?, ?)",
-      [taskBId, repoId, "Task B", "in progress", "sdk"],
+      [taskBId, repoId, "Task B", "in progress", "agent"],
     );
     await callVueMethod(client, "loadItems", repoId);
     await setSelectedItem(client, taskAId);
@@ -432,7 +432,7 @@ describe("new window", () => {
     await execDb(
       client,
       "INSERT INTO pipeline_item (id, repo_id, prompt, stage, agent_type) VALUES (?, ?, ?, ?, ?)",
-      [taskId, repoId, "Live Main Task", "in progress", "sdk"],
+      [taskId, repoId, "Live Main Task", "in progress", "agent"],
     );
     await callVueMethod(client, "loadItems", repoId);
     await setSelectedItem(client, taskId);
@@ -500,12 +500,12 @@ describe("new window", () => {
     await execDb(
       client,
       "INSERT INTO pipeline_item (id, repo_id, prompt, stage, agent_type) VALUES (?, ?, ?, ?, ?)",
-      [taskAId, repoId, "Task A", "in progress", "sdk"],
+      [taskAId, repoId, "Task A", "in progress", "agent"],
     );
     await execDb(
       client,
       "INSERT INTO pipeline_item (id, repo_id, prompt, stage, agent_type) VALUES (?, ?, ?, ?, ?)",
-      [taskBId, repoId, "Task B", "in progress", "sdk"],
+      [taskBId, repoId, "Task B", "in progress", "agent"],
     );
     await callVueMethod(client, "loadItems", repoId);
     await setSelectedItem(client, taskAId);

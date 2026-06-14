@@ -127,30 +127,6 @@ describe("kd CLI", () => {
     ).toThrow("--emulators and --firebase-env-from cannot be used together");
   });
 
-  it("parses dev up against the production cloud", () => {
-    expect(parseCliArgs(["dev", "up", "--cloud", "production"])).toEqual({
-      taskId: "dev.up",
-      input: {
-        mobile: false,
-        emulators: false,
-        seed: false,
-        attach: false,
-        deleteDb: false,
-        killDaemon: false,
-        cloud: "production"
-      }
-    });
-  });
-
-  it("rejects unsupported cloud targets and emulator combinations", () => {
-    expect(() => parseCliArgs(["dev", "up", "--cloud", "staging"])).toThrow(
-      "--cloud only supports 'production'"
-    );
-    expect(() => parseCliArgs(["dev", "up", "--cloud", "production", "--emulators"])).toThrow(
-      "--cloud cannot be combined with --emulators or --firebase-env-from"
-    );
-  });
-
   it("registers the dev status task", () => {
     expect(getTaskDefinition("dev.status").description).toBe("Show Kanna dev environment status.");
   });
@@ -184,18 +160,34 @@ describe("kd CLI", () => {
     expect(parseCliArgs(["mobile", "up", "--production"])).toEqual({
       taskId: "mobile.up",
       input: {
-        production: true
+        production: true,
+        staging: false
       }
     });
-    expect(() => parseCliArgs(["mobile", "up", "--staging"])).toThrow(
-      "mobile up --staging is not supported yet"
-    );
+    expect(parseCliArgs(["mobile", "up", "--staging"])).toEqual({
+      taskId: "mobile.up",
+      input: {
+        production: false,
+        staging: true
+      }
+    });
     expect(() => parseCliArgs(["mobile", "up", "--production", "--emulators"])).toThrow(
-      "mobile up only accepts --production"
+      "mobile up only accepts --production or --staging"
     );
     expect(parseCliArgs(["emulators", "up"])).toEqual({
       taskId: "emulators.up",
       input: {}
+    });
+  });
+
+  it("parses the physical-device mobile run command", () => {
+    expect(parseCliArgs(["mobile", "run", "--device"])).toEqual({
+      taskId: "mobile.run",
+      input: { device: true }
+    });
+    expect(parseCliArgs(["mobile", "doctor", "--device"])).toEqual({
+      taskId: "mobile.doctor",
+      input: { device: true }
     });
   });
 
@@ -321,9 +313,9 @@ describe("kd CLI", () => {
       taskId: "cloud.deploy",
       input: { staging: true, production: false, relay: true }
     });
-    expect(parseCliArgs(["cloud", "relay-provision"])).toEqual({
+    expect(parseCliArgs(["cloud", "relay-provision", "--staging"])).toEqual({
       taskId: "cloud.relay-provision",
-      input: {}
+      input: { staging: true, production: false }
     });
   });
 });

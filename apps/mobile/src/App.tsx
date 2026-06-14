@@ -14,7 +14,7 @@ import {
   shouldShowTopBar
 } from "./appShell";
 import { shouldRefreshOnAppStateTransition } from "./appLifecycle";
-import { createAppModel, type AppModel } from "./appModel";
+import { createAppModel, resolveForceCloud, type AppModel } from "./appModel";
 import { AccountBadge } from "./components/AccountBadge";
 import { AccountSheet } from "./components/AccountSheet";
 import { FloatingToolbar } from "./components/FloatingToolbar";
@@ -45,6 +45,7 @@ export default function App() {
   );
   const { controller, navigator } = model;
   const [accountSheetVisible, setAccountSheetVisible] = useState(false);
+  const [forceCloudEnabled, setForceCloudEnabled] = useState(resolveForceCloud());
   const taskDetailVisible =
     state.connectionState === "connected" &&
     isTaskDetailVisible(state.selectedTaskId, state.activeView);
@@ -84,10 +85,17 @@ export default function App() {
           terminalErrorMessage={state.taskTerminalErrorMessage}
           terminalOutput={state.taskTerminalOutput}
           terminalStatus={state.taskTerminalStatus}
+          agentErrorMessage={state.taskAgentErrorMessage}
+          agentEvents={state.taskAgentEvents}
+          agentStatus={state.taskAgentStatus}
           onBack={() => controller.closeTask()}
           onOpenMore={() => controller.showView("more")}
           onSendInput={(input) => {
             void controller.sendTaskInput(selectedTask.id, input);
+          }}
+          onStopAgent={() => controller.interruptTaskAgent(selectedTask.id)}
+          onResolveAgentPermission={(requestId, decision) => {
+            controller.sendTaskAgentPermission(selectedTask.id, requestId, decision);
           }}
         />
       );
@@ -252,12 +260,19 @@ export default function App() {
           connectionState={state.connectionState}
           desktopName={state.desktopName}
           errorMessage={state.errorMessage}
+          forceCloudEnabled={forceCloudEnabled}
           pairingCode={state.pairingCode}
+          showDevForceCloudToggle={__DEV__ === true}
           visible={accountSheetVisible}
           onConnectLocal={() => {
             void controller.connectLocal();
           }}
           onClose={() => setAccountSheetVisible(false)}
+          onForceCloudChange={(enabled) => {
+            setForceCloudEnabled(enabled);
+            model.setForceCloud(enabled);
+            void controller.refresh();
+          }}
           onSignIn={(email, password) => {
             void controller.signInWithEmailPassword(email, password);
           }}

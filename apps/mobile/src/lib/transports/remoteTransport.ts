@@ -1,5 +1,7 @@
 import type {
   KannaTransport,
+  TaskAgentStreamEvent,
+  TaskAgentSubscription,
   TaskTerminalStreamEvent,
   TaskTerminalSubscription,
 } from "../api/client";
@@ -39,6 +41,11 @@ export type RemoteTaskTerminalObserver = (
   listener: (event: TaskTerminalStreamEvent) => void
 ) => TaskTerminalSubscription;
 
+export type RemoteTaskAgentObserver = (
+  request: { desktopId: string; taskId: string },
+  listener: (event: TaskAgentStreamEvent) => void
+) => TaskAgentSubscription;
+
 export type RemoteTaskInputSender = (
   request: { desktopId: string; taskId: string; data: string }
 ) => Promise<void>;
@@ -69,6 +76,7 @@ export interface RemoteTransportDependencies {
   getSelectedDesktopId(): string | null;
   invokeDesktop: RemoteDesktopInvoker;
   observeTaskTerminal?: RemoteTaskTerminalObserver;
+  observeTaskAgent?: RemoteTaskAgentObserver;
   sendTaskInput?: RemoteTaskInputSender;
   listCloudTasks?: () => Promise<CloudIndexedTaskSummary[]>;
 }
@@ -87,6 +95,7 @@ export function createRemoteTransport({
   getSelectedDesktopId,
   invokeDesktop,
   observeTaskTerminal,
+  observeTaskAgent,
   sendTaskInput,
   listCloudTasks
 }: RemoteTransportDependencies): KannaTransport {
@@ -400,6 +409,93 @@ export function createRemoteTransport({
 
       const desktopId = getSelectedDesktopOrThrow(getSelectedDesktopId);
       return observeTaskTerminal({ desktopId, taskId }, listener);
+    },
+    observeTaskAgent(
+      taskId: string,
+      listener: (event: TaskAgentStreamEvent) => void
+    ): TaskAgentSubscription {
+      if (!observeTaskAgent) {
+        throw new RemoteTransportError(
+          "remote_invocation_failed",
+          "Remote agent stream transport is not available."
+        );
+      }
+
+      const route = cloudTaskRoutes.get(taskId);
+      if (route) {
+        return observeTaskAgent(route, listener);
+      }
+
+      if (listCloudTasks) {
+        let closed = false;
+        let activeSubscription: TaskAgentSubscription | null = null;
+        const pendingCommands: Array<(subscription: TaskAgentSubscription) => void> = [];
+
+        const withSubscription = (
+          command: (subscription: TaskAgentSubscription) => void
+        ) => {
+          if (closed) {
+            return;
+          }
+          if (activeSubscription) {
+            command(activeSubscription);
+          } else {
+            pendingCommands.push(command);
+          }
+        };
+
+        void resolveCloudTaskRoute(taskId)
+          .then((resolvedRoute) => {
+            if (closed) {
+              return;
+            }
+
+            const targetRoute =
+              resolvedRoute ?? {
+                desktopId: getSelectedDesktopOrThrow(getSelectedDesktopId),
+                taskId
+              };
+            activeSubscription = observeTaskAgent(targetRoute, listener);
+            for (const command of pendingCommands.splice(0)) {
+              command(activeSubscription);
+            }
+            if (closed) {
+              activeSubscription.close();
+            }
+          })
+          .catch((error) => {
+            if (closed) {
+              return;
+            }
+            listener({
+              type: "error",
+              taskId,
+              message: formatErrorMessage(error)
+            });
+          });
+
+        return {
+          close() {
+            closed = true;
+            pendingCommands.length = 0;
+            activeSubscription?.close();
+          },
+          sendInput(input: string) {
+            withSubscription((subscription) => subscription.sendInput(input));
+          },
+          sendPermission(requestId, decision) {
+            withSubscription((subscription) =>
+              subscription.sendPermission(requestId, decision)
+            );
+          },
+          interrupt() {
+            withSubscription((subscription) => subscription.interrupt());
+          }
+        };
+      }
+
+      const desktopId = getSelectedDesktopOrThrow(getSelectedDesktopId);
+      return observeTaskAgent({ desktopId, taskId }, listener);
     },
     async createPairingSession(): Promise<PairingSession> {
       throw new Error(

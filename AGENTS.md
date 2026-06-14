@@ -70,6 +70,15 @@ Tasks can be pinned to the top of their repo's task list by dragging above the p
 
 **Sending input to a running task:** Use `kanna-cli task send-input --task-id <TASK_ID> --message "Please fix the failing typecheck"` to send feedback or instructions to an already-running agent task through the desktop-backed local API. The command posts to `/v1/tasks/{task_id}/input` and appends Enter to the message when needed.
 
+### MCP task management
+
+Project-scoped MCP servers are registered in `.mcp.json` so Claude Code, Codex, and other MCP-aware agent clients launched from this repo can discover both Kanna task tools and kd development tools.
+
+- **`kanna-mcp`** exposes `kanna_*` task-management tools backed by the desktop local API at `http://127.0.0.1:48120`. Prefer these tools for task management: create tasks, fetch task status/detail, list/search tasks, close tasks, send input, request revision, advance stage, and complete stage.
+- **`kd-mcp`** exposes kd development workflow tools. Prefer these tools over shelling out when an MCP client has them available.
+
+Do not read or write the SQLite database directly for orchestration. Use `kanna-mcp` first, then `kanna-cli` as the fallback for clients without MCP support.
+
 ### Diff viewer
 
 - Modal (Cmd+D), not a tab
@@ -168,7 +177,23 @@ One concrete example: when changing the desktop sidecar build pipeline, preserve
 
 For mobile development, the same rule applies at the app level: use `./kd dev up --mobile` or `./kd mobile up` for end-to-end testing instead of launching Expo directly from `apps/mobile`. The desktop app startup path is what spawns the desktop-side `kanna-server` LAN API on the resolved `KANNA_MOBILE_SERVER_PORT`. Running `pnpm run dev -- --ios` or `expo start` inside `apps/mobile` is only appropriate for UI-only work when the desktop-side mobile server is already running elsewhere; by itself it will not start `kanna-server`, so the mobile app will boot but fail to connect to desktop data.
 
-When asked to launch the mobile app against production, use `./kd mobile up --production`. Production desktop mobile API comes from the installed `/Applications/Kanna.app/Contents/MacOS/kanna-server`, not the current worktree desktop server. The production launch path verifies `curl http://127.0.0.1:48120/v1/status`, checks `~/Library/Application Support/build.kanna/Kanna/server.toml`, starts only the mobile Metro/Expo window, and uses production Firebase/relay defaults from the installed desktop status and mobile app defaults. Plain `./kd mobile up` remains a development workflow that starts the worktree desktop plus mobile; do not assume it targets production. `./kd mobile up --staging` is not wired until there is a concrete staging desktop/server identity to verify.
+For physical iPhone dev-build launches, set `KANNA_IOS_DEVICE_UDID` or `KANNA_IOS_PHYSICAL_DEVICE_NAME`, then run `./kd mobile run --device` from a worktree. This is the canonical single-command flow: it starts or augments the worktree dev stack with Firebase emulators, relay, desktop, and a resilient dev-client Metro on `KANNA_MOBILE_PORT`; resolves the Mac LAN IP; prints the exact Metro URL (`http://<LAN-IP>:<KANNA_MOBILE_PORT>`); then runs `expo run:ios --device <udid> --port <KANNA_MOBILE_PORT>` with `REACT_NATIVE_PACKAGER_HOSTNAME=<LAN-IP>`. It reuses the kd-managed Metro and does not kill Metro after launch. Use `./kd mobile doctor --device` to run the same on-device preflight without building or launching.
+
+iOS requires a one-time Local Network permission grant for the dev build: Settings -> Privacy & Security -> Local Network -> Kanna = ON. If this permission is denied or dismissed, the app can show "Could not connect to development server" even when the Metro URL is correct. Troubleshooting map: "No script URL provided" means Metro is down or the app launched against the wrong port; "Could not connect to development server" means Metro is down, the phone cannot reach the printed LAN URL, or Local Network permission is off.
+
+Mobile native identity is keyed by `KANNA_APP_ENV` from `apps/mobile/src/mobileEnvironments.json`. The iOS bundle ids are `build.kanna.app.dev` for dev, `build.kanna.app.staging` for staging, and `build.kanna.app` for production; display names are `Kanna Dev`, `Kanna Staging`, and `Kanna`. `./kd mobile run --device` resolves the environment, then runs `expo prebuild --platform ios` with `KANNA_APP_ENV` before invoking `expo run:ios`. This is the standard Expo Continuous Native Generation path: `apps/mobile/app.config.ts` sets `ios.bundleIdentifier`, and `apps/mobile/plugins/withKannaNativeIdentity.js` applies the bundle id and display name to only the `KannaMobile` app target during prebuild. Because Expo config plugins make the Xcode changes during the same prebuild-sync path that `expo run:ios` uses before compiling, there is no runtime `project.pbxproj` patch for Expo to revert; test targets such as WebDriverAgentRunner keep their own bundle ids.
+
+When asked to launch the mobile app against production, use `./kd mobile up --production`. Production desktop mobile API comes from the installed `/Applications/Kanna.app/Contents/MacOS/kanna-server`, not the current worktree desktop server. The production launch path verifies `curl http://127.0.0.1:48120/v1/status`, checks `~/Library/Application Support/build.kanna/Kanna/server.toml`, starts only the mobile Metro/Expo window, and uses production Firebase/relay defaults from the installed desktop status and mobile app defaults. Plain `./kd mobile up` remains a development workflow that starts the worktree desktop plus mobile; do not assume it targets production.
+
+When asked to launch mobile against staging on a physical device, use `./kd mobile up --staging` from a worktree. This starts the worktree desktop with `KANNA_CLOUD_ENV=staging`, which resolves Firebase to `kanna-staging` and the relay to `wss://relay-staging.kanna.build`, then starts the staging mobile Metro/Expo window with `KANNA_APP_ENV=staging`. To use the committed persistent Buffy the Bug Slayer test identity, a human with `kanna-staging` credentials first provisions the real staging Firebase data with:
+
+```bash
+gcloud auth application-default login
+pnpm --dir services/firebase-functions exec node scripts/provision-staging-buffy-user.mjs
+KANNA_E2E_DEVICE_TOKEN=staging-buffy-device-token ./kd mobile up --staging
+```
+
+The script is idempotent: it upserts the Firebase Auth user `upvote.sieve.7t@icloud.com` / `password123` with display name `Buffy the Bug Slayer`, stores the committed avatar reference `file://services/firebase/emulator-seed/assets/buffy-avatar.jpg`, and merges `devices/staging-buffy-device-token` in `kanna-staging` Firestore so the staging relay can authenticate the desktop when that token is supplied. Use `--dry-run` on the script to print the planned Auth user and Firestore document without writing staging data. Do not run physical-device Appium or install/launch the attached device from agent automation; humans verify on-device after merge.
 
 ```bash
 # Development (from repo root or worktree root)
@@ -182,7 +207,10 @@ When asked to launch the mobile app against production, use `./kd mobile up --pr
 ./kd dev status              # inspect tmux session status
 ./kd dev log                 # print recent desktop tmux output
 ./kd dev log mobile          # print recent mobile tmux output
+./kd mobile run --device     # start dev stack + install/launch on a physical iPhone
+./kd mobile doctor --device  # check physical iPhone Metro reachability, install state, and Local Network guidance
 ./kd mobile up --production  # start mobile with installed /Applications/Kanna.app production status/relay defaults
+./kd mobile up --staging     # start worktree desktop + mobile against kanna-staging cloud/relay
 ./kd dev up --attach         # start and attach to tmux session
 ./kd env print               # print resolved ports, DB, daemon dir, transfer root
 ./kd doctor                  # check local prerequisites
@@ -218,18 +246,15 @@ cd apps/desktop/src-tauri && cargo test --test agent_cli_integration -- --ignore
 # Mobile Appium E2E (local only)
 # Simulator: pnpm --dir apps/mobile run test:e2e:preflight
 # Simulator: pnpm --dir apps/mobile run test:e2e:smoke
-# Physical device: pnpm --dir apps/mobile run test:e2e:device:preflight
-# Physical device: pnpm --dir apps/mobile run test:e2e:device:smoke
-# Physical-device runs assume local Xcode signing already works and the app is installed.
-# Device smoke now starts or reuses Metro on KANNA_MOBILE_PORT automatically and
-# force-relaunches the app so stale Expo bundles do not leak across runs.
-# If the app is missing on the device, install it with the same Metro port:
-# pnpm --dir apps/mobile ios --device <udid> --port "$KANNA_MOBILE_PORT" --no-bundler
-# If EXPO_PUBLIC_KANNA_SERVER_URL points at loopback (for example 127.0.0.1),
-# the physical-device Appium harness rewrites it to the host Mac's LAN IP before
-# preflight and smoke checks so the phone can reach the desktop-side mobile server.
+# Physical device launch: ./kd mobile run --device
+# Physical device preflight only: ./kd mobile doctor --device
+# Physical device Appium smoke is local/human-only after the app is installed:
+# pnpm --dir apps/mobile run test:e2e:device:preflight
+# pnpm --dir apps/mobile run test:e2e:device:smoke
+# Device smoke reuses an existing kd-managed Metro on KANNA_MOBILE_PORT and
+# only stops Metro when the smoke runner started that Metro itself.
 # Use KANNA_IOS_DEVICE_UDID for an exact device, or KANNA_IOS_PHYSICAL_DEVICE_NAME
-# to target the visible phone name (for example "Jerome’s iPhone 15").
+# to target the visible phone name (for example "Jerome's iPhone 15").
 # Set one of them when more than one iPhone is attached.
 ```
 
@@ -520,6 +545,12 @@ When something doesn't work, find the architectural reason and fix it at the rig
 - If a component needs to react to a state change, make sure the lifecycle handles it (mount/unmount/watch) — don't add manual triggers from the store.
 - If two systems disagree on the source of truth (e.g., `stage` vs `closed_at` for visibility), pick one and make everything use it.
 - If a resource needs cleanup, clean it up where the lifecycle owns it — don't leave stale state for another layer to work around.
+
+### Server-side completion notify boundary
+
+`kanna-server` subscribes directly to daemon terminal-state events and treats daemon `Exit` for a task session as the headless completion signal. That path updates task activity to `unread`, claims `pipeline_item.notify_task_id` by setting `notified_at`, and delivers `TASK <child-id> DONE [success|failure]: <title>` through the same two-step input submission helper used by `/v1/tasks/{task_id}/input`. Keep this boundary server/daemon-side; do not depend on the desktop frontend event bridge being open for completion notifications.
+
+Current E2E status: notify has server boundary coverage with a fake daemon asserting the exact two `Input` writes and the once-only DB guard. A full desktop E2E would require a runnable daemon plus agent task that exits under the packaged app/WebDriver harness; add that when the E2E harness can deterministically drive agent completion without external Claude/Copilot credentials.
 
 ## Coding Style
 

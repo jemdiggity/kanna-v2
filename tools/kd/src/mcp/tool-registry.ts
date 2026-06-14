@@ -20,12 +20,15 @@ const exposedTools = [
   ["build_sidecars", "build.sidecars"],
   ["release_ship", "release.ship"],
   ["cloud_deploy", "cloud.deploy"],
+  ["cloud_relay_provision", "cloud.relay-provision"],
   ["pages_build_schema", "pages.build-schema"],
   ["test_app_update_bundle", "test.app-update-bundle"],
   ["emulators_up", "emulators.up"],
   ["emulators_down", "emulators.down"],
   ["emulators_status", "emulators.status"],
   ["daemon_kill", "daemon.kill"],
+  ["mobile_run", "mobile.run"],
+  ["mobile_doctor", "mobile.doctor"],
   ["mobile_device_smoke", "mobile.device-smoke"],
   ["doctor", "doctor"]
 ] as const;

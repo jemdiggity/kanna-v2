@@ -159,7 +159,7 @@ describe("local transfer accept import", () => {
 
     // Direct task creation is setup-only: the product has no UI path for creating an inert
     // transfer fixture task without also launching a real agent session.
-    const createResult = await callVueMethod(primary, "store.createItem", repoId, testRepoPath, "Say OK", "sdk");
+    const createResult = await callVueMethod(primary, "store.createItem", repoId, testRepoPath, "Say OK", "agent");
     if (isVueCallError(createResult)) {
       throw new Error(createResult.__error);
     }

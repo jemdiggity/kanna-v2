@@ -548,7 +548,15 @@ async function observeSessionThroughRelay(input: {
     }, input.expectedText ? 20_000 : 10_000);
 
     ws.addEventListener("open", () => {
-      ws.send(JSON.stringify({ type: "auth", id_token: "test-user" }));
+      void signInForIdToken()
+        .then(({ idToken }) => {
+          ws.send(JSON.stringify({ type: "auth", id_token: idToken }));
+        })
+        .catch((error: unknown) => {
+          clearTimeout(timeout);
+          try { ws.close(); } catch {}
+          reject(error);
+        });
     });
     ws.addEventListener("message", (event) => {
       const message = JSON.parse(String(event.data)) as {
@@ -766,7 +774,7 @@ describe("cloud task sync", () => {
       primaryRepoId,
       testRepoPath,
       "Cloud sync visible task",
-      "sdk",
+      "agent",
       { agentProvider: "codex", baseRef: "origin/main" },
     );
     if (result && typeof result === "object" && "__error" in result) {

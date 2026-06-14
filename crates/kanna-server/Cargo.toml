@@ -18,6 +18,7 @@ base64 = "0.22"
 dirs = "6"
 serde_yaml = "0.9"
 kanna-daemon = { path = "../daemon" }
+kanna-agent-protocol = { path = "../kanna-agent-protocol" }
 kanna-runtime-defaults = { path = "../runtime-defaults" }
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["cors"] }

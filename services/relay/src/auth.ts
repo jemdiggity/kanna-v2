@@ -1,5 +1,5 @@
 import { createHash, timingSafeEqual } from "node:crypto";
-import { getFirebaseServices, isAuthBypassed } from "./firebase.js";
+import { getFirebaseServices } from "./firebase.js";
 
 /**
  * Upper bound on desktops docs fetched per credential check. A desktopId is a
@@ -9,28 +9,6 @@ import { getFirebaseServices, isAuthBypassed } from "./firebase.js";
  */
 const DESKTOP_LOOKUP_LIMIT = 10;
 
-function sha256Hex(value: string): string {
-  return createHash("sha256").update(value).digest("hex");
-}
-
-function hashesMatch(storedHex: string, presentedHex: string): boolean {
-  const stored = Buffer.from(storedHex, "hex");
-  const presented = Buffer.from(presentedHex, "hex");
-  if (stored.length !== presented.length || stored.length === 0) {
-    return false;
-  }
-  return timingSafeEqual(stored, presented);
-}
-
-function bypassUserIdFromToken(token: string): string {
-  const separator = token.indexOf(":");
-  if (separator > 0) {
-    return token.slice(0, separator);
-  }
-
-  return "test-user";
-}
-
 /**
  * Verify a Firebase Auth ID token (sent by the phone client).
  * Returns the userId or null if verification fails.
@@ -38,10 +16,6 @@ function bypassUserIdFromToken(token: string): string {
 export async function verifyPhoneToken(
   idToken: string
 ): Promise<string | null> {
-  if (isAuthBypassed()) {
-    return bypassUserIdFromToken(idToken);
-  }
-
   try {
     const { auth } = getFirebaseServices();
     const decoded = await auth.verifyIdToken(idToken);
@@ -60,10 +34,6 @@ export async function verifyPhoneToken(
 export async function verifyDeviceToken(
   deviceToken: string
 ): Promise<string | null> {
-  if (isAuthBypassed()) {
-    return bypassUserIdFromToken(deviceToken);
-  }
-
   try {
     const { db } = getFirebaseServices();
     const doc = await db.collection("devices").doc(deviceToken).get();
@@ -84,17 +54,27 @@ export interface DesktopPrincipal {
   desktopId: string;
 }
 
+export function hashDesktopSecret(desktopSecret: string): string {
+  return createHash("sha256").update(desktopSecret, "utf8").digest("hex");
+}
+
+export function desktopSecretMatchesHash(
+  desktopSecret: string,
+  desktopSecretHash: unknown
+): boolean {
+  if (typeof desktopSecretHash !== "string" || desktopSecretHash.length === 0) {
+    return false;
+  }
+
+  const actual = Buffer.from(hashDesktopSecret(desktopSecret), "hex");
+  const expected = Buffer.from(desktopSecretHash, "hex");
+  return actual.length === expected.length && timingSafeEqual(actual, expected);
+}
+
 export async function verifyDesktopCredentials(
   desktopId: string,
   desktopSecret: string
 ): Promise<DesktopPrincipal | null> {
-  if (isAuthBypassed()) {
-    return {
-      userId: bypassUserIdFromToken(desktopSecret),
-      desktopId,
-    };
-  }
-
   try {
     const { db } = getFirebaseServices();
     const snapshot = await db
@@ -108,15 +88,13 @@ export async function verifyDesktopCredentials(
       return null;
     }
 
-    const presentedHash = sha256Hex(desktopSecret);
     for (const doc of snapshot.docs) {
       const data = doc.data();
       if (data.revokedAt) {
         continue;
       }
 
-      const storedHash = data.desktopSecretHash;
-      if (typeof storedHash !== "string" || !hashesMatch(storedHash, presentedHash)) {
+      if (!desktopSecretMatchesHash(desktopSecret, data.desktopSecretHash)) {
         continue;
       }
 
@@ -148,13 +126,6 @@ export async function registerDevice(
   userId: string,
   deviceToken: string
 ): Promise<void> {
-  if (isAuthBypassed()) {
-    console.log(
-      `[auth] SKIP_AUTH — would register device ${deviceToken} for user ${userId}`
-    );
-    return;
-  }
-
   try {
     const { db } = getFirebaseServices();
     await db.collection("devices").doc(deviceToken).set({

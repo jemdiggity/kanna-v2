@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { WebSocketServer, type WebSocket } from "ws";
+import { WebSocketServer, type RawData, type WebSocket } from "ws";
 import {
   verifyPhoneToken,
   verifyDeviceToken,
@@ -7,10 +7,13 @@ import {
   registerDevice,
 } from "./auth.js";
 import {
+  attachDesktopTunnel,
+  forwardTunnelData,
   setPhoneConnection,
   setServerConnection,
   routeMessage,
   getConnectionCount,
+  isTunnelSocket,
 } from "./router.js";
 
 const PORT = parseInt(process.env.PORT || "8080", 10);
@@ -114,8 +117,8 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
     }
   }, AUTH_TIMEOUT_MS);
 
-  ws.on("message", async (raw: Buffer | string) => {
-    const data = typeof raw === "string" ? raw : raw.toString();
+  ws.on("message", async (raw: RawData, isBinary: boolean) => {
+    const data = raw.toString();
 
     // --- Auth handshake (first message) ---
     if (!authenticated) {
@@ -125,6 +128,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
         device_token?: string;
         desktop_id?: string;
         desktop_secret?: string;
+        tunnel_id?: string;
       };
 
       try {
@@ -173,6 +177,14 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
       authenticated = true;
       clearTimeout(authTimer);
 
+      if (role === "server" && desktopId && msg.tunnel_id) {
+        attachDesktopTunnel(userId, desktopId, msg.tunnel_id, ws);
+        console.log(
+          `[ws] Authenticated tunnel socket for ${userId}/${desktopId} from ${remoteAddr}`
+        );
+        return;
+      }
+
       // Register the connection with the router
       if (role === "phone") {
         setPhoneConnection(userId, ws);
@@ -189,6 +201,10 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
     }
 
     // --- Post-auth: route messages ---
+    if (isTunnelSocket(ws)) {
+      forwardTunnelData(ws, raw, isBinary);
+      return;
+    }
     routeMessage(userId!, role!, data, ws, desktopId);
   });
 
@@ -209,6 +225,6 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
 server.listen(PORT, () => {
   console.log(`[relay] Listening on port ${PORT}`);
   console.log(
-    `[relay] SKIP_AUTH=${process.env.SKIP_AUTH === "true" ? "true" : "false"}`
+    `[relay] Firebase project=${process.env.FIREBASE_PROJECT_ID?.trim() || "(default)"}`
   );
 });

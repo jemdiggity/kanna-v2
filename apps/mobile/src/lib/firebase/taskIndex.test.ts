@@ -41,7 +41,7 @@ describe("cloud task index", () => {
         baseRef: "origin/main",
         prNumber: null,
         prUrl: null,
-        agent: { provider: "claude", type: "pty" },
+        agent: { provider: "claude", type: "agent" },
         transfer: {
           state: "none",
           transferId: null,
@@ -61,6 +61,7 @@ describe("cloud task index", () => {
       stage: "in progress",
       snippet: "Fix mobile cloud",
       agentProvider: "claude",
+      agentType: "agent",
       ownerDesktopId: "desktop-1",
       ownerLocalTaskId: "task-1",
       ownerOnline: false,

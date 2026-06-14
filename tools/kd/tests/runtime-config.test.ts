@@ -74,7 +74,9 @@ describe("runtime config generation", () => {
       "--project",
       "kanna-local",
       "--config",
-      "/repo/.firebase-8080.kanna.json"
+      "/repo/.firebase-8080.kanna.json",
+      "--import",
+      "/repo/services/firebase/emulator-seed"
     ]);
     expect(buildFirebaseEmulatorArgs("/repo/.firebase-8080.kanna.json", ["--only", "auth"])).toContain("--only");
   });

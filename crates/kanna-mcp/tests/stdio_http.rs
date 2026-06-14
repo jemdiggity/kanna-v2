@@ -153,6 +153,24 @@ fn serve_forwards_get_and_post_tool_calls_to_configured_http_server() {
             response_body: json!([{ "id": "repo-1", "name": "kanna" }]),
         },
         ExpectedRequest {
+            method: "GET",
+            path: "/v1/tasks/task-1",
+            body: None,
+            response_status: "200 OK",
+            response_body: json!({
+                "id": "task-1",
+                "repoId": "repo-1",
+                "title": "Review MCP",
+                "stage": "in progress",
+                "activity": "working",
+                "agentType": "pty",
+                "agentProvider": "claude",
+                "branch": "task-task-1",
+                "prUrl": null,
+                "closedAt": null
+            }),
+        },
+        ExpectedRequest {
             method: "POST",
             path: "/v1/tasks/task-1/actions/complete-stage",
             body: Some(json!({
@@ -180,6 +198,15 @@ fn serve_forwards_get_and_post_tool_calls_to_configured_http_server() {
                 "id": 3,
                 "method": "tools/call",
                 "params": {
+                    "name": "kanna_get_task",
+                    "arguments": { "task_id": "task-1" }
+                }
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "tools/call",
+                "params": {
                     "name": "kanna_complete_stage",
                     "arguments": {
                         "task_id": "task-1",
@@ -193,8 +220,8 @@ fn serve_forwards_get_and_post_tool_calls_to_configured_http_server() {
     );
 
     let observed = server.join().expect("fixture server");
-    assert_eq!(observed.len(), 2);
-    assert_eq!(responses.len(), 3);
+    assert_eq!(observed.len(), 3);
+    assert_eq!(responses.len(), 4);
     assert_eq!(responses[0]["result"]["serverInfo"]["name"], "kanna-mcp");
     assert_eq!(
         tool_text(&responses[1]),
@@ -202,6 +229,21 @@ fn serve_forwards_get_and_post_tool_calls_to_configured_http_server() {
     );
     assert_eq!(
         tool_text(&responses[2]),
+        json!({
+            "id": "task-1",
+            "repoId": "repo-1",
+            "title": "Review MCP",
+            "stage": "in progress",
+            "activity": "working",
+            "agentType": "pty",
+            "agentProvider": "claude",
+            "branch": "task-task-1",
+            "prUrl": null,
+            "closedAt": null
+        })
+    );
+    assert_eq!(
+        tool_text(&responses[3]),
         json!({ "taskId": "task-1", "stage": "pr" })
     );
 }

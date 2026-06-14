@@ -7,6 +7,6 @@ describe("shouldPrewarmTaskShellOnCreate", () => {
   });
 
   it("keeps worktree shell prewarm enabled for SDK tasks", () => {
-    expect(shouldPrewarmTaskShellOnCreate("sdk")).toBe(true);
+    expect(shouldPrewarmTaskShellOnCreate("agent")).toBe(true);
   });
 });

@@ -17,4 +17,9 @@ describe("mobile smoke runner", () => {
   it("supports a disconnected profile smoke mode", () => {
     expect(supportedSmokeModes).toContain("profile-disconnected");
   });
+
+  it("supports a force-cloud smoke mode", () => {
+    expect(supportedSmokeModes).toContain("cloud");
+    expect(smokeSpecPaths).toContain("specs/cloud/cloud-task-flow.e2e.ts");
+  });
 });

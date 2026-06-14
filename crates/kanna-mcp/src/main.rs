@@ -81,9 +81,56 @@ fn mcp_tools() -> Value {
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
+            "name": "kanna_add_repo",
+            "description": "Register an existing local git repository with Kanna.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "name": { "type": "string" }
+                },
+                "required": ["path"]
+            }
+        },
+        {
             "name": "kanna_list_recent_tasks",
             "description": "List recent open Kanna tasks.",
             "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "kanna_get_task",
+            "description": "Fetch one Kanna task by task ID or branch name.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "task_id": { "type": "string" } },
+                "required": ["task_id"]
+            }
+        },
+        {
+            "name": "kanna_wait_task",
+            "description": "Poll a Kanna task until it finishes or closes.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string" },
+                    "timeout_secs": { "type": "integer" },
+                    "poll_secs": { "type": "integer" },
+                    "until": { "type": "string", "enum": ["finished", "closed"] }
+                },
+                "required": ["task_id"]
+            }
+        },
+        {
+            "name": "kanna_task_logs",
+            "description": "Fetch recent logs for a Kanna task.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string" },
+                    "tail": { "type": "integer" }
+                },
+                "required": ["task_id"]
+            }
         },
         {
             "name": "kanna_search_tasks",
@@ -117,6 +164,7 @@ fn mcp_tools() -> Value {
                     "agent_provider": { "type": "string" },
                     "model": { "type": "string" },
                     "permission_mode": { "type": "string" },
+                    "notify_task_id": { "type": "string" },
                     "allowed_tools": { "type": "array", "items": { "type": "string" } },
                     "blocker_task_ids": { "type": "array", "items": { "type": "string" } }
                 },
@@ -258,7 +306,17 @@ async fn handle_mcp_request(message: Value, base_url: &str) -> Value {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ToolRequest {
     Get(String),
-    PostJson { path: String, body: Value },
+    GetText(String),
+    PostJson {
+        path: String,
+        body: Value,
+    },
+    WaitTask {
+        task_id: String,
+        timeout_secs: u64,
+        poll_secs: u64,
+        until: WaitUntil,
+    },
 }
 
 fn encode_path_segment(value: &str) -> String {
@@ -284,6 +342,40 @@ fn optional_string(args: &Value, name: &str) -> Option<String> {
     args.get(name).and_then(Value::as_str).map(str::to_string)
 }
 
+fn optional_u64(args: &Value, name: &str) -> Result<Option<u64>, String> {
+    match args.get(name) {
+        Some(value) => value
+            .as_u64()
+            .map(Some)
+            .ok_or_else(|| format!("{name} must be an unsigned integer")),
+        None => Ok(None),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WaitUntil {
+    Finished,
+    Closed,
+}
+
+fn parse_wait_until(value: Option<String>) -> Result<WaitUntil, String> {
+    match value.as_deref().unwrap_or("finished") {
+        "finished" => Ok(WaitUntil::Finished),
+        "closed" => Ok(WaitUntil::Closed),
+        other => Err(format!("until must be finished or closed, got {other}")),
+    }
+}
+
+fn task_matches_wait_until(task: &Value, until: WaitUntil) -> bool {
+    let closed = task.get("closedAt").is_some_and(|value| !value.is_null());
+    match until {
+        WaitUntil::Finished => {
+            closed || task.get("activity").and_then(Value::as_str) == Some("unread")
+        }
+        WaitUntil::Closed => closed,
+    }
+}
+
 fn optional_string_array(args: &Value, name: &str) -> Result<Option<Vec<String>>, String> {
     let Some(value) = args.get(name) else {
         return Ok(None);
@@ -306,7 +398,45 @@ fn optional_string_array(args: &Value, name: &str) -> Result<Option<Vec<String>>
 fn build_tool_request(name: &str, args: Value) -> Result<ToolRequest, String> {
     match name {
         "kanna_list_repos" => Ok(ToolRequest::Get("/v1/repos".to_string())),
+        "kanna_add_repo" => {
+            let mut body = serde_json::Map::new();
+            body.insert(
+                "path".to_string(),
+                Value::String(required_string(&args, "path")?),
+            );
+            if let Some(name) = optional_string(&args, "name") {
+                body.insert("name".to_string(), Value::String(name));
+            }
+            Ok(ToolRequest::PostJson {
+                path: "/v1/repos".to_string(),
+                body: Value::Object(body),
+            })
+        }
         "kanna_list_recent_tasks" => Ok(ToolRequest::Get("/v1/tasks/recent".to_string())),
+        "kanna_get_task" => {
+            let task_id = encode_path_segment(&required_string(&args, "task_id")?);
+            Ok(ToolRequest::Get(format!("/v1/tasks/{task_id}")))
+        }
+        "kanna_wait_task" => {
+            let task_id = required_string(&args, "task_id")?;
+            let timeout_secs = optional_u64(&args, "timeout_secs")?.unwrap_or(600).min(600);
+            let poll_secs = optional_u64(&args, "poll_secs")?.unwrap_or(3).max(1);
+            let until = parse_wait_until(optional_string(&args, "until"))?;
+            Ok(ToolRequest::WaitTask {
+                task_id,
+                timeout_secs,
+                poll_secs,
+                until,
+            })
+        }
+        "kanna_task_logs" => {
+            let task_id = encode_path_segment(&required_string(&args, "task_id")?);
+            let path = match optional_u64(&args, "tail")? {
+                Some(tail) => format!("/v1/tasks/{task_id}/logs?tail={tail}"),
+                None => format!("/v1/tasks/{task_id}/logs"),
+            };
+            Ok(ToolRequest::GetText(path))
+        }
         "kanna_search_tasks" => {
             let query = encode_path_segment(&required_string(&args, "query")?);
             Ok(ToolRequest::Get(format!("/v1/tasks/search?query={query}")))
@@ -334,6 +464,7 @@ fn build_tool_request(name: &str, args: Value) -> Result<ToolRequest, String> {
                 ("agent_provider", "agentProvider"),
                 ("model", "model"),
                 ("permission_mode", "permissionMode"),
+                ("notify_task_id", "notifyTaskId"),
             ] {
                 if let Some(value) = optional_string(&args, arg_name) {
                     body.insert(body_name.to_string(), Value::String(value));
@@ -451,6 +582,44 @@ async fn get_json<T: DeserializeOwned>(base_url: &str, path: &str) -> Result<T, 
         .map_err(|e| format!("GET {path} returned invalid JSON: {e}"))
 }
 
+async fn get_text(base_url: &str, path: &str) -> Result<String, String> {
+    let response = reqwest::Client::new()
+        .get(join_server_url(base_url, path))
+        .send()
+        .await
+        .map_err(|e| format!("GET {path} failed: {e}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("GET {path} failed with status {status}"));
+    }
+    response
+        .text()
+        .await
+        .map_err(|e| format!("GET {path} returned invalid text: {e}"))
+}
+
+async fn wait_task(
+    base_url: &str,
+    task_id: &str,
+    timeout_secs: u64,
+    poll_secs: u64,
+    until: WaitUntil,
+) -> Result<Value, String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    let poll_interval = std::time::Duration::from_secs(poll_secs.max(1));
+    let path = format!("/v1/tasks/{}", encode_path_segment(task_id));
+    loop {
+        let task: Value = get_json(base_url, &path).await?;
+        if task_matches_wait_until(&task, until) {
+            return Ok(task);
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(format!("timed out waiting for task {task_id}"));
+        }
+        tokio::time::sleep(poll_interval).await;
+    }
+}
+
 async fn post_json<T: DeserializeOwned>(
     base_url: &str,
     path: &str,
@@ -479,7 +648,14 @@ async fn post_json<T: DeserializeOwned>(
 async fn handle_mcp_tool_call(base_url: &str, name: &str, args: Value) -> Result<Value, String> {
     match build_tool_request(name, args)? {
         ToolRequest::Get(path) => get_json(base_url, &path).await,
+        ToolRequest::GetText(path) => get_text(base_url, &path).await.map(Value::String),
         ToolRequest::PostJson { path, body } => post_json(base_url, &path, &body).await,
+        ToolRequest::WaitTask {
+            task_id,
+            timeout_secs,
+            poll_secs,
+            until,
+        } => wait_task(base_url, &task_id, timeout_secs, poll_secs, until).await,
     }
 }
 
@@ -575,7 +751,11 @@ mod tests {
             names,
             vec![
                 "kanna_list_repos",
+                "kanna_add_repo",
                 "kanna_list_recent_tasks",
+                "kanna_get_task",
+                "kanna_wait_task",
+                "kanna_task_logs",
                 "kanna_search_tasks",
                 "kanna_list_repo_tasks",
                 "kanna_create_task",
@@ -636,8 +816,47 @@ mod route_tests {
             ToolRequest::Get("/v1/repos".to_string())
         );
         assert_eq!(
+            build_tool_request(
+                "kanna_add_repo",
+                json!({ "path": "/Users/me/project", "name": "Project" })
+            )
+            .unwrap(),
+            ToolRequest::PostJson {
+                path: "/v1/repos".to_string(),
+                body: json!({
+                    "path": "/Users/me/project",
+                    "name": "Project"
+                })
+            }
+        );
+        assert_eq!(
             build_tool_request("kanna_list_recent_tasks", json!({})).unwrap(),
             ToolRequest::Get("/v1/tasks/recent".to_string())
+        );
+        assert_eq!(
+            build_tool_request("kanna_get_task", json!({ "task_id": "task 1" })).unwrap(),
+            ToolRequest::Get("/v1/tasks/task%201".to_string())
+        );
+        assert_eq!(
+            build_tool_request(
+                "kanna_wait_task",
+                json!({ "task_id": "task 1", "timeout_secs": 5, "poll_secs": 1, "until": "closed" })
+            )
+            .unwrap(),
+            ToolRequest::WaitTask {
+                task_id: "task 1".to_string(),
+                timeout_secs: 5,
+                poll_secs: 1,
+                until: WaitUntil::Closed,
+            }
+        );
+        assert_eq!(
+            build_tool_request(
+                "kanna_task_logs",
+                json!({ "task_id": "task 1", "tail": 25 })
+            )
+            .unwrap(),
+            ToolRequest::GetText("/v1/tasks/task%201/logs?tail=25".to_string())
         );
         assert_eq!(
             build_tool_request("kanna_search_tasks", json!({ "query": "review me" })).unwrap(),
@@ -689,6 +908,25 @@ mod route_tests {
             ToolRequest::PostJson {
                 path: "/v1/tasks/task-1/actions/unblock".to_string(),
                 body: json!({})
+            }
+        );
+        assert_eq!(
+            build_tool_request(
+                "kanna_create_task",
+                json!({
+                    "repo_id": "repo-1",
+                    "prompt": "Child",
+                    "notify_task_id": "task-parent"
+                })
+            )
+            .unwrap(),
+            ToolRequest::PostJson {
+                path: "/v1/tasks".to_string(),
+                body: json!({
+                    "repoId": "repo-1",
+                    "prompt": "Child",
+                    "notifyTaskId": "task-parent"
+                })
             }
         );
     }

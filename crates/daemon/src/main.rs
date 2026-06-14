@@ -1,3 +1,4 @@
+mod agent_runtime;
 #[cfg(test)]
 mod bench;
 mod fd_transfer;
@@ -45,7 +46,20 @@ type LostHandoffSessions = Arc<Mutex<HashMap<String, String>>>;
 
 struct HandoffResult {
     adopted: Vec<(String, pty::PtySession, protocol::HandoffSession)>,
+    adopted_agents: Vec<(protocol::HandoffSession, Vec<std::os::fd::RawFd>)>,
     lost: HashMap<String, String>,
+    old_pid: Option<i32>,
+}
+
+impl HandoffResult {
+    fn empty() -> Self {
+        HandoffResult {
+            adopted: vec![],
+            adopted_agents: vec![],
+            lost: HashMap::new(),
+            old_pid: None,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -144,6 +158,10 @@ fn app_support_dir() -> PathBuf {
     kanna_runtime_defaults::daemon_dir_for_current_runtime()
 }
 
+fn daemon_data_dir() -> PathBuf {
+    app_support_dir()
+}
+
 fn socket_path(dir: &PathBuf) -> PathBuf {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -232,6 +250,10 @@ fn parse_handoff_response(line: &str) -> Result<Vec<protocol::HandoffSession>, S
                 cwd: session.cwd,
                 agent_provider: None,
                 status: SessionStatus::Idle,
+                kind: protocol::SessionKind::Pty,
+                provider_session_id: None,
+                agent_fd_count: 0,
+                agent_spawn: None,
             })
             .collect()),
         Ok(HandoffEventCompat::Error { message }) => Err(message),
@@ -247,6 +269,10 @@ fn parse_handoff_response(line: &str) -> Result<Vec<protocol::HandoffSession>, S
                     snapshot: None,
                     agent_provider: None,
                     status: SessionStatus::Idle,
+                    kind: protocol::SessionKind::Pty,
+                    provider_session_id: None,
+                    agent_fd_count: 0,
+                    agent_spawn: None,
                 })
                 .collect()),
             Ok(HandoffEventLegacy::Error { message }) => Err(message),
@@ -375,18 +401,35 @@ async fn request_handoff(
         return Ok((vec![], vec![]));
     }
 
+    let expected_fds = expected_handoff_fd_count(&session_infos);
+    if expected_fds == 0 {
+        return Ok((session_infos, vec![]));
+    }
+
     log::info!(
         "[handoff] receiving {} fds via SCM_RIGHTS (raw_fd={})",
-        session_infos.len(),
+        expected_fds,
         raw_fd
     );
-    let fds = fd_transfer::recv_fds(raw_fd, session_infos.len()).map_err(|e| {
+    let fds = fd_transfer::recv_fds(raw_fd, expected_fds).map_err(|e| {
         HandoffRequestError::TransferFailed {
-            message: format!("failed to receive PTY fd: {}", e),
+            message: format!("failed to receive session fds: {}", e),
             session_infos: session_infos.clone(),
         }
     })?;
     Ok((session_infos, fds))
+}
+
+/// PTY sessions transfer exactly one master fd; agent sessions transfer
+/// `agent_fd_count` pipe fds (0 when the child already exited).
+fn expected_handoff_fd_count(session_infos: &[protocol::HandoffSession]) -> usize {
+    session_infos
+        .iter()
+        .map(|info| match info.kind {
+            protocol::SessionKind::Pty => 1,
+            protocol::SessionKind::Agent => info.agent_fd_count as usize,
+        })
+        .sum()
 }
 
 #[tokio::main]
@@ -418,7 +461,9 @@ async fn main() {
     let session_sizes: SessionSizes = Arc::new(Mutex::new(HashMap::new()));
     let session_observers: SessionObservers = Arc::new(Mutex::new(HashMap::new()));
     let lost_handoff_sessions: LostHandoffSessions = Arc::new(Mutex::new(handoff_result.lost));
+    let agent_sessions: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(HashMap::new()));
     let recovery_manager = RecoveryManager::start().await;
+    let (broadcast_tx, _) = broadcast::channel::<String>(256);
 
     // Adopt handed-off sessions and persist their handed-off snapshots immediately so the
     // recovery sidecar has durable state before any post-restart attach occurs.
@@ -501,6 +546,36 @@ async fn main() {
         }
     }
 
+    // Adopt handed-off agent sessions. Wait for the old daemon to exit first:
+    // its blocked reader threads hold the same pipes until then, and its
+    // final journal appends must land before we reload from disk.
+    if !handoff_result.adopted_agents.is_empty() {
+        if let Some(old_pid) = handoff_result.old_pid {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while unsafe { libc::kill(old_pid, 0) } == 0 {
+                if std::time::Instant::now() >= deadline {
+                    log::warn!(
+                        "[handoff] old daemon (pid={}) still alive after 5s; killing it before adopting agent sessions",
+                        old_pid
+                    );
+                    unsafe { libc::kill(old_pid, libc::SIGKILL) };
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        }
+        for (info, fds) in handoff_result.adopted_agents {
+            agent_runtime::adopt_agent_session(
+                info,
+                fds,
+                agent_sessions.clone(),
+                broadcast_tx.clone(),
+                daemon_data_dir(),
+            )
+            .await;
+        }
+    }
+
     // Write our PID and publish the socket only after adopted sessions are restored.
     let pid = std::process::id();
     std::fs::write(&pid_path, pid.to_string()).expect("Failed to write PID file");
@@ -515,8 +590,6 @@ async fn main() {
         pid,
         socket_path
     );
-
-    let (broadcast_tx, _) = broadcast::channel::<String>(256);
 
     let pid_path_clone = pid_path.clone();
     let socket_path_clone = socket_path.clone();
@@ -545,6 +618,7 @@ async fn main() {
                 let observers_clone = session_observers.clone();
                 let lost_handoff_clone = lost_handoff_sessions.clone();
                 let recovery_clone = recovery_manager.clone();
+                let agent_sessions_clone = agent_sessions.clone();
                 tokio::spawn(async move {
                     handle_connection(
                         stream,
@@ -556,6 +630,7 @@ async fn main() {
                         observers_clone,
                         lost_handoff_clone,
                         recovery_clone,
+                        agent_sessions_clone,
                     )
                     .await;
                 });
@@ -613,25 +688,16 @@ async fn attempt_handoff(pid_path: &PathBuf, socket_path: &PathBuf) -> HandoffRe
                     "[handoff] pid file contains {} but process is not running",
                     pid
                 );
-                return HandoffResult {
-                    adopted: vec![],
-                    lost: HashMap::new(),
-                };
+                return HandoffResult::empty();
             }
             _ => {
                 log::info!("[handoff] pid file has invalid content: {:?}", s.trim());
-                return HandoffResult {
-                    adopted: vec![],
-                    lost: HashMap::new(),
-                };
+                return HandoffResult::empty();
             }
         },
         Err(e) => {
             log::info!("[handoff] no pid file: {}", e);
-            return HandoffResult {
-                adopted: vec![],
-                lost: HashMap::new(),
-            };
+            return HandoffResult::empty();
         }
     };
 
@@ -654,7 +720,9 @@ async fn attempt_handoff(pid_path: &PathBuf, socket_path: &PathBuf) -> HandoffRe
                 );
                 return HandoffResult {
                     adopted: vec![],
+                    adopted_agents: vec![],
                     lost: lost_sessions_from_handoff_error(&error),
+                    old_pid: Some(old_pid),
                 };
             }
             match request_handoff(socket_path, HANDOFF_COMPAT_VERSION).await {
@@ -673,7 +741,9 @@ async fn attempt_handoff(pid_path: &PathBuf, socket_path: &PathBuf) -> HandoffRe
                     );
                     return HandoffResult {
                         adopted: vec![],
+                        adopted_agents: vec![],
                         lost: lost_sessions_from_handoff_error(&compat_error),
+                        old_pid: Some(old_pid),
                     };
                 }
             }
@@ -682,10 +752,7 @@ async fn attempt_handoff(pid_path: &PathBuf, socket_path: &PathBuf) -> HandoffRe
 
     if session_infos.is_empty() {
         log::info!("[handoff] no sessions to adopt");
-        return HandoffResult {
-            adopted: vec![],
-            lost: HashMap::new(),
-        };
+        return HandoffResult::empty();
     }
 
     for (i, info) in session_infos.iter().enumerate() {
@@ -706,10 +773,11 @@ async fn attempt_handoff(pid_path: &PathBuf, socket_path: &PathBuf) -> HandoffRe
         fds
     );
 
-    if fds.len() != session_infos.len() {
+    let expected_fds = expected_handoff_fd_count(&session_infos);
+    if fds.len() != expected_fds {
         let reason = handoff_loss_message(format!(
             "fd count mismatch during handoff: expected {}, got {}",
-            session_infos.len(),
+            expected_fds,
             fds.len()
         ));
         let lost = session_infos
@@ -719,44 +787,73 @@ async fn attempt_handoff(pid_path: &PathBuf, socket_path: &PathBuf) -> HandoffRe
         log::info!(
             "[handoff] fd count mismatch: got {}, expected {}",
             fds.len(),
-            session_infos.len()
+            expected_fds
         );
         return HandoffResult {
-            adopted: vec![],
             lost,
+            old_pid: Some(old_pid),
+            ..HandoffResult::empty()
         };
     }
 
-    // Build adopted sessions
+    // Build adopted sessions, consuming fds in session order.
     let mut adopted = Vec::new();
-    for (info, fd) in session_infos.into_iter().zip(fds) {
-        let session_id = info.session_id.clone();
-        let alive = unsafe { libc::kill(info.pid as i32, 0) } == 0;
-        log::info!(
-            "[handoff] adopting session {} (fd={}, child_pid={}, alive={}, rows={}, cols={}, snapshot={})",
-            session_id,
-            fd,
-            info.pid,
-            alive,
-            info.rows,
-            info.cols,
-            info.snapshot.is_some()
-        );
-        let owned_fd = unsafe { std::os::unix::io::OwnedFd::from_raw_fd(fd) };
-        let session = pty::PtySession::adopt(
-            owned_fd,
-            info.pid as libc::pid_t,
-            info.cwd.clone(),
-            info.rows,
-            info.cols,
-        );
-        adopted.push((session_id, session, info));
+    let mut adopted_agents = Vec::new();
+    let mut fd_iter = fds.into_iter();
+    for info in session_infos {
+        match info.kind {
+            protocol::SessionKind::Agent => {
+                let count = info.agent_fd_count as usize;
+                let session_fds: Vec<_> = fd_iter.by_ref().take(count).collect();
+                log::info!(
+                    "[handoff] adopting agent session {} (child_pid={}, fds={:?})",
+                    info.session_id,
+                    info.pid,
+                    session_fds
+                );
+                adopted_agents.push((info, session_fds));
+            }
+            protocol::SessionKind::Pty => {
+                let Some(fd) = fd_iter.next() else {
+                    // Unreachable given the count check above.
+                    log::error!("[handoff] ran out of fds adopting {}", info.session_id);
+                    break;
+                };
+                let session_id = info.session_id.clone();
+                let alive = unsafe { libc::kill(info.pid as i32, 0) } == 0;
+                log::info!(
+                    "[handoff] adopting session {} (fd={}, child_pid={}, alive={}, rows={}, cols={}, snapshot={})",
+                    session_id,
+                    fd,
+                    info.pid,
+                    alive,
+                    info.rows,
+                    info.cols,
+                    info.snapshot.is_some()
+                );
+                let owned_fd = unsafe { std::os::unix::io::OwnedFd::from_raw_fd(fd) };
+                let session = pty::PtySession::adopt(
+                    owned_fd,
+                    info.pid as libc::pid_t,
+                    info.cwd.clone(),
+                    info.rows,
+                    info.cols,
+                );
+                adopted.push((session_id, session, info));
+            }
+        }
     }
 
-    log::info!("[handoff] complete, adopted {} sessions", adopted.len());
+    log::info!(
+        "[handoff] complete, adopted {} pty + {} agent sessions",
+        adopted.len(),
+        adopted_agents.len()
+    );
     HandoffResult {
         adopted,
+        adopted_agents,
         lost: HashMap::new(),
+        old_pid: Some(old_pid),
     }
 }
 
@@ -771,6 +868,7 @@ async fn handle_connection(
     session_observers: SessionObservers,
     lost_handoff_sessions: LostHandoffSessions,
     recovery_manager: RecoveryManager,
+    agent_sessions: kanna_daemon::agent::AgentSessions,
 ) {
     // Keep the raw fd for SCM_RIGHTS (used by Handoff)
     let raw_fd = stream.as_raw_fd();
@@ -795,6 +893,7 @@ async fn handle_connection(
                     writer.clone(),
                     broadcast_tx.clone(),
                     recovery_manager.clone(),
+                    agent_sessions.clone(),
                 )
                 .await;
                 break; // Connection ends after handoff
@@ -858,6 +957,7 @@ async fn handle_connection(
                     session_observers.clone(),
                     lost_handoff_sessions.clone(),
                     recovery_manager.clone(),
+                    agent_sessions.clone(),
                 )
                 .await;
             }
@@ -877,6 +977,8 @@ async fn handle_connection(
         client_ids.remove(&writer_id);
     }
     terminal_clients.retain(|_, client_ids| !client_ids.is_empty());
+    drop(terminal_clients);
+    agent_runtime::cleanup_agent_writer(&agent_sessions, &writer).await;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -891,6 +993,7 @@ async fn handle_command(
     session_observers: SessionObservers,
     lost_handoff_sessions: LostHandoffSessions,
     recovery_manager: RecoveryManager,
+    agent_sessions: kanna_daemon::agent::AgentSessions,
 ) {
     match command {
         Command::Spawn {
@@ -1055,6 +1158,10 @@ async fn handle_command(
                 )
                 .await;
 
+                Event::Ok
+            } else if agent_runtime::detach_agent_writer(&agent_sessions, &session_id, &writer)
+                .await
+            {
                 Event::Ok
             } else {
                 error_event(
@@ -1301,6 +1408,13 @@ async fn handle_command(
 
         Command::Kill { session_id } => {
             log::info!("[kill] session={}", session_id);
+            if !sessions.lock().await.contains(&session_id)
+                && agent_runtime::kill_agent_session(&session_id, &agent_sessions, &broadcast_tx)
+                    .await
+            {
+                let _ = write_event(&mut *writer.lock().await, &Event::Ok).await;
+                return;
+            }
             let mut mgr = sessions.lock().await;
             let result = match mgr.get_mut(&session_id) {
                 Some(session) => session.pty.kill(),
@@ -1330,8 +1444,9 @@ async fn handle_command(
 
         Command::List => {
             let mut mgr = sessions.lock().await;
-            let sessions_list = mgr.list();
+            let mut sessions_list = mgr.list();
             drop(mgr);
+            sessions_list.extend(agent_runtime::agent_session_infos(&agent_sessions).await);
             let evt = Event::SessionList {
                 sessions: sessions_list,
             };
@@ -1431,6 +1546,56 @@ async fn handle_command(
             // Handled in handle_connection before dispatch
             let _ = write_event(&mut *writer.lock().await, &Event::Ok).await;
         }
+
+        Command::SpawnAgent { session_id, params } => {
+            agent_runtime::handle_spawn_agent(
+                session_id,
+                params,
+                writer,
+                broadcast_tx,
+                agent_sessions,
+                daemon_data_dir(),
+            )
+            .await;
+        }
+
+        Command::AttachAgent {
+            session_id,
+            from_seq,
+        } => {
+            agent_runtime::handle_attach_agent(session_id, from_seq, writer, agent_sessions).await;
+        }
+
+        Command::AgentInput { session_id, text } => {
+            agent_runtime::handle_agent_input(
+                session_id,
+                text,
+                writer,
+                broadcast_tx,
+                agent_sessions,
+            )
+            .await;
+        }
+
+        Command::AgentPermission {
+            session_id,
+            request_id,
+            decision,
+        } => {
+            agent_runtime::handle_agent_permission(
+                session_id,
+                request_id,
+                decision,
+                writer,
+                broadcast_tx,
+                agent_sessions,
+            )
+            .await;
+        }
+
+        Command::AgentInterrupt { session_id } => {
+            agent_runtime::handle_agent_interrupt(session_id, writer, agent_sessions).await;
+        }
     }
 }
 
@@ -1452,6 +1617,7 @@ async fn handle_handoff(
     writer: Arc<Mutex<tokio::net::unix::OwnedWriteHalf>>,
     broadcast_tx: broadcast::Sender<String>,
     recovery_manager: RecoveryManager,
+    agent_sessions: kanna_daemon::agent::AgentSessions,
 ) {
     log::info!(
         "[handoff] received Handoff request (version={}, our_version={})",
@@ -1572,6 +1738,10 @@ async fn handle_handoff(
                     snapshot,
                     agent_provider: session.agent_provider,
                     status: session.status,
+                    kind: protocol::SessionKind::Pty,
+                    provider_session_id: None,
+                    agent_fd_count: 0,
+                    agent_spawn: None,
                 });
                 fds.push(fd);
             } else {
@@ -1581,6 +1751,58 @@ async fn handle_handoff(
         }
     }
     drop(mgr);
+
+    // Collect agent sessions (v2 payloads only — v1 daemons cannot adopt
+    // them; their children keep running detached with journals on disk).
+    if version == HANDOFF_VERSION {
+        let agent_records: Vec<_> = agent_sessions.lock().await.drain().collect();
+        for (id, mut record) in agent_records {
+            let fd_bundle = record.handoff_fds.take();
+            let (agent_fd_count, session_fds) = match (record.exited, fd_bundle) {
+                (false, Some(bundle)) => {
+                    let session_fds = bundle.as_vec();
+                    (session_fds.len() as u8, session_fds)
+                }
+                (_, bundle) => {
+                    if let Some(bundle) = bundle {
+                        bundle.close();
+                    }
+                    (0, Vec::new())
+                }
+            };
+            log::info!(
+                "[handoff] transferring agent session {} (pid={}, fds={:?})",
+                id,
+                record.pid,
+                session_fds
+            );
+            infos.push(protocol::HandoffSession {
+                session_id: id,
+                pid: record.pid,
+                cwd: record.params.cwd.clone(),
+                rows: 0,
+                cols: 0,
+                snapshot: None,
+                agent_provider: Some(record.provider),
+                status: record.status,
+                kind: protocol::SessionKind::Agent,
+                provider_session_id: record.provider_session_id.clone(),
+                agent_fd_count,
+                agent_spawn: Some(record.params.clone()),
+            });
+            fds.extend(session_fds);
+            // Dropping the record closes our stdin handle copy; the dup'd
+            // write end keeps the child's stdin pipe open for the new daemon.
+            // Reader threads exit on their next registry lookup; a line
+            // consumed but not yet journaled in that window is lost — the
+            // same narrow race PTY handoff accepts.
+        }
+    } else if !agent_sessions.lock().await.is_empty() {
+        log::warn!(
+            "[handoff] peer requested v{} handoff; agent sessions are not transferable and stay orphaned",
+            version
+        );
+    }
 
     log::info!(
         "[handoff] collected {} live sessions ({} dead)",
@@ -2180,6 +2402,10 @@ mod tests {
                 snapshot: None,
                 agent_provider: None,
                 status: SessionStatus::Idle,
+                kind: protocol::SessionKind::Pty,
+                provider_session_id: None,
+                agent_fd_count: 0,
+                agent_spawn: None,
             }],
         })
         .unwrap();

@@ -7,28 +7,32 @@ import { z } from "zod";
 import { readKannaRepoConfig } from "../config";
 import { resolveKdContext, type KdContext } from "../context";
 import { cleanWorkspace } from "../runtime/clean";
-import { deployFirebaseCloud } from "../runtime/cloud-deploy";
+import { buildRelayProvisionPlan, deployFirebaseCloud } from "../runtime/cloud-deploy";
 import {
   buildCloudEmulatorTestCommand,
   buildCloudSmokeCommand,
   buildCloudSmokeEnv,
   requireCloudSmokeEnv,
 } from "../runtime/cloud-test";
-import {
-  applyCloudTestCredentialEnv,
-  applyProductionCloudEnv,
-  readCloudTestCredentials,
-} from "../runtime/cloud-creds";
 import { buildLanLabPlan, parseLanLabInventory } from "../runtime/lan-lab";
 import { buildLanLabScenarioCommand } from "../runtime/lan-lab-runner";
+import { selectPreferredLanAddress } from "../runtime/lan-address";
 import { buildDevPlan, buildProductionMobilePlan } from "../runtime/dev-plan";
+import { resolveKdEnvironment } from "../runtime/environment";
 import { assertNotProductionDb, resetSqliteDb, seedSqliteDb, type DevDbTarget } from "../runtime/db";
 import { killWorkspaceDaemons } from "../runtime/daemon";
 import { checkRequiredCommands } from "../runtime/doctor";
 import { writeCargoConfig } from "../runtime/env-sync";
-import { buildFirebaseCommandEnv, buildFirebaseEmulatorArgs, formatMissingFirebaseEmulators, resolveFirebaseEnvFromReference, writeFirebaseEmulatorConfig } from "../runtime/firebase";
+import { buildFirebaseCommandEnv, buildFirebaseEmulatorArgs, formatMissingFirebaseEmulators, resolveFirebaseEnvFromReference, writeFirebaseEmulatorConfig, type FirebasePortInput } from "../runtime/firebase";
 import { resolveMobileServerUrl } from "../runtime/mobile";
 import { buildMobileDeviceSmokeCommand, buildMobileTestCommand } from "../runtime/mobile-commands";
+import {
+  buildMobileDevicePrebuildCommand,
+  buildMobileDeviceRunCommand,
+  checkPhysicalDeviceRunPreflight,
+  resolveMobileNativeIdentity,
+  resolvePhysicalDevice
+} from "../runtime/mobile-device";
 import { buildConfigSchemaPages } from "../runtime/pages";
 import { getPortStatuses } from "../runtime/port-status";
 import { nodeCommandRunner, type CommandRunner } from "../runtime/process";
@@ -52,7 +56,6 @@ export interface DevUpInput {
   daemonDir?: string;
   transferRoot?: string;
   firebaseEnvFrom?: string;
-  cloud?: "production";
 }
 
 export interface DevDownInput {
@@ -61,6 +64,11 @@ export interface DevDownInput {
 
 export interface MobileUpInput {
   production: boolean;
+  staging: boolean;
+}
+
+export interface MobileRunInput {
+  device: boolean;
 }
 
 export const devUpInputSchema = z.object({
@@ -73,8 +81,7 @@ export const devUpInputSchema = z.object({
   db: z.string().optional(),
   daemonDir: z.string().optional(),
   transferRoot: z.string().optional(),
-  firebaseEnvFrom: z.string().optional(),
-  cloud: z.literal("production").optional()
+  firebaseEnvFrom: z.string().optional()
 });
 
 const devDownInputSchema = z.object({
@@ -82,7 +89,12 @@ const devDownInputSchema = z.object({
 });
 
 const mobileUpInputSchema = z.object({
-  production: z.boolean().default(false)
+  production: z.boolean().default(false),
+  staging: z.boolean().default(false)
+});
+
+const mobileRunInputSchema = z.object({
+  device: z.boolean().default(false)
 });
 
 const logInputSchema = z.object({
@@ -134,6 +146,11 @@ const cloudDeployInputSchema = z.object({
   relay: z.boolean().default(false)
 });
 
+const cloudRelayProvisionInputSchema = z.object({
+  staging: z.boolean().default(false),
+  production: z.boolean().default(false)
+});
+
 export interface ExecutorInput {
   runner: CommandRunner;
   context: {
@@ -146,6 +163,10 @@ export interface ExecutorInput {
 
 export interface DevDownExecutionOptions {
   killProcess?: (pid: number) => void;
+}
+
+export interface MobileDeviceRunExecutionOptions {
+  resolveLanAddress?: () => string | undefined;
 }
 
 async function readGitValue(args: string[], cwd?: string): Promise<string> {
@@ -197,11 +218,7 @@ export async function executeDevStatus(input: ExecutorInput): Promise<TaskResult
 }
 
 async function executeDevUp(input: DevUpInput): Promise<TaskResult> {
-  // --cloud production points the dev instance at the real cloud: production
-  // Firebase web client config plus the deployed relay URL. Explicit env vars
-  // still win so individual pieces can be overridden.
-  const baseEnv = input.cloud === "production" ? applyProductionCloudEnv(process.env) : process.env;
-  const context = await resolveDefaultContext(baseEnv, {
+  const context = await resolveDefaultContext(process.env, {
     dbOverride: input.db,
     daemonDirOverride: input.daemonDir,
     transferRootOverride: input.transferRoot,
@@ -303,8 +320,46 @@ export async function executeProductionMobileUpWithContext(
   input: MobileUpInput,
   executor: ExecutorInput
 ): Promise<TaskResult> {
-  if (!input.production) {
-    throw new Error("mobile.up currently supports --production only.");
+  if (input.production && input.staging) {
+    throw new Error("mobile.up accepts only one of --production or --staging.");
+  }
+  if (!input.production && !input.staging) {
+    throw new Error("mobile.up requires --production or --staging.");
+  }
+
+  if (input.staging) {
+    const staging = resolveKdEnvironment("staging");
+    const env = {
+      ...executor.context.env,
+      KANNA_CLOUD_ENV: "staging",
+      KANNA_APP_ENV: executor.context.env.KANNA_APP_ENV ?? "staging"
+    };
+    writeTauriLocalConfig(executor.context.repoRoot, requireNumberPort(executor.context.ports, "KANNA_DEV_PORT"));
+    const desktopPlan = buildDevPlan({
+      repoRoot: executor.context.repoRoot,
+      env,
+      mobile: false,
+      emulators: false,
+      firebaseConfigPath: "",
+      mobileServerUrl: resolveMobileServerUrl(env)
+    });
+    const mobilePlan = buildProductionMobilePlan({
+      repoRoot: executor.context.repoRoot,
+      env,
+      environment: "staging"
+    });
+    const plan = { windows: [...desktopPlan.windows, ...mobilePlan.windows] };
+
+    await startTmuxSession(executor.runner, executor.context.tmux, plan.windows);
+
+    return {
+      ok: true,
+      message: "Started mobile against staging cloud environment.",
+      data: {
+        relayUrl: staging.relayUrl,
+        windows: plan.windows.map((window) => window.name)
+      }
+    };
   }
 
   const [status, serverConfigPath] = await Promise.all([
@@ -319,7 +374,8 @@ export async function executeProductionMobileUpWithContext(
   };
   const plan = buildProductionMobilePlan({
     repoRoot: executor.context.repoRoot,
-    env
+    env,
+    environment: "production"
   });
 
   await startTmuxSession(executor.runner, executor.context.tmux, plan.windows);
@@ -342,6 +398,211 @@ export async function executeProductionMobileUpWithContext(
 async function executeProductionMobileUp(input: MobileUpInput): Promise<TaskResult> {
   const context = await resolveDefaultContext(process.env);
   return executeProductionMobileUpWithContext(input, {
+    runner: nodeCommandRunner,
+    context: {
+      repoRoot: context.repoRoot,
+      tmux: context.tmux,
+      ports: context.ports,
+      env: context.env
+    }
+  });
+}
+
+function requireMobileDeviceLanHost(
+  options: MobileDeviceRunExecutionOptions = {}
+): string {
+  const lanHost = (options.resolveLanAddress ?? selectPreferredLanAddress)();
+  if (!lanHost) {
+    throw new Error(
+      "Could not determine a Mac LAN IP address for physical-device mobile run. " +
+        "Connect the Mac and iPhone to the same network before running kd mobile run --device."
+    );
+  }
+  return lanHost;
+}
+
+function formatPhysicalDevicePreflight(checks: Awaited<ReturnType<typeof checkPhysicalDeviceRunPreflight>>["checks"]): string {
+  return checks.map((check) => `${check.ok ? "OK" : "FAIL"} ${check.name}: ${check.message}`).join("\n");
+}
+
+function requireNumberPort(ports: Partial<KdPorts>, key: keyof KdPorts): number {
+  const port = ports[key];
+  if (typeof port !== "number") {
+    throw new Error(`${key} is required.`);
+  }
+  return port;
+}
+
+function requireMobileDeviceDevPorts(ports: Partial<KdPorts>): FirebasePortInput & { KANNA_DEV_PORT: number } {
+  return {
+    KANNA_DEV_PORT: requireNumberPort(ports, "KANNA_DEV_PORT"),
+    KANNA_FIREBASE_AUTH_PORT: requireNumberPort(ports, "KANNA_FIREBASE_AUTH_PORT"),
+    KANNA_FIREBASE_FIRESTORE_PORT: requireNumberPort(ports, "KANNA_FIREBASE_FIRESTORE_PORT"),
+    KANNA_FIREBASE_FUNCTIONS_PORT: requireNumberPort(ports, "KANNA_FIREBASE_FUNCTIONS_PORT"),
+    KANNA_FIREBASE_UI_PORT: requireNumberPort(ports, "KANNA_FIREBASE_UI_PORT")
+  };
+}
+
+export async function executeMobileDeviceRunWithContext(
+  input: MobileRunInput,
+  executor: ExecutorInput,
+  options: MobileDeviceRunExecutionOptions = {}
+): Promise<TaskResult> {
+  if (!input.device) {
+    throw new Error("mobile.run requires --device.");
+  }
+
+  const lanHost = requireMobileDeviceLanHost(options);
+  const device = await resolvePhysicalDevice(executor.runner, {
+    requestedUdid: executor.context.env.KANNA_IOS_DEVICE_UDID?.trim() || undefined,
+    requestedName: executor.context.env.KANNA_IOS_PHYSICAL_DEVICE_NAME?.trim() || undefined
+  });
+  const env: NodeJS.ProcessEnv = {
+    ...executor.context.env,
+    KANNA_APP_ENV: executor.context.env.KANNA_APP_ENV ?? "dev",
+    KANNA_IOS_DEVICE_UDID: device.udid
+  };
+  const devPorts = requireMobileDeviceDevPorts(executor.context.ports);
+  const firebaseConfigPath = writeFirebaseEmulatorConfig(executor.context.repoRoot, devPorts);
+  writeTauriLocalConfig(executor.context.repoRoot, devPorts.KANNA_DEV_PORT);
+  const plan = buildDevPlan({
+    repoRoot: executor.context.repoRoot,
+    env,
+    mobile: true,
+    emulators: true,
+    firebaseConfigPath,
+    mobileServerUrl: resolveMobileServerUrl(env),
+    resolveLanAddress: () => lanHost
+  });
+
+  await startTmuxSession(executor.runner, executor.context.tmux, plan.windows);
+
+  const metroPort = Number.parseInt(env.KANNA_MOBILE_PORT ?? "8081", 10);
+  if (Number.isNaN(metroPort)) {
+    throw new Error(`KANNA_MOBILE_PORT must be an integer, got: ${env.KANNA_MOBILE_PORT}`);
+  }
+
+  const nativeIdentity = resolveMobileNativeIdentity(env);
+  const preflight = await checkPhysicalDeviceRunPreflight(executor.runner, {
+    bundleId: nativeIdentity.bundleId,
+    device,
+    lanHost,
+    metroPort
+  });
+  const prebuildCommand = buildMobileDevicePrebuildCommand({
+    repoRoot: executor.context.repoRoot,
+    nativeIdentity
+  });
+  const prebuildResult = await executor.runner.run(prebuildCommand.command, prebuildCommand.args, {
+    cwd: prebuildCommand.cwd,
+    env: { ...env, ...prebuildCommand.env },
+    streamOutput: true
+  });
+  if (prebuildResult.exitCode !== 0) {
+    return {
+      ok: false,
+      message:
+        prebuildResult.stderr ||
+        prebuildResult.stdout ||
+        `Failed to prebuild Kanna mobile for ${nativeIdentity.bundleId}.`,
+      data: {
+        bundleId: nativeIdentity.bundleId,
+        device,
+        metroUrl: preflight.metroUrl,
+        preflight,
+        windows: plan.windows.map((window) => window.name)
+      }
+    };
+  }
+
+  const runCommand = buildMobileDeviceRunCommand({
+    repoRoot: executor.context.repoRoot,
+    deviceUdid: device.udid,
+    lanHost,
+    metroPort,
+    nativeIdentity
+  });
+  const runResult = await executor.runner.run(runCommand.command, runCommand.args, {
+    cwd: runCommand.cwd,
+    env: { ...env, ...runCommand.env },
+    streamOutput: true
+  });
+
+  return {
+    ok: runResult.exitCode === 0,
+    message:
+      runResult.exitCode === 0
+        ? `Launched Kanna mobile on ${device.name}. Metro: ${preflight.metroUrl}\n${formatPhysicalDevicePreflight(preflight.checks)}`
+        : runResult.stderr || runResult.stdout || `Failed to launch Kanna mobile on ${device.name}. Metro: ${preflight.metroUrl}`,
+    data: {
+      bundleId: nativeIdentity.bundleId,
+      device,
+      metroUrl: preflight.metroUrl,
+      preflight,
+      windows: plan.windows.map((window) => window.name)
+    }
+  };
+}
+
+export async function executeMobileDeviceDoctorWithContext(
+  input: MobileRunInput,
+  executor: ExecutorInput,
+  options: MobileDeviceRunExecutionOptions = {}
+): Promise<TaskResult> {
+  if (!input.device) {
+    throw new Error("mobile.doctor requires --device.");
+  }
+
+  const lanHost = requireMobileDeviceLanHost(options);
+  const device = await resolvePhysicalDevice(executor.runner, {
+    requestedUdid: executor.context.env.KANNA_IOS_DEVICE_UDID?.trim() || undefined,
+    requestedName: executor.context.env.KANNA_IOS_PHYSICAL_DEVICE_NAME?.trim() || undefined
+  });
+  const metroPort = Number.parseInt(executor.context.env.KANNA_MOBILE_PORT ?? "8081", 10);
+  if (Number.isNaN(metroPort)) {
+    throw new Error(`KANNA_MOBILE_PORT must be an integer, got: ${executor.context.env.KANNA_MOBILE_PORT}`);
+  }
+  const nativeIdentity = resolveMobileNativeIdentity({
+    ...executor.context.env,
+    KANNA_APP_ENV: executor.context.env.KANNA_APP_ENV ?? "dev"
+  });
+  const preflight = await checkPhysicalDeviceRunPreflight(executor.runner, {
+    bundleId: nativeIdentity.bundleId,
+    device,
+    lanHost,
+    metroPort
+  });
+
+  return {
+    ok: preflight.ok,
+    message: `Physical-device mobile doctor for ${device.name}. Metro: ${preflight.metroUrl}\n${formatPhysicalDevicePreflight(preflight.checks)}`,
+    data: {
+      bundleId: nativeIdentity.bundleId,
+      device,
+      metroUrl: preflight.metroUrl,
+      preflight
+    }
+  };
+}
+
+async function executeMobileDeviceRun(input: MobileRunInput): Promise<TaskResult> {
+  const context = await resolveDefaultContext(process.env);
+  const dbTarget = devDbTarget(context);
+  assertNotProductionDb(dbTarget);
+  return executeMobileDeviceRunWithContext(input, {
+    runner: nodeCommandRunner,
+    context: {
+      repoRoot: context.repoRoot,
+      tmux: context.tmux,
+      ports: context.ports,
+      env: context.env
+    }
+  });
+}
+
+async function executeMobileDeviceDoctor(input: MobileRunInput): Promise<TaskResult> {
+  const context = await resolveDefaultContext(process.env);
+  return executeMobileDeviceDoctorWithContext(input, {
     runner: nodeCommandRunner,
     context: {
       repoRoot: context.repoRoot,
@@ -513,9 +774,21 @@ export const taskDefinitions = [
   },
   {
     id: "mobile.up",
-    description: "Start Kanna mobile against the installed production desktop app.",
+    description: "Start Kanna mobile against production or staging cloud.",
     inputSchema: mobileUpInputSchema,
     execute: async (_context, input) => executeProductionMobileUp(mobileUpInputSchema.parse(input))
+  },
+  {
+    id: "mobile.run",
+    description: "Build, install, and launch Kanna mobile on a physical iOS device.",
+    inputSchema: mobileRunInputSchema,
+    execute: async (_context, input) => executeMobileDeviceRun(mobileRunInputSchema.parse(input))
+  },
+  {
+    id: "mobile.doctor",
+    description: "Check physical iOS device mobile development readiness.",
+    inputSchema: mobileRunInputSchema,
+    execute: async (_context, input) => executeMobileDeviceDoctor(mobileRunInputSchema.parse(input))
   },
   {
     id: "emulators.up",
@@ -615,6 +888,7 @@ export const taskDefinitions = [
     inputSchema: emptyInputSchema,
     execute: async () => {
       const context = await resolveDefaultContext(process.env);
+      context.env.KANNA_APP_ENV = context.env.KANNA_APP_ENV ?? "dev";
       context.env.KANNA_E2E_DESKTOP_SERVER_URL = resolveMobileServerUrl(context.env);
       const command = buildMobileDeviceSmokeCommand(context.repoRoot);
       return runBuiltCommand(command.command, command.args, context.repoRoot, context.env);
@@ -769,16 +1043,23 @@ export const taskDefinitions = [
   },
   {
     id: "cloud.relay-provision",
-    description: "One-time provisioning of the kanna-relay VM (SA, static IP, firewall, e2-micro).",
-    inputSchema: emptyInputSchema,
-    execute: async () => {
-      const context = await resolveDefaultContext(process.env);
-      return runBuiltCommand(
-        "bash",
-        ["services/relay/deploy/provision.sh"],
-        context.repoRoot,
-        context.env
-      );
+    description: "Build the relay VM provisioning command plan.",
+    inputSchema: cloudRelayProvisionInputSchema,
+    execute: async (_context, input) => {
+      const parsed = cloudRelayProvisionInputSchema.parse(input);
+      if (parsed.staging && parsed.production) {
+        return { ok: false, message: "cloud relay-provision accepts only one of --staging or --production." };
+      }
+      if (!parsed.staging && !parsed.production) {
+        return { ok: false, message: "cloud relay-provision requires --staging or --production." };
+      }
+      const environment = parsed.staging ? "staging" : "production";
+      const plan = buildRelayProvisionPlan({ environment });
+      return {
+        ok: true,
+        message: formatJsonResult(plan),
+        data: plan
+      };
     }
   },
   {
@@ -821,20 +1102,13 @@ export const taskDefinitions = [
     inputSchema: emptyInputSchema,
     execute: async () => {
       const context = await resolveDefaultContext(process.env);
-      // Credentials come from env when set, otherwise from the local-only
-      // ~/.kanna/dev/creds.toml; production Firebase client values default
-      // to the committed public web config.
-      let env: NodeJS.ProcessEnv;
       try {
-        env = applyProductionCloudEnv(
-          applyCloudTestCredentialEnv(context.env, readCloudTestCredentials()),
-        );
-        requireCloudSmokeEnv(env, "production");
+        requireCloudSmokeEnv(context.env, "production");
       } catch (error) {
         return { ok: false, message: error instanceof Error ? error.message : String(error) };
       }
       const [command, args] = buildCloudSmokeCommand();
-      return runBuiltCommand(command, args, context.repoRoot, buildCloudSmokeEnv(env, "production"));
+      return runBuiltCommand(command, args, context.repoRoot, buildCloudSmokeEnv(context.env, "production"));
     }
   },
   {

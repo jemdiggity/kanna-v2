@@ -1,0 +1,138 @@
+#!/usr/bin/env node
+
+export const BUFFY_USER = {
+  projectId: process.env.KANNA_STAGING_PROJECT_ID || "kanna-staging",
+  email: process.env.KANNA_STAGING_TEST_EMAIL || "glass_galleon.3m@icloud.com",
+  // The password is a real credential — NEVER commit it (this repo is public).
+  // Pass it at provision time via KANNA_STAGING_TEST_PASSWORD; the committed
+  // default is an empty placeholder that the real run requires you to override.
+  password: process.env.KANNA_STAGING_TEST_PASSWORD || "",
+  displayName: "Buffy the Bug Slayer",
+  photoURL: "file://services/firebase/emulator-seed/assets/buffy-avatar.jpg",
+  deviceToken: "staging-buffy-device-token",
+};
+
+export function buildDeviceDocument(uid, now = new Date()) {
+  return {
+    userId: uid,
+    email: BUFFY_USER.email,
+    displayName: BUFFY_USER.displayName,
+    environment: "staging",
+    updatedAt: now.toISOString(),
+  };
+}
+
+export function buildDryRunResult() {
+  const uid = "dry-run-buffy-user";
+  return {
+    projectId: BUFFY_USER.projectId,
+    uid,
+    email: BUFFY_USER.email,
+    displayName: BUFFY_USER.displayName,
+    photoURL: BUFFY_USER.photoURL,
+    devicePath: `devices/${BUFFY_USER.deviceToken}`,
+    deviceDocument: buildDeviceDocument(uid),
+    dryRun: true,
+  };
+}
+
+async function upsertBuffyUser({ admin, dryRun = false }) {
+  if (dryRun) {
+    return buildDryRunResult();
+  }
+
+  const auth = admin.auth();
+  const db = admin.firestore();
+  const user = await getOrCreateUser(auth, dryRun);
+  const deviceDocument = buildDeviceDocument(user.uid);
+
+  if (!dryRun) {
+    await db
+      .collection("devices")
+      .doc(BUFFY_USER.deviceToken)
+      .set(deviceDocument, { merge: true });
+  }
+
+  return {
+    projectId: BUFFY_USER.projectId,
+    uid: user.uid,
+    email: BUFFY_USER.email,
+    displayName: BUFFY_USER.displayName,
+    photoURL: BUFFY_USER.photoURL,
+    devicePath: `devices/${BUFFY_USER.deviceToken}`,
+    deviceDocument,
+    dryRun,
+  };
+}
+
+// Real Firebase Auth requires photoURL to be a valid http(s) URL. The seeded
+// avatar is a local file (file://...), which the emulator tolerates but real
+// Auth rejects (auth/invalid-photo-url), so only forward an actual http(s) URL
+// and otherwise omit it — the displayName carries the identity.
+function authProfilePhoto() {
+  return /^https?:\/\//i.test(BUFFY_USER.photoURL)
+    ? { photoURL: BUFFY_USER.photoURL }
+    : {};
+}
+
+async function getOrCreateUser(auth, dryRun) {
+  try {
+    const existing = await auth.getUserByEmail(BUFFY_USER.email);
+    if (!dryRun) {
+      await auth.updateUser(existing.uid, {
+        password: BUFFY_USER.password,
+        displayName: BUFFY_USER.displayName,
+        ...authProfilePhoto(),
+        emailVerified: true,
+      });
+    }
+    return { uid: existing.uid };
+  } catch (error) {
+    if (error?.code !== "auth/user-not-found") {
+      throw error;
+    }
+    if (dryRun) {
+      return { uid: "dry-run-buffy-user" };
+    }
+    const created = await auth.createUser({
+      email: BUFFY_USER.email,
+      password: BUFFY_USER.password,
+      displayName: BUFFY_USER.displayName,
+      ...authProfilePhoto(),
+      emailVerified: true,
+    });
+    return { uid: created.uid };
+  }
+}
+
+async function main(argv = process.argv.slice(2)) {
+  const dryRun = argv.includes("--dry-run");
+  if (dryRun) {
+    console.log(JSON.stringify(buildDryRunResult(), null, 2));
+    return;
+  }
+
+  if (!BUFFY_USER.password) {
+    throw new Error(
+      "Set KANNA_STAGING_TEST_PASSWORD (the Buffy staging password is not stored in the repo)."
+    );
+  }
+
+  const { default: admin } = await import("firebase-admin");
+
+  if (!admin.apps.length) {
+    admin.initializeApp({ projectId: BUFFY_USER.projectId });
+  }
+
+  const result = await upsertBuffyUser({ admin, dryRun });
+  console.log(JSON.stringify(result, null, 2));
+}
+
+if (import.meta.url === `file://${process.argv[1]}`) {
+  main().catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });
+}
+
+export { upsertBuffyUser };

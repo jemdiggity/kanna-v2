@@ -61,6 +61,20 @@ enum RepoCommands {
         #[arg(long)]
         server_url: Option<String>,
     },
+    /// Register an existing local git repository with the running desktop server
+    Add {
+        /// Existing local git repository path
+        #[arg(long)]
+        path: String,
+
+        /// Optional display name
+        #[arg(long)]
+        name: Option<String>,
+
+        /// Override the local Kanna server base URL
+        #[arg(long)]
+        server_url: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -76,6 +90,52 @@ enum TaskCommands {
         /// The task/pipeline_item ID
         #[arg(long)]
         task_id: String,
+
+        /// Override the local Kanna server base URL
+        #[arg(long)]
+        server_url: Option<String>,
+    },
+    /// Fetch one task by exact ID
+    Get {
+        /// The task/pipeline_item ID
+        #[arg(long)]
+        task_id: String,
+
+        /// Override the local Kanna server base URL
+        #[arg(long)]
+        server_url: Option<String>,
+    },
+    /// Wait for a task to finish or close
+    Wait {
+        /// The task/pipeline_item ID
+        #[arg(long)]
+        task_id: String,
+
+        /// Maximum seconds to wait
+        #[arg(long, default_value_t = 600)]
+        timeout_secs: u64,
+
+        /// Poll interval in seconds
+        #[arg(long, default_value_t = 3)]
+        poll_secs: u64,
+
+        /// Condition to wait for: finished or closed
+        #[arg(long, default_value = "finished")]
+        until: String,
+
+        /// Override the local Kanna server base URL
+        #[arg(long)]
+        server_url: Option<String>,
+    },
+    /// Print recent task logs
+    Logs {
+        /// The task/pipeline_item ID
+        #[arg(long)]
+        task_id: String,
+
+        /// Number of recent relevant log events
+        #[arg(long)]
+        tail: Option<usize>,
 
         /// Override the local Kanna server base URL
         #[arg(long)]
@@ -111,6 +171,10 @@ enum TaskCommands {
         #[arg(long)]
         agent_provider: Option<String>,
 
+        /// Task session type: "agent" for themed headless sessions or "pty" for raw terminal
+        #[arg(long)]
+        agent_type: Option<String>,
+
         /// Optional model override
         #[arg(long)]
         model: Option<String>,
@@ -126,6 +190,10 @@ enum TaskCommands {
         /// Task that blocks this task. Repeat to pass multiple blockers.
         #[arg(long)]
         blocker_task_id: Vec<String>,
+
+        /// Task to notify when this task reaches a terminal state
+        #[arg(long)]
+        notify_task: Option<String>,
     },
     /// Request a new revision task from an existing task branch
     RequestRevision {
@@ -201,12 +269,43 @@ enum TaskCommands {
         #[arg(long)]
         server_url: Option<String>,
     },
+    /// Close a task (kills its sessions and hides it from the sidebar)
+    Close {
+        /// The task/pipeline_item ID to close
+        #[arg(long)]
+        task_id: String,
+
+        /// Override the local Kanna server base URL
+        #[arg(long)]
+        server_url: Option<String>,
+    },
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
 struct RepoSummary {
     id: String,
     name: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct RepoDetail {
+    id: String,
+    path: String,
+    name: String,
+    default_branch: Option<String>,
+    hidden: Option<i64>,
+    sort_order: Option<i64>,
+    created_at: Option<String>,
+    last_opened_at: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct AddRepoRequest {
+    path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -216,7 +315,28 @@ struct TaskSummary {
     repo_id: String,
     title: String,
     stage: Option<String>,
+    activity: Option<String>,
     snippet: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct TaskDetail {
+    id: String,
+    repo_id: String,
+    title: String,
+    stage: Option<String>,
+    activity: Option<String>,
+    snippet: Option<String>,
+    agent_type: Option<String>,
+    agent_provider: Option<String>,
+    branch: Option<String>,
+    pr_url: Option<String>,
+    closed_at: Option<String>,
+    worktree_path: Option<String>,
+    commits_ahead: i64,
+    commits_behind: i64,
+    dirty: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -225,6 +345,7 @@ struct TaskStatusRow {
     id: String,
     repo_id: String,
     stage: String,
+    activity: String,
     title: String,
 }
 
@@ -242,6 +363,8 @@ struct CreateTaskRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     agent_provider: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    agent_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     permission_mode: Option<String>,
@@ -249,6 +372,8 @@ struct CreateTaskRequest {
     allowed_tools: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     blocker_task_ids: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    notify_task_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -258,6 +383,10 @@ struct CreateTaskResponse {
     repo_id: String,
     title: String,
     stage: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    agent_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    worktree_path: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -310,10 +439,12 @@ struct TaskCreateOptions {
     base_ref: Option<String>,
     stage: Option<String>,
     agent_provider: Option<String>,
+    agent_type: Option<String>,
     model: Option<String>,
     permission_mode: Option<String>,
     allowed_tool: Vec<String>,
     blocker_task_id: Vec<String>,
+    notify_task: Option<String>,
 }
 
 fn write_stage_result_to_db(
@@ -423,10 +554,12 @@ fn build_create_task_request(options: TaskCreateOptions) -> CreateTaskRequest {
         base_ref: options.base_ref,
         stage: options.stage,
         agent_provider: options.agent_provider,
+        agent_type: options.agent_type,
         model: options.model,
         permission_mode: options.permission_mode,
         allowed_tools: (!options.allowed_tool.is_empty()).then_some(options.allowed_tool),
         blocker_task_ids: (!options.blocker_task_id.is_empty()).then_some(options.blocker_task_id),
+        notify_task_id: options.notify_task,
     }
 }
 
@@ -457,16 +590,19 @@ fn build_request_revision_request(
 }
 
 fn build_send_task_input_request(message: String) -> TaskInputRequest {
-    let input = if message.ends_with('\n') {
-        message
-    } else {
-        format!("{message}\n")
-    };
-    TaskInputRequest { input }
+    // Send the message text as-is. Submitting it to the agent terminal (typing
+    // the text, then a discrete Enter keystroke) is the desktop server's job at
+    // /v1/tasks/{id}/input — keeping that policy server-side means kanna-cli,
+    // kanna-mcp, and the mobile app all submit consistently.
+    TaskInputRequest { input: message }
 }
 
 fn build_block_task_request(blocker_task_ids: Vec<String>) -> BlockTaskRequest {
     BlockTaskRequest { blocker_task_ids }
+}
+
+fn build_add_repo_request(path: String, name: Option<String>) -> AddRepoRequest {
+    AddRepoRequest { path, name }
 }
 
 fn parse_metadata_json(metadata: &Option<String>) -> Result<Option<Value>, String> {
@@ -482,8 +618,32 @@ fn join_server_url(base_url: &str, path: &str) -> String {
     format!("{}{}", base_url.trim_end_matches('/'), path)
 }
 
+fn encode_path_segment(value: &str) -> String {
+    value
+        .bytes()
+        .flat_map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                vec![byte as char]
+            }
+            _ => format!("%{byte:02X}").chars().collect(),
+        })
+        .collect()
+}
+
 fn task_list_path() -> &'static str {
     "/v1/tasks/recent"
+}
+
+fn task_get_path(task_id: &str) -> String {
+    format!("/v1/tasks/{}", encode_path_segment(task_id))
+}
+
+fn task_logs_path(task_id: &str, tail: Option<usize>) -> String {
+    let task_id = encode_path_segment(task_id);
+    match tail {
+        Some(tail) => format!("/v1/tasks/{task_id}/logs?tail={tail}"),
+        None => format!("/v1/tasks/{task_id}/logs"),
+    }
 }
 
 async fn get_json<T: DeserializeOwned>(base_url: &str, path: &str) -> Result<T, String> {
@@ -497,6 +657,26 @@ async fn get_json<T: DeserializeOwned>(base_url: &str, path: &str) -> Result<T, 
         .map_err(|e| format!("request failed: {e}"))?;
     response
         .json::<T>()
+        .await
+        .map_err(|e| format!("failed to decode response: {e}"))
+}
+
+async fn get_text(base_url: &str, path: &str) -> Result<String, String> {
+    let response = reqwest::Client::new()
+        .get(join_server_url(base_url, path))
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {e}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|e| format!("failed to read error body: {e}"));
+        return Err(format!("request failed with status {status}: {body}"));
+    }
+    response
+        .text()
         .await
         .map_err(|e| format!("failed to decode response: {e}"))
 }
@@ -548,8 +728,68 @@ async fn list_repos_via_api(base_url: &str) -> Result<Vec<RepoSummary>, String> 
     get_json(base_url, "/v1/repos").await
 }
 
+async fn add_repo_via_api(base_url: &str, request: &AddRepoRequest) -> Result<RepoDetail, String> {
+    post_json(base_url, "/v1/repos", request).await
+}
+
 async fn list_tasks_via_api(base_url: &str) -> Result<Vec<TaskSummary>, String> {
     get_json(base_url, task_list_path()).await
+}
+
+async fn get_task_via_api(base_url: &str, task_id: &str) -> Result<TaskDetail, String> {
+    get_json(base_url, &task_get_path(task_id)).await
+}
+
+async fn task_logs_via_api(
+    base_url: &str,
+    task_id: &str,
+    tail: Option<usize>,
+) -> Result<String, String> {
+    get_text(base_url, &task_logs_path(task_id, tail)).await
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WaitUntil {
+    Finished,
+    Closed,
+}
+
+fn parse_wait_until(value: &str) -> Result<WaitUntil, String> {
+    match value {
+        "finished" => Ok(WaitUntil::Finished),
+        "closed" => Ok(WaitUntil::Closed),
+        other => Err(format!("--until must be finished or closed, got {other}")),
+    }
+}
+
+fn task_matches_wait_until(task: &TaskDetail, until: WaitUntil) -> bool {
+    match until {
+        WaitUntil::Finished => {
+            task.closed_at.is_some() || task.activity.as_deref() == Some("unread")
+        }
+        WaitUntil::Closed => task.closed_at.is_some(),
+    }
+}
+
+async fn wait_task_via_api(
+    base_url: &str,
+    task_id: &str,
+    timeout_secs: u64,
+    poll_secs: u64,
+    until: WaitUntil,
+) -> Result<TaskDetail, String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    let poll_interval = std::time::Duration::from_secs(poll_secs.max(1));
+    loop {
+        let task = get_task_via_api(base_url, task_id).await?;
+        if task_matches_wait_until(&task, until) {
+            return Ok(task);
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(format!("timed out waiting for task {task_id}"));
+        }
+        tokio::time::sleep(poll_interval).await;
+    }
 }
 
 async fn create_task_via_api(
@@ -629,6 +869,15 @@ async fn unblock_task_via_api(base_url: &str, task_id: &str) -> Result<TaskActio
     .await
 }
 
+async fn close_task_via_api(base_url: &str, task_id: &str) -> Result<(), String> {
+    post_no_content_json(
+        base_url,
+        &format!("/v1/tasks/{task_id}/actions/close"),
+        &serde_json::json!({}),
+    )
+    .await
+}
+
 fn print_json<T: Serialize>(value: &T) -> Result<(), String> {
     let rendered =
         serde_json::to_string_pretty(value).map_err(|e| format!("failed to render json: {e}"))?;
@@ -641,6 +890,17 @@ fn task_status_row(task: &TaskSummary) -> TaskStatusRow {
         id: task.id.clone(),
         repo_id: task.repo_id.clone(),
         stage: task.stage.clone().unwrap_or_default(),
+        activity: task.activity.clone().unwrap_or_default(),
+        title: task.title.clone(),
+    }
+}
+
+fn task_detail_status_row(task: &TaskDetail) -> TaskStatusRow {
+    TaskStatusRow {
+        id: task.id.clone(),
+        repo_id: task.repo_id.clone(),
+        stage: task.stage.clone().unwrap_or_default(),
+        activity: task.activity.clone().unwrap_or_default(),
         title: task.title.clone(),
     }
 }
@@ -654,6 +914,7 @@ fn format_task_list(tasks: &[TaskSummary]) -> Result<String, String> {
         .map_err(|e| format!("failed to render json: {e}"))
 }
 
+#[cfg(test)]
 fn find_task_status_row(tasks: &[TaskSummary], task_id: &str) -> Option<TaskStatusRow> {
     tasks
         .iter()
@@ -665,8 +926,9 @@ fn format_task_status(task: &TaskStatusRow) -> Result<String, String> {
     serde_json::to_string_pretty(task).map_err(|e| format!("failed to render json: {e}"))
 }
 
+#[cfg(test)]
 fn task_not_found_error(task_id: &str) -> String {
-    format!("Task '{task_id}' was not found in recent tasks")
+    format!("Task '{task_id}' was not found")
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -779,6 +1041,24 @@ async fn main() {
                     process::exit(1);
                 }
             }
+            RepoCommands::Add {
+                path,
+                name,
+                server_url,
+            } => {
+                let base_url = resolve_server_base_url_from_env(server_url.as_deref());
+                let request = build_add_repo_request(path, name);
+                let repo = add_repo_via_api(&base_url, &request)
+                    .await
+                    .unwrap_or_else(|e| {
+                        eprintln!("Error: {e}");
+                        process::exit(1);
+                    });
+                if let Err(e) = print_json(&repo) {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                }
+            }
         },
         Commands::Task { command } => match command {
             TaskCommands::List { server_url } => {
@@ -798,19 +1078,71 @@ async fn main() {
                 server_url,
             } => {
                 let base_url = resolve_server_base_url_from_env(server_url.as_deref());
-                let tasks = list_tasks_via_api(&base_url).await.unwrap_or_else(|e| {
-                    eprintln!("Error: {e}");
-                    process::exit(1);
-                });
-                let row = find_task_status_row(&tasks, &task_id).unwrap_or_else(|| {
-                    eprintln!("Error: {}", task_not_found_error(&task_id));
-                    process::exit(1);
-                });
+                let task = get_task_via_api(&base_url, &task_id)
+                    .await
+                    .unwrap_or_else(|e| {
+                        eprintln!("Error: {e}");
+                        process::exit(1);
+                    });
+                let row = task_detail_status_row(&task);
                 let rendered = format_task_status(&row).unwrap_or_else(|e| {
                     eprintln!("Error: {e}");
                     process::exit(1);
                 });
                 println!("{rendered}");
+            }
+            TaskCommands::Get {
+                task_id,
+                server_url,
+            } => {
+                let base_url = resolve_server_base_url_from_env(server_url.as_deref());
+                let task = get_task_via_api(&base_url, &task_id)
+                    .await
+                    .unwrap_or_else(|e| {
+                        eprintln!("Error: {e}");
+                        process::exit(1);
+                    });
+                if let Err(e) = print_json(&task) {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                }
+            }
+            TaskCommands::Wait {
+                task_id,
+                timeout_secs,
+                poll_secs,
+                until,
+                server_url,
+            } => {
+                let until = parse_wait_until(&until).unwrap_or_else(|e| {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                });
+                let base_url = resolve_server_base_url_from_env(server_url.as_deref());
+                let task = wait_task_via_api(&base_url, &task_id, timeout_secs, poll_secs, until)
+                    .await
+                    .unwrap_or_else(|e| {
+                        eprintln!("Error: {e}");
+                        process::exit(1);
+                    });
+                if let Err(e) = print_json(&task) {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                }
+            }
+            TaskCommands::Logs {
+                task_id,
+                tail,
+                server_url,
+            } => {
+                let base_url = resolve_server_base_url_from_env(server_url.as_deref());
+                let logs = task_logs_via_api(&base_url, &task_id, tail)
+                    .await
+                    .unwrap_or_else(|e| {
+                        eprintln!("Error: {e}");
+                        process::exit(1);
+                    });
+                println!("{logs}");
             }
             TaskCommands::Create {
                 repo_id,
@@ -820,10 +1152,12 @@ async fn main() {
                 base_ref,
                 stage,
                 agent_provider,
+                agent_type,
                 model,
                 permission_mode,
                 allowed_tool,
                 blocker_task_id,
+                notify_task,
             } => {
                 let base_url = resolve_server_base_url_from_env(server_url.as_deref());
                 let request = build_create_task_request(TaskCreateOptions {
@@ -833,10 +1167,12 @@ async fn main() {
                     base_ref,
                     stage,
                     agent_provider,
+                    agent_type,
                     model,
                     permission_mode,
                     allowed_tool,
                     blocker_task_id,
+                    notify_task,
                 });
                 let created = create_task_via_api(&base_url, &request)
                     .await
@@ -960,6 +1296,24 @@ async fn main() {
                     process::exit(1);
                 }
             }
+            TaskCommands::Close {
+                task_id,
+                server_url,
+            } => {
+                let base_url = resolve_server_base_url_from_env(server_url.as_deref());
+                close_task_via_api(&base_url, &task_id)
+                    .await
+                    .unwrap_or_else(|e| {
+                        eprintln!("Error: {e}");
+                        process::exit(1);
+                    });
+                if let Err(e) =
+                    print_json(&serde_json::json!({ "taskId": task_id, "closed": true }))
+                {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                }
+            }
         },
     }
 }
@@ -967,13 +1321,17 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        advance_stage_via_api, block_task_via_api, build_block_task_request,
-        build_complete_stage_request, build_create_task_request, build_request_revision_request,
-        build_send_task_input_request, create_task_via_api, find_task_status_row, format_task_list,
-        format_task_status, resolve_optional_server_base_url, resolve_server_base_url,
-        resolve_stage_db_path, send_task_input_via_api, task_list_path, task_not_found_error,
-        unblock_task_via_api, TaskCreateOptions, TaskInputResponse, TaskSummary,
+        advance_stage_via_api, block_task_via_api, build_add_repo_request,
+        build_block_task_request, build_complete_stage_request, build_create_task_request,
+        build_request_revision_request, build_send_task_input_request, close_task_via_api,
+        create_task_via_api, find_task_status_row, format_task_list, format_task_status,
+        get_task_via_api, parse_wait_until, resolve_optional_server_base_url,
+        resolve_server_base_url, resolve_stage_db_path, send_task_input_via_api,
+        task_get_path, task_list_path, task_logs_path, task_matches_wait_until,
+        task_not_found_error, unblock_task_via_api, TaskCreateOptions, TaskDetail,
+        TaskInputResponse, TaskSummary, WaitUntil,
     };
+    use clap::Parser;
     use serde_json::json;
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -1079,13 +1437,141 @@ mod tests {
         assert_eq!(
             serde_json::to_value(request).unwrap(),
             json!({
-                "input": "Please fix the failing typecheck\n",
+                "input": "Please fix the failing typecheck",
             })
         );
     }
 
     #[test]
-    fn preserves_existing_send_task_input_newline() {
+    fn builds_add_repo_payload() {
+        let request =
+            build_add_repo_request("/Users/me/project".to_string(), Some("Project".to_string()));
+
+        assert_eq!(
+            serde_json::to_value(request).unwrap(),
+            json!({
+                "path": "/Users/me/project",
+                "name": "Project",
+            })
+        );
+    }
+
+    #[test]
+    fn parses_new_repo_and_task_subcommands() {
+        let cli = super::Cli::try_parse_from([
+            "kanna-cli",
+            "repo",
+            "add",
+            "--path",
+            "/tmp/project",
+            "--name",
+            "Project",
+            "--server-url",
+            "http://127.0.0.1:48120",
+        ])
+        .unwrap();
+        match cli.command {
+            super::Commands::Repo {
+                command:
+                    super::RepoCommands::Add {
+                        path,
+                        name,
+                        server_url,
+                    },
+            } => {
+                assert_eq!(path, "/tmp/project");
+                assert_eq!(name.as_deref(), Some("Project"));
+                assert_eq!(server_url.as_deref(), Some("http://127.0.0.1:48120"));
+            }
+            _ => panic!("expected repo add command"),
+        }
+
+        let cli = super::Cli::try_parse_from([
+            "kanna-cli",
+            "task",
+            "wait",
+            "--task-id",
+            "task-1",
+            "--timeout-secs",
+            "5",
+            "--poll-secs",
+            "1",
+            "--until",
+            "closed",
+        ])
+        .unwrap();
+        match cli.command {
+            super::Commands::Task {
+                command:
+                    super::TaskCommands::Wait {
+                        task_id,
+                        timeout_secs,
+                        poll_secs,
+                        until,
+                        ..
+                    },
+            } => {
+                assert_eq!(task_id, "task-1");
+                assert_eq!(timeout_secs, 5);
+                assert_eq!(poll_secs, 1);
+                assert_eq!(until, "closed");
+            }
+            _ => panic!("expected task wait command"),
+        }
+
+        let cli = super::Cli::try_parse_from([
+            "kanna-cli",
+            "task",
+            "create",
+            "--repo-id",
+            "repo-1",
+            "--prompt",
+            "Child",
+            "--notify-task",
+            "task-parent",
+        ])
+        .unwrap();
+        match cli.command {
+            super::Commands::Task {
+                command:
+                    super::TaskCommands::Create {
+                        repo_id,
+                        prompt,
+                        notify_task,
+                        ..
+                    },
+            } => {
+                assert_eq!(repo_id, "repo-1");
+                assert_eq!(prompt, "Child");
+                assert_eq!(notify_task.as_deref(), Some("task-parent"));
+            }
+            _ => panic!("expected task create command"),
+        }
+
+        let cli = super::Cli::try_parse_from([
+            "kanna-cli",
+            "task",
+            "logs",
+            "--task-id",
+            "task-1",
+            "--tail",
+            "25",
+        ])
+        .unwrap();
+        match cli.command {
+            super::Commands::Task {
+                command: super::TaskCommands::Logs { task_id, tail, .. },
+            } => {
+                assert_eq!(task_id, "task-1");
+                assert_eq!(tail, Some(25));
+            }
+            _ => panic!("expected task logs command"),
+        }
+    }
+
+    #[test]
+    fn send_task_input_payload_passes_message_through_unchanged() {
+        // The server owns submission; the CLI sends the message verbatim.
         let request = build_send_task_input_request("continue\n".to_string());
 
         assert_eq!(
@@ -1106,7 +1592,7 @@ mod tests {
             let bytes_read = stream.read(&mut buffer).unwrap();
             let request = String::from_utf8_lossy(&buffer[..bytes_read]);
             assert!(request.starts_with("POST /v1/tasks/task-1/input HTTP/1.1"));
-            assert!(request.contains(r#"{"input":"continue\n"}"#));
+            assert!(request.contains(r#"{"input":"continue"}"#));
 
             stream
                 .write_all(b"HTTP/1.1 204 No Content\r\ncontent-length: 0\r\n\r\n")
@@ -1163,10 +1649,12 @@ mod tests {
             base_ref: Some("origin/main".to_string()),
             stage: Some("pr".to_string()),
             agent_provider: Some("claude".to_string()),
+            agent_type: Some("agent".to_string()),
             model: Some("sonnet".to_string()),
             permission_mode: Some("dontAsk".to_string()),
             allowed_tool: vec!["Bash".to_string(), "Edit".to_string()],
             blocker_task_id: vec!["blocker-1".to_string(), "blocker-2".to_string()],
+            notify_task: Some("orchestrator-1".to_string()),
         });
 
         assert_eq!(
@@ -1178,16 +1666,63 @@ mod tests {
                 "baseRef": "origin/main",
                 "stage": "pr",
                 "agentProvider": "claude",
+                "agentType": "agent",
                 "model": "sonnet",
                 "permissionMode": "dontAsk",
                 "allowedTools": ["Bash", "Edit"],
                 "blockerTaskIds": ["blocker-1", "blocker-2"],
+                "notifyTaskId": "orchestrator-1",
             })
         );
     }
     #[test]
     fn task_list_uses_recent_tasks_endpoint() {
         assert_eq!(task_list_path(), "/v1/tasks/recent");
+    }
+
+    #[test]
+    fn task_get_uses_single_task_endpoint() {
+        assert_eq!(task_get_path("task 1"), "/v1/tasks/task%201");
+    }
+
+    #[test]
+    fn task_logs_uses_task_logs_endpoint() {
+        assert_eq!(
+            task_logs_path("task 1", Some(25)),
+            "/v1/tasks/task%201/logs?tail=25"
+        );
+        assert_eq!(task_logs_path("task-1", None), "/v1/tasks/task-1/logs");
+    }
+
+    #[test]
+    fn wait_until_matches_finished_and_closed_states() {
+        let mut task: TaskDetail = serde_json::from_value(json!({
+            "id": "task-1",
+            "repoId": "repo-1",
+            "title": "Wait",
+            "stage": "in progress",
+            "activity": "working",
+            "snippet": null,
+            "agentType": "pty",
+            "agentProvider": "claude",
+            "branch": "task-task-1",
+            "prUrl": null,
+            "closedAt": null,
+            "worktreePath": null,
+            "commitsAhead": 0,
+            "commitsBehind": 0,
+            "dirty": false
+        }))
+        .unwrap();
+
+        assert_eq!(parse_wait_until("finished"), Ok(WaitUntil::Finished));
+        assert_eq!(parse_wait_until("closed"), Ok(WaitUntil::Closed));
+        assert!(!task_matches_wait_until(&task, WaitUntil::Finished));
+        task.activity = Some("unread".to_string());
+        assert!(task_matches_wait_until(&task, WaitUntil::Finished));
+        assert!(!task_matches_wait_until(&task, WaitUntil::Closed));
+        task.closed_at = Some("2026-06-13 00:00:00".to_string());
+        assert!(task_matches_wait_until(&task, WaitUntil::Closed));
     }
 
     #[test]
@@ -1198,13 +1733,46 @@ mod tests {
             "title": "Add status command",
             "stage": "in progress",
             "snippet": "working...",
+            "activity": "working",
         }))
         .unwrap();
 
         assert_eq!(task.id, "task-1");
         assert_eq!(task.repo_id, "repo-1");
         assert_eq!(task.stage.as_deref(), Some("in progress"));
+        assert_eq!(task.activity.as_deref(), Some("working"));
         assert_eq!(task.title, "Add status command");
+    }
+
+    #[test]
+    fn parses_task_detail_response_shape() {
+        let task: TaskDetail = serde_json::from_value(json!({
+            "id": "task-1",
+            "repoId": "repo-1",
+            "title": "Add status command",
+            "stage": "in progress",
+            "activity": "working",
+            "snippet": "working...",
+            "agentType": "pty",
+            "agentProvider": "claude",
+            "branch": "task-task-1",
+            "prUrl": null,
+            "closedAt": null,
+            "worktreePath": "/tmp/worktree",
+            "commitsAhead": 2,
+            "commitsBehind": 1,
+            "dirty": true
+        }))
+        .unwrap();
+
+        assert_eq!(task.id, "task-1");
+        assert_eq!(task.activity.as_deref(), Some("working"));
+        assert_eq!(task.agent_provider.as_deref(), Some("claude"));
+        assert_eq!(task.branch.as_deref(), Some("task-task-1"));
+        assert_eq!(task.worktree_path.as_deref(), Some("/tmp/worktree"));
+        assert_eq!(task.commits_ahead, 2);
+        assert_eq!(task.commits_behind, 1);
+        assert!(task.dirty);
     }
 
     #[test]
@@ -1215,6 +1783,7 @@ mod tests {
             title: "Add status command".to_string(),
             stage: Some("in progress".to_string()),
             snippet: Some("working...".to_string()),
+            activity: Some("working".to_string()),
         }];
 
         assert_eq!(
@@ -1224,6 +1793,7 @@ mod tests {
                     "id": "task-1",
                     "repoId": "repo-1",
                     "stage": "in progress",
+                    "activity": "working",
                     "title": "Add status command",
                 }
             ])
@@ -1239,6 +1809,7 @@ mod tests {
                 title: "Wanted".to_string(),
                 stage: Some("pr".to_string()),
                 snippet: None,
+                activity: Some("unread".to_string()),
             },
             TaskSummary {
                 id: "task-123-extra".to_string(),
@@ -1246,6 +1817,7 @@ mod tests {
                 title: "Wrong".to_string(),
                 stage: Some("in progress".to_string()),
                 snippet: None,
+                activity: Some("working".to_string()),
             },
         ];
 
@@ -1256,6 +1828,7 @@ mod tests {
                 "id": "task-123",
                 "repoId": "repo-1",
                 "stage": "pr",
+                "activity": "unread",
                 "title": "Wanted",
             })
         );
@@ -1265,7 +1838,7 @@ mod tests {
     fn reports_clear_task_not_found_error() {
         assert_eq!(
             task_not_found_error("missing-task"),
-            "Task 'missing-task' was not found in recent tasks".to_string()
+            "Task 'missing-task' was not found".to_string()
         );
     }
 
@@ -1306,6 +1879,49 @@ mod tests {
         assert!(request.starts_with("POST /v1/tasks/task-123/actions/advance-stage HTTP/1.1"));
         assert!(request.contains("content-type: application/json"));
         assert!(request.ends_with("{}"));
+    }
+
+    #[tokio::test]
+    async fn get_task_via_api_fetches_single_task_path() {
+        let response = http_json_response(
+            "200 OK",
+            r#"{
+                "id": "task-123",
+                "repoId": "repo-1",
+                "title": "Wanted",
+                "stage": "pr",
+                "activity": "unread",
+                "snippet": null,
+                "agentType": "pty",
+                "agentProvider": "claude",
+                "branch": "task-task-123",
+                "prUrl": "https://github.com/acme/kanna/pull/1",
+                "closedAt": null,
+                "worktreePath": null,
+                "commitsAhead": 0,
+                "commitsBehind": 0,
+                "dirty": false
+            }"#,
+        );
+        let (base_url, handle) = serve_single_http_response(response).await;
+
+        let task = get_task_via_api(&base_url, "task-123").await.unwrap();
+        let request = handle.await.unwrap();
+
+        assert_eq!(task.id, "task-123");
+        assert_eq!(task.activity.as_deref(), Some("unread"));
+        assert!(request.starts_with("GET /v1/tasks/task-123 HTTP/1.1"));
+    }
+
+    #[tokio::test]
+    async fn close_task_posts_to_close_action_path() {
+        let response = "HTTP/1.1 204 No Content\r\ncontent-length: 0\r\n\r\n".to_string();
+        let (base_url, handle) = serve_single_http_response(response).await;
+
+        close_task_via_api(&base_url, "task-123").await.unwrap();
+        let request = handle.await.unwrap();
+
+        assert!(request.starts_with("POST /v1/tasks/task-123/actions/close HTTP/1.1"));
     }
 
     #[tokio::test]
@@ -1376,10 +1992,12 @@ mod tests {
             base_ref: None,
             stage: None,
             agent_provider: None,
+            agent_type: None,
             model: None,
             permission_mode: None,
             allowed_tool: Vec::new(),
             blocker_task_id: Vec::new(),
+            notify_task: None,
         });
 
         assert_eq!(
@@ -1453,10 +2071,12 @@ mod tests {
             base_ref: None,
             stage: None,
             agent_provider: None,
+            agent_type: None,
             model: None,
             permission_mode: None,
             allowed_tool: Vec::new(),
             blocker_task_id: Vec::new(),
+            notify_task: None,
         });
 
         let created = create_task_via_api(&format!("http://{addr}"), &request)

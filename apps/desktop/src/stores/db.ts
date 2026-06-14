@@ -376,4 +376,16 @@ export async function runMigrations(db: DbHandle): Promise<void> {
     await addColumn("repo", "remote_url", "TEXT");
     await addColumn("repo", "remote_url_hash", "TEXT");
   });
+
+  await runMigration("020_agent_message_style_preference", async () => {
+    await db.execute(
+      "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)",
+      ["agentMessageStyle", "chat"],
+    );
+  });
+
+  await runMigration("020_pipeline_item_notify_task", async () => {
+    await addColumn("pipeline_item", "notify_task_id", "TEXT");
+    await addColumn("pipeline_item", "notified_at", "TEXT");
+  });
 }

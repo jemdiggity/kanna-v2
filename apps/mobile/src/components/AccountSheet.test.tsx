@@ -72,6 +72,21 @@ function findNodeByType(node: ElementNode, type: string): ElementNode | null {
   return null;
 }
 
+function findNodeByTestId(node: ElementNode, testID: string): ElementNode | null {
+  if (node.props?.testID === testID) {
+    return node;
+  }
+
+  for (const child of flattenChildren(node.props?.children)) {
+    const match = findNodeByTestId(child, testID);
+    if (match) {
+      return match;
+    }
+  }
+
+  return null;
+}
+
 function renderSignedOutSheet(): ElementNode {
   if (!AccountSheet) {
     throw new Error("AccountSheet was not loaded");
@@ -84,8 +99,11 @@ function renderSignedOutSheet(): ElementNode {
     errorMessage: null,
     pairingCode: null,
     visible: true,
+    forceCloudEnabled: false,
+    showDevForceCloudToggle: false,
     onClose: vi.fn(),
     onConnectLocal: vi.fn(),
+    onForceCloudChange: vi.fn(),
     onSignIn: vi.fn(),
     onSignOut: vi.fn()
   }) as ElementNode;
@@ -124,5 +142,32 @@ describe("AccountSheet", () => {
     const keyboardAvoider = findNodeByType(tree, "KeyboardAvoidingView");
 
     expect(keyboardAvoider?.props?.behavior).toBe("padding");
+  });
+
+  it("renders the force-cloud toggle only when the dev-only flag is enabled", () => {
+    if (!AccountSheet) {
+      throw new Error("AccountSheet was not loaded");
+    }
+
+    const hiddenTree = renderSignedOutSheet();
+    expect(findNodeByTestId(hiddenTree, "mobile.account-force-cloud")).toBeNull();
+
+    const visibleTree = AccountSheet({
+      auth: { status: "signedOut" },
+      connectionState: "idle",
+      desktopName: null,
+      errorMessage: null,
+      pairingCode: null,
+      visible: true,
+      forceCloudEnabled: true,
+      showDevForceCloudToggle: true,
+      onClose: vi.fn(),
+      onConnectLocal: vi.fn(),
+      onForceCloudChange: vi.fn(),
+      onSignIn: vi.fn(),
+      onSignOut: vi.fn()
+    }) as ElementNode;
+
+    expect(findNodeByTestId(visibleTree, "mobile.account-force-cloud")).not.toBeNull();
   });
 });

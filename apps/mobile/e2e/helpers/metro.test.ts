@@ -21,11 +21,42 @@ describe("mobile Metro helpers", () => {
     expect(
       shouldReuseExpoServer(
         {
-          commandLine: "node expo start",
+          commandLine: "node expo start EXPO_PUBLIC_KANNA_ENABLE_E2E_TRUST_SEED=1",
           cwd: "/tmp/kanna/apps/mobile"
         },
         {
-          projectRoot: "/tmp/kanna/apps/mobile"
+          projectRoot: "/tmp/kanna/apps/mobile",
+          env: { EXPO_PUBLIC_KANNA_ENABLE_E2E_TRUST_SEED: "1" }
+        }
+      )
+    ).toBe(true);
+  });
+
+  it("does not reuse an Expo server with mismatched expected env vars", () => {
+    expect(
+      shouldReuseExpoServer(
+        {
+          commandLine: "node expo start EXPO_PUBLIC_KANNA_FORCE_CLOUD=0",
+          cwd: "/tmp/kanna/apps/mobile"
+        },
+        {
+          projectRoot: "/tmp/kanna/apps/mobile",
+          env: { EXPO_PUBLIC_KANNA_FORCE_CLOUD: "1" }
+        }
+      )
+    ).toBe(false);
+  });
+
+  it("reuses a kd-managed dev-client Metro even when ps does not expose inline env vars", () => {
+    expect(
+      shouldReuseExpoServer(
+        {
+          commandLine: "node expo start --port 1430 --dev-client",
+          cwd: "/tmp/kanna/apps/mobile"
+        },
+        {
+          projectRoot: "/tmp/kanna/apps/mobile",
+          env: { KANNA_APP_ENV: "dev" }
         }
       )
     ).toBe(true);

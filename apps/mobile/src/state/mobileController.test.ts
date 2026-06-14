@@ -3,6 +3,8 @@ import { createSessionStore } from "./sessionStore";
 import { createMobileController } from "./mobileController";
 import type { MobileAuthSession } from "../lib/firebase/auth";
 import type {
+  TaskAgentStreamEvent,
+  TaskAgentSubscription,
   KannaClient,
   TaskTerminalStreamEvent,
   TaskTerminalSubscription
@@ -27,8 +29,31 @@ function createTerminalSubscriptionMock(): {
   };
 }
 
+function createAgentSubscriptionMock(): {
+  subscription: TaskAgentSubscription;
+  emit(event: TaskAgentStreamEvent): void;
+} {
+  let listener: ((event: TaskAgentStreamEvent) => void) | null = null;
+
+  return {
+    subscription: {
+      close: vi.fn(),
+      sendInput: vi.fn(),
+      sendPermission: vi.fn(),
+      interrupt: vi.fn(),
+      setListener(nextListener) {
+        listener = nextListener;
+      }
+    },
+    emit(event) {
+      listener?.(event);
+    }
+  };
+}
+
 function createClientMock(): ClientMock {
   const terminalStream = createTerminalSubscriptionMock();
+  const agentStream = createAgentSubscriptionMock();
 
   return {
     getStatus: vi.fn().mockResolvedValue({
@@ -102,6 +127,10 @@ function createClientMock(): ClientMock {
       terminalStream.subscription.setListener(listener);
       return terminalStream.subscription;
     }),
+    observeTaskAgent: vi.fn().mockImplementation((_taskId, listener) => {
+      agentStream.subscription.setListener(listener);
+      return agentStream.subscription;
+    }),
     createPairingSession: vi.fn().mockResolvedValue({
       code: "ABC123",
       desktopId: "desktop-1",
@@ -110,7 +139,8 @@ function createClientMock(): ClientMock {
       lanPort: 48120,
       expiresAtUnixMs: 1
     }),
-    __terminalStream: terminalStream
+    __terminalStream: terminalStream,
+    __agentStream: agentStream
   };
 }
 
@@ -454,6 +484,112 @@ describe("createMobileController", () => {
     expect(store.getState().taskTerminalOutput).toContain("Second line");
   });
 
+  it("opens an agent stream instead of a terminal stream for agent tasks", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    vi.mocked(client.listRecentTasks).mockResolvedValueOnce([
+      {
+        id: "task-agent",
+        repoId: "repo-1",
+        title: "Themed task",
+        stage: "in progress",
+        agentType: "agent"
+      }
+    ]);
+    vi.mocked(client.listRepoTasks).mockResolvedValueOnce([
+      {
+        id: "task-agent",
+        repoId: "repo-1",
+        title: "Themed task",
+        stage: "in progress",
+        agentType: "agent"
+      }
+    ]);
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    controller.openTask("task-agent");
+    client.__agentStream.emit({
+      type: "snapshot",
+      taskId: "task-agent",
+      events: [{ seq: 0, event: { type: "user_message", text: "hello" } }],
+      nextSeq: 1
+    });
+    client.__agentStream.emit({
+      type: "event",
+      taskId: "task-agent",
+      seq: 1,
+      event: { type: "assistant_text", text: "hi", truncated: false }
+    });
+
+    expect(client.observeTaskAgent).toHaveBeenCalledWith(
+      "task-agent",
+      expect.any(Function)
+    );
+    expect(client.observeTaskTerminal).not.toHaveBeenCalled();
+    expect(store.getState()).toMatchObject({
+      selectedTaskId: "task-agent",
+      taskAgentTaskId: "task-agent",
+      taskAgentStatus: "live"
+    });
+    expect(store.getState().taskAgentEvents).toEqual([
+      { seq: 0, event: { type: "user_message", text: "hello" } },
+      { seq: 1, event: { type: "assistant_text", text: "hi", truncated: false } }
+    ]);
+  });
+
+  it("opens a signed-in live cloud agent task through the agent stream", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const auth = createAuthSessionMock();
+    const liveCloudTask = {
+      id: "cloud-task-agent",
+      repoId: "repo-1",
+      title: "Cloud themed task",
+      stage: "in progress",
+      agentType: "agent" as const,
+      ownerDesktopId: "desktop-owner",
+      ownerLocalTaskId: "local-task-agent",
+      ownerOnline: true
+    };
+    const subscribeCloudTasks = vi.fn((
+      _uid: string,
+      onUpdate: (tasks: typeof liveCloudTask[]) => void
+    ) => {
+      onUpdate([liveCloudTask]);
+      return vi.fn();
+    });
+    auth.getState = vi.fn(() => ({
+      status: "signedIn",
+      user: { uid: "user-1", email: "u@example.com", displayName: null }
+    }));
+    client.getStatus.mockResolvedValueOnce({
+      state: "running",
+      desktopId: "cloud",
+      desktopName: "Kanna Cloud",
+      lanHost: "cloud",
+      lanPort: 0,
+      pairingCode: null
+    });
+    const controller = createMobileController(client, store, auth, {
+      subscribeCloudTasks
+    });
+
+    await controller.bootstrap();
+    controller.openTask("cloud-task-agent");
+
+    expect(subscribeCloudTasks).toHaveBeenCalledWith("user-1", expect.any(Function));
+    expect(client.observeTaskAgent).toHaveBeenCalledWith(
+      "cloud-task-agent",
+      expect.any(Function)
+    );
+    expect(client.observeTaskTerminal).not.toHaveBeenCalled();
+    expect(store.getState()).toMatchObject({
+      selectedTaskId: "cloud-task-agent",
+      taskAgentTaskId: "cloud-task-agent"
+    });
+  });
+
   it("keeps terminal stream errors scoped to the selected task", async () => {
     const store = createSessionStore();
     const client = createClientMock();
@@ -712,6 +848,37 @@ describe("createMobileController", () => {
     );
   });
 
+  it("sends agent task input as plain text through the active agent stream", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    vi.mocked(client.listRecentTasks).mockResolvedValueOnce([
+      {
+        id: "task-agent",
+        repoId: "repo-1",
+        title: "Themed task",
+        stage: "in progress",
+        agentType: "agent"
+      }
+    ]);
+    vi.mocked(client.listRepoTasks).mockResolvedValueOnce([
+      {
+        id: "task-agent",
+        repoId: "repo-1",
+        title: "Themed task",
+        stage: "in progress",
+        agentType: "agent"
+      }
+    ]);
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    controller.openTask("task-agent");
+    await controller.sendTaskInput("task-agent", "continue");
+
+    expect(client.__agentStream.subscription.sendInput).toHaveBeenCalledWith("continue");
+    expect(client.sendTaskInput).not.toHaveBeenCalled();
+  });
+
   it("closes the selected desktop task and clears the mobile task view", async () => {
     const store = createSessionStore();
     const client = createClientMock();
@@ -820,4 +987,5 @@ describe("createMobileController", () => {
 });
 interface ClientMock extends KannaClient {
   __terminalStream: ReturnType<typeof createTerminalSubscriptionMock>;
+  __agentStream: ReturnType<typeof createAgentSubscriptionMock>;
 }

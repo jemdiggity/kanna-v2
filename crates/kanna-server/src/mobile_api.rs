@@ -1,6 +1,9 @@
 use crate::config::Config;
-use crate::db::Db;
+use crate::db::{Db, NewRepo};
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -15,6 +18,19 @@ pub struct DesktopDescriptor {
 pub struct RepoSummary {
     pub id: String,
     pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoDetail {
+    pub id: String,
+    pub path: String,
+    pub name: String,
+    pub default_branch: Option<String>,
+    pub hidden: Option<i64>,
+    pub sort_order: Option<i64>,
+    pub created_at: Option<String>,
+    pub last_opened_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -41,7 +57,36 @@ pub struct TaskSummary {
     pub repo_id: String,
     pub title: String,
     pub stage: Option<String>,
+    pub activity: Option<String>,
     pub snippet: Option<String>,
+    pub agent_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskDetail {
+    pub id: String,
+    pub repo_id: String,
+    pub title: String,
+    pub stage: Option<String>,
+    pub activity: Option<String>,
+    pub snippet: Option<String>,
+    pub agent_type: Option<String>,
+    pub agent_provider: Option<String>,
+    pub branch: Option<String>,
+    pub pr_url: Option<String>,
+    pub closed_at: Option<String>,
+    pub worktree_path: Option<String>,
+    pub commits_ahead: i64,
+    pub commits_behind: i64,
+    pub dirty: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AddRepoRequest {
+    pub path: String,
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -53,10 +98,12 @@ pub struct CreateTaskRequest {
     pub base_ref: Option<String>,
     pub stage: Option<String>,
     pub agent_provider: Option<String>,
+    pub agent_type: Option<String>,
     pub model: Option<String>,
     pub permission_mode: Option<String>,
     pub allowed_tools: Option<Vec<String>>,
     pub blocker_task_ids: Option<Vec<String>>,
+    pub notify_task_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -66,6 +113,8 @@ pub struct CreateTaskResponse {
     pub repo_id: String,
     pub title: String,
     pub stage: String,
+    pub agent_type: String,
+    pub worktree_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -117,6 +166,46 @@ impl MobileApi {
             .map_err(|e| format!("db error: {}", e))
     }
 
+    pub fn add_repo(&self, request: AddRepoRequest) -> Result<RepoDetail, AddRepoError> {
+        let canonical_path = validate_git_repo_path(&request.path)?;
+        let path_string = canonical_path.to_string_lossy().to_string();
+        if self
+            ._db
+            .repo_path_exists(&path_string)
+            .map_err(|e| AddRepoError::Internal(format!("db error: {}", e)))?
+        {
+            return Err(AddRepoError::DuplicatePath);
+        }
+        let name = request
+            .name
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                canonical_path
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .map(str::to_string)
+            })
+            .ok_or_else(|| {
+                AddRepoError::InvalidPath("repo name could not be derived".to_string())
+            })?;
+        let default_branch = git_default_branch(&canonical_path).ok();
+        let id = generate_repo_id()?;
+        self._db
+            .insert_repo(NewRepo {
+                id: &id,
+                path: &path_string,
+                name: &name,
+                default_branch: default_branch.as_deref(),
+            })
+            .map_err(|e| AddRepoError::Internal(format!("db error: {}", e)))?;
+        let repo = self
+            ._db
+            .get_repo(&id)
+            .map_err(|e| AddRepoError::Internal(format!("db error: {}", e)))?
+            .ok_or_else(|| AddRepoError::Internal("created repo was not found".to_string()))?;
+        Ok(map_repo_detail(repo))
+    }
+
     pub fn list_repo_tasks(&self, repo_id: &str) -> Result<Vec<TaskSummary>, String> {
         self._db
             .list_pipeline_items(repo_id)
@@ -137,6 +226,49 @@ impl MobileApi {
             .map(|items| items.into_iter().map(map_task_summary).collect())
             .map_err(|e| format!("db error: {}", e))
     }
+
+    pub fn get_task(&self, task_or_branch_id: &str) -> Result<Option<TaskDetail>, String> {
+        let task_id = self
+            ._db
+            .resolve_pipeline_item_id(task_or_branch_id)
+            .map_err(|e| format!("db error: {}", e))?;
+        let Some(task_id) = task_id else {
+            return Ok(None);
+        };
+        let Some(item) = self
+            ._db
+            .get_pipeline_item(&task_id)
+            .map_err(|e| format!("db error: {}", e))?
+        else {
+            return Ok(None);
+        };
+        let repo = self
+            ._db
+            .get_repo(&item.repo_id)
+            .map_err(|e| format!("db error: {}", e))?;
+        let worktree_path = self
+            ._db
+            .get_task_worktree_path(&item.id)
+            .map_err(|e| format!("db error: {}", e))?;
+        Ok(Some(map_task_detail(item, repo.as_ref(), worktree_path)))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AddRepoError {
+    InvalidPath(String),
+    DuplicatePath,
+    Internal(String),
+}
+
+impl AddRepoError {
+    pub fn message(&self) -> String {
+        match self {
+            AddRepoError::InvalidPath(message) => message.clone(),
+            AddRepoError::DuplicatePath => "repo path is already registered".to_string(),
+            AddRepoError::Internal(message) => message.clone(),
+        }
+    }
 }
 
 fn map_task_summary(item: crate::db::PipelineItem) -> TaskSummary {
@@ -150,7 +282,48 @@ fn map_task_summary(item: crate::db::PipelineItem) -> TaskSummary {
         repo_id: item.repo_id,
         title,
         stage: item.stage,
+        activity: item.activity,
         snippet: item.last_output_preview,
+        agent_type: item.agent_type,
+    }
+}
+
+fn map_task_detail(
+    item: crate::db::PipelineItem,
+    repo: Option<&crate::db::Repo>,
+    worktree_path: Option<String>,
+) -> TaskDetail {
+    let title = item
+        .display_name
+        .clone()
+        .or(item.prompt.clone())
+        .unwrap_or_else(|| item.id.clone());
+    let git_state = worktree_path
+        .as_deref()
+        .and_then(|path| {
+            Path::new(path)
+                .exists()
+                .then(|| task_git_state(path, task_base_ref(&item, repo).as_deref()))
+        })
+        .and_then(Result::ok)
+        .unwrap_or_default();
+    let existing_worktree_path = worktree_path.filter(|path| Path::new(path).exists());
+    TaskDetail {
+        id: item.id,
+        repo_id: item.repo_id,
+        title,
+        stage: item.stage,
+        activity: item.activity,
+        snippet: item.last_output_preview,
+        agent_type: item.agent_type,
+        agent_provider: item.agent_provider,
+        branch: item.branch,
+        pr_url: item.pr_url,
+        closed_at: item.closed_at,
+        worktree_path: existing_worktree_path,
+        commits_ahead: git_state.commits_ahead,
+        commits_behind: git_state.commits_behind,
+        dirty: git_state.dirty,
     }
 }
 
@@ -159,6 +332,152 @@ fn map_repo_summary(repo: crate::db::Repo) -> RepoSummary {
         id: repo.id,
         name: repo.name,
     }
+}
+
+fn map_repo_detail(repo: crate::db::Repo) -> RepoDetail {
+    RepoDetail {
+        id: repo.id,
+        path: repo.path,
+        name: repo.name,
+        default_branch: repo.default_branch,
+        hidden: repo.hidden,
+        sort_order: repo.sort_order,
+        created_at: repo.created_at,
+        last_opened_at: repo.last_opened_at,
+    }
+}
+
+#[derive(Default)]
+struct TaskGitState {
+    commits_ahead: i64,
+    commits_behind: i64,
+    dirty: bool,
+}
+
+fn validate_git_repo_path(path: &str) -> Result<PathBuf, AddRepoError> {
+    let canonical = std::fs::canonicalize(path)
+        .map_err(|e| AddRepoError::InvalidPath(format!("path does not exist: {}", e)))?;
+    if !canonical.is_dir() {
+        return Err(AddRepoError::InvalidPath(
+            "path must be a directory".to_string(),
+        ));
+    }
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(&canonical)
+        .arg("rev-parse")
+        .arg("--is-inside-work-tree")
+        .output()
+        .map_err(|e| AddRepoError::Internal(format!("failed to run git: {}", e)))?;
+    if !output.status.success() || String::from_utf8_lossy(&output.stdout).trim() != "true" {
+        return Err(AddRepoError::InvalidPath(
+            "path is not a git repository".to_string(),
+        ));
+    }
+    Ok(canonical)
+}
+
+fn git_default_branch(repo_path: &Path) -> Result<String, String> {
+    let remote_head = Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
+        .output()
+        .map_err(|e| format!("failed to run git symbolic-ref: {}", e))?;
+    if remote_head.status.success() {
+        let branch = String::from_utf8_lossy(&remote_head.stdout)
+            .trim()
+            .strip_prefix("origin/")
+            .map(str::to_string)
+            .or_else(|| {
+                let trimmed = String::from_utf8_lossy(&remote_head.stdout)
+                    .trim()
+                    .to_string();
+                (!trimmed.is_empty()).then_some(trimmed)
+            });
+        if let Some(branch) = branch {
+            return Ok(branch);
+        }
+    }
+
+    let head = Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(["branch", "--show-current"])
+        .output()
+        .map_err(|e| format!("failed to run git branch: {}", e))?;
+    if head.status.success() {
+        let branch = String::from_utf8_lossy(&head.stdout).trim().to_string();
+        if !branch.is_empty() {
+            return Ok(branch);
+        }
+    }
+    Err("could not determine default branch".to_string())
+}
+
+fn task_base_ref(item: &crate::db::PipelineItem, repo: Option<&crate::db::Repo>) -> Option<String> {
+    item.base_ref
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| repo.and_then(|repo| repo.default_branch.clone()))
+}
+
+fn task_git_state(worktree_path: &str, base_ref: Option<&str>) -> Result<TaskGitState, String> {
+    let dirty = git_status_dirty(worktree_path)?;
+    let (commits_ahead, commits_behind) = match base_ref {
+        Some(base_ref) => git_ahead_behind(worktree_path, base_ref).unwrap_or((0, 0)),
+        None => (0, 0),
+    };
+    Ok(TaskGitState {
+        commits_ahead,
+        commits_behind,
+        dirty,
+    })
+}
+
+fn git_status_dirty(worktree_path: &str) -> Result<bool, String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(worktree_path)
+        .args(["status", "--porcelain"])
+        .output()
+        .map_err(|e| format!("failed to run git status: {}", e))?;
+    if !output.status.success() {
+        return Ok(false);
+    }
+    Ok(!output.stdout.is_empty())
+}
+
+fn git_ahead_behind(worktree_path: &str, base_ref: &str) -> Result<(i64, i64), String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(worktree_path)
+        .args(["rev-list", "--left-right", "--count"])
+        .arg(format!("{base_ref}...HEAD"))
+        .output()
+        .map_err(|e| format!("failed to run git rev-list: {}", e))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut parts = stdout.split_whitespace();
+    let behind = parts
+        .next()
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(0);
+    let ahead = parts
+        .next()
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(0);
+    Ok((ahead, behind))
+}
+
+fn generate_repo_id() -> Result<String, AddRepoError> {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| AddRepoError::Internal(format!("system clock error: {}", e)))?
+        .as_nanos();
+    Ok(format!("repo-{nanos:x}"))
 }
 
 pub fn build_mobile_server_status(
@@ -178,8 +497,39 @@ pub fn build_mobile_server_status(
 
 #[cfg(test)]
 mod tests {
+    use super::CreateTaskRequest;
     use crate::config::Config;
     use crate::db::Db;
+    use serde_json::json;
+
+    #[test]
+    fn create_task_request_uses_agent_type_camel_case() {
+        let request: CreateTaskRequest = serde_json::from_value(json!({
+            "repoId": "repo-1",
+            "prompt": "Build the view",
+            "agentProvider": "claude",
+            "agentType": "agent"
+        }))
+        .unwrap();
+
+        assert_eq!(request.agent_type.as_deref(), Some("agent"));
+        assert_eq!(
+            serde_json::to_value(request).unwrap(),
+            json!({
+                "repoId": "repo-1",
+                "prompt": "Build the view",
+                "pipelineName": null,
+                "baseRef": null,
+                "stage": null,
+                "agentProvider": "claude",
+                "agentType": "agent",
+                "model": null,
+                "permissionMode": null,
+                "allowedTools": null,
+                "notifyTaskId": null
+            })
+        );
+    }
 
     #[test]
     fn list_desktops_returns_configured_descriptor() {

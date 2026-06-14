@@ -1,0 +1,170 @@
+import { describe, expect, it } from "vitest";
+import {
+  buildMobileDevicePrebuildCommand,
+  buildMobileDeviceRunCommand,
+  checkPhysicalDeviceRunPreflight,
+  resolveMobileNativeIdentity,
+  parseXcdeviceList,
+  selectPhysicalDevice
+} from "../src/runtime/mobile-device";
+import type { CommandRunner } from "../src/runtime/process";
+
+function device(name: string, udid: string) {
+  return { name, udid, platformVersion: "17.5" };
+}
+
+describe("physical-device mobile runtime", () => {
+  it("selects the requested attached iPhone by UDID or name", () => {
+    const devices = [
+      device("Jeremy's iPhone", "udid-1"),
+      device("Jerome's iPhone 15", "udid-2")
+    ];
+
+    expect(selectPhysicalDevice(devices, { requestedUdid: "udid-2" })).toMatchObject({
+      name: "Jerome's iPhone 15",
+      udid: "udid-2"
+    });
+    expect(selectPhysicalDevice(devices, { requestedName: "Jeremy's iPhone" })).toMatchObject({
+      name: "Jeremy's iPhone",
+      udid: "udid-1"
+    });
+  });
+
+  it("parses attached physical iPhones from xcdevice JSON", () => {
+    expect(
+      parseXcdeviceList(`[
+        {
+          "available": true,
+          "identifier": "00008130-001015CA1091401C",
+          "name": "Jerome's iPhone 15",
+          "operatingSystemVersion": "17.5 (21F79)",
+          "platform": "com.apple.platform.iphoneos",
+          "simulator": false
+        },
+        {
+          "available": true,
+          "identifier": "390F2D5A-D8FE-40BC-9D42-DBA11DD35BF2",
+          "name": "iPhone 15",
+          "platform": "com.apple.platform.iphonesimulator",
+          "simulator": true
+        }
+      ]`)
+    ).toEqual([
+      {
+        name: "Jerome's iPhone 15",
+        udid: "00008130-001015CA1091401C",
+        platformVersion: "17.5"
+      }
+    ]);
+  });
+
+  it("resolves the native bundle id and display name from KANNA_APP_ENV", () => {
+    expect(resolveMobileNativeIdentity({ KANNA_APP_ENV: "dev" })).toEqual({
+      appEnv: "dev",
+      bundleId: "build.kanna.app.dev",
+      displayName: "Kanna Dev"
+    });
+    expect(resolveMobileNativeIdentity({ KANNA_APP_ENV: "staging" })).toEqual({
+      appEnv: "staging",
+      bundleId: "build.kanna.app.staging",
+      displayName: "Kanna Staging"
+    });
+    expect(resolveMobileNativeIdentity({ KANNA_APP_ENV: "production" })).toEqual({
+      appEnv: "prod",
+      bundleId: "build.kanna.app",
+      displayName: "Kanna"
+    });
+  });
+
+  it("builds an Expo prebuild command that applies app config and config plugins", () => {
+    const command = buildMobileDevicePrebuildCommand({
+      repoRoot: "/repo",
+      nativeIdentity: {
+        appEnv: "staging",
+        bundleId: "build.kanna.app.staging",
+        displayName: "Kanna Staging"
+      }
+    });
+
+    expect(command).toEqual({
+      command: "pnpm",
+      args: ["--dir", "/repo/apps/mobile", "exec", "expo", "prebuild", "--platform", "ios"],
+      cwd: "/repo",
+      env: {
+        KANNA_APP_ENV: "staging"
+      }
+    });
+  });
+
+  it("builds and launches through the worktree Metro on the Mac LAN IP with native identity env", () => {
+    const command = buildMobileDeviceRunCommand({
+      repoRoot: "/repo",
+      deviceUdid: "00008130-001015CA1091401C",
+      lanHost: "172.16.0.193",
+      metroPort: 1430,
+      nativeIdentity: {
+        appEnv: "dev",
+        bundleId: "build.kanna.app.dev",
+        displayName: "Kanna Dev"
+      }
+    });
+
+    expect(command).toEqual({
+      command: "pnpm",
+      args: [
+        "--dir",
+        "/repo/apps/mobile",
+        "ios",
+        "--device",
+        "00008130-001015CA1091401C",
+        "--port",
+        "1430"
+      ],
+      cwd: "/repo",
+      env: {
+        KANNA_APP_ENV: "dev",
+        REACT_NATIVE_PACKAGER_HOSTNAME: "172.16.0.193",
+        RCT_METRO_PORT: "1430"
+      }
+    });
+  });
+
+  it("checks LAN Metro reachability and installed app state with guidance", async () => {
+    const calls: string[] = [];
+    const runner: CommandRunner = {
+      async run(command, args) {
+        calls.push(`${command} ${args.join(" ")}`);
+        if (command === "curl") {
+          return { exitCode: 0, stdout: "packager-status:running\n", stderr: "" };
+        }
+        if (command === "xcrun") {
+          return { exitCode: 0, stdout: "build.kanna.app.dev\n", stderr: "" };
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+    };
+
+    const result = await checkPhysicalDeviceRunPreflight(runner, {
+      bundleId: "build.kanna.app.dev",
+      device: device("Jerome's iPhone 15", "00008130-001015CA1091401C"),
+      lanHost: "172.16.0.193",
+      metroPort: 1430
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.metroUrl).toBe("http://172.16.0.193:1430");
+    expect(result.checks).toEqual([
+      { name: "metro-lan", ok: true, message: "Metro is reachable at http://172.16.0.193:1430/status." },
+      { name: "app-installed", ok: true, message: "build.kanna.app.dev is installed on Jerome's iPhone 15." },
+      {
+        name: "local-network-permission",
+        ok: true,
+        message: "On the iPhone, allow Local Network for Kanna in Settings -> Privacy & Security -> Local Network."
+      }
+    ]);
+    expect(calls).toEqual([
+      "curl --fail --silent --show-error http://172.16.0.193:1430/status",
+      "xcrun devicectl device info apps --device 00008130-001015CA1091401C"
+    ]);
+  });
+});

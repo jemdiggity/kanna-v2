@@ -3,6 +3,7 @@ import {
   connectFirestoreEmulator,
   getDocs,
   getFirestore,
+  onSnapshot,
   query,
   where,
   type Firestore,
@@ -129,6 +130,85 @@ export async function listDesktopCloudTasks(
     taskSnapshots,
     { ...options, activeDesktopIds, currentDesktopId },
   );
+}
+
+export interface SubscribeDesktopCloudTasksOptions {
+  // Read fresh each emit so mapping reflects the current local repos/items.
+  getOptions: () => DesktopCloudTaskIndexOptions;
+}
+
+/**
+ * Live subscription to the signed-in user's cloud task index. Replaces polling
+ * getDocs: it attaches an onSnapshot listener to the user's `desktops`
+ * collection and a nested listener to each desktop's open `tasks`, so updates
+ * are pushed the instant a peer desktop writes. Returns an unsubscribe.
+ */
+export function subscribeDesktopCloudTasks(
+  uid: string,
+  onUpdate: (snapshot: DesktopCloudSnapshot) => void,
+  options: SubscribeDesktopCloudTasksOptions,
+): () => void {
+  let cancelled = false;
+  let desktopsUnsub: (() => void) | null = null;
+  const taskUnsubs = new Map<string, () => void>();
+  const tasksByDesktop = new Map<string, DesktopCloudTaskSnapshot[]>();
+
+  const emit = async () => {
+    const base = options.getOptions();
+    const [activeDesktopIds, currentDesktopId] = await Promise.all([
+      base.activeDesktopIds === undefined
+        ? listActiveDesktopIdsViaRelay().catch(() => null)
+        : Promise.resolve(base.activeDesktopIds),
+      base.currentDesktopId === undefined ? resolveDesktopId() : Promise.resolve(base.currentDesktopId),
+    ]);
+    if (cancelled) return;
+    const snapshots = [...tasksByDesktop.values()].flat();
+    onUpdate(mapDesktopCloudTasks(snapshots, { ...base, activeDesktopIds, currentDesktopId }));
+  };
+
+  void (async () => {
+    const firestore = await getConfiguredDesktopFirestore();
+    if (cancelled) return;
+    if (!firestore) {
+      onUpdate({ repos: [], items: [], terminalRefs: {} });
+      return;
+    }
+    const desktopsRef = collection(firestore, "users", uid, "desktops");
+    desktopsUnsub = onSnapshot(desktopsRef, (desktopsSnapshot) => {
+      const present = new Set<string>();
+      for (const desktopDoc of desktopsSnapshot.docs) {
+        present.add(desktopDoc.id);
+        if (taskUnsubs.has(desktopDoc.id)) continue;
+        const tasksQuery = query(collection(desktopDoc.ref, "tasks"), where("closedAt", "==", null));
+        taskUnsubs.set(
+          desktopDoc.id,
+          onSnapshot(tasksQuery, (tasksSnapshot) => {
+            tasksByDesktop.set(
+              desktopDoc.id,
+              tasksSnapshot.docs.map((doc) => doc.data() as DesktopCloudTaskSnapshot),
+            );
+            void emit();
+          }),
+        );
+      }
+      for (const [desktopId, unsub] of [...taskUnsubs]) {
+        if (present.has(desktopId)) continue;
+        unsub();
+        taskUnsubs.delete(desktopId);
+        tasksByDesktop.delete(desktopId);
+      }
+      void emit();
+    });
+  })();
+
+  return () => {
+    cancelled = true;
+    desktopsUnsub?.();
+    desktopsUnsub = null;
+    for (const unsub of taskUnsubs.values()) unsub();
+    taskUnsubs.clear();
+    tasksByDesktop.clear();
+  };
 }
 
 export function mapDesktopCloudTasks(

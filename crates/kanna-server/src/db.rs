@@ -22,14 +22,19 @@ pub struct PipelineItem {
     pub pr_url: Option<String>,
     pub branch: Option<String>,
     pub agent_type: Option<String>,
+    pub agent_provider: Option<String>,
     pub activity: Option<String>,
     pub activity_changed_at: Option<String>,
+    pub closed_at: Option<String>,
     pub pinned: Option<i64>,
     pub pin_order: Option<i64>,
     pub display_name: Option<String>,
     pub last_output_preview: Option<String>,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
+    pub base_ref: Option<String>,
+    pub notify_task_id: Option<String>,
+    pub notified_at: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -39,8 +44,16 @@ pub struct Repo {
     pub name: String,
     pub default_branch: Option<String>,
     pub hidden: Option<i64>,
+    pub sort_order: Option<i64>,
     pub created_at: Option<String>,
     pub last_opened_at: Option<String>,
+}
+
+pub struct NewRepo<'a> {
+    pub id: &'a str,
+    pub path: &'a str,
+    pub name: &'a str,
+    pub default_branch: Option<&'a str>,
 }
 
 pub struct TaskStageSource {
@@ -73,6 +86,13 @@ pub struct NewPipelineItem<'a> {
     pub port_offset: Option<i64>,
     pub port_env_json: Option<&'a str>,
     pub base_ref: Option<&'a str>,
+    pub notify_task_id: Option<&'a str>,
+}
+
+pub struct ClaimedTaskNotification {
+    pub child_id: String,
+    pub notify_task_id: String,
+    pub title: String,
 }
 
 #[derive(Debug)]
@@ -150,6 +170,7 @@ impl Db {
                 name TEXT NOT NULL,
                 default_branch TEXT,
                 hidden INTEGER,
+                sort_order INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT,
                 last_opened_at TEXT
             );
@@ -167,6 +188,7 @@ impl Db {
                 agent_type TEXT,
                 activity TEXT,
                 activity_changed_at TEXT,
+                unread_at TEXT,
                 pinned INTEGER,
                 pin_order INTEGER,
                 display_name TEXT,
@@ -182,7 +204,9 @@ impl Db {
                 agent_provider TEXT,
                 port_offset INTEGER,
                 port_env TEXT,
-                base_ref TEXT
+                base_ref TEXT,
+                notify_task_id TEXT,
+                notified_at TEXT
             );
 
             CREATE TABLE worktree (
@@ -236,8 +260,8 @@ impl Db {
         name: &str,
     ) -> Result<(), rusqlite::Error> {
         self.conn.execute(
-            "INSERT INTO repo (id, path, name, default_branch, hidden, created_at, last_opened_at)
-             VALUES (?, ?, ?, 'main', 0, datetime('now'), datetime('now'))",
+            "INSERT INTO repo (id, path, name, default_branch, hidden, sort_order, created_at, last_opened_at)
+             VALUES (?, ?, ?, 'main', 0, 0, datetime('now'), datetime('now'))",
             (id, path, name),
         )?;
         Ok(())
@@ -371,6 +395,32 @@ impl Db {
     }
 
     #[cfg(test)]
+    pub fn update_test_pipeline_item_agent_type(
+        &self,
+        id: &str,
+        agent_type: &str,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE pipeline_item SET agent_type = ? WHERE id = ?",
+            (agent_type, id),
+        )?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn update_test_pipeline_item_notify_task(
+        &self,
+        id: &str,
+        notify_task_id: &str,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE pipeline_item SET notify_task_id = ? WHERE id = ?",
+            (notify_task_id, id),
+        )?;
+        Ok(())
+    }
+
+    #[cfg(test)]
     pub fn update_test_pipeline_item_base_ref(
         &self,
         id: &str,
@@ -432,8 +482,8 @@ impl Db {
     pub fn list_recent_pipeline_items(&self) -> Result<Vec<PipelineItem>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo_id, issue_number, issue_title, prompt, stage,
-             pr_number, pr_url, branch, agent_type, activity, activity_changed_at,
-             pinned, pin_order, display_name, last_output_preview, created_at, updated_at
+             pr_number, pr_url, branch, agent_type, agent_provider, activity, activity_changed_at,
+             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at
              FROM pipeline_item
              WHERE closed_at IS NULL
              ORDER BY updated_at DESC, created_at DESC",
@@ -450,14 +500,19 @@ impl Db {
                 pr_url: row.get(7)?,
                 branch: row.get(8)?,
                 agent_type: row.get(9)?,
-                activity: row.get(10)?,
-                activity_changed_at: row.get(11)?,
-                pinned: row.get(12)?,
-                pin_order: row.get(13)?,
-                display_name: row.get(14)?,
-                last_output_preview: row.get(15)?,
-                created_at: row.get(16)?,
-                updated_at: row.get(17)?,
+                agent_provider: row.get(10)?,
+                activity: row.get(11)?,
+                activity_changed_at: row.get(12)?,
+                closed_at: row.get(13)?,
+                pinned: row.get(14)?,
+                pin_order: row.get(15)?,
+                display_name: row.get(16)?,
+                last_output_preview: row.get(17)?,
+                created_at: row.get(18)?,
+                updated_at: row.get(19)?,
+                base_ref: row.get(20)?,
+                notify_task_id: row.get(21)?,
+                notified_at: row.get(22)?,
             })
         })?;
         rows.collect()
@@ -467,8 +522,8 @@ impl Db {
         let like_query = format!("%{}%", query.to_lowercase());
         let mut stmt = self.conn.prepare(
             "SELECT id, repo_id, issue_number, issue_title, prompt, stage,
-             pr_number, pr_url, branch, agent_type, activity, activity_changed_at,
-             pinned, pin_order, display_name, last_output_preview, created_at, updated_at
+             pr_number, pr_url, branch, agent_type, agent_provider, activity, activity_changed_at,
+             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at
              FROM pipeline_item
              WHERE closed_at IS NULL
                AND (
@@ -489,14 +544,19 @@ impl Db {
                 pr_url: row.get(7)?,
                 branch: row.get(8)?,
                 agent_type: row.get(9)?,
-                activity: row.get(10)?,
-                activity_changed_at: row.get(11)?,
-                pinned: row.get(12)?,
-                pin_order: row.get(13)?,
-                display_name: row.get(14)?,
-                last_output_preview: row.get(15)?,
-                created_at: row.get(16)?,
-                updated_at: row.get(17)?,
+                agent_provider: row.get(10)?,
+                activity: row.get(11)?,
+                activity_changed_at: row.get(12)?,
+                closed_at: row.get(13)?,
+                pinned: row.get(14)?,
+                pin_order: row.get(15)?,
+                display_name: row.get(16)?,
+                last_output_preview: row.get(17)?,
+                created_at: row.get(18)?,
+                updated_at: row.get(19)?,
+                base_ref: row.get(20)?,
+                notify_task_id: row.get(21)?,
+                notified_at: row.get(22)?,
             })
         })?;
         rows.collect()
@@ -504,7 +564,7 @@ impl Db {
 
     pub fn list_repos(&self) -> Result<Vec<Repo>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, path, name, default_branch, hidden, created_at, last_opened_at \
+            "SELECT id, path, name, default_branch, hidden, sort_order, created_at, last_opened_at \
              FROM repo WHERE hidden = 0 OR hidden IS NULL ORDER BY last_opened_at DESC",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -514,8 +574,9 @@ impl Db {
                 name: row.get(2)?,
                 default_branch: row.get(3)?,
                 hidden: row.get(4)?,
-                created_at: row.get(5)?,
-                last_opened_at: row.get(6)?,
+                sort_order: row.get(5)?,
+                created_at: row.get(6)?,
+                last_opened_at: row.get(7)?,
             })
         })?;
         rows.collect()
@@ -524,8 +585,8 @@ impl Db {
     pub fn list_pipeline_items(&self, repo_id: &str) -> Result<Vec<PipelineItem>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo_id, issue_number, issue_title, prompt, stage, \
-             pr_number, pr_url, branch, agent_type, activity, activity_changed_at, \
-             pinned, pin_order, display_name, last_output_preview, created_at, updated_at \
+             pr_number, pr_url, branch, agent_type, agent_provider, activity, activity_changed_at, \
+             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at \
              FROM pipeline_item WHERE repo_id = ? AND closed_at IS NULL \
              ORDER BY pin_order ASC, created_at DESC",
         )?;
@@ -541,14 +602,19 @@ impl Db {
                 pr_url: row.get(7)?,
                 branch: row.get(8)?,
                 agent_type: row.get(9)?,
-                activity: row.get(10)?,
-                activity_changed_at: row.get(11)?,
-                pinned: row.get(12)?,
-                pin_order: row.get(13)?,
-                display_name: row.get(14)?,
-                last_output_preview: row.get(15)?,
-                created_at: row.get(16)?,
-                updated_at: row.get(17)?,
+                agent_provider: row.get(10)?,
+                activity: row.get(11)?,
+                activity_changed_at: row.get(12)?,
+                closed_at: row.get(13)?,
+                pinned: row.get(14)?,
+                pin_order: row.get(15)?,
+                display_name: row.get(16)?,
+                last_output_preview: row.get(17)?,
+                created_at: row.get(18)?,
+                updated_at: row.get(19)?,
+                base_ref: row.get(20)?,
+                notify_task_id: row.get(21)?,
+                notified_at: row.get(22)?,
             })
         })?;
         rows.collect()
@@ -557,8 +623,8 @@ impl Db {
     pub fn get_pipeline_item(&self, id: &str) -> Result<Option<PipelineItem>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo_id, issue_number, issue_title, prompt, stage, \
-             pr_number, pr_url, branch, agent_type, activity, activity_changed_at, \
-             pinned, pin_order, display_name, last_output_preview, created_at, updated_at \
+             pr_number, pr_url, branch, agent_type, agent_provider, activity, activity_changed_at, \
+             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at \
              FROM pipeline_item WHERE id = ?",
         )?;
         let mut rows = stmt.query_map([id], |row| {
@@ -573,14 +639,19 @@ impl Db {
                 pr_url: row.get(7)?,
                 branch: row.get(8)?,
                 agent_type: row.get(9)?,
-                activity: row.get(10)?,
-                activity_changed_at: row.get(11)?,
-                pinned: row.get(12)?,
-                pin_order: row.get(13)?,
-                display_name: row.get(14)?,
-                last_output_preview: row.get(15)?,
-                created_at: row.get(16)?,
-                updated_at: row.get(17)?,
+                agent_provider: row.get(10)?,
+                activity: row.get(11)?,
+                activity_changed_at: row.get(12)?,
+                closed_at: row.get(13)?,
+                pinned: row.get(14)?,
+                pin_order: row.get(15)?,
+                display_name: row.get(16)?,
+                last_output_preview: row.get(17)?,
+                created_at: row.get(18)?,
+                updated_at: row.get(19)?,
+                base_ref: row.get(20)?,
+                notify_task_id: row.get(21)?,
+                notified_at: row.get(22)?,
             })
         })?;
         match rows.next() {
@@ -642,7 +713,7 @@ impl Db {
 
     pub fn get_repo(&self, id: &str) -> Result<Option<Repo>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, path, name, default_branch, hidden, created_at, last_opened_at
+            "SELECT id, path, name, default_branch, hidden, sort_order, created_at, last_opened_at
              FROM repo WHERE id = ?",
         )?;
         let mut rows = stmt.query_map([id], |row| {
@@ -652,8 +723,9 @@ impl Db {
                 name: row.get(2)?,
                 default_branch: row.get(3)?,
                 hidden: row.get(4)?,
-                created_at: row.get(5)?,
-                last_opened_at: row.get(6)?,
+                sort_order: row.get(5)?,
+                created_at: row.get(6)?,
+                last_opened_at: row.get(7)?,
             })
         })?;
         match rows.next() {
@@ -723,8 +795,8 @@ impl Db {
         self.conn.execute(
             "INSERT INTO pipeline_item
              (id, repo_id, prompt, display_name, pipeline, stage, tags, branch, agent_type, agent_provider,
-              activity, activity_changed_at, port_offset, port_env, base_ref)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?)",
+              activity, activity_changed_at, port_offset, port_env, base_ref, notify_task_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?, ?)",
             (
                 item.id,
                 item.repo_id,
@@ -740,9 +812,116 @@ impl Db {
                 item.port_offset,
                 item.port_env_json,
                 item.base_ref,
+                item.notify_task_id,
             ),
         )?;
         Ok(())
+    }
+
+    pub fn update_pipeline_item_activity(
+        &self,
+        id: &str,
+        activity: &str,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE pipeline_item
+             SET activity = ?, activity_changed_at = datetime('now'),
+                 unread_at = CASE WHEN ? = 'unread' THEN datetime('now') ELSE unread_at END,
+                 updated_at = datetime('now')
+             WHERE id = ? AND activity != ? AND closed_at IS NULL",
+            (activity, activity, id, activity),
+        )?;
+        Ok(())
+    }
+
+    pub fn claim_task_notification(
+        &self,
+        child_id: &str,
+    ) -> Result<Option<ClaimedTaskNotification>, rusqlite::Error> {
+        let notification = self
+            .conn
+            .query_row(
+                "SELECT id, notify_task_id, display_name, issue_title, prompt
+                 FROM pipeline_item
+                 WHERE id = ? AND notify_task_id IS NOT NULL AND notify_task_id != '' AND notified_at IS NULL",
+                [child_id],
+                |row| {
+                    let child_id: String = row.get(0)?;
+                    let notify_task_id: String = row.get(1)?;
+                    let display_name: Option<String> = row.get(2)?;
+                    let issue_title: Option<String> = row.get(3)?;
+                    let prompt: Option<String> = row.get(4)?;
+                    let title = display_name
+                        .filter(|value| !value.trim().is_empty())
+                        .or_else(|| issue_title.filter(|value| !value.trim().is_empty()))
+                        .or_else(|| {
+                            prompt
+                                .and_then(|value| value.lines().next().map(str::to_string))
+                                .filter(|value| !value.trim().is_empty())
+                        })
+                        .unwrap_or_else(|| child_id.clone());
+                    Ok(ClaimedTaskNotification {
+                        child_id,
+                        notify_task_id,
+                        title,
+                    })
+                },
+            )
+            .optional()?;
+        let Some(notification) = notification else {
+            return Ok(None);
+        };
+        let rows = self.conn.execute(
+            "UPDATE pipeline_item SET notified_at = datetime('now'), updated_at = datetime('now')
+             WHERE id = ? AND notified_at IS NULL",
+            [&notification.child_id],
+        )?;
+        if rows == 0 {
+            return Ok(None);
+        }
+        Ok(Some(notification))
+    }
+
+    pub fn insert_repo(&self, repo: NewRepo<'_>) -> Result<(), rusqlite::Error> {
+        let sort_order: i64 = self.conn.query_row(
+            "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM repo",
+            [],
+            |row| row.get(0),
+        )?;
+        self.conn.execute(
+            "INSERT INTO repo (id, path, name, default_branch, hidden, sort_order, created_at, last_opened_at)
+             VALUES (?, ?, ?, ?, 0, ?, datetime('now'), datetime('now'))",
+            (
+                repo.id,
+                repo.path,
+                repo.name,
+                repo.default_branch,
+                sort_order,
+            ),
+        )?;
+        Ok(())
+    }
+
+    pub fn repo_path_exists(&self, path: &str) -> Result<bool, rusqlite::Error> {
+        let count: i64 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM repo WHERE path = ?", [path], |row| {
+                    row.get(0)
+                })?;
+        Ok(count > 0)
+    }
+
+    pub fn get_task_worktree_path(
+        &self,
+        pipeline_item_id: &str,
+    ) -> Result<Option<String>, rusqlite::Error> {
+        self.conn
+            .query_row(
+                "SELECT path FROM worktree WHERE pipeline_item_id = ? ORDER BY created_at DESC LIMIT 1",
+                [pipeline_item_id],
+                |row| row.get(0),
+            )
+            .optional()
     }
 
     pub fn upsert_worktree(
@@ -1570,6 +1749,8 @@ mod tests {
               port_offset INTEGER,
               port_env TEXT,
               base_ref TEXT,
+              notify_task_id TEXT,
+              notified_at TEXT,
               display_name TEXT,
               created_at TEXT NOT NULL DEFAULT (datetime('now')),
               updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -1595,6 +1776,7 @@ mod tests {
             port_env_json: Some("{\"KANNA_DEV_PORT\":\"1422\"}"),
             base_ref: None,
             display_name: Some("Merge queue"),
+            notify_task_id: None,
         })
         .expect("insert pipeline item");
 

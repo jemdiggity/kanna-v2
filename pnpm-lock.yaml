@@ -31,6 +31,12 @@ importers:
 
   apps/desktop:
     dependencies:
+      '@kanna/agent-protocol':
+        specifier: workspace:*
+        version: link:../../packages/agent-protocol
+      '@kanna/stream-client':
+        specifier: workspace:*
+        version: link:../../packages/stream-client
       '@pierre/diffs':
         specifier: ^1.1.0
         version: 1.1.13(react-dom@19.2.5(react@19.2.5))(react@19.2.5)
@@ -149,6 +155,12 @@ importers:
       '@expo/vector-icons':
         specifier: 14.1.0
         version: 14.1.0(expo-font@13.3.2(expo@53.0.27(react-native-webview@13.13.5(react-native@0.79.6(@babel/core@7.29.0)(@types/react@19.0.14)(react@19.0.0))(react@19.0.0))(react-native@0.79.6(@babel/core@7.29.0)(@types/react@19.0.14)(react@19.0.0))(react@19.0.0))(react@19.0.0))(react-native@0.79.6(@babel/core@7.29.0)(@types/react@19.0.14)(react@19.0.0))(react@19.0.0)
+      '@kanna/agent-protocol':
+        specifier: workspace:*
+        version: link:../../packages/agent-protocol
+      '@kanna/stream-client':
+        specifier: workspace:*
+        version: link:../../packages/stream-client
       '@react-native-async-storage/async-storage':
         specifier: ^2.1.2
         version: 2.1.2(react-native@0.79.6(@babel/core@7.29.0)(@types/react@19.0.14)(react@19.0.0))
@@ -167,6 +179,12 @@ importers:
       expo:
         specifier: ~53.0.0
         version: 53.0.27(react-native-webview@13.13.5(react-native@0.79.6(@babel/core@7.29.0)(@types/react@19.0.14)(react@19.0.0))(react@19.0.0))(react-native@0.79.6(@babel/core@7.29.0)(@types/react@19.0.14)(react@19.0.0))(react@19.0.0)
+      expo-constants:
+        specifier: 17.1.8
+        version: 17.1.8(expo@53.0.27(react-native-webview@13.13.5(react-native@0.79.6(@babel/core@7.29.0)(@types/react@19.0.14)(react@19.0.0))(react@19.0.0))(react-native@0.79.6(@babel/core@7.29.0)(@types/react@19.0.14)(react@19.0.0))(react@19.0.0))(react-native@0.79.6(@babel/core@7.29.0)(@types/react@19.0.14)(react@19.0.0))
+      expo-modules-core:
+        specifier: 2.5.0
+        version: 2.5.0
       firebase:
         specifier: ^12.12.1
         version: 12.12.1(@react-native-async-storage/async-storage@2.1.2(react-native@0.79.6(@babel/core@7.29.0)(@types/react@19.0.14)(react@19.0.0)))
@@ -205,6 +223,12 @@ importers:
         specifier: ^9.20.0
         version: 9.27.0
 
+  packages/agent-protocol:
+    devDependencies:
+      typescript:
+        specifier: ^5
+        version: 5.9.3
+
   packages/core:
     dependencies:
       smol-toml:
@@ -223,6 +247,19 @@ importers:
 
   packages/db:
     devDependencies:
+      vitest:
+        specifier: ^3
+        version: 3.2.4(@types/node@25.6.0)(happy-dom@20.8.9)(jiti@2.6.1)(lightningcss@1.27.0)(terser@5.46.1)(tsx@4.21.0)(yaml@2.8.3)
+
+  packages/stream-client:
+    dependencies:
+      '@kanna/agent-protocol':
+        specifier: workspace:*
+        version: link:../agent-protocol
+    devDependencies:
+      typescript:
+        specifier: ^5
+        version: 5.9.3
       vitest:
         specifier: ^3
         version: 3.2.4(@types/node@25.6.0)(happy-dom@20.8.9)(jiti@2.6.1)(lightningcss@1.27.0)(terser@5.46.1)(tsx@4.21.0)(yaml@2.8.3)
@@ -11142,10 +11179,12 @@ snapshots:
     transitivePeerDependencies:
       - '@expo/dom-webview'
       - '@expo/metro-runtime'
+      - bufferutil
       - react
       - react-native
       - react-native-webview
       - supports-color
+      - utf-8-validate
 
   babel-preset-jest@29.6.3(@babel/core@7.29.0):
     dependencies:

@@ -8,7 +8,7 @@ export interface CustomTaskConfig {
   agentProvider?: "claude" | "copilot" | "codex" | "opencode";
   model?: string;
   permissionMode?: "dontAsk" | "acceptEdits" | "default";
-  executionMode?: "pty" | "sdk";
+  executionMode?: "pty" | "agent";
   allowedTools?: string[];
   disallowedTools?: string[];
   maxTurns?: number;
@@ -42,7 +42,7 @@ Available frontmatter fields (all optional, defaults shown):
 - agent_provider: "claude" | "copilot" | "codex" | "opencode" (optional)
 - model: null (uses Kanna default)
 - permission_mode: "dontAsk" | "acceptEdits" | "default" (default: provider-specific yolo-equivalent: Claude -> --dangerously-skip-permissions, Copilot -> --yolo, Codex -> --yolo, OpenCode -> --dangerously-skip-permissions)
-- execution_mode: "pty" | "sdk" (default: pty)
+- execution_mode: "pty" | "agent" (default: pty; legacy "sdk" is accepted as "agent")
 - allowed_tools: [] (empty = all allowed)
 - disallowed_tools: []
 - max_turns: null (unlimited)
@@ -56,7 +56,7 @@ at .kanna/tasks/<taskname>/agent.md. Use a lowercase hyphenated directory name.`
 
 const VALID_AGENT_PROVIDERS = ["claude", "copilot", "codex", "opencode"] as const;
 const VALID_PERMISSION_MODES = ["dontAsk", "acceptEdits", "default"] as const;
-const VALID_EXECUTION_MODES = ["pty", "sdk"] as const;
+const VALID_EXECUTION_MODES = ["pty", "agent", "sdk"] as const;
 const VALID_STAGES = ["in_progress", "pr", "done"] as const;
 
 function slugToDisplayName(slug: string): string {
@@ -147,7 +147,7 @@ export function parseAgentMd(content: string, dirName: string): CustomTaskConfig
   }
 
   if (typeof fm.execution_mode === "string" && (VALID_EXECUTION_MODES as readonly string[]).includes(fm.execution_mode)) {
-    config.executionMode = fm.execution_mode as CustomTaskConfig["executionMode"];
+    config.executionMode = fm.execution_mode === "sdk" ? "agent" : fm.execution_mode as CustomTaskConfig["executionMode"];
   }
 
   if (Array.isArray(fm.allowed_tools) && fm.allowed_tools.every((t: unknown) => typeof t === "string")) {

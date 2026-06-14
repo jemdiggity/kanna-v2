@@ -76,17 +76,16 @@ async fn sdk_session_produces_assistant_and_result() {
     );
 }
 
-// ── Layer 2: Buffered session (mirrors Tauri command pattern) ───────────
+// ── Layer 2: Buffered session (exercises SDK draining pattern) ───────────
 
-/// The buffer + finished flag that the Tauri commands expose to the frontend.
+/// The buffer + finished flag used to verify SDK message draining behavior.
 /// The drainer task owns the Session and pushes serialized messages here.
 struct Buffered {
     buffer: Arc<Mutex<Vec<serde_json::Value>>>,
     finished: Arc<Mutex<bool>>,
 }
 
-/// Start a session with a background drainer — same architecture as
-/// `create_agent_session` in commands/agent.rs, minus the DashMap.
+/// Start a session with a background drainer.
 async fn start_buffered(prompt: &str) -> Buffered {
     let session = Session::start(
         SessionOptions::builder()
@@ -129,7 +128,6 @@ async fn start_buffered(prompt: &str) -> Buffered {
     Buffered { buffer, finished }
 }
 
-/// Poll the buffer exactly as `agent_next_message` does.
 /// Returns None when session is done, Some({"type":"waiting"}) when idle.
 async fn poll(b: &Buffered) -> Option<serde_json::Value> {
     {

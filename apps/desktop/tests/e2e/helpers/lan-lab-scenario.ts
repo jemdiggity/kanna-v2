@@ -32,7 +32,7 @@ async function createTask(client: WebDriverClient, repoId: string, repoPath: str
     repoId,
     repoPath,
     prompt,
-    "sdk",
+    "agent",
     { agentProvider: "codex", baseRef: "origin/main" },
   );
   if (typeof result !== "string") throw new Error(`createItem returned ${JSON.stringify(result)}`);

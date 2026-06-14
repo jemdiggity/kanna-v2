@@ -1,7 +1,7 @@
 import {
-  addDoc,
   collection,
   doc,
+  getDoc,
   getDocs,
   limit,
   query,
@@ -9,6 +9,7 @@ import {
   setDoc,
   where,
   writeBatch,
+  type CollectionReference,
   type DocumentReference,
   type Firestore,
   type QueryDocumentSnapshot,
@@ -220,11 +221,6 @@ async function resolveDesktopDocument(
   options: { create: boolean },
 ): Promise<DocumentReference | null> {
   const desktopsRef = collection(context.firestore, "users", context.uid, "desktops");
-  const snapshot = await getDocs(query(
-    desktopsRef,
-    where("desktopId", "==", desktopId),
-    limit(1),
-  ));
   // The relay authenticates kanna-server connections against this hash, so
   // registering it here is what lets this desktop use the cloud relay. Only
   // attach it to this desktop's own document.
@@ -232,22 +228,71 @@ async function resolveDesktopDocument(
     desktopId === context.desktopId && context.desktopSecretHash
       ? { desktopSecretHash: context.desktopSecretHash }
       : {};
-  const existing = snapshot.docs[0] as QueryDocumentSnapshot | undefined;
-  if (existing) {
-    await setDoc(existing.ref, {
+  // Use a deterministic document id derived from the desktop id so concurrent
+  // publishers (sign-in reconcile + per-task publish + LAN publish) converge on
+  // the same document instead of each creating its own via addDoc — which left
+  // duplicate desktop records for a single desktopId.
+  const desktopRef = doc(desktopsRef, desktopDocId(desktopId));
+
+  if (options.create) {
+    await setDoc(desktopRef, {
+      desktopId,
       displayName: context.desktopDisplayName,
       updatedAt: serverTimestamp(),
       ...credentialFields,
     }, { merge: true });
-    return existing.ref;
+    await deleteDuplicateDesktopDocs(context, desktopsRef, desktopId, desktopRef.id);
+    return desktopRef;
   }
-  if (!options.create) return null;
-  return addDoc(desktopsRef, {
-    desktopId,
+
+  const existing = await getDoc(desktopRef);
+  if (existing.exists()) {
+    await setDoc(desktopRef, {
+      displayName: context.desktopDisplayName,
+      updatedAt: serverTimestamp(),
+    }, { merge: true });
+    return desktopRef;
+  }
+
+  // Legacy fallback: a pre-deterministic auto-id document may still hold this
+  // desktopId. Honour it for reads/deletes until the next create migrates it.
+  const legacy = await getDocs(query(desktopsRef, where("desktopId", "==", desktopId), limit(1)));
+  const legacyDoc = legacy.docs[0];
+  if (!legacyDoc) return null;
+
+  await setDoc(legacyDoc.ref, {
     displayName: context.desktopDisplayName,
     updatedAt: serverTimestamp(),
-    ...credentialFields,
-  });
+  }, { merge: true });
+  return legacyDoc.ref;
+}
+
+// Firestore document ids may not contain "/" (and a few reserved forms). Desktop
+// ids are UUID-style slugs, but guard defensively.
+function desktopDocId(desktopId: string): string {
+  return desktopId.replace(/\//g, "_");
+}
+
+// Removes any extra desktop documents that share this desktopId (legacy auto-id
+// docs, or losers of a prior create race), including their tasks subcollection,
+// keeping only the canonical deterministic-id document.
+async function deleteDuplicateDesktopDocs(
+  context: CloudWriteContext,
+  desktopsRef: CollectionReference,
+  desktopId: string,
+  canonicalDocId: string,
+): Promise<void> {
+  const matches = await getDocs(query(desktopsRef, where("desktopId", "==", desktopId)));
+  const stale = matches.docs.filter((candidate) => candidate.id !== canonicalDocId);
+  for (const staleDoc of stale) {
+    const staleTasks = await getDocs(collection(staleDoc.ref, "tasks"));
+    const batch = writeBatch(context.firestore);
+    for (const taskDoc of staleTasks.docs) {
+      batch.delete(taskDoc.ref);
+    }
+    batch.delete(staleDoc.ref);
+    await batch.commit();
+  }
 }
 
 async function updateUserProfileDocument(context: CloudWriteContext): Promise<void> {

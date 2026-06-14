@@ -1,9 +1,10 @@
 import type {
   DesktopMode,
   DesktopSummary,
+  TaskSummary,
   RepoSummary,
-  TaskSummary
 } from "../lib/api/types";
+import type { FrameAgentEvent } from "@kanna/agent-protocol";
 import type { MobileAuthState } from "../lib/firebase/auth";
 import type {
   PersistedSessionContext,
@@ -43,6 +44,10 @@ export interface SessionState {
   taskTerminalStatus: TaskTerminalStatus;
   taskTerminalOutput: string;
   taskTerminalErrorMessage: string | null;
+  taskAgentTaskId: string | null;
+  taskAgentStatus: TaskTerminalStatus;
+  taskAgentEvents: FrameAgentEvent[];
+  taskAgentErrorMessage: string | null;
 }
 
 export interface SessionStore {
@@ -73,8 +78,11 @@ export interface SessionStore {
   appendTaskTerminal(taskId: string, chunk: string): void;
   setTaskTerminalStatus(taskId: string, status: TaskTerminalStatus): void;
   setTaskTerminalError(taskId: string, message: string): void;
+  beginTaskAgent(taskId: string): void;
+  applyTaskAgentStreamEvent(taskId: string, event: { type: "snapshot"; events: FrameAgentEvent[] } | { type: "event"; seq: number; event: FrameAgentEvent["event"] } | { type: "status"; status: string } | { type: "exit"; code: number } | { type: "error"; message: string }): void;
   reconcileSelectedTask(): void;
   clearTaskTerminal(): void;
+  clearTaskAgent(): void;
 }
 
 export function createSessionStore(): SessionStore {
@@ -104,7 +112,11 @@ export function createSessionStore(): SessionStore {
     taskTerminalTaskId: null,
     taskTerminalStatus: "idle",
     taskTerminalOutput: "",
-    taskTerminalErrorMessage: null
+    taskTerminalErrorMessage: null,
+    taskAgentTaskId: null,
+    taskAgentStatus: "idle",
+    taskAgentEvents: [],
+    taskAgentErrorMessage: null
   };
 
   const listeners = new Set<() => void>();
@@ -128,7 +140,8 @@ export function createSessionStore(): SessionStore {
         task.repoId === other.repoId &&
         task.title === other.title &&
         task.stage === other.stage &&
-        (task.snippet ?? null) === (other.snippet ?? null)
+        (task.snippet ?? null) === (other.snippet ?? null) &&
+        (task.agentType ?? null) === (other.agentType ?? null)
       );
     });
   };
@@ -300,7 +313,15 @@ export function createSessionStore(): SessionStore {
         taskTerminalOutput:
           selectedTaskId === null ? "" : state.taskTerminalOutput,
         taskTerminalErrorMessage:
-          selectedTaskId === null ? null : state.taskTerminalErrorMessage
+          selectedTaskId === null ? null : state.taskTerminalErrorMessage,
+        taskAgentTaskId:
+          selectedTaskId === null ? null : state.taskAgentTaskId,
+        taskAgentStatus:
+          selectedTaskId === null ? "idle" : state.taskAgentStatus,
+        taskAgentEvents:
+          selectedTaskId === null ? [] : state.taskAgentEvents,
+        taskAgentErrorMessage:
+          selectedTaskId === null ? null : state.taskAgentErrorMessage
       };
       publish();
     },
@@ -365,6 +386,70 @@ export function createSessionStore(): SessionStore {
       };
       publish();
     },
+    beginTaskAgent(taskId) {
+      state = {
+        ...state,
+        taskAgentTaskId: taskId,
+        taskAgentStatus: "connecting",
+        taskAgentEvents: [],
+        taskAgentErrorMessage: null
+      };
+      publish();
+    },
+    applyTaskAgentStreamEvent(taskId, event) {
+      if (state.taskAgentTaskId !== taskId) {
+        return;
+      }
+
+      if (event.type === "snapshot") {
+        state = {
+          ...state,
+          taskAgentStatus: "live",
+          taskAgentEvents: event.events,
+          taskAgentErrorMessage: null
+        };
+        publish();
+        return;
+      }
+
+      if (event.type === "event") {
+        state = {
+          ...state,
+          taskAgentStatus: "live",
+          taskAgentEvents: [...state.taskAgentEvents, { seq: event.seq, event: event.event }],
+          taskAgentErrorMessage: null
+        };
+        publish();
+        return;
+      }
+
+      if (event.type === "status") {
+        state = {
+          ...state,
+          taskAgentStatus: event.status === "idle" ? "idle" : "live",
+          taskAgentErrorMessage: null
+        };
+        publish();
+        return;
+      }
+
+      if (event.type === "exit") {
+        state = {
+          ...state,
+          taskAgentStatus: "closed",
+          taskAgentErrorMessage: null
+        };
+        publish();
+        return;
+      }
+
+      state = {
+        ...state,
+        taskAgentStatus: "error",
+        taskAgentErrorMessage: event.message
+      };
+      publish();
+    },
     reconcileSelectedTask() {
       if (hasTaskInCollections(state.selectedTaskId)) {
         return;
@@ -376,7 +461,11 @@ export function createSessionStore(): SessionStore {
         taskTerminalTaskId: null,
         taskTerminalStatus: "idle",
         taskTerminalOutput: "",
-        taskTerminalErrorMessage: null
+        taskTerminalErrorMessage: null,
+        taskAgentTaskId: null,
+        taskAgentStatus: "idle",
+        taskAgentEvents: [],
+        taskAgentErrorMessage: null
       };
       publish();
     },
@@ -387,6 +476,16 @@ export function createSessionStore(): SessionStore {
         taskTerminalStatus: "idle",
         taskTerminalOutput: "",
         taskTerminalErrorMessage: null
+      };
+      publish();
+    },
+    clearTaskAgent() {
+      state = {
+        ...state,
+        taskAgentTaskId: null,
+        taskAgentStatus: "idle",
+        taskAgentEvents: [],
+        taskAgentErrorMessage: null
       };
       publish();
     }

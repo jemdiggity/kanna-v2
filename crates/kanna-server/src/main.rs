@@ -4,6 +4,7 @@ mod config;
 mod daemon_client;
 mod db;
 mod http_api;
+mod ksp;
 mod mobile_api;
 mod pairing;
 mod register;
@@ -90,6 +91,10 @@ async fn main() {
     .ok();
 
     let http_state = Arc::new(http_api::AppState::new(config.clone()));
+    let terminal_state_config = config.clone();
+    tokio::spawn(async move {
+        terminal_state_watcher_loop(terminal_state_config).await;
+    });
     let lan_task = tokio::spawn(http_api::serve(Arc::clone(&http_state)));
     if relay_url.is_empty() {
         match lan_task.await {
@@ -112,6 +117,60 @@ async fn main() {
                 Err(err) => log::error!("relay loop failed: {}", err),
             },
         };
+    }
+}
+
+async fn terminal_state_watcher_loop(config: Config) {
+    loop {
+        if let Err(error) = terminal_state_watcher_once(&config).await {
+            log::warn!("terminal state watcher reconnecting after error: {}", error);
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
+}
+
+async fn terminal_state_watcher_once(config: &Config) -> Result<(), String> {
+    use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
+
+    let mut daemon = daemon_client::DaemonClient::connect(&config.daemon_dir)
+        .await
+        .map_err(|e| format!("daemon connection failed: {}", e))?;
+    match daemon
+        .send_command(&DaemonCommand::Subscribe)
+        .await
+        .map_err(|e| format!("daemon subscribe failed: {}", e))?
+    {
+        DaemonEvent::Ok => {}
+        DaemonEvent::Error { message, .. } => {
+            return Err(format!("daemon subscribe error: {}", message));
+        }
+        other => return Err(format!("unexpected daemon subscribe response: {:?}", other)),
+    }
+
+    loop {
+        match daemon
+            .read_event()
+            .await
+            .map_err(|e| format!("daemon read failed: {}", e))?
+        {
+            DaemonEvent::Exit {
+                session_id, code, ..
+            } => {
+                let success = code == 0;
+                if let Err(error) =
+                    http_api::handle_task_terminal_state(config, &session_id, success).await
+                {
+                    log::warn!(
+                        "failed to handle terminal state for {} (success={}): {}",
+                        session_id,
+                        success,
+                        error
+                    );
+                }
+            }
+            DaemonEvent::ShuttingDown => return Ok(()),
+            _ => {}
+        }
     }
 }
 
@@ -377,6 +436,47 @@ async fn run_relay_loop(
                         },
                         RelayMessage::AuthOk { user_id } => {
                             log::info!("Relay authenticated as user {}", user_id);
+                        }
+                        RelayMessage::TunnelEstablish {
+                            desktop_id,
+                            tunnel_id,
+                        } => {
+                            if desktop_id != config.desktop_id {
+                                log::warn!(
+                                    "Ignoring tunnel {} for unexpected desktop {}",
+                                    tunnel_id,
+                                    desktop_id
+                                );
+                                continue;
+                            }
+                            let tunnel_config = config.clone();
+                            let tunnel_state = Arc::clone(&http_state);
+                            tokio::spawn(async move {
+                                log::info!("Dialing relay tunnel {}", tunnel_id);
+                                match relay_client::connect_tunnel_to_relay(
+                                    &tunnel_config,
+                                    tunnel_id.clone(),
+                                )
+                                .await
+                                {
+                                    Ok(socket) => {
+                                        crate::ksp::handle_tungstenite_stream(
+                                            socket,
+                                            tunnel_state,
+                                            crate::ksp::AuthMode::RequireCredential,
+                                        )
+                                        .await;
+                                        log::info!("Relay tunnel {} closed", tunnel_id);
+                                    }
+                                    Err(error) => {
+                                        log::error!(
+                                            "Failed to establish relay tunnel {}: {}",
+                                            tunnel_id,
+                                            error
+                                        );
+                                    }
+                                }
+                            });
                         }
                         RelayMessage::Error { message } => {
                             log::error!("Relay error: {}", message);

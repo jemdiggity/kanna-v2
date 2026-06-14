@@ -35,13 +35,15 @@ import {
   runProfileConnectionSmoke,
   runProfileDisconnectedConnectionSmoke
 } from "./specs/smoke/profile-connection.e2e";
+import { runCloudTaskFlow } from "./specs/cloud/cloud-task-flow.e2e";
 
 export const smokeSpecPaths = [
+  "specs/cloud/cloud-task-flow.e2e.ts",
   "specs/smoke/list-detail-back.e2e.ts",
   "specs/smoke/profile-connection.e2e.ts"
 ];
 export const supportedSmokeTargets = ["simulator", "device"] as const;
-export const supportedSmokeModes = ["smoke", "profile-disconnected"] as const;
+export const supportedSmokeModes = ["smoke", "profile-disconnected", "cloud"] as const;
 
 interface StoppedDesktopServerHandle {
   baseUrl: string;
@@ -147,7 +149,8 @@ async function main(): Promise<void> {
         platformVersion: device.platformVersion,
         xcodeOrgId: env.xcodeOrgId,
         xcodeSigningId: env.xcodeSigningId,
-        updatedWdaBundleId: env.updatedWdaBundleId
+        updatedWdaBundleId: env.updatedWdaBundleId,
+        reservedPorts: env.reservedPorts
       });
     } else {
       const device = await resolveSimulatorDevice(env.deviceName);
@@ -156,7 +159,8 @@ async function main(): Promise<void> {
       capabilities = createSimulatorCapabilities({
         appiumPort: env.appiumPort,
         bundleId: env.bundleId,
-        deviceName: device.name
+        deviceName: device.name,
+        reservedPorts: env.reservedPorts
       });
     }
 
@@ -175,6 +179,13 @@ async function main(): Promise<void> {
     }
 
     expoServer = await ensureExpoServer({
+      env:
+        mode === "cloud"
+          ? {
+              EXPO_PUBLIC_KANNA_FORCE_CLOUD: "1",
+              KANNA_APP_ENV: env.appEnv
+            }
+          : { KANNA_APP_ENV: env.appEnv },
       metroPort: env.metroPort,
       projectRoot
     });
@@ -186,6 +197,11 @@ async function main(): Promise<void> {
 
     if (mode === "profile-disconnected") {
       await runProfileDisconnectedConnectionSmoke(driver);
+    } else if (mode === "cloud") {
+      await runCloudTaskFlow(driver, {
+        email: env.cloudEmail,
+        password: env.cloudPassword
+      });
     } else {
       const desktopIdentity = await readDesktopIdentity(resolvedDesktopServerUrl);
       await seedTrustedDesktopThroughDeepLink({

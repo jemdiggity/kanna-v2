@@ -53,6 +53,8 @@ pub enum RelayMessage {
         desktop_id: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         desktop_secret: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tunnel_id: Option<String>,
     },
     #[serde(rename = "invoke")]
     Invoke {
@@ -84,37 +86,67 @@ pub enum RelayMessage {
         #[serde(rename = "userId")]
         user_id: String,
     },
+    #[serde(rename = "tunnel_establish")]
+    TunnelEstablish {
+        #[serde(rename = "desktopId")]
+        desktop_id: String,
+        #[serde(rename = "tunnelId")]
+        tunnel_id: String,
+    },
+    #[serde(rename = "tunnel_ready")]
+    TunnelReady {
+        #[serde(rename = "desktopId")]
+        desktop_id: String,
+        #[serde(rename = "tunnelId")]
+        tunnel_id: String,
+    },
 }
 
-fn build_auth_message(config: &Config) -> RelayMessage {
+fn build_auth_message(config: &Config, tunnel_id: Option<String>) -> RelayMessage {
     match &config.desktop_secret {
         Some(desktop_secret) => RelayMessage::Auth {
             device_token: None,
             desktop_id: Some(config.desktop_id.clone()),
             desktop_secret: Some(desktop_secret.clone()),
+            tunnel_id,
         },
         None => RelayMessage::Auth {
             device_token: Some(config.device_token.clone()),
             desktop_id: Some(config.desktop_id.clone()),
             desktop_secret: None,
+            tunnel_id,
         },
     }
 }
 
 pub async fn connect_to_relay(
     config: &Config,
-) -> Result<(WsSink, WsStream), Box<dyn std::error::Error>> {
+) -> Result<(WsSink, WsStream), Box<dyn std::error::Error + Send + Sync>> {
     let (ws_stream, _response) = connect_async(&config.relay_url).await?;
     let (mut sink, stream) = ws_stream.split();
 
     // Send auth message immediately after connecting
-    let auth = build_auth_message(config);
+    let auth = build_auth_message(config, None);
     let auth_json = serde_json::to_string(&auth)?;
     sink.send(Message::Text(auth_json.into())).await?;
 
     log::info!("Authenticated with relay");
 
     Ok((sink, stream))
+}
+
+pub async fn connect_tunnel_to_relay(
+    config: &Config,
+    tunnel_id: String,
+) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>, Box<dyn std::error::Error + Send + Sync>> {
+    let (mut ws_stream, _response) = connect_async(&config.relay_url).await?;
+
+    let auth = build_auth_message(config, Some(tunnel_id.clone()));
+    ws_stream
+        .send(Message::Text(serde_json::to_string(&auth)?.into()))
+        .await?;
+
+    Ok(ws_stream)
 }
 
 #[cfg(test)]
@@ -139,7 +171,7 @@ mod tests {
 
     #[test]
     fn build_auth_message_uses_legacy_device_token_when_desktop_secret_is_missing() {
-        let auth = super::build_auth_message(&test_config());
+        let auth = super::build_auth_message(&test_config(), None);
         let payload = serde_json::to_value(auth).unwrap();
 
         assert_eq!(
@@ -157,7 +189,7 @@ mod tests {
         let mut config = test_config();
         config.desktop_secret = Some("desktop-secret".to_string());
 
-        let auth = super::build_auth_message(&config);
+        let auth = super::build_auth_message(&config, None);
         let payload = serde_json::to_value(auth).unwrap();
 
         assert_eq!(
@@ -166,6 +198,25 @@ mod tests {
                 "type": "auth",
                 "desktop_id": "desktop-1",
                 "desktop_secret": "desktop-secret"
+            })
+        );
+    }
+
+    #[test]
+    fn build_auth_message_includes_tunnel_id_for_tunnel_socket() {
+        let mut config = test_config();
+        config.desktop_secret = Some("desktop-secret".to_string());
+
+        let auth = super::build_auth_message(&config, Some("tunnel-1".to_string()));
+        let payload = serde_json::to_value(auth).unwrap();
+
+        assert_eq!(
+            payload,
+            serde_json::json!({
+                "type": "auth",
+                "desktop_id": "desktop-1",
+                "desktop_secret": "desktop-secret",
+                "tunnel_id": "tunnel-1"
             })
         );
     }

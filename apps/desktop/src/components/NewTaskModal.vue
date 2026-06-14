@@ -6,6 +6,7 @@ import { useModalZIndex } from "../composables/useModalZIndex";
 import { registerContextShortcuts } from "../composables/useShortcutContext";
 import { macOsTextInputAttrs } from "../utils/textInput";
 import { filterBaseBranchCandidates } from "../utils/baseBranchPicker";
+import type { AgentExecutionType } from "../stores/agentExecutionType";
 const { zIndex } = useModalZIndex();
 
 registerContextShortcuts("newTask", [
@@ -22,12 +23,14 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  submit: [prompt: string, agentProvider: AgentProvider, pipelineName: string, baseBranch: string];
+  submit: [prompt: string, agentProvider: AgentProvider, pipelineName: string, baseBranch: string, agentType: AgentExecutionType];
   cancel: [];
 }>();
 
 const prompt = ref("");
 const agentProvider = ref<AgentProvider>(props.defaultAgentProvider ?? "claude");
+const displayMode = ref<AgentExecutionType>("agent");
+const rawModeExplicitlySelected = ref(false);
 const pipelineOptions = computed(() => {
   if (props.pipelines && props.pipelines.length > 0) return props.pipelines;
   return ["default"];
@@ -78,6 +81,24 @@ function providerLabel(provider: AgentProvider): string {
   if (provider === "copilot") return "Copilot";
   if (provider === "codex") return "Codex";
   return "OpenCode";
+}
+
+const supportsThemedMode = computed(() => agentProvider.value === "claude" || agentProvider.value === "codex");
+
+watch(supportsThemedMode, (supported) => {
+  if (!supported) {
+    displayMode.value = "pty";
+    return;
+  }
+  if (!rawModeExplicitlySelected.value) {
+    displayMode.value = "agent";
+  }
+}, { immediate: true });
+
+function selectDisplayMode(mode: AgentExecutionType) {
+  if (mode === "agent" && !supportsThemedMode.value) return;
+  displayMode.value = mode;
+  rawModeExplicitlySelected.value = mode === "pty";
 }
 
 function cycleProvider(direction: -1 | 1) {
@@ -147,7 +168,7 @@ watch(showBaseBranchPicker, async (open) => {
 function handleSubmit() {
   const text = prompt.value.trim();
   if (!text || !hasValidBaseBranch.value || selectedBaseBranch.value === null) return;
-  emit("submit", text, agentProvider.value, selectedPipeline.value, selectedBaseBranch.value);
+  emit("submit", text, agentProvider.value, selectedPipeline.value, selectedBaseBranch.value, displayMode.value);
   prompt.value = "";
 }
 
@@ -444,6 +465,31 @@ function handleKeydown(e: KeyboardEvent) {
             </div>
           </div>
         </div>
+
+        <div class="pipeline-row">
+          <label class="pipeline-label">Display</label>
+          <div class="display-mode-options" role="radiogroup" aria-label="Display mode">
+            <button
+              type="button"
+              class="display-mode-option"
+              :class="{ selected: displayMode === 'agent' }"
+              :disabled="!supportsThemedMode"
+              data-testid="display-mode-themed"
+              @click="selectDisplayMode('agent')"
+            >
+              Themed
+            </button>
+            <button
+              type="button"
+              class="display-mode-option"
+              :class="{ selected: displayMode === 'pty' }"
+              data-testid="display-mode-raw"
+              @click="selectDisplayMode('pty')"
+            >
+              Raw terminal
+            </button>
+          </div>
+        </div>
       </div>
       <div class="modal-footer">
         <span class="hint">{{ $t('modals.submitHint', { action: $t('actions.submit').toLowerCase() }) }}</span>
@@ -507,6 +553,31 @@ function handleKeydown(e: KeyboardEvent) {
 
 .agent-provider:hover {
   color: var(--kn-text-primary);
+}
+
+.display-mode-options {
+  display: flex;
+  gap: 6px;
+}
+
+.display-mode-option {
+  border: 1px solid var(--kn-border);
+  border-radius: 6px;
+  background: var(--kn-bg-button);
+  color: var(--kn-text-secondary);
+  padding: 5px 9px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.display-mode-option.selected {
+  border-color: var(--kn-accent);
+  color: var(--kn-accent);
+}
+
+.display-mode-option:disabled {
+  cursor: default;
+  opacity: 0.45;
 }
 
 .modal-body {

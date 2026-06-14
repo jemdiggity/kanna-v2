@@ -99,7 +99,7 @@ function buildIncomingTransferPayload() {
       pipeline: "default",
       display_name: "Transferred task",
       base_ref: "main",
-      agent_type: "sdk",
+      agent_type: "agent",
       agent_provider: "claude" as const,
     },
     repo: {
@@ -1129,7 +1129,7 @@ describe("recordIncomingTransfer", () => {
           pipeline: "default",
           display_name: null,
           base_ref: "main",
-          agent_type: "sdk",
+          agent_type: "agent",
           agent_provider: "claude",
         },
         repo: {
@@ -1194,7 +1194,7 @@ describe("recordIncomingTransfer", () => {
           pipeline: "default",
           display_name: null,
           base_ref: "main",
-          agent_type: "sdk",
+          agent_type: "agent",
           agent_provider: "claude",
         },
         repo: {
@@ -1274,7 +1274,7 @@ describe("incoming transfer approval", () => {
       if (cmd === "git_fetch") {
         return null;
       }
-      if (cmd === "git_worktree_add" || cmd === "create_agent_session") {
+      if (cmd === "git_worktree_add" || cmd === "spawn_agent_session") {
         return null;
       }
       throw new Error(`unexpected invoke: ${cmd}`);
@@ -1321,7 +1321,7 @@ describe("incoming transfer approval", () => {
       if (cmd === "which_binary") {
         return args?.name === "claude" ? "/usr/bin/claude" : null;
       }
-      if (cmd === "git_worktree_add" || cmd === "create_agent_session") {
+      if (cmd === "git_worktree_add" || cmd === "spawn_agent_session") {
         return null;
       }
       throw new Error(`unexpected invoke: ${cmd}`);
@@ -1394,7 +1394,7 @@ describe("incoming transfer approval", () => {
         cmd === "ensure_directory" ||
         cmd === "git_clone" ||
         cmd === "git_worktree_add" ||
-        cmd === "create_agent_session"
+        cmd === "spawn_agent_session"
       ) {
         return null;
       }
@@ -1461,7 +1461,7 @@ describe("incoming transfer approval", () => {
       if (cmd === "which_binary") {
         return "/usr/bin/claude";
       }
-      if (cmd === "git_worktree_add" || cmd === "create_agent_session") {
+      if (cmd === "git_worktree_add" || cmd === "spawn_agent_session") {
         return null;
       }
       throw new Error(`unexpected invoke: ${cmd}`);
@@ -1522,7 +1522,7 @@ describe("incoming transfer approval", () => {
         cmd === "ensure_directory" ||
         cmd === "git_init" ||
         cmd === "git_worktree_add" ||
-        cmd === "create_agent_session"
+        cmd === "spawn_agent_session"
       ) {
         return null;
       }

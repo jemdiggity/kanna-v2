@@ -36,6 +36,33 @@ describe("resolveRequiredMobileE2eEnv", () => {
     });
   });
 
+  it("uses the staging bundle id when KANNA_APP_ENV is staging", () => {
+    expect(
+      resolveRequiredMobileE2eEnv({
+        KANNA_APP_ENV: "staging",
+        KANNA_APPIUM_PORT: "4723",
+        KANNA_E2E_DESKTOP_SERVER_URL: "http://127.0.0.1:48120"
+      })
+    ).toMatchObject({
+      appEnv: "staging",
+      bundleId: "build.kanna.app.staging"
+    });
+  });
+
+  it("parses cloud E2E credentials when provided", () => {
+    expect(
+      resolveRequiredMobileE2eEnv({
+        KANNA_APPIUM_PORT: "4723",
+        KANNA_E2E_CLOUD_EMAIL: "agent@example.com",
+        KANNA_E2E_CLOUD_PASSWORD: "secret",
+        KANNA_E2E_DESKTOP_SERVER_URL: "http://127.0.0.1:48120"
+      })
+    ).toMatchObject({
+      cloudEmail: "agent@example.com",
+      cloudPassword: "secret"
+    });
+  });
+
   it("defaults the Metro port to 8081 when unset", () => {
     expect(
       resolveRequiredMobileE2eEnv({

@@ -23,12 +23,64 @@ export async function startTmuxSession(runner: CommandRunner, target: TmuxTarget
     { env: first.env }
   );
   if (firstResult.exitCode !== 0) {
+    if (isDuplicateSessionError(firstResult.stderr)) {
+      await addMissingTmuxWindows(runner, target, windows);
+      return;
+    }
     throw new Error(`tmux failed to start ${target.session}:${first.name}: ${firstResult.stderr}`);
   }
 
   await runner.run("tmux", ["-L", target.server, "set-option", "-t", target.session, "remain-on-exit", "on"]);
 
   for (const window of rest) {
+    const result = await runner.run(
+      "tmux",
+      [
+        "-L",
+        target.server,
+        "new-window",
+        "-t",
+        target.session,
+        "-n",
+        window.name,
+        "-c",
+        window.cwd,
+        window.command
+      ],
+      { env: window.env }
+    );
+    if (result.exitCode !== 0) {
+      throw new Error(`tmux failed to start ${target.session}:${window.name}: ${result.stderr}`);
+    }
+  }
+}
+
+function isDuplicateSessionError(stderr: string): boolean {
+  const normalized = stderr.toLowerCase();
+  return normalized.includes("duplicate session") || normalized.includes("session already exists");
+}
+
+async function addMissingTmuxWindows(
+  runner: CommandRunner,
+  target: TmuxTarget,
+  windows: DevWindow[]
+): Promise<void> {
+  const list = await runner.run("tmux", ["-L", target.server, "list-windows", "-t", target.session, "-F", "#{window_name}"]);
+  if (list.exitCode !== 0) {
+    throw new Error(`tmux failed to inspect existing session ${target.session}: ${list.stderr}`);
+  }
+
+  const existing = new Set(
+    list.stdout
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+  );
+
+  for (const window of windows) {
+    if (existing.has(window.name)) {
+      continue;
+    }
     const result = await runner.run(
       "tmux",
       [

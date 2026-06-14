@@ -26,7 +26,7 @@ name: Code Review
 description: Reviews code for quality
 model: opus
 permission_mode: acceptEdits
-execution_mode: sdk
+execution_mode: agent
 allowed_tools:
   - Read
   - Grep
@@ -48,7 +48,7 @@ You are a code reviewer. Review the code carefully.
     expect(result!.description).toBe("Reviews code for quality");
     expect(result!.model).toBe("opus");
     expect(result!.permissionMode).toBe("acceptEdits");
-    expect(result!.executionMode).toBe("sdk");
+    expect(result!.executionMode).toBe("agent");
     expect(result!.allowedTools).toEqual(["Read", "Grep"]);
     expect(result!.disallowedTools).toEqual(["Bash"]);
     expect(result!.maxTurns).toBe(10);
@@ -57,6 +57,17 @@ You are a code reviewer. Review the code carefully.
     expect(result!.teardown).toEqual(["bun run clean"]);
     expect(result!.stage).toBe("pr");
     expect(result!.prompt).toBe("You are a code reviewer. Review the code carefully.");
+  });
+
+  it("maps legacy sdk execution mode to agent", () => {
+    const content = `---
+execution_mode: sdk
+---
+Run in the themed agent view.
+`;
+    const result = parseAgentMd(content, "themed");
+    expect(result).not.toBeNull();
+    expect(result!.executionMode).toBe("agent");
   });
 
   it("derives name from directory slug when missing", () => {

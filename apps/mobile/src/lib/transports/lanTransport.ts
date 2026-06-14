@@ -1,8 +1,10 @@
 import type {
   KannaTransport,
+  TaskAgentSubscription,
   TaskTerminalStreamEvent,
   TaskTerminalSubscription
 } from "../api/client";
+import { StreamClient, type WebSocketLike as StreamWebSocketLike } from "@kanna/stream-client";
 import type {
   CreateTaskRequest,
   CreateTaskResponse,
@@ -31,6 +33,7 @@ export type FetchLike = (
 ) => Promise<FetchResponseLike>;
 
 export interface WebSocketLike {
+  send(data: string): void;
   close(): void;
   onopen: (() => void) | null;
   onclose: (() => void) | null;
@@ -147,6 +150,46 @@ export function createLanTransport(
         }
       } satisfies TaskTerminalSubscription;
     },
+    observeTaskAgent(taskId, listener) {
+      const client = new StreamClient({
+        url: buildKspWebSocketUrl(baseUrl),
+        webSocketFactory: (url) => createSocket(url) as unknown as StreamWebSocketLike,
+        reconnectDelaysMs: [250, 500, 1000, 2000]
+      });
+
+      client.attachAgent(taskId, {
+        onSnapshot(events, nextSeq) {
+          listener({ type: "snapshot", taskId, events, nextSeq });
+        },
+        onEvent(seq, event) {
+          listener({ type: "event", taskId, seq, event });
+        },
+        onStatus(status) {
+          listener({ type: "status", taskId, status });
+        },
+        onSessionExit(code) {
+          listener({ type: "exit", taskId, code });
+        },
+        onError(_code, message) {
+          listener({ type: "error", taskId, message });
+        }
+      });
+
+      return {
+        close() {
+          client.close();
+        },
+        sendInput(input: string) {
+          client.sendAgentInput(taskId, input);
+        },
+        sendPermission(requestId, decision) {
+          client.sendAgentPermission(taskId, requestId, decision);
+        },
+        interrupt() {
+          client.sendAgentInterrupt(taskId);
+        }
+      } satisfies TaskAgentSubscription;
+    },
     createPairingSession: () =>
       request<PairingSession>("/v1/pairing/sessions", { method: "POST" })
   };
@@ -191,6 +234,14 @@ function buildTaskTerminalWebSocketUrl(baseUrl: string, taskId: string): string 
   const url = new URL(baseUrl);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   url.pathname = `/v1/tasks/${encodeURIComponent(taskId)}/terminal`;
+  url.search = "";
+  return url.toString();
+}
+
+function buildKspWebSocketUrl(baseUrl: string): string {
+  const url = new URL(baseUrl);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  url.pathname = "/v1/stream";
   url.search = "";
   return url.toString();
 }

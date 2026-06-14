@@ -93,6 +93,7 @@ Run '\\''copilot update'\\'' to check for updates.
         KANNA_DB_PATH: "/tmp/kanna.db",
         KANNA_MOBILE_SERVER_PORT: "48120",
         KANNA_FIREBASE_AUTH_PORT: "9100",
+        KANNA_FIREBASE_FIRESTORE_PORT: "9101",
         KANNA_RELAY_PORT: "9081",
         KANNA_MOBILE_PORT: "8082"
       },
@@ -107,8 +108,12 @@ Run '\\''copilot update'\\'' to check for updates.
     expect(plan.windows[0]?.command).toContain("firebase emulators:start");
     expect(plan.windows[1]?.cwd).toBe("/repo/services/relay");
     expect(plan.windows[1]?.env.PORT).toBe("9081");
-    expect(plan.windows[1]?.env.SKIP_AUTH).toBe("true");
-    expect(plan.windows[1]?.command).toContain("PORT='9081' SKIP_AUTH='true' pnpm run dev");
+    expect(plan.windows[1]?.env.FIREBASE_PROJECT_ID).toBe("kanna-local");
+    expect(plan.windows[1]?.env.FIREBASE_AUTH_EMULATOR_HOST).toBe("127.0.0.1:9100");
+    expect(plan.windows[1]?.env.FIRESTORE_EMULATOR_HOST).toBe("127.0.0.1:9101");
+    expect(plan.windows[1]?.command).toContain(
+      "PORT='9081' FIREBASE_PROJECT_ID='kanna-local' FIREBASE_AUTH_EMULATOR_HOST='127.0.0.1:9100' FIRESTORE_EMULATOR_HOST='127.0.0.1:9101' pnpm run dev"
+    );
     expect(plan.windows[3]?.command).not.toContain("EXPO_PUBLIC_KANNA_SERVER_URL");
     expect(plan.windows[3]?.command).toContain("EXPO_PUBLIC_KANNA_RELAY_URL='ws://192.168.1.5:9081'");
     expect(plan.windows[3]?.command).toContain("RCT_METRO_PORT='8082'");
@@ -118,6 +123,55 @@ Run '\\''copilot update'\\'' to check for updates.
     expect(plan.windows[3]?.command).toContain("EXPO_PUBLIC_FIREBASE_AUTH_EMULATOR_HOST='192.168.1.5'");
     expect(plan.windows[3]?.command).toContain("EXPO_PUBLIC_FIREBASE_AUTH_EMULATOR_PORT='9100'");
     expect(plan.windows[3]?.command).toContain("unset NO_COLOR;");
+    expect(plan.windows[3]?.command).toContain("pnpm run dev -- --port 8082 --dev-client");
+  });
+
+  it("keeps the mobile Metro window alive for physical-device sessions", () => {
+    const plan = buildDevPlan({
+      repoRoot: "/repo",
+      env: {
+        KANNA_DEV_PORT: "1421",
+        KANNA_DB_PATH: "/tmp/kanna.db",
+        KANNA_MOBILE_SERVER_PORT: "48120",
+        KANNA_MOBILE_PORT: "8082",
+        KANNA_IOS_DEVICE_UDID: "00008130-001015CA1091401C"
+      },
+      mobile: true,
+      emulators: false,
+      firebaseConfigPath: "/repo/.firebase-8080.kanna.json",
+      mobileServerUrl: "http://127.0.0.1:48120",
+      resolveLanAddress: () => "172.16.0.193"
+    });
+
+    expect(plan.windows[1]?.command).toContain("REACT_NATIVE_PACKAGER_HOSTNAME='172.16.0.193'");
+    expect(plan.windows[1]?.command).toContain("while true; do");
+    expect(plan.windows[1]?.command).toContain("pnpm run dev -- --port 8082 --dev-client");
+    expect(plan.windows[1]?.command).toContain("sleep 2");
+  });
+
+  it("uses the Mac LAN host for physical-device mobile dev endpoints", () => {
+    const plan = buildDevPlan({
+      repoRoot: "/repo",
+      env: {
+        KANNA_DEV_PORT: "1421",
+        KANNA_DB_PATH: "/tmp/kanna.db",
+        KANNA_MOBILE_SERVER_PORT: "48120",
+        KANNA_FIREBASE_AUTH_PORT: "9100",
+        KANNA_FIREBASE_FIRESTORE_PORT: "9101",
+        KANNA_RELAY_PORT: "9081",
+        KANNA_MOBILE_PORT: "8082",
+        KANNA_IOS_DEVICE_UDID: "00008130-001015CA1091401C"
+      },
+      mobile: true,
+      emulators: true,
+      firebaseConfigPath: "/repo/.firebase-8080.kanna.json",
+      mobileServerUrl: "http://127.0.0.1:48120",
+      resolveLanAddress: () => "172.16.0.193"
+    });
+
+    expect(plan.windows[3]?.command).toContain("EXPO_PUBLIC_KANNA_SERVER_URL='http://172.16.0.193:48120'");
+    expect(plan.windows[3]?.command).toContain("EXPO_PUBLIC_KANNA_RELAY_URL='ws://172.16.0.193:9081'");
+    expect(plan.windows[3]?.command).toContain("EXPO_PUBLIC_FIREBASE_AUTH_EMULATOR_HOST='172.16.0.193'");
   });
 
   it("does not point mobile auth at local emulators unless emulators are running", () => {
@@ -173,7 +227,8 @@ Run '\\''copilot update'\\'' to check for updates.
         KANNA_MOBILE_PORT: "8083",
         EXPO_PUBLIC_FIREBASE_PROJECT_ID: "kanna-prod",
         EXPO_PUBLIC_KANNA_RELAY_URL: "wss://relay.prod.example"
-      }
+      },
+      environment: "production"
     });
 
     expect(plan.windows.map((window) => window.name)).toEqual(["mobile"]);
@@ -182,7 +237,44 @@ Run '\\''copilot update'\\'' to check for updates.
     expect(plan.windows[0]?.command).toContain("EXPO_PUBLIC_KANNA_RELAY_URL='wss://relay.prod.example'");
     expect(plan.windows[0]?.command).toContain("EXPO_PUBLIC_FIREBASE_PROJECT_ID='kanna-prod'");
     expect(plan.windows[0]?.command).toContain("RCT_METRO_PORT='8083'");
-    expect(plan.windows[0]?.command).toContain("pnpm run dev -- --port 8083");
+    expect(plan.windows[0]?.command).toContain("pnpm run dev -- --port 8083 --dev-client");
     expect(plan.windows[0]?.command).not.toContain("EXPO_PUBLIC_FIREBASE_AUTH_EMULATOR_HOST");
+  });
+
+  it("sets staging mobile cloud env from the kd registry", () => {
+    const plan = buildProductionMobilePlan({
+      repoRoot: "/repo",
+      env: {
+        KANNA_MOBILE_PORT: "8084",
+        EXPO_PUBLIC_FIREBASE_API_KEY: "staging-api-key",
+        EXPO_PUBLIC_FIREBASE_APP_ID: "staging-app-id"
+      },
+      environment: "staging"
+    });
+
+    expect(plan.windows[0]?.command).toContain("KANNA_APP_ENV='staging'");
+    expect(plan.windows[0]?.command).toContain("EXPO_PUBLIC_KANNA_RELAY_URL='wss://relay-staging.kanna.build'");
+    expect(plan.windows[0]?.command).toContain("EXPO_PUBLIC_FIREBASE_PROJECT_ID='kanna-staging'");
+    expect(plan.windows[0]?.command).toContain("EXPO_PUBLIC_FIREBASE_API_KEY='staging-api-key'");
+    expect(plan.windows[0]?.command).toContain("RCT_METRO_PORT='8084'");
+  });
+
+  it("exports staging desktop relay settings when KANNA_CLOUD_ENV is staging", () => {
+    const plan = buildDevPlan({
+      repoRoot: "/repo",
+      env: {
+        KANNA_CLOUD_ENV: "staging",
+        KANNA_DEV_PORT: "1421",
+        KANNA_DB_PATH: "/tmp/kanna.db",
+        KANNA_MOBILE_SERVER_PORT: "48120"
+      },
+      mobile: false,
+      emulators: false,
+      firebaseConfigPath: "/repo/.firebase-8080.kanna.json",
+      mobileServerUrl: "http://127.0.0.1:48120"
+    });
+
+    expect(plan.windows[0]?.env.KANNA_FIREBASE_PROJECT_ID).toBe("kanna-staging");
+    expect(plan.windows[0]?.env.KANNA_RELAY_URL).toBe("wss://relay-staging.kanna.build");
   });
 });

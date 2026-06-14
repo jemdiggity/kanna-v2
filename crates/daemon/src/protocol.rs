@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+pub use kanna_agent_protocol::{AgentEvent as NeutralAgentEvent, PermissionDecision};
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
@@ -13,6 +15,25 @@ pub enum ErrorCode {
     HeadlessTerminalInitFailed,
     WriteFailed,
     UnknownSignal,
+    AgentSpawnFailed,
+    NotAgentSession,
+    UnknownPermissionRequest,
+}
+
+/// Whether a session is a PTY terminal or a headless agent (NDJSON pipes).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionKind {
+    #[default]
+    Pty,
+    Agent,
+}
+
+/// A journaled agent event paired with its sequence number.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SeqAgentEvent {
+    pub seq: u64,
+    pub event: NeutralAgentEvent,
 }
 
 fn default_cursor_visible() -> bool {
@@ -55,6 +76,49 @@ pub struct HandoffSession {
     pub agent_provider: Option<AgentProvider>,
     #[serde(default)]
     pub status: SessionStatus,
+    #[serde(default)]
+    pub kind: SessionKind,
+    /// Agent sessions: the provider's own session id (for resume), captured
+    /// from the stream by the old daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_session_id: Option<String>,
+    /// Agent sessions: number of pipe fds transferred for this session
+    /// (stdout, stderr, stdin — 0 for already-exited children). PTY sessions
+    /// always transfer exactly one master fd and leave this 0.
+    #[serde(default)]
+    pub agent_fd_count: u8,
+    /// Agent sessions: serialized spawn context so the adopting daemon can
+    /// resume-respawn after a crash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_spawn: Option<AgentSpawnParams>,
+}
+
+/// Everything needed to (re)build a provider adapter spawn for an agent
+/// session. Carried in SpawnAgent and across handoff.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentSpawnParams {
+    pub agent_provider: AgentProvider,
+    pub prompt: String,
+    pub cwd: String,
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub permission_mode: Option<String>,
+    #[serde(default)]
+    pub allowed_tools: Vec<String>,
+    #[serde(default)]
+    pub disallowed_tools: Vec<String>,
+    #[serde(default)]
+    pub max_turns: Option<u32>,
+    #[serde(default)]
+    pub max_budget_usd: Option<f64>,
+    #[serde(default)]
+    pub system_prompt: Option<String>,
+    /// Optional absolute executable path; otherwise resolved from env PATH.
+    #[serde(default)]
+    pub executable: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -131,6 +195,27 @@ pub enum Command {
     Handoff {
         version: u32,
     },
+    SpawnAgent {
+        session_id: String,
+        params: AgentSpawnParams,
+    },
+    AttachAgent {
+        session_id: String,
+        #[serde(default)]
+        from_seq: u64,
+    },
+    AgentInput {
+        session_id: String,
+        text: String,
+    },
+    AgentPermission {
+        session_id: String,
+        request_id: String,
+        decision: PermissionDecision,
+    },
+    AgentInterrupt {
+        session_id: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -172,6 +257,18 @@ pub enum Event {
     },
     HandoffUnsupported,
     ShuttingDown,
+    AgentSnapshot {
+        session_id: String,
+        /// The seq the live stream continues from (= journal length); a
+        /// reconnecting client passes this back as `from_seq`.
+        next_seq: u64,
+        events: Vec<SeqAgentEvent>,
+    },
+    AgentEvent {
+        session_id: String,
+        seq: u64,
+        event: NeutralAgentEvent,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -182,6 +279,8 @@ pub struct SessionInfo {
     pub state: SessionState,
     pub idle_seconds: u64,
     pub status: SessionStatus,
+    #[serde(default)]
+    pub kind: SessionKind,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -447,6 +546,10 @@ mod tests {
                 snapshot: None,
                 agent_provider: None,
                 status: SessionStatus::Idle,
+                kind: SessionKind::Pty,
+                provider_session_id: None,
+                agent_fd_count: 0,
+                agent_spawn: None,
             }],
         };
 
@@ -523,6 +626,7 @@ mod tests {
             state: SessionState::Active,
             idle_seconds: 30,
             status: SessionStatus::Idle,
+            kind: SessionKind::Pty,
         };
         let json = serde_json::to_string(&info).unwrap();
         let decoded: SessionInfo = serde_json::from_str(&json).unwrap();
@@ -550,6 +654,7 @@ mod tests {
                 state: SessionState::Suspended,
                 idle_seconds: 10,
                 status: SessionStatus::Idle,
+                kind: SessionKind::Pty,
             }],
         };
         let json = serde_json::to_string(&evt).unwrap();

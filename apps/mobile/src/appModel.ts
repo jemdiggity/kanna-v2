@@ -16,6 +16,7 @@ import {
   type RelayDesktopClient
 } from "./lib/transports/relayClient";
 import { createRemoteTransport } from "./lib/transports/remoteTransport";
+import { readExpoConfig } from "./lib/expoConfig";
 import { createRootNavigator } from "./navigation/RootNavigator";
 import { installE2eTrustSeedHandler } from "./e2eTrustSeed";
 import {
@@ -28,15 +29,18 @@ import {
   type SessionPersistence,
   type TrustedDesktopRecord
 } from "./state/sessionPersistence";
+import { readKannaExpoExtra } from "./mobileEnvironment";
 
 const PRODUCTION_RELAY_URL = "wss://relay.kanna.build";
 
 interface ExpoPublicEnv {
   EXPO_PUBLIC_KANNA_RELAY_URL?: string;
+  EXPO_PUBLIC_KANNA_FORCE_CLOUD?: string;
 }
 
 interface RelayUrlOptions {
   dev?: boolean;
+  extraRelayUrl?: string | null;
 }
 
 export interface AppModel {
@@ -45,9 +49,11 @@ export interface AppModel {
   initialize(): Promise<void>;
   navigator: ReturnType<typeof createRootNavigator>;
   sessionStore: SessionStore;
+  setForceCloud(enabled: boolean): void;
 }
 
 interface AppModelOptions {
+  forceCloud?: boolean;
   relayUrl?: string | null;
   taskIndex?: CloudTaskIndex;
   bonjourBrowser?: BonjourBrowser;
@@ -83,9 +89,19 @@ export function resolveRelayUrl(
     return relayUrl && relayUrl.length > 0 ? relayUrl : null;
   }
 
+  const extraRelayUrl = normalizeOptionalString(options.extraRelayUrl);
+  if (extraRelayUrl) {
+    return extraRelayUrl;
+  }
+
   if (options.dev ?? isDevRuntime()) return null;
 
   return PRODUCTION_RELAY_URL;
+}
+
+export function resolveForceCloud(env: ExpoPublicEnv = readExpoPublicEnv()): boolean {
+  const rawValue = env.EXPO_PUBLIC_KANNA_FORCE_CLOUD?.trim().toLowerCase();
+  return rawValue === "1" || rawValue === "true" || rawValue === "yes";
 }
 
 export function createAppModel(input: CreateAppModelInput = {}): AppModel {
@@ -95,20 +111,34 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
   const options = input.options ?? {};
   const bonjourBrowser = options.bonjourBrowser ?? createBonjourBrowser();
   const sessionStore = createSessionStore();
+  const extra = readKannaExpoExtra(readExpoConfig());
+  let forceCloud = options.forceCloud ?? resolveForceCloud();
+  // Lazily create the cloud task index only when the live subscription is
+  // actually used (sign-in time, when Firebase is initialized). Creating it
+  // eagerly would call getFirestore() before any Firebase app exists in
+  // LAN-only / no-Firebase paths.
+  let cloudTaskIndex: ReturnType<typeof createFirestoreTaskIndex> | null = null;
+  const getCloudTaskIndex = () =>
+    (cloudTaskIndex ??= options.taskIndex ?? createFirestoreTaskIndex());
   const resolveClient = () =>
     createClientForMode({
       authSession,
       bonjourBrowser,
       createRelayClient: options.createRelayClient ?? createRelayDesktopClient,
       fetchImpl,
+      forceCloud,
       getSelectedDesktopId: () => sessionStore.getState().selectedDesktopId,
       getTrustedDesktops: () => sessionStore.getState().trustedDesktops,
-      relayUrl: options.relayUrl ?? resolveRelayUrl(),
+      relayUrl: options.relayUrl ?? resolveRelayUrl(readExpoPublicEnv(), {
+        extraRelayUrl: extra?.relayUrl
+      }),
       taskIndex: options.taskIndex
     });
   let activeClient = resolveClient();
   const client = createDelegatingClient(() => activeClient);
-  const controller = createMobileController(client, sessionStore, authSession);
+  const controller = createMobileController(client, sessionStore, authSession, {
+    subscribeCloudTasks: (uid, onUpdate) => getCloudTaskIndex().subscribeRecentTasks(uid, onUpdate),
+  });
   let persistencePromise: Promise<SessionPersistence> | null = persistence
     ? Promise.resolve(persistence)
     : null;
@@ -166,7 +196,11 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
       await controller.bootstrap();
     },
     navigator: createRootNavigator(),
-    sessionStore
+    sessionStore,
+    setForceCloud(enabled) {
+      forceCloud = enabled;
+      activeClient = resolveClient();
+    }
   };
 }
 
@@ -175,6 +209,7 @@ function createClientForMode({
   bonjourBrowser,
   createRelayClient,
   fetchImpl,
+  forceCloud,
   getSelectedDesktopId,
   getTrustedDesktops,
   relayUrl,
@@ -187,6 +222,7 @@ function createClientForMode({
     getIdToken(forceRefresh?: boolean): Promise<string | null>;
   }): RelayDesktopClient;
   fetchImpl: FetchLike;
+  forceCloud: boolean;
   getSelectedDesktopId(): string | null;
   getTrustedDesktops(): readonly TrustedDesktopRecord[];
   relayUrl: string | null;
@@ -207,6 +243,7 @@ function createClientForMode({
         getSelectedDesktopId,
         invokeDesktop: relayClient.invokeDesktop,
         observeTaskTerminal: relayClient.observeTaskTerminal,
+        observeTaskAgent: relayClient.observeTaskAgent,
         sendTaskInput: relayClient.sendTaskInput,
         listCloudTasks: () => resolvedTaskIndex.listRecentTasks(authState.user.uid),
       }),
@@ -219,7 +256,8 @@ function createClientForMode({
     });
 
     return createCloudWithLanFallbackClient(cloudClient, lanClient, {
-      isLanFallbackEnabled: () => hasTrustedLanPeer(getTrustedDesktops())
+      isLanFallbackEnabled: () =>
+        !forceCloud && hasTrustedLanPeer(getTrustedDesktops())
     });
   }
 
@@ -233,6 +271,11 @@ function createClientForMode({
   }
 
   return createDisconnectedClient();
+}
+
+function normalizeOptionalString(value: string | null | undefined): string | null {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : null;
 }
 
 function createDisconnectedClient(): KannaClient {
@@ -266,6 +309,19 @@ function createDisconnectedClient(): KannaClient {
         message: "No trusted desktop is available."
       });
       return { close() {} };
+    },
+    observeTaskAgent(taskId, listener) {
+      listener({
+        type: "error",
+        taskId,
+        message: "No trusted desktop is available."
+      });
+      return {
+        close() {},
+        sendInput() {},
+        sendPermission() {},
+        interrupt() {}
+      };
     },
     createPairingSession: unavailable
   };
@@ -362,6 +418,10 @@ function createCloudWithLanFallbackClient(
       useLanFallback()
         ? lanClient.observeTaskTerminal(taskId, listener)
         : cloudClient.observeTaskTerminal(taskId, listener),
+    observeTaskAgent: (taskId, listener) =>
+      useLanFallback()
+        ? lanClient.observeTaskAgent(taskId, listener)
+        : cloudClient.observeTaskAgent(taskId, listener),
     createPairingSession: () => lanClient.createPairingSession()
   };
 }
@@ -411,6 +471,8 @@ function createTrustedLanFallbackClient({
       (await resolveClient()).sendTaskInput(taskId, input),
     observeTaskTerminal: (taskId, listener) =>
       currentClient().observeTaskTerminal(taskId, listener),
+    observeTaskAgent: (taskId, listener) =>
+      currentClient().observeTaskAgent(taskId, listener),
     createPairingSession: async () => (await resolveClient()).createPairingSession()
   };
 }
@@ -447,6 +509,8 @@ function createDelegatingClient(getClient: () => KannaClient): KannaClient {
     sendTaskInput: (taskId, input) => getClient().sendTaskInput(taskId, input),
     observeTaskTerminal: (taskId, listener) =>
       getClient().observeTaskTerminal(taskId, listener),
+    observeTaskAgent: (taskId, listener) =>
+      getClient().observeTaskAgent(taskId, listener),
     createPairingSession: () => getClient().createPairingSession()
   };
 }

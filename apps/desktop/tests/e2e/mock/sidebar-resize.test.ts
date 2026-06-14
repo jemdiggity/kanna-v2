@@ -254,7 +254,7 @@ describe("sidebar resize", () => {
     await execDb(
       client,
       "INSERT INTO pipeline_item (id, repo_id, prompt, stage, agent_type) VALUES (?, ?, ?, ?, ?)",
-      ["sidebar-resize-task", repoId, LONG_TASK_TITLE, "in progress", "sdk"],
+      ["sidebar-resize-task", repoId, LONG_TASK_TITLE, "in progress", "agent"],
     );
     await client.executeSync("location.reload()");
     await client.waitForAppReady();

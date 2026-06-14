@@ -3,6 +3,7 @@ import {
   createRemoteTransport,
   RemoteTransportError,
   type RemoteDesktopInvoker,
+  type RemoteTaskAgentObserver,
   type RemoteTaskInputSender,
   type RemoteTaskTerminalObserver
 } from "./remoteTransport";
@@ -496,6 +497,48 @@ describe("remote transport", () => {
     expect(subscription.close).toHaveBeenCalled();
   });
 
+  it("resolves a cloud task route before observing an uncached agent stream", async () => {
+    const subscription = {
+      close: vi.fn(),
+      sendInput: vi.fn(),
+      sendPermission: vi.fn(),
+      interrupt: vi.fn()
+    };
+    const observeTaskAgent = vi.fn<RemoteTaskAgentObserver>(() => subscription);
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [],
+      getSelectedDesktopId: () => null,
+      invokeDesktop: async () => null,
+      observeTaskAgent,
+      listCloudTasks: async () => [
+        {
+          id: "cloud-task-1",
+          repoId: "repo-1",
+          title: "Cloud task",
+          stage: "in progress",
+          ownerDesktopId: "desktop-owner",
+          ownerLocalTaskId: "local-task-1",
+          ownerOnline: true
+        }
+      ]
+    });
+    const listener = vi.fn();
+
+    const returnedSubscription = transport.observeTaskAgent("cloud-task-1", listener);
+    await vi.waitFor(() => {
+      expect(observeTaskAgent).toHaveBeenCalledWith(
+        {
+          desktopId: "desktop-owner",
+          taskId: "local-task-1"
+        },
+        listener
+      );
+    });
+
+    returnedSubscription.close();
+    expect(subscription.close).toHaveBeenCalled();
+  });
+
   it("serves cloud status and repo task collections without selecting a desktop", async () => {
     const invokeDesktop = vi.fn<RemoteDesktopInvoker>();
     const transport = createRemoteTransport({
@@ -547,6 +590,33 @@ describe("remote transport", () => {
     expect(transport.observeTaskTerminal("task-1", listener)).toBe(subscription);
 
     expect(observeTaskTerminal).toHaveBeenCalledWith(
+      {
+        desktopId: "desktop-1",
+        taskId: "task-1"
+      },
+      listener
+    );
+  });
+
+  it("delegates remote agent observation to the relay stream observer dependency", () => {
+    const subscription = {
+      close: vi.fn(),
+      sendInput: vi.fn(),
+      sendPermission: vi.fn(),
+      interrupt: vi.fn()
+    };
+    const observeTaskAgent = vi.fn<RemoteTaskAgentObserver>(() => subscription);
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [],
+      getSelectedDesktopId: () => "desktop-1",
+      invokeDesktop: async () => null,
+      observeTaskAgent
+    });
+    const listener = vi.fn();
+
+    expect(transport.observeTaskAgent("task-1", listener)).toBe(subscription);
+
+    expect(observeTaskAgent).toHaveBeenCalledWith(
       {
         desktopId: "desktop-1",
         taskId: "task-1"

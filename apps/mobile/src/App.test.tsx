@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { createAppModel, resolveRelayUrl } from "./appModel";
+import {
+  createAppModel,
+  resolveForceCloud,
+  resolveRelayUrl
+} from "./appModel";
 import { createStaticBonjourBrowser } from "./lib/discovery/bonjour";
 import type { MobileAuthSession } from "./lib/firebase/auth";
 import type { FetchLike } from "./lib/transports/lanTransport";
@@ -230,6 +234,25 @@ describe("createAppModel", () => {
     expect(resolveRelayUrl({ EXPO_PUBLIC_KANNA_RELAY_URL: "wss://relay.example" }, { dev: true })).toBe("wss://relay.example");
   });
 
+  it("resolves relay URL from Expo extra before production defaults", () => {
+    expect(resolveRelayUrl({}, { extraRelayUrl: "wss://relay-staging.kanna.build" }))
+      .toBe("wss://relay-staging.kanna.build");
+  });
+
+  it("lets Expo public relay URL override Expo extra", () => {
+    expect(
+      resolveRelayUrl(
+        { EXPO_PUBLIC_KANNA_RELAY_URL: "wss://relay.env.example" },
+        { extraRelayUrl: "wss://relay-extra.example" }
+      )
+    ).toBe("wss://relay.env.example");
+  });
+
+  it("parses the force-cloud override from Expo public env", () => {
+    expect(resolveForceCloud({ EXPO_PUBLIC_KANNA_FORCE_CLOUD: "1" })).toBe(true);
+    expect(resolveForceCloud({ EXPO_PUBLIC_KANNA_FORCE_CLOUD: "false" })).toBe(false);
+  });
+
   it("creates an app model with desktop navigation and a LAN client", async () => {
     const model = createAppModel({
       fetchImpl: createFetchMock(),
@@ -284,7 +307,8 @@ describe("createAppModel", () => {
           ownerLocalTaskId: "task-1",
           ownerOnline: false
         }
-      ])
+      ]),
+      subscribeRecentTasks: vi.fn(() => () => {})
     };
 
     const model = createAppModel({
@@ -322,7 +346,8 @@ describe("createAppModel", () => {
       getIdToken: vi.fn().mockResolvedValue("id-token-1")
     };
     const taskIndex = {
-      listRecentTasks: vi.fn(async () => [])
+      listRecentTasks: vi.fn(async () => []),
+      subscribeRecentTasks: vi.fn(() => () => {})
     };
     const model = createAppModel({
       fetchImpl: createFetchMock(),
@@ -398,7 +423,8 @@ describe("createAppModel", () => {
       throw new Error("LAN should not be called for standalone production cloud");
     }) as FetchLike;
     const taskIndex = {
-      listRecentTasks: vi.fn(async () => [])
+      listRecentTasks: vi.fn(async () => []),
+      subscribeRecentTasks: vi.fn(() => () => {})
     };
     const model = createAppModel({
       fetchImpl,
@@ -428,7 +454,8 @@ describe("createAppModel", () => {
   it("falls back to a trusted Bonjour LAN endpoint when signed-in cloud has no tasks", async () => {
     const authSession = createSignedInAuthSession();
     const taskIndex = {
-      listRecentTasks: vi.fn(async () => [])
+      listRecentTasks: vi.fn(async () => []),
+      subscribeRecentTasks: vi.fn(() => () => {})
     };
     const fetchImpl = createTrustedDesktopFetchMock();
     const model = createAppModel({
@@ -481,10 +508,67 @@ describe("createAppModel", () => {
     });
   });
 
+  it("uses cloud instead of trusted LAN fallback when force-cloud is enabled", async () => {
+    const authSession = createSignedInAuthSession();
+    const taskIndex = {
+      listRecentTasks: vi.fn(async () => []),
+      subscribeRecentTasks: vi.fn(() => () => {})
+    };
+    const fetchImpl = createTrustedDesktopFetchMock();
+    const model = createAppModel({
+      fetchImpl,
+      persistence: {
+        load: vi.fn().mockResolvedValue({
+          selectedDesktopId: "desktop-trusted",
+          selectedRepoId: null,
+          selectedTaskId: null,
+          activeView: "tasks",
+          trustedDesktops: [
+            {
+              desktopId: "desktop-trusted",
+              displayName: "Trusted Mac",
+              lanEndpoints: [
+                {
+                  baseUrl: "http://trusted.lan:48120",
+                  lastSeenAt: "2026-05-31T00:00:00.000Z"
+                }
+              ],
+              lastSeenAt: "2026-05-31T00:00:00.000Z"
+            }
+          ]
+        }),
+        save: vi.fn().mockResolvedValue(undefined)
+      },
+      authSession,
+      options: {
+        forceCloud: true,
+        relayUrl: "wss://relay.example",
+        taskIndex,
+        bonjourBrowser: createBonjourForDesktop(
+          "desktop-trusted",
+          "Trusted Mac",
+          "trusted.lan",
+          48120
+        )
+      }
+    });
+
+    await model.initialize();
+
+    expect(model.sessionStore.getState()).toMatchObject({
+      connectionMode: "remote",
+      connectionState: "connected",
+      desktopName: "Kanna Cloud",
+      recentTasks: []
+    });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   it("skips Bonjour LAN endpoints whose status belongs to a different desktop", async () => {
     const authSession = createSignedInAuthSession();
     const taskIndex = {
-      listRecentTasks: vi.fn(async () => [])
+      listRecentTasks: vi.fn(async () => []),
+      subscribeRecentTasks: vi.fn(() => () => {})
     };
     const fetchImpl = vi.fn(async (input) => {
       const url = typeof input === "string" ? input : input.toString();
