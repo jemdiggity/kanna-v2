@@ -183,11 +183,22 @@ describe("kd CLI", () => {
   it("parses the physical-device mobile run command", () => {
     expect(parseCliArgs(["mobile", "run", "--device"])).toEqual({
       taskId: "mobile.run",
-      input: { device: true }
+      input: { device: true, production: false, staging: false }
     });
+    expect(parseCliArgs(["mobile", "run", "--device", "--staging"])).toEqual({
+      taskId: "mobile.run",
+      input: { device: true, production: false, staging: true }
+    });
+    expect(parseCliArgs(["mobile", "run", "--device", "--production"])).toEqual({
+      taskId: "mobile.run",
+      input: { device: true, production: true, staging: false }
+    });
+    expect(() => parseCliArgs(["mobile", "run", "--device", "--production", "--staging"])).toThrow(
+      "mobile run accepts only one of --production or --staging"
+    );
     expect(parseCliArgs(["mobile", "doctor", "--device"])).toEqual({
       taskId: "mobile.doctor",
-      input: { device: true }
+      input: { device: true, production: false, staging: false }
     });
   });
 

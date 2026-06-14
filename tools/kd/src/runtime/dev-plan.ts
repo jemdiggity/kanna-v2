@@ -1,4 +1,4 @@
-import { buildFirebaseCommandEnv } from "./firebase";
+import { buildFirebaseCommandEnv, buildFirebaseEmulatorArgs } from "./firebase";
 import {
   cloudEnvironmentToKdEnvironment,
   resolveCloudRuntimeEnv,
@@ -43,6 +43,10 @@ function shellEnvPrefix(env: Record<string, string | undefined>): string {
 
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+function shellCommand(args: string[]): string {
+  return args.map((arg) => (arg.includes("/") ? shellQuote(arg) : arg)).join(" ");
 }
 
 function isPhysicalDeviceTarget(env: NodeJS.ProcessEnv): boolean {
@@ -111,7 +115,13 @@ function mobileFirebaseEnv(input: BuildDevPlanInput): Record<string, string | un
       input.env.EXPO_PUBLIC_FIREBASE_AUTH_EMULATOR_HOST ??
       resolveMobileHost(input),
     EXPO_PUBLIC_FIREBASE_AUTH_EMULATOR_PORT:
-      input.env.EXPO_PUBLIC_FIREBASE_AUTH_EMULATOR_PORT ?? authPort
+      input.env.EXPO_PUBLIC_FIREBASE_AUTH_EMULATOR_PORT ?? authPort,
+    EXPO_PUBLIC_FIREBASE_FIRESTORE_EMULATOR_HOST:
+      input.env.EXPO_PUBLIC_FIREBASE_FIRESTORE_EMULATOR_HOST ??
+      resolveMobileHost(input),
+    EXPO_PUBLIC_FIREBASE_FIRESTORE_EMULATOR_PORT:
+      input.env.EXPO_PUBLIC_FIREBASE_FIRESTORE_EMULATOR_PORT ??
+      input.env.KANNA_FIREBASE_FIRESTORE_PORT
   };
 }
 
@@ -183,7 +193,7 @@ export function buildDevPlan(input: BuildDevPlanInput): DevPlan {
       name: "emulators",
       cwd: input.repoRoot,
       env: buildFirebaseCommandEnv(input.repoRoot, sharedEnv),
-      command: `pnpm --dir services/firebase-functions build && pnpm exec firebase emulators:start --project kanna-local --config ${JSON.stringify(input.firebaseConfigPath)}`
+      command: `pnpm --dir services/firebase-functions build && ${shellCommand(["pnpm", ...buildFirebaseEmulatorArgs(input.firebaseConfigPath, [])])}`
     });
     const relayProcessEnv = {
       PORT: input.env.KANNA_RELAY_PORT ?? "9080",

@@ -61,17 +61,27 @@ function parseMobileUpInput(rest: string[]): ParsedCliCommand {
 }
 
 function parseMobileRunInput(rest: string[]): ParsedCliCommand {
-  const input = parseFlagInput(rest, { device: false });
+  const input = parseFlagInput(rest, { device: false, production: false, staging: false });
   const unsupportedFlags = Object.entries(input)
-    .filter(([key, value]) => key !== "device" && value === true)
+    .filter(([key, value]) => !["device", "production", "staging"].includes(key) && value === true)
     .map(([key]) => key);
   if (unsupportedFlags.length > 0) {
-    throw new Error("mobile run only accepts --device");
+    throw new Error("mobile run only accepts --device, --production, or --staging");
+  }
+  if (input.production === true && input.staging === true) {
+    throw new Error("mobile run accepts only one of --production or --staging");
   }
   if (input.device !== true) {
     throw new Error("mobile run requires --device");
   }
-  return { taskId: "mobile.run", input: { device: true } };
+  return {
+    taskId: "mobile.run",
+    input: {
+      device: true,
+      production: input.production === true,
+      staging: input.staging === true
+    }
+  };
 }
 
 function parseFlagInput(rest: string[], defaults: Record<string, unknown>): Record<string, unknown> {
@@ -283,7 +293,7 @@ function helpText(): string {
     "  dev seed [--db <path-or-name>] [--delete-db]",
     "  daemon kill",
     "  mobile up [--production|--staging]",
-    "  mobile run --device",
+    "  mobile run --device [--production|--staging]",
     "  mobile doctor --device",
     "  mobile test",
     "  mobile device-smoke",

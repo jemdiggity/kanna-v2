@@ -69,6 +69,8 @@ export interface MobileUpInput {
 
 export interface MobileRunInput {
   device: boolean;
+  production?: boolean;
+  staging?: boolean;
 }
 
 export const devUpInputSchema = z.object({
@@ -94,7 +96,9 @@ const mobileUpInputSchema = z.object({
 });
 
 const mobileRunInputSchema = z.object({
-  device: z.boolean().default(false)
+  device: z.boolean().default(false),
+  production: z.boolean().default(false),
+  staging: z.boolean().default(false)
 });
 
 const logInputSchema = z.object({
@@ -451,38 +455,25 @@ export async function executeMobileDeviceRunWithContext(
   if (!input.device) {
     throw new Error("mobile.run requires --device.");
   }
+  if (input.production && input.staging) {
+    throw new Error("mobile.run accepts only one of --production or --staging.");
+  }
 
   const lanHost = requireMobileDeviceLanHost(options);
   const device = await resolvePhysicalDevice(executor.runner, {
     requestedUdid: executor.context.env.KANNA_IOS_DEVICE_UDID?.trim() || undefined,
     requestedName: executor.context.env.KANNA_IOS_PHYSICAL_DEVICE_NAME?.trim() || undefined
   });
-  const env: NodeJS.ProcessEnv = {
-    ...executor.context.env,
-    KANNA_APP_ENV: executor.context.env.KANNA_APP_ENV ?? "dev",
-    KANNA_IOS_DEVICE_UDID: device.udid
-  };
-  const devPorts = requireMobileDeviceDevPorts(executor.context.ports);
-  const firebaseConfigPath = writeFirebaseEmulatorConfig(executor.context.repoRoot, devPorts);
-  writeTauriLocalConfig(executor.context.repoRoot, devPorts.KANNA_DEV_PORT);
-  const plan = buildDevPlan({
-    repoRoot: executor.context.repoRoot,
-    env,
-    mobile: true,
-    emulators: true,
-    firebaseConfigPath,
-    mobileServerUrl: resolveMobileServerUrl(env),
-    resolveLanAddress: () => lanHost
-  });
+  const launch = prepareMobileDeviceLaunch(input, executor, lanHost, device.udid);
+  await launch.resetTmux();
+  await startTmuxSession(executor.runner, executor.context.tmux, launch.plan.windows);
 
-  await startTmuxSession(executor.runner, executor.context.tmux, plan.windows);
-
-  const metroPort = Number.parseInt(env.KANNA_MOBILE_PORT ?? "8081", 10);
+  const metroPort = Number.parseInt(launch.env.KANNA_MOBILE_PORT ?? "8081", 10);
   if (Number.isNaN(metroPort)) {
-    throw new Error(`KANNA_MOBILE_PORT must be an integer, got: ${env.KANNA_MOBILE_PORT}`);
+    throw new Error(`KANNA_MOBILE_PORT must be an integer, got: ${launch.env.KANNA_MOBILE_PORT}`);
   }
 
-  const nativeIdentity = resolveMobileNativeIdentity(env);
+  const nativeIdentity = resolveMobileNativeIdentity(launch.env);
   const preflight = await checkPhysicalDeviceRunPreflight(executor.runner, {
     bundleId: nativeIdentity.bundleId,
     device,
@@ -495,7 +486,7 @@ export async function executeMobileDeviceRunWithContext(
   });
   const prebuildResult = await executor.runner.run(prebuildCommand.command, prebuildCommand.args, {
     cwd: prebuildCommand.cwd,
-    env: { ...env, ...prebuildCommand.env },
+    env: { ...launch.env, ...prebuildCommand.env },
     streamOutput: true
   });
   if (prebuildResult.exitCode !== 0) {
@@ -510,7 +501,7 @@ export async function executeMobileDeviceRunWithContext(
         device,
         metroUrl: preflight.metroUrl,
         preflight,
-        windows: plan.windows.map((window) => window.name)
+        windows: launch.plan.windows.map((window) => window.name)
       }
     };
   }
@@ -524,7 +515,7 @@ export async function executeMobileDeviceRunWithContext(
   });
   const runResult = await executor.runner.run(runCommand.command, runCommand.args, {
     cwd: runCommand.cwd,
-    env: { ...env, ...runCommand.env },
+    env: { ...launch.env, ...runCommand.env },
     streamOutput: true
   });
 
@@ -539,8 +530,94 @@ export async function executeMobileDeviceRunWithContext(
       device,
       metroUrl: preflight.metroUrl,
       preflight,
-      windows: plan.windows.map((window) => window.name)
+      windows: launch.plan.windows.map((window) => window.name)
     }
+  };
+}
+
+function prepareMobileDeviceLaunch(
+  input: MobileRunInput,
+  executor: ExecutorInput,
+  lanHost: string,
+  deviceUdid: string
+): {
+  env: NodeJS.ProcessEnv;
+  plan: ReturnType<typeof buildDevPlan>;
+  resetTmux: () => Promise<void>;
+} {
+  if (input.staging) {
+    const env: NodeJS.ProcessEnv = {
+      ...executor.context.env,
+      KANNA_CLOUD_ENV: "staging",
+      KANNA_APP_ENV: executor.context.env.KANNA_APP_ENV ?? "staging",
+      KANNA_IOS_DEVICE_UDID: deviceUdid
+    };
+    writeTauriLocalConfig(executor.context.repoRoot, requireNumberPort(executor.context.ports, "KANNA_DEV_PORT"));
+    const desktopPlan = buildDevPlan({
+      repoRoot: executor.context.repoRoot,
+      env,
+      mobile: false,
+      emulators: false,
+      firebaseConfigPath: "",
+      mobileServerUrl: resolveMobileServerUrl(env)
+    });
+    const mobilePlan = buildProductionMobilePlan({
+      repoRoot: executor.context.repoRoot,
+      env,
+      environment: "staging"
+    });
+    return {
+      env,
+      plan: { windows: [...desktopPlan.windows, ...mobilePlan.windows] },
+      resetTmux: () => stopTmuxSession(executor.runner, executor.context.tmux)
+        .then(() => undefined)
+    };
+  }
+
+  if (input.production) {
+    const production = resolveKdEnvironment("prod");
+    const env: NodeJS.ProcessEnv = {
+      ...executor.context.env,
+      KANNA_APP_ENV: executor.context.env.KANNA_APP_ENV ?? "prod",
+      KANNA_IOS_DEVICE_UDID: deviceUdid,
+      EXPO_PUBLIC_KANNA_RELAY_URL:
+        executor.context.env.EXPO_PUBLIC_KANNA_RELAY_URL ?? production.relayUrl
+    };
+    const plan = buildProductionMobilePlan({
+      repoRoot: executor.context.repoRoot,
+      env,
+      environment: "production"
+    });
+    return {
+      env,
+      plan,
+      resetTmux: () => stopTmuxWindow(executor.runner, executor.context.tmux, "mobile")
+        .then(() => undefined)
+    };
+  }
+
+  const env: NodeJS.ProcessEnv = {
+    ...executor.context.env,
+    KANNA_APP_ENV: executor.context.env.KANNA_APP_ENV ?? "dev",
+    KANNA_IOS_DEVICE_UDID: deviceUdid
+  };
+  const devPorts = requireMobileDeviceDevPorts(executor.context.ports);
+  const firebaseConfigPath = writeFirebaseEmulatorConfig(executor.context.repoRoot, devPorts);
+  writeTauriLocalConfig(executor.context.repoRoot, devPorts.KANNA_DEV_PORT);
+  const plan = buildDevPlan({
+    repoRoot: executor.context.repoRoot,
+    env,
+    mobile: true,
+    emulators: true,
+    firebaseConfigPath,
+    mobileServerUrl: resolveMobileServerUrl(env),
+    resolveLanAddress: () => lanHost
+  });
+  return {
+    env,
+    plan,
+    resetTmux: () => stopTmuxWindow(executor.runner, executor.context.tmux, "mobile")
+      .then(() => undefined)
   };
 }
 
