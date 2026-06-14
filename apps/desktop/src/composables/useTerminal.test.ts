@@ -473,6 +473,50 @@ describe("useTerminal", () => {
     expect(terminal.pendingStringWrites.some((write) => write.data === "restored scrollback")).toBe(true);
   });
 
+  it("preserves Codex scrollback when applying daemon snapshots", async () => {
+    const { useTerminal } = await import("./useTerminal");
+
+    const TestHarness = defineComponent({
+      setup() {
+        const { init, startListening } = useTerminal(
+          "session-1",
+          {
+            cwd: "/tmp/task",
+            prompt: "hello",
+            spawnFn: async () => {},
+          },
+          {
+            agentProvider: "codex",
+            worktreePath: "/tmp/task",
+          },
+        );
+
+        return { init, startListening };
+      },
+      render() {
+        return h("div");
+      },
+    });
+
+    const wrapper = mount(TestHarness);
+    const terminalElement = document.createElement("div");
+    Object.defineProperty(terminalElement, "offsetWidth", { configurable: true, value: 800 });
+    Object.defineProperty(terminalElement, "offsetHeight", { configurable: true, value: 600 });
+    terminalElement.querySelector = vi.fn(() => null) as typeof terminalElement.querySelector;
+    terminalElement.closest = vi.fn(() => null) as typeof terminalElement.closest;
+    wrapper.vm.init(terminalElement);
+
+    await wrapper.vm.startListening();
+    const terminal = terminals[0];
+    expect(terminal).toBeDefined();
+    terminal.reset.mockClear();
+
+    emitTerminalSnapshot("session-1", "codex partial redraw");
+
+    expect(terminal.reset).not.toHaveBeenCalled();
+    expect(terminal.write).toHaveBeenCalledWith("codex partial redraw");
+  });
+
   it("updates xterm theme when the effective code theme changes", async () => {
     const { resetThemeRuntimeForTests, setSystemPrefersDark, setThemePreferences } = await import("../theme/runtime");
     resetThemeRuntimeForTests();
