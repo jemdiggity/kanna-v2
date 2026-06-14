@@ -2,6 +2,8 @@
 
 import type { PipelineItem } from "@kanna/db";
 import { mount } from "@vue/test-utils";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
@@ -18,6 +20,11 @@ vi.mock("@tauri-apps/plugin-opener", () => ({
 vi.mock("../../tauri-mock", () => ({
   isTauri: true,
 }));
+
+const taskHeaderSource = readFileSync(
+  resolve(process.cwd(), "src/components/TaskHeader.vue"),
+  "utf8",
+);
 
 function makeItem(overrides: Partial<PipelineItem> = {}): PipelineItem {
   return {
@@ -58,6 +65,32 @@ function makeItem(overrides: Partial<PipelineItem> = {}): PipelineItem {
 }
 
 describe("TaskHeader", () => {
+  it("allows port badges to wrap when the header metadata overflows", async () => {
+    const { default: TaskHeader } = await import("../TaskHeader.vue");
+    const wrapper = mount(TaskHeader, {
+      props: {
+        item: makeItem({
+          port_env: JSON.stringify({
+            APP_PORT: 1421,
+            API_PORT: 3001,
+            STORYBOOK_PORT: 6006,
+            RELAY_PORT: 7555,
+            MOBILE_PORT: 8081,
+          }),
+        }),
+      },
+      global: {
+        mocks: {
+          $t: (key: string, fallback?: string) => fallback ?? key,
+        },
+      },
+    });
+
+    expect(wrapper.findAll(".meta-item.port")).toHaveLength(5);
+    expect(taskHeaderSource).toMatch(/\.header-meta\s*\{[^}]*flex-wrap:\s*wrap;/s);
+    expect(taskHeaderSource).toMatch(/\.port\s*\{[^}]*flex-shrink:\s*0;/s);
+  });
+
   it("renders port badges in ascending numeric order", async () => {
     const { default: TaskHeader } = await import("../TaskHeader.vue");
     const wrapper = mount(TaskHeader, {
