@@ -132,6 +132,7 @@ function openLocalhostPort(port: number) {
 .header-meta {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 12px;
   margin-top: 6px;
   font-size: 12px;
@@ -152,6 +153,10 @@ function openLocalhostPort(port: number) {
   padding: 1px 6px;
   border-radius: 3px;
   cursor: default;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .port {
@@ -162,6 +167,7 @@ function openLocalhostPort(port: number) {
   border-radius: 3px;
   color: var(--kn-success);
   cursor: pointer;
+  flex-shrink: 0;
 }
 
 .link {

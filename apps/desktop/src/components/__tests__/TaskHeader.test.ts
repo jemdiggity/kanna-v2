@@ -58,6 +58,30 @@ function makeItem(overrides: Partial<PipelineItem> = {}): PipelineItem {
 }
 
 describe("TaskHeader", () => {
+  it("renders all configured port badges", async () => {
+    const { default: TaskHeader } = await import("../TaskHeader.vue");
+    const wrapper = mount(TaskHeader, {
+      props: {
+        item: makeItem({
+          port_env: JSON.stringify({
+            APP_PORT: 1421,
+            API_PORT: 3001,
+            STORYBOOK_PORT: 6006,
+            RELAY_PORT: 7555,
+            MOBILE_PORT: 8081,
+          }),
+        }),
+      },
+      global: {
+        mocks: {
+          $t: (key: string, fallback?: string) => fallback ?? key,
+        },
+      },
+    });
+
+    expect(wrapper.findAll(".meta-item.port")).toHaveLength(5);
+  });
+
   it("renders port badges in ascending numeric order", async () => {
     const { default: TaskHeader } = await import("../TaskHeader.vue");
     const wrapper = mount(TaskHeader, {

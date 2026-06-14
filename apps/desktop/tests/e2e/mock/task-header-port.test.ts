@@ -1,4 +1,5 @@
 import { setTimeout as sleep } from "node:timers/promises";
+import { mkdir } from "node:fs/promises";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { WebDriverClient } from "../helpers/webdriver";
 import { resetDatabase, importTestRepo } from "../helpers/reset";
@@ -9,6 +10,16 @@ interface CapturedMouseEvent {
   type: string;
   defaultPrevented: boolean;
 }
+
+interface HeaderPortLayoutSnapshot {
+  metaClientWidth: number;
+  metaScrollWidth: number;
+  metaRect: { left: number; right: number; width: number };
+  portRects: Array<{ text: string; left: number; right: number; top: number; width: number }>;
+  portRows: number[];
+}
+
+const TASK_BRANCH = "task-header-port-wrapping-branch";
 
 function isVueCallError(value: unknown): value is { __error: string } {
   return Boolean(
@@ -35,6 +46,62 @@ async function installMousedownCapture(client: WebDriverClient): Promise<void> {
      return "ok";`,
   );
   expect(result).toBe("ok");
+}
+
+async function constrainHeaderWidth(client: WebDriverClient): Promise<void> {
+  await client.executeSync(
+    `let style = document.getElementById("kanna-e2e-task-header-port-layout");
+     if (!style) {
+       style = document.createElement("style");
+       style.id = "kanna-e2e-task-header-port-layout";
+       document.head.appendChild(style);
+     }
+     style.textContent = [
+       ".main-column { flex: 0 0 360px !important; width: 360px !important; max-width: 360px !important; }",
+       ".task-header { width: 360px !important; max-width: 360px !important; }"
+     ].join("\\n");`,
+  );
+}
+
+async function removeHeaderWidthConstraint(client: WebDriverClient): Promise<void> {
+  await client.executeSync(
+    `document.getElementById("kanna-e2e-task-header-port-layout")?.remove();`,
+  ).catch(() => undefined);
+}
+
+async function getHeaderPortLayout(client: WebDriverClient): Promise<HeaderPortLayoutSnapshot> {
+  const result = await client.executeSync<HeaderPortLayoutSnapshot | { __error: string }>(
+    `const meta = document.querySelector(".task-header .header-meta");
+     if (!meta) return { __error: "header metadata not found" };
+     const ports = Array.from(document.querySelectorAll(".task-header .meta-item.port"));
+     if (ports.length < 2) return { __error: "expected multiple port badges, found " + ports.length };
+     const metaRect = meta.getBoundingClientRect();
+     const portRects = ports.map((port) => {
+       const rect = port.getBoundingClientRect();
+       return {
+         text: port.textContent.trim(),
+         left: Math.round(rect.left),
+         right: Math.round(rect.right),
+         top: Math.round(rect.top),
+         width: Math.round(rect.width),
+       };
+     });
+     return {
+       metaClientWidth: Math.round(meta.clientWidth),
+       metaScrollWidth: Math.round(meta.scrollWidth),
+       metaRect: {
+         left: Math.round(metaRect.left),
+         right: Math.round(metaRect.right),
+         width: Math.round(metaRect.width),
+       },
+       portRects,
+       portRows: Array.from(new Set(portRects.map((rect) => rect.top))).sort((a, b) => a - b),
+     };`,
+  );
+  if (typeof result === "object" && result !== null && "__error" in result) {
+    throw new Error(result.__error);
+  }
+  return result;
 }
 
 async function waitForCapturedMousedown(client: WebDriverClient): Promise<CapturedMouseEvent> {
@@ -68,8 +135,8 @@ describe("task header port badge", () => {
       client,
       `INSERT INTO pipeline_item
          (id, repo_id, prompt, display_name, stage, tags, agent_type,
-          activity, port_offset, port_env, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          activity, port_offset, port_env, branch, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         "task-header-port-task",
         repoId,
@@ -80,11 +147,26 @@ describe("task header port badge", () => {
         "sdk",
         "idle",
         1,
-        '{"KANNA_DEV_PORT":"1421"}',
+        JSON.stringify({
+          KANNA_DEV_PORT: "1421",
+          KANNA_MOBILE_PORT: "19000",
+          KANNA_RELAY_PORT: "48120",
+          API_PORT: "3001",
+          STORYBOOK_PORT: "6006",
+          PREVIEW_PORT: "4173",
+          DOCS_PORT: "5173",
+          WEBDRIVER_PORT: "4445",
+          ANALYTICS_PORT: "7555",
+          ADMIN_PORT: "8081",
+          MOCK_PORT: "9300",
+          DEBUG_PORT: "9229",
+        }),
+        TASK_BRANCH,
         "2026-05-31T00:00:00.000Z",
         "2026-05-31T00:00:00.000Z",
       ],
     );
+    await mkdir(`${fixtureRepoRoot}/.kanna-worktrees/${TASK_BRANCH}`, { recursive: true });
 
     const loadResult = await callVueMethod(client, "loadItems");
     if (isVueCallError(loadResult)) throw new Error(loadResult.__error);
@@ -95,8 +177,30 @@ describe("task header port badge", () => {
   });
 
   afterAll(async () => {
+    await removeHeaderWidthConstraint(client);
     await cleanupFixtureRepos(fixtureRepoRoot ? [fixtureRepoRoot] : []);
     await client.deleteSession();
+  });
+
+  it("wraps many port badges inside constrained header metadata without horizontal overflow", async () => {
+    await client.waitForText(".task-header", "Open the task dev server", 5_000);
+    await client.waitForText(".task-header .meta-item.port", ":1421", 5_000);
+    await client.waitForText(".task-header .meta-item.port", ":48120", 5_000);
+    await constrainHeaderWidth(client);
+    await sleep(100);
+    try {
+      const layout = await getHeaderPortLayout(client);
+      const diagnostic = JSON.stringify(layout);
+      const rightmostPort = Math.max(...layout.portRects.map((rect) => rect.right));
+      const leftmostPort = Math.min(...layout.portRects.map((rect) => rect.left));
+
+      expect(layout.portRows.length, diagnostic).toBeGreaterThan(1);
+      expect(layout.metaScrollWidth, diagnostic).toBeLessThanOrEqual(layout.metaClientWidth + 1);
+      expect(rightmostPort, diagnostic).toBeLessThanOrEqual(layout.metaRect.right + 1);
+      expect(leftmostPort, diagnostic).toBeGreaterThanOrEqual(layout.metaRect.left - 1);
+    } finally {
+      await removeHeaderWidthConstraint(client);
+    }
   });
 
   it("keeps browser-level port badge pointer interaction from being canceled by the header guard", async () => {
