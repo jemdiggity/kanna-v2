@@ -5,7 +5,6 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const invokeMock = vi.fn();
 const tauriInvokeMock = vi.fn();
 const relaunchMock = vi.fn();
-const saveWindowStateMock = vi.fn();
 
 vi.mock("../invoke", () => ({
   invoke: (command: string, args?: Record<string, unknown>) => invokeMock(command, args),
@@ -17,13 +16,6 @@ vi.mock("../tauri-mock", () => ({
 
 vi.mock("@tauri-apps/plugin-process", () => ({
   relaunch: (...args: unknown[]) => relaunchMock(...args),
-}));
-
-vi.mock("@tauri-apps/plugin-window-state", () => ({
-  saveWindowState: (...args: unknown[]) => saveWindowStateMock(...args),
-  StateFlags: {
-    ALL: "ALL",
-  },
 }));
 
 import { useAppUpdate } from "./useAppUpdate";
@@ -39,7 +31,6 @@ describe("useAppUpdate with Tauri updater resources", () => {
     invokeMock.mockReset();
     tauriInvokeMock.mockReset();
     relaunchMock.mockReset();
-    saveWindowStateMock.mockReset();
 
     invokeMock.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
       if (command === "read_env_var" && args?.name === "KANNA_WORKTREE") return "";

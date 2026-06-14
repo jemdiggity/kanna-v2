@@ -7,7 +7,6 @@ let tauriRuntime = true;
 
 const checkMock = vi.fn();
 const relaunchMock = vi.fn();
-const saveWindowStateMock = vi.fn();
 const invokeMock = vi.fn();
 const downloadAndInstallMock = vi.fn();
 const closeMock = vi.fn();
@@ -18,13 +17,6 @@ vi.mock("@tauri-apps/plugin-updater", () => ({
 
 vi.mock("@tauri-apps/plugin-process", () => ({
   relaunch: (...args: unknown[]) => relaunchMock(...args),
-}));
-
-vi.mock("@tauri-apps/plugin-window-state", () => ({
-  saveWindowState: (...args: unknown[]) => saveWindowStateMock(...args),
-  StateFlags: {
-    ALL: "ALL",
-  },
 }));
 
 vi.mock("../invoke", () => ({
@@ -106,7 +98,6 @@ describe("useAppUpdate", () => {
     tauriRuntime = true;
     checkMock.mockReset();
     relaunchMock.mockReset();
-    saveWindowStateMock.mockReset();
     invokeMock.mockReset();
     downloadAndInstallMock.mockReset();
     closeMock.mockReset();
@@ -315,7 +306,7 @@ describe("useAppUpdate", () => {
     expect(relaunchMock).toHaveBeenCalledTimes(1);
   });
 
-  it("saves window state before relaunching after an update", async () => {
+  it("relaunches after an update without saving global native window state", async () => {
     downloadAndInstallMock.mockResolvedValue(undefined);
     checkMock.mockResolvedValue(makeUpdate("0.0.39"));
 
@@ -324,9 +315,6 @@ describe("useAppUpdate", () => {
     await updater.install();
     await updater.restartNow();
 
-    expect(saveWindowStateMock).toHaveBeenCalledWith("ALL");
-    expect(saveWindowStateMock.mock.invocationCallOrder[0]).toBeLessThan(
-      relaunchMock.mock.invocationCallOrder[0],
-    );
+    expect(relaunchMock).toHaveBeenCalledTimes(1);
   });
 });
