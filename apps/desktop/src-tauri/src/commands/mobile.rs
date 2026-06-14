@@ -449,13 +449,24 @@ fn build_server_config(state: &MobileServerState) -> Result<String, String> {
             ))
             .unwrap_or_default(),
     );
+    let kanna_cli_path = find_sidecar("kanna-cli").ok();
+    let kanna_cli_path_line = kanna_cli_path
+        .as_ref()
+        .map(|path| {
+            format!(
+                "kanna_cli_path = \"{}\"\n",
+                escape_toml_string(&path.to_string_lossy())
+            )
+        })
+        .unwrap_or_default();
 
     Ok(format!(
-        "relay_url = \"{}\"\ndevice_token = \"{}\"\ndaemon_dir = \"{}\"\ndb_path = \"{}\"\ndesktop_id = \"{}\"\ndesktop_secret = \"{}\"\ndesktop_name = \"{}\"\nserver_version = \"{}\"\n{}lan_host = \"0.0.0.0\"\nlan_port = {}\npairing_store_path = \"{}\"\n",
+        "relay_url = \"{}\"\ndevice_token = \"{}\"\ndaemon_dir = \"{}\"\ndb_path = \"{}\"\n{}desktop_id = \"{}\"\ndesktop_secret = \"{}\"\ndesktop_name = \"{}\"\nserver_version = \"{}\"\n{}lan_host = \"0.0.0.0\"\nlan_port = {}\npairing_store_path = \"{}\"\n",
         escape_toml_string(&relay_url),
         escape_toml_string(&device_token),
         escape_toml_string(&daemon_dir),
         escape_toml_string(&db_path.to_string_lossy()),
+        kanna_cli_path_line,
         escape_toml_string(&credential.desktop_id),
         escape_toml_string(&credential.desktop_secret),
         escape_toml_string(&state.desktop_name),
@@ -494,6 +505,12 @@ fn server_config_matches_runtime(config_path: &Path, desktop_id: &str) -> bool {
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "kanna-local".to_string());
+    let kanna_cli_path_line = find_sidecar("kanna-cli").ok().map(|path| {
+        format!(
+            "kanna_cli_path = \"{}\"",
+            escape_toml_string(&path.to_string_lossy())
+        )
+    });
 
     let mut required_lines = vec![
         format!("relay_url = \"{}\"", escape_toml_string(&relay_url())),
@@ -535,7 +552,9 @@ fn server_config_matches_runtime(config_path: &Path, desktop_id: &str) -> bool {
             escape_toml_string(&host)
         ));
     }
-
+    if let Some(line) = kanna_cli_path_line {
+        required_lines.push(line);
+    }
     required_lines.iter().all(|line| content.contains(line))
 }
 
@@ -1660,6 +1679,39 @@ mod tests {
         unsafe {
             unset_env_var("KANNA_E2E_DEVICE_TOKEN");
         }
+    }
+
+    #[test]
+    fn build_server_config_includes_desktop_resolved_kanna_cli_path() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+        let root = unique_test_root("server-config-kanna-cli");
+        let sidecar_dir = root.join("sidecars");
+        std::fs::create_dir_all(&sidecar_dir).unwrap();
+        let cli_path = sidecar_dir.join("kanna-cli");
+        std::fs::write(&cli_path, "#!/bin/sh\n").unwrap();
+        unsafe {
+            set_env_var("KANNA_TEST_SIDECAR_DIR", &sidecar_dir.to_string_lossy());
+        }
+
+        let state = MobileServerState {
+            status: "stopped".to_string(),
+            desktop_name: "Studio Mac".to_string(),
+            api_base_url: server_base_url(48120),
+            config_path: root.join("Kanna/server.toml"),
+            started: false,
+        };
+
+        let config = build_server_config(&state).unwrap();
+
+        unsafe {
+            unset_env_var("KANNA_TEST_SIDECAR_DIR");
+        }
+        assert!(config.contains(&format!(
+            "kanna_cli_path = \"{}\"",
+            cli_path.to_string_lossy()
+        )));
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

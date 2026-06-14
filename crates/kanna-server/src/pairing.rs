@@ -150,6 +150,7 @@ mod tests {
             device_token: "device-token".to_string(),
             daemon_dir: "/tmp/kanna-daemon".to_string(),
             db_path: "/tmp/kanna.db".to_string(),
+            kanna_cli_path: None,
             desktop_id: "desktop-1".to_string(),
             desktop_secret: Some("desktop-secret".to_string()),
             desktop_name: "Studio Mac".to_string(),

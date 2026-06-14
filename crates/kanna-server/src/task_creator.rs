@@ -1562,7 +1562,17 @@ fn build_spawn_env(
         ),
     ]);
     env.extend(port_env.clone());
-    if let Some(path) = which_binary("kanna-cli")? {
+    let kanna_cli_path = if let Some(path) = config
+        .kanna_cli_path
+        .as_deref()
+        .filter(|path| !path.trim().is_empty())
+        .map(str::to_string)
+    {
+        Some(path)
+    } else {
+        which_binary("kanna-cli")?
+    };
+    if let Some(path) = kanna_cli_path {
         if let Some(parent) = Path::new(&path).parent() {
             let runtime_path = prepend_path_entry(
                 std::env::var("PATH").ok().as_deref(),
@@ -1922,6 +1932,7 @@ mod tests {
             device_token: "device-token".to_string(),
             daemon_dir: format!("/tmp/kanna-daemon-{label}"),
             db_path: Db::test_db_path(label),
+            kanna_cli_path: None,
             desktop_id: "desktop-1".to_string(),
             desktop_secret: Some("desktop-secret".to_string()),
             desktop_name: "Studio Mac".to_string(),
@@ -2140,6 +2151,24 @@ mod tests {
     }
 
     #[test]
+    fn build_spawn_env_prefers_configured_kanna_cli_path() {
+        let mut config = test_config("spawn-env-configured-kanna-cli-path");
+        config.kanna_cli_path =
+            Some("/Applications/Kanna.app/Contents/MacOS/kanna-cli".to_string());
+
+        let env = build_spawn_env(&config, "task-1", &HashMap::new()).unwrap();
+
+        assert_eq!(
+            env.get("KANNA_CLI_PATH").map(String::as_str),
+            Some("/Applications/Kanna.app/Contents/MacOS/kanna-cli")
+        );
+        assert_eq!(
+            env.get("PATH").and_then(|path| path.split(':').next()),
+            Some("/Applications/Kanna.app/Contents/MacOS")
+        );
+    }
+
+    #[test]
     fn prepare_merge_agent_creates_in_progress_task() {
         let repo_root =
             std::env::temp_dir().join(format!("kanna-merge-agent-task-{}", std::process::id()));
@@ -2289,6 +2318,7 @@ mod tests {
             device_token: "device-token".to_string(),
             daemon_dir: "/tmp/kanna-daemon".to_string(),
             db_path: Db::test_db_path("advance-stage-helper"),
+            kanna_cli_path: None,
             desktop_id: "desktop-1".to_string(),
             desktop_secret: Some("desktop-secret".to_string()),
             desktop_name: "Studio Mac".to_string(),
@@ -2439,6 +2469,7 @@ mod tests {
                 .to_string_lossy()
                 .to_string(),
             db_path: Db::test_db_path("advance-stage-renamed-source"),
+            kanna_cli_path: None,
             desktop_id: "desktop-1".to_string(),
             desktop_secret: Some("desktop-secret".to_string()),
             desktop_name: "Studio Mac".to_string(),
@@ -2574,6 +2605,7 @@ mod tests {
             device_token: "device-token".to_string(),
             daemon_dir: "/tmp/kanna-daemon".to_string(),
             db_path: Db::test_db_path("advance-stage-continue"),
+            kanna_cli_path: None,
             desktop_id: "desktop-1".to_string(),
             desktop_secret: Some("desktop-secret".to_string()),
             desktop_name: "Studio Mac".to_string(),
@@ -2800,6 +2832,7 @@ mod tests {
                 .to_string_lossy()
                 .to_string(),
             db_path: Db::test_db_path("advance-stage-post-action"),
+            kanna_cli_path: None,
             desktop_id: "desktop-1".to_string(),
             desktop_secret: Some("desktop-secret".to_string()),
             desktop_name: "Studio Mac".to_string(),
@@ -2954,6 +2987,7 @@ mod tests {
             device_token: "device-token".to_string(),
             daemon_dir: "/tmp/kanna-daemon".to_string(),
             db_path: Db::test_db_path("auto-pr-after-continue"),
+            kanna_cli_path: None,
             desktop_id: "desktop-1".to_string(),
             desktop_secret: Some("desktop-secret".to_string()),
             desktop_name: "Studio Mac".to_string(),
@@ -3067,6 +3101,7 @@ mod tests {
             device_token: "device-token".to_string(),
             daemon_dir: "/tmp/kanna-daemon".to_string(),
             db_path: Db::test_db_path("default-pipeline-fallback"),
+            kanna_cli_path: None,
             desktop_id: "desktop-1".to_string(),
             desktop_secret: Some("desktop-secret".to_string()),
             desktop_name: "Studio Mac".to_string(),
@@ -3172,6 +3207,7 @@ mod tests {
             device_token: "device-token".to_string(),
             daemon_dir: "/tmp/kanna-daemon".to_string(),
             db_path: Db::test_db_path("default-agent-provider"),
+            kanna_cli_path: None,
             desktop_id: "desktop-1".to_string(),
             desktop_secret: Some("desktop-secret".to_string()),
             desktop_name: "Studio Mac".to_string(),
@@ -3319,6 +3355,7 @@ mod tests {
             device_token: "device-token".to_string(),
             daemon_dir: "/tmp/kanna-daemon".to_string(),
             db_path: Db::test_db_path("revision-stage-helper"),
+            kanna_cli_path: None,
             desktop_id: "desktop-1".to_string(),
             desktop_secret: Some("desktop-secret".to_string()),
             desktop_name: "Studio Mac".to_string(),
@@ -3516,6 +3553,7 @@ mod tests {
             device_token: "device-token".to_string(),
             daemon_dir: "/tmp/kanna-daemon".to_string(),
             db_path: Db::test_db_path("revision-title-recovery"),
+            kanna_cli_path: None,
             desktop_id: "desktop-1".to_string(),
             desktop_secret: Some("desktop-secret".to_string()),
             desktop_name: "Studio Mac".to_string(),
