@@ -249,6 +249,60 @@ function targetNeedsAuthIndexedDbOpenFailure(testTarget: string): boolean {
   return /real\/auth-indexeddb-fallback\.test\.ts$/.test(testTarget);
 }
 
+function targetNeedsStaleNativeWindowState(testTarget: string): boolean {
+  return /real\/startup-window-size\.test\.ts$/.test(testTarget);
+}
+
+async function seedStaleNativeWindowStateForStartup(repoRoot: string): Promise<() => Promise<void>> {
+  const windowStatePath = join(homedir(), "Library", "Application Support", "build.kanna", ".window-state.json");
+  const backupPath = join(
+    repoRoot,
+    ".kanna-daemon-e2e",
+    `window-state-backup-${process.pid}-${Date.now()}.json`,
+  );
+  await mkdir(dirname(windowStatePath), { recursive: true });
+  await mkdir(dirname(backupPath), { recursive: true });
+
+  let hadExistingState = true;
+  await copyFile(windowStatePath, backupPath).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") {
+      hadExistingState = false;
+      return;
+    }
+    throw error;
+  });
+
+  await writeFile(
+    windowStatePath,
+    JSON.stringify(
+      {
+        main: {
+          width: 180,
+          height: 120,
+          x: 24,
+          y: 24,
+          prev_x: 24,
+          prev_y: 24,
+          maximized: false,
+          visible: true,
+          decorated: true,
+          fullscreen: false,
+        },
+      },
+      null,
+      2,
+    ),
+  );
+
+  return async () => {
+    await rm(windowStatePath, { force: true }).catch(() => undefined);
+    if (hadExistingState) {
+      await copyFile(backupPath, windowStatePath).catch(() => undefined);
+    }
+    await rm(backupPath, { force: true }).catch(() => undefined);
+  };
+}
+
 function buildInstanceConfig(input: {
   daemonDir: string;
   dbName: string;
@@ -645,6 +699,7 @@ async function main(): Promise<void> {
 
   let runningInstances: RunningInstances | null = null;
   let lastTargetWasReal = false;
+  const cleanupAppDataHooks: Array<() => Promise<void>> = [];
 
   try {
     if (shouldStartInitialInstances(testTargets[0])) {
@@ -665,6 +720,9 @@ async function main(): Promise<void> {
         await resetTransferRegistry();
         if (needsEmulatorsForTarget) await startFirebaseEmulators();
         if (targetNeedsRelay(testTarget)) await startRelay();
+        if (targetNeedsStaleNativeWindowState(testTarget)) {
+          cleanupAppDataHooks.push(await seedStaleNativeWindowStateForStartup(repoRoot));
+        }
         runningInstances = await startInstances(
           needsSecondaryForTarget,
           false,
@@ -695,6 +753,14 @@ async function main(): Promise<void> {
         if (perfSummary.trim()) {
           process.stdout.write(`${perfSummary.trimEnd()}\n`);
         }
+        if (targetNeedsStaleNativeWindowState(testTarget)) {
+          await stopInstances(runningInstances);
+          runningInstances = null;
+          while (cleanupAppDataHooks.length > 0) {
+            const cleanup = cleanupAppDataHooks.pop();
+            await cleanup?.().catch(() => undefined);
+          }
+        }
       }
       lastTargetWasReal = targetIsReal;
     }
@@ -715,6 +781,10 @@ async function main(): Promise<void> {
     throw error;
   } finally {
     await stopInstances(runningInstances);
+    while (cleanupAppDataHooks.length > 0) {
+      const cleanup = cleanupAppDataHooks.pop();
+      await cleanup?.().catch(() => undefined);
+    }
     await stopRelay();
     await stopFirebaseEmulators();
     if (secondary) {
