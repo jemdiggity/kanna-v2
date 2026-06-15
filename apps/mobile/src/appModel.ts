@@ -62,6 +62,7 @@ interface AppModelOptions {
   createRelayClient?: (input: {
     relayUrl: string;
     getIdToken(forceRefresh?: boolean): Promise<string | null>;
+    onAuthError(): void;
   }) => RelayDesktopClient;
 }
 
@@ -243,6 +244,7 @@ function createClientForMode({
   createRelayClient(input: {
     relayUrl: string;
     getIdToken(forceRefresh?: boolean): Promise<string | null>;
+    onAuthError(): void;
   }): RelayDesktopClient;
   fetchImpl: FetchLike;
   forceCloud: boolean;
@@ -259,6 +261,7 @@ function createClientForMode({
     const relayClient = createRelayClient({
       relayUrl,
       getIdToken: (forceRefresh) => authSession.getIdToken(forceRefresh),
+      onAuthError: () => authSession.notifyAuthExpired(),
     });
     const resolvedTaskIndex = taskIndex ?? createFirestoreTaskIndex();
     const listCloudTasksForRouting = async () => {

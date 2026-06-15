@@ -104,4 +104,29 @@ describe("createMobileAuthSession", () => {
 
     expect(session.getState()).toEqual({ status: "signedOut" });
   });
+
+  it("surfaces an auth-expired error and keeps the user for re-login when notified", async () => {
+    const user = createUser("user-4", "signed-in@kanna.test");
+    const sdk = createSdkMock(user);
+    const session = createMobileAuthSession({ sdk });
+    await session.initialize();
+
+    session.notifyAuthExpired();
+
+    expect(session.getState()).toEqual({
+      status: "error",
+      message: "Your session expired. Please sign in again.",
+      user
+    });
+  });
+
+  it("ignores an auth-expired notification while signed out", async () => {
+    const sdk = createSdkMock();
+    const session = createMobileAuthSession({ sdk });
+    await session.initialize();
+
+    session.notifyAuthExpired();
+
+    expect(session.getState()).toEqual({ status: "signedOut" });
+  });
 });

@@ -151,7 +151,8 @@ function createAuthSessionMock(): MobileAuthSession {
     initialize: vi.fn().mockResolvedValue(undefined),
     signInWithEmailPassword: vi.fn().mockResolvedValue(undefined),
     signOut: vi.fn().mockResolvedValue(undefined),
-    getIdToken: vi.fn().mockResolvedValue(null)
+    getIdToken: vi.fn().mockResolvedValue(null),
+    notifyAuthExpired: vi.fn()
   };
 }
 
