@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   buildMobileDevicePrebuildCommand,
+  buildMobileDeviceRelaunchCommand,
   buildMobileDeviceRunCommand,
   checkPhysicalDeviceRunPreflight,
+  waitForPhysicalDeviceMetroReadiness,
   resolveMobileNativeIdentity,
   parseXcdeviceList,
   selectPhysicalDevice
@@ -166,5 +168,82 @@ describe("physical-device mobile runtime", () => {
       "curl --fail --silent --show-error http://172.16.0.193:1430/status",
       "xcrun devicectl device info apps --device 00008130-001015CA1091401C"
     ]);
+  });
+
+  it("retries the LAN Metro status endpoint until it is reachable", async () => {
+    const calls: string[] = [];
+    let attempts = 0;
+    const runner: CommandRunner = {
+      async run(command, args) {
+        calls.push(`${command} ${args.join(" ")}`);
+        attempts += 1;
+        return attempts < 3
+          ? { exitCode: 7, stdout: "", stderr: "Failed to connect" }
+          : { exitCode: 0, stdout: "packager-status:running\n", stderr: "" };
+      }
+    };
+
+    const result = await waitForPhysicalDeviceMetroReadiness(runner, {
+      lanHost: "172.16.0.193",
+      metroPort: 1430,
+      attempts: 3,
+      delayMs: 0
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      metroUrl: "http://172.16.0.193:1430",
+      attempts: 3,
+      message: "Metro is reachable at http://172.16.0.193:1430/status."
+    });
+    expect(calls).toEqual([
+      "curl --fail --silent --show-error http://172.16.0.193:1430/status",
+      "curl --fail --silent --show-error http://172.16.0.193:1430/status",
+      "curl --fail --silent --show-error http://172.16.0.193:1430/status"
+    ]);
+  });
+
+  it("reports a clear Metro failure after readiness retries are exhausted", async () => {
+    const runner: CommandRunner = {
+      async run() {
+        return { exitCode: 7, stdout: "", stderr: "Failed to connect" };
+      }
+    };
+
+    const result = await waitForPhysicalDeviceMetroReadiness(runner, {
+      lanHost: "172.16.0.193",
+      metroPort: 1430,
+      attempts: 2,
+      delayMs: 0
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      metroUrl: "http://172.16.0.193:1430",
+      attempts: 2,
+      message:
+        "Metro is not reachable at http://172.16.0.193:1430/status after 2 attempts. " +
+        "\"No script URL provided\" usually means Metro is down, the iPhone cannot reach the printed LAN URL, or Local Network permission is off."
+    });
+  });
+
+  it("builds a direct installed-app relaunch command for the resolved device and bundle id", () => {
+    expect(
+      buildMobileDeviceRelaunchCommand({
+        bundleId: "build.kanna.app.dev",
+        deviceUdid: "00008130-001015CA1091401C"
+      })
+    ).toEqual({
+      command: "xcrun",
+      args: [
+        "devicectl",
+        "device",
+        "process",
+        "launch",
+        "--device",
+        "00008130-001015CA1091401C",
+        "build.kanna.app.dev"
+      ]
+    });
   });
 });

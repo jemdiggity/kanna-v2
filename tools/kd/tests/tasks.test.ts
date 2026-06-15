@@ -464,6 +464,207 @@ describe("task executors", () => {
       cwd: repoRoot
     });
     expect(calls[installIndex]?.env?.REACT_NATIVE_PACKAGER_HOSTNAME).toBe("172.16.0.193");
+    expect(
+      calls.some(
+        (call) =>
+          call.command === "xcrun" &&
+          call.args.includes("process") &&
+          call.args.includes("launch") &&
+          call.args.includes("build.kanna.app.dev")
+      )
+    ).toBe(false);
+  });
+
+  it("recovers when Expo reports a transient post-launch Metro failure and Metro becomes reachable", async () => {
+    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-kd-device-run-transient-"));
+    await mkdir(join(repoRoot, "apps", "desktop", "src-tauri"), { recursive: true });
+    await writeFile(
+      join(repoRoot, "firebase.json"),
+      JSON.stringify({ functions: { source: "services/firebase-functions" }, emulators: {} })
+    );
+    const calls: Array<{ command: string; args: string[]; env?: NodeJS.ProcessEnv; cwd?: string }> = [];
+    let metroStatusAttempts = 0;
+    const runner: CommandRunner = {
+      async run(command, args, options) {
+        calls.push({ command, args, env: options?.env, cwd: options?.cwd });
+        if (command === "xcrun" && args.join(" ") === "xcdevice list") {
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify([
+              {
+                available: true,
+                identifier: "00008130-001015CA1091401C",
+                name: "Jerome's iPhone 15",
+                operatingSystemVersion: "17.5 (21F79)",
+                platform: "com.apple.platform.iphoneos",
+                simulator: false
+              }
+            ]),
+            stderr: ""
+          };
+        }
+        if (command === "curl") {
+          metroStatusAttempts += 1;
+          return metroStatusAttempts < 2
+            ? { exitCode: 7, stdout: "", stderr: "Failed to connect" }
+            : { exitCode: 0, stdout: "packager-status:running\n", stderr: "" };
+        }
+        if (command === "xcrun" && args.includes("devicectl") && args.includes("info")) {
+          return { exitCode: 0, stdout: "build.kanna.app.dev\n", stderr: "" };
+        }
+        if (command === "xcrun" && args.includes("process") && args.includes("launch")) {
+          return { exitCode: 0, stdout: "Launched application\n", stderr: "" };
+        }
+        if (command === "tmux" && args.includes("list-windows")) {
+          return { exitCode: 0, stdout: "desktop\nmobile\n", stderr: "" };
+        }
+        if (command === "pnpm" && args[2] === "ios") {
+          return {
+            exitCode: 1,
+            stdout: "",
+            stderr: "FAIL metro-lan: Metro is not reachable at http://172.16.0.193:1430/status"
+          };
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+    };
+
+    const result = await executeMobileDeviceRunWithContext(
+      { device: true, production: false, staging: false },
+      {
+        runner,
+        context: {
+          repoRoot,
+          tmux: { server: "kanna-task-abc", session: "kanna-task-abc" },
+          ports: {
+            KANNA_DEV_PORT: 1421,
+            KANNA_MOBILE_PORT: 1430,
+            KANNA_FIREBASE_AUTH_PORT: 9100,
+            KANNA_FIREBASE_FIRESTORE_PORT: 9101,
+            KANNA_FIREBASE_FUNCTIONS_PORT: 9102,
+            KANNA_FIREBASE_UI_PORT: 9103
+          },
+          env: {
+            KANNA_DEV_PORT: "1421",
+            KANNA_MOBILE_PORT: "1430",
+            KANNA_MOBILE_SERVER_PORT: "48120",
+            KANNA_FIREBASE_AUTH_PORT: "9100",
+            KANNA_FIREBASE_FIRESTORE_PORT: "9101",
+            KANNA_FIREBASE_FUNCTIONS_PORT: "9102",
+            KANNA_FIREBASE_UI_PORT: "9103",
+            KANNA_IOS_DEVICE_UDID: "00008130-001015CA1091401C"
+          }
+        }
+      },
+      {
+        resolveLanAddress: () => "172.16.0.193",
+        metroReadiness: { attempts: 2, delayMs: 0 }
+      }
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.message).toContain("Launched Kanna mobile on Jerome's iPhone 15.");
+    expect(result.message).toContain("Recovered by relaunching build.kanna.app.dev after Metro became reachable.");
+    expect(result.message).not.toContain("FAIL metro-lan");
+    const installIndex = calls.findIndex((call) => call.command === "pnpm" && call.args[2] === "ios");
+    const relaunchIndex = calls.findIndex(
+      (call) => call.command === "xcrun" && call.args.includes("process") && call.args.includes("launch")
+    );
+    expect(relaunchIndex).toBeGreaterThan(installIndex);
+    expect(calls[relaunchIndex]).toMatchObject({
+      command: "xcrun",
+      args: [
+        "devicectl",
+        "device",
+        "process",
+        "launch",
+        "--device",
+        "00008130-001015CA1091401C",
+        "build.kanna.app.dev"
+      ]
+    });
+  });
+
+  it("fails clearly when Metro never becomes reachable for a physical-device launch", async () => {
+    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-kd-device-run-persistent-"));
+    await mkdir(join(repoRoot, "apps", "desktop", "src-tauri"), { recursive: true });
+    await writeFile(
+      join(repoRoot, "firebase.json"),
+      JSON.stringify({ functions: { source: "services/firebase-functions" }, emulators: {} })
+    );
+    const calls: Array<{ command: string; args: string[]; env?: NodeJS.ProcessEnv; cwd?: string }> = [];
+    const runner: CommandRunner = {
+      async run(command, args, options) {
+        calls.push({ command, args, env: options?.env, cwd: options?.cwd });
+        if (command === "xcrun" && args.join(" ") === "xcdevice list") {
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify([
+              {
+                available: true,
+                identifier: "00008130-001015CA1091401C",
+                name: "Jerome's iPhone 15",
+                operatingSystemVersion: "17.5 (21F79)",
+                platform: "com.apple.platform.iphoneos",
+                simulator: false
+              }
+            ]),
+            stderr: ""
+          };
+        }
+        if (command === "curl") {
+          return { exitCode: 7, stdout: "", stderr: "Failed to connect" };
+        }
+        if (command === "xcrun" && args.includes("devicectl") && args.includes("info")) {
+          return { exitCode: 0, stdout: "build.kanna.app.dev\n", stderr: "" };
+        }
+        if (command === "tmux" && args.includes("list-windows")) {
+          return { exitCode: 0, stdout: "desktop\nmobile\n", stderr: "" };
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+    };
+
+    const result = await executeMobileDeviceRunWithContext(
+      { device: true, production: false, staging: false },
+      {
+        runner,
+        context: {
+          repoRoot,
+          tmux: { server: "kanna-task-abc", session: "kanna-task-abc" },
+          ports: {
+            KANNA_DEV_PORT: 1421,
+            KANNA_MOBILE_PORT: 1430,
+            KANNA_FIREBASE_AUTH_PORT: 9100,
+            KANNA_FIREBASE_FIRESTORE_PORT: 9101,
+            KANNA_FIREBASE_FUNCTIONS_PORT: 9102,
+            KANNA_FIREBASE_UI_PORT: 9103
+          },
+          env: {
+            KANNA_DEV_PORT: "1421",
+            KANNA_MOBILE_PORT: "1430",
+            KANNA_MOBILE_SERVER_PORT: "48120",
+            KANNA_FIREBASE_AUTH_PORT: "9100",
+            KANNA_FIREBASE_FIRESTORE_PORT: "9101",
+            KANNA_FIREBASE_FUNCTIONS_PORT: "9102",
+            KANNA_FIREBASE_UI_PORT: "9103",
+            KANNA_IOS_DEVICE_UDID: "00008130-001015CA1091401C"
+          }
+        }
+      },
+      {
+        resolveLanAddress: () => "172.16.0.193",
+        metroReadiness: { attempts: 2, delayMs: 0 }
+      }
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("Metro is not reachable at http://172.16.0.193:1430/status after 2 attempts.");
+    expect(result.message).toContain("Local Network");
+    expect(calls.some((call) => call.command === "pnpm" && call.args[2] === "ios")).toBe(false);
+    expect(
+      calls.some((call) => call.command === "xcrun" && call.args.includes("process") && call.args.includes("launch"))
+    ).toBe(false);
   });
 
   it("starts staging mobile, prebuilds the staging bundle, and launches it on a physical device", async () => {
