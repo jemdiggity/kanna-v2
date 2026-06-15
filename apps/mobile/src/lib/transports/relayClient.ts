@@ -90,7 +90,6 @@ export function createRelayDesktopClient({
 
     const client = new StreamClient({
       url: relayUrl,
-      credentialProvider: (forceRefresh) => getIdToken(forceRefresh),
       webSocketFactory: createRelayTunnelWebSocketFactory({
         relayUrl,
         desktopId,
@@ -351,7 +350,6 @@ export function createRelayDesktopClient({
     observeTaskAgent({ desktopId, taskId }, listener) {
       const client = new StreamClient({
         url: relayUrl,
-        credentialProvider: (forceRefresh) => getIdToken(forceRefresh),
         webSocketFactory: createRelayTunnelWebSocketFactory({
           relayUrl,
           desktopId,
