@@ -26,7 +26,26 @@ export interface WebSocketLike {
   onerror: ((event: unknown) => void) | null;
 }
 
-export type WebSocketFactory = (url: string) => WebSocketLike;
+export interface WebSocketFactoryOptions {
+  /** Fetch a freshly-refreshed credential rather than a cached one. Set on the
+   * single retry that follows an auth-failure close, so a stale/revoked token
+   * is replaced before reconnecting. */
+  forceRefreshCredential?: boolean;
+}
+
+export type WebSocketFactory = (
+  url: string,
+  options?: WebSocketFactoryOptions,
+) => WebSocketLike;
+
+/**
+ * WebSocket close code the relay uses to reject a failed auth handshake (see
+ * `services/relay/src/index.ts` — `ws.close(4005, "Authentication failed")`).
+ * A close carrying this code before we are authenticated means the credential
+ * was invalid/expired/revoked, so the client force-refreshes the token once and
+ * retries before giving up.
+ */
+export const AUTH_FAILURE_CLOSE_CODE = 4005;
 
 export interface AgentStreamHandlers {
   /** Journal replay on (re)attach. `nextSeq` is where the live stream resumes. */
@@ -48,11 +67,15 @@ export interface StreamClientOptions {
   /** e.g. ws://127.0.0.1:48120/v1/stream */
   url: string;
   credential?: string;
-  credentialProvider?: () => Promise<string | undefined | null>;
+  credentialProvider?: (forceRefresh?: boolean) => Promise<string | undefined | null>;
   webSocketFactory?: WebSocketFactory;
   /** Reconnect backoff schedule; the last entry repeats. */
   reconnectDelaysMs?: number[];
   onConnectionChange?(connected: boolean): void;
+  /** Invoked when the auth handshake is still rejected after a forced token
+   * refresh. The client stops reconnecting; callers should surface an
+   * auth-expired state and require the user to sign in again. */
+  onAuthError?(): void;
 }
 
 interface AgentAttachment {
@@ -76,6 +99,9 @@ interface PendingRequest {
 
 const DEFAULT_BACKOFF_MS = [250, 500, 1000, 2000, 5000];
 
+/** Delay before the single force-refresh retry after an auth-failure close. */
+const AUTH_RETRY_DELAY_MS = 250;
+
 function defaultFactory(url: string): WebSocketLike {
   return new WebSocket(url) as unknown as WebSocketLike;
 }
@@ -88,6 +114,13 @@ export class StreamClient {
   private closed = false;
   private reconnectAttempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  /** When set, the next auth handshake refreshes the credential before sending. */
+  private forceRefreshNextAuth = false;
+  /** Guards the single force-refresh retry per auth-failure episode. */
+  private authRetryConsumed = false;
+  /** Set when a local credential fetch fails, so the ensuing disconnect is
+   * treated as an auth failure even without a relay close code. */
+  private authFailurePending = false;
   private nextRequestId = 1;
   private readonly pendingRequests = new Map<number, PendingRequest>();
   private readonly attachments = new Map<string, Attachment>();
@@ -179,7 +212,9 @@ export class StreamClient {
   private connect(): void {
     if (this.closed) return;
     this.authed = false;
-    const socket = this.factory(this.options.url);
+    const socket = this.factory(this.options.url, {
+      forceRefreshCredential: this.forceRefreshNextAuth,
+    });
     this.socket = socket;
 
     socket.onopen = () => {
@@ -196,18 +231,54 @@ export class StreamClient {
       }
       this.handleFrame(frame);
     };
-    socket.onclose = () => this.handleDisconnect(socket);
+    socket.onclose = (event) => this.handleDisconnect(socket, event);
     socket.onerror = () => {
       // onclose follows; nothing to do here.
     };
   }
 
-  private handleDisconnect(socket: WebSocketLike): void {
+  private handleDisconnect(socket: WebSocketLike, closeEvent?: unknown): void {
     if (this.closed || socket !== this.socket) return;
     this.socket = null;
+    const wasAuthed = this.authed;
     this.authed = false;
     this.options.onConnectionChange?.(false);
     this.failPendingRequests(new Error("stream disconnected"));
+
+    // An auth-failure close (or a local credential fetch failure) before we
+    // ever authenticated means the credential was rejected — distinct from an
+    // ordinary network drop, which keeps the existing backoff reconnect.
+    const authFailure =
+      this.authFailurePending || (!wasAuthed && isAuthFailureClose(closeEvent));
+    this.authFailurePending = false;
+
+    if (authFailure) {
+      if (!this.authRetryConsumed) {
+        // Force-refresh the credential once and retry promptly.
+        this.authRetryConsumed = true;
+        this.forceRefreshNextAuth = true;
+        this.reconnectTimer = setTimeout(() => {
+          this.reconnectTimer = null;
+          this.connect();
+        }, AUTH_RETRY_DELAY_MS);
+        return;
+      }
+      // The forced-refresh retry was still rejected: the session is expired.
+      // Stop reconnecting and surface the failure so the user can re-login.
+      this.closed = true;
+      this.forceRefreshNextAuth = false;
+      for (const attachment of this.attachments.values()) {
+        attachment.handlers.onError?.("auth_expired", "Your session expired. Please sign in again.");
+      }
+      this.options.onAuthError?.();
+      return;
+    }
+
+    // Ordinary disconnect (network drop, or a drop after the handshake): the
+    // auth handshake itself did not fail this round, so clear any pending
+    // force-refresh/retry state and fall back to the normal backoff reconnect.
+    this.forceRefreshNextAuth = false;
+    this.authRetryConsumed = false;
     const delays = this.options.reconnectDelaysMs ?? DEFAULT_BACKOFF_MS;
     const delay = delays[Math.min(this.reconnectAttempt, delays.length - 1)];
     this.reconnectAttempt += 1;
@@ -225,9 +296,18 @@ export class StreamClient {
   }
 
   private async sendAuthFrame(socket: WebSocketLike): Promise<void> {
-    const provided = this.options.credentialProvider
-      ? await this.options.credentialProvider()
-      : this.options.credential;
+    let provided: string | undefined | null;
+    try {
+      provided = this.options.credentialProvider
+        ? await this.options.credentialProvider(this.forceRefreshNextAuth)
+        : this.options.credential;
+    } catch {
+      // Credential refresh failed (e.g. a revoked session). Drive the socket
+      // through the auth-failure disconnect path so the retry/give-up logic runs.
+      this.authFailurePending = true;
+      if (socket === this.socket) socket.close();
+      return;
+    }
     if (this.closed || socket !== this.socket) return;
     const credential = provided && provided.trim().length > 0 ? provided : undefined;
     this.rawSend({ type: "auth", ...(credential ? { credential } : {}) }, socket);
@@ -238,6 +318,8 @@ export class StreamClient {
       case "auth_ok": {
         this.authed = true;
         this.reconnectAttempt = 0;
+        this.forceRefreshNextAuth = false;
+        this.authRetryConsumed = false;
         this.options.onConnectionChange?.(true);
         // Re-attach everything we track, resuming agent streams from the
         // last seen seq, then flush queued frames.
@@ -346,6 +428,18 @@ export class StreamClient {
   }
 }
 
+function isAuthFailureClose(event: unknown): boolean {
+  return closeEventCode(event) === AUTH_FAILURE_CLOSE_CODE;
+}
+
+function closeEventCode(event: unknown): number | null {
+  if (typeof event === "object" && event !== null && "code" in event) {
+    const code = (event as { code?: unknown }).code;
+    return typeof code === "number" ? code : null;
+  }
+  return null;
+}
+
 function attachmentKey(taskId: string, kind: StreamKind): string {
   return `${kind}:${taskId}`;
 }
@@ -361,7 +455,7 @@ function parseAttachmentKey(key: string): { taskId: string; kind: StreamKind } {
 export interface RelayTunnelOptions {
   relayUrl: string;
   desktopId: string;
-  getIdentityToken(): Promise<string | null | undefined>;
+  getIdentityToken(forceRefresh?: boolean): Promise<string | null | undefined>;
   webSocketFactory?: WebSocketFactory;
   nextId?: () => string;
 }
@@ -373,13 +467,14 @@ export function createRelayTunnelWebSocketFactory({
   webSocketFactory = defaultFactory,
   nextId = createSequentialTunnelId,
 }: RelayTunnelOptions): WebSocketFactory {
-  return () =>
+  return (_url, options) =>
     new RelayTunnelSocket(
       relayUrl,
       desktopId,
       getIdentityToken,
       webSocketFactory,
       nextId,
+      options?.forceRefreshCredential ?? false,
     );
 }
 
@@ -389,6 +484,7 @@ class RelayTunnelSocket implements WebSocketLike {
   private identityToken: string | null = null;
   private ready = false;
   private closed = false;
+  private closeNotified = false;
   onopen: ((event: unknown) => void) | null = null;
   onmessage: ((event: { data: unknown }) => void) | null = null;
   onclose: ((event: unknown) => void) | null = null;
@@ -397,9 +493,12 @@ class RelayTunnelSocket implements WebSocketLike {
   constructor(
     relayUrl: string,
     private readonly desktopId: string,
-    private readonly getIdentityToken: () => Promise<string | null | undefined>,
+    private readonly getIdentityToken: (
+      forceRefresh?: boolean,
+    ) => Promise<string | null | undefined>,
     webSocketFactory: WebSocketFactory,
     private readonly nextId: () => string,
+    private readonly forceRefreshCredential: boolean,
   ) {
     this.socket = webSocketFactory(relayUrl);
     this.socket.onopen = () => {
@@ -407,7 +506,16 @@ class RelayTunnelSocket implements WebSocketLike {
     };
     this.socket.onmessage = (event) => this.handleMessage(event.data);
     this.socket.onerror = (event) => this.onerror?.(event);
-    this.socket.onclose = (event) => this.onclose?.(event);
+    this.socket.onclose = (event) => this.emitClose(event);
+  }
+
+  /** Forward a single close to the owning StreamClient. The relay close code
+   * (e.g. 4005) flows through here so the client can recognise auth failures;
+   * a synthetic auth-failure code is emitted when our own token fetch fails. */
+  private emitClose(event: unknown): void {
+    if (this.closeNotified) return;
+    this.closeNotified = true;
+    this.onclose?.(event);
   }
 
   send(data: string): void {
@@ -425,7 +533,7 @@ class RelayTunnelSocket implements WebSocketLike {
 
   private async authenticate(): Promise<void> {
     try {
-      const token = await this.getIdentityToken();
+      const token = await this.getIdentityToken(this.forceRefreshCredential);
       if (!token) {
         throw new Error("Sign in before opening a relay tunnel.");
       }
@@ -433,6 +541,9 @@ class RelayTunnelSocket implements WebSocketLike {
       this.socket.send(JSON.stringify({ type: "auth", id_token: token }));
     } catch (error) {
       this.onerror?.(error);
+      // Surface as an auth failure so the StreamClient force-refreshes once and
+      // then gives up rather than reconnecting forever with a bad token.
+      this.emitClose({ code: AUTH_FAILURE_CLOSE_CODE, reason: "relay tunnel auth failed" });
       this.close();
     }
   }

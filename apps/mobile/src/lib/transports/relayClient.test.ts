@@ -287,4 +287,58 @@ describe("createRelayDesktopClient", () => {
 
     await expect(input).resolves.toBeUndefined();
   });
+
+  it("force-refreshes the token once and reports an auth error when the relay keeps rejecting it", async () => {
+    vi.useFakeTimers();
+    try {
+      const sockets: RelaySocketLike[] = [];
+      const forceRefreshArgs: Array<boolean | undefined> = [];
+      const onAuthError = vi.fn();
+      const client = createRelayDesktopClient({
+        createSocket: () => {
+          const socket = createSocket();
+          sockets.push(socket);
+          return socket;
+        },
+        getIdToken: async (forceRefresh) => {
+          forceRefreshArgs.push(forceRefresh);
+          return "id-token";
+        },
+        relayUrl: "wss://relay.example",
+        onAuthError
+      });
+
+      client.observeTaskTerminal(
+        { desktopId: "desktop-1", taskId: "task-1" },
+        () => {}
+      );
+
+      // First tunnel: relay rejects the (revoked) phone token by closing 4005.
+      const socket1 = sockets[0];
+      socket1.onopen?.();
+      await flushPromises();
+      expect(forceRefreshArgs).toEqual([false]);
+      socket1.onclose?.({ code: 4005 });
+
+      // The client force-refreshes and retries.
+      await vi.advanceTimersByTimeAsync(250);
+      const socket2 = sockets[1];
+      expect(socket2).toBeDefined();
+      socket2.onopen?.();
+      await flushPromises();
+      expect(forceRefreshArgs).toEqual([false, true]);
+
+      // Still rejected after refresh → surface auth error, stop retrying.
+      socket2.onclose?.({ code: 4005 });
+      await flushPromises();
+      expect(onAuthError).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(sockets.length).toBe(2);
+
+      client.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

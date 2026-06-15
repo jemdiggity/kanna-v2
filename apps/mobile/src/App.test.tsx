@@ -165,7 +165,8 @@ function createSignedInAuthSession(): MobileAuthSession {
     }),
     signInWithEmailPassword: vi.fn().mockResolvedValue(undefined),
     signOut: vi.fn().mockResolvedValue(undefined),
-    getIdToken: vi.fn().mockResolvedValue("id-token-1")
+    getIdToken: vi.fn().mockResolvedValue("id-token-1"),
+    notifyAuthExpired: vi.fn()
   };
 }
 
@@ -176,7 +177,8 @@ function createSignedOutAuthSession(): MobileAuthSession {
     subscribe: vi.fn(() => () => undefined),
     signInWithEmailPassword: vi.fn().mockResolvedValue(undefined),
     signOut: vi.fn().mockResolvedValue(undefined),
-    getIdToken: vi.fn().mockResolvedValue(null)
+    getIdToken: vi.fn().mockResolvedValue(null),
+    notifyAuthExpired: vi.fn()
   };
 }
 
@@ -294,7 +296,8 @@ describe("createAppModel", () => {
       }),
       signInWithEmailPassword: vi.fn().mockResolvedValue(undefined),
       signOut: vi.fn().mockResolvedValue(undefined),
-      getIdToken: vi.fn().mockResolvedValue("id-token-1")
+      getIdToken: vi.fn().mockResolvedValue("id-token-1"),
+      notifyAuthExpired: vi.fn()
     };
     const taskIndex = {
       listRecentTasks: vi.fn(async () => [
@@ -343,7 +346,8 @@ describe("createAppModel", () => {
       }),
       signInWithEmailPassword: vi.fn().mockResolvedValue(undefined),
       signOut: vi.fn().mockResolvedValue(undefined),
-      getIdToken: vi.fn().mockResolvedValue("id-token-1")
+      getIdToken: vi.fn().mockResolvedValue("id-token-1"),
+      notifyAuthExpired: vi.fn()
     };
     const taskIndex = {
       listRecentTasks: vi.fn(async () => []),
@@ -417,7 +421,8 @@ describe("createAppModel", () => {
       }),
       signInWithEmailPassword: vi.fn().mockResolvedValue(undefined),
       signOut: vi.fn().mockResolvedValue(undefined),
-      getIdToken: vi.fn().mockResolvedValue("id-token-1")
+      getIdToken: vi.fn().mockResolvedValue("id-token-1"),
+      notifyAuthExpired: vi.fn()
     };
     const fetchImpl = vi.fn(async () => {
       throw new Error("LAN should not be called for standalone production cloud");

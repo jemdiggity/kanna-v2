@@ -238,11 +238,13 @@ function targetNeedsSecondaryInstance(testTarget: string): boolean {
 
 function targetNeedsEmulators(testTarget: string): boolean {
   return /real\/cloud-task-sync\.test\.ts$/.test(testTarget) ||
+    /real\/mobile-relay-auth-recovery\.test\.ts$/.test(testTarget) ||
     /real\/auth-indexeddb-fallback\.test\.ts$/.test(testTarget);
 }
 
 function targetNeedsRelay(testTarget: string): boolean {
-  return /real\/cloud-task-sync\.test\.ts$/.test(testTarget);
+  return /real\/cloud-task-sync\.test\.ts$/.test(testTarget) ||
+    /real\/mobile-relay-auth-recovery\.test\.ts$/.test(testTarget);
 }
 
 function targetNeedsAuthIndexedDbOpenFailure(testTarget: string): boolean {

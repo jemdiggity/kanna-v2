@@ -30,8 +30,8 @@ class MockSocket implements WebSocketLike {
     this.onmessage?.({ data: JSON.stringify(frame) });
   }
 
-  drop(): void {
-    this.onclose?.({});
+  drop(code?: number): void {
+    this.onclose?.(code === undefined ? {} : { code });
   }
 }
 
@@ -362,6 +362,147 @@ describe("StreamClient", () => {
       type: "auth",
       credential: "relay-id-token",
     });
+    client.close();
+  });
+
+  it("force-refreshes the credential once and retries after an auth-failure close", async () => {
+    const forceRefreshArgs: Array<boolean | undefined> = [];
+    const onAuthError = vi.fn();
+    const client = new StreamClient({
+      url: "ws://test/v1/stream",
+      webSocketFactory: factory,
+      credentialProvider: async (forceRefresh) => {
+        forceRefreshArgs.push(forceRefresh);
+        return "token";
+      },
+      onAuthError,
+    });
+
+    const socket1 = sockets[0];
+    socket1.open();
+    await Promise.resolve();
+    expect(forceRefreshArgs).toEqual([false]);
+
+    // Relay rejects the handshake with the auth-failure close code.
+    socket1.drop(4005);
+    vi.advanceTimersByTime(250);
+    const socket2 = sockets[1];
+    expect(socket2).toBeDefined();
+    socket2.open();
+    await Promise.resolve();
+    // The retry forced a fresh token rather than reusing the rejected one.
+    expect(forceRefreshArgs).toEqual([false, true]);
+
+    socket2.receive({ type: "auth_ok" });
+    expect(onAuthError).not.toHaveBeenCalled();
+    client.close();
+  });
+
+  it("reports an auth error and stops reconnecting when the refreshed token is still rejected", async () => {
+    const onAuthError = vi.fn();
+    const errors: Array<{ code: string; message: string }> = [];
+    const client = new StreamClient({
+      url: "ws://test/v1/stream",
+      webSocketFactory: factory,
+      credentialProvider: async () => "token",
+      onAuthError,
+    });
+    client.attachAgent("task-1", {
+      onSnapshot() {},
+      onEvent() {},
+      onError(code, message) {
+        errors.push({ code, message });
+      },
+    });
+
+    const socket1 = sockets[0];
+    socket1.open();
+    await Promise.resolve();
+
+    socket1.drop(4005); // first auth failure → schedule forced-refresh retry
+    vi.advanceTimersByTime(250);
+    const socket2 = sockets[1];
+    socket2.open();
+    await Promise.resolve();
+
+    socket2.drop(4005); // still rejected after refresh → give up
+    expect(onAuthError).toHaveBeenCalledTimes(1);
+    expect(errors).toEqual([
+      { code: "auth_expired", message: "Your session expired. Please sign in again." },
+    ]);
+
+    // No further reconnect attempts are scheduled.
+    vi.advanceTimersByTime(60_000);
+    expect(sockets.length).toBe(2);
+    client.close();
+  });
+
+  it("keeps reconnecting without forcing a refresh on an ordinary disconnect", async () => {
+    const forceRefreshArgs: Array<boolean | undefined> = [];
+    const onAuthError = vi.fn();
+    const client = new StreamClient({
+      url: "ws://test/v1/stream",
+      webSocketFactory: factory,
+      credentialProvider: async (forceRefresh) => {
+        forceRefreshArgs.push(forceRefresh);
+        return "token";
+      },
+      onAuthError,
+    });
+
+    const socket1 = sockets[0];
+    socket1.open();
+    await Promise.resolve();
+    socket1.receive({ type: "auth_ok" });
+
+    socket1.drop(); // network drop, no auth-failure code
+    vi.advanceTimersByTime(250);
+    const socket2 = sockets[1];
+    expect(socket2).toBeDefined();
+    socket2.open();
+    await Promise.resolve();
+
+    expect(forceRefreshArgs).toEqual([false, false]);
+    expect(onAuthError).not.toHaveBeenCalled();
+    client.close();
+  });
+
+  it("treats a relay tunnel identity-token failure as an auth failure", async () => {
+    const refreshCalls: Array<boolean | undefined> = [];
+    const tunnelFactory = createRelayTunnelWebSocketFactory({
+      relayUrl: "ws://relay",
+      desktopId: "desktop-1",
+      getIdentityToken: async (forceRefresh) => {
+        refreshCalls.push(forceRefresh);
+        throw new Error("revoked");
+      },
+      webSocketFactory: factory,
+      nextId: () => "tunnel-request-1",
+    });
+    const onAuthError = vi.fn();
+    const client = new StreamClient({
+      url: "ignored-by-tunnel-factory",
+      credentialProvider: async () => "id-token",
+      webSocketFactory: tunnelFactory,
+      onAuthError,
+    });
+
+    const socket1 = sockets[0];
+    socket1.open();
+    await Promise.resolve();
+    await Promise.resolve();
+    // First attempt reused a cached token (no force refresh) and was rejected.
+    expect(refreshCalls).toEqual([false]);
+
+    vi.advanceTimersByTime(250);
+    const socket2 = sockets[1];
+    expect(socket2).toBeDefined();
+    socket2.open();
+    await Promise.resolve();
+    await Promise.resolve();
+    // The retry forced a refresh; it still failed → permanent auth error.
+    expect(refreshCalls).toEqual([false, true]);
+    expect(onAuthError).toHaveBeenCalledTimes(1);
     client.close();
   });
 });

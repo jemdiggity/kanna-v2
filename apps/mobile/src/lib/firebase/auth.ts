@@ -30,7 +30,12 @@ export interface MobileAuthSession {
   signInWithEmailPassword(input: EmailPasswordSignInInput): Promise<void>;
   signOut(): Promise<void>;
   getIdToken(forceRefresh?: boolean): Promise<string | null>;
+  /** Mark the session as expired after the relay rejected the ID token even
+   * after a forced refresh. Surfaces an auth error and requires re-login. */
+  notifyAuthExpired(): void;
 }
+
+const AUTH_EXPIRED_MESSAGE = "Your session expired. Please sign in again.";
 
 interface MobileAuthSessionDeps {
   sdk: MobileAuthSdk;
@@ -97,6 +102,18 @@ export function createMobileAuthSession({
     },
     getIdToken(forceRefresh) {
       return sdk.getIdToken(forceRefresh);
+    },
+    notifyAuthExpired() {
+      // Only meaningful while we believe we are signed in; ignore otherwise so a
+      // stray late callback can't clobber a clean signed-out state.
+      if (state.status === "signedOut") {
+        return;
+      }
+      publish({
+        status: "error",
+        message: AUTH_EXPIRED_MESSAGE,
+        user: state.user
+      });
     }
   };
 }

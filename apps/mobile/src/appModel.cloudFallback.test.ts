@@ -142,7 +142,8 @@ describe("createAppModel cloud routing", () => {
       signOut: vi.fn().mockImplementation(async () => {
         authState = { status: "signedOut" };
       }),
-      getIdToken: vi.fn().mockResolvedValue("id-token")
+      getIdToken: vi.fn().mockResolvedValue("id-token"),
+      notifyAuthExpired: vi.fn()
     };
     let pushCloudTasks: ((tasks: Awaited<ReturnType<CloudTaskIndex["listRecentTasks"]>>) => void) | null = null;
     const taskIndex: CloudTaskIndex = {

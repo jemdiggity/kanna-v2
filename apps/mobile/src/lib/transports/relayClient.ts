@@ -36,6 +36,9 @@ export interface RelayDesktopClientDependencies {
   getIdToken(forceRefresh?: boolean): Promise<string | null>;
   nextId?: () => string;
   relayUrl: string;
+  /** Called when the relay rejects auth even after a forced token refresh, so
+   * the app can surface an auth-expired state and require re-login. */
+  onAuthError?(): void;
 }
 
 interface PendingInvoke {
@@ -68,7 +71,8 @@ export function createRelayDesktopClient({
   createSocket = (url) => new WebSocket(url) as unknown as RelaySocketLike,
   getIdToken,
   nextId = createSequentialIdFactory(),
-  relayUrl
+  relayUrl,
+  onAuthError
 }: RelayDesktopClientDependencies): RelayDesktopClient {
   let socket: RelaySocketLike | null = null;
   let readyPromise: Promise<void> | null = null;
@@ -86,14 +90,14 @@ export function createRelayDesktopClient({
 
     const client = new StreamClient({
       url: relayUrl,
-      credentialProvider: () => getIdToken(),
       webSocketFactory: createRelayTunnelWebSocketFactory({
         relayUrl,
         desktopId,
-        getIdentityToken: () => getIdToken(),
+        getIdentityToken: (forceRefresh) => getIdToken(forceRefresh),
         webSocketFactory: createSocket,
       }),
       reconnectDelaysMs: [250, 500, 1000, 2000],
+      onAuthError,
     });
     streamClients.set(desktopId, client);
     return client;
@@ -346,14 +350,14 @@ export function createRelayDesktopClient({
     observeTaskAgent({ desktopId, taskId }, listener) {
       const client = new StreamClient({
         url: relayUrl,
-        credentialProvider: () => getIdToken(),
         webSocketFactory: createRelayTunnelWebSocketFactory({
           relayUrl,
           desktopId,
-          getIdentityToken: () => getIdToken(),
+          getIdentityToken: (forceRefresh) => getIdToken(forceRefresh),
           webSocketFactory: createSocket,
         }),
         reconnectDelaysMs: [250, 500, 1000, 2000],
+        onAuthError,
       });
 
       client.attachAgent(taskId, {
