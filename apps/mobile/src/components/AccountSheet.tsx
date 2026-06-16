@@ -55,14 +55,22 @@ export function AccountSheet({
     errorMessage
   );
   const canSubmit = email.trim().length > 3 && password.length > 0;
+  const closeSheet = () => {
+    setIsPasswordVisible(false);
+    onClose();
+  };
+  const signOut = () => {
+    setIsPasswordVisible(false);
+    onSignOut();
+  };
 
   return (
-    <Modal animationType="slide" transparent visible={visible} onRequestClose={onClose}>
+    <Modal animationType="slide" transparent visible={visible} onRequestClose={closeSheet}>
       <KeyboardAvoidingView
         behavior={Platform.OS === "ios" ? "padding" : undefined}
         style={styles.backdrop}
       >
-        <Pressable style={styles.scrim} onPress={onClose} />
+        <Pressable style={styles.scrim} onPress={closeSheet} />
         <View style={styles.sheet} testID={MOBILE_E2E_IDS.accountSheet}>
           <View style={styles.header}>
             <View>
@@ -73,7 +81,7 @@ export function AccountSheet({
               accessibilityLabel="Close account"
               style={styles.closeButton}
               testID={MOBILE_E2E_IDS.accountCloseButton}
-              onPress={onClose}
+              onPress={closeSheet}
             >
               <Text style={styles.closeLabel}>×</Text>
             </Pressable>
@@ -132,7 +140,7 @@ export function AccountSheet({
               accessibilityLabel="Sign Out"
               style={styles.secondaryButton}
               testID={MOBILE_E2E_IDS.accountSignOutButton}
-              onPress={onSignOut}
+              onPress={signOut}
             >
               <Text style={styles.secondaryLabel}>Sign Out</Text>
             </Pressable>

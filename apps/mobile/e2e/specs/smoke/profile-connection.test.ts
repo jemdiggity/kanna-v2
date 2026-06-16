@@ -8,6 +8,7 @@ import {
 
 interface FakeElement {
   click: ReturnType<typeof vi.fn>;
+  getAttribute: ReturnType<typeof vi.fn>;
   getText: ReturnType<typeof vi.fn>;
   isExisting: ReturnType<typeof vi.fn>;
   waitForDisplayed: ReturnType<typeof vi.fn>;
@@ -20,6 +21,7 @@ interface FakeWaitUntilOptions {
 function createElement(exists = true): FakeElement {
   return {
     click: vi.fn(async () => undefined),
+    getAttribute: vi.fn(async () => null),
     getText: vi.fn(async () => ""),
     isExisting: vi.fn(async () => exists),
     waitForDisplayed: vi.fn(async () => undefined)
@@ -93,14 +95,17 @@ describe("assertProfileConnectionControlsReachable", () => {
 });
 
 describe("assertProfilePasswordCanRevealAndHide", () => {
-  it("clicks the profile password toggle through Show, Hide, and Show states", async () => {
-    let toggleText = "Show";
+  it("clicks the profile password toggle through native accessibility label states", async () => {
+    let toggleLabel = "Show password";
     const passwordToggle = {
       ...createElement(),
       click: vi.fn(async () => {
-        toggleText = toggleText === "Show" ? "Hide" : "Show";
+        toggleLabel = toggleLabel === "Show password" ? "Hide password" : "Show password";
       }),
-      getText: vi.fn(async () => toggleText)
+      getAttribute: vi.fn(async (attributeName: string) =>
+        attributeName === "label" ? toggleLabel : null
+      ),
+      getText: vi.fn(async () => toggleLabel)
     };
     const ui = createReachableControlsUi({
       getPasswordToggle: vi.fn(async () => passwordToggle)
@@ -109,9 +114,10 @@ describe("assertProfilePasswordCanRevealAndHide", () => {
     await assertProfilePasswordCanRevealAndHide(ui);
 
     expect(passwordToggle.click).toHaveBeenCalledTimes(2);
-    expect(passwordToggle.getText).toHaveBeenCalled();
+    expect(passwordToggle.getAttribute).toHaveBeenCalledWith("label");
+    expect(passwordToggle.getText).not.toHaveBeenCalled();
     expect(ui.getPasswordToggle).toHaveBeenCalledTimes(5);
-    expect(toggleText).toBe("Show");
+    expect(toggleLabel).toBe("Show password");
   });
 });
 
