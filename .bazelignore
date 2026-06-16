@@ -1,1 +1,5 @@
 .build
+node_modules
+apps/desktop/node_modules
+apps/mobile/node_modules
+packages/stream-client/node_modules

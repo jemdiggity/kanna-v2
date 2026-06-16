@@ -40,6 +40,8 @@ export default defineConfig(async () => ({
     alias: {
       "@kanna/db": path.resolve(__dirname, "../../packages/db/src"),
       "@kanna/core": path.resolve(__dirname, "../../packages/core/src"),
+      "@kanna/agent-protocol": path.resolve(__dirname, "../../packages/agent-protocol/src"),
+      "@kanna/stream-client": path.resolve(__dirname, "../../packages/stream-client/src"),
     },
   },
 
