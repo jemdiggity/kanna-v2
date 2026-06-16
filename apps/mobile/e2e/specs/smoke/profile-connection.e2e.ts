@@ -11,6 +11,10 @@ interface ProfileConnectionElement {
   waitForDisplayed(options: { timeout: number }): Promise<unknown>;
 }
 
+interface ProfilePasswordToggleElement extends ProfileConnectionElement {
+  getAttribute(name: string): Promise<string | null>;
+}
+
 interface ProfileSheetOpener {
   getAccountButton(): Promise<ProfileConnectionElement>;
   getAccountSheet(): Promise<ProfileConnectionElement>;
@@ -22,7 +26,7 @@ interface ProfileConnectionControlsUi {
   getConnectLocalButton(): Promise<ProfileConnectionElement>;
   getEmailInput(): Promise<ProfileConnectionElement>;
   getPasswordInput(): Promise<ProfileConnectionElement>;
-  getPasswordToggle(): Promise<ProfileConnectionElement>;
+  getPasswordToggle(): Promise<ProfilePasswordToggleElement>;
   getSignInButton(): Promise<ProfileConnectionElement>;
   waitUntil(
     condition: () => Promise<boolean>,
@@ -127,20 +131,22 @@ export async function assertProfilePasswordCanRevealAndHide(
   );
 
   const showToggle = await ui.getPasswordToggle();
-  const initialToggleText = await showToggle.getText();
-  if (initialToggleText !== "Show") {
+  const initialToggleLabel = await getPasswordToggleAccessibilityLabel(showToggle);
+  if (initialToggleLabel !== "Show password") {
     throw new Error(
-      `Expected password visibility control to start as Show, got ${initialToggleText}`
+      `Expected password visibility control to start as Show password, got ${initialToggleLabel}`
     );
   }
   await showToggle.click();
 
   await ui.waitUntil(
-    async () => (await (await ui.getPasswordToggle()).getText()) === "Hide",
+    async () =>
+      (await getPasswordToggleAccessibilityLabel(await ui.getPasswordToggle())) ===
+      "Hide password",
     {
       interval: POLL_INTERVAL_MS,
       timeout: SCREEN_TIMEOUT_MS,
-      timeoutMsg: "Expected password visibility control to switch to Hide"
+      timeoutMsg: "Expected password visibility control to switch to Hide password"
     }
   );
 
@@ -148,13 +154,32 @@ export async function assertProfilePasswordCanRevealAndHide(
   await hideToggle.click();
 
   await ui.waitUntil(
-    async () => (await (await ui.getPasswordToggle()).getText()) === "Show",
+    async () =>
+      (await getPasswordToggleAccessibilityLabel(await ui.getPasswordToggle())) ===
+      "Show password",
     {
       interval: POLL_INTERVAL_MS,
       timeout: SCREEN_TIMEOUT_MS,
-      timeoutMsg: "Expected password visibility control to switch back to Show"
+      timeoutMsg: "Expected password visibility control to switch back to Show password"
     }
   );
+}
+
+async function getPasswordToggleAccessibilityLabel(
+  toggle: ProfilePasswordToggleElement
+): Promise<string | null> {
+  for (const attributeName of ["label", "content-desc", "name"]) {
+    try {
+      const value = await toggle.getAttribute(attributeName);
+      if (value) {
+        return value;
+      }
+    } catch {
+      // Appium attribute support varies by native driver.
+    }
+  }
+
+  return null;
 }
 
 export async function assertProfileConnectionDisconnected(

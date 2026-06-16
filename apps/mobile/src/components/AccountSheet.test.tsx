@@ -262,4 +262,67 @@ describe("AccountSheet", () => {
     expect(finalToggle?.props?.accessibilityLabel).toBe("Show password");
     expect(textContent(finalToggle)).toBe("Show");
   });
+
+  it("hides the password again when the drawer closes", () => {
+    let tree = renderSignedOutSheet();
+    const showToggle = findNodeByTestId(tree, "mobile.account-toggle-password");
+    showToggle?.props?.onPress?.();
+
+    tree = renderSignedOutSheet();
+    expect(findNodeByTestId(tree, "mobile.account-password")?.props?.secureTextEntry).toBe(
+      false
+    );
+
+    const closeButton = findNodeByTestId(tree, "mobile.account-close");
+    closeButton?.props?.onPress?.();
+
+    tree = renderSignedOutSheet();
+    const passwordInput = findNodeByTestId(tree, "mobile.account-password");
+    const toggle = findNodeByTestId(tree, "mobile.account-toggle-password");
+
+    expect(passwordInput?.props?.secureTextEntry).toBe(true);
+    expect(toggle?.props?.accessibilityLabel).toBe("Show password");
+  });
+
+  it("hides the password again when the user signs out", () => {
+    if (!AccountSheet) {
+      throw new Error("AccountSheet was not loaded");
+    }
+
+    let tree = renderSignedOutSheet();
+    const showToggle = findNodeByTestId(tree, "mobile.account-toggle-password");
+    showToggle?.props?.onPress?.();
+
+    const onSignOut = vi.fn();
+    reactState.index = 0;
+    tree = AccountSheet({
+      auth: {
+        status: "signedIn",
+        user: { uid: "user-1", email: "dev@example.com", displayName: "Dev" }
+      },
+      connectionState: "idle",
+      desktopName: null,
+      errorMessage: null,
+      pairingCode: null,
+      visible: true,
+      forceCloudEnabled: false,
+      showDevForceCloudToggle: false,
+      onClose: vi.fn(),
+      onConnectLocal: vi.fn(),
+      onForceCloudChange: vi.fn(),
+      onSignIn: vi.fn(),
+      onSignOut
+    }) as ElementNode;
+
+    const signOutButton = findNodeByTestId(tree, "mobile.account-sign-out");
+    signOutButton?.props?.onPress?.();
+
+    tree = renderSignedOutSheet();
+    const passwordInput = findNodeByTestId(tree, "mobile.account-password");
+    const toggle = findNodeByTestId(tree, "mobile.account-toggle-password");
+
+    expect(onSignOut).toHaveBeenCalledTimes(1);
+    expect(passwordInput?.props?.secureTextEntry).toBe(true);
+    expect(toggle?.props?.accessibilityLabel).toBe("Show password");
+  });
 });
