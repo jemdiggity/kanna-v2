@@ -44,11 +44,23 @@ interface BuildMobileDevicePrebuildCommandInput {
   repoRoot: string;
 }
 
+interface BuildMobileDeviceRelaunchCommandInput {
+  bundleId: string;
+  deviceUdid: string;
+}
+
 interface PhysicalDeviceRunPreflightInput {
   bundleId: string;
   device: AvailablePhysicalDevice;
   lanHost: string;
   metroPort: number;
+}
+
+export interface PhysicalDeviceMetroReadinessInput {
+  lanHost: string;
+  metroPort: number;
+  attempts?: number;
+  delayMs?: number;
 }
 
 export interface PhysicalDeviceRunPreflightCheck {
@@ -61,6 +73,13 @@ export interface PhysicalDeviceRunPreflightResult {
   ok: boolean;
   metroUrl: string;
   checks: PhysicalDeviceRunPreflightCheck[];
+}
+
+export interface PhysicalDeviceMetroReadinessResult {
+  ok: boolean;
+  metroUrl: string;
+  attempts: number;
+  message: string;
 }
 
 const mobileBundleIds = {
@@ -268,6 +287,23 @@ export function buildMobileDevicePrebuildCommand(
   };
 }
 
+export function buildMobileDeviceRelaunchCommand(
+  input: BuildMobileDeviceRelaunchCommandInput
+): Omit<MobileDeviceRunCommand, "cwd" | "env"> {
+  return {
+    command: "xcrun",
+    args: [
+      "devicectl",
+      "device",
+      "process",
+      "launch",
+      "--device",
+      input.deviceUdid,
+      input.bundleId
+    ]
+  };
+}
+
 export function resolveMobileBundleId(env: NodeJS.ProcessEnv): string {
   return resolveMobileNativeIdentity(env).bundleId;
 }
@@ -354,5 +390,47 @@ export async function checkPhysicalDeviceRunPreflight(
     ok: checks.every((check) => check.ok),
     metroUrl,
     checks
+  };
+}
+
+function sleep(ms: number): Promise<void> {
+  return ms <= 0 ? Promise.resolve() : new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export async function waitForPhysicalDeviceMetroReadiness(
+  runner: CommandRunner,
+  input: PhysicalDeviceMetroReadinessInput
+): Promise<PhysicalDeviceMetroReadinessResult> {
+  const metroUrl = `http://${input.lanHost}:${input.metroPort}`;
+  const attempts = Math.max(1, input.attempts ?? 30);
+  const delayMs = Math.max(0, input.delayMs ?? 1000);
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    const result = await runner.run("curl", [
+      "--fail",
+      "--silent",
+      "--show-error",
+      `${metroUrl}/status`
+    ]);
+    if (result.exitCode === 0 && result.stdout.includes("packager-status:running")) {
+      return {
+        ok: true,
+        metroUrl,
+        attempts: attempt,
+        message: `Metro is reachable at ${metroUrl}/status.`
+      };
+    }
+    if (attempt < attempts) {
+      await sleep(delayMs);
+    }
+  }
+
+  return {
+    ok: false,
+    metroUrl,
+    attempts,
+    message:
+      `Metro is not reachable at ${metroUrl}/status after ${attempts} attempts. ` +
+      `"No script URL provided" usually means Metro is down, the iPhone cannot reach the printed LAN URL, or Local Network permission is off.`
   };
 }

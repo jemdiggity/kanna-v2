@@ -28,10 +28,13 @@ import { resolveMobileServerUrl } from "../runtime/mobile";
 import { buildMobileDeviceSmokeCommand, buildMobileTestCommand } from "../runtime/mobile-commands";
 import {
   buildMobileDevicePrebuildCommand,
+  buildMobileDeviceRelaunchCommand,
   buildMobileDeviceRunCommand,
   checkPhysicalDeviceRunPreflight,
   resolveMobileNativeIdentity,
-  resolvePhysicalDevice
+  resolvePhysicalDevice,
+  waitForPhysicalDeviceMetroReadiness,
+  type PhysicalDeviceMetroReadinessInput
 } from "../runtime/mobile-device";
 import { buildConfigSchemaPages } from "../runtime/pages";
 import { getPortStatuses } from "../runtime/port-status";
@@ -185,6 +188,7 @@ export interface DevDownExecutionOptions {
 
 export interface MobileDeviceRunExecutionOptions {
   resolveLanAddress?: () => string | undefined;
+  metroReadiness?: Pick<PhysicalDeviceMetroReadinessInput, "attempts" | "delayMs">;
 }
 
 async function readGitValue(args: string[], cwd?: string): Promise<string> {
@@ -590,6 +594,61 @@ function requireMobileDeviceDevPorts(ports: Partial<KdPorts>): FirebasePortInput
   };
 }
 
+function isTransientExpoMetroFailure(result: { stdout: string; stderr: string }): boolean {
+  const output = `${result.stderr}\n${result.stdout}`;
+  return (
+    output.includes("Metro is not reachable") ||
+    output.includes("No script URL provided") ||
+    output.includes("Could not connect to development server")
+  );
+}
+
+function formatPhysicalDeviceRunSuccess(input: {
+  bundleId: string;
+  deviceName: string;
+  metroUrl: string;
+  recoveryMessage?: string;
+  checks: Awaited<ReturnType<typeof checkPhysicalDeviceRunPreflight>>["checks"];
+}): string {
+  return [
+    `Launched Kanna mobile on ${input.deviceName}.`,
+    `Bundle ID: ${input.bundleId}`,
+    `Metro: ${input.metroUrl}`,
+    "App: installed and launched.",
+    ...(input.recoveryMessage ? [input.recoveryMessage] : []),
+    formatPhysicalDevicePreflight(input.checks)
+  ].join("\n");
+}
+
+function formatPhysicalDeviceRunFailure(input: {
+  bundleId: string;
+  deviceName: string;
+  metroUrl: string;
+  appState: string;
+  reason: string;
+}): string {
+  return [
+    `Failed to launch Kanna mobile on ${input.deviceName}.`,
+    `Bundle ID: ${input.bundleId}`,
+    `Metro: ${input.metroUrl}`,
+    `App: ${input.appState}`,
+    input.reason,
+    "On the iPhone, allow Local Network for Kanna in Settings -> Privacy & Security -> Local Network."
+  ].join("\n");
+}
+
+function physicalDeviceChecksWithMetroReadiness(input: {
+  checks: Awaited<ReturnType<typeof checkPhysicalDeviceRunPreflight>>["checks"];
+  metroMessage: string;
+  metroOk: boolean;
+}): Awaited<ReturnType<typeof checkPhysicalDeviceRunPreflight>>["checks"] {
+  return input.checks.map((check) =>
+    check.name === "metro-lan"
+      ? { name: "metro-lan", ok: input.metroOk, message: input.metroMessage }
+      : check
+  );
+}
+
 export async function executeMobileDeviceRunWithContext(
   input: MobileRunInput,
   executor: ExecutorInput,
@@ -638,12 +697,44 @@ export async function executeMobileDeviceRunWithContext(
       message:
         prebuildResult.stderr ||
         prebuildResult.stdout ||
-        `Failed to prebuild Kanna mobile for ${nativeIdentity.bundleId}.`,
+        formatPhysicalDeviceRunFailure({
+          bundleId: nativeIdentity.bundleId,
+          deviceName: device.name,
+          metroUrl: preflight.metroUrl,
+          appState: "not launched because prebuild failed.",
+          reason: `Failed to prebuild Kanna mobile for ${nativeIdentity.bundleId}.`
+        }),
       data: {
         bundleId: nativeIdentity.bundleId,
         device,
         metroUrl: preflight.metroUrl,
         preflight,
+        windows: launch.plan.windows.map((window) => window.name)
+      }
+    };
+  }
+
+  const initialMetroReadiness = await waitForPhysicalDeviceMetroReadiness(executor.runner, {
+    lanHost,
+    metroPort,
+    ...options.metroReadiness
+  });
+  if (!initialMetroReadiness.ok) {
+    return {
+      ok: false,
+      message: formatPhysicalDeviceRunFailure({
+        bundleId: nativeIdentity.bundleId,
+        deviceName: device.name,
+        metroUrl: initialMetroReadiness.metroUrl,
+        appState: "not launched because Metro was not ready.",
+        reason: `FAIL metro-lan: ${initialMetroReadiness.message}`
+      }),
+      data: {
+        bundleId: nativeIdentity.bundleId,
+        device,
+        metroUrl: initialMetroReadiness.metroUrl,
+        preflight,
+        metroReadiness: initialMetroReadiness,
         windows: launch.plan.windows.map((window) => window.name)
       }
     };
@@ -661,18 +752,124 @@ export async function executeMobileDeviceRunWithContext(
     env: { ...launch.env, ...runCommand.env },
     streamOutput: true
   });
+  const postLaunchMetroReadiness = await waitForPhysicalDeviceMetroReadiness(executor.runner, {
+    lanHost,
+    metroPort,
+    ...options.metroReadiness
+  });
+
+  if (runResult.exitCode === 0 && postLaunchMetroReadiness.ok) {
+    return {
+      ok: true,
+      message: formatPhysicalDeviceRunSuccess({
+        bundleId: nativeIdentity.bundleId,
+        deviceName: device.name,
+        metroUrl: postLaunchMetroReadiness.metroUrl,
+        checks: physicalDeviceChecksWithMetroReadiness({
+          checks: preflight.checks,
+          metroMessage: postLaunchMetroReadiness.message,
+          metroOk: true
+        })
+      }),
+      data: {
+        bundleId: nativeIdentity.bundleId,
+        device,
+        metroUrl: postLaunchMetroReadiness.metroUrl,
+        preflight,
+        metroReadiness: {
+          beforeLaunch: initialMetroReadiness,
+          afterLaunch: postLaunchMetroReadiness
+        },
+        windows: launch.plan.windows.map((window) => window.name)
+      }
+    };
+  }
+
+  if (
+    runResult.exitCode !== 0 &&
+    postLaunchMetroReadiness.ok &&
+    isTransientExpoMetroFailure(runResult)
+  ) {
+    const relaunchCommand = buildMobileDeviceRelaunchCommand({
+      bundleId: nativeIdentity.bundleId,
+      deviceUdid: device.udid
+    });
+    const relaunchResult = await executor.runner.run(relaunchCommand.command, relaunchCommand.args, {
+      streamOutput: true
+    });
+    if (relaunchResult.exitCode === 0) {
+      return {
+        ok: true,
+        message: formatPhysicalDeviceRunSuccess({
+          bundleId: nativeIdentity.bundleId,
+          deviceName: device.name,
+          metroUrl: postLaunchMetroReadiness.metroUrl,
+          recoveryMessage: `Recovered by relaunching ${nativeIdentity.bundleId} after Metro became reachable.`,
+          checks: physicalDeviceChecksWithMetroReadiness({
+            checks: preflight.checks,
+            metroMessage: postLaunchMetroReadiness.message,
+            metroOk: true
+          })
+        }),
+        data: {
+          bundleId: nativeIdentity.bundleId,
+          device,
+          metroUrl: postLaunchMetroReadiness.metroUrl,
+          preflight,
+          metroReadiness: {
+            beforeLaunch: initialMetroReadiness,
+            afterLaunch: postLaunchMetroReadiness
+          },
+          recovered: true,
+          windows: launch.plan.windows.map((window) => window.name)
+        }
+      };
+    }
+    return {
+      ok: false,
+      message: formatPhysicalDeviceRunFailure({
+        bundleId: nativeIdentity.bundleId,
+        deviceName: device.name,
+        metroUrl: postLaunchMetroReadiness.metroUrl,
+        appState: "installed, but relaunch failed.",
+        reason: relaunchResult.stderr || relaunchResult.stdout || "Failed to relaunch the installed iOS app."
+      }),
+      data: {
+        bundleId: nativeIdentity.bundleId,
+        device,
+        metroUrl: postLaunchMetroReadiness.metroUrl,
+        preflight,
+        metroReadiness: {
+          beforeLaunch: initialMetroReadiness,
+          afterLaunch: postLaunchMetroReadiness
+        },
+        recovered: false,
+        windows: launch.plan.windows.map((window) => window.name)
+      }
+    };
+  }
 
   return {
-    ok: runResult.exitCode === 0,
-    message:
-      runResult.exitCode === 0
-        ? `Launched Kanna mobile on ${device.name}. Metro: ${preflight.metroUrl}\n${formatPhysicalDevicePreflight(preflight.checks)}`
-        : runResult.stderr || runResult.stdout || `Failed to launch Kanna mobile on ${device.name}. Metro: ${preflight.metroUrl}`,
+    ok: false,
+    message: formatPhysicalDeviceRunFailure({
+      bundleId: nativeIdentity.bundleId,
+      deviceName: device.name,
+      metroUrl: postLaunchMetroReadiness.metroUrl,
+      appState: runResult.exitCode === 0 ? "installed and launched, but Metro was not reachable afterward." : "install or launch failed.",
+      reason:
+        runResult.exitCode === 0
+          ? `FAIL metro-lan: ${postLaunchMetroReadiness.message}`
+          : runResult.stderr || runResult.stdout || "The iOS install or launch command failed."
+    }),
     data: {
       bundleId: nativeIdentity.bundleId,
       device,
-      metroUrl: preflight.metroUrl,
+      metroUrl: postLaunchMetroReadiness.metroUrl,
       preflight,
+      metroReadiness: {
+        beforeLaunch: initialMetroReadiness,
+        afterLaunch: postLaunchMetroReadiness
+      },
       windows: launch.plan.windows.map((window) => window.name)
     }
   };
