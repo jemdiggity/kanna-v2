@@ -14,9 +14,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use axum::extract::ws::{Message as WsMessage, WebSocket};
 use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
-use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
-use tokio::sync::mpsc;
+use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use tokio::sync::RwLock;
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
@@ -26,7 +26,7 @@ use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent, Ses
 
 use crate::daemon_client::DaemonClient;
 use crate::db::Db;
-use crate::http_api::{dispatch_http_invoke, AppState};
+use crate::http_api::{AppState, dispatch_http_invoke};
 
 #[derive(Debug, serde::Deserialize)]
 struct FirebaseLookupResponse {
@@ -258,6 +258,13 @@ impl StreamConn {
             .ok_or_else(|| format!("no session for task {task_id}"))
     }
 
+    fn resolve_terminal_session_id(&self, task_id: &str) -> Result<String, String> {
+        if task_id.starts_with("shell-") {
+            return Ok(task_id.to_string());
+        }
+        self.resolve_session_id(task_id)
+    }
+
     /// One-shot daemon command over a fresh connection (unix-socket connects
     /// are cheap and this avoids interleaving with attach streams).
     async fn daemon_command(&self, cmd: DaemonCommand) -> Result<DaemonEvent, String> {
@@ -374,7 +381,7 @@ impl StreamConn {
                         return true;
                     }
                 };
-                match self.resolve_session_id(&task_id) {
+                match self.resolve_terminal_session_id(&task_id) {
                     Ok(session_id) => {
                         self.expect_ok(&task_id, DaemonCommand::Input { session_id, data })
                             .await;
@@ -386,7 +393,7 @@ impl StreamConn {
                 task_id,
                 cols,
                 rows,
-            } => match self.resolve_session_id(&task_id) {
+            } => match self.resolve_terminal_session_id(&task_id) {
                 Ok(session_id) => {
                     self.expect_ok(
                         &task_id,
@@ -476,7 +483,10 @@ impl StreamConn {
     }
 
     async fn attach(&mut self, task_id: String, kind: StreamKind, from_seq: u64) {
-        let session_id = match self.resolve_session_id(&task_id) {
+        let session_id = match match kind {
+            StreamKind::Agent => self.resolve_session_id(&task_id),
+            StreamKind::Terminal => self.resolve_terminal_session_id(&task_id),
+        } {
             Ok(session_id) => session_id,
             Err(message) => {
                 self.error(Some(task_id), "no_session", message).await;
@@ -1136,6 +1146,31 @@ mod tests {
             }
             other => panic!("expected Error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn shell_terminal_ids_resolve_directly_to_daemon_sessions() {
+        let state = Arc::new(crate::http_api::AppState::new(test_config(
+            "ksp-shell-terminal",
+            "KSP Shell Terminal",
+        )));
+        let (frame_tx, _frame_rx) = mpsc::channel(1);
+        let conn = StreamConn {
+            state,
+            frame_tx,
+            attachments: HashMap::new(),
+            authed: true,
+            auth_mode: AuthMode::AllowEmpty,
+        };
+
+        assert_eq!(
+            conn.resolve_terminal_session_id("shell-wt-task-1"),
+            Ok("shell-wt-task-1".to_string()),
+        );
+        assert_eq!(
+            conn.resolve_terminal_session_id("shell-repo-repo-1"),
+            Ok("shell-repo-repo-1".to_string()),
+        );
     }
 
     #[tokio::test]

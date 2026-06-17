@@ -30,9 +30,14 @@ export interface TerminalGeometry {
 
 const SESSION_NOT_FOUND_CODE = "session_not_found";
 const HANDOFF_LOST_CODE = "handoff_lost";
+const SESSION_ALREADY_EXISTS_CODE = "session_already_exists";
 
 export function isMissingDaemonSessionFailure(error: unknown): boolean {
   return getAppErrorCode(error) === SESSION_NOT_FOUND_CODE;
+}
+
+export function isExistingDaemonSessionFailure(error: unknown): boolean {
+  return getAppErrorCode(error) === SESSION_ALREADY_EXISTS_CODE;
 }
 
 export function getTerminalRecoveryMode(

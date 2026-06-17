@@ -1019,6 +1019,49 @@ describe("useTerminal", () => {
     }));
   });
 
+  it("attaches a pre-warmed shell terminal when spawn reports the session already exists", async () => {
+    const spawnFn = vi.fn(async () => {
+      throw new AppError("session already exists: shell-wt-1", "session_already_exists");
+    });
+    const { useTerminal } = await import("./useTerminal");
+    const client = installKspStreamClient();
+
+    const TestHarness = defineComponent({
+      setup() {
+        const { init, startListening } = useTerminal(
+          "shell-wt-1",
+          {
+            cwd: "/tmp/task",
+            prompt: "",
+            spawnFn,
+          },
+          undefined,
+        );
+
+        return { init, startListening };
+      },
+      render() {
+        return h("div");
+      },
+    });
+
+    const wrapper = mount(TestHarness);
+    const terminalElement = document.createElement("div");
+    Object.defineProperty(terminalElement, "offsetWidth", { configurable: true, value: 800 });
+    Object.defineProperty(terminalElement, "offsetHeight", { configurable: true, value: 600 });
+    terminalElement.querySelector = vi.fn(() => null) as typeof terminalElement.querySelector;
+    terminalElement.closest = vi.fn(() => null) as typeof terminalElement.closest;
+    wrapper.vm.init(terminalElement);
+
+    await wrapper.vm.startListening();
+
+    expect(spawnFn).toHaveBeenCalledTimes(1);
+    expect(errorToastMock).not.toHaveBeenCalled();
+    expect(client.attachTerminal).toHaveBeenCalledWith("shell-wt-1", expect.objectContaining({
+      onOutput: expect.any(Function),
+    }));
+  });
+
   it("respawns once when a previously attached task session disappears from the KSP stream", async () => {
     const spawnFn = vi.fn(async () => {});
     const { useTerminal } = await import("./useTerminal");
