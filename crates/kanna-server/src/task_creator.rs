@@ -172,6 +172,7 @@ pub(crate) fn prepare_advance_stage_for_api(
                     source_task.stage_result.clone(),
                     &task_prompt,
                     source_task.branch.as_deref(),
+                    source_task.agent_type.as_deref().unwrap_or("pty"),
                     post_action
                         .agent_provider
                         .as_deref()
@@ -209,6 +210,7 @@ pub(crate) fn prepare_advance_stage_for_api(
             source_task.stage_result.clone(),
             &task_prompt,
             source_task.branch.as_deref(),
+            source_task.agent_type.as_deref().unwrap_or("pty"),
             source_task.agent_provider.as_deref(),
         )?));
     }
@@ -353,6 +355,7 @@ pub(crate) fn prepare_auto_stage_completion_for_api(
             source_task.stage_result.clone(),
             &task_prompt,
             source_task.branch.as_deref(),
+            source_task.agent_type.as_deref().unwrap_or("pty"),
             source_task.agent_provider.as_deref(),
         )
         .map(PreparedStageTransition::Continue)
@@ -511,11 +514,13 @@ pub(crate) enum PreparedStageTransition {
 
 pub(crate) struct PreparedStageContinue {
     task_id: String,
+    agent_type: String,
     previous_stage: String,
     next_stage: String,
     previous_stage_result: Option<String>,
     previous_active_post_action: Option<String>,
     active_post_action: Option<String>,
+    input_text: String,
     input: Vec<u8>,
 }
 
@@ -912,8 +917,12 @@ pub(crate) async fn continue_prepared_stage_for_api(
     daemon: &mut DaemonClient,
     prepared: PreparedStageContinue,
 ) -> Result<crate::mobile_api::TaskActionResponse, String> {
-    {
+    let session_id = {
         let db = Db::open(db_path).map_err(|e| format!("db error: {}", e))?;
+        let session_id = db
+            .resolve_task_terminal_session_id(&prepared.task_id)
+            .map_err(|e| format!("db error: {}", e))?
+            .ok_or_else(|| format!("task not found: {}", prepared.task_id))?;
         if let Some(active_post_action) = prepared.active_post_action.as_deref() {
             db.update_pipeline_item_active_post_action(&prepared.task_id, active_post_action)
                 .map_err(|e| format!("db error: {}", e))?;
@@ -933,24 +942,30 @@ pub(crate) async fn continue_prepared_stage_for_api(
                 return Err(format!("db error: {}", err));
             }
         }
-    }
+        session_id
+    };
 
-    let event = daemon
-        .send_command(&DaemonCommand::Input {
-            session_id: prepared.task_id.clone(),
+    let command = match prepared.agent_type.as_str() {
+        "agent" => DaemonCommand::AgentInput {
+            session_id,
+            text: prepared.input_text.clone(),
+        },
+        _ => DaemonCommand::Input {
+            session_id,
             data: prepared.input,
-        })
-        .await
-        .map_err(|e| {
-            let _ = rollback_continue_stage(
-                db_path,
-                &prepared.task_id,
-                &prepared.previous_stage,
-                prepared.previous_stage_result.as_deref(),
-                prepared.previous_active_post_action.as_deref(),
-            );
-            format!("daemon error: {}", e)
-        })?;
+        },
+    };
+
+    let event = daemon.send_command(&command).await.map_err(|e| {
+        let _ = rollback_continue_stage(
+            db_path,
+            &prepared.task_id,
+            &prepared.previous_stage,
+            prepared.previous_stage_result.as_deref(),
+            prepared.previous_active_post_action.as_deref(),
+        );
+        format!("daemon error: {}", e)
+    })?;
 
     match event {
         DaemonEvent::Ok => Ok(crate::mobile_api::TaskActionResponse {
@@ -1094,16 +1109,19 @@ fn prepare_continue_stage(
     previous_stage_result: Option<String>,
     prompt: &str,
     source_branch: Option<&str>,
+    agent_type: &str,
     agent_provider: Option<&str>,
 ) -> Result<PreparedStageContinue, String> {
     source_branch.ok_or_else(|| format!("task has no branch: {}", source_task_id))?;
     Ok(PreparedStageContinue {
         task_id: source_task_id.to_string(),
+        agent_type: agent_type.to_string(),
         previous_stage: previous_stage.to_string(),
         next_stage: next_stage.to_string(),
         previous_stage_result,
         previous_active_post_action: None,
         active_post_action: None,
+        input_text: prompt.to_string(),
         input: encode_agent_stage_input(prompt, agent_provider),
     })
 }
@@ -1115,16 +1133,19 @@ fn prepare_post_action_stage(
     previous_stage_result: Option<String>,
     prompt: &str,
     source_branch: Option<&str>,
+    agent_type: &str,
     agent_provider: Option<&str>,
 ) -> Result<PreparedStageContinue, String> {
     source_branch.ok_or_else(|| format!("task has no branch: {}", source_task_id))?;
     Ok(PreparedStageContinue {
         task_id: source_task_id.to_string(),
+        agent_type: agent_type.to_string(),
         previous_stage: current_stage.to_string(),
         next_stage: current_stage.to_string(),
         previous_stage_result,
         previous_active_post_action: None,
         active_post_action: Some(post_action.name.clone()),
+        input_text: prompt.to_string(),
         input: encode_agent_stage_input(prompt, agent_provider),
     })
 }
@@ -2649,6 +2670,8 @@ mod tests {
             "claude",
         )
         .unwrap();
+        db.update_test_pipeline_item_agent_type("task-1", "agent")
+            .unwrap();
 
         let prepared = prepare_advance_stage_for_api(&db, &config, "task-1").unwrap();
         let continuation = match prepared {
@@ -2664,6 +2687,14 @@ mod tests {
             "\u{1b}[200~Commit agent\n\nCommit Fix stage promotion from task-source after {\"status\":\"success\",\"summary\":\"implemented\"}\u{1b}[201~\r"
         );
         assert_eq!(db.list_pipeline_items("repo-1").unwrap().len(), 1);
+        db.insert_test_terminal_session(
+            "terminal-1",
+            "repo-1",
+            "task-1",
+            "agent",
+            "daemon-agent-1",
+        )
+        .unwrap();
 
         let fake_daemon = spawn_fake_daemon_once(config.daemon_dir.clone()).await;
         let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
@@ -2673,14 +2704,14 @@ mod tests {
         let command = fake_daemon.await.unwrap();
         assert_eq!(continued.task_id, "task-1");
         match command {
-            kanna_daemon::protocol::Command::Input { session_id, data } => {
-                assert_eq!(session_id, "task-1");
+            kanna_daemon::protocol::Command::AgentInput { session_id, text } => {
+                assert_eq!(session_id, "daemon-agent-1");
                 assert_eq!(
-                    String::from_utf8(data).unwrap(),
-                    "\u{1b}[200~Commit agent\n\nCommit Fix stage promotion from task-source after {\"status\":\"success\",\"summary\":\"implemented\"}\u{1b}[201~\r"
+                    text,
+                    "Commit agent\n\nCommit Fix stage promotion from task-source after {\"status\":\"success\",\"summary\":\"implemented\"}"
                 );
             }
-            other => panic!("expected daemon input command, got {:?}", other),
+            other => panic!("expected daemon agent input command, got {:?}", other),
         }
         let updated_source = db.get_task_stage_source("task-1").unwrap().unwrap();
         assert_eq!(updated_source.stage.as_deref(), Some("commit"));

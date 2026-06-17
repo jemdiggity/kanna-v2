@@ -67,6 +67,7 @@ pub struct TaskStageSource {
     pub branch: Option<String>,
     pub base_ref: Option<String>,
     pub pipeline: Option<String>,
+    pub agent_type: Option<String>,
     pub agent_provider: Option<String>,
     pub closed_at: Option<String>,
 }
@@ -739,7 +740,7 @@ impl Db {
         id: &str,
     ) -> Result<Option<TaskStageSource>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
-            "SELECT repo_id, issue_title, prompt, display_name, stage, stage_result, active_post_action, branch, base_ref, pipeline, agent_provider, closed_at
+            "SELECT repo_id, issue_title, prompt, display_name, stage, stage_result, active_post_action, branch, base_ref, pipeline, agent_type, agent_provider, closed_at
              FROM pipeline_item WHERE id = ?",
         )?;
         let mut rows = stmt.query_map([id], |row| {
@@ -754,8 +755,9 @@ impl Db {
                 branch: row.get(7)?,
                 base_ref: row.get(8)?,
                 pipeline: row.get(9)?,
-                agent_provider: row.get(10)?,
-                closed_at: row.get(11)?,
+                agent_type: row.get(10)?,
+                agent_provider: row.get(11)?,
+                closed_at: row.get(12)?,
             })
         })?;
         match rows.next() {
