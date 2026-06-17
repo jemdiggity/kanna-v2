@@ -102,6 +102,52 @@ describe("reset helpers", () => {
     ]);
   });
 
+  it("kills agent-backed task sessions before closing them during cleanup", async () => {
+    const client = createImportClient([{ selectedRepoId: "repo-1", selectedRepoPath: "/repo" }]);
+
+    mocks.tauriInvoke
+      .mockResolvedValueOnce([])
+      .mockResolvedValue(undefined);
+    mocks.queryDb
+      .mockResolvedValueOnce([{ id: "repo-1", name: "test-repo" }])
+      .mockResolvedValueOnce([
+        { id: "sdk-task", agent_type: "agent" },
+        { id: "pty-task", agent_type: "pty" },
+      ])
+      .mockResolvedValue([
+        { stage: "done", closed_at: "2026-04-22T00:00:00.000Z" },
+      ]);
+    mocks.callVueMethod.mockResolvedValue(undefined);
+
+    const { cleanupWorktrees, importTestRepo } = await import("./reset");
+
+    await importTestRepo(client as never, "/repo", "test-repo");
+    await cleanupWorktrees(client as never, "/repo");
+
+    expect(mocks.tauriInvoke).toHaveBeenCalledWith(
+      client,
+      "kill_session",
+      { sessionId: "sdk-task" },
+    );
+    expect(mocks.tauriInvoke).not.toHaveBeenCalledWith(
+      client,
+      "kill_session",
+      { sessionId: "pty-task" },
+    );
+
+    const killCallIndex = mocks.tauriInvoke.mock.calls.findIndex(
+      ([, command, args]) => command === "kill_session" && args?.sessionId === "sdk-task",
+    );
+    const closeCallIndex = mocks.callVueMethod.mock.calls.findIndex(
+      ([, method, taskId]) => method === "store.closeTask" && taskId === "sdk-task",
+    );
+    expect(killCallIndex).toBeGreaterThanOrEqual(0);
+    expect(closeCallIndex).toBeGreaterThanOrEqual(0);
+    expect(mocks.tauriInvoke.mock.invocationCallOrder[killCallIndex]).toBeLessThan(
+      mocks.callVueMethod.mock.invocationCallOrder[closeCallIndex],
+    );
+  });
+
   it("refuses to import repos from the live checkout", async () => {
     const client = {};
 
@@ -142,7 +188,8 @@ describe("reset helpers", () => {
     expect(client.sendKeys).toHaveBeenCalledWith("repo-path-input", "/repo");
     expect(client.clear).toHaveBeenCalledWith("repo-name-input");
     expect(client.sendKeys).toHaveBeenCalledWith("repo-name-input", "test-repo");
-    expect(client.click).toHaveBeenCalledWith("repo-header");
+    expect(client.click).toHaveBeenCalledWith(".modal-overlay .repo-name-change");
+    expect(client.click).toHaveBeenCalledWith(".modal-overlay .btn-primary");
     expect(client.executeSync).toHaveBeenCalled();
   });
 
