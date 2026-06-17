@@ -15,8 +15,8 @@ use axum::extract::ws::{Message as WsMessage, WebSocket};
 use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
 use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
-use tokio::sync::RwLock;
 use tokio::sync::mpsc;
+use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
@@ -353,6 +353,18 @@ impl StreamConn {
                 }
                 Err(message) => self.error(Some(task_id), "no_session", message).await,
             },
+            ClientFrame::AgentSetModel { task_id, model } => {
+                match self.resolve_session_id(&task_id) {
+                    Ok(session_id) => {
+                        self.expect_ok(
+                            &task_id,
+                            DaemonCommand::AgentSetModel { session_id, model },
+                        )
+                        .await;
+                    }
+                    Err(message) => self.error(Some(task_id), "no_session", message).await,
+                }
+            }
             ClientFrame::TermInput { task_id, data_b64 } => {
                 let data = match base64::engine::general_purpose::STANDARD.decode(&data_b64) {
                     Ok(data) => data,

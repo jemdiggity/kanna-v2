@@ -94,6 +94,13 @@ pub trait ProviderAdapter: Send {
 
     fn encode_interrupt(&mut self) -> InterruptAction;
 
+    /// Encode a request to switch the model mid-session as a stdin line.
+    /// `None` when the provider can't change model in-band; the daemon then
+    /// applies the new model on the next spawn instead.
+    fn encode_set_model(&mut self, _model: &str) -> Option<String> {
+        None
+    }
+
     /// Encode the answer to a pending permission request as a stdin line.
     /// `None` when the provider has no permission protocol.
     fn encode_permission_response(

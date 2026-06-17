@@ -257,6 +257,9 @@ pub struct AgentSessionRecord {
     /// Permission request ids awaiting a decision.
     pub pending_permissions: HashSet<String>,
     pub exited: bool,
+    /// Set when the user asks to stop the agent. The child's resulting exit is
+    /// then surfaced as an interruption rather than a crash.
+    pub interrupt_requested: bool,
     pub turn_model: TurnModel,
     pub created_at: std::time::Instant,
     pub last_activity_at: std::time::Instant,

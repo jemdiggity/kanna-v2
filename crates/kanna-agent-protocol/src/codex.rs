@@ -10,6 +10,7 @@
 //! process waits forever before starting.
 
 use std::collections::HashSet;
+use std::time::Instant;
 
 use serde_json::Value;
 
@@ -25,6 +26,12 @@ pub struct CodexAdapter {
     /// Item ids whose `ToolCall` was already emitted (on `item.started`), so
     /// `item.completed` only adds the matching `ToolResult`.
     announced_calls: HashSet<String>,
+    /// Wall-clock start of the in-flight turn. Codex's `turn.completed` carries
+    /// only token usage (no duration/turn count), so we measure both ourselves.
+    turn_started_at: Option<Instant>,
+    /// Agentic steps (completed items: tool runs, messages) in the current turn
+    /// — the closest analog to Claude's `num_turns`.
+    turn_steps: u32,
 }
 
 impl CodexAdapter {
@@ -265,18 +272,38 @@ impl ProviderAdapter for CodexAdapter {
                 }
                 Vec::new()
             }
-            Some("turn.started") => vec![AgentEvent::TurnStarted { model: None }],
+            Some("turn.started") => {
+                self.turn_started_at = Some(Instant::now());
+                self.turn_steps = 0;
+                vec![AgentEvent::TurnStarted { model: None }]
+            }
             Some(kind @ ("item.started" | "item.updated" | "item.completed")) => {
                 if kind == "item.updated" {
                     // Incremental output updates; the completed item carries
                     // the full aggregated output.
                     return Vec::new();
                 }
-                self.translate_item(kind, &value, line)
+                let events = self.translate_item(kind, &value, line);
+                // Count each recognized completed item (tool run or message) as
+                // an agentic step. Unrecognized items surface as `Raw` and are
+                // not steps, so they don't inflate the turn count.
+                if kind == "item.completed"
+                    && !events.is_empty()
+                    && !events.iter().all(|e| matches!(e, AgentEvent::Raw { .. }))
+                {
+                    self.turn_steps += 1;
+                }
+                events
             }
             Some("turn.completed") => {
                 let usage = value.get("usage");
                 let stats = TurnStats {
+                    duration_ms: self
+                        .turn_started_at
+                        .take()
+                        .map(|started| started.elapsed().as_millis() as u64)
+                        .unwrap_or(0),
+                    num_turns: self.turn_steps,
                     input_tokens: usage
                         .and_then(|u| u.get("input_tokens"))
                         .and_then(Value::as_u64),
@@ -285,6 +312,7 @@ impl ProviderAdapter for CodexAdapter {
                         .and_then(Value::as_u64),
                     ..TurnStats::default()
                 };
+                self.turn_steps = 0;
                 vec![AgentEvent::TurnCompleted {
                     status: TurnStatus::Success,
                     stats,

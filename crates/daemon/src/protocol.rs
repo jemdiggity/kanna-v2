@@ -216,6 +216,10 @@ pub enum Command {
     AgentInterrupt {
         session_id: String,
     },
+    AgentSetModel {
+        session_id: String,
+        model: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -178,6 +178,64 @@ fn spawn_args_pin_the_stream_json_contract() {
 }
 
 #[test]
+fn default_spawn_runs_yolo_without_sandbox_or_prompts() {
+    let adapter = ClaudeAdapter::new();
+    let ctx = SpawnCtx {
+        prompt: "fix the bug".to_string(),
+        model: None,
+        // No enforcing permission mode -> agent mode runs yolo.
+        permission_mode: None,
+        allowed_tools: vec![],
+        disallowed_tools: vec![],
+        max_turns: None,
+        max_budget_usd: None,
+        system_prompt: None,
+    };
+
+    let args = adapter.initial_spawn(&ctx).args.join(" ");
+    assert!(args.contains("--dangerously-skip-permissions"));
+    assert!(!args.contains("--permission-mode"));
+    assert!(!args.contains("--permission-prompt-tool"));
+}
+
+#[test]
+fn dont_ask_and_default_modes_are_treated_as_yolo() {
+    let adapter = ClaudeAdapter::new();
+    for mode in ["dontAsk", "default"] {
+        let ctx = SpawnCtx {
+            prompt: "go".to_string(),
+            model: None,
+            permission_mode: Some(mode.to_string()),
+            allowed_tools: vec![],
+            disallowed_tools: vec![],
+            max_turns: None,
+            max_budget_usd: None,
+            system_prompt: None,
+        };
+
+        let args = adapter.initial_spawn(&ctx).args.join(" ");
+        assert!(
+            args.contains("--dangerously-skip-permissions"),
+            "mode {mode} should be yolo"
+        );
+        assert!(!args.contains("--permission-prompt-tool"));
+        assert!(!args.contains("--permission-mode"));
+    }
+}
+
+#[test]
+fn set_model_encodes_a_control_request() {
+    let mut adapter = ClaudeAdapter::new();
+    let line = adapter
+        .encode_set_model("claude-haiku-4-5-20251001")
+        .expect("claude can switch model in-band");
+    let value: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(value["type"], "control_request");
+    assert_eq!(value["request"]["subtype"], "set_model");
+    assert_eq!(value["request"]["model"], "claude-haiku-4-5-20251001");
+}
+
+#[test]
 fn plain_user_message_and_garbage_lines() {
     let mut adapter = ClaudeAdapter::new();
 
@@ -206,4 +264,25 @@ fn adapter_metadata() {
     assert_eq!(adapter.turn_model(), TurnModel::Persistent);
     assert!(adapter.capabilities().permission_requests);
     assert!(adapter.capabilities().mid_run_input);
+}
+
+#[test]
+fn parses_streaming_result_stats_from_live_cli() {
+    let line = include_str!("fixtures/claude-result-streaming.json");
+    let mut adapter = ClaudeAdapter::new();
+    let events: Vec<AgentEvent> = line.lines().flat_map(|l| adapter.parse_line(l)).collect();
+    let completed = events
+        .iter()
+        .find_map(|e| match e {
+            AgentEvent::TurnCompleted { stats, .. } => Some(stats),
+            _ => None,
+        })
+        .expect("a turn_completed event");
+    eprintln!("PARSED STATS: {completed:?}");
+    assert!(completed.duration_ms > 0, "duration_ms should be > 0");
+    assert!(completed.num_turns > 0, "num_turns should be > 0");
+    assert!(
+        completed.total_cost_usd.is_some(),
+        "total_cost_usd should be set"
+    );
 }

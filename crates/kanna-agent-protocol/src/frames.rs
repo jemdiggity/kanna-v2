@@ -72,6 +72,11 @@ pub enum ClientFrame {
     AgentInterrupt {
         task_id: String,
     },
+    /// Switch the model for a themed task mid-session.
+    AgentSetModel {
+        task_id: String,
+        model: String,
+    },
     /// Raw terminal input for PTY tasks (base64 bytes).
     TermInput {
         task_id: String,

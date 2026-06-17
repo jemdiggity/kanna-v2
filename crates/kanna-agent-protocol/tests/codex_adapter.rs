@@ -55,6 +55,10 @@ fn translates_captured_tool_run() {
             AgentEvent::TurnCompleted {
                 status: TurnStatus::Success,
                 stats: kanna_agent_protocol::TurnStats {
+                    // Codex reports no turn count; we derive it from the four
+                    // completed items (message + 2 commands + message). Duration
+                    // is wall-clock, ~0ms for this synchronous in-process run.
+                    num_turns: 4,
                     input_tokens: Some(38046),
                     output_tokens: Some(129),
                     ..Default::default()
@@ -136,7 +140,7 @@ fn spawn_args_pin_the_exec_json_contract() {
     let adapter = CodexAdapter::new();
     let ctx = SpawnCtx {
         prompt: "fix the bug".to_string(),
-        model: Some("gpt-5.3-codex".to_string()),
+        model: Some("gpt-5.5".to_string()),
         ..Default::default()
     };
 
@@ -146,13 +150,7 @@ fn spawn_args_pin_the_exec_json_contract() {
     assert_eq!(spec.initial_stdin, None);
     assert_eq!(
         spec.args,
-        vec![
-            "exec",
-            "-m",
-            "gpt-5.3-codex",
-            "--json",
-            "fix the bug",
-        ]
+        vec!["exec", "-m", "gpt-5.5", "--json", "fix the bug",]
     );
 
     let resume = adapter.resume_spawn(&ctx, "thread-1", "now add tests");
@@ -163,7 +161,7 @@ fn spawn_args_pin_the_exec_json_contract() {
             "resume",
             "thread-1",
             "-m",
-            "gpt-5.3-codex",
+            "gpt-5.5",
             "--json",
             "now add tests",
         ]
@@ -182,4 +180,6 @@ fn adapter_metadata() {
     assert!(adapter
         .encode_permission_response("r", &PermissionDecision::Allow)
         .is_none());
+    // Codex has no in-band model switch; the daemon applies it on respawn.
+    assert!(adapter.encode_set_model("gpt-5-codex").is_none());
 }

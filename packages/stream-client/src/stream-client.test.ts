@@ -84,6 +84,17 @@ describe("StreamClient", () => {
     client.close();
   });
 
+  it("sends agent_set_model frames", () => {
+    const { client, socket } = connectedClient();
+    client.sendAgentSetModel("task-1", "claude-haiku-4-5-20251001");
+    expect(socket.sent).toContainEqual({
+      type: "agent_set_model",
+      task_id: "task-1",
+      model: "claude-haiku-4-5-20251001",
+    });
+    client.close();
+  });
+
   it("delivers snapshot and live events and tracks the resume seq", () => {
     const { client, socket } = connectedClient();
     const snapshots: Array<{ count: number; nextSeq: number }> = [];

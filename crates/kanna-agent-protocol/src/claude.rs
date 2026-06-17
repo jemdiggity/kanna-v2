@@ -29,16 +29,22 @@ impl ClaudeAdapter {
     }
 
     fn session_options(ctx: &SpawnCtx) -> SessionOptions {
-        let mut builder = SessionOptions::builder().with_permission_callback();
+        let mut builder = SessionOptions::builder();
+        // Agent mode runs "yolo" by default: no tool sandbox and no approval
+        // prompts. This mirrors the PTY-mode convention in the desktop's
+        // `agent-permissions.ts`, where an unset mode, `default`, and `dontAsk`
+        // all map to `--dangerously-skip-permissions`. Only `acceptEdits` opts
+        // back into the sandboxed approval flow with a permission callback.
+        let enforced_mode = match ctx.permission_mode.as_deref() {
+            Some("acceptEdits") => Some(PermissionMode::AcceptEdits),
+            _ => None,
+        };
+        builder = match enforced_mode {
+            Some(mode) => builder.with_permission_callback().permission_mode(mode),
+            None => builder.dangerously_skip_permissions(true),
+        };
         if let Some(model) = &ctx.model {
             builder = builder.model(model.clone());
-        }
-        if let Some(mode) = ctx
-            .permission_mode
-            .as_deref()
-            .and_then(parse_permission_mode)
-        {
-            builder = builder.permission_mode(mode);
         }
         if !ctx.allowed_tools.is_empty() {
             builder = builder.allowed_tools(ctx.allowed_tools.clone());
@@ -405,6 +411,18 @@ impl ProviderAdapter for ClaudeAdapter {
         }
     }
 
+    fn encode_set_model(&mut self, model: &str) -> Option<String> {
+        self.next_request_id += 1;
+        let envelope = ControlRequestEnvelope {
+            type_field: "control_request".to_string(),
+            request_id: format!("kanna-req-{}", self.next_request_id),
+            request: ControlRequest::SetModel {
+                model: model.to_string(),
+            },
+        };
+        serde_json::to_string(&envelope).ok()
+    }
+
     fn encode_permission_response(
         &mut self,
         request_id: &str,
@@ -430,15 +448,6 @@ impl ProviderAdapter for ClaudeAdapter {
             },
         };
         serde_json::to_string(&envelope).ok()
-    }
-}
-
-fn parse_permission_mode(mode: &str) -> Option<PermissionMode> {
-    match mode {
-        "dontAsk" => Some(PermissionMode::DontAsk),
-        "acceptEdits" => Some(PermissionMode::AcceptEdits),
-        "default" => Some(PermissionMode::Default),
-        _ => None,
     }
 }
 

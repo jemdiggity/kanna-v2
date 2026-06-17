@@ -1596,6 +1596,10 @@ async fn handle_command(
         Command::AgentInterrupt { session_id } => {
             agent_runtime::handle_agent_interrupt(session_id, writer, agent_sessions).await;
         }
+
+        Command::AgentSetModel { session_id, model } => {
+            agent_runtime::handle_agent_set_model(session_id, model, writer, agent_sessions).await;
+        }
     }
 }
 
