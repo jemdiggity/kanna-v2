@@ -138,6 +138,21 @@ describe("themed agent view", () => {
     // prompt is the one piece of tool machinery that stays surfaced.
     await client.waitForText(".permission-card", "README.md", 5_000);
 
+    await client.waitForElement('[data-testid="model-select"]', 5_000);
+    await client.executeSync(
+      `const select = document.querySelector('[data-testid="model-select"]');
+       select.value = "claude-haiku-4-5-20251001";
+       select.dispatchEvent(new Event("change", { bubbles: true }));`,
+    );
+    const modelFrame = await client.executeSync<{ type: string; task_id: string; model: string } | undefined>(
+      `return window.__KSP_SENT__.find((frame) => frame.type === "agent_set_model");`,
+    );
+    expect(modelFrame).toEqual({
+      type: "agent_set_model",
+      task_id: taskId,
+      model: "claude-haiku-4-5-20251001",
+    });
+
     // Slash commands: typing "/" scans the worktree's .claude/commands and
     // surfaces them in a menu. Clear it afterwards so later steering is clean.
     await client.executeSync(

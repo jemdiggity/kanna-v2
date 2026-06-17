@@ -909,6 +909,9 @@ async fn stream_terminal(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
     use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
 
     fn test_config(desktop_id: &str, desktop_name: &str) -> crate::config::Config {
@@ -933,6 +936,10 @@ mod tests {
 
     async fn serve_test_router() -> String {
         let router = crate::http_api::test_router("ksp-test", "KSP Test");
+        serve_router(router).await
+    }
+
+    async fn serve_router(router: axum::Router) -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind test listener");
@@ -941,6 +948,42 @@ mod tests {
             let _ = axum::serve(listener, router).await;
         });
         format!("ws://{addr}/v1/stream")
+    }
+
+    fn daemon_socket_path_for_dir(daemon_dir: &str) -> PathBuf {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let dir = PathBuf::from(daemon_dir);
+        let mut hasher = DefaultHasher::new();
+        dir.hash(&mut hasher);
+        let hash = hasher.finish() as u32;
+        PathBuf::from(format!("/tmp/kanna-{hash:08x}.sock"))
+    }
+
+    async fn spawn_fake_daemon_once(daemon_dir: String) -> tokio::task::JoinHandle<DaemonCommand> {
+        let socket_path = daemon_socket_path_for_dir(&daemon_dir);
+        let _ = std::fs::remove_file(&socket_path);
+        let listener = UnixListener::bind(&socket_path).expect("bind fake daemon socket");
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept daemon connection");
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let mut line = String::new();
+            reader
+                .read_line(&mut line)
+                .await
+                .expect("read daemon command");
+            let command: DaemonCommand =
+                serde_json::from_str(line.trim()).expect("parse daemon command");
+            let response = serde_json::to_string(&DaemonEvent::Ok).expect("serialize daemon ok");
+            write_half
+                .write_all(format!("{response}\n").as_bytes())
+                .await
+                .expect("write daemon response");
+            command
+        })
     }
 
     async fn ws_connect(
@@ -1093,6 +1136,76 @@ mod tests {
             }
             other => panic!("expected Error, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn agent_set_model_frame_routes_to_daemon_command() {
+        let unique = format!(
+            "ksp-set-model-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        std::fs::create_dir_all(&daemon_dir).expect("create daemon dir");
+        let mut config = test_config("ksp-set-model", "KSP Set Model");
+        config.daemon_dir = daemon_dir.to_string_lossy().to_string();
+        config.db_path = Db::test_db_path(&unique);
+        config.pairing_store_path = format!("/tmp/kanna-pairings-{unique}.json");
+
+        let db = Db::open_for_tests(&config.db_path).expect("open test db");
+        db.insert_test_repo("repo-1", "Repo One")
+            .expect("insert repo");
+        db.insert_test_pipeline_item(
+            "task-1",
+            "repo-1",
+            "Switch models",
+            None,
+            "in progress",
+            "2026-06-17T00:00:00Z",
+        )
+        .expect("insert task");
+        db.insert_test_terminal_session(
+            "terminal-1",
+            "repo-1",
+            "task-1",
+            "agent",
+            "daemon-agent-1",
+        )
+        .expect("insert terminal session");
+
+        let daemon = spawn_fake_daemon_once(config.daemon_dir.clone()).await;
+        let router = crate::http_api::router(Arc::new(AppState::new(config)));
+        let url = serve_router(router).await;
+        let mut socket = ws_connect(&url).await;
+
+        send_frame(&mut socket, &ClientFrame::Auth { credential: None }).await;
+        assert_eq!(recv_frame(&mut socket).await, ServerFrame::AuthOk);
+        send_frame(
+            &mut socket,
+            &ClientFrame::AgentSetModel {
+                task_id: "task-1".into(),
+                model: "claude-haiku-4-5-20251001".into(),
+            },
+        )
+        .await;
+
+        let command = tokio::time::timeout(std::time::Duration::from_secs(5), daemon)
+            .await
+            .expect("timed out waiting for daemon command")
+            .expect("fake daemon task failed");
+        match command {
+            DaemonCommand::AgentSetModel { session_id, model } => {
+                assert_eq!(session_id, "daemon-agent-1");
+                assert_eq!(model, "claude-haiku-4-5-20251001");
+            }
+            other => panic!("expected AgentSetModel command, got {other:?}"),
+        }
+
+        drop(socket);
+        let _ = std::fs::remove_dir_all(&daemon_dir);
     }
 
     #[test]
