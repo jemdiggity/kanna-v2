@@ -370,6 +370,20 @@ describe("stage advance", () => {
       }),
     );
     await writeFile(
+      join(kannaDir, "pipelines", "sdk-advance-e2e.json"),
+      JSON.stringify({
+        name: "sdk-advance-e2e",
+        stages: [
+          { name: "in progress", transition: "manual" },
+          {
+            name: "qa",
+            transition: "manual",
+            agent: "revision-e2e",
+          },
+        ],
+      }),
+    );
+    await writeFile(
       join(kannaDir, "agents", "commit-e2e", "AGENT.md"),
       [
         "---",
@@ -571,6 +585,63 @@ describe("stage advance", () => {
     const createdMarkerPath = join(testRepoPath, ".kanna-worktrees", createdBranch as string, markerName);
     await waitForFileSize(createdMarkerPath, Buffer.byteLength(markerContent), 20_000);
     expect(await readFile(createdMarkerPath, "utf8")).toBe(markerContent);
+  });
+
+  it("preserves GUI agent execution when advancing to an agent-backed stage", async () => {
+    const sourceTaskId = "sdk-advance-source";
+    const sourceBranch = "task-sdk-advance-source";
+    const sourceWorktreePath = join(testRepoPath, ".kanna-worktrees", sourceBranch);
+    await tauriInvoke(client, "git_worktree_add", {
+      repoPath: testRepoPath,
+      branch: sourceBranch,
+      path: sourceWorktreePath,
+      startPoint: "main",
+    });
+
+    await execDb(
+      client,
+      `INSERT INTO pipeline_item (
+         id, repo_id, prompt, pipeline, stage, stage_result, tags, branch,
+         agent_type, agent_provider, activity, display_name, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
+      [
+        sourceTaskId,
+        repoId,
+        "Advance GUI agent to QA",
+        "sdk-advance-e2e",
+        "in progress",
+        JSON.stringify({ status: "success", summary: "ready for QA" }),
+        "[]",
+        sourceBranch,
+        "agent",
+        "codex",
+        "idle",
+        "GUI agent source",
+      ],
+    );
+    await hydrateStoreItem(client, sourceTaskId);
+
+    const existingQaTaskIds = await getStageTaskIds(client, repoId, "qa");
+    const advanceResult = await callVueMethod(client, "store.advanceStage", sourceTaskId);
+    if (isVueCallError(advanceResult)) throw new Error(advanceResult.__error);
+
+    const createdTaskId = await waitForCreatedStageTask(client, repoId, "qa", {
+      excludeIds: existingQaTaskIds,
+      displayName: "GUI agent source",
+      baseRef: sourceBranch,
+    });
+
+    const rows = (await queryDb(
+      client,
+      "SELECT branch, agent_type, agent_provider FROM pipeline_item WHERE id = ?",
+      [createdTaskId],
+    )) as Array<{ branch: string | null; agent_type: string | null; agent_provider: string | null }>;
+    expect(rows[0]).toMatchObject({
+      agent_type: "agent",
+      agent_provider: "codex",
+    });
+    const createdBranch = rows[0]?.branch;
+    expect(createdBranch).toBeTruthy();
   });
 
   it("starts a live task commit post-action through the daemon input command", async () => {

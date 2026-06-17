@@ -14,6 +14,7 @@ import {
 import { resolveDbName } from "./db";
 import { requireService, type AdvanceStageOptions, type StoreContext } from "./state";
 import { debugLog } from "../utils/debugLog";
+import { normalizeAgentExecutionType } from "./agentExecutionType";
 
 const CODEX_STAGE_SUBMIT_DELAY_MS = 250;
 
@@ -444,15 +445,22 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
       selectOnCreate: shouldFollowTask,
       selectedBeforeCreate: context.state.selectedItemId.value,
     });
-    const createdItemId = await requireService(context.services.createItem, "createItem")(repo.id, repo.path, stagePrompt, "pty", {
-      baseBranch: sourceBranch,
-      baseRef: item.base_ref ?? sourceBranch,
-      pipelineName: item.pipeline,
-      stage: nextStage.name,
-      selectOnCreate: shouldFollowTask,
-      displayName: resolveInheritedTaskTitle(item),
-      ...agentOpts,
-    });
+    const nextAgentType = normalizeAgentExecutionType(item.agent_type);
+    const createdItemId = await requireService(context.services.createItem, "createItem")(
+      repo.id,
+      repo.path,
+      stagePrompt,
+      nextAgentType,
+      {
+        baseBranch: sourceBranch,
+        baseRef: item.base_ref ?? sourceBranch,
+        pipelineName: item.pipeline,
+        stage: nextStage.name,
+        selectOnCreate: shouldFollowTask,
+        displayName: resolveInheritedTaskTitle(item),
+        ...agentOpts,
+      },
+    );
     debugLog("[pipeline:advanceStage] created next-stage task", {
       taskId: item.id,
       createdItemId,
