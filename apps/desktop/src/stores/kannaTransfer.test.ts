@@ -2580,6 +2580,8 @@ describe("outgoing transfer commit acknowledgment", () => {
         return null;
       }
       if (cmd === "attach_session_with_snapshot") return null;
+      if (cmd === "get_app_data_dir") return "/tmp/kanna-mock-data";
+      if (cmd === "get_pipeline_socket_path") return "/tmp/kanna-mock.sock";
       if (cmd === "read_text_file") {
         const path = args?.path as string | undefined;
         if (path === `${repo.path}/.kanna-worktrees/${sourceItem.branch}/.kanna/config.json`) {

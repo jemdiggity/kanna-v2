@@ -966,6 +966,55 @@ describe("kanna store task base branch integration", () => {
     expect(env).not.toHaveProperty("KANNA_SERVER_BASE_URL");
   });
 
+  it("runs repo setup scripts before spawning SDK agent sessions", async () => {
+    mockState.readEnvVarOverrides = {
+      ...mockState.readEnvVarOverrides,
+      PATH: "/usr/local/bin:/bin",
+    };
+    mockState.repoConfig = {
+      setup: ["pnpm install --frozen-lockfile"],
+      ports: {
+        KANNA_DEV_PORT: 1420,
+      },
+    };
+    const store = await createStore();
+
+    await store.createItem("repo-1", "/tmp/repo", "Ship SDK setup", "agent", {
+      agentProvider: "claude",
+    });
+
+    let createdItem: PipelineItem | undefined;
+    await vi.waitFor(() => {
+      createdItem = mockState.pipelineItems.at(-1);
+      expect(createdItem).toBeTruthy();
+      expect(mockState.invokeMock).toHaveBeenCalledWith(
+        "run_script",
+        expect.objectContaining({
+          script: "pnpm install --frozen-lockfile",
+          cwd: `/tmp/repo/.kanna-worktrees/task-${createdItem?.id}`,
+          env: expect.objectContaining({
+            KANNA_WORKTREE: "1",
+            KANNA_DEV_PORT: "1421",
+            KANNA_CLI_PATH: "/usr/bin/kanna-cli",
+            PATH: "/usr/bin:/usr/local/bin:/bin",
+            KANNA_TASK_ID: createdItem?.id,
+            KANNA_CLI_DB_PATH: "/tmp/kanna/kanna-wt-task-existing.db",
+            KANNA_SOCKET_PATH: "/tmp/kanna.sock",
+          }),
+        }),
+      );
+      expect(mockState.invokeMock).toHaveBeenCalledWith(
+        "spawn_agent_session",
+        expect.objectContaining({ sessionId: createdItem?.id }),
+      );
+    });
+
+    const runScriptCallIndex = mockState.invokeMock.mock.calls.findIndex(([command]) => command === "run_script");
+    const spawnAgentCallIndex = mockState.invokeMock.mock.calls.findIndex(([command]) => command === "spawn_agent_session");
+    expect(runScriptCallIndex).toBeGreaterThanOrEqual(0);
+    expect(spawnAgentCallIndex).toBeGreaterThan(runScriptCallIndex);
+  });
+
   it("passes a non-default app mobile server URL to agent sessions", async () => {
     mockState.readEnvVarOverrides = {
       ...mockState.readEnvVarOverrides,
@@ -2022,6 +2071,48 @@ describe("kanna store task base branch integration", () => {
     );
   });
 
+  it("preserves SDK agent execution when advancing a GUI agent task", async () => {
+    mockState.pipelineDefinition = {
+      name: "default",
+      stages: [
+        { name: "in progress", transition: "manual" },
+        { name: "qa", transition: "manual", agent: "qa" },
+      ],
+    };
+    mockState.pipelineItems = [
+      mockState.makeItem({
+        id: "item-source",
+        branch: "task-source",
+        stage: "in progress",
+        agent_type: "agent",
+        agent_provider: "claude",
+      }),
+    ];
+
+    const store = await createStore();
+
+    await store.advanceStage("item-source");
+
+    let createdQaItem: PipelineItem | undefined;
+    await vi.waitFor(() => {
+      createdQaItem = mockState.pipelineItems.find((item) => item.id !== "item-source" && item.stage === "qa");
+      expect(createdQaItem).toBeDefined();
+      expect(createdQaItem?.agent_type).toBe("agent");
+      expect(mockState.invokeMock).toHaveBeenCalledWith(
+        "spawn_agent_session",
+        expect.objectContaining({
+          sessionId: createdQaItem?.id,
+          prompt: "Stage prompt",
+          agentProvider: "claude",
+        }),
+      );
+    });
+    expect(mockState.invokeMock).not.toHaveBeenCalledWith(
+      "spawn_session",
+      expect.objectContaining({ sessionId: createdQaItem?.id }),
+    );
+  });
+
   it("starts a stage post-action without changing the task stage", async () => {
     mockState.pipelineDefinition = {
       name: "default",
@@ -2537,6 +2628,55 @@ describe("kanna store task base branch integration", () => {
 
     expect(mockState.invokeMock).toHaveBeenCalledWith("kill_session", { sessionId: "item-blocked" });
     expect(mockState.invokeMock).toHaveBeenCalledWith("kill_session", { sessionId: "shell-wt-item-blocked" });
+  });
+
+  it("kills SDK agent sessions before running teardown commands", async () => {
+    mockState.repoConfig = {
+      teardown: ["pnpm cleanup"],
+      ports: {
+        KANNA_DEV_PORT: 1420,
+      },
+    };
+    mockState.pipelineItems = [
+      mockState.makeItem({
+        id: "item-sdk",
+        branch: "task-item-sdk",
+        agent_type: "agent",
+        agent_provider: "codex",
+        port_env: JSON.stringify({
+          KANNA_DEV_PORT: "1421",
+        }),
+      }),
+    ];
+
+    const store = await createStore();
+    await store.selectItem("item-sdk");
+    await flushStore();
+
+    await store.closeTask();
+    await flushStore();
+
+    expect(mockState.invokeMock).toHaveBeenCalledWith("kill_session", { sessionId: "item-sdk" });
+    expect(mockState.invokeMock).not.toHaveBeenCalledWith("signal_session", {
+      sessionId: "item-sdk",
+      signal: "SIGINT",
+    });
+    expect(mockState.invokeMock).toHaveBeenCalledWith(
+      "spawn_session",
+      expect.objectContaining({
+        sessionId: "td-item-sdk",
+        cwd: "/tmp/repo/.kanna-worktrees/task-item-sdk",
+        args: expect.arrayContaining([expect.stringContaining("pnpm cleanup")]),
+        env: expect.objectContaining({
+          KANNA_WORKTREE: "1",
+          KANNA_DEV_PORT: "1421",
+          KANNA_CLI_PATH: "/usr/bin/kanna-cli",
+          KANNA_TASK_ID: "item-sdk",
+          KANNA_CLI_DB_PATH: "/tmp/kanna/kanna-wt-task-existing.db",
+          KANNA_SOCKET_PATH: "/tmp/kanna.sock",
+        }),
+      }),
+    );
   });
 
   it("still respawns legacy blocked tasks with no live session context", async () => {

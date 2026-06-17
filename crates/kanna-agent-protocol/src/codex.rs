@@ -41,12 +41,20 @@ impl CodexAdapter {
 
     fn base_args(ctx: &SpawnCtx) -> Vec<String> {
         let mut args = vec!["exec".to_string()];
+        args.extend(Self::permission_args(ctx.permission_mode.as_deref()));
         if let Some(model) = &ctx.model {
             args.push("-m".to_string());
             args.push(model.clone());
         }
         args.push("--json".to_string());
         args
+    }
+
+    fn permission_args(permission_mode: Option<&str>) -> Vec<String> {
+        match permission_mode {
+            None | Some("default" | "dontAsk") => vec!["--yolo".to_string()],
+            Some(_) => vec!["--full-auto".to_string()],
+        }
     }
 
     fn translate_item(&mut self, kind: &str, value: &Value, line: &str) -> Vec<AgentEvent> {
@@ -242,6 +250,7 @@ impl ProviderAdapter for CodexAdapter {
             "resume".to_string(),
             session_id.to_string(),
         ];
+        args.extend(Self::permission_args(ctx.permission_mode.as_deref()));
         if let Some(model) = &ctx.model {
             args.push("-m".to_string());
             args.push(model.clone());
@@ -366,5 +375,63 @@ impl ProviderAdapter for CodexAdapter {
         _decision: &PermissionDecision,
     ) -> Option<String> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn initial_spawn_uses_yolo_permissions_by_default() {
+        let adapter = CodexAdapter::new();
+        let spec = adapter.initial_spawn(&SpawnCtx {
+            prompt: "ship it".to_string(),
+            ..SpawnCtx::default()
+        });
+
+        assert_eq!(spec.args, vec!["exec", "--yolo", "--json", "ship it"]);
+    }
+
+    #[test]
+    fn initial_spawn_maps_dont_ask_to_yolo() {
+        let adapter = CodexAdapter::new();
+        let spec = adapter.initial_spawn(&SpawnCtx {
+            prompt: "ship it".to_string(),
+            permission_mode: Some("dontAsk".to_string()),
+            ..SpawnCtx::default()
+        });
+
+        assert_eq!(spec.args, vec!["exec", "--yolo", "--json", "ship it"]);
+    }
+
+    #[test]
+    fn resume_spawn_preserves_yolo_permissions() {
+        let adapter = CodexAdapter::new();
+        let spec = adapter.resume_spawn(
+            &SpawnCtx {
+                permission_mode: Some("default".to_string()),
+                ..SpawnCtx::default()
+            },
+            "thread-1",
+            "continue",
+        );
+
+        assert_eq!(
+            spec.args,
+            vec!["exec", "resume", "thread-1", "--yolo", "--json", "continue"],
+        );
+    }
+
+    #[test]
+    fn explicit_non_yolo_permission_uses_full_auto() {
+        let adapter = CodexAdapter::new();
+        let spec = adapter.initial_spawn(&SpawnCtx {
+            prompt: "ship it".to_string(),
+            permission_mode: Some("acceptEdits".to_string()),
+            ..SpawnCtx::default()
+        });
+
+        assert_eq!(spec.args, vec!["exec", "--full-auto", "--json", "ship it"]);
     }
 }

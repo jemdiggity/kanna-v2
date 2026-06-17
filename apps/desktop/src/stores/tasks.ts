@@ -90,6 +90,60 @@ function applyWorktreeProcessIsolation(env: Record<string, string>): Record<stri
   return env;
 }
 
+function parseTaskPortEnv(portEnv: string | null): Record<string, string> {
+  if (!portEnv) return {};
+  try {
+    const parsed = JSON.parse(portEnv) as Record<string, unknown>;
+    return Object.fromEntries(
+      Object.entries(parsed).map(([key, value]) => [key, String(value)]),
+    );
+  } catch (error) {
+    console.debug("[store] failed to parse task port env:", error);
+    return {};
+  }
+}
+
+async function buildTaskLifecycleEnv(options: {
+  taskId: string;
+  worktreePath: string;
+  repoConfig: RepoConfig;
+  portEnv?: Record<string, string>;
+  logContext: string;
+}): Promise<Record<string, string>> {
+  const inheritedPath = await invoke<string>("read_env_var", { name: "PATH" }).catch((error) => {
+    console.debug(`[store] PATH not available while creating ${options.logContext} env:`, error);
+    return null;
+  });
+  const worktreeEnv = buildWorktreeSessionEnv({
+    worktreePath: options.worktreePath,
+    repoConfig: options.repoConfig,
+    portEnv: options.portEnv,
+    inheritedPath,
+  });
+  const mobileServerPort = await invoke<string>("read_env_var", { name: "KANNA_MOBILE_SERVER_PORT" }).catch((error) => {
+    console.debug(`[store] KANNA_MOBILE_SERVER_PORT not set while creating ${options.logContext} env:`, error);
+    return null;
+  });
+  const kannaCliPath = await invoke<string>("which_binary", { name: "kanna-cli" }).catch((error) => {
+    console.debug(`[store] kanna-cli not available while creating ${options.logContext} env:`, error);
+    return null;
+  });
+
+  return {
+    ...worktreeEnv,
+    ...buildTaskRuntimeEnv({
+      taskId: options.taskId,
+      dbName: await resolveDbName(),
+      appDataDir: await invoke<string>("get_app_data_dir"),
+      socketPath: await invoke<string>("get_pipeline_socket_path"),
+      serverBaseUrl: resolveKannaServerBaseUrl(mobileServerPort),
+      kannaCliPath,
+      path: worktreeEnv.PATH ?? inheritedPath,
+      portEnv: options.portEnv,
+    }),
+  };
+}
+
 export interface TasksApi {
   importRepo: (path: string, name: string, defaultBranch: string) => Promise<string>;
   createRepo: (name: string, path: string) => Promise<void>;
@@ -454,36 +508,23 @@ export function createTasksApi(
         }
 
         if (agentType === "agent") {
-          const inheritedPath = await invoke<string>("read_env_var", { name: "PATH" }).catch((error) => {
-            console.debug("[store] PATH not available while creating SDK task env:", error);
-            return null;
-          });
-          const agentBaseEnv = buildWorktreeSessionEnv({
+          const agentEnv = await buildTaskLifecycleEnv({
+            taskId: id,
             worktreePath,
             repoConfig,
             portEnv,
-            inheritedPath,
+            logContext: "SDK task",
           });
-          const agentEnv = {
-            ...agentBaseEnv,
-            ...buildTaskRuntimeEnv({
-              taskId: id,
-              dbName: await resolveDbName(),
-              appDataDir: await invoke<string>("get_app_data_dir"),
-              socketPath: await invoke<string>("get_pipeline_socket_path"),
-              serverBaseUrl: resolveKannaServerBaseUrl(
-                await invoke<string>("read_env_var", { name: "KANNA_MOBILE_SERVER_PORT" }).catch((error) => {
-                  console.debug("[store] KANNA_MOBILE_SERVER_PORT not set while creating SDK task env:", error);
-                  return null;
-                }),
-              ),
-              kannaCliPath: await invoke<string>("which_binary", { name: "kanna-cli" }).catch((error) => {
-                console.debug("[store] kanna-cli not available while creating SDK task env:", error);
-                return null;
-              }),
-              path: agentBaseEnv.PATH ?? inheritedPath,
-            }),
-          };
+          const setupCmds = [...(repoConfig.setup || []), ...(opts?.customTask?.setup || [])];
+          for (const setupCmd of setupCmds) {
+            await invoke("run_script", {
+              script: setupCmd,
+              cwd: worktreePath,
+              env: agentEnv,
+            }).catch((error: unknown) => {
+              console.warn("[store] SDK setup command failed; continuing:", error);
+            });
+          }
           await invoke("spawn_agent_session", {
             sessionId: id,
             cwd: worktreePath,
@@ -491,9 +532,9 @@ export function createTasksApi(
             env: agentEnv,
             agentProvider,
             systemPrompt: buildKannaRuntimeSystemPrompt(),
-            permissionMode: opts?.customTask?.permissionMode ?? null,
+            permissionMode: opts?.customTask?.permissionMode ?? opts?.permissionMode ?? null,
             model: resolvedModel,
-            allowedTools: opts?.customTask?.allowedTools ?? null,
+            allowedTools: opts?.customTask?.allowedTools ?? opts?.allowedTools ?? null,
             disallowedTools: opts?.customTask?.disallowedTools ?? null,
             maxTurns: opts?.customTask?.maxTurns ?? null,
             maxBudgetUsd: opts?.customTask?.maxBudgetUsd ?? null,
@@ -986,12 +1027,25 @@ export function createTasksApi(
         return;
       }
 
-      await invoke("signal_session", { sessionId: item.id, signal: "SIGINT" }).catch((error: unknown) =>
-        reportCloseSessionError("[store] signal_session failed:", error));
+      if (normalizeAgentExecutionType(item.agent_type) === "agent") {
+        await invoke("kill_session", { sessionId: item.id }).catch((error: unknown) =>
+          reportCloseSessionError("[store] kill SDK agent session failed:", error));
+      } else {
+        await invoke("signal_session", { sessionId: item.id, signal: "SIGINT" }).catch((error: unknown) =>
+          reportCloseSessionError("[store] signal_session failed:", error));
+      }
 
       let teardownExit: Promise<void> | null = null;
       if (teardownCmds.length > 0) {
         const worktreePath = `${repo.path}/.kanna-worktrees/${item.branch}`;
+        const repoConfig = await readRepoConfig(worktreePath);
+        const teardownEnv = await buildTaskLifecycleEnv({
+          taskId: item.id,
+          worktreePath,
+          repoConfig,
+          portEnv: parseTaskPortEnv(item.port_env),
+          logContext: "teardown",
+        });
         const scriptParts = teardownCmds.map((command) => renderBestEffortLifecycleCommand(command, "Teardown"));
         const fullCmd = `printf '\\033[33mRunning teardown...\\033[0m\\n' && ${scriptParts.join(" && ")} && printf '\\n'`;
         const tdSessionId = `td-${item.id}`;
@@ -1001,7 +1055,7 @@ export function createTasksApi(
           cwd: worktreePath,
           executable: "/bin/zsh",
           args: ["--login", "-i", "-c", fullCmd],
-          env: applyWorktreeProcessIsolation({ KANNA_WORKTREE: "1" }),
+          env: applyWorktreeProcessIsolation(teardownEnv),
           cols: 120,
           rows: 30,
         });

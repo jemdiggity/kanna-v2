@@ -228,7 +228,7 @@ pub(crate) fn prepare_advance_stage_for_api(
             stage_override: Some(next_stage.name.clone()),
             explicit_provider,
             default_provider: None,
-            agent_type: None,
+            agent_type: source_task.agent_type,
             model: None,
             permission_mode: None,
             allowed_tools: Vec::new(),
@@ -375,7 +375,7 @@ pub(crate) fn prepare_auto_stage_completion_for_api(
             stage_override: Some(next_stage.name.clone()),
             explicit_provider,
             default_provider: None,
-            agent_type: None,
+            agent_type: source_task.agent_type,
             model: None,
             permission_mode: None,
             allowed_tools: Vec::new(),
@@ -447,7 +447,7 @@ pub(crate) fn prepare_revision_task_for_api(
             stage_override: Some(target_stage.name.clone()),
             explicit_provider,
             default_provider: None,
-            agent_type: None,
+            agent_type: source_task.agent_type,
             model: None,
             permission_mode: None,
             allowed_tools: Vec::new(),
@@ -2392,7 +2392,9 @@ mod tests {
         assert_eq!(prepared.created_task.repo_id, "repo-1");
         assert_eq!(prepared.created_task.stage, "pr");
         assert_eq!(prepared.created_task.title, "Mobile shell");
+        assert_eq!(prepared.created_task.agent_type, "pty");
         assert_eq!(created_source.display_name.as_deref(), Some("Mobile shell"));
+        assert_eq!(created_source.agent_type.as_deref(), Some("pty"));
         assert_eq!(
             created_source.prompt.as_deref(),
             Some("Review task: Fix the mobile shell\n\nReview branch task-old-branch against origin/main with result {\"status\":\"success\"}")
@@ -3458,11 +3460,13 @@ mod tests {
         assert_eq!(prepared.created_task.repo_id, "repo-1");
         assert_eq!(prepared.created_task.stage, "in progress");
         assert_eq!(prepared.created_task.title, "Mobile shell");
+        assert_eq!(prepared.created_task.agent_type, "pty");
         let created_source = db
             .get_pipeline_item(&prepared.created_task.task_id)
             .unwrap()
             .unwrap();
         assert_eq!(created_source.display_name.as_deref(), Some("Mobile shell"));
+        assert_eq!(created_source.agent_type.as_deref(), Some("pty"));
         assert_eq!(
             created_source.prompt.as_deref(),
             Some("Implement revision:\nAdd e2e coverage for task creation.\n\nAdd e2e coverage for task creation.")
