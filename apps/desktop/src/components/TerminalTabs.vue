@@ -53,6 +53,8 @@ function buildSpawnOptions() {
       v-if="sessionId && agentType === 'agent'"
       :key="sessionId"
       :session-id="sessionId"
+      :agent-provider="agentProvider"
+      :worktree-path="worktreePath"
     />
     <div v-if="!sessionId" class="placeholder">
       {{ $t('terminalTabs.noSession') }}

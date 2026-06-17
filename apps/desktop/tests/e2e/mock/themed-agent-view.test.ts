@@ -1,4 +1,4 @@
-import { mkdir } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { WebDriverClient } from "../helpers/webdriver";
@@ -96,7 +96,13 @@ describe("themed agent view", () => {
        VALUES (?, ?, ?, 'agent', ?, ?)`,
       [`agent-${taskId}`, repoId, taskId, testRepoPath, taskId],
     );
-    await mkdir(join(testRepoPath, ".kanna-worktrees", "task-themed-agent-task"), { recursive: true });
+    const worktreeRoot = join(testRepoPath, ".kanna-worktrees", "task-themed-agent-task");
+    await mkdir(join(worktreeRoot, ".claude", "commands"), { recursive: true });
+    // A project slash command the menu should discover when the view mounts.
+    await writeFile(
+      join(worktreeRoot, ".claude", "commands", "ping.md"),
+      "---\ndescription: Reply with pong\n---\nReply with exactly: pong\n",
+    );
     const loadResult = await callVueMethod(client, "loadItems");
     if (isVueCallError(loadResult)) throw new Error(loadResult.__error);
     const selectResult = await callVueMethod(client, "handleSelectItem", taskId);
@@ -128,21 +134,34 @@ describe("themed agent view", () => {
     await client.waitForElement('[data-testid="agent-message-view"]', 5_000);
 
     await client.waitForText('[data-testid="agent-message-view"]', "Hello themed view", 5_000);
-    await client.waitForText('[data-testid="agent-message-view"]', "pnpm test", 5_000);
+    // Tool-call/result/debug plumbing is intentionally hidden; the permission
+    // prompt is the one piece of tool machinery that stays surfaced.
     await client.waitForText(".permission-card", "README.md", 5_000);
 
+    // Slash commands: typing "/" scans the worktree's .claude/commands and
+    // surfaces them in a menu. Clear it afterwards so later steering is clean.
     await client.executeSync(
-      `Array.from(document.querySelectorAll('.style-switcher button'))
-        .find((button) => button.textContent?.trim() === 'Log')
-        ?.click();`,
+      `const composer = document.querySelector('[data-testid="agent-composer"]');
+       composer.value = "/";
+       composer.dispatchEvent(new Event("input", { bubbles: true }));`,
     );
-    expect(await client.executeSync("return document.querySelector('.agent-message-view')?.classList.contains('skin-log');")).toBe(true);
+    await client.waitForText('[data-testid="slash-menu"]', "/ping", 5_000);
     await client.executeSync(
-      `Array.from(document.querySelectorAll('.style-switcher button'))
-        .find((button) => button.textContent?.trim() === 'Terminal')
-        ?.click();`,
+      `const composer = document.querySelector('[data-testid="agent-composer"]');
+       composer.value = "";
+       composer.dispatchEvent(new Event("input", { bubbles: true }));`,
     );
-    expect(await client.executeSync("return document.querySelector('.agent-message-view')?.classList.contains('skin-terminal');")).toBe(true);
+    await client.waitForNoElement('[data-testid="slash-menu"]', 5_000);
+
+    // Appearance is driven by the user preference (moved out of an in-view switcher).
+    await client.executeSync(
+      `window.__KANNA_E2E__.setupState.store.agentMessageAppearance = 'log';`,
+    );
+    await client.waitForElement('.agent-message-view.skin-log', 5_000);
+    await client.executeSync(
+      `window.__KANNA_E2E__.setupState.store.agentMessageAppearance = 'terminal';`,
+    );
+    await client.waitForElement('.agent-message-view.skin-terminal', 5_000);
 
     await client.executeSync(
       `const composer = document.querySelector('[data-testid="agent-composer"]');
@@ -152,7 +171,12 @@ describe("themed agent view", () => {
     );
     await client.click(await client.waitForText(".permission-actions button", "Allow", 2_000));
     await client.click(await client.waitForText(".permission-actions button", "Deny", 2_000));
-    await client.click(await client.waitForText(".stop-button", "Stop", 2_000));
+    // Interrupt via Esc in the composer (the send button only becomes Stop while a
+    // turn is actively running; Esc-to-interrupt is always available).
+    await client.executeSync(
+      `document.querySelector('[data-testid="agent-composer"]')
+        .dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));`,
+    );
 
     const sentTypes = await client.executeSync<string[]>("return window.__KSP_SENT__.map((frame) => frame.type);");
     expect(sentTypes).toContain("agent_input");

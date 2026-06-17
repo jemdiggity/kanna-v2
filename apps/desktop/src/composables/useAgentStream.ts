@@ -16,6 +16,7 @@ export interface UseAgentStreamResult {
   sendInput: (text: string) => void;
   sendPermission: (requestId: string, decision: PermissionDecision) => void;
   interrupt: () => void;
+  setModel: (model: string) => void;
   close: () => void;
 }
 
@@ -77,6 +78,7 @@ export async function createAgentStream(taskId: string): Promise<UseAgentStreamR
     sendInput: (text: string) => client.sendAgentInput(taskId, text),
     sendPermission: (requestId: string, decision: PermissionDecision) => client.sendAgentPermission(taskId, requestId, decision),
     interrupt: () => client.sendAgentInterrupt(taskId),
+    setModel: (model: string) => client.sendAgentSetModel(taskId, model),
     close: () => {
       client.detach(taskId, "agent");
       stopConnectionListener();
@@ -114,6 +116,7 @@ export function useAgentStream(taskId: string): UseAgentStreamResult {
     sendInput: (text: string) => stream.value?.sendInput(text),
     sendPermission: (requestId: string, decision: PermissionDecision) => stream.value?.sendPermission(requestId, decision),
     interrupt: () => stream.value?.interrupt(),
+    setModel: (model: string) => stream.value?.setModel(model),
     close: () => stream.value?.close(),
   };
 }
