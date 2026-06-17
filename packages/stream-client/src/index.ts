@@ -183,6 +183,10 @@ export class StreamClient {
     this.sendFrame({ type: "agent_interrupt", task_id: taskId });
   }
 
+  sendAgentSetModel(taskId: string, model: string): void {
+    this.sendFrame({ type: "agent_set_model", task_id: taskId, model });
+  }
+
   sendTermInput(taskId: string, dataB64: string): void {
     this.sendFrame({ type: "term_input", task_id: taskId, data_b64: dataB64 });
   }

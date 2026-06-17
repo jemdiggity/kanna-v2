@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command as StdCommand};
 use std::time::{Duration, Instant};
 
-use kanna_agent_protocol::{AgentEvent, PermissionDecision};
+use kanna_agent_protocol::{AgentEvent, PermissionDecision, SessionEndReason};
 use kanna_daemon::protocol::{AgentProvider, AgentSpawnParams, Command, Event, SeqAgentEvent};
 
 // ---- Harness ----
@@ -215,6 +215,29 @@ echo '{"type":"assistant","message":{"content":[{"type":"text","text":"second ap
 echo '{"type":"result","subtype":"success","duration_ms":5,"num_turns":1,"total_cost_usd":0.01,"usage":{},"session_id":"fake-sess-perm"}'
 while read -r line; do :; done
 "#;
+
+/// Fake claude agent that appends every stdin line it receives to `$STDIN_LOG`,
+/// so tests can assert what the daemon wrote to the child (e.g. set_model).
+const STDIN_LOGGING_AGENT: &str = r#"#!/bin/sh
+echo '{"type":"system","subtype":"init","session_id":"fake-sess-model","model":"fake-model"}'
+echo '{"type":"result","subtype":"success","duration_ms":1,"num_turns":1,"total_cost_usd":0,"usage":{},"session_id":"fake-sess-model"}'
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> "$STDIN_LOG"
+done
+"#;
+
+/// Fake codex agent: starts a turn, then blocks until signaled. Codex has no
+/// stdin protocol, so the daemon interrupts it with SIGINT (the path that used
+/// to be misreported as a crash).
+const CODEX_SLEEPER_AGENT: &str = r#"#!/bin/sh
+echo '{"type":"thread.started","thread_id":"fake-thread"}'
+echo '{"type":"turn.started"}'
+sleep 30
+"#;
+
+fn is_session_ended(event: &AgentEvent) -> bool {
+    matches!(event, AgentEvent::SessionEnded { .. })
+}
 
 fn is_turn_completed(event: &AgentEvent) -> bool {
     matches!(event, AgentEvent::TurnCompleted { .. })
@@ -468,6 +491,88 @@ fn agent_session_survives_daemon_handoff() {
     assert!(steered
         .iter()
         .any(|e| matches!(e, AgentEvent::AssistantText { text, .. } if text == "steered")));
+}
+
+#[test]
+fn interrupt_is_surfaced_as_interrupted_not_crashed() {
+    let dir = temp_dir("interrupt");
+    let script = write_script(&dir, "codex-sleeper.sh", CODEX_SLEEPER_AGENT);
+    let daemon = DaemonHandle::start_in(&dir);
+
+    let mut conn = daemon.connect();
+    let mut params = spawn_params(&dir, &script, "do work");
+    params.agent_provider = AgentProvider::Codex;
+    conn.send(&Command::SpawnAgent {
+        session_id: "agent-int".to_string(),
+        params,
+    });
+    conn.recv_until(|e| matches!(e, Event::SessionCreated { .. }));
+
+    // Attach and wait until the turn is actually running, so the interrupt
+    // lands on a live child rather than racing the spawn.
+    conn.send(&Command::AttachAgent {
+        session_id: "agent-int".to_string(),
+        from_seq: 0,
+    });
+    conn.collect_agent_events_until(|e| matches!(e, AgentEvent::TurnStarted { .. }));
+
+    conn.send(&Command::AgentInterrupt {
+        session_id: "agent-int".to_string(),
+    });
+
+    // The SIGINT-driven exit must be reported as an interruption, not a crash.
+    let events = conn.collect_agent_events_until(is_session_ended);
+    let ended = events.iter().rev().find(|e| is_session_ended(e)).unwrap();
+    assert!(
+        matches!(
+            ended,
+            AgentEvent::SessionEnded {
+                reason: SessionEndReason::Interrupted,
+                ..
+            }
+        ),
+        "stopping the agent must read as interrupted, not crashed: {ended:?}"
+    );
+}
+
+#[test]
+fn set_model_writes_a_control_line_to_stdin() {
+    let dir = temp_dir("setmodel");
+    let stdin_log = dir.join("stdin.log");
+    let script = write_script(&dir, "stdin-logger.sh", STDIN_LOGGING_AGENT);
+    let daemon = DaemonHandle::start_in(&dir);
+
+    let mut conn = daemon.connect();
+    let mut params = spawn_params(&dir, &script, "go");
+    params.env.insert(
+        "STDIN_LOG".to_string(),
+        stdin_log.to_string_lossy().to_string(),
+    );
+    conn.send(&Command::SpawnAgent {
+        session_id: "agent-m".to_string(),
+        params,
+    });
+    conn.recv_until(|e| matches!(e, Event::SessionCreated { .. }));
+
+    conn.send(&Command::AgentSetModel {
+        session_id: "agent-m".to_string(),
+        model: "claude-haiku-4-5-20251001".to_string(),
+    });
+    conn.recv_until(|e| matches!(e, Event::Ok));
+
+    // The set_model control line must reach the live child's stdin.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let log = std::fs::read_to_string(&stdin_log).unwrap_or_default();
+        if log.contains("set_model") && log.contains("claude-haiku-4-5-20251001") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "set_model never reached stdin; log=\n{log}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 #[test]

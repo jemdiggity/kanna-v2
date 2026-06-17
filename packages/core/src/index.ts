@@ -15,3 +15,6 @@ export * from "./config/repo-config.js";
 
 // Custom Tasks
 export * from "./config/custom-tasks.js";
+
+// Agent models (UI picker + CLI contract source of truth)
+export * from "./agent-models.js";

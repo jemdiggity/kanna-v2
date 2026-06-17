@@ -250,7 +250,7 @@ async fn handle_child_exit(
     agents: &AgentSessions,
     broadcast_tx: &broadcast::Sender<String>,
 ) {
-    let (shared, code, per_turn) = {
+    let (shared, code, per_turn, interrupted) = {
         let mut registry = agents.lock().await;
         let Some(record) = registry.get_mut(session_id) else {
             return;
@@ -264,21 +264,26 @@ async fn handle_child_exit(
         record.child = None;
         record.stdin = None;
         record.exited = true;
+        let interrupted = std::mem::replace(&mut record.interrupt_requested, false);
         if let Some(fds) = record.handoff_fds.take() {
             fds.close();
         }
         set_status(record, broadcast_tx, session_id, SessionStatus::Idle);
         let per_turn = matches!(record.turn_model, TurnModel::PerTurn);
-        (record.shared.clone(), code, per_turn)
+        (record.shared.clone(), code, per_turn, interrupted)
     };
 
-    // Per-turn providers exit after every turn by design — process churn is
-    // an implementation detail, not a session event.
-    if per_turn && code == 0 {
+    // A user-initiated stop signals the child to exit; surface it as an
+    // interruption (never a crash) and end the turn so the UI stops showing
+    // activity. Per-turn sessions stay usable — the next message respawns the
+    // provider.
+    let reason = if interrupted {
+        SessionEndReason::Interrupted
+    } else if per_turn && code == 0 {
+        // Per-turn providers exit after every turn by design — process churn is
+        // an implementation detail, not a session event.
         return;
-    }
-
-    let reason = if code == 0 {
+    } else if code == 0 {
         SessionEndReason::Completed
     } else {
         SessionEndReason::Crashed
@@ -393,6 +398,7 @@ pub async fn handle_spawn_agent(
         session_allowed_tools: HashSet::new(),
         pending_permissions: HashSet::new(),
         exited: false,
+        interrupt_requested: false,
         turn_model,
         created_at: std::time::Instant::now(),
         last_activity_at: std::time::Instant::now(),
@@ -783,6 +789,9 @@ pub async fn handle_agent_interrupt(
                 if record.exited {
                     Ok(())
                 } else {
+                    // The signal makes the child exit; flag it so the exit is
+                    // surfaced as an interruption, not a crash.
+                    record.interrupt_requested = true;
                     agent::signal_agent_pid(record.pid, libc::SIGINT)
                 }
             }
@@ -797,6 +806,61 @@ pub async fn handle_agent_interrupt(
                 &agent_error(
                     protocol::ErrorCode::WriteFailed,
                     format!("failed to interrupt agent: {error}"),
+                ),
+            )
+            .await
+        }
+    }
+}
+
+/// Switch the agent's model. The new model is stored on the session so any
+/// future spawn uses it (the only mechanism for per-turn providers); for live
+/// persistent providers, a `set_model` control line is also written to stdin so
+/// the change takes effect immediately.
+pub async fn handle_agent_set_model(
+    session_id: String,
+    model: String,
+    writer: AgentClientWriter,
+    agents: AgentSessions,
+) {
+    let result = {
+        let mut registry = agents.lock().await;
+        let Some(record) = registry.get_mut(&session_id) else {
+            drop(registry);
+            reply(
+                &writer,
+                &agent_error(
+                    protocol::ErrorCode::SessionNotFound,
+                    format!("agent session not found: {session_id}"),
+                ),
+            )
+            .await;
+            return;
+        };
+
+        record.params.model = Some(model.clone());
+        let line = match record.adapter.lock() {
+            Ok(mut adapter) => adapter.encode_set_model(&model),
+            Err(poisoned) => poisoned.into_inner().encode_set_model(&model),
+        };
+        match line {
+            Some(line) if !record.exited => match record.stdin.as_mut() {
+                Some(stdin) => writeln!(stdin, "{line}").and_then(|_| stdin.flush()),
+                // No live stdin to steer; the stored model covers the next spawn.
+                None => Ok(()),
+            },
+            _ => Ok(()),
+        }
+    };
+
+    match result {
+        Ok(()) => reply(&writer, &Event::Ok).await,
+        Err(error) => {
+            reply(
+                &writer,
+                &agent_error(
+                    protocol::ErrorCode::WriteFailed,
+                    format!("failed to set agent model: {error}"),
                 ),
             )
             .await
@@ -959,6 +1023,7 @@ pub async fn adopt_agent_session(
         session_allowed_tools,
         pending_permissions,
         exited: !alive,
+        interrupt_requested: false,
         turn_model,
         created_at: std::time::Instant::now(),
         last_activity_at: std::time::Instant::now(),

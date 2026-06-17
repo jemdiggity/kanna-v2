@@ -269,7 +269,12 @@ describe("NewTaskModal", () => {
     await flushPromises();
     await flushPromises();
 
-    expect(wrapper.get('[data-testid="display-mode-themed"]').classes()).toContain("selected");
+    const directCli = () => wrapper.get('[data-testid="display-mode-direct-cli"]');
+    const checked = () => (directCli().element as HTMLInputElement).checked;
+    const disabled = () => (directCli().element as HTMLInputElement).disabled;
+
+    // Claude default → themed GUI (Direct CLI unchecked).
+    expect(checked()).toBe(false);
 
     await wrapper.get(".agent-provider").trigger("click");
     await flushPromises();
@@ -278,20 +283,23 @@ describe("NewTaskModal", () => {
     await wrapper.get(".agent-provider").trigger("click");
     await flushPromises();
     expect(wrapper.text()).toContain("OpenCode");
-    expect(wrapper.get('[data-testid="display-mode-raw"]').classes()).toContain("selected");
+    // OpenCode has no GUI mode → Direct CLI is forced on and locked.
+    expect(checked()).toBe(true);
+    expect(disabled()).toBe(true);
 
     await wrapper.get(".agent-provider").trigger("click");
     await flushPromises();
     expect(wrapper.text()).toContain("Claude");
-    expect(wrapper.get('[data-testid="display-mode-themed"]').classes()).toContain("selected");
+    expect(checked()).toBe(false);
 
-    await wrapper.get('[data-testid="display-mode-raw"]').trigger("click");
+    // Explicitly choosing Direct CLI sticks across provider changes.
+    await directCli().setValue(true);
     await wrapper.get(".agent-provider").trigger("click");
     await wrapper.get(".agent-provider").trigger("click");
     await wrapper.get(".agent-provider").trigger("click");
     await flushPromises();
     expect(wrapper.text()).toContain("Claude");
-    expect(wrapper.get('[data-testid="display-mode-raw"]').classes()).toContain("selected");
+    expect(checked()).toBe(true);
 
     await wrapper.get("textarea").setValue("Keep raw");
     await wrapper.get("textarea").trigger("keydown", { key: "Enter", metaKey: true });

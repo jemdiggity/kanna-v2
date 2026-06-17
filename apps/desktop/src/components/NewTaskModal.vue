@@ -101,6 +101,12 @@ function selectDisplayMode(mode: AgentExecutionType) {
   rawModeExplicitlySelected.value = mode === "pty";
 }
 
+// "Direct CLI" = the raw terminal (PTY); unchecked = the themed GUI view.
+const directCli = computed<boolean>({
+  get: () => displayMode.value === "pty",
+  set: (checked) => selectDisplayMode(checked ? "pty" : "agent"),
+});
+
 function cycleProvider(direction: -1 | 1) {
   const idx = availableProviders.value.indexOf(agentProvider.value);
   if (idx === -1) return;
@@ -468,27 +474,15 @@ function handleKeydown(e: KeyboardEvent) {
 
         <div class="pipeline-row">
           <label class="pipeline-label">Display</label>
-          <div class="display-mode-options" role="radiogroup" aria-label="Display mode">
-            <button
-              type="button"
-              class="display-mode-option"
-              :class="{ selected: displayMode === 'agent' }"
+          <label class="direct-cli-toggle">
+            <input
+              type="checkbox"
+              v-model="directCli"
               :disabled="!supportsThemedMode"
-              data-testid="display-mode-themed"
-              @click="selectDisplayMode('agent')"
-            >
-              Themed
-            </button>
-            <button
-              type="button"
-              class="display-mode-option"
-              :class="{ selected: displayMode === 'pty' }"
-              data-testid="display-mode-raw"
-              @click="selectDisplayMode('pty')"
-            >
-              Raw terminal
-            </button>
-          </div>
+              data-testid="display-mode-direct-cli"
+            />
+            Direct CLI
+          </label>
         </div>
       </div>
       <div class="modal-footer">
@@ -555,29 +549,17 @@ function handleKeydown(e: KeyboardEvent) {
   color: var(--kn-text-primary);
 }
 
-.display-mode-options {
-  display: flex;
+.direct-cli-toggle {
+  display: inline-flex;
+  align-items: center;
   gap: 6px;
-}
-
-.display-mode-option {
-  border: 1px solid var(--kn-border);
-  border-radius: 6px;
-  background: var(--kn-bg-button);
   color: var(--kn-text-secondary);
-  padding: 5px 9px;
-  font: inherit;
   cursor: pointer;
 }
 
-.display-mode-option.selected {
-  border-color: var(--kn-accent);
-  color: var(--kn-accent);
-}
-
-.display-mode-option:disabled {
+.direct-cli-toggle:has(input:disabled) {
   cursor: default;
-  opacity: 0.45;
+  opacity: 0.5;
 }
 
 .modal-body {

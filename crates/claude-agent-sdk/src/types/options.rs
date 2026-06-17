@@ -81,6 +81,12 @@ pub struct SessionOptions {
     pub additional_directories: Vec<String>,
     /// Whether a permission callback is registered (adds --permission-prompt-tool stdio).
     pub has_permission_callback: bool,
+    /// Skip all permission prompts and the tool sandbox (`--dangerously-skip-permissions`).
+    ///
+    /// This is the "yolo" mode: the CLI runs every tool without asking and
+    /// without sandboxing. When enabled, `--permission-mode` and
+    /// `--permission-prompt-tool` are omitted since no approval flow applies.
+    pub dangerously_skip_permissions: bool,
 }
 
 impl Default for SessionOptions {
@@ -103,6 +109,7 @@ impl Default for SessionOptions {
             include_partial_messages: false,
             additional_directories: Vec::new(),
             has_permission_callback: false,
+            dangerously_skip_permissions: false,
         }
     }
 }
@@ -140,7 +147,11 @@ impl SessionOptions {
             args.push(model.clone());
         }
 
-        if let Some(mode) = &self.permission_mode {
+        // Yolo mode skips the approval flow entirely; `--permission-mode` and
+        // `--permission-prompt-tool` only apply when permissions are enforced.
+        if self.dangerously_skip_permissions {
+            args.push("--dangerously-skip-permissions".to_string());
+        } else if let Some(mode) = &self.permission_mode {
             args.push("--permission-mode".to_string());
             args.push(mode.as_cli_flag().to_string());
         }
@@ -198,7 +209,7 @@ impl SessionOptions {
             args.push(dir.clone());
         }
 
-        if self.has_permission_callback {
+        if self.has_permission_callback && !self.dangerously_skip_permissions {
             args.push("--permission-prompt-tool".to_string());
             args.push("stdio".to_string());
         }
@@ -229,6 +240,15 @@ impl SessionOptionsBuilder {
     /// Set the permission mode.
     pub fn permission_mode(mut self, mode: PermissionMode) -> Self {
         self.options.permission_mode = Some(mode);
+        self
+    }
+
+    /// Skip all permission prompts and the tool sandbox ("yolo" mode).
+    ///
+    /// Adds `--dangerously-skip-permissions` and suppresses the permission
+    /// prompt tool, so the CLI executes every tool without approval.
+    pub fn dangerously_skip_permissions(mut self, skip: bool) -> Self {
+        self.options.dangerously_skip_permissions = skip;
         self
     }
 
@@ -510,6 +530,30 @@ mod tests {
             .position(|a| a == "--permission-prompt-tool")
             .unwrap();
         assert_eq!(args[idx + 1], "stdio");
+    }
+
+    #[test]
+    fn test_dangerously_skip_permissions_flag() {
+        let opts = SessionOptions::builder()
+            .dangerously_skip_permissions(true)
+            .build();
+        let args = opts.to_cli_args(None);
+        assert!(args.contains(&"--dangerously-skip-permissions".to_string()));
+    }
+
+    #[test]
+    fn test_yolo_suppresses_permission_flags() {
+        // Yolo mode must omit both the permission mode and the prompt tool, even
+        // when they were configured, since no approval flow applies.
+        let opts = SessionOptions::builder()
+            .permission_mode(PermissionMode::Default)
+            .with_permission_callback()
+            .dangerously_skip_permissions(true)
+            .build();
+        let args = opts.to_cli_args(None);
+        assert!(args.contains(&"--dangerously-skip-permissions".to_string()));
+        assert!(!args.contains(&"--permission-mode".to_string()));
+        assert!(!args.contains(&"--permission-prompt-tool".to_string()));
     }
 
     #[test]
