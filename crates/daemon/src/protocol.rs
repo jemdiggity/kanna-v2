@@ -195,6 +195,9 @@ pub enum Command {
     Handoff {
         version: u32,
     },
+    HandoffAdopted {
+        version: u32,
+    },
     SpawnAgent {
         session_id: String,
         params: AgentSpawnParams,

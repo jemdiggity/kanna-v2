@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -428,13 +428,59 @@ fn unique_session_id(prefix: &str) -> String {
     format!("{}-{}-{}", prefix, std::process::id(), nanos)
 }
 
+fn wait_for_child_exit(child: &mut Child, timeout: Duration) -> Option<std::process::ExitStatus> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Ok(None) => return None,
+            Err(error) => panic!("failed to wait for daemon child: {}", error),
+        }
+    }
+}
+
 // ---- Tests ----
+
+#[test]
+fn test_version_exits_without_handoff_or_socket() {
+    let dir = test_dir("version-no-handoff");
+    cleanup(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("daemon.pid"), std::process::id().to_string()).unwrap();
+
+    let daemon_bin = PathBuf::from(env!("CARGO_BIN_EXE_kanna-daemon"));
+    let output = Command::new(&daemon_bin)
+        .arg("--version")
+        .env("KANNA_DAEMON_DIR", dir.to_str().unwrap())
+        .output()
+        .expect("failed to run daemon --version");
+
+    assert!(
+        output.status.success(),
+        "--version should exit successfully"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("kanna-daemon"),
+        "--version should print daemon identity, stdout={:?}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        !compute_socket_path(&dir).exists(),
+        "--version must not bind or touch the daemon socket"
+    );
+
+    cleanup(&dir);
+}
 
 /// If the old daemon accepts the v2 handoff command and then drops the
 /// connection, the new daemon cannot know whether sessions were detached.
-/// It must not send a second compat handoff request.
+/// It must not send a second compat handoff request or start a competing
+/// daemon while the old daemon is still alive.
 #[test]
-fn test_handoff_ambiguous_post_send_failure_does_not_retry_compat() {
+fn test_handoff_ambiguous_post_send_failure_exits_without_split_brain() {
     let dir = test_dir("ambiguous-no-retry");
     let fake = FakeOldDaemon::start(&dir, |mut stream, requests| {
         let version = read_handoff_version(&mut stream);
@@ -442,7 +488,18 @@ fn test_handoff_ambiguous_post_send_failure_does_not_retry_compat() {
         drop(stream);
     });
 
-    let daemon = DaemonHandle::start_in(&dir);
+    let daemon_bin = PathBuf::from(env!("CARGO_BIN_EXE_kanna-daemon"));
+    let mut child = Command::new(&daemon_bin)
+        .env("KANNA_DAEMON_DIR", dir.to_str().unwrap())
+        .spawn()
+        .expect("failed to start daemon");
+    let status = wait_for_child_exit(&mut child, Duration::from_secs(5))
+        .expect("ambiguous handoff must exit instead of starting");
+    assert!(
+        !status.success(),
+        "ambiguous handoff should fail loudly instead of starting fresh"
+    );
+
     let requests = fake.join();
     assert_eq!(
         requests,
@@ -450,19 +507,55 @@ fn test_handoff_ambiguous_post_send_failure_does_not_retry_compat() {
         "ambiguous failure after sending Handoff must not retry compat"
     );
 
-    let mut conn = daemon.connect();
-    spawn_echo(&mut conn, "fresh-after-ambiguous-handoff");
-    attach(&mut conn, "fresh-after-ambiguous-handoff");
+    cleanup(&dir);
+}
 
-    drop(daemon);
+#[test]
+fn test_interrupted_handoff_leaves_old_daemon_session_usable() {
+    let dir = test_dir("interrupted-old-usable");
+    let daemon_a = DaemonHandle::start_in(&dir);
+    let mut conn_a = daemon_a.connect();
+    spawn_echo(&mut conn_a, "sess-interrupted");
+    attach(&mut conn_a, "sess-interrupted");
+    send_input_and_wait_for_echo(
+        &mut conn_a,
+        "sess-interrupted",
+        b"before-interrupt\n",
+        "before-interrupt",
+    );
+
+    let socket_path = compute_socket_path(&dir);
+    let mut handoff = UnixStream::connect(&socket_path).expect("connect to old daemon");
+    let request = serde_json::json!({ "type": "Handoff", "version": 2 });
+    writeln!(handoff, "{}", serde_json::to_string(&request).unwrap()).unwrap();
+    handoff.flush().unwrap();
+    let mut reader = BufReader::new(handoff.try_clone().unwrap());
+    let mut line = String::new();
+    reader
+        .read_line(&mut line)
+        .expect("old daemon should send handoff metadata");
+    assert!(
+        line.contains("HandoffReady"),
+        "expected HandoffReady, got {line:?}"
+    );
+    drop(handoff);
+
+    send_input_and_wait_for_echo(
+        &mut conn_a,
+        "sess-interrupted",
+        b"after-interrupt\n",
+        "after-interrupt",
+    );
+
+    drop(daemon_a);
     cleanup(&dir);
 }
 
 /// If the new daemon receives session metadata but the SCM_RIGHTS fd transfer
-/// fails, it should retain the lost session id so attach can report the
-/// specific handoff-loss condition instead of a generic missing session.
+/// fails while the old daemon is still alive, it must not bind a competing
+/// daemon over the same app state.
 #[test]
-fn test_handoff_fd_transfer_failure_reports_handoff_lost_on_attach() {
+fn test_handoff_fd_transfer_failure_exits_without_split_brain() {
     let dir = test_dir("fd-transfer-lost");
     let lost_session_id = unique_session_id("lost-session");
     let fake_session_id = lost_session_id.clone();
@@ -497,7 +590,18 @@ fn test_handoff_fd_transfer_failure_reports_handoff_lost_on_attach() {
         drop(stream);
     });
 
-    let daemon = DaemonHandle::start_in(&dir);
+    let daemon_bin = PathBuf::from(env!("CARGO_BIN_EXE_kanna-daemon"));
+    let mut child = Command::new(&daemon_bin)
+        .env("KANNA_DAEMON_DIR", dir.to_str().unwrap())
+        .spawn()
+        .expect("failed to start daemon");
+    let status = wait_for_child_exit(&mut child, Duration::from_secs(5))
+        .expect("fd transfer failure must exit instead of starting");
+    assert!(
+        !status.success(),
+        "fd transfer failure should fail loudly instead of starting fresh"
+    );
+
     let requests = fake.join();
     assert_eq!(
         requests,
@@ -505,30 +609,6 @@ fn test_handoff_fd_transfer_failure_reports_handoff_lost_on_attach() {
         "fd transfer failure after metadata must not retry compat"
     );
 
-    let mut conn = daemon.connect();
-    conn.send(&Cmd::AttachSnapshot {
-        session_id: lost_session_id.clone(),
-    });
-    match conn.recv() {
-        Evt::Error {
-            code: Some(ErrorCode::HandoffLost),
-            message,
-        } => {
-            assert!(
-                message.contains("session lost during daemon handoff"),
-                "expected handoff-loss message, got: {:?}",
-                message
-            );
-            assert!(
-                message.contains("failed to receive PTY fd"),
-                "expected fd-transfer reason, got: {:?}",
-                message
-            );
-        }
-        other => panic!("expected HandoffLost attach error, got: {:?}", other),
-    }
-
-    drop(daemon);
     cleanup(&dir);
 }
 

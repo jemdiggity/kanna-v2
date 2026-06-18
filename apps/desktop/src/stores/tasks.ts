@@ -393,8 +393,24 @@ export function createTasksApi(
   ) {
     const s0 = performance.now();
     const resolvedModel = opts?.customTask?.model ?? opts?.model ?? null;
+    let worktreeCreated = false;
     const markSetupFailed = async (error: unknown, logPrefix: string, toastMessage: string) => {
-      await updatePipelineItemActivity(context.requireDb(), id, "idle");
+      await Promise.allSettled([
+        invoke("kill_session", { sessionId: id }),
+        invoke("kill_session", { sessionId: `shell-wt-${id}` }),
+      ]);
+      await ports.releaseTaskPorts(id).catch((cleanupError) => {
+        console.debug("[store] failed to release ports after task setup failure:", cleanupError);
+      });
+      if (worktreeCreated) {
+        await invoke("git_worktree_remove", { repoPath, path: worktreePath }).catch((cleanupError) => {
+          console.debug("[store] failed to remove worktree after task setup failure:", cleanupError);
+        });
+      }
+      await context.requireDb().execute("DELETE FROM pipeline_item WHERE id = ?", [id]).catch((cleanupError) => {
+        console.debug("[store] failed to delete partially-created task after setup failure:", cleanupError);
+        return updatePipelineItemActivity(context.requireDb(), id, "idle");
+      });
       await reloadSnapshot();
       console.error(logPrefix, error);
       context.toast.error(toastMessage);
@@ -412,6 +428,7 @@ export function createTasksApi(
       let ptySetupCmds: string[] = [];
       try {
         worktreeBootstrap = await createWorktree(repoPath, branch, worktreePath, opts?.baseBranch ?? opts?.baseRef ?? null);
+        worktreeCreated = true;
         await insertWorktree(context.requireDb(), {
           id: `wt-${id}`,
           pipeline_item_id: id,
