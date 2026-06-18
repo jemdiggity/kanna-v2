@@ -39,8 +39,18 @@ impl CodexAdapter {
         Self::default()
     }
 
+    fn should_bypass_sandbox(ctx: &SpawnCtx) -> bool {
+        matches!(
+            ctx.permission_mode.as_deref(),
+            None | Some("default") | Some("dontAsk")
+        )
+    }
+
     fn base_args(ctx: &SpawnCtx) -> Vec<String> {
         let mut args = vec!["exec".to_string()];
+        if Self::should_bypass_sandbox(ctx) {
+            args.push("--dangerously-bypass-approvals-and-sandbox".to_string());
+        }
         if let Some(model) = &ctx.model {
             args.push("-m".to_string());
             args.push(model.clone());
@@ -242,6 +252,9 @@ impl ProviderAdapter for CodexAdapter {
             "resume".to_string(),
             session_id.to_string(),
         ];
+        if Self::should_bypass_sandbox(ctx) {
+            args.push("--dangerously-bypass-approvals-and-sandbox".to_string());
+        }
         if let Some(model) = &ctx.model {
             args.push("-m".to_string());
             args.push(model.clone());
