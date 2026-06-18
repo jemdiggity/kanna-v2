@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch, watchEffect } from "vue";
 import MarkdownIt from "markdown-it";
-import type { AgentEvent, PermissionDecision, TurnStats } from "@kanna/agent-protocol";
+import { formatCompactCount, type AgentEvent, type PermissionDecision, type TurnStats } from "@kanna/agent-protocol";
 import { getActivePinia } from "pinia";
 import type { BundledLanguage } from "shiki";
 import type { AgentProvider } from "@kanna/db";
@@ -300,7 +300,7 @@ function statsLabel(stats: TurnStats | null): string {
     parts.push(`$${stats.total_cost_usd.toFixed(4)}`);
   }
   if (stats.input_tokens || stats.output_tokens) {
-    parts.push(`${stats.input_tokens ?? 0}/${stats.output_tokens ?? 0} tok`);
+    parts.push(`${formatCompactCount(stats.input_tokens ?? 0)}/${formatCompactCount(stats.output_tokens ?? 0)} tok`);
   }
   return parts.join(" · ");
 }

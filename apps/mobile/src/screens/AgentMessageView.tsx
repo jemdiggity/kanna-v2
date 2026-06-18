@@ -1,6 +1,6 @@
 import React from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
-import type { AgentEvent, FrameAgentEvent, PermissionDecision, TurnStats } from "@kanna/agent-protocol";
+import { formatCompactCount, type AgentEvent, type FrameAgentEvent, type PermissionDecision, type TurnStats } from "@kanna/agent-protocol";
 import { MOBILE_E2E_IDS } from "../e2eTestIds";
 import type { TaskTerminalStatus } from "../state/sessionStore";
 
@@ -153,7 +153,7 @@ function formatStats(stats: TurnStats): string {
     parts.push(`$${stats.total_cost_usd.toFixed(4)}`);
   }
   if (stats.input_tokens || stats.output_tokens) {
-    parts.push(`${stats.input_tokens ?? 0}/${stats.output_tokens ?? 0} tok`);
+    parts.push(`${formatCompactCount(stats.input_tokens ?? 0)}/${formatCompactCount(stats.output_tokens ?? 0)} tok`);
   }
   return parts.join(" - ");
 }

@@ -99,4 +99,25 @@ describe("AgentMessageView", () => {
     expect(text).toContain("Debug");
     expect(text).toContain("debug stderr");
   });
+
+  it("compacts large token counts in turn stats", () => {
+    const tree = renderAgentView([
+      {
+        seq: 1,
+        event: {
+          type: "turn_completed",
+          status: "success",
+          stats: {
+            duration_ms: 1234,
+            input_tokens: 1200,
+            output_tokens: 4_567_890,
+            total_cost_usd: 0.01,
+            num_turns: 1
+          }
+        }
+      }
+    ]);
+
+    expect(collectText(tree)).toContain("1.2k/4.6M tok");
+  });
 });

@@ -129,6 +129,29 @@ describe("AgentMessageView", () => {
     expect(text).not.toContain("stderr output");
   });
 
+  it("compacts large token counts in turn stats", () => {
+    events.value = [
+      {
+        seq: 1,
+        event: {
+          type: "turn_completed",
+          status: "success",
+          stats: {
+            duration_ms: 1234,
+            input_tokens: 1200,
+            output_tokens: 4_567_890,
+            total_cost_usd: 0.01,
+            num_turns: 1,
+          },
+        },
+      },
+    ];
+
+    const wrapper = mount(AgentMessageView, { props: { sessionId: "task-1" } });
+
+    expect(wrapper.get('[data-testid="agent-message-view"]').text()).toContain("1.2k/4.6M tok");
+  });
+
   it("opens a slash command menu and completes the selected command without sending", async () => {
     const wrapper = mount(AgentMessageView, {
       props: { sessionId: "task-1", agentProvider: "claude", worktreePath: "/w" },
