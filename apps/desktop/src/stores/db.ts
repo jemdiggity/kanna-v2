@@ -94,6 +94,7 @@ export async function runMigrations(db: DbHandle): Promise<void> {
     issue_number INTEGER, issue_title TEXT, prompt TEXT,
     stage TEXT NOT NULL DEFAULT 'in_progress', pr_number INTEGER, pr_url TEXT,
     branch TEXT, agent_type TEXT,
+    agent_spawn_options TEXT,
     teardown_started_at TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -175,6 +176,7 @@ export async function runMigrations(db: DbHandle): Promise<void> {
     await addColumn("pipeline_item", "tags", "TEXT NOT NULL DEFAULT '[]'");
     await addColumn("pipeline_item", "base_ref", "TEXT");
     await addColumn("pipeline_item", "agent_provider", "TEXT NOT NULL DEFAULT 'claude'");
+    await addColumn("pipeline_item", "agent_spawn_options", "TEXT");
     await addColumn("pipeline_item", "previous_stage", "TEXT");
     await addColumn("pipeline_item", "teardown_started_at", "TEXT");
   });
@@ -387,5 +389,9 @@ export async function runMigrations(db: DbHandle): Promise<void> {
   await runMigration("020_pipeline_item_notify_task", async () => {
     await addColumn("pipeline_item", "notify_task_id", "TEXT");
     await addColumn("pipeline_item", "notified_at", "TEXT");
+  });
+
+  await runMigration("021_pipeline_item_agent_spawn_options", async () => {
+    await addColumn("pipeline_item", "agent_spawn_options", "TEXT");
   });
 }

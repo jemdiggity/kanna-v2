@@ -55,6 +55,15 @@ export interface PtySpawnOptions {
   repoConfig?: RepoConfig;
 }
 
+export interface AgentSpawnRecoveryOptions {
+  model?: string | null;
+  permissionMode?: string | null;
+  allowedTools?: string[] | null;
+  disallowedTools?: string[] | null;
+  maxTurns?: number | null;
+  maxBudgetUsd?: number | null;
+}
+
 export interface PreparedPtySession {
   env: Record<string, string>;
   setupCmds: string[];
@@ -62,6 +71,11 @@ export interface PreparedPtySession {
   agentCmdPreamble?: string;
   agentProvider: AgentProvider;
   kannaCliPath?: string;
+}
+
+export interface TaskSessionRecoveryOptions {
+  cols?: number;
+  rows?: number;
 }
 
 export interface WorktreeBootstrapResult {
@@ -175,6 +189,10 @@ export interface StoreServices {
     cols?: number,
     rows?: number,
     options?: PtySpawnOptions,
+  ) => Promise<void>;
+  recoverTaskSession?: (
+    sessionId: string,
+    options?: TaskSessionRecoveryOptions,
   ) => Promise<void>;
   syncTaskStatusesFromDaemon?: () => Promise<void>;
   applyTaskRuntimeStatus?: (item: PipelineItem, status: string) => Promise<void>;

@@ -21,6 +21,10 @@ export interface UseAgentStreamResult {
   close: () => void;
 }
 
+export interface UseAgentStreamOptions {
+  recoverSession?: (taskId: string) => Promise<void>;
+}
+
 function mergeSnapshot(existing: JournaledAgentEvent[], snapshot: FrameAgentEvent[]): JournaledAgentEvent[] {
   const bySeq = new Map<number, JournaledAgentEvent>();
   for (const item of existing) bySeq.set(item.seq, item);
@@ -28,33 +32,68 @@ function mergeSnapshot(existing: JournaledAgentEvent[], snapshot: FrameAgentEven
   return [...bySeq.values()].sort((left, right) => left.seq - right.seq);
 }
 
-export async function createAgentStream(taskId: string): Promise<UseAgentStreamResult> {
+function isRecoverableMissingSessionError(code: string, message: string): boolean {
+  return (
+    code === "no_session" ||
+    code === "session_not_found" ||
+    message.toLowerCase().includes("session not found")
+  );
+}
+
+export async function createAgentStream(taskId: string, options: UseAgentStreamOptions = {}): Promise<UseAgentStreamResult> {
   const events = ref<JournaledAgentEvent[]>([]);
   const connected = ref(false);
   const ended = ref(false);
   const error = ref<string | null>(null);
   let nextSeq = 0;
+  let recovering = false;
 
   const stopConnectionListener = onSharedStreamConnectionChange((value: boolean) => {
     connected.value = value;
   });
   const client = await getSharedStreamClient();
 
-  client.attachAgent(taskId, {
+  const handlers = {
     onSnapshot: (snapshot: FrameAgentEvent[], next: number) => {
       events.value = mergeSnapshot(events.value, snapshot);
       nextSeq = next;
+      error.value = null;
     },
     onEvent: (seq: number, event: AgentEvent) => {
       events.value = mergeSnapshot(events.value, [{ seq, event }]);
       nextSeq = seq + 1;
+      error.value = null;
       if (event.type === "session_ended") ended.value = true;
       if (event.type === "turn_started") ended.value = false;
     },
-    onError: (_code: string, message: string) => {
+    onError: (code: string, message: string) => {
+      if (options.recoverSession && isRecoverableMissingSessionError(code, message)) {
+        void recoverAndReattach(message);
+        return;
+      }
       error.value = message;
     },
-  }, nextSeq);
+  };
+
+  function attach() {
+    client.attachAgent(taskId, handlers, nextSeq);
+  }
+
+  async function recoverAndReattach(message: string): Promise<void> {
+    if (recovering) return;
+    recovering = true;
+    try {
+      await options.recoverSession?.(taskId);
+      error.value = null;
+      attach();
+    } catch (caught: unknown) {
+      error.value = caught instanceof Error ? caught.message : `${message}: ${String(caught)}`;
+    } finally {
+      recovering = false;
+    }
+  }
+
+  attach();
 
   const pendingPermissions = computed<Array<Extract<AgentEvent, { type: "permission_request" }>>>(() => {
     const resolved = new Set(
@@ -88,7 +127,7 @@ export async function createAgentStream(taskId: string): Promise<UseAgentStreamR
   };
 }
 
-export function useAgentStream(taskId: string): UseAgentStreamResult {
+export function useAgentStream(taskId: string, options: UseAgentStreamOptions = {}): UseAgentStreamResult {
   const fallbackEvents = ref<JournaledAgentEvent[]>([]);
   const connected = ref(false);
   const ready = ref(false);
@@ -119,7 +158,7 @@ export function useAgentStream(taskId: string): UseAgentStreamResult {
     pendingOperations.push(operation);
   }
 
-  void createAgentStream(taskId)
+  void createAgentStream(taskId, options)
     .then((created) => {
       if (closed) {
         created.close();

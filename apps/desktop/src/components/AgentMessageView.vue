@@ -25,6 +25,7 @@ const props = defineProps<{
   sessionId: string;
   agentProvider?: AgentProvider;
   worktreePath?: string;
+  recoverSession?: (sessionId: string) => Promise<void>;
 }>();
 
 const markdown = new MarkdownIt({ html: false, linkify: true, breaks: true });
@@ -40,7 +41,9 @@ const denyReasons = ref<Record<string, string>>({});
 const scrollContainer = ref<HTMLElement | null>(null);
 const appearance = ref<AgentMessageAppearance>(normalizeAppearance(store?.agentMessageAppearance ?? null));
 const renderedAssistant = ref<Record<number, string>>({});
-const stream = useAgentStream(props.sessionId);
+const stream = useAgentStream(props.sessionId, {
+  recoverSession: props.recoverSession,
+});
 let highlighterPromise: Promise<MarkdownHighlighter> | null = null;
 
 // Tool calls ("shell"), tool results, and raw/diagnostic debug output are the

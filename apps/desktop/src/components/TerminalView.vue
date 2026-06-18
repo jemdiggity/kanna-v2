@@ -16,6 +16,7 @@ const props = defineProps<{
   agentProvider?: string
   worktreePath?: string
   agentTerminal?: boolean
+  recoverSession?: (sessionId: string, options?: { cols?: number; rows?: number }) => Promise<void>
 }>()
 
 const containerRef = ref<HTMLElement | null>(null)
@@ -24,6 +25,7 @@ const { terminal, init, startListening, fit, fitDeferred, redraw, ensureConnecte
   agentProvider: props.agentProvider,
   worktreePath: props.worktreePath,
   agentTerminal: props.agentTerminal,
+  recoverSession: props.recoverSession,
 })
 
 defineExpose({
