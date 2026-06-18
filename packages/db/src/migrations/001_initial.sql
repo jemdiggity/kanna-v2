@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS pipeline_item (
     pr_url TEXT,
     branch TEXT,
     agent_type TEXT,
+    agent_spawn_options TEXT,
     teardown_started_at TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))

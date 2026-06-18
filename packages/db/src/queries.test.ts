@@ -145,7 +145,7 @@ function createMockDb(): DbHandle & {
           repo.remote_url_hash = remoteUrlHash;
         }
       } else if (q.startsWith("INSERT INTO PIPELINE_ITEM")) {
-        const [id, repo_id, issue_number, issue_title, prompt, pipeline, stage, tagsJson, pr_number, pr_url, branch, agent_type, agent_provider, port_offset, port_env, activity] =
+        const [id, repo_id, issue_number, issue_title, prompt, pipeline, stage, tagsJson, pr_number, pr_url, branch, agent_type, agent_provider, port_offset, port_env, agent_spawn_options, activity] =
           bindValues as unknown[];
         tables.pipeline_item.push({
           id: id as string,
@@ -165,6 +165,7 @@ function createMockDb(): DbHandle & {
           agent_provider: agent_provider as PipelineItem["agent_provider"],
           port_offset: (port_offset as number | null) ?? null,
           port_env: (port_env as string | null) ?? null,
+          agent_spawn_options: (agent_spawn_options as string | null) ?? null,
           activity: (activity as string) || "idle",
           activity_changed_at: currentTimestamp(),
           unread_at: null,
