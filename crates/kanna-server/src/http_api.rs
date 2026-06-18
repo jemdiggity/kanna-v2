@@ -626,7 +626,7 @@ fn apply_task_blockers(
             ));
         }
         if db
-            .task_dependency_has_path_to(&blocker_id, &task_id)
+            .task_dependency_has_path_to(blocker_id, &task_id)
             .map_err(|e| db_write_error("db error", e))?
         {
             return Err((
@@ -1767,9 +1767,9 @@ pub(crate) fn test_router(desktop_id: &str, desktop_name: &str) -> Router {
     let config = Config {
         relay_url: "wss://relay.example".to_string(),
         device_token: "device-token".to_string(),
-            firebase_project_id: "kanna-local".to_string(),
-            firebase_auth_emulator_url: None,
-            firebase_firestore_emulator_host: None,
+        firebase_project_id: "kanna-local".to_string(),
+        firebase_auth_emulator_url: None,
+        firebase_firestore_emulator_host: None,
         daemon_dir: "/tmp/kanna-daemon".to_string(),
         db_path: Db::test_db_path(&format!("http-api-{desktop_id}-{test_db_id}")),
         kanna_cli_path: None,
@@ -1794,9 +1794,9 @@ fn test_router_with_seed(desktop_id: &str, desktop_name: &str, seed: impl FnOnce
     let config = Config {
         relay_url: "wss://relay.example".to_string(),
         device_token: "device-token".to_string(),
-            firebase_project_id: "kanna-local".to_string(),
-            firebase_auth_emulator_url: None,
-            firebase_firestore_emulator_host: None,
+        firebase_project_id: "kanna-local".to_string(),
+        firebase_auth_emulator_url: None,
+        firebase_firestore_emulator_host: None,
         daemon_dir: "/tmp/kanna-daemon".to_string(),
         db_path: Db::test_db_path(&format!("http-api-{desktop_id}-{test_db_id}")),
         kanna_cli_path: None,
@@ -1826,9 +1826,9 @@ fn test_state_with_seed(
     let config = Config {
         relay_url: "wss://relay.example".to_string(),
         device_token: "device-token".to_string(),
-            firebase_project_id: "kanna-local".to_string(),
-            firebase_auth_emulator_url: None,
-            firebase_firestore_emulator_host: None,
+        firebase_project_id: "kanna-local".to_string(),
+        firebase_auth_emulator_url: None,
+        firebase_firestore_emulator_host: None,
         daemon_dir: "/tmp/kanna-daemon".to_string(),
         db_path: Db::test_db_path(&format!("http-invoke-{desktop_id}-{test_db_id}")),
         kanna_cli_path: None,
@@ -1858,9 +1858,9 @@ fn test_state_with_task_input_sender(
     let config = Config {
         relay_url: "wss://relay.example".to_string(),
         device_token: "device-token".to_string(),
-            firebase_project_id: "kanna-local".to_string(),
-            firebase_auth_emulator_url: None,
-            firebase_firestore_emulator_host: None,
+        firebase_project_id: "kanna-local".to_string(),
+        firebase_auth_emulator_url: None,
+        firebase_firestore_emulator_host: None,
         daemon_dir: "/tmp/kanna-daemon".to_string(),
         db_path: Db::test_db_path(&format!("http-invoke-input-{desktop_id}-{test_db_id}")),
         kanna_cli_path: None,
@@ -1891,9 +1891,9 @@ fn test_router_with_task_creator(
     let config = Config {
         relay_url: "wss://relay.example".to_string(),
         device_token: "device-token".to_string(),
-            firebase_project_id: "kanna-local".to_string(),
-            firebase_auth_emulator_url: None,
-            firebase_firestore_emulator_host: None,
+        firebase_project_id: "kanna-local".to_string(),
+        firebase_auth_emulator_url: None,
+        firebase_firestore_emulator_host: None,
         daemon_dir: "/tmp/kanna-daemon".to_string(),
         db_path: Db::test_db_path(&format!("http-api-{desktop_id}-{test_db_id}")),
         kanna_cli_path: None,
@@ -1922,9 +1922,9 @@ fn test_router_with_merge_agent_runner(
     let config = Config {
         relay_url: "wss://relay.example".to_string(),
         device_token: "device-token".to_string(),
-            firebase_project_id: "kanna-local".to_string(),
-            firebase_auth_emulator_url: None,
-            firebase_firestore_emulator_host: None,
+        firebase_project_id: "kanna-local".to_string(),
+        firebase_auth_emulator_url: None,
+        firebase_firestore_emulator_host: None,
         daemon_dir: "/tmp/kanna-daemon".to_string(),
         db_path: Db::test_db_path(&format!("http-api-{desktop_id}-{test_db_id}")),
         kanna_cli_path: None,
@@ -1956,9 +1956,9 @@ fn test_router_with_task_input_sender(
     let config = Config {
         relay_url: "wss://relay.example".to_string(),
         device_token: "device-token".to_string(),
-            firebase_project_id: "kanna-local".to_string(),
-            firebase_auth_emulator_url: None,
-            firebase_firestore_emulator_host: None,
+        firebase_project_id: "kanna-local".to_string(),
+        firebase_auth_emulator_url: None,
+        firebase_firestore_emulator_host: None,
         daemon_dir: "/tmp/kanna-daemon".to_string(),
         db_path: Db::test_db_path(&format!("http-api-{desktop_id}-{test_db_id}")),
         kanna_cli_path: None,
@@ -1990,9 +1990,9 @@ fn test_router_with_task_closer(
     let config = Config {
         relay_url: "wss://relay.example".to_string(),
         device_token: "device-token".to_string(),
-            firebase_project_id: "kanna-local".to_string(),
-            firebase_auth_emulator_url: None,
-            firebase_firestore_emulator_host: None,
+        firebase_project_id: "kanna-local".to_string(),
+        firebase_auth_emulator_url: None,
+        firebase_firestore_emulator_host: None,
         daemon_dir: "/tmp/kanna-daemon".to_string(),
         db_path: Db::test_db_path(&format!("http-api-{desktop_id}-{test_db_id}")),
         kanna_cli_path: None,
@@ -2021,9 +2021,9 @@ fn test_router_with_stage_advancer(
     let config = Config {
         relay_url: "wss://relay.example".to_string(),
         device_token: "device-token".to_string(),
-            firebase_project_id: "kanna-local".to_string(),
-            firebase_auth_emulator_url: None,
-            firebase_firestore_emulator_host: None,
+        firebase_project_id: "kanna-local".to_string(),
+        firebase_auth_emulator_url: None,
+        firebase_firestore_emulator_host: None,
         daemon_dir: "/tmp/kanna-daemon".to_string(),
         db_path: Db::test_db_path(&format!("http-api-{desktop_id}-{test_db_id}")),
         kanna_cli_path: None,
@@ -2055,9 +2055,9 @@ fn test_router_with_stage_completer(
     let config = Config {
         relay_url: "wss://relay.example".to_string(),
         device_token: "device-token".to_string(),
-            firebase_project_id: "kanna-local".to_string(),
-            firebase_auth_emulator_url: None,
-            firebase_firestore_emulator_host: None,
+        firebase_project_id: "kanna-local".to_string(),
+        firebase_auth_emulator_url: None,
+        firebase_firestore_emulator_host: None,
         daemon_dir: "/tmp/kanna-daemon".to_string(),
         db_path: Db::test_db_path(&format!("http-api-{desktop_id}-{test_db_id}")),
         kanna_cli_path: None,
@@ -2089,9 +2089,9 @@ fn test_router_with_revision_requester(
     let config = Config {
         relay_url: "wss://relay.example".to_string(),
         device_token: "device-token".to_string(),
-            firebase_project_id: "kanna-local".to_string(),
-            firebase_auth_emulator_url: None,
-            firebase_firestore_emulator_host: None,
+        firebase_project_id: "kanna-local".to_string(),
+        firebase_auth_emulator_url: None,
+        firebase_firestore_emulator_host: None,
         daemon_dir: "/tmp/kanna-daemon".to_string(),
         db_path: Db::test_db_path(&format!("http-api-{desktop_id}-{test_db_id}")),
         kanna_cli_path: None,
@@ -2123,9 +2123,9 @@ fn test_router_with_terminal_streamer(
     let config = Config {
         relay_url: "wss://relay.example".to_string(),
         device_token: "device-token".to_string(),
-            firebase_project_id: "kanna-local".to_string(),
-            firebase_auth_emulator_url: None,
-            firebase_firestore_emulator_host: None,
+        firebase_project_id: "kanna-local".to_string(),
+        firebase_auth_emulator_url: None,
+        firebase_firestore_emulator_host: None,
         daemon_dir: "/tmp/kanna-daemon".to_string(),
         db_path: Db::test_db_path(&format!("http-api-{desktop_id}-{test_db_id}")),
         kanna_cli_path: None,
@@ -2151,7 +2151,6 @@ mod tests {
     use crate::mobile_api::{CreateTaskResponse, MobileServerStatus, TaskActionResponse};
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
-    use axum::{routing::post, Json, Router};
     use kanna_agent_protocol::AgentEvent;
     use serde_json::from_slice;
     use std::path::{Path, PathBuf};

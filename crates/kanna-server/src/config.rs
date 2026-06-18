@@ -7,6 +7,7 @@ pub struct Config {
     pub device_token: String,
     pub firebase_project_id: String,
     pub firebase_auth_emulator_url: Option<String>,
+    #[allow(dead_code)]
     pub firebase_firestore_emulator_host: Option<String>,
     pub daemon_dir: String,
     pub db_path: String,

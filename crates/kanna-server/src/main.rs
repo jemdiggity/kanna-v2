@@ -813,6 +813,9 @@ mod tests {
 
     #[test]
     fn relay_tunnel_ksp_auth_is_already_satisfied_by_relay() {
-        assert_eq!(relay_tunnel_ksp_auth_mode(), crate::ksp::AuthMode::AllowEmpty);
+        assert_eq!(
+            relay_tunnel_ksp_auth_mode(),
+            crate::ksp::AuthMode::AllowEmpty
+        );
     }
 }

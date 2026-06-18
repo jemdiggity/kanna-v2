@@ -1,0 +1,184 @@
+{
+  "tools": [
+    {
+      "name": "kanna_list_repos",
+      "description": "List repositories known to the running Kanna desktop server.",
+      "method": "GET",
+      "path": "/v1/repos",
+      "response": "json",
+      "params": []
+    },
+    {
+      "name": "kanna_add_repo",
+      "description": "Register an existing local git repository with Kanna.",
+      "method": "POST",
+      "path": "/v1/repos",
+      "response": "json",
+      "params": [
+        { "name": "path", "type": "string", "required": true, "location": "body" },
+        { "name": "name", "type": "string", "required": false, "location": "body" }
+      ]
+    },
+    {
+      "name": "kanna_list_recent_tasks",
+      "description": "List recent open Kanna tasks.",
+      "method": "GET",
+      "path": "/v1/tasks/recent",
+      "response": "json",
+      "params": []
+    },
+    {
+      "name": "kanna_get_task",
+      "description": "Fetch one Kanna task by task ID or branch name.",
+      "method": "GET",
+      "path": "/v1/tasks/{task_id}",
+      "response": "json",
+      "params": [
+        { "name": "task_id", "type": "string", "required": true, "location": "path" }
+      ]
+    },
+    {
+      "name": "kanna_wait_task",
+      "description": "Poll a Kanna task until it finishes or closes.",
+      "method": "GET",
+      "path": "/v1/tasks/{task_id}",
+      "response": "wait",
+      "params": [
+        { "name": "task_id", "type": "string", "required": true, "location": "path" },
+        { "name": "timeout_secs", "type": "integer", "required": false, "location": "body", "default": 600, "max": 600 },
+        { "name": "poll_secs", "type": "integer", "required": false, "location": "body", "default": 3, "min": 1 },
+        { "name": "until", "type": "string", "required": false, "location": "body", "enum": ["finished", "closed"], "default": "finished" }
+      ]
+    },
+    {
+      "name": "kanna_task_logs",
+      "description": "Fetch recent logs for a Kanna task.",
+      "method": "GET",
+      "path": "/v1/tasks/{task_id}/logs",
+      "response": "text",
+      "params": [
+        { "name": "task_id", "type": "string", "required": true, "location": "path" },
+        { "name": "tail", "type": "integer", "required": false, "location": "query" }
+      ]
+    },
+    {
+      "name": "kanna_search_tasks",
+      "description": "Search Kanna tasks by query text.",
+      "method": "GET",
+      "path": "/v1/tasks/search",
+      "response": "json",
+      "params": [
+        { "name": "query", "type": "string", "required": true, "location": "query" }
+      ]
+    },
+    {
+      "name": "kanna_list_repo_tasks",
+      "description": "List Kanna tasks for a repository.",
+      "method": "GET",
+      "path": "/v1/repos/{repo_id}/tasks",
+      "response": "json",
+      "params": [
+        { "name": "repo_id", "type": "string", "required": true, "location": "path" }
+      ]
+    },
+    {
+      "name": "kanna_create_task",
+      "description": "Create a new Kanna task.",
+      "method": "POST",
+      "path": "/v1/tasks",
+      "response": "json",
+      "params": [
+        { "name": "repo_id", "type": "string", "required": true, "location": "body", "key": "repoId" },
+        { "name": "prompt", "type": "string", "required": true, "location": "body" },
+        { "name": "pipeline_name", "type": "string", "required": false, "location": "body", "key": "pipelineName" },
+        { "name": "base_ref", "type": "string", "required": false, "location": "body", "key": "baseRef" },
+        { "name": "stage", "type": "string", "required": false, "location": "body" },
+        { "name": "agent_provider", "type": "string", "required": false, "location": "body", "key": "agentProvider" },
+        { "name": "model", "type": "string", "required": false, "location": "body" },
+        { "name": "permission_mode", "type": "string", "required": false, "location": "body", "key": "permissionMode" },
+        { "name": "notify_task_id", "type": "string", "required": false, "location": "body", "key": "notifyTaskId" },
+        { "name": "allowed_tools", "type": "string_array", "required": false, "location": "body", "key": "allowedTools" },
+        { "name": "blocker_task_ids", "type": "string_array", "required": false, "location": "body", "key": "blockerTaskIds" }
+      ]
+    },
+    {
+      "name": "kanna_send_task_input",
+      "description": "Send input text to a Kanna task terminal session.",
+      "method": "POST",
+      "path": "/v1/tasks/{task_id}/input",
+      "response": "json",
+      "params": [
+        { "name": "task_id", "type": "string", "required": true, "location": "path" },
+        { "name": "input", "type": "string", "required": true, "location": "body" }
+      ]
+    },
+    {
+      "name": "kanna_close_task",
+      "description": "Close a Kanna task.",
+      "method": "POST",
+      "path": "/v1/tasks/{task_id}/actions/close",
+      "response": "json",
+      "params": [
+        { "name": "task_id", "type": "string", "required": true, "location": "path" }
+      ]
+    },
+    {
+      "name": "kanna_advance_stage",
+      "description": "Advance a Kanna task to the next pipeline stage.",
+      "method": "POST",
+      "path": "/v1/tasks/{task_id}/actions/advance-stage",
+      "response": "json",
+      "params": [
+        { "name": "task_id", "type": "string", "required": true, "location": "path" }
+      ]
+    },
+    {
+      "name": "kanna_block_task",
+      "description": "Mark a Kanna task as blocked by one or more tasks.",
+      "method": "POST",
+      "path": "/v1/tasks/{task_id}/actions/block",
+      "response": "json",
+      "params": [
+        { "name": "task_id", "type": "string", "required": true, "location": "path" },
+        { "name": "blocker_task_ids", "type": "string_array", "required": true, "location": "body", "key": "blockerTaskIds" }
+      ]
+    },
+    {
+      "name": "kanna_unblock_task",
+      "description": "Remove all blockers from a Kanna task.",
+      "method": "POST",
+      "path": "/v1/tasks/{task_id}/actions/unblock",
+      "response": "json",
+      "params": [
+        { "name": "task_id", "type": "string", "required": true, "location": "path" }
+      ]
+    },
+    {
+      "name": "kanna_complete_stage",
+      "description": "Record completion for a Kanna pipeline stage.",
+      "method": "POST",
+      "path": "/v1/tasks/{task_id}/actions/complete-stage",
+      "response": "json",
+      "params": [
+        { "name": "task_id", "type": "string", "required": true, "location": "path" },
+        { "name": "status", "type": "string", "required": true, "location": "body", "enum": ["success", "failure"] },
+        { "name": "summary", "type": "string", "required": true, "location": "body" },
+        { "name": "metadata", "type": "object", "required": false, "location": "body" }
+      ]
+    },
+    {
+      "name": "kanna_request_revision",
+      "description": "Create a revision task from an existing Kanna task branch.",
+      "method": "POST",
+      "path": "/v1/tasks/{task_id}/actions/request-revision",
+      "response": "json",
+      "params": [
+        { "name": "task_id", "type": "string", "required": true, "location": "path" },
+        { "name": "target_stage", "type": "string", "required": false, "location": "body", "key": "targetStage", "default": "in progress" },
+        { "name": "summary", "type": "string", "required": true, "location": "body" },
+        { "name": "prompt", "type": "string", "required": true, "location": "body" },
+        { "name": "metadata", "type": "object", "required": false, "location": "body" }
+      ]
+    }
+  ]
+}

@@ -14,9 +14,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use axum::extract::ws::{Message as WsMessage, WebSocket};
 use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
-use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
-use tokio::sync::RwLock;
+use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use tokio::sync::mpsc;
+use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
@@ -26,7 +26,7 @@ use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent, Ses
 
 use crate::daemon_client::DaemonClient;
 use crate::db::Db;
-use crate::http_api::{AppState, dispatch_http_invoke};
+use crate::http_api::{dispatch_http_invoke, AppState};
 
 #[derive(Debug, serde::Deserialize)]
 struct FirebaseLookupResponse {
@@ -57,6 +57,7 @@ const FIREBASE_CERTS_URL: &str =
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthMode {
     AllowEmpty,
+    #[allow(dead_code)]
     RequireCredential,
 }
 
