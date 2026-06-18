@@ -250,6 +250,7 @@ export const useKannaStore = defineStore("kanna", () => {
   services.prewarmWorktreeShellSession = sessions.prewarmWorktreeShellSession;
   services.preparePtySession = sessions.preparePtySession;
   services.spawnPtySession = sessions.spawnPtySession;
+  services.recoverTaskSession = sessions.recoverTaskSession;
 
   services.loadPipeline = pipeline.loadPipeline;
   services.loadAgent = pipeline.loadAgent;
@@ -939,6 +940,7 @@ Use this branch as the default when the user does not specify a target branch. B
 
     createItem: tasks.createItem,
     spawnPtySession: sessions.spawnPtySession,
+    recoverTaskSession: sessions.recoverTaskSession,
     spawnShellSession: sessions.spawnShellSession,
     closeTask: tasks.closeTask,
     undoClose: tasks.undoClose,

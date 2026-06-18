@@ -64,6 +64,11 @@ export interface PreparedPtySession {
   kannaCliPath?: string;
 }
 
+export interface TaskSessionRecoveryOptions {
+  cols?: number;
+  rows?: number;
+}
+
 export interface WorktreeBootstrapResult {
   visibleBootstrapSteps: string[];
 }
@@ -175,6 +180,10 @@ export interface StoreServices {
     cols?: number,
     rows?: number,
     options?: PtySpawnOptions,
+  ) => Promise<void>;
+  recoverTaskSession?: (
+    sessionId: string,
+    options?: TaskSessionRecoveryOptions,
   ) => Promise<void>;
   syncTaskStatusesFromDaemon?: () => Promise<void>;
   applyTaskRuntimeStatus?: (item: PipelineItem, status: string) => Promise<void>;

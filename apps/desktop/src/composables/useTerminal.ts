@@ -59,6 +59,7 @@ export interface TerminalOptions {
   worktreePath?: string
   agentTerminal?: boolean
   skipInitialReconnectEffects?: boolean
+  recoverSession?: (sessionId: string, options?: { cols?: number; rows?: number }) => Promise<void>
 }
 
 const CLIPBOARD_IMAGE_TTL_MS = 30_000
@@ -945,13 +946,20 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
       await ensureFitted()
       const fittedTerminal = getLiveTerminal()
       if (!fittedTerminal) return
-      await spawnOptions.spawnFn(
-        sessionId,
-        spawnOptions.cwd,
-        spawnOptions.prompt,
-        fittedTerminal.cols,
-        fittedTerminal.rows,
-      )
+      if (options?.recoverSession) {
+        await options.recoverSession(sessionId, {
+          cols: fittedTerminal.cols,
+          rows: fittedTerminal.rows,
+        })
+      } else {
+        await spawnOptions.spawnFn(
+          sessionId,
+          spawnOptions.cwd,
+          spawnOptions.prompt,
+          fittedTerminal.cols,
+          fittedTerminal.rows,
+        )
+      }
       attached = false
       terminalStreamAttached = false
       connecting = false

@@ -1,4 +1,4 @@
-import type { AgentProvider } from "@kanna/db";
+import type { AgentProvider, PipelineItem } from "@kanna/db";
 import { getRepo, updateAgentSessionId, updatePipelineItemActivity } from "@kanna/db";
 import { buildKannaRuntimeSystemPrompt, buildKannaRuntimeUserPrompt } from "../../../../packages/core/src/pipeline/prompt-builder";
 import { invoke } from "../invoke";
@@ -15,7 +15,7 @@ import {
 } from "./agent-provider";
 import { resolveActivityForRuntimeStatus, shouldIgnoreRuntimeStatusDuringSetup } from "./taskRuntimeStatus";
 import { isReadableDirectory, resolveShellSpawnCwd } from "../utils/shellCwd";
-import { readRepoConfig, requireService, type PreparedPtySession, type PtySpawnOptions, type StoreContext } from "./state";
+import { readRepoConfig, requireService, type PreparedPtySession, type PtySpawnOptions, type StoreContext, type TaskSessionRecoveryOptions } from "./state";
 import { isTaskSelectedInAnyWindow } from "./windowSelection";
 
 interface DaemonSessionInfo {
@@ -62,6 +62,10 @@ export interface SessionsApi {
     cols?: number,
     rows?: number,
     options?: PtySpawnOptions,
+  ) => Promise<void>;
+  recoverTaskSession: (
+    sessionId: string,
+    options?: TaskSessionRecoveryOptions,
   ) => Promise<void>;
 }
 
@@ -245,6 +249,56 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
       return;
     }
     await spawnShellSession(sessionId, worktreePath, portEnv, true, fallbackCwd);
+  }
+
+  async function resolveTaskWorktreePath(item: PipelineItem): Promise<string> {
+    const repo = context.state.repos.value.find((candidate) => candidate.id === item.repo_id)
+      ?? await getRepo(context.requireDb(), item.repo_id);
+    if (!repo) {
+      throw new Error(`repo not found for task ${item.id}`);
+    }
+    return item.branch ? `${repo.path}/.kanna-worktrees/${item.branch}` : repo.path;
+  }
+
+  async function buildAgentSessionEnv(
+    sessionId: string,
+    worktreePath: string,
+    portEnv: Record<string, string>,
+  ): Promise<Record<string, string>> {
+    const repoConfig = await readRepoConfig(worktreePath).catch((error) => {
+      console.error("[store] failed to read SDK task config during session recovery:", error);
+      return {};
+    });
+    const inheritedPath = await invoke<string>("read_env_var", { name: "PATH" }).catch((error) => {
+      console.debug("[store] PATH not available while recovering SDK task env:", error);
+      return null;
+    });
+    const agentBaseEnv = buildWorktreeSessionEnv({
+      worktreePath,
+      repoConfig,
+      portEnv,
+      inheritedPath,
+    });
+    return {
+      ...agentBaseEnv,
+      ...buildTaskRuntimeEnv({
+        taskId: sessionId,
+        dbName: await resolveDbName(),
+        appDataDir: await invoke<string>("get_app_data_dir"),
+        socketPath: await invoke<string>("get_pipeline_socket_path"),
+        serverBaseUrl: resolveKannaServerBaseUrl(
+          await invoke<string>("read_env_var", { name: "KANNA_MOBILE_SERVER_PORT" }).catch((error) => {
+            console.debug("[store] KANNA_MOBILE_SERVER_PORT not set while recovering SDK task env:", error);
+            return null;
+          }),
+        ),
+        kannaCliPath: await invoke<string>("which_binary", { name: "kanna-cli" }).catch((error) => {
+          console.debug("[store] kanna-cli not available while recovering SDK task env:", error);
+          return null;
+        }),
+        path: agentBaseEnv.PATH ?? inheritedPath,
+      }),
+    };
   }
 
   async function preparePtySession(
@@ -487,6 +541,53 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
     await syncTaskStatusesFromDaemon();
   }
 
+  async function recoverTaskSession(
+    sessionId: string,
+    options: TaskSessionRecoveryOptions = {},
+  ): Promise<void> {
+    const item = context.state.items.value.find((candidate) => candidate.id === sessionId);
+    if (!item) {
+      throw new Error(`task not found for session recovery: ${sessionId}`);
+    }
+    if (item.closed_at !== null || item.stage === "done") {
+      throw new Error(`cannot recover closed task session: ${sessionId}`);
+    }
+
+    const worktreePath = await resolveTaskWorktreePath(item);
+    const agentProvider = requireResolvedAgentProvider(item.agent_provider ?? undefined);
+    const prompt = item.prompt ?? "";
+    const cols = options.cols ?? 80;
+    const rows = options.rows ?? 24;
+    const portEnv = parsePortEnv(item.port_env);
+
+    if (item.agent_type === "agent" || item.agent_type === "sdk") {
+      await invoke("spawn_agent_session", {
+        sessionId,
+        cwd: worktreePath,
+        prompt,
+        env: await buildAgentSessionEnv(sessionId, worktreePath, portEnv),
+        agentProvider,
+        systemPrompt: buildKannaRuntimeSystemPrompt(),
+        permissionMode: null,
+        model: null,
+        allowedTools: null,
+        disallowedTools: null,
+        maxTurns: null,
+        maxBudgetUsd: null,
+        executable: null,
+      });
+      await syncTaskStatusesFromDaemon();
+      return;
+    }
+
+    await spawnPtySession(sessionId, worktreePath, prompt, cols, rows, {
+      agentProvider,
+      portEnv,
+      worktreePath,
+      ...(item.agent_session_id ? { resumeSessionId: item.agent_session_id } : {}),
+    });
+  }
+
   return {
     applyTaskRuntimeStatus,
     syncTaskStatusesFromDaemon,
@@ -499,5 +600,6 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
     prewarmWorktreeShellSession,
     preparePtySession,
     spawnPtySession,
+    recoverTaskSession,
   };
 }
