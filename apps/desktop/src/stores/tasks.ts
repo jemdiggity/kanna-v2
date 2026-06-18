@@ -59,7 +59,7 @@ import {
 import { isTaskTearingDown } from "./taskStages";
 import { isTaskSelectedInAnyWindow } from "./windowSelection";
 import { resolveDbName } from "./db";
-import { readRepoConfig, requireService, type CreateItemOptions, type StoreContext, type WorktreeBootstrapResult } from "./state";
+import { readRepoConfig, requireService, type AgentSpawnRecoveryOptions, type CreateItemOptions, type StoreContext, type WorktreeBootstrapResult } from "./state";
 import { debugLog } from "../utils/debugLog";
 import { normalizeAgentExecutionType, type AgentExecutionType } from "./agentExecutionType";
 
@@ -646,6 +646,14 @@ export function createTasksApi(
     });
     const providerCandidatesExplicit = customTaskAgentProvider ?? realE2eAgentOverride?.agentProvider ?? requestedAgentProviders;
     const resolvedModel = customTaskModel ?? realE2eAgentOverride?.model ?? requestedModel ?? null;
+    const agentSpawnOptions: AgentSpawnRecoveryOptions = {
+      model: resolvedModel,
+      permissionMode: opts?.customTask?.permissionMode ?? null,
+      allowedTools: opts?.customTask?.allowedTools ?? null,
+      disallowedTools: opts?.customTask?.disallowedTools ?? null,
+      maxTurns: opts?.customTask?.maxTurns ?? null,
+      maxBudgetUsd: opts?.customTask?.maxBudgetUsd ?? null,
+    };
 
     const pendingPlaceholder = buildPendingTaskPlaceholder({
       id,
@@ -793,6 +801,7 @@ export function createTasksApi(
               activity: "working",
               display_name: displayName,
               base_ref: baseRef,
+              agent_spawn_options: JSON.stringify(agentSpawnOptions),
             });
 
             pipelineItemInserted = true;

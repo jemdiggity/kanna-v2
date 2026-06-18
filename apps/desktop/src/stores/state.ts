@@ -55,6 +55,15 @@ export interface PtySpawnOptions {
   repoConfig?: RepoConfig;
 }
 
+export interface AgentSpawnRecoveryOptions {
+  model?: string | null;
+  permissionMode?: string | null;
+  allowedTools?: string[] | null;
+  disallowedTools?: string[] | null;
+  maxTurns?: number | null;
+  maxBudgetUsd?: number | null;
+}
+
 export interface PreparedPtySession {
   env: Record<string, string>;
   setupCmds: string[];

@@ -7,14 +7,22 @@ import { callVueMethod, execDb } from "../helpers/vue";
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
 
 const taskId = "themed-agent-task";
+const recoveryTaskId = "themed-agent-recovery-task";
 
 function isVueCallError(value: unknown): value is { __error: string } {
   return Boolean(value && typeof value === "object" && "__error" in value);
 }
 
-function installMockKspScript(): string {
+function installMockKspScript(options: { failFirstAgentAttach?: boolean; recoveredText?: string } = {}): string {
+  const failFirstAgentAttach = options.failFirstAgentAttach === true;
+  const recoveredText = options.recoveredText ?? "Hello **themed** view";
   return `
     window.__KSP_SENT__ = [];
+    window.__KSP_AGENT_ATTACH_COUNT__ = 0;
+    window.__KSP_MOCK_OPTIONS__ = {
+      failFirstAgentAttach: ${JSON.stringify(failFirstAgentAttach)},
+      recoveredText: ${JSON.stringify(recoveredText)}
+    };
     window.WebSocket = class MockKspSocket {
       constructor(url) {
         this.url = url;
@@ -32,13 +40,24 @@ function installMockKspScript(): string {
           return;
         }
         if (frame.type === "attach" && frame.kind === "agent") {
+          window.__KSP_AGENT_ATTACH_COUNT__ += 1;
+          const options = window.__KSP_MOCK_OPTIONS__ || {};
+          if (options.failFirstAgentAttach && window.__KSP_AGENT_ATTACH_COUNT__ === 1) {
+            this.onmessage?.({ data: JSON.stringify({
+              type: "error",
+              task_id: frame.task_id,
+              code: "session_not_found",
+              message: "agent session not found: " + frame.task_id
+            }) });
+            return;
+          }
           this.onmessage?.({ data: JSON.stringify({
             type: "agent_snapshot",
             task_id: frame.task_id,
             next_seq: 8,
             events: [
               { seq: 1, event: { type: "turn_started", model: "claude-test" } },
-              { seq: 2, event: { type: "assistant_text", text: "Hello **themed** view", truncated: false } },
+              { seq: 2, event: { type: "assistant_text", text: options.recoveredText || "Hello **themed** view", truncated: false } },
               { seq: 3, event: { type: "tool_call", call_id: "call-1", tool_name: "Bash", input: { command: "pnpm test" } } },
               { seq: 4, event: { type: "tool_result", call_id: "call-1", output: "passed", truncated: false, is_error: false } },
               { seq: 5, event: { type: "permission_request", request_id: "perm-1", tool_name: "Edit", input: { file_path: "README.md" } } },
@@ -54,6 +73,28 @@ function installMockKspScript(): string {
       }
     };
   `;
+}
+
+async function waitForInvoke<T>(
+  client: WebDriverClient,
+  predicateSource: string,
+  timeoutMs = 5_000,
+): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  let calls: unknown[] = [];
+
+  while (Date.now() < deadline) {
+    const result = await client.executeSync<{ match: T | null; calls: unknown[] }>(
+      `const calls = window.__KANNA_E2E__.invokes.getAll();
+       const match = calls.find(${predicateSource});
+       return { match: match ? JSON.parse(JSON.stringify(match.args)) : null, calls };`,
+    );
+    calls = result.calls;
+    if (result.match) return result.match;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+
+  throw new Error(`Timed out waiting for E2E invoke; calls were ${JSON.stringify(calls)}`);
 }
 
 describe("themed agent view", () => {
@@ -205,5 +246,78 @@ describe("themed agent view", () => {
        setTimeout(() => { store.$patch({ selectedItemId: ${JSON.stringify(taskId)} }); }, 0);`,
     );
     await client.waitForText('[data-testid="agent-message-view"]', "Hello themed view", 5_000);
+  });
+
+  it("recovers a missing headless agent session and reattaches to the recovered snapshot", async () => {
+    const repoId = await client.executeSync<string>(
+      `return window.__KANNA_E2E__.setupState.store.repos.find((repo) => repo.path === ${JSON.stringify(testRepoPath)})?.id;`,
+    );
+    expect(repoId).toBeTruthy();
+
+    await execDb(
+      client,
+      `INSERT INTO pipeline_item (
+         id, repo_id, prompt, pipeline, stage, tags, branch, agent_type, agent_provider,
+         activity, agent_spawn_options, created_at, updated_at
+       ) VALUES (?, ?, 'Recover this task', 'default', 'in progress', '[]', 'task-themed-agent-recovery-task',
+         'agent', 'claude', 'working', ?, datetime('now'), datetime('now'))`,
+      [
+        recoveryTaskId,
+        repoId,
+        JSON.stringify({
+          model: "claude-sonnet-test",
+          permissionMode: "dontAsk",
+          allowedTools: ["Read", "Bash"],
+          disallowedTools: ["WebFetch"],
+          maxTurns: 5,
+          maxBudgetUsd: 2.25,
+        }),
+      ],
+    );
+    await execDb(
+      client,
+      `INSERT INTO terminal_session (id, repo_id, pipeline_item_id, label, cwd, daemon_session_id)
+       VALUES (?, ?, ?, 'agent', ?, ?)`,
+      [`agent-${recoveryTaskId}`, repoId, recoveryTaskId, testRepoPath, recoveryTaskId],
+    );
+    const worktreeRoot = join(testRepoPath, ".kanna-worktrees", "task-themed-agent-recovery-task");
+    await mkdir(worktreeRoot, { recursive: true });
+
+    await client.executeSync(installMockKspScript({
+      failFirstAgentAttach: true,
+      recoveredText: "Recovered **agent** snapshot",
+    }));
+    await client.executeSync("window.__KANNA_E2E__.invokes.clear();");
+
+    const loadResult = await callVueMethod(client, "loadItems");
+    if (isVueCallError(loadResult)) throw new Error(loadResult.__error);
+    const selectResult = await callVueMethod(client, "handleSelectItem", recoveryTaskId);
+    if (isVueCallError(selectResult)) throw new Error(selectResult.__error);
+
+    const spawnArgs = await waitForInvoke<{
+      sessionId: string;
+      model: string | null;
+      permissionMode: string | null;
+      allowedTools: string[] | null;
+      disallowedTools: string[] | null;
+      maxTurns: number | null;
+      maxBudgetUsd: number | null;
+    }>(
+      client,
+      `(call) => call.cmd === "spawn_agent_session" && call.args?.sessionId === ${JSON.stringify(recoveryTaskId)}`,
+    );
+    expect(spawnArgs).toEqual(expect.objectContaining({
+      sessionId: recoveryTaskId,
+      model: "claude-sonnet-test",
+      permissionMode: "dontAsk",
+      allowedTools: ["Read", "Bash"],
+      disallowedTools: ["WebFetch"],
+      maxTurns: 5,
+      maxBudgetUsd: 2.25,
+    }));
+
+    await client.waitForText('[data-testid="agent-message-view"]', "Recovered agent snapshot", 5_000);
+    const attachCount = await client.executeSync<number>("return window.__KSP_AGENT_ATTACH_COUNT__;");
+    expect(attachCount).toBeGreaterThanOrEqual(2);
   });
 });

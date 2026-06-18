@@ -37,6 +37,7 @@ export interface PipelineItem {
   display_name: string | null;
   last_output_preview: string | null;
   port_env: string | null;  // JSON: {"KANNA_DEV_PORT": "1421", ...}
+  agent_spawn_options?: string | null; // JSON launch options for missing-session recovery
   pinned: number;          // 0 or 1
   pin_order: number | null;
   base_ref: string | null;

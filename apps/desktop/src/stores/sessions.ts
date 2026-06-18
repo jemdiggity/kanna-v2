@@ -15,7 +15,7 @@ import {
 } from "./agent-provider";
 import { resolveActivityForRuntimeStatus, shouldIgnoreRuntimeStatusDuringSetup } from "./taskRuntimeStatus";
 import { isReadableDirectory, resolveShellSpawnCwd } from "../utils/shellCwd";
-import { readRepoConfig, requireService, type PreparedPtySession, type PtySpawnOptions, type StoreContext, type TaskSessionRecoveryOptions } from "./state";
+import { readRepoConfig, requireService, type AgentSpawnRecoveryOptions, type PreparedPtySession, type PtySpawnOptions, type StoreContext, type TaskSessionRecoveryOptions } from "./state";
 import { isTaskSelectedInAnyWindow } from "./windowSelection";
 
 interface DaemonSessionInfo {
@@ -258,6 +258,28 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
       throw new Error(`repo not found for task ${item.id}`);
     }
     return item.branch ? `${repo.path}/.kanna-worktrees/${item.branch}` : repo.path;
+  }
+
+  function parseAgentSpawnRecoveryOptions(raw: string | null | undefined): AgentSpawnRecoveryOptions {
+    if (!raw) return {};
+    try {
+      const parsed = JSON.parse(raw) as AgentSpawnRecoveryOptions;
+      return {
+        model: typeof parsed.model === "string" ? parsed.model : null,
+        permissionMode: typeof parsed.permissionMode === "string" ? parsed.permissionMode : null,
+        allowedTools: Array.isArray(parsed.allowedTools)
+          ? parsed.allowedTools.filter((tool): tool is string => typeof tool === "string")
+          : null,
+        disallowedTools: Array.isArray(parsed.disallowedTools)
+          ? parsed.disallowedTools.filter((tool): tool is string => typeof tool === "string")
+          : null,
+        maxTurns: typeof parsed.maxTurns === "number" ? parsed.maxTurns : null,
+        maxBudgetUsd: typeof parsed.maxBudgetUsd === "number" ? parsed.maxBudgetUsd : null,
+      };
+    } catch (error) {
+      console.debug("[store] failed to parse agent spawn recovery options:", error);
+      return {};
+    }
   }
 
   async function buildAgentSessionEnv(
@@ -559,6 +581,7 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
     const cols = options.cols ?? 80;
     const rows = options.rows ?? 24;
     const portEnv = parsePortEnv(item.port_env);
+    const spawnOptions = parseAgentSpawnRecoveryOptions(item.agent_spawn_options);
 
     if (item.agent_type === "agent" || item.agent_type === "sdk") {
       await invoke("spawn_agent_session", {
@@ -568,12 +591,12 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
         env: await buildAgentSessionEnv(sessionId, worktreePath, portEnv),
         agentProvider,
         systemPrompt: buildKannaRuntimeSystemPrompt(),
-        permissionMode: null,
-        model: null,
-        allowedTools: null,
-        disallowedTools: null,
-        maxTurns: null,
-        maxBudgetUsd: null,
+        permissionMode: spawnOptions.permissionMode ?? null,
+        model: spawnOptions.model ?? null,
+        allowedTools: spawnOptions.allowedTools ?? null,
+        disallowedTools: spawnOptions.disallowedTools ?? null,
+        maxTurns: spawnOptions.maxTurns ?? null,
+        maxBudgetUsd: spawnOptions.maxBudgetUsd ?? null,
         executable: null,
       });
       await syncTaskStatusesFromDaemon();
