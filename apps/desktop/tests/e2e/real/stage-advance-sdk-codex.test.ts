@@ -7,6 +7,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
 import { cleanupWorktrees, importTestRepo, resetDatabase } from "../helpers/reset";
 import { dismissStartupShortcutsModal } from "../helpers/startupOverlays";
+import { advanceStageWithShortcut } from "../helpers/stageAdvance";
 import { callVueMethod, execDb, queryDb, tauriInvoke } from "../helpers/vue";
 import { WebDriverClient } from "../helpers/webdriver";
 import { waitForFile, waitForNewTaskWorktree } from "../helpers/worktreeFs";
@@ -195,8 +196,7 @@ describe("real Codex SDK stage advance", () => {
 
     const existingQaTaskIds = await getStageTaskIds(client, repoId, "qa");
     const nextBaseline = new Set(await readTaskWorktreeNames(testRepoPath));
-    const advanceResult = await callVueMethod(client, "store.advanceStage", sourceTaskId);
-    if (isVueCallError(advanceResult)) throw new Error(advanceResult.__error);
+    await advanceStageWithShortcut(client, "codex-sdk-source-ready.txt", sourceTaskId);
 
     nextTaskId = await waitForCreatedStageTask(client, repoId, "qa", existingQaTaskIds);
     const nextRows = (await queryDb(

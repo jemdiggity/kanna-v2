@@ -5,6 +5,7 @@ import { WebDriverClient } from "../helpers/webdriver";
 import { resetDatabase } from "../helpers/reset";
 import { callVueMethod, queryDb, tauriInvoke } from "../helpers/vue";
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
+import { advanceStageWithShortcut } from "../helpers/stageAdvance";
 
 function isVueCallError(value: unknown): value is { __error: string } {
   return Boolean(
@@ -117,8 +118,7 @@ describe("pipeline title preservation", () => {
       return exists === true;
     }, 10_000, "source task worktree was not created");
 
-    const advanceResult = await callVueMethod(client, "store.advanceStage", sourceTask.id);
-    if (isVueCallError(advanceResult)) throw new Error(advanceResult.__error);
+    await advanceStageWithShortcut(client, originalTitle, sourceTask.id);
 
     await waitForCondition(async () => {
       const rows = (await queryDb(

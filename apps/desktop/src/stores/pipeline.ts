@@ -106,6 +106,28 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
     });
   }
 
+  async function sendStagePromptToTask(
+    item: import("@kanna/db").PipelineItem,
+    stagePrompt: string,
+    agentProvider: string | null | undefined,
+    kittyKeyboard: boolean,
+  ): Promise<void> {
+    if (normalizeAgentExecutionType(item.agent_type) === "agent") {
+      await invoke("send_agent_input", { sessionId: item.id, text: stagePrompt });
+      return;
+    }
+
+    const inputChunks = encodeAgentStageInputChunks(stagePrompt, { agentProvider, kittyKeyboard });
+    for (let index = 0; index < inputChunks.length; index += 1) {
+      const data = inputChunks[index];
+      if (!data) continue;
+      await invoke("send_input", { sessionId: item.id, data });
+      if (agentProvider === "codex" && index < inputChunks.length - 1) {
+        await delay(CODEX_STAGE_SUBMIT_DELAY_MS);
+      }
+    }
+  }
+
   async function continueStageInPlace(
     item: import("@kanna/db").PipelineItem,
     repo: import("@kanna/db").Repo,
@@ -157,15 +179,7 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
       await updatePipelineItemStage(context.requireDb(), taskId, nextStageName);
       await clearPipelineItemStageResult(context.requireDb(), taskId);
       await requireService(context.services.reloadSnapshot, "reloadSnapshot")();
-      const inputChunks = encodeAgentStageInputChunks(stagePrompt, { agentProvider, kittyKeyboard });
-      for (let index = 0; index < inputChunks.length; index += 1) {
-        const data = inputChunks[index];
-        if (!data) continue;
-        await invoke("send_input", { sessionId: taskId, data });
-        if (agentProvider === "codex" && index < inputChunks.length - 1) {
-          await delay(CODEX_STAGE_SUBMIT_DELAY_MS);
-        }
-      }
+      await sendStagePromptToTask(item, stagePrompt, agentProvider, kittyKeyboard);
     } catch (error) {
       await updatePipelineItemStage(context.requireDb(), taskId, previousStageName);
       await requireService(context.services.reloadSnapshot, "reloadSnapshot")();
@@ -227,18 +241,12 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
       await updatePipelineItemActivePostAction(context.requireDb(), item.id, postAction.name);
       await clearPipelineItemStageResult(context.requireDb(), item.id);
       await requireService(context.services.reloadSnapshot, "reloadSnapshot")();
-      const inputChunks = encodeAgentStageInputChunks(stagePrompt, {
+      await sendStagePromptToTask(
+        item,
+        stagePrompt,
         agentProvider,
-        kittyKeyboard: item.agent_provider === "claude" && Boolean(item.prompt),
-      });
-      for (let index = 0; index < inputChunks.length; index += 1) {
-        const data = inputChunks[index];
-        if (!data) continue;
-        await invoke("send_input", { sessionId: item.id, data });
-        if (agentProvider === "codex" && index < inputChunks.length - 1) {
-          await delay(CODEX_STAGE_SUBMIT_DELAY_MS);
-        }
-      }
+        item.agent_provider === "claude" && Boolean(item.prompt),
+      );
     } catch (error) {
       await clearPipelineItemActivePostAction(context.requireDb(), item.id);
       await requireService(context.services.reloadSnapshot, "reloadSnapshot")();
