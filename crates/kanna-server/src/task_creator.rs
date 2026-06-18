@@ -1102,6 +1102,7 @@ fn build_post_action_prompt(
     Ok(task_prompt.to_string())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn prepare_continue_stage(
     source_task_id: &str,
     previous_stage: &str,
@@ -1126,6 +1127,7 @@ fn prepare_continue_stage(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn prepare_post_action_stage(
     source_task_id: &str,
     current_stage: &str,

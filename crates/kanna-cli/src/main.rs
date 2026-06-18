@@ -1,4 +1,8 @@
 use clap::{Parser, Subcommand};
+use kanna_tool_catalog::{
+    load_catalog, resolve_request, Catalog, Method as CatalogMethod, ResolvedRequest, ResponseKind,
+    WaitUntil as CatalogWaitUntil,
+};
 use rusqlite::Connection;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
@@ -50,6 +54,11 @@ enum Commands {
     Task {
         #[command(subcommand)]
         command: TaskCommands,
+    },
+    /// List and call catalog-backed Kanna tools through the desktop local API
+    Tool {
+        #[command(subcommand)]
+        command: ToolCommands,
     },
 }
 
@@ -274,6 +283,29 @@ enum TaskCommands {
         /// The task/pipeline_item ID to close
         #[arg(long)]
         task_id: String,
+
+        /// Override the local Kanna server base URL
+        #[arg(long)]
+        server_url: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ToolCommands {
+    /// Print the active catalog tools as MCP tools/list JSON
+    List,
+    /// Call any catalog-backed Kanna tool
+    Call {
+        /// Catalog tool name
+        name: String,
+
+        /// Tool arguments as a JSON object
+        #[arg(long)]
+        json: Option<String>,
+
+        /// Tool argument as key=value. Repeat to pass multiple values.
+        #[arg(long)]
+        arg: Vec<String>,
 
         /// Override the local Kanna server base URL
         #[arg(long)]
@@ -614,6 +646,71 @@ fn parse_metadata_json(metadata: &Option<String>) -> Result<Option<Value>, Strin
     }
 }
 
+fn load_tool_catalog_from_current_dir() -> Result<Catalog, String> {
+    let cwd = env::current_dir().map_err(|e| format!("failed to read current directory: {e}"))?;
+    let loaded = load_catalog(&cwd);
+    if let Some(warning) = loaded.warning {
+        eprintln!("Warning: {warning}");
+    }
+    Ok(loaded.catalog)
+}
+
+fn build_tool_call_args(
+    json_arg: &Option<String>,
+    repeated_args: &[String],
+) -> Result<Value, String> {
+    let mut args = match json_arg {
+        Some(raw) => serde_json::from_str::<Value>(raw)
+            .map_err(|e| format!("--json is not valid JSON: {e}"))?,
+        None => serde_json::json!({}),
+    };
+
+    let Some(args_object) = args.as_object_mut() else {
+        return Err("--json must be a JSON object".to_string());
+    };
+
+    for raw_arg in repeated_args {
+        let Some((key, raw_value)) = raw_arg.split_once('=') else {
+            return Err(format!("--arg must be key=value, got {raw_arg}"));
+        };
+        let value = serde_json::from_str::<Value>(raw_value)
+            .unwrap_or_else(|_| Value::String(raw_value.to_string()));
+        args_object.insert(key.to_string(), value);
+    }
+
+    Ok(args)
+}
+
+#[cfg(test)]
+fn task_create_flag_names() -> Vec<String> {
+    vec![
+        "repo_id",
+        "prompt",
+        "pipeline_name",
+        "base_ref",
+        "stage",
+        "agent_provider",
+        "model",
+        "permission_mode",
+        "allowed_tools",
+        "blocker_task_ids",
+        "notify_task_id",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
+#[cfg(test)]
+fn catalog_create_task_param_names() -> Vec<String> {
+    kanna_tool_catalog::bundled_catalog()
+        .tools
+        .into_iter()
+        .find(|tool| tool.name == "kanna_create_task")
+        .map(|tool| tool.params.into_iter().map(|param| param.name).collect())
+        .unwrap_or_default()
+}
+
 fn join_server_url(base_url: &str, path: &str) -> String {
     format!("{}{}", base_url.trim_end_matches('/'), path)
 }
@@ -724,6 +821,30 @@ async fn post_no_content_json<B: Serialize>(
     Ok(())
 }
 
+async fn post_catalog_json(base_url: &str, path: &str, body: &Value) -> Result<Value, String> {
+    let response = reqwest::Client::new()
+        .post(join_server_url(base_url, path))
+        .json(body)
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {e}"))?;
+    let status = response.status();
+    if status == reqwest::StatusCode::NO_CONTENT {
+        return Ok(serde_json::json!({ "ok": true }));
+    }
+    if !status.is_success() {
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|e| format!("failed to read error body: {e}"));
+        return Err(format!("request failed with status {status}: {body}"));
+    }
+    response
+        .json::<Value>()
+        .await
+        .map_err(|e| format!("failed to decode response: {e}"))
+}
+
 async fn list_repos_via_api(base_url: &str) -> Result<Vec<RepoSummary>, String> {
     get_json(base_url, "/v1/repos").await
 }
@@ -790,6 +911,82 @@ async fn wait_task_via_api(
         }
         tokio::time::sleep(poll_interval).await;
     }
+}
+
+fn catalog_task_matches_wait_until(task: &Value, until: CatalogWaitUntil) -> bool {
+    let closed = task.get("closedAt").is_some_and(|value| !value.is_null());
+    match until {
+        CatalogWaitUntil::Finished => {
+            closed || task.get("activity").and_then(Value::as_str) == Some("unread")
+        }
+        CatalogWaitUntil::Closed => closed,
+    }
+}
+
+async fn wait_catalog_task_via_api(
+    base_url: &str,
+    task_id: &str,
+    timeout_secs: u64,
+    poll_secs: u64,
+    until: CatalogWaitUntil,
+) -> Result<Value, String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    let poll_interval = std::time::Duration::from_secs(poll_secs.max(1));
+    let path = task_get_path(task_id);
+    loop {
+        let task: Value = get_json(base_url, &path).await?;
+        if catalog_task_matches_wait_until(&task, until) {
+            return Ok(task);
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(format!("timed out waiting for task {task_id}"));
+        }
+        tokio::time::sleep(poll_interval).await;
+    }
+}
+
+async fn execute_catalog_request(
+    base_url: &str,
+    request: ResolvedRequest,
+) -> Result<Value, String> {
+    match (request.method, request.kind) {
+        (CatalogMethod::Get, ResponseKind::Json) => get_json(base_url, &request.path).await,
+        (CatalogMethod::Get, ResponseKind::Text) => {
+            get_text(base_url, &request.path).await.map(Value::String)
+        }
+        (CatalogMethod::Post, ResponseKind::Json) => {
+            post_catalog_json(base_url, &request.path, &request.body).await
+        }
+        (_, ResponseKind::Wait) => {
+            let wait = request
+                .wait
+                .ok_or_else(|| "wait request missing wait spec".to_string())?;
+            wait_catalog_task_via_api(
+                base_url,
+                &wait.task_id,
+                wait.timeout_secs,
+                wait.poll_secs,
+                wait.until,
+            )
+            .await
+        }
+        _ => Err(format!(
+            "unsupported catalog request: {:?} {:?}",
+            request.method, request.kind
+        )),
+    }
+}
+
+async fn call_catalog_tool(
+    base_url: &str,
+    catalog: &Catalog,
+    name: &str,
+    args: &Value,
+) -> Result<(ResponseKind, Value), String> {
+    let request = resolve_request(catalog, name, args)?;
+    let kind = request.kind;
+    let value = execute_catalog_request(base_url, request).await?;
+    Ok((kind, value))
 }
 
 async fn create_task_via_api(
@@ -1315,6 +1512,50 @@ async fn main() {
                 }
             }
         },
+        Commands::Tool { command } => match command {
+            ToolCommands::List => {
+                let catalog = load_tool_catalog_from_current_dir().unwrap_or_else(|e| {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                });
+                if let Err(e) = print_json(&catalog.tools_list_value()) {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                }
+            }
+            ToolCommands::Call {
+                name,
+                json,
+                arg,
+                server_url,
+            } => {
+                let args = build_tool_call_args(&json, &arg).unwrap_or_else(|e| {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                });
+                let catalog = load_tool_catalog_from_current_dir().unwrap_or_else(|e| {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                });
+                let base_url = resolve_server_base_url_from_env(server_url.as_deref());
+                let (kind, value) = call_catalog_tool(&base_url, &catalog, &name, &args)
+                    .await
+                    .unwrap_or_else(|e| {
+                        eprintln!("Error: {e}");
+                        process::exit(1);
+                    });
+                if kind == ResponseKind::Text {
+                    if let Some(text) = value.as_str() {
+                        println!("{text}");
+                        return;
+                    }
+                }
+                if let Err(e) = print_json(&value) {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                }
+            }
+        },
     }
 }
 
@@ -1323,13 +1564,14 @@ mod tests {
     use super::{
         advance_stage_via_api, block_task_via_api, build_add_repo_request,
         build_block_task_request, build_complete_stage_request, build_create_task_request,
-        build_request_revision_request, build_send_task_input_request, close_task_via_api,
-        create_task_via_api, find_task_status_row, format_task_list, format_task_status,
-        get_task_via_api, parse_wait_until, resolve_optional_server_base_url,
-        resolve_server_base_url, resolve_stage_db_path, send_task_input_via_api,
-        task_get_path, task_list_path, task_logs_path, task_matches_wait_until,
-        task_not_found_error, unblock_task_via_api, TaskCreateOptions, TaskDetail,
-        TaskInputResponse, TaskSummary, WaitUntil,
+        build_request_revision_request, build_send_task_input_request, build_tool_call_args,
+        catalog_create_task_param_names, close_task_via_api, create_task_via_api,
+        find_task_status_row, format_task_list, format_task_status, get_task_via_api,
+        parse_wait_until, resolve_optional_server_base_url, resolve_server_base_url,
+        resolve_stage_db_path, send_task_input_via_api, task_create_flag_names, task_get_path,
+        task_list_path, task_logs_path, task_matches_wait_until, task_not_found_error,
+        unblock_task_via_api, TaskCreateOptions, TaskDetail, TaskInputResponse, TaskSummary,
+        WaitUntil,
     };
     use clap::Parser;
     use serde_json::json;
@@ -1567,6 +1809,120 @@ mod tests {
             }
             _ => panic!("expected task logs command"),
         }
+    }
+
+    #[test]
+    fn parses_generic_tool_subcommands() {
+        let cli = super::Cli::try_parse_from(["kanna-cli", "tool", "list"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            super::Commands::Tool {
+                command: super::ToolCommands::List
+            }
+        ));
+
+        let cli = super::Cli::try_parse_from([
+            "kanna-cli",
+            "tool",
+            "call",
+            "kanna_create_task",
+            "--json",
+            r#"{"repo_id":"repo-1","prompt":"Ship"}"#,
+            "--arg",
+            "stage=pr",
+            "--server-url",
+            "http://127.0.0.1:48120",
+        ])
+        .unwrap();
+        match cli.command {
+            super::Commands::Tool {
+                command:
+                    super::ToolCommands::Call {
+                        name,
+                        json,
+                        arg,
+                        server_url,
+                    },
+            } => {
+                assert_eq!(name, "kanna_create_task");
+                assert_eq!(
+                    json.as_deref(),
+                    Some(r#"{"repo_id":"repo-1","prompt":"Ship"}"#)
+                );
+                assert_eq!(arg, vec!["stage=pr".to_string()]);
+                assert_eq!(server_url.as_deref(), Some("http://127.0.0.1:48120"));
+            }
+            _ => panic!("expected tool call command"),
+        }
+    }
+
+    #[test]
+    fn tool_call_args_merge_json_and_repeated_args() {
+        let args = build_tool_call_args(
+            &Some(r#"{"repo_id":"repo-1","prompt":"Ship","allowed_tools":["Read"]}"#.to_string()),
+            &["stage=pr".to_string(), "timeout_secs=5".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(
+            args,
+            json!({
+                "repo_id": "repo-1",
+                "prompt": "Ship",
+                "allowed_tools": ["Read"],
+                "stage": "pr",
+                "timeout_secs": 5
+            })
+        );
+    }
+
+    #[test]
+    fn typed_create_flags_cover_catalog_create_task_params_and_match_body() {
+        let typed_flags = task_create_flag_names();
+        let catalog_params = catalog_create_task_param_names();
+        for param in catalog_params {
+            assert!(
+                typed_flags.contains(&param),
+                "typed task create missing catalog param {param}"
+            );
+        }
+
+        let request = build_create_task_request(TaskCreateOptions {
+            repo_id: "repo-1".to_string(),
+            prompt: "Ship it".to_string(),
+            pipeline_name: Some("default".to_string()),
+            base_ref: Some("origin/main".to_string()),
+            stage: Some("pr".to_string()),
+            agent_provider: Some("claude".to_string()),
+            agent_type: None,
+            model: Some("sonnet".to_string()),
+            permission_mode: Some("acceptEdits".to_string()),
+            allowed_tool: vec!["Read".to_string(), "Write".to_string()],
+            blocker_task_id: vec!["blocker-1".to_string()],
+            notify_task: Some("parent-1".to_string()),
+        });
+        let typed_body = serde_json::to_value(request).unwrap();
+        let catalog = kanna_tool_catalog::bundled_catalog();
+        let resolved = kanna_tool_catalog::resolve_request(
+            &catalog,
+            "kanna_create_task",
+            &json!({
+                "repo_id": "repo-1",
+                "prompt": "Ship it",
+                "pipeline_name": "default",
+                "base_ref": "origin/main",
+                "stage": "pr",
+                "agent_provider": "claude",
+                "model": "sonnet",
+                "permission_mode": "acceptEdits",
+                "allowed_tools": ["Read", "Write"],
+                "blocker_task_ids": ["blocker-1"],
+                "notify_task_id": "parent-1"
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(typed_body, resolved.body);
     }
 
     #[test]

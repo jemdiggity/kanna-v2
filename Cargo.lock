@@ -3102,6 +3102,7 @@ name = "kanna-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "kanna-tool-catalog",
  "reqwest 0.12.28",
  "rusqlite",
  "serde",
@@ -3164,6 +3165,7 @@ name = "kanna-mcp"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "kanna-tool-catalog",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -3234,6 +3236,14 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "kanna-tool-catalog"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

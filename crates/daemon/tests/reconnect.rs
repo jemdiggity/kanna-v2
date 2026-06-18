@@ -911,10 +911,8 @@ fn test_concurrent_attach_snapshot_cutover_keeps_snapshot_first_and_streaming_li
                 snapshot.vt
             );
 
-            let output = conn.collect_output_until_contains_with_timeout(
-                "CUTOVER-",
-                Duration::from_secs(2),
-            );
+            let output =
+                conn.collect_output_until_contains_with_timeout("CUTOVER-", Duration::from_secs(2));
             assert!(
                 String::from_utf8_lossy(&output).contains("CUTOVER-"),
                 "attach {index} should keep receiving live output after cutover"

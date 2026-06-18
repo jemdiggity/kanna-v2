@@ -1,5 +1,5 @@
 use serde_json::{json, Value};
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
@@ -135,11 +135,127 @@ fn run_kanna_mcp(base_url: &str, messages: &[Value]) -> Vec<Value> {
         .collect()
 }
 
+fn spawn_kanna_mcp_for_reload(cwd: &std::path::Path) -> std::process::Child {
+    let binary = env!("CARGO_BIN_EXE_kanna-mcp");
+    Command::new(binary)
+        .args(["serve", "--server-url", "http://127.0.0.1:9"])
+        .current_dir(cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn kanna-mcp")
+}
+
+fn send_mcp_message(stdin: &mut std::process::ChildStdin, message: Value) {
+    writeln!(stdin, "{message}").expect("write mcp message");
+    stdin.flush().expect("flush mcp stdin");
+}
+
+fn recv_json_line(receiver: &mpsc::Receiver<Value>) -> Value {
+    receiver
+        .recv_timeout(Duration::from_secs(5))
+        .expect("json-rpc line")
+}
+
+fn recv_until_id(receiver: &mpsc::Receiver<Value>, id: i64) -> Value {
+    loop {
+        let value = recv_json_line(receiver);
+        if value.get("id").and_then(Value::as_i64) == Some(id) {
+            return value;
+        }
+    }
+}
+
+fn recv_until_method(receiver: &mpsc::Receiver<Value>, method: &str) -> Value {
+    loop {
+        let value = recv_json_line(receiver);
+        if value.get("method").and_then(Value::as_str) == Some(method) {
+            return value;
+        }
+    }
+}
+
 fn tool_text(response: &Value) -> Value {
     let text = response["result"]["content"][0]["text"]
         .as_str()
         .expect("tool text");
     serde_json::from_str(text).expect("tool json")
+}
+
+#[test]
+fn serve_hot_reloads_catalog_override_and_notifies_tools_changed() {
+    let root = std::env::temp_dir().join(format!("kanna-mcp-stdio-reload-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join(".kanna")).expect("create .kanna");
+
+    let mut child = spawn_kanna_mcp_for_reload(&root);
+    let stdout = child.stdout.take().expect("stdout");
+    let (sender, receiver) = mpsc::channel();
+    let reader = thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            let line = line.expect("read stdout line");
+            let value = serde_json::from_str::<Value>(&line).expect("json-rpc line");
+            sender.send(value).expect("send json-rpc line");
+        }
+    });
+
+    let mut stdin = child.stdin.take().expect("stdin");
+    send_mcp_message(
+        &mut stdin,
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" }),
+    );
+    send_mcp_message(
+        &mut stdin,
+        json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }),
+    );
+
+    let _initialize = recv_until_id(&receiver, 1);
+    let baseline = recv_until_id(&receiver, 2);
+    let baseline_tools = baseline["result"]["tools"]
+        .as_array()
+        .expect("baseline tools");
+    assert!(baseline_tools
+        .iter()
+        .any(|tool| tool["name"] == "kanna_list_repos"));
+    assert!(!baseline_tools
+        .iter()
+        .any(|tool| tool["name"] == "kanna_custom_ping"));
+
+    let mut catalog = kanna_tool_catalog::bundled_catalog();
+    let custom_tool: kanna_tool_catalog::ToolDef = serde_json::from_value(json!({
+        "name": "kanna_custom_ping",
+        "description": "Custom ping",
+        "method": "GET",
+        "path": "/v1/ping",
+        "response": "json",
+        "params": []
+    }))
+    .expect("custom tool");
+    catalog.tools.push(custom_tool);
+    let catalog_json = serde_json::to_string(&catalog).expect("serialize catalog");
+    std::fs::write(root.join(".kanna/mcp-tools.json"), catalog_json).expect("write catalog");
+
+    let notification = recv_until_method(&receiver, "notifications/tools/list_changed");
+    assert_eq!(notification["jsonrpc"], json!("2.0"));
+
+    send_mcp_message(
+        &mut stdin,
+        json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/list" }),
+    );
+    let reloaded = recv_until_id(&receiver, 3);
+    let reloaded_tools = reloaded["result"]["tools"]
+        .as_array()
+        .expect("reloaded tools");
+    assert!(reloaded_tools
+        .iter()
+        .any(|tool| tool["name"] == "kanna_custom_ping"));
+
+    drop(stdin);
+    let status = child.wait().expect("wait for child");
+    assert!(status.success(), "kanna-mcp exited with {status}");
+    reader.join().expect("reader thread");
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]

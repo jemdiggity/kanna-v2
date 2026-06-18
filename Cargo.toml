@@ -6,6 +6,7 @@ members = [
     "crates/kanna-agent-protocol",
     "crates/kanna-cli",
     "crates/kanna-mcp",
+    "crates/kanna-tool-catalog",
     "crates/runtime-defaults",
     "crates/kanna-server",
     "crates/task-transfer",
