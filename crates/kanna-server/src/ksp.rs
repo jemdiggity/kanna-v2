@@ -671,10 +671,15 @@ async fn stream_agent(
         let frame_tx = frame_tx.clone();
         let task_id = task_id.clone();
         async move {
+            let code = if message.contains("session not found") {
+                "session_not_found"
+            } else {
+                "daemon"
+            };
             let _ = frame_tx
                 .send(ServerFrame::Error {
                     task_id: Some(task_id),
-                    code: "daemon".to_string(),
+                    code: code.to_string(),
                     message,
                 })
                 .await;

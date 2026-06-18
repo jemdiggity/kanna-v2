@@ -22,6 +22,7 @@ const props = defineProps<{
     rows: number,
     options?: { agentProvider?: AgentProvider },
   ) => Promise<void>;
+  recoverTaskSession?: (sessionId: string, options?: { cols?: number; rows?: number }) => Promise<void>;
 }>();
 
 function buildSpawnOptions() {
@@ -47,6 +48,7 @@ function buildSpawnOptions() {
         :agent-provider="agentProvider"
         :worktree-path="worktreePath"
         :agent-terminal="true"
+        :recover-session="recoverTaskSession"
       />
     </KeepAlive>
     <AgentMessageView
@@ -55,6 +57,7 @@ function buildSpawnOptions() {
       :session-id="sessionId"
       :agent-provider="agentProvider"
       :worktree-path="worktreePath"
+      :recover-session="recoverTaskSession"
     />
     <div v-if="!sessionId" class="placeholder">
       {{ $t('terminalTabs.noSession') }}

@@ -10,6 +10,7 @@ const props = defineProps<{
   item: PipelineItem | null;
   repoPath?: string;
   spawnPtySession?: (sessionId: string, cwd: string, prompt: string, cols: number, rows: number) => Promise<void>;
+  recoverTaskSession?: (sessionId: string, options?: { cols?: number; rows?: number }) => Promise<void>;
   maximized?: boolean;
   blockers?: PipelineItem[];
   hasRepos?: boolean;
@@ -182,6 +183,7 @@ function dismissCommandHint() {
           :worktree-path="item.branch ? `${repoPath}/.kanna-worktrees/${item.branch}` : undefined"
           :prompt="item.prompt || ''"
           :spawn-pty-session="spawnPtySession"
+          :recover-task-session="recoverTaskSession"
         />
       </template>
     </template>

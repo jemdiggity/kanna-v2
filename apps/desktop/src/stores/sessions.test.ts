@@ -18,6 +18,7 @@ const mocks = vi.hoisted(() => {
       case "read_text_file":
         return "{}";
       case "spawn_session":
+      case "spawn_agent_session":
       case "send_input":
         return undefined;
       case "list_sessions":
@@ -187,5 +188,72 @@ describe("createSessionsApi", () => {
       sessionId: "task-1",
       data: Array.from(new TextEncoder().encode("\x1b[13u")),
     });
+  });
+
+  it("recovers an SDK agent task through the shared task session recovery API", async () => {
+    const context = makeContext();
+    context.state.repos.value = [{
+      id: "repo-1",
+      path: "/tmp/repo",
+      name: "repo",
+      default_branch: "main",
+      hidden: 0,
+      sort_order: 0,
+      created_at: "2026-06-18T00:00:00.000Z",
+      last_opened_at: "2026-06-18T00:00:00.000Z",
+    }];
+    context.state.items.value = [{
+      id: "task-1",
+      repo_id: "repo-1",
+      issue_number: null,
+      issue_title: null,
+      prompt: "Ship it",
+      pipeline: "default",
+      stage: "in progress",
+      stage_result: null,
+      active_post_action: null,
+      tags: "[]",
+      pr_number: null,
+      pr_url: null,
+      branch: "task-task-1",
+      closed_at: null,
+      agent_type: "agent",
+      agent_provider: "claude",
+      activity: "idle",
+      activity_changed_at: "2026-06-18T00:00:00.000Z",
+      unread_at: null,
+      port_offset: null,
+      port_env: JSON.stringify({ KANNA_DEV_PORT: "1421" }),
+      pinned: 0,
+      pin_order: null,
+      display_name: null,
+      base_ref: null,
+      agent_session_id: "claude-session-1",
+      previous_stage: null,
+      teardown_started_at: null,
+      created_at: "2026-06-18T00:00:00.000Z",
+      updated_at: "2026-06-18T00:00:00.000Z",
+    }];
+    const sessions = createSessionsApi(context);
+
+    await sessions.recoverTaskSession("task-1", { cols: 100, rows: 40 });
+
+    expect(mocks.invokeMock).toHaveBeenCalledWith("spawn_agent_session", expect.objectContaining({
+      sessionId: "task-1",
+      cwd: "/tmp/repo/.kanna-worktrees/task-task-1",
+      prompt: "Ship it",
+      agentProvider: "claude",
+      model: null,
+      permissionMode: null,
+      executable: null,
+    }));
+    const spawnCall = mocks.invokeMock.mock.calls.find(([command]) => command === "spawn_agent_session");
+    expect(spawnCall?.[1]).toEqual(expect.objectContaining({
+      env: expect.objectContaining({
+        KANNA_TASK_ID: "task-1",
+        KANNA_WORKTREE: "1",
+        KANNA_DEV_PORT: "1421",
+      }),
+    }));
   });
 });

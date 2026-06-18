@@ -2470,6 +2470,7 @@ onBeforeUnmount(() => {
         :item="mainPanelItem"
         :repo-path="mainPanelRepo?.path"
         :spawn-pty-session="store.spawnPtySession"
+        :recover-task-session="store.recoverTaskSession"
         :maximized="maximized"
         :blockers="currentBlockers"
         :has-repos="sidebarRepos.length > 0"
