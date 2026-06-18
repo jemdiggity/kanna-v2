@@ -25,6 +25,7 @@ export function ConnectionScreen({
 }: ConnectionScreenProps) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [isPasswordVisible, setIsPasswordVisible] = useState(false);
   const primaryLabel =
     connectionState === "connecting" ? "Connecting..." : "Connect on Local Network";
   const authSummary = getConnectionAuthSummary(auth);
@@ -56,16 +57,27 @@ export function ConnectionScreen({
               style={styles.input}
               value={email}
             />
-            <TextInput
-              autoCapitalize="none"
-              autoCorrect={false}
-              onChangeText={setPassword}
-              placeholder="Password"
-              placeholderTextColor="#718199"
-              secureTextEntry
-              style={styles.input}
-              value={password}
-            />
+            <View style={styles.passwordRow}>
+              <TextInput
+                autoCapitalize="none"
+                autoCorrect={false}
+                onChangeText={setPassword}
+                placeholder="Password"
+                placeholderTextColor="#718199"
+                secureTextEntry={!isPasswordVisible}
+                style={[styles.input, styles.passwordInput]}
+                value={password}
+              />
+              <Pressable
+                accessibilityLabel={isPasswordVisible ? "Hide password" : "Show password"}
+                onPress={() => setIsPasswordVisible((visible) => !visible)}
+                style={styles.passwordToggle}
+              >
+                <Text style={styles.passwordToggleLabel}>
+                  {isPasswordVisible ? "Hide" : "Show"}
+                </Text>
+              </Pressable>
+            </View>
             <Pressable
               disabled={!canSubmitAuth || auth.status === "signingIn"}
               onPress={() => onSignIn(email.trim(), password)}
@@ -189,6 +201,29 @@ const styles = StyleSheet.create({
     fontSize: 15,
     paddingHorizontal: 12,
     paddingVertical: 12
+  },
+  passwordRow: {
+    alignItems: "stretch",
+    flexDirection: "row",
+    gap: 8
+  },
+  passwordInput: {
+    flex: 1
+  },
+  passwordToggle: {
+    alignItems: "center",
+    backgroundColor: "#152036",
+    borderColor: "#22304D",
+    borderRadius: 8,
+    borderWidth: 1,
+    justifyContent: "center",
+    minWidth: 68,
+    paddingHorizontal: 10
+  },
+  passwordToggleLabel: {
+    color: "#D5DEEC",
+    fontSize: 13,
+    fontWeight: "700"
   },
   errorCard: {
     backgroundColor: "rgba(97, 33, 36, 0.38)",

@@ -46,6 +46,7 @@ export function AccountSheet({
 }: AccountSheetProps) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [isPasswordVisible, setIsPasswordVisible] = useState(false);
   const presentation = getAccountBadgePresentation(auth);
   const connection = getConnectionStatusPresentation(
     connectionState,
@@ -54,14 +55,22 @@ export function AccountSheet({
     errorMessage
   );
   const canSubmit = email.trim().length > 3 && password.length > 0;
+  const closeSheet = () => {
+    setIsPasswordVisible(false);
+    onClose();
+  };
+  const signOut = () => {
+    setIsPasswordVisible(false);
+    onSignOut();
+  };
 
   return (
-    <Modal animationType="slide" transparent visible={visible} onRequestClose={onClose}>
+    <Modal animationType="slide" transparent visible={visible} onRequestClose={closeSheet}>
       <KeyboardAvoidingView
         behavior={Platform.OS === "ios" ? "padding" : undefined}
         style={styles.backdrop}
       >
-        <Pressable style={styles.scrim} onPress={onClose} />
+        <Pressable style={styles.scrim} onPress={closeSheet} />
         <View style={styles.sheet} testID={MOBILE_E2E_IDS.accountSheet}>
           <View style={styles.header}>
             <View>
@@ -72,7 +81,7 @@ export function AccountSheet({
               accessibilityLabel="Close account"
               style={styles.closeButton}
               testID={MOBILE_E2E_IDS.accountCloseButton}
-              onPress={onClose}
+              onPress={closeSheet}
             >
               <Text style={styles.closeLabel}>×</Text>
             </Pressable>
@@ -131,7 +140,7 @@ export function AccountSheet({
               accessibilityLabel="Sign Out"
               style={styles.secondaryButton}
               testID={MOBILE_E2E_IDS.accountSignOutButton}
-              onPress={onSignOut}
+              onPress={signOut}
             >
               <Text style={styles.secondaryLabel}>Sign Out</Text>
             </Pressable>
@@ -147,16 +156,28 @@ export function AccountSheet({
                 testID={MOBILE_E2E_IDS.accountEmailInput}
                 value={email}
               />
-              <TextInput
-                autoCapitalize="none"
-                onChangeText={setPassword}
-                placeholder="Password"
-                placeholderTextColor="#6A7E9D"
-                secureTextEntry
-                style={styles.input}
-                testID={MOBILE_E2E_IDS.accountPasswordInput}
-                value={password}
-              />
+              <View style={styles.passwordRow}>
+                <TextInput
+                  autoCapitalize="none"
+                  onChangeText={setPassword}
+                  placeholder="Password"
+                  placeholderTextColor="#6A7E9D"
+                  secureTextEntry={!isPasswordVisible}
+                  style={[styles.input, styles.passwordInput]}
+                  testID={MOBILE_E2E_IDS.accountPasswordInput}
+                  value={password}
+                />
+                <Pressable
+                  accessibilityLabel={isPasswordVisible ? "Hide password" : "Show password"}
+                  style={styles.passwordToggle}
+                  testID={MOBILE_E2E_IDS.accountPasswordToggle}
+                  onPress={() => setIsPasswordVisible((visible) => !visible)}
+                >
+                  <Text style={styles.passwordToggleLabel}>
+                    {isPasswordVisible ? "Hide" : "Show"}
+                  </Text>
+                </Pressable>
+              </View>
               {auth.status === "error" ? (
                 <Text style={styles.errorText}>{auth.message}</Text>
               ) : null}
@@ -338,6 +359,29 @@ const styles = StyleSheet.create({
     fontSize: 15,
     paddingHorizontal: 14,
     paddingVertical: 13
+  },
+  passwordRow: {
+    alignItems: "stretch",
+    flexDirection: "row",
+    gap: 8
+  },
+  passwordInput: {
+    flex: 1
+  },
+  passwordToggle: {
+    alignItems: "center",
+    backgroundColor: "#172338",
+    borderColor: "#2A3957",
+    borderRadius: 16,
+    borderWidth: 1,
+    justifyContent: "center",
+    minWidth: 72,
+    paddingHorizontal: 12
+  },
+  passwordToggleLabel: {
+    color: "#F5F7FB",
+    fontSize: 13,
+    fontWeight: "800"
   },
   errorText: {
     color: "#FFC7CE",

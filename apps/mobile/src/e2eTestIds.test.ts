@@ -21,6 +21,9 @@ describe("MOBILE_E2E_IDS", () => {
     );
     expect(MOBILE_E2E_IDS.accountEmailInput).toBe("mobile.account-email");
     expect(MOBILE_E2E_IDS.accountPasswordInput).toBe("mobile.account-password");
+    expect(MOBILE_E2E_IDS.accountPasswordToggle).toBe(
+      "mobile.account-toggle-password"
+    );
     expect(MOBILE_E2E_IDS.accountSignInButton).toBe("mobile.account-sign-in");
     expect(MOBILE_E2E_IDS.accountSignOutButton).toBe("mobile.account-sign-out");
   });

@@ -11,6 +11,10 @@ interface ProfileConnectionElement {
   waitForDisplayed(options: { timeout: number }): Promise<unknown>;
 }
 
+interface ProfilePasswordToggleElement extends ProfileConnectionElement {
+  getAttribute(name: string): Promise<string | null>;
+}
+
 interface ProfileSheetOpener {
   getAccountButton(): Promise<ProfileConnectionElement>;
   getAccountSheet(): Promise<ProfileConnectionElement>;
@@ -22,6 +26,7 @@ interface ProfileConnectionControlsUi {
   getConnectLocalButton(): Promise<ProfileConnectionElement>;
   getEmailInput(): Promise<ProfileConnectionElement>;
   getPasswordInput(): Promise<ProfileConnectionElement>;
+  getPasswordToggle(): Promise<ProfilePasswordToggleElement>;
   getSignInButton(): Promise<ProfileConnectionElement>;
   waitUntil(
     condition: () => Promise<boolean>,
@@ -60,6 +65,9 @@ function createProfileConnectionUi(driver: Browser): ProfileConnectionUi {
     async getPasswordInput() {
       return driver.$(selectors.accountPasswordInput);
     },
+    async getPasswordToggle() {
+      return driver.$(selectors.accountPasswordToggle);
+    },
     async getSignInButton() {
       return driver.$(selectors.accountSignInButton);
     },
@@ -89,6 +97,7 @@ export async function assertProfileConnectionControlsReachable(
       const localConnect = await ui.getConnectLocalButton();
       const emailInput = await ui.getEmailInput();
       const passwordInput = await ui.getPasswordInput();
+      const passwordToggle = await ui.getPasswordToggle();
       const signInButton = await ui.getSignInButton();
 
       return (
@@ -96,6 +105,7 @@ export async function assertProfileConnectionControlsReachable(
         (await localConnect.isExisting()) &&
         (await emailInput.isExisting()) &&
         (await passwordInput.isExisting()) &&
+        (await passwordToggle.isExisting()) &&
         (await signInButton.isExisting())
       );
     },
@@ -106,6 +116,70 @@ export async function assertProfileConnectionControlsReachable(
         "Expected profile drawer connection controls and sign-in form to be reachable"
     }
   );
+}
+
+export async function assertProfilePasswordCanRevealAndHide(
+  ui: ProfileConnectionControlsUi
+): Promise<void> {
+  await ui.waitUntil(
+    async () => (await ui.getPasswordToggle()).isExisting(),
+    {
+      interval: POLL_INTERVAL_MS,
+      timeout: SCREEN_TIMEOUT_MS,
+      timeoutMsg: "Expected profile drawer password visibility control to exist"
+    }
+  );
+
+  const showToggle = await ui.getPasswordToggle();
+  const initialToggleLabel = await getPasswordToggleAccessibilityLabel(showToggle);
+  if (initialToggleLabel !== "Show password") {
+    throw new Error(
+      `Expected password visibility control to start as Show password, got ${initialToggleLabel}`
+    );
+  }
+  await showToggle.click();
+
+  await ui.waitUntil(
+    async () =>
+      (await getPasswordToggleAccessibilityLabel(await ui.getPasswordToggle())) ===
+      "Hide password",
+    {
+      interval: POLL_INTERVAL_MS,
+      timeout: SCREEN_TIMEOUT_MS,
+      timeoutMsg: "Expected password visibility control to switch to Hide password"
+    }
+  );
+
+  const hideToggle = await ui.getPasswordToggle();
+  await hideToggle.click();
+
+  await ui.waitUntil(
+    async () =>
+      (await getPasswordToggleAccessibilityLabel(await ui.getPasswordToggle())) ===
+      "Show password",
+    {
+      interval: POLL_INTERVAL_MS,
+      timeout: SCREEN_TIMEOUT_MS,
+      timeoutMsg: "Expected password visibility control to switch back to Show password"
+    }
+  );
+}
+
+async function getPasswordToggleAccessibilityLabel(
+  toggle: ProfilePasswordToggleElement
+): Promise<string | null> {
+  for (const attributeName of ["label", "content-desc", "name"]) {
+    try {
+      const value = await toggle.getAttribute(attributeName);
+      if (value) {
+        return value;
+      }
+    } catch {
+      // Appium attribute support varies by native driver.
+    }
+  }
+
+  return null;
 }
 
 export async function assertProfileConnectionDisconnected(
@@ -131,6 +205,7 @@ export async function runProfileConnectionSmoke(driver: Browser): Promise<void> 
 
   await openProfileConnectionSheet(ui);
   await assertProfileConnectionControlsReachable(ui);
+  await assertProfilePasswordCanRevealAndHide(ui);
 }
 
 export async function runProfileDisconnectedConnectionSmoke(
@@ -143,4 +218,5 @@ export async function runProfileDisconnectedConnectionSmoke(
   await openProfileConnectionSheet(ui);
   await assertProfileConnectionDisconnected(ui);
   await assertProfileConnectionControlsReachable(ui);
+  await assertProfilePasswordCanRevealAndHide(ui);
 }
