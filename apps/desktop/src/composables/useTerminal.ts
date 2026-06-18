@@ -17,6 +17,7 @@ import {
   getReconnectResizeDelayMs,
   getReconnectKeyboardPush,
   getTerminalRecoveryMode,
+  isExistingDaemonSessionFailure,
   isMissingDaemonSessionFailure,
   shouldRespawnAfterAttachFailure,
   shouldPushKittyKeyboardOnFreshAttach,
@@ -811,7 +812,13 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
           const fittedTerminal = getLiveTerminal()
           if (!fittedTerminal) return
           const { cols, rows } = fittedTerminal
-          await spawnOptions.spawnFn(sessionId, spawnOptions.cwd, spawnOptions.prompt, cols, rows)
+          try {
+            await spawnOptions.spawnFn(sessionId, spawnOptions.cwd, spawnOptions.prompt, cols, rows)
+          } catch (error) {
+            if (!isExistingDaemonSessionFailure(error)) {
+              throw error
+            }
+          }
         }
       }
 
