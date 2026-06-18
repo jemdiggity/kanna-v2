@@ -202,6 +202,35 @@ echo '{"type":"assistant","message":{"content":[{"type":"text","text":"turn done
 echo '{"type":"result","subtype":"success","duration_ms":5,"num_turns":1,"total_cost_usd":0.01,"usage":{},"session_id":"fake-sess-resume"}'
 "#;
 
+/// Fake agent for resume persistence. The initial run emits provider session id
+/// `fake-sess-persisted`; a resume run only succeeds if the daemon passes that
+/// id in the provider command line.
+const RESUME_ID_ASSERTING_AGENT: &str = r#"#!/bin/sh
+resume_id=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--resume" ]; then
+    shift
+    resume_id="${1:-}"
+    break
+  fi
+  shift
+done
+if [ -n "$resume_id" ]; then
+  if [ "$resume_id" != "fake-sess-persisted" ]; then
+    echo "unexpected resume id: $resume_id" >&2
+    exit 7
+  fi
+  echo '{"type":"system","subtype":"init","session_id":"fake-sess-persisted","model":"fake-model"}'
+  echo '{"type":"assistant","message":{"content":[{"type":"text","text":"resumed with persisted id"}]}}'
+  echo '{"type":"result","subtype":"success","duration_ms":5,"num_turns":2,"total_cost_usd":0.02,"usage":{},"session_id":"fake-sess-persisted"}'
+  exit 0
+fi
+read -r first
+echo '{"type":"system","subtype":"init","session_id":"fake-sess-persisted","model":"fake-model"}'
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"initial done"}]}}'
+echo '{"type":"result","subtype":"success","duration_ms":5,"num_turns":1,"total_cost_usd":0.01,"usage":{},"session_id":"fake-sess-persisted"}'
+"#;
+
 /// Fake agent that raises two permission requests for the same tool.
 const PERMISSION_AGENT: &str = r#"#!/bin/sh
 read -r first
@@ -377,6 +406,47 @@ fn input_after_exit_resumes_via_respawn() {
     assert!(resumed
         .iter()
         .any(|e| matches!(e, AgentEvent::AssistantText { text, .. } if text == "turn done")));
+}
+
+#[test]
+fn input_after_handoff_uses_persisted_provider_session_id() {
+    let dir = temp_dir("resume-persisted");
+    let script = write_script(&dir, "resume-id-agent.sh", RESUME_ID_ASSERTING_AGENT);
+    let old_daemon = DaemonHandle::start_in(&dir);
+
+    let mut conn = old_daemon.connect();
+    conn.send(&Command::SpawnAgent {
+        session_id: "agent-rp".to_string(),
+        params: spawn_params(&dir, &script, "first prompt"),
+    });
+    conn.recv_until(|e| matches!(e, Event::SessionCreated { .. }));
+    conn.send(&Command::AttachAgent {
+        session_id: "agent-rp".to_string(),
+        from_seq: 0,
+    });
+    conn.recv_until(|e| matches!(e, Event::AgentSnapshot { .. }));
+    conn.collect_agent_events_until(is_turn_completed);
+    std::thread::sleep(Duration::from_millis(500));
+
+    let new_daemon = DaemonHandle::start_in(&dir);
+    drop(conn);
+    drop(old_daemon);
+
+    let mut conn2 = new_daemon.connect();
+    conn2.send(&Command::AttachAgent {
+        session_id: "agent-rp".to_string(),
+        from_seq: 0,
+    });
+    conn2.recv_until(|e| matches!(e, Event::AgentSnapshot { .. }));
+    conn2.send(&Command::AgentInput {
+        session_id: "agent-rp".to_string(),
+        text: "second prompt".to_string(),
+    });
+    let resumed = conn2.collect_agent_events_until(is_turn_completed);
+    assert!(resumed.iter().any(|e| matches!(
+        e,
+        AgentEvent::AssistantText { text, .. } if text == "resumed with persisted id"
+    )));
 }
 
 #[test]

@@ -10,6 +10,7 @@ export interface JournaledAgentEvent {
 export interface UseAgentStreamResult {
   events: Ref<JournaledAgentEvent[]> | ComputedRef<JournaledAgentEvent[]>;
   connected: Ref<boolean> | ComputedRef<boolean>;
+  ready: Ref<boolean> | ComputedRef<boolean>;
   ended: Ref<boolean> | ComputedRef<boolean>;
   error: Ref<string | null> | ComputedRef<string | null>;
   pendingPermissions: Readonly<ComputedRef<Array<Extract<AgentEvent, { type: "permission_request" }>>>>;
@@ -72,6 +73,7 @@ export async function createAgentStream(taskId: string): Promise<UseAgentStreamR
   return {
     events,
     connected,
+    ready: computed(() => true),
     ended,
     error,
     pendingPermissions,
@@ -89,19 +91,54 @@ export async function createAgentStream(taskId: string): Promise<UseAgentStreamR
 export function useAgentStream(taskId: string): UseAgentStreamResult {
   const fallbackEvents = ref<JournaledAgentEvent[]>([]);
   const connected = ref(false);
+  const ready = ref(false);
   const ended = ref(false);
   const error = ref<string | null>(null);
   const stream = shallowRef<UseAgentStreamResult | null>(null);
+  const pendingOperations: Array<(created: UseAgentStreamResult) => void> = [];
+  let closed = false;
+
+  function runSafely(operation: () => void): void {
+    try {
+      operation();
+    } catch (caught: unknown) {
+      error.value = caught instanceof Error ? caught.message : String(caught);
+    }
+  }
+
+  function enqueueOrRun(operation: (created: UseAgentStreamResult) => void): void {
+    const current = stream.value;
+    if (current) {
+      runSafely(() => operation(current));
+      return;
+    }
+    if (closed) {
+      error.value = "Agent stream is closed";
+      return;
+    }
+    pendingOperations.push(operation);
+  }
 
   void createAgentStream(taskId)
     .then((created) => {
+      if (closed) {
+        created.close();
+        return;
+      }
       stream.value = created;
+      ready.value = true;
+      while (pendingOperations.length > 0) {
+        const operation = pendingOperations.shift();
+        if (operation) runSafely(() => operation(created));
+      }
     })
     .catch((caught: unknown) => {
       error.value = caught instanceof Error ? caught.message : String(caught);
     });
 
   onUnmounted(() => {
+    closed = true;
+    pendingOperations.length = 0;
     stream.value?.close();
   });
 
@@ -110,13 +147,19 @@ export function useAgentStream(taskId: string): UseAgentStreamResult {
   return {
     events: computed(() => stream.value?.events.value ?? fallbackEvents.value),
     connected: computed(() => stream.value?.connected.value ?? connected.value),
+    ready: computed(() => stream.value?.ready.value ?? ready.value),
     ended: computed(() => stream.value?.ended.value ?? ended.value),
     error: computed(() => stream.value?.error.value ?? error.value),
     pendingPermissions,
-    sendInput: (text: string) => stream.value?.sendInput(text),
-    sendPermission: (requestId: string, decision: PermissionDecision) => stream.value?.sendPermission(requestId, decision),
-    interrupt: () => stream.value?.interrupt(),
-    setModel: (model: string) => stream.value?.setModel(model),
-    close: () => stream.value?.close(),
+    sendInput: (text: string) => enqueueOrRun((created) => created.sendInput(text)),
+    sendPermission: (requestId: string, decision: PermissionDecision) =>
+      enqueueOrRun((created) => created.sendPermission(requestId, decision)),
+    interrupt: () => enqueueOrRun((created) => created.interrupt()),
+    setModel: (model: string) => enqueueOrRun((created) => created.setModel(model)),
+    close: () => {
+      closed = true;
+      pendingOperations.length = 0;
+      stream.value?.close();
+    },
   };
 }

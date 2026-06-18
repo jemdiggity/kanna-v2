@@ -168,6 +168,7 @@ async fn process_event(
     // Registry pass: capture provider session id, permission bookkeeping,
     // status derivation, auto-allow.
     let mut auto_resolve: Option<String> = None;
+    let mut provider_session_to_persist: Option<String> = None;
     let shared = {
         let mut registry = agents.lock().await;
         let Some(record) = registry.get_mut(session_id) else {
@@ -181,7 +182,8 @@ async fn process_event(
                 Err(poisoned) => poisoned.into_inner().provider_session_id(),
             };
             if provider_session_id.is_some() {
-                record.provider_session_id = provider_session_id;
+                record.provider_session_id = provider_session_id.clone();
+                provider_session_to_persist = provider_session_id;
             }
         }
 
@@ -230,6 +232,11 @@ async fn process_event(
 
         record.shared.clone()
     };
+
+    if let Some(provider_session_id) = provider_session_to_persist {
+        let mut sh = shared.lock().await;
+        sh.journal.set_provider_session_id(&provider_session_id);
+    }
 
     journal_and_fan_out(session_id, &shared, event).await;
     if let Some(request_id) = auto_resolve {
@@ -996,6 +1003,10 @@ pub async fn adopt_agent_session(
     let turn_model = adapter.turn_model();
 
     let journal = AgentJournal::open(&data_dir, &info.session_id);
+    let provider_session_id = info
+        .provider_session_id
+        .clone()
+        .or_else(|| journal.provider_session_id());
     let pending_permissions = journal.pending_permission_ids();
     let session_allowed_tools = journal.session_allowed_tools();
     let shared = Arc::new(Mutex::new(AgentShared {
@@ -1014,7 +1025,7 @@ pub async fn adopt_agent_session(
         child: None,
         stdin: None,
         pid: info.pid,
-        provider_session_id: info.provider_session_id,
+        provider_session_id,
         status: if alive {
             info.status
         } else {

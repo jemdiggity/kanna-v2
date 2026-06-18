@@ -20,6 +20,7 @@ vi.mock("../../composables/useAgentStream", () => ({
   useAgentStream: () => ({
     events,
     connected: ref(true),
+    ready: ref(true),
     ended: ref(false),
     error,
     pendingPermissions: computed(() =>

@@ -242,7 +242,7 @@ function onModelChange() {
 
 function sendComposer() {
   const text = composer.value.trim();
-  if (!text) return;
+  if (!text || !stream.ready.value) return;
   stream.sendInput(text);
   composer.value = "";
   slashDismissed.value = false;
@@ -452,7 +452,7 @@ function sessionEndedLabel(event: Extract<AgentEvent, { type: "session_ended" }>
             type="button"
             class="composer-button send-button"
             aria-label="Send message"
-            :disabled="!composer.trim()"
+            :disabled="!composer.trim() || !stream.ready.value"
             @click="sendComposer"
           >
             <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">

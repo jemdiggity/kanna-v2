@@ -150,7 +150,14 @@ fn spawn_args_pin_the_exec_json_contract() {
     assert_eq!(spec.initial_stdin, None);
     assert_eq!(
         spec.args,
-        vec!["exec", "-m", "gpt-5.5", "--json", "fix the bug",]
+        vec![
+            "exec",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "-m",
+            "gpt-5.5",
+            "--json",
+            "fix the bug",
+        ]
     );
 
     let resume = adapter.resume_spawn(&ctx, "thread-1", "now add tests");
@@ -160,12 +167,45 @@ fn spawn_args_pin_the_exec_json_contract() {
             "exec",
             "resume",
             "thread-1",
+            "--dangerously-bypass-approvals-and-sandbox",
             "-m",
             "gpt-5.5",
             "--json",
             "now add tests",
         ]
     );
+}
+
+#[test]
+fn default_and_dont_ask_modes_bypass_exec_sandbox_and_approvals() {
+    let adapter = CodexAdapter::new();
+
+    for permission_mode in [
+        None,
+        Some("default".to_string()),
+        Some("dontAsk".to_string()),
+    ] {
+        let ctx = SpawnCtx {
+            prompt: "fix the bug".to_string(),
+            permission_mode,
+            ..Default::default()
+        };
+
+        let args = adapter.initial_spawn(&ctx).args.join(" ");
+        assert!(
+            args.contains("--dangerously-bypass-approvals-and-sandbox"),
+            "args should bypass approvals and sandbox, got: {args}"
+        );
+
+        let resume_args = adapter
+            .resume_spawn(&ctx, "thread-1", "continue")
+            .args
+            .join(" ");
+        assert!(
+            resume_args.contains("--dangerously-bypass-approvals-and-sandbox"),
+            "resume args should bypass approvals and sandbox, got: {resume_args}"
+        );
+    }
 }
 
 #[test]

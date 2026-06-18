@@ -80,6 +80,7 @@ const mockState = vi.hoisted(() => {
   let repoConfigResolver: ((path: string) => RepoConfig | undefined) | null = null;
   let taskPorts: TaskPort[] = [];
   let blockCleanupGate: Promise<void> | null = null;
+  let failingCommands: Record<string, string> = {};
   const listBlockersForItemMock = vi.fn(async () => [] as PipelineItem[]);
   const listBlockedByItemMock = vi.fn(async () => [] as PipelineItem[]);
   const setSettingMock = vi.fn(async () => {});
@@ -102,6 +103,9 @@ const mockState = vi.hoisted(() => {
   }
 
   const invokeMock = vi.fn(async (command: string, args?: Record<string, unknown>) => {
+    if (failingCommands[command]) {
+      throw new Error(failingCommands[command]);
+    }
     switch (command) {
       case "git_default_branch":
         return defaultBranchResponse;
@@ -240,6 +244,7 @@ const mockState = vi.hoisted(() => {
     repoConfigResolver = null;
     taskPorts = [];
     blockCleanupGate = null;
+    failingCommands = {};
     invokeMock.mockClear();
     insertPipelineItemMock.mockClear();
     updatePipelineItemStageMock.mockClear();
@@ -341,6 +346,12 @@ const mockState = vi.hoisted(() => {
     },
     set blockCleanupGate(value: Promise<void> | null) {
       blockCleanupGate = value;
+    },
+    get failingCommands() {
+      return failingCommands;
+    },
+    set failingCommands(value: Record<string, string>) {
+      failingCommands = value;
     },
     reset,
   };
@@ -1028,6 +1039,29 @@ describe("kanna store task base branch integration", () => {
         }),
       );
     });
+  });
+
+  it("removes a partially-created task when headless agent spawn fails", async () => {
+    mockState.failingCommands = {
+      spawn_agent_session: "daemon unavailable",
+    };
+    const store = await createStore();
+
+    const taskId = await store.createItem("repo-1", "/tmp/repo", "Spawn failure cleanup", "agent", {
+      agentProvider: "claude",
+    });
+
+    await vi.waitFor(() => {
+      expect(mockState.invokeMock).toHaveBeenCalledWith(
+        "spawn_agent_session",
+        expect.objectContaining({ sessionId: taskId }),
+      );
+      expect(mockState.pipelineItems.some((item) => item.id === taskId)).toBe(false);
+    });
+    expect(mockState.upsertTerminalSessionMock).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ pipeline_item_id: taskId }),
+    );
   });
 
   it("persists worktree and agent terminal session mappings for created PTY tasks", async () => {

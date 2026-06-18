@@ -288,6 +288,14 @@ impl PtySession {
         Ok(unsafe { OwnedFd::from_raw_fd(new_fd) })
     }
 
+    /// Clone the master fd for handoff while the current daemon keeps
+    /// ownership until the adopting daemon acknowledges success.
+    pub fn try_clone_handoff_fd(
+        &self,
+    ) -> Result<OwnedFd, Box<dyn std::error::Error + Send + Sync>> {
+        self.try_clone_writer()
+    }
+
     pub fn resize(
         &mut self,
         cols: u16,

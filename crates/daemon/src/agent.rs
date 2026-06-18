@@ -74,10 +74,18 @@ pub fn event_status(event: &AgentEvent) -> Option<SessionStatus> {
 /// [`SeqAgentEvent`]; the file is reloaded on daemon restart/handoff.
 pub struct AgentJournal {
     path: PathBuf,
+    metadata_path: PathBuf,
     file: Option<std::fs::File>,
     events: Vec<SeqAgentEvent>,
+    provider_session_id: Option<String>,
     /// Disk persistence failed at least once (already reported).
     degraded: bool,
+}
+
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+struct AgentJournalMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provider_session_id: Option<String>,
 }
 
 impl AgentJournal {
@@ -89,6 +97,7 @@ impl AgentJournal {
     pub fn open(data_dir: &Path, session_id: &str) -> Self {
         let dir = Self::journal_dir(data_dir);
         let path = dir.join(format!("{session_id}.ndjson"));
+        let metadata_path = dir.join(format!("{session_id}.meta.json"));
 
         let mut events = Vec::new();
         if let Ok(content) = std::fs::read_to_string(&path) {
@@ -106,6 +115,11 @@ impl AgentJournal {
             }
         }
 
+        let provider_session_id = std::fs::read_to_string(&metadata_path)
+            .ok()
+            .and_then(|content| serde_json::from_str::<AgentJournalMetadata>(&content).ok())
+            .and_then(|metadata| metadata.provider_session_id);
+
         let file = std::fs::create_dir_all(&dir)
             .and_then(|_| {
                 std::fs::OpenOptions::new()
@@ -122,8 +136,10 @@ impl AgentJournal {
 
         Self {
             path,
+            metadata_path,
             file,
             events,
+            provider_session_id,
             degraded,
         }
     }
@@ -171,6 +187,34 @@ impl AgentJournal {
             return Vec::new();
         }
         self.events[start..].to_vec()
+    }
+
+    pub fn provider_session_id(&self) -> Option<String> {
+        self.provider_session_id.clone()
+    }
+
+    pub fn set_provider_session_id(&mut self, provider_session_id: &str) {
+        if self.provider_session_id.as_deref() == Some(provider_session_id) {
+            return;
+        }
+        self.provider_session_id = Some(provider_session_id.to_string());
+        let metadata = AgentJournalMetadata {
+            provider_session_id: self.provider_session_id.clone(),
+        };
+        let write_result = std::fs::create_dir_all(
+            self.metadata_path
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new(".")),
+        )
+        .and_then(|_| serde_json::to_string(&metadata).map_err(std::io::Error::other))
+        .and_then(|json| std::fs::write(&self.metadata_path, json));
+        if let Err(error) = write_result {
+            log::warn!(
+                "[agent] failed to persist provider session id to {:?}: {}",
+                self.metadata_path,
+                error
+            );
+        }
     }
 
     /// Tool names granted AllowSession, derived from the journal so the
@@ -226,6 +270,15 @@ impl AgentJournal {
                 log::warn!(
                     "[agent] failed to remove journal {:?}: {}",
                     self.path,
+                    error
+                );
+            }
+        }
+        if let Err(error) = std::fs::remove_file(&self.metadata_path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                log::warn!(
+                    "[agent] failed to remove journal metadata {:?}: {}",
+                    self.metadata_path,
                     error
                 );
             }
