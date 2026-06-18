@@ -1,0 +1,38 @@
+load("@kanna_cli_crates//:defs.bzl", all_crate_deps_for_cli = "all_crate_deps")
+load("@kanna_mcp_crates//:defs.bzl", all_crate_deps_for_mcp = "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_library")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "Cargo.toml",
+])
+
+filegroup(
+    name = "cargo_srcs",
+    srcs = [
+        "Cargo.toml",
+    ] + glob(["src/**/*.json", "src/**/*.rs"]),
+)
+
+rust_library(
+    name = "kanna_tool_catalog_for_cli",
+    srcs = glob(["src/**/*.rs"]),
+    compile_data = ["src/catalog.json"],
+    crate_root = "src/lib.rs",
+    crate_name = "kanna_tool_catalog",
+    edition = "2021",
+    deps = all_crate_deps_for_cli(normal = True, package_name = "crates/kanna-tool-catalog"),
+    proc_macro_deps = all_crate_deps_for_cli(proc_macro = True, package_name = "crates/kanna-tool-catalog"),
+)
+
+rust_library(
+    name = "kanna_tool_catalog_for_mcp",
+    srcs = glob(["src/**/*.rs"]),
+    compile_data = ["src/catalog.json"],
+    crate_root = "src/lib.rs",
+    crate_name = "kanna_tool_catalog",
+    edition = "2021",
+    deps = all_crate_deps_for_mcp(normal = True, package_name = "crates/kanna-tool-catalog"),
+    proc_macro_deps = all_crate_deps_for_mcp(proc_macro = True, package_name = "crates/kanna-tool-catalog"),
+)

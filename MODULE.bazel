@@ -77,7 +77,10 @@ crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
 crate.from_cargo(
     name = "kanna_cli_crates",
     cargo_lockfile = "//crates/kanna-cli:Cargo.lock",
-    manifests = ["//crates/kanna-cli:Cargo.toml"],
+    manifests = [
+        "//crates/kanna-cli:Cargo.toml",
+        "//crates/kanna-tool-catalog:Cargo.toml",
+    ],
     supported_platform_triples = [
         "aarch64-apple-darwin",
         "x86_64-apple-darwin",
@@ -86,7 +89,10 @@ crate.from_cargo(
 crate.from_cargo(
     name = "kanna_mcp_crates",
     cargo_lockfile = "//crates/kanna-mcp:Cargo.lock",
-    manifests = ["//crates/kanna-mcp:Cargo.toml"],
+    manifests = [
+        "//crates/kanna-mcp:Cargo.toml",
+        "//crates/kanna-tool-catalog:Cargo.toml",
+    ],
     supported_platform_triples = [
         "aarch64-apple-darwin",
         "x86_64-apple-darwin",
