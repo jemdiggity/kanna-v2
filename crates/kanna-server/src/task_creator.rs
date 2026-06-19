@@ -172,7 +172,7 @@ pub(crate) fn prepare_advance_stage_for_api(
                     source_task.stage_result.clone(),
                     &task_prompt,
                     source_task.branch.as_deref(),
-                    source_task.agent_type.as_deref().unwrap_or("pty"),
+                    normalize_agent_type(source_task.agent_type.as_deref()).unwrap_or("pty"),
                     post_action
                         .agent_provider
                         .as_deref()
@@ -210,7 +210,7 @@ pub(crate) fn prepare_advance_stage_for_api(
             source_task.stage_result.clone(),
             &task_prompt,
             source_task.branch.as_deref(),
-            source_task.agent_type.as_deref().unwrap_or("pty"),
+            normalize_agent_type(source_task.agent_type.as_deref()).unwrap_or("pty"),
             source_task.agent_provider.as_deref(),
         )?));
     }
@@ -228,7 +228,7 @@ pub(crate) fn prepare_advance_stage_for_api(
             stage_override: Some(next_stage.name.clone()),
             explicit_provider,
             default_provider: None,
-            agent_type: None,
+            agent_type: source_task.agent_type,
             model: None,
             permission_mode: None,
             allowed_tools: Vec::new(),
@@ -355,7 +355,7 @@ pub(crate) fn prepare_auto_stage_completion_for_api(
             source_task.stage_result.clone(),
             &task_prompt,
             source_task.branch.as_deref(),
-            source_task.agent_type.as_deref().unwrap_or("pty"),
+            normalize_agent_type(source_task.agent_type.as_deref()).unwrap_or("pty"),
             source_task.agent_provider.as_deref(),
         )
         .map(PreparedStageTransition::Continue)
@@ -375,7 +375,7 @@ pub(crate) fn prepare_auto_stage_completion_for_api(
             stage_override: Some(next_stage.name.clone()),
             explicit_provider,
             default_provider: None,
-            agent_type: None,
+            agent_type: source_task.agent_type,
             model: None,
             permission_mode: None,
             allowed_tools: Vec::new(),
@@ -447,7 +447,7 @@ pub(crate) fn prepare_revision_task_for_api(
             stage_override: Some(target_stage.name.clone()),
             explicit_provider,
             default_provider: None,
-            agent_type: None,
+            agent_type: source_task.agent_type,
             model: None,
             permission_mode: None,
             allowed_tools: Vec::new(),
@@ -1373,7 +1373,7 @@ fn resolve_agent_type(
     explicit_agent_type: Option<&str>,
     provider: AgentProvider,
 ) -> Result<AgentSessionType, String> {
-    match explicit_agent_type {
+    match normalize_agent_type(explicit_agent_type).as_deref() {
         Some("pty") => Ok(AgentSessionType::Pty),
         Some("agent") => Ok(AgentSessionType::Agent),
         Some(other) => Err(format!("unsupported agent_type: {}", other)),
@@ -1381,6 +1381,14 @@ fn resolve_agent_type(
             AgentProvider::Claude | AgentProvider::Codex => AgentSessionType::Agent,
             AgentProvider::Copilot | AgentProvider::Opencode => AgentSessionType::Pty,
         }),
+    }
+}
+
+fn normalize_agent_type(agent_type: Option<&str>) -> Option<&str> {
+    match agent_type {
+        Some("sdk") => Some("agent"),
+        Some(value) => Some(value),
+        None => None,
     }
 }
 
@@ -1860,9 +1868,9 @@ mod tests {
         build_spawn_env, build_stage_prompt, continue_prepared_stage_for_api,
         prepare_advance_stage_for_api, prepare_merge_agent_for_api, prepare_revision_task_for_api,
         prepare_task_for_api, read_default_agent_provider_setting,
-        resolve_binary_from_candidates_with_path_lookup, spawn_prepared_task, CreatedTask,
-        DaemonAgentProvider, PreparedSessionSpawn, PreparedStageTransition, PreparedTaskSpawn,
-        PromptContext,
+        resolve_agent_type, resolve_binary_from_candidates_with_path_lookup, spawn_prepared_task,
+        AgentProvider, AgentSessionType, CreatedTask, DaemonAgentProvider, PreparedSessionSpawn,
+        PreparedStageTransition, PreparedTaskSpawn, PromptContext,
     };
     use crate::config::Config;
     use crate::daemon_client::DaemonClient;
@@ -1892,6 +1900,14 @@ mod tests {
             prompt,
             "Review changes since origin/main.\n\nCurrent branch task-source."
         );
+    }
+
+    #[test]
+    fn resolve_agent_type_normalizes_legacy_sdk_to_agent() {
+        assert!(matches!(
+            resolve_agent_type(Some("sdk"), AgentProvider::Claude),
+            Ok(AgentSessionType::Agent)
+        ));
     }
 
     fn test_daemon_socket_path(daemon_dir: &str) -> std::path::PathBuf {
@@ -2394,7 +2410,9 @@ mod tests {
         assert_eq!(prepared.created_task.repo_id, "repo-1");
         assert_eq!(prepared.created_task.stage, "pr");
         assert_eq!(prepared.created_task.title, "Mobile shell");
+        assert_eq!(prepared.created_task.agent_type, "pty");
         assert_eq!(created_source.display_name.as_deref(), Some("Mobile shell"));
+        assert_eq!(created_source.agent_type.as_deref(), Some("pty"));
         assert_eq!(
             created_source.prompt.as_deref(),
             Some("Review task: Fix the mobile shell\n\nReview branch task-old-branch against origin/main with result {\"status\":\"success\"}")
@@ -2672,7 +2690,7 @@ mod tests {
             "claude",
         )
         .unwrap();
-        db.update_test_pipeline_item_agent_type("task-1", "agent")
+        db.update_test_pipeline_item_agent_type("task-1", "sdk")
             .unwrap();
 
         let prepared = prepare_advance_stage_for_api(&db, &config, "task-1").unwrap();
@@ -2682,6 +2700,7 @@ mod tests {
         };
 
         assert_eq!(continuation.task_id, "task-1");
+        assert_eq!(continuation.agent_type, "agent");
         assert_eq!(continuation.previous_stage, "in progress");
         assert_eq!(continuation.next_stage, "commit");
         assert_eq!(
@@ -3460,11 +3479,13 @@ mod tests {
         assert_eq!(prepared.created_task.repo_id, "repo-1");
         assert_eq!(prepared.created_task.stage, "in progress");
         assert_eq!(prepared.created_task.title, "Mobile shell");
+        assert_eq!(prepared.created_task.agent_type, "pty");
         let created_source = db
             .get_pipeline_item(&prepared.created_task.task_id)
             .unwrap()
             .unwrap();
         assert_eq!(created_source.display_name.as_deref(), Some("Mobile shell"));
+        assert_eq!(created_source.agent_type.as_deref(), Some("pty"));
         assert_eq!(
             created_source.prompt.as_deref(),
             Some("Implement revision:\nAdd e2e coverage for task creation.\n\nAdd e2e coverage for task creation.")

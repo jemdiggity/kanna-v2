@@ -381,3 +381,84 @@ impl ProviderAdapter for CodexAdapter {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn initial_spawn_bypasses_sandbox_by_default() {
+        let adapter = CodexAdapter::new();
+        let spec = adapter.initial_spawn(&SpawnCtx {
+            prompt: "ship it".to_string(),
+            ..SpawnCtx::default()
+        });
+
+        assert_eq!(
+            spec.args,
+            vec![
+                "exec",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--json",
+                "ship it",
+            ],
+        );
+    }
+
+    #[test]
+    fn initial_spawn_maps_dont_ask_to_sandbox_bypass() {
+        let adapter = CodexAdapter::new();
+        let spec = adapter.initial_spawn(&SpawnCtx {
+            prompt: "ship it".to_string(),
+            permission_mode: Some("dontAsk".to_string()),
+            ..SpawnCtx::default()
+        });
+
+        assert_eq!(
+            spec.args,
+            vec![
+                "exec",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--json",
+                "ship it",
+            ],
+        );
+    }
+
+    #[test]
+    fn resume_spawn_preserves_sandbox_bypass_permissions() {
+        let adapter = CodexAdapter::new();
+        let spec = adapter.resume_spawn(
+            &SpawnCtx {
+                permission_mode: Some("default".to_string()),
+                ..SpawnCtx::default()
+            },
+            "thread-1",
+            "continue",
+        );
+
+        assert_eq!(
+            spec.args,
+            vec![
+                "exec",
+                "resume",
+                "thread-1",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--json",
+                "continue",
+            ],
+        );
+    }
+
+    #[test]
+    fn explicit_sandboxed_permission_omits_bypass_flag() {
+        let adapter = CodexAdapter::new();
+        let spec = adapter.initial_spawn(&SpawnCtx {
+            prompt: "ship it".to_string(),
+            permission_mode: Some("acceptEdits".to_string()),
+            ..SpawnCtx::default()
+        });
+
+        assert_eq!(spec.args, vec!["exec", "--json", "ship it"]);
+    }
+}
