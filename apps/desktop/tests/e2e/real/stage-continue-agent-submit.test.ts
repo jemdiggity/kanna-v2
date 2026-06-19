@@ -7,7 +7,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
 import { cleanupWorktrees, importTestRepo, resetDatabase } from "../helpers/reset";
 import { dismissStartupShortcutsModal } from "../helpers/startupOverlays";
-import { nudgeTerminalTrustPrompt, sendKeysToActiveTerminal } from "../helpers/terminalInput";
+import { pressAdvanceStageShortcut } from "../helpers/stageAdvance";
+import { nudgeTerminalTrustPrompt } from "../helpers/terminalInput";
 import { callVueMethod, execDb, queryDb, tauriInvoke } from "../helpers/vue";
 import { WebDriverClient } from "../helpers/webdriver";
 import { waitForFile, waitForNewTaskWorktree } from "../helpers/worktreeFs";
@@ -172,8 +173,7 @@ describe("real continue-stage agent submission", () => {
     );
     await hydrateStoreItem(client, taskId);
 
-    const advanceResult = await callVueMethod(client, "store.advanceStage", taskId);
-    if (isVueCallError(advanceResult)) throw new Error(advanceResult.__error);
+    await pressAdvanceStageShortcut(client);
 
     const markerPath = join(worktreePath, "continue-stage-real-submit.txt");
     await waitForFile(markerPath, 180_000, 1_000);

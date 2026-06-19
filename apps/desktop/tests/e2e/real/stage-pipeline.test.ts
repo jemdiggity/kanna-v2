@@ -8,6 +8,7 @@ import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo"
 import { cleanupWorktrees, resetDatabase } from "../helpers/reset";
 import { callVueMethod, execDb, queryDb, tauriInvoke } from "../helpers/vue";
 import { dismissStartupShortcutsModal } from "../helpers/startupOverlays";
+import { advanceStageWithShortcut } from "../helpers/stageAdvance";
 import { WebDriverClient } from "../helpers/webdriver";
 import { waitForFile } from "../helpers/worktreeFs";
 
@@ -230,12 +231,10 @@ describe("real stage pipeline", () => {
       agentProvider: "codex",
     });
 
-    const advanceResult = await callVueMethod(client, "store.advanceStage", taskId);
-    if (isVueCallError(advanceResult)) throw new Error(advanceResult.__error);
+    await advanceStageWithShortcut(client, "exercise the real stage pipeline", taskId);
 
     await waitForStageCount(client, repoId, "review", 1, 30_000, false);
-    const reviewAdvanceResult = await callVueMethod(client, "store.advanceStage", taskId);
-    if (isVueCallError(reviewAdvanceResult)) throw new Error(reviewAdvanceResult.__error);
+    await advanceStageWithShortcut(client, "exercise the real stage pipeline", taskId);
     await waitForStageCount(client, repoId, "pr", 1, 60_000);
     await waitForFile(join(worktreePath, ".kanna-commit-prompt.txt"), 5_000, 100);
     await waitForFile(join(worktreePath, ".kanna-review-prompt.txt"), 5_000, 100);

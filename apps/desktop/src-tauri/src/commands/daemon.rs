@@ -793,6 +793,21 @@ pub async fn send_input(
 }
 
 #[tauri::command]
+pub async fn send_agent_input(
+    state: tauri::State<'_, DaemonState>,
+    session_id: String,
+    text: String,
+) -> Result<(), DaemonCommandError> {
+    let cmd = serde_json::json!({
+        "type": "AgentInput",
+        "session_id": session_id,
+        "text": text,
+    });
+    let json = serde_json::to_string(&cmd).map_err(|e| e.to_string())?;
+    send_command_expect_ack(&state, &json).await
+}
+
+#[tauri::command]
 pub async fn resize_session(
     window: tauri::WebviewWindow,
     state: tauri::State<'_, DaemonState>,

@@ -733,6 +733,7 @@ pub fn run() {
             commands::daemon::spawn_session,
             commands::daemon::spawn_agent_session,
             commands::daemon::send_input,
+            commands::daemon::send_agent_input,
             commands::daemon::resize_session,
             commands::daemon::signal_session,
             commands::daemon::kill_session,

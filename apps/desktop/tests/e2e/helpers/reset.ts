@@ -13,6 +13,11 @@ interface GitWorktreeEntry {
   path?: string;
 }
 
+interface OpenCleanupTask {
+  id: string;
+  agent_type: string | null;
+}
+
 const worktreeCleanupBaselines = new Map<string, Set<string>>();
 const IMPORT_REPO_SELECTION_TIMEOUT_MS = 10_000;
 const IMPORT_REPO_SELECTION_POLL_MS = 100;
@@ -155,24 +160,31 @@ async function importRepoThroughUi(
   await client.waitForNoElement(IMPORT_REPO_MODAL_SELECTOR, 10_000);
 }
 
-async function listOpenTaskIdsForRepo(
+function shouldPreKillTaskSession(task: OpenCleanupTask): boolean {
+  return task.agent_type === "agent" || task.agent_type === "sdk";
+}
+
+async function listOpenTasksForRepo(
   client: WebDriverClient,
   repoPath: string
-): Promise<string[]> {
+): Promise<OpenCleanupTask[]> {
   const rows = await queryDb(
     client,
-    `SELECT p.id
+    `SELECT p.id, p.agent_type
        FROM pipeline_item p
        JOIN repo r ON r.id = p.repo_id
       WHERE r.path = ?
         AND p.closed_at IS NULL
       ORDER BY p.created_at DESC`,
     [repoPath],
-  ) as Array<{ id?: string | null }>;
+  ) as Array<{ id?: string | null; agent_type?: string | null }>;
 
   return rows
-    .map((row) => row.id)
-    .filter((id): id is string => typeof id === "string" && id.length > 0);
+    .filter((row): row is { id: string; agent_type?: string | null } => typeof row.id === "string" && row.id.length > 0)
+    .map((row) => ({
+      id: row.id,
+      agent_type: row.agent_type ?? null,
+    }));
 }
 
 /** Back up the SQLite DB file before wiping. Best-effort — logs but never throws. */
@@ -252,10 +264,13 @@ export async function cleanupWorktrees(
   if (!baseline) return;
 
   try {
-    const taskIds = await listOpenTaskIdsForRepo(client, repoPath);
-    for (const taskId of taskIds) {
+    const tasks = await listOpenTasksForRepo(client, repoPath);
+    for (const task of tasks) {
       try {
-        await closeTaskThroughApp(client, taskId);
+        if (shouldPreKillTaskSession(task)) {
+          await tauriInvoke(client, "kill_session", { sessionId: task.id }).catch(() => undefined);
+        }
+        await closeTaskThroughApp(client, task.id);
       } catch {
         // Cleanup is best-effort — don't fail tests
       }

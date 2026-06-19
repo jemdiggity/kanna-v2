@@ -269,6 +269,16 @@ async function clickSidebarItemByTitle(
   throw new Error(`timed out waiting for sidebar item ${JSON.stringify(title)}`);
 }
 
+async function advanceStageWithShortcut(
+  client: WebDriverClient,
+  taskTitle: string,
+  expectedTaskId: string,
+): Promise<void> {
+  await clickSidebarItemByTitle(client, taskTitle);
+  await waitForSelectedTask(client, expectedTaskId);
+  await client.executeSync(buildGlobalKeydownScript({ key: "s", meta: true }));
+}
+
 async function waitForFileSize(path: string, expectedSize: number, timeoutMs = 5_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -286,6 +296,17 @@ async function waitForFile(path: string, timeoutMs = 5_000): Promise<void> {
     await sleep(100);
   }
   throw new Error(`timed out waiting for ${path}`);
+}
+
+async function waitForFileContaining(path: string, expected: string, timeoutMs = 5_000): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+  let latest = "";
+  while (Date.now() < deadline) {
+    latest = await readFile(path, "utf8").catch(() => "");
+    if (latest.includes(expected)) return latest;
+    await sleep(100);
+  }
+  throw new Error(`timed out waiting for ${path} to contain ${JSON.stringify(expected)}; latest=${JSON.stringify(latest)}`);
 }
 
 describe("stage advance", () => {
@@ -370,6 +391,20 @@ describe("stage advance", () => {
       }),
     );
     await writeFile(
+      join(kannaDir, "pipelines", "sdk-advance-e2e.json"),
+      JSON.stringify({
+        name: "sdk-advance-e2e",
+        stages: [
+          { name: "in progress", transition: "manual" },
+          {
+            name: "qa",
+            transition: "manual",
+            agent: "revision-e2e",
+          },
+        ],
+      }),
+    );
+    await writeFile(
       join(kannaDir, "agents", "commit-e2e", "AGENT.md"),
       [
         "---",
@@ -403,6 +438,18 @@ describe("stage advance", () => {
       ].join("\n"),
     );
     await chmod(join(kannaDir, "fake-bin", "codex"), 0o755);
+    await writeFile(
+      join(kannaDir, "fake-bin", "fake-claude-agent"),
+      [
+        "#!/bin/sh",
+        "mkdir -p \"$(dirname \"$CHAT_AGENT_STDIN_LOG\")\"",
+        "while IFS= read -r line; do",
+        "  printf '%s\\n' \"$line\" >> \"$CHAT_AGENT_STDIN_LOG\"",
+        "done",
+        "",
+      ].join("\n"),
+    );
+    await chmod(join(kannaDir, "fake-bin", "fake-claude-agent"), 0o755);
     await git(testRepoPath, ["add", ".kanna"]);
     await git(testRepoPath, ["commit", "-m", "test: add kanna stage fixtures"]);
 
@@ -413,6 +460,7 @@ describe("stage advance", () => {
     await tauriInvoke(client, "kill_session", { sessionId: "continue-stage-task" }).catch(() => undefined);
     await tauriInvoke(client, "kill_session", { sessionId: "continue-stage-claude-enter-task" }).catch(() => undefined);
     await tauriInvoke(client, "kill_session", { sessionId: "continue-stage-copilot-task" }).catch(() => undefined);
+    await tauriInvoke(client, "kill_session", { sessionId: "continue-stage-chat-agent-task" }).catch(() => undefined);
     await tauriInvoke(client, "kill_session", { sessionId: "server-continue-stage-task" }).catch(() => undefined);
     if (renamedStageTaskId) {
       await tauriInvoke(client, "kill_session", { sessionId: renamedStageTaskId }).catch(() => undefined);
@@ -549,8 +597,7 @@ describe("stage advance", () => {
     await hydrateStoreItem(client, sourceTaskId);
 
     const existingReviewTaskIds = await getStageTaskIds(client, repoId, "review");
-    const advanceResult = await callVueMethod(client, "store.advanceStage", sourceTaskId);
-    if (isVueCallError(advanceResult)) throw new Error(advanceResult.__error);
+    await advanceStageWithShortcut(client, "Advance from renamed source", sourceTaskId);
 
     renamedStageTaskId = await waitForCreatedStageTask(client, repoId, "review", {
       excludeIds: existingReviewTaskIds,
@@ -571,6 +618,62 @@ describe("stage advance", () => {
     const createdMarkerPath = join(testRepoPath, ".kanna-worktrees", createdBranch as string, markerName);
     await waitForFileSize(createdMarkerPath, Buffer.byteLength(markerContent), 20_000);
     expect(await readFile(createdMarkerPath, "utf8")).toBe(markerContent);
+  });
+
+  it("preserves GUI agent execution when advancing to an agent-backed stage", async () => {
+    const sourceTaskId = "sdk-advance-source";
+    const sourceBranch = "task-sdk-advance-source";
+    const sourceWorktreePath = join(testRepoPath, ".kanna-worktrees", sourceBranch);
+    await tauriInvoke(client, "git_worktree_add", {
+      repoPath: testRepoPath,
+      branch: sourceBranch,
+      path: sourceWorktreePath,
+      startPoint: "main",
+    });
+
+    await execDb(
+      client,
+      `INSERT INTO pipeline_item (
+         id, repo_id, prompt, pipeline, stage, stage_result, tags, branch,
+         agent_type, agent_provider, activity, display_name, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
+      [
+        sourceTaskId,
+        repoId,
+        "Advance GUI agent to QA",
+        "sdk-advance-e2e",
+        "in progress",
+        JSON.stringify({ status: "success", summary: "ready for QA" }),
+        "[]",
+        sourceBranch,
+        "agent",
+        "codex",
+        "idle",
+        "GUI agent source",
+      ],
+    );
+    await hydrateStoreItem(client, sourceTaskId);
+
+    const existingQaTaskIds = await getStageTaskIds(client, repoId, "qa");
+    await advanceStageWithShortcut(client, "GUI agent source", sourceTaskId);
+
+    const createdTaskId = await waitForCreatedStageTask(client, repoId, "qa", {
+      excludeIds: existingQaTaskIds,
+      displayName: "GUI agent source",
+      baseRef: sourceBranch,
+    });
+
+    const rows = (await queryDb(
+      client,
+      "SELECT branch, agent_type, agent_provider FROM pipeline_item WHERE id = ?",
+      [createdTaskId],
+    )) as Array<{ branch: string | null; agent_type: string | null; agent_provider: string | null }>;
+    expect(rows[0]).toMatchObject({
+      agent_type: "agent",
+      agent_provider: "codex",
+    });
+    const createdBranch = rows[0]?.branch;
+    expect(createdBranch).toBeTruthy();
   });
 
   it("starts a live task commit post-action through the daemon input command", async () => {
@@ -600,7 +703,7 @@ describe("stage advance", () => {
         "pty",
         "codex",
         "idle",
-        null,
+        "Codex commit shortcut source",
       ],
     );
     await hydrateStoreItem(client, taskId);
@@ -619,12 +722,71 @@ describe("stage advance", () => {
       agentProvider: "codex",
     });
 
-    const advanceResult = await callVueMethod(client, "store.advanceStage", taskId);
-    if (isVueCallError(advanceResult)) throw new Error(advanceResult.__error);
+    await advanceStageWithShortcut(client, "Codex commit shortcut source", taskId);
 
     await waitForActivePostAction(client, taskId, "commit");
     await waitForFileSize(inputCapturePath, expectedInput.length);
     expect(await readFile(inputCapturePath)).toEqual(expectedInput);
+  });
+
+  it("starts a live chat-agent commit post-action through the daemon agent input command", async () => {
+    const taskId = "continue-stage-chat-agent-task";
+    const branch = "task-continue-stage-chat-agent";
+    const worktreePath = join(testRepoPath, ".kanna-worktrees", branch);
+    const agentInputLogPath = join(testRepoPath, ".kanna", "continue-stage-chat-agent-input.ndjson");
+
+    await tauriInvoke(client, "git_worktree_add", {
+      repoPath: testRepoPath,
+      branch,
+      path: worktreePath,
+      startPoint: "main",
+    });
+    await execDb(
+      client,
+      `INSERT INTO pipeline_item (
+         id, repo_id, prompt, pipeline, stage, stage_result, tags, branch,
+         agent_type, agent_provider, activity, display_name, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
+      [
+        taskId,
+        repoId,
+        "Write the chat commit",
+        "continue-e2e",
+        "in progress",
+        JSON.stringify({ status: "success", summary: "implemented" }),
+        "[]",
+        branch,
+        "agent",
+        "claude",
+        "idle",
+        "Chat agent commit shortcut source",
+      ],
+    );
+    await hydrateStoreItem(client, taskId);
+
+    await tauriInvoke(client, "spawn_agent_session", {
+      sessionId: taskId,
+      cwd: worktreePath,
+      env: { CHAT_AGENT_STDIN_LOG: agentInputLogPath },
+      agentProvider: "claude",
+      prompt: "Initial chat prompt",
+      model: null,
+      permissionMode: null,
+      allowedTools: null,
+      disallowedTools: null,
+      maxTurns: null,
+      maxBudgetUsd: null,
+      systemPrompt: null,
+      executable: join(testRepoPath, ".kanna", "fake-bin", "fake-claude-agent"),
+    });
+    await waitForFileContaining(agentInputLogPath, "Initial chat prompt");
+
+    await advanceStageWithShortcut(client, "Chat agent commit shortcut source", taskId);
+
+    await waitForActivePostAction(client, taskId, "commit");
+    const inputLog = await waitForFileContaining(agentInputLogPath, "Commit stage marker for Write the chat commit");
+    expect(inputLog).toContain("Commit agent generated prompt marker.");
+    expect(inputLog).toContain("Commit stage marker for Write the chat commit");
   });
 
   it("advances a commit post-action through the server API without creating a new task", async () => {
@@ -969,7 +1131,7 @@ describe("stage advance", () => {
         "pty",
         "claude",
         "idle",
-        null,
+        "Claude commit shortcut source",
       ],
     );
     await hydrateStoreItem(client, taskId);
@@ -988,8 +1150,7 @@ describe("stage advance", () => {
       agentProvider: "claude",
     });
 
-    const advanceResult = await callVueMethod(client, "store.advanceStage", taskId);
-    if (isVueCallError(advanceResult)) throw new Error(advanceResult.__error);
+    await advanceStageWithShortcut(client, "Claude commit shortcut source", taskId);
 
     await waitForActivePostAction(client, taskId, "commit");
     await waitForFileSize(inputCapturePath, expectedInput.length);
@@ -1023,7 +1184,7 @@ describe("stage advance", () => {
         "pty",
         "copilot",
         "idle",
-        null,
+        "Copilot commit shortcut source",
       ],
     );
     await hydrateStoreItem(client, taskId);
@@ -1042,8 +1203,7 @@ describe("stage advance", () => {
       agentProvider: "copilot",
     });
 
-    const advanceResult = await callVueMethod(client, "store.advanceStage", taskId);
-    if (isVueCallError(advanceResult)) throw new Error(advanceResult.__error);
+    await advanceStageWithShortcut(client, "Copilot commit shortcut source", taskId);
 
     await waitForActivePostAction(client, taskId, "commit");
     await waitForFileSize(inputCapturePath, expectedInput.length);
