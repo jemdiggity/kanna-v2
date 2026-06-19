@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch, watchEffect } from "vue";
+import { computed, nextTick, onMounted, ref, watch, watchEffect } from "vue";
 import MarkdownIt from "markdown-it";
 import type { AgentEvent, PermissionDecision, TurnStats } from "@kanna/agent-protocol";
 import { getActivePinia } from "pinia";
@@ -178,6 +178,14 @@ function adjustComposerHeight() {
 function onComposerInput() {
   void nextTick(adjustComposerHeight);
 }
+
+onMounted(() => {
+  void nextTick(() => {
+    if (document.querySelector(".modal-overlay")) return;
+    composerEl.value?.focus();
+    adjustComposerHeight();
+  });
+});
 
 // ── Slash commands ──────────────────────────────────────────
 const slashProvider = computed<string | undefined>(() => props.agentProvider);
@@ -444,6 +452,7 @@ function sessionEndedLabel(event: Extract<AgentEvent, { type: "session_ended" }>
             type="button"
             class="composer-button stop-button"
             aria-label="Stop the agent"
+            @mousedown.prevent
             @click="stream.interrupt"
           >
             <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
@@ -456,6 +465,7 @@ function sessionEndedLabel(event: Extract<AgentEvent, { type: "session_ended" }>
             class="composer-button send-button"
             aria-label="Send message"
             :disabled="!composer.trim() || !stream.ready.value"
+            @mousedown.prevent
             @click="sendComposer"
           >
             <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
