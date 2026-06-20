@@ -504,6 +504,7 @@ pub(crate) enum PreparedSessionSpawn {
         model: Option<String>,
         permission_mode: Option<String>,
         allowed_tools: Vec<String>,
+        executable: Option<String>,
     },
 }
 
@@ -743,13 +744,20 @@ fn prepare_task_spawn(
                 agent_provider: provider.to_daemon_provider(),
             }
         }
-        AgentSessionType::Agent => PreparedSessionSpawn::Agent {
-            agent_provider: provider.to_daemon_provider(),
-            prompt: final_prompt,
-            model,
-            permission_mode,
-            allowed_tools,
-        },
+        AgentSessionType::Agent => {
+            let executable = match provider {
+                AgentProvider::Opencode => which_binary("opencode")?,
+                AgentProvider::Claude | AgentProvider::Codex | AgentProvider::Copilot => None,
+            };
+            PreparedSessionSpawn::Agent {
+                agent_provider: provider.to_daemon_provider(),
+                prompt: final_prompt,
+                model,
+                permission_mode,
+                allowed_tools,
+                executable,
+            }
+        }
     };
     let title = request
         .display_name
@@ -866,6 +874,7 @@ async fn spawn_prepared_task(
             model,
             permission_mode,
             allowed_tools,
+            executable,
         } => DaemonCommand::SpawnAgent {
             session_id: prepared.session_id,
             params: AgentSpawnParams {
@@ -880,7 +889,7 @@ async fn spawn_prepared_task(
                 max_turns: None,
                 max_budget_usd: None,
                 system_prompt: Some(build_kanna_runtime_system_prompt()),
-                executable: None,
+                executable,
             },
         },
     };
@@ -1373,13 +1382,15 @@ fn resolve_agent_type(
     explicit_agent_type: Option<&str>,
     provider: AgentProvider,
 ) -> Result<AgentSessionType, String> {
-    match normalize_agent_type(explicit_agent_type).as_deref() {
+    match normalize_agent_type(explicit_agent_type) {
         Some("pty") => Ok(AgentSessionType::Pty),
         Some("agent") => Ok(AgentSessionType::Agent),
         Some(other) => Err(format!("unsupported agent_type: {}", other)),
         None => Ok(match provider {
-            AgentProvider::Claude | AgentProvider::Codex => AgentSessionType::Agent,
-            AgentProvider::Copilot | AgentProvider::Opencode => AgentSessionType::Pty,
+            AgentProvider::Claude | AgentProvider::Codex | AgentProvider::Opencode => {
+                AgentSessionType::Agent
+            }
+            AgentProvider::Copilot => AgentSessionType::Pty,
         }),
     }
 }
@@ -1867,9 +1878,9 @@ mod tests {
     use super::{
         build_spawn_env, build_stage_prompt, continue_prepared_stage_for_api,
         prepare_advance_stage_for_api, prepare_merge_agent_for_api, prepare_revision_task_for_api,
-        prepare_task_for_api, read_default_agent_provider_setting,
-        resolve_agent_type, resolve_binary_from_candidates_with_path_lookup, spawn_prepared_task,
-        AgentProvider, AgentSessionType, CreatedTask, DaemonAgentProvider, PreparedSessionSpawn,
+        prepare_task_for_api, read_default_agent_provider_setting, resolve_agent_type,
+        resolve_binary_from_candidates_with_path_lookup, spawn_prepared_task, AgentProvider,
+        AgentSessionType, CreatedTask, DaemonAgentProvider, PreparedSessionSpawn,
         PreparedStageTransition, PreparedTaskSpawn, PromptContext,
     };
     use crate::config::Config;
@@ -1907,6 +1918,18 @@ mod tests {
         assert!(matches!(
             resolve_agent_type(Some("sdk"), AgentProvider::Claude),
             Ok(AgentSessionType::Agent)
+        ));
+    }
+
+    #[test]
+    fn resolve_agent_type_defaults_opencode_to_agent_but_allows_explicit_pty() {
+        assert!(matches!(
+            resolve_agent_type(None, AgentProvider::Opencode),
+            Ok(AgentSessionType::Agent)
+        ));
+        assert!(matches!(
+            resolve_agent_type(Some("pty"), AgentProvider::Opencode),
+            Ok(AgentSessionType::Pty)
         ));
     }
 
@@ -2174,6 +2197,7 @@ mod tests {
                 model: Some("sonnet".to_string()),
                 permission_mode: Some("dontAsk".to_string()),
                 allowed_tools: vec!["Bash".to_string()],
+                executable: None,
             },
         };
 
@@ -2190,6 +2214,7 @@ mod tests {
                 assert_eq!(params.permission_mode.as_deref(), Some("dontAsk"));
                 assert_eq!(params.allowed_tools, vec!["Bash".to_string()]);
                 assert_eq!(params.cwd, "/tmp/repo/.kanna-worktrees/task-1");
+                assert_eq!(params.executable, None);
             }
             other => panic!("expected SpawnAgent, got {other:?}"),
         }

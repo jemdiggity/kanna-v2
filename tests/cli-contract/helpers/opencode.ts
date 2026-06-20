@@ -78,3 +78,38 @@ export async function runOpenCodeRaw(args: string[], opts?: {
     timeoutMs: opts?.timeoutMs ?? 15000,
   });
 }
+
+export async function runOpenCodeJson(opts: {
+  prompt: string;
+  flags?: string[];
+  cwd?: string;
+  timeoutMs?: number;
+}): Promise<{
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+  lines: Array<Record<string, unknown>>;
+}> {
+  const result = await runOpenCodeRaw([
+    "run",
+    "--format",
+    "json",
+    "--dangerously-skip-permissions",
+    "--dir",
+    opts.cwd ?? "/tmp",
+    ...(opts.flags || []),
+    opts.prompt,
+  ], {
+    cwd: opts.cwd ?? "/tmp",
+    timeoutMs: opts.timeoutMs ?? 120000,
+  });
+
+  const lines: Array<Record<string, unknown>> = [];
+  for (const line of result.stdout.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    lines.push(JSON.parse(trimmed));
+  }
+
+  return { ...result, lines };
+}

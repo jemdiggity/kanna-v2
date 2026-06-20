@@ -15,6 +15,7 @@ pub mod claude;
 pub mod codex;
 mod events;
 pub mod frames;
+pub mod opencode;
 
 pub use adapter::{Capabilities, InterruptAction, ProviderAdapter, SpawnCtx, SpawnSpec, TurnModel};
 pub use claude::ClaudeAdapter;
@@ -24,3 +25,4 @@ pub use events::{
     TurnStatus, MAX_TEXT_BYTES,
 };
 pub use frames::{ClientFrame, FrameAgentEvent, ServerFrame, StreamKind};
+pub use opencode::OpencodeAdapter;
