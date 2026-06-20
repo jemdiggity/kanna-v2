@@ -785,6 +785,7 @@ pub fn run() {
             commands::sqlite::backup_sqlite_database,
             commands::cloud::post_cloud_task_snapshot,
             // Mobile commands
+            commands::mobile::ensure_mobile_server,
             commands::mobile::mobile_server_status,
             commands::mobile::create_mobile_pairing_session,
             commands::mobile::desktop_cloud_credential,

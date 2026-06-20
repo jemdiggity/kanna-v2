@@ -23,6 +23,7 @@ export async function getSharedStreamClient(): Promise<StreamClient> {
   if (sharedClientPromise) return sharedClientPromise;
 
   sharedClientPromise = (async () => {
+    await invoke("ensure_mobile_server");
     const port = await invoke<string>("read_env_var", { name: "KANNA_MOBILE_SERVER_PORT" }).catch(() => null);
     const client = new StreamClient({
       url: streamUrlFromPort(port),

@@ -276,6 +276,12 @@ impl MobileServerManager {
 }
 
 #[tauri::command]
+pub async fn ensure_mobile_server(app: tauri::AppHandle) -> Result<(), String> {
+    let manager = app.state::<MobileServerManager>();
+    manager.start().await
+}
+
+#[tauri::command]
 pub async fn mobile_server_status(app: tauri::AppHandle) -> Result<MobileServerStatus, String> {
     let manager = app.state::<MobileServerManager>();
     manager.snapshot().await
