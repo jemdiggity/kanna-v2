@@ -38,7 +38,14 @@
   --kn-warning-bg: #2a2a1a;
   --kn-overlay-scrim: rgba(0, 0, 0, 0.6);
   --kn-shadow-modal: 0 8px 32px rgba(0, 0, 0, 0.5);
-  --kn-terminal-bg: #1e1e1e;
+  --kn-terminal-bg: #20242d;
+  --kn-agent-terminal-bg: #20242d;
+  --kn-agent-terminal-panel: #252b36;
+  --kn-agent-terminal-panel-raised: #2d3442;
+  --kn-agent-terminal-border: #3d4657;
+  --kn-agent-terminal-text: #d7deea;
+  --kn-agent-terminal-muted: #8f9aac;
+  --kn-agent-terminal-accent: #7db3ff;
   --kn-code-bg: #1a1a1a;
 }
 
@@ -70,6 +77,13 @@
   --kn-warning-bg: #fff7df;
   --kn-overlay-scrim: rgba(15, 23, 42, 0.32);
   --kn-shadow-modal: 0 16px 42px rgba(20, 30, 45, 0.18);
-  --kn-terminal-bg: #f8fafc;
+  --kn-terminal-bg: #f6f9ff;
+  --kn-agent-terminal-bg: #f6f9ff;
+  --kn-agent-terminal-panel: #eef4ff;
+  --kn-agent-terminal-panel-raised: #e3efff;
+  --kn-agent-terminal-border: #c2d3e8;
+  --kn-agent-terminal-text: #253044;
+  --kn-agent-terminal-muted: #687385;
+  --kn-agent-terminal-accent: #0b66c3;
   --kn-code-bg: #ffffff;
 }

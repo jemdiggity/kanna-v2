@@ -1,6 +1,8 @@
 // @vitest-environment happy-dom
 
 import { mount } from "@vue/test-utils";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { computed, ref } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentEvent } from "@kanna/agent-protocol";
@@ -74,6 +76,22 @@ describe("AgentMessageView", () => {
     expect(wrapper.get('[data-testid="agent-message-view"]').text()).toContain("Hello agent");
     expect(wrapper.classes()).toContain("skin-log");
     expect(wrapper.find(".style-switcher").exists()).toBe(false);
+  });
+
+  it("does not carry a separate light terminal chat palette", () => {
+    const source = readFileSync(join(process.cwd(), "src/components/AgentMessageView.vue"), "utf8");
+
+    expect(source).not.toContain(".skin-terminal.theme-light");
+  });
+
+  it("uses shared terminal chat CSS tokens instead of local palette literals", () => {
+    const source = readFileSync(join(process.cwd(), "src/components/AgentMessageView.vue"), "utf8");
+    const terminalSkin = source.match(/\.skin-terminal\s*\{(?<body>[^}]+)\}/)?.groups?.body ?? "";
+
+    expect(terminalSkin).toContain("--agent-bg: var(--kn-agent-terminal-bg)");
+    expect(terminalSkin).toContain("--agent-text: var(--kn-agent-terminal-text)");
+    expect(terminalSkin).toContain("--agent-accent: var(--kn-agent-terminal-accent)");
+    expect(terminalSkin).not.toMatch(/--agent-(?:bg|panel|panel-raised|border|text|muted|accent):\s*#[0-9a-f]{6}/i);
   });
 
   it("uses one dual-use button: send when idle, stop while running", async () => {
