@@ -47,8 +47,6 @@ interface PendingInvoke {
 }
 
 interface TerminalObserver {
-  decoder: TextDecoder;
-  desktopId: string;
   listener(event: TaskTerminalStreamEvent): void;
 }
 
@@ -247,7 +245,7 @@ export function createRelayDesktopClient({
           observer.listener({
             type: "output",
             taskId: sessionId,
-            text: getStringField(snapshot, "vt") ?? ""
+            dataB64: encodeBase64(getStringField(snapshot, "vt") ?? "")
           });
         }
         break;
@@ -256,10 +254,7 @@ export function createRelayDesktopClient({
         observer.listener({
           type: "output",
           taskId: sessionId,
-          text: decodeBase64(
-            getStringField(message.payload, "data_b64") ?? "",
-            observer.decoder
-          )
+          dataB64: getStringField(message.payload, "data_b64") ?? ""
         });
         break;
       case "session_exit":
@@ -315,23 +310,18 @@ export function createRelayDesktopClient({
       });
     },
     observeTaskTerminal({ desktopId, taskId }, listener) {
-      const decoder = new TextDecoder();
       const client = streamClientForDesktop(desktopId);
       client.attachTerminal(taskId, {
         onSnapshot(_cols, _rows, dataB64) {
           listener({ type: "ready", taskId });
-          listener({
-            type: "output",
-            taskId,
-            text: decodeBase64(dataB64, decoder)
-          });
+          if (dataB64) {
+            listener({ type: "output", taskId, dataB64 });
+          }
         },
         onOutput(dataB64) {
-          listener({
-            type: "output",
-            taskId,
-            text: decodeBase64(dataB64, decoder)
-          });
+          if (dataB64) {
+            listener({ type: "output", taskId, dataB64 });
+          }
         },
         onSessionExit(code) {
           listener({ type: "exit", taskId, code });
@@ -446,16 +436,6 @@ function getStringField(record: Record<string, unknown>, field: string): string 
 function getNumberField(record: Record<string, unknown>, field: string): number | null {
   const value = record[field];
   return typeof value === "number" ? value : null;
-}
-
-function decodeBase64(value: string, decoder = new TextDecoder()): string {
-  if (!value) {
-    return "";
-  }
-
-  const binary = globalThis.atob(value);
-  const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
-  return decoder.decode(bytes, { stream: true });
 }
 
 function encodeBase64(value: string): string {

@@ -1373,7 +1373,7 @@ fn resolve_agent_type(
     explicit_agent_type: Option<&str>,
     provider: AgentProvider,
 ) -> Result<AgentSessionType, String> {
-    match normalize_agent_type(explicit_agent_type).as_deref() {
+    match normalize_agent_type(explicit_agent_type) {
         Some("pty") => Ok(AgentSessionType::Pty),
         Some("agent") => Ok(AgentSessionType::Agent),
         Some(other) => Err(format!("unsupported agent_type: {}", other)),
@@ -1867,9 +1867,9 @@ mod tests {
     use super::{
         build_spawn_env, build_stage_prompt, continue_prepared_stage_for_api,
         prepare_advance_stage_for_api, prepare_merge_agent_for_api, prepare_revision_task_for_api,
-        prepare_task_for_api, read_default_agent_provider_setting,
-        resolve_agent_type, resolve_binary_from_candidates_with_path_lookup, spawn_prepared_task,
-        AgentProvider, AgentSessionType, CreatedTask, DaemonAgentProvider, PreparedSessionSpawn,
+        prepare_task_for_api, read_default_agent_provider_setting, resolve_agent_type,
+        resolve_binary_from_candidates_with_path_lookup, spawn_prepared_task, AgentProvider,
+        AgentSessionType, CreatedTask, DaemonAgentProvider, PreparedSessionSpawn,
         PreparedStageTransition, PreparedTaskSpawn, PromptContext,
     };
     use crate::config::Config;

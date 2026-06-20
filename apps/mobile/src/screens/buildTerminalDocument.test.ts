@@ -5,6 +5,10 @@ import {
   buildTerminalReplaceScript
 } from "./buildTerminalDocument";
 
+function b64(input: string): string {
+  return Buffer.from(input, "utf8").toString("base64");
+}
+
 describe("buildTerminalDocument", () => {
   it("builds an xterm shell with sticky scroll behavior and bottom inset", () => {
     const html = buildTerminalDocument({
@@ -36,22 +40,26 @@ describe("buildTerminalDocument", () => {
     expect(html).not.toContain("<pre id=\"terminal\"></pre>");
   });
 
-  it("repairs utf-8 box drawing text that arrived as latin-1 mojibake in replace scripts", () => {
+  it("writes base64 terminal chunks as bytes in replace scripts", () => {
     const script = buildTerminalReplaceScript({
-      output: "â­ââ Claude Code âââ®",
+      output: `${b64("╭── Claude Code ──╮")}\n`,
       status: "live"
     });
 
-    expect(script).toContain("╭── Claude Code ──╮");
+    expect(script).toContain(b64("╭── Claude Code ──╮"));
+    expect(script).not.toContain("╭── Claude Code ──╮");
     expect(script).not.toContain("â­");
     expect(script).toContain("window.__replaceTerminalState");
+    expect(script).toContain("chunksB64");
   });
 
-  it("repairs utf-8 spinner text that arrived as latin-1 mojibake in append scripts", () => {
-    const script = buildTerminalAppendScript("â  Thinking\n");
+  it("preserves split multibyte terminal chunks in append scripts", () => {
+    const script = buildTerminalAppendScript("8J8=\nmIA=\n");
 
-    expect(script).toContain("⠋ Thinking\\n");
-    expect(script).not.toContain("â ");
+    expect(script).toContain("8J8=");
+    expect(script).toContain("mIA=");
+    expect(script).not.toContain("😀");
+    expect(script).toContain("window.__appendTerminalChunk");
   });
 
   it("renders terminal status copy when no output is available", () => {
@@ -69,20 +77,23 @@ describe("buildTerminalDocument", () => {
   });
 
   it("builds append scripts for incremental terminal output", () => {
-    const script = buildTerminalAppendScript("Second line\n");
+    const script = buildTerminalAppendScript(`${b64("Second line\n")}\n`);
 
     expect(script).toContain("window.__appendTerminalChunk");
-    expect(script).toContain("Second line\\n");
+    expect(script).toContain(b64("Second line\n"));
+    expect(script).not.toContain("Second line");
   });
 
-  it("removes echoed terminal input protocol wrappers from update scripts", () => {
+  it("keeps echoed terminal input control stripping in the webview byte path", () => {
+    const html = buildTerminalDocument({ bottomInset: 24 });
     const replaceScript = buildTerminalReplaceScript({
-      output: "\u001b[200~continue\u001b[201~\u001b[13u\nClaude response\n",
+      output: `${b64("\u001b[200~continue\u001b[201~\u001b[13u\nClaude response\n")}\n`,
       status: "live"
     });
-    const appendScript = buildTerminalAppendScript("\u001b[>1u\u001b[13;5u");
+    const appendScript = buildTerminalAppendScript(`${b64("\u001b[>1u\u001b[13;5u")}\n`);
 
-    expect(replaceScript).toContain("continue\\nClaude response");
+    expect(html).toContain("removeEchoedTerminalInputControls");
+    expect(replaceScript).toContain(b64("\u001b[200~continue\u001b[201~\u001b[13u\nClaude response\n"));
     expect(replaceScript).not.toContain("[200~");
     expect(replaceScript).not.toContain("[201~");
     expect(replaceScript).not.toContain("[13u");

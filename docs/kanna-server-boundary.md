@@ -12,13 +12,13 @@ Mobile clients and future CLI tools should talk to `kanna-server`, not directly 
 ## v1 LAN Surface
 
 - `GET /v1/status`
+- `GET /v1/stream` (KSP WebSocket for terminal, agent, and streamed task API frames)
 - `GET /v1/desktops`
 - `GET /v1/repos`
 - `GET /v1/repos/{repo_id}/tasks`
 - `GET /v1/tasks/recent`
 - `GET /v1/tasks/search?query=...`
 - `POST /v1/tasks`
-- `GET /v1/tasks/{task_id}/terminal`
 - `POST /v1/tasks/{task_id}/input`
 - `POST /v1/tasks/{task_id}/actions/complete-stage`
 - `POST /v1/tasks/{task_id}/actions/request-revision`
