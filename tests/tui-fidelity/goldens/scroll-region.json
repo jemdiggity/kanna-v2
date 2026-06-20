@@ -1,0 +1,10 @@
+{
+  "name": "scroll-region",
+  "description": "DECSTBM scroll region with overflowing content.",
+  "snapshotAt": 212,
+  "usedVisibleTextFallback": false,
+  "divergentCells": 0,
+  "firstDiffs": [],
+  "pathSerialized": "top fixed\r\n\r\nregion line 6\r\nregion line 7\r\nregion line 8\r\nregion line 9\r\nregion line 10\r\n\r\n\r\nbottom after region\u001b[1B\u001b[19D",
+  "referenceSerialized": "top fixed\r\n\r\nregion line 6\r\nregion line 7\r\nregion line 8\r\nregion line 9\r\nregion line 10\r\n\r\n\r\nbottom after region\u001b[1B\u001b[19D"
+}

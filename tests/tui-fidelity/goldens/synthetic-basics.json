@@ -1,0 +1,10 @@
+{
+  "name": "synthetic-basics",
+  "description": "Plain ASCII baseline with clear screen and home cursor.",
+  "snapshotAt": 49,
+  "usedVisibleTextFallback": false,
+  "divergentCells": 0,
+  "firstDiffs": [],
+  "pathSerialized": "kanna tui fidelity\r\nplain ascii baseline\u001b[1B\u001b[20D",
+  "referenceSerialized": "kanna tui fidelity\r\nplain ascii baseline\u001b[1B\u001b[20D"
+}

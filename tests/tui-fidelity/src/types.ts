@@ -1,0 +1,67 @@
+export interface TermSnapshotFrame {
+  type: "term_snapshot";
+  task_id: string;
+  cols: number;
+  rows: number;
+  data_b64: string;
+}
+
+export interface TermOutputFrame {
+  type: "term_output";
+  task_id: string;
+  data_b64: string;
+}
+
+export type TerminalFrame = TermSnapshotFrame | TermOutputFrame;
+
+export interface EmitterOutput {
+  fixture: string;
+  cols: number;
+  rows: number;
+  snapshot_at: number;
+  used_visible_text_fallback: boolean;
+  frames: TerminalFrame[];
+}
+
+export interface FixtureDefinition {
+  name: string;
+  description: string;
+  bytes: Uint8Array;
+  snapshotAt: number;
+  allowFallback?: boolean;
+}
+
+export interface CellSnapshot {
+  row: number;
+  col: number;
+  chars: string;
+  width: number;
+  fg: number;
+  bg: number;
+  flags: number;
+}
+
+export interface GridSnapshot {
+  cols: number;
+  rows: number;
+  serialized: string;
+  cells: CellSnapshot[];
+}
+
+export interface CellDiff {
+  row: number;
+  col: number;
+  expected: CellSnapshot;
+  actual: CellSnapshot;
+}
+
+export interface FixtureResult {
+  name: string;
+  description: string;
+  snapshotAt: number;
+  usedVisibleTextFallback: boolean;
+  divergentCells: number;
+  firstDiffs: CellDiff[];
+  pathSerialized: string;
+  referenceSerialized: string;
+}

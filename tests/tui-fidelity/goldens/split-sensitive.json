@@ -1,0 +1,10 @@
+{
+  "name": "split-sensitive",
+  "description": "Fixture replayed as live chunks to split UTF-8 and escape sequences.",
+  "snapshotAt": 0,
+  "usedVisibleTextFallback": true,
+  "divergentCells": 0,
+  "firstDiffs": [],
+  "pathSerialized": "split utf8: 界😀\r\nsplit color: \u001b[38;2;1;2;3mRGB\u001b[1B\u001b[16D\u001b[0m",
+  "referenceSerialized": "split utf8: 界😀\r\nsplit color: \u001b[38;2;1;2;3mRGB\u001b[1B\u001b[16D\u001b[0m"
+}

@@ -44,6 +44,23 @@ type SessionObservers =
     Arc<Mutex<HashMap<String, Vec<Arc<Mutex<tokio::net::unix::OwnedWriteHalf>>>>>>;
 type LostHandoffSessions = Arc<Mutex<HashMap<String, String>>>;
 
+fn effective_terminal_size(
+    client_sizes: &HashMap<usize, (u16, u16)>,
+    fallback: (u16, u16),
+) -> (u16, u16) {
+    let min_cols = client_sizes
+        .values()
+        .map(|(cols, _)| *cols)
+        .min()
+        .unwrap_or(fallback.0);
+    let min_rows = client_sizes
+        .values()
+        .map(|(_, rows)| *rows)
+        .min()
+        .unwrap_or(fallback.1);
+    (min_cols, min_rows)
+}
+
 struct HandoffResult {
     adopted: Vec<(String, pty::PtySession, protocol::HandoffSession)>,
     adopted_agents: Vec<(protocol::HandoffSession, Vec<std::os::fd::RawFd>)>,
@@ -1218,10 +1235,8 @@ async fn handle_command(
                         let writer_id = Arc::as_ptr(&writer) as usize;
                         client_sizes.remove(&writer_id);
                         if !client_sizes.is_empty() {
-                            let min_cols =
-                                client_sizes.values().map(|(c, _)| *c).min().unwrap_or(80);
-                            let min_rows =
-                                client_sizes.values().map(|(_, r)| *r).min().unwrap_or(24);
+                            let (min_cols, min_rows) =
+                                effective_terminal_size(client_sizes, (80, 24));
                             drop(sizes);
                             let mut mgr = sessions.lock().await;
                             let resized = mgr.resize(&session_id, min_cols, min_rows).is_ok();
@@ -1437,9 +1452,7 @@ async fn handle_command(
                 let mut sizes = session_sizes.lock().await;
                 let client_sizes = sizes.entry(session_id.clone()).or_default();
                 client_sizes.insert(writer_id, (cols, rows));
-                let min_cols = client_sizes.values().map(|(c, _)| *c).min().unwrap_or(cols);
-                let min_rows = client_sizes.values().map(|(_, r)| *r).min().unwrap_or(rows);
-                (min_cols, min_rows)
+                effective_terminal_size(client_sizes, (cols, rows))
             };
 
             let mut mgr = sessions.lock().await;
@@ -2635,6 +2648,18 @@ mod tests {
     fn recovery_output_is_mirrored_even_with_live_terminal_client() {
         assert!(should_mirror_output_to_recovery(false));
         assert!(should_mirror_output_to_recovery(true));
+    }
+
+    #[test]
+    fn effective_terminal_size_uses_minimum_attached_client_dimensions() {
+        let mut clients = HashMap::new();
+        clients.insert(1, (220, 48));
+
+        assert_eq!(effective_terminal_size(&clients, (80, 24)), (220, 48));
+
+        clients.insert(2, (100, 30));
+
+        assert_eq!(effective_terminal_size(&clients, (80, 24)), (100, 30));
     }
 
     #[test]

@@ -1,0 +1,3 @@
+before alt
+[?1049h[2J[Hinside alt screen
+[3;10Hpositioned[?1049lafter alt

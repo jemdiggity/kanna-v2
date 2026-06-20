@@ -7,6 +7,7 @@
     "build:desktop-sidecars": "./kd build sidecars",
     "dev": "./kd dev up",
     "test": "turbo test",
+    "test:tui-fidelity": "pnpm --filter @kanna/tui-fidelity test",
     "lint": "turbo lint",
     "firebase:emulators": "./kd emulators up",
     "firebase:emulators:test": "./kd emulators exec -- pnpm test"

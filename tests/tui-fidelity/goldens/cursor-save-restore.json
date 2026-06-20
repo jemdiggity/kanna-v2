@@ -1,0 +1,10 @@
+{
+  "name": "cursor-save-restore",
+  "description": "DECSC/DECRC cursor save and restore.",
+  "snapshotAt": 37,
+  "usedVisibleTextFallback": false,
+  "divergentCells": 0,
+  "firstDiffs": [],
+  "pathSerialized": "start restored\r\n\r\n\r\n\r\n\u001b[19Cfar\u001b[3A\u001b[22D",
+  "referenceSerialized": "start restored\r\n\r\n\r\n\r\n\u001b[19Cfar\u001b[3A\u001b[22D"
+}

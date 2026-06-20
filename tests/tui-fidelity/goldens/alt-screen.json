@@ -1,0 +1,10 @@
+{
+  "name": "alt-screen",
+  "description": "Alternate screen enter/exit with absolute positioning.",
+  "snapshotAt": 82,
+  "usedVisibleTextFallback": false,
+  "divergentCells": 0,
+  "firstDiffs": [],
+  "pathSerialized": "before alt\r\nafter alt\u001b[1B\u001b[9D",
+  "referenceSerialized": "before alt\r\nafter alt\u001b[1B\u001b[9D"
+}
