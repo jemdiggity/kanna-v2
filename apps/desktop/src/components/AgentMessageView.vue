@@ -980,26 +980,14 @@ button:disabled {
 }
 
 .skin-terminal {
-  /* Dark terminal palette (default); the light variant below follows the UI
-     theme via the document's data-theme attribute. */
-  --agent-bg: #101214;
-  --agent-panel: #15191d;
-  --agent-panel-raised: #1c2127;
-  --agent-border: #2c333a;
-  --agent-text: #d9f0dd;
-  --agent-muted: #8aa094;
-  --agent-accent: #62d26f;
+  --agent-bg: var(--kn-agent-terminal-bg);
+  --agent-panel: var(--kn-agent-terminal-panel);
+  --agent-panel-raised: var(--kn-agent-terminal-panel-raised);
+  --agent-border: var(--kn-agent-terminal-border);
+  --agent-text: var(--kn-agent-terminal-text);
+  --agent-muted: var(--kn-agent-terminal-muted);
+  --agent-accent: var(--kn-agent-terminal-accent);
   font-family: "JetBrains Mono", "SF Mono", Menlo, monospace;
-}
-
-.skin-terminal.theme-light {
-  --agent-bg: #f4f7f3;
-  --agent-panel: #eaefe7;
-  --agent-panel-raised: #dfe6db;
-  --agent-border: #cad4c4;
-  --agent-text: #1d2a1f;
-  --agent-muted: #5f7563;
-  --agent-accent: #1f8a3b;
 }
 
 .skin-terminal .message.user,
