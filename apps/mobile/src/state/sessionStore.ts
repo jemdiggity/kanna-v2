@@ -11,6 +11,24 @@ import type {
   TrustedDesktopRecord
 } from "./sessionPersistence";
 
+// Terminal output is accumulated as newline-delimited base64 frames and replayed
+// into xterm.js on WebView (re)mount. Cap the buffer by dropping whole oldest
+// frames — never slice mid-base64, which corrupts decoding. The first frame is a
+// full-screen snapshot (one large base64 line) that must survive intact or the
+// terminal renders blank. 1MB comfortably holds a snapshot plus recent deltas.
+const MAX_TERMINAL_OUTPUT_CHARS = 1_000_000;
+
+function capTerminalOutput(output: string): string {
+  if (output.length <= MAX_TERMINAL_OUTPUT_CHARS) {
+    return output;
+  }
+  const cut = output.length - MAX_TERMINAL_OUTPUT_CHARS;
+  const newlineIndex = output.indexOf("\n", cut);
+  // Keep whole frames only; if a single frame exceeds the cap, keep it rather
+  // than emit a corrupt base64 fragment.
+  return newlineIndex === -1 ? output : output.slice(newlineIndex + 1);
+}
+
 export type ConnectionState = "idle" | "connecting" | "connected" | "error";
 export type MobileView = "tasks" | "recent" | "search" | "desktops" | "more";
 export type TaskTerminalStatus = "idle" | "connecting" | "live" | "closed" | "error";
@@ -371,7 +389,7 @@ export function createSessionStore(): SessionStore {
       state = {
         ...state,
         taskTerminalStatus: "live",
-        taskTerminalOutput: nextOutput.slice(-12000),
+        taskTerminalOutput: capTerminalOutput(nextOutput),
         taskTerminalErrorMessage: null
       };
       publish();
