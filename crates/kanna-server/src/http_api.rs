@@ -2217,6 +2217,8 @@ mod tests {
             task.worktree_path.as_deref(),
             Some(worktree_string.as_str())
         );
+        assert_eq!(task.pipeline_name.as_deref(), Some("default"));
+        assert_eq!(task.stage_transition.as_deref(), Some("manual"));
         assert_eq!(task.commits_ahead, 1);
         assert_eq!(task.commits_behind, 0);
         assert!(task.dirty);
