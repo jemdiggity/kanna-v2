@@ -33,7 +33,7 @@ export async function renderPathGrid(browser: Browser, emitted: EmitterOutput): 
 
     for (const frame of emitted.frames) {
       if (frame.type === "term_snapshot") {
-        await callHook(page, "__replaceTerminalState", { text: decodeBase64(frame.data_b64) });
+        await callHook(page, "__replaceTerminalState", { chunksB64: [frame.data_b64] });
       } else {
         await callHook(page, "__appendTerminalChunk", { chunksB64: [frame.data_b64] });
       }
@@ -42,7 +42,7 @@ export async function renderPathGrid(browser: Browser, emitted: EmitterOutput): 
     return await extractGrid(page);
   } finally {
     await page.screenshot({
-      path: path.join(ARTIFACT_DIR, `${path.basename(emitted.fixture)}.path.png`),
+      path: path.join(ARTIFACT_DIR, `${path.basename(emitted.fixture, ".ansi")}.path.png`),
       fullPage: true
     });
     await page.close();
@@ -137,6 +137,9 @@ async function callHook(
   hook: "__replaceTerminalState" | "__appendTerminalChunk",
   state: TerminalHookState
 ): Promise<void> {
+  if (!state.text && (!state.chunksB64 || state.chunksB64.length === 0)) {
+    return;
+  }
   await page.evaluate(
     ({ hookName, value }: { hookName: typeof hook; value: TerminalHookState }) => {
       window[hookName](value);
@@ -187,10 +190,6 @@ async function extractGrid(page: Page): Promise<GridSnapshot> {
     };
   });
   return grid;
-}
-
-function decodeBase64(value: string): string {
-  return Buffer.from(value, "base64").toString("utf8");
 }
 
 async function readPackageFile(packagePath: string): Promise<string> {
