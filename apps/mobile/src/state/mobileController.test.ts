@@ -465,12 +465,12 @@ describe("createMobileController", () => {
     client.__terminalStream.emit({
       type: "output",
       taskId: "task-1",
-      text: "First line\n"
+      dataB64: "Rmlyc3QgbGluZQo="
     });
     client.__terminalStream.emit({
       type: "output",
       taskId: "task-1",
-      text: "Second line"
+      dataB64: "U2Vjb25kIGxpbmU="
     });
 
     expect(client.observeTaskTerminal).toHaveBeenCalledWith(
@@ -481,8 +481,9 @@ describe("createMobileController", () => {
       selectedTaskId: "task-1",
       taskTerminalStatus: "live"
     });
-    expect(store.getState().taskTerminalOutput).toContain("First line");
-    expect(store.getState().taskTerminalOutput).toContain("Second line");
+    expect(store.getState().taskTerminalOutput).toContain("Rmlyc3QgbGluZQo=");
+    expect(store.getState().taskTerminalOutput).toContain("U2Vjb25kIGxpbmU=");
+    expect(store.getState().taskTerminalOutput).not.toContain("First line");
   });
 
   it("opens an agent stream instead of a terminal stream for agent tasks", async () => {

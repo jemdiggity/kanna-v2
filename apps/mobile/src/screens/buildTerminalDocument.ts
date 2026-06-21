@@ -176,7 +176,7 @@ export function buildTerminalDocument({ bottomInset }: BuildTerminalDocumentOpti
             TERMINAL_COLS * 8
           ) + "px";
           syncViewport();
-        } catch (_error) {
+        } catch {
           // WebView layout is still settling. The next resize tick will retry.
         }
       }
@@ -236,23 +236,116 @@ export function buildTerminalDocument({ bottomInset }: BuildTerminalDocumentOpti
 
       viewport.addEventListener("pointerdown", notifyTerminalTap, { passive: true });
 
+      function base64ToBytes(dataB64) {
+        try {
+          const binary = atob(dataB64);
+          const bytes = new Uint8Array(binary.length);
+          for (let index = 0; index < binary.length; index += 1) {
+            bytes[index] = binary.charCodeAt(index);
+          }
+          return bytes;
+        } catch (_error) {
+          return new Uint8Array(0);
+        }
+      }
+
+      function matchesByteSequence(bytes, offset, sequence) {
+        if (offset + sequence.length > bytes.length) {
+          return false;
+        }
+        for (let index = 0; index < sequence.length; index += 1) {
+          if (bytes[offset + index] !== sequence[index]) {
+            return false;
+          }
+        }
+        return true;
+      }
+
+      function echoedInputControlLength(bytes, offset) {
+        if (matchesByteSequence(bytes, offset, [27, 91, 50, 48, 48, 126])) {
+          return 6;
+        }
+        if (matchesByteSequence(bytes, offset, [27, 91, 50, 48, 49, 126])) {
+          return 6;
+        }
+        if (bytes[offset] !== 27 || bytes[offset + 1] !== 91) {
+          return 0;
+        }
+
+        let index = offset + 2;
+        if (bytes[index] === 62) {
+          index += 1;
+        }
+        const digitsStart = index;
+        while (
+          index < bytes.length &&
+          ((bytes[index] >= 48 && bytes[index] <= 57) || bytes[index] === 59)
+        ) {
+          index += 1;
+        }
+        if (index === digitsStart || bytes[index] !== 117) {
+          return 0;
+        }
+        return index - offset + 1;
+      }
+
+      function removeEchoedTerminalInputControls(bytes) {
+        const output = [];
+        for (let index = 0; index < bytes.length;) {
+          const controlLength = echoedInputControlLength(bytes, index);
+          if (controlLength > 0) {
+            index += controlLength;
+            continue;
+          }
+          output.push(bytes[index]);
+          index += 1;
+        }
+        return Uint8Array.from(output);
+      }
+
+      function writeTerminalChunks(chunksB64, done) {
+        const chunks = Array.isArray(chunksB64) ? chunksB64 : [];
+        let index = 0;
+
+        function writeNext() {
+          if (index >= chunks.length) {
+            done();
+            return;
+          }
+          const bytes = removeEchoedTerminalInputControls(base64ToBytes(chunks[index]));
+          index += 1;
+          if (bytes.length === 0) {
+            writeNext();
+            return;
+          }
+          term.write(bytes, writeNext);
+        }
+
+        writeNext();
+      }
+
       window.__replaceTerminalState = function replaceTerminalState(state) {
         const shouldStick = stickyToBottom || isNearBottom();
         term.reset();
         fitTerminal();
-        term.write(state.text, () => {
+        const complete = () => {
           fitTerminal();
           finalizeRender(shouldStick);
-        });
+        };
+        if (state.text) {
+          term.write(state.text, complete);
+          return;
+        }
+        writeTerminalChunks(state.chunksB64, complete);
       };
 
       window.__appendTerminalChunk = function appendTerminalChunk(state) {
-        if (!state.text) {
+        if (!state.chunksB64 || state.chunksB64.length === 0) {
           return;
         }
 
         const shouldStick = stickyToBottom || isNearBottom();
-        term.write(state.text, () => {
+        writeTerminalChunks(state.chunksB64, () => {
           fitTerminal();
           finalizeRender(shouldStick);
         });
@@ -270,13 +363,15 @@ export function buildTerminalReplaceScript({
   output,
   status
 }: BuildTerminalUpdateScriptOptions): string {
-  const terminalText = output.trim() ? normalizeTerminalText(output) : getStatusCopy(status);
-  return `window.__replaceTerminalState(${JSON.stringify({ text: terminalText })}); true;`;
+  const state = output.trim()
+    ? { chunksB64: terminalChunksFromOutput(output) }
+    : { text: getStatusCopy(status) };
+  return `window.__replaceTerminalState(${JSON.stringify(state)}); true;`;
 }
 
 export function buildTerminalAppendScript(chunk: string): string {
   return `window.__appendTerminalChunk(${JSON.stringify({
-    text: normalizeTerminalText(chunk)
+    chunksB64: terminalChunksFromOutput(chunk)
   })}); true;`;
 }
 
@@ -295,40 +390,9 @@ function getStatusCopy(status: TaskTerminalStatus): string {
   }
 }
 
-function normalizeTerminalText(input: string): string {
-  const cleaned = removeEchoedTerminalInputControls(input);
-  if (!looksLikeMojibake(cleaned)) {
-    return cleaned;
-  }
-
-  const normalized = new TextDecoder("utf-8", { fatal: false }).decode(
-    Uint8Array.from(cleaned, (char) => char.charCodeAt(0) & 0xff)
-  );
-
-  if (containsTerminalGlyphs(normalized)) {
-    return normalized;
-  }
-
-  return mojibakeScore(normalized) < mojibakeScore(cleaned) ? normalized : cleaned;
-}
-
-function removeEchoedTerminalInputControls(input: string): string {
-  return input
-    .replace(/\x1b\[200~/g, "")
-    .replace(/\x1b\[201~/g, "")
-    .replace(/\x1b\[>[0-9;]*u/g, "")
-    .replace(/\x1b\[[0-9;]*u/g, "");
-}
-
-function looksLikeMojibake(input: string): boolean {
-  return input.includes("â") || input.includes("ð") || input.includes("Ã");
-}
-
-function containsTerminalGlyphs(input: string): boolean {
-  return /[╭╮╰╯│─┌┐└┘├┤┬┴┼⠁-⣿]/u.test(input);
-}
-
-function mojibakeScore(input: string): number {
-  const matches = input.match(/[âÃð][\u0080-\u00bf]?|�/gu);
-  return matches ? matches.length : 0;
+function terminalChunksFromOutput(output: string): string[] {
+  return output
+    .split("\n")
+    .map((chunk) => chunk.trim())
+    .filter((chunk) => chunk.length > 0);
 }

@@ -173,10 +173,13 @@ describe("createLanTransport", () => {
     );
   });
 
-  it("observes task terminal output over the LAN websocket route", () => {
+  it("observes task terminal output over the LAN KSP websocket route without decoding bytes", () => {
     const fetchImpl = vi.fn<FetchLike>();
+    const sent: ClientFrame[] = [];
     const socket: WebSocketLike = {
-      send: vi.fn(),
+      send: vi.fn((payload: string) => {
+        sent.push(JSON.parse(payload) as ClientFrame);
+      }),
       close: vi.fn(),
       onopen: null,
       onclose: null,
@@ -196,31 +199,56 @@ describe("createLanTransport", () => {
     });
 
     socket.onopen?.();
+    socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok" } satisfies ServerFrame) });
     socket.onmessage?.({
       data: JSON.stringify({
-        type: "output",
+        type: "term_snapshot",
         task_id: "task-1",
-        text: "hello from daemon"
-      })
+        cols: 80,
+        rows: 24,
+        data_b64: "4pSA55WM"
+      } satisfies ServerFrame)
     });
     socket.onmessage?.({
       data: JSON.stringify({
-        type: "exit",
+        type: "term_output",
+        task_id: "task-1",
+        data_b64: "8J8="
+      } satisfies ServerFrame)
+    });
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: "term_output",
+        task_id: "task-1",
+        data_b64: "mIA="
+      } satisfies ServerFrame)
+    });
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: "session_exit",
         task_id: "task-1",
         code: 0
-      })
+      } satisfies ServerFrame)
     });
-    socket.onclose?.();
     subscription.close();
 
     expect(socketFactory).toHaveBeenCalledWith(
-      "ws://127.0.0.1:48120/v1/tasks/task-1/terminal"
+      "ws://127.0.0.1:48120/v1/stream"
     );
+    expect(sent).toEqual([
+      { type: "auth" },
+      { type: "attach", task_id: "task-1", kind: "terminal", from_seq: 0 }
+    ]);
     expect(events).toEqual([
       { type: "ready", taskId: "task-1" },
-      { type: "output", taskId: "task-1", text: "hello from daemon" },
+      { type: "output", taskId: "task-1", dataB64: "4pSA55WM" },
+      { type: "output", taskId: "task-1", dataB64: "8J8=" },
+      { type: "output", taskId: "task-1", dataB64: "mIA=" },
       { type: "exit", taskId: "task-1", code: 0 }
     ]);
+    expect(events).not.toContainEqual(
+      expect.objectContaining({ text: expect.any(String) })
+    );
     expect(socket.close).toHaveBeenCalledTimes(1);
   });
 
