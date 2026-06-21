@@ -8,13 +8,18 @@ const mocks = vi.hoisted(() => {
   const invokeMock = vi.fn(async (command: string, args?: { name?: string }) => {
     switch (command) {
       case "read_env_var":
-        return "/usr/bin:/bin";
+        if (args?.name === "PATH") return "/usr/bin:/bin";
+        throw new Error(`env var not set: ${args?.name ?? ""}`);
       case "which_binary":
         return `/usr/bin/${args?.name ?? "binary"}`;
       case "get_app_data_dir":
         return "/tmp/kanna";
       case "get_pipeline_socket_path":
         return "/tmp/kanna.sock";
+      case "ensure_term_init":
+        return "/tmp/kanna-zdotdir";
+      case "list_dir":
+        return [];
       case "read_text_file":
         return "{}";
       case "spawn_session":
@@ -254,6 +259,32 @@ describe("createSessionsApi", () => {
         KANNA_TASK_ID: "task-1",
         KANNA_WORKTREE: "1",
         KANNA_DEV_PORT: "1421",
+      }),
+    }));
+  });
+
+  it("passes task-scoped Kanna CLI env to worktree shell sessions", async () => {
+    const sessions = createSessionsApi(makeContext());
+
+    await sessions.spawnShellSession(
+      "shell-wt-task-1",
+      "/tmp/repo/.kanna-worktrees/task-1",
+      JSON.stringify({ KANNA_DEV_PORT: "1421" }),
+      true,
+      "/tmp/repo",
+    );
+
+    expect(mocks.invokeMock).toHaveBeenCalledWith("spawn_session", expect.objectContaining({
+      sessionId: "shell-wt-task-1",
+      cwd: "/tmp/repo/.kanna-worktrees/task-1",
+      env: expect.objectContaining({
+        KANNA_TASK_ID: "task-1",
+        KANNA_CLI_DB_PATH: "/tmp/kanna/kanna-test.db",
+        KANNA_SOCKET_PATH: "/tmp/kanna.sock",
+        KANNA_WORKTREE: "1",
+        KANNA_DEV_PORT: "1421",
+        KANNA_CLI_PATH: "/usr/bin/kanna-cli",
+        PATH: "/usr/bin:/bin",
       }),
     }));
   });

@@ -85,6 +85,13 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
     }
   }
 
+  function taskIdFromWorktreeShellSessionId(sessionId: string): string | null {
+    const prefix = "shell-wt-";
+    if (!sessionId.startsWith(prefix)) return null;
+    const taskId = sessionId.slice(prefix.length);
+    return taskId.length > 0 ? taskId : null;
+  }
+
   async function readInheritedPath(explicitPath?: string): Promise<string | null> {
     if (explicitPath && explicitPath.length > 0) {
       return explicitPath;
@@ -208,11 +215,41 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
       Object.assign(env, parsedPortEnv);
     }
     const runtimePath = await readInheritedPath(env.PATH);
+    let resolvedKannaCliPath: string | null = null;
     try {
-      const kannaCliPath = await invoke<string>("which_binary", { name: "kanna-cli" });
-      Object.assign(env, buildKannaCliPathEnv(kannaCliPath, runtimePath));
+      resolvedKannaCliPath = await invoke<string>("which_binary", { name: "kanna-cli" });
     } catch (error) {
       console.error("[store] failed to resolve shell kanna-cli path:", error);
+    }
+
+    const shellTaskId = isWorktree ? taskIdFromWorktreeShellSessionId(sessionId) : null;
+    if (shellTaskId) {
+      try {
+        const [appDataDir, dbName, socketPath, mobileServerPort] = await Promise.all([
+          invoke<string>("get_app_data_dir"),
+          resolveDbName(),
+          invoke<string>("get_pipeline_socket_path"),
+          invoke<string>("read_env_var", { name: "KANNA_MOBILE_SERVER_PORT" }).catch((error) => {
+            console.debug("[store] KANNA_MOBILE_SERVER_PORT not set while building shell env:", error);
+            return null;
+          }),
+        ]);
+        Object.assign(env, buildTaskRuntimeEnv({
+          taskId: shellTaskId,
+          dbName,
+          appDataDir,
+          socketPath,
+          serverBaseUrl: resolveKannaServerBaseUrl(mobileServerPort),
+          portEnv: parsedPortEnv,
+          kannaCliPath: resolvedKannaCliPath,
+          path: runtimePath,
+        }));
+      } catch (error) {
+        console.error("[store] failed to resolve task shell kanna-cli env:", error);
+        Object.assign(env, buildKannaCliPathEnv(resolvedKannaCliPath, runtimePath));
+      }
+    } else {
+      Object.assign(env, buildKannaCliPathEnv(resolvedKannaCliPath, runtimePath));
     }
     try {
       env.ZDOTDIR = await invoke<string>("ensure_term_init");
