@@ -61,6 +61,8 @@ export interface SessionState {
   taskTerminalTaskId: string | null;
   taskTerminalStatus: TaskTerminalStatus;
   taskTerminalOutput: string;
+  taskTerminalCols: number | null;
+  taskTerminalRows: number | null;
   taskTerminalErrorMessage: string | null;
   taskAgentTaskId: string | null;
   taskAgentStatus: TaskTerminalStatus;
@@ -95,6 +97,7 @@ export interface SessionStore {
   beginTaskTerminal(taskId: string, initialOutput: string): void;
   appendTaskTerminal(taskId: string, chunk: string): void;
   setTaskTerminalStatus(taskId: string, status: TaskTerminalStatus): void;
+  setTaskTerminalDims(taskId: string, cols: number, rows: number): void;
   setTaskTerminalError(taskId: string, message: string): void;
   beginTaskAgent(taskId: string): void;
   applyTaskAgentStreamEvent(taskId: string, event: { type: "snapshot"; events: FrameAgentEvent[] } | { type: "event"; seq: number; event: FrameAgentEvent["event"] } | { type: "status"; status: string } | { type: "exit"; code: number } | { type: "error"; message: string }): void;
@@ -130,6 +133,8 @@ export function createSessionStore(): SessionStore {
     taskTerminalTaskId: null,
     taskTerminalStatus: "idle",
     taskTerminalOutput: "",
+    taskTerminalCols: null,
+    taskTerminalRows: null,
     taskTerminalErrorMessage: null,
     taskAgentTaskId: null,
     taskAgentStatus: "idle",
@@ -345,6 +350,10 @@ export function createSessionStore(): SessionStore {
           selectedTaskId === null ? "idle" : state.taskTerminalStatus,
         taskTerminalOutput:
           selectedTaskId === null ? "" : state.taskTerminalOutput,
+        taskTerminalCols:
+          selectedTaskId === null ? null : state.taskTerminalCols,
+        taskTerminalRows:
+          selectedTaskId === null ? null : state.taskTerminalRows,
         taskTerminalErrorMessage:
           selectedTaskId === null ? null : state.taskTerminalErrorMessage,
         taskAgentTaskId:
@@ -376,6 +385,8 @@ export function createSessionStore(): SessionStore {
         taskTerminalTaskId: taskId,
         taskTerminalStatus: "connecting",
         taskTerminalOutput: initialOutput,
+        taskTerminalCols: null,
+        taskTerminalRows: null,
         taskTerminalErrorMessage: null
       };
       publish();
@@ -392,6 +403,17 @@ export function createSessionStore(): SessionStore {
         taskTerminalOutput: capTerminalOutput(nextOutput),
         taskTerminalErrorMessage: null
       };
+      publish();
+    },
+    setTaskTerminalDims(taskId, cols, rows) {
+      if (state.taskTerminalTaskId !== taskId) {
+        return;
+      }
+      if (state.taskTerminalCols === cols && state.taskTerminalRows === rows) {
+        return;
+      }
+
+      state = { ...state, taskTerminalCols: cols, taskTerminalRows: rows };
       publish();
     },
     setTaskTerminalStatus(taskId, taskTerminalStatus) {

@@ -51,7 +51,7 @@ export function buildTerminalDocument({ bottomInset }: BuildTerminalDocumentOpti
         -webkit-overflow-scrolling: touch;
         height: 100%;
         overflow-x: auto;
-        overflow-y: hidden;
+        overflow-y: auto;
         padding-bottom: ${bottomInset}px;
         touch-action: pan-x pan-y;
       }
@@ -125,6 +125,8 @@ export function buildTerminalDocument({ bottomInset }: BuildTerminalDocumentOpti
       const fitAddon = new FitAddonCtor();
       let terminalViewport = null;
       let stickyToBottom = true;
+      let pinnedCols = 0;
+      let pinnedRows = 0;
 
       term.loadAddon(fitAddon);
       term.open(root);
@@ -160,7 +162,51 @@ export function buildTerminalDocument({ bottomInset }: BuildTerminalDocumentOpti
         terminalViewport.style.bottom = stickyToBottom ? "${bottomInset}px" : "0px";
       }
 
+      function cellDimensions() {
+        try {
+          const cell = term._core._renderService.dimensions.css.cell;
+          if (cell && cell.width && cell.height) {
+            return { width: cell.width, height: cell.height };
+          }
+        } catch (_error) {
+          // Render service not ready yet; fall back to an estimate.
+        }
+        return { width: 8, height: 17 };
+      }
+
+      function applyPinnedSize() {
+        if (!pinnedCols || !pinnedRows) {
+          return;
+        }
+        const { width, height } = cellDimensions();
+        root.style.minWidth = "0px";
+        root.style.width = Math.ceil(pinnedCols * width) + "px";
+        root.style.height = Math.ceil(pinnedRows * height) + "px";
+      }
+
+      window.__setTerminalDims = function setTerminalDims(dims) {
+        if (!dims || !dims.cols || !dims.rows) {
+          return;
+        }
+        pinnedCols = dims.cols;
+        pinnedRows = dims.rows;
+        try {
+          term.resize(pinnedCols, pinnedRows);
+        } catch (_error) {
+          // Resize can throw mid-layout; a later call will retry.
+        }
+        applyPinnedSize();
+        syncViewport();
+      };
+
       function fitTerminal() {
+        // Once the desktop PTY dimensions are known, render at exactly that grid
+        // (current font, scroll on overflow) instead of refitting to the device.
+        if (pinnedCols && pinnedRows) {
+          applyPinnedSize();
+          syncViewport();
+          return;
+        }
         try {
           const proposed = fitAddon.proposeDimensions();
           if (proposed) {
@@ -373,6 +419,10 @@ export function buildTerminalAppendScript(chunk: string): string {
   return `window.__appendTerminalChunk(${JSON.stringify({
     chunksB64: terminalChunksFromOutput(chunk)
   })}); true;`;
+}
+
+export function buildTerminalResizeScript(cols: number, rows: number): string {
+  return `window.__setTerminalDims(${JSON.stringify({ cols, rows })}); true;`;
 }
 
 function getStatusCopy(status: TaskTerminalStatus): string {

@@ -147,6 +147,9 @@ export function createMobileController(
       const subscription = client.observeTaskTerminal(taskId, (event) => {
         switch (event.type) {
           case "ready":
+            if (event.cols && event.rows) {
+              store.setTaskTerminalDims(taskId, event.cols, event.rows);
+            }
             store.setTaskTerminalStatus(taskId, "live");
             break;
           case "output":
