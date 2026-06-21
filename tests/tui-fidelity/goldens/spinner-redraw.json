@@ -1,0 +1,10 @@
+{
+  "name": "spinner-redraw",
+  "description": "In-place carriage-return redraw loop.",
+  "snapshotAt": 0,
+  "usedVisibleTextFallback": true,
+  "divergentCells": 0,
+  "firstDiffs": [],
+  "pathSerialized": "working done\u001b[1B\u001b[12D",
+  "referenceSerialized": "working done\u001b[1B\u001b[12D"
+}

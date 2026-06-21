@@ -44,6 +44,12 @@ pub struct HeadlessTerminal {
 
 unsafe impl Send for HeadlessTerminal {}
 
+#[allow(dead_code)]
+pub struct TerminalSnapshotWithMetadata {
+    pub snapshot: TerminalSnapshot,
+    pub used_visible_text_fallback: bool,
+}
+
 impl HeadlessTerminal {
     fn normalize_dimensions(cols: u16, rows: u16) -> (u16, u16) {
         let normalized_cols = if cols == 0 { 80 } else { cols };
@@ -109,10 +115,17 @@ impl HeadlessTerminal {
     }
 
     pub fn snapshot(&mut self) -> HeadlessTerminalResult<TerminalSnapshot> {
+        Ok(self.snapshot_with_metadata()?.snapshot)
+    }
+
+    pub fn snapshot_with_metadata(
+        &mut self,
+    ) -> HeadlessTerminalResult<TerminalSnapshotWithMetadata> {
         let had_synchronized_output = self.terminal.mode(Mode::SYNC_OUTPUT).unwrap_or(false);
         if had_synchronized_output {
             self.terminal.set_mode(Mode::SYNC_OUTPUT, false)?;
         }
+        let mut used_visible_text_fallback = false;
         let vt = match serialize_terminal(&self.terminal, None) {
             Ok(snapshot) => snapshot.serialized_candidate,
             Err(error) => {
@@ -120,6 +133,7 @@ impl HeadlessTerminal {
                     "[headless-terminal] failed to serialize terminal snapshot, falling back to visible text: {}",
                     error
                 );
+                used_visible_text_fallback = true;
                 self.visible_text_vt(usize::from(self.rows))?
             }
         };
@@ -127,16 +141,19 @@ impl HeadlessTerminal {
             self.terminal.set_mode(Mode::SYNC_OUTPUT, true)?;
         }
 
-        Ok(TerminalSnapshot {
-            version: 1,
-            rows: self.rows,
-            cols: self.cols,
-            cursor_row: self.terminal.cursor_y().unwrap_or(0),
-            cursor_col: self.terminal.cursor_x().unwrap_or(0),
-            cursor_visible: self.terminal.is_cursor_visible().unwrap_or(true),
-            saved_at: 0,
-            sequence: 0,
-            vt,
+        Ok(TerminalSnapshotWithMetadata {
+            snapshot: TerminalSnapshot {
+                version: 1,
+                rows: self.rows,
+                cols: self.cols,
+                cursor_row: self.terminal.cursor_y().unwrap_or(0),
+                cursor_col: self.terminal.cursor_x().unwrap_or(0),
+                cursor_visible: self.terminal.is_cursor_visible().unwrap_or(true),
+                saved_at: 0,
+                sequence: 0,
+                vt,
+            },
+            used_visible_text_fallback,
         })
     }
 
@@ -479,6 +496,17 @@ mod tests {
         assert_eq!(snapshot.rows, 30);
         assert_eq!(snapshot.cols, 100);
         assert!(snapshot.vt.contains("abc"));
+    }
+
+    #[test]
+    fn snapshot_metadata_reports_no_fallback_for_serializable_screen() {
+        let mut headless_terminal = HeadlessTerminal::new(80, 24, 10_000).unwrap();
+        headless_terminal.write(b"abc");
+
+        let snapshot = headless_terminal.snapshot_with_metadata().unwrap();
+
+        assert!(!snapshot.used_visible_text_fallback);
+        assert!(snapshot.snapshot.vt.contains("abc"));
     }
 
     #[test]

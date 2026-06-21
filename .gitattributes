@@ -1,0 +1,1 @@
+tests/tui-fidelity/fixtures/*.ansi -text -diff
