@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch, watchEffect } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch, watchEffect } from "vue";
 import MarkdownIt from "markdown-it";
 import type { AgentEvent, PermissionDecision, TurnStats } from "@kanna/agent-protocol";
 import { getActivePinia } from "pinia";
@@ -45,6 +45,7 @@ const stream = useAgentStream(props.sessionId, {
   recoverSession: props.recoverSession,
 });
 let highlighterPromise: Promise<MarkdownHighlighter> | null = null;
+let focusRetryTimer: ReturnType<typeof window.setTimeout> | null = null;
 
 // Tool calls ("shell"), tool results, and raw/diagnostic debug output are the
 // agent's internal plumbing — hidden so the view reads like a Claude/ChatGPT
@@ -179,6 +180,38 @@ function onComposerInput() {
   void nextTick(adjustComposerHeight);
 }
 
+function focusComposer() {
+  void nextTick(() => composerEl.value?.focus());
+}
+
+function clearFocusRetry() {
+  if (focusRetryTimer === null) return;
+  window.clearTimeout(focusRetryTimer);
+  focusRetryTimer = null;
+}
+
+function focusComposerAfterSelection(attempt = 0) {
+  void nextTick(() => {
+    adjustComposerHeight();
+    if (document.querySelector(".modal-overlay")) {
+      if (attempt < 20) {
+        clearFocusRetry();
+        focusRetryTimer = window.setTimeout(() => focusComposerAfterSelection(attempt + 1), 50);
+      }
+      return;
+    }
+    composerEl.value?.focus();
+  });
+}
+
+onMounted(() => {
+  focusComposerAfterSelection();
+});
+
+onUnmounted(() => {
+  clearFocusRetry();
+});
+
 // ── Slash commands ──────────────────────────────────────────
 const slashProvider = computed<string | undefined>(() => props.agentProvider);
 const slashWorktree = computed<string | undefined>(() => props.worktreePath);
@@ -250,6 +283,12 @@ function sendComposer() {
   composer.value = "";
   slashDismissed.value = false;
   void nextTick(adjustComposerHeight);
+  focusComposer();
+}
+
+function interruptAgent() {
+  stream.interrupt();
+  focusComposer();
 }
 
 function handleComposerKeydown(event: KeyboardEvent) {
@@ -288,7 +327,7 @@ function handleComposerKeydown(event: KeyboardEvent) {
   }
   if (event.key === "Escape") {
     event.preventDefault();
-    stream.interrupt();
+    interruptAgent();
   }
 }
 
@@ -444,7 +483,8 @@ function sessionEndedLabel(event: Extract<AgentEvent, { type: "session_ended" }>
             type="button"
             class="composer-button stop-button"
             aria-label="Stop the agent"
-            @click="stream.interrupt"
+            @mousedown.prevent
+            @click="interruptAgent"
           >
             <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
               <rect x="4" y="4" width="8" height="8" rx="1.5" fill="currentColor" />
@@ -456,6 +496,7 @@ function sessionEndedLabel(event: Extract<AgentEvent, { type: "session_ended" }>
             class="composer-button send-button"
             aria-label="Send message"
             :disabled="!composer.trim() || !stream.ready.value"
+            @mousedown.prevent
             @click="sendComposer"
           >
             <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">

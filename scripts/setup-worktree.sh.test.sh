@@ -39,8 +39,8 @@ if ! grep -Fq 'target-dir = ".build"' "$WORKTREE/.cargo/config.toml"; then
   exit 1
 fi
 
-if ! grep -Fq 'build-dir = "'"$HOME"'/Library/Caches/kanna/rust-build"' "$WORKTREE/.cargo/config.toml"; then
-  printf 'expected worktree cargo config to share intermediates in ~/Library/Caches/kanna/rust-build, got:\n' >&2
+if grep -Fq 'build-dir' "$WORKTREE/.cargo/config.toml"; then
+  printf 'expected worktree cargo config to avoid machine-specific build-dir, got:\n' >&2
   cat "$WORKTREE/.cargo/config.toml" >&2
   exit 1
 fi
