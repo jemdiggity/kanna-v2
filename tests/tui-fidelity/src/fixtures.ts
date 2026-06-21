@@ -1,22 +1,45 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { FIXTURE_DIR } from "./paths.ts";
 import type { FixtureDefinition } from "./types.ts";
 
 const encoder = new TextEncoder();
 
+interface CapturedFixtureSpec {
+  name: string;
+  description: string;
+  snapshotAt: number;
+  allowFallback?: boolean;
+}
+
 export async function writeFixtures(): Promise<FixtureDefinition[]> {
-  const fixtures = buildFixtures();
+  const fixtures = [
+    ...buildSyntheticFixtures(),
+    ...(await Promise.all(
+      capturedFixtureSpecs().map((fixture) => loadCapturedFixture(FIXTURE_DIR, fixture))
+    ))
+  ];
   await mkdir(FIXTURE_DIR, { recursive: true });
   await Promise.all(
-    fixtures.map((fixture) =>
+    fixtures.filter(isSyntheticFixture).map((fixture) =>
       writeFile(path.join(FIXTURE_DIR, `${fixture.name}.ansi`), fixture.bytes)
     )
   );
   return fixtures;
 }
 
-function buildFixtures(): FixtureDefinition[] {
+export async function loadCapturedFixture(
+  fixtureDir: string,
+  spec: CapturedFixtureSpec
+): Promise<FixtureDefinition> {
+  const bytes = await readFile(path.join(fixtureDir, `${spec.name}.ansi`));
+  return {
+    ...spec,
+    bytes: new Uint8Array(bytes)
+  };
+}
+
+function buildSyntheticFixtures(): FixtureDefinition[] {
   return [
     syntheticBasics(),
     wideChars(),
@@ -28,6 +51,21 @@ function buildFixtures(): FixtureDefinition[] {
     spinnerRedraw(),
     splitSensitiveUtf8AndEscape()
   ];
+}
+
+function capturedFixtureSpecs(): CapturedFixtureSpec[] {
+  return [
+    {
+      name: "codex-pwd-tool",
+      description:
+        "Captured Codex CLI TUI session with update notice, status/title spinner redraws, shell tool calls, and final settled answer.",
+      snapshotAt: 4687
+    }
+  ];
+}
+
+function isSyntheticFixture(fixture: FixtureDefinition): boolean {
+  return !fixture.name.startsWith("codex-");
 }
 
 function bytes(input: string): Uint8Array {

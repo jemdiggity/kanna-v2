@@ -3,7 +3,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import type { Browser, Page } from "playwright";
 import { ARTIFACT_DIR, PACKAGE_ROOT, REPO_ROOT } from "./paths.ts";
-import type { EmitterOutput, GridSnapshot, TerminalFrame, TermOutputFrame } from "./types.ts";
+import type { EmitterOutput, GridSnapshot, TerminalFrame } from "./types.ts";
 
 interface MobileDocumentModule {
   buildTerminalDocument(options: { bottomInset: number }): string;
@@ -16,6 +16,11 @@ interface BrowserGridSnapshot {
   cells: GridSnapshot["cells"];
 }
 
+interface TerminalHookState {
+  text?: string;
+  chunksB64?: string[];
+}
+
 const VIEWPORT = { width: 1900, height: 624 };
 
 export async function renderPathGrid(browser: Browser, emitted: EmitterOutput): Promise<GridSnapshot> {
@@ -26,17 +31,12 @@ export async function renderPathGrid(browser: Browser, emitted: EmitterOutput): 
     await installSerializeAddon(page);
     await page.waitForFunction(() => typeof window.__replaceTerminalState === "function");
 
-    const outputDecoder = new TextDecoder();
     for (const frame of emitted.frames) {
       if (frame.type === "term_snapshot") {
-        await callHook(page, "__replaceTerminalState", decodeBase64(frame.data_b64));
+        await callHook(page, "__replaceTerminalState", { text: decodeBase64(frame.data_b64) });
       } else {
-        await callHook(page, "__appendTerminalChunk", decodeOutput(frame, outputDecoder));
+        await callHook(page, "__appendTerminalChunk", { chunksB64: [frame.data_b64] });
       }
-    }
-    const tail = outputDecoder.decode();
-    if (tail) {
-      await callHook(page, "__appendTerminalChunk", tail);
     }
     await waitForWrites(page);
     return await extractGrid(page);
@@ -135,16 +135,13 @@ async function installSerializeAddon(page: Page): Promise<void> {
 async function callHook(
   page: Page,
   hook: "__replaceTerminalState" | "__appendTerminalChunk",
-  text: string
+  state: TerminalHookState
 ): Promise<void> {
-  if (!text) {
-    return;
-  }
   await page.evaluate(
-    ({ hookName, value }) => {
-      window[hookName]({ text: value });
+    ({ hookName, value }: { hookName: typeof hook; value: TerminalHookState }) => {
+      window[hookName](value);
     },
-    { hookName: hook, value: text }
+    { hookName: hook, value: state }
   );
   await waitForWrites(page);
 }
@@ -194,10 +191,6 @@ async function extractGrid(page: Page): Promise<GridSnapshot> {
 
 function decodeBase64(value: string): string {
   return Buffer.from(value, "base64").toString("utf8");
-}
-
-function decodeOutput(frame: TermOutputFrame, decoder: TextDecoder): string {
-  return decoder.decode(Buffer.from(frame.data_b64, "base64"), { stream: true });
 }
 
 async function readPackageFile(packagePath: string): Promise<string> {
@@ -274,8 +267,8 @@ declare global {
     SerializeAddon: {
       SerializeAddon: new () => { serialize: () => string };
     };
-    __appendTerminalChunk: (state: { text: string }) => void;
-    __replaceTerminalState: (state: { text: string }) => void;
+    __appendTerminalChunk: (state: TerminalHookState) => void;
+    __replaceTerminalState: (state: TerminalHookState) => void;
     __kannaPendingWrites: number;
     __kannaSerializeAddon: { serialize: () => string };
     __kannaColorValue: (
