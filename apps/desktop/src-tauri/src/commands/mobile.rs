@@ -9,7 +9,11 @@ use tokio::sync::Mutex;
 
 const LOCAL_SERVER_HOST: &str = "127.0.0.1";
 const DEFAULT_LOCAL_SERVER_PORT: u16 = 48_120;
-const STATUS_POLL_ATTEMPTS: usize = 20;
+// kanna-server can take a while to bind and register when the machine is under
+// heavy load (e.g. an in-progress iOS/Rust build during `kd mobile run`). Poll
+// generously and only give up early if the process actually exits — a healthy
+// server must never be killed for being slow to answer /v1/status.
+const STATUS_POLL_ATTEMPTS: usize = 240;
 const STATUS_POLL_DELAY_MS: u64 = 250;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -152,7 +156,7 @@ impl MobileServerManager {
             }
         };
 
-        let status = match self.wait_for_status(&api_base_url).await {
+        let status = match self.wait_for_status(&api_base_url, &mut child).await {
             Ok(status) => status,
             Err(err) => {
                 let _ = child.kill().await;
@@ -242,9 +246,18 @@ impl MobileServerManager {
         self.snapshot().await
     }
 
-    async fn wait_for_status(&self, api_base_url: &str) -> Result<MobileServerStatus, String> {
+    async fn wait_for_status(
+        &self,
+        api_base_url: &str,
+        child: &mut tokio::process::Child,
+    ) -> Result<MobileServerStatus, String> {
         let mut last_error = "kanna-server did not become ready".to_string();
         for _ in 0..STATUS_POLL_ATTEMPTS {
+            // If the process already exited it genuinely failed to start; stop
+            // polling instead of waiting out the full budget on a dead server.
+            if let Ok(Some(exit)) = child.try_wait() {
+                return Err(format!("kanna-server exited during startup with {}", exit));
+            }
             match self.fetch_status(api_base_url).await {
                 Ok(status) => return Ok(status),
                 Err(err) => {

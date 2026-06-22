@@ -15,7 +15,7 @@ import type {
 } from "./types";
 
 export type TaskTerminalStreamEvent =
-  | { type: "ready"; taskId: string }
+  | { type: "ready"; taskId: string; cols?: number; rows?: number }
   | { type: "output"; taskId: string; dataB64: string }
   | { type: "exit"; taskId: string; code: number }
   | { type: "error"; taskId: string; message: string };

@@ -9,7 +9,8 @@ import type { TaskTerminalStatus } from "../state/sessionStore";
 import {
   buildTerminalAppendScript,
   buildTerminalDocument,
-  buildTerminalReplaceScript
+  buildTerminalReplaceScript,
+  buildTerminalResizeScript
 } from "./buildTerminalDocument";
 import { planTerminalMutation } from "./terminalMutation";
 
@@ -17,6 +18,8 @@ interface TerminalWebViewProps {
   taskId: string;
   output: string;
   status: TaskTerminalStatus;
+  cols: number | null;
+  rows: number | null;
   fullscreen?: boolean;
   onConsolePress?: () => void;
 }
@@ -35,12 +38,14 @@ export function TerminalWebView({
   taskId,
   output,
   status,
+  cols,
+  rows,
   fullscreen = false,
   onConsolePress
 }: TerminalWebViewProps) {
   const webViewRef = useRef<TerminalWebViewHandle>(null);
   const bridgeReadyRef = useRef(false);
-  const pendingScriptRef = useRef<string | null>(null);
+  const pendingScriptsRef = useRef<string[]>([]);
   const previousTaskIdRef = useRef<string | null>(null);
   const previousOutputRef = useRef("");
   const previousStatusRef = useRef<TaskTerminalStatus>("idle");
@@ -61,14 +66,12 @@ export function TerminalWebView({
   );
 
   const injectOrQueueScript = (script: string) => {
-    pendingScriptRef.current = script;
-
     if (!bridgeReadyRef.current) {
+      pendingScriptsRef.current.push(script);
       return;
     }
 
     webViewRef.current?.injectJavaScript(script);
-    pendingScriptRef.current = null;
   };
 
   useEffect(() => {
@@ -110,6 +113,12 @@ export function TerminalWebView({
     }
   }, [output, replaceScript, status, taskId]);
 
+  useEffect(() => {
+    if (cols && rows) {
+      injectOrQueueScript(buildTerminalResizeScript(cols, rows));
+    }
+  }, [cols, rows]);
+
   const handleMessage = (event: WebViewMessageEvent) => {
     let payload: { type?: string } | null = null;
 
@@ -129,9 +138,14 @@ export function TerminalWebView({
     }
 
     bridgeReadyRef.current = true;
-    const pendingScript = pendingScriptRef.current ?? replaceScript;
-    webViewRef.current?.injectJavaScript(pendingScript);
-    pendingScriptRef.current = null;
+    const pending =
+      pendingScriptsRef.current.length > 0
+        ? pendingScriptsRef.current
+        : [replaceScript];
+    pendingScriptsRef.current = [];
+    for (const script of pending) {
+      webViewRef.current?.injectJavaScript(script);
+    }
   };
 
   return (
@@ -141,7 +155,10 @@ export function TerminalWebView({
         originWhitelist={["*"]}
         onLoadStart={() => {
           bridgeReadyRef.current = false;
-          pendingScriptRef.current = replaceScript;
+          pendingScriptsRef.current =
+            cols && rows
+              ? [buildTerminalResizeScript(cols, rows), replaceScript]
+              : [replaceScript];
         }}
         onMessage={handleMessage}
         onLoadEnd={() => {

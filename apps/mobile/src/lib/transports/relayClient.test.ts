@@ -185,7 +185,7 @@ describe("createRelayDesktopClient", () => {
     });
 
     expect(events).toEqual([
-      { type: "ready", taskId: "task-1" },
+      { type: "ready", taskId: "task-1", cols: 80, rows: 24 },
       {
         type: "output",
         taskId: "task-1",
@@ -252,7 +252,7 @@ describe("createRelayDesktopClient", () => {
     });
 
     expect(events).toEqual([
-      { type: "ready", taskId: "task-1" },
+      { type: "ready", taskId: "task-1", cols: 80, rows: 24 },
       {
         type: "output",
         taskId: "task-1",

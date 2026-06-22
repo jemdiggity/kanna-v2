@@ -11,6 +11,24 @@ import type {
   TrustedDesktopRecord
 } from "./sessionPersistence";
 
+// Terminal output is accumulated as newline-delimited base64 frames and replayed
+// into xterm.js on WebView (re)mount. Cap the buffer by dropping whole oldest
+// frames — never slice mid-base64, which corrupts decoding. The first frame is a
+// full-screen snapshot (one large base64 line) that must survive intact or the
+// terminal renders blank. 1MB comfortably holds a snapshot plus recent deltas.
+const MAX_TERMINAL_OUTPUT_CHARS = 1_000_000;
+
+function capTerminalOutput(output: string): string {
+  if (output.length <= MAX_TERMINAL_OUTPUT_CHARS) {
+    return output;
+  }
+  const cut = output.length - MAX_TERMINAL_OUTPUT_CHARS;
+  const newlineIndex = output.indexOf("\n", cut);
+  // Keep whole frames only; if a single frame exceeds the cap, keep it rather
+  // than emit a corrupt base64 fragment.
+  return newlineIndex === -1 ? output : output.slice(newlineIndex + 1);
+}
+
 export type ConnectionState = "idle" | "connecting" | "connected" | "error";
 export type MobileView = "tasks" | "recent" | "search" | "desktops" | "more";
 export type TaskTerminalStatus = "idle" | "connecting" | "live" | "closed" | "error";
@@ -43,6 +61,8 @@ export interface SessionState {
   taskTerminalTaskId: string | null;
   taskTerminalStatus: TaskTerminalStatus;
   taskTerminalOutput: string;
+  taskTerminalCols: number | null;
+  taskTerminalRows: number | null;
   taskTerminalErrorMessage: string | null;
   taskAgentTaskId: string | null;
   taskAgentStatus: TaskTerminalStatus;
@@ -77,6 +97,7 @@ export interface SessionStore {
   beginTaskTerminal(taskId: string, initialOutput: string): void;
   appendTaskTerminal(taskId: string, chunk: string): void;
   setTaskTerminalStatus(taskId: string, status: TaskTerminalStatus): void;
+  setTaskTerminalDims(taskId: string, cols: number, rows: number): void;
   setTaskTerminalError(taskId: string, message: string): void;
   beginTaskAgent(taskId: string): void;
   applyTaskAgentStreamEvent(taskId: string, event: { type: "snapshot"; events: FrameAgentEvent[] } | { type: "event"; seq: number; event: FrameAgentEvent["event"] } | { type: "status"; status: string } | { type: "exit"; code: number } | { type: "error"; message: string }): void;
@@ -112,6 +133,8 @@ export function createSessionStore(): SessionStore {
     taskTerminalTaskId: null,
     taskTerminalStatus: "idle",
     taskTerminalOutput: "",
+    taskTerminalCols: null,
+    taskTerminalRows: null,
     taskTerminalErrorMessage: null,
     taskAgentTaskId: null,
     taskAgentStatus: "idle",
@@ -327,6 +350,10 @@ export function createSessionStore(): SessionStore {
           selectedTaskId === null ? "idle" : state.taskTerminalStatus,
         taskTerminalOutput:
           selectedTaskId === null ? "" : state.taskTerminalOutput,
+        taskTerminalCols:
+          selectedTaskId === null ? null : state.taskTerminalCols,
+        taskTerminalRows:
+          selectedTaskId === null ? null : state.taskTerminalRows,
         taskTerminalErrorMessage:
           selectedTaskId === null ? null : state.taskTerminalErrorMessage,
         taskAgentTaskId:
@@ -358,6 +385,8 @@ export function createSessionStore(): SessionStore {
         taskTerminalTaskId: taskId,
         taskTerminalStatus: "connecting",
         taskTerminalOutput: initialOutput,
+        taskTerminalCols: null,
+        taskTerminalRows: null,
         taskTerminalErrorMessage: null
       };
       publish();
@@ -371,9 +400,20 @@ export function createSessionStore(): SessionStore {
       state = {
         ...state,
         taskTerminalStatus: "live",
-        taskTerminalOutput: nextOutput.slice(-12000),
+        taskTerminalOutput: capTerminalOutput(nextOutput),
         taskTerminalErrorMessage: null
       };
+      publish();
+    },
+    setTaskTerminalDims(taskId, cols, rows) {
+      if (state.taskTerminalTaskId !== taskId) {
+        return;
+      }
+      if (state.taskTerminalCols === cols && state.taskTerminalRows === rows) {
+        return;
+      }
+
+      state = { ...state, taskTerminalCols: cols, taskTerminalRows: rows };
       publish();
     },
     setTaskTerminalStatus(taskId, taskTerminalStatus) {
