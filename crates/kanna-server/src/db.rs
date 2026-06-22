@@ -17,6 +17,7 @@ pub struct PipelineItem {
     pub issue_number: Option<i64>,
     pub issue_title: Option<String>,
     pub prompt: Option<String>,
+    pub pipeline: Option<String>,
     pub stage: Option<String>,
     pub pr_number: Option<i64>,
     pub pr_url: Option<String>,
@@ -482,7 +483,7 @@ impl Db {
 
     pub fn list_recent_pipeline_items(&self) -> Result<Vec<PipelineItem>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, repo_id, issue_number, issue_title, prompt, stage,
+            "SELECT id, repo_id, issue_number, issue_title, prompt, pipeline, stage,
              pr_number, pr_url, branch, agent_type, agent_provider, activity, activity_changed_at,
              closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at
              FROM pipeline_item
@@ -496,24 +497,25 @@ impl Db {
                 issue_number: row.get(2)?,
                 issue_title: row.get(3)?,
                 prompt: row.get(4)?,
-                stage: row.get(5)?,
-                pr_number: row.get(6)?,
-                pr_url: row.get(7)?,
-                branch: row.get(8)?,
-                agent_type: row.get(9)?,
-                agent_provider: row.get(10)?,
-                activity: row.get(11)?,
-                activity_changed_at: row.get(12)?,
-                closed_at: row.get(13)?,
-                pinned: row.get(14)?,
-                pin_order: row.get(15)?,
-                display_name: row.get(16)?,
-                last_output_preview: row.get(17)?,
-                created_at: row.get(18)?,
-                updated_at: row.get(19)?,
-                base_ref: row.get(20)?,
-                notify_task_id: row.get(21)?,
-                notified_at: row.get(22)?,
+                pipeline: row.get(5)?,
+                stage: row.get(6)?,
+                pr_number: row.get(7)?,
+                pr_url: row.get(8)?,
+                branch: row.get(9)?,
+                agent_type: row.get(10)?,
+                agent_provider: row.get(11)?,
+                activity: row.get(12)?,
+                activity_changed_at: row.get(13)?,
+                closed_at: row.get(14)?,
+                pinned: row.get(15)?,
+                pin_order: row.get(16)?,
+                display_name: row.get(17)?,
+                last_output_preview: row.get(18)?,
+                created_at: row.get(19)?,
+                updated_at: row.get(20)?,
+                base_ref: row.get(21)?,
+                notify_task_id: row.get(22)?,
+                notified_at: row.get(23)?,
             })
         })?;
         rows.collect()
@@ -522,7 +524,7 @@ impl Db {
     pub fn search_pipeline_items(&self, query: &str) -> Result<Vec<PipelineItem>, rusqlite::Error> {
         let like_query = format!("%{}%", query.to_lowercase());
         let mut stmt = self.conn.prepare(
-            "SELECT id, repo_id, issue_number, issue_title, prompt, stage,
+            "SELECT id, repo_id, issue_number, issue_title, prompt, pipeline, stage,
              pr_number, pr_url, branch, agent_type, agent_provider, activity, activity_changed_at,
              closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at
              FROM pipeline_item
@@ -540,24 +542,25 @@ impl Db {
                 issue_number: row.get(2)?,
                 issue_title: row.get(3)?,
                 prompt: row.get(4)?,
-                stage: row.get(5)?,
-                pr_number: row.get(6)?,
-                pr_url: row.get(7)?,
-                branch: row.get(8)?,
-                agent_type: row.get(9)?,
-                agent_provider: row.get(10)?,
-                activity: row.get(11)?,
-                activity_changed_at: row.get(12)?,
-                closed_at: row.get(13)?,
-                pinned: row.get(14)?,
-                pin_order: row.get(15)?,
-                display_name: row.get(16)?,
-                last_output_preview: row.get(17)?,
-                created_at: row.get(18)?,
-                updated_at: row.get(19)?,
-                base_ref: row.get(20)?,
-                notify_task_id: row.get(21)?,
-                notified_at: row.get(22)?,
+                pipeline: row.get(5)?,
+                stage: row.get(6)?,
+                pr_number: row.get(7)?,
+                pr_url: row.get(8)?,
+                branch: row.get(9)?,
+                agent_type: row.get(10)?,
+                agent_provider: row.get(11)?,
+                activity: row.get(12)?,
+                activity_changed_at: row.get(13)?,
+                closed_at: row.get(14)?,
+                pinned: row.get(15)?,
+                pin_order: row.get(16)?,
+                display_name: row.get(17)?,
+                last_output_preview: row.get(18)?,
+                created_at: row.get(19)?,
+                updated_at: row.get(20)?,
+                base_ref: row.get(21)?,
+                notify_task_id: row.get(22)?,
+                notified_at: row.get(23)?,
             })
         })?;
         rows.collect()
@@ -585,7 +588,7 @@ impl Db {
 
     pub fn list_pipeline_items(&self, repo_id: &str) -> Result<Vec<PipelineItem>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, repo_id, issue_number, issue_title, prompt, stage, \
+            "SELECT id, repo_id, issue_number, issue_title, prompt, pipeline, stage, \
              pr_number, pr_url, branch, agent_type, agent_provider, activity, activity_changed_at, \
              closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at \
              FROM pipeline_item WHERE repo_id = ? AND closed_at IS NULL \
@@ -598,24 +601,25 @@ impl Db {
                 issue_number: row.get(2)?,
                 issue_title: row.get(3)?,
                 prompt: row.get(4)?,
-                stage: row.get(5)?,
-                pr_number: row.get(6)?,
-                pr_url: row.get(7)?,
-                branch: row.get(8)?,
-                agent_type: row.get(9)?,
-                agent_provider: row.get(10)?,
-                activity: row.get(11)?,
-                activity_changed_at: row.get(12)?,
-                closed_at: row.get(13)?,
-                pinned: row.get(14)?,
-                pin_order: row.get(15)?,
-                display_name: row.get(16)?,
-                last_output_preview: row.get(17)?,
-                created_at: row.get(18)?,
-                updated_at: row.get(19)?,
-                base_ref: row.get(20)?,
-                notify_task_id: row.get(21)?,
-                notified_at: row.get(22)?,
+                pipeline: row.get(5)?,
+                stage: row.get(6)?,
+                pr_number: row.get(7)?,
+                pr_url: row.get(8)?,
+                branch: row.get(9)?,
+                agent_type: row.get(10)?,
+                agent_provider: row.get(11)?,
+                activity: row.get(12)?,
+                activity_changed_at: row.get(13)?,
+                closed_at: row.get(14)?,
+                pinned: row.get(15)?,
+                pin_order: row.get(16)?,
+                display_name: row.get(17)?,
+                last_output_preview: row.get(18)?,
+                created_at: row.get(19)?,
+                updated_at: row.get(20)?,
+                base_ref: row.get(21)?,
+                notify_task_id: row.get(22)?,
+                notified_at: row.get(23)?,
             })
         })?;
         rows.collect()
@@ -623,7 +627,7 @@ impl Db {
 
     pub fn get_pipeline_item(&self, id: &str) -> Result<Option<PipelineItem>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, repo_id, issue_number, issue_title, prompt, stage, \
+            "SELECT id, repo_id, issue_number, issue_title, prompt, pipeline, stage, \
              pr_number, pr_url, branch, agent_type, agent_provider, activity, activity_changed_at, \
              closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at \
              FROM pipeline_item WHERE id = ?",
@@ -635,24 +639,25 @@ impl Db {
                 issue_number: row.get(2)?,
                 issue_title: row.get(3)?,
                 prompt: row.get(4)?,
-                stage: row.get(5)?,
-                pr_number: row.get(6)?,
-                pr_url: row.get(7)?,
-                branch: row.get(8)?,
-                agent_type: row.get(9)?,
-                agent_provider: row.get(10)?,
-                activity: row.get(11)?,
-                activity_changed_at: row.get(12)?,
-                closed_at: row.get(13)?,
-                pinned: row.get(14)?,
-                pin_order: row.get(15)?,
-                display_name: row.get(16)?,
-                last_output_preview: row.get(17)?,
-                created_at: row.get(18)?,
-                updated_at: row.get(19)?,
-                base_ref: row.get(20)?,
-                notify_task_id: row.get(21)?,
-                notified_at: row.get(22)?,
+                pipeline: row.get(5)?,
+                stage: row.get(6)?,
+                pr_number: row.get(7)?,
+                pr_url: row.get(8)?,
+                branch: row.get(9)?,
+                agent_type: row.get(10)?,
+                agent_provider: row.get(11)?,
+                activity: row.get(12)?,
+                activity_changed_at: row.get(13)?,
+                closed_at: row.get(14)?,
+                pinned: row.get(15)?,
+                pin_order: row.get(16)?,
+                display_name: row.get(17)?,
+                last_output_preview: row.get(18)?,
+                created_at: row.get(19)?,
+                updated_at: row.get(20)?,
+                base_ref: row.get(21)?,
+                notify_task_id: row.get(22)?,
+                notified_at: row.get(23)?,
             })
         })?;
         match rows.next() {
