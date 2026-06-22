@@ -3,7 +3,7 @@ import { getRepo, updateAgentSessionId, updatePipelineItemActivity } from "@kann
 import { buildKannaRuntimeSystemPrompt, buildKannaRuntimeUserPrompt } from "../../../../packages/core/src/pipeline/prompt-builder";
 import { invoke } from "../invoke";
 import { isTauri } from "../tauri-mock";
-import { buildTaskShellCommand, getTaskTerminalEnv } from "../composables/terminalSessionRecovery";
+import { buildTaskShellCommand, getShellTerminalEnv, getTaskTerminalEnv } from "../composables/terminalSessionRecovery";
 import { resolveDbName } from "./db";
 import { buildKannaCliPathEnv, buildTaskRuntimeEnv, resolveKannaServerBaseUrl } from "./kannaCliEnv";
 import { encodeDaemonInput } from "./daemonInput";
@@ -201,7 +201,7 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
     fallbackCwd?: string | null,
   ): Promise<void> {
     const parsedPortEnv = parsePortEnv(portEnv);
-    let env: Record<string, string> = { TERM: "xterm-256color" };
+    let env: Record<string, string> = { ...getShellTerminalEnv() };
     if (isWorktree) {
       env.KANNA_WORKTREE = "1";
       env = buildWorktreeSessionEnv({
