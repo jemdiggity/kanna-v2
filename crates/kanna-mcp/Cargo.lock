@@ -645,10 +645,19 @@ name = "kanna-mcp"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "kanna-tool-catalog",
  "reqwest",
  "serde",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "kanna-tool-catalog"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

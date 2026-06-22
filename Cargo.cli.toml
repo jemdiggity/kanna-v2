@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "crates/kanna-cli",
+    "crates/kanna-tool-catalog",
+]
+resolver = "2"

@@ -17,7 +17,9 @@ rust_binary(
     crate_root = "src/main.rs",
     crate_name = "kanna_mcp",
     edition = "2021",
-    deps = all_crate_deps(normal = True),
+    deps = all_crate_deps(normal = True) + [
+        "//crates/kanna-tool-catalog:kanna_tool_catalog_for_mcp",
+    ],
     proc_macro_deps = all_crate_deps(proc_macro = True),
 )
 
@@ -27,7 +29,9 @@ rust_binary(
     crate_root = "src/main.rs",
     crate_name = "kanna_mcp",
     edition = "2021",
-    deps = all_crate_deps(normal = True),
+    deps = all_crate_deps(normal = True) + [
+        "//crates/kanna-tool-catalog:kanna_tool_catalog_for_mcp",
+    ],
     proc_macro_deps = all_crate_deps(proc_macro = True),
     platform = "//tools/bazel:macos_x86_64",
 )
