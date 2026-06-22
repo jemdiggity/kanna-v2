@@ -1,6 +1,8 @@
 [workspace]
 members = [
+    "crates/claude-agent-sdk",
     "crates/daemon",
+    "crates/kanna-agent-protocol",
     "crates/runtime-defaults",
     "crates/task-transfer",
 ]

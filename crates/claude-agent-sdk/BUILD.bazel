@@ -1,4 +1,7 @@
+load("@daemon_crates//:defs.bzl", all_crate_deps_for_daemon = "all_crate_deps")
 load("@desktop_crates//:defs.bzl", "all_crate_deps")
+load("@kanna_server_crates//:defs.bzl", all_crate_deps_for_server = "all_crate_deps")
+load("@task_transfer_crates//:defs.bzl", all_crate_deps_for_task_transfer = "all_crate_deps")
 load("@rules_rust//rust:defs.bzl", "rust_library")
 
 package(default_visibility = ["//visibility:public"])
@@ -30,6 +33,54 @@ rust_library(
         package_name = "crates/claude-agent-sdk",
     ),
     proc_macro_deps = all_crate_deps(
+        proc_macro = True,
+        package_name = "crates/claude-agent-sdk",
+    ),
+)
+
+rust_library(
+    name = "claude_agent_sdk_for_daemon",
+    srcs = glob(["src/**/*.rs"]),
+    crate_root = "src/lib.rs",
+    crate_name = "claude_agent_sdk",
+    edition = "2021",
+    deps = all_crate_deps_for_daemon(
+        normal = True,
+        package_name = "crates/claude-agent-sdk",
+    ),
+    proc_macro_deps = all_crate_deps_for_daemon(
+        proc_macro = True,
+        package_name = "crates/claude-agent-sdk",
+    ),
+)
+
+rust_library(
+    name = "claude_agent_sdk_for_server",
+    srcs = glob(["src/**/*.rs"]),
+    crate_root = "src/lib.rs",
+    crate_name = "claude_agent_sdk",
+    edition = "2021",
+    deps = all_crate_deps_for_server(
+        normal = True,
+        package_name = "crates/claude-agent-sdk",
+    ),
+    proc_macro_deps = all_crate_deps_for_server(
+        proc_macro = True,
+        package_name = "crates/claude-agent-sdk",
+    ),
+)
+
+rust_library(
+    name = "claude_agent_sdk_for_task_transfer",
+    srcs = glob(["src/**/*.rs"]),
+    crate_root = "src/lib.rs",
+    crate_name = "claude_agent_sdk",
+    edition = "2021",
+    deps = all_crate_deps_for_task_transfer(
+        normal = True,
+        package_name = "crates/claude-agent-sdk",
+    ),
+    proc_macro_deps = all_crate_deps_for_task_transfer(
         proc_macro = True,
         package_name = "crates/claude-agent-sdk",
     ),
