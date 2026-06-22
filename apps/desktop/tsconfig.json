@@ -18,7 +18,9 @@
     "baseUrl": ".",
     "paths": {
       "@kanna/db": ["../../packages/db/src"],
-      "@kanna/core": ["../../packages/core/src"]
+      "@kanna/core": ["../../packages/core/src"],
+      "@kanna/agent-protocol": ["../../packages/agent-protocol/src"],
+      "@kanna/stream-client": ["../../packages/stream-client/src"]
     },
 
     /* Linting */
@@ -33,7 +35,9 @@
     "src/**/*.tsx",
     "src/**/*.vue",
     "../../packages/db/src/**/*.ts",
-    "../../packages/core/src/**/*.ts"
+    "../../packages/core/src/**/*.ts",
+    "../../packages/agent-protocol/src/**/*.ts",
+    "../../packages/stream-client/src/**/*.ts"
   ],
   "exclude": [
     "src/**/*.test.ts"

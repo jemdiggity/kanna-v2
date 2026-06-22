@@ -45,7 +45,7 @@ const stream = useAgentStream(props.sessionId, {
   recoverSession: props.recoverSession,
 });
 let highlighterPromise: Promise<MarkdownHighlighter> | null = null;
-let focusRetryTimer: ReturnType<typeof window.setTimeout> | null = null;
+let focusRetryTimer: number | null = null;
 
 // Tool calls ("shell"), tool results, and raw/diagnostic debug output are the
 // agent's internal plumbing — hidden so the view reads like a Claude/ChatGPT
