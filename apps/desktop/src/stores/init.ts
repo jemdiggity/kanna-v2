@@ -1,4 +1,4 @@
-import { getSetting, getUnblockedItems, listRepos, type DbHandle, type PipelineItem } from "@kanna/db";
+import { getSetting, getUnblockedItems, listRepos, setSetting, type DbHandle, type PipelineItem } from "@kanna/db";
 import { invoke } from "../invoke";
 import { isTauri } from "../tauri-mock";
 import { listen } from "../listen";
@@ -22,6 +22,14 @@ export interface InitApi {
   init: (db: DbHandle) => Promise<void>;
   loadPreferences: () => Promise<void>;
   savePreference: (key: string, value: string) => Promise<void>;
+}
+
+const WORKTREE_SHELL_ENV_GENERATION_KEY = "worktreeShellEnvGeneration";
+const WORKTREE_SHELL_ENV_GENERATION = "2026-06-23-worktree-shell-env-v2";
+
+interface DaemonSessionListEntry {
+  session_id?: string;
+  kind?: string;
 }
 
 export function createInitApi(
@@ -133,6 +141,27 @@ export function createInitApi(
     await loadPreferences();
   }
 
+  async function retireStaleWorktreeShellSessions(): Promise<void> {
+    const currentGeneration = await getSetting(context.requireDb(), WORKTREE_SHELL_ENV_GENERATION_KEY);
+    if (currentGeneration === WORKTREE_SHELL_ENV_GENERATION) return;
+
+    try {
+      const sessions = await invoke<DaemonSessionListEntry[]>("list_sessions");
+      const worktreeShellIds = sessions
+        .map((session) => session.session_id)
+        .filter((sessionId): sessionId is string => Boolean(sessionId?.startsWith("shell-wt-")));
+
+      await Promise.all(worktreeShellIds.map((sessionId) =>
+        invoke("kill_session", { sessionId }).catch((error: unknown) => {
+          console.warn("[store] failed to retire stale worktree shell:", { sessionId, error });
+        }),
+      ));
+      await setSetting(context.requireDb(), WORKTREE_SHELL_ENV_GENERATION_KEY, WORKTREE_SHELL_ENV_GENERATION);
+    } catch (error) {
+      console.warn("[store] failed to inspect worktree shell sessions for env migration:", error);
+    }
+  }
+
   async function init(db: DbHandle) {
     context.state.db.value = db;
     await loadPreferences();
@@ -154,6 +183,7 @@ export function createInitApi(
     }
 
     if (isTauri) {
+      await retireStaleWorktreeShellSessions();
       for (const item of eagerItems) {
         if (!item.branch || item.stage === "done" || item.closed_at !== null) continue;
         const repo = eagerRepos.find((candidate) => candidate.id === item.repo_id);

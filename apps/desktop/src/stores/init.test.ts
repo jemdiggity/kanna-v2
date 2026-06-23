@@ -1,6 +1,6 @@
 import { computed, ref } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { getSetting, type DbHandle, type PipelineItem, type Repo } from "@kanna/db";
+import { getSetting, setSetting, type DbHandle, type PipelineItem, type Repo } from "@kanna/db";
 import { createStoreContext, createStoreState } from "./state";
 import { createInitApi } from "./init";
 
@@ -73,6 +73,16 @@ const mockState = vi.hoisted(() => {
   }));
   const advanceStageMock = vi.fn(async () => {});
   const reloadSnapshotMock = vi.fn(async () => {});
+  const invokeMock = vi.fn(async (command: string) => {
+    if (command === "file_exists") return true;
+    if (command === "list_sessions") return [];
+    if (command === "kill_session") return undefined;
+    if (command === "read_env_var") return "";
+    if (command === "git_app_info") return { version: "" };
+    throw new Error(`unexpected invoke: ${command}`);
+  });
+  const setSettingMock = vi.fn(async () => {});
+  let tauri = false;
 
   function reset(): void {
     repos = [makeRepo()];
@@ -84,6 +94,9 @@ const mockState = vi.hoisted(() => {
     loadPipelineMock.mockClear();
     advanceStageMock.mockClear();
     reloadSnapshotMock.mockClear();
+    invokeMock.mockClear();
+    setSettingMock.mockClear();
+    tauri = false;
   }
 
   return {
@@ -109,12 +122,21 @@ const mockState = vi.hoisted(() => {
     loadPipelineMock,
     advanceStageMock,
     reloadSnapshotMock,
+    invokeMock,
+    setSettingMock,
+    get tauri() {
+      return tauri;
+    },
+    set tauri(value: boolean) {
+      tauri = value;
+    },
     reset,
   };
 });
 
 vi.mock("@kanna/db", () => ({
   getSetting: vi.fn(async () => null),
+  setSetting: mockState.setSettingMock,
   getUnblockedItems: vi.fn(async () => mockState.unblockedItems),
   listRepos: vi.fn(async () => mockState.repos),
   listPipelineItems: vi.fn(async () => mockState.items),
@@ -125,7 +147,13 @@ vi.mock("@kanna/db", () => ({
 }));
 
 vi.mock("../tauri-mock", () => ({
-  isTauri: false,
+  get isTauri() {
+    return mockState.tauri;
+  },
+}));
+
+vi.mock("../invoke", () => ({
+  invoke: mockState.invokeMock,
 }));
 
 vi.mock("../listen", () => ({
@@ -167,6 +195,67 @@ describe("createInitApi", () => {
   beforeEach(() => {
     mockState.reset();
     vi.mocked(getSetting).mockResolvedValue(null);
+    vi.mocked(setSetting).mockClear();
+  });
+
+  it("retires handed-off worktree shells once when the shell env generation changes", async () => {
+    mockState.tauri = true;
+    mockState.items = [mockState.makeItem({ id: "task-1", branch: "task-task-1" })];
+    mockState.invokeMock.mockImplementation(async (command: string) => {
+      if (command === "file_exists") return true;
+      if (command === "list_sessions") {
+        return [
+          { session_id: "shell-wt-task-1", kind: "pty" },
+          { session_id: "task-1", kind: "pty" },
+          { session_id: "shell-repo-repo-1", kind: "pty" },
+          { session_id: "agent-task", kind: "agent" },
+        ];
+      }
+      if (command === "kill_session") return undefined;
+      if (command === "read_env_var") return "";
+      if (command === "git_app_info") return { version: "" };
+      throw new Error(`unexpected invoke: ${command}`);
+    });
+
+    const state = createStoreState();
+    const services = {
+      loadInitialData: vi.fn(async () => {}),
+      prewarmWorktreeShellSession: vi.fn(async () => {}),
+      spawnShellSession: vi.fn(async () => {}),
+    };
+    const toast = {
+      toasts: ref([]),
+      dismiss: vi.fn(),
+      info: vi.fn(),
+      warning: vi.fn(),
+      error: vi.fn(),
+    };
+    const context = createStoreContext(state, toast, services);
+    const ports = {
+      closeTaskAndReleasePorts: vi.fn(async () => {}),
+    } as unknown as import("./ports").PortsStore;
+    const initApi = createInitApi(context, ports, {
+      checkUnblocked: vi.fn(async () => {}),
+      handleAgentFinished: vi.fn(),
+      restoreUnblockedTask: vi.fn(async () => {}),
+    });
+
+    await initApi.init(createDb());
+
+    expect(mockState.invokeMock).toHaveBeenCalledWith("kill_session", { sessionId: "shell-wt-task-1" });
+    expect(mockState.invokeMock).not.toHaveBeenCalledWith("kill_session", { sessionId: "task-1" });
+    expect(mockState.invokeMock).not.toHaveBeenCalledWith("kill_session", { sessionId: "shell-repo-repo-1" });
+    expect(setSetting).toHaveBeenCalledWith(
+      expect.anything(),
+      "worktreeShellEnvGeneration",
+      expect.any(String),
+    );
+    expect(services.prewarmWorktreeShellSession).toHaveBeenCalledWith(
+      "shell-wt-task-1",
+      "/tmp/repo/.kanna-worktrees/task-task-1",
+      "{\"KANNA_DEV_PORT\":\"1421\"}",
+      "/tmp/repo",
+    );
   });
 
   it("restores unblocked tasks through the shared blocked-task restore path on startup", async () => {
