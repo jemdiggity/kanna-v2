@@ -1,4 +1,6 @@
 import { setTimeout as sleep } from "node:timers/promises";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
@@ -8,6 +10,7 @@ import { cleanupWorktrees, importTestRepo, resetDatabase } from "../helpers/rese
 import { dismissStartupShortcutsModal } from "../helpers/startupOverlays";
 import { callVueMethod, queryDb, tauriInvoke } from "../helpers/vue";
 import { WebDriverClient } from "../helpers/webdriver";
+import { waitForFile } from "../helpers/worktreeFs";
 
 function isVueCallError(value: unknown): value is { __error: string } {
   return Boolean(
@@ -131,10 +134,15 @@ function utf8Bytes(text: string): number[] {
   return Array.from(new TextEncoder().encode(text));
 }
 
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
 describe("task shell modal", () => {
   const client = new WebDriverClient();
   let testRepoPath = "";
   let taskId = "";
+  const taskIds: string[] = [];
 
   beforeAll(async () => {
     await client.createSession();
@@ -148,9 +156,9 @@ describe("task shell modal", () => {
   });
 
   afterAll(async () => {
-    if (taskId) {
-      await tauriInvoke(client, "kill_session", { sessionId: `shell-wt-${taskId}` }).catch(() => undefined);
-      await tauriInvoke(client, "kill_session", { sessionId: taskId }).catch(() => undefined);
+    for (const id of taskIds) {
+      await tauriInvoke(client, "kill_session", { sessionId: `shell-wt-${id}` }).catch(() => undefined);
+      await tauriInvoke(client, "kill_session", { sessionId: id }).catch(() => undefined);
     }
     if (testRepoPath) {
       await cleanupWorktrees(client, testRepoPath).catch(() => undefined);
@@ -182,6 +190,7 @@ describe("task shell modal", () => {
       throw new Error(`unexpected createItem result: ${JSON.stringify(createResult)}`);
     }
     taskId = createResult;
+    taskIds.push(taskId);
     await waitForTaskBranch(client, taskId);
 
     const shellSessionId = `shell-wt-${taskId}`;
@@ -202,6 +211,68 @@ describe("task shell modal", () => {
 
       const lines = await waitForTerminalBufferText(client, shellSessionId, "SHELL_MODAL_ATTACHED", 10_000);
       expect(lines.some((line) => line.includes("SHELL_MODAL_ATTACHED"))).toBe(true);
+    } catch (error) {
+      const diagnostics = await shellModalDiagnostics(client, shellSessionId).catch((diagnosticError) => ({
+        diagnosticError: String(diagnosticError),
+      }));
+      throw new Error(`${error instanceof Error ? error.message : String(error)}; diagnostics=${JSON.stringify(diagnostics)}`);
+    } finally {
+      await closeShellModal(client);
+    }
+  }, 90_000);
+
+  it("sets the task worktree shell terminal environment inside the spawned PTY process", async () => {
+    const repoRows = (await queryDb(
+      client,
+      "SELECT id FROM repo WHERE path = ?",
+      [testRepoPath],
+    )) as Array<{ id: string }>;
+    const repoId = repoRows[0]?.id;
+    if (!repoId) throw new Error("fixture repo was not imported");
+
+    const createResult = await callVueMethod(
+      client,
+      "store.createItem",
+      repoId,
+      testRepoPath,
+      "",
+      "pty",
+      { agentProvider: "codex", permissionMode: "dontAsk", selectOnCreate: false },
+    );
+    if (isVueCallError(createResult)) throw new Error(createResult.__error);
+    if (typeof createResult !== "string") {
+      throw new Error(`unexpected createItem result: ${JSON.stringify(createResult)}`);
+    }
+    taskId = createResult;
+    taskIds.push(taskId);
+
+    const branch = await waitForTaskBranch(client, taskId);
+    const worktreePath = join(testRepoPath, ".kanna-worktrees", branch);
+
+    const shellSessionId = `shell-wt-${taskId}`;
+    await waitForDaemonSession(client, shellSessionId, 30_000);
+
+    const selectResult = await callVueMethod(client, "store.selectItem", taskId);
+    if (isVueCallError(selectResult)) throw new Error(selectResult.__error);
+
+    await client.executeSync(buildGlobalKeydownScript({ key: "j", code: "KeyJ", meta: true }));
+    await client.waitForElement(".shell-modal .terminal-container", 15_000);
+
+    const markerPath = join(worktreePath, ".kanna-shell-terminal-env");
+
+    try {
+      await waitForTerminalBufferSession(client, shellSessionId, 10_000);
+      await tauriInvoke(client, "send_input", {
+        sessionId: shellSessionId,
+        data: utf8Bytes(
+          `set -eu; printf 'TERM=%s\\nCOLORTERM=%s\\nTERM_PROGRAM=%s\\n' "$TERM" "$COLORTERM" "$TERM_PROGRAM" > ${shellQuote(markerPath)}\n`,
+        ),
+      });
+
+      await waitForFile(markerPath, 30_000, 250);
+      expect((await readFile(markerPath, "utf8")).trimEnd()).toBe(
+        "TERM=xterm-256color\nCOLORTERM=truecolor\nTERM_PROGRAM=kanna",
+      );
     } catch (error) {
       const diagnostics = await shellModalDiagnostics(client, shellSessionId).catch((diagnosticError) => ({
         diagnosticError: String(diagnosticError),

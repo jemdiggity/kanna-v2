@@ -278,6 +278,7 @@ describe("createSessionsApi", () => {
       sessionId: "shell-wt-task-1",
       cwd: "/tmp/repo/.kanna-worktrees/task-1",
       env: expect.objectContaining({
+        COLORTERM: "truecolor",
         KANNA_TASK_ID: "task-1",
         KANNA_CLI_DB_PATH: "/tmp/kanna/kanna-test.db",
         KANNA_SOCKET_PATH: "/tmp/kanna.sock",
@@ -285,6 +286,8 @@ describe("createSessionsApi", () => {
         KANNA_DEV_PORT: "1421",
         KANNA_CLI_PATH: "/usr/bin/kanna-cli",
         PATH: "/usr/bin:/bin",
+        TERM: "xterm-256color",
+        TERM_PROGRAM: "kanna",
       }),
     }));
   });

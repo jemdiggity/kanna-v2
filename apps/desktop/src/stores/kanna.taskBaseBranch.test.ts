@@ -415,6 +415,11 @@ vi.mock("../services/desktopCloudPublisher", () => ({
 
 vi.mock("../composables/terminalSessionRecovery", () => ({
   buildTaskShellCommand: vi.fn((agentCmd: string, _setupCmds: string[], options?: { agentCmdPreamble?: string }) => options?.agentCmdPreamble ?? agentCmd),
+  getShellTerminalEnv: vi.fn(() => ({
+    TERM: "xterm-256color",
+    COLORTERM: "truecolor",
+    TERM_PROGRAM: "kanna",
+  })),
   getTaskTerminalEnv: vi.fn(() => ({})),
 }));
 
@@ -1507,7 +1512,9 @@ describe("kanna store task base branch integration", () => {
         cwd: "/tmp/repo/.kanna-worktrees/task-shell",
         args: [ "--login" ],
         env: expect.objectContaining({
+          COLORTERM: "truecolor",
           TERM: "xterm-256color",
+          TERM_PROGRAM: "kanna",
           ZDOTDIR: "/tmp/kanna-zdotdir",
           KANNA_WORKTREE: "1",
           KANNA_DEV_PORT: "1421",
