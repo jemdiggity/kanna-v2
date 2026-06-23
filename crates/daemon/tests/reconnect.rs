@@ -40,6 +40,14 @@ enum Cmd {
         #[serde(skip_serializing_if = "std::ops::Not::not")]
         emulate_terminal: bool,
     },
+    Observe {
+        session_id: String,
+    },
+    Resize {
+        session_id: String,
+        cols: u16,
+        rows: u16,
+    },
     Input {
         session_id: String,
         data: Vec<u8>,
@@ -210,6 +218,58 @@ impl DaemonHandle {
             writer: stream,
         }
     }
+}
+
+fn daemon_fd_count(pid: u32) -> usize {
+    #[cfg(target_os = "macos")]
+    {
+        let mut fds = vec![
+            libc::proc_fdinfo {
+                proc_fd: 0,
+                proc_fdtype: 0,
+            };
+            1024
+        ];
+        let bytes = unsafe {
+            libc::proc_pidinfo(
+                pid as i32,
+                libc::PROC_PIDLISTFDS,
+                0,
+                fds.as_mut_ptr().cast(),
+                (fds.len() * std::mem::size_of::<libc::proc_fdinfo>()) as i32,
+            )
+        };
+        assert!(bytes >= 0, "proc_pidinfo failed for pid {pid}");
+        return bytes as usize / std::mem::size_of::<libc::proc_fdinfo>();
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        return std::fs::read_dir(format!("/proc/{pid}/fd"))
+            .expect("should read daemon fd directory")
+            .count();
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = pid;
+        panic!("daemon fd counting is not implemented for this platform");
+    }
+}
+
+fn wait_for_daemon_fd_count_at_most(pid: u32, limit: usize, timeout: Duration) -> usize {
+    let deadline = Instant::now() + timeout;
+    let mut last_count = daemon_fd_count(pid);
+
+    while Instant::now() < deadline {
+        last_count = daemon_fd_count(pid);
+        if last_count <= limit {
+            return last_count;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    panic!("daemon fd count stayed above {limit}; last count was {last_count}");
 }
 
 fn write_fake_recovery_sidecar(dir: &Path) -> PathBuf {
@@ -479,6 +539,34 @@ fn attach_emulating_terminal(conn: &mut ClientConn, session_id: &str) {
         } => assert_eq!(sid, session_id),
         Evt::Error { message } => panic!("attach failed: {}", message),
         other => panic!("expected Snapshot, got: {:?}", other),
+    }
+}
+
+fn observe(conn: &mut ClientConn, session_id: &str) {
+    conn.send(&Cmd::Observe {
+        session_id: session_id.to_string(),
+    });
+    wait_for_ok(conn, "observe");
+}
+
+fn resize(conn: &mut ClientConn, session_id: &str, cols: u16, rows: u16) {
+    conn.send(&Cmd::Resize {
+        session_id: session_id.to_string(),
+        cols,
+        rows,
+    });
+    wait_for_ok(conn, "resize");
+}
+
+fn wait_for_ok(conn: &mut ClientConn, action: &str) {
+    loop {
+        match conn.recv() {
+            Evt::Ok => break,
+            Evt::Output { .. } => continue,
+            Evt::StatusChanged { .. } => continue,
+            Evt::Error { message } => panic!("{action} failed: {message}"),
+            other => panic!("expected Ok for {action}, got: {:?}", other),
+        }
     }
 }
 
@@ -1015,6 +1103,52 @@ fn test_attached_client_suppresses_headless_terminal_replies() {
     assert_eq!(
         output, query,
         "attached sessions should not receive extra daemon-generated terminal replies"
+    );
+}
+
+#[test]
+fn connection_drop_cleanup_removes_attached_and_observer_writers() {
+    let daemon = DaemonHandle::start();
+    let mut shared = daemon.connect();
+    spawn_shell_session(
+        &mut shared,
+        "sess-fd-cleanup",
+        "while true; do sleep 1; done",
+    );
+
+    {
+        let mut warmup = daemon.connect();
+        attach_emulating_terminal(&mut warmup, "sess-fd-cleanup");
+        resize(&mut warmup, "sess-fd-cleanup", 100, 30);
+        observe(&mut warmup, "sess-fd-cleanup");
+    }
+
+    thread::sleep(Duration::from_millis(250));
+    let baseline = daemon_fd_count(daemon.child.id());
+    let client_count = 64;
+    let mut clients = Vec::with_capacity(client_count);
+
+    for index in 0..client_count {
+        let mut client = daemon.connect();
+        attach_emulating_terminal(&mut client, "sess-fd-cleanup");
+        resize(&mut client, "sess-fd-cleanup", 100 + (index % 5) as u16, 30);
+        observe(&mut client, "sess-fd-cleanup");
+        clients.push(client);
+    }
+
+    let inflated = daemon_fd_count(daemon.child.id());
+    assert!(
+        inflated >= baseline + client_count / 2,
+        "daemon fd count should grow while real attached/observer clients are connected; baseline={baseline}, inflated={inflated}"
+    );
+
+    drop(clients);
+
+    let final_count =
+        wait_for_daemon_fd_count_at_most(daemon.child.id(), baseline + 6, Duration::from_secs(5));
+    assert!(
+        final_count <= baseline + 6,
+        "daemon fd count should return near baseline after client drops; baseline={baseline}, final={final_count}"
     );
 }
 
