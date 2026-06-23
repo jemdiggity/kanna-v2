@@ -372,6 +372,42 @@ async fn unregister_terminal_emulator_client(
     }
 }
 
+async fn cleanup_client_writer_registries(
+    writer: &SessionWriter,
+    session_writers: &SessionWriters,
+    terminal_emulator_clients: &TerminalEmulatorClients,
+    session_sizes: &SessionSizes,
+    session_observers: &SessionObservers,
+) {
+    let writer_id = Arc::as_ptr(writer) as usize;
+
+    let mut sizes = session_sizes.lock().await;
+    for client_sizes in sizes.values_mut() {
+        client_sizes.remove(&writer_id);
+    }
+    sizes.retain(|_, client_sizes| !client_sizes.is_empty());
+    drop(sizes);
+
+    let mut terminal_clients = terminal_emulator_clients.lock().await;
+    for client_ids in terminal_clients.values_mut() {
+        client_ids.remove(&writer_id);
+    }
+    terminal_clients.retain(|_, client_ids| !client_ids.is_empty());
+    drop(terminal_clients);
+
+    let mut writers = session_writers.lock().await;
+    for attached_writers in writers.values_mut() {
+        attached_writers.retain(|registered| Arc::as_ptr(registered) as usize != writer_id);
+    }
+    drop(writers);
+
+    let mut observers = session_observers.lock().await;
+    for observer_writers in observers.values_mut() {
+        observer_writers.retain(|registered| Arc::as_ptr(registered) as usize != writer_id);
+    }
+    observers.retain(|_, observer_writers| !observer_writers.is_empty());
+}
+
 async fn finish_attach_cutover(
     writer: &SessionWriter,
     session_writers: &SessionWriters,
@@ -1064,20 +1100,16 @@ async fn handle_connection(
         }
     }
 
-    // Connection dropped — clean up this client's entries from session_sizes
-    // so stale dimensions don't cap future resize computations.
-    let writer_id = Arc::as_ptr(&writer) as usize;
-    let mut sizes = session_sizes.lock().await;
-    for (_sid, client_sizes) in sizes.iter_mut() {
-        client_sizes.remove(&writer_id);
-    }
-    drop(sizes);
-    let mut terminal_clients = terminal_emulator_clients.lock().await;
-    for client_ids in terminal_clients.values_mut() {
-        client_ids.remove(&writer_id);
-    }
-    terminal_clients.retain(|_, client_ids| !client_ids.is_empty());
-    drop(terminal_clients);
+    // Connection dropped: remove every registry entry that owns or indexes this
+    // writer so dead Unix socket fds cannot survive on idle sessions.
+    cleanup_client_writer_registries(
+        &writer,
+        &session_writers,
+        &terminal_emulator_clients,
+        &session_sizes,
+        &session_observers,
+    )
+    .await;
     agent_runtime::cleanup_agent_writer(&agent_sessions, &writer).await;
 }
 
@@ -2660,6 +2692,73 @@ mod tests {
         clients.insert(2, (100, 30));
 
         assert_eq!(effective_terminal_size(&clients, (80, 24)), (100, 30));
+    }
+
+    #[tokio::test]
+    async fn connection_drop_cleanup_removes_attached_and_observer_writers() {
+        let session_writers: SessionWriters = Arc::new(Mutex::new(HashMap::new()));
+        let terminal_emulator_clients: TerminalEmulatorClients =
+            Arc::new(Mutex::new(HashMap::new()));
+        let session_sizes: SessionSizes = Arc::new(Mutex::new(HashMap::new()));
+        let session_observers: SessionObservers = Arc::new(Mutex::new(HashMap::new()));
+        let mut writers_to_drop = Vec::new();
+
+        for idx in 0..64 {
+            let (_client, server) = UnixStream::pair().expect("should create UnixStream pair");
+            let (_read_half, write_half) = server.into_split();
+            let writer = Arc::new(Mutex::new(write_half));
+            let writer_id = Arc::as_ptr(&writer) as usize;
+            let session_id = format!("session-{}", idx % 4);
+
+            session_writers
+                .lock()
+                .await
+                .entry(session_id.clone())
+                .or_default()
+                .push(writer.clone());
+            terminal_emulator_clients
+                .lock()
+                .await
+                .entry(session_id.clone())
+                .or_default()
+                .insert(writer_id);
+            session_sizes
+                .lock()
+                .await
+                .entry(session_id.clone())
+                .or_default()
+                .insert(writer_id, (80, 24));
+            session_observers
+                .lock()
+                .await
+                .entry(session_id)
+                .or_default()
+                .push(writer.clone());
+
+            writers_to_drop.push(writer);
+        }
+
+        let attached_count: usize = session_writers.lock().await.values().map(Vec::len).sum();
+        let observer_count: usize = session_observers.lock().await.values().map(Vec::len).sum();
+        assert_eq!(attached_count, 64);
+        assert_eq!(observer_count, 64);
+
+        for writer in &writers_to_drop {
+            cleanup_client_writer_registries(
+                writer,
+                &session_writers,
+                &terminal_emulator_clients,
+                &session_sizes,
+                &session_observers,
+            )
+            .await;
+        }
+
+        let attached_count: usize = session_writers.lock().await.values().map(Vec::len).sum();
+        assert_eq!(attached_count, 0);
+        assert!(terminal_emulator_clients.lock().await.is_empty());
+        assert!(session_sizes.lock().await.is_empty());
+        assert!(session_observers.lock().await.is_empty());
     }
 
     #[test]

@@ -401,6 +401,37 @@ async fn try_connect_daemon() -> Option<DaemonClient> {
     DaemonClient::connect(&socket_path).await.ok()
 }
 
+#[cfg(unix)]
+const TARGET_SOFT_NOFILE_LIMIT: libc::rlim_t = 4096;
+
+#[cfg(unix)]
+fn desired_child_nofile_soft_limit(current_soft: libc::rlim_t, hard: libc::rlim_t) -> libc::rlim_t {
+    let target = if hard == libc::RLIM_INFINITY {
+        TARGET_SOFT_NOFILE_LIMIT
+    } else {
+        std::cmp::min(TARGET_SOFT_NOFILE_LIMIT, hard)
+    };
+    std::cmp::max(current_soft, target)
+}
+
+#[cfg(unix)]
+fn raise_child_nofile_limit() {
+    let mut limit = std::mem::MaybeUninit::<libc::rlimit>::uninit();
+    let get_result = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, limit.as_mut_ptr()) };
+    if get_result != 0 {
+        return;
+    }
+
+    let mut limit = unsafe { limit.assume_init() };
+    let desired_soft = desired_child_nofile_soft_limit(limit.rlim_cur, limit.rlim_max);
+    if limit.rlim_cur >= desired_soft {
+        return;
+    }
+
+    limit.rlim_cur = desired_soft;
+    let _ = unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) };
+}
+
 /// Always spawn a new daemon. If an old one is running, the new daemon
 /// performs a handoff (transfers sessions via SCM_RIGHTS) automatically.
 async fn ensure_daemon_running() {
@@ -445,6 +476,7 @@ async fn ensure_daemon_running() {
         .stderr(std::process::Stdio::null());
     match unsafe {
         cmd.pre_exec(|| {
+            raise_child_nofile_limit();
             libc::setsid();
             Ok(())
         })
@@ -819,15 +851,22 @@ pub fn run() {
 #[cfg(all(test, debug_assertions))]
 mod tests {
     use super::{
-        resolve_native_workspace_menu_action, resolve_webdriver_port, NativeWorkspaceMenuAction,
-        MENU_ID_CLOSE_WINDOW, MENU_ID_NAVIGATE_REPO_DOWN, MENU_ID_NAVIGATE_REPO_UP,
-        MENU_ID_NAVIGATE_TASK_DOWN, MENU_ID_NAVIGATE_TASK_UP, MENU_ID_NEW_WINDOW,
-        WINDOW_WORKSPACE_NATIVE_CLOSE_WINDOW_EVENT,
+        desired_child_nofile_soft_limit, resolve_native_workspace_menu_action,
+        resolve_webdriver_port, NativeWorkspaceMenuAction, MENU_ID_CLOSE_WINDOW,
+        MENU_ID_NAVIGATE_REPO_DOWN, MENU_ID_NAVIGATE_REPO_UP, MENU_ID_NAVIGATE_TASK_DOWN,
+        MENU_ID_NAVIGATE_TASK_UP, MENU_ID_NEW_WINDOW, WINDOW_WORKSPACE_NATIVE_CLOSE_WINDOW_EVENT,
         WINDOW_WORKSPACE_NATIVE_NAVIGATE_REPO_DOWN_EVENT,
         WINDOW_WORKSPACE_NATIVE_NAVIGATE_REPO_UP_EVENT,
         WINDOW_WORKSPACE_NATIVE_NAVIGATE_TASK_DOWN_EVENT,
         WINDOW_WORKSPACE_NATIVE_NAVIGATE_TASK_UP_EVENT, WINDOW_WORKSPACE_NATIVE_NEW_WINDOW_EVENT,
     };
+
+    #[test]
+    fn child_nofile_limit_raises_low_gui_soft_limit_without_exceeding_hard_limit() {
+        assert_eq!(desired_child_nofile_soft_limit(256, 8192), 4096);
+        assert_eq!(desired_child_nofile_soft_limit(256, 1024), 1024);
+        assert_eq!(desired_child_nofile_soft_limit(8192, 8192), 8192);
+    }
 
     #[test]
     fn webdriver_disabled_for_worktrees_without_explicit_port() {
