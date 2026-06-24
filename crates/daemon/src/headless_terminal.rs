@@ -17,12 +17,10 @@ type HeadlessTerminalResult<T> = Result<T, Box<dyn std::error::Error + Send + Sy
 const GHOSTTY_SCROLLBACK_BYTES_PER_CELL: usize = 20;
 const STATUS_ROWS: usize = 8;
 const WAITING_MARKER: &str = "do you want to allow";
-const CLAUDE_PERMISSION_MARKER: &str = "bypass permissions on";
 const INTERRUPT_MARKER: &str = "esc to interrupt";
 const COPILOT_BUSY_MARKER: &str = "esc to cancel";
 const CLAUDE_IDLE_PROMPT: char = '\u{276F}';
 const CODEX_IDLE_PROMPT: char = '\u{203A}';
-const CLAUDE_SPINNERS: [char; 6] = ['✻', '✽', '✶', '✳', '✢', '⏺'];
 
 pub fn initial_session_status(provider: Option<AgentProvider>) -> SessionStatus {
     if provider.is_some() {
@@ -227,8 +225,6 @@ impl HeadlessTerminal {
             .unwrap_or("");
         let has_waiting_marker =
             any_line_contains_ascii_case_insensitive(&footer_lines, WAITING_MARKER);
-        let has_claude_permission =
-            any_line_contains_ascii_case_insensitive(&footer_lines, CLAUDE_PERMISSION_MARKER);
         let has_interrupt_marker =
             any_line_contains_ascii_case_insensitive(&footer_lines, INTERRUPT_MARKER);
         let has_copilot_busy_marker =
@@ -240,13 +236,7 @@ impl HeadlessTerminal {
 
         let status = match provider {
             AgentProvider::Claude => {
-                if has_claude_permission {
-                    Some(SessionStatus::Waiting)
-                } else if has_interrupt_marker
-                    || footer_lines
-                        .iter()
-                        .any(|line| line_has_claude_spinner(line))
-                {
+                if has_interrupt_marker {
                     Some(SessionStatus::Busy)
                 } else if line_starts_with_prompt(last_line, &[CLAUDE_IDLE_PROMPT]) {
                     Some(SessionStatus::Idle)
@@ -410,13 +400,6 @@ fn any_line_contains_ascii_case_insensitive(lines: &[String], needle: &str) -> b
         })
 }
 
-fn line_has_claude_spinner(line: &str) -> bool {
-    line.trim_start()
-        .chars()
-        .next()
-        .is_some_and(|ch| CLAUDE_SPINNERS.contains(&ch))
-}
-
 fn line_starts_with_prompt(line: &str, prompts: &[char]) -> bool {
     line.trim_start()
         .chars()
@@ -475,10 +458,6 @@ mod tests {
         assert!(super::contains_ascii_case_insensitive(
             "• Working (0s • Esc To Interrupt)",
             super::INTERRUPT_MARKER
-        ));
-        assert!(super::contains_ascii_case_insensitive(
-            "⏵⏵ Bypass Permissions On (shift+tab to cycle)",
-            super::CLAUDE_PERMISSION_MARKER
         ));
         assert!(!super::contains_ascii_case_insensitive(
             "Thinking hard",
@@ -710,6 +689,52 @@ mod tests {
     }
 
     #[test]
+    fn claude_status_comes_from_visible_interrupt_marker() {
+        let mut headless_terminal = HeadlessTerminal::new(80, 4, 10_000).unwrap();
+        headless_terminal.write(
+            "Header\r\nBody\r\n• Working(0s • esc to interrupt)\r\n❯ Find and fix a bug".as_bytes(),
+        );
+
+        assert_eq!(
+            headless_terminal
+                .visible_status(Some(AgentProvider::Claude))
+                .unwrap(),
+            Some(SessionStatus::Busy)
+        );
+
+        headless_terminal.write("\x1b[2J\x1b[HHeader\r\nBody\r\nAll done\r\n❯".as_bytes());
+
+        assert_eq!(
+            headless_terminal
+                .visible_status(Some(AgentProvider::Claude))
+                .unwrap(),
+            Some(SessionStatus::Idle)
+        );
+    }
+
+    #[test]
+    fn claude_interrupt_marker_takes_priority_over_permission_footer() {
+        let mut headless_terminal = HeadlessTerminal::new(120, 8, 10_000).unwrap();
+        headless_terminal.write(
+            concat!(
+                "Claude Code\r\n",
+                "✻ Running tests\r\n",
+                "────────────────────────────────────────────────────────────────\r\n",
+                "✻ Working (4s • esc to interrupt)\r\n",
+                "⏵⏵ bypass permissions on (shift+tab to cycle)\r\n"
+            )
+            .as_bytes(),
+        );
+
+        assert_eq!(
+            headless_terminal
+                .visible_status(Some(AgentProvider::Claude))
+                .unwrap(),
+            Some(SessionStatus::Busy)
+        );
+    }
+
+    #[test]
     fn codex_resume_session_id_comes_from_visible_footer_content() {
         let mut headless_terminal = HeadlessTerminal::new(48, 6, 10_000).unwrap();
         headless_terminal.write(
@@ -730,7 +755,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_permission_footer_maps_to_waiting() {
+    fn claude_permission_footer_without_interrupt_marker_does_not_map_to_waiting() {
         let mut headless_terminal = HeadlessTerminal::new(120, 8, 10_000).unwrap();
         headless_terminal.write(
             concat!(
@@ -748,12 +773,12 @@ mod tests {
             headless_terminal
                 .visible_status(Some(AgentProvider::Claude))
                 .unwrap(),
-            Some(SessionStatus::Waiting)
+            None
         );
     }
 
     #[test]
-    fn claude_permission_footer_maps_to_waiting_even_with_blank_rows_below() {
+    fn claude_permission_footer_without_interrupt_marker_does_not_map_to_waiting_even_with_blank_rows_below() {
         let mut headless_terminal = HeadlessTerminal::new(120, 42, 10_000).unwrap();
         headless_terminal.write(
             concat!(
@@ -774,7 +799,28 @@ mod tests {
             headless_terminal
                 .visible_status(Some(AgentProvider::Claude))
                 .unwrap(),
-            Some(SessionStatus::Waiting)
+            None
+        );
+    }
+
+    #[test]
+    fn claude_spinner_without_interrupt_marker_does_not_mark_busy() {
+        let mut headless_terminal = HeadlessTerminal::new(120, 8, 10_000).unwrap();
+        headless_terminal.write(
+            concat!(
+                "Claude Code\r\n",
+                "✻ Thinking…\r\n",
+                "All done\r\n",
+                "❯ \r\n"
+            )
+            .as_bytes(),
+        );
+
+        assert_eq!(
+            headless_terminal
+                .visible_status(Some(AgentProvider::Claude))
+                .unwrap(),
+            Some(SessionStatus::Idle)
         );
     }
 
