@@ -490,9 +490,13 @@ async fn create_task(
                 format!("daemon error: {}", e),
             )
         })?;
-    let created = crate::task_creator::spawn_prepared_task_for_api(&mut daemon, prepared)
-        .await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let created = crate::task_creator::spawn_prepared_task_for_api_with_rollback(
+        &state.config.db_path,
+        &mut daemon,
+        prepared,
+    )
+    .await
+    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(created))
 }
 
@@ -2943,6 +2947,125 @@ mod tests {
             "route should reject before creating a git worktree"
         );
 
+        let _ = std::fs::remove_dir_all(&daemon_dir);
+        let _ = std::fs::remove_dir_all(&repo_root);
+    }
+
+    #[tokio::test]
+    async fn create_task_route_rolls_back_prepared_task_when_daemon_spawn_fails() {
+        use kanna_daemon::protocol::{Command as DaemonCommand, ErrorCode, Event as DaemonEvent};
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::UnixListener;
+
+        let unique = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let repo_root = std::env::temp_dir().join(format!("kanna-http-create-spawn-fail-{unique}"));
+        init_test_git_repo(&repo_root);
+
+        let daemon_dir =
+            std::env::temp_dir().join(format!("kanna-http-create-spawn-fail-daemon-{unique}"));
+        std::fs::create_dir_all(&daemon_dir).unwrap();
+        let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+        let _ = std::fs::remove_file(&socket_path);
+        let daemon_listener = UnixListener::bind(&socket_path).unwrap();
+        let daemon_server = tokio::spawn(async move {
+            let (stream, _) = daemon_listener.accept().await.unwrap();
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+            let (session_id, cwd) = match command {
+                DaemonCommand::SpawnAgent { session_id, params } => (session_id, params.cwd),
+                DaemonCommand::Spawn {
+                    session_id, cwd, ..
+                } => (session_id, cwd),
+                other => panic!("expected spawn command, got {:?}", other),
+            };
+            write_half
+                .write_all(
+                    format!(
+                        "{}\n",
+                        serde_json::to_string(&DaemonEvent::Error {
+                            code: Some(ErrorCode::AgentSpawnFailed),
+                            message:
+                                "failed to spawn agent: No such file or directory (os error 2)"
+                                    .to_string(),
+                        })
+                        .unwrap()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            (session_id, cwd)
+        });
+
+        let config = Config {
+            relay_url: "wss://relay.example".to_string(),
+            device_token: "device-token".to_string(),
+            firebase_project_id: "kanna-local".to_string(),
+            firebase_auth_emulator_url: None,
+            firebase_firestore_emulator_host: None,
+            daemon_dir: daemon_dir.to_string_lossy().to_string(),
+            db_path: Db::test_db_path(&format!("http-api-create-spawn-fail-{unique}")),
+            kanna_cli_path: None,
+            desktop_id: "desktop-1".to_string(),
+            desktop_secret: Some("desktop-secret".to_string()),
+            desktop_name: "Studio Mac".to_string(),
+            server_version: Some("test-version".to_string()),
+            lan_host: "127.0.0.1".to_string(),
+            lan_port: 48120,
+            pairing_store_path: format!("/tmp/kanna-pairings-create-spawn-fail-{unique}.json"),
+        };
+        let db = Db::open_for_tests(&config.db_path).unwrap();
+        db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+            .unwrap();
+        drop(db);
+
+        let app = super::router(Arc::new(super::AppState::new(config.clone())));
+        let response = app
+            .oneshot(
+                Request::post("/v1/tasks")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "repoId": "repo-1",
+                            "prompt": "Rollback this failed create",
+                            "agentProvider": "codex"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let (task_id, worktree_path) = daemon_server.await.unwrap();
+        let db = Db::open(&config.db_path).unwrap();
+        assert_eq!(db.count_test_pipeline_items_for_repo("repo-1").unwrap(), 0);
+        assert_eq!(db.count_test_worktrees_for_repo("repo-1").unwrap(), 0);
+        assert_eq!(
+            db.count_test_terminal_sessions_for_repo("repo-1").unwrap(),
+            0
+        );
+        assert!(
+            !std::path::Path::new(&worktree_path).exists(),
+            "failed spawn should remove prepared worktree {worktree_path}"
+        );
+        assert!(
+            db.get_task_stage_source(&task_id).unwrap().is_none(),
+            "failed spawn should remove task row"
+        );
+
+        let _ = std::fs::remove_file(&socket_path);
         let _ = std::fs::remove_dir_all(&daemon_dir);
         let _ = std::fs::remove_dir_all(&repo_root);
     }
