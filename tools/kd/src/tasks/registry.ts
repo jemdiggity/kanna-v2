@@ -36,6 +36,11 @@ import {
   waitForPhysicalDeviceMetroReadiness,
   type PhysicalDeviceMetroReadinessInput
 } from "../runtime/mobile-device";
+import {
+  executeMobileOtaProvisionSecretWithContext,
+  executeMobileOtaPublishWithContext,
+  executeMobileOtaStatusWithContext
+} from "../runtime/mobile-ota";
 import { buildConfigSchemaPages } from "../runtime/pages";
 import { getPortStatuses } from "../runtime/port-status";
 import { nodeCommandRunner, type CommandRunner } from "../runtime/process";
@@ -116,6 +121,24 @@ const mobileRunInputSchema = z.object({
   device: z.boolean().default(false),
   production: z.boolean().default(false),
   staging: z.boolean().default(false)
+});
+
+const mobileOtaPublishInputSchema = z.object({
+  production: z.boolean().default(false),
+  staging: z.boolean().default(false),
+  dryRun: z.boolean().default(false),
+  rollbackTo: z.string().optional()
+});
+
+const mobileOtaStatusInputSchema = z.object({
+  production: z.boolean().default(false),
+  staging: z.boolean().default(false)
+});
+
+const mobileOtaProvisionSecretInputSchema = z.object({
+  production: z.boolean().default(false),
+  staging: z.boolean().default(false),
+  keyPath: z.string()
 });
 
 const logInputSchema = z.object({
@@ -1223,6 +1246,45 @@ export const taskDefinitions = [
     description: "Check physical iOS device mobile development readiness.",
     inputSchema: mobileRunInputSchema,
     execute: async (_context, input) => executeMobileDeviceDoctor(mobileRunInputSchema.parse(input))
+  },
+  {
+    id: "mobile.ota.publish",
+    description: "Publish or roll back a Kanna mobile OTA update.",
+    inputSchema: mobileOtaPublishInputSchema,
+    execute: async (_context, input) => {
+      const context = await resolveDefaultContext(process.env);
+      return executeMobileOtaPublishWithContext(mobileOtaPublishInputSchema.parse(input), {
+        repoRoot: context.repoRoot,
+        env: context.env,
+        runner: nodeCommandRunner
+      });
+    }
+  },
+  {
+    id: "mobile.ota.status",
+    description: "Show the current Kanna mobile OTA channel pointer.",
+    inputSchema: mobileOtaStatusInputSchema,
+    execute: async (_context, input) => {
+      const context = await resolveDefaultContext(process.env);
+      return executeMobileOtaStatusWithContext(mobileOtaStatusInputSchema.parse(input), {
+        repoRoot: context.repoRoot,
+        env: context.env,
+        runner: nodeCommandRunner
+      });
+    }
+  },
+  {
+    id: "mobile.ota.provision-secret",
+    description: "Provision the Kanna mobile OTA private key into cloud Secret Manager.",
+    inputSchema: mobileOtaProvisionSecretInputSchema,
+    execute: async (_context, input) => {
+      const context = await resolveDefaultContext(process.env);
+      return executeMobileOtaProvisionSecretWithContext(mobileOtaProvisionSecretInputSchema.parse(input), {
+        repoRoot: context.repoRoot,
+        env: context.env,
+        runner: nodeCommandRunner
+      });
+    }
   },
   {
     id: "emulators.up",

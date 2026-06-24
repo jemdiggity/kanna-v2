@@ -15,6 +15,7 @@ import {
   getConnectionCount,
   isTunnelSocket,
 } from "./router.js";
+import { handleOtaRequest } from "./ota.js";
 
 const PORT = parseInt(process.env.PORT || "8080", 10);
 const AUTH_TIMEOUT_MS = 10_000;
@@ -51,6 +52,10 @@ function jsonResponse(
 
 const server = createServer(async (req, res) => {
   try {
+    if (await handleOtaRequest(req, res)) {
+      return;
+    }
+
     if (req.method === "GET" && req.url === "/health") {
       jsonResponse(res, 200, {
         status: "ok",

@@ -216,6 +216,10 @@ The script is idempotent: it upserts the Firebase Auth user `upvote.sieve.7t@icl
 ./kd mobile doctor --device  # check physical iPhone Metro reachability, install state, and Local Network guidance
 ./kd mobile up --production  # start mobile with installed /Applications/Kanna.app production status/relay defaults
 ./kd mobile up --staging     # start worktree desktop + staging Metro only; does not install/launch a physical iPhone
+./kd mobile ota publish --staging     # publish a signed staging JS/asset OTA update
+./kd mobile ota publish --production  # publish a signed production JS/asset OTA update
+./kd mobile ota status --staging      # inspect the staging OTA channel pointer
+./kd mobile ota provision-secret --staging --key-path "$HOME/.kanna/secrets/kanna-mobile-ota-v1-private-key.pem"
 ./kd dev up --attach         # start and attach to tmux session
 ./kd env print               # print resolved ports, DB, daemon dir, transfer root
 ./kd doctor                  # check local prerequisites
@@ -270,6 +274,12 @@ The first `./kd dev up` in a fresh worktree compiles ~523 Rust crates (the daemo
 ### Cloud deployment
 
 Always use `./kd cloud deploy --staging` or `./kd cloud deploy --production` for Firebase backend deployments. Do not run `firebase deploy`, `pnpm exec firebase deploy`, or other Firebase CLI deploy commands directly. If `kd cloud deploy` hangs, hides necessary output, or otherwise fails, fix the `kd` deployment workflow and rerun the deployment through `kd`.
+
+### Mobile OTA updates
+
+Self-hosted mobile OTA updates are served by the relay at `/ota/manifest` and `/ota/assets`, stored in the environment Firebase/GCS bucket under `ota/ios/<runtimeVersion>/`, and code-signed with key id `kanna-mobile-ota-v1`. The public certificate is committed at `apps/mobile/certs/ota-codesign.pem`; the private key is provisioned through `./kd mobile ota provision-secret --staging|--production --key-path <path>` into Secret Manager as `kanna-mobile-ota-private-key-pem`.
+
+Publish only through `./kd mobile ota publish --staging|--production`. Check pointers with `./kd mobile ota status --staging|--production`. Roll back by repointing the channel with `./kd mobile ota publish --staging|--production --rollback-to <updateId>`.
 
 ## Architecture
 

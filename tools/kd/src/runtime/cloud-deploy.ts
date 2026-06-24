@@ -269,6 +269,10 @@ export function buildRelayDeployPlan(input: {
   }
 
   const projectId = identity.firebaseProjectId;
+  const otaBucket = identity.otaBucket;
+  if (!otaBucket) {
+    throw new Error(`Relay VM deploy is missing an OTA bucket for ${input.environment}.`);
+  }
   const zone = "us-central1-a";
   const deployDir = join(input.repoRoot, "services/relay/deploy");
   const registryHost = getArtifactRegistryHost(identity.artifactRegistryImage);
@@ -345,7 +349,8 @@ export function buildRelayDeployPlan(input: {
             domain: identity.relayDomain,
             projectId,
             image: identity.artifactRegistryImage,
-            registryHost
+            registryHost,
+            otaBucket
           })
         ],
         cwd: input.repoRoot,
@@ -368,15 +373,25 @@ function buildRemoteRelayDeployCommand(input: {
   projectId: string;
   image: string;
   registryHost: string;
+  otaBucket: string;
 }): string {
   return [
     "cd /opt/kanna-relay",
     "TOKEN=$(curl -fsS -H 'Metadata-Flavor: Google' 'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token' | sed -n 's/.*\"access_token\":\"\\([^\"]*\\)\".*/\\1/p')",
+    "SECRET_NAME=kanna-mobile-ota-private-key-pem",
+    "SECRET_DATA=$(curl -fsS -H \"Authorization: Bearer $TOKEN\" \"https://secretmanager.googleapis.com/v1/projects/" + input.projectId + "/secrets/$SECRET_NAME/versions/latest:access\" | sed -n 's/.*\"data\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p')",
+    "test -n \"$SECRET_DATA\"",
+    "printf '%s' \"$SECRET_DATA\" | base64 -d > .ota-private-key.tmp",
+    "sudo install -m 0444 .ota-private-key.tmp /opt/kanna-relay/ota-private-key.pem",
+    "rm .ota-private-key.tmp",
     `printf '%s' "$TOKEN" | docker login -u oauth2accesstoken --password-stdin https://${input.registryHost}`,
     "cat > .env.tmp <<'KANNA_RELAY_ENV'",
     `KANNA_RELAY_DOMAIN=${input.domain}`,
     `FIREBASE_PROJECT_ID=${input.projectId}`,
     `KANNA_RELAY_IMAGE=${input.image}`,
+    `KANNA_OTA_BUCKET=${input.otaBucket}`,
+    "KANNA_OTA_KEY_ID=kanna-mobile-ota-v1",
+    "KANNA_OTA_PRIVATE_KEY_PATH=/run/secrets/kanna_ota_private_key.pem",
     "KANNA_RELAY_ENV",
     "sudo install -m 0644 .env.tmp /opt/kanna-relay/.env",
     "rm .env.tmp",

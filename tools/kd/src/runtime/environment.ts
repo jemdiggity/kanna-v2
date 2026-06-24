@@ -6,6 +6,8 @@ export interface KdEnvironmentIdentity {
   firebaseProjectId: string;
   iosBundleId: string;
   relayUrl: string;
+  otaBucket?: string;
+  otaChannel?: "staging" | "production";
   relayDomain?: string;
   gceVmName?: string;
   artifactRegistryImage?: string;
@@ -29,6 +31,8 @@ const environmentRegistry: Record<KdEnvironmentName, KdEnvironmentIdentity> = {
     firebaseProjectId: "kanna-staging",
     iosBundleId: "build.kanna.app.staging",
     relayUrl: "wss://relay-staging.kanna.build",
+    otaBucket: "kanna-staging.firebasestorage.app",
+    otaChannel: "staging",
     relayDomain: "relay-staging.kanna.build",
     gceVmName: "kanna-relay-staging",
     artifactRegistryImage: "us-central1-docker.pkg.dev/kanna-staging/kanna-relay/relay:latest",
@@ -39,6 +43,8 @@ const environmentRegistry: Record<KdEnvironmentName, KdEnvironmentIdentity> = {
     firebaseProjectId: "kanna-build",
     iosBundleId: "build.kanna.app",
     relayUrl: "wss://relay.kanna.build",
+    otaBucket: "kanna-build.firebasestorage.app",
+    otaChannel: "production",
     relayDomain: "relay.kanna.build",
     gceVmName: "kanna-relay-vm",
     artifactRegistryImage: "us-central1-docker.pkg.dev/kanna-build/kanna-relay/relay:latest",

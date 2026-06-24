@@ -166,6 +166,24 @@ function parseFlagInput(rest: string[], defaults: Record<string, unknown>): Reco
       index += 1;
       continue;
     }
+    if (arg === "--rollback-to") {
+      const value = rest[index + 1];
+      if (!value) {
+        throw new Error("--rollback-to requires a value");
+      }
+      input.rollbackTo = value;
+      index += 1;
+      continue;
+    }
+    if (arg === "--key-path") {
+      const value = rest[index + 1];
+      if (!value) {
+        throw new Error("--key-path requires a value");
+      }
+      input.keyPath = value;
+      index += 1;
+      continue;
+    }
     if (arg === "--") {
       input.extraArgs = rest.slice(index + 1);
       break;
@@ -205,6 +223,33 @@ export function parseCliArgs(args: string[]): ParsedCliCommand {
   if (group === "mobile" && command === "doctor") {
     const parsed = parseMobileRunInput(rest);
     return { taskId: "mobile.doctor", input: parsed.input };
+  }
+  if (group === "mobile" && command === "ota") {
+    const [subcommand, ...otaRest] = rest;
+    if (subcommand === "publish") {
+      return {
+        taskId: "mobile.ota.publish",
+        input: parseFlagInput(otaRest, {
+          staging: false,
+          production: false,
+          dryRun: false,
+          rollbackTo: undefined,
+        }),
+      };
+    }
+    if (subcommand === "status") {
+      return {
+        taskId: "mobile.ota.status",
+        input: parseFlagInput(otaRest, { staging: false, production: false }),
+      };
+    }
+    if (subcommand === "provision-secret") {
+      return {
+        taskId: "mobile.ota.provision-secret",
+        input: parseFlagInput(otaRest, { staging: false, production: false }),
+      };
+    }
+    throw new Error("mobile ota requires publish or status");
   }
   if (group === "dev" && command === "restart") {
     return parseDevRestartInput(rest);
@@ -319,6 +364,9 @@ function helpText(): string {
     "  mobile up [--production|--staging]",
     "  mobile run --device [--production|--staging]",
     "  mobile doctor --device",
+    "  mobile ota publish --staging|--production [--dry-run] [--rollback-to <updateId>]",
+    "  mobile ota status --staging|--production",
+    "  mobile ota provision-secret --staging|--production --key-path <path>",
     "  mobile test",
     "  mobile device-smoke",
     "  emulators up|down|status",
