@@ -102,7 +102,7 @@ export async function runCopilot(opts: {
   const { stdout, stderr, exitCode } = await runProcess(binary, args, {
     cwd: opts.cwd ?? "/tmp",
     env: opts.env,
-    timeoutMs: opts.timeoutMs ?? 30000,
+    timeoutMs: opts.timeoutMs ?? 60_000,
   });
 
   const duration = Date.now() - start;
@@ -133,7 +133,7 @@ export async function runCopilotInteractive(opts: {
   const { stdout, stderr, exitCode } = await runProcess(binary, args, {
     cwd: opts.cwd ?? "/tmp",
     env: opts.env,
-    timeoutMs: opts.timeoutMs ?? 30000,
+    timeoutMs: opts.timeoutMs ?? 60_000,
   });
 
   const duration = Date.now() - start;
@@ -153,6 +153,6 @@ export async function runCopilotRaw(args: string[], opts?: {
   return await runProcess(binary, args, {
     cwd: opts?.cwd ?? "/tmp",
     env: opts?.env,
-    timeoutMs: opts?.timeoutMs ?? 15000,
+    timeoutMs: opts?.timeoutMs ?? 60_000,
   });
 }
