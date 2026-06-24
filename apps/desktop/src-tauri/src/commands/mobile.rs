@@ -914,7 +914,7 @@ fn desktop_identity_path(config_path: &Path) -> PathBuf {
 fn read_desktop_identity(path: &Path) -> Option<DesktopIdentityFile> {
     let body = std::fs::read_to_string(path).ok()?;
     let parsed = serde_json::from_str::<DesktopIdentityFile>(&body).ok()?;
-    if is_desktop_uuid(&parsed.desktop_id) {
+    if is_valid_desktop_identity(&parsed.desktop_id) {
         Some(parsed)
     } else {
         None
@@ -991,11 +991,14 @@ fn generate_uuid_v4_from_reader(mut reader: impl std::io::Read) -> Result<String
     ))
 }
 
-fn is_desktop_uuid(value: &str) -> bool {
+fn is_valid_desktop_identity(value: &str) -> bool {
     let Some(uuid) = value.strip_prefix("desktop-") else {
         return false;
     };
     let bytes = uuid.as_bytes();
+    if bytes.len() == 8 {
+        return bytes.iter().all(|byte| byte.is_ascii_hexdigit());
+    }
     if bytes.len() != 36 {
         return false;
     }
@@ -1455,6 +1458,34 @@ mod tests {
         assert_eq!(credential.desktop_id, legacy_id);
         assert_eq!(credential.desktop_secret.len(), 64);
         let rewritten = std::fs::read_to_string(&identity_path).unwrap();
+        assert!(rewritten.contains(&credential.desktop_secret));
+
+        let again = super::desktop_credential(&config_path).unwrap();
+        assert_eq!(again, credential);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn desktop_credential_preserves_legacy_short_identity() {
+        let root = unique_test_root("desktop-short-credential-migrate");
+        let config_path = root.join("main/Kanna/server.toml");
+        let identity_path = root.join("main/Kanna/desktop-identity.json");
+        std::fs::create_dir_all(identity_path.parent().unwrap()).unwrap();
+        let legacy_id = "desktop-ea554bc4";
+        std::fs::write(
+            &identity_path,
+            format!("{{\n  \"desktop_id\": \"{legacy_id}\"\n}}"),
+        )
+        .unwrap();
+
+        let credential =
+            super::desktop_credential(&config_path).expect("legacy short identity should migrate");
+
+        assert_eq!(credential.desktop_id, legacy_id);
+        assert_eq!(credential.desktop_secret.len(), 64);
+        let rewritten = std::fs::read_to_string(&identity_path).unwrap();
+        assert!(rewritten.contains(legacy_id));
         assert!(rewritten.contains(&credential.desktop_secret));
 
         let again = super::desktop_credential(&config_path).unwrap();
