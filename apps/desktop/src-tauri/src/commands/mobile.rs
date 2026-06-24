@@ -9,7 +9,11 @@ use tokio::sync::Mutex;
 
 const LOCAL_SERVER_HOST: &str = "127.0.0.1";
 const DEFAULT_LOCAL_SERVER_PORT: u16 = 48_120;
-const STATUS_POLL_ATTEMPTS: usize = 20;
+// kanna-server can take a while to bind and register when the machine is under
+// heavy load (e.g. an in-progress iOS/Rust build during `kd mobile run`). Poll
+// generously and only give up early if the process actually exits — a healthy
+// server must never be killed for being slow to answer /v1/status.
+const STATUS_POLL_ATTEMPTS: usize = 240;
 const STATUS_POLL_DELAY_MS: u64 = 250;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -152,7 +156,7 @@ impl MobileServerManager {
             }
         };
 
-        let status = match self.wait_for_status(&api_base_url).await {
+        let status = match self.wait_for_status(&api_base_url, &mut child).await {
             Ok(status) => status,
             Err(err) => {
                 let _ = child.kill().await;
@@ -242,9 +246,18 @@ impl MobileServerManager {
         self.snapshot().await
     }
 
-    async fn wait_for_status(&self, api_base_url: &str) -> Result<MobileServerStatus, String> {
+    async fn wait_for_status(
+        &self,
+        api_base_url: &str,
+        child: &mut tokio::process::Child,
+    ) -> Result<MobileServerStatus, String> {
         let mut last_error = "kanna-server did not become ready".to_string();
         for _ in 0..STATUS_POLL_ATTEMPTS {
+            // If the process already exited it genuinely failed to start; stop
+            // polling instead of waiting out the full budget on a dead server.
+            if let Ok(Some(exit)) = child.try_wait() {
+                return Err(format!("kanna-server exited during startup with {}", exit));
+            }
             match self.fetch_status(api_base_url).await {
                 Ok(status) => return Ok(status),
                 Err(err) => {
@@ -273,6 +286,12 @@ impl MobileServerManager {
             .await
             .map_err(|e| format!("failed to decode mobile server status: {}", e))
     }
+}
+
+#[tauri::command]
+pub async fn ensure_mobile_server(app: tauri::AppHandle) -> Result<(), String> {
+    let manager = app.state::<MobileServerManager>();
+    manager.start().await
 }
 
 #[tauri::command]
@@ -459,14 +478,18 @@ fn build_server_config(state: &MobileServerState) -> Result<String, String> {
             )
         })
         .unwrap_or_default();
+    let server_binary_sha256_line = sidecar_sha256_config_line("kanna-server")
+        .map(|line| format!("{line}\n"))
+        .unwrap_or_default();
 
     Ok(format!(
-        "relay_url = \"{}\"\ndevice_token = \"{}\"\ndaemon_dir = \"{}\"\ndb_path = \"{}\"\n{}desktop_id = \"{}\"\ndesktop_secret = \"{}\"\ndesktop_name = \"{}\"\nserver_version = \"{}\"\n{}lan_host = \"0.0.0.0\"\nlan_port = {}\npairing_store_path = \"{}\"\n",
+        "relay_url = \"{}\"\ndevice_token = \"{}\"\ndaemon_dir = \"{}\"\ndb_path = \"{}\"\n{}{}desktop_id = \"{}\"\ndesktop_secret = \"{}\"\ndesktop_name = \"{}\"\nserver_version = \"{}\"\n{}lan_host = \"0.0.0.0\"\nlan_port = {}\npairing_store_path = \"{}\"\n",
         escape_toml_string(&relay_url),
         escape_toml_string(&device_token),
         escape_toml_string(&daemon_dir),
         escape_toml_string(&db_path.to_string_lossy()),
         kanna_cli_path_line,
+        server_binary_sha256_line,
         escape_toml_string(&credential.desktop_id),
         escape_toml_string(&credential.desktop_secret),
         escape_toml_string(&state.desktop_name),
@@ -555,7 +578,16 @@ fn server_config_matches_runtime(config_path: &Path, desktop_id: &str) -> bool {
     if let Some(line) = kanna_cli_path_line {
         required_lines.push(line);
     }
+    if let Some(line) = sidecar_sha256_config_line("kanna-server") {
+        required_lines.push(line);
+    }
     required_lines.iter().all(|line| content.contains(line))
+}
+
+fn sidecar_sha256_config_line(name: &str) -> Option<String> {
+    let path = find_sidecar(name).ok()?;
+    let digest = file_sha256_hex(&path).ok()?;
+    Some(format!("{name}_sha256 = \"{digest}\""))
 }
 
 const PRODUCTION_RELAY_URL: &str = "wss://relay.kanna.build";
@@ -1013,6 +1045,27 @@ fn sha256_hex(value: &str) -> String {
     digest.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
+fn file_sha256_hex(path: &Path) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+
+    let mut file =
+        File::open(path).map_err(|e| format!("failed to open {}: {}", path.display(), e))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 16 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    let digest = hasher.finalize();
+    Ok(digest.iter().map(|b| format!("{:02x}", b)).collect())
+}
+
 fn default_desktop_name() -> String {
     std::env::var("HOSTNAME").unwrap_or_else(|_| "Kanna Desktop".to_string())
 }
@@ -1180,15 +1233,13 @@ mod tests {
             )
         };
         let expected_desktop_id = expected_credential.desktop_id.clone();
-        write_test_server_config(
-            &existing_config_path,
-            &db_path,
-            &daemon_dir,
-            &expected_desktop_id,
-            Some(&expected_credential.desktop_secret),
-            Some(current_server_version()),
-            port,
-        );
+        let current_config = {
+            let state = manager.inner.lock().await;
+            build_server_config(&state).expect("current server config should build")
+        };
+        std::fs::create_dir_all(existing_config_path.parent().unwrap()).unwrap();
+        std::fs::write(&existing_config_path, current_config)
+            .expect("current server config should be written");
         let mut existing_server = start_test_kanna_server(&existing_config_path, port).await;
 
         manager
@@ -1916,6 +1967,46 @@ mod tests {
     }
 
     #[test]
+    fn server_config_matches_runtime_rejects_replaced_same_version_server_binary() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+        let root = unique_test_root("config-server-binary-runtime");
+        let sidecar_dir = root.join("sidecars");
+        let server_bin = sidecar_dir.join("kanna-server");
+        std::fs::create_dir_all(&sidecar_dir).unwrap();
+        std::fs::write(&server_bin, b"old-server-binary").unwrap();
+        unsafe {
+            set_env_var("KANNA_TEST_SIDECAR_DIR", &sidecar_dir.to_string_lossy());
+            unset_env_var("KANNA_RELAY_PORT");
+            unset_env_var("KANNA_RELAY_URL");
+            unset_env_var("KANNA_DB_NAME");
+            unset_env_var("KANNA_DB_PATH");
+        }
+
+        let path = root.join("Kanna/server.toml");
+        let state = MobileServerState {
+            status: "stopped".to_string(),
+            desktop_name: "Studio Mac".to_string(),
+            api_base_url: server_base_url(48120),
+            config_path: path.clone(),
+            started: false,
+        };
+        let correct_config = build_server_config(&state).unwrap();
+        let desktop_id =
+            desktop_id(&state.config_path).expect("desktop identity should be generated");
+        std::fs::write(&path, correct_config).unwrap();
+        assert!(server_config_matches_runtime(&path, &desktop_id));
+
+        std::fs::write(&server_bin, b"new-server-binary").unwrap();
+
+        assert!(!server_config_matches_runtime(&path, &desktop_id));
+
+        unsafe {
+            unset_env_var("KANNA_TEST_SIDECAR_DIR");
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn stopped_snapshot_reflects_local_state() {
         let _guard = env_lock().lock().expect("env lock should not be poisoned");
         unsafe {
@@ -2218,13 +2309,17 @@ mod tests {
         let version_line = server_version
             .map(|version| format!("server_version = \"{}\"\n", escape_toml_string(version)))
             .unwrap_or_default();
+        let server_binary_sha256_line = super::sidecar_sha256_config_line("kanna-server")
+            .map(|line| format!("{line}\n"))
+            .unwrap_or_default();
         let pairing_store_path = config_path.with_file_name("pairings.json");
         let relay_url = relay_url();
         let config = format!(
-            "relay_url = \"{}\"\ndevice_token = \"test-token\"\ndaemon_dir = \"{}\"\ndb_path = \"{}\"\ndesktop_id = \"{}\"\n{}desktop_name = \"Kanna Test\"\n{}lan_host = \"127.0.0.1\"\nlan_port = {}\npairing_store_path = \"{}\"\n",
+            "relay_url = \"{}\"\ndevice_token = \"test-token\"\ndaemon_dir = \"{}\"\ndb_path = \"{}\"\n{}desktop_id = \"{}\"\n{}desktop_name = \"Kanna Test\"\n{}lan_host = \"127.0.0.1\"\nlan_port = {}\npairing_store_path = \"{}\"\n",
             escape_toml_string(&relay_url),
             escape_toml_string(&daemon_dir.to_string_lossy()),
             escape_toml_string(&db_path.to_string_lossy()),
+            server_binary_sha256_line,
             escape_toml_string(desktop_id),
             secret_line,
             version_line,

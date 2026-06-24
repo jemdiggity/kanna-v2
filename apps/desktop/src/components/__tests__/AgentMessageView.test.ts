@@ -1,7 +1,9 @@
 // @vitest-environment happy-dom
 
 import { mount } from "@vue/test-utils";
-import { computed, ref } from "vue";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { computed, nextTick, ref } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentEvent } from "@kanna/agent-protocol";
 import { createPinia, setActivePinia } from "pinia";
@@ -76,6 +78,22 @@ describe("AgentMessageView", () => {
     expect(wrapper.find(".style-switcher").exists()).toBe(false);
   });
 
+  it("does not carry a separate light terminal chat palette", () => {
+    const source = readFileSync(join(process.cwd(), "src/components/AgentMessageView.vue"), "utf8");
+
+    expect(source).not.toContain(".skin-terminal.theme-light");
+  });
+
+  it("uses shared terminal chat CSS tokens instead of local palette literals", () => {
+    const source = readFileSync(join(process.cwd(), "src/components/AgentMessageView.vue"), "utf8");
+    const terminalSkin = source.match(/\.skin-terminal\s*\{(?<body>[^}]+)\}/)?.groups?.body ?? "";
+
+    expect(terminalSkin).toContain("--agent-bg: var(--kn-agent-terminal-bg)");
+    expect(terminalSkin).toContain("--agent-text: var(--kn-agent-terminal-text)");
+    expect(terminalSkin).toContain("--agent-accent: var(--kn-agent-terminal-accent)");
+    expect(terminalSkin).not.toMatch(/--agent-(?:bg|panel|panel-raised|border|text|muted|accent):\s*#[0-9a-f]{6}/i);
+  });
+
   it("uses one dual-use button: send when idle, stop while running", async () => {
     const wrapper = mount(AgentMessageView, { props: { sessionId: "task-1" } });
 
@@ -93,6 +111,67 @@ describe("AgentMessageView", () => {
     expect(wrapper.find(".send-button").exists()).toBe(false);
     await wrapper.get(".stop-button").trigger("click");
     expect(interrupt).toHaveBeenCalled();
+  });
+
+  it("focuses the composer when a chat agent task is selected", async () => {
+    const wrapper = mount(AgentMessageView, {
+      attachTo: document.body,
+      props: { sessionId: "task-1" },
+    });
+
+    await nextTick();
+
+    expect(document.activeElement).toBe(wrapper.get('[data-testid="agent-composer"]').element);
+
+    wrapper.unmount();
+  });
+
+  it("prevents the send button from taking focus away from the composer", async () => {
+    const wrapper = mount(AgentMessageView, {
+      attachTo: document.body,
+      props: { sessionId: "task-1" },
+    });
+    const composer = wrapper.get('[data-testid="agent-composer"]');
+    const sendButton = wrapper.get(".send-button");
+
+    await composer.setValue("Keep me focused");
+    (composer.element as HTMLTextAreaElement).focus();
+    expect(document.activeElement).toBe(composer.element);
+
+    const mouseDown = new MouseEvent("mousedown", { bubbles: true, cancelable: true });
+    sendButton.element.dispatchEvent(mouseDown);
+    expect(mouseDown.defaultPrevented).toBe(true);
+
+    await sendButton.trigger("click");
+
+    expect(sendInput).toHaveBeenCalledWith("Keep me focused");
+    expect(document.activeElement).toBe(composer.element);
+
+    wrapper.unmount();
+  });
+
+  it("prevents the stop button from taking focus away from the composer", async () => {
+    events.value = [{ seq: 1, event: { type: "turn_started", model: null } }];
+    const wrapper = mount(AgentMessageView, {
+      attachTo: document.body,
+      props: { sessionId: "task-1" },
+    });
+    const composer = wrapper.get('[data-testid="agent-composer"]');
+    const stopButton = wrapper.get(".stop-button");
+
+    (composer.element as HTMLTextAreaElement).focus();
+    expect(document.activeElement).toBe(composer.element);
+
+    const mouseDown = new MouseEvent("mousedown", { bubbles: true, cancelable: true });
+    stopButton.element.dispatchEvent(mouseDown);
+    expect(mouseDown.defaultPrevented).toBe(true);
+
+    await stopButton.trigger("click");
+
+    expect(interrupt).toHaveBeenCalled();
+    expect(document.activeElement).toBe(composer.element);
+
+    wrapper.unmount();
   });
 
   it("renders permission requests and sends decisions", async () => {

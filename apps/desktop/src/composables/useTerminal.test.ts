@@ -552,12 +552,12 @@ describe("useTerminal", () => {
     const element = wrapper.element as HTMLElement;
     (wrapper.vm as unknown as { init: (el: HTMLElement) => void }).init(element);
 
-    expect(terminals.at(-1)?.options.theme).toMatchObject({ background: "#1e1e1e" });
+    expect(terminals.at(-1)?.options.theme).toMatchObject({ background: "#20242d" });
 
     setThemePreferences({ appTheme: "light", codeTheme: "match" });
     await Promise.resolve();
 
-    expect(terminals.at(-1)?.options.theme).toMatchObject({ background: "#f8fafc" });
+    expect(terminals.at(-1)?.options.theme).toMatchObject({ background: "#f6f9ff" });
 
     wrapper.unmount();
     resetThemeRuntimeForTests();

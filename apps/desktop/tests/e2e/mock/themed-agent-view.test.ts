@@ -1,4 +1,5 @@
 import { mkdir, writeFile } from "node:fs/promises";
+import { setTimeout as sleep } from "node:timers/promises";
 import { join } from "node:path";
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { WebDriverClient } from "../helpers/webdriver";
@@ -7,21 +8,24 @@ import { callVueMethod, execDb } from "../helpers/vue";
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
 
 const taskId = "themed-agent-task";
+const runningTaskId = "themed-agent-running-task";
 const recoveryTaskId = "themed-agent-recovery-task";
 
 function isVueCallError(value: unknown): value is { __error: string } {
   return Boolean(value && typeof value === "object" && "__error" in value);
 }
 
-function installMockKspScript(options: { failFirstAgentAttach?: boolean; recoveredText?: string } = {}): string {
+function installMockKspScript(options: { failFirstAgentAttach?: boolean; recoveredText?: string; activeTurn?: boolean } = {}): string {
   const failFirstAgentAttach = options.failFirstAgentAttach === true;
   const recoveredText = options.recoveredText ?? "Hello **themed** view";
+  const activeTurn = options.activeTurn === true;
   return `
     window.__KSP_SENT__ = [];
     window.__KSP_AGENT_ATTACH_COUNT__ = 0;
     window.__KSP_MOCK_OPTIONS__ = {
       failFirstAgentAttach: ${JSON.stringify(failFirstAgentAttach)},
-      recoveredText: ${JSON.stringify(recoveredText)}
+      recoveredText: ${JSON.stringify(recoveredText)},
+      activeTurn: ${JSON.stringify(activeTurn)}
     };
     window.WebSocket = class MockKspSocket {
       constructor(url) {
@@ -51,19 +55,22 @@ function installMockKspScript(options: { failFirstAgentAttach?: boolean; recover
             }) });
             return;
           }
+          const events = [
+            { seq: 1, event: { type: "turn_started", model: "claude-test" } },
+            { seq: 2, event: { type: "assistant_text", text: options.recoveredText || "Hello **themed** view", truncated: false } },
+            { seq: 3, event: { type: "tool_call", call_id: "call-1", tool_name: "Bash", input: { command: "pnpm test" } } },
+            { seq: 4, event: { type: "tool_result", call_id: "call-1", output: "passed", truncated: false, is_error: false } },
+            { seq: 5, event: { type: "permission_request", request_id: "perm-1", tool_name: "Edit", input: { file_path: "README.md" } } },
+            { seq: 6, event: { type: "diagnostic", message: "debug stderr" } }
+          ];
+          if (!options.activeTurn) {
+            events.push({ seq: 7, event: { type: "turn_completed", status: "success", stats: { duration_ms: 1200, num_turns: 1, total_cost_usd: 0.01 } } });
+          }
           this.onmessage?.({ data: JSON.stringify({
             type: "agent_snapshot",
             task_id: frame.task_id,
-            next_seq: 8,
-            events: [
-              { seq: 1, event: { type: "turn_started", model: "claude-test" } },
-              { seq: 2, event: { type: "assistant_text", text: options.recoveredText || "Hello **themed** view", truncated: false } },
-              { seq: 3, event: { type: "tool_call", call_id: "call-1", tool_name: "Bash", input: { command: "pnpm test" } } },
-              { seq: 4, event: { type: "tool_result", call_id: "call-1", output: "passed", truncated: false, is_error: false } },
-              { seq: 5, event: { type: "permission_request", request_id: "perm-1", tool_name: "Edit", input: { file_path: "README.md" } } },
-              { seq: 6, event: { type: "diagnostic", message: "debug stderr" } },
-              { seq: 7, event: { type: "turn_completed", status: "success", stats: { duration_ms: 1200, num_turns: 1, total_cost_usd: 0.01 } } }
-            ]
+            next_seq: events.length + 1,
+            events
           }) });
         }
       }
@@ -73,6 +80,27 @@ function installMockKspScript(options: { failFirstAgentAttach?: boolean; recover
       }
     };
   `;
+}
+
+async function waitForComposerFocus(client: WebDriverClient, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let lastActive = "";
+
+  while (Date.now() < deadline) {
+    const result = await client.executeSync<{ focused: boolean; active: string }>(
+      `const composer = document.querySelector('[data-testid="agent-composer"]');
+       const active = document.activeElement;
+       return {
+         focused: Boolean(composer && active === composer),
+         active: active ? (active.getAttribute('data-testid') || active.getAttribute('aria-label') || active.className || active.tagName) : ''
+       };`,
+    );
+    if (result.focused) return;
+    lastActive = result.active;
+    await sleep(100);
+  }
+
+  throw new Error(`Timed out waiting for agent composer focus; active element was ${lastActive}`);
 }
 
 async function waitForInvoke<T>(
@@ -173,6 +201,8 @@ describe("themed agent view", () => {
     }));
 
     await client.waitForElement('[data-testid="agent-message-view"]', 5_000);
+    await client.waitForElement('[data-testid="agent-composer"]', 5_000);
+    await waitForComposerFocus(client);
 
     await client.waitForText('[data-testid="agent-message-view"]', "Hello themed view", 5_000);
     // Tool-call/result/debug plumbing is intentionally hidden; the permission
@@ -223,21 +253,75 @@ describe("themed agent view", () => {
       `const composer = document.querySelector('[data-testid="agent-composer"]');
        composer.value = "Please continue";
        composer.dispatchEvent(new Event("input", { bubbles: true }));
-       composer.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));`,
+       composer.focus();`,
     );
+    await waitForComposerFocus(client);
+    await client.click(await client.waitForElement(".send-button", 2_000));
+    await waitForComposerFocus(client);
+    const inputFrame = await client.executeSync<{ type: string; task_id: string; text: string } | undefined>(
+      `return window.__KSP_SENT__.find((frame) => frame.type === "agent_input");`,
+    );
+    expect(inputFrame).toEqual({
+      type: "agent_input",
+      task_id: taskId,
+      text: "Please continue",
+    });
+
     await client.click(await client.waitForText(".permission-actions button", "Allow", 2_000));
     await client.click(await client.waitForText(".permission-actions button", "Deny", 2_000));
-    // Interrupt via Esc in the composer (the send button only becomes Stop while a
-    // turn is actively running; Esc-to-interrupt is always available).
-    await client.executeSync(
-      `document.querySelector('[data-testid="agent-composer"]')
-        .dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));`,
-    );
+    const sentTypesBeforeStop = await client.executeSync<string[]>("return window.__KSP_SENT__.map((frame) => frame.type);");
+    expect(sentTypesBeforeStop).toContain("agent_input");
+    expect(sentTypesBeforeStop).toContain("agent_permission");
 
-    const sentTypes = await client.executeSync<string[]>("return window.__KSP_SENT__.map((frame) => frame.type);");
-    expect(sentTypes).toContain("agent_input");
-    expect(sentTypes).toContain("agent_permission");
-    expect(sentTypes).toContain("agent_interrupt");
+    await client.executeSync(installMockKspScript({ activeTurn: true }));
+    await execDb(
+      client,
+      `INSERT INTO pipeline_item (
+         id, repo_id, prompt, pipeline, stage, tags, branch, agent_type, agent_provider, activity, created_at, updated_at
+       ) VALUES (?, ?, 'Stop this task', 'default', 'in progress', '[]', 'task-themed-agent-running-task', 'agent', 'claude', 'working', datetime('now'), datetime('now'))`,
+      [runningTaskId, repoId],
+    );
+    await execDb(
+      client,
+      `INSERT INTO terminal_session (id, repo_id, pipeline_item_id, label, cwd, daemon_session_id)
+       VALUES (?, ?, ?, 'agent', ?, ?)`,
+      [`agent-${runningTaskId}`, repoId, runningTaskId, testRepoPath, runningTaskId],
+    );
+    await mkdir(join(testRepoPath, ".kanna-worktrees", "task-themed-agent-running-task"), { recursive: true });
+    const loadRunningResult = await callVueMethod(client, "loadItems");
+    if (isVueCallError(loadRunningResult)) throw new Error(loadRunningResult.__error);
+    const selectRunningResult = await callVueMethod(client, "handleSelectItem", runningTaskId);
+    if (isVueCallError(selectRunningResult)) throw new Error(selectRunningResult.__error);
+    const runningSelectedState = await client.executeSync<{
+      selectedItemId: string | null;
+      currentItem: { id: string; agent_type: string | null; stage: string | null } | null;
+    }>(
+      `const store = window.__KANNA_E2E__.setupState.store;
+       return {
+         selectedItemId: store.selectedItemId,
+         currentItem: store.currentItem ? {
+           id: store.currentItem.id,
+           agent_type: store.currentItem.agent_type,
+           stage: store.currentItem.stage,
+         } : null
+       };`,
+    );
+    expect(runningSelectedState).toEqual(expect.objectContaining({
+      selectedItemId: runningTaskId,
+      currentItem: expect.objectContaining({ id: runningTaskId, agent_type: "agent" }),
+    }));
+    await client.waitForElement(".stop-button", 5_000);
+    await waitForComposerFocus(client);
+    await client.click(await client.waitForElement(".stop-button", 2_000));
+    await waitForComposerFocus(client);
+
+    const interruptFrame = await client.executeSync<{ type: string; task_id: string } | undefined>(
+      `return window.__KSP_SENT__.find((frame) => frame.type === "agent_interrupt");`,
+    );
+    expect(interruptFrame).toEqual({
+      type: "agent_interrupt",
+      task_id: runningTaskId,
+    });
 
     await client.executeSync(installMockKspScript());
     await client.executeSync(

@@ -504,6 +504,8 @@ pub(crate) enum PreparedSessionSpawn {
         model: Option<String>,
         permission_mode: Option<String>,
         allowed_tools: Vec<String>,
+        system_prompt: String,
+        executable: Option<String>,
     },
 }
 
@@ -660,6 +662,7 @@ fn prepare_task_spawn(
         .as_deref()
         .unwrap_or(stage.name.as_str())
         .to_string();
+    let stage_transition = stage.transition.as_deref();
     let tags_json = serde_json::to_string(&vec![stage_name.clone()])
         .map_err(|e| format!("serialize error: {}", e))?;
 
@@ -718,12 +721,20 @@ fn prepare_task_spawn(
     let spawn_env = build_spawn_env(config, &task_id, &port_env)?;
     let session = match agent_type {
         AgentSessionType::Pty => {
+            let preamble = build_kanna_preamble(
+                &provider,
+                &task_id,
+                &stage_name,
+                &pipeline_name,
+                stage_transition,
+            );
             let agent_cmd = build_agent_command(
                 &provider,
                 &final_prompt,
                 model.as_deref(),
                 permission_mode.as_deref(),
                 &allowed_tools,
+                Some(&preamble),
             );
             let full_cmd = build_task_shell_command(
                 &agent_cmd,
@@ -743,13 +754,28 @@ fn prepare_task_spawn(
                 agent_provider: provider.to_daemon_provider(),
             }
         }
-        AgentSessionType::Agent => PreparedSessionSpawn::Agent {
-            agent_provider: provider.to_daemon_provider(),
-            prompt: final_prompt,
-            model,
-            permission_mode,
-            allowed_tools,
-        },
+        AgentSessionType::Agent => {
+            let executable = match provider {
+                AgentProvider::Opencode => which_binary("opencode")?,
+                AgentProvider::Claude | AgentProvider::Codex | AgentProvider::Copilot => None,
+            };
+            let system_prompt = build_kanna_preamble(
+                &provider,
+                &task_id,
+                &stage_name,
+                &pipeline_name,
+                stage_transition,
+            );
+            PreparedSessionSpawn::Agent {
+                agent_provider: provider.to_daemon_provider(),
+                prompt: final_prompt,
+                model,
+                permission_mode,
+                allowed_tools,
+                system_prompt,
+                executable,
+            }
+        }
     };
     let title = request
         .display_name
@@ -866,6 +892,8 @@ async fn spawn_prepared_task(
             model,
             permission_mode,
             allowed_tools,
+            system_prompt,
+            executable,
         } => DaemonCommand::SpawnAgent {
             session_id: prepared.session_id,
             params: AgentSpawnParams {
@@ -879,8 +907,8 @@ async fn spawn_prepared_task(
                 disallowed_tools: Vec::new(),
                 max_turns: None,
                 max_budget_usd: None,
-                system_prompt: Some(build_kanna_runtime_system_prompt()),
-                executable: None,
+                system_prompt: Some(system_prompt),
+                executable,
             },
         },
     };
@@ -1373,13 +1401,15 @@ fn resolve_agent_type(
     explicit_agent_type: Option<&str>,
     provider: AgentProvider,
 ) -> Result<AgentSessionType, String> {
-    match normalize_agent_type(explicit_agent_type).as_deref() {
+    match normalize_agent_type(explicit_agent_type) {
         Some("pty") => Ok(AgentSessionType::Pty),
         Some("agent") => Ok(AgentSessionType::Agent),
         Some(other) => Err(format!("unsupported agent_type: {}", other)),
         None => Ok(match provider {
-            AgentProvider::Claude | AgentProvider::Codex => AgentSessionType::Agent,
-            AgentProvider::Copilot | AgentProvider::Opencode => AgentSessionType::Pty,
+            AgentProvider::Claude | AgentProvider::Codex | AgentProvider::Opencode => {
+                AgentSessionType::Agent
+            }
+            AgentProvider::Copilot => AgentSessionType::Pty,
         }),
     }
 }
@@ -1713,8 +1743,21 @@ fn build_agent_command(
     model: Option<&str>,
     permission_mode: Option<&str>,
     allowed_tools: &[String],
+    kanna_preamble: Option<&str>,
 ) -> String {
-    let escaped_prompt = shell_single_quote(prompt);
+    let prompt_with_fallback = match provider {
+        AgentProvider::Claude => prompt.to_string(),
+        AgentProvider::Copilot | AgentProvider::Codex | AgentProvider::Opencode => {
+            // TODO: Use native system-prompt flags for these providers once Kanna
+            // has verified stable CLI support for them. Until then, prepend the
+            // short preamble to the prompt body so the task remains Kanna-aware.
+            match kanna_preamble {
+                Some(preamble) if !preamble.is_empty() => format!("{preamble}\n\n{prompt}"),
+                _ => prompt.to_string(),
+            }
+        }
+    };
+    let escaped_prompt = shell_single_quote(&prompt_with_fallback);
     match provider {
         AgentProvider::Claude => {
             let mut flags = get_agent_permission_flags(*provider, permission_mode);
@@ -1723,6 +1766,12 @@ fn build_agent_command(
             }
             if !allowed_tools.is_empty() {
                 flags.push(format!("--allowedTools {}", allowed_tools.join(",")));
+            }
+            if let Some(preamble) = kanna_preamble {
+                flags.push(format!(
+                    "--append-system-prompt '{}'",
+                    shell_single_quote(preamble)
+                ));
             }
             format!("claude {} '{}'", flags.join(" "), escaped_prompt)
         }
@@ -1831,17 +1880,38 @@ fn build_task_shell_command(
     command_parts.join(" && ")
 }
 
-fn build_kanna_runtime_system_prompt() -> String {
+fn build_kanna_preamble(
+    provider: &AgentProvider,
+    task_id: &str,
+    stage_name: &str,
+    pipeline_name: &str,
+    transition: Option<&str>,
+) -> String {
+    let provider_name = provider.as_str();
+    let transition = transition.unwrap_or("manual");
     [
-        "## Kanna Task Environment",
-        "",
-        "This session was launched by Kanna, a desktop app that manages agent tasks, worktrees, and pipeline stages.",
-        "",
-        "- The current Kanna task id is in `KANNA_TASK_ID`.",
-        "- Kanna MCP tools are named `kanna_*` when your agent client exposes them.",
-        "- The bundled `kanna-cli` is on PATH for Kanna task operations from the shell.",
+        "## Kanna Task Context".to_string(),
+        format!(
+            "You are `{provider_name}` running inside Kanna task `{task_id}`, stage `{stage_name}` of pipeline `{pipeline_name}` with transition `{transition}`."
+        ),
+        "Run `kanna-cli guide` for the generated Kanna task manual and current workflow semantics.".to_string(),
+        "Prefer `kanna-mcp` tools when available; fall back to `kanna-cli` from the shell.".to_string(),
+        "Use `kanna-cli stage-complete --task-id \"$KANNA_TASK_ID\" --status success --summary \"...\"` when this stage is complete.".to_string(),
     ]
     .join("\n")
+}
+
+pub(crate) fn resolve_stage_transition(
+    repo_path: &str,
+    pipeline_name: &str,
+    stage_name: &str,
+) -> Result<Option<String>, String> {
+    let pipeline = read_pipeline_definition(repo_path, pipeline_name)?;
+    Ok(pipeline
+        .stages
+        .iter()
+        .find(|stage| stage.name == stage_name)
+        .and_then(|stage| stage.transition.clone()))
 }
 
 fn shell_single_quote(value: &str) -> String {
@@ -1867,9 +1937,9 @@ mod tests {
     use super::{
         build_spawn_env, build_stage_prompt, continue_prepared_stage_for_api,
         prepare_advance_stage_for_api, prepare_merge_agent_for_api, prepare_revision_task_for_api,
-        prepare_task_for_api, read_default_agent_provider_setting,
-        resolve_agent_type, resolve_binary_from_candidates_with_path_lookup, spawn_prepared_task,
-        AgentProvider, AgentSessionType, CreatedTask, DaemonAgentProvider, PreparedSessionSpawn,
+        prepare_task_for_api, read_default_agent_provider_setting, resolve_agent_type,
+        resolve_binary_from_candidates_with_path_lookup, spawn_prepared_task, AgentProvider,
+        AgentSessionType, CreatedTask, DaemonAgentProvider, PreparedSessionSpawn,
         PreparedStageTransition, PreparedTaskSpawn, PromptContext,
     };
     use crate::config::Config;
@@ -1908,6 +1978,45 @@ mod tests {
             resolve_agent_type(Some("sdk"), AgentProvider::Claude),
             Ok(AgentSessionType::Agent)
         ));
+    }
+
+    #[test]
+    fn resolve_agent_type_defaults_opencode_to_agent_but_allows_explicit_pty() {
+        assert!(matches!(
+            resolve_agent_type(None, AgentProvider::Opencode),
+            Ok(AgentSessionType::Agent)
+        ));
+        assert!(matches!(
+            resolve_agent_type(Some("pty"), AgentProvider::Opencode),
+            Ok(AgentSessionType::Pty)
+        ));
+    }
+
+    #[test]
+    fn build_agent_command_adds_claude_kanna_preamble_as_system_prompt() {
+        let preamble = super::build_kanna_preamble(
+            &AgentProvider::Claude,
+            "task-123",
+            "review",
+            "qa",
+            Some("auto"),
+        );
+
+        let command = super::build_agent_command(
+            &AgentProvider::Claude,
+            "Review the branch.",
+            None,
+            Some("dontAsk"),
+            &[],
+            Some(&preamble),
+        );
+
+        assert!(command.contains("--append-system-prompt '"));
+        assert!(command.contains("task-123"));
+        assert!(command.contains("stage `review`"));
+        assert!(command.contains("pipeline `qa`"));
+        assert!(command.contains("transition `auto`"));
+        assert!(command.contains("kanna-cli guide"));
     }
 
     fn test_daemon_socket_path(daemon_dir: &str) -> std::path::PathBuf {
@@ -2174,6 +2283,8 @@ mod tests {
                 model: Some("sonnet".to_string()),
                 permission_mode: Some("dontAsk".to_string()),
                 allowed_tools: vec!["Bash".to_string()],
+                system_prompt: "Kanna context".to_string(),
+                executable: None,
             },
         };
 
@@ -2190,6 +2301,8 @@ mod tests {
                 assert_eq!(params.permission_mode.as_deref(), Some("dontAsk"));
                 assert_eq!(params.allowed_tools, vec!["Bash".to_string()]);
                 assert_eq!(params.cwd, "/tmp/repo/.kanna-worktrees/task-1");
+                assert_eq!(params.system_prompt.as_deref(), Some("Kanna context"));
+                assert_eq!(params.executable, None);
             }
             other => panic!("expected SpawnAgent, got {other:?}"),
         }

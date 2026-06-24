@@ -1,7 +1,7 @@
 load("@daemon_crates//:defs.bzl", all_crate_deps_for_daemon = "all_crate_deps")
 load("@kanna_server_crates//:defs.bzl", all_crate_deps_for_server = "all_crate_deps")
-load("@task_transfer_crates//:defs.bzl", all_crate_deps_for_task_transfer = "all_crate_deps")
 load("@rules_rust//rust:defs.bzl", "rust_library")
+load("@task_transfer_crates//:defs.bzl", all_crate_deps_for_task_transfer = "all_crate_deps")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -18,16 +18,10 @@ rust_library(
     crate_root = "src/lib.rs",
     crate_name = "kanna_agent_protocol",
     edition = "2021",
-    deps = all_crate_deps_for_daemon(
-        normal = True,
-        package_name = "crates/kanna-agent-protocol",
-    ) + [
+    deps = all_crate_deps_for_daemon(normal = True, package_name = "crates/kanna-agent-protocol") + [
         "//crates/claude-agent-sdk:claude_agent_sdk_for_daemon",
     ],
-    proc_macro_deps = all_crate_deps_for_daemon(
-        proc_macro = True,
-        package_name = "crates/kanna-agent-protocol",
-    ),
+    proc_macro_deps = all_crate_deps_for_daemon(proc_macro = True, package_name = "crates/kanna-agent-protocol"),
 )
 
 rust_library(
@@ -36,16 +30,10 @@ rust_library(
     crate_root = "src/lib.rs",
     crate_name = "kanna_agent_protocol",
     edition = "2021",
-    deps = all_crate_deps_for_server(
-        normal = True,
-        package_name = "crates/kanna-agent-protocol",
-    ) + [
+    deps = all_crate_deps_for_server(normal = True, package_name = "crates/kanna-agent-protocol") + [
         "//crates/claude-agent-sdk:claude_agent_sdk_for_server",
     ],
-    proc_macro_deps = all_crate_deps_for_server(
-        proc_macro = True,
-        package_name = "crates/kanna-agent-protocol",
-    ),
+    proc_macro_deps = all_crate_deps_for_server(proc_macro = True, package_name = "crates/kanna-agent-protocol"),
 )
 
 rust_library(
@@ -54,14 +42,8 @@ rust_library(
     crate_root = "src/lib.rs",
     crate_name = "kanna_agent_protocol",
     edition = "2021",
-    deps = all_crate_deps_for_task_transfer(
-        normal = True,
-        package_name = "crates/kanna-agent-protocol",
-    ) + [
+    deps = all_crate_deps_for_task_transfer(normal = True, package_name = "crates/kanna-agent-protocol") + [
         "//crates/claude-agent-sdk:claude_agent_sdk_for_task_transfer",
     ],
-    proc_macro_deps = all_crate_deps_for_task_transfer(
-        proc_macro = True,
-        package_name = "crates/kanna-agent-protocol",
-    ),
+    proc_macro_deps = all_crate_deps_for_task_transfer(proc_macro = True, package_name = "crates/kanna-agent-protocol"),
 )

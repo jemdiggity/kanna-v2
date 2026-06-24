@@ -4,15 +4,11 @@ load("@rules_rust//rust:defs.bzl", "rust_library")
 
 package(default_visibility = ["//visibility:public"])
 
-exports_files([
-    "Cargo.toml",
-])
-
 filegroup(
     name = "cargo_srcs",
     srcs = [
         "Cargo.toml",
-    ] + glob(["src/**/*.json", "src/**/*.rs"]),
+    ] + glob(["src/**"]),
 )
 
 rust_library(

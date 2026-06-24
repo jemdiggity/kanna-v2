@@ -85,6 +85,8 @@ export default function App() {
           terminalErrorMessage={state.taskTerminalErrorMessage}
           terminalOutput={state.taskTerminalOutput}
           terminalStatus={state.taskTerminalStatus}
+          terminalCols={state.taskTerminalCols}
+          terminalRows={state.taskTerminalRows}
           agentErrorMessage={state.taskAgentErrorMessage}
           agentEvents={state.taskAgentEvents}
           agentStatus={state.taskAgentStatus}

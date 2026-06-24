@@ -185,9 +185,13 @@ describe("createRelayDesktopClient", () => {
     });
 
     expect(events).toEqual([
-      { type: "ready", taskId: "task-1" },
-      { type: "output", taskId: "task-1", text: "restored output" },
-      { type: "output", taskId: "task-1", text: "live output" },
+      { type: "ready", taskId: "task-1", cols: 80, rows: 24 },
+      {
+        type: "output",
+        taskId: "task-1",
+        dataB64: Buffer.from("restored output").toString("base64")
+      },
+      { type: "output", taskId: "task-1", dataB64: "bGl2ZSBvdXRwdXQ=" },
       { type: "exit", taskId: "task-1", code: 0 }
     ]);
 
@@ -198,7 +202,7 @@ describe("createRelayDesktopClient", () => {
     );
   });
 
-  it("decodes split utf-8 terminal output across relay chunks", async () => {
+  it("passes split utf-8 terminal output across relay chunks without decoding", async () => {
     const socket = createSocket();
     const client = createRelayDesktopClient({
       createSocket: () => socket,
@@ -248,10 +252,17 @@ describe("createRelayDesktopClient", () => {
     });
 
     expect(events).toEqual([
-      { type: "ready", taskId: "task-1" },
-      { type: "output", taskId: "task-1", text: "" },
-      { type: "output", taskId: "task-1", text: "" },
-      { type: "output", taskId: "task-1", text: "⠋" }
+      { type: "ready", taskId: "task-1", cols: 80, rows: 24 },
+      {
+        type: "output",
+        taskId: "task-1",
+        dataB64: Buffer.from(spinnerBytes.subarray(0, 1)).toString("base64")
+      },
+      {
+        type: "output",
+        taskId: "task-1",
+        dataB64: Buffer.from(spinnerBytes.subarray(1)).toString("base64")
+      }
     ]);
   });
 

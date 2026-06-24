@@ -1,7 +1,6 @@
 import type {
   KannaTransport,
   TaskAgentSubscription,
-  TaskTerminalStreamEvent,
   TaskTerminalSubscription
 } from "../api/client";
 import { StreamClient, type WebSocketLike as StreamWebSocketLike } from "@kanna/stream-client";
@@ -42,15 +41,6 @@ export interface WebSocketLike {
 }
 
 export type WebSocketFactory = (url: string) => WebSocketLike;
-
-interface RawTaskTerminalStreamEvent {
-  type?: string;
-  taskId?: string;
-  task_id?: string;
-  text?: string;
-  code?: number;
-  message?: string;
-}
 
 export function createLanTransport(
   baseUrl: string,
@@ -114,39 +104,35 @@ export function createLanTransport(
         body: JSON.stringify({ input })
       }),
     observeTaskTerminal(taskId, listener) {
-      const socket = createSocket(buildTaskTerminalWebSocketUrl(baseUrl, taskId));
-      let streamEnded = false;
+      const client = new StreamClient({
+        url: buildKspWebSocketUrl(baseUrl),
+        webSocketFactory: (url) => createSocket(url) as unknown as StreamWebSocketLike,
+        reconnectDelaysMs: [250, 500, 1000, 2000]
+      });
 
-      socket.onopen = () => {
-        listener({ type: "ready", taskId });
-      };
-      socket.onmessage = (event) => {
-        const parsed = normalizeTaskTerminalStreamEvent(
-          JSON.parse(event.data) as RawTaskTerminalStreamEvent
-        );
-        if (parsed.type === "exit" || parsed.type === "error") {
-          streamEnded = true;
+      client.attachTerminal(taskId, {
+        onSnapshot(cols, rows, dataB64) {
+          listener({ type: "ready", taskId, cols, rows });
+          if (dataB64) {
+            listener({ type: "output", taskId, dataB64 });
+          }
+        },
+        onOutput(dataB64) {
+          if (dataB64) {
+            listener({ type: "output", taskId, dataB64 });
+          }
+        },
+        onSessionExit(code) {
+          listener({ type: "exit", taskId, code });
+        },
+        onError(_code, message) {
+          listener({ type: "error", taskId, message });
         }
-        listener(parsed);
-      };
-      socket.onerror = () => {
-        streamEnded = true;
-        listener({
-          type: "error",
-          taskId,
-          message: `Task terminal stream failed for ${taskId}`
-        });
-      };
-      socket.onclose = () => {
-        if (streamEnded) {
-          return;
-        }
-        listener({ type: "exit", taskId, code: 0 });
-      };
+      });
 
       return {
         close() {
-          socket.close();
+          client.close();
         }
       } satisfies TaskTerminalSubscription;
     },
@@ -193,49 +179,6 @@ export function createLanTransport(
     createPairingSession: () =>
       request<PairingSession>("/v1/pairing/sessions", { method: "POST" })
   };
-}
-
-function normalizeTaskTerminalStreamEvent(
-  event: RawTaskTerminalStreamEvent
-): TaskTerminalStreamEvent {
-  const taskId = event.taskId ?? event.task_id ?? "";
-
-  switch (event.type) {
-    case "ready":
-      return { type: "ready", taskId };
-    case "output":
-      return {
-        type: "output",
-        taskId,
-        text: event.text ?? ""
-      };
-    case "exit":
-      return {
-        type: "exit",
-        taskId,
-        code: event.code ?? 0
-      };
-    case "error":
-      return {
-        type: "error",
-        taskId,
-        message: event.message ?? "Task terminal stream failed"
-      };
-    default:
-      return {
-        type: "error",
-        taskId,
-        message: "Task terminal stream sent an unknown event"
-      };
-  }
-}
-
-function buildTaskTerminalWebSocketUrl(baseUrl: string, taskId: string): string {
-  const url = new URL(baseUrl);
-  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-  url.pathname = `/v1/tasks/${encodeURIComponent(taskId)}/terminal`;
-  url.search = "";
-  return url.toString();
 }
 
 function buildKspWebSocketUrl(baseUrl: string): string {

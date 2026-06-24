@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "crates/kanna-mcp",
+    "crates/kanna-tool-catalog",
+]
+resolver = "2"

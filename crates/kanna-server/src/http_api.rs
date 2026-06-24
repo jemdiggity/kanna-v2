@@ -3,7 +3,7 @@ use crate::db::Db;
 use crate::mobile_api::MobileApi;
 use crate::pairing::{self, PairingSession};
 use axum::body::Body;
-use axum::extract::ws::{Message as WebSocketMessage, WebSocket, WebSocketUpgrade};
+use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::State;
 use axum::http::Request;
 use axum::response::{IntoResponse, Response};
@@ -36,8 +36,6 @@ pub struct AppState {
     stage_completer: Option<TestStageCompleter>,
     #[cfg(test)]
     revision_requester: Option<TestRevisionRequester>,
-    #[cfg(test)]
-    task_terminal_streamer: Option<TestTaskTerminalStreamer>,
 }
 
 #[cfg(test)]
@@ -82,19 +80,6 @@ type TestRevisionRequester = Arc<
         + Send
         + Sync,
 >;
-
-#[cfg(test)]
-type TestTaskTerminalStreamer =
-    Arc<dyn Fn(String) -> Result<Vec<TaskTerminalStreamEvent>, String> + Send + Sync>;
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-#[serde(tag = "type", rename_all = "camelCase")]
-enum TaskTerminalStreamEvent {
-    Ready { task_id: String },
-    Output { task_id: String, text: String },
-    Exit { task_id: String, code: i32 },
-    Error { task_id: String, message: String },
-}
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -148,8 +133,6 @@ impl AppState {
             stage_completer: None,
             #[cfg(test)]
             revision_requester: None,
-            #[cfg(test)]
-            task_terminal_streamer: None,
         }
     }
 
@@ -207,16 +190,6 @@ impl AppState {
     fn with_revision_requester(config: Config, revision_requester: TestRevisionRequester) -> Self {
         let mut state = Self::new(config);
         state.revision_requester = Some(revision_requester);
-        state
-    }
-
-    #[cfg(test)]
-    fn with_task_terminal_streamer(
-        config: Config,
-        task_terminal_streamer: TestTaskTerminalStreamer,
-    ) -> Self {
-        let mut state = Self::new(config);
-        state.task_terminal_streamer = Some(task_terminal_streamer);
         state
     }
 }
@@ -1272,336 +1245,11 @@ async fn request_revision(
     }))
 }
 
-async fn task_terminal(
-    ws: WebSocketUpgrade,
-    State(state): State<Arc<AppState>>,
-    axum::extract::Path(task_id): axum::extract::Path<String>,
-) -> axum::response::Response {
-    ws.on_upgrade(move |socket| stream_task_terminal(socket, state, task_id))
-}
-
 async fn ksp_stream(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
 ) -> axum::response::Response {
     ws.on_upgrade(move |socket| crate::ksp::handle_stream(socket, state))
-}
-
-async fn stream_task_terminal(socket: WebSocket, state: Arc<AppState>, task_id: String) {
-    #[cfg(test)]
-    if let Some(task_terminal_streamer) = state.task_terminal_streamer.clone() {
-        match task_terminal_streamer(task_id.clone()) {
-            Ok(events) => {
-                stream_prebuilt_task_terminal_events(socket, events).await;
-            }
-            Err(message) => {
-                stream_prebuilt_task_terminal_events(
-                    socket,
-                    vec![TaskTerminalStreamEvent::Error { task_id, message }],
-                )
-                .await;
-            }
-        }
-        return;
-    }
-
-    let mut socket = socket;
-    let daemon_session_id = match Db::open(&state.config.db_path)
-        .and_then(|db| db.resolve_task_terminal_session_id(&task_id))
-    {
-        Ok(Some(session_id)) => session_id,
-        Ok(None) => {
-            let _ = send_task_terminal_event(
-                &mut socket,
-                TaskTerminalStreamEvent::Error {
-                    task_id,
-                    message: "No terminal session is available for this task.".to_string(),
-                },
-            )
-            .await;
-            return;
-        }
-        Err(error) => {
-            let _ = send_task_terminal_event(
-                &mut socket,
-                TaskTerminalStreamEvent::Error {
-                    task_id,
-                    message: format!("db error: {error}"),
-                },
-            )
-            .await;
-            return;
-        }
-    };
-
-    let daemon_result = crate::daemon_client::DaemonClient::connect(&state.config.daemon_dir)
-        .await
-        .map_err(|error| format!("daemon error: {error}"));
-    let mut daemon = match daemon_result {
-        Ok(daemon) => daemon,
-        Err(message) => {
-            let _ = send_task_terminal_event(
-                &mut socket,
-                TaskTerminalStreamEvent::Error { task_id, message },
-            )
-            .await;
-            return;
-        }
-    };
-
-    let observe_result = daemon
-        .send_command(&DaemonCommand::Observe {
-            session_id: daemon_session_id.clone(),
-        })
-        .await
-        .map_err(|error| format!("daemon error: {error}"));
-    match observe_result {
-        Ok(DaemonEvent::Ok) => {
-            if send_task_terminal_event(
-                &mut socket,
-                TaskTerminalStreamEvent::Ready {
-                    task_id: task_id.clone(),
-                },
-            )
-            .await
-            .is_err()
-            {
-                return;
-            }
-
-            match read_initial_task_terminal_event(&mut daemon, &task_id, &daemon_session_id).await
-            {
-                Ok(Some(initial_event)) => {
-                    let should_stop = matches!(
-                        initial_event,
-                        TaskTerminalStreamEvent::Exit { .. }
-                            | TaskTerminalStreamEvent::Error { .. }
-                    );
-                    if send_task_terminal_event(&mut socket, initial_event)
-                        .await
-                        .is_err()
-                    {
-                        return;
-                    }
-                    if should_stop {
-                        return;
-                    }
-                }
-                Ok(None) => {}
-                Err(message) => {
-                    let _ = send_task_terminal_event(
-                        &mut socket,
-                        TaskTerminalStreamEvent::Error { task_id, message },
-                    )
-                    .await;
-                    return;
-                }
-            }
-        }
-        Ok(DaemonEvent::Error {
-            code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
-            ..
-        }) => {
-            let _ = send_task_terminal_event(
-                &mut socket,
-                TaskTerminalStreamEvent::Error {
-                    task_id,
-                    message: "No terminal session is available for this task.".to_string(),
-                },
-            )
-            .await;
-            return;
-        }
-        Ok(DaemonEvent::Error { message, .. }) => {
-            let _ = send_task_terminal_event(
-                &mut socket,
-                TaskTerminalStreamEvent::Error { task_id, message },
-            )
-            .await;
-            return;
-        }
-        Ok(other) => {
-            let _ = send_task_terminal_event(
-                &mut socket,
-                TaskTerminalStreamEvent::Error {
-                    task_id,
-                    message: format!("unexpected daemon response: {:?}", other),
-                },
-            )
-            .await;
-            return;
-        }
-        Err(message) => {
-            let _ = send_task_terminal_event(
-                &mut socket,
-                TaskTerminalStreamEvent::Error { task_id, message },
-            )
-            .await;
-            return;
-        }
-    }
-
-    loop {
-        let event = match daemon
-            .read_event()
-            .await
-            .map_err(|error| format!("daemon read error: {error}"))
-        {
-            Ok(event) => event,
-            Err(message) => {
-                let _ = send_task_terminal_event(
-                    &mut socket,
-                    TaskTerminalStreamEvent::Error {
-                        task_id: task_id.clone(),
-                        message,
-                    },
-                )
-                .await;
-                break;
-            }
-        };
-
-        let next_event = match daemon_event_to_task_terminal_event(&task_id, event) {
-            Some(next_event) => next_event,
-            None => continue,
-        };
-
-        let should_stop = matches!(
-            next_event,
-            TaskTerminalStreamEvent::Exit { .. } | TaskTerminalStreamEvent::Error { .. }
-        );
-        if send_task_terminal_event(&mut socket, next_event)
-            .await
-            .is_err()
-        {
-            break;
-        }
-        if should_stop {
-            break;
-        }
-    }
-}
-
-async fn read_initial_task_terminal_event(
-    daemon: &mut crate::daemon_client::DaemonClient,
-    task_id: &str,
-    daemon_session_id: &str,
-) -> Result<Option<TaskTerminalStreamEvent>, String> {
-    let mut event = daemon
-        .send_command(&DaemonCommand::Snapshot {
-            session_id: daemon_session_id.to_string(),
-        })
-        .await
-        .map_err(|error| format!("daemon snapshot error: {error}"))?;
-
-    loop {
-        match event {
-            DaemonEvent::Snapshot { snapshot, .. } => {
-                return Ok(snapshot_output_event(task_id, snapshot));
-            }
-            DaemonEvent::Exit { code, .. } => {
-                return Ok(Some(TaskTerminalStreamEvent::Exit {
-                    task_id: task_id.to_string(),
-                    code,
-                }))
-            }
-            DaemonEvent::Error {
-                code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
-                ..
-            } => return Ok(None),
-            DaemonEvent::Error { message, .. } => {
-                return Ok(Some(TaskTerminalStreamEvent::Error {
-                    task_id: task_id.to_string(),
-                    message,
-                }));
-            }
-            DaemonEvent::Output { .. } | DaemonEvent::StatusChanged { .. } => {
-                event = daemon
-                    .read_event()
-                    .await
-                    .map_err(|error| format!("daemon snapshot error: {error}"))?;
-            }
-            _ => {
-                event = daemon
-                    .read_event()
-                    .await
-                    .map_err(|error| format!("daemon snapshot error: {error}"))?;
-            }
-        }
-    }
-}
-
-fn daemon_event_to_task_terminal_event(
-    task_id: &str,
-    event: DaemonEvent,
-) -> Option<TaskTerminalStreamEvent> {
-    match event {
-        DaemonEvent::Output { data, .. } => {
-            let text = String::from_utf8_lossy(&data).to_string();
-            if text.is_empty() {
-                return None;
-            }
-
-            Some(TaskTerminalStreamEvent::Output {
-                task_id: task_id.to_string(),
-                text,
-            })
-        }
-        DaemonEvent::Exit { code, .. } => Some(TaskTerminalStreamEvent::Exit {
-            task_id: task_id.to_string(),
-            code,
-        }),
-        DaemonEvent::Error { message, .. } => Some(TaskTerminalStreamEvent::Error {
-            task_id: task_id.to_string(),
-            message,
-        }),
-        _ => None,
-    }
-}
-
-fn snapshot_output_event(
-    task_id: &str,
-    snapshot: kanna_daemon::protocol::TerminalSnapshot,
-) -> Option<TaskTerminalStreamEvent> {
-    let text = snapshot.vt;
-    if text.is_empty() {
-        return None;
-    }
-
-    Some(TaskTerminalStreamEvent::Output {
-        task_id: task_id.to_string(),
-        text,
-    })
-}
-
-#[cfg(test)]
-async fn stream_prebuilt_task_terminal_events(
-    mut socket: WebSocket,
-    events: Vec<TaskTerminalStreamEvent>,
-) {
-    for event in events {
-        let should_stop = matches!(
-            event,
-            TaskTerminalStreamEvent::Exit { .. } | TaskTerminalStreamEvent::Error { .. }
-        );
-        if send_task_terminal_event(&mut socket, event).await.is_err() {
-            break;
-        }
-        if should_stop {
-            break;
-        }
-    }
-}
-
-async fn send_task_terminal_event(
-    socket: &mut WebSocket,
-    event: TaskTerminalStreamEvent,
-) -> Result<(), ()> {
-    let json = serde_json::to_string(&event).map_err(|_| ())?;
-    socket
-        .send(WebSocketMessage::Text(json.into()))
-        .await
-        .map_err(|_| ())
 }
 
 pub fn router(state: Arc<AppState>) -> Router {
@@ -1616,7 +1264,6 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/tasks", post(create_task))
         .route("/v1/tasks/{task_id}", get(get_task))
         .route("/v1/tasks/{task_id}/logs", get(task_logs))
-        .route("/v1/tasks/{task_id}/terminal", get(task_terminal))
         .route("/v1/tasks/{task_id}/input", post(send_task_input))
         .route("/v1/tasks/{task_id}/actions/block", post(block_task))
         .route("/v1/tasks/{task_id}/actions/unblock", post(unblock_task))
@@ -2111,40 +1758,6 @@ fn test_router_with_revision_requester(
 }
 
 #[cfg(test)]
-fn test_router_with_terminal_streamer(
-    desktop_id: &str,
-    desktop_name: &str,
-    task_terminal_streamer: TestTaskTerminalStreamer,
-) -> Router {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    static NEXT_TEST_DB_ID: AtomicUsize = AtomicUsize::new(30_000);
-    let test_db_id = NEXT_TEST_DB_ID.fetch_add(1, Ordering::Relaxed);
-    let config = Config {
-        relay_url: "wss://relay.example".to_string(),
-        device_token: "device-token".to_string(),
-        firebase_project_id: "kanna-local".to_string(),
-        firebase_auth_emulator_url: None,
-        firebase_firestore_emulator_host: None,
-        daemon_dir: "/tmp/kanna-daemon".to_string(),
-        db_path: Db::test_db_path(&format!("http-api-{desktop_id}-{test_db_id}")),
-        kanna_cli_path: None,
-        desktop_id: desktop_id.to_string(),
-        desktop_secret: Some("desktop-secret".to_string()),
-        desktop_name: desktop_name.to_string(),
-        server_version: Some("test-version".to_string()),
-        lan_host: "127.0.0.1".to_string(),
-        lan_port: 48120,
-        pairing_store_path: format!("/tmp/kanna-pairings-{desktop_id}-{test_db_id}.json"),
-    };
-    let _ = Db::open_for_tests(&config.db_path).expect("open test db");
-    router(Arc::new(AppState::with_task_terminal_streamer(
-        config,
-        task_terminal_streamer,
-    )))
-}
-
-#[cfg(test)]
 mod tests {
     use crate::config::Config;
     use crate::db::Db;
@@ -2604,6 +2217,8 @@ mod tests {
             task.worktree_path.as_deref(),
             Some(worktree_string.as_str())
         );
+        assert_eq!(task.pipeline_name.as_deref(), Some("default"));
+        assert_eq!(task.stage_transition.as_deref(), Some("manual"));
         assert_eq!(task.commits_ahead, 1);
         assert_eq!(task.commits_behind, 0);
         assert!(task.dirty);
@@ -4199,7 +3814,9 @@ mod tests {
 
     #[tokio::test]
     async fn request_revision_route_resolves_branch_style_task_id() {
-        use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
+        use kanna_daemon::protocol::{
+            AgentProvider, Command as DaemonCommand, Event as DaemonEvent,
+        };
         use std::time::{SystemTime, UNIX_EPOCH};
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
         use tokio::net::UnixListener;
@@ -4268,10 +3885,25 @@ mod tests {
             let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
             let session_id = match command {
                 DaemonCommand::SpawnAgent { session_id, params } => {
+                    assert_eq!(params.agent_provider, AgentProvider::Claude);
                     assert!(params.cwd.contains(".kanna-worktrees/task-"));
                     session_id
                 }
-                other => panic!("expected SpawnAgent command, got {:?}", other),
+                DaemonCommand::Spawn {
+                    session_id,
+                    args,
+                    cwd,
+                    agent_provider,
+                    ..
+                } => {
+                    assert_eq!(agent_provider, Some(AgentProvider::Claude));
+                    assert!(cwd.contains(".kanna-worktrees/task-"));
+                    let command_line = args.join(" ");
+                    assert!(command_line.contains("Implement revision:"));
+                    assert!(command_line.contains("Add e2e coverage for task creation."));
+                    session_id
+                }
+                other => panic!("expected revision spawn command, got {:?}", other),
             };
             write_half
                 .write_all(
@@ -4473,7 +4105,22 @@ mod tests {
                         .contains("Review prompt that should stay hidden."));
                     session_id
                 }
-                other => panic!("expected SpawnAgent command, got {:?}", other),
+                DaemonCommand::Spawn {
+                    session_id,
+                    args,
+                    cwd,
+                    agent_provider,
+                    ..
+                } => {
+                    assert_eq!(agent_provider, Some(AgentProvider::Codex));
+                    assert!(cwd.contains(".kanna-worktrees/task-"));
+                    let command_line = args.join(" ");
+                    assert!(command_line.contains("Implement revision:"));
+                    assert!(command_line.contains("Add E2E coverage for title preservation."));
+                    assert!(!command_line.contains("Review prompt that should stay hidden."));
+                    session_id
+                }
+                other => panic!("expected revision spawn command, got {:?}", other),
             };
             write_half
                 .write_all(
@@ -4570,297 +4217,6 @@ mod tests {
         let _ = std::fs::remove_file(&socket_path);
         let _ = std::fs::remove_dir_all(&daemon_dir);
         let _ = std::fs::remove_dir_all(&repo_root);
-    }
-
-    #[tokio::test]
-    async fn task_terminal_route_streams_output_events() {
-        use futures_util::StreamExt;
-        use serde_json::Value;
-        use tokio::net::TcpListener;
-        use tokio_tungstenite::connect_async;
-        use tokio_tungstenite::tungstenite::Message;
-
-        let app = super::test_router_with_terminal_streamer(
-            "desktop-1",
-            "Studio Mac",
-            Arc::new(|task_id| {
-                Ok(vec![
-                    super::TaskTerminalStreamEvent::Ready {
-                        task_id: task_id.clone(),
-                    },
-                    super::TaskTerminalStreamEvent::Output {
-                        task_id: task_id.clone(),
-                        text: "hello from daemon".to_string(),
-                    },
-                    super::TaskTerminalStreamEvent::Exit { task_id, code: 0 },
-                ])
-            }),
-        );
-
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            axum::serve(listener, app.into_make_service())
-                .await
-                .unwrap();
-        });
-
-        let (mut socket, _) = connect_async(format!("ws://{addr}/v1/tasks/task-1/terminal"))
-            .await
-            .unwrap();
-
-        let ready = socket.next().await.unwrap().unwrap();
-        let output = socket.next().await.unwrap().unwrap();
-        let exit = socket.next().await.unwrap().unwrap();
-
-        server.abort();
-
-        let parse = |message: Message| -> Value {
-            match message {
-                Message::Text(text) => serde_json::from_str(&text).unwrap(),
-                other => panic!("expected text websocket frame, got {:?}", other),
-            }
-        };
-
-        assert_eq!(parse(ready)["type"], "ready");
-        assert_eq!(parse(output)["text"], "hello from daemon");
-        assert_eq!(parse(exit)["type"], "exit");
-    }
-
-    #[tokio::test]
-    async fn task_terminal_route_replays_snapshot_when_output_arrives_before_snapshot_response() {
-        use futures_util::StreamExt;
-        use kanna_daemon::protocol::{
-            Command as DaemonCommand, Event as DaemonEvent, TerminalSnapshot,
-        };
-        use serde_json::Value;
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        use std::path::PathBuf;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::time::{SystemTime, UNIX_EPOCH};
-        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-        use tokio::net::{TcpListener, UnixListener};
-        use tokio_tungstenite::connect_async;
-        use tokio_tungstenite::tungstenite::Message;
-
-        static NEXT_TEST_DB_ID: AtomicUsize = AtomicUsize::new(31_000);
-
-        fn test_socket_path_for_dir(daemon_dir: &str) -> PathBuf {
-            let dir = PathBuf::from(daemon_dir);
-            let mut hasher = DefaultHasher::new();
-            dir.hash(&mut hasher);
-            let hash = hasher.finish() as u32;
-            PathBuf::from(format!("/tmp/kanna-{:08x}.sock", hash))
-        }
-
-        let test_id = NEXT_TEST_DB_ID.fetch_add(1, Ordering::Relaxed);
-        let daemon_dir = std::env::temp_dir().join(format!(
-            "kanna-http-api-daemon-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&daemon_dir).unwrap();
-        let socket_path = test_socket_path_for_dir(&daemon_dir.to_string_lossy());
-        let _ = std::fs::remove_file(&socket_path);
-        let daemon_listener = UnixListener::bind(&socket_path).unwrap();
-        let daemon_server = tokio::spawn(async move {
-            let (stream, _) = daemon_listener.accept().await.unwrap();
-            let (read_half, mut write_half) = stream.into_split();
-            let mut reader = BufReader::new(read_half);
-
-            let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            let observe: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
-            match observe {
-                DaemonCommand::Observe { session_id } => assert_eq!(session_id, "daemon-task-1"),
-                other => panic!("expected observe command, got {:?}", other),
-            }
-            write_half
-                .write_all(
-                    format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap()).as_bytes(),
-                )
-                .await
-                .unwrap();
-
-            line.clear();
-            reader.read_line(&mut line).await.unwrap();
-            let snapshot: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
-            match snapshot {
-                DaemonCommand::Snapshot { session_id } => assert_eq!(session_id, "daemon-task-1"),
-                other => panic!("expected snapshot command, got {:?}", other),
-            }
-
-            let out_of_order_output = DaemonEvent::Output {
-                session_id: "daemon-task-1".to_string(),
-                data: b"ignored live delta".to_vec(),
-            };
-            let snapshot_response = DaemonEvent::Snapshot {
-                session_id: "daemon-task-1".to_string(),
-                snapshot: TerminalSnapshot {
-                    version: 1,
-                    rows: 24,
-                    cols: 80,
-                    cursor_row: 1,
-                    cursor_col: 0,
-                    cursor_visible: true,
-                    saved_at: 0,
-                    sequence: 0,
-                    vt: "hello from snapshot".to_string(),
-                },
-            };
-            let exit = DaemonEvent::Exit {
-                session_id: "daemon-task-1".to_string(),
-                code: 0,
-                resume_session_id: None,
-            };
-
-            for event in [out_of_order_output, snapshot_response, exit] {
-                write_half
-                    .write_all(format!("{}\n", serde_json::to_string(&event).unwrap()).as_bytes())
-                    .await
-                    .unwrap();
-            }
-        });
-
-        let config = crate::config::Config {
-            relay_url: "wss://relay.example".to_string(),
-            device_token: "device-token".to_string(),
-            firebase_project_id: "kanna-local".to_string(),
-            firebase_auth_emulator_url: None,
-            firebase_firestore_emulator_host: None,
-            daemon_dir: daemon_dir.to_string_lossy().to_string(),
-            db_path: crate::db::Db::test_db_path(&format!("http-api-snapshot-race-{test_id}")),
-            kanna_cli_path: None,
-            desktop_id: "desktop-1".to_string(),
-            desktop_secret: Some("desktop-secret".to_string()),
-            desktop_name: "Studio Mac".to_string(),
-            server_version: Some("test-version".to_string()),
-            lan_host: "127.0.0.1".to_string(),
-            lan_port: 48120,
-            pairing_store_path: format!("/tmp/kanna-pairings-snapshot-race-{test_id}.json"),
-        };
-        let db = crate::db::Db::open_for_tests(&config.db_path).unwrap();
-        db.insert_test_repo("repo-1", "Repo One").unwrap();
-        db.insert_test_pipeline_item(
-            "task-1",
-            "repo-1",
-            "Review branch",
-            Some("Review branch"),
-            "review",
-            "2026-05-11 10:00:00",
-        )
-        .unwrap();
-        db.insert_test_terminal_session("terminal-1", "repo-1", "task-1", "agent", "daemon-task-1")
-            .unwrap();
-        let app = super::router(Arc::new(super::AppState::new(config)));
-
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            axum::serve(listener, app.into_make_service())
-                .await
-                .unwrap();
-        });
-
-        let (mut socket, _) = connect_async(format!("ws://{addr}/v1/tasks/task-1/terminal"))
-            .await
-            .unwrap();
-
-        let ready = socket.next().await.unwrap().unwrap();
-        let output = socket.next().await.unwrap().unwrap();
-
-        server.abort();
-        daemon_server.abort();
-        let _ = std::fs::remove_file(&socket_path);
-
-        let parse = |message: Message| -> Value {
-            match message {
-                Message::Text(text) => serde_json::from_str(&text).unwrap(),
-                other => panic!("expected text websocket frame, got {:?}", other),
-            }
-        };
-
-        let ready = parse(ready);
-        let output = parse(output);
-
-        assert_eq!(ready["type"], "ready");
-        assert_eq!(output["type"], "output");
-        assert_eq!(output["task_id"], "task-1");
-        assert_eq!(output["text"], "hello from snapshot");
-    }
-
-    #[test]
-    fn snapshot_output_event_uses_snapshot_text_for_mobile_terminal() {
-        let snapshot = kanna_daemon::protocol::TerminalSnapshot {
-            version: 1,
-            rows: 24,
-            cols: 80,
-            cursor_row: 1,
-            cursor_col: 0,
-            cursor_visible: true,
-            saved_at: 0,
-            sequence: 0,
-            vt: "hello from snapshot".to_string(),
-        };
-
-        let event = super::snapshot_output_event("task-1", snapshot)
-            .expect("expected snapshot to produce an output event");
-
-        match event {
-            super::TaskTerminalStreamEvent::Output { task_id, text } => {
-                assert_eq!(task_id, "task-1");
-                assert_eq!(text, "hello from snapshot");
-            }
-            other => panic!("expected output event, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn snapshot_output_event_preserves_terminal_control_sequences_for_xterm() {
-        let snapshot = kanna_daemon::protocol::TerminalSnapshot {
-            version: 1,
-            rows: 24,
-            cols: 80,
-            cursor_row: 1,
-            cursor_col: 0,
-            cursor_visible: true,
-            saved_at: 0,
-            sequence: 0,
-            vt: "\u{1b}[2KThinking\u{1b}[1Bstill same terminal frame".to_string(),
-        };
-
-        let event = super::snapshot_output_event("task-1", snapshot)
-            .expect("expected snapshot to produce an output event");
-
-        match event {
-            super::TaskTerminalStreamEvent::Output { text, .. } => {
-                assert_eq!(text, "\u{1b}[2KThinking\u{1b}[1Bstill same terminal frame");
-            }
-            other => panic!("expected output event, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn live_terminal_output_preserves_terminal_control_sequences_for_xterm() {
-        let event = super::daemon_event_to_task_terminal_event(
-            "task-1",
-            kanna_daemon::protocol::Event::Output {
-                session_id: "task-1".to_string(),
-                data: b"\x1b[2KThinking\x1b[1Bstill same terminal frame".to_vec(),
-            },
-        )
-        .expect("expected output event");
-
-        match event {
-            super::TaskTerminalStreamEvent::Output { text, .. } => {
-                assert_eq!(text, "\u{1b}[2KThinking\u{1b}[1Bstill same terminal frame");
-            }
-            other => panic!("expected output event, got {:?}", other),
-        }
     }
 
     #[tokio::test]

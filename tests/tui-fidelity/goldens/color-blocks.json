@@ -1,0 +1,10 @@
+{
+  "name": "color-blocks",
+  "description": "256-color and 24-bit truecolor foreground/background blocks.",
+  "snapshotAt": 142,
+  "usedVisibleTextFallback": false,
+  "divergentCells": 0,
+  "firstDiffs": [],
+  "pathSerialized": "256-color:\r\n\u001b[48;5;196m 196 \u001b[48;5;46m 046 \u001b[48;5;21m 021 \u001b[0m\r\ntruecolor:\r\n\u001b[38;2;255;122;144mfg-rgb\u001b[0m \u001b[48;2;30;64;175m bg-rgb \u001b[0m\u001b[1B\u001b[15D",
+  "referenceSerialized": "256-color:\r\n\u001b[48;5;196m 196 \u001b[48;5;46m 046 \u001b[48;5;21m 021 \u001b[0m\r\ntruecolor:\r\n\u001b[38;2;255;122;144mfg-rgb\u001b[0m \u001b[48;2;30;64;175m bg-rgb \u001b[0m\u001b[1B\u001b[15D"
+}

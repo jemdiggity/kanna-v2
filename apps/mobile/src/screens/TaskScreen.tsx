@@ -21,6 +21,8 @@ interface TaskScreenProps {
   task: TaskSummary;
   terminalOutput: string;
   terminalStatus: TaskTerminalStatus;
+  terminalCols: number | null;
+  terminalRows: number | null;
   terminalErrorMessage: string | null;
   agentEvents: FrameAgentEvent[];
   agentStatus: TaskTerminalStatus;
@@ -36,6 +38,8 @@ export function TaskScreen({
   task,
   terminalOutput,
   terminalStatus,
+  terminalCols,
+  terminalRows,
   terminalErrorMessage,
   agentEvents,
   agentStatus,
@@ -99,6 +103,8 @@ export function TaskScreen({
             key={task.id}
             output={terminalOutput}
             status={terminalStatus}
+            cols={terminalCols}
+            rows={terminalRows}
             taskId={task.id}
             onConsolePress={Keyboard.dismiss}
           />

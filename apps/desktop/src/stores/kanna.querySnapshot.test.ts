@@ -180,6 +180,11 @@ vi.mock("../composables/useToast", () => ({
 
 vi.mock("../composables/terminalSessionRecovery", () => ({
   buildTaskShellCommand: vi.fn(() => "agent-command"),
+  getShellTerminalEnv: vi.fn(() => ({
+    TERM: "xterm-256color",
+    COLORTERM: "truecolor",
+    TERM_PROGRAM: "kanna",
+  })),
   getTaskTerminalEnv: vi.fn(() => ({})),
 }));
 

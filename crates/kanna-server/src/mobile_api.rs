@@ -69,6 +69,8 @@ pub struct TaskDetail {
     pub repo_id: String,
     pub title: String,
     pub stage: Option<String>,
+    pub pipeline_name: Option<String>,
+    pub stage_transition: Option<String>,
     pub activity: Option<String>,
     pub snippet: Option<String>,
     pub agent_type: Option<String>,
@@ -308,11 +310,22 @@ fn map_task_detail(
         .and_then(Result::ok)
         .unwrap_or_default();
     let existing_worktree_path = worktree_path.filter(|path| Path::new(path).exists());
+    let pipeline_name = item.pipeline.clone();
+    let stage_transition = repo
+        .zip(pipeline_name.as_deref())
+        .zip(item.stage.as_deref())
+        .and_then(|((repo, pipeline_name), stage_name)| {
+            crate::task_creator::resolve_stage_transition(&repo.path, pipeline_name, stage_name)
+                .ok()
+                .flatten()
+        });
     TaskDetail {
         id: item.id,
         repo_id: item.repo_id,
         title,
         stage: item.stage,
+        pipeline_name,
+        stage_transition,
         activity: item.activity,
         snippet: item.last_output_preview,
         agent_type: item.agent_type,

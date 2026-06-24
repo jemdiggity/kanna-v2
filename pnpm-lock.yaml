@@ -31,12 +31,6 @@ importers:
 
   apps/desktop:
     dependencies:
-      '@kanna/agent-protocol':
-        specifier: workspace:*
-        version: link:../../packages/agent-protocol
-      '@kanna/stream-client':
-        specifier: workspace:*
-        version: link:../../packages/stream-client
       '@pierre/diffs':
         specifier: ^1.1.0
         version: 1.1.13(react-dom@19.2.5(react@19.2.5))(react@19.2.5)
@@ -306,6 +300,28 @@ importers:
       vitest:
         specifier: ^4.1.4
         version: 4.1.4(@opentelemetry/api@1.9.1)(@types/node@25.6.0)(happy-dom@20.8.9)(vite@6.4.2(@types/node@25.6.0)(jiti@2.6.1)(lightningcss@1.27.0)(terser@5.46.1)(tsx@4.21.0)(yaml@2.8.3))
+
+  tests/tui-fidelity:
+    dependencies:
+      '@xterm/addon-serialize':
+        specifier: 0.15.0-beta.195
+        version: 0.15.0-beta.195(@xterm/xterm@6.1.0-beta.195)
+      '@xterm/xterm':
+        specifier: 6.1.0-beta.195
+        version: 6.1.0-beta.195
+      playwright:
+        specifier: ^1.57.0
+        version: 1.61.0
+    devDependencies:
+      '@types/node':
+        specifier: ^24.0.0
+        version: 24.12.2
+      tsx:
+        specifier: ^4.21.0
+        version: 4.21.0
+      typescript:
+        specifier: ^5.7
+        version: 5.9.3
 
   tools/kd:
     dependencies:
@@ -4314,6 +4330,11 @@ packages:
   fs.realpath@1.0.0:
     resolution: {integrity: sha512-OO0pH2lK6a0hZnAdau5ItzHPI6pUlvI7jMVnxUQRtw4owF2wk8lOSabtGDCTP4Ggrg2MbGnWO9X8K1t4+fGMDw==}
 
+  fsevents@2.3.2:
+    resolution: {integrity: sha512-xiqMQR4xAeHTuB9uWm+fFRcIOgKBMiOBP+eXiyT7jsgVCq1bkVygt00oASowB7EdtpOHaaPgKt812P9ab+DDKA==}
+    engines: {node: ^8.16.0 || ^10.6.0 || >=11.0.0}
+    os: [darwin]
+
   fsevents@2.3.3:
     resolution: {integrity: sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw==}
     engines: {node: ^8.16.0 || ^10.6.0 || >=11.0.0}
@@ -5961,6 +5982,16 @@ packages:
 
   pkg-types@1.3.1:
     resolution: {integrity: sha512-/Jm5M4RvtBFVkKWRu2BLUTNP8/M2a+UwuAX+ae4770q1qVGtfjG+WTCupoZixokjmHiry8uI+dlY8KXYV5HVVQ==}
+
+  playwright-core@1.61.0:
+    resolution: {integrity: sha512-caX7TrY3Ml6egyDX0WUcTHDxodl/b51y5wJOdCEA36QviK/s2g081hvmGs8eaE3DWb6NYZQ6BjO/QkNRPenoPA==}
+    engines: {node: '>=18'}
+    hasBin: true
+
+  playwright@1.61.0:
+    resolution: {integrity: sha512-Z+7BeeqQPRRzklHsVFP4KTGIyMxKUmfeRA4WisM6G3/XW6nwGeX6fX9qYaDa+CiUqpOkb2f6X3nar05R3kSuJQ==}
+    engines: {node: '>=18'}
+    hasBin: true
 
   plist@3.1.0:
     resolution: {integrity: sha512-uysumyrvkUX0rX/dEVqt8gC3sTBzd4zoWfLeS29nb53imdaXVvLINYXTI2GNqzaMuvacNx4uJQ8+b3zXR0pkgQ==}
@@ -11179,12 +11210,10 @@ snapshots:
     transitivePeerDependencies:
       - '@expo/dom-webview'
       - '@expo/metro-runtime'
-      - bufferutil
       - react
       - react-native
       - react-native-webview
       - supports-color
-      - utf-8-validate
 
   babel-preset-jest@29.6.3(@babel/core@7.29.0):
     dependencies:
@@ -12622,6 +12651,9 @@ snapshots:
     optional: true
 
   fs.realpath@1.0.0: {}
+
+  fsevents@2.3.2:
+    optional: true
 
   fsevents@2.3.3:
     optional: true
@@ -14461,6 +14493,14 @@ snapshots:
       confbox: 0.1.8
       mlly: 1.8.2
       pathe: 2.0.3
+
+  playwright-core@1.61.0: {}
+
+  playwright@1.61.0:
+    dependencies:
+      playwright-core: 1.61.0
+    optionalDependencies:
+      fsevents: 2.3.2
 
   plist@3.1.0:
     dependencies:

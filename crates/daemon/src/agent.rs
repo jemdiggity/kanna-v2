@@ -17,7 +17,8 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use kanna_agent_protocol::{
-    AgentEvent, ClaudeAdapter, CodexAdapter, ProviderAdapter, SpawnCtx, SpawnSpec, TurnModel,
+    AgentEvent, ClaudeAdapter, CodexAdapter, OpencodeAdapter, ProviderAdapter, SpawnCtx, SpawnSpec,
+    TurnModel,
 };
 
 use crate::protocol::{AgentProvider, AgentSpawnParams, SeqAgentEvent, SessionStatus};
@@ -32,8 +33,9 @@ pub fn make_adapter(provider: AgentProvider) -> Option<Box<dyn ProviderAdapter +
     match provider {
         AgentProvider::Claude => Some(Box::new(ClaudeAdapter::new())),
         AgentProvider::Codex => Some(Box::new(CodexAdapter::new())),
+        AgentProvider::Opencode => Some(Box::new(OpencodeAdapter::new())),
         // PTY-only providers — no headless adapter yet.
-        AgentProvider::Copilot | AgentProvider::Opencode => None,
+        AgentProvider::Copilot => None,
     }
 }
 
@@ -508,6 +510,13 @@ pub fn signal_agent_pid(pid: u32, signal: i32) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opencode_has_headless_adapter() {
+        let adapter = make_adapter(AgentProvider::Opencode).expect("opencode adapter exists");
+        assert_eq!(adapter.provider(), "opencode");
+        assert_eq!(adapter.turn_model(), TurnModel::PerTurn);
+    }
 
     fn journal_in_temp() -> (tempdir::TempDirGuard, AgentJournal) {
         let dir = tempdir::TempDirGuard::new("agent-journal-test");

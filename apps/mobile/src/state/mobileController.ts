@@ -141,17 +141,19 @@ export function createMobileController(
 
     stopTaskTerminal();
 
-    const task = findTask(taskId);
-    store.beginTaskTerminal(taskId, task?.snippet?.trim() ? `${task.snippet}\n\n` : "");
+    store.beginTaskTerminal(taskId, "");
 
     try {
       const subscription = client.observeTaskTerminal(taskId, (event) => {
         switch (event.type) {
           case "ready":
+            if (event.cols && event.rows) {
+              store.setTaskTerminalDims(taskId, event.cols, event.rows);
+            }
             store.setTaskTerminalStatus(taskId, "live");
             break;
           case "output":
-            store.appendTaskTerminal(taskId, event.text);
+            store.appendTaskTerminal(taskId, `${event.dataB64}\n`);
             break;
           case "exit":
             store.setTaskTerminalStatus(taskId, "closed");

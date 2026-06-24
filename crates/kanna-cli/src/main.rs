@@ -23,6 +23,16 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Print the generated Kanna task manual for the current spawned task
+    Guide {
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Override the local Kanna server base URL
+        #[arg(long)]
+        server_url: Option<String>,
+    },
     /// Signal that a pipeline stage is complete
     StageComplete {
         /// The task/pipeline_item ID
@@ -358,6 +368,8 @@ struct TaskDetail {
     repo_id: String,
     title: String,
     stage: Option<String>,
+    pipeline_name: Option<String>,
+    stage_transition: Option<String>,
     activity: Option<String>,
     snippet: Option<String>,
     agent_type: Option<String>,
@@ -576,6 +588,10 @@ fn resolve_server_base_url_from_env(explicit_server_url: Option<&str>) -> String
         .map(|(key, value)| (key.as_str(), value.as_str()))
         .collect::<Vec<_>>();
     resolve_server_base_url(&borrowed_pairs, explicit_server_url)
+}
+
+fn resolve_guide_task_id(env_pairs: &[(&str, &str)]) -> Option<String> {
+    env_var_from_pairs(env_pairs, "KANNA_TASK_ID")
 }
 
 fn build_create_task_request(options: TaskCreateOptions) -> CreateTaskRequest {
@@ -861,6 +877,141 @@ async fn get_task_via_api(base_url: &str, task_id: &str) -> Result<TaskDetail, S
     get_json(base_url, &task_get_path(task_id)).await
 }
 
+#[derive(Debug, Clone)]
+struct GuideContext {
+    task_id: String,
+    task: Option<TaskDetail>,
+    live_state_error: Option<String>,
+    catalog: Catalog,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GuideTool<'a> {
+    name: &'a str,
+    description: &'a str,
+}
+
+fn guide_tools(catalog: &Catalog) -> Vec<GuideTool<'_>> {
+    catalog
+        .tools
+        .iter()
+        .map(|tool| GuideTool {
+            name: &tool.name,
+            description: &tool.description,
+        })
+        .collect()
+}
+
+fn render_guide_markdown(context: &GuideContext) -> String {
+    let task = context.task.as_ref();
+    let stage = task
+        .and_then(|task| task.stage.as_deref())
+        .unwrap_or("unknown");
+    let pipeline = task
+        .and_then(|task| task.pipeline_name.as_deref())
+        .unwrap_or("unknown");
+    let transition = task
+        .and_then(|task| task.stage_transition.as_deref())
+        .unwrap_or("manual");
+    let branch = task
+        .and_then(|task| task.branch.as_deref())
+        .unwrap_or("unknown");
+
+    let mut lines = vec![
+        "# Kanna Task Guide".to_string(),
+        String::new(),
+        format!(
+            "You are task `{}`, stage `{}` of pipeline `{}` (`{}`). Branch: `{}`.",
+            context.task_id, stage, pipeline, transition, branch
+        ),
+        format!(
+            "Done here means this stage has achieved its goal; then run `kanna-cli stage-complete --task-id \"$KANNA_TASK_ID\" --status success --summary \"...\"`."
+        ),
+    ];
+
+    if let Some(error) = context.live_state_error.as_deref() {
+        lines.push(String::new());
+        lines.push(format!(
+            "Live task state was unavailable: {error}. The catalog and workflow manual below are still generated from the bundled Kanna tool catalog."
+        ));
+    }
+
+    lines.extend([
+        String::new(),
+        "## Workflow Semantics".to_string(),
+        String::new(),
+        "- Prefer `kanna-mcp` tools when your agent client exposes them; fall back to `kanna-cli` from the shell.".to_string(),
+        "- `kanna_complete_stage` / `kanna-cli stage-complete` records the stage result. `success` can trigger an auto-transition when the current stage is configured for auto; `failure` records the failure and stops advancement.".to_string(),
+        "- Manual transitions wait for a user or agent to request advancement.".to_string(),
+        "- Advancing closes the current task and spawns a new task in a new worktree.".to_string(),
+        "- Use create/spawn-subtask tools for follow-up work, `kanna_send_input` for feedback to a running task, `kanna_request_revision` for a new revision task from an existing branch, and blocker tools when this task depends on another task.".to_string(),
+        String::new(),
+        "## Catalog Tools".to_string(),
+        String::new(),
+    ]);
+
+    for tool in &context.catalog.tools {
+        lines.push(format!("- `{}`: {}", tool.name, tool.description));
+    }
+
+    lines.join("\n")
+}
+
+fn render_guide_json(context: &GuideContext) -> Result<Value, String> {
+    serde_json::to_value(serde_json::json!({
+        "taskId": context.task_id,
+        "liveStateError": context.live_state_error,
+        "task": context.task,
+        "workflow": {
+            "completeStage": "success can trigger auto-advance; failure records failure and stops advancement",
+            "manualTransition": "manual stages wait for explicit advancement",
+            "advanceStage": "advancing closes the current task and spawns a new task in a new worktree",
+            "operations": [
+                "prefer kanna-mcp tools",
+                "fall back to kanna-cli",
+                "send input to running tasks",
+                "request revisions from existing task branches",
+                "block and unblock tasks"
+            ]
+        },
+        "tools": guide_tools(&context.catalog),
+    }))
+    .map_err(|e| format!("failed to render guide json: {e}"))
+}
+
+async fn build_guide_context(
+    env_pairs: &[(&str, &str)],
+    explicit_server_url: Option<&str>,
+) -> GuideContext {
+    let catalog = kanna_tool_catalog::bundled_catalog();
+    let task_id = resolve_guide_task_id(env_pairs).unwrap_or_else(|| "unknown".to_string());
+    if task_id == "unknown" {
+        return GuideContext {
+            task_id,
+            task: None,
+            live_state_error: Some("KANNA_TASK_ID is not set".to_string()),
+            catalog,
+        };
+    }
+
+    let base_url = resolve_server_base_url(env_pairs, explicit_server_url);
+    match get_task_via_api(&base_url, &task_id).await {
+        Ok(task) => GuideContext {
+            task_id,
+            task: Some(task),
+            live_state_error: None,
+            catalog,
+        },
+        Err(error) => GuideContext {
+            task_id,
+            task: None,
+            live_state_error: Some(error),
+            catalog,
+        },
+    }
+}
+
 async fn task_logs_via_api(
     base_url: &str,
     task_id: &str,
@@ -1133,6 +1284,26 @@ async fn main() {
     let cli = Cli::parse();
 
     match cli.command {
+        Commands::Guide { json, server_url } => {
+            let env_pairs = env::vars().collect::<Vec<_>>();
+            let borrowed_pairs = env_pairs
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.as_str()))
+                .collect::<Vec<_>>();
+            let context = build_guide_context(&borrowed_pairs, server_url.as_deref()).await;
+            if json {
+                let rendered = render_guide_json(&context).unwrap_or_else(|e| {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                });
+                if let Err(e) = print_json(&rendered) {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                }
+            } else {
+                println!("{}", render_guide_markdown(&context));
+            }
+        }
         Commands::StageComplete {
             task_id,
             status,
@@ -1567,11 +1738,11 @@ mod tests {
         build_request_revision_request, build_send_task_input_request, build_tool_call_args,
         catalog_create_task_param_names, close_task_via_api, create_task_via_api,
         find_task_status_row, format_task_list, format_task_status, get_task_via_api,
-        parse_wait_until, resolve_optional_server_base_url, resolve_server_base_url,
-        resolve_stage_db_path, send_task_input_via_api, task_create_flag_names, task_get_path,
-        task_list_path, task_logs_path, task_matches_wait_until, task_not_found_error,
-        unblock_task_via_api, TaskCreateOptions, TaskDetail, TaskInputResponse, TaskSummary,
-        WaitUntil,
+        parse_wait_until, render_guide_markdown, resolve_optional_server_base_url,
+        resolve_server_base_url, resolve_stage_db_path, send_task_input_via_api,
+        task_create_flag_names, task_get_path, task_list_path, task_logs_path,
+        task_matches_wait_until, task_not_found_error, unblock_task_via_api, GuideContext,
+        TaskCreateOptions, TaskDetail, TaskInputResponse, TaskSummary, WaitUntil,
     };
     use clap::Parser;
     use serde_json::json;
@@ -1700,6 +1871,12 @@ mod tests {
 
     #[test]
     fn parses_new_repo_and_task_subcommands() {
+        let cli = super::Cli::try_parse_from(["kanna-cli", "guide", "--json"]).unwrap();
+        match cli.command {
+            super::Commands::Guide { json, .. } => assert!(json),
+            _ => panic!("expected guide command"),
+        }
+
         let cli = super::Cli::try_parse_from([
             "kanna-cli",
             "repo",
@@ -2107,6 +2284,8 @@ mod tests {
             "repoId": "repo-1",
             "title": "Add status command",
             "stage": "in progress",
+            "pipelineName": "default",
+            "stageTransition": "manual",
             "activity": "working",
             "snippet": "working...",
             "agentType": "pty",
@@ -2123,12 +2302,57 @@ mod tests {
 
         assert_eq!(task.id, "task-1");
         assert_eq!(task.activity.as_deref(), Some("working"));
+        assert_eq!(task.pipeline_name.as_deref(), Some("default"));
+        assert_eq!(task.stage_transition.as_deref(), Some("manual"));
         assert_eq!(task.agent_provider.as_deref(), Some("claude"));
         assert_eq!(task.branch.as_deref(), Some("task-task-1"));
         assert_eq!(task.worktree_path.as_deref(), Some("/tmp/worktree"));
         assert_eq!(task.commits_ahead, 2);
         assert_eq!(task.commits_behind, 1);
         assert!(task.dirty);
+    }
+
+    #[test]
+    fn guide_markdown_includes_live_context_and_all_catalog_tools() {
+        let task = TaskDetail {
+            id: "task-123".to_string(),
+            repo_id: "repo-1".to_string(),
+            title: "Review branch".to_string(),
+            stage: Some("review".to_string()),
+            pipeline_name: Some("qa".to_string()),
+            stage_transition: Some("auto".to_string()),
+            activity: Some("working".to_string()),
+            snippet: None,
+            agent_type: Some("pty".to_string()),
+            agent_provider: Some("claude".to_string()),
+            branch: Some("task-task-123".to_string()),
+            pr_url: None,
+            closed_at: None,
+            worktree_path: Some("/tmp/worktree".to_string()),
+            commits_ahead: 0,
+            commits_behind: 0,
+            dirty: false,
+        };
+
+        let guide = render_guide_markdown(&GuideContext {
+            task_id: "task-123".to_string(),
+            task: Some(task),
+            live_state_error: None,
+            catalog: kanna_tool_catalog::bundled_catalog(),
+        });
+
+        assert!(guide.contains("You are task `task-123`, stage `review` of pipeline `qa` (`auto`)"));
+        assert!(guide.contains("kanna-cli stage-complete --task-id \"$KANNA_TASK_ID\""));
+        assert!(guide.contains(
+            "Advancing closes the current task and spawns a new task in a new worktree."
+        ));
+        for tool in kanna_tool_catalog::bundled_catalog().tools {
+            assert!(
+                guide.contains(&format!("`{}`", tool.name)),
+                "guide missing catalog tool {}",
+                tool.name
+            );
+        }
     }
 
     #[test]

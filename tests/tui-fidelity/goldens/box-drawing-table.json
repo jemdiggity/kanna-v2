@@ -1,0 +1,10 @@
+{
+  "name": "box-drawing-table",
+  "description": "Unicode box drawing table.",
+  "snapshotAt": 143,
+  "usedVisibleTextFallback": false,
+  "divergentCells": 0,
+  "firstDiffs": [],
+  "pathSerialized": "┌──────────┬────────┐\r\n│ task     │ state  │\r\n├──────────┼────────┤\r\n│ claude   │ busy   │\r\n│ copilot  │ idle   │\r\n└──────────┴────────┘\u001b[1B\u001b[21D",
+  "referenceSerialized": "┌──────────┬────────┐\r\n│ task     │ state  │\r\n├──────────┼────────┤\r\n│ claude   │ busy   │\r\n│ copilot  │ idle   │\r\n└──────────┴────────┘\u001b[1B\u001b[21D"
+}

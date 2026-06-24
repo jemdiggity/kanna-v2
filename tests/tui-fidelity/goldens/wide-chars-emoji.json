@@ -1,0 +1,10 @@
+{
+  "name": "wide-chars-emoji",
+  "description": "CJK, emoji, skin tone, and ZWJ sequences.",
+  "snapshotAt": 62,
+  "usedVisibleTextFallback": false,
+  "divergentCells": 0,
+  "firstDiffs": [],
+  "pathSerialized": "wide: 漢字かなカナ\r\nemoji: 😀 🚀 👩‍💻 🧑🏽‍💻\r\nmix: A界B🙂C\u001b[1B\u001b[11D",
+  "referenceSerialized": "wide: 漢字かなカナ\r\nemoji: 😀 🚀 👩‍💻 🧑🏽‍💻\r\nmix: A界B🙂C\u001b[1B\u001b[11D"
+}

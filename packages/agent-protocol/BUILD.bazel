@@ -1,7 +1,7 @@
 package(default_visibility = ["//visibility:public"])
 
-load("@aspect_rules_js//npm:defs.bzl", "npm_package")
 load("@bazel_lib//lib:copy_to_bin.bzl", "copy_to_bin")
+load("@aspect_rules_js//js:defs.bzl", "js_library")
 load("@kanna_npm//:defs.bzl", "npm_link_all_packages")
 
 npm_link_all_packages(
@@ -15,16 +15,17 @@ filegroup(
         "tsconfig.json",
     ] + glob([
         "src/**",
+    ], exclude = [
+        "src/**/*.test.ts",
     ]),
-)
-
-npm_package(
-    name = "pkg",
-    srcs = [":srcs"],
-    package = "@kanna/agent-protocol",
 )
 
 copy_to_bin(
     name = "srcs_in_bin",
+    srcs = [":srcs"],
+)
+
+js_library(
+    name = "pkg",
     srcs = [":srcs"],
 )

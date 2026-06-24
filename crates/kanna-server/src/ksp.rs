@@ -22,7 +22,9 @@ use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 use kanna_agent_protocol::{ClientFrame, FrameAgentEvent, ServerFrame, StreamKind};
-use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent, SessionStatus};
+use kanna_daemon::protocol::{
+    Command as DaemonCommand, Event as DaemonEvent, SessionStatus, TerminalSnapshot,
+};
 
 use crate::daemon_client::DaemonClient;
 use crate::db::Db;
@@ -978,6 +980,13 @@ mod tests {
     }
 
     async fn spawn_fake_daemon_once(daemon_dir: String) -> tokio::task::JoinHandle<DaemonCommand> {
+        spawn_fake_daemon_once_with_response(daemon_dir, DaemonEvent::Ok).await
+    }
+
+    async fn spawn_fake_daemon_once_with_response(
+        daemon_dir: String,
+        response: DaemonEvent,
+    ) -> tokio::task::JoinHandle<DaemonCommand> {
         let socket_path = daemon_socket_path_for_dir(&daemon_dir);
         let _ = std::fs::remove_file(&socket_path);
         let listener = UnixListener::bind(&socket_path).expect("bind fake daemon socket");
@@ -993,7 +1002,7 @@ mod tests {
                 .expect("read daemon command");
             let command: DaemonCommand =
                 serde_json::from_str(line.trim()).expect("parse daemon command");
-            let response = serde_json::to_string(&DaemonEvent::Ok).expect("serialize daemon ok");
+            let response = serde_json::to_string(&response).expect("serialize daemon response");
             write_half
                 .write_all(format!("{response}\n").as_bytes())
                 .await
@@ -1177,6 +1186,261 @@ mod tests {
             conn.resolve_terminal_session_id("shell-repo-repo-1"),
             Ok("shell-repo-repo-1".to_string()),
         );
+    }
+
+    #[tokio::test]
+    async fn terminal_stream_preserves_snapshot_and_split_multibyte_output_bytes() {
+        let unique = format!(
+            "ksp-terminal-bytes-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        std::fs::create_dir_all(&daemon_dir).expect("create daemon dir");
+        let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+        let _ = std::fs::remove_file(&socket_path);
+
+        let daemon_listener = UnixListener::bind(&socket_path).expect("bind fake daemon socket");
+        let daemon = tokio::spawn(async move {
+            let (stream, _) = daemon_listener
+                .accept()
+                .await
+                .expect("accept daemon connection");
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let mut line = String::new();
+            reader
+                .read_line(&mut line)
+                .await
+                .expect("read attach snapshot command");
+            let command: DaemonCommand =
+                serde_json::from_str(line.trim()).expect("parse attach snapshot command");
+            match command {
+                DaemonCommand::AttachSnapshot {
+                    session_id,
+                    emulate_terminal,
+                } => {
+                    assert_eq!(session_id, "daemon-terminal-1");
+                    assert!(emulate_terminal);
+                }
+                other => panic!("expected AttachSnapshot command, got {other:?}"),
+            }
+
+            let snapshot = DaemonEvent::Snapshot {
+                session_id: "daemon-terminal-1".to_string(),
+                snapshot: kanna_daemon::protocol::TerminalSnapshot {
+                    version: 1,
+                    rows: 24,
+                    cols: 80,
+                    cursor_row: 1,
+                    cursor_col: 0,
+                    cursor_visible: true,
+                    saved_at: 0,
+                    sequence: 0,
+                    vt: "╭─界─╮\n".to_string(),
+                },
+            };
+            let output_prefix = DaemonEvent::Output {
+                session_id: "daemon-terminal-1".to_string(),
+                data: vec![0xf0, 0x9f],
+            };
+            let output_suffix = DaemonEvent::Output {
+                session_id: "daemon-terminal-1".to_string(),
+                data: vec![0x98, 0x80, b'\n'],
+            };
+            let exit = DaemonEvent::Exit {
+                session_id: "daemon-terminal-1".to_string(),
+                code: 0,
+                resume_session_id: None,
+            };
+
+            for event in [snapshot, output_prefix, output_suffix, exit] {
+                write_half
+                    .write_all(format!("{}\n", serde_json::to_string(&event).unwrap()).as_bytes())
+                    .await
+                    .expect("write daemon event");
+            }
+        });
+
+        let mut config = test_config("ksp-terminal-bytes", "KSP Terminal Bytes");
+        config.daemon_dir = daemon_dir.to_string_lossy().to_string();
+        config.db_path = Db::test_db_path(&unique);
+        config.pairing_store_path = format!("/tmp/kanna-pairings-{unique}.json");
+
+        let db = Db::open_for_tests(&config.db_path).expect("open test db");
+        db.insert_test_repo("repo-1", "Repo One")
+            .expect("insert repo");
+        db.insert_test_pipeline_item(
+            "task-1",
+            "repo-1",
+            "Terminal bytes",
+            None,
+            "in progress",
+            "2026-06-20T00:00:00Z",
+        )
+        .expect("insert task");
+        db.insert_test_terminal_session(
+            "terminal-1",
+            "repo-1",
+            "task-1",
+            "agent",
+            "daemon-terminal-1",
+        )
+        .expect("insert terminal session");
+
+        let router = crate::http_api::router(Arc::new(AppState::new(config)));
+        let url = serve_router(router).await;
+        let mut socket = ws_connect(&url).await;
+
+        send_frame(&mut socket, &ClientFrame::Auth { credential: None }).await;
+        assert_eq!(recv_frame(&mut socket).await, ServerFrame::AuthOk);
+        send_frame(
+            &mut socket,
+            &ClientFrame::Attach {
+                task_id: "task-1".into(),
+                kind: StreamKind::Terminal,
+                from_seq: 0,
+            },
+        )
+        .await;
+
+        let decode = |data_b64: String| {
+            base64::engine::general_purpose::STANDARD
+                .decode(data_b64)
+                .expect("decode terminal frame")
+        };
+
+        match recv_frame(&mut socket).await {
+            ServerFrame::TermSnapshot {
+                task_id,
+                cols,
+                rows,
+                data_b64,
+            } => {
+                assert_eq!(task_id, "task-1");
+                assert_eq!(cols, 80);
+                assert_eq!(rows, 24);
+                assert_eq!(decode(data_b64), "╭─界─╮\n".as_bytes());
+            }
+            other => panic!("expected terminal snapshot, got {other:?}"),
+        }
+        match recv_frame(&mut socket).await {
+            ServerFrame::TermOutput { task_id, data_b64 } => {
+                assert_eq!(task_id, "task-1");
+                assert_eq!(decode(data_b64), vec![0xf0, 0x9f]);
+            }
+            other => panic!("expected first terminal output, got {other:?}"),
+        }
+        match recv_frame(&mut socket).await {
+            ServerFrame::TermOutput { task_id, data_b64 } => {
+                assert_eq!(task_id, "task-1");
+                assert_eq!(decode(data_b64), vec![0x98, 0x80, b'\n']);
+            }
+            other => panic!("expected second terminal output, got {other:?}"),
+        }
+        match recv_frame(&mut socket).await {
+            ServerFrame::SessionExit { task_id, code } => {
+                assert_eq!(task_id, "task-1");
+                assert_eq!(code, 0);
+            }
+            other => panic!("expected session exit, got {other:?}"),
+        }
+
+        daemon.await.expect("fake daemon task failed");
+        drop(socket);
+        let _ = std::fs::remove_file(&socket_path);
+        let _ = std::fs::remove_dir_all(&daemon_dir);
+    }
+
+    #[tokio::test]
+    async fn shell_terminal_attach_routes_directly_to_daemon_session() {
+        let unique = format!(
+            "ksp-shell-attach-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        std::fs::create_dir_all(&daemon_dir).expect("create daemon dir");
+        let mut config = test_config("ksp-shell-attach", "KSP Shell Attach");
+        config.daemon_dir = daemon_dir.to_string_lossy().to_string();
+        config.db_path = Db::test_db_path(&unique);
+        config.pairing_store_path = format!("/tmp/kanna-pairings-{unique}.json");
+
+        let daemon = spawn_fake_daemon_once_with_response(
+            config.daemon_dir.clone(),
+            DaemonEvent::Snapshot {
+                session_id: "shell-wt-task-1".to_string(),
+                snapshot: TerminalSnapshot {
+                    version: 1,
+                    rows: 24,
+                    cols: 80,
+                    cursor_row: 0,
+                    cursor_col: 0,
+                    cursor_visible: true,
+                    saved_at: 0,
+                    sequence: 0,
+                    vt: "shell prompt".to_string(),
+                },
+            },
+        )
+        .await;
+        let router = crate::http_api::router(Arc::new(AppState::new(config)));
+        let url = serve_router(router).await;
+        let mut socket = ws_connect(&url).await;
+
+        send_frame(&mut socket, &ClientFrame::Auth { credential: None }).await;
+        assert_eq!(recv_frame(&mut socket).await, ServerFrame::AuthOk);
+        send_frame(
+            &mut socket,
+            &ClientFrame::Attach {
+                task_id: "shell-wt-task-1".into(),
+                kind: StreamKind::Terminal,
+                from_seq: 0,
+            },
+        )
+        .await;
+
+        match recv_frame(&mut socket).await {
+            ServerFrame::TermSnapshot {
+                task_id,
+                cols,
+                rows,
+                data_b64,
+            } => {
+                assert_eq!(task_id, "shell-wt-task-1");
+                assert_eq!(cols, 80);
+                assert_eq!(rows, 24);
+                let decoded = base64::engine::general_purpose::STANDARD
+                    .decode(data_b64.as_bytes())
+                    .expect("decode terminal snapshot");
+                assert_eq!(String::from_utf8(decoded).unwrap(), "shell prompt");
+            }
+            other => panic!("expected TermSnapshot, got {other:?}"),
+        }
+
+        let command = tokio::time::timeout(std::time::Duration::from_secs(5), daemon)
+            .await
+            .expect("timed out waiting for daemon command")
+            .expect("fake daemon task failed");
+        match command {
+            DaemonCommand::AttachSnapshot {
+                session_id,
+                emulate_terminal,
+            } => {
+                assert_eq!(session_id, "shell-wt-task-1");
+                assert!(emulate_terminal);
+            }
+            other => panic!("expected AttachSnapshot command, got {other:?}"),
+        }
+
+        drop(socket);
+        let _ = std::fs::remove_dir_all(&daemon_dir);
     }
 
     #[tokio::test]

@@ -1340,7 +1340,7 @@ export const taskDefinitions = [
     inputSchema: emptyInputSchema,
     execute: async () => {
       const context = await resolveDefaultContext(process.env);
-      const cargoConfig = writeCargoConfig(context.repoRoot, context.homeDir);
+      const cargoConfig = writeCargoConfig(context.repoRoot);
       return {
         ok: true,
         message: `Synced Kanna dev environment files.`,

@@ -99,6 +99,34 @@ describe("createSessionStore", () => {
     });
   });
 
+  it("keeps a large base64 snapshot frame intact instead of slicing mid-token", () => {
+    const store = createSessionStore();
+    store.beginTaskTerminal("task-1", "");
+
+    // A real TUI snapshot is a single base64 frame far larger than the old
+    // 12000-char cap. Char-slicing it corrupted base64 -> blank terminal.
+    const snapshot = "A".repeat(50_000);
+    store.appendTaskTerminal("task-1", `${snapshot}\n`);
+
+    expect(store.getState().taskTerminalOutput).toBe(`${snapshot}\n`);
+  });
+
+  it("drops whole oldest base64 frames (never a partial token) when over the cap", () => {
+    const store = createSessionStore();
+    store.beginTaskTerminal("task-1", "");
+
+    const frame = "B".repeat(300_000);
+    for (let i = 0; i < 5; i += 1) {
+      store.appendTaskTerminal("task-1", `${frame}\n`);
+    }
+
+    const output = store.getState().taskTerminalOutput;
+    const frames = output.split("\n").filter((segment) => segment.length > 0);
+    // Every retained frame is intact; none truncated mid-base64.
+    expect(frames.every((segment) => segment === frame)).toBe(true);
+    expect(output.length).toBeLessThanOrEqual(1_000_001);
+  });
+
   it("does not publish when repo tasks are refreshed with identical data", () => {
     const store = createSessionStore();
     let publishes = 0;
