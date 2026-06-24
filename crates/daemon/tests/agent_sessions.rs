@@ -176,6 +176,7 @@ fn spawn_params(cwd: &Path, executable: &Path, prompt: &str) -> AgentSpawnParams
         max_turns: None,
         max_budget_usd: None,
         system_prompt: None,
+        mcp_config_path: None,
         executable: Some(executable.to_string_lossy().to_string()),
     }
 }

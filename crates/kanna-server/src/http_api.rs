@@ -1021,7 +1021,7 @@ async fn advance_stage(
         })?;
     match transition {
         crate::task_creator::PreparedStageTransition::Spawn(prepared) => {
-            let created = crate::task_creator::spawn_prepared_task_for_api(&mut daemon, prepared)
+            let created = crate::task_creator::spawn_prepared_task_for_api(&mut daemon, *prepared)
                 .await
                 .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
             let db = Db::open(&state.config.db_path).map_err(|e| {
@@ -1045,7 +1045,7 @@ async fn advance_stage(
             let continued = crate::task_creator::continue_prepared_stage_for_api(
                 &state.config.db_path,
                 &mut daemon,
-                prepared,
+                *prepared,
             )
             .await
             .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -1125,7 +1125,7 @@ async fn complete_stage(
         })?;
     match transition {
         crate::task_creator::PreparedStageTransition::Spawn(prepared) => {
-            let created = crate::task_creator::spawn_prepared_task_for_api(&mut daemon, prepared)
+            let created = crate::task_creator::spawn_prepared_task_for_api(&mut daemon, *prepared)
                 .await
                 .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
             let db = Db::open(&state.config.db_path).map_err(|e| {
@@ -1149,7 +1149,7 @@ async fn complete_stage(
             let continued = crate::task_creator::continue_prepared_stage_for_api(
                 &state.config.db_path,
                 &mut daemon,
-                prepared,
+                *prepared,
             )
             .await
             .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;

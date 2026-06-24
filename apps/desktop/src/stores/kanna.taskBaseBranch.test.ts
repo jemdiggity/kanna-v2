@@ -126,6 +126,8 @@ const mockState = vi.hoisted(() => {
       case "attach_session_with_snapshot":
       case "send_input":
       case "run_script":
+      case "ensure_directory":
+      case "write_text_file":
         return undefined;
       case "list_sessions":
         return pipelineItems

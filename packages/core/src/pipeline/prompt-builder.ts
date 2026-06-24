@@ -11,8 +11,13 @@ const KANNA_RUNTIME_GUIDANCE = `## Kanna Task Environment
 This session was launched by Kanna, a desktop app that manages agent tasks, worktrees, and pipeline stages.
 
 - The current Kanna task id is in \`KANNA_TASK_ID\`.
-- Kanna MCP tools are named \`kanna_*\` when your agent client exposes them.
-- The bundled \`kanna-cli\` is on PATH for Kanna task operations from the shell.`;
+- You are not running inside a Kanna sandbox; use the normal shell tools available in this worktree.
+- Agents are assigned workspace ports from \`<repo>/.kanna/config.json\`; Kanna assigns ports nearest to each default depending on project specifics. Use the assigned ports for services like Vite servers and Firebase emulators. Do not leave your assigned workspace unless asked.
+- Prefer Kanna MCP tools named \`kanna_*\` for Kanna task operations when your agent client exposes them.
+- Claude tasks are launched with the instance-local MCP config via \`--mcp-config\` when \`kanna-mcp\` is available.
+- If MCP tools are unavailable, fall back to the instance-local \`kanna-cli\`; it is exported as \`KANNA_CLI_PATH\` and its directory is prepended to PATH.
+- Use \`kanna-cli guide\` for the generated fallback CLI manual and current workflow semantics.
+- When this stage is complete, prefer MCP \`kanna_complete_stage\`; fallback: \`kanna-cli stage-complete --task-id "$KANNA_TASK_ID" --status success --summary "..."\`.`;
 
 export function buildKannaRuntimeSystemPrompt(): string {
   return KANNA_RUNTIME_GUIDANCE;

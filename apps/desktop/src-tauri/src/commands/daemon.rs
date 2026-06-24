@@ -677,6 +677,7 @@ pub async fn spawn_agent_session(
     max_turns: Option<u32>,
     max_budget_usd: Option<f64>,
     system_prompt: Option<String>,
+    mcp_config_path: Option<String>,
     executable: Option<String>,
 ) -> Result<(), DaemonCommandError> {
     let agent_provider = parse_agent_provider(Some(agent_provider))?;
@@ -695,6 +696,7 @@ pub async fn spawn_agent_session(
             "max_turns": max_turns,
             "max_budget_usd": max_budget_usd,
             "system_prompt": system_prompt,
+            "mcp_config_path": mcp_config_path,
             "executable": executable,
         },
     });

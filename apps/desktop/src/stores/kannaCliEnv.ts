@@ -26,6 +26,8 @@ export function buildKannaCliEnv(options: BuildKannaCliEnvOptions): Record<strin
 interface BuildTaskRuntimeEnvOptions extends BuildKannaCliEnvOptions {
   portEnv?: Record<string, string>;
   kannaCliPath?: string | null;
+  kannaMcpPath?: string | null;
+  mcpConfigPath?: string | null;
   path?: string | null;
 }
 
@@ -50,13 +52,27 @@ export function buildKannaCliPathEnv(kannaCliPath?: string | null, path?: string
   };
 }
 
+export function buildKannaMcpPathEnv(kannaMcpPath?: string | null, path?: string | null): Record<string, string> {
+  const kannaMcpDir = kannaMcpPath ? directoryName(kannaMcpPath) : null;
+  const runtimePath = kannaMcpDir && path ? prependPathEntry(path, kannaMcpDir) : null;
+
+  return {
+    ...(kannaMcpPath ? { KANNA_MCP_PATH: kannaMcpPath } : {}),
+    ...(runtimePath ? { PATH: runtimePath } : {}),
+  };
+}
+
 export function buildTaskRuntimeEnv(options: BuildTaskRuntimeEnvOptions): Record<string, string> {
-  const { portEnv, kannaCliPath, path, ...kannaCliEnvOptions } = options;
+  const { portEnv, kannaCliPath, kannaMcpPath, mcpConfigPath, path, ...kannaCliEnvOptions } = options;
+  const cliPathEnv = buildKannaCliPathEnv(kannaCliPath, path);
+  const mcpPathEnv = buildKannaMcpPathEnv(kannaMcpPath, cliPathEnv.PATH ?? path);
 
   return {
     KANNA_WORKTREE: "1",
     ...(portEnv ?? {}),
-    ...buildKannaCliPathEnv(kannaCliPath, path),
+    ...cliPathEnv,
+    ...mcpPathEnv,
+    ...(mcpConfigPath ? { KANNA_MCP_CONFIG: mcpConfigPath } : {}),
     ...buildKannaCliEnv(kannaCliEnvOptions),
   };
 }

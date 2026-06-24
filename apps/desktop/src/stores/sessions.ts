@@ -6,6 +6,7 @@ import { isTauri } from "../tauri-mock";
 import { buildTaskShellCommand, getShellTerminalEnv, getTaskTerminalEnv } from "../composables/terminalSessionRecovery";
 import { resolveDbName } from "./db";
 import { buildKannaCliPathEnv, buildTaskRuntimeEnv, resolveKannaServerBaseUrl } from "./kannaCliEnv";
+import { prepareKannaMcpRuntime } from "./kannaMcpRuntime";
 import { encodeDaemonInput } from "./daemonInput";
 import { getAgentPermissionFlags } from "./agent-permissions";
 import { buildWorktreeSessionEnv } from "./worktreeEnv";
@@ -323,7 +324,7 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
     sessionId: string,
     worktreePath: string,
     portEnv: Record<string, string>,
-  ): Promise<Record<string, string>> {
+  ): Promise<{ env: Record<string, string>; mcpConfigPath?: string }> {
     const repoConfig = await readRepoConfig(worktreePath).catch((error) => {
       console.error("[store] failed to read SDK task config during session recovery:", error);
       return {};
@@ -338,7 +339,7 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
       portEnv,
       inheritedPath,
     });
-    return {
+    const env = {
       ...agentBaseEnv,
       ...buildTaskRuntimeEnv({
         taskId: sessionId,
@@ -358,6 +359,8 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
         path: agentBaseEnv.PATH ?? inheritedPath,
       }),
     };
+    const { mcpConfigPath } = await prepareKannaMcpRuntime(sessionId, env);
+    return { env, mcpConfigPath };
   }
 
   async function preparePtySession(
@@ -448,6 +451,8 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
       console.error("[store] failed to resolve kanna-cli env:", error);
     }
 
+    const { mcpConfigPath } = await prepareKannaMcpRuntime(sessionId, env);
+
     const escapedPrompt = prompt.replace(/'/g, "'\\''");
     const escapedSystemPrompt = buildKannaRuntimeSystemPrompt().replace(/'/g, "'\\''");
     const escapedPromptWithPreamble = buildKannaRuntimeUserPrompt(prompt).replace(/'/g, "'\\''");
@@ -528,6 +533,9 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
     } else {
       const flags: string[] = [...permissionFlags];
       flags.push(`--append-system-prompt '${escapedSystemPrompt}'`);
+      if (mcpConfigPath) {
+        flags.push(`--mcp-config '${mcpConfigPath.replace(/'/g, "'\\''")}'`);
+      }
       if (options?.model) flags.push(`--model ${options.model}`);
       if (options?.maxTurns != null) flags.push(`--max-turns ${options.maxTurns}`);
       if (options?.maxBudgetUsd != null) flags.push(`--max-budget-usd ${options.maxBudgetUsd}`);
@@ -563,6 +571,7 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
       agentCmdPreamble,
       agentProvider: provider,
       kannaCliPath,
+      mcpConfigPath,
     };
   }
 
@@ -621,13 +630,15 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
     const spawnOptions = parseAgentSpawnRecoveryOptions(item.agent_spawn_options);
 
     if (item.agent_type === "agent" || item.agent_type === "sdk") {
+      const { env, mcpConfigPath } = await buildAgentSessionEnv(sessionId, worktreePath, portEnv);
       await invoke("spawn_agent_session", {
         sessionId,
         cwd: worktreePath,
         prompt,
-        env: await buildAgentSessionEnv(sessionId, worktreePath, portEnv),
+        env,
         agentProvider,
         systemPrompt: buildKannaRuntimeSystemPrompt(),
+        mcpConfigPath: mcpConfigPath ?? null,
         permissionMode: spawnOptions.permissionMode ?? null,
         model: spawnOptions.model ?? null,
         allowedTools: spawnOptions.allowedTools ?? null,

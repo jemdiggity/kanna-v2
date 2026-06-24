@@ -5,10 +5,11 @@ import { createSessionsApi } from "./sessions";
 import type { StoreContext } from "./state";
 
 const mocks = vi.hoisted(() => {
-  const invokeMock = vi.fn(async (command: string, args?: { name?: string }) => {
+  const invokeMock = vi.fn(async (command: string, args?: Record<string, unknown>) => {
     switch (command) {
       case "read_env_var":
         if (args?.name === "PATH") return "/usr/bin:/bin";
+        if (args?.name === "KANNA_DAEMON_DIR") return "/tmp/kanna-daemon";
         throw new Error(`env var not set: ${args?.name ?? ""}`);
       case "which_binary":
         return `/usr/bin/${args?.name ?? "binary"}`;
@@ -25,6 +26,8 @@ const mocks = vi.hoisted(() => {
       case "spawn_session":
       case "spawn_agent_session":
       case "send_input":
+      case "ensure_directory":
+      case "write_text_file":
         return undefined;
       case "list_sessions":
         return [];
@@ -160,6 +163,42 @@ describe("createSessionsApi", () => {
     );
   });
 
+  it("builds Claude PTY tasks with the instance-local Kanna MCP config", async () => {
+    const sessions = createSessionsApi(makeContext());
+
+    const prepared = await sessions.preparePtySession("task-1", "Ship it", {
+      agentProvider: "claude",
+    });
+
+    expect(prepared.agentCmd).toContain("--append-system-prompt");
+    expect(prepared.agentCmd).toContain("--mcp-config '/tmp/kanna-daemon/runtime/mcp/task-1.json'");
+    expect(prepared.env).toEqual(expect.objectContaining({
+      KANNA_MCP_PATH: "/usr/bin/kanna-mcp",
+      KANNA_MCP_CONFIG: "/tmp/kanna-daemon/runtime/mcp/task-1.json",
+      KANNA_CLI_PATH: "/usr/bin/kanna-cli",
+    }));
+    expect(mocks.invokeMock).toHaveBeenCalledWith("ensure_directory", {
+      path: "/tmp/kanna-daemon/runtime/mcp",
+    });
+    expect(mocks.invokeMock).toHaveBeenCalledWith("write_text_file", {
+      path: "/tmp/kanna-daemon/runtime/mcp/task-1.json",
+      content: expect.stringContaining("\"kanna-mcp\""),
+    });
+    const writeCall = mocks.invokeMock.mock.calls.find(([command]) => command === "write_text_file");
+    const content = String(writeCall?.[1]?.content ?? "");
+    expect(JSON.parse(content)).toEqual({
+      mcpServers: {
+        "kanna-mcp": {
+          command: "/usr/bin/kanna-mcp",
+          args: ["serve"],
+          env: {
+            KANNA_SERVER_BASE_URL: "http://127.0.0.1:48120",
+          },
+        },
+      },
+    });
+  });
+
   it("builds a Copilot resume command with the stored session id", async () => {
     const sessions = createSessionsApi(makeContext());
 
@@ -259,7 +298,10 @@ describe("createSessionsApi", () => {
         KANNA_TASK_ID: "task-1",
         KANNA_WORKTREE: "1",
         KANNA_DEV_PORT: "1421",
+        KANNA_MCP_PATH: "/usr/bin/kanna-mcp",
+        KANNA_MCP_CONFIG: "/tmp/kanna-daemon/runtime/mcp/task-1.json",
       }),
+      mcpConfigPath: "/tmp/kanna-daemon/runtime/mcp/task-1.json",
     }));
   });
 

@@ -49,6 +49,7 @@ pub fn params_to_ctx(params: &AgentSpawnParams) -> SpawnCtx {
         max_turns: params.max_turns,
         max_budget_usd: params.max_budget_usd,
         system_prompt: params.system_prompt.clone(),
+        mcp_config_path: params.mcp_config_path.clone(),
     }
 }
 
