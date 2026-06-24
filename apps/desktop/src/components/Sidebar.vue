@@ -699,12 +699,15 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
 }
 
 .repo-header.selected {
-  background: var(--kn-bg-panel-raised);
+  box-shadow:
+    inset 0 1px 0 var(--kn-accent),
+    inset 0 -1px 0 var(--kn-accent);
 }
 
 .repo-header.contains-selected-task {
-  background: var(--kn-bg-selected);
-  outline: 1px solid var(--kn-accent);
+  box-shadow:
+    inset 0 1px 0 var(--kn-accent),
+    inset 0 -1px 0 var(--kn-accent);
 }
 
 .repo-dragging .repo-header {

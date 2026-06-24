@@ -2,6 +2,8 @@
 
 import type { PipelineItem, Repo } from "@kanna/db";
 import { mount } from "@vue/test-utils";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { h, nextTick } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Sidebar from "../Sidebar.vue";
@@ -437,6 +439,28 @@ describe("Sidebar", () => {
     const headers = wrapper.findAll(".repo-header");
     expect(headers[0]?.classes()).not.toContain("contains-selected-task");
     expect(headers[1]?.classes()).toContain("contains-selected-task");
+  });
+
+  it("styles the selected-task repository marker as inset top and bottom lines without a filled background", () => {
+    const source = readFileSync(join(process.cwd(), "src/components/Sidebar.vue"), "utf8");
+    const markerRule = source.match(/\.repo-header\.contains-selected-task\s*\{(?<body>[^}]*)\}/);
+
+    expect(markerRule?.groups?.body).toContain("box-shadow:");
+    expect(markerRule?.groups?.body).toContain("inset 0 1px 0 var(--kn-accent)");
+    expect(markerRule?.groups?.body).toContain("inset 0 -1px 0 var(--kn-accent)");
+    expect(markerRule?.groups?.body).not.toContain("background:");
+    expect(markerRule?.groups?.body).not.toContain("outline:");
+  });
+
+  it("styles the selected repository marker as inset top and bottom lines without a filled background", () => {
+    const source = readFileSync(join(process.cwd(), "src/components/Sidebar.vue"), "utf8");
+    const selectedRule = source.match(/\.repo-header\.selected\s*\{(?<body>[^}]*)\}/);
+
+    expect(selectedRule?.groups?.body).toContain("box-shadow:");
+    expect(selectedRule?.groups?.body).toContain("inset 0 1px 0 var(--kn-accent)");
+    expect(selectedRule?.groups?.body).toContain("inset 0 -1px 0 var(--kn-accent)");
+    expect(selectedRule?.groups?.body).not.toContain("background:");
+    expect(selectedRule?.groups?.body).not.toContain("outline:");
   });
 
   it("scrolls when a selected active-stage task becomes unclosed and visible", async () => {
