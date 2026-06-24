@@ -516,6 +516,7 @@ describe("kanna runtime status reconciliation", () => {
     await store.selectRepo("repo-1");
     await store.selectItem("task-1");
     await flushStore();
+    mockState.invokeMock.mockClear();
 
     mockState.sessionStatuses = [{ session_id: "task-1", status: "waiting" }];
 

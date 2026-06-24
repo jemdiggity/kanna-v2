@@ -19,6 +19,7 @@
     "test:e2e:all": "tsx tests/e2e/run.ts"
   },
   "dependencies": {
+    "@kanna/stream-client": "workspace:*",
     "@pierre/diffs": "^1.1.0",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-dialog": "^2.6.0",
