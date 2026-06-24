@@ -25,7 +25,7 @@ describe("NewTaskModal", () => {
     clearContextShortcuts("newTask");
   });
 
-  it("shows only the selected provider name and updates it when cycling", async () => {
+  it("shows only the selected agent choice and updates it when cycling", async () => {
     const wrapper = mount(NewTaskModal, {
       props: { defaultAgentProvider: "claude" },
       global: {
@@ -38,7 +38,7 @@ describe("NewTaskModal", () => {
     await flushPromises();
     await flushPromises();
 
-    expect(wrapper.text()).toContain("Claude");
+    expect(wrapper.text()).toContain("claude (chat)");
     expect(wrapper.findAll(".agent-provider")).toHaveLength(1);
 
     await wrapper.find("textarea").trigger("keydown", {
@@ -48,11 +48,11 @@ describe("NewTaskModal", () => {
     });
     await flushPromises();
 
-    expect(wrapper.text()).toContain("Codex");
+    expect(wrapper.text()).toContain("claude cli");
     expect(wrapper.findAll(".agent-provider")).toHaveLength(1);
   });
 
-  it("cycles forward when the agent indicator is clicked", async () => {
+  it("cycles forward when the agent choice is clicked", async () => {
     const wrapper = mount(NewTaskModal, {
       props: { defaultAgentProvider: "claude" },
       global: {
@@ -65,12 +65,12 @@ describe("NewTaskModal", () => {
     await flushPromises();
     await flushPromises();
 
-    expect(wrapper.text()).toContain("Claude");
+    expect(wrapper.text()).toContain("claude (chat)");
 
     await wrapper.get(".agent-provider").trigger("click");
     await flushPromises();
 
-    expect(wrapper.text()).toContain("Codex");
+    expect(wrapper.text()).toContain("claude cli");
   });
 
   it("includes OpenCode in the agent cycle when installed", async () => {
@@ -86,12 +86,17 @@ describe("NewTaskModal", () => {
     await flushPromises();
     await flushPromises();
 
-    expect(wrapper.text()).toContain("Codex");
+    expect(wrapper.text()).toContain("codex (chat)");
 
     await wrapper.get(".agent-provider").trigger("click");
     await flushPromises();
 
-    expect(wrapper.text()).toContain("OpenCode");
+    expect(wrapper.text()).toContain("codex cli");
+
+    await wrapper.get(".agent-provider").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("opencode cli");
   });
 
   it("prevents mouse down default on the agent indicator so focus stays on the prompt", async () => {
@@ -184,7 +189,7 @@ describe("NewTaskModal", () => {
 
     const labels = wrapper.findAll(".pipeline-row .pipeline-label").map((label) => label.text());
 
-    expect(labels).toEqual(["tasks.baseBranch", "Pipeline", "Display"]);
+    expect(labels).toEqual(["tasks.baseBranch", "Pipeline"]);
   });
 
   it("shows the selected pipeline inline before the picker is opened", async () => {
@@ -254,7 +259,7 @@ describe("NewTaskModal", () => {
     expect(wrapper.emitted("submit")).toEqual([["Ship pipeline picker", "claude", "review", "origin/main", "agent"]]);
   });
 
-  it("restores Themed after a PTY-only provider forced Raw but preserves explicit Raw", async () => {
+  it("uses combined chat and CLI agent choices when submitting", async () => {
     const wrapper = mount(NewTaskModal, {
       props: {
         defaultAgentProvider: "claude",
@@ -269,42 +274,25 @@ describe("NewTaskModal", () => {
     await flushPromises();
     await flushPromises();
 
-    const directCli = () => wrapper.get('[data-testid="display-mode-direct-cli"]');
-    const checked = () => (directCli().element as HTMLInputElement).checked;
-    const disabled = () => (directCli().element as HTMLInputElement).disabled;
-
-    // Claude default → themed GUI (Direct CLI unchecked).
-    expect(checked()).toBe(false);
+    expect(wrapper.text()).toContain("claude (chat)");
 
     await wrapper.get(".agent-provider").trigger("click");
     await flushPromises();
-    expect(wrapper.text()).toContain("Codex");
-
-    await wrapper.get(".agent-provider").trigger("click");
-    await flushPromises();
-    expect(wrapper.text()).toContain("OpenCode");
-    // OpenCode has no GUI mode → Direct CLI is forced on and locked.
-    expect(checked()).toBe(true);
-    expect(disabled()).toBe(true);
-
-    await wrapper.get(".agent-provider").trigger("click");
-    await flushPromises();
-    expect(wrapper.text()).toContain("Claude");
-    expect(checked()).toBe(false);
-
-    // Explicitly choosing Direct CLI sticks across provider changes.
-    await directCli().setValue(true);
-    await wrapper.get(".agent-provider").trigger("click");
-    await wrapper.get(".agent-provider").trigger("click");
-    await wrapper.get(".agent-provider").trigger("click");
-    await flushPromises();
-    expect(wrapper.text()).toContain("Claude");
-    expect(checked()).toBe(true);
+    expect(wrapper.text()).toContain("claude cli");
 
     await wrapper.get("textarea").setValue("Keep raw");
     await wrapper.get("textarea").trigger("keydown", { key: "Enter", metaKey: true });
 
     expect(wrapper.emitted("submit")?.at(-1)).toEqual(["Keep raw", "claude", "default", "origin/main", "pty"]);
+
+    await wrapper.get(".agent-provider").trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("codex (chat)");
+
+    await wrapper.get("textarea").setValue("Use codex chat");
+    await wrapper.get("textarea").trigger("keydown", { key: "Enter", metaKey: true });
+
+    expect(wrapper.emitted("submit")?.at(-1)).toEqual(["Use codex chat", "codex", "default", "origin/main", "agent"]);
   });
 
   it("supports keyboard navigation in the pipeline picker and returns focus to the toggle", async () => {

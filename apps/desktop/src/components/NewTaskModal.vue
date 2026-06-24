@@ -30,7 +30,6 @@ const emit = defineEmits<{
 const prompt = ref("");
 const agentProvider = ref<AgentProvider>(props.defaultAgentProvider ?? "claude");
 const displayMode = ref<AgentExecutionType>("agent");
-const rawModeExplicitlySelected = ref(false);
 const pipelineOptions = computed(() => {
   if (props.pipelines && props.pipelines.length > 0) return props.pipelines;
   return ["default"];
@@ -75,42 +74,64 @@ const baseBranchOptionsMaxHeight = `${MAX_VISIBLE_BRANCH_ROWS * BRANCH_ROW_HEIGH
 
 const providers: Array<AgentProvider> = ["claude", "copilot", "codex", "opencode"];
 const availableProviders = ref<Array<AgentProvider>>([...providers]);
+type AgentChoice = {
+  provider: AgentProvider;
+  executionType: AgentExecutionType;
+};
 
 function providerLabel(provider: AgentProvider): string {
-  if (provider === "claude") return "Claude";
-  if (provider === "copilot") return "Copilot";
-  if (provider === "codex") return "Codex";
-  return "OpenCode";
+  return provider;
 }
 
-const supportsThemedMode = computed(() => agentProvider.value === "claude" || agentProvider.value === "codex");
+function supportsChatMode(provider: AgentProvider): boolean {
+  return provider === "claude" || provider === "codex";
+}
 
-watch(supportsThemedMode, (supported) => {
-  if (!supported) {
-    displayMode.value = "pty";
-    return;
-  }
-  if (!rawModeExplicitlySelected.value) {
-    displayMode.value = "agent";
-  }
+function choicesForProvider(provider: AgentProvider): AgentChoice[] {
+  return supportsChatMode(provider)
+    ? [{ provider, executionType: "agent" }, { provider, executionType: "pty" }]
+    : [{ provider, executionType: "pty" }];
+}
+
+const agentChoices = computed(() => availableProviders.value.flatMap(choicesForProvider));
+
+function choiceMatches(choice: AgentChoice, provider: AgentProvider, executionType: AgentExecutionType): boolean {
+  return choice.provider === provider && choice.executionType === executionType;
+}
+
+function applyChoice(choice: AgentChoice) {
+  agentProvider.value = choice.provider;
+  displayMode.value = choice.executionType;
+}
+
+function preferredChoice(): AgentChoice | undefined {
+  const choices = agentChoices.value;
+  if (choices.length === 0) return undefined;
+
+  const preferredProvider = props.defaultAgentProvider && availableProviders.value.includes(props.defaultAgentProvider)
+    ? props.defaultAgentProvider
+    : agentProvider.value;
+  return choices.find((choice) => choice.provider === preferredProvider && choice.executionType === "agent")
+    ?? choices.find((choice) => choice.provider === preferredProvider)
+    ?? choices[0];
+}
+
+watch(agentChoices, (choices) => {
+  if (choices.length === 0) return;
+  if (choices.some((choice) => choiceMatches(choice, agentProvider.value, displayMode.value))) return;
+  const nextChoice = preferredChoice();
+  if (nextChoice) applyChoice(nextChoice);
 }, { immediate: true });
 
-function selectDisplayMode(mode: AgentExecutionType) {
-  if (mode === "agent" && !supportsThemedMode.value) return;
-  displayMode.value = mode;
-  rawModeExplicitlySelected.value = mode === "pty";
+function agentChoiceLabel(provider: AgentProvider, executionType: AgentExecutionType): string {
+  return `${providerLabel(provider)} ${executionType === "agent" ? "(chat)" : "cli"}`;
 }
 
-// "Direct CLI" = the raw terminal (PTY); unchecked = the themed GUI view.
-const directCli = computed<boolean>({
-  get: () => displayMode.value === "pty",
-  set: (checked) => selectDisplayMode(checked ? "pty" : "agent"),
-});
-
-function cycleProvider(direction: -1 | 1) {
-  const idx = availableProviders.value.indexOf(agentProvider.value);
+function cycleAgentChoice(direction: -1 | 1) {
+  const choices = agentChoices.value;
+  const idx = choices.findIndex((choice) => choiceMatches(choice, agentProvider.value, displayMode.value));
   if (idx === -1) return;
-  agentProvider.value = availableProviders.value[(idx + direction + availableProviders.value.length) % availableProviders.value.length];
+  applyChoice(choices[(idx + direction + choices.length) % choices.length]);
 }
 
 onMounted(async () => {
@@ -134,8 +155,10 @@ onMounted(async () => {
     const preferred = props.defaultAgentProvider ?? agentProvider.value;
     if (availableProviders.value.includes(preferred)) {
       agentProvider.value = preferred;
+      displayMode.value = supportsChatMode(preferred) ? "agent" : "pty";
     } else {
-      agentProvider.value = availableProviders.value[0];
+      const nextChoice = agentChoices.value[0];
+      if (nextChoice) applyChoice(nextChoice);
     }
   } catch (e) {
     console.debug("[newtask] cli detection failed:", e);
@@ -319,13 +342,13 @@ function handleKeydown(e: KeyboardEvent) {
   if (e.metaKey && e.shiftKey && (e.key === "[" || e.key === "{")) {
     e.preventDefault();
     e.stopPropagation();
-    cycleProvider(-1);
+    cycleAgentChoice(-1);
     return;
   }
   if (e.metaKey && e.shiftKey && (e.key === "]" || e.key === "}")) {
     e.preventDefault();
     e.stopPropagation();
-    cycleProvider(1);
+    cycleAgentChoice(1);
     return;
   }
   if (e.key === "Escape") {
@@ -340,8 +363,8 @@ function handleKeydown(e: KeyboardEvent) {
     <div class="modal" @keydown="handleKeydown">
       <div class="modal-header">
         <h3>{{ $t('tasks.newTask') }}</h3>
-        <button class="agent-provider" type="button" @mousedown.prevent @click="cycleProvider(1)">
-          {{ providerLabel(agentProvider) }}
+        <button class="agent-provider" type="button" @mousedown.prevent @click="cycleAgentChoice(1)">
+          {{ agentChoiceLabel(agentProvider, displayMode) }}
         </button>
       </div>
       <div class="modal-body">
@@ -471,19 +494,6 @@ function handleKeydown(e: KeyboardEvent) {
             </div>
           </div>
         </div>
-
-        <div class="pipeline-row">
-          <label class="pipeline-label">Display</label>
-          <label class="direct-cli-toggle">
-            <input
-              type="checkbox"
-              v-model="directCli"
-              :disabled="!supportsThemedMode"
-              data-testid="display-mode-direct-cli"
-            />
-            Direct CLI
-          </label>
-        </div>
       </div>
       <div class="modal-footer">
         <span class="hint">{{ $t('modals.submitHint', { action: $t('actions.submit').toLowerCase() }) }}</span>
@@ -547,19 +557,6 @@ function handleKeydown(e: KeyboardEvent) {
 
 .agent-provider:hover {
   color: var(--kn-text-primary);
-}
-
-.direct-cli-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--kn-text-secondary);
-  cursor: pointer;
-}
-
-.direct-cli-toggle:has(input:disabled) {
-  cursor: default;
-  opacity: 0.5;
 }
 
 .modal-body {

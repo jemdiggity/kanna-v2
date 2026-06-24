@@ -78,7 +78,7 @@ describe("new task modal", () => {
     await client.executeSync(buildGlobalKeydownScript({ key: "Escape" }));
   });
 
-  it("creates Claude tasks in themed mode by default and Direct CLI as PTY mode", async () => {
+  it("creates Claude tasks in chat mode by default and CLI mode as PTY mode", async () => {
     const themedPrompt = "Create themed Claude task";
     const directCliPrompt = "Create direct Claude task";
 
@@ -86,11 +86,10 @@ describe("new task modal", () => {
     expect(modalResult).toBeNull();
     await client.waitForElement(".modal-overlay", 5_000);
 
-    const defaultMode = await client.executeSync<{ checked: boolean; disabled: boolean }>(
-      `const checkbox = document.querySelector('[data-testid="display-mode-direct-cli"]');
-       return { checked: checkbox.checked, disabled: checkbox.disabled };`,
+    const defaultMode = await client.executeSync<string>(
+      `return document.querySelector(".agent-provider")?.textContent?.trim() ?? "";`,
     );
-    expect(defaultMode).toEqual({ checked: false, disabled: false });
+    expect(defaultMode).toBe("claude (chat)");
 
     const promptInput = await client.waitForElement(".prompt-input", 2_000);
     await client.sendKeys(promptInput, themedPrompt);
@@ -103,13 +102,12 @@ describe("new task modal", () => {
     const directModalResult = await callVueMethod(client, "keyboardActions.newTask");
     expect(directModalResult).toBeNull();
     await client.waitForElement(".modal-overlay", 5_000);
-    await client.click(await client.waitForElement('[data-testid="display-mode-direct-cli"]', 2_000));
+    await client.click(await client.waitForElement(".agent-provider", 2_000));
 
-    const directMode = await client.executeSync<{ checked: boolean; disabled: boolean }>(
-      `const checkbox = document.querySelector('[data-testid="display-mode-direct-cli"]');
-       return { checked: checkbox.checked, disabled: checkbox.disabled };`,
+    const directMode = await client.executeSync<string>(
+      `return document.querySelector(".agent-provider")?.textContent?.trim() ?? "";`,
     );
-    expect(directMode).toEqual({ checked: true, disabled: false });
+    expect(directMode).toBe("claude cli");
 
     const directPromptInput = await client.waitForElement(".prompt-input", 2_000);
     await client.sendKeys(directPromptInput, directCliPrompt);
@@ -120,30 +118,18 @@ describe("new task modal", () => {
     }));
   });
 
-  it("forces and locks Direct CLI for providers without themed mode", async () => {
+  it("shows CLI choices for providers without chat mode", async () => {
     const modalResult = await callVueMethod(client, "keyboardActions.newTask");
     expect(modalResult).toBeNull();
     await client.waitForElement(".modal-overlay", 5_000);
 
     await client.click(await client.waitForElement(".agent-provider", 2_000));
+    await client.click(await client.waitForElement(".agent-provider", 2_000));
 
-    const forcedMode = await client.executeSync<{
-      providerLabel: string;
-      checked: boolean;
-      disabled: boolean;
-    }>(
-      `const checkbox = document.querySelector('[data-testid="display-mode-direct-cli"]');
-       return {
-         providerLabel: document.querySelector(".agent-provider")?.textContent?.trim() ?? "",
-         checked: checkbox.checked,
-         disabled: checkbox.disabled,
-       };`,
+    const providerLabel = await client.executeSync<string>(
+      `return document.querySelector(".agent-provider")?.textContent?.trim() ?? "";`,
     );
-    expect(forcedMode).toEqual({
-      providerLabel: "Copilot",
-      checked: true,
-      disabled: true,
-    });
+    expect(providerLabel).toBe("copilot cli");
 
     await client.executeSync(buildGlobalKeydownScript({ key: "Escape" }));
   });
