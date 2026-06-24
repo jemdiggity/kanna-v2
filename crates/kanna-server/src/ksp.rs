@@ -22,9 +22,7 @@ use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 use kanna_agent_protocol::{ClientFrame, FrameAgentEvent, ServerFrame, StreamKind};
-use kanna_daemon::protocol::{
-    Command as DaemonCommand, Event as DaemonEvent, SessionStatus, TerminalSnapshot,
-};
+use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent, SessionStatus};
 
 use crate::daemon_client::DaemonClient;
 use crate::db::Db;
@@ -1376,7 +1374,7 @@ mod tests {
             config.daemon_dir.clone(),
             DaemonEvent::Snapshot {
                 session_id: "shell-wt-task-1".to_string(),
-                snapshot: TerminalSnapshot {
+                snapshot: kanna_daemon::protocol::TerminalSnapshot {
                     version: 1,
                     rows: 24,
                     cols: 80,

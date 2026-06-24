@@ -71,6 +71,7 @@ export interface PreparedPtySession {
   agentCmdPreamble?: string;
   agentProvider: AgentProvider;
   kannaCliPath?: string;
+  mcpConfigPath?: string;
 }
 
 export interface TaskSessionRecoveryOptions {

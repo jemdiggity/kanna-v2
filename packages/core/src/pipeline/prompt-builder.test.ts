@@ -110,8 +110,16 @@ describe("buildKannaRuntimeSystemPrompt", () => {
 
     expect(result).toContain("This session was launched by Kanna");
     expect(result).toContain("The current Kanna task id is in `KANNA_TASK_ID`.");
-    expect(result).toContain("Kanna MCP tools are named `kanna_*`");
-    expect(result).toContain("The bundled `kanna-cli` is on PATH");
+    expect(result).toContain("You are not running inside a Kanna sandbox");
+    expect(result).toContain("Prefer Kanna MCP tools named `kanna_*`");
+    expect(result).toContain("Claude tasks are launched with the instance-local MCP config via `--mcp-config`");
+    expect(result).toContain("fall back to the instance-local `kanna-cli`");
+    expect(result).toContain("kanna-cli guide");
+    expect(result).toContain("kanna_complete_stage");
+    expect(result).toContain("kanna-cli stage-complete");
+    expect(result).toContain("Agents are assigned workspace ports from `<repo>/.kanna/config.json`");
+    expect(result).toContain("Use the assigned ports for services like Vite servers and Firebase emulators");
+    expect(result).toContain("Do not leave your assigned workspace unless asked");
   });
 });
 
@@ -120,7 +128,8 @@ describe("buildKannaRuntimeUserPrompt", () => {
     const result = buildKannaRuntimeUserPrompt("Ship the feature");
 
     expect(result).toContain("This session was launched by Kanna");
-    expect(result).toContain("The bundled `kanna-cli` is on PATH");
+    expect(result).toContain("Prefer Kanna MCP tools named `kanna_*`");
+    expect(result).toContain("fall back to the instance-local `kanna-cli`");
     expect(result).toMatch(/\n\nShip the feature$/);
   });
 });

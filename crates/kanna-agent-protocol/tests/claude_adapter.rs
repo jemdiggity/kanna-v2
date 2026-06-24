@@ -147,6 +147,7 @@ fn spawn_args_pin_the_stream_json_contract() {
         max_turns: None,
         max_budget_usd: None,
         system_prompt: None,
+        mcp_config_path: Some("/tmp/kanna-mcp.json".to_string()),
     };
 
     let spec = adapter.initial_spawn(&ctx);
@@ -159,6 +160,7 @@ fn spawn_args_pin_the_stream_json_contract() {
     assert!(args.contains("--allowedTools Bash"));
     assert!(args.contains("--disallowedTools Write,Edit"));
     assert!(args.contains("--permission-prompt-tool stdio"));
+    assert!(args.contains("--mcp-config /tmp/kanna-mcp.json"));
 
     // The prompt is NOT an argument — stream-json input mode ignores the -p
     // prompt; it goes to stdin as an enveloped user message.
@@ -172,6 +174,7 @@ fn spawn_args_pin_the_stream_json_contract() {
     let resume_args = resume.args.join(" ");
     assert!(resume_args.contains("--resume sess-123"));
     assert!(resume_args.contains("--input-format stream-json"));
+    assert!(resume_args.contains("--mcp-config /tmp/kanna-mcp.json"));
     let stdin: Value =
         serde_json::from_str(&resume.initial_stdin.expect("message must go to stdin")).unwrap();
     assert_eq!(stdin["message"]["content"], "continue please");
@@ -190,6 +193,7 @@ fn default_spawn_runs_yolo_without_sandbox_or_prompts() {
         max_turns: None,
         max_budget_usd: None,
         system_prompt: None,
+        mcp_config_path: None,
     };
 
     let args = adapter.initial_spawn(&ctx).args.join(" ");
@@ -211,6 +215,7 @@ fn dont_ask_and_default_modes_are_treated_as_yolo() {
             max_turns: None,
             max_budget_usd: None,
             system_prompt: None,
+            mcp_config_path: None,
         };
 
         let args = adapter.initial_spawn(&ctx).args.join(" ");

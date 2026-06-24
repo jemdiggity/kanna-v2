@@ -164,7 +164,7 @@ pub(crate) fn prepare_advance_stage_for_api(
                 source_task.base_ref.as_deref(),
                 source_task.branch.as_deref(),
             )?;
-            return Ok(PreparedStageTransition::Continue(
+            return Ok(PreparedStageTransition::Continue(Box::new(
                 prepare_post_action_stage(
                     source_task_id,
                     &current_stage_name,
@@ -178,7 +178,7 @@ pub(crate) fn prepare_advance_stage_for_api(
                         .as_deref()
                         .or(source_task.agent_provider.as_deref()),
                 )?,
-            ));
+            )));
         }
     }
 
@@ -203,16 +203,18 @@ pub(crate) fn prepare_advance_stage_for_api(
     };
 
     if next_stage.mode == Some(PipelineStageMode::Continue) {
-        return Ok(PreparedStageTransition::Continue(prepare_continue_stage(
-            source_task_id,
-            &current_stage_name,
-            &next_stage.name,
-            source_task.stage_result.clone(),
-            &task_prompt,
-            source_task.branch.as_deref(),
-            normalize_agent_type(source_task.agent_type.as_deref()).unwrap_or("pty"),
-            source_task.agent_provider.as_deref(),
-        )?));
+        return Ok(PreparedStageTransition::Continue(Box::new(
+            prepare_continue_stage(
+                source_task_id,
+                &current_stage_name,
+                &next_stage.name,
+                source_task.stage_result.clone(),
+                &task_prompt,
+                source_task.branch.as_deref(),
+                normalize_agent_type(source_task.agent_type.as_deref()).unwrap_or("pty"),
+                source_task.agent_provider.as_deref(),
+            )?,
+        )));
     }
 
     prepare_task_spawn(
@@ -235,7 +237,7 @@ pub(crate) fn prepare_advance_stage_for_api(
             notify_task_id: None,
         },
     )
-    .map(PreparedStageTransition::Spawn)
+    .map(|spawn| PreparedStageTransition::Spawn(Box::new(spawn)))
 }
 
 fn resolve_inherited_task_title(
@@ -358,7 +360,7 @@ pub(crate) fn prepare_auto_stage_completion_for_api(
             normalize_agent_type(source_task.agent_type.as_deref()).unwrap_or("pty"),
             source_task.agent_provider.as_deref(),
         )
-        .map(PreparedStageTransition::Continue)
+        .map(|continuation| PreparedStageTransition::Continue(Box::new(continuation)))
         .map(Some);
     }
 
@@ -382,7 +384,7 @@ pub(crate) fn prepare_auto_stage_completion_for_api(
             notify_task_id: None,
         },
     )
-    .map(PreparedStageTransition::Spawn)
+    .map(|spawn| PreparedStageTransition::Spawn(Box::new(spawn)))
     .map(Some)
 }
 
@@ -508,13 +510,14 @@ pub(crate) enum PreparedSessionSpawn {
         permission_mode: Option<String>,
         allowed_tools: Vec<String>,
         system_prompt: String,
+        mcp_config_path: Option<String>,
         executable: Option<String>,
     },
 }
 
 pub(crate) enum PreparedStageTransition {
-    Spawn(PreparedTaskSpawn),
-    Continue(PreparedStageContinue),
+    Spawn(Box<PreparedTaskSpawn>),
+    Continue(Box<PreparedStageContinue>),
 }
 
 pub(crate) struct PreparedStageContinue {
@@ -726,7 +729,8 @@ fn prepare_task_spawn(
     )
     .map_err(|e| format!("db error: {}", e))?;
     let worktree_repo_config = read_repo_config(&worktree_path)?;
-    let spawn_env = build_spawn_env(config, &task_id, &port_env)?;
+    let mut spawn_env = build_spawn_env(config, &task_id, &port_env)?;
+    let mcp_config_path = write_kanna_mcp_config(&config.daemon_dir, &task_id, &mut spawn_env)?;
     let session = match agent_type {
         AgentSessionType::Pty => {
             let preamble = build_kanna_preamble(
@@ -735,6 +739,7 @@ fn prepare_task_spawn(
                 &stage_name,
                 &pipeline_name,
                 stage_transition,
+                mcp_config_path.as_deref(),
             );
             let agent_cmd = build_agent_command(
                 &provider,
@@ -743,6 +748,7 @@ fn prepare_task_spawn(
                 permission_mode.as_deref(),
                 &allowed_tools,
                 Some(&preamble),
+                mcp_config_path.as_deref(),
             );
             let full_cmd = build_task_shell_command(
                 &agent_cmd,
@@ -769,6 +775,7 @@ fn prepare_task_spawn(
                 &stage_name,
                 &pipeline_name,
                 stage_transition,
+                mcp_config_path.as_deref(),
             );
             PreparedSessionSpawn::Agent {
                 agent_provider: provider.to_daemon_provider(),
@@ -777,6 +784,7 @@ fn prepare_task_spawn(
                 permission_mode,
                 allowed_tools,
                 system_prompt,
+                mcp_config_path,
                 executable: headless_executable,
             }
         }
@@ -897,6 +905,7 @@ async fn spawn_prepared_task(
             permission_mode,
             allowed_tools,
             system_prompt,
+            mcp_config_path,
             executable,
         } => DaemonCommand::SpawnAgent {
             session_id: prepared.session_id,
@@ -912,6 +921,7 @@ async fn spawn_prepared_task(
                 max_turns: None,
                 max_budget_usd: None,
                 system_prompt: Some(system_prompt),
+                mcp_config_path,
                 executable,
             },
         },
@@ -1665,7 +1675,60 @@ fn build_spawn_env(
         }
         env.insert("KANNA_CLI_PATH".to_string(), path);
     }
+
+    if let Ok(Some(path)) = which_binary("kanna-mcp") {
+        if let Some(parent) = Path::new(&path).parent() {
+            let existing_path = env
+                .get("PATH")
+                .cloned()
+                .or_else(|| std::env::var("PATH").ok());
+            let runtime_path =
+                prepend_path_entry(existing_path.as_deref(), parent.to_string_lossy().as_ref());
+            env.insert("PATH".to_string(), runtime_path);
+        }
+        env.insert("KANNA_MCP_PATH".to_string(), path);
+    }
     Ok(env)
+}
+
+fn write_kanna_mcp_config(
+    daemon_dir: &str,
+    task_id: &str,
+    env: &mut HashMap<String, String>,
+) -> Result<Option<String>, String> {
+    let Some(mcp_path) = env.get("KANNA_MCP_PATH").cloned() else {
+        return Ok(None);
+    };
+    let server_base_url = env
+        .get("KANNA_SERVER_BASE_URL")
+        .cloned()
+        .unwrap_or_else(|| "http://127.0.0.1:48120".to_string());
+    let config_path = Path::new(daemon_dir)
+        .join("runtime")
+        .join("mcp")
+        .join(format!("{task_id}.json"));
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("failed to create Kanna MCP config directory: {e}"))?;
+    }
+    let config = serde_json::json!({
+        "mcpServers": {
+            "kanna-mcp": {
+                "command": mcp_path,
+                "args": ["serve"],
+                "env": {
+                    "KANNA_SERVER_BASE_URL": server_base_url
+                }
+            }
+        }
+    });
+    let content = serde_json::to_string_pretty(&config)
+        .map_err(|e| format!("failed to render Kanna MCP config: {e}"))?;
+    std::fs::write(&config_path, content)
+        .map_err(|e| format!("failed to write Kanna MCP config: {e}"))?;
+    let path = config_path.to_string_lossy().to_string();
+    env.insert("KANNA_MCP_CONFIG".to_string(), path.clone());
+    Ok(Some(path))
 }
 
 fn which_binary(name: &str) -> Result<Option<String>, String> {
@@ -1775,6 +1838,7 @@ fn build_agent_command(
     permission_mode: Option<&str>,
     allowed_tools: &[String],
     kanna_preamble: Option<&str>,
+    mcp_config_path: Option<&str>,
 ) -> String {
     let prompt_with_fallback = match provider {
         AgentProvider::Claude => prompt.to_string(),
@@ -1802,6 +1866,12 @@ fn build_agent_command(
                 flags.push(format!(
                     "--append-system-prompt '{}'",
                     shell_single_quote(preamble)
+                ));
+            }
+            if let Some(mcp_config_path) = mcp_config_path {
+                flags.push(format!(
+                    "--mcp-config '{}'",
+                    shell_single_quote(mcp_config_path)
                 ));
             }
             format!("claude {} '{}'", flags.join(" "), escaped_prompt)
@@ -1917,19 +1987,35 @@ fn build_kanna_preamble(
     stage_name: &str,
     pipeline_name: &str,
     transition: Option<&str>,
+    mcp_config_path: Option<&str>,
 ) -> String {
     let provider_name = provider.as_str();
     let transition = transition.unwrap_or("manual");
-    [
+    let mut lines = vec![
         "## Kanna Task Context".to_string(),
         format!(
             "You are `{provider_name}` running inside Kanna task `{task_id}`, stage `{stage_name}` of pipeline `{pipeline_name}` with transition `{transition}`."
         ),
-        "Run `kanna-cli guide` for the generated Kanna task manual and current workflow semantics.".to_string(),
-        "Prefer `kanna-mcp` tools when available; fall back to `kanna-cli` from the shell.".to_string(),
-        "Use `kanna-cli stage-complete --task-id \"$KANNA_TASK_ID\" --status success --summary \"...\"` when this stage is complete.".to_string(),
-    ]
-    .join("\n")
+        "You are not running inside a Kanna sandbox; use the normal shell tools available in this worktree.".to_string(),
+    ];
+    if mcp_config_path.is_some() {
+        lines.push(
+            "An instance-local `kanna-mcp` config is available at `KANNA_MCP_CONFIG`.".to_string(),
+        );
+        if matches!(provider, AgentProvider::Claude) {
+            lines.push(
+                "Claude is launched with this config via `--mcp-config`, so Kanna MCP tools should be available automatically."
+                    .to_string(),
+            );
+        }
+    }
+    lines.extend([
+        "Prefer `kanna-mcp` tools for Kanna task operations when your agent client exposes them.".to_string(),
+        "If MCP tools are unavailable, fall back to the instance-local `kanna-cli`; it is exported as `KANNA_CLI_PATH` and its directory is prepended to `PATH`.".to_string(),
+        "Use `kanna-cli guide` for the generated fallback CLI manual and current workflow semantics.".to_string(),
+        "When this stage is complete, prefer MCP `kanna_complete_stage`; fallback: `kanna-cli stage-complete --task-id \"$KANNA_TASK_ID\" --status success --summary \"...\"`.".to_string(),
+    ]);
+    lines.join("\n")
 }
 
 pub(crate) fn resolve_stage_transition(
@@ -2031,6 +2117,7 @@ mod tests {
             "review",
             "qa",
             Some("auto"),
+            None,
         );
 
         let command = super::build_agent_command(
@@ -2040,6 +2127,7 @@ mod tests {
             Some("dontAsk"),
             &[],
             Some(&preamble),
+            None,
         );
 
         assert!(command.contains("--append-system-prompt '"));
@@ -2048,6 +2136,16 @@ mod tests {
         assert!(command.contains("pipeline `qa`"));
         assert!(command.contains("transition `auto`"));
         assert!(command.contains("kanna-cli guide"));
+        assert!(command.contains("You are not running inside a Kanna sandbox"));
+        let mcp_index = command
+            .find("Prefer `kanna-mcp` tools for Kanna task operations")
+            .expect("preamble should prefer MCP tools");
+        let cli_index = command
+            .find("If MCP tools are unavailable, fall back to the instance-local `kanna-cli`")
+            .expect("preamble should describe CLI fallback");
+        assert!(mcp_index < cli_index);
+        assert!(cli_index < command.find("kanna-cli guide").unwrap());
+        assert!(command.contains("KANNA_CLI_PATH"));
     }
 
     fn test_daemon_socket_path(daemon_dir: &str) -> std::path::PathBuf {
@@ -2180,6 +2278,46 @@ mod tests {
         (sidecar_path, true)
     }
 
+    fn init_git_repo_with_pipeline(
+        label: &str,
+        pipeline_name: &str,
+        stage_name: &str,
+        transition: &str,
+        provider: &str,
+    ) -> std::path::PathBuf {
+        let repo_root = init_git_repo(label);
+        std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+        std::fs::write(
+            repo_root.join(format!(".kanna/pipelines/{pipeline_name}.json")),
+            serde_json::json!({
+                "stages": [
+                    {
+                        "name": stage_name,
+                        "transition": transition,
+                        "agent_provider": provider,
+                        "prompt": "$TASK_PROMPT"
+                    },
+                    { "name": "pr", "transition": "manual" }
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(Command::new("git")
+            .args(["add", ".kanna"])
+            .current_dir(&repo_root)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["commit", "-m", "add kanna pipeline"])
+            .current_dir(&repo_root)
+            .status()
+            .unwrap()
+            .success());
+        repo_root
+    }
+
     #[test]
     fn resolve_binary_prefers_sidecar_candidate_before_path_lookup() {
         let temp_root = std::env::temp_dir().join(format!(
@@ -2203,7 +2341,10 @@ mod tests {
 
     #[test]
     fn build_spawn_env_prepends_kanna_cli_directory_to_path() {
-        let config = test_config("spawn-env-kanna-cli-path");
+        let mut config = test_config("spawn-env-kanna-cli-path");
+        let (kanna_cli_path, created_test_sidecar) = ensure_test_sidecar("kanna-cli");
+        let (kanna_mcp_path, created_test_mcp_sidecar) = ensure_test_sidecar("kanna-mcp");
+        config.kanna_cli_path = Some(kanna_cli_path.to_string_lossy().to_string());
         let env = build_spawn_env(&config, "task-1", &HashMap::new()).unwrap();
         let cli_path = env
             .get("KANNA_CLI_PATH")
@@ -2216,6 +2357,12 @@ mod tests {
         let path = env.get("PATH").expect("PATH should be provided");
 
         assert_eq!(path.split(':').next(), Some(cli_dir.as_str()));
+        if created_test_sidecar {
+            let _ = std::fs::remove_file(kanna_cli_path);
+        }
+        if created_test_mcp_sidecar {
+            let _ = std::fs::remove_file(kanna_mcp_path);
+        }
     }
 
     #[test]
@@ -2372,6 +2519,7 @@ mod tests {
                 permission_mode: Some("dontAsk".to_string()),
                 allowed_tools: vec!["Bash".to_string()],
                 system_prompt: "Kanna context".to_string(),
+                mcp_config_path: None,
                 executable: None,
             },
         };
@@ -2396,6 +2544,221 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn prepared_agent_task_spawn_includes_task_specific_kanna_context() {
+        let repo_root =
+            init_git_repo_with_pipeline("agent-kanna-context", "qa", "verify", "auto", "claude");
+        let config = test_config("agent-kanna-context");
+        let db = Db::open_for_tests(&config.db_path).unwrap();
+        db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+            .unwrap();
+        let prepared = prepare_task_for_api(
+            &db,
+            &config,
+            CreateTaskRequest {
+                repo_id: "repo-1".to_string(),
+                prompt: "Exercise Kanna context".to_string(),
+                pipeline_name: Some("qa".to_string()),
+                base_ref: None,
+                stage: Some("verify".to_string()),
+                agent_provider: Some("claude".to_string()),
+                agent_type: Some("agent".to_string()),
+                model: None,
+                permission_mode: None,
+                allowed_tools: None,
+                blocker_task_ids: None,
+                notify_task_id: None,
+            },
+        )
+        .unwrap();
+        let task_id = prepared.created_task.task_id.clone();
+        let fake_daemon = spawn_fake_daemon_session_created_once(config.daemon_dir.clone()).await;
+        let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
+
+        let created = spawn_prepared_task(&mut daemon, prepared).await.unwrap();
+        let command = fake_daemon.await.unwrap();
+
+        assert_eq!(created.task_id, task_id);
+        match command {
+            kanna_daemon::protocol::Command::SpawnAgent { session_id, params } => {
+                assert_eq!(session_id, task_id);
+                let mcp_config = params
+                    .env
+                    .get("KANNA_MCP_CONFIG")
+                    .expect("spawn env should include instance-local MCP config");
+                assert!(
+                    mcp_config.contains("/runtime/mcp/"),
+                    "MCP config should be generated in the instance runtime area"
+                );
+                assert!(
+                    !mcp_config.contains(".kanna-worktrees/"),
+                    "MCP config should not be generated inside the repo worktree"
+                );
+                let mcp_config_json: serde_json::Value =
+                    serde_json::from_str(&std::fs::read_to_string(mcp_config).unwrap()).unwrap();
+                assert_eq!(
+                    mcp_config_json["mcpServers"]["kanna-mcp"]["command"],
+                    params.env["KANNA_MCP_PATH"]
+                );
+                assert_eq!(
+                    mcp_config_json["mcpServers"]["kanna-mcp"]["args"],
+                    serde_json::json!(["serve"])
+                );
+                assert_eq!(
+                    mcp_config_json["mcpServers"]["kanna-mcp"]["env"]["KANNA_SERVER_BASE_URL"],
+                    params.env["KANNA_SERVER_BASE_URL"]
+                );
+                let system_prompt = params.system_prompt.expect("system prompt should be sent");
+                assert!(system_prompt.contains(&format!("task `{task_id}`")));
+                assert!(system_prompt.contains("stage `verify`"));
+                assert!(system_prompt.contains("pipeline `qa`"));
+                assert!(system_prompt.contains("transition `auto`"));
+                assert!(system_prompt.contains("instance-local `kanna-mcp` config is available"));
+                assert!(system_prompt.contains("Claude is launched with this config"));
+                assert!(
+                    system_prompt.contains("Prefer `kanna-mcp` tools for Kanna task operations")
+                );
+                assert!(system_prompt.contains(
+                    "If MCP tools are unavailable, fall back to the instance-local `kanna-cli`"
+                ));
+                assert!(system_prompt.contains("KANNA_CLI_PATH"));
+                assert!(system_prompt.contains("kanna-cli guide"));
+                assert!(system_prompt.contains("kanna-cli stage-complete"));
+            }
+            other => panic!("expected SpawnAgent, got {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&repo_root);
+    }
+
+    #[tokio::test]
+    async fn prepared_claude_pty_task_spawn_passes_kanna_context_as_append_system_prompt() {
+        let repo_root = init_git_repo_with_pipeline(
+            "claude-pty-kanna-context",
+            "qa",
+            "implement",
+            "manual",
+            "claude",
+        );
+        let config = test_config("claude-pty-kanna-context");
+        let db = Db::open_for_tests(&config.db_path).unwrap();
+        db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+            .unwrap();
+        let prepared = prepare_task_for_api(
+            &db,
+            &config,
+            CreateTaskRequest {
+                repo_id: "repo-1".to_string(),
+                prompt: "Use Claude PTY".to_string(),
+                pipeline_name: Some("qa".to_string()),
+                base_ref: None,
+                stage: Some("implement".to_string()),
+                agent_provider: Some("claude".to_string()),
+                agent_type: Some("pty".to_string()),
+                model: None,
+                permission_mode: None,
+                allowed_tools: None,
+                blocker_task_ids: None,
+                notify_task_id: None,
+            },
+        )
+        .unwrap();
+        let task_id = prepared.created_task.task_id.clone();
+        let fake_daemon = spawn_fake_daemon_session_created_once(config.daemon_dir.clone()).await;
+        let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
+
+        spawn_prepared_task(&mut daemon, prepared).await.unwrap();
+        let command = fake_daemon.await.unwrap();
+
+        match command {
+            kanna_daemon::protocol::Command::Spawn {
+                session_id, args, ..
+            } => {
+                assert_eq!(session_id, task_id);
+                let shell_command = args.last().expect("shell command argument");
+                assert!(shell_command.contains("claude "));
+                assert!(shell_command.contains("--mcp-config"));
+                assert!(shell_command.contains("/runtime/mcp/"));
+                assert!(shell_command.contains("--append-system-prompt"));
+                assert!(shell_command.contains(&format!("task `{task_id}`")));
+                assert!(shell_command.contains("stage `implement`"));
+                assert!(shell_command.contains("pipeline `qa`"));
+                assert!(shell_command.contains("transition `manual`"));
+                assert!(shell_command.contains("kanna-cli stage-complete"));
+                assert!(shell_command.contains("'Use Claude PTY'"));
+            }
+            other => panic!("expected Spawn, got {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&repo_root);
+    }
+
+    #[tokio::test]
+    async fn prepared_non_claude_pty_task_spawn_prepends_kanna_context_to_prompt() {
+        let repo_root = init_git_repo_with_pipeline(
+            "copilot-pty-kanna-context",
+            "qa",
+            "implement",
+            "manual",
+            "copilot",
+        );
+        let config = test_config("copilot-pty-kanna-context");
+        let db = Db::open_for_tests(&config.db_path).unwrap();
+        db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+            .unwrap();
+        let prepared = prepare_task_for_api(
+            &db,
+            &config,
+            CreateTaskRequest {
+                repo_id: "repo-1".to_string(),
+                prompt: "Use Copilot PTY".to_string(),
+                pipeline_name: Some("qa".to_string()),
+                base_ref: None,
+                stage: Some("implement".to_string()),
+                agent_provider: Some("copilot".to_string()),
+                agent_type: Some("pty".to_string()),
+                model: None,
+                permission_mode: None,
+                allowed_tools: None,
+                blocker_task_ids: None,
+                notify_task_id: None,
+            },
+        )
+        .unwrap();
+        let task_id = prepared.created_task.task_id.clone();
+        let fake_daemon = spawn_fake_daemon_session_created_once(config.daemon_dir.clone()).await;
+        let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
+
+        spawn_prepared_task(&mut daemon, prepared).await.unwrap();
+        let command = fake_daemon.await.unwrap();
+
+        match command {
+            kanna_daemon::protocol::Command::Spawn {
+                session_id, args, ..
+            } => {
+                assert_eq!(session_id, task_id);
+                let shell_command = args.last().expect("shell command argument");
+                assert!(shell_command.contains("copilot "));
+                assert!(!shell_command.contains("--append-system-prompt"));
+                let context_index = shell_command
+                    .find("## Kanna Task Context")
+                    .expect("Kanna context should be prompt-prepended");
+                let prompt_index = shell_command
+                    .find("Use Copilot PTY")
+                    .expect("original prompt should be retained");
+                assert!(context_index < prompt_index);
+                assert!(shell_command.contains(&format!("task `{task_id}`")));
+                assert!(shell_command.contains("stage `implement`"));
+                assert!(shell_command.contains("pipeline `qa`"));
+                assert!(shell_command.contains("transition `manual`"));
+                assert!(shell_command.contains("kanna-cli stage-complete"));
+            }
+            other => panic!("expected Spawn, got {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&repo_root);
+    }
+
     #[test]
     fn build_spawn_env_prefers_configured_kanna_cli_path() {
         let mut config = test_config("spawn-env-configured-kanna-cli-path");
@@ -2408,10 +2771,11 @@ mod tests {
             env.get("KANNA_CLI_PATH").map(String::as_str),
             Some("/Applications/Kanna.app/Contents/MacOS/kanna-cli")
         );
-        assert_eq!(
-            env.get("PATH").and_then(|path| path.split(':').next()),
-            Some("/Applications/Kanna.app/Contents/MacOS")
-        );
+        assert!(env
+            .get("PATH")
+            .expect("PATH should be set for sidecars")
+            .split(':')
+            .any(|entry| entry == "/Applications/Kanna.app/Contents/MacOS"));
     }
 
     #[test]
@@ -2920,9 +3284,10 @@ mod tests {
 
         let fake_daemon = spawn_fake_daemon_once(config.daemon_dir.clone()).await;
         let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
-        let continued = continue_prepared_stage_for_api(&config.db_path, &mut daemon, continuation)
-            .await
-            .unwrap();
+        let continued =
+            continue_prepared_stage_for_api(&config.db_path, &mut daemon, *continuation)
+                .await
+                .unwrap();
         let command = fake_daemon.await.unwrap();
         assert_eq!(continued.task_id, "task-1");
         match command {
@@ -3150,9 +3515,10 @@ mod tests {
 
         let fake_daemon = spawn_fake_daemon_once(config.daemon_dir.clone()).await;
         let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
-        let continued = continue_prepared_stage_for_api(&config.db_path, &mut daemon, continuation)
-            .await
-            .unwrap();
+        let continued =
+            continue_prepared_stage_for_api(&config.db_path, &mut daemon, *continuation)
+                .await
+                .unwrap();
         let command = fake_daemon.await.unwrap();
         assert_eq!(continued.task_id, "task-1");
         match command {
@@ -3692,6 +4058,132 @@ mod tests {
             Some("Implement revision:\nAdd e2e coverage for task creation.\n\nAdd e2e coverage for task creation.")
         );
         assert!(prepared.cwd.contains(".kanna-worktrees/task-"));
+    }
+
+    #[tokio::test]
+    async fn prepared_revision_agent_task_spawn_sends_task_specific_kanna_context() {
+        let repo_root = std::env::temp_dir().join(format!(
+            "kanna-stage-revision-spawn-context-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&repo_root);
+        std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+        std::fs::write(repo_root.join("README.md"), "test repo").unwrap();
+        std::fs::write(
+            repo_root.join(".kanna/pipelines/qa.json"),
+            r#"{
+  "stages": [
+    { "name": "in progress", "transition": "auto", "agent_provider": "claude", "prompt": "$TASK_PROMPT" },
+    { "name": "review", "transition": "manual" },
+    { "name": "pr", "transition": "manual" }
+  ]
+}"#,
+        )
+        .unwrap();
+        assert!(Command::new("git")
+            .arg("init")
+            .arg("-b")
+            .arg("main")
+            .current_dir(&repo_root)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(&repo_root)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(&repo_root)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["add", "README.md", ".kanna"])
+            .current_dir(&repo_root)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(&repo_root)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["branch", "task-reviewed-branch"])
+            .current_dir(&repo_root)
+            .status()
+            .unwrap()
+            .success());
+
+        let config = test_config("revision-agent-spawn-kanna-context");
+        let db = Db::open_for_tests(&config.db_path).unwrap();
+        db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+            .unwrap();
+        db.insert_test_pipeline_item(
+            "review-task",
+            "repo-1",
+            "Review branch task-reviewed-branch.",
+            Some("Mobile shell"),
+            "review",
+            "2026-04-17 07:00:00",
+        )
+        .unwrap();
+        db.update_test_pipeline_item_stage_context(
+            "review-task",
+            "task-reviewed-branch",
+            "qa",
+            Some("{\"status\":\"failure\",\"summary\":\"missing e2e\"}"),
+            "claude",
+        )
+        .unwrap();
+        db.update_test_pipeline_item_agent_type("review-task", "agent")
+            .unwrap();
+        let prepared = prepare_revision_task_for_api(
+            &db,
+            &config,
+            "review-task",
+            "in progress",
+            "Add integration coverage for spawned Kanna context.",
+        )
+        .unwrap();
+        let task_id = prepared.created_task.task_id.clone();
+        let fake_daemon = spawn_fake_daemon_session_created_once(config.daemon_dir.clone()).await;
+        let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
+
+        let created = spawn_prepared_task(&mut daemon, prepared).await.unwrap();
+        let command = fake_daemon.await.unwrap();
+
+        assert_eq!(created.task_id, task_id);
+        match command {
+            kanna_daemon::protocol::Command::SpawnAgent { session_id, params } => {
+                assert_eq!(session_id, task_id);
+                assert_eq!(params.agent_provider, DaemonAgentProvider::Claude);
+                assert!(params.cwd.contains(".kanna-worktrees/task-"));
+                let system_prompt = params.system_prompt.expect("system prompt should be sent");
+                assert!(system_prompt.contains(&format!("task `{task_id}`")));
+                assert!(system_prompt.contains("stage `in progress`"));
+                assert!(system_prompt.contains("pipeline `qa`"));
+                assert!(system_prompt.contains("transition `auto`"));
+                assert!(system_prompt.contains("instance-local `kanna-mcp` config is available"));
+                assert!(system_prompt.contains("Claude is launched with this config"));
+                assert!(
+                    system_prompt.contains("Prefer `kanna-mcp` tools for Kanna task operations")
+                );
+                assert!(system_prompt.contains(
+                    "If MCP tools are unavailable, fall back to the instance-local `kanna-cli`"
+                ));
+                assert!(system_prompt.contains("kanna-cli guide"));
+                assert!(system_prompt.contains("kanna-cli stage-complete"));
+                assert!(system_prompt.contains("KANNA_CLI_PATH"));
+            }
+            other => panic!("expected SpawnAgent, got {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&repo_root);
     }
 
     #[test]

@@ -926,7 +926,7 @@ fn render_guide_markdown(context: &GuideContext) -> String {
             context.task_id, stage, pipeline, transition, branch
         ),
         format!(
-            "Done here means this stage has achieved its goal; then run `kanna-cli stage-complete --task-id \"$KANNA_TASK_ID\" --status success --summary \"...\"`."
+            "Done here means this stage has achieved its goal. Prefer `kanna_complete_stage` to record completion. Fallback: `kanna-cli stage-complete --task-id \"$KANNA_TASK_ID\" --status success --summary \"...\"`."
         ),
     ];
 
@@ -941,8 +941,8 @@ fn render_guide_markdown(context: &GuideContext) -> String {
         String::new(),
         "## Workflow Semantics".to_string(),
         String::new(),
-        "- Prefer `kanna-mcp` tools when your agent client exposes them; fall back to `kanna-cli` from the shell.".to_string(),
-        "- `kanna_complete_stage` / `kanna-cli stage-complete` records the stage result. `success` can trigger an auto-transition when the current stage is configured for auto; `failure` records the failure and stops advancement.".to_string(),
+        "- Prefer `kanna-mcp` tools for Kanna task operations; fall back to the instance-local `kanna-cli` from the shell only when MCP tools are unavailable. Kanna-spawned tasks export `KANNA_CLI_PATH` and prepend its directory to `PATH`.".to_string(),
+        "- Prefer `kanna_complete_stage` to record the stage result. Fallback: `kanna-cli stage-complete`. `success` can trigger an auto-transition when the current stage is configured for auto; `failure` records the failure and stops advancement.".to_string(),
         "- Manual transitions wait for a user or agent to request advancement.".to_string(),
         "- Advancing closes the current task and spawns a new task in a new worktree.".to_string(),
         "- Use create/spawn-subtask tools for follow-up work, `kanna_send_input` for feedback to a running task, `kanna_request_revision` for a new revision task from an existing branch, and blocker tools when this task depends on another task.".to_string(),
@@ -964,12 +964,12 @@ fn render_guide_json(context: &GuideContext) -> Result<Value, String> {
         "liveStateError": context.live_state_error,
         "task": context.task,
         "workflow": {
-            "completeStage": "success can trigger auto-advance; failure records failure and stops advancement",
+            "completeStage": "Prefer kanna_complete_stage. Fallback to kanna-cli stage-complete only when MCP tools are unavailable. success can trigger auto-advance; failure records failure and stops advancement",
             "manualTransition": "manual stages wait for explicit advancement",
             "advanceStage": "advancing closes the current task and spawns a new task in a new worktree",
             "operations": [
-                "prefer kanna-mcp tools",
-                "fall back to kanna-cli",
+                "prefer kanna-mcp tools for Kanna task operations",
+                "fall back to the instance-local kanna-cli only when MCP tools are unavailable",
                 "send input to running tasks",
                 "request revisions from existing task branches",
                 "block and unblock tasks"
@@ -1233,6 +1233,25 @@ fn print_json<T: Serialize>(value: &T) -> Result<(), String> {
     Ok(())
 }
 
+async fn run_guide_command<W: std::io::Write>(
+    json: bool,
+    server_url: Option<&str>,
+    env_pairs: &[(&str, &str)],
+    output: &mut W,
+) -> Result<(), String> {
+    let context = build_guide_context(env_pairs, server_url).await;
+    if json {
+        let rendered = render_guide_json(&context)?;
+        serde_json::to_writer_pretty(&mut *output, &rendered)
+            .map_err(|e| format!("failed to render json: {e}"))?;
+        writeln!(output).map_err(|e| format!("failed to write guide: {e}"))?;
+    } else {
+        writeln!(output, "{}", render_guide_markdown(&context))
+            .map_err(|e| format!("failed to write guide: {e}"))?;
+    }
+    Ok(())
+}
+
 fn task_status_row(task: &TaskSummary) -> TaskStatusRow {
     TaskStatusRow {
         id: task.id.clone(),
@@ -1290,18 +1309,12 @@ async fn main() {
                 .iter()
                 .map(|(key, value)| (key.as_str(), value.as_str()))
                 .collect::<Vec<_>>();
-            let context = build_guide_context(&borrowed_pairs, server_url.as_deref()).await;
-            if json {
-                let rendered = render_guide_json(&context).unwrap_or_else(|e| {
-                    eprintln!("Error: {e}");
-                    process::exit(1);
-                });
-                if let Err(e) = print_json(&rendered) {
-                    eprintln!("Error: {e}");
-                    process::exit(1);
-                }
-            } else {
-                println!("{}", render_guide_markdown(&context));
+            let mut stdout = std::io::stdout();
+            if let Err(e) =
+                run_guide_command(json, server_url.as_deref(), &borrowed_pairs, &mut stdout).await
+            {
+                eprintln!("Error: {e}");
+                process::exit(1);
             }
         }
         Commands::StageComplete {
@@ -1735,14 +1748,15 @@ mod tests {
     use super::{
         advance_stage_via_api, block_task_via_api, build_add_repo_request,
         build_block_task_request, build_complete_stage_request, build_create_task_request,
-        build_request_revision_request, build_send_task_input_request, build_tool_call_args,
-        catalog_create_task_param_names, close_task_via_api, create_task_via_api,
-        find_task_status_row, format_task_list, format_task_status, get_task_via_api,
-        parse_wait_until, render_guide_markdown, resolve_optional_server_base_url,
-        resolve_server_base_url, resolve_stage_db_path, send_task_input_via_api,
-        task_create_flag_names, task_get_path, task_list_path, task_logs_path,
-        task_matches_wait_until, task_not_found_error, unblock_task_via_api, GuideContext,
-        TaskCreateOptions, TaskDetail, TaskInputResponse, TaskSummary, WaitUntil,
+        build_guide_context, build_request_revision_request, build_send_task_input_request,
+        build_tool_call_args, catalog_create_task_param_names, close_task_via_api,
+        create_task_via_api, find_task_status_row, format_task_list, format_task_status,
+        get_task_via_api, parse_wait_until, render_guide_json, render_guide_markdown,
+        resolve_optional_server_base_url, resolve_server_base_url, resolve_stage_db_path,
+        run_guide_command, send_task_input_via_api, task_create_flag_names, task_get_path,
+        task_list_path, task_logs_path, task_matches_wait_until, task_not_found_error,
+        unblock_task_via_api, GuideContext, TaskCreateOptions, TaskDetail, TaskInputResponse,
+        TaskSummary, WaitUntil,
     };
     use clap::Parser;
     use serde_json::json;
@@ -2342,7 +2356,11 @@ mod tests {
         });
 
         assert!(guide.contains("You are task `task-123`, stage `review` of pipeline `qa` (`auto`)"));
-        assert!(guide.contains("kanna-cli stage-complete --task-id \"$KANNA_TASK_ID\""));
+        assert!(guide.contains(
+            "Prefer `kanna-mcp` tools for Kanna task operations; fall back to the instance-local `kanna-cli` from the shell only when MCP tools are unavailable."
+        ));
+        assert!(guide.contains("Prefer `kanna_complete_stage` to record completion"));
+        assert!(guide.contains("Fallback: `kanna-cli stage-complete --task-id \"$KANNA_TASK_ID\""));
         assert!(guide.contains(
             "Advancing closes the current task and spawns a new task in a new worktree."
         ));
@@ -2353,6 +2371,150 @@ mod tests {
                 tool.name
             );
         }
+    }
+
+    #[tokio::test]
+    async fn guide_json_fetches_env_task_id_and_includes_workflow_context_and_tools() {
+        let response = http_json_response(
+            "200 OK",
+            r#"{
+                "id": "task-123",
+                "repoId": "repo-1",
+                "title": "Add guide coverage",
+                "stage": "verify",
+                "pipelineName": "qa",
+                "stageTransition": "auto",
+                "activity": "working",
+                "snippet": null,
+                "agentType": "agent",
+                "agentProvider": "claude",
+                "branch": "task-task-123",
+                "prUrl": null,
+                "closedAt": null,
+                "worktreePath": "/tmp/repo/.kanna-worktrees/task-task-123",
+                "commitsAhead": 0,
+                "commitsBehind": 0,
+                "dirty": false
+            }"#,
+        );
+        let (base_url, handle) = serve_single_http_response(response).await;
+
+        let context = build_guide_context(
+            &[
+                ("KANNA_TASK_ID", "task-123"),
+                ("KANNA_SERVER_BASE_URL", base_url.as_str()),
+            ],
+            None,
+        )
+        .await;
+        let guide = render_guide_json(&context).unwrap();
+        let request = handle.await.unwrap();
+
+        assert!(request.starts_with("GET /v1/tasks/task-123 HTTP/1.1"));
+        assert_eq!(guide["taskId"], "task-123");
+        assert_eq!(guide["task"]["pipelineName"], "qa");
+        assert_eq!(guide["task"]["stage"], "verify");
+        assert_eq!(guide["task"]["stageTransition"], "auto");
+        assert!(guide["workflow"]["advanceStage"]
+            .as_str()
+            .unwrap()
+            .contains("spawns a new task in a new worktree"));
+        assert!(guide["workflow"]["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|operation| operation.as_str()
+                == Some("prefer kanna-mcp tools for Kanna task operations")));
+        assert!(guide["workflow"]["completeStage"]
+            .as_str()
+            .unwrap()
+            .contains("Prefer kanna_complete_stage"));
+        let tool_names = guide["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect::<Vec<_>>();
+        assert!(tool_names.contains(&"kanna_create_task"));
+        assert!(tool_names.contains(&"kanna_complete_stage"));
+        assert!(tool_names.contains(&"kanna_request_revision"));
+    }
+
+    #[tokio::test]
+    async fn guide_json_command_fetches_env_task_id_and_prints_workflow_context_and_tools() {
+        let response = http_json_response(
+            "200 OK",
+            r#"{
+                "id": "task-456",
+                "repoId": "repo-1",
+                "title": "Wire guide command",
+                "stage": "implement",
+                "pipelineName": "revision",
+                "stageTransition": "manual",
+                "activity": "working",
+                "snippet": null,
+                "agentType": "pty",
+                "agentProvider": "copilot",
+                "branch": "task-task-456",
+                "prUrl": null,
+                "closedAt": null,
+                "worktreePath": "/tmp/repo/.kanna-worktrees/task-task-456",
+                "commitsAhead": 0,
+                "commitsBehind": 0,
+                "dirty": false
+            }"#,
+        );
+        let (base_url, handle) = serve_single_http_response(response).await;
+        let cli = super::Cli::try_parse_from([
+            "kanna-cli",
+            "guide",
+            "--json",
+            "--server-url",
+            base_url.as_str(),
+        ])
+        .unwrap();
+        let super::Commands::Guide { json, server_url } = cli.command else {
+            panic!("expected guide command");
+        };
+        let mut output = Vec::new();
+
+        run_guide_command(
+            json,
+            server_url.as_deref(),
+            &[("KANNA_TASK_ID", "task-456")],
+            &mut output,
+        )
+        .await
+        .unwrap();
+        let request = handle.await.unwrap();
+        let guide: serde_json::Value = serde_json::from_slice(&output).unwrap();
+
+        assert!(request.starts_with("GET /v1/tasks/task-456 HTTP/1.1"));
+        assert_eq!(guide["taskId"], "task-456");
+        assert_eq!(guide["task"]["pipelineName"], "revision");
+        assert_eq!(guide["task"]["stage"], "implement");
+        assert_eq!(guide["task"]["stageTransition"], "manual");
+        assert!(guide["workflow"]["manualTransition"]
+            .as_str()
+            .unwrap()
+            .contains("manual stages wait"));
+        assert!(guide["workflow"]["advanceStage"]
+            .as_str()
+            .unwrap()
+            .contains("spawns a new task in a new worktree"));
+        assert!(guide["workflow"]["completeStage"]
+            .as_str()
+            .unwrap()
+            .contains("stage-complete"));
+        let tool_names = guide["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect::<Vec<_>>();
+        assert!(tool_names.contains(&"kanna_create_task"));
+        assert!(tool_names.contains(&"kanna_complete_stage"));
+        assert!(tool_names.contains(&"kanna_request_revision"));
     }
 
     #[test]

@@ -116,6 +116,8 @@ pub struct AgentSpawnParams {
     pub max_budget_usd: Option<f64>,
     #[serde(default)]
     pub system_prompt: Option<String>,
+    #[serde(default)]
+    pub mcp_config_path: Option<String>,
     /// Optional absolute executable path; otherwise resolved from env PATH.
     #[serde(default)]
     pub executable: Option<String>,

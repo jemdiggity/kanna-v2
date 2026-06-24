@@ -64,7 +64,11 @@ impl ClaudeAdapter {
         builder.build()
     }
 
-    fn spawn_spec(options: &SessionOptions, prompt: &str) -> SpawnSpec {
+    fn spawn_spec(
+        options: &SessionOptions,
+        prompt: &str,
+        mcp_config_path: Option<&str>,
+    ) -> SpawnSpec {
         // In stream-json input mode the CLI ignores the `-p` prompt argument;
         // the prompt is delivered as the first stdin user message instead.
         let mut args = options.to_cli_args(None);
@@ -72,6 +76,10 @@ impl ClaudeAdapter {
         // adds it for resume/continue sessions.
         if !args.iter().any(|a| a == "--input-format") {
             args.extend(["--input-format".to_string(), "stream-json".to_string()]);
+        }
+        if let Some(mcp_config_path) = mcp_config_path {
+            args.push("--mcp-config".to_string());
+            args.push(mcp_config_path.to_string());
         }
         SpawnSpec {
             executable: "claude".to_string(),
@@ -327,13 +335,17 @@ impl ProviderAdapter for ClaudeAdapter {
     }
 
     fn initial_spawn(&self, ctx: &SpawnCtx) -> SpawnSpec {
-        Self::spawn_spec(&Self::session_options(ctx), &ctx.prompt)
+        Self::spawn_spec(
+            &Self::session_options(ctx),
+            &ctx.prompt,
+            ctx.mcp_config_path.as_deref(),
+        )
     }
 
     fn resume_spawn(&self, ctx: &SpawnCtx, session_id: &str, message: &str) -> SpawnSpec {
         let mut options = Self::session_options(ctx);
         options.resume = Some(session_id.to_string());
-        Self::spawn_spec(&options, message)
+        Self::spawn_spec(&options, message, ctx.mcp_config_path.as_deref())
     }
 
     fn parse_line(&mut self, line: &str) -> Vec<AgentEvent> {

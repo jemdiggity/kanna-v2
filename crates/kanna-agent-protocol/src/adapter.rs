@@ -49,6 +49,7 @@ pub struct SpawnCtx {
     pub max_turns: Option<u32>,
     pub max_budget_usd: Option<f64>,
     pub system_prompt: Option<String>,
+    pub mcp_config_path: Option<String>,
 }
 
 /// How to deliver an interrupt to the provider.

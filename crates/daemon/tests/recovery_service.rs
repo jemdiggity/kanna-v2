@@ -3,6 +3,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::{Child, Command};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use kanna_daemon::recovery::{RecoveryManager, SeededRecoverySnapshot};
@@ -239,9 +240,13 @@ struct DaemonHandle {
     _dir: PathBuf,
 }
 
+static DAEMON_START_COUNTER: AtomicU64 = AtomicU64::new(0);
+
 impl DaemonHandle {
     fn start() -> Self {
-        let dir = std::env::temp_dir().join(format!("kanna-recovery-test-{}", std::process::id()));
+        let id = DAEMON_START_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("kanna-recovery-test-{}-{}", std::process::id(), id));
         std::fs::create_dir_all(&dir).expect("should create test daemon dir");
 
         let socket_path = compute_socket_path(&dir);

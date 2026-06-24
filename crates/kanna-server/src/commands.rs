@@ -186,7 +186,7 @@ pub async fn handle_invoke(
             match transition {
                 task_creator::PreparedStageTransition::Spawn(prepared) => {
                     let created =
-                        task_creator::spawn_prepared_task_for_api(daemon, prepared).await?;
+                        task_creator::spawn_prepared_task_for_api(daemon, *prepared).await?;
                     let db = Db::open(&config.db_path).map_err(|e| format!("db error: {}", e))?;
                     db.close_pipeline_item(task_id)
                         .map_err(|e| format!("db error: {}", e))?;
@@ -196,7 +196,7 @@ pub async fn handle_invoke(
                     let continued = task_creator::continue_prepared_stage_for_api(
                         &config.db_path,
                         daemon,
-                        prepared,
+                        *prepared,
                     )
                     .await?;
                     serde_json::to_value(continued).map_err(|e| format!("serialize error: {}", e))

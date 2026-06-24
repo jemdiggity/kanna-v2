@@ -47,6 +47,7 @@ import { shouldSelectNextOnCloseTransition } from "./taskCloseSelection";
 import { shouldPrewarmTaskShellOnCreate } from "./taskShellPrewarm";
 import { getCreateWorktreeStartPoint, getOriginFetchBranch, resolveInitialBaseRef } from "./taskBaseBranch";
 import { buildTaskRuntimeEnv, resolveKannaServerBaseUrl } from "./kannaCliEnv";
+import { prepareKannaMcpRuntime } from "./kannaMcpRuntime";
 import { encodeDaemonInput } from "./daemonInput";
 import { buildWorktreeSessionEnv } from "./worktreeEnv";
 import { publishDesktopTaskSnapshot } from "../services/desktopCloudPublisher";
@@ -109,7 +110,7 @@ async function buildTaskLifecycleEnv(options: {
   repoConfig: RepoConfig;
   portEnv?: Record<string, string>;
   logContext: string;
-}): Promise<Record<string, string>> {
+}): Promise<{ env: Record<string, string>; mcpConfigPath?: string }> {
   const inheritedPath = await invoke<string>("read_env_var", { name: "PATH" }).catch((error) => {
     console.debug(`[store] PATH not available while creating ${options.logContext} env:`, error);
     return null;
@@ -129,7 +130,7 @@ async function buildTaskLifecycleEnv(options: {
     return null;
   });
 
-  return {
+  const env = {
     ...worktreeEnv,
     ...buildTaskRuntimeEnv({
       taskId: options.taskId,
@@ -142,6 +143,8 @@ async function buildTaskLifecycleEnv(options: {
       portEnv: options.portEnv,
     }),
   };
+  const { mcpConfigPath } = await prepareKannaMcpRuntime(options.taskId, env);
+  return { env, mcpConfigPath };
 }
 
 export interface TasksApi {
@@ -525,7 +528,7 @@ export function createTasksApi(
         }
 
         if (agentType === "agent") {
-          const agentEnv = await buildTaskLifecycleEnv({
+          const { env: agentEnv, mcpConfigPath } = await buildTaskLifecycleEnv({
             taskId: id,
             worktreePath,
             repoConfig,
@@ -549,6 +552,7 @@ export function createTasksApi(
             env: agentEnv,
             agentProvider,
             systemPrompt: buildKannaRuntimeSystemPrompt(),
+            mcpConfigPath: mcpConfigPath ?? null,
             permissionMode: opts?.customTask?.permissionMode ?? opts?.permissionMode ?? null,
             model: resolvedModel,
             allowedTools: opts?.customTask?.allowedTools ?? opts?.allowedTools ?? null,
@@ -1065,7 +1069,7 @@ export function createTasksApi(
       if (teardownCmds.length > 0) {
         const worktreePath = `${repo.path}/.kanna-worktrees/${item.branch}`;
         const repoConfig = await readRepoConfig(worktreePath);
-        const teardownEnv = await buildTaskLifecycleEnv({
+        const { env: teardownEnv } = await buildTaskLifecycleEnv({
           taskId: item.id,
           worktreePath,
           repoConfig,
