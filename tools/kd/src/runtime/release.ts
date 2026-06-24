@@ -214,6 +214,7 @@ export async function shipRelease(input: ReleaseShipInput): Promise<ReleaseShipR
     await mustRun(input.runner, "git", ["add", "-f", "VERSION", "apps/desktop/src-tauri/tauri.conf.json", "apps/desktop/src-tauri/Cargo.toml", "apps/desktop/src-tauri/Cargo.lock"], input.repoRoot, input.env);
     await mustRun(input.runner, "git", ["commit", "-m", `release: v${version}`], input.repoRoot, input.env);
     await mustRun(input.runner, "git", ["tag", `v${version}`], input.repoRoot, input.env);
+    await mustRun(input.runner, "git", ["push", "origin", "HEAD:main", `v${version}`], input.repoRoot, input.env);
     await mustRun(input.runner, "gh", ["release", "create", `v${version}`, ...dmgPaths, ...updaterPaths, "--title", `Kanna v${version}`, "--notes", notes], input.repoRoot, input.env);
     await mustRun(input.runner, "gh", ["release", "upload", `v${version}`, latestJson, "--clobber"], input.repoRoot, input.env);
   }

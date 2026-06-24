@@ -767,6 +767,11 @@ fn ensure_server_belongs_to_desktop(
     if status.desktop_id == expected_desktop_id {
         return Ok(());
     }
+    if is_legacy_short_desktop_identity(&status.desktop_id)
+        && is_desktop_uuid_identity(expected_desktop_id)
+    {
+        return Ok(());
+    }
     Err(format!(
         "kanna-server port is already owned by {} ({})",
         status.desktop_name, status.desktop_id
@@ -992,13 +997,22 @@ fn generate_uuid_v4_from_reader(mut reader: impl std::io::Read) -> Result<String
 }
 
 fn is_valid_desktop_identity(value: &str) -> bool {
+    is_legacy_short_desktop_identity(value) || is_desktop_uuid_identity(value)
+}
+
+fn is_legacy_short_desktop_identity(value: &str) -> bool {
+    let Some(id) = value.strip_prefix("desktop-") else {
+        return false;
+    };
+    let bytes = id.as_bytes();
+    bytes.len() == 8 && bytes.iter().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn is_desktop_uuid_identity(value: &str) -> bool {
     let Some(uuid) = value.strip_prefix("desktop-") else {
         return false;
     };
     let bytes = uuid.as_bytes();
-    if bytes.len() == 8 {
-        return bytes.iter().all(|byte| byte.is_ascii_hexdigit());
-    }
     if bytes.len() != 36 {
         return false;
     }
@@ -1196,6 +1210,67 @@ mod tests {
         assert!(
             !process_is_running(stale_pid),
             "stale kanna-server process should be stopped"
+        );
+
+        let status = manager
+            .snapshot()
+            .await
+            .expect("replacement server should report status");
+        assert_eq!(status.desktop_id, expected_desktop_id);
+        assert_eq!(
+            status.server_version.as_deref(),
+            Some(current_server_version())
+        );
+
+        stop_server_on_port(port)
+            .await
+            .expect("cleanup should stop server");
+        cleanup_process_test_env();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::await_holding_lock)]
+    async fn manager_replaces_stale_legacy_short_id_server_after_identity_was_regenerated() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+        let root = unique_test_root("replace-stale-legacy-short-id");
+        let port = free_loopback_port();
+        let app_data_dir = root.join("app-data");
+        let db_path = root.join("kanna-test.db");
+        let daemon_dir = root.join("daemon");
+        let stale_config_path = root.join("stale-server.toml");
+        configure_process_test_env(port, &db_path, &daemon_dir);
+        create_test_database(&db_path);
+        let manager = MobileServerManager::new(app_data_dir.clone());
+        let expected_desktop_id = {
+            let state = manager.inner.lock().await;
+            desktop_id(&state.config_path).expect("desktop identity should be generated")
+        };
+        let stale_desktop_id = "desktop-ea554bc4";
+        assert_ne!(expected_desktop_id, stale_desktop_id);
+        write_test_server_config(
+            &stale_config_path,
+            &db_path,
+            &daemon_dir,
+            stale_desktop_id,
+            None,
+            None,
+            port,
+        );
+        let mut stale_server = start_test_kanna_server(&stale_config_path, port).await;
+        let stale_pid = stale_server.id().expect("stale server should have pid");
+
+        manager
+            .start()
+            .await
+            .expect("manager should replace stale legacy short-id server");
+        stale_server
+            .wait()
+            .await
+            .expect("stale server should have been reaped");
+        assert!(
+            !process_is_running(stale_pid),
+            "stale legacy kanna-server process should be stopped"
         );
 
         let status = manager

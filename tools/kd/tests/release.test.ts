@@ -352,4 +352,63 @@ describe("release shipping", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it("pushes main and the tag before creating the GitHub release", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-"));
+    try {
+      const { repoRoot, privateKeyPath } = createReleaseRepo(root);
+      const outputs = writeReleaseBuildOutputs(repoRoot, ["arm64", "x86_64"]);
+      const calls: CommandCall[] = [];
+      const runner: CommandRunner = {
+        async run(command, args, options) {
+          calls.push({ command, args, options });
+          if (command === "git" && args.join(" ") === "status --porcelain") {
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (command === "bazel" && args[0] === "build") {
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (command === "git" && args.join(" ") === "remote get-url origin") {
+            return { exitCode: 0, stdout: "git@github.com:jemdiggity/kanna.git\n", stderr: "" };
+          }
+          if (command === "bazel" && args[0] === "cquery") {
+            return { exitCode: 0, stdout: `${outputs.get(args[3]) ?? ""}\n`, stderr: "" };
+          }
+          if (command === "pnpm") {
+            const signedBundlePath = args.at(-1);
+            expect(typeof signedBundlePath).toBe("string");
+            writeFileSync(`${signedBundlePath}.sig`, "signature\n");
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          return { exitCode: 0, stdout: command === "gh" && args[0] === "api" ? "release notes\n" : "", stderr: "" };
+        }
+      };
+
+      await shipRelease({
+        repoRoot,
+        bump: "patch",
+        archLabels: ["arm64", "x86_64"],
+        release: true,
+        dryRun: false,
+        env: releaseEnv(privateKeyPath),
+        runner
+      });
+
+      const pushIndex = calls.findIndex((call) =>
+        call.command === "git" &&
+        call.args.join(" ") === "push origin HEAD:main v1.2.4"
+      );
+      const releaseCreateIndex = calls.findIndex((call) =>
+        call.command === "gh" &&
+        call.args[0] === "release" &&
+        call.args[1] === "create"
+      );
+
+      expect(pushIndex).toBeGreaterThan(-1);
+      expect(releaseCreateIndex).toBeGreaterThan(-1);
+      expect(pushIndex).toBeLessThan(releaseCreateIndex);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });
