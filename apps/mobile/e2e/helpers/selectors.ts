@@ -16,5 +16,7 @@ export const selectors = {
   accountPasswordInput: `~${MOBILE_E2E_IDS.accountPasswordInput}`,
   accountPasswordToggle: `~${MOBILE_E2E_IDS.accountPasswordToggle}`,
   accountSignInButton: `~${MOBILE_E2E_IDS.accountSignInButton}`,
+  moreTab: `~${MOBILE_E2E_IDS.toolbarTab("more")}`,
+  updateInfoOtaValue: `~${MOBILE_E2E_IDS.updateInfoOtaValue}`,
   taskRowsXPath: '//*[starts-with(@name, "mobile.task-row.")]'
 } as const;

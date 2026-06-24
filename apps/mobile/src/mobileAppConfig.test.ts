@@ -17,7 +17,23 @@ describe("mobile app config", () => {
     expect(config.extra?.kanna).toMatchObject({
       appEnv: "prod",
       firebase: { projectId: "kanna-build" },
-      relayUrl: "wss://relay.kanna.build"
+      relayUrl: "wss://relay.kanna.build",
+      ota: {
+        channel: "production",
+        manifestUrl: "https://relay.kanna.build/ota/manifest"
+      },
+      runtimeVersion: "1.0.0"
+    });
+    expect(config.runtimeVersion).toBe("1.0.0");
+    expect(config.updates).toMatchObject({
+      url: "https://relay.kanna.build/ota/manifest",
+      requestHeaders: { "expo-channel-name": "production" },
+      checkAutomatically: "NEVER",
+      codeSigningCertificate: "./certs/ota-codesign.pem",
+      codeSigningMetadata: {
+        keyid: "kanna-mobile-ota-v1",
+        alg: "rsa-v1_5-sha256"
+      }
     });
   });
 
@@ -40,8 +56,15 @@ describe("mobile app config", () => {
     expect(config.extra?.kanna).toMatchObject({
       appEnv: "dev",
       firebase: { projectId: "kanna-local" },
-      relayUrl: "ws://127.0.0.1:9080"
+      relayUrl: "ws://127.0.0.1:9080",
+      ota: {
+        channel: null,
+        manifestUrl: null
+      },
+      runtimeVersion: "1.0.0"
     });
+    expect(config.runtimeVersion).toBe("1.0.0");
+    expect(config.updates).toBeUndefined();
   });
 
   it("produces the staging identity from KANNA_APP_ENV", () => {
@@ -63,7 +86,17 @@ describe("mobile app config", () => {
     expect(config.extra?.kanna).toMatchObject({
       appEnv: "staging",
       firebase: { projectId: "kanna-staging" },
-      relayUrl: "wss://relay-staging.kanna.build"
+      relayUrl: "wss://relay-staging.kanna.build",
+      ota: {
+        channel: "staging",
+        manifestUrl: "https://relay-staging.kanna.build/ota/manifest"
+      },
+      runtimeVersion: "1.0.0"
+    });
+    expect(config.runtimeVersion).toBe("1.0.0");
+    expect(config.updates).toMatchObject({
+      url: "https://relay-staging.kanna.build/ota/manifest",
+      requestHeaders: { "expo-channel-name": "staging" }
     });
   });
 

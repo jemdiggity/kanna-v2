@@ -6,6 +6,7 @@
 import environments from "./src/mobileEnvironments.json";
 
 type KannaAppEnvironmentName = "dev" | "staging" | "prod";
+type OtaChannel = "staging" | "production";
 
 interface MobileFirebaseExtraConfig {
   apiKey: string;
@@ -18,6 +19,7 @@ interface MobileFirebaseExtraConfig {
 }
 
 interface MobileAppEnvironment {
+  runtimeVersion: string;
   name: KannaAppEnvironmentName;
   displayName: string;
   scheme: string;
@@ -25,6 +27,7 @@ interface MobileAppEnvironment {
   iosGoogleServicesFile: string;
   firebase: MobileFirebaseExtraConfig;
   relayUrl: string;
+  otaChannel: OtaChannel | null;
 }
 
 const registry = environments as Record<
@@ -55,19 +58,57 @@ interface ExpoConfig {
     appleTeamId: string;
     googleServicesFile: string;
   };
+  runtimeVersion: string;
+  updates?: {
+    url: string;
+    requestHeaders: {
+      "expo-channel-name": OtaChannel;
+    };
+    checkAutomatically: "NEVER";
+    codeSigningCertificate: string;
+    codeSigningMetadata: {
+      keyid: string;
+      alg: "rsa-v1_5-sha256";
+    };
+  };
   extra: {
     kanna: {
       appEnv: MobileAppEnvironment["name"];
       firebase: MobileAppEnvironment["firebase"];
       relayUrl: string;
+      runtimeVersion: string;
+      ota: {
+        channel: OtaChannel | null;
+        manifestUrl: string | null;
+      };
     };
   };
 }
+
+const OTA_MANIFEST_PATH = "/ota/manifest";
+const OTA_CODE_SIGNING_CERTIFICATE = "./certs/ota-codesign.pem";
+const OTA_CODE_SIGNING_KEY_ID = "kanna-mobile-ota-v1";
 
 export function createExpoConfig(
   env: { KANNA_APP_ENV?: string }
 ): ExpoConfig {
   const appEnvironment = resolveMobileAppEnvironment(env.KANNA_APP_ENV);
+  const otaManifestUrl = resolveOtaManifestUrl(appEnvironment);
+  const updates =
+    appEnvironment.otaChannel && otaManifestUrl
+      ? {
+          url: otaManifestUrl,
+          requestHeaders: {
+            "expo-channel-name": appEnvironment.otaChannel
+          },
+          checkAutomatically: "NEVER" as const,
+          codeSigningCertificate: OTA_CODE_SIGNING_CERTIFICATE,
+          codeSigningMetadata: {
+            keyid: OTA_CODE_SIGNING_KEY_ID,
+            alg: "rsa-v1_5-sha256" as const
+          }
+        }
+      : undefined;
 
   return {
     name: appEnvironment.displayName,
@@ -90,14 +131,44 @@ export function createExpoConfig(
       appleTeamId: "GY3LFAA59P",
       googleServicesFile: appEnvironment.iosGoogleServicesFile
     },
+    runtimeVersion: appEnvironment.runtimeVersion,
+    ...(updates ? { updates } : {}),
     extra: {
       kanna: {
         appEnv: appEnvironment.name,
         firebase: appEnvironment.firebase,
-        relayUrl: appEnvironment.relayUrl
+        relayUrl: appEnvironment.relayUrl,
+        runtimeVersion: appEnvironment.runtimeVersion,
+        ota: {
+          channel: appEnvironment.otaChannel,
+          manifestUrl: otaManifestUrl
+        }
       }
     }
   };
+}
+
+export function deriveHttpsBaseFromRelayUrl(relayUrl: string): string | null {
+  if (relayUrl.startsWith("wss://")) {
+    return `https://${relayUrl.slice("wss://".length)}`;
+  }
+
+  if (relayUrl.startsWith("https://")) {
+    return relayUrl;
+  }
+
+  return null;
+}
+
+function resolveOtaManifestUrl(
+  appEnvironment: MobileAppEnvironment
+): string | null {
+  if (!appEnvironment.otaChannel) {
+    return null;
+  }
+
+  const baseUrl = deriveHttpsBaseFromRelayUrl(appEnvironment.relayUrl);
+  return baseUrl ? `${baseUrl}${OTA_MANIFEST_PATH}` : null;
 }
 
 export default createExpoConfig(process.env);

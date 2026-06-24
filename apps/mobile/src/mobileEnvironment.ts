@@ -5,6 +5,7 @@
 import registry from "./mobileEnvironments.json";
 
 export type KannaAppEnvironmentName = "dev" | "staging" | "prod";
+export type OtaChannel = "staging" | "production";
 
 export interface MobileFirebaseExtraConfig {
   apiKey: string;
@@ -17,6 +18,7 @@ export interface MobileFirebaseExtraConfig {
 }
 
 export interface MobileAppEnvironment {
+  runtimeVersion: string;
   name: KannaAppEnvironmentName;
   displayName: string;
   scheme: string;
@@ -24,6 +26,12 @@ export interface MobileAppEnvironment {
   iosGoogleServicesFile: string;
   firebase: MobileFirebaseExtraConfig;
   relayUrl: string;
+  otaChannel: OtaChannel | null;
+}
+
+export interface MobileOtaExtraConfig {
+  channel?: OtaChannel | null;
+  manifestUrl?: string | null;
 }
 
 export interface KannaExpoExtra {
@@ -31,6 +39,8 @@ export interface KannaExpoExtra {
     appEnv?: KannaAppEnvironmentName;
     firebase?: Partial<MobileFirebaseExtraConfig>;
     relayUrl?: string;
+    runtimeVersion?: string;
+    ota?: MobileOtaExtraConfig;
   };
 }
 
@@ -71,8 +81,11 @@ export function readKannaExpoExtra(
       ? kanna.appEnv
       : undefined;
   const relayUrl = typeof kanna.relayUrl === "string" ? kanna.relayUrl : undefined;
+  const runtimeVersion =
+    typeof kanna.runtimeVersion === "string" ? kanna.runtimeVersion : undefined;
+  const ota = parseOtaExtra(kanna.ota);
 
-  return { appEnv, firebase, relayUrl };
+  return { appEnv, firebase, relayUrl, runtimeVersion, ota };
 }
 
 function parseFirebaseExtra(
@@ -91,6 +104,27 @@ function parseFirebaseExtra(
 
 function readString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
+}
+
+function parseOtaExtra(value: unknown): MobileOtaExtraConfig | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const channel =
+    value.channel === "staging" || value.channel === "production"
+      ? value.channel
+      : value.channel === null
+        ? null
+        : undefined;
+  const manifestUrl =
+    typeof value.manifestUrl === "string"
+      ? value.manifestUrl
+      : value.manifestUrl === null
+        ? null
+        : undefined;
+
+  return { channel, manifestUrl };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

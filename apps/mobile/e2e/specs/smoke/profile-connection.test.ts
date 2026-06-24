@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  assertOtaDisabledInDevSmoke,
   assertProfileConnectionControlsReachable,
   assertProfileConnectionDisconnected,
   assertProfilePasswordCanRevealAndHide,
@@ -74,6 +75,39 @@ describe("openProfileConnectionSheet", () => {
     expect(accountButton.waitForDisplayed).toHaveBeenCalledWith({ timeout: 30_000 });
     expect(accountButton.click).toHaveBeenCalledTimes(1);
     expect(accountSheet.waitForDisplayed).toHaveBeenCalledWith({ timeout: 30_000 });
+  });
+});
+
+describe("assertOtaDisabledInDevSmoke", () => {
+  it("opens More and verifies the dev OTA status is disabled", async () => {
+    const moreTab = createElement();
+    const otaStatus = {
+      ...createElement(),
+      getText: vi.fn(async () => "disabled")
+    };
+    const ui = {
+      getMoreTab: vi.fn(async () => moreTab),
+      getOtaStatusValue: vi.fn(async () => otaStatus)
+    };
+
+    await assertOtaDisabledInDevSmoke(ui);
+
+    expect(moreTab.click).toHaveBeenCalledOnce();
+    expect(otaStatus.waitForDisplayed).toHaveBeenCalledWith({ timeout: 30_000 });
+  });
+
+  it("fails when OTA is enabled in a dev smoke run", async () => {
+    const ui = {
+      getMoreTab: vi.fn(async () => createElement()),
+      getOtaStatusValue: vi.fn(async () => ({
+        ...createElement(),
+        getText: vi.fn(async () => "enabled")
+      }))
+    };
+
+    await expect(assertOtaDisabledInDevSmoke(ui)).rejects.toThrow(
+      "Expected OTA to be disabled in dev smoke, got enabled"
+    );
   });
 });
 
