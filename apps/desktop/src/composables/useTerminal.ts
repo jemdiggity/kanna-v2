@@ -46,6 +46,7 @@ import { getSharedStreamClient, onSharedStreamConnectionChange } from "./desktop
 import type { StreamClient } from "@kanna/stream-client"
 import { loadSessionRecoveryState } from "./sessionRecoveryState"
 import { useToast } from "./useToast"
+import i18n from "../i18n"
 
 export interface SpawnOptions {
   cwd: string
@@ -942,7 +943,7 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
         liveTerminal.write(recoveryState.serialized)
         preserveRecoveredScrollbackForNextSnapshot = true
       }
-      toast.warning(getRespawnToastKey(normalizedError, hasRecoveryState))
+      toast.warning(i18n.global.t(getRespawnToastKey(normalizedError, hasRecoveryState)))
       await ensureFitted()
       const fittedTerminal = getLiveTerminal()
       if (!fittedTerminal) return

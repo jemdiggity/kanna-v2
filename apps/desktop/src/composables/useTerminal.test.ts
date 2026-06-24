@@ -9,6 +9,11 @@ const invokeMock = vi.fn();
 const listenMock = vi.fn();
 const warningToastMock = vi.fn();
 const errorToastMock = vi.fn();
+const respawnedToastMessage = "The previous terminal session could not be reattached. A new session was started.";
+const respawnedWithScrollbackToastMessage =
+  "The previous terminal session could not be reattached. Scrollback was restored and a new session was started.";
+const daemonHandoffRespawnedToastMessage =
+  "The previous terminal session could not be reattached after restart. A new session was started.";
 const streamClientMock = vi.hoisted(() => ({
   getSharedStreamClient: vi.fn(),
   onSharedStreamConnectionChange: vi.fn(),
@@ -211,7 +216,12 @@ vi.mock("./useToast", () => ({
 vi.mock("../i18n", () => ({
   default: {
     global: {
-      t: (key: string) => key,
+      t: (key: string) =>
+        ({
+          "toasts.sessionRespawned": respawnedToastMessage,
+          "toasts.sessionRespawnedWithScrollback": respawnedWithScrollbackToastMessage,
+          "toasts.daemonHandoffRespawned": daemonHandoffRespawnedToastMessage,
+        })[key] ?? key,
     },
   },
 }));
@@ -700,7 +710,7 @@ describe("useTerminal", () => {
     terminalStreamHandlers.get("session-1")?.onError?.("session_not_found", "session not found: session-1");
     await flushAsyncWork();
 
-    expect(warningToastMock).toHaveBeenCalledWith("toasts.sessionRespawnedWithScrollback");
+    expect(warningToastMock).toHaveBeenCalledWith(respawnedWithScrollbackToastMessage);
     expect(errorToastMock).not.toHaveBeenCalled();
     expect(spawnFn).toHaveBeenCalledTimes(1);
     expect(client.attachTerminal).toHaveBeenCalledTimes(2);
@@ -783,7 +793,7 @@ describe("useTerminal", () => {
     expect(terminal.reset).toHaveBeenCalledTimes(1);
     expect(spawnFn).toHaveBeenCalledTimes(1);
     expect(client.attachTerminal).toHaveBeenCalledTimes(2);
-    expect(warningToastMock).toHaveBeenCalledWith("toasts.sessionRespawnedWithScrollback");
+    expect(warningToastMock).toHaveBeenCalledWith(respawnedWithScrollbackToastMessage);
   });
 
   it("respawns when the KSP stream reports a missing task session after initial attach", async () => {
@@ -838,7 +848,7 @@ describe("useTerminal", () => {
     const terminal = terminals[0];
     expect(terminal).toBeDefined();
     expect(spawnFn).toHaveBeenCalledTimes(1);
-    expect(warningToastMock).toHaveBeenCalledWith("toasts.sessionRespawned");
+    expect(warningToastMock).toHaveBeenCalledWith(respawnedToastMessage);
     expect(errorToastMock).not.toHaveBeenCalled();
     expect(
       terminal.write.mock.calls.some(
@@ -905,7 +915,7 @@ describe("useTerminal", () => {
     expect(terminal).toBeDefined();
 
     expect(spawnFn).toHaveBeenCalledTimes(1);
-    expect(warningToastMock).toHaveBeenCalledWith("toasts.daemonHandoffRespawned");
+    expect(warningToastMock).toHaveBeenCalledWith(daemonHandoffRespawnedToastMessage);
     expect(errorToastMock).not.toHaveBeenCalled();
     expect(client.attachTerminal).toHaveBeenCalledTimes(2);
     expect(terminal.write.mock.calls.some(([data]) => data === "fresh session output")).toBe(true);
@@ -1138,7 +1148,7 @@ describe("useTerminal", () => {
 
     expect(spawnFn).toHaveBeenCalledTimes(1);
     expect(client.attachTerminal).toHaveBeenCalledTimes(3);
-    expect(warningToastMock).toHaveBeenCalledWith("toasts.sessionRespawnedWithScrollback");
+    expect(warningToastMock).toHaveBeenCalledWith(respawnedWithScrollbackToastMessage);
   });
 
   it("attaches Copilot sessions without replaying recovery state on first mount", async () => {
