@@ -58,7 +58,7 @@ describe("desktop sidecar packaging", () => {
     expect(bazelBuild).toContain('":kanna_server_release_x86_64"');
     expect(bazelBuild).toContain('":kanna_task_transfer_release_x86_64"');
     expect(moduleBazel).toContain('name = "kanna_mcp_crates"');
-    expect(moduleBazel).toContain('manifests = ["//crates/kanna-mcp:Cargo.toml"]');
+    expect(moduleBazel).toContain('manifests = ["//:Cargo.mcp.toml"]');
     expect(moduleBazel).toContain('name = "kanna_server_crates"');
     expect(moduleBazel).toContain('manifests = ["//:Cargo.server.toml"]');
     expect(moduleBazel).toContain('name = "task_transfer_crates"');
