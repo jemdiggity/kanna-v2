@@ -1,5 +1,6 @@
 {
   "dev": {
+    "runtimeVersion": "1.0.0",
     "name": "dev",
     "displayName": "Kanna Dev",
     "scheme": "kanna-dev",
@@ -13,9 +14,11 @@
       "messagingSenderId": "0",
       "appId": "kanna-mobile-local"
     },
-    "relayUrl": "ws://127.0.0.1:9080"
+    "relayUrl": "ws://127.0.0.1:9080",
+    "otaChannel": null
   },
   "staging": {
+    "runtimeVersion": "1.0.0",
     "name": "staging",
     "displayName": "Kanna Staging",
     "scheme": "kanna-staging",
@@ -29,9 +32,11 @@
       "messagingSenderId": "1073113006696",
       "appId": "1:1073113006696:ios:612ea270319b137c1c71dd"
     },
-    "relayUrl": "wss://relay-staging.kanna.build"
+    "relayUrl": "wss://relay-staging.kanna.build",
+    "otaChannel": "staging"
   },
   "prod": {
+    "runtimeVersion": "1.0.0",
     "name": "prod",
     "displayName": "Kanna",
     "scheme": "kanna",
@@ -45,6 +50,7 @@
       "messagingSenderId": "402613185450",
       "appId": "1:402613185450:ios:adcedeadcd241285d859d3"
     },
-    "relayUrl": "wss://relay.kanna.build"
+    "relayUrl": "wss://relay.kanna.build",
+    "otaChannel": "production"
   }
 }

@@ -1,6 +1,7 @@
 import React from "react";
 import { Ionicons } from "@expo/vector-icons";
 import { Pressable, StyleSheet, Text, View } from "react-native";
+import { MOBILE_E2E_IDS } from "../e2eTestIds";
 import type { TabName, TabRoute } from "../navigation/RootNavigator";
 
 interface FloatingToolbarProps {
@@ -48,6 +49,7 @@ export function FloatingToolbar({
             <Pressable
               key={tab.name}
               style={[styles.item, active ? styles.itemActive : null]}
+              testID={MOBILE_E2E_IDS.toolbarTab(tab.name)}
               onPress={() => onSelectTab(tab.name)}
             >
               <Ionicons

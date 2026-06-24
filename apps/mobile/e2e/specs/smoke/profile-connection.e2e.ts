@@ -20,6 +20,11 @@ interface ProfileSheetOpener {
   getAccountSheet(): Promise<ProfileConnectionElement>;
 }
 
+interface OtaDevSmokeUi {
+  getMoreTab(): Promise<ProfileConnectionElement>;
+  getOtaStatusValue(): Promise<ProfileConnectionElement>;
+}
+
 interface ProfileConnectionControlsUi {
   getConnectionTitle(): Promise<ProfileConnectionElement>;
   getConnectionStatus(): Promise<ProfileConnectionElement>;
@@ -40,6 +45,7 @@ interface ProfileConnectionControlsUi {
 
 interface ProfileConnectionUi
   extends ProfileSheetOpener,
+    OtaDevSmokeUi,
     ProfileConnectionControlsUi {}
 
 function createProfileConnectionUi(driver: Browser): ProfileConnectionUi {
@@ -68,6 +74,12 @@ function createProfileConnectionUi(driver: Browser): ProfileConnectionUi {
     async getPasswordToggle() {
       return driver.$(selectors.accountPasswordToggle);
     },
+    async getMoreTab() {
+      return driver.$(selectors.moreTab);
+    },
+    async getOtaStatusValue() {
+      return driver.$(selectors.updateInfoOtaValue);
+    },
     async getSignInButton() {
       return driver.$(selectors.accountSignInButton);
     },
@@ -75,6 +87,21 @@ function createProfileConnectionUi(driver: Browser): ProfileConnectionUi {
       return driver.waitUntil(condition, options);
     }
   };
+}
+
+export async function assertOtaDisabledInDevSmoke(
+  ui: OtaDevSmokeUi
+): Promise<void> {
+  const moreTab = await ui.getMoreTab();
+  await moreTab.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  await moreTab.click();
+
+  const otaStatus = await ui.getOtaStatusValue();
+  await otaStatus.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  const statusText = await otaStatus.getText();
+  if (statusText.trim().toLowerCase() !== "disabled") {
+    throw new Error(`Expected OTA to be disabled in dev smoke, got ${statusText}`);
+  }
 }
 
 export async function openProfileConnectionSheet(
@@ -203,6 +230,7 @@ export async function runProfileConnectionSmoke(driver: Browser): Promise<void> 
   const appShell = await driver.$(selectors.appShell);
   await appShell.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
 
+  await assertOtaDisabledInDevSmoke(ui);
   await openProfileConnectionSheet(ui);
   await assertProfileConnectionControlsReachable(ui);
   await assertProfilePasswordCanRevealAndHide(ui);

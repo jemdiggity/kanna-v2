@@ -1,4 +1,10 @@
-import React, { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  useSyncExternalStore
+} from "react";
 import {
   AppState,
   type AppStateStatus,
@@ -13,18 +19,30 @@ import {
   shouldShowFloatingToolbar,
   shouldShowTopBar
 } from "./appShell";
-import { shouldRefreshOnAppStateTransition } from "./appLifecycle";
+import {
+  shouldCheckForOtaUpdateOnForeground,
+  shouldRefreshOnAppStateTransition
+} from "./appLifecycle";
 import { createAppModel, resolveForceCloud, type AppModel } from "./appModel";
 import { AccountBadge } from "./components/AccountBadge";
 import { AccountSheet } from "./components/AccountSheet";
 import { FloatingToolbar } from "./components/FloatingToolbar";
 import { CreateTaskComposer } from "./components/CreateTaskComposer";
+import { UpdateReadyBanner } from "./components/UpdateReadyBanner";
 import { MOBILE_E2E_IDS } from "./e2eTestIds";
+import {
+  checkAndFetchUpdate,
+  getCurrentUpdateInfo,
+  reloadToApplyUpdate,
+  type CurrentUpdateInfo
+} from "./lib/updates/otaUpdates";
 import { DesktopsScreen } from "./screens/DesktopsScreen";
 import { MoreScreen } from "./screens/MoreScreen";
 import { SearchScreen } from "./screens/SearchScreen";
 import { TaskScreen } from "./screens/TaskScreen";
 import { TasksScreen } from "./screens/TasksScreen";
+
+const OTA_FOREGROUND_CHECK_THROTTLE_MS = 5 * 60 * 1000;
 
 export default function App() {
   const modelRef = useRef<AppModel | null>(null);
@@ -46,22 +64,73 @@ export default function App() {
   const { controller, navigator } = model;
   const [accountSheetVisible, setAccountSheetVisible] = useState(false);
   const [forceCloudEnabled, setForceCloudEnabled] = useState(resolveForceCloud());
+  const [updatePromptVisible, setUpdatePromptVisible] = useState(false);
+  const [currentUpdateInfo, setCurrentUpdateInfo] = useState<CurrentUpdateInfo>(() =>
+    getCurrentUpdateInfo()
+  );
+  const lastOtaCheckAtRef = useRef<number | null>(null);
+  const hasDownloadedUpdateRef = useRef(false);
   const taskDetailVisible =
     state.connectionState === "connected" &&
     isTaskDetailVisible(state.selectedTaskId, state.activeView);
 
+  const runOtaUpdateCheck = useCallback(async (nowMs = Date.now()) => {
+    lastOtaCheckAtRef.current = nowMs;
+    const result = await checkAndFetchUpdate();
+    setCurrentUpdateInfo(getCurrentUpdateInfo());
+
+    if (result.state === "downloaded") {
+      hasDownloadedUpdateRef.current = true;
+      setUpdatePromptVisible(true);
+    }
+  }, []);
+
   useEffect(() => {
-    void model.initialize();
-  }, [model]);
+    let cancelled = false;
+
+    void model.initialize().then(() => {
+      if (!cancelled) {
+        void runOtaUpdateCheck();
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [model, runOtaUpdateCheck]);
 
   useEffect(() => {
     let previousState: AppStateStatus = AppState.currentState;
     const subscription = AppState.addEventListener("change", (nextState) => {
       if (
+        hasDownloadedUpdateRef.current &&
+        previousState === "background" &&
+        nextState === "active"
+      ) {
+        hasDownloadedUpdateRef.current = false;
+        void reloadToApplyUpdate();
+        previousState = nextState;
+        return;
+      }
+
+      if (
         shouldRefreshOnAppStateTransition(previousState, nextState) &&
         model.sessionStore.getState().connectionState === "connected"
       ) {
         void controller.refresh();
+      }
+
+      const nowMs = Date.now();
+      if (
+        shouldCheckForOtaUpdateOnForeground({
+          previousState,
+          nextState,
+          nowMs,
+          lastCheckAtMs: lastOtaCheckAtRef.current,
+          throttleMs: OTA_FOREGROUND_CHECK_THROTTLE_MS
+        })
+      ) {
+        void runOtaUpdateCheck(nowMs);
       }
 
       previousState = nextState;
@@ -142,6 +211,7 @@ export default function App() {
             pairingCode={state.pairingCode}
             refreshStatus={state.refreshStatus}
             selectedTask={selectedTask}
+            updateInfo={currentUpdateInfo}
             onRefresh={() => {
               void controller.refresh();
             }}
@@ -282,6 +352,15 @@ export default function App() {
             void controller.signOut();
           }}
         />
+        {updatePromptVisible ? (
+          <UpdateReadyBanner
+            onDismiss={() => setUpdatePromptVisible(false)}
+            onRestart={() => {
+              hasDownloadedUpdateRef.current = false;
+              void reloadToApplyUpdate();
+            }}
+          />
+        ) : null}
       </View>
     </SafeAreaView>
   );
