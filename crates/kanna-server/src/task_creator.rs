@@ -472,6 +472,7 @@ struct TaskCreationRequest {
     notify_task_id: Option<String>,
 }
 
+#[derive(Clone)]
 struct CreatedTask {
     task_id: String,
     repo_id: String,
@@ -481,6 +482,7 @@ struct CreatedTask {
     worktree_path: String,
 }
 
+#[derive(Clone)]
 pub(crate) struct PreparedTaskSpawn {
     created_task: CreatedTask,
     branch: String,
@@ -490,6 +492,7 @@ pub(crate) struct PreparedTaskSpawn {
     session: PreparedSessionSpawn,
 }
 
+#[derive(Clone)]
 pub(crate) enum PreparedSessionSpawn {
     Pty {
         executable: String,
@@ -653,6 +656,11 @@ fn prepare_task_spawn(
         request.allowed_tools
     };
     let agent_type = resolve_agent_type(request.agent_type.as_deref(), provider)?;
+    let headless_executable = if matches!(agent_type, AgentSessionType::Agent) {
+        resolve_headless_agent_executable(provider)?
+    } else {
+        None
+    };
 
     let task_id = generate_task_id()?;
     let branch = format!("task-{}", task_id);
@@ -755,10 +763,6 @@ fn prepare_task_spawn(
             }
         }
         AgentSessionType::Agent => {
-            let executable = match provider {
-                AgentProvider::Opencode => which_binary("opencode")?,
-                AgentProvider::Claude | AgentProvider::Codex | AgentProvider::Copilot => None,
-            };
             let system_prompt = build_kanna_preamble(
                 &provider,
                 &task_id,
@@ -773,7 +777,7 @@ fn prepare_task_spawn(
                 permission_mode,
                 allowed_tools,
                 system_prompt,
-                executable,
+                executable: headless_executable,
             }
         }
     };
@@ -938,6 +942,24 @@ pub(crate) async fn spawn_prepared_task_for_api(
         agent_type: created.agent_type,
         worktree_path: Some(created.worktree_path),
     })
+}
+
+pub(crate) async fn spawn_prepared_task_for_api_with_rollback(
+    db_path: &str,
+    daemon: &mut DaemonClient,
+    prepared: PreparedTaskSpawn,
+) -> Result<crate::mobile_api::CreateTaskResponse, String> {
+    match spawn_prepared_task_for_api(daemon, prepared.clone()).await {
+        Ok(created) => Ok(created),
+        Err(err) => {
+            let db = Db::open(db_path)
+                .map_err(|db_err| format!("{err}; rollback failed: db error: {db_err}"))?;
+            match rollback_prepared_task_for_api(&db, &prepared) {
+                Ok(()) => Err(err),
+                Err(rollback_err) => Err(format!("{err}; rollback failed: {rollback_err}")),
+            }
+        }
+    }
 }
 
 pub(crate) async fn continue_prepared_stage_for_api(
@@ -1650,6 +1672,15 @@ fn which_binary(name: &str) -> Result<Option<String>, String> {
     resolve_binary_from_candidates(name, sidecar_candidates(name)).map(Some)
 }
 
+fn resolve_headless_agent_executable(provider: AgentProvider) -> Result<Option<String>, String> {
+    match provider {
+        AgentProvider::Claude | AgentProvider::Codex | AgentProvider::Opencode => {
+            which_binary(provider.as_str())
+        }
+        AgentProvider::Copilot => Ok(None),
+    }
+}
+
 fn resolve_binary_from_candidates(name: &str, candidates: Vec<PathBuf>) -> Result<String, String> {
     resolve_binary_from_candidates_with_path_lookup(name, candidates, |name| {
         let output = Command::new("/bin/zsh")
@@ -2135,6 +2166,20 @@ mod tests {
         repo_root
     }
 
+    fn ensure_test_sidecar(name: &str) -> (std::path::PathBuf, bool) {
+        let sidecar_path = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join(name);
+        if sidecar_path.exists() {
+            return (sidecar_path, false);
+        }
+
+        std::fs::write(&sidecar_path, "#!/bin/sh\nexit 0\n").unwrap();
+        (sidecar_path, true)
+    }
+
     #[test]
     fn resolve_binary_prefers_sidecar_candidate_before_path_lookup() {
         let temp_root = std::env::temp_dir().join(format!(
@@ -2217,6 +2262,49 @@ mod tests {
 
             let _ = std::fs::remove_dir_all(&repo_root);
         }
+    }
+
+    #[test]
+    fn prepare_codex_agent_uses_resolved_executable_for_headless_spawn() {
+        let (codex_sidecar, created_sidecar) = ensure_test_sidecar("codex");
+        let repo_root = init_git_repo("codex-headless-executable");
+        let config = test_config("codex-headless-executable");
+        let db = Db::open_for_tests(&config.db_path).unwrap();
+        db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+            .unwrap();
+
+        let prepared = prepare_task_for_api(
+            &db,
+            &config,
+            CreateTaskRequest {
+                repo_id: "repo-1".to_string(),
+                prompt: "Use codex".to_string(),
+                pipeline_name: None,
+                base_ref: None,
+                stage: None,
+                agent_provider: Some("codex".to_string()),
+                agent_type: None,
+                model: None,
+                permission_mode: None,
+                allowed_tools: None,
+                notify_task_id: None,
+                blocker_task_ids: None,
+            },
+        )
+        .unwrap();
+
+        match prepared.session {
+            PreparedSessionSpawn::Agent { executable, .. } => {
+                let executable = executable.expect("codex executable should be resolved");
+                assert_eq!(executable, codex_sidecar.to_string_lossy());
+            }
+            _ => panic!("expected agent session"),
+        }
+
+        if created_sidecar {
+            let _ = std::fs::remove_file(&codex_sidecar);
+        }
+        let _ = std::fs::remove_dir_all(&repo_root);
     }
 
     #[test]
