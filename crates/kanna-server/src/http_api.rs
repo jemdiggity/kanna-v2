@@ -1798,11 +1798,15 @@ mod tests {
     }
 
     fn ensure_test_kanna_cli_sidecar() -> (PathBuf, bool) {
+        ensure_test_sidecar("kanna-cli")
+    }
+
+    fn ensure_test_sidecar(name: &str) -> (PathBuf, bool) {
         let sidecar_path = std::env::current_exe()
             .unwrap()
             .parent()
             .unwrap()
-            .join("kanna-cli");
+            .join(name);
         if sidecar_path.exists() {
             return (sidecar_path, false);
         }
@@ -2722,6 +2726,7 @@ mod tests {
         init_test_git_repo(&repo_root);
 
         let (kanna_cli_path, created_test_sidecar) = ensure_test_kanna_cli_sidecar();
+        let (kanna_mcp_path, created_test_mcp_sidecar) = ensure_test_sidecar("kanna-mcp");
         let kanna_cli_path_string = kanna_cli_path.to_string_lossy().to_string();
         let kanna_cli_dir = kanna_cli_path
             .parent()
@@ -2802,7 +2807,7 @@ mod tests {
             firebase_firestore_emulator_host: None,
             daemon_dir: daemon_dir.to_string_lossy().to_string(),
             db_path: db_path.clone(),
-            kanna_cli_path: None,
+            kanna_cli_path: Some(kanna_cli_path_string.clone()),
             desktop_id: "desktop-1".to_string(),
             desktop_secret: Some("desktop-secret".to_string()),
             desktop_name: "Studio Mac".to_string(),
@@ -2859,6 +2864,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&repo_root);
         if created_test_sidecar {
             let _ = std::fs::remove_file(&kanna_cli_path);
+        }
+        if created_test_mcp_sidecar {
+            let _ = std::fs::remove_file(&kanna_mcp_path);
         }
     }
 

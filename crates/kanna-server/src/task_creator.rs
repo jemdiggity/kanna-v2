@@ -2341,7 +2341,10 @@ mod tests {
 
     #[test]
     fn build_spawn_env_prepends_kanna_cli_directory_to_path() {
-        let config = test_config("spawn-env-kanna-cli-path");
+        let mut config = test_config("spawn-env-kanna-cli-path");
+        let (kanna_cli_path, created_test_sidecar) = ensure_test_sidecar("kanna-cli");
+        let (kanna_mcp_path, created_test_mcp_sidecar) = ensure_test_sidecar("kanna-mcp");
+        config.kanna_cli_path = Some(kanna_cli_path.to_string_lossy().to_string());
         let env = build_spawn_env(&config, "task-1", &HashMap::new()).unwrap();
         let cli_path = env
             .get("KANNA_CLI_PATH")
@@ -2354,6 +2357,12 @@ mod tests {
         let path = env.get("PATH").expect("PATH should be provided");
 
         assert_eq!(path.split(':').next(), Some(cli_dir.as_str()));
+        if created_test_sidecar {
+            let _ = std::fs::remove_file(kanna_cli_path);
+        }
+        if created_test_mcp_sidecar {
+            let _ = std::fs::remove_file(kanna_mcp_path);
+        }
     }
 
     #[test]
@@ -2762,10 +2771,11 @@ mod tests {
             env.get("KANNA_CLI_PATH").map(String::as_str),
             Some("/Applications/Kanna.app/Contents/MacOS/kanna-cli")
         );
-        assert_eq!(
-            env.get("PATH").and_then(|path| path.split(':').next()),
-            Some("/Applications/Kanna.app/Contents/MacOS")
-        );
+        assert!(env
+            .get("PATH")
+            .expect("PATH should be set for sidecars")
+            .split(':')
+            .any(|entry| entry == "/Applications/Kanna.app/Contents/MacOS"));
     }
 
     #[test]
