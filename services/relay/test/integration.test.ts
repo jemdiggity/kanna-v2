@@ -1,20 +1,32 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { deleteApp, initializeApp, type App } from "firebase-admin/app";
+import { getFirestore } from "firebase-admin/firestore";
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import WebSocket from "ws";
 
-const RELAY_PORT = 18080;
-const RELAY_URL = `ws://localhost:${RELAY_PORT}`;
-const HEALTH_URL = `http://localhost:${RELAY_PORT}/health`;
 const TEST_EMAIL = "upvote.sieve.7t@icloud.com";
 const TEST_PASSWORD = "password123";
 const OTHER_TEST_EMAIL = "relay.other.7t@example.com";
 const OTHER_TEST_PASSWORD = "password123";
 const TEST_DEVICE_TOKEN = "e2e-token";
+const TEST_USER_ID = "Bax9TJvOWm5bbl0Aq4nXg3XmkTCu";
+const SECRET_DESKTOP_ID = "desktop-secret-auth";
+const SECRET_DESKTOP_SECRET = "desktop-secret-for-relay";
+let relayPort = 0;
+
+function relayUrl(): string {
+  return `ws://localhost:${relayPort}`;
+}
+
+function healthUrl(): string {
+  return `http://localhost:${relayPort}/health`;
+}
 
 /**
  * Helper: wait for the relay's /health endpoint to respond 200.
@@ -24,7 +36,7 @@ async function waitForRelay(timeoutMs = 10_000): Promise<void> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     try {
-      const res = await fetch(HEALTH_URL);
+      const res = await fetch(healthUrl());
       if (res.ok) return;
     } catch {
       // not ready yet
@@ -73,7 +85,7 @@ async function signInToAuthEmulator(
   return response?.ok && body?.idToken ? body.idToken : null;
 }
 
-async function waitForAuthEmulator(authPort: number, timeoutMs = 30_000): Promise<string> {
+async function waitForAuthEmulator(authPort: number, timeoutMs = 60_000): Promise<string> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const token = await signInToAuthEmulator(authPort, TEST_EMAIL, TEST_PASSWORD);
@@ -81,6 +93,33 @@ async function waitForAuthEmulator(authPort: number, timeoutMs = 30_000): Promis
     await new Promise((r) => setTimeout(r, 250));
   }
   throw new Error(`Firebase auth emulator did not become ready on ${authPort}`);
+}
+
+function sha256Hex(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+async function seedRelayDesktopCredentials(firestorePort: number): Promise<void> {
+  const previousHost = process.env.FIRESTORE_EMULATOR_HOST;
+  process.env.FIRESTORE_EMULATOR_HOST = `127.0.0.1:${firestorePort}`;
+  let app: App | undefined;
+  try {
+    app = initializeApp({ projectId: "kanna-local" }, `relay-integration-${firestorePort}`);
+    await getFirestore(app)
+      .doc(`users/${TEST_USER_ID}/desktops/${SECRET_DESKTOP_ID}`)
+      .set({
+        desktopId: SECRET_DESKTOP_ID,
+        desktopSecretHash: sha256Hex(SECRET_DESKTOP_SECRET),
+        createdAt: new Date(0).toISOString(),
+      });
+  } finally {
+    if (app) await deleteApp(app);
+    if (previousHost === undefined) {
+      delete process.env.FIRESTORE_EMULATOR_HOST;
+    } else {
+      process.env.FIRESTORE_EMULATOR_HOST = previousHost;
+    }
+  }
 }
 
 /**
@@ -91,7 +130,7 @@ function connectAndAuth(
   authPayload: Record<string, unknown>
 ): Promise<{ ws: WebSocket; userId: string }> {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(RELAY_URL);
+    const ws = new WebSocket(relayUrl());
     const timeout = setTimeout(() => {
       ws.close();
       reject(new Error("Auth timed out"));
@@ -109,6 +148,37 @@ function connectAndAuth(
       }
     };
     ws.on("message", handler);
+    ws.on("error", (err) => {
+      clearTimeout(timeout);
+      reject(err);
+    });
+  });
+}
+
+function connectAndExpectClose(
+  authPayload: Record<string, unknown>,
+  expectedCode: number,
+  timeoutMs = 5_000,
+): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(relayUrl());
+    const timeout = setTimeout(() => {
+      ws.close();
+      reject(new Error(`Expected close ${expectedCode} timed out`));
+    }, timeoutMs);
+
+    ws.on("open", () => {
+      ws.send(JSON.stringify({ type: "auth", ...authPayload }));
+    });
+    ws.on("close", (code: number) => {
+      clearTimeout(timeout);
+      try {
+        expect(code).toBe(expectedCode);
+        resolve(code);
+      } catch (error) {
+        reject(error);
+      }
+    });
     ws.on("error", (err) => {
       clearTimeout(timeout);
       reject(err);
@@ -167,6 +237,65 @@ function waitForRawMessage(
   });
 }
 
+function waitForMessages(
+  ws: WebSocket,
+  predicate: (msg: Record<string, unknown>) => boolean,
+  count: number,
+  timeoutMs = 5_000,
+): Promise<Record<string, unknown>[]> {
+  return new Promise((resolve, reject) => {
+    const messages: Record<string, unknown>[] = [];
+    const timeout = setTimeout(() => {
+      reject(new Error(`waitForMessages timed out after ${messages.length}/${count}`));
+    }, timeoutMs);
+
+    const handler = (raw: Buffer) => {
+      let msg: Record<string, unknown>;
+      try {
+        msg = JSON.parse(raw.toString()) as Record<string, unknown>;
+      } catch {
+        return;
+      }
+      if (!predicate(msg)) return;
+      messages.push(msg);
+      if (messages.length === count) {
+        clearTimeout(timeout);
+        ws.off("message", handler);
+        resolve(messages);
+      }
+    };
+    ws.on("message", handler);
+  });
+}
+
+async function requestActiveDesktopIds(
+  phone: WebSocket,
+  id: string,
+): Promise<string[]> {
+  phone.send(
+    JSON.stringify({
+      type: "invoke",
+      id,
+      command: "list_active_desktops",
+      args: {},
+    }),
+  );
+
+  const response = await waitForMessage(
+    phone,
+    (msg) => msg.type === "response" && msg.id === id,
+  );
+  const data = response.data;
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    throw new Error("list_active_desktops returned invalid data");
+  }
+  const desktopIds = (data as Record<string, unknown>).desktopIds;
+  if (!Array.isArray(desktopIds) || !desktopIds.every((value) => typeof value === "string")) {
+    throw new Error("list_active_desktops returned invalid desktopIds");
+  }
+  return desktopIds;
+}
+
 /**
  * Helper: close a WebSocket and wait for the close event.
  */
@@ -181,18 +310,50 @@ function closeAndWait(ws: WebSocket): Promise<void> {
   });
 }
 
+async function terminateProcessTree(
+  child: ChildProcessWithoutNullStreams | null,
+  signal: NodeJS.Signals = "SIGTERM",
+): Promise<void> {
+  if (!child?.pid || child.exitCode !== null || child.signalCode !== null) return;
+  await new Promise<void>((resolve) => {
+    const timeout = setTimeout(() => {
+      try {
+        process.kill(-child.pid!, "SIGKILL");
+      } catch {
+        // Already exited.
+      }
+      resolve();
+    }, 2_000);
+    child.once("exit", () => {
+      clearTimeout(timeout);
+      resolve();
+    });
+    try {
+      process.kill(-child.pid!, signal);
+    } catch {
+      clearTimeout(timeout);
+      resolve();
+    }
+  });
+}
+
 describe("Relay integration", () => {
   let firebaseProcess: ChildProcessWithoutNullStreams | null = null;
   let firebaseConfigDir: string | null = null;
   let authPort = 0;
   let firestorePort = 0;
+  let firebaseHubPort = 0;
+  let firebaseLoggingPort = 0;
   let idToken = "";
   let otherIdToken = "";
   let relayProcess: ChildProcessWithoutNullStreams | null = null;
 
   beforeAll(async () => {
+    relayPort = await findFreePort();
     authPort = await findFreePort();
     firestorePort = await findFreePort();
+    firebaseHubPort = await findFreePort();
+    firebaseLoggingPort = await findFreePort();
     firebaseConfigDir = await mkdtemp(join(tmpdir(), "kanna-relay-firebase-"));
     const firebaseConfigPath = join(firebaseConfigDir, "firebase.json");
     await writeFile(
@@ -202,6 +363,8 @@ describe("Relay integration", () => {
         emulators: {
           auth: { host: "127.0.0.1", port: authPort },
           firestore: { host: "127.0.0.1", port: firestorePort },
+          hub: { host: "127.0.0.1", port: firebaseHubPort },
+          logging: { host: "127.0.0.1", port: firebaseLoggingPort },
           ui: { enabled: false },
         },
       }),
@@ -219,6 +382,7 @@ describe("Relay integration", () => {
     ], {
       cwd: fileURLToPath(new URL("../../..", import.meta.url)),
       env: { ...process.env },
+      detached: true,
       stdio: "pipe",
     });
     firebaseProcess.stderr?.on("data", (chunk: Buffer) => {
@@ -227,6 +391,7 @@ describe("Relay integration", () => {
     idToken = await waitForAuthEmulator(authPort);
     otherIdToken = await signInToAuthEmulator(authPort, OTHER_TEST_EMAIL, OTHER_TEST_PASSWORD) ?? "";
     if (!otherIdToken) throw new Error("Second seeded auth user is unavailable");
+    await seedRelayDesktopCredentials(firestorePort);
 
     relayProcess = spawn("pnpm", ["exec", "tsx", "src/index.ts"], {
       cwd: fileURLToPath(new URL("..", import.meta.url)),
@@ -235,8 +400,9 @@ describe("Relay integration", () => {
         FIREBASE_PROJECT_ID: "kanna-local",
         FIREBASE_AUTH_EMULATOR_HOST: `127.0.0.1:${authPort}`,
         FIRESTORE_EMULATOR_HOST: `127.0.0.1:${firestorePort}`,
-        PORT: String(RELAY_PORT),
+        PORT: String(relayPort),
       },
+      detached: true,
       stdio: "pipe",
     });
 
@@ -246,13 +412,11 @@ describe("Relay integration", () => {
     });
 
     await waitForRelay();
-  }, 60_000);
+  }, 90_000);
 
   afterAll(async () => {
-    relayProcess?.kill("SIGTERM");
-    firebaseProcess?.kill("SIGTERM");
-    // Give the process a moment to exit cleanly
-    await new Promise((r) => setTimeout(r, 500));
+    await terminateProcessTree(relayProcess);
+    await terminateProcessTree(firebaseProcess);
     if (firebaseConfigDir) await rm(firebaseConfigDir, { recursive: true, force: true });
   });
 
@@ -262,6 +426,31 @@ describe("Relay integration", () => {
     });
     expect(userId).toMatch(/^[A-Za-z0-9]+$/);
     await closeAndWait(ws);
+  });
+
+  it("authenticates a desktop with desktop_id and desktop_secret", async () => {
+    const { ws, userId } = await connectAndAuth({
+      desktop_id: SECRET_DESKTOP_ID,
+      desktop_secret: SECRET_DESKTOP_SECRET,
+    });
+
+    expect(userId).toBe(TEST_USER_ID);
+    await closeAndWait(ws);
+  });
+
+  it("rejects bad desktop, device, and phone credentials against Firebase emulators", async () => {
+    await expect(connectAndExpectClose({
+      device_token: "missing-device-token",
+    }, 4005)).resolves.toBe(4005);
+
+    await expect(connectAndExpectClose({
+      desktop_id: SECRET_DESKTOP_ID,
+      desktop_secret: "wrong-secret",
+    }, 4005)).resolves.toBe(4005);
+
+    await expect(connectAndExpectClose({
+      id_token: "eyJhbGciOiJub25lIn0.eyJleHAiOjEsInVpZCI6ImV4cGlyZWQifQ.",
+    }, 4005)).resolves.toBe(4005);
   });
 
   it("routes legacy device-token servers by supplied desktop id", async () => {
@@ -409,7 +598,7 @@ describe("Relay integration", () => {
     const signal = await establishSignal;
     expect(signal.tunnelId).toEqual(expect.any(String));
 
-    const desktopTunnel = new WebSocket(RELAY_URL);
+    const desktopTunnel = new WebSocket(relayUrl());
     const readyOrder: string[] = [];
     desktopTunnel.on("message", (raw: Buffer) => {
       let msg: Record<string, unknown>;
@@ -1027,26 +1216,178 @@ describe("Relay integration", () => {
     await closeAndWait(userOneDesktop);
   });
 
+  it("does not let another user invoke a desktop owned by the seeded user", async () => {
+    const { ws: userOneDesktop } = await connectAndAuth({
+      device_token: TEST_DEVICE_TOKEN,
+      desktop_id: "desktop-private-user-one",
+    });
+    const { ws: userTwoPhone } = await connectAndAuth({
+      id_token: otherIdToken,
+    });
+
+    const unexpectedInvoke = waitForMessage(
+      userOneDesktop,
+      (msg) => msg.type === "invoke",
+      250,
+    ).then(
+      () => "invoke",
+      () => "timeout",
+    );
+
+    userTwoPhone.send(
+      JSON.stringify({
+        type: "invoke",
+        id: "cross-user-invoke",
+        desktopId: "desktop-private-user-one",
+        method: "GET",
+        path: "/v1/status",
+        body: null,
+      }),
+    );
+
+    const response = await waitForMessage(
+      userTwoPhone,
+      (msg) => msg.type === "response" && msg.id === "cross-user-invoke",
+    );
+    expect(response.error).toBe("Desktop offline");
+    await expect(unexpectedInvoke).resolves.toBe("timeout");
+
+    await closeAndWait(userTwoPhone);
+    await closeAndWait(userOneDesktop);
+  });
+
+  it("drops server events silently while the phone is offline", async () => {
+    const { ws: server } = await connectAndAuth({
+      device_token: TEST_DEVICE_TOKEN,
+      desktop_id: "desktop-offline-phone-event",
+    });
+
+    server.send(
+      JSON.stringify({
+        type: "event",
+        name: "terminal_output",
+        payload: { session_id: "offline-phone", data_b64: "b2ZmbGluZQ==" },
+      }),
+    );
+
+    const health = await fetch(healthUrl());
+    expect(health.ok).toBe(true);
+    expect(server.readyState).toBe(WebSocket.OPEN);
+
+    await closeAndWait(server);
+  });
+
+  it("routes server events to the phone in send order", async () => {
+    const { ws: server } = await connectAndAuth({
+      device_token: TEST_DEVICE_TOKEN,
+      desktop_id: "desktop-event-order",
+    });
+    const { ws: phone } = await connectAndAuth({
+      id_token: idToken,
+    });
+
+    const eventCount = 20;
+    const receivedEvents = waitForMessages(
+      phone,
+      (msg) => msg.type === "event" && msg.name === "ordered_event",
+      eventCount,
+    );
+
+    for (let sequence = 0; sequence < eventCount; sequence += 1) {
+      server.send(
+        JSON.stringify({
+          type: "event",
+          name: "ordered_event",
+          payload: { sequence },
+        }),
+      );
+    }
+
+    const events = await receivedEvents;
+    expect(events.map((event) => (event.payload as Record<string, unknown>).sequence)).toEqual(
+      Array.from({ length: eventCount }, (_value, index) => index),
+    );
+
+    await closeAndWait(phone);
+    await closeAndWait(server);
+  });
+
+  it("cleans up disconnected desktops and resumes routing after reconnect", async () => {
+    const desktopId = "desktop-reconnect-route";
+    const { ws: firstDesktop } = await connectAndAuth({
+      device_token: TEST_DEVICE_TOKEN,
+      desktop_id: desktopId,
+    });
+    const { ws: phone } = await connectAndAuth({
+      id_token: idToken,
+    });
+
+    expect(await requestActiveDesktopIds(phone, "active-before-reconnect")).toContain(desktopId);
+    await closeAndWait(firstDesktop);
+
+    await expect(
+      requestActiveDesktopIds(phone, "active-after-disconnect"),
+    ).resolves.not.toContain(desktopId);
+
+    const { ws: secondDesktop } = await connectAndAuth({
+      device_token: TEST_DEVICE_TOKEN,
+      desktop_id: desktopId,
+    });
+    const secondDesktopInvoke = waitForMessage(
+      secondDesktop,
+      (msg) => msg.type === "invoke" && msg.id === "invoke-after-reconnect",
+    );
+
+    phone.send(
+      JSON.stringify({
+        type: "invoke",
+        id: "invoke-after-reconnect",
+        desktopId,
+        method: "GET",
+        path: "/v1/status",
+        body: null,
+      }),
+    );
+
+    await expect(secondDesktopInvoke).resolves.toMatchObject({
+      desktopId,
+      path: "/v1/status",
+    });
+
+    await closeAndWait(phone);
+    await closeAndWait(secondDesktop);
+  });
+
   it("should reject connections that do not send auth within timeout", async () => {
-    // Connect without sending auth — the relay should close after AUTH_TIMEOUT_MS (10s)
-    // We won't wait the full 10s, just verify the connection opens fine
-    // and verify a non-auth first message gets rejected
-    const ws = new WebSocket(RELAY_URL);
+    const startedAt = Date.now();
+    const ws = new WebSocket(relayUrl());
     await new Promise<void>((resolve) => ws.on("open", resolve));
 
-    // Send a non-auth message
+    const closeCode = await new Promise<number>((resolve) => {
+      ws.on("close", (code: number) => resolve(code));
+    });
+    const elapsedMs = Date.now() - startedAt;
+
+    expect(closeCode).toBe(4001);
+    expect(elapsedMs).toBeGreaterThanOrEqual(9_500);
+    expect(elapsedMs).toBeLessThan(12_000);
+  }, 13_000);
+
+  it("rejects connections whose first message is not auth", async () => {
+    const ws = new WebSocket(relayUrl());
+    await new Promise<void>((resolve) => ws.on("open", resolve));
+
     ws.send(JSON.stringify({ type: "not_auth", foo: "bar" }));
 
     const closeCode = await new Promise<number>((resolve) => {
       ws.on("close", (code: number) => resolve(code));
     });
 
-    // The relay closes with 4003 for "First message must be auth"
     expect(closeCode).toBe(4003);
   });
 
   it("should reject connections with missing tokens", async () => {
-    const ws = new WebSocket(RELAY_URL);
+    const ws = new WebSocket(relayUrl());
     await new Promise<void>((resolve) => ws.on("open", resolve));
 
     // Send auth without any token
