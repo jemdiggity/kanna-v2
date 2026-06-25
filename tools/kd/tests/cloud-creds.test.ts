@@ -11,8 +11,8 @@ import {
 } from "../src/runtime/cloud-creds";
 
 describe("cloud test credentials", () => {
-  it("resolves the creds path under ~/.kanna/dev", () => {
-    expect(cloudTestCredsPath("/Users/example")).toBe("/Users/example/.kanna/dev/creds.toml");
+  it("resolves the creds path under ~/.kanna/developer", () => {
+    expect(cloudTestCredsPath("/Users/example")).toBe("/Users/example/.kanna/developer/creds.toml");
   });
 
   it("parses a cloud_test_user table", () => {

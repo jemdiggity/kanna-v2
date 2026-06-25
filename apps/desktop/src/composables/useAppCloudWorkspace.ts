@@ -3,12 +3,14 @@ import { computedAsync } from "@vueuse/core";
 import type { DbHandle, PipelineItem } from "@kanna/db";
 
 import { getConfiguredDesktopAuthSession } from "../services/desktopAuthSdk";
+import { runDesktopAutoSignIn } from "../services/desktopAutoSignIn";
 import type { DesktopAuthSession, DesktopAuthState } from "../services/desktopAuth";
 import {
   listDesktopCloudTasks,
   subscribeDesktopCloudTasks,
   type DesktopCloudSnapshot,
 } from "../services/desktopCloudTaskIndex";
+import { invoke } from "../invoke";
 import { listDesktopLanTasks, publishDesktopLanTaskSnapshot } from "../services/desktopLanTaskIndex";
 import { deleteRemoteTaskSnapshots, reconcileDesktopTaskSnapshots } from "../services/desktopCloudPublisher";
 import { getCachedRepoRemoteMetadata } from "../services/repoRemoteUrl";
@@ -314,6 +316,12 @@ export function useAppCloudWorkspace({ db, store, toast }: UseAppCloudWorkspaceO
         stopCloudTaskSubscription();
         cloudSnapshot.value = { repos: [], items: [], terminalRefs: {} };
       }
+    });
+    void runDesktopAutoSignIn({
+      dev: import.meta.env.DEV,
+      session,
+      getState: () => desktopAuthState.value,
+      readEnv: (name) => invoke<string>("read_env_var", { name }),
     });
   }
 

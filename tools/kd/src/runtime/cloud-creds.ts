@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { parse as parseToml } from "smol-toml";
+import { resolveDeveloperConfigRoot } from "./developer-config";
 
 /**
  * Local-only cloud test credentials. `~/.kanna/dev/creds.toml` holds the
@@ -17,7 +18,7 @@ export interface CloudTestCredentials {
 }
 
 export function cloudTestCredsPath(homeDir: string = homedir()): string {
-  return join(homeDir, ".kanna", "dev", "creds.toml");
+  return join(resolveDeveloperConfigRoot(homeDir), "creds.toml");
 }
 
 export function parseCloudTestCreds(body: string): CloudTestCredentials | null {

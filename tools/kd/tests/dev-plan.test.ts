@@ -129,6 +129,35 @@ Run '\\''copilot update'\\'' to check for updates.
     expect(plan.windows[3]?.command).toContain("pnpm run dev -- --port 8082 --dev-client");
   });
 
+  it("keeps desktop auto sign-in secrets on the desktop env only", () => {
+    const plan = buildDevPlan({
+      repoRoot: "/repo",
+      env: {
+        KANNA_CLOUD_ENV: "staging",
+        KANNA_DEV_PORT: "1421",
+        KANNA_DB_PATH: "/tmp/kanna.db",
+        KANNA_MOBILE_SERVER_PORT: "48120",
+        KANNA_MOBILE_PORT: "8082"
+      },
+      desktopSecretEnv: {
+        KANNA_DESKTOP_AUTO_SIGN_IN_EMAIL: "dev@example.com",
+        KANNA_DESKTOP_AUTO_SIGN_IN_PASSWORD: "do-not-print"
+      },
+      mobile: true,
+      emulators: false,
+      firebaseConfigPath: "/repo/.firebase-8080.kanna.json",
+      mobileServerUrl: "http://127.0.0.1:48120"
+    });
+
+    expect(plan.windows.map((window) => window.name)).toEqual(["desktop", "mobile"]);
+    expect(plan.windows[0]?.env.KANNA_DESKTOP_AUTO_SIGN_IN_EMAIL).toBe("dev@example.com");
+    expect(plan.windows[0]?.env.KANNA_DESKTOP_AUTO_SIGN_IN_PASSWORD).toBe("do-not-print");
+    expect(plan.windows[1]?.env.KANNA_DESKTOP_AUTO_SIGN_IN_EMAIL).toBeUndefined();
+    expect(plan.windows[1]?.env.KANNA_DESKTOP_AUTO_SIGN_IN_PASSWORD).toBeUndefined();
+    expect(plan.windows.map((window) => window.command).join("\n")).not.toContain("do-not-print");
+    expect(plan.windows.map((window) => window.command).join("\n")).not.toContain("dev@example.com");
+  });
+
   it("keeps the mobile Metro window alive for physical-device sessions", () => {
     const plan = buildDevPlan({
       repoRoot: "/repo",

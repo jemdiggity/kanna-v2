@@ -184,6 +184,56 @@ describe("kd CLI", () => {
     });
   });
 
+  it("parses opt-in staging desktop credentials only for supported staging launch commands", () => {
+    expect(parseCliArgs(["mobile", "up", "--staging", "--with-credentials"])).toEqual({
+      taskId: "mobile.up",
+      input: {
+        production: false,
+        staging: true,
+        withCredentials: true
+      }
+    });
+    expect(parseCliArgs(["mobile", "run", "--device", "--staging", "--with-credentials"])).toEqual({
+      taskId: "mobile.run",
+      input: {
+        device: true,
+        production: false,
+        staging: true,
+        withCredentials: true
+      }
+    });
+    expect(parseCliArgs(["dev", "restart", "desktop", "--staging", "--with-credentials"])).toEqual({
+      taskId: "dev.restart",
+      input: {
+        component: "desktop",
+        mobile: false,
+        emulators: false,
+        seed: false,
+        attach: false,
+        deleteDb: false,
+        killDaemon: false,
+        staging: true,
+        production: false,
+        withCredentials: true
+      }
+    });
+    expect(() => parseCliArgs(["mobile", "up", "--production", "--with-credentials"])).toThrow(
+      "--with-credentials is only supported for staging desktop launch commands"
+    );
+    expect(() => parseCliArgs(["mobile", "run", "--device", "--with-credentials"])).toThrow(
+      "--with-credentials is only supported for staging desktop launch commands"
+    );
+    expect(() => parseCliArgs(["mobile", "doctor", "--device", "--staging", "--with-credentials"])).toThrow(
+      "--with-credentials is only supported for staging desktop launch commands"
+    );
+    expect(() => parseCliArgs(["dev", "up", "--with-credentials"])).toThrow(
+      "--with-credentials is only supported for staging desktop launch commands"
+    );
+    expect(() => parseCliArgs(["dev", "restart", "mobile", "--staging", "--with-credentials"])).toThrow(
+      "--with-credentials is only supported for staging desktop launch commands"
+    );
+  });
+
   it("keeps no-arg dev restart as a whole-stack restart", () => {
     expect(parseCliArgs(["dev", "restart"])).toEqual({
       taskId: "dev.restart",

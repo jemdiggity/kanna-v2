@@ -44,6 +44,7 @@ import {
 import { buildConfigSchemaPages } from "../runtime/pages";
 import { getPortStatuses } from "../runtime/port-status";
 import { nodeCommandRunner, type CommandRunner } from "../runtime/process";
+import { readStagingDesktopAuth } from "../runtime/developer-config";
 import { shipRelease } from "../runtime/release";
 import { buildDesktopSidecars } from "../runtime/sidecars";
 import { checkSetupPrerequisites, installSetupDependencies } from "../runtime/setup";
@@ -73,6 +74,7 @@ export interface DevRestartInput extends DevUpInput {
   component?: RestartComponent;
   staging: boolean;
   production: boolean;
+  withCredentials?: boolean;
 }
 
 export interface DevDownInput {
@@ -82,12 +84,14 @@ export interface DevDownInput {
 export interface MobileUpInput {
   production: boolean;
   staging: boolean;
+  withCredentials?: boolean;
 }
 
 export interface MobileRunInput {
   device: boolean;
   production?: boolean;
   staging?: boolean;
+  withCredentials?: boolean;
 }
 
 export const devUpInputSchema = z.object({
@@ -107,7 +111,8 @@ export const devUpInputSchema = z.object({
 const devRestartInputSchema = devUpInputSchema.extend({
   component: z.enum(["desktop", "mobile", "backend"]).optional(),
   staging: z.boolean().default(false),
-  production: z.boolean().default(false)
+  production: z.boolean().default(false),
+  withCredentials: z.boolean().default(false)
 });
 
 const devDownInputSchema = z.object({
@@ -116,13 +121,15 @@ const devDownInputSchema = z.object({
 
 const mobileUpInputSchema = z.object({
   production: z.boolean().default(false),
-  staging: z.boolean().default(false)
+  staging: z.boolean().default(false),
+  withCredentials: z.boolean().default(false)
 });
 
 const mobileRunInputSchema = z.object({
   device: z.boolean().default(false),
   production: z.boolean().default(false),
-  staging: z.boolean().default(false)
+  staging: z.boolean().default(false),
+  withCredentials: z.boolean().default(false)
 });
 
 const mobileOtaPublishInputSchema = z.object({
@@ -402,6 +409,9 @@ async function buildRestartWindow(
   const plan = buildDevPlan({
     repoRoot: executor.context.repoRoot,
     env,
+    desktopSecretEnv: environment === "staging" && component === "desktop"
+      ? stagingDesktopCredentialEnv(input, env)
+      : undefined,
     mobile: component === "mobile",
     emulators: input.emulators,
     firebaseConfigPath,
@@ -524,6 +534,7 @@ export async function executeProductionMobileUpWithContext(
     const desktopPlan = buildDevPlan({
       repoRoot: executor.context.repoRoot,
       env,
+      desktopSecretEnv: stagingDesktopCredentialEnv(input, env),
       mobile: false,
       emulators: false,
       firebaseConfigPath: "",
@@ -626,6 +637,15 @@ function requireMobileDeviceDevPorts(ports: Partial<KdPorts>): FirebasePortInput
     KANNA_FIREBASE_FIRESTORE_PORT: requireNumberPort(ports, "KANNA_FIREBASE_FIRESTORE_PORT"),
     KANNA_FIREBASE_FUNCTIONS_PORT: requireNumberPort(ports, "KANNA_FIREBASE_FUNCTIONS_PORT"),
     KANNA_FIREBASE_UI_PORT: requireNumberPort(ports, "KANNA_FIREBASE_UI_PORT")
+  };
+}
+
+function stagingDesktopCredentialEnv(input: { withCredentials?: boolean }, env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  if (!input.withCredentials) return {};
+  const credentials = readStagingDesktopAuth(env.HOME?.trim() || homedir());
+  return {
+    KANNA_DESKTOP_AUTO_SIGN_IN_EMAIL: credentials.email,
+    KANNA_DESKTOP_AUTO_SIGN_IN_PASSWORD: credentials.password
   };
 }
 
@@ -931,6 +951,7 @@ function prepareMobileDeviceLaunch(
     const desktopPlan = buildDevPlan({
       repoRoot: executor.context.repoRoot,
       env,
+      desktopSecretEnv: stagingDesktopCredentialEnv(input, env),
       mobile: false,
       emulators: false,
       firebaseConfigPath: "",
