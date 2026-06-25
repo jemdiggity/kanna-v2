@@ -132,6 +132,7 @@ fn resolves_expected_requests_for_every_bundled_tool() {
             json!({
                 "repo_id": "repo-1",
                 "prompt": "Blocked work",
+                "agent_type": "pty",
                 "blocker_task_ids": ["blocker-1", "blocker-2"]
             }),
             Method::Post,
@@ -140,6 +141,7 @@ fn resolves_expected_requests_for_every_bundled_tool() {
             json!({
                 "repoId": "repo-1",
                 "prompt": "Blocked work",
+                "agentType": "pty",
                 "blockerTaskIds": ["blocker-1", "blocker-2"]
             }),
         ),

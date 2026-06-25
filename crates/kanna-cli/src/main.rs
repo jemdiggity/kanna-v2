@@ -706,6 +706,7 @@ fn task_create_flag_names() -> Vec<String> {
         "base_ref",
         "stage",
         "agent_provider",
+        "agent_type",
         "model",
         "permission_mode",
         "allowed_tools",
@@ -718,13 +719,282 @@ fn task_create_flag_names() -> Vec<String> {
 }
 
 #[cfg(test)]
-fn catalog_create_task_param_names() -> Vec<String> {
-    kanna_tool_catalog::bundled_catalog()
-        .tools
-        .into_iter()
-        .find(|tool| tool.name == "kanna_create_task")
-        .map(|tool| tool.params.into_iter().map(|param| param.name).collect())
-        .unwrap_or_default()
+#[derive(Debug)]
+struct TypedCliArgMapping {
+    catalog_arg: &'static str,
+    cli_arg: &'static str,
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct TypedCliToolMapping {
+    catalog_tool: &'static str,
+    typed_command: &'static str,
+    command_path: &'static [&'static str],
+    args: &'static [TypedCliArgMapping],
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct CatalogCliException {
+    catalog_tool: &'static str,
+    reason: &'static str,
+}
+
+#[cfg(test)]
+fn typed_cli_tool_mappings() -> Vec<TypedCliToolMapping> {
+    vec![
+        TypedCliToolMapping {
+            catalog_tool: "kanna_list_repos",
+            typed_command: "kanna-cli repo list",
+            command_path: &["repo", "list"],
+            args: &[],
+        },
+        TypedCliToolMapping {
+            catalog_tool: "kanna_add_repo",
+            typed_command: "kanna-cli repo add",
+            command_path: &["repo", "add"],
+            args: &[
+                TypedCliArgMapping {
+                    catalog_arg: "path",
+                    cli_arg: "path",
+                },
+                TypedCliArgMapping {
+                    catalog_arg: "name",
+                    cli_arg: "name",
+                },
+            ],
+        },
+        TypedCliToolMapping {
+            catalog_tool: "kanna_list_recent_tasks",
+            typed_command: "kanna-cli task list",
+            command_path: &["task", "list"],
+            args: &[],
+        },
+        TypedCliToolMapping {
+            catalog_tool: "kanna_get_task",
+            typed_command: "kanna-cli task get",
+            command_path: &["task", "get"],
+            args: &[TypedCliArgMapping {
+                catalog_arg: "task_id",
+                cli_arg: "task_id",
+            }],
+        },
+        TypedCliToolMapping {
+            catalog_tool: "kanna_wait_task",
+            typed_command: "kanna-cli task wait",
+            command_path: &["task", "wait"],
+            args: &[
+                TypedCliArgMapping {
+                    catalog_arg: "task_id",
+                    cli_arg: "task_id",
+                },
+                TypedCliArgMapping {
+                    catalog_arg: "timeout_secs",
+                    cli_arg: "timeout_secs",
+                },
+                TypedCliArgMapping {
+                    catalog_arg: "poll_secs",
+                    cli_arg: "poll_secs",
+                },
+                TypedCliArgMapping {
+                    catalog_arg: "until",
+                    cli_arg: "until",
+                },
+            ],
+        },
+        TypedCliToolMapping {
+            catalog_tool: "kanna_task_logs",
+            typed_command: "kanna-cli task logs",
+            command_path: &["task", "logs"],
+            args: &[
+                TypedCliArgMapping {
+                    catalog_arg: "task_id",
+                    cli_arg: "task_id",
+                },
+                TypedCliArgMapping {
+                    catalog_arg: "tail",
+                    cli_arg: "tail",
+                },
+            ],
+        },
+        TypedCliToolMapping {
+            catalog_tool: "kanna_create_task",
+            typed_command: "kanna-cli task create",
+            command_path: &["task", "create"],
+            args: &[
+                TypedCliArgMapping {
+                    catalog_arg: "repo_id",
+                    cli_arg: "repo_id",
+                },
+                TypedCliArgMapping {
+                    catalog_arg: "prompt",
+                    cli_arg: "prompt",
+                },
+                TypedCliArgMapping {
+                    catalog_arg: "pipeline_name",
+                    cli_arg: "pipeline_name",
+                },
+                TypedCliArgMapping {
+                    catalog_arg: "base_ref",
+                    cli_arg: "base_ref",
+                },
+                TypedCliArgMapping {
+                    catalog_arg: "stage",
+                    cli_arg: "stage",
+                },
+                TypedCliArgMapping {
+                    catalog_arg: "agent_provider",
+                    cli_arg: "agent_provider",
+                },
+                TypedCliArgMapping {
+                    catalog_arg: "agent_type",
+                    cli_arg: "agent_type",
+                },
+                TypedCliArgMapping {
+                    catalog_arg: "model",
+                    cli_arg: "model",
+                },
+                TypedCliArgMapping {
+                    catalog_arg: "permission_mode",
+                    cli_arg: "permission_mode",
+                },
+                TypedCliArgMapping {
+                    catalog_arg: "allowed_tools",
+                    cli_arg: "allowed_tool",
+                },
+                TypedCliArgMapping {
+                    catalog_arg: "blocker_task_ids",
+                    cli_arg: "blocker_task_id",
+                },
+                TypedCliArgMapping {
+                    catalog_arg: "notify_task_id",
+                    cli_arg: "notify_task",
+                },
+            ],
+        },
+        TypedCliToolMapping {
+            catalog_tool: "kanna_send_task_input",
+            typed_command: "kanna-cli task send-input",
+            command_path: &["task", "send-input"],
+            args: &[
+                TypedCliArgMapping {
+                    catalog_arg: "task_id",
+                    cli_arg: "task_id",
+                },
+                TypedCliArgMapping {
+                    catalog_arg: "input",
+                    cli_arg: "message",
+                },
+            ],
+        },
+        TypedCliToolMapping {
+            catalog_tool: "kanna_close_task",
+            typed_command: "kanna-cli task close",
+            command_path: &["task", "close"],
+            args: &[TypedCliArgMapping {
+                catalog_arg: "task_id",
+                cli_arg: "task_id",
+            }],
+        },
+        TypedCliToolMapping {
+            catalog_tool: "kanna_advance_stage",
+            typed_command: "kanna-cli task advance-stage",
+            command_path: &["task", "advance-stage"],
+            args: &[TypedCliArgMapping {
+                catalog_arg: "task_id",
+                cli_arg: "task_id",
+            }],
+        },
+        TypedCliToolMapping {
+            catalog_tool: "kanna_block_task",
+            typed_command: "kanna-cli task block",
+            command_path: &["task", "block"],
+            args: &[
+                TypedCliArgMapping {
+                    catalog_arg: "task_id",
+                    cli_arg: "task_id",
+                },
+                TypedCliArgMapping {
+                    catalog_arg: "blocker_task_ids",
+                    cli_arg: "blocker_task_id",
+                },
+            ],
+        },
+        TypedCliToolMapping {
+            catalog_tool: "kanna_unblock_task",
+            typed_command: "kanna-cli task unblock",
+            command_path: &["task", "unblock"],
+            args: &[TypedCliArgMapping {
+                catalog_arg: "task_id",
+                cli_arg: "task_id",
+            }],
+        },
+        TypedCliToolMapping {
+            catalog_tool: "kanna_complete_stage",
+            typed_command: "kanna-cli stage-complete",
+            command_path: &["stage-complete"],
+            args: &[
+                TypedCliArgMapping {
+                    catalog_arg: "task_id",
+                    cli_arg: "task_id",
+                },
+                TypedCliArgMapping {
+                    catalog_arg: "status",
+                    cli_arg: "status",
+                },
+                TypedCliArgMapping {
+                    catalog_arg: "summary",
+                    cli_arg: "summary",
+                },
+                TypedCliArgMapping {
+                    catalog_arg: "metadata",
+                    cli_arg: "metadata",
+                },
+            ],
+        },
+        TypedCliToolMapping {
+            catalog_tool: "kanna_request_revision",
+            typed_command: "kanna-cli task request-revision",
+            command_path: &["task", "request-revision"],
+            args: &[
+                TypedCliArgMapping {
+                    catalog_arg: "task_id",
+                    cli_arg: "task_id",
+                },
+                TypedCliArgMapping {
+                    catalog_arg: "target_stage",
+                    cli_arg: "target_stage",
+                },
+                TypedCliArgMapping {
+                    catalog_arg: "summary",
+                    cli_arg: "summary",
+                },
+                TypedCliArgMapping {
+                    catalog_arg: "prompt",
+                    cli_arg: "prompt",
+                },
+                TypedCliArgMapping {
+                    catalog_arg: "metadata",
+                    cli_arg: "metadata",
+                },
+            ],
+        },
+    ]
+}
+
+#[cfg(test)]
+fn typed_cli_catalog_exceptions() -> Vec<CatalogCliException> {
+    vec![
+        CatalogCliException {
+            catalog_tool: "kanna_search_tasks",
+            reason: "catalog-only discovery helper; typed CLI keeps task list/get/status commands explicit",
+        },
+        CatalogCliException {
+            catalog_tool: "kanna_list_repo_tasks",
+            reason: "catalog-only repo-scoped discovery helper; typed CLI does not expose repo task filtering yet",
+        },
+    ]
 }
 
 fn join_server_url(base_url: &str, path: &str) -> String {
@@ -1749,21 +2019,41 @@ mod tests {
         advance_stage_via_api, block_task_via_api, build_add_repo_request,
         build_block_task_request, build_complete_stage_request, build_create_task_request,
         build_guide_context, build_request_revision_request, build_send_task_input_request,
-        build_tool_call_args, catalog_create_task_param_names, close_task_via_api,
-        create_task_via_api, find_task_status_row, format_task_list, format_task_status,
-        get_task_via_api, parse_wait_until, render_guide_json, render_guide_markdown,
-        resolve_optional_server_base_url, resolve_server_base_url, resolve_stage_db_path,
-        run_guide_command, send_task_input_via_api, task_create_flag_names, task_get_path,
-        task_list_path, task_logs_path, task_matches_wait_until, task_not_found_error,
-        unblock_task_via_api, GuideContext, TaskCreateOptions, TaskDetail, TaskInputResponse,
-        TaskSummary, WaitUntil,
+        build_tool_call_args, close_task_via_api, create_task_via_api, find_task_status_row,
+        format_task_list, format_task_status, get_task_via_api, parse_wait_until,
+        render_guide_json, render_guide_markdown, resolve_optional_server_base_url,
+        resolve_server_base_url, resolve_stage_db_path, run_guide_command, send_task_input_via_api,
+        task_create_flag_names, task_get_path, task_list_path, task_logs_path,
+        task_matches_wait_until, task_not_found_error, typed_cli_catalog_exceptions,
+        typed_cli_tool_mappings, unblock_task_via_api, GuideContext, TaskCreateOptions, TaskDetail,
+        TaskInputResponse, TaskSummary, WaitUntil,
     };
-    use clap::Parser;
+    use clap::{CommandFactory, Parser};
     use serde_json::json;
+    use std::collections::HashSet;
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener as TokioTcpListener;
+
+    fn catalog_tool_needs_typed_cli_decision(name: &str) -> bool {
+        name.contains("repo") || name.contains("task") || name.contains("stage")
+    }
+
+    fn typed_cli_arg_names(command_path: &[&str]) -> HashSet<String> {
+        let root = super::Cli::command();
+        let mut command = &root;
+        for segment in command_path {
+            command = command
+                .get_subcommands()
+                .find(|candidate| candidate.get_name() == *segment)
+                .unwrap_or_else(|| panic!("missing typed CLI subcommand path {command_path:?}"));
+        }
+        command
+            .get_arguments()
+            .map(|arg| arg.get_id().as_str().to_string())
+            .collect()
+    }
 
     #[test]
     fn prefers_cli_specific_db_path() {
@@ -2068,16 +2358,92 @@ mod tests {
     }
 
     #[test]
-    fn typed_create_flags_cover_catalog_create_task_params_and_match_body() {
-        let typed_flags = task_create_flag_names();
-        let catalog_params = catalog_create_task_param_names();
-        for param in catalog_params {
+    fn typed_cli_surfaces_match_catalog_tools_and_params() {
+        let catalog = kanna_tool_catalog::bundled_catalog();
+        let mappings = typed_cli_tool_mappings();
+        let exceptions = typed_cli_catalog_exceptions();
+
+        let mapped_tools = mappings
+            .iter()
+            .map(|mapping| mapping.catalog_tool)
+            .collect::<HashSet<_>>();
+        let excepted_tools = exceptions
+            .iter()
+            .map(|exception| exception.catalog_tool)
+            .collect::<HashSet<_>>();
+
+        for exception in &exceptions {
             assert!(
-                typed_flags.contains(&param),
-                "typed task create missing catalog param {param}"
+                !exception.reason.trim().is_empty(),
+                "{} exception must document why there is no typed CLI mapping",
+                exception.catalog_tool
             );
         }
 
+        for tool in catalog
+            .tools
+            .iter()
+            .filter(|tool| catalog_tool_needs_typed_cli_decision(&tool.name))
+        {
+            assert!(
+                mapped_tools.contains(tool.name.as_str())
+                    || excepted_tools.contains(tool.name.as_str()),
+                "{} must have a typed CLI mapping or documented exception",
+                tool.name
+            );
+        }
+
+        for mapping in &mappings {
+            let tool = catalog
+                .tools
+                .iter()
+                .find(|tool| tool.name == mapping.catalog_tool)
+                .unwrap_or_else(|| panic!("{} maps unknown catalog tool", mapping.catalog_tool));
+            let typed_args = typed_cli_arg_names(mapping.command_path);
+            let mapped_args = mapping
+                .args
+                .iter()
+                .map(|arg| arg.catalog_arg)
+                .collect::<HashSet<_>>();
+
+            for arg in mapping.args {
+                assert!(
+                    typed_args.contains(arg.cli_arg),
+                    "{} maps catalog arg {} to missing typed CLI arg {}",
+                    mapping.typed_command,
+                    arg.catalog_arg,
+                    arg.cli_arg
+                );
+            }
+
+            for param in &tool.params {
+                assert!(
+                    mapped_args.contains(param.name.as_str()),
+                    "{} ({}) missing typed CLI coverage for catalog arg {}",
+                    mapping.catalog_tool,
+                    mapping.typed_command,
+                    param.name
+                );
+            }
+        }
+
+        let task_create_flags = task_create_flag_names().into_iter().collect::<HashSet<_>>();
+        let create_mapping = mappings
+            .iter()
+            .find(|mapping| mapping.catalog_tool == "kanna_create_task")
+            .expect("create task mapping");
+        for arg in create_mapping.args {
+            assert!(
+                task_create_flags.contains(arg.catalog_arg),
+                "{} missing normalized typed create flag for catalog arg {}",
+                create_mapping.typed_command,
+                arg.catalog_arg
+            );
+        }
+    }
+
+    #[test]
+    fn typed_create_body_matches_catalog_create_task_body() {
         let request = build_create_task_request(TaskCreateOptions {
             repo_id: "repo-1".to_string(),
             prompt: "Ship it".to_string(),
@@ -2085,7 +2451,7 @@ mod tests {
             base_ref: Some("origin/main".to_string()),
             stage: Some("pr".to_string()),
             agent_provider: Some("claude".to_string()),
-            agent_type: None,
+            agent_type: Some("pty".to_string()),
             model: Some("sonnet".to_string()),
             permission_mode: Some("acceptEdits".to_string()),
             allowed_tool: vec!["Read".to_string(), "Write".to_string()],
@@ -2104,6 +2470,7 @@ mod tests {
                 "base_ref": "origin/main",
                 "stage": "pr",
                 "agent_provider": "claude",
+                "agent_type": "pty",
                 "model": "sonnet",
                 "permission_mode": "acceptEdits",
                 "allowed_tools": ["Read", "Write"],
