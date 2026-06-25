@@ -62,6 +62,18 @@ interface ExpoMetadata {
   >;
 }
 
+interface StagedExpoFile {
+  targetPath: string;
+  bytes: Buffer;
+}
+
+interface StagedExpoMetadata {
+  metadataBytes: Buffer;
+  updateId: string;
+  bundle: StagedExpoFile;
+  assets: StagedExpoFile[];
+}
+
 interface MobileEnvironmentRecord {
   runtimeVersion?: string;
 }
@@ -97,6 +109,7 @@ export async function buildMobileOtaPublishPlan(input: {
   environment: CloudEnvironmentName;
   distDir?: string;
   dryRun?: boolean;
+  updateId?: string;
 }): Promise<MobileOtaPublishPlan> {
   const identity = resolveKdEnvironment(cloudEnvironmentToKdEnvironment(input.environment));
   if (!identity.otaBucket || !identity.otaChannel) {
@@ -109,8 +122,7 @@ export async function buildMobileOtaPublishPlan(input: {
 
   const distDir = input.distDir ?? join(input.repoRoot, "apps/mobile/dist");
   const runtimeVersion = await resolveMobileRuntimeVersion(input.repoRoot, kdEnvironmentName);
-  const metadataBytes = await readFile(join(distDir, "metadata.json"));
-  const updateId = computeExpoUpdateId(metadataBytes);
+  const updateId = input.updateId ?? (await buildStagedExpoMetadata(distDir)).updateId;
   const updateObjectPrefix = `ota/ios/${runtimeVersion}/updates/${updateId}`;
   const pointerObject = `ota/ios/${runtimeVersion}/channels/${identity.otaChannel}.json`;
   const relayManifestUrl = `${identity.relayUrl.replace(/^ws/, "http")}/ota/manifest`;
@@ -209,15 +221,13 @@ export async function executeMobileOtaPublishWithContext(
     { ...context.env, ...exportCommand.env }
   );
 
+  const staged = await stageOtaUpdate({ distDir });
   const plan = await buildMobileOtaPublishPlan({
     repoRoot: context.repoRoot,
     environment,
     distDir,
+    updateId: staged.updateId,
     dryRun: input.dryRun === true,
-  });
-  const staged = await stageOtaUpdate({
-    distDir,
-    updateId: plan.updateId,
   });
   const pointer = await writePointerFile(plan.updateId, plan.runtimeVersion);
 
@@ -397,34 +407,48 @@ function buildExpoExportCommand(repoRoot: string, environment: CloudEnvironmentN
   };
 }
 
-async function stageOtaUpdate(input: { distDir: string; updateId: string }): Promise<{ path: string }> {
+async function stageOtaUpdate(input: { distDir: string }): Promise<{ path: string; updateId: string }> {
+  const stagedMetadata = await buildStagedExpoMetadata(input.distDir);
   const stageRoot = await mkdtemp(join(tmpdir(), "kanna-ota-stage-"));
-  const output = join(stageRoot, input.updateId);
+  const output = join(stageRoot, stagedMetadata.updateId);
   await mkdir(join(output, "bundles"), { recursive: true });
   await mkdir(join(output, "assets"), { recursive: true });
 
-  const metadata = JSON.parse(await readFile(join(input.distDir, "metadata.json"), "utf8")) as ExpoMetadata;
+  await writeFile(join(output, stagedMetadata.bundle.targetPath), stagedMetadata.bundle.bytes);
+  for (const asset of stagedMetadata.assets) {
+    await writeFile(join(output, asset.targetPath), asset.bytes);
+  }
+  await writeFile(join(output, "metadata.json"), stagedMetadata.metadataBytes);
+  await cp(join(input.distDir, "expoConfig.json"), join(output, "expoConfig.json"));
+  return { path: output, updateId: stagedMetadata.updateId };
+}
+
+async function buildStagedExpoMetadata(distDir: string): Promise<StagedExpoMetadata> {
+  const metadata = JSON.parse(await readFile(join(distDir, "metadata.json"), "utf8")) as ExpoMetadata;
   const ios = metadata.fileMetadata?.ios;
   if (!ios?.bundle) {
     throw new Error("Expo metadata.json does not include fileMetadata.ios.bundle.");
   }
 
   const bundlePath = ios.bundle;
-  const bundleBytes = await readFile(join(input.distDir, bundlePath));
+  const bundleBytes = await readFile(join(distDir, bundlePath));
   const bundleKey = createHash("sha256").update(bundleBytes).digest("base64url");
   const bundleTarget = `bundles/${bundleKey}.hbc`;
-  await writeFile(join(output, bundleTarget), bundleBytes);
 
   const assets: ExpoMetadataAsset[] = [];
+  const stagedAssets: StagedExpoFile[] = [];
   for (const asset of ios.assets ?? []) {
-    const assetBytes = await readFile(join(input.distDir, asset.path));
+    const assetBytes = await readFile(join(distDir, asset.path));
     const assetKey = createHash("sha256").update(assetBytes).digest("base64url");
     const target = `assets/${assetKey}`;
-    await writeFile(join(output, target), assetBytes);
     assets.push({
       ...asset,
       path: target,
       ext: asset.ext ?? normalizeAssetExtension(asset.path),
+    });
+    stagedAssets.push({
+      targetPath: target,
+      bytes: assetBytes,
     });
   }
 
@@ -439,9 +463,16 @@ async function stageOtaUpdate(input: { distDir: string; updateId: string }): Pro
       },
     },
   };
-  await writeFile(join(output, "metadata.json"), JSON.stringify(rewrittenMetadata));
-  await cp(join(input.distDir, "expoConfig.json"), join(output, "expoConfig.json"));
-  return { path: output };
+  const metadataBytes = Buffer.from(JSON.stringify(rewrittenMetadata));
+  return {
+    metadataBytes,
+    updateId: computeExpoUpdateId(metadataBytes),
+    bundle: {
+      targetPath: bundleTarget,
+      bytes: bundleBytes,
+    },
+    assets: stagedAssets,
+  };
 }
 
 async function writePointerFile(updateId: string, runtimeVersion: string): Promise<{ path: string }> {
