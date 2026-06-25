@@ -11,7 +11,7 @@ path = "src/lib.rs"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 libghostty-vt = { git = "https://github.com/jemdiggity/libghostty-rs.git", rev = "61ae57d7b42821e1b19ad325abc7ff49c80fc880", package = "libghostty-vt" }
-ghostty-xterm-compat-serialize = { git = "https://github.com/jemdiggity/ghostty-xterm-compat-serialize.git", rev = "135f988f408de703d5c4f6ae45de6902f3403f7c" }
+ghostty-xterm-compat-serialize = { git = "https://github.com/jemdiggity/ghostty-xterm-compat-serialize.git", rev = "06895c8ea1830a85c9ada93ca2a7ece1f5a9dc20" }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
