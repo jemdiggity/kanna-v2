@@ -925,6 +925,7 @@ async fn stream_terminal(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kanna_daemon::protocol::TerminalSnapshot;
     use std::path::PathBuf;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;

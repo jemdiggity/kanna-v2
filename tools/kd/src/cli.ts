@@ -31,7 +31,9 @@ const booleanFlagMap: Record<string, string> = {
   "--staging": "staging",
   "--production": "production",
   "--relay": "relay",
-  "--device": "device"
+  "--device": "device",
+  "--remote": "remote",
+  "--dev": "dev"
 };
 
 const defaultDevUpInput = {
@@ -103,6 +105,46 @@ function parseMobileRunInput(rest: string[]): ParsedCliCommand {
     input: {
       device: true,
       production: input.production === true,
+      staging: input.staging === true
+    }
+  };
+}
+
+function parseRemoteE2eInput(rest: string[]): ParsedCliCommand {
+  const input = parseFlagInput(rest, { dev: false, staging: false });
+  const unsupportedFlags = Object.entries(input)
+    .filter(([key, value]) => !["dev", "staging"].includes(key) && value === true)
+    .map(([key]) => key);
+  if (unsupportedFlags.length > 0) {
+    throw new Error("remote-e2e only accepts --dev or --staging");
+  }
+  if (input.dev === true && input.staging === true) {
+    throw new Error("remote-e2e accepts only one of --dev or --staging");
+  }
+  return {
+    taskId: "test.remote-e2e",
+    input: {
+      dev: input.staging !== true,
+      staging: input.staging === true
+    }
+  };
+}
+
+function parseRemoteDoctorInput(rest: string[]): ParsedCliCommand {
+  const [first, ...remaining] = rest;
+  if (first !== "--remote") {
+    throw new Error(`Unknown doctor command: ${["doctor", ...rest].join(" ")}`);
+  }
+  const input = parseFlagInput(remaining, { staging: false });
+  const unsupportedFlags = Object.entries(input)
+    .filter(([key, value]) => !["staging"].includes(key) && value === true)
+    .map(([key]) => key);
+  if (unsupportedFlags.length > 0) {
+    throw new Error("doctor --remote only accepts --staging");
+  }
+  return {
+    taskId: "doctor.remote",
+    input: {
       staging: input.staging === true
     }
   };
@@ -196,6 +238,9 @@ function parseFlagInput(rest: string[], defaults: Record<string, unknown>): Reco
   }
   if (input.emulators === true && typeof input.firebaseEnvFrom === "string") {
     throw new Error("--emulators and --firebase-env-from cannot be used together");
+  }
+  if (input.remote === true && typeof input.firebaseEnvFrom === "string") {
+    throw new Error("--remote and --firebase-env-from cannot be used together");
   }
   return input;
 }
@@ -303,6 +348,12 @@ export function parseCliArgs(args: string[]): ParsedCliCommand {
   if (group === "test" && command === "lan-lab") {
     return { taskId: "test.lan-lab", input: parseFlagInput(rest, {}) };
   }
+  if (group === "test" && command === "remote-e2e") {
+    return parseRemoteE2eInput(rest);
+  }
+  if (group === "doctor" && command === "--remote") {
+    return parseRemoteDoctorInput([command, ...rest]);
+  }
   if (group === "setup") {
     return { taskId: "setup", input: parseFlagInput([command, ...rest].filter((arg): arg is string => Boolean(arg)), { check: false }) };
   }
@@ -355,6 +406,7 @@ function helpText(): string {
     "",
     "Commands:",
     "  dev up [--mobile] [--emulators] [--seed] [--attach] [--db <path-or-name>] [--delete-db] [--firebase-env-from <task-or-path>]",
+    "  dev up --remote",
     "  dev down [--kill-daemon]",
     "  dev restart [desktop|mobile|backend] [--staging|--production] [--mobile] [--emulators] [--seed] [--attach] [--delete-db]",
     "  dev status",
@@ -386,7 +438,8 @@ function helpText(): string {
     "  test cloud-staging",
     "  test cloud-prod-smoke",
     "  test lan-lab --hosts <path>",
-    "  doctor"
+    "  test remote-e2e [--dev|--staging]",
+    "  doctor [--remote] [--staging]"
   ].join("\n");
 }
 
