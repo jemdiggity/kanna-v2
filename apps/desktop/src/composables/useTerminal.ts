@@ -1,14 +1,9 @@
-import { ref, onUnmounted, watch } from "vue"
-import { Terminal, type ILink } from "@xterm/xterm"
+import { ref, onUnmounted } from "vue"
+import { Terminal } from "@xterm/xterm"
 import { FitAddon } from "@xterm/addon-fit"
-import { WebLinksAddon } from "@xterm/addon-web-links"
-import { ImageAddon } from "@xterm/addon-image"
-import { WebglAddon } from "@xterm/addon-webgl"
 import { openUrl } from "@tauri-apps/plugin-opener"
-import { invoke } from "../invoke"
 import { listen } from "../listen"
 import { isTauri } from "../tauri-mock"
-import { isAppShortcut } from "./useKeyboardShortcuts"
 import {
   formatAttachFailureMessage,
   formatMissingInitialTaskSessionMessage,
@@ -20,53 +15,27 @@ import {
   isExistingDaemonSessionFailure,
   isMissingDaemonSessionFailure,
   shouldRespawnAfterAttachFailure,
-  shouldPushKittyKeyboardOnFreshAttach,
   shouldRunTerminalDispose,
-  shouldSupportKittyKeyboard,
   shouldSkipReconnect,
   shouldForceDoubleResizeOnReconnect,
   shouldReattachOnDaemonReady,
   shouldResetTerminalOnReconnect,
 } from "./terminalSessionRecovery"
-import {
-  buildKittyClipboardResponse,
-  collectKittyClipboardRequests,
-  type ClipboardImagePayload,
-  encodeTerminalPasteBytes,
-  formatDroppedPathsForPaste,
-  updateBracketedPasteMode,
-} from "./terminalMediaBridge"
 import { getAppErrorMessage } from "../appError"
 import { markTaskSwitchFirstOutput } from "../perf/taskSwitchPerf"
-import { registerE2ETerminalBuffer } from "../e2eTerminalBuffers"
 import { markDaemonReadyObserved } from "./daemonReadyState"
-import { getTerminalTheme } from "../theme/theme"
 import { useThemeRuntime } from "../theme/runtime"
 import { getSharedStreamClient, onSharedStreamConnectionChange } from "./desktopStreamClient"
 import type { StreamClient } from "@kanna/stream-client"
 import { loadSessionRecoveryState } from "./sessionRecoveryState"
 import { useToast } from "./useToast"
 import i18n from "../i18n"
+import { base64ToBytes, createTerminalInputQueue } from "./terminalInputQueue"
+import { createTerminalClipboardBridge } from "./terminalClipboardBridge"
+import { initializeTerminalView, type InitializedTerminalView } from "./terminalView"
+import type { SpawnOptions, TerminalOptions } from "./terminalTypes"
 
-export interface SpawnOptions {
-  cwd: string
-  prompt: string
-  spawnFn: (sessionId: string, cwd: string, prompt: string, cols: number, rows: number) => Promise<void>
-}
-
-export interface TerminalOptions {
-  kittyKeyboard?: boolean
-  agentProvider?: string
-  worktreePath?: string
-  agentTerminal?: boolean
-  skipInitialReconnectEffects?: boolean
-  recoverSession?: (sessionId: string, options?: { cols?: number; rows?: number }) => Promise<void>
-}
-
-const CLIPBOARD_IMAGE_TTL_MS = 30_000
-const NATIVE_DROP_DEDUPE_WINDOW_MS = 100
-const INPUT_BATCH_WINDOW_MS = 8
-const BRACKETED_PASTE_CONTROL_SEQUENCE = /\u001b\[\?2004[hl]/
+export type { SpawnOptions, TerminalOptions } from "./terminalTypes"
 
 export function resetTerminalOutputSubscriptionsForTests(): void {
   // Kept as a compatibility test hook; terminal output no longer uses Tauri
@@ -84,16 +53,12 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
   let unlistenDaemonReady: (() => void) | null = null
   let unlistenStreamLost: (() => void) | null = null
   let unlistenSharedStreamConnection: (() => void) | null = null
-  let unregisterE2ETerminalBuffer: (() => void) | null = null
   let container: HTMLElement | null = null
   let cleanupContainerEvents: (() => void) | null = null
   let cleanupNativeDropEvents: (() => void) | null = null
   let stopThemeWatch: (() => void) | null = null
+  let terminalView: InitializedTerminalView | null = null
   let fitRafId = 0
-  let pendingInputFlushTimer: ReturnType<typeof setTimeout> | null = null
-  let pendingInputBytes: number[] = []
-  let inputWriteChain: Promise<void> = Promise.resolve()
-  let inputWriteInFlight = false
   let attached = false
   let terminalStreamAttached = false
   let connecting = false
@@ -103,14 +68,6 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
   let hasAttachedOnce = false
   let sessionExited = false
   let preserveRecoveredScrollbackForNextSnapshot = false
-  let bracketedPasteMode = false
-  let hasObservedBracketedPasteMode = false
-  let kittyClipboardBuffer = ""
-  let pendingClipboardImage: ClipboardImagePayload | null = null
-  let pendingClipboardImageExpiresAt = 0
-  let pendingClipboardImageLoad: Promise<ClipboardImagePayload | null> | null = null
-  let lastNativeDropSignature: string | null = null
-  let lastNativeDropAt = 0
   let streamClient: StreamClient | null = null
   let respawningAfterAttachFailure = false
 
@@ -159,293 +116,22 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
     }
   }
 
-  // --- File link provider ---
-  const FILE_PATH_RE = /(?:^|[\s"'`(])([a-zA-Z0-9_.\-][\w.\-/]*\/[\w.\-/]*\.[a-zA-Z0-9]+(?::\d+)?)/g
-  const fileExistsCache = new Map<string, boolean>()
-
-  function parseFileLink(raw: string): { path: string; line?: number } {
-    const colonIdx = raw.lastIndexOf(":")
-    if (colonIdx > 0) {
-      const maybeLine = raw.slice(colonIdx + 1)
-      if (/^\d+$/.test(maybeLine)) {
-        return { path: raw.slice(0, colonIdx), line: parseInt(maybeLine, 10) }
-      }
-    }
-    return { path: raw }
-  }
-
-  async function checkFileExists(relativePath: string): Promise<boolean> {
-    const worktreePath = options?.worktreePath
-    if (!worktreePath) return false
-    if (fileExistsCache.has(relativePath)) return fileExistsCache.get(relativePath)!
-    try {
-      const exists = await invoke<boolean>("file_exists", { path: `${worktreePath}/${relativePath}` })
-      fileExistsCache.set(relativePath, exists)
-      return exists
-    } catch {
-      fileExistsCache.set(relativePath, false)
-      return false
-    }
-  }
-
-  function clearPendingClipboardImage() {
-    pendingClipboardImage = null
-    pendingClipboardImageExpiresAt = 0
-  }
-
-  function getPendingClipboardImage(): ClipboardImagePayload | null {
-    if (!pendingClipboardImage) {
-      return null
-    }
-    if (Date.now() > pendingClipboardImageExpiresAt) {
-      clearPendingClipboardImage()
-      return null
-    }
-    return pendingClipboardImage
-  }
-
-  function armPendingClipboardImage(payload: ClipboardImagePayload) {
-    pendingClipboardImage = payload
-    pendingClipboardImageExpiresAt = Date.now() + CLIPBOARD_IMAGE_TTL_MS
-  }
-
-  function bytesToBase64(bytes: Uint8Array): string {
-    let binary = ""
-    for (const byte of bytes) {
-      binary += String.fromCharCode(byte)
-    }
-    return btoa(binary)
-  }
-
-  function base64ToBytes(dataB64: string): Uint8Array {
-    const binary = atob(dataB64)
-    const bytes = new Uint8Array(binary.length)
-    for (let i = 0; i < binary.length; i++) {
-      bytes[i] = binary.charCodeAt(i)
-    }
-    return bytes
-  }
-
   async function getTerminalStreamClient(): Promise<StreamClient> {
     streamClient ??= await getSharedStreamClient()
     return streamClient
   }
 
-  async function sendInputBytesNow(bytes: Uint8Array) {
-    const client = await getTerminalStreamClient()
-    client.sendTermInput(sessionId, bytesToBase64(bytes))
-  }
-
-  function queueInputWrite(bytes: Uint8Array): Promise<void> {
-    const runWrite = async () => {
-      inputWriteInFlight = true
-      try {
-        await sendInputBytesNow(bytes)
-      } finally {
-        inputWriteInFlight = false
-      }
-    }
-
-    if (!inputWriteInFlight && pendingInputBytes.length === 0 && !pendingInputFlushTimer) {
-      inputWriteChain = runWrite()
-      return inputWriteChain
-    }
-
-    inputWriteChain = inputWriteChain
-      .catch(() => {})
-      .then(runWrite)
-    return inputWriteChain
-  }
-
-  function flushQueuedInput(): Promise<void> {
-    if (pendingInputFlushTimer) {
-      clearTimeout(pendingInputFlushTimer)
-      pendingInputFlushTimer = null
-    }
-    if (pendingInputBytes.length === 0) {
-      return inputWriteChain
-    }
-    const bytes = new Uint8Array(pendingInputBytes)
-    pendingInputBytes = []
-    return queueInputWrite(bytes)
-  }
-
-  function queueInputBytes(bytes: Uint8Array): void {
-    pendingInputBytes.push(...bytes)
-    if (pendingInputFlushTimer) {
-      return
-    }
-    pendingInputFlushTimer = setTimeout(() => {
-      pendingInputFlushTimer = null
-      void flushQueuedInput()
-    }, INPUT_BATCH_WINDOW_MS)
-  }
-
-  async function sendInputBytes(bytes: Uint8Array, config?: { immediate?: boolean }) {
-    if (config?.immediate) {
-      await flushQueuedInput()
-      await queueInputWrite(bytes)
-      return
-    }
-    queueInputBytes(bytes)
-  }
-
-  async function maybeReadClipboardImage() {
-    if (!options?.agentTerminal) {
-      return
-    }
-    const load = (async () => {
-      try {
-        const payload = await invoke<ClipboardImagePayload | null>("read_clipboard_image_png", {})
-        if (!payload) {
-          clearPendingClipboardImage()
-          return null
-        }
-        armPendingClipboardImage(payload)
-        return payload
-      } catch (error) {
-        clearPendingClipboardImage()
-        console.warn("[terminal][clipboard] failed to read clipboard image", {
-          sessionId,
-          instanceId,
-          error: getAppErrorMessage(error),
-        })
-        return null
-      }
-    })()
-    pendingClipboardImageLoad = load
-    void load.finally(() => {
-      if (pendingClipboardImageLoad === load) {
-        pendingClipboardImageLoad = null
-      }
-    })
-  }
-
-  async function resolvePendingClipboardImage(): Promise<ClipboardImagePayload | null> {
-    const readyPayload = getPendingClipboardImage()
-    if (readyPayload) {
-      return readyPayload
-    }
-    if (!pendingClipboardImageLoad) {
-      return null
-    }
-    await pendingClipboardImageLoad
-    return getPendingClipboardImage()
-  }
-
-  async function maybeRespondToKittyClipboardRequests(requests: ReturnType<typeof collectKittyClipboardRequests>["requests"]) {
-    if (requests.length === 0) {
-      return
-    }
-
-    const payload = await resolvePendingClipboardImage()
-    if (!payload) {
-      return
-    }
-
-    const matchesRequest = requests.some((request) => {
-      return request.mimeTypes.length === 0 || request.mimeTypes.includes(payload.mimeType)
-    })
-
-    if (!matchesRequest) {
-      return
-    }
-
-    clearPendingClipboardImage()
-    const response = buildKittyClipboardResponse(payload)
-    await sendInputBytes(new TextEncoder().encode(response), { immediate: true })
-  }
-
-  function handleTerminalOutputControlSequences(bytes: Uint8Array) {
-    const chunkText = outputDecoder.decode(bytes, { stream: true })
-    if (BRACKETED_PASTE_CONTROL_SEQUENCE.test(chunkText)) {
-      hasObservedBracketedPasteMode = true
-    }
-    bracketedPasteMode = updateBracketedPasteMode(bracketedPasteMode, chunkText)
-    kittyClipboardBuffer += chunkText
-
-    const parsed = collectKittyClipboardRequests(kittyClipboardBuffer)
-    kittyClipboardBuffer = parsed.remainder
-    void maybeRespondToKittyClipboardRequests(parsed.requests).catch((error) => {
-      console.warn("[terminal][clipboard] failed to send clipboard image response", {
-        sessionId,
-        instanceId,
-        error: getAppErrorMessage(error),
-      })
-    })
-  }
-
-  function restoreTerminalModesFromSnapshot(serializedTerminalState: string) {
-    // AttachSnapshot/recovery snapshots redraw the terminal from a serialized VT stream.
-    // Replay the mode toggles embedded in that stream so local paste behavior
-    // matches the restored terminal state.
-    if (BRACKETED_PASTE_CONTROL_SEQUENCE.test(serializedTerminalState)) {
-      hasObservedBracketedPasteMode = true
-    }
-    bracketedPasteMode = updateBracketedPasteMode(false, serializedTerminalState)
-  }
-
-  function shouldUseBracketedPasteForDrop() {
-    if (options?.agentProvider === "copilot" && !hasObservedBracketedPasteMode) {
-      return true
-    }
-    return bracketedPasteMode
-  }
-
-  function sendDroppedPaths(paths: string[]) {
-    if (paths.length === 0) return
-    const text = formatDroppedPathsForPaste(paths)
-    const bytes = encodeTerminalPasteBytes(text, shouldUseBracketedPasteForDrop())
-    void sendInputBytes(bytes, { immediate: true })
-  }
-
-  function shouldHandleNativeDrop(paths: string[]) {
-    const signature = paths.join("\u0000")
-    const now = Date.now()
-    if (
-      lastNativeDropSignature === signature &&
-      now - lastNativeDropAt <= NATIVE_DROP_DEDUPE_WINDOW_MS
-    ) {
-      return false
-    }
-    lastNativeDropSignature = signature
-    lastNativeDropAt = now
-    return true
-  }
-
-  function isDropWithinContainer(dropPosition: {
-    x?: number
-    y?: number
-    toLogical?: (scaleFactor: number) => { x: number; y: number }
-  }) {
-    if (!container) return false
-    const rect = container.getBoundingClientRect()
-    if (rect.width <= 0 || rect.height <= 0) return false
-
-    const candidates = [
-      typeof dropPosition.x === "number" && typeof dropPosition.y === "number"
-        ? { x: dropPosition.x, y: dropPosition.y }
-        : null,
-      typeof dropPosition.toLogical === "function"
-        ? dropPosition.toLogical(window.devicePixelRatio || 1)
-        : null,
-      typeof dropPosition.x === "number" && typeof dropPosition.y === "number"
-        ? {
-            x: dropPosition.x / (window.devicePixelRatio || 1),
-            y: dropPosition.y / (window.devicePixelRatio || 1),
-          }
-        : null,
-    ].filter((position): position is { x: number; y: number } => position !== null)
-
-    return candidates.some((position) => {
-      return (
-        position.x >= rect.left &&
-        position.x <= rect.right &&
-        position.y >= rect.top &&
-        position.y <= rect.bottom
-      )
-    })
-  }
+  const inputQueue = createTerminalInputQueue({
+    sessionId,
+    getTerminalStreamClient,
+  })
+  const clipboardBridge = createTerminalClipboardBridge({
+    sessionId,
+    instanceId,
+    options,
+    outputDecoder,
+    sendInputBytes: inputQueue.sendInputBytes,
+  })
 
   function init(el: HTMLElement) {
     container = el
@@ -455,252 +141,32 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
       worktreePath: options?.worktreePath ?? null,
       agentProvider: options?.agentProvider ?? null,
     })
-    const term = new Terminal({
-      fontFamily: '"JetBrains Mono", "SF Mono", Menlo, monospace',
-      fontSize: 13,
-      lineHeight: 1,
-      linkHandler: { activate: handleLinkActivate },
-      theme: getTerminalTheme(effectiveCodeTheme.value),
-      scrollback: 10000,
-      cursorBlink: false,
-      ...(shouldSupportKittyKeyboard(options) ? { vtExtensions: { kittyKeyboard: true } } : {}),
-    })
-    term.loadAddon(fitAddon)
-    term.loadAddon(new WebLinksAddon(handleLinkActivate))
-    try {
-      const webgl = new WebglAddon()
-      webgl.onContextLoss(() => {
-        console.warn("[terminal] WebGL context lost, falling back to DOM renderer")
-        webgl.dispose()
-      })
-      term.loadAddon(webgl)
-    } catch (e) {
-      console.warn("[terminal] WebGL addon failed, falling back to DOM renderer:", e)
-    }
-    term.loadAddon(new ImageAddon())
-
-    if (options?.worktreePath) {
-      let tooltipEl: HTMLElement | null = null
-
-      term.registerLinkProvider({
-        provideLinks(bufferLineNumber: number, callback: (links: ILink[] | undefined) => void) {
-          const line = term.buffer.active.getLine(bufferLineNumber)
-          if (!line) { callback(undefined); return }
-          const lineText = line.translateToString(true)
-
-          const matches: { text: string; start: number; path: string }[] = []
-          FILE_PATH_RE.lastIndex = 0
-          let m: RegExpExecArray | null
-          while ((m = FILE_PATH_RE.exec(lineText)) !== null) {
-            const fullMatch = m[0]
-            const pathMatch = m[1]
-            const startOffset = m.index + (fullMatch.length - pathMatch.length)
-            const { path } = parseFileLink(pathMatch)
-            matches.push({ text: pathMatch, start: startOffset, path })
-          }
-
-          if (matches.length === 0) { callback(undefined); return }
-
-          Promise.all(matches.map(async (match) => {
-            const exists = await checkFileExists(match.path)
-            if (!exists) return null
-            const link: ILink = {
-              range: {
-                start: { x: match.start + 1, y: bufferLineNumber },
-                end: { x: match.start + match.text.length + 1, y: bufferLineNumber },
-              },
-              text: match.text,
-              activate(event: MouseEvent) {
-                if (!event.metaKey) return
-                const { path, line: lineNum } = parseFileLink(match.text)
-                container?.dispatchEvent(new CustomEvent("file-link-activate", {
-                  bubbles: true,
-                  detail: { path, line: lineNum },
-                }))
-              },
-              hover(event: MouseEvent) {
-                if (!term.element) return
-                tooltipEl = document.createElement("div")
-                tooltipEl.className = "xterm-hover"
-                tooltipEl.textContent = "Open preview (\u2318+click)"
-                tooltipEl.style.cssText = `
-                  position: fixed;
-                  left: ${event.clientX + 8}px;
-                  top: ${event.clientY - 28}px;
-                  background: var(--kn-bg-panel);
-                  color: var(--kn-text-secondary);
-                  font-size: 11px;
-                  padding: 2px 6px;
-                  border-radius: 3px;
-                  border: 1px solid var(--kn-border-strong);
-                  pointer-events: none;
-                  z-index: 10000;
-                  font-family: "SF Mono", Menlo, monospace;
-                `
-                term.element.appendChild(tooltipEl)
-              },
-              leave() {
-                tooltipEl?.remove()
-                tooltipEl = null
-              },
-            }
-            return link
-          })).then((links) => {
-            const valid = links.filter((l): l is ILink => l !== null)
-            callback(valid.length > 0 ? valid : undefined)
-          })
-        },
-      })
-    }
-
-    term.open(container)
-
-    if (options?.agentTerminal) {
-      const suppressDragNavigation = (event: DragEvent) => {
-        if ((event.dataTransfer?.files?.length ?? 0) === 0) return
-        event.preventDefault()
-        event.stopPropagation()
-      }
-
-      const handleDrop = (event: DragEvent) => {
-        event.preventDefault()
-        event.stopPropagation()
-
-        if (isTauri) {
-          return
-        }
-
-        const files = Array.from(event.dataTransfer?.files ?? [])
-        const paths = files
-          .map((file) => (file as File & { path?: string }).path ?? "")
-          .filter((path): path is string => path.length > 0)
-
-        sendDroppedPaths(paths)
-      }
-
-      container.addEventListener("dragenter", suppressDragNavigation)
-      container.addEventListener("dragover", suppressDragNavigation)
-      container.addEventListener("drop", handleDrop)
-      cleanupContainerEvents = () => {
-        container?.removeEventListener("dragenter", suppressDragNavigation)
-        container?.removeEventListener("dragover", suppressDragNavigation)
-        container?.removeEventListener("drop", handleDrop)
-      }
-
-      if (isTauri) {
-        void Promise.all([
-          import("@tauri-apps/api/window").then(({ getCurrentWindow }) => {
-            return getCurrentWindow().onDragDropEvent((event) => {
-              if (event.payload.type !== "drop") return
-              if (!isDropWithinContainer(event.payload.position)) return
-              if (!shouldHandleNativeDrop(event.payload.paths)) return
-              sendDroppedPaths(event.payload.paths)
-            })
-          }),
-          import("@tauri-apps/api/webview").then(({ getCurrentWebview }) => {
-            return getCurrentWebview().onDragDropEvent((event) => {
-              if (event.payload.type !== "drop") return
-              if (!isDropWithinContainer(event.payload.position)) return
-              if (!shouldHandleNativeDrop(event.payload.paths)) return
-              sendDroppedPaths(event.payload.paths)
-            })
-          }),
-        ]).then((unlisteners) => {
-          const cleanup = () => {
-            for (const unlisten of unlisteners) {
-              unlisten()
-            }
-          }
-
-          if (disposed) {
-            cleanup()
-            return
-          }
-          cleanupNativeDropEvents = cleanup
-        }).catch((error) => {
-          console.warn("[terminal][drop] failed to register native drag-drop listener", {
-            sessionId,
-            instanceId,
-            error: getAppErrorMessage(error),
-          })
-        })
-      }
-    }
-
-    if (container.offsetWidth > 0 && container.offsetHeight > 0) {
-      fitAddon.fit()
-    }
-
-    if (options?.kittyKeyboard && shouldPushKittyKeyboardOnFreshAttach(options)) {
-      term.write("\x1b[>1u")
-    }
-
-    // Let app-level shortcuts pass through even when terminal has focus,
-    // but always let Escape reach the terminal (needed for Claude CLI).
-    // In kitty keyboard mode, Cmd+C/V would be encoded as CSI sequences
-    // and sent to the PTY instead of triggering clipboard operations —
-    // intercept Cmd+C here and let Cmd+V fall through to the native paste event.
-    term.attachCustomKeyEventHandler((e: KeyboardEvent) => {
-      if (
-        options?.agentTerminal &&
-        e.type === "keydown" &&
-        e.key === "Enter" &&
-        e.shiftKey &&
-        !e.metaKey &&
-        !e.altKey &&
-        !e.ctrlKey
-      ) {
-        e.preventDefault()
-        void sendInputBytes(new TextEncoder().encode("\x1b[13;2u"), { immediate: true })
-        return false
-      }
-      if (e.key === "Escape") {
-        // If this terminal is inside a modal (e.g. ShellModal), consume Escape for the PTY.
-        // Otherwise, when a modal overlay is visible, let Escape bubble to dismiss it.
-        if (container?.closest('.modal-overlay')) return true
-        if (document.querySelector('.modal-overlay')) return false
-        return true
-      }
-      if (isAppShortcut(e)) return false
-      // Prevent kitty keyboard from encoding Cmd+key as CSI sequences —
-      // let them fall through to the OS/browser (Cmd+Q, Cmd+V, etc.).
-      // Cmd+C is special: copy the terminal selection to clipboard.
-      if (e.type === "keydown" && e.metaKey) {
-        if (e.key === "c" && !e.altKey && !e.ctrlKey) {
-          const sel = term.getSelection()
-          if (sel) navigator.clipboard.writeText(sel)
-          e.preventDefault()
-        }
-        if (options?.agentTerminal && e.key === "v" && !e.altKey && !e.ctrlKey) {
-          void maybeReadClipboardImage()
-        }
-        return false
-      }
-      return true
-    })
-
-    // Send keystrokes to daemon
-    term.onData((data) => {
-      void sendInputBytes(new TextEncoder().encode(data))
-    })
-
-    // Handle resize — only forward to daemon after session is attached,
-    // otherwise the invoke fails silently and the resize is lost.
-    term.onResize(({ cols, rows }) => {
-      if (attached) {
-        streamClient?.sendTermResize(sessionId, cols, rows)
-      }
-    })
-
-    terminal.value = term
     stopThemeWatch?.()
-    stopThemeWatch = watch(effectiveCodeTheme, (theme) => {
-      if (terminal.value) {
-        terminal.value.options.theme = getTerminalTheme(theme)
-      }
+    terminalView?.unregisterE2ETerminalBuffer()
+    terminalView = initializeTerminalView({
+      el,
+      sessionId,
+      instanceId,
+      options,
+      effectiveCodeTheme,
+      fitAddon,
+      getContainer: () => container,
+      isDisposed: () => disposed,
+      isAttached: () => attached,
+      getStreamClient: () => streamClient,
+      handleLinkActivate,
+      sendInputBytes: inputQueue.sendInputBytes,
+      maybeReadClipboardImage: clipboardBridge.maybeReadClipboardImage,
+      sendDroppedPaths: clipboardBridge.sendDroppedPaths,
+      onNativeDropCleanupReady: (cleanup) => {
+        cleanupNativeDropEvents = cleanup
+      },
+      setTerminal: (term) => {
+        terminal.value = term
+      },
     })
-    unregisterE2ETerminalBuffer?.()
-    unregisterE2ETerminalBuffer = registerE2ETerminalBuffer(sessionId, term)
+    cleanupContainerEvents = terminalView.cleanupContainerEvents
+    stopThemeWatch = terminalView.stopThemeWatch
   }
 
   /** Wait for the container to have non-zero dimensions, then fit the terminal. */
@@ -834,7 +300,7 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
               liveTerminal.reset()
             }
             preserveRecoveredScrollbackForNextSnapshot = false
-            restoreTerminalModesFromSnapshot(vt)
+            clipboardBridge.restoreTerminalModesFromSnapshot(vt)
             liveTerminal.write(vt)
           },
           onOutput: (dataB64) => {
@@ -842,7 +308,7 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
             if (!liveTerminal) return
             markTaskSwitchFirstOutput(sessionId)
             const bytes = base64ToBytes(dataB64)
-            handleTerminalOutputControlSequences(bytes)
+            clipboardBridge.handleTerminalOutputControlSequences(bytes)
             liveTerminal.write(bytes)
           },
           onSessionExit: (code) => {
@@ -939,7 +405,7 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
     try {
       if (recoveryState?.serialized) {
         liveTerminal.reset()
-        restoreTerminalModesFromSnapshot(recoveryState.serialized)
+        clipboardBridge.restoreTerminalModesFromSnapshot(recoveryState.serialized)
         liveTerminal.write(recoveryState.serialized)
         preserveRecoveredScrollbackForNextSnapshot = true
       }
@@ -1069,7 +535,7 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
   function pause() {
     paused = true
     connectionGeneration += 1
-    void flushQueuedInput()
+    void inputQueue.flushQueuedInput()
     const shouldDetach = attached || connecting || hasAttachedOnce
     attached = false
     terminalStreamAttached = false
@@ -1141,34 +607,26 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
       hasDaemonReadyListener: unlistenDaemonReady != null,
       hasStreamLostListener: unlistenStreamLost != null,
     })
-    void flushQueuedInput()
+    void inputQueue.flushQueuedInput()
     if (attached || connecting || hasAttachedOnce) {
       streamClient?.detach(sessionId, "terminal")
     }
     disposed = true
     attached = false
     terminalStreamAttached = false
-    fileExistsCache.clear()
+    terminalView?.fileLinkProvider.clearFileExistsCache()
     if (fitRafId) cancelAnimationFrame(fitRafId)
-    if (pendingInputFlushTimer) {
-      clearTimeout(pendingInputFlushTimer)
-      pendingInputFlushTimer = null
-    }
+    inputQueue.clearPendingInputFlushTimer()
     cleanupContainerEvents?.()
     cleanupContainerEvents = null
     cleanupNativeDropEvents?.()
     cleanupNativeDropEvents = null
     stopThemeWatch?.()
     stopThemeWatch = null
-    unregisterE2ETerminalBuffer?.()
-    unregisterE2ETerminalBuffer = null
-    clearPendingClipboardImage()
-    pendingClipboardImageLoad = null
-    kittyClipboardBuffer = ""
-    bracketedPasteMode = false
-    hasObservedBracketedPasteMode = false
-    lastNativeDropSignature = null
-    lastNativeDropAt = 0
+    terminalView?.unregisterE2ETerminalBuffer()
+    terminalView?.dropBridge.resetNativeDropDedupe()
+    terminalView = null
+    clipboardBridge.reset()
     if (unlistenExit) {
       unlistenExit()
       console.warn("[terminal][instance] listener:remove", {
