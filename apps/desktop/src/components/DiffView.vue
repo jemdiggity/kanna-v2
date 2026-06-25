@@ -5,13 +5,11 @@ import { useLessScroll } from "../composables/useLessScroll";
 import { invoke } from "../invoke";
 import { registerContextShortcuts } from "../composables/useShortcutContext";
 import { useDiffRenderer, type DiffRenderContext } from "../composables/useDiffRenderer";
-import {
-  buildDiffSearchTargets,
-  findDiffSearchMatches,
-  type DiffSearchMatch,
-} from "../utils/diffSearch";
+import { useDiffSearch, type DiffSearchBarHandle } from "../composables/useDiffSearch";
+import { useDiffBranchBaseRef } from "../composables/useDiffBranchBaseRef";
 import { getDiffTheme } from "../theme/theme";
 import { useThemeRuntime } from "../theme/runtime";
+import DiffContentPane from "./DiffContentPane.vue";
 import DiffToolbar from "./DiffToolbar.vue";
 import DiffSearchBar from "./DiffSearchBar.vue";
 
@@ -37,6 +35,8 @@ type WorkingFilter = "all" | "unstaged" | "staged";
 type BranchInclude = "none" | "staged" | "all";
 type DiffScope = "branch" | "working";
 type DiffScrollPositions = Partial<Record<DiffScope, number>>;
+interface DiffContentPaneHandle { getContainerElement: () => HTMLElement | null; }
+
 const workingFilterOrder: WorkingFilter[] = ["all", "unstaged", "staged"];
 const branchIncludeOrder: BranchInclude[] = ["none", "staged", "all"];
 
@@ -49,6 +49,7 @@ const props = defineProps<{
   baseRef?: string;
   viewKey?: string;
 }>();
+const baseRef = computed(() => props.baseRef);
 
 const emit = defineEmits<{
   (e: "scope-change", scope: DiffScope): void;
@@ -58,8 +59,9 @@ const emit = defineEmits<{
 }>();
 
 const diffViewRef = ref<HTMLElement | null>(null);
+const contentPaneRef = ref<DiffContentPaneHandle | null>(null);
 const containerRef = ref<HTMLElement | null>(null);
-const searchBarRef = ref<{ focus: () => void } | null>(null);
+const searchBarRef = ref<DiffSearchBarHandle | null>(null);
 const diffContent = ref("");
 const loading = ref(false);
 const error = ref<string | null>(null);
@@ -68,9 +70,6 @@ const workingFilter = ref<WorkingFilter>("all");
 const branchInclude = ref<BranchInclude>(normalizeBranchInclude(props.initialBranchInclude));
 const scope = ref<DiffScope>(props.initialScope === "branch" ? "branch" : "working");
 const scrollPositions = ref<DiffScrollPositions>(cloneScrollPositions(props.initialScrollPositions));
-const isSearching = ref(false);
-const searchQuery = ref("");
-const currentMatch = ref(1);
 
 const workingFilterLabel = computed(() => {
   const labels: Record<WorkingFilter, string> = {
@@ -93,6 +92,7 @@ const branchIncludeLabel = computed(() => {
 let nextDiffLoadId = 0;
 let activeDiffLoadId = 0;
 let scrollRestorePendingLoadId = 0;
+let applySearchHighlightsFromSearch = () => {};
 
 const {
   renderedFiles,
@@ -106,20 +106,38 @@ const {
   isActiveDiffLoad,
   restoreScrollPositionForActiveLoad,
   finishPendingScrollRestore,
-  applySearchHighlights,
+  applySearchHighlights() {
+    applySearchHighlightsFromSearch();
+  },
   setNoDiff(nextNoDiff) {
     noDiff.value = nextNoDiff;
   },
 });
 
-const searchTargets = computed(() => buildDiffSearchTargets(renderedFiles.value));
-const searchMatches = computed(() => findDiffSearchMatches(searchTargets.value, searchQuery.value));
-const searchMatchCount = computed(() => searchMatches.value.length);
-const searchCountLabel = computed(() => {
-  if (!searchQuery.value) return "";
-  if (!searchMatchCount.value) return t("diffView.searchNoMatches");
-  return `${currentMatch.value}/${searchMatchCount.value}`;
+const {
+  isSearching,
+  searchQuery,
+  searchCountLabel,
+  openSearch,
+  closeSearch,
+  focusSearchInput,
+  nextMatch,
+  prevMatch,
+  applySearchHighlights: applySearchHighlightsFromComposable,
+  handleSearchInputKeydown,
+} = useDiffSearch({
+  containerRef,
+  renderedFiles,
+  searchBarRef,
+  t,
+  focusDiffView() {
+    diffViewRef.value?.focus();
+  },
 });
+
+applySearchHighlightsFromSearch = applySearchHighlightsFromComposable;
+
+const { resolveBranchBaseRef } = useDiffBranchBaseRef(baseRef);
 
 function roundDuration(durationMs: number): number {
   return Math.round(durationMs * 10) / 10;
@@ -127,116 +145,6 @@ function roundDuration(durationMs: number): number {
 
 function isActiveDiffLoad(loadId: number): boolean {
   return activeDiffLoadId === loadId;
-}
-
-function openSearch() {
-  isSearching.value = true;
-}
-
-function closeSearch() {
-  isSearching.value = false;
-  searchQuery.value = "";
-  currentMatch.value = 1;
-}
-
-function nextMatch() {
-  if (!searchMatchCount.value) return;
-  currentMatch.value =
-    currentMatch.value >= searchMatchCount.value ? 1 : currentMatch.value + 1;
-}
-
-function prevMatch() {
-  if (!searchMatchCount.value) return;
-  currentMatch.value =
-    currentMatch.value <= 1 ? searchMatchCount.value : currentMatch.value - 1;
-}
-
-function getFileWrapper(fileId: string): HTMLElement | null {
-  const wrappers = containerRef.value?.querySelectorAll<HTMLElement>(".diff-file");
-  if (!wrappers) return null;
-  return [...wrappers].find((wrapper) => wrapper.dataset.fileId === fileId) ?? null;
-}
-
-function ensureSearchStyles(shadowRoot: ShadowRoot) {
-  if (shadowRoot.querySelector("style[data-kanna-diff-search]")) return;
-  const style = document.createElement("style");
-  style.dataset.kannaDiffSearch = "true";
-  style.textContent = `
-    .diff-search-match {
-      background: rgba(255, 196, 61, 0.22);
-      box-shadow: inset 0 0 0 1px rgba(255, 196, 61, 0.3);
-    }
-
-    .diff-search-active {
-      background: rgba(255, 196, 61, 0.4);
-      box-shadow: inset 0 0 0 1px rgba(255, 196, 61, 0.85);
-    }
-  `;
-  shadowRoot.appendChild(style);
-}
-
-function getMatchElements(match: DiffSearchMatch): HTMLElement[] {
-  const wrapper = getFileWrapper(match.anchor.fileId);
-  const container = wrapper?.querySelector<HTMLElement>("diffs-container");
-  const shadowRoot = container?.shadowRoot;
-  if (shadowRoot) {
-    ensureSearchStyles(shadowRoot);
-  }
-
-  if (match.anchor.type === "file-header") {
-    const stickyHeader = wrapper?.querySelector<HTMLElement>(".diff-file-header");
-    if (stickyHeader) return [stickyHeader];
-    if (!shadowRoot) return [];
-    const title = shadowRoot.querySelector<HTMLElement>("[data-title]");
-    return title ? [title] : [];
-  }
-
-  if (!shadowRoot) return [];
-
-  const lineIndexPrefix = `${match.anchor.unifiedLineIndex},`;
-  const gutter = shadowRoot.querySelector<HTMLElement>(`[data-gutter] [data-line-index^="${lineIndexPrefix}"]`);
-  const content = shadowRoot.querySelector<HTMLElement>(`[data-content] [data-line-index^="${lineIndexPrefix}"]`);
-  return [gutter, content].filter((element): element is HTMLElement => element != null);
-}
-
-function clearSearchHighlights() {
-  for (const header of containerRef.value?.querySelectorAll<HTMLElement>(".diff-file-header.diff-search-match, .diff-file-header.diff-search-active") ?? []) {
-    header.classList.remove("diff-search-match", "diff-search-active");
-  }
-
-  const containers = containerRef.value?.querySelectorAll<HTMLElement>("diffs-container");
-  if (!containers) return;
-
-  for (const container of containers) {
-    const shadowRoot = container.shadowRoot;
-    if (!shadowRoot) continue;
-    for (const element of shadowRoot.querySelectorAll<HTMLElement>(".diff-search-match, .diff-search-active")) {
-      element.classList.remove("diff-search-match", "diff-search-active");
-    }
-  }
-}
-
-function applySearchHighlights() {
-  clearSearchHighlights();
-  if (!searchMatches.value.length) return;
-
-  const activeIndex = Math.max(1, Math.min(currentMatch.value, searchMatches.value.length)) - 1;
-  let activeElement: HTMLElement | null = null;
-
-  for (const [index, match] of searchMatches.value.entries()) {
-    const elements = getMatchElements(match);
-    for (const element of elements) {
-      element.classList.add("diff-search-match");
-      if (index === activeIndex) {
-        element.classList.add("diff-search-active");
-        if (activeElement == null && !element.closest("[data-gutter]")) {
-          activeElement = element;
-        }
-      }
-    }
-  }
-
-  activeElement?.scrollIntoView?.({ block: "center" });
 }
 
 function logDiffPerf(
@@ -253,6 +161,10 @@ function cloneScrollPositions(positions?: DiffScrollPositions): DiffScrollPositi
 
 function normalizeBranchInclude(include?: BranchInclude): BranchInclude {
   return include === "staged" || include === "all" ? include : "none";
+}
+
+function syncContainerRef() {
+  containerRef.value = contentPaneRef.value?.getContainerElement() ?? null;
 }
 
 function emitScrollStateChange() {
@@ -411,41 +323,6 @@ async function loadDiff(options: { preserveCurrentScroll?: boolean } = {}) {
   }
 }
 
-interface ResolvedBranchBaseRef {
-  ref: string;
-  source: "upstream" | "prop" | "detected";
-}
-
-async function resolveBranchBaseRef(path: string): Promise<ResolvedBranchBaseRef> {
-  const upstream = await invoke<string | null>("git_branch_upstream", { repoPath: path })
-    .catch((e: unknown) => {
-      console.warn("[DiffView] branch upstream unavailable, using stored base ref:", e);
-      return null;
-    });
-  if (upstream) {
-    return { ref: upstream, source: "upstream" };
-  }
-  if (props.baseRef) {
-    return { ref: props.baseRef, source: "prop" };
-  }
-  return { ref: await detectBaseRef(path), source: "detected" };
-}
-
-async function detectBaseRef(path: string): Promise<string> {
-  const defaultBranch = await invoke<string>("git_default_branch", { repoPath: path });
-  try {
-    await invoke<string>("git_merge_base", {
-      repoPath: path,
-      refA: `origin/${defaultBranch}`,
-      refB: "HEAD",
-    });
-    return `origin/${defaultBranch}`;
-  } catch (e: unknown) {
-    console.warn("[DiffView] origin ref not available, using local:", e);
-    return defaultBranch;
-  }
-}
-
 watch(
   () => [props.viewKey, props.repoPath, props.worktreePath, props.baseRef] as const,
   (nextValue, previousValue) => {
@@ -508,25 +385,6 @@ function handleScroll() {
   saveCurrentScrollPosition();
 }
 
-function handleSearchInputKeydown(e: KeyboardEvent) {
-  if (e.key === "Escape") {
-    e.preventDefault();
-    closeSearch();
-    nextTick(() => diffViewRef.value?.focus());
-    return;
-  }
-
-  if (e.key === "Enter") {
-    e.preventDefault();
-    if (e.shiftKey) {
-      prevMatch();
-    } else {
-      nextMatch();
-    }
-    nextTick(() => diffViewRef.value?.focus());
-  }
-}
-
 useLessScroll(containerRef, {
   extraHandler(e) {
     const noMods = !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey;
@@ -535,14 +393,14 @@ useLessScroll(containerRef, {
     if (e.key === "/" && noMods) {
       e.preventDefault();
       openSearch();
-      nextTick(() => searchBarRef.value?.focus());
+      focusSearchInput();
       return true;
     }
 
     if (meta && e.key === "f" && !e.altKey && !e.shiftKey) {
       e.preventDefault();
       openSearch();
-      nextTick(() => searchBarRef.value?.focus());
+      focusSearchInput();
       return true;
     }
 
@@ -583,31 +441,8 @@ useLessScroll(containerRef, {
   onClose: () => emit("close"),
 });
 
-watch(searchMatchCount, (count) => {
-  if (count === 0) {
-    currentMatch.value = 1;
-    return;
-  }
-  if (currentMatch.value > count) {
-    currentMatch.value = count;
-  }
-});
-
-watch(searchQuery, () => {
-  currentMatch.value = 1;
-});
-
-watch([searchMatches, currentMatch], () => {
-  nextTick(() => applySearchHighlights());
-});
-
-watch(isSearching, (searching) => {
-  if (searching) {
-    nextTick(() => searchBarRef.value?.focus());
-  }
-});
-
 onMounted(() => {
+  syncContainerRef();
   syncViewStateFromProps();
   void loadDiff({ preserveCurrentScroll: false });
   window.addEventListener("focus", refreshBranchDiffOnWindowFocus);
@@ -634,9 +469,13 @@ defineExpose({ refresh: loadDiff });
       @cycle-working-filter="cycleWorkingFilter()"
       @cycle-branch-include="cycleBranchInclude()"
     />
-    <div v-if="error" class="diff-status diff-error">{{ error }}</div>
-    <div v-else-if="noDiff && !loading" class="diff-status">{{ $t('diffView.noChanges') }}</div>
-    <div ref="containerRef" class="diff-container" @scroll="handleScroll"></div>
+    <DiffContentPane
+      ref="contentPaneRef"
+      :error="error"
+      :no-diff="noDiff"
+      :loading="loading"
+      @scroll="handleScroll"
+    />
     <DiffSearchBar
       v-if="isSearching"
       ref="searchBarRef"
@@ -657,67 +496,5 @@ defineExpose({ refresh: loadDiff });
   display: flex;
   flex-direction: column;
   outline: none;
-}
-
-.diff-status {
-  padding: 24px;
-  color: var(--kn-text-muted);
-  text-align: center;
-  font-size: 13px;
-}
-
-.diff-error {
-  color: var(--kn-danger);
-}
-
-.diff-container {
-  flex: 1;
-  min-height: 0;
-  overflow: auto;
-}
-
-.diff-container :deep(.diff-file) {
-  position: relative;
-  margin-bottom: 2px;
-}
-
-.diff-container :deep(.diff-file-header) {
-  position: sticky;
-  top: -1px;
-  z-index: 2;
-  padding: 7px 12px;
-  border-bottom: 1px solid var(--kn-border-default);
-  background: var(--kn-bg-panel);
-  color: var(--kn-text-primary);
-  font-family: "SF Mono", Menlo, monospace;
-  font-size: 12px;
-  line-height: 1.4;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  box-sizing: border-box;
-}
-
-.diff-container :deep(.diff-file-header.diff-search-match) {
-  background: rgba(255, 196, 61, 0.22);
-  box-shadow: inset 0 0 0 1px rgba(255, 196, 61, 0.3);
-}
-
-.diff-container :deep(.diff-file-header.diff-search-active) {
-  background: rgba(255, 196, 61, 0.4);
-  box-shadow: inset 0 0 0 1px rgba(255, 196, 61, 0.85);
-}
-
-.diff-container :deep(.diff-file-skipped) {
-  padding: 12px;
-  border-bottom: 1px solid var(--kn-border-default);
-  background: var(--kn-bg-app);
-  color: var(--kn-text-muted);
-  font-size: 12px;
-  line-height: 1.4;
-}
-
-.diff-container :deep(diffs-container) {
-  color-scheme: light dark;
 }
 </style>
