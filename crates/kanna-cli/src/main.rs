@@ -100,6 +100,20 @@ enum RepoCommands {
 enum TaskCommands {
     /// List recent tasks from the running desktop server
     List {
+        /// Limit results to one repo ID instead of recent tasks across repos
+        #[arg(long)]
+        repo_id: Option<String>,
+
+        /// Override the local Kanna server base URL
+        #[arg(long)]
+        server_url: Option<String>,
+    },
+    /// Search tasks by query text
+    Search {
+        /// Query text to search for
+        #[arg(long)]
+        query: String,
+
         /// Override the local Kanna server base URL
         #[arg(long)]
         server_url: Option<String>,
@@ -698,33 +712,10 @@ fn build_tool_call_args(
 }
 
 #[cfg(test)]
-fn task_create_flag_names() -> Vec<String> {
-    vec![
-        "repo_id",
-        "prompt",
-        "pipeline_name",
-        "base_ref",
-        "stage",
-        "agent_provider",
-        "model",
-        "permission_mode",
-        "allowed_tools",
-        "blocker_task_ids",
-        "notify_task_id",
-    ]
-    .into_iter()
-    .map(str::to_string)
-    .collect()
-}
-
-#[cfg(test)]
-fn catalog_create_task_param_names() -> Vec<String> {
-    kanna_tool_catalog::bundled_catalog()
-        .tools
-        .into_iter()
-        .find(|tool| tool.name == "kanna_create_task")
-        .map(|tool| tool.params.into_iter().map(|param| param.name).collect())
-        .unwrap_or_default()
+#[derive(Debug)]
+struct TypedToolSurface {
+    command_path: &'static [&'static str],
+    param_args: &'static [(&'static str, &'static str)],
 }
 
 fn join_server_url(base_url: &str, path: &str) -> String {
@@ -745,6 +736,14 @@ fn encode_path_segment(value: &str) -> String {
 
 fn task_list_path() -> &'static str {
     "/v1/tasks/recent"
+}
+
+fn repo_task_list_path(repo_id: &str) -> String {
+    format!("/v1/repos/{}/tasks", encode_path_segment(repo_id))
+}
+
+fn task_search_path(query: &str) -> String {
+    format!("/v1/tasks/search?query={}", encode_path_segment(query))
 }
 
 fn task_get_path(task_id: &str) -> String {
@@ -871,6 +870,17 @@ async fn add_repo_via_api(base_url: &str, request: &AddRepoRequest) -> Result<Re
 
 async fn list_tasks_via_api(base_url: &str) -> Result<Vec<TaskSummary>, String> {
     get_json(base_url, task_list_path()).await
+}
+
+async fn list_repo_tasks_via_api(
+    base_url: &str,
+    repo_id: &str,
+) -> Result<Vec<TaskSummary>, String> {
+    get_json(base_url, &repo_task_list_path(repo_id)).await
+}
+
+async fn search_tasks_via_api(base_url: &str, query: &str) -> Result<Vec<TaskSummary>, String> {
+    get_json(base_url, &task_search_path(query)).await
 }
 
 async fn get_task_via_api(base_url: &str, task_id: &str) -> Result<TaskDetail, String> {
@@ -1442,12 +1452,33 @@ async fn main() {
             }
         },
         Commands::Task { command } => match command {
-            TaskCommands::List { server_url } => {
+            TaskCommands::List {
+                repo_id,
+                server_url,
+            } => {
                 let base_url = resolve_server_base_url_from_env(server_url.as_deref());
-                let tasks = list_tasks_via_api(&base_url).await.unwrap_or_else(|e| {
+                let tasks = match repo_id {
+                    Some(repo_id) => list_repo_tasks_via_api(&base_url, &repo_id).await,
+                    None => list_tasks_via_api(&base_url).await,
+                }
+                .unwrap_or_else(|e| {
                     eprintln!("Error: {e}");
                     process::exit(1);
                 });
+                let rendered = format_task_list(&tasks).unwrap_or_else(|e| {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                });
+                println!("{rendered}");
+            }
+            TaskCommands::Search { query, server_url } => {
+                let base_url = resolve_server_base_url_from_env(server_url.as_deref());
+                let tasks = search_tasks_via_api(&base_url, &query)
+                    .await
+                    .unwrap_or_else(|e| {
+                        eprintln!("Error: {e}");
+                        process::exit(1);
+                    });
                 let rendered = format_task_list(&tasks).unwrap_or_else(|e| {
                     eprintln!("Error: {e}");
                     process::exit(1);
@@ -1749,17 +1780,18 @@ mod tests {
         advance_stage_via_api, block_task_via_api, build_add_repo_request,
         build_block_task_request, build_complete_stage_request, build_create_task_request,
         build_guide_context, build_request_revision_request, build_send_task_input_request,
-        build_tool_call_args, catalog_create_task_param_names, close_task_via_api,
-        create_task_via_api, find_task_status_row, format_task_list, format_task_status,
-        get_task_via_api, parse_wait_until, render_guide_json, render_guide_markdown,
+        build_tool_call_args, close_task_via_api, create_task_via_api, find_task_status_row,
+        format_task_list, format_task_status, get_task_via_api, parse_wait_until,
+        render_guide_json, render_guide_markdown, repo_task_list_path,
         resolve_optional_server_base_url, resolve_server_base_url, resolve_stage_db_path,
-        run_guide_command, send_task_input_via_api, task_create_flag_names, task_get_path,
-        task_list_path, task_logs_path, task_matches_wait_until, task_not_found_error,
-        unblock_task_via_api, GuideContext, TaskCreateOptions, TaskDetail, TaskInputResponse,
-        TaskSummary, WaitUntil,
+        run_guide_command, send_task_input_via_api, task_get_path, task_list_path, task_logs_path,
+        task_matches_wait_until, task_not_found_error, task_search_path, unblock_task_via_api,
+        GuideContext, TaskCreateOptions, TaskDetail, TaskInputResponse, TaskSummary,
+        TypedToolSurface, WaitUntil,
     };
-    use clap::Parser;
+    use clap::{Command, CommandFactory, Parser};
     use serde_json::json;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -2000,6 +2032,29 @@ mod tests {
             }
             _ => panic!("expected task logs command"),
         }
+
+        let cli = super::Cli::try_parse_from(["kanna-cli", "task", "list", "--repo-id", "repo-1"])
+            .unwrap();
+        match cli.command {
+            super::Commands::Task {
+                command: super::TaskCommands::List { repo_id, .. },
+            } => {
+                assert_eq!(repo_id.as_deref(), Some("repo-1"));
+            }
+            _ => panic!("expected repo-scoped task list command"),
+        }
+
+        let cli =
+            super::Cli::try_parse_from(["kanna-cli", "task", "search", "--query", "review me"])
+                .unwrap();
+        match cli.command {
+            super::Commands::Task {
+                command: super::TaskCommands::Search { query, .. },
+            } => {
+                assert_eq!(query, "review me");
+            }
+            _ => panic!("expected task search command"),
+        }
     }
 
     #[test]
@@ -2067,17 +2122,219 @@ mod tests {
         );
     }
 
-    #[test]
-    fn typed_create_flags_cover_catalog_create_task_params_and_match_body() {
-        let typed_flags = task_create_flag_names();
-        let catalog_params = catalog_create_task_param_names();
-        for param in catalog_params {
-            assert!(
-                typed_flags.contains(&param),
-                "typed task create missing catalog param {param}"
-            );
-        }
+    fn typed_tool_surfaces() -> BTreeMap<&'static str, TypedToolSurface> {
+        BTreeMap::from([
+            (
+                "kanna_list_repos",
+                TypedToolSurface {
+                    command_path: &["repo", "list"],
+                    param_args: &[],
+                },
+            ),
+            (
+                "kanna_add_repo",
+                TypedToolSurface {
+                    command_path: &["repo", "add"],
+                    param_args: &[("path", "path"), ("name", "name")],
+                },
+            ),
+            (
+                "kanna_list_recent_tasks",
+                TypedToolSurface {
+                    command_path: &["task", "list"],
+                    param_args: &[],
+                },
+            ),
+            (
+                "kanna_get_task",
+                TypedToolSurface {
+                    command_path: &["task", "get"],
+                    param_args: &[("task_id", "task_id")],
+                },
+            ),
+            (
+                "kanna_wait_task",
+                TypedToolSurface {
+                    command_path: &["task", "wait"],
+                    param_args: &[
+                        ("task_id", "task_id"),
+                        ("timeout_secs", "timeout_secs"),
+                        ("poll_secs", "poll_secs"),
+                        ("until", "until"),
+                    ],
+                },
+            ),
+            (
+                "kanna_task_logs",
+                TypedToolSurface {
+                    command_path: &["task", "logs"],
+                    param_args: &[("task_id", "task_id"), ("tail", "tail")],
+                },
+            ),
+            (
+                "kanna_search_tasks",
+                TypedToolSurface {
+                    command_path: &["task", "search"],
+                    param_args: &[("query", "query")],
+                },
+            ),
+            (
+                "kanna_list_repo_tasks",
+                TypedToolSurface {
+                    command_path: &["task", "list"],
+                    param_args: &[("repo_id", "repo_id")],
+                },
+            ),
+            (
+                "kanna_create_task",
+                TypedToolSurface {
+                    command_path: &["task", "create"],
+                    param_args: &[
+                        ("repo_id", "repo_id"),
+                        ("prompt", "prompt"),
+                        ("pipeline_name", "pipeline_name"),
+                        ("base_ref", "base_ref"),
+                        ("stage", "stage"),
+                        ("agent_provider", "agent_provider"),
+                        ("agent_type", "agent_type"),
+                        ("model", "model"),
+                        ("permission_mode", "permission_mode"),
+                        ("notify_task_id", "notify_task"),
+                        ("allowed_tools", "allowed_tool"),
+                        ("blocker_task_ids", "blocker_task_id"),
+                    ],
+                },
+            ),
+            (
+                "kanna_send_task_input",
+                TypedToolSurface {
+                    command_path: &["task", "send-input"],
+                    param_args: &[("task_id", "task_id"), ("input", "message")],
+                },
+            ),
+            (
+                "kanna_close_task",
+                TypedToolSurface {
+                    command_path: &["task", "close"],
+                    param_args: &[("task_id", "task_id")],
+                },
+            ),
+            (
+                "kanna_advance_stage",
+                TypedToolSurface {
+                    command_path: &["task", "advance-stage"],
+                    param_args: &[("task_id", "task_id")],
+                },
+            ),
+            (
+                "kanna_block_task",
+                TypedToolSurface {
+                    command_path: &["task", "block"],
+                    param_args: &[
+                        ("task_id", "task_id"),
+                        ("blocker_task_ids", "blocker_task_id"),
+                    ],
+                },
+            ),
+            (
+                "kanna_unblock_task",
+                TypedToolSurface {
+                    command_path: &["task", "unblock"],
+                    param_args: &[("task_id", "task_id")],
+                },
+            ),
+            (
+                "kanna_complete_stage",
+                TypedToolSurface {
+                    command_path: &["stage-complete"],
+                    param_args: &[
+                        ("task_id", "task_id"),
+                        ("status", "status"),
+                        ("summary", "summary"),
+                        ("metadata", "metadata"),
+                    ],
+                },
+            ),
+            (
+                "kanna_request_revision",
+                TypedToolSurface {
+                    command_path: &["task", "request-revision"],
+                    param_args: &[
+                        ("task_id", "task_id"),
+                        ("target_stage", "target_stage"),
+                        ("summary", "summary"),
+                        ("prompt", "prompt"),
+                        ("metadata", "metadata"),
+                    ],
+                },
+            ),
+        ])
+    }
 
+    fn command_for_path<'a>(command: &'a Command, path: &[&str]) -> Option<&'a Command> {
+        let mut current = command;
+        for part in path {
+            current = current
+                .get_subcommands()
+                .find(|candidate| candidate.get_name() == *part)?;
+        }
+        Some(current)
+    }
+
+    #[test]
+    fn typed_cli_surfaces_match_catalog_tools_and_params() {
+        let catalog = kanna_tool_catalog::bundled_catalog();
+        let typed = typed_tool_surfaces();
+        let catalog_tool_names = catalog
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<BTreeSet<_>>();
+        let typed_tool_names = typed.keys().copied().collect::<BTreeSet<_>>();
+
+        assert_eq!(typed_tool_names, catalog_tool_names);
+
+        let cli = super::Cli::command();
+        for tool in catalog.tools {
+            let surface = typed
+                .get(tool.name.as_str())
+                .expect("catalog tool should have typed CLI surface");
+            let command = command_for_path(&cli, surface.command_path)
+                .unwrap_or_else(|| panic!("missing typed command for {}", tool.name));
+            let cli_arg_ids = command
+                .get_arguments()
+                .map(|arg| arg.get_id().as_str())
+                .collect::<BTreeSet<_>>();
+            let catalog_params = tool
+                .params
+                .iter()
+                .map(|param| param.name.as_str())
+                .collect::<BTreeSet<_>>();
+            let mapped_params = surface
+                .param_args
+                .iter()
+                .map(|(catalog_param, _)| *catalog_param)
+                .collect::<BTreeSet<_>>();
+
+            assert_eq!(
+                mapped_params, catalog_params,
+                "{} typed CLI mapping must cover exactly the catalog params",
+                tool.name
+            );
+            for (catalog_param, cli_arg) in surface.param_args {
+                assert!(
+                    cli_arg_ids.contains(cli_arg),
+                    "{} maps catalog param {} to missing typed CLI arg {}",
+                    tool.name,
+                    catalog_param,
+                    cli_arg
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn typed_create_body_matches_catalog_create_task_body() {
         let request = build_create_task_request(TaskCreateOptions {
             repo_id: "repo-1".to_string(),
             prompt: "Ship it".to_string(),
@@ -2085,7 +2342,7 @@ mod tests {
             base_ref: Some("origin/main".to_string()),
             stage: Some("pr".to_string()),
             agent_provider: Some("claude".to_string()),
-            agent_type: None,
+            agent_type: Some("agent".to_string()),
             model: Some("sonnet".to_string()),
             permission_mode: Some("acceptEdits".to_string()),
             allowed_tool: vec!["Read".to_string(), "Write".to_string()],
@@ -2104,6 +2361,7 @@ mod tests {
                 "base_ref": "origin/main",
                 "stage": "pr",
                 "agent_provider": "claude",
+                "agent_type": "agent",
                 "model": "sonnet",
                 "permission_mode": "acceptEdits",
                 "allowed_tools": ["Read", "Write"],
@@ -2225,6 +2483,19 @@ mod tests {
     #[test]
     fn task_list_uses_recent_tasks_endpoint() {
         assert_eq!(task_list_path(), "/v1/tasks/recent");
+    }
+
+    #[test]
+    fn repo_task_list_uses_repo_tasks_endpoint() {
+        assert_eq!(repo_task_list_path("repo 1"), "/v1/repos/repo%201/tasks");
+    }
+
+    #[test]
+    fn task_search_uses_search_endpoint() {
+        assert_eq!(
+            task_search_path("review me"),
+            "/v1/tasks/search?query=review%20me"
+        );
     }
 
     #[test]
