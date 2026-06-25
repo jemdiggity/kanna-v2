@@ -176,6 +176,10 @@ pub(crate) enum TaskCommands {
         #[arg(long)]
         prompt: String,
 
+        /// Optional short display title for the task
+        #[arg(long)]
+        display_name: Option<String>,
+
         /// Override the local Kanna server base URL
         #[arg(long)]
         server_url: Option<String>,

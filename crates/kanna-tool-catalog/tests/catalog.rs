@@ -136,6 +136,7 @@ fn resolves_expected_requests_for_every_bundled_tool() {
             json!({
                 "repo_id": "repo-1",
                 "prompt": "Blocked work",
+                "display_name": "Short task title",
                 "agent_type": "agent",
                 "blocker_task_ids": ["blocker-1", "blocker-2"]
             }),
@@ -145,6 +146,7 @@ fn resolves_expected_requests_for_every_bundled_tool() {
             json!({
                 "repoId": "repo-1",
                 "prompt": "Blocked work",
+                "displayName": "Short task title",
                 "agentType": "agent",
                 "blockerTaskIds": ["blocker-1", "blocker-2"]
             }),
@@ -373,6 +375,12 @@ fn catalog_types_are_deserialized_from_manifest_values() {
         .collect::<Vec<_>>();
 
     assert!(params.contains(&("repo_id", ParamType::String, ParamLoc::Body, Some("repoId"))));
+    assert!(params.contains(&(
+        "display_name",
+        ParamType::String,
+        ParamLoc::Body,
+        Some("displayName"),
+    )));
     assert!(params.contains(&(
         "agent_type",
         ParamType::String,

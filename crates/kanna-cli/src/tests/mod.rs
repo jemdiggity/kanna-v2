@@ -102,6 +102,7 @@ fn typed_tool_surfaces() -> BTreeMap<&'static str, TypedToolSurface> {
                 param_args: &[
                     ("repo_id", "repo_id"),
                     ("prompt", "prompt"),
+                    ("display_name", "display_name"),
                     ("pipeline_name", "pipeline_name"),
                     ("base_ref", "base_ref"),
                     ("stage", "stage"),

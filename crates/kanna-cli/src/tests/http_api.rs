@@ -160,6 +160,7 @@ async fn create_task_via_api_posts_payload_without_agent_provider_when_flag_abse
     let request = build_create_task_request(TaskCreateOptions {
         repo_id: "repo-1".to_string(),
         prompt: "Use the saved default provider".to_string(),
+        display_name: None,
         pipeline_name: None,
         base_ref: None,
         stage: None,

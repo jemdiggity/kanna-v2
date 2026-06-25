@@ -90,6 +90,7 @@
       "params": [
         { "name": "repo_id", "type": "string", "required": true, "location": "body", "key": "repoId" },
         { "name": "prompt", "type": "string", "required": true, "location": "body" },
+        { "name": "display_name", "type": "string", "required": false, "location": "body", "key": "displayName" },
         { "name": "pipeline_name", "type": "string", "required": false, "location": "body", "key": "pipelineName" },
         { "name": "base_ref", "type": "string", "required": false, "location": "body", "key": "baseRef" },
         { "name": "stage", "type": "string", "required": false, "location": "body" },

@@ -77,6 +77,8 @@ pub(crate) struct CreateTaskRequest {
     pub(crate) repo_id: String,
     pub(crate) prompt: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) pipeline_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) base_ref: Option<String>,
@@ -157,6 +159,7 @@ pub(crate) struct TaskActionResponse {
 pub(crate) struct TaskCreateOptions {
     pub(crate) repo_id: String,
     pub(crate) prompt: String,
+    pub(crate) display_name: Option<String>,
     pub(crate) pipeline_name: Option<String>,
     pub(crate) base_ref: Option<String>,
     pub(crate) stage: Option<String>,

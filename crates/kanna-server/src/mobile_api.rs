@@ -96,6 +96,8 @@ pub struct AddRepoRequest {
 pub struct CreateTaskRequest {
     pub repo_id: String,
     pub prompt: String,
+    #[serde(alias = "display_name")]
+    pub display_name: Option<String>,
     pub pipeline_name: Option<String>,
     pub base_ref: Option<String>,
     pub stage: Option<String>,
@@ -520,17 +522,20 @@ mod tests {
         let request: CreateTaskRequest = serde_json::from_value(json!({
             "repoId": "repo-1",
             "prompt": "Build the view",
+            "displayName": "Short task title",
             "agentProvider": "claude",
             "agentType": "agent"
         }))
         .unwrap();
 
+        assert_eq!(request.display_name.as_deref(), Some("Short task title"));
         assert_eq!(request.agent_type.as_deref(), Some("agent"));
         assert_eq!(
             serde_json::to_value(request).unwrap(),
             json!({
                 "repoId": "repo-1",
                 "prompt": "Build the view",
+                "displayName": "Short task title",
                 "pipelineName": null,
                 "baseRef": null,
                 "stage": null,
@@ -543,6 +548,18 @@ mod tests {
                 "notifyTaskId": null
             })
         );
+    }
+
+    #[test]
+    fn create_task_request_accepts_display_name_snake_case_alias() {
+        let request: CreateTaskRequest = serde_json::from_value(json!({
+            "repoId": "repo-1",
+            "prompt": "Build the view",
+            "display_name": "Short task title"
+        }))
+        .unwrap();
+
+        assert_eq!(request.display_name.as_deref(), Some("Short task title"));
     }
 
     #[test]

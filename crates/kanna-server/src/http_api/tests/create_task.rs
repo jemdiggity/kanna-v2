@@ -163,6 +163,154 @@ async fn create_task_route_uses_saved_default_agent_provider_when_payload_omits_
 }
 
 #[tokio::test]
+async fn create_task_route_persists_display_name_alias_and_returns_it_as_title() {
+    use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+
+    let unique = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let repo_root = std::env::temp_dir().join(format!("kanna-http-create-title-{unique}"));
+    init_test_git_repo(&repo_root);
+
+    let daemon_dir = std::env::temp_dir().join(format!("kanna-http-create-title-daemon-{unique}"));
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+    let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+    let _ = std::fs::remove_file(&socket_path);
+    let daemon_listener = UnixListener::bind(&socket_path).unwrap();
+    let daemon_server = tokio::spawn(async move {
+        let (stream, _) = daemon_listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+        let session_id = match command {
+            DaemonCommand::Spawn {
+                session_id, cwd, ..
+            } => {
+                assert!(cwd.contains(".kanna-worktrees/task-"));
+                session_id
+            }
+            DaemonCommand::SpawnAgent { session_id, params } => {
+                assert!(params.cwd.contains(".kanna-worktrees/task-"));
+                session_id
+            }
+            other => panic!("expected spawn command, got {:?}", other),
+        };
+        write_half
+            .write_all(
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&DaemonEvent::SessionCreated { session_id }).unwrap()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+    });
+
+    let config = Config {
+        relay_url: "wss://relay.example".to_string(),
+        device_token: "device-token".to_string(),
+        firebase_project_id: "kanna-local".to_string(),
+        firebase_auth_emulator_url: None,
+        firebase_firestore_emulator_host: None,
+        daemon_dir: daemon_dir.to_string_lossy().to_string(),
+        db_path: Db::test_db_path(&format!("http-api-create-title-{unique}")),
+        kanna_cli_path: None,
+        desktop_id: "desktop-1".to_string(),
+        desktop_secret: Some("desktop-secret".to_string()),
+        desktop_name: "Studio Mac".to_string(),
+        server_version: Some("test-version".to_string()),
+        lan_host: "127.0.0.1".to_string(),
+        lan_port: 48120,
+        pairing_store_path: format!("/tmp/kanna-pairings-create-title-{unique}.json"),
+    };
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    drop(db);
+
+    let app = super::router(Arc::new(super::AppState::new(config.clone())));
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/tasks")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "repoId": "repo-1",
+                        "prompt": "This is the full agent prompt that should not become the title",
+                        "display_name": "Short task title",
+                        "agentProvider": "claude"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let created: CreateTaskResponse = from_slice(&body).unwrap();
+    assert_eq!(created.title, "Short task title");
+
+    daemon_server.await.unwrap();
+
+    let db = Db::open(&config.db_path).unwrap();
+    let item = db.get_pipeline_item(&created.task_id).unwrap().unwrap();
+    assert_eq!(
+        item.prompt.as_deref(),
+        Some("This is the full agent prompt that should not become the title")
+    );
+    assert_eq!(item.display_name.as_deref(), Some("Short task title"));
+
+    let get_response = app
+        .clone()
+        .oneshot(
+            Request::get(format!("/v1/tasks/{}", created.task_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get_response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(get_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let detail: crate::mobile_api::TaskDetail = from_slice(&body).unwrap();
+    assert_eq!(detail.title, "Short task title");
+
+    let list_response = app
+        .oneshot(Request::get("/v1/tasks/recent").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(list_response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(list_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let tasks: Vec<crate::mobile_api::TaskSummary> = from_slice(&body).unwrap();
+    assert_eq!(
+        tasks.first().map(|task| task.title.as_str()),
+        Some("Short task title")
+    );
+
+    let _ = std::fs::remove_file(&socket_path);
+    let _ = std::fs::remove_dir_all(&daemon_dir);
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[tokio::test]
 async fn create_task_route_sends_kanna_cli_runtime_env_to_daemon_spawn() {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
