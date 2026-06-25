@@ -150,7 +150,6 @@ const appTaskNavigation = useAppTaskNavigation({
   sidebarRef,
   sidebarRepos,
   sidebarItems,
-  mainPanelItem,
   workspaceTasksByItemId,
   selectedCloudRepoId,
   selectedCloudItemId,

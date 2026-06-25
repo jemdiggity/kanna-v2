@@ -50,7 +50,6 @@ interface UseAppTaskNavigationOptions {
   sidebarRef: Ref<InstanceType<typeof Sidebar> | null>;
   sidebarRepos: ComputedRef<SidebarRepoProjection[]>;
   sidebarItems: ComputedRef<AppSidebarItem[]>;
-  mainPanelItem: ComputedRef<AppSidebarItem | null>;
   workspaceTasksByItemId: ComputedRef<Map<string, WorkspaceTask>>;
   selectedCloudRepoId: Ref<string | null>;
   selectedCloudItemId: Ref<string | null>;
@@ -86,7 +85,6 @@ export function useAppTaskNavigation({
   sidebarRef,
   sidebarRepos,
   sidebarItems,
-  mainPanelItem,
   workspaceTasksByItemId,
   selectedCloudRepoId,
   selectedCloudItemId,
@@ -202,7 +200,6 @@ export function useAppTaskNavigation({
       visibleSidebarItemsAllRepos().filter((item) => isActivityShortcutCandidate(item) && !hasTag(item, "blocked")),
       mode,
       "idle",
-      mainPanelItem.value?.created_at,
     );
     if (target) await selectSidebarItem(target);
   }
@@ -212,7 +209,6 @@ export function useAppTaskNavigation({
       visibleSidebarItemsAllRepos().filter(isActivityShortcutCandidate),
       mode,
       "unread",
-      mainPanelItem.value?.created_at,
     );
     if (target) {
       await selectSidebarItem(target);
