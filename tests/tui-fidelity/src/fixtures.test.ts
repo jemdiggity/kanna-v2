@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { loadCapturedFixture } from "./fixtures.ts";
+import { loadCapturedFixture, writeFixtures } from "./fixtures.ts";
 
 test("loads captured Codex ANSI fixture bytes without overwriting the file", async () => {
   const fixtureDir = await mkdtemp(path.join(tmpdir(), "kanna-tui-fixture-"));
@@ -25,4 +25,18 @@ test("loads captured Codex ANSI fixture bytes without overwriting the file", asy
   } finally {
     await rm(fixtureDir, { recursive: true, force: true });
   }
+});
+
+test("includes non-220 and sessionStore coverage fixtures with explicit PTY dimensions", async () => {
+  const fixtures = await writeFixtures();
+  const bottomAnchored = fixtures.find((fixture) => fixture.name === "bottom-anchored-80x24");
+  const largeStoreSnapshot = fixtures.find(
+    (fixture) => fixture.name === "large-session-store-snapshot"
+  );
+
+  assert.equal(bottomAnchored?.cols, 80);
+  assert.equal(bottomAnchored?.rows, 24);
+  assert.equal(largeStoreSnapshot?.replayThroughSessionStore, true);
+  assert.equal(largeStoreSnapshot?.cols, 220);
+  assert.equal(largeStoreSnapshot?.rows, 72);
 });

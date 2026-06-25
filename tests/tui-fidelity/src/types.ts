@@ -28,7 +28,10 @@ export interface FixtureDefinition {
   description: string;
   bytes: Uint8Array;
   snapshotAt: number;
+  cols?: number;
+  rows?: number;
   allowFallback?: boolean;
+  replayThroughSessionStore?: boolean;
 }
 
 export interface CellSnapshot {

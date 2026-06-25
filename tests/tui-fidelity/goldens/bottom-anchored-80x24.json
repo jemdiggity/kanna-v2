@@ -1,0 +1,10 @@
+{
+  "name": "bottom-anchored-80x24",
+  "description": "80x24 PTY with bottom-anchored UI; catches mobile renders that ignore snapshot rows/cols.",
+  "snapshotAt": 81,
+  "usedVisibleTextFallback": false,
+  "divergentCells": 0,
+  "firstDiffs": [],
+  "pathSerialized": "non-220 PTY dimensions\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\nmiddle row marker\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\nBOTTOM-ANCHORED-80x24",
+  "referenceSerialized": "non-220 PTY dimensions\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\nmiddle row marker\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\nBOTTOM-ANCHORED-80x24"
+}

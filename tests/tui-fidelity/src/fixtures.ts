@@ -49,7 +49,9 @@ function buildSyntheticFixtures(): FixtureDefinition[] {
     scrollRegion(),
     cursorSaveRestore(),
     spinnerRedraw(),
-    splitSensitiveUtf8AndEscape()
+    splitSensitiveUtf8AndEscape(),
+    bottomAnchoredNon220(),
+    largeSnapshotThroughSessionStore()
   ];
 }
 
@@ -179,5 +181,46 @@ function splitSensitiveUtf8AndEscape(): FixtureDefinition {
     bytes: bytes(text),
     snapshotAt: 0,
     allowFallback: true
+  };
+}
+
+function bottomAnchoredNon220(): FixtureDefinition {
+  const text = [
+    "\x1b[2J\x1b[Hnon-220 PTY dimensions",
+    "\x1b[12;1Hmiddle row marker",
+    "\x1b[24;1HBOTTOM-ANCHORED-80x24"
+  ].join("");
+  return {
+    name: "bottom-anchored-80x24",
+    description:
+      "80x24 PTY with bottom-anchored UI; catches mobile renders that ignore snapshot rows/cols.",
+    bytes: bytes(text),
+    snapshotAt: text.length,
+    cols: 80,
+    rows: 24
+  };
+}
+
+function largeSnapshotThroughSessionStore(): FixtureDefinition {
+  const rows = 72;
+  const snapshotLines: string[] = ["\x1b[2J\x1b[Hlarge snapshot through sessionStore"];
+  for (let row = 2; row <= rows; row += 1) {
+    const fill = `${String(row).padStart(2, "0")} session-store snapshot frame `.padEnd(
+      170,
+      "."
+    );
+    snapshotLines.push(`\x1b[${row};1H${fill}`);
+  }
+  const snapshot = snapshotLines.join("");
+  const liveOutput = "\x1b[72;1HLIVE-APPEND-CORRECT";
+  return {
+    name: "large-session-store-snapshot",
+    description:
+      "Large snapshot plus live output replayed through sessionStore accumulation before mobile render.",
+    bytes: bytes(`${snapshot}${liveOutput}`),
+    snapshotAt: snapshot.length,
+    cols: 220,
+    rows,
+    replayThroughSessionStore: true
   };
 }

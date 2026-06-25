@@ -1107,7 +1107,7 @@ mod tests {
     use std::process::{Command as StdCommand, Stdio};
     use std::sync::Mutex;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
     use tokio::process::{Child, Command};
 
@@ -1465,6 +1465,60 @@ mod tests {
         let rebound = std::net::TcpListener::bind(("127.0.0.1", port))
             .expect("port should be reusable after stale listener is killed");
         drop(rebound);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn wait_for_status_keeps_polling_past_old_short_timeout_when_child_is_alive() {
+        let port = free_loopback_port();
+        let manager = MobileServerManager::new(unique_test_root("wait-slow").join("app-data"));
+        let server = spawn_delayed_status_responder(port, Duration::from_millis(5_500));
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("sleep 30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("alive child should spawn");
+
+        let status = manager
+            .wait_for_status(&server_base_url(port), &mut child)
+            .await
+            .expect("slow but alive server should become ready within the startup budget");
+
+        assert_eq!(status.state, "running");
+        assert_eq!(status.desktop_id, "desktop-wait-test");
+        child.kill().await.expect("alive child should be killable");
+        let _ = child.wait().await;
+        server.await.expect("fake status responder should complete");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn wait_for_status_exits_early_when_child_exits_during_startup() {
+        let port = free_loopback_port();
+        let manager = MobileServerManager::new(unique_test_root("wait-exit").join("app-data"));
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("exit 7")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("exiting child should spawn");
+        let started_at = tokio::time::Instant::now();
+
+        let error = manager
+            .wait_for_status(&server_base_url(port), &mut child)
+            .await
+            .expect_err("exited child should fail startup immediately");
+
+        assert!(
+            started_at.elapsed() < Duration::from_secs(2),
+            "startup wait should not consume the full poll budget after child exit"
+        );
+        assert!(error.contains("kanna-server exited during startup"));
+        assert!(error.contains("exit status: 7"));
+        let _ = child.wait().await;
     }
 
     #[test]
@@ -2504,6 +2558,43 @@ while True:
         let _ = child.kill().await;
         let _ = child.wait().await;
         panic!("timed out waiting for SIGTERM-ignoring listener on port {port}");
+    }
+
+    fn spawn_delayed_status_responder(port: u16, delay: Duration) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+                .await
+                .expect("fake status responder should bind");
+            let (mut stream, _) = listener
+                .accept()
+                .await
+                .expect("fake status responder should accept a request");
+            let mut buffer = [0_u8; 1024];
+            let _ = stream
+                .read(&mut buffer)
+                .await
+                .expect("fake status responder should read request");
+            let body = serde_json::json!({
+                "state": "running",
+                "desktopId": "desktop-wait-test",
+                "desktopName": "Wait Test",
+                "serverVersion": current_server_version(),
+                "lanHost": "127.0.0.1",
+                "lanPort": port,
+                "pairingCode": null
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("fake status responder should write response");
+        })
     }
 
     fn test_sidecar_dir() -> Option<PathBuf> {
