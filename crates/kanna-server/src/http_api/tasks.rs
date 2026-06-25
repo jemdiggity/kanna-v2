@@ -1,4 +1,4 @@
-use super::state::AppState;
+use super::state::{db_write_error, AppState};
 use super::task_blockers::{persist_resolved_task_blockers, resolve_task_blocker_ids};
 use crate::db::Db;
 use crate::mobile_api::MobileApi;
@@ -43,6 +43,47 @@ pub(super) async fn get_task(
             )
         })?;
     Ok(Json(task))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct UpdateTaskRequest {
+    display_name: Option<String>,
+}
+
+pub(super) async fn update_task(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+    Json(payload): Json<UpdateTaskRequest>,
+) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
+    let display_name = payload
+        .display_name
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                "displayName must be a non-empty string".to_string(),
+            )
+        })?;
+    let db = Db::open(&state.config.db_path).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("db error: {}", e),
+        )
+    })?;
+    let task_id = db
+        .resolve_pipeline_item_id(&task_id)
+        .map_err(|e| db_write_error("db error", e))?
+        .ok_or_else(|| {
+            (
+                axum::http::StatusCode::NOT_FOUND,
+                "db error: not found".to_string(),
+            )
+        })?;
+    db.update_pipeline_item_display_name(&task_id, &display_name)
+        .map_err(|e| db_write_error("db error", e))?;
+    Ok(Json(crate::mobile_api::TaskActionResponse { task_id }))
 }
 
 #[derive(Debug, serde::Deserialize)]

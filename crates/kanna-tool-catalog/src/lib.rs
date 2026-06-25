@@ -47,6 +47,7 @@ pub struct ParamDef {
 pub enum Method {
     Get,
     Post,
+    Patch,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

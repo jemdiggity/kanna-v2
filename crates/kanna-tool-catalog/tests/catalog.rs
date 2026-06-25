@@ -27,6 +27,7 @@ fn bundled_catalog_parses_and_declares_all_tools() {
             "kanna_create_task",
             "kanna_send_task_input",
             "kanna_close_task",
+            "kanna_rename_task",
             "kanna_advance_stage",
             "kanna_block_task",
             "kanna_unblock_task",
@@ -184,6 +185,14 @@ fn resolves_expected_requests_for_every_bundled_tool() {
             json!({}),
         ),
         (
+            "kanna_rename_task",
+            json!({ "task_id": "task 1", "display_name": "Renamed task" }),
+            Method::Patch,
+            ResponseKind::Json,
+            "/v1/tasks/task%201",
+            json!({ "displayName": "Renamed task" }),
+        ),
+        (
             "kanna_advance_stage",
             json!({ "task_id": "task-1" }),
             Method::Post,
@@ -289,6 +298,14 @@ fn preserves_validation_error_strings() {
             &json!({ "task_id": "task-1", "tail": "25" })
         ),
         Err("tail must be an unsigned integer".to_string())
+    );
+    assert_eq!(
+        resolve_request(
+            &catalog,
+            "kanna_rename_task",
+            &json!({ "task_id": "task-1" })
+        ),
+        Err("missing required argument: display_name".to_string())
     );
     assert_eq!(
         resolve_request(

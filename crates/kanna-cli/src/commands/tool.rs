@@ -6,7 +6,9 @@ use kanna_tool_catalog::{
 };
 use serde_json::Value;
 
-use crate::api::{get_json, get_text, post_catalog_json, wait_catalog_task_via_api};
+use crate::api::{
+    get_json, get_text, patch_catalog_json, post_catalog_json, wait_catalog_task_via_api,
+};
 use crate::commands::print_json;
 use crate::config::resolve_server_base_url_from_env;
 use crate::ToolCommands;
@@ -57,6 +59,9 @@ pub(crate) async fn execute_catalog_request(
         }
         (CatalogMethod::Post, ResponseKind::Json) => {
             post_catalog_json(base_url, &request.path, &request.body).await
+        }
+        (CatalogMethod::Patch, ResponseKind::Json) => {
+            patch_catalog_json(base_url, &request.path, &request.body).await
         }
         (_, ResponseKind::Wait) => {
             let wait = request

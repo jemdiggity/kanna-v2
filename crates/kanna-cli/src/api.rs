@@ -5,7 +5,7 @@ use serde_json::Value;
 use crate::models::{
     AddRepoRequest, BlockTaskRequest, CompleteStageRequest, CreateTaskRequest, CreateTaskResponse,
     RepoDetail, RepoSummary, RequestRevisionRequest, TaskActionResponse, TaskDetail,
-    TaskInputRequest, TaskInputResponse, TaskSummary, WaitUntil,
+    TaskInputRequest, TaskInputResponse, TaskRenameRequest, TaskSummary, WaitUntil,
 };
 
 pub(crate) fn join_server_url(base_url: &str, path: &str) -> String {
@@ -103,6 +103,26 @@ pub(crate) async fn post_json<B: Serialize, T: DeserializeOwned>(
         .map_err(|e| format!("failed to decode response: {e}"))
 }
 
+pub(crate) async fn patch_json<B: Serialize, T: DeserializeOwned>(
+    base_url: &str,
+    path: &str,
+    body: &B,
+) -> Result<T, String> {
+    let response = reqwest::Client::new()
+        .patch(join_server_url(base_url, path))
+        .json(body)
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {e}"))?;
+    let response = response
+        .error_for_status()
+        .map_err(|e| format!("request failed: {e}"))?;
+    response
+        .json::<T>()
+        .await
+        .map_err(|e| format!("failed to decode response: {e}"))
+}
+
 pub(crate) async fn post_no_content_json<B: Serialize>(
     base_url: &str,
     path: &str,
@@ -133,6 +153,34 @@ pub(crate) async fn post_catalog_json(
 ) -> Result<Value, String> {
     let response = reqwest::Client::new()
         .post(join_server_url(base_url, path))
+        .json(body)
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {e}"))?;
+    let status = response.status();
+    if status == reqwest::StatusCode::NO_CONTENT {
+        return Ok(serde_json::json!({ "ok": true }));
+    }
+    if !status.is_success() {
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|e| format!("failed to read error body: {e}"));
+        return Err(format!("request failed with status {status}: {body}"));
+    }
+    response
+        .json::<Value>()
+        .await
+        .map_err(|e| format!("failed to decode response: {e}"))
+}
+
+pub(crate) async fn patch_catalog_json(
+    base_url: &str,
+    path: &str,
+    body: &Value,
+) -> Result<Value, String> {
+    let response = reqwest::Client::new()
+        .patch(join_server_url(base_url, path))
         .json(body)
         .send()
         .await
@@ -306,6 +354,14 @@ pub(crate) async fn send_task_input_via_api(
     post_no_content_json(base_url, &format!("/v1/tasks/{task_id}/input"), request)
         .await
         .map(|_| TaskInputResponse { ok: true })
+}
+
+pub(crate) async fn rename_task_via_api(
+    base_url: &str,
+    task_id: &str,
+    request: &TaskRenameRequest,
+) -> Result<TaskActionResponse, String> {
+    patch_json(base_url, &task_get_path(task_id), request).await
 }
 
 pub(crate) async fn advance_stage_via_api(

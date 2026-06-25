@@ -292,7 +292,11 @@ async fn create_task_route_persists_display_name_alias_and_returns_it_as_title()
     assert_eq!(detail.title, "Short task title");
 
     let list_response = app
-        .oneshot(Request::get("/v1/tasks/recent").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::get("/v1/tasks/recent")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(list_response.status(), StatusCode::OK);
