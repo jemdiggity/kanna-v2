@@ -1,0 +1,188 @@
+use super::*;
+
+#[tokio::test]
+async fn advance_stage_posts_to_task_action_path_with_empty_json_body() {
+    let response = http_json_response("200 OK", "{\"taskId\":\"next-task-1\"}");
+    let (base_url, handle) = serve_single_http_response(response).await;
+
+    let action = advance_stage_via_api(&base_url, "task-123").await.unwrap();
+    let request = handle.await.unwrap();
+
+    assert_eq!(action.task_id, "next-task-1");
+    assert!(request.starts_with("POST /v1/tasks/task-123/actions/advance-stage HTTP/1.1"));
+    assert!(request.contains("content-type: application/json"));
+    assert!(request.ends_with("{}"));
+}
+
+#[tokio::test]
+async fn get_task_via_api_fetches_single_task_path() {
+    let response = http_json_response(
+        "200 OK",
+        r#"{
+                "id": "task-123",
+                "repoId": "repo-1",
+                "title": "Wanted",
+                "stage": "pr",
+                "activity": "unread",
+                "snippet": null,
+                "agentType": "pty",
+                "agentProvider": "claude",
+                "branch": "task-task-123",
+                "prUrl": "https://github.com/acme/kanna/pull/1",
+                "closedAt": null,
+                "worktreePath": null,
+                "commitsAhead": 0,
+                "commitsBehind": 0,
+                "dirty": false
+            }"#,
+    );
+    let (base_url, handle) = serve_single_http_response(response).await;
+
+    let task = get_task_via_api(&base_url, "task-123").await.unwrap();
+    let request = handle.await.unwrap();
+
+    assert_eq!(task.id, "task-123");
+    assert_eq!(task.activity.as_deref(), Some("unread"));
+    assert!(request.starts_with("GET /v1/tasks/task-123 HTTP/1.1"));
+}
+
+#[tokio::test]
+async fn close_task_posts_to_close_action_path() {
+    let response = "HTTP/1.1 204 No Content\r\ncontent-length: 0\r\n\r\n".to_string();
+    let (base_url, handle) = serve_single_http_response(response).await;
+
+    close_task_via_api(&base_url, "task-123").await.unwrap();
+    let request = handle.await.unwrap();
+
+    assert!(request.starts_with("POST /v1/tasks/task-123/actions/close HTTP/1.1"));
+}
+
+#[tokio::test]
+async fn advance_stage_surfaces_http_errors() {
+    let response = http_json_response("409 Conflict", "{\"error\":\"task not accepted yet\"}");
+    let (base_url, handle) = serve_single_http_response(response).await;
+
+    let error = advance_stage_via_api(&base_url, "task-123")
+        .await
+        .unwrap_err();
+    let request = handle.await.unwrap();
+
+    assert!(request.starts_with("POST /v1/tasks/task-123/actions/advance-stage HTTP/1.1"));
+    assert!(error.contains("409 Conflict"));
+}
+
+#[tokio::test]
+async fn block_task_posts_to_task_action_path() {
+    let response = http_json_response("200 OK", "{\"taskId\":\"task-123\"}");
+    let (base_url, handle) = serve_single_http_response(response).await;
+
+    let action = block_task_via_api(
+        &base_url,
+        "task-123",
+        &build_block_task_request(vec!["blocker-1".to_string()]),
+    )
+    .await
+    .unwrap();
+    let request = handle.await.unwrap();
+
+    assert_eq!(action.task_id, "task-123");
+    assert!(request.starts_with("POST /v1/tasks/task-123/actions/block HTTP/1.1"));
+    assert!(request.contains(r#"{"blockerTaskIds":["blocker-1"]}"#));
+}
+
+#[tokio::test]
+async fn unblock_task_posts_to_task_action_path() {
+    let response = http_json_response("200 OK", "{\"taskId\":\"task-123\"}");
+    let (base_url, handle) = serve_single_http_response(response).await;
+
+    let action = unblock_task_via_api(&base_url, "task-123").await.unwrap();
+    let request = handle.await.unwrap();
+
+    assert_eq!(action.task_id, "task-123");
+    assert!(request.starts_with("POST /v1/tasks/task-123/actions/unblock HTTP/1.1"));
+    assert!(request.ends_with("{}"));
+}
+
+#[tokio::test]
+async fn create_task_via_api_posts_payload_without_agent_provider_when_flag_absent() {
+    let listener = TokioTcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut received = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        let (body_start, content_length) = loop {
+            let n = stream.read(&mut buffer).await.unwrap();
+            assert!(n > 0, "client closed before sending request body");
+            received.extend_from_slice(&buffer[..n]);
+            if let Some(header_end) = received.windows(4).position(|w| w == b"\r\n\r\n") {
+                let header_text = String::from_utf8(received[..header_end].to_vec()).unwrap();
+                let content_length = header_text
+                    .lines()
+                    .find_map(|line| {
+                        line.strip_prefix("content-length: ")
+                            .or_else(|| line.strip_prefix("Content-Length: "))
+                    })
+                    .unwrap()
+                    .parse::<usize>()
+                    .unwrap();
+                break (header_end + 4, content_length);
+            }
+        };
+        while received.len() < body_start + content_length {
+            let n = stream.read(&mut buffer).await.unwrap();
+            assert!(n > 0, "client closed before sending full request body");
+            received.extend_from_slice(&buffer[..n]);
+        }
+        let body =
+            String::from_utf8(received[body_start..body_start + content_length].to_vec()).unwrap();
+        let response_body = serde_json::json!({
+            "taskId": "task-1",
+            "repoId": "repo-1",
+            "title": "Use the saved default provider",
+            "stage": "in progress",
+        })
+        .to_string();
+        stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                        response_body.len(),
+                        response_body
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        body
+    });
+
+    let request = build_create_task_request(TaskCreateOptions {
+        repo_id: "repo-1".to_string(),
+        prompt: "Use the saved default provider".to_string(),
+        pipeline_name: None,
+        base_ref: None,
+        stage: None,
+        agent_provider: None,
+        agent_type: None,
+        model: None,
+        permission_mode: None,
+        allowed_tool: Vec::new(),
+        blocker_task_id: Vec::new(),
+        notify_task: None,
+    });
+
+    let created = create_task_via_api(&format!("http://{addr}"), &request)
+        .await
+        .unwrap();
+    let body = server.await.unwrap();
+
+    assert_eq!(created.task_id, "task-1");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&body).unwrap(),
+        json!({
+            "repoId": "repo-1",
+            "prompt": "Use the saved default provider",
+        })
+    );
+}
