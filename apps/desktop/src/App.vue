@@ -1,11 +1,7 @@
 <script setup lang="ts">
-import { ref, computed, inject, onMounted, onBeforeUnmount, onUnmounted, nextTick, type Ref } from "vue";
+import { computed, inject, type Ref } from "vue";
 import { useI18n } from "vue-i18n";
-import { isTauri } from "./tauri-mock";
-import { invoke } from "./invoke";
-import { listen, listenCurrentWebviewWindow } from "./listen";
-import { getSetting, type AgentProvider, type DbHandle } from "@kanna/db";
-import i18n from "./i18n";
+import { type AgentProvider, type DbHandle } from "@kanna/db";
 import Sidebar from "./components/Sidebar.vue";
 import MainPanel from "./components/MainPanel.vue";
 import NewTaskModal from "./components/NewTaskModal.vue";
@@ -24,13 +20,13 @@ import PeerPickerModal from "./components/PeerPickerModal.vue";
 import PreferencesPanel from "./components/PreferencesPanel.vue";
 import AppUpdatePrompt from "./components/AppUpdatePrompt.vue";
 import ToastContainer from "./components/ToastContainer.vue";
-import { type ActionName } from "./composables/useKeyboardShortcuts";
-import { scheduleStartupBackup, startPeriodicBackup } from "./composables/useBackup";
+import { type ActionName, type KeyboardActions } from "./composables/useKeyboardShortcuts";
 import { useOperatorEvents } from "./composables/useOperatorEvents";
 import { useCustomTasks } from "./composables/useCustomTasks";
 import { useToast } from "./composables/useToast";
 import { useAppUpdate } from "./composables/useAppUpdate";
 import { useAppCloudWorkspace } from "./composables/useAppCloudWorkspace";
+import { useAppLifecycle } from "./composables/useAppLifecycle";
 import {
   useAppModals,
   type DiffScope,
@@ -42,28 +38,9 @@ import { useAppTaskTransfer } from "./composables/useAppTaskTransfer";
 import { useAppTaskNavigation } from "./composables/useAppTaskNavigation";
 import { useAppTaskCreation } from "./composables/useAppTaskCreation";
 import { useAppKeyboardActions } from "./composables/useAppKeyboardActions";
-import {
-  parseIncomingTransferRequest,
-  parsePairingCompletedEvent,
-  parsePairingRequestedEvent,
-  parseOutgoingTransferCommittedEvent,
-  parseOutgoingTransferFinalizationRequestEvent,
-} from "./utils/taskTransfer";
 import { useKannaStore } from "./stores/kanna";
 import { useThemeRuntime } from "./theme/runtime";
-import {
-  normalizeAppThemePreference,
-  normalizeCodeThemePreference,
-} from "./theme/theme";
-import {
-  WINDOW_WORKSPACE_NATIVE_CLOSE_WINDOW_EVENT,
-  WINDOW_WORKSPACE_NATIVE_NAVIGATE_REPO_DOWN_EVENT,
-  WINDOW_WORKSPACE_NATIVE_NAVIGATE_REPO_UP_EVENT,
-  WINDOW_WORKSPACE_NATIVE_NAVIGATE_TASK_DOWN_EVENT,
-  WINDOW_WORKSPACE_NATIVE_NAVIGATE_TASK_UP_EVENT,
-  WINDOW_WORKSPACE_NATIVE_NEW_WINDOW_EVENT,
-  type WindowWorkspaceController,
-} from "./windowWorkspace";
+import { type WindowWorkspaceController } from "./windowWorkspace";
 
 const isMobile = __KANNA_MOBILE__;
 
@@ -83,8 +60,6 @@ const windowWorkspace = inject<WindowWorkspaceController>("windowWorkspace")!;
 const { tasks: customTasks, scan: scanCustomTasks } = useCustomTasks();
 const { effectiveAppTheme } = useThemeRuntime();
 const appUpdate = useAppUpdate();
-const appUnlisteners: Array<() => void> = [];
-let closingCurrentWindow = false;
 useOperatorEvents(computed(() => db) as unknown as Ref<DbHandle | null>);
 store.attachWindowWorkspace(windowWorkspace);
 const {
@@ -108,17 +83,6 @@ const {
   advanceSelectedRemoteWorkspaceTask,
   disposeDesktopCloudWorkspace,
 } = useAppCloudWorkspace({ db, store, toast });
-
-async function requestCloseCurrentWindow() {
-  if (closingCurrentWindow) return;
-  closingCurrentWindow = true;
-  try {
-    await windowWorkspace.closeWindow();
-  } catch (error: unknown) {
-    closingCurrentWindow = false;
-    throw error;
-  }
-}
 
 const {
   showNewTaskModal,
@@ -277,7 +241,37 @@ const {
   isCloudOnlyRepoId,
   cloudRepoRemoteUrl,
 });
-const { keyboardActions } = useAppKeyboardActions({
+
+let keyboardActions = {} as KeyboardActions;
+const {
+  focusAgentTerminal,
+  requestCloseCurrentWindow,
+} = useAppLifecycle({
+  appUpdate,
+  commandUsageCounts,
+  db,
+  dbName,
+  disposeDesktopCloudWorkspace,
+  getKeyboardActions: () => keyboardActions,
+  homePath,
+  importPendingIncomingTransfers,
+  initializeDesktopCloudAuth,
+  initializeDesktopLanTaskSync,
+  openFilePreview,
+  preferences,
+  remoteTaskDiagnostics,
+  restoreSidebarWidth,
+  shortcutsStartFull,
+  showShortcutsModal,
+  startSystemThemeListener,
+  stopSidebarResize,
+  stopSystemThemeListener,
+  store,
+  toast,
+  warmTransferSidecar,
+  windowWorkspace,
+});
+const appKeyboardActions = useAppKeyboardActions({
   store,
   toast,
   t,
@@ -336,348 +330,7 @@ const { keyboardActions } = useAppKeyboardActions({
   handleBlockTask,
   handleEditBlockedTask,
 });
-
-function focusAgentTerminal() {
-  nextTick(() => {
-    const el = document.querySelector(".main-panel .xterm-helper-textarea") as HTMLElement | null;
-    el?.focus();
-  });
-}
-
-function listenNativeMenuAction(
-  eventName: string,
-  action: () => void | Promise<void>,
-  label: string,
-) {
-  void (async () => {
-    try {
-      const unlisten = await listenCurrentWebviewWindow(eventName, async () => {
-        await action();
-      });
-      appUnlisteners.push(unlisten);
-    } catch (e: unknown) {
-      console.error(`[App] native ${label} listener registration failed:`, e);
-    }
-  })();
-}
-
-function isFileTransfer(event: DragEvent): boolean {
-  const transfer = event.dataTransfer;
-  if (!transfer) return false;
-  if (transfer.files.length > 0) return true;
-  return Array.from(transfer.types).includes("Files");
-}
-
-function suppressFileDropNavigation(event: DragEvent) {
-  if (!isFileTransfer(event)) return;
-  event.preventDefault();
-}
-
-function handleFileLinkActivate(event: Event) {
-  const detail = (event as CustomEvent).detail as { path: string; line?: number };
-  openFilePreview(detail.path, detail.line, false);
-}
-
-// Restore focus after native macOS fullscreen exit.
-// WKWebView loses first-responder status during the exit animation, breaking
-// terminal input and keyboard shortcuts. The Rust side calls
-// evaluateJavaScript: after a delay, which triggers becomeFirstResponder on
-// WKWebView (WebKit Bug 143482 fix). We track the last meaningful focused
-// element and expose a global restore function for that call.
-let lastFocusedElement: HTMLElement | null = null;
-document.addEventListener("focusin", (e) => {
-  const el = e.target as HTMLElement;
-  if (el && el !== document.body) lastFocusedElement = el;
-});
-(window as unknown as Record<string, unknown>).__kannaRestoreFocus = () => {
-  if (lastFocusedElement) {
-    lastFocusedElement.focus();
-  }
-};
-
-// Init
-onMounted(async () => {
-  appUpdate.start();
-  window.addEventListener("dragenter", suppressFileDropNavigation);
-  window.addEventListener("dragover", suppressFileDropNavigation);
-  window.addEventListener("drop", suppressFileDropNavigation);
-  document.addEventListener("file-link-activate", handleFileLinkActivate);
-
-  await restoreSidebarWidth();
-  await store.init(db);
-  preferences.appTheme = normalizeAppThemePreference(store.appTheme);
-  preferences.codeTheme = normalizeCodeThemePreference(store.codeTheme);
-  startSystemThemeListener();
-  await nextTick();
-  if (windowWorkspace && windowWorkspace.bootstrap.windowId === "main") {
-    scheduleStartupBackup(dbName);
-  }
-  void initializeDesktopCloudAuth().catch((error) =>
-    console.warn("[cloud] failed to initialize desktop auth:", error),
-  );
-  initializeDesktopLanTaskSync();
-  await importPendingIncomingTransfers();
-  if (import.meta.env.DEV && window.__KANNA_E2E__) {
-    void remoteTaskDiagnostics.value;
-    window.__KANNA_E2E__.ready = true;
-  }
-
-  try {
-    const unlistenNativeNewWindow = await listenCurrentWebviewWindow(WINDOW_WORKSPACE_NATIVE_NEW_WINDOW_EVENT, async () => {
-      await keyboardActions.newWindow();
-    });
-    appUnlisteners.push(unlistenNativeNewWindow);
-  } catch (e: unknown) {
-    console.error("[App] native new-window listener registration failed:", e);
-  }
-
-  try {
-    const unlistenNativeCloseWindow = await listenCurrentWebviewWindow(WINDOW_WORKSPACE_NATIVE_CLOSE_WINDOW_EVENT, async () => {
-      await keyboardActions.closeWindow();
-    });
-    appUnlisteners.push(unlistenNativeCloseWindow);
-  } catch (e: unknown) {
-    console.error("[App] native close-window listener registration failed:", e);
-  }
-
-  if (isTauri) {
-    void (async () => {
-      try {
-        const { getCurrentWindow } = await import("@tauri-apps/api/window");
-        const unlistenNativeWindowCloseRequest = await getCurrentWindow().onCloseRequested(async (event) => {
-          if (closingCurrentWindow) return;
-          closingCurrentWindow = true;
-          try {
-            await windowWorkspace.forgetCurrentWindow();
-          } catch (error: unknown) {
-            closingCurrentWindow = false;
-            event.preventDefault();
-            console.error("[App] native window close request failed:", error);
-          }
-        });
-        appUnlisteners.push(unlistenNativeWindowCloseRequest);
-      } catch (e: unknown) {
-        console.error("[App] native window close-request listener registration failed:", e);
-      }
-    })();
-  }
-
-  listenNativeMenuAction(
-    WINDOW_WORKSPACE_NATIVE_NAVIGATE_TASK_UP_EVENT,
-    keyboardActions.navigateUp,
-    "navigate-task-up",
-  );
-  listenNativeMenuAction(
-    WINDOW_WORKSPACE_NATIVE_NAVIGATE_TASK_DOWN_EVENT,
-    keyboardActions.navigateDown,
-    "navigate-task-down",
-  );
-  listenNativeMenuAction(
-    WINDOW_WORKSPACE_NATIVE_NAVIGATE_REPO_UP_EVENT,
-    keyboardActions.navigateRepoUp,
-    "navigate-repo-up",
-  );
-  listenNativeMenuAction(
-    WINDOW_WORKSPACE_NATIVE_NAVIGATE_REPO_DOWN_EVENT,
-    keyboardActions.navigateRepoDown,
-    "navigate-repo-down",
-  );
-
-  try {
-    const unlistenTransferRequest = await listen("transfer-request", async (event: unknown) => {
-      try {
-        const payload = (event as { payload?: unknown })?.payload ?? event;
-        const request = parseIncomingTransferRequest(payload);
-        await store.recordIncomingTransfer(request);
-        await store.approveIncomingTransfer(request.transferId);
-      } catch (e: unknown) {
-        console.error("[App] failed to import incoming transfer request:", e);
-        toast.error(e instanceof Error ? e.message : String(e));
-      }
-    });
-    appUnlisteners.push(unlistenTransferRequest);
-  } catch (e: unknown) {
-    console.error("[App] transfer-request listener registration failed:", e);
-  }
-
-  try {
-    const unlistenPairingStarted = await listen("pairing-started", async (event: unknown) => {
-      try {
-        const payload = (event as { payload?: unknown })?.payload ?? event;
-        const pairing = parsePairingCompletedEvent(payload);
-        toast.info(`Enter code ${pairing.verificationCode} on ${pairing.displayName}.`);
-      } catch (e: unknown) {
-        console.error("[App] failed to handle pairing started event:", e);
-      }
-    });
-    appUnlisteners.push(unlistenPairingStarted);
-  } catch (e: unknown) {
-    console.error("[App] pairing-started listener registration failed:", e);
-  }
-
-  try {
-    const unlistenPairingRequested = await listen("pairing-requested", async (event: unknown) => {
-      let pairingRequestId: string | null = null;
-      try {
-        const payload = (event as { payload?: unknown })?.payload ?? event;
-        const pairing = parsePairingRequestedEvent(payload);
-        pairingRequestId = pairing.requestId;
-        const enteredCode = window
-          .prompt(`Enter pairing code for ${pairing.displayName}`)
-          ?.trim() ?? null;
-        if (enteredCode !== pairing.verificationCode) {
-          await invoke("reject_peer_pairing", { pairingRequestId: pairing.requestId });
-          toast.error("Pairing code did not match.");
-          return;
-        }
-
-        await invoke("accept_peer_pairing", {
-          pairingRequestId: pairing.requestId,
-          verificationCode: enteredCode,
-        });
-        toast.info(`Paired with ${pairing.displayName}. Verify code ${pairing.verificationCode}.`);
-      } catch (e: unknown) {
-        console.error("[App] failed to handle pairing request event:", e);
-        if (pairingRequestId) {
-          try {
-            await invoke("reject_peer_pairing", { pairingRequestId });
-          } catch (rejectError: unknown) {
-            console.error("[App] failed to reject pairing request:", rejectError);
-          }
-        }
-        toast.error(e instanceof Error ? e.message : String(e));
-      }
-    });
-    appUnlisteners.push(unlistenPairingRequested);
-  } catch (e: unknown) {
-    console.error("[App] pairing-requested listener registration failed:", e);
-  }
-
-  try {
-    const unlistenPairingCompleted = await listen("pairing-completed", async (event: unknown) => {
-      try {
-        const payload = (event as { payload?: unknown })?.payload ?? event;
-        const pairing = parsePairingCompletedEvent(payload);
-        console.debug("[transfer] pairing-completed event received", {
-          peerId: pairing.peerId,
-          displayName: pairing.displayName,
-        });
-        toast.info(`Paired with ${pairing.displayName}. Verify code ${pairing.verificationCode}.`);
-      } catch (e: unknown) {
-        console.error("[App] failed to handle pairing completion event:", e);
-      }
-    });
-    appUnlisteners.push(unlistenPairingCompleted);
-  } catch (e: unknown) {
-    console.error("[App] pairing-completed listener registration failed:", e);
-  }
-
-  try {
-    const unlistenOutgoingTransferCommitted = await listen("outgoing-transfer-committed", async (event: unknown) => {
-      try {
-        const payload = (event as { payload?: unknown })?.payload ?? event;
-        const committed = parseOutgoingTransferCommittedEvent(payload);
-        await store.handleOutgoingTransferCommitted(committed);
-      } catch (e: unknown) {
-        console.error("[App] failed to handle outgoing transfer commit acknowledgment:", e);
-      }
-    });
-    appUnlisteners.push(unlistenOutgoingTransferCommitted);
-  } catch (e: unknown) {
-    console.error("[App] outgoing-transfer-committed listener registration failed:", e);
-  }
-
-  try {
-    const unlistenOutgoingTransferFinalizationRequested = await listen("outgoing-transfer-finalization-requested", async (event: unknown) => {
-      const payload = (event as { payload?: unknown })?.payload ?? event;
-      const request = parseOutgoingTransferFinalizationRequestEvent(payload);
-      try {
-        const finalized = await store.finalizeOutgoingTransfer(request.transferId);
-        await invoke("complete_outgoing_transfer_finalization", {
-          transferId: request.transferId,
-          payload: finalized.payload,
-          finalizedCleanly: finalized.finalizedCleanly,
-          error: null,
-        });
-      } catch (error: unknown) {
-        console.error("[App] failed to finalize outgoing transfer:", error);
-        await invoke("complete_outgoing_transfer_finalization", {
-          transferId: request.transferId,
-          payload: null,
-          finalizedCleanly: false,
-          error: error instanceof Error ? error.message : String(error),
-        }).catch((invokeError: unknown) => {
-          console.error("[App] failed to report outgoing transfer finalization error:", invokeError);
-        });
-      }
-    });
-    appUnlisteners.push(unlistenOutgoingTransferFinalizationRequested);
-  } catch (e: unknown) {
-    console.error("[App] outgoing-transfer-finalization-requested listener registration failed:", e);
-  }
-
-  await warmTransferSidecar();
-
-  // Cache $HOME for shell-at-home (no repo selected)
-  invoke("read_env_var", { name: "HOME" }).then((val) => {
-    homePath.value = val as string;
-  }).catch(() => {
-    homePath.value = "/Users";
-  });
-
-  // Load persisted locale
-  const savedLocale = await getSetting(db, "locale");
-  if (savedLocale && ["en", "ja", "ko"].includes(savedLocale)) {
-    i18n.global.locale.value = savedLocale as "en" | "ja" | "ko";
-    preferences.locale = savedLocale;
-  }
-
-  // Sync preferences from store
-  preferences.suspendAfterMinutes = store.suspendAfterMinutes;
-  preferences.killAfterMinutes = store.killAfterMinutes;
-  preferences.ideCommand = store.ideCommand;
-  preferences.devLingerTerminals = store.devLingerTerminals;
-  preferences.agentMessageAppearance = store.agentMessageAppearance;
-
-  const savedAgentProvider = await getSetting(db, "defaultAgentProvider");
-  if (savedAgentProvider === "copilot") preferences.defaultAgentProvider = "copilot";
-  else if (savedAgentProvider === "codex") preferences.defaultAgentProvider = "codex";
-  else if (savedAgentProvider === "opencode") preferences.defaultAgentProvider = "opencode";
-
-  startPeriodicBackup(dbName, ref(db) as Ref<DbHandle | null>);
-  if (!store.hideShortcutsOnStartup) {
-    shortcutsStartFull.value = true;
-    showShortcutsModal.value = true;
-  }
-  const raw = await getSetting(db, "commandPaletteUsage");
-  if (raw) {
-    try { commandUsageCounts.value = JSON.parse(raw); }
-    catch (e) { console.error("[App] corrupt commandPaletteUsage setting:", e); }
-  }
-
-});
-
-onUnmounted(() => {
-  while (appUnlisteners.length > 0) {
-    const unlisten = appUnlisteners.pop();
-    try {
-      unlisten?.();
-    } catch (e: unknown) {
-      console.error("[App] failed to unlisten app event:", e);
-    }
-  }
-});
-
-onBeforeUnmount(() => {
-  disposeDesktopCloudWorkspace();
-  stopSidebarResize();
-  window.removeEventListener("dragenter", suppressFileDropNavigation);
-  window.removeEventListener("dragover", suppressFileDropNavigation);
-  window.removeEventListener("drop", suppressFileDropNavigation);
-  document.removeEventListener("file-link-activate", handleFileLinkActivate);
-  stopSystemThemeListener();
-  appUpdate.dispose();
-});
+keyboardActions = appKeyboardActions.keyboardActions;
 </script>
 
 <template>
