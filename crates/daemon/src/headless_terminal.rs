@@ -778,7 +778,8 @@ mod tests {
     }
 
     #[test]
-    fn claude_permission_footer_without_interrupt_marker_does_not_map_to_waiting_even_with_blank_rows_below() {
+    fn claude_permission_footer_without_interrupt_marker_does_not_map_to_waiting_even_with_blank_rows_below(
+    ) {
         let mut headless_terminal = HeadlessTerminal::new(120, 42, 10_000).unwrap();
         headless_terminal.write(
             concat!(
