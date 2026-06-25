@@ -54,6 +54,10 @@ fn generated_schema_preserves_required_order_types_and_enums() {
         create_task["inputSchema"]["properties"]["allowed_tools"],
         json!({ "type": "array", "items": { "type": "string" } })
     );
+    assert_eq!(
+        create_task["inputSchema"]["properties"]["agent_type"],
+        json!({ "type": "string" })
+    );
 
     let wait = tools
         .as_array()
@@ -132,6 +136,7 @@ fn resolves_expected_requests_for_every_bundled_tool() {
             json!({
                 "repo_id": "repo-1",
                 "prompt": "Blocked work",
+                "agent_type": "agent",
                 "blocker_task_ids": ["blocker-1", "blocker-2"]
             }),
             Method::Post,
@@ -140,6 +145,7 @@ fn resolves_expected_requests_for_every_bundled_tool() {
             json!({
                 "repoId": "repo-1",
                 "prompt": "Blocked work",
+                "agentType": "agent",
                 "blockerTaskIds": ["blocker-1", "blocker-2"]
             }),
         ),
@@ -367,6 +373,12 @@ fn catalog_types_are_deserialized_from_manifest_values() {
         .collect::<Vec<_>>();
 
     assert!(params.contains(&("repo_id", ParamType::String, ParamLoc::Body, Some("repoId"))));
+    assert!(params.contains(&(
+        "agent_type",
+        ParamType::String,
+        ParamLoc::Body,
+        Some("agentType"),
+    )));
     assert!(params.contains(&(
         "blocker_task_ids",
         ParamType::StringArray,
