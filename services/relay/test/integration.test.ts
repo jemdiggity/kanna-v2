@@ -10,9 +10,6 @@ import { getFirestore } from "firebase-admin/firestore";
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import WebSocket from "ws";
 
-const RELAY_PORT = 18080;
-const RELAY_URL = `ws://localhost:${RELAY_PORT}`;
-const HEALTH_URL = `http://localhost:${RELAY_PORT}/health`;
 const TEST_EMAIL = "upvote.sieve.7t@icloud.com";
 const TEST_PASSWORD = "password123";
 const OTHER_TEST_EMAIL = "relay.other.7t@example.com";
@@ -21,6 +18,15 @@ const TEST_DEVICE_TOKEN = "e2e-token";
 const TEST_USER_ID = "Bax9TJvOWm5bbl0Aq4nXg3XmkTCu";
 const SECRET_DESKTOP_ID = "desktop-secret-auth";
 const SECRET_DESKTOP_SECRET = "desktop-secret-for-relay";
+let relayPort = 0;
+
+function relayUrl(): string {
+  return `ws://localhost:${relayPort}`;
+}
+
+function healthUrl(): string {
+  return `http://localhost:${relayPort}/health`;
+}
 
 /**
  * Helper: wait for the relay's /health endpoint to respond 200.
@@ -30,7 +36,7 @@ async function waitForRelay(timeoutMs = 10_000): Promise<void> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     try {
-      const res = await fetch(HEALTH_URL);
+      const res = await fetch(healthUrl());
       if (res.ok) return;
     } catch {
       // not ready yet
@@ -79,7 +85,7 @@ async function signInToAuthEmulator(
   return response?.ok && body?.idToken ? body.idToken : null;
 }
 
-async function waitForAuthEmulator(authPort: number, timeoutMs = 30_000): Promise<string> {
+async function waitForAuthEmulator(authPort: number, timeoutMs = 60_000): Promise<string> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const token = await signInToAuthEmulator(authPort, TEST_EMAIL, TEST_PASSWORD);
@@ -124,7 +130,7 @@ function connectAndAuth(
   authPayload: Record<string, unknown>
 ): Promise<{ ws: WebSocket; userId: string }> {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(RELAY_URL);
+    const ws = new WebSocket(relayUrl());
     const timeout = setTimeout(() => {
       ws.close();
       reject(new Error("Auth timed out"));
@@ -155,7 +161,7 @@ function connectAndExpectClose(
   timeoutMs = 5_000,
 ): Promise<number> {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(RELAY_URL);
+    const ws = new WebSocket(relayUrl());
     const timeout = setTimeout(() => {
       ws.close();
       reject(new Error(`Expected close ${expectedCode} timed out`));
@@ -304,18 +310,50 @@ function closeAndWait(ws: WebSocket): Promise<void> {
   });
 }
 
+async function terminateProcessTree(
+  child: ChildProcessWithoutNullStreams | null,
+  signal: NodeJS.Signals = "SIGTERM",
+): Promise<void> {
+  if (!child?.pid || child.exitCode !== null || child.signalCode !== null) return;
+  await new Promise<void>((resolve) => {
+    const timeout = setTimeout(() => {
+      try {
+        process.kill(-child.pid!, "SIGKILL");
+      } catch {
+        // Already exited.
+      }
+      resolve();
+    }, 2_000);
+    child.once("exit", () => {
+      clearTimeout(timeout);
+      resolve();
+    });
+    try {
+      process.kill(-child.pid!, signal);
+    } catch {
+      clearTimeout(timeout);
+      resolve();
+    }
+  });
+}
+
 describe("Relay integration", () => {
   let firebaseProcess: ChildProcessWithoutNullStreams | null = null;
   let firebaseConfigDir: string | null = null;
   let authPort = 0;
   let firestorePort = 0;
+  let firebaseHubPort = 0;
+  let firebaseLoggingPort = 0;
   let idToken = "";
   let otherIdToken = "";
   let relayProcess: ChildProcessWithoutNullStreams | null = null;
 
   beforeAll(async () => {
+    relayPort = await findFreePort();
     authPort = await findFreePort();
     firestorePort = await findFreePort();
+    firebaseHubPort = await findFreePort();
+    firebaseLoggingPort = await findFreePort();
     firebaseConfigDir = await mkdtemp(join(tmpdir(), "kanna-relay-firebase-"));
     const firebaseConfigPath = join(firebaseConfigDir, "firebase.json");
     await writeFile(
@@ -325,6 +363,8 @@ describe("Relay integration", () => {
         emulators: {
           auth: { host: "127.0.0.1", port: authPort },
           firestore: { host: "127.0.0.1", port: firestorePort },
+          hub: { host: "127.0.0.1", port: firebaseHubPort },
+          logging: { host: "127.0.0.1", port: firebaseLoggingPort },
           ui: { enabled: false },
         },
       }),
@@ -342,6 +382,7 @@ describe("Relay integration", () => {
     ], {
       cwd: fileURLToPath(new URL("../../..", import.meta.url)),
       env: { ...process.env },
+      detached: true,
       stdio: "pipe",
     });
     firebaseProcess.stderr?.on("data", (chunk: Buffer) => {
@@ -359,8 +400,9 @@ describe("Relay integration", () => {
         FIREBASE_PROJECT_ID: "kanna-local",
         FIREBASE_AUTH_EMULATOR_HOST: `127.0.0.1:${authPort}`,
         FIRESTORE_EMULATOR_HOST: `127.0.0.1:${firestorePort}`,
-        PORT: String(RELAY_PORT),
+        PORT: String(relayPort),
       },
+      detached: true,
       stdio: "pipe",
     });
 
@@ -370,13 +412,11 @@ describe("Relay integration", () => {
     });
 
     await waitForRelay();
-  }, 60_000);
+  }, 90_000);
 
   afterAll(async () => {
-    relayProcess?.kill("SIGTERM");
-    firebaseProcess?.kill("SIGTERM");
-    // Give the process a moment to exit cleanly
-    await new Promise((r) => setTimeout(r, 500));
+    await terminateProcessTree(relayProcess);
+    await terminateProcessTree(firebaseProcess);
     if (firebaseConfigDir) await rm(firebaseConfigDir, { recursive: true, force: true });
   });
 
@@ -558,7 +598,7 @@ describe("Relay integration", () => {
     const signal = await establishSignal;
     expect(signal.tunnelId).toEqual(expect.any(String));
 
-    const desktopTunnel = new WebSocket(RELAY_URL);
+    const desktopTunnel = new WebSocket(relayUrl());
     const readyOrder: string[] = [];
     desktopTunnel.on("message", (raw: Buffer) => {
       let msg: Record<string, unknown>;
@@ -1230,7 +1270,7 @@ describe("Relay integration", () => {
       }),
     );
 
-    const health = await fetch(HEALTH_URL);
+    const health = await fetch(healthUrl());
     expect(health.ok).toBe(true);
     expect(server.readyState).toBe(WebSocket.OPEN);
 
@@ -1320,7 +1360,7 @@ describe("Relay integration", () => {
 
   it("should reject connections that do not send auth within timeout", async () => {
     const startedAt = Date.now();
-    const ws = new WebSocket(RELAY_URL);
+    const ws = new WebSocket(relayUrl());
     await new Promise<void>((resolve) => ws.on("open", resolve));
 
     const closeCode = await new Promise<number>((resolve) => {
@@ -1334,7 +1374,7 @@ describe("Relay integration", () => {
   }, 13_000);
 
   it("rejects connections whose first message is not auth", async () => {
-    const ws = new WebSocket(RELAY_URL);
+    const ws = new WebSocket(relayUrl());
     await new Promise<void>((resolve) => ws.on("open", resolve));
 
     ws.send(JSON.stringify({ type: "not_auth", foo: "bar" }));
@@ -1347,7 +1387,7 @@ describe("Relay integration", () => {
   });
 
   it("should reject connections with missing tokens", async () => {
-    const ws = new WebSocket(RELAY_URL);
+    const ws = new WebSocket(relayUrl());
     await new Promise<void>((resolve) => ws.on("open", resolve));
 
     // Send auth without any token
