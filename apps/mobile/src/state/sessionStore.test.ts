@@ -127,6 +127,31 @@ describe("createSessionStore", () => {
     expect(output.length).toBeLessThanOrEqual(1_000_001);
   });
 
+  it("keeps a large snapshot plus live frames decodable through the accumulation cap", () => {
+    const store = createSessionStore();
+    store.beginTaskTerminal("task-1", "");
+    store.setTaskTerminalDims("task-1", 220, 72);
+
+    const snapshotText = Array.from({ length: 72 }, (_value, index) =>
+      `row ${String(index + 1).padStart(2, "0")} ${"snapshot ".repeat(22)}`
+    ).join("\r\n");
+    const snapshotFrame = Buffer.from(snapshotText, "utf8").toString("base64");
+    const liveFrame = Buffer.from("LIVE-APPEND-CORRECT", "utf8").toString("base64");
+
+    store.appendTaskTerminal("task-1", `${snapshotFrame}\n`);
+    store.appendTaskTerminal("task-1", `${liveFrame}\n`);
+
+    const state = store.getState();
+    const frames = state.taskTerminalOutput.split("\n").filter(Boolean);
+    const decoded = frames.map((frame) => Buffer.from(frame, "base64").toString("utf8")).join("");
+
+    expect(state.taskTerminalCols).toBe(220);
+    expect(state.taskTerminalRows).toBe(72);
+    expect(frames).toEqual([snapshotFrame, liveFrame]);
+    expect(decoded).toContain("row 72");
+    expect(decoded).toContain("LIVE-APPEND-CORRECT");
+  });
+
   it("does not publish when repo tasks are refreshed with identical data", () => {
     const store = createSessionStore();
     let publishes = 0;

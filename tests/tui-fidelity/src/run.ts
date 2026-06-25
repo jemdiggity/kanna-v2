@@ -5,11 +5,11 @@ import { diffGrids, formatResult } from "./diff.ts";
 import { emitFixtureFrames } from "./emitter.ts";
 import { writeFixtures } from "./fixtures.ts";
 import { ARTIFACT_DIR, FIXTURE_DIR, GOLDEN_DIR } from "./paths.ts";
-import { renderPathGrid, renderReferenceGrid } from "./render.ts";
+import { renderPathGrid, renderReferenceGrid, renderSessionStorePathGrid } from "./render.ts";
 import type { FixtureResult } from "./types.ts";
 
-const COLS = 220;
-const ROWS = 48;
+const DEFAULT_COLS = 220;
+const DEFAULT_ROWS = 48;
 
 async function main(): Promise<void> {
   const updateGoldens = process.argv.includes("--update-goldens");
@@ -21,17 +21,30 @@ async function main(): Promise<void> {
   try {
     for (const fixture of fixtures) {
       const fixturePath = path.join(FIXTURE_DIR, `${fixture.name}.ansi`);
+      const cols = fixture.cols ?? DEFAULT_COLS;
+      const rows = fixture.rows ?? DEFAULT_ROWS;
       const emitted = await emitFixtureFrames({
         fixturePath,
-        cols: COLS,
-        rows: ROWS,
+        cols,
+        rows,
         snapshotAt: fixture.snapshotAt
       });
       if (emitted.used_visible_text_fallback && !fixture.allowFallback) {
         throw new Error(`${fixture.name} unexpectedly used visible_text_vt fallback`);
       }
-      const pathGrid = await renderPathGrid(browser, emitted);
-      const referenceGrid = await renderReferenceGrid(browser, fixture.name, fixture.bytes, pathGrid.rows);
+      const pathGrid = fixture.replayThroughSessionStore
+        ? await renderSessionStorePathGrid(browser, emitted)
+        : await renderPathGrid(browser, emitted);
+      if (fixture.replayThroughSessionStore && pathGrid.serialized.trim().length === 0) {
+        throw new Error(`${fixture.name} rendered a blank terminal after sessionStore replay`);
+      }
+      const referenceGrid = await renderReferenceGrid(
+        browser,
+        fixture.name,
+        fixture.bytes,
+        emitted.cols,
+        emitted.rows
+      );
       const result = diffGrids(
         fixture.name,
         fixture.description,

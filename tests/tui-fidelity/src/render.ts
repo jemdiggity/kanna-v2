@@ -3,7 +3,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import type { Browser, Page } from "playwright";
 import { ARTIFACT_DIR, PACKAGE_ROOT, REPO_ROOT } from "./paths.ts";
-import type { EmitterOutput, GridSnapshot, TerminalFrame } from "./types.ts";
+import type { EmitterOutput, GridSnapshot, TermSnapshotFrame } from "./types.ts";
 
 interface MobileDocumentModule {
   buildTerminalDocument(options: { bottomInset: number }): string;
@@ -21,6 +21,23 @@ interface TerminalHookState {
   chunksB64?: string[];
 }
 
+interface HarnessSessionState {
+  taskTerminalOutput: string;
+  taskTerminalCols: number | null;
+  taskTerminalRows: number | null;
+}
+
+interface HarnessSessionStore {
+  getState(): HarnessSessionState;
+  beginTaskTerminal(taskId: string, initialOutput: string): void;
+  appendTaskTerminal(taskId: string, chunk: string): void;
+  setTaskTerminalDims(taskId: string, cols: number, rows: number): void;
+}
+
+interface SessionStoreModule {
+  createSessionStore(): HarnessSessionStore;
+}
+
 const VIEWPORT = { width: 1900, height: 624 };
 
 export async function renderPathGrid(browser: Browser, emitted: EmitterOutput): Promise<GridSnapshot> {
@@ -33,6 +50,7 @@ export async function renderPathGrid(browser: Browser, emitted: EmitterOutput): 
 
     for (const frame of emitted.frames) {
       if (frame.type === "term_snapshot") {
+        await setTerminalDims(page, frame);
         await callHook(page, "__replaceTerminalState", { chunksB64: [frame.data_b64] });
       } else {
         await callHook(page, "__appendTerminalChunk", { chunksB64: [frame.data_b64] });
@@ -49,15 +67,61 @@ export async function renderPathGrid(browser: Browser, emitted: EmitterOutput): 
   }
 }
 
+export async function renderSessionStorePathGrid(
+  browser: Browser,
+  emitted: EmitterOutput
+): Promise<GridSnapshot> {
+  const page = await browser.newPage({ viewport: VIEWPORT });
+  try {
+    const html = await buildInstrumentedMobileDocument();
+    await page.setContent(html, { waitUntil: "load" });
+    await installSerializeAddon(page);
+    await page.waitForFunction(() => typeof window.__replaceTerminalState === "function");
+
+    const store = await createHarnessSessionStore();
+    const taskId = emitted.frames[0]?.task_id ?? "tui-fidelity";
+    store.beginTaskTerminal(taskId, "");
+    for (const frame of emitted.frames) {
+      if (frame.type === "term_snapshot") {
+        store.setTaskTerminalDims(frame.task_id, frame.cols, frame.rows);
+      }
+      store.appendTaskTerminal(frame.task_id, `${frame.data_b64}\n`);
+    }
+
+    const state = store.getState();
+    if (state.taskTerminalCols && state.taskTerminalRows) {
+      await setTerminalDims(page, {
+        type: "term_snapshot",
+        task_id: taskId,
+        cols: state.taskTerminalCols,
+        rows: state.taskTerminalRows,
+        data_b64: ""
+      });
+    }
+    await callHook(page, "__replaceTerminalState", {
+      chunksB64: terminalChunksFromOutput(state.taskTerminalOutput)
+    });
+    await waitForWrites(page);
+    return await extractGrid(page);
+  } finally {
+    await page.screenshot({
+      path: path.join(ARTIFACT_DIR, `${path.basename(emitted.fixture, ".ansi")}.path.png`),
+      fullPage: true
+    });
+    await page.close();
+  }
+}
+
 export async function renderReferenceGrid(
   browser: Browser,
   name: string,
   bytes: Uint8Array,
+  cols: number,
   rows: number
 ): Promise<GridSnapshot> {
   const page = await browser.newPage({ viewport: VIEWPORT });
   try {
-    await page.setContent(await buildReferenceDocument(rows), { waitUntil: "load" });
+    await page.setContent(await buildReferenceDocument(cols, rows), { waitUntil: "load" });
     await installSerializeAddon(page);
     await page.waitForFunction(() => window.__kannaTerminals.length > 0);
     await callReferenceWrite(page, new TextDecoder().decode(bytes));
@@ -82,7 +146,15 @@ async function buildInstrumentedMobileDocument(): Promise<string> {
     .replace("    <script>", `    <script>${terminalProbeScript()}</script>\n    <script>`);
 }
 
-async function buildReferenceDocument(rows: number): Promise<string> {
+async function createHarnessSessionStore(): Promise<HarnessSessionStore> {
+  const moduleUrl = pathToFileURL(
+    path.join(REPO_ROOT, "apps/mobile/src/state/sessionStore.ts")
+  ).href;
+  const mod = (await import(moduleUrl)) as SessionStoreModule;
+  return mod.createSessionStore();
+}
+
+async function buildReferenceDocument(cols: number, rows: number): Promise<string> {
   const xtermScript = await readPackageFile("@xterm/xterm/lib/xterm.js");
   const xtermCss = await readPackageFile("@xterm/xterm/css/xterm.css");
   return `<!DOCTYPE html>
@@ -101,7 +173,7 @@ async function buildReferenceDocument(rows: number): Promise<string> {
   <script>${xtermScript}</script>
   <script>
     const term = new Terminal({
-      cols: 220,
+      cols: ${cols},
       rows: ${rows},
       fontFamily: '"JetBrains Mono", "SF Mono", Menlo, monospace',
       fontSize: 13,
@@ -120,6 +192,13 @@ async function buildReferenceDocument(rows: number): Promise<string> {
   </script>
 </body>
 </html>`;
+}
+
+async function setTerminalDims(page: Page, frame: TermSnapshotFrame): Promise<void> {
+  await page.evaluate((dims) => {
+    window.__setTerminalDims(dims);
+  }, { cols: frame.cols, rows: frame.rows });
+  await page.waitForTimeout(20);
 }
 
 async function installSerializeAddon(page: Page): Promise<void> {
@@ -153,6 +232,13 @@ async function callReferenceWrite(page: Page, text: string): Promise<void> {
   await page.evaluate((value) => {
     window.__kannaTerminals[0].write(value);
   }, text);
+}
+
+function terminalChunksFromOutput(output: string): string[] {
+  return output
+    .split("\n")
+    .map((chunk) => chunk.trim())
+    .filter((chunk) => chunk.length > 0);
 }
 
 async function waitForWrites(page: Page): Promise<void> {
@@ -268,6 +354,7 @@ declare global {
     };
     __appendTerminalChunk: (state: TerminalHookState) => void;
     __replaceTerminalState: (state: TerminalHookState) => void;
+    __setTerminalDims: (dims: { cols: number; rows: number }) => void;
     __kannaPendingWrites: number;
     __kannaSerializeAddon: { serialize: () => string };
     __kannaColorValue: (
@@ -328,7 +415,7 @@ declare global {
         };
       };
       loadAddon: (addon: { serialize: () => string }) => void;
-      write: (text: string, callback?: () => void) => void;
+      write: (text: string | Uint8Array, callback?: () => void) => void;
     }>;
   }
 }

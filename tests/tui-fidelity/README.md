@@ -6,7 +6,12 @@ This package measures Kanna's mobile terminal path:
 raw PTY bytes -> daemon HeadlessTerminal snapshot -> KSP term frames -> real mobile xterm document
 ```
 
-The oracle renders the same raw fixture bytes directly into a fresh xterm.js instance at 220 columns. The harness compares the mobile-path grid against that oracle cell-by-cell, including text, width, foreground, background, and attributes.
+The oracle renders the same raw fixture bytes directly into a fresh xterm.js instance at the fixture's PTY dimensions. The harness compares the mobile-path grid against that oracle cell-by-cell, including text, width, foreground, background, and attributes.
+
+The harness also covers two mobile layers that are easy to bypass accidentally:
+
+- Snapshot dimensions: `term_snapshot.cols`/`rows` are applied through the mobile document's `__setTerminalDims` hook before replay. The `bottom-anchored-80x24` fixture fails if mobile rendering drops the PTY dimensions and falls back to the old fixed 220-column, viewport-fitted grid.
+- Session accumulation: `large-session-store-snapshot` sends a large snapshot plus live frames through the real `sessionStore` accumulation/cap path before mobile replay. It fails if a large base64 snapshot is sliced mid-frame or renders blank after store replay.
 
 ## Run
 
@@ -49,9 +54,13 @@ Synthetic fixtures are defined in `src/fixtures.ts` and materialized as raw `.an
 - `cursor-save-restore` - DECSC/DECRC
 - `spinner-redraw` - carriage-return redraw loop
 - `split-sensitive` - live chunks that split UTF-8 and escape sequences
+- `bottom-anchored-80x24` - non-220 PTY grid with UI anchored to row 24
+- `large-session-store-snapshot` - large snapshot and live output replayed through `sessionStore`
 - `codex-pwd-tool` - captured Codex CLI TUI session with status/title spinner redraws, shell tool calls, and a final settled answer
 
 Each fixture sets `snapshotAt`. Bytes before that offset are fed through the real daemon `HeadlessTerminal` and serialized into the initial `term_snapshot`; bytes after that offset are emitted as chunked `term_output` frames.
+
+Fixtures may also set explicit `cols`/`rows`. When omitted, the legacy 220x48 grid is used. The mobile-path renderer and the oracle both use the emitted snapshot dimensions, so a dimension-plumbing regression shows up as cell divergence instead of being hidden by a fixed-size oracle.
 
 Captured fixtures are checked in under `fixtures/codex-*.ansi` and loaded by `src/fixtures.ts` without being regenerated. The current Codex fixture was captured from the interactive `codex` TUI, not `codex exec`, in a throwaway `/tmp/kanna-codex-fixture-root` workspace. The raw bytes were inspected for home paths and token-like strings before committing.
 
@@ -69,6 +78,8 @@ PASS scroll-region: 0 divergent cells, fallback=false
 PASS cursor-save-restore: 0 divergent cells, fallback=false
 PASS spinner-redraw: 0 divergent cells, fallback=true
 PASS split-sensitive: 0 divergent cells, fallback=true
+PASS bottom-anchored-80x24: 0 divergent cells, fallback=false
+PASS large-session-store-snapshot: 0 divergent cells, fallback=false
 DIFF codex-pwd-tool: 59 divergent cells, fallback=false
 ```
 
