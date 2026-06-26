@@ -9,6 +9,7 @@ import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo"
 const CTX_SCRIPT = 'window.__KANNA_E2E__.setupState';
 const HISTORY_DWELL_WAIT_MS = 1_250;
 const SIDEBAR_SCROLL_STYLE_ID = "e2e-sidebar-scroll-viewport";
+const KEYBOARD_FIXTURE_AGENT_TYPE = "test";
 
 interface SidebarScrollMetrics {
   scrollTop: number;
@@ -216,13 +217,11 @@ describe("keyboard shortcuts", () => {
   it("Escape closes modal", async () => {
     await pressKey("Escape");
     await sleep(500);
-    try {
-      await client.findElement(".modal-overlay");
-      // Modal still there — close via state
+    const modalElements = await client.findElements(".modal-overlay");
+    if (modalElements.length > 0) {
+      // Modal still there - close via state
       await client.executeSync(`${CTX_SCRIPT}.showNewTaskModal = false;`);
       await sleep(300);
-    } catch {
-      // Modal already gone
     }
   });
 
@@ -265,7 +264,7 @@ describe("keyboard shortcuts", () => {
           "in progress",
           "[]",
           null,
-          "agent",
+          KEYBOARD_FIXTURE_AGENT_TYPE,
           createdAt,
           createdAt,
         ],
@@ -370,7 +369,7 @@ describe("keyboard shortcuts", () => {
         "in progress",
         "[]",
         null,
-        "agent",
+        KEYBOARD_FIXTURE_AGENT_TYPE,
         "2026-04-17T10:00:00.000Z",
         "2026-04-17T10:00:00.000Z",
         newerTaskId,
@@ -381,7 +380,7 @@ describe("keyboard shortcuts", () => {
         "in progress",
         "[]",
         null,
-        "agent",
+        KEYBOARD_FIXTURE_AGENT_TYPE,
         "2026-04-17T10:01:00.000Z",
         "2026-04-17T10:01:00.000Z",
       ],
@@ -427,7 +426,7 @@ describe("keyboard shortcuts", () => {
         "pr",
         "[]",
         null,
-        "agent",
+        KEYBOARD_FIXTURE_AGENT_TYPE,
         "2026-04-17T10:01:00.000Z",
         "2026-04-17T10:01:00.000Z",
         inProgressTaskId,
@@ -438,7 +437,7 @@ describe("keyboard shortcuts", () => {
         "in progress",
         "[]",
         null,
-        "agent",
+        KEYBOARD_FIXTURE_AGENT_TYPE,
         "2026-04-17T10:00:00.000Z",
         "2026-04-17T10:00:00.000Z",
       ],
@@ -494,7 +493,7 @@ describe("keyboard shortcuts", () => {
         `INSERT INTO pipeline_item
            (id, repo_id, prompt, stage, activity, created_at, updated_at, agent_type, tags)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [row[0], row[1], row[2], "in progress", "idle", row[3], row[3], "agent", "[]"],
+        [row[0], row[1], row[2], "in progress", "idle", row[3], row[3], KEYBOARD_FIXTURE_AGENT_TYPE, "[]"],
       );
     }
 
@@ -538,7 +537,7 @@ describe("keyboard shortcuts", () => {
           "in progress",
           "[]",
           null,
-          "agent",
+          KEYBOARD_FIXTURE_AGENT_TYPE,
           createdAt,
           createdAt,
         ],
@@ -684,7 +683,7 @@ describe("keyboard shortcuts", () => {
         "in progress",
         "[]",
         null,
-        "agent",
+        KEYBOARD_FIXTURE_AGENT_TYPE,
         "2026-04-17T10:00:00.000Z",
         "2026-04-17T10:00:00.000Z",
         repoTwoTaskId,
@@ -695,7 +694,7 @@ describe("keyboard shortcuts", () => {
         "in progress",
         "[]",
         null,
-        "agent",
+        KEYBOARD_FIXTURE_AGENT_TYPE,
         "2026-04-17T10:01:00.000Z",
         "2026-04-17T10:01:00.000Z",
       ],
@@ -737,7 +736,7 @@ describe("keyboard shortcuts", () => {
        Promise.all(rows.map(function(row) {
          return db.execute(
            "INSERT OR REPLACE INTO pipeline_item (id, repo_id, prompt, stage, activity, created_at, teardown_started_at, agent_type, tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-           [row[0], row[1], row[2], row[3], row[4], row[5], row[6], "agent", "[]"]
+           [row[0], row[1], row[2], row[3], row[4], row[5], row[6], ${JSON.stringify(KEYBOARD_FIXTURE_AGENT_TYPE)}, "[]"]
          );
        }))
          .then(function() { return ctx.loadItems("${repoId}"); })
@@ -773,7 +772,7 @@ describe("keyboard shortcuts", () => {
       await execDb(
         client,
         "INSERT INTO pipeline_item (id, repo_id, prompt, stage, activity, created_at, agent_type, tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        [row[0], row[1], row[2], row[3], row[4], row[5], "agent", row[6]],
+        [row[0], row[1], row[2], row[3], row[4], row[5], KEYBOARD_FIXTURE_AGENT_TYPE, row[6]],
       );
     }
 
@@ -844,7 +843,7 @@ describe("keyboard shortcuts", () => {
       await execDb(
         client,
         "INSERT INTO pipeline_item (id, repo_id, prompt, stage, activity, created_at, updated_at, agent_type, tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        [row[0], row[1], row[2], "in progress", row[3], row[4], row[4], "agent", "[]"],
+        [row[0], row[1], row[2], "in progress", row[3], row[4], row[4], KEYBOARD_FIXTURE_AGENT_TYPE, "[]"],
       );
     }
 
@@ -887,7 +886,7 @@ describe("keyboard shortcuts", () => {
         "idle",
         "2026-03-31T03:00:00.000Z",
         "2026-03-31T03:00:00.000Z",
-        "agent",
+        KEYBOARD_FIXTURE_AGENT_TYPE,
         "[]",
       ],
     );
@@ -1008,7 +1007,7 @@ describe("keyboard shortcuts", () => {
            return Promise.all(rows.map(function(row) {
              return db.execute(
                "INSERT INTO pipeline_item (id, repo_id, prompt, stage, activity, created_at, agent_type, tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-               [row[0], row[1], row[2], row[3], row[4], row[5], "agent", row[6]]
+               [row[0], row[1], row[2], row[3], row[4], row[5], ${JSON.stringify(KEYBOARD_FIXTURE_AGENT_TYPE)}, row[6]]
              );
            }));
          })

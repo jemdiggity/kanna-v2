@@ -100,9 +100,11 @@ describe("external task creation", () => {
     await writeFile(
       join(kannaDir, "config.json"),
       JSON.stringify({
-        setup: [
-          "export PATH=\"$PWD/.kanna/fake-bin:$PATH\"",
-        ],
+        workspace: {
+          path: {
+            prepend: [".kanna/fake-bin"],
+          },
+        },
       }),
     );
     await writeFile(

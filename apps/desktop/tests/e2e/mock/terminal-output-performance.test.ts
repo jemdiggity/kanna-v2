@@ -149,6 +149,28 @@ async function clearMetrics(client: WebDriverClient): Promise<void> {
   }
 }
 
+async function killSessionBestEffort(client: WebDriverClient, sessionId: string): Promise<void> {
+  await client.executeAsync<string>(
+    `const cb = arguments[arguments.length - 1];
+     let settled = false;
+     const done = (value) => {
+       if (settled) return;
+       settled = true;
+       cb(value);
+     };
+     const timeout = setTimeout(() => done("timeout"), 5_000);
+     window.__TAURI_INTERNALS__.invoke("kill_session", { sessionId: ${JSON.stringify(sessionId)} })
+       .then(() => {
+         clearTimeout(timeout);
+         done("ok");
+       })
+       .catch(() => {
+         clearTimeout(timeout);
+         done("error");
+       });`,
+  ).catch(() => undefined);
+}
+
 async function waitForTerminalBufferText(
   client: WebDriverClient,
   sessionId: string,
@@ -185,11 +207,7 @@ describe("terminal output performance", () => {
   });
 
   afterAll(async () => {
-    await Promise.all(
-      taskIds.map((sessionId) =>
-        tauriInvoke(client, "kill_session", { sessionId }).catch(() => null),
-      ),
-    );
+    await Promise.all(taskIds.map((sessionId) => killSessionBestEffort(client, sessionId)));
     if (testRepoPath) {
       await cleanupWorktrees(client, testRepoPath);
     }

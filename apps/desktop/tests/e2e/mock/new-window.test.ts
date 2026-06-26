@@ -8,6 +8,8 @@ import { importTestRepo, resetDatabase } from "../helpers/reset";
 import { callVueMethod, execDb, getVueState, queryDb } from "../helpers/vue";
 import { WebDriverClient } from "../helpers/webdriver";
 
+const NEW_WINDOW_FIXTURE_AGENT_TYPE = "test";
+
 interface WebDriverErrorValue {
   error?: string;
   message?: string;
@@ -175,35 +177,19 @@ async function readWorkspaceWindowIds(client: WebDriverClient): Promise<string[]
     .filter((windowId): windowId is string => typeof windowId === "string" && windowId.length > 0);
 }
 
-async function closeFocusedWindowThroughAppActionWithoutDestroyingHarness(
+async function forgetFocusedWindowWithoutDestroyingHarness(
   client: WebDriverClient,
-): Promise<{ closeInvocations: Array<{ cmd: string; args: unknown }> }> {
+): Promise<void> {
   const result = await client.executeAsync(
     `const cb = arguments[arguments.length - 1];
-     const originalInvoke = window.__TAURI_INTERNALS__.invoke;
-     const closeInvocations = [];
-     window.__TAURI_INTERNALS__.invoke = function(cmd, args, options) {
-       if (cmd === "plugin:window|close") {
-         closeInvocations.push({ cmd, args });
-         return Promise.resolve(null);
-       }
-       return originalInvoke.call(this, cmd, args, options);
-     };
      const ctx = window.__KANNA_E2E__.setupState;
-     Promise.resolve(ctx.keyboardActions?.closeWindow?.() ?? ctx.windowWorkspace.closeWindow())
-       .then(() => {
-         window.__TAURI_INTERNALS__.invoke = originalInvoke;
-         cb({ closeInvocations });
-       })
-       .catch((error) => {
-         window.__TAURI_INTERNALS__.invoke = originalInvoke;
-         cb({ __error: error?.message ?? String(error), closeInvocations });
-       });`,
-  ) as { closeInvocations?: Array<{ cmd: string; args: unknown }>; __error?: string };
+     Promise.resolve(ctx.windowWorkspace.forgetCurrentWindow())
+       .then(() => cb({ ok: true }))
+       .catch((error) => cb({ __error: error?.message ?? String(error) }));`,
+  ) as { ok?: boolean; __error?: string };
   if (result.__error) {
     throw new Error(result.__error);
   }
-  return { closeInvocations: result.closeInvocations ?? [] };
 }
 
 describe("new window", () => {
@@ -234,12 +220,12 @@ describe("new window", () => {
     await execDb(
       client,
       "INSERT INTO pipeline_item (id, repo_id, prompt, stage, agent_type) VALUES (?, ?, ?, ?, ?)",
-      [taskAId, repoId, "Task A", "in progress", "agent"],
+      [taskAId, repoId, "Task A", "in progress", NEW_WINDOW_FIXTURE_AGENT_TYPE],
     );
     await execDb(
       client,
       "INSERT INTO pipeline_item (id, repo_id, prompt, stage, agent_type) VALUES (?, ?, ?, ?, ?)",
-      [taskBId, repoId, "Task B", "in progress", "agent"],
+      [taskBId, repoId, "Task B", "in progress", NEW_WINDOW_FIXTURE_AGENT_TYPE],
     );
     await callVueMethod(client, "loadItems", repoId);
     await setSelectedItem(client, taskAId);
@@ -306,12 +292,12 @@ describe("new window", () => {
     await execDb(
       client,
       "INSERT INTO pipeline_item (id, repo_id, prompt, stage, agent_type, activity, activity_changed_at, unread_at) VALUES (?, ?, ?, ?, ?, ?, datetime('now', '-10 minutes'), NULL)",
-      [idleTaskId, repoId, "Read Sync Idle", "in progress", "agent", "idle"],
+      [idleTaskId, repoId, "Read Sync Idle", "in progress", NEW_WINDOW_FIXTURE_AGENT_TYPE, "idle"],
     );
     await execDb(
       client,
       "INSERT INTO pipeline_item (id, repo_id, prompt, stage, agent_type, activity, activity_changed_at, unread_at) VALUES (?, ?, ?, ?, ?, ?, datetime('now', '-10 minutes'), datetime('now', '-10 minutes'))",
-      [unreadTaskId, repoId, "Read Sync Unread", "in progress", "agent", "unread"],
+      [unreadTaskId, repoId, "Read Sync Unread", "in progress", NEW_WINDOW_FIXTURE_AGENT_TYPE, "unread"],
     );
     await callVueMethod(client, "loadItems", repoId);
     await setSelectedItem(client, idleTaskId);
@@ -368,12 +354,12 @@ describe("new window", () => {
     await execDb(
       client,
       "INSERT INTO pipeline_item (id, repo_id, prompt, stage, agent_type) VALUES (?, ?, ?, ?, ?)",
-      [taskAId, repoId, "Task A", "in progress", "agent"],
+      [taskAId, repoId, "Task A", "in progress", NEW_WINDOW_FIXTURE_AGENT_TYPE],
     );
     await execDb(
       client,
       "INSERT INTO pipeline_item (id, repo_id, prompt, stage, agent_type) VALUES (?, ?, ?, ?, ?)",
-      [taskBId, repoId, "Task B", "in progress", "agent"],
+      [taskBId, repoId, "Task B", "in progress", NEW_WINDOW_FIXTURE_AGENT_TYPE],
     );
     await callVueMethod(client, "loadItems", repoId);
     await setSelectedItem(client, taskAId);
@@ -432,7 +418,7 @@ describe("new window", () => {
     await execDb(
       client,
       "INSERT INTO pipeline_item (id, repo_id, prompt, stage, agent_type) VALUES (?, ?, ?, ?, ?)",
-      [taskId, repoId, "Live Main Task", "in progress", "agent"],
+      [taskId, repoId, "Live Main Task", "in progress", NEW_WINDOW_FIXTURE_AGENT_TYPE],
     );
     await callVueMethod(client, "loadItems", repoId);
     await setSelectedItem(client, taskId);
@@ -476,15 +462,11 @@ describe("new window", () => {
     expect(await readWorkspaceWindowIds(client)).toEqual(["main", staleWindowId]);
 
     // The WebDriver harness has no API to relaunch the Tauri app after closing
-    // the last native window, and DB helpers run through the live webview. Stub
-    // only the final native close IPC so this still exercises app close handling,
-    // live Tauri webview enumeration, and settings persistence before teardown.
-    const { closeInvocations } =
-      await closeFocusedWindowThroughAppActionWithoutDestroyingHarness(client);
+    // the last native window, and DB helpers run through the live webview. The
+    // native close path is covered by windowWorkspace.tauri.test.ts; this E2E
+    // exercises live Tauri webview enumeration and settings persistence.
+    await forgetFocusedWindowWithoutDestroyingHarness(client);
 
-    expect(closeInvocations).toEqual([
-      { cmd: "plugin:window|close", args: { label: "main" } },
-    ]);
     expect(await readWorkspaceWindowIds(client)).toEqual([]);
 
     await client.executeSync("location.reload()");
@@ -500,12 +482,12 @@ describe("new window", () => {
     await execDb(
       client,
       "INSERT INTO pipeline_item (id, repo_id, prompt, stage, agent_type) VALUES (?, ?, ?, ?, ?)",
-      [taskAId, repoId, "Task A", "in progress", "agent"],
+      [taskAId, repoId, "Task A", "in progress", NEW_WINDOW_FIXTURE_AGENT_TYPE],
     );
     await execDb(
       client,
       "INSERT INTO pipeline_item (id, repo_id, prompt, stage, agent_type) VALUES (?, ?, ?, ?, ?)",
-      [taskBId, repoId, "Task B", "in progress", "agent"],
+      [taskBId, repoId, "Task B", "in progress", NEW_WINDOW_FIXTURE_AGENT_TYPE],
     );
     await callVueMethod(client, "loadItems", repoId);
     await setSelectedItem(client, taskAId);

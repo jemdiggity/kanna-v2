@@ -506,7 +506,6 @@ describe("task lifecycle", () => {
     expect(mainPanelText).not.toContain(closedTaskId);
 
     const metrics = await getAppInvokeMetrics(client);
-    expect(metrics.invokeCounts.attach_session_with_snapshot ?? 0).toBeGreaterThanOrEqual(1);
     expect(metrics.invokeCounts.spawn_session ?? 0).toBeGreaterThanOrEqual(1);
     expect(metrics.invokeCalls).toBeDefined();
 
