@@ -4,35 +4,16 @@ import { useI18n } from "vue-i18n";
 import { type AgentProvider, type DbHandle } from "@kanna/db";
 import Sidebar from "./components/Sidebar.vue";
 import MainPanel from "./components/MainPanel.vue";
-import NewTaskModal from "./components/NewTaskModal.vue";
-import AddRepoModal from "./components/AddRepoModal.vue";
-import KeyboardShortcutsModal from "./components/KeyboardShortcutsModal.vue";
-import FilePickerModal from "./components/FilePickerModal.vue";
-import FilePreviewModal from "./components/FilePreviewModal.vue";
-import TreeExplorerModal from "./components/TreeExplorerModal.vue";
-import DiffModal from "./components/DiffModal.vue";
-import CommitGraphModal from "./components/CommitGraphModal.vue";
-import ShellModal from "./components/ShellModal.vue";
-import CommandPaletteModal from "./components/CommandPaletteModal.vue";
-import AnalyticsModal from "./components/AnalyticsModal.vue";
-import BlockerSelectModal from "./components/BlockerSelectModal.vue";
-import PeerPickerModal from "./components/PeerPickerModal.vue";
-import PreferencesPanel from "./components/PreferencesPanel.vue";
-import AppUpdatePrompt from "./components/AppUpdatePrompt.vue";
-import ToastContainer from "./components/ToastContainer.vue";
-import { type ActionName, type KeyboardActions } from "./composables/useKeyboardShortcuts";
+import AppModalLayer from "./components/AppModalLayer.vue";
+import type { AppModalLayerController } from "./components/AppModalLayer.types";
+import { type KeyboardActions } from "./composables/useKeyboardShortcuts";
 import { useOperatorEvents } from "./composables/useOperatorEvents";
 import { useCustomTasks } from "./composables/useCustomTasks";
 import { useToast } from "./composables/useToast";
 import { useAppUpdate } from "./composables/useAppUpdate";
 import { useAppCloudWorkspace } from "./composables/useAppCloudWorkspace";
 import { useAppLifecycle } from "./composables/useAppLifecycle";
-import {
-  useAppModals,
-  type DiffScope,
-  type DiffScrollPositions,
-  type BranchInclude,
-} from "./composables/useAppModals";
+import { useAppModals } from "./composables/useAppModals";
 import { useAppPreferences } from "./composables/useAppPreferences";
 import { useAppTaskTransfer } from "./composables/useAppTaskTransfer";
 import { useAppTaskNavigation } from "./composables/useAppTaskNavigation";
@@ -84,6 +65,7 @@ const {
   disposeDesktopCloudWorkspace,
 } = useAppCloudWorkspace({ db, store, toast });
 
+const appModals = useAppModals({ isMobile, store, windowWorkspace });
 const {
   showNewTaskModal,
   availablePipelines,
@@ -152,7 +134,8 @@ const {
   selectFileFromPicker,
   closeFilePreview,
   getCurrentPreviewRecall,
-} = useAppModals({ isMobile, store, windowWorkspace });
+} = appModals;
+const appTaskTransfer = useAppTaskTransfer({ db, store, toast, showPeerPicker });
 const {
   peerPickerMode,
   transferPeers,
@@ -165,7 +148,13 @@ const {
   handlePeerSelected,
   handlePairPeer,
   importPendingIncomingTransfers,
-} = useAppTaskTransfer({ db, store, toast, showPeerPicker });
+} = appTaskTransfer;
+const appPreferences = useAppPreferences({
+  db,
+  store,
+  effectiveAppTheme,
+  firstSupportedAgentProvider,
+});
 const {
   preferences,
   commandUsageCounts,
@@ -173,29 +162,8 @@ const {
   stopSystemThemeListener,
   trackCommandUsage,
   handlePreferenceUpdate,
-} = useAppPreferences({
-  db,
-  store,
-  effectiveAppTheme,
-  firstSupportedAgentProvider,
-});
-const {
-  navigateItems,
-  navigateRepos,
-  selectReadTask,
-  selectUnreadTaskWithReadFallback,
-  handleBlockTask,
-  handleEditBlockedTask,
-  blockerCandidates,
-  disabledBlockerIds,
-  preselectedBlockerIds,
-  sidebarBlockerNames,
-  onBlockerConfirm,
-  paletteExtraCommands,
-  paletteDynamicCommands,
-  handleSelectRepo,
-  handleSelectItem,
-} = useAppTaskNavigation({
+} = appPreferences;
+const appTaskNavigation = useAppTaskNavigation({
   store,
   toast,
   t,
@@ -215,14 +183,23 @@ const {
   openPairPeerPicker,
 });
 const {
-  cloningRepo,
-  currentBlockers,
-  openNewTaskModal,
-  handleNewTaskSubmit,
-  handleCreateRepo,
-  handleImportRepo,
-  handleCloneRepo,
-} = useAppTaskCreation({
+  navigateItems,
+  navigateRepos,
+  selectReadTask,
+  selectUnreadTaskWithReadFallback,
+  handleBlockTask,
+  handleEditBlockedTask,
+  blockerCandidates,
+  disabledBlockerIds,
+  preselectedBlockerIds,
+  sidebarBlockerNames,
+  onBlockerConfirm,
+  paletteExtraCommands,
+  paletteDynamicCommands,
+  handleSelectRepo,
+  handleSelectItem,
+} = appTaskNavigation;
+const appTaskCreation = useAppTaskCreation({
   store,
   toast,
   t,
@@ -241,6 +218,15 @@ const {
   isCloudOnlyRepoId,
   cloudRepoRemoteUrl,
 });
+const {
+  cloningRepo,
+  currentBlockers,
+  openNewTaskModal,
+  handleNewTaskSubmit,
+  handleCreateRepo,
+  handleImportRepo,
+  handleCloneRepo,
+} = appTaskCreation;
 
 let keyboardActions = {} as KeyboardActions;
 const {
@@ -331,6 +317,19 @@ const appKeyboardActions = useAppKeyboardActions({
   handleEditBlockedTask,
 });
 keyboardActions = appKeyboardActions.keyboardActions;
+const modalLayerController = {
+  isMobile,
+  db,
+  store,
+  appUpdate,
+  appKeyboardActions,
+  appModals,
+  appPreferences,
+  appTaskCreation,
+  appTaskNavigation,
+  appTaskTransfer,
+  getKeyboardActions: () => keyboardActions,
+} satisfies AppModalLayerController;
 </script>
 
 <template>
@@ -388,155 +387,7 @@ keyboardActions = appKeyboardActions.keyboardActions;
       />
     </div>
 
-    <NewTaskModal
-      v-if="showNewTaskModal"
-      :default-agent-provider="preferences.defaultAgentProvider"
-      :pipelines="availablePipelines"
-      :default-pipeline="defaultPipelineName"
-      :base-branches="availableBaseBranches"
-      :default-base-branch="defaultBaseBranchName"
-      :default-branch-name="repoDefaultBranchName"
-      @submit="(prompt, agentProvider, pipelineName, baseBranch, agentType) => handleNewTaskSubmit(prompt, agentProvider, pipelineName, baseBranch, agentType)"
-      @cancel="showNewTaskModal = false"
-    />
-    <AddRepoModal
-      v-if="showAddRepoModal"
-      :initial-tab="addRepoInitialTab"
-      :cloning="cloningRepo"
-      @create="handleCreateRepo"
-      @import="handleImportRepo"
-      @clone="handleCloneRepo"
-      @cancel="showAddRepoModal = false"
-    />
-    <CommandPaletteModal
-      v-if="showCommandPalette"
-      :extra-commands="paletteExtraCommands"
-      :dynamic-commands="paletteDynamicCommands"
-      :usage-counts="commandUsageCounts"
-      @close="showCommandPalette = false"
-      @execute="(action: ActionName) => keyboardActions[action]()"
-      @use="trackCommandUsage"
-    />
-    <KeyboardShortcutsModal
-      v-if="showShortcutsModal"
-      :context="shortcutsContext"
-      :start-in-full-mode="shortcutsStartFull"
-      :hide-on-startup="store.hideShortcutsOnStartup"
-      @close="showShortcutsModal = false"
-      @update:hide-on-startup="(val: boolean) => store.savePreference('hideShortcutsOnStartup', String(val))"
-      @update:full-mode="shortcutsStartFull = $event"
-    />
-    <KeepAlive :max="10">
-      <ShellModal
-        ref="shellModalRef"
-        v-if="showShellModal && !isMobile && (store.selectedRepo ? (shellRepoRoot || store.currentItem) : shellRepoRoot)"
-        :key="`shell-${shellRepoRoot && !store.selectedRepo ? 'home' : shellRepoRoot ? `repo-${store.selectedRepo!.id}` : `wt-${store.currentItem?.id}`}`"
-        :session-id="`shell-${shellRepoRoot && !store.selectedRepo ? 'home' : shellRepoRoot ? `repo-${store.selectedRepo!.id}` : `wt-${store.currentItem?.id}`}`"
-        :cwd="shellModalCwd"
-        :fallback-cwd="shellModalFallbackCwd"
-        :port-env="shellRepoRoot ? undefined : store.currentItem?.port_env"
-        :maximized="maximizedModal === 'shell'"
-        @close="onShellClose"
-      />
-    </KeepAlive>
-    <DiffModal
-      ref="diffModalRef"
-      v-if="showDiffModal && !isMobile && store.selectedRepo?.path"
-      :repo-path="store.selectedRepo.path"
-      :worktree-path="store.currentItem?.branch ? activeWorktreePath : undefined"
-      :initial-scope="currentDiffViewState?.scope"
-      :initial-scroll-positions="currentDiffViewState?.scrollPositions"
-      :initial-branch-include="currentDiffViewState?.branchInclude"
-      :base-ref="store.currentItem?.base_ref ?? undefined"
-      :view-key="currentDiffViewKey"
-      :maximized="maximizedModal === 'diff'"
-      @scope-change="(scope: DiffScope) => updateCurrentDiffViewState({ scope })"
-      @scroll-state-change="(scrollPositions: DiffScrollPositions) => updateCurrentDiffViewState({ scrollPositions })"
-      @branch-include-change="(branchInclude: BranchInclude) => updateCurrentDiffViewState({ branchInclude })"
-      @close="showDiffModal = false; maximizedModal = null"
-    />
-    <CommitGraphModal
-      ref="commitGraphModalRef"
-      v-if="showCommitGraphModal && store.selectedRepo?.path"
-      :repo-path="store.selectedRepo.path"
-      :worktree-path="store.currentItem?.branch ? activeWorktreePath : undefined"
-      @close="showCommitGraphModal = false"
-    />
-    <div
-      v-if="(showFilePickerModal || filePickerHidden) && !isMobile && store.selectedRepo?.path"
-      v-show="showFilePickerModal"
-    >
-      <FilePickerModal
-        ref="filePickerRef"
-        :key="activeWorktreePath"
-        :worktree-path="activeWorktreePath"
-        :repo-root="store.selectedRepo?.path ?? ''"
-        @close="closeFilePicker"
-        @select="selectFileFromPicker"
-      />
-    </div>
-    <TreeExplorerModal
-      ref="treeExplorerRef"
-      v-if="showTreeExplorer && treeExplorerRoot"
-      :worktree-path="treeExplorerRoot"
-      :repo-root="store.selectedRepo?.path ?? treeExplorerRoot"
-      :home-path="homePath"
-      :maximized="maximizedModal === 'tree'"
-      :suspended="showFilePreviewModal && previewFromTree"
-      @close="closeTreeExplorer"
-      @open-file="(f: string) => openFilePreview(f, undefined, false, true)"
-    />
-    <FilePreviewModal
-      ref="filePreviewRef"
-      v-if="(showFilePreviewModal || previewHidden) && !isMobile && store.selectedRepo?.path"
-      v-show="showFilePreviewModal"
-      :key="`${activeWorktreePath}:${previewFilePath}`"
-      :file-path="previewFilePath"
-      :worktree-path="activeWorktreePath"
-      :ide-command="store.ideCommand"
-      :initial-line="previewInitialLine"
-      :initial-markdown-mode="currentPreviewMarkdownMode"
-      :maximized="maximizedModal === 'file'"
-      @close="closeFilePreview(true)"
-      @update-markdown-mode="updateCurrentPreviewMarkdownMode"
-    />
-    <AnalyticsModal
-      v-if="showAnalyticsModal"
-      :db="db"
-      :repo-id="store.selectedRepoId"
-      @close="showAnalyticsModal = false"
-    />
-    <BlockerSelectModal
-      v-if="showBlockerSelect"
-      :candidates="blockerCandidates"
-      :disabled-ids="disabledBlockerIds"
-      :preselected="blockerSelectMode === 'edit' ? preselectedBlockerIds : undefined"
-      :title="blockerSelectMode === 'block' ? $t('app.selectBlockingTasks') : $t('app.editBlockingTasks')"
-      @confirm="onBlockerConfirm"
-      @cancel="showBlockerSelect = false"
-    />
-    <PeerPickerModal
-      v-if="showPeerPicker"
-      :peers="peerPickerMode === 'pair'
-        ? transferPeers.filter((peer) => !peer.trusted)
-        : transferPeers.filter((peer) => peer.trusted)"
-      :loading="transferPeersLoading"
-      :title="peerPickerMode === 'pair' ? $t('taskTransfer.pairPeer') : $t('taskTransfer.pushToMachine')"
-      :action-label="peerPickerMode === 'pair' ? $t('taskTransfer.pairPeer') : $t('taskTransfer.pushToMachine')"
-      :action-pending="transferPeerActionPending"
-      :require-trusted="peerPickerMode !== 'pair'"
-      @cancel="closePeerPicker"
-      @select="(peerId) => peerPickerMode === 'pair' ? handlePairPeer(peerId) : handlePeerSelected(peerId)"
-    />
-    <PreferencesPanel
-      v-if="showPreferencesPanel"
-      ref="preferencesRef"
-      :preferences="preferences"
-      @update="handlePreferenceUpdate"
-      @close="showPreferencesPanel = false"
-    />
-    <AppUpdatePrompt :controller="appUpdate" />
-    <ToastContainer />
+    <AppModalLayer :controller="modalLayerController" />
   </div>
 </template>
 
@@ -553,27 +404,23 @@ html, body, #app {
   overflow: hidden;
 }
 </style>
-
 <style scoped>
 .app {
   display: flex;
   height: 100%;
   width: 100%;
 }
-
 .sidebar-shell {
   position: relative;
   flex: 0 0 auto;
   height: 100%;
   min-height: 0;
 }
-
 .sidebar-shell :deep(.sidebar) {
   width: 100%;
   min-width: 0;
   max-width: none;
 }
-
 .sidebar-resize-handle {
   position: absolute;
   top: 0;
