@@ -7,15 +7,12 @@ mod pty;
 mod session;
 mod socket;
 
+use std::collections::VecDeque;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::io::Read;
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd};
 use std::path::{Path, PathBuf};
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
+use std::sync::Arc;
 
 pub use kanna_daemon::subprocess_env;
 use kanna_daemon::{
@@ -23,9 +20,10 @@ use kanna_daemon::{
     recovery::{RecoveryManager, RecoverySnapshot, SeededRecoverySnapshot},
 };
 use serde::Serialize;
+use tokio::io::unix::AsyncFd;
 use tokio::io::BufReader;
 use tokio::net::UnixStream;
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{broadcast, mpsc, Mutex};
 
 /// A single client's writer handle.
 type SessionWriter = Arc<Mutex<tokio::net::unix::OwnedWriteHalf>>;
@@ -59,6 +57,13 @@ fn effective_terminal_size(
         .min()
         .unwrap_or(fallback.1);
     (min_cols, min_rows)
+}
+
+async fn session_handle(
+    sessions: &Arc<Mutex<SessionManager>>,
+    session_id: &str,
+) -> Option<Arc<SessionHandle>> {
+    sessions.lock().await.get(session_id)
 }
 
 struct HandoffResult {
@@ -182,7 +187,10 @@ enum HandoffEventLegacy {
     },
 }
 use protocol::{Command, Event, SessionStatus};
-use session::{SessionManager, SessionRecord, StreamControl, STATUS_DETECTION_THROTTLE_MS};
+use session::{
+    MirrorResult, SessionHandle, SessionManager, SessionRecord, StreamControl,
+    STATUS_DETECTION_THROTTLE_MS,
+};
 use socket::{bind_socket, read_command, write_event};
 
 fn recovery_snapshot_to_terminal_snapshot(
@@ -649,18 +657,16 @@ async fn main() {
                 Ok(Some(_))
             ) || handoff.status
                 != headless_terminal::initial_session_status(handoff.agent_provider);
-            mgr.insert(
-                session_id,
-                SessionRecord {
-                    pty: pty_session,
-                    headless_terminal,
-                    stream_control: None,
-                    agent_provider: handoff.agent_provider,
-                    status: handoff.status,
-                    status_observed,
-                    last_status_check_at: None,
-                },
-            );
+            let handle = Arc::new(SessionHandle::new(SessionRecord {
+                pty: pty_session,
+                headless_terminal,
+                stream_control: None,
+                agent_provider: handoff.agent_provider,
+                status: handoff.status,
+                status_observed,
+                last_status_check_at: None,
+            }));
+            mgr.insert(session_id, handle);
             // Note: no stream_output started — client must AttachSnapshot to start streaming.
         }
     }
@@ -720,7 +726,12 @@ async fn main() {
         sigterm.recv().await;
         log::info!("kanna-daemon shutting down");
         recovery_shutdown.flush_and_shutdown().await;
-        sessions_shutdown.lock().await.kill_all();
+        let handles = sessions_shutdown.lock().await.kill_all_handles();
+        for (id, session) in handles {
+            if let Err(error) = session.kill().await {
+                eprintln!("failed to kill session {}: {}", id, error);
+            }
+        }
         let _ = std::fs::remove_file(&pid_path_clone);
         let _ = std::fs::remove_file(&socket_path_clone);
         std::process::exit(0);
@@ -1146,8 +1157,7 @@ async fn handle_command(
                 cols,
                 rows
             );
-            let mut mgr = sessions.lock().await;
-            if mgr.contains(&session_id) {
+            if sessions.lock().await.contains(&session_id) {
                 log::warn!("[spawn] session already exists: {}", session_id);
                 let evt = error_event(
                     Some(protocol::ErrorCode::SessionAlreadyExists),
@@ -1161,7 +1171,6 @@ async fn handle_command(
 
             match pty::PtySession::spawn(&executable, &args, &cwd, &env, cols, rows) {
                 Ok(pty_session) => {
-                    let pty_reader = pty_session.try_clone_reader();
                     let stream_control = StreamControl::new();
                     let headless_terminal =
                         match headless_terminal::HeadlessTerminal::new(cols, rows, 10_000) {
@@ -1175,19 +1184,43 @@ async fn handle_command(
                                 return;
                             }
                         };
-                    mgr.insert(
-                        session_id.clone(),
-                        SessionRecord {
-                            pty: pty_session,
-                            headless_terminal,
-                            stream_control: Some(stream_control.clone()),
-                            agent_provider,
-                            status: headless_terminal::initial_session_status(agent_provider),
-                            status_observed: false,
-                            last_status_check_at: None,
-                        },
-                    );
-                    drop(mgr);
+                    let handle = Arc::new(SessionHandle::new(SessionRecord {
+                        pty: pty_session,
+                        headless_terminal,
+                        stream_control: Some(stream_control.clone()),
+                        agent_provider,
+                        status: headless_terminal::initial_session_status(agent_provider),
+                        status_observed: false,
+                        last_status_check_at: None,
+                    }));
+                    let io_fd = match handle.try_clone_io_fd().await {
+                        Ok(fd) => fd,
+                        Err(e) => {
+                            let evt = error_event(
+                                Some(protocol::ErrorCode::PtyCloneFailed),
+                                format!("failed to clone PTY fd: {}", e),
+                            );
+                            let _ = write_event(&mut *writer.lock().await, &evt).await;
+                            return;
+                        }
+                    };
+                    let Some(input_rx) = handle.take_input_rx().await else {
+                        let evt = error_event(None, "failed to take PTY input queue".to_string());
+                        let _ = write_event(&mut *writer.lock().await, &evt).await;
+                        return;
+                    };
+                    {
+                        let mut mgr = sessions.lock().await;
+                        if mgr.contains(&session_id) {
+                            let evt = error_event(
+                                Some(protocol::ErrorCode::SessionAlreadyExists),
+                                format!("session already exists: {}", session_id),
+                            );
+                            let _ = write_event(&mut *writer.lock().await, &evt).await;
+                            return;
+                        }
+                        mgr.insert(session_id.clone(), Arc::clone(&handle));
+                    }
 
                     if let Err(error) = recovery_manager
                         .start_session(&session_id, cols, rows, false)
@@ -1202,35 +1235,36 @@ async fn handle_command(
 
                     // Start stream_output immediately so startup output
                     // (including kitty keyboard mode push) is captured.
-                    if let Ok(reader) = pty_reader {
-                        session_writers
-                            .lock()
-                            .await
-                            .insert(session_id.clone(), Vec::new());
+                    session_writers
+                        .lock()
+                        .await
+                        .insert(session_id.clone(), Vec::new());
 
-                        let sid = session_id.clone();
-                        let sessions_exit = sessions.clone();
-                        let writers_for_stream = session_writers.clone();
-                        let terminal_clients_for_stream = terminal_emulator_clients.clone();
-                        let sizes_for_stream = session_sizes.clone();
-                        let observers_for_stream = session_observers.clone();
-                        let recovery_for_stream = recovery_manager.clone();
-                        let broadcast_for_stream = broadcast_tx.clone();
-                        tokio::task::spawn_blocking(move || {
-                            stream_output(
-                                sid,
-                                reader,
-                                stream_control,
-                                broadcast_for_stream,
-                                writers_for_stream,
-                                terminal_clients_for_stream,
-                                sessions_exit,
-                                sizes_for_stream,
-                                observers_for_stream,
-                                recovery_for_stream,
-                            );
-                        });
-                    }
+                    let sid = session_id.clone();
+                    let sessions_exit = sessions.clone();
+                    let writers_for_stream = session_writers.clone();
+                    let terminal_clients_for_stream = terminal_emulator_clients.clone();
+                    let sizes_for_stream = session_sizes.clone();
+                    let observers_for_stream = session_observers.clone();
+                    let recovery_for_stream = recovery_manager.clone();
+                    let broadcast_for_stream = broadcast_tx.clone();
+                    tokio::spawn(async move {
+                        stream_output(
+                            sid,
+                            io_fd,
+                            input_rx,
+                            stream_control,
+                            broadcast_for_stream,
+                            writers_for_stream,
+                            terminal_clients_for_stream,
+                            sessions_exit,
+                            sizes_for_stream,
+                            observers_for_stream,
+                            recovery_for_stream,
+                            handle,
+                        )
+                        .await;
+                    });
 
                     let evt = Event::SessionCreated {
                         session_id: session_id.clone(),
@@ -1270,9 +1304,10 @@ async fn handle_command(
                             let (min_cols, min_rows) =
                                 effective_terminal_size(client_sizes, (80, 24));
                             drop(sizes);
-                            let mut mgr = sessions.lock().await;
-                            let resized = mgr.resize(&session_id, min_cols, min_rows).is_ok();
-                            drop(mgr);
+                            let resized = match session_handle(&sessions, &session_id).await {
+                                Some(session) => session.resize(min_cols, min_rows).await.is_ok(),
+                                None => false,
+                            };
                             if resized {
                                 recovery_manager
                                     .resize_session(&session_id, min_cols, min_rows)
@@ -1303,31 +1338,23 @@ async fn handle_command(
         }
 
         Command::Input { session_id, data } => {
-            let mut mgr = sessions.lock().await;
-            match mgr.get_mut(&session_id) {
-                Some(session) => match session.pty.write_input(&data) {
-                    Ok(_) => {
-                        drop(mgr);
-                        let _ = write_event(&mut *writer.lock().await, &Event::Ok).await;
-                    }
-                    Err(e) => {
-                        let evt = error_event(
-                            Some(protocol::ErrorCode::WriteFailed),
-                            format!("write error: {}", e),
-                        );
-                        drop(mgr);
-                        let _ = write_event(&mut *writer.lock().await, &evt).await;
-                    }
-                },
-                None => {
-                    let evt = error_event(
-                        Some(protocol::ErrorCode::SessionNotFound),
-                        format!("session not found: {}", session_id),
-                    );
-                    drop(mgr);
-                    let _ = write_event(&mut *writer.lock().await, &evt).await;
-                }
-            }
+            let Some(session) = session_handle(&sessions, &session_id).await else {
+                let evt = error_event(
+                    Some(protocol::ErrorCode::SessionNotFound),
+                    format!("session not found: {}", session_id),
+                );
+                let _ = write_event(&mut *writer.lock().await, &evt).await;
+                return;
+            };
+
+            let evt = match session.enqueue_input(data) {
+                Ok(()) => Event::Ok,
+                Err(_) => error_event(
+                    Some(protocol::ErrorCode::WriteFailed),
+                    format!("input queue closed for session: {}", session_id),
+                ),
+            };
+            let _ = write_event(&mut *writer.lock().await, &evt).await;
         }
 
         Command::AttachSnapshot {
@@ -1335,8 +1362,7 @@ async fn handle_command(
             emulate_terminal,
         } => {
             log::info!("[attach_snapshot] session={}", session_id);
-            let mut mgr = sessions.lock().await;
-            if !mgr.contains(&session_id) {
+            let Some(session) = session_handle(&sessions, &session_id).await else {
                 let lost_message = lost_handoff_sessions.lock().await.get(&session_id).cloned();
                 let evt = error_event(
                     Some(if lost_message.is_some() {
@@ -1346,10 +1372,9 @@ async fn handle_command(
                     }),
                     lost_message.unwrap_or_else(|| format!("session not found: {}", session_id)),
                 );
-                drop(mgr);
                 let _ = write_event(&mut *writer.lock().await, &evt).await;
                 return;
-            }
+            };
 
             let is_streaming = session_writers.lock().await.contains_key(&session_id);
             if !is_streaming {
@@ -1357,38 +1382,25 @@ async fn handle_command(
                     "[attach_snapshot] starting stream_output on first attach for adopted/non-streaming session {}",
                     session_id
                 );
-                let (pty_reader, stream_control, recovery_cols, recovery_rows) =
-                    match mgr.sessions.get_mut(&session_id) {
-                        Some(session) => match session.pty.try_clone_reader() {
-                            Ok(reader) => {
-                                let stream_control = StreamControl::new();
-                                let recovery_cols = session.pty.cols();
-                                let recovery_rows = session.pty.rows();
-                                session.stream_control = Some(stream_control.clone());
-                                (reader, stream_control, recovery_cols, recovery_rows)
-                            }
-                            Err(e) => {
-                                let evt = error_event(
-                                    Some(protocol::ErrorCode::PtyCloneFailed),
-                                    format!("failed to clone PTY reader: {}", e),
-                                );
-                                drop(mgr);
-                                let _ = write_event(&mut *writer.lock().await, &evt).await;
-                                return;
-                            }
-                        },
-                        None => {
-                            let evt = error_event(
-                                Some(protocol::ErrorCode::SessionNotFound),
-                                format!("session not found: {}", session_id),
-                            );
-                            drop(mgr);
-                            let _ = write_event(&mut *writer.lock().await, &evt).await;
-                            return;
-                        }
-                    };
-
-                drop(mgr);
+                let stream_control = StreamControl::new();
+                session.set_stream_control(stream_control.clone()).await;
+                let io_fd = match session.try_clone_io_fd().await {
+                    Ok(fd) => fd,
+                    Err(e) => {
+                        let evt = error_event(
+                            Some(protocol::ErrorCode::PtyCloneFailed),
+                            format!("failed to clone PTY fd: {}", e),
+                        );
+                        let _ = write_event(&mut *writer.lock().await, &evt).await;
+                        return;
+                    }
+                };
+                let Some(input_rx) = session.take_input_rx().await else {
+                    let evt = error_event(None, "PTY input queue already in use".to_string());
+                    let _ = write_event(&mut *writer.lock().await, &evt).await;
+                    return;
+                };
+                let (recovery_rows, recovery_cols) = session.rows_cols().await;
 
                 let resume_from_disk = recovery_manager.has_persisted_snapshot(&session_id);
                 if let Err(error) = recovery_manager
@@ -1410,10 +1422,16 @@ async fn handle_command(
                 let recovery_for_stream = recovery_manager.clone();
                 let sessions_for_stream = sessions.clone();
                 let session_id_for_stream = session_id.clone();
-                tokio::task::spawn_blocking(move || {
+                let handle_for_stream = Arc::clone(&session);
+                session_writers
+                    .lock()
+                    .await
+                    .insert(session_id.clone(), Vec::new());
+                tokio::spawn(async move {
                     stream_output(
                         session_id_for_stream,
-                        pty_reader,
+                        io_fd,
+                        input_rx,
                         stream_control,
                         broadcast_tx.clone(),
                         writers_for_stream,
@@ -1422,32 +1440,22 @@ async fn handle_command(
                         sizes_for_stream,
                         observers_for_stream,
                         recovery_for_stream,
-                    );
+                        handle_for_stream,
+                    )
+                    .await;
                 });
-
-                mgr = sessions.lock().await;
             }
 
-            let snapshot = match mgr.sessions.get_mut(&session_id) {
-                Some(session) => match session.headless_terminal.snapshot() {
-                    Ok(snapshot) => snapshot,
-                    Err(error) => {
-                        log::warn!(
-                            "[attach_snapshot] snapshot not ready for session {}: {}; falling back to blank snapshot",
-                            session_id,
-                            error
-                        );
-                        blank_snapshot(session.pty.rows(), session.pty.cols())
-                    }
-                },
-                None => {
-                    let evt = error_event(
-                        Some(protocol::ErrorCode::SessionNotFound),
-                        format!("session not found: {}", session_id),
+            let snapshot = match session.snapshot().await {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    let (rows, cols) = session.rows_cols().await;
+                    log::warn!(
+                        "[attach_snapshot] snapshot not ready for session {}: {}; falling back to blank snapshot",
+                        session_id,
+                        error
                     );
-                    drop(mgr);
-                    let _ = write_event(&mut *writer.lock().await, &evt).await;
-                    return;
+                    blank_snapshot(rows, cols)
                 }
             };
 
@@ -1465,12 +1473,7 @@ async fn handle_command(
             )
             .await;
 
-            let current_status = mgr.sessions.get(&session_id).map(|session| session.status);
-            drop(mgr);
-
-            if let Some(status) = current_status {
-                replay_current_status(&writer, &session_id, status).await;
-            }
+            replay_current_status(&writer, &session_id, session.status().await).await;
         }
 
         Command::Resize {
@@ -1487,9 +1490,10 @@ async fn handle_command(
                 effective_terminal_size(client_sizes, (cols, rows))
             };
 
-            let mut mgr = sessions.lock().await;
-            let result = mgr.resize(&session_id, eff_cols, eff_rows);
-            drop(mgr);
+            let result = match session_handle(&sessions, &session_id).await {
+                Some(session) => session.resize(eff_cols, eff_rows).await,
+                None => Err(format!("session not found: {}", session_id).into()),
+            };
             let success = result.is_ok();
             let evt = match result {
                 Ok(_) => Event::Ok,
@@ -1521,9 +1525,13 @@ async fn handle_command(
                     return;
                 }
             };
-            let mgr = sessions.lock().await;
-            let result = mgr.signal(&session_id, sig);
-            drop(mgr);
+            let result = match session_handle(&sessions, &session_id).await {
+                Some(session) => session.signal(sig).await,
+                None => Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("session not found: {}", session_id),
+                )),
+            };
             let evt = match result {
                 Ok(_) => Event::Ok,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -1536,16 +1544,16 @@ async fn handle_command(
 
         Command::Kill { session_id } => {
             log::info!("[kill] session={}", session_id);
-            if !sessions.lock().await.contains(&session_id)
+            if session_handle(&sessions, &session_id).await.is_none()
                 && agent_runtime::kill_agent_session(&session_id, &agent_sessions, &broadcast_tx)
                     .await
             {
                 let _ = write_event(&mut *writer.lock().await, &Event::Ok).await;
                 return;
             }
-            let mut mgr = sessions.lock().await;
-            let result = match mgr.get_mut(&session_id) {
-                Some(session) => session.pty.kill(),
+            let session = session_handle(&sessions, &session_id).await;
+            let result = match session {
+                Some(session) => session.kill().await,
                 None => Err(std::io::Error::new(
                     std::io::ErrorKind::NotFound,
                     format!("session not found: {}", session_id),
@@ -1553,9 +1561,8 @@ async fn handle_command(
             };
             let success = result.is_ok();
             if success {
-                mgr.remove(&session_id);
+                sessions.lock().await.remove(&session_id);
             }
-            drop(mgr);
             session_writers.lock().await.remove(&session_id);
             terminal_emulator_clients.lock().await.remove(&session_id);
             session_sizes.lock().await.remove(&session_id);
@@ -1571,9 +1578,11 @@ async fn handle_command(
         }
 
         Command::List => {
-            let mut mgr = sessions.lock().await;
-            let mut sessions_list = mgr.list();
-            drop(mgr);
+            let handles = sessions.lock().await.handles();
+            let mut sessions_list = Vec::with_capacity(handles.len());
+            for (id, session) in handles {
+                sessions_list.push(session.info(id).await);
+            }
             sessions_list.extend(agent_runtime::agent_session_infos(&agent_sessions).await);
             let evt = Event::SessionList {
                 sessions: sessions_list,
@@ -1583,9 +1592,8 @@ async fn handle_command(
 
         Command::Snapshot { session_id } => {
             let live_snapshot = {
-                let mut mgr = sessions.lock().await;
-                match mgr.get_mut(&session_id) {
-                    Some(session) => Some(session.headless_terminal.snapshot()),
+                match session_handle(&sessions, &session_id).await {
+                    Some(session) => Some(session.snapshot().await),
                     None => None,
                 }
             };
@@ -1773,38 +1781,35 @@ async fn handle_handoff(
 
     // Snapshot and clone fds without removing ownership. The old daemon keeps
     // serving sessions unless the adopting daemon explicitly ACKs success.
-    let mut mgr = sessions.lock().await;
-    let session_ids: Vec<String> = mgr.sessions.keys().cloned().collect();
-    log::info!("[handoff] found {} sessions in manager", session_ids.len());
-    let controls: Vec<StreamControl> = session_ids
-        .iter()
-        .filter_map(|id| {
-            mgr.sessions
-                .get(id)
-                .and_then(|session| session.stream_control.clone())
-        })
-        .collect();
+    let handles = sessions.lock().await.handles();
+    log::info!("[handoff] found {} sessions in manager", handles.len());
+    let mut controls = Vec::new();
+    for (_, handle) in &handles {
+        if let Some(control) = handle.stream_control().await {
+            controls.push(control);
+        }
+    }
 
     let mut infos = Vec::new();
     let mut fds = Vec::new();
     let mut cloned_pty_fds = Vec::new();
     let mut dead_count = 0;
 
-    for id in &session_ids {
-        if let Some(session) = mgr.sessions.get_mut(id) {
-            if session.pty.is_alive() {
-                let pid = session.pty.pid();
-                let cwd = session.pty.cwd.clone();
-                let rows = session.pty.rows();
-                let cols = session.pty.cols();
+    for (id, handle) in &handles {
+        match handle.handoff_parts().await {
+            Ok(Some(parts)) => {
+                let pid = parts.pid;
+                let cwd = parts.cwd;
+                let rows = parts.rows;
+                let cols = parts.cols;
                 log::info!(
                     "[handoff] snapshotting session {} (pid={}, cwd={})",
                     id,
                     pid,
                     cwd
                 );
-                let snapshot = match session.headless_terminal.snapshot() {
-                    Ok(snapshot) => {
+                let snapshot = match parts.snapshot {
+                    Some(snapshot) => {
                         log::info!(
                             "[handoff] snapshot session={} rows={} cols={} cursor=({}, {}) visible={} vt_len={}",
                             id,
@@ -1817,31 +1822,17 @@ async fn handle_handoff(
                         );
                         Some(snapshot)
                     }
-                    Err(error) => {
+                    None => {
                         log::error!(
-                            "[handoff] failed to snapshot session {} (pid={}, cwd={}): {}",
+                            "[handoff] failed to snapshot session {} (pid={}, cwd={})",
                             id,
                             pid,
-                            cwd,
-                            error
+                            cwd
                         );
                         None
                     }
                 };
-                let fd = match session.pty.try_clone_handoff_fd() {
-                    Ok(fd) => fd.into_raw_fd(),
-                    Err(error) => {
-                        log::error!(
-                            "[handoff] failed to clone PTY fd for {} (pid={}, cwd={}): {}",
-                            id,
-                            pid,
-                            cwd,
-                            error
-                        );
-                        dead_count += 1;
-                        continue;
-                    }
-                };
+                let fd = parts.fd.into_raw_fd();
                 if snapshot.is_some() {
                     log::info!(
                         "[handoff] cloned session {} (pid={}, fd={}, cwd={}, rows={}, cols={})",
@@ -1870,8 +1861,8 @@ async fn handle_handoff(
                     rows,
                     cols,
                     snapshot,
-                    agent_provider: session.agent_provider,
-                    status: session.status,
+                    agent_provider: parts.agent_provider,
+                    status: parts.status,
                     kind: protocol::SessionKind::Pty,
                     provider_session_id: None,
                     agent_fd_count: 0,
@@ -1879,13 +1870,17 @@ async fn handle_handoff(
                 });
                 fds.push(fd);
                 cloned_pty_fds.push(fd);
-            } else {
+            }
+            Ok(None) => {
                 log::info!("[handoff] session {} is dead, skipping", id);
+                dead_count += 1;
+            }
+            Err(error) => {
+                log::error!("[handoff] failed to prepare session {}: {}", id, error);
                 dead_count += 1;
             }
         }
     }
-    drop(mgr);
 
     // Collect agent sessions (v2 payloads only — v1 daemons cannot adopt
     // them; their children keep running detached with journals on disk).
@@ -2094,53 +2089,14 @@ async fn handle_handoff(
 
 const STATUS_IDLE_FLUSH_MS: u64 = STATUS_DETECTION_THROTTLE_MS;
 
-fn spawn_periodic_status_refresh_thread(
-    rt: tokio::runtime::Handle,
-    sessions: Arc<Mutex<SessionManager>>,
-    stop_requested: Arc<AtomicBool>,
-    flush_every: std::time::Duration,
-    session_id: String,
-    broadcast_tx: broadcast::Sender<String>,
-) -> std::thread::JoinHandle<()> {
-    std::thread::spawn(move || {
-        while !stop_requested.load(Ordering::SeqCst) {
-            std::thread::sleep(flush_every);
-            if stop_requested.load(Ordering::SeqCst) {
-                break;
-            }
-
-            let refreshed = rt.block_on(async {
-                let mut mgr = sessions.lock().await;
-                mgr.refresh_quiet_status(&session_id, flush_every)
-            });
-
-            match refreshed {
-                Ok(Some(status)) => {
-                    log_status_observation(&rt, &sessions, &session_id, "quiet_refresh");
-                    emit_status_changed(&rt, &sessions, &broadcast_tx, &session_id, status);
-                }
-                Ok(None) => {
-                    log_status_observation(&rt, &sessions, &session_id, "quiet_refresh");
-                }
-                Err(error) => {
-                    log::warn!(
-                        "[status] failed quiet status refresh for session {}: {}",
-                        session_id,
-                        error
-                    );
-                }
-            }
-        }
-    })
-}
-
 /// Runs in a blocking thread for the entire lifetime of a session.
 /// ONE reader per session — never duplicated. Output is broadcast to all
 /// currently attached clients via the SessionWriters map.
 #[allow(clippy::too_many_arguments)]
-fn stream_output(
+async fn stream_output(
     session_id: String,
-    mut reader: Box<dyn Read + Send>,
+    io_fd: std::os::fd::OwnedFd,
+    mut input_rx: mpsc::UnboundedReceiver<Vec<u8>>,
     stream_control: StreamControl,
     broadcast_tx: broadcast::Sender<String>,
     session_writers: SessionWriters,
@@ -2149,303 +2105,261 @@ fn stream_output(
     session_sizes: SessionSizes,
     session_observers: SessionObservers,
     recovery_manager: RecoveryManager,
+    session: Arc<SessionHandle>,
 ) {
-    let rt = tokio::runtime::Handle::current();
+    let async_fd = match AsyncFd::new(io_fd) {
+        Ok(fd) => fd,
+        Err(error) => {
+            log::error!(
+                "[stream] failed to register PTY fd with AsyncFd for session {}: {}",
+                session_id,
+                error
+            );
+            stream_control.mark_stopped();
+            return;
+        }
+    };
     let mut buf = [0u8; 4096];
     let mut chunk_count: usize = 0;
-    let status_flush_stop = Arc::new(AtomicBool::new(false));
-    let status_flush_thread = {
-        let status_flush_stop = Arc::clone(&status_flush_stop);
-        let sessions = Arc::clone(&sessions);
-        let broadcast_tx = broadcast_tx.clone();
-        let session_id = session_id.clone();
-        let rt = rt.clone();
-        spawn_periodic_status_refresh_thread(
-            rt,
-            sessions,
-            status_flush_stop,
-            std::time::Duration::from_millis(STATUS_IDLE_FLUSH_MS),
-            session_id,
-            broadcast_tx,
-        )
-    };
+    let mut pending_input: VecDeque<Vec<u8>> = VecDeque::new();
+    let mut pending_offset = 0usize;
+    let mut status_interval =
+        tokio::time::interval(std::time::Duration::from_millis(STATUS_IDLE_FLUSH_MS));
     log::info!("[stream] start session={}", session_id);
 
     loop {
         if stream_control.stop_requested() {
             log::info!("[stream] stop requested session={}", session_id);
-            status_flush_stop.store(true, Ordering::SeqCst);
-            let _ = status_flush_thread.join();
             stream_control.mark_stopped();
             return;
         }
-        match reader.read(&mut buf) {
-            Ok(0) => {
-                log::info!("[stream] eof session={} chunks={}", session_id, chunk_count);
-                break;
+
+        tokio::select! {
+            biased;
+
+            maybe_input = input_rx.recv() => {
+                if let Some(input) = maybe_input {
+                    pending_input.push_back(input);
+                }
             }
-            Ok(n) => {
-                if stream_control.stop_requested() {
-                    log::info!(
-                        "[stream] dropping late chunk after stop request session={} bytes={}",
-                        session_id,
-                        n
-                    );
-                    status_flush_stop.store(true, Ordering::SeqCst);
-                    let _ = status_flush_thread.join();
-                    stream_control.mark_stopped();
-                    return;
-                }
-                let owns_current_session = rt.block_on(async {
-                    let mgr = sessions.lock().await;
-                    mgr.sessions
-                        .get(&session_id)
-                        .and_then(|session| session.stream_control.as_ref())
-                        .is_some_and(|current| current.is_same_instance(&stream_control))
+
+            writable = async_fd.writable(), if !pending_input.is_empty() => {
+                let Ok(mut guard) = writable else {
+                    log::error!("[stream] writable readiness failed session={}", session_id);
+                    break;
+                };
+                let Some(front) = pending_input.front() else {
+                    continue;
+                };
+                let result = guard.try_io(|inner| {
+                    let fd = inner.get_ref().as_raw_fd();
+                    let slice = &front[pending_offset..];
+                    let n = unsafe {
+                        libc::write(fd, slice.as_ptr().cast::<libc::c_void>(), slice.len())
+                    };
+                    if n < 0 {
+                        Err(std::io::Error::last_os_error())
+                    } else {
+                        Ok(n as usize)
+                    }
                 });
-                if !owns_current_session {
-                    log::info!(
-                        "[stream] stale reader stopped before mirroring session={} bytes={}",
-                        session_id,
-                        n
-                    );
-                    status_flush_stop.store(true, Ordering::SeqCst);
-                    let _ = status_flush_thread.join();
-                    stream_control.mark_stopped();
-                    return;
+                match result {
+                    Ok(Ok(0)) => {}
+                    Ok(Ok(n)) => {
+                        session.mark_active().await;
+                        pending_offset += n;
+                        if pending_offset >= front.len() {
+                            pending_input.pop_front();
+                            pending_offset = 0;
+                        }
+                    }
+                    Ok(Err(error)) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                    Ok(Err(error)) => {
+                        log::error!("[stream] PTY write error session={} error={}", session_id, error);
+                        break;
+                    }
+                    Err(_would_block) => {}
                 }
-                chunk_count += 1;
-                if chunk_count <= 5 {
-                    log::info!(
-                        "[stream] chunk session={} chunk={} bytes={}",
-                        session_id,
-                        chunk_count,
-                        n
-                    );
-                }
-                let data = buf[..n].to_vec();
-                let has_live_terminal_client = rt.block_on(async {
-                    let terminal_clients = terminal_emulator_clients.lock().await;
-                    !terminal_clients
-                        .get(&session_id)
-                        .is_none_or(|client_ids| client_ids.is_empty())
+            }
+
+            readable = async_fd.readable() => {
+                let Ok(mut guard) = readable else {
+                    log::error!("[stream] readable readiness failed session={}", session_id);
+                    break;
+                };
+                let result = guard.try_io(|inner| {
+                    let fd = inner.get_ref().as_raw_fd();
+                    let n = unsafe {
+                        libc::read(fd, buf.as_mut_ptr().cast::<libc::c_void>(), buf.len())
+                    };
+                    if n < 0 {
+                        Err(std::io::Error::last_os_error())
+                    } else {
+                        Ok(n as usize)
+                    }
                 });
-                let allow_terminal_replies = !has_live_terminal_client;
-                match rt.block_on(async {
-                    let mut mgr = sessions.lock().await;
-                    mgr.mirror_output(&session_id, &data, allow_terminal_replies)
-                }) {
+                match result {
+                    Ok(Ok(0)) => {
+                        log::info!("[stream] eof session={} chunks={}", session_id, chunk_count);
+                        break;
+                    }
+                    Ok(Ok(n)) => {
+                        if stream_control.stop_requested() {
+                            log::info!(
+                                "[stream] dropping late chunk after stop request session={} bytes={}",
+                                session_id,
+                                n
+                            );
+                            stream_control.mark_stopped();
+                            return;
+                        }
+                        if !session.owns_stream_control(&stream_control).await {
+                            log::info!(
+                                "[stream] stale reader stopped before mirroring session={} bytes={}",
+                                session_id,
+                                n
+                            );
+                            stream_control.mark_stopped();
+                            return;
+                        }
+                        chunk_count += 1;
+                        if chunk_count <= 5 {
+                            log::info!(
+                                "[stream] chunk session={} chunk={} bytes={}",
+                                session_id,
+                                chunk_count,
+                                n
+                            );
+                        }
+                        let data = buf[..n].to_vec();
+                        handle_output_chunk(
+                            &session_id,
+                            &data,
+                            &session,
+                            &broadcast_tx,
+                            &session_writers,
+                            &terminal_emulator_clients,
+                            &session_sizes,
+                            &session_observers,
+                            &recovery_manager,
+                        )
+                        .await;
+                    }
+                    Ok(Err(error)) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                    Ok(Err(error)) => {
+                        log::info!(
+                            "[stream] read error session={} kind={:?} error={}",
+                            session_id,
+                            error.kind(),
+                            error
+                        );
+                        log::error!("PTY read error for session {}: {}", session_id, error);
+                        break;
+                    }
+                    Err(_would_block) => {}
+                }
+            }
+
+            _ = status_interval.tick() => {
+                match session
+                    .refresh_quiet_status(std::time::Duration::from_millis(STATUS_IDLE_FLUSH_MS))
+                    .await
+                {
                     Ok(Some(status)) => {
-                        log_status_observation(&rt, &sessions, &session_id, "mirror_output");
-                        emit_status_changed(&rt, &sessions, &broadcast_tx, &session_id, status);
+                        log_status_observation(&session, &session_id, "quiet_refresh").await;
+                        emit_status_changed(&session, &broadcast_tx, &session_id, status).await;
                     }
                     Ok(None) => {
-                        log_status_observation(&rt, &sessions, &session_id, "mirror_output");
+                        log_status_observation(&session, &session_id, "quiet_refresh").await;
                     }
                     Err(error) => {
-                        log::error!(
-                            "failed to mirror PTY output into headless terminal for session {}: {}",
+                        log::warn!(
+                            "[status] failed quiet status refresh for session {}: {}",
                             session_id,
                             error
                         );
                     }
                 }
-                // Check if observers exist before cloning data (avoids clone on hot path with zero observers)
-                let has_observers = rt.block_on(async {
-                    let guard = session_observers.lock().await;
-                    guard.get(&session_id).is_some_and(|list| !list.is_empty())
-                });
-
-                let obs_data = if has_observers {
-                    Some(data.clone())
-                } else {
-                    None
-                };
-
-                let evt = Event::Output {
-                    session_id: session_id.clone(),
-                    data: data.clone(),
-                };
-                rt.block_on(async {
-                    let mut writers = session_writers.lock().await;
-                    if let Some(vec) = writers.get_mut(&session_id) {
-                        let mut failed = Vec::new();
-                        for (i, w) in vec.iter().enumerate() {
-                            if write_event(&mut *w.lock().await, &evt).await.is_err() {
-                                failed.push(i);
-                            }
-                        }
-                        if !failed.is_empty() {
-                            // Collect writer_ids before removing so we can clean session_sizes
-                            let failed_ids: Vec<usize> = failed
-                                .iter()
-                                .map(|&i| Arc::as_ptr(&vec[i]) as usize)
-                                .collect();
-                            // Remove broken writers in reverse order to preserve indices
-                            for i in failed.into_iter().rev() {
-                                vec.remove(i);
-                            }
-                            // Clean up stale size entries for broken writers
-                            let mut sizes = session_sizes.lock().await;
-                            if let Some(client_sizes) = sizes.get_mut(&session_id) {
-                                for wid in &failed_ids {
-                                    client_sizes.remove(wid);
-                                }
-                            }
-                            drop(sizes);
-                            let mut terminal_clients = terminal_emulator_clients.lock().await;
-                            if let Some(client_ids) = terminal_clients.get_mut(&session_id) {
-                                for wid in &failed_ids {
-                                    client_ids.remove(wid);
-                                }
-                                if client_ids.is_empty() {
-                                    terminal_clients.remove(&session_id);
-                                }
-                            }
-                        }
-                    }
-                });
-
-                if should_mirror_output_to_recovery(has_live_terminal_client) {
-                    let sequence = recovery_manager.next_sequence(&session_id);
-                    rt.block_on(async {
-                        recovery_manager
-                            .write_output(&session_id, &data, sequence)
-                            .await;
-                    });
-                }
-
-                // Tee output to passive observers concurrently, removing dead ones
-                if let Some(obs_data) = obs_data {
-                    rt.block_on(async {
-                        let mut observers_guard = session_observers.lock().await;
-                        if let Some(observer_list) = observers_guard.get_mut(&session_id) {
-                            let obs_evt = Event::Output {
-                                session_id: session_id.clone(),
-                                data: obs_data,
-                            };
-                            // Write to all observers concurrently
-                            let results =
-                                futures::future::join_all(observer_list.iter().map(|obs| {
-                                    let evt = obs_evt.clone();
-                                    let obs = obs.clone();
-                                    async move { write_event(&mut *obs.lock().await, &evt).await }
-                                }))
-                                .await;
-                            // Remove observers whose writes failed (dead connections)
-                            let mut i = 0;
-                            observer_list.retain(|_| {
-                                let ok = results[i].is_ok();
-                                i += 1;
-                                ok
-                            });
-                            // Clean up empty entry
-                            if observer_list.is_empty() {
-                                observers_guard.remove(&session_id);
-                            }
-                        }
-                    });
-                }
-            }
-            Err(e) => {
-                if e.kind() == std::io::ErrorKind::WouldBlock {
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                    continue;
-                }
-                log::info!(
-                    "[stream] read error session={} kind={:?} error={}",
-                    session_id,
-                    e.kind(),
-                    e
-                );
-                log::error!("PTY read error for session {}: {}", session_id, e);
-                break;
             }
         }
     }
 
-    status_flush_stop.store(true, Ordering::SeqCst);
-    let _ = status_flush_thread.join();
+    if !session.owns_stream_control(&stream_control).await {
+        log::info!(
+            "[stream] stale reader skipped exit cleanup session={} chunks={}",
+            session_id,
+            chunk_count
+        );
+        stream_control.mark_stopped();
+        return;
+    }
 
-    let exit_code = {
-        let mut mgr = rt.block_on(sessions.lock());
-        match mgr.get_mut(&session_id) {
-            Some(session)
-                if session
-                    .stream_control
-                    .as_ref()
-                    .is_some_and(|current| current.is_same_instance(&stream_control)) =>
-            {
-                session.pty.try_wait().unwrap_or(0)
-            }
-            _ => {
-                log::info!(
-                    "[stream] stale reader skipped exit cleanup session={} chunks={}",
-                    session_id,
-                    chunk_count
-                );
-                stream_control.mark_stopped();
-                return;
-            }
+    let exit_code = session.try_wait().await.unwrap_or(0);
+    let resume_session_id = match session.codex_resume_session_id().await {
+        Ok(value) => value,
+        Err(error) => {
+            log::warn!(
+                "[stream] failed to read codex resume session id for {}: {}",
+                session_id,
+                error
+            );
+            None
         }
     };
-    let resume_session_id = rt.block_on(async {
+    {
         let mut mgr = sessions.lock().await;
-        match mgr.codex_resume_session_id(&session_id) {
-            Ok(value) => value,
-            Err(error) => {
-                log::warn!(
-                    "[stream] failed to read codex resume session id for {}: {}",
-                    session_id,
-                    error
-                );
-                None
-            }
+        if mgr
+            .get(&session_id)
+            .is_some_and(|current| Arc::ptr_eq(&current, &session))
+        {
+            mgr.remove(&session_id);
+        } else {
+            log::info!(
+                "[stream] current session changed before exit cleanup session={} chunks={}",
+                session_id,
+                chunk_count
+            );
+            stream_control.mark_stopped();
+            return;
         }
-    });
-    rt.block_on(async {
-        let mut mgr = sessions.lock().await;
-        mgr.remove(&session_id);
-    });
+    }
 
     let evt = Event::Exit {
         session_id: session_id.clone(),
         code: exit_code,
         resume_session_id: resume_session_id.clone(),
     };
-    rt.block_on(async {
-        recovery_manager.end_session(&session_id).await;
-        // Broadcast Exit to all attached writers, then remove the session entry.
-        // session_writers and writers_cleanup are the same Arc — use a single lock.
-        let mut writers = session_writers.lock().await;
-        if let Some(vec) = writers.get(&session_id) {
-            for w in vec.iter() {
-                let _ = write_event(&mut *w.lock().await, &evt).await;
-            }
+    recovery_manager.end_session(&session_id).await;
+    // Broadcast Exit to all attached writers, then remove the session entry.
+    // session_writers and writers_cleanup are the same Arc — use a single lock.
+    let mut writers = session_writers.lock().await;
+    if let Some(vec) = writers.get(&session_id) {
+        for w in vec.iter() {
+            let _ = write_event(&mut *w.lock().await, &evt).await;
         }
-        writers.remove(&session_id);
-        drop(writers);
-        terminal_emulator_clients.lock().await.remove(&session_id);
-        session_sizes.lock().await.remove(&session_id);
+    }
+    writers.remove(&session_id);
+    drop(writers);
+    terminal_emulator_clients.lock().await.remove(&session_id);
+    session_sizes.lock().await.remove(&session_id);
 
-        // Tee Exit event to passive observers concurrently, then clean up
-        let mut observers_guard = session_observers.lock().await;
-        if let Some(observer_list) = observers_guard.remove(&session_id) {
-            let obs_evt = Event::Exit {
-                session_id: session_id.clone(),
-                code: exit_code,
-                resume_session_id,
-            };
-            futures::future::join_all(observer_list.iter().map(|obs| {
-                let evt = obs_evt.clone();
-                let obs = obs.clone();
-                async move {
-                    let _ = write_event(&mut *obs.lock().await, &evt).await;
-                }
-            }))
-            .await;
-        }
-    });
+    // Tee Exit event to passive observers concurrently, then clean up
+    let mut observers_guard = session_observers.lock().await;
+    if let Some(observer_list) = observers_guard.remove(&session_id) {
+        let obs_evt = Event::Exit {
+            session_id: session_id.clone(),
+            code: exit_code,
+            resume_session_id,
+        };
+        futures::future::join_all(observer_list.iter().map(|obs| {
+            let evt = obs_evt.clone();
+            let obs = obs.clone();
+            async move {
+                let _ = write_event(&mut *obs.lock().await, &evt).await;
+            }
+        }))
+        .await;
+    }
     log::info!(
         "[stream] exit session={} code={} chunks={}",
         session_id,
@@ -2456,17 +2370,149 @@ fn stream_output(
     log::info!("[stream] end session={} chunks={}", session_id, chunk_count);
 }
 
-fn emit_status_changed(
-    rt: &tokio::runtime::Handle,
-    sessions: &Arc<Mutex<SessionManager>>,
+#[allow(clippy::too_many_arguments)]
+async fn handle_output_chunk(
+    session_id: &str,
+    data: &[u8],
+    session: &Arc<SessionHandle>,
+    broadcast_tx: &broadcast::Sender<String>,
+    session_writers: &SessionWriters,
+    terminal_emulator_clients: &TerminalEmulatorClients,
+    session_sizes: &SessionSizes,
+    session_observers: &SessionObservers,
+    recovery_manager: &RecoveryManager,
+) {
+    let has_live_terminal_client = {
+        let terminal_clients = terminal_emulator_clients.lock().await;
+        !terminal_clients
+            .get(session_id)
+            .is_none_or(|client_ids| client_ids.is_empty())
+    };
+    let allow_terminal_replies = !has_live_terminal_client;
+    match session.mirror_output(data, allow_terminal_replies).await {
+        Ok(MirrorResult { status, replies }) => {
+            for reply in replies {
+                if session.enqueue_input(reply).is_err() {
+                    log::warn!(
+                        "[stream] dropped terminal reply because input queue is closed session={}",
+                        session_id
+                    );
+                }
+            }
+            if let Some(status) = status {
+                log_status_observation(session, session_id, "mirror_output").await;
+                emit_status_changed(session, broadcast_tx, session_id, status).await;
+            } else {
+                log_status_observation(session, session_id, "mirror_output").await;
+            }
+        }
+        Err(error) => {
+            log::error!(
+                "failed to mirror PTY output into headless terminal for session {}: {}",
+                session_id,
+                error
+            );
+        }
+    }
+
+    // Check if observers exist before cloning data (avoids clone on hot path with zero observers)
+    let has_observers = {
+        let guard = session_observers.lock().await;
+        guard.get(session_id).is_some_and(|list| !list.is_empty())
+    };
+
+    let obs_data = if has_observers {
+        Some(data.to_vec())
+    } else {
+        None
+    };
+
+    let evt = Event::Output {
+        session_id: session_id.to_string(),
+        data: data.to_vec(),
+    };
+    let attached_writers = {
+        let writers = session_writers.lock().await;
+        writers.get(session_id).cloned().unwrap_or_default()
+    };
+    if !attached_writers.is_empty() {
+        let mut failed = Vec::new();
+        for (i, w) in attached_writers.iter().enumerate() {
+            if write_event(&mut *w.lock().await, &evt).await.is_err() {
+                failed.push(i);
+            }
+        }
+        if !failed.is_empty() {
+            // Collect writer_ids before removing so we can clean session_sizes.
+            let failed_ids: Vec<usize> = failed
+                .iter()
+                .map(|&i| Arc::as_ptr(&attached_writers[i]) as usize)
+                .collect();
+            let mut writers = session_writers.lock().await;
+            if let Some(vec) = writers.get_mut(session_id) {
+                vec.retain(|writer| !failed_ids.contains(&(Arc::as_ptr(writer) as usize)));
+            }
+            drop(writers);
+            let mut sizes = session_sizes.lock().await;
+            if let Some(client_sizes) = sizes.get_mut(session_id) {
+                for wid in &failed_ids {
+                    client_sizes.remove(wid);
+                }
+            }
+            drop(sizes);
+            let mut terminal_clients = terminal_emulator_clients.lock().await;
+            if let Some(client_ids) = terminal_clients.get_mut(session_id) {
+                for wid in &failed_ids {
+                    client_ids.remove(wid);
+                }
+                if client_ids.is_empty() {
+                    terminal_clients.remove(session_id);
+                }
+            }
+        }
+    }
+
+    if should_mirror_output_to_recovery(has_live_terminal_client) {
+        let sequence = recovery_manager.next_sequence(session_id);
+        recovery_manager
+            .write_output(session_id, data, sequence)
+            .await;
+    }
+
+    // Tee output to passive observers concurrently, removing dead ones.
+    if let Some(obs_data) = obs_data {
+        let mut observers_guard = session_observers.lock().await;
+        if let Some(observer_list) = observers_guard.get_mut(session_id) {
+            let obs_evt = Event::Output {
+                session_id: session_id.to_string(),
+                data: obs_data,
+            };
+            let results = futures::future::join_all(observer_list.iter().map(|obs| {
+                let evt = obs_evt.clone();
+                let obs = obs.clone();
+                async move { write_event(&mut *obs.lock().await, &evt).await }
+            }))
+            .await;
+            let mut i = 0;
+            observer_list.retain(|_| {
+                let ok = results[i].is_ok();
+                i += 1;
+                ok
+            });
+            if observer_list.is_empty() {
+                observers_guard.remove(session_id);
+            }
+        }
+    }
+}
+
+async fn emit_status_changed(
+    session: &Arc<SessionHandle>,
     broadcast_tx: &broadcast::Sender<String>,
     session_id: &str,
     status: SessionStatus,
 ) {
-    let changed = rt.block_on(async {
-        let mut mgr = sessions.lock().await;
-        mgr.update_status(session_id, status)
-    });
+    let changed = session.update_status(status).await;
     if !changed {
         return;
     }
@@ -2506,23 +2552,15 @@ fn format_status_observation_log(
     )
 }
 
-fn log_status_observation(
-    rt: &tokio::runtime::Handle,
-    sessions: &Arc<Mutex<SessionManager>>,
-    session_id: &str,
-    source: &str,
-) {
+async fn log_status_observation(session: &Arc<SessionHandle>, session_id: &str, source: &str) {
     if !log::log_enabled!(log::Level::Debug) {
         return;
     }
 
-    let observation = rt.block_on(async {
-        let mut mgr = sessions.lock().await;
-        mgr.debug_status_observation(session_id)
-    });
+    let observation = session.debug_status_observation().await;
 
     match observation {
-        Ok(Some(observation)) if observation.provider.is_some() => {
+        Ok(observation) if observation.provider.is_some() => {
             log::debug!(
                 "{}",
                 format_status_observation_log(
@@ -2534,7 +2572,7 @@ fn log_status_observation(
                 )
             );
         }
-        Ok(Some(_)) | Ok(None) => {}
+        Ok(_) => {}
         Err(error) => {
             log::warn!(
                 "[headless-terminal-debug] failed to collect status observation for session {} from {}: {}",
@@ -2781,10 +2819,10 @@ mod tests {
             .find("let evt = Event::Output")
             .expect("stream_output should emit live Output events");
         let headless_mirror_index = stream_body
-            .find(".mirror_output(&session_id")
+            .find(".mirror_output(data")
             .expect("stream_output should mirror output into the headless terminal");
         let recovery_write_index = stream_body
-            .find(".write_output(&session_id")
+            .find(".write_output(session_id")
             .expect("stream_output should persist output for recovery");
 
         assert!(

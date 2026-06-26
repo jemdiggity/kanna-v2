@@ -240,7 +240,7 @@ fn daemon_fd_count(pid: u32) -> usize {
             )
         };
         assert!(bytes >= 0, "proc_pidinfo failed for pid {pid}");
-        return bytes as usize / std::mem::size_of::<libc::proc_fdinfo>();
+        bytes as usize / std::mem::size_of::<libc::proc_fdinfo>()
     }
 
     #[cfg(target_os = "linux")]
@@ -335,6 +335,27 @@ impl ClientConn {
         self.reader.read_line(&mut line).expect("read timed out");
         serde_json::from_str(line.trim())
             .unwrap_or_else(|e| panic!("failed to parse event: {} — line: {:?}", e, line.trim()))
+    }
+
+    fn recv_with_timeout(&mut self, timeout: Duration) -> Result<Evt, String> {
+        self.reader
+            .get_mut()
+            .set_read_timeout(Some(timeout))
+            .map_err(|error| format!("failed to set read timeout: {error}"))?;
+
+        let mut line = String::new();
+        let result = match self.reader.read_line(&mut line) {
+            Ok(0) => Err("connection closed".to_string()),
+            Ok(_) => serde_json::from_str(line.trim())
+                .map_err(|error| format!("failed to parse event {line:?}: {error}")),
+            Err(error) => Err(format!("read failed: {error}")),
+        };
+
+        self.reader
+            .get_mut()
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .map_err(|error| format!("failed to restore read timeout: {error}"))?;
+        result
     }
 
     /// Read events until we've collected `n` bytes of Output data, or timeout.
@@ -570,6 +591,25 @@ fn wait_for_ok(conn: &mut ClientConn, action: &str) {
     }
 }
 
+fn wait_for_ok_with_timeout(conn: &mut ClientConn, action: &str, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "timed out waiting for Ok after {action}"
+        );
+
+        match conn.recv_with_timeout(remaining.min(Duration::from_millis(50))) {
+            Ok(Evt::Ok) => break,
+            Ok(Evt::Output { .. }) | Ok(Evt::StatusChanged { .. }) => continue,
+            Ok(Evt::Error { message }) => panic!("{action} failed: {message}"),
+            Ok(other) => panic!("expected Ok for {action}, got: {:?}", other),
+            Err(_) => continue,
+        }
+    }
+}
+
 fn attach_snapshot_and_capture(conn: &mut ClientConn, session_id: &str) -> SnapshotPayload {
     conn.send(&Cmd::AttachSnapshot {
         session_id: session_id.to_string(),
@@ -690,6 +730,22 @@ fn send_input(conn: &mut ClientConn, session_id: &str, data: &[u8]) {
     }
 }
 
+fn expect_session_list_with_timeout(conn: &mut ClientConn, timeout: Duration) -> Vec<Value> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(!remaining.is_zero(), "timed out waiting for SessionList");
+
+        match conn.recv_with_timeout(remaining.min(Duration::from_millis(50))) {
+            Ok(Evt::SessionList { sessions }) => return sessions,
+            Ok(Evt::Output { .. }) | Ok(Evt::StatusChanged { .. }) => continue,
+            Ok(Evt::Error { message }) => panic!("list failed: {message}"),
+            Ok(other) => panic!("expected SessionList, got: {:?}", other),
+            Err(_) => continue,
+        }
+    }
+}
+
 // ---- Tests ----
 
 /// Mimics the real Tauri flow: Spawn on shared conn, AttachSnapshot on dedicated conn,
@@ -737,6 +793,80 @@ fn test_spawn_attach_io() {
         "expected 'hello' in output, got: {:?}",
         String::from_utf8_lossy(&output)
     );
+}
+
+#[test]
+fn stalled_pty_input_does_not_block_daemon_or_stop_output_reader() {
+    let daemon = DaemonHandle::start();
+
+    let mut control = daemon.connect();
+    spawn_shell_session(
+        &mut control,
+        "sess-stalled-input",
+        "i=0; while :; do i=$((i + 1)); printf 'STALLED-OUTPUT-%06d\\r\\n' \"$i\"; done",
+    );
+    spawn_echo_session(&mut control, "sess-independent");
+
+    let mut attached = daemon.connect();
+    attach(&mut attached, "sess-stalled-input");
+    let warmup = attached
+        .collect_output_until_contains_with_timeout("STALLED-OUTPUT-", Duration::from_secs(2));
+    assert!(
+        String::from_utf8_lossy(&warmup).contains("STALLED-OUTPUT-"),
+        "test precondition failed: spammer output did not arrive"
+    );
+
+    let socket_path = daemon.socket_path.clone();
+    let input_thread = thread::spawn(move || {
+        let mut input_conn = ClientConn::connect(&socket_path);
+        let oversized_input = vec![b'x'; 16 * 1024 * 1024];
+        input_conn.send(&Cmd::Input {
+            session_id: "sess-stalled-input".to_string(),
+            data: oversized_input,
+        });
+        let _ = input_conn.recv_with_timeout(Duration::from_secs(10));
+    });
+
+    thread::sleep(Duration::from_millis(300));
+
+    let continued_output = attached
+        .collect_output_until_contains_with_timeout("STALLED-OUTPUT-", Duration::from_millis(700));
+    assert!(
+        String::from_utf8_lossy(&continued_output).contains("STALLED-OUTPUT-"),
+        "output reader should keep draining while input to the same PTY is backpressured"
+    );
+
+    let mut management = daemon.connect();
+    management.send(&Cmd::List);
+    let sessions = expect_session_list_with_timeout(&mut management, Duration::from_millis(700));
+    assert!(
+        sessions
+            .iter()
+            .any(|session| session["session_id"] == "sess-independent"),
+        "unrelated session should still be visible while another session input is backpressured: {sessions:?}"
+    );
+
+    management.send(&Cmd::Resize {
+        session_id: "sess-independent".to_string(),
+        cols: 100,
+        rows: 30,
+    });
+    wait_for_ok_with_timeout(
+        &mut management,
+        "resize independent",
+        Duration::from_millis(700),
+    );
+
+    management.send(&Cmd::Kill {
+        session_id: "sess-independent".to_string(),
+    });
+    wait_for_ok_with_timeout(
+        &mut management,
+        "kill independent",
+        Duration::from_millis(700),
+    );
+
+    let _ = input_thread.join();
 }
 
 #[test]
