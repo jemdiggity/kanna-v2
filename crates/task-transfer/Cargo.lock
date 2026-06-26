@@ -586,7 +586,7 @@ dependencies = [
 [[package]]
 name = "ghostty-xterm-compat-serialize"
 version = "0.1.0"
-source = "git+https://github.com/jemdiggity/ghostty-xterm-compat-serialize.git?rev=135f988f408de703d5c4f6ae45de6902f3403f7c#135f988f408de703d5c4f6ae45de6902f3403f7c"
+source = "git+https://github.com/jemdiggity/ghostty-xterm-compat-serialize.git?rev=06895c8ea1830a85c9ada93ca2a7ece1f5a9dc20#06895c8ea1830a85c9ada93ca2a7ece1f5a9dc20"
 dependencies = [
  "libghostty-vt",
  "serde",
