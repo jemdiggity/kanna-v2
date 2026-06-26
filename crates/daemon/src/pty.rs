@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::ffi::CString;
-use std::io::{self, Read};
+use std::io;
+#[cfg(test)]
+use std::io::Read;
 use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::time::Instant;
 
@@ -30,6 +32,20 @@ fn validate_cwd(cwd: &str) -> io::Result<()> {
     }
 
     std::fs::read_dir(path).map(|_| ())
+}
+
+fn set_nonblocking(fd: RawFd) -> io::Result<()> {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    let ret = unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+    if ret < 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    Ok(())
 }
 
 /// A PTY session backed by raw libc calls.
@@ -213,7 +229,7 @@ impl PtySession {
         // ---- Parent process ----
         unsafe { libc::close(slave_fd) };
 
-        // Set master to non-blocking? No — we use blocking reads in stream_output.
+        set_nonblocking(master_fd)?;
         let master = unsafe { OwnedFd::from_raw_fd(master_fd) };
 
         Ok(PtySession {
@@ -236,6 +252,9 @@ impl PtySession {
         rows: u16,
         cols: u16,
     ) -> Self {
+        if let Err(error) = set_nonblocking(master_fd.as_raw_fd()) {
+            log::warn!("failed to set adopted PTY master non-blocking: {}", error);
+        }
         PtySession {
             master_fd,
             child_pid,
@@ -246,27 +265,8 @@ impl PtySession {
         }
     }
 
-    pub fn write_input(&mut self, data: &[u8]) -> io::Result<()> {
-        let fd = self.master_fd.as_raw_fd();
-        let mut offset = 0;
-        while offset < data.len() {
-            let n = unsafe {
-                libc::write(
-                    fd,
-                    data[offset..].as_ptr() as *const libc::c_void,
-                    data.len() - offset,
-                )
-            };
-            if n < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            offset += n as usize;
-        }
-        self.last_active_at = Instant::now();
-        Ok(())
-    }
-
     /// Clone the master fd for a reader. The returned fd is independently owned.
+    #[cfg(test)]
     pub fn try_clone_reader(
         &self,
     ) -> Result<Box<dyn Read + Send>, Box<dyn std::error::Error + Send + Sync>> {
@@ -276,6 +276,15 @@ impl PtySession {
         }
         let file = unsafe { std::fs::File::from_raw_fd(new_fd) };
         Ok(Box::new(file))
+    }
+
+    pub fn try_clone_io_fd(&self) -> io::Result<OwnedFd> {
+        let new_fd = unsafe { libc::dup(self.master_fd.as_raw_fd()) };
+        if new_fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        set_nonblocking(new_fd)?;
+        Ok(unsafe { OwnedFd::from_raw_fd(new_fd) })
     }
 
     /// Clone the master fd for writing (e.g. kitty keyboard responses).
@@ -495,10 +504,25 @@ mod tests {
         let mut reader = session
             .try_clone_reader()
             .expect("reader clone should succeed");
-        let mut output = String::new();
-        reader
-            .read_to_string(&mut output)
-            .expect("should capture PTY output");
+        let mut output = Vec::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let mut buf = [0u8; 128];
+        while std::time::Instant::now() < deadline {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    output.extend_from_slice(&buf[..n]);
+                    if String::from_utf8_lossy(&output).contains("||") {
+                        break;
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(error) => panic!("should capture PTY output: {error}"),
+            }
+        }
+        let output = String::from_utf8_lossy(&output).to_string();
 
         unsafe {
             unset_env_var("KANNA_TMUX_SESSION");
