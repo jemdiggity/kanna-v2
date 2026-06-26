@@ -15,6 +15,7 @@ import App from "./App.vue";
 import { createWindowWorkspace, parseWindowBootstrap, resolveWindowBootstrap } from "./windowWorkspace";
 import { e2eAppMetrics } from "./e2eAppMetrics";
 import { e2eInvokeHistory } from "./e2eInvokeHistory";
+import { resetSharedStreamClientForTests } from "./composables/desktopStreamClient";
 
 interface AppWithSetupState {
   _instance?: {
@@ -221,6 +222,7 @@ try {
       },
       appMetrics: e2eAppMetrics,
       invokes: e2eInvokeHistory,
+      resetStreamClient: resetSharedStreamClientForTests,
     };
   }
 

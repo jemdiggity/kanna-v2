@@ -10,6 +10,8 @@ use serde_yaml::Value as YamlValue;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::Read;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -18,6 +20,18 @@ struct RepoConfig {
     pipeline: Option<String>,
     setup: Option<Vec<String>>,
     ports: Option<HashMap<String, u16>>,
+    workspace: Option<RepoWorkspaceConfig>,
+}
+
+#[derive(Default, Deserialize)]
+struct RepoWorkspaceConfig {
+    path: Option<RepoWorkspacePathConfig>,
+}
+
+#[derive(Default, Deserialize)]
+struct RepoWorkspacePathConfig {
+    prepend: Option<Vec<String>>,
+    append: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -659,11 +673,6 @@ fn prepare_task_spawn(
         request.allowed_tools
     };
     let agent_type = resolve_agent_type(request.agent_type.as_deref(), provider)?;
-    let headless_executable = if matches!(agent_type, AgentSessionType::Agent) {
-        resolve_headless_agent_executable(provider)?
-    } else {
-        None
-    };
 
     let task_id = generate_task_id()?;
     let branch = format!("task-{}", task_id);
@@ -730,6 +739,7 @@ fn prepare_task_spawn(
     .map_err(|e| format!("db error: {}", e))?;
     let worktree_repo_config = read_repo_config(&worktree_path)?;
     let mut spawn_env = build_spawn_env(config, &task_id, &port_env)?;
+    apply_workspace_path_env(&mut spawn_env, &worktree_path, &worktree_repo_config);
     let mcp_config_path = write_kanna_mcp_config(&config.daemon_dir, &task_id, &mut spawn_env)?;
     let session = match agent_type {
         AgentSessionType::Pty => {
@@ -769,6 +779,10 @@ fn prepare_task_spawn(
             }
         }
         AgentSessionType::Agent => {
+            let headless_executable = resolve_headless_agent_executable(
+                provider,
+                spawn_env.get("PATH").map(String::as_str),
+            )?;
             let system_prompt = build_kanna_preamble(
                 &provider,
                 &task_id,
@@ -1633,6 +1647,58 @@ fn claim_task_ports(
     Ok(port_env)
 }
 
+fn resolve_workspace_path(worktree_path: &str, entry: &str) -> String {
+    let entry_path = Path::new(entry);
+    if entry_path.is_absolute() {
+        entry_path.to_string_lossy().to_string()
+    } else {
+        Path::new(worktree_path)
+            .join(entry_path)
+            .to_string_lossy()
+            .to_string()
+    }
+}
+
+fn apply_workspace_path_env(
+    env: &mut HashMap<String, String>,
+    worktree_path: &str,
+    repo_config: &RepoConfig,
+) {
+    let Some(path_config) = repo_config
+        .workspace
+        .as_ref()
+        .and_then(|workspace| workspace.path.as_ref())
+    else {
+        return;
+    };
+
+    let prepend_entries = path_config
+        .prepend
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .map(|entry| resolve_workspace_path(worktree_path, entry));
+    let append_entries = path_config
+        .append
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .map(|entry| resolve_workspace_path(worktree_path, entry));
+    let existing_path = env
+        .get("PATH")
+        .cloned()
+        .or_else(|| std::env::var("PATH").ok())
+        .unwrap_or_default();
+
+    let path_parts = prepend_entries
+        .chain(std::iter::once(existing_path).filter(|entry| !entry.is_empty()))
+        .chain(append_entries)
+        .collect::<Vec<_>>();
+    if !path_parts.is_empty() {
+        env.insert("PATH".to_string(), path_parts.join(":"));
+    }
+}
+
 fn build_spawn_env(
     config: &Config,
     task_id: &str,
@@ -1732,20 +1798,36 @@ fn write_kanna_mcp_config(
 }
 
 fn which_binary(name: &str) -> Result<Option<String>, String> {
-    resolve_binary_from_candidates(name, sidecar_candidates(name)).map(Some)
+    resolve_binary_from_candidates(name, sidecar_candidates(name), None).map(Some)
 }
 
-fn resolve_headless_agent_executable(provider: AgentProvider) -> Result<Option<String>, String> {
+fn resolve_headless_agent_executable(
+    provider: AgentProvider,
+    path: Option<&str>,
+) -> Result<Option<String>, String> {
     match provider {
         AgentProvider::Claude | AgentProvider::Codex | AgentProvider::Opencode => {
-            which_binary(provider.as_str())
+            which_binary_with_path(provider.as_str(), path)
         }
         AgentProvider::Copilot => Ok(None),
     }
 }
 
-fn resolve_binary_from_candidates(name: &str, candidates: Vec<PathBuf>) -> Result<String, String> {
+fn which_binary_with_path(name: &str, path: Option<&str>) -> Result<Option<String>, String> {
+    resolve_binary_from_candidates(name, sidecar_candidates(name), path).map(Some)
+}
+
+fn resolve_binary_from_candidates(
+    name: &str,
+    candidates: Vec<PathBuf>,
+    path: Option<&str>,
+) -> Result<String, String> {
     resolve_binary_from_candidates_with_path_lookup(name, candidates, |name| {
+        if let Some(path) = path {
+            return resolve_binary_from_path(name, path)
+                .ok_or_else(|| format!("binary '{}' not found in PATH", name));
+        }
+
         let output = Command::new("/bin/zsh")
             .args(["--login", "-i", "-c", &format!("command -v {}", name)])
             .output()
@@ -1760,6 +1842,26 @@ fn resolve_binary_from_candidates(name: &str, candidates: Vec<PathBuf>) -> Resul
 
         Err(format!("binary '{}' not found in PATH", name))
     })
+}
+
+fn resolve_binary_from_path(name: &str, path: &str) -> Option<String> {
+    path.split(':')
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| Path::new(entry).join(name))
+        .find(|candidate| is_executable_file(candidate))
+        .map(|candidate| candidate.to_string_lossy().to_string())
+}
+
+#[cfg(unix)]
+fn is_executable_file(path: &Path) -> bool {
+    std::fs::metadata(path)
+        .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable_file(path: &Path) -> bool {
+    path.is_file()
 }
 
 fn resolve_binary_from_candidates_with_path_lookup<F>(
@@ -2451,6 +2553,87 @@ mod tests {
         if created_sidecar {
             let _ = std::fs::remove_file(&codex_sidecar);
         }
+        let _ = std::fs::remove_dir_all(&repo_root);
+    }
+
+    #[test]
+    fn prepare_headless_agent_uses_worktree_workspace_path_for_executable_resolution() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let repo_root = init_git_repo("headless-workspace-path");
+        let config = test_config("headless-workspace-path");
+        let db = Db::open_for_tests(&config.db_path).unwrap();
+        db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+            .unwrap();
+
+        let fake_bin = repo_root.join(".kanna/fake-bin");
+        std::fs::create_dir_all(&fake_bin).unwrap();
+        let fake_codex = fake_bin.join("codex");
+        std::fs::write(&fake_codex, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&fake_codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(
+            repo_root.join(".kanna/config.json"),
+            serde_json::json!({
+                "workspace": {
+                    "path": {
+                        "prepend": [".kanna/fake-bin"]
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(Command::new("git")
+            .args(["add", ".kanna"])
+            .current_dir(&repo_root)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["commit", "-m", "add workspace path"])
+            .current_dir(&repo_root)
+            .status()
+            .unwrap()
+            .success());
+
+        let prepared = prepare_task_for_api(
+            &db,
+            &config,
+            CreateTaskRequest {
+                repo_id: "repo-1".to_string(),
+                prompt: "Use codex".to_string(),
+                pipeline_name: None,
+                base_ref: None,
+                stage: None,
+                agent_provider: Some("codex".to_string()),
+                agent_type: None,
+                model: None,
+                permission_mode: None,
+                allowed_tools: None,
+                notify_task_id: None,
+                blocker_task_ids: None,
+            },
+        )
+        .unwrap();
+
+        let expected = std::path::Path::new(&prepared.cwd).join(".kanna/fake-bin/codex");
+        match prepared.session {
+            PreparedSessionSpawn::Agent { executable, .. } => {
+                assert_eq!(
+                    executable.as_deref(),
+                    Some(expected.to_string_lossy().as_ref())
+                );
+            }
+            _ => panic!("expected agent session"),
+        }
+
+        let path = prepared
+            .env
+            .get("PATH")
+            .expect("spawn env should include PATH");
+        let expected_dir = expected.parent().unwrap().to_string_lossy().to_string();
+        assert_eq!(path.split(':').next(), Some(expected_dir.as_str()));
+
         let _ = std::fs::remove_dir_all(&repo_root);
     }
 

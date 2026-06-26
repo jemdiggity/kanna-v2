@@ -148,7 +148,10 @@ describe("terminal recovery", () => {
     expect(await getSpawnSessionCount(client, taskId)).toBe(1);
   });
 
-  it("keeps Codex scrollback when a reconnect snapshot only partially redraws", async () => {
+  // Skipped during the KSP migration: this fixture injects the retired desktop
+  // Tauri terminal_snapshot event path. KSP scrollback preservation coverage
+  // lives in terminal-output-performance.test.ts.
+  it.skip("keeps Codex scrollback when a reconnect snapshot only partially redraws", async () => {
     const taskId = await createRecoverableTask(client, {
       repoId,
       repoPath: testRepoPath,

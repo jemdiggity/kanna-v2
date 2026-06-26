@@ -138,6 +138,7 @@ describe("themed agent view", () => {
     await mkdir(join(testRepoPath, ".kanna"), { recursive: true });
     await importTestRepo(client, testRepoPath, "themed-agent-view-test");
     await client.executeSync(installMockKspScript());
+    await client.executeSync("window.__KANNA_E2E__.resetStreamClient?.();");
   });
 
   afterAll(async () => {
@@ -274,6 +275,7 @@ describe("themed agent view", () => {
     expect(sentTypesBeforeStop).toContain("agent_permission");
 
     await client.executeSync(installMockKspScript({ activeTurn: true }));
+    await client.executeSync("window.__KANNA_E2E__.resetStreamClient?.();");
     await execDb(
       client,
       `INSERT INTO pipeline_item (
@@ -324,6 +326,7 @@ describe("themed agent view", () => {
     });
 
     await client.executeSync(installMockKspScript());
+    await client.executeSync("window.__KANNA_E2E__.resetStreamClient?.();");
     await client.executeSync(
       `const store = window.__KANNA_E2E__.setupState.store;
        store.$patch({ selectedItemId: null });
@@ -371,6 +374,7 @@ describe("themed agent view", () => {
       failFirstAgentAttach: true,
       recoveredText: "Recovered **agent** snapshot",
     }));
+    await client.executeSync("window.__KANNA_E2E__.resetStreamClient?.();");
     await client.executeSync("window.__KANNA_E2E__.invokes.clear();");
 
     const loadResult = await callVueMethod(client, "loadItems");

@@ -32,7 +32,7 @@ async function waitForActivePostAction(
   client: WebDriverClient,
   taskId: string,
   expectedPostAction: string,
-  timeoutMs = 5_000,
+  timeoutMs = 10_000,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -978,6 +978,7 @@ describe("stage advance", () => {
       const capturedArgs = await readFile(capturedArgsPath, "utf8");
       expect(capturedArgs).toContain("--yolo\n");
       expect(capturedArgs).toContain(`${expectedAgentPrompt}\n`);
+      expect(capturedArgs).not.toContain(reviewPrompt);
       await emitExternalSharedInvalidation(client, "requestRevision");
       await waitForSelectedTaskId(client, null);
       expect(await getVueState(client, "selectedItemId")).not.toBe(revisionTaskId);

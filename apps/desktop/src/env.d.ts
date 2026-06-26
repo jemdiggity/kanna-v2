@@ -46,6 +46,7 @@ interface KannaE2EHook {
   dbName: string;
   taskSwitchPerf: KannaTaskSwitchPerfE2EApi;
   appMetrics: KannaAppMetricsE2EApi;
+  resetStreamClient?: () => void;
   invokes?: {
     clear(): void;
     getAll(): Array<{ cmd: string; args?: unknown }>;
