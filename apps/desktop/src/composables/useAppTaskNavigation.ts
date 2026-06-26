@@ -13,6 +13,7 @@ import type { AppSidebarItem } from "./useAppCloudWorkspace";
 import type { useKannaStore } from "../stores/kanna";
 import type { useToast } from "./useToast";
 import type { WindowWorkspaceController } from "../windowWorkspace";
+import type { ActionName } from "./useKeyboardShortcuts";
 
 interface SidebarRepoProjection {
   id: string;
@@ -32,6 +33,13 @@ interface DynamicCommand {
   label: string;
   description?: string;
   execute: () => void;
+}
+
+interface PaletteExtraCommand {
+  action: ActionName;
+  label: string;
+  group: string;
+  shortcut: string;
 }
 
 interface UseAppTaskNavigationOptions {
@@ -299,8 +307,8 @@ export function useAppTaskNavigation({
     }
   }
 
-  const paletteExtraCommands = computed(() => {
-    const cmds: Array<{ action: string; label: string; group: string; shortcut: string }> = [];
+  const paletteExtraCommands = computed<PaletteExtraCommand[]>(() => {
+    const cmds: PaletteExtraCommand[] = [];
     const item = store.currentItem;
     if (item && item.stage !== "done" && item.closed_at == null && !hasTag(item, "blocked")) {
       cmds.push({ action: "blockTask", label: t('tasks.blockTask'), group: t('shortcuts.groupTasks'), shortcut: "" });

@@ -81,20 +81,14 @@ const {
   showFilePickerModal,
   filePickerHidden,
   showFilePreviewModal,
-  previewFilePath,
-  previewInitialLine,
   previewHidden,
   previewFromPicker,
   previewFromTree,
   showDiffModal,
   showTreeExplorer,
-  activeWorktreePath,
   homePath,
-  treeExplorerRoot,
   showShellModal,
   shellRepoRoot,
-  shellModalCwd,
-  shellModalFallbackCwd,
   showCommandPalette,
   showAnalyticsModal,
   showBlockerSelect,
@@ -116,11 +110,6 @@ const {
   preferencesRef,
   sidebarShellStyle,
   canResizeSidebar,
-  currentDiffViewKey,
-  currentDiffViewState,
-  updateCurrentDiffViewState,
-  currentPreviewMarkdownMode,
-  updateCurrentPreviewMarkdownMode,
   stopSidebarResize,
   startSidebarResize,
   restoreSidebarWidth,
@@ -131,22 +120,14 @@ const {
   closeFilePicker,
   showFilePickerOnTop,
   openFilePreview,
-  selectFileFromPicker,
-  closeFilePreview,
   getCurrentPreviewRecall,
 } = appModals;
 const appTaskTransfer = useAppTaskTransfer({ db, store, toast, showPeerPicker });
 const {
-  peerPickerMode,
-  transferPeers,
-  transferPeersLoading,
-  transferPeerActionPending,
   warmTransferSidecar,
   openPeerPicker,
   openPairPeerPicker,
   closePeerPicker,
-  handlePeerSelected,
-  handlePairPeer,
   importPendingIncomingTransfers,
 } = appTaskTransfer;
 const appPreferences = useAppPreferences({
@@ -160,8 +141,6 @@ const {
   commandUsageCounts,
   startSystemThemeListener,
   stopSystemThemeListener,
-  trackCommandUsage,
-  handlePreferenceUpdate,
 } = appPreferences;
 const appTaskNavigation = useAppTaskNavigation({
   store,
@@ -189,13 +168,7 @@ const {
   selectUnreadTaskWithReadFallback,
   handleBlockTask,
   handleEditBlockedTask,
-  blockerCandidates,
-  disabledBlockerIds,
-  preselectedBlockerIds,
   sidebarBlockerNames,
-  onBlockerConfirm,
-  paletteExtraCommands,
-  paletteDynamicCommands,
   handleSelectRepo,
   handleSelectItem,
 } = appTaskNavigation;
@@ -219,13 +192,8 @@ const appTaskCreation = useAppTaskCreation({
   cloudRepoRemoteUrl,
 });
 const {
-  cloningRepo,
   currentBlockers,
   openNewTaskModal,
-  handleNewTaskSubmit,
-  handleCreateRepo,
-  handleImportRepo,
-  handleCloneRepo,
 } = appTaskCreation;
 
 let keyboardActions = {} as KeyboardActions;
