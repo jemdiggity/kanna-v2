@@ -24,30 +24,37 @@ describe("selectTaskByActivity", () => {
     makeTask("unread-newest", "2026-03-31T04:00:00.000Z", "unread"),
   ];
 
-  it("selects the oldest unread task by created_at", () => {
+  it("selects oldest unread task by created_at when unread_at is unavailable", () => {
     expect(selectTaskByActivity(tasks, "oldest", "unread")?.id).toBe("unread-oldest");
   });
 
-  it("selects the newest unread task by created_at", () => {
+  it("selects newest unread task by created_at when unread_at is unavailable", () => {
     expect(selectTaskByActivity(tasks, "newest", "unread")?.id).toBe("unread-newest");
+  });
+
+  it("orders unread tasks by created_at even when unread_at differs", () => {
+    const unreadTasks = [
+      {
+        ...makeTask("created-oldest-unread-newest", "2026-03-31T00:00:00.000Z", "unread"),
+        unread_at: "2026-03-31T04:00:00.000Z",
+      },
+      {
+        ...makeTask("created-newest-unread-oldest", "2026-03-31T03:00:00.000Z", "unread"),
+        unread_at: "2026-03-31T01:00:00.000Z",
+      },
+      {
+        ...makeTask("created-middle-unread-middle", "2026-03-31T02:00:00.000Z", "unread"),
+        unread_at: "2026-03-31T02:00:00.000Z",
+      },
+    ];
+
+    expect(selectTaskByActivity(unreadTasks, "oldest", "unread")?.id).toBe("created-oldest-unread-newest");
+    expect(selectTaskByActivity(unreadTasks, "newest", "unread")?.id).toBe("created-newest-unread-oldest");
   });
 
   it("selects idle tasks for read shortcut navigation", () => {
     expect(selectTaskByActivity(tasks, "oldest", "idle")?.id).toBe("idle-old");
     expect(selectTaskByActivity(tasks, "newest", "idle")?.id).toBe("idle-new");
-  });
-
-  it("selects the closest older matching task when anchored in oldest mode", () => {
-    expect(selectTaskByActivity(tasks, "oldest", "unread", "2026-03-31T02:00:00.000Z")?.id).toBe("unread-near-older");
-  });
-
-  it("selects the closest newer matching task when anchored in newest mode", () => {
-    expect(selectTaskByActivity(tasks, "newest", "unread", "2026-03-31T02:00:00.000Z")?.id).toBe("unread-near-newer");
-  });
-
-  it("falls back to absolute oldest or newest when no relative match exists", () => {
-    expect(selectTaskByActivity(tasks, "oldest", "unread", "2026-03-31T01:00:00.000Z")?.id).toBe("unread-oldest");
-    expect(selectTaskByActivity(tasks, "newest", "unread", "2026-03-31T04:00:00.000Z")?.id).toBe("unread-newest");
   });
 
   it("can select working tasks without mixing them into idle shortcuts", () => {

@@ -1784,7 +1784,7 @@ describe("App", () => {
     expect(store.selectItem).toHaveBeenCalledWith("read-newest");
   });
 
-  it("navigates to the closest read task relative to the selected task", async () => {
+  it("navigates to the absolute oldest and newest read task", async () => {
     store.currentItem = { id: "current", created_at: "2026-03-31T03:00:00.000Z" };
     store.sortedItemsForCurrentRepo = [
       { id: "read-oldest", activity: "idle", created_at: "2026-03-31T00:00:00.000Z", tags: "[]" },
@@ -1798,11 +1798,11 @@ describe("App", () => {
     expect(capturedKeyboardActions).not.toBeNull();
 
     capturedKeyboardActions?.goToOldestRead();
-    expect(store.selectItem).toHaveBeenCalledWith("read-near-older");
+    expect(store.selectItem).toHaveBeenCalledWith("read-oldest");
 
     store.selectItem.mockClear();
     capturedKeyboardActions?.goToNewestRead();
-    expect(store.selectItem).toHaveBeenCalledWith("read-near-newer");
+    expect(store.selectItem).toHaveBeenCalledWith("read-newest");
   });
 
   it("opens a new window through the workspace controller using the current selection", async () => {
@@ -2073,7 +2073,7 @@ describe("App", () => {
     expect(store.selectItem).toHaveBeenCalledWith("normal-unread");
   });
 
-  it("navigates to the closest unread task relative to the selected task", async () => {
+  it("navigates to the absolute oldest and newest unread task", async () => {
     store.currentItem = { id: "current", created_at: "2026-03-31T03:00:00.000Z" };
     store.sortedItemsForCurrentRepo = [
       { id: "unread-oldest", activity: "unread", created_at: "2026-03-31T00:00:00.000Z", tags: "[]" },
@@ -2087,14 +2087,14 @@ describe("App", () => {
     expect(capturedKeyboardActions).not.toBeNull();
 
     capturedKeyboardActions?.goToOldestUnread();
-    expect(store.selectItem).toHaveBeenCalledWith("unread-near-older");
+    expect(store.selectItem).toHaveBeenCalledWith("unread-oldest");
 
     store.selectItem.mockClear();
     capturedKeyboardActions?.goToNewestUnread();
-    expect(store.selectItem).toHaveBeenCalledWith("unread-near-newer");
+    expect(store.selectItem).toHaveBeenCalledWith("unread-newest");
   });
 
-  it("falls back to relative read tasks when unread shortcut navigation has no unread task", async () => {
+  it("falls back to absolute read tasks when unread shortcut navigation has no unread task", async () => {
     store.currentItem = { id: "current", created_at: "2026-03-31T02:30:00.000Z" };
     store.sortedItemsForCurrentRepo = [
       { id: "blocked-oldest", activity: "idle", created_at: "2026-03-31T00:00:00.000Z", tags: '["blocked"]' },
@@ -2110,11 +2110,11 @@ describe("App", () => {
     expect(capturedKeyboardActions).not.toBeNull();
 
     capturedKeyboardActions?.goToOldestUnread();
-    expect(store.selectItem).toHaveBeenCalledWith("read-near-older");
+    expect(store.selectItem).toHaveBeenCalledWith("read-oldest");
 
     store.selectItem.mockClear();
     capturedKeyboardActions?.goToNewestUnread();
-    expect(store.selectItem).toHaveBeenCalledWith("read-near-newer");
+    expect(store.selectItem).toHaveBeenCalledWith("read-newest");
   });
 
   it("reopens the diff modal with the last saved diff view state", async () => {
