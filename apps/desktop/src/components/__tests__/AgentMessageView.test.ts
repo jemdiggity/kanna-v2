@@ -79,13 +79,13 @@ describe("AgentMessageView", () => {
   });
 
   it("does not carry a separate light terminal chat palette", () => {
-    const source = readFileSync(join(process.cwd(), "src/components/AgentMessageView.vue"), "utf8");
+    const source = readFileSync(join(process.cwd(), "src/components/AgentMessageView.css"), "utf8");
 
     expect(source).not.toContain(".skin-terminal.theme-light");
   });
 
   it("uses shared terminal chat CSS tokens instead of local palette literals", () => {
-    const source = readFileSync(join(process.cwd(), "src/components/AgentMessageView.vue"), "utf8");
+    const source = readFileSync(join(process.cwd(), "src/components/AgentMessageView.css"), "utf8");
     const terminalSkin = source.match(/\.skin-terminal\s*\{(?<body>[^}]+)\}/)?.groups?.body ?? "";
 
     expect(terminalSkin).toContain("--agent-bg: var(--kn-agent-terminal-bg)");
