@@ -1,0 +1,392 @@
+use super::state::{db_write_error, AppState};
+use super::task_input::notify_task_completion;
+use crate::db::Db;
+use axum::extract::State;
+use axum::Json;
+use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
+use std::sync::Arc;
+
+pub(super) async fn run_merge_agent(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
+    #[cfg(test)]
+    if let Some(merge_agent_runner) = state.merge_agent_runner.clone() {
+        return merge_agent_runner(task_id)
+            .map(Json)
+            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e));
+    }
+
+    let prepared = {
+        let db = Db::open(&state.config.db_path).map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("db error: {}", e),
+            )
+        })?;
+        crate::task_creator::prepare_merge_agent_for_api(&db, &state.config, &task_id)
+            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?
+    };
+    let mut daemon = crate::daemon_client::DaemonClient::connect(&state.config.daemon_dir)
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("daemon error: {}", e),
+            )
+        })?;
+    let created_task = crate::task_creator::spawn_prepared_task_for_api(&mut daemon, prepared)
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(crate::mobile_api::TaskActionResponse {
+        task_id: created_task.task_id,
+    }))
+}
+
+pub(super) async fn close_task(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+) -> Result<axum::http::StatusCode, (axum::http::StatusCode, String)> {
+    #[cfg(test)]
+    if let Some(task_closer) = state.task_closer.clone() {
+        return task_closer(task_id)
+            .map(|_| axum::http::StatusCode::NO_CONTENT)
+            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e));
+    }
+
+    let db = Db::open(&state.config.db_path).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("db error: {}", e),
+        )
+    })?;
+    let pipeline_item_id = db
+        .resolve_pipeline_item_id(&task_id)
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("db error: {}", e),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                axum::http::StatusCode::NOT_FOUND,
+                format!("task not found: {}", task_id),
+            )
+        })?;
+
+    let mut daemon = crate::daemon_client::DaemonClient::connect(&state.config.daemon_dir)
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("daemon error: {}", e),
+            )
+        })?;
+
+    for session_id in [
+        pipeline_item_id.to_string(),
+        format!("shell-wt-{pipeline_item_id}"),
+        format!("td-{pipeline_item_id}"),
+    ] {
+        let event = daemon
+            .send_command(&DaemonCommand::Kill { session_id })
+            .await
+            .map_err(|e| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("daemon error: {}", e),
+                )
+            })?;
+
+        match event {
+            DaemonEvent::Ok => {}
+            DaemonEvent::Error {
+                code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
+                ..
+            } => {}
+            DaemonEvent::Error { message, .. }
+                if message.to_ascii_lowercase().contains("session not found") => {}
+            DaemonEvent::Error { message, .. } => {
+                return Err((axum::http::StatusCode::INTERNAL_SERVER_ERROR, message));
+            }
+            other => {
+                return Err((
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("unexpected daemon response: {:?}", other),
+                ));
+            }
+        }
+    }
+
+    db.close_pipeline_item(&pipeline_item_id).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("db error: {}", e),
+        )
+    })?;
+    notify_task_completion(&state.config, &pipeline_item_id, false)
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+pub(super) async fn advance_stage(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
+    #[cfg(test)]
+    if let Some(stage_advancer) = state.stage_advancer.clone() {
+        return stage_advancer(task_id)
+            .map(Json)
+            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e));
+    }
+
+    let transition = {
+        let db = Db::open(&state.config.db_path).map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("db error: {}", e),
+            )
+        })?;
+        crate::task_creator::prepare_advance_stage_for_api(&db, &state.config, &task_id)
+            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?
+    };
+    let mut daemon = crate::daemon_client::DaemonClient::connect(&state.config.daemon_dir)
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("daemon error: {}", e),
+            )
+        })?;
+    match transition {
+        crate::task_creator::PreparedStageTransition::Spawn(prepared) => {
+            let created = crate::task_creator::spawn_prepared_task_for_api(&mut daemon, *prepared)
+                .await
+                .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+            let db = Db::open(&state.config.db_path).map_err(|e| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("db error: {}", e),
+                )
+            })?;
+            db.close_pipeline_item(&task_id).map_err(|e| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("db error: {}", e),
+                )
+            })?;
+
+            Ok(Json(crate::mobile_api::TaskActionResponse {
+                task_id: created.task_id,
+            }))
+        }
+        crate::task_creator::PreparedStageTransition::Continue(prepared) => {
+            let continued = crate::task_creator::continue_prepared_stage_for_api(
+                &state.config.db_path,
+                &mut daemon,
+                *prepared,
+            )
+            .await
+            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+            Ok(Json(continued))
+        }
+    }
+}
+
+pub(super) async fn complete_stage(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+    Json(payload): Json<crate::mobile_api::CompleteStageRequest>,
+) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
+    #[cfg(test)]
+    if let Some(stage_completer) = state.stage_completer.clone() {
+        return stage_completer(task_id, payload)
+            .map(Json)
+            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e));
+    }
+
+    if payload.status != "success" && payload.status != "failure" {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "status must be success or failure".to_string(),
+        ));
+    }
+    let should_auto_advance = payload.status == "success";
+
+    let stage_result = serde_json::to_string(&serde_json::json!({
+        "status": payload.status,
+        "summary": payload.summary,
+        "metadata": payload.metadata,
+    }))
+    .map_err(|e| {
+        (
+            axum::http::StatusCode::BAD_REQUEST,
+            format!("invalid stage result: {}", e),
+        )
+    })?;
+
+    {
+        let db = Db::open(&state.config.db_path).map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("db error: {}", e),
+            )
+        })?;
+        db.update_pipeline_item_stage_result(&task_id, &stage_result)
+            .map_err(|e| db_write_error("db error", e))?;
+    }
+
+    if !should_auto_advance {
+        return Ok(Json(crate::mobile_api::TaskActionResponse { task_id }));
+    }
+
+    let transition = {
+        let db = Db::open(&state.config.db_path).map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("db error: {}", e),
+            )
+        })?;
+        crate::task_creator::prepare_auto_stage_completion_for_api(&db, &state.config, &task_id)
+            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?
+    };
+    let Some(transition) = transition else {
+        return Ok(Json(crate::mobile_api::TaskActionResponse { task_id }));
+    };
+
+    let mut daemon = crate::daemon_client::DaemonClient::connect(&state.config.daemon_dir)
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("daemon error: {}", e),
+            )
+        })?;
+    match transition {
+        crate::task_creator::PreparedStageTransition::Spawn(prepared) => {
+            let created = crate::task_creator::spawn_prepared_task_for_api(&mut daemon, *prepared)
+                .await
+                .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+            let db = Db::open(&state.config.db_path).map_err(|e| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("db error: {}", e),
+                )
+            })?;
+            db.close_pipeline_item(&task_id).map_err(|e| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("db error: {}", e),
+                )
+            })?;
+
+            Ok(Json(crate::mobile_api::TaskActionResponse {
+                task_id: created.task_id,
+            }))
+        }
+        crate::task_creator::PreparedStageTransition::Continue(prepared) => {
+            let continued = crate::task_creator::continue_prepared_stage_for_api(
+                &state.config.db_path,
+                &mut daemon,
+                *prepared,
+            )
+            .await
+            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+            Ok(Json(continued))
+        }
+    }
+}
+
+pub(super) async fn request_revision(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+    Json(payload): Json<crate::mobile_api::RequestRevisionRequest>,
+) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
+    #[cfg(test)]
+    if let Some(revision_requester) = state.revision_requester.clone() {
+        return revision_requester(task_id, payload)
+            .map(Json)
+            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e));
+    }
+
+    let stage_result = serde_json::to_string(&serde_json::json!({
+        "status": "failure",
+        "summary": payload.summary,
+        "metadata": payload.metadata,
+    }))
+    .map_err(|e| {
+        (
+            axum::http::StatusCode::BAD_REQUEST,
+            format!("invalid revision result: {}", e),
+        )
+    })?;
+    let (source_task_id, prepared) = {
+        let db = Db::open(&state.config.db_path).map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("db error: {}", e),
+            )
+        })?;
+        let source_task_id = db
+            .resolve_pipeline_item_id(&task_id)
+            .map_err(|e| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("db error: {}", e),
+                )
+            })?
+            .ok_or_else(|| {
+                (
+                    axum::http::StatusCode::NOT_FOUND,
+                    format!("task not found: {}", task_id),
+                )
+            })?;
+        db.update_pipeline_item_stage_result(&source_task_id, &stage_result)
+            .map_err(|e| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("db error: {}", e),
+                )
+            })?;
+        crate::task_creator::prepare_revision_task_for_api(
+            &db,
+            &state.config,
+            &source_task_id,
+            &payload.target_stage,
+            &payload.prompt,
+        )
+        .map(|prepared| (source_task_id, prepared))
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?
+    };
+
+    let mut daemon = crate::daemon_client::DaemonClient::connect(&state.config.daemon_dir)
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("daemon error: {}", e),
+            )
+        })?;
+    let created = crate::task_creator::spawn_prepared_task_for_api(&mut daemon, prepared)
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let db = Db::open(&state.config.db_path).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("db error: {}", e),
+        )
+    })?;
+    db.close_pipeline_item(&source_task_id).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("db error: {}", e),
+        )
+    })?;
+
+    Ok(Json(crate::mobile_api::TaskActionResponse {
+        task_id: created.task_id,
+    }))
+}
