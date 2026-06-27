@@ -48,7 +48,7 @@ pub(crate) async fn handle_connection(
     let mut reader = BufReader::new(read_half);
     let writer = Arc::new(Mutex::new(write_half));
 
-    let subscribed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut subscription_task: Option<tokio::task::JoinHandle<()>> = None;
 
     loop {
         let cmd = read_command(&mut reader).await;
@@ -78,19 +78,21 @@ pub(crate) async fn handle_connection(
                 let _ = write_event(&mut *writer.lock().await, &evt).await;
             }
             Some(Command::Subscribe) => {
-                if !subscribed.load(std::sync::atomic::Ordering::Relaxed) {
-                    subscribed.store(true, std::sync::atomic::Ordering::Relaxed);
+                if subscription_task.is_none() {
                     let mut broadcast_rx = broadcast_tx.subscribe();
                     let writer_broadcast = writer.clone();
-                    tokio::spawn(async move {
+                    subscription_task = Some(tokio::spawn(async move {
                         use tokio::io::AsyncWriteExt;
                         while let Ok(msg) = broadcast_rx.recv().await {
                             let mut w = writer_broadcast.lock().await;
-                            let _ = w.write_all(msg.as_bytes()).await;
-                            let _ = w.write_all(b"\n").await;
-                            let _ = w.flush().await;
+                            if w.write_all(msg.as_bytes()).await.is_err()
+                                || w.write_all(b"\n").await.is_err()
+                                || w.flush().await.is_err()
+                            {
+                                break;
+                            }
                         }
-                    });
+                    }));
                 }
                 let _ = write_event(&mut *writer.lock().await, &Event::Ok).await;
             }
@@ -141,6 +143,10 @@ pub(crate) async fn handle_connection(
                 .await;
             }
         }
+    }
+
+    if let Some(task) = subscription_task {
+        task.abort();
     }
 
     // Connection dropped: remove every registry entry that owns or indexes this
