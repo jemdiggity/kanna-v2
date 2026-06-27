@@ -198,6 +198,8 @@ const releaseShipInputSchema = z.object({
   patch: z.boolean().default(false),
   arm64: z.boolean().default(false),
   x86_64: z.boolean().default(false),
+  staging: z.boolean().default(false),
+  production: z.boolean().default(false),
   release: z.boolean().default(false),
   dryRun: z.boolean().default(false)
 });
@@ -1521,16 +1523,21 @@ export const taskDefinitions = [
     inputSchema: releaseShipInputSchema,
     execute: async (_context, input) => {
       const parsed = releaseShipInputSchema.parse(input);
+      if (parsed.staging && parsed.production) {
+        return { ok: false, message: "release ship accepts only one of --staging or --production." };
+      }
       const bump = parsed.major ? "major" : parsed.minor ? "minor" : "patch";
       const archLabels = [
         ...(parsed.arm64 ? ["arm64" as const] : []),
         ...(parsed.x86_64 ? ["x86_64" as const] : [])
       ];
+      const environment = parsed.staging ? "staging" : "production";
       const context = await resolveDefaultContext(process.env);
       const result = await shipRelease({
         repoRoot: context.repoRoot,
         bump,
         archLabels: archLabels.length > 0 ? archLabels : ["arm64", "x86_64"],
+        environment,
         release: parsed.release,
         dryRun: parsed.dryRun,
         env: context.env,

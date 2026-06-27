@@ -4,11 +4,13 @@ import type { CommandRunner } from "./process";
 
 export type ReleaseBump = "major" | "minor" | "patch";
 export type ReleaseArchLabel = "arm64" | "x86_64";
+export type ReleaseEnvironment = "production" | "staging";
 
 export interface ReleaseShipInput {
   repoRoot: string;
   bump: ReleaseBump;
   archLabels: ReleaseArchLabel[];
+  environment?: ReleaseEnvironment;
   release: boolean;
   dryRun: boolean;
   env: NodeJS.ProcessEnv;
@@ -43,31 +45,50 @@ export function bumpVersion(sourceVersion: string, bump: ReleaseBump): string {
   return `${major}.${minor}.${patch}`;
 }
 
-export function releaseAssetName(version: string, label: ReleaseArchLabel): string {
+function releaseEnvironment(input: ReleaseEnvironment | undefined): ReleaseEnvironment {
+  return input ?? "production";
+}
+
+function releaseOutputDir(repoRoot: string, environment: ReleaseEnvironment): string {
+  return environment === "staging" ? join(repoRoot, ".build", "release", "staging") : join(repoRoot, ".build", "release");
+}
+
+export function releaseAssetName(version: string, label: ReleaseArchLabel, environment: ReleaseEnvironment = "production"): string {
+  if (environment === "staging") return `Kanna_Staging_${version}_${label}.dmg`;
   return `Kanna_${version}_${label}.dmg`;
 }
 
-export function updaterAssetName(version: string, label: ReleaseArchLabel): string {
+export function updaterAssetName(version: string, label: ReleaseArchLabel, environment: ReleaseEnvironment = "production"): string {
+  if (environment === "staging") return `Kanna_Staging_${version}_${label}.app.tar.gz`;
   return `Kanna_${version}_${label}.app.tar.gz`;
 }
 
-export function updaterSignatureName(version: string, label: ReleaseArchLabel): string {
-  return `${updaterAssetName(version, label)}.sig`;
+export function updaterSignatureName(version: string, label: ReleaseArchLabel, environment: ReleaseEnvironment = "production"): string {
+  return `${updaterAssetName(version, label, environment)}.sig`;
 }
 
 export function updaterPlatformKey(label: ReleaseArchLabel): string {
   return label === "arm64" ? "darwin-aarch64" : "darwin-x86_64";
 }
 
-export function bazelTargetForLabel(label: ReleaseArchLabel, dryRun: boolean): string {
+export function bazelTargetForLabel(label: ReleaseArchLabel, dryRun: boolean, environment: ReleaseEnvironment = "production"): string {
+  if (environment === "staging") {
+    return dryRun ? `//:kanna_signed_dmg_staging_${label}` : `//:kanna_notarized_dmg_staging_${label}`;
+  }
   return dryRun ? `//:kanna_signed_dmg_release_${label}` : `//:kanna_notarized_dmg_release_${label}`;
 }
 
-export function signedAppTargetForLabel(label: ReleaseArchLabel): string {
+export function signedAppTargetForLabel(label: ReleaseArchLabel, environment: ReleaseEnvironment = "production"): string {
+  if (environment === "staging") {
+    return label === "arm64" ? "//:kanna_signed_app_staging_arm64" : "//:kanna_signed_app_staging_x86_64";
+  }
   return label === "arm64" ? "//:kanna_signed_app_release_arm64" : "//:kanna_signed_app_release_x86_64";
 }
 
-export function updaterBundleTargetForLabel(label: ReleaseArchLabel): string {
+export function updaterBundleTargetForLabel(label: ReleaseArchLabel, environment: ReleaseEnvironment = "production"): string {
+  if (environment === "staging") {
+    return label === "arm64" ? "//:kanna_updater_bundle_staging_arm64" : "//:kanna_updater_bundle_staging_x86_64";
+  }
   return label === "arm64" ? "//:kanna_updater_bundle_release_arm64" : "//:kanna_updater_bundle_release_x86_64";
 }
 
@@ -127,6 +148,27 @@ async function assertCleanGitWorktree(repoRoot: string, runner: CommandRunner, e
   }
 }
 
+async function ensureStagingGithubRelease(input: ReleaseShipInput, repoSlug: string): Promise<void> {
+  const view = await input.runner.run("gh", ["release", "view", "desktop-staging", "--repo", repoSlug], {
+    cwd: input.repoRoot,
+    env: input.env
+  });
+  if (view.exitCode === 0) return;
+
+  await mustRun(input.runner, "gh", [
+    "release",
+    "create",
+    "desktop-staging",
+    "--repo",
+    repoSlug,
+    "--title",
+    "Kanna Desktop Staging",
+    "--notes",
+    "Mutable desktop staging updater channel.",
+    "--prerelease"
+  ], input.repoRoot, input.env);
+}
+
 async function resolveBazelOutput(input: ReleaseShipInput, target: string): Promise<string> {
   const output = await mustRun(input.runner, "bazel", ["cquery", "-c", "opt", target, "--output=files"], input.repoRoot, input.env);
   const path = output.split("\n").filter(Boolean).at(-1);
@@ -156,6 +198,7 @@ export async function createUpdaterBundle(input: ReleaseShipInput, bundleSource:
 }
 
 export async function shipRelease(input: ReleaseShipInput): Promise<ReleaseShipResult> {
+  const environment = releaseEnvironment(input.environment);
   if (input.release && input.archLabels.length !== 2) {
     throw new Error("updater releases must include both arm64 and x86_64 artifacts");
   }
@@ -168,7 +211,7 @@ export async function shipRelease(input: ReleaseShipInput): Promise<ReleaseShipR
   const version = bumpVersion(sourceVersion, input.bump);
 
   const bazelArgs = [input.dryRun ? "-c" : "--config=notarize", input.dryRun ? "opt" : "-c", ...(input.dryRun ? [] : ["opt"])];
-  const targets = input.archLabels.flatMap((label) => [bazelTargetForLabel(label, input.dryRun), updaterBundleTargetForLabel(label)]);
+  const targets = input.archLabels.flatMap((label) => [bazelTargetForLabel(label, input.dryRun, environment), updaterBundleTargetForLabel(label, environment)]);
   const versionFileSnapshot = snapshotVersionFiles(input.repoRoot);
   try {
     syncVersionFiles(input.repoRoot, version);
@@ -177,40 +220,51 @@ export async function shipRelease(input: ReleaseShipInput): Promise<ReleaseShipR
     restoreVersionFiles(versionFileSnapshot);
     throw error;
   }
+  if (environment === "staging") {
+    restoreVersionFiles(versionFileSnapshot);
+  }
 
-  const releaseDir = join(input.repoRoot, ".build", "release");
+  const releaseDir = releaseOutputDir(input.repoRoot, environment);
   mkdirSync(releaseDir, { recursive: true });
   const dmgPaths: string[] = [];
   const updaterPaths: string[] = [];
   const platforms: Record<string, { signature: string; url: string }> = {};
   const remoteUrl = await mustRun(input.runner, "git", ["remote", "get-url", "origin"], input.repoRoot, input.env);
-  const downloadBase = `https://github.com/${releaseRepoSlug(remoteUrl)}/releases/download/v${version}`;
+  const repoSlug = releaseRepoSlug(remoteUrl);
+  const downloadBase = environment === "staging"
+    ? `https://github.com/${repoSlug}/releases/download/desktop-staging`
+    : `https://github.com/${repoSlug}/releases/download/v${version}`;
 
   for (const label of input.archLabels) {
-    const dmgSource = await resolveBazelOutput(input, bazelTargetForLabel(label, input.dryRun));
-    const dmgDest = join(releaseDir, releaseAssetName(version, label));
+    const dmgSource = await resolveBazelOutput(input, bazelTargetForLabel(label, input.dryRun, environment));
+    const dmgDest = join(releaseDir, releaseAssetName(version, label, environment));
     cpSync(dmgSource, dmgDest);
     dmgPaths.push(dmgDest);
 
-    const bundleSource = await resolveBazelOutput(input, updaterBundleTargetForLabel(label));
-    const bundlePath = join(releaseDir, updaterAssetName(version, label));
-    const sigPath = join(releaseDir, updaterSignatureName(version, label));
+    const bundleSource = await resolveBazelOutput(input, updaterBundleTargetForLabel(label, environment));
+    const bundlePath = join(releaseDir, updaterAssetName(version, label, environment));
+    const sigPath = join(releaseDir, updaterSignatureName(version, label, environment));
     await createUpdaterBundle(input, bundleSource, bundlePath, sigPath);
     updaterPaths.push(bundlePath, sigPath);
     platforms[updaterPlatformKey(label)] = {
-      url: `${downloadBase}/${updaterAssetName(version, label)}`,
+      url: `${downloadBase}/${updaterAssetName(version, label, environment)}`,
       signature: readFileSync(sigPath, "utf8").trim()
     };
   }
 
-  const latestJson = join(releaseDir, "latest.json");
-  const notes = input.release
+  const latestJson = join(releaseDir, environment === "staging" ? "latest-staging.json" : "latest.json");
+  const notes = input.release && environment === "production"
     ? await mustRun(input.runner, "gh", ["api", `repos/${releaseRepoSlug(remoteUrl)}/releases/generate-notes`, "-X", "POST", "-f", `tag_name=v${version}`, "-f", "target_commitish=main", "--jq", ".body"], input.repoRoot, input.env)
-    : `Dry-run updater manifest for v${version}`;
+    : environment === "staging"
+      ? `Staging updater manifest for v${version}`
+      : `Dry-run updater manifest for v${version}`;
   const pubDate = new Date().toISOString();
   writeLatestJson(latestJson, version, notes, pubDate, platforms);
 
-  if (input.release) {
+  if (input.release && environment === "staging") {
+    await ensureStagingGithubRelease(input, repoSlug);
+    await mustRun(input.runner, "gh", ["release", "upload", "desktop-staging", ...dmgPaths, ...updaterPaths, latestJson, "--repo", repoSlug, "--clobber"], input.repoRoot, input.env);
+  } else if (input.release) {
     await mustRun(input.runner, "git", ["add", "-f", "VERSION", "apps/desktop/src-tauri/tauri.conf.json", "apps/desktop/src-tauri/Cargo.toml", "apps/desktop/src-tauri/Cargo.lock"], input.repoRoot, input.env);
     await mustRun(input.runner, "git", ["commit", "-m", `release: v${version}`], input.repoRoot, input.env);
     await mustRun(input.runner, "git", ["tag", `v${version}`], input.repoRoot, input.env);

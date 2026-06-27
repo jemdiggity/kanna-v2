@@ -85,6 +85,33 @@ PY
 )
 
 genrule(
+    name = "tauri_staging_bazel_config",
+    srcs = ["tauri.conf.json"],
+    outs = ["tauri.staging.bazel.conf.json"],
+    cmd = """
+python3 - "$(location tauri.conf.json)" "$@" <<'PY'
+import json
+import os
+import pathlib
+import sys
+
+source_path = pathlib.Path(sys.argv[1])
+output_path = pathlib.Path(sys.argv[2])
+config = json.loads(source_path.read_text(encoding="utf-8"))
+config["productName"] = "Kanna Staging"
+config["identifier"] = "build.kanna.staging"
+config.setdefault("plugins", {}).setdefault("updater", {})["endpoints"] = [
+    "https://github.com/jemdiggity/kanna/releases/download/desktop-staging/latest-staging.json"
+]
+pubkey = os.environ.get("KANNA_UPDATER_PUBKEY", "").strip()
+if pubkey:
+    config.setdefault("plugins", {}).setdefault("updater", {})["pubkey"] = pubkey
+output_path.write_text(json.dumps(config, indent=2) + "\\n", encoding="utf-8")
+PY
+""",
+)
+
+genrule(
     name = "embedded_assets_rust",
     srcs = ["//:frontend_dist"],
     tools = [
@@ -94,6 +121,17 @@ genrule(
     ],
     outs = ["embedded_assets_rust.rs"],
     cmd = "$(execpath @rules_tauri//tools:tauri_embedded_assets_rust_exec) --transformer $(execpath @rules_tauri//tools/tauri_brotli_compress:tauri_transform_assets_exec) --compressor $(execpath @rules_tauri//tools/tauri_brotli_compress:tauri_brotli_compress_exec) --compression-quality 2 $(location //:frontend_dist) $@",
+)
+
+filegroup(
+    name = "tauri_staging_build_data",
+    srcs = [
+        "Info.plist",
+        ":tauri_staging_bazel_config",
+        "//:frontend_dist",
+        ":capabilities",
+        ":icons",
+    ],
 )
 
 tauri_acl_prep_dir(
@@ -114,6 +152,24 @@ tauri_acl_prep_dir(
     tauri_build_data = ":tauri_build_data",
 )
 
+tauri_acl_prep_dir(
+    name = "desktop_staging_build_script_acl_prep",
+    cargo_srcs = ":context_cargo_srcs",
+    config = ":tauri_staging_bazel_config",
+    dep_env_targets = [
+        "@desktop_crates__tauri-2.10.3//:build_script_build",
+        "@desktop_crates__tauri-plugin-dialog-2.7.0//:build_script_build",
+        "@desktop_crates__tauri-plugin-opener-2.5.3//:build_script_build",
+        "@desktop_crates__tauri-plugin-process-2.3.1//:build_script_build",
+        "@desktop_crates__tauri-plugin-shell-2.3.5//:build_script_build",
+        "@desktop_crates__tauri-plugin-sql-2.4.0//:build_script_build",
+        "@desktop_crates__tauri-plugin-updater-2.10.1//:build_script_build",
+        "@desktop_crates__tauri-plugin-webdriver-0.2.1//:build_script_build",
+    ],
+    frontend_dist = "//:frontend_dist",
+    tauri_build_data = ":tauri_staging_build_data",
+)
+
 tauri_context_support_dir(
     name = "full_context_rust_support",
     acl_out_dir = ":desktop_build_script_acl_prep",
@@ -121,6 +177,15 @@ tauri_context_support_dir(
     config = ":tauri_updater_bazel_config",
     embedded_assets_rust = ":embedded_assets_rust",
     tauri_build_data = ":tauri_build_data",
+)
+
+tauri_context_support_dir(
+    name = "full_staging_context_rust_support",
+    acl_out_dir = ":desktop_staging_build_script_acl_prep",
+    cargo_srcs = ":context_cargo_srcs",
+    config = ":tauri_staging_bazel_config",
+    embedded_assets_rust = ":embedded_assets_rust",
+    tauri_build_data = ":tauri_staging_build_data",
 )
 
 genrule(
@@ -163,6 +228,52 @@ if version_const not in src:
 src = src.replace(version_const, f'pub(crate) const KANNA_VERSION: &str = {json.dumps(version)};', 1)
 pathlib.Path(sys.argv[5]).write_text(
     "// Bazel release builds consume the generated Tauri context directly.\\n" + src,
+    encoding="utf-8",
+)
+PY
+""",
+)
+
+genrule(
+    name = "kanna_desktop_staging_lib_rs",
+    srcs = [
+        ":full_staging_context_rust_support",
+        "//:VERSION",
+        "src/lib.rs",
+    ],
+    tools = ["//tools/bazel:normalize_tauri_context.py"],
+    outs = ["src/lib_staging_bazel.rs"],
+    cmd = """
+python3 - "$(location src/lib.rs)" "$(location :full_staging_context_rust_support)" "$(location //:VERSION)" "$(location //tools/bazel:normalize_tauri_context.py)" "$@" <<'PY'
+import json
+import pathlib
+import re
+import sys
+
+src = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+support_dir = pathlib.Path(sys.argv[2])
+version = pathlib.Path(sys.argv[3]).read_text(encoding="utf-8").strip()
+helper_path = pathlib.Path(sys.argv[4])
+sys.path.insert(0, str(helper_path.parent))
+from normalize_tauri_context import normalize_generated_context
+support_dir_literal = json.dumps(f"../{support_dir.name}")
+context = (support_dir / "full_context_rust.rs").read_text(encoding="utf-8")
+context = re.sub(
+    r'::\\s*std\\s*::\\s*env\\s*!\\s*\\(\\s*"OUT_DIR"\\s*\\)',
+    support_dir_literal,
+    context,
+)
+context = normalize_generated_context(context)
+needle = "tauri::generate_context!()"
+if needle not in src:
+    raise SystemExit(f"missing {needle} in src/lib.rs")
+src = src.replace(needle, context, 1)
+version_const = 'pub(crate) const KANNA_VERSION: &str = env!("KANNA_VERSION");'
+if version_const not in src:
+    raise SystemExit(f"missing {version_const} in src/lib.rs")
+src = src.replace(version_const, f'pub(crate) const KANNA_VERSION: &str = {json.dumps(version)};', 1)
+pathlib.Path(sys.argv[5]).write_text(
+    "// Bazel staging release builds consume the generated Tauri context directly.\\n" + src,
     encoding="utf-8",
 )
 PY
@@ -262,6 +373,34 @@ rust_library(
     ),
 )
 
+rust_library(
+    name = "kanna_desktop_staging_lib_bazel",
+    srcs = glob(["src/**/*.rs"], exclude = ["src/lib.rs", "src/main.rs"]) + [":kanna_desktop_staging_lib_rs"],
+    crate_root = "src/lib_staging_bazel.rs",
+    crate_name = "kanna_desktop_lib",
+    edition = "2021",
+    compile_data = [
+        ":full_staging_context_rust_support",
+    ],
+    rustc_env = {
+        "KANNA_BUILD_BRANCH": "",
+        "KANNA_BUILD_COMMIT": "",
+        "KANNA_BUILD_INFO": "",
+        "KANNA_BUILD_WORKTREE": "",
+    },
+    deps = all_crate_deps(
+        normal = True,
+        package_name = "apps/desktop/src-tauri",
+    ) + [
+        "//crates/claude-agent-sdk:claude_agent_sdk",
+        "//crates/runtime-defaults:kanna_runtime_defaults",
+    ],
+    proc_macro_deps = all_crate_deps(
+        proc_macro = True,
+        package_name = "apps/desktop/src-tauri",
+    ),
+)
+
 rust_binary(
     name = "kanna_desktop",
     srcs = glob(["src/**/*.rs"], exclude = ["src/lib.rs"]),
@@ -310,6 +449,31 @@ rust_binary(
     edition = "2021",
     deps = [
         ":kanna_desktop_lib_bazel",
+    ],
+    platform = "//tools/bazel:macos_x86_64",
+)
+
+rust_binary(
+    name = "kanna_desktop_staging_bazel",
+    srcs = glob(["src/**/*.rs"], exclude = ["src/lib.rs"]),
+    crate_root = "src/main.rs",
+    crate_name = "kanna_desktop",
+    binary_name = "kanna-desktop",
+    edition = "2021",
+    deps = [
+        ":kanna_desktop_staging_lib_bazel",
+    ],
+)
+
+rust_binary(
+    name = "kanna_desktop_staging_x86_64_bazel",
+    srcs = glob(["src/**/*.rs"], exclude = ["src/lib.rs"]),
+    crate_root = "src/main.rs",
+    crate_name = "kanna_desktop",
+    binary_name = "kanna-desktop",
+    edition = "2021",
+    deps = [
+        ":kanna_desktop_staging_lib_bazel",
     ],
     platform = "//tools/bazel:macos_x86_64",
 )

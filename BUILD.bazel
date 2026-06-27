@@ -187,6 +187,20 @@ genrule(
     cmd = "cp $< $@ && chmod +x $@",
 )
 
+genrule(
+    name = "kanna_desktop_binary_staging_arm64",
+    srcs = ["//apps/desktop/src-tauri:kanna_desktop_staging_bazel"],
+    outs = ["release/staging/kanna-desktop"],
+    cmd = "cp $< $@ && chmod +x $@",
+)
+
+genrule(
+    name = "kanna_desktop_binary_staging_x86_64",
+    srcs = ["//apps/desktop/src-tauri:kanna_desktop_staging_x86_64_bazel"],
+    outs = ["release/staging/x86_64/kanna-desktop"],
+    cmd = "cp $< $@ && chmod +x $@",
+)
+
 filegroup(
     name = "desktop_macos_icon",
     srcs = ["//apps/desktop/src-tauri:icons/icon.icns"],
@@ -379,6 +393,148 @@ macos_notarize_dmg(
     output_name = "release/notarized/Kanna-x86_64.dmg",
 )
 
+tauri_bundle_inputs(
+    name = "kanna_bundle_inputs_staging_arm64",
+    frontend_dist = ":frontend_dist",
+    main_binary = ":kanna_desktop_binary_staging_arm64",
+    main_binary_name = "kanna-desktop",
+    sidecars = [
+        ":kanna_cli_release_arm64",
+        ":kanna_daemon_release_arm64",
+        ":kanna_mcp_release_arm64",
+        ":kanna_server_release_arm64",
+        ":kanna_task_transfer_release_arm64",
+        ":kanna_terminal_recovery_release_arm64",
+    ],
+    resource_trees = {
+        ":kanna_builtin_resources": "",
+    },
+    icons = [":desktop_macos_icon"],
+    capabilities = ["//apps/desktop/src-tauri:capabilities/default.json"],
+    tauri_config = "//apps/desktop/src-tauri:tauri_staging_bazel_config",
+    info_plist_fragments = ["//apps/desktop/src-tauri:Info.plist"],
+    bundle_id = "build.kanna.staging",
+    product_name = "Kanna Staging",
+    version_file = "VERSION",
+    target_triple = "aarch64-apple-darwin",
+)
+
+tauri_macos_app(
+    name = "kanna_app_staging_arm64",
+    bundle = ":kanna_bundle_inputs_staging_arm64",
+)
+
+macos_codesign_app(
+    name = "kanna_signed_app_staging_arm64",
+    app = ":kanna_app_staging_arm64",
+    output_name = "release/staging/arm64/Kanna Staging.app",
+)
+
+macos_updater_bundle(
+    name = "kanna_updater_bundle_staging_arm64",
+    app = ":kanna_signed_app_staging_arm64",
+    output_name = "release/staging/Kanna-Staging-arm64.app.tar.gz",
+)
+
+macos_dmg(
+    name = "kanna_dmg_staging_arm64",
+    app = ":kanna_signed_app_staging_arm64",
+    output_name = "release/staging/Kanna-Staging-arm64.dmg",
+    volume_name = "Kanna Staging",
+    volume_icon = ":desktop_macos_icon",
+    window_pos = [10, 60],
+    window_size = [500, 350],
+    icon_size = 128,
+    text_size = 16,
+    icon_positions = {
+        "Applications": "352,175",
+        "Kanna Staging.app": "160,175",
+    },
+)
+
+macos_codesign_file(
+    name = "kanna_signed_dmg_staging_arm64",
+    src = ":kanna_dmg_staging_arm64",
+    output_name = "release/staging/signed/Kanna-Staging-arm64.dmg",
+)
+
+macos_notarize_dmg(
+    name = "kanna_notarized_dmg_staging_arm64",
+    dmg = ":kanna_signed_dmg_staging_arm64",
+    output_name = "release/staging/notarized/Kanna-Staging-arm64.dmg",
+)
+
+tauri_bundle_inputs(
+    name = "kanna_bundle_inputs_staging_x86_64",
+    frontend_dist = ":frontend_dist",
+    main_binary = ":kanna_desktop_binary_staging_x86_64",
+    main_binary_name = "kanna-desktop",
+    sidecars = [
+        ":kanna_cli_release_x86_64",
+        ":kanna_daemon_release_x86_64",
+        ":kanna_mcp_release_x86_64",
+        ":kanna_server_release_x86_64",
+        ":kanna_task_transfer_release_x86_64",
+        ":kanna_terminal_recovery_release_x86_64",
+    ],
+    resource_trees = {
+        ":kanna_builtin_resources": "",
+    },
+    icons = [":desktop_macos_icon"],
+    capabilities = ["//apps/desktop/src-tauri:capabilities/default.json"],
+    tauri_config = "//apps/desktop/src-tauri:tauri_staging_bazel_config",
+    info_plist_fragments = ["//apps/desktop/src-tauri:Info.plist"],
+    bundle_id = "build.kanna.staging",
+    product_name = "Kanna Staging",
+    version_file = "VERSION",
+    target_triple = "x86_64-apple-darwin",
+)
+
+tauri_macos_app(
+    name = "kanna_app_staging_x86_64",
+    bundle = ":kanna_bundle_inputs_staging_x86_64",
+)
+
+macos_codesign_app(
+    name = "kanna_signed_app_staging_x86_64",
+    app = ":kanna_app_staging_x86_64",
+    output_name = "release/staging/x86_64/Kanna Staging.app",
+)
+
+macos_updater_bundle(
+    name = "kanna_updater_bundle_staging_x86_64",
+    app = ":kanna_signed_app_staging_x86_64",
+    output_name = "release/staging/Kanna-Staging-x86_64.app.tar.gz",
+)
+
+macos_dmg(
+    name = "kanna_dmg_staging_x86_64",
+    app = ":kanna_signed_app_staging_x86_64",
+    output_name = "release/staging/Kanna-Staging-x86_64.dmg",
+    volume_name = "Kanna Staging",
+    volume_icon = ":desktop_macos_icon",
+    window_pos = [10, 60],
+    window_size = [500, 350],
+    icon_size = 128,
+    text_size = 16,
+    icon_positions = {
+        "Applications": "352,175",
+        "Kanna Staging.app": "160,175",
+    },
+)
+
+macos_codesign_file(
+    name = "kanna_signed_dmg_staging_x86_64",
+    src = ":kanna_dmg_staging_x86_64",
+    output_name = "release/staging/signed/Kanna-Staging-x86_64.dmg",
+)
+
+macos_notarize_dmg(
+    name = "kanna_notarized_dmg_staging_x86_64",
+    dmg = ":kanna_signed_dmg_staging_x86_64",
+    output_name = "release/staging/notarized/Kanna-Staging-x86_64.dmg",
+)
+
 filegroup(
     name = "release_apps",
     srcs = [
@@ -425,6 +581,59 @@ filegroup(
         ":kanna_notarized_dmg_release_arm64",
         ":kanna_notarized_dmg_release_x86_64",
     ],
+)
+
+filegroup(
+    name = "staging_release_apps",
+    srcs = [
+        ":kanna_app_staging_arm64",
+        ":kanna_app_staging_x86_64",
+    ],
+)
+
+filegroup(
+    name = "staging_release_signed_apps",
+    srcs = [
+        ":kanna_signed_app_staging_arm64",
+        ":kanna_signed_app_staging_x86_64",
+    ],
+)
+
+filegroup(
+    name = "staging_release_updater_bundles",
+    srcs = [
+        ":kanna_updater_bundle_staging_arm64",
+        ":kanna_updater_bundle_staging_x86_64",
+    ],
+)
+
+filegroup(
+    name = "staging_release_dmgs",
+    srcs = [
+        ":kanna_dmg_staging_arm64",
+        ":kanna_dmg_staging_x86_64",
+    ],
+)
+
+filegroup(
+    name = "staging_release_signed_dmgs",
+    srcs = [
+        ":kanna_signed_dmg_staging_arm64",
+        ":kanna_signed_dmg_staging_x86_64",
+    ],
+)
+
+filegroup(
+    name = "staging_release_notarized_dmgs",
+    srcs = [
+        ":kanna_notarized_dmg_staging_arm64",
+        ":kanna_notarized_dmg_staging_x86_64",
+    ],
+)
+
+alias(
+    name = "staging_release",
+    actual = ":staging_release_notarized_dmgs",
 )
 
 alias(

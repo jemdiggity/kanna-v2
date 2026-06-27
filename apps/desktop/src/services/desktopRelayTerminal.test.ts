@@ -15,6 +15,7 @@ vi.mock("./desktopAuthSdk", () => ({
 
 import {
   PRODUCTION_CLOUD_TRANSPORT_URL,
+  STAGING_CLOUD_TRANSPORT_URL,
   createConfiguredDesktopRelayTerminalClient,
   createDesktopRelayTerminalClient,
   listActiveDesktopIdsViaRelay,
@@ -324,5 +325,11 @@ describe("resolveDesktopCloudTransportUrlFromEnv", () => {
   it("uses the production cloud transport default only outside dev builds", () => {
     expect(resolveDesktopCloudTransportUrlFromEnv({}, { dev: false })).toBe(PRODUCTION_CLOUD_TRANSPORT_URL);
     expect(resolveDesktopCloudTransportUrlFromEnv({}, { dev: true })).toBeNull();
+  });
+
+  it("uses the staging cloud transport default when the desktop cloud env is staging", () => {
+    expect(resolveDesktopCloudTransportUrlFromEnv({
+      KANNA_CLOUD_ENV: " staging ",
+    }, { dev: false })).toBe(STAGING_CLOUD_TRANSPORT_URL);
   });
 });
