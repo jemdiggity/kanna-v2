@@ -309,16 +309,19 @@ fn request_snapshot(conn: &mut ClientConn, id: &str) -> SnapshotPayload {
     conn.send(&Cmd::Snapshot {
         session_id: id.to_string(),
     });
-    match conn.recv() {
-        Evt::Snapshot {
-            session_id,
-            snapshot,
-        } => {
-            assert_eq!(session_id, id);
-            snapshot
+    loop {
+        match conn.recv() {
+            Evt::Snapshot {
+                session_id,
+                snapshot,
+            } => {
+                assert_eq!(session_id, id);
+                break snapshot;
+            }
+            Evt::Output { .. } | Evt::StatusChanged { .. } => continue,
+            Evt::Error { code, message } => panic!("snapshot failed: {:?}: {}", code, message),
+            other => panic!("expected Snapshot, got: {:?}", other),
         }
-        Evt::Error { code, message } => panic!("snapshot failed: {:?}: {}", code, message),
-        other => panic!("expected Snapshot, got: {:?}", other),
     }
 }
 
