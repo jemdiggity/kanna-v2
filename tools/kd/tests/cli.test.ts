@@ -106,6 +106,21 @@ describe("kd CLI", () => {
     });
   });
 
+  it("parses dev up remote as a remote-poking dev stack", () => {
+    expect(parseCliArgs(["dev", "up", "--remote"])).toEqual({
+      taskId: "dev.up",
+      input: {
+        mobile: false,
+        emulators: false,
+        remote: true,
+        seed: false,
+        attach: false,
+        deleteDb: false,
+        killDaemon: false
+      }
+    });
+  });
+
   it("parses dev up with a borrowed Firebase emulator environment", () => {
     expect(parseCliArgs(["dev", "up", "--firebase-env-from", "task-source"])).toEqual({
       taskId: "dev.up",
@@ -338,6 +353,25 @@ describe("kd CLI", () => {
     expect(parseCliArgs(["test", "lan-lab", "--hosts", ".kanna/lab/macs.json"])).toEqual({
       taskId: "test.lan-lab",
       input: { hosts: ".kanna/lab/macs.json" },
+    });
+    expect(parseCliArgs(["test", "remote-e2e"])).toEqual({
+      taskId: "test.remote-e2e",
+      input: { dev: true, staging: false },
+    });
+    expect(parseCliArgs(["test", "remote-e2e", "--staging"])).toEqual({
+      taskId: "test.remote-e2e",
+      input: { dev: false, staging: true },
+    });
+  });
+
+  it("parses remote doctor commands", () => {
+    expect(parseCliArgs(["doctor", "--remote"])).toEqual({
+      taskId: "doctor.remote",
+      input: { staging: false }
+    });
+    expect(parseCliArgs(["doctor", "--remote", "--staging"])).toEqual({
+      taskId: "doctor.remote",
+      input: { staging: true }
     });
   });
 

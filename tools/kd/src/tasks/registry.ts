@@ -56,6 +56,7 @@ import type { TaskDefinition, TaskResult } from "./types";
 export interface DevUpInput {
   mobile: boolean;
   emulators: boolean;
+  remote?: boolean;
   seed: boolean;
   attach: boolean;
   deleteDb: boolean;
@@ -92,6 +93,7 @@ export interface MobileRunInput {
 export const devUpInputSchema = z.object({
   mobile: z.boolean().default(false),
   emulators: z.boolean().default(false),
+  remote: z.boolean().default(false),
   seed: z.boolean().default(false),
   attach: z.boolean().default(false),
   deleteDb: z.boolean().default(false),
@@ -158,6 +160,15 @@ const emptyInputSchema = z.object({});
 
 const lanLabInputSchema = z.object({
   hosts: z.string()
+});
+
+const remoteE2eInputSchema = z.object({
+  dev: z.boolean().default(true),
+  staging: z.boolean().default(false)
+});
+
+const remoteDoctorInputSchema = z.object({
+  staging: z.boolean().default(false)
 });
 
 const setupInputSchema = z.object({
@@ -289,13 +300,14 @@ async function executeDevUp(input: DevUpInput): Promise<TaskResult> {
     await resetSqliteDb(nodeCommandRunner, dbTarget);
   }
 
+  const emulators = input.emulators || input.remote === true;
   const firebaseConfigPath = writeFirebaseEmulatorConfig(context.repoRoot, context.ports);
   writeTauriLocalConfig(context.repoRoot, context.ports.KANNA_DEV_PORT);
   const plan = buildDevPlan({
     repoRoot: context.repoRoot,
     env: context.env,
     mobile: input.mobile,
-    emulators: input.emulators,
+    emulators,
     firebaseConfigPath,
     mobileServerUrl: resolveMobileServerUrl(context.env)
   });
@@ -311,7 +323,7 @@ async function executeDevUp(input: DevUpInput): Promise<TaskResult> {
   return {
     ok: true,
     message: `Started tmux session '${context.tmux.session}'.`,
-    data: { windows: plan.windows.map((window) => window.name) }
+    data: { windows: plan.windows.map((window) => window.name), remote: input.remote }
   };
 }
 
@@ -1687,6 +1699,24 @@ export const taskDefinitions = [
     }
   },
   {
+    id: "test.remote-e2e",
+    description: "Run remote task interaction E2E tests.",
+    inputSchema: remoteE2eInputSchema,
+    execute: async (_context, input) => {
+      const parsed = remoteE2eInputSchema.parse(input);
+      if (parsed.dev && parsed.staging) {
+        return { ok: false, message: "remote-e2e accepts only one of --dev or --staging." };
+      }
+      const context = await resolveDefaultContext(process.env);
+      return runBuiltCommand(
+        "pnpm",
+        ["--dir", "tests/remote-e2e", "exec", "tsx", "src/run.ts", parsed.staging ? "--staging" : "--dev"],
+        context.repoRoot,
+        context.env
+      );
+    }
+  },
+  {
     id: "daemon.kill",
     description: "Kill Kanna daemon processes for this workspace.",
     inputSchema: emptyInputSchema,
@@ -1702,6 +1732,21 @@ export const taskDefinitions = [
         message: formatJsonResult(result),
         data: result
       };
+    }
+  },
+  {
+    id: "doctor.remote",
+    description: "Check remote task E2E prerequisites.",
+    inputSchema: remoteDoctorInputSchema,
+    execute: async (_context, input) => {
+      const parsed = remoteDoctorInputSchema.parse(input);
+      const context = await resolveDefaultContext(process.env);
+      return runBuiltCommand(
+        "pnpm",
+        ["--dir", "tests/remote-e2e", "exec", "tsx", "src/doctor.ts", ...(parsed.staging ? ["--staging"] : [])],
+        context.repoRoot,
+        context.env
+      );
     }
   },
   {

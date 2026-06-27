@@ -18,6 +18,7 @@ describe("MCP tool registry", () => {
       "cloud_relay_provision",
       "pages_build_schema",
       "test_app_update_bundle",
+      "test_remote_e2e",
       "emulators_up",
       "emulators_down",
       "emulators_status",
@@ -25,6 +26,7 @@ describe("MCP tool registry", () => {
       "mobile_run",
       "mobile_doctor",
       "mobile_device_smoke",
+      "doctor_remote",
       "doctor"
     ]);
   });
