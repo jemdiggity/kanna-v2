@@ -220,6 +220,7 @@ pub fn resolve_request(
     let tool = catalog
         .find_tool(tool_name)
         .ok_or_else(|| format!("unknown tool: {tool_name}"))?;
+    reject_unknown_args(tool, args)?;
     let mut path = tool.path.clone();
     let mut body = Map::new();
     let mut query = Vec::new();
@@ -319,6 +320,18 @@ fn value_for_param(
         ParamType::Object => value,
     };
     Ok(Some(value))
+}
+
+fn reject_unknown_args(tool: &ToolDef, args: &Value) -> Result<(), String> {
+    let Some(args_object) = args.as_object() else {
+        return Ok(());
+    };
+    for key in args_object.keys() {
+        if !tool.params.iter().any(|param| param.name == *key) {
+            return Err(format!("unknown argument: {key}"));
+        }
+    }
+    Ok(())
 }
 
 fn string_value(value: &Value, name: &str) -> Result<String, String> {

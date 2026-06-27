@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
 import { parseAgentDefinition, validateAgentDefinition } from "./agent-loader";
 
 describe("parseAgentDefinition", () => {
@@ -155,6 +156,18 @@ describe("validateAgentDefinition", () => {
       prompt: "",
     };
     expect(validateAgentDefinition(def)).toEqual([]);
+  });
+
+  it("keeps the built-in implement agent inside the Kanna pipeline boundary", () => {
+    const content = readFileSync(
+      new URL("../../../../.kanna/agents/implement/AGENT.md", import.meta.url),
+      "utf8"
+    );
+    const result = parseAgentDefinition(content);
+
+    expect(result.prompt).toContain("Do not push a branch or create a pull request");
+    expect(result.prompt).toContain("kanna_complete_stage");
+    expect(result.prompt).toContain("kanna-cli stage-complete");
   });
 
   it("returns error for invalid permission_mode value", () => {

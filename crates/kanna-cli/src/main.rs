@@ -192,10 +192,6 @@ pub(crate) enum TaskCommands {
         #[arg(long)]
         base_ref: Option<String>,
 
-        /// Optional stage override
-        #[arg(long)]
-        stage: Option<String>,
-
         /// Optional agent provider override
         #[arg(long)]
         agent_provider: Option<String>,

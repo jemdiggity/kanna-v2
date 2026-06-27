@@ -17,6 +17,7 @@ This session was launched by Kanna, a desktop app that manages agent tasks, work
 - Claude tasks are launched with the instance-local MCP config via \`--mcp-config\` when \`kanna-mcp\` is available.
 - If MCP tools are unavailable, fall back to the instance-local \`kanna-cli\`; it is exported as \`KANNA_CLI_PATH\` and its directory is prepended to PATH.
 - Use \`kanna-cli guide\` for the generated fallback CLI manual and current workflow semantics.
+- Do not push a branch or create a pull request unless this stage's prompt explicitly tells you to do so. Most stages should finish by recording stage completion so Kanna can advance the configured pipeline.
 - When this stage is complete, prefer MCP \`kanna_complete_stage\`; fallback: \`kanna-cli stage-complete --task-id "$KANNA_TASK_ID" --status success --summary "..."\`.`;
 
 export function buildKannaRuntimeSystemPrompt(): string {

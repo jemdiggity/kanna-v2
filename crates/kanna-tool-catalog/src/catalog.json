@@ -93,7 +93,6 @@
         { "name": "display_name", "type": "string", "required": false, "location": "body", "key": "displayName" },
         { "name": "pipeline_name", "type": "string", "required": false, "location": "body", "key": "pipelineName" },
         { "name": "base_ref", "type": "string", "required": false, "location": "body", "key": "baseRef" },
-        { "name": "stage", "type": "string", "required": false, "location": "body" },
         { "name": "agent_provider", "type": "string", "required": false, "location": "body", "key": "agentProvider" },
         { "name": "agent_type", "type": "string", "required": false, "location": "body", "key": "agentType" },
         { "name": "model", "type": "string", "required": false, "location": "body" },

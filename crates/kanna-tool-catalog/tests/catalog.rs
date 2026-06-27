@@ -55,9 +55,9 @@ fn generated_schema_preserves_required_order_types_and_enums() {
         create_task["inputSchema"]["properties"]["allowed_tools"],
         json!({ "type": "array", "items": { "type": "string" } })
     );
-    assert_eq!(
-        create_task["inputSchema"]["properties"]["agent_type"],
-        json!({ "type": "string" })
+    assert!(
+        create_task["inputSchema"]["properties"]["stage"].is_null(),
+        "agent-facing create-task tool should not expose stage overrides"
     );
 
     let wait = tools
@@ -273,6 +273,23 @@ fn resolves_expected_requests_for_every_bundled_tool() {
     assert_eq!(wait_spec.timeout_secs, 600);
     assert_eq!(wait_spec.poll_secs, 1);
     assert_eq!(wait_spec.until, WaitUntil::Closed);
+}
+
+#[test]
+fn create_task_rejects_undeclared_stage_override_argument() {
+    let catalog = bundled_catalog();
+    let err = resolve_request(
+        &catalog,
+        "kanna_create_task",
+        &json!({
+            "repo_id": "repo-1",
+            "prompt": "Jump to PR",
+            "stage": "pr"
+        }),
+    )
+    .expect_err("stage should not be accepted by agent-facing create-task tools");
+
+    assert!(err.contains("unknown argument: stage"));
 }
 
 #[test]
