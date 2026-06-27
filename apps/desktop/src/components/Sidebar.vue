@@ -83,6 +83,11 @@ function isSearchActive(): boolean {
   return searchQuery.value.trim().length > 0;
 }
 
+function clearSearch(): void {
+  searchQuery.value = "";
+  nextTick(() => searchInputRef.value?.focus());
+}
+
 function matchesSearch(item: SidebarPipelineItem): boolean {
   const q = trimmedSearchQuery.value;
   if (!q) return true;
@@ -701,15 +706,29 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
     </div>
 
     <div class="sidebar-footer">
-      <input
-        ref="searchInputRef"
-        v-model="searchQuery"
-        v-bind="macOsTextInputAttrs"
-        type="text"
-        class="search-input"
-        :placeholder="$t('sidebar.searchPlaceholder')"
-        @keydown.escape="searchQuery = ''; searchInputRef?.blur()"
-      />
+      <div class="search-field">
+        <input
+          ref="searchInputRef"
+          v-model="searchQuery"
+          v-bind="macOsTextInputAttrs"
+          type="text"
+          class="search-input"
+          :placeholder="$t('sidebar.searchPlaceholder')"
+          @keydown.escape="searchQuery = ''; searchInputRef?.blur()"
+        />
+        <button
+          v-if="searchQuery.length > 0"
+          type="button"
+          class="search-clear"
+          aria-label="Clear task search"
+          title="Clear task search"
+          data-testid="sidebar-search-clear"
+          @mousedown.prevent
+          @click="clearSearch"
+        >
+          ×
+        </button>
+      </div>
     </div>
   </aside>
 </template>
@@ -1002,9 +1021,15 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
   gap: 8px;
 }
 
-.search-input {
+.search-field {
+  position: relative;
   flex: 1;
-  padding: 6px 10px;
+  min-width: 0;
+}
+
+.search-input {
+  width: 100%;
+  padding: 6px 28px 6px 10px;
   background: var(--kn-bg-panel-raised);
   border: 1px solid var(--kn-border-strong);
   color: var(--kn-text-secondary);
@@ -1022,6 +1047,31 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
 
 .search-input::placeholder {
   color: var(--kn-text-muted);
+}
+
+.search-clear {
+  position: absolute;
+  right: 5px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 18px;
+  height: 18px;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--kn-text-muted);
+  font: inherit;
+  font-size: 14px;
+  line-height: 18px;
+  padding: 0;
+  cursor: default;
+}
+
+.search-clear:hover,
+.search-clear:focus-visible {
+  background: var(--kn-bg-hover);
+  color: var(--kn-text-primary);
+  outline: none;
 }
 
 .pinned-zone {

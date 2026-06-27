@@ -309,6 +309,38 @@ describe("Sidebar", () => {
     expect(wrapper.text()).not.toContain('Filtering tasks: "visibility"');
   });
 
+  it("shows a clear button only while the task search input has text", async () => {
+    const wrapper = mountSidebar([
+      item("task-1", {
+        prompt: "Fix sidebar search visibility",
+        display_name: "Sidebar visibility fix",
+        branch: "task-1",
+      }),
+      item("task-2", {
+        prompt: "Refine merge queue behavior",
+        display_name: "Merge queue polish",
+        branch: "task-2",
+        stage: "pr",
+      }),
+    ]);
+
+    expect(wrapper.find('[data-testid="sidebar-search-clear"]').exists()).toBe(false);
+
+    await wrapper.get(".search-input").setValue("visibility");
+
+    const clearButton = wrapper.get('[data-testid="sidebar-search-clear"]');
+    expect(clearButton.attributes("aria-label")).toBe("Clear task search");
+
+    await clearButton.trigger("click");
+
+    expect((wrapper.get(".search-input").element as HTMLInputElement).value).toBe("");
+    expect(wrapper.find('[data-testid="sidebar-search-clear"]').exists()).toBe(false);
+    expect(wrapper.findAll(".pipeline-item .item-title").map((el) => el.text()).sort()).toEqual([
+      "Merge queue polish",
+      "Sidebar visibility fix",
+    ]);
+  });
+
   it("excludes closed tasks from filtered repo count totals", async () => {
     const pipelineItems = [
       item("task-open", {
