@@ -20,6 +20,8 @@ use std::process::Command;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 
+static TEST_SIDECAR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 mod core;
 mod revision;
 mod spawn;

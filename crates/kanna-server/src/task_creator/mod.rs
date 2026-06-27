@@ -113,7 +113,7 @@ pub(crate) fn prepare_task_for_api(
             pipeline_name: request.pipeline_name,
             base_ref: request.base_ref,
             stored_base_ref: None,
-            stage_override: request.stage,
+            stage_override: None,
             explicit_provider,
             default_provider,
             agent_type: request.agent_type,

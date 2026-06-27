@@ -102,6 +102,23 @@ fn parses_new_repo_and_task_subcommands() {
         _ => panic!("expected task create command"),
     }
 
+    let result = crate::Cli::try_parse_from([
+        "kanna-cli",
+        "task",
+        "create",
+        "--repo-id",
+        "repo-1",
+        "--prompt",
+        "Jump to PR",
+        "--stage",
+        "pr",
+    ]);
+    let err = match result {
+        Ok(_) => panic!("agent-facing task create must not accept stage overrides"),
+        Err(err) => err,
+    };
+    assert!(err.to_string().contains("unexpected argument '--stage'"));
+
     let cli = crate::Cli::try_parse_from([
         "kanna-cli",
         "task",
@@ -290,7 +307,6 @@ fn typed_create_body_matches_catalog_create_task_body() {
         display_name: Some("Short task title".to_string()),
         pipeline_name: Some("default".to_string()),
         base_ref: Some("origin/main".to_string()),
-        stage: Some("pr".to_string()),
         agent_provider: Some("claude".to_string()),
         agent_type: Some("agent".to_string()),
         model: Some("sonnet".to_string()),
@@ -310,7 +326,6 @@ fn typed_create_body_matches_catalog_create_task_body() {
             "display_name": "Short task title",
             "pipeline_name": "default",
             "base_ref": "origin/main",
-            "stage": "pr",
             "agent_provider": "claude",
             "agent_type": "agent",
             "model": "sonnet",

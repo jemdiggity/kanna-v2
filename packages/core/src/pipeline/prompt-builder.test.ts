@@ -117,6 +117,7 @@ describe("buildKannaRuntimeSystemPrompt", () => {
     expect(result).toContain("kanna-cli guide");
     expect(result).toContain("kanna_complete_stage");
     expect(result).toContain("kanna-cli stage-complete");
+    expect(result).toContain("Do not push a branch or create a pull request");
     expect(result).toContain("Agents are assigned workspace ports from `<repo>/.kanna/config.json`");
     expect(result).toContain("Use the assigned ports for services like Vite servers and Firebase emulators");
     expect(result).toContain("Do not leave your assigned workspace unless asked");

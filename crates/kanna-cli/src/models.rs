@@ -83,8 +83,6 @@ pub(crate) struct CreateTaskRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) base_ref: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) stage: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) agent_provider: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) agent_type: Option<String>,
@@ -168,7 +166,6 @@ pub(crate) struct TaskCreateOptions {
     pub(crate) display_name: Option<String>,
     pub(crate) pipeline_name: Option<String>,
     pub(crate) base_ref: Option<String>,
-    pub(crate) stage: Option<String>,
     pub(crate) agent_provider: Option<String>,
     pub(crate) agent_type: Option<String>,
     pub(crate) model: Option<String>,

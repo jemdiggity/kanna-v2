@@ -102,6 +102,10 @@ async fn guide_json_fetches_env_task_id_and_includes_workflow_context_and_tools(
         .as_str()
         .unwrap()
         .contains("Prefer kanna_complete_stage"));
+    assert!(guide["workflow"]["prBoundary"]
+        .as_str()
+        .unwrap()
+        .contains("Do not push a branch or create a pull request"));
     let tool_names = guide["tools"]
         .as_array()
         .unwrap()

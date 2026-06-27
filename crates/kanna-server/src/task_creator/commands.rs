@@ -184,6 +184,7 @@ pub(super) fn build_kanna_preamble(
         "Prefer `kanna-mcp` tools for Kanna task operations when your agent client exposes them.".to_string(),
         "If MCP tools are unavailable, fall back to the instance-local `kanna-cli`; it is exported as `KANNA_CLI_PATH` and its directory is prepended to `PATH`.".to_string(),
         "Use `kanna-cli guide` for the generated fallback CLI manual and current workflow semantics.".to_string(),
+        "Do not push a branch or create a pull request unless this stage's prompt explicitly tells you to do so. Most stages should finish by recording stage completion so Kanna can advance the configured pipeline.".to_string(),
         "When this stage is complete, prefer MCP `kanna_complete_stage`; fallback: `kanna-cli stage-complete --task-id \"$KANNA_TASK_ID\" --status success --summary \"...\"`.".to_string(),
     ]);
     lines.join("\n")

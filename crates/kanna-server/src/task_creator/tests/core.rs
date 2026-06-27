@@ -77,6 +77,7 @@ fn build_agent_command_adds_claude_kanna_preamble_as_system_prompt() {
     assert!(mcp_index < cli_index);
     assert!(cli_index < command.find("kanna-cli guide").unwrap());
     assert!(command.contains("KANNA_CLI_PATH"));
+    assert!(command.contains("Do not push a branch or create a pull request"));
 }
 
 #[test]
@@ -101,6 +102,7 @@ fn resolve_binary_prefers_sidecar_candidate_before_path_lookup() {
 
 #[test]
 fn build_spawn_env_prepends_kanna_cli_directory_to_path() {
+    let _sidecar_guard = super::TEST_SIDECAR_LOCK.lock().unwrap();
     let mut config = test_config("spawn-env-kanna-cli-path");
     let (kanna_cli_path, created_test_sidecar) = ensure_test_sidecar("kanna-cli");
     let (kanna_mcp_path, created_test_mcp_sidecar) = ensure_test_sidecar("kanna-mcp");
@@ -144,7 +146,6 @@ fn prepare_task_defaults_to_agent_session_for_claude_and_codex() {
                 display_name: None,
                 pipeline_name: None,
                 base_ref: None,
-                stage: None,
                 agent_provider: Some(provider.to_string()),
                 agent_type: None,
                 model: Some("model-a".to_string()),
@@ -174,6 +175,7 @@ fn prepare_task_defaults_to_agent_session_for_claude_and_codex() {
 
 #[test]
 fn prepare_codex_agent_uses_resolved_executable_for_headless_spawn() {
+    let _sidecar_guard = super::TEST_SIDECAR_LOCK.lock().unwrap();
     let (codex_sidecar, created_sidecar) = ensure_test_sidecar("codex");
     let repo_root = init_git_repo("codex-headless-executable");
     let config = test_config("codex-headless-executable");
@@ -190,7 +192,6 @@ fn prepare_codex_agent_uses_resolved_executable_for_headless_spawn() {
             display_name: None,
             pipeline_name: None,
             base_ref: None,
-            stage: None,
             agent_provider: Some("codex".to_string()),
             agent_type: None,
             model: None,
@@ -218,6 +219,7 @@ fn prepare_codex_agent_uses_resolved_executable_for_headless_spawn() {
 
 #[test]
 fn prepare_headless_agent_uses_worktree_workspace_path_for_executable_resolution() {
+    let _sidecar_guard = super::TEST_SIDECAR_LOCK.lock().unwrap();
     use std::os::unix::fs::PermissionsExt;
 
     let repo_root = init_git_repo("headless-workspace-path");
@@ -265,7 +267,6 @@ fn prepare_headless_agent_uses_worktree_workspace_path_for_executable_resolution
             display_name: None,
             pipeline_name: None,
             base_ref: None,
-            stage: None,
             agent_provider: Some("codex".to_string()),
             agent_type: None,
             model: None,
@@ -315,7 +316,6 @@ fn prepare_task_defaults_to_pty_session_for_copilot() {
             display_name: None,
             pipeline_name: None,
             base_ref: None,
-            stage: None,
             agent_provider: Some("copilot".to_string()),
             agent_type: None,
             model: None,
@@ -438,7 +438,6 @@ fn prepare_task_uses_builtin_default_pipeline_when_repo_has_no_local_default_pip
             display_name: None,
             pipeline_name: None,
             base_ref: None,
-            stage: None,
             agent_provider: Some("codex".to_string()),
             agent_type: None,
             model: None,
@@ -541,7 +540,6 @@ fn prepare_task_uses_default_agent_provider_setting_when_request_omits_provider(
             display_name: None,
             pipeline_name: None,
             base_ref: None,
-            stage: None,
             agent_provider: None,
             agent_type: None,
             model: None,
@@ -568,7 +566,6 @@ fn prepare_task_uses_default_agent_provider_setting_when_request_omits_provider(
             display_name: None,
             pipeline_name: None,
             base_ref: None,
-            stage: None,
             agent_provider: Some("codex".to_string()),
             agent_type: None,
             model: None,

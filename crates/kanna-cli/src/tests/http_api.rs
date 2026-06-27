@@ -184,7 +184,6 @@ async fn create_task_via_api_posts_payload_without_agent_provider_when_flag_abse
         display_name: None,
         pipeline_name: None,
         base_ref: None,
-        stage: None,
         agent_provider: None,
         agent_type: None,
         model: None,
