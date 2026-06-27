@@ -84,6 +84,11 @@ pub(crate) async fn stream_output(
                     log::error!("[stream] writable readiness failed session={}", session_id);
                     break;
                 };
+                if stream_control.stop_requested() {
+                    log::info!("[stream] stop requested session={}", session_id);
+                    stream_control.mark_stopped();
+                    return;
+                }
                 let Some(front) = pending_input.front() else {
                     continue;
                 };
@@ -123,6 +128,11 @@ pub(crate) async fn stream_output(
                     log::error!("[stream] readable readiness failed session={}", session_id);
                     break;
                 };
+                if stream_control.stop_requested() {
+                    log::info!("[stream] stop requested session={}", session_id);
+                    stream_control.mark_stopped();
+                    return;
+                }
                 let result = guard.try_io(|inner| {
                     let fd = inner.get_ref().as_raw_fd();
                     let n = unsafe {

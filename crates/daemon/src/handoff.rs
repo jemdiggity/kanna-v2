@@ -658,8 +658,6 @@ pub(crate) async fn handle_handoff(
             }
         }
     }
-    drop(mgr);
-
     // Collect agent sessions (v2 payloads only — v1 daemons cannot adopt
     // them; their children keep running detached with journals on disk).
     if version == HANDOFF_VERSION {

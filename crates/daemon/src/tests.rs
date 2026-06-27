@@ -250,10 +250,10 @@ fn stream_output_prioritizes_live_delivery_before_recovery_persistence() {
         .find("let evt = Event::Output")
         .expect("stream_output should emit live Output events");
     let headless_mirror_index = stream_body
-        .find(".mirror_output(&session_id")
+        .find(".mirror_output(data")
         .expect("stream_output should mirror output into the headless terminal");
     let recovery_write_index = stream_body
-        .find(".write_output(&session_id")
+        .find(".write_output(session_id")
         .expect("stream_output should persist output for recovery");
 
     assert!(
