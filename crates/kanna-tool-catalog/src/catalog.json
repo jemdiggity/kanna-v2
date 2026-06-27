@@ -125,6 +125,17 @@
       ]
     },
     {
+      "name": "kanna_rename_task",
+      "description": "Rename an existing Kanna task by setting its display name.",
+      "method": "PATCH",
+      "path": "/v1/tasks/{task_id}",
+      "response": "json",
+      "params": [
+        { "name": "task_id", "type": "string", "required": true, "location": "path" },
+        { "name": "display_name", "type": "string", "required": true, "location": "body", "key": "displayName" }
+      ]
+    },
+    {
       "name": "kanna_advance_stage",
       "description": "Advance an accepted Kanna task to the next pipeline stage; when the next stage is a new-task stage, this closes the current task and opens a new task in a new worktree.",
       "method": "POST",

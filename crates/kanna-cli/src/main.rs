@@ -264,6 +264,20 @@ pub(crate) enum TaskCommands {
         #[arg(long)]
         server_url: Option<String>,
     },
+    /// Rename a task by setting its display name
+    Rename {
+        /// The task/pipeline_item ID
+        #[arg(long)]
+        task_id: String,
+
+        /// New task title
+        #[arg(long)]
+        name: String,
+
+        /// Override the local Kanna server base URL
+        #[arg(long)]
+        server_url: Option<String>,
+    },
     /// Advance an accepted task to the next pipeline stage
     AdvanceStage {
         /// The accepted task/pipeline_item ID

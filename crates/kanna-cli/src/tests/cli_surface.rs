@@ -133,6 +133,26 @@ fn parses_new_repo_and_task_subcommands() {
         _ => panic!("expected repo-scoped task list command"),
     }
 
+    let cli = crate::Cli::try_parse_from([
+        "kanna-cli",
+        "task",
+        "rename",
+        "--task-id",
+        "task-1",
+        "--name",
+        "Renamed task",
+    ])
+    .unwrap();
+    match cli.command {
+        crate::Commands::Task {
+            command: crate::TaskCommands::Rename { task_id, name, .. },
+        } => {
+            assert_eq!(task_id, "task-1");
+            assert_eq!(name, "Renamed task");
+        }
+        _ => panic!("expected task rename command"),
+    }
+
     let cli = crate::Cli::try_parse_from(["kanna-cli", "task", "search", "--query", "review me"])
         .unwrap();
     match cli.command {

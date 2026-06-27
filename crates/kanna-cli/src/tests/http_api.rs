@@ -58,6 +58,27 @@ async fn close_task_posts_to_close_action_path() {
 }
 
 #[tokio::test]
+async fn rename_task_patches_task_update_path_with_display_name() {
+    let response = http_json_response("200 OK", "{\"taskId\":\"task-123\"}");
+    let (base_url, handle) = serve_single_http_response(response).await;
+
+    let action = rename_task_via_api(
+        &base_url,
+        "task-123",
+        &TaskRenameRequest {
+            display_name: "Renamed task".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    let request = handle.await.unwrap();
+
+    assert_eq!(action.task_id, "task-123");
+    assert!(request.starts_with("PATCH /v1/tasks/task-123 HTTP/1.1"));
+    assert!(request.contains(r#"{"displayName":"Renamed task"}"#));
+}
+
+#[tokio::test]
 async fn advance_stage_surfaces_http_errors() {
     let response = http_json_response("409 Conflict", "{\"error\":\"task not accepted yet\"}");
     let (base_url, handle) = serve_single_http_response(response).await;

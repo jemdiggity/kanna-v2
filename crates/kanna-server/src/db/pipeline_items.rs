@@ -338,6 +338,26 @@ impl Db {
         Ok(())
     }
 
+    pub fn update_pipeline_item_display_name(
+        &self,
+        id: &str,
+        display_name: &str,
+    ) -> Result<(), rusqlite::Error> {
+        let Some(pipeline_item_id) = self.resolve_pipeline_item_id(id)? else {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        };
+        let rows_affected = self.conn.execute(
+            "UPDATE pipeline_item
+             SET display_name = ?, updated_at = datetime('now')
+             WHERE id = ?",
+            (display_name, pipeline_item_id),
+        )?;
+        if rows_affected == 0 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        Ok(())
+    }
+
     pub fn update_pipeline_item_stage_result(
         &self,
         id: &str,

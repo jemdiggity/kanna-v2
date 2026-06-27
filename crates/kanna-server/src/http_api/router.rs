@@ -10,7 +10,7 @@ use super::task_actions::{
 use super::task_blockers::{block_task, unblock_task};
 use super::task_input::send_task_input;
 use super::task_logs::task_logs;
-use super::tasks::{create_task, get_task, list_recent_tasks, search_tasks};
+use super::tasks::{create_task, get_task, list_recent_tasks, search_tasks, update_task};
 use axum::body::Body;
 use axum::http::Request;
 use axum::routing::{get, post};
@@ -29,7 +29,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/tasks/recent", get(list_recent_tasks))
         .route("/v1/tasks/search", get(search_tasks))
         .route("/v1/tasks", post(create_task))
-        .route("/v1/tasks/{task_id}", get(get_task))
+        .route("/v1/tasks/{task_id}", get(get_task).patch(update_task))
         .route("/v1/tasks/{task_id}/logs", get(task_logs))
         .route("/v1/tasks/{task_id}/input", post(send_task_input))
         .route("/v1/tasks/{task_id}/actions/block", post(block_task))

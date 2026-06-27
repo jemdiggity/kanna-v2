@@ -6,15 +6,15 @@ use serde_json::Value;
 use crate::api::{
     advance_stage_via_api, block_task_via_api, close_task_via_api, create_task_via_api,
     get_task_via_api, list_repo_tasks_via_api, list_tasks_via_api, parse_wait_until,
-    request_revision_via_api, search_tasks_via_api, send_task_input_via_api, task_logs_via_api,
-    unblock_task_via_api, wait_task_via_api,
+    rename_task_via_api, request_revision_via_api, search_tasks_via_api, send_task_input_via_api,
+    task_logs_via_api, unblock_task_via_api, wait_task_via_api,
 };
 use crate::commands::socket::notify_socket;
 use crate::commands::{parse_metadata_json, print_json};
 use crate::config::resolve_server_base_url_from_env;
 use crate::models::{
     BlockTaskRequest, CreateTaskRequest, RequestRevisionRequest, TaskCreateOptions, TaskDetail,
-    TaskInputRequest, TaskStatusRow, TaskSummary,
+    TaskInputRequest, TaskRenameRequest, TaskStatusRow, TaskSummary,
 };
 use crate::TaskCommands;
 
@@ -307,6 +307,24 @@ pub(crate) async fn run(command: TaskCommands) {
                     process::exit(1);
                 });
             if let Err(e) = print_json(&response) {
+                eprintln!("Error: {e}");
+                process::exit(1);
+            }
+        }
+        TaskCommands::Rename {
+            task_id,
+            name,
+            server_url,
+        } => {
+            let base_url = resolve_server_base_url_from_env(server_url.as_deref());
+            let request = TaskRenameRequest { display_name: name };
+            let renamed = rename_task_via_api(&base_url, &task_id, &request)
+                .await
+                .unwrap_or_else(|e| {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                });
+            if let Err(e) = print_json(&renamed) {
                 eprintln!("Error: {e}");
                 process::exit(1);
             }

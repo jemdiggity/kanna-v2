@@ -140,6 +140,12 @@ pub(crate) struct TaskInputRequest {
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct TaskRenameRequest {
+    pub(crate) display_name: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct BlockTaskRequest {
     pub(crate) blocker_task_ids: Vec<String>,
 }
