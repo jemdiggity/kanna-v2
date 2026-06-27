@@ -1282,6 +1282,41 @@ fn connection_drop_cleanup_removes_attached_and_observer_writers() {
     );
 }
 
+#[test]
+fn connection_drop_cleanup_removes_subscriber_writers() {
+    let daemon = DaemonHandle::start();
+
+    thread::sleep(Duration::from_millis(250));
+    let baseline = daemon_fd_count(daemon.child.id());
+    let client_count = 64;
+    let mut clients = Vec::with_capacity(client_count);
+
+    for _ in 0..client_count {
+        let mut client = daemon.connect();
+        client.send(&Cmd::Subscribe);
+        match client.recv() {
+            Evt::Ok => {}
+            other => panic!("expected Ok for Subscribe, got: {:?}", other),
+        }
+        clients.push(client);
+    }
+
+    let inflated = daemon_fd_count(daemon.child.id());
+    assert!(
+        inflated >= baseline + client_count / 2,
+        "daemon fd count should grow while subscriber clients are connected; baseline={baseline}, inflated={inflated}"
+    );
+
+    drop(clients);
+
+    let final_count =
+        wait_for_daemon_fd_count_at_most(daemon.child.id(), baseline + 6, Duration::from_secs(5));
+    assert!(
+        final_count <= baseline + 6,
+        "daemon fd count should return near baseline after subscriber drops; baseline={baseline}, final={final_count}"
+    );
+}
+
 /// Rapid attach from separate connections: all connections receive output (broadcast).
 /// With the single-reader + broadcast architecture, each AttachSnapshot pushes a writer
 /// to the broadcast Vec. The final connection (and all earlier ones) receive output.
