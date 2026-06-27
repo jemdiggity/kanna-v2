@@ -554,6 +554,90 @@ describe("stage advance", () => {
     expect(await getVueState(client, "selectedItemId")).toBe(activeTaskId);
   });
 
+  it("leaves the selected task untouched when an unrelated task auto-advances to a different fallback", async () => {
+    // Regression: when a non-selected task auto-advances, selection must not move.
+    // The earlier two-task case passes even with the bug because the computed
+    // fallback coincidentally equals the selected task. Here a distinct third
+    // task is the fallback, so the buggy "restore fallback" path would steal
+    // selection away from the task the user actually picked.
+    const selectedTaskId = "auto-advance-keep-selected";
+    const sourceTaskId = "auto-advance-source-distinct";
+    const fallbackTaskId = "auto-advance-distinct-fallback";
+    const sourceBranch = "task-auto-advance-source-distinct";
+
+    await tauriInvoke(client, "git_worktree_add", {
+      repoPath: testRepoPath,
+      branch: sourceBranch,
+      path: join(testRepoPath, ".kanna-worktrees", sourceBranch),
+      startPoint: "main",
+    });
+
+    // Future-dated so these three sort to the top of the active section
+    // (newest first): selected, source, fallback.
+    const insertActiveItem = async (
+      id: string,
+      prompt: string,
+      branch: string | null,
+      agentType: string,
+      createdAt: string,
+    ): Promise<void> => {
+      await execDb(
+        client,
+        `INSERT INTO pipeline_item (
+           id, repo_id, prompt, pipeline, stage, stage_result, tags, branch,
+           agent_type, agent_provider, activity, display_name, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          id,
+          repoId,
+          prompt,
+          "auto-spawn-focus-e2e",
+          "auto-source",
+          null,
+          "[]",
+          branch,
+          agentType,
+          "codex",
+          "idle",
+          null,
+          createdAt,
+          createdAt,
+        ],
+      );
+      await hydrateStoreItem(client, id);
+    };
+
+    await insertActiveItem(selectedTaskId, "Selected stays put", null, "agent", "2026-12-01T00:03:00.000Z");
+    await insertActiveItem(sourceTaskId, "Unrelated auto-advance", sourceBranch, "pty", "2026-12-01T00:02:00.000Z");
+    await insertActiveItem(fallbackTaskId, "Would-be fallback", null, "agent", "2026-12-01T00:01:00.000Z");
+
+    const selectResult = await callVueMethod(client, "store.selectItem", selectedTaskId);
+    if (isVueCallError(selectResult)) throw new Error(selectResult.__error);
+    await waitForSelectedTask(client, selectedTaskId);
+
+    await execDb(
+      client,
+      "UPDATE pipeline_item SET stage_result = ?, updated_at = datetime('now') WHERE id = ?",
+      [JSON.stringify({ status: "success", summary: "ready for review" }), sourceTaskId],
+    );
+    const existingReviewTaskIds = await getStageTaskIds(client, repoId, "review");
+    await sendPipelineStageComplete(client, sourceTaskId);
+
+    const reviewTaskId = await waitForCreatedStageTask(client, repoId, "review", {
+      excludeIds: existingReviewTaskIds,
+      displayName: "Unrelated auto-advance",
+      baseRef: sourceBranch,
+    });
+    expect(reviewTaskId).not.toBe(sourceTaskId);
+
+    // Selection must remain on the user's chosen task — not the fallback, not
+    // the newly spawned review task.
+    await sleep(500);
+    expect(await getVueState(client, "selectedItemId")).toBe(selectedTaskId);
+
+    await tauriInvoke(client, "kill_session", { sessionId: reviewTaskId }).catch(() => undefined);
+  });
+
   it("creates the next stage task from the source worktree's renamed branch", async () => {
     const sourceTaskId = "renamed-source-stage-task";
     const storedSourceBranch = "task-renamed-source-stage";
