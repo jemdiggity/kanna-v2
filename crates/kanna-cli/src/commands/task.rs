@@ -1,0 +1,382 @@
+use std::env;
+use std::process;
+
+use serde_json::Value;
+
+use crate::api::{
+    advance_stage_via_api, block_task_via_api, close_task_via_api, create_task_via_api,
+    get_task_via_api, list_repo_tasks_via_api, list_tasks_via_api, parse_wait_until,
+    request_revision_via_api, search_tasks_via_api, send_task_input_via_api, task_logs_via_api,
+    unblock_task_via_api, wait_task_via_api,
+};
+use crate::commands::socket::notify_socket;
+use crate::commands::{parse_metadata_json, print_json};
+use crate::config::resolve_server_base_url_from_env;
+use crate::models::{
+    BlockTaskRequest, CreateTaskRequest, RequestRevisionRequest, TaskCreateOptions, TaskDetail,
+    TaskInputRequest, TaskStatusRow, TaskSummary,
+};
+use crate::TaskCommands;
+
+pub(crate) fn build_create_task_request(options: TaskCreateOptions) -> CreateTaskRequest {
+    CreateTaskRequest {
+        repo_id: options.repo_id,
+        prompt: options.prompt,
+        pipeline_name: options.pipeline_name,
+        base_ref: options.base_ref,
+        stage: options.stage,
+        agent_provider: options.agent_provider,
+        agent_type: options.agent_type,
+        model: options.model,
+        permission_mode: options.permission_mode,
+        allowed_tools: (!options.allowed_tool.is_empty()).then_some(options.allowed_tool),
+        blocker_task_ids: (!options.blocker_task_id.is_empty()).then_some(options.blocker_task_id),
+        notify_task_id: options.notify_task,
+    }
+}
+
+pub(crate) fn build_request_revision_request(
+    target_stage: String,
+    summary: String,
+    prompt: String,
+    metadata: Option<Value>,
+) -> RequestRevisionRequest {
+    RequestRevisionRequest {
+        target_stage,
+        summary,
+        prompt,
+        metadata,
+    }
+}
+
+pub(crate) fn build_send_task_input_request(message: String) -> TaskInputRequest {
+    // Send the message text as-is. Submitting it to the agent terminal (typing
+    // the text, then a discrete Enter keystroke) is the desktop server's job at
+    // /v1/tasks/{id}/input — keeping that policy server-side means kanna-cli,
+    // kanna-mcp, and the mobile app all submit consistently.
+    TaskInputRequest { input: message }
+}
+
+pub(crate) fn build_block_task_request(blocker_task_ids: Vec<String>) -> BlockTaskRequest {
+    BlockTaskRequest { blocker_task_ids }
+}
+
+pub(crate) fn task_status_row(task: &TaskSummary) -> TaskStatusRow {
+    TaskStatusRow {
+        id: task.id.clone(),
+        repo_id: task.repo_id.clone(),
+        stage: task.stage.clone().unwrap_or_default(),
+        activity: task.activity.clone().unwrap_or_default(),
+        title: task.title.clone(),
+    }
+}
+
+pub(crate) fn task_detail_status_row(task: &TaskDetail) -> TaskStatusRow {
+    TaskStatusRow {
+        id: task.id.clone(),
+        repo_id: task.repo_id.clone(),
+        stage: task.stage.clone().unwrap_or_default(),
+        activity: task.activity.clone().unwrap_or_default(),
+        title: task.title.clone(),
+    }
+}
+
+pub(crate) fn task_status_rows(tasks: &[TaskSummary]) -> Vec<TaskStatusRow> {
+    tasks.iter().map(task_status_row).collect()
+}
+
+pub(crate) fn format_task_list(tasks: &[TaskSummary]) -> Result<String, String> {
+    serde_json::to_string_pretty(&task_status_rows(tasks))
+        .map_err(|e| format!("failed to render json: {e}"))
+}
+
+#[cfg(test)]
+pub(crate) fn find_task_status_row(tasks: &[TaskSummary], task_id: &str) -> Option<TaskStatusRow> {
+    tasks
+        .iter()
+        .find(|task| task.id == task_id)
+        .map(task_status_row)
+}
+
+pub(crate) fn format_task_status(task: &TaskStatusRow) -> Result<String, String> {
+    serde_json::to_string_pretty(task).map_err(|e| format!("failed to render json: {e}"))
+}
+
+#[cfg(test)]
+pub(crate) fn task_not_found_error(task_id: &str) -> String {
+    format!("Task '{task_id}' was not found")
+}
+pub(crate) async fn run(command: TaskCommands) {
+    match command {
+        TaskCommands::List {
+            repo_id,
+            server_url,
+        } => {
+            let base_url = resolve_server_base_url_from_env(server_url.as_deref());
+            let tasks = match repo_id {
+                Some(repo_id) => list_repo_tasks_via_api(&base_url, &repo_id).await,
+                None => list_tasks_via_api(&base_url).await,
+            }
+            .unwrap_or_else(|e| {
+                eprintln!("Error: {e}");
+                process::exit(1);
+            });
+            let rendered = format_task_list(&tasks).unwrap_or_else(|e| {
+                eprintln!("Error: {e}");
+                process::exit(1);
+            });
+            println!("{rendered}");
+        }
+        TaskCommands::Search { query, server_url } => {
+            let base_url = resolve_server_base_url_from_env(server_url.as_deref());
+            let tasks = search_tasks_via_api(&base_url, &query)
+                .await
+                .unwrap_or_else(|e| {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                });
+            let rendered = format_task_list(&tasks).unwrap_or_else(|e| {
+                eprintln!("Error: {e}");
+                process::exit(1);
+            });
+            println!("{rendered}");
+        }
+        TaskCommands::Status {
+            task_id,
+            server_url,
+        } => {
+            let base_url = resolve_server_base_url_from_env(server_url.as_deref());
+            let task = get_task_via_api(&base_url, &task_id)
+                .await
+                .unwrap_or_else(|e| {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                });
+            let row = task_detail_status_row(&task);
+            let rendered = format_task_status(&row).unwrap_or_else(|e| {
+                eprintln!("Error: {e}");
+                process::exit(1);
+            });
+            println!("{rendered}");
+        }
+        TaskCommands::Get {
+            task_id,
+            server_url,
+        } => {
+            let base_url = resolve_server_base_url_from_env(server_url.as_deref());
+            let task = get_task_via_api(&base_url, &task_id)
+                .await
+                .unwrap_or_else(|e| {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                });
+            if let Err(e) = print_json(&task) {
+                eprintln!("Error: {e}");
+                process::exit(1);
+            }
+        }
+        TaskCommands::Wait {
+            task_id,
+            timeout_secs,
+            poll_secs,
+            until,
+            server_url,
+        } => {
+            let until = parse_wait_until(&until).unwrap_or_else(|e| {
+                eprintln!("Error: {e}");
+                process::exit(1);
+            });
+            let base_url = resolve_server_base_url_from_env(server_url.as_deref());
+            let task = wait_task_via_api(&base_url, &task_id, timeout_secs, poll_secs, until)
+                .await
+                .unwrap_or_else(|e| {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                });
+            if let Err(e) = print_json(&task) {
+                eprintln!("Error: {e}");
+                process::exit(1);
+            }
+        }
+        TaskCommands::Logs {
+            task_id,
+            tail,
+            server_url,
+        } => {
+            let base_url = resolve_server_base_url_from_env(server_url.as_deref());
+            let logs = task_logs_via_api(&base_url, &task_id, tail)
+                .await
+                .unwrap_or_else(|e| {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                });
+            println!("{logs}");
+        }
+        TaskCommands::Create {
+            repo_id,
+            prompt,
+            server_url,
+            pipeline_name,
+            base_ref,
+            stage,
+            agent_provider,
+            agent_type,
+            model,
+            permission_mode,
+            allowed_tool,
+            blocker_task_id,
+            notify_task,
+        } => {
+            let base_url = resolve_server_base_url_from_env(server_url.as_deref());
+            let request = build_create_task_request(TaskCreateOptions {
+                repo_id,
+                prompt,
+                pipeline_name,
+                base_ref,
+                stage,
+                agent_provider,
+                agent_type,
+                model,
+                permission_mode,
+                allowed_tool,
+                blocker_task_id,
+                notify_task,
+            });
+            let created = create_task_via_api(&base_url, &request)
+                .await
+                .unwrap_or_else(|e| {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                });
+            if let Err(e) = print_json(&created) {
+                eprintln!("Error: {e}");
+                process::exit(1);
+            }
+        }
+        TaskCommands::RequestRevision {
+            task_id,
+            target_stage,
+            summary,
+            prompt,
+            metadata,
+            server_url,
+        } => {
+            let metadata_value = parse_metadata_json(&metadata).unwrap_or_else(|e| {
+                eprintln!("Error: {e}");
+                process::exit(1);
+            });
+            let base_url = resolve_server_base_url_from_env(server_url.as_deref());
+            let request =
+                build_request_revision_request(target_stage, summary, prompt, metadata_value);
+            let created = request_revision_via_api(&base_url, &task_id, &request)
+                .await
+                .unwrap_or_else(|e| {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                });
+            if let Err(e) = print_json(&created) {
+                eprintln!("Error: {e}");
+                process::exit(1);
+            }
+
+            match env::var("KANNA_SOCKET_PATH") {
+                Ok(socket_path) => {
+                    if let Err(e) = notify_socket(&socket_path, &task_id).await {
+                        eprintln!("Warning: Socket notification failed: {e}");
+                    }
+                }
+                Err(_) => {
+                    eprintln!("Warning: KANNA_SOCKET_PATH not set, skipping socket notification");
+                }
+            }
+        }
+        TaskCommands::SendInput {
+            task_id,
+            message,
+            server_url,
+        } => {
+            let base_url = resolve_server_base_url_from_env(server_url.as_deref());
+            let request = build_send_task_input_request(message);
+            let response = send_task_input_via_api(&base_url, &task_id, &request)
+                .await
+                .unwrap_or_else(|e| {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                });
+            if let Err(e) = print_json(&response) {
+                eprintln!("Error: {e}");
+                process::exit(1);
+            }
+        }
+        TaskCommands::AdvanceStage {
+            task_id,
+            server_url,
+        } => {
+            let base_url = resolve_server_base_url_from_env(server_url.as_deref());
+            let advanced = advance_stage_via_api(&base_url, &task_id)
+                .await
+                .unwrap_or_else(|e| {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                });
+            if let Err(e) = print_json(&advanced) {
+                eprintln!("Error: {e}");
+                process::exit(1);
+            }
+        }
+        TaskCommands::Block {
+            task_id,
+            blocker_task_id,
+            server_url,
+        } => {
+            if blocker_task_id.is_empty() {
+                eprintln!("Error: at least one --blocker-task-id is required");
+                process::exit(1);
+            }
+            let base_url = resolve_server_base_url_from_env(server_url.as_deref());
+            let request = build_block_task_request(blocker_task_id);
+            let blocked = block_task_via_api(&base_url, &task_id, &request)
+                .await
+                .unwrap_or_else(|e| {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                });
+            if let Err(e) = print_json(&blocked) {
+                eprintln!("Error: {e}");
+                process::exit(1);
+            }
+        }
+        TaskCommands::Unblock {
+            task_id,
+            server_url,
+        } => {
+            let base_url = resolve_server_base_url_from_env(server_url.as_deref());
+            let unblocked = unblock_task_via_api(&base_url, &task_id)
+                .await
+                .unwrap_or_else(|e| {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                });
+            if let Err(e) = print_json(&unblocked) {
+                eprintln!("Error: {e}");
+                process::exit(1);
+            }
+        }
+        TaskCommands::Close {
+            task_id,
+            server_url,
+        } => {
+            let base_url = resolve_server_base_url_from_env(server_url.as_deref());
+            close_task_via_api(&base_url, &task_id)
+                .await
+                .unwrap_or_else(|e| {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                });
+            if let Err(e) = print_json(&serde_json::json!({ "taskId": task_id, "closed": true })) {
+                eprintln!("Error: {e}");
+                process::exit(1);
+            }
+        }
+    }
+}

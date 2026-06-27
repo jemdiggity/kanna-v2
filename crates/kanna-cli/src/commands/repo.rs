@@ -1,0 +1,45 @@
+use std::process;
+
+use crate::api::{add_repo_via_api, list_repos_via_api};
+use crate::commands::print_json;
+use crate::config::resolve_server_base_url_from_env;
+use crate::models::AddRepoRequest;
+use crate::RepoCommands;
+
+pub(crate) fn build_add_repo_request(path: String, name: Option<String>) -> AddRepoRequest {
+    AddRepoRequest { path, name }
+}
+
+pub(crate) async fn run(command: RepoCommands) {
+    match command {
+        RepoCommands::List { server_url } => {
+            let base_url = resolve_server_base_url_from_env(server_url.as_deref());
+            let repos = list_repos_via_api(&base_url).await.unwrap_or_else(|e| {
+                eprintln!("Error: {e}");
+                process::exit(1);
+            });
+            if let Err(e) = print_json(&repos) {
+                eprintln!("Error: {e}");
+                process::exit(1);
+            }
+        }
+        RepoCommands::Add {
+            path,
+            name,
+            server_url,
+        } => {
+            let base_url = resolve_server_base_url_from_env(server_url.as_deref());
+            let request = build_add_repo_request(path, name);
+            let repo = add_repo_via_api(&base_url, &request)
+                .await
+                .unwrap_or_else(|e| {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                });
+            if let Err(e) = print_json(&repo) {
+                eprintln!("Error: {e}");
+                process::exit(1);
+            }
+        }
+    }
+}
