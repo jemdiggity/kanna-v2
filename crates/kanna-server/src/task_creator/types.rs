@@ -15,6 +15,7 @@ pub(super) struct TaskCreationRequest {
     pub(super) permission_mode: Option<String>,
     pub(super) allowed_tools: Vec<String>,
     pub(super) notify_task_id: Option<String>,
+    pub(super) parent_task_id: Option<String>,
 }
 
 #[derive(Clone)]

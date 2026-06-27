@@ -10,6 +10,7 @@ import {
 } from "@kanna/db";
 import { invoke } from "../invoke";
 import { renderBestEffortLifecycleCommand } from "../utils/lifecycleCommands";
+import { hasOpenSubtasks } from "../utils/taskParenting";
 import { getTaskCloseBehavior } from "./taskCloseBehavior";
 import { shouldSelectNextOnCloseTransition } from "./taskCloseSelection";
 import { applyWorktreeProcessIsolation, buildTaskLifecycleEnv, collectTeardownCommands, hasLiveTaskResources, parseTaskPortEnv } from "./taskLifecycleEnv";
@@ -65,6 +66,10 @@ export function createTaskCloseActions(
       ? context.state.repos.value.find((candidate) => candidate.id === item.repo_id)
       : requireService(context.services.selectedRepo, "selectedRepo").value;
     if (!item || !repo) return;
+    if (hasOpenSubtasks(context.state.items.value, item.id)) {
+      context.toast.warning(context.tt("toasts.closeTaskHasOpenSubtasks"));
+      return;
+    }
 
     try {
       await context.requireDb().execute(

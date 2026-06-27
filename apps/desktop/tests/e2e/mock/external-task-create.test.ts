@@ -58,6 +58,34 @@ async function waitForStoreTask(
   throw new Error(`timed out waiting for task ${taskId} in Vue store`);
 }
 
+async function waitForSidebarTaskOrder(
+  client: WebDriverClient,
+  expectedTaskIds: string[],
+  timeoutMs = 10_000,
+): Promise<Array<{ id: string; text: string; subtask: boolean; paddingLeft: string }>> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const rows = await client.executeSync<Array<{ id: string; text: string; subtask: boolean; paddingLeft: string }>>(
+      `return Array.from(document.querySelectorAll(".sidebar .pipeline-item")).map((row) => ({
+         id: row.getAttribute("data-task-id") || "",
+         text: row.textContent || "",
+         subtask: row.classList.contains("subtask"),
+         paddingLeft: getComputedStyle(row).paddingLeft,
+       }));`,
+    );
+    const ids = rows.map((row) => row.id);
+    const startIndex = ids.indexOf(expectedTaskIds[0] ?? "");
+    if (
+      startIndex >= 0
+      && expectedTaskIds.every((id, offset) => ids[startIndex + offset] === id)
+    ) {
+      return rows;
+    }
+    await sleep(100);
+  }
+  throw new Error(`timed out waiting for sidebar task order: ${expectedTaskIds.join(", ")}`);
+}
+
 async function waitForSelectedTask(
   client: WebDriverClient,
   taskId: string,
@@ -207,6 +235,7 @@ describe("external task creation", () => {
           repoId,
           prompt: externalPrompt,
           pipelineName: "external-create-e2e",
+          agentType: "pty",
           agentProvider: "codex",
           permissionMode: "dontAsk",
         }),
@@ -253,6 +282,95 @@ describe("external task creation", () => {
       );
       await waitForFile(capturedArgsPath, 20_000);
       expect(await readFile(capturedArgsPath, "utf8")).toContain(externalPrompt);
+    } finally {
+      server.child.kill();
+    }
+  });
+
+  it("renders a POST-created child task nested directly beneath its parent", async () => {
+    const parentTaskId = "external-create-parent-task";
+    const parentPrompt = "Parent task visible for nesting";
+    const childPrompt = "Child task from local API";
+
+    await execDb(
+      client,
+      `INSERT INTO pipeline_item (
+         id, repo_id, prompt, pipeline, stage, stage_result, tags, branch,
+         agent_type, agent_provider, activity, display_name, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', '-20 seconds'), datetime('now', '-20 seconds'))`,
+      [
+        parentTaskId,
+        repoId,
+        parentPrompt,
+        "external-create-e2e",
+        "in progress",
+        null,
+        "[]",
+        null,
+        "agent",
+        "codex",
+        "idle",
+        null,
+      ],
+    );
+    await hydrateStoreItem(client, parentTaskId);
+    await client.waitForText(".sidebar", parentPrompt);
+
+    const server = await startTestKannaServer(client, join(testRepoPath, ".kanna"));
+    try {
+      const response = await fetch(`${server.baseUrl}/v1/tasks`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          repoId,
+          prompt: childPrompt,
+          pipelineName: "external-create-e2e",
+          stage: "pr",
+          agentType: "pty",
+          agentProvider: "codex",
+          permissionMode: "dontAsk",
+          parentTaskId,
+        }),
+      });
+      if (!response.ok) {
+        throw new Error(`create child task failed: ${response.status} ${await response.text()}`);
+      }
+
+      const body = await response.json() as { taskId: string; repoId: string; title: string; stage: string };
+      externalTaskId = body.taskId;
+      expect(body).toMatchObject({
+        repoId,
+        title: childPrompt,
+        stage: "in progress",
+      });
+
+      await waitForStoreTask(client, externalTaskId);
+      await client.waitForText(".sidebar", childPrompt);
+
+      const rows = (await queryDb(
+        client,
+        "SELECT parent_task_id, stage FROM pipeline_item WHERE id = ?",
+        [externalTaskId],
+      )) as Array<{ parent_task_id: string | null; stage: string }>;
+      expect(rows).toEqual([{ parent_task_id: parentTaskId, stage: "in progress" }]);
+
+      const sidebarRows = await waitForSidebarTaskOrder(client, [parentTaskId, externalTaskId]);
+      const parentIndex = sidebarRows.findIndex((row) => row.id === parentTaskId);
+      const childRow = sidebarRows[parentIndex + 1];
+      expect(sidebarRows[parentIndex]).toMatchObject({
+        id: parentTaskId,
+        subtask: false,
+      });
+      expect(childRow).toMatchObject({
+        id: externalTaskId,
+        subtask: true,
+      });
+      expect(childRow.paddingLeft).not.toBe(sidebarRows[parentIndex].paddingLeft);
+
+      const sectionLabels = await client.executeSync<string[]>(
+        `return Array.from(document.querySelectorAll(".sidebar .section-label")).map((label) => label.textContent || "");`,
+      );
+      expect(sectionLabels.filter((label) => label === "pr")).toHaveLength(0);
     } finally {
       server.child.kill();
     }

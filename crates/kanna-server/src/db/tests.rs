@@ -401,6 +401,7 @@ fn insert_pipeline_item_stores_stage_metadata() {
               base_ref TEXT,
               notify_task_id TEXT,
               notified_at TEXT,
+              parent_task_id TEXT,
               display_name TEXT,
               created_at TEXT NOT NULL DEFAULT (datetime('now')),
               updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -427,6 +428,7 @@ fn insert_pipeline_item_stores_stage_metadata() {
         base_ref: None,
         display_name: Some("Merge queue"),
         notify_task_id: None,
+        parent_task_id: None,
     })
     .expect("insert pipeline item");
 

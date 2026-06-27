@@ -97,7 +97,52 @@ export function createSelectionApi(context: StoreContext): SelectionApi {
       return right.created_at.localeCompare(left.created_at);
     });
 
-    return [...pinned, ...sortedStageItems, ...blocked];
+    return nestChildren([...pinned, ...sortedStageItems, ...blocked]);
+  }
+
+  /**
+   * Reorder a flat task list so every subtask immediately follows its parent, matching the
+   * indented sidebar layout. Keeps task navigation (next/prev, close-replacement) in sync with
+   * what the user sees. Only nests under parents that are themselves present in the list.
+   */
+  function nestChildren(ordered: PipelineItem[]): PipelineItem[] {
+    const present = new Set(ordered.map((item) => item.id));
+    const childrenByParent = new Map<string, PipelineItem[]>();
+    for (const item of ordered) {
+      const parentId = item.parent_task_id;
+      if (parentId != null && parentId !== item.id && present.has(parentId)) {
+        const siblings = childrenByParent.get(parentId) ?? [];
+        siblings.push(item);
+        childrenByParent.set(parentId, siblings);
+      }
+    }
+    if (childrenByParent.size === 0) return ordered;
+    for (const siblings of childrenByParent.values()) {
+      siblings.sort((left, right) => left.created_at.localeCompare(right.created_at));
+    }
+    const childIds = new Set(
+      [...childrenByParent.values()].flat().map((item) => item.id),
+    );
+
+    const out: PipelineItem[] = [];
+    const seen = new Set<string>();
+    const visit = (item: PipelineItem) => {
+      if (seen.has(item.id)) return;
+      seen.add(item.id);
+      out.push(item);
+      for (const child of childrenByParent.get(item.id) ?? []) visit(child);
+    };
+    for (const item of ordered) {
+      if (childIds.has(item.id)) continue;
+      visit(item);
+    }
+    for (const item of ordered) {
+      if (!seen.has(item.id)) {
+        seen.add(item.id);
+        out.push(item);
+      }
+    }
+    return out;
   }
 
   const sortedItemsForCurrentRepo = computed(() =>

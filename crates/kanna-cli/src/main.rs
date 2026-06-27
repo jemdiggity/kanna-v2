@@ -219,6 +219,10 @@ pub(crate) enum TaskCommands {
         /// Task to notify when this task reaches a terminal state
         #[arg(long)]
         notify_task: Option<String>,
+
+        /// Parent task this task is a subtask of
+        #[arg(long)]
+        parent_task: Option<String>,
     },
     /// Request a new revision task from an existing task branch
     RequestRevision {
@@ -313,6 +317,20 @@ pub(crate) enum TaskCommands {
         /// The task/pipeline_item ID to close
         #[arg(long)]
         task_id: String,
+
+        /// Override the local Kanna server base URL
+        #[arg(long)]
+        server_url: Option<String>,
+    },
+    /// Set or clear a task's parent so it nests as a subtask in the sidebar
+    SetParent {
+        /// The task/pipeline_item ID to reparent
+        #[arg(long)]
+        task_id: String,
+
+        /// Parent task ID. Omit to detach the task from its current parent.
+        #[arg(long)]
+        parent_task: Option<String>,
 
         /// Override the local Kanna server base URL
         #[arg(long)]

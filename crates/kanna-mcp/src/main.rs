@@ -483,9 +483,11 @@ mod tests {
                 "kanna_create_task",
                 "kanna_send_task_input",
                 "kanna_close_task",
+                "kanna_rename_task",
                 "kanna_advance_stage",
                 "kanna_block_task",
                 "kanna_unblock_task",
+                "kanna_set_task_parent",
                 "kanna_complete_stage",
                 "kanna_request_revision",
             ]

@@ -6,9 +6,11 @@ import draggable from "vuedraggable";
 import { taskSearchMatch } from "../utils/taskSearch";
 import {
   groupedSidebarItemsByStage,
+  sidebarSubtreeRows,
   sortedSidebarBlockedItems,
   sortedSidebarPinnedItems,
   sortSidebarItemsForRepo,
+  type SidebarTreeRow,
 } from "../utils/sidebarOrdering";
 import { useKannaStore } from "../stores/kanna";
 import { isTaskTearingDown } from "../stores/taskStages";
@@ -37,6 +39,7 @@ const emit = defineEmits<{
   (e: "unpin-item", itemId: string): void;
   (e: "reorder-pinned", repoId: string, orderedIds: string[]): void;
   (e: "reorder-repos", orderedIds: string[]): void;
+  (e: "set-parent", childId: string, parentId: string): void;
   (e: "rename-item", itemId: string, displayName: string | null): void;
   (e: "rename-repo", repoId: string, name: string): void;
   (e: "hide-repo", repoId: string): void;
@@ -119,6 +122,15 @@ function groupedByStage(repoId: string): StageGroup[] {
 
 function itemsForRepo(repoId: string): SidebarPipelineItem[] {
   return sortSidebarItemsForRepo(sidebarOrderingOptions(repoId));
+}
+
+/** A top-level task plus its nested subtasks, depth-annotated for indented rendering. */
+function subtreeRows(repoId: string, item: SidebarPipelineItem): SidebarTreeRow[] {
+  return sidebarSubtreeRows(sidebarOrderingOptions(repoId), item);
+}
+
+function subtaskIndentStyle(depth: number): Record<string, string> {
+  return depth > 0 ? { paddingLeft: `${14 + depth * 16}px` } : {};
 }
 
 function totalItemsForRepo(repoId: string): number {
@@ -332,6 +344,73 @@ function onUnpinnedChange(repoId: string, evt: DraggableChange<SidebarPipelineIt
   }
 }
 
+// --- Drag a task onto another task to nest it as a subtask ---
+// SortableJS owns the drag, so we read the drop target by hit-testing the pointer position
+// rather than via the list-reorder model. A live highlight (dropParentId) shows the target.
+interface SortableDragEvent {
+  item?: HTMLElement;
+  originalEvent?: Event;
+}
+
+const draggedTaskId = ref<string | null>(null);
+const dropParentId = ref<string | null>(null);
+
+function pointerFromEvent(event: Event | undefined | null): { x: number; y: number } | null {
+  if (event instanceof MouseEvent) return { x: event.clientX, y: event.clientY };
+  if (typeof TouchEvent !== "undefined" && event instanceof TouchEvent) {
+    const touch = event.changedTouches[0];
+    return touch ? { x: touch.clientX, y: touch.clientY } : null;
+  }
+  return null;
+}
+
+function taskRowAtPoint(x: number, y: number): { id: string; pinned: boolean } | null {
+  const row = document.elementFromPoint(x, y)?.closest<HTMLElement>(".pipeline-item");
+  const id = row?.dataset.taskId;
+  if (!row || !id) return null;
+  return { id, pinned: Boolean(row.closest(".pinned-zone")) };
+}
+
+function resolveDropParent(x: number, y: number, childId: string): string | null {
+  const hit = taskRowAtPoint(x, y);
+  // Dropping into the pinned zone stays a pin gesture, so only nest in other zones.
+  return hit && !hit.pinned && hit.id !== childId ? hit.id : null;
+}
+
+function onTaskDragPointerMove(event: PointerEvent) {
+  const childId = draggedTaskId.value;
+  if (!childId) return;
+  dropParentId.value = resolveDropParent(event.clientX, event.clientY, childId);
+}
+
+function stopTaskDragTracking() {
+  document.removeEventListener("pointermove", onTaskDragPointerMove, true);
+}
+
+function onTaskDragStart(evt: SortableDragEvent) {
+  draggedTaskId.value = isSearchActive() ? null : evt.item?.dataset.taskId ?? null;
+  dropParentId.value = null;
+  if (draggedTaskId.value) {
+    document.addEventListener("pointermove", onTaskDragPointerMove, true);
+  }
+}
+
+function onTaskDragEnd(evt: SortableDragEvent) {
+  stopTaskDragTracking();
+  const childId = draggedTaskId.value;
+  let parentId = dropParentId.value;
+  draggedTaskId.value = null;
+  dropParentId.value = null;
+  if (!childId || isSearchActive()) return;
+  if (!parentId) {
+    const point = pointerFromEvent(evt.originalEvent);
+    if (point) parentId = resolveDropParent(point.x, point.y, childId);
+  }
+  if (parentId && parentId !== childId) {
+    emit("set-parent", childId, parentId);
+  }
+}
+
 watch(searchQuery, (q) => {
   if (q.trim()) {
     if (!preSearchCollapsed.value) {
@@ -373,6 +452,7 @@ function focusSearch() {
 }
 
 onBeforeUnmount(stopRepoDragListeners);
+onBeforeUnmount(stopTaskDragTracking);
 
 defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emitRepoReorder });
 </script>
@@ -455,36 +535,44 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
             fallback-class="sortable-fallback"
             class="pinned-zone"
             @change="(evt) => onPinnedChange(repo.id, evt)"
+            @start="onTaskDragStart"
+            @end="onTaskDragEnd"
           >
             <template #item="{ element }">
-              <div
-                class="pipeline-item"
-                :class="{ selected: selectedItemId === element.id }"
-                @click="handleSelectItem(element)"
-                @dblclick.stop="startRename(element)"
-              >
-                <input
-                  v-if="editingItemId === element.id"
-                  class="rename-input"
-                  v-model="editingValue"
-                  v-bind="macOsTextInputAttrs"
-                  @keydown.enter="commitRename(element.id)"
-                  @keydown.escape="cancelRename()"
-                  @blur="commitRename(element.id)"
-                  @click.stop
-                />
-                <span
-                  v-else
-                  class="item-title"
-                  :style="{
-                    fontWeight: element.activity === 'unread' ? 'bold' : 'normal',
-                    fontStyle: element.activity === 'working' ? 'italic' : 'normal',
-                    textDecoration: isTaskTearingDown(element) ? 'line-through' : 'none',
-                    opacity: isTaskTearingDown(element) ? 0.5 : 1,
-                  }"
-                  :title="itemTooltip(element)"
+              <div class="task-subtree" :data-task-id="element.id">
+                <div
+                  v-for="row in subtreeRows(repo.id, element)"
+                  :key="row.item.id"
+                  class="pipeline-item"
+                  :data-task-id="row.item.id"
+                  :class="{ selected: selectedItemId === row.item.id, subtask: row.depth > 0, 'drop-target': dropParentId === row.item.id }"
+                  :style="subtaskIndentStyle(row.depth)"
+                  @click="handleSelectItem(row.item)"
+                  @dblclick.stop="startRename(row.item)"
                 >
-                  <span v-if="isRemoteTask(element)" class="remote-task-marker" :aria-label="t('sidebar.remoteTaskTooltip')">&lt; </span>{{ itemTitle(element) }}</span>
+                  <input
+                    v-if="editingItemId === row.item.id"
+                    class="rename-input"
+                    v-model="editingValue"
+                    v-bind="macOsTextInputAttrs"
+                    @keydown.enter="commitRename(row.item.id)"
+                    @keydown.escape="cancelRename()"
+                    @blur="commitRename(row.item.id)"
+                    @click.stop
+                  />
+                  <span
+                    v-else
+                    class="item-title"
+                    :style="{
+                      fontWeight: row.item.activity === 'unread' ? 'bold' : 'normal',
+                      fontStyle: row.item.activity === 'working' ? 'italic' : 'normal',
+                      textDecoration: isTaskTearingDown(row.item) ? 'line-through' : 'none',
+                      opacity: isTaskTearingDown(row.item) ? 0.5 : 1,
+                    }"
+                    :title="itemTooltip(row.item)"
+                  >
+                    <span v-if="isRemoteTask(row.item)" class="remote-task-marker" :aria-label="t('sidebar.remoteTaskTooltip')">&lt; </span>{{ itemTitle(row.item) }}</span>
+                </div>
               </div>
             </template>
           </draggable>
@@ -510,36 +598,44 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
               fallback-class="sortable-fallback"
               class="type-zone"
               @change="(evt) => onUnpinnedChange(repo.id, evt)"
+              @start="onTaskDragStart"
+              @end="onTaskDragEnd"
             >
               <template #item="{ element }">
-                <div
-                  class="pipeline-item"
-                  :class="{ selected: selectedItemId === element.id }"
-                  @click="handleSelectItem(element)"
-                  @dblclick.stop="startRename(element)"
-                >
-                  <input
-                    v-if="editingItemId === element.id"
-                    class="rename-input"
-                    v-model="editingValue"
-                    v-bind="macOsTextInputAttrs"
-                    @keydown.enter="commitRename(element.id)"
-                    @keydown.escape="cancelRename()"
-                    @blur="commitRename(element.id)"
-                    @click.stop
-                  />
-                  <span
-                    v-else
-                    class="item-title"
-                    :style="{
-                      fontWeight: element.activity === 'unread' ? 'bold' : 'normal',
-                      fontStyle: element.activity === 'working' ? 'italic' : 'normal',
-                      textDecoration: isTaskTearingDown(element) ? 'line-through' : 'none',
-                      opacity: isTaskTearingDown(element) ? 0.5 : 1,
-                    }"
-                    :title="itemTooltip(element)"
+                <div class="task-subtree" :data-task-id="element.id">
+                  <div
+                    v-for="row in subtreeRows(repo.id, element)"
+                    :key="row.item.id"
+                    class="pipeline-item"
+                    :data-task-id="row.item.id"
+                    :class="{ selected: selectedItemId === row.item.id, subtask: row.depth > 0, 'drop-target': dropParentId === row.item.id }"
+                    :style="subtaskIndentStyle(row.depth)"
+                    @click="handleSelectItem(row.item)"
+                    @dblclick.stop="startRename(row.item)"
                   >
-                    <span v-if="isRemoteTask(element)" class="remote-task-marker" :aria-label="t('sidebar.remoteTaskTooltip')">&lt; </span>{{ itemTitle(element) }}</span>
+                    <input
+                      v-if="editingItemId === row.item.id"
+                      class="rename-input"
+                      v-model="editingValue"
+                      v-bind="macOsTextInputAttrs"
+                      @keydown.enter="commitRename(row.item.id)"
+                      @keydown.escape="cancelRename()"
+                      @blur="commitRename(row.item.id)"
+                      @click.stop
+                    />
+                    <span
+                      v-else
+                      class="item-title"
+                      :style="{
+                        fontWeight: row.item.activity === 'unread' ? 'bold' : 'normal',
+                        fontStyle: row.item.activity === 'working' ? 'italic' : 'normal',
+                        textDecoration: isTaskTearingDown(row.item) ? 'line-through' : 'none',
+                        opacity: isTaskTearingDown(row.item) ? 0.5 : 1,
+                      }"
+                      :title="itemTooltip(row.item)"
+                    >
+                      <span v-if="isRemoteTask(row.item)" class="remote-task-marker" :aria-label="t('sidebar.remoteTaskTooltip')">&lt; </span>{{ itemTitle(row.item) }}</span>
+                  </div>
                 </div>
               </template>
             </draggable>
@@ -552,41 +648,45 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
             :class="{ 'filtered-label': hasActiveSearch }"
           >{{ $t('sidebar.sectionBlocked') }}</div>
           <div class="type-zone">
-            <div
-              v-for="element in sortedBlocked(repo.id)"
-              :key="element.id"
-              class="pipeline-item"
-              :class="{ selected: selectedItemId === element.id }"
-              @click="handleSelectItem(element)"
-              @dblclick.stop="startRename(element)"
-            >
-              <input
-                v-if="editingItemId === element.id"
-                class="rename-input"
-                v-model="editingValue"
-                v-bind="macOsTextInputAttrs"
-                @keydown.enter="commitRename(element.id)"
-                @keydown.escape="cancelRename()"
-                @blur="commitRename(element.id)"
-                @click.stop
-              />
-              <div v-else class="blocked-item-content">
-                <span
-                  class="item-title"
-                  :style="{
-                    color: 'var(--kn-text-muted)',
-                    textDecoration: isTaskTearingDown(element) ? 'line-through' : 'none',
-                    opacity: isTaskTearingDown(element) ? 0.5 : 1,
-                  }"
-                  :title="itemTooltip(element)"
-                >
-                  <span v-if="isRemoteTask(element)" class="remote-task-marker" :aria-label="t('sidebar.remoteTaskTooltip')">&lt; </span>{{ itemTitle(element) }}</span>
-                <span
-                  v-if="blockerNames?.[element.id]"
-                  class="blocked-by-text"
-                >{{ $t('sidebar.blockedBy') }} {{ blockerNames[element.id] }}</span>
+            <template v-for="blocked in sortedBlocked(repo.id)" :key="blocked.id">
+              <div
+                v-for="row in subtreeRows(repo.id, blocked)"
+                :key="row.item.id"
+                class="pipeline-item"
+                :data-task-id="row.item.id"
+                :class="{ selected: selectedItemId === row.item.id, subtask: row.depth > 0, 'drop-target': dropParentId === row.item.id }"
+                :style="subtaskIndentStyle(row.depth)"
+                @click="handleSelectItem(row.item)"
+                @dblclick.stop="startRename(row.item)"
+              >
+                <input
+                  v-if="editingItemId === row.item.id"
+                  class="rename-input"
+                  v-model="editingValue"
+                  v-bind="macOsTextInputAttrs"
+                  @keydown.enter="commitRename(row.item.id)"
+                  @keydown.escape="cancelRename()"
+                  @blur="commitRename(row.item.id)"
+                  @click.stop
+                />
+                <div v-else class="blocked-item-content">
+                  <span
+                    class="item-title"
+                    :style="{
+                      color: 'var(--kn-text-muted)',
+                      textDecoration: isTaskTearingDown(row.item) ? 'line-through' : 'none',
+                      opacity: isTaskTearingDown(row.item) ? 0.5 : 1,
+                    }"
+                    :title="itemTooltip(row.item)"
+                  >
+                    <span v-if="isRemoteTask(row.item)" class="remote-task-marker" :aria-label="t('sidebar.remoteTaskTooltip')">&lt; </span>{{ itemTitle(row.item) }}</span>
+                  <span
+                    v-if="blockerNames?.[row.item.id]"
+                    class="blocked-by-text"
+                  >{{ $t('sidebar.blockedBy') }} {{ blockerNames[row.item.id] }}</span>
+                </div>
               </div>
-            </div>
+            </template>
           </div>
 
           <div v-if="itemsForRepo(repo.id).length === 0" class="no-items">
@@ -824,6 +924,26 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
   -webkit-user-select: none;
 }
 
+.task-subtree {
+  display: flex;
+  flex-direction: column;
+}
+
+.pipeline-item.subtask {
+  position: relative;
+}
+
+/* Subtask guide rail: a short vertical tick marking nesting under the parent. */
+.pipeline-item.subtask::before {
+  content: "";
+  position: absolute;
+  left: 16px;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--kn-border-subtle, var(--kn-bg-panel-raised));
+}
+
 .pipeline-item:hover {
   background: var(--kn-bg-panel-raised);
 }
@@ -831,6 +951,12 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
 .pipeline-item.selected {
   background: var(--kn-bg-selected);
   outline: 1px solid var(--kn-accent);
+}
+
+/* Highlighted while a dragged task hovers over it as a potential parent. */
+.pipeline-item.drop-target {
+  background: var(--kn-bg-selected);
+  outline: 1px dashed var(--kn-accent);
 }
 
 .item-title {

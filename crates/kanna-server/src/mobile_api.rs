@@ -107,6 +107,7 @@ pub struct CreateTaskRequest {
     pub allowed_tools: Option<Vec<String>>,
     pub blocker_task_ids: Option<Vec<String>>,
     pub notify_task_id: Option<String>,
+    pub parent_task_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -141,6 +142,13 @@ pub struct RequestRevisionRequest {
 #[serde(rename_all = "camelCase")]
 pub struct BlockTaskRequest {
     pub blocker_task_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SetTaskParentRequest {
+    #[serde(default)]
+    pub parent_task_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -543,7 +551,8 @@ mod tests {
                 "permissionMode": null,
                 "allowedTools": null,
                 "blockerTaskIds": null,
-                "notifyTaskId": null
+                "notifyTaskId": null,
+                "parentTaskId": null
             })
         );
     }

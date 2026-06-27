@@ -29,6 +29,7 @@ import {
   updatePipelineItemActivity,
   getSetting,
   setSetting,
+  updatePipelineItemParent,
   pinPipelineItem,
   unpinPipelineItem,
   reorderPinnedItems,
@@ -176,6 +177,7 @@ function createMockDb(): DbHandle & {
           agent_session_id: null,
           previous_stage: null,
           teardown_started_at: null,
+          parent_task_id: (bindValues?.[19] as string | null) ?? null,
           created_at: currentTimestamp(),
           updated_at: currentTimestamp(),
           pinned: 0,
@@ -326,6 +328,13 @@ function createMockDb(): DbHandle & {
         const item = tables.pipeline_item.find((p) => p.id === id);
         if (item) {
           item.tags = newTags;
+          item.updated_at = new Date().toISOString();
+        }
+      } else if (q.startsWith("UPDATE PIPELINE_ITEM SET PARENT_TASK_ID")) {
+        const [parentTaskId, id] = bindValues as [string | null, string];
+        const item = tables.pipeline_item.find((p) => p.id === id);
+        if (item) {
+          item.parent_task_id = parentTaskId;
           item.updated_at = new Date().toISOString();
         }
       } else if (q.startsWith("UPDATE PIPELINE_ITEM SET") && q.includes("TEARDOWN_STARTED_AT")) {
@@ -749,6 +758,54 @@ describe("pipeline_item queries", () => {
     const items = await listPipelineItems(db, "r1");
     expect(items).toHaveLength(1);
     expect(items[0].tags).toBe("[]");
+  });
+
+  it("insertPipelineItem persists parent_task_id and updatePipelineItemParent sets/clears it", async () => {
+    await insertPipelineItem(db, {
+      id: "parent",
+      repo_id: "r1",
+      issue_number: null,
+      issue_title: null,
+      prompt: "parent",
+      tags: [],
+      pr_number: null,
+      pr_url: null,
+      branch: "task-parent",
+      agent_type: "pty",
+      agent_provider: "claude",
+      activity: "idle",
+      port_offset: null,
+      port_env: null,
+    });
+    await insertPipelineItem(db, {
+      id: "child",
+      repo_id: "r1",
+      issue_number: null,
+      issue_title: null,
+      prompt: "child",
+      tags: [],
+      pr_number: null,
+      pr_url: null,
+      branch: "task-child",
+      agent_type: "pty",
+      agent_provider: "claude",
+      activity: "idle",
+      port_offset: null,
+      port_env: null,
+      parent_task_id: "parent",
+    });
+
+    const initial = await listPipelineItems(db, "r1");
+    expect(initial.find((item) => item.id === "child")?.parent_task_id).toBe("parent");
+    expect(initial.find((item) => item.id === "parent")?.parent_task_id).toBeNull();
+
+    await updatePipelineItemParent(db, "child", null);
+    const cleared = await listPipelineItems(db, "r1");
+    expect(cleared.find((item) => item.id === "child")?.parent_task_id).toBeNull();
+
+    await updatePipelineItemParent(db, "child", "parent");
+    const reattached = await listPipelineItems(db, "r1");
+    expect(reattached.find((item) => item.id === "child")?.parent_task_id).toBe("parent");
   });
 
   it("listPipelineItems excludes closed rows even when stage is still active", async () => {

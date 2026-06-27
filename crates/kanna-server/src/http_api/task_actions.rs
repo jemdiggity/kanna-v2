@@ -1,4 +1,5 @@
 use super::state::{db_write_error, AppState};
+use super::task_blockers::resolve_existing_task_id;
 use super::task_input::notify_task_completion;
 use crate::db::Db;
 use axum::extract::State;
@@ -43,6 +44,90 @@ pub(super) async fn run_merge_agent(
     }))
 }
 
+fn parent_chain_reaches(
+    db: &Db,
+    start: &str,
+    target: &str,
+) -> Result<bool, (axum::http::StatusCode, String)> {
+    let mut current = Some(start.to_string());
+    let mut steps = 0usize;
+    while let Some(id) = current {
+        if id == target {
+            return Ok(true);
+        }
+        steps += 1;
+        if steps > 10_000 {
+            break;
+        }
+        current = db
+            .pipeline_item_parent(&id)
+            .map_err(|e| db_write_error("db error", e))?;
+    }
+    Ok(false)
+}
+
+pub(super) async fn set_task_parent(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+    Json(payload): Json<crate::mobile_api::SetTaskParentRequest>,
+) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
+    let db = Db::open(&state.config.db_path).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("db error: {}", e),
+        )
+    })?;
+    let task_id = resolve_existing_task_id(&db, &task_id)?;
+
+    let parent_task_id = match payload.parent_task_id.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(raw) => {
+            let parent_id = resolve_existing_task_id(&db, raw)?;
+            if parent_id == task_id {
+                return Err((
+                    axum::http::StatusCode::BAD_REQUEST,
+                    "task cannot be its own parent".to_string(),
+                ));
+            }
+            let task = db
+                .get_pipeline_item(&task_id)
+                .map_err(|e| db_write_error("db error", e))?
+                .ok_or_else(|| {
+                    (
+                        axum::http::StatusCode::NOT_FOUND,
+                        format!("task not found: {task_id}"),
+                    )
+                })?;
+            let parent = db
+                .get_pipeline_item(&parent_id)
+                .map_err(|e| db_write_error("db error", e))?
+                .ok_or_else(|| {
+                    (
+                        axum::http::StatusCode::NOT_FOUND,
+                        format!("parent task not found: {parent_id}"),
+                    )
+                })?;
+            if task.repo_id != parent.repo_id {
+                return Err((
+                    axum::http::StatusCode::BAD_REQUEST,
+                    "parent task belongs to a different repo".to_string(),
+                ));
+            }
+            if parent_chain_reaches(&db, &parent_id, &task_id)? {
+                return Err((
+                    axum::http::StatusCode::BAD_REQUEST,
+                    "cannot set parent because it would create a subtask cycle".to_string(),
+                ));
+            }
+            Some(parent_id)
+        }
+    };
+
+    db.update_pipeline_item_parent(&task_id, parent_task_id.as_deref())
+        .map_err(|e| db_write_error("db error", e))?;
+    Ok(Json(crate::mobile_api::TaskActionResponse { task_id }))
+}
+
 pub(super) async fn close_task(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(task_id): axum::extract::Path<String>,
@@ -74,6 +159,19 @@ pub(super) async fn close_task(
                 format!("task not found: {}", task_id),
             )
         })?;
+
+    let open_children = db.count_open_children(&pipeline_item_id).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("db error: {}", e),
+        )
+    })?;
+    if open_children > 0 {
+        return Err((
+            axum::http::StatusCode::CONFLICT,
+            "task has open subtasks; close or detach subtasks first".to_string(),
+        ));
+    }
 
     let mut daemon = crate::daemon_client::DaemonClient::connect(&state.config.daemon_dir)
         .await

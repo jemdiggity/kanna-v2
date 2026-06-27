@@ -82,6 +82,7 @@ pub(crate) fn prepare_merge_agent_for_api(
             permission_mode: None,
             allowed_tools: Vec::new(),
             notify_task_id: None,
+            parent_task_id: None,
         },
     )
 }
@@ -99,6 +100,25 @@ pub(crate) fn prepare_task_for_api(
     let explicit_provider = request.agent_provider;
     let default_provider = if explicit_provider.is_none() {
         read_default_agent_provider_setting(db)?
+    } else {
+        None
+    };
+    let parent_task_id = if let Some(raw_parent_task_id) = request.parent_task_id.as_deref() {
+        let parent_task_id = db
+            .resolve_pipeline_item_id(raw_parent_task_id)
+            .map_err(|e| format!("db error: {}", e))?
+            .ok_or_else(|| format!("parent task not found: {}", raw_parent_task_id))?;
+        let parent = db
+            .get_pipeline_item(&parent_task_id)
+            .map_err(|e| format!("db error: {}", e))?
+            .ok_or_else(|| format!("parent task not found: {}", parent_task_id))?;
+        if parent.repo_id != repo.id {
+            return Err(format!(
+                "parent task belongs to a different repo: {}",
+                parent_task_id
+            ));
+        }
+        Some(parent_task_id)
     } else {
         None
     };
@@ -121,6 +141,7 @@ pub(crate) fn prepare_task_for_api(
             permission_mode: request.permission_mode,
             allowed_tools: request.allowed_tools.unwrap_or_default(),
             notify_task_id: request.notify_task_id,
+            parent_task_id,
         },
     )
 }
@@ -245,6 +266,7 @@ fn prepare_task_spawn(
             .as_deref()
             .or(request.base_ref.as_deref()),
         notify_task_id: request.notify_task_id.as_deref(),
+        parent_task_id: request.parent_task_id.as_deref(),
     })
     .map_err(|e| format!("db error: {}", e))?;
 

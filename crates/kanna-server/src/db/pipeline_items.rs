@@ -6,7 +6,7 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo_id, issue_number, issue_title, prompt, pipeline, stage,
              pr_number, pr_url, branch, agent_type, agent_provider, activity, activity_changed_at,
-             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at
+             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at, parent_task_id
              FROM pipeline_item
              WHERE closed_at IS NULL
              ORDER BY updated_at DESC, created_at DESC",
@@ -37,6 +37,7 @@ impl Db {
                 base_ref: row.get(21)?,
                 notify_task_id: row.get(22)?,
                 notified_at: row.get(23)?,
+                parent_task_id: row.get(24)?,
             })
         })?;
         rows.collect()
@@ -47,7 +48,7 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo_id, issue_number, issue_title, prompt, pipeline, stage,
              pr_number, pr_url, branch, agent_type, agent_provider, activity, activity_changed_at,
-             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at
+             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at, parent_task_id
              FROM pipeline_item
              WHERE closed_at IS NULL
                AND (
@@ -82,6 +83,7 @@ impl Db {
                 base_ref: row.get(21)?,
                 notify_task_id: row.get(22)?,
                 notified_at: row.get(23)?,
+                parent_task_id: row.get(24)?,
             })
         })?;
         rows.collect()
@@ -91,7 +93,7 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo_id, issue_number, issue_title, prompt, pipeline, stage, \
              pr_number, pr_url, branch, agent_type, agent_provider, activity, activity_changed_at, \
-             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at \
+             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at, parent_task_id \
              FROM pipeline_item WHERE repo_id = ? AND closed_at IS NULL \
              ORDER BY pin_order ASC, created_at DESC",
         )?;
@@ -121,6 +123,7 @@ impl Db {
                 base_ref: row.get(21)?,
                 notify_task_id: row.get(22)?,
                 notified_at: row.get(23)?,
+                parent_task_id: row.get(24)?,
             })
         })?;
         rows.collect()
@@ -130,7 +133,7 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo_id, issue_number, issue_title, prompt, pipeline, stage, \
              pr_number, pr_url, branch, agent_type, agent_provider, activity, activity_changed_at, \
-             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at \
+             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at, parent_task_id \
              FROM pipeline_item WHERE id = ?",
         )?;
         let mut rows = stmt.query_map([id], |row| {
@@ -159,6 +162,7 @@ impl Db {
                 base_ref: row.get(21)?,
                 notify_task_id: row.get(22)?,
                 notified_at: row.get(23)?,
+                parent_task_id: row.get(24)?,
             })
         })?;
         match rows.next() {
@@ -280,8 +284,8 @@ impl Db {
         self.conn.execute(
             "INSERT INTO pipeline_item
              (id, repo_id, prompt, display_name, pipeline, stage, tags, branch, agent_type, agent_provider,
-              activity, activity_changed_at, port_offset, port_env, base_ref, notify_task_id)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?, ?)",
+              activity, activity_changed_at, port_offset, port_env, base_ref, notify_task_id, parent_task_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?, ?, ?)",
             (
                 item.id,
                 item.repo_id,
@@ -298,8 +302,55 @@ impl Db {
                 item.port_env_json,
                 item.base_ref,
                 item.notify_task_id,
+                item.parent_task_id,
             ),
         )?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn get_test_pipeline_item_parent(
+        &self,
+        id: &str,
+    ) -> Result<Option<String>, rusqlite::Error> {
+        self.conn.query_row(
+            "SELECT parent_task_id FROM pipeline_item WHERE id = ?",
+            [id],
+            |row| row.get(0),
+        )
+    }
+
+    pub fn count_open_children(&self, parent_id: &str) -> Result<i64, rusqlite::Error> {
+        self.conn.query_row(
+            "SELECT COUNT(*) FROM pipeline_item WHERE parent_task_id = ? AND closed_at IS NULL",
+            [parent_id],
+            |row| row.get(0),
+        )
+    }
+
+    pub fn pipeline_item_parent(&self, id: &str) -> Result<Option<String>, rusqlite::Error> {
+        self.conn
+            .query_row(
+                "SELECT parent_task_id FROM pipeline_item WHERE id = ?",
+                [id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map(Option::flatten)
+    }
+
+    pub fn update_pipeline_item_parent(
+        &self,
+        id: &str,
+        parent_task_id: Option<&str>,
+    ) -> Result<(), rusqlite::Error> {
+        let rows_affected = self.conn.execute(
+            "UPDATE pipeline_item SET parent_task_id = ?, updated_at = datetime('now') WHERE id = ?",
+            (parent_task_id, id),
+        )?;
+        if rows_affected == 0 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
         Ok(())
     }
 

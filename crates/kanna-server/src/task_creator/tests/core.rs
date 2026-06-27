@@ -152,6 +152,7 @@ fn prepare_task_defaults_to_agent_session_for_claude_and_codex() {
                 permission_mode: Some("dontAsk".to_string()),
                 allowed_tools: Some(vec!["Bash".to_string()]),
                 notify_task_id: None,
+                parent_task_id: None,
                 blocker_task_ids: None,
             },
         )
@@ -198,6 +199,7 @@ fn prepare_codex_agent_uses_resolved_executable_for_headless_spawn() {
             permission_mode: None,
             allowed_tools: None,
             notify_task_id: None,
+            parent_task_id: None,
             blocker_task_ids: None,
         },
     )
@@ -273,6 +275,7 @@ fn prepare_headless_agent_uses_worktree_workspace_path_for_executable_resolution
             permission_mode: None,
             allowed_tools: None,
             notify_task_id: None,
+            parent_task_id: None,
             blocker_task_ids: None,
         },
     )
@@ -322,6 +325,7 @@ fn prepare_task_defaults_to_pty_session_for_copilot() {
             permission_mode: None,
             allowed_tools: None,
             notify_task_id: None,
+            parent_task_id: None,
             blocker_task_ids: None,
         },
     )
@@ -335,6 +339,90 @@ fn prepare_task_defaults_to_pty_session_for_copilot() {
         .unwrap();
     assert_eq!(created.agent_type.as_deref(), Some("pty"));
     assert!(matches!(prepared.session, PreparedSessionSpawn::Pty { .. }));
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
+fn prepare_task_stores_parent_task_id_for_subtasks() {
+    let repo_root = init_git_repo("subtask-parent");
+    let config = test_config("subtask-parent");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    db.insert_test_pipeline_item(
+        "parent-1",
+        "repo-1",
+        "parent prompt",
+        Some("Parent"),
+        "in progress",
+        "2026-04-17 07:00:00",
+    )
+    .unwrap();
+
+    let prepared = prepare_task_for_api(
+        &db,
+        &config,
+        CreateTaskRequest {
+            repo_id: "repo-1".to_string(),
+            prompt: "Child prompt".to_string(),
+            display_name: None,
+            pipeline_name: None,
+            base_ref: None,
+            agent_provider: Some("claude".to_string()),
+            agent_type: Some("agent".to_string()),
+            model: None,
+            permission_mode: None,
+            allowed_tools: None,
+            blocker_task_ids: None,
+            notify_task_id: None,
+            parent_task_id: Some("parent-1".to_string()),
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        db.get_test_pipeline_item_parent(&prepared.created_task.task_id)
+            .unwrap()
+            .as_deref(),
+        Some("parent-1")
+    );
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
+fn prepare_task_rejects_missing_parent_task() {
+    let repo_root = init_git_repo("subtask-missing-parent");
+    let config = test_config("subtask-missing-parent");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+
+    let err = match prepare_task_for_api(
+        &db,
+        &config,
+        CreateTaskRequest {
+            repo_id: "repo-1".to_string(),
+            prompt: "Child prompt".to_string(),
+            display_name: None,
+            pipeline_name: None,
+            base_ref: None,
+            agent_provider: Some("claude".to_string()),
+            agent_type: Some("agent".to_string()),
+            model: None,
+            permission_mode: None,
+            allowed_tools: None,
+            blocker_task_ids: None,
+            notify_task_id: None,
+            parent_task_id: Some("missing-parent".to_string()),
+        },
+    ) {
+        Ok(_) => panic!("expected missing parent to be rejected"),
+        Err(err) => err,
+    };
+
+    assert!(err.contains("parent task not found"));
 
     let _ = std::fs::remove_dir_all(&repo_root);
 }
@@ -445,6 +533,8 @@ fn prepare_task_uses_builtin_default_pipeline_when_repo_has_no_local_default_pip
             allowed_tools: None,
             blocker_task_ids: None,
             notify_task_id: None,
+
+            parent_task_id: None,
         },
     );
     std::env::set_current_dir(original_cwd).unwrap();
@@ -547,6 +637,8 @@ fn prepare_task_uses_default_agent_provider_setting_when_request_omits_provider(
             allowed_tools: None,
             blocker_task_ids: None,
             notify_task_id: None,
+
+            parent_task_id: None,
         },
     )
     .unwrap();
@@ -573,6 +665,8 @@ fn prepare_task_uses_default_agent_provider_setting_when_request_omits_provider(
             allowed_tools: None,
             blocker_task_ids: None,
             notify_task_id: None,
+
+            parent_task_id: None,
         },
     )
     .unwrap();

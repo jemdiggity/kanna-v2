@@ -44,6 +44,7 @@ export interface PipelineItem {
   agent_session_id: string | null;
   previous_stage: string | null;
   teardown_started_at: string | null;
+  parent_task_id: string | null; // subtask parent; nests under it in the sidebar
   created_at: string;
   updated_at: string;
 }

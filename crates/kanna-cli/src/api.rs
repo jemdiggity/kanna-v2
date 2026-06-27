@@ -4,8 +4,8 @@ use serde_json::Value;
 
 use crate::models::{
     AddRepoRequest, BlockTaskRequest, CompleteStageRequest, CreateTaskRequest, CreateTaskResponse,
-    RepoDetail, RepoSummary, RequestRevisionRequest, TaskActionResponse, TaskDetail,
-    TaskInputRequest, TaskInputResponse, TaskRenameRequest, TaskSummary, WaitUntil,
+    RepoDetail, RepoSummary, RequestRevisionRequest, SetTaskParentRequest, TaskActionResponse,
+    TaskDetail, TaskInputRequest, TaskInputResponse, TaskRenameRequest, TaskSummary, WaitUntil,
 };
 
 pub(crate) fn join_server_url(base_url: &str, path: &str) -> String {
@@ -362,6 +362,19 @@ pub(crate) async fn rename_task_via_api(
     request: &TaskRenameRequest,
 ) -> Result<TaskActionResponse, String> {
     patch_json(base_url, &task_get_path(task_id), request).await
+}
+
+pub(crate) async fn set_task_parent_via_api(
+    base_url: &str,
+    task_id: &str,
+    request: &SetTaskParentRequest,
+) -> Result<TaskActionResponse, String> {
+    post_json(
+        base_url,
+        &format!("/v1/tasks/{task_id}/actions/set-parent"),
+        request,
+    )
+    .await
 }
 
 pub(crate) async fn advance_stage_via_api(

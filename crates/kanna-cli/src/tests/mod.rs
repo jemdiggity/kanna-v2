@@ -1,8 +1,8 @@
 use crate::api::{
     advance_stage_via_api, block_task_via_api, close_task_via_api, create_task_via_api,
     get_task_via_api, parse_wait_until, rename_task_via_api, repo_task_list_path,
-    send_task_input_via_api, task_get_path, task_list_path, task_logs_path,
-    task_matches_wait_until, task_search_path, unblock_task_via_api,
+    send_task_input_via_api, set_task_parent_via_api, task_get_path, task_list_path,
+    task_logs_path, task_matches_wait_until, task_search_path, unblock_task_via_api,
 };
 use crate::commands::guide::{
     build_guide_context, render_guide_json, render_guide_markdown, run_guide_command, GuideContext,
@@ -19,7 +19,8 @@ use crate::config::{
     resolve_optional_server_base_url, resolve_server_base_url, resolve_stage_db_path,
 };
 use crate::models::{
-    TaskCreateOptions, TaskDetail, TaskInputResponse, TaskRenameRequest, TaskSummary, WaitUntil,
+    SetTaskParentRequest, TaskCreateOptions, TaskDetail, TaskInputResponse, TaskRenameRequest,
+    TaskSummary, WaitUntil,
 };
 use clap::{Command, CommandFactory, Parser};
 use serde_json::json;
@@ -112,9 +113,17 @@ fn typed_tool_surfaces() -> BTreeMap<&'static str, TypedToolSurface> {
                     ("model", "model"),
                     ("permission_mode", "permission_mode"),
                     ("notify_task_id", "notify_task"),
+                    ("parent_task_id", "parent_task"),
                     ("allowed_tools", "allowed_tool"),
                     ("blocker_task_ids", "blocker_task_id"),
                 ],
+            },
+        ),
+        (
+            "kanna_set_task_parent",
+            TypedToolSurface {
+                command_path: &["task", "set-parent"],
+                param_args: &[("task_id", "task_id"), ("parent_task_id", "parent_task")],
             },
         ),
         (

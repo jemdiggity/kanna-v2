@@ -6,6 +6,7 @@ import { createTaskBlockedActions } from "./taskBlockedActions";
 import { createTaskCloseActions } from "./taskCloseActions";
 import { createTaskItemActions } from "./taskItemActions";
 import { createTaskMetadataActions } from "./taskMetadataActions";
+import { createTaskParentActions } from "./taskParentActions";
 import { createTaskRepoActions } from "./taskRepoActions";
 
 export { collectTeardownCommands } from "./taskLifecycleEnv";
@@ -35,6 +36,7 @@ export interface TasksApi {
   unpinItem: (itemId: string) => Promise<void>;
   reorderPinned: (repoId: string, orderedIds: string[]) => Promise<void>;
   renameItem: (itemId: string, displayName: string | null) => Promise<void>;
+  setTaskParent: (itemId: string, parentId: string | null) => Promise<void>;
   handleAgentFinished: (sessionId: string) => Promise<void>;
 }
 
@@ -49,6 +51,7 @@ export function createTasksApi(
     checkUnblocked: blockedActions.checkUnblocked,
   });
   const metadataActions = createTaskMetadataActions(context);
+  const parentActions = createTaskParentActions(context);
 
   return {
     importRepo: repoActions.importRepo,
@@ -69,6 +72,7 @@ export function createTasksApi(
     unpinItem: metadataActions.unpinItem,
     reorderPinned: metadataActions.reorderPinned,
     renameItem: metadataActions.renameItem,
+    setTaskParent: parentActions.setTaskParent,
     handleAgentFinished: closeActions.handleAgentFinished,
   };
 }

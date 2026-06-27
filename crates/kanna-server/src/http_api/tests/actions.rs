@@ -56,6 +56,171 @@ async fn close_task_route_uses_task_closer() {
 }
 
 #[tokio::test]
+async fn set_task_parent_route_sets_and_clears_parent() {
+    let state = super::test_state_with_seed("desktop-1", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "parent-1",
+            "repo-1",
+            "parent prompt",
+            Some("Parent"),
+            "in progress",
+            "2026-04-17 07:00:00",
+        )
+        .unwrap();
+        db.insert_test_pipeline_item(
+            "child-1",
+            "repo-1",
+            "child prompt",
+            Some("Child"),
+            "in progress",
+            "2026-04-17 08:00:00",
+        )
+        .unwrap();
+    });
+    let db_path = state.config.db_path.clone();
+    let app = super::router(state);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/tasks/child-1/actions/set-parent")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "parentTaskId": "parent-1" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let db = Db::open(&db_path).unwrap();
+    assert_eq!(
+        db.pipeline_item_parent("child-1").unwrap().as_deref(),
+        Some("parent-1")
+    );
+
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks/child-1/actions/set-parent")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::json!({}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let db = Db::open(&db_path).unwrap();
+    assert_eq!(db.pipeline_item_parent("child-1").unwrap(), None);
+}
+
+#[tokio::test]
+async fn set_task_parent_route_rejects_cycles_self_and_cross_repo() {
+    let state = super::test_state_with_seed("desktop-1", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_repo("repo-2", "Repo Two").unwrap();
+        for (id, repo_id) in [
+            ("parent-1", "repo-1"),
+            ("child-1", "repo-1"),
+            ("other-1", "repo-2"),
+        ] {
+            db.insert_test_pipeline_item(
+                id,
+                repo_id,
+                "prompt",
+                Some(id),
+                "in progress",
+                "2026-04-17 07:00:00",
+            )
+            .unwrap();
+        }
+        db.update_pipeline_item_parent("child-1", Some("parent-1"))
+            .unwrap();
+    });
+    let app = super::router(state);
+
+    let cycle = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/tasks/parent-1/actions/set-parent")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "parentTaskId": "child-1" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(cycle.status(), StatusCode::BAD_REQUEST);
+
+    let self_parent = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/tasks/parent-1/actions/set-parent")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "parentTaskId": "parent-1" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(self_parent.status(), StatusCode::BAD_REQUEST);
+
+    let cross_repo = app
+        .oneshot(
+            Request::post("/v1/tasks/child-1/actions/set-parent")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "parentTaskId": "other-1" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(cross_repo.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn close_task_route_rejects_parent_with_open_subtasks() {
+    let state = super::test_state_with_seed("desktop-1", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "parent-1",
+            "repo-1",
+            "parent prompt",
+            Some("Parent"),
+            "in progress",
+            "2026-04-17 07:00:00",
+        )
+        .unwrap();
+        db.insert_test_pipeline_item(
+            "child-1",
+            "repo-1",
+            "child prompt",
+            Some("Child"),
+            "in progress",
+            "2026-04-17 08:00:00",
+        )
+        .unwrap();
+        db.update_pipeline_item_parent("child-1", Some("parent-1"))
+            .unwrap();
+    });
+    let app = super::router(state);
+
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks/parent-1/actions/close")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
 async fn close_task_route_resolves_branch_style_task_id() {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
