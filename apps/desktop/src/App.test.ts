@@ -24,6 +24,13 @@ async function waitForNativeCloseRequestedHandler() {
   return closeRequestedHandler;
 }
 
+async function waitForCondition(predicate: () => boolean, attempts = 10): Promise<void> {
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    if (predicate()) return;
+    await flushPromises();
+  }
+}
+
 interface Deferred<T> {
   promise: Promise<T>;
   resolve: (value: T) => void;
@@ -671,8 +678,7 @@ describe("App", () => {
     expect(scheduleStartupBackupMock).not.toHaveBeenCalled();
 
     initDeferred.resolve();
-    await flushPromises();
-    await flushPromises();
+    await waitForCondition(() => scheduleStartupBackupMock.mock.calls.length > 0);
 
     expect(scheduleStartupBackupMock).toHaveBeenCalledTimes(1);
     expect(scheduleStartupBackupMock).toHaveBeenCalledWith("test.db");

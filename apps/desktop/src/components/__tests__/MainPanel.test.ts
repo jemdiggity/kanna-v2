@@ -13,6 +13,10 @@ describe("MainPanel", () => {
   beforeEach(() => {
     vi.resetModules();
     invokeMock.mockReset();
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "read_env_var") return Promise.resolve("0.0.0");
+      return Promise.reject(new Error("missing"));
+    });
     vi.stubGlobal("__KANNA_MOBILE__", false);
     localStorage.clear();
   });

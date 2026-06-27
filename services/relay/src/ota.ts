@@ -448,9 +448,38 @@ class LocalOtaStorageBackend implements OtaStorageBackend {
         continue;
       }
       const buffer = await readFile(path);
-      return { buffer, contentType: inferContentType(path) };
+      return {
+        buffer,
+        contentType: await this.contentTypeForObject(runtimeVersion, platform, normalized, key),
+      };
     }
     return null;
+  }
+
+  private async contentTypeForObject(
+    runtimeVersion: string,
+    platform: "ios",
+    normalizedObjectPath: string,
+    key: string
+  ): Promise<string> {
+    const [updateId, artifactKind] = normalizedObjectPath.split("/");
+    if (artifactKind === "bundles") {
+      return "application/javascript";
+    }
+    if (!updateId) {
+      return inferContentType(normalizedObjectPath);
+    }
+    const metadataPath = join(
+      this.root,
+      "ota",
+      platform,
+      runtimeVersion,
+      "updates",
+      updateId,
+      "metadata.json"
+    );
+    const metadata = JSON.parse(await readFile(metadataPath, "utf8")) as ExpoExportMetadata;
+    return contentTypeFromMetadata(metadata, platform, key) ?? inferContentType(normalizedObjectPath);
   }
 }
 
@@ -477,14 +506,50 @@ class GcsOtaStorageBackend implements OtaStorageBackend {
   }
 
   async findAsset(runtimeVersion: string, platform: "ios", key: string): Promise<OtaAssetResult | null> {
-    const [files] = await this.storage.bucket(this.bucketName).getFiles({
-      prefix: `ota/${platform}/${runtimeVersion}/updates/`,
-    });
+    const prefix = `ota/${platform}/${runtimeVersion}/updates/`;
+    const [files] = await this.storage.bucket(this.bucketName).getFiles({ prefix });
     const file = files.find((candidate) => assetObjectMatchesKey(candidate.name, key));
     if (!file) return null;
     const [buffer] = await file.download();
-    return { buffer, contentType: await readGcsContentType(file) };
+    return {
+      buffer,
+      contentType: await this.contentTypeForObject(file, prefix, platform, key),
+    };
   }
+
+  private async contentTypeForObject(
+    file: File,
+    updatesPrefix: string,
+    platform: "ios",
+    key: string
+  ): Promise<string> {
+    if (file.name.endsWith(`/bundles/${key}.hbc`)) {
+      return "application/javascript";
+    }
+    const updateId = updateIdFromObjectName(file.name, updatesPrefix);
+    if (!updateId) {
+      return await readGcsContentType(file);
+    }
+    const metadata = await this.readJson<ExpoExportMetadata>(`${updatesPrefix}${updateId}/metadata.json`);
+    return contentTypeFromMetadata(metadata, platform, key) ?? await readGcsContentType(file);
+  }
+}
+
+function updateIdFromObjectName(name: string, updatesPrefix: string): string | null {
+  if (!name.startsWith(updatesPrefix)) return null;
+  const [updateId] = name.slice(updatesPrefix.length).split("/");
+  return updateId || null;
+}
+
+function contentTypeFromMetadata(
+  metadata: ExpoExportMetadata | null,
+  platform: "ios",
+  key: string
+): string | null {
+  const assets = metadata?.fileMetadata[platform]?.assets ?? [];
+  const asset = assets.find((candidate) => candidate.path === `assets/${key}`);
+  if (!asset) return null;
+  return asset.contentType ?? inferContentType(asset.ext ?? asset.path);
 }
 
 async function readGcsContentType(file: File): Promise<string> {

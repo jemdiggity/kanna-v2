@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -33,7 +34,22 @@ async function makeRepoFixture(): Promise<string> {
       prod: { runtimeVersion: "1.0.0" },
     })
   );
-  await writeFile(join(repoRoot, "apps/mobile/dist/metadata.json"), "{\"hello\":\"world\"}");
+  await mkdir(join(repoRoot, "apps/mobile/dist/_expo/static/js/ios"), { recursive: true });
+  await mkdir(join(repoRoot, "apps/mobile/dist/assets"), { recursive: true });
+  await writeFile(
+    join(repoRoot, "apps/mobile/dist/metadata.json"),
+    JSON.stringify({
+      fileMetadata: {
+        ios: {
+          bundle: "_expo/static/js/ios/main.hbc",
+          assets: [{ path: "assets/icon.png", ext: "png" }],
+        },
+      },
+    })
+  );
+  await writeFile(join(repoRoot, "apps/mobile/dist/_expo/static/js/ios/main.hbc"), "bundle bytes");
+  await writeFile(join(repoRoot, "apps/mobile/dist/assets/icon.png"), "png bytes");
+  await writeFile(join(repoRoot, "apps/mobile/dist/expoConfig.json"), "{}");
   return repoRoot;
 }
 
@@ -78,6 +94,16 @@ describe("kd mobile OTA", () => {
 
   it("builds a dry-run publish plan without uploading to GCS", async () => {
     const repoRoot = await makeRepoFixture();
+    const bundleKey = createHash("sha256").update("bundle bytes").digest("base64url");
+    const assetKey = createHash("sha256").update("png bytes").digest("base64url");
+    const expectedUpdateId = computeExpoUpdateId(Buffer.from(JSON.stringify({
+      fileMetadata: {
+        ios: {
+          bundle: `bundles/${bundleKey}.hbc`,
+          assets: [{ path: `assets/${assetKey}`, ext: "png" }],
+        },
+      },
+    })));
     const plan = await buildMobileOtaPublishPlan({
       repoRoot,
       environment: "staging",
@@ -89,7 +115,7 @@ describe("kd mobile OTA", () => {
       bucket: "kanna-staging.firebasestorage.app",
       channel: "staging",
       runtimeVersion: "1.0.0",
-      updateId: "93a23971-a914-e5ea-cbf0-a8d25154cda3",
+      updateId: expectedUpdateId,
       pointerObject: "ota/ios/1.0.0/channels/staging.json",
     });
     expect(plan.commands.map((command) => command.command)).toEqual(["pnpm", "gcloud", "gcloud"]);
@@ -141,6 +167,72 @@ describe("kd mobile OTA", () => {
     expect(calls[1]).toMatchObject({ command: "pnpm", cwd: join(repoRoot, "apps/mobile") });
     expect(result.message).toContain("Dry run: mobile OTA update");
     expect(result.message).toContain("curl -H 'expo-protocol-version: 1'");
+  });
+
+  it("publishes the update ID derived from the staged metadata uploaded to GCS", async () => {
+    const repoRoot = await makeRepoFixture();
+    const bundleBytes = Buffer.from("bundle bytes");
+    const assetBytes = Buffer.from("asset bytes");
+    const bundleKey = createHash("sha256").update(bundleBytes).digest("base64url");
+    const assetKey = createHash("sha256").update(assetBytes).digest("base64url");
+    const expectedStagedMetadata = JSON.stringify({
+      fileMetadata: {
+        ios: {
+          bundle: `bundles/${bundleKey}.hbc`,
+          assets: [
+            {
+              path: `assets/${assetKey}`,
+              ext: "png",
+              contentType: "image/png",
+            },
+          ],
+        },
+      },
+    });
+    const expectedUpdateId = computeExpoUpdateId(Buffer.from(expectedStagedMetadata));
+    const runner: CommandRunner = {
+      async run(command) {
+        if (command === "git") return { exitCode: 0, stdout: "", stderr: "" };
+        if (command === "pnpm") {
+          await mkdir(join(repoRoot, "apps/mobile/dist/_expo/static/js/ios"), { recursive: true });
+          await mkdir(join(repoRoot, "apps/mobile/dist/assets"), { recursive: true });
+          await writeFile(
+            join(repoRoot, "apps/mobile/dist/metadata.json"),
+            JSON.stringify({
+              fileMetadata: {
+                ios: {
+                  bundle: "_expo/static/js/ios/main.hbc",
+                  assets: [
+                    {
+                      path: "assets/icon.png",
+                      ext: "png",
+                      contentType: "image/png",
+                    },
+                  ],
+                },
+              },
+            })
+          );
+          await writeFile(join(repoRoot, "apps/mobile/dist/expoConfig.json"), "{}");
+          await writeFile(join(repoRoot, "apps/mobile/dist/_expo/static/js/ios/main.hbc"), bundleBytes);
+          await writeFile(join(repoRoot, "apps/mobile/dist/assets/icon.png"), assetBytes);
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    };
+
+    const result = await executeMobileOtaPublishWithContext(
+      { staging: true, production: false, dryRun: true },
+      { repoRoot, env: {}, runner }
+    );
+
+    expect(result.data).toMatchObject({
+      updateId: expectedUpdateId,
+      runtimeVersion: "1.0.0",
+      channel: "staging",
+    });
+    expect(result.message).toContain(`Dry run: mobile OTA update ${expectedUpdateId}`);
   });
 
   it("provisions the private key through kd-managed gcloud commands", async () => {

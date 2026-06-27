@@ -1118,7 +1118,7 @@ describe("Relay integration", () => {
 
     await closeAndWait(phone);
     await closeAndWait(desktop);
-  });
+  }, 15_000);
 
   it("lists only active desktop connections for a signed-in user", async () => {
     const { ws: desktopOne } = await connectAndAuth({

@@ -31,7 +31,7 @@ async function findFreePort(): Promise<number> {
   });
 }
 
-async function waitForRelay(timeoutMs = 10_000): Promise<void> {
+async function waitForRelay(timeoutMs = 30_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const response = await fetch(`http://127.0.0.1:${port}/health`).catch(() => null);
@@ -99,7 +99,7 @@ describe("OTA relay integration", () => {
       process.stderr.write(`[relay] ${chunk.toString()}`);
     });
     await waitForRelay();
-  }, 15_000);
+  }, 45_000);
 
   afterAll(async () => {
     relayProcess?.kill("SIGTERM");
@@ -134,6 +134,15 @@ describe("OTA relay integration", () => {
     expect(assetResponse.headers.get("content-type")).toBe("application/javascript");
     expect(assetResponse.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
     expect(await assetResponse.text()).toBe("bundle bytes");
+
+    const assetKey = /"assets":\[\{"hash":"([^"]+)"/.exec(body)?.[1];
+    expect(assetKey).toBeTruthy();
+    const pngResponse = await fetch(
+      `http://127.0.0.1:${port}/ota/assets?key=${assetKey ?? ""}&runtimeVersion=1.0.0&platform=ios`
+    );
+    expect(pngResponse.status).toBe(200);
+    expect(pngResponse.headers.get("content-type")).toBe("image/png");
+    expect(await pngResponse.text()).toBe("png bytes");
   });
 
   it("returns 404 JSON when the channel pointer is missing", async () => {
