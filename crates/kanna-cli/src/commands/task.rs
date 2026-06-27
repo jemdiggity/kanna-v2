@@ -7,14 +7,14 @@ use crate::api::{
     advance_stage_via_api, block_task_via_api, close_task_via_api, create_task_via_api,
     get_task_via_api, list_repo_tasks_via_api, list_tasks_via_api, parse_wait_until,
     rename_task_via_api, request_revision_via_api, search_tasks_via_api, send_task_input_via_api,
-    task_logs_via_api, unblock_task_via_api, wait_task_via_api,
+    set_task_parent_via_api, task_logs_via_api, unblock_task_via_api, wait_task_via_api,
 };
 use crate::commands::socket::notify_socket;
 use crate::commands::{parse_metadata_json, print_json};
 use crate::config::resolve_server_base_url_from_env;
 use crate::models::{
-    BlockTaskRequest, CreateTaskRequest, RequestRevisionRequest, TaskCreateOptions, TaskDetail,
-    TaskInputRequest, TaskRenameRequest, TaskStatusRow, TaskSummary,
+    BlockTaskRequest, CreateTaskRequest, RequestRevisionRequest, SetTaskParentRequest,
+    TaskCreateOptions, TaskDetail, TaskInputRequest, TaskRenameRequest, TaskStatusRow, TaskSummary,
 };
 use crate::TaskCommands;
 
@@ -32,6 +32,7 @@ pub(crate) fn build_create_task_request(options: TaskCreateOptions) -> CreateTas
         allowed_tools: (!options.allowed_tool.is_empty()).then_some(options.allowed_tool),
         blocker_task_ids: (!options.blocker_task_id.is_empty()).then_some(options.blocker_task_id),
         notify_task_id: options.notify_task,
+        parent_task_id: options.parent_task,
     }
 }
 
@@ -226,6 +227,7 @@ pub(crate) async fn run(command: TaskCommands) {
             allowed_tool,
             blocker_task_id,
             notify_task,
+            parent_task,
         } => {
             let base_url = resolve_server_base_url_from_env(server_url.as_deref());
             let request = build_create_task_request(TaskCreateOptions {
@@ -241,6 +243,7 @@ pub(crate) async fn run(command: TaskCommands) {
                 allowed_tool,
                 blocker_task_id,
                 notify_task,
+                parent_task,
             });
             let created = create_task_via_api(&base_url, &request)
                 .await
@@ -392,6 +395,26 @@ pub(crate) async fn run(command: TaskCommands) {
                     process::exit(1);
                 });
             if let Err(e) = print_json(&serde_json::json!({ "taskId": task_id, "closed": true })) {
+                eprintln!("Error: {e}");
+                process::exit(1);
+            }
+        }
+        TaskCommands::SetParent {
+            task_id,
+            parent_task,
+            server_url,
+        } => {
+            let base_url = resolve_server_base_url_from_env(server_url.as_deref());
+            let request = SetTaskParentRequest {
+                parent_task_id: parent_task,
+            };
+            let updated = set_task_parent_via_api(&base_url, &task_id, &request)
+                .await
+                .unwrap_or_else(|e| {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                });
+            if let Err(e) = print_json(&updated) {
                 eprintln!("Error: {e}");
                 process::exit(1);
             }

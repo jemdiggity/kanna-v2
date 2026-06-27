@@ -79,6 +79,41 @@ async fn rename_task_patches_task_update_path_with_display_name() {
 }
 
 #[tokio::test]
+async fn set_task_parent_posts_camel_case_parent_id() {
+    let response = http_json_response("200 OK", "{\"taskId\":\"task-123\"}");
+    let (base_url, handle) = serve_single_http_response(response).await;
+
+    let action = set_task_parent_via_api(
+        &base_url,
+        "task-123",
+        &SetTaskParentRequest {
+            parent_task_id: Some("parent-1".to_string()),
+        },
+    )
+    .await
+    .unwrap();
+    let request = handle.await.unwrap();
+
+    assert_eq!(action.task_id, "task-123");
+    assert!(request.starts_with("POST /v1/tasks/task-123/actions/set-parent HTTP/1.1"));
+    assert!(request.contains(r#"{"parentTaskId":"parent-1"}"#));
+}
+
+#[tokio::test]
+async fn set_task_parent_omits_parent_id_when_clearing() {
+    let response = http_json_response("200 OK", "{\"taskId\":\"task-123\"}");
+    let (base_url, handle) = serve_single_http_response(response).await;
+
+    set_task_parent_via_api(&base_url, "task-123", &SetTaskParentRequest::default())
+        .await
+        .unwrap();
+    let request = handle.await.unwrap();
+
+    assert!(request.starts_with("POST /v1/tasks/task-123/actions/set-parent HTTP/1.1"));
+    assert!(request.ends_with("{}"));
+}
+
+#[tokio::test]
 async fn advance_stage_surfaces_http_errors() {
     let response = http_json_response("409 Conflict", "{\"error\":\"task not accepted yet\"}");
     let (base_url, handle) = serve_single_http_response(response).await;
@@ -191,6 +226,7 @@ async fn create_task_via_api_posts_payload_without_agent_provider_when_flag_abse
         allowed_tool: Vec::new(),
         blocker_task_id: Vec::new(),
         notify_task: None,
+        parent_task: None,
     });
 
     let created = create_task_via_api(&format!("http://{addr}"), &request)

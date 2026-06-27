@@ -314,6 +314,7 @@ fn typed_create_body_matches_catalog_create_task_body() {
         allowed_tool: vec!["Read".to_string(), "Write".to_string()],
         blocker_task_id: vec!["blocker-1".to_string()],
         notify_task: Some("parent-1".to_string()),
+        parent_task: Some("root-1".to_string()),
     });
     let typed_body = serde_json::to_value(request).unwrap();
     let catalog = kanna_tool_catalog::bundled_catalog();
@@ -332,7 +333,8 @@ fn typed_create_body_matches_catalog_create_task_body() {
             "permission_mode": "acceptEdits",
             "allowed_tools": ["Read", "Write"],
             "blocker_task_ids": ["blocker-1"],
-            "notify_task_id": "parent-1"
+            "notify_task_id": "parent-1",
+            "parent_task_id": "root-1"
         }),
     )
     .unwrap();

@@ -162,7 +162,7 @@ export async function upsertTerminalSession(
 
 export async function insertPipelineItem(
   db: DbHandle,
-  item: Omit<PipelineItem, "created_at" | "updated_at" | "activity_changed_at" | "unread_at" | "pinned" | "pin_order" | "display_name" | "closed_at" | "pipeline" | "stage" | "stage_result" | "active_post_action" | "tags" | "base_ref" | "agent_session_id" | "previous_stage" | "teardown_started_at" | "last_output_preview" | "agent_spawn_options"> & { pipeline?: string; stage?: string; tags?: string[]; activity?: PipelineItem["activity"]; display_name?: string | null; base_ref?: string | null; agent_spawn_options?: string | null }
+  item: Omit<PipelineItem, "created_at" | "updated_at" | "activity_changed_at" | "unread_at" | "pinned" | "pin_order" | "display_name" | "closed_at" | "pipeline" | "stage" | "stage_result" | "active_post_action" | "tags" | "base_ref" | "agent_session_id" | "previous_stage" | "teardown_started_at" | "last_output_preview" | "agent_spawn_options" | "parent_task_id"> & { pipeline?: string; stage?: string; tags?: string[]; activity?: PipelineItem["activity"]; display_name?: string | null; base_ref?: string | null; agent_spawn_options?: string | null; parent_task_id?: string | null }
 ): Promise<void> {
   if (!item.agent_provider) {
     throw new Error("No agent provider configured for pipeline item insertion.");
@@ -170,8 +170,8 @@ export async function insertPipelineItem(
   const tagsJson = JSON.stringify(item.tags ?? []);
   await db.execute(
     `INSERT INTO pipeline_item
-       (id, repo_id, issue_number, issue_title, prompt, pipeline, stage, tags, pr_number, pr_url, branch, agent_type, agent_provider, port_offset, port_env, agent_spawn_options, activity, activity_changed_at, display_name, base_ref)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?)`,
+       (id, repo_id, issue_number, issue_title, prompt, pipeline, stage, tags, pr_number, pr_url, branch, agent_type, agent_provider, port_offset, port_env, agent_spawn_options, activity, activity_changed_at, display_name, base_ref, parent_task_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?)`,
     [
       item.id,
       item.repo_id,
@@ -192,6 +192,7 @@ export async function insertPipelineItem(
       item.activity ?? "idle",
       item.display_name ?? null,
       item.base_ref ?? null,
+      item.parent_task_id ?? null,
     ]
   );
 }
@@ -336,6 +337,17 @@ export async function updatePipelineItemDisplayName(
   await db.execute(
     "UPDATE pipeline_item SET display_name = ?, updated_at = datetime('now') WHERE id = ?",
     [displayName, id]
+  );
+}
+
+export async function updatePipelineItemParent(
+  db: DbHandle,
+  id: string,
+  parentTaskId: string | null
+): Promise<void> {
+  await db.execute(
+    "UPDATE pipeline_item SET parent_task_id = ?, updated_at = datetime('now') WHERE id = ?",
+    [parentTaskId, id]
   );
 }
 

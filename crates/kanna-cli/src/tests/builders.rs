@@ -149,6 +149,7 @@ fn builds_camel_case_task_request_payload() {
         allowed_tool: vec!["Bash".to_string(), "Edit".to_string()],
         blocker_task_id: vec!["blocker-1".to_string(), "blocker-2".to_string()],
         notify_task: Some("orchestrator-1".to_string()),
+        parent_task: None,
     });
 
     assert_eq!(
@@ -197,6 +198,7 @@ fn builds_task_request_omits_agent_provider_when_flag_absent() {
         allowed_tool: Vec::new(),
         blocker_task_id: Vec::new(),
         notify_task: None,
+        parent_task: None,
     });
 
     assert_eq!(

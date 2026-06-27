@@ -394,4 +394,8 @@ export async function runMigrations(db: DbHandle): Promise<void> {
   await runMigration("021_pipeline_item_agent_spawn_options", async () => {
     await addColumn("pipeline_item", "agent_spawn_options", "TEXT");
   });
+
+  await runMigration("022_pipeline_item_parent_task_id", async () => {
+    await addColumn("pipeline_item", "parent_task_id", "TEXT");
+  });
 }

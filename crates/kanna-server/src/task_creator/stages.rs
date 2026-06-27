@@ -127,6 +127,7 @@ pub(crate) fn prepare_advance_stage_for_api(
             permission_mode: None,
             allowed_tools: Vec::new(),
             notify_task_id: None,
+            parent_task_id: None,
         },
     )
     .map(|spawn| PreparedStageTransition::Spawn(Box::new(spawn)))
@@ -274,6 +275,7 @@ pub(crate) fn prepare_auto_stage_completion_for_api(
             permission_mode: None,
             allowed_tools: Vec::new(),
             notify_task_id: None,
+            parent_task_id: None,
         },
     )
     .map(|spawn| PreparedStageTransition::Spawn(Box::new(spawn)))
@@ -346,6 +348,7 @@ pub(crate) fn prepare_revision_task_for_api(
             permission_mode: None,
             allowed_tools: Vec::new(),
             notify_task_id: None,
+            parent_task_id: None,
         },
     )
 }

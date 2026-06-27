@@ -44,6 +44,7 @@ pub struct PipelineItem {
     pub base_ref: Option<String>,
     pub notify_task_id: Option<String>,
     pub notified_at: Option<String>,
+    pub parent_task_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -97,6 +98,7 @@ pub struct NewPipelineItem<'a> {
     pub port_env_json: Option<&'a str>,
     pub base_ref: Option<&'a str>,
     pub notify_task_id: Option<&'a str>,
+    pub parent_task_id: Option<&'a str>,
 }
 
 pub struct ClaimedTaskNotification {

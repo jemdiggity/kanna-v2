@@ -67,7 +67,8 @@ impl Db {
                 port_env TEXT,
                 base_ref TEXT,
                 notify_task_id TEXT,
-                notified_at TEXT
+                notified_at TEXT,
+                parent_task_id TEXT
             );
 
             CREATE TABLE worktree (

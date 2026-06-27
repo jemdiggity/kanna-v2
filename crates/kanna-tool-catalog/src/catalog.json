@@ -97,6 +97,7 @@
         { "name": "agent_type", "type": "string", "required": false, "location": "body", "key": "agentType" },
         { "name": "model", "type": "string", "required": false, "location": "body" },
         { "name": "permission_mode", "type": "string", "required": false, "location": "body", "key": "permissionMode" },
+        { "name": "parent_task_id", "type": "string", "required": false, "location": "body", "key": "parentTaskId" },
         { "name": "notify_task_id", "type": "string", "required": false, "location": "body", "key": "notifyTaskId" },
         { "name": "allowed_tools", "type": "string_array", "required": false, "location": "body", "key": "allowedTools" },
         { "name": "blocker_task_ids", "type": "string_array", "required": false, "location": "body", "key": "blockerTaskIds" }
@@ -163,6 +164,17 @@
       "response": "json",
       "params": [
         { "name": "task_id", "type": "string", "required": true, "location": "path" }
+      ]
+    },
+    {
+      "name": "kanna_set_task_parent",
+      "description": "Set or clear a Kanna task's parent task so it nests as a subtask in the sidebar. Omit parent_task_id to detach the task from its parent.",
+      "method": "POST",
+      "path": "/v1/tasks/{task_id}/actions/set-parent",
+      "response": "json",
+      "params": [
+        { "name": "task_id", "type": "string", "required": true, "location": "path" },
+        { "name": "parent_task_id", "type": "string", "required": false, "location": "body", "key": "parentTaskId" }
       ]
     },
     {

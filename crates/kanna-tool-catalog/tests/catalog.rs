@@ -31,6 +31,7 @@ fn bundled_catalog_parses_and_declares_all_tools() {
             "kanna_advance_stage",
             "kanna_block_task",
             "kanna_unblock_task",
+            "kanna_set_task_parent",
             "kanna_complete_stage",
             "kanna_request_revision",
         ]
@@ -169,6 +170,22 @@ fn resolves_expected_requests_for_every_bundled_tool() {
             }),
         ),
         (
+            "kanna_create_task",
+            json!({
+                "repo_id": "repo-1",
+                "prompt": "Subtask",
+                "parent_task_id": "task-parent"
+            }),
+            Method::Post,
+            ResponseKind::Json,
+            "/v1/tasks",
+            json!({
+                "repoId": "repo-1",
+                "prompt": "Subtask",
+                "parentTaskId": "task-parent"
+            }),
+        ),
+        (
             "kanna_send_task_input",
             json!({ "task_id": "task-1", "input": "continue" }),
             Method::Post,
@@ -214,6 +231,22 @@ fn resolves_expected_requests_for_every_bundled_tool() {
             Method::Post,
             ResponseKind::Json,
             "/v1/tasks/task-1/actions/unblock",
+            json!({}),
+        ),
+        (
+            "kanna_set_task_parent",
+            json!({ "task_id": "task-1", "parent_task_id": "task-parent" }),
+            Method::Post,
+            ResponseKind::Json,
+            "/v1/tasks/task-1/actions/set-parent",
+            json!({ "parentTaskId": "task-parent" }),
+        ),
+        (
+            "kanna_set_task_parent",
+            json!({ "task_id": "task-1" }),
+            Method::Post,
+            ResponseKind::Json,
+            "/v1/tasks/task-1/actions/set-parent",
             json!({}),
         ),
         (
@@ -426,5 +459,11 @@ fn catalog_types_are_deserialized_from_manifest_values() {
         ParamType::StringArray,
         ParamLoc::Body,
         Some("blockerTaskIds"),
+    )));
+    assert!(params.contains(&(
+        "parent_task_id",
+        ParamType::String,
+        ParamLoc::Body,
+        Some("parentTaskId"),
     )));
 }

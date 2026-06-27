@@ -74,6 +74,8 @@ async fn prepared_agent_task_spawn_includes_task_specific_kanna_context() {
             allowed_tools: None,
             blocker_task_ids: None,
             notify_task_id: None,
+
+            parent_task_id: None,
         },
     )
     .unwrap();
@@ -164,6 +166,8 @@ async fn prepared_claude_pty_task_spawn_passes_kanna_context_as_append_system_pr
             allowed_tools: None,
             blocker_task_ids: None,
             notify_task_id: None,
+
+            parent_task_id: None,
         },
     )
     .unwrap();
@@ -226,6 +230,8 @@ async fn prepared_non_claude_pty_task_spawn_prepends_kanna_context_to_prompt() {
             allowed_tools: None,
             blocker_task_ids: None,
             notify_task_id: None,
+
+            parent_task_id: None,
         },
     )
     .unwrap();
