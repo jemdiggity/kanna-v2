@@ -52,6 +52,7 @@ export function buildPendingTaskPlaceholder(
     agent_session_id: null,
     previous_stage: null,
     teardown_started_at: null,
+    parent_task_id: null,
     created_at: nowIso,
     updated_at: nowIso,
   };

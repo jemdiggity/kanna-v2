@@ -320,6 +320,7 @@ const modalLayerController = {
         @pin-item="store.pinItem"
         @unpin-item="store.unpinItem"
         @reorder-pinned="store.reorderPinned"
+        @set-parent="store.setTaskParent"
         @rename-item="store.renameItem"
         @rename-done="focusAgentTerminal"
         @hide-repo="store.hideRepo"

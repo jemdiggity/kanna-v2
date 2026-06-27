@@ -966,6 +966,7 @@ Use this branch as the default when the user does not specify a target branch. B
     unpinItem: tasks.unpinItem,
     reorderPinned: tasks.reorderPinned,
     renameItem: tasks.renameItem,
+    setTaskParent: tasks.setTaskParent,
     savePreference: initApi.savePreference,
   };
 });

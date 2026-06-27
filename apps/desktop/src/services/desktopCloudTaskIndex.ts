@@ -299,6 +299,7 @@ export function mapDesktopCloudTasks(
       previous_stage: null,
       stage_result: null,
       teardown_started_at: null,
+      parent_task_id: null,
       last_output_preview: null,
       active_post_action: null,
       created_at: snapshot.createdAt,

@@ -1,7 +1,15 @@
 import { describe, expect, it } from "vitest";
 import type { PipelineItem } from "@kanna/db";
 
-import { sortSidebarItemsForRepo } from "./sidebarOrdering";
+import {
+  groupedSidebarItemsByStage,
+  sidebarChildItems,
+  sidebarSubtreeRows,
+  sortSidebarItemsForRepo,
+} from "./sidebarOrdering";
+
+const ORDER = ["merge", "pr", "review", "in progress"];
+const getStageOrder = () => ORDER;
 
 function item(overrides: Partial<PipelineItem>): PipelineItem {
   return {
@@ -52,5 +60,69 @@ describe("sidebarOrdering", () => {
     });
 
     expect(sorted.map((entry) => entry.id)).toEqual(["open"]);
+  });
+
+  it("nests a subtask directly beneath its parent and hides it from its own stage group", () => {
+    const items = [
+      item({ id: "parent", stage: "in progress", created_at: "2026-05-31T00:00:02.000Z" }),
+      item({
+        id: "child",
+        stage: "pr",
+        parent_task_id: "parent",
+        created_at: "2026-05-31T00:00:03.000Z",
+      }),
+      item({ id: "other", stage: "in progress", created_at: "2026-05-31T00:00:01.000Z" }),
+    ];
+
+    const ordered = sortSidebarItemsForRepo({ repoId: "repo-1", items, getStageOrder });
+    expect(ordered.map((entry) => entry.id)).toEqual(["parent", "child", "other"]);
+
+    // The child must not surface in its own "pr" stage section.
+    const groups = groupedSidebarItemsByStage({ repoId: "repo-1", items, getStageOrder });
+    expect(groups.flatMap((group) => group.items.map((entry) => entry.id))).not.toContain("child");
+  });
+
+  it("returns depth-annotated subtree rows for nested subtasks", () => {
+    const items = [
+      item({ id: "parent", created_at: "2026-05-31T00:00:01.000Z" }),
+      item({ id: "child-a", parent_task_id: "parent", created_at: "2026-05-31T00:00:02.000Z" }),
+      item({ id: "child-b", parent_task_id: "parent", created_at: "2026-05-31T00:00:03.000Z" }),
+      item({ id: "grandchild", parent_task_id: "child-a", created_at: "2026-05-31T00:00:04.000Z" }),
+    ];
+    const options = { repoId: "repo-1", items, getStageOrder };
+
+    expect(sidebarChildItems(options, "parent").map((entry) => entry.id)).toEqual([
+      "child-a",
+      "child-b",
+    ]);
+
+    const rows = sidebarSubtreeRows(options, items[0]);
+    expect(rows.map((row) => [row.item.id, row.depth])).toEqual([
+      ["parent", 0],
+      ["child-a", 1],
+      ["grandchild", 2],
+      ["child-b", 1],
+    ]);
+  });
+
+  it("promotes an orphaned subtask to top level when its parent is gone", () => {
+    const items = [
+      item({ id: "orphan", stage: "in progress", parent_task_id: "missing-parent" }),
+    ];
+    const ordered = sortSidebarItemsForRepo({ repoId: "repo-1", items, getStageOrder });
+    expect(ordered.map((entry) => entry.id)).toEqual(["orphan"]);
+  });
+
+  it("suppresses nesting during an active search so every match stays visible", () => {
+    const items = [
+      item({ id: "parent", prompt: "alpha" }),
+      item({ id: "child", prompt: "beta", parent_task_id: "parent" }),
+    ];
+    const options = { repoId: "repo-1", items, getStageOrder, searchQuery: "beta" };
+
+    expect(sidebarChildItems(options, "parent")).toEqual([]);
+    const ordered = sortSidebarItemsForRepo(options);
+    expect(ordered.map((entry) => entry.id)).toEqual(["child"]);
+    expect(sidebarSubtreeRows(options, items[1]).map((row) => row.item.id)).toEqual(["child"]);
   });
 });

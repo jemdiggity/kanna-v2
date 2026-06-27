@@ -95,6 +95,7 @@ function item(id: string, overrides: Partial<PipelineItem>): PipelineItem {
     base_ref: null,
     previous_stage: null,
     teardown_started_at: null,
+    parent_task_id: null,
     created_at: "2026-01-01T00:00:00.000Z",
     updated_at: "2026-01-01T00:00:00.000Z",
   };
@@ -198,6 +199,34 @@ describe("Sidebar", () => {
     ]);
 
     expect(wrapper.text()).toContain("... Pinned task");
+  });
+
+  it("renders a subtask nested beneath its parent instead of in its own stage section", () => {
+    const wrapper = mountSidebar([
+      item("task-1", { display_name: "Parent task", stage: "in progress" }),
+      item("task-2", {
+        display_name: "Child task",
+        stage: "pr",
+        parent_task_id: "task-1",
+        created_at: "2026-01-01T00:00:05.000Z",
+      }),
+    ]);
+
+    const rows = wrapper.findAll(".pipeline-item");
+    expect(rows.map((row) => row.get(".item-title").text())).toEqual([
+      "Parent task",
+      "Child task",
+    ]);
+
+    // The child renders as a depth-1 subtask row...
+    const childRow = rows[1];
+    expect(childRow.classes()).toContain("subtask");
+    // ...and the parent stays a top-level row.
+    expect(rows[0].classes()).not.toContain("subtask");
+
+    // The child's own "pr" stage must not appear as a separate section header.
+    const sectionLabels = wrapper.findAll(".section-label").map((label) => label.text());
+    expect(sectionLabels).not.toContain("pr");
   });
 
   it("renders full task titles so sidebar width controls visual truncation", () => {
