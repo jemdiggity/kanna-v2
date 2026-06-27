@@ -224,6 +224,8 @@ export function buildRelayProvisionPlan(input: { environment: CloudDeployEnviron
           zone,
           "--machine-type",
           "e2-micro",
+          "--scopes",
+          "https://www.googleapis.com/auth/cloud-platform",
           "--address",
           staticIpName,
           "--tags",
