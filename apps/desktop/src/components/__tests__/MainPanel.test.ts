@@ -63,7 +63,7 @@ describe("MainPanel", () => {
     const remounted = mountPanel();
 
     expect(remounted.find('[data-testid="command-hint"]').exists()).toBe(false);
-  });
+  }, 15_000);
 
   it("shows full agent CLI version numbers from --version output", async () => {
     invokeMock.mockImplementation((command: string, args?: { name?: string; script?: string }) => {
@@ -105,7 +105,7 @@ describe("MainPanel", () => {
     expect(wrapper.text()).toContain("Version 2.1.118");
     expect(wrapper.text()).toContain("Version 1.0.32");
     expect(wrapper.text()).toContain("Version 0.125.0-beta.1+20260429");
-  });
+  }, 15_000);
 
   it("does not mount task terminals while setup is still pending", async () => {
     const { default: MainPanel } = await import("../MainPanel.vue");

@@ -51,7 +51,8 @@ CREATE TABLE IF NOT EXISTS pipeline_item (
   notified_at TEXT,
   agent_session_id TEXT,
   agent_spawn_options TEXT,
-  teardown_started_at TEXT
+  teardown_started_at TEXT,
+  parent_task_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS worktree (
