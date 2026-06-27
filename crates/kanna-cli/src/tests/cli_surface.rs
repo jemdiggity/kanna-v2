@@ -77,6 +77,8 @@ fn parses_new_repo_and_task_subcommands() {
         "repo-1",
         "--prompt",
         "Child",
+        "--display-name",
+        "Short child",
         "--notify-task",
         "task-parent",
     ])
@@ -87,12 +89,14 @@ fn parses_new_repo_and_task_subcommands() {
                 crate::TaskCommands::Create {
                     repo_id,
                     prompt,
+                    display_name,
                     notify_task,
                     ..
                 },
         } => {
             assert_eq!(repo_id, "repo-1");
             assert_eq!(prompt, "Child");
+            assert_eq!(display_name.as_deref(), Some("Short child"));
             assert_eq!(notify_task.as_deref(), Some("task-parent"));
         }
         _ => panic!("expected task create command"),
@@ -263,6 +267,7 @@ fn typed_create_body_matches_catalog_create_task_body() {
     let request = build_create_task_request(TaskCreateOptions {
         repo_id: "repo-1".to_string(),
         prompt: "Ship it".to_string(),
+        display_name: Some("Short task title".to_string()),
         pipeline_name: Some("default".to_string()),
         base_ref: Some("origin/main".to_string()),
         stage: Some("pr".to_string()),
@@ -282,6 +287,7 @@ fn typed_create_body_matches_catalog_create_task_body() {
         &json!({
             "repo_id": "repo-1",
             "prompt": "Ship it",
+            "display_name": "Short task title",
             "pipeline_name": "default",
             "base_ref": "origin/main",
             "stage": "pr",

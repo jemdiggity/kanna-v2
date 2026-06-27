@@ -64,6 +64,7 @@ async fn prepared_agent_task_spawn_includes_task_specific_kanna_context() {
         CreateTaskRequest {
             repo_id: "repo-1".to_string(),
             prompt: "Exercise Kanna context".to_string(),
+            display_name: None,
             pipeline_name: Some("qa".to_string()),
             base_ref: None,
             stage: Some("verify".to_string()),
@@ -154,6 +155,7 @@ async fn prepared_claude_pty_task_spawn_passes_kanna_context_as_append_system_pr
         CreateTaskRequest {
             repo_id: "repo-1".to_string(),
             prompt: "Use Claude PTY".to_string(),
+            display_name: None,
             pipeline_name: Some("qa".to_string()),
             base_ref: None,
             stage: Some("implement".to_string()),
@@ -216,6 +218,7 @@ async fn prepared_non_claude_pty_task_spawn_prepends_kanna_context_to_prompt() {
         CreateTaskRequest {
             repo_id: "repo-1".to_string(),
             prompt: "Use Copilot PTY".to_string(),
+            display_name: None,
             pipeline_name: Some("qa".to_string()),
             base_ref: None,
             stage: Some("implement".to_string()),

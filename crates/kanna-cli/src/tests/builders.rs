@@ -139,6 +139,7 @@ fn builds_camel_case_task_request_payload() {
     let request = build_create_task_request(TaskCreateOptions {
         repo_id: "repo-1".to_string(),
         prompt: "Ship it".to_string(),
+        display_name: Some("Short task title".to_string()),
         pipeline_name: Some("default".to_string()),
         base_ref: Some("origin/main".to_string()),
         stage: Some("pr".to_string()),
@@ -156,6 +157,7 @@ fn builds_camel_case_task_request_payload() {
         json!({
             "repoId": "repo-1",
             "prompt": "Ship it",
+            "displayName": "Short task title",
             "pipelineName": "default",
             "baseRef": "origin/main",
             "stage": "pr",
@@ -187,6 +189,7 @@ fn builds_task_request_omits_agent_provider_when_flag_absent() {
     let request = build_create_task_request(TaskCreateOptions {
         repo_id: "repo-1".to_string(),
         prompt: "Use the saved default provider".to_string(),
+        display_name: None,
         pipeline_name: None,
         base_ref: None,
         stage: None,

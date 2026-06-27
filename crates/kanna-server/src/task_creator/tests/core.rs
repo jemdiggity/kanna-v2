@@ -141,6 +141,7 @@ fn prepare_task_defaults_to_agent_session_for_claude_and_codex() {
             CreateTaskRequest {
                 repo_id: "repo-1".to_string(),
                 prompt: format!("Use {provider}"),
+                display_name: None,
                 pipeline_name: None,
                 base_ref: None,
                 stage: None,
@@ -186,6 +187,7 @@ fn prepare_codex_agent_uses_resolved_executable_for_headless_spawn() {
         CreateTaskRequest {
             repo_id: "repo-1".to_string(),
             prompt: "Use codex".to_string(),
+            display_name: None,
             pipeline_name: None,
             base_ref: None,
             stage: None,
@@ -260,6 +262,7 @@ fn prepare_headless_agent_uses_worktree_workspace_path_for_executable_resolution
         CreateTaskRequest {
             repo_id: "repo-1".to_string(),
             prompt: "Use codex".to_string(),
+            display_name: None,
             pipeline_name: None,
             base_ref: None,
             stage: None,
@@ -309,6 +312,7 @@ fn prepare_task_defaults_to_pty_session_for_copilot() {
         CreateTaskRequest {
             repo_id: "repo-1".to_string(),
             prompt: "Use copilot".to_string(),
+            display_name: None,
             pipeline_name: None,
             base_ref: None,
             stage: None,
@@ -431,6 +435,7 @@ fn prepare_task_uses_builtin_default_pipeline_when_repo_has_no_local_default_pip
         CreateTaskRequest {
             repo_id: "repo-1".to_string(),
             prompt: "Implement the fallback".to_string(),
+            display_name: None,
             pipeline_name: None,
             base_ref: None,
             stage: None,
@@ -533,6 +538,7 @@ fn prepare_task_uses_default_agent_provider_setting_when_request_omits_provider(
         CreateTaskRequest {
             repo_id: "repo-1".to_string(),
             prompt: "Use the configured default provider".to_string(),
+            display_name: None,
             pipeline_name: None,
             base_ref: None,
             stage: None,
@@ -559,6 +565,7 @@ fn prepare_task_uses_default_agent_provider_setting_when_request_omits_provider(
         CreateTaskRequest {
             repo_id: "repo-1".to_string(),
             prompt: "Use the explicit provider".to_string(),
+            display_name: None,
             pipeline_name: None,
             base_ref: None,
             stage: None,

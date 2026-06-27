@@ -22,6 +22,7 @@ pub(crate) fn build_create_task_request(options: TaskCreateOptions) -> CreateTas
     CreateTaskRequest {
         repo_id: options.repo_id,
         prompt: options.prompt,
+        display_name: options.display_name,
         pipeline_name: options.pipeline_name,
         base_ref: options.base_ref,
         stage: options.stage,
@@ -215,6 +216,7 @@ pub(crate) async fn run(command: TaskCommands) {
         TaskCommands::Create {
             repo_id,
             prompt,
+            display_name,
             server_url,
             pipeline_name,
             base_ref,
@@ -231,6 +233,7 @@ pub(crate) async fn run(command: TaskCommands) {
             let request = build_create_task_request(TaskCreateOptions {
                 repo_id,
                 prompt,
+                display_name,
                 pipeline_name,
                 base_ref,
                 stage,

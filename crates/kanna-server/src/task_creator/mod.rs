@@ -109,7 +109,7 @@ pub(crate) fn prepare_task_for_api(
         &repo,
         TaskCreationRequest {
             task_prompt: request.prompt.clone(),
-            display_name: None,
+            display_name: request.display_name,
             pipeline_name: request.pipeline_name,
             base_ref: request.base_ref,
             stored_base_ref: None,
