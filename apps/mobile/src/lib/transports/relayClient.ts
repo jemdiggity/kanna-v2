@@ -102,25 +102,39 @@ export function createRelayDesktopClient({
   };
 
   const ensureSocket = () => {
-    if (socket) {
+    if (socket && socket.readyState <= 1) {
       return socket;
     }
 
-    socket = createSocket(relayUrl);
+    const openSocket = createSocket(relayUrl);
+    socket = openSocket;
     readyPromise = new Promise<void>((resolve, reject) => {
       resolveReady = resolve;
       rejectReady = reject;
     });
-    socket.onopen = () => {
-      void sendAuth(socket!);
+    openSocket.onopen = () => {
+      void sendAuth(openSocket);
     };
-    socket.onmessage = (event) => {
+    openSocket.onmessage = (event) => {
+      if (openSocket !== socket) {
+        return;
+      }
       handleRelayMessage(event.data);
     };
-    socket.onerror = () => {
+    openSocket.onerror = () => {
+      if (openSocket !== socket) {
+        return;
+      }
       failAll(new Error("Relay connection failed."));
+      socket = null;
+      readyPromise = null;
+      resolveReady = null;
+      rejectReady = null;
     };
-    socket.onclose = () => {
+    openSocket.onclose = () => {
+      if (openSocket !== socket) {
+        return;
+      }
       failAll(new Error("Relay connection closed."));
       socket = null;
       readyPromise = null;
@@ -128,7 +142,7 @@ export function createRelayDesktopClient({
       rejectReady = null;
     };
 
-    return socket;
+    return openSocket;
   };
 
   const sendAuth = async (openSocket: RelaySocketLike) => {

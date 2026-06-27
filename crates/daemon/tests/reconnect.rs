@@ -516,6 +516,32 @@ fn test_subscriber_receives_session_created_for_spawned_sessions() {
     }
 }
 
+#[test]
+fn test_subscriber_receives_exit_for_pty_sessions() {
+    let daemon = DaemonHandle::start();
+    let mut subscriber = daemon.connect();
+    subscriber.send(&Cmd::Subscribe);
+    match subscriber.recv() {
+        Evt::Ok => {}
+        other => panic!("expected Ok for Subscribe, got: {:?}", other),
+    }
+
+    let mut creator = daemon.connect();
+    spawn_shell_session(&mut creator, "sess-exit-broadcast", "printf ready; exit 0");
+
+    loop {
+        match subscriber.recv() {
+            Evt::SessionCreated { .. } | Evt::Output { .. } | Evt::StatusChanged { .. } => {}
+            Evt::Exit { session_id, code } => {
+                assert_eq!(session_id, "sess-exit-broadcast");
+                assert_eq!(code, 0);
+                break;
+            }
+            other => panic!("expected Exit broadcast, got: {:?}", other),
+        }
+    }
+}
+
 fn kill_session(conn: &mut ClientConn, session_id: &str) {
     conn.send(&Cmd::Kill {
         session_id: session_id.to_string(),

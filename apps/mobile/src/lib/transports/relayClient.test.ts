@@ -112,6 +112,61 @@ describe("createRelayDesktopClient", () => {
     await expect(invocation).rejects.toThrow("desktop failed");
   });
 
+  it("opens a fresh invoke socket after a relay socket error", async () => {
+    const sockets: RelaySocketLike[] = [];
+    const client = createRelayDesktopClient({
+      createSocket: () => {
+        const socket = createSocket();
+        sockets.push(socket);
+        return socket;
+      },
+      getIdToken: async () => "id-token-1",
+      nextId: () => `invoke-${sockets.length}`,
+      relayUrl: "wss://relay.example"
+    });
+
+    const first = client.invokeDesktop({
+      desktopId: "desktop-1",
+      method: "GET",
+      path: "/v1/status",
+      body: null
+    });
+    sockets[0].onerror?.(new Error("relay unavailable"));
+    await expect(first).rejects.toThrow("Relay connection failed.");
+
+    const second = client.invokeDesktop({
+      desktopId: "desktop-1",
+      method: "GET",
+      path: "/v1/status",
+      body: null
+    });
+    expect(sockets).toHaveLength(2);
+    sockets[1].onopen?.();
+    await flushPromises();
+    sockets[1].onmessage?.({ data: JSON.stringify({ type: "auth_ok", userId: "user-1" }) });
+    await flushPromises();
+    expect(sockets[1].send).toHaveBeenLastCalledWith(
+      JSON.stringify({
+        type: "invoke",
+        id: "invoke-2",
+        desktopId: "desktop-1",
+        method: "GET",
+        path: "/v1/status",
+        body: null
+      })
+    );
+    sockets[1].onmessage?.({
+      data: JSON.stringify({
+        type: "response",
+        id: "invoke-2",
+        status: 200,
+        body: { state: "running" }
+      })
+    });
+
+    await expect(second).resolves.toEqual({ state: "running" });
+  });
+
   it("observes terminal events through the KSP relay tunnel", async () => {
     const socket = createSocket();
     const client = createRelayDesktopClient({

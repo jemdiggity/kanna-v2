@@ -275,6 +275,9 @@ pub(crate) async fn stream_output(
         code: exit_code,
         resume_session_id: resume_session_id.clone(),
     };
+    if let Ok(json) = serde_json::to_string(&evt) {
+        let _ = broadcast_tx.send(json);
+    }
     recovery_manager.end_session(&session_id).await;
     let mut writers = session_writers.lock().await;
     if let Some(vec) = writers.get(&session_id) {

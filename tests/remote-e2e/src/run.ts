@@ -13,7 +13,14 @@ if (staging) {
   throw new Error("Layer B staging remote-e2e is intentionally gated until staging credentials are supplied to this harness.");
 }
 
-await runCommand("pnpm", ["exec", "vitest", "run", "src/remote-harness.smoke.test.ts"], {
+await runCommand("pnpm", [
+  "exec",
+  "vitest",
+  "run",
+  "--no-file-parallelism",
+  "src/remote-harness.smoke.test.ts",
+  "src/terminal-flow.e2e.test.ts"
+], {
   cwd: fileURLToPath(new URL("..", import.meta.url)),
   env: {
     ...process.env,

@@ -24,6 +24,7 @@ export interface RemoteHarnessOptions {
 export interface RemoteHarness {
   client: RelayDesktopClient;
   desktopId: string;
+  repoRoot: string;
   paths: {
     configPath: string;
     daemonDir: string;
@@ -38,6 +39,9 @@ export interface RemoteHarness {
     server: number;
     ui: number;
   };
+  startRelay(): Promise<void>;
+  stopRelay(): Promise<void>;
+  waitForDesktop(): Promise<void>;
   stop(): Promise<void>;
 }
 
@@ -81,12 +85,17 @@ async function waitForRelayDesktop(input: {
   let lastError = "";
   while (Date.now() < deadline) {
     try {
-      const status = await input.client.invokeDesktop({
-        desktopId: input.desktopId,
-        method: "GET",
-        path: "/v1/status",
-        body: null
-      });
+      const status = await Promise.race([
+        input.client.invokeDesktop({
+          desktopId: input.desktopId,
+          method: "GET",
+          path: "/v1/status",
+          body: null
+        }),
+        sleep(2_000).then(() => {
+          throw new Error("desktop status invoke timed out");
+        })
+      ]);
       if (
         status &&
         typeof status === "object" &&
@@ -157,8 +166,40 @@ export async function startRemoteHarness(options: RemoteHarnessOptions = {}): Pr
   const daemonDir = join(root, "daemon");
   const dbPath = join(root, "kanna.sqlite3");
   const processes: ManagedProcess[] = [];
+  let relayProcess: ManagedProcess | null = null;
   let client: RelayDesktopClient | null = null;
   let stopped = false;
+
+  const startRelay = async () => {
+    if (relayProcess?.process.exitCode === null && relayProcess.process.signalCode === null) {
+      return;
+    }
+    relayProcess = startManagedProcess("relay", "node", ["dist/index.js"], {
+      cwd: join(repoRoot, "services/relay"),
+      env: {
+        ...process.env,
+        FIREBASE_PROJECT_ID: "kanna-local",
+        FIREBASE_AUTH_EMULATOR_HOST: `127.0.0.1:${ports.auth}`,
+        FIRESTORE_EMULATOR_HOST: `127.0.0.1:${ports.firestore}`,
+        PORT: String(ports.relay)
+      }
+    });
+    processes.push(relayProcess);
+    await waitForHttpOk(`http://127.0.0.1:${ports.relay}/health`, timeoutMs);
+  };
+
+  const stopRelay = async () => {
+    const processHandle = relayProcess;
+    if (!processHandle) {
+      return;
+    }
+    relayProcess = null;
+    const index = processes.indexOf(processHandle);
+    if (index >= 0) {
+      processes.splice(index, 1);
+    }
+    await processHandle.stop();
+  };
 
   const stop = async () => {
     if (stopped) {
@@ -192,17 +233,7 @@ export async function startRemoteHarness(options: RemoteHarnessOptions = {}): Pr
     ));
     const idToken = await waitForBuffyIdToken(ports.auth, timeoutMs);
 
-    processes.push(startManagedProcess("relay", "node", ["dist/index.js"], {
-      cwd: join(repoRoot, "services/relay"),
-      env: {
-        ...process.env,
-        FIREBASE_PROJECT_ID: "kanna-local",
-        FIREBASE_AUTH_EMULATOR_HOST: `127.0.0.1:${ports.auth}`,
-        FIRESTORE_EMULATOR_HOST: `127.0.0.1:${ports.firestore}`,
-        PORT: String(ports.relay)
-      }
-    }));
-    await waitForHttpOk(`http://127.0.0.1:${ports.relay}/health`, timeoutMs);
+    await startRelay();
 
     processes.push(startManagedProcess("daemon", join(repoRoot, ".build/debug/kanna-daemon"), [], {
       cwd: repoRoot,
@@ -232,8 +263,12 @@ export async function startRemoteHarness(options: RemoteHarnessOptions = {}): Pr
     const harness: RemoteHarness = {
       client,
       desktopId,
+      repoRoot,
       paths: { configPath, daemonDir, dbPath, root },
       ports,
+      startRelay,
+      stopRelay,
+      waitForDesktop: () => waitForRelayDesktop({ client: client!, desktopId, timeoutMs }),
       stop
     };
     return harness;
