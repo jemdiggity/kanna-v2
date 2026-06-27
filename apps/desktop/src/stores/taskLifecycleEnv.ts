@@ -1,0 +1,127 @@
+import { parseAgentMd, type RepoConfig } from "@kanna/core";
+import type { PipelineItem, Repo } from "@kanna/db";
+import { invoke } from "../invoke";
+import { buildTaskRuntimeEnv, resolveKannaServerBaseUrl } from "./kannaCliEnv";
+import { prepareKannaMcpRuntime } from "./kannaMcpRuntime";
+import { resolveDbName } from "./db";
+import { readRepoConfig } from "./state";
+import { buildWorktreeSessionEnv } from "./worktreeEnv";
+
+const INSTANCE_SCOPED_WORKTREE_ENV_KEYS = [
+  "KANNA_TMUX_SESSION",
+  "KANNA_DB_NAME",
+  "KANNA_DB_PATH",
+  "KANNA_DAEMON_DIR",
+  "KANNA_TRANSFER_ROOT",
+  "KANNA_WEBDRIVER_PORT",
+  "KANNA_E2E_TARGET_WEBDRIVER_PORT",
+  "KANNA_TRANSFER_PORT",
+  "KANNA_TRANSFER_DISPLAY_NAME",
+  "KANNA_TRANSFER_PEER_ID",
+  "KANNA_TRANSFER_REGISTRY_DIR",
+] as const;
+
+export function applyWorktreeProcessIsolation(env: Record<string, string>): Record<string, string> {
+  for (const key of INSTANCE_SCOPED_WORKTREE_ENV_KEYS) {
+    env[key] = "";
+  }
+  return env;
+}
+
+export function parseTaskPortEnv(portEnv: string | null): Record<string, string> {
+  if (!portEnv) return {};
+  try {
+    const parsed = JSON.parse(portEnv) as Record<string, unknown>;
+    return Object.fromEntries(
+      Object.entries(parsed).map(([key, value]) => [key, String(value)]),
+    );
+  } catch (error) {
+    console.debug("[store] failed to parse task port env:", error);
+    return {};
+  }
+}
+
+export async function buildTaskLifecycleEnv(options: {
+  taskId: string;
+  worktreePath: string;
+  repoConfig: RepoConfig;
+  portEnv?: Record<string, string>;
+  logContext: string;
+}): Promise<{ env: Record<string, string>; mcpConfigPath?: string }> {
+  const inheritedPath = await invoke<string>("read_env_var", { name: "PATH" }).catch((error) => {
+    console.debug(`[store] PATH not available while creating ${options.logContext} env:`, error);
+    return null;
+  });
+  const worktreeEnv = buildWorktreeSessionEnv({
+    worktreePath: options.worktreePath,
+    repoConfig: options.repoConfig,
+    portEnv: options.portEnv,
+    inheritedPath,
+  });
+  const mobileServerPort = await invoke<string>("read_env_var", { name: "KANNA_MOBILE_SERVER_PORT" }).catch((error) => {
+    console.debug(`[store] KANNA_MOBILE_SERVER_PORT not set while creating ${options.logContext} env:`, error);
+    return null;
+  });
+  const kannaCliPath = await invoke<string>("which_binary", { name: "kanna-cli" }).catch((error) => {
+    console.debug(`[store] kanna-cli not available while creating ${options.logContext} env:`, error);
+    return null;
+  });
+
+  const env = {
+    ...worktreeEnv,
+    ...buildTaskRuntimeEnv({
+      taskId: options.taskId,
+      dbName: await resolveDbName(),
+      appDataDir: await invoke<string>("get_app_data_dir"),
+      socketPath: await invoke<string>("get_pipeline_socket_path"),
+      serverBaseUrl: resolveKannaServerBaseUrl(mobileServerPort),
+      kannaCliPath,
+      path: worktreeEnv.PATH ?? inheritedPath,
+      portEnv: options.portEnv,
+    }),
+  };
+  const { mcpConfigPath } = await prepareKannaMcpRuntime(options.taskId, env);
+  return { env, mcpConfigPath };
+}
+
+
+export function hasLiveTaskResources(item: PipelineItem): boolean {
+  return item.branch !== null || item.agent_session_id !== null || item.port_env !== null;
+}
+
+export async function collectTeardownCommands(item: PipelineItem, repo: Repo): Promise<string[]> {
+  const cmds: string[] = [];
+  if (item.display_name) {
+    try {
+      const tasksDir = `${repo.path}/.kanna/tasks`;
+      const entries = await invoke<string[]>("list_dir", { path: tasksDir }).catch((error) => {
+        console.debug("[store] no custom task teardown directory:", error);
+        return [] as string[];
+      });
+      for (const entry of entries) {
+        const agentMdPath = `${tasksDir}/${entry}/agent.md`;
+        let content: string;
+        try {
+          content = await invoke<string>("read_text_file", { path: agentMdPath });
+        } catch (error) {
+          console.debug(`[store] failed to read custom task teardown config ${agentMdPath}:`, error);
+          continue;
+        }
+        const config = parseAgentMd(content, entry);
+        if (config && config.name === item.display_name && config.teardown?.length) {
+          cmds.push(...config.teardown);
+          break;
+        }
+      }
+    } catch (error) {
+      console.error("[store] custom task teardown lookup failed:", error);
+    }
+  }
+
+  const worktreePath = `${repo.path}/.kanna-worktrees/${item.branch}`;
+  const repoConfig = await readRepoConfig(worktreePath);
+  if (repoConfig.teardown?.length) {
+    cmds.push(...repoConfig.teardown);
+  }
+  return cmds;
+}
