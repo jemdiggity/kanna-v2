@@ -65,6 +65,10 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
     return item.display_name ?? item.issue_title ?? item.prompt ?? null;
   }
 
+  // Selection during stage advance is only adjusted when the task being advanced
+  // (and therefore closed) is the one currently selected — analogous to deletion,
+  // where selection moves to the next visible task. When any other task advances
+  // (including auto-advance), the user's selection must be left untouched.
   function computeNextVisibleItemId(currentItemId: string): string | null {
     const sortedItems = requireService(context.services.sortedItemsForCurrentRepo, "sortedItemsForCurrentRepo").value;
     const currentIndex = sortedItems.findIndex((candidate) => candidate.id === currentItemId);
@@ -476,10 +480,6 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
       selectOnCreate: shouldFollowTask,
       selectedAfterCreate: context.state.selectedItemId.value,
     });
-
-    if (!shouldFollowTask && !sourceTaskIsSelected) {
-      await restoreStageAdvanceSelection(fallbackSelectionId);
-    }
   }
 
   function parseTaskPortEnv(portEnv: string | null): Record<string, string> | undefined {
