@@ -109,6 +109,7 @@
   },
   "sidebar": {
     "searchPlaceholder": "タスクを検索…  ⌘F",
+    "clearSearch": "タスク検索をクリア",
     "noTasks": "タスクなし",
     "noTasksMatching": "「{query}」に一致するタスクはありません",
     "noReposYet": "リポジトリがありません。",

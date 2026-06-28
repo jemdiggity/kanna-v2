@@ -720,8 +720,8 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
           v-if="searchQuery.length > 0"
           type="button"
           class="search-clear"
-          aria-label="Clear task search"
-          title="Clear task search"
+          :aria-label="$t('sidebar.clearSearch')"
+          :title="$t('sidebar.clearSearch')"
           data-testid="sidebar-search-clear"
           @mousedown.prevent
           @click="clearSearch"

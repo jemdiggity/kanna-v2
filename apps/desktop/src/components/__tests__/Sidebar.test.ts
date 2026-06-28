@@ -11,6 +11,9 @@ import Sidebar from "../Sidebar.vue";
 const getStageOrder = vi.fn();
 
 function translate(key: string, params?: Record<string, string>) {
+  if (key === "sidebar.clearSearch") {
+    return "Translated clear search";
+  }
   if (key === "sidebar.noTasksMatching") {
     return `No tasks match "${params?.query ?? ""}"`;
   }
@@ -329,7 +332,8 @@ describe("Sidebar", () => {
     await wrapper.get(".search-input").setValue("visibility");
 
     const clearButton = wrapper.get('[data-testid="sidebar-search-clear"]');
-    expect(clearButton.attributes("aria-label")).toBe("Clear task search");
+    expect(clearButton.attributes("aria-label")).toBe("Translated clear search");
+    expect(clearButton.attributes("title")).toBe("Translated clear search");
 
     await clearButton.trigger("click");
 
