@@ -94,6 +94,7 @@ async fn prepared_agent_task_spawn_includes_task_specific_kanna_context() {
                 .env
                 .get("KANNA_MCP_CONFIG")
                 .expect("spawn env should include instance-local MCP config");
+            assert_eq!(params.mcp_config_path.as_deref(), Some(mcp_config.as_str()));
             assert!(
                 mcp_config.contains("/runtime/mcp/"),
                 "MCP config should be generated in the instance runtime area"

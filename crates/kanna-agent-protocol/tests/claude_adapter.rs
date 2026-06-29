@@ -181,6 +181,31 @@ fn spawn_args_pin_the_stream_json_contract() {
 }
 
 #[test]
+fn spawn_args_include_mcp_config_for_initial_and_resume_spawns() {
+    let adapter = ClaudeAdapter::new();
+    let ctx = SpawnCtx {
+        prompt: "fix the bug".to_string(),
+        model: None,
+        permission_mode: None,
+        allowed_tools: vec![],
+        disallowed_tools: vec![],
+        max_turns: None,
+        max_budget_usd: None,
+        system_prompt: None,
+        mcp_config_path: Some("/tmp/kanna-mcp.json".to_string()),
+    };
+
+    let initial_args = adapter.initial_spawn(&ctx).args.join(" ");
+    assert!(initial_args.contains("--mcp-config /tmp/kanna-mcp.json"));
+
+    let resume_args = adapter
+        .resume_spawn(&ctx, "sess-123", "continue please")
+        .args
+        .join(" ");
+    assert!(resume_args.contains("--mcp-config /tmp/kanna-mcp.json"));
+}
+
+#[test]
 fn default_spawn_runs_yolo_without_sandbox_or_prompts() {
     let adapter = ClaudeAdapter::new();
     let ctx = SpawnCtx {

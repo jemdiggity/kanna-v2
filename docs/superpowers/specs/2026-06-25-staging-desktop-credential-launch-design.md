@@ -172,6 +172,31 @@ does not retry in a loop.
   - does nothing outside staging
   - does nothing without credentials
   - does not retry indefinitely after failure
+- Integration-test the automatable tmux boundary with a real tmux server:
+  start a generated desktop window with generated credentials, assert the
+  process receives `KANNA_DESKTOP_AUTO_SIGN_IN_EMAIL` and
+  `KANNA_DESKTOP_AUTO_SIGN_IN_PASSWORD`, and assert tmux-visible command text
+  and captured pane output do not contain the generated secret values.
+
+## E2E Coverage Exception
+
+The fully end-to-end staging path includes installing and launching the staging
+iOS dev build on a physical iPhone with local network permission already
+granted. That layer is not currently suitable for automated CI because it
+requires a locally attached trusted iPhone, a signing-capable Apple developer
+environment, device-specific Local Network permission state, and access to the
+human-owned staging Firebase credentials.
+
+What would make this testable: a dedicated CI-attached iPhone or device farm
+with stable signing credentials, a pre-provisioned staging test Firebase
+identity, a resettable Local Network permission strategy, and a runner allowed
+to install and launch Kanna Staging through Appium.
+
+Until that exists, automated coverage stops at the highest deterministic local
+boundary: CLI parsing, credential file parsing, dev-plan construction, real
+tmux environment delivery without visible secret leakage, Tauri env reads, and
+desktop auto sign-in guards. The physical-device install/launch remains a
+human verification step.
 
 ## Manual Verification
 
