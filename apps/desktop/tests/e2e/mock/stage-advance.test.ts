@@ -67,6 +67,27 @@ async function waitForClosedTask(
   throw new Error(`timed out waiting for ${taskId} to close`);
 }
 
+async function waitForTearingDownTask(
+  client: WebDriverClient,
+  taskId: string,
+  timeoutMs = 5_000,
+): Promise<{ stage: string | null; closed_at: string | null; teardown_started_at: string | null }> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const rows = (await queryDb(
+      client,
+      "SELECT stage, closed_at, teardown_started_at FROM pipeline_item WHERE id = ?",
+      [taskId],
+    )) as Array<{ stage: string | null; closed_at: string | null; teardown_started_at: string | null }>;
+    const row = rows[0];
+    if (row?.closed_at == null && typeof row.teardown_started_at === "string" && row.teardown_started_at.length > 0) {
+      return row;
+    }
+    await sleep(100);
+  }
+  throw new Error(`timed out waiting for ${taskId} to enter teardown`);
+}
+
 async function hydrateStoreItem(client: WebDriverClient, taskId: string): Promise<void> {
   const rows = (await queryDb(
     client,
@@ -100,7 +121,7 @@ async function injectCloudSnapshot(
   const result = await client.executeSync<string>(
     `const ctx = window.__KANNA_E2E__.setupState;
      const snapshot = ${JSON.stringify(snapshot)};
-     const cloudSnapshot = ctx.cloudSnapshot;
+     const cloudSnapshot = ctx.cloudSnapshot ?? ctx.remoteSnapshot;
      if (!cloudSnapshot) return "cloud-snapshot-unavailable";
      if (cloudSnapshot.__v_isRef) cloudSnapshot.value = snapshot;
      else Object.assign(cloudSnapshot, snapshot);
@@ -247,6 +268,22 @@ async function waitForSidebarToExcludeText(
   throw new Error(`timed out waiting for sidebar to remove ${JSON.stringify(text)}; saw ${JSON.stringify(lastSidebarText)}`);
 }
 
+async function waitForSidebarToExcludeTaskId(
+  client: WebDriverClient,
+  taskId: string,
+  timeoutMs = 5_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const visible = await client.executeSync<boolean>(
+      `return Boolean(document.querySelector(${JSON.stringify(`.sidebar .pipeline-item[data-task-id="${taskId}"]`)}));`,
+    );
+    if (!visible) return;
+    await sleep(100);
+  }
+  throw new Error(`timed out waiting for sidebar to remove task ${JSON.stringify(taskId)}`);
+}
+
 async function clickSidebarItemByTitle(
   client: WebDriverClient,
   title: string,
@@ -361,6 +398,16 @@ describe("stage advance", () => {
         name: "auto-spawn-focus-e2e",
         stages: [
           { name: "auto-source", transition: "auto" },
+          { name: "review", transition: "manual" },
+        ],
+      }),
+    );
+    await writeFile(
+      join(kannaDir, "pipelines", "teardown-review-e2e.json"),
+      JSON.stringify({
+        name: "teardown-review-e2e",
+        stages: [
+          { name: "in progress", transition: "manual" },
           { name: "review", transition: "manual" },
         ],
       }),
@@ -758,6 +805,79 @@ describe("stage advance", () => {
     });
     const createdBranch = rows[0]?.branch;
     expect(createdBranch).toBeTruthy();
+  });
+
+  it("closes the source task after a fast teardown exit during stage advance", async () => {
+    const sourceTaskId = "stage-advance-fast-teardown-source";
+    const sourceBranch = "task-stage-advance-fast-teardown-source";
+    const sourceTitle = "Fast teardown promotion source";
+    const sourceWorktreePath = join(testRepoPath, ".kanna-worktrees", sourceBranch);
+    await tauriInvoke(client, "git_worktree_add", {
+      repoPath: testRepoPath,
+      branch: sourceBranch,
+      path: sourceWorktreePath,
+      startPoint: "main",
+    });
+    await writeFile(
+      join(sourceWorktreePath, ".kanna", "config.json"),
+      JSON.stringify({
+        setup: [],
+        teardown: ["printf 'fast teardown\\n'"],
+      }),
+    );
+
+    await execDb(
+      client,
+      `INSERT INTO pipeline_item (
+         id, repo_id, prompt, pipeline, stage, stage_result, tags, branch,
+         agent_type, agent_provider, activity, display_name, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
+      [
+        sourceTaskId,
+        repoId,
+        "Promote with fast teardown",
+        "teardown-review-e2e",
+        "in progress",
+        JSON.stringify({ status: "success", summary: "ready for review" }),
+        "[]",
+        sourceBranch,
+        "pty",
+        "codex",
+        "idle",
+        sourceTitle,
+      ],
+    );
+    await hydrateStoreItem(client, sourceTaskId);
+
+    const existingReviewTaskIds = await getStageTaskIds(client, repoId, "review");
+    await advanceStageWithShortcut(client, sourceTitle, sourceTaskId);
+
+    const tearingDownRow = await waitForTearingDownTask(client, sourceTaskId);
+    expect(tearingDownRow).toMatchObject({
+      stage: "in progress",
+      closed_at: null,
+    });
+
+    const reviewTaskId = await waitForCreatedStageTask(client, repoId, "review", {
+      excludeIds: existingReviewTaskIds,
+      displayName: sourceTitle,
+      baseRef: sourceBranch,
+    });
+    expect(reviewTaskId).not.toBe(sourceTaskId);
+
+    await waitForClosedTask(client, sourceTaskId);
+
+    const rows = (await queryDb(
+      client,
+      "SELECT stage, closed_at, teardown_started_at FROM pipeline_item WHERE id = ?",
+      [sourceTaskId],
+    )) as Array<{ stage: string | null; closed_at: string | null; teardown_started_at: string | null }>;
+    expect(rows[0]?.stage).toBe("done");
+    expect(rows[0]?.closed_at).toBeTruthy();
+    expect(rows[0]?.teardown_started_at).toBeNull();
+    await waitForSidebarToExcludeTaskId(client, sourceTaskId);
+
+    await tauriInvoke(client, "kill_session", { sessionId: reviewTaskId }).catch(() => undefined);
   });
 
   it("starts a live task commit post-action through the daemon input command", async () => {

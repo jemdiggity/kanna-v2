@@ -222,6 +222,14 @@ const mockState = vi.hoisted(() => {
     }
   });
 
+  const markPipelineItemTearingDownMock = vi.fn(async (_db: DbHandle, itemId: string) => {
+    const item = pipelineItems.find((candidate) => candidate.id === itemId);
+    if (item) {
+      item.teardown_started_at = item.teardown_started_at ?? now;
+      item.updated_at = now;
+    }
+  });
+
   const closePipelineItemMock = vi.fn(async (_db: DbHandle, itemId: string) => {
     const item = pipelineItems.find((candidate) => candidate.id === itemId);
     if (item) {
@@ -254,6 +262,7 @@ const mockState = vi.hoisted(() => {
     clearPipelineItemStageResultMock.mockClear();
     updatePipelineItemActivePostActionMock.mockClear();
     clearPipelineItemActivePostActionMock.mockClear();
+    markPipelineItemTearingDownMock.mockClear();
     closePipelineItemMock.mockClear();
     listBlockersForItemMock.mockClear();
     listBlockedByItemMock.mockClear();
@@ -333,6 +342,7 @@ const mockState = vi.hoisted(() => {
     clearPipelineItemStageResultMock,
     updatePipelineItemActivePostActionMock,
     clearPipelineItemActivePostActionMock,
+    markPipelineItemTearingDownMock,
     closePipelineItemMock,
     makeItem,
     makeRepo,
@@ -530,7 +540,7 @@ vi.mock("@kanna/db", () => ({
   insertWorktree: mockState.insertWorktreeMock,
   upsertTerminalSession: mockState.upsertTerminalSessionMock,
   updatePipelineItemActivity: mockState.updatePipelineItemActivityMock,
-  markPipelineItemTearingDown: vi.fn(async () => {}),
+  markPipelineItemTearingDown: mockState.markPipelineItemTearingDownMock,
   updatePipelineItemStage: mockState.updatePipelineItemStageMock,
   updatePipelineItemTags: mockState.updatePipelineItemTagsMock,
   updatePipelineItemActivePostAction: mockState.updatePipelineItemActivePostActionMock,
@@ -2671,6 +2681,37 @@ describe("kanna store task base branch integration", () => {
 
     expect(mockState.invokeMock).toHaveBeenCalledWith("kill_session", { sessionId: "item-blocked" });
     expect(mockState.invokeMock).toHaveBeenCalledWith("kill_session", { sessionId: "shell-wt-item-blocked" });
+  });
+
+  it("marks a task as tearing down before spawning its teardown session", async () => {
+    mockState.repoConfig = {
+      teardown: ["pnpm cleanup"],
+    };
+    mockState.pipelineItems = [
+      mockState.makeItem({
+        id: "item-teardown",
+        branch: "task-item-teardown",
+      }),
+    ];
+
+    const store = await createStore();
+    await store.selectItem("item-teardown");
+    await flushStore();
+
+    await store.closeTask();
+    await flushStore();
+
+    const teardownSpawnCallIndex = mockState.invokeMock.mock.calls.findIndex(
+      ([command, args]) =>
+        command === "spawn_session" &&
+        args?.sessionId === "td-item-teardown",
+    );
+    expect(teardownSpawnCallIndex).toBeGreaterThanOrEqual(0);
+
+    const markOrder = mockState.markPipelineItemTearingDownMock.mock.invocationCallOrder[0];
+    const teardownSpawnOrder = mockState.invokeMock.mock.invocationCallOrder[teardownSpawnCallIndex];
+
+    expect(markOrder).toBeLessThan(teardownSpawnOrder);
   });
 
   it("kills SDK agent sessions before running teardown commands", async () => {
