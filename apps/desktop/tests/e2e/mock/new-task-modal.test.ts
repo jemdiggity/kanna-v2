@@ -3,10 +3,59 @@ import { join } from "node:path";
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { WebDriverClient } from "../helpers/webdriver";
 import { resetDatabase, importTestRepo, cleanupWorktrees } from "../helpers/reset";
-import { callVueMethod, queryDb } from "../helpers/vue";
+import { callVueMethod, execDb, queryDb } from "../helpers/vue";
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
 import { buildGlobalKeydownScript, buildSelectorKeydownScript } from "../helpers/keyboard";
 import { waitForTaskCreated } from "../helpers/taskCreation";
+
+async function openNewTaskModal(client: WebDriverClient): Promise<void> {
+  const modalResult = await callVueMethod(client, "keyboardActions.newTask");
+  expect(modalResult).toBeNull();
+  await client.waitForElement(".modal-overlay", 5_000);
+}
+
+async function agentChoiceLabel(client: WebDriverClient): Promise<string> {
+  return client.executeSync<string>(
+    `return document.querySelector(".agent-provider")?.textContent?.trim() ?? "";`,
+  );
+}
+
+async function cycleToAgentChoice(
+  client: WebDriverClient,
+  expectedLabel: string,
+  maxClicks = 8,
+): Promise<void> {
+  for (let i = 0; i < maxClicks; i += 1) {
+    if (await agentChoiceLabel(client) === expectedLabel) return;
+    await client.click(await client.waitForElement(".agent-provider", 2_000));
+  }
+
+  expect(await agentChoiceLabel(client)).toBe(expectedLabel);
+}
+
+async function submitTaskFromModal(
+  client: WebDriverClient,
+  prompt: string,
+): Promise<void> {
+  const promptInput = await client.waitForElement(".prompt-input", 2_000);
+  await client.sendKeys(promptInput, prompt);
+  await client.click(await client.waitForElement(".modal-actions .btn-primary", 2_000));
+}
+
+async function resetRecentAgentChoices(client: WebDriverClient): Promise<void> {
+  await execDb(client, "DELETE FROM settings WHERE key = ?", ["recentAgentChoices"]);
+  const result = await callVueMethod(client, "appPreferences.handlePreferenceUpdate", "recentAgentChoices", "[]");
+  expect(result).toBeNull();
+}
+
+async function recentAgentChoicesSetting(client: WebDriverClient): Promise<unknown[]> {
+  const rows = (await queryDb(
+    client,
+    "SELECT value FROM settings WHERE key = ?",
+    ["recentAgentChoices"],
+  )) as Array<{ value: string }>;
+  return JSON.parse(rows[0]?.value ?? "[]") as unknown[];
+}
 
 describe("new task modal", () => {
   const client = new WebDriverClient();
@@ -220,5 +269,42 @@ describe("new task modal", () => {
       agent_provider: "claude",
       agent_type: "agent",
     }));
+  });
+
+  it("persists recent exact agent choices and opens the remounted modal with them first", async () => {
+    await resetRecentAgentChoices(client);
+
+    const codexChatPrompt = "Remember codex chat as the recent task agent";
+    await openNewTaskModal(client);
+    await cycleToAgentChoice(client, "codex sdk");
+    await submitTaskFromModal(client, codexChatPrompt);
+    expect(await waitForTaskCreated(client, codexChatPrompt)).toEqual(expect.objectContaining({
+      agent_provider: "codex",
+      agent_type: "agent",
+    }));
+    expect(await recentAgentChoicesSetting(client)).toEqual([
+      { provider: "codex", executionType: "agent" },
+    ]);
+
+    await openNewTaskModal(client);
+    expect(await agentChoiceLabel(client)).toBe("codex sdk");
+
+    const copilotCliPrompt = "Remember copilot cli as the recent task agent";
+    await cycleToAgentChoice(client, "copilot");
+    await submitTaskFromModal(client, copilotCliPrompt);
+    expect(await waitForTaskCreated(client, copilotCliPrompt)).toEqual(expect.objectContaining({
+      agent_provider: "copilot",
+      agent_type: "pty",
+    }));
+    expect(await recentAgentChoicesSetting(client)).toEqual([
+      { provider: "copilot", executionType: "pty" },
+      { provider: "codex", executionType: "agent" },
+    ]);
+
+    await openNewTaskModal(client);
+    expect(await agentChoiceLabel(client)).toBe("copilot");
+    await client.click(await client.waitForElement(".agent-provider", 2_000));
+    expect(await agentChoiceLabel(client)).toBe("codex sdk");
+    await client.executeSync(buildGlobalKeydownScript({ key: "Escape" }));
   });
 });
