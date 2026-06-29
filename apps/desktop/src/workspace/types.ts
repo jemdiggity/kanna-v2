@@ -92,6 +92,7 @@ export interface LocalRepoWithRemote {
 export interface BuildWorkspaceInput {
   localRepos: LocalRepoWithRemote[];
   localItems: PipelineItem[];
+  localClosedItems?: Array<Pick<PipelineItem, "id" | "repo_id">>;
   cloudSnapshot: DesktopCloudSnapshot;
   lanSnapshot: DesktopCloudSnapshot;
 }

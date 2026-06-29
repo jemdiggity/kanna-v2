@@ -504,6 +504,39 @@ describe("buildWorkspace", () => {
     expect(result.tasks).toEqual([]);
   });
 
+  it("hides a stale remote task when only the closed local identity is loaded", () => {
+    const staleCloud = item({
+      id: "cloud:repo-local:task-closed",
+      repo_id: "repo-local",
+      branch: "task-closed",
+      stage: "review",
+      closed_at: null,
+    });
+
+    const result = buildWorkspace({
+      localRepos: [{ repo: repo(), remoteUrlHash: "remote-hash" }],
+      localItems: [],
+      localClosedItems: [{
+        id: "task-closed",
+        repo_id: "repo-local",
+      }],
+      cloudSnapshot: {
+        repos: [],
+        items: [staleCloud],
+        terminalRefs: {
+          "cloud:repo-local:task-closed": {
+            ownerDesktopId: "desktop-a",
+            ownerLocalTaskId: "task-closed",
+            transport: "cloud",
+          },
+        },
+      },
+      lanSnapshot: emptySnapshot(),
+    });
+
+    expect(result.tasks).toEqual([]);
+  });
+
   it("groups a remote task under a matching local repo by remote URL hash", () => {
     const cloudItem = item({
       id: "cloud:remote-repo:task-3",

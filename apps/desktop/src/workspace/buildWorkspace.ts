@@ -24,7 +24,11 @@ export function buildWorkspace(input: BuildWorkspaceInput): BuildWorkspaceResult
     ...input.cloudSnapshot.repos,
     ...input.lanSnapshot.repos,
   ]);
-  const closedLocalKeys = buildClosedLocalKeys(input.localItems, repoContext.localRepoKeyById);
+  const closedLocalKeys = buildClosedLocalKeys(
+    input.localItems,
+    input.localClosedItems ?? [],
+    repoContext.localRepoKeyById,
+  );
   const candidates = [
     ...input.localItems
       .filter((item) => item.stage !== "done" && !item.closed_at)
@@ -163,11 +167,16 @@ function remoteCandidates(
 
 function buildClosedLocalKeys(
   items: PipelineItem[],
+  closedItems: Array<Pick<PipelineItem, "id" | "repo_id">>,
   localRepoKeyById: Map<string, string>,
 ): Set<string> {
   const keys = new Set<string>();
   for (const item of items) {
     if (item.stage !== "done" && !item.closed_at) continue;
+    const repoKey = localRepoKeyById.get(item.repo_id);
+    if (repoKey) keys.add(`${repoKey}:owner-local:${item.id}`);
+  }
+  for (const item of closedItems) {
     const repoKey = localRepoKeyById.get(item.repo_id);
     if (repoKey) keys.add(`${repoKey}:owner-local:${item.id}`);
   }
