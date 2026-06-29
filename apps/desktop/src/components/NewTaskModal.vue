@@ -6,6 +6,7 @@ import { useModalZIndex } from "../composables/useModalZIndex";
 import { registerContextShortcuts } from "../composables/useShortcutContext";
 import { macOsTextInputAttrs } from "../utils/textInput";
 import { filterBaseBranchCandidates } from "../utils/baseBranchPicker";
+import { agentChoiceKey, sortAgentChoicesByRecentUsage, type RecentAgentChoice } from "../utils/agentChoiceUsage";
 import type { AgentExecutionType } from "../stores/agentExecutionType";
 const { zIndex } = useModalZIndex();
 
@@ -16,6 +17,7 @@ registerContextShortcuts("newTask", [
 const props = defineProps<{
   defaultAgentProvider?: AgentProvider;
   defaultAgentType?: AgentExecutionType;
+  recentAgentChoices?: RecentAgentChoice[];
   pipelines?: string[];
   defaultPipeline?: string;
   baseBranches?: string[];
@@ -75,10 +77,7 @@ const baseBranchOptionsMaxHeight = `${MAX_VISIBLE_BRANCH_ROWS * BRANCH_ROW_HEIGH
 
 const providers: Array<AgentProvider> = ["claude", "codex", "copilot", "opencode", "antigravity"];
 const availableProviders = ref<Array<AgentProvider>>([...providers]);
-type AgentChoice = {
-  provider: AgentProvider;
-  executionType: AgentExecutionType;
-};
+type AgentChoice = RecentAgentChoice;
 
 function providerLabel(provider: AgentProvider): string {
   return provider;
@@ -92,18 +91,15 @@ function supportsChatMode(provider: AgentProvider): boolean {
   return provider === "claude" || provider === "codex";
 }
 
-function choicesForProvider(provider: AgentProvider): AgentChoice[] {
-  return supportsChatMode(provider)
-    ? [{ provider, executionType: "pty" }, { provider, executionType: "agent" }]
-    : [{ provider, executionType: "pty" }];
-}
-
-const agentChoices = computed(() => [
+const baseAgentChoices = computed(() => [
   ...availableProviders.value.map((provider) => ({ provider, executionType: "pty" as const })),
   ...availableProviders.value
     .filter(supportsChatMode)
     .map((provider) => ({ provider, executionType: "agent" as const })),
 ]);
+const agentChoices = computed(() =>
+  sortAgentChoicesByRecentUsage(baseAgentChoices.value, props.recentAgentChoices ?? []),
+);
 
 function choiceMatches(choice: AgentChoice, provider: AgentProvider, executionType: AgentExecutionType): boolean {
   return choice.provider === provider && choice.executionType === executionType;
@@ -117,6 +113,10 @@ function applyChoice(choice: AgentChoice) {
 function preferredChoice(): AgentChoice | undefined {
   const choices = agentChoices.value;
   if (choices.length === 0) return undefined;
+
+  const recentChoiceKeys = new Set((props.recentAgentChoices ?? []).map(agentChoiceKey));
+  const recentChoice = choices.find((choice) => recentChoiceKeys.has(agentChoiceKey(choice)));
+  if (recentChoice) return recentChoice;
 
   const preferredProvider = props.defaultAgentProvider && availableProviders.value.includes(props.defaultAgentProvider)
     ? props.defaultAgentProvider
@@ -162,18 +162,8 @@ onMounted(async () => {
     if (found.length > 0) availableProviders.value = found;
     else availableProviders.value = [...providers]; // if none detected, keep all options
 
-    // Ensure selected provider is available; prefer defaultAgentProvider when provided
-    const preferred = props.defaultAgentProvider ?? agentProvider.value;
-    if (availableProviders.value.includes(preferred)) {
-      agentProvider.value = preferred;
-      const preferredExecutionType = props.defaultAgentType ?? "pty";
-      displayMode.value = choicesForProvider(preferred).some((choice) => choice.executionType === preferredExecutionType)
-        ? preferredExecutionType
-        : "pty";
-    } else {
-      const nextChoice = agentChoices.value[0];
-      if (nextChoice) applyChoice(nextChoice);
-    }
+    const nextChoice = preferredChoice();
+    if (nextChoice) applyChoice(nextChoice);
   } catch (e) {
     console.debug("[newtask] cli detection failed:", e);
   }

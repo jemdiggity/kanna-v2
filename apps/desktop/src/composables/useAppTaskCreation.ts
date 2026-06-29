@@ -2,6 +2,7 @@ import { ref, type ComputedRef, type Ref } from "vue";
 import { computedAsync } from "@vueuse/core";
 import { parseRepoConfig } from "@kanna/core";
 import type { AgentProvider } from "@kanna/db";
+import type { AgentExecutionType } from "../stores/agentExecutionType";
 
 import { invoke } from "../invoke";
 import { getDefaultBaseBranch } from "../utils/baseBranchPicker";
@@ -33,6 +34,7 @@ interface UseAppTaskCreationOptions {
   showAddRepoModal: Ref<boolean>;
   isCloudOnlyRepoId: (repoId: string | undefined | null) => boolean;
   cloudRepoRemoteUrl: (repoId: string | undefined | null) => string | null;
+  onAgentChoiceUsed?: (choice: { provider: AgentProvider; executionType: AgentExecutionType }) => void | Promise<void>;
 }
 
 export function useAppTaskCreation({
@@ -53,6 +55,7 @@ export function useAppTaskCreation({
   showAddRepoModal,
   isCloudOnlyRepoId,
   cloudRepoRemoteUrl,
+  onAgentChoiceUsed,
 }: UseAppTaskCreationOptions) {
   const cloningRepo = ref(false);
 
@@ -172,6 +175,11 @@ export function useAppTaskCreation({
         pipelineName,
         baseBranch,
       });
+      try {
+        await onAgentChoiceUsed?.({ provider: agentProvider, executionType: agentType });
+      } catch (error: unknown) {
+        console.warn("[App] failed to record recent agent choice:", error);
+      }
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       console.error("Task creation failed:", e);

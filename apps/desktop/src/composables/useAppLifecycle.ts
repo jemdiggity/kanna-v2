@@ -30,6 +30,7 @@ import {
 import { scheduleStartupBackup, startPeriodicBackup } from "./useBackup";
 import type { KeyboardActions } from "./useKeyboardShortcuts";
 import type { useAppPreferences } from "./useAppPreferences";
+import { parseRecentAgentChoices } from "../utils/agentChoiceUsage";
 import type { useAppUpdate } from "./useAppUpdate";
 import type { useToast } from "./useToast";
 
@@ -432,6 +433,7 @@ export function useAppLifecycle({
     if (savedAgentType !== null) {
       preferences.defaultAgentType = normalizeAgentExecutionType(savedAgentType);
     }
+    preferences.recentAgentChoices = parseRecentAgentChoices(await getSetting(db, "recentAgentChoices"));
 
     startPeriodicBackup(dbName, ref(db) as Ref<DbHandle | null>);
     if (!store.hideShortcutsOnStartup) {
