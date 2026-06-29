@@ -166,6 +166,7 @@ fn resolves_expected_requests_for_every_bundled_tool() {
             json!({
                 "repoId": "repo-1",
                 "prompt": "Child",
+                "agentType": "pty",
                 "notifyTaskId": "task-parent"
             }),
         ),
@@ -182,6 +183,7 @@ fn resolves_expected_requests_for_every_bundled_tool() {
             json!({
                 "repoId": "repo-1",
                 "prompt": "Subtask",
+                "agentType": "pty",
                 "parentTaskId": "task-parent"
             }),
         ),

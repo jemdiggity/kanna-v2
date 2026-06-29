@@ -184,7 +184,7 @@ fn builds_block_task_payload() {
 }
 
 #[test]
-fn builds_task_request_omits_agent_provider_when_flag_absent() {
+fn builds_task_request_defaults_to_pty_agent_type_when_flag_absent() {
     let request = build_create_task_request(TaskCreateOptions {
         repo_id: "repo-1".to_string(),
         prompt: "Use the saved default provider".to_string(),
@@ -206,6 +206,7 @@ fn builds_task_request_omits_agent_provider_when_flag_absent() {
         json!({
             "repoId": "repo-1",
             "prompt": "Use the saved default provider",
+            "agentType": "pty",
         })
     );
 }

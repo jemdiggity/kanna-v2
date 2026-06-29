@@ -29,6 +29,14 @@ fn resolve_agent_type_normalizes_legacy_sdk_to_agent() {
 }
 
 #[test]
+fn resolve_agent_type_normalizes_chat_to_agent() {
+    assert!(matches!(
+        resolve_agent_type(Some("chat"), AgentProvider::Claude),
+        Ok(AgentSessionType::Agent)
+    ));
+}
+
+#[test]
 fn resolve_agent_type_defaults_opencode_to_agent_but_allows_explicit_pty() {
     assert!(matches!(
         resolve_agent_type(None, AgentProvider::Opencode),
