@@ -161,6 +161,20 @@ export function createTaskCloseActions(
           reportCloseSessionError("[store] signal_session failed:", error));
       }
 
+      const enterTeardownState = async (): Promise<void> => {
+        await markPipelineItemTearingDown(context.requireDb(), item.id);
+        if (shouldSelectNextOnCloseTransition({
+          selectNext: opts?.selectNext !== false,
+          wasBlocked,
+          previousStage: item.stage,
+          nextStage: "tearing_down",
+        })) {
+          await selectReplacementAfterTaskRemoval(item);
+        }
+        await reloadSnapshot();
+        await invalidateWindowWorkspace("closeTask");
+      };
+
       let teardownExit: Promise<void> | null = null;
       if (teardownCmds.length > 0) {
         const worktreePath = `${repo.path}/.kanna-worktrees/${item.branch}`;
@@ -175,6 +189,7 @@ export function createTaskCloseActions(
         const scriptParts = teardownCmds.map((command) => renderBestEffortLifecycleCommand(command, "Teardown"));
         const fullCmd = `printf '\\033[33mRunning teardown...\\033[0m\\n' && ${scriptParts.join(" && ")} && printf '\\n'`;
         const tdSessionId = `td-${item.id}`;
+        await enterTeardownState();
         teardownExit = requireService(context.services.waitForSessionExit, "waitForSessionExit")(tdSessionId);
         await invoke("spawn_session", {
           sessionId: tdSessionId,
@@ -187,18 +202,6 @@ export function createTaskCloseActions(
         });
         await invoke("attach_session_with_snapshot", { sessionId: tdSessionId });
       }
-
-      await markPipelineItemTearingDown(context.requireDb(), item.id);
-      if (shouldSelectNextOnCloseTransition({
-        selectNext: opts?.selectNext !== false,
-        wasBlocked,
-        previousStage: item.stage,
-        nextStage: "tearing_down",
-      })) {
-        await selectReplacementAfterTaskRemoval(item);
-      }
-      await reloadSnapshot();
-      await invalidateWindowWorkspace("closeTask");
 
       void teardownExit;
     } catch (error) {
