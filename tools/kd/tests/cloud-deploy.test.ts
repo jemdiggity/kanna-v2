@@ -198,6 +198,8 @@ describe("cloud deploy runtime", () => {
     expect(plan.commands[1]?.args).toContain("kanna-relay-staging");
     expect(plan.commands[1]?.args).toContain("--machine-type");
     expect(plan.commands[1]?.args).toContain("e2-micro");
+    expect(plan.commands[1]?.args).toContain("--scopes");
+    expect(plan.commands[1]?.args).toContain("https://www.googleapis.com/auth/cloud-platform");
     expect(plan.commands[1]?.args).toContain("--zone");
     expect(plan.commands[1]?.args).toContain("us-central1-a");
     expect(plan.commands[1]?.args.join("\n")).toContain("startup-script");
