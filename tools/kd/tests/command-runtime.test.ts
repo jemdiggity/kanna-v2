@@ -82,10 +82,10 @@ describe("command runtime helpers", () => {
   });
 
   it("respawns a single tmux window with the resolved window env", async () => {
-    const calls: Array<{ command: string; args: string[]; env?: NodeJS.ProcessEnv }> = [];
+    const calls: Array<{ command: string; args: string[]; env?: NodeJS.ProcessEnv; stdin?: string }> = [];
     const runner: CommandRunner = {
       async run(command, args, options) {
-        calls.push({ command, args, env: options?.env });
+        calls.push({ command, args, env: options?.env, stdin: options?.stdin });
         if (args.includes("list-windows")) {
           return { exitCode: 0, stdout: "desktop\nmobile\n", stderr: "" };
         }
@@ -101,7 +101,10 @@ describe("command runtime helpers", () => {
           name: "desktop",
           cwd: "/repo/apps/desktop",
           command: "pnpm exec tauri dev",
-          env: { KANNA_CLOUD_ENV: "staging" }
+          env: {
+            KANNA_CLOUD_ENV: "staging",
+            KANNA_DESKTOP_AUTO_SIGN_IN_EMAIL: "dev@example.com",
+          }
         }
       )
     ).resolves.toBe(true);
@@ -117,17 +120,18 @@ describe("command runtime helpers", () => {
         args: [
           "-L",
           "kanna-task",
-          "respawn-window",
-          "-k",
-          "-t",
-          "kanna-task:desktop",
-          "-c",
-          "/repo/apps/desktop",
-          "pnpm exec tauri dev"
+          "source-file",
+          "-"
         ],
-        env: { KANNA_CLOUD_ENV: "staging" }
+        env: {
+          KANNA_CLOUD_ENV: "staging",
+          KANNA_DESKTOP_AUTO_SIGN_IN_EMAIL: "dev@example.com",
+        },
+        stdin:
+          "respawn-window '-k' '-t' 'kanna-task:desktop' '-c' '/repo/apps/desktop' '-e' 'KANNA_DESKTOP_AUTO_SIGN_IN_EMAIL=dev@example.com' 'pnpm exec tauri dev'\n"
       }
     ]);
+    expect(calls.map((call) => call.args.join(" ")).join("\n")).not.toContain("dev@example.com");
   });
 
   it("adds missing windows when the tmux dev session is already running", async () => {

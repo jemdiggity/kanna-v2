@@ -152,10 +152,13 @@ describe("task executors", () => {
   it("starts the worktree desktop and mobile against staging cloud env without requiring production desktop status", async () => {
     const repoRoot = await mkdtemp(join(tmpdir(), "kanna-kd-staging-"));
     await mkdir(join(repoRoot, "apps", "desktop", "src-tauri"), { recursive: true });
-    const calls: Array<{ command: string; args: string[]; env?: NodeJS.ProcessEnv }> = [];
+    const calls: Array<{ command: string; args: string[]; env?: NodeJS.ProcessEnv; stdin?: string }> = [];
     const runner: CommandRunner = {
       async run(command, args, options) {
-        calls.push({ command, args, env: options?.env });
+        calls.push({ command, args, env: options?.env, stdin: options?.stdin });
+        if (args.includes("list-windows")) {
+          return { exitCode: 0, stdout: "desktop\n", stderr: "" };
+        }
         return { exitCode: 0, stdout: "", stderr: "" };
       }
     };
@@ -208,10 +211,13 @@ describe("task executors", () => {
     const home = await mkdtemp(join(tmpdir(), "kanna-kd-staging-creds-home-"));
     await mkdir(join(repoRoot, "apps", "desktop", "src-tauri"), { recursive: true });
     await writeStagingDesktopAuth(home);
-    const calls: Array<{ command: string; args: string[]; env?: NodeJS.ProcessEnv }> = [];
+    const calls: Array<{ command: string; args: string[]; env?: NodeJS.ProcessEnv; stdin?: string }> = [];
     const runner: CommandRunner = {
       async run(command, args, options) {
-        calls.push({ command, args, env: options?.env });
+        calls.push({ command, args, env: options?.env, stdin: options?.stdin });
+        if (args.includes("list-windows")) {
+          return { exitCode: 0, stdout: "desktop\n", stderr: "" };
+        }
         return { exitCode: 0, stdout: "", stderr: "" };
       }
     };
@@ -235,10 +241,14 @@ describe("task executors", () => {
       }
     );
 
-    expect(calls[0]?.env?.KANNA_DESKTOP_AUTO_SIGN_IN_EMAIL).toBe("dev@example.com");
-    expect(calls[0]?.env?.KANNA_DESKTOP_AUTO_SIGN_IN_PASSWORD).toBe("do-not-print");
-    expect(calls[2]?.env?.KANNA_DESKTOP_AUTO_SIGN_IN_EMAIL).toBeUndefined();
-    expect(calls[2]?.env?.KANNA_DESKTOP_AUTO_SIGN_IN_PASSWORD).toBeUndefined();
+    const desktopCalls = calls.filter((call) => call.env?.KANNA_DESKTOP_AUTO_SIGN_IN_EMAIL);
+    const mobileCall = calls.find((call) => call.command === "tmux" && call.args.includes("new-window"));
+
+    expect(desktopCalls.length).toBeGreaterThan(0);
+    expect(desktopCalls.every((call) => call.env?.KANNA_DESKTOP_AUTO_SIGN_IN_EMAIL === "dev@example.com")).toBe(true);
+    expect(desktopCalls.every((call) => call.env?.KANNA_DESKTOP_AUTO_SIGN_IN_PASSWORD === "do-not-print")).toBe(true);
+    expect(mobileCall?.env?.KANNA_DESKTOP_AUTO_SIGN_IN_EMAIL).toBeUndefined();
+    expect(mobileCall?.env?.KANNA_DESKTOP_AUTO_SIGN_IN_PASSWORD).toBeUndefined();
     expect(calls.map((call) => call.args.join(" ")).join("\n")).not.toContain("do-not-print");
     expect(calls.map((call) => call.args.join(" ")).join("\n")).not.toContain("dev@example.com");
   });
