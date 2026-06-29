@@ -9,6 +9,7 @@ fn guide_markdown_includes_live_context_and_all_catalog_tools() {
         stage: Some("review".to_string()),
         pipeline_name: Some("qa".to_string()),
         stage_transition: Some("auto".to_string()),
+        stage_result: None,
         activity: Some("working".to_string()),
         snippet: None,
         agent_type: Some("pty".to_string()),

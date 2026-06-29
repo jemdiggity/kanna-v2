@@ -27,6 +27,7 @@ pub struct PipelineItem {
     pub prompt: Option<String>,
     pub pipeline: Option<String>,
     pub stage: Option<String>,
+    pub stage_result: Option<String>,
     pub pr_number: Option<i64>,
     pub pr_url: Option<String>,
     pub branch: Option<String>,

@@ -19,6 +19,26 @@ fn builds_complete_stage_payload() {
 }
 
 #[test]
+fn renders_stage_complete_confirmation_for_same_task_response() {
+    let rendered = render_stage_complete_confirmation("task-1", "success", "task-1");
+
+    assert_eq!(
+        rendered,
+        "Stage completion recorded for task task-1 (status: success)."
+    );
+}
+
+#[test]
+fn renders_stage_complete_confirmation_for_advanced_task_response() {
+    let rendered = render_stage_complete_confirmation("task-1", "success", "task-2");
+
+    assert_eq!(
+        rendered,
+        "Stage completion recorded for task task-1 (status: success); advanced to task task-2."
+    );
+}
+
+#[test]
 fn builds_request_revision_payload() {
     let request = build_request_revision_request(
         "in progress".to_string(),

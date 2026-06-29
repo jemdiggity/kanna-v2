@@ -43,6 +43,20 @@ pub(crate) fn build_complete_stage_request(
     }
 }
 
+pub(crate) fn render_stage_complete_confirmation(
+    task_id: &str,
+    status: &str,
+    response_task_id: &str,
+) -> String {
+    if response_task_id != task_id {
+        return format!(
+            "Stage completion recorded for task {task_id} (status: {status}); advanced to task {response_task_id}."
+        );
+    }
+
+    format!("Stage completion recorded for task {task_id} (status: {status}).")
+}
+
 pub(crate) async fn run(
     task_id: String,
     status: String,
@@ -72,10 +86,12 @@ pub(crate) async fn run(
     if let Some(base_url) = resolve_optional_server_base_url(&borrowed_pairs, server_url) {
         let request =
             build_complete_stage_request(status.clone(), summary.clone(), metadata_value.clone());
-        if let Err(e) = complete_stage_via_api(&base_url, &task_id, &request).await {
-            eprintln!("Error: {e}");
-            process::exit(1);
-        }
+        let response = complete_stage_via_api(&base_url, &task_id, &request)
+            .await
+            .unwrap_or_else(|e| {
+                eprintln!("Error: {e}");
+                process::exit(1);
+            });
 
         match env::var("KANNA_SOCKET_PATH") {
             Ok(socket_path) => {
@@ -87,6 +103,10 @@ pub(crate) async fn run(
                 eprintln!("Warning: KANNA_SOCKET_PATH not set, skipping socket notification");
             }
         }
+        println!(
+            "{}",
+            render_stage_complete_confirmation(&task_id, &status, &response.task_id)
+        );
         return;
     }
 
@@ -125,4 +145,9 @@ pub(crate) async fn run(
             eprintln!("Warning: KANNA_SOCKET_PATH not set, skipping socket notification");
         }
     }
+
+    println!(
+        "{}",
+        render_stage_complete_confirmation(&task_id, &status, &task_id)
+    );
 }
