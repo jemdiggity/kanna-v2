@@ -196,7 +196,9 @@ pub(crate) enum TaskCommands {
         #[arg(long)]
         agent_provider: Option<String>,
 
-        /// Task session type: "agent" for themed headless sessions or "pty" for raw terminal
+        /// Task session type: "pty" for raw terminal or "agent"/"chat"/"sdk" for headless sessions
+        ///
+        /// Defaults to "pty" for CLI-created tasks.
         #[arg(long)]
         agent_type: Option<String>,
 

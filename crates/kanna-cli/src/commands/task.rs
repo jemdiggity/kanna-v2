@@ -26,7 +26,7 @@ pub(crate) fn build_create_task_request(options: TaskCreateOptions) -> CreateTas
         pipeline_name: options.pipeline_name,
         base_ref: options.base_ref,
         agent_provider: options.agent_provider,
-        agent_type: options.agent_type,
+        agent_type: options.agent_type.or_else(|| Some("pty".to_string())),
         model: options.model,
         permission_mode: options.permission_mode,
         allowed_tools: (!options.allowed_tool.is_empty()).then_some(options.allowed_tool),

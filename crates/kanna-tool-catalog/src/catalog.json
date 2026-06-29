@@ -94,7 +94,7 @@
         { "name": "pipeline_name", "type": "string", "required": false, "location": "body", "key": "pipelineName" },
         { "name": "base_ref", "type": "string", "required": false, "location": "body", "key": "baseRef" },
         { "name": "agent_provider", "type": "string", "required": false, "location": "body", "key": "agentProvider" },
-        { "name": "agent_type", "type": "string", "required": false, "location": "body", "key": "agentType" },
+        { "name": "agent_type", "type": "string", "required": false, "location": "body", "key": "agentType", "default": "pty" },
         { "name": "model", "type": "string", "required": false, "location": "body" },
         { "name": "permission_mode", "type": "string", "required": false, "location": "body", "key": "permissionMode" },
         { "name": "parent_task_id", "type": "string", "required": false, "location": "body", "key": "parentTaskId" },

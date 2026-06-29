@@ -64,7 +64,7 @@ pub(super) fn resolve_agent_type(
 
 pub(super) fn normalize_agent_type(agent_type: Option<&str>) -> Option<&str> {
     match agent_type {
-        Some("sdk") => Some("agent"),
+        Some("sdk" | "chat") => Some("agent"),
         Some(value) => Some(value),
         None => None,
     }

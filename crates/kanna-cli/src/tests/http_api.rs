@@ -160,7 +160,7 @@ async fn unblock_task_posts_to_task_action_path() {
 }
 
 #[tokio::test]
-async fn create_task_via_api_posts_payload_without_agent_provider_when_flag_absent() {
+async fn create_task_via_api_posts_default_agent_type_without_agent_provider_when_flags_absent() {
     let listener = TokioTcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
@@ -240,6 +240,7 @@ async fn create_task_via_api_posts_payload_without_agent_provider_when_flag_abse
         json!({
             "repoId": "repo-1",
             "prompt": "Use the saved default provider",
+            "agentType": "pty",
         })
     );
 }
