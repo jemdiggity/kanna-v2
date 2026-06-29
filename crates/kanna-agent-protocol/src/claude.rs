@@ -77,9 +77,8 @@ impl ClaudeAdapter {
         if !args.iter().any(|a| a == "--input-format") {
             args.extend(["--input-format".to_string(), "stream-json".to_string()]);
         }
-        if let Some(mcp_config_path) = mcp_config_path {
-            args.push("--mcp-config".to_string());
-            args.push(mcp_config_path.to_string());
+        if let Some(path) = mcp_config_path.filter(|path| !path.trim().is_empty()) {
+            args.extend(["--mcp-config".to_string(), path.to_string()]);
         }
         SpawnSpec {
             executable: "claude".to_string(),

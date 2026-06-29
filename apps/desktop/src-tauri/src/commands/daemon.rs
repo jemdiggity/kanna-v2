@@ -3,6 +3,7 @@ mod connection;
 mod protocol;
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use tauri::Emitter;
@@ -112,7 +113,7 @@ pub async fn spawn_agent_session(
             "max_turns": max_turns,
             "max_budget_usd": max_budget_usd,
             "system_prompt": system_prompt,
-            "mcp_config_path": mcp_config_path,
+            "mcp_config_path": mcp_config_path.or_else(|| resolve_mcp_config_path(&env, &cwd)),
             "executable": executable,
         },
     });
@@ -133,6 +134,24 @@ pub async fn spawn_agent_session(
             code: None,
         }),
     }
+}
+
+fn resolve_mcp_config_path(env: &HashMap<String, String>, cwd: &str) -> Option<String> {
+    if let Some(path) = env
+        .get("KANNA_MCP_CONFIG")
+        .filter(|path| !path.trim().is_empty())
+    {
+        return Some(path.clone());
+    }
+    if let Ok(path) = std::env::var("KANNA_MCP_CONFIG") {
+        if !path.trim().is_empty() {
+            return Some(path);
+        }
+    }
+    let candidate = PathBuf::from(cwd).join(".mcp.json");
+    candidate
+        .is_file()
+        .then(|| candidate.to_string_lossy().to_string())
 }
 
 #[tauri::command]

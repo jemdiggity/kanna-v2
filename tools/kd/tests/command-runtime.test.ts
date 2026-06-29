@@ -1,9 +1,29 @@
+import { spawnSync } from "node:child_process";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { checkRequiredCommands } from "../src/runtime/doctor";
 import { buildMobileDeviceSmokeCommand, buildMobileTestCommand } from "../src/runtime/mobile-commands";
 import { getPortStatuses } from "../src/runtime/port-status";
 import { respawnTmuxWindow, startTmuxSession, stopTmuxWindow } from "../src/runtime/tmux";
-import type { CommandRunner } from "../src/runtime/process";
+import { nodeCommandRunner, type CommandRunner } from "../src/runtime/process";
+
+const tmuxAvailable = spawnSync("tmux", ["-V"], { stdio: "ignore" }).status === 0;
+
+async function waitForFile(path: string): Promise<string> {
+  const deadline = Date.now() + 5_000;
+  let lastError: unknown;
+  while (Date.now() < deadline) {
+    try {
+      return await readFile(path, "utf8");
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+  throw lastError;
+}
 
 describe("command runtime helpers", () => {
   it("checks whether Firebase emulator ports are listening", async () => {
@@ -82,10 +102,10 @@ describe("command runtime helpers", () => {
   });
 
   it("respawns a single tmux window with the resolved window env", async () => {
-    const calls: Array<{ command: string; args: string[]; env?: NodeJS.ProcessEnv }> = [];
+    const calls: Array<{ command: string; args: string[]; env?: NodeJS.ProcessEnv; stdin?: string }> = [];
     const runner: CommandRunner = {
       async run(command, args, options) {
-        calls.push({ command, args, env: options?.env });
+        calls.push({ command, args, env: options?.env, stdin: options?.stdin });
         if (args.includes("list-windows")) {
           return { exitCode: 0, stdout: "desktop\nmobile\n", stderr: "" };
         }
@@ -101,7 +121,10 @@ describe("command runtime helpers", () => {
           name: "desktop",
           cwd: "/repo/apps/desktop",
           command: "pnpm exec tauri dev",
-          env: { KANNA_CLOUD_ENV: "staging" }
+          env: {
+            KANNA_CLOUD_ENV: "staging",
+            KANNA_DESKTOP_AUTO_SIGN_IN_EMAIL: "dev@example.com",
+          }
         }
       )
     ).resolves.toBe(true);
@@ -117,17 +140,18 @@ describe("command runtime helpers", () => {
         args: [
           "-L",
           "kanna-task",
-          "respawn-window",
-          "-k",
-          "-t",
-          "kanna-task:desktop",
-          "-c",
-          "/repo/apps/desktop",
-          "pnpm exec tauri dev"
+          "source-file",
+          "-"
         ],
-        env: { KANNA_CLOUD_ENV: "staging" }
+        env: {
+          KANNA_CLOUD_ENV: "staging",
+          KANNA_DESKTOP_AUTO_SIGN_IN_EMAIL: "dev@example.com",
+        },
+        stdin:
+          "respawn-window '-k' '-t' 'kanna-task:desktop' '-c' '/repo/apps/desktop' '-e' 'KANNA_DESKTOP_AUTO_SIGN_IN_EMAIL=dev@example.com' 'pnpm exec tauri dev'\n"
       }
     ]);
+    expect(calls.map((call) => call.args.join(" ")).join("\n")).not.toContain("dev@example.com");
   });
 
   it("adds missing windows when the tmux dev session is already running", async () => {
@@ -161,5 +185,71 @@ describe("command runtime helpers", () => {
       "tmux -L kanna-task new-window -t kanna-task -n mobile -c /repo/apps/mobile mobile",
       "tmux -L kanna-task new-window -t kanna-task -n emulators -c /repo emulators"
     ]);
+  });
+
+  it.skipIf(!tmuxAvailable)("injects desktop credentials into a real tmux window without exposing them in command text", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kanna-kd-real-tmux-"));
+    const outputPath = join(root, "desktop-env.json");
+    const tmuxName = `kanna-test-${process.pid}-${Date.now()}`;
+    const target = {
+      server: tmuxName,
+      session: tmuxName
+    };
+    const email = "dev@example.com";
+    const password = "do-not-print";
+    const command = [
+      "node",
+      "-e",
+      JSON.stringify(
+        `require("node:fs").writeFileSync(${JSON.stringify(outputPath)}, JSON.stringify({ email: process.env.KANNA_DESKTOP_AUTO_SIGN_IN_EMAIL, password: process.env.KANNA_DESKTOP_AUTO_SIGN_IN_PASSWORD })); setTimeout(() => {}, 10000);`
+      )
+    ].join(" ");
+
+    try {
+      await startTmuxSession(nodeCommandRunner, target, [
+        {
+          name: "desktop",
+          cwd: root,
+          command,
+          env: {
+            PATH: process.env.PATH,
+            KANNA_DESKTOP_AUTO_SIGN_IN_EMAIL: email,
+            KANNA_DESKTOP_AUTO_SIGN_IN_PASSWORD: password
+          }
+        }
+      ]);
+
+      await expect(waitForFile(outputPath)).resolves.toBe(
+        JSON.stringify({ email, password })
+      );
+
+      const windows = await nodeCommandRunner.run("tmux", [
+        "-L",
+        target.server,
+        "list-windows",
+        "-t",
+        target.session,
+        "-F",
+        "#{window_name} #{pane_current_command}"
+      ]);
+      const pane = await nodeCommandRunner.run("tmux", [
+        "-L",
+        target.server,
+        "capture-pane",
+        "-t",
+        `${target.session}:desktop`,
+        "-p",
+        "-S",
+        "-50"
+      ]);
+      const visibleTmuxText = `${windows.stdout}\n${windows.stderr}\n${pane.stdout}\n${pane.stderr}`;
+
+      expect(visibleTmuxText).not.toContain(email);
+      expect(visibleTmuxText).not.toContain(password);
+    } finally {
+      await nodeCommandRunner.run("tmux", ["-L", target.server, "kill-session", "-t", target.session])
+        .catch(() => ({ exitCode: 1, stdout: "", stderr: "" }));
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

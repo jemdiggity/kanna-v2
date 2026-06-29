@@ -21,6 +21,7 @@ export interface DevPlan {
 export interface BuildDevPlanInput {
   repoRoot: string;
   env: NodeJS.ProcessEnv;
+  desktopSecretEnv?: NodeJS.ProcessEnv;
   mobile: boolean;
   emulators: boolean;
   firebaseConfigPath: string;
@@ -216,7 +217,10 @@ export function buildDevPlan(input: BuildDevPlanInput): DevPlan {
   windows.push({
     name: "desktop",
     cwd: `${input.repoRoot}/apps/desktop`,
-    env: sharedEnv,
+    env: {
+      ...sharedEnv,
+      ...(input.desktopSecretEnv ?? {}),
+    },
     command: `${desktopEnv ? `${desktopEnv} ` : ""}pnpm run build:sidecars && ${desktopEnv ? `${desktopEnv} ` : ""}pnpm exec tauri dev --config ${JSON.stringify(localConfigPath)}`
   });
 

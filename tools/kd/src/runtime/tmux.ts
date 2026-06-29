@@ -6,6 +6,87 @@ export interface TmuxTarget {
   session: string;
 }
 
+function tmuxWindowEnvArgs(env: NodeJS.ProcessEnv): string[] {
+  const keys = [
+    "KANNA_DESKTOP_AUTO_SIGN_IN_EMAIL",
+    "KANNA_DESKTOP_AUTO_SIGN_IN_PASSWORD",
+  ];
+  return keys.flatMap((key) => {
+    const value = env[key];
+    return typeof value === "string" && value.length > 0
+      ? [`${key}=${value}`]
+      : [];
+  });
+}
+
+function hasTmuxWindowEnv(env: NodeJS.ProcessEnv): boolean {
+  return tmuxWindowEnvArgs(env).length > 0;
+}
+
+function tmuxQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+async function runTmuxSourceCommand(
+  runner: CommandRunner,
+  target: TmuxTarget,
+  command: string,
+  env: NodeJS.ProcessEnv
+) {
+  return runner.run(
+    "tmux",
+    ["-L", target.server, "source-file", "-"],
+    { env, stdin: `${command}\n` },
+  );
+}
+
+function tmuxCommandLine(command: string, args: string[]): string {
+  return [command, ...args.map(tmuxQuote)].join(" ");
+}
+
+async function newTmuxWindowWithEnv(
+  runner: CommandRunner,
+  target: TmuxTarget,
+  window: DevWindow
+) {
+  return runTmuxSourceCommand(
+    runner,
+    target,
+    tmuxCommandLine("new-window", [
+      "-t",
+      target.session,
+      "-n",
+      window.name,
+      "-c",
+      window.cwd,
+      ...tmuxWindowEnvArgs(window.env).flatMap((entry) => ["-e", entry]),
+      window.command,
+    ]),
+    window.env,
+  );
+}
+
+async function respawnTmuxWindowWithEnv(
+  runner: CommandRunner,
+  target: TmuxTarget,
+  window: DevWindow
+) {
+  return runTmuxSourceCommand(
+    runner,
+    target,
+    tmuxCommandLine("respawn-window", [
+      "-k",
+      "-t",
+      `${target.session}:${window.name}`,
+      "-c",
+      window.cwd,
+      ...tmuxWindowEnvArgs(window.env).flatMap((entry) => ["-e", entry]),
+      window.command,
+    ]),
+    window.env,
+  );
+}
+
 export async function hasTmuxSession(runner: CommandRunner, target: TmuxTarget): Promise<boolean> {
   const result = await runner.run("tmux", ["-L", target.server, "has-session", "-t", target.session]);
   return result.exitCode === 0;
@@ -17,9 +98,17 @@ export async function startTmuxSession(runner: CommandRunner, target: TmuxTarget
     throw new Error("Cannot start tmux session without windows");
   }
 
+  const firstCommand = hasTmuxWindowEnv(first.env) ? "sleep 2147483647" : first.command;
   const firstResult = await runner.run(
     "tmux",
-    ["-L", target.server, "new-session", "-d", "-s", target.session, "-n", first.name, "-c", first.cwd, first.command],
+    [
+      "-L", target.server,
+      "new-session", "-d",
+      "-s", target.session,
+      "-n", first.name,
+      "-c", first.cwd,
+      firstCommand
+    ],
     { env: first.env }
   );
   if (firstResult.exitCode !== 0) {
@@ -32,23 +121,32 @@ export async function startTmuxSession(runner: CommandRunner, target: TmuxTarget
 
   await runner.run("tmux", ["-L", target.server, "set-option", "-t", target.session, "remain-on-exit", "on"]);
 
+  if (hasTmuxWindowEnv(first.env)) {
+    const respawned = await respawnTmuxWindow(runner, target, first);
+    if (!respawned) {
+      throw new Error(`tmux failed to start ${target.session}:${first.name}: window was not created`);
+    }
+  }
+
   for (const window of rest) {
-    const result = await runner.run(
-      "tmux",
-      [
-        "-L",
-        target.server,
-        "new-window",
-        "-t",
-        target.session,
-        "-n",
-        window.name,
-        "-c",
-        window.cwd,
-        window.command
-      ],
-      { env: window.env }
-    );
+    const result = hasTmuxWindowEnv(window.env)
+      ? await newTmuxWindowWithEnv(runner, target, window)
+      : await runner.run(
+          "tmux",
+          [
+            "-L",
+            target.server,
+            "new-window",
+            "-t",
+            target.session,
+            "-n",
+            window.name,
+            "-c",
+            window.cwd,
+            window.command
+          ],
+          { env: window.env }
+        );
     if (result.exitCode !== 0) {
       throw new Error(`tmux failed to start ${target.session}:${window.name}: ${result.stderr}`);
     }
@@ -81,22 +179,24 @@ async function addMissingTmuxWindows(
     if (existing.has(window.name)) {
       continue;
     }
-    const result = await runner.run(
-      "tmux",
-      [
-        "-L",
-        target.server,
-        "new-window",
-        "-t",
-        target.session,
-        "-n",
-        window.name,
-        "-c",
-        window.cwd,
-        window.command
-      ],
-      { env: window.env }
-    );
+    const result = hasTmuxWindowEnv(window.env)
+      ? await newTmuxWindowWithEnv(runner, target, window)
+      : await runner.run(
+          "tmux",
+          [
+            "-L",
+            target.server,
+            "new-window",
+            "-t",
+            target.session,
+            "-n",
+            window.name,
+            "-c",
+            window.cwd,
+            window.command
+          ],
+          { env: window.env }
+        );
     if (result.exitCode !== 0) {
       throw new Error(`tmux failed to start ${target.session}:${window.name}: ${result.stderr}`);
     }
@@ -152,21 +252,23 @@ export async function respawnTmuxWindow(runner: CommandRunner, target: TmuxTarge
     return false;
   }
 
-  const result = await runner.run(
-    "tmux",
-    [
-      "-L",
-      target.server,
-      "respawn-window",
-      "-k",
-      "-t",
-      `${target.session}:${window.name}`,
-      "-c",
-      window.cwd,
-      window.command
-    ],
-    { env: window.env }
-  );
+  const result = hasTmuxWindowEnv(window.env)
+    ? await respawnTmuxWindowWithEnv(runner, target, window)
+    : await runner.run(
+        "tmux",
+        [
+          "-L",
+          target.server,
+          "respawn-window",
+          "-k",
+          "-t",
+          `${target.session}:${window.name}`,
+          "-c",
+          window.cwd,
+          window.command
+        ],
+        { env: window.env }
+      );
   if (result.exitCode !== 0) {
     throw new Error(`tmux failed to respawn ${target.session}:${window.name}: ${result.stderr}`);
   }

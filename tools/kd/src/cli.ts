@@ -33,7 +33,8 @@ const booleanFlagMap: Record<string, string> = {
   "--relay": "relay",
   "--device": "device",
   "--remote": "remote",
-  "--dev": "dev"
+  "--dev": "dev",
+  "--with-credentials": "withCredentials"
 };
 
 const defaultDevUpInput = {
@@ -66,13 +67,16 @@ function parseDevRestartInput(rest: string[]): ParsedCliCommand {
   if (hasComponent) {
     input.component = first;
   }
+  if (input.withCredentials === true && !(input.staging === true && input.component === "desktop")) {
+    throw new Error("--with-credentials is only supported for staging desktop launch commands");
+  }
   return { taskId: "dev.restart", input };
 }
 
 function parseMobileUpInput(rest: string[]): ParsedCliCommand {
   const input = parseFlagInput(rest, { production: false, staging: false });
   const unsupportedFlags = Object.entries(input)
-    .filter(([key, value]) => !["production", "staging"].includes(key) && value === true)
+    .filter(([key, value]) => !["production", "staging", "withCredentials"].includes(key) && value === true)
     .map(([key]) => key);
   if (unsupportedFlags.length > 0) {
     throw new Error("mobile up only accepts --production or --staging");
@@ -80,8 +84,18 @@ function parseMobileUpInput(rest: string[]): ParsedCliCommand {
   if (input.production === true && input.staging === true) {
     throw new Error("mobile up accepts only one of --production or --staging");
   }
+  if (input.withCredentials === true && input.staging !== true) {
+    throw new Error("--with-credentials is only supported for staging desktop launch commands");
+  }
   if (input.production === true || input.staging === true) {
-    return { taskId: "mobile.up", input: { production: input.production === true, staging: input.staging === true } };
+    return {
+      taskId: "mobile.up",
+      input: {
+        production: input.production === true,
+        staging: input.staging === true,
+        ...(input.withCredentials === true ? { withCredentials: true } : {})
+      }
+    };
   }
   return { taskId: "dev.up", input: { ...defaultDevUpInput, mobile: true } };
 }
@@ -89,7 +103,7 @@ function parseMobileUpInput(rest: string[]): ParsedCliCommand {
 function parseMobileRunInput(rest: string[]): ParsedCliCommand {
   const input = parseFlagInput(rest, { device: false, production: false, staging: false });
   const unsupportedFlags = Object.entries(input)
-    .filter(([key, value]) => !["device", "production", "staging"].includes(key) && value === true)
+    .filter(([key, value]) => !["device", "production", "staging", "withCredentials"].includes(key) && value === true)
     .map(([key]) => key);
   if (unsupportedFlags.length > 0) {
     throw new Error("mobile run only accepts --device, --production, or --staging");
@@ -100,12 +114,16 @@ function parseMobileRunInput(rest: string[]): ParsedCliCommand {
   if (input.device !== true) {
     throw new Error("mobile run requires --device");
   }
+  if (input.withCredentials === true && input.staging !== true) {
+    throw new Error("--with-credentials is only supported for staging desktop launch commands");
+  }
   return {
     taskId: "mobile.run",
     input: {
       device: true,
       production: input.production === true,
-      staging: input.staging === true
+      staging: input.staging === true,
+      ...(input.withCredentials === true ? { withCredentials: true } : {})
     }
   };
 }
@@ -245,19 +263,29 @@ function parseFlagInput(rest: string[], defaults: Record<string, unknown>): Reco
   return input;
 }
 
+function rejectUnsupportedCredentialsFlag(input: Record<string, unknown>): void {
+  if (input.withCredentials === true) {
+    throw new Error("--with-credentials is only supported for staging desktop launch commands");
+  }
+}
+
 export function parseCliArgs(args: string[]): ParsedCliCommand {
   if (args[0] === "--help" || args[0] === "-h") {
     return { taskId: "help", input: {} };
   }
   if (args.length === 0 || args[0]?.startsWith("-")) {
-    return { taskId: "dev.up", input: parseFlagInput(args, defaultDevUpInput) };
+    const input = parseFlagInput(args, defaultDevUpInput);
+    rejectUnsupportedCredentialsFlag(input);
+    return { taskId: "dev.up", input };
   }
 
   const [group, command, ...rest] = args;
   const commandKey = command ? `${group} ${command}` : group;
 
   if (group === "dev" && command === "up") {
-    return { taskId: "dev.up", input: parseFlagInput(rest, defaultDevUpInput) };
+    const input = parseFlagInput(rest, defaultDevUpInput);
+    rejectUnsupportedCredentialsFlag(input);
+    return { taskId: "dev.up", input };
   }
   if (group === "mobile" && command === "up") {
     return parseMobileUpInput(rest);
@@ -267,6 +295,9 @@ export function parseCliArgs(args: string[]): ParsedCliCommand {
   }
   if (group === "mobile" && command === "doctor") {
     const parsed = parseMobileRunInput(rest);
+    if (parsed.input.withCredentials === true) {
+      throw new Error("--with-credentials is only supported for staging desktop launch commands");
+    }
     return { taskId: "mobile.doctor", input: parsed.input };
   }
   if (group === "mobile" && command === "ota") {
@@ -361,7 +392,9 @@ export function parseCliArgs(args: string[]): ParsedCliCommand {
     return { taskId: "clean", input: parseFlagInput([command, ...rest].filter((arg): arg is string => Boolean(arg)), { all: false, dry: false, sharedRustBuild: false }) };
   }
   if (group === "start") {
-    return { taskId: "dev.up", input: parseFlagInput([command, ...rest].filter((arg): arg is string => Boolean(arg)), defaultDevUpInput) };
+    const input = parseFlagInput([command, ...rest].filter((arg): arg is string => Boolean(arg)), defaultDevUpInput);
+    rejectUnsupportedCredentialsFlag(input);
+    return { taskId: "dev.up", input };
   }
   if (group === "restart") {
     return parseDevRestartInput([command, ...rest].filter((arg): arg is string => Boolean(arg)));
@@ -408,13 +441,13 @@ function helpText(): string {
     "  dev up [--mobile] [--emulators] [--seed] [--attach] [--db <path-or-name>] [--delete-db] [--firebase-env-from <task-or-path>]",
     "  dev up --remote",
     "  dev down [--kill-daemon]",
-    "  dev restart [desktop|mobile|backend] [--staging|--production] [--mobile] [--emulators] [--seed] [--attach] [--delete-db]",
+    "  dev restart [desktop|mobile|backend] [--staging|--production] [--with-credentials] [--mobile] [--emulators] [--seed] [--attach] [--delete-db]",
     "  dev status",
     "  dev log [window]",
     "  dev seed [--db <path-or-name>] [--delete-db]",
     "  daemon kill",
-    "  mobile up [--production|--staging]",
-    "  mobile run --device [--production|--staging]",
+    "  mobile up [--production|--staging] [--with-credentials]",
+    "  mobile run --device [--production|--staging] [--with-credentials]",
     "  mobile doctor --device",
     "  mobile ota publish --staging|--production [--dry-run] [--rollback-to <updateId>]",
     "  mobile ota status --staging|--production",
