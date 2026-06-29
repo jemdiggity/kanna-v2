@@ -132,6 +132,13 @@ export function startManagedProcess(
       });
       if (!exited && child.exitCode === null && child.signalCode === null) {
         child.kill("SIGKILL");
+        await new Promise<void>((resolve) => {
+          if (child.exitCode !== null || child.signalCode !== null) {
+            resolve();
+            return;
+          }
+          child.once("exit", () => resolve());
+        });
       }
     }
   };
