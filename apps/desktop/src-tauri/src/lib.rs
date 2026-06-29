@@ -716,7 +716,10 @@ pub fn run() {
                 .path()
                 .app_data_dir()
                 .unwrap_or_else(|_| PathBuf::from("."));
-            let mobile_manager = commands::mobile::MobileServerManager::new(mobile_app_data_dir);
+            let mobile_manager = commands::mobile::MobileServerManager::new_with_bundle_identifier(
+                mobile_app_data_dir,
+                app.config().identifier.as_str(),
+            );
             app.manage(mobile_manager.clone());
             tauri::async_runtime::spawn(async move {
                 if let Err(err) = mobile_manager.start().await {

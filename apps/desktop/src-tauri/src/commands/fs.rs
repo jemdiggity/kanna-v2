@@ -388,15 +388,11 @@ pub fn sidecar_candidates_for_exe(current_exe: &Path, name: &str) -> Vec<PathBuf
 }
 
 fn bundled_cloud_env(app: &AppHandle) -> Option<&'static str> {
-    if cfg!(debug_assertions) {
-        return None;
-    }
-
-    match app.config().identifier.as_str() {
-        "build.kanna.staging" => Some("staging"),
-        "build.kanna" => Some("production"),
-        _ => None,
-    }
+    kanna_runtime_defaults::desktop_cloud_environment_for_bundle_identifier(
+        app.config().identifier.as_str(),
+        cfg!(debug_assertions),
+    )
+    .map(|env| env.as_str())
 }
 
 #[tauri::command]

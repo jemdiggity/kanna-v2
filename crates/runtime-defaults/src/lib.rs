@@ -1,9 +1,67 @@
 use std::path::{Path, PathBuf};
 
 pub const DESKTOP_BUNDLE_IDENTIFIER: &str = "build.kanna";
+pub const STAGING_DESKTOP_BUNDLE_IDENTIFIER: &str = "build.kanna.staging";
 pub const LEGACY_DESKTOP_BUNDLE_IDENTIFIER: &str = "com.kanna.app";
 pub const PRODUCT_APP_SUPPORT_DIR: &str = "Kanna";
 pub const DEFAULT_DB_NAME: &str = "kanna-v2.db";
+pub const PRODUCTION_RELAY_URL: &str = "wss://relay.kanna.build";
+pub const STAGING_RELAY_URL: &str = "wss://relay-staging.kanna.build";
+pub const PRODUCTION_FIREBASE_PROJECT_ID: &str = "kanna-build";
+pub const STAGING_FIREBASE_PROJECT_ID: &str = "kanna-staging";
+pub const LOCAL_FIREBASE_PROJECT_ID: &str = "kanna-local";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DesktopCloudEnvironment {
+    Staging,
+    Production,
+}
+
+impl DesktopCloudEnvironment {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Staging => "staging",
+            Self::Production => "production",
+        }
+    }
+
+    pub fn relay_url(self) -> &'static str {
+        match self {
+            Self::Staging => STAGING_RELAY_URL,
+            Self::Production => PRODUCTION_RELAY_URL,
+        }
+    }
+
+    pub fn firebase_project_id(self) -> &'static str {
+        match self {
+            Self::Staging => STAGING_FIREBASE_PROJECT_ID,
+            Self::Production => PRODUCTION_FIREBASE_PROJECT_ID,
+        }
+    }
+}
+
+pub fn desktop_cloud_environment_for_bundle_identifier(
+    bundle_identifier: &str,
+    debug_assertions: bool,
+) -> Option<DesktopCloudEnvironment> {
+    if debug_assertions {
+        return None;
+    }
+
+    match bundle_identifier {
+        STAGING_DESKTOP_BUNDLE_IDENTIFIER => Some(DesktopCloudEnvironment::Staging),
+        DESKTOP_BUNDLE_IDENTIFIER => Some(DesktopCloudEnvironment::Production),
+        _ => None,
+    }
+}
+
+pub fn desktop_cloud_environment_from_env(value: Option<&str>) -> Option<DesktopCloudEnvironment> {
+    match value?.trim().to_lowercase().as_str() {
+        "staging" => Some(DesktopCloudEnvironment::Staging),
+        "production" | "prod" => Some(DesktopCloudEnvironment::Production),
+        _ => None,
+    }
+}
 
 pub fn default_daemon_dir_for_home(home: &Path) -> PathBuf {
     macos_app_support_dir_for_home(home).join(PRODUCT_APP_SUPPORT_DIR)
@@ -271,5 +329,51 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(unique);
+    }
+
+    #[test]
+    fn desktop_cloud_environment_resolves_from_release_bundle_identifier() {
+        assert_eq!(
+            desktop_cloud_environment_for_bundle_identifier(
+                STAGING_DESKTOP_BUNDLE_IDENTIFIER,
+                false
+            ),
+            Some(DesktopCloudEnvironment::Staging)
+        );
+        assert_eq!(
+            desktop_cloud_environment_for_bundle_identifier(DESKTOP_BUNDLE_IDENTIFIER, false),
+            Some(DesktopCloudEnvironment::Production)
+        );
+    }
+
+    #[test]
+    fn desktop_cloud_environment_ignores_bundle_identifier_in_debug_builds() {
+        assert_eq!(
+            desktop_cloud_environment_for_bundle_identifier(
+                STAGING_DESKTOP_BUNDLE_IDENTIFIER,
+                true
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn desktop_cloud_environment_carries_server_defaults() {
+        assert_eq!(
+            DesktopCloudEnvironment::Staging.relay_url(),
+            "wss://relay-staging.kanna.build"
+        );
+        assert_eq!(
+            DesktopCloudEnvironment::Staging.firebase_project_id(),
+            "kanna-staging"
+        );
+        assert_eq!(
+            DesktopCloudEnvironment::Production.relay_url(),
+            "wss://relay.kanna.build"
+        );
+        assert_eq!(
+            DesktopCloudEnvironment::Production.firebase_project_id(),
+            "kanna-build"
+        );
     }
 }
