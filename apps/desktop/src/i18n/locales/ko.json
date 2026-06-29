@@ -109,6 +109,7 @@
   },
   "sidebar": {
     "searchPlaceholder": "작업 검색…  ⌘F",
+    "clearSearch": "작업 검색 지우기",
     "noTasks": "작업 없음",
     "noTasksMatching": "\"{query}\"와 일치하는 작업이 없습니다",
     "noReposYet": "저장소가 없습니다.",

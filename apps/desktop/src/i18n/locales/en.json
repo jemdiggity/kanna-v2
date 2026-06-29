@@ -109,6 +109,7 @@
   },
   "sidebar": {
     "searchPlaceholder": "Search tasks…  ⌘F",
+    "clearSearch": "Clear task search",
     "noTasks": "No tasks",
     "noTasksMatching": "No tasks match \"{query}\"",
     "noReposYet": "No repos yet.",

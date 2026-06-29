@@ -11,6 +11,9 @@ import Sidebar from "../Sidebar.vue";
 const getStageOrder = vi.fn();
 
 function translate(key: string, params?: Record<string, string>) {
+  if (key === "sidebar.clearSearch") {
+    return "Translated clear search";
+  }
   if (key === "sidebar.noTasksMatching") {
     return `No tasks match "${params?.query ?? ""}"`;
   }
@@ -307,6 +310,39 @@ describe("Sidebar", () => {
     expect(wrapper.get(".repo-name").classes()).toContain("filtered-label");
     expect(wrapper.get(".section-label").classes()).toContain("filtered-label");
     expect(wrapper.text()).not.toContain('Filtering tasks: "visibility"');
+  });
+
+  it("shows a clear button only while the task search input has text", async () => {
+    const wrapper = mountSidebar([
+      item("task-1", {
+        prompt: "Fix sidebar search visibility",
+        display_name: "Sidebar visibility fix",
+        branch: "task-1",
+      }),
+      item("task-2", {
+        prompt: "Refine merge queue behavior",
+        display_name: "Merge queue polish",
+        branch: "task-2",
+        stage: "pr",
+      }),
+    ]);
+
+    expect(wrapper.find('[data-testid="sidebar-search-clear"]').exists()).toBe(false);
+
+    await wrapper.get(".search-input").setValue("visibility");
+
+    const clearButton = wrapper.get('[data-testid="sidebar-search-clear"]');
+    expect(clearButton.attributes("aria-label")).toBe("Translated clear search");
+    expect(clearButton.attributes("title")).toBe("Translated clear search");
+
+    await clearButton.trigger("click");
+
+    expect((wrapper.get(".search-input").element as HTMLInputElement).value).toBe("");
+    expect(wrapper.find('[data-testid="sidebar-search-clear"]').exists()).toBe(false);
+    expect(wrapper.findAll(".pipeline-item .item-title").map((el) => el.text()).sort()).toEqual([
+      "Merge queue polish",
+      "Sidebar visibility fix",
+    ]);
   });
 
   it("excludes closed tasks from filtered repo count totals", async () => {
