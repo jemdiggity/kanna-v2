@@ -34,6 +34,10 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
