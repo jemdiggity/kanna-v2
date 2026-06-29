@@ -14,7 +14,7 @@ describe("developer config", () => {
     expect(resolveDeveloperConfigRoot("/Users/example")).toBe("/Users/example/.kanna/developer");
   });
 
-  it("migrates the legacy dev directory when the canonical root is missing", () => {
+  it("does not migrate the legacy dev directory", () => {
     const home = mkdtempSync(join(tmpdir(), "kd-developer-config-"));
     const legacyRoot = join(home, ".kanna", "dev");
     mkdirSync(legacyRoot, { recursive: true });
@@ -24,8 +24,8 @@ describe("developer config", () => {
       const resolved = resolveDeveloperConfigRoot(home);
 
       expect(resolved).toBe(join(home, ".kanna", "developer"));
-      expect(existsSync(join(home, ".kanna", "developer", "creds.toml"))).toBe(true);
-      expect(existsSync(legacyRoot)).toBe(false);
+      expect(existsSync(join(home, ".kanna", "developer", "creds.toml"))).toBe(false);
+      expect(existsSync(legacyRoot)).toBe(true);
     } finally {
       rmSync(home, { recursive: true, force: true });
     }

@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, renameSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { parse as parseToml } from "smol-toml";
@@ -9,15 +9,7 @@ export interface DeveloperCredentials {
 }
 
 export function resolveDeveloperConfigRoot(homeDir: string = homedir()): string {
-  const kannaRoot = join(homeDir, ".kanna");
-  const canonicalRoot = join(kannaRoot, "developer");
-  const legacyRoot = join(kannaRoot, "dev");
-
-  if (existsSync(canonicalRoot)) return canonicalRoot;
-  if (existsSync(legacyRoot)) {
-    renameSync(legacyRoot, canonicalRoot);
-  }
-  return canonicalRoot;
+  return join(homeDir, ".kanna", "developer");
 }
 
 export function stagingDesktopAuthPath(homeDir: string = homedir()): string {
