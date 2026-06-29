@@ -39,8 +39,8 @@ if ! grep -Fq 'target-dir = ".build"' "$WORKTREE/.cargo/config.toml"; then
   exit 1
 fi
 
-if grep -Fq 'build-dir' "$WORKTREE/.cargo/config.toml"; then
-  printf 'expected worktree cargo config to avoid machine-specific build-dir, got:\n' >&2
+if ! grep -Fq 'build-dir = ".build/cargo-build"' "$WORKTREE/.cargo/config.toml"; then
+  printf 'expected worktree cargo config to isolate Cargo build metadata under .build/cargo-build, got:\n' >&2
   cat "$WORKTREE/.cargo/config.toml" >&2
   exit 1
 fi

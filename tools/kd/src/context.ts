@@ -53,7 +53,12 @@ export function resolveKdContext(input: ResolveKdContextInput): KdContext {
   if (isWorktree) {
     env.KANNA_WORKTREE = "1";
     env.KANNA_BUILD_WORKTREE = worktreeName;
-    env.CARGO_BUILD_BUILD_DIR = env.CARGO_BUILD_BUILD_DIR?.trim() || join(input.homeDir, "Library", "Caches", "kanna", "rust-build");
+    const legacySharedRustBuildDir = join(input.homeDir, "Library", "Caches", "kanna", "rust-build");
+    const inheritedRustBuildDir = env.CARGO_BUILD_BUILD_DIR?.trim();
+    env.CARGO_BUILD_BUILD_DIR =
+      inheritedRustBuildDir && inheritedRustBuildDir !== legacySharedRustBuildDir
+        ? inheritedRustBuildDir
+        : join(input.repoRoot, ".build", "cargo-build");
   }
 
   env.KANNA_BUILD_BRANCH = input.branch;
