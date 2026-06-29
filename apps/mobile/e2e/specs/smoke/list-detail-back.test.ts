@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   ensureTaskListVisible,
+  inspectTerminalWebView,
+  waitForRenderedPtyTerminal,
   waitForTaskTerminalLive
 } from "./list-detail-back.e2e";
 
@@ -117,5 +119,102 @@ describe("waitForTaskTerminalLive", () => {
 
     expect(ui.getAgentMessageView).toHaveBeenCalled();
     expect(ui.getTerminalOverlay).not.toHaveBeenCalled();
+  });
+});
+
+describe("inspectTerminalWebView", () => {
+  it("reports why WebView terminal inspection is unavailable", async () => {
+    await expect(
+      inspectTerminalWebView({
+        execute: vi.fn()
+      })
+    ).resolves.toEqual({
+      kind: "unavailable",
+      reason: "Appium driver does not expose WebView context APIs"
+    });
+  });
+
+  it("switches into the WebView context and restores the previous native context", async () => {
+    const switchContext = vi.fn(async () => undefined);
+    const execute = vi.fn(async () => ({
+      kind: "rendered" as const,
+      byteCount: 1024,
+      cols: 132,
+      frameCount: 1,
+      rows: 43,
+      text: "large snapshot"
+    }));
+
+    const result = await inspectTerminalWebView({
+      execute,
+      getContext: vi.fn(async () => "NATIVE_APP"),
+      getContexts: vi.fn(async () => ["NATIVE_APP", "WEBVIEW_build.kanna.app.dev"]),
+      switchContext
+    });
+
+    expect(result).toEqual({
+      kind: "rendered",
+      byteCount: 1024,
+      cols: 132,
+      frameCount: 1,
+      rows: 43,
+      text: "large snapshot"
+    });
+    expect(switchContext).toHaveBeenNthCalledWith(1, "WEBVIEW_build.kanna.app.dev");
+    expect(switchContext).toHaveBeenNthCalledWith(2, "NATIVE_APP");
+    expect(execute).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("waitForRenderedPtyTerminal", () => {
+  it("waits until WebView terminal output and desktop dimensions are rendered", async () => {
+    const agentMessageView = createElement(() => false);
+    const inspections = [
+      { kind: "unavailable" as const, reason: "No WEBVIEW context was available" },
+      {
+        kind: "rendered" as const,
+        byteCount: 1024,
+        cols: 132,
+        frameCount: 1,
+        rows: 43,
+        text: "large snapshot"
+      }
+    ];
+    const ui = {
+      getAgentMessageView: vi.fn(async () => agentMessageView),
+      inspectTerminalWebView: vi.fn(async () => inspections.shift() ?? inspections[0]),
+      waitUntil: vi.fn(async (condition: () => Promise<boolean>, options) => {
+        for (let index = 0; index < 3; index += 1) {
+          if (await condition()) {
+            return;
+          }
+        }
+
+        throw new Error(options.timeoutMsg);
+      })
+    };
+
+    await waitForRenderedPtyTerminal(ui);
+
+    expect(ui.inspectTerminalWebView).toHaveBeenCalledTimes(2);
+  });
+
+  it("fails with the last WebView inspection reason when Appium cannot inspect the terminal", async () => {
+    const agentMessageView = createElement(() => false);
+    const ui = {
+      getAgentMessageView: vi.fn(async () => agentMessageView),
+      inspectTerminalWebView: vi.fn(async () => ({
+        kind: "unavailable" as const,
+        reason: "No WEBVIEW context was available"
+      })),
+      waitUntil: vi.fn(async (condition: () => Promise<boolean>, options) => {
+        await condition();
+        throw new Error(options.timeoutMsg);
+      })
+    };
+
+    await expect(waitForRenderedPtyTerminal(ui)).rejects.toThrow(
+      "No WEBVIEW context was available"
+    );
   });
 });

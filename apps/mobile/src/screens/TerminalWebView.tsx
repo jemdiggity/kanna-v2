@@ -30,6 +30,8 @@ interface TerminalWebViewHandle {
   injectJavaScript(script: string): void;
 }
 
+type PendingScriptKind = "terminal-state" | "resize";
+
 const WebView = NativeWebView as unknown as React.ForwardRefExoticComponent<
   WebViewProps & React.RefAttributes<TerminalWebViewHandle>
 >;
@@ -65,9 +67,21 @@ export function TerminalWebView({
     [output, status]
   );
 
-  const injectOrQueueScript = (script: string) => {
+  const injectOrQueueScript = (
+    script: string,
+    kind: PendingScriptKind = "terminal-state"
+  ) => {
     if (!bridgeReadyRef.current) {
-      pendingScriptsRef.current.push(script);
+      if (kind === "resize") {
+        pendingScriptsRef.current = [
+          script,
+          ...pendingScriptsRef.current.filter(
+            (pendingScript) => !pendingScript.includes("__setTerminalDims")
+          )
+        ];
+      } else {
+        pendingScriptsRef.current.push(script);
+      }
       return;
     }
 
@@ -115,7 +129,7 @@ export function TerminalWebView({
 
   useEffect(() => {
     if (cols && rows) {
-      injectOrQueueScript(buildTerminalResizeScript(cols, rows));
+      injectOrQueueScript(buildTerminalResizeScript(cols, rows), "resize");
     }
   }, [cols, rows]);
 

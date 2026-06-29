@@ -47,7 +47,13 @@ interface ElementNode {
   };
 }
 
-function renderTaskScreen(agentType: "agent" | "pty"): ElementNode {
+function renderTaskScreen(
+  agentType: "agent" | "pty",
+  terminalDims: { cols: number | null; rows: number | null } = {
+    cols: null,
+    rows: null
+  }
+): ElementNode {
   if (!TaskScreen) {
     throw new Error("TaskScreen was not loaded");
   }
@@ -62,6 +68,8 @@ function renderTaskScreen(agentType: "agent" | "pty"): ElementNode {
     },
     terminalOutput: "terminal",
     terminalStatus: "live",
+    terminalCols: terminalDims.cols,
+    terminalRows: terminalDims.rows,
     terminalErrorMessage: null,
     agentEvents: [{ seq: 0, event: { type: "user_message", text: "hello" } }],
     agentStatus: "live",
@@ -121,5 +129,15 @@ describe("TaskScreen", () => {
 
     expect(findByType(tree, "TerminalWebView")).not.toBeNull();
     expect(findByType(tree, "AgentMessageView")).toBeNull();
+  });
+
+  it("passes desktop PTY dimensions to the terminal WebView", () => {
+    const tree = renderTaskScreen("pty", { cols: 132, rows: 43 });
+    const terminal = findByType(tree, "TerminalWebView");
+
+    expect(terminal?.props).toMatchObject({
+      cols: 132,
+      rows: 43
+    });
   });
 });
