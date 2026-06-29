@@ -27,6 +27,9 @@ export type AppSidebarItem = PipelineItem & {
   remote_task?: boolean;
 };
 
+type LocalTaskIdentity = Pick<PipelineItem, "id" | "repo_id" | "stage" | "closed_at">;
+type ClosedLocalTaskIdentity = Pick<PipelineItem, "id" | "repo_id">;
+
 interface UseAppCloudWorkspaceOptions {
   db: DbHandle;
   store: ReturnType<typeof useKannaStore>;
@@ -66,6 +69,36 @@ export function useAppCloudWorkspace({ db, store, toast }: UseAppCloudWorkspaceO
     remoteUrlHash: null,
   })));
 
+  const closedLocalTaskIdentities = computedAsync<ClosedLocalTaskIdentity[]>(async () => {
+    const repos = store.repos.map((repo) => ({ id: repo.id }));
+    const openTaskMarker = store.items
+      .map((item) => `${item.repo_id}:${item.id}:${item.stage}:${item.closed_at ?? ""}:${item.updated_at}`)
+      .join("\n");
+    void openTaskMarker;
+
+    const rows = await Promise.all(repos.map((repo) =>
+      db.select<ClosedLocalTaskIdentity>(
+        "SELECT id, repo_id FROM pipeline_item WHERE repo_id = ? AND (closed_at IS NOT NULL OR stage = 'done')",
+        [repo.id],
+      )
+    ));
+    return rows.flat();
+  }, []);
+
+  const localTaskIdentitiesForRemoteFiltering = computed<LocalTaskIdentity[]>(() => [
+    ...store.items.map((item) => ({
+      id: item.id,
+      repo_id: item.repo_id,
+      stage: item.stage,
+      closed_at: item.closed_at,
+    })),
+    ...closedLocalTaskIdentities.value.map((item) => ({
+      ...item,
+      stage: "done",
+      closed_at: "",
+    })),
+  ]);
+
   const remoteSnapshot = computed<DesktopCloudSnapshot>(() => ({
     repos: [...cloudSnapshot.value.repos, ...lanSnapshot.value.repos],
     items: [...cloudSnapshot.value.items, ...lanSnapshot.value.items]
@@ -84,6 +117,7 @@ export function useAppCloudWorkspace({ db, store, toast }: UseAppCloudWorkspaceO
   const workspace = computed(() => buildWorkspace({
     localRepos: localReposForCloudMatching.value,
     localItems: store.items,
+    localClosedItems: closedLocalTaskIdentities.value,
     cloudSnapshot: filterClosedRemoteSnapshot(cloudSnapshot.value),
     lanSnapshot: filterClosedRemoteSnapshot(lanSnapshot.value),
   }));
@@ -218,7 +252,8 @@ export function useAppCloudWorkspace({ db, store, toast }: UseAppCloudWorkspaceO
     }
     const snapshot = await listDesktopCloudTasks(state.user.uid, undefined, {
       localRepos: localReposForCloudMatching.value,
-      localItems: store.items,
+      localItems: localTaskIdentitiesForRemoteFiltering.value,
+      localClosedItems: closedLocalTaskIdentities.value,
     });
     cloudSnapshot.value = {
       repos: snapshot.repos,
@@ -243,7 +278,8 @@ export function useAppCloudWorkspace({ db, store, toast }: UseAppCloudWorkspaceO
       {
         getOptions: () => ({
           localRepos: localReposForCloudMatching.value,
-          localItems: store.items,
+          localItems: localTaskIdentitiesForRemoteFiltering.value,
+          localClosedItems: closedLocalTaskIdentities.value,
         }),
       },
     );
@@ -277,6 +313,7 @@ export function useAppCloudWorkspace({ db, store, toast }: UseAppCloudWorkspaceO
     await publishDesktopLanTaskSnapshot(db);
     const snapshot = await listDesktopLanTasks({
       localRepos: localReposForCloudMatching.value,
+      localClosedItems: closedLocalTaskIdentities.value,
     });
     lanSnapshot.value = {
       repos: snapshot.repos,

@@ -459,6 +459,57 @@ describe("mapDesktopCloudTasks", () => {
     expect(snapshot.terminalRefs).toEqual({});
   });
 
+  it("omits stale cloud tasks that match a separately loaded closed local identity", () => {
+    const snapshot = mapDesktopCloudTasks([
+      {
+        cloudTaskId: "remote-repo-id:task-closed",
+        ownerDesktopId: "peer-primary",
+        ownerLocalTaskId: "task-closed",
+        title: "Closed review task",
+        promptSnippet: "Closed review task prompt",
+        displayName: null,
+        stage: "review",
+        activity: "working",
+        status: "active",
+        repo: {
+          cloudRepoId: "remote-repo-id",
+          name: "kanna",
+          defaultBranch: "main",
+          remoteUrlHash: "same-remote",
+        },
+        branch: "task-task-closed",
+        baseRef: "origin/main",
+        prNumber: null,
+        prUrl: null,
+        agent: { provider: "claude", type: "pty" },
+        createdAt: "2026-05-14T00:00:00.000Z",
+        updatedAt: "2026-05-14T00:01:00.000Z",
+        closedAt: null,
+      },
+    ], {
+      localRepos: [{
+        repo: {
+          id: "local-repo",
+          path: "/Users/test/kanna",
+          name: "kanna",
+          default_branch: "main",
+          hidden: 0,
+          sort_order: 0,
+          created_at: "2026-05-13T00:00:00.000Z",
+          last_opened_at: "2026-05-13T00:00:00.000Z",
+        },
+        remoteUrlHash: "same-remote",
+      }],
+      localClosedItems: [{
+        id: "task-closed",
+        repo_id: "local-repo",
+      }],
+    });
+
+    expect(snapshot.items).toEqual([]);
+    expect(snapshot.terminalRefs).toEqual({});
+  });
+
   it("keeps same-owner snapshots visible when no local task matches", () => {
     const snapshot = mapDesktopCloudTasks([
       {

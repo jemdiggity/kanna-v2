@@ -69,6 +69,7 @@ export interface DesktopCloudTaskIndexOptions {
     remoteUrlHash: string | null;
   }>;
   localItems?: Array<Pick<PipelineItem, "id" | "repo_id" | "stage" | "closed_at">>;
+  localClosedItems?: Array<Pick<PipelineItem, "id" | "repo_id">>;
   activeDesktopIds?: Set<string> | null;
   currentDesktopId?: string | null;
 }
@@ -229,9 +230,12 @@ export function mapDesktopCloudTasks(
       .map((entry) => [entry.remoteUrlHash, entry.repo]),
   );
   const closedLocalItemKeys = new Set(
-    (options.localItems ?? [])
-      .filter((item) => item.stage === "done" || item.closed_at !== null)
-      .map((item) => `${item.repo_id}:${item.id}`),
+    [
+      ...(options.localItems ?? [])
+        .filter((item) => item.stage === "done" || item.closed_at !== null)
+        .map((item) => `${item.repo_id}:${item.id}`),
+      ...(options.localClosedItems ?? []).map((item) => `${item.repo_id}:${item.id}`),
+    ],
   );
   for (const snapshot of sortByUpdatedAt(snapshots)) {
     const snapshotLocalRepoId = snapshot.localRepoId ?? snapshot.repo.cloudRepoId;

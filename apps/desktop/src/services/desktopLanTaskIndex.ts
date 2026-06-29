@@ -52,6 +52,7 @@ export async function publishDesktopLanTaskSnapshot(db: DbHandle): Promise<void>
 
 export async function listDesktopLanTasks(options: {
   localRepos?: Array<{ repo: Repo; remoteUrlHash: string | null }>;
+  localClosedItems?: Array<{ id: string; repo_id: string }>;
   currentDesktopId?: string | null;
 } = {}): Promise<DesktopCloudSnapshot> {
   const [raw, currentDesktopId] = await Promise.all([
