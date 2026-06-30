@@ -89,7 +89,7 @@ describe("new task modal", () => {
     const defaultMode = await client.executeSync<string>(
       `return document.querySelector(".agent-provider")?.textContent?.trim() ?? "";`,
     );
-    expect(defaultMode).toBe("claude (chat)");
+    expect(defaultMode).toBe("claude sdk");
 
     const promptInput = await client.waitForElement(".prompt-input", 2_000);
     await client.sendKeys(promptInput, themedPrompt);
@@ -107,7 +107,7 @@ describe("new task modal", () => {
     const directMode = await client.executeSync<string>(
       `return document.querySelector(".agent-provider")?.textContent?.trim() ?? "";`,
     );
-    expect(directMode).toBe("claude cli");
+    expect(directMode).toBe("claude");
 
     const directPromptInput = await client.waitForElement(".prompt-input", 2_000);
     await client.sendKeys(directPromptInput, directCliPrompt);
@@ -129,7 +129,7 @@ describe("new task modal", () => {
     const providerLabel = await client.executeSync<string>(
       `return document.querySelector(".agent-provider")?.textContent?.trim() ?? "";`,
     );
-    expect(providerLabel).toBe("copilot cli");
+    expect(providerLabel).toBe("copilot");
 
     await client.executeSync(buildGlobalKeydownScript({ key: "Escape" }));
   });

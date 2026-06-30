@@ -124,7 +124,7 @@ watch(agentChoices, (choices) => {
 }, { immediate: true });
 
 function agentChoiceLabel(provider: AgentProvider, executionType: AgentExecutionType): string {
-  return `${providerLabel(provider)} ${executionType === "agent" ? "(chat)" : "cli"}`;
+  return executionType === "agent" ? `${providerLabel(provider)} sdk` : providerLabel(provider);
 }
 
 function cycleAgentChoice(direction: -1 | 1) {
