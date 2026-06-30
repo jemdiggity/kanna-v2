@@ -9,7 +9,7 @@ use commands::daemon::{
 };
 use daemon_client::DaemonClient;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tauri::menu::{AboutMetadataBuilder, MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 use tauri::{Emitter, EventTarget, Manager};
 use tokio::io::AsyncBufReadExt;
@@ -23,6 +23,7 @@ pub(crate) const KANNA_BUILD_COMMIT: &str = env!("KANNA_BUILD_COMMIT");
 pub(crate) const KANNA_BUILD_WORKTREE: &str = env!("KANNA_BUILD_WORKTREE");
 pub(crate) const KANNA_BUILD_INFO: &str = env!("KANNA_BUILD_INFO");
 pub type TransferServiceState = Arc<Mutex<Option<transfer_sidecar::TransferSidecarClient>>>;
+static RUNTIME_BUNDLE_IDENTIFIER: OnceLock<String> = OnceLock::new();
 
 /// Process-wide lock serializing tests that read or mutate process env vars.
 /// Per-module locks cannot serialize against each other, so env-dependent
@@ -261,7 +262,10 @@ fn short_socket_path(dir: &PathBuf) -> PathBuf {
 
 /// Directory where daemon stores PID file and logs.
 pub fn daemon_data_dir() -> PathBuf {
-    kanna_runtime_defaults::daemon_dir_for_current_runtime()
+    kanna_runtime_defaults::daemon_dir_for_current_runtime_with_bundle_identifier(
+        RUNTIME_BUNDLE_IDENTIFIER.get().map(String::as_str),
+        cfg!(debug_assertions),
+    )
 }
 
 pub fn daemon_socket_path() -> PathBuf {
@@ -716,9 +720,11 @@ pub fn run() {
                 .path()
                 .app_data_dir()
                 .unwrap_or_else(|_| PathBuf::from("."));
+            let bundle_identifier = app.config().identifier.clone();
+            let _ = RUNTIME_BUNDLE_IDENTIFIER.set(bundle_identifier.clone());
             let mobile_manager = commands::mobile::MobileServerManager::new_with_bundle_identifier(
                 mobile_app_data_dir,
-                app.config().identifier.as_str(),
+                bundle_identifier.as_str(),
             );
             app.manage(mobile_manager.clone());
             tauri::async_runtime::spawn(async move {

@@ -9,7 +9,7 @@ use tokio::process::Command;
 use tokio::sync::Mutex;
 
 const LOCAL_SERVER_HOST: &str = "127.0.0.1";
-const DEFAULT_LOCAL_SERVER_PORT: u16 = 48_120;
+const DEFAULT_LOCAL_SERVER_PORT: u16 = kanna_runtime_defaults::PRODUCTION_LOCAL_SERVER_PORT;
 // kanna-server can take a while to bind and register when the machine is under
 // heavy load (e.g. an in-progress iOS/Rust build during `kd mobile run`). Poll
 // generously and only give up early if the process actually exits — a healthy
@@ -110,7 +110,7 @@ impl MobileServerManager {
             inner: Arc::new(Mutex::new(MobileServerState {
                 status: "stopped".to_string(),
                 desktop_name: default_desktop_name(),
-                api_base_url: server_base_url(local_server_port()),
+                api_base_url: server_base_url(local_server_port_for_cloud_env(cloud_env)),
                 config_path,
                 started: false,
                 cloud_env,
@@ -150,7 +150,7 @@ impl MobileServerManager {
                 state.desktop_name = status.desktop_name;
                 return Ok(());
             }
-            stop_server_on_port(local_server_port()).await?;
+            stop_server_on_port(local_server_port_for_cloud_env(cloud_env)).await?;
         }
 
         let lock_path = server_lock_path_for_config(&config_path)?;
@@ -467,8 +467,7 @@ fn try_claim_server_lock(lock_path: &Path) -> Result<File, String> {
 }
 
 fn build_server_config(state: &MobileServerState) -> Result<String, String> {
-    let daemon_dir = std::env::var("KANNA_DAEMON_DIR")
-        .unwrap_or_else(|_| crate::daemon_data_dir().to_string_lossy().to_string());
+    let daemon_dir = daemon_dir_for_cloud_env(state.cloud_env);
     let db_path = resolved_db_path(state)?;
     let pairing_store_path = state
         .config_path
@@ -531,7 +530,7 @@ fn build_server_config(state: &MobileServerState) -> Result<String, String> {
         escape_toml_string(&state.desktop_name),
         escape_toml_string(current_server_version()),
         firebase_config,
-        local_server_port(),
+        local_server_port_for_cloud_env(state.cloud_env),
         escape_toml_string(&pairing_store_path.to_string_lossy()),
     ))
 }
@@ -547,7 +546,7 @@ fn server_config_matches_runtime(
     let state = MobileServerState {
         status: "stopped".to_string(),
         desktop_name: default_desktop_name(),
-        api_base_url: server_base_url(local_server_port()),
+        api_base_url: server_base_url(local_server_port_for_cloud_env(cloud_env)),
         config_path: config_path.to_path_buf(),
         started: false,
         cloud_env,
@@ -555,8 +554,7 @@ fn server_config_matches_runtime(
     let Ok(db_path) = resolved_db_path(&state) else {
         return false;
     };
-    let daemon_dir = std::env::var("KANNA_DAEMON_DIR")
-        .unwrap_or_else(|_| crate::daemon_data_dir().to_string_lossy().to_string());
+    let daemon_dir = daemon_dir_for_cloud_env(cloud_env);
     let Ok(credential) = desktop_credential(config_path) else {
         return false;
     };
@@ -595,7 +593,7 @@ fn server_config_matches_runtime(
             "firebase_project_id = \"{}\"",
             escape_toml_string(&expected_firebase_project_id)
         ),
-        format!("lan_port = {}", local_server_port()),
+        format!("lan_port = {}", local_server_port_for_cloud_env(cloud_env)),
     ];
     if let Some(device_token) = expected_device_token {
         required_lines.push(format!(
@@ -767,11 +765,25 @@ fn app_data_dir_for_server_config(config_path: &Path) -> Result<PathBuf, String>
         .ok_or_else(|| "mobile config path missing app data directory".to_string())
 }
 
-fn local_server_port() -> u16 {
+fn local_server_port_for_cloud_env(cloud_env: Option<DesktopCloudEnvironment>) -> u16 {
     std::env::var("KANNA_MOBILE_SERVER_PORT")
         .ok()
         .and_then(|value| value.parse::<u16>().ok())
-        .unwrap_or(DEFAULT_LOCAL_SERVER_PORT)
+        .unwrap_or_else(|| {
+            cloud_env
+                .map(DesktopCloudEnvironment::local_server_port)
+                .unwrap_or(DEFAULT_LOCAL_SERVER_PORT)
+        })
+}
+
+fn daemon_dir_for_cloud_env(cloud_env: Option<DesktopCloudEnvironment>) -> String {
+    std::env::var("KANNA_DAEMON_DIR").unwrap_or_else(|_| {
+        cloud_env
+            .map(kanna_runtime_defaults::daemon_dir_for_desktop_cloud_environment)
+            .unwrap_or_else(crate::daemon_data_dir)
+            .to_string_lossy()
+            .to_string()
+    })
 }
 
 fn find_sidecar(name: &str) -> Result<PathBuf, String> {
@@ -812,7 +824,7 @@ fn stopped_snapshot(state: &MobileServerState) -> Result<MobileServerStatus, Str
         desktop_name: state.desktop_name.clone(),
         server_version: Some(current_server_version().to_string()),
         lan_host: "0.0.0.0".to_string(),
-        lan_port: local_server_port(),
+        lan_port: local_server_port_for_cloud_env(state.cloud_env),
         pairing_code: None,
     })
 }
@@ -2095,14 +2107,21 @@ mod tests {
     async fn build_server_config_uses_staging_release_bundle_identifier_defaults_without_env() {
         let _guard = env_lock().lock().expect("env lock should not be poisoned");
         unsafe {
+            unset_env_var("KANNA_DAEMON_DIR");
             unset_env_var("KANNA_CLOUD_ENV");
+            unset_env_var("KANNA_MOBILE_SERVER_PORT");
             unset_env_var("KANNA_RELAY_PORT");
             unset_env_var("KANNA_RELAY_URL");
             unset_env_var("KANNA_FIREBASE_PROJECT_ID");
             set_env_var("KANNA_FIREBASE_AUTH_PORT", "19099");
             set_env_var("KANNA_FIREBASE_FIRESTORE_PORT", "18080");
         }
+        let previous_home = std::env::var("HOME").ok();
         let root = unique_test_root("staging-release-bundle-server-config");
+        let home_dir = root.join("home");
+        unsafe {
+            set_env_var("HOME", &home_dir.to_string_lossy());
+        }
         let manager = MobileServerManager::new_with_bundle_identifier_for_mode(
             root.join("app-data"),
             kanna_runtime_defaults::STAGING_DESKTOP_BUNDLE_IDENTIFIER,
@@ -2116,12 +2135,59 @@ mod tests {
 
         assert!(config.contains("relay_url = \"wss://relay-staging.kanna.build\""));
         assert!(config.contains("firebase_project_id = \"kanna-staging\""));
+        assert!(config.contains("lan_port = 48121"));
+        assert!(config.contains(&format!(
+            "daemon_dir = \"{}\"",
+            escape_toml_string(
+                &kanna_runtime_defaults::daemon_dir_for_bundle_identifier_for_home(
+                    kanna_runtime_defaults::STAGING_DESKTOP_BUNDLE_IDENTIFIER,
+                    false,
+                    &home_dir
+                )
+                .to_string_lossy()
+            )
+        )));
         assert!(!config.contains("firebase_auth_emulator_url"));
         assert!(!config.contains("firebase_firestore_emulator_host"));
 
         unsafe {
             unset_env_var("KANNA_FIREBASE_AUTH_PORT");
             unset_env_var("KANNA_FIREBASE_FIRESTORE_PORT");
+            match previous_home {
+                Some(home) => set_env_var("HOME", &home),
+                None => unset_env_var("HOME"),
+            }
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::await_holding_lock)]
+    async fn staging_release_bundle_preserves_explicit_daemon_dir_and_server_port() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+        unsafe {
+            set_env_var("KANNA_DAEMON_DIR", "/tmp/kanna-staging-daemon-override");
+            set_env_var("KANNA_MOBILE_SERVER_PORT", "49123");
+        }
+        let root = unique_test_root("staging-release-bundle-runtime-overrides");
+        let manager = MobileServerManager::new_with_bundle_identifier_for_mode(
+            root.join("app-data"),
+            kanna_runtime_defaults::STAGING_DESKTOP_BUNDLE_IDENTIFIER,
+            false,
+        );
+
+        let config = {
+            let state = manager.inner.lock().await;
+            assert_eq!(state.api_base_url, "http://127.0.0.1:49123");
+            build_server_config(&state).unwrap()
+        };
+
+        assert!(config.contains("daemon_dir = \"/tmp/kanna-staging-daemon-override\""));
+        assert!(config.contains("lan_port = 49123"));
+
+        unsafe {
+            unset_env_var("KANNA_DAEMON_DIR");
+            unset_env_var("KANNA_MOBILE_SERVER_PORT");
         }
         let _ = std::fs::remove_dir_all(root);
     }
