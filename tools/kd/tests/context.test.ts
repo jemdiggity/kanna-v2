@@ -20,8 +20,40 @@ describe("resolveKdContext", () => {
     expect(context.worktreeName).toBe("task-abc123");
     expect(context.env.KANNA_DB_NAME).toBe("kanna-wt-task-abc123.db");
     expect(context.env.KANNA_DAEMON_DIR).toBe("/repo/.kanna-worktrees/task-abc123/.kanna-daemon");
-    expect(context.env.CARGO_BUILD_BUILD_DIR).toBe("/Users/tester/Library/Caches/kanna/rust-build");
+    expect(context.env.CARGO_BUILD_BUILD_DIR).toBe("/repo/.kanna-worktrees/task-abc123/.build/cargo-build");
     expect(context.tmux.session).toBe("kanna-task-abc123");
+  });
+
+  it("replaces the legacy shared Rust build cache in worktrees", () => {
+    const context = resolveKdContext({
+      repoRoot: "/repo/.kanna-worktrees/task-abc123",
+      homeDir: "/Users/tester",
+      env: {
+        CARGO_BUILD_BUILD_DIR: "/Users/tester/Library/Caches/kanna/rust-build"
+      },
+      branch: "task-abc123",
+      commit: "cafebabe",
+      bundleIdentifier: "build.kanna",
+      configPorts: {}
+    });
+
+    expect(context.env.CARGO_BUILD_BUILD_DIR).toBe("/repo/.kanna-worktrees/task-abc123/.build/cargo-build");
+  });
+
+  it("honors explicit custom Rust build cache overrides in worktrees", () => {
+    const context = resolveKdContext({
+      repoRoot: "/repo/.kanna-worktrees/task-abc123",
+      homeDir: "/Users/tester",
+      env: {
+        CARGO_BUILD_BUILD_DIR: "/tmp/custom-rust-build"
+      },
+      branch: "task-abc123",
+      commit: "cafebabe",
+      bundleIdentifier: "build.kanna",
+      configPorts: {}
+    });
+
+    expect(context.env.CARGO_BUILD_BUILD_DIR).toBe("/tmp/custom-rust-build");
   });
 
   it("honors root checkout DB overrides", () => {

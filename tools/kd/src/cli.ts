@@ -462,7 +462,7 @@ function helpText(): string {
     "  clean [--all] [--dry] [--shared-rust-build]",
     "  build desktop",
     "  build sidecars",
-    "  release ship [--dry-run] [--release] [--major|--minor|--patch] [--arm64|--x86_64]",
+    "  release ship [--staging|--production] [--dry-run] [--release] [--major|--minor|--patch] [--arm64|--x86_64]",
     "  cloud deploy --staging|--production [--relay]",
     "  cloud relay-provision --staging|--production",
     "  pages build-schema --out-dir <dir>",

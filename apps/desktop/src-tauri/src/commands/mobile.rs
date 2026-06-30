@@ -1,3 +1,4 @@
+use kanna_runtime_defaults::DesktopCloudEnvironment;
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::os::fd::AsRawFd;
@@ -48,6 +49,7 @@ struct MobileServerState {
     api_base_url: String,
     config_path: PathBuf,
     started: bool,
+    cloud_env: Option<DesktopCloudEnvironment>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -74,7 +76,35 @@ pub struct DesktopCloudCredential {
 }
 
 impl MobileServerManager {
+    #[cfg(test)]
     pub fn new(app_data_dir: PathBuf) -> Self {
+        Self::new_with_cloud_env(app_data_dir, None)
+    }
+
+    pub fn new_with_bundle_identifier(app_data_dir: PathBuf, bundle_identifier: &str) -> Self {
+        Self::new_with_bundle_identifier_for_mode(
+            app_data_dir,
+            bundle_identifier,
+            cfg!(debug_assertions),
+        )
+    }
+
+    fn new_with_bundle_identifier_for_mode(
+        app_data_dir: PathBuf,
+        bundle_identifier: &str,
+        debug_assertions: bool,
+    ) -> Self {
+        let cloud_env = kanna_runtime_defaults::desktop_cloud_environment_for_bundle_identifier(
+            bundle_identifier,
+            debug_assertions,
+        );
+        Self::new_with_cloud_env(app_data_dir, cloud_env)
+    }
+
+    fn new_with_cloud_env(
+        app_data_dir: PathBuf,
+        cloud_env: Option<DesktopCloudEnvironment>,
+    ) -> Self {
         let config_path = server_config_path_for_app_data_dir(&app_data_dir);
         Self {
             inner: Arc::new(Mutex::new(MobileServerState {
@@ -83,6 +113,7 @@ impl MobileServerManager {
                 api_base_url: server_base_url(local_server_port()),
                 config_path,
                 started: false,
+                cloud_env,
             })),
             server_lock: Arc::new(Mutex::new(None)),
             client: reqwest::Client::new(),
@@ -106,8 +137,12 @@ impl MobileServerManager {
         let existing_status = self.fetch_status(&api_base_url).await.ok();
         if let Some(status) = existing_status {
             ensure_server_belongs_to_desktop(&status, &expected_desktop_id)?;
+            let cloud_env = {
+                let state = self.inner.lock().await;
+                state.cloud_env
+            };
             if is_current_server_status(&status, &expected_desktop_id, current_server_version())
-                && server_config_matches_runtime(&config_path, &expected_desktop_id)
+                && server_config_matches_runtime(&config_path, &expected_desktop_id, cloud_env)
             {
                 let mut state = self.inner.lock().await;
                 state.started = true;
@@ -441,15 +476,16 @@ fn build_server_config(state: &MobileServerState) -> Result<String, String> {
         .ok_or_else(|| "mobile config path missing parent directory".to_string())?
         .join("mobile-pairings.json");
     let device_token = generate_device_token()?;
-    let relay_url = relay_url();
+    let relay_url = relay_url_for_bundled_cloud_env(state.cloud_env);
     let credential = desktop_credential(&state.config_path)?;
-    let firebase_auth_emulator_url = firebase_auth_emulator_url();
-    let firebase_firestore_emulator_host = firebase_firestore_emulator_host();
-    let firebase_project_id = std::env::var("KANNA_FIREBASE_PROJECT_ID")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "kanna-local".to_string());
+    let use_firebase_emulators = effective_cloud_env(state.cloud_env).is_none();
+    let firebase_auth_emulator_url = use_firebase_emulators
+        .then(firebase_auth_emulator_url)
+        .flatten();
+    let firebase_firestore_emulator_host = use_firebase_emulators
+        .then(firebase_firestore_emulator_host)
+        .flatten();
+    let firebase_project_id = firebase_project_id(state.cloud_env);
     let firebase_config = format!(
         "firebase_project_id = \"{}\"\n{}{}",
         escape_toml_string(&firebase_project_id),
@@ -500,7 +536,11 @@ fn build_server_config(state: &MobileServerState) -> Result<String, String> {
     ))
 }
 
-fn server_config_matches_runtime(config_path: &Path, desktop_id: &str) -> bool {
+fn server_config_matches_runtime(
+    config_path: &Path,
+    desktop_id: &str,
+    cloud_env: Option<DesktopCloudEnvironment>,
+) -> bool {
     let Ok(content) = std::fs::read_to_string(config_path) else {
         return false;
     };
@@ -510,6 +550,7 @@ fn server_config_matches_runtime(config_path: &Path, desktop_id: &str) -> bool {
         api_base_url: server_base_url(local_server_port()),
         config_path: config_path.to_path_buf(),
         started: false,
+        cloud_env,
     };
     let Ok(db_path) = resolved_db_path(&state) else {
         return false;
@@ -523,11 +564,7 @@ fn server_config_matches_runtime(config_path: &Path, desktop_id: &str) -> bool {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
-    let expected_firebase_project_id = std::env::var("KANNA_FIREBASE_PROJECT_ID")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "kanna-local".to_string());
+    let expected_firebase_project_id = firebase_project_id(cloud_env);
     let kanna_cli_path_line = find_sidecar("kanna-cli").ok().map(|path| {
         format!(
             "kanna_cli_path = \"{}\"",
@@ -536,7 +573,10 @@ fn server_config_matches_runtime(config_path: &Path, desktop_id: &str) -> bool {
     });
 
     let mut required_lines = vec![
-        format!("relay_url = \"{}\"", escape_toml_string(&relay_url())),
+        format!(
+            "relay_url = \"{}\"",
+            escape_toml_string(&relay_url_for_bundled_cloud_env(cloud_env))
+        ),
         format!("daemon_dir = \"{}\"", escape_toml_string(&daemon_dir)),
         format!(
             "db_path = \"{}\"",
@@ -563,17 +603,19 @@ fn server_config_matches_runtime(config_path: &Path, desktop_id: &str) -> bool {
             escape_toml_string(&device_token)
         ));
     }
-    if let Some(url) = firebase_auth_emulator_url() {
-        required_lines.push(format!(
-            "firebase_auth_emulator_url = \"{}\"",
-            escape_toml_string(&url)
-        ));
-    }
-    if let Some(host) = firebase_firestore_emulator_host() {
-        required_lines.push(format!(
-            "firebase_firestore_emulator_host = \"{}\"",
-            escape_toml_string(&host)
-        ));
+    if effective_cloud_env(cloud_env).is_none() {
+        if let Some(url) = firebase_auth_emulator_url() {
+            required_lines.push(format!(
+                "firebase_auth_emulator_url = \"{}\"",
+                escape_toml_string(&url)
+            ));
+        }
+        if let Some(host) = firebase_firestore_emulator_host() {
+            required_lines.push(format!(
+                "firebase_firestore_emulator_host = \"{}\"",
+                escape_toml_string(&host)
+            ));
+        }
     }
     if let Some(line) = kanna_cli_path_line {
         required_lines.push(line);
@@ -590,13 +632,20 @@ fn sidecar_sha256_config_line(name: &str) -> Option<String> {
     Some(format!("{name}_sha256 = \"{digest}\""))
 }
 
-const PRODUCTION_RELAY_URL: &str = "wss://relay.kanna.build";
-
+#[cfg(test)]
 fn relay_url() -> String {
-    relay_url_for_mode(cfg!(debug_assertions))
+    relay_url_for_bundled_cloud_env(None)
 }
 
+#[cfg(test)]
 fn relay_url_for_mode(debug_assertions: bool) -> String {
+    if !debug_assertions {
+        return kanna_runtime_defaults::PRODUCTION_RELAY_URL.to_string();
+    }
+    relay_url_for_bundled_cloud_env(None)
+}
+
+fn relay_url_for_bundled_cloud_env(cloud_env: Option<DesktopCloudEnvironment>) -> String {
     if let Ok(url) = std::env::var("KANNA_RELAY_URL") {
         let trimmed = url.trim();
         if !trimmed.is_empty() {
@@ -609,10 +658,31 @@ fn relay_url_for_mode(debug_assertions: bool) -> String {
             return format!("ws://127.0.0.1:{}", trimmed);
         }
     }
-    if !debug_assertions {
-        return PRODUCTION_RELAY_URL.to_string();
+    if let Some(cloud_env) = effective_cloud_env(cloud_env) {
+        return cloud_env.relay_url().to_string();
     }
     String::new()
+}
+
+fn firebase_project_id(cloud_env: Option<DesktopCloudEnvironment>) -> String {
+    if let Ok(project_id) = std::env::var("KANNA_FIREBASE_PROJECT_ID") {
+        let trimmed = project_id.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    effective_cloud_env(cloud_env)
+        .map(|env| env.firebase_project_id().to_string())
+        .unwrap_or_else(|| kanna_runtime_defaults::LOCAL_FIREBASE_PROJECT_ID.to_string())
+}
+
+fn effective_cloud_env(
+    bundled_cloud_env: Option<DesktopCloudEnvironment>,
+) -> Option<DesktopCloudEnvironment> {
+    match std::env::var("KANNA_CLOUD_ENV") {
+        Ok(value) => kanna_runtime_defaults::desktop_cloud_environment_from_env(Some(&value)),
+        Err(_) => bundled_cloud_env,
+    }
 }
 
 fn firebase_auth_emulator_url() -> Option<String> {
@@ -1101,6 +1171,7 @@ mod tests {
         server_lock_path_for_config, server_pids_on_port, stop_server_on_port, stopped_snapshot,
         try_claim_server_lock, MobileServerManager, MobileServerState, MobileServerStatus,
     };
+    use kanna_runtime_defaults::DesktopCloudEnvironment;
     use std::ffi::CString;
     use std::os::unix::process::ExitStatusExt;
     use std::path::PathBuf;
@@ -1734,6 +1805,7 @@ mod tests {
             api_base_url: server_base_url(48120),
             config_path: PathBuf::from("/tmp/build.kanna/Kanna/server.toml"),
             started: false,
+            cloud_env: None,
         };
 
         assert_eq!(
@@ -1757,6 +1829,7 @@ mod tests {
                 "/tmp/build.kanna/Kanna/servers/kanna-wt-task-1234/server.toml",
             ),
             started: false,
+            cloud_env: None,
         };
 
         let resolved = resolved_db_path(&state).unwrap();
@@ -1810,6 +1883,7 @@ mod tests {
             api_base_url: server_base_url(48120),
             config_path: PathBuf::from("/tmp/build.kanna/Kanna/server.toml"),
             started: false,
+            cloud_env: None,
         };
 
         let config = build_server_config(&state).unwrap();
@@ -1846,6 +1920,7 @@ mod tests {
             api_base_url: server_base_url(48120),
             config_path: PathBuf::from("/tmp/build.kanna/Kanna/server.toml"),
             started: false,
+            cloud_env: None,
         };
 
         let config = build_server_config(&state).unwrap();
@@ -1882,6 +1957,7 @@ mod tests {
             api_base_url: server_base_url(48120),
             config_path: PathBuf::from("/tmp/build.kanna/Kanna/server.toml"),
             started: false,
+            cloud_env: None,
         };
 
         let config = build_server_config(&state).unwrap();
@@ -1910,6 +1986,7 @@ mod tests {
             api_base_url: server_base_url(48120),
             config_path: root.join("Kanna/server.toml"),
             started: false,
+            cloud_env: None,
         };
 
         let config = build_server_config(&state).unwrap();
@@ -1938,6 +2015,7 @@ mod tests {
             api_base_url: server_base_url(48120),
             config_path: PathBuf::from("/tmp/build.kanna/Kanna/server.toml"),
             started: false,
+            cloud_env: None,
         };
 
         let config = build_server_config(&state).unwrap();
@@ -1963,6 +2041,7 @@ mod tests {
             api_base_url: server_base_url(48120),
             config_path: PathBuf::from("/tmp/build.kanna/Kanna/server.toml"),
             started: false,
+            cloud_env: None,
         };
 
         let config = build_server_config(&state).unwrap();
@@ -1972,6 +2051,166 @@ mod tests {
         }
 
         assert!(config.contains("relay_url = \"ws://127.0.0.1:19083\""));
+    }
+
+    #[test]
+    fn build_server_config_uses_staging_bundle_cloud_defaults_without_env() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+        unsafe {
+            unset_env_var("KANNA_CLOUD_ENV");
+            unset_env_var("KANNA_RELAY_PORT");
+            unset_env_var("KANNA_RELAY_URL");
+            unset_env_var("KANNA_FIREBASE_PROJECT_ID");
+            set_env_var("KANNA_FIREBASE_AUTH_PORT", "19099");
+            set_env_var("KANNA_FIREBASE_FIRESTORE_PORT", "18080");
+            set_env_var("FIREBASE_AUTH_EMULATOR_HOST", "127.0.0.1:19199");
+            set_env_var("FIRESTORE_EMULATOR_HOST", "127.0.0.1:18180");
+        }
+
+        let state = MobileServerState {
+            status: "stopped".to_string(),
+            desktop_name: "Studio Mac".to_string(),
+            api_base_url: server_base_url(48120),
+            config_path: PathBuf::from("/tmp/build.kanna.staging/Kanna/server.toml"),
+            started: false,
+            cloud_env: Some(DesktopCloudEnvironment::Staging),
+        };
+
+        let config = build_server_config(&state).unwrap();
+        assert!(config.contains("relay_url = \"wss://relay-staging.kanna.build\""));
+        assert!(config.contains("firebase_project_id = \"kanna-staging\""));
+        assert!(!config.contains("firebase_auth_emulator_url"));
+        assert!(!config.contains("firebase_firestore_emulator_host"));
+
+        unsafe {
+            unset_env_var("KANNA_FIREBASE_AUTH_PORT");
+            unset_env_var("KANNA_FIREBASE_FIRESTORE_PORT");
+            unset_env_var("FIREBASE_AUTH_EMULATOR_HOST");
+            unset_env_var("FIRESTORE_EMULATOR_HOST");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::await_holding_lock)]
+    async fn build_server_config_uses_staging_release_bundle_identifier_defaults_without_env() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+        unsafe {
+            unset_env_var("KANNA_CLOUD_ENV");
+            unset_env_var("KANNA_RELAY_PORT");
+            unset_env_var("KANNA_RELAY_URL");
+            unset_env_var("KANNA_FIREBASE_PROJECT_ID");
+            set_env_var("KANNA_FIREBASE_AUTH_PORT", "19099");
+            set_env_var("KANNA_FIREBASE_FIRESTORE_PORT", "18080");
+        }
+        let root = unique_test_root("staging-release-bundle-server-config");
+        let manager = MobileServerManager::new_with_bundle_identifier_for_mode(
+            root.join("app-data"),
+            kanna_runtime_defaults::STAGING_DESKTOP_BUNDLE_IDENTIFIER,
+            false,
+        );
+
+        let config = {
+            let state = manager.inner.lock().await;
+            build_server_config(&state).unwrap()
+        };
+
+        assert!(config.contains("relay_url = \"wss://relay-staging.kanna.build\""));
+        assert!(config.contains("firebase_project_id = \"kanna-staging\""));
+        assert!(!config.contains("firebase_auth_emulator_url"));
+        assert!(!config.contains("firebase_firestore_emulator_host"));
+
+        unsafe {
+            unset_env_var("KANNA_FIREBASE_AUTH_PORT");
+            unset_env_var("KANNA_FIREBASE_FIRESTORE_PORT");
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_server_config_uses_production_bundle_cloud_defaults_without_env() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+        unsafe {
+            unset_env_var("KANNA_CLOUD_ENV");
+            unset_env_var("KANNA_RELAY_PORT");
+            unset_env_var("KANNA_RELAY_URL");
+            unset_env_var("KANNA_FIREBASE_PROJECT_ID");
+            unset_env_var("KANNA_FIREBASE_AUTH_PORT");
+            unset_env_var("KANNA_FIREBASE_FIRESTORE_PORT");
+            unset_env_var("FIREBASE_AUTH_EMULATOR_HOST");
+            unset_env_var("FIRESTORE_EMULATOR_HOST");
+        }
+
+        let state = MobileServerState {
+            status: "stopped".to_string(),
+            desktop_name: "Studio Mac".to_string(),
+            api_base_url: server_base_url(48120),
+            config_path: PathBuf::from("/tmp/build.kanna/Kanna/server.toml"),
+            started: false,
+            cloud_env: Some(DesktopCloudEnvironment::Production),
+        };
+
+        let config = build_server_config(&state).unwrap();
+        assert!(config.contains("relay_url = \"wss://relay.kanna.build\""));
+        assert!(config.contains("firebase_project_id = \"kanna-build\""));
+        assert!(!config.contains("firebase_auth_emulator_url"));
+        assert!(!config.contains("firebase_firestore_emulator_host"));
+    }
+
+    #[test]
+    fn build_server_config_preserves_explicit_relay_overrides_with_cloud_env() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+        unsafe {
+            unset_env_var("KANNA_CLOUD_ENV");
+            set_env_var("KANNA_RELAY_URL", "wss://relay.override.example");
+            set_env_var("KANNA_RELAY_PORT", "19083");
+            unset_env_var("KANNA_FIREBASE_PROJECT_ID");
+        }
+
+        let state = MobileServerState {
+            status: "stopped".to_string(),
+            desktop_name: "Studio Mac".to_string(),
+            api_base_url: server_base_url(48120),
+            config_path: PathBuf::from("/tmp/build.kanna.staging/Kanna/server.toml"),
+            started: false,
+            cloud_env: Some(DesktopCloudEnvironment::Staging),
+        };
+
+        let config = build_server_config(&state).unwrap();
+        assert!(config.contains("relay_url = \"wss://relay.override.example\""));
+        assert!(config.contains("firebase_project_id = \"kanna-staging\""));
+
+        unsafe {
+            unset_env_var("KANNA_RELAY_URL");
+            unset_env_var("KANNA_RELAY_PORT");
+        }
+    }
+
+    #[test]
+    fn build_server_config_preserves_explicit_relay_port_with_cloud_env() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+        unsafe {
+            unset_env_var("KANNA_CLOUD_ENV");
+            unset_env_var("KANNA_RELAY_URL");
+            set_env_var("KANNA_RELAY_PORT", "19083");
+            unset_env_var("KANNA_FIREBASE_PROJECT_ID");
+        }
+
+        let state = MobileServerState {
+            status: "stopped".to_string(),
+            desktop_name: "Studio Mac".to_string(),
+            api_base_url: server_base_url(48120),
+            config_path: PathBuf::from("/tmp/build.kanna.staging/Kanna/server.toml"),
+            started: false,
+            cloud_env: Some(DesktopCloudEnvironment::Staging),
+        };
+
+        let config = build_server_config(&state).unwrap();
+        assert!(config.contains("relay_url = \"ws://127.0.0.1:19083\""));
+        assert!(config.contains("firebase_project_id = \"kanna-staging\""));
+
+        unsafe {
+            unset_env_var("KANNA_RELAY_PORT");
+        }
     }
 
     #[test]
@@ -2021,6 +2260,7 @@ mod tests {
             api_base_url: server_base_url(48120),
             config_path: path.clone(),
             started: false,
+            cloud_env: None,
         };
         let correct_config = build_server_config(&state).unwrap();
         let stale_config = correct_config.replace(
@@ -2032,15 +2272,68 @@ mod tests {
         let desktop_id =
             desktop_id(&state.config_path).expect("desktop identity should be generated");
 
-        assert!(!server_config_matches_runtime(&path, &desktop_id));
+        assert!(!server_config_matches_runtime(
+            &path,
+            &desktop_id,
+            state.cloud_env
+        ));
 
         std::fs::write(&path, correct_config).unwrap();
-        assert!(server_config_matches_runtime(&path, &desktop_id));
+        assert!(server_config_matches_runtime(
+            &path,
+            &desktop_id,
+            state.cloud_env
+        ));
 
         let _ = std::fs::remove_file(path);
         unsafe {
             unset_env_var("KANNA_RELAY_PORT");
         }
+    }
+
+    #[test]
+    fn server_config_matches_runtime_requires_cloud_default_firebase_project() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+        unsafe {
+            unset_env_var("KANNA_CLOUD_ENV");
+            unset_env_var("KANNA_RELAY_PORT");
+            unset_env_var("KANNA_RELAY_URL");
+            unset_env_var("KANNA_FIREBASE_PROJECT_ID");
+        }
+        let root = unique_test_root("config-cloud-runtime");
+        let path = root.join("Kanna/server.toml");
+        let state = MobileServerState {
+            status: "stopped".to_string(),
+            desktop_name: "Studio Mac".to_string(),
+            api_base_url: server_base_url(48120),
+            config_path: path.clone(),
+            started: false,
+            cloud_env: Some(DesktopCloudEnvironment::Staging),
+        };
+        let correct_config = build_server_config(&state).unwrap();
+        let stale_config = correct_config.replace(
+            "firebase_project_id = \"kanna-staging\"",
+            "firebase_project_id = \"kanna-local\"",
+        );
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, stale_config).unwrap();
+        let desktop_id =
+            desktop_id(&state.config_path).expect("desktop identity should be generated");
+
+        assert!(!server_config_matches_runtime(
+            &path,
+            &desktop_id,
+            state.cloud_env
+        ));
+
+        std::fs::write(&path, correct_config).unwrap();
+        assert!(server_config_matches_runtime(
+            &path,
+            &desktop_id,
+            state.cloud_env
+        ));
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -2066,6 +2359,7 @@ mod tests {
             api_base_url: server_base_url(48120),
             config_path: path.clone(),
             started: false,
+            cloud_env: None,
         };
         let correct_config = build_server_config(&state).unwrap();
         let correct_db_path = root.join("kanna-wt-task-1234.db");
@@ -2078,10 +2372,18 @@ mod tests {
         let desktop_id =
             desktop_id(&state.config_path).expect("desktop identity should be generated");
 
-        assert!(!server_config_matches_runtime(&path, &desktop_id));
+        assert!(!server_config_matches_runtime(
+            &path,
+            &desktop_id,
+            state.cloud_env
+        ));
 
         std::fs::write(&path, correct_config).unwrap();
-        assert!(server_config_matches_runtime(&path, &desktop_id));
+        assert!(server_config_matches_runtime(
+            &path,
+            &desktop_id,
+            state.cloud_env
+        ));
 
         let _ = std::fs::remove_dir_all(root);
         unsafe {
@@ -2107,6 +2409,7 @@ mod tests {
             api_base_url: server_base_url(48120),
             config_path: path.clone(),
             started: false,
+            cloud_env: None,
         };
         let correct_config = build_server_config(&state).unwrap();
         let credential = super::desktop_credential(&path).unwrap();
@@ -2118,10 +2421,18 @@ mod tests {
         assert_ne!(stale_config, correct_config);
         std::fs::write(&path, stale_config).unwrap();
 
-        assert!(!server_config_matches_runtime(&path, &desktop_id));
+        assert!(!server_config_matches_runtime(
+            &path,
+            &desktop_id,
+            state.cloud_env
+        ));
 
         std::fs::write(&path, correct_config).unwrap();
-        assert!(server_config_matches_runtime(&path, &desktop_id));
+        assert!(server_config_matches_runtime(
+            &path,
+            &desktop_id,
+            state.cloud_env
+        ));
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -2149,16 +2460,25 @@ mod tests {
             api_base_url: server_base_url(48120),
             config_path: path.clone(),
             started: false,
+            cloud_env: None,
         };
         let correct_config = build_server_config(&state).unwrap();
         let desktop_id =
             desktop_id(&state.config_path).expect("desktop identity should be generated");
         std::fs::write(&path, correct_config).unwrap();
-        assert!(server_config_matches_runtime(&path, &desktop_id));
+        assert!(server_config_matches_runtime(
+            &path,
+            &desktop_id,
+            state.cloud_env
+        ));
 
         std::fs::write(&server_bin, b"new-server-binary").unwrap();
 
-        assert!(!server_config_matches_runtime(&path, &desktop_id));
+        assert!(!server_config_matches_runtime(
+            &path,
+            &desktop_id,
+            state.cloud_env
+        ));
 
         unsafe {
             unset_env_var("KANNA_TEST_SIDECAR_DIR");
@@ -2179,6 +2499,7 @@ mod tests {
             api_base_url: server_base_url(48120),
             config_path: PathBuf::from("/tmp/build.kanna/Kanna/server.toml"),
             started: false,
+            cloud_env: None,
         };
 
         let snapshot = stopped_snapshot(&state).expect("stopped snapshot should build");

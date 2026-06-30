@@ -7,8 +7,11 @@ import type { CommandRunner } from "../src/runtime/process";
 import {
   bazelTargetForLabel,
   createUpdaterBundle,
+  releaseAssetName,
   shipRelease,
+  updaterAssetName,
   updaterBundleTargetForLabel,
+  updaterSignatureName,
   type ReleaseArchLabel,
   type ReleaseShipInput
 } from "../src/runtime/release";
@@ -59,6 +62,23 @@ function writeReleaseBuildOutputs(repoRoot: string, labels: ReleaseArchLabel[]):
     writeFileSync(join(repoRoot, bundleRel), `${label} updater bundle\n`);
     outputs.set(bazelTargetForLabel(label, false), dmgRel);
     outputs.set(updaterBundleTargetForLabel(label), bundleRel);
+  }
+
+  return outputs;
+}
+
+function writeStagingReleaseBuildOutputs(repoRoot: string, labels: ReleaseArchLabel[]): Map<string, string> {
+  const outputs = new Map<string, string>();
+  mkdirSync(join(repoRoot, "bazel-out", "release", "staging"), { recursive: true });
+
+  for (const label of labels) {
+    const dmgRel = `bazel-out/release/staging/Kanna-Staging-${label}.dmg`;
+    const bundleRel = `bazel-out/release/staging/Kanna-Staging-${label}.app.tar.gz`;
+    writeFileSync(join(repoRoot, dmgRel), `${label} staging dmg\n`);
+    writeFileSync(join(repoRoot, bundleRel), `${label} staging updater bundle\n`);
+    outputs.set(bazelTargetForLabel(label, true, "staging"), dmgRel);
+    outputs.set(bazelTargetForLabel(label, false, "staging"), dmgRel);
+    outputs.set(updaterBundleTargetForLabel(label, "staging"), bundleRel);
   }
 
   return outputs;
@@ -142,6 +162,147 @@ describe("release updater bundling", () => {
 });
 
 describe("release shipping", () => {
+  it("uses staging artifact names and Bazel targets when shipping staging", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-"));
+    try {
+      const { repoRoot, privateKeyPath } = createReleaseRepo(root);
+      const outputs = writeStagingReleaseBuildOutputs(repoRoot, ["arm64"]);
+      const calls: CommandCall[] = [];
+      const runner: CommandRunner = {
+        async run(command, args, options) {
+          calls.push({ command, args, options });
+          if (command === "git" && args.join(" ") === "status --porcelain") {
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (command === "bazel" && args[0] === "build") {
+            expect(args).toContain("//:kanna_signed_dmg_staging_arm64");
+            expect(args).toContain("//:kanna_updater_bundle_staging_arm64");
+            expect(args).not.toContain("//:kanna_signed_dmg_release_arm64");
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (command === "git" && args.join(" ") === "remote get-url origin") {
+            return { exitCode: 0, stdout: "git@github.com:jemdiggity/kanna.git\n", stderr: "" };
+          }
+          if (command === "bazel" && args[0] === "cquery") {
+            return { exitCode: 0, stdout: `${outputs.get(args[3]) ?? ""}\n`, stderr: "" };
+          }
+          if (command === "pnpm") {
+            const signedBundlePath = args.at(-1);
+            expect(typeof signedBundlePath).toBe("string");
+            writeFileSync(`${signedBundlePath}.sig`, "staging signature\n");
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          return { exitCode: 1, stdout: "", stderr: `unexpected command ${command} ${args.join(" ")}` };
+        }
+      };
+
+      const result = await shipRelease({
+        repoRoot,
+        bump: "patch",
+        archLabels: ["arm64"],
+        release: false,
+        dryRun: true,
+        environment: "staging",
+        env: releaseEnv(privateKeyPath),
+        runner
+      });
+
+      expect(releaseAssetName("1.2.4", "arm64", "staging")).toBe("Kanna_Staging_1.2.4_arm64.dmg");
+      expect(updaterAssetName("1.2.4", "arm64", "staging")).toBe("Kanna_Staging_1.2.4_arm64.app.tar.gz");
+      expect(updaterSignatureName("1.2.4", "arm64", "staging")).toBe("Kanna_Staging_1.2.4_arm64.app.tar.gz.sig");
+      expect(result.dmgPaths).toEqual([join(repoRoot, ".build", "release", "staging", "Kanna_Staging_1.2.4_arm64.dmg")]);
+      expect(result.updaterPaths).toEqual([
+        join(repoRoot, ".build", "release", "staging", "Kanna_Staging_1.2.4_arm64.app.tar.gz"),
+        join(repoRoot, ".build", "release", "staging", "Kanna_Staging_1.2.4_arm64.app.tar.gz.sig")
+      ]);
+      expect(result.latestJson).toBe(join(repoRoot, ".build", "release", "staging", "latest-staging.json"));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("uploads staging releases to the mutable desktop-staging channel without tagging production", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-"));
+    try {
+      const { repoRoot, privateKeyPath } = createReleaseRepo(root);
+      const originalFiles = readVersionFiles(repoRoot);
+      const outputs = writeStagingReleaseBuildOutputs(repoRoot, ["arm64", "x86_64"]);
+      const calls: CommandCall[] = [];
+      const runner: CommandRunner = {
+        async run(command, args, options) {
+          calls.push({ command, args, options });
+          if (command === "git" && args.join(" ") === "status --porcelain") {
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (command === "bazel" && args[0] === "build") {
+            expect(args).toContain("//:kanna_notarized_dmg_staging_arm64");
+            expect(args).toContain("//:kanna_notarized_dmg_staging_x86_64");
+            expect(args).toContain("//:kanna_updater_bundle_staging_arm64");
+            expect(args).toContain("//:kanna_updater_bundle_staging_x86_64");
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (command === "git" && args.join(" ") === "remote get-url origin") {
+            return { exitCode: 0, stdout: "git@github.com:jemdiggity/kanna.git\n", stderr: "" };
+          }
+          if (command === "bazel" && args[0] === "cquery") {
+            return { exitCode: 0, stdout: `${outputs.get(args[3]) ?? ""}\n`, stderr: "" };
+          }
+          if (command === "pnpm") {
+            const signedBundlePath = args.at(-1);
+            expect(typeof signedBundlePath).toBe("string");
+            writeFileSync(`${signedBundlePath}.sig`, "staging signature\n");
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (command === "gh" && args.join(" ") === "release view desktop-staging --repo jemdiggity/kanna") {
+            return { exitCode: 1, stdout: "", stderr: "not found" };
+          }
+          if (command === "gh" && args[0] === "release" && args[1] === "create") {
+            expect(args).toEqual([
+              "release",
+              "create",
+              "desktop-staging",
+              "--repo",
+              "jemdiggity/kanna",
+              "--title",
+              "Kanna Desktop Staging",
+              "--notes",
+              "Mutable desktop staging updater channel.",
+              "--prerelease"
+            ]);
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (command === "gh" && args[0] === "release" && args[1] === "upload") {
+            expect(args[2]).toBe("desktop-staging");
+            expect(args).toContain(join(repoRoot, ".build", "release", "staging", "latest-staging.json"));
+            expect(args).toContain("--clobber");
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          return { exitCode: 1, stdout: "", stderr: `unexpected command ${command} ${args.join(" ")}` };
+        }
+      };
+
+      await shipRelease({
+        repoRoot,
+        bump: "patch",
+        archLabels: ["arm64", "x86_64"],
+        release: true,
+        dryRun: false,
+        environment: "staging",
+        env: releaseEnv(privateKeyPath),
+        runner
+      });
+
+      expect(readVersionFiles(repoRoot)).toEqual(originalFiles);
+      const uploadCall = calls.find((call) => call.command === "gh" && call.args[0] === "release" && call.args[1] === "upload");
+      expect(uploadCall?.args[2]).toBe("desktop-staging");
+      expect(calls.some((call) => call.command === "git" && ["add", "commit", "tag", "push"].includes(call.args[0] ?? ""))).toBe(false);
+      expect(calls.some((call) => call.command === "gh" && call.args[0] === "api")).toBe(false);
+      expect(calls.some((call) => call.command === "gh" && call.args[0] === "release" && call.args[1] === "create" && call.args[2] !== "desktop-staging")).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("refuses to ship from a dirty git worktree before changing version files", async () => {
     const root = await mkdtemp(join(tmpdir(), "kd-release-"));
     try {

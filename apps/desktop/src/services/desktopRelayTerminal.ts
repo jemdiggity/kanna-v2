@@ -3,6 +3,7 @@ import { invoke } from "../invoke";
 import { createRelayTunnelWebSocketFactory, StreamClient } from "@kanna/stream-client";
 
 export const PRODUCTION_CLOUD_TRANSPORT_URL = "wss://relay.kanna.build";
+export const STAGING_CLOUD_TRANSPORT_URL = "wss://relay-staging.kanna.build";
 
 export type DesktopRelayTerminalEvent =
   | { type: "ready"; taskId: string }
@@ -464,14 +465,16 @@ function createDesktopRelayRpcClient({
 export async function resolveDesktopRelayUrl(): Promise<string | null> {
   const configured = await invoke<string>("read_env_var", { name: "KANNA_RELAY_URL" }).catch(() => "");
   const port = await invoke<string>("read_env_var", { name: "KANNA_RELAY_PORT" }).catch(() => "");
+  const cloudEnv = await invoke<string>("read_env_var", { name: "KANNA_CLOUD_ENV" }).catch(() => "");
   return resolveDesktopCloudTransportUrlFromEnv({
     KANNA_RELAY_URL: configured,
     KANNA_RELAY_PORT: port,
+    KANNA_CLOUD_ENV: cloudEnv,
   }, { dev: import.meta.env.DEV });
 }
 
 export function resolveDesktopCloudTransportUrlFromEnv(
-  env: { KANNA_RELAY_URL?: string | null; KANNA_RELAY_PORT?: string | null },
+  env: { KANNA_RELAY_URL?: string | null; KANNA_RELAY_PORT?: string | null; KANNA_CLOUD_ENV?: string | null },
   options: { dev: boolean },
 ): string | null {
   const configured = env.KANNA_RELAY_URL?.trim();
@@ -480,6 +483,8 @@ export function resolveDesktopCloudTransportUrlFromEnv(
   const port = env.KANNA_RELAY_PORT?.trim();
   if (port) return `ws://127.0.0.1:${port}`;
 
+  const cloudEnv = env.KANNA_CLOUD_ENV?.trim().toLowerCase();
+  if (cloudEnv === "staging") return STAGING_CLOUD_TRANSPORT_URL;
   if (!options.dev) return PRODUCTION_CLOUD_TRANSPORT_URL;
 
   return null;

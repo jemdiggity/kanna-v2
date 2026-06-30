@@ -439,9 +439,9 @@ describe("kd CLI", () => {
       taskId: "pages.build-schema",
       input: { outDir: ".build/pages-schema" }
     });
-    expect(parseCliArgs(["release", "ship", "--dry-run", "--minor", "--arm64"])).toEqual({
+    expect(parseCliArgs(["release", "ship", "--dry-run", "--minor", "--arm64", "--staging"])).toEqual({
       taskId: "release.ship",
-      input: { dryRun: true, minor: true, arm64: true }
+      input: { dryRun: true, minor: true, arm64: true, staging: true }
     });
     expect(parseCliArgs(["cloud", "deploy", "--production"])).toEqual({
       taskId: "cloud.deploy",

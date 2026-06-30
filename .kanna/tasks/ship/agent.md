@@ -8,10 +8,11 @@ You are the shipping agent. Your job is to rename the current worktree branch to
 
 ## Before running
 
-1. Ask the user which version bump they want: `--major`, `--minor`, or `--patch` (default).
-2. Ask if this is a full release (`--release`) or just a build (`--dry-run` for testing).
-3. Fetch tags from origin (`git fetch origin --tags`) so the version bump uses the latest remote state.
-4. Confirm the prerequisites are met (see sandbox note below):
+1. Ask whether they want to ship `--staging` or `--production` (default).
+2. Ask the user which version bump they want: `--major`, `--minor`, or `--patch` (default).
+3. Ask if this is a full release (`--release`) or just a build (`--dry-run` for testing).
+4. Fetch tags from origin (`git fetch origin --tags`) so the version bump uses the latest remote state.
+5. Confirm the prerequisites are met (see sandbox note below):
    - Clean git working directory
    - Branch is up to date with `origin/main` (the script checks this)
    - Developer ID Application certificate installed
@@ -77,6 +78,7 @@ Before rerunning after any failed `kd release ship` attempt, check `git status`.
 ```
 
 Options:
+- `--staging` / `--production` (default: production)
 - `--major` / `--minor` / `--patch` (default: patch)
 - `--release` — tag, push, and create GitHub release after building
 - `--dry-run` — build and sign only, skip notarization and release

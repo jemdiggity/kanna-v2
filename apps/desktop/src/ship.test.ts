@@ -170,6 +170,15 @@ function alphaBounds(png: DecodedPng): AlphaBounds {
 }
 
 describe("kd release workflow", () => {
+  it("instructs the shipping agent to ask for staging or production", () => {
+    const shipAgent = readFileSync(resolve(repoRoot, ".kanna/tasks/ship/agent.md"), "utf8");
+
+    expect(shipAgent).toContain("Ask whether they want to ship `--staging` or `--production`");
+    expect(shipAgent).toContain("./kd release ship [OPTIONS]");
+    expect(shipAgent).toContain("`--staging`");
+    expect(shipAgent).toContain("`--production`");
+  });
+
   it("uses the VERSION file as the source of truth for the target version", () => {
     const releaseRuntime = readFileSync(
       resolve(repoRoot, "tools/kd/src/runtime/release.ts"),
@@ -301,6 +310,28 @@ describe("release bundle naming", () => {
     expect(tauriConfig).toContain('"identifier": "build.kanna"');
     expect(rootBuild).toContain('bundle_id = "build.kanna"');
     expect(rootBuild).not.toContain('bundle_id = "com.kanna.app"');
+  });
+
+  it("declares a separate staging desktop app identity and updater channel", () => {
+    const rootBuild = readFileSync(
+      resolve(repoRoot, "BUILD.bazel"),
+      "utf8",
+    );
+    const releaseRuntime = readFileSync(
+      resolve(repoRoot, "tools/kd/src/runtime/release.ts"),
+      "utf8",
+    );
+
+    expect(rootBuild).toContain('name = "kanna_bundle_inputs_staging_arm64"');
+    expect(rootBuild).toContain('name = "kanna_bundle_inputs_staging_x86_64"');
+    expect(rootBuild).toContain('bundle_id = "build.kanna.staging"');
+    expect(rootBuild).toContain('product_name = "Kanna Staging"');
+    expect(rootBuild).toContain('output_name = "release/staging/arm64/Kanna Staging.app"');
+    expect(rootBuild).toContain('output_name = "release/staging/x86_64/Kanna Staging.app"');
+    expect(rootBuild).toContain('output_name = "release/staging/Kanna-Staging-arm64.dmg"');
+    expect(rootBuild).toContain('output_name = "release/staging/Kanna-Staging-x86_64.dmg"');
+    expect(rootBuild).toContain('"Kanna Staging.app": "160,175"');
+    expect(releaseRuntime).toContain("latest-staging.json");
   });
 
   it("uses the custom macOS app icon for Bazel app and DMG builds", () => {

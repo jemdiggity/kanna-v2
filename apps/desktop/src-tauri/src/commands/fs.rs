@@ -387,9 +387,23 @@ pub fn sidecar_candidates_for_exe(current_exe: &Path, name: &str) -> Vec<PathBuf
     candidates
 }
 
+fn bundled_cloud_env(app: &AppHandle) -> Option<&'static str> {
+    kanna_runtime_defaults::desktop_cloud_environment_for_bundle_identifier(
+        app.config().identifier.as_str(),
+        cfg!(debug_assertions),
+    )
+    .map(|env| env.as_str())
+}
+
 #[tauri::command]
-pub fn read_env_var(name: String) -> Result<String, String> {
-    std::env::var(&name).map_err(|_| format!("{} not set", name))
+pub fn read_env_var(app: AppHandle, name: String) -> Result<String, String> {
+    match std::env::var(&name) {
+        Ok(value) => Ok(value),
+        Err(_) if name == "KANNA_CLOUD_ENV" => bundled_cloud_env(&app)
+            .map(str::to_string)
+            .ok_or_else(|| format!("{} not set", name)),
+        Err(_) => Err(format!("{} not set", name)),
+    }
 }
 
 #[tauri::command]
