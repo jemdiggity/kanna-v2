@@ -11,6 +11,10 @@ async function flushPromises() {
   await nextTick();
 }
 
+function selectedAgentLabel(wrapper: ReturnType<typeof mount<typeof NewTaskModal>>): string {
+  return wrapper.get(".agent-provider").text();
+}
+
 vi.mock("../../invoke", () => ({
   invoke: vi.fn(async (command: string, args?: { name?: string; repoPath?: string }) => {
     if (command === "which_binary" && (args?.name === "claude" || args?.name === "codex" || args?.name === "opencode")) {
@@ -38,7 +42,7 @@ describe("NewTaskModal", () => {
     await flushPromises();
     await flushPromises();
 
-    expect(wrapper.text()).toContain("claude (chat)");
+    expect(selectedAgentLabel(wrapper)).toBe("claude sdk");
     expect(wrapper.findAll(".agent-provider")).toHaveLength(1);
 
     await wrapper.find("textarea").trigger("keydown", {
@@ -48,7 +52,7 @@ describe("NewTaskModal", () => {
     });
     await flushPromises();
 
-    expect(wrapper.text()).toContain("claude cli");
+    expect(selectedAgentLabel(wrapper)).toBe("claude");
     expect(wrapper.findAll(".agent-provider")).toHaveLength(1);
   });
 
@@ -65,12 +69,12 @@ describe("NewTaskModal", () => {
     await flushPromises();
     await flushPromises();
 
-    expect(wrapper.text()).toContain("claude (chat)");
+    expect(selectedAgentLabel(wrapper)).toBe("claude sdk");
 
     await wrapper.get(".agent-provider").trigger("click");
     await flushPromises();
 
-    expect(wrapper.text()).toContain("claude cli");
+    expect(selectedAgentLabel(wrapper)).toBe("claude");
   });
 
   it("includes OpenCode in the agent cycle when installed", async () => {
@@ -86,17 +90,17 @@ describe("NewTaskModal", () => {
     await flushPromises();
     await flushPromises();
 
-    expect(wrapper.text()).toContain("codex (chat)");
+    expect(selectedAgentLabel(wrapper)).toBe("codex sdk");
 
     await wrapper.get(".agent-provider").trigger("click");
     await flushPromises();
 
-    expect(wrapper.text()).toContain("codex cli");
+    expect(selectedAgentLabel(wrapper)).toBe("codex");
 
     await wrapper.get(".agent-provider").trigger("click");
     await flushPromises();
 
-    expect(wrapper.text()).toContain("opencode cli");
+    expect(selectedAgentLabel(wrapper)).toBe("opencode");
   });
 
   it("prevents mouse down default on the agent indicator so focus stays on the prompt", async () => {
@@ -274,11 +278,11 @@ describe("NewTaskModal", () => {
     await flushPromises();
     await flushPromises();
 
-    expect(wrapper.text()).toContain("claude (chat)");
+    expect(selectedAgentLabel(wrapper)).toBe("claude sdk");
 
     await wrapper.get(".agent-provider").trigger("click");
     await flushPromises();
-    expect(wrapper.text()).toContain("claude cli");
+    expect(selectedAgentLabel(wrapper)).toBe("claude");
 
     await wrapper.get("textarea").setValue("Keep raw");
     await wrapper.get("textarea").trigger("keydown", { key: "Enter", metaKey: true });
@@ -287,7 +291,7 @@ describe("NewTaskModal", () => {
 
     await wrapper.get(".agent-provider").trigger("click");
     await flushPromises();
-    expect(wrapper.text()).toContain("codex (chat)");
+    expect(selectedAgentLabel(wrapper)).toBe("codex sdk");
 
     await wrapper.get("textarea").setValue("Use codex chat");
     await wrapper.get("textarea").trigger("keydown", { key: "Enter", metaKey: true });
