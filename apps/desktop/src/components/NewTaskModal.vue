@@ -15,6 +15,7 @@ registerContextShortcuts("newTask", [
 
 const props = defineProps<{
   defaultAgentProvider?: AgentProvider;
+  defaultAgentType?: AgentExecutionType;
   pipelines?: string[];
   defaultPipeline?: string;
   baseBranches?: string[];
@@ -29,7 +30,7 @@ const emit = defineEmits<{
 
 const prompt = ref("");
 const agentProvider = ref<AgentProvider>(props.defaultAgentProvider ?? "claude");
-const displayMode = ref<AgentExecutionType>("agent");
+const displayMode = ref<AgentExecutionType>(props.defaultAgentType ?? "agent");
 const pipelineOptions = computed(() => {
   if (props.pipelines && props.pipelines.length > 0) return props.pipelines;
   return ["default"];
@@ -111,7 +112,8 @@ function preferredChoice(): AgentChoice | undefined {
   const preferredProvider = props.defaultAgentProvider && availableProviders.value.includes(props.defaultAgentProvider)
     ? props.defaultAgentProvider
     : agentProvider.value;
-  return choices.find((choice) => choice.provider === preferredProvider && choice.executionType === "agent")
+  const preferredExecutionType = props.defaultAgentType ?? "agent";
+  return choices.find((choice) => choice.provider === preferredProvider && choice.executionType === preferredExecutionType)
     ?? choices.find((choice) => choice.provider === preferredProvider)
     ?? choices[0];
 }
@@ -155,7 +157,10 @@ onMounted(async () => {
     const preferred = props.defaultAgentProvider ?? agentProvider.value;
     if (availableProviders.value.includes(preferred)) {
       agentProvider.value = preferred;
-      displayMode.value = supportsChatMode(preferred) ? "agent" : "pty";
+      const preferredExecutionType = props.defaultAgentType ?? (supportsChatMode(preferred) ? "agent" : "pty");
+      displayMode.value = choicesForProvider(preferred).some((choice) => choice.executionType === preferredExecutionType)
+        ? preferredExecutionType
+        : "pty";
     } else {
       const nextChoice = agentChoices.value[0];
       if (nextChoice) applyChoice(nextChoice);
