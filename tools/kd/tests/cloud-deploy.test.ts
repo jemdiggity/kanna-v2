@@ -180,12 +180,50 @@ describe("cloud deploy runtime", () => {
 
   it("builds a staging relay VM provision plan without executing it", () => {
     const plan = buildRelayProvisionPlan({ environment: "staging" });
+    const serviceAccount = "kanna-relay-staging@kanna-staging.iam.gserviceaccount.com";
 
     expect(plan.projectId).toBe("kanna-staging");
     expect(plan.domain).toBe("relay-staging.kanna.build");
     expect(plan.vmName).toBe("kanna-relay-staging");
-    expect(plan.commands.map((command) => command.command)).toEqual(["gcloud", "gcloud", "gcloud"]);
+    expect(plan.commands.map((command) => command.command)).toEqual([
+      "gcloud",
+      "gcloud",
+      "gcloud",
+      "gcloud",
+      "gcloud",
+      "gcloud",
+      "gcloud",
+      "gcloud"
+    ]);
     expect(plan.commands[0]?.args).toEqual([
+      "services",
+      "enable",
+      "compute.googleapis.com",
+      "--project",
+      "kanna-staging"
+    ]);
+    expect(plan.commands[1]?.args).toEqual([
+      "iam",
+      "service-accounts",
+      "create",
+      "kanna-relay-staging",
+      "--project",
+      "kanna-staging",
+      "--display-name",
+      "Kanna relay VM (staging)"
+    ]);
+    for (const role of [
+      "roles/datastore.user",
+      "roles/artifactregistry.reader",
+      "roles/storage.objectViewer"
+    ]) {
+      expect(plan.commands.some((command) =>
+        command.args.includes("add-iam-policy-binding") &&
+        command.args.includes(`serviceAccount:${serviceAccount}`) &&
+        command.args.includes(role)
+      )).toBe(true);
+    }
+    expect(plan.commands[5]?.args).toEqual([
       "compute",
       "addresses",
       "create",
@@ -195,16 +233,18 @@ describe("cloud deploy runtime", () => {
       "--region",
       "us-central1"
     ]);
-    expect(plan.commands[1]?.args).toContain("kanna-relay-staging");
-    expect(plan.commands[1]?.args).toContain("--machine-type");
-    expect(plan.commands[1]?.args).toContain("e2-micro");
-    expect(plan.commands[1]?.args).toContain("--scopes");
-    expect(plan.commands[1]?.args).toContain("https://www.googleapis.com/auth/cloud-platform");
-    expect(plan.commands[1]?.args).toContain("--zone");
-    expect(plan.commands[1]?.args).toContain("us-central1-a");
-    expect(plan.commands[1]?.args.join("\n")).toContain("startup-script");
-    expect(plan.commands[1]?.args.join("\n")).toContain("relay-staging.kanna.build");
-    expect(plan.commands[2]?.args).toEqual([
+    expect(plan.commands[6]?.args).toContain("kanna-relay-staging");
+    expect(plan.commands[6]?.args).toContain("--machine-type");
+    expect(plan.commands[6]?.args).toContain("e2-micro");
+    expect(plan.commands[6]?.args).toContain("--service-account");
+    expect(plan.commands[6]?.args).toContain(serviceAccount);
+    expect(plan.commands[6]?.args).toContain("--scopes");
+    expect(plan.commands[6]?.args).toContain("https://www.googleapis.com/auth/cloud-platform");
+    expect(plan.commands[6]?.args).toContain("--zone");
+    expect(plan.commands[6]?.args).toContain("us-central1-a");
+    expect(plan.commands[6]?.args.join("\n")).toContain("startup-script");
+    expect(plan.commands[6]?.args.join("\n")).toContain("relay-staging.kanna.build");
+    expect(plan.commands[7]?.args).toEqual([
       "compute",
       "firewall-rules",
       "create",
