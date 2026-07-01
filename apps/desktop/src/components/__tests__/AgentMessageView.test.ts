@@ -225,6 +225,24 @@ describe("AgentMessageView", () => {
     expect(links.map((link) => link.attributes("href"))).toEqual([imageUrl, imageUrl]);
   });
 
+  it("dispatches image preview activation when an inline image preview link is clicked", async () => {
+    const imageUrl = "https://example.com/artifacts/screenshot.png";
+    events.value = [
+      { seq: 1, event: { type: "assistant_text", text: `Screenshot: ${imageUrl}`, truncated: false } },
+    ];
+    const activations: unknown[] = [];
+    document.addEventListener("image-link-activate", (event) => {
+      activations.push((event as CustomEvent).detail);
+    }, { once: true });
+
+    const wrapper = mount(AgentMessageView, { props: { sessionId: "task-1" } });
+    const click = new MouseEvent("click", { bubbles: true, cancelable: true });
+    wrapper.get(".agent-image-link-preview-media").element.dispatchEvent(click);
+
+    expect(click.defaultPrevented).toBe(true);
+    expect(activations).toEqual([{ url: imageUrl }]);
+  });
+
   it("opens a slash command menu and completes the selected command without sending", async () => {
     const wrapper = mount(AgentMessageView, {
       props: { sessionId: "task-1", agentProvider: "claude", worktreePath: "/w" },

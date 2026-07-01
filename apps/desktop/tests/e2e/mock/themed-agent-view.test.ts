@@ -10,6 +10,7 @@ import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo"
 const taskId = "themed-agent-task";
 const runningTaskId = "themed-agent-running-task";
 const recoveryTaskId = "themed-agent-recovery-task";
+const imageTaskId = "themed-agent-image-task";
 
 function isVueCallError(value: unknown): value is { __error: string } {
   return Boolean(value && typeof value === "object" && "__error" in value);
@@ -407,5 +408,80 @@ describe("themed agent view", () => {
     await client.waitForText('[data-testid="agent-message-view"]', "Recovered agent snapshot", 5_000);
     const attachCount = await client.executeSync<number>("return window.__KSP_AGENT_ATTACH_COUNT__;");
     expect(attachCount).toBeGreaterThanOrEqual(2);
+  });
+
+  it("renders assistant image links inline and opens them in the app image preview", async () => {
+    const imageUrl = "https://example.com/artifacts/simple-paper-boat.png";
+    const repoId = await client.executeSync<string>(
+      `return window.__KANNA_E2E__.setupState.store.repos.find((repo) => repo.path === ${JSON.stringify(testRepoPath)})?.id;`,
+    );
+    expect(repoId).toBeTruthy();
+
+    await execDb(
+      client,
+      `INSERT INTO pipeline_item (
+         id, repo_id, prompt, pipeline, stage, tags, branch, agent_type, agent_provider, activity, created_at, updated_at
+       ) VALUES (?, ?, 'Render an image link', 'default', 'in progress', '[]', 'task-themed-agent-image-task',
+         'agent', 'claude', 'working', datetime('now'), datetime('now'))`,
+      [imageTaskId, repoId],
+    );
+    await execDb(
+      client,
+      `INSERT INTO terminal_session (id, repo_id, pipeline_item_id, label, cwd, daemon_session_id)
+       VALUES (?, ?, ?, 'agent', ?, ?)`,
+      [`agent-${imageTaskId}`, repoId, imageTaskId, testRepoPath, imageTaskId],
+    );
+    await mkdir(join(testRepoPath, ".kanna-worktrees", "task-themed-agent-image-task"), { recursive: true });
+
+    await client.executeSync(installMockKspScript({
+      recoveredText: `Screenshot artifact: ${imageUrl}`,
+    }));
+    await client.executeSync("window.__KANNA_E2E__.resetStreamClient?.();");
+
+    const loadResult = await callVueMethod(client, "loadItems");
+    if (isVueCallError(loadResult)) throw new Error(loadResult.__error);
+    const selectResult = await callVueMethod(client, "handleSelectItem", imageTaskId);
+    if (isVueCallError(selectResult)) throw new Error(selectResult.__error);
+
+    await client.waitForElement(".agent-image-link-preview img", 5_000);
+    const inlinePreview = await client.executeSync<{
+      imageSrc: string | null;
+      linkHrefs: string[];
+      rawLinkCount: number;
+    }>(
+      `const preview = document.querySelector(".agent-image-link-preview");
+       return {
+         imageSrc: preview?.querySelector("img")?.getAttribute("src") ?? null,
+         linkHrefs: Array.from(preview?.querySelectorAll("a") ?? []).map((link) => link.getAttribute("href")),
+         rawLinkCount: Array.from(document.querySelectorAll('[data-testid="agent-message-view"] a'))
+           .filter((link) => link.textContent === ${JSON.stringify(imageUrl)} && !link.closest(".agent-image-link-preview")).length,
+       };`,
+    );
+    expect(inlinePreview.imageSrc).toBe(imageUrl);
+    expect(inlinePreview.linkHrefs).toEqual([imageUrl, imageUrl]);
+    expect(inlinePreview.rawLinkCount).toBe(0);
+
+    await client.executeSync("window.__KANNA_E2E__.invokes.clear();");
+    await client.click(await client.waitForElement(".agent-image-link-preview-media", 2_000));
+    await client.waitForElement(".image-preview-modal img", 5_000);
+
+    const modalState = await client.executeSync<{
+      sourceLabel: string | null;
+      imageSrc: string | null;
+      readerCalls: number;
+    }>(
+      `return {
+         sourceLabel: document.querySelector(".image-preview-modal .image-source")?.textContent ?? null,
+         imageSrc: document.querySelector(".image-preview-modal img")?.getAttribute("src") ?? null,
+         readerCalls: window.__KANNA_E2E__.invokes.getAll()
+           .filter((call) => call.cmd === "read_image_file_data_url").length,
+       };`,
+    );
+
+    expect(modalState).toEqual({
+      sourceLabel: imageUrl,
+      imageSrc: imageUrl,
+      readerCalls: 0,
+    });
   });
 });

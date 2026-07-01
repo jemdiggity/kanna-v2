@@ -250,6 +250,20 @@ export function useAgentMessageView(props: UseAgentMessageViewProps) {
     });
   }
 
+  function handleRenderedMessageClick(event: MouseEvent) {
+    const target = event.target instanceof Element ? event.target : null;
+    const link = target?.closest(".agent-image-link-preview a[href]");
+    if (!link) return;
+
+    const imageUrl = link.getAttribute("href");
+    if (!isImageLinkHref(imageUrl)) return;
+
+    event.preventDefault();
+    document.dispatchEvent(new CustomEvent("image-link-activate", {
+      detail: { url: imageUrl },
+    }));
+  }
+
   onMounted(() => {
     focusComposerAfterSelection();
   });
@@ -409,6 +423,7 @@ export function useAgentMessageView(props: UseAgentMessageViewProps) {
     fallbackMarkdown,
     formatValue,
     handleComposerKeydown,
+    handleRenderedMessageClick,
     interruptAgent,
     isEmpty,
     isRunning,

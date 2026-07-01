@@ -19,6 +19,7 @@ const {
   fallbackMarkdown,
   formatValue,
   handleComposerKeydown,
+  handleRenderedMessageClick,
   interruptAgent,
   isEmpty,
   isRunning,
@@ -43,7 +44,12 @@ const {
 
 <template>
   <section class="agent-message-view" :class="[`skin-${appearance}`, `theme-${appTheme}`]">
-    <div ref="scrollContainer" class="agent-scroll" data-testid="agent-message-view">
+    <div
+      ref="scrollContainer"
+      class="agent-scroll"
+      data-testid="agent-message-view"
+      @click="handleRenderedMessageClick"
+    >
       <div class="conversation">
         <div v-if="isEmpty" class="empty-state">
           <p class="empty-title">Ready when you are</p>
