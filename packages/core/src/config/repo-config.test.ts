@@ -14,10 +14,14 @@ describe("parseRepoConfig", () => {
       setup: ["bun install", "./scripts/seed.sh"],
       teardown: ["./scripts/cleanup.sh"],
       ports: { PORT: 3000, API_PORT: 8000 },
+      reserved_port_offsets: [0, 1],
+      reserved_ports: [5432, 6379],
     }));
     expect(config.setup).toEqual(["bun install", "./scripts/seed.sh"]);
     expect(config.teardown).toEqual(["./scripts/cleanup.sh"]);
     expect(config.ports).toEqual({ PORT: 3000, API_PORT: 8000 });
+    expect(config.reserved_port_offsets).toEqual([0, 1]);
+    expect(config.reserved_ports).toEqual([5432, 6379]);
   });
 
   it("returns empty config for empty JSON object", () => {
@@ -56,6 +60,16 @@ describe("parseRepoConfig", () => {
   it("returns empty config for empty ports object", () => {
     const config = parseRepoConfig(JSON.stringify({ ports: {} }));
     expect(config.ports).toBeUndefined();
+  });
+
+  it("ignores malformed reserved port entries", () => {
+    const config = parseRepoConfig(JSON.stringify({
+      reserved_port_offsets: [0, "bad", -1, 1.5, 2],
+      reserved_ports: [5432, "bad", 0, 65536, 6379],
+    }));
+
+    expect(config.reserved_port_offsets).toEqual([0, 2]);
+    expect(config.reserved_ports).toEqual([5432, 6379]);
   });
 
   it("throws for invalid JSON", () => {

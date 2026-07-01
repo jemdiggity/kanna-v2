@@ -20,6 +20,8 @@ export interface RepoConfig {
   teardown?: string[];
   test?: string[];
   ports?: Record<string, number>;
+  reserved_port_offsets?: number[];
+  reserved_ports?: number[];
   stage_order?: string[];
   workspace?: RepoWorkspaceConfig;
 }
@@ -56,6 +58,24 @@ export function parseRepoConfig(json: string): RepoConfig {
       if (typeof value === "number") ports[name] = value;
     }
     if (Object.keys(ports).length > 0) config.ports = ports;
+  }
+
+  if (Array.isArray(raw.reserved_port_offsets)) {
+    const reservedPortOffsets = raw.reserved_port_offsets.filter(
+      (value): value is number => Number.isInteger(value) && value >= 0,
+    );
+    if (reservedPortOffsets.length > 0) {
+      config.reserved_port_offsets = reservedPortOffsets;
+    }
+  }
+
+  if (Array.isArray(raw.reserved_ports)) {
+    const reservedPorts = raw.reserved_ports.filter(
+      (value): value is number => Number.isInteger(value) && value >= 1 && value <= 65535,
+    );
+    if (reservedPorts.length > 0) {
+      config.reserved_ports = reservedPorts;
+    }
   }
 
   if (Array.isArray(raw.stage_order) && raw.stage_order.every((s) => typeof s === "string")) {

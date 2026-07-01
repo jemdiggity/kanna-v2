@@ -23,5 +23,6 @@
     "KANNA_FIREBASE_FIRESTORE_PORT": 8080,
     "KANNA_FIREBASE_FUNCTIONS_PORT": 5001,
     "KANNA_FIREBASE_UI_PORT": 4000
-  }
+  },
+  "reserved_port_offsets": [0, 1]
 }
