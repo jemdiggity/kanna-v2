@@ -12,7 +12,7 @@ import {
   type PipelineItem,
 } from "@kanna/db";
 import { invoke } from "../invoke";
-import { encodeDaemonInput } from "./daemonInput";
+import { encodeAgentPromptInputChunks } from "./daemonInput";
 import { resolveAgentProvider } from "./agent-provider";
 import { hasLiveTaskResources } from "./taskLifecycleEnv";
 import { readRepoConfig, requireService, type StoreContext } from "./state";
@@ -84,10 +84,13 @@ export function createTaskBlockedActions(
     await updatePipelineItemActivity(context.requireDb(), item.id, "working");
     await reloadSnapshot();
 
-    await invoke("send_input", {
-      sessionId: item.id,
-      data: encodeDaemonInput(`${buildBlockedResumeMessage(resolvedBlockers)}\n`),
+    const inputChunks = encodeAgentPromptInputChunks(buildBlockedResumeMessage(resolvedBlockers), {
+      agentProvider: item.agent_provider,
+      kittyKeyboard: false,
     });
+    for (const data of inputChunks) {
+      await invoke("send_input", { sessionId: item.id, data });
+    }
   }
 
   async function startBlockedTask(item: PipelineItem) {
