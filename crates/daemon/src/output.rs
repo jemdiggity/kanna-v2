@@ -479,6 +479,7 @@ pub(crate) fn format_status_observation_log(
         Some(protocol::AgentProvider::Copilot) => "copilot",
         Some(protocol::AgentProvider::Codex) => "codex",
         Some(protocol::AgentProvider::Opencode) => "opencode",
+        Some(protocol::AgentProvider::Antigravity) => "antigravity",
         None => "none",
     };
     let detected = match detected_status {

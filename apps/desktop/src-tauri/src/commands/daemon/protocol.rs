@@ -109,7 +109,8 @@ pub(super) fn parse_agent_provider(
     agent_provider: Option<String>,
 ) -> Result<Option<String>, DaemonCommandError> {
     match agent_provider.as_deref() {
-        Some("claude") | Some("copilot") | Some("codex") | Some("opencode") => Ok(agent_provider),
+        Some("claude") | Some("copilot") | Some("codex") | Some("opencode")
+        | Some("antigravity") => Ok(agent_provider),
         Some(other) => Err(DaemonCommandError {
             message: format!("unsupported agent provider: {other}"),
             code: None,

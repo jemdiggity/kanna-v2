@@ -244,7 +244,7 @@ impl HeadlessTerminal {
                     None
                 }
             }
-            AgentProvider::Codex | AgentProvider::Opencode => {
+            AgentProvider::Codex | AgentProvider::Opencode | AgentProvider::Antigravity => {
                 if has_interrupt_marker {
                     Some(SessionStatus::Busy)
                 } else if line_starts_with_prompt(last_line, &[CODEX_IDLE_PROMPT]) {

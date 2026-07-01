@@ -292,6 +292,7 @@
     "agentCopilotName": "GitHub Copilot",
     "agentCodexName": "OpenAI Codex",
     "agentOpenCodeName": "OpenCode",
+    "agentAntigravityName": "Google Antigravity",
     "agentCopied": "コピーしました！",
     "commandHintPrefix": "",
     "commandHintSuffix": "で利用可能なコマンドを表示できます。",

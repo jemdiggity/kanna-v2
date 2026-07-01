@@ -292,6 +292,7 @@
     "agentCopilotName": "GitHub Copilot",
     "agentCodexName": "OpenAI Codex",
     "agentOpenCodeName": "OpenCode",
+    "agentAntigravityName": "Google Antigravity",
     "agentCopied": "Copied!",
     "commandHintPrefix": "Use",
     "commandHintSuffix": "to see available commands.",

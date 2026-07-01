@@ -27,15 +27,23 @@ describe("resolveAgentProvider", () => {
     copilot: true,
     codex: true,
     opencode: true,
+    antigravity: true,
   };
 
   it("single available provider resolves", () => {
     expect(resolveAgentProvider("codex", allAvailable)).toBe("codex");
     expect(resolveAgentProvider("opencode", allAvailable)).toBe("opencode");
+    expect(resolveAgentProvider("antigravity", allAvailable)).toBe("antigravity");
   });
 
   it("ordered list returns first available", () => {
-    expect(resolveAgentProvider(["opencode", "copilot"], { claude: true, copilot: true, codex: false, opencode: false })).toBe("copilot");
+    expect(resolveAgentProvider(["opencode", "antigravity", "copilot"], {
+      claude: true,
+      copilot: true,
+      codex: false,
+      opencode: false,
+      antigravity: true,
+    })).toBe("antigravity");
   });
 
   it("missing providers throws No agent provider configured for this request.", () => {
@@ -46,13 +54,25 @@ describe("resolveAgentProvider", () => {
 
   it("unavailable providers throws None of the configured agent providers are available: codex, copilot.", () => {
     expect(() =>
-      resolveAgentProvider(["codex", "copilot"], { claude: true, copilot: false, codex: false, opencode: true }),
+      resolveAgentProvider(["codex", "copilot"], {
+        claude: true,
+        copilot: false,
+        codex: false,
+        opencode: true,
+        antigravity: true,
+      }),
     ).toThrow("None of the configured agent providers are available: codex, copilot.");
   });
 
   it("single unavailable provider throws with that provider in the message", () => {
     expect(() =>
-      resolveAgentProvider("codex", { claude: true, copilot: true, codex: false, opencode: true }),
+      resolveAgentProvider("codex", {
+        claude: true,
+        copilot: true,
+        codex: false,
+        opencode: true,
+        antigravity: true,
+      }),
     ).toThrow("None of the configured agent providers are available: codex.");
   });
 });
@@ -79,7 +99,13 @@ describe("getPreferredAgentProviders", () => {
   it("does not fall through to lower-precedence sources when selected source is unavailable", () => {
     const selected = getPreferredAgentProviders({ stage: ["codex"], agent: ["copilot"], item: "claude" });
     expect(() =>
-      resolveAgentProvider(selected, { claude: true, copilot: true, codex: false, opencode: true }),
+      resolveAgentProvider(selected, {
+        claude: true,
+        copilot: true,
+        codex: false,
+        opencode: true,
+        antigravity: true,
+      }),
     ).toThrow("None of the configured agent providers are available: codex.");
   });
 });

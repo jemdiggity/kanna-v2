@@ -30,6 +30,10 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function agentProviderBinary(provider: AgentProvider): string {
+  return provider === "antigravity" ? "agy" : provider;
+}
+
 export interface SessionsApi {
   applyTaskRuntimeStatus: (item: import("@kanna/db").PipelineItem, status: string) => Promise<void>;
   syncTaskStatusesFromDaemon: () => Promise<void>;
@@ -149,24 +153,26 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
   }
 
   async function isAgentProviderAvailable(provider: AgentProvider): Promise<boolean> {
+    const binary = agentProviderBinary(provider);
     try {
-      const path = await invoke<string | null>("which_binary", { name: provider });
+      const path = await invoke<string | null>("which_binary", { name: binary });
       return Boolean(path);
     } catch (error) {
-      console.debug(`[store] which_binary failed for ${provider}:`, error);
+      console.debug(`[store] which_binary failed for ${binary}:`, error);
       return false;
     }
   }
 
   async function getAgentProviderAvailability(): Promise<AgentProviderAvailability> {
-    const [claude, copilot, codex, opencode] = await Promise.all([
+    const [claude, copilot, codex, opencode, antigravity] = await Promise.all([
       isAgentProviderAvailable("claude"),
       isAgentProviderAvailable("copilot"),
       isAgentProviderAvailable("codex"),
       isAgentProviderAvailable("opencode"),
+      isAgentProviderAvailable("antigravity"),
     ]);
 
-    return { claude, copilot, codex, opencode };
+    return { claude, copilot, codex, opencode, antigravity };
   }
 
   async function waitForSessionExit(sessionId: string): Promise<void> {
@@ -529,6 +535,15 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
           `'${escapedPromptWithPreamble}'`,
         ];
         agentCmdPreamble = opencodePreambleParts.join(" ");
+      }
+    } else if (provider === "antigravity") {
+      const antigravityFlags: string[] = [...permissionFlags];
+      if (options?.model) antigravityFlags.push(`--model ${options.model}`);
+      const parts = ["'agy'", ...antigravityFlags];
+      if (escapedPrompt) parts.push("--prompt-interactive", `'${escapedPrompt}'`);
+      agentCmd = parts.join(" ");
+      if (escapedPrompt) {
+        agentCmdPreamble = ["'agy'", ...antigravityFlags, "--prompt-interactive", `'${escapedPromptWithPreamble}'`].join(" ");
       }
     } else {
       const flags: string[] = [...permissionFlags];

@@ -48,14 +48,57 @@ const claude = ref<AgentCliStatus>({ installed: false });
 const copilot = ref<AgentCliStatus>({ installed: false });
 const codex = ref<AgentCliStatus>({ installed: false });
 const opencode = ref<AgentCliStatus>({ installed: false });
+const antigravity = ref<AgentCliStatus>({ installed: false });
 const copiedAgent = ref<string | null>(null);
+
+interface AgentSetupCard {
+  key: string;
+  nameKey: string;
+  sortName: string;
+  status: AgentCliStatus;
+}
 
 const INSTALL_COMMANDS: Record<string, string> = {
   claude: "curl -fsSL https://claude.ai/install.sh | bash",
   copilot: "curl -fsSL https://gh.io/copilot-install | bash",
   codex: "npm install -g @openai/codex",
   opencode: "curl -fsSL https://opencode.ai/install | bash",
+  antigravity: "curl -fsSL https://antigravity.google/cli/install.sh | bash",
 };
+
+const AGENT_CLI_BINARIES: Record<string, string> = {
+  claude: "claude",
+  copilot: "copilot",
+  codex: "codex",
+  opencode: "opencode",
+  antigravity: "agy",
+};
+
+const agentCards = computed<AgentSetupCard[]>(() => [
+  { key: "antigravity", nameKey: "mainPanel.agentAntigravityName", sortName: "Google Antigravity", status: antigravity.value },
+  { key: "claude", nameKey: "mainPanel.agentClaudeName", sortName: "Claude Code", status: claude.value },
+  { key: "codex", nameKey: "mainPanel.agentCodexName", sortName: "OpenAI Codex", status: codex.value },
+  { key: "copilot", nameKey: "mainPanel.agentCopilotName", sortName: "GitHub Copilot", status: copilot.value },
+  { key: "opencode", nameKey: "mainPanel.agentOpenCodeName", sortName: "OpenCode", status: opencode.value },
+]);
+
+const agentSetupGroups = computed(() => {
+  const sorted = [...agentCards.value].sort((a, b) =>
+    a.sortName.localeCompare(b.sortName, undefined, { sensitivity: "base" })
+  );
+  return [
+    {
+      key: "installed",
+      titleKey: "mainPanel.agentInstalled",
+      cards: sorted.filter(agent => agent.status.installed),
+    },
+    {
+      key: "not-installed",
+      titleKey: "mainPanel.agentNotInstalled",
+      cards: sorted.filter(agent => !agent.status.installed),
+    },
+  ].filter(group => group.cards.length > 0);
+});
 
 function parseSemver(output: string): string | undefined {
   const match = output.match(/\b(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)\b/);
@@ -74,20 +117,21 @@ async function readE2eCliVersion(name: string): Promise<string | undefined> {
 }
 
 async function checkCli(name: string): Promise<AgentCliStatus> {
-  const e2eVersionOutput = await readE2eCliVersion(name);
+  const binary = AGENT_CLI_BINARIES[name] ?? name;
+  const e2eVersionOutput = await readE2eCliVersion(binary);
   if (e2eVersionOutput !== undefined) {
     return { installed: true, version: parseSemver(e2eVersionOutput) };
   }
 
   try {
-    await invoke("which_binary", { name });
+    await invoke("which_binary", { name: binary });
   } catch (error) {
-    console.debug(`[main-panel] CLI binary not found: ${name}`, error);
+    console.debug(`[main-panel] CLI binary not found: ${binary}`, error);
     return { installed: false };
   }
   try {
     const output = await invoke("run_script", {
-      script: `${name} --version`,
+      script: `${binary} --version`,
       cwd: "/",
       env: {},
     }) as string;
@@ -99,11 +143,18 @@ async function checkCli(name: string): Promise<AgentCliStatus> {
 }
 
 async function checkAllClis() {
-  const [c, p, x, o] = await Promise.all([checkCli("claude"), checkCli("copilot"), checkCli("codex"), checkCli("opencode")]);
+  const [c, p, x, o, a] = await Promise.all([
+    checkCli("claude"),
+    checkCli("copilot"),
+    checkCli("codex"),
+    checkCli("opencode"),
+    checkCli("antigravity"),
+  ]);
   claude.value = c;
   copilot.value = p;
   codex.value = x;
   opencode.value = o;
+  antigravity.value = a;
 }
 
 watch(() => props.hasRepos, (has) => {
@@ -192,33 +243,31 @@ function dismissCommandHint() {
         <div class="agent-setup">
           <p class="setup-title">{{ $t('mainPanel.agentSetupTitle') }}</p>
           <div class="agent-cards">
-            <div v-for="agent in [
-              { key: 'claude', nameKey: 'mainPanel.agentClaudeName', status: claude },
-              { key: 'copilot', nameKey: 'mainPanel.agentCopilotName', status: copilot },
-              { key: 'codex', nameKey: 'mainPanel.agentCodexName', status: codex },
-              { key: 'opencode', nameKey: 'mainPanel.agentOpenCodeName', status: opencode },
-            ]" :key="agent.key" class="agent-card">
-              <div class="agent-header">
-                <span class="agent-name">{{ $t(agent.nameKey) }}</span>
-                <span v-if="agent.status.installed" class="agent-badge installed">
-                  <span class="checkmark">✓</span>
-                  {{ $t('mainPanel.agentVersion', { version: agent.status.version || '?' }) }}
-                </span>
-                <span v-else class="agent-badge not-installed">
-                  {{ $t('mainPanel.agentNotInstalled') }}
-                </span>
+            <section v-for="group in agentSetupGroups" :key="group.key" class="agent-group">
+              <p class="agent-group-title">{{ $t(group.titleKey) }}</p>
+              <div v-for="agent in group.cards" :key="agent.key" class="agent-card">
+                <div class="agent-header">
+                  <span class="agent-name">{{ $t(agent.nameKey) }}</span>
+                  <span v-if="agent.status.installed" class="agent-badge installed">
+                    <span class="checkmark">✓</span>
+                    {{ $t('mainPanel.agentVersion', { version: agent.status.version || '?' }) }}
+                  </span>
+                  <span v-else class="agent-badge not-installed">
+                    {{ $t('mainPanel.agentNotInstalled') }}
+                  </span>
+                </div>
+                <div v-if="!agent.status.installed" class="install-block">
+                  <code class="install-cmd">{{ INSTALL_COMMANDS[agent.key] }}</code>
+                  <button
+                    class="copy-btn"
+                    :title="copiedAgent === agent.key ? $t('mainPanel.agentCopied') : 'Copy'"
+                    @click="copyCommand(agent.key)"
+                  >
+                    {{ copiedAgent === agent.key ? '✓' : '⧉' }}
+                  </button>
+                </div>
               </div>
-              <div v-if="!agent.status.installed" class="install-block">
-                <code class="install-cmd">{{ INSTALL_COMMANDS[agent.key] }}</code>
-                <button
-                  class="copy-btn"
-                  :title="copiedAgent === agent.key ? $t('mainPanel.agentCopied') : 'Copy'"
-                  @click="copyCommand(agent.key)"
-                >
-                  {{ copiedAgent === agent.key ? '✓' : '⧉' }}
-                </button>
-              </div>
-            </div>
+            </section>
           </div>
           <p class="setup-hint">
             {{ $t('mainPanel.agentInstallHint', { shellShortcut: '⇧⌘J' }) }}
@@ -481,8 +530,23 @@ function dismissCommandHint() {
 .agent-cards {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 14px;
   width: 100%;
+}
+
+.agent-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.agent-group-title {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--kn-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
 }
 
 .agent-card {

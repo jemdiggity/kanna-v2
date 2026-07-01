@@ -47,4 +47,11 @@ describe("getAgentPermissionFlags", () => {
     expect(getAgentPermissionFlags("opencode", "dontAsk")).toEqual(["--dangerously-skip-permissions"]);
     expect(getAgentPermissionFlags("opencode", "acceptEdits")).toEqual([]);
   });
+
+  it("maps Antigravity default-like permissions to its skip-permissions flag", () => {
+    expect(getAgentPermissionFlags("antigravity")).toEqual(["--dangerously-skip-permissions"]);
+    expect(getAgentPermissionFlags("antigravity", "default")).toEqual(["--dangerously-skip-permissions"]);
+    expect(getAgentPermissionFlags("antigravity", "dontAsk")).toEqual(["--dangerously-skip-permissions"]);
+    expect(getAgentPermissionFlags("antigravity", "acceptEdits")).toEqual([]);
+  });
 });

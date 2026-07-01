@@ -8,6 +8,7 @@ pub(super) enum AgentProvider {
     Copilot,
     Codex,
     Opencode,
+    Antigravity,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -32,6 +33,7 @@ impl AgentProvider {
             Self::Copilot => "copilot",
             Self::Codex => "codex",
             Self::Opencode => "opencode",
+            Self::Antigravity => "antigravity",
         }
     }
 
@@ -41,6 +43,7 @@ impl AgentProvider {
             Self::Copilot => DaemonAgentProvider::Copilot,
             Self::Codex => DaemonAgentProvider::Codex,
             Self::Opencode => DaemonAgentProvider::Opencode,
+            Self::Antigravity => DaemonAgentProvider::Antigravity,
         }
     }
 }
@@ -57,7 +60,7 @@ pub(super) fn resolve_agent_type(
             AgentProvider::Claude | AgentProvider::Codex | AgentProvider::Opencode => {
                 AgentSessionType::Agent
             }
-            AgentProvider::Copilot => AgentSessionType::Pty,
+            AgentProvider::Copilot | AgentProvider::Antigravity => AgentSessionType::Pty,
         }),
     }
 }
@@ -101,6 +104,7 @@ pub(super) fn resolve_agent_provider(
             "copilot" => Some(AgentProvider::Copilot),
             "codex" => Some(AgentProvider::Codex),
             "opencode" => Some(AgentProvider::Opencode),
+            "antigravity" => Some(AgentProvider::Antigravity),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -109,12 +113,19 @@ pub(super) fn resolve_agent_provider(
     }
 
     for provider in &parsed {
-        if binary_available(provider.as_str()) {
+        if binary_available(provider_binary_name(*provider)) {
             return Ok(*provider);
         }
     }
 
     Ok(parsed[0])
+}
+
+pub(super) fn provider_binary_name(provider: AgentProvider) -> &'static str {
+    match provider {
+        AgentProvider::Antigravity => "agy",
+        _ => provider.as_str(),
+    }
 }
 
 fn binary_available(name: &str) -> bool {

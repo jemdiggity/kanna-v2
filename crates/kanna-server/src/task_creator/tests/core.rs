@@ -49,6 +49,14 @@ fn resolve_agent_type_defaults_opencode_to_agent_but_allows_explicit_pty() {
 }
 
 #[test]
+fn resolve_agent_type_defaults_antigravity_to_pty() {
+    assert!(matches!(
+        resolve_agent_type(None, AgentProvider::Antigravity),
+        Ok(AgentSessionType::Pty)
+    ));
+}
+
+#[test]
 fn build_agent_command_adds_claude_kanna_preamble_as_system_prompt() {
     let preamble = super::build_kanna_preamble(
         &AgentProvider::Claude,
@@ -86,6 +94,33 @@ fn build_agent_command_adds_claude_kanna_preamble_as_system_prompt() {
     assert!(cli_index < command.find("kanna-cli guide").unwrap());
     assert!(command.contains("KANNA_CLI_PATH"));
     assert!(command.contains("Do not push a branch or create a pull request"));
+}
+
+#[test]
+fn build_agent_command_launches_antigravity_with_prepended_kanna_context() {
+    let preamble = super::build_kanna_preamble(
+        &AgentProvider::Antigravity,
+        "task-123",
+        "implement",
+        "default",
+        Some("manual"),
+        None,
+    );
+
+    let command = super::build_agent_command(
+        &AgentProvider::Antigravity,
+        "Ship the task.",
+        None,
+        Some("dontAsk"),
+        &[],
+        Some(&preamble),
+        None,
+    );
+
+    assert!(command.starts_with("agy --dangerously-skip-permissions --prompt-interactive '"));
+    assert!(command.contains("## Kanna Task Context"));
+    assert!(command.contains("task-123"));
+    assert!(command.contains("Ship the task."));
 }
 
 #[test]

@@ -151,7 +151,7 @@ fn read_default_agent_provider_setting(db: &Db) -> Result<Option<String>, String
         .get_setting("defaultAgentProvider")
         .map_err(|e| format!("db error: {}", e))?;
     Ok(match provider.as_deref() {
-        Some("claude" | "copilot" | "codex" | "opencode") => provider,
+        Some("claude" | "copilot" | "codex" | "opencode" | "antigravity") => provider,
         _ => Some("claude".to_string()),
     })
 }

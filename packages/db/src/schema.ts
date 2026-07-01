@@ -1,4 +1,4 @@
-export type AgentProvider = "claude" | "copilot" | "codex" | "opencode";
+export type AgentProvider = "claude" | "copilot" | "codex" | "opencode" | "antigravity";
 
 export interface Repo {
   id: string;

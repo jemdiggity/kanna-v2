@@ -130,6 +130,7 @@ pub enum AgentProvider {
     Copilot,
     Codex,
     Opencode,
+    Antigravity,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]

@@ -179,6 +179,6 @@ describe("real continue-stage agent submission", () => {
     await waitForFile(markerPath, 180_000, 1_000);
     expect((await readFile(markerPath, "utf8")).trimEnd()).toBe("submitted");
 
-    expect(["codex", "claude", "copilot", "opencode"]).toContain(initialRow.agent_provider);
+    expect(["codex", "claude", "copilot", "opencode", "antigravity"]).toContain(initialRow.agent_provider);
   }, 300_000);
 });
