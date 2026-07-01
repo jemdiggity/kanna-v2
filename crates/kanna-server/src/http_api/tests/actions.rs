@@ -480,6 +480,7 @@ async fn advance_stage_route_uses_stage_advancer() {
             assert_eq!(task_id, "task-1");
             Ok(TaskActionResponse {
                 task_id: "task-2".to_string(),
+                follow_task: None,
             })
         }),
     );
@@ -502,6 +503,37 @@ async fn advance_stage_route_uses_stage_advancer() {
 }
 
 #[tokio::test]
+async fn rerun_stage_route_uses_stage_rerunner() {
+    let app = super::test_router_with_stage_rerunner(
+        "desktop-1",
+        "Studio Mac",
+        Arc::new(|task_id| {
+            assert_eq!(task_id, "task-1");
+            Ok(TaskActionResponse {
+                task_id: "task-1".to_string(),
+                follow_task: None,
+            })
+        }),
+    );
+
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks/task-1/actions/rerun-stage")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let rerun: TaskActionResponse = from_slice(&body).unwrap();
+    assert_eq!(rerun.task_id, "task-1");
+}
+
+#[tokio::test]
 async fn complete_stage_route_uses_stage_completer() {
     let app = super::test_router_with_stage_completer(
         "desktop-1",
@@ -516,6 +548,7 @@ async fn complete_stage_route_uses_stage_completer() {
             );
             Ok(TaskActionResponse {
                 task_id: "task-2".to_string(),
+                follow_task: None,
             })
         }),
     );

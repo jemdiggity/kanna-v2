@@ -11,6 +11,7 @@ pub(super) fn prepare_continue_stage(
     source_branch: Option<&str>,
     agent_type: &str,
     agent_provider: Option<&str>,
+    follow_task: Option<bool>,
 ) -> Result<PreparedStageContinue, String> {
     source_branch.ok_or_else(|| format!("task has no branch: {}", source_task_id))?;
     Ok(PreparedStageContinue {
@@ -21,6 +22,7 @@ pub(super) fn prepare_continue_stage(
         previous_stage_result,
         previous_active_post_action: None,
         active_post_action: None,
+        follow_task,
         input_text: prompt.to_string(),
         input: encode_agent_stage_input(prompt, agent_provider),
     })
@@ -46,6 +48,7 @@ pub(super) fn prepare_post_action_stage(
         previous_stage_result,
         previous_active_post_action: None,
         active_post_action: Some(post_action.name.clone()),
+        follow_task: None,
         input_text: prompt.to_string(),
         input: encode_agent_stage_input(prompt, agent_provider),
     })

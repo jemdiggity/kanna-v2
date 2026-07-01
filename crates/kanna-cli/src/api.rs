@@ -389,6 +389,18 @@ pub(crate) async fn advance_stage_via_api(
     .await
 }
 
+pub(crate) async fn rerun_stage_via_api(
+    base_url: &str,
+    task_id: &str,
+) -> Result<TaskActionResponse, String> {
+    post_json(
+        base_url,
+        &format!("/v1/tasks/{task_id}/actions/rerun-stage"),
+        &serde_json::json!({}),
+    )
+    .await
+}
+
 pub(crate) async fn block_task_via_api(
     base_url: &str,
     task_id: &str,

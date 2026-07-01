@@ -8,6 +8,7 @@ async fn run_merge_agent_route_uses_merge_agent_runner() {
         Arc::new(|task_id| {
             Ok(TaskActionResponse {
                 task_id: format!("merge-{task_id}"),
+                follow_task: None,
             })
         }),
     );

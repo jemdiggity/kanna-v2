@@ -201,6 +201,19 @@ pub async fn handle_invoke(
                     .await?;
                     serde_json::to_value(continued).map_err(|e| format!("serialize error: {}", e))
                 }
+                task_creator::PreparedStageTransition::Close { task_id } => {
+                    for session_id in [
+                        task_id.to_string(),
+                        format!("shell-wt-{task_id}"),
+                        format!("td-{task_id}"),
+                    ] {
+                        kill_session_if_present(daemon, &session_id).await?;
+                    }
+                    let db = Db::open(&config.db_path).map_err(|e| format!("db error: {}", e))?;
+                    db.close_pipeline_item(&task_id)
+                        .map_err(|e| format!("db error: {}", e))?;
+                    Ok(serde_json::json!({ "task_id": task_id, "followTask": false }))
+                }
             }
         }
         "run_merge_agent" => {

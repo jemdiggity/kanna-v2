@@ -21,6 +21,12 @@ pub(crate) fn prepare_advance_stage_for_api(
     if source_task.closed_at.is_some() {
         return Err(format!("task is closed: {}", source_task_id));
     }
+    let open_blockers = db
+        .count_open_task_blockers(source_task_id)
+        .map_err(|e| format!("db error: {}", e))?;
+    if open_blockers > 0 {
+        return Err(format!("task is blocked: {}", source_task_id));
+    }
     let repo = db
         .get_repo(&source_task.repo_id)
         .map_err(|e| format!("db error: {}", e))?
@@ -74,10 +80,11 @@ pub(crate) fn prepare_advance_stage_for_api(
         }
     }
 
-    let next_stage = pipeline
-        .stages
-        .get(current_stage_index + 1)
-        .ok_or_else(|| format!("task already at final stage: {}", current_stage_name))?;
+    let Some(next_stage) = pipeline.stages.get(current_stage_index + 1) else {
+        return Ok(PreparedStageTransition::Close {
+            task_id: source_task_id.to_string(),
+        });
+    };
 
     let task_prompt = build_target_stage_prompt(
         &repo.path,
@@ -105,11 +112,12 @@ pub(crate) fn prepare_advance_stage_for_api(
                 source_task.branch.as_deref(),
                 normalize_agent_type(source_task.agent_type.as_deref()).unwrap_or("pty"),
                 source_task.agent_provider.as_deref(),
+                next_stage.follow_task,
             )?,
         )));
     }
 
-    prepare_task_spawn(
+    let mut spawn = prepare_task_spawn(
         db,
         config,
         &repo,
@@ -129,8 +137,9 @@ pub(crate) fn prepare_advance_stage_for_api(
             notify_task_id: None,
             parent_task_id: None,
         },
-    )
-    .map(|spawn| PreparedStageTransition::Spawn(Box::new(spawn)))
+    )?;
+    spawn.follow_task = next_stage.follow_task;
+    Ok(PreparedStageTransition::Spawn(Box::new(spawn)))
 }
 
 fn resolve_inherited_task_title(
@@ -252,12 +261,13 @@ pub(crate) fn prepare_auto_stage_completion_for_api(
             source_task.branch.as_deref(),
             normalize_agent_type(source_task.agent_type.as_deref()).unwrap_or("pty"),
             source_task.agent_provider.as_deref(),
+            next_stage.follow_task,
         )
         .map(|continuation| PreparedStageTransition::Continue(Box::new(continuation)))
         .map(Some);
     }
 
-    prepare_task_spawn(
+    let mut spawn = prepare_task_spawn(
         db,
         config,
         &repo,
@@ -277,9 +287,9 @@ pub(crate) fn prepare_auto_stage_completion_for_api(
             notify_task_id: None,
             parent_task_id: None,
         },
-    )
-    .map(|spawn| PreparedStageTransition::Spawn(Box::new(spawn)))
-    .map(Some)
+    )?;
+    spawn.follow_task = next_stage.follow_task;
+    Ok(Some(PreparedStageTransition::Spawn(Box::new(spawn))))
 }
 
 pub(crate) fn prepare_revision_task_for_api(

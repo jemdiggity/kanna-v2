@@ -133,7 +133,10 @@ pub(super) async fn block_task(
         )
     })?;
     let task_id = apply_task_blockers(&db, &task_id, &payload.blocker_task_ids)?;
-    Ok(Json(crate::mobile_api::TaskActionResponse { task_id }))
+    Ok(Json(crate::mobile_api::TaskActionResponse {
+        task_id,
+        follow_task: None,
+    }))
 }
 
 pub(super) async fn unblock_task(
@@ -150,5 +153,8 @@ pub(super) async fn unblock_task(
     db.remove_all_task_blockers(&task_id)
         .map_err(|e| db_write_error("db error", e))?;
     remove_blocked_tag(&db, &task_id)?;
-    Ok(Json(crate::mobile_api::TaskActionResponse { task_id }))
+    Ok(Json(crate::mobile_api::TaskActionResponse {
+        task_id,
+        follow_task: None,
+    }))
 }

@@ -7,6 +7,14 @@ use axum::Json;
 use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
 use std::sync::Arc;
 
+fn stage_action_error_status(error: &str) -> axum::http::StatusCode {
+    if error.starts_with("task is blocked:") {
+        axum::http::StatusCode::CONFLICT
+    } else {
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR
+    }
+}
+
 pub(super) async fn run_merge_agent(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(task_id): axum::extract::Path<String>,
@@ -41,6 +49,7 @@ pub(super) async fn run_merge_agent(
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(crate::mobile_api::TaskActionResponse {
         task_id: created_task.task_id,
+        follow_task: None,
     }))
 }
 
@@ -125,7 +134,10 @@ pub(super) async fn set_task_parent(
 
     db.update_pipeline_item_parent(&task_id, parent_task_id.as_deref())
         .map_err(|e| db_write_error("db error", e))?;
-    Ok(Json(crate::mobile_api::TaskActionResponse { task_id }))
+    Ok(Json(crate::mobile_api::TaskActionResponse {
+        task_id,
+        follow_task: None,
+    }))
 }
 
 pub(super) async fn close_task(
@@ -249,7 +261,7 @@ pub(super) async fn advance_stage(
             )
         })?;
         crate::task_creator::prepare_advance_stage_for_api(&db, &state.config, &task_id)
-            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?
+            .map_err(|e| (stage_action_error_status(&e), e))?
     };
     let mut daemon = crate::daemon_client::DaemonClient::connect(&state.config.daemon_dir)
         .await
@@ -261,6 +273,7 @@ pub(super) async fn advance_stage(
         })?;
     match transition {
         crate::task_creator::PreparedStageTransition::Spawn(prepared) => {
+            let follow_task = prepared.follow_task;
             let created = crate::task_creator::spawn_prepared_task_for_api(&mut daemon, *prepared)
                 .await
                 .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -279,6 +292,7 @@ pub(super) async fn advance_stage(
 
             Ok(Json(crate::mobile_api::TaskActionResponse {
                 task_id: created.task_id,
+                follow_task,
             }))
         }
         crate::task_creator::PreparedStageTransition::Continue(prepared) => {
@@ -291,7 +305,100 @@ pub(super) async fn advance_stage(
             .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
             Ok(Json(continued))
         }
+        crate::task_creator::PreparedStageTransition::Close { task_id } => {
+            for session_id in [
+                task_id.to_string(),
+                format!("shell-wt-{task_id}"),
+                format!("td-{task_id}"),
+            ] {
+                let event = daemon
+                    .send_command(&DaemonCommand::Kill { session_id })
+                    .await
+                    .map_err(|e| {
+                        (
+                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("daemon error: {}", e),
+                        )
+                    })?;
+                match event {
+                    DaemonEvent::Ok => {}
+                    DaemonEvent::Error {
+                        code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
+                        ..
+                    } => {}
+                    DaemonEvent::Error { message, .. }
+                        if message.to_ascii_lowercase().contains("session not found") => {}
+                    DaemonEvent::Error { message, .. } => {
+                        return Err((axum::http::StatusCode::INTERNAL_SERVER_ERROR, message));
+                    }
+                    other => {
+                        return Err((
+                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("unexpected daemon response: {:?}", other),
+                        ));
+                    }
+                }
+            }
+            let db = Db::open(&state.config.db_path).map_err(|e| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("db error: {}", e),
+                )
+            })?;
+            db.close_pipeline_item(&task_id).map_err(|e| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("db error: {}", e),
+                )
+            })?;
+            notify_task_completion(&state.config, &task_id, false)
+                .await
+                .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+            Ok(Json(crate::mobile_api::TaskActionResponse {
+                task_id,
+                follow_task: Some(false),
+            }))
+        }
     }
+}
+
+pub(super) async fn rerun_stage(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
+    #[cfg(test)]
+    if let Some(stage_rerunner) = state.stage_rerunner.clone() {
+        return stage_rerunner(task_id)
+            .map(Json)
+            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e));
+    }
+
+    let prepared = {
+        let db = Db::open(&state.config.db_path).map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("db error: {}", e),
+            )
+        })?;
+        crate::task_creator::prepare_rerun_stage_for_api(&db, &state.config, &task_id)
+            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?
+    };
+    let mut daemon = crate::daemon_client::DaemonClient::connect(&state.config.daemon_dir)
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("daemon error: {}", e),
+            )
+        })?;
+    let rerun = crate::task_creator::rerun_prepared_stage_for_api(
+        &state.config.db_path,
+        &mut daemon,
+        prepared,
+    )
+    .await
+    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(rerun))
 }
 
 pub(super) async fn complete_stage(
@@ -338,7 +445,10 @@ pub(super) async fn complete_stage(
     }
 
     if !should_auto_advance {
-        return Ok(Json(crate::mobile_api::TaskActionResponse { task_id }));
+        return Ok(Json(crate::mobile_api::TaskActionResponse {
+            task_id,
+            follow_task: None,
+        }));
     }
 
     let transition = {
@@ -352,7 +462,10 @@ pub(super) async fn complete_stage(
             .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?
     };
     let Some(transition) = transition else {
-        return Ok(Json(crate::mobile_api::TaskActionResponse { task_id }));
+        return Ok(Json(crate::mobile_api::TaskActionResponse {
+            task_id,
+            follow_task: None,
+        }));
     };
 
     let mut daemon = crate::daemon_client::DaemonClient::connect(&state.config.daemon_dir)
@@ -365,6 +478,7 @@ pub(super) async fn complete_stage(
         })?;
     match transition {
         crate::task_creator::PreparedStageTransition::Spawn(prepared) => {
+            let follow_task = prepared.follow_task;
             let created = crate::task_creator::spawn_prepared_task_for_api(&mut daemon, *prepared)
                 .await
                 .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -383,6 +497,7 @@ pub(super) async fn complete_stage(
 
             Ok(Json(crate::mobile_api::TaskActionResponse {
                 task_id: created.task_id,
+                follow_task,
             }))
         }
         crate::task_creator::PreparedStageTransition::Continue(prepared) => {
@@ -394,6 +509,12 @@ pub(super) async fn complete_stage(
             .await
             .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
             Ok(Json(continued))
+        }
+        crate::task_creator::PreparedStageTransition::Close { task_id } => {
+            Ok(Json(crate::mobile_api::TaskActionResponse {
+                task_id,
+                follow_task: None,
+            }))
         }
     }
 }
@@ -486,5 +607,6 @@ pub(super) async fn request_revision(
 
     Ok(Json(crate::mobile_api::TaskActionResponse {
         task_id: created.task_id,
+        follow_task: None,
     }))
 }

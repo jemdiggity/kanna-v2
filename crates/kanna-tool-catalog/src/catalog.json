@@ -146,6 +146,16 @@
       ]
     },
     {
+      "name": "kanna_rerun_stage",
+      "description": "Rerun the current pipeline stage or active post-action for a Kanna task in the same worktree.",
+      "method": "POST",
+      "path": "/v1/tasks/{task_id}/actions/rerun-stage",
+      "response": "json",
+      "params": [
+        { "name": "task_id", "type": "string", "required": true, "location": "path" }
+      ]
+    },
+    {
       "name": "kanna_block_task",
       "description": "Mark a Kanna task as blocked by one or more tasks.",
       "method": "POST",

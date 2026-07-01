@@ -290,6 +290,16 @@ pub(crate) enum TaskCommands {
         #[arg(long)]
         server_url: Option<String>,
     },
+    /// Rerun the current pipeline stage for a task
+    RerunStage {
+        /// The task/pipeline_item ID to rerun
+        #[arg(long)]
+        task_id: String,
+
+        /// Override the local Kanna server base URL
+        #[arg(long)]
+        server_url: Option<String>,
+    },
     /// Mark a task as blocked by one or more tasks
     Block {
         /// The task/pipeline_item ID to block

@@ -20,6 +20,8 @@ pub struct AppState {
     #[cfg(test)]
     pub(super) stage_advancer: Option<TestStageAdvancer>,
     #[cfg(test)]
+    pub(super) stage_rerunner: Option<TestStageRerunner>,
+    #[cfg(test)]
     pub(super) stage_completer: Option<TestStageCompleter>,
     #[cfg(test)]
     pub(super) revision_requester: Option<TestRevisionRequester>,
@@ -47,6 +49,10 @@ pub(super) type TestTaskCloser = Arc<dyn Fn(String) -> Result<(), String> + Send
 
 #[cfg(test)]
 pub(super) type TestStageAdvancer =
+    Arc<dyn Fn(String) -> Result<crate::mobile_api::TaskActionResponse, String> + Send + Sync>;
+
+#[cfg(test)]
+pub(super) type TestStageRerunner =
     Arc<dyn Fn(String) -> Result<crate::mobile_api::TaskActionResponse, String> + Send + Sync>;
 
 #[cfg(test)]
@@ -121,6 +127,8 @@ impl AppState {
             #[cfg(test)]
             stage_advancer: None,
             #[cfg(test)]
+            stage_rerunner: None,
+            #[cfg(test)]
             stage_completer: None,
             #[cfg(test)]
             revision_requester: None,
@@ -173,6 +181,13 @@ impl AppState {
     pub(super) fn with_stage_advancer(config: Config, stage_advancer: TestStageAdvancer) -> Self {
         let mut state = Self::new(config);
         state.stage_advancer = Some(stage_advancer);
+        state
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_stage_rerunner(config: Config, stage_rerunner: TestStageRerunner) -> Self {
+        let mut state = Self::new(config);
+        state.stage_rerunner = Some(stage_rerunner);
         state
     }
 

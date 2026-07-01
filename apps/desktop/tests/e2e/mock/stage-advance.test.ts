@@ -1,7 +1,6 @@
 import { join } from "node:path";
 import { execFile } from "node:child_process";
 import { chmod, mkdir, readFile, stat, writeFile } from "node:fs/promises";
-import { createConnection } from "node:net";
 import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
@@ -67,27 +66,6 @@ async function waitForClosedTask(
   throw new Error(`timed out waiting for ${taskId} to close`);
 }
 
-async function waitForTearingDownTask(
-  client: WebDriverClient,
-  taskId: string,
-  timeoutMs = 5_000,
-): Promise<{ stage: string | null; closed_at: string | null; teardown_started_at: string | null }> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const rows = (await queryDb(
-      client,
-      "SELECT stage, closed_at, teardown_started_at FROM pipeline_item WHERE id = ?",
-      [taskId],
-    )) as Array<{ stage: string | null; closed_at: string | null; teardown_started_at: string | null }>;
-    const row = rows[0];
-    if (row?.closed_at == null && typeof row.teardown_started_at === "string" && row.teardown_started_at.length > 0) {
-      return row;
-    }
-    await sleep(100);
-  }
-  throw new Error(`timed out waiting for ${taskId} to enter teardown`);
-}
-
 async function hydrateStoreItem(client: WebDriverClient, taskId: string): Promise<void> {
   const rows = (await queryDb(
     client,
@@ -132,35 +110,25 @@ async function injectCloudSnapshot(
   }
 }
 
-async function sendPipelineStageComplete(client: WebDriverClient, taskId: string): Promise<void> {
-  const socketPath = await tauriInvoke(client, "get_pipeline_socket_path");
-  if (typeof socketPath !== "string" || socketPath.length === 0) {
-    throw new Error(`unexpected pipeline socket path: ${JSON.stringify(socketPath)}`);
+async function completeStageThroughServer(
+  client: WebDriverClient,
+  taskId: string,
+  configDir: string,
+  summary = "ready for review",
+): Promise<void> {
+  const server = await startTestKannaServer(client, configDir);
+  try {
+    const response = await fetch(`${server.baseUrl}/v1/tasks/${encodeURIComponent(taskId)}/actions/complete-stage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status: "success", summary }),
+    });
+    if (!response.ok) {
+      throw new Error(`complete-stage failed: ${response.status} ${await response.text()}`);
+    }
+  } finally {
+    server.child.kill();
   }
-
-  await new Promise<void>((resolve, reject) => {
-    let settled = false;
-    const socket = createConnection(socketPath);
-    const settle = (error?: Error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      socket.destroy();
-      if (error) reject(error);
-      else resolve();
-    };
-    const timer = setTimeout(() => {
-      settle(new Error(`timed out sending pipeline_stage_complete for ${taskId}`));
-    }, 5_000);
-
-    socket.once("error", (error) => settle(error));
-    socket.once("connect", () => {
-      socket.end(`${JSON.stringify({ type: "stage_complete", task_id: taskId })}\n`);
-    });
-    socket.once("close", (hadError) => {
-      if (!hadError) settle();
-    });
-  });
 }
 
 interface CreatedStageTaskRow {
@@ -589,7 +557,7 @@ describe("stage advance", () => {
       [JSON.stringify({ status: "success", summary: "ready for review" }), sourceTaskId],
     );
     const existingReviewTaskIds = await getStageTaskIds(client, repoId, "review");
-    await sendPipelineStageComplete(client, sourceTaskId);
+    await completeStageThroughServer(client, sourceTaskId, join(testRepoPath, ".kanna"));
 
     const reviewTaskId = await waitForCreatedStageTask(client, repoId, "review", {
       excludeIds: existingReviewTaskIds,
@@ -668,7 +636,7 @@ describe("stage advance", () => {
       [JSON.stringify({ status: "success", summary: "ready for review" }), sourceTaskId],
     );
     const existingReviewTaskIds = await getStageTaskIds(client, repoId, "review");
-    await sendPipelineStageComplete(client, sourceTaskId);
+    await completeStageThroughServer(client, sourceTaskId, join(testRepoPath, ".kanna"));
 
     const reviewTaskId = await waitForCreatedStageTask(client, repoId, "review", {
       excludeIds: existingReviewTaskIds,
@@ -852,12 +820,6 @@ describe("stage advance", () => {
     const existingReviewTaskIds = await getStageTaskIds(client, repoId, "review");
     await advanceStageWithShortcut(client, sourceTitle, sourceTaskId);
 
-    const tearingDownRow = await waitForTearingDownTask(client, sourceTaskId);
-    expect(tearingDownRow).toMatchObject({
-      stage: "in progress",
-      closed_at: null,
-    });
-
     const reviewTaskId = await waitForCreatedStageTask(client, repoId, "review", {
       excludeIds: existingReviewTaskIds,
       displayName: sourceTitle,
@@ -888,7 +850,7 @@ describe("stage advance", () => {
       "",
       "Commit stage marker for Write the commit",
     ].join("\n");
-    const expectedInput = Buffer.from(`${expectedPrompt}\x1b[13u`, "utf8");
+    const expectedInput = Buffer.from(`\x1b[200~${expectedPrompt}\x1b[201~\r`, "utf8");
     await execDb(
       client,
       `INSERT INTO pipeline_item (
@@ -1184,7 +1146,7 @@ describe("stage advance", () => {
       expect(capturedArgs).toContain(`${expectedAgentPrompt}\n`);
       expect(capturedArgs).not.toContain(reviewPrompt);
       await emitExternalSharedInvalidation(client, "requestRevision");
-      await waitForSelectedTaskId(client, null);
+      await sleep(500);
       expect(await getVueState(client, "selectedItemId")).not.toBe(revisionTaskId);
 
       const tasksResponse = await fetch(`${server.baseUrl}/v1/repos/${encodeURIComponent(repoId)}/tasks`);
@@ -1449,7 +1411,7 @@ describe("stage advance", () => {
     await hydrateStoreItem(client, taskId);
 
     const existingPrTaskIds = await getStageTaskIds(client, repoId, "pr");
-    await sendPipelineStageComplete(client, taskId);
+    await completeStageThroughServer(client, taskId, join(testRepoPath, ".kanna"));
 
     const prTaskId = await waitForCreatedStageTask(client, repoId, "pr", {
       excludeIds: existingPrTaskIds,

@@ -1,4 +1,6 @@
-use super::types::{CreatedTask, PreparedSessionSpawn, PreparedStageContinue, PreparedTaskSpawn};
+use super::types::{
+    CreatedTask, PreparedSessionSpawn, PreparedStageContinue, PreparedStageRerun, PreparedTaskSpawn,
+};
 use super::worktree::remove_prepared_worktree;
 use crate::daemon_client::DaemonClient;
 use crate::db::Db;
@@ -179,6 +181,7 @@ pub(crate) async fn continue_prepared_stage_for_api(
     match event {
         DaemonEvent::Ok => Ok(crate::mobile_api::TaskActionResponse {
             task_id: prepared.task_id,
+            follow_task: prepared.follow_task,
         }),
         DaemonEvent::Error { message, .. } => {
             let _ = rollback_continue_stage(
@@ -200,6 +203,97 @@ pub(crate) async fn continue_prepared_stage_for_api(
             );
             Err(format!("unexpected daemon response: {:?}", other))
         }
+    }
+}
+
+pub(crate) async fn rerun_prepared_stage_for_api(
+    db_path: &str,
+    daemon: &mut DaemonClient,
+    prepared: PreparedStageRerun,
+) -> Result<crate::mobile_api::TaskActionResponse, String> {
+    let task_id = prepared.task_id.clone();
+    let session_id = prepared.session_id.clone();
+    {
+        let db = Db::open(db_path).map_err(|e| format!("db error: {}", e))?;
+        db.clear_pipeline_item_stage_result(&prepared.task_id)
+            .map_err(|e| format!("db error: {}", e))?;
+    }
+
+    let kill = daemon
+        .send_command(&DaemonCommand::Kill {
+            session_id: session_id.clone(),
+        })
+        .await
+        .map_err(|e| format!("daemon error: {}", e))?;
+    match kill {
+        DaemonEvent::Ok => {}
+        DaemonEvent::Error {
+            code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
+            ..
+        } => {}
+        DaemonEvent::Error { message, .. }
+            if message.to_ascii_lowercase().contains("session not found") => {}
+        DaemonEvent::Error { message, .. } => return Err(format!("daemon error: {}", message)),
+        other => return Err(format!("unexpected daemon response: {:?}", other)),
+    }
+
+    let command = match prepared.session {
+        PreparedSessionSpawn::Pty {
+            executable,
+            args,
+            cols,
+            rows,
+            agent_provider,
+        } => DaemonCommand::Spawn {
+            session_id,
+            executable,
+            args,
+            cwd: prepared.cwd,
+            env: prepared.env,
+            cols,
+            rows,
+            agent_provider: Some(agent_provider),
+        },
+        PreparedSessionSpawn::Agent {
+            agent_provider,
+            prompt,
+            model,
+            permission_mode,
+            allowed_tools,
+            system_prompt,
+            mcp_config_path,
+            executable,
+        } => DaemonCommand::SpawnAgent {
+            session_id,
+            params: AgentSpawnParams {
+                agent_provider,
+                prompt,
+                cwd: prepared.cwd,
+                env: prepared.env,
+                model,
+                permission_mode,
+                allowed_tools,
+                disallowed_tools: Vec::new(),
+                max_turns: None,
+                max_budget_usd: None,
+                system_prompt: Some(system_prompt),
+                mcp_config_path,
+                executable,
+            },
+        },
+    };
+
+    let event = daemon
+        .send_command(&command)
+        .await
+        .map_err(|e| format!("daemon error: {}", e))?;
+    match event {
+        DaemonEvent::SessionCreated { .. } => Ok(crate::mobile_api::TaskActionResponse {
+            task_id,
+            follow_task: None,
+        }),
+        DaemonEvent::Error { message, .. } => Err(format!("daemon error: {}", message)),
+        other => Err(format!("unexpected daemon response: {:?}", other)),
     }
 }
 

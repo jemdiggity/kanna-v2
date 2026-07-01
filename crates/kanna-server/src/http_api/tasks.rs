@@ -83,7 +83,10 @@ pub(super) async fn update_task(
         })?;
     db.update_pipeline_item_display_name(&task_id, &display_name)
         .map_err(|e| db_write_error("db error", e))?;
-    Ok(Json(crate::mobile_api::TaskActionResponse { task_id }))
+    Ok(Json(crate::mobile_api::TaskActionResponse {
+        task_id,
+        follow_task: None,
+    }))
 }
 
 #[derive(Debug, serde::Deserialize)]

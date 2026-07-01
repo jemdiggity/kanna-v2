@@ -25,6 +25,7 @@ pub(super) struct RepoWorkspacePathConfig {
 #[derive(Deserialize)]
 pub(super) struct PipelineDefinition {
     pub(super) stages: Vec<PipelineStage>,
+    pub(super) environments: Option<HashMap<String, PipelineEnvironment>>,
 }
 
 #[derive(Deserialize)]
@@ -36,6 +37,13 @@ pub(super) struct PipelineStage {
     pub(super) transition: Option<String>,
     pub(super) mode: Option<PipelineStageMode>,
     pub(super) post_action: Option<PipelinePostAction>,
+    pub(super) environment: Option<String>,
+    pub(super) follow_task: Option<bool>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct PipelineEnvironment {
+    pub(super) setup: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]

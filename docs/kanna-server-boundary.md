@@ -24,6 +24,7 @@ Mobile clients and future CLI tools should talk to `kanna-server`, not directly 
 - `POST /v1/tasks/{task_id}/actions/request-revision`
 - `POST /v1/tasks/{task_id}/actions/close`
 - `POST /v1/tasks/{task_id}/actions/advance-stage`
+- `POST /v1/tasks/{task_id}/actions/rerun-stage`
 - `POST /v1/tasks/{task_id}/actions/run-merge-agent`
 - `POST /v1/pairing/sessions`
 
