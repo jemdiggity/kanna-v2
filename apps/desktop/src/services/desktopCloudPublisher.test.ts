@@ -249,6 +249,28 @@ describe("desktop cloud live task index publisher", () => {
     );
   });
 
+  it("preserves Antigravity as the task agent provider in direct Firestore writes", async () => {
+    mocks.getDocs
+      .mockResolvedValueOnce({ docs: [canonicalDesktopDoc()] })
+      .mockResolvedValueOnce({ docs: [] });
+
+    await publishDesktopTaskSnapshot(
+      null as never,
+      openItem("task-antigravity", { agent_provider: "antigravity" }) as never,
+      repo() as never,
+    );
+
+    expect(mocks.set).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.objectContaining({
+        agent: {
+          provider: "antigravity",
+          type: "pty",
+        },
+      }),
+    );
+  });
+
   it("writes the desktop document to a deterministic id keyed by the desktop id", async () => {
     mocks.getDocs
       .mockResolvedValueOnce({ docs: [] }) // duplicate sweep finds nothing

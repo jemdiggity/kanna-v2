@@ -339,7 +339,9 @@ function normalizeActivity(activity: string | undefined): PipelineItem["activity
 }
 
 function normalizeAgentProvider(provider: string | null | undefined): PipelineItem["agent_provider"] {
-  return provider === "copilot" || provider === "codex" || provider === "opencode" ? provider : "claude";
+  return provider === "copilot" || provider === "codex" || provider === "opencode" || provider === "antigravity"
+    ? provider
+    : "claude";
 }
 
 async function resolveDesktopId(): Promise<string | null> {
