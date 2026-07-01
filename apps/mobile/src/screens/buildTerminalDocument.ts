@@ -182,6 +182,8 @@ export function buildTerminalDocument({ bottomInset }: BuildTerminalDocumentOpti
         root.style.minWidth = "0px";
         root.style.width = Math.ceil(pinnedCols * width) + "px";
         root.style.height = Math.ceil(pinnedRows * height) + "px";
+        root.dataset.kannaCols = String(pinnedCols);
+        root.dataset.kannaRows = String(pinnedRows);
       }
 
       window.__setTerminalDims = function setTerminalDims(dims) {
@@ -349,6 +351,28 @@ export function buildTerminalDocument({ bottomInset }: BuildTerminalDocumentOpti
         return Uint8Array.from(output);
       }
 
+      function resetTerminalFrameDiagnostics() {
+        root.dataset.kannaFrameCount = "0";
+        root.dataset.kannaByteCount = "0";
+        root.dataset.kannaTextSample = "";
+      }
+
+      function recordTerminalFrame(bytes) {
+        const frameCount = Number.parseInt(root.dataset.kannaFrameCount || "0", 10) || 0;
+        const byteCount = Number.parseInt(root.dataset.kannaByteCount || "0", 10) || 0;
+        root.dataset.kannaFrameCount = String(frameCount + 1);
+        root.dataset.kannaByteCount = String(byteCount + bytes.length);
+        try {
+          const sample = new TextDecoder("utf-8", { fatal: false }).decode(bytes.slice(0, 512));
+          if (sample.trim()) {
+            root.dataset.kannaTextSample = sample;
+          }
+        } catch (_error) {
+          // TextDecoder may not be available in older WebViews; byte count still
+          // proves a valid base64 frame reached the terminal write path.
+        }
+      }
+
       function writeTerminalChunks(chunksB64, done) {
         const chunks = Array.isArray(chunksB64) ? chunksB64 : [];
         let index = 0;
@@ -364,6 +388,7 @@ export function buildTerminalDocument({ bottomInset }: BuildTerminalDocumentOpti
             writeNext();
             return;
           }
+          recordTerminalFrame(bytes);
           term.write(bytes, writeNext);
         }
 
@@ -373,6 +398,7 @@ export function buildTerminalDocument({ bottomInset }: BuildTerminalDocumentOpti
       window.__replaceTerminalState = function replaceTerminalState(state) {
         const shouldStick = stickyToBottom || isNearBottom();
         term.reset();
+        resetTerminalFrameDiagnostics();
         fitTerminal();
         const complete = () => {
           fitTerminal();

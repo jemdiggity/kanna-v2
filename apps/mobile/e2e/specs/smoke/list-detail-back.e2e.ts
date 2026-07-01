@@ -4,16 +4,35 @@ import { selectors } from "../../helpers/selectors";
 const SCREEN_TIMEOUT_MS = 30_000;
 const POLL_INTERVAL_MS = 250;
 const BACK_NAVIGATION_SETTLE_MS = 500;
+const DEFAULT_PTY_COLS = 80;
+const DEFAULT_PTY_ROWS = 24;
+
+// The old regression sliced a large base64 snapshot at 12,000 encoded chars,
+// which can decode to at most about 9 KiB. Requiring 16 KiB decoded proves the
+// smoke saw a full large snapshot instead of the capped mid-token fragment.
+export const PTY_SNAPSHOT_MIN_DECODED_BYTES = 16_384;
 
 interface SmokeElement {
   click(): Promise<unknown>;
   isExisting(): Promise<boolean>;
+  waitForDisplayed?(options: { timeout: number }): Promise<unknown>;
 }
 
-interface SmokeUi {
+interface TaskTerminalLiveUi {
   getAgentMessageView(): Promise<SmokeElement>;
-  getBackButton(): Promise<SmokeElement>;
   getTerminalOverlay(): Promise<SmokeElement>;
+  waitUntil(
+    condition: () => Promise<boolean>,
+    options: {
+      interval: number;
+      timeout: number;
+      timeoutMsg: string;
+    }
+  ): Promise<unknown>;
+}
+
+interface TaskListUi {
+  getBackButton(): Promise<SmokeElement>;
   getTaskRows(): Promise<SmokeElement[]>;
   pause(ms: number): Promise<unknown>;
   waitUntil(
@@ -26,6 +45,67 @@ interface SmokeUi {
   ): Promise<unknown>;
 }
 
+interface RenderedPtyTerminalUi extends TaskTerminalLiveUi {
+  inspectTerminalWebView(): Promise<TerminalWebViewInspection>;
+}
+
+interface SmokeUi extends TaskListUi, RenderedPtyTerminalUi, PtyFixtureTaskUi {}
+
+export interface PtyTerminalFixture {
+  taskId: string;
+  sentinel: string;
+  expectedCols: number;
+  expectedRows: number;
+  minDecodedBytes: number;
+}
+
+interface PtyFixtureTaskUi {
+  getTaskRowById(taskId: string): Promise<SmokeElement>;
+  waitUntil(
+    condition: () => Promise<boolean>,
+    options: {
+      interval: number;
+      timeout: number;
+      timeoutMsg: string;
+    }
+  ): Promise<unknown>;
+}
+
+type TerminalWebViewInspection =
+  | {
+      kind: "rendered";
+      byteCount: number;
+      cols: number | null;
+      frameCount: number;
+      rows: number | null;
+      text: string;
+    }
+  | {
+      kind: "unavailable";
+      reason: string;
+    };
+
+interface WebViewContextDriver {
+  execute<T>(script: () => T): Promise<T>;
+  getContext?: () => Promise<string>;
+  getContexts?: () => Promise<unknown[]>;
+  switchContext?: (context: string) => Promise<unknown>;
+}
+
+type FetchLike = (
+  input: string
+) => Promise<{
+  ok: boolean;
+  status: number;
+  json(): Promise<unknown>;
+}>;
+
+interface RunListDetailBackSmokeOptions {
+  desktopServerUrl?: string;
+  env?: Record<string, string | undefined>;
+  fetchImpl?: FetchLike;
+}
+
 function createSmokeUi(driver: Browser): SmokeUi {
   return {
     async getAgentMessageView() {
@@ -34,12 +114,18 @@ function createSmokeUi(driver: Browser): SmokeUi {
     async getBackButton() {
       return driver.$(selectors.taskBackButton);
     },
+    async getTaskRowById(taskId) {
+      return driver.$(`~mobile.task-row.${taskId}`);
+    },
     async getTerminalOverlay() {
       return driver.$(selectors.terminalOverlay);
     },
     async getTaskRows() {
       const taskRows = await driver.$$(selectors.taskRowsXPath);
       return Array.from(taskRows);
+    },
+    async inspectTerminalWebView() {
+      return inspectTerminalWebView(driver as Browser & WebViewContextDriver);
     },
     async pause(ms) {
       return driver.pause(ms);
@@ -50,7 +136,178 @@ function createSmokeUi(driver: Browser): SmokeUi {
   };
 }
 
-export async function waitForTaskTerminalLive(ui: SmokeUi): Promise<void> {
+function parsePositiveInteger(
+  rawValue: string | undefined,
+  envName: string,
+  defaultValue: number
+): number {
+  const value = rawValue?.trim();
+  if (!value) {
+    return defaultValue;
+  }
+
+  const parsed = Number.parseInt(value, 10);
+  if (Number.isNaN(parsed) || parsed <= 0) {
+    throw new Error(`${envName} must be a positive integer, got: ${value}`);
+  }
+  return parsed;
+}
+
+export function resolveRequiredPtyTerminalFixture(
+  env: Record<string, string | undefined> = process.env as Record<
+    string,
+    string | undefined
+  >
+): PtyTerminalFixture {
+  const taskId = env.KANNA_E2E_PTY_TASK_ID?.trim();
+  if (!taskId) {
+    throw new Error(
+      "KANNA_E2E_PTY_TASK_ID is required. Provide a known live PTY task whose " +
+        "terminal snapshot contains KANNA_E2E_PTY_SENTINEL; opening an arbitrary " +
+        "task row does not prove mobile PTY rendering."
+    );
+  }
+
+  const sentinel = env.KANNA_E2E_PTY_SENTINEL?.trim();
+  if (!sentinel) {
+    throw new Error(
+      "KANNA_E2E_PTY_SENTINEL is required so the smoke can prove rendered " +
+        "terminal text came from the intended PTY fixture."
+    );
+  }
+
+  return {
+    taskId,
+    sentinel,
+    expectedCols: parsePositiveInteger(
+      env.KANNA_E2E_PTY_EXPECTED_COLS,
+      "KANNA_E2E_PTY_EXPECTED_COLS",
+      DEFAULT_PTY_COLS
+    ),
+    expectedRows: parsePositiveInteger(
+      env.KANNA_E2E_PTY_EXPECTED_ROWS,
+      "KANNA_E2E_PTY_EXPECTED_ROWS",
+      DEFAULT_PTY_ROWS
+    ),
+    minDecodedBytes: parsePositiveInteger(
+      env.KANNA_E2E_PTY_MIN_DECODED_BYTES,
+      "KANNA_E2E_PTY_MIN_DECODED_BYTES",
+      PTY_SNAPSHOT_MIN_DECODED_BYTES
+    )
+  };
+}
+
+function getStringProperty(value: unknown, key: string): string | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const property = (value as Record<string, unknown>)[key];
+  return typeof property === "string" ? property : null;
+}
+
+export async function assertPtyTerminalFixtureAvailable(
+  desktopServerUrl: string,
+  fixture: PtyTerminalFixture,
+  fetchImpl: FetchLike = fetch
+): Promise<void> {
+  const response = await fetchImpl(
+    `${desktopServerUrl}/v1/tasks/${encodeURIComponent(fixture.taskId)}`
+  );
+  if (!response.ok) {
+    throw new Error(
+      `Known PTY fixture task ${fixture.taskId} was not available from ${desktopServerUrl}: ${response.status}`
+    );
+  }
+
+  const task = await response.json();
+  const agentType = getStringProperty(task, "agentType");
+  const closedAt = getStringProperty(task, "closedAt");
+  if (agentType !== "pty" || closedAt) {
+    throw new Error(
+      `Known PTY fixture task ${fixture.taskId} expected a live PTY task, got ` +
+        `agentType=${agentType ?? "<missing>"} closedAt=${closedAt ?? "<open>"}.`
+    );
+  }
+}
+
+function contextName(context: unknown): string | null {
+  if (typeof context === "string") {
+    return context;
+  }
+  if (!context || typeof context !== "object") {
+    return null;
+  }
+
+  const record = context as Record<string, unknown>;
+  for (const key of ["id", "name"]) {
+    if (typeof record[key] === "string") {
+      return record[key];
+    }
+  }
+
+  return null;
+}
+
+export async function inspectTerminalWebView(
+  driver: WebViewContextDriver
+): Promise<TerminalWebViewInspection> {
+  if (!driver.getContexts || !driver.switchContext) {
+    return {
+      kind: "unavailable",
+      reason: "Appium driver does not expose WebView context APIs"
+    };
+  }
+
+  const contexts = await driver.getContexts();
+  const webViewContext = contexts
+    .map(contextName)
+    .find((context): context is string => Boolean(context?.includes("WEBVIEW")));
+  if (!webViewContext) {
+    return {
+      kind: "unavailable",
+      reason: `No WEBVIEW context was available. Contexts: ${contexts
+        .map(contextName)
+        .filter(Boolean)
+        .join(", ") || "<none>"}`
+    };
+  }
+
+  const previousContext = driver.getContext ? await driver.getContext() : null;
+  await driver.switchContext(webViewContext);
+  try {
+    return await driver.execute(() => {
+      const root = document.getElementById("terminal-root");
+      if (!root) {
+        return {
+          kind: "unavailable" as const,
+          reason: "WebView document did not contain #terminal-root"
+        };
+      }
+
+      const terminalRows =
+        root.querySelector(".xterm-rows")?.textContent ?? root.textContent ?? "";
+      const byteCount = Number.parseInt(root.dataset.kannaByteCount ?? "", 10);
+      const cols = Number.parseInt(root.dataset.kannaCols ?? "", 10);
+      const frameCount = Number.parseInt(root.dataset.kannaFrameCount ?? "", 10);
+      const rows = Number.parseInt(root.dataset.kannaRows ?? "", 10);
+      return {
+        kind: "rendered" as const,
+        byteCount: Number.isNaN(byteCount) ? 0 : byteCount,
+        cols: Number.isNaN(cols) ? null : cols,
+        frameCount: Number.isNaN(frameCount) ? 0 : frameCount,
+        rows: Number.isNaN(rows) ? null : rows,
+        text: terminalRows || root.dataset.kannaTextSample || ""
+      };
+    });
+  } finally {
+    if (previousContext) {
+      await driver.switchContext(previousContext);
+    }
+  }
+}
+
+export async function waitForTaskTerminalLive(ui: TaskTerminalLiveUi): Promise<void> {
   await ui.waitUntil(
     async () => {
       const agentMessageView = await ui.getAgentMessageView();
@@ -68,7 +325,95 @@ export async function waitForTaskTerminalLive(ui: SmokeUi): Promise<void> {
   );
 }
 
-async function waitForTaskRows(ui: SmokeUi): Promise<void> {
+export async function waitForRenderedPtyTerminal(
+  ui: RenderedPtyTerminalUi,
+  fixture: PtyTerminalFixture
+): Promise<void> {
+  let lastInspection: TerminalWebViewInspection | null = null;
+  const baseTimeoutMessage =
+    `Expected mobile PTY terminal WebView to render at least ${fixture.minDecodedBytes} decoded bytes, ` +
+    `desktop PTY dimensions ${fixture.expectedCols}x${fixture.expectedRows}, and sentinel text "${fixture.sentinel}". ` +
+    "If this fails before WebView inspection, enable Appium iOS WebView context access and ensure KANNA_E2E_PTY_TASK_ID points at the known live PTY snapshot.";
+
+  try {
+    await ui.waitUntil(
+      async () => {
+        const agentMessageView = await ui.getAgentMessageView();
+        if (await agentMessageView.isExisting()) {
+          lastInspection = {
+            kind: "unavailable",
+            reason: "Opened task rendered the agent message view, not the PTY terminal WebView"
+          };
+          return false;
+        }
+
+        lastInspection = await ui.inspectTerminalWebView();
+        return renderedPtyInspectionMatches(lastInspection, fixture);
+      },
+      {
+        interval: POLL_INTERVAL_MS,
+        timeout: SCREEN_TIMEOUT_MS,
+        timeoutMsg: baseTimeoutMessage
+      }
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : baseTimeoutMessage;
+    throw new Error(
+      `${message} Last validation error: ${describeRenderedPtyInspectionFailure(
+        lastInspection,
+        fixture
+      )}. Last inspection: ${JSON.stringify(lastInspection)}`
+    );
+  }
+}
+
+function renderedPtyInspectionMatches(
+  inspection: TerminalWebViewInspection,
+  fixture: PtyTerminalFixture
+): boolean {
+  if (inspection.kind !== "rendered") {
+    return false;
+  }
+
+  return (
+    inspection.byteCount >= fixture.minDecodedBytes &&
+    inspection.frameCount > 0 &&
+    inspection.cols === fixture.expectedCols &&
+    inspection.rows === fixture.expectedRows &&
+    inspection.text.trim().length > 0 &&
+    inspection.text.includes(fixture.sentinel)
+  );
+}
+
+function describeRenderedPtyInspectionFailure(
+  inspection: TerminalWebViewInspection | null,
+  fixture: PtyTerminalFixture
+): string {
+  if (!inspection) {
+    return "terminal WebView was not inspected";
+  }
+  if (inspection.kind === "unavailable") {
+    return inspection.reason;
+  }
+  if (inspection.byteCount < fixture.minDecodedBytes) {
+    return `byteCount ${inspection.byteCount} was below ${fixture.minDecodedBytes}`;
+  }
+  if (inspection.frameCount <= 0) {
+    return `frameCount ${inspection.frameCount} did not prove a decoded terminal frame`;
+  }
+  if (inspection.cols !== fixture.expectedCols || inspection.rows !== fixture.expectedRows) {
+    return `desktop PTY dimensions were ${inspection.cols}x${inspection.rows}, expected ${fixture.expectedCols}x${fixture.expectedRows}`;
+  }
+  if (inspection.text.trim().length === 0) {
+    return "terminal text was blank after WebView rendering";
+  }
+  if (!inspection.text.includes(fixture.sentinel)) {
+    return `terminal sentinel "${fixture.sentinel}" was missing from rendered text`;
+  }
+  return "terminal inspection did not match the fixture";
+}
+
+async function waitForTaskRows(ui: TaskListUi): Promise<void> {
   await ui.waitUntil(
     async () => {
       const taskRows = await ui.getTaskRows();
@@ -82,7 +427,28 @@ async function waitForTaskRows(ui: SmokeUi): Promise<void> {
   );
 }
 
-export async function ensureTaskListVisible(ui: SmokeUi): Promise<void> {
+export async function openPtyFixtureTask(
+  ui: PtyFixtureTaskUi,
+  taskId: string
+): Promise<void> {
+  await ui.waitUntil(
+    async () => {
+      const taskRow = await ui.getTaskRowById(taskId);
+      return taskRow.isExisting();
+    },
+    {
+      interval: POLL_INTERVAL_MS,
+      timeout: SCREEN_TIMEOUT_MS,
+      timeoutMsg: `Expected known PTY fixture task row ${taskId} in the mobile task list`
+    }
+  );
+
+  const taskRow = await ui.getTaskRowById(taskId);
+  await taskRow.waitForDisplayed?.({ timeout: SCREEN_TIMEOUT_MS });
+  await taskRow.click();
+}
+
+export async function ensureTaskListVisible(ui: TaskListUi): Promise<void> {
   const backButton = await ui.getBackButton();
   if (await backButton.isExisting()) {
     await backButton.click();
@@ -92,16 +458,31 @@ export async function ensureTaskListVisible(ui: SmokeUi): Promise<void> {
   await waitForTaskRows(ui);
 }
 
-export async function runListDetailBackSmoke(driver: Browser): Promise<void> {
+export async function runListDetailBackSmoke(
+  driver: Browser,
+  options: RunListDetailBackSmokeOptions = {}
+): Promise<void> {
   const ui = createSmokeUi(driver);
+  const env = options.env ?? (process.env as Record<string, string | undefined>);
+  const desktopServerUrl =
+    options.desktopServerUrl ?? env.KANNA_E2E_DESKTOP_SERVER_URL?.trim();
+  if (!desktopServerUrl) {
+    throw new Error(
+      "KANNA_E2E_DESKTOP_SERVER_URL is required to validate the known PTY fixture task."
+    );
+  }
+  const fixture = resolveRequiredPtyTerminalFixture(env);
+  await assertPtyTerminalFixtureAvailable(
+    desktopServerUrl,
+    fixture,
+    options.fetchImpl
+  );
+
   const appShell = await driver.$(selectors.appShell);
   await appShell.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
 
   await ensureTaskListVisible(ui);
-
-  const [firstTaskRow] = await driver.$$(selectors.taskRowsXPath);
-  await firstTaskRow.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
-  await firstTaskRow.click();
+  await openPtyFixtureTask(ui, fixture.taskId);
 
   await driver.pause(1_000);
   await driver.waitUntil(
@@ -117,6 +498,7 @@ export async function runListDetailBackSmoke(driver: Browser): Promise<void> {
   );
 
   await waitForTaskTerminalLive(ui);
+  await waitForRenderedPtyTerminal(ui, fixture);
 
   const backButton = await driver.$(selectors.taskBackButton);
   await backButton.click();

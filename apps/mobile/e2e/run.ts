@@ -212,7 +212,9 @@ async function main(): Promise<void> {
           displayName: desktopIdentity.desktopName
         }
       });
-      await runListDetailBackSmoke(driver);
+      await runListDetailBackSmoke(driver, {
+        desktopServerUrl: resolvedDesktopServerUrl
+      });
       await runProfileConnectionSmoke(driver);
     }
   } finally {

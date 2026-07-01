@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   buildTerminalAppendScript,
   buildTerminalDocument,
-  buildTerminalReplaceScript
+  buildTerminalReplaceScript,
+  buildTerminalResizeScript
 } from "./buildTerminalDocument";
 
 function b64(input: string): string {
@@ -82,6 +83,32 @@ describe("buildTerminalDocument", () => {
     expect(script).toContain("window.__appendTerminalChunk");
     expect(script).toContain(b64("Second line\n"));
     expect(script).not.toContain("Second line");
+  });
+
+  it("keeps large newline-delimited base64 snapshot frames as separate chunks", () => {
+    const firstFrame = "A".repeat(64_000);
+    const secondFrame = b64("terminal prompt\n");
+    const script = buildTerminalReplaceScript({
+      output: `${firstFrame}\n${secondFrame}\n`,
+      status: "live"
+    });
+
+    expect(script).toContain(`"chunksB64":["${firstFrame}","${secondFrame}"]`);
+    expect(script).not.toContain(`${firstFrame}\\n${secondFrame}`);
+  });
+
+  it("builds resize scripts for the WebView terminal dimension bridge", () => {
+    const html = buildTerminalDocument({ bottomInset: 24 });
+    const script = buildTerminalResizeScript(132, 43);
+
+    expect(html).toContain("window.__setTerminalDims");
+    expect(html).toContain("term.resize(pinnedCols, pinnedRows)");
+    expect(html).toContain("root.dataset.kannaCols = String(pinnedCols)");
+    expect(html).toContain("root.dataset.kannaRows = String(pinnedRows)");
+    expect(html).toContain("root.dataset.kannaFrameCount");
+    expect(html).toContain("new TextDecoder");
+    expect(html).toContain("applyPinnedSize()");
+    expect(script).toBe('window.__setTerminalDims({"cols":132,"rows":43}); true;');
   });
 
   it("keeps echoed terminal input control stripping in the webview byte path", () => {
