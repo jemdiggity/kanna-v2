@@ -4,7 +4,8 @@ import { buildKannaRuntimeSystemPrompt, buildKannaRuntimeUserPrompt } from "../.
 import { invoke } from "../invoke";
 import { isTauri } from "../tauri-mock";
 import { buildTaskShellCommand, getShellTerminalEnv, getTaskTerminalEnv } from "../composables/terminalSessionRecovery";
-import { buildKannaCliPathEnv, buildTaskRuntimeEnv, resolveKannaServerBaseUrl } from "./kannaCliEnv";
+import { resolveCurrentKannaServerBaseUrl } from "../services/kannaServerBaseUrl";
+import { buildKannaCliPathEnv, buildTaskRuntimeEnv } from "./kannaCliEnv";
 import { prepareKannaMcpRuntime } from "./kannaMcpRuntime";
 import { encodeDaemonInput } from "./daemonInput";
 import { getAgentPermissionFlags } from "./agent-permissions";
@@ -231,17 +232,14 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
     const shellTaskId = isWorktree ? taskIdFromWorktreeShellSessionId(sessionId) : null;
     if (shellTaskId) {
       try {
-        const [socketPath, mobileServerPort] = await Promise.all([
+        const [socketPath, serverBaseUrl] = await Promise.all([
           invoke<string>("get_pipeline_socket_path"),
-          invoke<string>("read_env_var", { name: "KANNA_MOBILE_SERVER_PORT" }).catch((error) => {
-            console.debug("[store] KANNA_MOBILE_SERVER_PORT not set while building shell env:", error);
-            return null;
-          }),
+          resolveCurrentKannaServerBaseUrl("building shell env"),
         ]);
         Object.assign(env, buildTaskRuntimeEnv({
           taskId: shellTaskId,
           socketPath,
-          serverBaseUrl: resolveKannaServerBaseUrl(mobileServerPort),
+          serverBaseUrl,
           portEnv: parsedPortEnv,
           kannaCliPath: resolvedKannaCliPath,
           path: runtimePath,
@@ -345,12 +343,7 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
       ...buildTaskRuntimeEnv({
         taskId: sessionId,
         socketPath: await invoke<string>("get_pipeline_socket_path"),
-        serverBaseUrl: resolveKannaServerBaseUrl(
-          await invoke<string>("read_env_var", { name: "KANNA_MOBILE_SERVER_PORT" }).catch((error) => {
-            console.debug("[store] KANNA_MOBILE_SERVER_PORT not set while recovering SDK task env:", error);
-            return null;
-          }),
-        ),
+        serverBaseUrl: await resolveCurrentKannaServerBaseUrl("recovering SDK task env"),
         kannaCliPath: await invoke<string>("which_binary", { name: "kanna-cli" }).catch((error) => {
           console.debug("[store] kanna-cli not available while recovering SDK task env:", error);
           return null;
@@ -433,12 +426,7 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
       Object.assign(env, buildTaskRuntimeEnv({
         taskId: sessionId,
         socketPath,
-        serverBaseUrl: resolveKannaServerBaseUrl(
-          await invoke<string>("read_env_var", { name: "KANNA_MOBILE_SERVER_PORT" }).catch((error) => {
-            console.debug("[store] KANNA_MOBILE_SERVER_PORT not set while building session env:", error);
-            return null;
-          }),
-        ),
+        serverBaseUrl: await resolveCurrentKannaServerBaseUrl("building session env"),
         kannaCliPath: resolvedKannaCliPath,
         path: runtimePath,
       }));

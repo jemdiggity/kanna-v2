@@ -1,7 +1,8 @@
 import { parseAgentMd, type RepoConfig } from "@kanna/core";
 import type { PipelineItem, Repo } from "@kanna/db";
 import { invoke } from "../invoke";
-import { buildTaskRuntimeEnv, resolveKannaServerBaseUrl } from "./kannaCliEnv";
+import { resolveCurrentKannaServerBaseUrl } from "../services/kannaServerBaseUrl";
+import { buildTaskRuntimeEnv } from "./kannaCliEnv";
 import { prepareKannaMcpRuntime } from "./kannaMcpRuntime";
 import { readRepoConfig } from "./state";
 import { buildWorktreeSessionEnv } from "./worktreeEnv";
@@ -57,10 +58,6 @@ export async function buildTaskLifecycleEnv(options: {
     portEnv: options.portEnv,
     inheritedPath,
   });
-  const mobileServerPort = await invoke<string>("read_env_var", { name: "KANNA_MOBILE_SERVER_PORT" }).catch((error) => {
-    console.debug(`[store] KANNA_MOBILE_SERVER_PORT not set while creating ${options.logContext} env:`, error);
-    return null;
-  });
   const kannaCliPath = await invoke<string>("which_binary", { name: "kanna-cli" }).catch((error) => {
     console.debug(`[store] kanna-cli not available while creating ${options.logContext} env:`, error);
     return null;
@@ -71,7 +68,7 @@ export async function buildTaskLifecycleEnv(options: {
     ...buildTaskRuntimeEnv({
       taskId: options.taskId,
       socketPath: await invoke<string>("get_pipeline_socket_path"),
-      serverBaseUrl: resolveKannaServerBaseUrl(mobileServerPort),
+      serverBaseUrl: await resolveCurrentKannaServerBaseUrl(`creating ${options.logContext} env`),
       kannaCliPath,
       path: worktreeEnv.PATH ?? inheritedPath,
       portEnv: options.portEnv,

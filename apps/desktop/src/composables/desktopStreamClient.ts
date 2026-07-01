@@ -1,16 +1,12 @@
 import { StreamClient } from "@kanna/stream-client";
 import { invoke } from "../invoke";
+import { resolveCurrentKannaServerBaseUrl, streamUrlFromServerBaseUrl } from "../services/kannaServerBaseUrl";
 
 type ConnectionListener = (connected: boolean) => void;
 
 let sharedClient: StreamClient | null = null;
 let sharedClientPromise: Promise<StreamClient> | null = null;
 const connectionListeners = new Set<ConnectionListener>();
-
-function streamUrlFromPort(port: string | null): string {
-  const resolvedPort = port && port.trim().length > 0 ? port.trim() : "48120";
-  return `ws://127.0.0.1:${resolvedPort}/v1/stream`;
-}
 
 function notifyConnectionListeners(connected: boolean): void {
   for (const listener of [...connectionListeners]) {
@@ -24,9 +20,9 @@ export async function getSharedStreamClient(): Promise<StreamClient> {
 
   sharedClientPromise = (async () => {
     await invoke("ensure_mobile_server");
-    const port = await invoke<string>("read_env_var", { name: "KANNA_MOBILE_SERVER_PORT" }).catch(() => null);
+    const serverBaseUrl = await resolveCurrentKannaServerBaseUrl("creating shared stream client");
     const client = new StreamClient({
-      url: streamUrlFromPort(port),
+      url: streamUrlFromServerBaseUrl(serverBaseUrl),
       onConnectionChange: notifyConnectionListeners,
     });
     sharedClient = client;

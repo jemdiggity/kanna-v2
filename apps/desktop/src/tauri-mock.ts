@@ -343,6 +343,9 @@ const invokeHandlers: Record<string, (...args: any[]) => any> = {
     state: "running",
     desktopId: "desktop-mock-current",
     desktopName: "Mock Desktop",
+    serverVersion: "0.0.0",
+    lanHost: "127.0.0.1",
+    lanPort: 48120,
     pairingCode: null,
   }),
   create_mobile_pairing_session: () => ({

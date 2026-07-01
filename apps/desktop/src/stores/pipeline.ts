@@ -5,7 +5,8 @@ import { getNextStage } from "../../../../packages/core/src/pipeline/types";
 import type { AgentDefinition, PipelineDefinition, PipelinePostAction } from "../../../../packages/core/src/pipeline/pipeline-types";
 import { clearPipelineItemActivePostAction, clearPipelineItemStageResult, getRepo, updatePipelineItemActivePostAction, updatePipelineItemStage } from "@kanna/db";
 import { invoke } from "../invoke";
-import { buildTaskRuntimeEnv, resolveKannaServerBaseUrl } from "./kannaCliEnv";
+import { resolveCurrentKannaServerBaseUrl } from "../services/kannaServerBaseUrl";
+import { buildTaskRuntimeEnv } from "./kannaCliEnv";
 import { encodeAgentStageInputChunks } from "./daemonInput";
 import {
   getPreferredAgentProviders,
@@ -532,12 +533,7 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
           const scriptEnv = buildTaskRuntimeEnv({
             taskId,
             socketPath: await invoke<string>("get_pipeline_socket_path"),
-            serverBaseUrl: resolveKannaServerBaseUrl(
-              await invoke<string>("read_env_var", { name: "KANNA_MOBILE_SERVER_PORT" }).catch((error) => {
-                console.debug("[pipeline] KANNA_MOBILE_SERVER_PORT not set while building setup env:", error);
-                return null;
-              }),
-            ),
+            serverBaseUrl: await resolveCurrentKannaServerBaseUrl("building setup env"),
             portEnv,
             kannaCliPath: await invoke<string>("which_binary", { name: "kanna-cli" }).catch((error) => {
               console.debug("[pipeline] kanna-cli not available while building setup env:", error);

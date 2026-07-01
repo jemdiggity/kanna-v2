@@ -5,12 +5,14 @@ import { createSessionsApi } from "./sessions";
 import type { StoreContext } from "./state";
 
 const mocks = vi.hoisted(() => {
-  const invokeMock = vi.fn(async (command: string, args?: Record<string, unknown>) => {
+  const invokeDefault = async (command: string, args?: Record<string, unknown>) => {
     switch (command) {
       case "read_env_var":
         if (args?.name === "PATH") return "/usr/bin:/bin";
         if (args?.name === "KANNA_DAEMON_DIR") return "/tmp/kanna-daemon";
         throw new Error(`env var not set: ${args?.name ?? ""}`);
+      case "mobile_server_status":
+        return { state: "running", lanPort: 48120 };
       case "which_binary":
         return `/usr/bin/${args?.name ?? "binary"}`;
       case "get_app_data_dir":
@@ -34,9 +36,10 @@ const mocks = vi.hoisted(() => {
       default:
         throw new Error(`unexpected invoke: ${command}`);
     }
-  });
+  };
+  const invokeMock = vi.fn(invokeDefault);
   const updateAgentSessionIdMock = vi.fn(async () => {});
-  return { invokeMock, updateAgentSessionIdMock };
+  return { invokeMock, invokeDefault, updateAgentSessionIdMock };
 });
 
 vi.mock("../invoke", () => ({
@@ -98,7 +101,8 @@ function makeContext(): StoreContext {
 describe("createSessionsApi", () => {
   beforeEach(() => {
     vi.useRealTimers();
-    mocks.invokeMock.mockClear();
+    mocks.invokeMock.mockReset();
+    mocks.invokeMock.mockImplementation(mocks.invokeDefault);
     mocks.updateAgentSessionIdMock.mockClear();
   });
 
@@ -227,6 +231,25 @@ describe("createSessionsApi", () => {
         },
       },
     });
+  });
+
+  it("uses the running desktop server port when writing agent MCP config", async () => {
+    mocks.invokeMock.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (command === "mobile_server_status") {
+        return { state: "running", lanPort: 48121 };
+      }
+      return mocks.invokeDefault(command, args);
+    });
+    const sessions = createSessionsApi(makeContext());
+
+    const prepared = await sessions.preparePtySession("task-1", "Ship it", {
+      agentProvider: "claude",
+    });
+
+    expect(prepared.env.KANNA_SERVER_BASE_URL).toBe("http://127.0.0.1:48121");
+    const writeCall = mocks.invokeMock.mock.calls.find(([command]) => command === "write_text_file");
+    const content = String(writeCall?.[1]?.content ?? "");
+    expect(JSON.parse(content).mcpServers["kanna-mcp"].env.KANNA_SERVER_BASE_URL).toBe("http://127.0.0.1:48121");
   });
 
   it("builds a Copilot resume command with the stored session id", async () => {
