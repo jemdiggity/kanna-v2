@@ -78,6 +78,21 @@ interface MobileEnvironmentRecord {
   runtimeVersion?: string;
 }
 
+interface OtaChannelPointer {
+  currentUpdateId?: string;
+  createdAt?: string;
+  runtimeVersion?: string;
+}
+
+interface OtaDoctorCheck {
+  status: "PASS" | "FAIL";
+  name: string;
+  detail: string;
+}
+
+const OTA_SECRET_NAME = "kanna-mobile-ota-private-key-pem";
+const OTA_KEY_ID = "kanna-mobile-ota-v1";
+
 export function computeExpoUpdateId(metadataBytes: Buffer): string {
   const hash = createHash("sha256").update(metadataBytes).digest("hex");
   return [
@@ -312,6 +327,201 @@ export async function executeMobileOtaStatusWithContext(
   };
 }
 
+export async function executeMobileOtaDoctorWithContext(
+  input: Pick<MobileOtaInput, "staging" | "production">,
+  context: MobileOtaContext
+): Promise<{ ok: boolean; message: string; data?: unknown }> {
+  const environment = resolveMobileOtaEnvironment(input, "doctor");
+  const identity = resolveKdEnvironment(cloudEnvironmentToKdEnvironment(environment));
+  if (!identity.otaBucket || !identity.otaChannel) {
+    throw new Error(`Mobile OTA is not configured for ${environment}.`);
+  }
+  if (!identity.gceVmName) {
+    throw new Error(`Relay VM is not configured for ${environment}.`);
+  }
+  const kdEnvironmentName = cloudEnvironmentToKdEnvironment(environment);
+  if (kdEnvironmentName !== "staging" && kdEnvironmentName !== "prod") {
+    throw new Error("Mobile OTA applies only to staging and production.");
+  }
+
+  const runtimeVersion = await resolveMobileRuntimeVersion(context.repoRoot, kdEnvironmentName);
+  const projectId = identity.firebaseProjectId;
+  const bucket = identity.otaBucket;
+  const channel = identity.otaChannel;
+  const pointerObject = `ota/ios/${runtimeVersion}/channels/${channel}.json`;
+  const relayBaseUrl = identity.relayUrl.replace(/^ws/, "http");
+  const relayHealthUrl = `${relayBaseUrl}/health`;
+  const relayManifestUrl = `${relayBaseUrl}/ota/manifest`;
+  const checks: OtaDoctorCheck[] = [
+    {
+      status: "PASS",
+      name: "environment",
+      detail: `${environment} project=${projectId} bucket=${bucket} channel=${channel} runtimeVersion=${runtimeVersion}`,
+    },
+  ];
+
+  const pointerResult = await context.runner.run("gcloud", [
+    "storage",
+    "cat",
+    `gs://${bucket}/${pointerObject}`,
+  ], { cwd: context.repoRoot, env: context.env });
+  const pointer = parsePointer(pointerResult.stdout);
+  const updateId = pointer?.currentUpdateId?.trim();
+  if (pointerResult.exitCode === 0 && pointer && updateId) {
+    if (pointer.runtimeVersion && pointer.runtimeVersion !== runtimeVersion) {
+      checks.push({
+        status: "FAIL",
+        name: "pointer",
+        detail: `gs://${bucket}/${pointerObject} points at runtimeVersion ${pointer.runtimeVersion}, expected ${runtimeVersion}`,
+      });
+    } else {
+      checks.push({
+        status: "PASS",
+        name: "pointer",
+        detail: `gs://${bucket}/${pointerObject} -> ${updateId}`,
+      });
+    }
+    await addGcsObjectCheck(checks, context, bucket, `ota/ios/${runtimeVersion}/updates/${updateId}/metadata.json`, "update metadata");
+    await addGcsObjectCheck(checks, context, bucket, `ota/ios/${runtimeVersion}/updates/${updateId}/expoConfig.json`, "update expoConfig");
+  } else {
+    checks.push({
+      status: "FAIL",
+      name: "pointer",
+      detail: `gs://${bucket}/${pointerObject} is not readable: ${summarizeCommandFailure(pointerResult)}`,
+    });
+  }
+
+  await addCommandCheck(checks, context, {
+    name: "relay health",
+    command: "curl",
+    args: ["--fail", "--silent", "--show-error", relayHealthUrl],
+    passDetail: `${relayHealthUrl} responded successfully`,
+    failDetail: `${relayHealthUrl} failed`,
+  });
+
+  const manifestResult = await context.runner.run("curl", manifestCurlArgs(relayManifestUrl, runtimeVersion, channel), {
+    cwd: context.repoRoot,
+    env: context.env,
+  });
+  if (manifestResult.exitCode === 0) {
+    checks.push({
+      status: "PASS",
+      name: "manifest",
+      detail: `${relayManifestUrl} returned an Expo manifest response`,
+    });
+  } else if (!updateId) {
+    checks.push({
+      status: "FAIL",
+      name: "manifest",
+      detail: "relay reports no update for the channel; publish an OTA before human device apply verification",
+    });
+  } else {
+    checks.push({
+      status: "FAIL",
+      name: "manifest",
+      detail: `${relayManifestUrl} failed for update ${updateId}: ${summarizeCommandFailure(manifestResult)}`,
+    });
+  }
+
+  await addCommandCheck(checks, context, {
+    name: "secret",
+    command: "gcloud",
+    args: ["secrets", "describe", OTA_SECRET_NAME, "--project", projectId],
+    passDetail: `${OTA_SECRET_NAME} exists in ${projectId}`,
+    failDetail: `${OTA_SECRET_NAME} is missing or inaccessible in ${projectId}`,
+  });
+
+  const serviceAccountResult = await context.runner.run("gcloud", [
+    "compute",
+    "instances",
+    "describe",
+    identity.gceVmName,
+    "--project",
+    projectId,
+    "--zone",
+    "us-central1-a",
+    "--format",
+    "value(serviceAccounts[0].email)",
+  ], { cwd: context.repoRoot, env: context.env });
+  const serviceAccount = serviceAccountResult.stdout.trim();
+  if (serviceAccountResult.exitCode === 0 && serviceAccount.length > 0) {
+    checks.push({
+      status: "PASS",
+      name: "relay service account",
+      detail: serviceAccount,
+    });
+  } else {
+    checks.push({
+      status: "FAIL",
+      name: "relay service account",
+      detail: summarizeCommandFailure(serviceAccountResult),
+    });
+  }
+
+  if (serviceAccount.length > 0) {
+    await addIamPolicyCheck(checks, context, {
+      name: "secret IAM",
+      command: "gcloud",
+      args: [
+        "secrets",
+        "get-iam-policy",
+        OTA_SECRET_NAME,
+        "--project",
+        projectId,
+        "--flatten=bindings[].members",
+        `--filter=bindings.role:roles/secretmanager.secretAccessor AND bindings.members:serviceAccount:${serviceAccount}`,
+        "--format=value(bindings.members)",
+      ],
+      expectedMember: `serviceAccount:${serviceAccount}`,
+      passDetail: `${serviceAccount} can read ${OTA_SECRET_NAME}`,
+      failDetail: `${serviceAccount} is not listed as a Secret Manager accessor for ${OTA_SECRET_NAME}`,
+    });
+    await addIamPolicyCheck(checks, context, {
+      name: "GCS IAM",
+      command: "gcloud",
+      args: [
+        "storage",
+        "buckets",
+        "get-iam-policy",
+        `gs://${bucket}`,
+        "--project",
+        projectId,
+        "--flatten=bindings[].members",
+        `--filter=bindings.role:roles/storage.objectViewer AND bindings.members:serviceAccount:${serviceAccount}`,
+        "--format=value(bindings.members)",
+      ],
+      expectedMember: `serviceAccount:${serviceAccount}`,
+      passDetail: `${serviceAccount} can read gs://${bucket}`,
+      failDetail: `${serviceAccount} is not listed as a Storage Object Viewer for gs://${bucket}`,
+    });
+  } else {
+    checks.push({
+      status: "FAIL",
+      name: "secret IAM",
+      detail: "skipped because the relay service account could not be resolved",
+    });
+    checks.push({
+      status: "FAIL",
+      name: "GCS IAM",
+      detail: "skipped because the relay service account could not be resolved",
+    });
+  }
+
+  const ok = checks.every((check) => check.status === "PASS");
+  return {
+    ok,
+    message: formatDoctorMessage({
+      environment,
+      bucket,
+      channel,
+      runtimeVersion,
+      relayManifestUrl,
+      checks,
+    }),
+    data: { environment, bucket, channel, runtimeVersion, pointerObject, checks },
+  };
+}
+
 export async function executeMobileOtaProvisionSecretWithContext(
   input: MobileOtaProvisionSecretInput,
   context: MobileOtaContext
@@ -323,7 +533,7 @@ export async function executeMobileOtaProvisionSecretWithContext(
   }
   await readFile(input.keyPath);
 
-  const secretName = "kanna-mobile-ota-private-key-pem";
+  const secretName = OTA_SECRET_NAME;
   const projectId = identity.firebaseProjectId;
   const describe = await context.runner.run("gcloud", [
     "secrets",
@@ -388,11 +598,89 @@ export async function executeMobileOtaProvisionSecretWithContext(
     message: [
       `Provisioned mobile OTA private key secret for ${environment}.`,
       `secret: ${secretName}`,
-      `keyid: kanna-mobile-ota-v1`,
+      `keyid: ${OTA_KEY_ID}`,
       `relay VM: ${identity.gceVmName}`,
     ].join("\n"),
-    data: { environment, projectId, secretName, keyId: "kanna-mobile-ota-v1" },
+    data: { environment, projectId, secretName, keyId: OTA_KEY_ID },
   };
+}
+
+async function addGcsObjectCheck(
+  checks: OtaDoctorCheck[],
+  context: MobileOtaContext,
+  bucket: string,
+  object: string,
+  name: string
+): Promise<void> {
+  const result = await context.runner.run("gcloud", [
+    "storage",
+    "cat",
+    `gs://${bucket}/${object}`,
+  ], { cwd: context.repoRoot, env: context.env });
+  checks.push({
+    status: result.exitCode === 0 ? "PASS" : "FAIL",
+    name,
+    detail: result.exitCode === 0 ? `gs://${bucket}/${object} is readable` : summarizeCommandFailure(result),
+  });
+}
+
+async function addCommandCheck(
+  checks: OtaDoctorCheck[],
+  context: MobileOtaContext,
+  input: {
+    name: string;
+    command: string;
+    args: string[];
+    passDetail: string;
+    failDetail: string;
+  }
+): Promise<void> {
+  const result = await context.runner.run(input.command, input.args, {
+    cwd: context.repoRoot,
+    env: context.env,
+  });
+  checks.push({
+    status: result.exitCode === 0 ? "PASS" : "FAIL",
+    name: input.name,
+    detail: result.exitCode === 0 ? input.passDetail : `${input.failDetail}: ${summarizeCommandFailure(result)}`,
+  });
+}
+
+async function addIamPolicyCheck(
+  checks: OtaDoctorCheck[],
+  context: MobileOtaContext,
+  input: {
+    name: string;
+    command: string;
+    args: string[];
+    expectedMember: string;
+    passDetail: string;
+    failDetail: string;
+  }
+): Promise<void> {
+  const result = await context.runner.run(input.command, input.args, {
+    cwd: context.repoRoot,
+    env: context.env,
+  });
+  const hasMember = result.stdout.includes(input.expectedMember);
+  checks.push({
+    status: result.exitCode === 0 && hasMember ? "PASS" : "FAIL",
+    name: input.name,
+    detail: result.exitCode === 0 && hasMember ? input.passDetail : `${input.failDetail}: ${summarizeCommandFailure(result)}`,
+  });
+}
+
+function parsePointer(stdout: string): OtaChannelPointer | null {
+  try {
+    const parsed = JSON.parse(stdout) as OtaChannelPointer;
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function summarizeCommandFailure(result: { stdout: string; stderr: string }): string {
+  return (result.stderr || result.stdout || "command failed").trim();
 }
 
 function buildExpoExportCommand(repoRoot: string, environment: CloudEnvironmentName, distDir: string): MobileOtaCommandPlan {
@@ -557,6 +845,26 @@ function formatRollbackMessage(input: {
   ].join("\n");
 }
 
+function formatDoctorMessage(input: {
+  environment: CloudEnvironmentName;
+  bucket: string;
+  channel: string;
+  runtimeVersion: string;
+  relayManifestUrl: string;
+  checks: OtaDoctorCheck[];
+}): string {
+  return [
+    `Mobile OTA ${input.environment} preflight`,
+    `bucket: ${input.bucket}`,
+    `channel: ${input.channel}`,
+    `runtimeVersion: ${input.runtimeVersion}`,
+    `manifest: ${input.relayManifestUrl}`,
+    ...input.checks.map((check) => `${check.status} ${check.name}: ${check.detail}`),
+    "writes: none",
+    `human-only: install/launch the ${input.channel} iOS app and confirm the OTA applies on a device`,
+  ].join("\n");
+}
+
 function manifestCurl(url: string, runtimeVersion: string, channel: string): string {
   return [
     "curl",
@@ -566,4 +874,21 @@ function manifestCurl(url: string, runtimeVersion: string, channel: string): str
     `-H 'expo-channel-name: ${channel}'`,
     `'${url}'`,
   ].join(" ");
+}
+
+function manifestCurlArgs(url: string, runtimeVersion: string, channel: string): string[] {
+  return [
+    "--fail",
+    "--silent",
+    "--show-error",
+    "-H",
+    "expo-protocol-version: 1",
+    "-H",
+    "expo-platform: ios",
+    "-H",
+    `expo-runtime-version: ${runtimeVersion}`,
+    "-H",
+    `expo-channel-name: ${channel}`,
+    url,
+  ];
 }

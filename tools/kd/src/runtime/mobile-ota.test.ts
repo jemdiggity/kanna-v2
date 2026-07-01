@@ -8,6 +8,7 @@ import { resolveKdEnvironment } from "./environment.js";
 import {
   buildMobileOtaPublishPlan,
   computeExpoUpdateId,
+  executeMobileOtaDoctorWithContext,
   executeMobileOtaPublishWithContext,
   executeMobileOtaProvisionSecretWithContext,
   resolveMobileRuntimeVersion,
@@ -54,7 +55,7 @@ async function makeRepoFixture(): Promise<string> {
 }
 
 describe("kd mobile OTA", () => {
-  it("parses publish and status commands under mobile ota", () => {
+  it("parses publish, status, doctor, and preflight commands under mobile ota", () => {
     expect(parseCliArgs(["mobile", "ota", "publish", "--staging", "--dry-run"])).toEqual({
       taskId: "mobile.ota.publish",
       input: { staging: true, production: false, dryRun: true, rollbackTo: undefined },
@@ -66,6 +67,14 @@ describe("kd mobile OTA", () => {
     expect(parseCliArgs(["mobile", "ota", "provision-secret", "--staging", "--key-path", "/tmp/key.pem"])).toEqual({
       taskId: "mobile.ota.provision-secret",
       input: { staging: true, production: false, keyPath: "/tmp/key.pem" },
+    });
+    expect(parseCliArgs(["mobile", "ota", "doctor", "--staging"])).toEqual({
+      taskId: "mobile.ota.doctor",
+      input: { staging: true, production: false },
+    });
+    expect(parseCliArgs(["mobile", "ota", "preflight", "--production"])).toEqual({
+      taskId: "mobile.ota.doctor",
+      input: { staging: false, production: true },
     });
   });
 
@@ -262,5 +271,106 @@ describe("kd mobile OTA", () => {
     expect(calls.map((call) => call.args.slice(0, 3).join(" "))).toContain("secrets create kanna-mobile-ota-private-key-pem");
     expect(calls.map((call) => call.args.slice(0, 4).join(" "))).toContain("secrets versions add kanna-mobile-ota-private-key-pem");
     expect(calls.at(-1)?.args).toContain("roles/secretmanager.secretAccessor");
+  });
+
+  it("runs a read-only staging OTA doctor against GCS, relay, and Secret Manager wiring", async () => {
+    const repoRoot = await makeRepoFixture();
+    const calls: Array<{ command: string; args: string[] }> = [];
+    const pointer = {
+      currentUpdateId: "11111111-2222-3333-4444-555555555555",
+      createdAt: "2026-06-30T00:00:00.000Z",
+      runtimeVersion: "1.0.0",
+    };
+    const runner: CommandRunner = {
+      async run(command, args) {
+        calls.push({ command, args });
+        const joined = args.join(" ");
+        if (command === "gcloud" && joined.includes("storage cat gs://kanna-staging.firebasestorage.app/ota/ios/1.0.0/channels/staging.json")) {
+          return { exitCode: 0, stdout: JSON.stringify(pointer), stderr: "" };
+        }
+        if (command === "gcloud" && joined.includes("updates/11111111-2222-3333-4444-555555555555/metadata.json")) {
+          return { exitCode: 0, stdout: "{\"fileMetadata\":{\"ios\":{\"bundle\":\"bundles/main.hbc\"}}}", stderr: "" };
+        }
+        if (command === "gcloud" && joined.includes("updates/11111111-2222-3333-4444-555555555555/expoConfig.json")) {
+          return { exitCode: 0, stdout: "{\"name\":\"Kanna\"}", stderr: "" };
+        }
+        if (command === "gcloud" && joined.includes("secrets describe kanna-mobile-ota-private-key-pem")) {
+          return { exitCode: 0, stdout: "name: projects/kanna-staging/secrets/kanna-mobile-ota-private-key-pem\n", stderr: "" };
+        }
+        if (command === "gcloud" && joined.includes("compute instances describe kanna-relay-staging")) {
+          return { exitCode: 0, stdout: "relay-sa@kanna-staging.iam.gserviceaccount.com\n", stderr: "" };
+        }
+        if (command === "gcloud" && joined.includes("secrets get-iam-policy kanna-mobile-ota-private-key-pem")) {
+          return { exitCode: 0, stdout: "serviceAccount:relay-sa@kanna-staging.iam.gserviceaccount.com\n", stderr: "" };
+        }
+        if (command === "gcloud" && joined.includes("storage buckets get-iam-policy gs://kanna-staging.firebasestorage.app")) {
+          return { exitCode: 0, stdout: "serviceAccount:relay-sa@kanna-staging.iam.gserviceaccount.com\n", stderr: "" };
+        }
+        if (command === "curl" && args.at(-1) === "https://relay-staging.kanna.build/health") {
+          return { exitCode: 0, stdout: "{\"ok\":true}", stderr: "" };
+        }
+        if (command === "curl" && args.at(-1) === "https://relay-staging.kanna.build/ota/manifest") {
+          return { exitCode: 0, stdout: "multipart manifest", stderr: "" };
+        }
+        return { exitCode: 1, stdout: "", stderr: `unexpected command: ${command} ${joined}` };
+      },
+    };
+
+    const result = await executeMobileOtaDoctorWithContext(
+      { staging: true, production: false },
+      { repoRoot, env: {}, runner }
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.message).toContain("Mobile OTA staging preflight");
+    expect(result.message).toContain("human-only: install/launch the staging iOS app and confirm the OTA applies on a device");
+    expect(calls.some((call) => call.command === "gcloud" && call.args.includes("cp"))).toBe(false);
+    expect(calls.some((call) => call.command === "gcloud" && call.args.includes("rsync"))).toBe(false);
+    expect(calls.some((call) => call.command === "gcloud" && call.args.includes("create"))).toBe(false);
+    expect(calls.some((call) => call.command === "gcloud" && call.args.includes("add-iam-policy-binding"))).toBe(false);
+    expect(calls.some((call) => call.command === "gcloud" && call.args.includes("access"))).toBe(false);
+  });
+
+  it("reports a missing OTA pointer without probing update objects", async () => {
+    const repoRoot = await makeRepoFixture();
+    const calls: Array<{ command: string; args: string[] }> = [];
+    const runner: CommandRunner = {
+      async run(command, args) {
+        calls.push({ command, args });
+        const joined = args.join(" ");
+        if (command === "gcloud" && joined.includes("storage cat gs://kanna-staging.firebasestorage.app/ota/ios/1.0.0/channels/staging.json")) {
+          return { exitCode: 1, stdout: "", stderr: "No URLs matched" };
+        }
+        if (command === "gcloud" && joined.includes("secrets describe kanna-mobile-ota-private-key-pem")) {
+          return { exitCode: 0, stdout: "name: projects/kanna-staging/secrets/kanna-mobile-ota-private-key-pem\n", stderr: "" };
+        }
+        if (command === "gcloud" && joined.includes("compute instances describe kanna-relay-staging")) {
+          return { exitCode: 0, stdout: "relay-sa@kanna-staging.iam.gserviceaccount.com\n", stderr: "" };
+        }
+        if (command === "gcloud" && joined.includes("secrets get-iam-policy kanna-mobile-ota-private-key-pem")) {
+          return { exitCode: 0, stdout: "serviceAccount:relay-sa@kanna-staging.iam.gserviceaccount.com\n", stderr: "" };
+        }
+        if (command === "gcloud" && joined.includes("storage buckets get-iam-policy gs://kanna-staging.firebasestorage.app")) {
+          return { exitCode: 0, stdout: "serviceAccount:relay-sa@kanna-staging.iam.gserviceaccount.com\n", stderr: "" };
+        }
+        if (command === "curl" && args.at(-1) === "https://relay-staging.kanna.build/health") {
+          return { exitCode: 0, stdout: "{\"ok\":true}", stderr: "" };
+        }
+        if (command === "curl" && args.at(-1) === "https://relay-staging.kanna.build/ota/manifest") {
+          return { exitCode: 22, stdout: "", stderr: "HTTP 404" };
+        }
+        return { exitCode: 1, stdout: "", stderr: `unexpected command: ${command} ${joined}` };
+      },
+    };
+
+    const result = await executeMobileOtaDoctorWithContext(
+      { staging: true, production: false },
+      { repoRoot, env: {}, runner }
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("FAIL pointer");
+    expect(result.message).toContain("manifest: relay reports no update for the channel");
+    expect(calls.some((call) => call.args.join(" ").includes("/updates/"))).toBe(false);
   });
 });

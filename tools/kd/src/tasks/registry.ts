@@ -37,6 +37,7 @@ import {
   type PhysicalDeviceMetroReadinessInput
 } from "../runtime/mobile-device";
 import {
+  executeMobileOtaDoctorWithContext,
   executeMobileOtaProvisionSecretWithContext,
   executeMobileOtaPublishWithContext,
   executeMobileOtaStatusWithContext
@@ -140,6 +141,11 @@ const mobileOtaPublishInputSchema = z.object({
 });
 
 const mobileOtaStatusInputSchema = z.object({
+  production: z.boolean().default(false),
+  staging: z.boolean().default(false)
+});
+
+const mobileOtaDoctorInputSchema = z.object({
   production: z.boolean().default(false),
   staging: z.boolean().default(false)
 });
@@ -1302,6 +1308,19 @@ export const taskDefinitions = [
     execute: async (_context, input) => {
       const context = await resolveDefaultContext(process.env);
       return executeMobileOtaStatusWithContext(mobileOtaStatusInputSchema.parse(input), {
+        repoRoot: context.repoRoot,
+        env: context.env,
+        runner: nodeCommandRunner
+      });
+    }
+  },
+  {
+    id: "mobile.ota.doctor",
+    description: "Run read-only preflight checks for Kanna mobile OTA cloud and relay wiring.",
+    inputSchema: mobileOtaDoctorInputSchema,
+    execute: async (_context, input) => {
+      const context = await resolveDefaultContext(process.env);
+      return executeMobileOtaDoctorWithContext(mobileOtaDoctorInputSchema.parse(input), {
         repoRoot: context.repoRoot,
         env: context.env,
         runner: nodeCommandRunner

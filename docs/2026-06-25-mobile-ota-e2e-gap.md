@@ -12,6 +12,9 @@ a signed staging bundle and a native staging build embeds the matching public
 certificate. Full E2E needs:
 
 - `kd mobile ota publish --staging` producing a signed manifest and assets.
+- `kd mobile ota doctor --staging` passing read-only cloud, relay, GCS pointer,
+  manifest, Secret Manager, and IAM checks with real staging Google Cloud
+  credentials.
 - A staging dev/TestFlight build pointed at channel `staging`.
 - An Appium/device flow that launches the older build, waits for the update
   prompt, taps restart, and verifies the new JS bundle after reload.

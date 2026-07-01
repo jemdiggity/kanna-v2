@@ -219,6 +219,7 @@ The script is idempotent: it upserts the Firebase Auth user `upvote.sieve.7t@icl
 ./kd mobile ota publish --staging     # publish a signed staging JS/asset OTA update
 ./kd mobile ota publish --production  # publish a signed production JS/asset OTA update
 ./kd mobile ota status --staging      # inspect the staging OTA channel pointer
+./kd mobile ota doctor --staging      # read-only OTA cloud/relay preflight before human device verification
 ./kd mobile ota provision-secret --staging --key-path "$HOME/.kanna/secrets/kanna-mobile-ota-v1-private-key.pem"
 ./kd dev up --attach         # start and attach to tmux session
 ./kd env print               # print resolved ports, DB, daemon dir, transfer root
@@ -279,7 +280,7 @@ Always use `./kd cloud deploy --staging` or `./kd cloud deploy --production` for
 
 Self-hosted mobile OTA updates are served by the relay at `/ota/manifest` and `/ota/assets`, stored in the environment Firebase/GCS bucket under `ota/ios/<runtimeVersion>/`, and code-signed with key id `kanna-mobile-ota-v1`. The public certificate is committed at `apps/mobile/certs/ota-codesign.pem`; the private key is provisioned through `./kd mobile ota provision-secret --staging|--production --key-path <path>` into Secret Manager as `kanna-mobile-ota-private-key-pem`.
 
-Publish only through `./kd mobile ota publish --staging|--production`. Check pointers with `./kd mobile ota status --staging|--production`. Roll back by repointing the channel with `./kd mobile ota publish --staging|--production --rollback-to <updateId>`.
+Publish only through `./kd mobile ota publish --staging|--production`. Check pointers with `./kd mobile ota status --staging|--production`. Run read-only cloud and relay preflight with `./kd mobile ota doctor --staging|--production` or the `preflight` alias; this requires Google Cloud credentials for the target project and performs no writes. Roll back by repointing the channel with `./kd mobile ota publish --staging|--production --rollback-to <updateId>`. Human device apply verification remains separate: do not install, launch, or run physical-device Appium from agent automation.
 
 ## Architecture
 
