@@ -586,7 +586,7 @@ describe("keyboard shortcuts", () => {
       `const cb = arguments[arguments.length - 1];
        const ctx = ${CTX_SCRIPT};
        window.__KANNA_E2E__.appMetrics.clear();
-       ctx.lanSnapshot = {
+       const snapshot = {
          repos: [{
            id: ${JSON.stringify(remoteRepoId)},
            path: "lan",
@@ -639,9 +639,19 @@ describe("keyboard shortcuts", () => {
            }
          }
        };
-       ctx.selectedCloudRepoId = ${JSON.stringify(remoteRepoId)};
-       ctx.selectedCloudItemId = ${JSON.stringify(remoteTaskId)};
-       cb("ok");`,
+       const remoteSnapshot = ctx.lanSnapshot;
+       if (!remoteSnapshot) {
+         cb("err:remote snapshot unavailable");
+         return;
+       }
+       if (remoteSnapshot.__v_isRef) remoteSnapshot.value = snapshot;
+       else Object.assign(remoteSnapshot, snapshot);
+       const selectRepo = ctx.handleSelectRepo || ctx.store.selectRepo.bind(ctx.store);
+       const selectItem = ctx.handleSelectItem || ctx.store.selectItem.bind(ctx.store);
+       Promise.resolve(selectRepo(${JSON.stringify(remoteRepoId)}))
+         .then(function() { return selectItem(${JSON.stringify(remoteTaskId)}); })
+         .then(function() { cb("ok"); })
+         .catch(function(e) { cb("err:" + (e && e.message ? e.message : e)); });`,
     );
     expect(seedResult).toBe("ok");
 
@@ -825,7 +835,7 @@ describe("keyboard shortcuts", () => {
     await waitForSelection({ repoId, itemId: `${prefix}-created-newest-unread-oldest` });
   });
 
-  it("read and unread shortcuts traverse local repo boundaries", async () => {
+  it("read and unread shortcuts stay scoped to the selected local repo", async () => {
     await resetDatabase(client);
     await client.executeSync("location.reload()");
     await client.waitForAppReady();
@@ -843,10 +853,14 @@ describe("keyboard shortcuts", () => {
       const currentTaskId = `${prefix}-current`;
       const rows = [
         [currentTaskId, repoOneId, "Current local task", "idle", "2026-03-31T03:00:00.000Z"],
-        [`${prefix}-cmd-u-unread-older`, repoTwoId, "Cross local unread older", "unread", "2026-03-31T02:00:00.000Z"],
-        [`${prefix}-shift-cmd-u-unread-newer`, repoTwoId, "Cross local unread newer", "unread", "2026-03-31T04:00:00.000Z"],
-        [`${prefix}-cmd-r-read-older`, repoTwoId, "Cross local read older", "idle", "2026-03-31T01:00:00.000Z"],
-        [`${prefix}-shift-cmd-r-read-newer`, repoTwoId, "Cross local read newer", "idle", "2026-03-31T05:00:00.000Z"],
+        [`${prefix}-cmd-u-unread-local`, repoOneId, "Selected repo unread older", "unread", "2026-03-31T02:00:00.000Z"],
+        [`${prefix}-shift-cmd-u-unread-local`, repoOneId, "Selected repo unread newer", "unread", "2026-03-31T04:00:00.000Z"],
+        [`${prefix}-cmd-r-read-local`, repoOneId, "Selected repo read older", "idle", "2026-03-31T01:00:00.000Z"],
+        [`${prefix}-shift-cmd-r-read-local`, repoOneId, "Selected repo read newer", "idle", "2026-03-31T05:00:00.000Z"],
+        [`${prefix}-cmd-u-unread-other`, repoTwoId, "Other repo unread oldest", "unread", "2026-03-31T00:30:00.000Z"],
+        [`${prefix}-shift-cmd-u-unread-other`, repoTwoId, "Other repo unread newest", "unread", "2026-03-31T06:30:00.000Z"],
+        [`${prefix}-cmd-r-read-other`, repoTwoId, "Other repo read oldest", "idle", "2026-03-31T00:00:00.000Z"],
+        [`${prefix}-shift-cmd-r-read-other`, repoTwoId, "Other repo read newest", "idle", "2026-03-31T07:00:00.000Z"],
       ] as const;
 
       for (const row of rows) {
@@ -862,22 +876,22 @@ describe("keyboard shortcuts", () => {
 
     await seedRowsAndSelectCurrent("shortcut-cross-local");
     await pressKey("u", { meta: true });
-    await waitForSelection({ repoId: repoTwoId, itemId: "shortcut-cross-local-cmd-u-unread-older" });
+    await waitForSelection({ repoId: repoOneId, itemId: "shortcut-cross-local-cmd-u-unread-local" });
 
     await seedRowsAndSelectCurrent("shortcut-cross-local");
     await pressKey("U", { meta: true, shift: true });
-    await waitForSelection({ repoId: repoTwoId, itemId: "shortcut-cross-local-shift-cmd-u-unread-newer" });
+    await waitForSelection({ repoId: repoOneId, itemId: "shortcut-cross-local-shift-cmd-u-unread-local" });
 
     await seedRowsAndSelectCurrent("shortcut-cross-local");
     await pressKey("r", { meta: true });
-    await waitForSelection({ repoId: repoTwoId, itemId: "shortcut-cross-local-cmd-r-read-older" });
+    await waitForSelection({ repoId: repoOneId, itemId: "shortcut-cross-local-cmd-r-read-local" });
 
     await seedRowsAndSelectCurrent("shortcut-cross-local");
     await pressKey("R", { meta: true, shift: true });
-    await waitForSelection({ repoId: repoTwoId, itemId: "shortcut-cross-local-shift-cmd-r-read-newer" });
+    await waitForSelection({ repoId: repoOneId, itemId: "shortcut-cross-local-shift-cmd-r-read-local" });
   });
 
-  it("read and unread shortcuts traverse remote tasks in remote-only repos", async () => {
+  it("read and unread shortcuts stay scoped to the selected remote-only repo", async () => {
     await resetDatabase(client);
     await client.executeSync("location.reload()");
     await client.waitForAppReady();
@@ -904,29 +918,48 @@ describe("keyboard shortcuts", () => {
     );
 
     const remoteRepoId = "cloud:keyboard-activity-remote";
+    const otherRemoteRepoId = "cloud:keyboard-activity-remote-other";
     const remoteRows = [
-      ["remote-unread-older", "Remote unread older", "unread", "2026-03-31T02:00:00.000Z"],
-      ["remote-unread-newer", "Remote unread newer", "unread", "2026-03-31T04:00:00.000Z"],
-      ["remote-read-older", "Remote read older", "idle", "2026-03-31T01:00:00.000Z"],
-      ["remote-read-newer", "Remote read newer", "idle", "2026-03-31T05:00:00.000Z"],
+      [remoteRepoId, "remote-unread-older", "Selected remote unread older", "unread", "2026-03-31T02:00:00.000Z"],
+      [remoteRepoId, "remote-unread-newer", "Selected remote unread newer", "unread", "2026-03-31T04:00:00.000Z"],
+      [remoteRepoId, "remote-read-older", "Selected remote read older", "idle", "2026-03-31T01:00:00.000Z"],
+      [remoteRepoId, "remote-read-newer", "Selected remote read newer", "idle", "2026-03-31T05:00:00.000Z"],
+      [otherRemoteRepoId, "remote-unread-oldest-other", "Other remote unread oldest", "unread", "2026-03-31T00:30:00.000Z"],
+      [otherRemoteRepoId, "remote-unread-newest-other", "Other remote unread newest", "unread", "2026-03-31T06:30:00.000Z"],
+      [otherRemoteRepoId, "remote-read-oldest-other", "Other remote read oldest", "idle", "2026-03-31T00:00:00.000Z"],
+      [otherRemoteRepoId, "remote-read-newest-other", "Other remote read newest", "idle", "2026-03-31T07:00:00.000Z"],
     ] as const;
-    const remoteItemId = (suffix: string) => `${remoteRepoId}:${suffix}`;
+    const remoteItemId = (repoId: string, suffix: string) => `${repoId}:${suffix}`;
     const remoteSnapshot = {
-      repos: [{
-        id: remoteRepoId,
-        path: "cloud",
-        name: "Keyboard Remote Activity",
-        remote_url: "https://example.invalid/kanna/keyboard-activity-remote.git",
-        remoteUrlHash: null,
-        default_branch: "main",
-        hidden: 0,
-        sort_order: 1,
-        created_at: "2026-03-31T00:00:00.000Z",
-        last_opened_at: "2026-03-31T05:00:00.000Z",
-      }],
-      items: remoteRows.map(([suffix, title, activity, createdAt]) => ({
-        id: remoteItemId(suffix),
-        repo_id: remoteRepoId,
+      repos: [
+        {
+          id: remoteRepoId,
+          path: "cloud",
+          name: "Keyboard Remote Activity",
+          remote_url: "https://example.invalid/kanna/keyboard-activity-remote.git",
+          remoteUrlHash: null,
+          default_branch: "main",
+          hidden: 0,
+          sort_order: 1,
+          created_at: "2026-03-31T00:00:00.000Z",
+          last_opened_at: "2026-03-31T05:00:00.000Z",
+        },
+        {
+          id: otherRemoteRepoId,
+          path: "cloud",
+          name: "Keyboard Other Remote Activity",
+          remote_url: "https://example.invalid/kanna/keyboard-activity-remote-other.git",
+          remoteUrlHash: null,
+          default_branch: "main",
+          hidden: 0,
+          sort_order: 2,
+          created_at: "2026-03-31T00:00:00.000Z",
+          last_opened_at: "2026-03-31T05:00:00.000Z",
+        },
+      ],
+      items: remoteRows.map(([repoId, suffix, title, activity, createdAt]) => ({
+        id: remoteItemId(repoId, suffix),
+        repo_id: repoId,
         prompt: title,
         pipeline: "cloud",
         stage: "in progress",
@@ -957,8 +990,8 @@ describe("keyboard shortcuts", () => {
         created_at: createdAt,
         updated_at: createdAt,
       })),
-      terminalRefs: Object.fromEntries(remoteRows.map(([suffix]) => [
-        remoteItemId(suffix),
+      terminalRefs: Object.fromEntries(remoteRows.map(([repoId, suffix]) => [
+        remoteItemId(repoId, suffix),
         {
           ownerDesktopId: "keyboard-remote-peer",
           ownerLocalTaskId: suffix,
@@ -967,37 +1000,60 @@ describe("keyboard shortcuts", () => {
       ])),
     };
 
+    const selectRemoteTask = async (itemId: string): Promise<void> => {
+      const result = await client.executeAsync<string>(
+        `const cb = arguments[arguments.length - 1];
+         const ctx = ${CTX_SCRIPT};
+         const selectItem = ctx.handleSelectItem || ctx.store.selectItem.bind(ctx.store);
+         Promise.resolve(selectItem(${JSON.stringify(itemId)}))
+           .then(function() { cb("ok"); })
+           .catch(function(e) { cb("err:" + (e && e.message ? e.message : e)); });`,
+      );
+      expect(result).toBe("ok");
+    };
+
     try {
-      await refreshItemsAndSelect(localRepoId, currentTaskId);
-
       await injectCloudSnapshot(remoteSnapshot);
+      const selectRepoResult = await client.executeAsync<string>(
+        `const cb = arguments[arguments.length - 1];
+         const ctx = ${CTX_SCRIPT};
+         const selectRepo = ctx.handleSelectRepo || ctx.store.selectRepo.bind(ctx.store);
+         const selectItem = ctx.handleSelectItem || ctx.store.selectItem.bind(ctx.store);
+         Promise.resolve(selectRepo(${JSON.stringify(remoteRepoId)}))
+           .then(function() { return selectItem(${JSON.stringify(remoteItemId(remoteRepoId, "remote-read-older"))}); })
+           .then(function() { cb("ok"); })
+           .catch(function(e) { cb("err:" + (e && e.message ? e.message : e)); });`,
+      );
+      expect(selectRepoResult).toBe("ok");
+      await waitForSelection({ repoId: remoteRepoId, itemId: remoteItemId(remoteRepoId, "remote-read-older") });
+
       await pressKey("u", { meta: true });
-      await waitForSelection({ repoId: remoteRepoId, itemId: remoteItemId("remote-unread-older") });
+      await waitForSelection({ repoId: remoteRepoId, itemId: remoteItemId(remoteRepoId, "remote-unread-older") });
 
       await injectCloudSnapshot(remoteSnapshot);
-      await refreshItemsAndSelect(localRepoId, currentTaskId);
-      await injectCloudSnapshot(remoteSnapshot);
+      await selectRemoteTask(remoteItemId(remoteRepoId, "remote-read-older"));
+      await waitForSelection({ repoId: remoteRepoId, itemId: remoteItemId(remoteRepoId, "remote-read-older") });
       await pressKey("U", { meta: true, shift: true });
-      await waitForSelection({ repoId: remoteRepoId, itemId: remoteItemId("remote-unread-newer") });
+      await waitForSelection({ repoId: remoteRepoId, itemId: remoteItemId(remoteRepoId, "remote-unread-newer") });
 
       await injectCloudSnapshot(remoteSnapshot);
-      await refreshItemsAndSelect(localRepoId, currentTaskId);
-      await injectCloudSnapshot(remoteSnapshot);
+      await selectRemoteTask(remoteItemId(remoteRepoId, "remote-unread-older"));
+      await waitForSelection({ repoId: remoteRepoId, itemId: remoteItemId(remoteRepoId, "remote-unread-older") });
       await pressKey("r", { meta: true });
-      await waitForSelection({ repoId: remoteRepoId, itemId: remoteItemId("remote-read-older") });
+      await waitForSelection({ repoId: remoteRepoId, itemId: remoteItemId(remoteRepoId, "remote-read-older") });
 
       await injectCloudSnapshot(remoteSnapshot);
-      await refreshItemsAndSelect(localRepoId, currentTaskId);
-      await injectCloudSnapshot(remoteSnapshot);
+      await selectRemoteTask(remoteItemId(remoteRepoId, "remote-unread-older"));
+      await waitForSelection({ repoId: remoteRepoId, itemId: remoteItemId(remoteRepoId, "remote-unread-older") });
       await pressKey("R", { meta: true, shift: true });
-      await waitForSelection({ repoId: remoteRepoId, itemId: remoteItemId("remote-read-newer") });
+      await waitForSelection({ repoId: remoteRepoId, itemId: remoteItemId(remoteRepoId, "remote-read-newer") });
     } finally {
       await injectCloudSnapshot({ repos: [], items: [], terminalRefs: {} });
       await refreshItemsAndSelect(localRepoId, currentTaskId).catch(() => undefined);
     }
   });
 
-  it("unread shortcuts fall back to relative read tasks when no unread tasks exist", async () => {
+  it("unread shortcuts fall back to absolute read tasks when no unread tasks exist", async () => {
     await ensureRepoImported();
     const repoId = await getVueState(client, "selectedRepoId") as string;
 
@@ -1032,7 +1088,7 @@ describe("keyboard shortcuts", () => {
     await waitForSelection({ repoId, itemId: "shortcut-current-read-fallback" });
 
     await pressKey("u", { meta: true });
-    await waitForSelection({ repoId, itemId: "shortcut-read-near-old" });
+    await waitForSelection({ repoId, itemId: "shortcut-read-old" });
 
     await client.executeAsync<string>(
       `const cb = arguments[arguments.length - 1];
@@ -1041,7 +1097,7 @@ describe("keyboard shortcuts", () => {
     await waitForSelection({ repoId, itemId: "shortcut-current-read-fallback" });
 
     await pressKey("U", { meta: true, shift: true });
-    await waitForSelection({ repoId, itemId: "shortcut-read-near-new" });
+    await waitForSelection({ repoId, itemId: "shortcut-read-new" });
   });
 
   it("shows the Option+Cmd+P file preview shortcut in the file picker shortcut menu", async () => {
