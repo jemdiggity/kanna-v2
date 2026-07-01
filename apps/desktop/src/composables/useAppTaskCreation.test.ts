@@ -1,10 +1,12 @@
 import { computed, ref } from "vue";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useAppTaskCreation } from "./useAppTaskCreation";
 
+const invokeMock = vi.hoisted(() => vi.fn());
+
 vi.mock("../invoke", () => ({
-  invoke: vi.fn(),
+  invoke: invokeMock,
 }));
 
 function createTaskCreationHarness() {
@@ -42,6 +44,17 @@ function createTaskCreationHarness() {
 }
 
 describe("useAppTaskCreation", () => {
+  beforeEach(() => {
+    invokeMock.mockReset();
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "list_dir") return [];
+      if (command === "read_text_file") return "";
+      if (command === "git_default_branch") return "main";
+      if (command === "git_list_base_branches") return ["origin/main"];
+      return "";
+    });
+  });
+
   it("records the exact agent choice after a task is created", async () => {
     const { creation, onAgentChoiceUsed } = createTaskCreationHarness();
 
@@ -57,5 +70,37 @@ describe("useAppTaskCreation", () => {
     await creation.handleNewTaskSubmit("Ship MRU", "copilot", "default", "origin/main", "pty");
 
     expect(onAgentChoiceUsed).not.toHaveBeenCalled();
+  });
+
+  it("does not reopen the new task modal before recording the submitted agent choice", async () => {
+    let finishRecordingChoice: (() => void) | undefined;
+    const { creation, showNewTaskModal, onAgentChoiceUsed } = createTaskCreationHarness();
+    onAgentChoiceUsed.mockImplementationOnce(() => new Promise<void>((resolve) => {
+      finishRecordingChoice = resolve;
+    }));
+
+    const submitPromise = creation.handleNewTaskSubmit(
+      "Ship MRU",
+      "copilot",
+      "default",
+      "origin/main",
+      "pty",
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+
+    invokeMock.mockClear();
+    const openPromise = creation.openNewTaskModal();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(invokeMock).not.toHaveBeenCalled();
+    expect(showNewTaskModal.value).toBe(false);
+
+    finishRecordingChoice?.();
+    await submitPromise;
+    await openPromise;
+
+    expect(showNewTaskModal.value).toBe(true);
   });
 });

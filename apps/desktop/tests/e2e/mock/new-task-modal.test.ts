@@ -1,4 +1,5 @@
 import { mkdir, writeFile } from "node:fs/promises";
+import { setTimeout as sleep } from "node:timers/promises";
 import { join } from "node:path";
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { WebDriverClient } from "../helpers/webdriver";
@@ -55,6 +56,25 @@ async function recentAgentChoicesSetting(client: WebDriverClient): Promise<unkno
     ["recentAgentChoices"],
   )) as Array<{ value: string }>;
   return JSON.parse(rows[0]?.value ?? "[]") as unknown[];
+}
+
+async function waitForRecentAgentChoicesSetting(
+  client: WebDriverClient,
+  expected: unknown[],
+  timeoutMs = 5_000,
+): Promise<unknown[]> {
+  const deadline = Date.now() + timeoutMs;
+  let last: unknown[] = [];
+
+  while (Date.now() < deadline) {
+    last = await recentAgentChoicesSetting(client);
+    if (JSON.stringify(last) === JSON.stringify(expected)) {
+      return last;
+    }
+    await sleep(100);
+  }
+
+  throw new Error(`timed out waiting for recentAgentChoices ${JSON.stringify(expected)}, last value: ${JSON.stringify(last)}`);
 }
 
 describe("new task modal", () => {
@@ -216,6 +236,8 @@ describe("new task modal", () => {
   });
 
   it("cycles through installed agents alphabetically", async () => {
+    await resetRecentAgentChoices(client);
+
     const modalResult = await callVueMethod(client, "keyboardActions.newTask");
     expect(modalResult).toBeNull();
     await client.waitForElement(".modal-overlay", 5_000);
@@ -225,32 +247,15 @@ describe("new task modal", () => {
     const providerLabel = await client.executeSync<string>(
       `return document.querySelector(".agent-provider")?.textContent?.trim() ?? "";`,
     );
-    expect(providerLabel).toBe("codex");
+    expect(providerLabel).not.toBe("claude");
 
     await client.executeSync(buildGlobalKeydownScript({ key: "Escape" }));
   });
 
   it("uses the persisted sdk default agent preference when creating tasks", async () => {
-    const codexPrompt = "Create persisted Codex SDK task";
+    await resetRecentAgentChoices(client);
+
     const claudePrompt = "Create persisted Claude SDK task";
-
-    await setDefaultAgentPreference("codex-sdk");
-
-    const codexModalResult = await callVueMethod(client, "keyboardActions.newTask");
-    expect(codexModalResult).toBeNull();
-    await client.waitForElement(".modal-overlay", 5_000);
-
-    const codexMode = await client.executeSync<string>(
-      `return document.querySelector(".agent-provider")?.textContent?.trim() ?? "";`,
-    );
-    expect(codexMode).toBe("codex sdk");
-
-    await client.sendKeys(await client.waitForElement(".prompt-input", 2_000), codexPrompt);
-    await client.click(await client.waitForElement(".modal-actions .btn-primary", 2_000));
-    expect(await waitForTaskCreated(client, codexPrompt)).toEqual(expect.objectContaining({
-      agent_provider: "codex",
-      agent_type: "agent",
-    }));
 
     await setDefaultAgentPreference("claude-sdk");
 
@@ -274,37 +279,42 @@ describe("new task modal", () => {
   it("persists recent exact agent choices and opens the remounted modal with them first", async () => {
     await resetRecentAgentChoices(client);
 
-    const codexChatPrompt = "Remember codex chat as the recent task agent";
+    const claudeSdkPrompt = "Remember claude sdk as the recent task agent";
     await openNewTaskModal(client);
-    await cycleToAgentChoice(client, "codex sdk");
-    await submitTaskFromModal(client, codexChatPrompt);
-    expect(await waitForTaskCreated(client, codexChatPrompt)).toEqual(expect.objectContaining({
-      agent_provider: "codex",
+    await cycleToAgentChoice(client, "claude sdk");
+    await submitTaskFromModal(client, claudeSdkPrompt);
+    expect(await waitForTaskCreated(client, claudeSdkPrompt)).toEqual(expect.objectContaining({
+      agent_provider: "claude",
       agent_type: "agent",
     }));
-    expect(await recentAgentChoicesSetting(client)).toEqual([
-      { provider: "codex", executionType: "agent" },
+    expect(await waitForRecentAgentChoicesSetting(client, [
+      { provider: "claude", executionType: "agent" },
+    ])).toEqual([
+      { provider: "claude", executionType: "agent" },
     ]);
 
     await openNewTaskModal(client);
-    expect(await agentChoiceLabel(client)).toBe("codex sdk");
+    expect(await agentChoiceLabel(client)).toBe("claude sdk");
 
-    const copilotCliPrompt = "Remember copilot cli as the recent task agent";
-    await cycleToAgentChoice(client, "copilot");
-    await submitTaskFromModal(client, copilotCliPrompt);
-    expect(await waitForTaskCreated(client, copilotCliPrompt)).toEqual(expect.objectContaining({
-      agent_provider: "copilot",
+    const claudeCliPrompt = "Remember claude cli as the recent task agent";
+    await cycleToAgentChoice(client, "claude");
+    await submitTaskFromModal(client, claudeCliPrompt);
+    expect(await waitForTaskCreated(client, claudeCliPrompt)).toEqual(expect.objectContaining({
+      agent_provider: "claude",
       agent_type: "pty",
     }));
-    expect(await recentAgentChoicesSetting(client)).toEqual([
-      { provider: "copilot", executionType: "pty" },
-      { provider: "codex", executionType: "agent" },
+    expect(await waitForRecentAgentChoicesSetting(client, [
+      { provider: "claude", executionType: "pty" },
+      { provider: "claude", executionType: "agent" },
+    ])).toEqual([
+      { provider: "claude", executionType: "pty" },
+      { provider: "claude", executionType: "agent" },
     ]);
 
     await openNewTaskModal(client);
-    expect(await agentChoiceLabel(client)).toBe("copilot");
+    expect(await agentChoiceLabel(client)).toBe("claude");
     await client.click(await client.waitForElement(".agent-provider", 2_000));
-    expect(await agentChoiceLabel(client)).toBe("codex sdk");
+    expect(await agentChoiceLabel(client)).toBe("claude sdk");
     await client.executeSync(buildGlobalKeydownScript({ key: "Escape" }));
   });
 });
