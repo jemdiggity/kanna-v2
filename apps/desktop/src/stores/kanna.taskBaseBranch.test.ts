@@ -887,6 +887,35 @@ describe("kanna store task base branch integration", () => {
     });
   });
 
+  it("skips configured reserved port offsets and explicit reserved ports", async () => {
+    mockState.repoConfig = {
+      ports: {
+        KANNA_DEV_PORT: 1420,
+        API_PORT: 3000,
+      },
+      reserved_port_offsets: [0, 1],
+      reserved_ports: [3002],
+    };
+    const store = await createStore();
+
+    await store.createItem("repo-1", "/tmp/repo", "Ship reserved port ranges", "agent", {
+      agentProvider: "claude",
+    });
+
+    await vi.waitFor(() => {
+      const createdItem = mockState.pipelineItems.at(-1);
+      expect(createdItem?.port_offset).toBe(1422);
+      expect(createdItem?.port_env).toBe(JSON.stringify({
+        KANNA_DEV_PORT: "1422",
+        API_PORT: "3003",
+      }));
+      expect(mockState.taskPorts.map((taskPort) => `${taskPort.env_name}:${taskPort.port}`)).toEqual([
+        "KANNA_DEV_PORT:1422",
+        "API_PORT:3003",
+      ]);
+    });
+  });
+
   it("claims task ports from the checked-out worktree config instead of the repo root config", async () => {
     mockState.repoConfig = {
       ports: {

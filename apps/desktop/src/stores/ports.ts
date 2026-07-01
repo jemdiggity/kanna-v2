@@ -27,6 +27,28 @@ function toPortAssignmentMap(taskPorts: Array<{ env_name: string; port: number }
   return map;
 }
 
+function addReservedPorts(occupiedPorts: Set<number>, repoConfig: RepoConfig): void {
+  for (const port of repoConfig.reserved_ports ?? []) {
+    if (Number.isInteger(port) && port > 0 && port <= 65535) {
+      occupiedPorts.add(port);
+    }
+  }
+
+  const offsets = repoConfig.reserved_port_offsets ?? [];
+  if (!repoConfig.ports || offsets.length === 0) return;
+
+  for (const preferredPort of Object.values(repoConfig.ports)) {
+    if (!Number.isInteger(preferredPort)) continue;
+    for (const offset of offsets) {
+      if (!Number.isInteger(offset) || offset < 0) continue;
+      const reservedPort = preferredPort + offset;
+      if (reservedPort > 0 && reservedPort <= 65535) {
+        occupiedPorts.add(reservedPort);
+      }
+    }
+  }
+}
+
 export function createPortsStore(context: StoreContext): PortsStore {
   let portAllocationChain: Promise<void> = Promise.resolve();
 
@@ -98,6 +120,7 @@ export function createPortsStore(context: StoreContext): PortsStore {
       try {
         const activeTaskPorts = await listTaskPorts(context.requireDb());
         const occupiedPorts = new Set<number>(activeTaskPorts.map((taskPort) => taskPort.port));
+        addReservedPorts(occupiedPorts, repoConfig);
 
         if (!repoConfig.ports) return { portEnv, firstPort };
 

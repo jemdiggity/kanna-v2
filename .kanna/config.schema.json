@@ -37,6 +37,21 @@
         "type": "integer"
       }
     },
+    "reserved_port_offsets": {
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "minimum": 0
+      }
+    },
+    "reserved_ports": {
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 65535
+      }
+    },
     "stage_order": {
       "type": "array",
       "items": {
