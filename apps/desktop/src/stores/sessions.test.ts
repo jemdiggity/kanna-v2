@@ -179,6 +179,20 @@ describe("createSessionsApi", () => {
     );
   });
 
+  it("prints the display prompt while launching Codex with the stage prompt", async () => {
+    const sessions = createSessionsApi(makeContext());
+
+    const prepared = await sessions.preparePtySession("task-1", "Stage guidance\n\nShip it", {
+      agentProvider: "codex",
+      displayPrompt: "Ship it",
+    });
+
+    expect(prepared.agentCmd).toBe("codex --yolo 'Ship it'");
+    expect(prepared.agentCmdPreamble).toContain("Stage guidance");
+    expect(prepared.agentCmdPreamble).toContain("This session was launched by Kanna");
+    expect(prepared.agentCmdPreamble).toContain("Ship it");
+  });
+
   it("builds Claude PTY tasks with the instance-local Kanna MCP config", async () => {
     const sessions = createSessionsApi(makeContext());
 

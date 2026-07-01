@@ -505,6 +505,7 @@ export function useAppCloudWorkspace({ db, store, toast }: UseAppCloudWorkspaceO
     isCloudOnlyRepoId,
     cloudRepoRemoteUrl,
     markWorkspaceTaskLocallyClosed,
+    refreshLanTasks,
     initializeDesktopCloudAuth,
     initializeDesktopLanTaskSync,
     closeSelectedWorkspaceTask,

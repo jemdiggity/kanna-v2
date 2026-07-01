@@ -448,6 +448,8 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
 
     const { mcpConfigPath } = await prepareKannaMcpRuntime(sessionId, env);
 
+    const displayPrompt = options?.displayPrompt ?? prompt;
+    const escapedDisplayPrompt = displayPrompt.replace(/'/g, "'\\''");
     const escapedPrompt = prompt.replace(/'/g, "'\\''");
     const escapedSystemPrompt = buildKannaRuntimeSystemPrompt().replace(/'/g, "'\\''");
     const escapedPromptWithPreamble = buildKannaRuntimeUserPrompt(prompt).replace(/'/g, "'\\''");
@@ -477,7 +479,7 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
 
       agentCmd = options?.resumeSessionId
         ? `copilot ${copilotFlags.join(" ")}`
-        : `copilot ${copilotFlags.join(" ")} -i '${escapedPrompt}'`;
+        : `copilot ${copilotFlags.join(" ")} -i '${escapedDisplayPrompt}'`;
       agentCmdPreamble = options?.resumeSessionId
         ? undefined
         : `copilot ${copilotFlags.join(" ")} -i '${escapedPromptWithPreamble}'`;
@@ -487,14 +489,14 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
       if (options?.resumeSessionId) {
         const escapedResumeSessionId = options.resumeSessionId.replace(/'/g, "'\\''");
         agentCmd = escapedPrompt
-          ? `codex resume ${codexFlags.join(" ")} '${escapedResumeSessionId}' '${escapedPrompt}'`
+          ? `codex resume ${codexFlags.join(" ")} '${escapedResumeSessionId}' '${escapedDisplayPrompt}'`
           : `codex resume ${codexFlags.join(" ")} '${escapedResumeSessionId}'`;
         agentCmdPreamble = escapedPrompt
           ? `codex resume ${codexFlags.join(" ")} '${escapedResumeSessionId}' '${escapedPromptWithPreamble}'`
           : undefined;
       } else {
         agentCmd = escapedPrompt
-          ? `codex ${codexFlags.join(" ")} '${escapedPrompt}'`
+          ? `codex ${codexFlags.join(" ")} '${escapedDisplayPrompt}'`
           : `codex ${codexFlags.join(" ")}`;
         agentCmdPreamble = escapedPrompt
           ? `codex ${codexFlags.join(" ")} '${escapedPromptWithPreamble}'`
@@ -512,7 +514,7 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
       }
       const opencodeParts = [opencodeExecutable, "run", "--interactive", ...opencodeFlags];
       if (escapedPrompt) {
-        opencodeParts.push(`'${escapedPrompt}'`);
+        opencodeParts.push(`'${escapedDisplayPrompt}'`);
       }
       agentCmd = opencodeParts.join(" ");
       if (escapedPrompt) {

@@ -51,6 +51,7 @@ export interface PtySpawnOptions {
   portEnv?: Record<string, string>;
   setupCmds?: string[];
   resumeSessionId?: string;
+  displayPrompt?: string;
   worktreePath?: string;
   repoConfig?: RepoConfig;
 }

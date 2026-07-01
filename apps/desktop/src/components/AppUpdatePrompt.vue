@@ -51,7 +51,7 @@ async function restartUpdate() {
 </script>
 
 <template>
-  <Transition name="update-prompt">
+  <Transition name="update-prompt" :duration="180">
     <section v-if="visible" class="update-prompt">
       <header class="update-prompt__header">
         <div class="update-prompt__titles">

@@ -48,6 +48,8 @@ const appUpdate = useAppUpdate();
 useOperatorEvents(computed(() => db) as unknown as Ref<DbHandle | null>);
 store.attachWindowWorkspace(windowWorkspace);
 const {
+  cloudSnapshot,
+  lanSnapshot,
   selectedCloudRepoId,
   selectedCloudItemId,
   remoteSnapshot,
@@ -62,12 +64,19 @@ const {
   mainPanelCloudTerminalRef,
   isCloudOnlyRepoId,
   cloudRepoRemoteUrl,
+  refreshLanTasks,
   initializeDesktopCloudAuth,
   initializeDesktopLanTaskSync,
   closeSelectedWorkspaceTask,
   advanceSelectedRemoteWorkspaceTask,
   disposeDesktopCloudWorkspace,
 } = useAppCloudWorkspace({ db, store, toast });
+if (import.meta.env.DEV) {
+  // Exposed through <script setup> for E2E tests via window.__KANNA_E2E__.setupState.
+  void cloudSnapshot;
+  void lanSnapshot;
+  void refreshLanTasks;
+}
 
 const appModals = useAppModals({ isMobile, store, windowWorkspace });
 const {

@@ -108,6 +108,7 @@ export function createTaskItemActions(
     worktreePath: string,
     branch: string,
     prompt: string,
+    displayPrompt: string,
     agentType: AgentExecutionType,
     agentProvider: AgentProvider,
     opts?: CreateItemOptions,
@@ -250,6 +251,7 @@ export function createTaskItemActions(
               repoConfig,
               portEnv,
               setupCmds: ptySetupCmds,
+              displayPrompt,
               resumeSessionId: opts?.resumeSessionId ?? undefined,
             },
           );
@@ -606,6 +608,7 @@ export function createTaskItemActions(
             worktreePath,
             branch,
             pipelinePrompt,
+            effectivePrompt,
             effectiveAgentType,
             effectiveAgentProvider,
             {
