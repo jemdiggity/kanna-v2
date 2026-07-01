@@ -42,7 +42,7 @@
     "killAfter": "Kill After (min)",
     "ideCommand": "IDE Command",
     "idePlaceholder": "code, cursor, idea...",
-    "defaultAgent": "Default Agent CLI"
+    "defaultAgent": "Default agent"
   },
   "shortcuts": {
     "title": "Keyboard Shortcuts",

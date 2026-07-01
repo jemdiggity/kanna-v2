@@ -10,6 +10,7 @@ import {
   normalizeAppThemePreference,
   normalizeCodeThemePreference,
 } from "../theme/theme";
+import { normalizeAgentExecutionType } from "../stores/agentExecutionType";
 import {
   parseIncomingTransferRequest,
   parseOutgoingTransferCommittedEvent,
@@ -418,6 +419,10 @@ export function useAppLifecycle({
     if (savedAgentProvider === "copilot") preferences.defaultAgentProvider = "copilot";
     else if (savedAgentProvider === "codex") preferences.defaultAgentProvider = "codex";
     else if (savedAgentProvider === "opencode") preferences.defaultAgentProvider = "opencode";
+    const savedAgentType = await getSetting(db, "defaultAgentType");
+    if (savedAgentType !== null) {
+      preferences.defaultAgentType = normalizeAgentExecutionType(savedAgentType);
+    }
 
     startPeriodicBackup(dbName, ref(db) as Ref<DbHandle | null>);
     if (!store.hideShortcutsOnStartup) {

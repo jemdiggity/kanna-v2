@@ -60,6 +60,7 @@ function mountPreferences() {
         locale: "en",
         devLingerTerminals: false,
         defaultAgentProvider: "claude",
+        defaultAgentType: "pty",
         appTheme: "dark",
         codeTheme: "match",
         agentMessageAppearance: "chat",

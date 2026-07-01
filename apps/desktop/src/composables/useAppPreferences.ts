@@ -16,6 +16,7 @@ import {
 } from "../theme/theme";
 import { syncNativeAppTheme } from "../theme/native";
 import type { useKannaStore } from "../stores/kanna";
+import { normalizeAgentExecutionType, type AgentExecutionType } from "../stores/agentExecutionType";
 
 interface UseAppPreferencesOptions {
   db: DbHandle;
@@ -40,6 +41,7 @@ export function useAppPreferences({
     locale: "en",
     devLingerTerminals: false,
     defaultAgentProvider: "claude" as AgentProvider,
+    defaultAgentType: "pty" as AgentExecutionType,
     appTheme: DEFAULT_APP_THEME,
     codeTheme: DEFAULT_CODE_THEME,
     agentMessageAppearance: "chat" as import("../stores/state").AgentMessageAppearance,
@@ -118,9 +120,7 @@ export function useAppPreferences({
     await setSetting(db, "commandPaletteUsage", JSON.stringify(counts));
   }
 
-  // Preferences update handler
-  async function handlePreferenceUpdate(key: string, value: string) {
-    await store.savePreference(key, value);
+  function applyPreferenceUpdate(key: string, value: string) {
     if (key === "locale" && ["en", "ja", "ko"].includes(value)) {
       i18n.global.locale.value = value as "en" | "ja" | "ko";
       preferences.locale = value;
@@ -134,6 +134,8 @@ export function useAppPreferences({
       preferences.devLingerTerminals = value === "true";
     } else if (key === "defaultAgentProvider") {
       preferences.defaultAgentProvider = firstSupportedAgentProvider(value) ?? "claude";
+    } else if (key === "defaultAgentType") {
+      preferences.defaultAgentType = normalizeAgentExecutionType(value);
     } else if (key === "appTheme") {
       preferences.appTheme = normalizeAppThemePreference(value);
       syncThemeRuntime();
@@ -144,6 +146,12 @@ export function useAppPreferences({
       preferences.agentMessageAppearance =
         value === "log" || value === "terminal" ? value : "chat";
     }
+  }
+
+  // Preferences update handler
+  async function handlePreferenceUpdate(key: string, value: string) {
+    applyPreferenceUpdate(key, value);
+    await store.savePreference(key, value);
   }
 
   return {

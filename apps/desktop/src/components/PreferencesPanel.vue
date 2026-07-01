@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { AgentProvider } from "@kanna/db"
+import type { AgentExecutionType } from "../stores/agentExecutionType"
 import { invoke } from "../invoke"
 import { useModalZIndex } from '../composables/useModalZIndex'
 import MobileAccessPanel from './MobileAccessPanel.vue'
@@ -32,7 +33,7 @@ interface PairingSessionResponse {
   state?: string
 }
 
-defineProps<{
+const props = defineProps<{
   preferences: {
     suspendAfterMinutes: number
     killAfterMinutes: number
@@ -40,6 +41,7 @@ defineProps<{
     locale: string
     devLingerTerminals: boolean
     defaultAgentProvider: AgentProvider
+    defaultAgentType: AgentExecutionType
     appTheme: AppThemePreference
     codeTheme: CodeThemePreference
     agentMessageAppearance: AgentMessageAppearance
@@ -74,6 +76,13 @@ const signedInUserEmail = computed(() =>
     ? authState.value.user.email ?? authState.value.user.uid
     : null
 )
+const defaultAgentSelection = computed(() => {
+  const provider = props.preferences.defaultAgentProvider
+  if (props.preferences.defaultAgentType === "agent" && (provider === "claude" || provider === "codex")) {
+    return `${provider}-sdk`
+  }
+  return provider
+})
 
 function cycleTab(direction: -1 | 1) {
   const idx = tabs.indexOf(activeTab.value)
@@ -159,6 +168,16 @@ async function signInAccount() {
 async function signOutAccount() {
   accountMessage.value = ""
   await authSession.value?.signOut()
+}
+
+function handleDefaultAgentChange(value: string) {
+  if (value === "claude-sdk" || value === "codex-sdk") {
+    emit("update", "defaultAgentProvider", value.replace("-sdk", ""))
+    emit("update", "defaultAgentType", "agent")
+    return
+  }
+  emit("update", "defaultAgentProvider", value)
+  emit("update", "defaultAgentType", "pty")
 }
 
 onMounted(() => {
@@ -285,13 +304,16 @@ defineExpose({ cycleTab })
         <div class="pref-row">
           <label>{{ $t('preferences.defaultAgent') }}</label>
           <select
-            :value="preferences.defaultAgentProvider"
-            @change="emit('update', 'defaultAgentProvider', ($event.target as HTMLSelectElement).value)"
+            data-testid="default-agent-select"
+            :value="defaultAgentSelection"
+            @change="handleDefaultAgentChange(($event.target as HTMLSelectElement).value)"
           >
-            <option value="claude">Claude</option>
-            <option value="copilot">Copilot</option>
-            <option value="codex">Codex</option>
-            <option value="opencode">OpenCode</option>
+            <option value="claude">claude</option>
+            <option value="codex">codex</option>
+            <option value="copilot">copilot</option>
+            <option value="opencode">opencode</option>
+            <option value="claude-sdk">claude (sdk)</option>
+            <option value="codex-sdk">codex (sdk)</option>
           </select>
         </div>
       </div>

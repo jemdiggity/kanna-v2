@@ -15,6 +15,7 @@ registerContextShortcuts("newTask", [
 
 const props = defineProps<{
   defaultAgentProvider?: AgentProvider;
+  defaultAgentType?: AgentExecutionType;
   pipelines?: string[];
   defaultPipeline?: string;
   baseBranches?: string[];
@@ -29,7 +30,7 @@ const emit = defineEmits<{
 
 const prompt = ref("");
 const agentProvider = ref<AgentProvider>(props.defaultAgentProvider ?? "claude");
-const displayMode = ref<AgentExecutionType>("agent");
+const displayMode = ref<AgentExecutionType>(props.defaultAgentType ?? "pty");
 const pipelineOptions = computed(() => {
   if (props.pipelines && props.pipelines.length > 0) return props.pipelines;
   return ["default"];
@@ -72,7 +73,7 @@ const MAX_VISIBLE_BRANCH_ROWS = 7;
 const BRANCH_ROW_HEIGHT_PX = 36;
 const baseBranchOptionsMaxHeight = `${MAX_VISIBLE_BRANCH_ROWS * BRANCH_ROW_HEIGHT_PX}px`;
 
-const providers: Array<AgentProvider> = ["claude", "copilot", "codex", "opencode"];
+const providers: Array<AgentProvider> = ["claude", "codex", "copilot", "opencode"];
 const availableProviders = ref<Array<AgentProvider>>([...providers]);
 type AgentChoice = {
   provider: AgentProvider;
@@ -89,11 +90,16 @@ function supportsChatMode(provider: AgentProvider): boolean {
 
 function choicesForProvider(provider: AgentProvider): AgentChoice[] {
   return supportsChatMode(provider)
-    ? [{ provider, executionType: "agent" }, { provider, executionType: "pty" }]
+    ? [{ provider, executionType: "pty" }, { provider, executionType: "agent" }]
     : [{ provider, executionType: "pty" }];
 }
 
-const agentChoices = computed(() => availableProviders.value.flatMap(choicesForProvider));
+const agentChoices = computed(() => [
+  ...availableProviders.value.map((provider) => ({ provider, executionType: "pty" as const })),
+  ...availableProviders.value
+    .filter(supportsChatMode)
+    .map((provider) => ({ provider, executionType: "agent" as const })),
+]);
 
 function choiceMatches(choice: AgentChoice, provider: AgentProvider, executionType: AgentExecutionType): boolean {
   return choice.provider === provider && choice.executionType === executionType;
@@ -111,7 +117,8 @@ function preferredChoice(): AgentChoice | undefined {
   const preferredProvider = props.defaultAgentProvider && availableProviders.value.includes(props.defaultAgentProvider)
     ? props.defaultAgentProvider
     : agentProvider.value;
-  return choices.find((choice) => choice.provider === preferredProvider && choice.executionType === "agent")
+  const preferredExecutionType = props.defaultAgentType ?? "pty";
+  return choices.find((choice) => choice.provider === preferredProvider && choice.executionType === preferredExecutionType)
     ?? choices.find((choice) => choice.provider === preferredProvider)
     ?? choices[0];
 }
@@ -147,7 +154,7 @@ onMounted(async () => {
         return null as AgentProvider | null;
       }
     }));
-    const found = checks.filter(Boolean) as AgentProvider[];
+    const found = (checks.filter(Boolean) as AgentProvider[]).sort((a, b) => a.localeCompare(b));
     if (found.length > 0) availableProviders.value = found;
     else availableProviders.value = [...providers]; // if none detected, keep all options
 
@@ -155,7 +162,10 @@ onMounted(async () => {
     const preferred = props.defaultAgentProvider ?? agentProvider.value;
     if (availableProviders.value.includes(preferred)) {
       agentProvider.value = preferred;
-      displayMode.value = supportsChatMode(preferred) ? "agent" : "pty";
+      const preferredExecutionType = props.defaultAgentType ?? "pty";
+      displayMode.value = choicesForProvider(preferred).some((choice) => choice.executionType === preferredExecutionType)
+        ? preferredExecutionType
+        : "pty";
     } else {
       const nextChoice = agentChoices.value[0];
       if (nextChoice) applyChoice(nextChoice);
