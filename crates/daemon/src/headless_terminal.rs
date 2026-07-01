@@ -19,6 +19,7 @@ const STATUS_ROWS: usize = 8;
 const WAITING_MARKER: &str = "do you want to allow";
 const INTERRUPT_MARKER: &str = "esc to interrupt";
 const COPILOT_BUSY_MARKER: &str = "esc to cancel";
+const ANTIGRAVITY_BUSY_MARKER: &str = "esc to cancel";
 const CLAUDE_IDLE_PROMPT: char = '\u{276F}';
 const CODEX_IDLE_PROMPT: char = '\u{203A}';
 
@@ -217,51 +218,12 @@ impl HeadlessTerminal {
         };
 
         let footer_lines = self.visible_footer_lines(STATUS_ROWS)?;
-        let last_line = footer_lines
-            .iter()
-            .rev()
-            .find(|line| !line.is_empty())
-            .map(String::as_str)
-            .unwrap_or("");
-        let has_waiting_marker =
-            any_line_contains_ascii_case_insensitive(&footer_lines, WAITING_MARKER);
-        let has_interrupt_marker =
-            any_line_contains_ascii_case_insensitive(&footer_lines, INTERRUPT_MARKER);
-        let has_copilot_busy_marker =
-            any_line_contains_ascii_case_insensitive(&footer_lines, COPILOT_BUSY_MARKER);
-
-        if has_waiting_marker {
-            return Ok(Some(SessionStatus::Waiting));
-        }
-
         let status = match provider {
-            AgentProvider::Claude => {
-                if has_interrupt_marker {
-                    Some(SessionStatus::Busy)
-                } else if line_starts_with_prompt(last_line, &[CLAUDE_IDLE_PROMPT]) {
-                    Some(SessionStatus::Idle)
-                } else {
-                    None
-                }
-            }
-            AgentProvider::Codex | AgentProvider::Opencode | AgentProvider::Antigravity => {
-                if has_interrupt_marker {
-                    Some(SessionStatus::Busy)
-                } else if line_starts_with_prompt(last_line, &[CODEX_IDLE_PROMPT]) {
-                    Some(SessionStatus::Idle)
-                } else {
-                    None
-                }
-            }
-            AgentProvider::Copilot => copilot_status_from_lines(&footer_lines).or_else(|| {
-                if has_copilot_busy_marker {
-                    Some(SessionStatus::Busy)
-                } else if line_starts_with_prompt(last_line, &[CLAUDE_IDLE_PROMPT]) {
-                    Some(SessionStatus::Idle)
-                } else {
-                    None
-                }
-            }),
+            AgentProvider::Claude => claude_status_from_lines(&footer_lines),
+            AgentProvider::Codex => codex_status_from_lines(&footer_lines),
+            AgentProvider::Opencode => opencode_status_from_lines(&footer_lines),
+            AgentProvider::Antigravity => antigravity_status_from_lines(&footer_lines),
+            AgentProvider::Copilot => copilot_status_from_lines(&footer_lines),
         };
 
         Ok(status)
@@ -400,6 +362,15 @@ fn any_line_contains_ascii_case_insensitive(lines: &[String], needle: &str) -> b
         })
 }
 
+fn last_non_empty_line(lines: &[String]) -> &str {
+    lines
+        .iter()
+        .rev()
+        .find(|line| !line.is_empty())
+        .map(String::as_str)
+        .unwrap_or("")
+}
+
 fn line_starts_with_prompt(line: &str, prompts: &[char]) -> bool {
     line.trim_start()
         .chars()
@@ -423,26 +394,99 @@ fn line_contains_worktree_path(line: &str) -> bool {
     line.contains(".kanna-worktrees/") || line.contains("[⎇ ")
 }
 
+fn claude_status_from_lines(lines: &[String]) -> Option<SessionStatus> {
+    if any_line_contains_ascii_case_insensitive(lines, WAITING_MARKER) {
+        return Some(SessionStatus::Waiting);
+    }
+    if any_line_contains_ascii_case_insensitive(lines, INTERRUPT_MARKER) {
+        return Some(SessionStatus::Busy);
+    }
+    if line_starts_with_prompt(last_non_empty_line(lines), &[CLAUDE_IDLE_PROMPT]) {
+        return Some(SessionStatus::Idle);
+    }
+
+    None
+}
+
+fn codex_status_from_lines(lines: &[String]) -> Option<SessionStatus> {
+    if any_line_contains_ascii_case_insensitive(lines, WAITING_MARKER) {
+        return Some(SessionStatus::Waiting);
+    }
+    if any_line_contains_ascii_case_insensitive(lines, INTERRUPT_MARKER) {
+        return Some(SessionStatus::Busy);
+    }
+    if line_starts_with_prompt(last_non_empty_line(lines), &[CODEX_IDLE_PROMPT]) {
+        return Some(SessionStatus::Idle);
+    }
+
+    None
+}
+
+fn opencode_status_from_lines(lines: &[String]) -> Option<SessionStatus> {
+    if any_line_contains_ascii_case_insensitive(lines, WAITING_MARKER) {
+        return Some(SessionStatus::Waiting);
+    }
+    if any_line_contains_ascii_case_insensitive(lines, INTERRUPT_MARKER) {
+        return Some(SessionStatus::Busy);
+    }
+    if line_starts_with_prompt(last_non_empty_line(lines), &[CODEX_IDLE_PROMPT]) {
+        return Some(SessionStatus::Idle);
+    }
+
+    None
+}
+
+fn antigravity_status_from_lines(lines: &[String]) -> Option<SessionStatus> {
+    if any_line_contains_ascii_case_insensitive(lines, WAITING_MARKER) {
+        return Some(SessionStatus::Waiting);
+    }
+    if any_line_contains_ascii_case_insensitive(lines, ANTIGRAVITY_BUSY_MARKER) {
+        return Some(SessionStatus::Busy);
+    }
+    if line_starts_with_prompt(last_non_empty_line(lines), &[CODEX_IDLE_PROMPT]) {
+        return Some(SessionStatus::Idle);
+    }
+
+    None
+}
+
 fn copilot_line_has_busy_marker(line: &str) -> bool {
     contains_ascii_case_insensitive(line, COPILOT_BUSY_MARKER)
         || contains_ascii_case_insensitive(line, "thinking ")
 }
 
 fn copilot_status_from_lines(lines: &[String]) -> Option<SessionStatus> {
-    let path_index = lines
-        .iter()
-        .rposition(|line| line_contains_worktree_path(line))?;
-
-    if path_index > 0 && copilot_line_has_busy_marker(&lines[path_index - 1]) {
-        return Some(SessionStatus::Busy);
+    if any_line_contains_ascii_case_insensitive(lines, WAITING_MARKER) {
+        return Some(SessionStatus::Waiting);
     }
 
-    lines
+    if let Some(path_index) = lines
         .iter()
-        .skip(path_index + 1)
-        .find_map(|line| prompt_remainder(line, &[CLAUDE_IDLE_PROMPT]))
-        .filter(|remainder| remainder.is_empty())
-        .map(|_| SessionStatus::Idle)
+        .rposition(|line| line_contains_worktree_path(line))
+    {
+        if path_index > 0 && copilot_line_has_busy_marker(&lines[path_index - 1]) {
+            return Some(SessionStatus::Busy);
+        }
+
+        let path_relative_status = lines
+            .iter()
+            .skip(path_index + 1)
+            .find_map(|line| prompt_remainder(line, &[CLAUDE_IDLE_PROMPT]))
+            .filter(|remainder| remainder.is_empty())
+            .map(|_| SessionStatus::Idle);
+        if path_relative_status.is_some() {
+            return path_relative_status;
+        }
+    }
+
+    if any_line_contains_ascii_case_insensitive(lines, COPILOT_BUSY_MARKER) {
+        return Some(SessionStatus::Busy);
+    }
+    if line_starts_with_prompt(last_non_empty_line(lines), &[CLAUDE_IDLE_PROMPT]) {
+        return Some(SessionStatus::Idle);
+    }
+
+    None
 }
 
 #[cfg(test)]
@@ -648,6 +692,48 @@ mod tests {
     }
 
     #[test]
+    fn codex_working_status_without_interrupt_marker_does_not_override_prompt() {
+        let mut headless_terminal = HeadlessTerminal::new(80, 4, 10_000).unwrap();
+        headless_terminal.write(
+            concat!(
+                "OpenAI Codex\r\n",
+                "◦ Working\r\n",
+                "gpt-5.5 high · /tmp/kanna-codex-fixture-root\r\n",
+                "› Improve documentation in @filename\r\n",
+            )
+            .as_bytes(),
+        );
+
+        assert_eq!(
+            headless_terminal
+                .visible_status(Some(AgentProvider::Codex))
+                .unwrap(),
+            Some(SessionStatus::Idle)
+        );
+    }
+
+    #[test]
+    fn codex_assistant_text_starting_with_working_does_not_keep_prompt_busy() {
+        let mut headless_terminal = HeadlessTerminal::new(80, 5, 10_000).unwrap();
+        headless_terminal.write(
+            concat!(
+                "OpenAI Codex\r\n",
+                "• Working on the implementation details.\r\n",
+                "────────────────────────────────\r\n",
+                "› Follow-up prompt\r\n",
+            )
+            .as_bytes(),
+        );
+
+        assert_eq!(
+            headless_terminal
+                .visible_status(Some(AgentProvider::Codex))
+                .unwrap(),
+            Some(SessionStatus::Idle)
+        );
+    }
+
+    #[test]
     fn opencode_status_comes_from_visible_footer_content() {
         let mut headless_terminal = HeadlessTerminal::new(80, 4, 10_000).unwrap();
         headless_terminal.write(
@@ -685,6 +771,31 @@ mod tests {
                 .visible_status(Some(AgentProvider::Opencode))
                 .unwrap(),
             Some(SessionStatus::Busy)
+        );
+    }
+
+    #[test]
+    fn antigravity_status_comes_from_visible_cancel_marker() {
+        let mut headless_terminal = HeadlessTerminal::new(80, 4, 10_000).unwrap();
+        headless_terminal.write(
+            "Header\r\nBody\r\n• Working(0s • esc to cancel)\r\n› Review the implementation"
+                .as_bytes(),
+        );
+
+        assert_eq!(
+            headless_terminal
+                .visible_status(Some(AgentProvider::Antigravity))
+                .unwrap(),
+            Some(SessionStatus::Busy)
+        );
+
+        headless_terminal.write("\x1b[2J\x1b[HHeader\r\nBody\r\nAll done\r\n›".as_bytes());
+
+        assert_eq!(
+            headless_terminal
+                .visible_status(Some(AgentProvider::Antigravity))
+                .unwrap(),
+            Some(SessionStatus::Idle)
         );
     }
 
