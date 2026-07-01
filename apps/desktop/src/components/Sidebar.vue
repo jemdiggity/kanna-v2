@@ -154,7 +154,7 @@ function itemTitle(item: SidebarPipelineItem): string {
 }
 
 function itemTooltip(item: SidebarPipelineItem): string | undefined {
-  return item.prompt || (isRemoteTask(item) ? t('sidebar.remoteTaskTooltip') : undefined);
+  return itemTitle(item);
 }
 
 function isRemoteTask(item: SidebarPipelineItem): boolean {
