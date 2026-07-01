@@ -17,6 +17,11 @@ import {
 import { syncNativeAppTheme } from "../theme/native";
 import type { useKannaStore } from "../stores/kanna";
 import { normalizeAgentExecutionType, type AgentExecutionType } from "../stores/agentExecutionType";
+import {
+  parseRecentAgentChoices,
+  promoteRecentAgentChoice,
+  type RecentAgentChoice,
+} from "../utils/agentChoiceUsage";
 
 interface UseAppPreferencesOptions {
   db: DbHandle;
@@ -42,6 +47,7 @@ export function useAppPreferences({
     devLingerTerminals: false,
     defaultAgentProvider: "claude" as AgentProvider,
     defaultAgentType: "pty" as AgentExecutionType,
+    recentAgentChoices: [] as RecentAgentChoice[],
     appTheme: DEFAULT_APP_THEME,
     codeTheme: DEFAULT_CODE_THEME,
     agentMessageAppearance: "chat" as import("../stores/state").AgentMessageAppearance,
@@ -120,6 +126,12 @@ export function useAppPreferences({
     await setSetting(db, "commandPaletteUsage", JSON.stringify(counts));
   }
 
+  async function trackAgentChoiceUsage(choice: { provider: AgentProvider; executionType: AgentExecutionType }) {
+    const choices = promoteRecentAgentChoice(preferences.recentAgentChoices, choice);
+    preferences.recentAgentChoices = choices;
+    await setSetting(db, "recentAgentChoices", JSON.stringify(choices));
+  }
+
   function applyPreferenceUpdate(key: string, value: string) {
     if (key === "locale" && ["en", "ja", "ko"].includes(value)) {
       i18n.global.locale.value = value as "en" | "ja" | "ko";
@@ -136,6 +148,8 @@ export function useAppPreferences({
       preferences.defaultAgentProvider = firstSupportedAgentProvider(value) ?? "claude";
     } else if (key === "defaultAgentType") {
       preferences.defaultAgentType = normalizeAgentExecutionType(value);
+    } else if (key === "recentAgentChoices") {
+      preferences.recentAgentChoices = parseRecentAgentChoices(value);
     } else if (key === "appTheme") {
       preferences.appTheme = normalizeAppThemePreference(value);
       syncThemeRuntime();
@@ -160,6 +174,7 @@ export function useAppPreferences({
     startSystemThemeListener,
     stopSystemThemeListener,
     trackCommandUsage,
+    trackAgentChoiceUsage,
     handlePreferenceUpdate,
   };
 }

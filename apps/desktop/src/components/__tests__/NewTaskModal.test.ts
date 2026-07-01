@@ -2,7 +2,7 @@
 
 import { mount } from "@vue/test-utils";
 import { nextTick } from "vue";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import NewTaskModal from "../NewTaskModal.vue";
 import { clearContextShortcuts, getContextShortcuts } from "../../composables/useShortcutContext";
 
@@ -15,14 +15,11 @@ function selectedAgentLabel(wrapper: ReturnType<typeof mount<typeof NewTaskModal
   return wrapper.get(".agent-provider").text();
 }
 
+let installedProviderNames = new Set(["claude", "codex", "opencode", "agy"]);
+
 vi.mock("../../invoke", () => ({
   invoke: vi.fn(async (command: string, args?: { name?: string; repoPath?: string }) => {
-    if (command === "which_binary" && (
-      args?.name === "claude"
-      || args?.name === "codex"
-      || args?.name === "opencode"
-      || args?.name === "agy"
-    )) {
+    if (command === "which_binary" && args?.name && installedProviderNames.has(args.name)) {
       return true;
     }
     throw new Error("missing");
@@ -30,6 +27,10 @@ vi.mock("../../invoke", () => ({
 }));
 
 describe("NewTaskModal", () => {
+  beforeEach(() => {
+    installedProviderNames = new Set(["claude", "codex", "opencode", "agy"]);
+  });
+
   afterEach(() => {
     clearContextShortcuts("newTask");
   });
@@ -129,6 +130,44 @@ describe("NewTaskModal", () => {
     }
 
     expect(selectedAgentLabel(wrapper)).toBe("antigravity");
+  });
+
+  it("orders agent choices by most recent exact usage", async () => {
+    installedProviderNames = new Set(["claude", "copilot", "codex", "opencode"]);
+    const wrapper = mount(NewTaskModal, {
+      props: {
+        defaultAgentProvider: "claude",
+        recentAgentChoices: [
+          { provider: "copilot", executionType: "pty" },
+          { provider: "codex", executionType: "agent" },
+        ],
+      },
+      global: {
+        mocks: {
+          $t: (key: string) => key,
+        },
+      },
+    });
+
+    await flushPromises();
+    await flushPromises();
+
+    expect(selectedAgentLabel(wrapper)).toBe("copilot");
+
+    await wrapper.get(".agent-provider").trigger("click");
+    await flushPromises();
+
+    expect(selectedAgentLabel(wrapper)).toBe("codex sdk");
+
+    await wrapper.get(".agent-provider").trigger("click");
+    await flushPromises();
+
+    expect(selectedAgentLabel(wrapper)).toBe("claude");
+
+    await wrapper.get(".agent-provider").trigger("click");
+    await flushPromises();
+
+    expect(selectedAgentLabel(wrapper)).toBe("codex");
   });
 
   it("prevents mouse down default on the agent indicator so focus stays on the prompt", async () => {

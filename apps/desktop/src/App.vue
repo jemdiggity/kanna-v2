@@ -144,6 +144,7 @@ const appPreferences = useAppPreferences({
 const {
   preferences,
   commandUsageCounts,
+  trackAgentChoiceUsage,
   startSystemThemeListener,
   stopSystemThemeListener,
 } = appPreferences;
@@ -194,6 +195,7 @@ const appTaskCreation = useAppTaskCreation({
   showAddRepoModal,
   isCloudOnlyRepoId,
   cloudRepoRemoteUrl,
+  onAgentChoiceUsed: trackAgentChoiceUsage,
 });
 const {
   currentBlockers,

@@ -2,6 +2,7 @@ import { ref, type ComputedRef, type Ref } from "vue";
 import { computedAsync } from "@vueuse/core";
 import { parseRepoConfig } from "@kanna/core";
 import type { AgentProvider } from "@kanna/db";
+import type { AgentExecutionType } from "../stores/agentExecutionType";
 
 import { invoke } from "../invoke";
 import { getDefaultBaseBranch } from "../utils/baseBranchPicker";
@@ -33,6 +34,7 @@ interface UseAppTaskCreationOptions {
   showAddRepoModal: Ref<boolean>;
   isCloudOnlyRepoId: (repoId: string | undefined | null) => boolean;
   cloudRepoRemoteUrl: (repoId: string | undefined | null) => string | null;
+  onAgentChoiceUsed?: (choice: { provider: AgentProvider; executionType: AgentExecutionType }) => void | Promise<void>;
 }
 
 export function useAppTaskCreation({
@@ -53,10 +55,14 @@ export function useAppTaskCreation({
   showAddRepoModal,
   isCloudOnlyRepoId,
   cloudRepoRemoteUrl,
+  onAgentChoiceUsed,
 }: UseAppTaskCreationOptions) {
   const cloningRepo = ref(false);
+  let pendingNewTaskSubmit: Promise<void> | null = null;
 
   async function openNewTaskModal(repoId?: string) {
+    await pendingNewTaskSubmit?.catch(() => undefined);
+
     const targetRepoId = repoId ?? store.selectedRepoId ?? (sidebarRepos.value.length === 1 ? sidebarRepos.value[0]?.id : undefined);
     if (targetRepoId) store.selectedRepoId = targetRepoId;
     const repoPath = store.repos.find((r) => r.id === targetRepoId)?.path;
@@ -131,6 +137,8 @@ export function useAppTaskCreation({
     baseBranch?: string,
     agentType: "pty" | "agent" = "pty",
   ) {
+    if (pendingNewTaskSubmit) return;
+
     if (!store.selectedRepoId) {
       if (sidebarRepos.value.length === 1) {
         store.selectedRepoId = sidebarRepos.value[0].id;
@@ -166,16 +174,29 @@ export function useAppTaskCreation({
     }
     if (!repo) return;
     showNewTaskModal.value = false;
-    try {
+    const submitPromise = (async () => {
       await store.createItem(store.selectedRepoId, repo.path, prompt, agentType, {
         agentProvider,
         pipelineName,
         baseBranch,
       });
+      try {
+        await onAgentChoiceUsed?.({ provider: agentProvider, executionType: agentType });
+      } catch (error: unknown) {
+        console.warn("[App] failed to record recent agent choice:", error);
+      }
+    })();
+    pendingNewTaskSubmit = submitPromise;
+    try {
+      await submitPromise;
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       console.error("Task creation failed:", e);
       toast.error(`${t('toasts.taskCreationFailed')}: ${msg}`);
+    } finally {
+      if (pendingNewTaskSubmit === submitPromise) {
+        pendingNewTaskSubmit = null;
+      }
     }
   }
 

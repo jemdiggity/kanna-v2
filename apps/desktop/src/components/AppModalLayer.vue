@@ -72,6 +72,7 @@ function setPreferencesRef(component: Element | ComponentPublicInstance | null) 
     v-if="m.showNewTaskModal.value"
     :default-agent-provider="preferences.defaultAgentProvider"
     :default-agent-type="preferences.defaultAgentType"
+    :recent-agent-choices="preferences.recentAgentChoices"
     :pipelines="m.availablePipelines.value"
     :default-pipeline="m.defaultPipelineName.value"
     :base-branches="m.availableBaseBranches.value"
