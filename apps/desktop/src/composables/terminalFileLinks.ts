@@ -4,6 +4,7 @@ import type { TerminalOptions } from "./terminalTypes"
 
 // --- File link provider ---
 const FILE_PATH_RE = /(?:^|[\s"'`(<\[])(\/?[a-zA-Z0-9_.\-][\w.\-/]*\.[a-zA-Z][a-zA-Z0-9]*(?::\d+){0,2})/g
+const IMAGE_FILE_EXTENSION = /\.(?:apng|avif|bmp|gif|jpe?g|png|svg|webp)$/i
 
 export interface TerminalFileLinkProvider {
   register(): void
@@ -47,6 +48,10 @@ export function createTerminalFileLinkProvider(params: {
       previewPath: path,
       line,
     }
+  }
+
+  function isImageFilePath(path: string): boolean {
+    return IMAGE_FILE_EXTENSION.test(path)
   }
 
   async function checkFileExists(checkPath: string): Promise<boolean> {
@@ -105,6 +110,13 @@ export function createTerminalFileLinkProvider(params: {
             text: match.text,
             activate(event: MouseEvent) {
               if (!event.metaKey) return
+              if (isImageFilePath(match.checkPath)) {
+                params.getContainer()?.dispatchEvent(new CustomEvent("image-link-activate", {
+                  bubbles: true,
+                  detail: { url: match.checkPath },
+                }))
+                return
+              }
               params.getContainer()?.dispatchEvent(new CustomEvent("file-link-activate", {
                 bubbles: true,
                 detail: { path: match.previewPath, line: match.line },

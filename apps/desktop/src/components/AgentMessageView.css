@@ -97,6 +97,35 @@
   color: var(--agent-accent);
 }
 
+.message.assistant :deep(.agent-image-link-preview) {
+  display: block;
+  margin: 10px 0;
+  max-width: min(100%, 640px);
+}
+
+.message.assistant :deep(.agent-image-link-preview-media) {
+  display: block;
+  overflow: hidden;
+  border: 1px solid var(--agent-border);
+  border-radius: 8px;
+  background: var(--agent-panel);
+}
+
+.message.assistant :deep(.agent-image-link-preview img) {
+  display: block;
+  width: 100%;
+  max-height: 420px;
+  object-fit: contain;
+}
+
+.message.assistant :deep(.agent-image-link-preview-caption) {
+  display: block;
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
 .message.assistant :deep(code) {
   font-family: "JetBrains Mono", "SF Mono", Menlo, monospace;
   font-size: 0.86em;

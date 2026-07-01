@@ -6,6 +6,7 @@ import AddRepoModal from "./AddRepoModal.vue";
 import KeyboardShortcutsModal from "./KeyboardShortcutsModal.vue";
 import FilePickerModal from "./FilePickerModal.vue";
 import FilePreviewModal from "./FilePreviewModal.vue";
+import ImageUrlPreviewModal from "./ImageUrlPreviewModal.vue";
 import TreeExplorerModal from "./TreeExplorerModal.vue";
 import DiffModal from "./DiffModal.vue";
 import CommitGraphModal from "./CommitGraphModal.vue";
@@ -55,6 +56,10 @@ function setFilePickerRef(component: Element | ComponentPublicInstance | null) {
 
 function setFilePreviewRef(component: Element | ComponentPublicInstance | null) {
   m.filePreviewRef.value = component as InstanceType<typeof FilePreviewModal> | null;
+}
+
+function setImageUrlPreviewRef(component: Element | ComponentPublicInstance | null) {
+  m.imageUrlPreviewRef.value = component as InstanceType<typeof ImageUrlPreviewModal> | null;
 }
 
 function setPreferencesRef(component: Element | ComponentPublicInstance | null) {
@@ -175,6 +180,12 @@ function setPreferencesRef(component: Element | ComponentPublicInstance | null) 
     :maximized="m.maximizedModal.value === 'file'"
     @close="m.closeFilePreview(true)"
     @update-markdown-mode="m.updateCurrentPreviewMarkdownMode"
+  />
+  <ImageUrlPreviewModal
+    :ref="setImageUrlPreviewRef"
+    v-if="m.showImageUrlPreviewModal.value && !c.isMobile"
+    :image-url="m.previewImageUrl.value"
+    @close="m.closeImageUrlPreview"
   />
   <AnalyticsModal
     v-if="m.showAnalyticsModal.value"

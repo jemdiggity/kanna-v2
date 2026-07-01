@@ -6,7 +6,6 @@ use std::sync::OnceLock;
 use tauri::AppHandle;
 use tauri::Manager;
 
-#[cfg(target_os = "macos")]
 use base64::Engine;
 
 fn webview_log_path() -> &'static str {
@@ -310,6 +309,30 @@ pub fn read_text_file(path: String) -> Result<String, String> {
 }
 
 #[tauri::command]
+pub fn read_image_file_data_url(path: String) -> Result<String, String> {
+    let mime_type = image_mime_type_for_path(&path)
+        .ok_or_else(|| format!("unsupported image file type '{}'", path))?;
+    let bytes = std::fs::read(&path).map_err(|e| format!("failed to read '{}': {}", path, e))?;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+    Ok(format!("data:{mime_type};base64,{encoded}"))
+}
+
+fn image_mime_type_for_path(path: &str) -> Option<&'static str> {
+    let extension = Path::new(path).extension()?.to_str()?.to_ascii_lowercase();
+    match extension.as_str() {
+        "apng" => Some("image/apng"),
+        "avif" => Some("image/avif"),
+        "bmp" => Some("image/bmp"),
+        "gif" => Some("image/gif"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "png" => Some("image/png"),
+        "svg" => Some("image/svg+xml"),
+        "webp" => Some("image/webp"),
+        _ => None,
+    }
+}
+
+#[tauri::command]
 pub fn which_binary(name: String) -> Result<String, String> {
     resolve_binary_from_candidates(&name, sidecar_candidates(&name))
 }
@@ -483,7 +506,7 @@ pub fn append_log(message: String) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        current_target_triple, format_log_timestamp,
+        current_target_triple, format_log_timestamp, image_mime_type_for_path,
         resolve_binary_from_candidates_with_path_lookup, resolve_builtin_resource_path,
         sidecar_candidates_for_exe,
     };
@@ -607,6 +630,19 @@ mod tests {
             .expect_err("absolute resource paths should be rejected");
 
         assert!(error.contains("invalid resource path"));
+    }
+
+    #[test]
+    fn image_mime_type_accepts_supported_extensions_case_insensitively() {
+        assert_eq!(image_mime_type_for_path("/tmp/screenshot.PNG"), Some("image/png"));
+        assert_eq!(image_mime_type_for_path("/tmp/photo.jpeg"), Some("image/jpeg"));
+        assert_eq!(image_mime_type_for_path("/tmp/diagram.svg"), Some("image/svg+xml"));
+    }
+
+    #[test]
+    fn image_mime_type_rejects_non_image_extensions() {
+        assert_eq!(image_mime_type_for_path("/tmp/readme.md"), None);
+        assert_eq!(image_mime_type_for_path("/tmp/no-extension"), None);
     }
 }
 

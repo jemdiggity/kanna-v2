@@ -4,6 +4,7 @@ import Sidebar from "../components/Sidebar.vue";
 import MainPanel from "../components/MainPanel.vue";
 import FilePickerModal from "../components/FilePickerModal.vue";
 import FilePreviewModal from "../components/FilePreviewModal.vue";
+import ImageUrlPreviewModal from "../components/ImageUrlPreviewModal.vue";
 import TreeExplorerModal from "../components/TreeExplorerModal.vue";
 import DiffModal from "../components/DiffModal.vue";
 import CommitGraphModal from "../components/CommitGraphModal.vue";
@@ -72,6 +73,8 @@ export function useAppModals({ isMobile, store, windowWorkspace }: UseAppModalsO
   const previewHidden = ref(false);
   const previewFromPicker = ref(false);
   const previewFromTree = ref(false);
+  const showImageUrlPreviewModal = ref(false);
+  const previewImageUrl = ref("");
   const showDiffModal = ref(false);
   const showTreeExplorer = ref(false);
   const currentWorktreePath = computed(() => {
@@ -116,6 +119,7 @@ export function useAppModals({ isMobile, store, windowWorkspace }: UseAppModalsO
   const treeExplorerRef = ref<InstanceType<typeof TreeExplorerModal> | null>(null);
   const filePickerRef = ref<InstanceType<typeof FilePickerModal> | null>(null);
   const filePreviewRef = ref<InstanceType<typeof FilePreviewModal> | null>(null);
+  const imageUrlPreviewRef = ref<InstanceType<typeof ImageUrlPreviewModal> | null>(null);
   const preferencesRef = ref<InstanceType<typeof PreferencesPanel> | null>(null);
   const sidebarShellStyle = computed(() => ({
     width: `${sidebarWidth.value}px`,
@@ -342,12 +346,23 @@ export function useAppModals({ isMobile, store, windowWorkspace }: UseAppModalsO
     }
   }
 
+  function openImageUrlPreview(imageUrl: string) {
+    previewImageUrl.value = imageUrl;
+    showImageUrlPreviewModal.value = true;
+    nextTick(() => imageUrlPreviewRef.value?.bringToFront?.());
+  }
+
+  function closeImageUrlPreview() {
+    showImageUrlPreviewModal.value = false;
+    previewImageUrl.value = "";
+  }
+
   const anyModalOpen = computed(() =>
     showNewTaskModal.value || showAddRepoModal.value || showShortcutsModal.value ||
     showFilePickerModal.value || showFilePreviewModal.value || showDiffModal.value ||
     showTreeExplorer.value || showShellModal.value || showAnalyticsModal.value ||
     showBlockerSelect.value || showPreferencesPanel.value || showCommitGraphModal.value ||
-    showPeerPicker.value
+    showPeerPicker.value || showImageUrlPreviewModal.value
   );
   useRestoreFocus(anyModalOpen);
 
@@ -371,6 +386,8 @@ export function useAppModals({ isMobile, store, windowWorkspace }: UseAppModalsO
     previewHidden,
     previewFromPicker,
     previewFromTree,
+    showImageUrlPreviewModal,
+    previewImageUrl,
     showDiffModal,
     showTreeExplorer,
     currentWorktreePath,
@@ -399,6 +416,7 @@ export function useAppModals({ isMobile, store, windowWorkspace }: UseAppModalsO
     treeExplorerRef,
     filePickerRef,
     filePreviewRef,
+    imageUrlPreviewRef,
     preferencesRef,
     sidebarShellStyle,
     canResizeSidebar,
@@ -419,6 +437,8 @@ export function useAppModals({ isMobile, store, windowWorkspace }: UseAppModalsO
     openFilePreview,
     selectFileFromPicker,
     closeFilePreview,
+    openImageUrlPreview,
+    closeImageUrlPreview,
     getCurrentPreviewRecall,
   };
 }

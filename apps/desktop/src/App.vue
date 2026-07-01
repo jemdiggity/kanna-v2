@@ -124,6 +124,7 @@ const {
   closeFilePicker,
   showFilePickerOnTop,
   openFilePreview,
+  openImageUrlPreview,
   getCurrentPreviewRecall,
 } = appModals;
 const appTaskTransfer = useAppTaskTransfer({ db, store, toast, showPeerPicker });
@@ -215,6 +216,7 @@ const {
   initializeDesktopCloudAuth,
   initializeDesktopLanTaskSync,
   openFilePreview,
+  openImageUrlPreview,
   preferences,
   remoteTaskDiagnostics,
   restoreSidebarWidth,
