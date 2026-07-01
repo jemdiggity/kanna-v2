@@ -85,6 +85,7 @@ describe("PreferencesPanel theme controls", () => {
       "codex",
       "copilot",
       "opencode",
+      "antigravity",
       "claude (sdk)",
       "codex (sdk)",
     ]);

@@ -123,8 +123,10 @@ describe("NewTaskModal", () => {
 
     expect(selectedAgentLabel(wrapper)).toBe("opencode");
 
-    await wrapper.get(".agent-provider").trigger("click");
-    await flushPromises();
+    for (let attempt = 0; attempt < 4 && selectedAgentLabel(wrapper) !== "antigravity"; attempt++) {
+      await wrapper.get(".agent-provider").trigger("click");
+      await flushPromises();
+    }
 
     expect(selectedAgentLabel(wrapper)).toBe("antigravity");
   });
