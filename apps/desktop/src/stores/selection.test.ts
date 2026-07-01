@@ -180,6 +180,49 @@ describe("createSelectionApi", () => {
     expect(invalidateSharedData).toHaveBeenCalledWith("taskActivity");
   });
 
+  it("moves the selected repo to the selected item's repo", async () => {
+    const state = createStoreState();
+    state.db.value = createDb();
+    state.repos.value = [
+      createRepo(),
+      createRepo({
+        id: "repo-2",
+        path: "/tmp/repo-2",
+        name: "repo-2",
+        sort_order: 1,
+      }),
+    ];
+    state.items.value = [createItem()];
+    state.selectedRepoId.value = "repo-2";
+    state.selectedItemId.value = null;
+
+    const persistSelection = vi.fn(async () => {});
+    const context = createStoreContext(
+      state,
+      {
+        toasts: ref([]),
+        dismiss: vi.fn(),
+        info: vi.fn(),
+        warning: vi.fn(),
+        error: vi.fn(),
+      },
+      {
+        windowWorkspace: {
+          persistSelection,
+        },
+      } as never,
+    );
+
+    await createSelectionApi(context).selectItem("task-1");
+
+    expect(state.selectedRepoId.value).toBe("repo-1");
+    expect(state.selectedItemId.value).toBe("task-1");
+    expect(persistSelection).toHaveBeenCalledWith({
+      selectedRepoId: "repo-1",
+      selectedItemId: "task-1",
+    });
+  });
+
   it("falls back to the first visible repo and task when the current selection disappears", async () => {
     const state = createStoreState();
     state.db.value = createDb();
