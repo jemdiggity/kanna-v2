@@ -91,6 +91,25 @@ Check the current pointer:
 ./kd mobile ota status --production
 ```
 
+Run the read-only cloud and relay preflight before asking a human to verify an
+OTA on a physical device:
+
+```bash
+./kd mobile ota doctor --staging
+./kd mobile ota doctor --production
+```
+
+`preflight` is an alias for `doctor`. The command does not publish, roll back,
+write GCS objects, modify Secret Manager, or install/launch a device app. It
+requires Google Cloud credentials for the target project and verifies:
+
+- environment resolution, OTA bucket, channel, and `runtimeVersion`
+- current GCS channel pointer and referenced update metadata/config readability
+- relay `/health` and `/ota/manifest` behavior for the current channel
+- Secret Manager private-key secret existence
+- relay VM service account resolution
+- relay service account IAM for Secret Manager and OTA GCS reads
+
 Rollback by repointing the channel to a prior update id:
 
 ```bash
@@ -100,8 +119,25 @@ Rollback by repointing the channel to a prior update id:
 
 Dry run a publish or rollback with `--dry-run`.
 
-## E2E Gap
+## Release Verification
 
-Human post-merge verification should publish to staging, run the staging app on
-device, confirm the update is fetched and applied, change a visible JS string,
-republish, and confirm the new update applies on foreground/restart.
+Automated preflight with real staging or production cloud resources is not a CI
+claim because it needs Google Cloud credentials for the target project. Run it
+explicitly before human device verification:
+
+```bash
+gcloud auth application-default login
+./kd mobile ota doctor --staging
+```
+
+For production, use credentials authorized for `kanna-build` and run:
+
+```bash
+./kd mobile ota doctor --production
+```
+
+Human-only post-merge verification remains: publish to staging, run the staging
+app on a physical iPhone, confirm the update is fetched and applied, change a
+visible JS string, republish, and confirm the replacement update applies on
+foreground or restart. Agent automation must not install, launch, or run
+physical-device Appium for this check.
