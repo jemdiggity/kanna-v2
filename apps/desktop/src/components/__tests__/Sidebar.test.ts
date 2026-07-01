@@ -243,7 +243,7 @@ describe("Sidebar", () => {
     expect(wrapper.get(".pipeline-item .item-title").text()).toBe(longTitle);
   });
 
-  it("uses the full task prompt as the sidebar title tooltip", () => {
+  it("uses the rendered task title as the sidebar title tooltip", () => {
     const prompt = "Add tooltip to task titles so hovering shows the full task prompt even when the sidebar truncates the visible title";
     const wrapper = mountSidebar([
       item("task-1", {
@@ -254,7 +254,7 @@ describe("Sidebar", () => {
 
     const title = wrapper.get(".pipeline-item .item-title");
     expect(title.text()).toBe("Tooltip task titles");
-    expect(title.attributes("title")).toBe(prompt);
+    expect(title.attributes("title")).toBe("Tooltip task titles");
   });
 
   it("marks remote tasks with a leading angle marker and leaves local tasks unmarked", () => {
@@ -273,10 +273,10 @@ describe("Sidebar", () => {
     const titles = wrapper.findAll(".pipeline-item .item-title");
     expect(titles).toHaveLength(2);
     expect(titles[0]?.text()).toBe("< LAN visible task");
-    expect(titles[0]?.attributes("title")).toBe("Remote task");
+    expect(titles[0]?.attributes("title")).toBe("LAN visible task");
     expect(titles[0]?.find(".remote-task-marker").exists()).toBe(true);
     expect(titles[1]?.text()).toBe("Local cleanup");
-    expect(titles[1]?.attributes("title")).toBeUndefined();
+    expect(titles[1]?.attributes("title")).toBe("Local cleanup");
     expect(titles[1]?.find(".remote-task-marker").exists()).toBe(false);
   });
 
