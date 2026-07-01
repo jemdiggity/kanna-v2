@@ -36,6 +36,7 @@ pub(crate) struct PreparedTaskSpawn {
     pub(super) cwd: String,
     pub(super) env: HashMap<String, String>,
     pub(super) session: PreparedSessionSpawn,
+    pub(crate) follow_task: Option<bool>,
 }
 
 #[derive(Clone)]
@@ -62,6 +63,15 @@ pub(crate) enum PreparedSessionSpawn {
 pub(crate) enum PreparedStageTransition {
     Spawn(Box<PreparedTaskSpawn>),
     Continue(Box<PreparedStageContinue>),
+    Close { task_id: String },
+}
+
+pub(crate) struct PreparedStageRerun {
+    pub(super) task_id: String,
+    pub(super) session_id: String,
+    pub(super) cwd: String,
+    pub(super) env: HashMap<String, String>,
+    pub(super) session: PreparedSessionSpawn,
 }
 
 pub(crate) struct PreparedStageContinue {
@@ -72,6 +82,7 @@ pub(crate) struct PreparedStageContinue {
     pub(super) previous_stage_result: Option<String>,
     pub(super) previous_active_post_action: Option<String>,
     pub(super) active_post_action: Option<String>,
+    pub(super) follow_task: Option<bool>,
     pub(super) input_text: String,
     pub(super) input: Vec<u8>,
 }

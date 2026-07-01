@@ -12,6 +12,7 @@ async fn request_revision_route_uses_revision_requester() {
             assert_eq!(payload.prompt, "Add e2e coverage for task creation.");
             Ok(TaskActionResponse {
                 task_id: "revision-task".to_string(),
+                follow_task: None,
             })
         }),
     );

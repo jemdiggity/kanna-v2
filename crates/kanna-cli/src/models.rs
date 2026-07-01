@@ -169,6 +169,8 @@ pub(crate) struct TaskInputResponse {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TaskActionResponse {
     pub(crate) task_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) follow_task: Option<bool>,
 }
 
 pub(crate) struct TaskCreateOptions {

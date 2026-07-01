@@ -29,6 +29,7 @@ fn bundled_catalog_parses_and_declares_all_tools() {
             "kanna_close_task",
             "kanna_rename_task",
             "kanna_advance_stage",
+            "kanna_rerun_stage",
             "kanna_block_task",
             "kanna_unblock_task",
             "kanna_set_task_parent",

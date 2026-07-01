@@ -384,7 +384,7 @@ async function main(): Promise<void> {
     KANNA_RELAY_PORT: String(relayPort),
     KANNA_RELAY_URL: relayUrl,
   };
-  const primaryDbName = `test-${worktreeName}-primary.db`;
+  const primaryDbName = `test-${worktreeName}-${runSuffix}-primary.db`;
   const primaryDaemonDir = join(repoRoot, ".kanna-daemon-e2e", runSuffix);
   const realE2eRuntimeEnv = realE2eAgentEnv.KANNA_E2E_REAL_AGENT_PROVIDER === "codex"
     ? {
@@ -417,7 +417,7 @@ async function main(): Promise<void> {
   const secondaryWebDriverPort = enableSecondary ? await findFreePort() : null;
   const secondaryTransferPort = enableSecondary ? await findFreePort() : null;
   const secondaryMobileServerPort = enableSecondary ? await findFreePort() : null;
-  const secondaryDbName = enableSecondary ? `test-${worktreeName}-secondary.db` : null;
+  const secondaryDbName = enableSecondary ? `test-${worktreeName}-${runSuffix}-secondary.db` : null;
   const secondaryDaemonDir = enableSecondary
     ? join(repoRoot, ".kanna-daemon-e2e", `${runSuffix}-secondary`)
     : null;

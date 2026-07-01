@@ -16,7 +16,10 @@ use crate::config::Config;
 use crate::daemon_client::DaemonClient;
 use crate::db::{Db, NewPipelineItem, Repo};
 use commands::{build_agent_command, build_kanna_preamble, build_task_shell_command};
-use definitions::{read_agent_definition, read_pipeline_definition, read_repo_config};
+use definitions::{
+    read_agent_definition, read_pipeline_definition, read_repo_config, PipelinePostAction,
+    PipelineStage,
+};
 use environment::{
     apply_workspace_path_env, build_spawn_env, claim_task_ports, resolve_headless_agent_executable,
     write_kanna_mcp_config,
@@ -24,18 +27,223 @@ use environment::{
 use lifecycle::spawn_prepared_task;
 use prompt::{build_stage_prompt, PromptContext};
 use provider::{resolve_agent_provider, resolve_agent_type, AgentSessionType};
-use types::{CreatedTask, PreparedSessionSpawn, TaskCreationRequest};
+use types::{CreatedTask, PreparedSessionSpawn, PreparedStageRerun, TaskCreationRequest};
 pub(crate) use types::{PreparedStageTransition, PreparedTaskSpawn};
 use worktree::{create_worktree, fetch_start_point, generate_task_id};
 
 pub(crate) use lifecycle::{
-    continue_prepared_stage_for_api, prepared_task_id, rollback_prepared_task_for_api,
-    spawn_prepared_task_for_api, spawn_prepared_task_for_api_with_rollback,
+    continue_prepared_stage_for_api, prepared_task_id, rerun_prepared_stage_for_api,
+    rollback_prepared_task_for_api, spawn_prepared_task_for_api,
+    spawn_prepared_task_for_api_with_rollback,
 };
 pub(crate) use stages::{
     prepare_advance_stage_for_api, prepare_auto_stage_completion_for_api,
     prepare_revision_task_for_api, resolve_stage_transition,
 };
+
+enum RerunExecution<'a> {
+    Stage(&'a PipelineStage),
+    PostAction(&'a PipelinePostAction),
+}
+
+impl<'a> RerunExecution<'a> {
+    fn agent(&self) -> Option<&'a str> {
+        match self {
+            Self::Stage(stage) => stage.agent.as_deref(),
+            Self::PostAction(post_action) => post_action.agent.as_deref(),
+        }
+    }
+
+    fn prompt(&self) -> Option<&'a str> {
+        match self {
+            Self::Stage(stage) => stage.prompt.as_deref(),
+            Self::PostAction(post_action) => post_action.prompt.as_deref(),
+        }
+    }
+
+    fn agent_provider(&self) -> Option<&'a str> {
+        match self {
+            Self::Stage(stage) => stage.agent_provider.as_deref(),
+            Self::PostAction(post_action) => post_action.agent_provider.as_deref(),
+        }
+    }
+
+    fn transition(&self) -> Option<&'a str> {
+        match self {
+            Self::Stage(stage) => stage.transition.as_deref(),
+            Self::PostAction(post_action) => post_action.transition.as_deref(),
+        }
+    }
+}
+
+pub(crate) fn prepare_rerun_stage_for_api(
+    db: &Db,
+    config: &Config,
+    task_id: &str,
+) -> Result<PreparedStageRerun, String> {
+    let source_task = db
+        .get_task_stage_source(task_id)
+        .map_err(|e| format!("db error: {}", e))?
+        .ok_or_else(|| format!("task not found: {}", task_id))?;
+    if source_task.closed_at.is_some() {
+        return Err(format!("task is closed: {}", task_id));
+    }
+    let branch = source_task
+        .branch
+        .as_deref()
+        .ok_or_else(|| format!("task has no branch: {}", task_id))?;
+    let repo = db
+        .get_repo(&source_task.repo_id)
+        .map_err(|e| format!("db error: {}", e))?
+        .ok_or_else(|| format!("repo not found for task: {}", task_id))?;
+    let pipeline_name = source_task
+        .pipeline
+        .clone()
+        .unwrap_or_else(|| "default".to_string());
+    let stage_name = source_task
+        .stage
+        .clone()
+        .ok_or_else(|| format!("task has no stage: {}", task_id))?;
+    let pipeline = read_pipeline_definition(&repo.path, &pipeline_name)?;
+    let current_stage = pipeline
+        .stages
+        .iter()
+        .find(|stage| stage.name == stage_name)
+        .ok_or_else(|| format!("stage not found in pipeline: {}", stage_name))?;
+    let active_post_action = source_task.active_post_action.as_deref().and_then(|name| {
+        current_stage
+            .post_action
+            .as_ref()
+            .filter(|post| post.name == name)
+    });
+    let execution = active_post_action
+        .map(RerunExecution::PostAction)
+        .unwrap_or(RerunExecution::Stage(current_stage));
+    let agent = match execution.agent() {
+        Some(agent_name) => Some(read_agent_definition(&repo.path, agent_name)?),
+        None => None,
+    };
+    let source_worktree = source_task
+        .base_ref
+        .as_deref()
+        .filter(|base_ref| base_ref.starts_with("task-"))
+        .map(|base_ref| format!("{}/.kanna-worktrees/{base_ref}", repo.path));
+    let prompt = build_stage_prompt(
+        agent
+            .as_ref()
+            .map(|agent| agent.prompt.as_str())
+            .unwrap_or(""),
+        execution.prompt(),
+        &PromptContext {
+            task_prompt: source_task.prompt.as_deref(),
+            prev_result: source_task.stage_result.as_deref(),
+            branch: Some(branch),
+            base_ref: source_task.base_ref.as_deref(),
+            source_worktree: source_worktree.as_deref(),
+        },
+    );
+    let provider = resolve_agent_provider(
+        source_task.agent_provider.as_deref(),
+        None,
+        execution.agent_provider(),
+        agent.as_ref(),
+    )?;
+    let model = agent.as_ref().and_then(|agent| agent.model.clone());
+    let permission_mode = agent
+        .as_ref()
+        .and_then(|agent| agent.permission_mode.clone());
+    let allowed_tools = agent
+        .as_ref()
+        .map(|agent| agent.allowed_tools.clone())
+        .unwrap_or_default();
+    let agent_type = resolve_agent_type(source_task.agent_type.as_deref(), provider)?;
+    let worktree_path = format!("{}/.kanna-worktrees/{}", repo.path, branch);
+    let repo_config = read_repo_config(&repo.path)?;
+    let worktree_repo_config = read_repo_config(&worktree_path)?;
+    let port_env = claim_task_ports(db, task_id, repo_config.ports.as_ref())?;
+    let mut spawn_env = build_spawn_env(config, task_id, &port_env)?;
+    apply_workspace_path_env(&mut spawn_env, &worktree_path, &worktree_repo_config);
+    let mcp_config_path = write_kanna_mcp_config(&config.daemon_dir, task_id, &mut spawn_env)?;
+    let stage_setup = current_stage
+        .environment
+        .as_deref()
+        .and_then(|name| pipeline.environments.as_ref()?.get(name))
+        .and_then(|environment| environment.setup.clone())
+        .unwrap_or_default();
+    let session = match agent_type {
+        AgentSessionType::Pty => {
+            let preamble = build_kanna_preamble(
+                &provider,
+                task_id,
+                &stage_name,
+                &pipeline_name,
+                execution.transition(),
+                mcp_config_path.as_deref(),
+            );
+            let agent_cmd = build_agent_command(
+                &provider,
+                &prompt,
+                model.as_deref(),
+                permission_mode.as_deref(),
+                &allowed_tools,
+                Some(&preamble),
+                mcp_config_path.as_deref(),
+            );
+            let full_cmd = build_task_shell_command(
+                &agent_cmd,
+                &stage_setup,
+                spawn_env.get("KANNA_CLI_PATH").map(String::as_str),
+            );
+            PreparedSessionSpawn::Pty {
+                executable: "/bin/zsh".to_string(),
+                args: vec![
+                    "--login".to_string(),
+                    "-i".to_string(),
+                    "-c".to_string(),
+                    full_cmd,
+                ],
+                cols: 80,
+                rows: 24,
+                agent_provider: provider.to_daemon_provider(),
+            }
+        }
+        AgentSessionType::Agent => {
+            let headless_executable = resolve_headless_agent_executable(
+                provider,
+                spawn_env.get("PATH").map(String::as_str),
+            )?;
+            let system_prompt = build_kanna_preamble(
+                &provider,
+                task_id,
+                &stage_name,
+                &pipeline_name,
+                execution.transition(),
+                mcp_config_path.as_deref(),
+            );
+            PreparedSessionSpawn::Agent {
+                agent_provider: provider.to_daemon_provider(),
+                prompt,
+                model,
+                permission_mode,
+                allowed_tools,
+                system_prompt,
+                mcp_config_path,
+                executable: headless_executable,
+            }
+        }
+    };
+    let session_id = db
+        .resolve_task_terminal_session_id(task_id)
+        .map_err(|e| format!("db error: {}", e))?
+        .unwrap_or_else(|| task_id.to_string());
+    Ok(PreparedStageRerun {
+        task_id: task_id.to_string(),
+        session_id,
+        cwd: worktree_path,
+        env: spawn_env,
+        session,
+    })
+}
 
 pub async fn run_merge_agent(
     db: &Db,
@@ -384,5 +592,6 @@ fn prepare_task_spawn(
         cwd: worktree_path,
         env: spawn_env,
         session,
+        follow_task: None,
     })
 }

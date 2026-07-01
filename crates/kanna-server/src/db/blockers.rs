@@ -32,6 +32,18 @@ impl Db {
         rows.collect()
     }
 
+    pub fn count_open_task_blockers(&self, blocked_item_id: &str) -> Result<i64, rusqlite::Error> {
+        self.conn.query_row(
+            "SELECT COUNT(*)
+             FROM task_blocker blocker
+             JOIN pipeline_item blocker_item ON blocker_item.id = blocker.blocker_item_id
+             WHERE blocker.blocked_item_id = ?
+               AND blocker_item.closed_at IS NULL",
+            [blocked_item_id],
+            |row| row.get(0),
+        )
+    }
+
     pub fn task_dependency_has_path_to(
         &self,
         from_blocked_item_id: &str,
