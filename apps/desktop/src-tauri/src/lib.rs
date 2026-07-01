@@ -802,6 +802,7 @@ pub fn run() {
             commands::fs::file_exists,
             commands::fs::list_files,
             commands::fs::read_text_file,
+            commands::fs::read_image_file_data_url,
             commands::fs::write_text_file,
             commands::fs::which_binary,
             commands::fs::read_env_var,

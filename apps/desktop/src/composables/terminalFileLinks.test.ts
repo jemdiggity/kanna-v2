@@ -81,6 +81,14 @@ function waitForFileLinkActivation(container: HTMLElement): Promise<{ path: stri
   })
 }
 
+function waitForImageLinkActivation(container: HTMLElement): Promise<{ url: string }> {
+  return new Promise((resolve) => {
+    container.addEventListener("image-link-activate", (event) => {
+      resolve((event as CustomEvent).detail)
+    }, { once: true })
+  })
+}
+
 describe("terminalFileLinks", () => {
   it("links Copilot-style bare filenames and nested file paths", async () => {
     invokeMock.mockImplementation(async (command: string, args: { path: string }) => {
@@ -113,5 +121,23 @@ describe("terminalFileLinks", () => {
     expect(await provideLinkTexts("See /worktree/apps/desktop/src/App.vue:31:7")).toEqual([
       "/worktree/apps/desktop/src/App.vue:31:7",
     ])
+  })
+
+  it("opens local image file links in the image preview instead of the text file preview", async () => {
+    invokeMock.mockImplementation(async (command: string, args: { path: string }) => {
+      return command === "file_exists" && args.path === "/worktree/simple-paper-boat.png"
+    })
+
+    const { container, link } = await provideFirstLink("Image: /worktree/simple-paper-boat.png")
+    const imageActivation = waitForImageLinkActivation(container)
+    let filePreviewActivated = false
+    container.addEventListener("file-link-activate", () => {
+      filePreviewActivated = true
+    })
+
+    activateLink(link)
+
+    await expect(imageActivation).resolves.toEqual({ url: "/worktree/simple-paper-boat.png" })
+    expect(filePreviewActivated).toBe(false)
   })
 })

@@ -320,6 +320,7 @@ const invokeHandlers: Record<string, (...args: any[]) => any> = {
   acknowledge_incoming_transfer_commit: () => ({ ok: true }),
   file_exists: () => true,
   read_text_file: () => "",
+  read_image_file_data_url: () => "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciLz4=",
   get_app_data_dir: () => "/tmp/kanna-mock-data",
   get_claude_usage: () => "",
   copy_file: () => ({}),

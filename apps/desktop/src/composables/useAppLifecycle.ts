@@ -62,6 +62,7 @@ interface UseAppLifecycleOptions {
     fromPicker: boolean,
     fromTree?: boolean,
   ) => void;
+  openImageUrlPreview: (imageUrl: string) => void;
   preferences: AppPreferences;
   remoteTaskDiagnostics: Ref<unknown>;
   restoreSidebarWidth: () => Promise<void>;
@@ -99,6 +100,7 @@ export function useAppLifecycle({
   initializeDesktopCloudAuth,
   initializeDesktopLanTaskSync,
   openFilePreview,
+  openImageUrlPreview,
   preferences,
   remoteTaskDiagnostics,
   restoreSidebarWidth,
@@ -160,6 +162,11 @@ export function useAppLifecycle({
     openFilePreview(detail.path, detail.line, false);
   }
 
+  function handleImageLinkActivate(event: Event) {
+    const detail = (event as CustomEvent).detail as { url?: string };
+    if (detail.url) openImageUrlPreview(detail.url);
+  }
+
   // Restore focus after native macOS fullscreen exit.
   // WKWebView loses first-responder status during the exit animation, breaking
   // terminal input and keyboard shortcuts. The Rust side calls
@@ -184,6 +191,7 @@ export function useAppLifecycle({
     window.addEventListener("dragover", suppressFileDropNavigation);
     window.addEventListener("drop", suppressFileDropNavigation);
     document.addEventListener("file-link-activate", handleFileLinkActivate);
+    document.addEventListener("image-link-activate", handleImageLinkActivate);
 
     await restoreSidebarWidth();
     await store.init(db);
@@ -456,6 +464,7 @@ export function useAppLifecycle({
     window.removeEventListener("dragover", suppressFileDropNavigation);
     window.removeEventListener("drop", suppressFileDropNavigation);
     document.removeEventListener("file-link-activate", handleFileLinkActivate);
+    document.removeEventListener("image-link-activate", handleImageLinkActivate);
     stopSystemThemeListener();
     appUpdate.dispose();
   });

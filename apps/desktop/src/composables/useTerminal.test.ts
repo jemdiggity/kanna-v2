@@ -573,6 +573,40 @@ describe("useTerminal", () => {
     resetThemeRuntimeForTests();
   });
 
+  it("opens ordinary terminal web links externally but dispatches image links for in-app preview", async () => {
+    isTauriMock = true;
+    const { openUrl } = await import("@tauri-apps/plugin-opener");
+    vi.mocked(openUrl).mockResolvedValue(undefined);
+    const { useTerminal } = await import("./useTerminal");
+    const TestHarness = defineComponent({
+      setup() {
+        const { init } = useTerminal("session-1");
+        return { init };
+      },
+      render() {
+        return h("div", { ref: "host" });
+      },
+    });
+    const imageEvents: unknown[] = [];
+    document.addEventListener("image-link-activate", (event) => {
+      imageEvents.push((event as CustomEvent).detail);
+    });
+
+    const wrapper = mount(TestHarness);
+    const element = wrapper.element as HTMLElement;
+    (wrapper.vm as unknown as { init: (el: HTMLElement) => void }).init(element);
+    const activate = terminals.at(-1)?.options.linkHandler as { activate: (event: MouseEvent, uri: string) => void };
+
+    activate.activate(new MouseEvent("click"), "https://example.com/report");
+    activate.activate(new MouseEvent("click"), "https://example.com/screenshot.png");
+
+    expect(openUrl).toHaveBeenCalledWith("https://example.com/report");
+    expect(openUrl).not.toHaveBeenCalledWith("https://example.com/screenshot.png");
+    expect(imageEvents).toEqual([{ url: "https://example.com/screenshot.png" }]);
+
+    wrapper.unmount();
+  });
+
   it("detaches the active task session stream when the terminal unmounts", async () => {
     const callOrder: string[] = [];
     const { useTerminal } = await import("./useTerminal");

@@ -28,6 +28,7 @@ export interface UseAgentMessageViewProps {
 }
 
 const markdown = new MarkdownIt({ html: false, linkify: true, breaks: true });
+const IMAGE_LINK_EXTENSION = /\.(?:apng|avif|bmp|gif|jpe?g|png|svg|webp)(?:[?#].*)?$/i;
 
 // Tool calls ("shell"), tool results, and raw/diagnostic debug output are the
 // agent's internal plumbing — hidden so the view reads like a Claude/ChatGPT
@@ -45,6 +46,47 @@ const SLASH_MENU_LIMIT = 8;
 function normalizeAppearance(value: string | null | undefined): AgentMessageAppearance {
   if (value === "log" || value === "terminal") return value;
   return "chat";
+}
+
+function isImageLinkHref(href: string | null): href is string {
+  return Boolean(href && IMAGE_LINK_EXTENSION.test(href));
+}
+
+function renderImageLinkPreviews(html: string): string {
+  if (typeof document === "undefined") return html;
+
+  const template = document.createElement("template");
+  template.innerHTML = html;
+
+  for (const anchor of Array.from(template.content.querySelectorAll("a[href]"))) {
+    const href = anchor.getAttribute("href");
+    if (!isImageLinkHref(href)) continue;
+
+    const label = anchor.textContent?.trim() || href;
+    const preview = document.createElement("span");
+    preview.className = "agent-image-link-preview";
+
+    const imageLink = document.createElement("a");
+    imageLink.className = "agent-image-link-preview-media";
+    imageLink.href = href;
+
+    const image = document.createElement("img");
+    image.src = href;
+    image.alt = label;
+    image.loading = "lazy";
+    image.decoding = "async";
+    imageLink.append(image);
+
+    const caption = document.createElement("a");
+    caption.className = "agent-image-link-preview-caption";
+    caption.href = href;
+    caption.textContent = label;
+
+    preview.append(imageLink, caption);
+    anchor.replaceWith(preview);
+  }
+
+  return template.innerHTML;
 }
 
 export function useAgentMessageView(props: UseAgentMessageViewProps) {
@@ -95,7 +137,7 @@ export function useAgentMessageView(props: UseAgentMessageViewProps) {
   });
 
   function fallbackMarkdown(text: string): string {
-    return markdown.render(text);
+    return renderImageLinkPreviews(markdown.render(text));
   }
 
   async function getMarkdownHighlighter(): Promise<MarkdownHighlighter> {
@@ -141,7 +183,7 @@ export function useAgentMessageView(props: UseAgentMessageViewProps) {
           theme: shikiTheme.value,
         }),
     });
-    return renderer.render(text);
+    return renderImageLinkPreviews(renderer.render(text));
   }
 
   async function refreshRenderedMarkdown(): Promise<void> {
@@ -206,6 +248,20 @@ export function useAgentMessageView(props: UseAgentMessageViewProps) {
       }
       composerEl.value?.focus();
     });
+  }
+
+  function handleRenderedMessageClick(event: MouseEvent) {
+    const target = event.target instanceof Element ? event.target : null;
+    const link = target?.closest(".agent-image-link-preview a[href]");
+    if (!link) return;
+
+    const imageUrl = link.getAttribute("href");
+    if (!isImageLinkHref(imageUrl)) return;
+
+    event.preventDefault();
+    document.dispatchEvent(new CustomEvent("image-link-activate", {
+      detail: { url: imageUrl },
+    }));
   }
 
   onMounted(() => {
@@ -367,6 +423,7 @@ export function useAgentMessageView(props: UseAgentMessageViewProps) {
     fallbackMarkdown,
     formatValue,
     handleComposerKeydown,
+    handleRenderedMessageClick,
     interruptAgent,
     isEmpty,
     isRunning,

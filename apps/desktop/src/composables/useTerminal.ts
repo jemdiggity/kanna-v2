@@ -17,9 +17,15 @@ import type { SpawnOptions, TerminalOptions } from "./terminalTypes"
 
 export type { SpawnOptions, TerminalOptions } from "./terminalTypes"
 
+const IMAGE_LINK_EXTENSION = /\.(?:apng|avif|bmp|gif|jpe?g|png|svg|webp)(?:[?#].*)?$/i
+
 export function resetTerminalOutputSubscriptionsForTests(): void {
   // Kept as a compatibility test hook; terminal output no longer uses Tauri
   // event subscriptions after the KSP migration.
+}
+
+function isImageLinkUri(uri: string): boolean {
+  return IMAGE_LINK_EXTENSION.test(uri)
 }
 
 export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, options?: TerminalOptions) {
@@ -32,6 +38,13 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
   const state = createTerminalRuntimeState()
 
   function handleLinkActivate(_event: MouseEvent, uri: string) {
+    if (isImageLinkUri(uri)) {
+      document.dispatchEvent(new CustomEvent("image-link-activate", {
+        detail: { url: uri },
+      }))
+      return
+    }
+
     if (isTauri) {
       openUrl(uri).catch((e) => console.error("[terminal] Failed to open URL:", e))
     } else {
