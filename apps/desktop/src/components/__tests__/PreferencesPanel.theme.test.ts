@@ -77,12 +77,10 @@ describe("PreferencesPanel theme controls", () => {
 
   it("uses the requested provider and sdk choices for the default agent preference", () => {
     const wrapper = mountPreferences();
-    const defaultAgentSelect = wrapper.findAll("select").find((select) =>
-      select.find('option[value="claude"]').exists()
-    );
+    const defaultAgentSelect = wrapper.get('[data-testid="default-agent-select"]');
 
     expect(en.preferences.defaultAgent).toBe("Default agent");
-    expect(defaultAgentSelect?.findAll("option").map((option) => option.text())).toEqual([
+    expect(defaultAgentSelect.findAll("option").map((option) => option.text())).toEqual([
       "claude",
       "codex",
       "copilot",
@@ -94,13 +92,24 @@ describe("PreferencesPanel theme controls", () => {
 
   it("emits provider and execution type when choosing an sdk default agent", async () => {
     const wrapper = mountPreferences();
-    const defaultAgentSelect = wrapper.findAll("select").find((select) =>
-      select.find('option[value="claude"]').exists()
-    );
+    const defaultAgentSelect = wrapper.get('[data-testid="default-agent-select"]');
 
-    await defaultAgentSelect?.setValue("codex-sdk");
+    await defaultAgentSelect.setValue("codex-sdk");
 
     expect(wrapper.emitted("update")).toContainEqual(["defaultAgentProvider", "codex"]);
+    expect(wrapper.emitted("update")).toContainEqual(["defaultAgentType", "agent"]);
+  });
+
+  it("emits provider and execution type when switching between cli and sdk defaults", async () => {
+    const wrapper = mountPreferences();
+    const defaultAgentSelect = wrapper.get('[data-testid="default-agent-select"]');
+
+    await defaultAgentSelect.setValue("opencode");
+    await defaultAgentSelect.setValue("claude-sdk");
+
+    expect(wrapper.emitted("update")).toContainEqual(["defaultAgentProvider", "opencode"]);
+    expect(wrapper.emitted("update")).toContainEqual(["defaultAgentType", "pty"]);
+    expect(wrapper.emitted("update")).toContainEqual(["defaultAgentProvider", "claude"]);
     expect(wrapper.emitted("update")).toContainEqual(["defaultAgentType", "agent"]);
   });
 });

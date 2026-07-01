@@ -304,6 +304,7 @@ defineExpose({ cycleTab })
         <div class="pref-row">
           <label>{{ $t('preferences.defaultAgent') }}</label>
           <select
+            data-testid="default-agent-select"
             :value="defaultAgentSelection"
             @change="handleDefaultAgentChange(($event.target as HTMLSelectElement).value)"
           >

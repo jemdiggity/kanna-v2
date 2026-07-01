@@ -1647,7 +1647,7 @@ describe("App", () => {
       "repo-imported",
       "/Users/test/.kanna/repos/remote-repo",
       "Create task from remote repo",
-      "agent",
+      "pty",
       expect.objectContaining({
         baseBranch: "origin/main",
       }),
@@ -1672,7 +1672,7 @@ describe("App", () => {
       "repo-1",
       "/tmp/repo",
       "Create default-base task",
-      "agent",
+      "pty",
       expect.objectContaining({
         agentProvider: "claude",
         pipelineName: "default",
@@ -1765,7 +1765,7 @@ describe("App", () => {
       "repo-1",
       "/tmp/repo",
       "Create local default task",
-      "agent",
+      "pty",
       expect.objectContaining({
         baseBranch: "main",
       }),

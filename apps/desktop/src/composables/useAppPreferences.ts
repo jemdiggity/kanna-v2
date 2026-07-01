@@ -120,9 +120,7 @@ export function useAppPreferences({
     await setSetting(db, "commandPaletteUsage", JSON.stringify(counts));
   }
 
-  // Preferences update handler
-  async function handlePreferenceUpdate(key: string, value: string) {
-    await store.savePreference(key, value);
+  function applyPreferenceUpdate(key: string, value: string) {
     if (key === "locale" && ["en", "ja", "ko"].includes(value)) {
       i18n.global.locale.value = value as "en" | "ja" | "ko";
       preferences.locale = value;
@@ -148,6 +146,12 @@ export function useAppPreferences({
       preferences.agentMessageAppearance =
         value === "log" || value === "terminal" ? value : "chat";
     }
+  }
+
+  // Preferences update handler
+  async function handlePreferenceUpdate(key: string, value: string) {
+    applyPreferenceUpdate(key, value);
+    await store.savePreference(key, value);
   }
 
   return {

@@ -42,7 +42,7 @@ describe("NewTaskModal", () => {
     await flushPromises();
     await flushPromises();
 
-    expect(selectedAgentLabel(wrapper)).toBe("claude sdk");
+    expect(selectedAgentLabel(wrapper)).toBe("claude");
     expect(wrapper.findAll(".agent-provider")).toHaveLength(1);
 
     await wrapper.find("textarea").trigger("keydown", {
@@ -52,7 +52,7 @@ describe("NewTaskModal", () => {
     });
     await flushPromises();
 
-    expect(selectedAgentLabel(wrapper)).toBe("claude");
+    expect(selectedAgentLabel(wrapper)).toBe("codex");
     expect(wrapper.findAll(".agent-provider")).toHaveLength(1);
   });
 
@@ -69,12 +69,12 @@ describe("NewTaskModal", () => {
     await flushPromises();
     await flushPromises();
 
-    expect(selectedAgentLabel(wrapper)).toBe("claude sdk");
+    expect(selectedAgentLabel(wrapper)).toBe("claude");
 
     await wrapper.get(".agent-provider").trigger("click");
     await flushPromises();
 
-    expect(selectedAgentLabel(wrapper)).toBe("claude");
+    expect(selectedAgentLabel(wrapper)).toBe("codex");
   });
 
   it("includes OpenCode in the agent cycle when installed", async () => {
@@ -90,17 +90,17 @@ describe("NewTaskModal", () => {
     await flushPromises();
     await flushPromises();
 
-    expect(selectedAgentLabel(wrapper)).toBe("codex sdk");
-
-    await wrapper.get(".agent-provider").trigger("click");
-    await flushPromises();
-
     expect(selectedAgentLabel(wrapper)).toBe("codex");
 
     await wrapper.get(".agent-provider").trigger("click");
     await flushPromises();
 
     expect(selectedAgentLabel(wrapper)).toBe("opencode");
+
+    await wrapper.get(".agent-provider").trigger("click");
+    await flushPromises();
+
+    expect(selectedAgentLabel(wrapper)).toBe("claude sdk");
   });
 
   it("prevents mouse down default on the agent indicator so focus stays on the prompt", async () => {
@@ -173,7 +173,7 @@ describe("NewTaskModal", () => {
     await wrapper.get("textarea").trigger("keydown", { key: "Enter", metaKey: true });
 
     expect(wrapper.emitted("submit")).toEqual([
-      ["Ship branch picker", "claude", "default", "feature/task-base-branch", "agent"],
+      ["Ship branch picker", "claude", "default", "feature/task-base-branch", "pty"],
     ]);
   });
 
@@ -260,7 +260,7 @@ describe("NewTaskModal", () => {
     expect(wrapper.find('[data-testid="pipeline-option-review"]').exists()).toBe(false);
     await wrapper.get("textarea").trigger("keydown", { key: "Enter", metaKey: true });
 
-    expect(wrapper.emitted("submit")).toEqual([["Ship pipeline picker", "claude", "review", "origin/main", "agent"]]);
+    expect(wrapper.emitted("submit")).toEqual([["Ship pipeline picker", "claude", "review", "origin/main", "pty"]]);
   });
 
   it("uses combined chat and CLI agent choices when submitting", async () => {
@@ -278,16 +278,34 @@ describe("NewTaskModal", () => {
     await flushPromises();
     await flushPromises();
 
-    expect(selectedAgentLabel(wrapper)).toBe("claude sdk");
-
-    await wrapper.get(".agent-provider").trigger("click");
-    await flushPromises();
     expect(selectedAgentLabel(wrapper)).toBe("claude");
 
     await wrapper.get("textarea").setValue("Keep raw");
     await wrapper.get("textarea").trigger("keydown", { key: "Enter", metaKey: true });
 
     expect(wrapper.emitted("submit")?.at(-1)).toEqual(["Keep raw", "claude", "default", "origin/main", "pty"]);
+
+    await wrapper.get(".agent-provider").trigger("click");
+    await flushPromises();
+    expect(selectedAgentLabel(wrapper)).toBe("codex");
+
+    await wrapper.get("textarea").setValue("Use codex raw");
+    await wrapper.get("textarea").trigger("keydown", { key: "Enter", metaKey: true });
+
+    expect(wrapper.emitted("submit")?.at(-1)).toEqual(["Use codex raw", "codex", "default", "origin/main", "pty"]);
+
+    await wrapper.get(".agent-provider").trigger("click");
+    await flushPromises();
+    expect(selectedAgentLabel(wrapper)).toBe("opencode");
+
+    await wrapper.get(".agent-provider").trigger("click");
+    await flushPromises();
+    expect(selectedAgentLabel(wrapper)).toBe("claude sdk");
+
+    await wrapper.get("textarea").setValue("Use claude chat");
+    await wrapper.get("textarea").trigger("keydown", { key: "Enter", metaKey: true });
+
+    expect(wrapper.emitted("submit")?.at(-1)).toEqual(["Use claude chat", "claude", "default", "origin/main", "agent"]);
 
     await wrapper.get(".agent-provider").trigger("click");
     await flushPromises();
@@ -458,7 +476,7 @@ describe("NewTaskModal", () => {
     await search.trigger("keydown", { key: "Enter", metaKey: true });
 
     expect(wrapper.emitted("submit")).toEqual([
-      ["Ship branch picker submit", "claude", "default", "origin/main", "agent"],
+      ["Ship branch picker submit", "claude", "default", "origin/main", "pty"],
     ]);
 
     wrapper.unmount();
@@ -549,7 +567,7 @@ describe("NewTaskModal", () => {
     await wrapper.get("textarea").trigger("keydown", { key: "Enter", metaKey: true });
 
     expect(wrapper.emitted("submit")).toEqual([
-      ["Ship branch fallback", "claude", "default", "origin/main", "agent"],
+      ["Ship branch fallback", "claude", "default", "origin/main", "pty"],
     ]);
   });
 
