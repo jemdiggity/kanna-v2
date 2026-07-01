@@ -326,6 +326,7 @@ fn prepare_task_spawn(
                 &agent_cmd,
                 worktree_repo_config.setup.as_deref().unwrap_or(&[]),
                 spawn_env.get("KANNA_CLI_PATH").map(String::as_str),
+                spawn_env.get("PATH").map(String::as_str),
             );
             PreparedSessionSpawn::Pty {
                 executable: "/bin/zsh".to_string(),

@@ -139,11 +139,17 @@ pub(super) fn build_task_shell_command(
     agent_cmd: &str,
     setup_cmds: &[String],
     kanna_cli_path: Option<&str>,
+    spawn_path: Option<&str>,
 ) -> String {
     let mut command_parts = Vec::new();
     if let Some(kanna_cli_path) = kanna_cli_path {
         let quoted = shell_single_quote(kanna_cli_path);
         command_parts.push(format!("export KANNA_CLI_PATH='{}'", quoted));
+    }
+
+    if let Some(spawn_path) = spawn_path.filter(|path| !path.is_empty()) {
+        command_parts.push(format!("export PATH='{}'", shell_single_quote(spawn_path)));
+    } else if let Some(kanna_cli_path) = kanna_cli_path {
         if let Some(parent) = Path::new(kanna_cli_path).parent() {
             let parent = shell_single_quote(parent.to_string_lossy().as_ref());
             command_parts.push(format!("export PATH='{}':\"$PATH\"", parent));

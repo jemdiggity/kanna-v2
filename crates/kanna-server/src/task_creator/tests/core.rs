@@ -387,6 +387,89 @@ fn prepare_task_defaults_to_pty_session_for_copilot() {
 }
 
 #[test]
+fn prepare_pty_task_restores_workspace_path_inside_login_shell_command() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo_root = init_git_repo("pty-workspace-path");
+    let config = test_config("pty-workspace-path");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+
+    let fake_bin = repo_root.join(".kanna/fake-bin");
+    std::fs::create_dir_all(&fake_bin).unwrap();
+    let fake_codex = fake_bin.join("codex");
+    std::fs::write(&fake_codex, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&fake_codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/config.json"),
+        serde_json::json!({
+            "workspace": {
+                "path": {
+                    "prepend": [".kanna/fake-bin"]
+                }
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    assert!(Command::new("git")
+        .args(["add", ".kanna"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["commit", "-m", "add workspace path"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+
+    let prepared = prepare_task_for_api(
+        &db,
+        &config,
+        CreateTaskRequest {
+            repo_id: "repo-1".to_string(),
+            prompt: "Use codex".to_string(),
+            display_name: None,
+            pipeline_name: None,
+            base_ref: None,
+            agent_provider: Some("codex".to_string()),
+            agent_type: Some("pty".to_string()),
+            model: None,
+            permission_mode: None,
+            allowed_tools: None,
+            notify_task_id: None,
+            parent_task_id: None,
+            blocker_task_ids: None,
+        },
+    )
+    .unwrap();
+
+    let expected_dir = std::path::Path::new(&prepared.cwd)
+        .join(".kanna/fake-bin")
+        .to_string_lossy()
+        .to_string();
+    match prepared.session {
+        PreparedSessionSpawn::Pty { args, .. } => {
+            let command = args.last().expect("pty shell should include command");
+            let restore_path = format!("export PATH='{expected_dir}:");
+            assert!(
+                command.contains(&restore_path),
+                "command should restore spawn PATH before running agent: {command}"
+            );
+            let path_index = command.find("export PATH=").unwrap();
+            let codex_index = command.find("codex ").unwrap();
+            assert!(path_index < codex_index);
+        }
+        _ => panic!("expected pty session"),
+    }
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
 fn prepare_task_stores_parent_task_id_for_subtasks() {
     let repo_root = init_git_repo("subtask-parent");
     let config = test_config("subtask-parent");
