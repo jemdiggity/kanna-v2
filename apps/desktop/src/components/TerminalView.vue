@@ -111,13 +111,11 @@ onMounted(async () => {
 onActivated(async () => {
   if (props.agentTerminal && props.active !== false) {
     markTaskSwitchMounted(props.sessionId)
+    markTaskSwitchReady(props.sessionId, "warm")
   }
   await startWhenActive()
   fitDeferred()
   await focusWhenActive()
-  if (props.agentTerminal && props.active !== false) {
-    markTaskSwitchReady(props.sessionId, "warm")
-  }
 })
 
 onDeactivated(() => {
@@ -132,6 +130,10 @@ onDeactivated(() => {
 watch(
   () => props.active,
   async (active) => {
+    if (active && props.agentTerminal) {
+      markTaskSwitchMounted(props.sessionId)
+      markTaskSwitchReady(props.sessionId, "warm")
+    }
     await startWhenActive()
     if (active) {
       await focusWhenActive()

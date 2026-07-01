@@ -186,6 +186,12 @@ describe("release shipping", () => {
           if (command === "bazel" && args[0] === "cquery") {
             return { exitCode: 0, stdout: `${outputs.get(args[3]) ?? ""}\n`, stderr: "" };
           }
+          if (command === "sh" && args[0] === "-c") {
+            expect(args[1]).toContain("hdiutil attach");
+            expect(args[1]).toContain("sips -g pixelWidth -g pixelHeight");
+            expect(args.at(-1)).toBe(join(repoRoot, ".build", "release", "staging", "Kanna_Staging_1.2.4_arm64.dmg"));
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
           if (command === "pnpm") {
             const signedBundlePath = args.at(-1);
             expect(typeof signedBundlePath).toBe("string");
@@ -216,6 +222,11 @@ describe("release shipping", () => {
         join(repoRoot, ".build", "release", "staging", "Kanna_Staging_1.2.4_arm64.app.tar.gz.sig")
       ]);
       expect(result.latestJson).toBe(join(repoRoot, ".build", "release", "staging", "latest-staging.json"));
+      const validationCall = calls.find((call) => call.command === "sh" && call.args[0] === "-c");
+      const signerCall = calls.find((call) => call.command === "pnpm");
+      expect(validationCall).toBeDefined();
+      expect(signerCall).toBeDefined();
+      expect(calls.indexOf(validationCall!)).toBeLessThan(calls.indexOf(signerCall!));
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -246,6 +257,9 @@ describe("release shipping", () => {
           }
           if (command === "bazel" && args[0] === "cquery") {
             return { exitCode: 0, stdout: `${outputs.get(args[3]) ?? ""}\n`, stderr: "" };
+          }
+          if (command === "sh" && args[0] === "-c") {
+            return { exitCode: 0, stdout: "", stderr: "" };
           }
           if (command === "pnpm") {
             const signedBundlePath = args.at(-1);
@@ -405,6 +419,9 @@ describe("release shipping", () => {
           if (command === "bazel" && args[0] === "cquery") {
             return { exitCode: 0, stdout: `${outputs.get(args[3]) ?? ""}\n`, stderr: "" };
           }
+          if (command === "sh" && args[0] === "-c") {
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
           if (command === "pnpm") {
             const signedBundlePath = args.at(-1);
             expect(typeof signedBundlePath).toBe("string");
@@ -470,6 +487,9 @@ describe("release shipping", () => {
           if (command === "bazel" && args[0] === "cquery") {
             return { exitCode: 0, stdout: `${outputs.get(args[3]) ?? ""}\n`, stderr: "" };
           }
+          if (command === "sh" && args[0] === "-c") {
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
           if (command === "pnpm") {
             const signedBundlePath = args.at(-1);
             expect(typeof signedBundlePath).toBe("string");
@@ -534,6 +554,9 @@ describe("release shipping", () => {
           }
           if (command === "bazel" && args[0] === "cquery") {
             return { exitCode: 0, stdout: `${outputs.get(args[3]) ?? ""}\n`, stderr: "" };
+          }
+          if (command === "sh" && args[0] === "-c") {
+            return { exitCode: 0, stdout: "", stderr: "" };
           }
           if (command === "pnpm") {
             const signedBundlePath = args.at(-1);

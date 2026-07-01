@@ -51,8 +51,7 @@ async function restartUpdate() {
 </script>
 
 <template>
-  <Transition name="update-prompt" :duration="180">
-    <section v-if="visible" class="update-prompt">
+  <section v-if="visible" class="update-prompt">
       <header class="update-prompt__header">
         <div class="update-prompt__titles">
           <p class="update-prompt__eyebrow">{{ t("app.update.title") }}</p>
@@ -161,8 +160,7 @@ async function restartUpdate() {
           {{ t("actions.dismiss") }}
         </button>
       </footer>
-    </section>
-  </Transition>
+  </section>
 </template>
 
 <style scoped>

@@ -143,6 +143,81 @@ describe("TerminalView", () => {
     modal.remove();
   });
 
+  it("records warm task switch readiness when an existing terminal becomes active", async () => {
+    const wrapper = mount(TerminalView, {
+      attachTo: document.body,
+      props: {
+        sessionId: "session-1",
+        active: false,
+        agentTerminal: true,
+      },
+    });
+    await flushLifecycle();
+
+    markTaskSwitchMountedMock.mockReset();
+    markTaskSwitchReadyMock.mockReset();
+
+    await wrapper.setProps({ active: true });
+    await flushLifecycle();
+
+    expect(markTaskSwitchMountedMock).toHaveBeenCalledWith("session-1");
+    expect(markTaskSwitchReadyMock).toHaveBeenCalledWith("session-1", "warm");
+
+    wrapper.unmount();
+  });
+
+  it("records warm task switch readiness even if native focus restore is slow", async () => {
+    setWebviewFocusMock.mockImplementationOnce(() => new Promise(() => {}));
+
+    const wrapper = mount(TerminalView, {
+      attachTo: document.body,
+      props: {
+        sessionId: "session-1",
+        active: false,
+        agentTerminal: true,
+      },
+    });
+    await flushLifecycle();
+
+    markTaskSwitchMountedMock.mockReset();
+    markTaskSwitchReadyMock.mockReset();
+
+    await wrapper.setProps({ active: true });
+    await Promise.resolve();
+    await nextTick();
+
+    expect(markTaskSwitchMountedMock).toHaveBeenCalledWith("session-1");
+    expect(markTaskSwitchReadyMock).toHaveBeenCalledWith("session-1", "warm");
+
+    wrapper.unmount();
+  });
+
+  it("records warm task switch readiness even if stream attach is slow", async () => {
+    startListeningMock.mockImplementationOnce(() => new Promise(() => {}));
+
+    const wrapper = mount(TerminalView, {
+      attachTo: document.body,
+      props: {
+        sessionId: "session-1",
+        active: false,
+        agentTerminal: true,
+      },
+    });
+    await flushLifecycle();
+
+    markTaskSwitchMountedMock.mockReset();
+    markTaskSwitchReadyMock.mockReset();
+
+    await wrapper.setProps({ active: true });
+    await Promise.resolve();
+    await nextTick();
+
+    expect(markTaskSwitchMountedMock).toHaveBeenCalledWith("session-1");
+    expect(markTaskSwitchReadyMock).toHaveBeenCalledWith("session-1", "warm");
+
+    wrapper.unmount();
+  });
+
   it("pauses the daemon stream while kept-alive terminals are deactivated", async () => {
     const Harness = defineComponent({
       props: {

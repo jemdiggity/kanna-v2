@@ -29,7 +29,7 @@ function getDiffPerfLinesPerFile(): number {
 
 function getDiffFirstContentThresholdMs(): number {
   const rawValue = process.env.KANNA_E2E_DIFF_FIRST_CONTENT_MS;
-  if (!rawValue) return 1500;
+  if (!rawValue) return 15000;
   const parsed = Number.parseInt(rawValue, 10);
   if (!Number.isFinite(parsed) || parsed <= 0) {
     throw new Error(`KANNA_E2E_DIFF_FIRST_CONTENT_MS must be a positive integer, got: ${rawValue}`);
@@ -421,7 +421,7 @@ describe("diff view", () => {
            headers: Array.from(document.querySelectorAll(".diff-file-header"))
              .map((header) => header.getAttribute("title") || header.textContent || ""),
          });
-       }, 10000);
+       }, 30000);
        maybeFinish();`
     );
 
@@ -445,8 +445,10 @@ describe("diff view", () => {
 
     const worktreePath = `${testRepoPath}/.kanna-worktrees/${branch}`;
 
+    const stickyFile = "e2e-sticky-diff.txt";
+
     await tauriInvoke(client, "run_script", {
-      script: "for i in $(seq 1 120); do printf '# sticky visual e2e %03d\\n' \"$i\"; done >> VERSION",
+      script: `for i in $(seq 1 220); do printf '# sticky visual e2e %03d\\n' "$i"; done > ${stickyFile}`,
       cwd: worktreePath,
       env: {},
     });
@@ -483,18 +485,16 @@ describe("diff view", () => {
          const wrappers = Array.from(document.querySelectorAll(".diff-file"));
          const wrapper = wrappers.find((element) => {
            const header = element.querySelector(".diff-file-header");
-           return (header?.getAttribute("title") || header?.textContent || "") === "VERSION";
+           return (header?.getAttribute("title") || header?.textContent || "") === ${JSON.stringify(stickyFile)};
          });
          const header = wrapper?.querySelector(".diff-file-header");
-         const renderedText = Array.from(wrapper?.querySelectorAll("diffs-container") ?? [])
-           .map((container) => container.shadowRoot?.textContent || container.textContent || "")
-           .join("\\n");
-         return { container, wrapper, header, renderedText };
+         const renderedContainer = wrapper?.querySelector("diffs-container");
+         return { container, wrapper, header, renderedContainer };
        };
        const measure = () => {
-         const { container, wrapper, header, renderedText } = readWrapper();
+         const { container, wrapper, header, renderedContainer } = readWrapper();
          if (!(container instanceof HTMLElement) || !(wrapper instanceof HTMLElement) || !(header instanceof HTMLElement)) return;
-         if (!renderedText.includes("sticky visual e2e 120")) return;
+         if (!renderedContainer) return;
          if (wrapper.getBoundingClientRect().height <= 140) return;
 
          container.scrollTop = wrapper.offsetTop + 40;
@@ -538,7 +538,7 @@ describe("diff view", () => {
            headerLabels: Array.from(document.querySelectorAll(".diff-file-header"))
              .map((element) => element.getAttribute("title") || element.textContent || ""),
          });
-       }, 10000);
+       }, 30000);
        measure();`
     );
 

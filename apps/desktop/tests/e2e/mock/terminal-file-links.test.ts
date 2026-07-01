@@ -84,12 +84,24 @@ describe("terminal file links", () => {
            style.visibility !== "hidden" &&
            rect.width > 0 &&
            rect.height > 0 &&
-           image.getAttribute("src")?.startsWith("data:image/png;base64,") === true;`,
+           image.getAttribute("src")?.startsWith("data:image/png;base64,") === true &&
+           image.complete &&
+           image.naturalWidth > 0 &&
+           image.naturalHeight > 0;`,
       );
       if (visible) return;
       await sleep(200);
     }
-    throw new Error("image preview modal did not render a data URL image");
+    const imageState = await client.executeSync(
+      `const image = document.querySelector(".image-preview-modal img");
+       return image ? {
+         complete: image.complete,
+         naturalWidth: image.naturalWidth,
+         naturalHeight: image.naturalHeight,
+         srcPrefix: image.getAttribute("src")?.slice(0, 32) ?? null,
+       } : null;`,
+    );
+    throw new Error(`image preview modal did not decode a data URL image: ${JSON.stringify(imageState)}`);
   }
 
   it("opens the preview for a Copilot-style terminal file link activation", async () => {
@@ -161,14 +173,19 @@ describe("terminal file links", () => {
       textPreviewOpen: boolean;
       sourceLabel: string | null;
       imageSrc: string | null;
+      naturalWidth: number | null;
+      naturalHeight: number | null;
       readerCall: { cmd: string; args: { path: string } } | null;
     }>(
       `const calls = window.__KANNA_E2E__.invokes.getAll();
        const readerCall = calls.find((call) => call.cmd === "read_image_file_data_url");
+       const image = document.querySelector(".image-preview-modal img");
        return {
          textPreviewOpen: Boolean(document.querySelector(".preview-modal")),
          sourceLabel: document.querySelector(".image-preview-modal .image-source")?.textContent ?? null,
-         imageSrc: document.querySelector(".image-preview-modal img")?.getAttribute("src") ?? null,
+         imageSrc: image?.getAttribute("src") ?? null,
+         naturalWidth: image?.naturalWidth ?? null,
+         naturalHeight: image?.naturalHeight ?? null,
          readerCall: readerCall ? JSON.parse(JSON.stringify(readerCall)) : null,
        };`,
     );
@@ -176,6 +193,8 @@ describe("terminal file links", () => {
     expect(previewState.textPreviewOpen).toBe(false);
     expect(previewState.sourceLabel).toBe(imagePath);
     expect(previewState.imageSrc).toMatch(/^data:image\/png;base64,/);
+    expect(previewState.naturalWidth).toBeGreaterThan(0);
+    expect(previewState.naturalHeight).toBeGreaterThan(0);
     expect(previewState.readerCall).toEqual({
       cmd: "read_image_file_data_url",
       args: { path: imagePath },

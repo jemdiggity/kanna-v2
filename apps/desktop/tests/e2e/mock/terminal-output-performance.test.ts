@@ -1,7 +1,7 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { WebDriverClient } from "../helpers/webdriver";
-import { cleanupWorktrees, importTestRepo, resetDatabase } from "../helpers/reset";
+import { cleanupWorktrees, importTestRepoDirect, resetDatabase } from "../helpers/reset";
 import { cleanupFixtureRepos, createSeedFixtureRepo } from "../helpers/fixture-repo";
 import { tauriInvoke } from "../helpers/vue";
 
@@ -175,10 +175,11 @@ async function waitForTerminalBufferText(
   client: WebDriverClient,
   sessionId: string,
   text: string,
-  timeoutMs = 10_000,
+  timeoutMs = 30_000,
 ): Promise<string[]> {
   const deadline = Date.now() + timeoutMs;
   let latest: string[] = [];
+  let latestSessionIds: string[] = [];
   while (Date.now() < deadline) {
     latest = await client.executeSync<string[]>(
       `const hook = window.__KANNA_E2E__?.terminalBuffers;
@@ -186,9 +187,16 @@ async function waitForTerminalBufferText(
        return hook.lines(${JSON.stringify(sessionId)}).slice(-80);`,
     );
     if (latest.some((line) => line.includes(text))) return latest;
+    latestSessionIds = await client.executeSync<string[]>(
+      `return window.__KANNA_E2E__?.terminalBuffers?.sessionIds?.() ?? [];`,
+    );
     await sleep(100);
   }
-  throw new Error(`timed out waiting for terminal buffer text "${text}" in ${sessionId}; latest=${JSON.stringify(latest)}`);
+  const sessions = await tauriInvoke(client, "list_sessions").catch((error) => String(error));
+  throw new Error(
+    `timed out waiting for terminal buffer text "${text}" in ${sessionId}; ` +
+    `registered=${JSON.stringify(latestSessionIds)}; sessions=${JSON.stringify(sessions)}; latest=${JSON.stringify(latest)}`,
+  );
 }
 
 describe("terminal output performance", () => {
@@ -203,7 +211,7 @@ describe("terminal output performance", () => {
     await resetDatabase(client);
     fixtureRepoRoot = await createSeedFixtureRepo("task-switch-minimal");
     testRepoPath = fixtureRepoRoot;
-    repoId = await importTestRepo(client, testRepoPath, "terminal-output-perf");
+    repoId = await importTestRepoDirect(client, testRepoPath, "terminal-output-perf");
   });
 
   afterAll(async () => {

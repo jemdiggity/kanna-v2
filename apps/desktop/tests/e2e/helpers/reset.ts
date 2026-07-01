@@ -21,12 +21,13 @@ interface OpenCleanupTask {
 const worktreeCleanupBaselines = new Map<string, Set<string>>();
 const IMPORT_REPO_SELECTION_TIMEOUT_MS = 10_000;
 const IMPORT_REPO_SELECTION_POLL_MS = 100;
+const IMPORT_REPO_MODAL_DISMISS_TIMEOUT_MS = 30_000;
 const TASK_CLOSE_TIMEOUT_MS = 20_000;
 const IMPORT_REPO_MODAL_SELECTOR = ".modal-overlay";
 const IMPORT_REPO_INPUT_SELECTOR = ".modal-overlay .text-input";
 const IMPORT_REPO_READY_SELECTOR = ".modal-overlay .resolved-url";
 const IMPORT_REPO_NAME_CHANGE_SELECTOR = ".modal-overlay .repo-name-change";
-const IMPORT_REPO_SUBMIT_SELECTOR = ".modal-overlay .btn-primary";
+const IMPORT_REPO_SUBMIT_SELECTOR = ".modal-overlay .btn-primary:not(:disabled)";
 const TRANSIENT_MODAL_REFS = [
   "showCommandPalette",
   "showShortcutsModal",
@@ -157,7 +158,7 @@ async function importRepoThroughUi(
   await client.sendKeys(nameInput, name);
   const submit = await client.waitForElement(IMPORT_REPO_SUBMIT_SELECTOR, 2_000);
   await client.click(submit);
-  await client.waitForNoElement(IMPORT_REPO_MODAL_SELECTOR, 10_000);
+  await client.waitForNoElement(IMPORT_REPO_MODAL_SELECTOR, IMPORT_REPO_MODAL_DISMISS_TIMEOUT_MS);
 }
 
 function shouldPreKillTaskSession(task: OpenCleanupTask): boolean {
@@ -325,4 +326,33 @@ export async function importTestRepo(
   }
 
   throw new Error(`Repo "${name}" was imported but never became selected.`);
+}
+
+export async function importTestRepoDirect(
+  client: WebDriverClient,
+  repoPath: string,
+  name = "test-repo",
+  branch = "main",
+): Promise<string> {
+  assertSafeE2eRepoPath(repoPath);
+  await recordWorktreeCleanupBaseline(client, repoPath);
+
+  const importResult = await callVueMethod(client, "store.importRepo", repoPath, name, branch);
+  if (isVueCallError(importResult)) {
+    throw new Error(importResult.__error);
+  }
+
+  const rows = (await queryDb(
+    client,
+    "SELECT id, name FROM repo WHERE path = ?",
+    [repoPath],
+  )) as Array<{ id: string; name: string }>;
+  const repo = rows.find((entry) => entry.name === name) ?? rows[0];
+  if (!repo) throw new Error(`Repo "${name}" not found after direct import`);
+
+  const selectResult = await callVueMethod(client, "store.selectRepo", repo.id);
+  if (isVueCallError(selectResult)) {
+    throw new Error(selectResult.__error);
+  }
+  return repo.id;
 }

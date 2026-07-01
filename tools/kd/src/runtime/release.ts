@@ -176,6 +176,31 @@ async function resolveBazelOutput(input: ReleaseShipInput, target: string): Prom
   return join(input.repoRoot, path);
 }
 
+async function validateDmgImageResources(input: ReleaseShipInput, dmgPath: string): Promise<void> {
+  const script = `
+set -eu
+mount_dir="$(mktemp -d "\${TMPDIR:-/tmp}/kanna-dmg-validate.XXXXXX")"
+assets_file="$(mktemp "\${TMPDIR:-/tmp}/kanna-dmg-assets.XXXXXX")"
+cleanup() {
+  hdiutil detach -quiet "$mount_dir" >/dev/null 2>&1 || true
+  rm -f "$assets_file"
+  rmdir "$mount_dir" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+hdiutil attach -quiet -nobrowse -readonly -mountpoint "$mount_dir" "$1"
+find "$mount_dir" -maxdepth 6 -type f \\( -name '*.icns' -o -name '*.png' \\) > "$assets_file"
+if [ ! -s "$assets_file" ]; then
+  echo "No PNG or ICNS image resources found in $1" >&2
+  exit 1
+fi
+while IFS= read -r asset; do
+  sips -g pixelWidth -g pixelHeight "$asset" >/dev/null
+done < "$assets_file"
+`.trim();
+
+  await mustRun(input.runner, "sh", ["-c", script, "validate-dmg-images", dmgPath], input.repoRoot, input.env);
+}
+
 function writeLatestJson(path: string, version: string, notes: string, pubDate: string, platforms: Record<string, { signature: string; url: string }>): void {
   writeFileSync(path, JSON.stringify({ version, notes, pub_date: pubDate, platforms }, null, 2) + "\n");
 }
@@ -239,6 +264,7 @@ export async function shipRelease(input: ReleaseShipInput): Promise<ReleaseShipR
     const dmgSource = await resolveBazelOutput(input, bazelTargetForLabel(label, input.dryRun, environment));
     const dmgDest = join(releaseDir, releaseAssetName(version, label, environment));
     cpSync(dmgSource, dmgDest);
+    await validateDmgImageResources(input, dmgDest);
     dmgPaths.push(dmgDest);
 
     const bundleSource = await resolveBazelOutput(input, updaterBundleTargetForLabel(label, environment));

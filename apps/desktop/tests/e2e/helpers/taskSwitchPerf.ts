@@ -52,5 +52,8 @@ export async function waitForCompletedTaskSwitchPerfCount(
     }
     await sleep(100);
   }
-  throw new Error(`timed out waiting for ${count} completed task switch perf records after ${timeoutMs}ms`);
+  const all = await getAllTaskSwitchPerf(client);
+  throw new Error(
+    `timed out waiting for ${count} completed task switch perf records after ${timeoutMs}ms; records=${JSON.stringify(all)}`,
+  );
 }

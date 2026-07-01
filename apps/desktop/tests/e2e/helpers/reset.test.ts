@@ -189,7 +189,8 @@ describe("reset helpers", () => {
     expect(client.clear).toHaveBeenCalledWith("repo-name-input");
     expect(client.sendKeys).toHaveBeenCalledWith("repo-name-input", "test-repo");
     expect(client.click).toHaveBeenCalledWith(".modal-overlay .repo-name-change");
-    expect(client.click).toHaveBeenCalledWith(".modal-overlay .btn-primary");
+    expect(client.click).toHaveBeenCalledWith(".modal-overlay .btn-primary:not(:disabled)");
+    expect(client.waitForNoElement).toHaveBeenCalledWith(".modal-overlay", 30_000);
     expect(client.executeSync).toHaveBeenCalled();
   });
 
