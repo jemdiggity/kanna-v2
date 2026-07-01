@@ -188,6 +188,8 @@ export function buildRelayProvisionPlan(input: { environment: CloudDeployEnviron
   const vmName = identity.gceVmName;
   const staticIpName = identity.staticIpName ?? `${vmName}-ip`;
   const tag = vmName;
+  const serviceAccountId = vmName;
+  const serviceAccountEmail = `${serviceAccountId}@${projectId}.iam.gserviceaccount.com`;
   const startupScript = buildRelayStartupScript();
 
   return {
@@ -198,6 +200,46 @@ export function buildRelayProvisionPlan(input: { environment: CloudDeployEnviron
     region,
     staticIpName,
     commands: [
+      {
+        command: "gcloud",
+        args: [
+          "services",
+          "enable",
+          "compute.googleapis.com",
+          "--project",
+          projectId
+        ]
+      },
+      {
+        command: "gcloud",
+        args: [
+          "iam",
+          "service-accounts",
+          "create",
+          serviceAccountId,
+          "--project",
+          projectId,
+          "--display-name",
+          `Kanna relay VM (${input.environment})`
+        ]
+      },
+      ...[
+        "roles/datastore.user",
+        "roles/artifactregistry.reader",
+        "roles/storage.objectViewer"
+      ].map((role): RelayCommandPlanStep => ({
+        command: "gcloud",
+        args: [
+          "projects",
+          "add-iam-policy-binding",
+          projectId,
+          "--member",
+          `serviceAccount:${serviceAccountEmail}`,
+          "--role",
+          role,
+          "--condition=None"
+        ]
+      })),
       {
         command: "gcloud",
         args: [
@@ -224,6 +266,8 @@ export function buildRelayProvisionPlan(input: { environment: CloudDeployEnviron
           zone,
           "--machine-type",
           "e2-micro",
+          "--service-account",
+          serviceAccountEmail,
           "--scopes",
           "https://www.googleapis.com/auth/cloud-platform",
           "--address",
