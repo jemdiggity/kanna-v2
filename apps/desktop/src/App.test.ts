@@ -607,6 +607,7 @@ describe("App", () => {
     store.handleOutgoingTransferCommitted.mockClear();
     store.pushTaskToPeer.mockClear();
     store.loadAgent.mockClear();
+    store.selectRepo.mockClear();
     store.selectItem.mockClear();
     store.advanceStage.mockClear();
     relayAdvanceStageMock.mockClear();
@@ -1986,7 +1987,7 @@ describe("App", () => {
     expect(store.selectItem).toHaveBeenCalledWith("task-two", { previousItemId: "task-one" });
   });
 
-  it("navigates unread task shortcuts across repo boundaries before falling back to read tasks", async () => {
+  it("keeps unread task shortcuts scoped to the selected repo before falling back to read tasks", async () => {
     store.repos = [
       { id: "repo-1", path: "/tmp/repo-1", name: "repo 1" },
       { id: "repo-2", path: "/tmp/repo-2", name: "repo 2" },
@@ -2004,9 +2005,21 @@ describe("App", () => {
     };
     store.items = [
       {
+        id: "task-read-oldest",
+        repo_id: "repo-1",
+        prompt: "Repo one oldest read task",
+        stage: "in progress",
+        activity: "idle",
+        tags: "[]",
+        pinned: 0,
+        pin_order: null,
+        created_at: "2026-04-17T09:00:00.000Z",
+        updated_at: "2026-04-17T09:00:00.000Z",
+      },
+      {
         id: "task-read",
         repo_id: "repo-1",
-        prompt: "Repo one read task",
+        prompt: "Repo one current read task",
         stage: "in progress",
         activity: "idle",
         tags: "[]",
@@ -2035,8 +2048,61 @@ describe("App", () => {
     await capturedKeyboardActions?.goToOldestUnread();
     await flushPromises();
 
-    expect(store.selectRepo).toHaveBeenCalledWith("repo-2");
-    expect(store.selectItem).toHaveBeenCalledWith("task-unread-other-repo", { previousItemId: "task-read" });
+    expect(store.selectRepo).not.toHaveBeenCalled();
+    expect(store.selectItem).toHaveBeenCalledWith("task-read-oldest");
+  });
+
+  it("keeps read task shortcuts scoped to the selected repo", async () => {
+    store.repos = [
+      { id: "repo-1", path: "/tmp/repo-1", name: "repo 1" },
+      { id: "repo-2", path: "/tmp/repo-2", name: "repo 2" },
+    ];
+    store.selectedRepoId = "repo-1";
+    store.selectedItemId = "task-current";
+    store.selectedRepo = { id: "repo-1", path: "/tmp/repo-1", name: "repo 1" };
+    store.currentItem = {
+      id: "task-current",
+      repo_id: "repo-1",
+      activity: "idle",
+      created_at: "2026-04-17T10:00:00.000Z",
+      tags: "[]",
+      stage: "in progress",
+    };
+    store.items = [
+      {
+        id: "task-current",
+        repo_id: "repo-1",
+        prompt: "Repo one current task",
+        stage: "in progress",
+        activity: "idle",
+        tags: "[]",
+        pinned: 0,
+        pin_order: null,
+        created_at: "2026-04-17T10:00:00.000Z",
+        updated_at: "2026-04-17T10:00:00.000Z",
+      },
+      {
+        id: "task-read-other-repo",
+        repo_id: "repo-2",
+        prompt: "Repo two older read task",
+        stage: "in progress",
+        activity: "idle",
+        tags: "[]",
+        pinned: 0,
+        pin_order: null,
+        created_at: "2026-04-17T09:00:00.000Z",
+        updated_at: "2026-04-17T09:00:00.000Z",
+      },
+    ];
+
+    await mountApp(SidebarWithRepoStub);
+    expect(capturedKeyboardActions).not.toBeNull();
+
+    await capturedKeyboardActions?.goToOldestRead();
+    await flushPromises();
+
+    expect(store.selectRepo).not.toHaveBeenCalled();
+    expect(store.selectItem).toHaveBeenCalledWith("task-current");
   });
 
   it("navigates repos when the native repo-navigation event arrives", async () => {
