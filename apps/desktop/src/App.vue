@@ -50,6 +50,8 @@ store.attachWindowWorkspace(windowWorkspace);
 const {
   selectedCloudRepoId,
   selectedCloudItemId,
+  cloudSnapshot,
+  lanSnapshot,
   remoteSnapshot,
   remoteTaskDiagnostics,
   workspaceTasksByItemId,

@@ -124,6 +124,11 @@ export function useAppTaskNavigation({
     return repoId ? visibleSidebarItemsForRepo(repoId, { currentRepoScope: true }) : [];
   }
 
+  function visibleSidebarItemsForCurrentRepo() {
+    const repoId = selectedCloudRepoId.value ?? store.selectedRepoId;
+    return repoId ? visibleSidebarItemsForRepo(repoId, { currentRepoScope: true }) : [];
+  }
+
   // Navigation
   async function selectSidebarItem(item: Pick<AppSidebarItem, "id" | "repo_id">, previousItemId?: string | null) {
     if (item.repo_id !== store.selectedRepoId) {
@@ -197,7 +202,7 @@ export function useAppTaskNavigation({
 
   async function selectReadTask(mode: "oldest" | "newest") {
     const target = selectTaskByActivity(
-      visibleSidebarItemsAllRepos().filter((item) => isActivityShortcutCandidate(item) && !hasTag(item, "blocked")),
+      visibleSidebarItemsForCurrentRepo().filter((item) => isActivityShortcutCandidate(item) && !hasTag(item, "blocked")),
       mode,
       "idle",
     );
@@ -206,7 +211,7 @@ export function useAppTaskNavigation({
 
   async function selectUnreadTaskWithReadFallback(mode: "oldest" | "newest") {
     const target = selectTaskByActivity(
-      visibleSidebarItemsAllRepos().filter(isActivityShortcutCandidate),
+      visibleSidebarItemsForCurrentRepo().filter(isActivityShortcutCandidate),
       mode,
       "unread",
     );
