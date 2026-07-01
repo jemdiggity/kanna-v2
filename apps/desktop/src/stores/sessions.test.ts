@@ -338,7 +338,6 @@ describe("createSessionsApi", () => {
       env: expect.objectContaining({
         COLORTERM: "truecolor",
         KANNA_TASK_ID: "task-1",
-        KANNA_CLI_DB_PATH: "/tmp/kanna/kanna-test.db",
         KANNA_SOCKET_PATH: "/tmp/kanna.sock",
         KANNA_WORKTREE: "1",
         KANNA_DEV_PORT: "1421",

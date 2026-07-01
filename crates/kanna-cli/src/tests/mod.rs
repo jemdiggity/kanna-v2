@@ -17,9 +17,7 @@ use crate::commands::task::{
     task_not_found_error,
 };
 use crate::commands::tool::build_tool_call_args;
-use crate::config::{
-    resolve_optional_server_base_url, resolve_server_base_url, resolve_stage_db_path,
-};
+use crate::config::resolve_server_base_url;
 use crate::models::{
     SetTaskParentRequest, TaskCreateOptions, TaskDetail, TaskInputResponse, TaskRenameRequest,
     TaskSummary, WaitUntil,

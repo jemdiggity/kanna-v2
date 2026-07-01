@@ -1,25 +1,21 @@
 interface BuildKannaCliEnvOptions {
   taskId: string;
-  dbName: string;
-  appDataDir: string;
   socketPath: string;
-  serverBaseUrl?: string;
+  serverBaseUrl: string;
 }
 
-export function resolveKannaServerBaseUrl(mobileServerPort?: string | null): string | undefined {
+export function resolveKannaServerBaseUrl(mobileServerPort?: string | null): string {
   const port = mobileServerPort?.trim();
-  if (!port || port === "48120") return undefined;
-  return `http://127.0.0.1:${port}`;
+  return `http://127.0.0.1:${port || "48120"}`;
 }
 
 export function buildKannaCliEnv(options: BuildKannaCliEnvOptions): Record<string, string> {
-  const { taskId, dbName, appDataDir, socketPath, serverBaseUrl } = options;
+  const { taskId, socketPath, serverBaseUrl } = options;
 
   return {
     KANNA_TASK_ID: taskId,
-    KANNA_CLI_DB_PATH: `${appDataDir}/${dbName}`,
     KANNA_SOCKET_PATH: socketPath,
-    ...(serverBaseUrl ? { KANNA_SERVER_BASE_URL: serverBaseUrl } : {}),
+    KANNA_SERVER_BASE_URL: serverBaseUrl,
   };
 }
 

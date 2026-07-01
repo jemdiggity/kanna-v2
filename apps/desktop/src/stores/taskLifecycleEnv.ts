@@ -3,7 +3,6 @@ import type { PipelineItem, Repo } from "@kanna/db";
 import { invoke } from "../invoke";
 import { buildTaskRuntimeEnv, resolveKannaServerBaseUrl } from "./kannaCliEnv";
 import { prepareKannaMcpRuntime } from "./kannaMcpRuntime";
-import { resolveDbName } from "./db";
 import { readRepoConfig } from "./state";
 import { buildWorktreeSessionEnv } from "./worktreeEnv";
 
@@ -71,8 +70,6 @@ export async function buildTaskLifecycleEnv(options: {
     ...worktreeEnv,
     ...buildTaskRuntimeEnv({
       taskId: options.taskId,
-      dbName: await resolveDbName(),
-      appDataDir: await invoke<string>("get_app_data_dir"),
       socketPath: await invoke<string>("get_pipeline_socket_path"),
       serverBaseUrl: resolveKannaServerBaseUrl(mobileServerPort),
       kannaCliPath,

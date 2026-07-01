@@ -500,7 +500,6 @@ async fn create_task_route_sends_kanna_cli_runtime_env_to_daemon_spawn() {
     let daemon_server = tokio::spawn({
         let expected_cli_path = kanna_cli_path_string.clone();
         let expected_cli_dir = kanna_cli_dir.clone();
-        let expected_db_path = Db::test_db_path(&format!("http-api-create-env-{unique}"));
         let expected_socket_path = pipeline_socket_path.clone();
         async move {
             let (stream, _) = daemon_listener.accept().await.unwrap();
@@ -517,10 +516,7 @@ async fn create_task_route_sends_kanna_cli_runtime_env_to_daemon_spawn() {
                         env.get("KANNA_CLI_PATH").map(String::as_str),
                         Some(expected_cli_path.as_str())
                     );
-                    assert_eq!(
-                        env.get("KANNA_CLI_DB_PATH").map(String::as_str),
-                        Some(expected_db_path.as_str())
-                    );
+                    assert_eq!(env.get("KANNA_CLI_DB_PATH"), None);
                     assert_eq!(
                         env.get("KANNA_SOCKET_PATH").map(String::as_str),
                         Some(expected_socket_path.as_str())
