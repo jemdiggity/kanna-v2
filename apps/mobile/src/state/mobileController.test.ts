@@ -486,6 +486,28 @@ describe("createMobileController", () => {
     expect(store.getState().taskTerminalOutput).not.toContain("First line");
   });
 
+  it("stores desktop PTY dimensions from a ready terminal event", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    controller.openTask("task-1");
+    client.__terminalStream.emit({
+      type: "ready",
+      taskId: "task-1",
+      cols: 132,
+      rows: 43
+    });
+
+    expect(store.getState()).toMatchObject({
+      taskTerminalTaskId: "task-1",
+      taskTerminalCols: 132,
+      taskTerminalRows: 43,
+      taskTerminalStatus: "live"
+    });
+  });
+
   it("opens an agent stream instead of a terminal stream for agent tasks", async () => {
     const store = createSessionStore();
     const client = createClientMock();

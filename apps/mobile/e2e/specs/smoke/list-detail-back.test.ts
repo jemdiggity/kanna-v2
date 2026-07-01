@@ -1,7 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  assertPtyTerminalFixtureAvailable,
   ensureTaskListVisible,
   inspectTerminalWebView,
+  openPtyFixtureTask,
+  PTY_SNAPSHOT_MIN_DECODED_BYTES,
+  resolveRequiredPtyTerminalFixture,
   waitForRenderedPtyTerminal,
   waitForTaskTerminalLive
 } from "./list-detail-back.e2e";
@@ -71,6 +75,63 @@ describe("ensureTaskListVisible", () => {
 
     expect(backButton.click).not.toHaveBeenCalled();
     expect(ui.pause).not.toHaveBeenCalled();
+  });
+});
+
+describe("PTY fixture selection", () => {
+  it("requires a known live PTY fixture instead of opening an arbitrary task row", () => {
+    expect(() => resolveRequiredPtyTerminalFixture({})).toThrow(
+      "KANNA_E2E_PTY_TASK_ID is required"
+    );
+  });
+
+  it("rejects a fixture task that is not a PTY task", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        id: "task-agent",
+        agentType: "agent",
+        closedAt: null
+      })
+    }));
+
+    await expect(
+      assertPtyTerminalFixtureAvailable(
+        "http://127.0.0.1:48120",
+        {
+          taskId: "task-agent",
+          sentinel: "Kanna PTY sentinel",
+          expectedCols: 80,
+          expectedRows: 24,
+          minDecodedBytes: PTY_SNAPSHOT_MIN_DECODED_BYTES
+        },
+        fetchImpl
+      )
+    ).rejects.toThrow("expected a live PTY task");
+  });
+
+  it("opens the exact fixture task row by id and never clicks the first arbitrary row", async () => {
+    const firstRow = createElement(() => true);
+    const fixtureRow = createElement(() => true);
+    const ui = {
+      getTaskRowById: vi.fn(async (taskId: string) =>
+        taskId === "task-fixture" ? fixtureRow : firstRow
+      ),
+      waitUntil: vi.fn(async (condition: () => Promise<boolean>, options) => {
+        if (await condition()) {
+          return;
+        }
+
+        throw new Error(options.timeoutMsg);
+      })
+    };
+
+    await openPtyFixtureTask(ui, "task-fixture");
+
+    expect(ui.getTaskRowById).toHaveBeenCalledWith("task-fixture");
+    expect(fixtureRow.click).toHaveBeenCalledTimes(1);
+    expect(firstRow.click).not.toHaveBeenCalled();
   });
 });
 
@@ -167,17 +228,24 @@ describe("inspectTerminalWebView", () => {
 });
 
 describe("waitForRenderedPtyTerminal", () => {
+  const expectation = {
+    sentinel: "Kanna PTY sentinel",
+    expectedCols: 80,
+    expectedRows: 24,
+    minDecodedBytes: PTY_SNAPSHOT_MIN_DECODED_BYTES
+  };
+
   it("waits until WebView terminal output and desktop dimensions are rendered", async () => {
     const agentMessageView = createElement(() => false);
     const inspections = [
       { kind: "unavailable" as const, reason: "No WEBVIEW context was available" },
       {
         kind: "rendered" as const,
-        byteCount: 1024,
-        cols: 132,
+        byteCount: PTY_SNAPSHOT_MIN_DECODED_BYTES,
+        cols: 80,
         frameCount: 1,
-        rows: 43,
-        text: "large snapshot"
+        rows: 24,
+        text: "large snapshot\nKanna PTY sentinel"
       }
     ];
     const ui = {
@@ -194,9 +262,78 @@ describe("waitForRenderedPtyTerminal", () => {
       })
     };
 
-    await waitForRenderedPtyTerminal(ui);
+    await waitForRenderedPtyTerminal(ui, expectation);
 
     expect(ui.inspectTerminalWebView).toHaveBeenCalledTimes(2);
+  });
+
+  it("fails on tiny decoded byte counts that would not catch the old mid-base64 slice", async () => {
+    const agentMessageView = createElement(() => false);
+    const ui = {
+      getAgentMessageView: vi.fn(async () => agentMessageView),
+      inspectTerminalWebView: vi.fn(async () => ({
+        kind: "rendered" as const,
+        byteCount: 9_000,
+        cols: 80,
+        frameCount: 1,
+        rows: 24,
+        text: "Kanna PTY sentinel"
+      })),
+      waitUntil: vi.fn(async (condition: () => Promise<boolean>, options) => {
+        await condition();
+        throw new Error(options.timeoutMsg);
+      })
+    };
+
+    await expect(waitForRenderedPtyTerminal(ui, expectation)).rejects.toThrow(
+      "byteCount"
+    );
+  });
+
+  it("fails when the rendered terminal text is blank", async () => {
+    const agentMessageView = createElement(() => false);
+    const ui = {
+      getAgentMessageView: vi.fn(async () => agentMessageView),
+      inspectTerminalWebView: vi.fn(async () => ({
+        kind: "rendered" as const,
+        byteCount: PTY_SNAPSHOT_MIN_DECODED_BYTES,
+        cols: 80,
+        frameCount: 1,
+        rows: 24,
+        text: "   "
+      })),
+      waitUntil: vi.fn(async (condition: () => Promise<boolean>, options) => {
+        await condition();
+        throw new Error(options.timeoutMsg);
+      })
+    };
+
+    await expect(waitForRenderedPtyTerminal(ui, expectation)).rejects.toThrow(
+      "terminal text"
+    );
+  });
+
+  it("fails when the expected terminal sentinel is missing", async () => {
+    const agentMessageView = createElement(() => false);
+    const ui = {
+      getAgentMessageView: vi.fn(async () => agentMessageView),
+      inspectTerminalWebView: vi.fn(async () => ({
+        kind: "rendered" as const,
+        byteCount: PTY_SNAPSHOT_MIN_DECODED_BYTES,
+        cols: 80,
+        frameCount: 1,
+        rows: 24,
+        text: "large snapshot without the expected marker"
+      })),
+      waitUntil: vi.fn(async (condition: () => Promise<boolean>, options) => {
+        await condition();
+        throw new Error(options.timeoutMsg);
+      })
+    };
+
+    await expect(waitForRenderedPtyTerminal(ui, expectation)).rejects.toThrow(
+      "sentinel"
+    );
   });
 
   it("fails with the last WebView inspection reason when Appium cannot inspect the terminal", async () => {
@@ -213,7 +350,7 @@ describe("waitForRenderedPtyTerminal", () => {
       })
     };
 
-    await expect(waitForRenderedPtyTerminal(ui)).rejects.toThrow(
+    await expect(waitForRenderedPtyTerminal(ui, expectation)).rejects.toThrow(
       "No WEBVIEW context was available"
     );
   });
