@@ -419,6 +419,7 @@ export function useAppLifecycle({
     if (savedAgentProvider === "copilot") preferences.defaultAgentProvider = "copilot";
     else if (savedAgentProvider === "codex") preferences.defaultAgentProvider = "codex";
     else if (savedAgentProvider === "opencode") preferences.defaultAgentProvider = "opencode";
+    else if (savedAgentProvider === "antigravity") preferences.defaultAgentProvider = "antigravity";
     const savedAgentType = await getSetting(db, "defaultAgentType");
     if (savedAgentType !== null) {
       preferences.defaultAgentType = normalizeAgentExecutionType(savedAgentType);

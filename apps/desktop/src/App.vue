@@ -28,7 +28,11 @@ const isMobile = __KANNA_MOBILE__;
 function firstSupportedAgentProvider(agentProvider: AgentProvider | AgentProvider[] | string | string[] | undefined): AgentProvider | undefined {
   const providers = Array.isArray(agentProvider) ? agentProvider : [agentProvider];
   return providers.find((provider): provider is AgentProvider =>
-    provider === "claude" || provider === "copilot" || provider === "codex" || provider === "opencode"
+    provider === "claude"
+    || provider === "copilot"
+    || provider === "codex"
+    || provider === "opencode"
+    || provider === "antigravity"
   );
 }
 

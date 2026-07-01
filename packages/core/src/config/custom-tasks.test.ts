@@ -8,7 +8,7 @@ import { scanCustomTasks } from "./custom-tasks-scanner.js";
 
 describe("NEW_CUSTOM_TASK_PROMPT", () => {
   it("documents all supported agent providers and provider-specific yolo-equivalent permission defaults", () => {
-    expect(NEW_CUSTOM_TASK_PROMPT).toContain('- agent_provider: "claude" | "copilot" | "codex" | "opencode"');
+    expect(NEW_CUSTOM_TASK_PROMPT).toContain('- agent_provider: "claude" | "copilot" | "codex" | "opencode" | "antigravity"');
     expect(NEW_CUSTOM_TASK_PROMPT).toContain('permission_mode: "dontAsk" | "acceptEdits" | "default"');
     expect(NEW_CUSTOM_TASK_PROMPT).toContain("default: provider-specific yolo-equivalent");
     expect(NEW_CUSTOM_TASK_PROMPT).toContain("Codex -> --yolo");
@@ -175,6 +175,18 @@ Use OpenCode for this task.
     expect(result).not.toBeNull();
     expect(result!.agentProvider).toBe("opencode");
     expect(result!.prompt).toBe("Use OpenCode for this task.");
+  });
+
+  it("accepts antigravity as an agent provider", () => {
+    const content = `---
+agent_provider: antigravity
+---
+Use Antigravity for this task.
+`;
+    const result = parseAgentMd(content, "antigravity-task");
+    expect(result).not.toBeNull();
+    expect(result!.agentProvider).toBe("antigravity");
+    expect(result!.prompt).toBe("Use Antigravity for this task.");
   });
 
   it("accepts an agent-backed task with no prompt body", () => {

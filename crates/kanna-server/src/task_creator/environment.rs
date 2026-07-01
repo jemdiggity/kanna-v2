@@ -205,7 +205,7 @@ pub(super) fn resolve_headless_agent_executable(
         AgentProvider::Claude | AgentProvider::Codex | AgentProvider::Opencode => {
             which_binary_with_path(provider.as_str(), path)
         }
-        AgentProvider::Copilot => Ok(None),
+        AgentProvider::Copilot | AgentProvider::Antigravity => Ok(None),
     }
 }
 

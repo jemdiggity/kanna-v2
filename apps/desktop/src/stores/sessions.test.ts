@@ -110,7 +110,23 @@ describe("createSessionsApi", () => {
       copilot: true,
       codex: true,
       opencode: true,
+      antigravity: true,
     });
+  });
+
+  it("builds a fresh Antigravity PTY command using prompt-interactive and Kanna prompt context", async () => {
+    const sessions = createSessionsApi(makeContext());
+
+    const prepared = await sessions.preparePtySession("task-1", "Ship it", {
+      agentProvider: "antigravity",
+    });
+
+    expect(prepared.agentCmd).toBe("'agy' --dangerously-skip-permissions --prompt-interactive 'Ship it'");
+    expect(prepared.agentCmdPreamble).toContain("'agy' --dangerously-skip-permissions --prompt-interactive '");
+    expect(prepared.agentCmdPreamble).toContain("Ship it");
+    expect(prepared.agentCmdPreamble).toContain("This session was launched by Kanna");
+    expect(prepared.agentProvider).toBe("antigravity");
+    expect(mocks.updateAgentSessionIdMock).not.toHaveBeenCalled();
   });
 
   it("builds a fresh OpenCode TUI command with prompt and model flags", async () => {

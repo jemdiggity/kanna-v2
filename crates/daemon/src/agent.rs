@@ -35,7 +35,7 @@ pub fn make_adapter(provider: AgentProvider) -> Option<Box<dyn ProviderAdapter +
         AgentProvider::Codex => Some(Box::new(CodexAdapter::new())),
         AgentProvider::Opencode => Some(Box::new(OpencodeAdapter::new())),
         // PTY-only providers — no headless adapter yet.
-        AgentProvider::Copilot => None,
+        AgentProvider::Copilot | AgentProvider::Antigravity => None,
     }
 }
 

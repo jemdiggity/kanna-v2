@@ -39,6 +39,12 @@ export function getAgentPermissionFlags(
       : [];
   }
 
+  if (provider === "antigravity") {
+    return shouldUseYoloPermissionDefaults(permissionMode)
+      ? ["--dangerously-skip-permissions"]
+      : [];
+  }
+
   if (shouldUseYoloPermissionDefaults(permissionMode)) {
     return ["--yolo"];
   }

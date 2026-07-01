@@ -1,5 +1,5 @@
 use super::environment::which_binary;
-use super::provider::AgentProvider;
+use super::provider::{provider_binary_name, AgentProvider};
 use std::path::Path;
 
 pub(super) fn build_agent_command(
@@ -13,7 +13,10 @@ pub(super) fn build_agent_command(
 ) -> String {
     let prompt_with_fallback = match provider {
         AgentProvider::Claude => prompt.to_string(),
-        AgentProvider::Copilot | AgentProvider::Codex | AgentProvider::Opencode => {
+        AgentProvider::Copilot
+        | AgentProvider::Codex
+        | AgentProvider::Opencode
+        | AgentProvider::Antigravity => {
             // TODO: Use native system-prompt flags for these providers once Kanna
             // has verified stable CLI support for them. Until then, prepend the
             // short preamble to the prompt body so the task remains Kanna-aware.
@@ -86,6 +89,19 @@ pub(super) fn build_agent_command(
             }
             parts.join(" ")
         }
+        AgentProvider::Antigravity => {
+            let mut flags = get_agent_permission_flags(*provider, permission_mode);
+            if let Some(model) = model {
+                flags.push(format!("--model {}", model));
+            }
+            let mut parts = vec![provider_binary_name(*provider).to_string()];
+            parts.extend(flags);
+            if !prompt.is_empty() {
+                parts.push("--prompt-interactive".to_string());
+                parts.push(format!("'{}'", escaped_prompt));
+            }
+            parts.join(" ")
+        }
     }
 }
 
@@ -109,6 +125,10 @@ fn get_agent_permission_flags(
             Some(_) => vec!["--full-auto".to_string()],
         },
         AgentProvider::Opencode => match normalized {
+            None | Some("dontAsk") => vec!["--dangerously-skip-permissions".to_string()],
+            Some(_) => Vec::new(),
+        },
+        AgentProvider::Antigravity => match normalized {
             None | Some("dontAsk") => vec!["--dangerously-skip-permissions".to_string()],
             Some(_) => Vec::new(),
         },

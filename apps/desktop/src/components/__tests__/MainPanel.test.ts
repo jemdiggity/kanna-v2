@@ -75,6 +75,7 @@ describe("MainPanel", () => {
           return Promise.resolve("GitHub Copilot CLI 1.0.32.\nRun 'copilot update' to check for updates.\n");
         }
         if (args?.script === "codex --version") return Promise.resolve("codex-cli 0.125.0-beta.1+20260429\n");
+        if (args?.script === "agy --version") return Promise.resolve("agy 1.0.14\n");
       }
       return Promise.resolve("");
     });
@@ -105,6 +106,101 @@ describe("MainPanel", () => {
     expect(wrapper.text()).toContain("Version 2.1.118");
     expect(wrapper.text()).toContain("Version 1.0.32");
     expect(wrapper.text()).toContain("Version 0.125.0-beta.1+20260429");
+    expect(wrapper.text()).toContain("Version 1.0.14");
+  }, 15_000);
+
+  it("shows the Antigravity install command when agy is missing", async () => {
+    invokeMock.mockImplementation((command: string, args?: { name?: string }) => {
+      if (command === "read_env_var") return Promise.reject(new Error("env var not set"));
+      if (command === "which_binary" && args?.name === "agy") return Promise.reject(new Error("missing agy"));
+      if (command === "which_binary") return Promise.resolve(`/usr/local/bin/${args?.name ?? "agent"}`);
+      if (command === "run_script") return Promise.resolve("1.0.0\n");
+      return Promise.resolve("");
+    });
+
+    const { default: MainPanel } = await import("../MainPanel.vue");
+
+    const wrapper = mount(MainPanel, {
+      props: {
+        item: null,
+        hasRepos: false,
+      },
+      global: {
+        mocks: {
+          $t: (key: string, values?: Record<string, string>) =>
+            key === "mainPanel.agentVersion"
+              ? `Version ${values?.version ?? "?"}`
+              : key === "mainPanel.agentAntigravityName"
+                ? "Google Antigravity"
+                : key,
+        },
+        stubs: {
+          TaskHeader: { template: '<div data-testid="task-header" />' },
+          TerminalTabs: { template: '<div data-testid="terminal-tabs" />' },
+        },
+      },
+    });
+
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("Google Antigravity");
+    expect(wrapper.text()).toContain("curl -fsSL https://antigravity.google/cli/install.sh | bash");
+  }, 15_000);
+
+  it("groups installed agents before missing agents and sorts each group alphabetically", async () => {
+    invokeMock.mockImplementation((command: string, args?: { name?: string; script?: string }) => {
+      if (command === "read_env_var") return Promise.reject(new Error("env var not set"));
+      if (command === "which_binary" && (args?.name === "agy" || args?.name === "codex")) {
+        return Promise.resolve(`/usr/local/bin/${args.name}`);
+      }
+      if (command === "which_binary") return Promise.reject(new Error(`missing ${args?.name ?? "agent"}`));
+      if (command === "run_script") return Promise.resolve(`${args?.script ?? "agent"} 1.0.0\n`);
+      return Promise.resolve("");
+    });
+
+    const { default: MainPanel } = await import("../MainPanel.vue");
+
+    const names: Record<string, string> = {
+      "mainPanel.agentAntigravityName": "Google Antigravity",
+      "mainPanel.agentClaudeName": "Claude Code",
+      "mainPanel.agentCodexName": "OpenAI Codex",
+      "mainPanel.agentCopilotName": "GitHub Copilot",
+      "mainPanel.agentOpenCodeName": "OpenCode",
+    };
+
+    const wrapper = mount(MainPanel, {
+      props: {
+        item: null,
+        hasRepos: false,
+      },
+      global: {
+        mocks: {
+          $t: (key: string, values?: Record<string, string>) =>
+            key === "mainPanel.agentVersion"
+              ? `Version ${values?.version ?? "?"}`
+              : key === "mainPanel.agentInstalled"
+                ? "Installed"
+                : key === "mainPanel.agentNotInstalled"
+                  ? "Not installed"
+                  : names[key] ?? key,
+        },
+        stubs: {
+          TaskHeader: { template: '<div data-testid="task-header" />' },
+          TerminalTabs: { template: '<div data-testid="terminal-tabs" />' },
+        },
+      },
+    });
+
+    await flushPromises();
+
+    expect(wrapper.findAll(".agent-group-title").map(title => title.text())).toEqual(["Installed", "Not installed"]);
+    expect(wrapper.findAll(".agent-name").map(name => name.text())).toEqual([
+      "Google Antigravity",
+      "OpenAI Codex",
+      "Claude Code",
+      "GitHub Copilot",
+      "OpenCode",
+    ]);
   }, 15_000);
 
   it("does not mount task terminals while setup is still pending", async () => {

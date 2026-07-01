@@ -88,6 +88,42 @@ describe("cloud task snapshot mapper", () => {
     });
   });
 
+  it("publishes Antigravity from the local task agent provider", async () => {
+    const snapshot = await buildCloudTaskSnapshot({
+      desktopId: "desktop-1",
+      item: {
+        id: "task-antigravity",
+        repo_id: "repo-1",
+        prompt: "Ship the Antigravity cloud snapshot",
+        stage: "in progress",
+        activity: "idle",
+        branch: "task-antigravity",
+        base_ref: "origin/main",
+        pr_number: null,
+        pr_url: null,
+        display_name: null,
+        agent_provider: "antigravity",
+        agent_type: "pty",
+        created_at: "2026-06-06T00:00:00.000Z",
+        updated_at: "2026-06-06T00:00:00.000Z",
+        closed_at: null,
+      },
+      repo: {
+        id: "repo-1",
+        name: "kanna",
+        path: "/Users/test/kanna",
+        default_branch: "main",
+        remote_url: null,
+      },
+      blockedByTaskIds: [],
+    });
+
+    expect(snapshot.agent).toEqual({
+      provider: "antigravity",
+      type: "pty",
+    });
+  });
+
   it("treats legacy merge stage as active status", async () => {
     const snapshot = await buildCloudTaskSnapshot({
       desktopId: "desktop-1",

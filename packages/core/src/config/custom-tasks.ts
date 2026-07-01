@@ -5,7 +5,7 @@ export interface CustomTaskConfig {
   name: string;
   description?: string;
   agent?: string;
-  agentProvider?: "claude" | "copilot" | "codex" | "opencode";
+  agentProvider?: "claude" | "copilot" | "codex" | "opencode" | "antigravity";
   model?: string;
   permissionMode?: "dontAsk" | "acceptEdits" | "default";
   executionMode?: "pty" | "agent";
@@ -39,7 +39,7 @@ Available frontmatter fields (all optional, defaults shown):
 - name: Display name (default: derived from directory name)
 - description: Short description for the command palette
 - agent: name of an existing \`.kanna/agents/<name>/AGENT.md\` to run
-- agent_provider: "claude" | "copilot" | "codex" | "opencode" (optional)
+- agent_provider: "claude" | "copilot" | "codex" | "opencode" | "antigravity" (optional)
 - model: null (uses Kanna default)
 - permission_mode: "dontAsk" | "acceptEdits" | "default" (default: provider-specific yolo-equivalent: Claude -> --dangerously-skip-permissions, Copilot -> --yolo, Codex -> --yolo, OpenCode -> --dangerously-skip-permissions)
 - execution_mode: "pty" | "agent" (default: pty; legacy "sdk" is accepted as "agent")
@@ -54,7 +54,7 @@ Available frontmatter fields (all optional, defaults shown):
 Once you understand what they want, create the directory and write the agent.md file
 at .kanna/tasks/<taskname>/agent.md. Use a lowercase hyphenated directory name.`;
 
-const VALID_AGENT_PROVIDERS = ["claude", "copilot", "codex", "opencode"] as const;
+const VALID_AGENT_PROVIDERS = ["claude", "copilot", "codex", "opencode", "antigravity"] as const;
 const VALID_PERMISSION_MODES = ["dontAsk", "acceptEdits", "default"] as const;
 const VALID_EXECUTION_MODES = ["pty", "agent", "sdk"] as const;
 const VALID_STAGES = ["in_progress", "pr", "done"] as const;

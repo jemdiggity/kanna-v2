@@ -73,7 +73,7 @@ const MAX_VISIBLE_BRANCH_ROWS = 7;
 const BRANCH_ROW_HEIGHT_PX = 36;
 const baseBranchOptionsMaxHeight = `${MAX_VISIBLE_BRANCH_ROWS * BRANCH_ROW_HEIGHT_PX}px`;
 
-const providers: Array<AgentProvider> = ["claude", "codex", "copilot", "opencode"];
+const providers: Array<AgentProvider> = ["claude", "codex", "copilot", "opencode", "antigravity"];
 const availableProviders = ref<Array<AgentProvider>>([...providers]);
 type AgentChoice = {
   provider: AgentProvider;
@@ -82,6 +82,10 @@ type AgentChoice = {
 
 function providerLabel(provider: AgentProvider): string {
   return provider;
+}
+
+function providerBinary(provider: AgentProvider): string {
+  return provider === "antigravity" ? "agy" : provider;
 }
 
 function supportsChatMode(provider: AgentProvider): boolean {
@@ -147,7 +151,7 @@ onMounted(async () => {
     // Detect installed CLIs and filter options
     const checks = await Promise.all(providers.map(async (p) => {
       try {
-        await invoke("which_binary", { name: p });
+        await invoke("which_binary", { name: providerBinary(p) });
         return p;
       } catch (error) {
         console.debug(`[newtask] CLI binary not found or unavailable: ${p}`, error);

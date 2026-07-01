@@ -312,6 +312,7 @@ defineExpose({ cycleTab })
             <option value="codex">codex</option>
             <option value="copilot">copilot</option>
             <option value="opencode">opencode</option>
+            <option value="antigravity">antigravity</option>
             <option value="claude-sdk">claude (sdk)</option>
             <option value="codex-sdk">codex (sdk)</option>
           </select>
