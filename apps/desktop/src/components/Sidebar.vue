@@ -485,7 +485,7 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
           <div
             class="repo-header"
             :class="{
-              selected: selectedRepoId === repo.id,
+              selected: selectedRepoId === repo.id && (!selectedTaskRepoId || selectedTaskRepoId === repo.id),
               'contains-selected-task': selectedTaskRepoId === repo.id,
             }"
             @mousedown="startRepoDrag(repo.id, $event)"

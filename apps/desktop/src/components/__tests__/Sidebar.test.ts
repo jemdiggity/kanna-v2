@@ -139,12 +139,13 @@ function mountSidebarWithRepos(
   repos: Repo[],
   pipelineItems: PipelineItem[],
   selectedItemId: string | null = "task-1",
+  selectedRepoId: string | null = repos[0]?.id ?? null,
 ) {
   return mount(Sidebar, {
     props: {
       repos,
       pipelineItems,
-      selectedRepoId: repos[0]?.id ?? null,
+      selectedRepoId,
       selectedItemId,
       blockerNames: {},
     },
@@ -504,6 +505,35 @@ describe("Sidebar", () => {
     const headers = wrapper.findAll(".repo-header");
     expect(headers[0]?.classes()).not.toContain("contains-selected-task");
     expect(headers[1]?.classes()).toContain("contains-selected-task");
+  });
+
+  it("does not render two repository headers as selected when repo and item selection diverge", () => {
+    const repos = [
+      repo,
+      {
+        ...repo,
+        id: "repo-2",
+        path: "/repo-2",
+        name: "second",
+        created_at: "2026-01-02T00:00:00.000Z",
+      },
+    ];
+    const pipelineItems = [
+      item("task-1", {
+        repo_id: repo.id,
+        display_name: "First repo task",
+      }),
+    ];
+
+    const wrapper = mountSidebarWithRepos(repos, pipelineItems, "task-1", "repo-2");
+
+    const highlightedHeaders = wrapper.findAll(".repo-header").filter((header) =>
+      header.classes().includes("selected") || header.classes().includes("contains-selected-task")
+    );
+    expect(highlightedHeaders).toHaveLength(1);
+    expect(highlightedHeaders[0]?.text()).toContain("kanna-v2");
+    expect(highlightedHeaders[0]?.classes()).not.toContain("selected");
+    expect(highlightedHeaders[0]?.classes()).toContain("contains-selected-task");
   });
 
   it("styles the selected-task repository marker as inset top and bottom lines without a filled background", () => {

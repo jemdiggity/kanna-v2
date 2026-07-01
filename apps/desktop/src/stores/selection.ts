@@ -195,6 +195,9 @@ export function createSelectionApi(context: StoreContext): SelectionApi {
     nav.select(itemId, previousItemId);
     context.state.selectedItemId.value = itemId;
     const item = context.state.items.value.find((candidate) => candidate.id === itemId);
+    if (item) {
+      context.state.selectedRepoId.value = item.repo_id;
+    }
     logSelection("selectItem", previousItemId, itemId, {
       itemStage: item?.stage,
       itemBranch: item?.branch,
@@ -269,6 +272,9 @@ export function createSelectionApi(context: StoreContext): SelectionApi {
     const previousItemId = context.state.selectedItemId.value;
     context.state.selectedItemId.value = itemId;
     const item = context.state.items.value.find((candidate) => candidate.id === itemId);
+    if (item) {
+      context.state.selectedRepoId.value = item.repo_id;
+    }
     logSelection("restoreSelection", previousItemId, itemId, {
       itemStage: item?.stage,
       itemBranch: item?.branch,
