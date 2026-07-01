@@ -211,10 +211,10 @@ describe("real stage pipeline", () => {
       ].join("\n"),
     );
 
-    const appDataDir = await tauriInvoke(client, "get_app_data_dir") as string;
-    const dbName = await tauriInvoke(client, "read_env_var", { name: "KANNA_DB_NAME" }) as string;
     const socketPath = await tauriInvoke(client, "get_pipeline_socket_path") as string;
     const kannaCliPath = await tauriInvoke(client, "which_binary", { name: "kanna-cli" }) as string;
+    const serverPort = await tauriInvoke(client, "read_env_var", { name: "KANNA_MOBILE_SERVER_PORT" }).catch(() => null) as string | null;
+    const serverBaseUrl = `http://127.0.0.1:${serverPort?.trim() || "48120"}`;
     await tauriInvoke(client, "spawn_session", {
       sessionId: taskId,
       cwd: worktreePath,
@@ -222,8 +222,8 @@ describe("real stage pipeline", () => {
       args: [".kanna-stage-driver.sh"],
       env: {
         KANNA_TASK_ID: taskId,
-        KANNA_CLI_DB_PATH: `${appDataDir}/${dbName}`,
         KANNA_SOCKET_PATH: socketPath,
+        KANNA_SERVER_BASE_URL: serverBaseUrl,
         PATH: `${kannaCliPath.slice(0, kannaCliPath.lastIndexOf("/"))}:${process.env.PATH ?? ""}`,
       },
       cols: 80,

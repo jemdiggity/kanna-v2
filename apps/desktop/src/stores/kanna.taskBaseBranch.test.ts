@@ -1012,15 +1012,12 @@ describe("kanna store task base branch integration", () => {
             KANNA_CLI_PATH: "/usr/bin/kanna-cli",
             PATH: "/usr/bin:/usr/local/bin:/bin",
             KANNA_TASK_ID: createdItem?.id,
-            KANNA_CLI_DB_PATH: "/tmp/kanna/kanna-wt-task-existing.db",
             KANNA_SOCKET_PATH: "/tmp/kanna.sock",
+            KANNA_SERVER_BASE_URL: "http://127.0.0.1:48120",
           }),
         }),
       );
     });
-    const createAgentCall = mockState.invokeMock.mock.calls.find(([command]) => command === "spawn_agent_session");
-    const env = createAgentCall?.[1]?.env as Record<string, string> | undefined;
-    expect(env).not.toHaveProperty("KANNA_SERVER_BASE_URL");
   });
 
   it("runs repo setup scripts before spawning SDK agent sessions", async () => {
@@ -1055,7 +1052,6 @@ describe("kanna store task base branch integration", () => {
             KANNA_CLI_PATH: "/usr/bin/kanna-cli",
             PATH: "/usr/bin:/usr/local/bin:/bin",
             KANNA_TASK_ID: createdItem?.id,
-            KANNA_CLI_DB_PATH: "/tmp/kanna/kanna-wt-task-existing.db",
             KANNA_SOCKET_PATH: "/tmp/kanna.sock",
           }),
         }),
@@ -1230,6 +1226,7 @@ describe("kanna store task base branch integration", () => {
           PATH: "/usr/bin:/tmp/repo/.kanna-worktrees/task-pty-env/bin:/usr/local/bin:/bin:/tmp/repo/.kanna-worktrees/task-pty-env/vendor/tools",
           KANNA_WORKTREE: "1",
           KANNA_CLI_PATH: "/usr/bin/kanna-cli",
+          KANNA_SERVER_BASE_URL: "http://127.0.0.1:48120",
         }),
       }),
     );
@@ -1237,8 +1234,6 @@ describe("kanna store task base branch integration", () => {
     expect(spawnCall?.[1]?.args?.join(" ")).toContain("--append-system-prompt");
     expect(spawnCall?.[1]?.args?.join(" ")).toContain("This session was launched by Kanna.");
     expect(spawnCall?.[1]?.args?.join(" ")).not.toContain("Ship PTY env\\n\\nThis session was launched by Kanna.");
-    const env = spawnCall?.[1]?.env as Record<string, string> | undefined;
-    expect(env).not.toHaveProperty("KANNA_SERVER_BASE_URL");
   });
 
   it("uses the real E2E override for PTY task provider and model when no explicit choice is supplied", async () => {
@@ -1427,14 +1422,11 @@ describe("kanna store task base branch integration", () => {
           KANNA_CLI_PATH: "/usr/bin/kanna-cli",
           PATH: "/usr/bin:/usr/local/bin:/bin",
           KANNA_TASK_ID: "item-existing",
-          KANNA_CLI_DB_PATH: "/tmp/kanna/kanna-wt-task-existing.db",
           KANNA_SOCKET_PATH: "/tmp/kanna.sock",
+          KANNA_SERVER_BASE_URL: "http://127.0.0.1:48120",
         }),
       }),
     );
-    const runScriptCall = mockState.invokeMock.mock.calls.find(([command]) => command === "run_script");
-    const env = runScriptCall?.[1]?.env as Record<string, string> | undefined;
-    expect(env).not.toHaveProperty("KANNA_SERVER_BASE_URL");
   });
 
   it("assigns ports freshly on undo close instead of restoring the task's previous assignment", async () => {
@@ -2785,7 +2777,6 @@ describe("kanna store task base branch integration", () => {
           KANNA_DEV_PORT: "1421",
           KANNA_CLI_PATH: "/usr/bin/kanna-cli",
           KANNA_TASK_ID: "item-sdk",
-          KANNA_CLI_DB_PATH: "/tmp/kanna/kanna-wt-task-existing.db",
           KANNA_SOCKET_PATH: "/tmp/kanna.sock",
         }),
       }),

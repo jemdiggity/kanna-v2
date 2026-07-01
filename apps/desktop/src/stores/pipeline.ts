@@ -11,7 +11,6 @@ import {
   getPreferredAgentProviders,
   resolveAgentProvider,
 } from "./agent-provider";
-import { resolveDbName } from "./db";
 import { requireService, type AdvanceStageOptions, type StoreContext } from "./state";
 import { debugLog } from "../utils/debugLog";
 import { normalizeAgentExecutionType } from "./agentExecutionType";
@@ -532,8 +531,6 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
           });
           const scriptEnv = buildTaskRuntimeEnv({
             taskId,
-            dbName: await resolveDbName(),
-            appDataDir: await invoke<string>("get_app_data_dir"),
             socketPath: await invoke<string>("get_pipeline_socket_path"),
             serverBaseUrl: resolveKannaServerBaseUrl(
               await invoke<string>("read_env_var", { name: "KANNA_MOBILE_SERVER_PORT" }).catch((error) => {

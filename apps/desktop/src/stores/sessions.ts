@@ -4,7 +4,6 @@ import { buildKannaRuntimeSystemPrompt, buildKannaRuntimeUserPrompt } from "../.
 import { invoke } from "../invoke";
 import { isTauri } from "../tauri-mock";
 import { buildTaskShellCommand, getShellTerminalEnv, getTaskTerminalEnv } from "../composables/terminalSessionRecovery";
-import { resolveDbName } from "./db";
 import { buildKannaCliPathEnv, buildTaskRuntimeEnv, resolveKannaServerBaseUrl } from "./kannaCliEnv";
 import { prepareKannaMcpRuntime } from "./kannaMcpRuntime";
 import { encodeDaemonInput } from "./daemonInput";
@@ -232,9 +231,7 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
     const shellTaskId = isWorktree ? taskIdFromWorktreeShellSessionId(sessionId) : null;
     if (shellTaskId) {
       try {
-        const [appDataDir, dbName, socketPath, mobileServerPort] = await Promise.all([
-          invoke<string>("get_app_data_dir"),
-          resolveDbName(),
+        const [socketPath, mobileServerPort] = await Promise.all([
           invoke<string>("get_pipeline_socket_path"),
           invoke<string>("read_env_var", { name: "KANNA_MOBILE_SERVER_PORT" }).catch((error) => {
             console.debug("[store] KANNA_MOBILE_SERVER_PORT not set while building shell env:", error);
@@ -243,8 +240,6 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
         ]);
         Object.assign(env, buildTaskRuntimeEnv({
           taskId: shellTaskId,
-          dbName,
-          appDataDir,
           socketPath,
           serverBaseUrl: resolveKannaServerBaseUrl(mobileServerPort),
           portEnv: parsedPortEnv,
@@ -349,8 +344,6 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
       ...agentBaseEnv,
       ...buildTaskRuntimeEnv({
         taskId: sessionId,
-        dbName: await resolveDbName(),
-        appDataDir: await invoke<string>("get_app_data_dir"),
         socketPath: await invoke<string>("get_pipeline_socket_path"),
         serverBaseUrl: resolveKannaServerBaseUrl(
           await invoke<string>("read_env_var", { name: "KANNA_MOBILE_SERVER_PORT" }).catch((error) => {
@@ -434,15 +427,11 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
     }
 
     try {
-      const [appDataDir, dbName, socketPath] = await Promise.all([
-        invoke<string>("get_app_data_dir"),
-        resolveDbName(),
+      const [socketPath] = await Promise.all([
         invoke<string>("get_pipeline_socket_path"),
       ]);
       Object.assign(env, buildTaskRuntimeEnv({
         taskId: sessionId,
-        dbName,
-        appDataDir,
         socketPath,
         serverBaseUrl: resolveKannaServerBaseUrl(
           await invoke<string>("read_env_var", { name: "KANNA_MOBILE_SERVER_PORT" }).catch((error) => {

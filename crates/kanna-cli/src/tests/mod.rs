@@ -8,16 +8,16 @@ use crate::commands::guide::{
     build_guide_context, render_guide_json, render_guide_markdown, run_guide_command, GuideContext,
 };
 use crate::commands::repo::build_add_repo_request;
-use crate::commands::stage_complete::build_complete_stage_request;
+use crate::commands::stage_complete::{
+    build_complete_stage_request, render_stage_complete_confirmation,
+};
 use crate::commands::task::{
     build_block_task_request, build_create_task_request, build_request_revision_request,
     build_send_task_input_request, find_task_status_row, format_task_list, format_task_status,
     task_not_found_error,
 };
 use crate::commands::tool::build_tool_call_args;
-use crate::config::{
-    resolve_optional_server_base_url, resolve_server_base_url, resolve_stage_db_path,
-};
+use crate::config::resolve_server_base_url;
 use crate::models::{
     SetTaskParentRequest, TaskCreateOptions, TaskDetail, TaskInputResponse, TaskRenameRequest,
     TaskSummary, WaitUntil,

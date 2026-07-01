@@ -48,6 +48,8 @@ pub(crate) struct TaskDetail {
     pub(crate) stage: Option<String>,
     pub(crate) pipeline_name: Option<String>,
     pub(crate) stage_transition: Option<String>,
+    #[serde(default)]
+    pub(crate) stage_result: Option<String>,
     pub(crate) activity: Option<String>,
     pub(crate) snippet: Option<String>,
     pub(crate) agent_type: Option<String>,

@@ -66,7 +66,6 @@ pub(super) fn build_spawn_env(
         ("TERM_PROGRAM".to_string(), "kanna".to_string()),
         ("KANNA_WORKTREE".to_string(), "1".to_string()),
         ("KANNA_TASK_ID".to_string(), task_id.to_string()),
-        ("KANNA_CLI_DB_PATH".to_string(), config.db_path.clone()),
         (
             "KANNA_SOCKET_PATH".to_string(),
             pipeline_socket_path(&config.daemon_dir),
