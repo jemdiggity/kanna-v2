@@ -807,7 +807,6 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
   align-items: center;
   gap: 6px;
   padding: 6px 14px;
-  cursor: grab;
   color: var(--kn-text-secondary);
   font-size: 13px;
   font-weight: 500;
@@ -831,7 +830,6 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
 
 .repo-dragging .repo-header {
   opacity: 0.65;
-  cursor: grabbing;
 }
 
 .repo-drag-over .repo-header {
@@ -936,7 +934,6 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
   align-items: center;
   gap: 8px;
   padding: 4px 14px;
-  cursor: grab;
   border-radius: 4px;
   margin: 1px 6px;
   user-select: none;
@@ -1132,7 +1129,7 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
 }
 
 .sortable-chosen {
-  cursor: grabbing;
+  opacity: 0.9;
 }
 
 .sortable-fallback {
