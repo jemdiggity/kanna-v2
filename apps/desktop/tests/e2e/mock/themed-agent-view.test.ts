@@ -157,8 +157,8 @@ describe("themed agent view", () => {
     await execDb(
       client,
       `INSERT INTO pipeline_item (
-         id, repo_id, prompt, pipeline, stage, tags, branch, agent_type, agent_provider, activity, created_at, updated_at
-       ) VALUES (?, ?, 'Theme this task', 'default', 'in progress', '[]', 'task-themed-agent-task', 'agent', 'claude', 'working', datetime('now'), datetime('now'))`,
+         id, repo_id, prompt, pipeline, stage, branch, agent_type, agent_provider, activity, created_at, updated_at
+       ) VALUES (?, ?, 'Theme this task', 'default', 'in progress', 'task-themed-agent-task', 'agent', 'claude', 'working', datetime('now'), datetime('now'))`,
       [taskId, repoId],
     );
     await execDb(
@@ -280,8 +280,8 @@ describe("themed agent view", () => {
     await execDb(
       client,
       `INSERT INTO pipeline_item (
-         id, repo_id, prompt, pipeline, stage, tags, branch, agent_type, agent_provider, activity, created_at, updated_at
-       ) VALUES (?, ?, 'Stop this task', 'default', 'in progress', '[]', 'task-themed-agent-running-task', 'agent', 'claude', 'working', datetime('now'), datetime('now'))`,
+         id, repo_id, prompt, pipeline, stage, branch, agent_type, agent_provider, activity, created_at, updated_at
+       ) VALUES (?, ?, 'Stop this task', 'default', 'in progress', 'task-themed-agent-running-task', 'agent', 'claude', 'working', datetime('now'), datetime('now'))`,
       [runningTaskId, repoId],
     );
     await execDb(
@@ -345,9 +345,9 @@ describe("themed agent view", () => {
     await execDb(
       client,
       `INSERT INTO pipeline_item (
-         id, repo_id, prompt, pipeline, stage, tags, branch, agent_type, agent_provider,
+         id, repo_id, prompt, pipeline, stage, branch, agent_type, agent_provider,
          activity, agent_spawn_options, created_at, updated_at
-       ) VALUES (?, ?, 'Recover this task', 'default', 'in progress', '[]', 'task-themed-agent-recovery-task',
+       ) VALUES (?, ?, 'Recover this task', 'default', 'in progress', 'task-themed-agent-recovery-task',
          'agent', 'claude', 'working', ?, datetime('now'), datetime('now'))`,
       [
         recoveryTaskId,
@@ -420,8 +420,8 @@ describe("themed agent view", () => {
     await execDb(
       client,
       `INSERT INTO pipeline_item (
-         id, repo_id, prompt, pipeline, stage, tags, branch, agent_type, agent_provider, activity, created_at, updated_at
-       ) VALUES (?, ?, 'Render an image link', 'default', 'in progress', '[]', 'task-themed-agent-image-task',
+         id, repo_id, prompt, pipeline, stage, branch, agent_type, agent_provider, activity, created_at, updated_at
+       ) VALUES (?, ?, 'Render an image link', 'default', 'in progress', 'task-themed-agent-image-task',
          'agent', 'claude', 'working', datetime('now'), datetime('now'))`,
       [imageTaskId, repoId],
     );

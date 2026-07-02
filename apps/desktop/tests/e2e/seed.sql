@@ -23,7 +23,6 @@ CREATE TABLE IF NOT EXISTS pipeline_item (
   id TEXT PRIMARY KEY, repo_id TEXT NOT NULL REFERENCES repo(id) ON DELETE CASCADE,
   issue_number INTEGER, issue_title TEXT, prompt TEXT,
   stage TEXT NOT NULL DEFAULT 'in_progress',
-  tags TEXT NOT NULL DEFAULT '[]',
   pr_number INTEGER, pr_url TEXT, branch TEXT, agent_type TEXT,
   activity TEXT NOT NULL DEFAULT 'idle',
   activity_changed_at TEXT,
@@ -131,13 +130,13 @@ VALUES ('repo-seed-docs', '/Users/test/example-docs', 'example-docs', 'main', 0,
 
 -- Auth refactor: in progress, working, pinned
 INSERT INTO pipeline_item
-  (id, repo_id, issue_number, issue_title, prompt, stage, tags, branch,
+  (id, repo_id, issue_number, issue_title, prompt, stage, branch,
    agent_type, activity, activity_changed_at, pinned, pin_order,
    port_offset, port_env, base_ref, created_at, updated_at)
 VALUES
   ('task-seed-auth-refactor', 'repo-seed-app', 42, 'Refactor auth middleware',
    'Refactor the auth middleware to use the new token validation library',
-   'in_progress', '["in progress"]', 'task-seed-auth-refactor',
+   'in progress', 'task-seed-auth-refactor',
   'claude', 'working', datetime('now', '-30 minutes'), 1, 1,
   1, '{"KANNA_DEV_PORT":"1421"}', 'origin/main', datetime('now', '-3 days'), datetime('now', '-30 minutes'));
 
@@ -146,13 +145,13 @@ VALUES (1421, 'task-seed-auth-refactor', 'KANNA_DEV_PORT');
 
 -- Dashboard: in progress, idle, pinned
 INSERT INTO pipeline_item
-  (id, repo_id, issue_number, issue_title, prompt, stage, tags, branch,
+  (id, repo_id, issue_number, issue_title, prompt, stage, branch,
    agent_type, activity, activity_changed_at, pinned, pin_order,
    port_offset, port_env, base_ref, created_at, updated_at)
 VALUES
   ('task-seed-dashboard', 'repo-seed-app', 51, 'Analytics dashboard',
    'Build the operator analytics dashboard with time-series charts',
-   'in_progress', '["in progress"]', 'task-seed-dashboard',
+   'in progress', 'task-seed-dashboard',
   'claude', 'idle', datetime('now', '-6 hours'), 1, 2,
   2, '{"KANNA_DEV_PORT":"1422"}', 'origin/main', datetime('now', '-5 days'), datetime('now', '-6 hours'));
 
@@ -161,37 +160,37 @@ VALUES (1422, 'task-seed-dashboard', 'KANNA_DEV_PORT');
 
 -- Onboarding: in progress, unread
 INSERT INTO pipeline_item
-  (id, repo_id, issue_number, issue_title, prompt, stage, tags, branch,
+  (id, repo_id, issue_number, issue_title, prompt, stage, branch,
    agent_type, activity, activity_changed_at, unread_at, base_ref,
    created_at, updated_at)
 VALUES
   ('task-seed-onboarding', 'repo-seed-app', 55, 'First-run onboarding',
    'Create a first-run onboarding flow that walks users through importing a repo',
-   'in_progress', '["in progress"]', 'task-seed-onboarding',
+   'in progress', 'task-seed-onboarding',
    'claude', 'unread', datetime('now', '-2 hours'), datetime('now', '-2 hours'), 'origin/main',
    datetime('now', '-2 days'), datetime('now', '-2 hours'));
 
 -- Perf audit: has PR
 INSERT INTO pipeline_item
-  (id, repo_id, issue_number, issue_title, prompt, stage, tags, branch,
+  (id, repo_id, issue_number, issue_title, prompt, stage, branch,
    agent_type, activity, pr_number, pr_url, base_ref,
    created_at, updated_at)
 VALUES
   ('task-seed-perf-audit', 'repo-seed-app', 38, 'Performance audit',
    'Audit frontend rendering performance and fix the top 3 bottlenecks',
-   'pr', '["pr"]', 'task-seed-perf-audit',
+   'pr', 'task-seed-perf-audit',
    'claude', 'idle', 67, 'https://github.com/test/example-app/pull/67', 'origin/main',
    datetime('now', '-7 days'), datetime('now', '-1 days'));
 
 -- Search: in progress, working (api repo)
 INSERT INTO pipeline_item
-  (id, repo_id, issue_number, issue_title, prompt, stage, tags, branch,
+  (id, repo_id, issue_number, issue_title, prompt, stage, branch,
    agent_type, activity, activity_changed_at,
    port_offset, port_env, base_ref, created_at, updated_at)
 VALUES
   ('task-seed-search', 'repo-seed-api', 12, 'Full-text search',
    'Implement full-text search across task prompts and issue titles',
-   'in_progress', '["in progress"]', 'task-seed-search',
+   'in progress', 'task-seed-search',
    'claude', 'working', datetime('now', '-1 hours'),
    3, '{"KANNA_DEV_PORT":"1423"}', 'origin/main', datetime('now', '-4 days'), datetime('now', '-1 hours'));
 
@@ -200,97 +199,97 @@ VALUES (1423, 'task-seed-search', 'KANNA_DEV_PORT');
 
 -- Rate limiting: api repo, has PR
 INSERT INTO pipeline_item
-  (id, repo_id, issue_number, issue_title, prompt, stage, tags, branch,
+  (id, repo_id, issue_number, issue_title, prompt, stage, branch,
    agent_type, activity, pr_number, pr_url, base_ref,
    created_at, updated_at)
 VALUES
   ('task-seed-rate-limit', 'repo-seed-api', 18, 'Rate limiting middleware',
    'Add rate limiting middleware with configurable per-route limits',
-   'pr', '["pr"]', 'task-seed-rate-limit',
+   'pr', 'task-seed-rate-limit',
    'claude', 'idle', 23, 'https://github.com/test/example-api/pull/23', 'origin/main',
    datetime('now', '-6 days'), datetime('now', '-2 days'));
 
 -- Webhooks: api repo, in progress
 INSERT INTO pipeline_item
-  (id, repo_id, issue_number, issue_title, prompt, stage, tags, branch,
+  (id, repo_id, issue_number, issue_title, prompt, stage, branch,
    agent_type, activity, activity_changed_at, base_ref,
    created_at, updated_at)
 VALUES
   ('task-seed-webhooks', 'repo-seed-api', 21, 'Webhook delivery system',
    'Build a webhook delivery system with retry logic and event filtering',
-   'in_progress', '["in progress"]', 'task-seed-webhooks',
+   'in progress', 'task-seed-webhooks',
    'claude', 'idle', datetime('now', '-4 hours'), 'origin/main',
    datetime('now', '-3 days'), datetime('now', '-4 hours'));
 
 -- API docs: docs repo, in progress, working
 INSERT INTO pipeline_item
-  (id, repo_id, issue_number, issue_title, prompt, stage, tags, branch,
+  (id, repo_id, issue_number, issue_title, prompt, stage, branch,
    agent_type, activity, activity_changed_at, pinned, pin_order, base_ref,
    created_at, updated_at)
 VALUES
   ('task-seed-api-docs', 'repo-seed-docs', 5, 'API reference docs',
    'Write API reference documentation for all public endpoints',
-   'in_progress', '["in progress"]', 'task-seed-api-docs',
+   'in progress', 'task-seed-api-docs',
    'claude', 'working', datetime('now', '-45 minutes'), 1, 1, 'origin/main',
    datetime('now', '-4 days'), datetime('now', '-45 minutes'));
 
 -- Tutorials: docs repo, in progress
 INSERT INTO pipeline_item
-  (id, repo_id, issue_number, issue_title, prompt, stage, tags, branch,
+  (id, repo_id, issue_number, issue_title, prompt, stage, branch,
    agent_type, activity, activity_changed_at, base_ref,
    created_at, updated_at)
 VALUES
   ('task-seed-tutorials', 'repo-seed-docs', 8, 'Getting started tutorials',
    'Create getting started tutorials for common workflows',
-   'in_progress', '["in progress"]', 'task-seed-tutorials',
+   'in progress', 'task-seed-tutorials',
    'claude', 'idle', datetime('now', '-1 days'), 'origin/main',
    datetime('now', '-3 days'), datetime('now', '-1 days'));
 
 -- Changelog: docs repo, has PR
 INSERT INTO pipeline_item
-  (id, repo_id, issue_number, issue_title, prompt, stage, tags, branch,
+  (id, repo_id, issue_number, issue_title, prompt, stage, branch,
    agent_type, activity, pr_number, pr_url, base_ref,
    created_at, updated_at)
 VALUES
   ('task-seed-changelog', 'repo-seed-docs', 3, 'Auto-generated changelog',
    'Set up auto-generated changelog from git history',
-   'pr', '["pr"]', 'task-seed-changelog',
+   'pr', 'task-seed-changelog',
    'claude', 'idle', 7, 'https://github.com/test/example-docs/pull/7', 'origin/main',
    datetime('now', '-8 days'), datetime('now', '-3 days'));
 
--- Notifications: done + merged
+-- Notifications: merged and closed (closed_at set; stage keeps its last real value)
 INSERT INTO pipeline_item
-  (id, repo_id, issue_number, issue_title, prompt, stage, tags, branch,
+  (id, repo_id, issue_number, issue_title, prompt, stage, branch,
    agent_type, activity, pr_number, pr_url, closed_at, base_ref,
    created_at, updated_at)
 VALUES
   ('task-seed-notifications', 'repo-seed-app', 30, 'Desktop notifications',
    'Add native desktop notifications when agent runs complete',
-   'done', '["done","merge"]', 'task-seed-notifications',
+   'pr', 'task-seed-notifications',
    'claude', 'idle', 52, 'https://github.com/test/example-app/pull/52', datetime('now', '-2 days'), 'origin/main',
    datetime('now', '-10 days'), datetime('now', '-2 days'));
 
 -- Blocked migration: blocked by auth refactor
 INSERT INTO pipeline_item
-  (id, repo_id, issue_number, issue_title, prompt, stage, tags, branch,
+  (id, repo_id, issue_number, issue_title, prompt, stage, branch,
    agent_type, activity, display_name,
    created_at, updated_at)
 VALUES
   ('task-seed-blocked-migration', 'repo-seed-app', 60, 'DB schema migration v3',
    'Run the v3 schema migration after auth refactor lands',
-   'in_progress', '["in progress","blocked"]', 'task-seed-blocked-migration',
+   'in progress', 'task-seed-blocked-migration',
    'claude', 'idle', 'Schema migration (blocked)',
    datetime('now', '-1 days'), datetime('now', '-1 days'));
 
--- Done cleanup: done, closed
+-- Done cleanup: closed (closed_at is the sole done indicator)
 INSERT INTO pipeline_item
-  (id, repo_id, issue_title, prompt, stage, tags,
+  (id, repo_id, issue_title, prompt, stage,
    agent_type, activity, closed_at,
    created_at, updated_at)
 VALUES
   ('task-seed-done-cleanup', 'repo-seed-app', 'Remove deprecated helpers',
    'Clean up unused helper functions from the utils module',
-   'done', '["done"]',
+   'in progress',
    'claude', 'idle', datetime('now', '-5 days'),
    datetime('now', '-8 days'), datetime('now', '-5 days'));
 

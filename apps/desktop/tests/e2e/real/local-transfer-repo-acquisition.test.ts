@@ -109,7 +109,8 @@ async function waitForPrimaryTaskClosed(taskId: string, timeoutMs = 20_000): Pro
       [taskId],
     )) as PipelineRow[];
     const row = rows[0];
-    if (row?.stage === "done" && typeof row.closed_at === "string" && row.closed_at.length > 0) {
+    // closed_at is the sole done indicator — closing never rewrites stage.
+    if (typeof row?.closed_at === "string" && row.closed_at.length > 0) {
       return;
     }
     await sleep(250);

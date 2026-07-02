@@ -111,14 +111,14 @@ export async function seedDatabase(client: WebDriverClient): Promise<void> {
   await execDb(
     client,
     `INSERT INTO pipeline_item
-       (id, repo_id, issue_number, issue_title, prompt, stage, tags, branch,
+       (id, repo_id, issue_number, issue_title, prompt, stage, branch,
         agent_type, activity, activity_changed_at, pinned, pin_order,
         port_offset, port_env, base_ref, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       TASK_AUTH, REPO_APP, 42, "Refactor auth middleware",
       "Refactor the auth middleware to use the new token validation library",
-      "in_progress", '["in progress"]', "task-seed-auth-refactor",
+      "in progress", "task-seed-auth-refactor",
       "claude", "working", hoursAgo(0.5), 1, 1,
       1, '{"KANNA_DEV_PORT":"1421"}', "origin/main", daysAgo(3), hoursAgo(0.5),
     ]
@@ -128,14 +128,14 @@ export async function seedDatabase(client: WebDriverClient): Promise<void> {
   await execDb(
     client,
     `INSERT INTO pipeline_item
-       (id, repo_id, issue_number, issue_title, prompt, stage, tags, branch,
+       (id, repo_id, issue_number, issue_title, prompt, stage, branch,
         agent_type, activity, activity_changed_at, pinned, pin_order,
         port_offset, port_env, base_ref, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       TASK_DASH, REPO_APP, 51, "Analytics dashboard",
       "Build the operator analytics dashboard with time-series charts",
-      "in_progress", '["in progress"]', "task-seed-dashboard",
+      "in progress", "task-seed-dashboard",
       "claude", "idle", hoursAgo(6), 1, 2,
       2, '{"KANNA_DEV_PORT":"1422"}', "origin/main", daysAgo(5), hoursAgo(6),
     ]
@@ -145,14 +145,14 @@ export async function seedDatabase(client: WebDriverClient): Promise<void> {
   await execDb(
     client,
     `INSERT INTO pipeline_item
-       (id, repo_id, issue_number, issue_title, prompt, stage, tags, branch,
+       (id, repo_id, issue_number, issue_title, prompt, stage, branch,
         agent_type, activity, activity_changed_at, unread_at, base_ref,
         created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       TASK_ONBOARD, REPO_APP, 55, "First-run onboarding",
       "Create a first-run onboarding flow that walks users through importing a repo",
-      "in_progress", '["in progress"]', "task-seed-onboarding",
+      "in progress", "task-seed-onboarding",
       "claude", "unread", hoursAgo(2), hoursAgo(2), "origin/main",
       daysAgo(2), hoursAgo(2),
     ]
@@ -162,14 +162,14 @@ export async function seedDatabase(client: WebDriverClient): Promise<void> {
   await execDb(
     client,
     `INSERT INTO pipeline_item
-       (id, repo_id, issue_number, issue_title, prompt, stage, tags, branch,
+       (id, repo_id, issue_number, issue_title, prompt, stage, branch,
         agent_type, activity, pr_number, pr_url, base_ref,
         created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       TASK_PERF, REPO_APP, 38, "Performance audit",
       "Audit frontend rendering performance and fix the top 3 bottlenecks",
-      "pr", '["pr"]', "task-seed-perf-audit",
+      "pr", "task-seed-perf-audit",
       "claude", "idle", 67, "https://github.com/test/example-app/pull/67", "origin/main",
       daysAgo(7), daysAgo(1),
     ]
@@ -179,14 +179,14 @@ export async function seedDatabase(client: WebDriverClient): Promise<void> {
   await execDb(
     client,
     `INSERT INTO pipeline_item
-       (id, repo_id, issue_number, issue_title, prompt, stage, tags, branch,
+       (id, repo_id, issue_number, issue_title, prompt, stage, branch,
         agent_type, activity, activity_changed_at,
         port_offset, port_env, base_ref, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       TASK_SEARCH, REPO_API, 12, "Full-text search",
       "Implement full-text search across task prompts and issue titles",
-      "in_progress", '["in progress"]', "task-seed-search",
+      "in progress", "task-seed-search",
       "claude", "working", hoursAgo(1),
       3, '{"KANNA_DEV_PORT":"1423"}', "origin/main", daysAgo(4), hoursAgo(1),
     ]
@@ -208,18 +208,19 @@ export async function seedDatabase(client: WebDriverClient): Promise<void> {
     [1423, TASK_SEARCH, "KANNA_DEV_PORT"],
   );
 
-  // 6. Notifications — merged/done
+  // 6. Notifications — merged and closed (closed_at set; stage keeps its
+  // last real value under the durable model)
   await execDb(
     client,
     `INSERT INTO pipeline_item
-       (id, repo_id, issue_number, issue_title, prompt, stage, tags, branch,
+       (id, repo_id, issue_number, issue_title, prompt, stage, branch,
         agent_type, activity, pr_number, pr_url, closed_at, base_ref,
         created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       TASK_NOTIF, REPO_APP, 30, "Desktop notifications",
       "Add native desktop notifications when agent runs complete",
-      "done", '["done","merge"]', "task-seed-notifications",
+      "pr", "task-seed-notifications",
       "claude", "idle", 52, "https://github.com/test/example-app/pull/52", daysAgo(2), "origin/main",
       daysAgo(10), daysAgo(2),
     ]
@@ -229,31 +230,31 @@ export async function seedDatabase(client: WebDriverClient): Promise<void> {
   await execDb(
     client,
     `INSERT INTO pipeline_item
-       (id, repo_id, issue_number, issue_title, prompt, stage, tags, branch,
+       (id, repo_id, issue_number, issue_title, prompt, stage, branch,
         agent_type, activity, display_name,
         created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       TASK_BLOCKED, REPO_APP, 60, "DB schema migration v3",
       "Run the v3 schema migration after auth refactor lands",
-      "in_progress", '["in progress","blocked"]', "task-seed-blocked-migration",
+      "in progress", "task-seed-blocked-migration",
       "claude", "idle", "Schema migration (blocked)",
       daysAgo(1), daysAgo(1),
     ]
   );
 
-  // 8. Done cleanup — done, closed
+  // 8. Done cleanup — closed (closed_at is the sole done indicator)
   await execDb(
     client,
     `INSERT INTO pipeline_item
-       (id, repo_id, issue_title, prompt, stage, tags,
+       (id, repo_id, issue_title, prompt, stage,
         agent_type, activity, closed_at,
         created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       TASK_DONE, REPO_APP, "Remove deprecated helpers",
       "Clean up unused helper functions from the utils module",
-      "done", '["done"]',
+      "in progress",
       "claude", "idle", daysAgo(5),
       daysAgo(8), daysAgo(5),
     ]
@@ -341,57 +342,24 @@ export async function seedDatabase(client: WebDriverClient): Promise<void> {
   );
 
   // ── Activity log ──────────────────────────────────────────────────────
+  // Accumulator schema (db.ts migration 004): one row per
+  // (pipeline_item_id, activity) holding total seconds in that activity.
 
-  // Auth refactor activity timeline
-  await execDb(
-    client,
-    `INSERT INTO activity_log (pipeline_item_id, activity, started_at) VALUES (?, ?, ?)`,
-    [TASK_AUTH, "working", daysAgo(3)]
-  );
-  await execDb(
-    client,
-    `INSERT INTO activity_log (pipeline_item_id, activity, started_at) VALUES (?, ?, ?)`,
-    [TASK_AUTH, "idle", daysAgo(2)]
-  );
-  await execDb(
-    client,
-    `INSERT INTO activity_log (pipeline_item_id, activity, started_at) VALUES (?, ?, ?)`,
-    [TASK_AUTH, "working", hoursAgo(0.5)]
-  );
-
-  // Dashboard activity timeline
-  await execDb(
-    client,
-    `INSERT INTO activity_log (pipeline_item_id, activity, started_at) VALUES (?, ?, ?)`,
-    [TASK_DASH, "working", daysAgo(5)]
-  );
-  await execDb(
-    client,
-    `INSERT INTO activity_log (pipeline_item_id, activity, started_at) VALUES (?, ?, ?)`,
-    [TASK_DASH, "idle", daysAgo(4)]
-  );
-  await execDb(
-    client,
-    `INSERT INTO activity_log (pipeline_item_id, activity, started_at) VALUES (?, ?, ?)`,
-    [TASK_DASH, "working", daysAgo(1)]
-  );
-  await execDb(
-    client,
-    `INSERT INTO activity_log (pipeline_item_id, activity, started_at) VALUES (?, ?, ?)`,
-    [TASK_DASH, "idle", hoursAgo(6)]
-  );
-
-  // Onboarding — went unread
-  await execDb(
-    client,
-    `INSERT INTO activity_log (pipeline_item_id, activity, started_at) VALUES (?, ?, ?)`,
-    [TASK_ONBOARD, "working", daysAgo(2)]
-  );
-  await execDb(
-    client,
-    `INSERT INTO activity_log (pipeline_item_id, activity, started_at) VALUES (?, ?, ?)`,
-    [TASK_ONBOARD, "unread", hoursAgo(2)]
-  );
+  const activityTotals: Array<[string, string, number]> = [
+    [TASK_AUTH, "working", 12600],
+    [TASK_AUTH, "idle", 3600],
+    [TASK_DASH, "working", 18000],
+    [TASK_DASH, "idle", 9000],
+    [TASK_ONBOARD, "working", 7200],
+    [TASK_ONBOARD, "unread", 1800],
+  ];
+  for (const [itemId, activity, seconds] of activityTotals) {
+    await execDb(
+      client,
+      `INSERT INTO activity_log (pipeline_item_id, activity, seconds) VALUES (?, ?, ?)`,
+      [itemId, activity, seconds]
+    );
+  }
 
   // ── Operator events ───────────────────────────────────────────────────
 

@@ -253,8 +253,8 @@ describe("keyboard shortcuts", () => {
       await execDb(
         client,
         `INSERT INTO pipeline_item
-           (id, repo_id, issue_number, issue_title, prompt, stage, tags, branch, agent_type, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           (id, repo_id, issue_number, issue_title, prompt, stage, branch, agent_type, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           id,
           repoId,
@@ -262,7 +262,6 @@ describe("keyboard shortcuts", () => {
           issueTitle,
           `Prompt for ${issueTitle}`,
           "in progress",
-          "[]",
           null,
           KEYBOARD_FIXTURE_AGENT_TYPE,
           createdAt,
@@ -358,8 +357,8 @@ describe("keyboard shortcuts", () => {
     await execDb(
       client,
       `INSERT INTO pipeline_item
-         (id, repo_id, issue_number, issue_title, prompt, stage, tags, branch, agent_type, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (id, repo_id, issue_number, issue_title, prompt, stage, branch, agent_type, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         olderTaskId,
         repoId,
@@ -367,7 +366,6 @@ describe("keyboard shortcuts", () => {
         "Older key action task",
         "Prompt for older key action task",
         "in progress",
-        "[]",
         null,
         KEYBOARD_FIXTURE_AGENT_TYPE,
         "2026-04-17T10:00:00.000Z",
@@ -378,7 +376,6 @@ describe("keyboard shortcuts", () => {
         "Newer key action task",
         "Prompt for newer key action task",
         "in progress",
-        "[]",
         null,
         KEYBOARD_FIXTURE_AGENT_TYPE,
         "2026-04-17T10:01:00.000Z",
@@ -415,8 +412,8 @@ describe("keyboard shortcuts", () => {
     await execDb(
       client,
       `INSERT INTO pipeline_item
-         (id, repo_id, issue_number, issue_title, prompt, stage, tags, branch, agent_type, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (id, repo_id, issue_number, issue_title, prompt, stage, branch, agent_type, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         prTaskId,
         repoId,
@@ -424,7 +421,6 @@ describe("keyboard shortcuts", () => {
         "Visual order PR task",
         "Prompt for visual order PR task",
         "pr",
-        "[]",
         null,
         KEYBOARD_FIXTURE_AGENT_TYPE,
         "2026-04-17T10:01:00.000Z",
@@ -435,7 +431,6 @@ describe("keyboard shortcuts", () => {
         "Visual order in progress task",
         "Prompt for visual order in progress task",
         "in progress",
-        "[]",
         null,
         KEYBOARD_FIXTURE_AGENT_TYPE,
         "2026-04-17T10:00:00.000Z",
@@ -491,9 +486,9 @@ describe("keyboard shortcuts", () => {
       await execDb(
         client,
         `INSERT INTO pipeline_item
-           (id, repo_id, prompt, stage, activity, created_at, updated_at, agent_type, tags)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [row[0], row[1], row[2], "in progress", "idle", row[3], row[3], KEYBOARD_FIXTURE_AGENT_TYPE, "[]"],
+           (id, repo_id, prompt, stage, activity, created_at, updated_at, agent_type)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [row[0], row[1], row[2], "in progress", "idle", row[3], row[3], KEYBOARD_FIXTURE_AGENT_TYPE],
       );
     }
 
@@ -526,8 +521,8 @@ describe("keyboard shortcuts", () => {
       await execDb(
         client,
         `INSERT INTO pipeline_item
-           (id, repo_id, issue_number, issue_title, prompt, stage, tags, branch, agent_type, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           (id, repo_id, issue_number, issue_title, prompt, stage, branch, agent_type, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           taskId(index),
           repoId,
@@ -535,7 +530,6 @@ describe("keyboard shortcuts", () => {
           taskTitle(index),
           `Prompt for ${taskTitle(index)}`,
           "in progress",
-          "[]",
           null,
           KEYBOARD_FIXTURE_AGENT_TYPE,
           createdAt,
@@ -604,7 +598,6 @@ describe("keyboard shortcuts", () => {
            prompt: "Remote Cmd+S task",
            pipeline: "default",
            stage: "in progress",
-           tags: "[]",
            pr_number: null,
            pr_url: null,
            branch: ${JSON.stringify(ownerTaskId)},
@@ -623,11 +616,8 @@ describe("keyboard shortcuts", () => {
            base_ref: "origin/main",
            agent_provider: "codex",
            agent_type: "pty",
-           previous_stage: null,
-           stage_result: null,
            teardown_started_at: null,
            last_output_preview: null,
-           active_post_action: null,
            created_at: "2026-04-17T10:00:00.000Z",
            updated_at: "2026-04-17T10:00:00.000Z"
          }],
@@ -682,8 +672,8 @@ describe("keyboard shortcuts", () => {
     await execDb(
       client,
       `INSERT INTO pipeline_item
-         (id, repo_id, issue_number, issue_title, prompt, stage, tags, branch, agent_type, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (id, repo_id, issue_number, issue_title, prompt, stage, branch, agent_type, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         repoOneTaskId,
         repoOneId,
@@ -691,7 +681,6 @@ describe("keyboard shortcuts", () => {
         "Native repo action one",
         "Prompt for native repo action one",
         "in progress",
-        "[]",
         null,
         KEYBOARD_FIXTURE_AGENT_TYPE,
         "2026-04-17T10:00:00.000Z",
@@ -702,7 +691,6 @@ describe("keyboard shortcuts", () => {
         "Native repo action two",
         "Prompt for native repo action two",
         "in progress",
-        "[]",
         null,
         KEYBOARD_FIXTURE_AGENT_TYPE,
         "2026-04-17T10:01:00.000Z",
@@ -745,8 +733,8 @@ describe("keyboard shortcuts", () => {
        ];
        Promise.all(rows.map(function(row) {
          return db.execute(
-           "INSERT OR REPLACE INTO pipeline_item (id, repo_id, prompt, stage, activity, created_at, teardown_started_at, agent_type, tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-           [row[0], row[1], row[2], row[3], row[4], row[5], row[6], ${JSON.stringify(KEYBOARD_FIXTURE_AGENT_TYPE)}, "[]"]
+           "INSERT OR REPLACE INTO pipeline_item (id, repo_id, prompt, stage, activity, created_at, teardown_started_at, agent_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+           [row[0], row[1], row[2], row[3], row[4], row[5], row[6], ${JSON.stringify(KEYBOARD_FIXTURE_AGENT_TYPE)}]
          );
        }))
          .then(function() { return ctx.loadItems("${repoId}"); })
@@ -782,8 +770,8 @@ describe("keyboard shortcuts", () => {
       for (const row of rows) {
         await execDb(
           client,
-          "INSERT INTO pipeline_item (id, repo_id, prompt, stage, activity, created_at, agent_type, tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-          [row[0], row[1], row[2], row[3], row[4], row[5], KEYBOARD_FIXTURE_AGENT_TYPE, row[6]],
+          "INSERT INTO pipeline_item (id, repo_id, prompt, stage, activity, created_at, agent_type) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          [row[0], row[1], row[2], row[3], row[4], row[5], KEYBOARD_FIXTURE_AGENT_TYPE],
         );
       }
 
@@ -821,8 +809,8 @@ describe("keyboard shortcuts", () => {
     for (const row of rows) {
       await execDb(
         client,
-        "INSERT INTO pipeline_item (id, repo_id, prompt, stage, activity, created_at, unread_at, agent_type, tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        [row[0], row[1], row[2], row[3], row[4], row[5], row[6], KEYBOARD_FIXTURE_AGENT_TYPE, "[]"],
+        "INSERT INTO pipeline_item (id, repo_id, prompt, stage, activity, created_at, unread_at, agent_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        [row[0], row[1], row[2], row[3], row[4], row[5], row[6], KEYBOARD_FIXTURE_AGENT_TYPE],
       );
     }
 
@@ -866,8 +854,8 @@ describe("keyboard shortcuts", () => {
       for (const row of rows) {
         await execDb(
           client,
-          "INSERT INTO pipeline_item (id, repo_id, prompt, stage, activity, created_at, updated_at, agent_type, tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-          [row[0], row[1], row[2], "in progress", row[3], row[4], row[4], KEYBOARD_FIXTURE_AGENT_TYPE, "[]"],
+          "INSERT INTO pipeline_item (id, repo_id, prompt, stage, activity, created_at, updated_at, agent_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+          [row[0], row[1], row[2], "in progress", row[3], row[4], row[4], KEYBOARD_FIXTURE_AGENT_TYPE],
         );
       }
 
@@ -903,7 +891,7 @@ describe("keyboard shortcuts", () => {
     const currentTaskId = "shortcut-cross-remote-current";
     await execDb(
       client,
-      "INSERT INTO pipeline_item (id, repo_id, prompt, stage, activity, created_at, updated_at, agent_type, tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      "INSERT INTO pipeline_item (id, repo_id, prompt, stage, activity, created_at, updated_at, agent_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
       [
         currentTaskId,
         localRepoId,
@@ -913,7 +901,6 @@ describe("keyboard shortcuts", () => {
         "2026-03-31T03:00:00.000Z",
         "2026-03-31T03:00:00.000Z",
         KEYBOARD_FIXTURE_AGENT_TYPE,
-        "[]",
       ],
     );
 
@@ -963,7 +950,6 @@ describe("keyboard shortcuts", () => {
         prompt: title,
         pipeline: "cloud",
         stage: "in progress",
-        tags: "[]",
         pr_number: null,
         pr_url: null,
         branch: `task-${suffix}`,
@@ -982,11 +968,8 @@ describe("keyboard shortcuts", () => {
         base_ref: "origin/main",
         agent_provider: "codex",
         agent_type: "pty",
-        previous_stage: null,
-        stage_result: null,
         teardown_started_at: null,
         last_output_preview: null,
-        active_post_action: null,
         created_at: createdAt,
         updated_at: createdAt,
       })),
@@ -1062,20 +1045,33 @@ describe("keyboard shortcuts", () => {
        const ctx = window.__KANNA_E2E__.setupState;
        const db = ctx.db.value || ctx.db;
        const rows = [
-         ["shortcut-blocked-old", "${repoId}", "Blocked old read", "in progress", "idle", "2026-03-31T00:00:00.000Z", "[\\"blocked\\"]"],
-         ["shortcut-read-old", "${repoId}", "Read old", "in progress", "idle", "2026-03-31T01:00:00.000Z", "[]"],
-         ["shortcut-read-near-old", "${repoId}", "Read near old", "in progress", "idle", "2026-03-31T02:00:00.000Z", "[]"],
-         ["shortcut-current-read-fallback", "${repoId}", "Current", "in progress", "idle", "2026-03-31T03:00:00.000Z", "[]"],
-         ["shortcut-read-near-new", "${repoId}", "Read near new", "in progress", "idle", "2026-03-31T04:00:00.000Z", "[]"],
-         ["shortcut-read-new", "${repoId}", "Read new", "in progress", "idle", "2026-03-31T05:00:00.000Z", "[]"],
-         ["shortcut-blocked-new", "${repoId}", "Blocked new read", "in progress", "idle", "2026-03-31T06:00:00.000Z", "[\\"blocked\\"]"],
+         ["shortcut-blocked-old", "${repoId}", "Blocked old read", "in progress", "idle", "2026-03-31T00:00:00.000Z"],
+         ["shortcut-read-old", "${repoId}", "Read old", "in progress", "idle", "2026-03-31T01:00:00.000Z"],
+         ["shortcut-read-near-old", "${repoId}", "Read near old", "in progress", "idle", "2026-03-31T02:00:00.000Z"],
+         ["shortcut-current-read-fallback", "${repoId}", "Current", "in progress", "idle", "2026-03-31T03:00:00.000Z"],
+         ["shortcut-read-near-new", "${repoId}", "Read near new", "in progress", "idle", "2026-03-31T04:00:00.000Z"],
+         ["shortcut-read-new", "${repoId}", "Read new", "in progress", "idle", "2026-03-31T05:00:00.000Z"],
+         ["shortcut-blocked-new", "${repoId}", "Blocked new read", "in progress", "idle", "2026-03-31T06:00:00.000Z"],
+       ];
+       // Blocked-ness comes from task_blocker rows on open blockers, not tags.
+       const blockerEdges = [
+         ["shortcut-blocked-old", "shortcut-read-old"],
+         ["shortcut-blocked-new", "shortcut-read-new"],
        ];
        db.execute("DELETE FROM pipeline_item WHERE repo_id = ?", ["${repoId}"])
          .then(function() {
            return Promise.all(rows.map(function(row) {
              return db.execute(
-               "INSERT INTO pipeline_item (id, repo_id, prompt, stage, activity, created_at, agent_type, tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-               [row[0], row[1], row[2], row[3], row[4], row[5], ${JSON.stringify(KEYBOARD_FIXTURE_AGENT_TYPE)}, row[6]]
+               "INSERT INTO pipeline_item (id, repo_id, prompt, stage, activity, created_at, agent_type) VALUES (?, ?, ?, ?, ?, ?, ?)",
+               [row[0], row[1], row[2], row[3], row[4], row[5], ${JSON.stringify(KEYBOARD_FIXTURE_AGENT_TYPE)}]
+             );
+           }));
+         })
+         .then(function() {
+           return Promise.all(blockerEdges.map(function(edge) {
+             return db.execute(
+               "INSERT OR IGNORE INTO task_blocker (blocked_item_id, blocker_item_id) VALUES (?, ?)",
+               [edge[0], edge[1]]
              );
            }));
          })

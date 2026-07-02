@@ -19,7 +19,6 @@ interface PipelineRow {
   stage: string;
   display_name: string | null;
   closed_at?: string | null;
-  previous_stage?: string | null;
 }
 
 interface TransferRow {
@@ -109,11 +108,12 @@ async function waitForPrimaryTaskClosed(
   while (Date.now() < deadline) {
     const rows = (await queryDb(
       primary,
-      "SELECT id, stage, closed_at, previous_stage FROM pipeline_item WHERE id = ?",
+      "SELECT id, stage, closed_at FROM pipeline_item WHERE id = ?",
       [taskId],
     )) as PipelineRow[];
     const row = rows[0];
-    if (row?.stage === "done" && typeof row.closed_at === "string" && row.closed_at.length > 0) {
+    // closed_at is the sole done indicator — closing never rewrites stage.
+    if (typeof row?.closed_at === "string" && row.closed_at.length > 0) {
       return row;
     }
     await sleep(250);
@@ -227,8 +227,8 @@ describe("local transfer accept import", () => {
     const closedSourceTask = await waitForPrimaryTaskClosed(sourceTaskId);
     expect(closedSourceTask).toMatchObject({
       id: sourceTaskId,
-      stage: "done",
-      previous_stage: "in progress",
+      // The stage keeps its last real value; closed_at marks the close.
+      stage: "in progress",
     });
     expect(closedSourceTask.closed_at).toBeTruthy();
   });

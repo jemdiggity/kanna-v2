@@ -200,17 +200,15 @@ describe("external task creation", () => {
     await execDb(
       client,
       `INSERT INTO pipeline_item (
-         id, repo_id, prompt, pipeline, stage, stage_result, tags, branch,
+         id, repo_id, prompt, pipeline, stage, branch,
          agent_type, agent_provider, activity, display_name, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', '-10 seconds'), datetime('now', '-10 seconds'))`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', '-10 seconds'), datetime('now', '-10 seconds'))`,
       [
         visibleTaskId,
         repoId,
         visiblePrompt,
         "external-create-e2e",
         "in progress",
-        null,
-        "[]",
         null,
         "agent",
         "codex",
@@ -295,17 +293,15 @@ describe("external task creation", () => {
     await execDb(
       client,
       `INSERT INTO pipeline_item (
-         id, repo_id, prompt, pipeline, stage, stage_result, tags, branch,
+         id, repo_id, prompt, pipeline, stage, branch,
          agent_type, agent_provider, activity, display_name, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', '-20 seconds'), datetime('now', '-20 seconds'))`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', '-20 seconds'), datetime('now', '-20 seconds'))`,
       [
         parentTaskId,
         repoId,
         parentPrompt,
         "external-create-e2e",
         "in progress",
-        null,
-        "[]",
         null,
         "agent",
         "codex",
