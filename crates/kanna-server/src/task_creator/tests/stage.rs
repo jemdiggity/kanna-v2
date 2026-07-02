@@ -203,6 +203,254 @@ fn prepare_advance_stage_builds_next_stage_task_from_previous_branch() {
 }
 
 #[test]
+fn prepare_advance_stage_uses_stored_pipeline_snapshot_for_existing_task() {
+    let repo_root =
+        std::env::temp_dir().join(format!("kanna-stage-snapshot-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&repo_root);
+    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::create_dir_all(repo_root.join(".kanna/agents/reviewer")).unwrap();
+    std::fs::create_dir_all(repo_root.join(".kanna/agents/qa")).unwrap();
+    std::fs::write(repo_root.join("README.md"), "test repo").unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/pipelines/default.json"),
+        r#"{
+  "stages": [
+    { "name": "in progress", "transition": "manual" },
+    { "name": "review", "transition": "manual", "agent": "reviewer", "prompt": "Snapshot prompt $PREV_RESULT" }
+  ]
+}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/agents/reviewer/AGENT.md"),
+        "---\nagent_provider: claude\n---\nSnapshot agent: $TASK_PROMPT",
+    )
+    .unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/agents/qa/AGENT.md"),
+        "---\nagent_provider: claude\n---\nLive agent: $TASK_PROMPT",
+    )
+    .unwrap();
+    assert!(Command::new("git")
+        .arg("init")
+        .arg("-b")
+        .arg("main")
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["config", "user.email", "test@example.com"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["config", "user.name", "Test User"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["add", "README.md", ".kanna"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["commit", "-m", "init"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["branch", "task-old-branch"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+
+    let snapshot =
+        std::fs::read_to_string(repo_root.join(".kanna/pipelines/default.json")).unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/pipelines/default.json"),
+        r#"{
+  "stages": [
+    { "name": "in progress", "transition": "manual" },
+    { "name": "qa", "transition": "manual", "agent": "qa", "prompt": "Live prompt $PREV_RESULT" }
+  ]
+}"#,
+    )
+    .unwrap();
+
+    let config = test_config("stage-snapshot-resolution");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Fix the shell",
+        Some("Shell fix"),
+        "in progress",
+        "2026-07-02 00:00:00",
+    )
+    .unwrap();
+    db.update_test_pipeline_item_stage_context(
+        "task-1",
+        "task-old-branch",
+        "default",
+        Some("{\"status\":\"success\",\"summary\":\"done\"}"),
+        "claude",
+    )
+    .unwrap();
+    db.update_test_pipeline_item_pipeline_def("task-1", &snapshot)
+        .unwrap();
+
+    let prepared = match prepare_advance_stage_for_api(&db, &config, "task-1").unwrap() {
+        PreparedStageTransition::Spawn(prepared) => prepared,
+        PreparedStageTransition::Continue(_) => panic!("expected new task transition"),
+    };
+    let created_source = db
+        .get_task_stage_source(&prepared.created_task.task_id)
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(prepared.created_task.stage, "review");
+    assert_eq!(
+        created_source.prompt.as_deref(),
+        Some(
+            "Snapshot agent: Fix the shell\n\nSnapshot prompt {\"status\":\"success\",\"summary\":\"done\"}"
+        )
+    );
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
+fn prepare_advance_stage_substitutes_previous_stage_run_result_before_legacy_stage_result() {
+    let repo_root = std::env::temp_dir().join(format!(
+        "kanna-stage-run-prev-result-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&repo_root);
+    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::create_dir_all(repo_root.join(".kanna/agents/reviewer")).unwrap();
+    std::fs::write(repo_root.join("README.md"), "test repo").unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/pipelines/default.json"),
+        r#"{
+  "stages": [
+    { "name": "in progress", "transition": "manual" },
+    { "name": "review", "transition": "manual", "agent": "reviewer", "prompt": "Use result $PREV_RESULT" }
+  ]
+}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/agents/reviewer/AGENT.md"),
+        "---\nagent_provider: claude\n---\nReview $TASK_PROMPT",
+    )
+    .unwrap();
+    assert!(Command::new("git")
+        .arg("init")
+        .arg("-b")
+        .arg("main")
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["config", "user.email", "test@example.com"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["config", "user.name", "Test User"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["add", "README.md", ".kanna"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["commit", "-m", "init"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["branch", "task-old-branch"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+
+    let config = test_config("stage-run-prev-result");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Fix it",
+        Some("Fix it"),
+        "in progress",
+        "2026-07-02 00:00:00",
+    )
+    .unwrap();
+    db.update_test_pipeline_item_stage_context(
+        "task-1",
+        "task-old-branch",
+        "default",
+        Some("{\"source\":\"legacy\"}"),
+        "claude",
+    )
+    .unwrap();
+    db.insert_stage_run(crate::db::NewStageRun {
+        id: "run-1",
+        task_id: "task-1",
+        stage: "in progress",
+        agent: Some("implement"),
+        agent_provider: Some("claude"),
+        model: None,
+        status: "succeeded",
+        result: Some("{\"source\":\"stage_run\"}"),
+        feedback: Some("done"),
+        session_id: Some("task-1"),
+    })
+    .unwrap();
+    db.finish_stage_run(
+        "run-1",
+        "succeeded",
+        Some("{\"source\":\"stage_run\"}"),
+        Some("done"),
+    )
+    .unwrap();
+
+    let prepared = match prepare_advance_stage_for_api(&db, &config, "task-1").unwrap() {
+        PreparedStageTransition::Spawn(prepared) => prepared,
+        PreparedStageTransition::Continue(_) => panic!("expected new task transition"),
+    };
+    let created_source = db
+        .get_task_stage_source(&prepared.created_task.task_id)
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        created_source.prompt.as_deref(),
+        Some("Review Fix it\n\nUse result {\"source\":\"stage_run\"}")
+    );
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
 fn prepare_advance_stage_uses_current_source_worktree_branch_after_rename() {
     let repo_root = std::env::temp_dir().join(format!(
         "kanna-stage-advance-renamed-source-{}",

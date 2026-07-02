@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS pipeline_item (
   previous_stage TEXT,
   closed_at TEXT,
   pipeline TEXT,
+  pipeline_def TEXT,
   stage_result TEXT,
   active_post_action TEXT,
   tags TEXT,
@@ -89,6 +90,23 @@ CREATE TABLE IF NOT EXISTS task_blocker (
   blocker_item_id TEXT NOT NULL,
   PRIMARY KEY (blocked_item_id, blocker_item_id)
 );
+
+CREATE TABLE IF NOT EXISTS stage_run (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL,
+  stage TEXT NOT NULL,
+  agent TEXT,
+  agent_provider TEXT,
+  model TEXT,
+  status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'succeeded', 'failed', 'cancelled')),
+  result TEXT,
+  feedback TEXT,
+  session_id TEXT,
+  started_at TEXT NOT NULL DEFAULT (datetime('now')),
+  finished_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_stage_run_task_started ON stage_run(task_id, started_at);
 `;
 
 export async function createHarnessDatabase(repoRoot: string, dbPath: string): Promise<void> {

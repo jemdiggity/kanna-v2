@@ -10,6 +10,7 @@ pub(super) fn prepare_continue_stage(
     prompt: &str,
     source_branch: Option<&str>,
     agent_type: &str,
+    stage_agent: Option<&str>,
     agent_provider: Option<&str>,
 ) -> Result<PreparedStageContinue, String> {
     source_branch.ok_or_else(|| format!("task has no branch: {}", source_task_id))?;
@@ -18,6 +19,9 @@ pub(super) fn prepare_continue_stage(
         agent_type: agent_type.to_string(),
         previous_stage: previous_stage.to_string(),
         next_stage: next_stage.to_string(),
+        stage_agent: stage_agent.map(str::to_string),
+        agent_provider: agent_provider.map(str::to_string),
+        model: None,
         previous_stage_result,
         previous_active_post_action: None,
         active_post_action: None,
@@ -43,6 +47,13 @@ pub(super) fn prepare_post_action_stage(
         agent_type: agent_type.to_string(),
         previous_stage: current_stage.to_string(),
         next_stage: current_stage.to_string(),
+        stage_agent: post_action
+            .agent
+            .as_deref()
+            .or(Some(post_action.name.as_str()))
+            .map(str::to_string),
+        agent_provider: agent_provider.map(str::to_string),
+        model: None,
         previous_stage_result,
         previous_active_post_action: None,
         active_post_action: Some(post_action.name.clone()),

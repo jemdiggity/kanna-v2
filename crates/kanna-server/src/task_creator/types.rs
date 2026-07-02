@@ -5,6 +5,7 @@ pub(super) struct TaskCreationRequest {
     pub(super) task_prompt: String,
     pub(super) display_name: Option<String>,
     pub(super) pipeline_name: Option<String>,
+    pub(super) pipeline_def: Option<String>,
     pub(super) base_ref: Option<String>,
     pub(super) stored_base_ref: Option<String>,
     pub(super) stage_override: Option<String>,
@@ -35,6 +36,9 @@ pub(crate) struct PreparedTaskSpawn {
     pub(super) session_id: String,
     pub(super) cwd: String,
     pub(super) env: HashMap<String, String>,
+    pub(super) stage_agent: Option<String>,
+    pub(super) agent_provider: String,
+    pub(super) model: Option<String>,
     pub(super) session: PreparedSessionSpawn,
 }
 
@@ -69,6 +73,9 @@ pub(crate) struct PreparedStageContinue {
     pub(super) agent_type: String,
     pub(super) previous_stage: String,
     pub(super) next_stage: String,
+    pub(super) stage_agent: Option<String>,
+    pub(super) agent_provider: Option<String>,
+    pub(super) model: Option<String>,
     pub(super) previous_stage_result: Option<String>,
     pub(super) previous_active_post_action: Option<String>,
     pub(super) active_post_action: Option<String>,

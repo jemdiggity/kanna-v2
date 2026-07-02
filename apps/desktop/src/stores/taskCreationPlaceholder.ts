@@ -29,6 +29,7 @@ export function buildPendingTaskPlaceholder(
     issue_title: null,
     prompt: options.prompt,
     pipeline: options.pipelineName ?? "default",
+    pipeline_def: null,
     stage,
     stage_result: null,
     active_post_action: null,

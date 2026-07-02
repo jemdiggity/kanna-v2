@@ -16,12 +16,14 @@ use crate::config::Config;
 use crate::daemon_client::DaemonClient;
 use crate::db::{Db, NewPipelineItem, Repo};
 use commands::{build_agent_command, build_kanna_preamble, build_task_shell_command};
-use definitions::{read_agent_definition, read_pipeline_definition, read_repo_config};
+use definitions::{
+    read_agent_definition, read_pipeline_definition, read_repo_config,
+    read_task_pipeline_definition,
+};
 use environment::{
     apply_workspace_path_env, build_spawn_env, claim_task_ports, resolve_headless_agent_executable,
     write_kanna_mcp_config,
 };
-use lifecycle::spawn_prepared_task;
 use prompt::{build_stage_prompt, PromptContext};
 use provider::{resolve_agent_provider, resolve_agent_type, AgentSessionType};
 use types::{CreatedTask, PreparedSessionSpawn, TaskCreationRequest};
@@ -30,7 +32,7 @@ use worktree::{create_worktree, fetch_start_point, generate_task_id};
 
 pub(crate) use lifecycle::{
     continue_prepared_stage_for_api, prepared_task_id, rollback_prepared_task_for_api,
-    spawn_prepared_task_for_api, spawn_prepared_task_for_api_with_rollback,
+    spawn_prepared_task_for_api_recording_stage_run, spawn_prepared_task_for_api_with_rollback,
 };
 pub(crate) use stages::{
     prepare_advance_stage_for_api, prepare_auto_stage_completion_for_api,
@@ -44,7 +46,7 @@ pub async fn run_merge_agent(
     source_task_id: &str,
 ) -> Result<String, String> {
     let prepared = prepare_merge_agent_for_api(db, config, source_task_id)?;
-    spawn_prepared_task(daemon, prepared)
+    spawn_prepared_task_for_api_recording_stage_run(&config.db_path, daemon, prepared)
         .await
         .map(|created| created.task_id)
 }
@@ -72,6 +74,7 @@ pub(crate) fn prepare_merge_agent_for_api(
             task_prompt: merge_agent.prompt,
             display_name: None,
             pipeline_name: None,
+            pipeline_def: None,
             base_ref: None,
             stored_base_ref: None,
             stage_override: None,
@@ -131,6 +134,7 @@ pub(crate) fn prepare_task_for_api(
             task_prompt: request.prompt.clone(),
             display_name: request.display_name,
             pipeline_name: request.pipeline_name,
+            pipeline_def: None,
             base_ref: request.base_ref,
             stored_base_ref: None,
             stage_override: None,
@@ -169,7 +173,13 @@ fn prepare_task_spawn(
         .pipeline_name
         .or(repo_config.pipeline.clone())
         .unwrap_or_else(|| "default".to_string());
-    let pipeline = read_pipeline_definition(&repo.path, &pipeline_name)?;
+    let pipeline = if request.pipeline_def.is_some() {
+        read_task_pipeline_definition(&repo.path, &pipeline_name, request.pipeline_def.as_deref())?
+    } else {
+        read_pipeline_definition(&repo.path, &pipeline_name)?
+    };
+    let pipeline_def_json =
+        serde_json::to_string(&pipeline).map_err(|e| format!("serialize error: {}", e))?;
     let stage = if let Some(stage_name) = request.stage_override.as_deref() {
         pipeline
             .stages
@@ -234,6 +244,9 @@ fn prepare_task_spawn(
         request.allowed_tools
     };
     let agent_type = resolve_agent_type(request.agent_type.as_deref(), provider)?;
+    let stage_run_agent = stage.agent.clone();
+    let stage_run_provider = provider.as_str().to_string();
+    let stage_run_model = model.clone();
 
     let task_id = generate_task_id()?;
     let branch = format!("task-{}", task_id);
@@ -253,6 +266,7 @@ fn prepare_task_spawn(
         prompt: &original_prompt,
         display_name: display_name.as_deref(),
         pipeline: &pipeline_name,
+        pipeline_def: Some(&pipeline_def_json),
         stage: &stage_name,
         tags_json: &tags_json,
         branch: &branch,
@@ -383,6 +397,9 @@ fn prepare_task_spawn(
         session_id: task_id,
         cwd: worktree_path,
         env: spawn_env,
+        stage_agent: stage_run_agent,
+        agent_provider: stage_run_provider,
+        model: stage_run_model,
         session,
     })
 }

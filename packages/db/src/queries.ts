@@ -8,6 +8,8 @@ import type {
   TrustedPeer,
   TaskTransfer,
   TaskTransferProvenance,
+  StageRun,
+  StageRunStatus,
   Worktree,
 } from "./schema.js";
 
@@ -162,7 +164,7 @@ export async function upsertTerminalSession(
 
 export async function insertPipelineItem(
   db: DbHandle,
-  item: Omit<PipelineItem, "created_at" | "updated_at" | "activity_changed_at" | "unread_at" | "pinned" | "pin_order" | "display_name" | "closed_at" | "pipeline" | "stage" | "stage_result" | "active_post_action" | "tags" | "base_ref" | "agent_session_id" | "previous_stage" | "teardown_started_at" | "last_output_preview" | "agent_spawn_options" | "parent_task_id"> & { pipeline?: string; stage?: string; tags?: string[]; activity?: PipelineItem["activity"]; display_name?: string | null; base_ref?: string | null; agent_spawn_options?: string | null; parent_task_id?: string | null }
+  item: Omit<PipelineItem, "created_at" | "updated_at" | "activity_changed_at" | "unread_at" | "pinned" | "pin_order" | "display_name" | "closed_at" | "pipeline" | "pipeline_def" | "stage" | "stage_result" | "active_post_action" | "tags" | "base_ref" | "agent_session_id" | "previous_stage" | "teardown_started_at" | "last_output_preview" | "agent_spawn_options" | "parent_task_id"> & { pipeline?: string; pipeline_def?: string | null; stage?: string; tags?: string[]; activity?: PipelineItem["activity"]; display_name?: string | null; base_ref?: string | null; agent_spawn_options?: string | null; parent_task_id?: string | null }
 ): Promise<void> {
   if (!item.agent_provider) {
     throw new Error("No agent provider configured for pipeline item insertion.");
@@ -170,8 +172,8 @@ export async function insertPipelineItem(
   const tagsJson = JSON.stringify(item.tags ?? []);
   await db.execute(
     `INSERT INTO pipeline_item
-       (id, repo_id, issue_number, issue_title, prompt, pipeline, stage, tags, pr_number, pr_url, branch, agent_type, agent_provider, port_offset, port_env, agent_spawn_options, activity, activity_changed_at, display_name, base_ref, parent_task_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?)`,
+       (id, repo_id, issue_number, issue_title, prompt, pipeline, pipeline_def, stage, tags, pr_number, pr_url, branch, agent_type, agent_provider, port_offset, port_env, agent_spawn_options, activity, activity_changed_at, display_name, base_ref, parent_task_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?)`,
     [
       item.id,
       item.repo_id,
@@ -179,6 +181,7 @@ export async function insertPipelineItem(
       item.issue_title,
       item.prompt,
       item.pipeline ?? "default",
+      item.pipeline_def ?? null,
       item.stage ?? "in progress",
       tagsJson,
       item.pr_number,
@@ -194,6 +197,56 @@ export async function insertPipelineItem(
       item.base_ref ?? null,
       item.parent_task_id ?? null,
     ]
+  );
+}
+
+export async function insertStageRun(
+  db: DbHandle,
+  run: Omit<StageRun, "started_at" | "finished_at">,
+): Promise<void> {
+  await db.execute(
+    `INSERT INTO stage_run
+       (id, task_id, stage, agent, agent_provider, model, status, result, feedback, session_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      run.id,
+      run.task_id,
+      run.stage,
+      run.agent,
+      run.agent_provider,
+      run.model,
+      run.status,
+      run.result,
+      run.feedback,
+      run.session_id,
+    ],
+  );
+}
+
+export async function listStageRunsForTask(
+  db: DbHandle,
+  taskId: string,
+): Promise<StageRun[]> {
+  return db.select<StageRun>(
+    "SELECT * FROM stage_run WHERE task_id = ? ORDER BY started_at ASC",
+    [taskId],
+  );
+}
+
+export async function finishStageRun(
+  db: DbHandle,
+  id: string,
+  update: {
+    status: Extract<StageRunStatus, "succeeded" | "failed" | "cancelled">;
+    result?: string | null;
+    feedback?: string | null;
+  },
+): Promise<void> {
+  await db.execute(
+    `UPDATE stage_run
+     SET status = ?, result = ?, feedback = ?, finished_at = datetime('now')
+     WHERE id = ?`,
+    [update.status, update.result ?? null, update.feedback ?? null, id],
   );
 }
 

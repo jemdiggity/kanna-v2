@@ -187,6 +187,7 @@ function createTransferDb(initial: {
           issueTitle,
           prompt,
           pipeline,
+          pipelineDef,
           stage,
           tagsJson,
           prNumber,
@@ -200,6 +201,7 @@ function createTransferDb(initial: {
           activity,
           displayName,
           baseRef,
+          parentTaskId,
         ] = params as unknown[];
         tables.pipeline_item.push({
           id: id as string,
@@ -208,6 +210,7 @@ function createTransferDb(initial: {
           issue_title: issueTitle as string | null,
           prompt: prompt as string | null,
           pipeline: pipeline as string,
+          pipeline_def: pipelineDef as string | null,
           stage: stage as string,
           stage_result: null,
           tags: tagsJson as string,
@@ -230,6 +233,7 @@ function createTransferDb(initial: {
           agent_session_id: null,
           previous_stage: null,
           teardown_started_at: null,
+          parent_task_id: parentTaskId as string | null,
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
         });

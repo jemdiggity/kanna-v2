@@ -280,6 +280,7 @@ export function mapDesktopCloudTasks(
       repo_id: repoId,
       prompt: snapshot.promptSnippet ?? snapshot.title,
       pipeline: "cloud",
+      pipeline_def: null,
       stage: snapshot.stage,
       tags: JSON.stringify([snapshot.stage]),
       pr_number: snapshot.prNumber,

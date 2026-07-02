@@ -18,6 +18,9 @@ async fn spawn_prepared_task_sends_spawn_agent_for_agent_sessions() {
         session_id: "task-1".to_string(),
         cwd: "/tmp/repo/.kanna-worktrees/task-1".to_string(),
         env: HashMap::new(),
+        stage_agent: Some("implement".to_string()),
+        agent_provider: "claude".to_string(),
+        model: Some("sonnet".to_string()),
         session: PreparedSessionSpawn::Agent {
             agent_provider: DaemonAgentProvider::Claude,
             prompt: "Do work".to_string(),
@@ -48,6 +51,67 @@ async fn spawn_prepared_task_sends_spawn_agent_for_agent_sessions() {
         }
         other => panic!("expected SpawnAgent, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn spawn_prepared_task_records_running_stage_run_after_session_created() {
+    let config = test_config("spawn-records-stage-run");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Agent task",
+        Some("Agent task"),
+        "review",
+        "2026-07-02 00:00:00",
+    )
+    .unwrap();
+    let daemon = spawn_fake_daemon_session_created_once(config.daemon_dir.clone()).await;
+    let mut client = DaemonClient::connect(&config.daemon_dir).await.unwrap();
+    let prepared = PreparedTaskSpawn {
+        created_task: CreatedTask {
+            task_id: "task-1".to_string(),
+            repo_id: "repo-1".to_string(),
+            title: "Agent task".to_string(),
+            stage: "review".to_string(),
+            agent_type: "agent".to_string(),
+            worktree_path: "/tmp/worktree".to_string(),
+        },
+        branch: "task-1".to_string(),
+        session_id: "task-1".to_string(),
+        cwd: "/tmp/repo/.kanna-worktrees/task-1".to_string(),
+        env: HashMap::new(),
+        stage_agent: Some("reviewer".to_string()),
+        agent_provider: "claude".to_string(),
+        model: Some("sonnet".to_string()),
+        session: PreparedSessionSpawn::Agent {
+            agent_provider: DaemonAgentProvider::Claude,
+            prompt: "Do work".to_string(),
+            model: Some("sonnet".to_string()),
+            permission_mode: Some("dontAsk".to_string()),
+            allowed_tools: vec!["Bash".to_string()],
+            system_prompt: "Kanna context".to_string(),
+            mcp_config_path: None,
+            executable: None,
+        },
+    };
+
+    let created =
+        spawn_prepared_task_for_api_recording_stage_run(&config.db_path, &mut client, prepared)
+            .await
+            .unwrap();
+    let _ = daemon.await.unwrap();
+    let runs = db.list_stage_runs_for_task("task-1").unwrap();
+
+    assert_eq!(created.task_id, "task-1");
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].stage, "review");
+    assert_eq!(runs[0].agent.as_deref(), Some("reviewer"));
+    assert_eq!(runs[0].agent_provider.as_deref(), Some("claude"));
+    assert_eq!(runs[0].model.as_deref(), Some("sonnet"));
+    assert_eq!(runs[0].status, "running");
+    assert_eq!(runs[0].session_id.as_deref(), Some("task-1"));
 }
 
 #[tokio::test]

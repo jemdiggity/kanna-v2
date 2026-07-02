@@ -42,6 +42,7 @@ impl Db {
                 issue_number INTEGER,
                 issue_title TEXT,
                 prompt TEXT,
+                pipeline_def TEXT,
                 stage TEXT,
                 pr_number INTEGER,
                 pr_url TEXT,
@@ -84,6 +85,22 @@ impl Db {
                 pipeline_item_id TEXT NOT NULL,
                 env_name TEXT NOT NULL
             );
+
+            CREATE TABLE stage_run (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                stage TEXT NOT NULL,
+                agent TEXT,
+                agent_provider TEXT,
+                model TEXT,
+                status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'succeeded', 'failed', 'cancelled')),
+                result TEXT,
+                feedback TEXT,
+                session_id TEXT,
+                started_at TEXT NOT NULL DEFAULT (datetime('now')),
+                finished_at TEXT
+            );
+            CREATE INDEX idx_stage_run_task_started ON stage_run(task_id, started_at);
 
             CREATE TABLE settings (
                 key TEXT PRIMARY KEY,
@@ -291,6 +308,19 @@ impl Db {
         self.conn.execute(
             "UPDATE pipeline_item SET base_ref = ? WHERE id = ?",
             (base_ref, id),
+        )?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn update_test_pipeline_item_pipeline_def(
+        &self,
+        id: &str,
+        pipeline_def: &str,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE pipeline_item SET pipeline_def = ? WHERE id = ?",
+            (pipeline_def, id),
         )?;
         Ok(())
     }
