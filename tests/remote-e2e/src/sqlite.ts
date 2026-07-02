@@ -85,6 +85,18 @@ CREATE TABLE IF NOT EXISTS terminal_session (
   daemon_session_id TEXT
 );
 
+CREATE TABLE IF NOT EXISTS stage_run (
+  id TEXT PRIMARY KEY,
+  pipeline_item_id TEXT NOT NULL,
+  stage TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'running',
+  daemon_session_id TEXT,
+  feedback TEXT,
+  result_json TEXT,
+  started_at TEXT NOT NULL DEFAULT (datetime('now')),
+  finished_at TEXT
+);
+
 CREATE TABLE IF NOT EXISTS task_blocker (
   blocked_item_id TEXT NOT NULL,
   blocker_item_id TEXT NOT NULL,

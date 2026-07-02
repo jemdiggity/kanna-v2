@@ -169,6 +169,14 @@ export async function runMigrations(db: DbHandle): Promise<void> {
     }
   };
 
+  const dropColumn = async (table: string, col: string) => {
+    try {
+      await db.execute(`ALTER TABLE ${table} DROP COLUMN ${col}`);
+    } catch (error) {
+      console.debug(`[db] column ${table}.${col} already absent or cannot be dropped:`, error);
+    }
+  };
+
   await runMigration("001_default_settings", async () => {
     await db.execute(`INSERT OR IGNORE INTO settings (key, value) VALUES ('suspendAfterMinutes', '5')`);
     await db.execute(`INSERT OR IGNORE INTO settings (key, value) VALUES ('killAfterMinutes', '30')`);
@@ -200,8 +208,8 @@ export async function runMigrations(db: DbHandle): Promise<void> {
   await runMigration("003_legacy_stage_to_tags_backfill", async () => {
     try {
       await db.execute(`UPDATE pipeline_item SET stage = 'in_progress' WHERE stage = 'queued'`);
-      await db.execute(`UPDATE pipeline_item SET stage = 'done' WHERE stage IN ('needs_review', 'merged', 'closed')`);
-      await db.execute(`UPDATE pipeline_item SET tags = '["done"]' WHERE stage = 'done' AND tags = '[]'`);
+      await db.execute(`UPDATE pipeline_item SET closed_at = COALESCE(closed_at, updated_at, datetime('now')) WHERE stage IN ('needs_review', 'merged', 'closed')`);
+      await db.execute(`UPDATE pipeline_item SET closed_at = COALESCE(closed_at, updated_at, datetime('now')) WHERE stage = 'done'`);
       await db.execute(`UPDATE pipeline_item SET tags = '["pr"]' WHERE stage = 'pr' AND tags = '[]'`);
       await db.execute(`UPDATE pipeline_item SET tags = '["merge"]' WHERE stage = 'merge' AND tags = '[]'`);
       await db.execute(`UPDATE pipeline_item SET stage = 'in_progress' WHERE stage = 'merge' AND closed_at IS NULL`);
@@ -275,7 +283,7 @@ export async function runMigrations(db: DbHandle): Promise<void> {
       UNIQUE(pipeline_item_id, env_name)
     )`);
     const activeItems = await db.select<{ id: string; port_env: string | null }>(
-      "SELECT id, port_env FROM pipeline_item WHERE stage != 'done' AND port_env IS NOT NULL",
+      "SELECT id, port_env FROM pipeline_item WHERE closed_at IS NULL AND port_env IS NOT NULL",
     );
     for (const item of activeItems) {
       try {
@@ -368,7 +376,7 @@ export async function runMigrations(db: DbHandle): Promise<void> {
       UPDATE pipeline_item
       SET
         teardown_started_at = COALESCE(teardown_started_at, updated_at, datetime('now')),
-        stage = COALESCE(previous_stage, 'in progress'),
+        stage = 'in progress',
         updated_at = datetime('now')
       WHERE stage IN ('teardown', 'torndown')
         AND closed_at IS NULL
@@ -476,5 +484,32 @@ export async function runMigrations(db: DbHandle): Promise<void> {
           SELECT 1 FROM stage_run WHERE stage_run.task_id = pipeline_item.id
         )
     `);
+  });
+
+  await runMigration("024_pipeline_item_stage_graph_cleanup", async () => {
+    await db.execute(`
+      UPDATE pipeline_item
+      SET
+        closed_at = COALESCE(closed_at, updated_at, datetime('now')),
+        stage = COALESCE(NULLIF(previous_stage, ''), 'in progress'),
+        updated_at = datetime('now')
+      WHERE stage = 'done'
+        AND closed_at IS NULL
+    `).catch((error) => {
+      console.debug("[db] done-stage normalization without previous_stage:", error);
+      return db.execute(`
+        UPDATE pipeline_item
+        SET
+          closed_at = COALESCE(closed_at, updated_at, datetime('now')),
+          stage = 'in progress',
+          updated_at = datetime('now')
+        WHERE stage = 'done'
+          AND closed_at IS NULL
+      `);
+    });
+    await dropColumn("pipeline_item", "tags");
+    await dropColumn("pipeline_item", "stage_result");
+    await dropColumn("pipeline_item", "active_post_action");
+    await dropColumn("pipeline_item", "previous_stage");
   });
 }

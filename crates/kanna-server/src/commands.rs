@@ -184,26 +184,14 @@ pub async fn handle_invoke(
                 task_creator::prepare_advance_stage_for_api(&db, config, task_id)?
             };
             match transition {
-                task_creator::PreparedStageTransition::Spawn(prepared) => {
-                    let created = task_creator::spawn_prepared_task_for_api_recording_stage_run(
+                task_creator::PreparedStageTransition::Run(prepared) => {
+                    let advanced = task_creator::spawn_prepared_stage_run_for_api(
                         &config.db_path,
                         daemon,
                         *prepared,
                     )
                     .await?;
-                    let db = Db::open(&config.db_path).map_err(|e| format!("db error: {}", e))?;
-                    db.close_pipeline_item(task_id)
-                        .map_err(|e| format!("db error: {}", e))?;
-                    Ok(serde_json::json!({ "task_id": created.task_id }))
-                }
-                task_creator::PreparedStageTransition::Continue(prepared) => {
-                    let continued = task_creator::continue_prepared_stage_for_api(
-                        &config.db_path,
-                        daemon,
-                        *prepared,
-                    )
-                    .await?;
-                    serde_json::to_value(continued).map_err(|e| format!("serialize error: {}", e))
+                    serde_json::to_value(advanced).map_err(|e| format!("serialize error: {}", e))
                 }
                 task_creator::PreparedStageTransition::Close { task_id } => {
                     for session_id in [
@@ -386,7 +374,7 @@ mod tests {
         daemon_server.await.unwrap();
 
         let item = db.get_task_stage_source("710917fb").unwrap().unwrap();
-        assert_eq!(item.stage.as_deref(), Some("done"));
+        assert_eq!(item.stage.as_deref(), Some("in progress"));
         assert!(item.closed_at.is_some());
 
         // Full app E2E for the original untitled-task close regression would need a

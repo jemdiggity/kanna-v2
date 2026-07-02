@@ -71,8 +71,8 @@ pub struct NewRepo<'a> {
 
 pub struct TaskStageSource {
     pub repo_id: String,
-    pub issue_title: Option<String>,
     pub prompt: Option<String>,
+    #[allow(dead_code)]
     pub display_name: Option<String>,
     pub stage: Option<String>,
     pub stage_result: Option<String>,

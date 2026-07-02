@@ -24,6 +24,8 @@ pub(super) struct RepoWorkspacePathConfig {
 
 #[derive(Clone, Deserialize, Serialize)]
 pub(super) struct PipelineDefinition {
+    #[allow(dead_code)]
+    pub(super) name: Option<String>,
     pub(super) stages: Vec<PipelineStage>,
     pub(super) environments: Option<HashMap<String, PipelineEnvironment>>,
 }
@@ -34,32 +36,92 @@ pub(super) struct PipelineStage {
     pub(super) agent: Option<String>,
     pub(super) prompt: Option<String>,
     pub(super) agent_provider: Option<String>,
-    pub(super) transition: Option<String>,
-    pub(super) mode: Option<PipelineStageMode>,
-    pub(super) post_action: Option<PipelinePostAction>,
     pub(super) environment: Option<String>,
-    pub(super) follow_task: Option<bool>,
+    pub(super) policy: PipelineStagePolicy,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
+pub(super) struct PipelineStagePolicy {
+    pub(super) transition: PipelineStageTransition,
+    pub(super) execution: Option<PipelineStageExecution>,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum PipelineStageExecution {
+    Continue,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum PipelineStageTransition {
+    Manual,
+    Auto,
+}
+
+impl PipelineStageTransition {
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::Auto => "auto",
+        }
+    }
+}
+
+#[derive(Clone, Deserialize, Serialize)]
 pub(super) struct PipelineEnvironment {
     pub(super) setup: Option<Vec<String>>,
 }
 
-#[derive(Clone, Deserialize, Serialize)]
-pub(super) struct PipelinePostAction {
-    pub(super) name: String,
-    pub(super) agent: Option<String>,
-    pub(super) prompt: Option<String>,
-    pub(super) agent_provider: Option<String>,
-    pub(super) transition: Option<String>,
+#[derive(Deserialize)]
+struct RawPipelineDefinition {
+    name: Option<String>,
+    stages: Vec<RawPipelineStage>,
+    environments: Option<HashMap<String, PipelineEnvironment>>,
 }
 
-#[derive(Clone, Copy, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Deserialize)]
+struct RawPipelineStage {
+    name: String,
+    agent: Option<String>,
+    prompt: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_provider_list")]
+    agent_provider: Option<String>,
+    environment: Option<String>,
+    policy: Option<RawPipelineStagePolicy>,
+    transition: Option<PipelineStageTransition>,
+    mode: Option<RawPipelineStageExecution>,
+    post_action: Option<RawPipelinePostAction>,
+}
+
+#[derive(Deserialize)]
+struct RawPipelineStagePolicy {
+    transition: PipelineStageTransition,
+    execution: Option<PipelineStageExecution>,
+}
+
+#[derive(Deserialize)]
+struct RawPipelinePostAction {
+    name: String,
+    agent: Option<String>,
+    prompt: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_provider_list")]
+    agent_provider: Option<String>,
+    transition: PipelineStageTransition,
+}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(super) enum PipelineStageMode {
+enum RawPipelineStageExecution {
     NewTask,
     Continue,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawAgentProviderList {
+    Single(String),
+    Multiple(Vec<String>),
 }
 
 #[derive(Default, Deserialize)]
@@ -98,7 +160,9 @@ pub(super) fn read_pipeline_definition(
         Ok(content) => content,
         Err(_) => read_builtin_resource(&format!(".kanna/pipelines/{pipeline_name}.json"))?,
     };
-    serde_json::from_str(&content).map_err(|e| format!("invalid pipeline definition: {}", e))
+    let raw: RawPipelineDefinition = serde_json::from_str(&content)
+        .map_err(|e| format!("invalid pipeline definition: {}", e))?;
+    normalize_pipeline_definition(raw)
 }
 
 pub(super) fn read_task_pipeline_definition(
@@ -107,8 +171,9 @@ pub(super) fn read_task_pipeline_definition(
     pipeline_def: Option<&str>,
 ) -> Result<PipelineDefinition, String> {
     if let Some(pipeline_def) = pipeline_def.filter(|value| !value.trim().is_empty()) {
-        return serde_json::from_str(pipeline_def)
-            .map_err(|e| format!("invalid stored pipeline definition: {}", e));
+        let raw: RawPipelineDefinition = serde_json::from_str(pipeline_def)
+            .map_err(|e| format!("invalid stored pipeline definition: {}", e))?;
+        return normalize_pipeline_definition(raw);
     }
     read_pipeline_definition(repo_path, pipeline_name)
 }
@@ -232,4 +297,79 @@ fn parse_agent_providers(value: Option<YamlValue>) -> Vec<String> {
             .collect(),
         _ => Vec::new(),
     }
+}
+
+fn normalize_pipeline_definition(raw: RawPipelineDefinition) -> Result<PipelineDefinition, String> {
+    let mut stages = Vec::new();
+    for stage in raw.stages {
+        let RawPipelineStage {
+            name,
+            agent,
+            prompt,
+            agent_provider,
+            environment,
+            policy,
+            transition,
+            mode,
+            post_action,
+        } = stage;
+
+        let policy = match policy {
+            Some(policy) => PipelineStagePolicy {
+                transition: policy.transition,
+                execution: policy.execution,
+            },
+            None => PipelineStagePolicy {
+                transition: transition
+                    .ok_or_else(|| format!("stage {name:?} is missing policy.transition"))?,
+                execution: match mode {
+                    Some(RawPipelineStageExecution::Continue) => {
+                        Some(PipelineStageExecution::Continue)
+                    }
+                    Some(RawPipelineStageExecution::NewTask) | None => None,
+                },
+            },
+        };
+
+        stages.push(PipelineStage {
+            name,
+            agent,
+            prompt,
+            agent_provider,
+            environment: environment.clone(),
+            policy,
+        });
+
+        if let Some(post_action) = post_action {
+            stages.push(PipelineStage {
+                name: post_action.name,
+                agent: post_action.agent,
+                prompt: post_action.prompt,
+                agent_provider: post_action.agent_provider,
+                environment,
+                policy: PipelineStagePolicy {
+                    transition: post_action.transition,
+                    execution: Some(PipelineStageExecution::Continue),
+                },
+            });
+        }
+    }
+
+    Ok(PipelineDefinition {
+        name: raw.name,
+        stages,
+        environments: raw.environments,
+    })
+}
+
+fn deserialize_optional_provider_list<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<RawAgentProviderList>::deserialize(deserializer)?;
+    Ok(match value {
+        Some(RawAgentProviderList::Single(provider)) => Some(provider),
+        Some(RawAgentProviderList::Multiple(providers)) => Some(providers.join(",")),
+        None => None,
+    })
 }

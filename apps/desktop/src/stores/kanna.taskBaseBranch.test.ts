@@ -1,7 +1,7 @@
 import { createPinia, setActivePinia } from "pinia";
 import { nextTick } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { DbHandle, PipelineItem, Repo, TaskPort } from "@kanna/db";
+import type { DbHandle, PipelineItem, Repo, TaskBlocker, TaskPort } from "@kanna/db";
 import type { PipelineDefinition } from "../../../../packages/core/src/pipeline/pipeline-types";
 import type { CustomTaskConfig, RepoConfig } from "@kanna/core";
 import { buildStagePrompt } from "../../../../packages/core/src/pipeline/prompt-builder";
@@ -81,10 +81,27 @@ const mockState = vi.hoisted(() => {
   let repoConfig: RepoConfig = {};
   let repoConfigResolver: ((path: string) => RepoConfig | undefined) | null = null;
   let taskPorts: TaskPort[] = [];
+  let taskBlockers: TaskBlocker[] = [];
   let blockCleanupGate: Promise<void> | null = null;
   let failingCommands: Record<string, string> = {};
   const listBlockersForItemMock = vi.fn(async () => [] as PipelineItem[]);
   const listBlockedByItemMock = vi.fn(async () => [] as PipelineItem[]);
+  const insertTaskBlockerMock = vi.fn(async (_db: DbHandle, blockedItemId: string, blockerItemId: string) => {
+    taskBlockers = [
+      ...taskBlockers.filter(
+        (blocker) => blocker.blocked_item_id !== blockedItemId || blocker.blocker_item_id !== blockerItemId,
+      ),
+      { blocked_item_id: blockedItemId, blocker_item_id: blockerItemId },
+    ];
+  });
+  const removeTaskBlockerMock = vi.fn(async (_db: DbHandle, blockedItemId: string, blockerItemId: string) => {
+    taskBlockers = taskBlockers.filter(
+      (blocker) => blocker.blocked_item_id !== blockedItemId || blocker.blocker_item_id !== blockerItemId,
+    );
+  });
+  const removeAllBlockersForItemMock = vi.fn(async (_db: DbHandle, itemId: string) => {
+    taskBlockers = taskBlockers.filter((blocker) => blocker.blocked_item_id !== itemId);
+  });
   const setSettingMock = vi.fn(async () => {});
   const updatePipelineItemTagsMock = vi.fn(async (_db: DbHandle, itemId: string, tags: string[]) => {
     const item = pipelineItems.find((candidate) => candidate.id === itemId);
@@ -236,7 +253,6 @@ const mockState = vi.hoisted(() => {
   const closePipelineItemMock = vi.fn(async (_db: DbHandle, itemId: string) => {
     const item = pipelineItems.find((candidate) => candidate.id === itemId);
     if (item) {
-      item.stage = "done";
       item.closed_at = now;
       item.updated_at = now;
     }
@@ -256,6 +272,7 @@ const mockState = vi.hoisted(() => {
     repoConfig = {};
     repoConfigResolver = null;
     taskPorts = [];
+    taskBlockers = [];
     blockCleanupGate = null;
     failingCommands = {};
     invokeMock.mockClear();
@@ -269,6 +286,9 @@ const mockState = vi.hoisted(() => {
     closePipelineItemMock.mockClear();
     listBlockersForItemMock.mockClear();
     listBlockedByItemMock.mockClear();
+    insertTaskBlockerMock.mockClear();
+    removeTaskBlockerMock.mockClear();
+    removeAllBlockersForItemMock.mockClear();
     setSettingMock.mockClear();
     updatePipelineItemTagsMock.mockClear();
     insertWorktreeMock.mockClear();
@@ -344,6 +364,12 @@ const mockState = vi.hoisted(() => {
     set taskPorts(value: TaskPort[]) {
       taskPorts = value;
     },
+    get taskBlockers() {
+      return taskBlockers;
+    },
+    set taskBlockers(value: TaskBlocker[]) {
+      taskBlockers = value;
+    },
     invokeMock,
     insertPipelineItemMock,
     updatePipelineItemStageMock,
@@ -358,6 +384,9 @@ const mockState = vi.hoisted(() => {
     defer,
     listBlockersForItemMock,
     listBlockedByItemMock,
+    insertTaskBlockerMock,
+    removeTaskBlockerMock,
+    removeAllBlockersForItemMock,
     setSettingMock,
     updatePipelineItemTagsMock,
     insertWorktreeMock,
@@ -533,7 +562,7 @@ vi.mock("./kannaCliEnv", async (importOriginal) => {
 vi.mock("../i18n", () => ({
   default: {
     global: {
-      t: (key: string) => key,
+      t: (key: string) => key === "mainPanel.taskBlocked" ? "Task Blocked" : key,
     },
   },
 }));
@@ -547,6 +576,7 @@ vi.mock("@kanna/db", () => ({
   listPipelineItems: vi.fn(async (_db: DbHandle, repoId: string) =>
     mockState.pipelineItems.filter((item) => item.repo_id === repoId)
   ),
+  listTaskBlockers: vi.fn(async () => mockState.taskBlockers),
   insertPipelineItem: mockState.insertPipelineItemMock,
   insertWorktree: mockState.insertWorktreeMock,
   upsertTerminalSession: mockState.upsertTerminalSessionMock,
@@ -574,9 +604,9 @@ vi.mock("@kanna/db", () => ({
   updateRepoRemoteMetadata: vi.fn(async () => {}),
   getSetting: vi.fn(async () => null),
   setSetting: mockState.setSettingMock,
-  insertTaskBlocker: vi.fn(async () => {}),
-  removeTaskBlocker: vi.fn(async () => {}),
-  removeAllBlockersForItem: vi.fn(async () => {}),
+  insertTaskBlocker: mockState.insertTaskBlockerMock,
+  removeTaskBlocker: mockState.removeTaskBlockerMock,
+  removeAllBlockersForItem: mockState.removeAllBlockersForItemMock,
   listBlockersForItem: mockState.listBlockersForItemMock,
   listBlockedByItem: mockState.listBlockedByItemMock,
   getUnblockedItems: vi.fn(async () => []),
@@ -1638,7 +1668,7 @@ describe("kanna store task base branch integration", () => {
     expect(mockState.pipelineItems[0]?.closed_at).toBe("2026-06-03 00:02:25");
   });
 
-  it("selects the task returned by the server action when followTask is true", async () => {
+  it("keeps selection on the same task when the server advances it in place", async () => {
     mockState.pipelineItems = [
       mockState.makeItem({
         id: "item-source",
@@ -1651,18 +1681,12 @@ describe("kanna store task base branch integration", () => {
       json: async () => {
         mockState.pipelineItems = [
           mockState.makeItem({
-            id: "item-created",
-            branch: "task-created",
-            stage: "review",
-          }),
-          mockState.makeItem({
             id: "item-source",
             branch: "task-source",
-            stage: "done",
-            closed_at: "2026-04-14T00:03:00.000Z",
+            stage: "review",
           }),
         ];
-        return { taskId: "item-created", followTask: true };
+        return { taskId: "item-source" };
       },
       text: async () => "",
     });
@@ -1673,15 +1697,16 @@ describe("kanna store task base branch integration", () => {
 
     await store.advanceStage("item-source");
 
-    expect(store.selectedItemId).toBe("item-created");
+    expect(store.selectedItemId).toBe("item-source");
+    expect(store.items.map((item) => item.id)).toEqual(["item-source"]);
   });
 
-  it("keeps selection on the next visible item when the server action returns followTask false", async () => {
+  it("moves selection to the next visible item when the advance closes the task", async () => {
     mockState.pipelineItems = [
       mockState.makeItem({
         id: "item-source",
         branch: "task-source",
-        stage: "in progress",
+        stage: "pr",
         created_at: "2026-04-14T00:02:00.000Z",
         updated_at: "2026-04-14T00:02:00.000Z",
       }),
@@ -1698,14 +1723,9 @@ describe("kanna store task base branch integration", () => {
       json: async () => {
         mockState.pipelineItems = [
           mockState.makeItem({
-            id: "item-created",
-            branch: "task-created",
-            stage: "pr",
-          }),
-          mockState.makeItem({
             id: "item-source",
             branch: "task-source",
-            stage: "done",
+            stage: "pr",
             closed_at: "2026-04-14T00:03:00.000Z",
           }),
           mockState.makeItem({
@@ -1716,7 +1736,7 @@ describe("kanna store task base branch integration", () => {
             updated_at: "2026-04-14T00:01:00.000Z",
           }),
         ];
-        return { taskId: "item-created", followTask: false };
+        return { taskId: "item-source", followTask: false };
       },
       text: async () => "",
     });
@@ -1749,7 +1769,7 @@ describe("kanna store task base branch integration", () => {
 
     await store.advanceStage("item-blocked");
 
-    expect(toastWarningMock).toHaveBeenCalledWith("toasts.taskBlocked");
+    expect(toastWarningMock).toHaveBeenCalledWith("Task Blocked");
     expect(toastErrorMock).not.toHaveBeenCalled();
   });
 
@@ -1837,7 +1857,10 @@ describe("kanna store task base branch integration", () => {
     const active = mockState.pipelineItems.find((item) => item.id === "item-active");
     expect(active?.branch).toBe("task-item-active");
     expect(active?.agent_session_id).toBe("claude-item-active");
-    expect(JSON.parse(active?.tags ?? "[]")).toContain("blocked");
+    expect(mockState.taskBlockers).toContainEqual({
+      blocked_item_id: "item-active",
+      blocker_item_id: "item-blocker",
+    });
     expect(store.selectedItemId).toBe("item-active");
     expect(store.currentItem?.id).toBe("item-active");
     expect(mockState.invokeMock).not.toHaveBeenCalledWith("kill_session", expect.anything());
@@ -1875,7 +1898,12 @@ describe("kanna store task base branch integration", () => {
     await flushStore();
 
     const blocked = mockState.pipelineItems.find((item) => item.id === "item-blocked");
-    expect(JSON.parse(blocked?.tags ?? "[]")).not.toContain("blocked");
+    expect(blocked?.branch).toBe("task-item-blocked");
+    expect(mockState.removeTaskBlockerMock).toHaveBeenCalledWith(
+      expect.anything(),
+      "item-blocked",
+      "item-blocker",
+    );
     expect(mockState.invokeMock).toHaveBeenCalledWith(
       "send_input",
       expect.objectContaining({

@@ -1,5 +1,4 @@
 mod commands;
-mod continuation;
 mod definitions;
 mod environment;
 mod lifecycle;
@@ -18,62 +17,29 @@ use crate::db::{Db, NewPipelineItem, Repo};
 use commands::{build_agent_command, build_kanna_preamble, build_task_shell_command};
 use definitions::{
     read_agent_definition, read_pipeline_definition, read_repo_config,
-    read_task_pipeline_definition, PipelinePostAction, PipelineStage,
+    read_task_pipeline_definition, PipelineStage,
 };
 use environment::{
     apply_workspace_path_env, build_spawn_env, claim_task_ports, resolve_headless_agent_executable,
     write_kanna_mcp_config,
 };
 use prompt::{build_stage_prompt, PromptContext};
-use provider::{resolve_agent_provider, resolve_agent_type, AgentSessionType};
+use provider::{resolve_agent_provider, resolve_agent_type, AgentProvider, AgentSessionType};
+use std::collections::HashMap;
 use types::{CreatedTask, PreparedSessionSpawn, PreparedStageRerun, TaskCreationRequest};
-pub(crate) use types::{PreparedStageTransition, PreparedTaskSpawn};
-use worktree::{create_worktree, fetch_start_point, generate_task_id};
+pub(crate) use types::{PreparedStageRunSpawn, PreparedStageTransition, PreparedTaskSpawn};
+use worktree::{
+    create_worktree, fetch_start_point, generate_task_id, merge_branches_into_worktree,
+};
 
 pub(crate) use lifecycle::{
-    continue_prepared_stage_for_api, prepared_task_id, rerun_prepared_stage_for_api,
-    rollback_prepared_task_for_api, spawn_prepared_task_for_api,
+    rerun_prepared_stage_for_api, spawn_prepared_stage_run_for_api,
     spawn_prepared_task_for_api_recording_stage_run, spawn_prepared_task_for_api_with_rollback,
 };
 pub(crate) use stages::{
     prepare_advance_stage_for_api, prepare_auto_stage_completion_for_api,
     prepare_revision_task_for_api, resolve_stage_transition,
 };
-
-enum RerunExecution<'a> {
-    Stage(&'a PipelineStage),
-    PostAction(&'a PipelinePostAction),
-}
-
-impl<'a> RerunExecution<'a> {
-    fn agent(&self) -> Option<&'a str> {
-        match self {
-            Self::Stage(stage) => stage.agent.as_deref(),
-            Self::PostAction(post_action) => post_action.agent.as_deref(),
-        }
-    }
-
-    fn prompt(&self) -> Option<&'a str> {
-        match self {
-            Self::Stage(stage) => stage.prompt.as_deref(),
-            Self::PostAction(post_action) => post_action.prompt.as_deref(),
-        }
-    }
-
-    fn agent_provider(&self) -> Option<&'a str> {
-        match self {
-            Self::Stage(stage) => stage.agent_provider.as_deref(),
-            Self::PostAction(post_action) => post_action.agent_provider.as_deref(),
-        }
-    }
-
-    fn transition(&self) -> Option<&'a str> {
-        match self {
-            Self::Stage(stage) => stage.transition.as_deref(),
-            Self::PostAction(post_action) => post_action.transition.as_deref(),
-        }
-    }
-}
 
 pub(crate) fn prepare_rerun_stage_for_api(
     db: &Db,
@@ -103,22 +69,17 @@ pub(crate) fn prepare_rerun_stage_for_api(
         .stage
         .clone()
         .ok_or_else(|| format!("task has no stage: {}", task_id))?;
-    let pipeline = read_pipeline_definition(&repo.path, &pipeline_name)?;
+    let pipeline = read_task_pipeline_definition(
+        &repo.path,
+        &pipeline_name,
+        source_task.pipeline_def.as_deref(),
+    )?;
     let current_stage = pipeline
         .stages
         .iter()
         .find(|stage| stage.name == stage_name)
         .ok_or_else(|| format!("stage not found in pipeline: {}", stage_name))?;
-    let active_post_action = source_task.active_post_action.as_deref().and_then(|name| {
-        current_stage
-            .post_action
-            .as_ref()
-            .filter(|post| post.name == name)
-    });
-    let execution = active_post_action
-        .map(RerunExecution::PostAction)
-        .unwrap_or(RerunExecution::Stage(current_stage));
-    let agent = match execution.agent() {
+    let agent = match current_stage.agent.as_deref() {
         Some(agent_name) => Some(read_agent_definition(&repo.path, agent_name)?),
         None => None,
     };
@@ -127,15 +88,16 @@ pub(crate) fn prepare_rerun_stage_for_api(
         .as_deref()
         .filter(|base_ref| base_ref.starts_with("task-"))
         .map(|base_ref| format!("{}/.kanna-worktrees/{base_ref}", repo.path));
+    let prev_result = stages::previous_stage_result(db, task_id, &source_task)?;
     let prompt = build_stage_prompt(
         agent
             .as_ref()
             .map(|agent| agent.prompt.as_str())
             .unwrap_or(""),
-        execution.prompt(),
+        current_stage.prompt.as_deref(),
         &PromptContext {
             task_prompt: source_task.prompt.as_deref(),
-            prev_result: source_task.stage_result.as_deref(),
+            prev_result: prev_result.as_deref(),
             branch: Some(branch),
             base_ref: source_task.base_ref.as_deref(),
             source_worktree: source_worktree.as_deref(),
@@ -144,7 +106,7 @@ pub(crate) fn prepare_rerun_stage_for_api(
     let provider = resolve_agent_provider(
         source_task.agent_provider.as_deref(),
         None,
-        execution.agent_provider(),
+        current_stage.agent_provider.as_deref(),
         agent.as_ref(),
     )?;
     let model = agent.as_ref().and_then(|agent| agent.model.clone());
@@ -169,19 +131,156 @@ pub(crate) fn prepare_rerun_stage_for_api(
         .and_then(|name| pipeline.environments.as_ref()?.get(name))
         .and_then(|environment| environment.setup.clone())
         .unwrap_or_default();
-    let session = match agent_type {
+    let stage_run_model = model.clone();
+    let session = build_prepared_session(
+        provider,
+        agent_type,
+        task_id,
+        &stage_name,
+        &pipeline_name,
+        Some(current_stage.policy.transition.as_str()),
+        prompt,
+        model,
+        permission_mode,
+        allowed_tools,
+        mcp_config_path,
+        &spawn_env,
+        &worktree_path,
+        &stage_setup,
+    )?;
+    let session_id = db
+        .resolve_task_terminal_session_id(task_id)
+        .map_err(|e| format!("db error: {}", e))?
+        .unwrap_or_else(|| task_id.to_string());
+    Ok(PreparedStageRerun {
+        task_id: task_id.to_string(),
+        session_id,
+        stage: stage_name,
+        stage_agent: current_stage.agent.clone(),
+        agent_provider: provider.as_str().to_string(),
+        model: stage_run_model,
+        cwd: worktree_path,
+        env: spawn_env,
+        session,
+    })
+}
+
+/// Prepare a new stage run to be spawned in place on an existing task. The
+/// task keeps its id, branch, and worktree; only the stage (and its agent
+/// session) changes. Used for stage advance, auto-advance, and revisions.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::task_creator) fn prepare_stage_run_spawn(
+    db: &Db,
+    config: &Config,
+    repo: &Repo,
+    task_id: &str,
+    pipeline_name: &str,
+    pipeline: &definitions::PipelineDefinition,
+    target_stage: &PipelineStage,
+    final_prompt: String,
+    branch: &str,
+    feedback: Option<String>,
+    source_agent_type: Option<&str>,
+    explicit_provider: Option<String>,
+) -> Result<PreparedStageRunSpawn, String> {
+    let agent = match target_stage.agent.as_deref() {
+        Some(agent_name) => Some(read_agent_definition(&repo.path, agent_name)?),
+        None => None,
+    };
+    let provider = resolve_agent_provider(
+        explicit_provider.as_deref(),
+        None,
+        target_stage.agent_provider.as_deref(),
+        agent.as_ref(),
+    )?;
+    let agent_type = resolve_agent_type(source_agent_type, provider)?;
+    let model = agent.as_ref().and_then(|agent| agent.model.clone());
+    let stage_run_model = model.clone();
+    let permission_mode = agent
+        .as_ref()
+        .and_then(|agent| agent.permission_mode.clone());
+    let allowed_tools = agent
+        .as_ref()
+        .map(|agent| agent.allowed_tools.clone())
+        .unwrap_or_default();
+    let worktree_path = format!("{}/.kanna-worktrees/{}", repo.path, branch);
+    let repo_config = read_repo_config(&repo.path)?;
+    let worktree_repo_config = read_repo_config(&worktree_path)?;
+    let port_env = claim_task_ports(db, task_id, repo_config.ports.as_ref())?;
+    let mut spawn_env = build_spawn_env(config, task_id, &port_env)?;
+    apply_workspace_path_env(&mut spawn_env, &worktree_path, &worktree_repo_config);
+    let mcp_config_path = write_kanna_mcp_config(&config.daemon_dir, task_id, &mut spawn_env)?;
+    let stage_setup = target_stage
+        .environment
+        .as_deref()
+        .and_then(|name| pipeline.environments.as_ref()?.get(name))
+        .and_then(|environment| environment.setup.clone())
+        .unwrap_or_default();
+    let session = build_prepared_session(
+        provider,
+        agent_type,
+        task_id,
+        &target_stage.name,
+        pipeline_name,
+        Some(target_stage.policy.transition.as_str()),
+        final_prompt,
+        model,
+        permission_mode,
+        allowed_tools,
+        mcp_config_path,
+        &spawn_env,
+        &worktree_path,
+        &stage_setup,
+    )?;
+    let session_id = db
+        .resolve_task_terminal_session_id(task_id)
+        .map_err(|e| format!("db error: {}", e))?
+        .unwrap_or_else(|| task_id.to_string());
+
+    Ok(PreparedStageRunSpawn {
+        task_id: task_id.to_string(),
+        session_id,
+        next_stage: target_stage.name.clone(),
+        stage_agent: target_stage.agent.clone(),
+        agent_provider: provider.as_str().to_string(),
+        model: stage_run_model,
+        feedback,
+        cwd: worktree_path,
+        env: spawn_env,
+        session,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_prepared_session(
+    provider: AgentProvider,
+    agent_type: AgentSessionType,
+    task_id: &str,
+    stage_name: &str,
+    pipeline_name: &str,
+    stage_transition: Option<&str>,
+    final_prompt: String,
+    model: Option<String>,
+    permission_mode: Option<String>,
+    allowed_tools: Vec<String>,
+    mcp_config_path: Option<String>,
+    spawn_env: &HashMap<String, String>,
+    worktree_path: &str,
+    setup: &[String],
+) -> Result<PreparedSessionSpawn, String> {
+    Ok(match agent_type {
         AgentSessionType::Pty => {
             let preamble = build_kanna_preamble(
                 &provider,
                 task_id,
-                &stage_name,
-                &pipeline_name,
-                execution.transition(),
+                stage_name,
+                pipeline_name,
+                stage_transition,
                 mcp_config_path.as_deref(),
             );
             let agent_cmd = build_agent_command(
                 &provider,
-                &prompt,
+                &final_prompt,
                 model.as_deref(),
                 permission_mode.as_deref(),
                 &allowed_tools,
@@ -190,7 +289,7 @@ pub(crate) fn prepare_rerun_stage_for_api(
             );
             let full_cmd = build_task_shell_command(
                 &agent_cmd,
-                &stage_setup,
+                setup,
                 spawn_env.get("KANNA_CLI_PATH").map(String::as_str),
             );
             PreparedSessionSpawn::Pty {
@@ -210,18 +309,19 @@ pub(crate) fn prepare_rerun_stage_for_api(
             let headless_executable = resolve_headless_agent_executable(
                 provider,
                 spawn_env.get("PATH").map(String::as_str),
+                worktree_path,
             )?;
             let system_prompt = build_kanna_preamble(
                 &provider,
                 task_id,
-                &stage_name,
-                &pipeline_name,
-                execution.transition(),
+                stage_name,
+                pipeline_name,
+                stage_transition,
                 mcp_config_path.as_deref(),
             );
             PreparedSessionSpawn::Agent {
                 agent_provider: provider.to_daemon_provider(),
-                prompt,
+                prompt: final_prompt,
                 model,
                 permission_mode,
                 allowed_tools,
@@ -230,17 +330,6 @@ pub(crate) fn prepare_rerun_stage_for_api(
                 executable: headless_executable,
             }
         }
-    };
-    let session_id = db
-        .resolve_task_terminal_session_id(task_id)
-        .map_err(|e| format!("db error: {}", e))?
-        .unwrap_or_else(|| task_id.to_string());
-    Ok(PreparedStageRerun {
-        task_id: task_id.to_string(),
-        session_id,
-        cwd: worktree_path,
-        env: spawn_env,
-        session,
     })
 }
 
@@ -355,6 +444,270 @@ pub(crate) fn prepare_task_for_api(
     )
 }
 
+pub(crate) fn create_dormant_task_for_api(
+    db: &Db,
+    request: crate::mobile_api::CreateTaskRequest,
+) -> Result<crate::mobile_api::CreateTaskResponse, String> {
+    let repo = db
+        .get_repo(&request.repo_id)
+        .map_err(|e| format!("db error: {}", e))?
+        .ok_or_else(|| format!("repo not found: {}", request.repo_id))?;
+
+    let explicit_provider = request.agent_provider;
+    let default_provider = if explicit_provider.is_none() {
+        read_default_agent_provider_setting(db)?
+    } else {
+        None
+    };
+    let parent_task_id = if let Some(raw_parent_task_id) = request.parent_task_id.as_deref() {
+        let parent_task_id = db
+            .resolve_pipeline_item_id(raw_parent_task_id)
+            .map_err(|e| format!("db error: {}", e))?
+            .ok_or_else(|| format!("parent task not found: {}", raw_parent_task_id))?;
+        let parent = db
+            .get_pipeline_item(&parent_task_id)
+            .map_err(|e| format!("db error: {}", e))?
+            .ok_or_else(|| format!("parent task not found: {}", parent_task_id))?;
+        if parent.repo_id != repo.id {
+            return Err(format!(
+                "parent task belongs to a different repo: {}",
+                parent_task_id
+            ));
+        }
+        Some(parent_task_id)
+    } else {
+        None
+    };
+
+    let repo_config = read_repo_config(&repo.path)?;
+    let pipeline_name = request
+        .pipeline_name
+        .or(repo_config.pipeline.clone())
+        .unwrap_or_else(|| "default".to_string());
+    let pipeline = read_pipeline_definition(&repo.path, &pipeline_name)?;
+    let pipeline_def_json =
+        serde_json::to_string(&pipeline).map_err(|e| format!("serialize error: {}", e))?;
+    let stage = pipeline
+        .stages
+        .first()
+        .ok_or_else(|| format!("pipeline has no stages: {}", pipeline_name))?;
+    let agent = if let Some(agent_name) = stage.agent.as_deref() {
+        Some(read_agent_definition(&repo.path, agent_name)?)
+    } else {
+        None
+    };
+    let provider = resolve_agent_provider(
+        explicit_provider.as_deref(),
+        default_provider.as_deref(),
+        stage.agent_provider.as_deref(),
+        agent.as_ref(),
+    )?;
+    let agent_type = resolve_agent_type(request.agent_type.as_deref(), provider)?;
+    let task_id = generate_task_id()?;
+    let branch = format!("task-{}", task_id);
+    let stage_name = stage.name.clone();
+
+    db.insert_pipeline_item(NewPipelineItem {
+        id: &task_id,
+        repo_id: &repo.id,
+        prompt: &request.prompt,
+        display_name: request.display_name.as_deref(),
+        pipeline: &pipeline_name,
+        pipeline_def: Some(&pipeline_def_json),
+        stage: &stage_name,
+        branch: &branch,
+        agent_type: agent_type.as_str(),
+        agent_provider: provider.as_str(),
+        activity: "idle",
+        port_offset: None,
+        port_env_json: None,
+        base_ref: None,
+        notify_task_id: request.notify_task_id.as_deref(),
+        parent_task_id: parent_task_id.as_deref(),
+    })
+    .map_err(|e| format!("db error: {}", e))?;
+
+    Ok(crate::mobile_api::CreateTaskResponse {
+        task_id,
+        repo_id: repo.id,
+        title: request.display_name.unwrap_or(request.prompt),
+        stage: stage_name,
+        agent_type: agent_type.as_str().to_string(),
+        worktree_path: None,
+    })
+}
+
+pub(crate) fn prepare_start_dormant_task_for_api(
+    db: &Db,
+    config: &Config,
+    task_id: &str,
+    blocker_branches: Vec<String>,
+) -> Result<Option<PreparedTaskSpawn>, String> {
+    if db
+        .get_task_worktree_path(task_id)
+        .map_err(|e| format!("db error: {}", e))?
+        .is_some()
+    {
+        return Ok(None);
+    }
+
+    let item = db
+        .get_pipeline_item(task_id)
+        .map_err(|e| format!("db error: {}", e))?
+        .ok_or_else(|| format!("task not found: {}", task_id))?;
+    if item.closed_at.is_some() {
+        return Ok(None);
+    }
+    let repo = db
+        .get_repo(&item.repo_id)
+        .map_err(|e| format!("db error: {}", e))?
+        .ok_or_else(|| format!("repo not found for task: {}", task_id))?;
+    if !std::path::Path::new(&repo.path).exists() {
+        return Ok(None);
+    }
+
+    let repo_config = read_repo_config(&repo.path)?;
+    let pipeline_name = item
+        .pipeline
+        .clone()
+        .unwrap_or_else(|| "default".to_string());
+    let pipeline =
+        read_task_pipeline_definition(&repo.path, &pipeline_name, item.pipeline_def.as_deref())?;
+    let stage_name = item
+        .stage
+        .clone()
+        .ok_or_else(|| format!("task has no stage: {}", task_id))?;
+    let stage = pipeline
+        .stages
+        .iter()
+        .find(|stage| stage.name == stage_name)
+        .ok_or_else(|| format!("stage not found in pipeline: {}", stage_name))?;
+    let agent = if let Some(agent_name) = stage.agent.as_deref() {
+        Some(read_agent_definition(&repo.path, agent_name)?)
+    } else {
+        None
+    };
+    let provider = resolve_agent_provider(
+        item.agent_provider.as_deref(),
+        None,
+        stage.agent_provider.as_deref(),
+        agent.as_ref(),
+    )?;
+    let agent_type = resolve_agent_type(item.agent_type.as_deref(), provider)?;
+    let branch = item
+        .branch
+        .clone()
+        .filter(|branch| !branch.trim().is_empty())
+        .unwrap_or_else(|| format!("task-{}", task_id));
+    let worktree_path = format!("{}/.kanna-worktrees/{}", repo.path, branch);
+    let base_ref = blocker_branches
+        .first()
+        .cloned()
+        .or_else(|| item.base_ref.clone())
+        .or_else(|| fetch_start_point(&repo.path, repo.default_branch.as_deref()));
+
+    let final_prompt = build_stage_prompt(
+        agent
+            .as_ref()
+            .map(|agent| agent.prompt.as_str())
+            .unwrap_or(""),
+        stage.prompt.as_deref(),
+        &PromptContext {
+            task_prompt: item.prompt.as_deref(),
+            prev_result: None,
+            branch: base_ref.as_deref(),
+            base_ref: base_ref.as_deref(),
+            source_worktree: None,
+        },
+    );
+
+    let model = agent.as_ref().and_then(|agent| agent.model.clone());
+    let permission_mode = agent
+        .as_ref()
+        .and_then(|agent| agent.permission_mode.clone());
+    let allowed_tools = agent
+        .as_ref()
+        .map(|agent| agent.allowed_tools.clone())
+        .unwrap_or_default();
+
+    create_worktree(&repo.path, &branch, &worktree_path, base_ref.as_deref())?;
+    if blocker_branches.len() > 1 {
+        merge_branches_into_worktree(&worktree_path, &blocker_branches[1..])?;
+    }
+    db.upsert_worktree(&format!("wt-{task_id}"), task_id, &worktree_path, &branch)
+        .map_err(|e| format!("db error: {}", e))?;
+    db.upsert_terminal_session(
+        &format!("agent-{task_id}"),
+        &repo.id,
+        Some(task_id),
+        Some("agent"),
+        Some(&worktree_path),
+        Some(task_id),
+    )
+    .map_err(|e| format!("db error: {}", e))?;
+
+    let port_env = claim_task_ports(db, task_id, repo_config.ports.as_ref())?;
+    let first_port = port_env
+        .values()
+        .next()
+        .and_then(|value| value.parse::<i64>().ok());
+    let port_env_json = if port_env.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(&port_env).map_err(|e| format!("serialize error: {}", e))?)
+    };
+    db.update_pipeline_item_ports(task_id, first_port, port_env_json.as_deref())
+        .map_err(|e| format!("db error: {}", e))?;
+    db.update_pipeline_item_base_ref_and_activity(task_id, base_ref.as_deref(), "working")
+        .map_err(|e| format!("db error: {}", e))?;
+
+    let worktree_repo_config = read_repo_config(&worktree_path)?;
+    let mut spawn_env = build_spawn_env(config, task_id, &port_env)?;
+    apply_workspace_path_env(&mut spawn_env, &worktree_path, &worktree_repo_config);
+    let mcp_config_path = write_kanna_mcp_config(&config.daemon_dir, task_id, &mut spawn_env)?;
+    let stage_run_model = model.clone();
+    let session = build_prepared_session(
+        provider,
+        agent_type,
+        task_id,
+        &stage_name,
+        &pipeline_name,
+        Some(stage.policy.transition.as_str()),
+        final_prompt,
+        model,
+        permission_mode,
+        allowed_tools,
+        mcp_config_path,
+        &spawn_env,
+        &worktree_path,
+        worktree_repo_config.setup.as_deref().unwrap_or(&[]),
+    )?;
+    let title = item
+        .display_name
+        .clone()
+        .or_else(|| item.prompt.clone())
+        .unwrap_or_else(|| task_id.to_string());
+
+    Ok(Some(PreparedTaskSpawn {
+        created_task: CreatedTask {
+            task_id: task_id.to_string(),
+            repo_id: repo.id.clone(),
+            title,
+            stage: stage_name,
+            agent_type: agent_type.as_str().to_string(),
+            worktree_path: worktree_path.clone(),
+        },
+        branch,
+        session_id: task_id.to_string(),
+        cwd: worktree_path,
+        env: spawn_env,
+        stage_agent: stage.agent.clone(),
+        agent_provider: provider.as_str().to_string(),
+        model: stage_run_model,
+        session,
+    }))
+}
+
 fn read_default_agent_provider_setting(db: &Db) -> Result<Option<String>, String> {
     let provider = db
         .get_setting("defaultAgentProvider")
@@ -461,9 +814,7 @@ fn prepare_task_spawn(
         .as_deref()
         .unwrap_or(stage.name.as_str())
         .to_string();
-    let stage_transition = stage.transition.as_deref();
-    let tags_json = serde_json::to_string(&vec![stage_name.clone()])
-        .map_err(|e| format!("serialize error: {}", e))?;
+    let stage_transition = Some(stage.policy.transition.as_str());
 
     db.insert_pipeline_item(NewPipelineItem {
         id: &task_id,
@@ -473,7 +824,6 @@ fn prepare_task_spawn(
         pipeline: &pipeline_name,
         pipeline_def: Some(&pipeline_def_json),
         stage: &stage_name,
-        tags_json: &tags_json,
         branch: &branch,
         agent_type: agent_type.as_str(),
         agent_provider: provider.as_str(),
@@ -563,6 +913,7 @@ fn prepare_task_spawn(
             let headless_executable = resolve_headless_agent_executable(
                 provider,
                 spawn_env.get("PATH").map(String::as_str),
+                &worktree_path,
             )?;
             let system_prompt = build_kanna_preamble(
                 &provider,
@@ -606,6 +957,5 @@ fn prepare_task_spawn(
         agent_provider: stage_run_provider,
         model: stage_run_model,
         session,
-        follow_task: None,
     })
 }

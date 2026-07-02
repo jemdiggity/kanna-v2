@@ -180,7 +180,7 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
       if (!response.ok) {
         const message = await response.text();
         if (response.status === 409) {
-          context.toast.warning(context.tt("toasts.taskBlocked"));
+          context.toast.warning(context.tt("mainPanel.taskBlocked"));
           return;
         }
         throw new Error(message);
@@ -188,10 +188,13 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
       const result = await response.json() as TaskActionResponse;
       await requireService(context.services.reloadSnapshot, "reloadSnapshot")();
 
-      const shouldFollowTask = result.followTask ?? (options.initiatedBy !== "auto");
-      if (shouldFollowTask) {
-        await restoreStageAdvanceSelection(result.taskId);
-      } else if (sourceTaskIsSelected) {
+      // Durable tasks: an in-pipeline advance transitions the SAME task in
+      // place, so the user's selection stays put. Only when the advance
+      // closed the task (final stage) does selection move to the next
+      // visible item — analogous to closing a task.
+      const advancedItem = context.state.items.value.find((candidate) => candidate.id === result.taskId);
+      const taskClosed = !advancedItem || advancedItem.closed_at != null;
+      if (taskClosed && sourceTaskIsSelected) {
         await restoreStageAdvanceSelection(fallbackSelectionId);
       }
     } catch (error) {

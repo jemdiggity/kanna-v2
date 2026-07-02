@@ -467,6 +467,55 @@ fn resolves_task_terminal_session_id_to_pipeline_item_when_no_session_row_exists
 }
 
 #[test]
+fn resolves_task_terminal_session_id_from_latest_running_stage_run() {
+    let path = Db::test_db_path("resolve-task-terminal-latest-stage-run");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "710917fb",
+        "repo-1",
+        "Review branch",
+        Some("Review branch"),
+        "review",
+        "2026-05-11 10:00:00",
+    )
+    .unwrap();
+    db.update_test_pipeline_item_stage_context(
+        "710917fb",
+        "task-710917fb",
+        "default",
+        None,
+        "claude",
+    )
+    .unwrap();
+    db.insert_stage_run(
+        "run-old",
+        "710917fb",
+        "in progress",
+        "finished",
+        Some("daemon-old"),
+        None,
+    )
+    .unwrap();
+    db.insert_stage_run(
+        "run-current",
+        "710917fb",
+        "review",
+        "running",
+        Some("daemon-current"),
+        Some("address review feedback"),
+    )
+    .unwrap();
+
+    assert_eq!(
+        db.resolve_task_terminal_session_id("task-710917fb")
+            .unwrap()
+            .as_deref(),
+        Some("daemon-current")
+    );
+}
+
+#[test]
 fn insert_pipeline_item_stores_stage_metadata() {
     let path = temp_db_path();
     let conn = Connection::open(&path).expect("open temp db");
