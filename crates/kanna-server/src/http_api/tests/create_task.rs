@@ -706,6 +706,130 @@ async fn create_task_route_rejects_invalid_blocker_before_creating_task_or_spawn
 }
 
 #[tokio::test]
+async fn create_task_route_with_blocker_creates_dormant_task_without_spawning() {
+    let unique = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let repo_root = std::env::temp_dir().join(format!("kanna-http-create-dormant-{unique}"));
+    init_test_git_repo(&repo_root);
+
+    let daemon_dir =
+        std::env::temp_dir().join(format!("kanna-http-create-dormant-daemon-{unique}"));
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+    let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+    let _ = std::fs::remove_file(&socket_path);
+
+    let config = Config {
+        relay_url: "wss://relay.example".to_string(),
+        device_token: "device-token".to_string(),
+        firebase_project_id: "kanna-local".to_string(),
+        firebase_auth_emulator_url: None,
+        firebase_firestore_emulator_host: None,
+        daemon_dir: daemon_dir.to_string_lossy().to_string(),
+        db_path: Db::test_db_path(&format!("http-api-create-dormant-{unique}")),
+        kanna_cli_path: None,
+        desktop_id: "desktop-1".to_string(),
+        desktop_secret: Some("desktop-secret".to_string()),
+        desktop_name: "Studio Mac".to_string(),
+        server_version: Some("test-version".to_string()),
+        lan_host: "127.0.0.1".to_string(),
+        lan_port: 48120,
+        pairing_store_path: format!("/tmp/kanna-pairings-create-dormant-{unique}.json"),
+    };
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    db.insert_test_pipeline_item(
+        "blocker-1",
+        "repo-1",
+        "Build prerequisite",
+        Some("Prerequisite"),
+        "in progress",
+        "2026-07-01T00:00:00Z",
+    )
+    .unwrap();
+    db.update_test_pipeline_item_stage_context(
+        "blocker-1",
+        "task-blocker-branch",
+        "default",
+        None,
+        "claude",
+    )
+    .unwrap();
+    drop(db);
+
+    let app = super::router(Arc::new(super::AppState::new(config.clone())));
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "repoId": "repo-1",
+                        "prompt": "Wait for the prerequisite",
+                        "blockerTaskIds": ["blocker-1"]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    if response.status() != StatusCode::OK {
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        panic!(
+            "expected blocked task creation to skip daemon spawn, got {status}: {}",
+            String::from_utf8_lossy(&body)
+        );
+    }
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let created: CreateTaskResponse = from_slice(&body).unwrap();
+    assert_eq!(created.repo_id, "repo-1");
+    assert_eq!(created.stage, "in progress");
+    assert_eq!(created.worktree_path, None);
+
+    let db = Db::open(&config.db_path).unwrap();
+    let created_item = db.get_pipeline_item(&created.task_id).unwrap().unwrap();
+    assert_eq!(created_item.activity.as_deref(), Some("idle"));
+    assert_eq!(created_item.base_ref, None);
+    assert_eq!(
+        db.count_test_task_blockers(&created.task_id, "blocker-1")
+            .unwrap(),
+        1
+    );
+    assert_eq!(db.count_test_worktrees_for_repo("repo-1").unwrap(), 0);
+    assert_eq!(
+        db.count_test_terminal_sessions_for_repo("repo-1").unwrap(),
+        0
+    );
+    assert!(
+        !repo_root
+            .join(".kanna-worktrees")
+            .join(created_item.branch.as_deref().unwrap())
+            .exists(),
+        "blocked task should not create a worktree until it first runs"
+    );
+    assert!(
+        !socket_path.exists(),
+        "blocked task creation should not require a daemon connection"
+    );
+
+    let _ = std::fs::remove_dir_all(&daemon_dir);
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[tokio::test]
 async fn create_task_route_rolls_back_prepared_task_when_daemon_spawn_fails() {
     use kanna_daemon::protocol::{Command as DaemonCommand, ErrorCode, Event as DaemonEvent};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -824,11 +948,7 @@ async fn create_task_route_rolls_back_prepared_task_when_daemon_spawn_fails() {
 }
 
 #[tokio::test]
-async fn create_task_route_persists_blocker_before_daemon_spawn() {
-    use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-    use tokio::net::UnixListener;
-
+async fn create_task_route_persists_blocker_without_daemon_spawn() {
     let unique = format!(
         "{}-{}",
         std::process::id(),
@@ -847,53 +967,6 @@ async fn create_task_route_persists_blocker_before_daemon_spawn() {
     let _ = std::fs::remove_file(&socket_path);
 
     let db_path = Db::test_db_path(&format!("http-api-create-blocker-{unique}"));
-    let db_path_for_daemon = db_path.clone();
-    let daemon_listener = UnixListener::bind(&socket_path).unwrap();
-    let daemon_server = tokio::spawn(async move {
-        let (stream, _) = daemon_listener.accept().await.unwrap();
-        let (read_half, mut write_half) = stream.into_split();
-        let mut reader = BufReader::new(read_half);
-        let mut line = String::new();
-        reader.read_line(&mut line).await.unwrap();
-        let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
-        let session_id = match command {
-            DaemonCommand::Spawn {
-                session_id, cwd, ..
-            } => {
-                assert!(cwd.contains(".kanna-worktrees/task-"));
-                let db = Db::open(&db_path_for_daemon).unwrap();
-                assert_eq!(
-                    db.count_test_task_blockers(&session_id, "blocker-1")
-                        .unwrap(),
-                    1,
-                    "blocker row must exist before daemon spawn is issued"
-                );
-                session_id
-            }
-            DaemonCommand::SpawnAgent { session_id, params } => {
-                assert!(params.cwd.contains(".kanna-worktrees/task-"));
-                let db = Db::open(&db_path_for_daemon).unwrap();
-                assert_eq!(
-                    db.count_test_task_blockers(&session_id, "blocker-1")
-                        .unwrap(),
-                    1,
-                    "blocker row must exist before daemon spawn is issued"
-                );
-                session_id
-            }
-            other => panic!("expected spawn command, got {:?}", other),
-        };
-        write_half
-            .write_all(
-                format!(
-                    "{}\n",
-                    serde_json::to_string(&DaemonEvent::SessionCreated { session_id }).unwrap()
-                )
-                .as_bytes(),
-            )
-            .await
-            .unwrap();
-    });
 
     let config = Config {
         relay_url: "wss://relay.example".to_string(),
@@ -952,7 +1025,6 @@ async fn create_task_route_persists_blocker_before_daemon_spawn() {
     assert_eq!(created.repo_id, "repo-1");
     assert_eq!(created.stage, "in progress");
 
-    daemon_server.await.unwrap();
     let db = Db::open(&config.db_path).unwrap();
     assert_eq!(
         db.count_test_task_blockers(&created.task_id, "blocker-1")
@@ -963,8 +1035,17 @@ async fn create_task_route_persists_blocker_before_daemon_spawn() {
         db.get_test_pipeline_item_tags(&created.task_id).unwrap(),
         "[\"in progress\",\"blocked\"]"
     );
+    assert_eq!(created.worktree_path, None);
+    assert_eq!(db.count_test_worktrees_for_repo("repo-1").unwrap(), 0);
+    assert_eq!(
+        db.count_test_terminal_sessions_for_repo("repo-1").unwrap(),
+        0
+    );
+    assert!(
+        !socket_path.exists(),
+        "blocked task creation should not open or require a daemon socket"
+    );
 
-    let _ = std::fs::remove_file(&socket_path);
     let _ = std::fs::remove_dir_all(&daemon_dir);
     let _ = std::fs::remove_dir_all(&repo_root);
 }

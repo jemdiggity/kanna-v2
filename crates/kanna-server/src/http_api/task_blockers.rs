@@ -4,45 +4,6 @@ use axum::extract::State;
 use axum::Json;
 use std::sync::Arc;
 
-fn parse_tags_json(tags_json: &str) -> Vec<String> {
-    serde_json::from_str::<Vec<String>>(tags_json).unwrap_or_default()
-}
-
-fn render_tags_json(tags: &[String]) -> Result<String, (axum::http::StatusCode, String)> {
-    serde_json::to_string(tags).map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("failed to serialize tags: {}", e),
-        )
-    })
-}
-
-fn add_blocked_tag(db: &Db, task_id: &str) -> Result<(), (axum::http::StatusCode, String)> {
-    let tags_json = db
-        .pipeline_item_tags(task_id)
-        .map_err(|e| db_write_error("db error", e))?;
-    let mut tags = parse_tags_json(&tags_json);
-    if !tags.iter().any(|tag| tag == "blocked") {
-        tags.push("blocked".to_string());
-    }
-    let rendered = render_tags_json(&tags)?;
-    db.update_pipeline_item_tags(task_id, &rendered)
-        .map_err(|e| db_write_error("db error", e))
-}
-
-fn remove_blocked_tag(db: &Db, task_id: &str) -> Result<(), (axum::http::StatusCode, String)> {
-    let tags_json = db
-        .pipeline_item_tags(task_id)
-        .map_err(|e| db_write_error("db error", e))?;
-    let tags = parse_tags_json(&tags_json)
-        .into_iter()
-        .filter(|tag| tag != "blocked")
-        .collect::<Vec<_>>();
-    let rendered = render_tags_json(&tags)?;
-    db.update_pipeline_item_tags(task_id, &rendered)
-        .map_err(|e| db_write_error("db error", e))
-}
-
 pub(super) fn resolve_existing_task_id(
     db: &Db,
     task_or_branch_id: &str,
@@ -80,7 +41,6 @@ pub(super) fn persist_resolved_task_blockers(
         db.insert_task_blocker(task_id, blocker_id)
             .map_err(|e| db_write_error("db error", e))?;
     }
-    add_blocked_tag(db, task_id)?;
     db.update_pipeline_item_activity(task_id, "idle")
         .map_err(|e| db_write_error("db error", e))
 }
@@ -121,6 +81,97 @@ pub(super) fn apply_task_blockers(
     Ok(task_id)
 }
 
+pub(super) async fn start_dormant_task_if_ready(
+    state: &Arc<AppState>,
+    task_id: &str,
+    blocker_branches: Vec<String>,
+) -> Result<bool, (axum::http::StatusCode, String)> {
+    let prepared = {
+        let db = Db::open(&state.config.db_path).map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("db error: {}", e),
+            )
+        })?;
+        crate::task_creator::prepare_start_dormant_task_for_api(
+            &db,
+            &state.config,
+            task_id,
+            blocker_branches,
+        )
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?
+    };
+    let Some(prepared) = prepared else {
+        return Ok(false);
+    };
+
+    let mut daemon = crate::daemon_client::DaemonClient::connect(&state.config.daemon_dir)
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("daemon error: {}", e),
+            )
+        })?;
+    crate::task_creator::spawn_prepared_task_for_api_recording_stage_run(
+        &state.config.db_path,
+        &mut daemon,
+        prepared,
+    )
+    .await
+    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(true)
+}
+
+pub(super) async fn start_dependents_unblocked_by_pr(
+    state: &Arc<AppState>,
+    blocker_task_id: &str,
+    blocker_branch: Option<String>,
+) -> Result<(), (axum::http::StatusCode, String)> {
+    let ready_dependents = {
+        let db = Db::open(&state.config.db_path).map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("db error: {}", e),
+            )
+        })?;
+        let mut ready = Vec::new();
+        for blocked_id in db
+            .list_tasks_blocked_by(blocker_task_id)
+            .map_err(|e| db_write_error("db error", e))?
+        {
+            if db
+                .task_has_unresolved_blockers_except(&blocked_id, blocker_task_id)
+                .map_err(|e| db_write_error("db error", e))?
+            {
+                continue;
+            }
+            let mut branches = Vec::new();
+            if let Some(branch) = blocker_branch
+                .clone()
+                .filter(|branch| !branch.trim().is_empty())
+            {
+                branches.push(branch);
+            }
+            for branch in db
+                .list_resolved_blocker_branches_for_task(&blocked_id)
+                .map_err(|e| db_write_error("db error", e))?
+            {
+                if !branches.contains(&branch) {
+                    branches.push(branch);
+                }
+            }
+            ready.push((blocked_id, branches));
+        }
+        ready
+    };
+
+    for (blocked_id, branches) in ready_dependents {
+        start_dormant_task_if_ready(state, &blocked_id, branches).await?;
+    }
+    Ok(())
+}
+
 pub(super) async fn block_task(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(task_id): axum::extract::Path<String>,
@@ -152,7 +203,8 @@ pub(super) async fn unblock_task(
     let task_id = resolve_existing_task_id(&db, &task_id)?;
     db.remove_all_task_blockers(&task_id)
         .map_err(|e| db_write_error("db error", e))?;
-    remove_blocked_tag(&db, &task_id)?;
+    drop(db);
+    start_dormant_task_if_ready(&state, &task_id, Vec::new()).await?;
     Ok(Json(crate::mobile_api::TaskActionResponse {
         task_id,
         follow_task: None,

@@ -145,3 +145,23 @@ pub(super) fn create_worktree(
     );
     Ok(())
 }
+
+pub(super) fn merge_branches_into_worktree(
+    worktree_path: &str,
+    branches: &[String],
+) -> Result<(), String> {
+    for branch in branches {
+        let output = Command::new("git")
+            .args(["merge", "--no-edit", branch])
+            .current_dir(worktree_path)
+            .output()
+            .map_err(|e| format!("failed to run git merge {branch}: {e}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "failed to merge blocker branch {branch}: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+    }
+    Ok(())
+}
