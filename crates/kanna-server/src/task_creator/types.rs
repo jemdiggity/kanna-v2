@@ -5,6 +5,7 @@ pub(super) struct TaskCreationRequest {
     pub(super) task_prompt: String,
     pub(super) display_name: Option<String>,
     pub(super) pipeline_name: Option<String>,
+    pub(super) pipeline_def: Option<String>,
     pub(super) base_ref: Option<String>,
     pub(super) stored_base_ref: Option<String>,
     pub(super) stage_override: Option<String>,
@@ -35,6 +36,9 @@ pub(crate) struct PreparedTaskSpawn {
     pub(super) session_id: String,
     pub(super) cwd: String,
     pub(super) env: HashMap<String, String>,
+    pub(super) stage_agent: Option<String>,
+    pub(super) agent_provider: String,
+    pub(super) model: Option<String>,
     pub(super) session: PreparedSessionSpawn,
 }
 
@@ -59,19 +63,37 @@ pub(crate) enum PreparedSessionSpawn {
     },
 }
 
+/// Stage transitions are durable: an in-pipeline hop starts a new stage run on
+/// the SAME task (`Run`), and advancing past the final stage closes the task
+/// (`Close`). No transition ever creates a new task or worktree.
 pub(crate) enum PreparedStageTransition {
-    Spawn(Box<PreparedTaskSpawn>),
-    Continue(Box<PreparedStageContinue>),
+    Run(Box<PreparedStageRunSpawn>),
+    Close { task_id: String },
 }
 
-pub(crate) struct PreparedStageContinue {
+pub(crate) struct PreparedStageRerun {
     pub(super) task_id: String,
-    pub(super) agent_type: String,
-    pub(super) previous_stage: String,
+    pub(super) session_id: String,
+    pub(super) stage: String,
+    pub(super) stage_agent: Option<String>,
+    pub(super) agent_provider: String,
+    pub(super) model: Option<String>,
+    pub(super) cwd: String,
+    pub(super) env: HashMap<String, String>,
+    pub(super) session: PreparedSessionSpawn,
+}
+
+/// A new stage run spawned in place on an existing task: same task id, same
+/// branch, same worktree — only the stage (and agent session) changes.
+pub(crate) struct PreparedStageRunSpawn {
+    pub(super) task_id: String,
+    pub(super) session_id: String,
     pub(super) next_stage: String,
-    pub(super) previous_stage_result: Option<String>,
-    pub(super) previous_active_post_action: Option<String>,
-    pub(super) active_post_action: Option<String>,
-    pub(super) input_text: String,
-    pub(super) input: Vec<u8>,
+    pub(super) stage_agent: Option<String>,
+    pub(super) agent_provider: String,
+    pub(super) model: Option<String>,
+    pub(super) feedback: Option<String>,
+    pub(super) cwd: String,
+    pub(super) env: HashMap<String, String>,
+    pub(super) session: PreparedSessionSpawn,
 }

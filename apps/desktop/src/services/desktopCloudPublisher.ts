@@ -70,7 +70,7 @@ export async function publishDesktopTaskSnapshot(
     ownerLocalTaskId: item.id,
   };
 
-  if (item.stage === "done" || item.closed_at !== null) {
+  if (item.closed_at !== null) {
     await deleteTaskSnapshotByIdentity(context, identity, { createDesktopDoc: false });
     return;
   }
@@ -94,7 +94,7 @@ export async function reconcileDesktopTaskSnapshots(db: DbHandle): Promise<void>
   for (const repo of repos) {
     const items = await listPipelineItems(db, repo.id);
     for (const item of items) {
-      if (item.stage === "done" || item.closed_at !== null) continue;
+      if (item.closed_at !== null) continue;
       try {
         snapshots.push(await buildSnapshot(db, item, repo, context.desktopId));
       } catch (error) {

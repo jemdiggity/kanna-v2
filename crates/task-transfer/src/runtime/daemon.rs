@@ -304,9 +304,7 @@ fn close_pipeline_item_in_db(context: &ListenerContext, task_id: &str) -> Result
     let rows = conn
         .execute(
             "UPDATE pipeline_item
-             SET previous_stage = COALESCE(previous_stage, stage),
-                 stage = 'done',
-                 closed_at = datetime('now'),
+             SET closed_at = datetime('now'),
                  updated_at = datetime('now')
              WHERE id = ?",
             [task_id],

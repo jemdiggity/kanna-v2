@@ -62,6 +62,7 @@ export interface CreateTaskResponse {
 
 export interface TaskActionResponse {
   taskId: string;
+  followTask?: boolean;
 }
 
 export interface TaskSummary {

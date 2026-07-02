@@ -284,6 +284,7 @@ vi.mock("@kanna/db", () => ({
   listPipelineItems: vi.fn(async (_db: DbHandle, repoId: string) =>
     mockState.pipelineItems.filter((item) => item.repo_id === repoId),
   ),
+  listTaskBlockers: vi.fn(async () => []),
   insertPipelineItem: vi.fn(async () => {}),
   updatePipelineItemActivity: vi.fn(async () => {}),
   markPipelineItemTearingDown: vi.fn(async () => {}),

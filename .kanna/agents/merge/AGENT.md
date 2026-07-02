@@ -48,7 +48,8 @@ You are a merge agent. Your job is to understand what each PR does, identify whe
    g. Update your worktree HEAD to match the new origin target branch.
    h. Do not delete a PR branch while any unmerged PR still uses it as its base. If the PR is part of a detected stack, defer branch deletion until the full stack has merged.
    i. After the full detected stack has merged, delete the stack branches that are no longer needed. For standalone PRs, delete the merged remote branch after confirming the PR is merged.
-   j. After merging, re-examine any risk areas flagged in Phase 1 that involve this PR. Read the combined code around those interaction points and assess whether previously merged features still behave as intended. Note your findings for the final report.
+   j. For stacked PRs, immediately retarget each direct child PR whose base was the merged branch onto the target branch or the next still-unmerged parent branch in the stack. Prefer `gh pr edit <CHILD_PR> --base <NEW_BASE>` after confirming the child branch is still valid. If the child branch also needs rebasing, rebase it onto the new base and push with `--force-with-lease`.
+   k. After merging, re-examine any risk areas flagged in Phase 1 that involve this PR. Read the combined code around those interaction points and assess whether previously merged features still behave as intended. Note your findings for the final report.
 
 ## Phase 3 — Report
 

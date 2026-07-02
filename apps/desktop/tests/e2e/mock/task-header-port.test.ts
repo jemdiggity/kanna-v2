@@ -134,16 +134,15 @@ describe("task header port badge", () => {
     await execDb(
       client,
       `INSERT INTO pipeline_item
-         (id, repo_id, prompt, display_name, stage, tags, agent_type,
+         (id, repo_id, prompt, display_name, stage, agent_type,
           activity, port_offset, port_env, branch, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         "task-header-port-task",
         repoId,
         "Open the task dev server",
         "Open the task dev server",
         "in progress",
-        '["in progress"]',
         "agent",
         "idle",
         1,

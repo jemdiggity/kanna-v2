@@ -631,10 +631,10 @@ describe("cloud task sync", () => {
     await execDb(
       primary,
       `INSERT INTO pipeline_item
-         (id, repo_id, issue_number, issue_title, prompt, pipeline, stage, tags, pr_number, pr_url,
+         (id, repo_id, issue_number, issue_title, prompt, pipeline, stage, pr_number, pr_url,
           branch, agent_type, agent_provider, port_offset, port_env, activity, activity_changed_at,
           display_name, base_ref, closed_at, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         "stale-owned-closed-task",
         primaryRepoId,
@@ -642,8 +642,7 @@ describe("cloud task sync", () => {
         null,
         "Stale owned closed cloud task",
         "default",
-        "done",
-        JSON.stringify(["done"]),
+        "in progress",
         null,
         null,
         "task-stale-owned-closed-task",
@@ -714,7 +713,8 @@ describe("cloud task sync", () => {
       ["stale-owned-closed-task"],
     )).toEqual([
       expect.objectContaining({
-        stage: "done",
+        // closed_at is the sole done indicator; stage keeps its last value.
+        stage: "in progress",
         closed_at: "2026-05-03T00:01:00.000Z",
       }),
     ]);

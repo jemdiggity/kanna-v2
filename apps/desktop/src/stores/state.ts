@@ -1,6 +1,6 @@
 import { ref, type ComputedRef, type Ref } from "vue";
 import { parseRepoConfig, type RepoConfig } from "@kanna/core";
-import type { AgentProvider, DbHandle, PipelineItem, Repo } from "@kanna/db";
+import type { AgentProvider, DbHandle, PipelineItem, Repo, TaskBlocker } from "@kanna/db";
 import type { PipelineDefinition, AgentDefinition } from "../../../../packages/core/src/pipeline/pipeline-types";
 import type { SessionRecoveryState } from "../composables/sessionRecoveryState";
 import { invoke } from "../invoke";
@@ -23,20 +23,6 @@ export function generateId(): string {
   const buf = new Uint8Array(4);
   crypto.getRandomValues(buf);
   return Array.from(buf, (b) => b.toString(16).padStart(2, "0")).join("");
-}
-
-export function parseTags(raw: string | null | undefined): string[] {
-  if (!raw) return [];
-  try {
-    return JSON.parse(raw) as string[];
-  } catch (error) {
-    console.debug("[store] failed to parse task tags:", error);
-    return [];
-  }
-}
-
-export function hasTag(item: { tags: string }, tag: string): boolean {
-  return parseTags(item.tags).includes(tag);
 }
 
 export interface PtySpawnOptions {
@@ -95,12 +81,12 @@ export interface RepoSnapshotEntry {
 
 export interface KannaSnapshot {
   entries: RepoSnapshotEntry[];
+  taskBlockers: TaskBlocker[];
 }
 
 export interface CreateItemOptions {
   baseBranch?: string;
   baseRef?: string | null;
-  tags?: string[];
   pipelineName?: string;
   stage?: string;
   customTask?: import("@kanna/core").CustomTaskConfig;
@@ -118,6 +104,7 @@ export interface StoreState {
   db: Ref<DbHandle | null>;
   repos: Ref<Repo[]>;
   items: Ref<PipelineItem[]>;
+  taskBlockers: Ref<TaskBlocker[]>;
   initialWindowBootstrap: Ref<WindowBootstrap | null>;
   selectedRepoId: Ref<string | null>;
   selectedItemId: Ref<string | null>;
@@ -271,6 +258,7 @@ export function createStoreState(): StoreState {
   const db = ref<DbHandle | null>(null);
   const repos = ref<Repo[]>([]);
   const items = ref<PipelineItem[]>([]);
+  const taskBlockers = ref<TaskBlocker[]>([]);
   const initialWindowBootstrap = ref<WindowBootstrap | null>(null);
   const selectedRepoId = ref<string | null>(null);
   const selectedItemId = ref<string | null>(null);
@@ -294,6 +282,7 @@ export function createStoreState(): StoreState {
     db,
     repos,
     items,
+    taskBlockers,
     initialWindowBootstrap,
     selectedRepoId,
     selectedItemId,

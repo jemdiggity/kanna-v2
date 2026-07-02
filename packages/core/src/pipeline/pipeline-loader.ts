@@ -1,4 +1,4 @@
-import type { PipelineDefinition, PipelineStage } from "./pipeline-types";
+import type { PipelineDefinition, PipelineStage, PipelineStagePolicy } from "./pipeline-types";
 
 function formatRawValue(value: unknown): string {
   if (value === undefined) {
@@ -17,7 +17,7 @@ function validationError(message: string): Error {
 function parseTransition(
   value: unknown,
   describeInvalid: (value: string) => string
-): PipelineStage["transition"] {
+): PipelineStagePolicy["transition"] {
   if (value === "manual" || value === "auto") {
     return value;
   }
@@ -25,20 +25,53 @@ function parseTransition(
   throw validationError(describeInvalid(formatRawValue(value)));
 }
 
-function parseStageMode(
+function parseStageExecution(
   value: unknown,
-  stageName: string
-): PipelineStage["mode"] | undefined {
-  if (value === undefined || typeof value !== "string") {
+  stageName: string,
+): PipelineStagePolicy["execution"] | undefined {
+  if (value === undefined) {
     return undefined;
   }
-  if (value === "new_task" || value === "continue") {
-    return value;
+  if (value === "continue") {
+    return "continue";
   }
+  if (value === "new_task") return undefined;
+  if (typeof value !== "string") return undefined;
 
   throw validationError(
-    `Stage "${stageName}" has invalid mode "${value}"; must be "new_task" or "continue"`
+    `Stage "${stageName}" has invalid execution "${value}"; must be "continue"`
   );
+}
+
+function parseStagePolicy(raw: Record<string, unknown>, stageName: string): PipelineStagePolicy {
+  const policy = raw["policy"];
+  if (policy !== undefined) {
+    if (policy === null || typeof policy !== "object" || Array.isArray(policy)) {
+      throw validationError(`Stage "${stageName}" has invalid policy "${formatRawValue(policy)}"; must be an object`);
+    }
+    const p = policy as Record<string, unknown>;
+    const parsed: PipelineStagePolicy = {
+      transition: parseTransition(
+        p["transition"],
+        (transition) =>
+          `Stage "${stageName}" has invalid policy.transition "${transition}"; must be "manual" or "auto"`
+      ),
+    };
+    const execution = parseStageExecution(p["execution"], stageName);
+    if (execution !== undefined) parsed.execution = execution;
+    return parsed;
+  }
+
+  const parsed: PipelineStagePolicy = {
+    transition: parseTransition(
+      raw["transition"],
+      (transition) =>
+        `Stage "${stageName}" has invalid transition "${transition}"; must be "manual" or "auto"`
+    ),
+  };
+  const execution = parseStageExecution(raw["mode"], stageName);
+  if (execution !== undefined) parsed.execution = execution;
+  return parsed;
 }
 
 /**
@@ -68,31 +101,19 @@ export function validatePipeline(def: PipelineDefinition): string[] {
       seenNames.add(stage.name);
     }
 
-    if (stage.transition !== "manual" && stage.transition !== "auto") {
+    if (stage.policy?.transition !== "manual" && stage.policy?.transition !== "auto") {
       errors.push(
-        `Stage "${stage.name ?? "(unnamed)"}" has invalid transition "${stage.transition as string}"; must be "manual" or "auto"`
+        `Stage "${stage.name ?? "(unnamed)"}" has invalid policy.transition "${stage.policy?.transition as string}"; must be "manual" or "auto"`
       );
     }
 
     if (
-      stage.mode !== undefined &&
-      stage.mode !== "new_task" &&
-      stage.mode !== "continue"
+      stage.policy?.execution !== undefined &&
+      stage.policy.execution !== "continue"
     ) {
       errors.push(
-        `Stage "${stage.name ?? "(unnamed)"}" has invalid mode "${stage.mode as string}"; must be "new_task" or "continue"`
+        `Stage "${stage.name ?? "(unnamed)"}" has invalid policy.execution "${stage.policy.execution as string}"; must be "continue"`
       );
-    }
-
-    if (stage.post_action !== undefined) {
-      if (!stage.post_action.name || typeof stage.post_action.name !== "string" || stage.post_action.name.trim() === "") {
-        errors.push(`Stage "${stage.name ?? "(unnamed)"}" has post_action with missing name`);
-      }
-      if (stage.post_action.transition !== "manual" && stage.post_action.transition !== "auto") {
-        errors.push(
-          `Stage "${stage.name ?? "(unnamed)"}" has post_action "${stage.post_action.name ?? "(unnamed)"}" with invalid transition "${stage.post_action.transition as string}"; must be "manual" or "auto"`
-        );
-      }
     }
 
     if (stage.environment !== undefined) {
@@ -151,14 +172,23 @@ export function parsePipelineJson(raw: string): PipelineDefinition {
   return def;
 }
 
-function extractPostAction(value: unknown, stageName: string): PipelineStage["post_action"] | undefined {
+type LegacyPostAction = {
+  name: string;
+  description?: string;
+  agent?: string;
+  prompt?: string;
+  agent_provider?: string | string[];
+  transition: PipelineStagePolicy["transition"];
+};
+
+function extractLegacyPostAction(value: unknown, stageName: string): LegacyPostAction | undefined {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     return undefined;
   }
 
   const raw = value as Record<string, unknown>;
   const name = typeof raw["name"] === "string" ? raw["name"] : "";
-  const postAction: PipelineStage["post_action"] = {
+  const postAction: LegacyPostAction = {
     name,
     transition: parseTransition(
       raw["transition"],
@@ -191,7 +221,7 @@ function extractStages(obj: Record<string, unknown>): PipelineStage[] {
     return [];
   }
 
-  return (obj["stages"] as unknown[]).map((item, index) => {
+  return (obj["stages"] as unknown[]).flatMap((item, index) => {
     if (item === null || typeof item !== "object" || Array.isArray(item)) {
       throw new Error(`Stage at index ${index} must be an object`);
     }
@@ -200,11 +230,7 @@ function extractStages(obj: Record<string, unknown>): PipelineStage[] {
 
     const stage: PipelineStage = {
       name,
-      transition: parseTransition(
-        s["transition"],
-        (transition) =>
-          `Stage "${name || "(unnamed)"}" has invalid transition "${transition}"; must be "manual" or "auto"`
-      ),
+      policy: parseStagePolicy(s, name || "(unnamed)"),
     };
 
     if (typeof s["description"] === "string") {
@@ -216,24 +242,29 @@ function extractStages(obj: Record<string, unknown>): PipelineStage[] {
     if (typeof s["prompt"] === "string") {
       stage.prompt = s["prompt"];
     }
-    if (typeof s["agent_provider"] === "string") {
-      stage.agent_provider = s["agent_provider"];
+    if (
+      typeof s["agent_provider"] === "string" ||
+      (Array.isArray(s["agent_provider"]) && s["agent_provider"].every((entry) => typeof entry === "string"))
+    ) {
+      stage.agent_provider = s["agent_provider"] as string | string[];
     }
     if (typeof s["environment"] === "string") {
       stage.environment = s["environment"];
     }
-    if (typeof s["follow_task"] === "boolean") {
-      stage.follow_task = s["follow_task"];
-    }
-    const mode = parseStageMode(s["mode"], stage.name || "(unnamed)");
-    if (mode !== undefined) {
-      stage.mode = mode;
-    }
-    const postAction = extractPostAction(s["post_action"], stage.name || "(unnamed)");
+    const stages = [stage];
+    const postAction = extractLegacyPostAction(s["post_action"], stage.name || "(unnamed)");
     if (postAction) {
-      stage.post_action = postAction;
+      stages.push({
+        name: postAction.name,
+        ...(postAction.description !== undefined ? { description: postAction.description } : {}),
+        ...(postAction.agent !== undefined ? { agent: postAction.agent } : {}),
+        ...(postAction.prompt !== undefined ? { prompt: postAction.prompt } : {}),
+        ...(postAction.agent_provider !== undefined ? { agent_provider: postAction.agent_provider } : {}),
+        ...(stage.environment !== undefined ? { environment: stage.environment } : {}),
+        policy: { transition: postAction.transition, execution: "continue" },
+      });
     }
 
-    return stage;
+    return stages;
   });
 }

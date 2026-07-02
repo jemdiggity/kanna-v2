@@ -1,6 +1,7 @@
 use super::*;
 
 #[test]
+#[ignore = "obsolete close-and-recreate revision task contract"]
 fn prepare_revision_task_builds_target_stage_task_from_reviewed_branch() {
     let repo_root =
         std::env::temp_dir().join(format!("kanna-stage-revision-{}", std::process::id()));
@@ -218,16 +219,19 @@ async fn prepared_revision_agent_task_spawn_sends_task_specific_kanna_context() 
     )
     .unwrap();
     let task_id = prepared.created_task.task_id.clone();
+    let expected_session_id = prepared.session_id.clone();
     let fake_daemon = spawn_fake_daemon_session_created_once(config.daemon_dir.clone()).await;
     let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
 
-    let created = spawn_prepared_task(&mut daemon, prepared).await.unwrap();
+    let created = spawn_prepared_stage_run_for_api(&config.db_path, &mut daemon, prepared)
+        .await
+        .unwrap();
     let command = fake_daemon.await.unwrap();
 
     assert_eq!(created.task_id, task_id);
     match command {
         kanna_daemon::protocol::Command::SpawnAgent { session_id, params } => {
-            assert_eq!(session_id, task_id);
+            assert_eq!(session_id, expected_session_id);
             assert_eq!(params.agent_provider, DaemonAgentProvider::Claude);
             assert!(params.cwd.contains(".kanna-worktrees/task-"));
             let system_prompt = params.system_prompt.expect("system prompt should be sent");
@@ -247,6 +251,146 @@ async fn prepared_revision_agent_task_spawn_sends_task_specific_kanna_context() 
         }
         other => panic!("expected SpawnAgent, got {other:?}"),
     }
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[tokio::test]
+async fn request_revision_spawns_target_stage_run_in_same_worktree_with_feedback() {
+    let repo_root = init_git_repo("revision-same-worktree-feedback");
+    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::create_dir_all(repo_root.join(".kanna/agents/implement")).unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/pipelines/qa.json"),
+        r#"{
+  "stages": [
+    { "name": "in progress", "transition": "manual", "agent": "implement", "prompt": "$TASK_PROMPT" },
+    { "name": "review", "transition": "manual" }
+  ]
+}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/agents/implement/AGENT.md"),
+        "---\nagent_provider: claude\n---\nImplement revision:\n$TASK_PROMPT",
+    )
+    .unwrap();
+    assert!(Command::new("git")
+        .args(["add", ".kanna"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["commit", "-m", "add qa pipeline"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["branch", "task-reviewed"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    let worktree = repo_root.join(".kanna-worktrees/task-reviewed");
+    assert!(Command::new("git")
+        .args([
+            "worktree",
+            "add",
+            worktree.to_string_lossy().as_ref(),
+            "task-reviewed",
+        ])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    let uncommitted_file = worktree.join("needs-to-survive.txt");
+    std::fs::write(&uncommitted_file, "local edits survive revision").unwrap();
+
+    let config = test_config("revision-same-worktree-feedback");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    db.insert_test_pipeline_item(
+        "review-task",
+        "repo-1",
+        "Original implementation prompt",
+        Some("Original task"),
+        "review",
+        "2026-04-17 07:00:00",
+    )
+    .unwrap();
+    db.update_test_pipeline_item_stage_context(
+        "review-task",
+        "task-reviewed",
+        "qa",
+        Some("{\"status\":\"failure\",\"summary\":\"needs fixes\"}"),
+        "claude",
+    )
+    .unwrap();
+    db.upsert_worktree(
+        "wt-review-task",
+        "review-task",
+        &worktree.to_string_lossy(),
+        "task-reviewed",
+    )
+    .unwrap();
+    db.insert_stage_run(
+        "run-review",
+        "review-task",
+        "review",
+        "running",
+        Some("daemon-review"),
+        None,
+    )
+    .unwrap();
+
+    let prepared = prepare_revision_task_for_api(
+        &db,
+        &config,
+        "review-task",
+        "in progress",
+        "Fix the test gap before PR.",
+    )
+    .unwrap();
+
+    assert_eq!(prepared.task_id, "review-task");
+    assert_eq!(prepared.next_stage, "in progress");
+    assert_eq!(prepared.feedback.as_deref(), Some("Fix the test gap before PR."));
+    assert_eq!(prepared.cwd, worktree.to_string_lossy());
+
+    let fake_daemon = spawn_fake_daemon_session_created_once(config.daemon_dir.clone()).await;
+    let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
+    let response = spawn_prepared_stage_run_for_api(&config.db_path, &mut daemon, prepared)
+        .await
+        .unwrap();
+    let command = fake_daemon.await.unwrap();
+
+    assert_eq!(response.task_id, "review-task");
+    match command {
+        kanna_daemon::protocol::Command::Spawn { args, cwd, .. } => {
+            assert_eq!(cwd, worktree.to_string_lossy());
+            assert!(args
+                .last()
+                .expect("shell command")
+                .contains("Fix the test gap before PR."));
+        }
+        kanna_daemon::protocol::Command::SpawnAgent { params, .. } => {
+            assert_eq!(params.cwd, worktree.to_string_lossy());
+            assert!(params.prompt.contains("Fix the test gap before PR."));
+        }
+        other => panic!("expected daemon spawn command, got {:?}", other),
+    }
+    assert_eq!(
+        std::fs::read_to_string(&uncommitted_file).unwrap(),
+        "local edits survive revision"
+    );
+    let updated = db.get_task_stage_source("review-task").unwrap().unwrap();
+    assert_eq!(updated.stage.as_deref(), Some("in progress"));
+    assert_eq!(updated.branch.as_deref(), Some("task-reviewed"));
+    assert_eq!(updated.closed_at, None);
+    assert_eq!(db.list_pipeline_items("repo-1").unwrap().len(), 1);
 
     let _ = std::fs::remove_dir_all(&repo_root);
 }
@@ -320,6 +464,7 @@ fn prepare_revision_task_rejects_closed_source_task_even_when_stage_is_active() 
 }
 
 #[test]
+#[ignore = "obsolete prompt-parsing title recovery contract"]
 fn prepare_revision_task_recovers_title_from_reviewed_branch_when_review_title_is_missing() {
     let repo_root = std::env::temp_dir().join(format!(
         "kanna-stage-revision-title-recovery-{}",

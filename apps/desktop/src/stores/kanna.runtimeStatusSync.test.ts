@@ -289,6 +289,7 @@ vi.mock("@kanna/db", () => ({
   listPipelineItems: vi.fn(async (_db: DbHandle, repoId: string) =>
     mockState.pipelineItems.filter((item) => item.repo_id === repoId),
   ),
+  listTaskBlockers: vi.fn(async () => []),
   insertPipelineItem: vi.fn(async () => {}),
   updatePipelineItemActivity: mockState.updatePipelineItemActivityMock,
   markPipelineItemTearingDown: vi.fn(async () => {}),
@@ -302,8 +303,6 @@ vi.mock("@kanna/db", () => ({
   closePipelineItem: vi.fn(async (_db: DbHandle, itemId: string) => {
     const item = mockState.pipelineItems.find((candidate) => candidate.id === itemId);
     if (!item) return;
-    item.previous_stage = item.previous_stage ?? item.stage;
-    item.stage = "done";
     item.teardown_started_at = null;
     item.closed_at = "2026-04-16T00:00:00.000Z";
     item.updated_at = "2026-04-16T00:00:00.000Z";

@@ -93,13 +93,12 @@ describe("real continue-stage agent submission", () => {
       JSON.stringify({
         name: pipelineName,
         stages: [
-          { name: "in progress", transition: "manual" },
+          { name: "in progress", policy: { transition: "manual" } },
           {
             name: "commit",
-            transition: "auto",
-            mode: "continue",
             agent: "commit-real",
             prompt: "Create a file named continue-stage-real-submit.txt in the current directory containing exactly the text submitted with no punctuation. Then run: kanna-cli stage-complete --task-id \"$KANNA_TASK_ID\" --status success --summary 'continue submitted'. Do not wait for any additional input.",
+            policy: { transition: "auto" },
           },
         ],
       }),
@@ -129,7 +128,7 @@ describe("real continue-stage agent submission", () => {
     await client.deleteSession();
   });
 
-  it("advances a live real agent and submits the continue-stage prompt without a manual Enter", async () => {
+  it("advances a live real agent into the commit stage in place and executes the stage prompt", async () => {
     const initialPrompt = process.env.KANNA_E2E_REAL_AGENT_PROVIDER === "codex"
       ? "Create a file named continue-stage-initial.txt in the current directory containing exactly: ready. Then stop."
       : "";
@@ -168,16 +167,27 @@ describe("real continue-stage agent submission", () => {
 
     await execDb(
       client,
-      "UPDATE pipeline_item SET stage_result = ?, activity = 'idle', updated_at = datetime('now') WHERE id = ?",
-      [JSON.stringify({ status: "success", summary: "ready for continue" }), taskId],
+      "UPDATE pipeline_item SET activity = 'idle', updated_at = datetime('now') WHERE id = ?",
+      [taskId],
     );
     await hydrateStoreItem(client, taskId);
 
+    // Durable model: advancing accepts the current stage's work and swaps the
+    // commit stage's agent session into the SAME task and worktree, passing
+    // the stage prompt directly to the fresh agent session.
     await pressAdvanceStageShortcut(client);
 
     const markerPath = join(worktreePath, "continue-stage-real-submit.txt");
     await waitForFile(markerPath, 180_000, 1_000);
     expect((await readFile(markerPath, "utf8")).trimEnd()).toBe("submitted");
+
+    const stageRows = (await queryDb(
+      client,
+      "SELECT stage, closed_at FROM pipeline_item WHERE id = ?",
+      [taskId],
+    )) as Array<{ stage: string | null; closed_at: string | null }>;
+    expect(stageRows[0]?.stage).toBe("commit");
+    expect(stageRows[0]?.closed_at).toBeNull();
 
     expect(["codex", "claude", "copilot", "opencode", "antigravity"]).toContain(initialRow.agent_provider);
   }, 300_000);

@@ -1,3 +1,4 @@
+use super::NewStageRun;
 use super::{database_open_flags, Db, NewPipelineItem};
 use rusqlite::Connection;
 use rusqlite::OpenFlags;
@@ -74,7 +75,6 @@ fn server_connection_opens_with_desktop_like_wal_client_active() {
                 CREATE TABLE pipeline_item (
                   id TEXT PRIMARY KEY,
                   stage TEXT NOT NULL,
-                  previous_stage TEXT,
                   closed_at TEXT,
                   updated_at TEXT
                 );
@@ -93,7 +93,7 @@ fn server_connection_opens_with_desktop_like_wal_client_active() {
             |row| row.get(0),
         )
         .expect("desktop-like read");
-    assert_eq!(stage, "done");
+    assert_eq!(stage, "in progress");
 
     drop(db);
     drop(desktop_conn);
@@ -119,7 +119,7 @@ fn open_fails_with_clear_error_when_quick_check_cannot_read_database() {
 }
 
 #[test]
-fn close_pipeline_item_marks_task_done() {
+fn close_pipeline_item_sets_closed_at_without_changing_stage() {
     let path = temp_db_path();
     let conn = Connection::open(&path).expect("open temp db");
     conn.execute_batch(
@@ -127,7 +127,6 @@ fn close_pipeline_item_marks_task_done() {
             CREATE TABLE pipeline_item (
               id TEXT PRIMARY KEY,
               stage TEXT NOT NULL,
-              previous_stage TEXT,
               closed_at TEXT,
               updated_at TEXT
             );
@@ -141,19 +140,105 @@ fn close_pipeline_item_marks_task_done() {
     db.close_pipeline_item("task-1").expect("close task");
 
     let conn = Connection::open(&path).expect("re-open db");
-    let (stage, previous_stage, closed_at): (String, Option<String>, Option<String>) = conn
+    let (stage, closed_at): (String, Option<String>) = conn
         .query_row(
-            "SELECT stage, previous_stage, closed_at FROM pipeline_item WHERE id = 'task-1'",
+            "SELECT stage, closed_at FROM pipeline_item WHERE id = 'task-1'",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .expect("query row");
 
-    assert_eq!(stage, "done");
-    assert_eq!(previous_stage.as_deref(), Some("in progress"));
+    assert_eq!(stage, "in progress");
     assert!(closed_at.is_some());
 
     let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn stage_run_lifecycle_inserts_lists_and_finishes_runs() {
+    let path = Db::test_db_path("stage-run-lifecycle");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Implement feature",
+        Some("Implement feature"),
+        "in progress",
+        "2026-07-02 00:00:00",
+    )
+    .unwrap();
+
+    db.insert_stage_run(NewStageRun {
+        id: "run-1",
+        task_id: "task-1",
+        stage: "in progress",
+        agent: Some("implement"),
+        agent_provider: Some("codex"),
+        model: Some("gpt-5"),
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: Some("session-1"),
+    })
+    .unwrap();
+
+    let runs = db.list_stage_runs_for_task("task-1").unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].id, "run-1");
+    assert_eq!(runs[0].task_id, "task-1");
+    assert_eq!(runs[0].stage, "in progress");
+    assert_eq!(runs[0].agent.as_deref(), Some("implement"));
+    assert_eq!(runs[0].agent_provider.as_deref(), Some("codex"));
+    assert_eq!(runs[0].model.as_deref(), Some("gpt-5"));
+    assert_eq!(runs[0].status, "running");
+    assert_eq!(runs[0].session_id.as_deref(), Some("session-1"));
+    assert!(!runs[0].started_at.is_empty());
+
+    let result = r#"{"status":"success","summary":"implemented"}"#;
+    db.finish_stage_run("run-1", "succeeded", Some(result), Some("implemented"))
+        .unwrap();
+
+    let runs = db.list_stage_runs_for_task("task-1").unwrap();
+    assert_eq!(runs[0].status, "succeeded");
+    assert_eq!(runs[0].result.as_deref(), Some(result));
+    assert_eq!(runs[0].feedback.as_deref(), Some("implemented"));
+    assert!(runs[0].finished_at.is_some());
+}
+
+#[test]
+fn close_pipeline_item_cancels_running_stage_runs() {
+    let path = Db::test_db_path("stage-run-close-cancel");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Implement feature",
+        Some("Implement feature"),
+        "in progress",
+        "2026-07-02 00:00:00",
+    )
+    .unwrap();
+    db.insert_stage_run(NewStageRun {
+        id: "run-1",
+        task_id: "task-1",
+        stage: "in progress",
+        agent: Some("implement"),
+        agent_provider: Some("codex"),
+        model: None,
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: Some("task-1"),
+    })
+    .unwrap();
+
+    db.close_pipeline_item("task-1").unwrap();
+
+    let runs = db.list_stage_runs_for_task("task-1").unwrap();
+    assert_eq!(runs[0].status, "cancelled");
+    assert!(runs[0].finished_at.is_some());
 }
 
 #[test]
@@ -183,7 +268,8 @@ fn close_pipeline_item_accepts_task_branch_name() {
         .expect("close task by branch name");
 
     let item = db.get_pipeline_item("710917fb").unwrap().unwrap();
-    assert_eq!(item.stage.as_deref(), Some("done"));
+    assert_eq!(item.stage.as_deref(), Some("in progress"));
+    assert!(item.closed_at.is_some());
 }
 
 #[test]
@@ -195,7 +281,6 @@ fn update_pipeline_item_stage_does_not_mutate_closed_rows() {
             CREATE TABLE pipeline_item (
               id TEXT PRIMARY KEY,
               stage TEXT NOT NULL,
-              stage_result TEXT,
               closed_at TEXT,
               updated_at TEXT
             );
@@ -379,6 +464,55 @@ fn resolves_task_terminal_session_id_to_pipeline_item_when_no_session_row_exists
 }
 
 #[test]
+fn resolves_task_terminal_session_id_from_latest_running_stage_run() {
+    let path = Db::test_db_path("resolve-task-terminal-latest-stage-run");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "710917fb",
+        "repo-1",
+        "Review branch",
+        Some("Review branch"),
+        "review",
+        "2026-05-11 10:00:00",
+    )
+    .unwrap();
+    db.update_test_pipeline_item_stage_context(
+        "710917fb",
+        "task-710917fb",
+        "default",
+        None,
+        "claude",
+    )
+    .unwrap();
+    db.insert_stage_run(
+        "run-old",
+        "710917fb",
+        "in progress",
+        "finished",
+        Some("daemon-old"),
+        None,
+    )
+    .unwrap();
+    db.insert_stage_run(
+        "run-current",
+        "710917fb",
+        "review",
+        "running",
+        Some("daemon-current"),
+        Some("address review feedback"),
+    )
+    .unwrap();
+
+    assert_eq!(
+        db.resolve_task_terminal_session_id("task-710917fb")
+            .unwrap()
+            .as_deref(),
+        Some("daemon-current")
+    );
+}
+
+#[test]
 fn insert_pipeline_item_stores_stage_metadata() {
     let path = temp_db_path();
     let conn = Connection::open(&path).expect("open temp db");
@@ -389,8 +523,8 @@ fn insert_pipeline_item_stores_stage_metadata() {
               repo_id TEXT NOT NULL,
               prompt TEXT,
               pipeline TEXT NOT NULL,
+              pipeline_def TEXT,
               stage TEXT NOT NULL,
-              tags TEXT NOT NULL,
               branch TEXT,
               agent_type TEXT,
               agent_provider TEXT NOT NULL,
@@ -417,8 +551,8 @@ fn insert_pipeline_item_stores_stage_metadata() {
         repo_id: "repo-1",
         prompt: "Merge queued pull requests",
         pipeline: "default",
+        pipeline_def: Some("{\"stages\":[]}"),
         stage: "in progress",
-        tags_json: "[\"in progress\"]",
         branch: "task-task-2",
         agent_type: "pty",
         agent_provider: "claude",
@@ -432,22 +566,45 @@ fn insert_pipeline_item_stores_stage_metadata() {
     })
     .expect("insert pipeline item");
 
-    let conn = Connection::open(&path).expect("re-open db");
-    let row: (String, String, String, String, String, Option<i64>, Option<String>) = conn
-            .query_row(
-                "SELECT repo_id, prompt, pipeline, stage, activity, port_offset, display_name FROM pipeline_item WHERE id = 'task-2'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
-            )
-            .expect("query row");
+    struct InsertedPipelineItem {
+        repo_id: String,
+        prompt: String,
+        pipeline: String,
+        pipeline_def: Option<String>,
+        stage: String,
+        activity: String,
+        port_offset: Option<i64>,
+        display_name: Option<String>,
+    }
 
-    assert_eq!(row.0, "repo-1");
-    assert_eq!(row.1, "Merge queued pull requests");
-    assert_eq!(row.2, "default");
-    assert_eq!(row.3, "in progress");
-    assert_eq!(row.4, "working");
-    assert_eq!(row.5, Some(1422));
-    assert_eq!(row.6.as_deref(), Some("Merge queue"));
+    let conn = Connection::open(&path).expect("re-open db");
+    let row = conn
+        .query_row(
+            "SELECT repo_id, prompt, pipeline, pipeline_def, stage, activity, port_offset, display_name FROM pipeline_item WHERE id = 'task-2'",
+            [],
+            |row| {
+                Ok(InsertedPipelineItem {
+                    repo_id: row.get(0)?,
+                    prompt: row.get(1)?,
+                    pipeline: row.get(2)?,
+                    pipeline_def: row.get(3)?,
+                    stage: row.get(4)?,
+                    activity: row.get(5)?,
+                    port_offset: row.get(6)?,
+                    display_name: row.get(7)?,
+                })
+            },
+        )
+        .expect("query row");
+
+    assert_eq!(row.repo_id, "repo-1");
+    assert_eq!(row.prompt, "Merge queued pull requests");
+    assert_eq!(row.pipeline, "default");
+    assert_eq!(row.pipeline_def.as_deref(), Some("{\"stages\":[]}"));
+    assert_eq!(row.stage, "in progress");
+    assert_eq!(row.activity, "working");
+    assert_eq!(row.port_offset, Some(1422));
+    assert_eq!(row.display_name.as_deref(), Some("Merge queue"));
 
     let _ = std::fs::remove_file(path);
 }

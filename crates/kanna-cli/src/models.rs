@@ -48,8 +48,6 @@ pub(crate) struct TaskDetail {
     pub(crate) stage: Option<String>,
     pub(crate) pipeline_name: Option<String>,
     pub(crate) stage_transition: Option<String>,
-    #[serde(default)]
-    pub(crate) stage_result: Option<String>,
     pub(crate) activity: Option<String>,
     pub(crate) snippet: Option<String>,
     pub(crate) agent_type: Option<String>,
@@ -169,6 +167,8 @@ pub(crate) struct TaskInputResponse {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TaskActionResponse {
     pub(crate) task_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) follow_task: Option<bool>,
 }
 
 pub(crate) struct TaskCreateOptions {

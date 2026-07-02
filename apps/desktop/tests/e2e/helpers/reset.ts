@@ -65,12 +65,13 @@ async function waitForTaskClosed(
   while (Date.now() < deadline) {
     const rows = await queryDb(
       client,
-      "SELECT stage, closed_at FROM pipeline_item WHERE id = ?",
+      "SELECT closed_at FROM pipeline_item WHERE id = ?",
       [taskId],
-    ) as Array<{ stage?: string | null; closed_at?: string | null }>;
+    ) as Array<{ closed_at?: string | null }>;
     const row = rows[0];
     if (!row) return;
-    if (row.stage === "done" && typeof row.closed_at === "string" && row.closed_at.length > 0) {
+    // closed_at is the sole done indicator — closing never rewrites stage.
+    if (typeof row.closed_at === "string" && row.closed_at.length > 0) {
       return;
     }
     await sleep(250);

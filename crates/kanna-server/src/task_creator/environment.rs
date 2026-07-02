@@ -199,16 +199,27 @@ pub(super) fn which_binary(name: &str) -> Result<Option<String>, String> {
 pub(super) fn resolve_headless_agent_executable(
     provider: AgentProvider,
     path: Option<&str>,
+    worktree_path: &str,
 ) -> Result<Option<String>, String> {
     match provider {
         AgentProvider::Claude | AgentProvider::Codex | AgentProvider::Opencode => {
-            which_binary_with_path(provider.as_str(), path)
+            which_binary_with_path(provider.as_str(), path, worktree_path)
         }
         AgentProvider::Copilot | AgentProvider::Antigravity => Ok(None),
     }
 }
 
-fn which_binary_with_path(name: &str, path: Option<&str>) -> Result<Option<String>, String> {
+fn which_binary_with_path(
+    name: &str,
+    path: Option<&str>,
+    worktree_path: &str,
+) -> Result<Option<String>, String> {
+    if let Some(path) = path {
+        if let Some(binary) = resolve_workspace_binary_from_path(name, path, worktree_path) {
+            return Ok(Some(binary));
+        }
+    }
+
     resolve_binary_from_candidates(name, sidecar_candidates(name), path).map(Some)
 }
 
@@ -255,6 +266,21 @@ fn resolve_binary_from_path(name: &str, path: &str) -> Option<String> {
     path.split(':')
         .filter(|entry| !entry.is_empty())
         .map(|entry| Path::new(entry).join(name))
+        .find(|candidate| is_executable_file(candidate))
+        .map(|candidate| candidate.to_string_lossy().to_string())
+}
+
+fn resolve_workspace_binary_from_path(
+    name: &str,
+    path: &str,
+    worktree_path: &str,
+) -> Option<String> {
+    let worktree_path = Path::new(worktree_path);
+    path.split(':')
+        .filter(|entry| !entry.is_empty())
+        .map(Path::new)
+        .filter(|entry| entry.starts_with(worktree_path))
+        .map(|entry| entry.join(name))
         .find(|candidate| is_executable_file(candidate))
         .map(|candidate| candidate.to_string_lossy().to_string())
 }

@@ -14,6 +14,7 @@ pub(crate) struct Cli {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum Commands {
     /// Print the generated Kanna task manual for the current spawned task
     Guide {
@@ -283,6 +284,16 @@ pub(crate) enum TaskCommands {
     /// Advance an accepted task to the next pipeline stage
     AdvanceStage {
         /// The accepted task/pipeline_item ID
+        #[arg(long)]
+        task_id: String,
+
+        /// Override the local Kanna server base URL
+        #[arg(long)]
+        server_url: Option<String>,
+    },
+    /// Rerun the current pipeline stage for a task
+    RerunStage {
+        /// The task/pipeline_item ID to rerun
         #[arg(long)]
         task_id: String,
 

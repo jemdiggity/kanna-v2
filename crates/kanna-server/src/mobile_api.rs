@@ -71,7 +71,6 @@ pub struct TaskDetail {
     pub stage: Option<String>,
     pub pipeline_name: Option<String>,
     pub stage_transition: Option<String>,
-    pub stage_result: Option<String>,
     pub activity: Option<String>,
     pub snippet: Option<String>,
     pub agent_type: Option<String>,
@@ -156,6 +155,8 @@ pub struct SetTaskParentRequest {
 #[serde(rename_all = "camelCase")]
 pub struct TaskActionResponse {
     pub task_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follow_task: Option<bool>,
 }
 
 impl MobileApi {
@@ -336,7 +337,6 @@ fn map_task_detail(
         stage: item.stage,
         pipeline_name,
         stage_transition,
-        stage_result: item.stage_result,
         activity: item.activity,
         snippet: item.last_output_preview,
         agent_type: item.agent_type,

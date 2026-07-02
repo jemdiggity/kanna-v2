@@ -1,8 +1,9 @@
 use crate::api::{
     advance_stage_via_api, block_task_via_api, close_task_via_api, create_task_via_api,
     get_task_via_api, parse_wait_until, rename_task_via_api, repo_task_list_path,
-    send_task_input_via_api, set_task_parent_via_api, task_get_path, task_list_path,
-    task_logs_path, task_matches_wait_until, task_search_path, unblock_task_via_api,
+    rerun_stage_via_api, send_task_input_via_api, set_task_parent_via_api, task_get_path,
+    task_list_path, task_logs_path, task_matches_wait_until, task_search_path,
+    unblock_task_via_api,
 };
 use crate::commands::guide::{
     build_guide_context, render_guide_json, render_guide_markdown, run_guide_command, GuideContext,
@@ -151,6 +152,13 @@ fn typed_tool_surfaces() -> BTreeMap<&'static str, TypedToolSurface> {
             "kanna_advance_stage",
             TypedToolSurface {
                 command_path: &["task", "advance-stage"],
+                param_args: &[("task_id", "task_id")],
+            },
+        ),
+        (
+            "kanna_rerun_stage",
+            TypedToolSurface {
+                command_path: &["task", "rerun-stage"],
                 param_args: &[("task_id", "task_id")],
             },
         ),

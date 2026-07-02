@@ -60,9 +60,9 @@ async function seedPtyTask(
   await execDb(
     client,
     `INSERT INTO pipeline_item (
-       id, repo_id, prompt, pipeline, stage, tags, branch,
+       id, repo_id, prompt, pipeline, stage, branch,
        agent_type, agent_provider, activity, closed_at, created_at, updated_at
-     ) VALUES (?, ?, ?, 'default', ?, '[]', ?, 'pty', 'claude', 'idle', ?, ?, ?)`,
+     ) VALUES (?, ?, ?, 'default', ?, ?, 'pty', 'claude', 'idle', ?, ?, ?)`,
     [
       task.id,
       task.repoId,
@@ -361,7 +361,7 @@ describe("task lifecycle", () => {
     expect(titleStyle).toContain("line-through");
   });
 
-  it("closes directly to done and disappears when teardown commands do not exist", async () => {
+  it("closes immediately and disappears when teardown commands do not exist", async () => {
     // Internal setup only: this creates a second inert task to isolate close
     // behavior from terminal and agent process startup.
     const createResult = await client.executeAsync<string>(
@@ -398,13 +398,14 @@ describe("task lifecycle", () => {
       shift: true,
     }));
 
-    const stageRow = await waitForPipelineItem<{ stage: string }>(
+    // closed_at is the sole done indicator — closing never rewrites stage.
+    const closedRow = await waitForPipelineItem<{ closed_at: string | null }>(
       client,
-      "SELECT stage FROM pipeline_item WHERE repo_id = ? AND prompt = ? ORDER BY created_at DESC LIMIT 1",
+      "SELECT closed_at FROM pipeline_item WHERE repo_id = ? AND prompt = ? ORDER BY created_at DESC LIMIT 1",
       [repoId, "Close Fast"],
-      (row) => row?.stage === "done",
+      (row) => typeof row?.closed_at === "string" && row.closed_at.length > 0,
     );
-    expect(stageRow.stage).toBe("done");
+    expect(closedRow.closed_at).toBeTruthy();
 
     const sidebarText = await client.executeSync<string>(
       `return document.querySelector(".sidebar")?.textContent || "";`

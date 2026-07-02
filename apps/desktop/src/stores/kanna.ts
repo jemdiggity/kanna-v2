@@ -903,6 +903,7 @@ Use this branch as the default when the user does not specify a target branch. B
   return {
     repos: state.repos,
     items: state.items,
+    taskBlockers: state.taskBlockers,
     selectedRepoId: state.selectedRepoId,
     selectedItemId: state.selectedItemId,
     lastSelectedItemByRepo: state.lastSelectedItemByRepo,

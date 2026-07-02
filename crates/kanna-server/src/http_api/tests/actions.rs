@@ -56,6 +56,142 @@ async fn close_task_route_uses_task_closer() {
 }
 
 #[tokio::test]
+async fn close_pr_task_sends_retarget_instruction_to_running_dependents() {
+    use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+
+    let unique = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let daemon_dir = std::env::temp_dir().join(format!("kanna-http-close-pr-daemon-{unique}"));
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+    let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+    let _ = std::fs::remove_file(&socket_path);
+
+    let config = Config {
+        relay_url: "wss://relay.example".to_string(),
+        device_token: "device-token".to_string(),
+        firebase_project_id: "kanna-local".to_string(),
+        firebase_auth_emulator_url: None,
+        firebase_firestore_emulator_host: None,
+        daemon_dir: daemon_dir.to_string_lossy().to_string(),
+        db_path: Db::test_db_path(&format!("http-api-close-pr-{unique}")),
+        kanna_cli_path: None,
+        desktop_id: "desktop-1".to_string(),
+        desktop_secret: Some("desktop-secret".to_string()),
+        desktop_name: "Studio Mac".to_string(),
+        server_version: Some("test-version".to_string()),
+        lan_host: "127.0.0.1".to_string(),
+        lan_port: 48120,
+        pairing_store_path: format!("/tmp/kanna-pairings-close-pr-{unique}.json"),
+    };
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "task-a",
+        "repo-1",
+        "blocker prompt",
+        Some("Blocker PR"),
+        "pr",
+        "2026-07-01T00:00:00Z",
+    )
+    .unwrap();
+    db.update_test_pipeline_item_stage_context(
+        "task-a",
+        "task-a-branch",
+        "default",
+        None,
+        "claude",
+    )
+    .unwrap();
+    db.insert_test_pipeline_item(
+        "task-b",
+        "repo-1",
+        "dependent prompt",
+        Some("Dependent"),
+        "in progress",
+        "2026-07-01T00:01:00Z",
+    )
+    .unwrap();
+    db.insert_test_task_blocker("task-b", "task-a").unwrap();
+    db.upsert_worktree(
+        "wt-task-b",
+        "task-b",
+        "/tmp/task-b-worktree",
+        "task-b-branch",
+    )
+    .unwrap();
+    db.insert_test_terminal_session(
+        "agent-task-b",
+        "repo-1",
+        "task-b",
+        "agent",
+        "task-b-session",
+    )
+    .unwrap();
+    drop(db);
+
+    let daemon_listener = UnixListener::bind(&socket_path).unwrap();
+    let daemon_server = tokio::spawn(async move {
+        let (stream, _) = daemon_listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        for index in 0..5 {
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+            match (index, command) {
+                (0, DaemonCommand::Input { session_id, data }) => {
+                    assert_eq!(session_id, "task-b-session");
+                    let message = String::from_utf8(data).unwrap();
+                    assert!(message.contains("retarget this stacked branch"));
+                    assert!(message.contains("task-a-branch"));
+                    assert!(message.contains("main"));
+                }
+                (1, DaemonCommand::Input { session_id, data }) => {
+                    assert_eq!(session_id, "task-b-session");
+                    assert_eq!(data, vec![b'\r']);
+                }
+                (2..=4, DaemonCommand::Kill { .. }) => {}
+                (_, other) => panic!("unexpected daemon command at {index}: {:?}", other),
+            }
+            write_half
+                .write_all(
+                    format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap()).as_bytes(),
+                )
+                .await
+                .unwrap();
+        }
+    });
+
+    let app = super::router(Arc::new(super::AppState::new(config.clone())));
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks/task-a/actions/close")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    daemon_server.await.unwrap();
+    let db = Db::open(&config.db_path).unwrap();
+    let blocker = db.get_pipeline_item("task-a").unwrap().unwrap();
+    assert_eq!(blocker.stage.as_deref(), Some("pr"));
+    assert!(blocker.closed_at.is_some());
+
+    let _ = std::fs::remove_file(&socket_path);
+    let _ = std::fs::remove_dir_all(&daemon_dir);
+}
+
+#[tokio::test]
 async fn set_task_parent_route_sets_and_clears_parent() {
     let state = super::test_state_with_seed("desktop-1", "Studio Mac", |db| {
         db.insert_test_repo("repo-1", "Repo One").unwrap();
@@ -319,7 +455,8 @@ async fn close_task_route_resolves_branch_style_task_id() {
 
     let db = Db::open(&db_path).expect("reopen db");
     let item = db.get_pipeline_item("710917fb").unwrap().unwrap();
-    assert_eq!(item.stage.as_deref(), Some("done"));
+    assert_eq!(item.stage.as_deref(), Some("in progress"));
+    assert!(item.closed_at.is_some());
 
     let _ = std::fs::remove_dir_all(daemon_dir);
     let _ = std::fs::remove_file(db_path);
@@ -374,10 +511,6 @@ async fn block_task_route_marks_task_blocked_by_requested_tasks() {
     );
     let item = db.get_pipeline_item("task-1").unwrap().unwrap();
     assert_eq!(item.activity.as_deref(), Some("idle"));
-    assert_eq!(
-        db.get_test_pipeline_item_tags("task-1").unwrap(),
-        "[\"blocked\"]"
-    );
 }
 
 #[tokio::test]
@@ -425,7 +558,7 @@ async fn block_task_route_rejects_circular_dependencies() {
 }
 
 #[tokio::test]
-async fn unblock_task_route_removes_blockers_and_blocked_tag() {
+async fn unblock_task_route_removes_blockers() {
     let state = super::test_state_with_seed("desktop-1", "Studio Mac", |db| {
         db.insert_test_repo("repo-1", "Repo One").unwrap();
         db.insert_test_pipeline_item(
@@ -447,8 +580,6 @@ async fn unblock_task_route_removes_blockers_and_blocked_tag() {
         )
         .unwrap();
         db.insert_test_task_blocker("task-1", "blocker-1").unwrap();
-        db.set_test_pipeline_item_tags("task-1", "[\"blocked\"]")
-            .unwrap();
     });
     let db_path = state.config.db_path.clone();
     let app = super::router(state);
@@ -468,7 +599,207 @@ async fn unblock_task_route_removes_blockers_and_blocked_tag() {
         db.count_test_task_blockers("task-1", "blocker-1").unwrap(),
         0
     );
-    assert_eq!(db.get_test_pipeline_item_tags("task-1").unwrap(), "[]");
+}
+
+#[tokio::test]
+async fn complete_pr_stage_starts_dormant_dependent_from_blocker_branch() {
+    use kanna_daemon::protocol::{AgentProvider, Command as DaemonCommand, Event as DaemonEvent};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+
+    let unique = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let repo_root = std::env::temp_dir().join(format!("kanna-http-pr-unblocks-{unique}"));
+    init_test_git_repo(&repo_root);
+    assert!(Command::new("git")
+        .args(["checkout", "-b", "task-a"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    std::fs::write(repo_root.join("feature-a.txt"), "from blocker").unwrap();
+    assert!(Command::new("git")
+        .args(["add", "feature-a.txt"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["commit", "-m", "feature a"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["checkout", "main"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    let blocker_head = Command::new("git")
+        .args(["rev-parse", "task-a"])
+        .current_dir(&repo_root)
+        .output()
+        .unwrap();
+    assert!(blocker_head.status.success());
+    let blocker_head = String::from_utf8_lossy(&blocker_head.stdout)
+        .trim()
+        .to_string();
+
+    let (kanna_cli_path, created_test_sidecar) = ensure_test_kanna_cli_sidecar();
+    let daemon_dir = std::env::temp_dir().join(format!("kanna-http-pr-unblocks-daemon-{unique}"));
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+    let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+    let _ = std::fs::remove_file(&socket_path);
+
+    let config = Config {
+        relay_url: "wss://relay.example".to_string(),
+        device_token: "device-token".to_string(),
+        firebase_project_id: "kanna-local".to_string(),
+        firebase_auth_emulator_url: None,
+        firebase_firestore_emulator_host: None,
+        daemon_dir: daemon_dir.to_string_lossy().to_string(),
+        db_path: Db::test_db_path(&format!("http-api-pr-unblocks-{unique}")),
+        kanna_cli_path: Some(kanna_cli_path.to_string_lossy().to_string()),
+        desktop_id: "desktop-1".to_string(),
+        desktop_secret: Some("desktop-secret".to_string()),
+        desktop_name: "Studio Mac".to_string(),
+        server_version: Some("test-version".to_string()),
+        lan_host: "127.0.0.1".to_string(),
+        lan_port: 48120,
+        pairing_store_path: format!("/tmp/kanna-pairings-pr-unblocks-{unique}.json"),
+    };
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    db.insert_test_pipeline_item(
+        "task-a",
+        "repo-1",
+        "Build prerequisite",
+        Some("Prerequisite"),
+        "pr",
+        "2026-07-01T00:00:00Z",
+    )
+    .unwrap();
+    db.update_test_pipeline_item_stage_context("task-a", "task-a", "default", None, "claude")
+        .unwrap();
+    drop(db);
+
+    let app = super::router(Arc::new(super::AppState::new(config.clone())));
+    let create_response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/tasks")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "repoId": "repo-1",
+                        "prompt": "Build on task A",
+                        "blockerTaskIds": ["task-a"]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create_response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(create_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let dependent: CreateTaskResponse = from_slice(&body).unwrap();
+    assert_eq!(dependent.worktree_path, None);
+
+    let daemon_listener = UnixListener::bind(&socket_path).unwrap();
+    let expected_task_id = dependent.task_id.clone();
+    let daemon_server = tokio::spawn(async move {
+        let (stream, _) = daemon_listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+        let session_id = match command {
+            DaemonCommand::Spawn {
+                session_id,
+                cwd,
+                agent_provider,
+                ..
+            } => {
+                assert_eq!(session_id, expected_task_id);
+                assert!(cwd.contains(".kanna-worktrees/task-"));
+                assert_eq!(agent_provider, Some(AgentProvider::Claude));
+                session_id
+            }
+            DaemonCommand::SpawnAgent { session_id, params } => {
+                assert_eq!(session_id, expected_task_id);
+                assert!(params.cwd.contains(".kanna-worktrees/task-"));
+                assert_eq!(params.agent_provider, AgentProvider::Claude);
+                session_id
+            }
+            other => panic!("expected Spawn command, got {:?}", other),
+        };
+        write_half
+            .write_all(
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&DaemonEvent::SessionCreated { session_id }).unwrap()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+    });
+
+    let complete_response = app
+        .oneshot(
+            Request::post("/v1/tasks/task-a/actions/complete-stage")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "status": "success",
+                        "summary": "PR is ready"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(complete_response.status(), StatusCode::OK);
+    daemon_server.await.unwrap();
+
+    let db = Db::open(&config.db_path).unwrap();
+    let dependent_item = db.get_pipeline_item(&dependent.task_id).unwrap().unwrap();
+    assert_eq!(dependent_item.base_ref.as_deref(), Some("task-a"));
+    assert_eq!(dependent_item.activity.as_deref(), Some("working"));
+    let worktree_path = db
+        .get_task_worktree_path(&dependent.task_id)
+        .unwrap()
+        .expect("dependent worktree");
+    let dependent_head = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&worktree_path)
+        .output()
+        .unwrap();
+    assert!(dependent_head.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&dependent_head.stdout).trim(),
+        blocker_head
+    );
+
+    let _ = std::fs::remove_file(&socket_path);
+    let _ = std::fs::remove_dir_all(&daemon_dir);
+    let _ = std::fs::remove_dir_all(&repo_root);
+    if created_test_sidecar {
+        let _ = std::fs::remove_file(&kanna_cli_path);
+    }
 }
 
 #[tokio::test]
@@ -480,6 +811,7 @@ async fn advance_stage_route_uses_stage_advancer() {
             assert_eq!(task_id, "task-1");
             Ok(TaskActionResponse {
                 task_id: "task-2".to_string(),
+                follow_task: None,
             })
         }),
     );
@@ -502,6 +834,221 @@ async fn advance_stage_route_uses_stage_advancer() {
 }
 
 #[tokio::test]
+async fn rerun_stage_route_uses_stage_rerunner() {
+    let app = super::test_router_with_stage_rerunner(
+        "desktop-1",
+        "Studio Mac",
+        Arc::new(|task_id| {
+            assert_eq!(task_id, "task-1");
+            Ok(TaskActionResponse {
+                task_id: "task-1".to_string(),
+                follow_task: None,
+            })
+        }),
+    );
+
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks/task-1/actions/rerun-stage")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let rerun: TaskActionResponse = from_slice(&body).unwrap();
+    assert_eq!(rerun.task_id, "task-1");
+}
+
+#[tokio::test]
+async fn advance_stage_route_records_stage_run_for_spawned_next_task() {
+    use kanna_daemon::protocol::{AgentProvider, Command as DaemonCommand, Event as DaemonEvent};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+
+    let unique = format!(
+        "{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let repo_root = std::env::temp_dir().join(format!("kanna-http-advance-stage-{unique}"));
+    init_test_git_repo(&repo_root);
+    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::create_dir_all(repo_root.join(".kanna/agents/reviewer")).unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/pipelines/default.json"),
+        r#"{
+  "stages": [
+    { "name": "in progress", "transition": "manual" },
+    { "name": "review", "transition": "manual", "agent": "reviewer", "prompt": "Review $PREV_RESULT" }
+  ]
+}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/agents/reviewer/AGENT.md"),
+        "---\nagent_provider: claude\n---\nReview task $TASK_PROMPT",
+    )
+    .unwrap();
+    assert!(Command::new("git")
+        .args(["add", ".kanna"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["commit", "-m", "add pipeline"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["branch", "task-source"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+
+    let daemon_dir = std::env::temp_dir().join(format!("kanna-http-advance-daemon-{unique}"));
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+    let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+    let _ = std::fs::remove_file(&socket_path);
+    let daemon_listener = UnixListener::bind(&socket_path).unwrap();
+    let daemon_server = tokio::spawn(async move {
+        let (stream, _) = daemon_listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+        let session_id = match command {
+            DaemonCommand::Spawn {
+                session_id,
+                cwd,
+                agent_provider,
+                ..
+            } => {
+                assert_eq!(agent_provider, Some(AgentProvider::Claude));
+                assert!(cwd.contains(".kanna-worktrees/task-"));
+                session_id
+            }
+            DaemonCommand::SpawnAgent { session_id, params } => {
+                assert_eq!(params.agent_provider, AgentProvider::Claude);
+                assert!(params.cwd.contains(".kanna-worktrees/task-"));
+                session_id
+            }
+            other => panic!("expected stage advance spawn command, got {:?}", other),
+        };
+        write_half
+            .write_all(
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&DaemonEvent::SessionCreated { session_id }).unwrap()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+    });
+
+    let (kanna_cli_path, created_sidecar) = ensure_test_kanna_cli_sidecar();
+    let config = Config {
+        relay_url: "wss://relay.example".to_string(),
+        device_token: "device-token".to_string(),
+        firebase_project_id: "kanna-local".to_string(),
+        firebase_auth_emulator_url: None,
+        firebase_firestore_emulator_host: None,
+        daemon_dir: daemon_dir.to_string_lossy().to_string(),
+        db_path: Db::test_db_path(&format!("http-api-advance-stage-{unique}")),
+        kanna_cli_path: Some(kanna_cli_path.to_string_lossy().to_string()),
+        desktop_id: "desktop-1".to_string(),
+        desktop_secret: Some("desktop-secret".to_string()),
+        desktop_name: "Studio Mac".to_string(),
+        server_version: Some("test-version".to_string()),
+        lan_host: "127.0.0.1".to_string(),
+        lan_port: 48120,
+        pairing_store_path: format!("/tmp/kanna-pairings-advance-stage-{unique}.json"),
+    };
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    db.insert_test_pipeline_item(
+        "source-1",
+        "repo-1",
+        "Implement it",
+        Some("Implement it"),
+        "in progress",
+        "2026-07-02 00:00:00",
+    )
+    .unwrap();
+    db.update_test_pipeline_item_stage_context(
+        "source-1",
+        "task-source",
+        "default",
+        Some("{\"status\":\"success\",\"summary\":\"implemented\"}"),
+        "claude",
+    )
+    .unwrap();
+    drop(db);
+
+    let app = super::router(Arc::new(super::AppState::new(config.clone())));
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks/source-1/actions/advance-stage")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    if response.status() != StatusCode::OK {
+        daemon_server.abort();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        panic!(
+            "expected advance-stage to succeed, got {status}: {}",
+            String::from_utf8_lossy(&body)
+        );
+    }
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let created: TaskActionResponse = from_slice(&body).unwrap();
+
+    let db = Db::open(&config.db_path).unwrap();
+    let source = db.get_task_stage_source("source-1").unwrap().unwrap();
+    assert_eq!(source.stage.as_deref(), Some("done"));
+    let runs = db.list_stage_runs_for_task(&created.task_id).unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].stage, "review");
+    assert_eq!(runs[0].agent.as_deref(), Some("reviewer"));
+    assert_eq!(runs[0].agent_provider.as_deref(), Some("claude"));
+    assert_eq!(runs[0].status, "running");
+    assert_eq!(
+        runs[0].session_id.as_deref(),
+        Some(created.task_id.as_str())
+    );
+
+    daemon_server.await.unwrap();
+    if created_sidecar {
+        let _ = std::fs::remove_file(&kanna_cli_path);
+    }
+    let _ = std::fs::remove_file(&socket_path);
+    let _ = std::fs::remove_dir_all(&daemon_dir);
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[tokio::test]
 async fn complete_stage_route_uses_stage_completer() {
     let app = super::test_router_with_stage_completer(
         "desktop-1",
@@ -516,6 +1063,7 @@ async fn complete_stage_route_uses_stage_completer() {
             );
             Ok(TaskActionResponse {
                 task_id: "task-2".to_string(),
+                follow_task: None,
             })
         }),
     );
@@ -543,6 +1091,69 @@ async fn complete_stage_route_uses_stage_completer() {
         .unwrap();
     let created: TaskActionResponse = from_slice(&body).unwrap();
     assert_eq!(created.task_id, "task-2");
+}
+
+#[tokio::test]
+async fn complete_stage_route_finishes_latest_running_stage_run() {
+    let state = super::test_state_with_seed("desktop-1", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "task-1",
+            "repo-1",
+            "Implement it",
+            Some("Implement it"),
+            "in progress",
+            "2026-07-02 00:00:00",
+        )
+        .unwrap();
+        db.insert_stage_run(crate::db::NewStageRun {
+            id: "run-1",
+            task_id: "task-1",
+            stage: "in progress",
+            agent: Some("implement"),
+            agent_provider: Some("codex"),
+            model: None,
+            status: "running",
+            result: None,
+            feedback: None,
+            session_id: Some("task-1"),
+        })
+        .unwrap();
+    });
+    let db_path = state.config.db_path.clone();
+    let app = super::router(state);
+
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks/task-1/actions/complete-stage")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "status": "success",
+                        "summary": "implemented"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let db = Db::open(&db_path).unwrap();
+    let stage_result = serde_json::json!({
+        "status": "success",
+        "summary": "implemented",
+        "metadata": null
+    })
+    .to_string();
+    assert!(stage_result.contains("\"status\":\"success\""));
+    assert!(stage_result.contains("implemented"));
+    let runs = db.list_stage_runs_for_task("task-1").unwrap();
+    assert_eq!(runs[0].status, "succeeded");
+    assert_eq!(runs[0].result.as_deref(), Some(stage_result.as_str()));
+    assert_eq!(runs[0].feedback.as_deref(), Some("implemented"));
+    assert!(runs[0].finished_at.is_some());
 }
 
 #[tokio::test]

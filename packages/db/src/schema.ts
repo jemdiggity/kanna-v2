@@ -20,10 +20,8 @@ export interface PipelineItem {
   issue_title: string | null;
   prompt: string | null;
   pipeline: string;             // pipeline name (e.g., "default")
+  pipeline_def: string | null;  // resolved pipeline JSON snapshot for this task
   stage: string;                // current stage name (e.g., "in progress")
-  stage_result: string | null;  // JSON from stage-complete signal
-  active_post_action: string | null; // stage-local action currently running
-  tags: string;                 // JSON array of tag strings, e.g. '["pr"]' or '[]'
   pr_number: number | null;
   pr_url: string | null;
   branch: string | null;
@@ -42,9 +40,10 @@ export interface PipelineItem {
   pin_order: number | null;
   base_ref: string | null;
   agent_session_id: string | null;
-  previous_stage: string | null;
   teardown_started_at: string | null;
   parent_task_id: string | null; // subtask parent; nests under it in the sidebar
+  notify_task_id: string | null;
+  notified_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -59,6 +58,23 @@ export interface TaskPort {
   pipeline_item_id: string;
   env_name: string;
   created_at: string;
+}
+
+export type StageRunStatus = "pending" | "running" | "succeeded" | "failed" | "cancelled";
+
+export interface StageRun {
+  id: string;
+  task_id: string;
+  stage: string;
+  agent: string | null;
+  agent_provider: AgentProvider | null;
+  model: string | null;
+  status: StageRunStatus;
+  result: string | null;
+  feedback: string | null;
+  session_id: string | null;
+  started_at: string;
+  finished_at: string | null;
 }
 
 export interface TrustedPeer {
