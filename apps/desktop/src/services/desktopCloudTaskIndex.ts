@@ -305,7 +305,6 @@ export function mapDesktopCloudTasks(
       last_output_preview: null,
       notify_task_id: null,
       notified_at: null,
-      pipeline_def: null,
       created_at: snapshot.createdAt,
       updated_at: snapshot.updatedAt,
     });

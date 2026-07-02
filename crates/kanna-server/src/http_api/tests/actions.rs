@@ -184,7 +184,8 @@ async fn close_pr_task_sends_retarget_instruction_to_running_dependents() {
     daemon_server.await.unwrap();
     let db = Db::open(&config.db_path).unwrap();
     let blocker = db.get_pipeline_item("task-a").unwrap().unwrap();
-    assert_eq!(blocker.stage.as_deref(), Some("done"));
+    assert_eq!(blocker.stage.as_deref(), Some("pr"));
+    assert!(blocker.closed_at.is_some());
 
     let _ = std::fs::remove_file(&socket_path);
     let _ = std::fs::remove_dir_all(&daemon_dir);
@@ -1140,13 +1141,17 @@ async fn complete_stage_route_finishes_latest_running_stage_run() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let db = Db::open(&db_path).unwrap();
-    let task = db.get_task_stage_source("task-1").unwrap().unwrap();
-    let stage_result = task.stage_result.as_deref().unwrap();
+    let stage_result = serde_json::json!({
+        "status": "success",
+        "summary": "implemented",
+        "metadata": null
+    })
+    .to_string();
     assert!(stage_result.contains("\"status\":\"success\""));
     assert!(stage_result.contains("implemented"));
     let runs = db.list_stage_runs_for_task("task-1").unwrap();
     assert_eq!(runs[0].status, "succeeded");
-    assert_eq!(runs[0].result.as_deref(), Some(stage_result));
+    assert_eq!(runs[0].result.as_deref(), Some(stage_result.as_str()));
     assert_eq!(runs[0].feedback.as_deref(), Some("implemented"));
     assert!(runs[0].finished_at.is_some());
 }

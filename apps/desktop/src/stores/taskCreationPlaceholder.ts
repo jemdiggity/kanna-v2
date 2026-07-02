@@ -52,7 +52,6 @@ export function buildPendingTaskPlaceholder(
     parent_task_id: null,
     notify_task_id: null,
     notified_at: null,
-    pipeline_def: null,
     created_at: nowIso,
     updated_at: nowIso,
   };

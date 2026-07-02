@@ -83,15 +83,20 @@ CREATE TABLE IF NOT EXISTS terminal_session (
 
 CREATE TABLE IF NOT EXISTS stage_run (
   id TEXT PRIMARY KEY,
-  pipeline_item_id TEXT NOT NULL,
+  task_id TEXT NOT NULL,
   stage TEXT NOT NULL,
-  status TEXT NOT NULL DEFAULT 'running',
-  daemon_session_id TEXT,
+  agent TEXT,
+  agent_provider TEXT,
+  model TEXT,
+  status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'succeeded', 'failed', 'cancelled')),
+  result TEXT,
   feedback TEXT,
-  result_json TEXT,
+  session_id TEXT,
   started_at TEXT NOT NULL DEFAULT (datetime('now')),
   finished_at TEXT
 );
+
+CREATE INDEX IF NOT EXISTS idx_stage_run_task_started ON stage_run(task_id, started_at);
 
 CREATE TABLE IF NOT EXISTS task_blocker (
   blocked_item_id TEXT NOT NULL,

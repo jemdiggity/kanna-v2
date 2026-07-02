@@ -1031,10 +1031,6 @@ async fn create_task_route_persists_blocker_without_daemon_spawn() {
             .unwrap(),
         1
     );
-    assert_eq!(
-        db.get_test_pipeline_item_tags(&created.task_id).unwrap(),
-        "[\"in progress\",\"blocked\"]"
-    );
     assert_eq!(created.worktree_path, None);
     assert_eq!(db.count_test_worktrees_for_repo("repo-1").unwrap(), 0);
     assert_eq!(

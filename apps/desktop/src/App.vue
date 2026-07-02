@@ -177,8 +177,6 @@ const {
   handleSelectRepo,
   handleSelectItem,
 } = appTaskNavigation;
-void cloudSnapshot;
-void lanSnapshot;
 const appTaskCreation = useAppTaskCreation({
   store,
   toast,

@@ -65,8 +65,7 @@ impl Db {
                 base_ref TEXT,
                 notify_task_id TEXT,
                 notified_at TEXT,
-                parent_task_id TEXT,
-                pipeline_def TEXT
+                parent_task_id TEXT
             );
 
             CREATE TABLE worktree (
