@@ -3,7 +3,7 @@ use super::types::{
 };
 use super::worktree::remove_prepared_worktree;
 use crate::daemon_client::DaemonClient;
-use crate::db::Db;
+use crate::db::{Db, NewStageRun};
 use kanna_daemon::protocol::{AgentSpawnParams, Command as DaemonCommand, Event as DaemonEvent};
 
 pub(crate) fn prepared_task_id(prepared: &PreparedTaskSpawn) -> &str {
@@ -105,12 +105,22 @@ pub(crate) async fn spawn_prepared_task_for_api(
     })
 }
 
+pub(crate) async fn spawn_prepared_task_for_api_recording_stage_run(
+    db_path: &str,
+    daemon: &mut DaemonClient,
+    prepared: PreparedTaskSpawn,
+) -> Result<crate::mobile_api::CreateTaskResponse, String> {
+    let created = spawn_prepared_task_for_api(daemon, prepared.clone()).await?;
+    record_spawned_stage_run(db_path, &prepared)?;
+    Ok(created)
+}
+
 pub(crate) async fn spawn_prepared_task_for_api_with_rollback(
     db_path: &str,
     daemon: &mut DaemonClient,
     prepared: PreparedTaskSpawn,
 ) -> Result<crate::mobile_api::CreateTaskResponse, String> {
-    match spawn_prepared_task_for_api(daemon, prepared.clone()).await {
+    match spawn_prepared_task_for_api_recording_stage_run(db_path, daemon, prepared.clone()).await {
         Ok(created) => Ok(created),
         Err(err) => {
             let db = Db::open(db_path)
@@ -156,14 +166,15 @@ pub(crate) async fn continue_prepared_stage_for_api(
         session_id
     };
 
+    let command_session_id = session_id.clone();
     let command = match prepared.agent_type.as_str() {
         "agent" => DaemonCommand::AgentInput {
-            session_id,
+            session_id: command_session_id,
             text: prepared.input_text.clone(),
         },
         _ => DaemonCommand::Input {
-            session_id,
-            data: prepared.input,
+            session_id: command_session_id,
+            data: prepared.input.clone(),
         },
     };
 
@@ -179,10 +190,13 @@ pub(crate) async fn continue_prepared_stage_for_api(
     })?;
 
     match event {
-        DaemonEvent::Ok => Ok(crate::mobile_api::TaskActionResponse {
-            task_id: prepared.task_id,
-            follow_task: prepared.follow_task,
-        }),
+        DaemonEvent::Ok => {
+            record_continued_stage_run(db_path, &prepared, &session_id)?;
+            Ok(crate::mobile_api::TaskActionResponse {
+                task_id: prepared.task_id,
+                follow_task: prepared.follow_task,
+            })
+        }
         DaemonEvent::Error { message, .. } => {
             let _ = rollback_continue_stage(
                 db_path,
@@ -295,6 +309,54 @@ pub(crate) async fn rerun_prepared_stage_for_api(
         DaemonEvent::Error { message, .. } => Err(format!("daemon error: {}", message)),
         other => Err(format!("unexpected daemon response: {:?}", other)),
     }
+}
+
+fn record_spawned_stage_run(db_path: &str, prepared: &PreparedTaskSpawn) -> Result<(), String> {
+    let db = Db::open(db_path).map_err(|e| format!("db error: {}", e))?;
+    let run_id = generate_stage_run_id(&prepared.created_task.task_id);
+    db.insert_stage_run(NewStageRun {
+        id: &run_id,
+        task_id: &prepared.created_task.task_id,
+        stage: &prepared.created_task.stage,
+        agent: prepared.stage_agent.as_deref(),
+        agent_provider: Some(prepared.agent_provider.as_str()),
+        model: prepared.model.as_deref(),
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: Some(&prepared.session_id),
+    })
+    .map_err(|e| format!("db error: {}", e))
+}
+
+fn record_continued_stage_run(
+    db_path: &str,
+    prepared: &PreparedStageContinue,
+    session_id: &str,
+) -> Result<(), String> {
+    let db = Db::open(db_path).map_err(|e| format!("db error: {}", e))?;
+    let run_id = generate_stage_run_id(&prepared.task_id);
+    db.insert_stage_run(NewStageRun {
+        id: &run_id,
+        task_id: &prepared.task_id,
+        stage: &prepared.next_stage,
+        agent: prepared.stage_agent.as_deref(),
+        agent_provider: prepared.agent_provider.as_deref(),
+        model: prepared.model.as_deref(),
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: Some(session_id),
+    })
+    .map_err(|e| format!("db error: {}", e))
+}
+
+fn generate_stage_run_id(task_id: &str) -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    format!("run-{task_id}-{nanos}")
 }
 
 fn rollback_continue_stage(

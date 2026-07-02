@@ -45,6 +45,9 @@ import {
   insertTaskTransferProvenance,
   getTaskTransferProvenance,
   insertOperatorEvent,
+  insertStageRun,
+  listStageRunsForTask,
+  finishStageRun,
   type DbHandle,
 } from "./queries.js";
 import type {
@@ -58,6 +61,7 @@ import type {
   TrustedPeer,
   TaskTransfer,
   TaskTransferProvenance,
+  StageRun,
   Worktree,
 } from "./schema.js";
 
@@ -76,6 +80,7 @@ function createMockDb(): DbHandle & {
     trusted_peer: TrustedPeer[];
     task_transfer: TaskTransfer[];
     task_transfer_provenance: TaskTransferProvenance[];
+    stage_run: StageRun[];
     settings: Setting[];
     operator_event: Omit<OperatorEvent, "id" | "created_at">[];
   };
@@ -93,6 +98,7 @@ function createMockDb(): DbHandle & {
     trusted_peer: [] as TrustedPeer[],
     task_transfer: [] as TaskTransfer[],
     task_transfer_provenance: [] as TaskTransferProvenance[],
+    stage_run: [] as StageRun[],
     settings: [] as Setting[],
     operator_event: [] as Omit<OperatorEvent, "id" | "created_at">[],
   };
@@ -146,7 +152,7 @@ function createMockDb(): DbHandle & {
           repo.remote_url_hash = remoteUrlHash;
         }
       } else if (q.startsWith("INSERT INTO PIPELINE_ITEM")) {
-        const [id, repo_id, issue_number, issue_title, prompt, pipeline, stage, tagsJson, pr_number, pr_url, branch, agent_type, agent_provider, port_offset, port_env, agent_spawn_options, activity] =
+        const [id, repo_id, issue_number, issue_title, prompt, pipeline, pipeline_def, stage, tagsJson, pr_number, pr_url, branch, agent_type, agent_provider, port_offset, port_env, agent_spawn_options, activity] =
           bindValues as unknown[];
         tables.pipeline_item.push({
           id: id as string,
@@ -155,6 +161,7 @@ function createMockDb(): DbHandle & {
           issue_title: (issue_title as string | null),
           prompt: (prompt as string | null),
           pipeline: (pipeline as string) || "default",
+          pipeline_def: (pipeline_def as string | null) ?? null,
           stage: (stage as string) || "in progress",
           stage_result: null,
           active_post_action: null,
@@ -177,12 +184,40 @@ function createMockDb(): DbHandle & {
           agent_session_id: null,
           previous_stage: null,
           teardown_started_at: null,
-          parent_task_id: (bindValues?.[19] as string | null) ?? null,
+          parent_task_id: (bindValues?.[20] as string | null) ?? null,
           created_at: currentTimestamp(),
           updated_at: currentTimestamp(),
           pinned: 0,
           pin_order: null,
         } as PipelineItem);
+      } else if (q.startsWith("INSERT INTO STAGE_RUN")) {
+        const [id, task_id, stage, agent, agent_provider, model, status, result, feedback, session_id] =
+          bindValues as [
+            string,
+            string,
+            string,
+            string | null,
+            StageRun["agent_provider"],
+            string | null,
+            StageRun["status"],
+            string | null,
+            string | null,
+            string | null,
+          ];
+        tables.stage_run.push({
+          id,
+          task_id,
+          stage,
+          agent,
+          agent_provider,
+          model,
+          status,
+          result,
+          feedback,
+          session_id,
+          started_at: currentTimestamp(),
+          finished_at: null,
+        });
       } else if (q.startsWith("INSERT OR IGNORE INTO TASK_BLOCKER")) {
         const [blocked_item_id, blocker_item_id] = bindValues as [string, string];
         const existing = tables.task_blocker.find(
@@ -319,6 +354,20 @@ function createMockDb(): DbHandle & {
           transfer.status = "rejected";
           transfer.completed_at = new Date().toISOString();
           transfer.error = firstValue;
+        }
+      } else if (q.startsWith("UPDATE STAGE_RUN")) {
+        const [status, result, feedback, id] = bindValues as [
+          StageRun["status"],
+          string | null,
+          string | null,
+          string,
+        ];
+        const run = tables.stage_run.find((row) => row.id === id);
+        if (run) {
+          run.status = status;
+          run.result = result;
+          run.feedback = feedback;
+          run.finished_at = currentTimestamp();
         }
       } else if (q.startsWith("DELETE FROM TASK_PORT WHERE PIPELINE_ITEM_ID")) {
         const [itemId] = bindValues as [string];
@@ -510,6 +559,11 @@ function createMockDb(): DbHandle & {
       } else if (q.startsWith("SELECT * FROM TASK_TRANSFER_PROVENANCE WHERE PIPELINE_ITEM_ID")) {
         const [pipelineItemId] = bindValues as [string];
         return tables.task_transfer_provenance.filter((row) => row.pipeline_item_id === pipelineItemId) as unknown as T[];
+      } else if (q.startsWith("SELECT * FROM STAGE_RUN WHERE TASK_ID")) {
+        const [taskId] = bindValues as [string];
+        return tables.stage_run
+          .filter((row) => row.task_id === taskId)
+          .sort((a, b) => new Date(a.started_at).getTime() - new Date(b.started_at).getTime()) as unknown as T[];
       } else if (q.startsWith("SELECT PIPELINE_ITEM_ID FROM TASK_PORT WHERE PORT")) {
         const [port] = bindValues as [number];
         const row = tables.task_port.find((p) => p.port === port);
@@ -998,6 +1052,115 @@ describe("pipeline_item queries", () => {
     const item = db.tables.pipeline_item.find((p) => p.id === "pi1");
     expect(item?.pipeline).toBe("custom");
     expect(item?.stage).toBe("review");
+  });
+
+  it("insertPipelineItem persists the resolved pipeline definition snapshot", async () => {
+    const pipelineDef = JSON.stringify({
+      stages: [
+        { name: "in progress", transition: "manual" },
+        { name: "review", transition: "manual" },
+      ],
+    });
+
+    await insertPipelineItem(db, {
+      id: "pi1",
+      repo_id: "r1",
+      issue_number: null,
+      issue_title: null,
+      prompt: "do it",
+      tags: [],
+      pr_number: null,
+      pr_url: null,
+      branch: null,
+      agent_type: null,
+      agent_provider: "claude",
+      activity: "idle",
+      port_offset: null,
+      port_env: null,
+      pipeline_def: pipelineDef,
+    });
+
+    const item = db.tables.pipeline_item.find((p) => p.id === "pi1");
+    expect(item?.pipeline_def).toBe(pipelineDef);
+  });
+});
+
+describe("stage_run queries", () => {
+  let db: ReturnType<typeof createMockDb>;
+
+  beforeEach(() => {
+    db = createMockDb();
+    db.setNow("2026-07-02T00:00:00.000Z");
+  });
+
+  it("inserts and lists stage runs for a task by start time", async () => {
+    await insertStageRun(db, {
+      id: "run-2",
+      task_id: "task-1",
+      stage: "review",
+      agent: "reviewer",
+      agent_provider: "claude",
+      model: "sonnet",
+      status: "running",
+      result: null,
+      feedback: null,
+      session_id: "session-2",
+    });
+    db.setNow("2026-07-02T00:01:00.000Z");
+    await insertStageRun(db, {
+      id: "run-1",
+      task_id: "task-1",
+      stage: "in progress",
+      agent: "implement",
+      agent_provider: "codex",
+      model: null,
+      status: "succeeded",
+      result: JSON.stringify({ status: "success" }),
+      feedback: "done",
+      session_id: "session-1",
+    });
+
+    const runs = await listStageRunsForTask(db, "task-1");
+
+    expect(runs.map((run) => run.id)).toEqual(["run-2", "run-1"]);
+    expect(runs[0]).toMatchObject({
+      task_id: "task-1",
+      stage: "review",
+      agent_provider: "claude",
+      status: "running",
+      session_id: "session-2",
+    });
+  });
+
+  it("finishes a stage run with terminal status, result, feedback, and finished_at", async () => {
+    await insertStageRun(db, {
+      id: "run-1",
+      task_id: "task-1",
+      stage: "in progress",
+      agent: "implement",
+      agent_provider: "codex",
+      model: null,
+      status: "running",
+      result: null,
+      feedback: null,
+      session_id: "session-1",
+    });
+    db.setNow("2026-07-02T00:05:00.000Z");
+    const result = JSON.stringify({ status: "success", summary: "implemented" });
+
+    await finishStageRun(db, "run-1", {
+      status: "succeeded",
+      result,
+      feedback: "implemented",
+    });
+
+    expect(db.tables.stage_run[0]).toMatchObject({
+      id: "run-1",
+      status: "succeeded",
+      result,
+      feedback: "implemented",
+      finished_at: "2026-07-02T00:05:00.000Z",
+    });
   });
 });
 

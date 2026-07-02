@@ -92,6 +92,7 @@ export async function runMigrations(db: DbHandle): Promise<void> {
   await db.execute(`CREATE TABLE IF NOT EXISTS pipeline_item (
     id TEXT PRIMARY KEY, repo_id TEXT NOT NULL REFERENCES repo(id) ON DELETE CASCADE,
     issue_number INTEGER, issue_title TEXT, prompt TEXT,
+    pipeline_def TEXT,
     stage TEXT NOT NULL DEFAULT 'in_progress', pr_number INTEGER, pr_url TEXT,
     branch TEXT, agent_type TEXT,
     agent_spawn_options TEXT,
@@ -122,6 +123,21 @@ export async function runMigrations(db: DbHandle): Promise<void> {
     status TEXT NOT NULL DEFAULT 'running', started_at TEXT NOT NULL DEFAULT (datetime('now')),
     finished_at TEXT, error TEXT
   )`);
+  await db.execute(`CREATE TABLE IF NOT EXISTS stage_run (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL REFERENCES pipeline_item(id) ON DELETE CASCADE,
+    stage TEXT NOT NULL,
+    agent TEXT,
+    agent_provider TEXT,
+    model TEXT,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'succeeded', 'failed', 'cancelled')),
+    result TEXT,
+    feedback TEXT,
+    session_id TEXT,
+    started_at TEXT NOT NULL DEFAULT (datetime('now')),
+    finished_at TEXT
+  )`);
+  await db.execute(`CREATE INDEX IF NOT EXISTS idx_stage_run_task_started ON stage_run(task_id, started_at)`);
   await db.execute(`CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)`);
 
   const hasMigration = async (id: string): Promise<boolean> => {
@@ -397,5 +413,68 @@ export async function runMigrations(db: DbHandle): Promise<void> {
 
   await runMigration("022_pipeline_item_parent_task_id", async () => {
     await addColumn("pipeline_item", "parent_task_id", "TEXT");
+  });
+
+  await runMigration("023_stage_run_pipeline_snapshot", async () => {
+    await addColumn("pipeline_item", "pipeline_def", "TEXT");
+    await db.execute(`CREATE TABLE IF NOT EXISTS stage_run (
+      id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL REFERENCES pipeline_item(id) ON DELETE CASCADE,
+      stage TEXT NOT NULL,
+      agent TEXT,
+      agent_provider TEXT,
+      model TEXT,
+      status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'succeeded', 'failed', 'cancelled')),
+      result TEXT,
+      feedback TEXT,
+      session_id TEXT,
+      started_at TEXT NOT NULL DEFAULT (datetime('now')),
+      finished_at TEXT
+    )`);
+    await db.execute(`CREATE INDEX IF NOT EXISTS idx_stage_run_task_started ON stage_run(task_id, started_at)`);
+    await db.execute(`
+      INSERT OR IGNORE INTO stage_run (
+        id, task_id, stage, agent, agent_provider, model, status, result, feedback, session_id, started_at, finished_at
+      )
+      SELECT
+        'migration-current-' || id,
+        id,
+        stage,
+        agent_type,
+        agent_provider,
+        NULL,
+        CASE
+          WHEN stage_result IS NOT NULL
+            AND json_valid(stage_result)
+            AND json_extract(stage_result, '$.status') = 'success'
+            THEN 'succeeded'
+          WHEN stage_result IS NOT NULL
+            AND json_valid(stage_result)
+            AND json_extract(stage_result, '$.status') = 'failure'
+            THEN 'failed'
+          ELSE 'running'
+        END,
+        stage_result,
+        CASE
+          WHEN stage_result IS NOT NULL AND json_valid(stage_result)
+            THEN json_extract(stage_result, '$.summary')
+          ELSE NULL
+        END,
+        agent_session_id,
+        COALESCE(activity_changed_at, created_at, datetime('now')),
+        CASE
+          WHEN stage_result IS NOT NULL
+            AND json_valid(stage_result)
+            AND json_extract(stage_result, '$.status') IN ('success', 'failure')
+            THEN COALESCE(updated_at, datetime('now'))
+          ELSE NULL
+        END
+      FROM pipeline_item
+      WHERE closed_at IS NULL
+        AND stage != 'done'
+        AND NOT EXISTS (
+          SELECT 1 FROM stage_run WHERE stage_run.task_id = pipeline_item.id
+        )
+    `);
   });
 }

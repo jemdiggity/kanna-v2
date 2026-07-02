@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_yaml::Value as YamlValue;
 use std::collections::HashMap;
 use std::path::Path;
@@ -22,13 +22,13 @@ pub(super) struct RepoWorkspacePathConfig {
     pub(super) append: Option<Vec<String>>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub(super) struct PipelineDefinition {
     pub(super) stages: Vec<PipelineStage>,
     pub(super) environments: Option<HashMap<String, PipelineEnvironment>>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub(super) struct PipelineStage {
     pub(super) name: String,
     pub(super) agent: Option<String>,
@@ -46,7 +46,7 @@ pub(super) struct PipelineEnvironment {
     pub(super) setup: Option<Vec<String>>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub(super) struct PipelinePostAction {
     pub(super) name: String,
     pub(super) agent: Option<String>,
@@ -55,7 +55,7 @@ pub(super) struct PipelinePostAction {
     pub(super) transition: Option<String>,
 }
 
-#[derive(Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum PipelineStageMode {
     NewTask,
@@ -99,6 +99,18 @@ pub(super) fn read_pipeline_definition(
         Err(_) => read_builtin_resource(&format!(".kanna/pipelines/{pipeline_name}.json"))?,
     };
     serde_json::from_str(&content).map_err(|e| format!("invalid pipeline definition: {}", e))
+}
+
+pub(super) fn read_task_pipeline_definition(
+    repo_path: &str,
+    pipeline_name: &str,
+    pipeline_def: Option<&str>,
+) -> Result<PipelineDefinition, String> {
+    if let Some(pipeline_def) = pipeline_def.filter(|value| !value.trim().is_empty()) {
+        return serde_json::from_str(pipeline_def)
+            .map_err(|e| format!("invalid stored pipeline definition: {}", e));
+    }
+    read_pipeline_definition(repo_path, pipeline_name)
 }
 
 pub(super) fn read_agent_definition(

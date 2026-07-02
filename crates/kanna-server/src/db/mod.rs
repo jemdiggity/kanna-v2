@@ -9,6 +9,7 @@ mod ports;
 mod post_actions;
 mod repos;
 mod settings;
+mod stage_runs;
 #[cfg(test)]
 mod test_support;
 #[cfg(test)]
@@ -26,6 +27,7 @@ pub struct PipelineItem {
     pub issue_title: Option<String>,
     pub prompt: Option<String>,
     pub pipeline: Option<String>,
+    pub pipeline_def: Option<String>,
     pub stage: Option<String>,
     pub stage_result: Option<String>,
     pub pr_number: Option<i64>,
@@ -78,6 +80,7 @@ pub struct TaskStageSource {
     pub branch: Option<String>,
     pub base_ref: Option<String>,
     pub pipeline: Option<String>,
+    pub pipeline_def: Option<String>,
     pub agent_type: Option<String>,
     pub agent_provider: Option<String>,
     pub closed_at: Option<String>,
@@ -89,6 +92,7 @@ pub struct NewPipelineItem<'a> {
     pub prompt: &'a str,
     pub display_name: Option<&'a str>,
     pub pipeline: &'a str,
+    pub pipeline_def: Option<&'a str>,
     pub stage: &'a str,
     pub tags_json: &'a str,
     pub branch: &'a str,
@@ -100,6 +104,36 @@ pub struct NewPipelineItem<'a> {
     pub base_ref: Option<&'a str>,
     pub notify_task_id: Option<&'a str>,
     pub parent_task_id: Option<&'a str>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct StageRun {
+    pub id: String,
+    pub task_id: String,
+    pub stage: String,
+    pub agent: Option<String>,
+    pub agent_provider: Option<String>,
+    pub model: Option<String>,
+    pub status: String,
+    pub result: Option<String>,
+    pub feedback: Option<String>,
+    pub session_id: Option<String>,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+}
+
+pub struct NewStageRun<'a> {
+    pub id: &'a str,
+    pub task_id: &'a str,
+    pub stage: &'a str,
+    pub agent: Option<&'a str>,
+    pub agent_provider: Option<&'a str>,
+    pub model: Option<&'a str>,
+    pub status: &'a str,
+    pub result: Option<&'a str>,
+    pub feedback: Option<&'a str>,
+    pub session_id: Option<&'a str>,
 }
 
 pub struct ClaimedTaskNotification {

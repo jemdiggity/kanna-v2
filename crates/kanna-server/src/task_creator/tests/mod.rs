@@ -1,4 +1,5 @@
 use super::environment::resolve_binary_from_candidates_with_path_lookup;
+use super::lifecycle::spawn_prepared_task;
 use super::prompt::PromptContext;
 use super::provider::{AgentProvider, AgentSessionType};
 use super::types::{CreatedTask, PreparedSessionSpawn, PreparedStageTransition, PreparedTaskSpawn};
@@ -8,6 +9,7 @@ use super::{
     prepare_auto_stage_completion_for_api, prepare_merge_agent_for_api,
     prepare_rerun_stage_for_api, prepare_revision_task_for_api, prepare_task_for_api,
     read_default_agent_provider_setting, resolve_agent_type, spawn_prepared_task,
+    spawn_prepared_task_for_api_recording_stage_run,
 };
 use crate::config::Config;
 use crate::daemon_client::DaemonClient;

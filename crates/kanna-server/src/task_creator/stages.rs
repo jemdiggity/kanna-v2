@@ -2,7 +2,9 @@ use crate::config::Config;
 use crate::db::{Db, TaskStageSource};
 
 use super::continuation::{prepare_continue_stage, prepare_post_action_stage};
-use super::definitions::{read_pipeline_definition, PipelineStageMode};
+use super::definitions::{
+    read_pipeline_definition, read_task_pipeline_definition, PipelineStageMode,
+};
 use super::prepare_task_spawn;
 use super::prompt::{build_post_action_prompt, build_target_stage_prompt};
 use super::provider::normalize_agent_type;
@@ -40,7 +42,11 @@ pub(crate) fn prepare_advance_stage_for_api(
         .stage
         .clone()
         .ok_or_else(|| format!("task has no stage: {}", source_task_id))?;
-    let pipeline = read_pipeline_definition(&repo.path, &pipeline_name)?;
+    let pipeline = read_task_pipeline_definition(
+        &repo.path,
+        &pipeline_name,
+        source_task.pipeline_def.as_deref(),
+    )?;
     let current_stage_index = pipeline
         .stages
         .iter()
@@ -50,6 +56,7 @@ pub(crate) fn prepare_advance_stage_for_api(
     let source_branch =
         resolve_current_source_worktree_branch(&repo.path, source_task.branch.as_deref());
     let display_name = resolve_inherited_task_title(db, &source_task)?;
+    let prev_result = previous_stage_result(db, source_task_id, &source_task)?;
 
     if source_task.active_post_action.is_none() {
         if let Some(post_action) = current_stage.post_action.as_ref() {
@@ -57,7 +64,7 @@ pub(crate) fn prepare_advance_stage_for_api(
                 &repo.path,
                 post_action,
                 source_task.prompt.as_deref().unwrap_or(""),
-                source_task.stage_result.as_deref(),
+                prev_result.as_deref(),
                 source_branch.as_deref(),
                 source_task.base_ref.as_deref(),
                 source_task.branch.as_deref(),
@@ -90,7 +97,7 @@ pub(crate) fn prepare_advance_stage_for_api(
         &repo.path,
         next_stage,
         source_task.prompt.as_deref().unwrap_or(""),
-        source_task.stage_result.as_deref(),
+        prev_result.as_deref(),
         source_branch.as_deref(),
         source_task.base_ref.as_deref(),
         source_task.branch.as_deref(),
@@ -111,6 +118,7 @@ pub(crate) fn prepare_advance_stage_for_api(
                 &task_prompt,
                 source_task.branch.as_deref(),
                 normalize_agent_type(source_task.agent_type.as_deref()).unwrap_or("pty"),
+                next_stage.agent.as_deref(),
                 source_task.agent_provider.as_deref(),
                 next_stage.follow_task,
             )?,
@@ -125,6 +133,7 @@ pub(crate) fn prepare_advance_stage_for_api(
             task_prompt,
             display_name,
             pipeline_name: Some(pipeline_name),
+            pipeline_def: source_task.pipeline_def,
             base_ref: source_branch,
             stored_base_ref: source_task.base_ref,
             stage_override: Some(next_stage.name.clone()),
@@ -163,6 +172,16 @@ fn resolve_inherited_task_title(
         }
     }
     Ok(non_empty_string(source_task.prompt.clone()))
+}
+
+fn previous_stage_result(
+    db: &Db,
+    source_task_id: &str,
+    source_task: &TaskStageSource,
+) -> Result<Option<String>, String> {
+    db.latest_finished_stage_run_result(source_task_id)
+        .map_err(|e| format!("db error: {}", e))
+        .map(|result| result.or_else(|| source_task.stage_result.clone()))
 }
 
 fn non_empty_string(value: Option<String>) -> Option<String> {
@@ -208,7 +227,11 @@ pub(crate) fn prepare_auto_stage_completion_for_api(
         .stage
         .clone()
         .ok_or_else(|| format!("task has no stage: {}", source_task_id))?;
-    let pipeline = read_pipeline_definition(&repo.path, &pipeline_name)?;
+    let pipeline = read_task_pipeline_definition(
+        &repo.path,
+        &pipeline_name,
+        source_task.pipeline_def.as_deref(),
+    )?;
     let current_stage_index = pipeline
         .stages
         .iter()
@@ -235,12 +258,13 @@ pub(crate) fn prepare_auto_stage_completion_for_api(
     let source_branch =
         resolve_current_source_worktree_branch(&repo.path, source_task.branch.as_deref());
     let display_name = resolve_inherited_task_title(db, &source_task)?;
+    let prev_result = previous_stage_result(db, source_task_id, &source_task)?;
 
     let task_prompt = build_target_stage_prompt(
         &repo.path,
         next_stage,
         source_task.prompt.as_deref().unwrap_or(""),
-        source_task.stage_result.as_deref(),
+        prev_result.as_deref(),
         source_branch.as_deref(),
         source_task.base_ref.as_deref(),
         source_task.branch.as_deref(),
@@ -260,6 +284,7 @@ pub(crate) fn prepare_auto_stage_completion_for_api(
             &task_prompt,
             source_task.branch.as_deref(),
             normalize_agent_type(source_task.agent_type.as_deref()).unwrap_or("pty"),
+            next_stage.agent.as_deref(),
             source_task.agent_provider.as_deref(),
             next_stage.follow_task,
         )
@@ -275,6 +300,7 @@ pub(crate) fn prepare_auto_stage_completion_for_api(
             task_prompt,
             display_name,
             pipeline_name: Some(pipeline_name),
+            pipeline_def: source_task.pipeline_def,
             base_ref: source_branch,
             stored_base_ref: source_task.base_ref,
             stage_override: Some(next_stage.name.clone()),
@@ -315,7 +341,11 @@ pub(crate) fn prepare_revision_task_for_api(
         .pipeline
         .clone()
         .unwrap_or_else(|| "default".to_string());
-    let pipeline = read_pipeline_definition(&repo.path, &pipeline_name)?;
+    let pipeline = read_task_pipeline_definition(
+        &repo.path,
+        &pipeline_name,
+        source_task.pipeline_def.as_deref(),
+    )?;
     let target_stage = pipeline
         .stages
         .iter()
@@ -324,12 +354,13 @@ pub(crate) fn prepare_revision_task_for_api(
     let source_branch =
         resolve_current_source_worktree_branch(&repo.path, source_task.branch.as_deref());
     let display_name = resolve_inherited_task_title(db, &source_task)?;
+    let prev_result = previous_stage_result(db, source_task_id, &source_task)?;
 
     let task_prompt = build_target_stage_prompt(
         &repo.path,
         target_stage,
         revision_prompt,
-        source_task.stage_result.as_deref(),
+        prev_result.as_deref(),
         source_branch.as_deref(),
         source_task.base_ref.as_deref(),
         source_task.branch.as_deref(),
@@ -348,6 +379,7 @@ pub(crate) fn prepare_revision_task_for_api(
             task_prompt,
             display_name,
             pipeline_name: Some(pipeline_name),
+            pipeline_def: source_task.pipeline_def,
             base_ref: source_branch,
             stored_base_ref: source_task.base_ref,
             stage_override: Some(target_stage.name.clone()),

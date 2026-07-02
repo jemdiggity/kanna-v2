@@ -44,9 +44,13 @@ pub(super) async fn run_merge_agent(
                 format!("daemon error: {}", e),
             )
         })?;
-    let created_task = crate::task_creator::spawn_prepared_task_for_api(&mut daemon, prepared)
-        .await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let created_task = crate::task_creator::spawn_prepared_task_for_api_recording_stage_run(
+        &state.config.db_path,
+        &mut daemon,
+        prepared,
+    )
+    .await
+    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(crate::mobile_api::TaskActionResponse {
         task_id: created_task.task_id,
         follow_task: None,
@@ -274,9 +278,13 @@ pub(super) async fn advance_stage(
     match transition {
         crate::task_creator::PreparedStageTransition::Spawn(prepared) => {
             let follow_task = prepared.follow_task;
-            let created = crate::task_creator::spawn_prepared_task_for_api(&mut daemon, *prepared)
-                .await
-                .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+            let created = crate::task_creator::spawn_prepared_task_for_api_recording_stage_run(
+                &state.config.db_path,
+                &mut daemon,
+                *prepared,
+            )
+            .await
+            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
             let db = Db::open(&state.config.db_path).map_err(|e| {
                 (
                     axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -442,6 +450,17 @@ pub(super) async fn complete_stage(
         })?;
         db.update_pipeline_item_stage_result(&task_id, &stage_result)
             .map_err(|e| db_write_error("db error", e))?;
+        db.finish_latest_running_stage_run(
+            &task_id,
+            if payload.status == "success" {
+                "succeeded"
+            } else {
+                "failed"
+            },
+            Some(&stage_result),
+            Some(&payload.summary),
+        )
+        .map_err(|e| db_write_error("db error", e))?;
     }
 
     if !should_auto_advance {
@@ -479,9 +498,13 @@ pub(super) async fn complete_stage(
     match transition {
         crate::task_creator::PreparedStageTransition::Spawn(prepared) => {
             let follow_task = prepared.follow_task;
-            let created = crate::task_creator::spawn_prepared_task_for_api(&mut daemon, *prepared)
-                .await
-                .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+            let created = crate::task_creator::spawn_prepared_task_for_api_recording_stage_run(
+                &state.config.db_path,
+                &mut daemon,
+                *prepared,
+            )
+            .await
+            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
             let db = Db::open(&state.config.db_path).map_err(|e| {
                 (
                     axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -570,6 +593,18 @@ pub(super) async fn request_revision(
                     format!("db error: {}", e),
                 )
             })?;
+        db.finish_latest_running_stage_run(
+            &source_task_id,
+            "failed",
+            Some(&stage_result),
+            Some(&payload.summary),
+        )
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("db error: {}", e),
+            )
+        })?;
         crate::task_creator::prepare_revision_task_for_api(
             &db,
             &state.config,
@@ -589,9 +624,13 @@ pub(super) async fn request_revision(
                 format!("daemon error: {}", e),
             )
         })?;
-    let created = crate::task_creator::spawn_prepared_task_for_api(&mut daemon, prepared)
-        .await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let created = crate::task_creator::spawn_prepared_task_for_api_recording_stage_run(
+        &state.config.db_path,
+        &mut daemon,
+        prepared,
+    )
+    .await
+    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
     let db = Db::open(&state.config.db_path).map_err(|e| {
         (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
