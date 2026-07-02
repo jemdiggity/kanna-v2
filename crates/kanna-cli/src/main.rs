@@ -14,6 +14,7 @@ pub(crate) struct Cli {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum Commands {
     /// Print the generated Kanna task manual for the current spawned task
     Guide {

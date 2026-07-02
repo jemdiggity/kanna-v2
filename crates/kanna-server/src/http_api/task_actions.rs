@@ -314,29 +314,6 @@ pub(super) async fn complete_stage(
     }
     let should_auto_advance = payload.status == "success";
 
-    let stage_result = serde_json::to_string(&serde_json::json!({
-        "status": payload.status,
-        "summary": payload.summary,
-        "metadata": payload.metadata,
-    }))
-    .map_err(|e| {
-        (
-            axum::http::StatusCode::BAD_REQUEST,
-            format!("invalid stage result: {}", e),
-        )
-    })?;
-
-    {
-        let db = Db::open(&state.config.db_path).map_err(|e| {
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("db error: {}", e),
-            )
-        })?;
-        db.update_pipeline_item_stage_result(&task_id, &stage_result)
-            .map_err(|e| db_write_error("db error", e))?;
-    }
-
     if !should_auto_advance {
         return Ok(Json(crate::mobile_api::TaskActionResponse { task_id }));
     }
@@ -349,7 +326,13 @@ pub(super) async fn complete_stage(
             )
         })?;
         crate::task_creator::prepare_auto_stage_completion_for_api(&db, &state.config, &task_id)
-            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?
+            .map_err(|e| {
+                if e.starts_with("task not found:") {
+                    (axum::http::StatusCode::NOT_FOUND, e)
+                } else {
+                    (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e)
+                }
+            })?
     };
     let Some(transition) = transition else {
         return Ok(Json(crate::mobile_api::TaskActionResponse { task_id }));
@@ -410,17 +393,6 @@ pub(super) async fn request_revision(
             .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e));
     }
 
-    let stage_result = serde_json::to_string(&serde_json::json!({
-        "status": "failure",
-        "summary": payload.summary,
-        "metadata": payload.metadata,
-    }))
-    .map_err(|e| {
-        (
-            axum::http::StatusCode::BAD_REQUEST,
-            format!("invalid revision result: {}", e),
-        )
-    })?;
     let (source_task_id, prepared) = {
         let db = Db::open(&state.config.db_path).map_err(|e| {
             (
@@ -440,13 +412,6 @@ pub(super) async fn request_revision(
                 (
                     axum::http::StatusCode::NOT_FOUND,
                     format!("task not found: {}", task_id),
-                )
-            })?;
-        db.update_pipeline_item_stage_result(&source_task_id, &stage_result)
-            .map_err(|e| {
-                (
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("db error: {}", e),
                 )
             })?;
         crate::task_creator::prepare_revision_task_for_api(

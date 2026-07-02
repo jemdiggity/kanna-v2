@@ -70,13 +70,13 @@ const selectedVisibleTaskId = computed(() => {
   const item = props.selectedItemId
     ? props.pipelineItems.find((candidate) => candidate.id === props.selectedItemId)
     : null;
-  return item && item.stage !== "done" && item.closed_at == null ? item.id : null;
+  return item && item.closed_at == null ? item.id : null;
 });
 const selectedTaskRepoId = computed(() => {
   const item = props.selectedItemId
     ? props.pipelineItems.find((candidate) => candidate.id === props.selectedItemId)
     : null;
-  return item && item.stage !== "done" && item.closed_at == null ? item.repo_id : null;
+  return item && item.closed_at == null ? item.repo_id : null;
 });
 
 function isSearchActive(): boolean {
@@ -98,6 +98,7 @@ function sidebarOrderingOptions(repoId: string) {
   return {
     repoId,
     items: props.pipelineItems,
+    blockers: store.taskBlockers,
     getStageOrder: store.getStageOrder,
     searchQuery: searchQuery.value,
   };
@@ -139,7 +140,7 @@ function subtaskIndentStyle(depth: number): Record<string, string> {
 }
 
 function totalItemsForRepo(repoId: string): number {
-  return props.pipelineItems.filter((i) => i.repo_id === repoId && i.stage !== "done" && i.closed_at == null).length;
+  return props.pipelineItems.filter((i) => i.repo_id === repoId && i.closed_at == null).length;
 }
 
 function repoCountLabel(repoId: string): string {
@@ -150,7 +151,7 @@ function repoCountLabel(repoId: string): string {
 
 function itemTitle(item: SidebarPipelineItem): string {
   const raw = item.display_name || item.issue_title || item.prompt || t('tasks.untitled');
-  return item.active_post_action ? `... ${raw}` : raw;
+  return raw;
 }
 
 function itemTooltip(item: SidebarPipelineItem): string | undefined {

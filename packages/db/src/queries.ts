@@ -121,6 +121,10 @@ export async function deleteTaskPortsForItem(
   await db.execute("DELETE FROM task_port WHERE pipeline_item_id = ?", [itemId]);
 }
 
+export async function listTaskBlockers(db: DbHandle): Promise<TaskBlocker[]> {
+  return db.select<TaskBlocker>("SELECT * FROM task_blocker");
+}
+
 export async function insertWorktree(
   db: DbHandle,
   worktree: Omit<Worktree, "created_at">,
@@ -162,16 +166,15 @@ export async function upsertTerminalSession(
 
 export async function insertPipelineItem(
   db: DbHandle,
-  item: Omit<PipelineItem, "created_at" | "updated_at" | "activity_changed_at" | "unread_at" | "pinned" | "pin_order" | "display_name" | "closed_at" | "pipeline" | "stage" | "stage_result" | "active_post_action" | "tags" | "base_ref" | "agent_session_id" | "previous_stage" | "teardown_started_at" | "last_output_preview" | "agent_spawn_options" | "parent_task_id"> & { pipeline?: string; stage?: string; tags?: string[]; activity?: PipelineItem["activity"]; display_name?: string | null; base_ref?: string | null; agent_spawn_options?: string | null; parent_task_id?: string | null }
+  item: Omit<PipelineItem, "created_at" | "updated_at" | "activity_changed_at" | "unread_at" | "pinned" | "pin_order" | "display_name" | "closed_at" | "pipeline" | "stage" | "base_ref" | "agent_session_id" | "teardown_started_at" | "last_output_preview" | "agent_spawn_options" | "parent_task_id" | "notify_task_id" | "notified_at" | "pipeline_def"> & { pipeline?: string; stage?: string; activity?: PipelineItem["activity"]; display_name?: string | null; base_ref?: string | null; agent_spawn_options?: string | null; parent_task_id?: string | null; pipeline_def?: string | null }
 ): Promise<void> {
   if (!item.agent_provider) {
     throw new Error("No agent provider configured for pipeline item insertion.");
   }
-  const tagsJson = JSON.stringify(item.tags ?? []);
   await db.execute(
     `INSERT INTO pipeline_item
-       (id, repo_id, issue_number, issue_title, prompt, pipeline, stage, tags, pr_number, pr_url, branch, agent_type, agent_provider, port_offset, port_env, agent_spawn_options, activity, activity_changed_at, display_name, base_ref, parent_task_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?)`,
+       (id, repo_id, issue_number, issue_title, prompt, pipeline, stage, pr_number, pr_url, branch, agent_type, agent_provider, port_offset, port_env, agent_spawn_options, activity, activity_changed_at, display_name, base_ref, parent_task_id, pipeline_def)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?, ?)`,
     [
       item.id,
       item.repo_id,
@@ -180,7 +183,6 @@ export async function insertPipelineItem(
       item.prompt,
       item.pipeline ?? "default",
       item.stage ?? "in progress",
-      tagsJson,
       item.pr_number,
       item.pr_url,
       item.branch,
@@ -193,6 +195,7 @@ export async function insertPipelineItem(
       item.display_name ?? null,
       item.base_ref ?? null,
       item.parent_task_id ?? null,
+      item.pipeline_def ?? null,
     ]
   );
 }
@@ -217,59 +220,6 @@ export async function markPipelineItemTearingDown(
        teardown_started_at = COALESCE(teardown_started_at, datetime('now')),
        updated_at = datetime('now')
      WHERE id = ?`,
-    [id],
-  );
-}
-
-export async function updatePipelineItemTags(
-  db: DbHandle,
-  id: string,
-  tags: string[],
-): Promise<void> {
-  await db.execute(
-    "UPDATE pipeline_item SET tags = ?, updated_at = datetime('now') WHERE id = ?",
-    [JSON.stringify(tags), id],
-  );
-}
-
-export async function updatePipelineItemStageResult(
-  db: DbHandle,
-  id: string,
-  result: string
-): Promise<void> {
-  await db.execute(
-    `UPDATE pipeline_item SET stage_result = ?, updated_at = datetime('now') WHERE id = ?`,
-    [result, id]
-  );
-}
-
-export async function clearPipelineItemStageResult(
-  db: DbHandle,
-  id: string
-): Promise<void> {
-  await db.execute(
-    `UPDATE pipeline_item SET stage_result = NULL, updated_at = datetime('now') WHERE id = ?`,
-    [id]
-  );
-}
-
-export async function updatePipelineItemActivePostAction(
-  db: DbHandle,
-  id: string,
-  activePostAction: string,
-): Promise<void> {
-  await db.execute(
-    `UPDATE pipeline_item SET active_post_action = ?, updated_at = datetime('now') WHERE id = ?`,
-    [activePostAction, id],
-  );
-}
-
-export async function clearPipelineItemActivePostAction(
-  db: DbHandle,
-  id: string,
-): Promise<void> {
-  await db.execute(
-    `UPDATE pipeline_item SET active_post_action = NULL, updated_at = datetime('now') WHERE id = ?`,
     [id],
   );
 }
@@ -375,18 +325,15 @@ export async function updateAgentSessionId(
 
 export async function closePipelineItem(
   db: DbHandle,
-  id: string,
-  previousStage?: string
+  id: string
 ): Promise<void> {
   await db.execute(
     `UPDATE pipeline_item SET
-       previous_stage = COALESCE(?, previous_stage, stage),
-       stage = 'done',
        teardown_started_at = NULL,
        closed_at = datetime('now'),
        updated_at = datetime('now')
      WHERE id = ?`,
-    [previousStage ?? null, id]
+    [id]
   );
 }
 
@@ -396,8 +343,6 @@ export async function reopenPipelineItem(
 ): Promise<void> {
   await db.execute(
     `UPDATE pipeline_item SET
-       stage = COALESCE(previous_stage, 'in progress'),
-       previous_stage = NULL,
        teardown_started_at = NULL,
        closed_at = NULL,
        updated_at = datetime('now')

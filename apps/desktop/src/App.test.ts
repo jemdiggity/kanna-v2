@@ -81,6 +81,7 @@ const store = {
   currentItem: null,
   sortedItemsForCurrentRepo: [],
   sortedItemsAllRepos: [],
+  taskBlockers: [] as Array<{ blocked_item_id: string; blocker_item_id: string }>,
   lastSelectedItemByRepo: {},
   getStageOrder: vi.fn(() => ["in progress", "pr", "merge"]),
   suspendAfterMinutes: 30,
@@ -243,6 +244,7 @@ vi.mock("@kanna/db", () => ({
   setSetting: vi.fn(async () => {}),
   listRepos: vi.fn(async () => []),
   listPipelineItems: vi.fn(async () => []),
+  listTaskBlockers: vi.fn(async () => []),
   listBlockersForItem: vi.fn(async () => []),
 }));
 
@@ -620,6 +622,7 @@ describe("App", () => {
     store.items = [];
     store.sortedItemsForCurrentRepo = [];
     store.sortedItemsAllRepos = [];
+    store.taskBlockers = [];
     store.getStageOrder.mockReturnValue(["in progress", "pr", "merge"]);
     store.appTheme = "dark";
     store.codeTheme = "match";
@@ -1774,10 +1777,14 @@ describe("App", () => {
   });
   it("skips blocked tasks when navigating to the oldest and newest read task", async () => {
     store.sortedItemsForCurrentRepo = [
-      { id: "blocked-oldest", activity: "idle", created_at: "2026-03-31T00:00:00.000Z", tags: '["blocked"]' },
+      { id: "blocked-oldest", activity: "idle", created_at: "2026-03-31T00:00:00.000Z", tags: "[]" },
       { id: "read-oldest", activity: "idle", created_at: "2026-03-31T01:00:00.000Z", tags: "[]" },
       { id: "read-newest", activity: "idle", created_at: "2026-03-31T03:00:00.000Z", tags: "[]" },
-      { id: "blocked-newest", activity: "idle", created_at: "2026-03-31T04:00:00.000Z", tags: '["blocked"]' },
+      { id: "blocked-newest", activity: "idle", created_at: "2026-03-31T04:00:00.000Z", tags: "[]" },
+    ];
+    store.taskBlockers = [
+      { blocked_item_id: "blocked-oldest", blocker_item_id: "blocker" },
+      { blocked_item_id: "blocked-newest", blocker_item_id: "blocker" },
     ];
 
     await mountApp(SidebarWithRepoStub);
@@ -2169,13 +2176,17 @@ describe("App", () => {
   it("falls back to absolute read tasks when unread shortcut navigation has no unread task", async () => {
     store.currentItem = { id: "current", created_at: "2026-03-31T02:30:00.000Z" };
     store.sortedItemsForCurrentRepo = [
-      { id: "blocked-oldest", activity: "idle", created_at: "2026-03-31T00:00:00.000Z", tags: '["blocked"]' },
+      { id: "blocked-oldest", activity: "idle", created_at: "2026-03-31T00:00:00.000Z", tags: "[]" },
       { id: "read-oldest", activity: "idle", created_at: "2026-03-31T01:00:00.000Z", tags: "[]" },
       { id: "read-near-older", activity: "idle", created_at: "2026-03-31T02:00:00.000Z", tags: "[]" },
       { id: "current", activity: "idle", created_at: "2026-03-31T02:30:00.000Z", tags: "[]" },
       { id: "read-near-newer", activity: "idle", created_at: "2026-03-31T02:45:00.000Z", tags: "[]" },
       { id: "read-newest", activity: "idle", created_at: "2026-03-31T03:00:00.000Z", tags: "[]" },
-      { id: "blocked-newest", activity: "idle", created_at: "2026-03-31T04:00:00.000Z", tags: '["blocked"]' },
+      { id: "blocked-newest", activity: "idle", created_at: "2026-03-31T04:00:00.000Z", tags: "[]" },
+    ];
+    store.taskBlockers = [
+      { blocked_item_id: "blocked-oldest", blocker_item_id: "blocker" },
+      { blocked_item_id: "blocked-newest", blocker_item_id: "blocker" },
     ];
 
     await mountApp(SidebarWithRepoStub);

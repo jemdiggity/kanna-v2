@@ -21,9 +21,6 @@ export interface PipelineItem {
   prompt: string | null;
   pipeline: string;             // pipeline name (e.g., "default")
   stage: string;                // current stage name (e.g., "in progress")
-  stage_result: string | null;  // JSON from stage-complete signal
-  active_post_action: string | null; // stage-local action currently running
-  tags: string;                 // JSON array of tag strings, e.g. '["pr"]' or '[]'
   pr_number: number | null;
   pr_url: string | null;
   branch: string | null;
@@ -42,9 +39,11 @@ export interface PipelineItem {
   pin_order: number | null;
   base_ref: string | null;
   agent_session_id: string | null;
-  previous_stage: string | null;
   teardown_started_at: string | null;
   parent_task_id: string | null; // subtask parent; nests under it in the sidebar
+  notify_task_id: string | null;
+  notified_at: string | null;
+  pipeline_def: string | null;
   created_at: string;
   updated_at: string;
 }

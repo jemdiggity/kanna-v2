@@ -40,7 +40,6 @@ export function createInitApi(
   function isVisibleItemInSelectedRepo(item: PipelineItem | null | undefined): item is PipelineItem {
     return Boolean(
       item
-      && item.stage !== "done"
       && item.closed_at === null
       && item.repo_id === context.state.selectedRepoId.value,
     );
@@ -166,7 +165,7 @@ export function createInitApi(
     context.state.db.value = db;
     await loadPreferences();
 
-    const { clearPipelineItemActivePostAction, updatePipelineItemActivity, closePipelineItem } = await import("@kanna/db");
+    const { updatePipelineItemActivity, closePipelineItem } = await import("@kanna/db");
 
     const workingItems = await context.requireDb().select<PipelineItem>(
       "SELECT * FROM pipeline_item WHERE activity = 'working'",
@@ -185,7 +184,7 @@ export function createInitApi(
     if (isTauri) {
       await retireStaleWorktreeShellSessions();
       for (const item of eagerItems) {
-        if (!item.branch || item.stage === "done" || item.closed_at !== null) continue;
+        if (!item.branch || item.closed_at !== null) continue;
         const repo = eagerRepos.find((candidate) => candidate.id === item.repo_id);
         if (!repo) continue;
         const worktreePath = `${repo.path}/.kanna-worktrees/${item.branch}`;
@@ -193,7 +192,7 @@ export function createInitApi(
         if (!exists) {
           console.warn(`[store] closing orphaned task ${item.id}: worktree missing at ${worktreePath}`);
           await ports.closeTaskAndReleasePorts(item.id, (id) => closePipelineItem(context.requireDb(), id));
-          item.stage = "done";
+          item.closed_at = new Date().toISOString();
         }
       }
     }
@@ -219,7 +218,6 @@ export function createInitApi(
       bootstrapItemId
       && eagerItems.some((item) =>
         item.id === bootstrapItemId
-        && item.stage !== "done"
         && item.closed_at === null
         && item.repo_id === context.state.selectedRepoId.value)
     ) {
@@ -263,7 +261,7 @@ export function createInitApi(
 
     if (isTauri) {
       for (const item of eagerItems) {
-        if (!item.branch || item.stage === "done" || item.closed_at !== null) continue;
+        if (!item.branch || item.closed_at !== null) continue;
         const repo = eagerRepos.find((candidate) => candidate.id === item.repo_id);
         if (!repo) continue;
         const worktreePath = `${repo.path}/.kanna-worktrees/${item.branch}`;
@@ -367,67 +365,8 @@ export function createInitApi(
       const taskId = payload.task_id;
       if (!taskId) return;
 
-      const item = context.state.items.value.find((candidate) => candidate.id === taskId);
-      if (!item) return;
-
       await requireService(context.services.reloadSnapshot, "reloadSnapshot")();
-
-      const freshItem = context.state.items.value.find((candidate) => candidate.id === taskId);
-      if (!freshItem) return;
-
-      const repo = context.state.repos.value.find((candidate) => candidate.id === freshItem.repo_id);
-      if (!repo) return;
-
       try {
-        const pipeline = await requireService(context.services.loadPipeline, "loadPipeline")(repo.path, freshItem.pipeline);
-        const stage = pipeline.stages.find((candidate) => candidate.name === freshItem.stage);
-        if (!stage) return;
-        const activePostAction = freshItem.active_post_action && stage.post_action?.name === freshItem.active_post_action
-          ? stage.post_action
-          : null;
-        const shouldAutoAdvance = activePostAction
-          ? activePostAction.transition === "auto"
-          : stage.transition === "auto";
-
-        if (shouldAutoAdvance && freshItem.stage_result) {
-          try {
-            const claimedResult = freshItem.stage_result;
-            const claimedItemSnapshot = { ...freshItem };
-            const result = JSON.parse(claimedResult) as { status?: string };
-            if (result.status === "success") {
-              const claim = await context.requireDb().execute(
-                "UPDATE pipeline_item SET stage_result = NULL, updated_at = datetime('now') WHERE id = ? AND stage_result = ?",
-                [taskId, claimedResult],
-              );
-              if (claim.rowsAffected === 0) return;
-              if (activePostAction) {
-                await clearPipelineItemActivePostAction(context.requireDb(), taskId);
-                await requireService(context.services.reloadSnapshot, "reloadSnapshot")();
-                const claimedItem = context.state.items.value.find((candidate) => candidate.id === taskId);
-                if (claimedItem) {
-                  Object.assign(claimedItem, claimedItemSnapshot);
-                  claimedItem.active_post_action = null;
-                  claimedItem.stage_result = claimedResult;
-                }
-                await requireService(context.services.advanceStage, "advanceStage")(taskId, {
-                  initiatedBy: "auto",
-                  skipPostAction: true,
-                });
-              } else {
-                await requireService(context.services.reloadSnapshot, "reloadSnapshot")();
-                const claimedItem = context.state.items.value.find((candidate) => candidate.id === taskId);
-                if (claimedItem) {
-                  Object.assign(claimedItem, claimedItemSnapshot);
-                  claimedItem.stage_result = claimedResult;
-                }
-                await requireService(context.services.advanceStage, "advanceStage")(taskId, { initiatedBy: "auto" });
-              }
-            }
-          } catch (error) {
-            console.error("[store] failed to parse stage_result:", error);
-          }
-        }
-
         if (context.state.selectedItemId.value !== taskId) {
           await updatePipelineItemActivity(context.requireDb(), taskId, "unread");
           await requireService(context.services.reloadSnapshot, "reloadSnapshot")();

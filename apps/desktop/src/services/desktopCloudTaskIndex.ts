@@ -232,7 +232,7 @@ export function mapDesktopCloudTasks(
   const closedLocalItemKeys = new Set(
     [
       ...(options.localItems ?? [])
-        .filter((item) => item.stage === "done" || item.closed_at !== null)
+        .filter((item) => item.closed_at !== null)
         .map((item) => `${item.repo_id}:${item.id}`),
       ...(options.localClosedItems ?? []).map((item) => `${item.repo_id}:${item.id}`),
     ],
@@ -281,7 +281,6 @@ export function mapDesktopCloudTasks(
       prompt: snapshot.promptSnippet ?? snapshot.title,
       pipeline: "cloud",
       stage: snapshot.stage,
-      tags: JSON.stringify([snapshot.stage]),
       pr_number: snapshot.prNumber,
       pr_url: snapshot.prUrl,
       branch: snapshot.branch,
@@ -300,12 +299,12 @@ export function mapDesktopCloudTasks(
       base_ref: snapshot.baseRef,
       agent_provider: normalizeAgentProvider(snapshot.agent?.provider),
       agent_type: snapshot.agent?.type ?? "pty",
-      previous_stage: null,
-      stage_result: null,
       teardown_started_at: null,
       parent_task_id: null,
       last_output_preview: null,
-      active_post_action: null,
+      notify_task_id: null,
+      notified_at: null,
+      pipeline_def: null,
       created_at: snapshot.createdAt,
       updated_at: snapshot.updatedAt,
     });

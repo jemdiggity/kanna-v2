@@ -1,8 +1,8 @@
 import type { PipelineItem } from "@kanna/db";
 
-/** A task is "open" while it is neither done nor closed. */
-export function isOpenTask(item: Pick<PipelineItem, "closed_at" | "stage">): boolean {
-  return item.closed_at == null && item.stage !== "done";
+/** A task is open while it has not been closed. */
+export function isOpenTask(item: Pick<PipelineItem, "closed_at">): boolean {
+  return item.closed_at == null;
 }
 
 /** True when `taskId` has at least one open subtask — used to keep parents open until drained. */

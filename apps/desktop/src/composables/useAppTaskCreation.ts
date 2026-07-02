@@ -175,7 +175,7 @@ export function useAppTaskCreation({
     if (!repo) return;
     showNewTaskModal.value = false;
     const submitPromise = (async () => {
-      await store.createItem(store.selectedRepoId, repo.path, prompt, agentType, {
+      await store.createItem(store.selectedRepoId ?? repo.id, repo.path, prompt, agentType, {
         agentProvider,
         pipelineName,
         baseBranch,

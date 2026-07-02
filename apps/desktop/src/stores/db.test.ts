@@ -174,11 +174,11 @@ function createMigrationDb(
         for (const item of pipelineItems) {
           if (item.stage === "torndown") item.stage = "teardown";
         }
-      } else if (sql === "UPDATE pipeline_item SET teardown_started_at = COALESCE(teardown_started_at, updated_at, datetime('now')), stage = COALESCE(previous_stage, 'in progress'), updated_at = datetime('now') WHERE stage IN ('teardown', 'torndown') AND closed_at IS NULL") {
+      } else if (sql === "UPDATE pipeline_item SET teardown_started_at = COALESCE(teardown_started_at, updated_at, datetime('now')), stage = 'in progress', updated_at = datetime('now') WHERE stage IN ('teardown', 'torndown') AND closed_at IS NULL") {
         for (const item of pipelineItems) {
           if (["teardown", "torndown"].includes(item.stage) && item.closed_at === null) {
             item.teardown_started_at = item.teardown_started_at ?? item.updated_at ?? "now";
-            item.stage = item.previous_stage ?? "in progress";
+            item.stage = "in progress";
             item.updated_at = "now";
           }
         }
@@ -348,7 +348,7 @@ describe("runMigrations", () => {
     });
   });
 
-  it("migrates open teardown stage rows to teardown state while preserving their prior stage", async () => {
+  it("migrates open teardown stage rows to in progress", async () => {
     db = createMigrationDb([
       {
         stage: "teardown",
@@ -368,7 +368,7 @@ describe("runMigrations", () => {
     await runMigrations(db);
 
     expect(db.pipelineItems[0]).toMatchObject({
-      stage: "pr",
+      stage: "in progress",
       teardown_started_at: "2026-05-01T00:00:00.000Z",
     });
     expect(db.pipelineItems[1]?.stage).toBe("teardown");

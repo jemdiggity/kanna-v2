@@ -6,7 +6,6 @@ mod blockers;
 mod notifications;
 mod pipeline_items;
 mod ports;
-mod post_actions;
 mod repos;
 mod settings;
 #[cfg(test)]
@@ -27,7 +26,6 @@ pub struct PipelineItem {
     pub prompt: Option<String>,
     pub pipeline: Option<String>,
     pub stage: Option<String>,
-    pub stage_result: Option<String>,
     pub pr_number: Option<i64>,
     pub pr_url: Option<String>,
     pub branch: Option<String>,
@@ -46,6 +44,7 @@ pub struct PipelineItem {
     pub notify_task_id: Option<String>,
     pub notified_at: Option<String>,
     pub parent_task_id: Option<String>,
+    pub pipeline_def: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -73,8 +72,6 @@ pub struct TaskStageSource {
     pub prompt: Option<String>,
     pub display_name: Option<String>,
     pub stage: Option<String>,
-    pub stage_result: Option<String>,
-    pub active_post_action: Option<String>,
     pub branch: Option<String>,
     pub base_ref: Option<String>,
     pub pipeline: Option<String>,
@@ -90,7 +87,6 @@ pub struct NewPipelineItem<'a> {
     pub display_name: Option<&'a str>,
     pub pipeline: &'a str,
     pub stage: &'a str,
-    pub tags_json: &'a str,
     pub branch: &'a str,
     pub agent_type: &'a str,
     pub agent_provider: &'a str,
@@ -100,6 +96,7 @@ pub struct NewPipelineItem<'a> {
     pub base_ref: Option<&'a str>,
     pub notify_task_id: Option<&'a str>,
     pub parent_task_id: Option<&'a str>,
+    pub pipeline_def: Option<&'a str>,
 }
 
 pub struct ClaimedTaskNotification {

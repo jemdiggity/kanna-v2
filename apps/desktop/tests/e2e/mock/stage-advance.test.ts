@@ -28,24 +28,31 @@ function isVueCallError(value: unknown): value is { __error: string } {
   );
 }
 
-async function waitForActivePostAction(
+async function bestEffort<T>(work: Promise<T>, timeoutMs = 10_000): Promise<T | undefined> {
+  return Promise.race([
+    work.catch(() => undefined),
+    sleep(timeoutMs).then(() => undefined),
+  ]);
+}
+
+async function waitForStage(
   client: WebDriverClient,
   taskId: string,
-  expectedPostAction: string,
+  expectedStage: string,
   timeoutMs = 10_000,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const rows = (await queryDb(
       client,
-      "SELECT stage, active_post_action FROM pipeline_item WHERE id = ?",
+      "SELECT stage FROM pipeline_item WHERE id = ?",
       [taskId],
-    )) as Array<{ stage: string | null; active_post_action: string | null }>;
+    )) as Array<{ stage: string | null }>;
     const row = rows[0];
-    if (row?.stage === "in progress" && row.active_post_action === expectedPostAction) return;
+    if (row?.stage === expectedStage) return;
     await sleep(100);
   }
-  throw new Error(`timed out waiting for ${taskId} to enter post-action ${expectedPostAction}`);
+  throw new Error(`timed out waiting for ${taskId} to enter stage ${expectedStage}`);
 }
 
 async function waitForClosedTask(
@@ -57,11 +64,11 @@ async function waitForClosedTask(
   while (Date.now() < deadline) {
     const rows = (await queryDb(
       client,
-      "SELECT stage, closed_at FROM pipeline_item WHERE id = ?",
+      "SELECT closed_at FROM pipeline_item WHERE id = ?",
       [taskId],
-    )) as Array<{ stage: string | null; closed_at: string | null }>;
+    )) as Array<{ closed_at: string | null }>;
     const row = rows[0];
-    if (row?.stage === "done" && typeof row.closed_at === "string" && row.closed_at.length > 0) return;
+    if (typeof row?.closed_at === "string" && row.closed_at.length > 0) return;
     await sleep(100);
   }
   throw new Error(`timed out waiting for ${taskId} to close`);
@@ -380,15 +387,15 @@ describe("stage advance", () => {
         stages: [
           {
             name: "in progress",
-            transition: "manual",
-            post_action: {
-              name: "commit",
-              transition: "auto",
-              agent: "commit-e2e",
-              prompt: "Commit stage marker for $TASK_PROMPT",
-            },
+            policy: { transition: "manual" },
           },
-          { name: "pr", transition: "manual" },
+          {
+            name: "commit",
+            agent: "commit-e2e",
+            prompt: "Commit stage marker for $TASK_PROMPT",
+            policy: { transition: "auto", execution: "continue" },
+          },
+          { name: "pr", policy: { transition: "manual" } },
         ],
       }),
     );
@@ -397,8 +404,8 @@ describe("stage advance", () => {
       JSON.stringify({
         name: "auto-spawn-focus-e2e",
         stages: [
-          { name: "auto-source", transition: "auto" },
-          { name: "review", transition: "manual" },
+          { name: "auto-source", policy: { transition: "auto" } },
+          { name: "review", policy: { transition: "manual" } },
         ],
       }),
     );
@@ -407,8 +414,8 @@ describe("stage advance", () => {
       JSON.stringify({
         name: "teardown-review-e2e",
         stages: [
-          { name: "in progress", transition: "manual" },
-          { name: "review", transition: "manual" },
+          { name: "in progress", policy: { transition: "manual" } },
+          { name: "review", policy: { transition: "manual" } },
         ],
       }),
     );
@@ -417,8 +424,8 @@ describe("stage advance", () => {
       JSON.stringify({
         name: "final-stage-e2e",
         stages: [
-          { name: "in progress", transition: "manual" },
-          { name: "pr", transition: "manual" },
+          { name: "in progress", policy: { transition: "manual" } },
+          { name: "pr", policy: { transition: "manual" } },
         ],
       }),
     );
@@ -429,11 +436,11 @@ describe("stage advance", () => {
         stages: [
           {
             name: "in progress",
-            transition: "manual",
             agent: "revision-e2e",
+            policy: { transition: "manual" },
           },
-          { name: "review", transition: "auto" },
-          { name: "pr", transition: "manual" },
+          { name: "review", policy: { transition: "auto" } },
+          { name: "pr", policy: { transition: "manual" } },
         ],
       }),
     );
@@ -442,11 +449,11 @@ describe("stage advance", () => {
       JSON.stringify({
         name: "sdk-advance-e2e",
         stages: [
-          { name: "in progress", transition: "manual" },
+          { name: "in progress", policy: { transition: "manual" } },
           {
             name: "qa",
-            transition: "manual",
             agent: "revision-e2e",
+            policy: { transition: "manual" },
           },
         ],
       }),
@@ -504,22 +511,24 @@ describe("stage advance", () => {
   });
 
   afterAll(async () => {
-    await tauriInvoke(client, "kill_session", { sessionId: "continue-stage-task" }).catch(() => undefined);
-    await tauriInvoke(client, "kill_session", { sessionId: "continue-stage-claude-enter-task" }).catch(() => undefined);
-    await tauriInvoke(client, "kill_session", { sessionId: "continue-stage-copilot-task" }).catch(() => undefined);
-    await tauriInvoke(client, "kill_session", { sessionId: "continue-stage-chat-agent-task" }).catch(() => undefined);
-    await tauriInvoke(client, "kill_session", { sessionId: "server-continue-stage-task" }).catch(() => undefined);
+    await Promise.all([
+      bestEffort(tauriInvoke(client, "kill_session", { sessionId: "continue-stage-task" })),
+      bestEffort(tauriInvoke(client, "kill_session", { sessionId: "continue-stage-claude-enter-task" })),
+      bestEffort(tauriInvoke(client, "kill_session", { sessionId: "continue-stage-copilot-task" })),
+      bestEffort(tauriInvoke(client, "kill_session", { sessionId: "continue-stage-chat-agent-task" })),
+      bestEffort(tauriInvoke(client, "kill_session", { sessionId: "server-continue-stage-task" })),
+    ]);
     if (renamedStageTaskId) {
-      await tauriInvoke(client, "kill_session", { sessionId: renamedStageTaskId }).catch(() => undefined);
+      await bestEffort(tauriInvoke(client, "kill_session", { sessionId: renamedStageTaskId }));
     }
     if (testRepoPath) {
-      await cleanupWorktrees(client, testRepoPath);
+      await bestEffort(cleanupWorktrees(client, testRepoPath), 30_000);
     }
-    await cleanupFixtureRepos(fixtureRepoRoot ? [fixtureRepoRoot] : []);
-    await client.deleteSession();
-  });
+    await bestEffort(cleanupFixtureRepos(fixtureRepoRoot ? [fixtureRepoRoot] : []), 30_000);
+    await bestEffort(client.deleteSession(), 10_000);
+  }, 240_000);
 
-  it("keeps an automatically spawned next-stage task in the background when follow_task is omitted", async () => {
+  it("keeps an automatically spawned next-stage task in the background", async () => {
     const sourceTaskId = "auto-spawn-focus-source";
     const sourceBranch = "task-auto-spawn-focus-source";
     const activeTaskId = "auto-spawn-focus-active";
@@ -533,17 +542,15 @@ describe("stage advance", () => {
     await execDb(
       client,
       `INSERT INTO pipeline_item (
-         id, repo_id, prompt, pipeline, stage, stage_result, tags, branch,
+         id, repo_id, prompt, pipeline, stage, branch,
          agent_type, agent_provider, activity, display_name, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         sourceTaskId,
         repoId,
         "Automatically spawn review",
         "auto-spawn-focus-e2e",
         "auto-source",
-        null,
-        "[]",
         sourceBranch,
         "pty",
         "codex",
@@ -556,17 +563,15 @@ describe("stage advance", () => {
     await execDb(
       client,
       `INSERT INTO pipeline_item (
-         id, repo_id, prompt, pipeline, stage, stage_result, tags, branch,
+         id, repo_id, prompt, pipeline, stage, branch,
          agent_type, agent_provider, activity, display_name, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         activeTaskId,
         repoId,
         "Keep this task selected",
         "auto-spawn-focus-e2e",
         "auto-source",
-        null,
-        "[]",
         null,
         "agent",
         "codex",
@@ -583,13 +588,9 @@ describe("stage advance", () => {
     if (isVueCallError(selectResult)) throw new Error(selectResult.__error);
     await waitForSelectedTask(client, activeTaskId);
 
-    await execDb(
-      client,
-      "UPDATE pipeline_item SET stage_result = ?, updated_at = datetime('now') WHERE id = ?",
-      [JSON.stringify({ status: "success", summary: "ready for review" }), sourceTaskId],
-    );
     const existingReviewTaskIds = await getStageTaskIds(client, repoId, "review");
-    await sendPipelineStageComplete(client, sourceTaskId);
+    const advanceResult = await callVueMethod(client, "store.advanceStage", sourceTaskId, { initiatedBy: "auto" });
+    if (isVueCallError(advanceResult)) throw new Error(advanceResult.__error);
 
     const reviewTaskId = await waitForCreatedStageTask(client, repoId, "review", {
       excludeIds: existingReviewTaskIds,
@@ -631,17 +632,15 @@ describe("stage advance", () => {
       await execDb(
         client,
         `INSERT INTO pipeline_item (
-           id, repo_id, prompt, pipeline, stage, stage_result, tags, branch,
+           id, repo_id, prompt, pipeline, stage, branch,
            agent_type, agent_provider, activity, display_name, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           id,
           repoId,
           prompt,
           "auto-spawn-focus-e2e",
           "auto-source",
-          null,
-          "[]",
           branch,
           agentType,
           "codex",
@@ -662,13 +661,9 @@ describe("stage advance", () => {
     if (isVueCallError(selectResult)) throw new Error(selectResult.__error);
     await waitForSelectedTask(client, selectedTaskId);
 
-    await execDb(
-      client,
-      "UPDATE pipeline_item SET stage_result = ?, updated_at = datetime('now') WHERE id = ?",
-      [JSON.stringify({ status: "success", summary: "ready for review" }), sourceTaskId],
-    );
     const existingReviewTaskIds = await getStageTaskIds(client, repoId, "review");
-    await sendPipelineStageComplete(client, sourceTaskId);
+    const advanceResult = await callVueMethod(client, "store.advanceStage", sourceTaskId, { initiatedBy: "auto" });
+    if (isVueCallError(advanceResult)) throw new Error(advanceResult.__error);
 
     const reviewTaskId = await waitForCreatedStageTask(client, repoId, "review", {
       excludeIds: existingReviewTaskIds,
@@ -707,17 +702,15 @@ describe("stage advance", () => {
     await execDb(
       client,
       `INSERT INTO pipeline_item (
-         id, repo_id, prompt, pipeline, stage, stage_result, tags, branch,
+         id, repo_id, prompt, pipeline, stage, branch,
          agent_type, agent_provider, activity, display_name, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
       [
         sourceTaskId,
         repoId,
         "Advance from renamed source",
         "auto-spawn-focus-e2e",
         "auto-source",
-        JSON.stringify({ status: "success", summary: "ready for review" }),
-        "[]",
         storedSourceBranch,
         "pty",
         "codex",
@@ -765,17 +758,15 @@ describe("stage advance", () => {
     await execDb(
       client,
       `INSERT INTO pipeline_item (
-         id, repo_id, prompt, pipeline, stage, stage_result, tags, branch,
+         id, repo_id, prompt, pipeline, stage, branch,
          agent_type, agent_provider, activity, display_name, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
       [
         sourceTaskId,
         repoId,
         "Advance GUI agent to QA",
         "sdk-advance-e2e",
         "in progress",
-        JSON.stringify({ status: "success", summary: "ready for QA" }),
-        "[]",
         sourceBranch,
         "agent",
         "codex",
@@ -829,17 +820,15 @@ describe("stage advance", () => {
     await execDb(
       client,
       `INSERT INTO pipeline_item (
-         id, repo_id, prompt, pipeline, stage, stage_result, tags, branch,
+         id, repo_id, prompt, pipeline, stage, branch,
          agent_type, agent_provider, activity, display_name, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
       [
         sourceTaskId,
         repoId,
         "Promote with fast teardown",
         "teardown-review-e2e",
         "in progress",
-        JSON.stringify({ status: "success", summary: "ready for review" }),
-        "[]",
         sourceBranch,
         "pty",
         "codex",
@@ -872,7 +861,7 @@ describe("stage advance", () => {
       "SELECT stage, closed_at, teardown_started_at FROM pipeline_item WHERE id = ?",
       [sourceTaskId],
     )) as Array<{ stage: string | null; closed_at: string | null; teardown_started_at: string | null }>;
-    expect(rows[0]?.stage).toBe("done");
+    expect(rows[0]?.stage).toBe("in progress");
     expect(rows[0]?.closed_at).toBeTruthy();
     expect(rows[0]?.teardown_started_at).toBeNull();
     await waitForSidebarToExcludeTaskId(client, sourceTaskId);
@@ -892,17 +881,15 @@ describe("stage advance", () => {
     await execDb(
       client,
       `INSERT INTO pipeline_item (
-         id, repo_id, prompt, pipeline, stage, stage_result, tags, branch,
+         id, repo_id, prompt, pipeline, stage, branch,
          agent_type, agent_provider, activity, display_name, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
       [
         taskId,
         repoId,
         "Write the commit",
         "continue-e2e",
         "in progress",
-        JSON.stringify({ status: "success", summary: "implemented" }),
-        "[]",
         "task-continue-stage",
         "pty",
         "codex",
@@ -928,7 +915,7 @@ describe("stage advance", () => {
 
     await advanceStageWithShortcut(client, "Codex commit shortcut source", taskId);
 
-    await waitForActivePostAction(client, taskId, "commit");
+    await waitForStage(client, taskId, "commit");
     await waitForFileSize(inputCapturePath, expectedInput.length);
     expect(await readFile(inputCapturePath)).toEqual(expectedInput);
   });
@@ -948,17 +935,15 @@ describe("stage advance", () => {
     await execDb(
       client,
       `INSERT INTO pipeline_item (
-         id, repo_id, prompt, pipeline, stage, stage_result, tags, branch,
+         id, repo_id, prompt, pipeline, stage, branch,
          agent_type, agent_provider, activity, display_name, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
       [
         taskId,
         repoId,
         "Write the chat commit",
         "continue-e2e",
         "in progress",
-        JSON.stringify({ status: "success", summary: "implemented" }),
-        "[]",
         branch,
         "agent",
         "claude",
@@ -987,7 +972,7 @@ describe("stage advance", () => {
 
     await advanceStageWithShortcut(client, "Chat agent commit shortcut source", taskId);
 
-    await waitForActivePostAction(client, taskId, "commit");
+    await waitForStage(client, taskId, "commit");
     const inputLog = await waitForFileContaining(agentInputLogPath, "Commit stage marker for Write the chat commit");
     expect(inputLog).toContain("Commit agent generated prompt marker.");
     expect(inputLog).toContain("Commit stage marker for Write the chat commit");
@@ -1014,17 +999,15 @@ describe("stage advance", () => {
     await execDb(
       client,
       `INSERT INTO pipeline_item (
-         id, repo_id, prompt, pipeline, stage, stage_result, tags, branch,
+         id, repo_id, prompt, pipeline, stage, branch,
          agent_type, agent_provider, activity, display_name, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
       [
         taskId,
         repoId,
         "Write the server commit",
         "continue-e2e",
         "in progress",
-        JSON.stringify({ status: "success", summary: "implemented over HTTP" }),
-        "[]",
         branch,
         "pty",
         "claude",
@@ -1057,26 +1040,22 @@ describe("stage advance", () => {
       }
       expect(await response.json()).toEqual({ taskId });
 
-      await waitForActivePostAction(client, taskId, "commit");
+      await waitForStage(client, taskId, "commit");
       await waitForFileSize(inputCapturePath, expectedInput.length);
       expect(await readFile(inputCapturePath)).toEqual(expectedInput);
 
       const rows = (await queryDb(
         client,
-        "SELECT stage, active_post_action, stage_result, closed_at, branch FROM pipeline_item WHERE repo_id = ? ORDER BY id",
+        "SELECT stage, closed_at, branch FROM pipeline_item WHERE repo_id = ? ORDER BY id",
         [repoId],
       )) as Array<{
         stage: string | null;
-        active_post_action: string | null;
-        stage_result: string | null;
         closed_at: string | null;
         branch: string | null;
       }>;
       const row = rows.find((candidate) => candidate.branch === branch);
       expect(row).toEqual({
-        stage: "in progress",
-        active_post_action: "commit",
-        stage_result: null,
+        stage: "commit",
         closed_at: null,
         branch,
       });
@@ -1107,17 +1086,15 @@ describe("stage advance", () => {
     await execDb(
       client,
       `INSERT INTO pipeline_item (
-         id, repo_id, prompt, pipeline, stage, stage_result, tags, branch,
+         id, repo_id, prompt, pipeline, stage, branch,
          agent_type, agent_provider, activity, display_name, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
       [
         taskId,
         repoId,
         reviewPrompt,
         "revision-e2e",
         "review",
-        JSON.stringify({ status: "success", summary: "ready for review" }),
-        "[]",
         branch,
         "pty",
         "codex",
@@ -1169,7 +1146,7 @@ describe("stage advance", () => {
       }>;
       const reviewed = rows.find((row) => row.id === taskId);
       const revision = rows.find((row) => row.id === revisionTaskId);
-      expect(reviewed?.stage).toBe("done");
+      expect(reviewed?.stage).toBe("review");
       expect(reviewed?.closed_at).toBeTruthy();
       expect(revision?.stage).toBe("in progress");
       expect(revision?.display_name).toBe(originalTitle);
@@ -1219,17 +1196,15 @@ describe("stage advance", () => {
     await execDb(
       client,
       `INSERT INTO pipeline_item (
-         id, repo_id, prompt, pipeline, stage, stage_result, tags, branch,
+         id, repo_id, prompt, pipeline, stage, branch,
          agent_type, agent_provider, activity, display_name, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         taskId,
         repoId,
         "Review task that needs a revision",
         "revision-e2e",
         "review",
-        JSON.stringify({ status: "success", summary: "ready for review" }),
-        "[]",
         branch,
         "pty",
         "codex",
@@ -1242,17 +1217,15 @@ describe("stage advance", () => {
     await execDb(
       client,
       `INSERT INTO pipeline_item (
-         id, repo_id, prompt, pipeline, stage, stage_result, tags, branch,
+         id, repo_id, prompt, pipeline, stage, branch,
          agent_type, agent_provider, activity, display_name, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         activeTaskId,
         repoId,
         "Keep this unrelated task selected",
         "revision-e2e",
         "in progress",
-        null,
-        "[]",
         null,
         "sdk",
         "codex",
@@ -1300,7 +1273,7 @@ describe("stage advance", () => {
         "SELECT id, stage, closed_at FROM pipeline_item WHERE id IN (?, ?, ?)",
         [taskId, activeTaskId, revisionTaskId],
       )) as Array<{ id: string | null; stage: string | null; closed_at: string | null }>;
-      expect(rows.find((row) => row.id === taskId)?.stage).toBe("done");
+      expect(rows.find((row) => row.id === taskId)?.stage).toBe("review");
       expect(rows.find((row) => row.id === taskId)?.closed_at).toBeTruthy();
       expect(rows.find((row) => row.id === activeTaskId)?.stage).toBe("in progress");
       expect(rows.find((row) => row.id === revisionTaskId)?.stage).toBe("in progress");
@@ -1321,17 +1294,15 @@ describe("stage advance", () => {
     await execDb(
       client,
       `INSERT INTO pipeline_item (
-         id, repo_id, prompt, pipeline, stage, stage_result, tags, branch,
+         id, repo_id, prompt, pipeline, stage, branch,
          agent_type, agent_provider, activity, display_name, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
       [
         taskId,
         repoId,
         "Write the commit",
         "continue-e2e",
         "in progress",
-        JSON.stringify({ status: "success", summary: "implemented" }),
-        "[]",
         "task-continue-stage-claude-enter",
         "pty",
         "claude",
@@ -1357,7 +1328,7 @@ describe("stage advance", () => {
 
     await advanceStageWithShortcut(client, "Claude commit shortcut source", taskId);
 
-    await waitForActivePostAction(client, taskId, "commit");
+    await waitForStage(client, taskId, "commit");
     await waitForFileSize(inputCapturePath, expectedInput.length);
     expect(await readFile(inputCapturePath)).toEqual(expectedInput);
   });
@@ -1374,17 +1345,15 @@ describe("stage advance", () => {
     await execDb(
       client,
       `INSERT INTO pipeline_item (
-         id, repo_id, prompt, pipeline, stage, stage_result, tags, branch,
+         id, repo_id, prompt, pipeline, stage, branch,
          agent_type, agent_provider, activity, display_name, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
       [
         taskId,
         repoId,
         "Write the commit",
         "continue-e2e",
         "in progress",
-        JSON.stringify({ status: "success", summary: "implemented" }),
-        "[]",
         "task-continue-stage-copilot",
         "pty",
         "copilot",
@@ -1410,7 +1379,7 @@ describe("stage advance", () => {
 
     await advanceStageWithShortcut(client, "Copilot commit shortcut source", taskId);
 
-    await waitForActivePostAction(client, taskId, "commit");
+    await waitForStage(client, taskId, "commit");
     await waitForFileSize(inputCapturePath, expectedInput.length);
     expect(await readFile(inputCapturePath)).toEqual(expectedInput);
   });
@@ -1427,18 +1396,15 @@ describe("stage advance", () => {
     await execDb(
       client,
       `INSERT INTO pipeline_item (
-         id, repo_id, prompt, pipeline, stage, active_post_action, stage_result, tags, branch,
+         id, repo_id, prompt, pipeline, stage, branch,
          agent_type, agent_provider, activity, display_name, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
       [
         taskId,
         repoId,
         "Complete commit post-action",
         "continue-e2e",
-        "in progress",
         "commit",
-        JSON.stringify({ status: "success", summary: "committed" }),
-        "[]",
         branch,
         "pty",
         "codex",
@@ -1449,7 +1415,8 @@ describe("stage advance", () => {
     await hydrateStoreItem(client, taskId);
 
     const existingPrTaskIds = await getStageTaskIds(client, repoId, "pr");
-    await sendPipelineStageComplete(client, taskId);
+    const advanceResult = await callVueMethod(client, "store.advanceStage", taskId, { initiatedBy: "auto" });
+    if (isVueCallError(advanceResult)) throw new Error(advanceResult.__error);
 
     const prTaskId = await waitForCreatedStageTask(client, repoId, "pr", {
       excludeIds: existingPrTaskIds,
@@ -1459,10 +1426,10 @@ describe("stage advance", () => {
     expect(prTaskId).not.toBe(taskId);
     const rows = (await queryDb(
       client,
-      "SELECT active_post_action FROM pipeline_item WHERE id = ?",
+      "SELECT stage FROM pipeline_item WHERE id = ?",
       [taskId],
-    )) as Array<{ active_post_action: string | null }>;
-    expect(rows[0]?.active_post_action).toBeNull();
+    )) as Array<{ stage: string | null }>;
+    expect(rows[0]?.stage).toBe("commit");
   });
 
   it("closes a final-stage task through the Cmd+S shortcut", async () => {
@@ -1477,17 +1444,15 @@ describe("stage advance", () => {
     await execDb(
       client,
       `INSERT INTO pipeline_item (
-         id, repo_id, prompt, pipeline, stage, stage_result, tags, branch,
+         id, repo_id, prompt, pipeline, stage, branch,
          agent_type, agent_provider, activity, display_name, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
       [
         taskId,
         repoId,
         "Close PR from shortcut",
         "final-stage-e2e",
         "pr",
-        null,
-        "[]",
         branch,
         "pty",
         "codex",
@@ -1527,17 +1492,15 @@ describe("stage advance", () => {
     await execDb(
       client,
       `INSERT INTO pipeline_item (
-         id, repo_id, prompt, pipeline, stage, stage_result, tags, branch,
+         id, repo_id, prompt, pipeline, stage, branch,
          agent_type, agent_provider, activity, display_name, pinned, pin_order, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         fallbackTaskId,
         repoId,
         "Stale local fallback from shortcut",
         "final-stage-e2e",
         "pr",
-        null,
-        "[]",
         fallbackBranch,
         "pty",
         "codex",
@@ -1572,7 +1535,6 @@ describe("stage advance", () => {
         prompt: "Remote shortcut task",
         pipeline: "cloud",
         stage: "in progress",
-        tags: "[]",
         pr_number: null,
         pr_url: null,
         branch: "remote-shortcut-task",
@@ -1591,18 +1553,26 @@ describe("stage advance", () => {
         base_ref: "origin/main",
         agent_provider: "codex",
         agent_type: "pty",
-        previous_stage: null,
-        stage_result: null,
         teardown_started_at: null,
         last_output_preview: null,
-        active_post_action: null,
+        parent_task_id: null,
+        notify_task_id: null,
+        notified_at: null,
+        pipeline_def: null,
         created_at: "2026-05-18T00:01:00.000Z",
         updated_at: "2026-05-18T00:01:00.000Z",
       }],
-      terminalRefs: {},
+      terminalRefs: {
+        [remoteTaskId]: {
+          ownerDesktopId: "desktop-owner",
+          ownerLocalTaskId: "remote-shortcut-task",
+          transport: "cloud",
+        },
+      },
     });
 
-    await clickSidebarItemByTitle(client, "Remote shortcut task");
+    const selectRemoteResult = await callVueMethod(client, "handleSelectItem", remoteTaskId);
+    if (isVueCallError(selectRemoteResult)) throw new Error(selectRemoteResult.__error);
     await waitForSelectedTask(client, remoteTaskId);
 
     const selectedState = await client.executeSync<{
@@ -1621,7 +1591,7 @@ describe("stage advance", () => {
     expect(selectedState).toEqual({
       selectedItemId: remoteTaskId,
       currentItemId: fallbackTaskId,
-      selectedWorkspaceTaskId: remoteTaskId,
+      selectedWorkspaceTaskId: null,
     });
 
     await client.executeSync(buildGlobalKeydownScript({ key: "s", meta: true }));

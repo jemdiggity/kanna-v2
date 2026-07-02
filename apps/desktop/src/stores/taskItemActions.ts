@@ -482,6 +482,7 @@ export function createTaskItemActions(
                 }
               : entry,
           ),
+          taskBlockers: snapshot.taskBlockers,
         }),
         run: async () => {
           try {
@@ -516,7 +517,6 @@ export function createTaskItemActions(
               prompt: effectivePrompt,
               pipeline: pipelineName,
               stage: firstStageName,
-              tags: opts?.tags ?? [firstStageName],
               pr_number: null,
               pr_url: null,
               branch,

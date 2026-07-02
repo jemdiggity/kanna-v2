@@ -215,11 +215,8 @@ async fn request_revision_route_resolves_branch_style_task_id() {
 
     let db = Db::open(&config.db_path).unwrap();
     let source = db.get_task_stage_source("710917fb").unwrap().unwrap();
-    assert_eq!(source.stage.as_deref(), Some("done"));
+    assert_eq!(source.stage.as_deref(), Some("review"));
     assert!(source.closed_at.is_some());
-    let stage_result = source.stage_result.as_deref().unwrap();
-    assert!(stage_result.contains("\"status\":\"failure\""));
-    assert!(stage_result.contains("missing e2e coverage"));
 
     let revision = db.get_task_stage_source(&created.task_id).unwrap().unwrap();
     assert_eq!(revision.stage.as_deref(), Some("in progress"));
@@ -420,7 +417,7 @@ async fn request_revision_route_preserves_title_and_sends_revision_prompt() {
     let db = Db::open(&config.db_path).unwrap();
     let reviewed = db.get_task_stage_source("review-task").unwrap().unwrap();
     let revision = db.get_task_stage_source(&created.task_id).unwrap().unwrap();
-    assert_eq!(reviewed.stage.as_deref(), Some("done"));
+    assert_eq!(reviewed.stage.as_deref(), Some("review"));
     assert!(reviewed.closed_at.is_some());
     assert_eq!(revision.stage.as_deref(), Some("in progress"));
     assert_eq!(

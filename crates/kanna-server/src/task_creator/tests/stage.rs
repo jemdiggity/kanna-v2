@@ -196,7 +196,7 @@ fn prepare_advance_stage_builds_next_stage_task_from_previous_branch() {
     assert_eq!(created_source.agent_type.as_deref(), Some("pty"));
     assert_eq!(
             created_source.prompt.as_deref(),
-            Some("Review task: Fix the mobile shell\n\nReview branch task-old-branch against origin/main with result {\"status\":\"success\"}")
+            Some("Review task: Fix the mobile shell\n\nReview branch task-old-branch against origin/main with result ")
         );
     assert_eq!(created_source.base_ref.as_deref(), Some("origin/main"));
     assert!(prepared.cwd.contains(".kanna-worktrees/task-"));
@@ -486,7 +486,7 @@ async fn prepare_advance_stage_continues_commit_stage_in_same_task_and_worktree(
     assert_eq!(continuation.next_stage, "commit");
     assert_eq!(
             String::from_utf8(continuation.input.clone()).unwrap(),
-            "\u{1b}[200~Commit agent\n\nCommit Fix stage promotion from task-source after {\"status\":\"success\",\"summary\":\"implemented\"}\u{1b}[201~\r"
+            "\u{1b}[200~Commit agent\n\nCommit Fix stage promotion from task-source after \u{1b}[201~\r"
         );
     assert_eq!(db.list_pipeline_items("repo-1").unwrap().len(), 1);
     db.insert_test_terminal_session("terminal-1", "repo-1", "task-1", "agent", "daemon-agent-1")
@@ -503,16 +503,15 @@ async fn prepare_advance_stage_continues_commit_stage_in_same_task_and_worktree(
         kanna_daemon::protocol::Command::AgentInput { session_id, text } => {
             assert_eq!(session_id, "daemon-agent-1");
             assert_eq!(
-                    text,
-                    "Commit agent\n\nCommit Fix stage promotion from task-source after {\"status\":\"success\",\"summary\":\"implemented\"}"
-                );
+                text,
+                "Commit agent\n\nCommit Fix stage promotion from task-source after "
+            );
         }
         other => panic!("expected daemon agent input command, got {:?}", other),
     }
     let updated_source = db.get_task_stage_source("task-1").unwrap().unwrap();
     assert_eq!(updated_source.stage.as_deref(), Some("commit"));
     assert_eq!(updated_source.branch.as_deref(), Some("task-source"));
-    assert_eq!(updated_source.stage_result, None);
     assert_eq!(updated_source.closed_at, None);
     assert_eq!(db.list_pipeline_items("repo-1").unwrap().len(), 1);
 
@@ -581,7 +580,7 @@ fn prepare_advance_stage_rejects_closed_source_task_even_when_stage_is_active() 
 }
 
 #[tokio::test]
-async fn prepare_advance_stage_enters_post_action_without_changing_stage() {
+async fn prepare_advance_stage_expands_legacy_post_action_to_continue_stage() {
     let repo_root = std::env::temp_dir().join(format!(
         "kanna-stage-advance-post-action-{}",
         std::process::id()
@@ -715,11 +714,10 @@ async fn prepare_advance_stage_enters_post_action_without_changing_stage() {
 
     assert_eq!(continuation.task_id, "task-1");
     assert_eq!(continuation.previous_stage, "in progress");
-    assert_eq!(continuation.next_stage, "in progress");
-    assert_eq!(continuation.active_post_action.as_deref(), Some("commit"));
+    assert_eq!(continuation.next_stage, "commit");
     assert_eq!(
             String::from_utf8(continuation.input.clone()).unwrap(),
-            "\u{1b}[200~Commit agent\n\nCommit Fix stage promotion from task-source after {\"status\":\"success\",\"summary\":\"implemented\"}\u{1b}[201~\r"
+            "\u{1b}[200~Commit agent\n\nCommit Fix stage promotion from task-source after \u{1b}[201~\r"
         );
 
     let fake_daemon = spawn_fake_daemon_once(config.daemon_dir.clone()).await;
@@ -734,15 +732,13 @@ async fn prepare_advance_stage_enters_post_action_without_changing_stage() {
             assert_eq!(session_id, "task-1");
             assert_eq!(
                     String::from_utf8(data).unwrap(),
-                    "\u{1b}[200~Commit agent\n\nCommit Fix stage promotion from task-source after {\"status\":\"success\",\"summary\":\"implemented\"}\u{1b}[201~\r"
+                    "\u{1b}[200~Commit agent\n\nCommit Fix stage promotion from task-source after \u{1b}[201~\r"
                 );
         }
         other => panic!("expected daemon input command, got {:?}", other),
     }
     let updated_source = db.get_task_stage_source("task-1").unwrap().unwrap();
-    assert_eq!(updated_source.stage.as_deref(), Some("in progress"));
-    assert_eq!(updated_source.active_post_action.as_deref(), Some("commit"));
-    assert_eq!(updated_source.stage_result, None);
+    assert_eq!(updated_source.stage.as_deref(), Some("commit"));
     assert_eq!(updated_source.closed_at, None);
     assert_eq!(db.list_pipeline_items("repo-1").unwrap().len(), 1);
 
@@ -887,9 +883,9 @@ fn prepare_auto_stage_completion_from_commit_creates_pr_task_from_original_branc
         Some("Fix stage promotion")
     );
     let expected_prompt = format!(
-            "PR agent for Fix stage promotion\n\nCreate PR for task-source from {} after {{\"status\":\"success\",\"summary\":\"committed\"}}",
-            source_worktree.to_string_lossy()
-        );
+        "PR agent for Fix stage promotion\n\nCreate PR for task-source from {} after ",
+        source_worktree.to_string_lossy()
+    );
     assert_eq!(
         created_source.prompt.as_deref(),
         Some(expected_prompt.as_str())

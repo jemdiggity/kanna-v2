@@ -111,7 +111,7 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
   }
 
   async function applyTaskRuntimeStatus(item: import("@kanna/db").PipelineItem, status: string) {
-    if (item.stage === "done" || item.closed_at !== null) {
+    if (item.closed_at !== null) {
       return;
     }
 
@@ -621,7 +621,7 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
     if (!item) {
       throw new Error(`task not found for session recovery: ${sessionId}`);
     }
-    if (item.closed_at !== null || item.stage === "done") {
+    if (item.closed_at !== null) {
       throw new Error(`cannot recover closed task session: ${sessionId}`);
     }
 

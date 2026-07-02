@@ -188,7 +188,6 @@ function createTransferDb(initial: {
           prompt,
           pipeline,
           stage,
-          tagsJson,
           prNumber,
           prUrl,
           branch,
@@ -200,6 +199,8 @@ function createTransferDb(initial: {
           activity,
           displayName,
           baseRef,
+          parentTaskId,
+          pipelineDef,
         ] = params as unknown[];
         tables.pipeline_item.push({
           id: id as string,
@@ -209,8 +210,6 @@ function createTransferDb(initial: {
           prompt: prompt as string | null,
           pipeline: pipeline as string,
           stage: stage as string,
-          stage_result: null,
-          tags: tagsJson as string,
           pr_number: prNumber as number | null,
           pr_url: prUrl as string | null,
           branch: branch as string | null,
@@ -228,8 +227,11 @@ function createTransferDb(initial: {
           pin_order: null,
           base_ref: baseRef as string | null,
           agent_session_id: null,
-          previous_stage: null,
           teardown_started_at: null,
+          parent_task_id: parentTaskId as string | null,
+          notify_task_id: null,
+          notified_at: null,
+          pipeline_def: pipelineDef as string | null,
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
         });
@@ -276,9 +278,7 @@ function createTransferDb(initial: {
           row.agent_session_id = agentSessionId;
         }
 
-        if (q.includes("STAGE = 'DONE'")) {
-          row.previous_stage = row.stage;
-          row.stage = "done";
+        if (q.includes("CLOSED_AT")) {
           row.teardown_started_at = null;
           row.closed_at = new Date().toISOString();
         }
@@ -2539,7 +2539,7 @@ describe("outgoing transfer commit acknowledgment", () => {
     });
     expect(fakeDb.tables.pipeline_item[0]).toMatchObject({
       id: "task-source",
-      stage: "done",
+      stage: "in progress",
     });
     expect(fakeDb.tables.pipeline_item[0]?.closed_at).not.toBeNull();
   });

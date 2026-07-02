@@ -26,15 +26,6 @@ const selectedIndex = ref(-1);
 const inputRef = ref<HTMLInputElement | null>(null);
 const mouseMoved = ref(false);
 
-function hasTag(item: { tags: string }, tag: string): boolean {
-  try {
-    return (JSON.parse(item.tags) as string[]).includes(tag);
-  } catch (error) {
-    console.debug("[blocker-select] failed to parse task tags:", error);
-    return false;
-  }
-}
-
 const disabledSet = computed(() => new Set(props.disabledIds || []));
 
 function isDisabled(id: string): boolean {
@@ -162,7 +153,7 @@ onMounted(async () => {
           <span class="command-label">{{ itemTitle(item) }}</span>
           <span class="command-meta">
             <span v-if="isDisabled(item.id)" class="tag-label">{{ $t('blockerSelect.circularDep') }}</span>
-            <span v-else class="tag-label">{{ hasTag(item, 'blocked') ? $t('blockerSelect.statusBlocked') : $t('blockerSelect.statusActive') }}</span>
+            <span v-else class="tag-label">{{ $t('blockerSelect.statusActive') }}</span>
           </span>
         </div>
       </div>

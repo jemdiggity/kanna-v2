@@ -35,14 +35,8 @@ CREATE TABLE IF NOT EXISTS pipeline_item (
   pin_order INTEGER,
   display_name TEXT,
   last_output_preview TEXT,
-  created_at TEXT,
-  updated_at TEXT,
-  previous_stage TEXT,
   closed_at TEXT,
   pipeline TEXT,
-  stage_result TEXT,
-  active_post_action TEXT,
-  tags TEXT,
   agent_provider TEXT,
   port_offset INTEGER,
   port_env TEXT,
@@ -52,7 +46,10 @@ CREATE TABLE IF NOT EXISTS pipeline_item (
   agent_session_id TEXT,
   agent_spawn_options TEXT,
   teardown_started_at TEXT,
-  parent_task_id TEXT
+  parent_task_id TEXT,
+  pipeline_def TEXT,
+  created_at TEXT,
+  updated_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS worktree (

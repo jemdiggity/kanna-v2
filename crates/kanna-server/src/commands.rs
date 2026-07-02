@@ -369,7 +369,7 @@ mod tests {
         daemon_server.await.unwrap();
 
         let item = db.get_task_stage_source("710917fb").unwrap().unwrap();
-        assert_eq!(item.stage.as_deref(), Some("done"));
+        assert_eq!(item.stage.as_deref(), Some("in progress"));
         assert!(item.closed_at.is_some());
 
         // Full app E2E for the original untitled-task close regression would need a

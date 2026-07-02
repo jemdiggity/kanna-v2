@@ -4,45 +4,6 @@ use axum::extract::State;
 use axum::Json;
 use std::sync::Arc;
 
-fn parse_tags_json(tags_json: &str) -> Vec<String> {
-    serde_json::from_str::<Vec<String>>(tags_json).unwrap_or_default()
-}
-
-fn render_tags_json(tags: &[String]) -> Result<String, (axum::http::StatusCode, String)> {
-    serde_json::to_string(tags).map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("failed to serialize tags: {}", e),
-        )
-    })
-}
-
-fn add_blocked_tag(db: &Db, task_id: &str) -> Result<(), (axum::http::StatusCode, String)> {
-    let tags_json = db
-        .pipeline_item_tags(task_id)
-        .map_err(|e| db_write_error("db error", e))?;
-    let mut tags = parse_tags_json(&tags_json);
-    if !tags.iter().any(|tag| tag == "blocked") {
-        tags.push("blocked".to_string());
-    }
-    let rendered = render_tags_json(&tags)?;
-    db.update_pipeline_item_tags(task_id, &rendered)
-        .map_err(|e| db_write_error("db error", e))
-}
-
-fn remove_blocked_tag(db: &Db, task_id: &str) -> Result<(), (axum::http::StatusCode, String)> {
-    let tags_json = db
-        .pipeline_item_tags(task_id)
-        .map_err(|e| db_write_error("db error", e))?;
-    let tags = parse_tags_json(&tags_json)
-        .into_iter()
-        .filter(|tag| tag != "blocked")
-        .collect::<Vec<_>>();
-    let rendered = render_tags_json(&tags)?;
-    db.update_pipeline_item_tags(task_id, &rendered)
-        .map_err(|e| db_write_error("db error", e))
-}
-
 pub(super) fn resolve_existing_task_id(
     db: &Db,
     task_or_branch_id: &str,
@@ -80,7 +41,6 @@ pub(super) fn persist_resolved_task_blockers(
         db.insert_task_blocker(task_id, blocker_id)
             .map_err(|e| db_write_error("db error", e))?;
     }
-    add_blocked_tag(db, task_id)?;
     db.update_pipeline_item_activity(task_id, "idle")
         .map_err(|e| db_write_error("db error", e))
 }
@@ -149,6 +109,5 @@ pub(super) async fn unblock_task(
     let task_id = resolve_existing_task_id(&db, &task_id)?;
     db.remove_all_task_blockers(&task_id)
         .map_err(|e| db_write_error("db error", e))?;
-    remove_blocked_tag(&db, &task_id)?;
     Ok(Json(crate::mobile_api::TaskActionResponse { task_id }))
 }

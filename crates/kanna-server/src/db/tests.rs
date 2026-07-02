@@ -74,7 +74,6 @@ fn server_connection_opens_with_desktop_like_wal_client_active() {
                 CREATE TABLE pipeline_item (
                   id TEXT PRIMARY KEY,
                   stage TEXT NOT NULL,
-                  previous_stage TEXT,
                   closed_at TEXT,
                   updated_at TEXT
                 );
@@ -93,7 +92,7 @@ fn server_connection_opens_with_desktop_like_wal_client_active() {
             |row| row.get(0),
         )
         .expect("desktop-like read");
-    assert_eq!(stage, "done");
+    assert_eq!(stage, "in progress");
 
     drop(db);
     drop(desktop_conn);
@@ -119,7 +118,7 @@ fn open_fails_with_clear_error_when_quick_check_cannot_read_database() {
 }
 
 #[test]
-fn close_pipeline_item_marks_task_done() {
+fn close_pipeline_item_sets_closed_at_without_changing_stage() {
     let path = temp_db_path();
     let conn = Connection::open(&path).expect("open temp db");
     conn.execute_batch(
@@ -127,7 +126,6 @@ fn close_pipeline_item_marks_task_done() {
             CREATE TABLE pipeline_item (
               id TEXT PRIMARY KEY,
               stage TEXT NOT NULL,
-              previous_stage TEXT,
               closed_at TEXT,
               updated_at TEXT
             );
@@ -141,16 +139,15 @@ fn close_pipeline_item_marks_task_done() {
     db.close_pipeline_item("task-1").expect("close task");
 
     let conn = Connection::open(&path).expect("re-open db");
-    let (stage, previous_stage, closed_at): (String, Option<String>, Option<String>) = conn
+    let (stage, closed_at): (String, Option<String>) = conn
         .query_row(
-            "SELECT stage, previous_stage, closed_at FROM pipeline_item WHERE id = 'task-1'",
+            "SELECT stage, closed_at FROM pipeline_item WHERE id = 'task-1'",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .expect("query row");
 
-    assert_eq!(stage, "done");
-    assert_eq!(previous_stage.as_deref(), Some("in progress"));
+    assert_eq!(stage, "in progress");
     assert!(closed_at.is_some());
 
     let _ = std::fs::remove_file(path);
@@ -183,7 +180,8 @@ fn close_pipeline_item_accepts_task_branch_name() {
         .expect("close task by branch name");
 
     let item = db.get_pipeline_item("710917fb").unwrap().unwrap();
-    assert_eq!(item.stage.as_deref(), Some("done"));
+    assert_eq!(item.stage.as_deref(), Some("in progress"));
+    assert!(item.closed_at.is_some());
 }
 
 #[test]
@@ -195,7 +193,6 @@ fn update_pipeline_item_stage_does_not_mutate_closed_rows() {
             CREATE TABLE pipeline_item (
               id TEXT PRIMARY KEY,
               stage TEXT NOT NULL,
-              stage_result TEXT,
               closed_at TEXT,
               updated_at TEXT
             );
@@ -221,47 +218,6 @@ fn update_pipeline_item_stage_does_not_mutate_closed_rows() {
         )
         .expect("query row");
     assert_eq!(stage, "review");
-    assert_eq!(closed_at.as_deref(), Some("2026-06-03 00:02:25"));
-
-    let _ = std::fs::remove_file(path);
-}
-
-#[test]
-fn update_pipeline_item_stage_state_does_not_mutate_closed_rows() {
-    let path = temp_db_path();
-    let conn = Connection::open(&path).expect("open temp db");
-    conn.execute_batch(
-        r#"
-            CREATE TABLE pipeline_item (
-              id TEXT PRIMARY KEY,
-              stage TEXT NOT NULL,
-              stage_result TEXT,
-              closed_at TEXT,
-              updated_at TEXT
-            );
-            INSERT INTO pipeline_item (id, stage, stage_result, closed_at)
-            VALUES ('task-1', 'pr', '{"status":"success"}', '2026-06-03 00:02:25');
-            "#,
-    )
-    .expect("seed db");
-    drop(conn);
-
-    let db = Db::open(path.to_str().expect("utf8 path")).expect("open db");
-    let err = db
-        .update_pipeline_item_stage_state("task-1", "review", None)
-        .expect_err("closed task should not be stage-state-mutated");
-
-    assert!(matches!(err, rusqlite::Error::QueryReturnedNoRows));
-    let conn = Connection::open(&path).expect("re-open db");
-    let (stage, stage_result, closed_at): (String, Option<String>, Option<String>) = conn
-        .query_row(
-            "SELECT stage, stage_result, closed_at FROM pipeline_item WHERE id = 'task-1'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .expect("query row");
-    assert_eq!(stage, "pr");
-    assert_eq!(stage_result.as_deref(), Some("{\"status\":\"success\"}"));
     assert_eq!(closed_at.as_deref(), Some("2026-06-03 00:02:25"));
 
     let _ = std::fs::remove_file(path);
@@ -390,7 +346,6 @@ fn insert_pipeline_item_stores_stage_metadata() {
               prompt TEXT,
               pipeline TEXT NOT NULL,
               stage TEXT NOT NULL,
-              tags TEXT NOT NULL,
               branch TEXT,
               agent_type TEXT,
               agent_provider TEXT NOT NULL,
@@ -402,6 +357,7 @@ fn insert_pipeline_item_stores_stage_metadata() {
               notify_task_id TEXT,
               notified_at TEXT,
               parent_task_id TEXT,
+              pipeline_def TEXT,
               display_name TEXT,
               created_at TEXT NOT NULL DEFAULT (datetime('now')),
               updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -418,7 +374,6 @@ fn insert_pipeline_item_stores_stage_metadata() {
         prompt: "Merge queued pull requests",
         pipeline: "default",
         stage: "in progress",
-        tags_json: "[\"in progress\"]",
         branch: "task-task-2",
         agent_type: "pty",
         agent_provider: "claude",
@@ -429,6 +384,7 @@ fn insert_pipeline_item_stores_stage_metadata() {
         display_name: Some("Merge queue"),
         notify_task_id: None,
         parent_task_id: None,
+        pipeline_def: Some("{\"name\":\"default\"}"),
     })
     .expect("insert pipeline item");
 

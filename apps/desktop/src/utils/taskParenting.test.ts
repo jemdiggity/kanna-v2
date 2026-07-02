@@ -42,7 +42,7 @@ function item(overrides: Partial<PipelineItem>): PipelineItem {
 }
 
 describe("hasOpenSubtasks", () => {
-  it("is true while a subtask is open and false once all subtasks are closed/done", () => {
+  it("is true while a subtask is open and false once all subtasks are closed", () => {
     const open = [
       item({ id: "parent" }),
       item({ id: "child", parent_task_id: "parent" }),
@@ -52,7 +52,7 @@ describe("hasOpenSubtasks", () => {
     const closed = [
       item({ id: "parent" }),
       item({ id: "child", parent_task_id: "parent", closed_at: "2026-05-31 10:00:00" }),
-      item({ id: "child-2", parent_task_id: "parent", stage: "done" }),
+      item({ id: "child-2", parent_task_id: "parent", closed_at: "2026-05-31 10:05:00" }),
     ];
     expect(hasOpenSubtasks(closed, "parent")).toBe(false);
   });

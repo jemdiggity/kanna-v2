@@ -959,10 +959,6 @@ async fn create_task_route_persists_blocker_before_daemon_spawn() {
             .unwrap(),
         1
     );
-    assert_eq!(
-        db.get_test_pipeline_item_tags(&created.task_id).unwrap(),
-        "[\"in progress\",\"blocked\"]"
-    );
 
     let _ = std::fs::remove_file(&socket_path);
     let _ = std::fs::remove_dir_all(&daemon_dir);

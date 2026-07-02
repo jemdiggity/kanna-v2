@@ -140,6 +140,7 @@ vi.mock("@kanna/db", () => ({
   getUnblockedItems: vi.fn(async () => mockState.unblockedItems),
   listRepos: vi.fn(async () => mockState.repos),
   listPipelineItems: vi.fn(async () => mockState.items),
+  listTaskBlockers: vi.fn(async () => []),
   updatePipelineItemActivity: mockState.updatePipelineItemActivityMock,
   markPipelineItemTearingDown: vi.fn(async () => {}),
   clearPipelineItemActivePostAction: mockState.clearPipelineItemActivePostActionMock,
@@ -576,11 +577,10 @@ describe("createInitApi", () => {
     expect(state.codeTheme.value).toBe("match");
   });
 
-  it("consumes successful auto-stage results once when duplicate stage-complete events arrive", async () => {
+  it("reloads and marks an unselected task unread when a stage-complete event arrives", async () => {
     const item = mockState.makeItem({
       id: "task-1",
       stage: "commit",
-      stage_result: JSON.stringify({ status: "success", summary: "committed" }),
       tags: "[]",
     });
     mockState.items = [item];
@@ -590,143 +590,6 @@ describe("createInitApi", () => {
     state.items.value = [item];
     const services = {
       loadInitialData: vi.fn(async () => {}),
-      loadPipeline: mockState.loadPipelineMock,
-      advanceStage: mockState.advanceStageMock,
-      reloadSnapshot: mockState.reloadSnapshotMock,
-    };
-    const toast = {
-      toasts: ref([]),
-      dismiss: vi.fn(),
-      info: vi.fn(),
-      warning: vi.fn(),
-      error: vi.fn(),
-    };
-    let claimAvailable = true;
-    const db = {
-      ...createDb(),
-      execute: vi.fn(async (query: string) => {
-        if (query.includes("UPDATE pipeline_item SET stage_result = NULL")) {
-          if (!claimAvailable) return { rowsAffected: 0 };
-          claimAvailable = false;
-          return { rowsAffected: 1 };
-        }
-        return { rowsAffected: 1 };
-      }),
-    };
-    const context = createStoreContext(state, toast, services);
-    const ports = {
-      closeTaskAndReleasePorts: vi.fn(async () => {}),
-    } as unknown as import("./ports").PortsStore;
-    const initApi = createInitApi(context, ports, {
-      checkUnblocked: vi.fn(async () => {}),
-      handleAgentFinished: vi.fn(),
-      startBlockedTask: vi.fn(async () => {}),
-      restoreUnblockedTask: vi.fn(async () => {}),
-    } as unknown as Parameters<typeof createInitApi>[2]);
-
-    await initApi.init(db);
-
-    const stageCompleteHandler = getStageCompleteHandler();
-
-    await Promise.all([
-      stageCompleteHandler({ payload: { task_id: "task-1" } }),
-      stageCompleteHandler({ payload: { task_id: "task-1" } }),
-    ]);
-
-    expect(mockState.advanceStageMock).toHaveBeenCalledTimes(1);
-    expect(mockState.advanceStageMock).toHaveBeenCalledWith("task-1", { initiatedBy: "auto" });
-  });
-
-  it("clears a successful active post-action and advances to the next real stage", async () => {
-    const item = mockState.makeItem({
-      id: "task-post-action",
-      stage: "in progress",
-      active_post_action: "commit",
-      stage_result: JSON.stringify({ status: "success", summary: "committed" }),
-      tags: "[]",
-    });
-    mockState.loadPipelineMock.mockResolvedValueOnce({
-      name: "default",
-      stages: [
-        {
-          name: "in progress",
-          transition: "manual",
-          post_action: { name: "commit", transition: "auto", agent: "commit" },
-        },
-        { name: "pr", transition: "manual" },
-      ],
-    });
-    mockState.items = [item];
-
-    const state = createStoreState();
-    state.repos.value = [...mockState.repos];
-    state.items.value = [item];
-    const services = {
-      loadInitialData: vi.fn(async () => {}),
-      loadPipeline: mockState.loadPipelineMock,
-      advanceStage: mockState.advanceStageMock,
-      reloadSnapshot: mockState.reloadSnapshotMock,
-    };
-    const toast = {
-      toasts: ref([]),
-      dismiss: vi.fn(),
-      info: vi.fn(),
-      warning: vi.fn(),
-      error: vi.fn(),
-    };
-    const db = {
-      ...createDb(),
-      execute: vi.fn(async () => ({ rowsAffected: 1 })),
-    };
-    const context = createStoreContext(state, toast, services);
-    const ports = {
-      closeTaskAndReleasePorts: vi.fn(async () => {}),
-    } as unknown as import("./ports").PortsStore;
-    const initApi = createInitApi(context, ports, {
-      checkUnblocked: vi.fn(async () => {}),
-      handleAgentFinished: vi.fn(),
-      startBlockedTask: vi.fn(async () => {}),
-      restoreUnblockedTask: vi.fn(async () => {}),
-    } as unknown as Parameters<typeof createInitApi>[2]);
-
-    await initApi.init(db);
-    await getStageCompleteHandler()({ payload: { task_id: "task-post-action" } });
-
-    expect(mockState.clearPipelineItemActivePostActionMock).toHaveBeenCalledWith(expect.anything(), "task-post-action");
-    expect(mockState.advanceStageMock).toHaveBeenCalledWith("task-post-action", {
-      initiatedBy: "auto",
-      skipPostAction: true,
-    });
-  });
-
-  it("leaves a failed active post-action in place", async () => {
-    const item = mockState.makeItem({
-      id: "task-post-action-failed",
-      stage: "in progress",
-      active_post_action: "commit",
-      stage_result: JSON.stringify({ status: "failure", summary: "dirty unrelated files" }),
-      tags: "[]",
-    });
-    mockState.loadPipelineMock.mockResolvedValueOnce({
-      name: "default",
-      stages: [
-        {
-          name: "in progress",
-          transition: "manual",
-          post_action: { name: "commit", transition: "auto", agent: "commit" },
-        },
-        { name: "pr", transition: "manual" },
-      ],
-    });
-    mockState.items = [item];
-
-    const state = createStoreState();
-    state.repos.value = [...mockState.repos];
-    state.items.value = [item];
-    const services = {
-      loadInitialData: vi.fn(async () => {}),
-      loadPipeline: mockState.loadPipelineMock,
-      advanceStage: mockState.advanceStageMock,
       reloadSnapshot: mockState.reloadSnapshotMock,
     };
     const toast = {
@@ -748,9 +611,9 @@ describe("createInitApi", () => {
     } as unknown as Parameters<typeof createInitApi>[2]);
 
     await initApi.init(createDb());
-    await getStageCompleteHandler()({ payload: { task_id: "task-post-action-failed" } });
+    await getStageCompleteHandler()({ payload: { task_id: "task-1" } });
 
-    expect(mockState.clearPipelineItemActivePostActionMock).not.toHaveBeenCalled();
-    expect(mockState.advanceStageMock).not.toHaveBeenCalled();
+    expect(mockState.updatePipelineItemActivityMock).toHaveBeenCalledWith(expect.anything(), "task-1", "unread");
+    expect(mockState.reloadSnapshotMock).toHaveBeenCalledTimes(2);
   });
 });

@@ -46,12 +46,11 @@ describe("computeTaskSnapshotFingerprint", () => {
     expect(computeTaskSnapshotFingerprint([a, b])).toBe(computeTaskSnapshotFingerprint([b, a]));
   });
 
-  it("excludes closed and done tasks", () => {
+  it("excludes closed tasks", () => {
     const open = makeItem({ id: "open" });
     const withClosed = computeTaskSnapshotFingerprint([
       open,
       makeItem({ id: "closed", closed_at: "2026-06-14T00:00:00.000Z" }),
-      makeItem({ id: "done", stage: "done" }),
     ]);
     expect(withClosed).toBe(computeTaskSnapshotFingerprint([open]));
   });

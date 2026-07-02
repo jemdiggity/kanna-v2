@@ -56,19 +56,16 @@ impl Db {
                 last_output_preview TEXT,
                 created_at TEXT,
                 updated_at TEXT,
-                previous_stage TEXT,
                 closed_at TEXT,
                 pipeline TEXT,
-                stage_result TEXT,
-                active_post_action TEXT,
-                tags TEXT,
                 agent_provider TEXT,
                 port_offset INTEGER,
                 port_env TEXT,
                 base_ref TEXT,
                 notify_task_id TEXT,
                 notified_at TEXT,
-                parent_task_id TEXT
+                parent_task_id TEXT,
+                pipeline_def TEXT
             );
 
             CREATE TABLE worktree (
@@ -142,8 +139,8 @@ impl Db {
         self.conn.execute(
             "INSERT INTO pipeline_item (
                 id, repo_id, prompt, stage, branch, agent_type, activity,
-                pinned, pin_order, display_name, created_at, updated_at, pipeline, tags, agent_provider
-             ) VALUES (?, ?, ?, ?, ?, 'pty', 'idle', 0, NULL, ?, ?, ?, 'default', '[]', 'claude')",
+                pinned, pin_order, display_name, created_at, updated_at, pipeline, agent_provider
+             ) VALUES (?, ?, ?, ?, ?, 'pty', 'idle', 0, NULL, ?, ?, ?, 'default', 'claude')",
             (
                 id,
                 repo_id,
@@ -244,14 +241,14 @@ impl Db {
         id: &str,
         branch: &str,
         pipeline: &str,
-        stage_result: Option<&str>,
+        _stage_result: Option<&str>,
         agent_provider: &str,
     ) -> Result<(), rusqlite::Error> {
         self.conn.execute(
             "UPDATE pipeline_item
-             SET branch = ?, pipeline = ?, stage_result = ?, agent_provider = ?
+             SET branch = ?, pipeline = ?, agent_provider = ?
              WHERE id = ?",
-            (branch, pipeline, stage_result, agent_provider, id),
+            (branch, pipeline, agent_provider, id),
         )?;
         Ok(())
     }
@@ -325,19 +322,5 @@ impl Db {
             (blocked_item_id, blocker_item_id),
             |row| row.get(0),
         )
-    }
-
-    #[cfg(test)]
-    pub fn get_test_pipeline_item_tags(&self, id: &str) -> Result<String, rusqlite::Error> {
-        self.pipeline_item_tags(id)
-    }
-
-    #[cfg(test)]
-    pub fn set_test_pipeline_item_tags(
-        &self,
-        id: &str,
-        tags_json: &str,
-    ) -> Result<(), rusqlite::Error> {
-        self.update_pipeline_item_tags(id, tags_json)
     }
 }

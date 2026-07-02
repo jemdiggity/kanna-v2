@@ -137,7 +137,7 @@
     },
     {
       "name": "kanna_advance_stage",
-      "description": "Advance an accepted Kanna task to the next pipeline stage; when the next stage is a new-task stage, this closes the current task and opens a new task in a new worktree.",
+      "description": "Advance an accepted Kanna task to the next pipeline stage according to stage policy; continue stages reuse the current task/session, while new-task stages create a next-stage task and close the source after successful spawn.",
       "method": "POST",
       "path": "/v1/tasks/{task_id}/actions/advance-stage",
       "response": "json",
@@ -179,7 +179,7 @@
     },
     {
       "name": "kanna_complete_stage",
-      "description": "Record pipeline stage completion; success can trigger configured auto-advance, while failure records the result and stops advancement.",
+      "description": "Record pipeline stage completion; success can trigger configured auto-advance, while failure stops advancement.",
       "method": "POST",
       "path": "/v1/tasks/{task_id}/actions/complete-stage",
       "response": "json",

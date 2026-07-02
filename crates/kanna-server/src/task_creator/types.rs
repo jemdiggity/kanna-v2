@@ -69,9 +69,6 @@ pub(crate) struct PreparedStageContinue {
     pub(super) agent_type: String,
     pub(super) previous_stage: String,
     pub(super) next_stage: String,
-    pub(super) previous_stage_result: Option<String>,
-    pub(super) previous_active_post_action: Option<String>,
-    pub(super) active_post_action: Option<String>,
     pub(super) input_text: String,
     pub(super) input: Vec<u8>,
 }

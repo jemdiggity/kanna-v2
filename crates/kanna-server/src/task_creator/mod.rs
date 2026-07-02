@@ -16,7 +16,9 @@ use crate::config::Config;
 use crate::daemon_client::DaemonClient;
 use crate::db::{Db, NewPipelineItem, Repo};
 use commands::{build_agent_command, build_kanna_preamble, build_task_shell_command};
-use definitions::{read_agent_definition, read_pipeline_definition, read_repo_config};
+use definitions::{
+    read_agent_definition, read_pipeline_definition, read_repo_config, PipelineStageTransition,
+};
 use environment::{
     apply_workspace_path_env, build_spawn_env, claim_task_ports, resolve_headless_agent_executable,
     write_kanna_mcp_config,
@@ -243,9 +245,10 @@ fn prepare_task_spawn(
         .as_deref()
         .unwrap_or(stage.name.as_str())
         .to_string();
-    let stage_transition = stage.transition.as_deref();
-    let tags_json = serde_json::to_string(&vec![stage_name.clone()])
-        .map_err(|e| format!("serialize error: {}", e))?;
+    let stage_transition = match stage.policy.transition {
+        PipelineStageTransition::Manual => Some("manual"),
+        PipelineStageTransition::Auto => Some("auto"),
+    };
 
     db.insert_pipeline_item(NewPipelineItem {
         id: &task_id,
@@ -254,7 +257,6 @@ fn prepare_task_spawn(
         display_name: display_name.as_deref(),
         pipeline: &pipeline_name,
         stage: &stage_name,
-        tags_json: &tags_json,
         branch: &branch,
         agent_type: agent_type.as_str(),
         agent_provider: provider.as_str(),
@@ -267,6 +269,7 @@ fn prepare_task_spawn(
             .or(request.base_ref.as_deref()),
         notify_task_id: request.notify_task_id.as_deref(),
         parent_task_id: request.parent_task_id.as_deref(),
+        pipeline_def: None,
     })
     .map_err(|e| format!("db error: {}", e))?;
 

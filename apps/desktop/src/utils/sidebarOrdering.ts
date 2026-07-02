@@ -1,4 +1,4 @@
-import type { PipelineItem } from "@kanna/db";
+import type { PipelineItem, TaskBlocker } from "@kanna/db";
 import { taskSearchMatch } from "./taskSearch";
 
 export interface SidebarItemGroup {
@@ -15,21 +15,13 @@ export interface SidebarTreeRow {
 interface SidebarOrderingOptions {
   repoId: string;
   items: readonly PipelineItem[];
+  blockers?: readonly TaskBlocker[];
   getStageOrder: (repoId: string) => readonly string[];
   searchQuery?: string;
 }
 
-function hasTag(item: { tags: string }, tag: string): boolean {
-  try {
-    return (JSON.parse(item.tags) as string[]).includes(tag);
-  } catch (error) {
-    console.debug("[sidebar-ordering] failed to parse task tags:", error);
-    return false;
-  }
-}
-
-function isHidden(item: { stage: string; closed_at?: string | null }): boolean {
-  return item.stage === "done" || item.closed_at != null;
+function isHidden(item: { closed_at?: string | null }): boolean {
+  return item.closed_at != null;
 }
 
 function matchesSearch(query: string, item: PipelineItem): boolean {
@@ -55,6 +47,10 @@ function sortByCreatedAt(items: PipelineItem[]): PipelineItem[] {
 
 function normalizedSearchQuery(query: string | undefined): string {
   return query?.trim() ?? "";
+}
+
+function blockedItemIds(options: SidebarOrderingOptions): Set<string> {
+  return new Set((options.blockers ?? []).map((blocker) => blocker.blocked_item_id));
 }
 
 /** Ids of visible (non-hidden) tasks in the repo — used to resolve subtask parents. */
@@ -128,9 +124,10 @@ export function sortedSidebarPinnedItems(options: SidebarOrderingOptions): Pipel
 export function sortedSidebarBlockedItems(options: SidebarOrderingOptions): PipelineItem[] {
   const query = normalizedSearchQuery(options.searchQuery);
   const isNestedChild = makeNestedChildPredicate(options);
+  const blockedIds = blockedItemIds(options);
   const items = options.items.filter((item) =>
     item.repo_id === options.repoId
-    && hasTag(item, "blocked")
+    && blockedIds.has(item.id)
     && !isHidden(item)
     && !item.pinned
     && !isNestedChild(item)
@@ -142,16 +139,7 @@ export function sortedSidebarBlockedItems(options: SidebarOrderingOptions): Pipe
 export function groupedSidebarItemsByStage(options: SidebarOrderingOptions): SidebarItemGroup[] {
   const query = normalizedSearchQuery(options.searchQuery);
   const isNestedChild = makeNestedChildPredicate(options);
-  const blockedIds = new Set(
-    options.items
-      .filter((item) =>
-        item.repo_id === options.repoId
-        && hasTag(item, "blocked")
-        && !isHidden(item)
-        && !item.pinned
-      )
-      .map((item) => item.id),
-  );
+  const blockedIds = blockedItemIds(options);
 
   const stageItems = options.items.filter((item) =>
     item.repo_id === options.repoId

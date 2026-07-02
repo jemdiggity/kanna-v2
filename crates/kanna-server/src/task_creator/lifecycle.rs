@@ -132,25 +132,8 @@ pub(crate) async fn continue_prepared_stage_for_api(
             .resolve_task_terminal_session_id(&prepared.task_id)
             .map_err(|e| format!("db error: {}", e))?
             .ok_or_else(|| format!("task not found: {}", prepared.task_id))?;
-        if let Some(active_post_action) = prepared.active_post_action.as_deref() {
-            db.update_pipeline_item_active_post_action(&prepared.task_id, active_post_action)
-                .map_err(|e| format!("db error: {}", e))?;
-            if let Err(err) = db.clear_pipeline_item_stage_result(&prepared.task_id) {
-                let _ = db.update_pipeline_item_post_action_state(
-                    &prepared.task_id,
-                    prepared.previous_active_post_action.as_deref(),
-                    prepared.previous_stage_result.as_deref(),
-                );
-                return Err(format!("db error: {}", err));
-            }
-        } else {
-            db.update_pipeline_item_stage(&prepared.task_id, &prepared.next_stage)
-                .map_err(|e| format!("db error: {}", e))?;
-            if let Err(err) = db.clear_pipeline_item_stage_result(&prepared.task_id) {
-                let _ = db.update_pipeline_item_stage(&prepared.task_id, &prepared.previous_stage);
-                return Err(format!("db error: {}", err));
-            }
-        }
+        db.update_pipeline_item_stage(&prepared.task_id, &prepared.next_stage)
+            .map_err(|e| format!("db error: {}", e))?;
         session_id
     };
 
@@ -166,13 +149,7 @@ pub(crate) async fn continue_prepared_stage_for_api(
     };
 
     let event = daemon.send_command(&command).await.map_err(|e| {
-        let _ = rollback_continue_stage(
-            db_path,
-            &prepared.task_id,
-            &prepared.previous_stage,
-            prepared.previous_stage_result.as_deref(),
-            prepared.previous_active_post_action.as_deref(),
-        );
+        let _ = rollback_continue_stage(db_path, &prepared.task_id, &prepared.previous_stage);
         format!("daemon error: {}", e)
     })?;
 
@@ -181,23 +158,11 @@ pub(crate) async fn continue_prepared_stage_for_api(
             task_id: prepared.task_id,
         }),
         DaemonEvent::Error { message, .. } => {
-            let _ = rollback_continue_stage(
-                db_path,
-                &prepared.task_id,
-                &prepared.previous_stage,
-                prepared.previous_stage_result.as_deref(),
-                prepared.previous_active_post_action.as_deref(),
-            );
+            let _ = rollback_continue_stage(db_path, &prepared.task_id, &prepared.previous_stage);
             Err(format!("daemon error: {}", message))
         }
         other => {
-            let _ = rollback_continue_stage(
-                db_path,
-                &prepared.task_id,
-                &prepared.previous_stage,
-                prepared.previous_stage_result.as_deref(),
-                prepared.previous_active_post_action.as_deref(),
-            );
+            let _ = rollback_continue_stage(db_path, &prepared.task_id, &prepared.previous_stage);
             Err(format!("unexpected daemon response: {:?}", other))
         }
     }
@@ -207,16 +172,8 @@ fn rollback_continue_stage(
     db_path: &str,
     task_id: &str,
     previous_stage: &str,
-    previous_stage_result: Option<&str>,
-    previous_active_post_action: Option<&str>,
 ) -> Result<(), String> {
     let db = Db::open(db_path).map_err(|e| format!("db error: {}", e))?;
-    db.update_pipeline_item_stage_state(task_id, previous_stage, previous_stage_result)
-        .map_err(|e| format!("db error: {}", e))?;
-    db.update_pipeline_item_post_action_state(
-        task_id,
-        previous_active_post_action,
-        previous_stage_result,
-    )
-    .map_err(|e| format!("db error: {}", e))
+    db.update_pipeline_item_stage(task_id, previous_stage)
+        .map_err(|e| format!("db error: {}", e))
 }

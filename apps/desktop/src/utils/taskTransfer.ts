@@ -23,7 +23,6 @@ export interface OutgoingTransferPayload {
     resume_session_id?: string | null;
     prompt: string | null;
     stage: string;
-    active_post_action: string | null;
     branch: string | null;
     pipeline: string;
     display_name: string | null;
@@ -53,7 +52,7 @@ export interface BuildOutgoingTransferPayloadInput {
   targetPeerId: string;
   item: Pick<
     PipelineItem,
-    "id" | "prompt" | "stage" | "active_post_action" | "branch" | "pipeline" | "display_name" | "base_ref" | "agent_type" | "agent_provider" | "agent_session_id"
+    "id" | "prompt" | "stage" | "branch" | "pipeline" | "display_name" | "base_ref" | "agent_type" | "agent_provider" | "agent_session_id"
   >;
   repoPath?: string | null;
   repoName?: string | null;
@@ -238,7 +237,6 @@ export function buildOutgoingTransferPayload(
       resume_session_id: input.item.agent_session_id,
       prompt: input.item.prompt,
       stage: input.item.stage,
-      active_post_action: input.item.active_post_action,
       branch: input.item.branch,
       pipeline: input.item.pipeline,
       display_name: input.item.display_name,
