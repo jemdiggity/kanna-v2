@@ -374,6 +374,25 @@ impl Db {
         Ok(())
     }
 
+    pub fn update_pipeline_item_base_ref_and_activity(
+        &self,
+        id: &str,
+        base_ref: Option<&str>,
+        activity: &str,
+    ) -> Result<(), rusqlite::Error> {
+        let rows_affected = self.conn.execute(
+            "UPDATE pipeline_item
+             SET base_ref = ?, activity = ?, activity_changed_at = datetime('now'),
+                 updated_at = datetime('now')
+             WHERE id = ? AND closed_at IS NULL",
+            (base_ref, activity, id),
+        )?;
+        if rows_affected == 0 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        Ok(())
+    }
+
     pub fn close_pipeline_item(&self, id: &str) -> Result<(), rusqlite::Error> {
         let Some(pipeline_item_id) = self.resolve_pipeline_item_id(id)? else {
             return Err(rusqlite::Error::QueryReturnedNoRows);

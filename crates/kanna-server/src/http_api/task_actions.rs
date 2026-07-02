@@ -1,6 +1,6 @@
 use super::state::{db_write_error, AppState};
-use super::task_blockers::resolve_existing_task_id;
-use super::task_input::notify_task_completion;
+use super::task_blockers::{resolve_existing_task_id, start_dependents_unblocked_by_pr};
+use super::task_input::{notify_task_completion, submit_task_input};
 use crate::db::Db;
 use axum::extract::State;
 use axum::Json;
@@ -128,6 +128,62 @@ pub(super) async fn set_task_parent(
     Ok(Json(crate::mobile_api::TaskActionResponse { task_id }))
 }
 
+fn collect_retarget_instructions_for_merged_blocker(
+    db: &Db,
+    blocker_task_id: &str,
+) -> Result<Vec<(String, String)>, (axum::http::StatusCode, String)> {
+    let blocker = db
+        .get_pipeline_item(blocker_task_id)
+        .map_err(|e| db_write_error("db error", e))?
+        .ok_or_else(|| {
+            (
+                axum::http::StatusCode::NOT_FOUND,
+                format!("task not found: {blocker_task_id}"),
+            )
+        })?;
+    if blocker.stage.as_deref() != Some("pr") {
+        return Ok(Vec::new());
+    }
+    let repo = db
+        .get_repo(&blocker.repo_id)
+        .map_err(|e| db_write_error("db error", e))?
+        .ok_or_else(|| {
+            (
+                axum::http::StatusCode::NOT_FOUND,
+                format!("repo not found for task: {blocker_task_id}"),
+            )
+        })?;
+    let default_branch = repo.default_branch.unwrap_or_else(|| "main".to_string());
+    let blocker_branch = blocker
+        .branch
+        .unwrap_or_else(|| blocker_task_id.to_string());
+
+    let mut instructions = Vec::new();
+    for dependent_id in db
+        .list_tasks_blocked_by(blocker_task_id)
+        .map_err(|e| db_write_error("db error", e))?
+    {
+        if db
+            .get_task_worktree_path(&dependent_id)
+            .map_err(|e| db_write_error("db error", e))?
+            .is_none()
+        {
+            continue;
+        }
+        let Some(session_id) = db
+            .resolve_task_terminal_session_id(&dependent_id)
+            .map_err(|e| db_write_error("db error", e))?
+        else {
+            continue;
+        };
+        let message = format!(
+            "Dependency branch `{blocker_branch}` has merged. Please retarget this stacked branch onto `{default_branch}` now: fetch the latest default branch, rebase your work onto `{default_branch}`, resolve conflicts if needed, and continue from the rebased branch."
+        );
+        instructions.push((session_id, message));
+    }
+    Ok(instructions)
+}
+
 pub(super) async fn close_task(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(task_id): axum::extract::Path<String>,
@@ -172,6 +228,8 @@ pub(super) async fn close_task(
             "task has open subtasks; close or detach subtasks first".to_string(),
         ));
     }
+    let retarget_instructions =
+        collect_retarget_instructions_for_merged_blocker(&db, &pipeline_item_id)?;
 
     let mut daemon = crate::daemon_client::DaemonClient::connect(&state.config.daemon_dir)
         .await
@@ -181,6 +239,12 @@ pub(super) async fn close_task(
                 format!("daemon error: {}", e),
             )
         })?;
+
+    for (session_id, message) in retarget_instructions {
+        submit_task_input(&mut daemon, &session_id, &message)
+            .await
+            .map_err(|(_, message)| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, message))?;
+    }
 
     for session_id in [
         pipeline_item_id.to_string(),
@@ -241,15 +305,21 @@ pub(super) async fn advance_stage(
             .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e));
     }
 
-    let transition = {
+    let (source_branch, transition) = {
         let db = Db::open(&state.config.db_path).map_err(|e| {
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                 format!("db error: {}", e),
             )
         })?;
-        crate::task_creator::prepare_advance_stage_for_api(&db, &state.config, &task_id)
-            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?
+        let source_branch = db
+            .get_pipeline_item(&task_id)
+            .map_err(|e| db_write_error("db error", e))?
+            .and_then(|item| item.branch);
+        let transition =
+            crate::task_creator::prepare_advance_stage_for_api(&db, &state.config, &task_id)
+                .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        (source_branch, transition)
     };
     let mut daemon = crate::daemon_client::DaemonClient::connect(&state.config.daemon_dir)
         .await
@@ -264,6 +334,9 @@ pub(super) async fn advance_stage(
             let created = crate::task_creator::spawn_prepared_task_for_api(&mut daemon, *prepared)
                 .await
                 .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+            if created.stage == "pr" {
+                start_dependents_unblocked_by_pr(&state, &task_id, source_branch.clone()).await?;
+            }
             let db = Db::open(&state.config.db_path).map_err(|e| {
                 (
                     axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -326,16 +399,20 @@ pub(super) async fn complete_stage(
         )
     })?;
 
-    {
+    let current = {
         let db = Db::open(&state.config.db_path).map_err(|e| {
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                 format!("db error: {}", e),
             )
         })?;
+        let current = db
+            .get_pipeline_item(&task_id)
+            .map_err(|e| db_write_error("db error", e))?;
         db.update_pipeline_item_stage_result(&task_id, &stage_result)
             .map_err(|e| db_write_error("db error", e))?;
-    }
+        current
+    };
 
     if !should_auto_advance {
         return Ok(Json(crate::mobile_api::TaskActionResponse { task_id }));
@@ -352,6 +429,14 @@ pub(super) async fn complete_stage(
             .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?
     };
     let Some(transition) = transition else {
+        if current.as_ref().and_then(|item| item.stage.as_deref()) == Some("pr") {
+            start_dependents_unblocked_by_pr(
+                &state,
+                &task_id,
+                current.and_then(|item| item.branch),
+            )
+            .await?;
+        }
         return Ok(Json(crate::mobile_api::TaskActionResponse { task_id }));
     };
 
@@ -368,6 +453,14 @@ pub(super) async fn complete_stage(
             let created = crate::task_creator::spawn_prepared_task_for_api(&mut daemon, *prepared)
                 .await
                 .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+            if created.stage == "pr" {
+                start_dependents_unblocked_by_pr(
+                    &state,
+                    &task_id,
+                    current.as_ref().and_then(|item| item.branch.clone()),
+                )
+                .await?;
+            }
             let db = Db::open(&state.config.db_path).map_err(|e| {
                 (
                     axum::http::StatusCode::INTERNAL_SERVER_ERROR,

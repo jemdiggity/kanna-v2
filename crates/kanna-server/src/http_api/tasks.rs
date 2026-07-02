@@ -132,6 +132,30 @@ pub(super) async fn create_task(
         })?;
         resolve_task_blocker_ids(&db, &blocker_task_ids)?
     };
+    if !resolved_blocker_ids.is_empty() {
+        let db = Db::open(&state.config.db_path).map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("db error: {}", e),
+            )
+        })?;
+        let created = crate::task_creator::create_dormant_task_for_api(&db, payload)
+            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        if let Err(err) =
+            persist_resolved_task_blockers(&db, &created.task_id, &resolved_blocker_ids)
+        {
+            let rollback_result = db.delete_task_creation_artifacts(&created.task_id);
+            return Err(match rollback_result {
+                Ok(()) => err,
+                Err(rollback_err) => (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("{}; rollback failed: {}", err.1, rollback_err),
+                ),
+            });
+        }
+        return Ok(Json(created));
+    }
+
     let prepared = {
         let db = Db::open(&state.config.db_path).map_err(|e| {
             (
@@ -142,29 +166,6 @@ pub(super) async fn create_task(
         crate::task_creator::prepare_task_for_api(&db, &state.config, payload)
             .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?
     };
-    if !resolved_blocker_ids.is_empty() {
-        let db = Db::open(&state.config.db_path).map_err(|e| {
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("db error: {}", e),
-            )
-        })?;
-        if let Err(err) = persist_resolved_task_blockers(
-            &db,
-            crate::task_creator::prepared_task_id(&prepared),
-            &resolved_blocker_ids,
-        ) {
-            let rollback_result =
-                crate::task_creator::rollback_prepared_task_for_api(&db, &prepared);
-            return Err(match rollback_result {
-                Ok(()) => err,
-                Err(rollback_err) => (
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("{}; rollback failed: {}", err.1, rollback_err),
-                ),
-            });
-        }
-    }
     let mut daemon = crate::daemon_client::DaemonClient::connect(&state.config.daemon_dir)
         .await
         .map_err(|e| {
