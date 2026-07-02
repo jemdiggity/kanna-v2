@@ -90,14 +90,6 @@ pub fn git_worktree_add(
         ));
     }
 
-    // Create .cargo/config.toml so Cargo builds in the worktree's own target dir.
-    let cargo_dir = std::path::Path::new(&path).join(".cargo");
-    let _ = std::fs::create_dir_all(&cargo_dir);
-    let _ = std::fs::write(
-        cargo_dir.join("config.toml"),
-        "[build]\ntarget-dir = \".build\"\n",
-    );
-
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 

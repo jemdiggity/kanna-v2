@@ -137,12 +137,6 @@ pub(super) fn create_worktree(
         return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
     }
 
-    let cargo_dir = Path::new(worktree_path).join(".cargo");
-    let _ = std::fs::create_dir_all(&cargo_dir);
-    let _ = std::fs::write(
-        cargo_dir.join("config.toml"),
-        "[build]\ntarget-dir = \".build\"\n",
-    );
     Ok(())
 }
 
