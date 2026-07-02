@@ -107,3 +107,40 @@ pub fn git_worktree_remove(repo_path: String, path: String) -> Result<String, St
         Err(String::from_utf8_lossy(&output.stderr).to_string())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::git_worktree_add;
+    use crate::commands::git::test_support::{create_commit, TempRepo};
+    use git2::Repository;
+    use std::fs;
+
+    #[test]
+    fn git_worktree_add_creates_worktree_without_cargo_config() {
+        let temp_repo = TempRepo::new("worktree-no-cargo-config");
+        let repo = Repository::init(&temp_repo.path).expect("repo should initialize");
+        create_commit(&repo, &temp_repo.path);
+        let worktree_path = temp_repo
+            .path
+            .join(".kanna-worktrees")
+            .join("task-no-cargo-config");
+        fs::create_dir_all(worktree_path.parent().unwrap())
+            .expect("worktree parent should be created");
+
+        git_worktree_add(
+            temp_repo.path.to_string_lossy().into_owned(),
+            "task-no-cargo-config".to_string(),
+            worktree_path.to_string_lossy().into_owned(),
+            None,
+        )
+        .expect("worktree should be added");
+
+        // This focused command test covers the desktop call site with a real
+        // git worktree while avoiding full desktop E2E for a filesystem
+        // side-effect regression.
+        assert!(
+            !worktree_path.join(".cargo/config.toml").exists(),
+            "fresh desktop-created worktrees must not receive .cargo/config.toml"
+        );
+    }
+}
