@@ -56,7 +56,7 @@ impl Drop for EnvGuard {
 }
 
 #[test]
-fn from_env_uses_worktree_daemon_dir_when_runtime_paths_are_not_overridden_inside_worktree() {
+fn from_env_uses_runtime_default_daemon_dir_inside_worktree() {
     let _lock = env_lock();
     let home = std::env::temp_dir().join(format!(
         "kanna-task-transfer-worktree-defaults-{}",
@@ -68,8 +68,6 @@ fn from_env_uses_worktree_daemon_dir_when_runtime_paths_are_not_overridden_insid
         .join("task-transfer-test");
     std::fs::create_dir_all(&worktree).expect("worktree test dir should be created");
     let _cwd_guard = CwdGuard::set(&worktree);
-    let resolved_worktree =
-        std::env::current_dir().expect("resolved worktree cwd should be available");
     let _home_guard = EnvGuard::set("HOME", home.as_os_str());
     let _daemon_guard = EnvGuard::unset("KANNA_DAEMON_DIR");
     let _db_guard = EnvGuard::unset("KANNA_DB_PATH");
@@ -81,7 +79,7 @@ fn from_env_uses_worktree_daemon_dir_when_runtime_paths_are_not_overridden_insid
 
     assert_eq!(
         config.daemon_dir,
-        Some(resolved_worktree.join(".kanna-daemon"))
+        Some(kanna_runtime_defaults::daemon_dir_for_current_runtime())
     );
     assert_eq!(
         config.db_path,
@@ -105,7 +103,7 @@ fn from_env_uses_worktree_daemon_dir_when_runtime_paths_are_not_overridden_insid
 }
 
 #[test]
-fn from_env_uses_production_defaults_when_runtime_paths_are_not_overridden_outside_worktree() {
+fn from_env_uses_runtime_default_daemon_dir_outside_worktree() {
     let _lock = env_lock();
     let home = std::env::temp_dir().join(format!(
         "kanna-task-transfer-production-defaults-{}",
@@ -125,11 +123,7 @@ fn from_env_uses_production_defaults_when_runtime_paths_are_not_overridden_outsi
 
     assert_eq!(
         config.daemon_dir,
-        Some(
-            home.join("Library")
-                .join("Application Support")
-                .join("Kanna")
-        )
+        Some(kanna_runtime_defaults::daemon_dir_for_current_runtime())
     );
     assert_eq!(
         config.db_path,

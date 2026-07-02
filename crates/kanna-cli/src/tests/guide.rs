@@ -9,7 +9,6 @@ fn guide_markdown_includes_live_context_and_all_catalog_tools() {
         stage: Some("review".to_string()),
         pipeline_name: Some("qa".to_string()),
         stage_transition: Some("auto".to_string()),
-        stage_result: None,
         activity: Some("working".to_string()),
         snippet: None,
         agent_type: Some("pty".to_string()),
@@ -36,8 +35,7 @@ fn guide_markdown_includes_live_context_and_all_catalog_tools() {
         ));
     assert!(guide.contains("Prefer `kanna_complete_stage` to record completion"));
     assert!(guide.contains("Fallback: `kanna-cli stage-complete --task-id \"$KANNA_TASK_ID\""));
-    assert!(guide
-        .contains("Advancing closes the current task and spawns a new task in a new worktree."));
+    assert!(guide.contains("Advancing follows the next stage policy"));
     for tool in kanna_tool_catalog::bundled_catalog().tools {
         assert!(
             guide.contains(&format!("`{}`", tool.name)),
@@ -92,7 +90,7 @@ async fn guide_json_fetches_env_task_id_and_includes_workflow_context_and_tools(
     assert!(guide["workflow"]["advanceStage"]
         .as_str()
         .unwrap()
-        .contains("spawns a new task in a new worktree"));
+        .contains("continue stages reuse the current task and session"));
     assert!(guide["workflow"]["operations"]
         .as_array()
         .unwrap()
@@ -179,7 +177,7 @@ async fn guide_json_command_fetches_env_task_id_and_prints_workflow_context_and_
     assert!(guide["workflow"]["advanceStage"]
         .as_str()
         .unwrap()
-        .contains("spawns a new task in a new worktree"));
+        .contains("next stage policy"));
     assert!(guide["workflow"]["completeStage"]
         .as_str()
         .unwrap()

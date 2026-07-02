@@ -2585,6 +2585,7 @@ mod tests {
                 name TEXT NOT NULL,
                 default_branch TEXT,
                 hidden INTEGER,
+                sort_order INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT,
                 last_opened_at TEXT
             );
@@ -2600,24 +2601,28 @@ mod tests {
                 pr_url TEXT,
                 branch TEXT,
                 agent_type TEXT,
+                agent_provider TEXT,
                 activity TEXT,
                 activity_changed_at TEXT,
+                unread_at TEXT,
+                port_offset INTEGER,
+                port_env TEXT,
+                agent_spawn_options TEXT,
+                teardown_started_at TEXT,
+                closed_at TEXT,
                 pinned INTEGER,
                 pin_order INTEGER,
                 display_name TEXT,
                 last_output_preview TEXT,
-                created_at TEXT,
-                updated_at TEXT,
-                previous_stage TEXT,
-                closed_at TEXT,
                 pipeline TEXT,
-                stage_result TEXT,
-                active_post_action TEXT,
-                tags TEXT,
-                agent_provider TEXT,
-                port_offset INTEGER,
-                port_env TEXT,
-                base_ref TEXT
+                base_ref TEXT,
+                agent_session_id TEXT,
+                parent_task_id TEXT,
+                notify_task_id TEXT,
+                notified_at TEXT,
+                pipeline_def TEXT,
+                created_at TEXT,
+                updated_at TEXT
             );
 
             CREATE TABLE worktree (
@@ -2653,8 +2658,8 @@ mod tests {
         )
         .expect("test schema should be created");
         conn.execute(
-            "INSERT INTO repo (id, path, name, default_branch, hidden, created_at, last_opened_at)
-             VALUES ('repo-1', ?, 'Repo One', 'main', 0, datetime('now'), datetime('now'))",
+            "INSERT INTO repo (id, path, name, default_branch, hidden, sort_order, created_at, last_opened_at)
+             VALUES ('repo-1', ?, 'Repo One', 'main', 0, 0, datetime('now'), datetime('now'))",
             [repo_path.to_string_lossy().as_ref()],
         )
         .expect("test repo should be inserted");
@@ -2696,40 +2701,54 @@ mod tests {
         let listener = UnixListener::bind(socket_path).expect("fake daemon socket should bind");
         let expected_agent_provider = expected_agent_provider.to_string();
         tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.expect("daemon should accept spawn");
-            let (read_half, mut write_half) = stream.into_split();
-            let mut reader = BufReader::new(read_half);
-            let mut line = String::new();
-            reader
-                .read_line(&mut line)
-                .await
-                .expect("daemon command should be readable");
-            let command: serde_json::Value =
-                serde_json::from_str(line.trim()).expect("daemon command should be JSON");
-            assert_eq!(
-                command.get("type").and_then(|value| value.as_str()),
-                Some("Spawn")
-            );
-            assert_eq!(
-                command
-                    .get("agent_provider")
-                    .and_then(|value| value.as_str()),
-                Some(expected_agent_provider.as_str())
-            );
-            let session_id = command
-                .get("session_id")
-                .and_then(|value| value.as_str())
-                .expect("spawn should include session id");
-            write_half
-                .write_all(
-                    format!(
-                        "{{\"type\":\"SessionCreated\",\"session_id\":{}}}\n",
-                        serde_json::to_string(session_id).unwrap()
-                    )
-                    .as_bytes(),
-                )
-                .await
-                .expect("daemon response should be written");
+            loop {
+                let (stream, _) = listener
+                    .accept()
+                    .await
+                    .expect("daemon should accept connection");
+                let (read_half, mut write_half) = stream.into_split();
+                let mut reader = BufReader::new(read_half);
+                let mut line = String::new();
+                reader
+                    .read_line(&mut line)
+                    .await
+                    .expect("daemon command should be readable");
+                let command: serde_json::Value =
+                    serde_json::from_str(line.trim()).expect("daemon command should be JSON");
+
+                match command.get("type").and_then(|value| value.as_str()) {
+                    Some("Subscribe") => {
+                        write_half
+                            .write_all(b"{\"type\":\"Ok\"}\n")
+                            .await
+                            .expect("daemon subscribe response should be written");
+                    }
+                    Some("Spawn") => {
+                        assert_eq!(
+                            command
+                                .get("agent_provider")
+                                .and_then(|value| value.as_str()),
+                            Some(expected_agent_provider.as_str())
+                        );
+                        let session_id = command
+                            .get("session_id")
+                            .and_then(|value| value.as_str())
+                            .expect("spawn should include session id");
+                        write_half
+                            .write_all(
+                                format!(
+                                    "{{\"type\":\"SessionCreated\",\"session_id\":{}}}\n",
+                                    serde_json::to_string(session_id).unwrap()
+                                )
+                                .as_bytes(),
+                            )
+                            .await
+                            .expect("daemon response should be written");
+                        break;
+                    }
+                    other => panic!("expected Subscribe or Spawn command, got {other:?}"),
+                }
+            }
         })
     }
 

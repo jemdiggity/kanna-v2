@@ -454,7 +454,8 @@ async fn close_task_route_resolves_branch_style_task_id() {
 
     let db = Db::open(&db_path).expect("reopen db");
     let item = db.get_pipeline_item("710917fb").unwrap().unwrap();
-    assert_eq!(item.stage.as_deref(), Some("done"));
+    assert_eq!(item.stage.as_deref(), Some("in progress"));
+    assert!(item.closed_at.is_some());
 
     let _ = std::fs::remove_dir_all(daemon_dir);
     let _ = std::fs::remove_file(db_path);
@@ -509,10 +510,6 @@ async fn block_task_route_marks_task_blocked_by_requested_tasks() {
     );
     let item = db.get_pipeline_item("task-1").unwrap().unwrap();
     assert_eq!(item.activity.as_deref(), Some("idle"));
-    assert_eq!(
-        db.get_test_pipeline_item_tags("task-1").unwrap(),
-        "[\"blocked\"]"
-    );
 }
 
 #[tokio::test]
@@ -560,7 +557,7 @@ async fn block_task_route_rejects_circular_dependencies() {
 }
 
 #[tokio::test]
-async fn unblock_task_route_removes_blockers_and_blocked_tag() {
+async fn unblock_task_route_removes_blockers() {
     let state = super::test_state_with_seed("desktop-1", "Studio Mac", |db| {
         db.insert_test_repo("repo-1", "Repo One").unwrap();
         db.insert_test_pipeline_item(
@@ -582,8 +579,6 @@ async fn unblock_task_route_removes_blockers_and_blocked_tag() {
         )
         .unwrap();
         db.insert_test_task_blocker("task-1", "blocker-1").unwrap();
-        db.set_test_pipeline_item_tags("task-1", "[\"blocked\"]")
-            .unwrap();
     });
     let db_path = state.config.db_path.clone();
     let app = super::router(state);
@@ -603,7 +598,6 @@ async fn unblock_task_route_removes_blockers_and_blocked_tag() {
         db.count_test_task_blockers("task-1", "blocker-1").unwrap(),
         0
     );
-    assert_eq!(db.get_test_pipeline_item_tags("task-1").unwrap(), "[]");
 }
 
 #[tokio::test]

@@ -13,13 +13,13 @@ describe("shouldSelectNextOnCloseTransition", () => {
     ).toBe(true);
   });
 
-  it("also selects immediately when a normal task closes directly to done", () => {
+  it("also selects immediately when a normal task closes directly", () => {
     expect(
       shouldSelectNextOnCloseTransition({
         selectNext: true,
         wasBlocked: false,
         previousStage: "in progress",
-        nextStage: "done",
+        nextStage: "closed",
       }),
     ).toBe(true);
   });
@@ -30,7 +30,7 @@ describe("shouldSelectNextOnCloseTransition", () => {
         selectNext: true,
         wasBlocked: false,
         previousStage: "pr",
-        nextStage: "done",
+        nextStage: "closed",
       }),
     ).toBe(true);
   });
@@ -41,7 +41,7 @@ describe("shouldSelectNextOnCloseTransition", () => {
         selectNext: false,
         wasBlocked: false,
         previousStage: "in progress",
-        nextStage: "done",
+        nextStage: "closed",
       }),
     ).toBe(false);
   });
@@ -52,7 +52,7 @@ describe("shouldSelectNextOnCloseTransition", () => {
         selectNext: true,
         wasBlocked: true,
         previousStage: "in progress",
-        nextStage: "done",
+        nextStage: "closed",
       }),
     ).toBe(false);
   });
@@ -63,7 +63,7 @@ describe("shouldSelectNextOnCloseTransition", () => {
         selectNext: true,
         wasBlocked: false,
         previousStage: "teardown",
-        nextStage: "done",
+        nextStage: "closed",
       }),
     ).toBe(false);
   });

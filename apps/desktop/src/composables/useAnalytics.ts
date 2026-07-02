@@ -229,11 +229,11 @@ export function useAnalytics(db: Ref<DbHandle | null>, repoId: Ref<string | null
       }));
 
       // --- Avg Time in State ---
-      const doneItems = items.filter((i) => i.stage === "done");
+      const doneItems = items.filter((i) => i.closed_at != null);
       const logs = await db.value.select<ActivityLog>(
         `SELECT al.* FROM activity_log al
          JOIN pipeline_item pi ON al.pipeline_item_id = pi.id
-         WHERE pi.repo_id = ? AND pi.stage = 'done'`,
+         WHERE pi.repo_id = ? AND pi.closed_at IS NOT NULL`,
         [repoId.value]
       );
 

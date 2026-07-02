@@ -45,7 +45,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["name", "transition"],
+        "required": ["name", "policy"],
         "properties": {
           "name": {
             "type": "string",
@@ -77,49 +77,16 @@
           "environment": {
             "type": "string"
           },
-          "transition": {
-            "enum": ["manual", "auto"]
-          },
-          "follow_task": {
-            "type": "boolean"
-          },
-          "mode": {
-            "enum": ["new_task", "continue"]
-          },
-          "post_action": {
+          "policy": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["name", "transition"],
+            "required": ["transition"],
             "properties": {
-              "name": {
-                "type": "string",
-                "minLength": 1
-              },
-              "description": {
-                "type": "string"
-              },
-              "agent": {
-                "type": "string"
-              },
-              "prompt": {
-                "type": "string"
-              },
-              "agent_provider": {
-                "oneOf": [
-                  {
-                    "enum": ["codex", "claude", "copilot"]
-                  },
-                  {
-                    "type": "array",
-                    "items": {
-                      "enum": ["codex", "claude", "copilot"]
-                    },
-                    "minItems": 1
-                  }
-                ]
-              },
               "transition": {
                 "enum": ["manual", "auto"]
+              },
+              "execution": {
+                "enum": ["continue"]
               }
             }
           }
@@ -131,26 +98,25 @@
     {
       "$schema": "./schema.json",
       "name": "default",
-      "description": "Standard in progress -> PR flow with commit as a post-action",
+      "description": "Standard in progress -> commit -> PR flow",
       "stages": [
         {
           "name": "in progress",
           "agent": "implement",
           "prompt": "$TASK_PROMPT",
-          "transition": "manual",
-          "post_action": {
-            "name": "commit",
-            "agent": "commit",
-            "prompt": "Commit the relevant work for this task. Original task: $TASK_PROMPT",
-            "transition": "auto"
-          }
+          "policy": { "transition": "manual" }
+        },
+        {
+          "name": "commit",
+          "agent": "commit",
+          "prompt": "Commit the relevant work for this task. Original task: $TASK_PROMPT",
+          "policy": { "transition": "auto", "execution": "continue" }
         },
         {
           "name": "pr",
           "agent": "pr",
           "prompt": "Create a PR for the work on branch $BRANCH. Previous result: $PREV_RESULT",
-          "transition": "manual",
-          "follow_task": false
+          "policy": { "transition": "manual" }
         }
       ]
     }

@@ -20,11 +20,6 @@ import {
   hasCircularDependency,
   updatePipelineItemStage,
   markPipelineItemTearingDown,
-  updatePipelineItemTags,
-  updatePipelineItemStageResult,
-  clearPipelineItemStageResult,
-  updatePipelineItemActivePostAction,
-  clearPipelineItemActivePostAction,
   updatePipelineItemPR,
   updatePipelineItemActivity,
   getSetting,
@@ -45,9 +40,6 @@ import {
   insertTaskTransferProvenance,
   getTaskTransferProvenance,
   insertOperatorEvent,
-  insertStageRun,
-  listStageRunsForTask,
-  finishStageRun,
   type DbHandle,
 } from "./queries.js";
 import type {
@@ -61,7 +53,6 @@ import type {
   TrustedPeer,
   TaskTransfer,
   TaskTransferProvenance,
-  StageRun,
   Worktree,
 } from "./schema.js";
 
@@ -80,7 +71,6 @@ function createMockDb(): DbHandle & {
     trusted_peer: TrustedPeer[];
     task_transfer: TaskTransfer[];
     task_transfer_provenance: TaskTransferProvenance[];
-    stage_run: StageRun[];
     settings: Setting[];
     operator_event: Omit<OperatorEvent, "id" | "created_at">[];
   };
@@ -98,7 +88,6 @@ function createMockDb(): DbHandle & {
     trusted_peer: [] as TrustedPeer[],
     task_transfer: [] as TaskTransfer[],
     task_transfer_provenance: [] as TaskTransferProvenance[],
-    stage_run: [] as StageRun[],
     settings: [] as Setting[],
     operator_event: [] as Omit<OperatorEvent, "id" | "created_at">[],
   };
@@ -152,7 +141,7 @@ function createMockDb(): DbHandle & {
           repo.remote_url_hash = remoteUrlHash;
         }
       } else if (q.startsWith("INSERT INTO PIPELINE_ITEM")) {
-        const [id, repo_id, issue_number, issue_title, prompt, pipeline, pipeline_def, stage, tagsJson, pr_number, pr_url, branch, agent_type, agent_provider, port_offset, port_env, agent_spawn_options, activity] =
+        const [id, repo_id, issue_number, issue_title, prompt, pipeline, stage, pr_number, pr_url, branch, agent_type, agent_provider, port_offset, port_env, agent_spawn_options, activity, display_name, base_ref, parent_task_id, pipeline_def] =
           bindValues as unknown[];
         tables.pipeline_item.push({
           id: id as string,
@@ -161,11 +150,7 @@ function createMockDb(): DbHandle & {
           issue_title: (issue_title as string | null),
           prompt: (prompt as string | null),
           pipeline: (pipeline as string) || "default",
-          pipeline_def: (pipeline_def as string | null) ?? null,
           stage: (stage as string) || "in progress",
-          stage_result: null,
-          active_post_action: null,
-          tags: (tagsJson as string) || "[]",
           pr_number: (pr_number as number | null),
           pr_url: (pr_url as string | null),
           branch: (branch as string | null),
@@ -178,46 +163,20 @@ function createMockDb(): DbHandle & {
           activity_changed_at: currentTimestamp(),
           unread_at: null,
           closed_at: null,
-          display_name: null,
+          display_name: display_name as string | null,
           last_output_preview: null,
-          base_ref: null,
+          base_ref: base_ref as string | null,
           agent_session_id: null,
-          previous_stage: null,
           teardown_started_at: null,
-          parent_task_id: (bindValues?.[20] as string | null) ?? null,
+          parent_task_id: (parent_task_id as string | null) ?? null,
+          notify_task_id: null,
+          notified_at: null,
+          pipeline_def: pipeline_def as string | null,
           created_at: currentTimestamp(),
           updated_at: currentTimestamp(),
           pinned: 0,
           pin_order: null,
         } as PipelineItem);
-      } else if (q.startsWith("INSERT INTO STAGE_RUN")) {
-        const [id, task_id, stage, agent, agent_provider, model, status, result, feedback, session_id] =
-          bindValues as [
-            string,
-            string,
-            string,
-            string | null,
-            StageRun["agent_provider"],
-            string | null,
-            StageRun["status"],
-            string | null,
-            string | null,
-            string | null,
-          ];
-        tables.stage_run.push({
-          id,
-          task_id,
-          stage,
-          agent,
-          agent_provider,
-          model,
-          status,
-          result,
-          feedback,
-          session_id,
-          started_at: currentTimestamp(),
-          finished_at: null,
-        });
       } else if (q.startsWith("INSERT OR IGNORE INTO TASK_BLOCKER")) {
         const [blocked_item_id, blocker_item_id] = bindValues as [string, string];
         const existing = tables.task_blocker.find(
@@ -355,30 +314,9 @@ function createMockDb(): DbHandle & {
           transfer.completed_at = new Date().toISOString();
           transfer.error = firstValue;
         }
-      } else if (q.startsWith("UPDATE STAGE_RUN")) {
-        const [status, result, feedback, id] = bindValues as [
-          StageRun["status"],
-          string | null,
-          string | null,
-          string,
-        ];
-        const run = tables.stage_run.find((row) => row.id === id);
-        if (run) {
-          run.status = status;
-          run.result = result;
-          run.feedback = feedback;
-          run.finished_at = currentTimestamp();
-        }
       } else if (q.startsWith("DELETE FROM TASK_PORT WHERE PIPELINE_ITEM_ID")) {
         const [itemId] = bindValues as [string];
         tables.task_port = tables.task_port.filter((p) => p.pipeline_item_id !== itemId);
-      } else if (q.startsWith("UPDATE PIPELINE_ITEM SET TAGS")) {
-        const [newTags, id] = bindValues as string[];
-        const item = tables.pipeline_item.find((p) => p.id === id);
-        if (item) {
-          item.tags = newTags;
-          item.updated_at = new Date().toISOString();
-        }
       } else if (q.startsWith("UPDATE PIPELINE_ITEM SET PARENT_TASK_ID")) {
         const [parentTaskId, id] = bindValues as [string | null, string];
         const item = tables.pipeline_item.find((p) => p.id === id);
@@ -409,34 +347,6 @@ function createMockDb(): DbHandle & {
         if (item && (!q.includes("CLOSED_AT IS NULL") || item.closed_at === null) && item.activity !== activity) {
           item.activity = activity;
           item.activity_changed_at = new Date().toISOString();
-          item.updated_at = new Date().toISOString();
-        }
-      } else if (q.startsWith("UPDATE PIPELINE_ITEM SET STAGE_RESULT = NULL")) {
-        const [id] = bindValues as string[];
-        const item = tables.pipeline_item.find((p) => p.id === id);
-        if (item) {
-          item.stage_result = null;
-          item.updated_at = new Date().toISOString();
-        }
-      } else if (q.startsWith("UPDATE PIPELINE_ITEM SET STAGE_RESULT =")) {
-        const [result, id] = bindValues as string[];
-        const item = tables.pipeline_item.find((p) => p.id === id);
-        if (item) {
-          item.stage_result = result;
-          item.updated_at = new Date().toISOString();
-        }
-      } else if (q.startsWith("UPDATE PIPELINE_ITEM SET ACTIVE_POST_ACTION = NULL")) {
-        const [id] = bindValues as string[];
-        const item = tables.pipeline_item.find((p) => p.id === id);
-        if (item) {
-          item.active_post_action = null;
-          item.updated_at = new Date().toISOString();
-        }
-      } else if (q.startsWith("UPDATE PIPELINE_ITEM SET ACTIVE_POST_ACTION =")) {
-        const [activePostAction, id] = bindValues as string[];
-        const item = tables.pipeline_item.find((p) => p.id === id);
-        if (item) {
-          item.active_post_action = activePostAction;
           item.updated_at = new Date().toISOString();
         }
       } else if (q.startsWith("UPDATE PIPELINE_ITEM SET PR_NUMBER")) {
@@ -514,11 +424,6 @@ function createMockDb(): DbHandle & {
             new Date(a.created_at).getTime() -
               new Date(b.created_at).getTime()
         ) as unknown as T[];
-      } else if (q.startsWith("SELECT * FROM PIPELINE_ITEM WHERE REPO_ID") && q.includes("STAGE != 'DONE'")) {
-        const [repoId] = bindValues as string[];
-        return tables.pipeline_item.filter(
-          (p) => p.repo_id === repoId && p.stage !== "done" && p.closed_at === null
-        ) as unknown as T[];
       } else if (q.startsWith("SELECT * FROM PIPELINE_ITEM WHERE REPO_ID") && q.includes("CLOSED_AT IS NULL")) {
         const [repoId] = bindValues as string[];
         return tables.pipeline_item.filter(
@@ -559,19 +464,10 @@ function createMockDb(): DbHandle & {
       } else if (q.startsWith("SELECT * FROM TASK_TRANSFER_PROVENANCE WHERE PIPELINE_ITEM_ID")) {
         const [pipelineItemId] = bindValues as [string];
         return tables.task_transfer_provenance.filter((row) => row.pipeline_item_id === pipelineItemId) as unknown as T[];
-      } else if (q.startsWith("SELECT * FROM STAGE_RUN WHERE TASK_ID")) {
-        const [taskId] = bindValues as [string];
-        return tables.stage_run
-          .filter((row) => row.task_id === taskId)
-          .sort((a, b) => new Date(a.started_at).getTime() - new Date(b.started_at).getTime()) as unknown as T[];
       } else if (q.startsWith("SELECT PIPELINE_ITEM_ID FROM TASK_PORT WHERE PORT")) {
         const [port] = bindValues as [number];
         const row = tables.task_port.find((p) => p.port === port);
         return row ? [{ pipeline_item_id: row.pipeline_item_id } as unknown as T] : [];
-      } else if (q.startsWith("SELECT TAGS FROM PIPELINE_ITEM WHERE ID")) {
-        const [id] = bindValues as string[];
-        const item = tables.pipeline_item.find((p) => p.id === id);
-        return item ? [{ tags: item.tags } as unknown as T] : [];
       } else if (q.startsWith("SELECT * FROM SETTINGS WHERE KEY")) {
         const [key] = bindValues as string[];
         return tables.settings.filter(
@@ -799,7 +695,6 @@ describe("pipeline_item queries", () => {
       issue_number: 42,
       issue_title: "Fix bug",
       prompt: null,
-      tags: [],
       pr_number: null,
       pr_url: null,
       branch: null,
@@ -811,7 +706,7 @@ describe("pipeline_item queries", () => {
     });
     const items = await listPipelineItems(db, "r1");
     expect(items).toHaveLength(1);
-    expect(items[0].tags).toBe("[]");
+    expect(items[0].pipeline_def).toBeNull();
   });
 
   it("insertPipelineItem persists parent_task_id and updatePipelineItemParent sets/clears it", async () => {
@@ -821,7 +716,6 @@ describe("pipeline_item queries", () => {
       issue_number: null,
       issue_title: null,
       prompt: "parent",
-      tags: [],
       pr_number: null,
       pr_url: null,
       branch: "task-parent",
@@ -837,7 +731,6 @@ describe("pipeline_item queries", () => {
       issue_number: null,
       issue_title: null,
       prompt: "child",
-      tags: [],
       pr_number: null,
       pr_url: null,
       branch: "task-child",
@@ -869,7 +762,6 @@ describe("pipeline_item queries", () => {
       issue_number: null,
       issue_title: null,
       prompt: "open",
-      tags: [],
       pr_number: null,
       pr_url: null,
       branch: "task-open",
@@ -886,7 +778,6 @@ describe("pipeline_item queries", () => {
       issue_title: null,
       prompt: "closed",
       stage: "pr",
-      tags: [],
       pr_number: null,
       pr_url: null,
       branch: "task-closed-pr",
@@ -949,7 +840,6 @@ describe("pipeline_item queries", () => {
         issue_number: null,
         issue_title: null,
         prompt: "do it",
-        tags: [],
         pr_number: null,
         pr_url: null,
         branch: null,
@@ -962,27 +852,6 @@ describe("pipeline_item queries", () => {
     ).rejects.toThrow("No agent provider configured for pipeline item insertion.");
   });
 
-  it("insertPipelineItem with tags", async () => {
-    await insertPipelineItem(db, {
-      id: "pi1",
-      repo_id: "r1",
-      issue_number: null,
-      issue_title: null,
-      prompt: "do it",
-      tags: ["pr"],
-      pr_number: null,
-      pr_url: null,
-      branch: null,
-      agent_type: null,
-      agent_provider: "claude",
-      activity: "idle",
-      port_offset: null,
-      port_env: null,
-    });
-    const item = db.tables.pipeline_item.find((p) => p.id === "pi1");
-    expect(item?.tags).toBe('["pr"]');
-  });
-
   it("updatePipelineItemPR sets pr_number and pr_url", async () => {
     await insertPipelineItem(db, {
       id: "pi1",
@@ -990,7 +859,6 @@ describe("pipeline_item queries", () => {
       issue_number: null,
       issue_title: null,
       prompt: null,
-      tags: [],
       pr_number: null,
       pr_url: null,
       branch: "feature/x",
@@ -1013,7 +881,6 @@ describe("pipeline_item queries", () => {
       issue_number: null,
       issue_title: null,
       prompt: "do it",
-      tags: [],
       pr_number: null,
       pr_url: null,
       branch: null,
@@ -1026,8 +893,7 @@ describe("pipeline_item queries", () => {
     const item = db.tables.pipeline_item.find((p) => p.id === "pi1");
     expect(item?.pipeline).toBe("default");
     expect(item?.stage).toBe("in progress");
-    expect(item?.stage_result).toBeNull();
-    expect(item?.active_post_action).toBeNull();
+    expect(item?.pipeline_def).toBeNull();
   });
 
   it("insertPipelineItem accepts explicit pipeline and stage", async () => {
@@ -1037,7 +903,6 @@ describe("pipeline_item queries", () => {
       issue_number: null,
       issue_title: null,
       prompt: "do it",
-      tags: [],
       pr_number: null,
       pr_url: null,
       branch: null,
@@ -1052,115 +917,6 @@ describe("pipeline_item queries", () => {
     const item = db.tables.pipeline_item.find((p) => p.id === "pi1");
     expect(item?.pipeline).toBe("custom");
     expect(item?.stage).toBe("review");
-  });
-
-  it("insertPipelineItem persists the resolved pipeline definition snapshot", async () => {
-    const pipelineDef = JSON.stringify({
-      stages: [
-        { name: "in progress", transition: "manual" },
-        { name: "review", transition: "manual" },
-      ],
-    });
-
-    await insertPipelineItem(db, {
-      id: "pi1",
-      repo_id: "r1",
-      issue_number: null,
-      issue_title: null,
-      prompt: "do it",
-      tags: [],
-      pr_number: null,
-      pr_url: null,
-      branch: null,
-      agent_type: null,
-      agent_provider: "claude",
-      activity: "idle",
-      port_offset: null,
-      port_env: null,
-      pipeline_def: pipelineDef,
-    });
-
-    const item = db.tables.pipeline_item.find((p) => p.id === "pi1");
-    expect(item?.pipeline_def).toBe(pipelineDef);
-  });
-});
-
-describe("stage_run queries", () => {
-  let db: ReturnType<typeof createMockDb>;
-
-  beforeEach(() => {
-    db = createMockDb();
-    db.setNow("2026-07-02T00:00:00.000Z");
-  });
-
-  it("inserts and lists stage runs for a task by start time", async () => {
-    await insertStageRun(db, {
-      id: "run-2",
-      task_id: "task-1",
-      stage: "review",
-      agent: "reviewer",
-      agent_provider: "claude",
-      model: "sonnet",
-      status: "running",
-      result: null,
-      feedback: null,
-      session_id: "session-2",
-    });
-    db.setNow("2026-07-02T00:01:00.000Z");
-    await insertStageRun(db, {
-      id: "run-1",
-      task_id: "task-1",
-      stage: "in progress",
-      agent: "implement",
-      agent_provider: "codex",
-      model: null,
-      status: "succeeded",
-      result: JSON.stringify({ status: "success" }),
-      feedback: "done",
-      session_id: "session-1",
-    });
-
-    const runs = await listStageRunsForTask(db, "task-1");
-
-    expect(runs.map((run) => run.id)).toEqual(["run-2", "run-1"]);
-    expect(runs[0]).toMatchObject({
-      task_id: "task-1",
-      stage: "review",
-      agent_provider: "claude",
-      status: "running",
-      session_id: "session-2",
-    });
-  });
-
-  it("finishes a stage run with terminal status, result, feedback, and finished_at", async () => {
-    await insertStageRun(db, {
-      id: "run-1",
-      task_id: "task-1",
-      stage: "in progress",
-      agent: "implement",
-      agent_provider: "codex",
-      model: null,
-      status: "running",
-      result: null,
-      feedback: null,
-      session_id: "session-1",
-    });
-    db.setNow("2026-07-02T00:05:00.000Z");
-    const result = JSON.stringify({ status: "success", summary: "implemented" });
-
-    await finishStageRun(db, "run-1", {
-      status: "succeeded",
-      result,
-      feedback: "implemented",
-    });
-
-    expect(db.tables.stage_run[0]).toMatchObject({
-      id: "run-1",
-      status: "succeeded",
-      result,
-      feedback: "implemented",
-      finished_at: "2026-07-02T00:05:00.000Z",
-    });
   });
 });
 
@@ -1275,7 +1031,6 @@ describe("stage queries", () => {
       issue_number: null,
       issue_title: null,
       prompt: "task",
-      tags: [],
       pr_number: null,
       pr_url: null,
       branch: null,
@@ -1331,34 +1086,6 @@ describe("stage queries", () => {
     expect(item?.teardown_started_at).not.toBeNull();
   });
 
-  it("updatePipelineItemTags overwrites tags for a single task", async () => {
-    await updatePipelineItemTags(db, "pi1", ["in progress", "blocked"]);
-    const item = db.tables.pipeline_item.find((p) => p.id === "pi1");
-    expect(item?.tags).toBe('["in progress","blocked"]');
-  });
-
-  it("updatePipelineItemStageResult sets stage_result", async () => {
-    const result = JSON.stringify({ outcome: "success" });
-    await updatePipelineItemStageResult(db, "pi1", result);
-    const item = db.tables.pipeline_item.find((p) => p.id === "pi1");
-    expect(item?.stage_result).toBe(result);
-  });
-
-  it("clearPipelineItemStageResult sets stage_result to null", async () => {
-    const result = JSON.stringify({ outcome: "success" });
-    await updatePipelineItemStageResult(db, "pi1", result);
-    await clearPipelineItemStageResult(db, "pi1");
-    const item = db.tables.pipeline_item.find((p) => p.id === "pi1");
-    expect(item?.stage_result).toBeNull();
-  });
-
-  it("sets and clears the active post-action", async () => {
-    await updatePipelineItemActivePostAction(db, "pi1", "commit");
-    expect(db.tables.pipeline_item.find((p) => p.id === "pi1")?.active_post_action).toBe("commit");
-
-    await clearPipelineItemActivePostAction(db, "pi1");
-    expect(db.tables.pipeline_item.find((p) => p.id === "pi1")?.active_post_action).toBeNull();
-  });
 });
 
 describe("settings queries", () => {
@@ -1391,19 +1118,19 @@ describe("pin queries", () => {
     db = createMockDb();
     await insertPipelineItem(db, {
       id: "pi1", repo_id: "r1", issue_number: null, issue_title: null,
-      prompt: "task 1", tags: [], pr_number: null, pr_url: null,
+      prompt: "task 1", pr_number: null, pr_url: null,
       branch: null, agent_type: null,
       agent_provider: "claude", activity: "idle", port_offset: null, port_env: null,
     });
     await insertPipelineItem(db, {
       id: "pi2", repo_id: "r1", issue_number: null, issue_title: null,
-      prompt: "task 2", tags: [], pr_number: null, pr_url: null,
+      prompt: "task 2", pr_number: null, pr_url: null,
       branch: null, agent_type: null,
       agent_provider: "claude", activity: "idle", port_offset: null, port_env: null,
     });
     await insertPipelineItem(db, {
       id: "pi3", repo_id: "r1", issue_number: null, issue_title: null,
-      prompt: "task 3", tags: [], pr_number: null, pr_url: null,
+      prompt: "task 3", pr_number: null, pr_url: null,
       branch: null, agent_type: null,
       agent_provider: "claude", activity: "idle", port_offset: null, port_env: null,
     });

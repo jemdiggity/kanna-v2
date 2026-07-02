@@ -177,32 +177,32 @@ describe("Sidebar", () => {
     getStageOrder.mockReturnValue(["merge", "pr", "review", "in progress"]);
   });
 
-  it("prefixes active post-action tasks with an ASCII ellipsis and keeps the stage group", () => {
+  it("renders task titles without retired post-action prefixes", () => {
     getStageOrder.mockReturnValue(["merge", "pr", "review", "in progress"]);
     const wrapper = mountSidebar([
       item("task-1", {
         display_name: "Fix sidebar task ordering",
-        active_post_action: "commit",
         stage: "in progress",
       }),
     ]);
 
     expect(wrapper.text()).toContain("in progress");
-    expect(wrapper.text()).toContain("... Fix sidebar task ordering");
+    expect(wrapper.text()).toContain("Fix sidebar task ordering");
+    expect(wrapper.text()).not.toContain("... Fix sidebar task ordering");
     expect(wrapper.text()).not.toContain("commit");
   });
 
-  it("prefixes pinned active post-action tasks", () => {
+  it("renders pinned task titles without retired post-action prefixes", () => {
     const wrapper = mountSidebar([
       item("task-1", {
         display_name: "Pinned task",
-        active_post_action: "commit",
         pinned: 1,
         pin_order: 0,
       }),
     ]);
 
-    expect(wrapper.text()).toContain("... Pinned task");
+    expect(wrapper.text()).toContain("Pinned task");
+    expect(wrapper.text()).not.toContain("... Pinned task");
   });
 
   it("renders a subtask nested beneath its parent instead of in its own stage section", () => {

@@ -5,9 +5,9 @@ import {
   insertTaskBlocker,
   listBlockedByItem,
   listBlockersForItem,
+  removeAllBlockersForItem,
   removeTaskBlocker,
   updatePipelineItemActivity,
-  updatePipelineItemTags,
   type AgentProvider,
   type PipelineItem,
 } from "@kanna/db";
@@ -66,21 +66,22 @@ export function createTaskBlockedActions(
 
     if (hasLiveTaskResources(item)) {
       await resumeBlockedTaskInPlace(item, resolvedBlockers);
+      await removeAllBlockersForItem(context.requireDb(), item.id);
+      await reloadSnapshot();
       return;
     }
 
     await startBlockedTask(item);
+    await removeAllBlockersForItem(context.requireDb(), item.id);
+    await reloadSnapshot();
   }
 
   async function resumeBlockedTaskInPlace(
     item: PipelineItem,
     blockers?: PipelineItem[],
   ): Promise<void> {
-    if (!JSON.parse(item.tags).includes("blocked")) return;
     const resolvedBlockers = blockers ?? await listBlockersForItem(context.requireDb(), item.id);
 
-    const nextTags = JSON.parse(item.tags).filter((tag: string) => tag !== "blocked");
-    await updatePipelineItemTags(context.requireDb(), item.id, nextTags);
     await updatePipelineItemActivity(context.requireDb(), item.id, "working");
     await reloadSnapshot();
 
@@ -184,7 +185,7 @@ export function createTaskBlockedActions(
       await context.requireDb().execute(
         `UPDATE pipeline_item
          SET branch = ?, port_offset = ?, port_env = ?, base_ref = ?,
-             tags = '[]', activity = 'working',
+             activity = 'working',
              activity_changed_at = datetime('now'), updated_at = datetime('now')
          WHERE id = ?`,
         [branch, portOffset, Object.keys(portEnv).length > 0 ? JSON.stringify(portEnv) : null, resolvedBaseRef, id],
@@ -208,14 +209,12 @@ export function createTaskBlockedActions(
     const item = requireService(context.services.currentItem, "currentItem").value;
     const repo = requireService(context.services.selectedRepo, "selectedRepo").value;
     const isItemHidden = requireService(context.services.isItemHidden as ((item: PipelineItem) => boolean) | undefined, "isItemHidden");
-    if (!item || !repo || isItemHidden(item) || JSON.parse(item.tags).includes("blocked")) return;
+    if (!item || !repo || isItemHidden(item)) return;
 
     for (const blockerId of blockerIds) {
       await insertTaskBlocker(context.requireDb(), item.id, blockerId);
     }
 
-    const nextTags = Array.from(new Set([...JSON.parse(item.tags), "blocked"]));
-    await updatePipelineItemTags(context.requireDb(), item.id, nextTags);
     await updatePipelineItemActivity(context.requireDb(), item.id, "idle");
     await reloadSnapshot();
     await invalidateWindowWorkspace("blockTask");
@@ -224,7 +223,7 @@ export function createTaskBlockedActions(
 
   async function editBlockedTask(itemId: string, newBlockerIds: string[]) {
     const item = context.state.items.value.find((candidate) => candidate.id === itemId);
-    if (!item || !JSON.parse(item.tags).includes("blocked")) return;
+    if (!item) return;
 
     if (newBlockerIds.length > 0) {
       const hasCycle = await hasCircularDependency(context.requireDb(), itemId, newBlockerIds);

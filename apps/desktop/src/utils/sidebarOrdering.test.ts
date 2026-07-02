@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { PipelineItem } from "@kanna/db";
+import type { PipelineItem, TaskBlocker } from "@kanna/db";
 
 import {
   groupedSidebarItemsByStage,
@@ -20,9 +20,6 @@ function item(overrides: Partial<PipelineItem>): PipelineItem {
     prompt: "Task",
     pipeline: "default",
     stage: "in progress",
-    stage_result: null,
-    active_post_action: null,
-    tags: "[]",
     pr_number: null,
     pr_url: null,
     branch: "task-task-1",
@@ -39,9 +36,11 @@ function item(overrides: Partial<PipelineItem>): PipelineItem {
     display_name: null,
     base_ref: null,
     agent_session_id: null,
-    previous_stage: null,
     teardown_started_at: null,
     last_output_preview: null,
+    notify_task_id: null,
+    notified_at: null,
+    pipeline_def: null,
     created_at: "2026-05-31T00:00:00.000Z",
     updated_at: "2026-05-31T00:00:00.000Z",
     ...overrides,
@@ -60,6 +59,39 @@ describe("sidebarOrdering", () => {
     });
 
     expect(sorted.map((entry) => entry.id)).toEqual(["open"]);
+  });
+
+  it("does not hide an open row solely because its stage is done", () => {
+    const sorted = sortSidebarItemsForRepo({
+      repoId: "repo-1",
+      items: [
+        item({ id: "legacy-done", stage: "done", closed_at: null }),
+        item({ id: "open", stage: "in progress", closed_at: null }),
+      ],
+      getStageOrder,
+    });
+
+    expect(sorted.map((entry) => entry.id)).toEqual(["open", "legacy-done"]);
+  });
+
+  it("derives blocked ordering from task_blocker rows instead of tags", () => {
+    const blockers: TaskBlocker[] = [
+      { blocked_item_id: "blocked", blocker_item_id: "upstream" },
+    ];
+    const items = [
+      item({ id: "blocked", stage: "in progress", tags: "[]" } as Partial<PipelineItem>),
+      item({ id: "tagged-only", stage: "in progress", tags: "[\"blocked\"]" } as Partial<PipelineItem>),
+      item({ id: "upstream", stage: "review" }),
+    ];
+
+    const groups = groupedSidebarItemsByStage({ repoId: "repo-1", items, blockers, getStageOrder });
+    expect(groups.flatMap((group) => group.items.map((entry) => entry.id))).toEqual([
+      "upstream",
+      "tagged-only",
+    ]);
+
+    const ordered = sortSidebarItemsForRepo({ repoId: "repo-1", items, blockers, getStageOrder });
+    expect(ordered.map((entry) => entry.id)).toEqual(["upstream", "tagged-only", "blocked"]);
   });
 
   it("nests a subtask directly beneath its parent and hides it from its own stage group", () => {

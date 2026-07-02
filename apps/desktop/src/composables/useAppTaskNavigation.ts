@@ -63,15 +63,6 @@ interface UseAppTaskNavigationOptions {
   openPairPeerPicker: () => void;
 }
 
-function hasTag(item: { tags: string }, tag: string): boolean {
-  try {
-    return (JSON.parse(item.tags) as string[]).includes(tag);
-  } catch (error) {
-    console.debug("[App] failed to parse task tags:", error);
-    return false;
-  }
-}
-
 function isActivityShortcutCandidate(item: { stage?: string; teardown_started_at?: string | null }): boolean {
   if (typeof item.stage !== "string") return true;
   return !isTaskTearingDown({ stage: item.stage, teardown_started_at: item.teardown_started_at });
@@ -100,6 +91,7 @@ export function useAppTaskNavigation({
     const searchQuery = sidebarRef.value?.searchQuery ?? "";
     const sortOptions = {
       repoId,
+      blockers: store.taskBlockers,
       getStageOrder: store.getStageOrder,
       searchQuery,
     };
@@ -183,7 +175,7 @@ export function useAppTaskNavigation({
     // Restore last-selected task for this repo, or fall back to first task.
     const lastItemId = store.lastSelectedItemByRepo[nextRepo.id];
     const lastItem = lastItemId
-      ? sidebarItems.value.find((i) => i.id === lastItemId && i.repo_id === nextRepo.id && i.stage !== "done" && i.closed_at == null)
+      ? sidebarItems.value.find((i) => i.id === lastItemId && i.repo_id === nextRepo.id && i.closed_at == null)
       : undefined;
     const targetItem = lastItem ?? visibleSidebarItemsForRepo(nextRepo.id)[0];
 
@@ -200,9 +192,13 @@ export function useAppTaskNavigation({
     }
   }
 
+  function isBlocked(itemId: string): boolean {
+    return (store.taskBlockers ?? []).some((blocker) => blocker.blocked_item_id === itemId);
+  }
+
   async function selectReadTask(mode: "oldest" | "newest") {
     const target = selectTaskByActivity(
-      visibleSidebarItemsForCurrentRepo().filter((item) => isActivityShortcutCandidate(item) && !hasTag(item, "blocked")),
+      visibleSidebarItemsForCurrentRepo().filter((item) => isActivityShortcutCandidate(item) && !isBlocked(item.id)),
       mode,
       "idle",
     );
@@ -237,7 +233,6 @@ export function useAppTaskNavigation({
     if (!item) return [];
     return store.items.filter((i) =>
       i.id !== item.id &&
-      i.stage !== "done" &&
       i.closed_at == null &&
       i.repo_id === store.selectedRepoId
     );
@@ -247,7 +242,7 @@ export function useAppTaskNavigation({
   const disabledBlockerIds = computedAsync(async () => {
     const item = store.currentItem;
     if (!item) return [];
-    if (item.stage !== "done" && item.closed_at == null) {
+    if (item.closed_at == null) {
       const dependents = await collectDependents(item.id);
       return [...dependents];
     }
@@ -280,7 +275,8 @@ export function useAppTaskNavigation({
 
   // Build a map of blocked item ID → blocker names for the sidebar
   const sidebarBlockerNames = computedAsync(async () => {
-    const blockedItems = store.items.filter((i) => hasTag(i, "blocked"));
+    const blockedIds = new Set(store.taskBlockers.map((blocker) => blocker.blocked_item_id));
+    const blockedItems = store.items.filter((i) => blockedIds.has(i.id));
     if (blockedItems.length === 0) return {};
     const map: Record<string, string> = {};
     for (const item of blockedItems) {
@@ -311,10 +307,10 @@ export function useAppTaskNavigation({
   const paletteExtraCommands = computed<PaletteExtraCommand[]>(() => {
     const cmds: PaletteExtraCommand[] = [];
     const item = store.currentItem;
-    if (item && item.stage !== "done" && item.closed_at == null && !hasTag(item, "blocked")) {
+    if (item && item.closed_at == null && !isBlocked(item.id)) {
       cmds.push({ action: "blockTask", label: t('tasks.blockTask'), group: t('shortcuts.groupTasks'), shortcut: "" });
     }
-    if (item && hasTag(item, "blocked")) {
+    if (item && isBlocked(item.id)) {
       cmds.push({ action: "editBlockedTask", label: t('tasks.editBlockedTask'), group: t('shortcuts.groupTasks'), shortcut: "" });
     }
     return cmds;
@@ -467,7 +463,7 @@ export function useAppTaskNavigation({
         execute: () => sidebarRef.value?.renameSelectedItem(),
       });
     }
-    if (store.currentItem && store.currentItem.stage !== "done" && store.currentItem.closed_at == null) {
+    if (store.currentItem && store.currentItem.closed_at == null) {
       cmds.push({
         id: "push-to-machine",
         label: t('taskTransfer.pushToMachine'),
