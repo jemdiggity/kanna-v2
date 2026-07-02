@@ -561,7 +561,7 @@ describe("Sidebar", () => {
   it("does not use grab-hand cursors as the sidebar drag affordance", () => {
     const source = readFileSync(join(process.cwd(), "src/components/Sidebar.vue"), "utf8");
 
-    expect(source).not.toMatch(/cursor:\s*grabb?ing?\s*;/);
+    expect(source).not.toMatch(/cursor:\s*(?:grab|grabbing)\s*;/);
   });
 
   it("scrolls when a selected active-stage task becomes unclosed and visible", async () => {
