@@ -137,7 +137,7 @@
     },
     {
       "name": "kanna_advance_stage",
-      "description": "Advance an accepted Kanna task to the next pipeline stage according to stage policy; continue stages reuse the current task/session, while new-task stages create a next-stage task and close the source after successful spawn.",
+      "description": "Advance a Kanna task to the next pipeline stage in place: the task keeps its id, branch, and worktree while the next stage's agent session replaces the current one. Advancing past the final stage closes the task.",
       "method": "POST",
       "path": "/v1/tasks/{task_id}/actions/advance-stage",
       "response": "json",
@@ -147,7 +147,7 @@
     },
     {
       "name": "kanna_rerun_stage",
-      "description": "Rerun the current pipeline stage or active post-action for a Kanna task in the same worktree.",
+      "description": "Rerun the current pipeline stage for a Kanna task in place: cancels the running stage run and starts a fresh agent session for the same stage in the same worktree.",
       "method": "POST",
       "path": "/v1/tasks/{task_id}/actions/rerun-stage",
       "response": "json",
@@ -202,7 +202,7 @@
     },
     {
       "name": "kanna_request_revision",
-      "description": "Create a revision task from an existing Kanna task branch.",
+      "description": "Request a revision on a Kanna task: reruns an earlier pipeline stage in place on the same task, branch, and worktree, passing the revision prompt to the stage agent.",
       "method": "POST",
       "path": "/v1/tasks/{task_id}/actions/request-revision",
       "response": "json",

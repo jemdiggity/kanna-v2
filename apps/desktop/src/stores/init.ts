@@ -40,7 +40,6 @@ export function createInitApi(
   function isVisibleItemInSelectedRepo(item: PipelineItem | null | undefined): item is PipelineItem {
     return Boolean(
       item
-      && item.stage !== "done"
       && item.closed_at === null
       && item.repo_id === context.state.selectedRepoId.value,
     );
@@ -185,7 +184,7 @@ export function createInitApi(
     if (isTauri) {
       await retireStaleWorktreeShellSessions();
       for (const item of eagerItems) {
-        if (!item.branch || item.stage === "done" || item.closed_at !== null) continue;
+        if (!item.branch || item.closed_at !== null) continue;
         const repo = eagerRepos.find((candidate) => candidate.id === item.repo_id);
         if (!repo) continue;
         const worktreePath = `${repo.path}/.kanna-worktrees/${item.branch}`;
@@ -193,7 +192,7 @@ export function createInitApi(
         if (!exists) {
           console.warn(`[store] closing orphaned task ${item.id}: worktree missing at ${worktreePath}`);
           await ports.closeTaskAndReleasePorts(item.id, (id) => closePipelineItem(context.requireDb(), id));
-          item.stage = "done";
+          item.closed_at = new Date().toISOString();
         }
       }
     }
@@ -219,7 +218,6 @@ export function createInitApi(
       bootstrapItemId
       && eagerItems.some((item) =>
         item.id === bootstrapItemId
-        && item.stage !== "done"
         && item.closed_at === null
         && item.repo_id === context.state.selectedRepoId.value)
     ) {
@@ -263,7 +261,7 @@ export function createInitApi(
 
     if (isTauri) {
       for (const item of eagerItems) {
-        if (!item.branch || item.stage === "done" || item.closed_at !== null) continue;
+        if (!item.branch || item.closed_at !== null) continue;
         const repo = eagerRepos.find((candidate) => candidate.id === item.repo_id);
         if (!repo) continue;
         const worktreePath = `${repo.path}/.kanna-worktrees/${item.branch}`;
