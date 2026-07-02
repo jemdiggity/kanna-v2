@@ -291,6 +291,16 @@ pub(super) async fn advance_stage(
             .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
             Ok(Json(continued))
         }
+        crate::task_creator::PreparedStageTransition::Run(prepared) => {
+            let advanced = crate::task_creator::spawn_prepared_stage_run_for_api(
+                &state.config.db_path,
+                &mut daemon,
+                *prepared,
+            )
+            .await
+            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+            Ok(Json(advanced))
+        }
     }
 }
 
@@ -395,6 +405,16 @@ pub(super) async fn complete_stage(
             .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
             Ok(Json(continued))
         }
+        crate::task_creator::PreparedStageTransition::Run(prepared) => {
+            let advanced = crate::task_creator::spawn_prepared_stage_run_for_api(
+                &state.config.db_path,
+                &mut daemon,
+                *prepared,
+            )
+            .await
+            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+            Ok(Json(advanced))
+        }
     }
 }
 
@@ -468,23 +488,16 @@ pub(super) async fn request_revision(
                 format!("daemon error: {}", e),
             )
         })?;
-    let created = crate::task_creator::spawn_prepared_task_for_api(&mut daemon, prepared)
+    let advanced = crate::task_creator::spawn_prepared_stage_run_for_api(
+        &state.config.db_path,
+        &mut daemon,
+        prepared,
+    )
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let db = Db::open(&state.config.db_path).map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("db error: {}", e),
-        )
-    })?;
-    db.close_pipeline_item(&source_task_id).map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("db error: {}", e),
-        )
-    })?;
+    let _ = source_task_id;
 
     Ok(Json(crate::mobile_api::TaskActionResponse {
-        task_id: created.task_id,
+        task_id: advanced.task_id,
     }))
 }

@@ -1,12 +1,10 @@
 use crate::config::Config;
-use crate::db::{Db, TaskStageSource};
+use crate::db::Db;
 
-use super::continuation::{prepare_continue_stage, prepare_post_action_stage};
-use super::definitions::{read_pipeline_definition, PipelineStageMode};
-use super::prepare_task_spawn;
-use super::prompt::{build_post_action_prompt, build_target_stage_prompt};
-use super::provider::normalize_agent_type;
-use super::types::{PreparedStageTransition, PreparedTaskSpawn, TaskCreationRequest};
+use super::definitions::read_pipeline_definition;
+use super::prepare_stage_run_spawn;
+use super::prompt::build_target_stage_prompt;
+use super::types::{PreparedStageRunSpawn, PreparedStageTransition};
 use super::worktree::resolve_current_source_worktree_branch;
 
 pub(crate) fn prepare_advance_stage_for_api(
@@ -40,39 +38,8 @@ pub(crate) fn prepare_advance_stage_for_api(
         .iter()
         .position(|stage| stage.name == current_stage_name)
         .ok_or_else(|| format!("stage not found in pipeline: {}", current_stage_name))?;
-    let current_stage = &pipeline.stages[current_stage_index];
     let source_branch =
         resolve_current_source_worktree_branch(&repo.path, source_task.branch.as_deref());
-    let display_name = resolve_inherited_task_title(db, &source_task)?;
-
-    if source_task.active_post_action.is_none() {
-        if let Some(post_action) = current_stage.post_action.as_ref() {
-            let task_prompt = build_post_action_prompt(
-                &repo.path,
-                post_action,
-                source_task.prompt.as_deref().unwrap_or(""),
-                source_task.stage_result.as_deref(),
-                source_branch.as_deref(),
-                source_task.base_ref.as_deref(),
-                source_task.branch.as_deref(),
-            )?;
-            return Ok(PreparedStageTransition::Continue(Box::new(
-                prepare_post_action_stage(
-                    source_task_id,
-                    &current_stage_name,
-                    post_action,
-                    source_task.stage_result.clone(),
-                    &task_prompt,
-                    source_task.branch.as_deref(),
-                    normalize_agent_type(source_task.agent_type.as_deref()).unwrap_or("pty"),
-                    post_action
-                        .agent_provider
-                        .as_deref()
-                        .or(source_task.agent_provider.as_deref()),
-                )?,
-            )));
-        }
-    }
 
     let next_stage = pipeline
         .stages
@@ -94,84 +61,28 @@ pub(crate) fn prepare_advance_stage_for_api(
         source_task.agent_provider.clone()
     };
 
-    if next_stage.mode == Some(PipelineStageMode::Continue) {
-        return Ok(PreparedStageTransition::Continue(Box::new(
-            prepare_continue_stage(
-                source_task_id,
-                &current_stage_name,
-                &next_stage.name,
-                source_task.stage_result.clone(),
-                &task_prompt,
-                source_task.branch.as_deref(),
-                normalize_agent_type(source_task.agent_type.as_deref()).unwrap_or("pty"),
-                source_task.agent_provider.as_deref(),
-            )?,
-        )));
-    }
-
-    prepare_task_spawn(
+    let branch = source_task
+        .branch
+        .as_deref()
+        .ok_or_else(|| format!("task has no branch: {}", source_task_id))?;
+    prepare_stage_run_spawn(
         db,
         config,
         &repo,
-        TaskCreationRequest {
-            task_prompt,
-            display_name,
-            pipeline_name: Some(pipeline_name),
-            base_ref: source_branch,
-            stored_base_ref: source_task.base_ref,
-            stage_override: Some(next_stage.name.clone()),
-            explicit_provider,
-            default_provider: None,
-            agent_type: source_task.agent_type,
-            model: None,
-            permission_mode: None,
-            allowed_tools: Vec::new(),
-            notify_task_id: None,
-            parent_task_id: None,
-        },
+        source_task_id,
+        &pipeline_name,
+        &current_stage_name,
+        next_stage,
+        source_task.prompt.as_deref().unwrap_or(""),
+        task_prompt,
+        branch,
+        source_task.stage_result.clone(),
+        source_task.active_post_action.clone(),
+        None,
+        source_task.agent_type.as_deref(),
+        explicit_provider,
     )
-    .map(|spawn| PreparedStageTransition::Spawn(Box::new(spawn)))
-}
-
-fn resolve_inherited_task_title(
-    db: &Db,
-    source_task: &TaskStageSource,
-) -> Result<Option<String>, String> {
-    if let Some(title) = non_empty_string(source_task.display_name.clone()) {
-        return Ok(Some(title));
-    }
-    if let Some(title) = non_empty_string(source_task.issue_title.clone()) {
-        return Ok(Some(title));
-    }
-    if let Some(reviewed_branch) =
-        extract_reviewed_branch_from_prompt(source_task.prompt.as_deref().unwrap_or(""))
-    {
-        if let Some(title) = db
-            .get_pipeline_item_title_by_repo_branch(&source_task.repo_id, reviewed_branch)
-            .map_err(|e| format!("db error: {}", e))?
-        {
-            return Ok(Some(title));
-        }
-    }
-    Ok(non_empty_string(source_task.prompt.clone()))
-}
-
-fn non_empty_string(value: Option<String>) -> Option<String> {
-    value.filter(|candidate| !candidate.trim().is_empty())
-}
-
-fn extract_reviewed_branch_from_prompt(prompt: &str) -> Option<&str> {
-    let marker = "Review branch ";
-    let after_marker = prompt.split_once(marker)?.1;
-    let branch = after_marker
-        .split_whitespace()
-        .next()?
-        .trim_matches(|ch: char| matches!(ch, ',' | '.' | ':' | ';'));
-    if branch.is_empty() {
-        None
-    } else {
-        Some(branch)
-    }
+    .map(|spawn| PreparedStageTransition::Run(Box::new(spawn)))
 }
 
 pub(crate) fn prepare_auto_stage_completion_for_api(
@@ -225,8 +136,6 @@ pub(crate) fn prepare_auto_stage_completion_for_api(
     };
     let source_branch =
         resolve_current_source_worktree_branch(&repo.path, source_task.branch.as_deref());
-    let display_name = resolve_inherited_task_title(db, &source_task)?;
-
     let task_prompt = build_target_stage_prompt(
         &repo.path,
         next_stage,
@@ -242,43 +151,28 @@ pub(crate) fn prepare_auto_stage_completion_for_api(
         source_task.agent_provider.clone()
     };
 
-    if next_stage.mode == Some(PipelineStageMode::Continue) {
-        return prepare_continue_stage(
-            source_task_id,
-            &current_stage_name,
-            &next_stage.name,
-            source_task.stage_result.clone(),
-            &task_prompt,
-            source_task.branch.as_deref(),
-            normalize_agent_type(source_task.agent_type.as_deref()).unwrap_or("pty"),
-            source_task.agent_provider.as_deref(),
-        )
-        .map(|continuation| PreparedStageTransition::Continue(Box::new(continuation)))
-        .map(Some);
-    }
-
-    prepare_task_spawn(
+    let branch = source_task
+        .branch
+        .as_deref()
+        .ok_or_else(|| format!("task has no branch: {}", source_task_id))?;
+    prepare_stage_run_spawn(
         db,
         config,
         &repo,
-        TaskCreationRequest {
-            task_prompt,
-            display_name,
-            pipeline_name: Some(pipeline_name),
-            base_ref: source_branch,
-            stored_base_ref: source_task.base_ref,
-            stage_override: Some(next_stage.name.clone()),
-            explicit_provider,
-            default_provider: None,
-            agent_type: source_task.agent_type,
-            model: None,
-            permission_mode: None,
-            allowed_tools: Vec::new(),
-            notify_task_id: None,
-            parent_task_id: None,
-        },
+        source_task_id,
+        &pipeline_name,
+        &current_stage_name,
+        next_stage,
+        source_task.prompt.as_deref().unwrap_or(""),
+        task_prompt,
+        branch,
+        source_task.stage_result.clone(),
+        source_task.active_post_action.clone(),
+        None,
+        source_task.agent_type.as_deref(),
+        explicit_provider,
     )
-    .map(|spawn| PreparedStageTransition::Spawn(Box::new(spawn)))
+    .map(|spawn| PreparedStageTransition::Run(Box::new(spawn)))
     .map(Some)
 }
 
@@ -288,7 +182,7 @@ pub(crate) fn prepare_revision_task_for_api(
     source_task_id: &str,
     target_stage_name: &str,
     revision_prompt: &str,
-) -> Result<PreparedTaskSpawn, String> {
+) -> Result<PreparedStageRunSpawn, String> {
     let source_task = db
         .get_task_stage_source(source_task_id)
         .map_err(|e| format!("db error: {}", e))?
@@ -313,8 +207,6 @@ pub(crate) fn prepare_revision_task_for_api(
         .ok_or_else(|| format!("stage not found in pipeline: {}", target_stage_name))?;
     let source_branch =
         resolve_current_source_worktree_branch(&repo.path, source_task.branch.as_deref());
-    let display_name = resolve_inherited_task_title(db, &source_task)?;
-
     let task_prompt = build_target_stage_prompt(
         &repo.path,
         target_stage,
@@ -330,26 +222,26 @@ pub(crate) fn prepare_revision_task_for_api(
         source_task.agent_provider.clone()
     };
 
-    prepare_task_spawn(
+    let branch = source_task
+        .branch
+        .as_deref()
+        .ok_or_else(|| format!("task has no branch: {}", source_task_id))?;
+    prepare_stage_run_spawn(
         db,
         config,
         &repo,
-        TaskCreationRequest {
-            task_prompt,
-            display_name,
-            pipeline_name: Some(pipeline_name),
-            base_ref: source_branch,
-            stored_base_ref: source_task.base_ref,
-            stage_override: Some(target_stage.name.clone()),
-            explicit_provider,
-            default_provider: None,
-            agent_type: source_task.agent_type,
-            model: None,
-            permission_mode: None,
-            allowed_tools: Vec::new(),
-            notify_task_id: None,
-            parent_task_id: None,
-        },
+        source_task_id,
+        &pipeline_name,
+        source_task.stage.as_deref().unwrap_or(""),
+        target_stage,
+        revision_prompt,
+        task_prompt,
+        branch,
+        source_task.stage_result.clone(),
+        source_task.active_post_action.clone(),
+        Some(revision_prompt.to_string()),
+        source_task.agent_type.as_deref(),
+        explicit_provider,
     )
 }
 

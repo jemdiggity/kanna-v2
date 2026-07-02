@@ -66,6 +66,7 @@ fn prepare_merge_agent_creates_in_progress_task() {
 }
 
 #[test]
+#[ignore = "obsolete close-and-recreate stage transition contract"]
 fn prepare_advance_stage_builds_next_stage_task_from_previous_branch() {
     let repo_root =
         std::env::temp_dir().join(format!("kanna-stage-advance-{}", std::process::id()));
@@ -182,6 +183,7 @@ fn prepare_advance_stage_builds_next_stage_task_from_previous_branch() {
     let prepared = match prepare_advance_stage_for_api(&db, &config, "task-1").unwrap() {
         PreparedStageTransition::Spawn(prepared) => prepared,
         PreparedStageTransition::Continue(_) => panic!("expected new task transition"),
+        PreparedStageTransition::Run(_) => panic!("expected new task transition"),
     };
     let created_source = db
         .get_task_stage_source(&prepared.created_task.task_id)
@@ -203,6 +205,7 @@ fn prepare_advance_stage_builds_next_stage_task_from_previous_branch() {
 }
 
 #[test]
+#[ignore = "obsolete close-and-recreate stage transition contract"]
 fn prepare_advance_stage_uses_current_source_worktree_branch_after_rename() {
     let repo_root = std::env::temp_dir().join(format!(
         "kanna-stage-advance-renamed-source-{}",
@@ -338,6 +341,7 @@ fn prepare_advance_stage_uses_current_source_worktree_branch_after_rename() {
     let prepared = match prepare_advance_stage_for_api(&db, &config, "task-1").unwrap() {
         PreparedStageTransition::Spawn(prepared) => prepared,
         PreparedStageTransition::Continue(_) => panic!("expected new task transition"),
+        PreparedStageTransition::Run(_) => panic!("expected new task transition"),
     };
 
     assert_eq!(prepared.created_task.repo_id, "repo-1");
@@ -357,6 +361,7 @@ fn prepare_advance_stage_uses_current_source_worktree_branch_after_rename() {
 }
 
 #[tokio::test]
+#[ignore = "obsolete mode=continue transition contract"]
 async fn prepare_advance_stage_continues_commit_stage_in_same_task_and_worktree() {
     let repo_root = std::env::temp_dir().join(format!(
         "kanna-stage-advance-continue-{}",
@@ -478,6 +483,7 @@ async fn prepare_advance_stage_continues_commit_stage_in_same_task_and_worktree(
     let continuation = match prepared {
         PreparedStageTransition::Continue(continuation) => continuation,
         PreparedStageTransition::Spawn(_) => panic!("expected continue transition"),
+        PreparedStageTransition::Run(_) => panic!("expected continue transition"),
     };
 
     assert_eq!(continuation.task_id, "task-1");
@@ -515,6 +521,142 @@ async fn prepare_advance_stage_continues_commit_stage_in_same_task_and_worktree(
     assert_eq!(updated_source.stage_result, None);
     assert_eq!(updated_source.closed_at, None);
     assert_eq!(db.list_pipeline_items("repo-1").unwrap().len(), 1);
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[tokio::test]
+async fn prepare_advance_stage_spawns_next_run_in_same_task_and_worktree() {
+    let repo_root = init_git_repo("advance-stage-same-task-run");
+    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::create_dir_all(repo_root.join(".kanna/agents/reviewer")).unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/pipelines/default.json"),
+        r#"{
+  "stages": [
+    { "name": "in progress", "transition": "manual" },
+    { "name": "review", "transition": "manual", "agent": "reviewer", "prompt": "Review $BRANCH in $SOURCE_WORKTREE after $PREV_RESULT" }
+  ]
+}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/agents/reviewer/AGENT.md"),
+        "---\nagent_provider: claude\n---\nReview task: $TASK_PROMPT",
+    )
+    .unwrap();
+    assert!(Command::new("git")
+        .args(["add", ".kanna"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["commit", "-m", "add kanna pipeline"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["branch", "task-source"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    let source_worktree = repo_root.join(".kanna-worktrees/task-source");
+    assert!(Command::new("git")
+        .args([
+            "worktree",
+            "add",
+            source_worktree.to_string_lossy().as_ref(),
+            "task-source",
+        ])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+
+    let config = test_config("advance-stage-same-task-run");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Fix stage promotion",
+        Some("Fix stage promotion"),
+        "in progress",
+        "2026-04-17 07:00:00",
+    )
+    .unwrap();
+    db.update_test_pipeline_item_stage_context(
+        "task-1",
+        "task-source",
+        "default",
+        Some("{\"status\":\"success\",\"summary\":\"implemented\"}"),
+        "claude",
+    )
+    .unwrap();
+    db.upsert_worktree(
+        "wt-task-1",
+        "task-1",
+        &source_worktree.to_string_lossy(),
+        "task-source",
+    )
+    .unwrap();
+    db.insert_stage_run(
+        "run-in-progress",
+        "task-1",
+        "in progress",
+        "running",
+        Some("daemon-run-old"),
+        None,
+    )
+    .unwrap();
+
+    let prepared = prepare_advance_stage_for_api(&db, &config, "task-1").unwrap();
+    let run = match prepared {
+        PreparedStageTransition::Run(run) => run,
+        PreparedStageTransition::Spawn(_) => panic!("stage advance must not create a new task"),
+        PreparedStageTransition::Continue(_) => panic!("stage advance must spawn a new run"),
+    };
+
+    assert_eq!(run.task_id, "task-1");
+    assert_eq!(run.previous_stage, "in progress");
+    assert_eq!(run.next_stage, "review");
+    assert_eq!(run.cwd, source_worktree.to_string_lossy());
+    assert_ne!(run.session_id, "daemon-run-old");
+
+    let fake_daemon = spawn_fake_daemon_session_created_once(config.daemon_dir.clone()).await;
+    let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
+    let advanced = spawn_prepared_stage_run_for_api(&config.db_path, &mut daemon, *run)
+        .await
+        .unwrap();
+    let command = fake_daemon.await.unwrap();
+
+    assert_eq!(advanced.task_id, "task-1");
+    match command {
+        kanna_daemon::protocol::Command::Spawn { session_id, cwd, .. } => {
+            assert_ne!(session_id, "task-1");
+            assert_eq!(cwd, source_worktree.to_string_lossy());
+        }
+        kanna_daemon::protocol::Command::SpawnAgent { session_id, params } => {
+            assert_ne!(session_id, "task-1");
+            assert_eq!(params.cwd, source_worktree.to_string_lossy());
+        }
+        other => panic!("expected daemon spawn command, got {:?}", other),
+    }
+    let updated = db.get_task_stage_source("task-1").unwrap().unwrap();
+    assert_eq!(updated.stage.as_deref(), Some("review"));
+    assert_eq!(updated.branch.as_deref(), Some("task-source"));
+    assert_eq!(updated.closed_at, None);
+    assert_eq!(db.list_pipeline_items("repo-1").unwrap().len(), 1);
+    assert_eq!(
+        db.resolve_task_terminal_session_id("task-1")
+            .unwrap()
+            .as_deref(),
+        Some("run-2-review-task-1")
+    );
 
     let _ = std::fs::remove_dir_all(&repo_root);
 }
@@ -581,6 +723,7 @@ fn prepare_advance_stage_rejects_closed_source_task_even_when_stage_is_active() 
 }
 
 #[tokio::test]
+#[ignore = "obsolete runtime post_action transition contract"]
 async fn prepare_advance_stage_enters_post_action_without_changing_stage() {
     let repo_root = std::env::temp_dir().join(format!(
         "kanna-stage-advance-post-action-{}",
@@ -711,6 +854,7 @@ async fn prepare_advance_stage_enters_post_action_without_changing_stage() {
     let continuation = match prepared {
         PreparedStageTransition::Continue(continuation) => continuation,
         PreparedStageTransition::Spawn(_) => panic!("expected post-action continuation"),
+        PreparedStageTransition::Run(_) => panic!("expected post-action continuation"),
     };
 
     assert_eq!(continuation.task_id, "task-1");
@@ -750,6 +894,7 @@ async fn prepare_advance_stage_enters_post_action_without_changing_stage() {
 }
 
 #[test]
+#[ignore = "obsolete close-and-recreate auto transition contract"]
 fn prepare_auto_stage_completion_from_commit_creates_pr_task_from_original_branch() {
     let repo_root = std::env::temp_dir().join(format!(
         "kanna-stage-auto-pr-after-continue-{}",
@@ -871,6 +1016,7 @@ fn prepare_auto_stage_completion_from_commit_creates_pr_task_from_original_branc
     let spawn = match prepared {
         Some(PreparedStageTransition::Spawn(spawn)) => spawn,
         Some(PreparedStageTransition::Continue(_)) => panic!("expected pr task spawn"),
+        Some(PreparedStageTransition::Run(_)) => panic!("expected pr task spawn"),
         None => panic!("expected auto transition"),
     };
 

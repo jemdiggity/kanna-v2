@@ -17,7 +17,7 @@ export interface PipelineStage {
   description?: string;
   agent?: string;
   prompt?: string;
-  agent_provider?: string;
+  agent_provider?: string | string[];
   environment?: string;
   transition: "manual" | "auto";
   follow_task?: boolean;

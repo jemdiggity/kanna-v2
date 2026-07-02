@@ -191,7 +191,7 @@ function extractStages(obj: Record<string, unknown>): PipelineStage[] {
     return [];
   }
 
-  return (obj["stages"] as unknown[]).map((item, index) => {
+  return (obj["stages"] as unknown[]).flatMap((item, index) => {
     if (item === null || typeof item !== "object" || Array.isArray(item)) {
       throw new Error(`Stage at index ${index} must be an object`);
     }
@@ -216,8 +216,11 @@ function extractStages(obj: Record<string, unknown>): PipelineStage[] {
     if (typeof s["prompt"] === "string") {
       stage.prompt = s["prompt"];
     }
-    if (typeof s["agent_provider"] === "string") {
-      stage.agent_provider = s["agent_provider"];
+    if (
+      typeof s["agent_provider"] === "string" ||
+      (Array.isArray(s["agent_provider"]) && s["agent_provider"].every((entry) => typeof entry === "string"))
+    ) {
+      stage.agent_provider = s["agent_provider"] as string | string[];
     }
     if (typeof s["environment"] === "string") {
       stage.environment = s["environment"];
@@ -230,10 +233,27 @@ function extractStages(obj: Record<string, unknown>): PipelineStage[] {
       stage.mode = mode;
     }
     const postAction = extractPostAction(s["post_action"], stage.name || "(unnamed)");
-    if (postAction) {
-      stage.post_action = postAction;
+    if (!postAction) {
+      return [stage];
     }
 
-    return stage;
+    const compiledPostAction: PipelineStage = {
+      name: postAction.name,
+      transition: postAction.transition,
+    };
+    if (postAction.description !== undefined) {
+      compiledPostAction.description = postAction.description;
+    }
+    if (postAction.agent !== undefined) {
+      compiledPostAction.agent = postAction.agent;
+    }
+    if (postAction.prompt !== undefined) {
+      compiledPostAction.prompt = postAction.prompt;
+    }
+    if (postAction.agent_provider !== undefined) {
+      compiledPostAction.agent_provider = postAction.agent_provider;
+    }
+
+    return [stage, compiledPostAction];
   });
 }

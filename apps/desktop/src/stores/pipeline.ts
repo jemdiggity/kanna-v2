@@ -60,47 +60,6 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
     return buildWorktreePath(repoPath, baseRef);
   }
 
-  function resolveInheritedTaskTitle(item: { display_name: string | null; issue_title: string | null; prompt: string | null }): string | null {
-    return item.display_name ?? item.issue_title ?? item.prompt ?? null;
-  }
-
-  // Selection during stage advance is only adjusted when the task being advanced
-  // (and therefore closed) is the one currently selected — analogous to deletion,
-  // where selection moves to the next visible task. When any other task advances
-  // (including auto-advance), the user's selection must be left untouched.
-  function computeNextVisibleItemId(currentItemId: string): string | null {
-    const sortedItems = requireService(context.services.sortedItemsForCurrentRepo, "sortedItemsForCurrentRepo").value;
-    const currentIndex = sortedItems.findIndex((candidate) => candidate.id === currentItemId);
-    if (currentIndex === -1) return null;
-
-    const remainingItems = sortedItems.filter((candidate) => candidate.id !== currentItemId);
-    const nextIndex = currentIndex >= remainingItems.length ? remainingItems.length - 1 : currentIndex;
-    return remainingItems[nextIndex]?.id ?? null;
-  }
-
-  async function restoreStageAdvanceSelection(itemId: string | null) {
-    if (itemId) {
-      const item = context.state.items.value.find((candidate) => candidate.id === itemId);
-      const isItemHidden = requireService(context.services.isItemHidden, "isItemHidden");
-      if (item && !isItemHidden(item) && item.repo_id === context.state.selectedRepoId.value) {
-        debugLog("[pipeline:advanceStage] restoring selection", {
-          targetItemId: itemId,
-          targetStage: item.stage,
-          targetBranch: item.branch,
-          selectedBefore: context.state.selectedItemId.value,
-        });
-        await requireService(context.services.selectItem, "selectItem")(itemId);
-        return;
-      }
-    }
-
-    debugLog("[pipeline:advanceStage] clearing selection during restore", {
-      requestedItemId: itemId,
-      selectedBefore: context.state.selectedItemId.value,
-    });
-    context.state.selectedItemId.value = null;
-  }
-
   async function hasLiveDaemonSession(taskId: string): Promise<boolean> {
     const sessions = await invoke<DaemonSessionInfo[]>("list_sessions");
     return sessions.some((session) => {
@@ -356,23 +315,16 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
       return;
     }
 
-    const shouldFollowTask = nextStage.follow_task ?? (options.initiatedBy !== "auto");
-    const sourceTaskIsSelected = context.state.selectedItemId.value === item.id;
-    const fallbackSelectionId = computeNextVisibleItemId(item.id);
     debugLog("[pipeline:advanceStage] selection policy", {
       taskId,
       currentStage: item.stage,
       nextStage: nextStage.name,
-      followTask: nextStage.follow_task,
       initiatedBy: options.initiatedBy ?? "manual",
-      shouldFollowTask,
-      sourceTaskIsSelected,
-      fallbackSelectionId,
       selectedBefore: context.state.selectedItemId.value,
     });
 
     let stagePrompt = "";
-    let agentOpts: Record<string, unknown> = { agentProvider: item.agent_provider };
+    let nextAgentProvider: import("@kanna/db").AgentProvider = item.agent_provider;
     const sourceBranch = await resolveCurrentSourceBranch(repo.path, item.branch);
     const sourceWorktree = resolveSourceWorktree(repo.path, item.branch);
     const currentStage = pipeline.stages.find((stage) => stage.name === item.stage);
@@ -416,12 +368,7 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
           await requireService(context.services.getAgentProviderAvailability, "getAgentProviderAvailability")(),
         );
 
-        agentOpts = {
-          agentProvider: resolvedProvider,
-          model: agent.model,
-          permissionMode: agent.permission_mode,
-          allowedTools: agent.allowed_tools,
-        };
+        nextAgentProvider = resolvedProvider;
       } catch (error) {
         console.error("[store] advanceStage: failed to load agent:", error);
         context.toast.error(`${context.tt("toasts.agentStartFailed")}: ${error instanceof Error ? error.message : error}`);
@@ -429,56 +376,14 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
       }
     }
 
-    if (nextStage.mode === "continue") {
-      await continueStageInPlace(
-        item,
-        repo,
-        nextStage.name,
-        stagePrompt,
-        item.agent_provider,
-        item.agent_provider === "claude" && Boolean(item.prompt),
-      );
-      return;
-    }
-
-    if (sourceTaskIsSelected) {
-      await restoreStageAdvanceSelection(fallbackSelectionId);
-    }
-
-    debugLog("[pipeline:advanceStage] closing source task", {
-      taskId: item.id,
-      selectedBeforeClose: context.state.selectedItemId.value,
-    });
-    await requireService(context.services.closeTask, "closeTask")(item.id, { selectNext: false });
-    debugLog("[pipeline:advanceStage] creating next-stage task", {
-      taskId: item.id,
-      nextStage: nextStage.name,
-      selectOnCreate: shouldFollowTask,
-      selectedBeforeCreate: context.state.selectedItemId.value,
-    });
-    const nextAgentType = normalizeAgentExecutionType(item.agent_type);
-    const createdItemId = await requireService(context.services.createItem, "createItem")(
-      repo.id,
-      repo.path,
+    await continueStageInPlace(
+      item,
+      repo,
+      nextStage.name,
       stagePrompt,
-      nextAgentType,
-      {
-        baseBranch: sourceBranch,
-        baseRef: item.base_ref ?? sourceBranch,
-        pipelineName: item.pipeline,
-        stage: nextStage.name,
-        selectOnCreate: shouldFollowTask,
-        displayName: resolveInheritedTaskTitle(item),
-        ...agentOpts,
-      },
+      nextAgentProvider,
+      nextAgentProvider === "claude" && Boolean(item.prompt),
     );
-    debugLog("[pipeline:advanceStage] created next-stage task", {
-      taskId: item.id,
-      createdItemId,
-      nextStage: nextStage.name,
-      selectOnCreate: shouldFollowTask,
-      selectedAfterCreate: context.state.selectedItemId.value,
-    });
   }
 
   function parseTaskPortEnv(portEnv: string | null): Record<string, string> | undefined {

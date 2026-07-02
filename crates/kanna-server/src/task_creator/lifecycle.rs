@@ -1,4 +1,7 @@
-use super::types::{CreatedTask, PreparedSessionSpawn, PreparedStageContinue, PreparedTaskSpawn};
+use super::types::{
+    CreatedTask, PreparedSessionSpawn, PreparedStageContinue, PreparedStageRunSpawn,
+    PreparedTaskSpawn,
+};
 use super::worktree::remove_prepared_worktree;
 use crate::daemon_client::DaemonClient;
 use crate::db::Db;
@@ -101,6 +104,105 @@ pub(crate) async fn spawn_prepared_task_for_api(
         agent_type: created.agent_type,
         worktree_path: Some(created.worktree_path),
     })
+}
+
+pub(crate) async fn spawn_prepared_stage_run_for_api(
+    db_path: &str,
+    daemon: &mut DaemonClient,
+    prepared: PreparedStageRunSpawn,
+) -> Result<crate::mobile_api::TaskActionResponse, String> {
+    {
+        let db = Db::open(db_path).map_err(|e| format!("db error: {}", e))?;
+        db.finish_running_stage_runs(&prepared.task_id, prepared.previous_stage_result.as_deref())
+            .map_err(|e| format!("db error: {}", e))?;
+        db.update_pipeline_item_stage(&prepared.task_id, &prepared.next_stage)
+            .map_err(|e| format!("db error: {}", e))?;
+        db.clear_pipeline_item_stage_result(&prepared.task_id)
+            .map_err(|e| format!("db error: {}", e))?;
+        db.update_pipeline_item_post_action_state(
+            &prepared.task_id,
+            prepared.previous_active_post_action.as_deref(),
+            None,
+        )
+        .map_err(|e| format!("db error: {}", e))?;
+        db.insert_stage_run(
+            &prepared.session_id,
+            &prepared.task_id,
+            &prepared.next_stage,
+            "running",
+            Some(&prepared.session_id),
+            prepared.feedback.as_deref(),
+        )
+        .map_err(|e| format!("db error: {}", e))?;
+        db.upsert_terminal_session(
+            &format!("agent-{}", prepared.task_id),
+            &prepared.repo_id,
+            Some(&prepared.task_id),
+            Some("agent"),
+            Some(&prepared.cwd),
+            Some(&prepared.session_id),
+        )
+        .map_err(|e| format!("db error: {}", e))?;
+    }
+
+    let command = match prepared.session {
+        PreparedSessionSpawn::Pty {
+            executable,
+            args,
+            cols,
+            rows,
+            agent_provider,
+        } => DaemonCommand::Spawn {
+            session_id: prepared.session_id,
+            executable,
+            args,
+            cwd: prepared.cwd,
+            env: prepared.env,
+            cols,
+            rows,
+            agent_provider: Some(agent_provider),
+        },
+        PreparedSessionSpawn::Agent {
+            agent_provider,
+            prompt,
+            model,
+            permission_mode,
+            allowed_tools,
+            system_prompt,
+            mcp_config_path,
+            executable,
+        } => DaemonCommand::SpawnAgent {
+            session_id: prepared.session_id,
+            params: AgentSpawnParams {
+                agent_provider,
+                prompt,
+                cwd: prepared.cwd,
+                env: prepared.env,
+                model,
+                permission_mode,
+                allowed_tools,
+                disallowed_tools: Vec::new(),
+                max_turns: None,
+                max_budget_usd: None,
+                system_prompt: Some(system_prompt),
+                mcp_config_path,
+                executable,
+            },
+        },
+    };
+
+    let event = daemon
+        .send_command(&command)
+        .await
+        .map_err(|e| format!("daemon error: {}", e))?;
+
+    match event {
+        DaemonEvent::SessionCreated { .. } => Ok(crate::mobile_api::TaskActionResponse {
+            task_id: prepared.task_id,
+        }),
+        DaemonEvent::Error { message, .. } => Err(format!("daemon error: {}", message)),
+        other => Err(format!("unexpected daemon response: {:?}", other)),
+    }
 }
 
 pub(crate) async fn spawn_prepared_task_for_api_with_rollback(

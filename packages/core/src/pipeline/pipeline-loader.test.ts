@@ -159,7 +159,7 @@ describe("parsePipelineJson", () => {
     expect(() => parsePipelineJson(json)).toThrow(/invalid mode "sideways"/);
   });
 
-  it("parses a stage post_action", () => {
+  it("compiles a stage post_action into an interleaved auto stage", () => {
     const json = JSON.stringify({
       name: "My Pipeline",
       stages: [
@@ -181,7 +181,9 @@ describe("parsePipelineJson", () => {
 
     const result = parsePipelineJson(json);
 
-    expect(result.stages[0].post_action).toEqual({
+    expect(result.stages.map((stage) => stage.name)).toEqual(["in progress", "commit", "pr"]);
+    expect(result.stages[0].post_action).toBeUndefined();
+    expect(result.stages[1]).toEqual({
       name: "commit",
       description: "Commit the relevant work",
       agent: "commit",
@@ -189,6 +191,7 @@ describe("parsePipelineJson", () => {
       agent_provider: ["codex", "claude"],
       transition: "auto",
     });
+    expect(result.stages[2].name).toBe("pr");
   });
 
   it("reports missing post_action transition as undefined instead of an empty string", () => {

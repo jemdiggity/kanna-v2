@@ -201,6 +201,15 @@ pub async fn handle_invoke(
                     .await?;
                     serde_json::to_value(continued).map_err(|e| format!("serialize error: {}", e))
                 }
+                task_creator::PreparedStageTransition::Run(prepared) => {
+                    let advanced = task_creator::spawn_prepared_stage_run_for_api(
+                        &config.db_path,
+                        daemon,
+                        *prepared,
+                    )
+                    .await?;
+                    serde_json::to_value(advanced).map_err(|e| format!("serialize error: {}", e))
+                }
             }
         }
         "run_merge_agent" => {

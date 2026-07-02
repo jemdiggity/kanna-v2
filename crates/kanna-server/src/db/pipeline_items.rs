@@ -208,6 +208,25 @@ impl Db {
             return Ok(None);
         };
 
+        let stage_run_session_id = self
+            .conn
+            .query_row(
+                "SELECT daemon_session_id
+                 FROM stage_run
+                 WHERE pipeline_item_id = ?
+                   AND status = 'running'
+                   AND daemon_session_id IS NOT NULL
+                   AND daemon_session_id != ''
+                 ORDER BY rowid DESC
+                 LIMIT 1",
+                [&pipeline_item_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if stage_run_session_id.is_some() {
+            return Ok(stage_run_session_id);
+        }
+
         let terminal_session_id = self
             .conn
             .query_row(
@@ -226,62 +245,75 @@ impl Db {
         Ok(terminal_session_id.or(Some(pipeline_item_id)))
     }
 
+    pub fn insert_stage_run(
+        &self,
+        id: &str,
+        pipeline_item_id: &str,
+        stage: &str,
+        status: &str,
+        daemon_session_id: Option<&str>,
+        feedback: Option<&str>,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "INSERT INTO stage_run (id, pipeline_item_id, stage, status, daemon_session_id, feedback)
+             VALUES (?, ?, ?, ?, ?, ?)",
+            (id, pipeline_item_id, stage, status, daemon_session_id, feedback),
+        )?;
+        Ok(())
+    }
+
+    pub fn finish_running_stage_runs(
+        &self,
+        pipeline_item_id: &str,
+        result_json: Option<&str>,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE stage_run
+             SET status = 'finished',
+                 result_json = COALESCE(?, result_json),
+                 finished_at = datetime('now')
+             WHERE pipeline_item_id = ? AND status = 'running'",
+            (result_json, pipeline_item_id),
+        )?;
+        Ok(())
+    }
+
+    pub fn count_stage_runs_for_task(&self, pipeline_item_id: &str) -> Result<i64, rusqlite::Error> {
+        self.conn.query_row(
+            "SELECT COUNT(*) FROM stage_run WHERE pipeline_item_id = ?",
+            [pipeline_item_id],
+            |row| row.get(0),
+        )
+    }
+
     pub fn get_task_stage_source(
         &self,
         id: &str,
     ) -> Result<Option<TaskStageSource>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
-            "SELECT repo_id, issue_title, prompt, display_name, stage, stage_result, active_post_action, branch, base_ref, pipeline, agent_type, agent_provider, closed_at
+            "SELECT repo_id, prompt, display_name, stage, stage_result, active_post_action, branch, base_ref, pipeline, agent_type, agent_provider, closed_at
              FROM pipeline_item WHERE id = ?",
         )?;
         let mut rows = stmt.query_map([id], |row| {
             Ok(TaskStageSource {
                 repo_id: row.get(0)?,
-                issue_title: row.get(1)?,
-                prompt: row.get(2)?,
-                display_name: row.get(3)?,
-                stage: row.get(4)?,
-                stage_result: row.get(5)?,
-                active_post_action: row.get(6)?,
-                branch: row.get(7)?,
-                base_ref: row.get(8)?,
-                pipeline: row.get(9)?,
-                agent_type: row.get(10)?,
-                agent_provider: row.get(11)?,
-                closed_at: row.get(12)?,
+                prompt: row.get(1)?,
+                display_name: row.get(2)?,
+                stage: row.get(3)?,
+                stage_result: row.get(4)?,
+                active_post_action: row.get(5)?,
+                branch: row.get(6)?,
+                base_ref: row.get(7)?,
+                pipeline: row.get(8)?,
+                agent_type: row.get(9)?,
+                agent_provider: row.get(10)?,
+                closed_at: row.get(11)?,
             })
         })?;
         match rows.next() {
             Some(row) => Ok(Some(row?)),
             None => Ok(None),
         }
-    }
-
-    pub fn get_pipeline_item_title_by_repo_branch(
-        &self,
-        repo_id: &str,
-        branch: &str,
-    ) -> Result<Option<String>, rusqlite::Error> {
-        self.conn
-            .query_row(
-                "SELECT display_name, issue_title, prompt
-                 FROM pipeline_item
-                 WHERE repo_id = ? AND branch = ?
-                 ORDER BY datetime(created_at) DESC
-                 LIMIT 1",
-                (repo_id, branch),
-                |row| {
-                    let display_name: Option<String> = row.get(0)?;
-                    let issue_title: Option<String> = row.get(1)?;
-                    let prompt: Option<String> = row.get(2)?;
-                    Ok(display_name
-                        .filter(|value| !value.trim().is_empty())
-                        .or_else(|| issue_title.filter(|value| !value.trim().is_empty()))
-                        .or_else(|| prompt.filter(|value| !value.trim().is_empty())))
-                },
-            )
-            .optional()
-            .map(|title| title.flatten())
     }
 
     pub fn insert_pipeline_item(&self, item: NewPipelineItem<'_>) -> Result<(), rusqlite::Error> {

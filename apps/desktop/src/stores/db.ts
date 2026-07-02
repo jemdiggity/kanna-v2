@@ -122,6 +122,17 @@ export async function runMigrations(db: DbHandle): Promise<void> {
     status TEXT NOT NULL DEFAULT 'running', started_at TEXT NOT NULL DEFAULT (datetime('now')),
     finished_at TEXT, error TEXT
   )`);
+  await db.execute(`CREATE TABLE IF NOT EXISTS stage_run (
+    id TEXT PRIMARY KEY,
+    pipeline_item_id TEXT NOT NULL REFERENCES pipeline_item(id) ON DELETE CASCADE,
+    stage TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'running',
+    daemon_session_id TEXT,
+    feedback TEXT,
+    result_json TEXT,
+    started_at TEXT NOT NULL DEFAULT (datetime('now')),
+    finished_at TEXT
+  )`);
   await db.execute(`CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)`);
 
   const hasMigration = async (id: string): Promise<boolean> => {

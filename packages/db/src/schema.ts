@@ -124,6 +124,18 @@ export interface AgentRun {
   error: string | null;
 }
 
+export interface StageRun {
+  id: string;
+  pipeline_item_id: string;
+  stage: string;
+  status: "running" | "finished" | "failed";
+  daemon_session_id: string | null;
+  feedback: string | null;
+  result_json: string | null;
+  started_at: string;
+  finished_at: string | null;
+}
+
 export interface Setting {
   key: string;
   value: string;

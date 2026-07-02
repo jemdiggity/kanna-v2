@@ -34,7 +34,6 @@ pub(super) struct PipelineStage {
     pub(super) prompt: Option<String>,
     pub(super) agent_provider: Option<String>,
     pub(super) transition: Option<String>,
-    pub(super) mode: Option<PipelineStageMode>,
     pub(super) post_action: Option<PipelinePostAction>,
 }
 
@@ -45,13 +44,6 @@ pub(super) struct PipelinePostAction {
     pub(super) prompt: Option<String>,
     pub(super) agent_provider: Option<String>,
     pub(super) transition: Option<String>,
-}
-
-#[derive(Clone, Copy, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub(super) enum PipelineStageMode {
-    NewTask,
-    Continue,
 }
 
 #[derive(Default, Deserialize)]
@@ -90,7 +82,29 @@ pub(super) fn read_pipeline_definition(
         Ok(content) => content,
         Err(_) => read_builtin_resource(&format!(".kanna/pipelines/{pipeline_name}.json"))?,
     };
-    serde_json::from_str(&content).map_err(|e| format!("invalid pipeline definition: {}", e))
+    let mut pipeline: PipelineDefinition =
+        serde_json::from_str(&content).map_err(|e| format!("invalid pipeline definition: {}", e))?;
+    compile_legacy_post_actions(&mut pipeline);
+    Ok(pipeline)
+}
+
+fn compile_legacy_post_actions(pipeline: &mut PipelineDefinition) {
+    let mut compiled = Vec::with_capacity(pipeline.stages.len());
+    for mut stage in pipeline.stages.drain(..) {
+        let post_action = stage.post_action.take();
+        compiled.push(stage);
+        if let Some(post_action) = post_action {
+            compiled.push(PipelineStage {
+                name: post_action.name,
+                agent: post_action.agent,
+                prompt: post_action.prompt,
+                agent_provider: post_action.agent_provider,
+                transition: post_action.transition,
+                post_action: None,
+            });
+        }
+    }
+    pipeline.stages = compiled;
 }
 
 pub(super) fn read_agent_definition(

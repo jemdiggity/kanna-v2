@@ -23,14 +23,16 @@ use environment::{
 };
 use lifecycle::spawn_prepared_task;
 use prompt::{build_stage_prompt, PromptContext};
-use provider::{resolve_agent_provider, resolve_agent_type, AgentSessionType};
+use provider::{resolve_agent_provider, resolve_agent_type, AgentProvider, AgentSessionType};
+use std::collections::HashMap;
 use types::{CreatedTask, PreparedSessionSpawn, TaskCreationRequest};
-pub(crate) use types::{PreparedStageTransition, PreparedTaskSpawn};
+pub(crate) use types::{PreparedStageRunSpawn, PreparedStageTransition, PreparedTaskSpawn};
 use worktree::{create_worktree, fetch_start_point, generate_task_id};
 
 pub(crate) use lifecycle::{
     continue_prepared_stage_for_api, prepared_task_id, rollback_prepared_task_for_api,
-    spawn_prepared_task_for_api, spawn_prepared_task_for_api_with_rollback,
+    spawn_prepared_stage_run_for_api, spawn_prepared_task_for_api,
+    spawn_prepared_task_for_api_with_rollback,
 };
 pub(crate) use stages::{
     prepare_advance_stage_for_api, prepare_auto_stage_completion_for_api,
@@ -299,6 +301,15 @@ fn prepare_task_spawn(
         Some(&task_id),
     )
     .map_err(|e| format!("db error: {}", e))?;
+    db.insert_stage_run(
+        &format!("run-1-{}-{}", stage_slug(&stage_name), task_id),
+        &task_id,
+        &stage_name,
+        "running",
+        Some(&task_id),
+        None,
+    )
+    .map_err(|e| format!("db error: {}", e))?;
     let worktree_repo_config = read_repo_config(&worktree_path)?;
     let mut spawn_env = build_spawn_env(config, &task_id, &port_env)?;
     apply_workspace_path_env(&mut spawn_env, &worktree_path, &worktree_repo_config);
@@ -385,4 +396,186 @@ fn prepare_task_spawn(
         env: spawn_env,
         session,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::task_creator) fn prepare_stage_run_spawn(
+    db: &Db,
+    config: &Config,
+    repo: &Repo,
+    task_id: &str,
+    pipeline_name: &str,
+    previous_stage: &str,
+    next_stage: &definitions::PipelineStage,
+    task_prompt: &str,
+    final_prompt: String,
+    branch: &str,
+    previous_stage_result: Option<String>,
+    previous_active_post_action: Option<String>,
+    feedback: Option<String>,
+    source_agent_type: Option<&str>,
+    explicit_provider: Option<String>,
+) -> Result<PreparedStageRunSpawn, String> {
+    let agent = if let Some(agent_name) = next_stage.agent.as_deref() {
+        Some(read_agent_definition(&repo.path, agent_name)?)
+    } else {
+        None
+    };
+    let provider = resolve_agent_provider(
+        explicit_provider.as_deref(),
+        None,
+        next_stage.agent_provider.as_deref(),
+        agent.as_ref(),
+    )?;
+    let agent_type = resolve_agent_type(source_agent_type, provider)?;
+    let model = agent.as_ref().and_then(|agent| agent.model.clone());
+    let permission_mode = agent
+        .as_ref()
+        .and_then(|agent| agent.permission_mode.clone());
+    let allowed_tools = agent
+        .as_ref()
+        .map(|agent| agent.allowed_tools.clone())
+        .unwrap_or_default();
+    let worktree_path = format!("{}/.kanna-worktrees/{}", repo.path, branch);
+    let worktree_repo_config = read_repo_config(&worktree_path)?;
+    let mut spawn_env = build_spawn_env(config, task_id, &HashMap::new())?;
+    apply_workspace_path_env(&mut spawn_env, &worktree_path, &worktree_repo_config);
+    let mcp_config_path = write_kanna_mcp_config(&config.daemon_dir, task_id, &mut spawn_env)?;
+    let run_number = db
+        .count_stage_runs_for_task(task_id)
+        .map_err(|e| format!("db error: {}", e))?
+        + 1;
+    let session_id = format!(
+        "run-{run_number}-{}-{task_id}",
+        stage_slug(&next_stage.name)
+    );
+    let session = build_prepared_session(
+        provider,
+        agent_type,
+        task_id,
+        &next_stage.name,
+        pipeline_name,
+        next_stage.transition.as_deref(),
+        final_prompt,
+        model,
+        permission_mode,
+        allowed_tools,
+        mcp_config_path.as_deref(),
+        &spawn_env,
+        worktree_repo_config.setup.as_deref().unwrap_or(&[]),
+    )?;
+
+    Ok(PreparedStageRunSpawn {
+        created_task: CreatedTask {
+            task_id: task_id.to_string(),
+            repo_id: repo.id.clone(),
+            title: task_prompt.to_string(),
+            stage: next_stage.name.clone(),
+            agent_type: agent_type.as_str().to_string(),
+            worktree_path: worktree_path.clone(),
+        },
+        task_id: task_id.to_string(),
+        repo_id: repo.id.clone(),
+        previous_stage: previous_stage.to_string(),
+        next_stage: next_stage.name.clone(),
+        previous_stage_result,
+        previous_active_post_action,
+        feedback,
+        session_id,
+        cwd: worktree_path,
+        env: spawn_env,
+        session,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_prepared_session(
+    provider: AgentProvider,
+    agent_type: AgentSessionType,
+    task_id: &str,
+    stage_name: &str,
+    pipeline_name: &str,
+    stage_transition: Option<&str>,
+    final_prompt: String,
+    model: Option<String>,
+    permission_mode: Option<String>,
+    allowed_tools: Vec<String>,
+    mcp_config_path: Option<&str>,
+    spawn_env: &HashMap<String, String>,
+    setup: &[String],
+) -> Result<PreparedSessionSpawn, String> {
+    Ok(match agent_type {
+        AgentSessionType::Pty => {
+            let preamble = build_kanna_preamble(
+                &provider,
+                task_id,
+                stage_name,
+                pipeline_name,
+                stage_transition,
+                mcp_config_path,
+            );
+            let agent_cmd = build_agent_command(
+                &provider,
+                &final_prompt,
+                model.as_deref(),
+                permission_mode.as_deref(),
+                &allowed_tools,
+                Some(&preamble),
+                mcp_config_path,
+            );
+            let full_cmd = build_task_shell_command(
+                &agent_cmd,
+                setup,
+                spawn_env.get("KANNA_CLI_PATH").map(String::as_str),
+            );
+            PreparedSessionSpawn::Pty {
+                executable: "/bin/zsh".to_string(),
+                args: vec![
+                    "--login".to_string(),
+                    "-i".to_string(),
+                    "-c".to_string(),
+                    full_cmd,
+                ],
+                cols: 80,
+                rows: 24,
+                agent_provider: provider.to_daemon_provider(),
+            }
+        }
+        AgentSessionType::Agent => {
+            let headless_executable = resolve_headless_agent_executable(
+                provider,
+                spawn_env.get("PATH").map(String::as_str),
+            )?;
+            let system_prompt = build_kanna_preamble(
+                &provider,
+                task_id,
+                stage_name,
+                pipeline_name,
+                stage_transition,
+                mcp_config_path,
+            );
+            PreparedSessionSpawn::Agent {
+                agent_provider: provider.to_daemon_provider(),
+                prompt: final_prompt,
+                model,
+                permission_mode,
+                allowed_tools,
+                system_prompt,
+                mcp_config_path: mcp_config_path.map(str::to_string),
+                executable: headless_executable,
+            }
+        }
+    })
+}
+
+fn stage_slug(stage_name: &str) -> String {
+    let mut slug = String::new();
+    for ch in stage_name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+        } else if !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    slug.trim_matches('-').to_string()
 }

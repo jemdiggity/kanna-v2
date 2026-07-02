@@ -59,9 +59,11 @@ pub(crate) enum PreparedSessionSpawn {
     },
 }
 
+#[allow(dead_code)]
 pub(crate) enum PreparedStageTransition {
     Spawn(Box<PreparedTaskSpawn>),
     Continue(Box<PreparedStageContinue>),
+    Run(Box<PreparedStageRunSpawn>),
 }
 
 pub(crate) struct PreparedStageContinue {
@@ -74,4 +76,21 @@ pub(crate) struct PreparedStageContinue {
     pub(super) active_post_action: Option<String>,
     pub(super) input_text: String,
     pub(super) input: Vec<u8>,
+}
+
+#[derive(Clone)]
+#[allow(dead_code)]
+pub(crate) struct PreparedStageRunSpawn {
+    pub(super) created_task: CreatedTask,
+    pub(super) task_id: String,
+    pub(super) repo_id: String,
+    pub(super) previous_stage: String,
+    pub(super) next_stage: String,
+    pub(super) previous_stage_result: Option<String>,
+    pub(super) previous_active_post_action: Option<String>,
+    pub(super) feedback: Option<String>,
+    pub(super) session_id: String,
+    pub(super) cwd: String,
+    pub(super) env: HashMap<String, String>,
+    pub(super) session: PreparedSessionSpawn,
 }
