@@ -558,6 +558,12 @@ describe("Sidebar", () => {
     expect(selectedRule?.groups?.body).not.toContain("outline:");
   });
 
+  it("does not use grab-hand cursors as the sidebar drag affordance", () => {
+    const source = readFileSync(join(process.cwd(), "src/components/Sidebar.vue"), "utf8");
+
+    expect(source).not.toMatch(/cursor:\s*grabb?ing?\s*;/);
+  });
+
   it("scrolls when a selected active-stage task becomes unclosed and visible", async () => {
     const scrollIntoView = vi.fn();
     const originalDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollIntoView");
