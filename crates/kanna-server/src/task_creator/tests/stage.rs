@@ -60,7 +60,7 @@ fn prepare_merge_agent_creates_in_progress_task() {
 
     assert_eq!(prepared.created_task.repo_id, "repo-1");
     assert_eq!(prepared.created_task.stage, "in progress");
-    assert!(prepared.created_task.title.contains("merge agent"));
+    assert_eq!(prepared.created_task.title, "Merge Master");
 
     let _ = std::fs::remove_dir_all(&repo_root);
 }

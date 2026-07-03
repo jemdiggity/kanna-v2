@@ -144,6 +144,11 @@ pub struct ClaimedTaskNotification {
     pub title: String,
 }
 
+pub struct RunningAgentTask {
+    pub task_id: String,
+    pub session_id: String,
+}
+
 #[derive(Debug)]
 pub struct Db {
     conn: Connection,

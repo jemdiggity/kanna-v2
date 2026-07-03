@@ -2,6 +2,7 @@ use super::desktop::list_desktops;
 use super::ksp::ksp_stream;
 use super::pairing::create_pairing_session;
 use super::repos::{add_repo, list_repo_tasks, list_repos};
+use super::signal_agent::signal_agent;
 use super::state::{AppState, HttpInvokeResponse};
 use super::status::status;
 use super::task_actions::{
@@ -27,6 +28,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/desktops", get(list_desktops))
         .route("/v1/repos", get(list_repos).post(add_repo))
         .route("/v1/repos/{repo_id}/tasks", get(list_repo_tasks))
+        .route(
+            "/v1/repos/{repo_id}/agents/{agent}/signal",
+            post(signal_agent),
+        )
         .route("/v1/tasks/recent", get(list_recent_tasks))
         .route("/v1/tasks/search", get(search_tasks))
         .route("/v1/tasks", post(create_task))
