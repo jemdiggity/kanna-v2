@@ -303,6 +303,100 @@ pub fn is_executable_file(path: &Path) -> bool {
     path.is_file()
 }
 
+/// Strip ANSI terminal escape sequences from text for logs and usage output.
+///
+/// Cursor-forward (`CSI <n> C`) is rendered as spaces and cursor-down
+/// (`CSI <n> B`) as newlines so fixed-position terminal output remains
+/// readable after conversion to plain text. Other escape sequences are omitted.
+pub fn strip_ansi_for_display(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let bytes = input.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+
+    while i < len {
+        match bytes[i] {
+            0x1b => {
+                i += 1;
+                if i >= len {
+                    break;
+                }
+                match bytes[i] {
+                    b'[' => {
+                        i += 1;
+                        let param_start = i;
+                        while i < len && !bytes[i].is_ascii_alphabetic() {
+                            i += 1;
+                        }
+                        if i < len {
+                            let command = bytes[i];
+                            let params = &input[param_start..i];
+                            i += 1;
+                            match command {
+                                b'C' => {
+                                    let count = params.parse::<usize>().unwrap_or(1);
+                                    for _ in 0..count {
+                                        result.push(' ');
+                                    }
+                                }
+                                b'B' => {
+                                    let count = params.parse::<usize>().unwrap_or(1);
+                                    for _ in 0..count {
+                                        result.push('\n');
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    b']' => {
+                        i += 1;
+                        while i < len {
+                            if bytes[i] == 0x07 {
+                                i += 1;
+                                break;
+                            }
+                            if bytes[i] == 0x1b && i + 1 < len && bytes[i + 1] == b'\\' {
+                                i += 2;
+                                break;
+                            }
+                            i += 1;
+                        }
+                    }
+                    0x1b => {}
+                    _ => {
+                        i += 1;
+                    }
+                }
+            }
+            b'\r' => {
+                i += 1;
+            }
+            _ => {
+                let byte = bytes[i];
+                if byte >= 0x20 || byte == b'\n' || byte == b'\t' {
+                    if byte < 0x80 {
+                        result.push(byte as char);
+                        i += 1;
+                    } else {
+                        let remaining = &input[i..];
+                        if let Some(ch) = remaining.chars().next() {
+                            result.push(ch);
+                            i += ch.len_utf8();
+                        } else {
+                            i += 1;
+                        }
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+        }
+    }
+
+    result
+}
+
 fn macos_app_support_dir_for_home(home: &Path) -> PathBuf {
     home.join("Library").join("Application Support")
 }
@@ -626,5 +720,31 @@ mod tests {
             DesktopCloudEnvironment::Production.firebase_project_id(),
             "kanna-build"
         );
+    }
+
+    #[test]
+    fn strip_ansi_for_display_removes_color_codes() {
+        assert_eq!(strip_ansi_for_display("\u{1b}[31mused\u{1b}[0m"), "used");
+    }
+
+    #[test]
+    fn strip_ansi_for_display_preserves_cursor_movement_readability() {
+        assert_eq!(
+            strip_ansi_for_display("used\u{1b}[3C42\u{1b}[2Bdone"),
+            "used   42\n\ndone"
+        );
+    }
+
+    #[test]
+    fn strip_ansi_for_display_removes_osc_sequences_and_carriage_returns() {
+        assert_eq!(
+            strip_ansi_for_display("a\u{1b}]0;title\u{7}b\rc\u{1b}]1;ignored\u{1b}\\d"),
+            "abcd"
+        );
+    }
+
+    #[test]
+    fn strip_ansi_for_display_preserves_utf8_and_drops_incomplete_escapes() {
+        assert_eq!(strip_ansi_for_display("✓ café\u{1b}\u{1b}[31"), "✓ café");
     }
 }
