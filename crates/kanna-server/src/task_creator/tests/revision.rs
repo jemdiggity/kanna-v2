@@ -122,13 +122,11 @@ async fn prepared_revision_agent_task_spawn_sends_task_specific_kanna_context() 
             assert!(system_prompt.contains(&format!("task `{task_id}`")));
             assert!(system_prompt.contains("stage `in progress`"));
             assert!(system_prompt.contains("pipeline `qa`"));
-            assert!(system_prompt.contains("transition `auto`"));
-            assert!(system_prompt.contains("instance-local `kanna-mcp` config is available"));
-            assert!(system_prompt.contains("Claude is launched with this config"));
-            assert!(system_prompt.contains("Prefer `kanna-mcp` tools for Kanna task operations"));
-            assert!(system_prompt.contains(
-                "If MCP tools are unavailable, fall back to the instance-local `kanna-cli`"
-            ));
+            assert!(system_prompt.contains("(transition: `auto`)"));
+            assert!(system_prompt.contains("## Kanna Task Environment"));
+            assert!(system_prompt.contains("Prefer the `kanna_*` MCP tools"));
+            assert!(system_prompt
+                .contains("If MCP tools are unavailable, fall back to the `kanna-cli` binary"));
             assert!(system_prompt.contains("kanna-cli guide"));
             assert!(system_prompt.contains("kanna-cli stage-complete"));
             assert!(system_prompt.contains("KANNA_CLI_PATH"));

@@ -64,7 +64,7 @@ fn build_agent_command_adds_claude_kanna_preamble_as_system_prompt() {
         "review",
         "qa",
         Some("auto"),
-        None,
+        Some("/tmp/kanna-mcp.json"),
     );
 
     let command = super::build_agent_command(
@@ -78,22 +78,27 @@ fn build_agent_command_adds_claude_kanna_preamble_as_system_prompt() {
     );
 
     assert!(command.contains("--append-system-prompt '"));
-    assert!(command.contains("task-123"));
-    assert!(command.contains("stage `review`"));
-    assert!(command.contains("pipeline `qa`"));
-    assert!(command.contains("transition `auto`"));
+    assert!(command.contains("## Kanna Task Environment"));
+    assert!(command.contains(
+        "This session was launched by Kanna as task `task-123`, stage `review` of pipeline `qa` (transition: `auto`)."
+    ));
+    assert!(!command.contains("{{TASK_CONTEXT}}"));
+    assert!(!command.contains("{{MCP_STATUS}}"));
+    assert!(command.contains("Claude is launched with this config via `--mcp-config`"));
     assert!(command.contains("kanna-cli guide"));
     assert!(command.contains("You are not running inside a Kanna sandbox"));
     let mcp_index = command
-        .find("Prefer `kanna-mcp` tools for Kanna task operations")
+        .find("Prefer the `kanna_*` MCP tools")
         .expect("preamble should prefer MCP tools");
     let cli_index = command
-        .find("If MCP tools are unavailable, fall back to the instance-local `kanna-cli`")
+        .find("If MCP tools are unavailable, fall back to the `kanna-cli` binary")
         .expect("preamble should describe CLI fallback");
     assert!(mcp_index < cli_index);
     assert!(cli_index < command.find("kanna-cli guide").unwrap());
     assert!(command.contains("KANNA_CLI_PATH"));
     assert!(command.contains("Do not push a branch or create a pull request"));
+    assert!(command.contains("kanna_complete_stage"));
+    assert!(command.contains("kanna-cli stage-complete --task-id \"$KANNA_TASK_ID\""));
 }
 
 #[test]
@@ -118,8 +123,9 @@ fn build_agent_command_launches_antigravity_with_prepended_kanna_context() {
     );
 
     assert!(command.starts_with("agy --dangerously-skip-permissions --prompt-interactive '"));
-    assert!(command.contains("## Kanna Task Context"));
-    assert!(command.contains("task-123"));
+    assert!(command.contains("## Kanna Task Environment"));
+    assert!(command.contains("task `task-123`"));
+    assert!(!command.contains("{{MCP_STATUS}}"));
     assert!(command.contains("Ship the task."));
 }
 
@@ -243,7 +249,7 @@ fn build_kanna_preamble_names_automatic_and_fallback_mcp_providers() {
         Some("/tmp/kanna-mcp.json"),
     );
     assert!(antigravity.contains("Antigravity CLI MCP registration is not wired"));
-    assert!(antigravity.contains("fall back to the instance-local `kanna-cli`"));
+    assert!(antigravity.contains("use the `kanna-cli` fallback for Kanna task operations"));
 }
 
 #[test]

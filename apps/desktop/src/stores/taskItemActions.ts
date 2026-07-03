@@ -215,7 +215,11 @@ export function createTaskItemActions(
             prompt,
             env: agentEnv,
             agentProvider,
-            systemPrompt: buildKannaRuntimeSystemPrompt(),
+            systemPrompt: buildKannaRuntimeSystemPrompt({
+              taskId: id,
+              provider: agentProvider,
+              mcpConfigured: !!mcpConfigPath,
+            }),
             mcpConfigPath: mcpConfigPath ?? null,
             permissionMode: opts?.customTask?.permissionMode ?? opts?.permissionMode ?? null,
             model: resolvedModel,
