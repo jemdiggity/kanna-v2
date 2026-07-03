@@ -8,7 +8,7 @@ pub(super) fn find_sidecar(name: &str) -> Result<PathBuf, String> {
         let suffixed = dir.join(format!(
             "{}-{}",
             name,
-            crate::commands::fs::current_target_triple()
+            kanna_runtime_defaults::current_target_triple()
         ));
         if suffixed.exists() {
             return Ok(suffixed);
@@ -19,13 +19,12 @@ pub(super) fn find_sidecar(name: &str) -> Result<PathBuf, String> {
         }
     }
 
-    for candidate in crate::commands::fs::sidecar_candidates(name) {
-        if candidate.exists() {
-            return Ok(candidate);
-        }
-    }
-
-    Err(format!("mobile sidecar '{}' not found", name))
+    kanna_runtime_defaults::resolve_binary_from_candidates(
+        name,
+        crate::commands::fs::sidecar_candidates(name),
+        |_| Err(format!("mobile sidecar '{}' not found", name)),
+    )
+    .map(PathBuf::from)
 }
 
 pub(super) async fn stop_server_on_port(port: u16) -> Result<(), String> {

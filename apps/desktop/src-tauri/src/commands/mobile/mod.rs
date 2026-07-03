@@ -1475,6 +1475,12 @@ mod tests {
             );
             CREATE INDEX idx_stage_run_task_started ON stage_run(task_id, started_at);
 
+            CREATE TABLE task_blocker (
+                blocked_item_id TEXT NOT NULL,
+                blocker_item_id TEXT NOT NULL,
+                PRIMARY KEY (blocked_item_id, blocker_item_id)
+            );
+
             CREATE TABLE settings (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -1495,12 +1501,6 @@ mod tests {
                 port INTEGER NOT NULL,
                 PRIMARY KEY (pipeline_item_id, env_name),
                 UNIQUE (port)
-            );
-
-            CREATE TABLE task_blocker (
-                blocked_item_id TEXT NOT NULL,
-                blocker_item_id TEXT NOT NULL,
-                PRIMARY KEY (blocked_item_id, blocker_item_id)
             );
             "#,
         )
@@ -1529,13 +1529,7 @@ mod tests {
     }
 
     fn daemon_socket_path_for_dir(daemon_dir: &std::path::Path) -> PathBuf {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        let mut hasher = DefaultHasher::new();
-        daemon_dir.hash(&mut hasher);
-        let hash = hasher.finish() as u32;
-        PathBuf::from(format!("/tmp/kanna-{hash:08x}.sock"))
+        kanna_runtime_defaults::socket_path(daemon_dir)
     }
 
     async fn spawn_one_task_create_daemon(
@@ -1754,7 +1748,7 @@ mod tests {
             manifest_dir.join("binaries"),
             repo_root
                 .join(".build")
-                .join(crate::commands::fs::current_target_triple())
+                .join(kanna_runtime_defaults::current_target_triple())
                 .join("debug"),
             repo_root.join(".build").join("debug"),
         ]
@@ -1762,7 +1756,7 @@ mod tests {
         .find(|dir| {
             dir.join(format!(
                 "kanna-server-{}",
-                crate::commands::fs::current_target_triple()
+                kanna_runtime_defaults::current_target_triple()
             ))
             .is_file()
                 || dir.join("kanna-server").is_file()
@@ -1773,7 +1767,7 @@ mod tests {
         let dir = test_sidecar_dir()?;
         let suffixed = dir.join(format!(
             "kanna-server-{}",
-            crate::commands::fs::current_target_triple()
+            kanna_runtime_defaults::current_target_triple()
         ));
         if suffixed.is_file() {
             return Some(suffixed);

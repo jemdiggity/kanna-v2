@@ -29,101 +29,39 @@ pub async fn get_claude_usage() -> Result<String, String> {
             ));
         }
 
-        Ok(strip_ansi_usage(&raw))
+        Ok(kanna_runtime_defaults::strip_ansi_for_display(&raw))
     })
     .await
     .map_err(|e| format!("task join error: {e}"))?
 }
 
-/// Strip ANSI escape sequences from terminal output.
-///
-/// Converts CSI cursor-forward (`[<n>C`) to spaces and cursor-down (`[<n>B`)
-/// to newlines so the result is roughly readable. All other escape sequences
-/// (colors, cursor positioning, etc.) are discarded.
-fn strip_ansi_usage(input: &str) -> String {
-    let mut result = String::with_capacity(input.len());
-    let bytes = input.as_bytes();
-    let len = bytes.len();
-    let mut i = 0;
+#[cfg(test)]
+mod tests {
+    use kanna_runtime_defaults::strip_ansi_for_display;
 
-    while i < len {
-        match bytes[i] {
-            0x1b => {
-                i += 1;
-                if i >= len {
-                    break;
-                }
-                match bytes[i] {
-                    b'[' => {
-                        i += 1;
-                        let param_start = i;
-                        while i < len && !bytes[i].is_ascii_alphabetic() {
-                            i += 1;
-                        }
-                        if i < len {
-                            let cmd = bytes[i];
-                            let params = &input[param_start..i];
-                            i += 1;
-                            match cmd {
-                                b'C' => {
-                                    let n: usize = params.parse().unwrap_or(1);
-                                    for _ in 0..n {
-                                        result.push(' ');
-                                    }
-                                }
-                                b'B' => {
-                                    let n: usize = params.parse().unwrap_or(1);
-                                    for _ in 0..n {
-                                        result.push('\n');
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                    b']' => {
-                        i += 1;
-                        while i < len {
-                            if bytes[i] == 0x07 {
-                                i += 1;
-                                break;
-                            }
-                            if bytes[i] == 0x1b && i + 1 < len && bytes[i + 1] == b'\\' {
-                                i += 2;
-                                break;
-                            }
-                            i += 1;
-                        }
-                    }
-                    _ => {
-                        i += 1;
-                    }
-                }
-            }
-            b'\r' => {
-                i += 1;
-            }
-            _ => {
-                let byte = bytes[i];
-                if byte >= 0x20 || byte == b'\n' || byte == b'\t' {
-                    if byte < 0x80 {
-                        result.push(byte as char);
-                        i += 1;
-                    } else {
-                        let remaining = &input[i..];
-                        if let Some(ch) = remaining.chars().next() {
-                            result.push(ch);
-                            i += ch.len_utf8();
-                        } else {
-                            i += 1;
-                        }
-                    }
-                } else {
-                    i += 1;
-                }
-            }
-        }
+    #[test]
+    fn strip_ansi_usage_removes_color_codes() {
+        assert_eq!(strip_ansi_for_display("\u{1b}[31mused\u{1b}[0m"), "used");
     }
 
-    result
+    #[test]
+    fn strip_ansi_usage_preserves_cursor_movement_readability() {
+        assert_eq!(
+            strip_ansi_for_display("used\u{1b}[3C42\u{1b}[2Bdone"),
+            "used   42\n\ndone"
+        );
+    }
+
+    #[test]
+    fn strip_ansi_usage_removes_osc_sequences_and_carriage_returns() {
+        assert_eq!(
+            strip_ansi_for_display("a\u{1b}]0;title\u{7}b\rc\u{1b}]1;ignored\u{1b}\\d"),
+            "abcd"
+        );
+    }
+
+    #[test]
+    fn strip_ansi_usage_preserves_utf8_and_drops_incomplete_escapes() {
+        assert_eq!(strip_ansi_for_display("✓ café\u{1b}\u{1b}[31"), "✓ café");
+    }
 }

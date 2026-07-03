@@ -9,6 +9,7 @@ import { useDiffSearch, type DiffSearchBarHandle } from "../composables/useDiffS
 import { useDiffBranchBaseRef } from "../composables/useDiffBranchBaseRef";
 import { getDiffTheme } from "../theme/theme";
 import { useThemeRuntime } from "../theme/runtime";
+import { debugLog } from "../utils/debugLog";
 import DiffContentPane from "./DiffContentPane.vue";
 import DiffToolbar from "./DiffToolbar.vue";
 import DiffSearchBar from "./DiffSearchBar.vue";
@@ -152,7 +153,7 @@ function logDiffPerf(
   stage: string,
   details: Record<string, unknown>,
 ) {
-  console.warn(`[DiffView][perf] load#${loadId} ${stage}`, details);
+  debugLog(`[DiffView][perf] load#${loadId} ${stage}`, details);
 }
 
 function cloneScrollPositions(positions?: DiffScrollPositions): DiffScrollPositions {

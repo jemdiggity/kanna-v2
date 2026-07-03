@@ -36,15 +36,6 @@ pub(crate) fn daemon_data_dir() -> PathBuf {
     app_support_dir()
 }
 
-pub(crate) fn socket_path(dir: &PathBuf) -> PathBuf {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    dir.hash(&mut hasher);
-    let hash = hasher.finish() as u32;
-    PathBuf::from(format!("/tmp/kanna-{:08x}.sock", hash))
-}
-
 pub(crate) fn panic_log_path(dir: &Path, pid: u32, timestamp_secs: u64) -> PathBuf {
     dir.join(format!("kanna-daemon-panic_{pid}_{timestamp_secs}.log"))
 }
