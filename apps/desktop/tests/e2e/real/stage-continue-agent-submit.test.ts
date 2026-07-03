@@ -69,7 +69,7 @@ async function readTaskRow(
   return row;
 }
 
-describe("real continue-stage agent submission", () => {
+describe("real post injection into a live agent session", () => {
   const client = new WebDriverClient();
   const pipelineName = "real-continue-submit";
   let repoId = "";
@@ -88,18 +88,25 @@ describe("real continue-stage agent submission", () => {
     const kannaDir = join(testRepoPath, ".kanna");
     await mkdir(join(kannaDir, "pipelines"), { recursive: true });
     await mkdir(join(kannaDir, "agents", "commit-real"), { recursive: true });
+    // The commit work is a POST of `in progress`: advancing injects this
+    // prompt into the LIVE agent session (same worktree, same process)
+    // rather than spawning a fresh agent. The trailing `holding` stage gives
+    // the post's success somewhere to transition to.
     await writeFile(
       join(kannaDir, "pipelines", `${pipelineName}.json`),
       JSON.stringify({
         name: pipelineName,
         stages: [
-          { name: "in progress", policy: { transition: "manual" } },
           {
-            name: "commit",
-            agent: "commit-real",
-            prompt: "Create a file named continue-stage-real-submit.txt in the current directory containing exactly the text submitted with no punctuation. Then run: kanna-cli stage-complete --task-id \"$KANNA_TASK_ID\" --status success --summary 'continue submitted'. Do not wait for any additional input.",
-            policy: { transition: "auto" },
+            name: "in progress",
+            policy: { transition: "manual" },
+            post: {
+              name: "commit",
+              agent: "commit-real",
+              prompt: "Create a file named continue-stage-real-submit.txt in the current directory containing exactly the text submitted with no punctuation. Then run: kanna-cli stage-complete --task-id \"$KANNA_TASK_ID\" --status success --summary 'continue submitted'. Do not wait for any additional input.",
+            },
           },
+          { name: "holding", policy: { transition: "manual" } },
         ],
       }),
     );
@@ -128,7 +135,7 @@ describe("real continue-stage agent submission", () => {
     await client.deleteSession();
   });
 
-  it("advances a live real agent into the commit stage in place and executes the stage prompt", async () => {
+  it("injects the commit post into the live agent session and executes it in place", async () => {
     const initialPrompt = process.env.KANNA_E2E_REAL_AGENT_PROVIDER === "codex"
       ? "Create a file named continue-stage-initial.txt in the current directory containing exactly: ready. Then stop."
       : "";
@@ -172,21 +179,33 @@ describe("real continue-stage agent submission", () => {
     );
     await hydrateStoreItem(client, taskId);
 
-    // Durable model: advancing accepts the current stage's work and swaps the
-    // commit stage's agent session into the SAME task and worktree, passing
-    // the stage prompt directly to the fresh agent session.
+    // Posts continue the session: advancing injects the commit prompt into
+    // the LIVE agent (no respawn, no fork), which writes the marker in the
+    // task's current worktree and records completion. The post's success
+    // then performs the transition to `holding`.
     await pressAdvanceStageShortcut(client);
 
     const markerPath = join(worktreePath, "continue-stage-real-submit.txt");
     await waitForFile(markerPath, 180_000, 1_000);
     expect((await readFile(markerPath, "utf8")).trimEnd()).toBe("submitted");
 
+    const runRows = (await queryDb(
+      client,
+      "SELECT kind, stage, status FROM stage_run WHERE task_id = ? AND kind = 'post'",
+      [taskId],
+    )) as Array<{ kind: string | null; stage: string | null; status: string | null }>;
+    expect(runRows.length).toBeGreaterThanOrEqual(1);
+    expect(runRows[0]?.stage).toBe("commit");
+
     const stageRows = (await queryDb(
       client,
       "SELECT stage, closed_at FROM pipeline_item WHERE id = ?",
       [taskId],
     )) as Array<{ stage: string | null; closed_at: string | null }>;
-    expect(stageRows[0]?.stage).toBe("commit");
+    // The marker is written before the agent's stage-complete lands, so the
+    // task is either still in the post ("in progress") or already
+    // transitioned to "holding"; it is never closed.
+    expect(["in progress", "holding"]).toContain(stageRows[0]?.stage);
     expect(stageRows[0]?.closed_at).toBeNull();
 
     expect(["codex", "claude", "copilot", "opencode", "antigravity"]).toContain(initialRow.agent_provider);

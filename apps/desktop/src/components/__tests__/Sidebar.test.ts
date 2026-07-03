@@ -192,6 +192,20 @@ describe("Sidebar", () => {
     expect(wrapper.text()).not.toContain("commit");
   });
 
+  it("renders a transition-in-flight prefix while a post is running", () => {
+    const wrapper = mountSidebar([
+      item("task-1", {
+        display_name: "Commit generated changes",
+        stage: "in progress",
+        has_running_post: 1,
+      }),
+    ]);
+
+    const title = wrapper.get(".pipeline-item .item-title");
+    expect(title.text()).toBe("... Commit generated changes");
+    expect(title.attributes("title")).toBe("... Commit generated changes");
+  });
+
   it("renders pinned task titles without retired post-action prefixes", () => {
     const wrapper = mountSidebar([
       item("task-1", {
@@ -203,6 +217,21 @@ describe("Sidebar", () => {
 
     expect(wrapper.text()).toContain("Pinned task");
     expect(wrapper.text()).not.toContain("... Pinned task");
+  });
+
+  it("renders the transition-in-flight prefix for pinned tasks while a post is running", () => {
+    const wrapper = mountSidebar([
+      item("task-1", {
+        display_name: "Pinned post task",
+        pinned: 1,
+        pin_order: 0,
+        has_running_post: 1,
+      }),
+    ]);
+
+    const title = wrapper.get(".pinned-zone .pipeline-item .item-title");
+    expect(title.text()).toBe("... Pinned post task");
+    expect(title.attributes("title")).toBe("... Pinned post task");
   });
 
   it("renders a subtask nested beneath its parent instead of in its own stage section", () => {

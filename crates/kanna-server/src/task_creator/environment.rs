@@ -223,6 +223,50 @@ fn which_binary_with_path(
     resolve_binary_from_candidates(name, sidecar_candidates(name), path).map(Some)
 }
 
+/// The user's real PATH as an interactive login shell resolves it, captured
+/// ONCE per process. Loading zshrc costs seconds; it used to run per binary
+/// lookup on the stage-advance request path, which is where the multi-second
+/// ⌘S-to-prompt lag came from. The PATH cannot change for the lifetime of
+/// this process, so one capture serves every lookup. `warm_login_shell_path`
+/// pays the one-time cost at server startup, off the request path.
+fn login_shell_path() -> Option<&'static str> {
+    static LOGIN_SHELL_PATH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    LOGIN_SHELL_PATH
+        .get_or_init(|| {
+            let output = Command::new("/bin/zsh")
+                .args(["--login", "-i", "-c", "printf %s \"$PATH\""])
+                .output()
+                .ok()?;
+            if !output.status.success() {
+                return None;
+            }
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if path.is_empty() {
+                None
+            } else {
+                Some(path)
+            }
+        })
+        .as_deref()
+}
+
+pub(crate) fn warm_login_shell_path() {
+    let _ = login_shell_path();
+}
+
+/// Cheap binary availability check against the process PATH plus the cached
+/// login-shell PATH — never a per-call login shell.
+pub(super) fn binary_on_path(name: &str) -> bool {
+    if let Ok(process_path) = std::env::var("PATH") {
+        if resolve_binary_from_path(name, &process_path).is_some() {
+            return true;
+        }
+    }
+    login_shell_path()
+        .map(|path| resolve_binary_from_path(name, path).is_some())
+        .unwrap_or(false)
+}
+
 fn resolve_binary_from_candidates(
     name: &str,
     candidates: Vec<PathBuf>,
@@ -234,15 +278,17 @@ fn resolve_binary_from_candidates(
                 .ok_or_else(|| format!("binary '{}' not found in PATH", name));
         }
 
-        let output = Command::new("/bin/zsh")
-            .args(["--login", "-i", "-c", &format!("command -v {}", name)])
-            .output()
-            .map_err(|e| format!("failed to locate {}: {}", name, e))?;
-
-        if output.status.success() {
-            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !path.is_empty() {
-                return Ok(path);
+        // The process PATH first (cheap, and correct when launched from a
+        // terminal), then the captured login-shell PATH (Spotlight-launched
+        // apps inherit a minimal PATH).
+        if let Ok(process_path) = std::env::var("PATH") {
+            if let Some(binary) = resolve_binary_from_path(name, &process_path) {
+                return Ok(binary);
+            }
+        }
+        if let Some(login_path) = login_shell_path() {
+            if let Some(binary) = resolve_binary_from_path(name, login_path) {
+                return Ok(binary);
             }
         }
 

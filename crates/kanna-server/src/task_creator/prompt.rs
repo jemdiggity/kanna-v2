@@ -11,19 +11,25 @@ pub(super) fn build_target_stage_prompt(
 ) -> Result<String, String> {
     let source_worktree =
         source_worktree_branch.map(|branch| format!("{repo_path}/.kanna-worktrees/{branch}"));
+    let context = PromptContext {
+        task_prompt: Some(task_prompt),
+        prev_result,
+        branch,
+        base_ref,
+        source_worktree: source_worktree.as_deref(),
+    };
     if let Some(agent_name) = stage.agent.as_deref() {
         let agent = read_agent_definition(repo_path, agent_name)?;
         return Ok(build_stage_prompt(
             &agent.prompt,
             stage.prompt.as_deref(),
-            &PromptContext {
-                task_prompt: Some(task_prompt),
-                prev_result,
-                branch,
-                base_ref,
-                source_worktree: source_worktree.as_deref(),
-            },
+            &context,
         ));
+    }
+    // An agent-less stage (or post) still owns its prompt; only when it
+    // declares none does the task's own prompt carry over.
+    if stage.prompt.is_some() {
+        return Ok(build_stage_prompt("", stage.prompt.as_deref(), &context));
     }
 
     Ok(task_prompt.to_string())

@@ -634,9 +634,18 @@ mod tests {
 
     #[test]
     fn image_mime_type_accepts_supported_extensions_case_insensitively() {
-        assert_eq!(image_mime_type_for_path("/tmp/screenshot.PNG"), Some("image/png"));
-        assert_eq!(image_mime_type_for_path("/tmp/photo.jpeg"), Some("image/jpeg"));
-        assert_eq!(image_mime_type_for_path("/tmp/diagram.svg"), Some("image/svg+xml"));
+        assert_eq!(
+            image_mime_type_for_path("/tmp/screenshot.PNG"),
+            Some("image/png")
+        );
+        assert_eq!(
+            image_mime_type_for_path("/tmp/photo.jpeg"),
+            Some("image/jpeg")
+        );
+        assert_eq!(
+            image_mime_type_for_path("/tmp/diagram.svg"),
+            Some("image/svg+xml")
+        );
     }
 
     #[test]

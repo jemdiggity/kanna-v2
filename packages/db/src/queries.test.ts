@@ -47,6 +47,7 @@ import type {
   PipelineItem,
   Setting,
   OperatorEvent,
+  StageRun,
   TaskBlocker,
   TaskPort,
   TerminalSession,
@@ -64,6 +65,7 @@ function createMockDb(): DbHandle & {
   tables: {
     repo: Repo[];
     pipeline_item: PipelineItem[];
+    stage_run: StageRun[];
     task_blocker: TaskBlocker[];
     task_port: TaskPort[];
     terminal_session: TerminalSession[];
@@ -81,6 +83,7 @@ function createMockDb(): DbHandle & {
   const tables = {
     repo: [] as Repo[],
     pipeline_item: [] as PipelineItem[],
+    stage_run: [] as StageRun[],
     task_blocker: [] as TaskBlocker[],
     task_port: [] as TaskPort[],
     terminal_session: [] as TerminalSession[],
@@ -424,6 +427,18 @@ function createMockDb(): DbHandle & {
             new Date(a.created_at).getTime() -
               new Date(b.created_at).getTime()
         ) as unknown as T[];
+      } else if (q.startsWith("SELECT PIPELINE_ITEM.*") && q.includes("HAS_RUNNING_POST")) {
+        const [repoId] = bindValues as string[];
+        return tables.pipeline_item
+          .filter((p) => p.repo_id === repoId && p.closed_at === null)
+          .map((p) => ({
+            ...p,
+            has_running_post: tables.stage_run.some(
+              (run) => run.task_id === p.id && run.kind === "post" && run.status === "running",
+            )
+              ? 1
+              : 0,
+          })) as unknown as T[];
       } else if (q.startsWith("SELECT * FROM PIPELINE_ITEM WHERE REPO_ID") && q.includes("CLOSED_AT IS NULL")) {
         const [repoId] = bindValues as string[];
         return tables.pipeline_item.filter(
@@ -707,6 +722,93 @@ describe("pipeline_item queries", () => {
     const items = await listPipelineItems(db, "r1");
     expect(items).toHaveLength(1);
     expect(items[0].pipeline_def).toBeNull();
+  });
+
+  it("listPipelineItems derives has_running_post from running post stage runs only", async () => {
+    const baseItem = {
+      repo_id: "r1",
+      issue_number: null,
+      issue_title: null,
+      pr_number: null,
+      pr_url: null,
+      branch: null,
+      agent_type: null,
+      agent_provider: "claude" as const,
+      activity: "idle" as const,
+      port_offset: null,
+      port_env: null,
+    };
+    await insertPipelineItem(db, {
+      ...baseItem,
+      id: "running-post-task",
+      prompt: "running post",
+    });
+    await insertPipelineItem(db, {
+      ...baseItem,
+      id: "running-main-task",
+      prompt: "running main",
+    });
+    await insertPipelineItem(db, {
+      ...baseItem,
+      id: "finished-post-task",
+      prompt: "finished post",
+    });
+
+    db.tables.stage_run.push(
+      {
+        id: "run-post-running",
+        task_id: "running-post-task",
+        stage: "commit",
+        kind: "post",
+        agent: "commit",
+        agent_provider: "claude",
+        model: null,
+        status: "running",
+        result: null,
+        feedback: null,
+        session_id: "session-1",
+        started_at: "2026-01-01T00:00:00.000Z",
+        finished_at: null,
+      },
+      {
+        id: "run-main-running",
+        task_id: "running-main-task",
+        stage: "in progress",
+        kind: "main",
+        agent: "codex",
+        agent_provider: "claude",
+        model: null,
+        status: "running",
+        result: null,
+        feedback: null,
+        session_id: "session-2",
+        started_at: "2026-01-01T00:00:00.000Z",
+        finished_at: null,
+      },
+      {
+        id: "run-post-finished",
+        task_id: "finished-post-task",
+        stage: "commit",
+        kind: "post",
+        agent: "commit",
+        agent_provider: "claude",
+        model: null,
+        status: "succeeded",
+        result: "success",
+        feedback: null,
+        session_id: "session-3",
+        started_at: "2026-01-01T00:00:00.000Z",
+        finished_at: "2026-01-01T00:01:00.000Z",
+      },
+    );
+
+    const items = await listPipelineItems(db, "r1");
+
+    expect(Object.fromEntries(items.map((item) => [item.id, item.has_running_post]))).toEqual({
+      "running-post-task": 1,
+      "running-main-task": 0,
+      "finished-post-task": 0,
+    });
   });
 
   it("insertPipelineItem persists parent_task_id and updatePipelineItemParent sets/clears it", async () => {

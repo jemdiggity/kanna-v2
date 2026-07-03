@@ -1,27 +1,34 @@
 /**
  * Stage advance E2E — durable task semantics.
  *
- * Stage transitions happen IN PLACE on the same pipeline_item: the task keeps
- * its id, branch, and worktree while the next stage's agent session replaces
- * the current one (kanna-server owns the transition). Advancing past the
- * final stage closes the task (closed_at is the sole done indicator — stage
- * is never rewritten to a "done" sentinel). Revisions rerun an earlier stage
- * on the same task.
+ * Stage transitions happen on the same pipeline_item: the task keeps its id
+ * while each transition FORKS a fresh workspace — a new randomly-named
+ * branch and worktree created from the previous branch's committed tip
+ * (N worktrees, N branches, one PR; the PR agent renames the final branch).
+ * Only committed work crosses a stage boundary; the previous worktree stays
+ * on disk until cleanup. Posts and reruns keep the current workspace.
+ * Advancing past the final stage closes the task (closed_at is the sole done
+ * indicator — stage is never rewritten to a "done" sentinel). Revisions
+ * rerun an earlier stage on the same task in a fresh fork.
  *
  * Coverage that was deleted with the old close-and-recreate model, and why:
  * - "spawns a next-stage task / baseRef checks on a created task": advancing
  *   no longer creates tasks, so there is nothing to spawn or focus-steal.
  *   The durable counterparts below assert the SAME task id advances and that
  *   selection is only adjusted when the advanced task actually closes.
- * - "creates the next stage task from the renamed source branch": stage runs
- *   continue in the source worktree itself, so no branch is resolved to
- *   create anything.
  * - post-action carriage-return tests (claude/codex/copilot input capture):
- *   `post_action` no longer exists as a separate mechanism — it normalized
- *   into a `continue`-execution stage whose agent is spawned as a fresh
- *   session rather than typed into the live terminal. Prompt delivery to the
- *   in-place stage agent is covered by the request-revision test's fake
- *   `codex` argument capture.
+ *   `post_action` compiles into a stage `post` — tail work injected into the
+ *   stage's RUNNING agent session on advance (stages swap sessions; posts
+ *   continue them). The exact two-write input submission (message, then a
+ *   discrete Enter) and the dead-session fallback spawn are covered at the
+ *   server boundary by
+ *   crates/kanna-server/src/task_creator/tests/stage.rs
+ *   (dispatch_post_injects_message_into_live_session_and_records_post_run,
+ *   dispatch_post_falls_back_to_fresh_session_when_session_is_dead) with a
+ *   fake daemon asserting the exact Input/Spawn commands. A full desktop
+ *   E2E of post injection would need a deterministic live agent session to
+ *   type into under the WebDriver harness; the fixtures here use post-less
+ *   pipelines so swaps stay deterministic.
  * - "closes the source task after a fast teardown exit during stage
  *   advance": advancing never closes the source mid-pipeline anymore; the
  *   final-stage test covers the one remaining close path.
@@ -417,17 +424,21 @@ describe("stage advance", () => {
       expect(await response.json()).toEqual({ taskId });
     });
 
-    // The SAME pipeline_item transitions in place: same id, same branch,
-    // still open, and no next-stage task was created.
+    // The SAME pipeline_item transitions: same id, still open, no
+    // next-stage task created — but the workspace forked: a fresh
+    // randomly-named branch cut from the previous branch's committed tip.
     const row = await waitForTaskRow(client, taskId, (candidate) => candidate.stage === "pr");
     expect(row).toMatchObject({
       id: taskId,
       stage: "pr",
       closed_at: null,
-      branch,
       agent_type: "pty",
       agent_provider: "codex",
     });
+    expect(row.branch).not.toBe(branch);
+    expect(row.branch).toMatch(/^task-[0-9a-f]{8}$/);
+    const forkWorktree = join(testRepoPath, ".kanna-worktrees", row.branch as string);
+    expect((await stat(forkWorktree)).isDirectory()).toBe(true);
     expect(await countRepoTasks(client, repoId)).toBe(taskCountBefore);
 
     const runs = await getStageRuns(client, taskId);
@@ -567,7 +578,9 @@ describe("stage advance", () => {
     });
 
     const row = await waitForTaskRow(client, sourceTaskId, (candidate) => candidate.stage === "review");
-    expect(row).toMatchObject({ id: sourceTaskId, closed_at: null, branch: sourceBranch });
+    expect(row).toMatchObject({ id: sourceTaskId, closed_at: null });
+    expect(row.branch).not.toBe(sourceBranch);
+    expect(row.branch).toMatch(/^task-[0-9a-f]{8}$/);
 
     const runs = await getStageRuns(client, sourceTaskId);
     const seededRun = runs.find((run) => run.id === "run-auto-complete-source-seed");
@@ -625,7 +638,6 @@ describe("stage advance", () => {
     const originalTitle = "Preserve reviewed task title";
     const reviewPrompt = "Original prompt that must stay on the task.";
     const revisionPrompt = "Add E2E coverage for the request-revision path.";
-    const worktreePath = join(testRepoPath, ".kanna-worktrees", branch);
     await addTaskWorktree(taskId, branch);
     await insertTask({
       id: taskId,
@@ -663,10 +675,12 @@ describe("stage advance", () => {
       id: taskId,
       stage: "in progress",
       closed_at: null,
-      branch,
       display_name: originalTitle,
       prompt: reviewPrompt,
     });
+    // The revision forked a fresh workspace from the reviewed branch's tip.
+    expect(row.branch).not.toBe(branch);
+    expect(row.branch).toMatch(/^task-[0-9a-f]{8}$/);
 
     const runs = await getStageRuns(client, taskId);
     const seededRun = runs.find((run) => run.id === seedRunId);
@@ -674,9 +688,16 @@ describe("stage advance", () => {
     const revisionRun = runs.find((run) => run.stage === "in progress");
     expect(revisionRun).toMatchObject({ status: "running", feedback: revisionPrompt });
 
-    // The revision agent runs inside the task's existing worktree: the fake
-    // `codex` on the stage environment PATH records its argv there.
-    const capturedArgsPath = join(worktreePath, ".kanna", "revision-codex-args.txt");
+    // The revision agent runs inside the freshly forked worktree: the fake
+    // `codex` (committed into the repo, so present in the fork's checkout)
+    // records its argv there.
+    const capturedArgsPath = join(
+      testRepoPath,
+      ".kanna-worktrees",
+      row.branch as string,
+      ".kanna",
+      "revision-codex-args.txt",
+    );
     await waitForFile(capturedArgsPath, 20_000);
     const capturedArgs = await readFile(capturedArgsPath, "utf8");
     expect(capturedArgs).toContain("--yolo\n");

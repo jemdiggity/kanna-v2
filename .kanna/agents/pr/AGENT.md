@@ -47,4 +47,10 @@ You are in a worktree branched from the task branch. Your job is to create a Git
 
    Write a clear title and description summarizing the changes.
 
+6. **Report completion with the PR URL** so Kanna can link it on the task. Prefer MCP `kanna_complete_stage` with the URL in metadata:
+
+   `kanna_complete_stage` with `status: "success"`, a short summary, and `metadata: {"pr_url": "<the PR URL>"}`.
+
+   Fallback: `kanna-cli stage-complete --task-id "$KANNA_TASK_ID" --status success --summary "Created PR <the PR URL>" --metadata '{"pr_url": "<the PR URL>"}'`. Always include the full PR URL in the summary as well.
+
 If `gh` CLI commands fail due to sandbox restrictions, disable the sandbox for those commands.

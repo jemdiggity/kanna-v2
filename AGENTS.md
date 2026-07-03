@@ -13,7 +13,7 @@ Kanna is a product distributed to end users as a signed macOS app. All dependenc
 ### Core concepts
 
 - **Task** — A unit of work. Has a prompt, a git worktree, a Claude agent session, and a lifecycle stage. One task = one branch = one PR.
-- **Pipeline** — User-definable agentic pipeline: an ordered list of stages, each with an agent, an optional environment, and a stage policy. Defined in `.kanna/pipelines/*.json`. Default: `in progress → commit → pr`. Advancing follows the next stage policy: continue stages reuse the current task/worktree/session, while other stages create a next-stage task in a new worktree and close the source after successful spawn.
+- **Pipeline** — User-definable agentic pipeline: an ordered list of stages, each with an agent, an optional environment, a stage policy, and an optional post. Defined in `.kanna/pipelines/*.json`. Default: `in progress` (post: `commit`) `→ review → pr`. Tasks are durable (same id, run history, blockers), but each stage transition forks a fresh workspace: a new randomly-named branch + worktree cut from the previous branch's committed tip — N worktrees, N branches, one PR (the PR agent renames the final branch into something meaningful). A stage's `post` (e.g. commit) is tail work injected into the stage's running agent session before the transition — stages fork workspaces and swap sessions, posts continue them. Only committed work crosses a stage boundary; old worktrees stay on disk until cleanup. Advancing past the final stage closes the task.
 - **Daemon** — Standalone process that manages PTY sessions. Survives app restarts. Handles seamless upgrades via fd handoff.
 
 ### Workflows
@@ -29,8 +29,8 @@ Kanna is a product distributed to end users as a signed macOS app. All dependenc
 1. Agent finishes → task marked as unread (bold in sidebar)
 2. User selects task, presses Cmd+D → diff modal shows all branch changes
 3. Optionally Cmd+P → file picker → preview, Cmd+O → open in IDE, or Cmd+J → shell in worktree
-4. Cmd+S → create GitHub PR, task moves to `pr`
-5. Cmd+M → merge PR, task moves to `merge`
+4. Cmd+S → advance the pipeline (commit post runs in-session; the pr-stage agent creates the GitHub PR and reports its URL)
+5. Human reviews the PR, then the merge agent merges it (MCP `run_merge_agent` / kanna-cli — there is no merge keyboard shortcut)
 
 **Manual intervention:**
 1. Cmd+J → shell modal opens in the task's worktree
@@ -101,7 +101,6 @@ Do not read or write the SQLite database directly for orchestration. Use `kanna-
 | ⌘P | File picker |
 | ⌘O | Open in IDE |
 | ⌘S | Make PR |
-| ⇧⌘M | Merge PR |
 | ⇧⌘Delete | Close task |
 | ⌘Z | Undo close |
 | ⌘Opt+Up/Down | Navigate tasks |
@@ -621,5 +620,5 @@ Single `VERSION` file is the source of truth for packaged app versioning. `kd re
 - The event bridge auto-reconnects to daemon with exponential backoff — don't add manual retry logic on top.
 - KeepAlive is used for ShellModal to preserve xterm buffer across task switches — use `v-show` not `v-if` for terminal-containing components.
 - `agent_next_message` uses a polling pattern — frontend calls it repeatedly to drain the buffered message queue from the background drainer task.
-- Stage advance follows the next stage's policy. `policy.execution: "continue"` updates the current task's `stage`, keeps the same worktree/branch/session, and sends the stage prompt to the running agent. Stages without continue execution create a next-stage task/worktree/session; the source task is closed only after that spawn succeeds. The next stage prompt can reference the previous task's branch via `$BRANCH`.
+- Stage advance is durable on the task but forks the workspace. If the current stage declares a `post`, advancing (⌘S or an auto main-run success) injects the post prompt into the running agent session (`stage_run` row with `kind: "post"`; the task's stage and workspace do not change); when that post run completes with success, the engine performs the transition. A transition kills the task's daemon session (and the stale worktree shell), forks a new branch + worktree from the current branch's committed tip, respawns the same session id with the next stage's agent there, and moves `pipeline_item.stage`/`branch` — no new task is ever created; advancing past the final stage closes the task. Reruns keep the current workspace; a dead-session post falls back to spawning its `agent` binding in the current workspace. Legacy `post_action` and `policy.execution: "continue"` pipeline JSON (including pinned `pipeline_def` snapshots) compiles into stage posts at load time. `$BRANCH` in a stage prompt resolves to the freshly forked branch; `$SOURCE_WORKTREE` points at the previous stage's worktree.
 - Built-in agent/pipeline definitions must ship as Tauri bundled resources, not as TypeScript string constants. Definitions live in `.kanna/` files — the app reads them at runtime via the resource directory fallback.

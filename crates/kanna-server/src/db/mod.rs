@@ -15,6 +15,9 @@ mod test_support;
 mod tests;
 mod worktrees;
 
+#[allow(unused_imports)]
+pub use stage_runs::FinishedStageRun;
+
 const SQLITE_BUSY_TIMEOUT_MS: u64 = 10_000;
 const SQLITE_WAL_AUTOCHECKPOINT_PAGES: i64 = 100;
 
@@ -109,6 +112,7 @@ pub struct StageRun {
     pub id: String,
     pub task_id: String,
     pub stage: String,
+    pub kind: String,
     pub agent: Option<String>,
     pub agent_provider: Option<String>,
     pub model: Option<String>,
@@ -124,6 +128,7 @@ pub struct NewStageRun<'a> {
     pub id: &'a str,
     pub task_id: &'a str,
     pub stage: &'a str,
+    pub kind: &'a str,
     pub agent: Option<&'a str>,
     pub agent_provider: Option<&'a str>,
     pub model: Option<&'a str>,

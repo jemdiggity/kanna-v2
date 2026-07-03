@@ -127,6 +127,7 @@ export async function runMigrations(db: DbHandle): Promise<void> {
     id TEXT PRIMARY KEY,
     task_id TEXT NOT NULL REFERENCES pipeline_item(id) ON DELETE CASCADE,
     stage TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'main' CHECK (kind IN ('main', 'post')),
     agent TEXT,
     agent_provider TEXT,
     model TEXT,
@@ -511,5 +512,9 @@ export async function runMigrations(db: DbHandle): Promise<void> {
     await dropColumn("pipeline_item", "stage_result");
     await dropColumn("pipeline_item", "active_post_action");
     await dropColumn("pipeline_item", "previous_stage");
+  });
+
+  await runMigration("025_stage_run_kind", async () => {
+    await addColumn("stage_run", "kind", "TEXT NOT NULL DEFAULT 'main'");
   });
 }

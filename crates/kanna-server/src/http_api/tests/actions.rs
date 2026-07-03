@@ -1,5 +1,26 @@
 use super::*;
 
+/// Stage transitions execute on detached tasks (see
+/// execute_stage_transition_detached); route tests poll for the DB effect.
+pub(super) async fn wait_for_task_stage(
+    db: &Db,
+    task_id: &str,
+    expected_stage: &str,
+) -> crate::db::TaskStageSource {
+    for _ in 0..100 {
+        let task = db.get_task_stage_source(task_id).unwrap().unwrap();
+        if task.stage.as_deref() == Some(expected_stage) {
+            return task;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let task = db.get_task_stage_source(task_id).unwrap().unwrap();
+    panic!(
+        "task {task_id} never reached stage {expected_stage}; last: {:?}",
+        task.stage
+    );
+}
+
 #[tokio::test]
 async fn http_invoke_dispatches_shared_mobile_post_routes_with_json_body() {
     let received = Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
@@ -926,49 +947,55 @@ async fn advance_stage_route_records_stage_run_for_spawned_next_task() {
         let (stream, _) = daemon_listener.accept().await.unwrap();
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
-        let mut line = String::new();
-        reader.read_line(&mut line).await.unwrap();
-        let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
-        assert!(matches!(
-            command,
-            DaemonCommand::Kill { ref session_id } if session_id == "source-1"
-        ));
-        write_half
-            .write_all(format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap()).as_bytes())
-            .await
-            .unwrap();
-
-        let mut line = String::new();
-        reader.read_line(&mut line).await.unwrap();
-        let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
-        let session_id = match command {
-            DaemonCommand::Spawn {
-                session_id,
-                cwd,
-                agent_provider,
-                ..
-            } => {
-                assert_eq!(agent_provider, Some(AgentProvider::Claude));
-                assert!(cwd.contains(".kanna-worktrees/task-"));
-                session_id
-            }
-            DaemonCommand::SpawnAgent { session_id, params } => {
-                assert_eq!(params.agent_provider, AgentProvider::Claude);
-                assert!(params.cwd.contains(".kanna-worktrees/task-"));
-                session_id
-            }
-            other => panic!("expected stage advance spawn command, got {:?}", other),
-        };
-        write_half
-            .write_all(
-                format!(
-                    "{}\n",
-                    serde_json::to_string(&DaemonEvent::SessionCreated { session_id }).unwrap()
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+            let session_id = match command {
+                // Durable stage swap kills the previous session in place
+                // before respawning the same session id.
+                DaemonCommand::Kill { .. } => {
+                    let response = DaemonEvent::Error {
+                        code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
+                        message: "session not found".to_string(),
+                    };
+                    write_half
+                        .write_all(
+                            format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                    continue;
+                }
+                DaemonCommand::Spawn {
+                    session_id,
+                    cwd,
+                    agent_provider,
+                    ..
+                } => {
+                    assert_eq!(agent_provider, Some(AgentProvider::Claude));
+                    assert!(cwd.contains(".kanna-worktrees/task-"));
+                    session_id
+                }
+                DaemonCommand::SpawnAgent { session_id, params } => {
+                    assert_eq!(params.agent_provider, AgentProvider::Claude);
+                    assert!(params.cwd.contains(".kanna-worktrees/task-"));
+                    session_id
+                }
+                other => panic!("expected stage advance spawn command, got {:?}", other),
+            };
+            write_half
+                .write_all(
+                    format!(
+                        "{}\n",
+                        serde_json::to_string(&DaemonEvent::SessionCreated { session_id }).unwrap()
+                    )
+                    .as_bytes(),
                 )
-                .as_bytes(),
-            )
-            .await
-            .unwrap();
+                .await
+                .unwrap();
+            break;
+        }
     });
 
     let (kanna_cli_path, created_sidecar) = ensure_test_kanna_cli_sidecar();
@@ -1036,21 +1063,25 @@ async fn advance_stage_route_records_stage_run_for_spawned_next_task() {
         .await
         .unwrap();
     let created: TaskActionResponse = from_slice(&body).unwrap();
+    assert_eq!(created.task_id, "source-1");
 
+    // The transition executes on a detached task (the request's caller may
+    // be the session being replaced); wait for it to land.
     let db = Db::open(&config.db_path).unwrap();
-    let source = db.get_task_stage_source("source-1").unwrap().unwrap();
+    let source = wait_for_task_stage(&db, "source-1", "review").await;
+
+    // Durable stage swap: the SAME task moves to `review` with a new main
+    // run on the same session id; nothing is closed or recreated.
     assert_eq!(source.stage.as_deref(), Some("review"));
-    assert_eq!(source.closed_at, None);
-    let runs = db.list_stage_runs_for_task(&created.task_id).unwrap();
+    assert!(source.closed_at.is_none());
+    let runs = db.list_stage_runs_for_task("source-1").unwrap();
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].stage, "review");
+    assert_eq!(runs[0].kind, "main");
     assert_eq!(runs[0].agent.as_deref(), Some("reviewer"));
     assert_eq!(runs[0].agent_provider.as_deref(), Some("claude"));
     assert_eq!(runs[0].status, "running");
-    assert_eq!(
-        runs[0].session_id.as_deref(),
-        Some(created.task_id.as_str())
-    );
+    assert_eq!(runs[0].session_id.as_deref(), Some("source-1"));
 
     daemon_server.await.unwrap();
     if created_sidecar {
@@ -1123,6 +1154,7 @@ async fn complete_stage_route_finishes_latest_running_stage_run() {
             id: "run-1",
             task_id: "task-1",
             stage: "in progress",
+            kind: "main",
             agent: Some("implement"),
             agent_provider: Some("codex"),
             model: None,
@@ -1143,7 +1175,8 @@ async fn complete_stage_route_finishes_latest_running_stage_run() {
                 .body(Body::from(
                     serde_json::json!({
                         "status": "success",
-                        "summary": "implemented"
+                        "summary": "implemented",
+                        "metadata": { "pr_url": "https://github.com/acme/repo/pull/41" }
                     })
                     .to_string(),
                 ))
@@ -1157,7 +1190,7 @@ async fn complete_stage_route_finishes_latest_running_stage_run() {
     let stage_result = serde_json::json!({
         "status": "success",
         "summary": "implemented",
-        "metadata": null
+        "metadata": { "pr_url": "https://github.com/acme/repo/pull/41" }
     })
     .to_string();
     assert!(stage_result.contains("\"status\":\"success\""));
@@ -1167,6 +1200,283 @@ async fn complete_stage_route_finishes_latest_running_stage_run() {
     assert_eq!(runs[0].result.as_deref(), Some(stage_result.as_str()));
     assert_eq!(runs[0].feedback.as_deref(), Some("implemented"));
     assert!(runs[0].finished_at.is_some());
+
+    // The verdict's PR URL is denormalized onto the task for the header link.
+    let item = db.get_pipeline_item("task-1").unwrap().unwrap();
+    assert_eq!(
+        item.pr_url.as_deref(),
+        Some("https://github.com/acme/repo/pull/41")
+    );
+    assert_eq!(item.pr_number, Some(41));
+}
+
+#[tokio::test]
+async fn complete_stage_route_parses_pr_url_from_summary_fallback() {
+    let state = super::test_state_with_seed("desktop-1", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "task-1",
+            "repo-1",
+            "Ship it",
+            Some("Ship it"),
+            "in progress",
+            "2026-07-03 00:00:00",
+        )
+        .unwrap();
+        db.insert_stage_run(crate::db::NewStageRun {
+            id: "run-1",
+            task_id: "task-1",
+            stage: "in progress",
+            kind: "main",
+            agent: Some("pr"),
+            agent_provider: Some("claude"),
+            model: None,
+            status: "running",
+            result: None,
+            feedback: None,
+            session_id: Some("task-1"),
+        })
+        .unwrap();
+    });
+    let db_path = state.config.db_path.clone();
+    let app = super::router(state);
+
+    // No metadata: agents reporting through plain kanna-cli put the URL in
+    // the summary.
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks/task-1/actions/complete-stage")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "status": "success",
+                        "summary": "Created PR https://github.com/acme/repo/pull/7 from add-feature."
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let db = Db::open(&db_path).unwrap();
+    let item = db.get_pipeline_item("task-1").unwrap().unwrap();
+    assert_eq!(
+        item.pr_url.as_deref(),
+        Some("https://github.com/acme/repo/pull/7")
+    );
+    assert_eq!(item.pr_number, Some(7));
+}
+
+#[tokio::test]
+async fn complete_stage_success_after_failed_post_refinishes_run_and_transitions() {
+    use kanna_daemon::protocol::{AgentProvider, Command as DaemonCommand, Event as DaemonEvent};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+
+    let unique = format!(
+        "{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let repo_root = std::env::temp_dir().join(format!("kanna-http-post-refinish-{unique}"));
+    init_test_git_repo(&repo_root);
+    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::create_dir_all(repo_root.join(".kanna/agents/reviewer")).unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/pipelines/default.json"),
+        r#"{
+  "stages": [
+    { "name": "in progress", "transition": "manual",
+      "post": { "name": "commit", "prompt": "Commit $TASK_PROMPT" } },
+    { "name": "review", "transition": "manual", "agent": "reviewer", "prompt": "Review $PREV_RESULT" }
+  ]
+}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/agents/reviewer/AGENT.md"),
+        "---\nagent_provider: claude\n---\nReview task $TASK_PROMPT",
+    )
+    .unwrap();
+    assert!(Command::new("git")
+        .args(["add", ".kanna"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["commit", "-m", "add pipeline"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["branch", "task-source"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+
+    let daemon_dir = std::env::temp_dir().join(format!("kanna-http-post-refinish-daemon-{unique}"));
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+    let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+    let _ = std::fs::remove_file(&socket_path);
+    let daemon_listener = UnixListener::bind(&socket_path).unwrap();
+    let daemon_server = tokio::spawn(async move {
+        let (stream, _) = daemon_listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+            let response = match &command {
+                DaemonCommand::Kill { .. } => DaemonEvent::Error {
+                    code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
+                    message: "session not found".to_string(),
+                },
+                DaemonCommand::Spawn { session_id, .. } => DaemonEvent::SessionCreated {
+                    session_id: session_id.clone(),
+                },
+                DaemonCommand::SpawnAgent { session_id, .. } => DaemonEvent::SessionCreated {
+                    session_id: session_id.clone(),
+                },
+                other => panic!("unexpected daemon command: {other:?}"),
+            };
+            let done = matches!(
+                &command,
+                DaemonCommand::Spawn { .. } | DaemonCommand::SpawnAgent { .. }
+            );
+            write_half
+                .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
+                .await
+                .unwrap();
+            if done {
+                break;
+            }
+        }
+        let _ = AgentProvider::Claude;
+    });
+
+    let (kanna_cli_path, created_sidecar) = ensure_test_kanna_cli_sidecar();
+    let config = Config {
+        relay_url: "wss://relay.example".to_string(),
+        device_token: "device-token".to_string(),
+        firebase_project_id: "kanna-local".to_string(),
+        firebase_auth_emulator_url: None,
+        firebase_firestore_emulator_host: None,
+        daemon_dir: daemon_dir.to_string_lossy().to_string(),
+        db_path: Db::test_db_path(&format!("http-api-post-refinish-{unique}")),
+        kanna_cli_path: Some(kanna_cli_path.to_string_lossy().to_string()),
+        desktop_id: "desktop-1".to_string(),
+        desktop_secret: Some("desktop-secret".to_string()),
+        desktop_name: "Studio Mac".to_string(),
+        server_version: Some("test-version".to_string()),
+        lan_host: "127.0.0.1".to_string(),
+        lan_port: 48120,
+        pairing_store_path: format!("/tmp/kanna-pairings-post-refinish-{unique}.json"),
+    };
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Implement it",
+        Some("Implement it"),
+        "in progress",
+        "2026-07-02 00:00:00",
+    )
+    .unwrap();
+    db.update_test_pipeline_item_stage_context("task-1", "task-source", "default", None, "claude")
+        .unwrap();
+    db.insert_stage_run(crate::db::NewStageRun {
+        id: "run-main",
+        task_id: "task-1",
+        stage: "in progress",
+        kind: "main",
+        agent: Some("implement"),
+        agent_provider: Some("claude"),
+        model: None,
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: Some("task-1"),
+    })
+    .unwrap();
+    db.finish_stage_run("run-main", "succeeded", None, None)
+        .unwrap();
+    // The post ran and honestly reported failure; the task is parked with no
+    // running run.
+    db.insert_stage_run(crate::db::NewStageRun {
+        id: "run-post",
+        task_id: "task-1",
+        stage: "commit",
+        kind: "post",
+        agent: None,
+        agent_provider: Some("claude"),
+        model: None,
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: Some("task-1"),
+    })
+    .unwrap();
+    db.finish_stage_run("run-post", "failed", None, Some("dirty worktree"))
+        .unwrap();
+    drop(db);
+
+    // The agent recovers (cleans up, commits) and sends a late success
+    // verdict: it must re-finish the SAME post run and perform the post's
+    // deferred transition to `review`.
+    let app = super::router(Arc::new(super::AppState::new(config.clone())));
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks/task-1/actions/complete-stage")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "status": "success",
+                        "summary": "cleaned up and committed"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    daemon_server.await.unwrap();
+
+    // The deferred transition executes on a detached task; wait for it.
+    let db = Db::open(&config.db_path).unwrap();
+    let task = wait_for_task_stage(&db, "task-1", "review").await;
+    assert_eq!(task.stage.as_deref(), Some("review"));
+    assert!(task.closed_at.is_none());
+
+    let runs = db.list_stage_runs_for_task("task-1").unwrap();
+    let post_run = runs.iter().find(|run| run.id == "run-post").unwrap();
+    assert_eq!(post_run.status, "succeeded", "late verdict wins");
+    assert_eq!(
+        post_run.feedback.as_deref(),
+        Some("cleaned up and committed")
+    );
+    let review_run = runs.iter().find(|run| run.stage == "review").unwrap();
+    assert_eq!(review_run.status, "running");
+
+    if created_sidecar {
+        let _ = std::fs::remove_file(&kanna_cli_path);
+    }
+    let _ = std::fs::remove_file(&socket_path);
+    let _ = std::fs::remove_dir_all(&daemon_dir);
+    let _ = std::fs::remove_dir_all(&repo_root);
 }
 
 #[tokio::test]

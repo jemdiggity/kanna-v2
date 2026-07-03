@@ -137,6 +137,12 @@ pub(super) fn create_worktree(
         return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
     }
 
+    // Worktrees contain exactly what the branch checkout contains. Repo-
+    // specific scaffolding (like a Rust `.cargo/config.toml`) must come from
+    // the repo itself — committed, or created by `.kanna/config.json` setup
+    // commands. Kanna used to inject a `.cargo/config.toml` here for its own
+    // build layout; the stray untracked file made every commit post in other
+    // repos report a dirty worktree.
     Ok(())
 }
 

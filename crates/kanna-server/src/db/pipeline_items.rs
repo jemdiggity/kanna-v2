@@ -460,4 +460,38 @@ impl Db {
         }
         Ok(())
     }
+
+    /// Record the task's pull request once an agent reports it (the pr
+    /// stage's verdict carries the URL). Best-effort denormalization: the
+    /// authoritative record is the stage run result.
+    pub fn update_pipeline_item_pr(
+        &self,
+        id: &str,
+        pr_number: Option<i64>,
+        pr_url: &str,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE pipeline_item SET pr_number = ?, pr_url = ?, updated_at = datetime('now') WHERE id = ? AND closed_at IS NULL",
+            (pr_number, pr_url, id),
+        )?;
+        Ok(())
+    }
+
+    /// Stage transition into a freshly forked workspace: the task's current
+    /// branch moves with the stage.
+    pub fn update_pipeline_item_stage_and_branch(
+        &self,
+        id: &str,
+        stage: &str,
+        branch: &str,
+    ) -> Result<(), rusqlite::Error> {
+        let rows_affected = self.conn.execute(
+            "UPDATE pipeline_item SET stage = ?, branch = ?, updated_at = datetime('now') WHERE id = ? AND closed_at IS NULL",
+            (stage, branch, id),
+        )?;
+        if rows_affected == 0 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        Ok(())
+    }
 }

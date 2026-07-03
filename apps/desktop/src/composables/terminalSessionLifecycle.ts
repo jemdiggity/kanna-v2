@@ -303,6 +303,44 @@ export function createTerminalSessionLifecycle(params: {
       params.state.unlistenExit = exitUnlisten
     }
 
+    if (!params.state.unlistenSessionCreated) {
+      // Stage transitions replace the task's agent session in place: the
+      // engine kills this session id and respawns it with the next stage's
+      // agent. The exit latches `sessionExited`; the daemon's SessionCreated
+      // broadcast is the signal to drop that latch and attach to the new
+      // session. Without it the terminal stays permanently dead while the
+      // next stage's agent runs invisibly.
+      const sessionCreatedUnlisten = await listen(
+        "session_created",
+        (event) => {
+          const sid = (event.payload as { session_id?: string } | undefined)?.session_id
+          if (sid !== params.sessionId) return
+          if (!params.state.sessionExited && params.state.attached) return
+          console.warn("[terminal][event] session_created rebind", {
+            sessionId: params.sessionId,
+            instanceId: params.instanceId,
+            sessionExited: params.state.sessionExited,
+            attached: params.state.attached,
+          })
+          params.state.sessionExited = false
+          params.state.attached = false
+          params.state.terminalStreamAttached = false
+          connectSession().catch((e) =>
+            console.error("[terminal] session_created re-attach failed:", e)
+          )
+        }
+      )
+      if (!acceptRegisteredListener({
+        state: params.state,
+        generation: listeningGeneration,
+        event: "session_created",
+        unlisten: sessionCreatedUnlisten,
+        sessionId: params.sessionId,
+        instanceId: params.instanceId,
+      })) return
+      params.state.unlistenSessionCreated = sessionCreatedUnlisten
+    }
+
     if (!params.state.unlistenDaemonReady && shouldReattachOnDaemonReady(params.spawnOptions, params.options)) {
       const daemonReadyUnlisten = await listen("daemon_ready", () => {
         markDaemonReadyObserved()
@@ -394,6 +432,15 @@ export function createTerminalSessionLifecycle(params: {
         event: "session_exit",
       })
       params.state.unlistenExit = null
+    }
+    if (params.state.unlistenSessionCreated) {
+      params.state.unlistenSessionCreated()
+      console.warn("[terminal][instance] listener:remove", {
+        sessionId: params.sessionId,
+        instanceId: params.instanceId,
+        event: "session_created",
+      })
+      params.state.unlistenSessionCreated = null
     }
     if (params.state.unlistenDaemonReady) {
       params.state.unlistenDaemonReady()

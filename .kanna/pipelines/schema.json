@@ -84,9 +84,41 @@
             "properties": {
               "transition": {
                 "enum": ["manual", "auto"]
+              }
+            }
+          },
+          "post": {
+            "type": "object",
+            "description": "Tail work injected into the stage's running agent session when the stage transitions forward. `agent` is the fallback spawned when the session is dead.",
+            "additionalProperties": false,
+            "required": ["name", "prompt"],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
               },
-              "execution": {
-                "enum": ["continue"]
+              "description": {
+                "type": "string"
+              },
+              "agent": {
+                "type": "string"
+              },
+              "prompt": {
+                "type": "string"
+              },
+              "agent_provider": {
+                "oneOf": [
+                  {
+                    "enum": ["codex", "claude", "copilot"]
+                  },
+                  {
+                    "type": "array",
+                    "items": {
+                      "enum": ["codex", "claude", "copilot"]
+                    },
+                    "minItems": 1
+                  }
+                ]
               }
             }
           }
@@ -98,19 +130,18 @@
     {
       "$schema": "./schema.json",
       "name": "default",
-      "description": "Standard in progress -> commit -> PR flow",
+      "description": "Standard in progress (commit as post) -> PR flow",
       "stages": [
         {
           "name": "in progress",
           "agent": "implement",
           "prompt": "$TASK_PROMPT",
-          "policy": { "transition": "manual" }
-        },
-        {
-          "name": "commit",
-          "agent": "commit",
-          "prompt": "Commit the relevant work for this task. Original task: $TASK_PROMPT",
-          "policy": { "transition": "auto", "execution": "continue" }
+          "policy": { "transition": "manual" },
+          "post": {
+            "name": "commit",
+            "agent": "commit",
+            "prompt": "Commit the relevant work for this task. Original task: $TASK_PROMPT"
+          }
         },
         {
           "name": "pr",

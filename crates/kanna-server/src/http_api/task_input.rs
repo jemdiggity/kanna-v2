@@ -29,42 +29,52 @@ pub(super) fn task_input_message(input: &str) -> &str {
     input.trim_end_matches(['\r', '\n'])
 }
 
-/// Send one raw Input command to a daemon session, mapping daemon failures to
-/// an HTTP error.
+/// A task-input submission failure, distinguishing "the session does not
+/// exist" (a post dispatch falls back to spawning a fresh session) from
+/// everything else.
+pub(crate) enum TaskInputError {
+    SessionNotFound,
+    Other(String),
+}
+
+/// Send one raw Input command to a daemon session.
 async fn send_session_input(
     daemon: &mut crate::daemon_client::DaemonClient,
     session_id: &str,
     data: Vec<u8>,
-) -> Result<(), (axum::http::StatusCode, String)> {
+) -> Result<(), TaskInputError> {
     let event = daemon
         .send_command(&DaemonCommand::Input {
             session_id: session_id.to_string(),
             data,
         })
         .await
-        .map_err(|e| {
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("daemon error: {}", e),
-            )
-        })?;
+        .map_err(|e| TaskInputError::Other(format!("daemon error: {}", e)))?;
     match event {
         DaemonEvent::Ok => Ok(()),
-        DaemonEvent::Error { message, .. } => {
-            Err((axum::http::StatusCode::INTERNAL_SERVER_ERROR, message))
+        DaemonEvent::Error {
+            code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
+            ..
+        } => Err(TaskInputError::SessionNotFound),
+        DaemonEvent::Error { message, .. }
+            if message.to_ascii_lowercase().contains("session not found") =>
+        {
+            Err(TaskInputError::SessionNotFound)
         }
-        other => Err((
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("unexpected daemon response: {:?}", other),
-        )),
+        DaemonEvent::Error { message, .. } => Err(TaskInputError::Other(message)),
+        other => Err(TaskInputError::Other(format!(
+            "unexpected daemon response: {:?}",
+            other
+        ))),
     }
 }
 
-pub(crate) async fn submit_task_input(
+/// Submit input to a daemon session, reporting a typed error.
+pub(crate) async fn try_submit_task_input(
     daemon: &mut crate::daemon_client::DaemonClient,
     session_id: &str,
     input: &str,
-) -> Result<(), (axum::http::StatusCode, String)> {
+) -> Result<(), TaskInputError> {
     // Type the message, then press Enter as a discrete keystroke (see
     // SUBMIT_ENTER_DELAY_MS). The daemon stays a raw byte pipe; this submission
     // policy lives here so every client — kanna-cli, kanna-mcp, mobile, and
@@ -76,6 +86,24 @@ pub(crate) async fn submit_task_input(
     }
     send_session_input(daemon, session_id, vec![b'\r']).await?;
     Ok(())
+}
+
+pub(crate) async fn submit_task_input(
+    daemon: &mut crate::daemon_client::DaemonClient,
+    session_id: &str,
+    input: &str,
+) -> Result<(), (axum::http::StatusCode, String)> {
+    try_submit_task_input(daemon, session_id, input)
+        .await
+        .map_err(|error| match error {
+            TaskInputError::SessionNotFound => (
+                axum::http::StatusCode::NOT_FOUND,
+                format!("session not found: {}", session_id),
+            ),
+            TaskInputError::Other(message) => {
+                (axum::http::StatusCode::INTERNAL_SERVER_ERROR, message)
+            }
+        })
 }
 
 pub(super) async fn send_task_input(
