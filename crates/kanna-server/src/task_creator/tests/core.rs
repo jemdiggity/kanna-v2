@@ -123,6 +123,129 @@ fn build_agent_command_launches_antigravity_with_prepended_kanna_context() {
     assert!(command.contains("Ship the task."));
 }
 
+fn write_test_mcp_config(label: &str) -> std::path::PathBuf {
+    let path = std::env::temp_dir().join(format!(
+        "kanna-server-{label}-mcp-{}.json",
+        std::process::id()
+    ));
+    std::fs::write(
+        &path,
+        serde_json::json!({
+            "mcpServers": {
+                "kanna-mcp": {
+                    "command": "/tmp/kanna mcp/kanna-mcp",
+                    "args": ["serve"],
+                    "env": {
+                        "KANNA_SERVER_BASE_URL": "http://127.0.0.1:48120"
+                    }
+                }
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    path
+}
+
+#[test]
+fn build_agent_command_registers_codex_kanna_mcp_with_config_overrides() {
+    let mcp_config = write_test_mcp_config("codex-command");
+    let command = super::build_agent_command(
+        &AgentProvider::Codex,
+        "Do work.",
+        None,
+        Some("dontAsk"),
+        &[],
+        Some("Kanna preamble."),
+        Some(mcp_config.to_string_lossy().as_ref()),
+    );
+
+    assert!(command.starts_with("codex "));
+    assert!(command.contains("-c 'mcp_servers.kanna-mcp.command=\"/tmp/kanna mcp/kanna-mcp\"'"));
+    assert!(command.contains("-c 'mcp_servers.kanna-mcp.args=[\"serve\"]'"));
+    assert!(command.contains(
+        "-c 'mcp_servers.kanna-mcp.env.KANNA_SERVER_BASE_URL=\"http://127.0.0.1:48120\"'"
+    ));
+    assert!(command.contains("'Kanna preamble."));
+    assert!(command.contains("Do work."));
+
+    let _ = std::fs::remove_file(mcp_config);
+}
+
+#[test]
+fn build_agent_command_registers_copilot_kanna_mcp_with_additional_config() {
+    let mcp_config = write_test_mcp_config("copilot-command");
+    let command = super::build_agent_command(
+        &AgentProvider::Copilot,
+        "Do work.",
+        None,
+        Some("dontAsk"),
+        &[],
+        Some("Kanna preamble."),
+        Some(mcp_config.to_string_lossy().as_ref()),
+    );
+
+    assert!(command.starts_with("copilot "));
+    assert!(command.contains("--additional-mcp-config @'"));
+    assert!(command.contains(mcp_config.to_string_lossy().as_ref()));
+    assert!(command.contains("-i 'Kanna preamble."));
+    assert!(command.contains("Do work."));
+
+    let _ = std::fs::remove_file(mcp_config);
+}
+
+#[test]
+fn build_agent_command_registers_opencode_kanna_mcp_with_inline_config() {
+    let mcp_config = write_test_mcp_config("opencode-command");
+    let command = super::build_agent_command(
+        &AgentProvider::Opencode,
+        "Do work.",
+        None,
+        Some("dontAsk"),
+        &[],
+        Some("Kanna preamble."),
+        Some(mcp_config.to_string_lossy().as_ref()),
+    );
+
+    assert!(command.contains("OPENCODE_CONFIG_CONTENT='"));
+    assert!(command.contains("\"$schema\":\"https://opencode.ai/config.json\""));
+    assert!(command
+        .contains("\"mcp\":{\"kanna-mcp\":{\"command\":[\"/tmp/kanna mcp/kanna-mcp\",\"serve\"]"));
+    assert!(command.contains("\"type\":\"local\""));
+    assert!(command.contains("\"enabled\":true"));
+    assert!(command.contains("\"KANNA_SERVER_BASE_URL\":\"http://127.0.0.1:48120\""));
+    assert!(command.contains("run --interactive"));
+    assert!(command.contains("'Kanna preamble."));
+    assert!(command.contains("Do work."));
+
+    let _ = std::fs::remove_file(mcp_config);
+}
+
+#[test]
+fn build_kanna_preamble_names_automatic_and_fallback_mcp_providers() {
+    let codex = super::build_kanna_preamble(
+        &AgentProvider::Codex,
+        "task-123",
+        "implement",
+        "default",
+        None,
+        Some("/tmp/kanna-mcp.json"),
+    );
+    assert!(codex.contains("Codex is launched with Kanna MCP registration"));
+    assert!(codex.contains("Kanna MCP tools should be available automatically"));
+
+    let antigravity = super::build_kanna_preamble(
+        &AgentProvider::Antigravity,
+        "task-123",
+        "implement",
+        "default",
+        None,
+        Some("/tmp/kanna-mcp.json"),
+    );
+    assert!(antigravity.contains("Antigravity CLI MCP registration is not wired"));
+    assert!(antigravity.contains("fall back to the instance-local `kanna-cli`"));
+}
+
 #[test]
 fn resolve_binary_prefers_sidecar_candidate_before_path_lookup() {
     let temp_root = std::env::temp_dir().join(format!(

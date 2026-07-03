@@ -1,5 +1,8 @@
 use super::environment::which_binary;
 use super::provider::{provider_binary_name, AgentProvider};
+use kanna_agent_protocol::mcp::{
+    codex_mcp_config_overrides, opencode_mcp_config_content, read_kanna_mcp_server,
+};
 use std::path::Path;
 
 pub(super) fn build_agent_command(
@@ -52,6 +55,12 @@ pub(super) fn build_agent_command(
         }
         AgentProvider::Copilot => {
             let mut flags = get_agent_permission_flags(*provider, permission_mode);
+            if let Some(mcp_config_path) = mcp_config_path {
+                flags.push(format!(
+                    "--additional-mcp-config @'{}'",
+                    shell_single_quote(mcp_config_path)
+                ));
+            }
             if let Some(model) = model {
                 flags.push(format!("--model={}", model));
             }
@@ -64,6 +73,7 @@ pub(super) fn build_agent_command(
         }
         AgentProvider::Codex => {
             let mut flags = get_agent_permission_flags(*provider, permission_mode);
+            extend_codex_mcp_flags(&mut flags, mcp_config_path);
             if let Some(model) = model {
                 flags.push(format!("-m {}", model));
             }
@@ -83,6 +93,9 @@ pub(super) fn build_agent_command(
                 "run".to_string(),
                 "--interactive".to_string(),
             ];
+            if let Some(env_prefix) = opencode_mcp_env_prefix(mcp_config_path) {
+                parts.insert(0, env_prefix);
+            }
             parts.extend(flags);
             if !prompt.is_empty() {
                 parts.push(format!("'{}'", escaped_prompt));
@@ -103,6 +116,25 @@ pub(super) fn build_agent_command(
             parts.join(" ")
         }
     }
+}
+
+fn extend_codex_mcp_flags(flags: &mut Vec<String>, mcp_config_path: Option<&str>) {
+    let Some(server) = mcp_config_path.and_then(read_kanna_mcp_server) else {
+        return;
+    };
+
+    for value in codex_mcp_config_overrides(&server) {
+        flags.push(format!("-c '{}'", shell_single_quote(&value)));
+    }
+}
+
+fn opencode_mcp_env_prefix(mcp_config_path: Option<&str>) -> Option<String> {
+    let server = mcp_config_path.and_then(read_kanna_mcp_server)?;
+    let content = opencode_mcp_config_content(&server)?;
+    Some(format!(
+        "OPENCODE_CONFIG_CONTENT='{}'",
+        shell_single_quote(&content)
+    ))
 }
 
 fn get_agent_permission_flags(
@@ -193,12 +225,7 @@ pub(super) fn build_kanna_preamble(
         lines.push(
             "An instance-local `kanna-mcp` config is available at `KANNA_MCP_CONFIG`.".to_string(),
         );
-        if matches!(provider, AgentProvider::Claude) {
-            lines.push(
-                "Claude is launched with this config via `--mcp-config`, so Kanna MCP tools should be available automatically."
-                    .to_string(),
-            );
-        }
+        lines.push(kanna_mcp_launch_line(*provider));
     }
     lines.extend([
         "Prefer `kanna-mcp` tools for Kanna task operations when your agent client exposes them.".to_string(),
@@ -208,6 +235,26 @@ pub(super) fn build_kanna_preamble(
         "When this stage is complete, prefer MCP `kanna_complete_stage`; fallback: `kanna-cli stage-complete --task-id \"$KANNA_TASK_ID\" --status success --summary \"...\"`.".to_string(),
     ]);
     lines.join("\n")
+}
+
+fn kanna_mcp_launch_line(provider: AgentProvider) -> String {
+    match provider {
+        AgentProvider::Claude => {
+            "Claude is launched with this config via `--mcp-config`, so Kanna MCP tools should be available automatically.".to_string()
+        }
+        AgentProvider::Codex => {
+            "Codex is launched with Kanna MCP registration via `-c mcp_servers.kanna-mcp.*` overrides, so Kanna MCP tools should be available automatically.".to_string()
+        }
+        AgentProvider::Copilot => {
+            "Copilot is launched with this config via `--additional-mcp-config`, so Kanna MCP tools should be available automatically.".to_string()
+        }
+        AgentProvider::Opencode => {
+            "OpenCode is launched with Kanna MCP registration via `OPENCODE_CONFIG_CONTENT`, so Kanna MCP tools should be available automatically.".to_string()
+        }
+        AgentProvider::Antigravity => {
+            "Antigravity CLI MCP registration is not wired because `agy 1.0.14` exposes no stable MCP flag or config surface; use the `kanna-cli` fallback for Kanna task operations.".to_string()
+        }
+    }
 }
 
 fn shell_single_quote(value: &str) -> String {
