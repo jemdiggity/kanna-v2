@@ -1059,6 +1059,123 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::await_holding_lock)]
+    async fn staging_release_bundle_start_uses_48121_without_claiming_production_48120() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+        let root = unique_test_root("staging-release-bundle-start");
+        let app_data_dir = root.join("app-data");
+        let db_path = root.join("kanna-test.db");
+        let daemon_dir = root.join("daemon");
+        let production_port = kanna_runtime_defaults::PRODUCTION_MOBILE_SERVER_PORT;
+        let staging_port = kanna_runtime_defaults::STAGING_MOBILE_SERVER_PORT;
+
+        let staging_status_before =
+            reqwest::get(format!("{}/v1/status", server_base_url(staging_port)))
+                .await
+                .ok()
+                .filter(|response| response.status().is_success());
+        if staging_status_before.is_none() {
+            let staging_probe = std::net::TcpListener::bind(("127.0.0.1", staging_port))
+                .expect("staging test requires 127.0.0.1:48121 to be free or serving /v1/status");
+            drop(staging_probe);
+        }
+
+        let mut owned_production_server = match try_start_production_status_server(production_port)
+            .await
+        {
+            Ok(child) => Some(child),
+            Err(error) => {
+                let existing_status =
+                    reqwest::get(format!("{}/v1/status", server_base_url(production_port)))
+                        .await
+                        .ok()
+                        .filter(|response| response.status().is_success());
+                if existing_status.is_none() {
+                    panic!(
+                            "production port 48120 is unavailable and did not answer /v1/status: {error}"
+                        );
+                }
+                None
+            }
+        };
+
+        let sidecar_dir = test_sidecar_dir().unwrap_or_else(|| {
+            panic!("kanna-server sidecar not found; run `./kd build sidecars` before this test")
+        });
+        unsafe {
+            unset_env_var("KANNA_CLOUD_ENV");
+            unset_env_var("KANNA_MOBILE_SERVER_PORT");
+            unset_env_var("KANNA_DB_NAME");
+            unset_env_var("KANNA_RELAY_URL");
+            unset_env_var("KANNA_RELAY_PORT");
+            unset_env_var("KANNA_E2E_DEVICE_TOKEN");
+            set_env_var("KANNA_DB_PATH", &db_path.to_string_lossy());
+            set_env_var("KANNA_DAEMON_DIR", &daemon_dir.to_string_lossy());
+            set_env_var("KANNA_TEST_SIDECAR_DIR", &sidecar_dir.to_string_lossy());
+        }
+        create_test_database(&db_path);
+        let manager = MobileServerManager::new_with_bundle_identifier_for_mode(
+            app_data_dir.clone(),
+            kanna_runtime_defaults::STAGING_DESKTOP_BUNDLE_IDENTIFIER,
+            false,
+        );
+        {
+            let state = manager.inner.lock().await;
+            assert_eq!(state.api_base_url, "http://127.0.0.1:48121");
+        }
+
+        if staging_status_before.is_some() {
+            let start_error = manager
+                .start()
+                .await
+                .expect_err("staging manager should not claim an existing 48121 owner");
+            assert!(start_error.contains("port is already owned"));
+            assert_production_status_still_available(production_port, &mut owned_production_server)
+                .await;
+            cleanup_process_test_env();
+            let _ = std::fs::remove_dir_all(root);
+            return;
+        }
+
+        let start_result = manager.start().await;
+        let status_result = if start_result.is_ok() {
+            Some(
+                reqwest::get(format!("{}/v1/status", server_base_url(staging_port)))
+                    .await
+                    .expect("staging kanna-server status should be reachable"),
+            )
+        } else {
+            None
+        };
+
+        if start_result.is_ok() {
+            stop_server_on_port(staging_port)
+                .await
+                .expect("cleanup should stop staging server");
+        }
+        assert_production_status_still_available(production_port, &mut owned_production_server)
+            .await;
+        cleanup_process_test_env();
+        let _ = std::fs::remove_dir_all(root);
+
+        start_result.expect("staging bundle manager should start kanna-server");
+        let status = status_result
+            .expect("status should be captured after successful start")
+            .json::<MobileServerStatus>()
+            .await
+            .expect("staging status should deserialize");
+        assert_eq!(status.lan_port, staging_port);
+        assert_eq!(
+            manager
+                .snapshot()
+                .await
+                .expect("staging snapshot should be available")
+                .lan_port,
+            staging_port
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn wait_for_status_keeps_polling_past_old_short_timeout_when_child_is_alive() {
         let port = free_loopback_port();
         let manager = MobileServerManager::new(unique_test_root("wait-slow").join("app-data"));
@@ -1720,6 +1837,101 @@ mod tests {
         }
         let _ = child.kill().await;
         panic!("timed out waiting for kanna-server on {base_url}");
+    }
+
+    async fn try_start_production_status_server(port: u16) -> Result<Child, String> {
+        let script = r#"
+import json
+import signal
+import socket
+import sys
+
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+sock.bind(("127.0.0.1", int(sys.argv[1])))
+sock.listen(8)
+while True:
+    conn, _ = sock.accept()
+    with conn:
+        _ = conn.recv(4096)
+        body = json.dumps({
+            "state": "running",
+            "desktopId": "desktop-production-port-owner",
+            "desktopName": "Production Port Owner",
+            "serverVersion": "test-production",
+            "lanHost": "127.0.0.1",
+            "lanPort": int(sys.argv[1]),
+            "pairingCode": None,
+        })
+        response = (
+            "HTTP/1.1 200 OK\r\n"
+            "content-type: application/json\r\n"
+            f"content-length: {len(body)}\r\n"
+            "connection: close\r\n\r\n"
+            f"{body}"
+        )
+        conn.sendall(response.encode("utf-8"))
+"#;
+        let mut child = Command::new("python3")
+            .arg("-c")
+            .arg(script)
+            .arg(port.to_string())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|error| format!("failed to start production status server: {error}"))?;
+        let base_url = server_base_url(port);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while tokio::time::Instant::now() < deadline {
+            if let Some(status) = child
+                .try_wait()
+                .map_err(|error| format!("production status server wait failed: {error}"))?
+            {
+                return Err(format!(
+                    "production status server exited early with {status}"
+                ));
+            }
+            if reqwest::get(format!("{base_url}/v1/status"))
+                .await
+                .is_ok_and(|response| response.status().is_success())
+            {
+                return Ok(child);
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+        Err(format!(
+            "timed out waiting for production status server on {base_url}"
+        ))
+    }
+
+    async fn assert_production_status_still_available(
+        production_port: u16,
+        owned_production_server: &mut Option<Child>,
+    ) {
+        if let Some(child) = owned_production_server.as_mut() {
+            assert!(
+                child
+                    .try_wait()
+                    .expect("production server status should be readable")
+                    .is_none(),
+                "production 48120 owner should still be running"
+            );
+            child
+                .kill()
+                .await
+                .expect("cleanup should stop production server");
+            let _ = child.wait().await;
+        } else {
+            let production_response =
+                reqwest::get(format!("{}/v1/status", server_base_url(production_port)))
+                    .await
+                    .expect("existing production server should still answer after staging start");
+            assert!(production_response.status().is_success());
+        }
     }
 
     fn spawn_delayed_status_responder(port: u16, delay: Duration) -> tokio::task::JoinHandle<()> {

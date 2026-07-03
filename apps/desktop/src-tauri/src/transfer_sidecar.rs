@@ -27,9 +27,11 @@ impl TransferSidecarClient {
                 error
             )
         })?;
-        let sidecar_env = build_transfer_sidecar_env(
+        let sidecar_env = build_transfer_sidecar_env_for_bundle_identifier(
             &app_data_dir,
             crate::transfer_identity::current_machine_name().as_deref(),
+            app.config().identifier.as_str(),
+            cfg!(debug_assertions),
         )?;
         let mut child = Command::new(&sidecar_path)
             .envs(sidecar_env)
@@ -655,28 +657,74 @@ fn forwarded_event_name(value: &Value) -> Option<&'static str> {
     }
 }
 
+#[cfg(test)]
 fn build_transfer_sidecar_env(
     app_data_dir: &std::path::Path,
     machine_name: Option<&str>,
 ) -> Result<HashMap<String, String>, String> {
-    let transfer_root = crate::transfer_identity::resolve_transfer_root(app_data_dir);
-    build_transfer_sidecar_env_for_root(app_data_dir, &transfer_root, machine_name)
+    build_transfer_sidecar_env_for_bundle_identifier(
+        app_data_dir,
+        machine_name,
+        kanna_runtime_defaults::DESKTOP_BUNDLE_IDENTIFIER,
+        cfg!(debug_assertions),
+    )
 }
 
+fn build_transfer_sidecar_env_for_bundle_identifier(
+    app_data_dir: &std::path::Path,
+    machine_name: Option<&str>,
+    bundle_identifier: &str,
+    debug_assertions: bool,
+) -> Result<HashMap<String, String>, String> {
+    let transfer_root = crate::transfer_identity::resolve_transfer_root(app_data_dir);
+    build_transfer_sidecar_env_for_root_with_bundle_identifier(
+        app_data_dir,
+        &transfer_root,
+        machine_name,
+        bundle_identifier,
+        debug_assertions,
+    )
+}
+
+#[cfg(test)]
 fn build_transfer_sidecar_env_for_root(
     app_data_dir: &std::path::Path,
     transfer_root: &std::path::Path,
     machine_name: Option<&str>,
 ) -> Result<HashMap<String, String>, String> {
+    build_transfer_sidecar_env_for_root_with_bundle_identifier(
+        app_data_dir,
+        transfer_root,
+        machine_name,
+        kanna_runtime_defaults::DESKTOP_BUNDLE_IDENTIFIER,
+        cfg!(debug_assertions),
+    )
+}
+
+fn build_transfer_sidecar_env_for_root_with_bundle_identifier(
+    app_data_dir: &std::path::Path,
+    transfer_root: &std::path::Path,
+    machine_name: Option<&str>,
+    bundle_identifier: &str,
+    debug_assertions: bool,
+) -> Result<HashMap<String, String>, String> {
     let resolved =
         crate::transfer_identity::resolve_transfer_identity_for_root(transfer_root, machine_name)?;
-    build_transfer_sidecar_env_from_resolved(app_data_dir, transfer_root, resolved)
+    build_transfer_sidecar_env_from_resolved(
+        app_data_dir,
+        transfer_root,
+        resolved,
+        bundle_identifier,
+        debug_assertions,
+    )
 }
 
 fn build_transfer_sidecar_env_from_resolved(
     app_data_dir: &std::path::Path,
     transfer_root: &std::path::Path,
     resolved: crate::transfer_identity::ResolvedTransferIdentity,
+    bundle_identifier: &str,
+    debug_assertions: bool,
 ) -> Result<HashMap<String, String>, String> {
     let mut env = HashMap::new();
     env.insert(
@@ -732,9 +780,23 @@ fn build_transfer_sidecar_env_from_resolved(
     env.insert("KANNA_CLI_DB_PATH".to_string(), db_path);
     env.insert(
         "KANNA_MOBILE_SERVER_PORT".to_string(),
-        std::env::var("KANNA_MOBILE_SERVER_PORT").unwrap_or_else(|_| "48120".to_string()),
+        transfer_mobile_server_port(bundle_identifier, debug_assertions),
     );
     Ok(env)
+}
+
+fn transfer_mobile_server_port(bundle_identifier: &str, debug_assertions: bool) -> String {
+    std::env::var("KANNA_MOBILE_SERVER_PORT")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| {
+            kanna_runtime_defaults::mobile_server_port_for_bundle_identifier(
+                bundle_identifier,
+                debug_assertions,
+            )
+            .unwrap_or(kanna_runtime_defaults::PRODUCTION_MOBILE_SERVER_PORT)
+            .to_string()
+        })
 }
 
 fn required_bool(value: &Value, keys: &[&str]) -> Result<bool, String> {
@@ -908,6 +970,26 @@ mod tests {
         assert_eq!(
             env.get("KANNA_MOBILE_SERVER_PORT").map(String::as_str),
             Some("48129")
+        );
+    }
+
+    #[test]
+    fn transfer_sidecar_env_uses_staging_bundle_mobile_server_port_without_env() {
+        let _lock = env_lock();
+        let _guard = EnvVarGuard::unset("KANNA_MOBILE_SERVER_PORT");
+        let temp = TestTempDir::new();
+
+        let env = build_transfer_sidecar_env_for_bundle_identifier(
+            temp.path(),
+            Some("Jeremy's MacBook Pro"),
+            kanna_runtime_defaults::STAGING_DESKTOP_BUNDLE_IDENTIFIER,
+            false,
+        )
+        .expect("sidecar env should be built");
+
+        assert_eq!(
+            env.get("KANNA_MOBILE_SERVER_PORT").map(String::as_str),
+            Some("48121")
         );
     }
 
