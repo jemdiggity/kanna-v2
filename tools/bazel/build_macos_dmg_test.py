@@ -239,6 +239,48 @@ class BuildMacosDmgTest(unittest.TestCase):
             subprocess_run.assert_called_once()
             self.assertTrue(ds_store_path.exists())
 
+    def test_run_finder_layout_retries_finder_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            mount_dir = Path(temp_dir) / "Kanna Staging"
+            mount_dir.mkdir()
+            ds_store_path = mount_dir / ".DS_Store"
+
+            attempts = 0
+
+            def fake_run(command, check=False, capture_output=False, text=False):
+                nonlocal attempts
+                attempts += 1
+                if attempts == 1:
+                    return subprocess.CompletedProcess(
+                        args=command,
+                        returncode=1,
+                        stdout="",
+                        stderr="execution error: Finder got an error: AppleEvent timed out. (-1712)",
+                    )
+                ds_store_path.write_text("finder-layout", encoding="utf-8")
+                return subprocess.CompletedProcess(
+                    args=command, returncode=0, stdout="", stderr=""
+                )
+
+            with mock.patch.object(
+                build_macos_dmg, "build_applescript", return_value="on run {}"
+            ):
+                with mock.patch.object(build_macos_dmg.time, "sleep"):
+                    with mock.patch.object(
+                        build_macos_dmg.subprocess, "run", side_effect=fake_run
+                    ) as subprocess_run:
+                        build_macos_dmg.run_finder_layout(
+                            mount_dir=mount_dir,
+                            window_pos=(10, 60),
+                            window_size=(500, 350),
+                            icon_size=128,
+                            text_size=16,
+                            icon_positions={"Kanna Staging.app": (160, 175)},
+                        )
+
+            self.assertEqual(subprocess_run.call_count, 2)
+            self.assertTrue(ds_store_path.exists())
+
     def test_run_finder_layout_surfaces_osascript_failure_details(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             mount_dir = Path(temp_dir) / "Kanna 1"

@@ -20,6 +20,7 @@ DEFAULT_TEXT_SIZE = 16
 FINDER_INFO_LENGTH = 32
 VOLUME_CUSTOM_ICON_FLAG = 0x0400
 FINDER_LAYOUT_LOCK_PATH = Path("/tmp/kanna-build-macos-dmg-finder.lock")
+RETRYABLE_FINDER_ERRORS = ("(-1712)", "(-1728)")
 
 
 def parse_args() -> argparse.Namespace:
@@ -246,7 +247,7 @@ def run_finder_layout(
                 break
             stdout = result.stdout.strip()
             stderr = result.stderr.strip()
-            if "(-1728)" not in result.stderr:
+            if not any(error_code in result.stderr for error_code in RETRYABLE_FINDER_ERRORS):
                 keep_applescript = True
                 message_lines = [
                     f"Finder layout failed for mounted volume '{mounted_volume_name}' (attempt {attempt}/10)",
@@ -269,7 +270,7 @@ def run_finder_layout(
                         f"Finder layout failed for mounted volume '{mounted_volume_name}' after 10 retries",
                         f"mount path: {mount_dir}",
                         f"AppleScript path: {applescript_path}",
-                        "osascript continued returning Finder missing-item errors (-1728)",
+                        "osascript continued returning retryable Finder errors (-1712/-1728)",
                     ]
                 )
             )
