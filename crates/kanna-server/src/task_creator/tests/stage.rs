@@ -1,6 +1,34 @@
 use super::*;
 
 #[test]
+fn builtin_qa_pipeline_ships_approve_as_pr_stage_post() {
+    let repo_root =
+        std::env::temp_dir().join(format!("kanna-builtin-qa-pipeline-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&repo_root);
+    std::fs::create_dir_all(&repo_root).unwrap();
+
+    let pipeline =
+        super::super::definitions::read_pipeline_definition(&repo_root.to_string_lossy(), "qa")
+            .unwrap();
+
+    let pr_stage = pipeline
+        .stages
+        .iter()
+        .find(|stage| stage.name == "pr")
+        .expect("qa pipeline should have a pr stage");
+    let post = pr_stage.post.as_ref().expect("pr stage should have a post");
+    assert_eq!(post.name, "approve");
+    assert_eq!(post.agent.as_deref(), Some("approve"));
+    assert!(post
+        .prompt
+        .as_deref()
+        .unwrap_or_default()
+        .contains("$PREV_RESULT"));
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
 fn prepare_merge_agent_creates_in_progress_task() {
     let repo_root =
         std::env::temp_dir().join(format!("kanna-merge-agent-task-{}", std::process::id()));

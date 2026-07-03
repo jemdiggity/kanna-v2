@@ -67,6 +67,7 @@ For each branch in safe order:
 7. If no PR URL exists, ask before directly updating the target branch.
 8. After each merge, fetch/reset to the updated target and recheck any risk areas involving already-merged branches.
 9. For stacked PRs, retarget direct children onto the next live parent or target branch with `gh pr edit --base` when a PR URL exists. Do not delete a parent branch while an unmerged child still uses it.
+10. After the full detected stack has merged, delete the stack branches that are no longer needed.
 
 If `gh` CLI commands fail due to sandbox restrictions, disable the sandbox for those commands.
 
