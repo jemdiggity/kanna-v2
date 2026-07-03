@@ -8,6 +8,7 @@ import { invoke } from "../invoke";
 import { getDefaultBaseBranch } from "../utils/baseBranchPicker";
 import { parseRepoInput } from "../utils/parseRepoInput";
 import { defaultReposHome } from "../utils/reposHome";
+import { fileExistsSafe } from "../utils/invokeHelpers";
 import type { DesktopCloudSnapshot } from "../services/desktopCloudTaskIndex";
 import type { useKannaStore } from "../stores/kanna";
 import type { useToast } from "./useToast";
@@ -210,10 +211,7 @@ export function useAppTaskCreation({
     for (let i = 1; i <= 99; i++) {
       const candidateName = i === 1 ? baseName : `${baseName}-${i}`;
       const candidatePath = `${parentDir}/${candidateName}`;
-      const exists = await invoke<boolean>("file_exists", { path: candidatePath }).catch((error) => {
-        console.debug("[App] failed to check candidate cloud clone path; treating as available:", error);
-        return false;
-      });
+      const exists = await fileExistsSafe(candidatePath);
       if (!exists) return candidatePath;
     }
     return `${parentDir}/${baseName}-${Date.now()}`;

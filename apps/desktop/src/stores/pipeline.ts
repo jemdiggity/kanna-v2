@@ -3,6 +3,7 @@ import { parsePipelineJson } from "../../../../packages/core/src/pipeline/pipeli
 import type { AgentDefinition, PipelineDefinition } from "../../../../packages/core/src/pipeline/pipeline-types";
 import { invoke } from "../invoke";
 import { resolveKannaServerBaseUrl } from "./kannaCliEnv";
+import { readEnvVarOptional } from "../utils/invokeHelpers";
 import { requireService, type AdvanceStageOptions, type StoreContext } from "./state";
 import { debugLog } from "../utils/debugLog";
 
@@ -32,10 +33,7 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
     while (Date.now() < deadline) {
       try {
         await invoke("ensure_mobile_server");
-        const port = await invoke<string>("read_env_var", { name: "KANNA_MOBILE_SERVER_PORT" }).catch((error) => {
-          console.debug("[pipeline] KANNA_MOBILE_SERVER_PORT not set:", error);
-          return null;
-        });
+        const port = await readEnvVarOptional("KANNA_MOBILE_SERVER_PORT");
         return resolveKannaServerBaseUrl(port);
       } catch (error) {
         lastError = error;

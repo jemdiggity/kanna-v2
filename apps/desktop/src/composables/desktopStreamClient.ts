@@ -1,5 +1,6 @@
 import { StreamClient } from "@kanna/stream-client";
 import { invoke } from "../invoke";
+import { readEnvVarOptional } from "../utils/invokeHelpers";
 
 type ConnectionListener = (connected: boolean) => void;
 
@@ -24,7 +25,7 @@ export async function getSharedStreamClient(): Promise<StreamClient> {
 
   sharedClientPromise = (async () => {
     await invoke("ensure_mobile_server");
-    const port = await invoke<string>("read_env_var", { name: "KANNA_MOBILE_SERVER_PORT" }).catch(() => null);
+    const port = await readEnvVarOptional("KANNA_MOBILE_SERVER_PORT");
     const client = new StreamClient({
       url: streamUrlFromPort(port),
       onConnectionChange: notifyConnectionListeners,

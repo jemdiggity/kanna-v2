@@ -6,6 +6,7 @@ import { isTauri } from "../tauri-mock";
 import { buildTaskShellCommand, getShellTerminalEnv, getTaskTerminalEnv } from "../composables/terminalSessionRecovery";
 import { buildKannaCliPathEnv, buildTaskRuntimeEnv, resolveKannaServerBaseUrl } from "./kannaCliEnv";
 import { prepareKannaMcpRuntime } from "./kannaMcpRuntime";
+import { readEnvVarOptional, whichBinaryOptional } from "../utils/invokeHelpers";
 import { encodeDaemonInput } from "./daemonInput";
 import { getAgentPermissionFlags } from "./agent-permissions";
 import { buildWorktreeSessionEnv } from "./worktreeEnv";
@@ -101,13 +102,8 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
       return explicitPath;
     }
 
-    try {
-      const inheritedPath = await invoke<string>("read_env_var", { name: "PATH" });
-      return inheritedPath.length > 0 ? inheritedPath : null;
-    } catch (error) {
-      console.error("[store] failed to resolve inherited PATH:", error);
-      return null;
-    }
+    const inheritedPath = await readEnvVarOptional("PATH");
+    return inheritedPath && inheritedPath.length > 0 ? inheritedPath : null;
   }
 
   async function applyTaskRuntimeStatus(item: import("@kanna/db").PipelineItem, status: string) {
@@ -153,13 +149,8 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
 
   async function isAgentProviderAvailable(provider: AgentProvider): Promise<boolean> {
     const binary = agentProviderBinary(provider);
-    try {
-      const path = await invoke<string | null>("which_binary", { name: binary });
-      return Boolean(path);
-    } catch (error) {
-      console.debug(`[store] which_binary failed for ${binary}:`, error);
-      return false;
-    }
+    const path = await whichBinaryOptional(binary);
+    return Boolean(path);
   }
 
   async function getAgentProviderAvailability(): Promise<AgentProviderAvailability> {
@@ -221,22 +212,14 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
       Object.assign(env, parsedPortEnv);
     }
     const runtimePath = await readInheritedPath(env.PATH);
-    let resolvedKannaCliPath: string | null = null;
-    try {
-      resolvedKannaCliPath = await invoke<string>("which_binary", { name: "kanna-cli" });
-    } catch (error) {
-      console.error("[store] failed to resolve shell kanna-cli path:", error);
-    }
+    const resolvedKannaCliPath = await whichBinaryOptional("kanna-cli");
 
     const shellTaskId = isWorktree ? taskIdFromWorktreeShellSessionId(sessionId) : null;
     if (shellTaskId) {
       try {
         const [socketPath, mobileServerPort] = await Promise.all([
           invoke<string>("get_pipeline_socket_path"),
-          invoke<string>("read_env_var", { name: "KANNA_MOBILE_SERVER_PORT" }).catch((error) => {
-            console.debug("[store] KANNA_MOBILE_SERVER_PORT not set while building shell env:", error);
-            return null;
-          }),
+          readEnvVarOptional("KANNA_MOBILE_SERVER_PORT"),
         ]);
         Object.assign(env, buildTaskRuntimeEnv({
           taskId: shellTaskId,
@@ -330,10 +313,7 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
       console.error("[store] failed to read SDK task config during session recovery:", error);
       return {};
     });
-    const inheritedPath = await invoke<string>("read_env_var", { name: "PATH" }).catch((error) => {
-      console.debug("[store] PATH not available while recovering SDK task env:", error);
-      return null;
-    });
+    const inheritedPath = await readEnvVarOptional("PATH");
     const agentBaseEnv = buildWorktreeSessionEnv({
       worktreePath,
       repoConfig,
@@ -345,16 +325,8 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
       ...buildTaskRuntimeEnv({
         taskId: sessionId,
         socketPath: await invoke<string>("get_pipeline_socket_path"),
-        serverBaseUrl: resolveKannaServerBaseUrl(
-          await invoke<string>("read_env_var", { name: "KANNA_MOBILE_SERVER_PORT" }).catch((error) => {
-            console.debug("[store] KANNA_MOBILE_SERVER_PORT not set while recovering SDK task env:", error);
-            return null;
-          }),
-        ),
-        kannaCliPath: await invoke<string>("which_binary", { name: "kanna-cli" }).catch((error) => {
-          console.debug("[store] kanna-cli not available while recovering SDK task env:", error);
-          return null;
-        }),
+        serverBaseUrl: resolveKannaServerBaseUrl(await readEnvVarOptional("KANNA_MOBILE_SERVER_PORT")),
+        kannaCliPath: await whichBinaryOptional("kanna-cli"),
         path: agentBaseEnv.PATH ?? inheritedPath,
       }),
     };
@@ -418,12 +390,9 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
     }
     const runtimePath = await readInheritedPath(env.PATH);
 
-    let resolvedKannaCliPath: string | null = null;
-    try {
-      kannaCliPath = await invoke<string>("which_binary", { name: "kanna-cli" });
-      resolvedKannaCliPath = kannaCliPath;
-    } catch (error) {
-      console.error("[store] failed to resolve kanna-cli path:", error);
+    const resolvedKannaCliPath = await whichBinaryOptional("kanna-cli");
+    if (resolvedKannaCliPath) {
+      kannaCliPath = resolvedKannaCliPath;
     }
 
     try {
@@ -433,12 +402,7 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
       Object.assign(env, buildTaskRuntimeEnv({
         taskId: sessionId,
         socketPath,
-        serverBaseUrl: resolveKannaServerBaseUrl(
-          await invoke<string>("read_env_var", { name: "KANNA_MOBILE_SERVER_PORT" }).catch((error) => {
-            console.debug("[store] KANNA_MOBILE_SERVER_PORT not set while building session env:", error);
-            return null;
-          }),
-        ),
+        serverBaseUrl: resolveKannaServerBaseUrl(await readEnvVarOptional("KANNA_MOBILE_SERVER_PORT")),
         kannaCliPath: resolvedKannaCliPath,
         path: runtimePath,
       }));

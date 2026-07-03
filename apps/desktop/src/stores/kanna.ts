@@ -34,6 +34,7 @@ import { createSessionsApi } from "./sessions";
 import { createPipelineApi } from "./pipeline";
 import { createTasksApi } from "./tasks";
 import { createInitApi } from "./init";
+import { fileExistsSafe } from "../utils/invokeHelpers";
 import type { WindowWorkspaceController } from "../windowWorkspace";
 
 export { readRepoConfig } from "./state";
@@ -161,10 +162,7 @@ async function findCodexRolloutArtifact(sessionId: string): Promise<LocatedTrans
   try {
     const home = await invoke<string>("read_env_var", { name: "HOME" });
     const sessionsRoot = `${home}/.codex/sessions`;
-    const rootExists = await invoke<boolean>("file_exists", { path: sessionsRoot }).catch((error) => {
-      console.debug("[store] failed to check Codex sessions root:", error);
-      return false;
-    });
+    const rootExists = await fileExistsSafe(sessionsRoot);
     if (!rootExists) return null;
 
     const years = await listDirectoryNames(sessionsRoot);
@@ -298,10 +296,7 @@ export const useKannaStore = defineStore("kanna", () => {
       const home = await invoke<string>("read_env_var", { name: "HOME" });
       if (item.agent_provider === "claude") {
         const sourceDir = `${home}/.claude/tasks/${item.agent_session_id}`;
-        const exists = await invoke<boolean>("file_exists", { path: sourceDir }).catch((error) => {
-          console.debug("[store] failed to check Claude session artifact source:", error);
-          return false;
-        });
+        const exists = await fileExistsSafe(sourceDir);
         if (!exists) return [];
 
         const archivePath = buildTransferArchivePath(transferId, "claude-session");
@@ -328,10 +323,7 @@ export const useKannaStore = defineStore("kanna", () => {
 
       if (item.agent_provider === "copilot") {
         const sourceDir = `${home}/.copilot/session-state/${item.agent_session_id}`;
-        const exists = await invoke<boolean>("file_exists", { path: sourceDir }).catch((error) => {
-          console.debug("[store] failed to check Copilot session artifact source:", error);
-          return false;
-        });
+        const exists = await fileExistsSafe(sourceDir);
         if (!exists) return [];
 
         const archivePath = buildTransferArchivePath(transferId, "copilot-session");
@@ -381,10 +373,7 @@ export const useKannaStore = defineStore("kanna", () => {
       const destinationPath = joinHomeRelativePath(home, artifact.home_rel_path);
       const destinationParent = parentDirectory(destinationPath);
       const materialization = resolveTransferArtifactMaterialization(artifact);
-      const destinationExists = await invoke<boolean>("file_exists", { path: destinationPath }).catch((error) => {
-        console.debug("[store] failed to check transferred artifact destination:", error);
-        return false;
-      });
+      const destinationExists = await fileExistsSafe(destinationPath);
       if (destinationExists) {
         console.warn("[store] skipping transferred session import because destination already exists:", destinationPath);
         return null;
@@ -436,18 +425,12 @@ export const useKannaStore = defineStore("kanna", () => {
 
     const base = sanitizeTransferRepoName(repoName);
     let candidate = `${parentDir}/${base}`;
-    let exists = await invoke<boolean>("file_exists", { path: candidate }).catch((error) => {
-      console.debug("[store] failed to check transferred repo path candidate:", error);
-      return false;
-    });
+    let exists = await fileExistsSafe(candidate);
     if (!exists) return candidate;
 
     for (let index = 2; index <= 99; index += 1) {
       candidate = `${parentDir}/${base}-${index}`;
-      exists = await invoke<boolean>("file_exists", { path: candidate }).catch((error) => {
-        console.debug("[store] failed to check transferred repo enumerated path candidate:", error);
-        return false;
-      });
+      exists = await fileExistsSafe(candidate);
       if (!exists) return candidate;
     }
 

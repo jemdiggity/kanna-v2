@@ -1,5 +1,5 @@
 import { Terminal, type ILink } from "@xterm/xterm"
-import { invoke } from "../invoke"
+import { fileExistsSafe } from "../utils/invokeHelpers"
 import type { TerminalOptions } from "./terminalTypes"
 
 // --- File link provider ---
@@ -56,14 +56,9 @@ export function createTerminalFileLinkProvider(params: {
 
   async function checkFileExists(checkPath: string): Promise<boolean> {
     if (fileExistsCache.has(checkPath)) return fileExistsCache.get(checkPath)!
-    try {
-      const exists = await invoke<boolean>("file_exists", { path: checkPath })
-      fileExistsCache.set(checkPath, exists)
-      return exists
-    } catch {
-      fileExistsCache.set(checkPath, false)
-      return false
-    }
+    const exists = await fileExistsSafe(checkPath)
+    fileExistsCache.set(checkPath, exists)
+    return exists
   }
 
   function register(): void {
