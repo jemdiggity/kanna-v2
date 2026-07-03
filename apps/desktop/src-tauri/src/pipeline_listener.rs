@@ -6,10 +6,10 @@ use tokio::io::AsyncBufReadExt;
 use crate::{daemon_data_dir, PipelineSocketState};
 
 /// Compute the kanna.sock path for the pipeline listener.
-/// Uses short_socket_path to stay under macOS SUN_LEN (104 bytes).
+/// Uses a hashed /tmp path to stay under macOS SUN_LEN (104 bytes).
 fn pipeline_socket_path() -> PathBuf {
     let dir = daemon_data_dir().join("pipeline");
-    crate::short_socket_path(&dir)
+    kanna_runtime_defaults::socket_path(&dir)
 }
 
 /// Spawn a Unix socket listener at kanna.sock that accepts stage-complete

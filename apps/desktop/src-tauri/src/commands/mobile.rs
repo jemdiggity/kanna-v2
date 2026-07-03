@@ -781,7 +781,7 @@ fn find_sidecar(name: &str) -> Result<PathBuf, String> {
         let suffixed = dir.join(format!(
             "{}-{}",
             name,
-            crate::commands::fs::current_target_triple()
+            kanna_runtime_defaults::current_target_triple()
         ));
         if suffixed.exists() {
             return Ok(suffixed);
@@ -792,13 +792,12 @@ fn find_sidecar(name: &str) -> Result<PathBuf, String> {
         }
     }
 
-    for candidate in crate::commands::fs::sidecar_candidates(name) {
-        if candidate.exists() {
-            return Ok(candidate);
-        }
-    }
-
-    Err(format!("mobile sidecar '{}' not found", name))
+    kanna_runtime_defaults::resolve_binary_from_candidates(
+        name,
+        crate::commands::fs::sidecar_candidates(name),
+        |_| Err(format!("mobile sidecar '{}' not found", name)),
+    )
+    .map(PathBuf::from)
 }
 
 fn server_base_url(port: u16) -> String {
@@ -2633,28 +2632,6 @@ mod tests {
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
 
-            CREATE TABLE settings (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            );
-
-            CREATE TABLE terminal_session (
-                id TEXT PRIMARY KEY,
-                repo_id TEXT NOT NULL,
-                pipeline_item_id TEXT,
-                label TEXT,
-                cwd TEXT,
-                daemon_session_id TEXT
-            );
-
-            CREATE TABLE task_port (
-                pipeline_item_id TEXT NOT NULL,
-                env_name TEXT NOT NULL,
-                port INTEGER NOT NULL,
-                PRIMARY KEY (pipeline_item_id, env_name),
-                UNIQUE (port)
-            );
-
             CREATE TABLE stage_run (
                 id TEXT PRIMARY KEY,
                 task_id TEXT NOT NULL,
@@ -2676,6 +2653,28 @@ mod tests {
                 blocked_item_id TEXT NOT NULL,
                 blocker_item_id TEXT NOT NULL,
                 PRIMARY KEY (blocked_item_id, blocker_item_id)
+            );
+
+            CREATE TABLE settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+
+            CREATE TABLE terminal_session (
+                id TEXT PRIMARY KEY,
+                repo_id TEXT NOT NULL,
+                pipeline_item_id TEXT,
+                label TEXT,
+                cwd TEXT,
+                daemon_session_id TEXT
+            );
+
+            CREATE TABLE task_port (
+                pipeline_item_id TEXT NOT NULL,
+                env_name TEXT NOT NULL,
+                port INTEGER NOT NULL,
+                PRIMARY KEY (pipeline_item_id, env_name),
+                UNIQUE (port)
             );
             "#,
         )
@@ -2704,13 +2703,7 @@ mod tests {
     }
 
     fn daemon_socket_path_for_dir(daemon_dir: &std::path::Path) -> PathBuf {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        let mut hasher = DefaultHasher::new();
-        daemon_dir.hash(&mut hasher);
-        let hash = hasher.finish() as u32;
-        PathBuf::from(format!("/tmp/kanna-{hash:08x}.sock"))
+        kanna_runtime_defaults::socket_path(daemon_dir)
     }
 
     async fn spawn_one_task_create_daemon(
@@ -2971,7 +2964,7 @@ while True:
             manifest_dir.join("binaries"),
             repo_root
                 .join(".build")
-                .join(crate::commands::fs::current_target_triple())
+                .join(kanna_runtime_defaults::current_target_triple())
                 .join("debug"),
             repo_root.join(".build").join("debug"),
         ]
@@ -2979,7 +2972,7 @@ while True:
         .find(|dir| {
             dir.join(format!(
                 "kanna-server-{}",
-                crate::commands::fs::current_target_triple()
+                kanna_runtime_defaults::current_target_triple()
             ))
             .is_file()
                 || dir.join("kanna-server").is_file()
@@ -2990,7 +2983,7 @@ while True:
         let dir = test_sidecar_dir()?;
         let suffixed = dir.join(format!(
             "kanna-server-{}",
-            crate::commands::fs::current_target_triple()
+            kanna_runtime_defaults::current_target_triple()
         ));
         if suffixed.is_file() {
             return Some(suffixed);

@@ -1,3 +1,5 @@
+import { assertOk, httpRequest } from "../http/client.js";
+
 export interface SlackMessage {
   ts: string;
   user: string;
@@ -9,22 +11,16 @@ export interface SlackClientOptions {
   timeoutMs?: number;
 }
 
-const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
-
 export class SlackClient {
   constructor(
     private readonly token: string,
     private readonly options: SlackClientOptions = {}
   ) {}
 
-  private requestSignal(): AbortSignal {
-    return AbortSignal.timeout(this.options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS);
-  }
-
   async postMessage(channel: string, text: string): Promise<void> {
-    const response = await fetch("https://slack.com/api/chat.postMessage", {
+    const response = await httpRequest("https://slack.com/api/chat.postMessage", {
       method: "POST",
-      signal: this.requestSignal(),
+      timeoutMs: this.options.timeoutMs,
       headers: {
         Authorization: `Bearer ${this.token}`,
         "Content-Type": "application/json",
@@ -32,9 +28,7 @@ export class SlackClient {
       body: JSON.stringify({ channel, text }),
     });
 
-    if (!response.ok) {
-      throw new Error(`Slack HTTP error ${response.status}`);
-    }
+    await assertOk(response, "Slack HTTP");
 
     const data = (await response.json()) as { ok: boolean; error?: string };
     if (!data.ok) {
@@ -51,19 +45,17 @@ export class SlackClient {
       params.set("oldest", oldest);
     }
 
-    const response = await fetch(
+    const response = await httpRequest(
       `https://slack.com/api/conversations.history?${params.toString()}`,
       {
-        signal: this.requestSignal(),
+        timeoutMs: this.options.timeoutMs,
         headers: {
           Authorization: `Bearer ${this.token}`,
         },
       }
     );
 
-    if (!response.ok) {
-      throw new Error(`Slack HTTP error ${response.status}`);
-    }
+    await assertOk(response, "Slack HTTP");
 
     const data = (await response.json()) as {
       ok: boolean;

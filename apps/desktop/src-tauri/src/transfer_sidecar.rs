@@ -750,13 +750,12 @@ fn required_bool(value: &Value, keys: &[&str]) -> Result<bool, String> {
 }
 
 fn resolve_sidecar_binary() -> Result<PathBuf, String> {
-    for candidate in crate::commands::fs::sidecar_candidates("kanna-task-transfer") {
-        if candidate.exists() {
-            return Ok(candidate);
-        }
-    }
-
-    Err("kanna-task-transfer sidecar binary not found".to_string())
+    kanna_runtime_defaults::resolve_binary_from_candidates(
+        "kanna-task-transfer",
+        crate::commands::fs::sidecar_candidates("kanna-task-transfer"),
+        |_| Err("kanna-task-transfer sidecar binary not found".to_string()),
+    )
+    .map(PathBuf::from)
 }
 
 #[cfg(test)]

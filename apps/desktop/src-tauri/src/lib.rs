@@ -42,22 +42,13 @@ pub(crate) fn test_env_lock() -> &'static std::sync::Mutex<()> {
     static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
     LOCK.get_or_init(|| std::sync::Mutex::new(()))
 }
-pub(crate) fn short_socket_path(dir: &PathBuf) -> PathBuf {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    dir.hash(&mut hasher);
-    let hash = hasher.finish() as u32;
-    PathBuf::from(format!("/tmp/kanna-{:08x}.sock", hash))
-}
-
 /// Directory where daemon stores PID file and logs.
 pub fn daemon_data_dir() -> PathBuf {
     kanna_runtime_defaults::daemon_dir_for_current_runtime()
 }
 
 pub fn daemon_socket_path() -> PathBuf {
-    short_socket_path(&daemon_data_dir())
+    kanna_runtime_defaults::socket_path(&daemon_data_dir())
 }
 
 #[cfg(debug_assertions)]
