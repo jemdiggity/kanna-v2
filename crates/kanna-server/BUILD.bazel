@@ -16,7 +16,10 @@ rust_binary(
     srcs = glob(["src/**/*.rs"]),
     crate_root = "src/main.rs",
     crate_name = "kanna_server",
-    compile_data = ["//:kanna_builtin_resources"],
+    compile_data = [
+        "//:kanna_builtin_resources",
+        "//packages/core:src/pipeline/kanna-task-environment.md",
+    ],
     edition = "2021",
     deps = all_crate_deps(normal = True) + [
         "//crates/daemon:kanna_daemon_lib_for_server",
@@ -31,7 +34,10 @@ rust_binary(
     srcs = glob(["src/**/*.rs"]),
     crate_root = "src/main.rs",
     crate_name = "kanna_server",
-    compile_data = ["//:kanna_builtin_resources"],
+    compile_data = [
+        "//:kanna_builtin_resources",
+        "//packages/core:src/pipeline/kanna-task-environment.md",
+    ],
     edition = "2021",
     deps = all_crate_deps(normal = True) + [
         "//crates/daemon:kanna_daemon_lib_for_server",

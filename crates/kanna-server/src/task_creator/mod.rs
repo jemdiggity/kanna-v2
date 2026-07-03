@@ -353,6 +353,7 @@ fn build_prepared_session(
                 &agent_cmd,
                 setup,
                 spawn_env.get("KANNA_CLI_PATH").map(String::as_str),
+                spawn_env.get("PATH").map(String::as_str),
             );
             PreparedSessionSpawn::Pty {
                 executable: "/bin/zsh".to_string(),
