@@ -112,7 +112,7 @@ async fn prepared_revision_agent_task_spawn_sends_task_specific_kanna_context() 
     ));
     match commands.into_iter().last().expect("respawn command") {
         kanna_daemon::protocol::Command::SpawnAgent { session_id, params } => {
-            assert_eq!(session_id, &expected_session_id);
+            assert_eq!(session_id, expected_session_id);
             assert_eq!(params.agent_provider, DaemonAgentProvider::Claude);
             assert!(params.cwd.contains(".kanna-worktrees/task-"));
             let system_prompt = params
