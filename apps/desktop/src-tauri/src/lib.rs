@@ -250,22 +250,13 @@ fn fix_path_from_shell() {
     }
 }
 
-fn short_socket_path(dir: &PathBuf) -> PathBuf {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    dir.hash(&mut hasher);
-    let hash = hasher.finish() as u32;
-    PathBuf::from(format!("/tmp/kanna-{:08x}.sock", hash))
-}
-
 /// Directory where daemon stores PID file and logs.
 pub fn daemon_data_dir() -> PathBuf {
     kanna_runtime_defaults::daemon_dir_for_current_runtime()
 }
 
 pub fn daemon_socket_path() -> PathBuf {
-    short_socket_path(&daemon_data_dir())
+    kanna_runtime_defaults::socket_path(&daemon_data_dir())
 }
 
 #[cfg(debug_assertions)]
@@ -290,10 +281,10 @@ fn resolve_webdriver_port() -> Option<u16> {
 }
 
 /// Compute the kanna.sock path for the pipeline listener.
-/// Uses short_socket_path to stay under macOS SUN_LEN (104 bytes).
+/// Uses a hashed /tmp path to stay under macOS SUN_LEN (104 bytes).
 fn pipeline_socket_path() -> PathBuf {
     let dir = daemon_data_dir().join("pipeline");
-    short_socket_path(&dir)
+    kanna_runtime_defaults::socket_path(&dir)
 }
 
 /// Spawn a Unix socket listener at kanna.sock that accepts stage-complete

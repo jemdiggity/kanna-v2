@@ -2681,13 +2681,7 @@ mod tests {
     }
 
     fn daemon_socket_path_for_dir(daemon_dir: &std::path::Path) -> PathBuf {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        let mut hasher = DefaultHasher::new();
-        daemon_dir.hash(&mut hasher);
-        let hash = hasher.finish() as u32;
-        PathBuf::from(format!("/tmp/kanna-{hash:08x}.sock"))
+        kanna_runtime_defaults::socket_path(daemon_dir)
     }
 
     async fn spawn_one_task_create_daemon(

@@ -414,14 +414,7 @@ fn prepend_path_entry(path: Option<&str>, entry: &str) -> String {
 
 fn pipeline_socket_path(daemon_dir: &str) -> String {
     let dir = PathBuf::from(daemon_dir).join("pipeline");
-    short_socket_path(&dir).to_string_lossy().to_string()
-}
-
-fn short_socket_path(dir: &PathBuf) -> PathBuf {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    dir.hash(&mut hasher);
-    let hash = hasher.finish() as u32;
-    PathBuf::from(format!("/tmp/kanna-{:08x}.sock", hash))
+    kanna_runtime_defaults::socket_path(&dir)
+        .to_string_lossy()
+        .to_string()
 }

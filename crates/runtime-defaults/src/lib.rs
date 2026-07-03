@@ -201,6 +201,17 @@ pub fn default_transfer_registry_dir() -> PathBuf {
     default_transfer_registry_dir_for_home(&home_dir())
 }
 
+pub fn socket_path(dir: &Path) -> PathBuf {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let dir = dir.to_path_buf();
+    let mut hasher = DefaultHasher::new();
+    dir.hash(&mut hasher);
+    let hash = hasher.finish() as u32;
+    PathBuf::from(format!("/tmp/kanna-{hash:08x}.sock"))
+}
+
 fn macos_app_support_dir_for_home(home: &Path) -> PathBuf {
     home.join("Library").join("Application Support")
 }
@@ -304,6 +315,29 @@ mod tests {
                 "/Users/tester/Library/Application Support/build.kanna/transfer/registry"
             )
         );
+    }
+
+    #[test]
+    fn socket_path_matches_legacy_pathbuf_hash_algorithm() {
+        fn legacy_socket_path(dir: &Path) -> PathBuf {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+
+            let dir = dir.to_path_buf();
+            let mut hasher = DefaultHasher::new();
+            dir.hash(&mut hasher);
+            let hash = hasher.finish() as u32;
+            PathBuf::from(format!("/tmp/kanna-{hash:08x}.sock"))
+        }
+
+        for dir in [
+            Path::new("/Users/tester/Library/Application Support/Kanna"),
+            Path::new("/repo/.kanna-worktrees/task-1234/.kanna-daemon"),
+            Path::new("/repo/.kanna-worktrees/task-1234/.kanna-daemon/pipeline"),
+            Path::new("/tmp/kanna daemon with spaces"),
+        ] {
+            assert_eq!(socket_path(dir), legacy_socket_path(dir));
+        }
     }
 
     #[test]
