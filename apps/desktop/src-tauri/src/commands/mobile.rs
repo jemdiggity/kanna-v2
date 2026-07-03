@@ -781,7 +781,7 @@ fn find_sidecar(name: &str) -> Result<PathBuf, String> {
         let suffixed = dir.join(format!(
             "{}-{}",
             name,
-            crate::commands::fs::current_target_triple()
+            kanna_runtime_defaults::current_target_triple()
         ));
         if suffixed.exists() {
             return Ok(suffixed);
@@ -792,13 +792,12 @@ fn find_sidecar(name: &str) -> Result<PathBuf, String> {
         }
     }
 
-    for candidate in crate::commands::fs::sidecar_candidates(name) {
-        if candidate.exists() {
-            return Ok(candidate);
-        }
-    }
-
-    Err(format!("mobile sidecar '{}' not found", name))
+    kanna_runtime_defaults::resolve_binary_from_candidates(
+        name,
+        crate::commands::fs::sidecar_candidates(name),
+        |_| Err(format!("mobile sidecar '{}' not found", name)),
+    )
+    .map(PathBuf::from)
 }
 
 fn server_base_url(port: u16) -> String {
@@ -2633,6 +2632,29 @@ mod tests {
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
 
+            CREATE TABLE stage_run (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                stage TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'main' CHECK (kind IN ('main', 'post')),
+                agent TEXT,
+                agent_provider TEXT,
+                model TEXT,
+                status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'succeeded', 'failed', 'cancelled')),
+                result TEXT,
+                feedback TEXT,
+                session_id TEXT,
+                started_at TEXT NOT NULL DEFAULT (datetime('now')),
+                finished_at TEXT
+            );
+            CREATE INDEX idx_stage_run_task_started ON stage_run(task_id, started_at);
+
+            CREATE TABLE task_blocker (
+                blocked_item_id TEXT NOT NULL,
+                blocker_item_id TEXT NOT NULL,
+                PRIMARY KEY (blocked_item_id, blocker_item_id)
+            );
+
             CREATE TABLE settings (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -2681,13 +2703,7 @@ mod tests {
     }
 
     fn daemon_socket_path_for_dir(daemon_dir: &std::path::Path) -> PathBuf {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        let mut hasher = DefaultHasher::new();
-        daemon_dir.hash(&mut hasher);
-        let hash = hasher.finish() as u32;
-        PathBuf::from(format!("/tmp/kanna-{hash:08x}.sock"))
+        kanna_runtime_defaults::socket_path(daemon_dir)
     }
 
     async fn spawn_one_task_create_daemon(
@@ -2948,7 +2964,7 @@ while True:
             manifest_dir.join("binaries"),
             repo_root
                 .join(".build")
-                .join(crate::commands::fs::current_target_triple())
+                .join(kanna_runtime_defaults::current_target_triple())
                 .join("debug"),
             repo_root.join(".build").join("debug"),
         ]
@@ -2956,7 +2972,7 @@ while True:
         .find(|dir| {
             dir.join(format!(
                 "kanna-server-{}",
-                crate::commands::fs::current_target_triple()
+                kanna_runtime_defaults::current_target_triple()
             ))
             .is_file()
                 || dir.join("kanna-server").is_file()
@@ -2967,7 +2983,7 @@ while True:
         let dir = test_sidecar_dir()?;
         let suffixed = dir.join(format!(
             "kanna-server-{}",
-            crate::commands::fs::current_target_triple()
+            kanna_runtime_defaults::current_target_triple()
         ));
         if suffixed.is_file() {
             return Some(suffixed);

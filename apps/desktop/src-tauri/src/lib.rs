@@ -250,22 +250,13 @@ fn fix_path_from_shell() {
     }
 }
 
-fn short_socket_path(dir: &PathBuf) -> PathBuf {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    dir.hash(&mut hasher);
-    let hash = hasher.finish() as u32;
-    PathBuf::from(format!("/tmp/kanna-{:08x}.sock", hash))
-}
-
 /// Directory where daemon stores PID file and logs.
 pub fn daemon_data_dir() -> PathBuf {
     kanna_runtime_defaults::daemon_dir_for_current_runtime()
 }
 
 pub fn daemon_socket_path() -> PathBuf {
-    short_socket_path(&daemon_data_dir())
+    kanna_runtime_defaults::socket_path(&daemon_data_dir())
 }
 
 #[cfg(debug_assertions)]
@@ -290,10 +281,10 @@ fn resolve_webdriver_port() -> Option<u16> {
 }
 
 /// Compute the kanna.sock path for the pipeline listener.
-/// Uses short_socket_path to stay under macOS SUN_LEN (104 bytes).
+/// Uses a hashed /tmp path to stay under macOS SUN_LEN (104 bytes).
 fn pipeline_socket_path() -> PathBuf {
     let dir = daemon_data_dir().join("pipeline");
-    short_socket_path(&dir)
+    kanna_runtime_defaults::socket_path(&dir)
 }
 
 /// Spawn a Unix socket listener at kanna.sock that accepts stage-complete
@@ -437,9 +428,13 @@ fn raise_child_nofile_limit() {
 async fn ensure_daemon_running() {
     eprintln!("[daemon] spawning daemon...");
 
-    let daemon_bin = commands::fs::sidecar_candidates("kanna-daemon")
-        .into_iter()
-        .find(|path| path.exists());
+    let daemon_bin = kanna_runtime_defaults::resolve_binary_from_candidates(
+        "kanna-daemon",
+        commands::fs::sidecar_candidates("kanna-daemon"),
+        |_| Err("kanna-daemon sidecar binary not found".to_string()),
+    )
+    .map(PathBuf::from)
+    .ok();
 
     let Some(daemon_bin) = daemon_bin else {
         eprintln!("[daemon] daemon binary not found — PTY sessions will not work");

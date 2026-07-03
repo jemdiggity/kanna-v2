@@ -201,6 +201,108 @@ pub fn default_transfer_registry_dir() -> PathBuf {
     default_transfer_registry_dir_for_home(&home_dir())
 }
 
+pub fn socket_path(dir: &Path) -> PathBuf {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let dir = dir.to_path_buf();
+    let mut hasher = DefaultHasher::new();
+    dir.hash(&mut hasher);
+    let hash = hasher.finish() as u32;
+    PathBuf::from(format!("/tmp/kanna-{hash:08x}.sock"))
+}
+
+pub fn current_target_triple() -> &'static str {
+    #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+    {
+        "aarch64-apple-darwin"
+    }
+    #[cfg(all(target_arch = "x86_64", target_os = "macos"))]
+    {
+        "x86_64-apple-darwin"
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        "unknown-target"
+    }
+}
+
+pub fn sidecar_candidates(name: &str) -> Vec<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .map(|exe| sidecar_candidates_for_exe(&exe, name))
+        .unwrap_or_default()
+}
+
+pub fn sidecar_candidates_for_exe(current_exe: &Path, name: &str) -> Vec<PathBuf> {
+    let Some(exe_dir) = current_exe.parent() else {
+        return Vec::new();
+    };
+
+    let sidecar_name = format!("{}-{}", name, current_target_triple());
+    let mut candidates = vec![exe_dir.join(name), exe_dir.join(&sidecar_name)];
+
+    if let (Some(build_root), Some(profile_dir)) = (exe_dir.parent(), exe_dir.file_name()) {
+        if build_root.file_name().is_some_and(|dir| dir == ".build")
+            && matches!(profile_dir.to_str(), Some("debug" | "release"))
+        {
+            let triple_dir = build_root.join(current_target_triple()).join(profile_dir);
+            candidates.push(triple_dir.join(name));
+            candidates.push(triple_dir.join(&sidecar_name));
+        }
+    }
+
+    candidates.push(exe_dir.join("../Resources").join(&sidecar_name));
+    candidates.push(exe_dir.join("../Resources").join(name));
+    candidates
+}
+
+pub fn resolve_binary_from_candidates<F>(
+    name: &str,
+    candidates: Vec<PathBuf>,
+    path_lookup: F,
+) -> Result<String, String>
+where
+    F: FnOnce(&str) -> Result<String, String>,
+{
+    for candidate in candidates {
+        if candidate.exists() {
+            return Ok(candidate.to_string_lossy().to_string());
+        }
+    }
+
+    path_lookup(name)
+}
+
+pub fn which_binary(name: &str) -> Option<PathBuf> {
+    std::env::var_os("PATH").and_then(|path| which_binary_in_path_os(name, &path))
+}
+
+pub fn which_binary_in_path(name: &str, path: &str) -> Option<PathBuf> {
+    which_binary_in_path_os(name, std::ffi::OsStr::new(path))
+}
+
+pub fn which_binary_in_path_os(name: &str, path: &std::ffi::OsStr) -> Option<PathBuf> {
+    std::env::split_paths(path)
+        .filter(|entry| !entry.as_os_str().is_empty())
+        .map(|entry| entry.join(name))
+        .find(|candidate| is_executable_file(candidate))
+}
+
+#[cfg(unix)]
+pub fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::metadata(path)
+        .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+pub fn is_executable_file(path: &Path) -> bool {
+    path.is_file()
+}
+
 /// Strip ANSI terminal escape sequences from text for logs and usage output.
 ///
 /// Cursor-forward (`CSI <n> C`) is rendered as spaces and cursor-down
@@ -401,6 +503,143 @@ mod tests {
     }
 
     #[test]
+    fn socket_path_matches_legacy_pathbuf_hash_algorithm() {
+        fn legacy_socket_path(dir: &Path) -> PathBuf {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+
+            let dir = dir.to_path_buf();
+            let mut hasher = DefaultHasher::new();
+            dir.hash(&mut hasher);
+            let hash = hasher.finish() as u32;
+            PathBuf::from(format!("/tmp/kanna-{hash:08x}.sock"))
+        }
+
+        for dir in [
+            Path::new("/Users/tester/Library/Application Support/Kanna"),
+            Path::new("/repo/.kanna-worktrees/task-1234/.kanna-daemon"),
+            Path::new("/repo/.kanna-worktrees/task-1234/.kanna-daemon/pipeline"),
+            Path::new("/tmp/kanna daemon with spaces"),
+        ] {
+            assert_eq!(socket_path(dir), legacy_socket_path(dir));
+        }
+    }
+
+    #[test]
+    fn sidecar_candidates_cover_dev_runtime_layout() {
+        let current_exe = Path::new("/repo/.build/debug/kanna-desktop");
+        let candidates = sidecar_candidates_for_exe(current_exe, "kanna-daemon");
+
+        assert_eq!(candidates[0], Path::new("/repo/.build/debug/kanna-daemon"));
+        assert_eq!(
+            candidates[1],
+            Path::new(&format!(
+                "/repo/.build/debug/kanna-daemon-{}",
+                current_target_triple()
+            ))
+        );
+        assert!(candidates.contains(
+            &Path::new(&format!(
+                "/repo/.build/{}/debug/kanna-daemon",
+                current_target_triple()
+            ))
+            .to_path_buf()
+        ));
+    }
+
+    #[test]
+    fn sidecar_candidates_cover_bundled_resource_layout() {
+        let current_exe = Path::new("/Applications/Kanna.app/Contents/MacOS/kanna-desktop");
+        let candidates = sidecar_candidates_for_exe(current_exe, "kanna-server");
+
+        assert_eq!(
+            candidates[0],
+            Path::new("/Applications/Kanna.app/Contents/MacOS/kanna-server")
+        );
+        assert_eq!(
+            candidates[1],
+            Path::new(&format!(
+                "/Applications/Kanna.app/Contents/MacOS/kanna-server-{}",
+                current_target_triple()
+            ))
+        );
+        assert!(candidates.contains(
+            &Path::new(&format!(
+                "/Applications/Kanna.app/Contents/MacOS/../Resources/kanna-server-{}",
+                current_target_triple()
+            ))
+            .to_path_buf()
+        ));
+        assert!(candidates.contains(
+            &Path::new("/Applications/Kanna.app/Contents/MacOS/../Resources/kanna-server")
+                .to_path_buf()
+        ));
+    }
+
+    #[test]
+    fn resolve_binary_from_candidates_prefers_first_existing_candidate() {
+        let resolved = resolve_binary_from_candidates(
+            "kanna-cli",
+            vec![Path::new("/bin/sh").to_path_buf()],
+            |_| Ok("/global/kanna-cli".to_string()),
+        )
+        .expect("existing sidecar candidate should resolve");
+
+        assert_eq!(resolved, "/bin/sh");
+    }
+
+    #[test]
+    fn resolve_binary_from_candidates_can_fallback_to_path() {
+        let resolved = resolve_binary_from_candidates("kanna-cli", Vec::new(), |_| {
+            Ok("/global/kanna-cli".to_string())
+        })
+        .expect("PATH fallback should resolve");
+
+        assert_eq!(resolved, "/global/kanna-cli");
+    }
+
+    #[test]
+    fn which_binary_in_path_finds_executable_in_explicit_path() {
+        let unique = std::env::temp_dir().join(format!(
+            "kanna-runtime-defaults-path-{}",
+            std::process::id()
+        ));
+        let first = unique.join("first");
+        let second = unique.join("second");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+
+        let binary = second.join("kanna-cli");
+        std::fs::write(&binary, b"#!/bin/sh\n").unwrap();
+        make_executable(&binary);
+
+        let path = format!("{}:{}", first.display(), second.display());
+        assert_eq!(which_binary_in_path("kanna-cli", &path), Some(binary));
+
+        let _ = std::fs::remove_dir_all(unique);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn which_binary_in_path_rejects_non_executable_files() {
+        let unique = std::env::temp_dir().join(format!(
+            "kanna-runtime-defaults-path-nonexec-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&unique).unwrap();
+
+        let binary = unique.join("kanna-cli");
+        std::fs::write(&binary, b"#!/bin/sh\n").unwrap();
+
+        assert_eq!(
+            which_binary_in_path("kanna-cli", unique.to_string_lossy().as_ref()),
+            None
+        );
+
+        let _ = std::fs::remove_dir_all(unique);
+    }
+
+    #[test]
     fn preferred_db_path_uses_existing_legacy_only_when_canonical_is_absent() {
         let unique =
             std::env::temp_dir().join(format!("kanna-runtime-defaults-{}", std::process::id()));
@@ -424,6 +663,18 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(unique);
     }
+
+    #[cfg(unix)]
+    fn make_executable(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut permissions = std::fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).unwrap();
+    }
+
+    #[cfg(not(unix))]
+    fn make_executable(_path: &Path) {}
 
     #[test]
     fn desktop_cloud_environment_resolves_from_release_bundle_identifier() {
