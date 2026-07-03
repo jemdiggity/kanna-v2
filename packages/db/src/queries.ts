@@ -94,8 +94,20 @@ export async function listPipelineItems(
   db: DbHandle,
   repoId: string
 ): Promise<PipelineItem[]> {
+  // has_running_post drives the sidebar's "..." prefix: the task's stage is
+  // unchanged while its post (e.g. commit) runs inside the live session, so
+  // the transition-in-flight state is only visible through stage_run.
   return db.select<PipelineItem>(
-    "SELECT * FROM pipeline_item WHERE repo_id = ? AND closed_at IS NULL ORDER BY created_at DESC",
+    `SELECT pipeline_item.*,
+            EXISTS (
+              SELECT 1 FROM stage_run
+              WHERE stage_run.task_id = pipeline_item.id
+                AND stage_run.kind = 'post'
+                AND stage_run.status = 'running'
+            ) AS has_running_post
+     FROM pipeline_item
+     WHERE repo_id = ? AND closed_at IS NULL
+     ORDER BY created_at DESC`,
     [repoId]
   );
 }

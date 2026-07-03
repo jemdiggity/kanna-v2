@@ -151,7 +151,9 @@ function repoCountLabel(repoId: string): string {
 
 function itemTitle(item: SidebarPipelineItem): string {
   const raw = item.display_name || item.issue_title || item.prompt || t('tasks.untitled');
-  return raw;
+  // A running post (e.g. commit) executes inside the live session while the
+  // stage stays put; the "..." prefix is the transition-in-flight signal.
+  return item.has_running_post ? `... ${raw}` : raw;
 }
 
 function itemTooltip(item: SidebarPipelineItem): string | undefined {

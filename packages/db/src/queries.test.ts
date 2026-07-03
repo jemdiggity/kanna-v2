@@ -424,6 +424,13 @@ function createMockDb(): DbHandle & {
             new Date(a.created_at).getTime() -
               new Date(b.created_at).getTime()
         ) as unknown as T[];
+      } else if (q.startsWith("SELECT PIPELINE_ITEM.*") && q.includes("HAS_RUNNING_POST")) {
+        // listPipelineItems: open items plus the derived running-post flag
+        // (this in-memory handle has no stage_run table, so it is always 0).
+        const [repoId] = bindValues as string[];
+        return tables.pipeline_item
+          .filter((p) => p.repo_id === repoId && p.closed_at === null)
+          .map((p) => ({ ...p, has_running_post: 0 })) as unknown as T[];
       } else if (q.startsWith("SELECT * FROM PIPELINE_ITEM WHERE REPO_ID") && q.includes("CLOSED_AT IS NULL")) {
         const [repoId] = bindValues as string[];
         return tables.pipeline_item.filter(
