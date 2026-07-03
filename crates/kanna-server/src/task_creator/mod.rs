@@ -991,69 +991,22 @@ fn prepare_task_spawn(
     let mut spawn_env = build_spawn_env(config, &task_id, &port_env)?;
     apply_workspace_path_env(&mut spawn_env, &worktree_path, &worktree_repo_config);
     let mcp_config_path = write_kanna_mcp_config(&config.daemon_dir, &task_id, &mut spawn_env)?;
-    let session = match agent_type {
-        AgentSessionType::Pty => {
-            let preamble = build_kanna_preamble(
-                &provider,
-                &task_id,
-                &stage_name,
-                &pipeline_name,
-                stage_transition,
-                mcp_config_path.as_deref(),
-            );
-            let agent_cmd = build_agent_command(
-                &provider,
-                &final_prompt,
-                model.as_deref(),
-                permission_mode.as_deref(),
-                &allowed_tools,
-                Some(&preamble),
-                mcp_config_path.as_deref(),
-            );
-            let full_cmd = build_task_shell_command(
-                &agent_cmd,
-                worktree_repo_config.setup.as_deref().unwrap_or(&[]),
-                spawn_env.get("KANNA_CLI_PATH").map(String::as_str),
-            );
-            PreparedSessionSpawn::Pty {
-                executable: "/bin/zsh".to_string(),
-                args: vec![
-                    "--login".to_string(),
-                    "-i".to_string(),
-                    "-c".to_string(),
-                    full_cmd,
-                ],
-                cols: 80,
-                rows: 24,
-                agent_provider: provider.to_daemon_provider(),
-            }
-        }
-        AgentSessionType::Agent => {
-            let headless_executable = resolve_headless_agent_executable(
-                provider,
-                spawn_env.get("PATH").map(String::as_str),
-                &worktree_path,
-            )?;
-            let system_prompt = build_kanna_preamble(
-                &provider,
-                &task_id,
-                &stage_name,
-                &pipeline_name,
-                stage_transition,
-                mcp_config_path.as_deref(),
-            );
-            PreparedSessionSpawn::Agent {
-                agent_provider: provider.to_daemon_provider(),
-                prompt: final_prompt,
-                model,
-                permission_mode,
-                allowed_tools,
-                system_prompt,
-                mcp_config_path,
-                executable: headless_executable,
-            }
-        }
-    };
+    let session = build_prepared_session(
+        provider,
+        agent_type,
+        &task_id,
+        &stage_name,
+        &pipeline_name,
+        stage_transition,
+        final_prompt,
+        model,
+        permission_mode,
+        allowed_tools,
+        mcp_config_path,
+        &spawn_env,
+        &worktree_path,
+        worktree_repo_config.setup.as_deref().unwrap_or(&[]),
+    )?;
     let title = request
         .display_name
         .clone()
