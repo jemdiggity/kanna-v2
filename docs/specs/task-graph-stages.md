@@ -401,9 +401,9 @@ session when the stage transitions forward:
   actually-executing agent/session. Kick-back to an earlier stage resets the
   post: the next advance runs it again.
 
-The default pipeline becomes `in progress` (post: `commit`) → `pr`. The
-sidebar never shows `commit`: committing is the tail of `in progress`,
-which is what it always was in practice.
+The default pipeline becomes `in progress` (post: `commit`) → `review` →
+`pr`. The sidebar never shows `commit`: committing is the tail of
+`in progress`, which is what it always was in practice.
 
 ### Workspaces fork per transition
 
