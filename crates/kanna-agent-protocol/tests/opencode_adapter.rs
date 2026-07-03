@@ -184,6 +184,59 @@ fn spawn_args_pin_the_run_json_contract() {
     );
 }
 
+fn write_test_mcp_config(label: &str) -> std::path::PathBuf {
+    let path = std::env::temp_dir().join(format!(
+        "kanna-agent-protocol-{label}-mcp-{}.json",
+        std::process::id()
+    ));
+    std::fs::write(
+        &path,
+        serde_json::json!({
+            "mcpServers": {
+                "kanna-mcp": {
+                    "command": "/tmp/kanna-mcp",
+                    "args": ["serve"],
+                    "env": {
+                        "KANNA_SERVER_BASE_URL": "http://127.0.0.1:48120"
+                    }
+                }
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    path
+}
+
+#[test]
+fn spawn_env_includes_opencode_mcp_config_for_initial_and_resume_spawns() {
+    let adapter = OpencodeAdapter::new();
+    let mcp_config = write_test_mcp_config("opencode-adapter");
+    let ctx = SpawnCtx {
+        prompt: "fix the bug".to_string(),
+        mcp_config_path: Some(mcp_config.to_string_lossy().to_string()),
+        ..Default::default()
+    };
+
+    let initial_env = adapter.initial_spawn(&ctx).env;
+    let content = initial_env
+        .iter()
+        .find_map(|(key, value)| (key == "OPENCODE_CONFIG_CONTENT").then_some(value))
+        .expect("OpenCode should receive inline MCP config");
+    assert!(content.contains("\"$schema\":\"https://opencode.ai/config.json\""));
+    assert!(content.contains("\"mcp\":{\"kanna-mcp\":{\"command\":[\"/tmp/kanna-mcp\",\"serve\"]"));
+    assert!(content.contains("\"type\":\"local\""));
+    assert!(content.contains("\"enabled\":true"));
+    assert!(content.contains("\"KANNA_SERVER_BASE_URL\":\"http://127.0.0.1:48120\""));
+
+    let resume_env = adapter.resume_spawn(&ctx, "ses_123", "continue").env;
+    assert!(resume_env
+        .iter()
+        .any(|(key, value)| key == "OPENCODE_CONFIG_CONTENT" && value == content));
+
+    let _ = std::fs::remove_file(mcp_config);
+}
+
 #[test]
 fn default_and_dont_ask_modes_skip_permissions() {
     let adapter = OpencodeAdapter::new();

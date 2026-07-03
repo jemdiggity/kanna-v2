@@ -42,6 +42,7 @@ impl Db {
                 issue_number INTEGER,
                 issue_title TEXT,
                 prompt TEXT,
+                pipeline_def TEXT,
                 stage TEXT,
                 pr_number INTEGER,
                 pr_url TEXT,
@@ -56,12 +57,8 @@ impl Db {
                 last_output_preview TEXT,
                 created_at TEXT,
                 updated_at TEXT,
-                previous_stage TEXT,
                 closed_at TEXT,
                 pipeline TEXT,
-                stage_result TEXT,
-                active_post_action TEXT,
-                tags TEXT,
                 agent_provider TEXT,
                 port_offset INTEGER,
                 port_env TEXT,
@@ -84,6 +81,23 @@ impl Db {
                 pipeline_item_id TEXT NOT NULL,
                 env_name TEXT NOT NULL
             );
+
+            CREATE TABLE stage_run (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                stage TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'main' CHECK (kind IN ('main', 'post')),
+                agent TEXT,
+                agent_provider TEXT,
+                model TEXT,
+                status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'succeeded', 'failed', 'cancelled')),
+                result TEXT,
+                feedback TEXT,
+                session_id TEXT,
+                started_at TEXT NOT NULL DEFAULT (datetime('now')),
+                finished_at TEXT
+            );
+            CREATE INDEX idx_stage_run_task_started ON stage_run(task_id, started_at);
 
             CREATE TABLE settings (
                 key TEXT PRIMARY KEY,
@@ -142,8 +156,8 @@ impl Db {
         self.conn.execute(
             "INSERT INTO pipeline_item (
                 id, repo_id, prompt, stage, branch, agent_type, activity,
-                pinned, pin_order, display_name, created_at, updated_at, pipeline, tags, agent_provider
-             ) VALUES (?, ?, ?, ?, ?, 'pty', 'idle', 0, NULL, ?, ?, ?, 'default', '[]', 'claude')",
+                pinned, pin_order, display_name, created_at, updated_at, pipeline, agent_provider
+             ) VALUES (?, ?, ?, ?, ?, 'pty', 'idle', 0, NULL, ?, ?, ?, 'default', 'claude')",
             (
                 id,
                 repo_id,
@@ -244,14 +258,14 @@ impl Db {
         id: &str,
         branch: &str,
         pipeline: &str,
-        stage_result: Option<&str>,
+        _stage_result: Option<&str>,
         agent_provider: &str,
     ) -> Result<(), rusqlite::Error> {
         self.conn.execute(
             "UPDATE pipeline_item
-             SET branch = ?, pipeline = ?, stage_result = ?, agent_provider = ?
+             SET branch = ?, pipeline = ?, agent_provider = ?
              WHERE id = ?",
-            (branch, pipeline, stage_result, agent_provider, id),
+            (branch, pipeline, agent_provider, id),
         )?;
         Ok(())
     }
@@ -296,6 +310,19 @@ impl Db {
     }
 
     #[cfg(test)]
+    pub fn update_test_pipeline_item_pipeline_def(
+        &self,
+        id: &str,
+        pipeline_def: &str,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE pipeline_item SET pipeline_def = ? WHERE id = ?",
+            (pipeline_def, id),
+        )?;
+        Ok(())
+    }
+
+    #[cfg(test)]
     pub fn set_test_setting(&self, key: &str, value: &str) -> Result<(), rusqlite::Error> {
         self.conn.execute(
             "INSERT INTO settings (key, value) VALUES (?, ?)
@@ -325,19 +352,5 @@ impl Db {
             (blocked_item_id, blocker_item_id),
             |row| row.get(0),
         )
-    }
-
-    #[cfg(test)]
-    pub fn get_test_pipeline_item_tags(&self, id: &str) -> Result<String, rusqlite::Error> {
-        self.pipeline_item_tags(id)
-    }
-
-    #[cfg(test)]
-    pub fn set_test_pipeline_item_tags(
-        &self,
-        id: &str,
-        tags_json: &str,
-    ) -> Result<(), rusqlite::Error> {
-        self.update_pipeline_item_tags(id, tags_json)
     }
 }

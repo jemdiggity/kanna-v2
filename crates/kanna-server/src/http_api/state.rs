@@ -9,6 +9,7 @@ use tokio::sync::Mutex;
 pub struct AppState {
     pub(super) config: Config,
     pub(super) pairing_session: Arc<Mutex<Option<PairingSession>>>,
+    pub(super) session_replacements: crate::session_replacements::SessionReplacements,
     #[cfg(test)]
     pub(super) task_creator: Option<TestTaskCreator>,
     #[cfg(test)]
@@ -19,6 +20,8 @@ pub struct AppState {
     pub(super) task_closer: Option<TestTaskCloser>,
     #[cfg(test)]
     pub(super) stage_advancer: Option<TestStageAdvancer>,
+    #[cfg(test)]
+    pub(super) stage_rerunner: Option<TestStageRerunner>,
     #[cfg(test)]
     pub(super) stage_completer: Option<TestStageCompleter>,
     #[cfg(test)]
@@ -47,6 +50,10 @@ pub(super) type TestTaskCloser = Arc<dyn Fn(String) -> Result<(), String> + Send
 
 #[cfg(test)]
 pub(super) type TestStageAdvancer =
+    Arc<dyn Fn(String) -> Result<crate::mobile_api::TaskActionResponse, String> + Send + Sync>;
+
+#[cfg(test)]
+pub(super) type TestStageRerunner =
     Arc<dyn Fn(String) -> Result<crate::mobile_api::TaskActionResponse, String> + Send + Sync>;
 
 #[cfg(test)]
@@ -98,6 +105,12 @@ impl AppState {
         &self.config
     }
 
+    /// Shared handle for the daemon Exit watcher, so orchestrated kills
+    /// performed through the HTTP actions are not misread as completions.
+    pub fn session_replacements(&self) -> crate::session_replacements::SessionReplacements {
+        self.session_replacements.clone()
+    }
+
     pub fn new(config: Config) -> Self {
         if let Err(err) = pairing::PairingStore::load(Path::new(&config.pairing_store_path)) {
             log::warn!(
@@ -110,6 +123,7 @@ impl AppState {
         Self {
             config,
             pairing_session: Arc::new(Mutex::new(None)),
+            session_replacements: crate::session_replacements::SessionReplacements::default(),
             #[cfg(test)]
             task_creator: None,
             #[cfg(test)]
@@ -120,6 +134,8 @@ impl AppState {
             task_closer: None,
             #[cfg(test)]
             stage_advancer: None,
+            #[cfg(test)]
+            stage_rerunner: None,
             #[cfg(test)]
             stage_completer: None,
             #[cfg(test)]
@@ -173,6 +189,13 @@ impl AppState {
     pub(super) fn with_stage_advancer(config: Config, stage_advancer: TestStageAdvancer) -> Self {
         let mut state = Self::new(config);
         state.stage_advancer = Some(stage_advancer);
+        state
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_stage_rerunner(config: Config, stage_rerunner: TestStageRerunner) -> Self {
+        let mut state = Self::new(config);
+        state.stage_rerunner = Some(stage_rerunner);
         state
     }
 

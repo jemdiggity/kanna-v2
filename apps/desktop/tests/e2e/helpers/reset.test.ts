@@ -75,7 +75,7 @@ describe("reset helpers", () => {
         { id: "task-created-externally" },
       ])
       .mockResolvedValue([
-        { stage: "done", closed_at: "2026-04-22T00:00:00.000Z" },
+        { closed_at: "2026-04-22T00:00:00.000Z" },
       ]);
     mocks.callVueMethod.mockResolvedValue(undefined);
 
@@ -115,7 +115,7 @@ describe("reset helpers", () => {
         { id: "pty-task", agent_type: "pty" },
       ])
       .mockResolvedValue([
-        { stage: "done", closed_at: "2026-04-22T00:00:00.000Z" },
+        { closed_at: "2026-04-22T00:00:00.000Z" },
       ]);
     mocks.callVueMethod.mockResolvedValue(undefined);
 
@@ -203,7 +203,7 @@ describe("reset helpers", () => {
         { id: "task-b" },
       ])
       .mockResolvedValue([
-        { stage: "done", closed_at: "2026-04-22T00:00:00.000Z" },
+        { closed_at: "2026-04-22T00:00:00.000Z" },
       ]);
     mocks.execDb.mockResolvedValue(undefined);
     mocks.callVueMethod.mockResolvedValue(undefined);

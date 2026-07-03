@@ -216,7 +216,11 @@ export function createTaskItemActions(
             prompt,
             env: agentEnv,
             agentProvider,
-            systemPrompt: buildKannaRuntimeSystemPrompt(),
+            systemPrompt: buildKannaRuntimeSystemPrompt({
+              taskId: id,
+              provider: agentProvider,
+              mcpConfigured: !!mcpConfigPath,
+            }),
             mcpConfigPath: mcpConfigPath ?? null,
             permissionMode: opts?.customTask?.permissionMode ?? opts?.permissionMode ?? null,
             model: resolvedModel,
@@ -484,6 +488,7 @@ export function createTaskItemActions(
                 }
               : entry,
           ),
+          taskBlockers: snapshot.taskBlockers,
         }),
         run: async () => {
           try {
@@ -518,7 +523,6 @@ export function createTaskItemActions(
               prompt: effectivePrompt,
               pipeline: pipelineName,
               stage: firstStageName,
-              tags: opts?.tags ?? [firstStageName],
               pr_number: null,
               pr_url: null,
               branch,

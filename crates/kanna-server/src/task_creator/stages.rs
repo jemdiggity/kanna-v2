@@ -1,326 +1,296 @@
 use crate::config::Config;
 use crate::db::{Db, TaskStageSource};
 
-use super::continuation::{prepare_continue_stage, prepare_post_action_stage};
-use super::definitions::{read_pipeline_definition, PipelineStageMode};
-use super::prepare_task_spawn;
-use super::prompt::{build_post_action_prompt, build_target_stage_prompt};
-use super::provider::normalize_agent_type;
-use super::types::{PreparedStageTransition, PreparedTaskSpawn, TaskCreationRequest};
+use super::definitions::{
+    post_as_stage, read_pipeline_definition, read_task_pipeline_definition, resolve_stage_position,
+    PipelineDefinition, PipelineStage, PipelineStageTransition, StagePosition,
+};
+use super::prepare_stage_run_spawn;
+use super::prompt::build_target_stage_prompt;
+use super::types::{PreparedPostDispatch, PreparedStageRunSpawn, PreparedStageTransition};
+use super::worktree::generate_task_id as generate_fork_id;
 use super::worktree::resolve_current_source_worktree_branch;
+use crate::db::Repo;
+
+/// Everything stage routing needs about the task being transitioned.
+struct StageTransitionContext<'a> {
+    source_task: &'a TaskStageSource,
+    source_task_id: &'a str,
+    repo: &'a Repo,
+    pipeline_name: &'a str,
+    pipeline: &'a PipelineDefinition,
+}
+
+fn load_stage_transition_source(
+    db: &Db,
+    source_task_id: &str,
+) -> Result<(TaskStageSource, Repo, String, PipelineDefinition, String), String> {
+    let source_task = db
+        .get_task_stage_source(source_task_id)
+        .map_err(|e| format!("db error: {}", e))?
+        .ok_or_else(|| format!("task not found: {}", source_task_id))?;
+    let repo = db
+        .get_repo(&source_task.repo_id)
+        .map_err(|e| format!("db error: {}", e))?
+        .ok_or_else(|| format!("repo not found for task: {}", source_task_id))?;
+    let pipeline_name = source_task
+        .pipeline
+        .clone()
+        .unwrap_or_else(|| "default".to_string());
+    let current_stage_name = source_task
+        .stage
+        .clone()
+        .ok_or_else(|| format!("task has no stage: {}", source_task_id))?;
+    let pipeline = read_task_pipeline_definition(
+        &repo.path,
+        &pipeline_name,
+        source_task.pipeline_def.as_deref(),
+    )?;
+    Ok((
+        source_task,
+        repo,
+        pipeline_name,
+        pipeline,
+        current_stage_name,
+    ))
+}
 
 pub(crate) fn prepare_advance_stage_for_api(
     db: &Db,
     config: &Config,
     source_task_id: &str,
 ) -> Result<PreparedStageTransition, String> {
-    let source_task = db
-        .get_task_stage_source(source_task_id)
-        .map_err(|e| format!("db error: {}", e))?
-        .ok_or_else(|| format!("task not found: {}", source_task_id))?;
+    let (source_task, repo, pipeline_name, pipeline, current_stage_name) =
+        load_stage_transition_source(db, source_task_id)?;
     if source_task.closed_at.is_some() {
         return Err(format!("task is closed: {}", source_task_id));
     }
-    let repo = db
-        .get_repo(&source_task.repo_id)
-        .map_err(|e| format!("db error: {}", e))?
-        .ok_or_else(|| format!("repo not found for task: {}", source_task_id))?;
-
-    let pipeline_name = source_task
-        .pipeline
-        .clone()
-        .unwrap_or_else(|| "default".to_string());
-    let current_stage_name = source_task
-        .stage
-        .clone()
-        .ok_or_else(|| format!("task has no stage: {}", source_task_id))?;
-    let pipeline = read_pipeline_definition(&repo.path, &pipeline_name)?;
-    let current_stage_index = pipeline
-        .stages
-        .iter()
-        .position(|stage| stage.name == current_stage_name)
-        .ok_or_else(|| format!("stage not found in pipeline: {}", current_stage_name))?;
-    let current_stage = &pipeline.stages[current_stage_index];
-    let source_branch =
-        resolve_current_source_worktree_branch(&repo.path, source_task.branch.as_deref());
-    let display_name = resolve_inherited_task_title(db, &source_task)?;
-
-    if source_task.active_post_action.is_none() {
-        if let Some(post_action) = current_stage.post_action.as_ref() {
-            let task_prompt = build_post_action_prompt(
-                &repo.path,
-                post_action,
-                source_task.prompt.as_deref().unwrap_or(""),
-                source_task.stage_result.as_deref(),
-                source_branch.as_deref(),
-                source_task.base_ref.as_deref(),
-                source_task.branch.as_deref(),
-            )?;
-            return Ok(PreparedStageTransition::Continue(Box::new(
-                prepare_post_action_stage(
-                    source_task_id,
-                    &current_stage_name,
-                    post_action,
-                    source_task.stage_result.clone(),
-                    &task_prompt,
-                    source_task.branch.as_deref(),
-                    normalize_agent_type(source_task.agent_type.as_deref()).unwrap_or("pty"),
-                    post_action
-                        .agent_provider
-                        .as_deref()
-                        .or(source_task.agent_provider.as_deref()),
-                )?,
-            )));
-        }
+    let open_blockers = db
+        .count_open_task_blockers(source_task_id)
+        .map_err(|e| format!("db error: {}", e))?;
+    if open_blockers > 0 {
+        return Err(format!("task is blocked: {}", source_task_id));
     }
-
-    let next_stage = pipeline
-        .stages
-        .get(current_stage_index + 1)
-        .ok_or_else(|| format!("task already at final stage: {}", current_stage_name))?;
-
-    let task_prompt = build_target_stage_prompt(
-        &repo.path,
-        next_stage,
-        source_task.prompt.as_deref().unwrap_or(""),
-        source_task.stage_result.as_deref(),
-        source_branch.as_deref(),
-        source_task.base_ref.as_deref(),
-        source_task.branch.as_deref(),
-    )?;
-    let explicit_provider = if next_stage.agent.is_some() {
-        None
-    } else {
-        source_task.agent_provider.clone()
+    let context = StageTransitionContext {
+        source_task: &source_task,
+        source_task_id,
+        repo: &repo,
+        pipeline_name: &pipeline_name,
+        pipeline: &pipeline,
     };
 
-    if next_stage.mode == Some(PipelineStageMode::Continue) {
-        return Ok(PreparedStageTransition::Continue(Box::new(
-            prepare_continue_stage(
-                source_task_id,
-                &current_stage_name,
-                &next_stage.name,
-                source_task.stage_result.clone(),
-                &task_prompt,
-                source_task.branch.as_deref(),
-                normalize_agent_type(source_task.agent_type.as_deref()).unwrap_or("pty"),
-                source_task.agent_provider.as_deref(),
-            )?,
-        )));
-    }
-
-    prepare_task_spawn(
-        db,
-        config,
-        &repo,
-        TaskCreationRequest {
-            task_prompt,
-            display_name,
-            pipeline_name: Some(pipeline_name),
-            base_ref: source_branch,
-            stored_base_ref: source_task.base_ref,
-            stage_override: Some(next_stage.name.clone()),
-            explicit_provider,
-            default_provider: None,
-            agent_type: source_task.agent_type,
-            model: None,
-            permission_mode: None,
-            allowed_tools: Vec::new(),
-            notify_task_id: None,
-            parent_task_id: None,
-        },
-    )
-    .map(|spawn| PreparedStageTransition::Spawn(Box::new(spawn)))
-}
-
-fn resolve_inherited_task_title(
-    db: &Db,
-    source_task: &TaskStageSource,
-) -> Result<Option<String>, String> {
-    if let Some(title) = non_empty_string(source_task.display_name.clone()) {
-        return Ok(Some(title));
-    }
-    if let Some(title) = non_empty_string(source_task.issue_title.clone()) {
-        return Ok(Some(title));
-    }
-    if let Some(reviewed_branch) =
-        extract_reviewed_branch_from_prompt(source_task.prompt.as_deref().unwrap_or(""))
-    {
-        if let Some(title) = db
-            .get_pipeline_item_title_by_repo_branch(&source_task.repo_id, reviewed_branch)
-            .map_err(|e| format!("db error: {}", e))?
-        {
-            return Ok(Some(title));
+    let position = resolve_stage_position(&pipeline, &current_stage_name)
+        .ok_or_else(|| format!("stage not found in pipeline: {}", current_stage_name))?;
+    match position {
+        // Legacy in-flight task parked at a folded post name (e.g. `commit`):
+        // the post is the current context, so advancing swaps past its owner.
+        StagePosition::Post { owner } => prepare_swap_to_index(db, config, &context, owner + 1),
+        StagePosition::Stage(index) => {
+            let stage = &pipeline.stages[index];
+            if let Some(post) = &stage.post {
+                let latest = db
+                    .latest_stage_run(source_task_id)
+                    .map_err(|e| format!("db error: {}", e))?;
+                // Dispatch the post unless it already ran for this stage
+                // visit: a succeeded post means the transition proceeds, and
+                // a still-running post being advanced again is a human
+                // override (swap immediately). Failed or cancelled posts are
+                // re-dispatched.
+                let post_pending = match &latest {
+                    Some(run) if run.kind == "post" && run.stage == post.name => {
+                        matches!(run.status.as_str(), "failed" | "cancelled")
+                    }
+                    _ => true,
+                };
+                if post_pending {
+                    return prepare_post_dispatch(db, config, &context, index);
+                }
+            }
+            prepare_swap_to_index(db, config, &context, index + 1)
         }
     }
-    Ok(non_empty_string(source_task.prompt.clone()))
 }
 
-fn non_empty_string(value: Option<String>) -> Option<String> {
-    value.filter(|candidate| !candidate.trim().is_empty())
-}
-
-fn extract_reviewed_branch_from_prompt(prompt: &str) -> Option<&str> {
-    let marker = "Review branch ";
-    let after_marker = prompt.split_once(marker)?.1;
-    let branch = after_marker
-        .split_whitespace()
-        .next()?
-        .trim_matches(|ch: char| matches!(ch, ',' | '.' | ':' | ';'));
-    if branch.is_empty() {
-        None
-    } else {
-        Some(branch)
-    }
-}
-
-pub(crate) fn prepare_auto_stage_completion_for_api(
+/// Routes a stage-run completion verdict (`complete-stage` with
+/// status=success). `finished_run_kind` identifies the run that just
+/// finished: a `post` completion performs the deferred swap regardless of
+/// the stage's transition policy (the gate was passed when the post was
+/// dispatched); a `main` completion follows the stage's policy — `auto`
+/// dispatches the stage's post (or swaps when there is none), `manual`
+/// parks the task.
+pub(crate) fn prepare_stage_completion_for_api(
     db: &Db,
     config: &Config,
     source_task_id: &str,
+    finished_run_kind: Option<&str>,
 ) -> Result<Option<PreparedStageTransition>, String> {
-    let source_task = db
-        .get_task_stage_source(source_task_id)
-        .map_err(|e| format!("db error: {}", e))?
-        .ok_or_else(|| format!("task not found: {}", source_task_id))?;
+    let (source_task, repo, pipeline_name, pipeline, current_stage_name) =
+        load_stage_transition_source(db, source_task_id)?;
     if source_task.closed_at.is_some() {
         return Ok(None);
     }
-    let repo = db
-        .get_repo(&source_task.repo_id)
-        .map_err(|e| format!("db error: {}", e))?
-        .ok_or_else(|| format!("repo not found for task: {}", source_task_id))?;
+    let context = StageTransitionContext {
+        source_task: &source_task,
+        source_task_id,
+        repo: &repo,
+        pipeline_name: &pipeline_name,
+        pipeline: &pipeline,
+    };
 
-    let pipeline_name = source_task
-        .pipeline
-        .clone()
-        .unwrap_or_else(|| "default".to_string());
-    let current_stage_name = source_task
-        .stage
-        .clone()
-        .ok_or_else(|| format!("task has no stage: {}", source_task_id))?;
-    let pipeline = read_pipeline_definition(&repo.path, &pipeline_name)?;
-    let current_stage_index = pipeline
-        .stages
-        .iter()
-        .position(|stage| stage.name == current_stage_name)
+    let position = resolve_stage_position(&pipeline, &current_stage_name)
         .ok_or_else(|| format!("stage not found in pipeline: {}", current_stage_name))?;
-    let current_stage = &pipeline.stages[current_stage_index];
-    if let Some(active_post_action) = source_task.active_post_action.as_deref() {
-        let Some(post_action) = current_stage.post_action.as_ref() else {
-            return Ok(None);
-        };
-        if post_action.name != active_post_action
-            || post_action.transition.as_deref() != Some("auto")
-        {
-            return Ok(None);
+    match position {
+        // Legacy in-flight task parked at a folded post name: success means
+        // the post finished, which always advances past its owner.
+        StagePosition::Post { owner } => {
+            prepare_swap_to_index(db, config, &context, owner + 1).map(Some)
         }
-        db.clear_pipeline_item_active_post_action(source_task_id)
-            .map_err(|e| format!("db error: {}", e))?;
-    } else if current_stage.transition.as_deref() != Some("auto") {
-        return Ok(None);
+        StagePosition::Stage(index) => {
+            let stage = &pipeline.stages[index];
+            if finished_run_kind == Some("post") {
+                return prepare_swap_to_index(db, config, &context, index + 1).map(Some);
+            }
+            if stage.policy.transition != PipelineStageTransition::Auto {
+                return Ok(None);
+            }
+            if stage.post.is_some() {
+                return prepare_post_dispatch(db, config, &context, index).map(Some);
+            }
+            if pipeline.stages.get(index + 1).is_none() {
+                // An auto main-run completion never closes the task; only an
+                // explicit advance (or a post completion) moves past the
+                // final stage.
+                return Ok(None);
+            }
+            prepare_swap_to_index(db, config, &context, index + 1).map(Some)
+        }
     }
-    let Some(next_stage) = pipeline.stages.get(current_stage_index + 1) else {
-        return Ok(None);
-    };
-    let source_branch =
-        resolve_current_source_worktree_branch(&repo.path, source_task.branch.as_deref());
-    let display_name = resolve_inherited_task_title(db, &source_task)?;
-
-    let task_prompt = build_target_stage_prompt(
-        &repo.path,
-        next_stage,
-        source_task.prompt.as_deref().unwrap_or(""),
-        source_task.stage_result.as_deref(),
-        source_branch.as_deref(),
-        source_task.base_ref.as_deref(),
-        source_task.branch.as_deref(),
-    )?;
-    let explicit_provider = if next_stage.agent.is_some() {
-        None
-    } else {
-        source_task.agent_provider.clone()
-    };
-
-    if next_stage.mode == Some(PipelineStageMode::Continue) {
-        return prepare_continue_stage(
-            source_task_id,
-            &current_stage_name,
-            &next_stage.name,
-            source_task.stage_result.clone(),
-            &task_prompt,
-            source_task.branch.as_deref(),
-            normalize_agent_type(source_task.agent_type.as_deref()).unwrap_or("pty"),
-            source_task.agent_provider.as_deref(),
-        )
-        .map(|continuation| PreparedStageTransition::Continue(Box::new(continuation)))
-        .map(Some);
-    }
-
-    prepare_task_spawn(
-        db,
-        config,
-        &repo,
-        TaskCreationRequest {
-            task_prompt,
-            display_name,
-            pipeline_name: Some(pipeline_name),
-            base_ref: source_branch,
-            stored_base_ref: source_task.base_ref,
-            stage_override: Some(next_stage.name.clone()),
-            explicit_provider,
-            default_provider: None,
-            agent_type: source_task.agent_type,
-            model: None,
-            permission_mode: None,
-            allowed_tools: Vec::new(),
-            notify_task_id: None,
-            parent_task_id: None,
-        },
-    )
-    .map(|spawn| PreparedStageTransition::Spawn(Box::new(spawn)))
-    .map(Some)
 }
 
-pub(crate) fn prepare_revision_task_for_api(
+fn prepare_swap_to_index(
     db: &Db,
     config: &Config,
-    source_task_id: &str,
-    target_stage_name: &str,
-    revision_prompt: &str,
-) -> Result<PreparedTaskSpawn, String> {
-    let source_task = db
-        .get_task_stage_source(source_task_id)
-        .map_err(|e| format!("db error: {}", e))?
-        .ok_or_else(|| format!("task not found: {}", source_task_id))?;
-    if source_task.closed_at.is_some() {
-        return Err(format!("task is closed: {}", source_task_id));
-    }
-    let repo = db
-        .get_repo(&source_task.repo_id)
-        .map_err(|e| format!("db error: {}", e))?
-        .ok_or_else(|| format!("repo not found for task: {}", source_task_id))?;
+    context: &StageTransitionContext<'_>,
+    next_index: usize,
+) -> Result<PreparedStageTransition, String> {
+    let Some(next_stage) = context.pipeline.stages.get(next_index) else {
+        return Ok(PreparedStageTransition::Close {
+            task_id: context.source_task_id.to_string(),
+        });
+    };
+    prepare_stage_run_for_target(
+        db,
+        config,
+        context,
+        next_stage,
+        &next_stage.name,
+        "main",
+        None,
+        None,
+    )
+    .map(|run| PreparedStageTransition::Run(Box::new(run)))
+}
 
-    let pipeline_name = source_task
-        .pipeline
-        .clone()
-        .unwrap_or_else(|| "default".to_string());
-    let pipeline = read_pipeline_definition(&repo.path, &pipeline_name)?;
-    let target_stage = pipeline
-        .stages
-        .iter()
-        .find(|stage| stage.name == target_stage_name)
-        .ok_or_else(|| format!("stage not found in pipeline: {}", target_stage_name))?;
-    let source_branch =
-        resolve_current_source_worktree_branch(&repo.path, source_task.branch.as_deref());
-    let display_name = resolve_inherited_task_title(db, &source_task)?;
+fn prepare_post_dispatch(
+    db: &Db,
+    config: &Config,
+    context: &StageTransitionContext<'_>,
+    owner_index: usize,
+) -> Result<PreparedStageTransition, String> {
+    let owner = &context.pipeline.stages[owner_index];
+    let post_stage =
+        post_as_stage(owner).ok_or_else(|| format!("stage has no post: {}", owner.name))?;
+    let run_stage = post_stage.name.clone();
 
-    let task_prompt = build_target_stage_prompt(
-        &repo.path,
+    // The fallback spawn doubles as the source of the composed post prompt
+    // (post agent body + post prompt with $VAR substitution) and the resolved
+    // session id. `item_stage` stays the owner: a post never moves the
+    // task's stage.
+    let (fallback, final_prompt) = prepare_stage_run_for_target_returning_prompt(
+        db,
+        config,
+        context,
+        &post_stage,
+        &owner.name,
+        "post",
+        None,
+        None,
+    )?;
+    let message = format!(
+        "{final_prompt}\n\nWhen this work is complete, record stage completion: prefer MCP `kanna_complete_stage`; fallback: `kanna-cli stage-complete --task-id \"{}\" --status success --summary \"...\"`. Kanna will then advance this task's pipeline.",
+        context.source_task_id
+    );
+
+    Ok(PreparedStageTransition::Post(Box::new(
+        PreparedPostDispatch {
+            task_id: context.source_task_id.to_string(),
+            session_id: fallback.session_id.clone(),
+            message,
+            run_stage,
+            fallback,
+        },
+    )))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_stage_run_for_target(
+    db: &Db,
+    config: &Config,
+    context: &StageTransitionContext<'_>,
+    target_stage: &PipelineStage,
+    item_stage: &str,
+    run_kind: &'static str,
+    prompt_override: Option<&str>,
+    feedback: Option<String>,
+) -> Result<PreparedStageRunSpawn, String> {
+    prepare_stage_run_for_target_returning_prompt(
+        db,
+        config,
+        context,
         target_stage,
-        revision_prompt,
-        source_task.stage_result.as_deref(),
-        source_branch.as_deref(),
+        item_stage,
+        run_kind,
+        prompt_override,
+        feedback,
+    )
+    .map(|(run, _)| run)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_stage_run_for_target_returning_prompt(
+    db: &Db,
+    config: &Config,
+    context: &StageTransitionContext<'_>,
+    target_stage: &PipelineStage,
+    item_stage: &str,
+    run_kind: &'static str,
+    prompt_override: Option<&str>,
+    feedback: Option<String>,
+) -> Result<(PreparedStageRunSpawn, String), String> {
+    let source_task = context.source_task;
+    let source_branch =
+        resolve_current_source_worktree_branch(&context.repo.path, source_task.branch.as_deref());
+    let prev_result = previous_stage_result(db, context.source_task_id, source_task)?;
+    let task_prompt = prompt_override
+        .or(source_task.prompt.as_deref())
+        .unwrap_or("");
+    // Stage transitions fork a fresh workspace: a new randomly-named branch
+    // and worktree from the task's committed tip (N worktrees, N branches,
+    // one PR — the PR agent renames the final branch into something
+    // meaningful). Posts run inside the stage, so their fallback spawn keeps
+    // the stage's workspace.
+    let fork_branch = if run_kind == "main" {
+        Some(format!("task-{}", generate_fork_id()?))
+    } else {
+        None
+    };
+    let prompt_branch = fork_branch.clone().or(source_branch.clone());
+    let final_prompt = build_target_stage_prompt(
+        &context.repo.path,
+        target_stage,
+        task_prompt,
+        prev_result.as_deref(),
+        prompt_branch.as_deref(),
         source_task.base_ref.as_deref(),
         source_task.branch.as_deref(),
     )?;
@@ -329,27 +299,89 @@ pub(crate) fn prepare_revision_task_for_api(
     } else {
         source_task.agent_provider.clone()
     };
+    let branch = source_task
+        .branch
+        .as_deref()
+        .ok_or_else(|| format!("task has no branch: {}", context.source_task_id))?;
 
-    prepare_task_spawn(
+    prepare_stage_run_spawn(
         db,
         config,
-        &repo,
-        TaskCreationRequest {
-            task_prompt,
-            display_name,
-            pipeline_name: Some(pipeline_name),
-            base_ref: source_branch,
-            stored_base_ref: source_task.base_ref,
-            stage_override: Some(target_stage.name.clone()),
-            explicit_provider,
-            default_provider: None,
-            agent_type: source_task.agent_type,
-            model: None,
-            permission_mode: None,
-            allowed_tools: Vec::new(),
-            notify_task_id: None,
-            parent_task_id: None,
-        },
+        context.repo,
+        context.source_task_id,
+        context.pipeline_name,
+        context.pipeline,
+        target_stage,
+        item_stage,
+        run_kind,
+        fork_branch,
+        final_prompt.clone(),
+        branch,
+        feedback,
+        source_task.agent_type.as_deref(),
+        explicit_provider,
+    )
+    .map(|run| (run, final_prompt))
+}
+
+pub(crate) fn previous_stage_result(
+    db: &Db,
+    source_task_id: &str,
+    _source_task: &TaskStageSource,
+) -> Result<Option<String>, String> {
+    db.latest_finished_stage_run_result(source_task_id)
+        .map_err(|e| format!("db error: {}", e))
+}
+
+pub(crate) fn prepare_revision_task_for_api(
+    db: &Db,
+    config: &Config,
+    source_task_id: &str,
+    target_stage_name: &str,
+    revision_prompt: &str,
+) -> Result<PreparedStageRunSpawn, String> {
+    let (source_task, repo, pipeline_name, pipeline, _current_stage_name) =
+        load_stage_transition_source(db, source_task_id)?;
+    if source_task.closed_at.is_some() {
+        return Err(format!("task is closed: {}", source_task_id));
+    }
+    let context = StageTransitionContext {
+        source_task: &source_task,
+        source_task_id,
+        repo: &repo,
+        pipeline_name: &pipeline_name,
+        pipeline: &pipeline,
+    };
+
+    let position = resolve_stage_position(&pipeline, target_stage_name)
+        .ok_or_else(|| format!("stage not found in pipeline: {}", target_stage_name))?;
+    let (target_stage, item_stage, run_kind): (PipelineStage, String, &'static str) = match position
+    {
+        StagePosition::Stage(index) => {
+            let stage = pipeline.stages[index].clone();
+            let item_stage = stage.name.clone();
+            (stage, item_stage, "main")
+        }
+        // Revision targeting a post name (legacy `commit` targets): rerun
+        // the post as a fresh session with feedback; the task's stage is
+        // the post's owner.
+        StagePosition::Post { owner } => {
+            let owner_stage = &pipeline.stages[owner];
+            let post_stage = post_as_stage(owner_stage)
+                .ok_or_else(|| format!("stage has no post: {}", owner_stage.name))?;
+            (post_stage, owner_stage.name.clone(), "post")
+        }
+    };
+
+    prepare_stage_run_for_target(
+        db,
+        config,
+        &context,
+        &target_stage,
+        &item_stage,
+        run_kind,
+        Some(revision_prompt),
+        Some(revision_prompt.to_string()),
     )
 }
 
@@ -359,9 +391,18 @@ pub(crate) fn resolve_stage_transition(
     stage_name: &str,
 ) -> Result<Option<String>, String> {
     let pipeline = read_pipeline_definition(repo_path, pipeline_name)?;
-    Ok(pipeline
-        .stages
-        .iter()
-        .find(|stage| stage.name == stage_name)
-        .and_then(|stage| stage.transition.clone()))
+    Ok(match resolve_stage_position(&pipeline, stage_name) {
+        Some(StagePosition::Stage(index)) => Some(
+            pipeline.stages[index]
+                .policy
+                .transition
+                .as_str()
+                .to_string(),
+        ),
+        // A post always advances on success.
+        Some(StagePosition::Post { .. }) => {
+            Some(PipelineStageTransition::Auto.as_str().to_string())
+        }
+        None => None,
+    })
 }

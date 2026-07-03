@@ -57,15 +57,24 @@ async function waitForActiveSession(client: WebDriverClient, taskId: string): Pr
 async function readTaskRow(
   client: WebDriverClient,
   taskId: string,
-): Promise<{ agent_provider: string | null; tags: string | null }> {
+): Promise<{ agent_provider: string | null }> {
   const rows = (await queryDb(
     client,
-    "SELECT agent_provider, tags FROM pipeline_item WHERE id = ?",
+    "SELECT agent_provider FROM pipeline_item WHERE id = ?",
     [taskId],
-  )) as Array<{ agent_provider: string | null; tags: string | null }>;
+  )) as Array<{ agent_provider: string | null }>;
   const row = rows[0];
   if (!row) throw new Error(`task ${taskId} was not found`);
   return row;
+}
+
+async function countOpenBlockerEdges(client: WebDriverClient, taskId: string): Promise<number> {
+  const rows = (await queryDb(
+    client,
+    "SELECT COUNT(*) AS blocker_count FROM task_blocker WHERE blocked_item_id = ?",
+    [taskId],
+  )) as Array<{ blocker_count: number }>;
+  return rows[0]?.blocker_count ?? 0;
 }
 
 describe("real blocked task resume agent submission", () => {
@@ -151,20 +160,20 @@ describe("real blocked task resume agent submission", () => {
 
     const blockerId = "blocked-resume-blocker";
     const blockerDisplayName = "Create a file named blocked-resume-real-submit.txt containing exactly resumed";
+    // Closed blocker: closed_at set, stage keeps its last real value.
     await execDb(
       client,
       `INSERT INTO pipeline_item
-         (id, repo_id, prompt, pipeline, stage, tags, branch, closed_at,
+         (id, repo_id, prompt, pipeline, stage, branch, closed_at,
           agent_type, agent_provider, activity, display_name, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'),
+       VALUES (?, ?, ?, ?, ?, ?, datetime('now'),
           ?, ?, ?, ?, datetime('now'), datetime('now'))`,
       [
         blockerId,
         repoId,
         "Complete dependency",
         pipelineName,
-        "done",
-        '["done"]',
+        "in progress",
         "task-blocked-resume-blocker",
         "pty",
         initialRow.agent_provider ?? "opencode",
@@ -177,10 +186,11 @@ describe("real blocked task resume agent submission", () => {
       "INSERT INTO task_blocker (blocked_item_id, blocker_item_id) VALUES (?, ?)",
       [taskId, blockerId],
     );
+    // Blocked-ness comes from the task_blocker row inserted above, not tags.
     await execDb(
       client,
-      "UPDATE pipeline_item SET tags = ?, activity = 'idle', updated_at = datetime('now') WHERE id = ?",
-      [JSON.stringify(["in progress", "blocked"]), taskId],
+      "UPDATE pipeline_item SET activity = 'idle', updated_at = datetime('now') WHERE id = ?",
+      [taskId],
     );
     await hydrateStoreItem(client, taskId);
 
@@ -191,8 +201,7 @@ describe("real blocked task resume agent submission", () => {
     await waitForFile(markerPath, 180_000, 1_000);
     expect((await readFile(markerPath, "utf8")).trimEnd()).toBe("resumed");
 
-    const finalRow = await readTaskRow(client, taskId);
-    expect(JSON.parse(finalRow.tags ?? "[]")).not.toContain("blocked");
+    expect(await countOpenBlockerEdges(client, taskId)).toBe(0);
     expect(["codex", "claude", "copilot", "opencode"]).toContain(initialRow.agent_provider);
   }, 300_000);
 });

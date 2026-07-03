@@ -1,36 +1,38 @@
 {
   "$schema": "./schema.json",
   "name": "qa",
-  "description": "Implementation with commit post-action -> QA review -> PR flow with automatic revision requests for weak testing",
+  "description": "Implementation (commit as post) -> QA review -> PR flow with automatic revision requests for weak testing",
   "stages": [
     {
       "name": "in progress",
-      "description": "Agent implements the task",
+      "description": "Agent implements the task, then commits as the stage's tail work",
       "agent": "implement",
       "prompt": "$TASK_PROMPT",
-      "transition": "manual",
-      "post_action": {
+      "policy": { "transition": "manual" },
+      "post": {
         "name": "commit",
-        "description": "Implementation agent commits the relevant work before review",
         "agent": "commit",
-        "prompt": "Commit the relevant work for this task before QA review. Original task: $TASK_PROMPT",
-        "transition": "auto"
+        "prompt": "Commit the relevant work for this task before QA review. Original task: $TASK_PROMPT"
       }
     },
     {
       "name": "review",
       "description": "QA agent checks whether sufficient tests exist before PR creation",
       "agent": "review",
-      "prompt": "Review branch $BRANCH for task quality and test coverage against base $BASE_REF. Original task: $TASK_PROMPT. Previous result: $PREV_RESULT",
-      "transition": "auto"
+      "prompt": "Review branch $BRANCH for task quality and test coverage against base $BASE_REF. Original task: $TASK_PROMPT.",
+      "policy": { "transition": "auto" }
     },
     {
       "name": "pr",
       "description": "Agent creates a GitHub PR after QA passes",
       "agent": "pr",
-      "prompt": "Create a PR for the QA-approved work on branch $BRANCH. QA result: $PREV_RESULT",
-      "transition": "manual",
-      "follow_task": false
+      "prompt": "Create a PR for the QA-approved work on branch $BRANCH.",
+      "policy": { "transition": "manual" },
+      "post": {
+        "name": "approve",
+        "agent": "approve",
+        "prompt": "Approve the PR for branch $BRANCH after PR creation. Previous result: $PREV_RESULT"
+      }
     }
   ]
 }

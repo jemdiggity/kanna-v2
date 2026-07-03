@@ -4,7 +4,8 @@ import { DEFAULT_STAGE_ORDER } from "@kanna/core";
 import { insertOperatorEvent, setSetting, updatePipelineItemActivity, type PipelineItem, type Repo } from "@kanna/db";
 import { createNavigationHistory } from "../composables/useNavigationHistory";
 import { beginTaskSwitch } from "../perf/taskSwitchPerf";
-import { hasTag, requireService, type StoreContext } from "./state";
+import { sortSidebarItemsForRepo } from "../utils/sidebarOrdering";
+import { requireService, type StoreContext } from "./state";
 
 export interface SelectionApi {
   selectedRepo: ComputedRef<Repo | null>;
@@ -60,7 +61,7 @@ export function createSelectionApi(context: StoreContext): SelectionApi {
   }
 
   function isItemHidden(item: PipelineItem): boolean {
-    return item.stage === "done" || item.closed_at != null;
+    return item.closed_at != null;
   }
 
   const selectedRepo = computed(() =>
@@ -68,81 +69,12 @@ export function createSelectionApi(context: StoreContext): SelectionApi {
   );
 
   function sortItemsForRepo(repoId: string): PipelineItem[] {
-    const repoItems = context.state.items.value.filter(
-      (item) => item.repo_id === repoId && !isItemHidden(item),
-    );
-    const pinned = repoItems
-      .filter((item) => item.pinned)
-      .sort((left, right) => (left.pin_order ?? 0) - (right.pin_order ?? 0));
-    const sortByCreatedAt = (entries: PipelineItem[]) =>
-      entries.sort((left, right) => right.created_at.localeCompare(left.created_at));
-
-    const blocked = sortByCreatedAt(repoItems.filter((item) => hasTag(item, "blocked") && !item.pinned));
-    const blockedIds = new Set(blocked.map((item) => item.id));
-    const stageItems = repoItems.filter((item) => !item.pinned && !blockedIds.has(item.id));
-    const order = getStageOrder(repoId);
-
-    const stageOrder = (item: PipelineItem): number => {
-      const idx = order.indexOf(item.stage);
-      return idx === -1 ? order.length : idx;
-    };
-
-    const sortedStageItems = stageItems.sort((left, right) => {
-      const orderLeft = stageOrder(left);
-      const orderRight = stageOrder(right);
-      if (orderLeft !== orderRight) return orderLeft - orderRight;
-      if (orderLeft === order.length && left.stage !== right.stage) {
-        return left.stage.localeCompare(right.stage);
-      }
-      return right.created_at.localeCompare(left.created_at);
+    return sortSidebarItemsForRepo({
+      repoId,
+      items: context.state.items.value,
+      blockers: context.state.taskBlockers.value,
+      getStageOrder,
     });
-
-    return nestChildren([...pinned, ...sortedStageItems, ...blocked]);
-  }
-
-  /**
-   * Reorder a flat task list so every subtask immediately follows its parent, matching the
-   * indented sidebar layout. Keeps task navigation (next/prev, close-replacement) in sync with
-   * what the user sees. Only nests under parents that are themselves present in the list.
-   */
-  function nestChildren(ordered: PipelineItem[]): PipelineItem[] {
-    const present = new Set(ordered.map((item) => item.id));
-    const childrenByParent = new Map<string, PipelineItem[]>();
-    for (const item of ordered) {
-      const parentId = item.parent_task_id;
-      if (parentId != null && parentId !== item.id && present.has(parentId)) {
-        const siblings = childrenByParent.get(parentId) ?? [];
-        siblings.push(item);
-        childrenByParent.set(parentId, siblings);
-      }
-    }
-    if (childrenByParent.size === 0) return ordered;
-    for (const siblings of childrenByParent.values()) {
-      siblings.sort((left, right) => left.created_at.localeCompare(right.created_at));
-    }
-    const childIds = new Set(
-      [...childrenByParent.values()].flat().map((item) => item.id),
-    );
-
-    const out: PipelineItem[] = [];
-    const seen = new Set<string>();
-    const visit = (item: PipelineItem) => {
-      if (seen.has(item.id)) return;
-      seen.add(item.id);
-      out.push(item);
-      for (const child of childrenByParent.get(item.id) ?? []) visit(child);
-    };
-    for (const item of ordered) {
-      if (childIds.has(item.id)) continue;
-      visit(item);
-    }
-    for (const item of ordered) {
-      if (!seen.has(item.id)) {
-        seen.add(item.id);
-        out.push(item);
-      }
-    }
-    return out;
   }
 
   const sortedItemsForCurrentRepo = computed(() =>
@@ -195,6 +127,9 @@ export function createSelectionApi(context: StoreContext): SelectionApi {
     nav.select(itemId, previousItemId);
     context.state.selectedItemId.value = itemId;
     const item = context.state.items.value.find((candidate) => candidate.id === itemId);
+    if (item) {
+      context.state.selectedRepoId.value = item.repo_id;
+    }
     logSelection("selectItem", previousItemId, itemId, {
       itemStage: item?.stage,
       itemBranch: item?.branch,
@@ -269,6 +204,9 @@ export function createSelectionApi(context: StoreContext): SelectionApi {
     const previousItemId = context.state.selectedItemId.value;
     context.state.selectedItemId.value = itemId;
     const item = context.state.items.value.find((candidate) => candidate.id === itemId);
+    if (item) {
+      context.state.selectedRepoId.value = item.repo_id;
+    }
     logSelection("restoreSelection", previousItemId, itemId, {
       itemStage: item?.stage,
       itemBranch: item?.branch,

@@ -70,13 +70,13 @@ const selectedVisibleTaskId = computed(() => {
   const item = props.selectedItemId
     ? props.pipelineItems.find((candidate) => candidate.id === props.selectedItemId)
     : null;
-  return item && item.stage !== "done" && item.closed_at == null ? item.id : null;
+  return item && item.closed_at == null ? item.id : null;
 });
 const selectedTaskRepoId = computed(() => {
   const item = props.selectedItemId
     ? props.pipelineItems.find((candidate) => candidate.id === props.selectedItemId)
     : null;
-  return item && item.stage !== "done" && item.closed_at == null ? item.repo_id : null;
+  return item && item.closed_at == null ? item.repo_id : null;
 });
 
 function isSearchActive(): boolean {
@@ -98,6 +98,7 @@ function sidebarOrderingOptions(repoId: string) {
   return {
     repoId,
     items: props.pipelineItems,
+    blockers: store.taskBlockers,
     getStageOrder: store.getStageOrder,
     searchQuery: searchQuery.value,
   };
@@ -139,7 +140,7 @@ function subtaskIndentStyle(depth: number): Record<string, string> {
 }
 
 function totalItemsForRepo(repoId: string): number {
-  return props.pipelineItems.filter((i) => i.repo_id === repoId && i.stage !== "done" && i.closed_at == null).length;
+  return props.pipelineItems.filter((i) => i.repo_id === repoId && i.closed_at == null).length;
 }
 
 function repoCountLabel(repoId: string): string {
@@ -150,7 +151,9 @@ function repoCountLabel(repoId: string): string {
 
 function itemTitle(item: SidebarPipelineItem): string {
   const raw = item.display_name || item.issue_title || item.prompt || t('tasks.untitled');
-  return item.active_post_action ? `... ${raw}` : raw;
+  // A running post (e.g. commit) executes inside the live session while the
+  // stage stays put; the "..." prefix is the transition-in-flight signal.
+  return item.has_running_post ? `... ${raw}` : raw;
 }
 
 function itemTooltip(item: SidebarPipelineItem): string | undefined {
@@ -485,7 +488,7 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
           <div
             class="repo-header"
             :class="{
-              selected: selectedRepoId === repo.id,
+              selected: selectedRepoId === repo.id && (!selectedTaskRepoId || selectedTaskRepoId === repo.id),
               'contains-selected-task': selectedTaskRepoId === repo.id,
             }"
             @mousedown="startRepoDrag(repo.id, $event)"
@@ -807,7 +810,6 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
   align-items: center;
   gap: 6px;
   padding: 6px 14px;
-  cursor: grab;
   color: var(--kn-text-secondary);
   font-size: 13px;
   font-weight: 500;
@@ -831,7 +833,6 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
 
 .repo-dragging .repo-header {
   opacity: 0.65;
-  cursor: grabbing;
 }
 
 .repo-drag-over .repo-header {
@@ -936,7 +937,6 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
   align-items: center;
   gap: 8px;
   padding: 4px 14px;
-  cursor: grab;
   border-radius: 4px;
   margin: 1px 6px;
   user-select: none;
@@ -1132,7 +1132,7 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
 }
 
 .sortable-chosen {
-  cursor: grabbing;
+  opacity: 0.9;
 }
 
 .sortable-fallback {

@@ -7,8 +7,10 @@ import { buildTaskShellCommand, getShellTerminalEnv, getTaskTerminalEnv } from "
 import { resolveCurrentKannaServerBaseUrl } from "../services/kannaServerBaseUrl";
 import { buildKannaCliPathEnv, buildTaskRuntimeEnv } from "./kannaCliEnv";
 import { prepareKannaMcpRuntime } from "./kannaMcpRuntime";
+import { readEnvVarOptional, whichBinaryOptional } from "../utils/invokeHelpers";
 import { encodeDaemonInput } from "./daemonInput";
 import { getAgentPermissionFlags } from "./agent-permissions";
+import { buildAgentCommand } from "./agentCommand";
 import { buildWorktreeSessionEnv } from "./worktreeEnv";
 import {
   requireResolvedAgentProvider,
@@ -102,17 +104,12 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
       return explicitPath;
     }
 
-    try {
-      const inheritedPath = await invoke<string>("read_env_var", { name: "PATH" });
-      return inheritedPath.length > 0 ? inheritedPath : null;
-    } catch (error) {
-      console.error("[store] failed to resolve inherited PATH:", error);
-      return null;
-    }
+    const inheritedPath = await readEnvVarOptional("PATH");
+    return inheritedPath && inheritedPath.length > 0 ? inheritedPath : null;
   }
 
   async function applyTaskRuntimeStatus(item: import("@kanna/db").PipelineItem, status: string) {
-    if (item.stage === "done" || item.closed_at !== null) {
+    if (item.closed_at !== null) {
       return;
     }
 
@@ -154,13 +151,8 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
 
   async function isAgentProviderAvailable(provider: AgentProvider): Promise<boolean> {
     const binary = agentProviderBinary(provider);
-    try {
-      const path = await invoke<string | null>("which_binary", { name: binary });
-      return Boolean(path);
-    } catch (error) {
-      console.debug(`[store] which_binary failed for ${binary}:`, error);
-      return false;
-    }
+    const path = await whichBinaryOptional(binary);
+    return Boolean(path);
   }
 
   async function getAgentProviderAvailability(): Promise<AgentProviderAvailability> {
@@ -222,12 +214,7 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
       Object.assign(env, parsedPortEnv);
     }
     const runtimePath = await readInheritedPath(env.PATH);
-    let resolvedKannaCliPath: string | null = null;
-    try {
-      resolvedKannaCliPath = await invoke<string>("which_binary", { name: "kanna-cli" });
-    } catch (error) {
-      console.error("[store] failed to resolve shell kanna-cli path:", error);
-    }
+    const resolvedKannaCliPath = await whichBinaryOptional("kanna-cli");
 
     const shellTaskId = isWorktree ? taskIdFromWorktreeShellSessionId(sessionId) : null;
     if (shellTaskId) {
@@ -328,10 +315,7 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
       console.error("[store] failed to read SDK task config during session recovery:", error);
       return {};
     });
-    const inheritedPath = await invoke<string>("read_env_var", { name: "PATH" }).catch((error) => {
-      console.debug("[store] PATH not available while recovering SDK task env:", error);
-      return null;
-    });
+    const inheritedPath = await readEnvVarOptional("PATH");
     const agentBaseEnv = buildWorktreeSessionEnv({
       worktreePath,
       repoConfig,
@@ -344,10 +328,7 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
         taskId: sessionId,
         socketPath: await invoke<string>("get_pipeline_socket_path"),
         serverBaseUrl: await resolveCurrentKannaServerBaseUrl("recovering SDK task env"),
-        kannaCliPath: await invoke<string>("which_binary", { name: "kanna-cli" }).catch((error) => {
-          console.debug("[store] kanna-cli not available while recovering SDK task env:", error);
-          return null;
-        }),
+        kannaCliPath: await whichBinaryOptional("kanna-cli"),
         path: agentBaseEnv.PATH ?? inheritedPath,
       }),
     };
@@ -411,12 +392,9 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
     }
     const runtimePath = await readInheritedPath(env.PATH);
 
-    let resolvedKannaCliPath: string | null = null;
-    try {
-      kannaCliPath = await invoke<string>("which_binary", { name: "kanna-cli" });
-      resolvedKannaCliPath = kannaCliPath;
-    } catch (error) {
-      console.error("[store] failed to resolve kanna-cli path:", error);
+    const resolvedKannaCliPath = await whichBinaryOptional("kanna-cli");
+    if (resolvedKannaCliPath) {
+      kannaCliPath = resolvedKannaCliPath;
     }
 
     try {
@@ -436,127 +414,33 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
 
     const { mcpConfigPath } = await prepareKannaMcpRuntime(sessionId, env);
 
-    const displayPrompt = options?.displayPrompt ?? prompt;
-    const escapedDisplayPrompt = displayPrompt.replace(/'/g, "'\\''");
-    const escapedPrompt = prompt.replace(/'/g, "'\\''");
-    const escapedSystemPrompt = buildKannaRuntimeSystemPrompt().replace(/'/g, "'\\''");
-    const escapedPromptWithPreamble = buildKannaRuntimeUserPrompt(prompt).replace(/'/g, "'\\''");
-    let agentCmd: string;
-    let agentCmdPreamble: string | undefined;
+    // Only the Claude PTY command registers kanna-mcp in this spawn path; the
+    // prompt-prepended providers fall back to kanna-cli per the guidance.
+    const runtimeSystemPrompt = buildKannaRuntimeSystemPrompt({
+      taskId: sessionId,
+      provider: "claude",
+      mcpConfigured: !!mcpConfigPath,
+    });
+    const runtimeUserPrompt = buildKannaRuntimeUserPrompt(prompt, { taskId: sessionId });
     const permissionFlags = getAgentPermissionFlags(provider, options?.permissionMode);
-
-    if (provider === "copilot") {
-      const copilotFlags: string[] = [...permissionFlags];
-      if (options?.model) copilotFlags.push(`--model=${options.model}`);
-      if (options?.allowedTools?.length) {
-        for (const tool of options.allowedTools) copilotFlags.push(`--allow-tool=${tool}`);
-      }
-      if (options?.disallowedTools?.length) {
-        for (const tool of options.disallowedTools) copilotFlags.push(`--deny-tool=${tool}`);
-      }
-
-      if (options?.resumeSessionId) {
-        const escapedResumeSessionId = options.resumeSessionId.replace(/'/g, "'\\''");
-        copilotFlags.push(`--resume='${escapedResumeSessionId}'`);
-      } else {
-        const copilotSessionId = crypto.randomUUID();
-        await updateAgentSessionId(context.requireDb(), sessionId, copilotSessionId);
-        const escapedSessionId = copilotSessionId.replace(/'/g, "'\\''");
-        copilotFlags.push(`--session-id='${escapedSessionId}'`);
-      }
-
-      agentCmd = options?.resumeSessionId
-        ? `copilot ${copilotFlags.join(" ")}`
-        : `copilot ${copilotFlags.join(" ")} -i '${escapedDisplayPrompt}'`;
-      agentCmdPreamble = options?.resumeSessionId
-        ? undefined
-        : `copilot ${copilotFlags.join(" ")} -i '${escapedPromptWithPreamble}'`;
-    } else if (provider === "codex") {
-      const codexFlags: string[] = [...permissionFlags];
-      if (options?.model) codexFlags.push(`-m ${options.model}`);
-      if (options?.resumeSessionId) {
-        const escapedResumeSessionId = options.resumeSessionId.replace(/'/g, "'\\''");
-        agentCmd = escapedPrompt
-          ? `codex resume ${codexFlags.join(" ")} '${escapedResumeSessionId}' '${escapedDisplayPrompt}'`
-          : `codex resume ${codexFlags.join(" ")} '${escapedResumeSessionId}'`;
-        agentCmdPreamble = escapedPrompt
-          ? `codex resume ${codexFlags.join(" ")} '${escapedResumeSessionId}' '${escapedPromptWithPreamble}'`
-          : undefined;
-      } else {
-        agentCmd = escapedPrompt
-          ? `codex ${codexFlags.join(" ")} '${escapedDisplayPrompt}'`
-          : `codex ${codexFlags.join(" ")}`;
-        agentCmdPreamble = escapedPrompt
-          ? `codex ${codexFlags.join(" ")} '${escapedPromptWithPreamble}'`
-          : undefined;
-      }
-    } else if (provider === "opencode") {
-      const opencodePath = await invoke<string>("which_binary", { name: "opencode" })
-        .catch(() => "opencode");
-      const opencodeExecutable = `'${opencodePath.replace(/'/g, "'\\''")}'`;
-      const opencodeFlags: string[] = [...permissionFlags];
-      if (options?.model) opencodeFlags.push(`-m ${options.model}`);
-      if (options?.resumeSessionId) {
-        const escapedResumeSessionId = options.resumeSessionId.replace(/'/g, "'\\''");
-        opencodeFlags.push(`--session '${escapedResumeSessionId}'`);
-      }
-      const opencodeParts = [opencodeExecutable, "run", "--interactive", ...opencodeFlags];
-      if (escapedPrompt) {
-        opencodeParts.push(`'${escapedDisplayPrompt}'`);
-      }
-      agentCmd = opencodeParts.join(" ");
-      if (escapedPrompt) {
-        const opencodePreambleParts = [
-          opencodeExecutable,
-          "run",
-          "--interactive",
-          ...opencodeFlags,
-          `'${escapedPromptWithPreamble}'`,
-        ];
-        agentCmdPreamble = opencodePreambleParts.join(" ");
-      }
-    } else if (provider === "antigravity") {
-      const antigravityFlags: string[] = [...permissionFlags];
-      if (options?.model) antigravityFlags.push(`--model ${options.model}`);
-      const parts = ["'agy'", ...antigravityFlags];
-      if (escapedPrompt) parts.push("--prompt-interactive", `'${escapedPrompt}'`);
-      agentCmd = parts.join(" ");
-      if (escapedPrompt) {
-        agentCmdPreamble = ["'agy'", ...antigravityFlags, "--prompt-interactive", `'${escapedPromptWithPreamble}'`].join(" ");
-      }
-    } else {
-      const flags: string[] = [...permissionFlags];
-      flags.push(`--append-system-prompt '${escapedSystemPrompt}'`);
-      if (mcpConfigPath) {
-        flags.push(`--mcp-config '${mcpConfigPath.replace(/'/g, "'\\''")}'`);
-      }
-      if (options?.model) flags.push(`--model ${options.model}`);
-      if (options?.maxTurns != null) flags.push(`--max-turns ${options.maxTurns}`);
-      if (options?.maxBudgetUsd != null) flags.push(`--max-budget-usd ${options.maxBudgetUsd}`);
-      if (options?.allowedTools?.length) {
-        flags.push(`--allowedTools ${options.allowedTools.join(",")}`);
-      }
-      if (options?.disallowedTools?.length) {
-        flags.push(`--disallowedTools ${options.disallowedTools.join(",")}`);
-      }
-
-      const claudeSessionId = options?.resumeSessionId || crypto.randomUUID();
-      if (!options?.resumeSessionId) {
-        await updateAgentSessionId(context.requireDb(), sessionId, claudeSessionId);
-      }
-
-      if (options?.resumeSessionId) {
-        flags.push(`--resume ${claudeSessionId}`);
-      } else {
-        flags.push(`--session-id ${claudeSessionId}`);
-      }
-
-      if (options?.resumeSessionId || !escapedPrompt) {
-        agentCmd = `claude ${flags.join(" ")}`;
-      } else {
-        agentCmd = `claude ${flags.join(" ")} '${escapedPrompt}'`;
-      }
-    }
+    const { agentCmd, agentCmdPreamble } = await buildAgentCommand(provider, {
+      taskId: sessionId,
+      prompt,
+      runtimeSystemPrompt,
+      runtimeUserPrompt,
+      permissionFlags,
+      mcpConfigPath,
+      model: options?.model,
+      allowedTools: options?.allowedTools,
+      disallowedTools: options?.disallowedTools,
+      maxTurns: options?.maxTurns,
+      maxBudgetUsd: options?.maxBudgetUsd,
+      resumeSessionId: options?.resumeSessionId,
+      persistAgentSessionId: async (agentSessionId) => {
+        await updateAgentSessionId(context.requireDb(), sessionId, agentSessionId);
+      },
+      resolveBinaryPath: async (name) => invoke<string>("which_binary", { name }),
+    });
 
     return {
       env,
@@ -611,7 +495,7 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
     if (!item) {
       throw new Error(`task not found for session recovery: ${sessionId}`);
     }
-    if (item.closed_at !== null || item.stage === "done") {
+    if (item.closed_at !== null) {
       throw new Error(`cannot recover closed task session: ${sessionId}`);
     }
 
@@ -631,7 +515,13 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
         prompt,
         env,
         agentProvider,
-        systemPrompt: buildKannaRuntimeSystemPrompt(),
+        systemPrompt: buildKannaRuntimeSystemPrompt({
+          taskId: sessionId,
+          stage: item.stage,
+          pipeline: item.pipeline,
+          provider: agentProvider,
+          mcpConfigured: !!mcpConfigPath,
+        }),
         mcpConfigPath: mcpConfigPath ?? null,
         permissionMode: spawnOptions.permissionMode ?? null,
         model: spawnOptions.model ?? null,

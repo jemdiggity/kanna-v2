@@ -6,14 +6,17 @@ mod blockers;
 mod notifications;
 mod pipeline_items;
 mod ports;
-mod post_actions;
 mod repos;
 mod settings;
+mod stage_runs;
 #[cfg(test)]
 mod test_support;
 #[cfg(test)]
 mod tests;
 mod worktrees;
+
+#[allow(unused_imports)]
+pub use stage_runs::FinishedStageRun;
 
 const SQLITE_BUSY_TIMEOUT_MS: u64 = 10_000;
 const SQLITE_WAL_AUTOCHECKPOINT_PAGES: i64 = 100;
@@ -27,7 +30,6 @@ pub struct PipelineItem {
     pub prompt: Option<String>,
     pub pipeline: Option<String>,
     pub stage: Option<String>,
-    pub stage_result: Option<String>,
     pub pr_number: Option<i64>,
     pub pr_url: Option<String>,
     pub branch: Option<String>,
@@ -46,6 +48,7 @@ pub struct PipelineItem {
     pub notify_task_id: Option<String>,
     pub notified_at: Option<String>,
     pub parent_task_id: Option<String>,
+    pub pipeline_def: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -69,15 +72,16 @@ pub struct NewRepo<'a> {
 
 pub struct TaskStageSource {
     pub repo_id: String,
+    #[allow(dead_code)]
     pub issue_title: Option<String>,
     pub prompt: Option<String>,
+    #[allow(dead_code)]
     pub display_name: Option<String>,
     pub stage: Option<String>,
-    pub stage_result: Option<String>,
-    pub active_post_action: Option<String>,
     pub branch: Option<String>,
     pub base_ref: Option<String>,
     pub pipeline: Option<String>,
+    pub pipeline_def: Option<String>,
     pub agent_type: Option<String>,
     pub agent_provider: Option<String>,
     pub closed_at: Option<String>,
@@ -90,7 +94,6 @@ pub struct NewPipelineItem<'a> {
     pub display_name: Option<&'a str>,
     pub pipeline: &'a str,
     pub stage: &'a str,
-    pub tags_json: &'a str,
     pub branch: &'a str,
     pub agent_type: &'a str,
     pub agent_provider: &'a str,
@@ -100,12 +103,50 @@ pub struct NewPipelineItem<'a> {
     pub base_ref: Option<&'a str>,
     pub notify_task_id: Option<&'a str>,
     pub parent_task_id: Option<&'a str>,
+    pub pipeline_def: Option<&'a str>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct StageRun {
+    pub id: String,
+    pub task_id: String,
+    pub stage: String,
+    pub kind: String,
+    pub agent: Option<String>,
+    pub agent_provider: Option<String>,
+    pub model: Option<String>,
+    pub status: String,
+    pub result: Option<String>,
+    pub feedback: Option<String>,
+    pub session_id: Option<String>,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+}
+
+pub struct NewStageRun<'a> {
+    pub id: &'a str,
+    pub task_id: &'a str,
+    pub stage: &'a str,
+    pub kind: &'a str,
+    pub agent: Option<&'a str>,
+    pub agent_provider: Option<&'a str>,
+    pub model: Option<&'a str>,
+    pub status: &'a str,
+    pub result: Option<&'a str>,
+    pub feedback: Option<&'a str>,
+    pub session_id: Option<&'a str>,
 }
 
 pub struct ClaimedTaskNotification {
     pub child_id: String,
     pub notify_task_id: String,
     pub title: String,
+}
+
+pub struct RunningAgentTask {
+    pub task_id: String,
+    pub session_id: String,
 }
 
 #[derive(Debug)]

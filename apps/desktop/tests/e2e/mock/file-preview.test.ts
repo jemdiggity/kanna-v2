@@ -212,14 +212,13 @@ describe("file preview", () => {
     await execDb(
       client,
       `INSERT OR REPLACE INTO pipeline_item
-         (id, repo_id, prompt, stage, tags, branch, agent_type, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (id, repo_id, prompt, stage, branch, agent_type, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         taskAId,
         fixtureRepoId,
         "File preview recall task A",
         "in progress",
-        "[]",
         null,
         "agent",
         "2026-05-08T00:00:00.000Z",
@@ -228,7 +227,6 @@ describe("file preview", () => {
         fixtureRepoId,
         "File preview recall task B",
         "in progress",
-        "[]",
         null,
         "agent",
         "2026-05-08T00:01:00.000Z",

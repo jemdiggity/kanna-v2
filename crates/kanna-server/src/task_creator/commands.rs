@@ -1,5 +1,8 @@
 use super::environment::which_binary;
 use super::provider::{provider_binary_name, AgentProvider};
+use kanna_agent_protocol::mcp::{
+    codex_mcp_config_overrides, opencode_mcp_config_content, read_kanna_mcp_server,
+};
 use std::path::Path;
 
 pub(super) fn build_agent_command(
@@ -48,10 +51,20 @@ pub(super) fn build_agent_command(
                     shell_single_quote(mcp_config_path)
                 ));
             }
-            format!("claude {} '{}'", flags.join(" "), escaped_prompt)
+            // `--` terminates option parsing. Without it, variadic flags eat
+            // the positional prompt: `--mcp-config <path> '<prompt>'` makes
+            // the CLI treat the prompt as a second MCP config file and exit
+            // with "MCP config file not found: <prompt>".
+            format!("claude {} -- '{}'", flags.join(" "), escaped_prompt)
         }
         AgentProvider::Copilot => {
             let mut flags = get_agent_permission_flags(*provider, permission_mode);
+            if let Some(mcp_config_path) = mcp_config_path {
+                flags.push(format!(
+                    "--additional-mcp-config @'{}'",
+                    shell_single_quote(mcp_config_path)
+                ));
+            }
             if let Some(model) = model {
                 flags.push(format!("--model={}", model));
             }
@@ -64,6 +77,7 @@ pub(super) fn build_agent_command(
         }
         AgentProvider::Codex => {
             let mut flags = get_agent_permission_flags(*provider, permission_mode);
+            extend_codex_mcp_flags(&mut flags, mcp_config_path);
             if let Some(model) = model {
                 flags.push(format!("-m {}", model));
             }
@@ -83,6 +97,9 @@ pub(super) fn build_agent_command(
                 "run".to_string(),
                 "--interactive".to_string(),
             ];
+            if let Some(env_prefix) = opencode_mcp_env_prefix(mcp_config_path) {
+                parts.insert(0, env_prefix);
+            }
             parts.extend(flags);
             if !prompt.is_empty() {
                 parts.push(format!("'{}'", escaped_prompt));
@@ -103,6 +120,25 @@ pub(super) fn build_agent_command(
             parts.join(" ")
         }
     }
+}
+
+fn extend_codex_mcp_flags(flags: &mut Vec<String>, mcp_config_path: Option<&str>) {
+    let Some(server) = mcp_config_path.and_then(read_kanna_mcp_server) else {
+        return;
+    };
+
+    for value in codex_mcp_config_overrides(&server) {
+        flags.push(format!("-c '{}'", shell_single_quote(&value)));
+    }
+}
+
+fn opencode_mcp_env_prefix(mcp_config_path: Option<&str>) -> Option<String> {
+    let server = mcp_config_path.and_then(read_kanna_mcp_server)?;
+    let content = opencode_mcp_config_content(&server)?;
+    Some(format!(
+        "OPENCODE_CONFIG_CONTENT='{}'",
+        shell_single_quote(&content)
+    ))
 }
 
 fn get_agent_permission_flags(
@@ -178,6 +214,12 @@ pub(super) fn build_task_shell_command(
     command_parts.join(" && ")
 }
 
+/// Canonical Kanna runtime guidance shared with the desktop frontend.
+/// `packages/core/src/pipeline/prompt-builder.ts` mirrors this file as a TS
+/// constant; a sync test there keeps both sides byte-identical.
+const KANNA_TASK_ENVIRONMENT_TEMPLATE: &str =
+    include_str!("../../../../packages/core/src/pipeline/kanna-task-environment.md");
+
 pub(super) fn build_kanna_preamble(
     provider: &AgentProvider,
     task_id: &str,
@@ -186,34 +228,38 @@ pub(super) fn build_kanna_preamble(
     transition: Option<&str>,
     mcp_config_path: Option<&str>,
 ) -> String {
-    let provider_name = provider.as_str();
     let transition = transition.unwrap_or("manual");
-    let mut lines = vec![
-        "## Kanna Task Context".to_string(),
-        format!(
-            "You are `{provider_name}` running inside Kanna task `{task_id}`, stage `{stage_name}` of pipeline `{pipeline_name}` with transition `{transition}`."
-        ),
-        "You are not running inside a Kanna sandbox; use the normal shell tools available in this worktree.".to_string(),
-    ];
-    if mcp_config_path.is_some() {
-        lines.push(
-            "An instance-local `kanna-mcp` config is available at `KANNA_MCP_CONFIG`.".to_string(),
-        );
-        if matches!(provider, AgentProvider::Claude) {
-            lines.push(
-                "Claude is launched with this config via `--mcp-config`, so Kanna MCP tools should be available automatically."
-                    .to_string(),
-            );
+    // Mirrors buildKannaTaskContextLine in prompt-builder.ts — keep in sync.
+    let task_context = format!(
+        "This session was launched by Kanna as task `{task_id}`, stage `{stage_name}` of pipeline `{pipeline_name}` (transition: `{transition}`)."
+    );
+    let rendered = KANNA_TASK_ENVIRONMENT_TEMPLATE
+        .trim_end()
+        .replace("{{TASK_CONTEXT}}", &task_context);
+    match mcp_config_path {
+        Some(_) => rendered.replace("{{MCP_STATUS}}", &kanna_mcp_launch_line(*provider)),
+        None => rendered.replace("- {{MCP_STATUS}}\n", ""),
+    }
+}
+
+fn kanna_mcp_launch_line(provider: AgentProvider) -> String {
+    match provider {
+        AgentProvider::Claude => {
+            "Claude is launched with this config via `--mcp-config`, so Kanna MCP tools should be available automatically.".to_string()
+        }
+        AgentProvider::Codex => {
+            "Codex is launched with Kanna MCP registration via `-c mcp_servers.kanna-mcp.*` overrides, so Kanna MCP tools should be available automatically.".to_string()
+        }
+        AgentProvider::Copilot => {
+            "Copilot is launched with this config via `--additional-mcp-config`, so Kanna MCP tools should be available automatically.".to_string()
+        }
+        AgentProvider::Opencode => {
+            "OpenCode is launched with Kanna MCP registration via `OPENCODE_CONFIG_CONTENT`, so Kanna MCP tools should be available automatically.".to_string()
+        }
+        AgentProvider::Antigravity => {
+            "Antigravity CLI MCP registration is not wired because `agy 1.0.14` exposes no stable MCP flag or config surface; use the `kanna-cli` fallback for Kanna task operations.".to_string()
         }
     }
-    lines.extend([
-        "Prefer `kanna-mcp` tools for Kanna task operations when your agent client exposes them.".to_string(),
-        "If MCP tools are unavailable, fall back to the instance-local `kanna-cli`; it is exported as `KANNA_CLI_PATH` and its directory is prepended to `PATH`.".to_string(),
-        "Use `kanna-cli guide` for the generated fallback CLI manual and current workflow semantics.".to_string(),
-        "Do not push a branch or create a pull request unless this stage's prompt explicitly tells you to do so. Most stages should finish by recording stage completion so Kanna can advance the configured pipeline.".to_string(),
-        "When this stage is complete, prefer MCP `kanna_complete_stage`; fallback: `kanna-cli stage-complete --task-id \"$KANNA_TASK_ID\" --status success --summary \"...\"`.".to_string(),
-    ]);
-    lines.join("\n")
 }
 
 fn shell_single_quote(value: &str) -> String {

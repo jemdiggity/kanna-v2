@@ -131,7 +131,9 @@ async fn render_pty_snapshot_logs(daemon_dir: &str, session_id: &str) -> String 
         })
         .await;
     match event {
-        Ok(DaemonEvent::Snapshot { snapshot, .. }) => strip_ansi(&snapshot.vt),
+        Ok(DaemonEvent::Snapshot { snapshot, .. }) => {
+            kanna_runtime_defaults::strip_ansi_for_display(&snapshot.vt)
+        }
         Ok(DaemonEvent::Error { message, .. }) => {
             format!("no logs for pty session: {message}")
         }
@@ -140,20 +142,33 @@ async fn render_pty_snapshot_logs(daemon_dir: &str, session_id: &str) -> String 
     }
 }
 
-fn strip_ansi(input: &str) -> String {
-    let mut output = String::with_capacity(input.len());
-    let mut chars = input.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\u{1b}' && chars.peek() == Some(&'[') {
-            let _ = chars.next();
-            for next in chars.by_ref() {
-                if ('@'..='~').contains(&next) {
-                    break;
-                }
-            }
-        } else {
-            output.push(ch);
-        }
+#[cfg(test)]
+mod tests {
+    use kanna_runtime_defaults::strip_ansi_for_display;
+
+    #[test]
+    fn strip_ansi_removes_color_codes() {
+        assert_eq!(strip_ansi_for_display("\u{1b}[31mused\u{1b}[0m"), "used");
     }
-    output
+
+    #[test]
+    fn strip_ansi_preserves_cursor_movement_readability() {
+        assert_eq!(
+            strip_ansi_for_display("used\u{1b}[3C42\u{1b}[2Bdone"),
+            "used   42\n\ndone"
+        );
+    }
+
+    #[test]
+    fn strip_ansi_removes_osc_sequences_and_carriage_returns() {
+        assert_eq!(
+            strip_ansi_for_display("a\u{1b}]0;title\u{7}b\rc\u{1b}]1;ignored\u{1b}\\d"),
+            "abcd"
+        );
+    }
+
+    #[test]
+    fn strip_ansi_preserves_utf8_and_drops_incomplete_escapes() {
+        assert_eq!(strip_ansi_for_display("✓ café\u{1b}\u{1b}[31"), "✓ café");
+    }
 }

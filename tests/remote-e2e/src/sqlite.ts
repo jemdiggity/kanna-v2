@@ -35,14 +35,8 @@ CREATE TABLE IF NOT EXISTS pipeline_item (
   pin_order INTEGER,
   display_name TEXT,
   last_output_preview TEXT,
-  created_at TEXT,
-  updated_at TEXT,
-  previous_stage TEXT,
   closed_at TEXT,
   pipeline TEXT,
-  stage_result TEXT,
-  active_post_action TEXT,
-  tags TEXT,
   agent_provider TEXT,
   port_offset INTEGER,
   port_env TEXT,
@@ -52,7 +46,10 @@ CREATE TABLE IF NOT EXISTS pipeline_item (
   agent_session_id TEXT,
   agent_spawn_options TEXT,
   teardown_started_at TEXT,
-  parent_task_id TEXT
+  parent_task_id TEXT,
+  pipeline_def TEXT,
+  created_at TEXT,
+  updated_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS worktree (
@@ -83,6 +80,24 @@ CREATE TABLE IF NOT EXISTS terminal_session (
   cwd TEXT,
   daemon_session_id TEXT
 );
+
+CREATE TABLE IF NOT EXISTS stage_run (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL,
+  stage TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'main' CHECK (kind IN ('main', 'post')),
+  agent TEXT,
+  agent_provider TEXT,
+  model TEXT,
+  status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'succeeded', 'failed', 'cancelled')),
+  result TEXT,
+  feedback TEXT,
+  session_id TEXT,
+  started_at TEXT NOT NULL DEFAULT (datetime('now')),
+  finished_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_stage_run_task_started ON stage_run(task_id, started_at);
 
 CREATE TABLE IF NOT EXISTS task_blocker (
   blocked_item_id TEXT NOT NULL,

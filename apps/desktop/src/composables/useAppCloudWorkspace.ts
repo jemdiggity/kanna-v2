@@ -78,7 +78,7 @@ export function useAppCloudWorkspace({ db, store, toast }: UseAppCloudWorkspaceO
 
     const rows = await Promise.all(repos.map((repo) =>
       db.select<ClosedLocalTaskIdentity>(
-        "SELECT id, repo_id FROM pipeline_item WHERE repo_id = ? AND (closed_at IS NOT NULL OR stage = 'done')",
+        "SELECT id, repo_id FROM pipeline_item WHERE repo_id = ? AND closed_at IS NOT NULL",
         [repo.id],
       )
     ));
@@ -94,7 +94,7 @@ export function useAppCloudWorkspace({ db, store, toast }: UseAppCloudWorkspaceO
     })),
     ...closedLocalTaskIdentities.value.map((item) => ({
       ...item,
-      stage: "done",
+      stage: "closed",
       closed_at: "",
     })),
   ]);

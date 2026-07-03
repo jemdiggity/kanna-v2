@@ -13,7 +13,7 @@ Kanna is a product distributed to end users as a signed macOS app. All dependenc
 ### Core concepts
 
 - **Task** — A unit of work. Has a prompt, a git worktree, a Claude agent session, and a lifecycle stage. One task = one branch = one PR.
-- **Pipeline** — User-definable agentic pipeline: an ordered list of stages, each with an agent and an optional environment. Defined in `.kanna/pipelines/*.json`. Default: `in progress → pr`. Advancing a stage closes the current task and creates a new task with the next stage's agent in a new worktree.
+- **Pipeline** — User-definable agentic pipeline: an ordered list of stages, each with an agent, an optional environment, a stage policy, and an optional post. Defined in `.kanna/pipelines/*.json`. Default: `in progress` (post: `commit`) `→ review → pr`. Tasks are durable (same id, run history, blockers), but each stage transition forks a fresh workspace: a new randomly-named branch + worktree cut from the previous branch's committed tip — N worktrees, N branches, one PR (the PR agent renames the final branch into something meaningful). A stage's `post` (e.g. commit) is tail work injected into the stage's running agent session before the transition — stages fork workspaces and swap sessions, posts continue them. Only committed work crosses a stage boundary; old worktrees stay on disk until cleanup. Advancing past the final stage closes the task.
 - **Daemon** — Standalone process that manages PTY sessions. Survives app restarts. Handles seamless upgrades via fd handoff.
 
 ### Workflows
@@ -29,8 +29,8 @@ Kanna is a product distributed to end users as a signed macOS app. All dependenc
 1. Agent finishes → task marked as unread (bold in sidebar)
 2. User selects task, presses Cmd+D → diff modal shows all branch changes
 3. Optionally Cmd+P → file picker → preview, Cmd+O → open in IDE, or Cmd+J → shell in worktree
-4. Cmd+S → create GitHub PR, task tagged `pr`
-5. Cmd+M → merge PR, task tagged `merge`
+4. Cmd+S → advance the pipeline (commit post runs in-session; the pr-stage agent creates the GitHub PR and reports its URL)
+5. Human reviews the PR, then the merge agent merges it (MCP `run_merge_agent` / kanna-cli — there is no merge keyboard shortcut)
 
 **Manual intervention:**
 1. Cmd+J → shell modal opens in the task's worktree
@@ -43,9 +43,9 @@ Kanna is a product distributed to end users as a signed macOS app. All dependenc
 ### Closing a task (Cmd+Delete)
 
 1. Kills the agent PTY session and shell session in the daemon
-2. Marks the task as `done` in the DB
+2. Sets `closed_at` in the DB
 3. Selects the next task in the sidebar
-4. Tasks with `stage = 'done'` are hidden from the sidebar. The sidebar shows all tasks whose stage is not `done`.
+4. Tasks with `closed_at` are hidden from the sidebar. The sidebar shows tasks whose `closed_at` is null.
 5. Closed tasks remain in the database and on disk until a future explicit cleanup workflow removes them.
 
 ### Task activity
@@ -75,6 +75,7 @@ Tasks can be pinned to the top of their repo's task list by dragging above the p
 Project-scoped MCP servers are registered in `.mcp.json` so Claude Code, Codex, and other MCP-aware agent clients launched from this repo can discover both Kanna task tools and kd development tools.
 
 - **`kanna-mcp`** exposes `kanna_*` task-management tools backed by the desktop local API at `http://127.0.0.1:48120`. Prefer these tools for task management: create tasks, fetch task status/detail, list/search tasks, close tasks, send input, request revision, advance stage, and complete stage. Its tool surface comes from `crates/kanna-tool-catalog`, the single declarative source of truth shared with `kanna-cli`.
+- Kanna task sessions register the instance-local `kanna-mcp` server automatically for Claude (`--mcp-config`), Codex (`-c mcp_servers.kanna-mcp.*`), Copilot (`--additional-mcp-config`), and OpenCode (`OPENCODE_CONFIG_CONTENT`). Antigravity (`agy 1.0.14`) has no verified stable MCP registration flag or config surface, so Antigravity tasks use the `kanna-cli` fallback for Kanna task operations.
 - The MCP server hot-reloads an override catalog from `KANNA_MCP_CATALOG` or `<cwd>/.kanna/mcp-tools.json`. When the catalog changes, `kanna-mcp` swaps the active tools and emits the JSON-RPC notification `notifications/tools/list_changed`; clients should call `tools/list` again after receiving it. The shared CLI exposes the same catalog through `kanna-cli tool list` and can invoke any catalog tool with `kanna-cli tool call <name> --json '{...}'`.
 - Catalog manifests declare `{ "tools": [...] }`. Each tool includes `name`, `description`, `method`, `path` with `{param}` placeholders, `response` (`json`, `text`, or `wait`), and `params`. Params use snake_case names, `type` (`string`, `integer`, `string_array`, or `object`), `required`, `location` (`path`, `query`, or `body`), optional camelCase `key`, optional `enum`, optional `default`, and optional integer `min`/`max` clamps.
 - **`kd-mcp`** exposes kd development workflow tools. Prefer these tools over shelling out when an MCP client has them available.
@@ -100,7 +101,6 @@ Do not read or write the SQLite database directly for orchestration. Use `kanna-
 | ⌘P | File picker |
 | ⌘O | Open in IDE |
 | ⌘S | Make PR |
-| ⇧⌘M | Merge PR |
 | ⇧⌘Delete | Close task |
 | ⌘Z | Undo close |
 | ⌘Opt+Up/Down | Navigate tasks |
@@ -354,7 +354,7 @@ User makes PR → GitHub API → DB update → stage transition
 | `ShellModal` | Standalone shell terminal |
 | `Sidebar` | Task list navigation (pinned/PR/merge/active/blocked sections) |
 | `TagBadges` | Task tag display |
-| `TaskHeader` | Task title, branch, PR link, tags |
+| `TaskHeader` | Task title, branch, PR link, stage |
 | `TerminalTabs` | Tab manager for multiple terminal/agent sessions |
 | `TerminalView` | xterm.js terminal renderer |
 | `ToastContainer` | Toast notification display |
@@ -448,7 +448,7 @@ User makes PR → GitHub API → DB update → stage transition
 | Table | Key Columns |
 |---|---|
 | `repo` | id, path, name, default_branch, hidden |
-| `pipeline_item` | id, repo_id, prompt, tags (JSON), pr_number/url, branch, activity, port_env (JSON), pinned, pin_order, display_name, agent_type, agent_provider, base_ref, issue_number, issue_title, closed_at, port_offset |
+| `pipeline_item` | id, repo_id, prompt, pipeline, stage, pr_number/url, branch, activity, port_env (JSON), pinned, pin_order, display_name, agent_type, agent_provider, base_ref, issue_number, issue_title, closed_at, notify_task_id, notified_at, parent_task_id, pipeline_def, port_offset |
 | `task_blocker` | blocked_item_id, blocker_item_id |
 | `worktree` | id, pipeline_item_id, path, branch |
 | `terminal_session` | id, repo_id, pipeline_item_id, label, cwd, daemon_session_id |
@@ -531,7 +531,7 @@ If a behavior should have E2E coverage but cannot reasonably get it yet, the cha
 
 ## Conventions
 
-- Task stage tracked via `pipeline_item.stage` column (e.g., `'in progress'`, `'pr'`). The `tags` column is deprecated for stage management but still used internally for `blocked` tag until the blocker system is fully decoupled. `closed_at` indicates done tasks, not a tag.
+- Task stage is tracked via `pipeline_item.stage` (e.g., `'in progress'`, `'commit'`, `'pr'`). Visibility is governed by `closed_at`; closed tasks keep their last stage. Blocked display state derives from `task_blocker`, not tags.
 - Git worktrees created at `{repoPath}/.kanna-worktrees/task-{uuid}`
 - Branch names: `task-{uuid}`
 - GitHub labels: `kn:wip`, `kn:pr-ready`, `kn:claimed`
@@ -542,7 +542,7 @@ If a behavior should have E2E coverage but cannot reasonably get it yet, the cha
 - `.kanna/` per repo — project-level Kanna config:
   - `config.json` — `setup` (commands run in each new worktree), `teardown` (cleanup commands), `test` (test commands), `ports` (env var → base port mapping), `pipeline` (default pipeline name)
   - `agents/{name}/AGENT.md` — agent definitions (YAML frontmatter + markdown body). Built-in agents ship as Tauri resources; per-repo files override built-ins by name.
-  - `pipelines/{name}.json` — pipeline definitions (stages, environments, transitions). Built-in `default.json` ships as Tauri resource.
+  - `pipelines/{name}.json` — pipeline definitions (stages, environments, stage policies). Built-in `default.json` ships as Tauri resource.
   - `tasks/{slug}/agent.md` — custom task templates with YAML frontmatter (prompt, model, permissions, allowed tools)
 
 ## Working on the Codebase
@@ -620,5 +620,5 @@ Single `VERSION` file is the source of truth for packaged app versioning. `kd re
 - The event bridge auto-reconnects to daemon with exponential backoff — don't add manual retry logic on top.
 - KeepAlive is used for ShellModal to preserve xterm buffer across task switches — use `v-show` not `v-if` for terminal-containing components.
 - `agent_next_message` uses a polling pattern — frontend calls it repeatedly to drain the buffered message queue from the background drainer task.
-- Stage advance creates a **new task** (new `pipeline_item`, new worktree, new PTY session). The new task's prompt can reference the previous task's branch via `$BRANCH` variable substitution. The source task is closed after the new one is created. Never mutate an existing task's stage in-place.
+- Stage advance is durable on the task but forks the workspace. If the current stage declares a `post`, advancing (⌘S or an auto main-run success) injects the post prompt into the running agent session (`stage_run` row with `kind: "post"`; the task's stage and workspace do not change); when that post run completes with success, the engine performs the transition. A transition kills the task's daemon session (and the stale worktree shell), forks a new branch + worktree from the current branch's committed tip, respawns the same session id with the next stage's agent there, and moves `pipeline_item.stage`/`branch` — no new task is ever created; advancing past the final stage closes the task. Reruns keep the current workspace; a dead-session post falls back to spawning its `agent` binding in the current workspace. Legacy `post_action` and `policy.execution: "continue"` pipeline JSON (including pinned `pipeline_def` snapshots) compiles into stage posts at load time. `$BRANCH` in a stage prompt resolves to the freshly forked branch; `$SOURCE_WORKTREE` points at the previous stage's worktree.
 - Built-in agent/pipeline definitions must ship as Tauri bundled resources, not as TypeScript string constants. Definitions live in `.kanna/` files — the app reads them at runtime via the resource directory fallback.

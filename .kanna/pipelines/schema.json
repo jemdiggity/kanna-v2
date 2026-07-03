@@ -45,7 +45,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["name", "transition"],
+        "required": ["name", "policy"],
         "properties": {
           "name": {
             "type": "string",
@@ -77,19 +77,21 @@
           "environment": {
             "type": "string"
           },
-          "transition": {
-            "enum": ["manual", "auto"]
-          },
-          "follow_task": {
-            "type": "boolean"
-          },
-          "mode": {
-            "enum": ["new_task", "continue"]
-          },
-          "post_action": {
+          "policy": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["name", "transition"],
+            "required": ["transition"],
+            "properties": {
+              "transition": {
+                "enum": ["manual", "auto"]
+              }
+            }
+          },
+          "post": {
+            "type": "object",
+            "description": "Tail work injected into the stage's running agent session when the stage transitions forward. `agent` is the fallback spawned when the session is dead.",
+            "additionalProperties": false,
+            "required": ["name", "prompt"],
             "properties": {
               "name": {
                 "type": "string",
@@ -117,9 +119,6 @@
                     "minItems": 1
                   }
                 ]
-              },
-              "transition": {
-                "enum": ["manual", "auto"]
               }
             }
           }
@@ -131,26 +130,24 @@
     {
       "$schema": "./schema.json",
       "name": "default",
-      "description": "Standard in progress -> PR flow with commit as a post-action",
+      "description": "Standard in progress (commit as post) -> PR flow",
       "stages": [
         {
           "name": "in progress",
           "agent": "implement",
           "prompt": "$TASK_PROMPT",
-          "transition": "manual",
-          "post_action": {
+          "policy": { "transition": "manual" },
+          "post": {
             "name": "commit",
             "agent": "commit",
-            "prompt": "Commit the relevant work for this task. Original task: $TASK_PROMPT",
-            "transition": "auto"
+            "prompt": "Commit the relevant work for this task. Original task: $TASK_PROMPT"
           }
         },
         {
           "name": "pr",
           "agent": "pr",
           "prompt": "Create a PR for the work on branch $BRANCH. Previous result: $PREV_RESULT",
-          "transition": "manual",
-          "follow_task": false
+          "policy": { "transition": "manual" }
         }
       ]
     }

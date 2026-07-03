@@ -85,13 +85,22 @@ pub(super) fn generate_task_id() -> Result<String, String> {
 
 pub(super) fn fetch_start_point(repo_path: &str, default_branch: Option<&str>) -> Option<String> {
     let branch = default_branch.unwrap_or("main");
-    let status = Command::new("git")
+    let fetch_success = Command::new("git")
         .args(["fetch", "origin", branch])
         .current_dir(repo_path)
-        .status()
-        .ok()?;
-    if status.success() {
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false);
+    if fetch_success {
         Some(format!("origin/{}", branch))
+    } else if Command::new("git")
+        .args(["rev-parse", "--verify", branch])
+        .current_dir(repo_path)
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+    {
+        Some(branch.to_string())
     } else {
         None
     }
@@ -137,11 +146,31 @@ pub(super) fn create_worktree(
         return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
     }
 
-    let cargo_dir = Path::new(worktree_path).join(".cargo");
-    let _ = std::fs::create_dir_all(&cargo_dir);
-    let _ = std::fs::write(
-        cargo_dir.join("config.toml"),
-        "[build]\ntarget-dir = \".build\"\n",
-    );
+    // Worktrees contain exactly what the branch checkout contains. Repo-
+    // specific scaffolding (like a Rust `.cargo/config.toml`) must come from
+    // the repo itself — committed, or created by `.kanna/config.json` setup
+    // commands. Kanna used to inject a `.cargo/config.toml` here for its own
+    // build layout; the stray untracked file made every commit post in other
+    // repos report a dirty worktree.
+    Ok(())
+}
+
+pub(super) fn merge_branches_into_worktree(
+    worktree_path: &str,
+    branches: &[String],
+) -> Result<(), String> {
+    for branch in branches {
+        let output = Command::new("git")
+            .args(["merge", "--no-edit", branch])
+            .current_dir(worktree_path)
+            .output()
+            .map_err(|e| format!("failed to run git merge {branch}: {e}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "failed to merge blocker branch {branch}: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+    }
     Ok(())
 }

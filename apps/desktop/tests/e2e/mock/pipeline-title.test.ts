@@ -120,22 +120,32 @@ describe("pipeline title preservation", () => {
 
     await advanceStageWithShortcut(client, originalTitle, sourceTask.id);
 
+    // Durable model: the SAME task advances to the qa stage in place; the
+    // generated stage prompt is delivered to the fresh agent session and
+    // never overwrites the task's own prompt or title.
     await waitForCondition(async () => {
       const rows = (await queryDb(
         client,
-        "SELECT id FROM pipeline_item WHERE repo_id = ? AND stage = ? AND closed_at IS NULL ORDER BY created_at DESC LIMIT 1",
-        [repoId, "qa"],
-      )) as Array<{ id: string }>;
-      return Boolean(rows[0]?.id);
-    }, 10_000, "next-stage QA task was not created");
+        "SELECT stage FROM pipeline_item WHERE id = ? AND closed_at IS NULL",
+        [sourceTask.id],
+      )) as Array<{ stage: string | null }>;
+      return rows[0]?.stage === "qa";
+    }, 10_000, "task did not advance to the qa stage in place");
 
     const qaRows = (await queryDb(
       client,
-      "SELECT prompt, display_name FROM pipeline_item WHERE repo_id = ? AND stage = ? AND closed_at IS NULL ORDER BY created_at DESC LIMIT 1",
-      [repoId, "qa"],
+      "SELECT prompt, display_name FROM pipeline_item WHERE id = ?",
+      [sourceTask.id],
     )) as Array<{ prompt: string | null; display_name: string | null }>;
-    expect(qaRows[0]?.prompt).toContain(generatedMarker);
-    expect(qaRows[0]?.display_name).toBe(originalTitle);
+    expect(qaRows[0]?.prompt).toBe(originalTitle);
+    expect(qaRows[0]?.prompt).not.toContain(generatedMarker);
+
+    const qaRuns = (await queryDb(
+      client,
+      "SELECT id FROM stage_run WHERE task_id = ? AND stage = 'qa'",
+      [sourceTask.id],
+    )) as Array<{ id: string }>;
+    expect(qaRuns.length).toBeGreaterThanOrEqual(1);
 
     const sidebarText = await client.executeSync<string>(
       `return document.querySelector(".sidebar")?.textContent || "";`,

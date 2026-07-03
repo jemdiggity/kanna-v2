@@ -12,6 +12,7 @@ async fn request_revision_route_uses_revision_requester() {
             assert_eq!(payload.prompt, "Add e2e coverage for task creation.");
             Ok(TaskActionResponse {
                 task_id: "revision-task".to_string(),
+                follow_task: None,
             })
         }),
     );
@@ -107,41 +108,59 @@ async fn request_revision_route_resolves_branch_style_task_id() {
         let (stream, _) = daemon_listener.accept().await.unwrap();
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
-        let mut line = String::new();
-        reader.read_line(&mut line).await.unwrap();
-        let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
-        let session_id = match command {
-            DaemonCommand::SpawnAgent { session_id, params } => {
-                assert_eq!(params.agent_provider, AgentProvider::Claude);
-                assert!(params.cwd.contains(".kanna-worktrees/task-"));
-                session_id
-            }
-            DaemonCommand::Spawn {
-                session_id,
-                args,
-                cwd,
-                agent_provider,
-                ..
-            } => {
-                assert_eq!(agent_provider, Some(AgentProvider::Claude));
-                assert!(cwd.contains(".kanna-worktrees/task-"));
-                let command_line = args.join(" ");
-                assert!(command_line.contains("Implement revision:"));
-                assert!(command_line.contains("Add e2e coverage for task creation."));
-                session_id
-            }
-            other => panic!("expected revision spawn command, got {:?}", other),
-        };
-        write_half
-            .write_all(
-                format!(
-                    "{}\n",
-                    serde_json::to_string(&DaemonEvent::SessionCreated { session_id }).unwrap()
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+            let session_id = match command {
+                // A durable revision replaces the task's session in place:
+                // the previous session is killed before the respawn.
+                DaemonCommand::Kill { .. } => {
+                    let response = DaemonEvent::Error {
+                        code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
+                        message: "session not found".to_string(),
+                    };
+                    write_half
+                        .write_all(
+                            format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                    continue;
+                }
+                DaemonCommand::SpawnAgent { session_id, params } => {
+                    assert_eq!(params.agent_provider, AgentProvider::Claude);
+                    assert!(params.cwd.contains(".kanna-worktrees/task-"));
+                    session_id
+                }
+                DaemonCommand::Spawn {
+                    session_id,
+                    args,
+                    cwd,
+                    agent_provider,
+                    ..
+                } => {
+                    assert_eq!(agent_provider, Some(AgentProvider::Claude));
+                    assert!(cwd.contains(".kanna-worktrees/task-"));
+                    let command_line = args.join(" ");
+                    assert!(command_line.contains("Implement revision:"));
+                    assert!(command_line.contains("Add e2e coverage for task creation."));
+                    session_id
+                }
+                other => panic!("expected revision spawn command, got {:?}", other),
+            };
+            write_half
+                .write_all(
+                    format!(
+                        "{}\n",
+                        serde_json::to_string(&DaemonEvent::SessionCreated { session_id }).unwrap()
+                    )
+                    .as_bytes(),
                 )
-                .as_bytes(),
-            )
-            .await
-            .unwrap();
+                .await
+                .unwrap();
+            break;
+        }
     });
 
     let config = Config {
@@ -211,19 +230,25 @@ async fn request_revision_route_resolves_branch_style_task_id() {
         .await
         .unwrap();
     let created: TaskActionResponse = from_slice(&body).unwrap();
-    assert_ne!(created.task_id, "710917fb");
+    assert_eq!(created.task_id, "710917fb");
 
+    // Durable revision: the SAME task moves back to the target stage with a
+    // new stage run carrying the feedback; nothing is closed and no new task
+    // is created. The respawn executes on a detached task; wait for it.
     let db = Db::open(&config.db_path).unwrap();
-    let source = db.get_task_stage_source("710917fb").unwrap().unwrap();
-    assert_eq!(source.stage.as_deref(), Some("done"));
-    assert!(source.closed_at.is_some());
-    let stage_result = source.stage_result.as_deref().unwrap();
-    assert!(stage_result.contains("\"status\":\"failure\""));
-    assert!(stage_result.contains("missing e2e coverage"));
+    let source = super::actions::wait_for_task_stage(&db, "710917fb", "in progress").await;
+    assert_eq!(source.stage.as_deref(), Some("in progress"));
+    assert!(source.closed_at.is_none());
 
-    let revision = db.get_task_stage_source(&created.task_id).unwrap().unwrap();
-    assert_eq!(revision.stage.as_deref(), Some("in progress"));
-    assert_eq!(revision.base_ref.as_deref(), Some("task-710917fb"));
+    let runs = db.list_stage_runs_for_task("710917fb").unwrap();
+    let revision_run = runs.last().expect("revision stage run recorded");
+    assert_eq!(revision_run.stage, "in progress");
+    assert_eq!(revision_run.kind, "main");
+    assert_eq!(revision_run.status, "running");
+    assert_eq!(
+        revision_run.feedback.as_deref(),
+        Some("Add e2e coverage for task creation.")
+    );
 
     daemon_server.await.unwrap();
     let _ = std::fs::remove_file(&socket_path);
@@ -308,49 +333,67 @@ async fn request_revision_route_preserves_title_and_sends_revision_prompt() {
         let (stream, _) = daemon_listener.accept().await.unwrap();
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
-        let mut line = String::new();
-        reader.read_line(&mut line).await.unwrap();
-        let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
-        let session_id = match command {
-            DaemonCommand::SpawnAgent { session_id, params } => {
-                assert_eq!(params.agent_provider, AgentProvider::Codex);
-                assert!(params.cwd.contains(".kanna-worktrees/task-"));
-                assert!(params.prompt.contains("Implement revision:"));
-                assert!(params
-                    .prompt
-                    .contains("Add E2E coverage for title preservation."));
-                assert!(!params
-                    .prompt
-                    .contains("Review prompt that should stay hidden."));
-                session_id
-            }
-            DaemonCommand::Spawn {
-                session_id,
-                args,
-                cwd,
-                agent_provider,
-                ..
-            } => {
-                assert_eq!(agent_provider, Some(AgentProvider::Codex));
-                assert!(cwd.contains(".kanna-worktrees/task-"));
-                let command_line = args.join(" ");
-                assert!(command_line.contains("Implement revision:"));
-                assert!(command_line.contains("Add E2E coverage for title preservation."));
-                assert!(!command_line.contains("Review prompt that should stay hidden."));
-                session_id
-            }
-            other => panic!("expected revision spawn command, got {:?}", other),
-        };
-        write_half
-            .write_all(
-                format!(
-                    "{}\n",
-                    serde_json::to_string(&DaemonEvent::SessionCreated { session_id }).unwrap()
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+            let session_id = match command {
+                // A durable revision replaces the task's session in place:
+                // the previous session is killed before the respawn.
+                DaemonCommand::Kill { .. } => {
+                    let response = DaemonEvent::Error {
+                        code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
+                        message: "session not found".to_string(),
+                    };
+                    write_half
+                        .write_all(
+                            format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                    continue;
+                }
+                DaemonCommand::SpawnAgent { session_id, params } => {
+                    assert_eq!(params.agent_provider, AgentProvider::Codex);
+                    assert!(params.cwd.contains(".kanna-worktrees/task-"));
+                    assert!(params.prompt.contains("Implement revision:"));
+                    assert!(params
+                        .prompt
+                        .contains("Add E2E coverage for title preservation."));
+                    assert!(!params
+                        .prompt
+                        .contains("Review prompt that should stay hidden."));
+                    session_id
+                }
+                DaemonCommand::Spawn {
+                    session_id,
+                    args,
+                    cwd,
+                    agent_provider,
+                    ..
+                } => {
+                    assert_eq!(agent_provider, Some(AgentProvider::Codex));
+                    assert!(cwd.contains(".kanna-worktrees/task-"));
+                    let command_line = args.join(" ");
+                    assert!(command_line.contains("Implement revision:"));
+                    assert!(command_line.contains("Add E2E coverage for title preservation."));
+                    assert!(!command_line.contains("Review prompt that should stay hidden."));
+                    session_id
+                }
+                other => panic!("expected revision spawn command, got {:?}", other),
+            };
+            write_half
+                .write_all(
+                    format!(
+                        "{}\n",
+                        serde_json::to_string(&DaemonEvent::SessionCreated { session_id }).unwrap()
+                    )
+                    .as_bytes(),
                 )
-                .as_bytes(),
-            )
-            .await
-            .unwrap();
+                .await
+                .unwrap();
+            break;
+        }
     });
 
     let config = Config {
@@ -415,21 +458,23 @@ async fn request_revision_route_preserves_title_and_sends_revision_prompt() {
         .await
         .unwrap();
     let created: TaskActionResponse = from_slice(&body).unwrap();
-    assert_ne!(created.task_id, "review-task");
+    assert_eq!(created.task_id, "review-task");
 
+    // Durable revision: the SAME task keeps its identity and title; only the
+    // stage moves back and a new run carries the revision feedback. The
+    // respawn executes on a detached task; wait for it.
     let db = Db::open(&config.db_path).unwrap();
-    let reviewed = db.get_task_stage_source("review-task").unwrap().unwrap();
-    let revision = db.get_task_stage_source(&created.task_id).unwrap().unwrap();
-    assert_eq!(reviewed.stage.as_deref(), Some("done"));
-    assert!(reviewed.closed_at.is_some());
-    assert_eq!(revision.stage.as_deref(), Some("in progress"));
+    let reviewed = super::actions::wait_for_task_stage(&db, "review-task", "in progress").await;
+    assert_eq!(reviewed.stage.as_deref(), Some("in progress"));
+    assert!(reviewed.closed_at.is_none());
     assert_eq!(
-        revision.display_name.as_deref(),
+        reviewed.display_name.as_deref(),
         Some("Preserved review title")
     );
     assert_eq!(
-        revision.prompt.as_deref(),
-        Some("Implement revision:\nAdd E2E coverage for title preservation.")
+        reviewed.prompt.as_deref(),
+        Some("Review prompt that should stay hidden."),
+        "revision must not overwrite the task's original prompt"
     );
 
     daemon_server.await.unwrap();

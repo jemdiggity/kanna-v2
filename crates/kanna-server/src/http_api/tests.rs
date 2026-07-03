@@ -2,7 +2,7 @@ pub(super) use super::task_input::{submit_task_input, task_input_message};
 pub(super) use super::test_support::{
     test_router, test_router_with_merge_agent_runner, test_router_with_revision_requester,
     test_router_with_seed, test_router_with_stage_advancer, test_router_with_stage_completer,
-    test_router_with_task_closer, test_router_with_task_creator,
+    test_router_with_stage_rerunner, test_router_with_task_closer, test_router_with_task_creator,
     test_router_with_task_input_sender, test_state_with_seed, test_state_with_task_input_sender,
 };
 pub(super) use super::{dispatch_http_invoke, handle_task_terminal_state, router, AppState};
@@ -19,25 +19,14 @@ use std::sync::Arc;
 use tower::ServiceExt;
 
 fn daemon_socket_path_for_dir(daemon_dir: &str) -> PathBuf {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    let dir = PathBuf::from(daemon_dir);
-    let mut hasher = DefaultHasher::new();
-    dir.hash(&mut hasher);
-    let hash = hasher.finish() as u32;
-    PathBuf::from(format!("/tmp/kanna-{:08x}.sock", hash))
+    kanna_runtime_defaults::socket_path(Path::new(daemon_dir))
 }
 
 fn pipeline_socket_path_for_daemon_dir(daemon_dir: &str) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
     let dir = PathBuf::from(daemon_dir).join("pipeline");
-    let mut hasher = DefaultHasher::new();
-    dir.hash(&mut hasher);
-    let hash = hasher.finish() as u32;
-    format!("/tmp/kanna-{hash:08x}.sock")
+    kanna_runtime_defaults::socket_path(&dir)
+        .to_string_lossy()
+        .to_string()
 }
 
 fn ensure_test_kanna_cli_sidecar() -> (PathBuf, bool) {

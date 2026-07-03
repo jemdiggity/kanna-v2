@@ -139,12 +139,13 @@ function mountSidebarWithRepos(
   repos: Repo[],
   pipelineItems: PipelineItem[],
   selectedItemId: string | null = "task-1",
+  selectedRepoId: string | null = repos[0]?.id ?? null,
 ) {
   return mount(Sidebar, {
     props: {
       repos,
       pipelineItems,
-      selectedRepoId: repos[0]?.id ?? null,
+      selectedRepoId,
       selectedItemId,
       blockerNames: {},
     },
@@ -176,32 +177,61 @@ describe("Sidebar", () => {
     getStageOrder.mockReturnValue(["merge", "pr", "review", "in progress"]);
   });
 
-  it("prefixes active post-action tasks with an ASCII ellipsis and keeps the stage group", () => {
+  it("renders task titles without retired post-action prefixes", () => {
     getStageOrder.mockReturnValue(["merge", "pr", "review", "in progress"]);
     const wrapper = mountSidebar([
       item("task-1", {
         display_name: "Fix sidebar task ordering",
-        active_post_action: "commit",
         stage: "in progress",
       }),
     ]);
 
     expect(wrapper.text()).toContain("in progress");
-    expect(wrapper.text()).toContain("... Fix sidebar task ordering");
+    expect(wrapper.text()).toContain("Fix sidebar task ordering");
+    expect(wrapper.text()).not.toContain("... Fix sidebar task ordering");
     expect(wrapper.text()).not.toContain("commit");
   });
 
-  it("prefixes pinned active post-action tasks", () => {
+  it("renders a transition-in-flight prefix while a post is running", () => {
+    const wrapper = mountSidebar([
+      item("task-1", {
+        display_name: "Commit generated changes",
+        stage: "in progress",
+        has_running_post: 1,
+      }),
+    ]);
+
+    const title = wrapper.get(".pipeline-item .item-title");
+    expect(title.text()).toBe("... Commit generated changes");
+    expect(title.attributes("title")).toBe("... Commit generated changes");
+  });
+
+  it("renders pinned task titles without retired post-action prefixes", () => {
     const wrapper = mountSidebar([
       item("task-1", {
         display_name: "Pinned task",
-        active_post_action: "commit",
         pinned: 1,
         pin_order: 0,
       }),
     ]);
 
-    expect(wrapper.text()).toContain("... Pinned task");
+    expect(wrapper.text()).toContain("Pinned task");
+    expect(wrapper.text()).not.toContain("... Pinned task");
+  });
+
+  it("renders the transition-in-flight prefix for pinned tasks while a post is running", () => {
+    const wrapper = mountSidebar([
+      item("task-1", {
+        display_name: "Pinned post task",
+        pinned: 1,
+        pin_order: 0,
+        has_running_post: 1,
+      }),
+    ]);
+
+    const title = wrapper.get(".pinned-zone .pipeline-item .item-title");
+    expect(title.text()).toBe("... Pinned post task");
+    expect(title.attributes("title")).toBe("... Pinned post task");
   });
 
   it("renders a subtask nested beneath its parent instead of in its own stage section", () => {
@@ -506,6 +536,35 @@ describe("Sidebar", () => {
     expect(headers[1]?.classes()).toContain("contains-selected-task");
   });
 
+  it("does not render two repository headers as selected when repo and item selection diverge", () => {
+    const repos = [
+      repo,
+      {
+        ...repo,
+        id: "repo-2",
+        path: "/repo-2",
+        name: "second",
+        created_at: "2026-01-02T00:00:00.000Z",
+      },
+    ];
+    const pipelineItems = [
+      item("task-1", {
+        repo_id: repo.id,
+        display_name: "First repo task",
+      }),
+    ];
+
+    const wrapper = mountSidebarWithRepos(repos, pipelineItems, "task-1", "repo-2");
+
+    const highlightedHeaders = wrapper.findAll(".repo-header").filter((header) =>
+      header.classes().includes("selected") || header.classes().includes("contains-selected-task")
+    );
+    expect(highlightedHeaders).toHaveLength(1);
+    expect(highlightedHeaders[0]?.text()).toContain("kanna-v2");
+    expect(highlightedHeaders[0]?.classes()).not.toContain("selected");
+    expect(highlightedHeaders[0]?.classes()).toContain("contains-selected-task");
+  });
+
   it("styles the selected-task repository marker as inset top and bottom lines without a filled background", () => {
     const source = readFileSync(join(process.cwd(), "src/components/Sidebar.vue"), "utf8");
     const markerRule = source.match(/\.repo-header\.contains-selected-task\s*\{(?<body>[^}]*)\}/);
@@ -526,6 +585,12 @@ describe("Sidebar", () => {
     expect(selectedRule?.groups?.body).toContain("inset 0 -1px 0 var(--kn-accent)");
     expect(selectedRule?.groups?.body).not.toContain("background:");
     expect(selectedRule?.groups?.body).not.toContain("outline:");
+  });
+
+  it("does not use grab-hand cursors as the sidebar drag affordance", () => {
+    const source = readFileSync(join(process.cwd(), "src/components/Sidebar.vue"), "utf8");
+
+    expect(source).not.toMatch(/cursor:\s*(?:grab|grabbing)\s*;/);
   });
 
   it("scrolls when a selected active-stage task becomes unclosed and visible", async () => {

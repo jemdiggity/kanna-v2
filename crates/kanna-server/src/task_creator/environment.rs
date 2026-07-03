@@ -3,8 +3,6 @@ use super::provider::AgentProvider;
 use crate::config::Config;
 use crate::db::Db;
 use std::collections::{HashMap, HashSet};
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -199,17 +197,72 @@ pub(super) fn which_binary(name: &str) -> Result<Option<String>, String> {
 pub(super) fn resolve_headless_agent_executable(
     provider: AgentProvider,
     path: Option<&str>,
+    worktree_path: &str,
 ) -> Result<Option<String>, String> {
     match provider {
         AgentProvider::Claude | AgentProvider::Codex | AgentProvider::Opencode => {
-            which_binary_with_path(provider.as_str(), path)
+            which_binary_with_path(provider.as_str(), path, worktree_path)
         }
         AgentProvider::Copilot | AgentProvider::Antigravity => Ok(None),
     }
 }
 
-fn which_binary_with_path(name: &str, path: Option<&str>) -> Result<Option<String>, String> {
+fn which_binary_with_path(
+    name: &str,
+    path: Option<&str>,
+    worktree_path: &str,
+) -> Result<Option<String>, String> {
+    if let Some(path) = path {
+        if let Some(binary) = resolve_workspace_binary_from_path(name, path, worktree_path) {
+            return Ok(Some(binary));
+        }
+    }
+
     resolve_binary_from_candidates(name, sidecar_candidates(name), path).map(Some)
+}
+
+/// The user's real PATH as an interactive login shell resolves it, captured
+/// ONCE per process. Loading zshrc costs seconds; it used to run per binary
+/// lookup on the stage-advance request path, which is where the multi-second
+/// ⌘S-to-prompt lag came from. The PATH cannot change for the lifetime of
+/// this process, so one capture serves every lookup. `warm_login_shell_path`
+/// pays the one-time cost at server startup, off the request path.
+fn login_shell_path() -> Option<&'static str> {
+    static LOGIN_SHELL_PATH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    LOGIN_SHELL_PATH
+        .get_or_init(|| {
+            let output = Command::new("/bin/zsh")
+                .args(["--login", "-i", "-c", "printf %s \"$PATH\""])
+                .output()
+                .ok()?;
+            if !output.status.success() {
+                return None;
+            }
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if path.is_empty() {
+                None
+            } else {
+                Some(path)
+            }
+        })
+        .as_deref()
+}
+
+pub(crate) fn warm_login_shell_path() {
+    let _ = login_shell_path();
+}
+
+/// Cheap binary availability check against the process PATH plus the cached
+/// login-shell PATH — never a per-call login shell.
+pub(super) fn binary_on_path(name: &str) -> bool {
+    if let Ok(process_path) = std::env::var("PATH") {
+        if resolve_binary_from_path(name, &process_path).is_some() {
+            return true;
+        }
+    }
+    login_shell_path()
+        .map(|path| resolve_binary_from_path(name, path).is_some())
+        .unwrap_or(false)
 }
 
 fn resolve_binary_from_candidates(
@@ -223,15 +276,17 @@ fn resolve_binary_from_candidates(
                 .ok_or_else(|| format!("binary '{}' not found in PATH", name));
         }
 
-        let output = Command::new("/bin/zsh")
-            .args(["--login", "-i", "-c", &format!("command -v {}", name)])
-            .output()
-            .map_err(|e| format!("failed to locate {}: {}", name, e))?;
-
-        if output.status.success() {
-            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !path.is_empty() {
-                return Ok(path);
+        // The process PATH first (cheap, and correct when launched from a
+        // terminal), then the captured login-shell PATH (Spotlight-launched
+        // apps inherit a minimal PATH).
+        if let Ok(process_path) = std::env::var("PATH") {
+            if let Some(binary) = resolve_binary_from_path(name, &process_path) {
+                return Ok(binary);
+            }
+        }
+        if let Some(login_path) = login_shell_path() {
+            if let Some(binary) = resolve_binary_from_path(name, login_path) {
+                return Ok(binary);
             }
         }
 
@@ -252,23 +307,23 @@ fn resolve_workspace_path(worktree_path: &str, entry: &str) -> String {
 }
 
 fn resolve_binary_from_path(name: &str, path: &str) -> Option<String> {
-    path.split(':')
-        .filter(|entry| !entry.is_empty())
-        .map(|entry| Path::new(entry).join(name))
-        .find(|candidate| is_executable_file(candidate))
+    kanna_runtime_defaults::which_binary_in_path(name, path)
         .map(|candidate| candidate.to_string_lossy().to_string())
 }
 
-#[cfg(unix)]
-fn is_executable_file(path: &Path) -> bool {
-    std::fs::metadata(path)
-        .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
-        .unwrap_or(false)
-}
-
-#[cfg(not(unix))]
-fn is_executable_file(path: &Path) -> bool {
-    path.is_file()
+fn resolve_workspace_binary_from_path(
+    name: &str,
+    path: &str,
+    worktree_path: &str,
+) -> Option<String> {
+    let worktree_path = Path::new(worktree_path);
+    path.split(':')
+        .filter(|entry| !entry.is_empty())
+        .map(Path::new)
+        .filter(|entry| entry.starts_with(worktree_path))
+        .map(|entry| entry.join(name))
+        .find(|candidate| kanna_runtime_defaults::is_executable_file(candidate))
+        .map(|candidate| candidate.to_string_lossy().to_string())
 }
 
 pub(super) fn resolve_binary_from_candidates_with_path_lookup<F>(
@@ -279,54 +334,11 @@ pub(super) fn resolve_binary_from_candidates_with_path_lookup<F>(
 where
     F: FnOnce(&str) -> Result<String, String>,
 {
-    for candidate in candidates {
-        if candidate.exists() {
-            return Ok(candidate.to_string_lossy().to_string());
-        }
-    }
-
-    path_lookup(name)
-}
-
-fn current_target_triple() -> &'static str {
-    #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
-    {
-        "aarch64-apple-darwin"
-    }
-    #[cfg(all(target_arch = "x86_64", target_os = "macos"))]
-    {
-        "x86_64-apple-darwin"
-    }
+    kanna_runtime_defaults::resolve_binary_from_candidates(name, candidates, path_lookup)
 }
 
 fn sidecar_candidates(name: &str) -> Vec<PathBuf> {
-    std::env::current_exe()
-        .ok()
-        .map(|exe| sidecar_candidates_for_exe(&exe, name))
-        .unwrap_or_default()
-}
-
-fn sidecar_candidates_for_exe(current_exe: &Path, name: &str) -> Vec<PathBuf> {
-    let Some(exe_dir) = current_exe.parent() else {
-        return Vec::new();
-    };
-
-    let sidecar_name = format!("{}-{}", name, current_target_triple());
-    let mut candidates = vec![exe_dir.join(&sidecar_name), exe_dir.join(name)];
-
-    if let (Some(build_root), Some(profile_dir)) = (exe_dir.parent(), exe_dir.file_name()) {
-        if build_root.file_name().is_some_and(|dir| dir == ".build")
-            && matches!(profile_dir.to_str(), Some("debug" | "release"))
-        {
-            let triple_dir = build_root.join(current_target_triple()).join(profile_dir);
-            candidates.push(triple_dir.join(name));
-            candidates.push(triple_dir.join(&sidecar_name));
-        }
-    }
-
-    candidates.push(exe_dir.join("../Resources").join(&sidecar_name));
-    candidates.push(exe_dir.join("../Resources").join(name));
-    candidates
+    kanna_runtime_defaults::sidecar_candidates(name)
 }
 
 fn prepend_path_entry(path: Option<&str>, entry: &str) -> String {
@@ -342,14 +354,7 @@ fn prepend_path_entry(path: Option<&str>, entry: &str) -> String {
 
 fn pipeline_socket_path(daemon_dir: &str) -> String {
     let dir = PathBuf::from(daemon_dir).join("pipeline");
-    short_socket_path(&dir).to_string_lossy().to_string()
-}
-
-fn short_socket_path(dir: &PathBuf) -> PathBuf {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    dir.hash(&mut hasher);
-    let hash = hasher.finish() as u32;
-    PathBuf::from(format!("/tmp/kanna-{:08x}.sock", hash))
+    kanna_runtime_defaults::socket_path(&dir)
+        .to_string_lossy()
+        .to_string()
 }

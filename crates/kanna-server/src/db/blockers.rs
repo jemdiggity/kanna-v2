@@ -32,6 +32,32 @@ impl Db {
         rows.collect()
     }
 
+    /// Count blockers that are still unresolved. A blocker resolves only when
+    /// it is closed; dependents start from the current default branch at that
+    /// point so they build on the blocker after it has merged.
+    pub fn count_open_task_blockers(&self, blocked_item_id: &str) -> Result<i64, rusqlite::Error> {
+        self.conn.query_row(
+            "SELECT COUNT(*)
+             FROM task_blocker blocker
+             JOIN pipeline_item blocker_item ON blocker_item.id = blocker.blocker_item_id
+             WHERE blocker.blocked_item_id = ?
+               AND blocker_item.closed_at IS NULL",
+            [blocked_item_id],
+            |row| row.get(0),
+        )
+    }
+
+    pub fn list_tasks_blocked_by(
+        &self,
+        blocker_item_id: &str,
+    ) -> Result<Vec<String>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT blocked_item_id FROM task_blocker WHERE blocker_item_id = ? ORDER BY blocked_item_id",
+        )?;
+        let rows = stmt.query_map([blocker_item_id], |row| row.get(0))?;
+        rows.collect()
+    }
+
     pub fn task_dependency_has_path_to(
         &self,
         from_blocked_item_id: &str,

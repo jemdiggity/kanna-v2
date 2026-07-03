@@ -576,7 +576,7 @@ describe("createInitApi", () => {
     expect(state.codeTheme.value).toBe("match");
   });
 
-  it("consumes successful auto-stage results once when duplicate stage-complete events arrive", async () => {
+  it("does not auto-advance successful stage results in the desktop listener", async () => {
     const item = mockState.makeItem({
       id: "task-1",
       stage: "commit",
@@ -601,17 +601,9 @@ describe("createInitApi", () => {
       warning: vi.fn(),
       error: vi.fn(),
     };
-    let claimAvailable = true;
     const db = {
       ...createDb(),
-      execute: vi.fn(async (query: string) => {
-        if (query.includes("UPDATE pipeline_item SET stage_result = NULL")) {
-          if (!claimAvailable) return { rowsAffected: 0 };
-          claimAvailable = false;
-          return { rowsAffected: 1 };
-        }
-        return { rowsAffected: 1 };
-      }),
+      execute: vi.fn(async () => ({ rowsAffected: 1 })),
     };
     const context = createStoreContext(state, toast, services);
     const ports = {
@@ -628,16 +620,16 @@ describe("createInitApi", () => {
 
     const stageCompleteHandler = getStageCompleteHandler();
 
-    await Promise.all([
-      stageCompleteHandler({ payload: { task_id: "task-1" } }),
-      stageCompleteHandler({ payload: { task_id: "task-1" } }),
-    ]);
+    await stageCompleteHandler({ payload: { task_id: "task-1" } });
 
-    expect(mockState.advanceStageMock).toHaveBeenCalledTimes(1);
-    expect(mockState.advanceStageMock).toHaveBeenCalledWith("task-1", { initiatedBy: "auto" });
+    expect(db.execute).not.toHaveBeenCalledWith(
+      expect.stringContaining("UPDATE pipeline_item SET stage_result = NULL"),
+      expect.anything(),
+    );
+    expect(mockState.advanceStageMock).not.toHaveBeenCalled();
   });
 
-  it("clears a successful active post-action and advances to the next real stage", async () => {
+  it("leaves successful active post-actions to the server-side complete-stage orchestrator", async () => {
     const item = mockState.makeItem({
       id: "task-post-action",
       stage: "in progress",
@@ -692,11 +684,8 @@ describe("createInitApi", () => {
     await initApi.init(db);
     await getStageCompleteHandler()({ payload: { task_id: "task-post-action" } });
 
-    expect(mockState.clearPipelineItemActivePostActionMock).toHaveBeenCalledWith(expect.anything(), "task-post-action");
-    expect(mockState.advanceStageMock).toHaveBeenCalledWith("task-post-action", {
-      initiatedBy: "auto",
-      skipPostAction: true,
-    });
+    expect(mockState.clearPipelineItemActivePostActionMock).not.toHaveBeenCalled();
+    expect(mockState.advanceStageMock).not.toHaveBeenCalled();
   });
 
   it("leaves a failed active post-action in place", async () => {

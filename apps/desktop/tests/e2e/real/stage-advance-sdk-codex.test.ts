@@ -8,7 +8,7 @@ import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo"
 import { cleanupWorktrees, importTestRepo, resetDatabase } from "../helpers/reset";
 import { dismissStartupShortcutsModal } from "../helpers/startupOverlays";
 import { advanceStageWithShortcut } from "../helpers/stageAdvance";
-import { callVueMethod, execDb, queryDb, tauriInvoke } from "../helpers/vue";
+import { callVueMethod, queryDb, tauriInvoke } from "../helpers/vue";
 import { WebDriverClient } from "../helpers/webdriver";
 import { waitForFile, waitForNewTaskWorktree } from "../helpers/worktreeFs";
 
@@ -31,70 +31,25 @@ async function readTaskWorktreeNames(repoPath: string): Promise<string[]> {
     .catch(() => []);
 }
 
-async function hydrateStoreItem(client: WebDriverClient, taskId: string): Promise<void> {
-  const rows = (await queryDb(
-    client,
-    "SELECT * FROM pipeline_item WHERE id = ?",
-    [taskId],
-  )) as Array<Record<string, unknown>>;
-  const item = rows[0];
-  if (!item) throw new Error(`task ${taskId} was not found`);
-
-  const result = await client.executeSync<string>(
-    `const item = ${JSON.stringify(item)};
-     const ctx = window.__KANNA_E2E__.setupState;
-     const items = ctx.store?.items?.value ?? ctx.store?.items;
-     if (!Array.isArray(items)) return "items-unavailable";
-     const index = items.findIndex((candidate) => candidate.id === item.id);
-     if (index >= 0) items.splice(index, 1, item);
-     else items.push(item);
-     return "ok";`,
-  );
-  if (result !== "ok") throw new Error(`failed to hydrate store item: ${result}`);
-}
-
-async function waitForCreatedStageTask(
+async function waitForTaskStage(
   client: WebDriverClient,
-  repoId: string,
-  stage: string,
-  excludedIds: Set<string>,
+  taskId: string,
+  expectedStage: string,
   timeoutMs = 60_000,
-): Promise<string> {
+): Promise<void> {
   const deadline = Date.now() + timeoutMs;
+  let last: { stage: string | null; closed_at: string | null } | undefined;
   while (Date.now() < deadline) {
     const rows = (await queryDb(
       client,
-      "SELECT id FROM pipeline_item WHERE repo_id = ? AND stage = ? AND closed_at IS NULL ORDER BY created_at DESC",
-      [repoId, stage],
-    )) as Array<{ id: string | null }>;
-    const row = rows.find((candidate) => candidate.id && !excludedIds.has(candidate.id));
-    if (row?.id) return row.id;
-    await sleep(250);
-  }
-  throw new Error(`timed out waiting for created ${stage} task`);
-}
-
-async function getStageTaskIds(client: WebDriverClient, repoId: string, stage: string): Promise<Set<string>> {
-  const rows = (await queryDb(
-    client,
-    "SELECT id FROM pipeline_item WHERE repo_id = ? AND stage = ? AND closed_at IS NULL",
-    [repoId, stage],
-  )) as Array<{ id: string | null }>;
-  return new Set(rows.flatMap((row) => (row.id ? [row.id] : [])));
-}
-
-async function waitForAgentTerminalSession(client: WebDriverClient, taskId: string, timeoutMs = 30_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const rows = (await queryDb(
-      client,
-      "SELECT daemon_session_id, label FROM terminal_session WHERE pipeline_item_id = ?",
+      "SELECT stage, closed_at FROM pipeline_item WHERE id = ?",
       [taskId],
-    )) as Array<{ daemon_session_id: string | null; label: string | null }>;
-    if (rows.some((row) => row.daemon_session_id === taskId && row.label === "agent")) return;
+    )) as Array<{ stage: string | null; closed_at: string | null }>;
+    last = rows[0];
+    if (last?.stage === expectedStage && last.closed_at === null) return;
     await sleep(250);
   }
-  throw new Error(`timed out waiting for agent terminal session for ${taskId}`);
+  throw new Error(`timed out waiting for ${taskId} to reach ${expectedStage}; last: ${JSON.stringify(last)}`);
 }
 
 describe("real Codex SDK stage advance", () => {
@@ -102,7 +57,6 @@ describe("real Codex SDK stage advance", () => {
   const pipelineName = "codex-sdk-stage-advance";
   let repoId = "";
   let sourceTaskId = "";
-  let nextTaskId = "";
   let testRepoPath = "";
 
   beforeAll(async () => {
@@ -121,12 +75,12 @@ describe("real Codex SDK stage advance", () => {
       JSON.stringify({
         name: pipelineName,
         stages: [
-          { name: "in progress", transition: "manual" },
+          { name: "in progress", policy: { transition: "manual" } },
           {
             name: "qa",
-            transition: "manual",
             agent: "qa-codex-sdk",
             prompt: "Create a file named codex-sdk-stage-advance-output.txt in the current directory containing exactly: sdk stage advanced. Do not ask questions. Stop after writing the file.",
+            policy: { transition: "manual" },
           },
         ],
       }),
@@ -148,11 +102,9 @@ describe("real Codex SDK stage advance", () => {
   });
 
   afterAll(async () => {
-    await Promise.all(
-      [sourceTaskId, nextTaskId]
-        .filter((taskId) => taskId.length > 0)
-        .map((taskId) => tauriInvoke(client, "kill_session", { sessionId: taskId }).catch(() => undefined)),
-    );
+    if (sourceTaskId) {
+      await tauriInvoke(client, "kill_session", { sessionId: sourceTaskId }).catch(() => undefined);
+    }
     if (testRepoPath) {
       await cleanupWorktrees(client, testRepoPath).catch(() => undefined);
       await cleanupFixtureRepos([testRepoPath]).catch(() => undefined);
@@ -160,7 +112,7 @@ describe("real Codex SDK stage advance", () => {
     await client.deleteSession();
   });
 
-  it("advances a Codex SDK task into a new Codex SDK agent task", async () => {
+  it("advances a Codex SDK task to the qa stage in place", async () => {
     const sourcePrompt = [
       "Create a file named codex-sdk-source-ready.txt in the current directory containing exactly: source ready.",
       "Do not ask questions. Stop after writing the file.",
@@ -187,32 +139,37 @@ describe("real Codex SDK stage advance", () => {
     await waitForFile(join(sourceWorktreePath, "codex-sdk-source-ready.txt"), 180_000, 1_000);
     expect((await readFile(join(sourceWorktreePath, "codex-sdk-source-ready.txt"), "utf8")).trimEnd()).toBe("source ready");
 
-    await execDb(
-      client,
-      "UPDATE pipeline_item SET stage_result = ?, activity = 'idle', updated_at = datetime('now') WHERE id = ?",
-      [JSON.stringify({ status: "success", summary: "source stage complete" }), sourceTaskId],
-    );
-    await hydrateStoreItem(client, sourceTaskId);
-
-    const existingQaTaskIds = await getStageTaskIds(client, repoId, "qa");
-    const nextBaseline = new Set(await readTaskWorktreeNames(testRepoPath));
+    // Durable model: a manual advance accepts the current stage's work and
+    // spawns the next stage's agent session on the SAME task, in a freshly
+    // forked branch + worktree cut from the committed tip.
+    const worktreesBeforeAdvance = new Set(await readTaskWorktreeNames(testRepoPath));
     await advanceStageWithShortcut(client, "codex-sdk-source-ready.txt", sourceTaskId);
 
-    nextTaskId = await waitForCreatedStageTask(client, repoId, "qa", existingQaTaskIds);
-    const nextRows = (await queryDb(
+    await waitForTaskStage(client, sourceTaskId, "qa");
+    const rows = (await queryDb(
       client,
       "SELECT agent_type, agent_provider FROM pipeline_item WHERE id = ?",
-      [nextTaskId],
+      [sourceTaskId],
     )) as Array<{ agent_type: string | null; agent_provider: string | null }>;
-    expect(nextRows[0]).toMatchObject({
+    expect(rows[0]).toMatchObject({
       agent_type: "agent",
       agent_provider: "codex",
     });
-    await waitForAgentTerminalSession(client, nextTaskId);
 
-    const nextWorktreePath = await waitForNewTaskWorktree(testRepoPath, nextBaseline, 60_000);
-    const nextMarkerPath = join(nextWorktreePath, "codex-sdk-stage-advance-output.txt");
-    await waitForFile(nextMarkerPath, 180_000, 1_000);
-    expect((await readFile(nextMarkerPath, "utf8")).trimEnd()).toBe("sdk stage advanced");
+    // The qa agent runs inside the forked worktree; the source worktree
+    // (and its uncommitted output) stays behind untouched. No next-stage
+    // TASK is created — only a workspace.
+    const qaWorktreePath = await waitForNewTaskWorktree(testRepoPath, worktreesBeforeAdvance, 60_000);
+    expect(qaWorktreePath).not.toBe(sourceWorktreePath);
+    const qaMarkerPath = join(qaWorktreePath, "codex-sdk-stage-advance-output.txt");
+    await waitForFile(qaMarkerPath, 180_000, 1_000);
+    expect((await readFile(qaMarkerPath, "utf8")).trimEnd()).toBe("sdk stage advanced");
+
+    const runs = (await queryDb(
+      client,
+      "SELECT stage FROM stage_run WHERE task_id = ? AND stage = 'qa'",
+      [sourceTaskId],
+    )) as Array<{ stage: string | null }>;
+    expect(runs.length).toBeGreaterThanOrEqual(1);
   }, 360_000);
 });

@@ -37,23 +37,28 @@ allowed_tools: []                  # optional: tool allowlist (provider-specific
 
 ### Stage-Complete Signal
 
-If the agent should signal completion to the Kanna pipeline engine, include these instructions in its body:
+If the agent should signal completion to the Kanna pipeline engine, include instructions like these in its body:
 
 ```
+Record the stage result so Kanna can advance the pipeline. Prefer the
+`kanna_complete_stage` MCP tool; use the `kanna-cli` fallback only when
+MCP tools are unavailable.
+
 When done:
-kanna-cli stage-complete --task-id $KANNA_TASK_ID --status success --summary "..."
+kanna-cli stage-complete --task-id "$KANNA_TASK_ID" --status success --summary "..."
 
 If unable to complete:
-kanna-cli stage-complete --task-id $KANNA_TASK_ID --status failure --summary "..."
+kanna-cli stage-complete --task-id "$KANNA_TASK_ID" --status failure --summary "..."
 ```
 
 ### Environment Variables Available to Agents
 
 | Variable | Description |
 |----------|-------------|
-| `KANNA_TASK_ID` | Task ID for the `kanna-cli` call |
+| `KANNA_TASK_ID` | Current task id, used by `kanna_*` MCP tools and `kanna-cli` |
+| `KANNA_CLI_PATH` | Full path to the instance-local `kanna-cli` binary (also on `PATH`) |
+| `KANNA_SERVER_BASE_URL` | Base URL of the Kanna local API |
 | `KANNA_SOCKET_PATH` | Path to the app's Unix socket |
-| `KANNA_DB_PATH` | Path to the SQLite DB file |
 
 ## Your Process
 
@@ -64,8 +69,16 @@ kanna-cli stage-complete --task-id $KANNA_TASK_ID --status failure --summary "..
 
 ## Completion
 
-After writing the agent file, run:
+Record the stage result so Kanna can advance the pipeline. Prefer the `kanna_complete_stage` MCP tool; use the `kanna-cli` fallback only when MCP tools are unavailable.
 
+After writing the agent file, record success:
+
+```bash
+kanna-cli stage-complete --task-id "$KANNA_TASK_ID" --status success --summary "Created agent: <name>"
 ```
-kanna-cli stage-complete --task-id $KANNA_TASK_ID --status success --summary "Created agent: <name>"
+
+If you cannot produce a complete agent definition, record failure with the reason:
+
+```bash
+kanna-cli stage-complete --task-id "$KANNA_TASK_ID" --status failure --summary "<why the agent could not be created>"
 ```

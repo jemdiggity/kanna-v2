@@ -97,3 +97,39 @@ export async function runCodexExec(opts: {
 
   return { stdout, stderr, exitCode, lines, duration: Date.now() - start };
 }
+
+export async function runCodexRaw(args: string[], opts?: {
+  cwd?: string;
+  env?: NodeJS.ProcessEnv;
+  timeoutMs?: number;
+}): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  const binary = await findCodexBinary();
+  return await new Promise((resolve, reject) => {
+    const child = spawn(binary, args, {
+      cwd: opts?.cwd ?? "/tmp",
+      env: { ...process.env, ...opts?.env },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk: string) => {
+      stdout += chunk;
+    });
+    child.stderr?.on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+    child.on("error", reject);
+
+    const timer = setTimeout(() => {
+      child.kill();
+    }, opts?.timeoutMs ?? 30_000);
+
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      resolve({ stdout, stderr, exitCode: code ?? -1 });
+    });
+  });
+}

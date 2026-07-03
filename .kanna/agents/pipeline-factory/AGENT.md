@@ -28,12 +28,13 @@ Pipeline files may reference the bundled schema with `"$schema": "./schema.json"
       "name": "<stage-name>",
       "description": "<human-readable description>",
       "agent": "<agent-directory-name>",
-      "prompt": "<stage-specific prompt, can use $TASK_PROMPT and $PREV_RESULT>",
+      "prompt": "<stage-specific prompt, can use $TASK_PROMPT, $BRANCH, and $SOURCE_WORKTREE>",
       "agent_provider": "<optional override: codex | claude | copilot>",
       "environment": "<optional: env-name from environments above>",
-      "transition": "manual",
-      "follow_task": true,
-      "mode": "new_task"
+      "policy": {
+        "transition": "manual",
+        "execution": "continue"
+      }
     }
   ]
 }
@@ -56,21 +57,19 @@ Pipeline files may reference the bundled schema with `"$schema": "./schema.json"
 | `name` | string | yes | Stage identifier, unique within pipeline |
 | `description` | string | no | Human-readable description |
 | `agent` | string | no | Agent directory name (resolves to `.kanna/agents/{name}/AGENT.md`). Omit for gate stages (no agent spawns, just waits for manual advance). |
-| `prompt` | string | no | Stage-specific prompt appended to the agent's base instructions. Can reference `$TASK_PROMPT` (user's original task prompt) and `$PREV_RESULT` (previous stage's completion summary). |
+| `prompt` | string | no | Stage-specific prompt appended to the agent's base instructions. Can reference `$TASK_PROMPT`, `$BRANCH`, `$BASE_REF`, and `$SOURCE_WORKTREE`. |
 | `agent_provider` | string | no | Override agent provider for this stage: `codex`, `claude`, or `copilot` |
 | `environment` | string | no | Environment name from the `environments` map. Null = no setup/teardown. |
-| `transition` | `"manual"` or `"auto"` | yes | How the task advances to the next stage. `auto` advances when the agent calls `kanna-cli stage-complete --status success`. `manual` requires user action. |
-| `follow_task` | boolean | no | Whether advancing into this stage should auto-select the new stage task. Defaults to `true`; set to `false` for fire-and-forget stages like PR. |
-| `mode` | `"new_task"` or `"continue"` | no | How Kanna enters this stage. Defaults to `new_task`, which closes the current task and creates a new task/worktree. Use `continue` to keep the same task, worktree, branch, and agent session, update the stage in place, and send the stage prompt to the existing agent. |
+| `policy` | object | yes | Stage policy. `policy.transition` is `"manual"` or `"auto"`. Optional `policy.execution: "continue"` keeps the same task, worktree, branch, and agent session, updates the stage in place, and sends the stage prompt to the existing agent. Omit `execution` for a new next-stage task/worktree. |
 
-For PR stages, set `"follow_task": false` so creating the PR task does not pull focus away from the next visible task.
+For PR stages, omit `policy.execution` so PR creation runs in a separate next-stage task/worktree.
 
 ### Prompt Variables
 
 | Variable | Description |
 |----------|-------------|
 | `$TASK_PROMPT` | The user's original task description |
-| `$PREV_RESULT` | The previous stage's completion summary (from `kanna-cli stage-complete --summary`) |
+| `$PREV_RESULT` | Reserved legacy placeholder; do not rely on it for new pipelines |
 | `$BRANCH` | The current task branch |
 | `$SOURCE_WORKTREE` | The source task worktree path, useful for PR stages that run in a separate worktree |
 
@@ -80,10 +79,12 @@ The following agents ship with Kanna and can be referenced in any pipeline:
 
 - `implement` — coding agent that implements the task
 - `commit` — continues the implementation task and commits relevant work before PR creation
+- `review` — QA review agent that verifies test coverage and requests revisions
 - `pr` — creates a GitHub pull request
 - `merge` — safely merges pull requests
 - `agent-factory` — creates new agent definitions
 - `pipeline-factory` — creates new pipeline definitions
+- `config-factory` — creates or updates `.kanna/config.json`
 
 ## Your Process
 
@@ -95,8 +96,16 @@ The following agents ship with Kanna and can be referenced in any pipeline:
 
 ## Completion
 
-After writing the pipeline file, run:
+Record the stage result so Kanna can advance the pipeline. Prefer the `kanna_complete_stage` MCP tool; use the `kanna-cli` fallback only when MCP tools are unavailable.
 
+After writing the pipeline file, record success:
+
+```bash
+kanna-cli stage-complete --task-id "$KANNA_TASK_ID" --status success --summary "Created pipeline: <name>"
 ```
-kanna-cli stage-complete --task-id $KANNA_TASK_ID --status success --summary "Created pipeline: <name>"
+
+If you cannot produce a complete pipeline definition, record failure with the reason:
+
+```bash
+kanna-cli stage-complete --task-id "$KANNA_TASK_ID" --status failure --summary "<why the pipeline could not be created>"
 ```

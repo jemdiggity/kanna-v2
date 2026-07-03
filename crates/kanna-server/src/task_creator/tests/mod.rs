@@ -1,17 +1,18 @@
 use super::environment::resolve_binary_from_candidates_with_path_lookup;
+use super::lifecycle::spawn_prepared_task;
 use super::prompt::PromptContext;
 use super::provider::{AgentProvider, AgentSessionType};
 use super::types::{CreatedTask, PreparedSessionSpawn, PreparedStageTransition, PreparedTaskSpawn};
 use super::{
     build_agent_command, build_kanna_preamble, build_spawn_env, build_stage_prompt,
-    continue_prepared_stage_for_api, prepare_advance_stage_for_api,
-    prepare_auto_stage_completion_for_api, prepare_merge_agent_for_api,
-    prepare_revision_task_for_api, prepare_task_for_api, read_default_agent_provider_setting,
-    resolve_agent_type, spawn_prepared_task,
+    prepare_advance_stage_for_api, prepare_merge_agent_for_api, prepare_rerun_stage_for_api,
+    prepare_revision_task_for_api, prepare_stage_completion_for_api, prepare_task_for_api,
+    read_default_agent_provider_setting, resolve_agent_type, spawn_prepared_stage_run_for_api,
+    spawn_prepared_task_for_api_recording_stage_run,
 };
 use crate::config::Config;
 use crate::daemon_client::DaemonClient;
-use crate::db::Db;
+use crate::db::{Db, NewStageRun};
 use crate::mobile_api::CreateTaskRequest;
 use kanna_daemon::protocol::AgentProvider as DaemonAgentProvider;
 use rusqlite::Connection;
@@ -28,33 +29,7 @@ mod spawn;
 mod stage;
 
 fn test_daemon_socket_path(daemon_dir: &str) -> std::path::PathBuf {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let dir = std::path::PathBuf::from(daemon_dir);
-    let mut hasher = DefaultHasher::new();
-    dir.hash(&mut hasher);
-    let hash = hasher.finish() as u32;
-    std::path::PathBuf::from(format!("/tmp/kanna-{:08x}.sock", hash))
-}
-
-async fn spawn_fake_daemon_once(
-    daemon_dir: String,
-) -> tokio::task::JoinHandle<kanna_daemon::protocol::Command> {
-    let socket_path = test_daemon_socket_path(&daemon_dir);
-    let _ = std::fs::remove_file(&socket_path);
-    let listener = UnixListener::bind(&socket_path).unwrap();
-    tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        let (read_half, mut write_half) = stream.into_split();
-        let mut reader = BufReader::new(read_half);
-        let mut line = String::new();
-        reader.read_line(&mut line).await.unwrap();
-        let command: kanna_daemon::protocol::Command = serde_json::from_str(line.trim()).unwrap();
-        let response = serde_json::to_string(&kanna_daemon::protocol::Event::Ok).unwrap();
-        write_half.write_all(response.as_bytes()).await.unwrap();
-        write_half.write_all(b"\n").await.unwrap();
-        command
-    })
+    kanna_runtime_defaults::socket_path(std::path::Path::new(daemon_dir))
 }
 
 async fn spawn_fake_daemon_session_created_once(
@@ -138,6 +113,109 @@ fn init_git_repo(label: &str) -> std::path::PathBuf {
         .unwrap()
         .success());
     repo_root
+}
+
+/// Fake daemon for post dispatch into a live session: replies `Ok` to each
+/// Input command (message, then the discrete Enter) and returns every
+/// received command once `expected_commands` have arrived.
+async fn spawn_fake_daemon_input_ok(
+    daemon_dir: String,
+    expected_commands: usize,
+) -> tokio::task::JoinHandle<Vec<kanna_daemon::protocol::Command>> {
+    let socket_path = test_daemon_socket_path(&daemon_dir);
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let mut commands = Vec::new();
+        for _ in 0..expected_commands {
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let command: kanna_daemon::protocol::Command =
+                serde_json::from_str(line.trim()).unwrap();
+            commands.push(command);
+            let response = serde_json::to_string(&kanna_daemon::protocol::Event::Ok).unwrap();
+            write_half.write_all(response.as_bytes()).await.unwrap();
+            write_half.write_all(b"\n").await.unwrap();
+        }
+        commands
+    })
+}
+
+/// Fake daemon for a forked stage transition: replies to any number of
+/// leading `Kill` commands (agent session, then the stale worktree shell),
+/// then `SessionCreated` to the fork's spawn, returning every command.
+async fn spawn_fake_daemon_fork_transition(
+    daemon_dir: String,
+) -> tokio::task::JoinHandle<Vec<kanna_daemon::protocol::Command>> {
+    let socket_path = test_daemon_socket_path(&daemon_dir);
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let mut commands = Vec::new();
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let command: kanna_daemon::protocol::Command =
+                serde_json::from_str(line.trim()).unwrap();
+            let (response, done) = match &command {
+                kanna_daemon::protocol::Command::Kill { .. } => {
+                    (kanna_daemon::protocol::Event::Ok, false)
+                }
+                kanna_daemon::protocol::Command::Spawn { session_id, .. } => (
+                    kanna_daemon::protocol::Event::SessionCreated {
+                        session_id: session_id.clone(),
+                    },
+                    true,
+                ),
+                kanna_daemon::protocol::Command::SpawnAgent { session_id, .. } => (
+                    kanna_daemon::protocol::Event::SessionCreated {
+                        session_id: session_id.clone(),
+                    },
+                    true,
+                ),
+                other => panic!("unexpected daemon command: {other:?}"),
+            };
+            commands.push(command);
+            write_half
+                .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
+                .await
+                .unwrap();
+            if done {
+                break;
+            }
+        }
+        commands
+    })
+}
+
+fn insert_finished_stage_run(db: &Db, task_id: &str, stage: &str, result: &str) {
+    db.insert_stage_run(NewStageRun {
+        id: &format!("{task_id}-{stage}-run"),
+        task_id,
+        stage,
+        kind: "main",
+        agent: Some("test-agent"),
+        agent_provider: Some("claude"),
+        model: None,
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: Some(task_id),
+    })
+    .unwrap();
+    db.finish_stage_run(
+        &format!("{task_id}-{stage}-run"),
+        "succeeded",
+        Some(result),
+        Some("done"),
+    )
+    .unwrap();
 }
 
 fn ensure_test_sidecar(name: &str) -> (std::path::PathBuf, bool) {

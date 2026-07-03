@@ -10,8 +10,8 @@ pub const STAGING_RELAY_URL: &str = "wss://relay-staging.kanna.build";
 pub const PRODUCTION_FIREBASE_PROJECT_ID: &str = "kanna-build";
 pub const STAGING_FIREBASE_PROJECT_ID: &str = "kanna-staging";
 pub const LOCAL_FIREBASE_PROJECT_ID: &str = "kanna-local";
-pub const PRODUCTION_LOCAL_SERVER_PORT: u16 = 48_120;
-pub const STAGING_LOCAL_SERVER_PORT: u16 = 48_121;
+pub const PRODUCTION_MOBILE_SERVER_PORT: u16 = 48_120;
+pub const STAGING_MOBILE_SERVER_PORT: u16 = 48_121;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DesktopCloudEnvironment {
@@ -41,21 +41,10 @@ impl DesktopCloudEnvironment {
         }
     }
 
-    pub fn local_server_port(self) -> u16 {
+    pub fn mobile_server_port(self) -> u16 {
         match self {
-            Self::Staging => STAGING_LOCAL_SERVER_PORT,
-            Self::Production => PRODUCTION_LOCAL_SERVER_PORT,
-        }
-    }
-
-    pub fn daemon_dir_for_home(self, home: &Path) -> PathBuf {
-        match self {
-            Self::Staging => daemon_dir_for_bundle_identifier_for_home(
-                STAGING_DESKTOP_BUNDLE_IDENTIFIER,
-                false,
-                home,
-            ),
-            Self::Production => default_daemon_dir_for_home(home),
+            Self::Staging => STAGING_MOBILE_SERVER_PORT,
+            Self::Production => PRODUCTION_MOBILE_SERVER_PORT,
         }
     }
 }
@@ -73,6 +62,14 @@ pub fn desktop_cloud_environment_for_bundle_identifier(
         DESKTOP_BUNDLE_IDENTIFIER => Some(DesktopCloudEnvironment::Production),
         _ => None,
     }
+}
+
+pub fn mobile_server_port_for_bundle_identifier(
+    bundle_identifier: &str,
+    debug_assertions: bool,
+) -> Option<u16> {
+    desktop_cloud_environment_for_bundle_identifier(bundle_identifier, debug_assertions)
+        .map(|env| env.mobile_server_port())
 }
 
 pub fn desktop_cloud_environment_from_env(value: Option<&str>) -> Option<DesktopCloudEnvironment> {
@@ -95,80 +92,17 @@ pub fn default_daemon_dir() -> PathBuf {
     default_daemon_dir_for_home(&home_dir())
 }
 
-pub fn daemon_dir_for_desktop_cloud_environment(environment: DesktopCloudEnvironment) -> PathBuf {
-    environment.daemon_dir_for_home(&home_dir())
-}
-
-pub fn daemon_dir_for_bundle_identifier_for_home(
-    bundle_identifier: &str,
-    debug_assertions: bool,
-    home: &Path,
-) -> PathBuf {
-    daemon_dir_for_bundle_identifier_for_app_support_root(
-        bundle_identifier,
-        debug_assertions,
-        &macos_app_support_dir_for_home(home),
-    )
-}
-
-pub fn daemon_dir_for_bundle_identifier_for_app_support_root(
-    bundle_identifier: &str,
-    debug_assertions: bool,
-    app_support_root: &Path,
-) -> PathBuf {
-    match desktop_cloud_environment_for_bundle_identifier(bundle_identifier, debug_assertions) {
-        Some(DesktopCloudEnvironment::Staging) => app_support_root
-            .join(STAGING_DESKTOP_BUNDLE_IDENTIFIER)
-            .join(PRODUCT_APP_SUPPORT_DIR),
-        Some(DesktopCloudEnvironment::Production) | None => {
-            default_daemon_dir_for_app_support_root(app_support_root)
-        }
-    }
-}
-
-pub fn local_server_port_for_bundle_identifier(
-    bundle_identifier: &str,
-    debug_assertions: bool,
-) -> u16 {
-    desktop_cloud_environment_for_bundle_identifier(bundle_identifier, debug_assertions)
-        .map(DesktopCloudEnvironment::local_server_port)
-        .unwrap_or(PRODUCTION_LOCAL_SERVER_PORT)
-}
-
 pub fn daemon_dir_for_runtime(
     explicit_daemon_dir: Option<&Path>,
     current_exe: &Path,
     current_dir: &Path,
     home: &Path,
 ) -> PathBuf {
-    daemon_dir_for_runtime_with_bundle_identifier(
-        explicit_daemon_dir,
-        current_exe,
-        current_dir,
-        home,
-        None,
-        cfg!(debug_assertions),
-    )
-}
-
-pub fn daemon_dir_for_runtime_with_bundle_identifier(
-    explicit_daemon_dir: Option<&Path>,
-    current_exe: &Path,
-    current_dir: &Path,
-    home: &Path,
-    bundle_identifier: Option<&str>,
-    debug_assertions: bool,
-) -> PathBuf {
     let worktree_root =
         worktree_root_for_path(current_exe).or_else(|| worktree_root_for_path(current_dir));
     if let Some(dir) = explicit_daemon_dir {
         let production_dir = default_daemon_dir_for_home(home);
-        let staging_dir = daemon_dir_for_bundle_identifier_for_home(
-            STAGING_DESKTOP_BUNDLE_IDENTIFIER,
-            false,
-            home,
-        );
-        if worktree_root.is_none() || (dir != production_dir && dir != staging_dir) {
+        if worktree_root.is_none() || dir != production_dir {
             return dir.to_path_buf();
         }
     }
@@ -177,34 +111,16 @@ pub fn daemon_dir_for_runtime_with_bundle_identifier(
         return worktree_root.join(".kanna-daemon");
     }
 
-    bundle_identifier
-        .map(|identifier| {
-            daemon_dir_for_bundle_identifier_for_home(identifier, debug_assertions, home)
-        })
-        .unwrap_or_else(|| default_daemon_dir_for_home(home))
+    default_daemon_dir_for_home(home)
 }
 
 pub fn daemon_dir_for_current_runtime() -> PathBuf {
-    daemon_dir_for_current_runtime_with_bundle_identifier(None, cfg!(debug_assertions))
-}
-
-pub fn daemon_dir_for_current_runtime_with_bundle_identifier(
-    bundle_identifier: Option<&str>,
-    debug_assertions: bool,
-) -> PathBuf {
     let explicit = std::env::var_os("KANNA_DAEMON_DIR")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from);
     let current_exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::new());
     let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::new());
-    daemon_dir_for_runtime_with_bundle_identifier(
-        explicit.as_deref(),
-        &current_exe,
-        &current_dir,
-        &home_dir(),
-        bundle_identifier,
-        debug_assertions,
-    )
+    daemon_dir_for_runtime(explicit.as_deref(), &current_exe, &current_dir, &home_dir())
 }
 
 pub fn worktree_root_for_path(path: &Path) -> Option<PathBuf> {
@@ -302,6 +218,202 @@ pub fn default_transfer_registry_dir() -> PathBuf {
     default_transfer_registry_dir_for_home(&home_dir())
 }
 
+pub fn socket_path(dir: &Path) -> PathBuf {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let dir = dir.to_path_buf();
+    let mut hasher = DefaultHasher::new();
+    dir.hash(&mut hasher);
+    let hash = hasher.finish() as u32;
+    PathBuf::from(format!("/tmp/kanna-{hash:08x}.sock"))
+}
+
+pub fn current_target_triple() -> &'static str {
+    #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+    {
+        "aarch64-apple-darwin"
+    }
+    #[cfg(all(target_arch = "x86_64", target_os = "macos"))]
+    {
+        "x86_64-apple-darwin"
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        "unknown-target"
+    }
+}
+
+pub fn sidecar_candidates(name: &str) -> Vec<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .map(|exe| sidecar_candidates_for_exe(&exe, name))
+        .unwrap_or_default()
+}
+
+pub fn sidecar_candidates_for_exe(current_exe: &Path, name: &str) -> Vec<PathBuf> {
+    let Some(exe_dir) = current_exe.parent() else {
+        return Vec::new();
+    };
+
+    let sidecar_name = format!("{}-{}", name, current_target_triple());
+    let mut candidates = vec![exe_dir.join(name), exe_dir.join(&sidecar_name)];
+
+    if let (Some(build_root), Some(profile_dir)) = (exe_dir.parent(), exe_dir.file_name()) {
+        if build_root.file_name().is_some_and(|dir| dir == ".build")
+            && matches!(profile_dir.to_str(), Some("debug" | "release"))
+        {
+            let triple_dir = build_root.join(current_target_triple()).join(profile_dir);
+            candidates.push(triple_dir.join(name));
+            candidates.push(triple_dir.join(&sidecar_name));
+        }
+    }
+
+    candidates.push(exe_dir.join("../Resources").join(&sidecar_name));
+    candidates.push(exe_dir.join("../Resources").join(name));
+    candidates
+}
+
+pub fn resolve_binary_from_candidates<F>(
+    name: &str,
+    candidates: Vec<PathBuf>,
+    path_lookup: F,
+) -> Result<String, String>
+where
+    F: FnOnce(&str) -> Result<String, String>,
+{
+    for candidate in candidates {
+        if candidate.exists() {
+            return Ok(candidate.to_string_lossy().to_string());
+        }
+    }
+
+    path_lookup(name)
+}
+
+pub fn which_binary(name: &str) -> Option<PathBuf> {
+    std::env::var_os("PATH").and_then(|path| which_binary_in_path_os(name, &path))
+}
+
+pub fn which_binary_in_path(name: &str, path: &str) -> Option<PathBuf> {
+    which_binary_in_path_os(name, std::ffi::OsStr::new(path))
+}
+
+pub fn which_binary_in_path_os(name: &str, path: &std::ffi::OsStr) -> Option<PathBuf> {
+    std::env::split_paths(path)
+        .filter(|entry| !entry.as_os_str().is_empty())
+        .map(|entry| entry.join(name))
+        .find(|candidate| is_executable_file(candidate))
+}
+
+#[cfg(unix)]
+pub fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::metadata(path)
+        .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+pub fn is_executable_file(path: &Path) -> bool {
+    path.is_file()
+}
+
+/// Strip ANSI terminal escape sequences from text for logs and usage output.
+///
+/// Cursor-forward (`CSI <n> C`) is rendered as spaces and cursor-down
+/// (`CSI <n> B`) as newlines so fixed-position terminal output remains
+/// readable after conversion to plain text. Other escape sequences are omitted.
+pub fn strip_ansi_for_display(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let bytes = input.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+
+    while i < len {
+        match bytes[i] {
+            0x1b => {
+                i += 1;
+                if i >= len {
+                    break;
+                }
+                match bytes[i] {
+                    b'[' => {
+                        i += 1;
+                        let param_start = i;
+                        while i < len && !bytes[i].is_ascii_alphabetic() {
+                            i += 1;
+                        }
+                        if i < len {
+                            let command = bytes[i];
+                            let params = &input[param_start..i];
+                            i += 1;
+                            match command {
+                                b'C' => {
+                                    let count = params.parse::<usize>().unwrap_or(1);
+                                    for _ in 0..count {
+                                        result.push(' ');
+                                    }
+                                }
+                                b'B' => {
+                                    let count = params.parse::<usize>().unwrap_or(1);
+                                    for _ in 0..count {
+                                        result.push('\n');
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    b']' => {
+                        i += 1;
+                        while i < len {
+                            if bytes[i] == 0x07 {
+                                i += 1;
+                                break;
+                            }
+                            if bytes[i] == 0x1b && i + 1 < len && bytes[i + 1] == b'\\' {
+                                i += 2;
+                                break;
+                            }
+                            i += 1;
+                        }
+                    }
+                    0x1b => {}
+                    _ => {
+                        i += 1;
+                    }
+                }
+            }
+            b'\r' => {
+                i += 1;
+            }
+            _ => {
+                let byte = bytes[i];
+                if byte >= 0x20 || byte == b'\n' || byte == b'\t' {
+                    if byte < 0x80 {
+                        result.push(byte as char);
+                        i += 1;
+                    } else {
+                        let remaining = &input[i..];
+                        if let Some(ch) = remaining.chars().next() {
+                            result.push(ch);
+                            i += ch.len_utf8();
+                        } else {
+                            i += 1;
+                        }
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+        }
+    }
+
+    result
+}
+
 fn macos_app_support_dir_for_home(home: &Path) -> PathBuf {
     home.join("Library").join("Application Support")
 }
@@ -374,27 +486,6 @@ mod tests {
     }
 
     #[test]
-    fn daemon_dir_ignores_staging_env_inside_worktree() {
-        let home = Path::new("/Users/tester");
-        let current_exe = Path::new("/repo/.kanna-worktrees/task-1234/.build/debug/kanna-desktop");
-        let current_dir = Path::new("/repo/.kanna-worktrees/task-1234/apps/desktop");
-
-        assert_eq!(
-            daemon_dir_for_runtime_with_bundle_identifier(
-                Some(Path::new(
-                    "/Users/tester/Library/Application Support/build.kanna.staging/Kanna"
-                )),
-                current_exe,
-                current_dir,
-                home,
-                Some(STAGING_DESKTOP_BUNDLE_IDENTIFIER),
-                false,
-            ),
-            PathBuf::from("/repo/.kanna-worktrees/task-1234/.kanna-daemon")
-        );
-    }
-
-    #[test]
     fn daemon_dir_uses_production_default_outside_worktree() {
         let home = Path::new("/Users/tester");
         let current_exe = Path::new("/Applications/Kanna.app/Contents/MacOS/kanna-desktop");
@@ -402,30 +493,6 @@ mod tests {
 
         assert_eq!(
             daemon_dir_for_runtime(None, current_exe, current_dir, home),
-            PathBuf::from("/Users/tester/Library/Application Support/Kanna")
-        );
-    }
-
-    #[test]
-    fn daemon_dir_uses_staging_bundle_app_support_directory() {
-        let home = Path::new("/Users/tester");
-
-        assert_eq!(
-            daemon_dir_for_bundle_identifier_for_home(
-                STAGING_DESKTOP_BUNDLE_IDENTIFIER,
-                false,
-                home
-            ),
-            PathBuf::from("/Users/tester/Library/Application Support/build.kanna.staging/Kanna")
-        );
-    }
-
-    #[test]
-    fn daemon_dir_uses_product_app_support_directory_for_production_bundle() {
-        let home = Path::new("/Users/tester");
-
-        assert_eq!(
-            daemon_dir_for_bundle_identifier_for_home(DESKTOP_BUNDLE_IDENTIFIER, false, home),
             PathBuf::from("/Users/tester/Library/Application Support/Kanna")
         );
     }
@@ -453,6 +520,143 @@ mod tests {
     }
 
     #[test]
+    fn socket_path_matches_legacy_pathbuf_hash_algorithm() {
+        fn legacy_socket_path(dir: &Path) -> PathBuf {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+
+            let dir = dir.to_path_buf();
+            let mut hasher = DefaultHasher::new();
+            dir.hash(&mut hasher);
+            let hash = hasher.finish() as u32;
+            PathBuf::from(format!("/tmp/kanna-{hash:08x}.sock"))
+        }
+
+        for dir in [
+            Path::new("/Users/tester/Library/Application Support/Kanna"),
+            Path::new("/repo/.kanna-worktrees/task-1234/.kanna-daemon"),
+            Path::new("/repo/.kanna-worktrees/task-1234/.kanna-daemon/pipeline"),
+            Path::new("/tmp/kanna daemon with spaces"),
+        ] {
+            assert_eq!(socket_path(dir), legacy_socket_path(dir));
+        }
+    }
+
+    #[test]
+    fn sidecar_candidates_cover_dev_runtime_layout() {
+        let current_exe = Path::new("/repo/.build/debug/kanna-desktop");
+        let candidates = sidecar_candidates_for_exe(current_exe, "kanna-daemon");
+
+        assert_eq!(candidates[0], Path::new("/repo/.build/debug/kanna-daemon"));
+        assert_eq!(
+            candidates[1],
+            Path::new(&format!(
+                "/repo/.build/debug/kanna-daemon-{}",
+                current_target_triple()
+            ))
+        );
+        assert!(candidates.contains(
+            &Path::new(&format!(
+                "/repo/.build/{}/debug/kanna-daemon",
+                current_target_triple()
+            ))
+            .to_path_buf()
+        ));
+    }
+
+    #[test]
+    fn sidecar_candidates_cover_bundled_resource_layout() {
+        let current_exe = Path::new("/Applications/Kanna.app/Contents/MacOS/kanna-desktop");
+        let candidates = sidecar_candidates_for_exe(current_exe, "kanna-server");
+
+        assert_eq!(
+            candidates[0],
+            Path::new("/Applications/Kanna.app/Contents/MacOS/kanna-server")
+        );
+        assert_eq!(
+            candidates[1],
+            Path::new(&format!(
+                "/Applications/Kanna.app/Contents/MacOS/kanna-server-{}",
+                current_target_triple()
+            ))
+        );
+        assert!(candidates.contains(
+            &Path::new(&format!(
+                "/Applications/Kanna.app/Contents/MacOS/../Resources/kanna-server-{}",
+                current_target_triple()
+            ))
+            .to_path_buf()
+        ));
+        assert!(candidates.contains(
+            &Path::new("/Applications/Kanna.app/Contents/MacOS/../Resources/kanna-server")
+                .to_path_buf()
+        ));
+    }
+
+    #[test]
+    fn resolve_binary_from_candidates_prefers_first_existing_candidate() {
+        let resolved = resolve_binary_from_candidates(
+            "kanna-cli",
+            vec![Path::new("/bin/sh").to_path_buf()],
+            |_| Ok("/global/kanna-cli".to_string()),
+        )
+        .expect("existing sidecar candidate should resolve");
+
+        assert_eq!(resolved, "/bin/sh");
+    }
+
+    #[test]
+    fn resolve_binary_from_candidates_can_fallback_to_path() {
+        let resolved = resolve_binary_from_candidates("kanna-cli", Vec::new(), |_| {
+            Ok("/global/kanna-cli".to_string())
+        })
+        .expect("PATH fallback should resolve");
+
+        assert_eq!(resolved, "/global/kanna-cli");
+    }
+
+    #[test]
+    fn which_binary_in_path_finds_executable_in_explicit_path() {
+        let unique = std::env::temp_dir().join(format!(
+            "kanna-runtime-defaults-path-{}",
+            std::process::id()
+        ));
+        let first = unique.join("first");
+        let second = unique.join("second");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+
+        let binary = second.join("kanna-cli");
+        std::fs::write(&binary, b"#!/bin/sh\n").unwrap();
+        make_executable(&binary);
+
+        let path = format!("{}:{}", first.display(), second.display());
+        assert_eq!(which_binary_in_path("kanna-cli", &path), Some(binary));
+
+        let _ = std::fs::remove_dir_all(unique);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn which_binary_in_path_rejects_non_executable_files() {
+        let unique = std::env::temp_dir().join(format!(
+            "kanna-runtime-defaults-path-nonexec-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&unique).unwrap();
+
+        let binary = unique.join("kanna-cli");
+        std::fs::write(&binary, b"#!/bin/sh\n").unwrap();
+
+        assert_eq!(
+            which_binary_in_path("kanna-cli", unique.to_string_lossy().as_ref()),
+            None
+        );
+
+        let _ = std::fs::remove_dir_all(unique);
+    }
+
+    #[test]
     fn preferred_db_path_uses_existing_legacy_only_when_canonical_is_absent() {
         let unique =
             std::env::temp_dir().join(format!("kanna-runtime-defaults-{}", std::process::id()));
@@ -476,6 +680,18 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(unique);
     }
+
+    #[cfg(unix)]
+    fn make_executable(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut permissions = std::fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).unwrap();
+    }
+
+    #[cfg(not(unix))]
+    fn make_executable(_path: &Path) {}
 
     #[test]
     fn desktop_cloud_environment_resolves_from_release_bundle_identifier() {
@@ -521,18 +737,63 @@ mod tests {
             DesktopCloudEnvironment::Production.firebase_project_id(),
             "kanna-build"
         );
-        assert_eq!(DesktopCloudEnvironment::Staging.local_server_port(), 48121);
+    }
+
+    #[test]
+    fn desktop_cloud_environment_carries_distinct_mobile_server_ports() {
         assert_eq!(
-            DesktopCloudEnvironment::Production.local_server_port(),
-            48120
+            DesktopCloudEnvironment::Production.mobile_server_port(),
+            PRODUCTION_MOBILE_SERVER_PORT
         );
         assert_eq!(
-            DesktopCloudEnvironment::Staging.daemon_dir_for_home(Path::new("/Users/tester")),
-            PathBuf::from("/Users/tester/Library/Application Support/build.kanna.staging/Kanna")
+            DesktopCloudEnvironment::Staging.mobile_server_port(),
+            STAGING_MOBILE_SERVER_PORT
+        );
+        assert_ne!(
+            DesktopCloudEnvironment::Production.mobile_server_port(),
+            DesktopCloudEnvironment::Staging.mobile_server_port()
+        );
+    }
+
+    #[test]
+    fn mobile_server_port_resolves_from_release_bundle_identifier() {
+        assert_eq!(
+            mobile_server_port_for_bundle_identifier(STAGING_DESKTOP_BUNDLE_IDENTIFIER, false),
+            Some(STAGING_MOBILE_SERVER_PORT)
         );
         assert_eq!(
-            DesktopCloudEnvironment::Production.daemon_dir_for_home(Path::new("/Users/tester")),
-            PathBuf::from("/Users/tester/Library/Application Support/Kanna")
+            mobile_server_port_for_bundle_identifier(DESKTOP_BUNDLE_IDENTIFIER, false),
+            Some(PRODUCTION_MOBILE_SERVER_PORT)
         );
+        assert_eq!(
+            mobile_server_port_for_bundle_identifier(STAGING_DESKTOP_BUNDLE_IDENTIFIER, true),
+            None
+        );
+    }
+
+    #[test]
+    fn strip_ansi_for_display_removes_color_codes() {
+        assert_eq!(strip_ansi_for_display("\u{1b}[31mused\u{1b}[0m"), "used");
+    }
+
+    #[test]
+    fn strip_ansi_for_display_preserves_cursor_movement_readability() {
+        assert_eq!(
+            strip_ansi_for_display("used\u{1b}[3C42\u{1b}[2Bdone"),
+            "used   42\n\ndone"
+        );
+    }
+
+    #[test]
+    fn strip_ansi_for_display_removes_osc_sequences_and_carriage_returns() {
+        assert_eq!(
+            strip_ansi_for_display("a\u{1b}]0;title\u{7}b\rc\u{1b}]1;ignored\u{1b}\\d"),
+            "abcd"
+        );
+    }
+
+    #[test]
+    fn strip_ansi_for_display_preserves_utf8_and_drops_incomplete_escapes() {
+        assert_eq!(strip_ansi_for_display("✓ café\u{1b}\u{1b}[31"), "✓ café");
     }
 }

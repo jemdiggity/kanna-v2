@@ -1,6 +1,344 @@
 use super::*;
 
 #[tokio::test]
+async fn signal_agent_route_sends_message_to_open_running_agent_task() {
+    use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+
+    let unique = format!(
+        "kanna-signal-agent-found-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+    let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path).unwrap();
+
+    let daemon_server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let mut inputs = Vec::new();
+        for _ in 0..2 {
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+            match command {
+                DaemonCommand::Input { session_id, data } => {
+                    assert_eq!(session_id, "merge-session");
+                    inputs.push(data);
+                }
+                other => panic!("expected Input command, got {other:?}"),
+            }
+            write_half
+                .write_all(
+                    format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap()).as_bytes(),
+                )
+                .await
+                .unwrap();
+        }
+        inputs
+    });
+
+    let config = Config {
+        relay_url: "wss://relay.example".to_string(),
+        device_token: "device-token".to_string(),
+        firebase_project_id: "kanna-local".to_string(),
+        firebase_auth_emulator_url: None,
+        firebase_firestore_emulator_host: None,
+        daemon_dir: daemon_dir.to_string_lossy().to_string(),
+        db_path: Db::test_db_path(&unique),
+        kanna_cli_path: None,
+        desktop_id: "desktop-1".to_string(),
+        desktop_secret: Some("desktop-secret".to_string()),
+        desktop_name: "Studio Mac".to_string(),
+        server_version: Some("test-version".to_string()),
+        lan_host: "127.0.0.1".to_string(),
+        lan_port: 48120,
+        pairing_store_path: format!("/tmp/kanna-pairings-{unique}.json"),
+    };
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "task-merge",
+        "repo-1",
+        "Merge master",
+        Some("Merge Master"),
+        "in progress",
+        "2026-07-01T00:00:00Z",
+    )
+    .unwrap();
+    db.insert_stage_run(crate::db::NewStageRun {
+        id: "run-merge",
+        task_id: "task-merge",
+        stage: "in progress",
+        kind: "main",
+        agent: Some("merge"),
+        agent_provider: Some("claude"),
+        model: None,
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: Some("merge-session"),
+    })
+    .unwrap();
+    drop(db);
+
+    let app = super::router(Arc::new(super::AppState::new(config)));
+    let message =
+        "MERGE task-feature -> main [PR https://github.com/acme/repo/pull/7]: ship feature";
+    let response = app
+        .oneshot(
+            Request::post("/v1/repos/repo-1/agents/merge/signal")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "message": message
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = from_slice(&body).unwrap();
+    assert_eq!(body["taskId"], "task-merge");
+    assert_eq!(body["created"], false);
+    let inputs = daemon_server.await.unwrap();
+    assert_eq!(inputs, vec![message.as_bytes().to_vec(), vec![b'\r']]);
+
+    let _ = std::fs::remove_file(socket_path);
+    let _ = std::fs::remove_dir_all(daemon_dir);
+}
+
+#[tokio::test]
+async fn signal_agent_route_creates_pinned_agent_task_when_absent() {
+    use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+
+    let unique = format!(
+        "kanna-signal-agent-absent-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let repo_root = std::env::temp_dir().join(format!("{unique}-repo"));
+    init_test_git_repo(&repo_root);
+    let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+    let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path).unwrap();
+
+    let daemon_server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+        let session_id = match command {
+            DaemonCommand::Spawn {
+                session_id, args, ..
+            } => {
+                assert!(
+                    args.iter().any(|arg| arg.contains("MERGE task-ready")),
+                    "spawn args should contain the first prompt: {args:?}"
+                );
+                session_id
+            }
+            DaemonCommand::SpawnAgent { session_id, params } => {
+                assert!(params.prompt.contains("MERGE task-ready"));
+                session_id
+            }
+            other => panic!("expected spawn command, got {other:?}"),
+        };
+        write_half
+            .write_all(
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&DaemonEvent::SessionCreated { session_id }).unwrap()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+    });
+
+    let config = Config {
+        relay_url: "wss://relay.example".to_string(),
+        device_token: "device-token".to_string(),
+        firebase_project_id: "kanna-local".to_string(),
+        firebase_auth_emulator_url: None,
+        firebase_firestore_emulator_host: None,
+        daemon_dir: daemon_dir.to_string_lossy().to_string(),
+        db_path: Db::test_db_path(&unique),
+        kanna_cli_path: None,
+        desktop_id: "desktop-1".to_string(),
+        desktop_secret: Some("desktop-secret".to_string()),
+        desktop_name: "Studio Mac".to_string(),
+        server_version: Some("test-version".to_string()),
+        lan_host: "127.0.0.1".to_string(),
+        lan_port: 48120,
+        pairing_store_path: format!("/tmp/kanna-pairings-{unique}.json"),
+    };
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    drop(db);
+
+    let app = super::router(Arc::new(super::AppState::new(config.clone())));
+    let response = app
+        .oneshot(
+            Request::post("/v1/repos/repo-1/agents/merge/signal")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "message": "MERGE task-ready -> main: ready"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = from_slice(&body).unwrap();
+    assert_eq!(body["created"], true);
+    let task_id = body["taskId"].as_str().expect("task id");
+    daemon_server.await.unwrap();
+
+    let db = Db::open(&config.db_path).unwrap();
+    let task = db.get_pipeline_item(task_id).unwrap().unwrap();
+    assert_eq!(task.repo_id, "repo-1");
+    assert_eq!(
+        task.prompt.as_deref(),
+        Some("MERGE task-ready -> main: ready")
+    );
+    assert_eq!(task.stage.as_deref(), Some("in progress"));
+    assert_eq!(task.pinned, Some(1));
+    assert_eq!(task.pin_order, Some(0));
+    let mut runs = db.list_stage_runs_for_task(task_id).unwrap();
+    for _ in 0..20 {
+        if !runs.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        runs = db.list_stage_runs_for_task(task_id).unwrap();
+    }
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].agent.as_deref(), Some("merge"));
+    assert_eq!(runs[0].status, "running");
+
+    let _ = std::fs::remove_file(socket_path);
+    let _ = std::fs::remove_dir_all(daemon_dir);
+    let _ = std::fs::remove_dir_all(repo_root);
+}
+
+#[tokio::test]
+async fn signal_agent_route_detaches_creation_spawn_from_request_future() {
+    use kanna_daemon::protocol::Command as DaemonCommand;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    use tokio::net::UnixListener;
+
+    let unique = format!(
+        "kanna-signal-agent-detached-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let repo_root = std::env::temp_dir().join(format!("{unique}-repo"));
+    init_test_git_repo(&repo_root);
+    let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+    let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path).unwrap();
+
+    let daemon_server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read_half, _) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+        match command {
+            DaemonCommand::Spawn { .. } | DaemonCommand::SpawnAgent { .. } => {}
+            other => panic!("expected spawn command, got {other:?}"),
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    });
+
+    let config = Config {
+        relay_url: "wss://relay.example".to_string(),
+        device_token: "device-token".to_string(),
+        firebase_project_id: "kanna-local".to_string(),
+        firebase_auth_emulator_url: None,
+        firebase_firestore_emulator_host: None,
+        daemon_dir: daemon_dir.to_string_lossy().to_string(),
+        db_path: Db::test_db_path(&unique),
+        kanna_cli_path: None,
+        desktop_id: "desktop-1".to_string(),
+        desktop_secret: Some("desktop-secret".to_string()),
+        desktop_name: "Studio Mac".to_string(),
+        server_version: Some("test-version".to_string()),
+        lan_host: "127.0.0.1".to_string(),
+        lan_port: 48120,
+        pairing_store_path: format!("/tmp/kanna-pairings-{unique}.json"),
+    };
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    drop(db);
+
+    let app = super::router(Arc::new(super::AppState::new(config)));
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        app.oneshot(
+            Request::post("/v1/repos/repo-1/agents/merge/signal")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "message": "MERGE task-detached -> main: ready"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        ),
+    )
+    .await
+    .expect("signal route must respond without waiting for daemon spawn")
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    daemon_server.abort();
+
+    let _ = std::fs::remove_file(socket_path);
+    let _ = std::fs::remove_dir_all(daemon_dir);
+    let _ = std::fs::remove_dir_all(repo_root);
+}
+
+#[tokio::test]
 async fn run_merge_agent_route_uses_merge_agent_runner() {
     let app = super::test_router_with_merge_agent_runner(
         "desktop-1",
@@ -8,6 +346,7 @@ async fn run_merge_agent_route_uses_merge_agent_runner() {
         Arc::new(|task_id| {
             Ok(TaskActionResponse {
                 task_id: format!("merge-{task_id}"),
+                follow_task: None,
             })
         }),
     );

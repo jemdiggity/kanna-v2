@@ -1,7 +1,7 @@
 use super::router;
 use super::state::{
     AppState, TestMergeAgentRunner, TestRevisionRequester, TestStageAdvancer, TestStageCompleter,
-    TestTaskCloser, TestTaskCreator, TestTaskInputSender,
+    TestStageRerunner, TestTaskCloser, TestTaskCreator, TestTaskInputSender,
 };
 use crate::config::Config;
 use crate::db::Db;
@@ -284,6 +284,39 @@ pub(super) fn test_router_with_stage_advancer(
     router(Arc::new(AppState::with_stage_advancer(
         config,
         stage_advancer,
+    )))
+}
+
+pub(super) fn test_router_with_stage_rerunner(
+    desktop_id: &str,
+    desktop_name: &str,
+    stage_rerunner: TestStageRerunner,
+) -> Router {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static NEXT_TEST_DB_ID: AtomicUsize = AtomicUsize::new(41_000);
+    let test_db_id = NEXT_TEST_DB_ID.fetch_add(1, Ordering::Relaxed);
+    let config = Config {
+        relay_url: "wss://relay.example".to_string(),
+        device_token: "device-token".to_string(),
+        firebase_project_id: "kanna-local".to_string(),
+        firebase_auth_emulator_url: None,
+        firebase_firestore_emulator_host: None,
+        daemon_dir: "/tmp/kanna-daemon".to_string(),
+        db_path: Db::test_db_path(&format!("http-api-rerun-{desktop_id}-{test_db_id}")),
+        kanna_cli_path: None,
+        desktop_id: desktop_id.to_string(),
+        desktop_secret: Some("desktop-secret".to_string()),
+        desktop_name: desktop_name.to_string(),
+        server_version: Some("test-version".to_string()),
+        lan_host: "0.0.0.0".to_string(),
+        lan_port: 48120,
+        pairing_store_path: format!("/tmp/kanna-pairings-rerun-{desktop_id}-{test_db_id}.json"),
+    };
+    let _ = Db::open_for_tests(&config.db_path).expect("open test db");
+    router(Arc::new(AppState::with_stage_rerunner(
+        config,
+        stage_rerunner,
     )))
 }
 

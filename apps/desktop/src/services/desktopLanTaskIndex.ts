@@ -28,7 +28,7 @@ export async function publishDesktopLanTaskSnapshot(db: DbHandle): Promise<void>
       listPipelineItems(db, repo.id),
       getCachedRepoRemoteUrl(db, repo),
     ]);
-    for (const item of items.filter((candidate) => !candidate.closed_at && candidate.stage !== "done")) {
+    for (const item of items.filter((candidate) => !candidate.closed_at)) {
       const blockers = await listBlockersForItem(db, item.id);
       tasks.push(await buildCloudTaskSnapshot({
         desktopId,

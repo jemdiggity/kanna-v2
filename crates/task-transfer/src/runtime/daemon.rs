@@ -6,9 +6,7 @@ use super::utils::{
 };
 use crate::protocol::{PeerRegistryEntry, PeerRequest, PeerResponse, PeerTerminalEvent};
 use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpStream, UnixStream};
 use tokio::sync::mpsc;
@@ -304,9 +302,7 @@ fn close_pipeline_item_in_db(context: &ListenerContext, task_id: &str) -> Result
     let rows = conn
         .execute(
             "UPDATE pipeline_item
-             SET previous_stage = COALESCE(previous_stage, stage),
-                 stage = 'done',
-                 closed_at = datetime('now'),
+             SET closed_at = datetime('now'),
                  updated_at = datetime('now')
              WHERE id = ?",
             [task_id],
@@ -391,7 +387,7 @@ pub(super) async fn stream_daemon_session(
 }
 
 async fn connect_daemon(daemon_dir: &Path) -> Result<DaemonConnection, RuntimeError> {
-    let stream = UnixStream::connect(daemon_socket_path(daemon_dir)).await?;
+    let stream = UnixStream::connect(kanna_runtime_defaults::socket_path(daemon_dir)).await?;
     let (read_half, write_half) = stream.into_split();
     Ok(DaemonConnection {
         reader: BufReader::new(read_half),
@@ -419,11 +415,4 @@ async fn read_daemon_event(daemon: &mut DaemonConnection) -> Result<DaemonEvent,
         ));
     }
     Ok(serde_json::from_str(line.trim())?)
-}
-
-fn daemon_socket_path(daemon_dir: &Path) -> PathBuf {
-    let mut hasher = DefaultHasher::new();
-    daemon_dir.hash(&mut hasher);
-    let hash = hasher.finish() as u32;
-    PathBuf::from(format!("/tmp/kanna-{:08x}.sock", hash))
 }

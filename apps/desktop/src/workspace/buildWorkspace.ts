@@ -31,7 +31,7 @@ export function buildWorkspace(input: BuildWorkspaceInput): BuildWorkspaceResult
   );
   const candidates = [
     ...input.localItems
-      .filter((item) => item.stage !== "done" && !item.closed_at)
+      .filter((item) => !item.closed_at)
       .map((item) => localCandidate(item, repoContext.localRepoKeyById)),
     ...remoteCandidates(input.cloudSnapshot.items, input.cloudSnapshot.terminalRefs, "cloud", repoContext, closedLocalKeys),
     ...remoteCandidates(input.lanSnapshot.items, input.lanSnapshot.terminalRefs, "lan", repoContext, closedLocalKeys),
@@ -141,7 +141,7 @@ function remoteCandidates(
   closedLocalKeys: Set<string>,
 ): Array<Candidate | null> {
   return items.map((item) => {
-    if (item.stage === "done" || item.closed_at) return null;
+    if (item.closed_at) return null;
     const repoKey = repoContext.remoteRepoKeyById.get(item.repo_id)
       ?? repoContext.localRepoKeyById.get(item.repo_id)
       ?? item.repo_id;
@@ -172,7 +172,7 @@ function buildClosedLocalKeys(
 ): Set<string> {
   const keys = new Set<string>();
   for (const item of items) {
-    if (item.stage !== "done" && !item.closed_at) continue;
+    if (!item.closed_at) continue;
     const repoKey = localRepoKeyById.get(item.repo_id);
     if (repoKey) keys.add(`${repoKey}:owner-local:${item.id}`);
   }

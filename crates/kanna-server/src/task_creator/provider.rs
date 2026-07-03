@@ -1,6 +1,5 @@
 use super::definitions::AgentDefinition;
 use kanna_daemon::protocol::AgentProvider as DaemonAgentProvider;
-use std::process::Command;
 
 #[derive(Clone, Copy)]
 pub(super) enum AgentProvider {
@@ -129,14 +128,5 @@ pub(super) fn provider_binary_name(provider: AgentProvider) -> &'static str {
 }
 
 fn binary_available(name: &str) -> bool {
-    Command::new("/bin/zsh")
-        .args([
-            "--login",
-            "-i",
-            "-c",
-            &format!("command -v {} >/dev/null 2>&1", name),
-        ])
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+    super::environment::binary_on_path(name)
 }

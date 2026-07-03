@@ -253,11 +253,6 @@ async fn get_task_route_returns_full_task_detail_by_id() {
             "2026-04-18 10:00:00",
         )
         .unwrap();
-        db.update_pipeline_item_stage_result(
-            "task-1",
-            r#"{"status":"success","summary":"review passed"}"#,
-        )
-        .unwrap();
     });
 
     let response = app
@@ -279,10 +274,6 @@ async fn get_task_route_returns_full_task_detail_by_id() {
     assert_eq!(task.repo_id, "repo-1");
     assert_eq!(task.title, "Review MCP");
     assert_eq!(task.stage.as_deref(), Some("in progress"));
-    assert_eq!(
-        task.stage_result.as_deref(),
-        Some(r#"{"status":"success","summary":"review passed"}"#)
-    );
     assert_eq!(task.activity.as_deref(), Some("idle"));
     assert_eq!(task.agent_type.as_deref(), Some("pty"));
     assert_eq!(task.agent_provider.as_deref(), Some("claude"));

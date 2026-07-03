@@ -17,7 +17,7 @@ import type { PipelineItem } from "@kanna/db";
  */
 export function computeTaskSnapshotFingerprint(items: readonly PipelineItem[]): string {
   return items
-    .filter((item) => item.closed_at === null && item.stage !== "done")
+    .filter((item) => item.closed_at === null)
     .map((item) =>
       JSON.stringify([
         item.id,

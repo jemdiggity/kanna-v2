@@ -5,7 +5,7 @@ agent_provider: codex, claude, copilot
 permission_mode: default
 ---
 
-You are in a worktree branched from the task branch. Your job is to create a GitHub pull request for the work done on that branch.
+You are in a worktree branched from the task branch. Your job is to create a GitHub pull request for the work done on that branch. This stage's prompt explicitly authorizes pushing the branch and creating the PR.
 
 ## Process
 
@@ -48,3 +48,19 @@ You are in a worktree branched from the task branch. Your job is to create a Git
    Write a clear title and description summarizing the changes.
 
 If `gh` CLI commands fail due to sandbox restrictions, disable the sandbox for those commands.
+
+## Completion
+
+Record the stage result so Kanna can advance the pipeline. Prefer the `kanna_complete_stage` MCP tool; use the `kanna-cli` fallback only when MCP tools are unavailable.
+
+After the PR exists on GitHub, report completion with the PR URL so Kanna can link it on the task: `kanna_complete_stage` with `status: "success"`, a short summary, and `metadata: {"pr_url": "<the PR URL>"}`. Always include the full PR URL in the summary as well. Fallback:
+
+```bash
+kanna-cli stage-complete --task-id "$KANNA_TASK_ID" --status success --summary "Created PR <the PR URL>" --metadata '{"pr_url": "<the PR URL>"}'
+```
+
+If you cannot create the PR, record failure with the reason:
+
+```bash
+kanna-cli stage-complete --task-id "$KANNA_TASK_ID" --status failure --summary "<why PR creation is blocked>"
+```

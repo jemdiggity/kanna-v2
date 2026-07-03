@@ -14,7 +14,7 @@ describe("parsePipelineJson", () => {
     expect(result.name).toBe("My Pipeline");
     expect(result.stages).toHaveLength(2);
     expect(result.stages[0].name).toBe("Stage 1");
-    expect(result.stages[1].transition).toBe("auto");
+    expect(result.stages[1].policy.transition).toBe("auto");
   });
 
   it("rejects missing name", () => {
@@ -95,29 +95,7 @@ describe("parsePipelineJson", () => {
     expect(stage.environment).toBeUndefined();
   });
 
-  it("parses follow_task when explicitly false", () => {
-    const json = JSON.stringify({
-      name: "My Pipeline",
-      stages: [{ name: "PR", transition: "manual", follow_task: false }],
-    });
-
-    const result = parsePipelineJson(json);
-
-    expect(result.stages[0].follow_task).toBe(false);
-  });
-
-  it("parses follow_task when explicitly true", () => {
-    const json = JSON.stringify({
-      name: "My Pipeline",
-      stages: [{ name: "Stage 1", transition: "manual", follow_task: true }],
-    });
-
-    const result = parsePipelineJson(json);
-
-    expect(result.stages[0].follow_task).toBe(true);
-  });
-
-  it("ignores non-boolean follow_task values", () => {
+  it("drops legacy follow_task values", () => {
     const json = JSON.stringify({
       name: "My Pipeline",
       stages: [{ name: "Stage 1", transition: "manual", follow_task: "nope" }],
@@ -125,10 +103,30 @@ describe("parsePipelineJson", () => {
 
     const result = parsePipelineJson(json);
 
-    expect(result.stages[0].follow_task).toBeUndefined();
+    expect("follow_task" in result.stages[0]).toBe(false);
   });
 
-  it("parses continue mode when explicitly set", () => {
+  it("folds a legacy continue-mode stage into the preceding stage's post", () => {
+    const json = JSON.stringify({
+      name: "My Pipeline",
+      stages: [
+        { name: "in progress", transition: "manual", agent: "implement" },
+        { name: "Commit", transition: "auto", mode: "continue", agent: "commit", prompt: "Commit it" },
+        { name: "pr", transition: "manual" },
+      ],
+    });
+
+    const result = parsePipelineJson(json);
+
+    expect(result.stages.map((stage) => stage.name)).toEqual(["in progress", "pr"]);
+    expect(result.stages[0].post).toEqual({
+      name: "Commit",
+      agent: "commit",
+      prompt: "Commit it",
+    });
+  });
+
+  it("keeps a first-stage legacy continue marker as a normal stage", () => {
     const json = JSON.stringify({
       name: "My Pipeline",
       stages: [{ name: "Commit", transition: "auto", mode: "continue" }],
@@ -136,7 +134,8 @@ describe("parsePipelineJson", () => {
 
     const result = parsePipelineJson(json);
 
-    expect(result.stages[0].mode).toBe("continue");
+    expect(result.stages.map((stage) => stage.name)).toEqual(["Commit"]);
+    expect(result.stages[0].post).toBeUndefined();
   });
 
   it("ignores non-string mode values", () => {
@@ -147,19 +146,19 @@ describe("parsePipelineJson", () => {
 
     const result = parsePipelineJson(json);
 
-    expect(result.stages[0].mode).toBeUndefined();
+    expect(result.stages[0].post).toBeUndefined();
   });
 
-  it("rejects invalid stage mode values", () => {
+  it("rejects invalid legacy stage mode values", () => {
     const json = JSON.stringify({
       name: "My Pipeline",
       stages: [{ name: "Commit", transition: "auto", mode: "sideways" }],
     });
 
-    expect(() => parsePipelineJson(json)).toThrow(/invalid mode "sideways"/);
+    expect(() => parsePipelineJson(json)).toThrow(/invalid execution "sideways"/);
   });
 
-  it("parses a stage post_action", () => {
+  it("compiles a legacy stage post_action into the stage's post", () => {
     const json = JSON.stringify({
       name: "My Pipeline",
       stages: [
@@ -181,17 +180,18 @@ describe("parsePipelineJson", () => {
 
     const result = parsePipelineJson(json);
 
-    expect(result.stages[0].post_action).toEqual({
+    expect(result.stages.map((stage) => stage.name)).toEqual(["in progress", "pr"]);
+    expect(result.stages[0].post).toEqual({
       name: "commit",
       description: "Commit the relevant work",
       agent: "commit",
       prompt: "Commit $TASK_PROMPT",
       agent_provider: ["codex", "claude"],
-      transition: "auto",
     });
+    expect("post_action" in result.stages[0]).toBe(false);
   });
 
-  it("reports missing post_action transition as undefined instead of an empty string", () => {
+  it("accepts a legacy post_action without a transition", () => {
     const json = JSON.stringify({
       name: "My Pipeline",
       stages: [
@@ -205,10 +205,12 @@ describe("parsePipelineJson", () => {
       ],
     });
 
-    expect(() => parsePipelineJson(json)).toThrow(/invalid transition "undefined"/);
+    const result = parsePipelineJson(json);
+
+    expect(result.stages[0].post).toEqual({ name: "commit" });
   });
 
-  it("ignores non-object post_action values", () => {
+  it("drops non-object legacy post_action values", () => {
     const json = JSON.stringify({
       name: "My Pipeline",
       stages: [{ name: "in progress", transition: "manual", post_action: "commit" }],
@@ -216,7 +218,107 @@ describe("parsePipelineJson", () => {
 
     const result = parsePipelineJson(json);
 
-    expect(result.stages[0].post_action).toBeUndefined();
+    expect("post_action" in result.stages[0]).toBe(false);
+  });
+
+  it("folds pinned snapshot continue stages into posts (legacy pipeline_def compatibility)", () => {
+    const json = JSON.stringify({
+      name: "My Pipeline",
+      stages: [
+        {
+          name: "in progress",
+          agent: "implement",
+          prompt: "$TASK_PROMPT",
+          policy: { transition: "manual" },
+        },
+        {
+          name: "commit",
+          agent: "commit",
+          prompt: "Commit $TASK_PROMPT",
+          policy: { transition: "auto", execution: "continue" },
+        },
+        {
+          name: "pr",
+          agent: "pr",
+          prompt: "Create PR",
+          policy: { transition: "manual" },
+        },
+      ],
+    });
+
+    const result = parsePipelineJson(json);
+
+    expect(result.stages.map((stage) => ({
+      name: stage.name,
+      policy: stage.policy,
+    }))).toEqual([
+      { name: "in progress", policy: { transition: "manual" } },
+      { name: "pr", policy: { transition: "manual" } },
+    ]);
+    expect(result.stages[0].post).toEqual({
+      name: "commit",
+      agent: "commit",
+      prompt: "Commit $TASK_PROMPT",
+    });
+  });
+
+  it("parses a stage post declaration", () => {
+    const json = JSON.stringify({
+      name: "My Pipeline",
+      stages: [
+        {
+          name: "in progress",
+          agent: "implement",
+          prompt: "$TASK_PROMPT",
+          policy: { transition: "manual" },
+          post: {
+            name: "commit",
+            agent: "commit",
+            prompt: "Commit $TASK_PROMPT",
+          },
+        },
+        { name: "pr", policy: { transition: "manual" } },
+      ],
+    });
+
+    const result = parsePipelineJson(json);
+
+    expect(result.stages.map((stage) => stage.name)).toEqual(["in progress", "pr"]);
+    expect(result.stages[0].post).toEqual({
+      name: "commit",
+      agent: "commit",
+      prompt: "Commit $TASK_PROMPT",
+    });
+  });
+
+  it("prefers an explicit post over a legacy post_action on the same stage", () => {
+    const json = JSON.stringify({
+      name: "My Pipeline",
+      stages: [
+        {
+          name: "in progress",
+          agent: "implement",
+          prompt: "$TASK_PROMPT",
+          transition: "manual",
+          post: { name: "commit", agent: "commit", prompt: "Commit new" },
+          post_action: {
+            name: "legacy-commit",
+            agent: "commit",
+            prompt: "Commit legacy",
+            transition: "auto",
+          },
+        },
+        { name: "pr", agent: "pr", transition: "manual" },
+      ],
+    });
+
+    const result = parsePipelineJson(json);
+
+    expect(result.stages[0].post).toEqual({
+      name: "commit",
+      agent: "commit",
+      prompt: "Commit new",
+    });
   });
 });
 
@@ -224,7 +326,7 @@ describe("validatePipeline", () => {
   it("returns empty array for valid pipeline", () => {
     const pipeline = {
       name: "Valid Pipeline",
-      stages: [{ name: "Stage 1", transition: "manual" as const }],
+      stages: [{ name: "Stage 1", policy: { transition: "manual" as const } }],
     };
     expect(validatePipeline(pipeline)).toEqual([]);
   });
@@ -232,7 +334,7 @@ describe("validatePipeline", () => {
   it("returns error for missing name", () => {
     const pipeline = {
       name: "",
-      stages: [{ name: "Stage 1", transition: "manual" as const }],
+      stages: [{ name: "Stage 1", policy: { transition: "manual" as const } }],
     };
     const errors = validatePipeline(pipeline);
     expect(errors.length).toBeGreaterThan(0);
@@ -253,8 +355,8 @@ describe("validatePipeline", () => {
     const pipeline = {
       name: "Pipeline",
       stages: [
-        { name: "Dup", transition: "manual" as const },
-        { name: "Dup", transition: "auto" as const },
+        { name: "Dup", policy: { transition: "manual" as const } },
+        { name: "Dup", policy: { transition: "auto" as const } },
       ],
     };
     const errors = validatePipeline(pipeline);
@@ -265,61 +367,34 @@ describe("validatePipeline", () => {
   it("returns error for invalid transition", () => {
     const pipeline = {
       name: "Pipeline",
-      stages: [{ name: "Stage 1", transition: "bad" as "manual" | "auto" }],
+      stages: [{ name: "Stage 1", policy: { transition: "bad" as "manual" | "auto" } }],
     };
     const errors = validatePipeline(pipeline);
     expect(errors.length).toBeGreaterThan(0);
   });
 
-  it("returns error for invalid mode", () => {
-    const pipeline = {
-      name: "Pipeline",
-      stages: [{ name: "Commit", transition: "auto" as const, mode: "sideways" as "continue" }],
-    };
-
-    const errors = validatePipeline(pipeline);
-
-    expect(errors.some((error) => error.includes("mode"))).toBe(true);
-  });
-
-  it("returns error for post_action without a name", () => {
+  it("returns error for a post whose name collides with a stage name", () => {
     const pipeline = {
       name: "Pipeline",
       stages: [
         {
           name: "in progress",
-          transition: "manual" as const,
-          post_action: { name: "", transition: "auto" as const },
+          policy: { transition: "manual" as const },
+          post: { name: "pr" },
         },
+        { name: "pr", policy: { transition: "manual" as const } },
       ],
     };
 
     const errors = validatePipeline(pipeline);
 
-    expect(errors.some((error) => error.includes("post_action") && error.includes("name"))).toBe(true);
-  });
-
-  it("returns error for invalid post_action transition", () => {
-    const pipeline = {
-      name: "Pipeline",
-      stages: [
-        {
-          name: "in progress",
-          transition: "manual" as const,
-          post_action: { name: "commit", transition: "sideways" as "auto" },
-        },
-      ],
-    };
-
-    const errors = validatePipeline(pipeline);
-
-    expect(errors.some((error) => error.includes("post_action") && error.includes("transition"))).toBe(true);
+    expect(errors.some((error) => error.includes("Duplicate stage name"))).toBe(true);
   });
 
   it("returns error for undefined environment reference", () => {
     const pipeline = {
       name: "Pipeline",
-      stages: [{ name: "Stage 1", transition: "manual" as const, environment: "missing" }],
+      stages: [{ name: "Stage 1", policy: { transition: "manual" as const }, environment: "missing" }],
     };
     const errors = validatePipeline(pipeline);
     expect(errors.length).toBeGreaterThan(0);

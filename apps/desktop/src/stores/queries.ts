@@ -1,5 +1,5 @@
 import { computed, ref, type ComputedRef, type Ref } from "vue";
-import { listPipelineItems, listRepos, type PipelineItem, type Repo } from "@kanna/db";
+import { listPipelineItems, listRepos, listTaskBlockers, type PipelineItem, type Repo } from "@kanna/db";
 import { readRepoConfig, type KannaSnapshot, type RepoSnapshotEntry, type StoreContext } from "./state";
 import { debugLog } from "../utils/debugLog";
 
@@ -34,7 +34,7 @@ function flattenSnapshotItems(snapshot: KannaSnapshot): PipelineItem[] {
 }
 
 export function createQueriesApi(context: StoreContext): QueriesApi {
-  const baseSnapshot = ref<KannaSnapshot>({ entries: [] });
+  const baseSnapshot = ref<KannaSnapshot>({ entries: [], taskBlockers: [] });
   const snapshotPending = ref(false);
   const snapshotError = ref<unknown>(null);
   const optimisticItems = ref<OptimisticItemOverlay[]>([]);
@@ -54,6 +54,7 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
   function syncSnapshot(): void {
     context.state.repos.value = repos.value;
     context.state.items.value = items.value;
+    context.state.taskBlockers.value = mergedSnapshot.value.taskBlockers;
   }
 
   async function reloadSnapshot(): Promise<void> {
@@ -64,6 +65,7 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
       const refreshStart = performance.now();
 
       const loadedRepos = await listRepos(context.requireDb());
+      const taskBlockers = await listTaskBlockers(context.requireDb());
       const entries: RepoSnapshotEntry[] = [];
       const loadedItems: PipelineItem[] = [];
 
@@ -92,7 +94,7 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
         `[perf:items] refresh done #${runId}: ${(performance.now() - refreshStart).toFixed(1)}ms total, items=${loadedItems.length}`,
       );
 
-      baseSnapshot.value = { entries };
+      baseSnapshot.value = { entries, taskBlockers };
       syncSnapshot();
 
       for (const item of loadedItems) {

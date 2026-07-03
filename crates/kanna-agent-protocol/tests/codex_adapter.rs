@@ -176,6 +176,58 @@ fn spawn_args_pin_the_exec_json_contract() {
     );
 }
 
+fn write_test_mcp_config(label: &str) -> std::path::PathBuf {
+    let path = std::env::temp_dir().join(format!(
+        "kanna-agent-protocol-{label}-mcp-{}.json",
+        std::process::id()
+    ));
+    std::fs::write(
+        &path,
+        serde_json::json!({
+            "mcpServers": {
+                "kanna-mcp": {
+                    "command": "/tmp/kanna-mcp",
+                    "args": ["serve"],
+                    "env": {
+                        "KANNA_SERVER_BASE_URL": "http://127.0.0.1:48120"
+                    }
+                }
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    path
+}
+
+#[test]
+fn spawn_args_include_kanna_mcp_config_overrides_for_initial_and_resume_spawns() {
+    let adapter = CodexAdapter::new();
+    let mcp_config = write_test_mcp_config("codex-adapter");
+    let ctx = SpawnCtx {
+        prompt: "fix the bug".to_string(),
+        mcp_config_path: Some(mcp_config.to_string_lossy().to_string()),
+        ..Default::default()
+    };
+
+    let initial_args = adapter.initial_spawn(&ctx).args.join(" ");
+    assert!(initial_args.contains("-c mcp_servers.kanna-mcp.command=\"/tmp/kanna-mcp\""));
+    assert!(initial_args.contains("-c mcp_servers.kanna-mcp.args=[\"serve\"]"));
+    assert!(initial_args
+        .contains("-c mcp_servers.kanna-mcp.env.KANNA_SERVER_BASE_URL=\"http://127.0.0.1:48120\""));
+
+    let resume_args = adapter
+        .resume_spawn(&ctx, "thread-1", "continue")
+        .args
+        .join(" ");
+    assert!(resume_args.contains("-c mcp_servers.kanna-mcp.command=\"/tmp/kanna-mcp\""));
+    assert!(resume_args.contains("-c mcp_servers.kanna-mcp.args=[\"serve\"]"));
+    assert!(resume_args
+        .contains("-c mcp_servers.kanna-mcp.env.KANNA_SERVER_BASE_URL=\"http://127.0.0.1:48120\""));
+
+    let _ = std::fs::remove_file(mcp_config);
+}
+
 #[test]
 fn default_and_dont_ask_modes_bypass_exec_sandbox_and_approvals() {
     let adapter = CodexAdapter::new();

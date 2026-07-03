@@ -73,9 +73,9 @@ describe("repo remote metadata", () => {
     await execDb(
       client,
       `INSERT INTO pipeline_item (
-         id, repo_id, prompt, pipeline, stage, tags, branch,
+         id, repo_id, prompt, pipeline, stage, branch,
          agent_type, agent_provider, activity, closed_at, created_at, updated_at
-       ) VALUES (?, ?, ?, 'default', 'in progress', '[]', ?, 'pty', 'claude', 'idle', NULL, datetime('now'), datetime('now'))`,
+       ) VALUES (?, ?, ?, 'default', 'in progress', ?, 'pty', 'claude', 'idle', NULL, datetime('now'), datetime('now'))`,
       ["task-remote-metadata-cache", repoId, "Publish cached remote metadata", "task-remote-metadata-cache"],
     );
 

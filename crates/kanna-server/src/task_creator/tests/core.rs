@@ -64,7 +64,7 @@ fn build_agent_command_adds_claude_kanna_preamble_as_system_prompt() {
         "review",
         "qa",
         Some("auto"),
-        None,
+        Some("/tmp/kanna-mcp.json"),
     );
 
     let command = super::build_agent_command(
@@ -78,22 +78,27 @@ fn build_agent_command_adds_claude_kanna_preamble_as_system_prompt() {
     );
 
     assert!(command.contains("--append-system-prompt '"));
-    assert!(command.contains("task-123"));
-    assert!(command.contains("stage `review`"));
-    assert!(command.contains("pipeline `qa`"));
-    assert!(command.contains("transition `auto`"));
+    assert!(command.contains("## Kanna Task Environment"));
+    assert!(command.contains(
+        "This session was launched by Kanna as task `task-123`, stage `review` of pipeline `qa` (transition: `auto`)."
+    ));
+    assert!(!command.contains("{{TASK_CONTEXT}}"));
+    assert!(!command.contains("{{MCP_STATUS}}"));
+    assert!(command.contains("Claude is launched with this config via `--mcp-config`"));
     assert!(command.contains("kanna-cli guide"));
     assert!(command.contains("You are not running inside a Kanna sandbox"));
     let mcp_index = command
-        .find("Prefer `kanna-mcp` tools for Kanna task operations")
+        .find("Prefer the `kanna_*` MCP tools")
         .expect("preamble should prefer MCP tools");
     let cli_index = command
-        .find("If MCP tools are unavailable, fall back to the instance-local `kanna-cli`")
+        .find("If MCP tools are unavailable, fall back to the `kanna-cli` binary")
         .expect("preamble should describe CLI fallback");
     assert!(mcp_index < cli_index);
     assert!(cli_index < command.find("kanna-cli guide").unwrap());
     assert!(command.contains("KANNA_CLI_PATH"));
     assert!(command.contains("Do not push a branch or create a pull request"));
+    assert!(command.contains("kanna_complete_stage"));
+    assert!(command.contains("kanna-cli stage-complete --task-id \"$KANNA_TASK_ID\""));
 }
 
 #[test]
@@ -118,9 +123,133 @@ fn build_agent_command_launches_antigravity_with_prepended_kanna_context() {
     );
 
     assert!(command.starts_with("agy --dangerously-skip-permissions --prompt-interactive '"));
-    assert!(command.contains("## Kanna Task Context"));
-    assert!(command.contains("task-123"));
+    assert!(command.contains("## Kanna Task Environment"));
+    assert!(command.contains("task `task-123`"));
+    assert!(!command.contains("{{MCP_STATUS}}"));
     assert!(command.contains("Ship the task."));
+}
+
+fn write_test_mcp_config(label: &str) -> std::path::PathBuf {
+    let path = std::env::temp_dir().join(format!(
+        "kanna-server-{label}-mcp-{}.json",
+        std::process::id()
+    ));
+    std::fs::write(
+        &path,
+        serde_json::json!({
+            "mcpServers": {
+                "kanna-mcp": {
+                    "command": "/tmp/kanna mcp/kanna-mcp",
+                    "args": ["serve"],
+                    "env": {
+                        "KANNA_SERVER_BASE_URL": "http://127.0.0.1:48120"
+                    }
+                }
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    path
+}
+
+#[test]
+fn build_agent_command_registers_codex_kanna_mcp_with_config_overrides() {
+    let mcp_config = write_test_mcp_config("codex-command");
+    let command = super::build_agent_command(
+        &AgentProvider::Codex,
+        "Do work.",
+        None,
+        Some("dontAsk"),
+        &[],
+        Some("Kanna preamble."),
+        Some(mcp_config.to_string_lossy().as_ref()),
+    );
+
+    assert!(command.starts_with("codex "));
+    assert!(command.contains("-c 'mcp_servers.kanna-mcp.command=\"/tmp/kanna mcp/kanna-mcp\"'"));
+    assert!(command.contains("-c 'mcp_servers.kanna-mcp.args=[\"serve\"]'"));
+    assert!(command.contains(
+        "-c 'mcp_servers.kanna-mcp.env.KANNA_SERVER_BASE_URL=\"http://127.0.0.1:48120\"'"
+    ));
+    assert!(command.contains("'Kanna preamble."));
+    assert!(command.contains("Do work."));
+
+    let _ = std::fs::remove_file(mcp_config);
+}
+
+#[test]
+fn build_agent_command_registers_copilot_kanna_mcp_with_additional_config() {
+    let mcp_config = write_test_mcp_config("copilot-command");
+    let command = super::build_agent_command(
+        &AgentProvider::Copilot,
+        "Do work.",
+        None,
+        Some("dontAsk"),
+        &[],
+        Some("Kanna preamble."),
+        Some(mcp_config.to_string_lossy().as_ref()),
+    );
+
+    assert!(command.starts_with("copilot "));
+    assert!(command.contains("--additional-mcp-config @'"));
+    assert!(command.contains(mcp_config.to_string_lossy().as_ref()));
+    assert!(command.contains("-i 'Kanna preamble."));
+    assert!(command.contains("Do work."));
+
+    let _ = std::fs::remove_file(mcp_config);
+}
+
+#[test]
+fn build_agent_command_registers_opencode_kanna_mcp_with_inline_config() {
+    let mcp_config = write_test_mcp_config("opencode-command");
+    let command = super::build_agent_command(
+        &AgentProvider::Opencode,
+        "Do work.",
+        None,
+        Some("dontAsk"),
+        &[],
+        Some("Kanna preamble."),
+        Some(mcp_config.to_string_lossy().as_ref()),
+    );
+
+    assert!(command.contains("OPENCODE_CONFIG_CONTENT='"));
+    assert!(command.contains("\"$schema\":\"https://opencode.ai/config.json\""));
+    assert!(command
+        .contains("\"mcp\":{\"kanna-mcp\":{\"command\":[\"/tmp/kanna mcp/kanna-mcp\",\"serve\"]"));
+    assert!(command.contains("\"type\":\"local\""));
+    assert!(command.contains("\"enabled\":true"));
+    assert!(command.contains("\"KANNA_SERVER_BASE_URL\":\"http://127.0.0.1:48120\""));
+    assert!(command.contains("run --interactive"));
+    assert!(command.contains("'Kanna preamble."));
+    assert!(command.contains("Do work."));
+
+    let _ = std::fs::remove_file(mcp_config);
+}
+
+#[test]
+fn build_kanna_preamble_names_automatic_and_fallback_mcp_providers() {
+    let codex = super::build_kanna_preamble(
+        &AgentProvider::Codex,
+        "task-123",
+        "implement",
+        "default",
+        None,
+        Some("/tmp/kanna-mcp.json"),
+    );
+    assert!(codex.contains("Codex is launched with Kanna MCP registration"));
+    assert!(codex.contains("Kanna MCP tools should be available automatically"));
+
+    let antigravity = super::build_kanna_preamble(
+        &AgentProvider::Antigravity,
+        "task-123",
+        "implement",
+        "default",
+        None,
+        Some("/tmp/kanna-mcp.json"),
+    );
+    assert!(antigravity.contains("Antigravity CLI MCP registration is not wired"));
+    assert!(antigravity.contains("use the `kanna-cli` fallback for Kanna task operations"));
 }
 
 #[test]
@@ -215,6 +344,49 @@ fn prepare_task_defaults_to_agent_session_for_claude_and_codex() {
 
         let _ = std::fs::remove_dir_all(&repo_root);
     }
+}
+
+#[test]
+fn prepare_task_for_api_creates_worktree_without_cargo_config() {
+    let repo_root = init_git_repo("no-cargo-config");
+    let config = test_config("no-cargo-config");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+
+    let prepared = prepare_task_for_api(
+        &db,
+        &config,
+        CreateTaskRequest {
+            repo_id: "repo-1".to_string(),
+            prompt: "Create a task worktree".to_string(),
+            display_name: None,
+            pipeline_name: None,
+            base_ref: None,
+            agent_provider: Some("claude".to_string()),
+            agent_type: Some("agent".to_string()),
+            model: None,
+            permission_mode: None,
+            allowed_tools: None,
+            notify_task_id: None,
+            parent_task_id: None,
+            blocker_task_ids: None,
+        },
+    )
+    .unwrap();
+
+    assert!(prepared.cwd.contains(".kanna-worktrees/task-"));
+    // This boundary test exercises the real server-side task worktree creation
+    // without booting the full desktop app, which is too heavyweight for this
+    // filesystem side-effect regression.
+    assert!(
+        !std::path::Path::new(&prepared.cwd)
+            .join(".cargo/config.toml")
+            .exists(),
+        "fresh Kanna-created task worktrees must not receive .cargo/config.toml"
+    );
+
+    let _ = std::fs::remove_dir_all(&repo_root);
 }
 
 #[test]

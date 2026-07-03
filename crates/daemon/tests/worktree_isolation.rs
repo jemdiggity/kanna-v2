@@ -4,14 +4,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-fn compute_socket_path(dir: &PathBuf) -> PathBuf {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    let mut hasher = DefaultHasher::new();
-    dir.hash(&mut hasher);
-    let hash = hasher.finish() as u32;
-    PathBuf::from(format!("/tmp/kanna-{:08x}.sock", hash))
+fn compute_socket_path(dir: &Path) -> PathBuf {
+    kanna_runtime_defaults::socket_path(dir)
 }
 
 fn unique_temp_root(name: &str) -> PathBuf {
@@ -24,7 +18,7 @@ fn unique_temp_root(name: &str) -> PathBuf {
 
 fn wait_for_daemon(child: &Child, daemon_dir: &Path) {
     let pid_path = daemon_dir.join("daemon.pid");
-    let socket_path = compute_socket_path(&daemon_dir.to_path_buf());
+    let socket_path = compute_socket_path(daemon_dir);
 
     for _ in 0..50 {
         let pid_matches = std::fs::read_to_string(&pid_path)

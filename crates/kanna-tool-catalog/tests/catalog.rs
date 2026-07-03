@@ -25,10 +25,12 @@ fn bundled_catalog_parses_and_declares_all_tools() {
             "kanna_search_tasks",
             "kanna_list_repo_tasks",
             "kanna_create_task",
+            "kanna_signal_agent",
             "kanna_send_task_input",
             "kanna_close_task",
             "kanna_rename_task",
             "kanna_advance_stage",
+            "kanna_rerun_stage",
             "kanna_block_task",
             "kanna_unblock_task",
             "kanna_set_task_parent",
@@ -185,6 +187,20 @@ fn resolves_expected_requests_for_every_bundled_tool() {
                 "prompt": "Subtask",
                 "agentType": "pty",
                 "parentTaskId": "task-parent"
+            }),
+        ),
+        (
+            "kanna_signal_agent",
+            json!({
+                "repo_id": "repo-1",
+                "agent": "merge",
+                "message": "MERGE task-1 -> main: ready"
+            }),
+            Method::Post,
+            ResponseKind::Json,
+            "/v1/repos/repo-1/agents/merge/signal",
+            json!({
+                "message": "MERGE task-1 -> main: ready"
             }),
         ),
         (

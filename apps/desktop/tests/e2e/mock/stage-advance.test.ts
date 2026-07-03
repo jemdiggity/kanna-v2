@@ -1,7 +1,48 @@
+/**
+ * Stage advance E2E — durable task semantics.
+ *
+ * Stage transitions happen on the same pipeline_item: the task keeps its id
+ * while each transition FORKS a fresh workspace — a new randomly-named
+ * branch and worktree created from the previous branch's committed tip
+ * (N worktrees, N branches, one PR; the PR agent renames the final branch).
+ * Only committed work crosses a stage boundary; the previous worktree stays
+ * on disk until cleanup. Posts and reruns keep the current workspace.
+ * Advancing past the final stage closes the task (closed_at is the sole done
+ * indicator — stage is never rewritten to a "done" sentinel). Revisions
+ * rerun an earlier stage on the same task in a fresh fork.
+ *
+ * Coverage that was deleted with the old close-and-recreate model, and why:
+ * - "spawns a next-stage task / baseRef checks on a created task": advancing
+ *   no longer creates tasks, so there is nothing to spawn or focus-steal.
+ *   The durable counterparts below assert the SAME task id advances and that
+ *   selection is only adjusted when the advanced task actually closes.
+ * - post-action carriage-return tests (claude/codex/copilot input capture):
+ *   `post_action` compiles into a stage `post` — tail work injected into the
+ *   stage's RUNNING agent session on advance (stages swap sessions; posts
+ *   continue them). The exact two-write input submission (message, then a
+ *   discrete Enter) and the dead-session fallback spawn are covered at the
+ *   server boundary by
+ *   crates/kanna-server/src/task_creator/tests/stage.rs
+ *   (dispatch_post_injects_message_into_live_session_and_records_post_run,
+ *   dispatch_post_falls_back_to_fresh_session_when_session_is_dead) with a
+ *   fake daemon asserting the exact Input/Spawn commands. A full desktop
+ *   E2E of post injection would need a deterministic live agent session to
+ *   type into under the WebDriver harness; the fixtures here use post-less
+ *   pipelines so swaps stay deterministic.
+ * - "closes the source task after a fast teardown exit during stage
+ *   advance": advancing never closes the source mid-pipeline anymore; the
+ *   final-stage test covers the one remaining close path.
+ * - "Cmd+S with a remote workspace task selected does not close a stale
+ *   local fallback": still a real guard in useAppKeyboardActions, but the
+ *   old test injected the cloud snapshot through a setupState ref that no
+ *   longer exists (`remoteSnapshot` is now a read-only computed and
+ *   `cloudSnapshot` is not exposed on App.vue's setupState). Making this
+ *   testable again needs a deliberate snapshot-injection hook in
+ *   useAppCloudWorkspace; until then the guard has no E2E coverage here.
+ */
 import { join } from "node:path";
-import { execFile } from "node:child_process";
 import { chmod, mkdir, readFile, stat, writeFile } from "node:fs/promises";
-import { createConnection } from "node:net";
+import { execFile } from "node:child_process";
 import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
@@ -9,10 +50,14 @@ import { WebDriverClient } from "../helpers/webdriver";
 import { resetDatabase, importTestRepo, cleanupWorktrees } from "../helpers/reset";
 import { callVueMethod, execDb, getVueState, queryDb, tauriInvoke } from "../helpers/vue";
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
-import { buildGlobalKeydownScript } from "../helpers/keyboard";
-import { startTestKannaServer } from "../helpers/kannaServer";
+import { advanceStageWithShortcut, pressAdvanceStageShortcut } from "../helpers/stageAdvance";
+import { startTestKannaServer, type TestKannaServer } from "../helpers/kannaServer";
 
 const execFileAsync = promisify(execFile);
+
+const TWO_STAGE_PIPELINE = "durable-two-stage-e2e";
+const AUTO_PIPELINE = "durable-auto-e2e";
+const REVISION_PIPELINE = "durable-revision-e2e";
 
 async function git(repoPath: string, args: string[]): Promise<string> {
   const { stdout } = await execFileAsync("git", ["-C", repoPath, ...args]);
@@ -28,64 +73,68 @@ function isVueCallError(value: unknown): value is { __error: string } {
   );
 }
 
-async function waitForActivePostAction(
-  client: WebDriverClient,
-  taskId: string,
-  expectedPostAction: string,
-  timeoutMs = 10_000,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const rows = (await queryDb(
-      client,
-      "SELECT stage, active_post_action FROM pipeline_item WHERE id = ?",
-      [taskId],
-    )) as Array<{ stage: string | null; active_post_action: string | null }>;
-    const row = rows[0];
-    if (row?.stage === "in progress" && row.active_post_action === expectedPostAction) return;
-    await sleep(100);
-  }
-  throw new Error(`timed out waiting for ${taskId} to enter post-action ${expectedPostAction}`);
+interface TaskRow {
+  id: string | null;
+  stage: string | null;
+  closed_at: string | null;
+  branch: string | null;
+  agent_type: string | null;
+  agent_provider: string | null;
+  display_name: string | null;
+  prompt: string | null;
 }
 
-async function waitForClosedTask(
-  client: WebDriverClient,
-  taskId: string,
-  timeoutMs = 5_000,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const rows = (await queryDb(
-      client,
-      "SELECT stage, closed_at FROM pipeline_item WHERE id = ?",
-      [taskId],
-    )) as Array<{ stage: string | null; closed_at: string | null }>;
-    const row = rows[0];
-    if (row?.stage === "done" && typeof row.closed_at === "string" && row.closed_at.length > 0) return;
-    await sleep(100);
-  }
-  throw new Error(`timed out waiting for ${taskId} to close`);
+interface StageRunRow {
+  id: string | null;
+  stage: string | null;
+  status: string | null;
+  session_id: string | null;
+  feedback: string | null;
 }
 
-async function waitForTearingDownTask(
+async function getTaskRow(client: WebDriverClient, taskId: string): Promise<TaskRow> {
+  const rows = (await queryDb(
+    client,
+    `SELECT id, stage, closed_at, branch, agent_type, agent_provider, display_name, prompt
+     FROM pipeline_item WHERE id = ?`,
+    [taskId],
+  )) as TaskRow[];
+  const row = rows[0];
+  if (!row) throw new Error(`task ${taskId} not found`);
+  return row;
+}
+
+async function waitForTaskRow(
   client: WebDriverClient,
   taskId: string,
-  timeoutMs = 5_000,
-): Promise<{ stage: string | null; closed_at: string | null; teardown_started_at: string | null }> {
+  predicate: (row: TaskRow) => boolean,
+  timeoutMs = 20_000,
+): Promise<TaskRow> {
   const deadline = Date.now() + timeoutMs;
+  let last: TaskRow | null = null;
   while (Date.now() < deadline) {
-    const rows = (await queryDb(
-      client,
-      "SELECT stage, closed_at, teardown_started_at FROM pipeline_item WHERE id = ?",
-      [taskId],
-    )) as Array<{ stage: string | null; closed_at: string | null; teardown_started_at: string | null }>;
-    const row = rows[0];
-    if (row?.closed_at == null && typeof row.teardown_started_at === "string" && row.teardown_started_at.length > 0) {
-      return row;
-    }
+    last = await getTaskRow(client, taskId);
+    if (predicate(last)) return last;
     await sleep(100);
   }
-  throw new Error(`timed out waiting for ${taskId} to enter teardown`);
+  throw new Error(`timed out waiting for task ${taskId}; last row: ${JSON.stringify(last)}`);
+}
+
+async function getStageRuns(client: WebDriverClient, taskId: string): Promise<StageRunRow[]> {
+  return (await queryDb(
+    client,
+    "SELECT id, stage, status, session_id, feedback FROM stage_run WHERE task_id = ? ORDER BY started_at, id",
+    [taskId],
+  )) as StageRunRow[];
+}
+
+async function countRepoTasks(client: WebDriverClient, repoId: string): Promise<number> {
+  const rows = (await queryDb(
+    client,
+    "SELECT COUNT(*) AS task_count FROM pipeline_item WHERE repo_id = ?",
+    [repoId],
+  )) as Array<{ task_count: number }>;
+  return rows[0]?.task_count ?? 0;
 }
 
 async function hydrateStoreItem(client: WebDriverClient, taskId: string): Promise<void> {
@@ -114,111 +163,6 @@ async function hydrateStoreItem(client: WebDriverClient, taskId: string): Promis
   }
 }
 
-async function injectCloudSnapshot(
-  client: WebDriverClient,
-  snapshot: { repos: Array<Record<string, unknown>>; items: Array<Record<string, unknown>>; terminalRefs?: Record<string, unknown> },
-): Promise<void> {
-  const result = await client.executeSync<string>(
-    `const ctx = window.__KANNA_E2E__.setupState;
-     const snapshot = ${JSON.stringify(snapshot)};
-     const cloudSnapshot = ctx.cloudSnapshot ?? ctx.remoteSnapshot;
-     if (!cloudSnapshot) return "cloud-snapshot-unavailable";
-     if (cloudSnapshot.__v_isRef) cloudSnapshot.value = snapshot;
-     else Object.assign(cloudSnapshot, snapshot);
-     return "ok";`,
-  );
-  if (result !== "ok") {
-    throw new Error(`failed to inject cloud snapshot: ${result}`);
-  }
-}
-
-async function sendPipelineStageComplete(client: WebDriverClient, taskId: string): Promise<void> {
-  const socketPath = await tauriInvoke(client, "get_pipeline_socket_path");
-  if (typeof socketPath !== "string" || socketPath.length === 0) {
-    throw new Error(`unexpected pipeline socket path: ${JSON.stringify(socketPath)}`);
-  }
-
-  await new Promise<void>((resolve, reject) => {
-    let settled = false;
-    const socket = createConnection(socketPath);
-    const settle = (error?: Error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      socket.destroy();
-      if (error) reject(error);
-      else resolve();
-    };
-    const timer = setTimeout(() => {
-      settle(new Error(`timed out sending pipeline_stage_complete for ${taskId}`));
-    }, 5_000);
-
-    socket.once("error", (error) => settle(error));
-    socket.once("connect", () => {
-      socket.end(`${JSON.stringify({ type: "stage_complete", task_id: taskId })}\n`);
-    });
-    socket.once("close", (hadError) => {
-      if (!hadError) settle();
-    });
-  });
-}
-
-interface CreatedStageTaskRow {
-  id: string | null;
-  display_name: string | null;
-  base_ref: string | null;
-}
-
-interface WaitForCreatedStageTaskOptions {
-  excludeIds?: Iterable<string>;
-  displayName?: string;
-  baseRef?: string;
-}
-
-async function getStageTaskIds(
-  client: WebDriverClient,
-  repoId: string,
-  stage: string,
-): Promise<Set<string>> {
-  const rows = (await queryDb(
-    client,
-    "SELECT id FROM pipeline_item WHERE repo_id = ? AND stage = ? AND closed_at IS NULL",
-    [repoId, stage],
-  )) as Array<{ id: string | null }>;
-  return new Set(rows.flatMap((row) => (row.id ? [row.id] : [])));
-}
-
-async function waitForCreatedStageTask(
-  client: WebDriverClient,
-  repoId: string,
-  stage: string,
-  options: WaitForCreatedStageTaskOptions = {},
-  timeoutMs = 10_000,
-): Promise<string> {
-  const deadline = Date.now() + timeoutMs;
-  const excludeIds = new Set(options.excludeIds ?? []);
-  while (Date.now() < deadline) {
-    const rows = (await queryDb(
-      client,
-      "SELECT id, display_name, base_ref FROM pipeline_item WHERE repo_id = ? AND stage = ? AND closed_at IS NULL ORDER BY created_at DESC, id DESC",
-      [repoId, stage],
-    )) as CreatedStageTaskRow[];
-    const row = rows.find((candidate) => {
-      if (!candidate.id || excludeIds.has(candidate.id)) return false;
-      if (options.displayName !== undefined && candidate.display_name !== options.displayName) return false;
-      if (options.baseRef !== undefined && candidate.base_ref !== options.baseRef) return false;
-      return true;
-    });
-    if (row?.id) return row.id;
-    await sleep(100);
-  }
-  throw new Error(`timed out waiting for a ${stage} task`);
-}
-
-async function waitForSelectedTask(client: WebDriverClient, expectedTaskId: string, timeoutMs = 10_000): Promise<void> {
-  await waitForSelectedTaskId(client, expectedTaskId, timeoutMs);
-}
-
 async function waitForSelectedTaskId(
   client: WebDriverClient,
   expectedTaskId: string | null,
@@ -235,37 +179,10 @@ async function waitForSelectedTaskId(
   throw new Error(`timed out waiting for selected task ${expectedTaskId}; saw ${JSON.stringify(lastSelectedTaskId)}`);
 }
 
-async function emitExternalSharedInvalidation(client: WebDriverClient, reason: string): Promise<void> {
-  const result = await client.executeAsync<string | { __error: string }>(
-    `const cb = arguments[arguments.length - 1];
-     import("/src/emit.ts")
-       .then(({ emit }) => emit("kanna://window-workspace-invalidated", {
-         reason: ${JSON.stringify(reason)},
-         sourceWindowId: "e2e-peer-window",
-       }))
-       .then(() => cb("ok"))
-       .catch((error) => cb({ __error: error?.message || String(error) }));`,
-  );
-  if (isVueCallError(result)) {
-    throw new Error(`failed to emit shared invalidation: ${result.__error}`);
-  }
-}
-
-async function waitForSidebarToExcludeText(
-  client: WebDriverClient,
-  text: string,
-  timeoutMs = 5_000,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  let lastSidebarText = "";
-  while (Date.now() < deadline) {
-    lastSidebarText = await client.executeSync<string>(
-      `return document.querySelector(".sidebar")?.textContent || "";`,
-    );
-    if (!lastSidebarText.includes(text)) return;
-    await sleep(100);
-  }
-  throw new Error(`timed out waiting for sidebar to remove ${JSON.stringify(text)}; saw ${JSON.stringify(lastSidebarText)}`);
+async function selectTask(client: WebDriverClient, taskId: string): Promise<void> {
+  const result = await callVueMethod(client, "store.selectItem", taskId);
+  if (isVueCallError(result)) throw new Error(result.__error);
+  await waitForSelectedTaskId(client, taskId);
 }
 
 async function waitForSidebarToExcludeTaskId(
@@ -284,46 +201,21 @@ async function waitForSidebarToExcludeTaskId(
   throw new Error(`timed out waiting for sidebar to remove task ${JSON.stringify(taskId)}`);
 }
 
-async function clickSidebarItemByTitle(
+async function waitForToastContaining(
   client: WebDriverClient,
-  title: string,
-  timeoutMs = 5_000,
+  text: string,
+  timeoutMs = 10_000,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
+  let lastToastText = "";
   while (Date.now() < deadline) {
-    const clicked = await client.executeSync<boolean>(
-      `const title = ${JSON.stringify(title)};
-       const titles = Array.from(document.querySelectorAll(".sidebar .item-title"));
-       const match = titles.find((element) => element.textContent?.includes(title));
-       const item = match?.closest(".pipeline-item");
-       if (!item) return false;
-       item.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
-       return true;`,
+    lastToastText = await client.executeSync<string>(
+      `return document.querySelector(".toast-container")?.textContent || "";`,
     );
-    if (clicked) return;
+    if (lastToastText.includes(text)) return;
     await sleep(100);
   }
-  throw new Error(`timed out waiting for sidebar item ${JSON.stringify(title)}`);
-}
-
-async function advanceStageWithShortcut(
-  client: WebDriverClient,
-  taskTitle: string,
-  expectedTaskId: string,
-): Promise<void> {
-  await clickSidebarItemByTitle(client, taskTitle);
-  await waitForSelectedTask(client, expectedTaskId);
-  await client.executeSync(buildGlobalKeydownScript({ key: "s", meta: true }));
-}
-
-async function waitForFileSize(path: string, expectedSize: number, timeoutMs = 5_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const size = await stat(path).then((stats) => stats.size).catch(() => 0);
-    if (size === expectedSize) return;
-    await sleep(100);
-  }
-  throw new Error(`timed out waiting for ${path} to reach ${expectedSize} bytes`);
+  throw new Error(`timed out waiting for toast ${JSON.stringify(text)}; saw ${JSON.stringify(lastToastText)}`);
 }
 
 async function waitForFile(path: string, timeoutMs = 5_000): Promise<void> {
@@ -335,15 +227,20 @@ async function waitForFile(path: string, timeoutMs = 5_000): Promise<void> {
   throw new Error(`timed out waiting for ${path}`);
 }
 
-async function waitForFileContaining(path: string, expected: string, timeoutMs = 5_000): Promise<string> {
-  const deadline = Date.now() + timeoutMs;
-  let latest = "";
-  while (Date.now() < deadline) {
-    latest = await readFile(path, "utf8").catch(() => "");
-    if (latest.includes(expected)) return latest;
-    await sleep(100);
+async function emitExternalSharedInvalidation(client: WebDriverClient, reason: string): Promise<void> {
+  const result = await client.executeAsync<string | { __error: string }>(
+    `const cb = arguments[arguments.length - 1];
+     import("/src/emit.ts")
+       .then(({ emit }) => emit("kanna://window-workspace-invalidated", {
+         reason: ${JSON.stringify(reason)},
+         sourceWindowId: "e2e-peer-window",
+       }))
+       .then(() => cb("ok"))
+       .catch((error) => cb({ __error: error?.message || String(error) }));`,
+  );
+  if (isVueCallError(result)) {
+    throw new Error(`failed to emit shared invalidation: ${result.__error}`);
   }
-  throw new Error(`timed out waiting for ${path} to contain ${JSON.stringify(expected)}; latest=${JSON.stringify(latest)}`);
 }
 
 describe("stage advance", () => {
@@ -351,7 +248,66 @@ describe("stage advance", () => {
   let repoId = "";
   let fixtureRepoRoot = "";
   let testRepoPath = "";
-  let renamedStageTaskId = "";
+  const spawnedSessionIds = new Set<string>();
+
+  async function insertTask(options: {
+    id: string;
+    prompt: string;
+    pipeline: string;
+    stage: string;
+    branch: string | null;
+    agentType?: string;
+    agentProvider?: string;
+    displayName?: string | null;
+  }): Promise<void> {
+    await execDb(
+      client,
+      `INSERT INTO pipeline_item (
+         id, repo_id, prompt, display_name, pipeline, stage, branch,
+         agent_type, agent_provider, activity, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'idle', datetime('now'), datetime('now'))`,
+      [
+        options.id,
+        repoId,
+        options.prompt,
+        options.displayName ?? null,
+        options.pipeline,
+        options.stage,
+        options.branch,
+        options.agentType ?? "pty",
+        options.agentProvider ?? "codex",
+      ],
+    );
+    await hydrateStoreItem(client, options.id);
+  }
+
+  async function insertRunningStageRun(taskId: string, runId: string, stage: string): Promise<void> {
+    await execDb(
+      client,
+      `INSERT INTO stage_run (id, task_id, stage, agent, agent_provider, model, status, session_id)
+       VALUES (?, ?, ?, NULL, 'codex', NULL, 'running', ?)`,
+      [runId, taskId, stage, taskId],
+    );
+  }
+
+  async function addTaskWorktree(taskId: string, branch: string): Promise<void> {
+    await tauriInvoke(client, "git_worktree_add", {
+      repoPath: testRepoPath,
+      branch,
+      path: join(testRepoPath, ".kanna-worktrees", branch),
+      startPoint: "main",
+    });
+    spawnedSessionIds.add(taskId);
+  }
+
+  async function withTestKannaServer<T>(run: (server: TestKannaServer) => Promise<T>): Promise<T> {
+    const server = await startTestKannaServer(client, join(testRepoPath, ".kanna"));
+    try {
+      return await run(server);
+    } finally {
+      server.child.kill();
+    }
+  }
 
   beforeAll(async () => {
     await client.createSession();
@@ -359,108 +315,49 @@ describe("stage advance", () => {
     fixtureRepoRoot = await createFixtureRepo("stage-advance-test");
     testRepoPath = fixtureRepoRoot;
 
-    const pipelineName = "continue-e2e";
     const kannaDir = join(testRepoPath, ".kanna");
     await mkdir(join(kannaDir, "pipelines"), { recursive: true });
-    await mkdir(join(kannaDir, "agents", "commit-e2e"), { recursive: true });
     await mkdir(join(kannaDir, "agents", "revision-e2e"), { recursive: true });
     await mkdir(join(kannaDir, "fake-bin"), { recursive: true });
     await writeFile(
-      join(kannaDir, "config.json"),
+      join(kannaDir, "pipelines", `${TWO_STAGE_PIPELINE}.json`),
       JSON.stringify({
-        setup: [
-          "export PATH=\"$PWD/.kanna/fake-bin:$PATH\"",
+        name: TWO_STAGE_PIPELINE,
+        stages: [
+          { name: "in progress", policy: { transition: "manual" } },
+          { name: "pr", policy: { transition: "manual" } },
         ],
       }),
     );
     await writeFile(
-      join(kannaDir, "pipelines", `${pipelineName}.json`),
+      join(kannaDir, "pipelines", `${AUTO_PIPELINE}.json`),
       JSON.stringify({
-        name: pipelineName,
+        name: AUTO_PIPELINE,
+        stages: [
+          { name: "auto-source", policy: { transition: "auto" } },
+          { name: "review", policy: { transition: "manual" } },
+        ],
+      }),
+    );
+    await writeFile(
+      join(kannaDir, "pipelines", `${REVISION_PIPELINE}.json`),
+      JSON.stringify({
+        name: REVISION_PIPELINE,
+        environments: {
+          "fake-bin": {
+            setup: ["export PATH=\"$PWD/.kanna/fake-bin:$PATH\""],
+          },
+        },
         stages: [
           {
             name: "in progress",
-            transition: "manual",
-            post_action: {
-              name: "commit",
-              transition: "auto",
-              agent: "commit-e2e",
-              prompt: "Commit stage marker for $TASK_PROMPT",
-            },
-          },
-          { name: "pr", transition: "manual" },
-        ],
-      }),
-    );
-    await writeFile(
-      join(kannaDir, "pipelines", "auto-spawn-focus-e2e.json"),
-      JSON.stringify({
-        name: "auto-spawn-focus-e2e",
-        stages: [
-          { name: "auto-source", transition: "auto" },
-          { name: "review", transition: "manual" },
-        ],
-      }),
-    );
-    await writeFile(
-      join(kannaDir, "pipelines", "teardown-review-e2e.json"),
-      JSON.stringify({
-        name: "teardown-review-e2e",
-        stages: [
-          { name: "in progress", transition: "manual" },
-          { name: "review", transition: "manual" },
-        ],
-      }),
-    );
-    await writeFile(
-      join(kannaDir, "pipelines", "final-stage-e2e.json"),
-      JSON.stringify({
-        name: "final-stage-e2e",
-        stages: [
-          { name: "in progress", transition: "manual" },
-          { name: "pr", transition: "manual" },
-        ],
-      }),
-    );
-    await writeFile(
-      join(kannaDir, "pipelines", "revision-e2e.json"),
-      JSON.stringify({
-        name: "revision-e2e",
-        stages: [
-          {
-            name: "in progress",
-            transition: "manual",
             agent: "revision-e2e",
+            environment: "fake-bin",
+            policy: { transition: "manual" },
           },
-          { name: "review", transition: "auto" },
-          { name: "pr", transition: "manual" },
+          { name: "review", policy: { transition: "manual" } },
         ],
       }),
-    );
-    await writeFile(
-      join(kannaDir, "pipelines", "sdk-advance-e2e.json"),
-      JSON.stringify({
-        name: "sdk-advance-e2e",
-        stages: [
-          { name: "in progress", transition: "manual" },
-          {
-            name: "qa",
-            transition: "manual",
-            agent: "revision-e2e",
-          },
-        ],
-      }),
-    );
-    await writeFile(
-      join(kannaDir, "agents", "commit-e2e", "AGENT.md"),
-      [
-        "---",
-        "name: Commit E2E",
-        "description: Verifies post-action advancement.",
-        "---",
-        "Commit agent generated prompt marker.",
-        "",
-      ].join("\n"),
     );
     await writeFile(
       join(kannaDir, "agents", "revision-e2e", "AGENT.md"),
@@ -485,18 +382,6 @@ describe("stage advance", () => {
       ].join("\n"),
     );
     await chmod(join(kannaDir, "fake-bin", "codex"), 0o755);
-    await writeFile(
-      join(kannaDir, "fake-bin", "fake-claude-agent"),
-      [
-        "#!/bin/sh",
-        "mkdir -p \"$(dirname \"$CHAT_AGENT_STDIN_LOG\")\"",
-        "while IFS= read -r line; do",
-        "  printf '%s\\n' \"$line\" >> \"$CHAT_AGENT_STDIN_LOG\"",
-        "done",
-        "",
-      ].join("\n"),
-    );
-    await chmod(join(kannaDir, "fake-bin", "fake-claude-agent"), 0o755);
     await git(testRepoPath, ["add", ".kanna"]);
     await git(testRepoPath, ["commit", "-m", "test: add kanna stage fixtures"]);
 
@@ -504,13 +389,8 @@ describe("stage advance", () => {
   });
 
   afterAll(async () => {
-    await tauriInvoke(client, "kill_session", { sessionId: "continue-stage-task" }).catch(() => undefined);
-    await tauriInvoke(client, "kill_session", { sessionId: "continue-stage-claude-enter-task" }).catch(() => undefined);
-    await tauriInvoke(client, "kill_session", { sessionId: "continue-stage-copilot-task" }).catch(() => undefined);
-    await tauriInvoke(client, "kill_session", { sessionId: "continue-stage-chat-agent-task" }).catch(() => undefined);
-    await tauriInvoke(client, "kill_session", { sessionId: "server-continue-stage-task" }).catch(() => undefined);
-    if (renamedStageTaskId) {
-      await tauriInvoke(client, "kill_session", { sessionId: renamedStageTaskId }).catch(() => undefined);
+    for (const sessionId of spawnedSessionIds) {
+      await tauriInvoke(client, "kill_session", { sessionId }).catch(() => undefined);
     }
     if (testRepoPath) {
       await cleanupWorktrees(client, testRepoPath);
@@ -519,1120 +399,308 @@ describe("stage advance", () => {
     await client.deleteSession();
   });
 
-  it("keeps an automatically spawned next-stage task in the background when follow_task is omitted", async () => {
-    const sourceTaskId = "auto-spawn-focus-source";
-    const sourceBranch = "task-auto-spawn-focus-source";
-    const activeTaskId = "auto-spawn-focus-active";
-    await tauriInvoke(client, "git_worktree_add", {
-      repoPath: testRepoPath,
-      branch: sourceBranch,
-      path: join(testRepoPath, ".kanna-worktrees", sourceBranch),
-      startPoint: "main",
-    });
-
-    await execDb(
-      client,
-      `INSERT INTO pipeline_item (
-         id, repo_id, prompt, pipeline, stage, stage_result, tags, branch,
-         agent_type, agent_provider, activity, display_name, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        sourceTaskId,
-        repoId,
-        "Automatically spawn review",
-        "auto-spawn-focus-e2e",
-        "auto-source",
-        null,
-        "[]",
-        sourceBranch,
-        "pty",
-        "codex",
-        "idle",
-        null,
-        "2026-05-06T00:00:00.000Z",
-        "2026-05-06T00:00:00.000Z",
-      ],
-    );
-    await execDb(
-      client,
-      `INSERT INTO pipeline_item (
-         id, repo_id, prompt, pipeline, stage, stage_result, tags, branch,
-         agent_type, agent_provider, activity, display_name, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        activeTaskId,
-        repoId,
-        "Keep this task selected",
-        "auto-spawn-focus-e2e",
-        "auto-source",
-        null,
-        "[]",
-        null,
-        "agent",
-        "codex",
-        "idle",
-        null,
-        "2026-05-06T00:01:00.000Z",
-        "2026-05-06T00:01:00.000Z",
-      ],
-    );
-    await hydrateStoreItem(client, sourceTaskId);
-    await hydrateStoreItem(client, activeTaskId);
-
-    const selectResult = await callVueMethod(client, "store.selectItem", activeTaskId);
-    if (isVueCallError(selectResult)) throw new Error(selectResult.__error);
-    await waitForSelectedTask(client, activeTaskId);
-
-    await execDb(
-      client,
-      "UPDATE pipeline_item SET stage_result = ?, updated_at = datetime('now') WHERE id = ?",
-      [JSON.stringify({ status: "success", summary: "ready for review" }), sourceTaskId],
-    );
-    const existingReviewTaskIds = await getStageTaskIds(client, repoId, "review");
-    await sendPipelineStageComplete(client, sourceTaskId);
-
-    const reviewTaskId = await waitForCreatedStageTask(client, repoId, "review", {
-      excludeIds: existingReviewTaskIds,
-      displayName: "Automatically spawn review",
-      baseRef: sourceBranch,
-    });
-    expect(reviewTaskId).not.toBe(sourceTaskId);
-    await sleep(500);
-    expect(await getVueState(client, "selectedItemId")).toBe(activeTaskId);
-  });
-
-  it("leaves the selected task untouched when an unrelated task auto-advances to a different fallback", async () => {
-    // Regression: when a non-selected task auto-advances, selection must not move.
-    // The earlier two-task case passes even with the bug because the computed
-    // fallback coincidentally equals the selected task. Here a distinct third
-    // task is the fallback, so the buggy "restore fallback" path would steal
-    // selection away from the task the user actually picked.
-    const selectedTaskId = "auto-advance-keep-selected";
-    const sourceTaskId = "auto-advance-source-distinct";
-    const fallbackTaskId = "auto-advance-distinct-fallback";
-    const sourceBranch = "task-auto-advance-source-distinct";
-
-    await tauriInvoke(client, "git_worktree_add", {
-      repoPath: testRepoPath,
-      branch: sourceBranch,
-      path: join(testRepoPath, ".kanna-worktrees", sourceBranch),
-      startPoint: "main",
-    });
-
-    // Future-dated so these three sort to the top of the active section
-    // (newest first): selected, source, fallback.
-    const insertActiveItem = async (
-      id: string,
-      prompt: string,
-      branch: string | null,
-      agentType: string,
-      createdAt: string,
-    ): Promise<void> => {
-      await execDb(
-        client,
-        `INSERT INTO pipeline_item (
-           id, repo_id, prompt, pipeline, stage, stage_result, tags, branch,
-           agent_type, agent_provider, activity, display_name, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          id,
-          repoId,
-          prompt,
-          "auto-spawn-focus-e2e",
-          "auto-source",
-          null,
-          "[]",
-          branch,
-          agentType,
-          "codex",
-          "idle",
-          null,
-          createdAt,
-          createdAt,
-        ],
-      );
-      await hydrateStoreItem(client, id);
-    };
-
-    await insertActiveItem(selectedTaskId, "Selected stays put", null, "agent", "2026-12-01T00:03:00.000Z");
-    await insertActiveItem(sourceTaskId, "Unrelated auto-advance", sourceBranch, "pty", "2026-12-01T00:02:00.000Z");
-    await insertActiveItem(fallbackTaskId, "Would-be fallback", null, "agent", "2026-12-01T00:01:00.000Z");
-
-    const selectResult = await callVueMethod(client, "store.selectItem", selectedTaskId);
-    if (isVueCallError(selectResult)) throw new Error(selectResult.__error);
-    await waitForSelectedTask(client, selectedTaskId);
-
-    await execDb(
-      client,
-      "UPDATE pipeline_item SET stage_result = ?, updated_at = datetime('now') WHERE id = ?",
-      [JSON.stringify({ status: "success", summary: "ready for review" }), sourceTaskId],
-    );
-    const existingReviewTaskIds = await getStageTaskIds(client, repoId, "review");
-    await sendPipelineStageComplete(client, sourceTaskId);
-
-    const reviewTaskId = await waitForCreatedStageTask(client, repoId, "review", {
-      excludeIds: existingReviewTaskIds,
-      displayName: "Unrelated auto-advance",
-      baseRef: sourceBranch,
-    });
-    expect(reviewTaskId).not.toBe(sourceTaskId);
-
-    // Selection must remain on the user's chosen task — not the fallback, not
-    // the newly spawned review task.
-    await sleep(500);
-    expect(await getVueState(client, "selectedItemId")).toBe(selectedTaskId);
-
-    await tauriInvoke(client, "kill_session", { sessionId: reviewTaskId }).catch(() => undefined);
-  });
-
-  it("creates the next stage task from the source worktree's renamed branch", async () => {
-    const sourceTaskId = "renamed-source-stage-task";
-    const storedSourceBranch = "task-renamed-source-stage";
-    const actualSourceBranch = "renamed/stage-source-e2e";
-    const markerName = "renamed-source-stage-marker.txt";
-    const markerContent = "created on the renamed source branch\n";
-    const sourceWorktreePath = join(testRepoPath, ".kanna-worktrees", storedSourceBranch);
-
-    await tauriInvoke(client, "git_worktree_add", {
-      repoPath: testRepoPath,
-      branch: storedSourceBranch,
-      path: sourceWorktreePath,
-      startPoint: "main",
-    });
-    await git(sourceWorktreePath, ["branch", "-m", actualSourceBranch]);
-    await writeFile(join(sourceWorktreePath, markerName), markerContent);
-    await git(sourceWorktreePath, ["add", markerName]);
-    await git(sourceWorktreePath, ["commit", "-m", "test: marker on renamed source branch"]);
-
-    await execDb(
-      client,
-      `INSERT INTO pipeline_item (
-         id, repo_id, prompt, pipeline, stage, stage_result, tags, branch,
-         agent_type, agent_provider, activity, display_name, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
-      [
-        sourceTaskId,
-        repoId,
-        "Advance from renamed source",
-        "auto-spawn-focus-e2e",
-        "auto-source",
-        JSON.stringify({ status: "success", summary: "ready for review" }),
-        "[]",
-        storedSourceBranch,
-        "pty",
-        "codex",
-        "idle",
-        null,
-      ],
-    );
-    await hydrateStoreItem(client, sourceTaskId);
-
-    const existingReviewTaskIds = await getStageTaskIds(client, repoId, "review");
-    await advanceStageWithShortcut(client, "Advance from renamed source", sourceTaskId);
-
-    renamedStageTaskId = await waitForCreatedStageTask(client, repoId, "review", {
-      excludeIds: existingReviewTaskIds,
-      displayName: "Advance from renamed source",
-      baseRef: actualSourceBranch,
-    });
-    expect(renamedStageTaskId).not.toBe(sourceTaskId);
-
-    const rows = (await queryDb(
-      client,
-      "SELECT branch, base_ref FROM pipeline_item WHERE id = ?",
-      [renamedStageTaskId],
-    )) as Array<{ branch: string | null; base_ref: string | null }>;
-    const createdBranch = rows[0]?.branch;
-    expect(createdBranch).toBeTruthy();
-    expect(rows[0]?.base_ref).toBe(actualSourceBranch);
-
-    const createdMarkerPath = join(testRepoPath, ".kanna-worktrees", createdBranch as string, markerName);
-    await waitForFileSize(createdMarkerPath, Buffer.byteLength(markerContent), 20_000);
-    expect(await readFile(createdMarkerPath, "utf8")).toBe(markerContent);
-  });
-
-  it("preserves GUI agent execution when advancing to an agent-backed stage", async () => {
-    const sourceTaskId = "sdk-advance-source";
-    const sourceBranch = "task-sdk-advance-source";
-    const sourceWorktreePath = join(testRepoPath, ".kanna-worktrees", sourceBranch);
-    await tauriInvoke(client, "git_worktree_add", {
-      repoPath: testRepoPath,
-      branch: sourceBranch,
-      path: sourceWorktreePath,
-      startPoint: "main",
-    });
-
-    await execDb(
-      client,
-      `INSERT INTO pipeline_item (
-         id, repo_id, prompt, pipeline, stage, stage_result, tags, branch,
-         agent_type, agent_provider, activity, display_name, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
-      [
-        sourceTaskId,
-        repoId,
-        "Advance GUI agent to QA",
-        "sdk-advance-e2e",
-        "in progress",
-        JSON.stringify({ status: "success", summary: "ready for QA" }),
-        "[]",
-        sourceBranch,
-        "agent",
-        "codex",
-        "idle",
-        "GUI agent source",
-      ],
-    );
-    await hydrateStoreItem(client, sourceTaskId);
-
-    const existingQaTaskIds = await getStageTaskIds(client, repoId, "qa");
-    await advanceStageWithShortcut(client, "GUI agent source", sourceTaskId);
-
-    const createdTaskId = await waitForCreatedStageTask(client, repoId, "qa", {
-      excludeIds: existingQaTaskIds,
-      displayName: "GUI agent source",
-      baseRef: sourceBranch,
-    });
-
-    const rows = (await queryDb(
-      client,
-      "SELECT branch, agent_type, agent_provider FROM pipeline_item WHERE id = ?",
-      [createdTaskId],
-    )) as Array<{ branch: string | null; agent_type: string | null; agent_provider: string | null }>;
-    expect(rows[0]).toMatchObject({
-      agent_type: "agent",
-      agent_provider: "codex",
-    });
-    const createdBranch = rows[0]?.branch;
-    expect(createdBranch).toBeTruthy();
-  });
-
-  it("closes the source task after a fast teardown exit during stage advance", async () => {
-    const sourceTaskId = "stage-advance-fast-teardown-source";
-    const sourceBranch = "task-stage-advance-fast-teardown-source";
-    const sourceTitle = "Fast teardown promotion source";
-    const sourceWorktreePath = join(testRepoPath, ".kanna-worktrees", sourceBranch);
-    await tauriInvoke(client, "git_worktree_add", {
-      repoPath: testRepoPath,
-      branch: sourceBranch,
-      path: sourceWorktreePath,
-      startPoint: "main",
-    });
-    await writeFile(
-      join(sourceWorktreePath, ".kanna", "config.json"),
-      JSON.stringify({
-        setup: [],
-        teardown: ["printf 'fast teardown\\n'"],
-      }),
-    );
-
-    await execDb(
-      client,
-      `INSERT INTO pipeline_item (
-         id, repo_id, prompt, pipeline, stage, stage_result, tags, branch,
-         agent_type, agent_provider, activity, display_name, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
-      [
-        sourceTaskId,
-        repoId,
-        "Promote with fast teardown",
-        "teardown-review-e2e",
-        "in progress",
-        JSON.stringify({ status: "success", summary: "ready for review" }),
-        "[]",
-        sourceBranch,
-        "pty",
-        "codex",
-        "idle",
-        sourceTitle,
-      ],
-    );
-    await hydrateStoreItem(client, sourceTaskId);
-
-    const existingReviewTaskIds = await getStageTaskIds(client, repoId, "review");
-    await advanceStageWithShortcut(client, sourceTitle, sourceTaskId);
-
-    const tearingDownRow = await waitForTearingDownTask(client, sourceTaskId);
-    expect(tearingDownRow).toMatchObject({
+  it("advances the stage in place through the server API, keeping the same task", async () => {
+    const taskId = "advance-in-place-task";
+    const branch = "task-advance-in-place";
+    await addTaskWorktree(taskId, branch);
+    await insertTask({
+      id: taskId,
+      prompt: "Advance this task in place",
+      pipeline: TWO_STAGE_PIPELINE,
       stage: "in progress",
-      closed_at: null,
-    });
-
-    const reviewTaskId = await waitForCreatedStageTask(client, repoId, "review", {
-      excludeIds: existingReviewTaskIds,
-      displayName: sourceTitle,
-      baseRef: sourceBranch,
-    });
-    expect(reviewTaskId).not.toBe(sourceTaskId);
-
-    await waitForClosedTask(client, sourceTaskId);
-
-    const rows = (await queryDb(
-      client,
-      "SELECT stage, closed_at, teardown_started_at FROM pipeline_item WHERE id = ?",
-      [sourceTaskId],
-    )) as Array<{ stage: string | null; closed_at: string | null; teardown_started_at: string | null }>;
-    expect(rows[0]?.stage).toBe("done");
-    expect(rows[0]?.closed_at).toBeTruthy();
-    expect(rows[0]?.teardown_started_at).toBeNull();
-    await waitForSidebarToExcludeTaskId(client, sourceTaskId);
-
-    await tauriInvoke(client, "kill_session", { sessionId: reviewTaskId }).catch(() => undefined);
-  });
-
-  it("starts a live task commit post-action through the daemon input command", async () => {
-    const taskId = "continue-stage-task";
-    const inputCapturePath = join(testRepoPath, ".kanna", "continue-stage-input.bin");
-    const expectedPrompt = [
-      "Commit agent generated prompt marker.",
-      "",
-      "Commit stage marker for Write the commit",
-    ].join("\n");
-    const expectedInput = Buffer.from(`${expectedPrompt}\x1b[13u`, "utf8");
-    await execDb(
-      client,
-      `INSERT INTO pipeline_item (
-         id, repo_id, prompt, pipeline, stage, stage_result, tags, branch,
-         agent_type, agent_provider, activity, display_name, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
-      [
-        taskId,
-        repoId,
-        "Write the commit",
-        "continue-e2e",
-        "in progress",
-        JSON.stringify({ status: "success", summary: "implemented" }),
-        "[]",
-        "task-continue-stage",
-        "pty",
-        "codex",
-        "idle",
-        "Codex commit shortcut source",
-      ],
-    );
-    await hydrateStoreItem(client, taskId);
-
-    await tauriInvoke(client, "spawn_session", {
-      sessionId: taskId,
-      cwd: testRepoPath,
-      executable: "/bin/sh",
-      args: [
-        "-lc",
-        `stty raw -echo; dd bs=1 count=${expectedInput.length} of=.kanna/continue-stage-input.bin 2>/dev/null`,
-      ],
-      env: {},
-      cols: 80,
-      rows: 24,
-      agentProvider: "codex",
-    });
-
-    await advanceStageWithShortcut(client, "Codex commit shortcut source", taskId);
-
-    await waitForActivePostAction(client, taskId, "commit");
-    await waitForFileSize(inputCapturePath, expectedInput.length);
-    expect(await readFile(inputCapturePath)).toEqual(expectedInput);
-  });
-
-  it("starts a live chat-agent commit post-action through the daemon agent input command", async () => {
-    const taskId = "continue-stage-chat-agent-task";
-    const branch = "task-continue-stage-chat-agent";
-    const worktreePath = join(testRepoPath, ".kanna-worktrees", branch);
-    const agentInputLogPath = join(testRepoPath, ".kanna", "continue-stage-chat-agent-input.ndjson");
-
-    await tauriInvoke(client, "git_worktree_add", {
-      repoPath: testRepoPath,
       branch,
-      path: worktreePath,
-      startPoint: "main",
-    });
-    await execDb(
-      client,
-      `INSERT INTO pipeline_item (
-         id, repo_id, prompt, pipeline, stage, stage_result, tags, branch,
-         agent_type, agent_provider, activity, display_name, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
-      [
-        taskId,
-        repoId,
-        "Write the chat commit",
-        "continue-e2e",
-        "in progress",
-        JSON.stringify({ status: "success", summary: "implemented" }),
-        "[]",
-        branch,
-        "agent",
-        "claude",
-        "idle",
-        "Chat agent commit shortcut source",
-      ],
-    );
-    await hydrateStoreItem(client, taskId);
-
-    await tauriInvoke(client, "spawn_agent_session", {
-      sessionId: taskId,
-      cwd: worktreePath,
-      env: { CHAT_AGENT_STDIN_LOG: agentInputLogPath },
-      agentProvider: "claude",
-      prompt: "Initial chat prompt",
-      model: null,
-      permissionMode: null,
-      allowedTools: null,
-      disallowedTools: null,
-      maxTurns: null,
-      maxBudgetUsd: null,
-      systemPrompt: null,
-      executable: join(testRepoPath, ".kanna", "fake-bin", "fake-claude-agent"),
-    });
-    await waitForFileContaining(agentInputLogPath, "Initial chat prompt");
-
-    await advanceStageWithShortcut(client, "Chat agent commit shortcut source", taskId);
-
-    await waitForActivePostAction(client, taskId, "commit");
-    const inputLog = await waitForFileContaining(agentInputLogPath, "Commit stage marker for Write the chat commit");
-    expect(inputLog).toContain("Commit agent generated prompt marker.");
-    expect(inputLog).toContain("Commit stage marker for Write the chat commit");
-  });
-
-  it("advances a commit post-action through the server API without creating a new task", async () => {
-    const taskId = "server-continue-stage-task";
-    const branch = "task-server-continue-stage";
-    const worktreePath = join(testRepoPath, ".kanna-worktrees", branch);
-    const inputCapturePath = join(worktreePath, ".kanna", "server-continue-stage-input.bin");
-    const expectedPrompt = [
-      "Commit agent generated prompt marker.",
-      "",
-      "Commit stage marker for Write the server commit",
-    ].join("\n");
-    const expectedInput = Buffer.from(`\x1b[200~${expectedPrompt}\x1b[201~\r`, "utf8");
-
-    await tauriInvoke(client, "git_worktree_add", {
-      repoPath: testRepoPath,
-      branch,
-      path: worktreePath,
-      startPoint: "main",
-    });
-    await execDb(
-      client,
-      `INSERT INTO pipeline_item (
-         id, repo_id, prompt, pipeline, stage, stage_result, tags, branch,
-         agent_type, agent_provider, activity, display_name, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
-      [
-        taskId,
-        repoId,
-        "Write the server commit",
-        "continue-e2e",
-        "in progress",
-        JSON.stringify({ status: "success", summary: "implemented over HTTP" }),
-        "[]",
-        branch,
-        "pty",
-        "claude",
-        "idle",
-        null,
-      ],
-    );
-
-    await tauriInvoke(client, "spawn_session", {
-      sessionId: taskId,
-      cwd: worktreePath,
-      executable: "/bin/sh",
-      args: [
-        "-lc",
-        `stty raw -echo; dd bs=1 count=${expectedInput.length} of=.kanna/server-continue-stage-input.bin 2>/dev/null`,
-      ],
-      env: {},
-      cols: 80,
-      rows: 24,
-      agentProvider: "claude",
+      displayName: "Advance in place source",
     });
 
-    const server = await startTestKannaServer(client, join(testRepoPath, ".kanna"));
-    try {
-      const response = await fetch(`${server.baseUrl}/v1/tasks/${encodeURIComponent(taskId)}/actions/advance-stage`, {
-        method: "POST",
-      });
+    const taskCountBefore = await countRepoTasks(client, repoId);
+    await withTestKannaServer(async (server) => {
+      const response = await fetch(
+        `${server.baseUrl}/v1/tasks/${encodeURIComponent(taskId)}/actions/advance-stage`,
+        { method: "POST" },
+      );
       if (!response.ok) {
         throw new Error(`advance-stage failed: ${response.status} ${await response.text()}`);
       }
       expect(await response.json()).toEqual({ taskId });
+    });
 
-      await waitForActivePostAction(client, taskId, "commit");
-      await waitForFileSize(inputCapturePath, expectedInput.length);
-      expect(await readFile(inputCapturePath)).toEqual(expectedInput);
+    // The SAME pipeline_item transitions: same id, still open, no
+    // next-stage task created — but the workspace forked: a fresh
+    // randomly-named branch cut from the previous branch's committed tip.
+    const row = await waitForTaskRow(client, taskId, (candidate) => candidate.stage === "pr");
+    expect(row).toMatchObject({
+      id: taskId,
+      stage: "pr",
+      closed_at: null,
+      agent_type: "pty",
+      agent_provider: "codex",
+    });
+    expect(row.branch).not.toBe(branch);
+    expect(row.branch).toMatch(/^task-[0-9a-f]{8}$/);
+    const forkWorktree = join(testRepoPath, ".kanna-worktrees", row.branch as string);
+    expect((await stat(forkWorktree)).isDirectory()).toBe(true);
+    expect(await countRepoTasks(client, repoId)).toBe(taskCountBefore);
 
-      const rows = (await queryDb(
-        client,
-        "SELECT stage, active_post_action, stage_result, closed_at, branch FROM pipeline_item WHERE repo_id = ? ORDER BY id",
-        [repoId],
-      )) as Array<{
-        stage: string | null;
-        active_post_action: string | null;
-        stage_result: string | null;
-        closed_at: string | null;
-        branch: string | null;
-      }>;
-      const row = rows.find((candidate) => candidate.branch === branch);
-      expect(row).toEqual({
-        stage: "in progress",
-        active_post_action: "commit",
-        stage_result: null,
-        closed_at: null,
-        branch,
-      });
-      expect(rows.filter((candidate) => candidate.branch === branch)).toHaveLength(1);
-    } finally {
-      server.child.kill();
-    }
+    const runs = await getStageRuns(client, taskId);
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({
+      stage: "pr",
+      status: "running",
+      session_id: taskId,
+    });
   });
 
-  it("requests a revision through the server API without replacing the reviewed task title", async () => {
-    const taskId = "server-request-revision-title-task";
-    const branch = "task-server-request-revision-title";
-    const worktreePath = join(testRepoPath, ".kanna-worktrees", branch);
-    const originalTitle = "Preserve reviewed task title";
-    const reviewPrompt = "Review prompt that should be hidden after revision.";
-    const revisionPrompt = "Add E2E coverage for the request-revision title path.";
-    const expectedAgentPrompt = [
-      "Implement revision:",
-      revisionPrompt,
-    ].join("\n");
-
-    await tauriInvoke(client, "git_worktree_add", {
-      repoPath: testRepoPath,
+  it("keeps the same task selected when Cmd+S advances a non-final stage", async () => {
+    const taskId = "shortcut-advance-task";
+    const branch = "task-shortcut-advance";
+    const title = "Shortcut advance source";
+    await addTaskWorktree(taskId, branch);
+    await insertTask({
+      id: taskId,
+      prompt: "Advance via keyboard shortcut",
+      pipeline: TWO_STAGE_PIPELINE,
+      stage: "in progress",
       branch,
-      path: worktreePath,
-      startPoint: "main",
-    });
-    await execDb(
-      client,
-      `INSERT INTO pipeline_item (
-         id, repo_id, prompt, pipeline, stage, stage_result, tags, branch,
-         agent_type, agent_provider, activity, display_name, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
-      [
-        taskId,
-        repoId,
-        reviewPrompt,
-        "revision-e2e",
-        "review",
-        JSON.stringify({ status: "success", summary: "ready for review" }),
-        "[]",
-        branch,
-        "pty",
-        "codex",
-        "idle",
-        originalTitle,
-      ],
-    );
-    await hydrateStoreItem(client, taskId);
-    const selectResult = await callVueMethod(client, "store.selectItem", taskId);
-    if (isVueCallError(selectResult)) throw new Error(selectResult.__error);
-    await waitForSelectedTask(client, taskId);
-
-    const existingInProgressTaskIds = await getStageTaskIds(client, repoId, "in progress");
-    const server = await startTestKannaServer(client, join(testRepoPath, ".kanna"));
-    try {
-      const response = await fetch(`${server.baseUrl}/v1/tasks/${encodeURIComponent(taskId)}/actions/request-revision`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          targetStage: "in progress",
-          summary: "missing request-revision title coverage",
-          prompt: revisionPrompt,
-          metadata: { source: "e2e" },
-        }),
-      });
-      if (!response.ok) {
-        throw new Error(`request-revision failed: ${response.status} ${await response.text()}`);
-      }
-
-      const body = await response.json() as { taskId: string };
-      const revisionTaskId = body.taskId;
-      expect(revisionTaskId).toBeTruthy();
-      expect(existingInProgressTaskIds.has(revisionTaskId)).toBe(false);
-
-      const rows = (await queryDb(
-        client,
-        `SELECT id, prompt, display_name, stage, closed_at, branch
-         FROM pipeline_item
-         WHERE id IN (?, ?)
-         ORDER BY id`,
-        [taskId, revisionTaskId],
-      )) as Array<{
-        id: string | null;
-        prompt: string | null;
-        display_name: string | null;
-        stage: string | null;
-        closed_at: string | null;
-        branch: string | null;
-      }>;
-      const reviewed = rows.find((row) => row.id === taskId);
-      const revision = rows.find((row) => row.id === revisionTaskId);
-      expect(reviewed?.stage).toBe("done");
-      expect(reviewed?.closed_at).toBeTruthy();
-      expect(revision?.stage).toBe("in progress");
-      expect(revision?.display_name).toBe(originalTitle);
-      expect(revision?.prompt).toBe(expectedAgentPrompt);
-      expect(revision?.branch).toMatch(/^task-/);
-
-      const createdWorktreePath = join(testRepoPath, ".kanna-worktrees", revision?.branch ?? "");
-      const capturedArgsPath = join(createdWorktreePath, ".kanna", "revision-codex-args.txt");
-      await waitForFile(capturedArgsPath, 20_000);
-      const capturedArgs = await readFile(capturedArgsPath, "utf8");
-      expect(capturedArgs).toContain("--yolo\n");
-      expect(capturedArgs).toContain(`${expectedAgentPrompt}\n`);
-      expect(capturedArgs).not.toContain(reviewPrompt);
-      await emitExternalSharedInvalidation(client, "requestRevision");
-      await waitForSelectedTaskId(client, null);
-      expect(await getVueState(client, "selectedItemId")).not.toBe(revisionTaskId);
-
-      const tasksResponse = await fetch(`${server.baseUrl}/v1/repos/${encodeURIComponent(repoId)}/tasks`);
-      if (!tasksResponse.ok) {
-        throw new Error(`list tasks failed: ${tasksResponse.status} ${await tasksResponse.text()}`);
-      }
-      const tasks = await tasksResponse.json() as Array<{ id: string; title: string; stage: string | null }>;
-      expect(tasks.find((task) => task.id === taskId)).toBeUndefined();
-      expect(tasks.find((task) => task.id === revisionTaskId)).toMatchObject({
-        id: revisionTaskId,
-        title: originalTitle,
-        stage: "in progress",
-      });
-    } finally {
-      server.child.kill();
-    }
-  });
-
-  it("requests a revision through the server API without stealing focus from another selected task", async () => {
-    const taskId = "server-request-revision-focus-task";
-    const branch = "task-server-request-revision-focus";
-    const worktreePath = join(testRepoPath, ".kanna-worktrees", branch);
-    const activeTaskId = "server-request-revision-focused-active";
-    const revisionPrompt = "Keep the unrelated selected task focused.";
-
-    await tauriInvoke(client, "git_worktree_add", {
-      repoPath: testRepoPath,
-      branch,
-      path: worktreePath,
-      startPoint: "main",
-    });
-    await execDb(
-      client,
-      `INSERT INTO pipeline_item (
-         id, repo_id, prompt, pipeline, stage, stage_result, tags, branch,
-         agent_type, agent_provider, activity, display_name, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        taskId,
-        repoId,
-        "Review task that needs a revision",
-        "revision-e2e",
-        "review",
-        JSON.stringify({ status: "success", summary: "ready for review" }),
-        "[]",
-        branch,
-        "pty",
-        "codex",
-        "idle",
-        "Request revision focus source",
-        "2026-05-06T00:02:00.000Z",
-        "2026-05-06T00:02:00.000Z",
-      ],
-    );
-    await execDb(
-      client,
-      `INSERT INTO pipeline_item (
-         id, repo_id, prompt, pipeline, stage, stage_result, tags, branch,
-         agent_type, agent_provider, activity, display_name, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        activeTaskId,
-        repoId,
-        "Keep this unrelated task selected",
-        "revision-e2e",
-        "in progress",
-        null,
-        "[]",
-        null,
-        "sdk",
-        "codex",
-        "idle",
-        "Selected task should stay focused",
-        "2026-05-06T00:03:00.000Z",
-        "2026-05-06T00:03:00.000Z",
-      ],
-    );
-    await hydrateStoreItem(client, taskId);
-    await hydrateStoreItem(client, activeTaskId);
-
-    const selectResult = await callVueMethod(client, "store.selectItem", activeTaskId);
-    if (isVueCallError(selectResult)) throw new Error(selectResult.__error);
-    await waitForSelectedTask(client, activeTaskId);
-
-    const existingInProgressTaskIds = await getStageTaskIds(client, repoId, "in progress");
-    const server = await startTestKannaServer(client, join(testRepoPath, ".kanna"));
-    try {
-      const response = await fetch(`${server.baseUrl}/v1/tasks/${encodeURIComponent(taskId)}/actions/request-revision`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          targetStage: "in progress",
-          summary: "focus regression coverage",
-          prompt: revisionPrompt,
-          metadata: { source: "e2e" },
-        }),
-      });
-      if (!response.ok) {
-        throw new Error(`request-revision failed: ${response.status} ${await response.text()}`);
-      }
-
-      const body = await response.json() as { taskId: string };
-      const revisionTaskId = body.taskId;
-      expect(revisionTaskId).toBeTruthy();
-      expect(existingInProgressTaskIds.has(revisionTaskId)).toBe(false);
-
-      await emitExternalSharedInvalidation(client, "requestRevision");
-      await waitForSelectedTask(client, activeTaskId);
-      expect(await getVueState(client, "selectedItemId")).not.toBe(revisionTaskId);
-
-      const rows = (await queryDb(
-        client,
-        "SELECT id, stage, closed_at FROM pipeline_item WHERE id IN (?, ?, ?)",
-        [taskId, activeTaskId, revisionTaskId],
-      )) as Array<{ id: string | null; stage: string | null; closed_at: string | null }>;
-      expect(rows.find((row) => row.id === taskId)?.stage).toBe("done");
-      expect(rows.find((row) => row.id === taskId)?.closed_at).toBeTruthy();
-      expect(rows.find((row) => row.id === activeTaskId)?.stage).toBe("in progress");
-      expect(rows.find((row) => row.id === revisionTaskId)?.stage).toBe("in progress");
-    } finally {
-      server.child.kill();
-    }
-  });
-
-  it("submits a Claude commit post-action with carriage return", async () => {
-    const taskId = "continue-stage-claude-enter-task";
-    const inputCapturePath = join(testRepoPath, ".kanna", "continue-stage-claude-enter-input.bin");
-    const expectedPrompt = [
-      "Commit agent generated prompt marker.",
-      "",
-      "Commit stage marker for Write the commit",
-    ].join("\n");
-    const expectedInput = Buffer.from(`\x1b[200~${expectedPrompt}\x1b[201~\r`, "utf8");
-    await execDb(
-      client,
-      `INSERT INTO pipeline_item (
-         id, repo_id, prompt, pipeline, stage, stage_result, tags, branch,
-         agent_type, agent_provider, activity, display_name, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
-      [
-        taskId,
-        repoId,
-        "Write the commit",
-        "continue-e2e",
-        "in progress",
-        JSON.stringify({ status: "success", summary: "implemented" }),
-        "[]",
-        "task-continue-stage-claude-enter",
-        "pty",
-        "claude",
-        "idle",
-        "Claude commit shortcut source",
-      ],
-    );
-    await hydrateStoreItem(client, taskId);
-
-    await tauriInvoke(client, "spawn_session", {
-      sessionId: taskId,
-      cwd: testRepoPath,
-      executable: "/bin/sh",
-      args: [
-        "-lc",
-        `stty raw -echo; dd bs=1 count=${expectedInput.length} of=.kanna/continue-stage-claude-enter-input.bin 2>/dev/null`,
-      ],
-      env: {},
-      cols: 80,
-      rows: 24,
-      agentProvider: "claude",
+      displayName: title,
     });
 
-    await advanceStageWithShortcut(client, "Claude commit shortcut source", taskId);
+    await advanceStageWithShortcut(client, title, taskId);
 
-    await waitForActivePostAction(client, taskId, "commit");
-    await waitForFileSize(inputCapturePath, expectedInput.length);
-    expect(await readFile(inputCapturePath)).toEqual(expectedInput);
-  });
+    const row = await waitForTaskRow(client, taskId, (candidate) => candidate.stage === "pr");
+    expect(row.closed_at).toBeNull();
 
-  it("submits a Copilot commit post-action with carriage return", async () => {
-    const taskId = "continue-stage-copilot-task";
-    const inputCapturePath = join(testRepoPath, ".kanna", "continue-stage-copilot-input.bin");
-    const expectedPrompt = [
-      "Commit agent generated prompt marker.",
-      "",
-      "Commit stage marker for Write the commit",
-    ].join("\n");
-    const expectedInput = Buffer.from(`\x1b[200~${expectedPrompt}\x1b[201~\r`, "utf8");
-    await execDb(
-      client,
-      `INSERT INTO pipeline_item (
-         id, repo_id, prompt, pipeline, stage, stage_result, tags, branch,
-         agent_type, agent_provider, activity, display_name, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
-      [
-        taskId,
-        repoId,
-        "Write the commit",
-        "continue-e2e",
-        "in progress",
-        JSON.stringify({ status: "success", summary: "implemented" }),
-        "[]",
-        "task-continue-stage-copilot",
-        "pty",
-        "copilot",
-        "idle",
-        "Copilot commit shortcut source",
-      ],
-    );
-    await hydrateStoreItem(client, taskId);
-
-    await tauriInvoke(client, "spawn_session", {
-      sessionId: taskId,
-      cwd: testRepoPath,
-      executable: "/bin/sh",
-      args: [
-        "-lc",
-        `stty raw -echo; dd bs=1 count=${expectedInput.length} of=.kanna/continue-stage-copilot-input.bin 2>/dev/null`,
-      ],
-      env: {},
-      cols: 80,
-      rows: 24,
-      agentProvider: "copilot",
-    });
-
-    await advanceStageWithShortcut(client, "Copilot commit shortcut source", taskId);
-
-    await waitForActivePostAction(client, taskId, "commit");
-    await waitForFileSize(inputCapturePath, expectedInput.length);
-    expect(await readFile(inputCapturePath)).toEqual(expectedInput);
-  });
-
-  it("clears a successful commit post-action and creates the PR task", async () => {
-    const taskId = "post-action-complete-task";
-    const branch = "task-post-action-complete";
-    await tauriInvoke(client, "git_worktree_add", {
-      repoPath: testRepoPath,
-      branch,
-      path: join(testRepoPath, ".kanna-worktrees", branch),
-      startPoint: "main",
-    });
-    await execDb(
-      client,
-      `INSERT INTO pipeline_item (
-         id, repo_id, prompt, pipeline, stage, active_post_action, stage_result, tags, branch,
-         agent_type, agent_provider, activity, display_name, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
-      [
-        taskId,
-        repoId,
-        "Complete commit post-action",
-        "continue-e2e",
-        "in progress",
-        "commit",
-        JSON.stringify({ status: "success", summary: "committed" }),
-        "[]",
-        branch,
-        "pty",
-        "codex",
-        "idle",
-        null,
-      ],
-    );
-    await hydrateStoreItem(client, taskId);
-
-    const existingPrTaskIds = await getStageTaskIds(client, repoId, "pr");
-    await sendPipelineStageComplete(client, taskId);
-
-    const prTaskId = await waitForCreatedStageTask(client, repoId, "pr", {
-      excludeIds: existingPrTaskIds,
-      displayName: "Complete commit post-action",
-      baseRef: branch,
-    });
-    expect(prTaskId).not.toBe(taskId);
-    const rows = (await queryDb(
-      client,
-      "SELECT active_post_action FROM pipeline_item WHERE id = ?",
-      [taskId],
-    )) as Array<{ active_post_action: string | null }>;
-    expect(rows[0]?.active_post_action).toBeNull();
-  });
-
-  it("closes a final-stage task through the Cmd+S shortcut", async () => {
-    const taskId = "final-stage-shortcut-task";
-    const branch = "task-final-stage-shortcut";
-    await tauriInvoke(client, "git_worktree_add", {
-      repoPath: testRepoPath,
-      branch,
-      path: join(testRepoPath, ".kanna-worktrees", branch),
-      startPoint: "main",
-    });
-    await execDb(
-      client,
-      `INSERT INTO pipeline_item (
-         id, repo_id, prompt, pipeline, stage, stage_result, tags, branch,
-         agent_type, agent_provider, activity, display_name, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
-      [
-        taskId,
-        repoId,
-        "Close PR from shortcut",
-        "final-stage-e2e",
-        "pr",
-        null,
-        "[]",
-        branch,
-        "pty",
-        "codex",
-        "idle",
-        null,
-      ],
-    );
-    await hydrateStoreItem(client, taskId);
-
-    const selectResult = await callVueMethod(client, "store.selectItem", taskId);
-    if (isVueCallError(selectResult)) throw new Error(selectResult.__error);
-    await waitForSelectedTask(client, taskId);
-
-    await client.executeSync(buildGlobalKeydownScript({ key: "s", meta: true }));
-
-    await waitForClosedTask(client, taskId);
-    await waitForSidebarToExcludeText(client, "Close PR from shortcut");
-  });
-
-  it("does not close a stale local fallback task when Cmd+S is pressed with a remote workspace task selected", async () => {
-    // The mock E2E app has no seeded Firebase/relay peer to publish a true
-    // remote desktop snapshot. A full cloud E2E would need harness support for
-    // publishing a controllable remote task into the primary app before
-    // selection. This regression keeps the narrower UI contract covered:
-    // sidebar selects a remote workspace task, the real global shortcut fires,
-    // and the stale local fallback row stays untouched.
-    const fallbackTaskId = "stale-local-final-stage-shortcut-task";
-    const fallbackBranch = "task-stale-local-final-stage-shortcut";
-    const remoteTaskId = `cloud:${repoId}:remote-shortcut-task`;
-    const createdAt = "2026-05-18T00:00:00.000Z";
-    await tauriInvoke(client, "git_worktree_add", {
-      repoPath: testRepoPath,
-      branch: fallbackBranch,
-      path: join(testRepoPath, ".kanna-worktrees", fallbackBranch),
-      startPoint: "main",
-    });
-    await execDb(
-      client,
-      `INSERT INTO pipeline_item (
-         id, repo_id, prompt, pipeline, stage, stage_result, tags, branch,
-         agent_type, agent_provider, activity, display_name, pinned, pin_order, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        fallbackTaskId,
-        repoId,
-        "Stale local fallback from shortcut",
-        "final-stage-e2e",
-        "pr",
-        null,
-        "[]",
-        fallbackBranch,
-        "pty",
-        "codex",
-        "idle",
-        "Stale local fallback",
-        1,
-        0,
-        createdAt,
-        createdAt,
-      ],
-    );
-    await hydrateStoreItem(client, fallbackTaskId);
-
-    const selectFallbackResult = await callVueMethod(client, "store.selectItem", fallbackTaskId);
-    if (isVueCallError(selectFallbackResult)) throw new Error(selectFallbackResult.__error);
-    await waitForSelectedTask(client, fallbackTaskId);
-
-    await injectCloudSnapshot(client, {
-      repos: [{
-        id: repoId,
-        path: "cloud",
-        name: "Shortcut Remote",
-        default_branch: "main",
-        hidden: 0,
-        sort_order: 0,
-        created_at: createdAt,
-        last_opened_at: createdAt,
-      }],
-      items: [{
-        id: remoteTaskId,
-        repo_id: repoId,
-        prompt: "Remote shortcut task",
-        pipeline: "cloud",
-        stage: "in progress",
-        tags: "[]",
-        pr_number: null,
-        pr_url: null,
-        branch: "remote-shortcut-task",
-        activity: "idle",
-        activity_changed_at: createdAt,
-        unread_at: null,
-        port_offset: null,
-        port_env: null,
-        pinned: 0,
-        pin_order: null,
-        display_name: "Remote shortcut task",
-        issue_number: null,
-        issue_title: null,
-        closed_at: null,
-        agent_session_id: null,
-        base_ref: "origin/main",
-        agent_provider: "codex",
-        agent_type: "pty",
-        previous_stage: null,
-        stage_result: null,
-        teardown_started_at: null,
-        last_output_preview: null,
-        active_post_action: null,
-        created_at: "2026-05-18T00:01:00.000Z",
-        updated_at: "2026-05-18T00:01:00.000Z",
-      }],
-      terminalRefs: {},
-    });
-
-    await clickSidebarItemByTitle(client, "Remote shortcut task");
-    await waitForSelectedTask(client, remoteTaskId);
-
-    const selectedState = await client.executeSync<{
-      selectedItemId: string | null;
-      currentItemId: string | null;
-      selectedWorkspaceTaskId: string | null;
-    }>(
-      `const ctx = window.__KANNA_E2E__.setupState;
-       const read = (value) => value && value.__v_isRef ? value.value : value;
-       return {
-         selectedItemId: read(ctx.store.selectedItemId),
-         currentItemId: read(ctx.store.currentItem)?.id ?? null,
-         selectedWorkspaceTaskId: read(ctx.selectedWorkspaceTask)?.id ?? null,
-       };`,
-    );
-    expect(selectedState).toEqual({
-      selectedItemId: remoteTaskId,
-      currentItemId: fallbackTaskId,
-      selectedWorkspaceTaskId: remoteTaskId,
-    });
-
-    await client.executeSync(buildGlobalKeydownScript({ key: "s", meta: true }));
+    // Durable advance keeps the user's selection on the same (still-open) task.
     await sleep(500);
-
-    const rows = (await queryDb(
-      client,
-      "SELECT stage, closed_at FROM pipeline_item WHERE id = ?",
-      [fallbackTaskId],
-    )) as Array<{ stage: string | null; closed_at: string | null }>;
-    expect(rows[0]).toEqual({ stage: "pr", closed_at: null });
+    expect(await getVueState(client, "selectedItemId")).toBe(taskId);
+    const sidebarText = await client.executeSync<string>(
+      `return document.querySelector(".sidebar")?.textContent || "";`,
+    );
+    expect(sidebarText).toContain(title);
   });
 
+  it("closes the task when Cmd+S advances past the final stage", async () => {
+    const taskId = "final-stage-close-task";
+    const branch = "task-final-stage-close";
+    const title = "Final stage close source";
+    await addTaskWorktree(taskId, branch);
+    await insertTask({
+      id: taskId,
+      prompt: "Close from the final stage",
+      pipeline: TWO_STAGE_PIPELINE,
+      stage: "pr",
+      branch,
+      displayName: title,
+    });
+
+    await advanceStageWithShortcut(client, title, taskId);
+
+    const row = await waitForTaskRow(client, taskId, (candidate) => candidate.closed_at !== null);
+    // closed_at is the sole done indicator; the stage keeps its last real value.
+    expect(row.stage).toBe("pr");
+    await waitForSidebarToExcludeTaskId(client, taskId);
+    expect(await getVueState(client, "selectedItemId")).not.toBe(taskId);
+  });
+
+  it("rejects advancing a blocked task with a toast and leaves it untouched", async () => {
+    const blockerTaskId = "advance-blocker-task";
+    const blockedTaskId = "advance-blocked-task";
+    await insertTask({
+      id: blockerTaskId,
+      prompt: "Open blocker",
+      pipeline: TWO_STAGE_PIPELINE,
+      stage: "in progress",
+      branch: null,
+      agentType: "agent",
+      displayName: "Open blocker",
+    });
+    await insertTask({
+      id: blockedTaskId,
+      prompt: "Blocked task",
+      pipeline: TWO_STAGE_PIPELINE,
+      stage: "in progress",
+      branch: "task-advance-blocked",
+      displayName: "Blocked advance source",
+    });
+    await execDb(
+      client,
+      "INSERT INTO task_blocker (blocked_item_id, blocker_item_id) VALUES (?, ?)",
+      [blockedTaskId, blockerTaskId],
+    );
+
+    await selectTask(client, blockedTaskId);
+    await pressAdvanceStageShortcut(client);
+
+    await waitForToastContaining(client, "Task Blocked");
+    const row = await getTaskRow(client, blockedTaskId);
+    expect(row).toMatchObject({ stage: "in progress", closed_at: null });
+    expect(await getStageRuns(client, blockedTaskId)).toHaveLength(0);
+  });
+
+  it("auto-advances an auto-transition stage in place on completion without stealing selection", async () => {
+    const sourceTaskId = "auto-complete-source";
+    const sourceBranch = "task-auto-complete-source";
+    const selectedTaskId = "auto-complete-selected";
+    await addTaskWorktree(sourceTaskId, sourceBranch);
+    await insertTask({
+      id: sourceTaskId,
+      prompt: "Complete the auto stage",
+      pipeline: AUTO_PIPELINE,
+      stage: "auto-source",
+      branch: sourceBranch,
+      displayName: "Auto complete source",
+    });
+    await insertTask({
+      id: selectedTaskId,
+      prompt: "Keep this task selected",
+      pipeline: AUTO_PIPELINE,
+      stage: "auto-source",
+      branch: null,
+      agentType: "agent",
+      displayName: "Selected task stays put",
+    });
+    await insertRunningStageRun(sourceTaskId, "run-auto-complete-source-seed", "auto-source");
+
+    await selectTask(client, selectedTaskId);
+
+    await withTestKannaServer(async (server) => {
+      const response = await fetch(
+        `${server.baseUrl}/v1/tasks/${encodeURIComponent(sourceTaskId)}/actions/complete-stage`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ status: "success", summary: "ready for review" }),
+        },
+      );
+      if (!response.ok) {
+        throw new Error(`complete-stage failed: ${response.status} ${await response.text()}`);
+      }
+      expect((await response.json() as { taskId: string }).taskId).toBe(sourceTaskId);
+    });
+
+    const row = await waitForTaskRow(client, sourceTaskId, (candidate) => candidate.stage === "review");
+    expect(row).toMatchObject({ id: sourceTaskId, closed_at: null });
+    expect(row.branch).not.toBe(sourceBranch);
+    expect(row.branch).toMatch(/^task-[0-9a-f]{8}$/);
+
+    const runs = await getStageRuns(client, sourceTaskId);
+    const seededRun = runs.find((run) => run.id === "run-auto-complete-source-seed");
+    expect(seededRun?.status).toBe("succeeded");
+    const reviewRun = runs.find((run) => run.stage === "review");
+    expect(reviewRun).toMatchObject({ status: "running", session_id: sourceTaskId });
+
+    // A refresh triggered by the external transition must not move selection —
+    // nothing closed, so the user's chosen task stays selected.
+    await emitExternalSharedInvalidation(client, "completeStage");
+    await sleep(500);
+    expect(await getVueState(client, "selectedItemId")).toBe(selectedTaskId);
+  });
+
+  it("reruns the current stage on the same task", async () => {
+    const taskId = "rerun-stage-task";
+    const branch = "task-rerun-stage";
+    const seedRunId = "run-rerun-stage-task-seed";
+    await addTaskWorktree(taskId, branch);
+    await insertTask({
+      id: taskId,
+      prompt: "Rerun this stage",
+      pipeline: TWO_STAGE_PIPELINE,
+      stage: "in progress",
+      branch,
+      displayName: "Rerun stage source",
+    });
+    await insertRunningStageRun(taskId, seedRunId, "in progress");
+
+    await withTestKannaServer(async (server) => {
+      const response = await fetch(
+        `${server.baseUrl}/v1/tasks/${encodeURIComponent(taskId)}/actions/rerun-stage`,
+        { method: "POST" },
+      );
+      if (!response.ok) {
+        throw new Error(`rerun-stage failed: ${response.status} ${await response.text()}`);
+      }
+      expect(await response.json()).toEqual({ taskId });
+    });
+
+    const row = await getTaskRow(client, taskId);
+    expect(row).toMatchObject({ stage: "in progress", closed_at: null, branch });
+
+    const runs = await getStageRuns(client, taskId);
+    const seededRun = runs.find((run) => run.id === seedRunId);
+    expect(seededRun?.status).toBe("cancelled");
+    const freshRun = runs.find((run) => run.id !== seedRunId && run.stage === "in progress");
+    expect(freshRun).toMatchObject({ status: "running", session_id: taskId });
+  });
+
+  it("requests a revision that reruns an earlier stage on the same task", async () => {
+    const taskId = "request-revision-task";
+    const branch = "task-request-revision";
+    const seedRunId = "run-request-revision-task-seed";
+    const originalTitle = "Preserve reviewed task title";
+    const reviewPrompt = "Original prompt that must stay on the task.";
+    const revisionPrompt = "Add E2E coverage for the request-revision path.";
+    await addTaskWorktree(taskId, branch);
+    await insertTask({
+      id: taskId,
+      prompt: reviewPrompt,
+      pipeline: REVISION_PIPELINE,
+      stage: "review",
+      branch,
+      displayName: originalTitle,
+    });
+    await insertRunningStageRun(taskId, seedRunId, "review");
+
+    await withTestKannaServer(async (server) => {
+      const response = await fetch(
+        `${server.baseUrl}/v1/tasks/${encodeURIComponent(taskId)}/actions/request-revision`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            targetStage: "in progress",
+            summary: "needs another pass",
+            prompt: revisionPrompt,
+            metadata: { source: "e2e" },
+          }),
+        },
+      );
+      if (!response.ok) {
+        throw new Error(`request-revision failed: ${response.status} ${await response.text()}`);
+      }
+      // The revision reruns an earlier stage on the SAME durable task.
+      expect((await response.json() as { taskId: string }).taskId).toBe(taskId);
+    });
+
+    const row = await waitForTaskRow(client, taskId, (candidate) => candidate.stage === "in progress");
+    expect(row).toMatchObject({
+      id: taskId,
+      stage: "in progress",
+      closed_at: null,
+      display_name: originalTitle,
+      prompt: reviewPrompt,
+    });
+    // The revision forked a fresh workspace from the reviewed branch's tip.
+    expect(row.branch).not.toBe(branch);
+    expect(row.branch).toMatch(/^task-[0-9a-f]{8}$/);
+
+    const runs = await getStageRuns(client, taskId);
+    const seededRun = runs.find((run) => run.id === seedRunId);
+    expect(seededRun?.status).toBe("failed");
+    const revisionRun = runs.find((run) => run.stage === "in progress");
+    expect(revisionRun).toMatchObject({ status: "running", feedback: revisionPrompt });
+
+    // The revision agent runs inside the freshly forked worktree: the fake
+    // `codex` (committed into the repo, so present in the fork's checkout)
+    // records its argv there.
+    const capturedArgsPath = join(
+      testRepoPath,
+      ".kanna-worktrees",
+      row.branch as string,
+      ".kanna",
+      "revision-codex-args.txt",
+    );
+    await waitForFile(capturedArgsPath, 20_000);
+    const capturedArgs = await readFile(capturedArgsPath, "utf8");
+    expect(capturedArgs).toContain("--yolo\n");
+    expect(capturedArgs).toContain(`Implement revision:\n${revisionPrompt}`);
+  });
 });

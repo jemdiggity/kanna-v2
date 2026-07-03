@@ -3,13 +3,21 @@ export interface PipelineEnvironment {
   teardown?: string[];
 }
 
-export interface PipelinePostAction {
+export interface PipelineStagePolicy {
+  transition: "manual" | "auto";
+}
+
+/**
+ * Tail work of a stage, injected into the stage's running agent session when
+ * the stage transitions forward. `agent` is the fallback used to spawn a
+ * fresh session when the task's session is dead.
+ */
+export interface PipelinePost {
   name: string;
   description?: string;
   agent?: string;
   prompt?: string;
   agent_provider?: string | string[];
-  transition: "manual" | "auto";
 }
 
 export interface PipelineStage {
@@ -17,12 +25,10 @@ export interface PipelineStage {
   description?: string;
   agent?: string;
   prompt?: string;
-  agent_provider?: string;
+  agent_provider?: string | string[];
   environment?: string;
-  transition: "manual" | "auto";
-  follow_task?: boolean;
-  mode?: "new_task" | "continue";
-  post_action?: PipelinePostAction;
+  policy: PipelineStagePolicy;
+  post?: PipelinePost;
 }
 
 export interface PipelineDefinition {
