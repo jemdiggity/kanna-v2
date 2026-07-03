@@ -967,14 +967,7 @@ mod tests {
     }
 
     fn daemon_socket_path_for_dir(daemon_dir: &str) -> PathBuf {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        let dir = PathBuf::from(daemon_dir);
-        let mut hasher = DefaultHasher::new();
-        dir.hash(&mut hasher);
-        let hash = hasher.finish() as u32;
-        PathBuf::from(format!("/tmp/kanna-{hash:08x}.sock"))
+        kanna_runtime_defaults::socket_path(std::path::Path::new(daemon_dir))
     }
 
     async fn spawn_fake_daemon_once(daemon_dir: String) -> tokio::task::JoinHandle<DaemonCommand> {

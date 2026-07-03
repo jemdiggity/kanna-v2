@@ -3,8 +3,6 @@ use super::provider::AgentProvider;
 use crate::config::Config;
 use crate::db::Db;
 use std::collections::{HashMap, HashSet};
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -309,10 +307,7 @@ fn resolve_workspace_path(worktree_path: &str, entry: &str) -> String {
 }
 
 fn resolve_binary_from_path(name: &str, path: &str) -> Option<String> {
-    path.split(':')
-        .filter(|entry| !entry.is_empty())
-        .map(|entry| Path::new(entry).join(name))
-        .find(|candidate| is_executable_file(candidate))
+    kanna_runtime_defaults::which_binary_in_path(name, path)
         .map(|candidate| candidate.to_string_lossy().to_string())
 }
 
@@ -327,20 +322,8 @@ fn resolve_workspace_binary_from_path(
         .map(Path::new)
         .filter(|entry| entry.starts_with(worktree_path))
         .map(|entry| entry.join(name))
-        .find(|candidate| is_executable_file(candidate))
+        .find(|candidate| kanna_runtime_defaults::is_executable_file(candidate))
         .map(|candidate| candidate.to_string_lossy().to_string())
-}
-
-#[cfg(unix)]
-fn is_executable_file(path: &Path) -> bool {
-    std::fs::metadata(path)
-        .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
-        .unwrap_or(false)
-}
-
-#[cfg(not(unix))]
-fn is_executable_file(path: &Path) -> bool {
-    path.is_file()
 }
 
 pub(super) fn resolve_binary_from_candidates_with_path_lookup<F>(
@@ -351,54 +334,11 @@ pub(super) fn resolve_binary_from_candidates_with_path_lookup<F>(
 where
     F: FnOnce(&str) -> Result<String, String>,
 {
-    for candidate in candidates {
-        if candidate.exists() {
-            return Ok(candidate.to_string_lossy().to_string());
-        }
-    }
-
-    path_lookup(name)
-}
-
-fn current_target_triple() -> &'static str {
-    #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
-    {
-        "aarch64-apple-darwin"
-    }
-    #[cfg(all(target_arch = "x86_64", target_os = "macos"))]
-    {
-        "x86_64-apple-darwin"
-    }
+    kanna_runtime_defaults::resolve_binary_from_candidates(name, candidates, path_lookup)
 }
 
 fn sidecar_candidates(name: &str) -> Vec<PathBuf> {
-    std::env::current_exe()
-        .ok()
-        .map(|exe| sidecar_candidates_for_exe(&exe, name))
-        .unwrap_or_default()
-}
-
-fn sidecar_candidates_for_exe(current_exe: &Path, name: &str) -> Vec<PathBuf> {
-    let Some(exe_dir) = current_exe.parent() else {
-        return Vec::new();
-    };
-
-    let sidecar_name = format!("{}-{}", name, current_target_triple());
-    let mut candidates = vec![exe_dir.join(&sidecar_name), exe_dir.join(name)];
-
-    if let (Some(build_root), Some(profile_dir)) = (exe_dir.parent(), exe_dir.file_name()) {
-        if build_root.file_name().is_some_and(|dir| dir == ".build")
-            && matches!(profile_dir.to_str(), Some("debug" | "release"))
-        {
-            let triple_dir = build_root.join(current_target_triple()).join(profile_dir);
-            candidates.push(triple_dir.join(name));
-            candidates.push(triple_dir.join(&sidecar_name));
-        }
-    }
-
-    candidates.push(exe_dir.join("../Resources").join(&sidecar_name));
-    candidates.push(exe_dir.join("../Resources").join(name));
-    candidates
+    kanna_runtime_defaults::sidecar_candidates(name)
 }
 
 fn prepend_path_entry(path: Option<&str>, entry: &str) -> String {
@@ -414,14 +354,7 @@ fn prepend_path_entry(path: Option<&str>, entry: &str) -> String {
 
 fn pipeline_socket_path(daemon_dir: &str) -> String {
     let dir = PathBuf::from(daemon_dir).join("pipeline");
-    short_socket_path(&dir).to_string_lossy().to_string()
-}
-
-fn short_socket_path(dir: &PathBuf) -> PathBuf {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    dir.hash(&mut hasher);
-    let hash = hasher.finish() as u32;
-    PathBuf::from(format!("/tmp/kanna-{:08x}.sock", hash))
+    kanna_runtime_defaults::socket_path(&dir)
+        .to_string_lossy()
+        .to_string()
 }

@@ -1,7 +1,6 @@
 use serde::Serialize;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
 use std::sync::OnceLock;
 use tauri::AppHandle;
 use tauri::Manager;
@@ -339,16 +338,9 @@ pub fn which_binary(name: String) -> Result<String, String> {
 
 fn resolve_binary_from_candidates(name: &str, candidates: Vec<PathBuf>) -> Result<String, String> {
     resolve_binary_from_candidates_with_path_lookup(name, candidates, |name| {
-        let output = Command::new("which")
-            .arg(name)
-            .output()
-            .map_err(|e| format!("failed to run which: {}", e))?;
-
-        if output.status.success() {
-            Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-        } else {
-            Err(format!("binary '{}' not found in PATH", name))
-        }
+        kanna_runtime_defaults::which_binary(name)
+            .map(|path| path.to_string_lossy().to_string())
+            .ok_or_else(|| format!("binary '{}' not found in PATH", name))
     })
 }
 
@@ -360,54 +352,11 @@ fn resolve_binary_from_candidates_with_path_lookup<F>(
 where
     F: FnOnce(&str) -> Result<String, String>,
 {
-    for candidate in candidates {
-        if candidate.exists() {
-            return Ok(candidate.to_string_lossy().to_string());
-        }
-    }
-
-    path_lookup(name)
-}
-
-pub fn current_target_triple() -> &'static str {
-    #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
-    {
-        "aarch64-apple-darwin"
-    }
-    #[cfg(all(target_arch = "x86_64", target_os = "macos"))]
-    {
-        "x86_64-apple-darwin"
-    }
+    kanna_runtime_defaults::resolve_binary_from_candidates(name, candidates, path_lookup)
 }
 
 pub fn sidecar_candidates(name: &str) -> Vec<PathBuf> {
-    std::env::current_exe()
-        .ok()
-        .map(|exe| sidecar_candidates_for_exe(&exe, name))
-        .unwrap_or_default()
-}
-
-pub fn sidecar_candidates_for_exe(current_exe: &Path, name: &str) -> Vec<PathBuf> {
-    let Some(exe_dir) = current_exe.parent() else {
-        return Vec::new();
-    };
-
-    let sidecar_name = format!("{}-{}", name, current_target_triple());
-    let mut candidates = vec![exe_dir.join(name), exe_dir.join(&sidecar_name)];
-
-    if let (Some(build_root), Some(profile_dir)) = (exe_dir.parent(), exe_dir.file_name()) {
-        if build_root.file_name().is_some_and(|dir| dir == ".build")
-            && matches!(profile_dir.to_str(), Some("debug" | "release"))
-        {
-            let triple_dir = build_root.join(current_target_triple()).join(profile_dir);
-            candidates.push(triple_dir.join(name));
-            candidates.push(triple_dir.join(&sidecar_name));
-        }
-    }
-
-    candidates.push(exe_dir.join("../Resources").join(&sidecar_name));
-    candidates.push(exe_dir.join("../Resources").join(name));
-    candidates
+    kanna_runtime_defaults::sidecar_candidates(name)
 }
 
 fn bundled_cloud_env(app: &AppHandle) -> Option<&'static str> {
@@ -505,11 +454,7 @@ pub fn append_log(message: String) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        current_target_triple, format_log_timestamp, image_mime_type_for_path,
-        resolve_binary_from_candidates_with_path_lookup, resolve_builtin_resource_path,
-        sidecar_candidates_for_exe,
-    };
+    use super::{format_log_timestamp, image_mime_type_for_path, resolve_builtin_resource_path};
     use chrono::{Duration, FixedOffset, TimeZone};
     use std::path::Path;
 
@@ -523,80 +468,6 @@ mod tests {
             + Duration::milliseconds(123);
 
         assert_eq!(format_log_timestamp(timestamp), "2026-04-19 06:55:05.123");
-    }
-
-    #[test]
-    fn sidecar_candidates_cover_dev_runtime_layout() {
-        let current_exe = Path::new("/repo/.build/debug/kanna-desktop");
-        let candidates = sidecar_candidates_for_exe(current_exe, "kanna-daemon");
-
-        assert_eq!(candidates[0], Path::new("/repo/.build/debug/kanna-daemon"));
-        assert_eq!(
-            candidates[1],
-            Path::new(&format!(
-                "/repo/.build/debug/kanna-daemon-{}",
-                current_target_triple()
-            ))
-        );
-        assert!(candidates.contains(
-            &Path::new(&format!(
-                "/repo/.build/{}/debug/kanna-daemon",
-                current_target_triple()
-            ))
-            .to_path_buf()
-        ));
-    }
-
-    #[test]
-    fn sidecar_candidates_cover_bundled_resource_layout() {
-        let current_exe = Path::new("/Applications/Kanna.app/Contents/MacOS/kanna-desktop");
-        let candidates = sidecar_candidates_for_exe(current_exe, "kanna-server");
-
-        assert_eq!(
-            candidates[0],
-            Path::new("/Applications/Kanna.app/Contents/MacOS/kanna-server")
-        );
-        assert_eq!(
-            candidates[1],
-            Path::new(&format!(
-                "/Applications/Kanna.app/Contents/MacOS/kanna-server-{}",
-                current_target_triple()
-            ))
-        );
-        assert!(candidates.contains(
-            &Path::new(&format!(
-                "/Applications/Kanna.app/Contents/MacOS/../Resources/kanna-server-{}",
-                current_target_triple()
-            ))
-            .to_path_buf()
-        ));
-        assert!(candidates.contains(
-            &Path::new("/Applications/Kanna.app/Contents/MacOS/../Resources/kanna-server")
-                .to_path_buf()
-        ));
-    }
-
-    #[test]
-    fn kanna_cli_prefers_instance_local_sidecar_when_available() {
-        let resolved = resolve_binary_from_candidates_with_path_lookup(
-            "kanna-cli",
-            vec![Path::new("/bin/sh").to_path_buf()],
-            |_| Ok("/global/kanna-cli".to_string()),
-        )
-        .expect("existing sidecar candidate should resolve");
-
-        assert_eq!(resolved, "/bin/sh");
-    }
-
-    #[test]
-    fn kanna_cli_can_fallback_to_path_when_instance_local_sidecar_is_missing() {
-        let resolved =
-            resolve_binary_from_candidates_with_path_lookup("kanna-cli", Vec::new(), |_| {
-                Ok("/global/kanna-cli".to_string())
-            })
-            .expect("PATH fallback should resolve");
-
-        assert_eq!(resolved, "/global/kanna-cli");
     }
 
     #[test]

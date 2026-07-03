@@ -229,14 +229,7 @@ mod tests {
     use tokio::net::UnixListener;
 
     fn daemon_socket_path_for_dir(daemon_dir: &str) -> std::path::PathBuf {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        let dir = std::path::PathBuf::from(daemon_dir);
-        let mut hasher = DefaultHasher::new();
-        dir.hash(&mut hasher);
-        let hash = hasher.finish() as u32;
-        std::path::PathBuf::from(format!("/tmp/kanna-{:08x}.sock", hash))
+        kanna_runtime_defaults::socket_path(std::path::Path::new(daemon_dir))
     }
 
     fn test_config(unique: &str, db_path: String, daemon_dir: String) -> Config {

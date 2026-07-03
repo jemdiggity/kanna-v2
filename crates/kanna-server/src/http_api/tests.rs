@@ -19,25 +19,14 @@ use std::sync::Arc;
 use tower::ServiceExt;
 
 fn daemon_socket_path_for_dir(daemon_dir: &str) -> PathBuf {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    let dir = PathBuf::from(daemon_dir);
-    let mut hasher = DefaultHasher::new();
-    dir.hash(&mut hasher);
-    let hash = hasher.finish() as u32;
-    PathBuf::from(format!("/tmp/kanna-{:08x}.sock", hash))
+    kanna_runtime_defaults::socket_path(Path::new(daemon_dir))
 }
 
 fn pipeline_socket_path_for_daemon_dir(daemon_dir: &str) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
     let dir = PathBuf::from(daemon_dir).join("pipeline");
-    let mut hasher = DefaultHasher::new();
-    dir.hash(&mut hasher);
-    let hash = hasher.finish() as u32;
-    format!("/tmp/kanna-{hash:08x}.sock")
+    kanna_runtime_defaults::socket_path(&dir)
+        .to_string_lossy()
+        .to_string()
 }
 
 fn ensure_test_kanna_cli_sidecar() -> (PathBuf, bool) {
