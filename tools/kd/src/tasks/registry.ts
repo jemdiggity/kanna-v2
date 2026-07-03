@@ -20,7 +20,7 @@ import { selectPreferredLanAddress } from "../runtime/lan-address";
 import { buildDevPlan, buildProductionMobilePlan } from "../runtime/dev-plan";
 import { resolveKdEnvironment } from "../runtime/environment";
 import { assertNotProductionDb, resetSqliteDb, seedSqliteDb, type DevDbTarget } from "../runtime/db";
-import { killWorkspaceDaemons } from "../runtime/daemon";
+import { killWorkspaceDaemons, killWorkspaceServers } from "../runtime/daemon";
 import { checkRequiredCommands } from "../runtime/doctor";
 import { writeCargoConfig } from "../runtime/env-sync";
 import { buildFirebaseCommandEnv, buildFirebaseEmulatorArgs, formatMissingFirebaseEmulators, resolveFirebaseEnvFromReference, writeFirebaseEmulatorConfig, type FirebasePortInput } from "../runtime/firebase";
@@ -1100,6 +1100,15 @@ export async function executeDevDownWithContext(
   options: DevDownExecutionOptions = {}
 ): Promise<TaskResult> {
   const stopped = await stopTmuxSession(executor.runner, executor.context.tmux);
+  // Always stop the workspace kanna-server: the desktop app dies with the
+  // tmux session, and an orphaned server would keep the port bound and serve
+  // a stale binary across restarts. The daemon stays (unless asked) so PTY
+  // sessions survive.
+  const serverCleanup = await killWorkspaceServers({
+    repoRoot: executor.context.repoRoot,
+    runner: executor.runner,
+    killProcess: options.killProcess
+  });
   const daemonCleanup = input.killDaemon
     ? await killWorkspaceDaemons({
         repoRoot: executor.context.repoRoot,
@@ -1111,7 +1120,7 @@ export async function executeDevDownWithContext(
   return {
     ok: true,
     message: stopped ? "Stopped." : "No session running.",
-    data: { stopped, daemonCleanup }
+    data: { stopped, serverCleanup, daemonCleanup }
   };
 }
 
