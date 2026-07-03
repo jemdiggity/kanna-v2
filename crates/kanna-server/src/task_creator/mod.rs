@@ -2,6 +2,7 @@ mod commands;
 mod definitions;
 mod environment;
 mod lifecycle;
+mod merge;
 mod prompt;
 mod provider;
 mod stages;
@@ -12,7 +13,6 @@ mod worktree;
 mod tests;
 
 use crate::config::Config;
-use crate::daemon_client::DaemonClient;
 use crate::db::{Db, NewPipelineItem, Repo};
 use commands::{build_agent_command, build_kanna_preamble, build_task_shell_command};
 use definitions::{
@@ -41,6 +41,8 @@ pub(crate) use lifecycle::{
     spawn_prepared_stage_run_for_api, spawn_prepared_task_for_api_recording_stage_run,
     spawn_prepared_task_for_api_with_rollback,
 };
+pub(crate) use merge::prepare_merge_agent_for_api;
+pub use merge::run_merge_agent;
 pub(crate) use stages::{
     prepare_advance_stage_for_api, prepare_revision_task_for_api, prepare_stage_completion_for_api,
     resolve_stage_transition,
@@ -391,57 +393,6 @@ fn build_prepared_session(
             }
         }
     })
-}
-
-pub async fn run_merge_agent(
-    db: &Db,
-    daemon: &mut DaemonClient,
-    config: &Config,
-    source_task_id: &str,
-) -> Result<String, String> {
-    let prepared = prepare_merge_agent_for_api(db, config, source_task_id)?;
-    spawn_prepared_task_for_api_recording_stage_run(&config.db_path, daemon, prepared)
-        .await
-        .map(|created| created.task_id)
-}
-
-pub(crate) fn prepare_merge_agent_for_api(
-    db: &Db,
-    config: &Config,
-    source_task_id: &str,
-) -> Result<PreparedTaskSpawn, String> {
-    let source_task = db
-        .get_pipeline_item(source_task_id)
-        .map_err(|e| format!("db error: {}", e))?
-        .ok_or_else(|| format!("task not found: {}", source_task_id))?;
-    let repo = db
-        .get_repo(&source_task.repo_id)
-        .map_err(|e| format!("db error: {}", e))?
-        .ok_or_else(|| format!("repo not found for task: {}", source_task_id))?;
-
-    let merge_agent = read_agent_definition(&repo.path, "merge")?;
-    prepare_task_spawn(
-        db,
-        config,
-        &repo,
-        TaskCreationRequest {
-            task_prompt: merge_agent.prompt,
-            display_name: Some("Merge Master".to_string()),
-            pipeline_name: None,
-            pipeline_def: None,
-            base_ref: None,
-            stored_base_ref: None,
-            stage_override: None,
-            explicit_provider: None,
-            default_provider: None,
-            agent_type: None,
-            model: None,
-            permission_mode: None,
-            allowed_tools: Vec::new(),
-            notify_task_id: None,
-            parent_task_id: None,
-        },
-    )
 }
 
 pub(crate) fn prepare_task_for_api(
@@ -848,7 +799,7 @@ struct ResolvedTaskSpawn {
     parent_task_id: Option<String>,
 }
 
-fn prepare_task_spawn(
+pub(in crate::task_creator) fn prepare_task_spawn(
     db: &Db,
     config: &Config,
     repo: &Repo,
