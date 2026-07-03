@@ -47,6 +47,17 @@ impl DesktopCloudEnvironment {
             Self::Production => PRODUCTION_MOBILE_SERVER_PORT,
         }
     }
+
+    pub fn daemon_dir_for_home(self, home: &Path) -> PathBuf {
+        match self {
+            Self::Staging => daemon_dir_for_bundle_identifier_for_home(
+                STAGING_DESKTOP_BUNDLE_IDENTIFIER,
+                false,
+                home,
+            ),
+            Self::Production => default_daemon_dir_for_home(home),
+        }
+    }
 }
 
 pub fn desktop_cloud_environment_for_bundle_identifier(
@@ -92,17 +103,71 @@ pub fn default_daemon_dir() -> PathBuf {
     default_daemon_dir_for_home(&home_dir())
 }
 
+pub fn daemon_dir_for_desktop_cloud_environment(environment: DesktopCloudEnvironment) -> PathBuf {
+    environment.daemon_dir_for_home(&home_dir())
+}
+
+pub fn daemon_dir_for_bundle_identifier_for_home(
+    bundle_identifier: &str,
+    debug_assertions: bool,
+    home: &Path,
+) -> PathBuf {
+    daemon_dir_for_bundle_identifier_for_app_support_root(
+        bundle_identifier,
+        debug_assertions,
+        &macos_app_support_dir_for_home(home),
+    )
+}
+
+pub fn daemon_dir_for_bundle_identifier_for_app_support_root(
+    bundle_identifier: &str,
+    debug_assertions: bool,
+    app_support_root: &Path,
+) -> PathBuf {
+    match desktop_cloud_environment_for_bundle_identifier(bundle_identifier, debug_assertions) {
+        Some(DesktopCloudEnvironment::Staging) => app_support_root
+            .join(STAGING_DESKTOP_BUNDLE_IDENTIFIER)
+            .join(PRODUCT_APP_SUPPORT_DIR),
+        Some(DesktopCloudEnvironment::Production) | None => {
+            default_daemon_dir_for_app_support_root(app_support_root)
+        }
+    }
+}
+
 pub fn daemon_dir_for_runtime(
     explicit_daemon_dir: Option<&Path>,
     current_exe: &Path,
     current_dir: &Path,
     home: &Path,
 ) -> PathBuf {
+    daemon_dir_for_runtime_with_bundle_identifier(
+        explicit_daemon_dir,
+        current_exe,
+        current_dir,
+        home,
+        None,
+        cfg!(debug_assertions),
+    )
+}
+
+pub fn daemon_dir_for_runtime_with_bundle_identifier(
+    explicit_daemon_dir: Option<&Path>,
+    current_exe: &Path,
+    current_dir: &Path,
+    home: &Path,
+    bundle_identifier: Option<&str>,
+    debug_assertions: bool,
+) -> PathBuf {
     let worktree_root =
         worktree_root_for_path(current_exe).or_else(|| worktree_root_for_path(current_dir));
     if let Some(dir) = explicit_daemon_dir {
         let production_dir = default_daemon_dir_for_home(home);
-        if worktree_root.is_none() || dir != production_dir {
+        let staging_dir = daemon_dir_for_bundle_identifier_for_home(
+            STAGING_DESKTOP_BUNDLE_IDENTIFIER,
+            false,
+            home,
+        );
+        if worktree_root.is_none() || (dir != production_dir && dir != staging_dir) {
             return dir.to_path_buf();
         }
     }
@@ -111,16 +176,34 @@ pub fn daemon_dir_for_runtime(
         return worktree_root.join(".kanna-daemon");
     }
 
-    default_daemon_dir_for_home(home)
+    bundle_identifier
+        .map(|identifier| {
+            daemon_dir_for_bundle_identifier_for_home(identifier, debug_assertions, home)
+        })
+        .unwrap_or_else(|| default_daemon_dir_for_home(home))
 }
 
 pub fn daemon_dir_for_current_runtime() -> PathBuf {
+    daemon_dir_for_current_runtime_with_bundle_identifier(None, cfg!(debug_assertions))
+}
+
+pub fn daemon_dir_for_current_runtime_with_bundle_identifier(
+    bundle_identifier: Option<&str>,
+    debug_assertions: bool,
+) -> PathBuf {
     let explicit = std::env::var_os("KANNA_DAEMON_DIR")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from);
     let current_exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::new());
     let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::new());
-    daemon_dir_for_runtime(explicit.as_deref(), &current_exe, &current_dir, &home_dir())
+    daemon_dir_for_runtime_with_bundle_identifier(
+        explicit.as_deref(),
+        &current_exe,
+        &current_dir,
+        &home_dir(),
+        bundle_identifier,
+        debug_assertions,
+    )
 }
 
 pub fn worktree_root_for_path(path: &Path) -> Option<PathBuf> {
@@ -486,6 +569,27 @@ mod tests {
     }
 
     #[test]
+    fn daemon_dir_ignores_staging_env_inside_worktree() {
+        let home = Path::new("/Users/tester");
+        let current_exe = Path::new("/repo/.kanna-worktrees/task-1234/.build/debug/kanna-desktop");
+        let current_dir = Path::new("/repo/.kanna-worktrees/task-1234/apps/desktop");
+
+        assert_eq!(
+            daemon_dir_for_runtime_with_bundle_identifier(
+                Some(Path::new(
+                    "/Users/tester/Library/Application Support/build.kanna.staging/Kanna"
+                )),
+                current_exe,
+                current_dir,
+                home,
+                Some(STAGING_DESKTOP_BUNDLE_IDENTIFIER),
+                false,
+            ),
+            PathBuf::from("/repo/.kanna-worktrees/task-1234/.kanna-daemon")
+        );
+    }
+
+    #[test]
     fn daemon_dir_uses_production_default_outside_worktree() {
         let home = Path::new("/Users/tester");
         let current_exe = Path::new("/Applications/Kanna.app/Contents/MacOS/kanna-desktop");
@@ -493,6 +597,30 @@ mod tests {
 
         assert_eq!(
             daemon_dir_for_runtime(None, current_exe, current_dir, home),
+            PathBuf::from("/Users/tester/Library/Application Support/Kanna")
+        );
+    }
+
+    #[test]
+    fn daemon_dir_uses_staging_bundle_app_support_directory() {
+        let home = Path::new("/Users/tester");
+
+        assert_eq!(
+            daemon_dir_for_bundle_identifier_for_home(
+                STAGING_DESKTOP_BUNDLE_IDENTIFIER,
+                false,
+                home
+            ),
+            PathBuf::from("/Users/tester/Library/Application Support/build.kanna.staging/Kanna")
+        );
+    }
+
+    #[test]
+    fn daemon_dir_uses_product_app_support_directory_for_production_bundle() {
+        let home = Path::new("/Users/tester");
+
+        assert_eq!(
+            daemon_dir_for_bundle_identifier_for_home(DESKTOP_BUNDLE_IDENTIFIER, false, home),
             PathBuf::from("/Users/tester/Library/Application Support/Kanna")
         );
     }
