@@ -14,6 +14,7 @@ import { createTerminalLayoutController } from "./terminalLayout"
 import { createTerminalRuntimeState } from "./terminalRuntimeState"
 import { createTerminalSessionLifecycle } from "./terminalSessionLifecycle"
 import type { SpawnOptions, TerminalOptions } from "./terminalTypes"
+import { debugLog } from "../utils/debugLog"
 
 export type { SpawnOptions, TerminalOptions } from "./terminalTypes"
 
@@ -94,7 +95,7 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
 
   function init(el: HTMLElement) {
     state.container = el
-    console.warn("[terminal][instance] init", {
+    debugLog("[terminal][instance] init", {
       sessionId,
       instanceId,
       worktreePath: options?.worktreePath ?? null,
