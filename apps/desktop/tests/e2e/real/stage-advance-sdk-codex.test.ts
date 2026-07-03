@@ -140,8 +140,9 @@ describe("real Codex SDK stage advance", () => {
     expect((await readFile(join(sourceWorktreePath, "codex-sdk-source-ready.txt"), "utf8")).trimEnd()).toBe("source ready");
 
     // Durable model: a manual advance accepts the current stage's work and
-    // swaps the next stage's agent session into the SAME task and worktree.
-    const worktreesBeforeAdvance = (await readTaskWorktreeNames(testRepoPath)).sort();
+    // spawns the next stage's agent session on the SAME task, in a freshly
+    // forked branch + worktree cut from the committed tip.
+    const worktreesBeforeAdvance = new Set(await readTaskWorktreeNames(testRepoPath));
     await advanceStageWithShortcut(client, "codex-sdk-source-ready.txt", sourceTaskId);
 
     await waitForTaskStage(client, sourceTaskId, "qa");
@@ -155,10 +156,12 @@ describe("real Codex SDK stage advance", () => {
       agent_provider: "codex",
     });
 
-    // The qa agent runs inside the source task's existing worktree — no
-    // next-stage task or worktree is created.
-    expect((await readTaskWorktreeNames(testRepoPath)).sort()).toEqual(worktreesBeforeAdvance);
-    const qaMarkerPath = join(sourceWorktreePath, "codex-sdk-stage-advance-output.txt");
+    // The qa agent runs inside the forked worktree; the source worktree
+    // (and its uncommitted output) stays behind untouched. No next-stage
+    // TASK is created — only a workspace.
+    const qaWorktreePath = await waitForNewTaskWorktree(testRepoPath, worktreesBeforeAdvance, 60_000);
+    expect(qaWorktreePath).not.toBe(sourceWorktreePath);
+    const qaMarkerPath = join(qaWorktreePath, "codex-sdk-stage-advance-output.txt");
     await waitForFile(qaMarkerPath, 180_000, 1_000);
     expect((await readFile(qaMarkerPath, "utf8")).trimEnd()).toBe("sdk stage advanced");
 
