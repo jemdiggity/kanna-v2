@@ -1,5 +1,5 @@
 use kanna_daemon::protocol::{Command, Event};
-use std::path::PathBuf;
+use std::path::Path;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
@@ -10,7 +10,7 @@ pub struct DaemonClient {
 
 impl DaemonClient {
     pub async fn connect(daemon_dir: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        let socket_path = socket_path_for_dir(daemon_dir);
+        let socket_path = kanna_runtime_defaults::socket_path(Path::new(daemon_dir));
         let stream = UnixStream::connect(&socket_path).await.map_err(|e| {
             format!(
                 "Failed to connect to daemon at {}: {}",
@@ -45,17 +45,4 @@ impl DaemonClient {
         let event: Event = serde_json::from_str(line.trim())?;
         Ok(event)
     }
-}
-
-/// Compute the daemon socket path from the daemon directory.
-/// This must match the `socket_path` function in `crates/daemon/src/main.rs`,
-/// which hashes a `PathBuf` (not a raw string) using `DefaultHasher`.
-fn socket_path_for_dir(daemon_dir: &str) -> PathBuf {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let dir = PathBuf::from(daemon_dir);
-    let mut hasher = DefaultHasher::new();
-    dir.hash(&mut hasher);
-    let hash = hasher.finish() as u32;
-    PathBuf::from(format!("/tmp/kanna-{:08x}.sock", hash))
 }

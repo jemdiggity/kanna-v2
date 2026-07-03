@@ -9,6 +9,7 @@ import { prepareKannaMcpRuntime } from "./kannaMcpRuntime";
 import { readEnvVarOptional, whichBinaryOptional } from "../utils/invokeHelpers";
 import { encodeDaemonInput } from "./daemonInput";
 import { getAgentPermissionFlags } from "./agent-permissions";
+import { buildAgentCommand } from "./agentCommand";
 import { buildWorktreeSessionEnv } from "./worktreeEnv";
 import {
   requireResolvedAgentProvider,
@@ -412,131 +413,33 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
 
     const { mcpConfigPath } = await prepareKannaMcpRuntime(sessionId, env);
 
-    const escapedPrompt = prompt.replace(/'/g, "'\\''");
     // Only the Claude PTY command registers kanna-mcp in this spawn path; the
     // prompt-prepended providers fall back to kanna-cli per the guidance.
-    const escapedSystemPrompt = buildKannaRuntimeSystemPrompt({
+    const runtimeSystemPrompt = buildKannaRuntimeSystemPrompt({
       taskId: sessionId,
       provider: "claude",
       mcpConfigured: !!mcpConfigPath,
-    }).replace(/'/g, "'\\''");
-    const escapedPromptWithPreamble = buildKannaRuntimeUserPrompt(prompt, { taskId: sessionId }).replace(/'/g, "'\\''");
-    let agentCmd: string;
-    let agentCmdPreamble: string | undefined;
+    });
+    const runtimeUserPrompt = buildKannaRuntimeUserPrompt(prompt, { taskId: sessionId });
     const permissionFlags = getAgentPermissionFlags(provider, options?.permissionMode);
-
-    if (provider === "copilot") {
-      const copilotFlags: string[] = [...permissionFlags];
-      if (options?.model) copilotFlags.push(`--model=${options.model}`);
-      if (options?.allowedTools?.length) {
-        for (const tool of options.allowedTools) copilotFlags.push(`--allow-tool=${tool}`);
-      }
-      if (options?.disallowedTools?.length) {
-        for (const tool of options.disallowedTools) copilotFlags.push(`--deny-tool=${tool}`);
-      }
-
-      if (options?.resumeSessionId) {
-        const escapedResumeSessionId = options.resumeSessionId.replace(/'/g, "'\\''");
-        copilotFlags.push(`--resume='${escapedResumeSessionId}'`);
-      } else {
-        const copilotSessionId = crypto.randomUUID();
-        await updateAgentSessionId(context.requireDb(), sessionId, copilotSessionId);
-        const escapedSessionId = copilotSessionId.replace(/'/g, "'\\''");
-        copilotFlags.push(`--session-id='${escapedSessionId}'`);
-      }
-
-      agentCmd = options?.resumeSessionId
-        ? `copilot ${copilotFlags.join(" ")}`
-        : `copilot ${copilotFlags.join(" ")} -i '${escapedPrompt}'`;
-      agentCmdPreamble = options?.resumeSessionId
-        ? undefined
-        : `copilot ${copilotFlags.join(" ")} -i '${escapedPromptWithPreamble}'`;
-    } else if (provider === "codex") {
-      const codexFlags: string[] = [...permissionFlags];
-      if (options?.model) codexFlags.push(`-m ${options.model}`);
-      if (options?.resumeSessionId) {
-        const escapedResumeSessionId = options.resumeSessionId.replace(/'/g, "'\\''");
-        agentCmd = escapedPrompt
-          ? `codex resume ${codexFlags.join(" ")} '${escapedResumeSessionId}' '${escapedPrompt}'`
-          : `codex resume ${codexFlags.join(" ")} '${escapedResumeSessionId}'`;
-        agentCmdPreamble = escapedPrompt
-          ? `codex resume ${codexFlags.join(" ")} '${escapedResumeSessionId}' '${escapedPromptWithPreamble}'`
-          : undefined;
-      } else {
-        agentCmd = escapedPrompt
-          ? `codex ${codexFlags.join(" ")} '${escapedPrompt}'`
-          : `codex ${codexFlags.join(" ")}`;
-        agentCmdPreamble = escapedPrompt
-          ? `codex ${codexFlags.join(" ")} '${escapedPromptWithPreamble}'`
-          : undefined;
-      }
-    } else if (provider === "opencode") {
-      const opencodePath = await invoke<string>("which_binary", { name: "opencode" })
-        .catch(() => "opencode");
-      const opencodeExecutable = `'${opencodePath.replace(/'/g, "'\\''")}'`;
-      const opencodeFlags: string[] = [...permissionFlags];
-      if (options?.model) opencodeFlags.push(`-m ${options.model}`);
-      if (options?.resumeSessionId) {
-        const escapedResumeSessionId = options.resumeSessionId.replace(/'/g, "'\\''");
-        opencodeFlags.push(`--session '${escapedResumeSessionId}'`);
-      }
-      const opencodeParts = [opencodeExecutable, "run", "--interactive", ...opencodeFlags];
-      if (escapedPrompt) {
-        opencodeParts.push(`'${escapedPrompt}'`);
-      }
-      agentCmd = opencodeParts.join(" ");
-      if (escapedPrompt) {
-        const opencodePreambleParts = [
-          opencodeExecutable,
-          "run",
-          "--interactive",
-          ...opencodeFlags,
-          `'${escapedPromptWithPreamble}'`,
-        ];
-        agentCmdPreamble = opencodePreambleParts.join(" ");
-      }
-    } else if (provider === "antigravity") {
-      const antigravityFlags: string[] = [...permissionFlags];
-      if (options?.model) antigravityFlags.push(`--model ${options.model}`);
-      const parts = ["'agy'", ...antigravityFlags];
-      if (escapedPrompt) parts.push("--prompt-interactive", `'${escapedPrompt}'`);
-      agentCmd = parts.join(" ");
-      if (escapedPrompt) {
-        agentCmdPreamble = ["'agy'", ...antigravityFlags, "--prompt-interactive", `'${escapedPromptWithPreamble}'`].join(" ");
-      }
-    } else {
-      const flags: string[] = [...permissionFlags];
-      flags.push(`--append-system-prompt '${escapedSystemPrompt}'`);
-      if (mcpConfigPath) {
-        flags.push(`--mcp-config '${mcpConfigPath.replace(/'/g, "'\\''")}'`);
-      }
-      if (options?.model) flags.push(`--model ${options.model}`);
-      if (options?.maxTurns != null) flags.push(`--max-turns ${options.maxTurns}`);
-      if (options?.maxBudgetUsd != null) flags.push(`--max-budget-usd ${options.maxBudgetUsd}`);
-      if (options?.allowedTools?.length) {
-        flags.push(`--allowedTools ${options.allowedTools.join(",")}`);
-      }
-      if (options?.disallowedTools?.length) {
-        flags.push(`--disallowedTools ${options.disallowedTools.join(",")}`);
-      }
-
-      const claudeSessionId = options?.resumeSessionId || crypto.randomUUID();
-      if (!options?.resumeSessionId) {
-        await updateAgentSessionId(context.requireDb(), sessionId, claudeSessionId);
-      }
-
-      if (options?.resumeSessionId) {
-        flags.push(`--resume ${claudeSessionId}`);
-      } else {
-        flags.push(`--session-id ${claudeSessionId}`);
-      }
-
-      if (options?.resumeSessionId || !escapedPrompt) {
-        agentCmd = `claude ${flags.join(" ")}`;
-      } else {
-        agentCmd = `claude ${flags.join(" ")} '${escapedPrompt}'`;
-      }
-    }
+    const { agentCmd, agentCmdPreamble } = await buildAgentCommand(provider, {
+      taskId: sessionId,
+      prompt,
+      runtimeSystemPrompt,
+      runtimeUserPrompt,
+      permissionFlags,
+      mcpConfigPath,
+      model: options?.model,
+      allowedTools: options?.allowedTools,
+      disallowedTools: options?.disallowedTools,
+      maxTurns: options?.maxTurns,
+      maxBudgetUsd: options?.maxBudgetUsd,
+      resumeSessionId: options?.resumeSessionId,
+      persistAgentSessionId: async (agentSessionId) => {
+        await updateAgentSessionId(context.requireDb(), sessionId, agentSessionId);
+      },
+      resolveBinaryPath: async (name) => invoke<string>("which_binary", { name }),
+    });
 
     return {
       env,

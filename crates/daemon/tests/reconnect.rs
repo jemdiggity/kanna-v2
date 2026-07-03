@@ -122,13 +122,8 @@ struct SnapshotPayload {
 static TEST_INSTANCE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 /// Compute the socket path using the same hash the daemon uses.
-fn compute_socket_path(dir: &PathBuf) -> PathBuf {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    dir.hash(&mut hasher);
-    let hash = hasher.finish() as u32;
-    PathBuf::from(format!("/tmp/kanna-{:08x}.sock", hash))
+fn compute_socket_path(dir: &Path) -> PathBuf {
+    kanna_runtime_defaults::socket_path(dir)
 }
 
 struct DaemonHandle {

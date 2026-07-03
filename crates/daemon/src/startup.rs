@@ -10,7 +10,7 @@ use crate::client::{
 use crate::connection::handle_connection;
 use crate::handoff::attempt_handoff;
 use crate::paths::{
-    app_support_dir, daemon_data_dir, handle_cli_args, install_panic_hook, socket_path, CliAction,
+    app_support_dir, daemon_data_dir, handle_cli_args, install_panic_hook, CliAction,
 };
 use crate::session::{SessionHandle, SessionManager, SessionRecord};
 use crate::socket::bind_socket;
@@ -38,7 +38,7 @@ pub(crate) async fn run_daemon() {
         .start();
 
     let pid_path = dir.join("daemon.pid");
-    let socket_path = socket_path(&dir);
+    let socket_path = kanna_runtime_defaults::socket_path(&dir);
 
     // Attempt handoff from old daemon (if running)
     let handoff_result = attempt_handoff(&pid_path, &socket_path).await;

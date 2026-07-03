@@ -20,12 +20,7 @@ use kanna_daemon::protocol::{AgentProvider, AgentSpawnParams, Command, Event, Se
 // ---- Harness ----
 
 fn compute_socket_path(dir: &Path) -> PathBuf {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    dir.to_path_buf().hash(&mut hasher);
-    let hash = hasher.finish() as u32;
-    PathBuf::from(format!("/tmp/kanna-{:08x}.sock", hash))
+    kanna_runtime_defaults::socket_path(dir)
 }
 
 fn temp_dir(prefix: &str) -> PathBuf {

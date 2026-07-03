@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -225,13 +225,8 @@ struct SeedSnapshotPayload {
     vt: String,
 }
 
-fn compute_socket_path(dir: &PathBuf) -> PathBuf {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    dir.hash(&mut hasher);
-    let hash = hasher.finish() as u32;
-    PathBuf::from(format!("/tmp/kanna-{:08x}.sock", hash))
+fn compute_socket_path(dir: &Path) -> PathBuf {
+    kanna_runtime_defaults::socket_path(dir)
 }
 
 struct DaemonHandle {
