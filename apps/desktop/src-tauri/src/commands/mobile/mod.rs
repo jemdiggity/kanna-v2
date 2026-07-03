@@ -18,7 +18,7 @@ use config::{
 use process::{find_sidecar, stop_server_on_port};
 
 const LOCAL_SERVER_HOST: &str = "127.0.0.1";
-const DEFAULT_LOCAL_SERVER_PORT: u16 = 48_120;
+const DEFAULT_LOCAL_SERVER_PORT: u16 = kanna_runtime_defaults::PRODUCTION_MOBILE_SERVER_PORT;
 // kanna-server can take a while to bind and register when the machine is under
 // heavy load (e.g. an in-progress iOS/Rust build during `kd mobile run`). Poll
 // generously and only give up early if the process actually exits — a healthy
@@ -119,7 +119,7 @@ impl MobileServerManager {
             inner: Arc::new(Mutex::new(MobileServerState {
                 status: "stopped".to_string(),
                 desktop_name: default_desktop_name(),
-                api_base_url: server_base_url(local_server_port()),
+                api_base_url: server_base_url(local_server_port_for_cloud_env(cloud_env)),
                 config_path,
                 started: false,
                 cloud_env,
@@ -130,7 +130,7 @@ impl MobileServerManager {
     }
 
     pub async fn start(&self) -> Result<(), String> {
-        let (config_path, desktop_name, api_base_url) = {
+        let (config_path, desktop_name, api_base_url, cloud_env) = {
             let state = self.inner.lock().await;
             if state.started {
                 return Ok(());
@@ -139,6 +139,7 @@ impl MobileServerManager {
                 state.config_path.clone(),
                 state.desktop_name.clone(),
                 state.api_base_url.clone(),
+                state.cloud_env,
             )
         };
 
@@ -146,10 +147,6 @@ impl MobileServerManager {
         let existing_status = self.fetch_status(&api_base_url).await.ok();
         if let Some(status) = existing_status {
             ensure_server_belongs_to_desktop(&status, &expected_desktop_id)?;
-            let cloud_env = {
-                let state = self.inner.lock().await;
-                state.cloud_env
-            };
             if is_current_server_status(&status, &expected_desktop_id, current_server_version())
                 && server_config_matches_runtime(&config_path, &expected_desktop_id, cloud_env)
             {
@@ -159,7 +156,7 @@ impl MobileServerManager {
                 state.desktop_name = status.desktop_name;
                 return Ok(());
             }
-            stop_server_on_port(local_server_port()).await?;
+            stop_server_on_port(local_server_port_for_cloud_env(cloud_env)).await?;
         }
 
         let lock_path = server_lock_path_for_config(&config_path)?;
@@ -417,11 +414,15 @@ fn app_data_dir_for_server_config(config_path: &Path) -> Result<PathBuf, String>
         .ok_or_else(|| "mobile config path missing app data directory".to_string())
 }
 
-fn local_server_port() -> u16 {
+fn local_server_port_for_cloud_env(cloud_env: Option<DesktopCloudEnvironment>) -> u16 {
     std::env::var("KANNA_MOBILE_SERVER_PORT")
         .ok()
         .and_then(|value| value.parse::<u16>().ok())
-        .unwrap_or(DEFAULT_LOCAL_SERVER_PORT)
+        .unwrap_or_else(|| {
+            cloud_env::effective_cloud_env(cloud_env)
+                .map(|env| env.mobile_server_port())
+                .unwrap_or(DEFAULT_LOCAL_SERVER_PORT)
+        })
 }
 
 fn server_base_url(port: u16) -> String {
@@ -435,7 +436,7 @@ fn stopped_snapshot(state: &MobileServerState) -> Result<MobileServerStatus, Str
         desktop_name: state.desktop_name.clone(),
         server_version: Some(current_server_version().to_string()),
         lan_host: "0.0.0.0".to_string(),
-        lan_port: local_server_port(),
+        lan_port: local_server_port_for_cloud_env(state.cloud_env),
         pairing_code: None,
     })
 }
@@ -1309,6 +1310,27 @@ mod tests {
             .unwrap(),
             PathBuf::from("/tmp/build.kanna")
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::await_holding_lock)]
+    async fn staging_release_bundle_manager_uses_staging_server_port_without_env() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+        unsafe {
+            unset_env_var("KANNA_CLOUD_ENV");
+            unset_env_var("KANNA_MOBILE_SERVER_PORT");
+        }
+        let root = unique_test_root("staging-release-bundle-server-port");
+        let manager = MobileServerManager::new_with_bundle_identifier_for_mode(
+            root.join("app-data"),
+            kanna_runtime_defaults::STAGING_DESKTOP_BUNDLE_IDENTIFIER,
+            false,
+        );
+
+        let state = manager.inner.lock().await;
+        assert_eq!(state.api_base_url, "http://127.0.0.1:48121");
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

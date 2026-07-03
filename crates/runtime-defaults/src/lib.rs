@@ -10,6 +10,8 @@ pub const STAGING_RELAY_URL: &str = "wss://relay-staging.kanna.build";
 pub const PRODUCTION_FIREBASE_PROJECT_ID: &str = "kanna-build";
 pub const STAGING_FIREBASE_PROJECT_ID: &str = "kanna-staging";
 pub const LOCAL_FIREBASE_PROJECT_ID: &str = "kanna-local";
+pub const PRODUCTION_MOBILE_SERVER_PORT: u16 = 48_120;
+pub const STAGING_MOBILE_SERVER_PORT: u16 = 48_121;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DesktopCloudEnvironment {
@@ -38,6 +40,13 @@ impl DesktopCloudEnvironment {
             Self::Production => PRODUCTION_FIREBASE_PROJECT_ID,
         }
     }
+
+    pub fn mobile_server_port(self) -> u16 {
+        match self {
+            Self::Staging => STAGING_MOBILE_SERVER_PORT,
+            Self::Production => PRODUCTION_MOBILE_SERVER_PORT,
+        }
+    }
 }
 
 pub fn desktop_cloud_environment_for_bundle_identifier(
@@ -53,6 +62,14 @@ pub fn desktop_cloud_environment_for_bundle_identifier(
         DESKTOP_BUNDLE_IDENTIFIER => Some(DesktopCloudEnvironment::Production),
         _ => None,
     }
+}
+
+pub fn mobile_server_port_for_bundle_identifier(
+    bundle_identifier: &str,
+    debug_assertions: bool,
+) -> Option<u16> {
+    desktop_cloud_environment_for_bundle_identifier(bundle_identifier, debug_assertions)
+        .map(|env| env.mobile_server_port())
 }
 
 pub fn desktop_cloud_environment_from_env(value: Option<&str>) -> Option<DesktopCloudEnvironment> {
@@ -719,6 +736,38 @@ mod tests {
         assert_eq!(
             DesktopCloudEnvironment::Production.firebase_project_id(),
             "kanna-build"
+        );
+    }
+
+    #[test]
+    fn desktop_cloud_environment_carries_distinct_mobile_server_ports() {
+        assert_eq!(
+            DesktopCloudEnvironment::Production.mobile_server_port(),
+            PRODUCTION_MOBILE_SERVER_PORT
+        );
+        assert_eq!(
+            DesktopCloudEnvironment::Staging.mobile_server_port(),
+            STAGING_MOBILE_SERVER_PORT
+        );
+        assert_ne!(
+            DesktopCloudEnvironment::Production.mobile_server_port(),
+            DesktopCloudEnvironment::Staging.mobile_server_port()
+        );
+    }
+
+    #[test]
+    fn mobile_server_port_resolves_from_release_bundle_identifier() {
+        assert_eq!(
+            mobile_server_port_for_bundle_identifier(STAGING_DESKTOP_BUNDLE_IDENTIFIER, false),
+            Some(STAGING_MOBILE_SERVER_PORT)
+        );
+        assert_eq!(
+            mobile_server_port_for_bundle_identifier(DESKTOP_BUNDLE_IDENTIFIER, false),
+            Some(PRODUCTION_MOBILE_SERVER_PORT)
+        );
+        assert_eq!(
+            mobile_server_port_for_bundle_identifier(STAGING_DESKTOP_BUNDLE_IDENTIFIER, true),
+            None
         );
     }
 
