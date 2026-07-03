@@ -1,5 +1,7 @@
 use super::state::{db_write_error, AppState};
-use super::task_blockers::{persist_resolved_task_blockers, resolve_task_blocker_ids};
+use super::task_blockers::{
+    persist_resolved_task_blockers, persist_task_blocker_rows, resolve_task_blocker_ids,
+};
 use crate::db::Db;
 use crate::mobile_api::MobileApi;
 use axum::extract::State;
@@ -142,21 +144,41 @@ pub(super) async fn create_task(
                 format!("db error: {}", e),
             )
         })?;
-        let created = crate::task_creator::create_dormant_task_for_api(&db, payload)
-            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
-        if let Err(err) =
-            persist_resolved_task_blockers(&db, &created.task_id, &resolved_blocker_ids)
-        {
-            let rollback_result = db.delete_task_creation_artifacts(&created.task_id);
-            return Err(match rollback_result {
-                Ok(()) => err,
-                Err(rollback_err) => (
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("{}; rollback failed: {}", err.1, rollback_err),
-                ),
-            });
+        let has_open_blockers = resolved_blocker_ids
+            .iter()
+            .try_fold(false, |has_open, id| {
+                if has_open {
+                    Ok(true)
+                } else {
+                    let blocker = db
+                        .get_pipeline_item(id)
+                        .map_err(|e| db_write_error("db error", e))?
+                        .ok_or_else(|| {
+                            (
+                                axum::http::StatusCode::NOT_FOUND,
+                                format!("task not found: {id}"),
+                            )
+                        })?;
+                    Ok(blocker.closed_at.is_none())
+                }
+            })?;
+        if has_open_blockers {
+            let created = crate::task_creator::create_dormant_task_for_api(&db, payload)
+                .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+            if let Err(err) =
+                persist_resolved_task_blockers(&db, &created.task_id, &resolved_blocker_ids)
+            {
+                let rollback_result = db.delete_task_creation_artifacts(&created.task_id);
+                return Err(match rollback_result {
+                    Ok(()) => err,
+                    Err(rollback_err) => (
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("{}; rollback failed: {}", err.1, rollback_err),
+                    ),
+                });
+            }
+            return Ok(Json(created));
         }
-        return Ok(Json(created));
     }
 
     let prepared = {
@@ -169,6 +191,29 @@ pub(super) async fn create_task(
         crate::task_creator::prepare_task_for_api(&db, &state.config, payload)
             .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?
     };
+    if !resolved_blocker_ids.is_empty() {
+        let db = Db::open(&state.config.db_path).map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("db error: {}", e),
+            )
+        })?;
+        if let Err(err) = persist_task_blocker_rows(
+            &db,
+            crate::task_creator::prepared_task_id(&prepared),
+            &resolved_blocker_ids,
+        ) {
+            let rollback_result =
+                crate::task_creator::rollback_prepared_task_for_api(&db, &prepared);
+            return Err(match rollback_result {
+                Ok(()) => err,
+                Err(rollback_err) => (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("{}; rollback failed: {}", err.1, rollback_err),
+                ),
+            });
+        }
+    }
     let mut daemon = crate::daemon_client::DaemonClient::connect(&state.config.daemon_dir)
         .await
         .map_err(|e| {
