@@ -1,5 +1,7 @@
 use super::state::{db_write_error, AppState};
-use super::task_blockers::{resolve_existing_task_id, start_dependents_unblocked_by_pr};
+use super::task_blockers::{
+    resolve_existing_task_id, start_dependents_unblocked_by_close_with_daemon,
+};
 use super::task_input::{notify_task_completion, submit_task_input};
 use crate::db::Db;
 use axum::extract::State;
@@ -12,40 +14,6 @@ fn stage_action_error_status(error: &str) -> axum::http::StatusCode {
     } else {
         axum::http::StatusCode::INTERNAL_SERVER_ERROR
     }
-}
-
-/// Dependency-driven auto-start: a blocker resolves when it reaches the `pr`
-/// stage. Stage transitions happen in place on the same task, so this runs
-/// after any action that may have moved `pipeline_item.stage` — if the task
-/// is now at `pr`, its fully-unblocked dormant dependents start with the
-/// blocker's branch as their stacked base.
-async fn start_dependents_if_task_entered_pr(
-    state: &Arc<AppState>,
-    task_id: &str,
-) -> Result<(), (axum::http::StatusCode, String)> {
-    let blocker = {
-        let db = Db::open(&state.config.db_path).map_err(|e| {
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("db error: {}", e),
-            )
-        })?;
-        let Some(resolved_id) = db
-            .resolve_pipeline_item_id(task_id)
-            .map_err(|e| db_write_error("db error", e))?
-        else {
-            return Ok(());
-        };
-        db.get_pipeline_item(&resolved_id)
-            .map_err(|e| db_write_error("db error", e))?
-    };
-    let Some(blocker) = blocker else {
-        return Ok(());
-    };
-    if blocker.stage.as_deref() != Some("pr") {
-        return Ok(());
-    }
-    start_dependents_unblocked_by_pr(state, &blocker.id, blocker.branch).await
 }
 
 pub(super) async fn run_merge_agent(
@@ -319,6 +287,7 @@ pub(super) async fn close_task(
     notify_task_completion(&state.config, &pipeline_item_id, false)
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    start_dependents_unblocked_by_close_with_daemon(&state, &mut daemon, &pipeline_item_id).await?;
 
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
@@ -374,6 +343,7 @@ async fn close_task_after_final_stage(
     notify_task_completion(&state.config, &task_id, false)
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    start_dependents_unblocked_by_close_with_daemon(state, daemon, &task_id).await?;
     Ok(Json(crate::mobile_api::TaskActionResponse {
         task_id,
         follow_task: Some(false),
@@ -427,7 +397,6 @@ async fn execute_stage_transition(
             )
             .await
             .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
-            start_dependents_if_task_entered_pr(state, &advanced.task_id).await?;
             Ok(Json(advanced))
         }
         crate::task_creator::PreparedStageTransition::Post(prepared) => {
@@ -675,7 +644,6 @@ pub(super) async fn complete_stage(
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?
     };
     let Some(transition) = transition else {
-        start_dependents_if_task_entered_pr(&state, &task_id).await?;
         return Ok(Json(crate::mobile_api::TaskActionResponse {
             task_id,
             follow_task: None,

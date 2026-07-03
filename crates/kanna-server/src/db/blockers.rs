@@ -32,17 +32,16 @@ impl Db {
         rows.collect()
     }
 
-    /// Count blockers that are still unresolved. A blocker resolves when it
-    /// reaches the `pr` stage (dependents stack on its branch from there) or
-    /// when it is closed.
+    /// Count blockers that are still unresolved. A blocker resolves only when
+    /// it is closed; dependents start from the current default branch at that
+    /// point so they build on the blocker after it has merged.
     pub fn count_open_task_blockers(&self, blocked_item_id: &str) -> Result<i64, rusqlite::Error> {
         self.conn.query_row(
             "SELECT COUNT(*)
              FROM task_blocker blocker
              JOIN pipeline_item blocker_item ON blocker_item.id = blocker.blocker_item_id
              WHERE blocker.blocked_item_id = ?
-               AND blocker_item.closed_at IS NULL
-               AND COALESCE(blocker_item.stage, '') != 'pr'",
+               AND blocker_item.closed_at IS NULL",
             [blocked_item_id],
             |row| row.get(0),
         )
@@ -56,43 +55,6 @@ impl Db {
             "SELECT blocked_item_id FROM task_blocker WHERE blocker_item_id = ? ORDER BY blocked_item_id",
         )?;
         let rows = stmt.query_map([blocker_item_id], |row| row.get(0))?;
-        rows.collect()
-    }
-
-    pub fn task_has_unresolved_blockers_except(
-        &self,
-        blocked_item_id: &str,
-        resolved_blocker_item_id: &str,
-    ) -> Result<bool, rusqlite::Error> {
-        let count: i64 = self.conn.query_row(
-            "SELECT COUNT(*)
-             FROM task_blocker tb
-             JOIN pipeline_item blocker ON blocker.id = tb.blocker_item_id
-             WHERE tb.blocked_item_id = ?
-               AND tb.blocker_item_id != ?
-               AND blocker.closed_at IS NULL
-               AND COALESCE(blocker.stage, '') != 'pr'",
-            (blocked_item_id, resolved_blocker_item_id),
-            |row| row.get(0),
-        )?;
-        Ok(count > 0)
-    }
-
-    pub fn list_resolved_blocker_branches_for_task(
-        &self,
-        blocked_item_id: &str,
-    ) -> Result<Vec<String>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare(
-            "SELECT blocker.branch
-             FROM task_blocker tb
-             JOIN pipeline_item blocker ON blocker.id = tb.blocker_item_id
-             WHERE tb.blocked_item_id = ?
-               AND blocker.stage = 'pr'
-               AND blocker.branch IS NOT NULL
-               AND blocker.branch != ''
-             ORDER BY tb.blocker_item_id",
-        )?;
-        let rows = stmt.query_map([blocked_item_id], |row| row.get(0))?;
         rows.collect()
     }
 

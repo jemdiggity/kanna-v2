@@ -85,13 +85,22 @@ pub(super) fn generate_task_id() -> Result<String, String> {
 
 pub(super) fn fetch_start_point(repo_path: &str, default_branch: Option<&str>) -> Option<String> {
     let branch = default_branch.unwrap_or("main");
-    let status = Command::new("git")
+    let fetch_success = Command::new("git")
         .args(["fetch", "origin", branch])
         .current_dir(repo_path)
-        .status()
-        .ok()?;
-    if status.success() {
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false);
+    if fetch_success {
         Some(format!("origin/{}", branch))
+    } else if Command::new("git")
+        .args(["rev-parse", "--verify", branch])
+        .current_dir(repo_path)
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+    {
+        Some(branch.to_string())
     } else {
         None
     }

@@ -1,4 +1,5 @@
 use super::state::{db_write_error, AppState};
+use crate::daemon_client::DaemonClient;
 use crate::db::Db;
 use axum::extract::State;
 use axum::Json;
@@ -37,12 +38,21 @@ pub(super) fn persist_resolved_task_blockers(
     task_id: &str,
     resolved_blocker_ids: &[String],
 ) -> Result<(), (axum::http::StatusCode, String)> {
+    persist_task_blocker_rows(db, task_id, resolved_blocker_ids)?;
+    db.update_pipeline_item_activity(task_id, "idle")
+        .map_err(|e| db_write_error("db error", e))
+}
+
+pub(super) fn persist_task_blocker_rows(
+    db: &Db,
+    task_id: &str,
+    resolved_blocker_ids: &[String],
+) -> Result<(), (axum::http::StatusCode, String)> {
     for blocker_id in resolved_blocker_ids {
         db.insert_task_blocker(task_id, blocker_id)
             .map_err(|e| db_write_error("db error", e))?;
     }
-    db.update_pipeline_item_activity(task_id, "idle")
-        .map_err(|e| db_write_error("db error", e))
+    Ok(())
 }
 
 pub(super) fn apply_task_blockers(
@@ -86,25 +96,9 @@ pub(super) async fn start_dormant_task_if_ready(
     task_id: &str,
     blocker_branches: Vec<String>,
 ) -> Result<bool, (axum::http::StatusCode, String)> {
-    let prepared = {
-        let db = Db::open(&state.config.db_path).map_err(|e| {
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("db error: {}", e),
-            )
-        })?;
-        crate::task_creator::prepare_start_dormant_task_for_api(
-            &db,
-            &state.config,
-            task_id,
-            blocker_branches,
-        )
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?
-    };
-    let Some(prepared) = prepared else {
+    let Some(prepared) = prepare_dormant_task(state, task_id, blocker_branches)? else {
         return Ok(false);
     };
-
     let mut daemon = crate::daemon_client::DaemonClient::connect(&state.config.daemon_dir)
         .await
         .map_err(|e| {
@@ -113,20 +107,62 @@ pub(super) async fn start_dormant_task_if_ready(
                 format!("daemon error: {}", e),
             )
         })?;
+    spawn_prepared_dormant_task(state, &mut daemon, prepared).await?;
+    Ok(true)
+}
+
+async fn start_dormant_task_if_ready_with_daemon(
+    state: &Arc<AppState>,
+    daemon: &mut DaemonClient,
+    task_id: &str,
+    blocker_branches: Vec<String>,
+) -> Result<bool, (axum::http::StatusCode, String)> {
+    let Some(prepared) = prepare_dormant_task(state, task_id, blocker_branches)? else {
+        return Ok(false);
+    };
+    spawn_prepared_dormant_task(state, daemon, prepared).await?;
+    Ok(true)
+}
+
+fn prepare_dormant_task(
+    state: &Arc<AppState>,
+    task_id: &str,
+    blocker_branches: Vec<String>,
+) -> Result<Option<crate::task_creator::PreparedTaskSpawn>, (axum::http::StatusCode, String)> {
+    let db = Db::open(&state.config.db_path).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("db error: {}", e),
+        )
+    })?;
+    crate::task_creator::prepare_start_dormant_task_for_api(
+        &db,
+        &state.config,
+        task_id,
+        blocker_branches,
+    )
+    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))
+}
+
+async fn spawn_prepared_dormant_task(
+    state: &Arc<AppState>,
+    daemon: &mut DaemonClient,
+    prepared: crate::task_creator::PreparedTaskSpawn,
+) -> Result<(), (axum::http::StatusCode, String)> {
     crate::task_creator::spawn_prepared_task_for_api_recording_stage_run(
         &state.config.db_path,
-        &mut daemon,
+        daemon,
         prepared,
     )
     .await
     .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    Ok(true)
+    Ok(())
 }
 
-pub(super) async fn start_dependents_unblocked_by_pr(
+pub(super) async fn start_dependents_unblocked_by_close_with_daemon(
     state: &Arc<AppState>,
+    daemon: &mut DaemonClient,
     blocker_task_id: &str,
-    blocker_branch: Option<String>,
 ) -> Result<(), (axum::http::StatusCode, String)> {
     let ready_dependents = {
         let db = Db::open(&state.config.db_path).map_err(|e| {
@@ -141,33 +177,19 @@ pub(super) async fn start_dependents_unblocked_by_pr(
             .map_err(|e| db_write_error("db error", e))?
         {
             if db
-                .task_has_unresolved_blockers_except(&blocked_id, blocker_task_id)
+                .count_open_task_blockers(&blocked_id)
                 .map_err(|e| db_write_error("db error", e))?
+                > 0
             {
                 continue;
             }
-            let mut branches = Vec::new();
-            if let Some(branch) = blocker_branch
-                .clone()
-                .filter(|branch| !branch.trim().is_empty())
-            {
-                branches.push(branch);
-            }
-            for branch in db
-                .list_resolved_blocker_branches_for_task(&blocked_id)
-                .map_err(|e| db_write_error("db error", e))?
-            {
-                if !branches.contains(&branch) {
-                    branches.push(branch);
-                }
-            }
-            ready.push((blocked_id, branches));
+            ready.push(blocked_id);
         }
         ready
     };
 
-    for (blocked_id, branches) in ready_dependents {
-        start_dormant_task_if_ready(state, &blocked_id, branches).await?;
+    for blocked_id in ready_dependents {
+        start_dormant_task_if_ready_with_daemon(state, daemon, &blocked_id, Vec::new()).await?;
     }
     Ok(())
 }
