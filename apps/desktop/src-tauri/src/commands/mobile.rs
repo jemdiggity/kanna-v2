@@ -2654,6 +2654,29 @@ mod tests {
                 PRIMARY KEY (pipeline_item_id, env_name),
                 UNIQUE (port)
             );
+
+            CREATE TABLE stage_run (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                stage TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'main' CHECK (kind IN ('main', 'post')),
+                agent TEXT,
+                agent_provider TEXT,
+                model TEXT,
+                status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'succeeded', 'failed', 'cancelled')),
+                result TEXT,
+                feedback TEXT,
+                session_id TEXT,
+                started_at TEXT NOT NULL DEFAULT (datetime('now')),
+                finished_at TEXT
+            );
+            CREATE INDEX idx_stage_run_task_started ON stage_run(task_id, started_at);
+
+            CREATE TABLE task_blocker (
+                blocked_item_id TEXT NOT NULL,
+                blocker_item_id TEXT NOT NULL,
+                PRIMARY KEY (blocked_item_id, blocker_item_id)
+            );
             "#,
         )
         .expect("test schema should be created");
