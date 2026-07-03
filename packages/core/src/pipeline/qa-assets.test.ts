@@ -1,6 +1,7 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+import { parsePipelineJson } from "./pipeline-loader";
 
 const repoRoot = resolve(process.cwd(), "../..");
 
@@ -51,6 +52,20 @@ describe("QA pipeline assets", () => {
     expect(qaPipeline).not.toContain("$SOURCE_WORKTREE");
   });
 
+  it("ships the approve step as the pr stage's post instead of a legacy post_action", () => {
+    const qaPipeline = readRepoFile(".kanna/pipelines/qa.json");
+    // Legacy `post_action` still compiles at load time for pinned
+    // pipeline_def snapshots, but shipped assets must use the current format.
+    expect(qaPipeline).not.toContain("post_action");
+    expect(readRepoFile(".kanna/pipelines/schema.json")).not.toContain("post_action");
+
+    const parsed = parsePipelineJson(qaPipeline);
+    const prStage = parsed.stages.find((stage) => stage.name === "pr");
+    expect(prStage?.post?.name).toBe("approve");
+    expect(prStage?.post?.agent).toBe("approve");
+    expect(prStage?.post?.prompt).toContain("$PREV_RESULT");
+  });
+
   it("keeps the PR agent agnostic to the development branch name", () => {
     const prAgent = readRepoFile(".kanna/agents/pr/AGENT.md");
 
@@ -63,7 +78,9 @@ describe("QA pipeline assets", () => {
     const mergeAgent = readRepoFile(".kanna/agents/merge/AGENT.md");
 
     expect(mergeAgent).toContain("PR metadata can explain intent, but topology decides ordering.");
+    expect(mergeAgent).toContain("Do not infer stack relationships from PR titles or descriptions");
     expect(mergeAgent).toContain("Do not delete a parent branch while an unmerged child still uses it");
+    expect(mergeAgent).toContain("After the full detected stack has merged, delete the stack branches that are no longer needed");
     expect(mergeAgent).toContain("gh pr merge <PR> --merge");
     expect(mergeAgent).toContain("Do not push directly to the target branch.");
     expect(mergeAgent).not.toContain("--delete-branch");

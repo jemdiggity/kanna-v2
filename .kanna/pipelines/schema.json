@@ -77,40 +77,6 @@
           "environment": {
             "type": "string"
           },
-          "post_action": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["name", "transition"],
-            "properties": {
-              "name": {
-                "type": "string",
-                "minLength": 1
-              },
-              "agent": {
-                "type": "string"
-              },
-              "prompt": {
-                "type": "string"
-              },
-              "agent_provider": {
-                "oneOf": [
-                  {
-                    "enum": ["codex", "claude", "copilot"]
-                  },
-                  {
-                    "type": "array",
-                    "items": {
-                      "enum": ["codex", "claude", "copilot"]
-                    },
-                    "minItems": 1
-                  }
-                ]
-              },
-              "transition": {
-                "enum": ["manual", "auto"]
-              }
-            }
-          },
           "policy": {
             "type": "object",
             "additionalProperties": false,
