@@ -55,6 +55,14 @@ export function createTerminalDisposalController(params: {
         event: "session_exit",
       })
     }
+    if (params.state.unlistenSessionCreated) {
+      params.state.unlistenSessionCreated()
+      console.warn("[terminal][instance] listener:remove", {
+        sessionId: params.sessionId,
+        instanceId: params.instanceId,
+        event: "session_created",
+      })
+    }
     if (params.state.unlistenDaemonReady) {
       params.state.unlistenDaemonReady()
       console.warn("[terminal][instance] listener:remove", {
@@ -77,6 +85,7 @@ export function createTerminalDisposalController(params: {
     params.terminal.value?.dispose()
     params.terminal.value = null
     params.state.unlistenExit = null
+    params.state.unlistenSessionCreated = null
     params.state.unlistenDaemonReady = null
     params.state.unlistenStreamLost = null
     params.state.unlistenSharedStreamConnection = null

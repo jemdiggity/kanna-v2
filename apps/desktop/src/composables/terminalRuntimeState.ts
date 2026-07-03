@@ -5,6 +5,7 @@ import type { InitializedTerminalView } from "./terminalView"
 
 export interface TerminalRuntimeState {
   unlistenExit: (() => void) | null
+  unlistenSessionCreated: (() => void) | null
   unlistenDaemonReady: (() => void) | null
   unlistenStreamLost: (() => void) | null
   unlistenSharedStreamConnection: (() => void) | null
@@ -30,6 +31,7 @@ export interface TerminalRuntimeState {
 export function createTerminalRuntimeState(): TerminalRuntimeState {
   return {
     unlistenExit: null,
+    unlistenSessionCreated: null,
     unlistenDaemonReady: null,
     unlistenStreamLost: null,
     unlistenSharedStreamConnection: null,
