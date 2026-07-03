@@ -449,8 +449,14 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
     const { mcpConfigPath } = await prepareKannaMcpRuntime(sessionId, env);
 
     const escapedPrompt = prompt.replace(/'/g, "'\\''");
-    const escapedSystemPrompt = buildKannaRuntimeSystemPrompt().replace(/'/g, "'\\''");
-    const escapedPromptWithPreamble = buildKannaRuntimeUserPrompt(prompt).replace(/'/g, "'\\''");
+    // Only the Claude PTY command registers kanna-mcp in this spawn path; the
+    // prompt-prepended providers fall back to kanna-cli per the guidance.
+    const escapedSystemPrompt = buildKannaRuntimeSystemPrompt({
+      taskId: sessionId,
+      provider: "claude",
+      mcpConfigured: !!mcpConfigPath,
+    }).replace(/'/g, "'\\''");
+    const escapedPromptWithPreamble = buildKannaRuntimeUserPrompt(prompt, { taskId: sessionId }).replace(/'/g, "'\\''");
     let agentCmd: string;
     let agentCmdPreamble: string | undefined;
     const permissionFlags = getAgentPermissionFlags(provider, options?.permissionMode);
@@ -641,7 +647,13 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
         prompt,
         env,
         agentProvider,
-        systemPrompt: buildKannaRuntimeSystemPrompt(),
+        systemPrompt: buildKannaRuntimeSystemPrompt({
+          taskId: sessionId,
+          stage: item.stage,
+          pipeline: item.pipeline,
+          provider: agentProvider,
+          mcpConfigured: !!mcpConfigPath,
+        }),
         mcpConfigPath: mcpConfigPath ?? null,
         permissionMode: spawnOptions.permissionMode ?? null,
         model: spawnOptions.model ?? null,

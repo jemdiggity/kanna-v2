@@ -208,6 +208,12 @@ pub(super) fn build_task_shell_command(
     command_parts.join(" && ")
 }
 
+/// Canonical Kanna runtime guidance shared with the desktop frontend.
+/// `packages/core/src/pipeline/prompt-builder.ts` mirrors this file as a TS
+/// constant; a sync test there keeps both sides byte-identical.
+const KANNA_TASK_ENVIRONMENT_TEMPLATE: &str =
+    include_str!("../../../../packages/core/src/pipeline/kanna-task-environment.md");
+
 pub(super) fn build_kanna_preamble(
     provider: &AgentProvider,
     task_id: &str,
@@ -216,29 +222,18 @@ pub(super) fn build_kanna_preamble(
     transition: Option<&str>,
     mcp_config_path: Option<&str>,
 ) -> String {
-    let provider_name = provider.as_str();
     let transition = transition.unwrap_or("manual");
-    let mut lines = vec![
-        "## Kanna Task Context".to_string(),
-        format!(
-            "You are `{provider_name}` running inside Kanna task `{task_id}`, stage `{stage_name}` of pipeline `{pipeline_name}` with transition `{transition}`."
-        ),
-        "You are not running inside a Kanna sandbox; use the normal shell tools available in this worktree.".to_string(),
-    ];
-    if mcp_config_path.is_some() {
-        lines.push(
-            "An instance-local `kanna-mcp` config is available at `KANNA_MCP_CONFIG`.".to_string(),
-        );
-        lines.push(kanna_mcp_launch_line(*provider));
+    // Mirrors buildKannaTaskContextLine in prompt-builder.ts — keep in sync.
+    let task_context = format!(
+        "This session was launched by Kanna as task `{task_id}`, stage `{stage_name}` of pipeline `{pipeline_name}` (transition: `{transition}`)."
+    );
+    let rendered = KANNA_TASK_ENVIRONMENT_TEMPLATE
+        .trim_end()
+        .replace("{{TASK_CONTEXT}}", &task_context);
+    match mcp_config_path {
+        Some(_) => rendered.replace("{{MCP_STATUS}}", &kanna_mcp_launch_line(*provider)),
+        None => rendered.replace("- {{MCP_STATUS}}\n", ""),
     }
-    lines.extend([
-        "Prefer `kanna-mcp` tools for Kanna task operations when your agent client exposes them.".to_string(),
-        "If MCP tools are unavailable, fall back to the instance-local `kanna-cli`; it is exported as `KANNA_CLI_PATH` and its directory is prepended to `PATH`.".to_string(),
-        "Use `kanna-cli guide` for the generated fallback CLI manual and current workflow semantics.".to_string(),
-        "Do not push a branch or create a pull request unless this stage's prompt explicitly tells you to do so. Most stages should finish by recording stage completion so Kanna can advance the configured pipeline.".to_string(),
-        "When this stage is complete, prefer MCP `kanna_complete_stage`; fallback: `kanna-cli stage-complete --task-id \"$KANNA_TASK_ID\" --status success --summary \"...\"`.".to_string(),
-    ]);
-    lines.join("\n")
 }
 
 fn kanna_mcp_launch_line(provider: AgentProvider) -> String {

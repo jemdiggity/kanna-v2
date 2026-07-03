@@ -185,13 +185,11 @@ async fn prepared_agent_task_spawn_includes_task_specific_kanna_context() {
             assert!(system_prompt.contains(&format!("task `{task_id}`")));
             assert!(system_prompt.contains("stage `verify`"));
             assert!(system_prompt.contains("pipeline `qa`"));
-            assert!(system_prompt.contains("transition `auto`"));
-            assert!(system_prompt.contains("instance-local `kanna-mcp` config is available"));
-            assert!(system_prompt.contains("Claude is launched with this config"));
-            assert!(system_prompt.contains("Prefer `kanna-mcp` tools for Kanna task operations"));
-            assert!(system_prompt.contains(
-                "If MCP tools are unavailable, fall back to the instance-local `kanna-cli`"
-            ));
+            assert!(system_prompt.contains("(transition: `auto`)"));
+            assert!(system_prompt.contains("## Kanna Task Environment"));
+            assert!(system_prompt.contains("Prefer the `kanna_*` MCP tools"));
+            assert!(system_prompt
+                .contains("If MCP tools are unavailable, fall back to the `kanna-cli` binary"));
             assert!(system_prompt.contains("KANNA_CLI_PATH"));
             assert!(system_prompt.contains("kanna-cli guide"));
             assert!(system_prompt.contains("kanna-cli stage-complete"));
@@ -256,7 +254,7 @@ async fn prepared_claude_pty_task_spawn_passes_kanna_context_as_append_system_pr
             assert!(shell_command.contains(&format!("task `{task_id}`")));
             assert!(shell_command.contains("stage `implement`"));
             assert!(shell_command.contains("pipeline `qa`"));
-            assert!(shell_command.contains("transition `manual`"));
+            assert!(shell_command.contains("(transition: `manual`)"));
             assert!(shell_command.contains("kanna-cli stage-complete"));
             // `--mcp-config` is variadic: without a `--` separator the CLI
             // consumes the positional prompt as a second config file and
@@ -322,7 +320,7 @@ async fn prepared_non_claude_pty_task_spawn_prepends_kanna_context_to_prompt() {
             assert!(shell_command.contains("copilot "));
             assert!(!shell_command.contains("--append-system-prompt"));
             let context_index = shell_command
-                .find("## Kanna Task Context")
+                .find("## Kanna Task Environment")
                 .expect("Kanna context should be prompt-prepended");
             let prompt_index = shell_command
                 .find("Use Copilot PTY")
@@ -331,7 +329,7 @@ async fn prepared_non_claude_pty_task_spawn_prepends_kanna_context_to_prompt() {
             assert!(shell_command.contains(&format!("task `{task_id}`")));
             assert!(shell_command.contains("stage `implement`"));
             assert!(shell_command.contains("pipeline `qa`"));
-            assert!(shell_command.contains("transition `manual`"));
+            assert!(shell_command.contains("(transition: `manual`)"));
             assert!(shell_command.contains("kanna-cli stage-complete"));
         }
         other => panic!("expected Spawn, got {other:?}"),
