@@ -5,8 +5,8 @@ use super::cloud_env::{
 use super::process::find_sidecar;
 use super::{
     current_server_version, default_desktop_name, desktop_credential, escape_toml_string,
-    file_sha256_hex, generate_device_token, local_server_port, resolved_db_path, server_base_url,
-    MobileServerState,
+    file_sha256_hex, generate_device_token, local_server_port_for_cloud_env, resolved_db_path,
+    server_base_url, MobileServerState,
 };
 use kanna_runtime_defaults::DesktopCloudEnvironment;
 use std::fs::{File, OpenOptions};
@@ -181,7 +181,7 @@ pub(super) fn build_server_config(state: &MobileServerState) -> Result<String, S
         escape_toml_string(&state.desktop_name),
         escape_toml_string(current_server_version()),
         firebase_config,
-        local_server_port(),
+        local_server_port_for_cloud_env(state.cloud_env),
         escape_toml_string(&pairing_store_path.to_string_lossy()),
     ))
 }
@@ -197,7 +197,7 @@ pub(super) fn server_config_matches_runtime(
     let state = MobileServerState {
         status: "stopped".to_string(),
         desktop_name: default_desktop_name(),
-        api_base_url: server_base_url(local_server_port()),
+        api_base_url: server_base_url(local_server_port_for_cloud_env(cloud_env)),
         config_path: config_path.to_path_buf(),
         started: false,
         cloud_env,
@@ -245,7 +245,7 @@ pub(super) fn server_config_matches_runtime(
             "firebase_project_id = \"{}\"",
             escape_toml_string(&expected_firebase_project_id)
         ),
-        format!("lan_port = {}", local_server_port()),
+        format!("lan_port = {}", local_server_port_for_cloud_env(cloud_env)),
     ];
     if let Some(device_token) = expected_device_token {
         required_lines.push(format!(
@@ -600,6 +600,7 @@ mod tests {
             unset_env_var("KANNA_RELAY_PORT");
             unset_env_var("KANNA_RELAY_URL");
             unset_env_var("KANNA_FIREBASE_PROJECT_ID");
+            unset_env_var("KANNA_MOBILE_SERVER_PORT");
             set_env_var("KANNA_FIREBASE_AUTH_PORT", "19099");
             set_env_var("KANNA_FIREBASE_FIRESTORE_PORT", "18080");
         }
@@ -617,6 +618,7 @@ mod tests {
 
         assert!(config.contains("relay_url = \"wss://relay-staging.kanna.build\""));
         assert!(config.contains("firebase_project_id = \"kanna-staging\""));
+        assert!(config.contains("lan_port = 48121"));
         assert!(!config.contains("firebase_auth_emulator_url"));
         assert!(!config.contains("firebase_firestore_emulator_host"));
 
