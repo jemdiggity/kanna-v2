@@ -312,47 +312,6 @@ fn update_pipeline_item_stage_does_not_mutate_closed_rows() {
 }
 
 #[test]
-fn update_pipeline_item_stage_state_does_not_mutate_closed_rows() {
-    let path = temp_db_path();
-    let conn = Connection::open(&path).expect("open temp db");
-    conn.execute_batch(
-        r#"
-            CREATE TABLE pipeline_item (
-              id TEXT PRIMARY KEY,
-              stage TEXT NOT NULL,
-              stage_result TEXT,
-              closed_at TEXT,
-              updated_at TEXT
-            );
-            INSERT INTO pipeline_item (id, stage, stage_result, closed_at)
-            VALUES ('task-1', 'pr', '{"status":"success"}', '2026-06-03 00:02:25');
-            "#,
-    )
-    .expect("seed db");
-    drop(conn);
-
-    let db = Db::open(path.to_str().expect("utf8 path")).expect("open db");
-    let err = db
-        .update_pipeline_item_stage_state("task-1", "review", None)
-        .expect_err("closed task should not be stage-state-mutated");
-
-    assert!(matches!(err, rusqlite::Error::QueryReturnedNoRows));
-    let conn = Connection::open(&path).expect("re-open db");
-    let (stage, stage_result, closed_at): (String, Option<String>, Option<String>) = conn
-        .query_row(
-            "SELECT stage, stage_result, closed_at FROM pipeline_item WHERE id = 'task-1'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .expect("query row");
-    assert_eq!(stage, "pr");
-    assert_eq!(stage_result.as_deref(), Some("{\"status\":\"success\"}"));
-    assert_eq!(closed_at.as_deref(), Some("2026-06-03 00:02:25"));
-
-    let _ = std::fs::remove_file(path);
-}
-
-#[test]
 fn resolves_pipeline_item_id_from_task_branch_name() {
     let path = Db::test_db_path("resolve-task-branch-name");
     let db = Db::open_for_tests(&path).expect("open test db");
@@ -485,23 +444,31 @@ fn resolves_task_terminal_session_id_from_latest_running_stage_run() {
         "claude",
     )
     .unwrap();
-    db.insert_stage_run(
-        "run-old",
-        "710917fb",
-        "in progress",
-        "finished",
-        Some("daemon-old"),
-        None,
-    )
+    db.insert_stage_run(NewStageRun {
+        id: "run-old",
+        task_id: "710917fb",
+        stage: "in progress",
+        agent: None,
+        agent_provider: None,
+        model: None,
+        status: "succeeded",
+        result: None,
+        feedback: None,
+        session_id: Some("daemon-old"),
+    })
     .unwrap();
-    db.insert_stage_run(
-        "run-current",
-        "710917fb",
-        "review",
-        "running",
-        Some("daemon-current"),
-        Some("address review feedback"),
-    )
+    db.insert_stage_run(NewStageRun {
+        id: "run-current",
+        task_id: "710917fb",
+        stage: "review",
+        agent: None,
+        agent_provider: None,
+        model: None,
+        status: "running",
+        result: None,
+        feedback: Some("address review feedback"),
+        session_id: Some("daemon-current"),
+    })
     .unwrap();
 
     assert_eq!(

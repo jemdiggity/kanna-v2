@@ -111,6 +111,18 @@ async fn request_revision_route_resolves_branch_style_task_id() {
         let mut line = String::new();
         reader.read_line(&mut line).await.unwrap();
         let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+        assert!(matches!(
+            command,
+            DaemonCommand::Kill { ref session_id } if session_id == "710917fb"
+        ));
+        write_half
+            .write_all(format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap()).as_bytes())
+            .await
+            .unwrap();
+
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
         let session_id = match command {
             DaemonCommand::SpawnAgent { session_id, params } => {
                 assert_eq!(params.agent_provider, AgentProvider::Claude);
@@ -212,19 +224,23 @@ async fn request_revision_route_resolves_branch_style_task_id() {
         .await
         .unwrap();
     let created: TaskActionResponse = from_slice(&body).unwrap();
-    assert_ne!(created.task_id, "710917fb");
+    assert_eq!(created.task_id, "710917fb");
 
     let db = Db::open(&config.db_path).unwrap();
     let source = db.get_task_stage_source("710917fb").unwrap().unwrap();
-    assert_eq!(source.stage.as_deref(), Some("done"));
-    assert!(source.closed_at.is_some());
-    let stage_result = source.stage_result.as_deref().unwrap();
-    assert!(stage_result.contains("\"status\":\"failure\""));
-    assert!(stage_result.contains("missing e2e coverage"));
+    assert_eq!(source.stage.as_deref(), Some("in progress"));
+    assert_eq!(source.closed_at, None);
+    let stage_runs = db.list_stage_runs_for_task("710917fb").unwrap();
+    let revision_run = stage_runs
+        .iter()
+        .find(|run| run.stage == "in progress" && run.status == "running")
+        .expect("source task should record a running revision stage");
+    assert_eq!(
+        revision_run.feedback.as_deref(),
+        Some("Add e2e coverage for task creation.")
+    );
 
-    let revision = db.get_task_stage_source(&created.task_id).unwrap().unwrap();
-    assert_eq!(revision.stage.as_deref(), Some("in progress"));
-    assert_eq!(revision.base_ref.as_deref(), Some("task-710917fb"));
+    assert_eq!(source.branch.as_deref(), Some("task-710917fb"));
 
     daemon_server.await.unwrap();
     let _ = std::fs::remove_file(&socket_path);
@@ -309,6 +325,18 @@ async fn request_revision_route_preserves_title_and_sends_revision_prompt() {
         let (stream, _) = daemon_listener.accept().await.unwrap();
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+        assert!(matches!(
+            command,
+            DaemonCommand::Kill { ref session_id } if session_id == "review-task"
+        ));
+        write_half
+            .write_all(format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap()).as_bytes())
+            .await
+            .unwrap();
+
         let mut line = String::new();
         reader.read_line(&mut line).await.unwrap();
         let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
@@ -416,21 +444,19 @@ async fn request_revision_route_preserves_title_and_sends_revision_prompt() {
         .await
         .unwrap();
     let created: TaskActionResponse = from_slice(&body).unwrap();
-    assert_ne!(created.task_id, "review-task");
+    assert_eq!(created.task_id, "review-task");
 
     let db = Db::open(&config.db_path).unwrap();
     let reviewed = db.get_task_stage_source("review-task").unwrap().unwrap();
-    let revision = db.get_task_stage_source(&created.task_id).unwrap().unwrap();
-    assert_eq!(reviewed.stage.as_deref(), Some("done"));
-    assert!(reviewed.closed_at.is_some());
-    assert_eq!(revision.stage.as_deref(), Some("in progress"));
+    assert_eq!(reviewed.stage.as_deref(), Some("in progress"));
+    assert_eq!(reviewed.closed_at, None);
     assert_eq!(
-        revision.display_name.as_deref(),
+        reviewed.display_name.as_deref(),
         Some("Preserved review title")
     );
     assert_eq!(
-        revision.prompt.as_deref(),
-        Some("Implement revision:\nAdd E2E coverage for title preservation.")
+        reviewed.prompt.as_deref(),
+        Some("Review prompt that should stay hidden.")
     );
 
     daemon_server.await.unwrap();

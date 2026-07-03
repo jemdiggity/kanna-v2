@@ -31,7 +31,6 @@ async fn spawn_prepared_task_sends_spawn_agent_for_agent_sessions() {
             mcp_config_path: None,
             executable: None,
         },
-        follow_task: None,
     };
 
     let created = spawn_prepared_task(&mut client, prepared).await.unwrap();

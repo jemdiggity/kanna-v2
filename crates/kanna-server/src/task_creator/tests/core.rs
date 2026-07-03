@@ -218,6 +218,49 @@ fn prepare_task_defaults_to_agent_session_for_claude_and_codex() {
 }
 
 #[test]
+fn prepare_task_for_api_creates_worktree_without_cargo_config() {
+    let repo_root = init_git_repo("no-cargo-config");
+    let config = test_config("no-cargo-config");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+
+    let prepared = prepare_task_for_api(
+        &db,
+        &config,
+        CreateTaskRequest {
+            repo_id: "repo-1".to_string(),
+            prompt: "Create a task worktree".to_string(),
+            display_name: None,
+            pipeline_name: None,
+            base_ref: None,
+            agent_provider: Some("claude".to_string()),
+            agent_type: Some("agent".to_string()),
+            model: None,
+            permission_mode: None,
+            allowed_tools: None,
+            notify_task_id: None,
+            parent_task_id: None,
+            blocker_task_ids: None,
+        },
+    )
+    .unwrap();
+
+    assert!(prepared.cwd.contains(".kanna-worktrees/task-"));
+    // This boundary test exercises the real server-side task worktree creation
+    // without booting the full desktop app, which is too heavyweight for this
+    // filesystem side-effect regression.
+    assert!(
+        !std::path::Path::new(&prepared.cwd)
+            .join(".cargo/config.toml")
+            .exists(),
+        "fresh Kanna-created task worktrees must not receive .cargo/config.toml"
+    );
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
 fn prepare_codex_agent_uses_resolved_executable_for_headless_spawn() {
     let _sidecar_guard = super::TEST_SIDECAR_LOCK.lock().unwrap();
     let (codex_sidecar, created_sidecar) = ensure_test_sidecar("codex");
