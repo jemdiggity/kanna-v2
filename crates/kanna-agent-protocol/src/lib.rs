@@ -15,6 +15,7 @@ pub mod claude;
 pub mod codex;
 mod events;
 pub mod frames;
+pub mod mcp;
 pub mod opencode;
 
 pub use adapter::{Capabilities, InterruptAction, ProviderAdapter, SpawnCtx, SpawnSpec, TurnModel};

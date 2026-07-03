@@ -12,6 +12,7 @@ use crate::adapter::{
     Capabilities, InterruptAction, ProviderAdapter, SpawnCtx, SpawnSpec, TurnModel,
 };
 use crate::events::{truncate_text, AgentEvent, PermissionDecision, TurnStats, TurnStatus};
+use crate::mcp::{opencode_mcp_config_content, read_kanna_mcp_server};
 
 /// Adapter for the Opencode CLI.
 #[derive(Debug, Default)]
@@ -48,6 +49,15 @@ impl OpencodeAdapter {
             args.push(model.clone());
         }
         args
+    }
+
+    fn mcp_env(ctx: &SpawnCtx) -> Vec<(String, String)> {
+        ctx.mcp_config_path
+            .as_deref()
+            .and_then(read_kanna_mcp_server)
+            .and_then(|server| opencode_mcp_config_content(&server))
+            .map(|content| vec![("OPENCODE_CONFIG_CONTENT".to_string(), content)])
+            .unwrap_or_default()
     }
 
     fn capture_session_id(&mut self, value: &Value) {
@@ -262,7 +272,7 @@ impl ProviderAdapter for OpencodeAdapter {
         SpawnSpec {
             executable: "opencode".to_string(),
             args,
-            env: Vec::new(),
+            env: Self::mcp_env(ctx),
             initial_stdin: None,
         }
     }
@@ -274,7 +284,7 @@ impl ProviderAdapter for OpencodeAdapter {
         SpawnSpec {
             executable: "opencode".to_string(),
             args,
-            env: Vec::new(),
+            env: Self::mcp_env(ctx),
             initial_stdin: None,
         }
     }

@@ -18,6 +18,7 @@ use crate::adapter::{
     Capabilities, InterruptAction, ProviderAdapter, SpawnCtx, SpawnSpec, TurnModel,
 };
 use crate::events::{truncate_text, AgentEvent, PermissionDecision, TurnStats, TurnStatus};
+use crate::mcp::{codex_mcp_config_overrides, read_kanna_mcp_server};
 
 /// Adapter for the Codex CLI.
 #[derive(Debug, Default)]
@@ -48,6 +49,16 @@ impl CodexAdapter {
 
     fn base_args(ctx: &SpawnCtx) -> Vec<String> {
         let mut args = vec!["exec".to_string()];
+        if let Some(server) = ctx
+            .mcp_config_path
+            .as_deref()
+            .and_then(read_kanna_mcp_server)
+        {
+            for value in codex_mcp_config_overrides(&server) {
+                args.push("-c".to_string());
+                args.push(value);
+            }
+        }
         if Self::should_bypass_sandbox(ctx) {
             args.push("--dangerously-bypass-approvals-and-sandbox".to_string());
         }
@@ -247,11 +258,19 @@ impl ProviderAdapter for CodexAdapter {
     }
 
     fn resume_spawn(&self, ctx: &SpawnCtx, session_id: &str, message: &str) -> SpawnSpec {
-        let mut args = vec![
-            "exec".to_string(),
-            "resume".to_string(),
-            session_id.to_string(),
-        ];
+        let mut args = vec!["exec".to_string()];
+        if let Some(server) = ctx
+            .mcp_config_path
+            .as_deref()
+            .and_then(read_kanna_mcp_server)
+        {
+            for value in codex_mcp_config_overrides(&server) {
+                args.push("-c".to_string());
+                args.push(value);
+            }
+        }
+        args.push("resume".to_string());
+        args.push(session_id.to_string());
         if Self::should_bypass_sandbox(ctx) {
             args.push("--dangerously-bypass-approvals-and-sandbox".to_string());
         }
