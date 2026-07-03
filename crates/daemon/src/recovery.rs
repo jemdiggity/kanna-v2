@@ -847,7 +847,7 @@ fn workspace_binary_launcher() -> Option<RecoveryLauncher> {
 }
 
 fn cargo_manifest_launcher() -> Option<RecoveryLauncher> {
-    let cargo = find_in_path("cargo")?;
+    let cargo = kanna_runtime_defaults::which_binary("cargo")?;
     let manifest = workspace_root()?.join("packages/terminal-recovery/Cargo.toml");
     manifest.exists().then_some(RecoveryLauncher {
         program: cargo,
@@ -880,18 +880,6 @@ fn workspace_root() -> Option<PathBuf> {
         .parent()
         .and_then(Path::parent)
         .map(Path::to_path_buf)
-}
-
-fn find_in_path(binary: &str) -> Option<PathBuf> {
-    let path_var = std::env::var_os("PATH")?;
-    std::env::split_paths(&path_var).find_map(|dir| {
-        let candidate = dir.join(binary);
-        if candidate.is_file() {
-            Some(candidate)
-        } else {
-            None
-        }
-    })
 }
 
 fn unique_test_snapshot_dir() -> PathBuf {

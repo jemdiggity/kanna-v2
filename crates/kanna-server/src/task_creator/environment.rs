@@ -3,8 +3,6 @@ use super::provider::AgentProvider;
 use crate::config::Config;
 use crate::db::Db;
 use std::collections::{HashMap, HashSet};
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -309,10 +307,7 @@ fn resolve_workspace_path(worktree_path: &str, entry: &str) -> String {
 }
 
 fn resolve_binary_from_path(name: &str, path: &str) -> Option<String> {
-    path.split(':')
-        .filter(|entry| !entry.is_empty())
-        .map(|entry| Path::new(entry).join(name))
-        .find(|candidate| is_executable_file(candidate))
+    kanna_runtime_defaults::which_binary_in_path(name, path)
         .map(|candidate| candidate.to_string_lossy().to_string())
 }
 
@@ -327,20 +322,8 @@ fn resolve_workspace_binary_from_path(
         .map(Path::new)
         .filter(|entry| entry.starts_with(worktree_path))
         .map(|entry| entry.join(name))
-        .find(|candidate| is_executable_file(candidate))
+        .find(|candidate| kanna_runtime_defaults::is_executable_file(candidate))
         .map(|candidate| candidate.to_string_lossy().to_string())
-}
-
-#[cfg(unix)]
-fn is_executable_file(path: &Path) -> bool {
-    std::fs::metadata(path)
-        .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
-        .unwrap_or(false)
-}
-
-#[cfg(not(unix))]
-fn is_executable_file(path: &Path) -> bool {
-    path.is_file()
 }
 
 pub(super) fn resolve_binary_from_candidates_with_path_lookup<F>(

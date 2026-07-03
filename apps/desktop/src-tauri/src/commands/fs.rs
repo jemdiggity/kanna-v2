@@ -1,7 +1,6 @@
 use serde::Serialize;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
 use std::sync::OnceLock;
 use tauri::AppHandle;
 use tauri::Manager;
@@ -339,16 +338,9 @@ pub fn which_binary(name: String) -> Result<String, String> {
 
 fn resolve_binary_from_candidates(name: &str, candidates: Vec<PathBuf>) -> Result<String, String> {
     resolve_binary_from_candidates_with_path_lookup(name, candidates, |name| {
-        let output = Command::new("which")
-            .arg(name)
-            .output()
-            .map_err(|e| format!("failed to run which: {}", e))?;
-
-        if output.status.success() {
-            Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-        } else {
-            Err(format!("binary '{}' not found in PATH", name))
-        }
+        kanna_runtime_defaults::which_binary(name)
+            .map(|path| path.to_string_lossy().to_string())
+            .ok_or_else(|| format!("binary '{}' not found in PATH", name))
     })
 }
 
@@ -363,16 +355,8 @@ where
     kanna_runtime_defaults::resolve_binary_from_candidates(name, candidates, path_lookup)
 }
 
-pub fn current_target_triple() -> &'static str {
-    kanna_runtime_defaults::current_target_triple()
-}
-
 pub fn sidecar_candidates(name: &str) -> Vec<PathBuf> {
     kanna_runtime_defaults::sidecar_candidates(name)
-}
-
-pub fn sidecar_candidates_for_exe(current_exe: &Path, name: &str) -> Vec<PathBuf> {
-    kanna_runtime_defaults::sidecar_candidates_for_exe(current_exe, name)
 }
 
 fn bundled_cloud_env(app: &AppHandle) -> Option<&'static str> {

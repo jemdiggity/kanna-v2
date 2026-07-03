@@ -781,7 +781,7 @@ fn find_sidecar(name: &str) -> Result<PathBuf, String> {
         let suffixed = dir.join(format!(
             "{}-{}",
             name,
-            crate::commands::fs::current_target_triple()
+            kanna_runtime_defaults::current_target_triple()
         ));
         if suffixed.exists() {
             return Ok(suffixed);
@@ -2964,7 +2964,7 @@ while True:
             manifest_dir.join("binaries"),
             repo_root
                 .join(".build")
-                .join(crate::commands::fs::current_target_triple())
+                .join(kanna_runtime_defaults::current_target_triple())
                 .join("debug"),
             repo_root.join(".build").join("debug"),
         ]
@@ -2972,7 +2972,7 @@ while True:
         .find(|dir| {
             dir.join(format!(
                 "kanna-server-{}",
-                crate::commands::fs::current_target_triple()
+                kanna_runtime_defaults::current_target_triple()
             ))
             .is_file()
                 || dir.join("kanna-server").is_file()
@@ -2983,7 +2983,7 @@ while True:
         let dir = test_sidecar_dir()?;
         let suffixed = dir.join(format!(
             "kanna-server-{}",
-            crate::commands::fs::current_target_triple()
+            kanna_runtime_defaults::current_target_triple()
         ));
         if suffixed.is_file() {
             return Some(suffixed);

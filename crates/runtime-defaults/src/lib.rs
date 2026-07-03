@@ -274,6 +274,35 @@ where
     path_lookup(name)
 }
 
+pub fn which_binary(name: &str) -> Option<PathBuf> {
+    std::env::var_os("PATH").and_then(|path| which_binary_in_path_os(name, &path))
+}
+
+pub fn which_binary_in_path(name: &str, path: &str) -> Option<PathBuf> {
+    which_binary_in_path_os(name, std::ffi::OsStr::new(path))
+}
+
+pub fn which_binary_in_path_os(name: &str, path: &std::ffi::OsStr) -> Option<PathBuf> {
+    std::env::split_paths(path)
+        .filter(|entry| !entry.as_os_str().is_empty())
+        .map(|entry| entry.join(name))
+        .find(|candidate| is_executable_file(candidate))
+}
+
+#[cfg(unix)]
+pub fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::metadata(path)
+        .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+pub fn is_executable_file(path: &Path) -> bool {
+    path.is_file()
+}
+
 fn macos_app_support_dir_for_home(home: &Path) -> PathBuf {
     home.join("Library").join("Application Support")
 }
@@ -476,6 +505,47 @@ mod tests {
     }
 
     #[test]
+    fn which_binary_in_path_finds_executable_in_explicit_path() {
+        let unique = std::env::temp_dir().join(format!(
+            "kanna-runtime-defaults-path-{}",
+            std::process::id()
+        ));
+        let first = unique.join("first");
+        let second = unique.join("second");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+
+        let binary = second.join("kanna-cli");
+        std::fs::write(&binary, b"#!/bin/sh\n").unwrap();
+        make_executable(&binary);
+
+        let path = format!("{}:{}", first.display(), second.display());
+        assert_eq!(which_binary_in_path("kanna-cli", &path), Some(binary));
+
+        let _ = std::fs::remove_dir_all(unique);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn which_binary_in_path_rejects_non_executable_files() {
+        let unique = std::env::temp_dir().join(format!(
+            "kanna-runtime-defaults-path-nonexec-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&unique).unwrap();
+
+        let binary = unique.join("kanna-cli");
+        std::fs::write(&binary, b"#!/bin/sh\n").unwrap();
+
+        assert_eq!(
+            which_binary_in_path("kanna-cli", unique.to_string_lossy().as_ref()),
+            None
+        );
+
+        let _ = std::fs::remove_dir_all(unique);
+    }
+
+    #[test]
     fn preferred_db_path_uses_existing_legacy_only_when_canonical_is_absent() {
         let unique =
             std::env::temp_dir().join(format!("kanna-runtime-defaults-{}", std::process::id()));
@@ -499,6 +569,18 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(unique);
     }
+
+    #[cfg(unix)]
+    fn make_executable(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut permissions = std::fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).unwrap();
+    }
+
+    #[cfg(not(unix))]
+    fn make_executable(_path: &Path) {}
 
     #[test]
     fn desktop_cloud_environment_resolves_from_release_bundle_identifier() {
