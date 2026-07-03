@@ -44,14 +44,16 @@ If `.kanna/config.schema.json` exists in this checkout, read it before editing t
 
 Report the fields you added or changed, any assumptions you made, and any validation command you ran.
 
+Record the stage result so Kanna can advance the pipeline. Prefer the `kanna_complete_stage` MCP tool; use the `kanna-cli` fallback only when MCP tools are unavailable.
+
 When done:
 
 ```bash
-kanna-cli stage-complete --task-id $KANNA_TASK_ID --status success --summary "Created or updated .kanna/config.json"
+kanna-cli stage-complete --task-id "$KANNA_TASK_ID" --status success --summary "Created or updated .kanna/config.json"
 ```
 
 If unable to complete:
 
 ```bash
-kanna-cli stage-complete --task-id $KANNA_TASK_ID --status failure --summary "Could not create or update .kanna/config.json: <reason>"
+kanna-cli stage-complete --task-id "$KANNA_TASK_ID" --status failure --summary "Could not create or update .kanna/config.json: <reason>"
 ```

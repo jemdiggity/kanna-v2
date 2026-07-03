@@ -28,11 +28,11 @@ The review stage is an oversight checkpoint, not a place to patch and approve yo
 
 ## Coverage Standard
 
-Require E2E coverage when the behavior crosses component or system boundaries, including:
+Require E2E or integration coverage when the behavior crosses component or system boundaries, including:
 
 - UI flows, navigation, shortcuts, modals, or user journeys
-- frontend or mobile interactions with backend APIs
-- daemon, PTY, process, filesystem, git, network, or server behavior
+- client interactions with server or backend APIs
+- process, filesystem, git, network, or server behavior
 - persistence, reload, reconnect, recovery, or transfer behavior
 - async coordination where isolated unit tests do not prove the wiring
 
@@ -46,7 +46,7 @@ If E2E coverage is applicable but not feasible, the branch must explicitly docum
 
 ## Passing Review
 
-If the branch is ready for human PR review with no required changes, run:
+If the branch is ready for human PR review with no required changes, record success. Prefer the `kanna_complete_stage` MCP tool; use the `kanna-cli` fallback only when MCP tools are unavailable:
 
 ```bash
 kanna-cli stage-complete --task-id "$KANNA_TASK_ID" --status success --summary "QA passed: <brief coverage summary>"
@@ -54,7 +54,7 @@ kanna-cli stage-complete --task-id "$KANNA_TASK_ID" --status success --summary "
 
 ## Requesting Revision
 
-If coverage is missing, too weak, or any branch changes are required, create a new revision task instead of approving the branch:
+If coverage is missing, too weak, or any branch changes are required, request a revision instead of approving the branch. Prefer the `kanna_request_revision` MCP tool (`task_id`, `target_stage`, `summary`, `prompt`); CLI fallback:
 
 ```bash
 kanna-cli task request-revision \

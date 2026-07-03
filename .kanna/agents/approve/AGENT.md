@@ -44,4 +44,8 @@ You are the approve post agent. You run after the PR stage in pipelines that opt
      kanna-cli stage-complete --task-id "$KANNA_TASK_ID" --status success --summary "Approved PR and signaled merge master: <url>"
      ```
 
-If a required command fails, fix the issue when it is clearly local and safe. Otherwise complete the stage as failure with a concise reason.
+If a required command fails, fix the issue when it is clearly local and safe. Otherwise complete the stage as failure with a concise reason — MCP `kanna_complete_stage` with status `failure`, or:
+
+```bash
+kanna-cli stage-complete --task-id "$KANNA_TASK_ID" --status failure --summary "<why approval is blocked>"
+```

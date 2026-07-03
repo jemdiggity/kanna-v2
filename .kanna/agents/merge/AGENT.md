@@ -83,16 +83,16 @@ After processing all queued requests, report:
 
 ## Completion
 
-When you have finished processing the current queue, run:
+Always record the stage result before finishing a merge-master turn. Prefer the `kanna_complete_stage` MCP tool; use the `kanna-cli` fallback only when MCP tools are unavailable.
 
-```
-kanna-cli stage-complete --task-id $KANNA_TASK_ID --status success --summary "Brief summary of merge results"
-```
+When you have finished processing the current queue, record success:
 
-If you were unable to complete the queue, run:
-
-```
-kanna-cli stage-complete --task-id $KANNA_TASK_ID --status failure --summary "Brief description of what went wrong"
+```bash
+kanna-cli stage-complete --task-id "$KANNA_TASK_ID" --status success --summary "<brief summary of merge results>"
 ```
 
-Always call `kanna-cli stage-complete` before finishing a merge-master turn.
+If you were unable to complete the queue, record failure:
+
+```bash
+kanna-cli stage-complete --task-id "$KANNA_TASK_ID" --status failure --summary "<what went wrong>"
+```

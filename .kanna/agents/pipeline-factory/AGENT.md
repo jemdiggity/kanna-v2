@@ -79,10 +79,12 @@ The following agents ship with Kanna and can be referenced in any pipeline:
 
 - `implement` — coding agent that implements the task
 - `commit` — continues the implementation task and commits relevant work before PR creation
+- `review` — QA review agent that verifies test coverage and requests revisions
 - `pr` — creates a GitHub pull request
 - `merge` — safely merges pull requests
 - `agent-factory` — creates new agent definitions
 - `pipeline-factory` — creates new pipeline definitions
+- `config-factory` — creates or updates `.kanna/config.json`
 
 ## Your Process
 
@@ -94,8 +96,16 @@ The following agents ship with Kanna and can be referenced in any pipeline:
 
 ## Completion
 
-After writing the pipeline file, run:
+Record the stage result so Kanna can advance the pipeline. Prefer the `kanna_complete_stage` MCP tool; use the `kanna-cli` fallback only when MCP tools are unavailable.
 
+After writing the pipeline file, record success:
+
+```bash
+kanna-cli stage-complete --task-id "$KANNA_TASK_ID" --status success --summary "Created pipeline: <name>"
 ```
-kanna-cli stage-complete --task-id $KANNA_TASK_ID --status success --summary "Created pipeline: <name>"
+
+If you cannot produce a complete pipeline definition, record failure with the reason:
+
+```bash
+kanna-cli stage-complete --task-id "$KANNA_TASK_ID" --status failure --summary "<why the pipeline could not be created>"
 ```
