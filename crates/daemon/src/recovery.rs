@@ -866,40 +866,13 @@ fn bundled_runtime_launcher() -> Option<RecoveryLauncher> {
 }
 
 fn bundled_runtime_launcher_from_exe(exe: &Path) -> Option<RecoveryLauncher> {
-    let exe_dir = exe.parent()?;
-    let candidates = [
-        exe_dir.join(format!(
-            "kanna-terminal-recovery-{}",
-            current_target_triple()
-        )),
-        exe_dir.join("kanna-terminal-recovery"),
-        exe_dir.join("../Resources/kanna-terminal-recovery"),
-    ];
-
-    candidates
+    kanna_runtime_defaults::sidecar_candidates_for_exe(exe, "kanna-terminal-recovery")
         .into_iter()
         .find(|candidate| candidate.exists())
         .map(|program| RecoveryLauncher {
             program,
             args: Vec::new(),
         })
-}
-
-fn current_target_triple() -> &'static str {
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    {
-        "aarch64-apple-darwin"
-    }
-
-    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-    {
-        "x86_64-apple-darwin"
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        "unknown-target"
-    }
 }
 
 fn workspace_root() -> Option<PathBuf> {
@@ -934,34 +907,6 @@ fn unique_test_snapshot_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn bundled_runtime_launcher_prefers_rust_sidecar_and_resource_binary() {
-        let root = std::env::temp_dir().join(format!(
-            "kanna-recovery-launcher-test-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&root);
-
-        let exe_dir = root.join("Contents/MacOS");
-        let resources_dir = root.join("Contents/Resources");
-        std::fs::create_dir_all(&exe_dir).unwrap();
-        std::fs::create_dir_all(&resources_dir).unwrap();
-
-        let exe = exe_dir.join("kanna-daemon");
-        let binary = exe_dir.join("kanna-terminal-recovery");
-        let resource_binary = resources_dir.join("kanna-terminal-recovery");
-
-        std::fs::write(&exe, "").unwrap();
-        std::fs::write(&binary, "").unwrap();
-        std::fs::write(&resource_binary, "").unwrap();
-
-        let launcher = bundled_runtime_launcher_from_exe(&exe).unwrap();
-        assert_eq!(launcher.program, binary);
-        assert!(launcher.args.is_empty());
-
-        let _ = std::fs::remove_dir_all(&root);
-    }
 
     #[tokio::test]
     async fn seeded_snapshot_is_readable_without_live_recovery_worker() {

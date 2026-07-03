@@ -212,6 +212,68 @@ pub fn socket_path(dir: &Path) -> PathBuf {
     PathBuf::from(format!("/tmp/kanna-{hash:08x}.sock"))
 }
 
+pub fn current_target_triple() -> &'static str {
+    #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+    {
+        "aarch64-apple-darwin"
+    }
+    #[cfg(all(target_arch = "x86_64", target_os = "macos"))]
+    {
+        "x86_64-apple-darwin"
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        "unknown-target"
+    }
+}
+
+pub fn sidecar_candidates(name: &str) -> Vec<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .map(|exe| sidecar_candidates_for_exe(&exe, name))
+        .unwrap_or_default()
+}
+
+pub fn sidecar_candidates_for_exe(current_exe: &Path, name: &str) -> Vec<PathBuf> {
+    let Some(exe_dir) = current_exe.parent() else {
+        return Vec::new();
+    };
+
+    let sidecar_name = format!("{}-{}", name, current_target_triple());
+    let mut candidates = vec![exe_dir.join(name), exe_dir.join(&sidecar_name)];
+
+    if let (Some(build_root), Some(profile_dir)) = (exe_dir.parent(), exe_dir.file_name()) {
+        if build_root.file_name().is_some_and(|dir| dir == ".build")
+            && matches!(profile_dir.to_str(), Some("debug" | "release"))
+        {
+            let triple_dir = build_root.join(current_target_triple()).join(profile_dir);
+            candidates.push(triple_dir.join(name));
+            candidates.push(triple_dir.join(&sidecar_name));
+        }
+    }
+
+    candidates.push(exe_dir.join("../Resources").join(&sidecar_name));
+    candidates.push(exe_dir.join("../Resources").join(name));
+    candidates
+}
+
+pub fn resolve_binary_from_candidates<F>(
+    name: &str,
+    candidates: Vec<PathBuf>,
+    path_lookup: F,
+) -> Result<String, String>
+where
+    F: FnOnce(&str) -> Result<String, String>,
+{
+    for candidate in candidates {
+        if candidate.exists() {
+            return Ok(candidate.to_string_lossy().to_string());
+        }
+    }
+
+    path_lookup(name)
+}
+
 fn macos_app_support_dir_for_home(home: &Path) -> PathBuf {
     home.join("Library").join("Application Support")
 }
@@ -338,6 +400,79 @@ mod tests {
         ] {
             assert_eq!(socket_path(dir), legacy_socket_path(dir));
         }
+    }
+
+    #[test]
+    fn sidecar_candidates_cover_dev_runtime_layout() {
+        let current_exe = Path::new("/repo/.build/debug/kanna-desktop");
+        let candidates = sidecar_candidates_for_exe(current_exe, "kanna-daemon");
+
+        assert_eq!(candidates[0], Path::new("/repo/.build/debug/kanna-daemon"));
+        assert_eq!(
+            candidates[1],
+            Path::new(&format!(
+                "/repo/.build/debug/kanna-daemon-{}",
+                current_target_triple()
+            ))
+        );
+        assert!(candidates.contains(
+            &Path::new(&format!(
+                "/repo/.build/{}/debug/kanna-daemon",
+                current_target_triple()
+            ))
+            .to_path_buf()
+        ));
+    }
+
+    #[test]
+    fn sidecar_candidates_cover_bundled_resource_layout() {
+        let current_exe = Path::new("/Applications/Kanna.app/Contents/MacOS/kanna-desktop");
+        let candidates = sidecar_candidates_for_exe(current_exe, "kanna-server");
+
+        assert_eq!(
+            candidates[0],
+            Path::new("/Applications/Kanna.app/Contents/MacOS/kanna-server")
+        );
+        assert_eq!(
+            candidates[1],
+            Path::new(&format!(
+                "/Applications/Kanna.app/Contents/MacOS/kanna-server-{}",
+                current_target_triple()
+            ))
+        );
+        assert!(candidates.contains(
+            &Path::new(&format!(
+                "/Applications/Kanna.app/Contents/MacOS/../Resources/kanna-server-{}",
+                current_target_triple()
+            ))
+            .to_path_buf()
+        ));
+        assert!(candidates.contains(
+            &Path::new("/Applications/Kanna.app/Contents/MacOS/../Resources/kanna-server")
+                .to_path_buf()
+        ));
+    }
+
+    #[test]
+    fn resolve_binary_from_candidates_prefers_first_existing_candidate() {
+        let resolved = resolve_binary_from_candidates(
+            "kanna-cli",
+            vec![Path::new("/bin/sh").to_path_buf()],
+            |_| Ok("/global/kanna-cli".to_string()),
+        )
+        .expect("existing sidecar candidate should resolve");
+
+        assert_eq!(resolved, "/bin/sh");
+    }
+
+    #[test]
+    fn resolve_binary_from_candidates_can_fallback_to_path() {
+        let resolved = resolve_binary_from_candidates("kanna-cli", Vec::new(), |_| {
+            Ok("/global/kanna-cli".to_string())
+        })
+        .expect("PATH fallback should resolve");
+
+        assert_eq!(resolved, "/global/kanna-cli");
     }
 
     #[test]

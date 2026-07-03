@@ -792,13 +792,12 @@ fn find_sidecar(name: &str) -> Result<PathBuf, String> {
         }
     }
 
-    for candidate in crate::commands::fs::sidecar_candidates(name) {
-        if candidate.exists() {
-            return Ok(candidate);
-        }
-    }
-
-    Err(format!("mobile sidecar '{}' not found", name))
+    kanna_runtime_defaults::resolve_binary_from_candidates(
+        name,
+        crate::commands::fs::sidecar_candidates(name),
+        |_| Err(format!("mobile sidecar '{}' not found", name)),
+    )
+    .map(PathBuf::from)
 }
 
 fn server_base_url(port: u16) -> String {
@@ -2631,6 +2630,29 @@ mod tests {
                 path TEXT NOT NULL,
                 branch TEXT NOT NULL,
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE stage_run (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                stage TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'main' CHECK (kind IN ('main', 'post')),
+                agent TEXT,
+                agent_provider TEXT,
+                model TEXT,
+                status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'succeeded', 'failed', 'cancelled')),
+                result TEXT,
+                feedback TEXT,
+                session_id TEXT,
+                started_at TEXT NOT NULL DEFAULT (datetime('now')),
+                finished_at TEXT
+            );
+            CREATE INDEX idx_stage_run_task_started ON stage_run(task_id, started_at);
+
+            CREATE TABLE task_blocker (
+                blocked_item_id TEXT NOT NULL,
+                blocker_item_id TEXT NOT NULL,
+                PRIMARY KEY (blocked_item_id, blocker_item_id)
             );
 
             CREATE TABLE settings (

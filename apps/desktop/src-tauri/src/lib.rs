@@ -428,9 +428,13 @@ fn raise_child_nofile_limit() {
 async fn ensure_daemon_running() {
     eprintln!("[daemon] spawning daemon...");
 
-    let daemon_bin = commands::fs::sidecar_candidates("kanna-daemon")
-        .into_iter()
-        .find(|path| path.exists());
+    let daemon_bin = kanna_runtime_defaults::resolve_binary_from_candidates(
+        "kanna-daemon",
+        commands::fs::sidecar_candidates("kanna-daemon"),
+        |_| Err("kanna-daemon sidecar binary not found".to_string()),
+    )
+    .map(PathBuf::from)
+    .ok();
 
     let Some(daemon_bin) = daemon_bin else {
         eprintln!("[daemon] daemon binary not found — PTY sessions will not work");

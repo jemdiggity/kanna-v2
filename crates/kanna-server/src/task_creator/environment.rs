@@ -351,54 +351,11 @@ pub(super) fn resolve_binary_from_candidates_with_path_lookup<F>(
 where
     F: FnOnce(&str) -> Result<String, String>,
 {
-    for candidate in candidates {
-        if candidate.exists() {
-            return Ok(candidate.to_string_lossy().to_string());
-        }
-    }
-
-    path_lookup(name)
-}
-
-fn current_target_triple() -> &'static str {
-    #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
-    {
-        "aarch64-apple-darwin"
-    }
-    #[cfg(all(target_arch = "x86_64", target_os = "macos"))]
-    {
-        "x86_64-apple-darwin"
-    }
+    kanna_runtime_defaults::resolve_binary_from_candidates(name, candidates, path_lookup)
 }
 
 fn sidecar_candidates(name: &str) -> Vec<PathBuf> {
-    std::env::current_exe()
-        .ok()
-        .map(|exe| sidecar_candidates_for_exe(&exe, name))
-        .unwrap_or_default()
-}
-
-fn sidecar_candidates_for_exe(current_exe: &Path, name: &str) -> Vec<PathBuf> {
-    let Some(exe_dir) = current_exe.parent() else {
-        return Vec::new();
-    };
-
-    let sidecar_name = format!("{}-{}", name, current_target_triple());
-    let mut candidates = vec![exe_dir.join(&sidecar_name), exe_dir.join(name)];
-
-    if let (Some(build_root), Some(profile_dir)) = (exe_dir.parent(), exe_dir.file_name()) {
-        if build_root.file_name().is_some_and(|dir| dir == ".build")
-            && matches!(profile_dir.to_str(), Some("debug" | "release"))
-        {
-            let triple_dir = build_root.join(current_target_triple()).join(profile_dir);
-            candidates.push(triple_dir.join(name));
-            candidates.push(triple_dir.join(&sidecar_name));
-        }
-    }
-
-    candidates.push(exe_dir.join("../Resources").join(&sidecar_name));
-    candidates.push(exe_dir.join("../Resources").join(name));
-    candidates
+    kanna_runtime_defaults::sidecar_candidates(name)
 }
 
 fn prepend_path_entry(path: Option<&str>, entry: &str) -> String {
