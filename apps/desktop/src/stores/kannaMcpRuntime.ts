@@ -1,5 +1,6 @@
 import { invoke } from "../invoke";
 import { buildKannaMcpPathEnv } from "./kannaCliEnv";
+import { whichBinaryOptional } from "../utils/invokeHelpers";
 
 interface KannaMcpRuntime {
   kannaMcpPath?: string;
@@ -23,10 +24,7 @@ export async function prepareKannaMcpRuntime(
   taskId: string,
   env: Record<string, string>,
 ): Promise<KannaMcpRuntime> {
-  const kannaMcpPath = await invoke<string>("which_binary", { name: "kanna-mcp" }).catch((error) => {
-    console.debug("[store] kanna-mcp not available while building task runtime env:", error);
-    return null;
-  });
+  const kannaMcpPath = await whichBinaryOptional("kanna-mcp");
   if (!kannaMcpPath) {
     return {};
   }
