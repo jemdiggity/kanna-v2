@@ -27,7 +27,13 @@
       "description": "Agent creates a GitHub PR after QA passes",
       "agent": "pr",
       "prompt": "Create a PR for the QA-approved work on branch $BRANCH.",
-      "policy": { "transition": "manual" }
+      "policy": { "transition": "manual" },
+      "post_action": {
+        "name": "approve",
+        "agent": "approve",
+        "prompt": "Approve the PR for branch $BRANCH after PR creation. Previous result: $PREV_RESULT",
+        "transition": "auto"
+      }
     }
   ]
 }

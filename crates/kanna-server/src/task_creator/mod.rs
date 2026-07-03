@@ -17,7 +17,7 @@ use crate::db::{Db, NewPipelineItem, Repo};
 use commands::{build_agent_command, build_kanna_preamble, build_task_shell_command};
 use definitions::{
     read_agent_definition, read_pipeline_definition, read_repo_config,
-    read_task_pipeline_definition, PipelineStage,
+    read_task_pipeline_definition, PipelineStage, PipelineStagePolicy, PipelineStageTransition,
 };
 use environment::{
     apply_workspace_path_env, build_spawn_env, claim_task_ports, resolve_headless_agent_executable,
@@ -425,7 +425,7 @@ pub(crate) fn prepare_merge_agent_for_api(
         &repo,
         TaskCreationRequest {
             task_prompt: merge_agent.prompt,
-            display_name: None,
+            display_name: Some("Merge Master".to_string()),
             pipeline_name: None,
             pipeline_def: None,
             base_ref: None,
@@ -499,6 +499,66 @@ pub(crate) fn prepare_task_for_api(
             allowed_tools: request.allowed_tools.unwrap_or_default(),
             notify_task_id: request.notify_task_id,
             parent_task_id,
+        },
+    )
+}
+
+pub(crate) fn prepare_singleton_agent_task_for_api(
+    db: &Db,
+    config: &Config,
+    repo_id: &str,
+    agent_name: &str,
+    message: &str,
+) -> Result<PreparedTaskSpawn, String> {
+    let repo = db
+        .get_repo(repo_id)
+        .map_err(|e| format!("db error: {}", e))?
+        .ok_or_else(|| format!("repo not found: {}", repo_id))?;
+    let default_provider = read_default_agent_provider_setting(db)?;
+    let pipeline_name = format!("singleton-{agent_name}");
+    let pipeline = definitions::PipelineDefinition {
+        name: Some(pipeline_name.clone()),
+        stages: vec![PipelineStage {
+            name: "in progress".to_string(),
+            agent: Some(agent_name.to_string()),
+            prompt: Some("$TASK_PROMPT".to_string()),
+            agent_provider: None,
+            environment: None,
+            policy: PipelineStagePolicy {
+                transition: PipelineStageTransition::Manual,
+            },
+            post: None,
+        }],
+        environments: None,
+    };
+    let pipeline_def =
+        serde_json::to_string(&pipeline).map_err(|e| format!("serialize error: {}", e))?;
+    let display_name = if agent_name == "merge" {
+        Some("Merge Master".to_string())
+    } else {
+        Some(format!("{agent_name} agent"))
+    };
+
+    prepare_task_spawn(
+        db,
+        config,
+        &repo,
+        TaskCreationRequest {
+            task_prompt: message.to_string(),
+            display_name,
+            pipeline_name: Some(pipeline_name),
+            pipeline_def: Some(pipeline_def),
+            base_ref: None,
+            stored_base_ref: None,
+            stage_override: None,
+            explicit_provider: None,
+            default_provider,
+            agent_type: None,
+            model: None,
+            permission_mode: None,
+            allowed_tools: Vec::new(),
+            notify_task_id: None,
+            parent_task_id: None,
         },
     )
 }

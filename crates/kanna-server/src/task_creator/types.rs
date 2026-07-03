@@ -42,6 +42,12 @@ pub(crate) struct PreparedTaskSpawn {
     pub(super) session: PreparedSessionSpawn,
 }
 
+impl PreparedTaskSpawn {
+    pub(crate) fn task_id(&self) -> &str {
+        &self.created_task.task_id
+    }
+}
+
 #[derive(Clone)]
 pub(crate) enum PreparedSessionSpawn {
     Pty {

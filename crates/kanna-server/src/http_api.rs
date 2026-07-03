@@ -4,6 +4,7 @@ mod pairing;
 mod repos;
 #[path = "http_api/router.rs"]
 mod routes;
+mod signal_agent;
 mod state;
 mod status;
 mod task_actions;

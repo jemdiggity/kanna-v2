@@ -1,4 +1,4 @@
-use super::{Db, NewPipelineItem, PipelineItem, TaskStageSource};
+use super::{Db, NewPipelineItem, PipelineItem, RunningAgentTask, TaskStageSource};
 use rusqlite::OptionalExtension;
 
 impl Db {
@@ -245,6 +245,33 @@ impl Db {
         Ok(terminal_session_id.or(Some(pipeline_item_id)))
     }
 
+    pub fn find_open_running_agent_task(
+        &self,
+        repo_id: &str,
+        agent: &str,
+    ) -> Result<Option<RunningAgentTask>, rusqlite::Error> {
+        self.conn
+            .query_row(
+                "SELECT p.id, COALESCE(NULLIF(sr.session_id, ''), p.id)
+                 FROM pipeline_item p
+                 JOIN stage_run sr ON sr.task_id = p.id
+                 WHERE p.repo_id = ?
+                   AND p.closed_at IS NULL
+                   AND sr.status = 'running'
+                   AND sr.agent = ?
+                 ORDER BY datetime(sr.started_at) DESC, sr.id DESC
+                 LIMIT 1",
+                (repo_id, agent),
+                |row| {
+                    Ok(RunningAgentTask {
+                        task_id: row.get(0)?,
+                        session_id: row.get(1)?,
+                    })
+                },
+            )
+            .optional()
+    }
+
     pub fn get_task_stage_source(
         &self,
         id: &str,
@@ -328,6 +355,30 @@ impl Db {
                 item.pipeline_def,
             ),
         )?;
+        Ok(())
+    }
+
+    pub fn pin_pipeline_item_at_top(
+        &self,
+        repo_id: &str,
+        task_id: &str,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE pipeline_item
+             SET pin_order = COALESCE(pin_order, 0) + 1,
+                 updated_at = datetime('now')
+             WHERE repo_id = ? AND closed_at IS NULL AND pinned = 1",
+            [repo_id],
+        )?;
+        let rows_affected = self.conn.execute(
+            "UPDATE pipeline_item
+             SET pinned = 1, pin_order = 0, updated_at = datetime('now')
+             WHERE id = ?",
+            [task_id],
+        )?;
+        if rows_affected == 0 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
         Ok(())
     }
 

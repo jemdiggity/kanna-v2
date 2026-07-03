@@ -285,6 +285,9 @@ fn compiled_builtin_resource(relative_path: &str) -> Option<&'static str> {
         ".kanna/agents/agent-factory/AGENT.md" => Some(include_str!(
             "../../../../.kanna/agents/agent-factory/AGENT.md"
         )),
+        ".kanna/agents/approve/AGENT.md" => {
+            Some(include_str!("../../../../.kanna/agents/approve/AGENT.md"))
+        }
         ".kanna/agents/commit/AGENT.md" => {
             Some(include_str!("../../../../.kanna/agents/commit/AGENT.md"))
         }

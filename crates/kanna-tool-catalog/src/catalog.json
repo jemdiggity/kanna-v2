@@ -104,6 +104,18 @@
       ]
     },
     {
+      "name": "kanna_signal_agent",
+      "description": "Find or create a singleton task for an agent in a repo and send it a message.",
+      "method": "POST",
+      "path": "/v1/repos/{repo_id}/agents/{agent}/signal",
+      "response": "json",
+      "params": [
+        { "name": "repo_id", "type": "string", "required": true, "location": "path" },
+        { "name": "agent", "type": "string", "required": true, "location": "path" },
+        { "name": "message", "type": "string", "required": true, "location": "body" }
+      ]
+    },
+    {
       "name": "kanna_send_task_input",
       "description": "Send input text to a Kanna task terminal session.",
       "method": "POST",
