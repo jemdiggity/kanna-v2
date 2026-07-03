@@ -6,6 +6,10 @@ become per-task stage policy (which agent runs each phase, and where the human
 sits); parallelism moves out of the stage engine and into cheap child-task
 forks. One orchestrator — `kanna-server` — owns all of it.
 
+> **Amended (2026-07-02):** see [Amendment: post-stage transitions](#amendment-post-stage-transitions-2026-07-02).
+> Stages swap agent sessions; posts continue them. `execution: "continue"` is
+> retired; `commit` is a post of `in progress`, not a stage.
+
 ## Motivation
 
 Kanna's purpose is to give agents the same structure humans have had for
@@ -94,7 +98,9 @@ top of it.
 A task is a durable node in the repo's task graph:
 
 - One goal (the prompt), one branch (`task-{id}`), one worktree
-  (`{repo}/.kanna-worktrees/task-{id}`), for its whole life.
+  (`{repo}/.kanna-worktrees/task-{id}`), for its whole life. *(Amended:
+  the goal and the task row are for life; the branch and worktree are
+  per-stage-run — see the amendment's "Workspaces fork per transition".)*
 - `stage` is honest mutable state (`in progress ⇄ review → pr → done`). A
   stage transition swaps the agent session *inside* the task — possibly a
   different agent, model, or provider per stage — and never recreates the
@@ -160,8 +166,8 @@ ordered stage list, the agent/model binding per stage, and the HITL markers.
 {
   "name": "default",
   "stages": [
-    { "name": "in progress", "agent": "implement", "transition": "manual" },
-    { "name": "commit",      "agent": "commit",    "transition": "auto" },
+    { "name": "in progress", "agent": "implement", "transition": "manual",
+      "post": { "name": "commit", "agent": "commit", "prompt": "Commit the relevant work." } },
     { "name": "review",      "agent": "review",    "transition": "auto" },
     { "name": "pr",          "agent": "pr",        "transition": "manual" }
   ]
@@ -169,10 +175,10 @@ ordered stage list, the agent/model binding per stage, and the HITL markers.
 ```
 
 - `transition: auto` — when the stage's run completes with `success`, the
-  engine starts the next stage's run immediately. This is what `post_action`
-  was for (commit-then-advance without a human round-trip); post-actions
-  dissolve into ordinary auto stages. The loader compiles legacy `post_action`
-  JSON into an interleaved stage for back-compat.
+  engine starts the next stage's run immediately. *(Amended: `post_action`
+  does not dissolve into an auto stage; it becomes the stage's `post` — tail
+  work injected into the stage's running session before the swap. See the
+  amendment below.)*
 - `transition: manual` — the run's success parks the task (activity `unread`)
   until a human advances it (⌘S) or an agent issues an explicit verdict.
 - `mode: new_task` / `follow_task` are deleted: no stage transition creates a
@@ -320,6 +326,140 @@ E2E coverage per the repo's expectation:
   worktree; kick-back preserves uncommitted state.
 - Phase 4: two-task DAG — blocker reaches `pr`, dependent auto-starts with
   stacked `base_ref`; blocker merge retargets the dependent.
+
+## Amendment: post-stage transitions (2026-07-02)
+
+The first implementation of this spec dissolved `post_action` into ordinary
+stages with `policy.execution: "continue"` — and then never implemented
+`continue`. Every stage transition killed the running agent session and
+spawned the next stage's agent fresh in the same worktree. For the default
+pipeline's `commit` stage this was a strict regression over the old
+post-action: the implement agent knew which changes were the task and which
+were scratch, and could write the commit from memory; the fresh commit agent
+had to reconstruct all of that from `git status`, paying a full CLI spawn for
+a thirty-second action.
+
+The dissolve was also the wrong unification. There are two genuinely
+different kinds of transition, and the model should say so:
+
+- **A stage swaps the session.** Fresh context is the point: review wants an
+  agent that did not write the code; each stage can bind a different
+  agent/model/provider. This is the cost/capability tiering the redesign
+  exists for.
+- **A post continues the session.** Existing context is the asset: "commit
+  your work" is tail work of the stage that produced the work. It is not a
+  lifecycle phase; the task never leaves its stage while a post runs.
+
+> Stages swap sessions. Posts continue them.
+
+### Post declaration
+
+A stage may declare one `post` — work injected into the stage's running agent
+session when the stage transitions forward:
+
+```json
+{
+  "name": "in progress",
+  "agent": "implement",
+  "prompt": "$TASK_PROMPT",
+  "policy": { "transition": "manual" },
+  "post": {
+    "name": "commit",
+    "agent": "commit",
+    "prompt": "Commit the relevant work for this task. Original task: $TASK_PROMPT"
+  }
+}
+```
+
+- `post.name` labels the run in history. `post.prompt` (with the usual
+  `$VAR` substitution) is submitted as input to the live session, along with
+  a reminder to record stage completion.
+- `post.agent` is the **fallback**: when the session is dead (suspend/kill
+  timeout, user quit), the post is spawned as a fresh session with this
+  agent, and the agent's prompt body also feeds the injected message. When
+  the session is alive, whatever agent is already running executes the post —
+  the binding is honestly a fallback, not a guarantee.
+- `policy.execution` is retired. Legacy `post_action` and legacy interleaved
+  `execution: "continue"` stages (including pinned `pipeline_def` snapshots
+  written by the first implementation) compile into a `post` on the preceding
+  stage at load time. A task parked *at* a folded stage name (e.g. `commit`)
+  is treated as sitting in that post's owner stage.
+
+### Transition semantics
+
+- **Manual stage with a post** (⌘S): the advance dispatches the post into the
+  running session; `stage` does not change. When the post's run completes
+  with `success` (agent verdict), the engine performs the swap to the next
+  stage. A second ⌘S while the post is still running is a human override:
+  swap immediately.
+- **Auto stage with a post**: main run success dispatches the post; post
+  success performs the swap.
+- **Post failure** parks the task (activity `unread`); a later advance
+  re-dispatches the post.
+- Post executions are `stage_run` rows with `kind = 'post'` (main runs are
+  `kind = 'main'`), recording the post name as the run's stage label and the
+  actually-executing agent/session. Kick-back to an earlier stage resets the
+  post: the next advance runs it again.
+
+The default pipeline becomes `in progress` (post: `commit`) → `pr`. The
+sidebar never shows `commit`: committing is the tail of `in progress`,
+which is what it always was in practice.
+
+### Workspaces fork per transition
+
+Task *identity* is durable — the row, the run history, the blockers, the
+notify wiring. The *workspace* is not: task ids are short random strings
+precisely because identity is bookkeeping, and meaning is assigned at the
+end, when the PR agent renames the final branch into something worth
+publishing.
+
+- **N worktrees, N branches, one PR.** Each stage transition (advance, auto
+  completion after a post, revision) forks a fresh randomly-named branch and
+  worktree from the current branch's committed tip and moves
+  `pipeline_item.branch` with it. The previous worktree stays on disk until
+  cleanup; only committed work crosses a stage boundary — the stage's post
+  (commit) is what establishes that invariant, so posts and reruns keep the
+  stage's live workspace while transitions fork.
+- **Fresh state is the point.** The next stage's agent inherits no running
+  dev servers, no half-mutated env, no untracked scratch — it sets up its
+  workspace through the repo's declared setup commands, the same path task
+  creation uses. "Review passed because of leftover state" is not a bug
+  class agents notice.
+- The fork starts from the branch actually checked out in the previous
+  worktree (`resolve_current_source_worktree_branch`), so agent-performed
+  branch renames — the PR agent's job — are honored.
+- A human override (⌘S while a post is still running) forks from the
+  committed tip like any transition: uncommitted work stays behind in the
+  abandoned worktree, by design. The post exists so that doesn't happen in
+  the normal flow.
+
+### Session lifecycle across transitions
+
+Transitions keep the daemon session id equal to the task id and respawn it
+(in the forked worktree). The stale worktree's shell session
+(`shell-wt-{task}`) is killed on fork so ⌘J opens in the new workspace. Two
+consequences the first implementation missed are now owned explicitly:
+
+- **The desktop terminal rebinds on respawn.** The daemon already broadcasts
+  session creation through the event bridge (`session_created`); the terminal
+  lifecycle treats it as the signal to clear its exited state and re-attach
+  to the new session. Previously the terminal saw `session_exit`, latched
+  `sessionExited`, and went permanently dead while the next stage's agent ran
+  invisibly — the ⌘S "nothing happened" bug.
+- **Orchestrated kills are not completions.** The engine finishes the current
+  `stage_run` row *before* killing the session it replaces, and the server's
+  Exit watcher only treats a daemon `Exit` as agent completion when the task
+  still has a running `stage_run` for that session; an in-process
+  replacement guard covers the kill→spawn window. Previously an advance's
+  kill could be misread as the agent finishing, prematurely claiming the
+  once-only `notify_task_id` delivery.
+
+Per-run daemon session ids (`{task_id}-r{n}`) remain the eventual model if
+TerminalTabs grows per-run history (the `stage_run.session_id` column and
+`resolve_task_terminal_session_id` already accommodate it), but they are not
+required for correctness under the rebind + finish-before-kill invariants,
+and they would ripple through the cloud terminal protocol, mobile attach,
+and every session→task lookup today.
 
 ## Open Questions
 
