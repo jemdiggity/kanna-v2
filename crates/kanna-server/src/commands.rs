@@ -2,36 +2,10 @@ use crate::config::Config;
 use crate::daemon_client::DaemonClient;
 use crate::db::Db;
 use crate::mobile_api::MobileApi;
+use crate::session_replacements::SessionReplacements;
 use crate::task_creator;
-use kanna_daemon::protocol::{Command as DaemonCommand, ErrorCode, Event as DaemonEvent};
+use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
 use serde_json::Value;
-
-async fn kill_session_if_present(
-    daemon: &mut DaemonClient,
-    session_id: &str,
-) -> Result<(), String> {
-    let event = daemon
-        .send_command(&DaemonCommand::Kill {
-            session_id: session_id.to_string(),
-        })
-        .await
-        .map_err(|e| format!("daemon error: {}", e))?;
-
-    match event {
-        DaemonEvent::Ok => Ok(()),
-        DaemonEvent::Error {
-            code: Some(ErrorCode::SessionNotFound),
-            ..
-        } => Ok(()),
-        DaemonEvent::Error { message, .. } if is_session_not_found(&message) => Ok(()),
-        DaemonEvent::Error { message, .. } => Err(format!("daemon error: {}", message)),
-        other => Err(format!("unexpected daemon response: {:?}", other)),
-    }
-}
-
-fn is_session_not_found(message: &str) -> bool {
-    message.to_ascii_lowercase().contains("session not found")
-}
 
 pub async fn handle_invoke(
     command: &str,
@@ -39,6 +13,7 @@ pub async fn handle_invoke(
     db: &Db,
     daemon: &mut DaemonClient,
     config: &Config,
+    replacements: &SessionReplacements,
 ) -> Result<Value, String> {
     let mobile_api = || {
         Db::open(&config.db_path)
@@ -167,7 +142,7 @@ pub async fn handle_invoke(
                 format!("shell-wt-{pipeline_item_id}"),
                 format!("td-{pipeline_item_id}"),
             ] {
-                kill_session_if_present(daemon, &session_id).await?;
+                task_creator::kill_session_replacing(daemon, replacements, &session_id).await?;
             }
 
             db.close_pipeline_item(&pipeline_item_id)
@@ -188,10 +163,21 @@ pub async fn handle_invoke(
                     let advanced = task_creator::spawn_prepared_stage_run_for_api(
                         &config.db_path,
                         daemon,
+                        replacements,
                         *prepared,
                     )
                     .await?;
                     serde_json::to_value(advanced).map_err(|e| format!("serialize error: {}", e))
+                }
+                task_creator::PreparedStageTransition::Post(prepared) => {
+                    let dispatched = task_creator::dispatch_prepared_post_for_api(
+                        &config.db_path,
+                        daemon,
+                        replacements,
+                        *prepared,
+                    )
+                    .await?;
+                    serde_json::to_value(dispatched).map_err(|e| format!("serialize error: {}", e))
                 }
                 task_creator::PreparedStageTransition::Close { task_id } => {
                     for session_id in [
@@ -199,7 +185,8 @@ pub async fn handle_invoke(
                         format!("shell-wt-{task_id}"),
                         format!("td-{task_id}"),
                     ] {
-                        kill_session_if_present(daemon, &session_id).await?;
+                        task_creator::kill_session_replacing(daemon, replacements, &session_id)
+                            .await?;
                     }
                     let db = Db::open(&config.db_path).map_err(|e| format!("db error: {}", e))?;
                     db.close_pipeline_item(&task_id)
@@ -366,6 +353,7 @@ mod tests {
             &db,
             &mut daemon,
             &config,
+            &SessionReplacements::default(),
         )
         .await
         .expect("close task invoke");

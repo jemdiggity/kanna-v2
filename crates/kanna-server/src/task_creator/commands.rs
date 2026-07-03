@@ -51,7 +51,11 @@ pub(super) fn build_agent_command(
                     shell_single_quote(mcp_config_path)
                 ));
             }
-            format!("claude {} '{}'", flags.join(" "), escaped_prompt)
+            // `--` terminates option parsing. Without it, variadic flags eat
+            // the positional prompt: `--mcp-config <path> '<prompt>'` makes
+            // the CLI treat the prompt as a second MCP config file and exit
+            // with "MCP config file not found: <prompt>".
+            format!("claude {} -- '{}'", flags.join(" "), escaped_prompt)
         }
         AgentProvider::Copilot => {
             let mut flags = get_agent_permission_flags(*provider, permission_mode);

@@ -1,4 +1,9 @@
-import type { PipelineDefinition, PipelineStage, PipelineStagePolicy } from "./pipeline-types";
+import type {
+  PipelineDefinition,
+  PipelinePost,
+  PipelineStage,
+  PipelineStagePolicy,
+} from "./pipeline-types";
 
 function formatRawValue(value: unknown): string {
   if (value === undefined) {
@@ -25,53 +30,59 @@ function parseTransition(
   throw validationError(describeInvalid(formatRawValue(value)));
 }
 
-function parseStageExecution(
-  value: unknown,
-  stageName: string,
-): PipelineStagePolicy["execution"] | undefined {
-  if (value === undefined) {
-    return undefined;
+/**
+ * Legacy `execution` / `mode` markers. `"continue"` folds the stage into the
+ * preceding stage's `post` (stages swap sessions; posts continue them);
+ * anything else is ignored.
+ */
+function parseLegacyContinueMarker(value: unknown, stageName: string): boolean {
+  if (value === undefined || value === "new_task") {
+    return false;
   }
   if (value === "continue") {
-    return "continue";
+    return true;
   }
-  if (value === "new_task") return undefined;
-  if (typeof value !== "string") return undefined;
+  if (typeof value !== "string") return false;
 
   throw validationError(
     `Stage "${stageName}" has invalid execution "${value}"; must be "continue"`
   );
 }
 
-function parseStagePolicy(raw: Record<string, unknown>, stageName: string): PipelineStagePolicy {
+interface ParsedStagePolicy {
+  policy: PipelineStagePolicy;
+  legacyContinue: boolean;
+}
+
+function parseStagePolicy(raw: Record<string, unknown>, stageName: string): ParsedStagePolicy {
   const policy = raw["policy"];
   if (policy !== undefined) {
     if (policy === null || typeof policy !== "object" || Array.isArray(policy)) {
       throw validationError(`Stage "${stageName}" has invalid policy "${formatRawValue(policy)}"; must be an object`);
     }
     const p = policy as Record<string, unknown>;
-    const parsed: PipelineStagePolicy = {
-      transition: parseTransition(
-        p["transition"],
-        (transition) =>
-          `Stage "${stageName}" has invalid policy.transition "${transition}"; must be "manual" or "auto"`
-      ),
+    return {
+      policy: {
+        transition: parseTransition(
+          p["transition"],
+          (transition) =>
+            `Stage "${stageName}" has invalid policy.transition "${transition}"; must be "manual" or "auto"`
+        ),
+      },
+      legacyContinue: parseLegacyContinueMarker(p["execution"], stageName),
     };
-    const execution = parseStageExecution(p["execution"], stageName);
-    if (execution !== undefined) parsed.execution = execution;
-    return parsed;
   }
 
-  const parsed: PipelineStagePolicy = {
-    transition: parseTransition(
-      raw["transition"],
-      (transition) =>
-        `Stage "${stageName}" has invalid transition "${transition}"; must be "manual" or "auto"`
-    ),
+  return {
+    policy: {
+      transition: parseTransition(
+        raw["transition"],
+        (transition) =>
+          `Stage "${stageName}" has invalid transition "${transition}"; must be "manual" or "auto"`
+      ),
+    },
+    legacyContinue: parseLegacyContinueMarker(raw["mode"], stageName),
   };
-  const execution = parseStageExecution(raw["mode"], stageName);
-  if (execution !== undefined) parsed.execution = execution;
-  return parsed;
 }
 
 /**
@@ -107,13 +118,14 @@ export function validatePipeline(def: PipelineDefinition): string[] {
       );
     }
 
-    if (
-      stage.policy?.execution !== undefined &&
-      stage.policy.execution !== "continue"
-    ) {
-      errors.push(
-        `Stage "${stage.name ?? "(unnamed)"}" has invalid policy.execution "${stage.policy.execution as string}"; must be "continue"`
-      );
+    if (stage.post !== undefined) {
+      if (!stage.post.name || typeof stage.post.name !== "string" || stage.post.name.trim() === "") {
+        errors.push(`Stage "${stage.name ?? "(unnamed)"}" has a post without a non-empty string name`);
+      } else if (seenNames.has(stage.post.name)) {
+        errors.push(`Duplicate stage name: "${stage.post.name}"`);
+      } else {
+        seenNames.add(stage.post.name);
+      }
     }
 
     if (stage.environment !== undefined) {
@@ -172,48 +184,35 @@ export function parsePipelineJson(raw: string): PipelineDefinition {
   return def;
 }
 
-type LegacyPostAction = {
-  name: string;
-  description?: string;
-  agent?: string;
-  prompt?: string;
-  agent_provider?: string | string[];
-  transition: PipelineStagePolicy["transition"];
-};
-
-function extractLegacyPostAction(value: unknown, stageName: string): LegacyPostAction | undefined {
+function extractPost(value: unknown, stageName: string): PipelinePost | undefined {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     return undefined;
   }
 
   const raw = value as Record<string, unknown>;
   const name = typeof raw["name"] === "string" ? raw["name"] : "";
-  const postAction: LegacyPostAction = {
-    name,
-    transition: parseTransition(
-      raw["transition"],
-      (transition) =>
-        `Stage "${stageName}" has post_action "${name || "(unnamed)"}" with invalid transition "${transition}"; must be "manual" or "auto"`
-    ),
-  };
+  if (!name) {
+    throw validationError(`Stage "${stageName}" has a post without a non-empty string name`);
+  }
+  const post: PipelinePost = { name };
 
   if (typeof raw["description"] === "string") {
-    postAction.description = raw["description"];
+    post.description = raw["description"];
   }
   if (typeof raw["agent"] === "string") {
-    postAction.agent = raw["agent"];
+    post.agent = raw["agent"];
   }
   if (typeof raw["prompt"] === "string") {
-    postAction.prompt = raw["prompt"];
+    post.prompt = raw["prompt"];
   }
   if (
     typeof raw["agent_provider"] === "string" ||
     (Array.isArray(raw["agent_provider"]) && raw["agent_provider"].every((entry) => typeof entry === "string"))
   ) {
-    postAction.agent_provider = raw["agent_provider"] as string | string[];
+    post.agent_provider = raw["agent_provider"] as string | string[];
   }
 
-  return postAction;
+  return post;
 }
 
 function extractStages(obj: Record<string, unknown>): PipelineStage[] {
@@ -221,16 +220,39 @@ function extractStages(obj: Record<string, unknown>): PipelineStage[] {
     return [];
   }
 
-  return (obj["stages"] as unknown[]).flatMap((item, index) => {
+  const stages: PipelineStage[] = [];
+  for (const [index, item] of (obj["stages"] as unknown[]).entries()) {
     if (item === null || typeof item !== "object" || Array.isArray(item)) {
       throw new Error(`Stage at index ${index} must be an object`);
     }
     const s = item as Record<string, unknown>;
     const name = typeof s["name"] === "string" ? s["name"] : "";
+    const { policy, legacyContinue } = parseStagePolicy(s, name || "(unnamed)");
+
+    // Legacy interleaved continue stage (old post_action compilation or an
+    // `execution: "continue"` policy, including pinned pipeline_def
+    // snapshots): fold into the preceding stage's post.
+    if (legacyContinue) {
+      const previous = stages[stages.length - 1];
+      if (previous && previous.post === undefined) {
+        const folded: PipelinePost = { name };
+        if (typeof s["description"] === "string") folded.description = s["description"];
+        if (typeof s["agent"] === "string") folded.agent = s["agent"];
+        if (typeof s["prompt"] === "string") folded.prompt = s["prompt"];
+        if (
+          typeof s["agent_provider"] === "string" ||
+          (Array.isArray(s["agent_provider"]) && s["agent_provider"].every((entry) => typeof entry === "string"))
+        ) {
+          folded.agent_provider = s["agent_provider"] as string | string[];
+        }
+        previous.post = folded;
+        continue;
+      }
+    }
 
     const stage: PipelineStage = {
       name,
-      policy: parseStagePolicy(s, name || "(unnamed)"),
+      policy,
     };
 
     if (typeof s["description"] === "string") {
@@ -251,20 +273,20 @@ function extractStages(obj: Record<string, unknown>): PipelineStage[] {
     if (typeof s["environment"] === "string") {
       stage.environment = s["environment"];
     }
-    const stages = [stage];
-    const postAction = extractLegacyPostAction(s["post_action"], stage.name || "(unnamed)");
-    if (postAction) {
-      stages.push({
-        name: postAction.name,
-        ...(postAction.description !== undefined ? { description: postAction.description } : {}),
-        ...(postAction.agent !== undefined ? { agent: postAction.agent } : {}),
-        ...(postAction.prompt !== undefined ? { prompt: postAction.prompt } : {}),
-        ...(postAction.agent_provider !== undefined ? { agent_provider: postAction.agent_provider } : {}),
-        ...(stage.environment !== undefined ? { environment: stage.environment } : {}),
-        policy: { transition: postAction.transition, execution: "continue" },
-      });
+
+    const post = extractPost(s["post"], stage.name || "(unnamed)");
+    if (post) {
+      stage.post = post;
+    } else {
+      // Legacy `post_action` declarations become the stage's post directly.
+      const legacyPost = extractPost(s["post_action"], stage.name || "(unnamed)");
+      if (legacyPost) {
+        stage.post = legacyPost;
+      }
     }
 
-    return stages;
-  });
+    stages.push(stage);
+  }
+
+  return stages;
 }

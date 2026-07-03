@@ -46,6 +46,9 @@ export interface PipelineItem {
   notified_at: string | null;
   created_at: string;
   updated_at: string;
+  /** Derived by listPipelineItems (not a column): 1 while a `kind: "post"`
+   * stage run is executing inside the task's live session. */
+  has_running_post?: number;
 }
 
 export interface TaskBlocker {
@@ -62,10 +65,14 @@ export interface TaskPort {
 
 export type StageRunStatus = "pending" | "running" | "succeeded" | "failed" | "cancelled";
 
+/** "main" runs a pipeline stage; "post" runs a stage's tail work (e.g. commit). */
+export type StageRunKind = "main" | "post";
+
 export interface StageRun {
   id: string;
   task_id: string;
   stage: string;
+  kind: StageRunKind;
   agent: string | null;
   agent_provider: AgentProvider | null;
   model: string | null;

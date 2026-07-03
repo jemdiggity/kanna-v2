@@ -64,17 +64,37 @@ pub(crate) enum PreparedSessionSpawn {
 }
 
 /// Stage transitions are durable: an in-pipeline hop starts a new stage run on
-/// the SAME task (`Run`), and advancing past the final stage closes the task
-/// (`Close`). No transition ever creates a new task or worktree.
+/// the SAME task (`Run`), a stage with pending tail work dispatches its post
+/// into the running session (`Post`), and advancing past the final stage
+/// closes the task (`Close`). No transition ever creates a new task or
+/// worktree.
 pub(crate) enum PreparedStageTransition {
     Run(Box<PreparedStageRunSpawn>),
+    Post(Box<PreparedPostDispatch>),
     Close { task_id: String },
+}
+
+/// A stage's post, ready to be injected into the task's live agent session.
+/// `fallback` spawns the post as a fresh session (with the post's agent) when
+/// the live session turns out to be dead.
+pub(crate) struct PreparedPostDispatch {
+    pub(super) task_id: String,
+    pub(super) session_id: String,
+    /// Post prompt (with $VAR substitution) plus the completion reminder,
+    /// submitted through the task-input path.
+    pub(super) message: String,
+    /// Run-history label: the post's name.
+    pub(super) run_stage: String,
+    pub(super) fallback: PreparedStageRunSpawn,
 }
 
 pub(crate) struct PreparedStageRerun {
     pub(super) task_id: String,
     pub(super) session_id: String,
+    /// Run-history label: the stage name, or the post name when rerunning a
+    /// legacy task parked at a folded post stage.
     pub(super) stage: String,
+    pub(super) run_kind: &'static str,
     pub(super) stage_agent: Option<String>,
     pub(super) agent_provider: String,
     pub(super) model: Option<String>,
@@ -83,12 +103,34 @@ pub(crate) struct PreparedStageRerun {
     pub(super) session: PreparedSessionSpawn,
 }
 
-/// A new stage run spawned in place on an existing task: same task id, same
-/// branch, same worktree — only the stage (and agent session) changes.
+/// A stage-run workspace forked from the task's committed tip: swaps get a
+/// fresh branch + worktree (N worktrees, N branches, one PR — the PR agent
+/// renames the final random branch into something meaningful). The previous
+/// worktree stays on disk until cleanup; only committed work crosses the
+/// boundary.
+pub(crate) struct ForkedWorkspace {
+    pub(super) branch: String,
+    pub(super) worktree_path: String,
+}
+
+/// A new stage run spawned on an existing task: same task id, but a swap runs
+/// in a freshly forked workspace (`forked_workspace`), while a post fallback
+/// or rerun keeps the task's current one.
 pub(crate) struct PreparedStageRunSpawn {
     pub(super) task_id: String,
     pub(super) session_id: String,
+    /// Value written to `pipeline_item.stage`. For a post fallback spawn this
+    /// is the owning stage (a post never moves the task's stage).
     pub(super) next_stage: String,
+    /// Run-history label (`stage_run.stage`): the stage name, or the post's
+    /// name for a post fallback spawn.
+    pub(super) run_stage: String,
+    /// `stage_run.kind`: "main" or "post".
+    pub(super) run_kind: &'static str,
+    /// Present when this run forked a fresh workspace; the spawn updates
+    /// `pipeline_item.branch` and the worktree record, and rolls the fork
+    /// back if the daemon spawn fails.
+    pub(super) forked_workspace: Option<ForkedWorkspace>,
     pub(super) stage_agent: Option<String>,
     pub(super) agent_provider: String,
     pub(super) model: Option<String>,

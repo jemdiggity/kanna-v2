@@ -9,6 +9,7 @@ use tokio::sync::Mutex;
 pub struct AppState {
     pub(super) config: Config,
     pub(super) pairing_session: Arc<Mutex<Option<PairingSession>>>,
+    pub(super) session_replacements: crate::session_replacements::SessionReplacements,
     #[cfg(test)]
     pub(super) task_creator: Option<TestTaskCreator>,
     #[cfg(test)]
@@ -104,6 +105,12 @@ impl AppState {
         &self.config
     }
 
+    /// Shared handle for the daemon Exit watcher, so orchestrated kills
+    /// performed through the HTTP actions are not misread as completions.
+    pub fn session_replacements(&self) -> crate::session_replacements::SessionReplacements {
+        self.session_replacements.clone()
+    }
+
     pub fn new(config: Config) -> Self {
         if let Err(err) = pairing::PairingStore::load(Path::new(&config.pairing_store_path)) {
             log::warn!(
@@ -116,6 +123,7 @@ impl AppState {
         Self {
             config,
             pairing_session: Arc::new(Mutex::new(None)),
+            session_replacements: crate::session_replacements::SessionReplacements::default(),
             #[cfg(test)]
             task_creator: None,
             #[cfg(test)]

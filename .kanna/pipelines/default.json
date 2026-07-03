@@ -1,21 +1,26 @@
 {
   "$schema": "./schema.json",
   "name": "default",
-  "description": "Standard in progress -> commit -> PR flow",
+  "description": "Standard in progress (commit as post) -> review -> PR flow",
   "stages": [
     {
       "name": "in progress",
-      "description": "Agent implements the task",
+      "description": "Agent implements the task, then commits as the stage's tail work",
       "agent": "implement",
       "prompt": "$TASK_PROMPT",
-      "policy": { "transition": "manual" }
+      "policy": { "transition": "manual" },
+      "post": {
+        "name": "commit",
+        "agent": "commit",
+        "prompt": "Commit the relevant work for this task. Original task: $TASK_PROMPT"
+      }
     },
     {
-      "name": "commit",
-      "description": "Implementation agent commits the relevant work",
-      "agent": "commit",
-      "prompt": "Commit the relevant work for this task. Original task: $TASK_PROMPT",
-      "policy": { "transition": "auto", "execution": "continue" }
+      "name": "review",
+      "description": "Review agent checks quality and test coverage before PR creation",
+      "agent": "review",
+      "prompt": "Review branch $BRANCH for task quality and test coverage against base $BASE_REF. Original task: $TASK_PROMPT.",
+      "policy": { "transition": "auto" }
     },
     {
       "name": "pr",

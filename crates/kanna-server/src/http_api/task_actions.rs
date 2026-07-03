@@ -4,7 +4,6 @@ use super::task_input::{notify_task_completion, submit_task_input};
 use crate::db::Db;
 use axum::extract::State;
 use axum::Json;
-use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
 use std::sync::Arc;
 
 fn stage_action_error_status(error: &str) -> axum::http::StatusCode {
@@ -302,34 +301,13 @@ pub(super) async fn close_task(
         format!("shell-wt-{pipeline_item_id}"),
         format!("td-{pipeline_item_id}"),
     ] {
-        let event = daemon
-            .send_command(&DaemonCommand::Kill { session_id })
-            .await
-            .map_err(|e| {
-                (
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("daemon error: {}", e),
-                )
-            })?;
-
-        match event {
-            DaemonEvent::Ok => {}
-            DaemonEvent::Error {
-                code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
-                ..
-            } => {}
-            DaemonEvent::Error { message, .. }
-                if message.to_ascii_lowercase().contains("session not found") => {}
-            DaemonEvent::Error { message, .. } => {
-                return Err((axum::http::StatusCode::INTERNAL_SERVER_ERROR, message));
-            }
-            other => {
-                return Err((
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("unexpected daemon response: {:?}", other),
-                ));
-            }
-        }
+        crate::task_creator::kill_session_replacing(
+            &mut daemon,
+            &state.session_replacements,
+            &session_id,
+        )
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
     }
 
     db.close_pipeline_item(&pipeline_item_id).map_err(|e| {
@@ -373,33 +351,13 @@ async fn close_task_after_final_stage(
         format!("shell-wt-{task_id}"),
         format!("td-{task_id}"),
     ] {
-        let event = daemon
-            .send_command(&DaemonCommand::Kill { session_id })
-            .await
-            .map_err(|e| {
-                (
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("daemon error: {}", e),
-                )
-            })?;
-        match event {
-            DaemonEvent::Ok => {}
-            DaemonEvent::Error {
-                code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
-                ..
-            } => {}
-            DaemonEvent::Error { message, .. }
-                if message.to_ascii_lowercase().contains("session not found") => {}
-            DaemonEvent::Error { message, .. } => {
-                return Err((axum::http::StatusCode::INTERNAL_SERVER_ERROR, message));
-            }
-            other => {
-                return Err((
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("unexpected daemon response: {:?}", other),
-                ));
-            }
-        }
+        crate::task_creator::kill_session_replacing(
+            daemon,
+            &state.session_replacements,
+            &session_id,
+        )
+        .await
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
     }
     let db = Db::open(&state.config.db_path).map_err(|e| {
         (
@@ -443,30 +401,84 @@ pub(super) async fn advance_stage(
         crate::task_creator::prepare_advance_stage_for_api(&db, &state.config, &task_id)
             .map_err(|e| (stage_action_error_status(&e), e))?
     };
-    let mut daemon = crate::daemon_client::DaemonClient::connect(&state.config.daemon_dir)
-        .await
-        .map_err(|e| {
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("daemon error: {}", e),
-            )
-        })?;
+    let response = crate::mobile_api::TaskActionResponse {
+        task_id: task_id.clone(),
+        follow_task: None,
+    };
+    execute_stage_transition_detached(Arc::clone(&state), task_id, transition);
+    Ok(Json(response))
+}
+
+/// Execute a prepared transition: swap to the next stage's run, dispatch a
+/// post into the running session, or close past the final stage. Shared by
+/// `advance_stage` and `complete_stage`.
+async fn execute_stage_transition(
+    state: &Arc<AppState>,
+    daemon: &mut crate::daemon_client::DaemonClient,
+    transition: crate::task_creator::PreparedStageTransition,
+) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
     match transition {
         crate::task_creator::PreparedStageTransition::Run(prepared) => {
             let advanced = crate::task_creator::spawn_prepared_stage_run_for_api(
                 &state.config.db_path,
-                &mut daemon,
+                daemon,
+                &state.session_replacements,
                 *prepared,
             )
             .await
             .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
-            start_dependents_if_task_entered_pr(&state, &advanced.task_id).await?;
+            start_dependents_if_task_entered_pr(state, &advanced.task_id).await?;
             Ok(Json(advanced))
         }
+        crate::task_creator::PreparedStageTransition::Post(prepared) => {
+            // A post never moves the task's stage, so it cannot newly enter
+            // `pr`; no dependent start check is needed.
+            let dispatched = crate::task_creator::dispatch_prepared_post_for_api(
+                &state.config.db_path,
+                daemon,
+                &state.session_replacements,
+                *prepared,
+            )
+            .await
+            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+            Ok(Json(dispatched))
+        }
         crate::task_creator::PreparedStageTransition::Close { task_id } => {
-            close_task_after_final_stage(&state, &mut daemon, task_id).await
+            close_task_after_final_stage(state, daemon, task_id).await
         }
     }
+}
+
+/// Run a prepared transition on a detached task, NOT on the HTTP request's
+/// future. Transitions kill the session they replace — and when the verdict
+/// comes from an agent INSIDE that session (kanna-cli / kanna-mcp riding the
+/// task's own process tree), killing it drops the HTTP connection and axum
+/// cancels the in-flight handler, silently abandoning the transition between
+/// the kill and the respawn. Detaching makes the transition immune to the
+/// caller's death; failures are logged since the caller may not outlive the
+/// work it triggered.
+fn execute_stage_transition_detached(
+    state: Arc<AppState>,
+    task_id: String,
+    transition: crate::task_creator::PreparedStageTransition,
+) {
+    tokio::spawn(async move {
+        let mut daemon =
+            match crate::daemon_client::DaemonClient::connect(&state.config.daemon_dir).await {
+                Ok(daemon) => daemon,
+                Err(error) => {
+                    log::error!(
+                        "stage transition for {} failed to reach daemon: {}",
+                        task_id,
+                        error
+                    );
+                    return;
+                }
+            };
+        if let Err((_, message)) = execute_stage_transition(&state, &mut daemon, transition).await {
+            log::error!("stage transition for {} failed: {}", task_id, message);
+        }
+    });
 }
 
 pub(super) async fn rerun_stage(
@@ -490,22 +502,68 @@ pub(super) async fn rerun_stage(
         crate::task_creator::prepare_rerun_stage_for_api(&db, &state.config, &task_id)
             .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?
     };
-    let mut daemon = crate::daemon_client::DaemonClient::connect(&state.config.daemon_dir)
+    // Detached for the same reason as execute_stage_transition_detached: the
+    // rerun kills the session that may carry this very request.
+    let rerun_state = Arc::clone(&state);
+    let rerun_task_id = task_id.clone();
+    tokio::spawn(async move {
+        let mut daemon =
+            match crate::daemon_client::DaemonClient::connect(&rerun_state.config.daemon_dir).await
+            {
+                Ok(daemon) => daemon,
+                Err(error) => {
+                    log::error!(
+                        "stage rerun for {} failed to reach daemon: {}",
+                        rerun_task_id,
+                        error
+                    );
+                    return;
+                }
+            };
+        if let Err(error) = crate::task_creator::rerun_prepared_stage_for_api(
+            &rerun_state.config.db_path,
+            &mut daemon,
+            &rerun_state.session_replacements,
+            prepared,
+        )
         .await
-        .map_err(|e| {
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("daemon error: {}", e),
-            )
-        })?;
-    let rerun = crate::task_creator::rerun_prepared_stage_for_api(
-        &state.config.db_path,
-        &mut daemon,
-        prepared,
-    )
-    .await
-    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    Ok(Json(rerun))
+        {
+            log::error!("stage rerun for {} failed: {}", rerun_task_id, error);
+        }
+    });
+    Ok(Json(crate::mobile_api::TaskActionResponse {
+        task_id,
+        follow_task: None,
+    }))
+}
+
+/// A pull-request URL carried by a stage-complete verdict: explicitly via
+/// `metadata.pr_url`, or the first `…/pull/<n>` link in the summary (agents
+/// reporting through plain `kanna-cli` tend to put it there).
+fn pr_url_from_verdict(metadata: Option<&serde_json::Value>, summary: &str) -> Option<String> {
+    if let Some(url) = metadata
+        .and_then(|metadata| metadata.get("pr_url"))
+        .and_then(|value| value.as_str())
+        .filter(|url| !url.trim().is_empty())
+    {
+        return Some(url.trim().to_string());
+    }
+    summary
+        .split_whitespace()
+        .map(|token| token.trim_end_matches(['.', ',', ')', ']', ';']))
+        .find(|token| {
+            token.starts_with("https://")
+                && token.rsplit_once("/pull/").is_some_and(|(_, number)| {
+                    !number.is_empty() && number.chars().all(|c| c.is_ascii_digit())
+                })
+        })
+        .map(str::to_string)
+}
+
+fn pr_number_from_url(pr_url: &str) -> Option<i64> {
+    pr_url
+        .rsplit_once("/pull/")
+        .and_then(|(_, number)| number.parse::<i64>().ok())
 }
 
 pub(super) async fn complete_stage(
@@ -540,7 +598,7 @@ pub(super) async fn complete_stage(
         )
     })?;
 
-    let task_id = {
+    let (task_id, finished_run) = {
         let db = Db::open(&state.config.db_path).map_err(|e| {
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -556,18 +614,42 @@ pub(super) async fn complete_stage(
                     format!("task not found: {}", task_id),
                 )
             })?;
-        db.finish_latest_running_stage_run(
-            &task_id,
-            if payload.status == "success" {
-                "succeeded"
-            } else {
-                "failed"
-            },
-            Some(&stage_result),
-            Some(&payload.summary),
-        )
-        .map_err(|e| db_write_error("db error", e))?;
-        task_id
+        let run_status = if payload.status == "success" {
+            "succeeded"
+        } else {
+            "failed"
+        };
+        let finished_run = db
+            .finish_latest_running_stage_run(
+                &task_id,
+                run_status,
+                Some(&stage_result),
+                Some(&payload.summary),
+            )
+            .map_err(|e| db_write_error("db error", e))?;
+        // A parked task has no running run (its last verdict finished it).
+        // An agent may recover after reporting failure — e.g. the commit
+        // post cleans up and reports success — and that late verdict must
+        // both stick and keep its run identity, or a corrected post would
+        // never perform its deferred transition.
+        let finished_run = match finished_run {
+            Some(run) => Some(run),
+            None => db
+                .refinish_latest_stage_run(
+                    &task_id,
+                    run_status,
+                    Some(&stage_result),
+                    Some(&payload.summary),
+                )
+                .map_err(|e| db_write_error("db error", e))?,
+        };
+        if payload.status == "success" {
+            if let Some(pr_url) = pr_url_from_verdict(payload.metadata.as_ref(), &payload.summary) {
+                db.update_pipeline_item_pr(&task_id, pr_number_from_url(&pr_url), &pr_url)
+                    .map_err(|e| db_write_error("db error", e))?;
+            }
+        }
+        (task_id, finished_run)
     };
 
     if !should_auto_advance {
@@ -584,8 +666,13 @@ pub(super) async fn complete_stage(
                 format!("db error: {}", e),
             )
         })?;
-        crate::task_creator::prepare_auto_stage_completion_for_api(&db, &state.config, &task_id)
-            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?
+        crate::task_creator::prepare_stage_completion_for_api(
+            &db,
+            &state.config,
+            &task_id,
+            finished_run.as_ref().map(|run| run.kind.as_str()),
+        )
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?
     };
     let Some(transition) = transition else {
         start_dependents_if_task_entered_pr(&state, &task_id).await?;
@@ -595,35 +682,12 @@ pub(super) async fn complete_stage(
         }));
     };
 
-    let mut daemon = crate::daemon_client::DaemonClient::connect(&state.config.daemon_dir)
-        .await
-        .map_err(|e| {
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("daemon error: {}", e),
-            )
-        })?;
-    match transition {
-        crate::task_creator::PreparedStageTransition::Run(prepared) => {
-            let advanced = crate::task_creator::spawn_prepared_stage_run_for_api(
-                &state.config.db_path,
-                &mut daemon,
-                *prepared,
-            )
-            .await
-            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
-            start_dependents_if_task_entered_pr(&state, &advanced.task_id).await?;
-            Ok(Json(advanced))
-        }
-        crate::task_creator::PreparedStageTransition::Close { task_id } => {
-            // prepare_auto_stage_completion_for_api currently returns None at
-            // the final stage, so this arm cannot be produced today. If a
-            // future policy change makes an auto completion reach past the
-            // final stage, closing the task here matches advance_stage rather
-            // than silently dropping the transition.
-            close_task_after_final_stage(&state, &mut daemon, task_id).await
-        }
-    }
+    let response = crate::mobile_api::TaskActionResponse {
+        task_id: task_id.clone(),
+        follow_task: None,
+    };
+    execute_stage_transition_detached(Arc::clone(&state), task_id, transition);
+    Ok(Json(response))
 }
 
 pub(super) async fn request_revision(
@@ -670,18 +734,19 @@ pub(super) async fn request_revision(
                     format!("task not found: {}", task_id),
                 )
             })?;
-        db.finish_latest_running_stage_run(
-            &source_task_id,
-            "failed",
-            Some(&stage_result),
-            Some(&payload.summary),
-        )
-        .map_err(|e| {
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("db error: {}", e),
+        let _ = db
+            .finish_latest_running_stage_run(
+                &source_task_id,
+                "failed",
+                Some(&stage_result),
+                Some(&payload.summary),
             )
-        })?;
+            .map_err(|e| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("db error: {}", e),
+                )
+            })?;
         crate::task_creator::prepare_revision_task_for_api(
             &db,
             &state.config,
@@ -693,25 +758,14 @@ pub(super) async fn request_revision(
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?
     };
 
-    let mut daemon = crate::daemon_client::DaemonClient::connect(&state.config.daemon_dir)
-        .await
-        .map_err(|e| {
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("daemon error: {}", e),
-            )
-        })?;
-    let advanced = crate::task_creator::spawn_prepared_stage_run_for_api(
-        &state.config.db_path,
-        &mut daemon,
-        prepared,
-    )
-    .await
-    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    debug_assert_eq!(advanced.task_id, source_task_id);
+    execute_stage_transition_detached(
+        Arc::clone(&state),
+        source_task_id.clone(),
+        crate::task_creator::PreparedStageTransition::Run(Box::new(prepared)),
+    );
 
     Ok(Json(crate::mobile_api::TaskActionResponse {
-        task_id: advanced.task_id,
+        task_id: source_task_id,
         follow_task: None,
     }))
 }

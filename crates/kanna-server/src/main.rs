@@ -9,6 +9,7 @@ mod mobile_api;
 mod pairing;
 mod register;
 mod relay_client;
+mod session_replacements;
 mod task_creator;
 
 use config::Config;
@@ -90,10 +91,15 @@ async fn main() {
     })
     .ok();
 
+    // Capture the login-shell PATH before the first stage action needs it —
+    // loading zshrc costs seconds and must never sit on a request path.
+    tokio::task::spawn_blocking(task_creator::warm_login_shell_path);
+
     let http_state = Arc::new(http_api::AppState::new(config.clone()));
+    let session_replacements = http_state.session_replacements();
     let terminal_state_config = config.clone();
     tokio::spawn(async move {
-        terminal_state_watcher_loop(terminal_state_config).await;
+        terminal_state_watcher_loop(terminal_state_config, session_replacements).await;
     });
     let lan_task = tokio::spawn(http_api::serve(Arc::clone(&http_state)));
     if relay_url.is_empty() {
@@ -120,16 +126,25 @@ async fn main() {
     }
 }
 
-async fn terminal_state_watcher_loop(config: Config) {
+async fn terminal_state_watcher_loop(
+    config: Config,
+    replacements: session_replacements::SessionReplacements,
+) {
     loop {
-        if let Err(error) = terminal_state_watcher_once(&config).await {
+        if let Err(error) = terminal_state_watcher_once(&config, &replacements).await {
             log::warn!("terminal state watcher reconnecting after error: {}", error);
         }
+        // Exits broadcast while disconnected are lost along with their
+        // replacement entries; stale entries must not swallow future Exits.
+        replacements.clear();
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     }
 }
 
-async fn terminal_state_watcher_once(config: &Config) -> Result<(), String> {
+async fn terminal_state_watcher_once(
+    config: &Config,
+    replacements: &session_replacements::SessionReplacements,
+) -> Result<(), String> {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
 
     let mut daemon = daemon_client::DaemonClient::connect(&config.daemon_dir)
@@ -156,6 +171,11 @@ async fn terminal_state_watcher_once(config: &Config) -> Result<(), String> {
             DaemonEvent::Exit {
                 session_id, code, ..
             } => {
+                if replacements.consume(&session_id) {
+                    // Orchestrated kill (stage swap, rerun, close) — not the
+                    // agent finishing.
+                    continue;
+                }
                 let success = code == 0;
                 if let Err(error) =
                     http_api::handle_task_terminal_state(config, &session_id, success).await
@@ -367,6 +387,7 @@ async fn run_relay_loop(
                                             &db,
                                             &mut daemon,
                                             &config,
+                                            &http_state.session_replacements(),
                                         )
                                         .await
                                         {

@@ -26,19 +26,23 @@ use environment::{
 use prompt::{build_stage_prompt, PromptContext};
 use provider::{resolve_agent_provider, resolve_agent_type, AgentProvider, AgentSessionType};
 use std::collections::HashMap;
-use types::{CreatedTask, PreparedSessionSpawn, PreparedStageRerun, TaskCreationRequest};
+use types::{
+    CreatedTask, ForkedWorkspace, PreparedSessionSpawn, PreparedStageRerun, TaskCreationRequest,
+};
 pub(crate) use types::{PreparedStageRunSpawn, PreparedStageTransition, PreparedTaskSpawn};
 use worktree::{
     create_worktree, fetch_start_point, generate_task_id, merge_branches_into_worktree,
 };
 
+pub(crate) use environment::warm_login_shell_path;
 pub(crate) use lifecycle::{
-    rerun_prepared_stage_for_api, spawn_prepared_stage_run_for_api,
-    spawn_prepared_task_for_api_recording_stage_run, spawn_prepared_task_for_api_with_rollback,
+    dispatch_prepared_post_for_api, kill_session_replacing, rerun_prepared_stage_for_api,
+    spawn_prepared_stage_run_for_api, spawn_prepared_task_for_api_recording_stage_run,
+    spawn_prepared_task_for_api_with_rollback,
 };
 pub(crate) use stages::{
-    prepare_advance_stage_for_api, prepare_auto_stage_completion_for_api,
-    prepare_revision_task_for_api, resolve_stage_transition,
+    prepare_advance_stage_for_api, prepare_revision_task_for_api, prepare_stage_completion_for_api,
+    resolve_stage_transition,
 };
 
 pub(crate) fn prepare_rerun_stage_for_api(
@@ -74,11 +78,23 @@ pub(crate) fn prepare_rerun_stage_for_api(
         &pipeline_name,
         source_task.pipeline_def.as_deref(),
     )?;
-    let current_stage = pipeline
-        .stages
-        .iter()
-        .find(|stage| stage.name == stage_name)
-        .ok_or_else(|| format!("stage not found in pipeline: {}", stage_name))?;
+    // A legacy in-flight task can be parked at a folded post name (e.g.
+    // `commit`); rerunning it respawns the post as a fresh session.
+    let (current_stage, run_kind): (PipelineStage, &'static str) =
+        match definitions::resolve_stage_position(&pipeline, &stage_name)
+            .ok_or_else(|| format!("stage not found in pipeline: {}", stage_name))?
+        {
+            definitions::StagePosition::Stage(index) => (pipeline.stages[index].clone(), "main"),
+            definitions::StagePosition::Post { owner } => {
+                let owner_stage = &pipeline.stages[owner];
+                (
+                    definitions::post_as_stage(owner_stage)
+                        .ok_or_else(|| format!("stage has no post: {}", owner_stage.name))?,
+                    "post",
+                )
+            }
+        };
+    let current_stage = &current_stage;
     let agent = match current_stage.agent.as_deref() {
         Some(agent_name) => Some(read_agent_definition(&repo.path, agent_name)?),
         None => None,
@@ -155,7 +171,8 @@ pub(crate) fn prepare_rerun_stage_for_api(
     Ok(PreparedStageRerun {
         task_id: task_id.to_string(),
         session_id,
-        stage: stage_name,
+        stage: current_stage.name.clone(),
+        run_kind,
         stage_agent: current_stage.agent.clone(),
         agent_provider: provider.as_str().to_string(),
         model: stage_run_model,
@@ -165,9 +182,15 @@ pub(crate) fn prepare_rerun_stage_for_api(
     })
 }
 
-/// Prepare a new stage run to be spawned in place on an existing task. The
-/// task keeps its id, branch, and worktree; only the stage (and its agent
-/// session) changes. Used for stage advance, auto-advance, and revisions.
+/// Prepare a new stage run to be spawned on an existing task. Used for stage
+/// advance, auto-advance, revisions, and dead-session post fallbacks
+/// (`run_kind = "post"`, where `item_stage` stays the owning stage and
+/// `target_stage` is the post viewed as a stage).
+///
+/// `fork_branch: Some(_)` forks a fresh workspace for the run: a new branch
+/// and worktree created from the task's current branch tip (only committed
+/// work crosses a stage boundary — the stage's post committed it). `None`
+/// keeps the task's current workspace (post fallbacks, reruns).
 #[allow(clippy::too_many_arguments)]
 pub(in crate::task_creator) fn prepare_stage_run_spawn(
     db: &Db,
@@ -177,6 +200,9 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
     pipeline_name: &str,
     pipeline: &definitions::PipelineDefinition,
     target_stage: &PipelineStage,
+    item_stage: &str,
+    run_kind: &'static str,
+    fork_branch: Option<String>,
     final_prompt: String,
     branch: &str,
     feedback: Option<String>,
@@ -203,19 +229,49 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
         .as_ref()
         .map(|agent| agent.allowed_tools.clone())
         .unwrap_or_default();
-    let worktree_path = format!("{}/.kanna-worktrees/{}", repo.path, branch);
+
+    let forked_workspace = match &fork_branch {
+        Some(fork_branch) => {
+            // Fork from the branch actually checked out in the current
+            // worktree (agents may have renamed it — the PR agent does).
+            let start_point =
+                worktree::resolve_current_source_worktree_branch(&repo.path, Some(branch))
+                    .unwrap_or_else(|| branch.to_string());
+            let worktree_path = format!("{}/.kanna-worktrees/{}", repo.path, fork_branch);
+            create_worktree(&repo.path, fork_branch, &worktree_path, Some(&start_point))?;
+            Some(ForkedWorkspace {
+                branch: fork_branch.clone(),
+                worktree_path,
+            })
+        }
+        None => None,
+    };
+    let worktree_path = forked_workspace
+        .as_ref()
+        .map(|fork| fork.worktree_path.clone())
+        .unwrap_or_else(|| format!("{}/.kanna-worktrees/{}", repo.path, branch));
+
     let repo_config = read_repo_config(&repo.path)?;
     let worktree_repo_config = read_repo_config(&worktree_path)?;
     let port_env = claim_task_ports(db, task_id, repo_config.ports.as_ref())?;
     let mut spawn_env = build_spawn_env(config, task_id, &port_env)?;
     apply_workspace_path_env(&mut spawn_env, &worktree_path, &worktree_repo_config);
     let mcp_config_path = write_kanna_mcp_config(&config.daemon_dir, task_id, &mut spawn_env)?;
-    let stage_setup = target_stage
-        .environment
-        .as_deref()
-        .and_then(|name| pipeline.environments.as_ref()?.get(name))
-        .and_then(|environment| environment.setup.clone())
-        .unwrap_or_default();
+    // A forked workspace is fresh disk: run the repo's worktree setup (the
+    // same commands task creation runs) before any stage-specific setup.
+    let mut setup = if forked_workspace.is_some() {
+        worktree_repo_config.setup.clone().unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    setup.extend(
+        target_stage
+            .environment
+            .as_deref()
+            .and_then(|name| pipeline.environments.as_ref()?.get(name))
+            .and_then(|environment| environment.setup.clone())
+            .unwrap_or_default(),
+    );
     let session = build_prepared_session(
         provider,
         agent_type,
@@ -230,7 +286,7 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
         mcp_config_path,
         &spawn_env,
         &worktree_path,
-        &stage_setup,
+        &setup,
     )?;
     let session_id = db
         .resolve_task_terminal_session_id(task_id)
@@ -240,7 +296,10 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
     Ok(PreparedStageRunSpawn {
         task_id: task_id.to_string(),
         session_id,
-        next_stage: target_stage.name.clone(),
+        next_stage: item_stage.to_string(),
+        run_stage: target_stage.name.clone(),
+        run_kind,
+        forked_workspace,
         stage_agent: target_stage.agent.clone(),
         agent_provider: provider.as_str().to_string(),
         model: stage_run_model,

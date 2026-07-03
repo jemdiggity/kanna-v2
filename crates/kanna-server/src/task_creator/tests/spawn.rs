@@ -258,7 +258,13 @@ async fn prepared_claude_pty_task_spawn_passes_kanna_context_as_append_system_pr
             assert!(shell_command.contains("pipeline `qa`"));
             assert!(shell_command.contains("transition `manual`"));
             assert!(shell_command.contains("kanna-cli stage-complete"));
-            assert!(shell_command.contains("'Use Claude PTY'"));
+            // `--mcp-config` is variadic: without a `--` separator the CLI
+            // consumes the positional prompt as a second config file and
+            // exits ("MCP config file not found: <prompt>").
+            assert!(
+                shell_command.contains("-- 'Use Claude PTY'"),
+                "prompt must follow an option terminator: {shell_command}"
+            );
         }
         other => panic!("expected Spawn, got {other:?}"),
     }

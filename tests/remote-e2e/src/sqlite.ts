@@ -85,6 +85,7 @@ CREATE TABLE IF NOT EXISTS stage_run (
   id TEXT PRIMARY KEY,
   task_id TEXT NOT NULL,
   stage TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'main' CHECK (kind IN ('main', 'post')),
   agent TEXT,
   agent_provider TEXT,
   model TEXT,

@@ -38,18 +38,24 @@ pub(super) struct PipelineStage {
     pub(super) agent_provider: Option<String>,
     pub(super) environment: Option<String>,
     pub(super) policy: PipelineStagePolicy,
+    pub(super) post: Option<PipelinePost>,
+}
+
+/// Tail work of a stage, injected into the stage's running agent session when
+/// the stage transitions forward. `agent` is the fallback used to spawn a
+/// fresh session (and the prompt-body source) when the task's session is
+/// dead; a live session keeps whatever agent is already running.
+#[derive(Clone, Deserialize, Serialize)]
+pub(super) struct PipelinePost {
+    pub(super) name: String,
+    pub(super) agent: Option<String>,
+    pub(super) prompt: Option<String>,
+    pub(super) agent_provider: Option<String>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
 pub(super) struct PipelineStagePolicy {
     pub(super) transition: PipelineStageTransition,
-    pub(super) execution: Option<PipelineStageExecution>,
-}
-
-#[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub(super) enum PipelineStageExecution {
-    Continue,
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -73,6 +79,56 @@ pub(super) struct PipelineEnvironment {
     pub(super) setup: Option<Vec<String>>,
 }
 
+/// Where a stored stage name sits in a pipeline. In-flight tasks created
+/// before posts replaced interleaved continue stages can be parked *at* a
+/// folded post name (e.g. `commit`); those resolve to the owning stage's
+/// post rather than erroring.
+pub(super) enum StagePosition {
+    Stage(usize),
+    Post { owner: usize },
+}
+
+pub(super) fn resolve_stage_position(
+    pipeline: &PipelineDefinition,
+    stage_name: &str,
+) -> Option<StagePosition> {
+    if let Some(index) = pipeline
+        .stages
+        .iter()
+        .position(|stage| stage.name == stage_name)
+    {
+        return Some(StagePosition::Stage(index));
+    }
+    pipeline
+        .stages
+        .iter()
+        .position(|stage| {
+            stage
+                .post
+                .as_ref()
+                .is_some_and(|post| post.name == stage_name)
+        })
+        .map(|owner| StagePosition::Post { owner })
+}
+
+/// A stage's post viewed as a stage: the shape `prepare_stage_run_spawn` and
+/// prompt building consume for dead-session fallbacks and legacy in-flight
+/// tasks parked at a folded post name. Post success always advances, so the
+/// synthetic policy is `auto`.
+pub(super) fn post_as_stage(owner: &PipelineStage) -> Option<PipelineStage> {
+    owner.post.as_ref().map(|post| PipelineStage {
+        name: post.name.clone(),
+        agent: post.agent.clone(),
+        prompt: post.prompt.clone(),
+        agent_provider: post.agent_provider.clone(),
+        environment: owner.environment.clone(),
+        policy: PipelineStagePolicy {
+            transition: PipelineStageTransition::Auto,
+        },
+        post: None,
+    })
+}
+
 #[derive(Deserialize)]
 struct RawPipelineDefinition {
     name: Option<String>,
@@ -91,13 +147,23 @@ struct RawPipelineStage {
     policy: Option<RawPipelineStagePolicy>,
     transition: Option<PipelineStageTransition>,
     mode: Option<RawPipelineStageExecution>,
+    post: Option<RawPipelinePost>,
     post_action: Option<RawPipelinePostAction>,
 }
 
 #[derive(Deserialize)]
 struct RawPipelineStagePolicy {
     transition: PipelineStageTransition,
-    execution: Option<PipelineStageExecution>,
+    execution: Option<RawPipelineStageExecution>,
+}
+
+#[derive(Deserialize)]
+struct RawPipelinePost {
+    name: String,
+    agent: Option<String>,
+    prompt: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_provider_list")]
+    agent_provider: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -107,7 +173,8 @@ struct RawPipelinePostAction {
     prompt: Option<String>,
     #[serde(default, deserialize_with = "deserialize_optional_provider_list")]
     agent_provider: Option<String>,
-    transition: PipelineStageTransition,
+    #[allow(dead_code)]
+    transition: Option<PipelineStageTransition>,
 }
 
 #[derive(Deserialize)]
@@ -300,7 +367,7 @@ fn parse_agent_providers(value: Option<YamlValue>) -> Vec<String> {
 }
 
 fn normalize_pipeline_definition(raw: RawPipelineDefinition) -> Result<PipelineDefinition, String> {
-    let mut stages = Vec::new();
+    let mut stages: Vec<PipelineStage> = Vec::new();
     for stage in raw.stages {
         let RawPipelineStage {
             name,
@@ -311,24 +378,53 @@ fn normalize_pipeline_definition(raw: RawPipelineDefinition) -> Result<PipelineD
             policy,
             transition,
             mode,
+            post,
             post_action,
         } = stage;
 
-        let policy = match policy {
-            Some(policy) => PipelineStagePolicy {
-                transition: policy.transition,
-                execution: policy.execution,
-            },
-            None => PipelineStagePolicy {
-                transition: transition
-                    .ok_or_else(|| format!("stage {name:?} is missing policy.transition"))?,
-                execution: match mode {
-                    Some(RawPipelineStageExecution::Continue) => {
-                        Some(PipelineStageExecution::Continue)
-                    }
-                    Some(RawPipelineStageExecution::NewTask) | None => None,
-                },
-            },
+        let (transition, continues) = match policy {
+            Some(policy) => (
+                policy.transition,
+                matches!(policy.execution, Some(RawPipelineStageExecution::Continue)),
+            ),
+            None => (
+                transition.ok_or_else(|| format!("stage {name:?} is missing policy.transition"))?,
+                matches!(mode, Some(RawPipelineStageExecution::Continue)),
+            ),
+        };
+
+        // Legacy interleaved continue stage (old `post_action` compilation or
+        // an `execution: "continue"` policy, including pinned pipeline_def
+        // snapshots): fold into the preceding stage's post. Stages swap
+        // sessions; posts continue them.
+        if continues {
+            if let Some(previous) = stages.last_mut() {
+                if previous.post.is_none() {
+                    previous.post = Some(PipelinePost {
+                        name,
+                        agent,
+                        prompt,
+                        agent_provider,
+                    });
+                    continue;
+                }
+            }
+        }
+
+        let post = match (post, post_action) {
+            (Some(post), _) => Some(PipelinePost {
+                name: post.name,
+                agent: post.agent,
+                prompt: post.prompt,
+                agent_provider: post.agent_provider,
+            }),
+            (None, Some(post_action)) => Some(PipelinePost {
+                name: post_action.name,
+                agent: post_action.agent,
+                prompt: post_action.prompt,
+                agent_provider: post_action.agent_provider,
+            }),
+            (None, None) => None,
         };
 
         stages.push(PipelineStage {
@@ -336,23 +432,10 @@ fn normalize_pipeline_definition(raw: RawPipelineDefinition) -> Result<PipelineD
             agent,
             prompt,
             agent_provider,
-            environment: environment.clone(),
-            policy,
+            environment,
+            policy: PipelineStagePolicy { transition },
+            post,
         });
-
-        if let Some(post_action) = post_action {
-            stages.push(PipelineStage {
-                name: post_action.name,
-                agent: post_action.agent,
-                prompt: post_action.prompt,
-                agent_provider: post_action.agent_provider,
-                environment,
-                policy: PipelineStagePolicy {
-                    transition: post_action.transition,
-                    execution: Some(PipelineStageExecution::Continue),
-                },
-            });
-        }
     }
 
     Ok(PipelineDefinition {
