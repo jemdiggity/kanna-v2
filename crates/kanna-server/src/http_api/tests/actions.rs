@@ -929,6 +929,18 @@ async fn advance_stage_route_records_stage_run_for_spawned_next_task() {
         let mut line = String::new();
         reader.read_line(&mut line).await.unwrap();
         let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+        assert!(matches!(
+            command,
+            DaemonCommand::Kill { ref session_id } if session_id == "source-1"
+        ));
+        write_half
+            .write_all(format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap()).as_bytes())
+            .await
+            .unwrap();
+
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
         let session_id = match command {
             DaemonCommand::Spawn {
                 session_id,
@@ -1027,7 +1039,8 @@ async fn advance_stage_route_records_stage_run_for_spawned_next_task() {
 
     let db = Db::open(&config.db_path).unwrap();
     let source = db.get_task_stage_source("source-1").unwrap().unwrap();
-    assert_eq!(source.stage.as_deref(), Some("done"));
+    assert_eq!(source.stage.as_deref(), Some("review"));
+    assert_eq!(source.closed_at, None);
     let runs = db.list_stage_runs_for_task(&created.task_id).unwrap();
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].stage, "review");

@@ -111,14 +111,9 @@ fn prepare_revision_task_builds_target_stage_task_from_reviewed_branch() {
     )
     .unwrap();
 
-    assert_eq!(prepared.created_task.repo_id, "repo-1");
-    assert_eq!(prepared.created_task.stage, "in progress");
-    assert_eq!(prepared.created_task.title, "Mobile shell");
-    assert_eq!(prepared.created_task.agent_type, "pty");
-    let created_source = db
-        .get_pipeline_item(&prepared.created_task.task_id)
-        .unwrap()
-        .unwrap();
+    assert_eq!(prepared.task_id, "review-task");
+    assert_eq!(prepared.next_stage, "in progress");
+    let created_source = db.get_pipeline_item(&prepared.task_id).unwrap().unwrap();
     assert_eq!(created_source.display_name.as_deref(), Some("Mobile shell"));
     assert_eq!(created_source.agent_type.as_deref(), Some("pty"));
     assert_eq!(
@@ -218,23 +213,33 @@ async fn prepared_revision_agent_task_spawn_sends_task_specific_kanna_context() 
         "Add integration coverage for spawned Kanna context.",
     )
     .unwrap();
-    let task_id = prepared.created_task.task_id.clone();
+    let task_id = prepared.task_id.clone();
     let expected_session_id = prepared.session_id.clone();
-    let fake_daemon = spawn_fake_daemon_session_created_once(config.daemon_dir.clone()).await;
+    let fake_daemon = spawn_fake_daemon_kill_then_session_created(config.daemon_dir.clone()).await;
     let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
 
     let created = spawn_prepared_stage_run_for_api(&config.db_path, &mut daemon, prepared)
         .await
         .unwrap();
-    let command = fake_daemon.await.unwrap();
+    let commands = fake_daemon.await.unwrap();
+    assert!(matches!(
+        commands.first(),
+        Some(kanna_daemon::protocol::Command::Kill { session_id }) if session_id == "review-task"
+    ));
+    let command = commands
+        .get(1)
+        .expect("spawn command should follow previous session kill");
 
     assert_eq!(created.task_id, task_id);
     match command {
         kanna_daemon::protocol::Command::SpawnAgent { session_id, params } => {
-            assert_eq!(session_id, expected_session_id);
+            assert_eq!(session_id, &expected_session_id);
             assert_eq!(params.agent_provider, DaemonAgentProvider::Claude);
             assert!(params.cwd.contains(".kanna-worktrees/task-"));
-            let system_prompt = params.system_prompt.expect("system prompt should be sent");
+            let system_prompt = params
+                .system_prompt
+                .as_ref()
+                .expect("system prompt should be sent");
             assert!(system_prompt.contains(&format!("task `{task_id}`")));
             assert!(system_prompt.contains("stage `in progress`"));
             assert!(system_prompt.contains("pipeline `qa`"));
@@ -336,14 +341,18 @@ async fn request_revision_spawns_target_stage_run_in_same_worktree_with_feedback
         "task-reviewed",
     )
     .unwrap();
-    db.insert_stage_run(
-        "run-review",
-        "review-task",
-        "review",
-        "running",
-        Some("daemon-review"),
-        None,
-    )
+    db.insert_stage_run(crate::db::NewStageRun {
+        id: "run-review",
+        task_id: "review-task",
+        stage: "review",
+        agent: None,
+        agent_provider: None,
+        model: None,
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: Some("daemon-review"),
+    })
     .unwrap();
 
     let prepared = prepare_revision_task_for_api(
@@ -357,20 +366,30 @@ async fn request_revision_spawns_target_stage_run_in_same_worktree_with_feedback
 
     assert_eq!(prepared.task_id, "review-task");
     assert_eq!(prepared.next_stage, "in progress");
-    assert_eq!(prepared.feedback.as_deref(), Some("Fix the test gap before PR."));
+    assert_eq!(
+        prepared.feedback.as_deref(),
+        Some("Fix the test gap before PR.")
+    );
     assert_eq!(prepared.cwd, worktree.to_string_lossy());
 
-    let fake_daemon = spawn_fake_daemon_session_created_once(config.daemon_dir.clone()).await;
+    let fake_daemon = spawn_fake_daemon_kill_then_session_created(config.daemon_dir.clone()).await;
     let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
     let response = spawn_prepared_stage_run_for_api(&config.db_path, &mut daemon, prepared)
         .await
         .unwrap();
-    let command = fake_daemon.await.unwrap();
+    let commands = fake_daemon.await.unwrap();
+    assert!(matches!(
+        commands.first(),
+        Some(kanna_daemon::protocol::Command::Kill { session_id }) if session_id == "daemon-review"
+    ));
+    let command = commands
+        .get(1)
+        .expect("spawn command should follow previous session kill");
 
     assert_eq!(response.task_id, "review-task");
     match command {
         kanna_daemon::protocol::Command::Spawn { args, cwd, .. } => {
-            assert_eq!(cwd, worktree.to_string_lossy());
+            assert_eq!(cwd.as_str(), worktree.to_string_lossy());
             assert!(args
                 .last()
                 .expect("shell command")
@@ -598,12 +617,9 @@ fn prepare_revision_task_recovers_title_from_reviewed_branch_when_review_title_i
         "Add e2e coverage for task creation.",
     )
     .unwrap();
-    let created_source = db
-        .get_pipeline_item(&prepared.created_task.task_id)
-        .unwrap()
-        .unwrap();
+    let created_source = db.get_pipeline_item(&prepared.task_id).unwrap().unwrap();
 
-    assert_eq!(prepared.created_task.title, "cloud/mobile");
+    assert_eq!(created_source.prompt.as_deref(), Some("cloud/mobile"));
     assert_eq!(created_source.display_name.as_deref(), Some("cloud/mobile"));
 
     let _ = std::fs::remove_dir_all(&repo_root);
