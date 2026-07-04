@@ -1,5 +1,6 @@
 import type { AgentDefinition } from "./pipeline-types";
 import { parseFrontmatter } from "../config/custom-tasks";
+import { VALID_AGENT_PROVIDERS, isAgentProvider, splitAgentProviderValue } from "../config/agent-providers";
 
 const VALID_PERMISSION_MODES = ["default", "acceptEdits", "dontAsk"] as const;
 type PermissionMode = AgentDefinition["permission_mode"];
@@ -17,6 +18,13 @@ function parsePermissionMode(value: unknown): PermissionMode | undefined {
   );
 }
 
+// An agent definition (`.kanna/agents/*/AGENT.md`) describes a reusable *role* and
+// intentionally supports a focused field set: name, description, prompt (body),
+// model, permission_mode, allowed_tools, and agent_provider. Per-task execution
+// limits (execution_mode, max_turns, max_budget_usd, disallowed_tools) and
+// worktree setup/teardown live on task templates (`.kanna/tasks/*/agent.md`, parsed
+// by parseAgentMd), not on agent definitions. Keep this boundary in mind before
+// widening the agent schema.
 export function parseAgentDefinition(content: string): AgentDefinition {
   const { frontmatter, body } = parseFrontmatter(content);
 
@@ -42,14 +50,11 @@ export function parseAgentDefinition(content: string): AgentDefinition {
     def.allowed_tools = fm.allowed_tools as string[];
   }
 
-  // agent_provider: YAML array, single string, or comma-separated string
-  if (Array.isArray(fm.agent_provider) && fm.agent_provider.every((v: unknown) => typeof v === "string")) {
-    def.agent_provider = fm.agent_provider as string[];
-  } else if (typeof fm.agent_provider === "string") {
-    if (fm.agent_provider.includes(",")) {
-      def.agent_provider = fm.agent_provider.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
-    } else {
-      def.agent_provider = [fm.agent_provider.trim()];
+  // agent_provider: YAML array, single string, or comma-separated string.
+  if (fm.agent_provider !== undefined) {
+    const providers = splitAgentProviderValue(fm.agent_provider);
+    if (providers.length > 0) {
+      def.agent_provider = providers;
     }
   }
 
@@ -83,6 +88,16 @@ export function validateAgentDefinition(def: AgentDefinition): string[] {
     errors.push(
       `permission_mode must be one of: ${VALID_PERMISSION_MODES.join(", ")} (got "${def.permission_mode}")`
     );
+  }
+
+  if (def.agent_provider !== undefined) {
+    const providers = Array.isArray(def.agent_provider) ? def.agent_provider : [def.agent_provider];
+    const invalid = providers.filter((p) => !isAgentProvider(p));
+    if (invalid.length > 0) {
+      errors.push(
+        `agent_provider must be one of: ${VALID_AGENT_PROVIDERS.join(", ")} (got "${invalid.join(", ")}")`
+      );
+    }
   }
 
   return errors;

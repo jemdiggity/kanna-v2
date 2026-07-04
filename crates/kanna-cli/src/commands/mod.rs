@@ -1,6 +1,5 @@
 pub(crate) mod guide;
 pub(crate) mod repo;
-pub(crate) mod socket;
 pub(crate) mod stage_complete;
 pub(crate) mod task;
 pub(crate) mod tool;

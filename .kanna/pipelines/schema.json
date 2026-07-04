@@ -63,12 +63,12 @@
           "agent_provider": {
             "oneOf": [
               {
-                "enum": ["codex", "claude", "copilot"]
+                "enum": ["codex", "claude", "copilot", "opencode", "antigravity"]
               },
               {
                 "type": "array",
                 "items": {
-                  "enum": ["codex", "claude", "copilot"]
+                  "enum": ["codex", "claude", "copilot", "opencode", "antigravity"]
                 },
                 "minItems": 1
               }
@@ -109,12 +109,12 @@
               "agent_provider": {
                 "oneOf": [
                   {
-                    "enum": ["codex", "claude", "copilot"]
+                    "enum": ["codex", "claude", "copilot", "opencode", "antigravity"]
                   },
                   {
                     "type": "array",
                     "items": {
-                      "enum": ["codex", "claude", "copilot"]
+                      "enum": ["codex", "claude", "copilot", "opencode", "antigravity"]
                     },
                     "minItems": 1
                   }

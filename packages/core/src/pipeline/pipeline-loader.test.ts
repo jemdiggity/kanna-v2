@@ -95,6 +95,33 @@ describe("parsePipelineJson", () => {
     expect(stage.environment).toBeUndefined();
   });
 
+  it("parses a single-string stage agent_provider", () => {
+    const json = JSON.stringify({
+      name: "My Pipeline",
+      stages: [{ name: "Stage 1", transition: "auto", agent_provider: "codex" }],
+    });
+    const result = parsePipelineJson(json);
+    expect(result.stages[0].agent_provider).toBe("codex");
+  });
+
+  it("parses a stage agent_provider array", () => {
+    const json = JSON.stringify({
+      name: "My Pipeline",
+      stages: [{ name: "Stage 1", transition: "auto", agent_provider: ["codex", "claude"] }],
+    });
+    const result = parsePipelineJson(json);
+    expect(result.stages[0].agent_provider).toEqual(["codex", "claude"]);
+  });
+
+  it("ignores a stage agent_provider array containing non-strings", () => {
+    const json = JSON.stringify({
+      name: "My Pipeline",
+      stages: [{ name: "Stage 1", transition: "auto", agent_provider: ["codex", 3] }],
+    });
+    const result = parsePipelineJson(json);
+    expect(result.stages[0].agent_provider).toBeUndefined();
+  });
+
   it("drops legacy follow_task values", () => {
     const json = JSON.stringify({
       name: "My Pipeline",
