@@ -210,6 +210,51 @@ export function useTreeExplorer(rootPath: Ref<string>, repoRoot: Ref<string>) {
     return null;
   }
 
+  function activateCurrentEntry(index: number): string | null {
+    const entry = currentEntries.value[index];
+    if (!entry) return null;
+
+    requestedCursor.value = index;
+    filterText.value = "";
+
+    if (!entry.isDir) return entry.path;
+
+    triggerSlide("left");
+    breadcrumb.value = [...breadcrumb.value, entry.name];
+    requestedCursor.value = 0;
+    return null;
+  }
+
+  function activateParentEntry(index: number): string | null {
+    const entry = parentEntries.value[index];
+    if (!entry) return null;
+
+    filterText.value = "";
+
+    if (!entry.isDir) return entry.path;
+
+    const parentBreadcrumb = breadcrumb.value.slice(0, -1);
+    triggerSlide("right");
+    breadcrumb.value = [...parentBreadcrumb, entry.name];
+    requestedCursor.value = 0;
+    return null;
+  }
+
+  function activatePreviewEntry(index: number): string | null {
+    const parentEntry = previewEntry.value;
+    const entry = previewEntries.value[index];
+    if (!parentEntry?.isDir || !entry) return null;
+
+    filterText.value = "";
+
+    if (!entry.isDir) return entry.path;
+
+    triggerSlide("left");
+    breadcrumb.value = [...breadcrumb.value, parentEntry.name, entry.name];
+    requestedCursor.value = 0;
+    return null;
+  }
+
   function navigateLeft() {
     if (breadcrumb.value.length === 0) return;
 
@@ -217,6 +262,14 @@ export function useTreeExplorer(rootPath: Ref<string>, repoRoot: Ref<string>) {
     requestedCursor.value = breadcrumb.value[breadcrumb.value.length - 1];
     breadcrumb.value = breadcrumb.value.slice(0, -1);
     filterText.value = "";
+  }
+
+  function activateSelectedEntry(): string | null {
+    return activateCurrentEntry(cursorIndex.value);
+  }
+
+  function exitCurrentDirectory() {
+    navigateLeft();
   }
 
   // ── Filter / cursor helpers ────────────────────────────────────
@@ -408,6 +461,11 @@ export function useTreeExplorer(rootPath: Ref<string>, repoRoot: Ref<string>) {
     error,
     slideDirection,
     handleKey,
+    activateCurrentEntry,
+    activateParentEntry,
+    activatePreviewEntry,
+    activateSelectedEntry,
+    exitCurrentDirectory,
     currentFilePath,
     jumpToBreadcrumb,
     reset,
