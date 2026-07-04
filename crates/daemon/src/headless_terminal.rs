@@ -394,11 +394,39 @@ fn line_contains_worktree_path(line: &str) -> bool {
     line.contains(".kanna-worktrees/") || line.contains("[⎇ ")
 }
 
+fn claude_line_starts_subagent_parent(line: &str) -> bool {
+    line.trim_start().starts_with("⏺ ")
+}
+
+fn claude_line_starts_subagent_task(line: &str) -> bool {
+    line.trim_start().starts_with("◯ ")
+}
+
+fn claude_lines_have_active_subagent_footer(lines: &[String]) -> bool {
+    let Some(parent_index) = lines
+        .iter()
+        .rposition(|line| claude_line_starts_subagent_parent(line))
+    else {
+        return false;
+    };
+
+    let lines_after_parent = &lines[parent_index + 1..];
+    lines_after_parent
+        .iter()
+        .any(|line| claude_line_starts_subagent_task(line))
+        && !lines_after_parent
+            .iter()
+            .any(|line| line_starts_with_prompt(line, &[CLAUDE_IDLE_PROMPT]))
+}
+
 fn claude_status_from_lines(lines: &[String]) -> Option<SessionStatus> {
     if any_line_contains_ascii_case_insensitive(lines, WAITING_MARKER) {
         return Some(SessionStatus::Waiting);
     }
     if any_line_contains_ascii_case_insensitive(lines, INTERRUPT_MARKER) {
+        return Some(SessionStatus::Busy);
+    }
+    if claude_lines_have_active_subagent_footer(lines) {
         return Some(SessionStatus::Busy);
     }
     if line_starts_with_prompt(last_non_empty_line(lines), &[CLAUDE_IDLE_PROMPT]) {
@@ -833,6 +861,28 @@ mod tests {
                 "────────────────────────────────────────────────────────────────\r\n",
                 "✻ Working (4s • esc to interrupt)\r\n",
                 "⏵⏵ bypass permissions on (shift+tab to cycle)\r\n"
+            )
+            .as_bytes(),
+        );
+
+        assert_eq!(
+            headless_terminal
+                .visible_status(Some(AgentProvider::Claude))
+                .unwrap(),
+            Some(SessionStatus::Busy)
+        );
+    }
+
+    #[test]
+    fn claude_subagent_footer_without_interrupt_marker_marks_busy() {
+        let mut headless_terminal = HeadlessTerminal::new(140, 8, 10_000).unwrap();
+        headless_terminal.write(
+            concat!(
+                "Claude Code\r\n",
+                "Reviewing changes\r\n",
+                "⏺ main\r\n",
+                "  ◯ Explore  Verify firmware issue fixes                                      2m 31s · ↓ 44.2k tokens\r\n",
+                "  ◯ Explore  Verify backend issue fixes\r\n"
             )
             .as_bytes(),
         );
