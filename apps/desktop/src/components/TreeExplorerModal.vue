@@ -61,6 +61,11 @@ const {
   error,
   slideDirection,
   handleKey,
+  activateCurrentEntry,
+  activateParentEntry,
+  activatePreviewEntry,
+  activateSelectedEntry,
+  exitCurrentDirectory,
   currentFilePath,
   jumpToBreadcrumb,
   toggleShowAllFiles,
@@ -69,6 +74,12 @@ const {
   toRef(props, "worktreePath"),
   toRef(props, "repoRoot")
 );
+
+const HORIZONTAL_WHEEL_THRESHOLD = 64;
+const HORIZONTAL_WHEEL_COOLDOWN_MS = 220;
+let horizontalWheelDelta = 0;
+let lastHorizontalNavigationAt = 0;
+let lastHorizontalNavigationDirection: "enter" | "exit" | null = null;
 
 async function onKeydown(e: KeyboardEvent) {
   // Let meta/ctrl combos bubble to global shortcuts (⌘J, ⌘D, etc.)
@@ -100,8 +111,41 @@ async function onKeydown(e: KeyboardEvent) {
   }
 
   const filePath = handleKey(e);
-  if (filePath) {
-    emit("open-file", filePath);
+  emitOpenedFile(filePath);
+}
+
+function onWheel(e: WheelEvent) {
+  const horizontal = Math.abs(e.deltaX);
+  const vertical = Math.abs(e.deltaY);
+
+  if (horizontal < 12 || horizontal <= vertical * 1.15) return;
+
+  e.preventDefault();
+  e.stopPropagation();
+
+  horizontalWheelDelta += e.deltaX;
+
+  const now = performance.now();
+  if (Math.abs(horizontalWheelDelta) < HORIZONTAL_WHEEL_THRESHOLD) {
+    return;
+  }
+
+  const direction = horizontalWheelDelta > 0 ? "enter" : "exit";
+  if (
+    direction === lastHorizontalNavigationDirection &&
+    now - lastHorizontalNavigationAt < HORIZONTAL_WHEEL_COOLDOWN_MS
+  ) {
+    return;
+  }
+
+  horizontalWheelDelta = 0;
+  lastHorizontalNavigationAt = now;
+  lastHorizontalNavigationDirection = direction;
+
+  if (direction === "enter") {
+    emitOpenedFile(activateSelectedEntry());
+  } else {
+    exitCurrentDirectory();
   }
 }
 
@@ -126,6 +170,12 @@ watch(
     el?.scrollIntoView({ block: "nearest" });
   }
 );
+
+function emitOpenedFile(filePath: string | null) {
+  if (filePath) {
+    emit("open-file", filePath);
+  }
+}
 
 function isInPath(entry: TreeNode): boolean {
   const bc = state.value.breadcrumb;
@@ -175,15 +225,17 @@ function isDimmed(entry: TreeNode): boolean {
           'slide-left': slideDirection === 'left',
           'slide-right': slideDirection === 'right',
         }"
+        @wheel="onWheel"
       >
         <!-- Parent column -->
         <div class="miller-col col-parent">
           <div class="col-scroll">
             <div
-              v-for="entry in state.columns[0]"
+              v-for="(entry, index) in state.columns[0]"
               :key="entry.path"
               class="tree-item"
               :class="{ active: isInPath(entry) }"
+              @click.stop="emitOpenedFile(activateParentEntry(index))"
             >
               <span v-if="entry.isDir" class="dir-arrow">{{ isInPath(entry) ? '&#x25BE;' : '&#x25B8;' }}</span>
               <span class="entry-name">{{ entry.name }}{{ entry.isDir ? '/' : '' }}</span>
@@ -203,6 +255,7 @@ function isDimmed(entry: TreeNode): boolean {
                 cursor: index === state.cursor[1],
                 dimmed: isDimmed(entry),
               }"
+              @click.stop="emitOpenedFile(activateCurrentEntry(index))"
             >
               <span v-if="entry.isDir" class="dir-arrow">&#x25B8;</span>
               <span class="entry-name">{{ entry.name }}{{ entry.isDir ? '/' : '' }}</span>
@@ -221,6 +274,7 @@ function isDimmed(entry: TreeNode): boolean {
               :key="entry.path"
               class="tree-item"
               :class="{ cursor: index === state.cursor[2] }"
+              @click.stop="emitOpenedFile(activatePreviewEntry(index))"
             >
               <span v-if="entry.isDir" class="dir-arrow">&#x25B8;</span>
               <span class="entry-name">{{ entry.name }}{{ entry.isDir ? '/' : '' }}</span>
@@ -385,14 +439,21 @@ function isDimmed(entry: TreeNode): boolean {
   font-family: "JetBrains Mono", monospace;
   font-size: 12px;
   color: var(--kn-text-muted);
-  cursor: default;
+  cursor: pointer;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  transition:
+    background-color 120ms ease,
+    color 120ms ease,
+    opacity 120ms ease,
+    transform 120ms ease;
 }
 
 .tree-item:hover {
   background: var(--kn-bg-hover);
+  color: var(--kn-text-primary);
+  transform: translateX(2px);
 }
 
 .tree-item.cursor {
@@ -400,6 +461,10 @@ function isDimmed(entry: TreeNode): boolean {
   border-left: 2px solid var(--kn-warning);
   padding-left: 8px;
   color: var(--kn-text-primary);
+}
+
+.tree-item:active {
+  transform: translateX(3px) scale(0.995);
 }
 
 .tree-item.active {

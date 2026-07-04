@@ -66,6 +66,46 @@ async function waitForExplorerText(
   throw new Error(`tree explorer never showed ${expected}`);
 }
 
+async function clickTreeItem(client: WebDriverClient, columnSelector: string, label: string): Promise<void> {
+  const clicked = await client.executeSync<boolean>(
+    `const column = document.querySelector(${JSON.stringify(columnSelector)});
+     const item = Array.from(column?.querySelectorAll(".tree-item") ?? [])
+       .find((el) => el.querySelector(".entry-name")?.textContent?.trim() === ${JSON.stringify(label)});
+     if (!item) return false;
+     item.click();
+     return true;`,
+  );
+  expect(clicked).toBe(true);
+}
+
+async function wheelTree(client: WebDriverClient, deltaX: number, deltaY = 0): Promise<void> {
+  await client.executeSync(
+    `const target = document.querySelector(".miller-columns");
+     target?.dispatchEvent(new WheelEvent("wheel", {
+       deltaX: ${deltaX},
+       deltaY: ${deltaY},
+       bubbles: true,
+       cancelable: true,
+     }));`,
+  );
+}
+
+async function waitForBreadcrumb(
+  client: WebDriverClient,
+  text: string,
+  options: { contains: boolean },
+  timeoutMs = 5_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const breadcrumb = await textContent(client, ".breadcrumb-bar");
+    if (options.contains ? breadcrumb.includes(text) : !breadcrumb.includes(text)) return;
+    await sleep(100);
+  }
+  const mode = options.contains ? "include" : "exclude";
+  throw new Error(`breadcrumb did not ${mode} ${text}`);
+}
+
 describe("tree explorer", () => {
   const client = new WebDriverClient();
   let fixtureRepoPath = "";
@@ -103,6 +143,44 @@ describe("tree explorer", () => {
     await waitForExplorerText(client, IGNORED_FILE);
 
     expect(await textContent(client, ".show-all-toggle")).toContain("showing all");
+  });
+
+  it("enters a directory from a current-column mouse click", async () => {
+    await ensureRepoImported();
+
+    await client.executeSync(
+      `window.__KANNA_E2E__.setupState.showTreeExplorer = false;`,
+    );
+
+    await pressKey(client, "E", { meta: true, shift: true });
+    await client.waitForElement(".tree-modal", 5_000);
+    await waitForExplorerText(client, "src/");
+
+    await clickTreeItem(client, ".col-current", "src/");
+
+    await client.waitForText(".breadcrumb-bar", "src", 5_000);
+    await waitForExplorerText(client, "index.txt");
+  });
+
+  it("uses horizontal trackpad gestures to enter and exit folders", async () => {
+    await ensureRepoImported();
+
+    await client.executeSync(
+      `window.__KANNA_E2E__.setupState.showTreeExplorer = false;`,
+    );
+
+    await pressKey(client, "E", { meta: true, shift: true });
+    await client.waitForElement(".tree-modal", 5_000);
+    await waitForExplorerText(client, "src/");
+
+    await wheelTree(client, 96);
+
+    await waitForBreadcrumb(client, "src", { contains: true });
+    await waitForExplorerText(client, "index.txt");
+
+    await wheelTree(client, -96);
+
+    await waitForBreadcrumb(client, "src", { contains: false });
   });
 
   it("closes a stacked commit graph before closing the tree explorer with Escape", async () => {
