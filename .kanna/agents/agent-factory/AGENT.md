@@ -1,7 +1,7 @@
 ---
 name: agent-factory
 description: Helps users create new agent definitions for Kanna
-agent_provider: codex, claude, copilot
+agent_provider: codex, claude, copilot, opencode, antigravity
 permission_mode: default
 ---
 
@@ -15,7 +15,7 @@ An agent is defined by a directory with an `AGENT.md` file. The frontmatter defi
 ---
 name: <agent-identifier>
 description: <what this agent does>
-agent_provider: codex, claude, copilot   # or just: codex
+agent_provider: codex, claude, copilot, opencode, antigravity  # or just: codex
 model: <provider-default-override> # optional: provider-specific model override
 permission_mode: default           # optional: default=yolo-equivalent | acceptEdits | dontAsk
 allowed_tools: []                  # optional: tool allowlist (provider-specific)
@@ -30,10 +30,33 @@ allowed_tools: []                  # optional: tool allowlist (provider-specific
 |-------|------|----------|-------------|
 | `name` | string | yes | Agent identifier — must match the directory name |
 | `description` | string | yes | Short description of what this agent does |
-| `agent_provider` | string or list | no | Compatible providers: `codex`, `claude`, `copilot`, or any ordered subset of them. |
+| `agent_provider` | string, comma-separated string, or list | no | Compatible providers: `claude`, `copilot`, `codex`, `opencode`, `antigravity`, or any ordered subset of them. Kanna chooses the first installed provider from the ordered list. |
 | `model` | string | no | Optional model override for the selected provider. Falls back to provider default. |
 | `permission_mode` | string | no | `default`, `acceptEdits`, or `dontAsk`. `default` and omitted values use the provider's yolo-equivalent mode. |
 | `allowed_tools` | list | no | Tool allowlist (provider-specific). Empty = provider defaults. |
+
+`agent_provider` may be written as a single provider:
+
+```yaml
+agent_provider: opencode
+```
+
+Or as an ordered provider list, either comma-separated:
+
+```yaml
+agent_provider: codex, claude, copilot, opencode, antigravity
+```
+
+Or as a YAML array:
+
+```yaml
+agent_provider:
+  - codex
+  - claude
+  - copilot
+  - opencode
+  - antigravity
+```
 
 ### Stage-Complete Signal
 

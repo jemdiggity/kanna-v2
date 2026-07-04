@@ -14,7 +14,7 @@ import type { AgentProvider } from "@kanna/db";
 //      throws rather than silently falling back to another source or provider.
 //
 // Note: because built-in agent definitions list providers as e.g.
-// `codex, claude, copilot`, the agent's list takes precedence over the task's
+// `codex, claude, copilot, opencode, antigravity`, the agent's list takes precedence over the task's
 // stored provider on stage advance. Change the ordering in an AGENT.md, or set a
 // stage/explicit provider, to override.
 

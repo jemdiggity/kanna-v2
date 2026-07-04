@@ -24,7 +24,7 @@ export function isAgentProvider(value: unknown): value is KnownAgentProvider {
 /**
  * Split a frontmatter `agent_provider` value into an ordered list of trimmed,
  * non-empty tokens. Accepts a YAML array, a single string, or a comma-separated
- * string (e.g. `codex, claude, copilot`). Does not validate the tokens — callers
+ * string (e.g. `codex, claude, copilot, opencode, antigravity`). Does not validate the tokens — callers
  * decide whether unknown providers should throw or be filtered out.
  */
 export function splitAgentProviderValue(value: unknown): string[] {

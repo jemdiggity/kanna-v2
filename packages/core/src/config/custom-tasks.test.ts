@@ -191,7 +191,7 @@ Use Antigravity for this task.
 
   it("takes the first known provider from a comma-separated agent_provider", () => {
     const content = `---
-agent_provider: codex, claude, copilot
+agent_provider: codex, claude, copilot, opencode, antigravity
 ---
 Do the task.
 `;

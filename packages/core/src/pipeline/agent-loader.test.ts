@@ -89,13 +89,13 @@ Do something.
     const content = `---
 name: Impl
 description: Multi provider
-agent_provider: codex, claude, copilot
+agent_provider: codex, claude, copilot, opencode, antigravity
 ---
 
 Do something.
 `;
     const result = parseAgentDefinition(content);
-    expect(result.agent_provider).toEqual(["codex", "claude", "copilot"]);
+    expect(result.agent_provider).toEqual(["codex", "claude", "copilot", "opencode", "antigravity"]);
   });
 
   it("rejects unknown agent_provider values from frontmatter", () => {
