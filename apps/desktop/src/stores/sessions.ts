@@ -435,6 +435,7 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
       maxTurns: options?.maxTurns,
       maxBudgetUsd: options?.maxBudgetUsd,
       resumeSessionId: options?.resumeSessionId,
+      worktreePath,
       persistAgentSessionId: async (agentSessionId) => {
         await updateAgentSessionId(context.requireDb(), sessionId, agentSessionId);
       },

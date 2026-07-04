@@ -119,10 +119,15 @@ describe("createSessionsApi", () => {
 
     const prepared = await sessions.preparePtySession("task-1", "Ship it", {
       agentProvider: "antigravity",
+      worktreePath: "/tmp/repo/.kanna-worktrees/task-1",
     });
 
-    expect(prepared.agentCmd).toBe("'agy' --dangerously-skip-permissions --prompt-interactive 'Ship it'");
-    expect(prepared.agentCmdPreamble).toContain("'agy' --dangerously-skip-permissions --prompt-interactive '");
+    expect(prepared.agentCmd).toBe(
+      "mkdir -p '/tmp/kanna-antigravity-workspaces' && rm -f '/tmp/kanna-antigravity-workspaces/task-1' && ln -s '/tmp/repo/.kanna-worktrees/task-1' '/tmp/kanna-antigravity-workspaces/task-1' && 'agy' --dangerously-skip-permissions --add-dir '/tmp/kanna-antigravity-workspaces/task-1' --prompt-interactive 'Ship it'",
+    );
+    expect(prepared.agentCmdPreamble).toContain(
+      "mkdir -p '/tmp/kanna-antigravity-workspaces' && rm -f '/tmp/kanna-antigravity-workspaces/task-1' && ln -s '/tmp/repo/.kanna-worktrees/task-1' '/tmp/kanna-antigravity-workspaces/task-1' && 'agy' --dangerously-skip-permissions --add-dir '/tmp/kanna-antigravity-workspaces/task-1' --prompt-interactive '",
+    );
     expect(prepared.agentCmdPreamble).toContain("Ship it");
     expect(prepared.agentCmdPreamble).toContain("This session was launched by Kanna");
     expect(prepared.agentProvider).toBe("antigravity");
