@@ -1,7 +1,7 @@
 ---
 name: pr
 description: Creates a GitHub pull request for a completed task branch
-agent_provider: codex, claude, copilot
+agent_provider: codex, claude, copilot, opencode, antigravity
 permission_mode: default
 ---
 
@@ -26,6 +26,8 @@ You are in a worktree branched from the task branch. Your job is to create a Git
    ```
 
    This ensures the PR only contains the task's changes, not reversions from a stale branch point.
+
+   If the rebase stops on conflicts, do not force it through blindly. Resolve conflicts only when the correct resolution is unambiguous from the task's own changes, then continue with `git rebase --continue`. If the resolution is unclear or the conflict is in code this task did not touch, run `git rebase --abort` and stop, reporting that the branch needs manual rebasing before a PR can be created — do not push a half-rebased branch.
 
 3. **Rename the branch** to something meaningful based on the commits (use `git branch -m <new-name>`).
 

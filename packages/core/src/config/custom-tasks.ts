@@ -1,4 +1,5 @@
 import { parse as parseYaml } from "yaml";
+import { isAgentProvider, splitAgentProviderValue } from "./agent-providers";
 export type Stage = "in_progress" | "pr" | "done";
 
 export interface CustomTaskConfig {
@@ -54,7 +55,6 @@ Available frontmatter fields (all optional, defaults shown):
 Once you understand what they want, create the directory and write the agent.md file
 at .kanna/tasks/<taskname>/agent.md. Use a lowercase hyphenated directory name.`;
 
-const VALID_AGENT_PROVIDERS = ["claude", "copilot", "codex", "opencode", "antigravity"] as const;
 const VALID_PERMISSION_MODES = ["dontAsk", "acceptEdits", "default"] as const;
 const VALID_EXECUTION_MODES = ["pty", "agent", "sdk"] as const;
 const VALID_STAGES = ["in_progress", "pr", "done"] as const;
@@ -138,8 +138,14 @@ export function parseAgentMd(content: string, dirName: string): CustomTaskConfig
     config.model = fm.model;
   }
 
-  if (typeof fm.agent_provider === "string" && (VALID_AGENT_PROVIDERS as readonly string[]).includes(fm.agent_provider)) {
-    config.agentProvider = fm.agent_provider as CustomTaskConfig["agentProvider"];
+  // A task template spawns exactly one agent, so it resolves to a single provider.
+  // Accept a YAML array / single / comma-separated value (e.g. "codex, claude") and
+  // take the first known provider rather than silently dropping a list.
+  if (fm.agent_provider !== undefined) {
+    const firstKnown = splitAgentProviderValue(fm.agent_provider).find(isAgentProvider);
+    if (firstKnown) {
+      config.agentProvider = firstKnown as CustomTaskConfig["agentProvider"];
+    }
   }
 
   if (typeof fm.permission_mode === "string" && (VALID_PERMISSION_MODES as readonly string[]).includes(fm.permission_mode)) {

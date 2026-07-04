@@ -189,6 +189,39 @@ Use Antigravity for this task.
     expect(result!.prompt).toBe("Use Antigravity for this task.");
   });
 
+  it("takes the first known provider from a comma-separated agent_provider", () => {
+    const content = `---
+agent_provider: codex, claude, copilot, opencode, antigravity
+---
+Do the task.
+`;
+    const result = parseAgentMd(content, "multi-task");
+    expect(result).not.toBeNull();
+    expect(result!.agentProvider).toBe("codex");
+  });
+
+  it("skips unknown leading providers and takes the first known one", () => {
+    const content = `---
+agent_provider: bogus, claude
+---
+Do the task.
+`;
+    const result = parseAgentMd(content, "multi-task");
+    expect(result).not.toBeNull();
+    expect(result!.agentProvider).toBe("claude");
+  });
+
+  it("leaves agentProvider unset when no token is a known provider", () => {
+    const content = `---
+agent_provider: bogus, nope
+---
+Do the task.
+`;
+    const result = parseAgentMd(content, "bad-task");
+    expect(result).not.toBeNull();
+    expect(result!.agentProvider).toBeUndefined();
+  });
+
   it("accepts an agent-backed task with no prompt body", () => {
     const content = `---
 name: Merge Master

@@ -1,7 +1,7 @@
 ---
 name: review
 description: QA review agent that verifies test coverage before PR creation
-agent_provider: codex, claude, copilot
+agent_provider: codex, claude, copilot, opencode, antigravity
 permission_mode: default
 ---
 
