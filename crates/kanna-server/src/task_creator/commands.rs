@@ -13,6 +13,7 @@ pub(super) fn build_agent_command(
     allowed_tools: &[String],
     kanna_preamble: Option<&str>,
     mcp_config_path: Option<&str>,
+    worktree_path: Option<&str>,
 ) -> String {
     let prompt_with_fallback = match provider {
         AgentProvider::Claude => prompt.to_string(),
@@ -111,13 +112,31 @@ pub(super) fn build_agent_command(
             if let Some(model) = model {
                 flags.push(format!("--model {}", model));
             }
+            let mut setup = Vec::new();
+            if let Some(worktree_path) = worktree_path {
+                let alias_base = "/tmp/kanna-antigravity-workspaces";
+                let alias_path = format!(
+                    "{}/{}",
+                    alias_base,
+                    safe_antigravity_alias_name(worktree_path)
+                );
+                setup.push(format!("mkdir -p '{}'", shell_single_quote(alias_base)));
+                setup.push(format!("rm -f '{}'", shell_single_quote(&alias_path)));
+                setup.push(format!(
+                    "ln -s '{}' '{}'",
+                    shell_single_quote(worktree_path),
+                    shell_single_quote(&alias_path)
+                ));
+                flags.push(format!("--add-dir '{}'", shell_single_quote(&alias_path)));
+            }
             let mut parts = vec![provider_binary_name(*provider).to_string()];
             parts.extend(flags);
             if !prompt.is_empty() {
                 parts.push("--prompt-interactive".to_string());
                 parts.push(format!("'{}'", escaped_prompt));
             }
-            parts.join(" ")
+            setup.push(parts.join(" "));
+            setup.join(" && ")
         }
     }
 }
@@ -258,4 +277,20 @@ fn kanna_mcp_launch_line(provider: AgentProvider) -> String {
 
 fn shell_single_quote(value: &str) -> String {
     value.replace('\'', "'\\''")
+}
+
+fn safe_antigravity_alias_name(value: &str) -> String {
+    Path::new(value)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(value)
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '.' || ch == '_' || ch == '-' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }

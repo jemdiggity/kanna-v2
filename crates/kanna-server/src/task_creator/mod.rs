@@ -348,6 +348,7 @@ fn build_prepared_session(
                 &allowed_tools,
                 Some(&preamble),
                 mcp_config_path.as_deref(),
+                Some(worktree_path),
             );
             let full_cmd = build_task_shell_command(
                 &agent_cmd,

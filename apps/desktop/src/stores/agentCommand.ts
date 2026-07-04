@@ -19,6 +19,7 @@ export interface BuildAgentCommandParams {
   maxTurns?: number;
   maxBudgetUsd?: number;
   resumeSessionId?: string;
+  worktreePath?: string;
   createSessionId?: () => string;
   persistAgentSessionId?: (agentSessionId: string) => Promise<void>;
   resolveBinaryPath?: (name: string) => Promise<string>;
@@ -131,21 +132,40 @@ async function buildOpenCodeCommand(params: BuildAgentCommandParams): Promise<Ag
 function buildAntigravityCommand(params: BuildAgentCommandParams): AgentCommandResult {
   const antigravityFlags: string[] = [...params.permissionFlags];
   if (params.model) antigravityFlags.push(`--model ${params.model}`);
+  let workspaceAliasSetup: string[] = [];
+  if (params.worktreePath) {
+    const aliasBase = shellSingleQuote("/tmp/kanna-antigravity-workspaces");
+    const aliasPath = shellSingleQuote(`/tmp/kanna-antigravity-workspaces/${safeAntigravityAliasName(params.worktreePath)}`);
+    workspaceAliasSetup = [
+      `mkdir -p ${aliasBase}`,
+      `rm -f ${aliasPath}`,
+      `ln -s ${shellSingleQuote(params.worktreePath)} ${aliasPath}`,
+    ];
+    antigravityFlags.push(`--add-dir ${aliasPath}`);
+  }
   const parts = [shellSingleQuote("agy"), ...antigravityFlags];
   if (params.prompt) parts.push("--prompt-interactive", shellSingleQuote(params.prompt));
 
   const result: AgentCommandResult = {
-    agentCmd: parts.join(" "),
+    agentCmd: [...workspaceAliasSetup, parts.join(" ")].join(" && "),
   };
   if (params.prompt) {
-    result.agentCmdPreamble = [
+    const preambleParts = [
       shellSingleQuote("agy"),
       ...antigravityFlags,
       "--prompt-interactive",
       shellSingleQuote(params.runtimeUserPrompt),
-    ].join(" ");
+    ];
+    result.agentCmdPreamble = [...workspaceAliasSetup, preambleParts.join(" ")].join(" && ");
   }
   return result;
+}
+
+function safeAntigravityAliasName(path: string): string {
+  const trimmed = path.replace(/\/+$/, "");
+  const lastSlash = trimmed.lastIndexOf("/");
+  const name = lastSlash >= 0 ? trimmed.slice(lastSlash + 1) : trimmed;
+  return name.replace(/[^A-Za-z0-9._-]/g, "_");
 }
 
 async function buildClaudeCommand(params: BuildAgentCommandParams): Promise<AgentCommandResult> {
