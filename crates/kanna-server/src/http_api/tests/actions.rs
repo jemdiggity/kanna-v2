@@ -734,7 +734,7 @@ async fn complete_pr_stage_does_not_start_dormant_dependent_until_blocker_closes
 }
 
 #[tokio::test]
-async fn close_last_blocker_starts_dormant_dependent_from_current_default_branch() {
+async fn close_last_blocker_starts_dormant_dependent_from_blocker_branch() {
     use kanna_daemon::protocol::{AgentProvider, Command as DaemonCommand, Event as DaemonEvent};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
@@ -786,9 +786,57 @@ async fn close_last_blocker_starts_dormant_dependent_from_current_default_branch
         "2026-07-01T00:00:00Z",
     )
     .unwrap();
-    db.update_test_pipeline_item_stage_context("task-a", "task-a", "default", None, "claude")
+    db.update_test_pipeline_item_stage_context("task-a", "task-a-stage", "default", None, "claude")
         .unwrap();
     drop(db);
+
+    let blocker_worktree_path = repo_root.join(".kanna-worktrees").join("task-a-stage");
+    std::fs::create_dir_all(repo_root.join(".kanna-worktrees")).unwrap();
+    assert!(Command::new("git")
+        .args([
+            "worktree",
+            "add",
+            "-b",
+            "task-a-stage",
+            blocker_worktree_path.to_str().unwrap(),
+            "main",
+        ])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["branch", "-m", "task-a-pr"])
+        .current_dir(&blocker_worktree_path)
+        .status()
+        .unwrap()
+        .success());
+    std::fs::write(
+        blocker_worktree_path.join("blocker-output.txt"),
+        "blocker output",
+    )
+    .unwrap();
+    assert!(Command::new("git")
+        .args(["add", "blocker-output.txt"])
+        .current_dir(&blocker_worktree_path)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["commit", "-m", "blocker output"])
+        .current_dir(&blocker_worktree_path)
+        .status()
+        .unwrap()
+        .success());
+    let blocker_head = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&blocker_worktree_path)
+        .output()
+        .unwrap();
+    assert!(blocker_head.status.success());
+    let blocker_head = String::from_utf8_lossy(&blocker_head.stdout)
+        .trim()
+        .to_string();
 
     let app = super::router(Arc::new(super::AppState::new(config.clone())));
     let create_response = app
@@ -814,29 +862,6 @@ async fn close_last_blocker_starts_dormant_dependent_from_current_default_branch
         .unwrap();
     let dependent: CreateTaskResponse = from_slice(&body).unwrap();
     assert_eq!(dependent.worktree_path, None);
-
-    std::fs::write(repo_root.join("merged-output.txt"), "merged blocker output").unwrap();
-    assert!(Command::new("git")
-        .args(["add", "merged-output.txt"])
-        .current_dir(&repo_root)
-        .status()
-        .unwrap()
-        .success());
-    assert!(Command::new("git")
-        .args(["commit", "-m", "merge blocker output"])
-        .current_dir(&repo_root)
-        .status()
-        .unwrap()
-        .success());
-    let default_head = Command::new("git")
-        .args(["rev-parse", "main"])
-        .current_dir(&repo_root)
-        .output()
-        .unwrap();
-    assert!(default_head.status.success());
-    let default_head = String::from_utf8_lossy(&default_head.stdout)
-        .trim()
-        .to_string();
 
     let daemon_listener = UnixListener::bind(&socket_path).unwrap();
     let expected_task_id = dependent.task_id.clone();
@@ -922,7 +947,7 @@ async fn close_last_blocker_starts_dormant_dependent_from_current_default_branch
 
     let db = Db::open(&config.db_path).unwrap();
     let dependent_item = db.get_pipeline_item(&dependent.task_id).unwrap().unwrap();
-    assert_eq!(dependent_item.base_ref.as_deref(), Some("main"));
+    assert_eq!(dependent_item.base_ref.as_deref(), Some("task-a-pr"));
     assert_eq!(dependent_item.activity.as_deref(), Some("working"));
     let worktree_path = db
         .get_task_worktree_path(&dependent.task_id)
@@ -936,7 +961,13 @@ async fn close_last_blocker_starts_dormant_dependent_from_current_default_branch
     assert!(dependent_head.status.success());
     assert_eq!(
         String::from_utf8_lossy(&dependent_head.stdout).trim(),
-        default_head
+        blocker_head
+    );
+    assert!(
+        std::path::Path::new(&worktree_path)
+            .join("blocker-output.txt")
+            .exists(),
+        "dependent should include committed blocker work"
     );
 
     let _ = std::fs::remove_file(&socket_path);

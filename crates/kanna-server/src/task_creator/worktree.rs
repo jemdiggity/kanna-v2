@@ -46,7 +46,7 @@ pub(super) fn remove_prepared_worktree(worktree_path: &str, branch: &str) -> Res
 
     Ok(())
 }
-pub(super) fn resolve_current_source_worktree_branch(
+pub(crate) fn resolve_current_source_worktree_branch(
     repo_path: &str,
     stored_branch: Option<&str>,
 ) -> Option<String> {

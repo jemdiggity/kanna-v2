@@ -47,6 +47,7 @@ pub(crate) use stages::{
     prepare_advance_stage_for_api, prepare_revision_task_for_api, prepare_stage_completion_for_api,
     resolve_stage_transition,
 };
+pub(crate) use worktree::resolve_current_source_worktree_branch;
 
 pub(crate) fn prepare_rerun_stage_for_api(
     db: &Db,

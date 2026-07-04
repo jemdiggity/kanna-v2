@@ -33,8 +33,8 @@ impl Db {
     }
 
     /// Count blockers that are still unresolved. A blocker resolves only when
-    /// it is closed; dependents start from the current default branch at that
-    /// point so they build on the blocker after it has merged.
+    /// it is closed; dependents started at that point inherit same-repo
+    /// blocker branches before falling back to their normal base.
     pub fn count_open_task_blockers(&self, blocked_item_id: &str) -> Result<i64, rusqlite::Error> {
         self.conn.query_row(
             "SELECT COUNT(*)
