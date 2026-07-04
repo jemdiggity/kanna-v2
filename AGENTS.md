@@ -13,7 +13,7 @@ Kanna is a product distributed to end users as a signed macOS app. All dependenc
 ### Core concepts
 
 - **Task** — A unit of work. Has a prompt, a git worktree, a Claude agent session, and a lifecycle stage. One task = one branch = one PR.
-- **Pipeline** — User-definable agentic pipeline: an ordered list of stages, each with an agent, an optional environment, a stage policy, and an optional post. Defined in `.kanna/pipelines/*.json`. Default: `in progress` (post: `commit`) `→ review → pr`. Tasks are durable (same id, run history, blockers), but each stage transition forks a fresh workspace: a new randomly-named branch + worktree cut from the previous branch's committed tip — N worktrees, N branches, one PR (the PR agent renames the final branch into something meaningful). A stage's `post` (e.g. commit) is tail work injected into the stage's running agent session before the transition — stages fork workspaces and swap sessions, posts continue them. Only committed work crosses a stage boundary; old worktrees stay on disk until cleanup. Advancing past the final stage closes the task.
+- **Pipeline** — User-definable agentic pipeline: an ordered list of stages, each with an agent, an optional environment, a stage policy, and an optional post. Defined in `.kanna/pipelines/*.json`. Default: `in progress` (post: `commit`) `→ review → pr`. Tasks are durable (same id, run history, blockers), but each stage transition forks a fresh workspace: a new branch + worktree named `task-{id}-{n}` (the durable task id plus a workspace counter; the creation workspace is plain `task-{id}`) cut from the previous branch's committed tip — N worktrees, N branches, one PR (the PR agent renames the final branch into something meaningful). A workspace is an ephemeral manifestation of the task. A stage's `post` (e.g. commit) is tail work injected into the stage's running agent session before the transition — stages fork workspaces and swap sessions, posts continue them. Only committed work crosses a stage boundary; old worktrees stay on disk until cleanup. Advancing past the final stage closes the task.
 - **Daemon** — Standalone process that manages PTY sessions. Survives app restarts. Handles seamless upgrades via fd handoff.
 
 ### Workflows
@@ -533,7 +533,7 @@ If a behavior should have E2E coverage but cannot reasonably get it yet, the cha
 
 - Task stage is tracked via `pipeline_item.stage` (e.g., `'in progress'`, `'commit'`, `'pr'`). Visibility is governed by `closed_at`; closed tasks keep their last stage. Blocked display state derives from `task_blocker`, not tags.
 - Git worktrees created at `{repoPath}/.kanna-worktrees/task-{uuid}`
-- Branch names: `task-{uuid}`
+- Branch names: `task-{id}` at creation; stage forks append a workspace counter (`task-{id}-2`, `task-{id}-3`, …)
 - GitHub labels: `kn:wip`, `kn:pr-ready`, `kn:claimed`
 - API tokens from env: `KANNA_GITHUB_TOKEN`, `KANNA_SLACK_TOKEN`, `KANNA_DISCORD_TOKEN`
 - Agent providers: `"claude"` or `"copilot"` — stored in `pipeline_item.agent_provider`

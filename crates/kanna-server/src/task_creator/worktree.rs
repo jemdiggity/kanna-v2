@@ -74,6 +74,40 @@ pub(super) fn resolve_current_source_worktree_branch(
     }
 }
 
+/// Branch/worktree name for a stage fork: the task's durable id plus a
+/// workspace counter (`task-<id>-2`, `task-<id>-3`, ...). The creation
+/// workspace `task-<id>` is workspace 1, so forks count from 2. Each
+/// workspace is an ephemeral manifestation of the task; the visible id ties
+/// it back to the durable row. Suffixes whose branch or worktree directory
+/// still exists are skipped (revisions can revisit a stage).
+pub(super) fn next_fork_branch(repo_path: &str, task_id: &str) -> Result<String, String> {
+    for n in 2u32..10_000 {
+        let candidate = format!("task-{}-{}", task_id, n);
+        let branch_exists = Command::new("git")
+            .args([
+                "show-ref",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{}", candidate),
+            ])
+            .current_dir(repo_path)
+            .status()
+            .map_err(|e| format!("failed to run git show-ref: {}", e))?
+            .success();
+        let worktree_exists = Path::new(repo_path)
+            .join(".kanna-worktrees")
+            .join(&candidate)
+            .exists();
+        if !branch_exists && !worktree_exists {
+            return Ok(candidate);
+        }
+    }
+    Err(format!(
+        "no free fork workspace suffix for task {}",
+        task_id
+    ))
+}
+
 pub(super) fn generate_task_id() -> Result<String, String> {
     let mut bytes = [0u8; 4];
     File::open("/dev/urandom")
