@@ -469,9 +469,34 @@ fn spawn_echo_session(conn: &mut ClientConn, session_id: &str) {
         rows: 24,
     });
 
+    expect_session_created(conn, session_id);
+}
+
+fn expect_session_created(conn: &mut ClientConn, session_id: &str) {
     match conn.recv() {
         Evt::SessionCreated { session_id: sid } => assert_eq!(sid, session_id),
         other => panic!("expected SessionCreated, got: {:?}", other),
+    }
+}
+
+fn expect_session_created_with_timeout(conn: &mut ClientConn, session_id: &str, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(!remaining.is_zero(), "timed out waiting for SessionCreated");
+
+        match conn.recv_with_timeout(remaining.min(Duration::from_millis(50))) {
+            Ok(Evt::SessionCreated { session_id: sid }) => {
+                assert_eq!(sid, session_id);
+                return;
+            }
+            Ok(Evt::Output { .. }) | Ok(Evt::StatusChanged { .. }) | Ok(Evt::Exit { .. }) => {
+                continue;
+            }
+            Ok(Evt::Error { message }) => panic!("spawn failed: {message}"),
+            Ok(other) => panic!("expected SessionCreated, got: {:?}", other),
+            Err(_) => continue,
+        }
     }
 }
 
@@ -767,6 +792,12 @@ fn expect_session_list_with_timeout(conn: &mut ClientConn, timeout: Duration) ->
     }
 }
 
+fn session_list_contains(sessions: &[Value], session_id: &str) -> bool {
+    sessions
+        .iter()
+        .any(|session| session["session_id"] == session_id)
+}
+
 // ---- Tests ----
 
 /// Mimics the real Tauri flow: Spawn on shared conn, AttachSnapshot on dedicated conn,
@@ -888,6 +919,45 @@ fn stalled_pty_input_does_not_block_daemon_or_stop_output_reader() {
     );
 
     let _ = input_thread.join();
+}
+
+#[test]
+fn kill_keeps_same_management_connection_responsive() {
+    let daemon = DaemonHandle::start();
+    let mut management = daemon.connect();
+
+    spawn_shell_session(
+        &mut management,
+        "sess-kill-responsive",
+        "while :; do sleep 1; done",
+    );
+
+    management.send(&Cmd::Kill {
+        session_id: "sess-kill-responsive".to_string(),
+    });
+    wait_for_ok_with_timeout(&mut management, "kill session", Duration::from_millis(700));
+
+    management.send(&Cmd::List);
+    let sessions = expect_session_list_with_timeout(&mut management, Duration::from_millis(700));
+    assert!(
+        !session_list_contains(&sessions, "sess-kill-responsive"),
+        "killed session should be removed before the same management connection continues: {sessions:?}"
+    );
+
+    management.send(&Cmd::Spawn {
+        session_id: "sess-after-kill".to_string(),
+        executable: "/bin/cat".to_string(),
+        args: vec![],
+        cwd: "/tmp".to_string(),
+        env: HashMap::new(),
+        cols: 80,
+        rows: 24,
+    });
+    expect_session_created_with_timeout(
+        &mut management,
+        "sess-after-kill",
+        Duration::from_millis(700),
+    );
 }
 
 #[test]

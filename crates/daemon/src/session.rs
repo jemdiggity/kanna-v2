@@ -259,7 +259,13 @@ impl SessionHandle {
     }
 
     pub async fn kill(&self) -> std::io::Result<()> {
-        self.pty.lock().await.kill()
+        let pid = {
+            let mut pty = self.pty.lock().await;
+            pty.kill()?;
+            pty.pid() as libc::pid_t
+        };
+        reap_child_in_background(pid);
+        Ok(())
     }
 
     pub async fn try_wait(&self) -> Option<i32> {
@@ -408,6 +414,46 @@ fn status_detection_throttle() -> Duration {
     Duration::from_millis(STATUS_DETECTION_THROTTLE_MS)
 }
 
+const REAP_GIVE_UP_AFTER: Duration = Duration::from_secs(60);
+
+/// Reap a SIGKILLed child without ever blocking the async runtime. A child
+/// stuck exiting inside the kernel keeps a blocking `waitpid` from returning
+/// indefinitely; polling with WNOHANG lets the kill command complete and the
+/// connection keep serving commands regardless of the child's fate.
+fn reap_child_in_background(pid: libc::pid_t) {
+    tokio::spawn(async move {
+        let reaped =
+            reap_child(move || unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) })
+                .await;
+        if !reaped {
+            log::warn!(
+                "[kill] child {} still not reapable after {:?}; abandoning reap",
+                pid,
+                REAP_GIVE_UP_AFTER
+            );
+        }
+    });
+}
+
+/// Poll a WNOHANG-style waiter until the child is gone or the deadline passes.
+/// `poll` returns the child pid once reaped, `-1` when the child was already
+/// reaped elsewhere (or is not ours), and `0` while it is still exiting.
+/// Returns false only when the child never became reapable.
+async fn reap_child(mut poll: impl FnMut() -> libc::pid_t) -> bool {
+    let deadline = tokio::time::Instant::now() + REAP_GIVE_UP_AFTER;
+    let mut delay = Duration::from_millis(20);
+    loop {
+        if poll() != 0 {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(delay).await;
+        delay = (delay * 2).min(Duration::from_secs(1));
+    }
+}
+
 fn detect_headless_terminal_status_if_due(
     headless_terminal: &mut HeadlessTerminal,
     agent_provider: Option<AgentProvider>,
@@ -532,6 +578,41 @@ mod tests {
         Ok(Arc::new(SessionHandle::new(spawn_test_record(
             provider, status,
         )?)))
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reap_child_gives_up_when_child_never_becomes_reapable() {
+        // A child stuck exiting inside the kernel is never reapable; the loop
+        // must give up at the deadline instead of hanging the runtime forever
+        // the way the old blocking `waitpid` did.
+        let reaped = super::reap_child(|| 0).await;
+        assert!(!reaped);
+    }
+
+    #[tokio::test]
+    async fn reap_child_returns_once_child_is_reaped() {
+        let mut polls = 0;
+        let reaped = super::reap_child(move || {
+            polls += 1;
+            if polls < 3 {
+                0
+            } else {
+                42
+            }
+        })
+        .await;
+        assert!(reaped);
+    }
+
+    #[tokio::test]
+    async fn kill_returns_and_releases_pty_lock_before_child_is_reaped() {
+        let handle = spawn_test_handle(AgentProvider::Codex, SessionStatus::Idle).unwrap();
+
+        handle.kill().await.unwrap();
+
+        // The pty mutex must be free as soon as kill returns; the old code
+        // held it through a blocking reap of the child.
+        assert!(handle.pty.try_lock().is_ok());
     }
 
     #[tokio::test]
