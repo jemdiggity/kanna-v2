@@ -1,5 +1,23 @@
 import type { AgentProvider } from "@kanna/db";
 
+// Provider-selection policy (how a multi-provider agent/stage resolves to the one
+// provider a task actually spawns with):
+//
+//   1. Precedence between sources (getPreferredAgentProviders): explicit > stage >
+//      agent > item. The first source that names any provider wins outright; lower
+//      sources are NOT consulted, even if the winning source's providers are all
+//      unavailable. So a stage-level provider intentionally overrides the agent
+//      definition's list, which in turn overrides the task's stored provider.
+//   2. Within the winning source's ordered candidate list (resolveAgentProvider),
+//      the first *installed/available* provider is chosen.
+//   3. If the winning source has candidates but none are available, resolution
+//      throws rather than silently falling back to another source or provider.
+//
+// Note: because built-in agent definitions list providers as e.g.
+// `codex, claude, copilot`, the agent's list takes precedence over the task's
+// stored provider on stage advance. Change the ordering in an AGENT.md, or set a
+// stage/explicit provider, to override.
+
 export interface AgentProviderAvailability {
   claude: boolean;
   copilot: boolean;

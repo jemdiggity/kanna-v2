@@ -85,6 +85,43 @@ Do something.
     expect(result.agent_provider).toEqual(["codex", "copilot"]);
   });
 
+  it("parses the built-in comma-separated multi-provider agent_provider", () => {
+    const content = `---
+name: Impl
+description: Multi provider
+agent_provider: codex, claude, copilot
+---
+
+Do something.
+`;
+    const result = parseAgentDefinition(content);
+    expect(result.agent_provider).toEqual(["codex", "claude", "copilot"]);
+  });
+
+  it("rejects unknown agent_provider values from frontmatter", () => {
+    const content = `---
+name: Bad Provider
+description: Has a typo'd provider
+agent_provider: codx
+---
+
+Do something.
+`;
+    expect(() => parseAgentDefinition(content)).toThrow(/agent_provider.*codx/);
+  });
+
+  it("rejects an unknown provider inside a comma-separated list", () => {
+    const content = `---
+name: Bad Provider
+description: One typo among valid providers
+agent_provider: codex, claud, copilot
+---
+
+Do something.
+`;
+    expect(() => parseAgentDefinition(content)).toThrow(/agent_provider.*claud/);
+  });
+
   it("uses markdown body as the prompt field", () => {
     const content = `---
 name: Body Agent
@@ -193,5 +230,26 @@ describe("validateAgentDefinition", () => {
       };
       expect(validateAgentDefinition(def)).toEqual([]);
     }
+  });
+
+  it("returns error for an unknown agent_provider in the list", () => {
+    const def = {
+      name: "Valid Name",
+      description: "Valid description",
+      agent_provider: ["codex", "nope"],
+      prompt: "Do something.",
+    };
+    const errors = validateAgentDefinition(def);
+    expect(errors.some((e) => e.includes("agent_provider"))).toBe(true);
+  });
+
+  it("accepts all known agent_provider values", () => {
+    const def = {
+      name: "Valid Name",
+      description: "Valid description",
+      agent_provider: ["claude", "copilot", "codex", "opencode", "antigravity"],
+      prompt: "Do something.",
+    };
+    expect(validateAgentDefinition(def)).toEqual([]);
   });
 });
