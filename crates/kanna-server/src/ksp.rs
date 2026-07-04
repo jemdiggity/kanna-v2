@@ -1030,6 +1030,7 @@ mod tests {
                 session_id: "daemon-terminal-1".to_string(),
                 code: 0,
                 resume_session_id: None,
+                killed: false,
             };
 
             for event in [snapshot, output_prefix, output_suffix, exit] {

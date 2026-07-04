@@ -43,9 +43,16 @@ async fn terminal_state_watcher_once(
             .map_err(|e| format!("daemon read failed: {}", e))?
         {
             DaemonEvent::Exit {
-                session_id, code, ..
+                session_id,
+                code,
+                killed,
+                ..
             } => {
-                if replacements.consume(&session_id) {
+                // Consume the replacement entry even when the event is
+                // self-describing — a leftover entry would swallow a future
+                // legitimate Exit for the same session id.
+                let replaced = replacements.consume(&session_id);
+                if replaced || killed {
                     // Orchestrated kill (stage swap, rerun, close) — not the
                     // agent finishing.
                     continue;

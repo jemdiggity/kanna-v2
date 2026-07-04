@@ -82,6 +82,8 @@ enum Evt {
     Exit {
         session_id: String,
         code: i32,
+        #[serde(default)]
+        killed: bool,
     },
     SessionCreated {
         session_id: String,
@@ -552,12 +554,102 @@ fn test_subscriber_receives_exit_for_pty_sessions() {
     loop {
         match subscriber.recv() {
             Evt::SessionCreated { .. } | Evt::Output { .. } | Evt::StatusChanged { .. } => {}
-            Evt::Exit { session_id, code } => {
+            Evt::Exit {
+                session_id,
+                code,
+                killed,
+            } => {
+                assert!(!killed, "natural exit must not be marked killed");
                 assert_eq!(session_id, "sess-exit-broadcast");
                 assert_eq!(code, 0);
                 break;
             }
             other => panic!("expected Exit broadcast, got: {:?}", other),
+        }
+    }
+}
+
+#[test]
+fn test_subscriber_receives_killed_exit_for_killed_pty_sessions() {
+    let daemon = DaemonHandle::start();
+    let mut subscriber = daemon.connect();
+    subscriber.send(&Cmd::Subscribe);
+    match subscriber.recv() {
+        Evt::Ok => {}
+        other => panic!("expected Ok for Subscribe, got: {:?}", other),
+    }
+
+    let mut creator = daemon.connect();
+    spawn_shell_session(&mut creator, "sess-kill-broadcast", "sleep 30");
+    kill_session(&mut creator, "sess-kill-broadcast");
+
+    loop {
+        match subscriber.recv() {
+            Evt::SessionCreated { .. } | Evt::Output { .. } | Evt::StatusChanged { .. } => {}
+            Evt::Exit {
+                session_id, killed, ..
+            } => {
+                assert_eq!(session_id, "sess-kill-broadcast");
+                assert!(killed, "a Kill-command exit must be marked killed");
+                break;
+            }
+            other => panic!("expected killed Exit broadcast, got: {:?}", other),
+        }
+    }
+}
+
+/// A stage swap kills a session id and immediately respawns it with the next
+/// stage's agent. Subscribers must observe the old incarnation's Exit before
+/// the new incarnation's SessionCreated — the desktop terminal rebinds on
+/// SessionCreated, and kill orchestration (SessionReplacements) consumes
+/// exactly one Exit per kill.
+#[test]
+fn test_kill_then_respawn_broadcasts_exit_before_session_created() {
+    let daemon = DaemonHandle::start();
+    let mut subscriber = daemon.connect();
+    subscriber.send(&Cmd::Subscribe);
+    match subscriber.recv() {
+        Evt::Ok => {}
+        other => panic!("expected Ok for Subscribe, got: {:?}", other),
+    }
+
+    let mut creator = daemon.connect();
+    spawn_shell_session(&mut creator, "sess-swap", "sleep 30");
+    // Drain the first incarnation's SessionCreated broadcast.
+    loop {
+        match subscriber.recv() {
+            Evt::SessionCreated { session_id } => {
+                assert_eq!(session_id, "sess-swap");
+                break;
+            }
+            Evt::Output { .. } | Evt::StatusChanged { .. } => {}
+            other => panic!("expected SessionCreated broadcast, got: {:?}", other),
+        }
+    }
+
+    kill_session(&mut creator, "sess-swap");
+    spawn_shell_session(&mut creator, "sess-swap", "sleep 30");
+
+    let mut saw_killed_exit = false;
+    loop {
+        match subscriber.recv() {
+            Evt::Exit {
+                session_id, killed, ..
+            } => {
+                assert_eq!(session_id, "sess-swap");
+                assert!(killed);
+                saw_killed_exit = true;
+            }
+            Evt::SessionCreated { session_id } => {
+                assert_eq!(session_id, "sess-swap");
+                assert!(
+                    saw_killed_exit,
+                    "respawn SessionCreated must be preceded by the killed Exit"
+                );
+                break;
+            }
+            Evt::Output { .. } | Evt::StatusChanged { .. } => {}
+            other => panic!("expected Exit then SessionCreated, got: {:?}", other),
         }
     }
 }
