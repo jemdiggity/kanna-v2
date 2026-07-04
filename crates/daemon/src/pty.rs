@@ -359,13 +359,15 @@ impl PtySession {
         unsafe { libc::kill(self.child_pid, 0) == 0 }
     }
 
+    /// Send SIGKILL to the child. Reaping is the caller's responsibility
+    /// (see `SessionHandle::kill`): a blocking `waitpid` here can hang forever
+    /// when the child is stuck exiting inside the kernel, wedging the daemon
+    /// connection that issued the kill.
     pub fn kill(&mut self) -> io::Result<()> {
         let ret = unsafe { libc::kill(self.child_pid, libc::SIGKILL) };
         if ret != 0 {
             return Err(io::Error::last_os_error());
         }
-        // Reap the child
-        unsafe { libc::waitpid(self.child_pid, std::ptr::null_mut(), 0) };
         Ok(())
     }
 
