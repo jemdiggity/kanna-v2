@@ -427,6 +427,67 @@ describe("useTerminal", () => {
     expect(detach).toHaveBeenCalledWith("session-1", "terminal");
   });
 
+  it("re-attaches when the session is respawned even though the terminal still believes it is attached", async () => {
+    // Stage transitions kill + respawn the same session id. The kill can race
+    // ahead of (or never produce) an exit signal, so the SessionCreated
+    // broadcast must force a rebind even while `attached` is still true —
+    // otherwise the terminal freezes on the dead predecessor session.
+    const attachTerminal = vi.fn((taskId: string, handlers: TerminalStreamHandlers) => {
+      terminalStreamHandlers.set(taskId, handlers);
+      handlers.onSnapshot?.(80, 24, btoa("stage snapshot"));
+    });
+    streamClientMock.getSharedStreamClient.mockResolvedValue({
+      attachTerminal,
+      sendTermInput: vi.fn(),
+      sendTermResize: vi.fn(),
+      detach: vi.fn(),
+    });
+
+    const { useTerminal } = await import("./useTerminal");
+    const TestHarness = defineComponent({
+      setup() {
+        const { init, startListening } = useTerminal(
+          "session-1",
+          {
+            cwd: "/tmp/task",
+            prompt: "hello",
+            spawnFn: async () => {},
+          },
+          {
+            agentProvider: "claude",
+            worktreePath: "/tmp/task",
+          },
+        );
+
+        return { init, startListening };
+      },
+      render() {
+        return h("div");
+      },
+    });
+
+    const wrapper = mount(TestHarness);
+    const terminalElement = document.createElement("div");
+    Object.defineProperty(terminalElement, "offsetWidth", { configurable: true, value: 800 });
+    Object.defineProperty(terminalElement, "offsetHeight", { configurable: true, value: 600 });
+    terminalElement.querySelector = vi.fn(() => null) as typeof terminalElement.querySelector;
+    terminalElement.closest = vi.fn(() => null) as typeof terminalElement.closest;
+    wrapper.vm.init(terminalElement);
+
+    await wrapper.vm.startListening();
+    await flushAsyncWork();
+    expect(attachTerminal).toHaveBeenCalledTimes(1);
+
+    for (const listener of eventListeners.get("session_created") ?? []) {
+      listener({ payload: { session_id: "session-1" } });
+    }
+    await flushAsyncWork();
+
+    expect(attachTerminal).toHaveBeenCalledTimes(2);
+
+    wrapper.unmount();
+  });
+
   it("applies the initial task snapshot from the ordered stream without a resume step", async () => {
     const client = installKspStreamClient({
       onAttach: (_taskId, handlers) => {

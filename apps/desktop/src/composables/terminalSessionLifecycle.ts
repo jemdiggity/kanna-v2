@@ -306,16 +306,17 @@ export function createTerminalSessionLifecycle(params: {
     if (!params.state.unlistenSessionCreated) {
       // Stage transitions replace the task's agent session in place: the
       // engine kills this session id and respawns it with the next stage's
-      // agent. The exit latches `sessionExited`; the daemon's SessionCreated
-      // broadcast is the signal to drop that latch and attach to the new
-      // session. Without it the terminal stays permanently dead while the
-      // next stage's agent runs invisibly.
+      // agent. A SessionCreated for our session id therefore means any
+      // attachment we hold points at the killed predecessor — rebind even if
+      // we still believe we are attached; that belief is stale by definition.
+      // Only an in-flight connect is left alone: it attaches to the daemon's
+      // current (new) session anyway.
       const sessionCreatedUnlisten = await listen(
         "session_created",
         (event) => {
           const sid = (event.payload as { session_id?: string } | undefined)?.session_id
           if (sid !== params.sessionId) return
-          if (!params.state.sessionExited && params.state.attached) return
+          if (params.state.connecting) return
           console.warn("[terminal][event] session_created rebind", {
             sessionId: params.sessionId,
             instanceId: params.instanceId,

@@ -601,11 +601,30 @@ pub(crate) async fn handle_command(
             if success {
                 sessions.lock().await.remove(&session_id);
             }
-            session_writers.lock().await.remove(&session_id);
+            let killed_writers = session_writers.lock().await.remove(&session_id);
             terminal_emulator_clients.lock().await.remove(&session_id);
             session_sizes.lock().await.remove(&session_id);
-            session_observers.lock().await.remove(&session_id);
+            let killed_observers = session_observers.lock().await.remove(&session_id);
             if success {
+                // A killed session must reach attached clients the same way a
+                // natural exit does, or they keep believing a dead stream is
+                // live (the killed session's reader skips its exit broadcast
+                // because the session is already gone from the manager).
+                // Deliberately per-writer, not on the Subscribe broadcast:
+                // subscribers (e.g. completion notify) must not see engine
+                // kills as task completion.
+                let exit_evt = Event::Exit {
+                    session_id: session_id.clone(),
+                    code: 128 + libc::SIGKILL,
+                    resume_session_id: None,
+                };
+                for client in killed_writers
+                    .into_iter()
+                    .flatten()
+                    .chain(killed_observers.into_iter().flatten())
+                {
+                    let _ = write_event(&mut *client.lock().await, &exit_evt).await;
+                }
                 recovery_manager.end_session(&session_id).await;
             }
             let evt = match result {
