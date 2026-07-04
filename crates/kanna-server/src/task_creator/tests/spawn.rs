@@ -337,3 +337,102 @@ async fn prepared_non_claude_pty_task_spawn_prepends_kanna_context_to_prompt() {
 
     let _ = std::fs::remove_dir_all(&repo_root);
 }
+
+#[tokio::test]
+async fn prepared_antigravity_pty_task_spawn_sets_up_worktree_alias() {
+    let repo_root = init_git_repo_with_pipeline(
+        "antigravity-pty-worktree-alias",
+        "qa",
+        "implement",
+        "manual",
+        "antigravity",
+    );
+    let config = test_config("antigravity-pty-worktree-alias");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    let prepared = prepare_task_for_api(
+        &db,
+        &config,
+        CreateTaskRequest {
+            repo_id: "repo-1".to_string(),
+            prompt: "Use Antigravity PTY".to_string(),
+            display_name: None,
+            pipeline_name: Some("qa".to_string()),
+            base_ref: None,
+            agent_provider: Some("antigravity".to_string()),
+            agent_type: None,
+            model: None,
+            permission_mode: None,
+            allowed_tools: None,
+            blocker_task_ids: None,
+            notify_task_id: None,
+
+            parent_task_id: None,
+        },
+    )
+    .unwrap();
+    let task_id = prepared.created_task.task_id.clone();
+    let worktree_path = prepared.created_task.worktree_path.clone();
+    let alias_name: String = std::path::Path::new(&worktree_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '.' || ch == '_' || ch == '-' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let alias_path = format!("/tmp/kanna-antigravity-workspaces/{alias_name}");
+    let fake_daemon = spawn_fake_daemon_session_created_once(config.daemon_dir.clone()).await;
+    let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
+
+    spawn_prepared_task(&mut daemon, prepared).await.unwrap();
+    let command = fake_daemon.await.unwrap();
+
+    match command {
+        kanna_daemon::protocol::Command::Spawn {
+            session_id,
+            args,
+            cwd,
+            ..
+        } => {
+            assert_eq!(session_id, task_id);
+            assert_eq!(cwd, worktree_path);
+            let shell_command = args.last().expect("shell command argument");
+            assert!(shell_command.contains("mkdir -p '/tmp/kanna-antigravity-workspaces'"));
+            assert!(shell_command.contains(&format!("rm -f '{alias_path}'")));
+            assert!(shell_command.contains(&format!("ln -s '{}' '{alias_path}'", worktree_path)));
+            assert!(shell_command.contains(&format!(
+                "agy --dangerously-skip-permissions --add-dir '{alias_path}'"
+            )));
+            let alias_setup_index = shell_command
+                .find(&format!("ln -s '{}' '{alias_path}'", worktree_path))
+                .expect("worktree alias setup should be present");
+            let launch_index = shell_command
+                .find(&format!(
+                    "agy --dangerously-skip-permissions --add-dir '{alias_path}'"
+                ))
+                .expect("Antigravity launch should use the alias");
+            assert!(alias_setup_index < launch_index);
+            let context_index = shell_command
+                .find("## Kanna Task Environment")
+                .expect("Kanna context should be prompt-prepended");
+            let prompt_index = shell_command
+                .find("Use Antigravity PTY")
+                .expect("original prompt should be retained");
+            assert!(context_index < prompt_index);
+            assert!(shell_command.contains(&format!("task `{task_id}`")));
+            assert!(shell_command.contains("stage `implement`"));
+            assert!(shell_command.contains("pipeline `qa`"));
+            assert!(shell_command.contains("(transition: `manual`)"));
+        }
+        other => panic!("expected Spawn, got {other:?}"),
+    }
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
