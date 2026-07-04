@@ -682,6 +682,9 @@ async fn prepare_advance_stage_forks_workspace_for_next_run_in_same_task() {
         .branch
         .clone();
     let fork_worktree = run.forked_workspace.as_ref().unwrap().worktree_path.clone();
+    // Fork workspaces carry the durable task id plus a workspace counter:
+    // the creation workspace is workspace 1, so the first fork is `-2`.
+    assert_eq!(fork_branch, "task-task-1-2");
     assert_ne!(fork_branch, "task-source");
     assert_ne!(run.cwd, source_worktree.to_string_lossy());
     assert_eq!(run.cwd, fork_worktree);
@@ -741,6 +744,13 @@ async fn prepare_advance_stage_forks_workspace_for_next_run_in_same_task() {
     assert_eq!(runs[1].stage, "review");
     assert_eq!(runs[1].status, "running");
     assert_eq!(runs[1].session_id.as_deref(), Some("task-1"));
+
+    // The counter skips workspaces that still exist: with `-2` live, the
+    // next fork for this task is `-3`.
+    assert_eq!(
+        super::super::worktree::next_fork_branch(&repo_root.to_string_lossy(), "task-1").unwrap(),
+        "task-task-1-3"
+    );
 
     let _ = std::fs::remove_dir_all(&repo_root);
 }
