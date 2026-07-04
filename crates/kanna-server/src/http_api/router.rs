@@ -15,6 +15,7 @@ use super::task_logs::task_logs;
 use super::tasks::{create_task, get_task, list_recent_tasks, search_tasks, update_task};
 use axum::body::Body;
 use axum::http::Request;
+use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::Router;
 use std::sync::Arc;
@@ -64,7 +65,43 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/v1/pairing/sessions", post(create_pairing_session))
         .layer(CorsLayer::permissive())
+        .layer(axum::middleware::from_fn(log_error_responses))
         .with_state(state)
+}
+
+/// Log every error response with its body. Clients see the body too, but a
+/// crashed or headless client leaves no trace — this is the server-side
+/// record of what actually failed (request-revision once returned a bare 500
+/// that nothing recorded).
+async fn log_error_responses(
+    request: Request<Body>,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let method = request.method().clone();
+    let path = request.uri().path().to_string();
+    let response = next.run(request).await;
+    let status = response.status();
+    if !(status.is_client_error() || status.is_server_error()) {
+        return response;
+    }
+    let (parts, body) = response.into_parts();
+    match axum::body::to_bytes(body, usize::MAX).await {
+        Ok(bytes) => {
+            log::error!(
+                "{method} {path} -> {status}: {}",
+                String::from_utf8_lossy(&bytes)
+            );
+            axum::response::Response::from_parts(parts, Body::from(bytes))
+        }
+        Err(error) => {
+            log::error!("{method} {path} -> {status}: failed to read error body: {error}");
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to read error response body: {error}"),
+            )
+                .into_response()
+        }
+    }
 }
 
 pub async fn dispatch_http_invoke(

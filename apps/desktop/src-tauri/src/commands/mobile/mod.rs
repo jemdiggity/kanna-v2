@@ -184,7 +184,7 @@ impl MobileServerManager {
             .env("KANNA_SERVER_CONFIG", &config_path)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            .stderr(server_stderr_log(&config_path))
             .spawn()
         {
             Ok(child) => child,
@@ -412,6 +412,28 @@ fn app_data_dir_for_server_config(config_path: &Path) -> Result<PathBuf, String>
         .parent()
         .map(Path::to_path_buf)
         .ok_or_else(|| "mobile config path missing app data directory".to_string())
+}
+
+/// kanna-server logs through env_logger to stderr; discarding it leaves API
+/// 500s with no server-side record anywhere. Append stderr to a log file next
+/// to `server.toml` (the same directory the daemon logs into). Errors-only by
+/// default, so the file stays small.
+fn server_stderr_log(config_path: &Path) -> std::process::Stdio {
+    let Some(dir) = config_path.parent() else {
+        eprintln!("[mobile] cannot derive kanna-server log directory; discarding server stderr");
+        return std::process::Stdio::null();
+    };
+    match OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("kanna-server.log"))
+    {
+        Ok(file) => std::process::Stdio::from(file),
+        Err(err) => {
+            eprintln!("[mobile] failed to open kanna-server.log: {err}; discarding server stderr");
+            std::process::Stdio::null()
+        }
+    }
 }
 
 fn local_server_port_for_cloud_env(cloud_env: Option<DesktopCloudEnvironment>) -> u16 {
@@ -727,8 +749,8 @@ mod tests {
     use super::{
         app_data_dir_for_server_config, current_server_version, desktop_id, escape_toml_string,
         generate_uuid_v4_from_reader, is_current_server_status, resolved_db_path, server_base_url,
-        stop_server_on_port, stopped_snapshot, MobileServerManager, MobileServerState,
-        MobileServerStatus,
+        server_stderr_log, stop_server_on_port, stopped_snapshot, MobileServerManager,
+        MobileServerState, MobileServerStatus,
     };
     use std::ffi::CString;
     use std::path::PathBuf;
@@ -752,6 +774,39 @@ mod tests {
     pub(super) unsafe fn unset_env_var(key: &str) {
         let key = CString::new(key).expect("env key should be valid");
         assert_eq!(libc::unsetenv(key.as_ptr()), 0);
+    }
+
+    #[test]
+    fn server_stderr_log_appends_to_file_beside_server_config() {
+        let root = std::env::temp_dir().join(format!(
+            "kanna-server-stderr-log-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("create log dir");
+        let config_path = root.join("server.toml");
+        let log_path = root.join("kanna-server.log");
+        std::fs::write(&log_path, "earlier run\n").expect("seed log");
+
+        let stdio = server_stderr_log(&config_path);
+        let status = StdCommand::new("/bin/sh")
+            .args(["-c", "echo server error >&2"])
+            .stderr(stdio)
+            .status()
+            .expect("run child with captured stderr");
+        assert!(status.success());
+
+        let contents = std::fs::read_to_string(&log_path).expect("read log");
+        assert!(
+            contents.starts_with("earlier run\n"),
+            "log must append, not truncate: {contents}"
+        );
+        assert!(contents.contains("server error"));
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

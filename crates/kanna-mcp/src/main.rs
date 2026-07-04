@@ -151,16 +151,33 @@ fn join_server_url(base_url: &str, path: &str) -> String {
     format!("{}{}", base_url.trim_end_matches('/'), path)
 }
 
+/// Surface the response body on HTTP errors — the server puts its actual
+/// error message there, and a bare status code is undiagnosable for agents.
+async fn require_success(
+    method: &str,
+    path: &str,
+    response: reqwest::Response,
+) -> Result<reqwest::Response, String> {
+    let status = response.status();
+    if status.is_success() {
+        return Ok(response);
+    }
+    let body = response
+        .text()
+        .await
+        .unwrap_or_else(|e| format!("failed to read error body: {e}"));
+    Err(format!(
+        "{method} {path} failed with status {status}: {body}"
+    ))
+}
+
 async fn get_json<T: DeserializeOwned>(base_url: &str, path: &str) -> Result<T, String> {
     let response = reqwest::Client::new()
         .get(join_server_url(base_url, path))
         .send()
         .await
         .map_err(|e| format!("GET {path} failed: {e}"))?;
-    let status = response.status();
-    let response = response
-        .error_for_status()
-        .map_err(|e| format!("GET {path} failed with status {status}: {e}"))?;
+    let response = require_success("GET", path, response).await?;
     response
         .json::<T>()
         .await
@@ -173,10 +190,7 @@ async fn get_text(base_url: &str, path: &str) -> Result<String, String> {
         .send()
         .await
         .map_err(|e| format!("GET {path} failed: {e}"))?;
-    let status = response.status();
-    if !status.is_success() {
-        return Err(format!("GET {path} failed with status {status}"));
-    }
+    let response = require_success("GET", path, response).await?;
     response
         .text()
         .await
@@ -216,14 +230,11 @@ async fn post_json<T: DeserializeOwned>(
         .send()
         .await
         .map_err(|e| format!("POST {path} failed: {e}"))?;
-    let status = response.status();
-    if status == reqwest::StatusCode::NO_CONTENT {
+    if response.status() == reqwest::StatusCode::NO_CONTENT {
         return serde_json::from_value(serde_json::json!({ "ok": true }))
             .map_err(|e| format!("failed to encode empty response: {e}"));
     }
-    let response = response
-        .error_for_status()
-        .map_err(|e| format!("POST {path} failed with status {status}: {e}"))?;
+    let response = require_success("POST", path, response).await?;
     response
         .json::<T>()
         .await

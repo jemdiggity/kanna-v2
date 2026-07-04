@@ -139,6 +139,46 @@ async fn advance_stage_surfaces_http_errors() {
 
     assert!(request.starts_with("POST /v1/tasks/task-123/actions/advance-stage HTTP/1.1"));
     assert!(error.contains("409 Conflict"));
+    assert!(error.contains("task not accepted yet"));
+}
+
+#[tokio::test]
+async fn request_revision_surfaces_server_error_body() {
+    let response = http_json_response(
+        "500 Internal Server Error",
+        "failed to create worktree: No space left on device",
+    );
+    let (base_url, handle) = serve_single_http_response(response).await;
+
+    let error = request_revision_via_api(
+        &base_url,
+        "task-123",
+        &build_request_revision_request(
+            "in progress".to_string(),
+            "QA failed".to_string(),
+            "Add the missing coverage.".to_string(),
+            None,
+        ),
+    )
+    .await
+    .unwrap_err();
+    let request = handle.await.unwrap();
+
+    assert!(request.starts_with("POST /v1/tasks/task-123/actions/request-revision HTTP/1.1"));
+    assert!(error.contains("500 Internal Server Error"));
+    assert!(error.contains("No space left on device"));
+}
+
+#[tokio::test]
+async fn get_task_surfaces_server_error_body() {
+    let response = http_json_response("500 Internal Server Error", "db error: disk I/O error");
+    let (base_url, handle) = serve_single_http_response(response).await;
+
+    let error = get_task_via_api(&base_url, "task-123").await.unwrap_err();
+    handle.await.unwrap();
+
+    assert!(error.contains("500 Internal Server Error"));
+    assert!(error.contains("db error: disk I/O error"));
 }
 
 #[tokio::test]

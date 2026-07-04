@@ -388,10 +388,62 @@ fn serve_reports_http_failures_as_mcp_errors() {
     assert_eq!(responses.len(), 1);
     assert_eq!(responses[0]["id"], json!(9));
     assert_eq!(responses[0]["error"]["code"], json!(-32603));
-    assert!(responses[0]["error"]["message"]
+    let message = responses[0]["error"]["message"]
         .as_str()
-        .expect("error message")
-        .contains("GET /v1/repos failed with status 503"));
+        .expect("error message");
+    assert!(message.contains("GET /v1/repos failed with status 503"));
+    assert!(
+        message.contains("offline"),
+        "error message should include the response body: {message}"
+    );
+}
+
+#[test]
+fn serve_reports_server_error_bodies_for_failed_actions() {
+    let (base_url, server) = start_http_fixture(vec![ExpectedRequest {
+        method: "POST",
+        path: "/v1/tasks/task-1/actions/request-revision",
+        body: Some(json!({
+            "targetStage": "in progress",
+            "summary": "QA failed",
+            "prompt": "Add the missing coverage."
+        })),
+        response_status: "500 Internal Server Error",
+        response_body: json!("failed to create worktree: No space left on device"),
+    }]);
+
+    let responses = run_kanna_mcp(
+        &base_url,
+        &[json!({
+            "jsonrpc": "2.0",
+            "id": 10,
+            "method": "tools/call",
+            "params": {
+                "name": "kanna_request_revision",
+                "arguments": {
+                    "task_id": "task-1",
+                    "target_stage": "in progress",
+                    "summary": "QA failed",
+                    "prompt": "Add the missing coverage."
+                }
+            }
+        })],
+    );
+
+    server.join().expect("fixture server");
+    assert_eq!(responses.len(), 1);
+    assert_eq!(responses[0]["id"], json!(10));
+    assert_eq!(responses[0]["error"]["code"], json!(-32603));
+    let message = responses[0]["error"]["message"]
+        .as_str()
+        .expect("error message");
+    assert!(
+        message.contains("POST /v1/tasks/task-1/actions/request-revision failed with status 500")
+    );
+    assert!(
+        message.contains("No space left on device"),
+        "error message should include the response body: {message}"
+    );
 }
 
 #[test]
