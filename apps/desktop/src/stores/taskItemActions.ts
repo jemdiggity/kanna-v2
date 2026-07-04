@@ -6,6 +6,7 @@ import {
   updatePipelineItemActivity,
   upsertTerminalSession,
   type AgentProvider,
+  type PipelineItem,
 } from "@kanna/db";
 import { buildKannaRuntimeSystemPrompt, buildStagePrompt } from "../../../../packages/core/src/pipeline/prompt-builder";
 import { invoke } from "../invoke";
@@ -24,7 +25,7 @@ import { encodeDaemonInput } from "./daemonInput";
 import { normalizeAgentExecutionType, type AgentExecutionType } from "./agentExecutionType";
 import { reportPrewarmSessionError } from "./kannaCleanup";
 import { showCloudPublishErrorToast } from "./taskPublishing";
-import { readRepoConfig, requireService, type AgentSpawnRecoveryOptions, type CreateItemOptions, type StoreContext, type WorktreeBootstrapResult } from "./state";
+import { readRepoConfig, requireService, type AgentSpawnRecoveryOptions, type CreateItemOptions, type KannaSnapshot, type StoreContext, type WorktreeBootstrapResult } from "./state";
 import type { PortsStore } from "./ports";
 import type { TasksApi } from "./tasks";
 
@@ -110,6 +111,7 @@ export function createTaskItemActions(
     prompt: string,
     agentType: AgentExecutionType,
     agentProvider: AgentProvider,
+    pendingPlaceholder: PipelineItem,
     opts?: CreateItemOptions,
   ) {
     const s0 = performance.now();
@@ -133,6 +135,9 @@ export function createTaskItemActions(
         return updatePipelineItemActivity(context.requireDb(), id, "idle");
       });
       await reloadSnapshot();
+      if (context.state.selectedItemId.value === id) {
+        await requireService(context.services.selectReplacementAfterItemRemoval, "selectReplacementAfterItemRemoval")(pendingPlaceholder);
+      }
       console.error(logPrefix, error);
       context.toast.error(toastMessage);
     };
@@ -404,91 +409,110 @@ export function createTaskItemActions(
       context.state.pendingCreateVisibility.delete(id);
     };
 
-    let pipelineName = opts?.pipelineName;
-    let repoConfig: RepoConfig = {};
-    let t1 = performance.now();
-    if (!pipelineName) {
-      try {
-        repoConfig = await readRepoConfig(repoPath);
-        pipelineName = repoConfig.pipeline ?? "default";
-      } catch (error) {
-        console.debug("[store] no repo config while creating task; using default pipeline:", error);
-        pipelineName = "default";
-      }
-    }
-    debugLog(`[perf:createItem] readRepoConfig: ${(performance.now() - t1).toFixed(1)}ms`);
+    const applyPendingPlaceholderOverlay = (snapshot: KannaSnapshot): KannaSnapshot => ({
+      entries: snapshot.entries.map((entry) =>
+        entry.repo.id === repoId
+          ? {
+              ...entry,
+              items: [pendingPlaceholder, ...entry.items.filter((item) => item.id !== id)],
+            }
+          : entry,
+      ),
+      taskBlockers: snapshot.taskBlockers,
+    });
 
-    let firstStageName = opts?.stage ?? "in progress";
-    let pipelinePrompt = effectivePrompt;
-    let firstStageProviders: AgentProvider | AgentProvider[] | undefined;
-    let firstStageAgentProviders: AgentProvider | AgentProvider[] | undefined;
-    t1 = performance.now();
-    try {
-      const pipeline = await requireService(context.services.loadPipeline, "loadPipeline")(repoPath, pipelineName);
-      if (!opts?.stage && pipeline.stages.length > 0) {
-        const firstStage = pipeline.stages[0];
-        firstStageName = firstStage.name;
-        firstStageProviders = firstStage.agent_provider as AgentProvider | AgentProvider[] | undefined;
-        if (firstStage.agent && !opts?.stage) {
-          try {
-            const agent = await requireService(context.services.loadAgent, "loadAgent")(repoPath, firstStage.agent);
-            firstStageAgentProviders = agent.agent_provider as AgentProvider | AgentProvider[] | undefined;
-            pipelinePrompt = buildStagePrompt(
-              agent.prompt,
-              firstStage.prompt,
-              { taskPrompt: effectivePrompt },
-            );
-          } catch (error) {
-            console.error("[store] failed to load agent for first stage:", error);
-          }
-        }
-      }
-    } catch (error) {
-      console.error("[store] failed to load pipeline definition:", error);
-    }
-    debugLog(`[perf:createItem] loadPipeline+loadAgent: ${(performance.now() - t1).toFixed(1)}ms`);
+    const selectPendingPlaceholder = () => {
+      if (opts?.selectOnCreate === false) return;
+      context.state.selectedRepoId.value = repoId;
+      context.state.selectedItemId.value = id;
+      context.state.lastSelectedItemByRepo.value = {
+        ...context.state.lastSelectedItemByRepo.value,
+        [repoId]: id,
+      };
+    };
 
-    if (Object.keys(repoConfig).length === 0) {
-      try {
-        repoConfig = await readRepoConfig(repoPath);
-      } catch (error) {
-        console.debug("[store] no repo config while creating task; using empty config:", error);
-        repoConfig = {};
-      }
-    }
-
-    let effectiveAgentProvider: AgentProvider;
-    try {
-      const candidates = getPreferredAgentProviders({
-        explicit: providerCandidatesExplicit,
-        stage: firstStageProviders,
-        agent: firstStageAgentProviders,
-      });
-      const availability = await requireService(context.services.getAgentProviderAvailability, "getAgentProviderAvailability")();
-      effectiveAgentProvider = resolveAgentProvider(candidates, availability);
-    } catch (error) {
-      console.error("[store] createItem: failed to resolve agent provider:", error);
-      throw error;
-    }
-
-    let baseRef: string | null = null;
-    let pipelineItemInserted = false;
+    const selectReplacementAfterPendingRemoval = async () => {
+      if (context.state.selectedItemId.value !== id) return;
+      await requireService(context.services.selectReplacementAfterItemRemoval, "selectReplacementAfterItemRemoval")(pendingPlaceholder);
+    };
 
     try {
       await withOptimisticItemOverlay<void>({
-        key: `create:${id}`,
-        apply: (snapshot) => ({
-          entries: snapshot.entries.map((entry) =>
-            entry.repo.id === repoId
-              ? {
-                  ...entry,
-                  items: [pendingPlaceholder, ...entry.items.filter((item) => item.id !== id)],
-                }
-              : entry,
-          ),
-          taskBlockers: snapshot.taskBlockers,
-        }),
+        key: `create:immediate:${id}`,
+        apply: applyPendingPlaceholderOverlay,
         run: async () => {
+          selectPendingPlaceholder();
+
+          let pipelineName = opts?.pipelineName;
+          let repoConfig: RepoConfig = {};
+          let t1 = performance.now();
+          if (!pipelineName) {
+            try {
+              repoConfig = await readRepoConfig(repoPath);
+              pipelineName = repoConfig.pipeline ?? "default";
+            } catch (error) {
+              console.debug("[store] no repo config while creating task; using default pipeline:", error);
+              pipelineName = "default";
+            }
+          }
+          debugLog(`[perf:createItem] readRepoConfig: ${(performance.now() - t1).toFixed(1)}ms`);
+
+          let firstStageName = opts?.stage ?? "in progress";
+          let pipelinePrompt = effectivePrompt;
+          let firstStageProviders: AgentProvider | AgentProvider[] | undefined;
+          let firstStageAgentProviders: AgentProvider | AgentProvider[] | undefined;
+          t1 = performance.now();
+          try {
+            const pipeline = await requireService(context.services.loadPipeline, "loadPipeline")(repoPath, pipelineName);
+            if (!opts?.stage && pipeline.stages.length > 0) {
+              const firstStage = pipeline.stages[0];
+              firstStageName = firstStage.name;
+              firstStageProviders = firstStage.agent_provider as AgentProvider | AgentProvider[] | undefined;
+              if (firstStage.agent && !opts?.stage) {
+                try {
+                  const agent = await requireService(context.services.loadAgent, "loadAgent")(repoPath, firstStage.agent);
+                  firstStageAgentProviders = agent.agent_provider as AgentProvider | AgentProvider[] | undefined;
+                  pipelinePrompt = buildStagePrompt(
+                    agent.prompt,
+                    firstStage.prompt,
+                    { taskPrompt: effectivePrompt },
+                  );
+                } catch (error) {
+                  console.error("[store] failed to load agent for first stage:", error);
+                }
+              }
+            }
+          } catch (error) {
+            console.error("[store] failed to load pipeline definition:", error);
+          }
+          debugLog(`[perf:createItem] loadPipeline+loadAgent: ${(performance.now() - t1).toFixed(1)}ms`);
+
+          if (Object.keys(repoConfig).length === 0) {
+            try {
+              repoConfig = await readRepoConfig(repoPath);
+            } catch (error) {
+              console.debug("[store] no repo config while creating task; using empty config:", error);
+              repoConfig = {};
+            }
+          }
+
+          let effectiveAgentProvider: AgentProvider;
+          try {
+            const candidates = getPreferredAgentProviders({
+              explicit: providerCandidatesExplicit,
+              stage: firstStageProviders,
+              agent: firstStageAgentProviders,
+            });
+            const availability = await requireService(context.services.getAgentProviderAvailability, "getAgentProviderAvailability")();
+            effectiveAgentProvider = resolveAgentProvider(candidates, availability);
+          } catch (error) {
+            console.error("[store] createItem: failed to resolve agent provider:", error);
+            throw error;
+          }
+
+          let baseRef: string | null = null;
+          let pipelineItemInserted = false;
+
           try {
             t1 = performance.now();
             if (opts?.baseRef !== undefined) {
@@ -612,6 +636,7 @@ export function createTaskItemActions(
             pipelinePrompt,
             effectiveAgentType,
             effectiveAgentProvider,
+            pendingPlaceholder,
             {
               ...opts,
               baseRef,
@@ -623,6 +648,7 @@ export function createTaskItemActions(
       });
     } catch (error) {
       removePendingPlaceholder();
+      await selectReplacementAfterPendingRemoval();
       throw error;
     }
     debugLog("[tasks:createItem] returning", {

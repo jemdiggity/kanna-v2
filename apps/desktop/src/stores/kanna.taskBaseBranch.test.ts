@@ -84,6 +84,7 @@ const mockState = vi.hoisted(() => {
   let taskBlockers: TaskBlocker[] = [];
   let blockCleanupGate: Promise<void> | null = null;
   let failingCommands: Record<string, string> = {};
+  let commandGates: Record<string, Promise<void>> = {};
   const listBlockersForItemMock = vi.fn(async () => [] as PipelineItem[]);
   const listBlockedByItemMock = vi.fn(async () => [] as PipelineItem[]);
   const insertTaskBlockerMock = vi.fn(async (_db: DbHandle, blockedItemId: string, blockerItemId: string) => {
@@ -124,6 +125,9 @@ const mockState = vi.hoisted(() => {
   const invokeMock = vi.fn(async (command: string, args?: Record<string, unknown>) => {
     if (failingCommands[command]) {
       throw new Error(failingCommands[command]);
+    }
+    if (commandGates[command]) {
+      await commandGates[command];
     }
     switch (command) {
       case "git_default_branch":
@@ -275,6 +279,7 @@ const mockState = vi.hoisted(() => {
     taskBlockers = [];
     blockCleanupGate = null;
     failingCommands = {};
+    commandGates = {};
     invokeMock.mockClear();
     insertPipelineItemMock.mockClear();
     updatePipelineItemStageMock.mockClear();
@@ -402,6 +407,12 @@ const mockState = vi.hoisted(() => {
     },
     set failingCommands(value: Record<string, string>) {
       failingCommands = value;
+    },
+    get commandGates() {
+      return commandGates;
+    },
+    set commandGates(value: Record<string, Promise<void>>) {
+      commandGates = value;
     },
     reset,
   };
@@ -1379,6 +1390,26 @@ describe("kanna store task base branch integration", () => {
     selectionGate.resolve();
   });
 
+  it("selects the pending task placeholder immediately while creation continues", async () => {
+    const configReadGate = mockState.defer();
+    const store = await createStore();
+    mockState.commandGates = { read_text_file: configReadGate.promise };
+
+    const createPromise = store.createItem("repo-1", "/tmp/repo", "Show the new task now", "pty", {
+      agentProvider: "claude",
+    });
+    await flushStore();
+
+    expect(mockState.insertPipelineItemMock).not.toHaveBeenCalled();
+    expect(store.selectedItemId).toEqual(expect.stringMatching(/^[0-9a-f-]+$/));
+    expect(store.currentItem?.id).toBe(store.selectedItemId);
+    expect(store.currentItem?.prompt).toBe("Show the new task now");
+    expect(store.sortedItemsForCurrentRepo[0]?.id).toBe(store.selectedItemId);
+
+    configReadGate.resolve();
+    await createPromise;
+  });
+
   it("keeps a custom task PTY provider ahead of the real E2E override", async () => {
     mockState.readEnvVarOverrides = {
       KANNA_DB_NAME: "kanna-wt-task-existing.db",
@@ -1699,6 +1730,60 @@ describe("kanna store task base branch integration", () => {
 
     expect(store.selectedItemId).toBe("item-source");
     expect(store.items.map((item) => item.id)).toEqual(["item-source"]);
+  });
+
+  it("shows the next stage immediately while server advance continues", async () => {
+    const serverAdvanceGate = mockState.defer();
+    mockState.pipelineDefinition = {
+      name: "default",
+      stages: [
+        { name: "in progress", transition: "manual" },
+        { name: "review", transition: "manual" },
+        { name: "pr", transition: "manual" },
+      ],
+    };
+    mockState.pipelineItems = [
+      mockState.makeItem({
+        id: "item-source",
+        branch: "task-source",
+        stage: "in progress",
+      }),
+    ];
+    fetchMock.mockImplementationOnce(async () => {
+      await serverAdvanceGate.promise;
+      mockState.pipelineItems = [
+        mockState.makeItem({
+          id: "item-source",
+          branch: "task-source",
+          stage: "review",
+        }),
+      ];
+      return {
+        ok: true,
+        json: async () => ({ taskId: "item-source" }),
+        text: async () => "",
+      };
+    });
+
+    const store = await createStore();
+    await store.selectItem("item-source");
+    await flushStore();
+
+    const advancePromise = store.advanceStage("item-source");
+    await flushStore();
+
+    await vi.waitFor(() => {
+      expect(fetchMock).toHaveBeenCalled();
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:48120/v1/tasks/item-source/actions/advance-stage",
+      { method: "POST" },
+    );
+    expect(store.currentItem?.stage).toBe("review");
+    expect(store.sortedItemsForCurrentRepo.find((item) => item.id === "item-source")?.stage).toBe("review");
+
+    serverAdvanceGate.resolve();
+    await advancePromise;
   });
 
   it("moves selection to the next visible item when the advance closes the task", async () => {
