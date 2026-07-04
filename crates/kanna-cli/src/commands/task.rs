@@ -1,4 +1,3 @@
-use std::env;
 use std::process;
 
 use serde_json::Value;
@@ -10,7 +9,6 @@ use crate::api::{
     send_task_input_via_api, set_task_parent_via_api, task_logs_via_api, unblock_task_via_api,
     wait_task_via_api,
 };
-use crate::commands::socket::notify_socket;
 use crate::commands::{parse_metadata_json, print_json};
 use crate::config::resolve_server_base_url_from_env;
 use crate::models::{
@@ -281,17 +279,6 @@ pub(crate) async fn run(command: TaskCommands) {
             if let Err(e) = print_json(&created) {
                 eprintln!("Error: {e}");
                 process::exit(1);
-            }
-
-            match env::var("KANNA_SOCKET_PATH") {
-                Ok(socket_path) => {
-                    if let Err(e) = notify_socket(&socket_path, &task_id).await {
-                        eprintln!("Warning: Socket notification failed: {e}");
-                    }
-                }
-                Err(_) => {
-                    eprintln!("Warning: KANNA_SOCKET_PATH not set, skipping socket notification");
-                }
             }
         }
         TaskCommands::SendInput {
