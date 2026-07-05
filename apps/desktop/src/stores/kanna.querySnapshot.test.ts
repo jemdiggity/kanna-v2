@@ -317,7 +317,10 @@ vi.mock("@kanna/db", () => ({
 }));
 
 import { useKannaStore } from "./kanna";
-import { setDesktopSnapshotFetcherForTests } from "../services/desktopServerClient";
+import {
+  setDesktopSnapshotFetcherForTests,
+  updateDesktopServerClientHandlersForTests,
+} from "../services/desktopServerClient";
 import {
   getSetting,
   getUnblockedItems,
@@ -378,6 +381,20 @@ describe("kanna query snapshot regressions", () => {
       worktreePaths: {},
       settings: {},
     }));
+    updateDesktopServerClientHandlersForTests({
+      patchRepo: async (repoId, input) => {
+        mockState.allRepos = mockState.allRepos.map((repo) =>
+          repo.id === repoId
+            ? {
+                ...repo,
+                hidden: input.hidden === undefined ? repo.hidden : (input.hidden ? 1 : 0),
+                remote_url: input.remoteUrl === undefined ? repo.remote_url : input.remoteUrl,
+                remote_url_hash: input.remoteUrlHash === undefined ? repo.remote_url_hash : input.remoteUrlHash,
+              }
+            : repo,
+        );
+      },
+    });
     beginTaskSwitchMock.mockReset();
     invalidateSharedDataMock.mockReset();
     onSharedInvalidationMock.mockReset();

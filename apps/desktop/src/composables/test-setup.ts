@@ -11,7 +11,10 @@ globalThis.localStorage = win.localStorage;
 // @ts-ignore — use happy-dom's Event so dispatchEvent instanceof check passes
 globalThis.Event = win.Event;
 
-import { setDesktopSnapshotFetcherForTests } from "../services/desktopServerClient";
+import {
+  setDesktopServerClientHandlersForTests,
+  setDesktopSnapshotFetcherForTests,
+} from "../services/desktopServerClient";
 
 setDesktopSnapshotFetcherForTests(async () => ({
   entries: [],
@@ -19,3 +22,32 @@ setDesktopSnapshotFetcherForTests(async () => ({
   worktreePaths: {},
   settings: {},
 }));
+
+setDesktopServerClientHandlersForTests({
+  getSetting: async () => null,
+  putSetting: async (key, value) => ({ key, value }),
+  postOperatorEvents: async () => {},
+  fetchRepoAnalytics: async () => ({
+    taskBuckets: [],
+    bucketSize: "daily",
+    hasData: false,
+    avgTimeInState: {
+      working: 0,
+      idle: 0,
+      unread: 0,
+    },
+    operatorMetrics: {
+      avgResponseTime: null,
+      avgDwellTime: null,
+      switchesPerHour: null,
+      focusScore: null,
+    },
+    hasOperatorData: false,
+  }),
+  patchRepo: async () => {},
+  putTaskAgentSession: async () => {},
+  fetchPendingIncomingTransfers: async () => [],
+  claimPendingIncomingTransfer: async () => false,
+  failPendingIncomingTransfer: async () => false,
+  fetchClosedTaskIdentities: async () => [],
+});

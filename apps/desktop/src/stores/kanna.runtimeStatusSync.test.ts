@@ -328,7 +328,10 @@ vi.mock("@kanna/db", () => ({
 }));
 
 import { useKannaStore } from "./kanna";
-import { setDesktopSnapshotFetcherForTests } from "../services/desktopServerClient";
+import {
+  setDesktopSnapshotFetcherForTests,
+  updateDesktopServerClientHandlersForTests,
+} from "../services/desktopServerClient";
 
 function createDb(): DbHandle {
   return {
@@ -375,6 +378,11 @@ describe("kanna runtime status reconciliation", () => {
       worktreePaths: {},
       settings: {},
     }));
+    updateDesktopServerClientHandlersForTests({
+      putTaskAgentSession: async (taskId, agentSessionId) => {
+        await mockState.updateAgentSessionIdMock(expect.anything(), taskId, agentSessionId);
+      },
+    });
     cleanupMocks.closePipelineItemAndClearCachedTerminalState.mockClear();
     cleanupMocks.getTaskIdFromTeardownSessionId.mockClear();
     cleanupMocks.isTeardownSessionId.mockClear();

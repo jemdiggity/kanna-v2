@@ -4,6 +4,7 @@ import {
   __resetRepoRemoteUrlCacheForTests,
   refreshRepoRemoteMetadata,
 } from "./repoRemoteUrl";
+import { updateDesktopServerClientHandlersForTests } from "./desktopServerClient";
 
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -24,6 +25,14 @@ describe("repo remote URL metadata", () => {
     mocks.invoke.mockReset();
     mocks.updateRepoRemoteMetadata.mockReset();
     mocks.updateRepoRemoteMetadata.mockResolvedValue(undefined);
+    updateDesktopServerClientHandlersForTests({
+      patchRepo: async (repoId, input) => {
+        await mocks.updateRepoRemoteMetadata(null, repoId, {
+          remote_url: input.remoteUrl ?? null,
+          remote_url_hash: input.remoteUrlHash ?? null,
+        });
+      },
+    });
   });
 
   it("refreshes and persists remote URL metadata explicitly", async () => {

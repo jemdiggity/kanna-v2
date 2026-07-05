@@ -13,6 +13,7 @@ import {
 import { createStoreContext, createStoreState } from "./state";
 import { createInitApi } from "./init";
 import { applySnapshotSettingsToState } from "./snapshotSettings";
+import { updateDesktopServerClientHandlersForTests } from "../services/desktopServerClient";
 
 const mockState = vi.hoisted(() => {
   const now = "2026-04-23T00:00:00.000Z";
@@ -256,6 +257,12 @@ describe("createInitApi", () => {
     mockState.reset();
     vi.mocked(getSetting).mockResolvedValue(null);
     vi.mocked(setSetting).mockClear();
+    updateDesktopServerClientHandlersForTests({
+      putSetting: async (key, value) => {
+        await mockState.setSettingMock(expect.anything(), key, value);
+        return { key, value };
+      },
+    });
   });
 
   it("retires handed-off worktree shells once when the shell env generation changes", async () => {

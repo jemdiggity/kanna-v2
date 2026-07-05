@@ -1,6 +1,7 @@
 import { ref } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DbHandle, PipelineItem, Repo } from "@kanna/db";
+import { updateDesktopServerClientHandlersForTests } from "../services/desktopServerClient";
 import { createSessionsApi } from "./sessions";
 import type { StoreContext } from "./state";
 
@@ -100,6 +101,11 @@ describe("createSessionsApi", () => {
     vi.useRealTimers();
     mocks.invokeMock.mockClear();
     mocks.updateAgentSessionIdMock.mockClear();
+    updateDesktopServerClientHandlersForTests({
+      putTaskAgentSession: async (taskId, agentSessionId) => {
+        await mocks.updateAgentSessionIdMock(expect.anything(), taskId, agentSessionId);
+      },
+    });
   });
 
   it("reports OpenCode CLI availability", async () => {
