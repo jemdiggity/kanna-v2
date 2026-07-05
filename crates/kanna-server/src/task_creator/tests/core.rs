@@ -100,6 +100,49 @@ fn build_agent_command_adds_claude_kanna_preamble_as_system_prompt() {
     assert!(command.contains("Do not push a branch or create a pull request"));
     assert!(command.contains("kanna_complete_stage"));
     assert!(command.contains("kanna-cli stage-complete --task-id \"$KANNA_TASK_ID\""));
+    assert!(command.contains("record completion so Kanna can advance the pipeline"));
+}
+
+#[test]
+fn build_kanna_preamble_renders_transition_specific_completion_guidance() {
+    let auto = super::build_kanna_preamble(
+        &AgentProvider::Claude,
+        "task-123",
+        "review",
+        "qa",
+        Some("auto"),
+        None,
+    );
+    assert!(auto.contains("This stage's transition is `auto`"));
+    assert!(auto.contains("record completion so Kanna can advance the pipeline"));
+    assert!(auto.contains("--status success --summary \"...\""));
+    assert!(!auto.contains("{{COMPLETION}}"));
+
+    let manual = super::build_kanna_preamble(
+        &AgentProvider::Claude,
+        "task-123",
+        "in progress",
+        "default",
+        Some("manual"),
+        None,
+    );
+    assert!(manual.contains("This stage's transition is `manual`"));
+    assert!(manual.contains("recording a successful result does not advance the pipeline"));
+    assert!(manual.contains("record completion only if this stage's prompt asks for it"));
+    assert!(manual.contains("record status `failure` with the reason"));
+    assert!(!manual.contains("--status success"));
+    assert!(!manual.contains("{{COMPLETION}}"));
+
+    // Unknown transition falls back to manual, the safe non-advancing default.
+    let default = super::build_kanna_preamble(
+        &AgentProvider::Claude,
+        "task-123",
+        "in progress",
+        "default",
+        None,
+        None,
+    );
+    assert!(default.contains("This stage's transition is `manual`"));
 }
 
 #[test]
