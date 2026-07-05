@@ -183,11 +183,19 @@ export function createInitApi(
 
     if (isTauri) {
       await retireStaleWorktreeShellSessions();
+      // Orphan = a task whose workspace was initialized (worktree row exists)
+      // but whose directory is gone from disk. Dormant blocked tasks have a
+      // branch name reserved yet no worktree row until their blockers close —
+      // they must survive app restarts, so key on the worktree row, not on
+      // the branch column.
+      const worktreeRows = await context.requireDb().select<{ pipeline_item_id: string; path: string }>(
+        "SELECT pipeline_item_id, path FROM worktree",
+      );
+      const worktreePathByItemId = new Map(worktreeRows.map((row) => [row.pipeline_item_id, row.path]));
       for (const item of eagerItems) {
-        if (!item.branch || item.closed_at !== null) continue;
-        const repo = eagerRepos.find((candidate) => candidate.id === item.repo_id);
-        if (!repo) continue;
-        const worktreePath = `${repo.path}/.kanna-worktrees/${item.branch}`;
+        if (item.closed_at !== null) continue;
+        const worktreePath = worktreePathByItemId.get(item.id);
+        if (!worktreePath) continue;
         const exists = await invoke<boolean>("file_exists", { path: worktreePath });
         if (!exists) {
           console.warn(`[store] closing orphaned task ${item.id}: worktree missing at ${worktreePath}`);

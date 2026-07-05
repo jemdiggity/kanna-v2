@@ -213,41 +213,71 @@ async fn spawn_prepared_dormant_task(
     Ok(())
 }
 
+/// Start every dormant dependent whose last blocker just closed. Runs after
+/// the blocker's close has already committed, so failures here must never
+/// fail the close: each dependent is attempted independently and errors are
+/// logged. Historically a swallowed failure in this path left dependents
+/// permanently dormant with no trace — log loudly instead.
 pub(super) async fn start_dependents_unblocked_by_close_with_daemon(
     state: &Arc<AppState>,
     daemon: &mut DaemonClient,
     blocker_task_id: &str,
-) -> Result<(), (axum::http::StatusCode, String)> {
+) {
     let ready_dependents = {
-        let db = Db::open(&state.config.db_path).map_err(|e| {
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("db error: {}", e),
-            )
-        })?;
-        let mut ready = Vec::new();
-        for blocked_id in db
-            .list_tasks_blocked_by(blocker_task_id)
-            .map_err(|e| db_write_error("db error", e))?
-        {
-            if db
-                .count_open_task_blockers(&blocked_id)
-                .map_err(|e| db_write_error("db error", e))?
-                > 0
-            {
-                continue;
+        let db = match Db::open(&state.config.db_path) {
+            Ok(db) => db,
+            Err(error) => {
+                log::error!(
+                    "cannot start dependents unblocked by {blocker_task_id}: db error: {error}"
+                );
+                return;
             }
-            let blocker_branches = blocker_branches_for_task(&db, &blocked_id)?;
-            ready.push((blocked_id, blocker_branches));
+        };
+        let blocked_ids = match db.list_tasks_blocked_by(blocker_task_id) {
+            Ok(blocked_ids) => blocked_ids,
+            Err(error) => {
+                log::error!("cannot list dependents of closed blocker {blocker_task_id}: {error}");
+                return;
+            }
+        };
+        let mut ready = Vec::new();
+        for blocked_id in blocked_ids {
+            match db.count_open_task_blockers(&blocked_id) {
+                Ok(0) => {}
+                Ok(_) => continue,
+                Err(error) => {
+                    log::error!("cannot count open blockers for {blocked_id}: {error}");
+                    continue;
+                }
+            }
+            match blocker_branches_for_task(&db, &blocked_id) {
+                Ok(blocker_branches) => ready.push((blocked_id, blocker_branches)),
+                Err((_, error)) => {
+                    log::error!("cannot resolve blocker branches for {blocked_id}: {error}");
+                    ready.push((blocked_id, Vec::new()));
+                }
+            }
         }
         ready
     };
 
     for (blocked_id, blocker_branches) in ready_dependents {
-        start_dormant_task_if_ready_with_daemon(state, daemon, &blocked_id, blocker_branches)
-            .await?;
+        match start_dormant_task_if_ready_with_daemon(state, daemon, &blocked_id, blocker_branches)
+            .await
+        {
+            Ok(true) => {
+                log::info!(
+                    "started dependent task {blocked_id} unblocked by close of {blocker_task_id}"
+                );
+            }
+            Ok(false) => {}
+            Err((_, error)) => {
+                log::error!(
+                    "failed to start dependent task {blocked_id} unblocked by close of {blocker_task_id}: {error}"
+                );
+            }
+        }
     }
-    Ok(())
 }
 
 pub(super) async fn block_task(

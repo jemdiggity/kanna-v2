@@ -220,7 +220,7 @@ pub async fn handle_invoke(
                     }
                     task_creator::spawn_prepared_workspace_teardown_best_effort(
                         daemon,
-                        workspace_teardown,
+                        workspace_teardown.map(|teardown| *teardown),
                     )
                     .await;
                     let db = Db::open(&config.db_path).map_err(|e| format!("db error: {}", e))?;

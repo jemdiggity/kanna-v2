@@ -143,7 +143,8 @@ describe("createTaskBlockedActions", () => {
       "\x1b[200~This task was previously blocked by the following tasks, which have now completed:\n"
         + "- Dependency (branch: task-blocker-1)\n"
         + "Their changes may be on branches that haven't merged to main yet.\n"
-        + "Please continue this task using that context where relevant.\x1b[201~\r",
+        + "Bring their work into this branch if relevant: `git fetch origin`, then merge or rebase onto the listed branch (or onto the default branch if their PR already merged).\n"
+        + "Please continue this task using that context.\x1b[201~\r",
     );
   });
 
@@ -170,7 +171,8 @@ describe("createTaskBlockedActions", () => {
         data: "This task was previously blocked by the following tasks, which have now completed:\n"
           + "- Dependency (branch: task-blocker-1)\n"
           + "Their changes may be on branches that haven't merged to main yet.\n"
-          + "Please continue this task using that context where relevant.",
+          + "Bring their work into this branch if relevant: `git fetch origin`, then merge or rebase onto the listed branch (or onto the default branch if their PR already merged).\n"
+          + "Please continue this task using that context.",
       },
       {
         sessionId: "task-1",
@@ -241,5 +243,114 @@ describe("createTaskBlockedActions", () => {
     );
     expect(ports.claimTaskPorts).toHaveBeenCalledWith("task-1", {});
     expect(listBlockersForItem).toHaveBeenCalledWith(expect.anything(), "task-1");
+  });
+
+  it("resume message carries the blocker's renamed branch resolved from its worktree", async () => {
+    const repo: Repo = {
+      id: "repo-1",
+      path: "/repo",
+      name: "Repo",
+      default_branch: "main",
+      remote_url: null,
+      remote_url_hash: null,
+      hidden: 0,
+      sort_order: 0,
+      created_at: "2026-06-30T00:00:00.000Z",
+      last_opened_at: "2026-06-30T00:00:00.000Z",
+    };
+    const context = makeContext();
+    context.state.repos.value = [repo];
+    mocks.invokeMock.mockImplementation(async (command: string, args?: { repoPath?: string }) => {
+      if (command === "git_current_branch") {
+        expect(args?.repoPath).toBe("/repo/.kanna-worktrees/task-blocker-1");
+        return "feat/blocker-renamed";
+      }
+      return undefined;
+    });
+
+    const actions = createTaskBlockedActions(context, {} as never);
+    const blocked = makeItem({ agent_provider: "claude", port_env: "{}" });
+    const blocker = makeItem({
+      id: "blocker-1",
+      tags: "[]",
+      branch: "task-blocker-1",
+      closed_at: "2026-06-30T00:00:00.000Z",
+      display_name: "Dependency",
+    });
+
+    await (actions.restoreUnblockedTask as (item: PipelineItem, blockers: PipelineItem[]) => Promise<void>)(blocked, [blocker]);
+
+    const sendInputCall = mocks.invokeMock.mock.calls.find(([command]) => command === "send_input");
+    const message = decode(sendInputCall?.[1]?.data);
+    expect(message).toContain("- Dependency (branch: feat/blocker-renamed)");
+    expect(message).not.toContain("task-blocker-1");
+  });
+
+  it("bases a dormant task's fresh worktree on the blocker's live branch", async () => {
+    const repo: Repo = {
+      id: "repo-1",
+      path: "/repo",
+      name: "Repo",
+      default_branch: "main",
+      remote_url: null,
+      remote_url_hash: null,
+      hidden: 0,
+      sort_order: 0,
+      created_at: "2026-06-30T00:00:00.000Z",
+      last_opened_at: "2026-06-30T00:00:00.000Z",
+    };
+    const spawnPtySession = vi.fn(async () => {});
+    const context = makeContext();
+    context.state.repos.value = [repo];
+    context.services.getAgentProviderAvailability = vi.fn(async () => ({
+      claude: true,
+      copilot: false,
+      codex: false,
+      opencode: false,
+      antigravity: false,
+    }));
+    context.services.spawnPtySession = spawnPtySession;
+    const ports = {
+      claimTaskPorts: vi.fn(async () => ({ portEnv: {}, firstPort: null })),
+    };
+    const blocker = makeItem({
+      id: "blocker-1",
+      tags: "[]",
+      branch: "task-blocker-1",
+      closed_at: "2026-06-30T00:00:00.000Z",
+      display_name: "Dependency",
+    });
+    mocks.listBlockersForItemMock.mockResolvedValue([blocker]);
+    mocks.invokeMock.mockImplementation(async (command: string) => {
+      if (command === "file_exists") return false;
+      if (command === "git_current_branch") return "feat/blocker-renamed";
+      if (command === "read_text_file") return "";
+      return undefined;
+    });
+
+    const actions = createTaskBlockedActions(context, ports as never);
+    const dormant = makeItem({
+      branch: "task-task-1",
+      agent_session_id: null,
+      port_env: null,
+    });
+
+    await actions.restoreUnblockedTask(dormant, [blocker]);
+
+    expect(mocks.invokeMock).toHaveBeenCalledWith("git_worktree_add", {
+      repoPath: "/repo",
+      branch: "task-task-1",
+      path: "/repo/.kanna-worktrees/task-task-1",
+      startPoint: "feat/blocker-renamed",
+    });
+    expect(mocks.invokeMock).not.toHaveBeenCalledWith("git_fetch", expect.anything());
+    expect(spawnPtySession).toHaveBeenCalledWith(
+      "task-1",
+      "/repo/.kanna-worktrees/task-task-1",
+      expect.stringContaining("(branch: feat/blocker-renamed)"),
+      80,
+      24,
+      expect.objectContaining({ agentProvider: "claude" }),
+    );
   });
 });

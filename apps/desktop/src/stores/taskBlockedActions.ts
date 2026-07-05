@@ -27,19 +27,52 @@ export function createTaskBlockedActions(
     await context.services.windowWorkspace?.invalidateSharedData(reason);
   };
 
-  function buildBlockedResumeMessage(blockers: PipelineItem[]): string {
-    const blockerContext = blockers
-      .map((blocker) => {
-        const name = blocker.display_name || (blocker.prompt ? blocker.prompt.slice(0, 60) : "Untitled");
-        return `- ${name} (branch: ${blocker.branch || "unknown"})`;
-      })
-      .join("\n");
+  interface ResolvedBlockerBranch {
+    name: string;
+    /** Branch resolved from the blocker's worktree HEAD, or null when the
+     * worktree is gone (its stored branch may still exist locally). */
+    liveBranch: string | null;
+    storedBranch: string | null;
+  }
 
+  // The stored pipeline_item.branch goes stale once the PR stage renames the
+  // branch (`git branch -m`); the worktree directory keeps the stored name,
+  // so its HEAD is the authoritative branch — same resolution the server
+  // does in resolve_current_source_worktree_branch.
+  async function resolveBlockerBranches(
+    repoPath: string,
+    blockers: PipelineItem[],
+  ): Promise<ResolvedBlockerBranch[]> {
+    return Promise.all(blockers.map(async (blocker) => {
+      const name = blocker.display_name || (blocker.prompt ? blocker.prompt.slice(0, 60) : "Untitled");
+      const storedBranch = blocker.branch;
+      let liveBranch: string | null = null;
+      if (storedBranch) {
+        try {
+          liveBranch = await invoke<string | null>("git_current_branch", {
+            repoPath: `${repoPath}/.kanna-worktrees/${storedBranch}`,
+          });
+        } catch (error) {
+          console.debug(`[store] blocker worktree for ${blocker.id} not resolvable, using stored branch:`, error);
+        }
+      }
+      return { name, liveBranch, storedBranch };
+    }));
+  }
+
+  function describeBlockers(resolved: ResolvedBlockerBranch[]): string {
+    return resolved
+      .map(({ name, liveBranch, storedBranch }) => `- ${name} (branch: ${liveBranch || storedBranch || "unknown"})`)
+      .join("\n");
+  }
+
+  function buildBlockedResumeMessage(resolved: ResolvedBlockerBranch[]): string {
     return [
       "This task was previously blocked by the following tasks, which have now completed:",
-      blockerContext,
+      describeBlockers(resolved),
       "Their changes may be on branches that haven't merged to main yet.",
-      "Please continue this task using that context where relevant.",
+      "Bring their work into this branch if relevant: `git fetch origin`, then merge or rebase onto the listed branch (or onto the default branch if their PR already merged).",
+      "Please continue this task using that context.",
     ].join("\n");
   }
 
@@ -95,11 +128,20 @@ export function createTaskBlockedActions(
     blockers?: PipelineItem[],
   ): Promise<void> {
     const resolvedBlockers = blockers ?? await listBlockersForItem(context.requireDb(), item.id);
+    const repo = context.state.repos.value.find((candidate) => candidate.id === item.repo_id)
+      ?? await getRepo(context.requireDb(), item.repo_id);
+    const resolvedBranches = repo
+      ? await resolveBlockerBranches(repo.path, resolvedBlockers)
+      : resolvedBlockers.map((blocker) => ({
+        name: blocker.display_name || (blocker.prompt ? blocker.prompt.slice(0, 60) : "Untitled"),
+        liveBranch: null,
+        storedBranch: blocker.branch,
+      }));
 
     await updatePipelineItemActivity(context.requireDb(), item.id, "working");
     await reloadSnapshot();
 
-    const inputChunks = encodeAgentPromptInputChunks(buildBlockedResumeMessage(resolvedBlockers), {
+    const inputChunks = encodeAgentPromptInputChunks(buildBlockedResumeMessage(resolvedBranches), {
       agentProvider: item.agent_provider,
       kittyKeyboard: false,
     });
@@ -117,12 +159,8 @@ export function createTaskBlockedActions(
     }
 
     const blockers = await listBlockersForItem(context.requireDb(), item.id);
-    const blockerContext = blockers
-      .map((blocker) => {
-        const name = blocker.display_name || (blocker.prompt ? blocker.prompt.slice(0, 60) : "Untitled");
-        return `- ${name} (branch: ${blocker.branch || "unknown"})`;
-      })
-      .join("\n");
+    const resolvedBranches = await resolveBlockerBranches(repo.path, blockers);
+    const blockerContext = describeBlockers(resolvedBranches);
 
     const augmentedPrompt = [
       "Note: this task was previously blocked by the following tasks which have now completed:",
@@ -140,20 +178,28 @@ export function createTaskBlockedActions(
     const worktreeExists = await invoke<boolean>("file_exists", { path: worktreePath });
     let resolvedBaseRef: string | null = null;
     if (!worktreeExists) {
-      let startPoint: string | null = null;
-      try {
-        const defaultBranch = await invoke<string>("git_default_branch", { repoPath: repo.path });
-        await invoke("git_fetch", { repoPath: repo.path, branch: defaultBranch });
-        startPoint = `origin/${defaultBranch}`;
+      // Base the fresh workspace on the blocker's branch so the dependent
+      // builds on that work even when the blocker's PR hasn't merged yet.
+      // Only a live resolution qualifies — it proves the branch exists.
+      let startPoint: string | null = resolvedBranches
+        .find((resolved) => resolved.liveBranch !== null)?.liveBranch ?? null;
+      if (startPoint !== null) {
         resolvedBaseRef = startPoint;
-      } catch (error) {
-        console.debug("[store] fetch origin failed (offline?), using local HEAD:", error);
+      } else {
         try {
           const defaultBranch = await invoke<string>("git_default_branch", { repoPath: repo.path });
-          resolvedBaseRef = defaultBranch;
-        } catch (defaultBranchError) {
-          console.debug("[store] failed to resolve default branch after fetch fallback:", defaultBranchError);
-          resolvedBaseRef = null;
+          await invoke("git_fetch", { repoPath: repo.path, branch: defaultBranch });
+          startPoint = `origin/${defaultBranch}`;
+          resolvedBaseRef = startPoint;
+        } catch (error) {
+          console.debug("[store] fetch origin failed (offline?), using local HEAD:", error);
+          try {
+            const defaultBranch = await invoke<string>("git_default_branch", { repoPath: repo.path });
+            resolvedBaseRef = defaultBranch;
+          } catch (defaultBranchError) {
+            console.debug("[store] failed to resolve default branch after fetch fallback:", defaultBranchError);
+            resolvedBaseRef = null;
+          }
         }
       }
 
