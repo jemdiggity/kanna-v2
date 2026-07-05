@@ -276,13 +276,22 @@ describe("buildKannaRuntimeUserPrompt", () => {
     expect(result).toContain("This session was launched by Kanna");
     expect(result).toContain("Prefer the `kanna_*` MCP tools");
     expect(result).toContain("fall back to the `kanna-cli` binary");
-    expect(result).toMatch(/\n\nShip the feature$/);
+    expect(result).toMatch(/\n\n## Your Task\n\nShip the feature$/);
   });
 
   it("passes the task context through to the guidance", () => {
     const result = buildKannaRuntimeUserPrompt("Ship it", { taskId: "task-9" });
 
     expect(result).toContain("as task `task-9`");
-    expect(result).toMatch(/\n\nShip it$/);
+    expect(result).toMatch(/\n\n## Your Task\n\nShip it$/);
+  });
+
+  it("delimits the task with a heading matching prompt_with_system_prompt in adapter.rs", () => {
+    const result = buildKannaRuntimeUserPrompt("Ship it");
+
+    const guidanceIndex = result.indexOf("## Kanna Task Environment");
+    const taskIndex = result.indexOf("## Your Task");
+    expect(guidanceIndex).toBeGreaterThan(-1);
+    expect(taskIndex).toBeGreaterThan(guidanceIndex);
   });
 });

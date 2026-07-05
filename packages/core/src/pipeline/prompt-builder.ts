@@ -106,11 +106,17 @@ export function buildKannaRuntimeSystemPrompt(context?: KannaRuntimeContext): st
     .replace("{{COMPLETION}}", buildKannaCompletionLine(context));
 }
 
+// Joins the Kanna preamble and the task prompt into one message for providers
+// without a native system-prompt channel. A `## Your Task` heading closes the
+// preamble's `## Kanna Task Environment` section so the agent can tell where
+// the environment guidance ends and its assignment begins. Mirrors
+// prompt_with_system_prompt in crates/kanna-agent-protocol/src/adapter.rs —
+// keep the formats in sync.
 export function buildKannaRuntimeUserPrompt(
   prompt: string,
   context?: KannaRuntimeContext
 ): string {
-  return `${buildKannaRuntimeSystemPrompt(context)}\n\n${prompt}`;
+  return `${buildKannaRuntimeSystemPrompt(context)}\n\n## Your Task\n\n${prompt}`;
 }
 
 export function buildStagePrompt(
