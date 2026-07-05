@@ -120,6 +120,15 @@ pub struct StageRun {
     pub result: Option<String>,
     pub feedback: Option<String>,
     pub session_id: Option<String>,
+    /// The agent CLI's own session id (e.g. the Claude `--session-id` /
+    /// `--resume` UUID), assigned at spawn time. Revisions resume from it.
+    pub provider_session_id: Option<String>,
+    /// Worktree the run executed in; a resumed revision reopens the provider
+    /// session here (CLI transcripts are keyed by working directory).
+    pub cwd: Option<String>,
+    /// Set when this run resumed a previous run's provider session instead
+    /// of starting a fresh agent; records which run's session it continued.
+    pub resumed_from_run_id: Option<String>,
     pub started_at: String,
     pub finished_at: Option<String>,
 }
@@ -136,6 +145,9 @@ pub struct NewStageRun<'a> {
     pub result: Option<&'a str>,
     pub feedback: Option<&'a str>,
     pub session_id: Option<&'a str>,
+    pub provider_session_id: Option<&'a str>,
+    pub cwd: Option<&'a str>,
+    pub resumed_from_run_id: Option<&'a str>,
 }
 
 pub struct ClaimedTaskNotification {

@@ -4,8 +4,9 @@ use serde_json::Value;
 
 use crate::models::{
     AddRepoRequest, BlockTaskRequest, CompleteStageRequest, CreateTaskRequest, CreateTaskResponse,
-    RepoDetail, RepoSummary, RequestRevisionRequest, SetTaskParentRequest, TaskActionResponse,
-    TaskDetail, TaskInputRequest, TaskInputResponse, TaskRenameRequest, TaskSummary, WaitUntil,
+    RepoDetail, RepoSummary, RequestRevisionRequest, SetTaskParentRequest, SignalAgentRequest,
+    SignalAgentResponse, TaskActionResponse, TaskDetail, TaskInputRequest, TaskInputResponse,
+    TaskRenameRequest, TaskSummary, WaitUntil,
 };
 
 pub(crate) fn join_server_url(base_url: &str, path: &str) -> String {
@@ -32,6 +33,14 @@ pub(crate) fn repo_task_list_path(repo_id: &str) -> String {
     format!("/v1/repos/{}/tasks", encode_path_segment(repo_id))
 }
 
+pub(crate) fn signal_agent_path(repo_id: &str, agent: &str) -> String {
+    format!(
+        "/v1/repos/{}/agents/{}/signal",
+        encode_path_segment(repo_id),
+        encode_path_segment(agent)
+    )
+}
+
 pub(crate) fn task_search_path(query: &str) -> String {
     format!("/v1/tasks/search?query={}", encode_path_segment(query))
 }
@@ -54,13 +63,27 @@ pub(crate) async fn get_json<T: DeserializeOwned>(base_url: &str, path: &str) ->
         .send()
         .await
         .map_err(|e| format!("request failed: {e}"))?;
-    let response = response
-        .error_for_status()
-        .map_err(|e| format!("request failed: {e}"))?;
+    let response = require_success(response).await?;
     response
         .json::<T>()
         .await
         .map_err(|e| format!("failed to decode response: {e}"))
+}
+
+/// Surface the response body on HTTP errors — the server puts its actual
+/// error message there, and a bare status code is undiagnosable for agents.
+pub(crate) async fn require_success(
+    response: reqwest::Response,
+) -> Result<reqwest::Response, String> {
+    let status = response.status();
+    if status.is_success() {
+        return Ok(response);
+    }
+    let body = response
+        .text()
+        .await
+        .unwrap_or_else(|e| format!("failed to read error body: {e}"));
+    Err(format!("request failed with status {status}: {body}"))
 }
 
 pub(crate) async fn get_text(base_url: &str, path: &str) -> Result<String, String> {
@@ -69,14 +92,7 @@ pub(crate) async fn get_text(base_url: &str, path: &str) -> Result<String, Strin
         .send()
         .await
         .map_err(|e| format!("request failed: {e}"))?;
-    let status = response.status();
-    if !status.is_success() {
-        let body = response
-            .text()
-            .await
-            .unwrap_or_else(|e| format!("failed to read error body: {e}"));
-        return Err(format!("request failed with status {status}: {body}"));
-    }
+    let response = require_success(response).await?;
     response
         .text()
         .await
@@ -94,9 +110,7 @@ pub(crate) async fn post_json<B: Serialize, T: DeserializeOwned>(
         .send()
         .await
         .map_err(|e| format!("request failed: {e}"))?;
-    let response = response
-        .error_for_status()
-        .map_err(|e| format!("request failed: {e}"))?;
+    let response = require_success(response).await?;
     response
         .json::<T>()
         .await
@@ -114,9 +128,7 @@ pub(crate) async fn patch_json<B: Serialize, T: DeserializeOwned>(
         .send()
         .await
         .map_err(|e| format!("request failed: {e}"))?;
-    let response = response
-        .error_for_status()
-        .map_err(|e| format!("request failed: {e}"))?;
+    let response = require_success(response).await?;
     response
         .json::<T>()
         .await
@@ -134,14 +146,7 @@ pub(crate) async fn post_no_content_json<B: Serialize>(
         .send()
         .await
         .map_err(|e| format!("request failed: {e}"))?;
-    let status = response.status();
-    if !status.is_success() {
-        let body = response
-            .text()
-            .await
-            .unwrap_or_else(|e| format!("failed to read error body: {e}"));
-        return Err(format!("request failed with status {status}: {body}"));
-    }
+    require_success(response).await?;
 
     Ok(())
 }
@@ -157,17 +162,10 @@ pub(crate) async fn post_catalog_json(
         .send()
         .await
         .map_err(|e| format!("request failed: {e}"))?;
-    let status = response.status();
-    if status == reqwest::StatusCode::NO_CONTENT {
+    if response.status() == reqwest::StatusCode::NO_CONTENT {
         return Ok(serde_json::json!({ "ok": true }));
     }
-    if !status.is_success() {
-        let body = response
-            .text()
-            .await
-            .unwrap_or_else(|e| format!("failed to read error body: {e}"));
-        return Err(format!("request failed with status {status}: {body}"));
-    }
+    let response = require_success(response).await?;
     response
         .json::<Value>()
         .await
@@ -185,17 +183,10 @@ pub(crate) async fn patch_catalog_json(
         .send()
         .await
         .map_err(|e| format!("request failed: {e}"))?;
-    let status = response.status();
-    if status == reqwest::StatusCode::NO_CONTENT {
+    if response.status() == reqwest::StatusCode::NO_CONTENT {
         return Ok(serde_json::json!({ "ok": true }));
     }
-    if !status.is_success() {
-        let body = response
-            .text()
-            .await
-            .unwrap_or_else(|e| format!("failed to read error body: {e}"));
-        return Err(format!("request failed with status {status}: {body}"));
-    }
+    let response = require_success(response).await?;
     response
         .json::<Value>()
         .await
@@ -211,6 +202,15 @@ pub(crate) async fn add_repo_via_api(
     request: &AddRepoRequest,
 ) -> Result<RepoDetail, String> {
     post_json(base_url, "/v1/repos", request).await
+}
+
+pub(crate) async fn signal_agent_via_api(
+    base_url: &str,
+    repo_id: &str,
+    agent: &str,
+    request: &SignalAgentRequest,
+) -> Result<SignalAgentResponse, String> {
+    post_json(base_url, &signal_agent_path(repo_id, agent), request).await
 }
 
 pub(crate) async fn list_tasks_via_api(base_url: &str) -> Result<Vec<TaskSummary>, String> {

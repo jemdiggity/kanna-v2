@@ -214,7 +214,7 @@
     },
     {
       "name": "kanna_request_revision",
-      "description": "Request a revision on a Kanna task: reruns an earlier pipeline stage in place on the same task, branch, and worktree, passing the revision prompt to the stage agent.",
+      "description": "Request a revision on a Kanna task: resumes the target stage's previous agent session in its worktree when possible (Claude, with context intact), otherwise starts a fresh agent in a newly forked workspace. Kanna delivers the original task prompt alongside the revision prompt, so the prompt should focus on the required changes.",
       "method": "POST",
       "path": "/v1/tasks/{task_id}/actions/request-revision",
       "response": "json",

@@ -7,6 +7,7 @@ use std::path::Path;
 pub(super) struct RepoConfig {
     pub(super) pipeline: Option<String>,
     pub(super) setup: Option<Vec<String>>,
+    pub(super) teardown: Option<Vec<String>>,
     pub(super) ports: Option<HashMap<String, u16>>,
     pub(super) workspace: Option<RepoWorkspaceConfig>,
 }
@@ -77,6 +78,7 @@ impl PipelineStageTransition {
 #[derive(Clone, Deserialize, Serialize)]
 pub(super) struct PipelineEnvironment {
     pub(super) setup: Option<Vec<String>>,
+    pub(super) teardown: Option<Vec<String>>,
 }
 
 /// Where a stored stage name sits in a pipeline. In-flight tasks created
@@ -207,6 +209,14 @@ pub(super) struct AgentDefinition {
     pub(super) allowed_tools: Vec<String>,
 }
 
+struct AgentExtension {
+    prompt: String,
+    agent_providers: Vec<String>,
+    model: Option<String>,
+    permission_mode: Option<String>,
+    allowed_tools: Option<Vec<String>>,
+}
+
 pub(super) fn read_repo_config(repo_path: &str) -> Result<RepoConfig, String> {
     let path = Path::new(repo_path).join(".kanna/config.json");
     match std::fs::read_to_string(&path) {
@@ -254,7 +264,27 @@ pub(super) fn read_agent_definition(
         Ok(content) => content,
         Err(_) => read_builtin_resource(&format!(".kanna/agents/{agent_name}/AGENT.md"))?,
     };
-    parse_agent_definition(&content)
+    let mut definition = parse_agent_definition(&content)?;
+
+    // Repo-local extension: layered onto the resolved agent (repo override or
+    // built-in) so a repo can customize a default agent without rewriting it.
+    let extend_path = Path::new(repo_path).join(format!(".kanna/agents/{agent_name}/EXTEND.md"));
+    match std::fs::read_to_string(&extend_path) {
+        Ok(extension) => {
+            apply_agent_extension(&mut definition, &extension)
+                .map_err(|e| format!("invalid agent extension {}: {}", extend_path.display(), e))?;
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            return Err(format!(
+                "failed to read agent extension {}: {}",
+                extend_path.display(),
+                err
+            ))
+        }
+    }
+
+    Ok(definition)
 }
 
 fn read_builtin_resource(relative_path: &str) -> Result<String, String> {
@@ -311,6 +341,36 @@ fn compiled_builtin_resource(relative_path: &str) -> Option<&'static str> {
     }
 }
 
+/// Merge an `EXTEND.md` document into a resolved agent definition: the body
+/// is appended to the base prompt and frontmatter fields replace the base's
+/// when present. Frontmatter is optional; a plain markdown file is a pure
+/// prompt extension.
+fn apply_agent_extension(definition: &mut AgentDefinition, content: &str) -> Result<(), String> {
+    let extension = parse_agent_extension(content)?;
+
+    if !extension.prompt.is_empty() {
+        if definition.prompt.is_empty() {
+            definition.prompt = extension.prompt;
+        } else {
+            definition.prompt = format!("{}\n\n{}", definition.prompt, extension.prompt);
+        }
+    }
+    if !extension.agent_providers.is_empty() {
+        definition.agent_providers = extension.agent_providers;
+    }
+    if extension.model.is_some() {
+        definition.model = extension.model;
+    }
+    if extension.permission_mode.is_some() {
+        definition.permission_mode = extension.permission_mode;
+    }
+    if let Some(allowed_tools) = extension.allowed_tools {
+        definition.allowed_tools = allowed_tools;
+    }
+
+    Ok(())
+}
+
 fn parse_agent_definition(content: &str) -> Result<AgentDefinition, String> {
     let (frontmatter, body) = split_frontmatter(content);
     let fm: AgentFrontmatter = match frontmatter {
@@ -326,6 +386,29 @@ fn parse_agent_definition(content: &str) -> Result<AgentDefinition, String> {
         model: fm.model,
         permission_mode: fm.permission_mode,
         allowed_tools: fm.allowed_tools.unwrap_or_default(),
+    })
+}
+
+fn parse_agent_extension(content: &str) -> Result<AgentExtension, String> {
+    let (frontmatter, body) = split_frontmatter(content);
+    let fm: AgentFrontmatter = match frontmatter {
+        Some(raw) => {
+            serde_yaml::from_str(raw).map_err(|e| format!("invalid AGENT.md frontmatter: {}", e))?
+        }
+        None => AgentFrontmatter::default(),
+    };
+
+    let agent_providers = match fm.agent_provider {
+        Some(value) => parse_agent_providers(Some(value)),
+        None => Vec::new(),
+    };
+
+    Ok(AgentExtension {
+        prompt: body.trim().to_string(),
+        agent_providers,
+        model: fm.model,
+        permission_mode: fm.permission_mode,
+        allowed_tools: fm.allowed_tools,
     })
 }
 

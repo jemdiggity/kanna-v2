@@ -42,6 +42,7 @@ pub fn make_adapter(provider: AgentProvider) -> Option<Box<dyn ProviderAdapter +
 pub fn params_to_ctx(params: &AgentSpawnParams) -> SpawnCtx {
     SpawnCtx {
         prompt: params.prompt.clone(),
+        cwd: params.cwd.clone(),
         model: params.model.clone(),
         permission_mode: params.permission_mode.clone(),
         allowed_tools: params.allowed_tools.clone(),
@@ -511,12 +512,38 @@ pub fn signal_agent_pid(pid: u32, signal: i32) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
 
     #[test]
     fn opencode_has_headless_adapter() {
         let adapter = make_adapter(AgentProvider::Opencode).expect("opencode adapter exists");
         assert_eq!(adapter.provider(), "opencode");
         assert_eq!(adapter.turn_model(), TurnModel::PerTurn);
+    }
+
+    #[test]
+    fn spawn_agent_child_uses_requested_process_cwd() {
+        let dir = tempdir::TempDirGuard::new("agent-child-cwd");
+        let spec = SpawnSpec {
+            executable: "/bin/pwd".to_string(),
+            args: Vec::new(),
+            env: Vec::new(),
+            initial_stdin: None,
+        };
+
+        let mut spawned = spawn_agent_child(&spec, dir.path().to_str().unwrap(), &HashMap::new())
+            .expect("spawn pwd child");
+        let mut output = String::new();
+        spawned
+            .stdout
+            .read_to_string(&mut output)
+            .expect("read pwd output");
+        let status = spawned.child.wait().expect("wait for pwd child");
+
+        assert!(status.success());
+        let actual = std::fs::canonicalize(output.trim()).expect("canonicalize pwd output");
+        let expected = std::fs::canonicalize(dir.path()).expect("canonicalize temp cwd");
+        assert_eq!(actual, expected);
     }
 
     fn journal_in_temp() -> (tempdir::TempDirGuard, AgentJournal) {

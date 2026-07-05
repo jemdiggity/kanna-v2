@@ -1,4 +1,4 @@
-import type { AgentDefinition } from "./pipeline-types";
+import type { AgentDefinition, AgentExtension } from "./pipeline-types";
 import { parseFrontmatter } from "../config/custom-tasks";
 import { VALID_AGENT_PROVIDERS, isAgentProvider, splitAgentProviderValue } from "../config/agent-providers";
 
@@ -14,7 +14,7 @@ function parsePermissionMode(value: unknown): PermissionMode | undefined {
   }
 
   throw new Error(
-    `Invalid AGENT.md: permission_mode must be one of: ${VALID_PERMISSION_MODES.join(", ")} (got "${value}")`
+    `permission_mode must be one of: ${VALID_PERMISSION_MODES.join(", ")} (got "${value}")`
   );
 }
 
@@ -64,6 +64,65 @@ export function parseAgentDefinition(content: string): AgentDefinition {
   }
 
   return def;
+}
+
+// An extension (`.kanna/agents/{name}/EXTEND.md`) customizes the resolved
+// agent — repo override or built-in — without a total rewrite: its body is
+// appended to the base prompt and its frontmatter fields replace the base's.
+// Frontmatter is optional; a plain markdown file is a pure prompt extension.
+export function parseAgentExtension(content: string): AgentExtension {
+  const { frontmatter, body } = parseFrontmatter(content);
+
+  const fm: Record<string, unknown> = frontmatter ?? {};
+  const ext: AgentExtension = { prompt: body.trim() };
+
+  if (typeof fm.description === "string") {
+    ext.description = fm.description;
+  }
+
+  if (typeof fm.model === "string") {
+    ext.model = fm.model;
+  }
+
+  const permissionMode = parsePermissionMode(fm.permission_mode);
+  if (permissionMode !== undefined) {
+    ext.permission_mode = permissionMode;
+  }
+
+  if (Array.isArray(fm.allowed_tools) && fm.allowed_tools.every((t: unknown) => typeof t === "string")) {
+    ext.allowed_tools = fm.allowed_tools as string[];
+  }
+
+  if (fm.agent_provider !== undefined) {
+    const providers = splitAgentProviderValue(fm.agent_provider);
+    if (providers.length > 0) {
+      ext.agent_provider = providers;
+    }
+  }
+
+  return ext;
+}
+
+export function applyAgentExtension(base: AgentDefinition, extension: AgentExtension): AgentDefinition {
+  const merged: AgentDefinition = {
+    ...base,
+    ...(extension.description !== undefined && { description: extension.description }),
+    ...(extension.model !== undefined && { model: extension.model }),
+    ...(extension.permission_mode !== undefined && { permission_mode: extension.permission_mode }),
+    ...(extension.allowed_tools !== undefined && { allowed_tools: extension.allowed_tools }),
+    ...(extension.agent_provider !== undefined && { agent_provider: extension.agent_provider }),
+  };
+
+  if (extension.prompt !== "") {
+    merged.prompt = base.prompt === "" ? extension.prompt : `${base.prompt}\n\n${extension.prompt}`;
+  }
+
+  const errors = validateAgentDefinition(merged);
+  if (errors.length > 0) {
+    throw new Error(`Invalid extended agent: ${errors.join("; ")}`);
+  }
+
+  return merged;
 }
 
 export function validateAgentDefinition(def: AgentDefinition): string[] {

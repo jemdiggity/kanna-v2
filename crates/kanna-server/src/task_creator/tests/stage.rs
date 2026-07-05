@@ -335,6 +335,123 @@ fn prepare_advance_stage_uses_stored_pipeline_snapshot_for_existing_task() {
 }
 
 #[test]
+fn prepare_advance_stage_applies_repo_agent_extension() {
+    let repo_root = std::env::temp_dir().join(format!("kanna-stage-extend-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&repo_root);
+    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::create_dir_all(repo_root.join(".kanna/agents/reviewer")).unwrap();
+    std::fs::write(repo_root.join("README.md"), "test repo").unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/pipelines/default.json"),
+        r#"{
+  "stages": [
+    { "name": "in progress", "transition": "manual" },
+    { "name": "review", "transition": "manual", "agent": "reviewer", "prompt": "Review prompt $PREV_RESULT" }
+  ]
+}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/agents/reviewer/AGENT.md"),
+        "---\nagent_provider: claude\n---\nBase reviewer: $TASK_PROMPT",
+    )
+    .unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/agents/reviewer/EXTEND.md"),
+        "Repo extension: run the full unit and integration suites.",
+    )
+    .unwrap();
+    assert!(Command::new("git")
+        .arg("init")
+        .arg("-b")
+        .arg("main")
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["config", "user.email", "test@example.com"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["config", "user.name", "Test User"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["add", "README.md", ".kanna"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["commit", "-m", "init"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["branch", "task-ext-branch"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+
+    let config = test_config("stage-agent-extension");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Fix the shell",
+        Some("Shell fix"),
+        "in progress",
+        "2026-07-02 00:00:00",
+    )
+    .unwrap();
+    db.update_test_pipeline_item_stage_context(
+        "task-1",
+        "task-ext-branch",
+        "default",
+        None,
+        "claude",
+    )
+    .unwrap();
+    insert_finished_stage_run(
+        &db,
+        "task-1",
+        "in progress",
+        "{\"status\":\"success\",\"summary\":\"done\"}",
+    );
+
+    let run = match prepare_advance_stage_for_api(&db, &config, "task-1").unwrap() {
+        PreparedStageTransition::Run(run) => run,
+        PreparedStageTransition::Post(_) => panic!("expected stage swap, got post dispatch"),
+        PreparedStageTransition::Close { .. } => panic!("expected in-place stage run"),
+    };
+
+    assert_eq!(run.next_stage, "review");
+    match run.session {
+        PreparedSessionSpawn::Pty { args, .. } => {
+            let command = args.join(" ");
+            assert!(
+                command.contains(
+                    "Base reviewer: Fix the shell\n\nRepo extension: run the full unit and integration suites.\n\nReview prompt {\"status\":\"success\",\"summary\":\"done\"}"
+                ),
+                "unexpected command: {command}"
+            );
+        }
+        PreparedSessionSpawn::Agent { .. } => panic!("expected pty session"),
+    }
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
 fn prepare_advance_stage_substitutes_previous_stage_run_result_before_legacy_stage_result() {
     let repo_root = std::env::temp_dir().join(format!(
         "kanna-stage-run-prev-result-{}",
@@ -431,6 +548,9 @@ fn prepare_advance_stage_substitutes_previous_stage_run_result_before_legacy_sta
         result: Some("{\"source\":\"stage_run\"}"),
         feedback: Some("done"),
         session_id: Some("task-1"),
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
     })
     .unwrap();
     db.finish_stage_run(
@@ -659,6 +779,9 @@ async fn prepare_advance_stage_forks_workspace_for_next_run_in_same_task() {
         result: None,
         feedback: None,
         session_id: Some("task-1"),
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
     })
     .unwrap();
 
@@ -676,18 +799,20 @@ async fn prepare_advance_stage_forks_workspace_for_next_run_in_same_task() {
     // The transition forks: same task, fresh branch + worktree from the
     // committed tip of task-source.
     let fork_branch = run
-        .forked_workspace
-        .as_ref()
+        .forked_workspace()
         .expect("stage transition forks a workspace")
         .branch
         .clone();
-    let fork_worktree = run.forked_workspace.as_ref().unwrap().worktree_path.clone();
+    let fork_worktree = run.forked_workspace().unwrap().worktree_path.clone();
+    // Fork workspaces carry the durable task id plus a workspace counter:
+    // the creation workspace is workspace 1, so the first fork is `-2`.
+    assert_eq!(fork_branch, "task-task-1-2");
     assert_ne!(fork_branch, "task-source");
     assert_ne!(run.cwd, source_worktree.to_string_lossy());
     assert_eq!(run.cwd, fork_worktree);
     assert!(std::path::Path::new(&fork_worktree).is_dir());
 
-    let fake_daemon = spawn_fake_daemon_fork_transition(config.daemon_dir.clone()).await;
+    let fake_daemon = spawn_fake_daemon_fork_transition(config.daemon_dir.clone(), 1).await;
     let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
     let advanced = spawn_prepared_stage_run_for_api(
         &config.db_path,
@@ -742,6 +867,180 @@ async fn prepare_advance_stage_forks_workspace_for_next_run_in_same_task() {
     assert_eq!(runs[1].status, "running");
     assert_eq!(runs[1].session_id.as_deref(), Some("task-1"));
 
+    // The counter skips workspaces that still exist: with `-2` live, the
+    // next fork for this task is `-3`.
+    assert_eq!(
+        super::super::worktree::next_fork_branch(&repo_root.to_string_lossy(), "task-1").unwrap(),
+        "task-task-1-3"
+    );
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[tokio::test]
+async fn stage_transition_tears_down_departed_stage_environment_before_repo_teardown() {
+    let repo_root = init_git_repo("advance-stage-env-teardown");
+    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::create_dir_all(repo_root.join(".kanna/agents/reviewer")).unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/config.json"),
+        serde_json::json!({
+            "teardown": ["echo repo-teardown"]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/pipelines/default.json"),
+        serde_json::json!({
+            "environments": {
+                "dev": {
+                    "setup": ["echo env-setup"],
+                    "teardown": ["echo env-teardown"]
+                }
+            },
+            "stages": [
+                { "name": "in progress", "transition": "manual", "environment": "dev" },
+                { "name": "review", "transition": "manual", "agent": "reviewer", "prompt": "Review $TASK_PROMPT" }
+            ]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/agents/reviewer/AGENT.md"),
+        "---\nagent_provider: claude\n---\nReview agent.",
+    )
+    .unwrap();
+    assert!(Command::new("git")
+        .args(["add", ".kanna"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["commit", "-m", "add teardown config"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["branch", "task-source"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    let source_worktree = repo_root.join(".kanna-worktrees/task-source");
+    assert!(Command::new("git")
+        .args([
+            "worktree",
+            "add",
+            source_worktree.to_string_lossy().as_ref(),
+            "task-source",
+        ])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+
+    let config = test_config("advance-stage-env-teardown");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Fix teardown",
+        Some("Fix teardown"),
+        "in progress",
+        "2026-07-04 07:00:00",
+    )
+    .unwrap();
+    db.update_test_pipeline_item_stage_context(
+        "task-1",
+        "task-source",
+        "default",
+        Some("{\"status\":\"success\",\"summary\":\"implemented\"}"),
+        "claude",
+    )
+    .unwrap();
+    db.upsert_worktree(
+        "wt-task-1",
+        "task-1",
+        &source_worktree.to_string_lossy(),
+        "task-source",
+    )
+    .unwrap();
+
+    let run = match prepare_advance_stage_for_api(&db, &config, "task-1").unwrap() {
+        PreparedStageTransition::Run(run) => run,
+        PreparedStageTransition::Post(_) => panic!("expected stage swap, got post dispatch"),
+        PreparedStageTransition::Close { .. } => panic!("expected stage run"),
+    };
+    let fork_worktree = run.forked_workspace().unwrap().worktree_path.clone();
+
+    let fake_daemon =
+        spawn_fake_daemon_fork_transition_with_teardown(config.daemon_dir.clone()).await;
+    let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
+    spawn_prepared_stage_run_for_api(
+        &config.db_path,
+        &mut daemon,
+        &crate::session_replacements::SessionReplacements::default(),
+        *run,
+    )
+    .await
+    .unwrap();
+    let commands = fake_daemon.await.unwrap();
+
+    assert!(matches!(
+        commands.first(),
+        Some(kanna_daemon::protocol::Command::Kill { session_id }) if session_id == "task-1"
+    ));
+    assert!(matches!(
+        commands.get(1),
+        Some(kanna_daemon::protocol::Command::Kill { session_id }) if session_id == "shell-wt-task-1"
+    ));
+    assert!(matches!(
+        commands.get(2),
+        Some(kanna_daemon::protocol::Command::Kill { session_id }) if session_id == "td-task-source"
+    ));
+    match commands.get(3) {
+        Some(kanna_daemon::protocol::Command::Spawn {
+            session_id, cwd, ..
+        })
+        | Some(kanna_daemon::protocol::Command::SpawnAgent {
+            session_id,
+            params: kanna_daemon::protocol::AgentSpawnParams { cwd, .. },
+        }) => {
+            assert_eq!(session_id, "task-1");
+            assert_eq!(cwd, &fork_worktree);
+        }
+        other => panic!("expected next stage spawn, got {other:?}"),
+    }
+    match commands.get(4) {
+        Some(kanna_daemon::protocol::Command::Spawn {
+            session_id,
+            cwd,
+            args,
+            ..
+        }) => {
+            assert_eq!(session_id, "td-task-source");
+            assert_eq!(cwd, &source_worktree.to_string_lossy());
+            let command = args.join(" ");
+            let env_index = command
+                .find("echo env-teardown")
+                .expect("environment teardown command should be present");
+            let repo_index = command
+                .find("echo repo-teardown")
+                .expect("repo teardown command should be present");
+            assert!(
+                env_index < repo_index,
+                "environment teardown should run before repo teardown: {command}"
+            );
+        }
+        other => panic!("expected teardown spawn, got {other:?}"),
+    }
+
     let _ = std::fs::remove_dir_all(&repo_root);
 }
 
@@ -772,7 +1071,7 @@ fn prepare_advance_stage_at_final_stage_prepares_close() {
         .unwrap();
 
     match prepare_advance_stage_for_api(&db, &config, "task-1").unwrap() {
-        PreparedStageTransition::Close { task_id } => assert_eq!(task_id, "task-1"),
+        PreparedStageTransition::Close { task_id, .. } => assert_eq!(task_id, "task-1"),
         PreparedStageTransition::Run(_) | PreparedStageTransition::Post(_) => {
             panic!("advancing past the final stage must close the task")
         }
@@ -869,10 +1168,7 @@ fn prepare_auto_stage_completion_spawns_next_run_in_same_task() {
     // The auto transition forks; $BRANCH resolves to the fork (the branch
     // the next agent actually works on) while $SOURCE_WORKTREE still points
     // at the previous stage's worktree.
-    let fork = run
-        .forked_workspace
-        .as_ref()
-        .expect("auto transition forks");
+    let fork = run.forked_workspace().expect("auto transition forks");
     assert_eq!(run.cwd, fork.worktree_path);
     let expected_prompt = format!(
         "PR agent for Fix stage promotion\n\nCreate PR for {} from {} after {{\"status\":\"success\",\"summary\":\"committed\"}}",
@@ -1027,6 +1323,9 @@ fn prepare_advance_stage_dispatches_post_into_running_session() {
         result: None,
         feedback: None,
         session_id: Some("task-1"),
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
     })
     .unwrap();
 
@@ -1087,6 +1386,9 @@ fn prepare_advance_stage_swaps_after_succeeded_post() {
         result: None,
         feedback: None,
         session_id: Some("task-1"),
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
     })
     .unwrap();
     db.finish_stage_run("run-post", "succeeded", None, None)
@@ -1100,10 +1402,7 @@ fn prepare_advance_stage_swaps_after_succeeded_post() {
     assert_eq!(run.next_stage, "pr");
     assert_eq!(run.run_kind, "main");
     // Stage transitions fork: fresh branch + worktree from the committed tip.
-    let fork = run
-        .forked_workspace
-        .as_ref()
-        .expect("swap forks a workspace");
+    let fork = run.forked_workspace().expect("swap forks a workspace");
     assert_ne!(fork.branch, "task-source");
     assert!(std::path::Path::new(&fork.worktree_path).is_dir());
     assert_eq!(run.cwd, fork.worktree_path);
@@ -1131,6 +1430,9 @@ fn prepare_advance_stage_overrides_running_post_with_swap() {
         result: None,
         feedback: None,
         session_id: Some("task-1"),
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
     })
     .unwrap();
 
@@ -1165,6 +1467,9 @@ fn prepare_advance_stage_redispatches_failed_post() {
         result: None,
         feedback: None,
         session_id: Some("task-1"),
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
     })
     .unwrap();
     db.finish_stage_run("run-post", "failed", None, None)
@@ -1289,6 +1594,9 @@ async fn dispatch_post_injects_message_into_live_session_and_records_post_run() 
         result: None,
         feedback: None,
         session_id: Some("task-1"),
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
     })
     .unwrap();
 

@@ -767,6 +767,9 @@ describe("pipeline_item queries", () => {
         result: null,
         feedback: null,
         session_id: "session-1",
+        provider_session_id: null,
+        cwd: null,
+        resumed_from_run_id: null,
         started_at: "2026-01-01T00:00:00.000Z",
         finished_at: null,
       },
@@ -782,6 +785,9 @@ describe("pipeline_item queries", () => {
         result: null,
         feedback: null,
         session_id: "session-2",
+        provider_session_id: null,
+        cwd: null,
+        resumed_from_run_id: null,
         started_at: "2026-01-01T00:00:00.000Z",
         finished_at: null,
       },
@@ -797,6 +803,9 @@ describe("pipeline_item queries", () => {
         result: "success",
         feedback: null,
         session_id: "session-3",
+        provider_session_id: null,
+        cwd: null,
+        resumed_from_run_id: null,
         started_at: "2026-01-01T00:00:00.000Z",
         finished_at: "2026-01-01T00:01:00.000Z",
       },
@@ -809,6 +818,9 @@ describe("pipeline_item queries", () => {
       "running-main-task": 0,
       "finished-post-task": 0,
     });
+    const runningPostItem = items.find((item) => item.id === "running-post-task");
+    const activePostAction: PipelineItem["active_post_action"] = runningPostItem?.active_post_action;
+    expect(activePostAction).toBeUndefined();
   });
 
   it("insertPipelineItem persists parent_task_id and updatePipelineItemParent sets/clears it", async () => {

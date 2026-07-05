@@ -10,6 +10,7 @@ export interface KannaRuntimeContext {
   taskId?: string;
   stage?: string;
   pipeline?: string;
+  /** Stage transition policy ("manual" | "auto"); defaults to manual like the Rust side. */
   transition?: string;
   /** Agent provider, used with mcpConfigured to describe MCP registration. */
   provider?: string;
@@ -25,7 +26,7 @@ export const KANNA_TASK_ENVIRONMENT_TEMPLATE = `## Kanna Task Environment
 
 {{TASK_CONTEXT}}
 
-Kanna is a desktop app that orchestrates coding agent tasks. Each task moves through the stages of a pipeline (for example: in progress -> review -> pr). The task is durable — same id, history, and blockers across stages — but each stage transition forks a fresh workspace: a new branch and worktree cut from the previous stage's committed tip. Only committed work crosses a stage boundary; uncommitted changes stay behind in the old worktree. You are the agent for the current stage. Kanna advances the pipeline when you record this stage's result; do not move the task between stages yourself unless a prompt explicitly asks you to.
+Kanna is a desktop app that orchestrates coding agent tasks. Each task moves through the stages of a pipeline (for example: in progress -> review -> pr). The task itself is durable — its id, run history, and blockers survive every stage, and \`KANNA_TASK_ID\` always holds that id — but each stage transition forks a fresh workspace: a new branch and worktree named \`task-<taskid>-<n>\` cut from the previous stage's committed tip. A workspace is an ephemeral manifestation of the task: the name carries the durable task id plus a per-workspace counter (the creation workspace is plain \`task-<taskid>\`). Only committed work crosses a stage boundary; uncommitted changes stay behind in the old worktree. You are the agent for the current stage. Do not move the task between stages yourself unless a prompt explicitly asks you to.
 
 Rules:
 
@@ -40,9 +41,24 @@ Kanna task operations (inspect tasks, create subtasks, send input to other tasks
 - {{MCP_STATUS}}
 - If MCP tools are unavailable, fall back to the \`kanna-cli\` binary; it is on \`PATH\` and its full path is exported as \`KANNA_CLI_PATH\`.
 - Run \`kanna-cli guide\` for live task state, workflow semantics, and the full tool catalog.
-- This task's id is in the \`KANNA_TASK_ID\` environment variable.
+- This task's id is in the \`KANNA_TASK_ID\` environment variable. Use it for all task operations; it is stable across stages, unlike branch and worktree names.
 
-When this stage's goal is achieved, record completion so Kanna can advance the pipeline: prefer MCP \`kanna_complete_stage\` with status \`success\` and a short summary; fallback: \`kanna-cli stage-complete --task-id "$KANNA_TASK_ID" --status success --summary "..."\`. If you are blocked or the goal cannot be met, record status \`failure\` with the reason instead of stopping silently.`;
+{{COMPLETION}}`;
+
+// Completion guidance depends on the stage's transition policy: only \`auto\`
+// stages advance when the agent records a successful result; \`manual\` stages
+// wait for the user to review and advance. Mirrors the completion constants in
+// build_kanna_preamble (crates/kanna-server/src/task_creator/commands.rs) —
+// keep the texts in sync.
+const COMPLETION_GUIDANCE: Record<string, string> = {
+  auto: 'This stage\'s transition is `auto`: when this stage\'s goal is achieved, record completion so Kanna can advance the pipeline: prefer MCP `kanna_complete_stage` with status `success` and a short summary; fallback: `kanna-cli stage-complete --task-id "$KANNA_TASK_ID" --status success --summary "..."`. If you are blocked or the goal cannot be met, record status `failure` with the reason instead of stopping silently.',
+  manual:
+    'This stage\'s transition is `manual`: recording a successful result does not advance the pipeline — the user reviews your work and advances the stage themselves. When this stage\'s goal is achieved, finish with a clear summary of what you did; record completion only if this stage\'s prompt asks for it. If you are blocked or the goal cannot be met, record status `failure` with the reason instead of stopping silently: prefer MCP `kanna_complete_stage`; fallback: `kanna-cli stage-complete --task-id "$KANNA_TASK_ID" --status failure --summary "..."`.',
+};
+
+export function buildKannaCompletionLine(context?: KannaRuntimeContext): string {
+  return context?.transition === "auto" ? COMPLETION_GUIDANCE.auto : COMPLETION_GUIDANCE.manual;
+}
 
 // Mirrors build_kanna_preamble's context line in
 // crates/kanna-server/src/task_creator/commands.rs — keep the formats in sync.
@@ -85,7 +101,9 @@ export function buildKannaRuntimeSystemPrompt(context?: KannaRuntimeContext): st
   return KANNA_TASK_ENVIRONMENT_TEMPLATE.replace(
     "{{TASK_CONTEXT}}",
     buildKannaTaskContextLine(context)
-  ).replace(mcpStatus ? "{{MCP_STATUS}}" : "- {{MCP_STATUS}}\n", mcpStatus ?? "");
+  )
+    .replace(mcpStatus ? "{{MCP_STATUS}}" : "- {{MCP_STATUS}}\n", mcpStatus ?? "")
+    .replace("{{COMPLETION}}", buildKannaCompletionLine(context));
 }
 
 export function buildKannaRuntimeUserPrompt(

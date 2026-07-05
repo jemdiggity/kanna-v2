@@ -590,7 +590,7 @@ pub(crate) async fn handle_command(
                 return;
             }
             let session = session_handle(&sessions, &session_id).await;
-            let result = match session {
+            let result = match &session {
                 Some(session) => session.kill().await,
                 None => Err(std::io::Error::new(
                     std::io::ErrorKind::NotFound,
@@ -600,12 +600,64 @@ pub(crate) async fn handle_command(
             let success = result.is_ok();
             if success {
                 sessions.lock().await.remove(&session_id);
+                // A kill removes the session from the map, so the output
+                // reader's exit cleanup is skipped ("current session changed")
+                // and would never announce the death. Announce it here —
+                // before replying — so every session termination broadcasts
+                // exactly one Exit, and a kill-then-respawn of the same
+                // session id always orders Exit before the new
+                // SessionCreated. `killed` marks it as an orchestrated kill,
+                // not the agent finishing.
+                let exit_evt = Event::Exit {
+                    session_id: session_id.clone(),
+                    code: 128 + libc::SIGKILL,
+                    resume_session_id: match &session {
+                        Some(session) => {
+                            session.codex_resume_session_id().await.unwrap_or_default()
+                        }
+                        None => None,
+                    },
+                    killed: true,
+                };
+                if let Ok(json) = serde_json::to_string(&exit_evt) {
+                    let _ = broadcast_tx.send(json);
+                }
+                if let Some(writers) = session_writers.lock().await.get(&session_id) {
+                    for w in writers.iter() {
+                        let _ = write_event(&mut *w.lock().await, &exit_evt).await;
+                    }
+                }
+                if let Some(observers) = session_observers.lock().await.get(&session_id) {
+                    for obs in observers.iter() {
+                        let _ = write_event(&mut *obs.lock().await, &exit_evt).await;
+                    }
+                }
             }
-            session_writers.lock().await.remove(&session_id);
+            let killed_writers = session_writers.lock().await.remove(&session_id);
             terminal_emulator_clients.lock().await.remove(&session_id);
             session_sizes.lock().await.remove(&session_id);
-            session_observers.lock().await.remove(&session_id);
+            let killed_observers = session_observers.lock().await.remove(&session_id);
             if success {
+                // A killed session must reach attached clients the same way a
+                // natural exit does, or they keep believing a dead stream is
+                // live (the killed session's reader skips its exit broadcast
+                // because the session is already gone from the manager).
+                // Deliberately per-writer, not on the Subscribe broadcast:
+                // subscribers (e.g. completion notify) must not see engine
+                // kills as task completion.
+                let exit_evt = Event::Exit {
+                    session_id: session_id.clone(),
+                    code: 128 + libc::SIGKILL,
+                    resume_session_id: None,
+                    killed: true,
+                };
+                for client in killed_writers
+                    .into_iter()
+                    .flatten()
+                    .chain(killed_observers.into_iter().flatten())
+                {
+                    let _ = write_event(&mut *client.lock().await, &exit_evt).await;
+                }
                 recovery_manager.end_session(&session_id).await;
             }
             let evt = match result {

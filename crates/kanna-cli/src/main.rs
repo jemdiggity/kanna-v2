@@ -87,6 +87,33 @@ pub(crate) enum RepoCommands {
         #[arg(long)]
         server_url: Option<String>,
     },
+    /// Find or create singleton agent tasks for a repo
+    Agent {
+        #[command(subcommand)]
+        command: RepoAgentCommands,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum RepoAgentCommands {
+    /// Send a message to a repo-scoped singleton agent
+    Signal {
+        /// The target repo ID
+        #[arg(long)]
+        repo_id: String,
+
+        /// The singleton agent name
+        #[arg(long)]
+        agent: String,
+
+        /// Message to send to the agent
+        #[arg(long)]
+        message: String,
+
+        /// Override the local Kanna server base URL
+        #[arg(long)]
+        server_url: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]

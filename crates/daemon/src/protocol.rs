@@ -241,6 +241,12 @@ pub enum Event {
         code: i32,
         #[serde(skip_serializing_if = "Option::is_none")]
         resume_session_id: Option<String>,
+        /// True when this exit was an orchestrated Kill (stage swap, rerun,
+        /// task close) rather than the process ending on its own. Consumers
+        /// that treat Exit as an agent-completion signal must skip killed
+        /// exits.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        killed: bool,
     },
     StatusChanged {
         session_id: String,
@@ -388,14 +394,18 @@ mod tests {
             session_id: "s1".to_string(),
             code: 42,
             resume_session_id: Some("019d99a5-aa94-7c73-b786-644cc095c037".to_string()),
+            killed: false,
         };
         let json = serde_json::to_string(&evt).unwrap();
+        // `killed: false` stays off the wire so older peers see the same shape.
+        assert!(!json.contains("killed"));
         let decoded: Event = serde_json::from_str(&json).unwrap();
         match decoded {
             Event::Exit {
                 session_id,
                 code,
                 resume_session_id,
+                killed,
             } => {
                 assert_eq!(session_id, "s1");
                 assert_eq!(code, 42);
@@ -403,7 +413,35 @@ mod tests {
                     resume_session_id.as_deref(),
                     Some("019d99a5-aa94-7c73-b786-644cc095c037")
                 );
+                assert!(!killed);
             }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_event_exit_killed_roundtrip() {
+        let evt = Event::Exit {
+            session_id: "s1".to_string(),
+            code: -1,
+            resume_session_id: None,
+            killed: true,
+        };
+        let json = serde_json::to_string(&evt).unwrap();
+        let decoded: Event = serde_json::from_str(&json).unwrap();
+        match decoded {
+            Event::Exit { killed, .. } => assert!(killed),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_event_exit_without_killed_field_deserializes() {
+        // Events from an older daemon lack `killed`; it must default to false.
+        let json = r#"{"type":"Exit","session_id":"s1","code":0}"#;
+        let decoded: Event = serde_json::from_str(json).unwrap();
+        match decoded {
+            Event::Exit { killed, .. } => assert!(!killed),
             _ => panic!("wrong variant"),
         }
     }

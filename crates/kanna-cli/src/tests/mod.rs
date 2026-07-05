@@ -1,7 +1,8 @@
 use crate::api::{
     advance_stage_via_api, block_task_via_api, close_task_via_api, create_task_via_api,
     get_task_via_api, parse_wait_until, rename_task_via_api, repo_task_list_path,
-    rerun_stage_via_api, send_task_input_via_api, set_task_parent_via_api, task_get_path,
+    request_revision_via_api, rerun_stage_via_api, send_task_input_via_api,
+    set_task_parent_via_api, signal_agent_path, signal_agent_via_api, task_get_path,
     task_list_path, task_logs_path, task_matches_wait_until, task_search_path,
     unblock_task_via_api,
 };
@@ -9,6 +10,7 @@ use crate::commands::guide::{
     build_guide_context, render_guide_json, render_guide_markdown, run_guide_command, GuideContext,
 };
 use crate::commands::repo::build_add_repo_request;
+use crate::commands::repo::build_signal_agent_request;
 use crate::commands::stage_complete::{
     build_complete_stage_request, render_stage_complete_confirmation,
 };
@@ -20,8 +22,8 @@ use crate::commands::task::{
 use crate::commands::tool::build_tool_call_args;
 use crate::config::resolve_server_base_url;
 use crate::models::{
-    SetTaskParentRequest, TaskCreateOptions, TaskDetail, TaskInputResponse, TaskRenameRequest,
-    TaskSummary, WaitUntil,
+    SetTaskParentRequest, SignalAgentRequest, TaskCreateOptions, TaskDetail, TaskInputResponse,
+    TaskRenameRequest, TaskSummary, WaitUntil,
 };
 use clap::{Command, CommandFactory, Parser};
 use serde_json::json;
@@ -117,6 +119,17 @@ fn typed_tool_surfaces() -> BTreeMap<&'static str, TypedToolSurface> {
                     ("parent_task_id", "parent_task"),
                     ("allowed_tools", "allowed_tool"),
                     ("blocker_task_ids", "blocker_task_id"),
+                ],
+            },
+        ),
+        (
+            "kanna_signal_agent",
+            TypedToolSurface {
+                command_path: &["repo", "agent", "signal"],
+                param_args: &[
+                    ("repo_id", "repo_id"),
+                    ("agent", "agent"),
+                    ("message", "message"),
                 ],
             },
         ),

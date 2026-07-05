@@ -1,10 +1,14 @@
-import { parseAgentDefinition } from "../../../../packages/core/src/pipeline/agent-loader";
+import {
+  applyAgentExtension,
+  parseAgentDefinition,
+  parseAgentExtension,
+} from "../../../../packages/core/src/pipeline/agent-loader";
 import { parsePipelineJson } from "../../../../packages/core/src/pipeline/pipeline-loader";
 import type { AgentDefinition, PipelineDefinition } from "../../../../packages/core/src/pipeline/pipeline-types";
 import { invoke } from "../invoke";
 import { resolveKannaServerBaseUrl } from "./kannaCliEnv";
 import { readEnvVarOptional } from "../utils/invokeHelpers";
-import { requireService, type AdvanceStageOptions, type StoreContext } from "./state";
+import { requireService, type AdvanceStageOptions, type KannaSnapshot, type StoreContext } from "./state";
 import { debugLog } from "../utils/debugLog";
 
 const LOCAL_SERVER_ACTION_TIMEOUT_MS = 30_000;
@@ -102,6 +106,63 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
     context.state.selectedItemId.value = null;
   }
 
+  async function resolveStageAdvanceProjection(item: {
+    repo_id: string;
+    pipeline: string;
+    stage: string;
+  }): Promise<{ nextStageName: string | null; pendingPostName: string | null }> {
+    const repo = context.state.repos.value.find((candidate) => candidate.id === item.repo_id);
+    if (!repo) return { nextStageName: null, pendingPostName: null };
+    try {
+      const pipeline = await loadPipeline(repo.path, item.pipeline || "default");
+      const currentIndex = pipeline.stages.findIndex((stage) => stage.name === item.stage);
+      if (currentIndex === -1) return { nextStageName: null, pendingPostName: null };
+      const currentStage = pipeline.stages[currentIndex];
+      return {
+        nextStageName: pipeline.stages[currentIndex + 1]?.name ?? null,
+        pendingPostName: currentStage?.post?.name ?? null,
+      };
+    } catch (error) {
+      console.debug("[pipeline:advanceStage] could not resolve stage projection for optimistic update:", error);
+      return { nextStageName: null, pendingPostName: null };
+    }
+  }
+
+  async function withOptimisticStageAdvance<T>(
+    taskId: string,
+    nextStageName: string | null,
+    pendingPostName: string | null,
+    run: () => Promise<T>,
+  ): Promise<T> {
+    if (!nextStageName && !pendingPostName) return run();
+    return requireService(context.services.withOptimisticItemOverlay, "withOptimisticItemOverlay")({
+      key: `advance-stage:${taskId}`,
+      apply: (snapshot: KannaSnapshot): KannaSnapshot => ({
+        entries: snapshot.entries.map((entry) => ({
+          ...entry,
+          items: entry.items.map((candidate) =>
+            candidate.id === taskId
+              ? {
+                  ...candidate,
+                  ...(pendingPostName
+                    ? {
+                        active_post_action: candidate.active_post_action ?? pendingPostName,
+                        has_running_post: 1,
+                      }
+                    : {
+                        stage: nextStageName ?? candidate.stage,
+                      }),
+                }
+              : candidate,
+          ),
+        })),
+        taskBlockers: snapshot.taskBlockers,
+      }),
+      run,
+      reconcile: requireService(context.services.reloadSnapshot, "reloadSnapshot"),
+    });
+  }
+
   async function loadPipeline(repoPath: string, pipelineName: string): Promise<PipelineDefinition> {
     const cacheKey = `${repoPath}::${pipelineName}`;
     const cached = context.state.pipelineCache.get(cacheKey);
@@ -154,6 +215,25 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
       }
     }
 
+    // Repo-local extension: layered onto the resolved agent (repo override or
+    // built-in) so a repo can customize a default agent without rewriting it.
+    const extendPath = `${repoPath}/.kanna/agents/${agentName}/EXTEND.md`;
+    let extendContent: string | null = null;
+    try {
+      extendContent = await invoke<string>("read_text_file", { path: extendPath });
+    } catch (error) {
+      console.debug(`[pipeline] no extension for agent "${agentName}":`, error);
+    }
+    if (extendContent !== null) {
+      try {
+        agent = applyAgentExtension(agent, parseAgentExtension(extendContent));
+      } catch (error) {
+        throw new Error(
+          `Invalid agent extension at ${extendPath}: ${error instanceof Error ? error.message : JSON.stringify(error)}`,
+        );
+      }
+    }
+
     context.state.agentCache.set(cacheKey, agent);
     return agent;
   }
@@ -164,9 +244,12 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
     if (item.closed_at != null) return;
     const sourceTaskIsSelected = context.state.selectedItemId.value === item.id;
     const fallbackSelectionId = computeNextVisibleItemId(item.id);
+    const { nextStageName, pendingPostName } = await resolveStageAdvanceProjection(item);
     debugLog("[pipeline:advanceStage] selection policy", {
       taskId,
       currentStage: item.stage,
+      optimisticNextStage: nextStageName,
+      optimisticPendingPost: pendingPostName,
       initiatedBy: options.initiatedBy ?? "manual",
       sourceTaskIsSelected,
       fallbackSelectionId,
@@ -174,27 +257,29 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
     });
 
     try {
-      const response = await postTaskAction(taskId, "advance-stage");
-      if (!response.ok) {
-        const message = await response.text();
-        if (response.status === 409) {
-          context.toast.warning(context.tt("mainPanel.taskBlocked"));
-          return;
+      await withOptimisticStageAdvance(taskId, nextStageName, pendingPostName, async () => {
+        const response = await postTaskAction(taskId, "advance-stage");
+        if (!response.ok) {
+          const message = await response.text();
+          if (response.status === 409) {
+            context.toast.warning(context.tt("mainPanel.taskBlocked"));
+            return;
+          }
+          throw new Error(message);
         }
-        throw new Error(message);
-      }
-      const result = await response.json() as TaskActionResponse;
-      await requireService(context.services.reloadSnapshot, "reloadSnapshot")();
+        const result = await response.json() as TaskActionResponse;
+        await requireService(context.services.reloadSnapshot, "reloadSnapshot")();
 
-      // Durable tasks: an in-pipeline advance transitions the SAME task in
-      // place, so the user's selection stays put. Only when the advance
-      // closed the task (final stage) does selection move to the next
-      // visible item — analogous to closing a task.
-      const advancedItem = context.state.items.value.find((candidate) => candidate.id === result.taskId);
-      const taskClosed = !advancedItem || advancedItem.closed_at != null;
-      if (taskClosed && sourceTaskIsSelected) {
-        await restoreStageAdvanceSelection(fallbackSelectionId);
-      }
+        // Durable tasks: an in-pipeline advance transitions the SAME task in
+        // place, so the user's selection stays put. Only when the advance
+        // closed the task (final stage) does selection move to the next
+        // visible item — analogous to closing a task.
+        const advancedItem = context.state.items.value.find((candidate) => candidate.id === result.taskId);
+        const taskClosed = !advancedItem || advancedItem.closed_at != null;
+        if (taskClosed && sourceTaskIsSelected) {
+          await restoreStageAdvanceSelection(fallbackSelectionId);
+        }
+      });
     } catch (error) {
       console.error("[store] advanceStage: server action failed:", error);
       context.toast.error(`${context.tt("toasts.agentStartFailed")}: ${error instanceof Error ? error.message : error}`);

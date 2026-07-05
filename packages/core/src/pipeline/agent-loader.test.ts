@@ -1,6 +1,11 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
-import { parseAgentDefinition, validateAgentDefinition } from "./agent-loader";
+import {
+  applyAgentExtension,
+  parseAgentDefinition,
+  parseAgentExtension,
+  validateAgentDefinition,
+} from "./agent-loader";
 
 describe("parseAgentDefinition", () => {
   it("parses valid AGENT.md with all fields", () => {
@@ -251,5 +256,141 @@ describe("validateAgentDefinition", () => {
       prompt: "Do something.",
     };
     expect(validateAgentDefinition(def)).toEqual([]);
+  });
+});
+
+describe("parseAgentExtension", () => {
+  it("parses a plain markdown file as a pure prompt extension", () => {
+    const ext = parseAgentExtension("## Extra Rules\n\nAlways run the full test suite.\n");
+    expect(ext.prompt).toBe("## Extra Rules\n\nAlways run the full test suite.");
+    expect(ext.description).toBeUndefined();
+    expect(ext.model).toBeUndefined();
+    expect(ext.permission_mode).toBeUndefined();
+    expect(ext.allowed_tools).toBeUndefined();
+    expect(ext.agent_provider).toBeUndefined();
+  });
+
+  it("parses frontmatter overrides", () => {
+    const content = `---
+description: Stricter review agent
+model: opus
+permission_mode: acceptEdits
+allowed_tools:
+  - Bash
+agent_provider: claude
+---
+
+Extra instructions.
+`;
+    const ext = parseAgentExtension(content);
+    expect(ext.description).toBe("Stricter review agent");
+    expect(ext.model).toBe("opus");
+    expect(ext.permission_mode).toBe("acceptEdits");
+    expect(ext.allowed_tools).toEqual(["Bash"]);
+    expect(ext.agent_provider).toEqual(["claude"]);
+    expect(ext.prompt).toBe("Extra instructions.");
+  });
+
+  it("rejects invalid permission_mode values", () => {
+    const content = `---
+permission_mode: neverAsk
+---
+
+Extra instructions.
+`;
+    expect(() => parseAgentExtension(content)).toThrow(/permission_mode.*neverAsk/);
+  });
+});
+
+describe("applyAgentExtension", () => {
+  const base = {
+    name: "review",
+    description: "Reviews branches",
+    model: "sonnet",
+    permission_mode: "default" as const,
+    allowed_tools: ["Read"],
+    agent_provider: ["codex", "claude"],
+    prompt: "Review the branch.",
+  };
+
+  it("appends the extension body to the base prompt", () => {
+    const merged = applyAgentExtension(base, parseAgentExtension("Run the full test suite."));
+    expect(merged.prompt).toBe("Review the branch.\n\nRun the full test suite.");
+  });
+
+  it("keeps base fields when the extension does not override them", () => {
+    const merged = applyAgentExtension(base, parseAgentExtension("Extra."));
+    expect(merged.name).toBe("review");
+    expect(merged.description).toBe("Reviews branches");
+    expect(merged.model).toBe("sonnet");
+    expect(merged.permission_mode).toBe("default");
+    expect(merged.allowed_tools).toEqual(["Read"]);
+    expect(merged.agent_provider).toEqual(["codex", "claude"]);
+  });
+
+  it("overrides base fields present in the extension frontmatter", () => {
+    const content = `---
+description: Stricter review
+model: opus
+permission_mode: dontAsk
+allowed_tools:
+  - Bash
+agent_provider: claude
+---
+
+Extra.
+`;
+    const merged = applyAgentExtension(base, parseAgentExtension(content));
+    expect(merged.description).toBe("Stricter review");
+    expect(merged.model).toBe("opus");
+    expect(merged.permission_mode).toBe("dontAsk");
+    expect(merged.allowed_tools).toEqual(["Bash"]);
+    expect(merged.agent_provider).toEqual(["claude"]);
+    expect(merged.prompt).toBe("Review the branch.\n\nExtra.");
+  });
+
+  it("keeps the base prompt when the extension body is empty", () => {
+    const merged = applyAgentExtension(base, parseAgentExtension("---\nmodel: opus\n---\n"));
+    expect(merged.prompt).toBe("Review the branch.");
+    expect(merged.model).toBe("opus");
+  });
+
+  it("uses the extension body alone when the base prompt is empty", () => {
+    const merged = applyAgentExtension({ ...base, prompt: "" }, parseAgentExtension("Only extension."));
+    expect(merged.prompt).toBe("Only extension.");
+  });
+
+  it("cannot rename the agent", () => {
+    const merged = applyAgentExtension(base, parseAgentExtension("---\nname: hijack\n---\n\nExtra."));
+    expect(merged.name).toBe("review");
+  });
+
+  it("rejects a merged definition with an unknown agent_provider", () => {
+    const content = `---
+agent_provider: claude, nope
+---
+
+Extra.
+`;
+    expect(() => applyAgentExtension(base, parseAgentExtension(content))).toThrow(/agent_provider.*nope/);
+  });
+
+  it("extends the built-in review agent with the repo extension", () => {
+    const agentContent = readFileSync(
+      new URL("../../../../.kanna/agents/review/AGENT.md", import.meta.url),
+      "utf8"
+    );
+    const extendContent = readFileSync(
+      new URL("../../../../.kanna/agents/review/EXTEND.md", import.meta.url),
+      "utf8"
+    );
+    const merged = applyAgentExtension(parseAgentDefinition(agentContent), parseAgentExtension(extendContent));
+
+    expect(merged.name).toBe("review");
+    expect(merged.prompt).toContain("Do not create a PR yourself.");
+    expect(merged.prompt).toContain("Kanna Repository Test Requirements");
+    expect(merged.prompt.indexOf("Kanna Repository Test Requirements")).toBeGreaterThan(
+      merged.prompt.indexOf("Do not create a PR yourself.")
+    );
   });
 });

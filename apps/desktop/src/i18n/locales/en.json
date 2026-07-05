@@ -310,7 +310,13 @@
   },
   "commandPalette": {
     "placeholder": "Type a command...",
-    "noCommands": "No commands found"
+    "noCommands": "No commands found",
+    "createAgent": "Create Agent",
+    "createAgentDesc": "Create a new agent definition",
+    "createPipeline": "Create Pipeline",
+    "createPipelineDesc": "Create a new pipeline definition",
+    "createConfig": "Create Config",
+    "createConfigDesc": "Create or update .kanna/config.json"
   },
   "terminalTabs": {
     "noSession": "No agent session active"

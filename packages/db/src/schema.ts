@@ -46,6 +46,10 @@ export interface PipelineItem {
   notified_at: string | null;
   created_at: string;
   updated_at: string;
+  /** Transient/derived UI metadata. The legacy column was removed when stage_run
+   * became the source of truth; optimistic store overlays may still attach the
+   * post action name before the running post stage_run is visible. */
+  active_post_action?: string | null;
   /** Derived by listPipelineItems (not a column): 1 while a `kind: "post"`
    * stage run is executing inside the task's live session. */
   has_running_post?: number;
@@ -80,6 +84,12 @@ export interface StageRun {
   result: string | null;
   feedback: string | null;
   session_id: string | null;
+  /** The agent CLI's own session id (Claude --session-id/--resume UUID), assigned at spawn. */
+  provider_session_id: string | null;
+  /** Worktree the run executed in; revisions resume the provider session here. */
+  cwd: string | null;
+  /** Set when this run resumed a previous run's provider session instead of starting fresh. */
+  resumed_from_run_id: string | null;
   started_at: string;
   finished_at: string | null;
 }

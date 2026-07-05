@@ -43,6 +43,36 @@ pub(super) struct PromptContext<'a> {
     pub(super) source_worktree: Option<&'a str>,
 }
 
+/// Composed revision context: what the task originally was plus what the
+/// reviewer wants changed. Used as the `$TASK_PROMPT` substitution when a
+/// revision spawns a fresh agent (which otherwise never sees the original
+/// task prompt), and as the body of the resume message.
+pub(super) fn build_revision_task_prompt(original_task_prompt: &str, feedback: &str) -> String {
+    let mut parts = vec!["Review feedback requires changes on this task.".to_string()];
+    if !original_task_prompt.trim().is_empty() {
+        parts.push(format!("Original task:\n{}", original_task_prompt.trim()));
+    }
+    parts.push(format!("Reviewer feedback:\n{}", feedback.trim()));
+    parts.join("\n\n")
+}
+
+/// Next user message for a resumed revision session. The session already
+/// carries its agent/stage instructions, so only the revision context is
+/// sent — restating the original task prompt re-anchors the turn even if the
+/// session has compacted it away — plus a completion reminder in case the
+/// standing instructions were compacted too.
+pub(super) fn build_revision_resume_message(
+    original_task_prompt: &str,
+    feedback: &str,
+    task_id: &str,
+) -> String {
+    format!(
+        "{}\n\nAddress the feedback in this worktree, then record stage completion: prefer MCP `kanna_complete_stage`; fallback: `kanna-cli stage-complete --task-id \"{}\" --status success --summary \"...\"`. Kanna will then advance this task's pipeline.",
+        build_revision_task_prompt(original_task_prompt, feedback),
+        task_id
+    )
+}
+
 pub(super) fn build_stage_prompt(
     agent_prompt: &str,
     stage_prompt: Option<&str>,
