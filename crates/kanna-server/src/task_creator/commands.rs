@@ -235,10 +235,9 @@ pub(super) fn build_teardown_shell_command(teardown_cmds: &[String]) -> String {
     let teardown_parts = teardown_cmds
         .iter()
         .map(|cmd| {
+            let escaped = shell_single_quote(cmd);
             format!(
-                "printf '\\033[2m$ %s\\033[0m\\n' '{}' ; ( {} ) || true",
-                shell_single_quote(cmd),
-                cmd
+                "( {{ printf '\\033[2m$ %s\\033[0m\\n' '{escaped}' && ( {cmd} ); }} || printf '\\033[31mTeardown command failed; continuing: %s\\033[0m\\n' '{escaped}' )"
             )
         })
         .collect::<Vec<_>>()

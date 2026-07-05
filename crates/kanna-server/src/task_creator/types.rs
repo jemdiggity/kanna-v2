@@ -79,6 +79,7 @@ pub(crate) enum PreparedStageTransition {
     Post(Box<PreparedPostDispatch>),
     Close {
         task_id: String,
+        /// Teardown for the final workspace the close leaves behind.
         workspace_teardown: Option<PreparedWorkspaceTeardown>,
     },
 }
@@ -140,6 +141,8 @@ pub(crate) struct PreparedStageRunSpawn {
     /// `pipeline_item.branch` and the worktree record, and rolls the fork
     /// back if the daemon spawn fails.
     pub(super) forked_workspace: Option<ForkedWorkspace>,
+    /// Teardown for the workspace this run leaves behind (forked swaps only);
+    /// spawned after the transition succeeds, never on rollback.
     pub(super) workspace_teardown: Option<PreparedWorkspaceTeardown>,
     pub(super) stage_agent: Option<String>,
     pub(super) agent_provider: String,

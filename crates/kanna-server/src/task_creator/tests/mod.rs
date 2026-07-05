@@ -146,9 +146,12 @@ async fn spawn_fake_daemon_input_ok(
 
 /// Fake daemon for a forked stage transition: replies to any number of
 /// leading `Kill` commands (agent session, then the stale worktree shell),
-/// then `SessionCreated` to the fork's spawn, returning every command.
+/// then `SessionCreated` to each spawn, returning every command once
+/// `expected_spawns` spawns have arrived (a transition that tears down the
+/// left workspace sends a second spawn for the teardown session).
 async fn spawn_fake_daemon_fork_transition(
     daemon_dir: String,
+    expected_spawns: usize,
 ) -> tokio::task::JoinHandle<Vec<kanna_daemon::protocol::Command>> {
     let socket_path = test_daemon_socket_path(&daemon_dir);
     let _ = std::fs::remove_file(&socket_path);
@@ -158,27 +161,21 @@ async fn spawn_fake_daemon_fork_transition(
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
         let mut commands = Vec::new();
+        let mut spawns = 0;
         loop {
             let mut line = String::new();
             reader.read_line(&mut line).await.unwrap();
             let command: kanna_daemon::protocol::Command =
                 serde_json::from_str(line.trim()).unwrap();
-            let (response, done) = match &command {
-                kanna_daemon::protocol::Command::Kill { .. } => {
-                    (kanna_daemon::protocol::Event::Ok, false)
+            let response = match &command {
+                kanna_daemon::protocol::Command::Kill { .. } => kanna_daemon::protocol::Event::Ok,
+                kanna_daemon::protocol::Command::Spawn { session_id, .. }
+                | kanna_daemon::protocol::Command::SpawnAgent { session_id, .. } => {
+                    spawns += 1;
+                    kanna_daemon::protocol::Event::SessionCreated {
+                        session_id: session_id.clone(),
+                    }
                 }
-                kanna_daemon::protocol::Command::Spawn { session_id, .. } => (
-                    kanna_daemon::protocol::Event::SessionCreated {
-                        session_id: session_id.clone(),
-                    },
-                    true,
-                ),
-                kanna_daemon::protocol::Command::SpawnAgent { session_id, .. } => (
-                    kanna_daemon::protocol::Event::SessionCreated {
-                        session_id: session_id.clone(),
-                    },
-                    true,
-                ),
                 other => panic!("unexpected daemon command: {other:?}"),
             };
             commands.push(command);
@@ -186,7 +183,7 @@ async fn spawn_fake_daemon_fork_transition(
                 .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
                 .await
                 .unwrap();
-            if done {
+            if spawns >= expected_spawns {
                 break;
             }
         }

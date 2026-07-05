@@ -357,6 +357,9 @@ fn prepare_workspace_teardown(
         .ok()
         .flatten()
         .unwrap_or_else(|| format!("{}/.kanna-worktrees/{branch}", repo.path));
+    if !std::path::Path::new(&worktree_path).is_dir() {
+        return None;
+    }
     let repo_config = read_repo_config(&repo.path).ok()?;
     let worktree_repo_config = read_repo_config(&worktree_path).unwrap_or_default();
     let mut teardown = stage_environment_teardown(pipeline, stage_name);
