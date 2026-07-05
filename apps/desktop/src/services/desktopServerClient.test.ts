@@ -5,6 +5,8 @@ import {
   createDesktopTask,
   markDesktopTaskRead,
   reopenDesktopTask,
+  setDesktopTaskActionForTests,
+  setDesktopTaskCreatorForTests,
   unblockDesktopTask,
 } from "./desktopServerClient";
 
@@ -16,6 +18,8 @@ vi.mock("../invoke", () => ({
 
 describe("desktopServerClient", () => {
   beforeEach(() => {
+    setDesktopTaskActionForTests(null);
+    setDesktopTaskCreatorForTests(null);
     invokeMock.mockReset();
     invokeMock.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
       if (command === "read_env_var" && args?.name === "KANNA_MOBILE_SERVER_PORT") {

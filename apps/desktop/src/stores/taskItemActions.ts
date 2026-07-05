@@ -139,6 +139,8 @@ export function createTaskItemActions(
             maxTurns: opts?.customTask?.maxTurns,
             maxBudgetUsd: opts?.customTask?.maxBudgetUsd,
             setupCmds: opts?.customTask?.setup,
+            resumeSessionId: opts?.resumeSessionId,
+            recoverySnapshot: opts?.recoverySnapshot,
           });
           createdTaskId = created.taskId;
           removePendingPlaceholder();

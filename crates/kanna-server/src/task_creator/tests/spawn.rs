@@ -148,6 +148,7 @@ async fn prepared_agent_task_spawn_includes_task_specific_kanna_context() {
             max_turns: None,
             max_budget_usd: None,
             setup_cmds: None,
+            resume_session_id: None,
             blocker_task_ids: None,
             notify_task_id: None,
 
@@ -243,6 +244,7 @@ async fn prepared_claude_pty_task_spawn_passes_kanna_context_as_append_system_pr
             max_turns: None,
             max_budget_usd: None,
             setup_cmds: None,
+            resume_session_id: None,
             blocker_task_ids: None,
             notify_task_id: None,
 
@@ -317,6 +319,7 @@ async fn prepared_non_claude_pty_task_spawn_prepends_kanna_context_to_prompt() {
             max_turns: None,
             max_budget_usd: None,
             setup_cmds: None,
+            resume_session_id: None,
             blocker_task_ids: None,
             notify_task_id: None,
 
@@ -389,6 +392,7 @@ async fn prepared_antigravity_pty_task_spawn_sets_up_worktree_alias() {
             max_turns: None,
             max_budget_usd: None,
             setup_cmds: None,
+            resume_session_id: None,
             blocker_task_ids: None,
             notify_task_id: None,
 

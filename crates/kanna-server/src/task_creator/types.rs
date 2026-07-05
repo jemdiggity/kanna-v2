@@ -19,6 +19,7 @@ pub(super) struct TaskCreationRequest {
     pub(super) max_turns: Option<u32>,
     pub(super) max_budget_usd: Option<f64>,
     pub(super) setup_cmds: Vec<String>,
+    pub(super) resume_session_id: Option<String>,
     pub(super) notify_task_id: Option<String>,
     pub(super) parent_task_id: Option<String>,
 }

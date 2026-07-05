@@ -1,4 +1,5 @@
 import type { PipelineItem, Repo, TaskBlocker } from "@kanna/db";
+import type { SessionRecoveryState } from "../composables/sessionRecoveryState";
 
 export interface DesktopSnapshotEntry {
   repo: Repo;
@@ -13,9 +14,19 @@ export interface DesktopSnapshot {
 }
 
 let snapshotFetcherForTests: (() => Promise<DesktopSnapshot>) | null = null;
+let taskCreatorForTests: ((request: CreateDesktopTaskRequest) => Promise<CreateDesktopTaskResponse>) | null = null;
+let taskActionForTests: ((action: string, taskId: string, body?: unknown) => Promise<void>) | null = null;
 
 export function setDesktopSnapshotFetcherForTests(fetcher: (() => Promise<DesktopSnapshot>) | null): void {
   snapshotFetcherForTests = fetcher;
+}
+
+export function setDesktopTaskCreatorForTests(creator: ((request: CreateDesktopTaskRequest) => Promise<CreateDesktopTaskResponse>) | null): void {
+  taskCreatorForTests = creator;
+}
+
+export function setDesktopTaskActionForTests(actionHandler: ((action: string, taskId: string, body?: unknown) => Promise<void>) | null): void {
+  taskActionForTests = actionHandler;
 }
 
 function normalizePort(port: unknown): string {
@@ -108,22 +119,27 @@ export async function fetchDesktopSnapshot(): Promise<DesktopSnapshot> {
 }
 
 export async function closeDesktopTask(taskId: string): Promise<void> {
+  if (taskActionForTests) return await taskActionForTests("close", taskId);
   await post(`/v1/tasks/${encodeURIComponent(taskId)}/actions/close`);
 }
 
 export async function reopenDesktopTask(taskId: string): Promise<void> {
+  if (taskActionForTests) return await taskActionForTests("reopen", taskId);
   await post(`/v1/tasks/${encodeURIComponent(taskId)}/actions/reopen`);
 }
 
 export async function markDesktopTaskRead(taskId: string): Promise<void> {
+  if (taskActionForTests) return await taskActionForTests("mark-read", taskId);
   await post(`/v1/tasks/${encodeURIComponent(taskId)}/actions/mark-read`);
 }
 
 export async function blockDesktopTask(taskId: string, blockerTaskIds: string[]): Promise<void> {
+  if (taskActionForTests) return await taskActionForTests("block", taskId, { blockerTaskIds });
   await post(`/v1/tasks/${encodeURIComponent(taskId)}/actions/block`, { blockerTaskIds });
 }
 
 export async function unblockDesktopTask(taskId: string): Promise<void> {
+  if (taskActionForTests) return await taskActionForTests("unblock", taskId);
   await post(`/v1/tasks/${encodeURIComponent(taskId)}/actions/unblock`);
 }
 
@@ -142,6 +158,8 @@ export interface CreateDesktopTaskRequest {
   maxTurns?: number;
   maxBudgetUsd?: number;
   setupCmds?: string[];
+  resumeSessionId?: string | null;
+  recoverySnapshot?: SessionRecoveryState | null;
   blockerTaskIds?: string[];
   notifyTaskId?: string;
   parentTaskId?: string;
@@ -157,25 +175,31 @@ export interface CreateDesktopTaskResponse {
 }
 
 export async function createDesktopTask(request: CreateDesktopTaskRequest): Promise<CreateDesktopTaskResponse> {
+  if (taskCreatorForTests) return await taskCreatorForTests(request);
   return await postJson<CreateDesktopTaskResponse>("/v1/tasks", request);
 }
 
 export async function renameDesktopTask(taskId: string, displayName: string | null): Promise<void> {
+  if (taskActionForTests) return await taskActionForTests("rename", taskId, { displayName });
   await patch(`/v1/tasks/${encodeURIComponent(taskId)}`, { displayName });
 }
 
 export async function setDesktopTaskParent(taskId: string, parentTaskId: string | null): Promise<void> {
+  if (taskActionForTests) return await taskActionForTests("set-parent", taskId, { parentTaskId });
   await post(`/v1/tasks/${encodeURIComponent(taskId)}/actions/set-parent`, { parentTaskId });
 }
 
 export async function pinDesktopTask(taskId: string, position: number): Promise<void> {
+  if (taskActionForTests) return await taskActionForTests("pin", taskId, { position });
   await post(`/v1/tasks/${encodeURIComponent(taskId)}/actions/pin`, { position });
 }
 
 export async function unpinDesktopTask(taskId: string): Promise<void> {
+  if (taskActionForTests) return await taskActionForTests("unpin", taskId);
   await post(`/v1/tasks/${encodeURIComponent(taskId)}/actions/unpin`);
 }
 
 export async function reorderDesktopPinnedTasks(orderedIds: string[]): Promise<void> {
+  if (taskActionForTests) return await taskActionForTests("reorder-pinned", "", { orderedIds });
   await post("/v1/tasks/actions/reorder-pinned", { orderedIds });
 }

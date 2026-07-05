@@ -65,6 +65,7 @@ fn build_merge_task_request(repo_path: &str) -> Result<TaskCreationRequest, Stri
         max_turns: None,
         max_budget_usd: None,
         setup_cmds: Vec::new(),
+        resume_session_id: None,
         notify_task_id: None,
         parent_task_id: None,
     })

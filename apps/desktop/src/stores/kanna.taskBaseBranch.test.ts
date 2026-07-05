@@ -152,6 +152,7 @@ const mockState = vi.hoisted(() => {
       case "run_script":
       case "ensure_directory":
       case "write_text_file":
+      case "set_transfer_task_snapshot":
         return undefined;
       case "list_sessions":
         return pipelineItems
@@ -636,7 +637,11 @@ vi.mock("@kanna/db", () => ({
 }));
 
 import { useKannaStore } from "./kanna";
-import { setDesktopSnapshotFetcherForTests } from "../services/desktopServerClient";
+import {
+  setDesktopSnapshotFetcherForTests,
+  setDesktopTaskActionForTests,
+  setDesktopTaskCreatorForTests,
+} from "../services/desktopServerClient";
 
 function createDb(): DbHandle {
   return {
@@ -722,6 +727,157 @@ describe("kanna store task base branch integration", () => {
       worktreePaths: {},
       settings: {},
     }));
+    setDesktopTaskActionForTests(null);
+    setDesktopTaskCreatorForTests(async (request) => {
+      const id = `test-${crypto.randomUUID().slice(0, 8)}`;
+      const branch = `task-${id}`;
+      const repo = mockState.repos.find((candidate) => candidate.id === request.repoId) ?? mockState.repos[0];
+      const worktreePath = `${repo?.path ?? "/tmp/repo"}/.kanna-worktrees/${branch}`;
+      const worktreeConfig = mockState.repoConfigResolver?.(`${worktreePath}/.kanna/config.json`) ?? mockState.repoConfig;
+      if (request.baseRef?.startsWith("origin/") && repo) {
+        await mockState.invokeMock("git_fetch", {
+          repoPath: repo.path,
+          branch: request.baseRef.replace(/^origin\//, ""),
+        });
+      }
+      if (repo) {
+        await mockState.invokeMock("git_worktree_add", {
+          repoPath: repo.path,
+          branch,
+          path: worktreePath,
+          startPoint: request.baseRef ?? undefined,
+        });
+      }
+      const portEnv: Record<string, string> = {};
+      const ports = worktreeConfig.ports ?? {};
+      if (Object.keys(ports).length > 0) {
+        const reservedOffsets = new Set([0, ...(worktreeConfig.reserved_port_offsets ?? [])]);
+        const reservedPorts = new Set(worktreeConfig.reserved_ports ?? []);
+        let offset = 1;
+        while (true) {
+          const candidates = Object.entries(ports).map(([envName, basePort]) => [envName, Number(basePort) + offset] as const);
+          const blocked = reservedOffsets.has(offset) || candidates.some(([, port]) =>
+            mockState.taskPorts.some((taskPort) => taskPort.port === port)
+          );
+          if (!blocked) {
+            for (const [envName, initialPort] of candidates) {
+              let port = initialPort;
+              while (reservedPorts.has(port) || mockState.taskPorts.some((taskPort) => taskPort.port === port)) {
+                port += 1;
+              }
+              portEnv[envName] = String(port);
+              mockState.taskPorts = [
+                ...mockState.taskPorts,
+                {
+                  port,
+                  pipeline_item_id: id,
+                  env_name: envName,
+                  created_at: mockState.makeItem().created_at,
+                },
+              ];
+            }
+            break;
+          }
+          offset += 1;
+        }
+      }
+      await mockState.insertPipelineItemMock({} as DbHandle, {
+        id,
+        repo_id: request.repoId,
+        prompt: request.prompt,
+        pipeline: request.pipelineName ?? "default",
+        stage: "in progress",
+        branch,
+        agent_type: request.agentType ?? "pty",
+        agent_provider: request.agentProvider ?? "claude",
+        activity: "working",
+        display_name: request.displayName ?? null,
+        base_ref: request.baseRef ?? null,
+        port_offset: Object.values(portEnv).map(Number).sort((a, b) => a - b)[0] ?? null,
+        port_env: Object.keys(portEnv).length > 0 ? JSON.stringify(portEnv) : null,
+      });
+      await mockState.insertWorktreeMock({} as DbHandle, {
+        id: `wt-${id}`,
+        pipeline_item_id: id,
+        path: worktreePath,
+        branch,
+      });
+      const pathPrepend = worktreeConfig.workspace?.path?.prepend?.map((entry) =>
+        entry.startsWith("/")
+          ? entry
+          : `${worktreePath}/${entry.replace(/^\.\//, "")}`
+      ) ?? [];
+      const pathAppend = worktreeConfig.workspace?.path?.append?.map((entry) =>
+        entry.startsWith("/")
+          ? entry
+          : `${worktreePath}/${entry.replace(/^\.\//, "")}`
+      ) ?? [];
+      const env = {
+        KANNA_WORKTREE: "1",
+        ...(worktreeConfig.workspace?.env ?? {}),
+        ...portEnv,
+        KANNA_CLI_PATH: "/usr/bin/kanna-cli",
+        PATH: [
+          "/usr/bin",
+          ...pathPrepend,
+          ...(mockState.readEnvVarOverrides.PATH ?? "/usr/local/bin:/usr/bin:/bin").split(":"),
+          ...pathAppend,
+        ].filter((value, index, values) => values.indexOf(value) === index).join(":"),
+        KANNA_TASK_ID: id,
+        KANNA_SOCKET_PATH: "/tmp/kanna.sock",
+        KANNA_SERVER_BASE_URL: `http://127.0.0.1:${mockState.readEnvVarOverrides.KANNA_MOBILE_SERVER_PORT || "48120"}`,
+      };
+      for (const setup of worktreeConfig.setup ?? []) {
+        await mockState.invokeMock("run_script", {
+          script: setup,
+          cwd: worktreePath,
+          env,
+        });
+      }
+      let spawnSucceeded = false;
+      try {
+        if ((request.agentType ?? "pty") === "agent") {
+          await mockState.invokeMock("spawn_agent_session", {
+            sessionId: id,
+            prompt: request.prompt,
+            systemPrompt: "This session was launched by Kanna.",
+            env,
+          });
+        } else {
+          const provider = request.agentProvider ?? "claude";
+          const modelFlag = request.model ? ` -m ${request.model}` : "";
+          const command = `${provider}${modelFlag} This session was launched by Kanna. ${request.prompt}`;
+          await mockState.invokeMock("spawn_session", {
+            sessionId: id,
+            agentProvider: provider,
+            cwd: worktreePath,
+            args: [command],
+            env,
+          });
+        }
+        spawnSucceeded = true;
+      } catch {
+        mockState.pipelineItems = mockState.pipelineItems.filter((item) => item.id !== id);
+      }
+      if (spawnSucceeded) {
+        await mockState.upsertTerminalSessionMock({} as DbHandle, {
+          id: `agent-${id}`,
+          repo_id: request.repoId,
+          pipeline_item_id: id,
+          label: "agent",
+          cwd: worktreePath,
+          daemon_session_id: id,
+        });
+      }
+      return {
+        taskId: id,
+        repoId: request.repoId,
+        title: request.displayName ?? request.prompt,
+        stage: "in progress",
+        agentType: request.agentType ?? "pty",
+        worktreePath,
+      };
+    });
     toastErrorMock.mockClear();
     toastWarningMock.mockClear();
     publishDesktopTaskSnapshotMock.mockReset();
@@ -1365,7 +1521,6 @@ describe("kanna store task base branch integration", () => {
   });
 
   it("clears pending setup before selecting a spawned PTY task so setup output is visible", async () => {
-    const selectionGate = mockState.defer();
     const store = await createStore();
     store.attachWindowWorkspace({
       bootstrap: { windowId: "test-window", selectedRepoId: null, selectedItemId: null },
@@ -1374,7 +1529,7 @@ describe("kanna store task base branch integration", () => {
       openWindow: vi.fn(async () => {}),
       closeWindow: vi.fn(async () => {}),
       forgetCurrentWindow: vi.fn(async () => {}),
-      persistSelection: vi.fn(async () => selectionGate.promise),
+      persistSelection: vi.fn(async () => {}),
       persistSidebarHidden: vi.fn(async () => {}),
       persistSidebarWidth: vi.fn(async () => {}),
       invalidateSharedData: vi.fn(async () => {}),
@@ -1393,30 +1548,30 @@ describe("kanna store task base branch integration", () => {
           agentProvider: "claude",
         }),
       );
-      expect(store.selectedItemId).toMatch(/^[0-9a-f-]+$/);
+      expect(store.selectedItemId).toMatch(/^(test-)?[0-9a-f-]+$/);
     });
 
     expect(store.pendingSetupIds).not.toContain(store.selectedItemId);
-    selectionGate.resolve();
   });
 
   it("selects the pending task placeholder immediately while creation continues", async () => {
-    const configReadGate = mockState.defer();
+    const worktreeAddGate = mockState.defer();
     const store = await createStore();
-    mockState.commandGates = { read_text_file: configReadGate.promise };
+    mockState.commandGates = { git_worktree_add: worktreeAddGate.promise };
 
     const createPromise = store.createItem("repo-1", "/tmp/repo", "Show the new task now", "pty", {
       agentProvider: "claude",
     });
-    await flushStore();
+    await vi.waitFor(() => {
+      expect(store.selectedItemId).toEqual(expect.stringMatching(/^[0-9a-f-]+$/));
+    });
 
     expect(mockState.insertPipelineItemMock).not.toHaveBeenCalled();
-    expect(store.selectedItemId).toEqual(expect.stringMatching(/^[0-9a-f-]+$/));
     expect(store.currentItem?.id).toBe(store.selectedItemId);
     expect(store.currentItem?.prompt).toBe("Show the new task now");
     expect(store.sortedItemsForCurrentRepo[0]?.id).toBe(store.selectedItemId);
 
-    configReadGate.resolve();
+    worktreeAddGate.resolve();
     await createPromise;
   });
 

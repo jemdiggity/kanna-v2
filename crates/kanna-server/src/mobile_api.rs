@@ -109,6 +109,7 @@ pub struct CreateTaskRequest {
     pub max_turns: Option<u32>,
     pub max_budget_usd: Option<f64>,
     pub setup_cmds: Option<Vec<String>>,
+    pub resume_session_id: Option<String>,
     pub blocker_task_ids: Option<Vec<String>>,
     pub notify_task_id: Option<String>,
     pub parent_task_id: Option<String>,
