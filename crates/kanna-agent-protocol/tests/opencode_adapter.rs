@@ -147,6 +147,7 @@ fn spawn_args_pin_the_run_json_contract() {
     let adapter = OpencodeAdapter::new();
     let ctx = SpawnCtx {
         prompt: "fix the bug".to_string(),
+        cwd: "/tmp/kanna-task".to_string(),
         model: Some("opencode/big-pickle".to_string()),
         ..Default::default()
     };
@@ -160,6 +161,8 @@ fn spawn_args_pin_the_run_json_contract() {
             "run",
             "--format",
             "json",
+            "--dir",
+            "/tmp/kanna-task",
             "--dangerously-skip-permissions",
             "-m",
             "opencode/big-pickle",
@@ -176,6 +179,8 @@ fn spawn_args_pin_the_run_json_contract() {
             "json",
             "--session",
             "ses_123",
+            "--dir",
+            "/tmp/kanna-task",
             "--dangerously-skip-permissions",
             "-m",
             "opencode/big-pickle",

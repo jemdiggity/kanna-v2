@@ -140,6 +140,7 @@ fn spawn_args_pin_the_stream_json_contract() {
     let adapter = ClaudeAdapter::new();
     let ctx = SpawnCtx {
         prompt: "fix the bug".to_string(),
+        cwd: String::new(),
         model: Some("claude-fable-5".to_string()),
         permission_mode: Some("acceptEdits".to_string()),
         allowed_tools: vec!["Bash".to_string()],
@@ -185,6 +186,7 @@ fn spawn_args_include_mcp_config_for_initial_and_resume_spawns() {
     let adapter = ClaudeAdapter::new();
     let ctx = SpawnCtx {
         prompt: "fix the bug".to_string(),
+        cwd: String::new(),
         model: None,
         permission_mode: None,
         allowed_tools: vec![],
@@ -210,6 +212,7 @@ fn default_spawn_runs_yolo_without_sandbox_or_prompts() {
     let adapter = ClaudeAdapter::new();
     let ctx = SpawnCtx {
         prompt: "fix the bug".to_string(),
+        cwd: String::new(),
         model: None,
         // No enforcing permission mode -> agent mode runs yolo.
         permission_mode: None,
@@ -233,6 +236,7 @@ fn dont_ask_and_default_modes_are_treated_as_yolo() {
     for mode in ["dontAsk", "default"] {
         let ctx = SpawnCtx {
             prompt: "go".to_string(),
+            cwd: String::new(),
             model: None,
             permission_mode: Some(mode.to_string()),
             allowed_tools: vec![],

@@ -260,6 +260,27 @@ echo '{"type":"turn.started"}'
 sleep 30
 "#;
 
+/// Fake opencode agent: reports the `--dir` value it was given. Real
+/// `opencode run` uses this flag to choose the project directory for headless
+/// tool execution, so process cwd alone is not enough.
+const OPENCODE_DIR_REPORTER_AGENT: &str = r#"#!/bin/sh
+dir_arg=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--dir" ]; then
+    shift
+    dir_arg="${1:-}"
+    break
+  fi
+  shift
+done
+if [ -z "$dir_arg" ]; then
+  dir_arg="missing:$(pwd)"
+fi
+printf '{"type":"step_start","sessionID":"fake-opencode","timestamp":1,"part":{"type":"step-start","id":"step-1","messageID":"msg-1"}}\n'
+printf '{"type":"text","sessionID":"fake-opencode","timestamp":2,"part":{"type":"text","text":"dir=%s"}}\n' "$dir_arg"
+printf '{"type":"step_finish","sessionID":"fake-opencode","timestamp":3,"part":{"type":"step-finish","id":"step-1","messageID":"msg-1"}}\n'
+"#;
+
 fn is_session_ended(event: &AgentEvent) -> bool {
     matches!(event, AgentEvent::SessionEnded { .. })
 }
@@ -598,6 +619,42 @@ fn interrupt_is_surfaced_as_interrupted_not_crashed() {
             }
         ),
         "stopping the agent must read as interrupted, not crashed: {ended:?}"
+    );
+}
+
+#[test]
+fn opencode_headless_spawn_passes_task_cwd_as_project_dir() {
+    let dir = temp_dir("opencode-cwd");
+    let task_cwd = dir.join("task-cwd");
+    std::fs::create_dir_all(&task_cwd).unwrap();
+    let script = write_script(
+        &dir,
+        "opencode-dir-reporter.sh",
+        OPENCODE_DIR_REPORTER_AGENT,
+    );
+    let daemon = DaemonHandle::start_in(&dir);
+
+    let mut conn = daemon.connect();
+    let mut params = spawn_params(&task_cwd, &script, "where am I?");
+    params.agent_provider = AgentProvider::Opencode;
+    conn.send(&Command::SpawnAgent {
+        session_id: "agent-oc-cwd".to_string(),
+        params,
+    });
+    conn.recv_until(|e| matches!(e, Event::SessionCreated { .. }));
+    conn.send(&Command::AttachAgent {
+        session_id: "agent-oc-cwd".to_string(),
+        from_seq: 0,
+    });
+    conn.recv_until(|e| matches!(e, Event::AgentSnapshot { .. }));
+
+    let events = conn.collect_agent_events_until(is_turn_completed);
+    let expected = format!("dir={}", task_cwd.display());
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::AssistantText { text, .. } if text == &expected)),
+        "opencode should receive the task cwd through --dir; expected {expected}, got {events:?}"
     );
 }
 
