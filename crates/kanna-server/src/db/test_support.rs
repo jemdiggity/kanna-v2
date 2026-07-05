@@ -126,6 +126,14 @@ impl Db {
                 blocker_item_id TEXT NOT NULL,
                 PRIMARY KEY (blocked_item_id, blocker_item_id)
             );
+
+            CREATE TABLE operator_event (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type TEXT NOT NULL,
+                pipeline_item_id TEXT,
+                repo_id TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
             "#,
         )?;
         Ok(())

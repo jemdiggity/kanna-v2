@@ -1,11 +1,11 @@
 import { computed, type ComputedRef } from "vue";
 import { watchDebounced } from "@vueuse/core";
 import { DEFAULT_STAGE_ORDER } from "@kanna/core";
-import { insertOperatorEvent, updatePipelineItemActivity } from "@kanna/db";
+import { updatePipelineItemActivity } from "@kanna/db";
 import type { PipelineItem, Repo } from "../types/kanna";
 import { createNavigationHistory } from "../composables/useNavigationHistory";
 import { beginTaskSwitch } from "../perf/taskSwitchPerf";
-import { putDesktopSetting } from "../services/desktopServerClient";
+import { postDesktopOperatorEvent, putDesktopSetting } from "../services/desktopServerClient";
 import { sortSidebarItemsForRepo } from "../utils/sidebarOrdering";
 import { requireService, type StoreContext } from "./state";
 
@@ -52,7 +52,11 @@ export function createSelectionApi(context: StoreContext): SelectionApi {
 
   function emitTaskSelected(itemId: string) {
     const item = context.state.items.value.find((candidate) => candidate.id === itemId);
-    insertOperatorEvent(context.requireDb(), "task_selected", itemId, item?.repo_id ?? null).catch((error) =>
+    postDesktopOperatorEvent({
+      eventType: "task_selected",
+      pipelineItemId: itemId,
+      repoId: item?.repo_id ?? null,
+    }).catch((error) =>
       console.error("[store] operator event failed:", error),
     );
   }
