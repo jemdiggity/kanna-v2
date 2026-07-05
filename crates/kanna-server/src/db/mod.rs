@@ -3,6 +3,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::time::Duration;
 
+mod analytics;
 mod blockers;
 mod notifications;
 mod operator_events;
@@ -18,6 +19,8 @@ mod test_support;
 mod tests;
 mod worktrees;
 
+#[allow(unused_imports)]
+pub use analytics::RepoAnalytics;
 #[allow(unused_imports)]
 pub use operator_events::NewOperatorEvent;
 #[allow(unused_imports)]

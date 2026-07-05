@@ -1,5 +1,6 @@
 import { ref, computed, watch, type Ref } from "vue";
-import type { DbHandle, PipelineItem, ActivityLog, OperatorEvent } from "@kanna/db";
+import type { DbHandle } from "../types/kanna";
+import { fetchDesktopRepoAnalytics, type DesktopAnalyticsBucketSize } from "../services/desktopServerClient";
 
 interface TaskBucket {
   label: string;
@@ -14,7 +15,7 @@ interface OperatorMetrics {
   focusScore: number | null;       // 0.0–1.0
 }
 
-type BucketSize = "daily" | "weekly" | "monthly";
+type BucketSize = DesktopAnalyticsBucketSize;
 
 export function useAnalytics(db: Ref<DbHandle | null>, repoId: Ref<string | null>) {
   const taskBuckets = ref<TaskBucket[]>([]);
@@ -36,28 +37,6 @@ export function useAnalytics(db: Ref<DbHandle | null>, repoId: Ref<string | null
 
   const avgTimeInState = ref({ working: 0, idle: 0, unread: 0 });
 
-  function detectBucketSize(minDate: string): BucketSize {
-    const now = Date.now();
-    const min = new Date(minDate + "Z").getTime();
-    const days = (now - min) / 86400000;
-    if (days < 14) return "daily";
-    if (days < 90) return "weekly";
-    return "monthly";
-  }
-
-  function bucketKey(dateStr: string, size: BucketSize): string {
-    const d = new Date(dateStr + "Z");
-    if (size === "daily") return d.toISOString().slice(0, 10);
-    if (size === "weekly") {
-      const day = d.getDay();
-      const diff = d.getDate() - day + (day === 0 ? -6 : 1);
-      const monday = new Date(d);
-      monday.setDate(diff);
-      return monday.toISOString().slice(0, 10);
-    }
-    return d.toISOString().slice(0, 7);
-  }
-
   function bucketLabel(key: string, size: BucketSize): string {
     if (size === "daily") {
       const d = new Date(key + "T00:00:00Z");
@@ -71,113 +50,6 @@ export function useAnalytics(db: Ref<DbHandle | null>, repoId: Ref<string | null
     return d.toLocaleDateString(undefined, { month: "short", year: "2-digit" });
   }
 
-  function computeDwells(events: OperatorEvent[]): Map<string, number> {
-    const dwells = new Map<string, number>();
-    let activeItemId: string | null = null;
-    let segmentStart: number | null = null;
-    let appVisible = true;
-
-    for (const event of events) {
-      const t = new Date(event.created_at + "Z").getTime();
-
-      if (event.event_type === "task_selected") {
-        if (activeItemId && segmentStart !== null && appVisible) {
-          const dur = Math.max(0, (t - segmentStart) / 1000);
-          dwells.set(activeItemId, (dwells.get(activeItemId) || 0) + dur);
-        }
-        activeItemId = event.pipeline_item_id;
-        segmentStart = appVisible ? t : null;
-      } else if (event.event_type === "app_blur") {
-        if (activeItemId && segmentStart !== null) {
-          const dur = Math.max(0, (t - segmentStart) / 1000);
-          dwells.set(activeItemId, (dwells.get(activeItemId) || 0) + dur);
-        }
-        segmentStart = null;
-        appVisible = false;
-      } else if (event.event_type === "app_focus") {
-        appVisible = true;
-        if (activeItemId) segmentStart = t;
-      }
-    }
-
-    if (activeItemId && segmentStart !== null && appVisible) {
-      const dur = Math.max(0, (Date.now() - segmentStart) / 1000);
-      dwells.set(activeItemId, (dwells.get(activeItemId) || 0) + dur);
-    }
-
-    return dwells;
-  }
-
-  function computeActiveHours(events: OperatorEvent[]): number {
-    if (events.length === 0) return 0;
-    const first = new Date(events[0].created_at + "Z").getTime();
-    const now = Date.now();
-    let totalBlur = 0;
-    let blurStart: number | null = null;
-
-    for (const event of events) {
-      const t = new Date(event.created_at + "Z").getTime();
-      if (event.event_type === "app_blur") {
-        blurStart = t;
-      } else if (event.event_type === "app_focus" && blurStart !== null) {
-        totalBlur += t - blurStart;
-        blurStart = null;
-      }
-    }
-    if (blurStart !== null) totalBlur += now - blurStart;
-
-    return Math.max(0.001, (now - first - totalBlur) / 3600000);
-  }
-
-  function computeSwitchCount(events: OperatorEvent[]): number {
-    let count = 0;
-    let prevItemId: string | null = null;
-    for (const event of events) {
-      if (event.event_type === "task_selected" && event.pipeline_item_id) {
-        if (prevItemId !== null && event.pipeline_item_id !== prevItemId) {
-          count++;
-        }
-        prevItemId = event.pipeline_item_id;
-      }
-    }
-    return count;
-  }
-
-  function computeResponseTimes(
-    events: OperatorEvent[],
-    items: PipelineItem[]
-  ): Map<string, number> {
-    const responses = new Map<string, number[]>();
-
-    const selectionTimes = new Map<string, number[]>();
-    for (const e of events) {
-      if (e.event_type === "task_selected" && e.pipeline_item_id) {
-        const arr = selectionTimes.get(e.pipeline_item_id) || [];
-        arr.push(new Date(e.created_at + "Z").getTime());
-        selectionTimes.set(e.pipeline_item_id, arr);
-      }
-    }
-
-    for (const item of items) {
-      if (!item.unread_at) continue;
-      const unreadAt = new Date(item.unread_at + "Z").getTime();
-      const selections = selectionTimes.get(item.id) || [];
-      const firstAfter = selections.find((t) => t > unreadAt);
-      if (firstAfter !== undefined) {
-        const dur = (firstAfter - unreadAt) / 1000;
-        const arr = responses.get(item.id) || [];
-        arr.push(dur);
-        responses.set(item.id, arr);
-      }
-    }
-
-    const avgResponses = new Map<string, number>();
-    for (const [itemId, times] of responses) {
-      avgResponses.set(itemId, times.reduce((a, b) => a + b, 0) / times.length);
-    }
-    return avgResponses;
-  }
-
   async function refresh() {
     if (!db.value || !repoId.value) {
       hasData.value = false;
@@ -189,120 +61,20 @@ export function useAnalytics(db: Ref<DbHandle | null>, repoId: Ref<string | null
     }
     loading.value = true;
     try {
-      const items = await db.value.select<PipelineItem>(
-        "SELECT * FROM pipeline_item WHERE repo_id = ? ORDER BY created_at ASC",
-        [repoId.value]
-      );
-      hasData.value = items.length > 0;
-      if (!hasData.value) {
-        taskBuckets.value = [];
-        avgTimeInState.value = { working: 0, idle: 0, unread: 0 };
-        operatorMetrics.value = { avgResponseTime: null, avgDwellTime: null, switchesPerHour: null, focusScore: null };
-        hasOperatorData.value = false;
-        return;
-      }
-
-      // --- Tasks created / closed per day ---
-      const size = detectBucketSize(items[0].created_at);
-      bucketSize.value = size;
-
-      const bucketMap = new Map<string, { created: number; closed: number }>();
-      for (const item of items) {
-        const key = bucketKey(item.created_at, size);
-        const entry = bucketMap.get(key) || { created: 0, closed: 0 };
-        entry.created++;
-        bucketMap.set(key, entry);
-      }
-      for (const item of items) {
-        if (item.closed_at != null) {
-          const key = bucketKey(item.closed_at || item.updated_at, size);
-          const entry = bucketMap.get(key) || { created: 0, closed: 0 };
-          entry.closed++;
-          bucketMap.set(key, entry);
-        }
-      }
-      const sortedKeys = [...bucketMap.keys()].sort();
-      taskBuckets.value = sortedKeys.map((key) => ({
-        label: bucketLabel(key, size),
-        created: bucketMap.get(key)!.created,
-        closed: bucketMap.get(key)!.closed,
+      const analytics = await fetchDesktopRepoAnalytics(repoId.value);
+      hasData.value = analytics.hasData;
+      bucketSize.value = analytics.bucketSize;
+      taskBuckets.value = analytics.taskBuckets.map((bucket) => ({
+        label: bucketLabel(bucket.key, analytics.bucketSize),
+        created: bucket.created,
+        closed: bucket.closed,
       }));
+      avgTimeInState.value = analytics.avgTimeInState;
+      operatorMetrics.value = analytics.operatorMetrics;
+      hasOperatorData.value = analytics.hasOperatorData;
 
-      // --- Avg Time in State ---
-      const doneItems = items.filter((i) => i.closed_at != null);
-      const logs = await db.value.select<ActivityLog>(
-        `SELECT al.* FROM activity_log al
-         JOIN pipeline_item pi ON al.pipeline_item_id = pi.id
-         WHERE pi.repo_id = ? AND pi.closed_at IS NOT NULL`,
-        [repoId.value]
-      );
-
-      const grouped = new Map<string, Record<string, number>>();
-      for (const log of logs) {
-        const m = grouped.get(log.pipeline_item_id) ?? {};
-        m[log.activity] = (m[log.activity] ?? 0) + log.seconds;
-        grouped.set(log.pipeline_item_id, m);
-      }
-
-      const totals = { working: 0, idle: 0, unread: 0 };
-      let taskCount = 0;
-
-      for (const item of doneItems) {
-        const m = grouped.get(item.id);
-        if (!m) continue;
-        taskCount++;
-        totals.working += m.working ?? 0;
-        totals.idle += m.idle ?? 0;
-        totals.unread += m.unread ?? 0;
-      }
-
-      if (taskCount > 0) {
-        avgTimeInState.value = {
-          working: totals.working / taskCount,
-          idle: totals.idle / taskCount,
-          unread: totals.unread / taskCount,
-        };
-      } else {
+      if (!analytics.hasData) {
         avgTimeInState.value = { working: 0, idle: 0, unread: 0 };
-      }
-
-      // --- Operator Metrics ---
-      const opEvents = await db.value.select<OperatorEvent>(
-        `SELECT * FROM operator_event
-         WHERE repo_id = ? OR repo_id IS NULL
-         ORDER BY created_at ASC`,
-        [repoId.value]
-      );
-
-      hasOperatorData.value = opEvents.some((e) => e.event_type === "task_selected");
-
-      if (hasOperatorData.value) {
-        const dwells = computeDwells(opEvents);
-        const dwellValues = [...dwells.values()];
-        const avgDwell = dwellValues.length > 0
-          ? dwellValues.reduce((a, b) => a + b, 0) / dwellValues.length
-          : null;
-
-        const activeHours = computeActiveHours(opEvents);
-        const switchCount = computeSwitchCount(opEvents);
-
-        const totalDwell = dwellValues.reduce((a, b) => a + b, 0);
-        const focusDwell = dwellValues.filter((d) => d > 30).reduce((a, b) => a + b, 0);
-        const focusScore = totalDwell > 0 ? focusDwell / totalDwell : null;
-
-        const responseTimes = computeResponseTimes(opEvents, items);
-        const responseValues = [...responseTimes.values()];
-        const avgResponse = responseValues.length > 0
-          ? responseValues.reduce((a, b) => a + b, 0) / responseValues.length
-          : null;
-
-        operatorMetrics.value = {
-          avgResponseTime: avgResponse,
-          avgDwellTime: avgDwell,
-          switchesPerHour: switchCount / activeHours,
-          focusScore,
-        };
-      } else {
         operatorMetrics.value = { avgResponseTime: null, avgDwellTime: null, switchesPerHour: null, focusScore: null };
       }
     } catch (e) {

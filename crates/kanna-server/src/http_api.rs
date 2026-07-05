@@ -1,3 +1,4 @@
+mod analytics;
 mod desktop;
 mod ksp;
 mod operator_events;

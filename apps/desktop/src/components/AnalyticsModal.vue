@@ -14,7 +14,7 @@ import {
   Legend,
   Filler,
 } from "chart.js";
-import type { DbHandle } from "@kanna/db";
+import type { DbHandle } from "../types/kanna";
 import { useAnalytics } from "../composables/useAnalytics";
 import { getChartTheme } from "../theme/theme";
 import { useThemeRuntime } from "../theme/runtime";

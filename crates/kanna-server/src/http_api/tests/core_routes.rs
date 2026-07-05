@@ -449,6 +449,63 @@ async fn operator_events_route_inserts_batched_events() {
 }
 
 #[tokio::test]
+async fn analytics_route_returns_repo_metrics() {
+    let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "task-1",
+            "repo-1",
+            "prompt one",
+            Some("Task One"),
+            "in progress",
+            "2026-04-17 08:00:00",
+        )
+        .unwrap();
+        db.insert_test_pipeline_item(
+            "task-2",
+            "repo-1",
+            "prompt two",
+            Some("Task Two"),
+            "in progress",
+            "2026-04-18 08:00:00",
+        )
+        .unwrap();
+        db.set_test_pipeline_item_closed_at("task-1", "2026-04-19 08:00:00")
+            .unwrap();
+        db.insert_test_activity_log("task-1", "working", 30)
+            .unwrap();
+        db.insert_test_activity_log("task-1", "idle", 60).unwrap();
+        db.insert_test_operator_event("task_selected", Some("task-1"), Some("repo-1"), "2026-04-17 08:05:00")
+            .unwrap();
+        db.insert_test_operator_event("task_selected", Some("task-2"), Some("repo-1"), "2026-04-17 08:07:00")
+            .unwrap();
+    });
+
+    let response = app
+        .oneshot(
+            Request::get("/v1/analytics/repos/repo-1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = from_slice(&body).unwrap();
+    assert_eq!(json["hasData"], true);
+    assert_eq!(json["taskBuckets"].as_array().unwrap().len(), 1);
+    assert_eq!(json["taskBuckets"][0]["created"], 2);
+    assert_eq!(json["taskBuckets"][0]["closed"], 1);
+    assert_eq!(json["avgTimeInState"]["working"], 30.0);
+    assert_eq!(json["avgTimeInState"]["idle"], 60.0);
+    assert_eq!(json["hasOperatorData"], true);
+    assert!(json["operatorMetrics"]["switchesPerHour"].as_f64().unwrap() > 0.0);
+}
+
+#[tokio::test]
 async fn add_repo_route_registers_existing_git_repo() {
     let unique = format!(
         "{}-{}",
