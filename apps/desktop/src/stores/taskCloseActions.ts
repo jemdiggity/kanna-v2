@@ -16,6 +16,7 @@ import { shouldSelectNextOnCloseTransition } from "./taskCloseSelection";
 import { applyWorktreeProcessIsolation, buildTaskLifecycleEnv, collectTeardownCommands, hasLiveTaskResources, parseTaskPortEnv } from "./taskLifecycleEnv";
 import { reportCloseSessionError } from "./kannaCleanup";
 import { isTaskTearingDown } from "./taskStages";
+import { resolveTaskItemForDaemonSession } from "./taskSessionIdentity";
 import { isTaskSelectedInAnyWindow } from "./windowSelection";
 import { readRepoConfig, requireService, type StoreContext } from "./state";
 import { resolveAgentProvider } from "./agent-provider";
@@ -279,10 +280,10 @@ export function createTaskCloseActions(
   }
 
   async function handleAgentFinished(sessionId: string) {
-    const item = context.state.items.value.find((candidate) => candidate.id === sessionId);
+    const item = resolveTaskItemForDaemonSession(context.state.items.value, sessionId);
     if (!item) return;
     if (item.closed_at !== null) return;
-    const activity = await isTaskSelectedInAnyWindow(context, sessionId) ? "idle" : "unread";
+    const activity = await isTaskSelectedInAnyWindow(context, item.id) ? "idle" : "unread";
     try {
       await updatePipelineItemActivity(context.requireDb(), item.id, activity);
       await reloadSnapshot();
