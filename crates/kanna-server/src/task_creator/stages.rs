@@ -176,6 +176,11 @@ fn prepare_swap_to_index(
     let Some(next_stage) = context.pipeline.stages.get(next_index) else {
         return Ok(PreparedStageTransition::Close {
             task_id: context.source_task_id.to_string(),
+            workspace_teardown: super::prepare_workspace_teardown_for_close(
+                db,
+                config,
+                context.source_task_id,
+            ),
         });
     };
     prepare_stage_run_for_target(

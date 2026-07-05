@@ -248,6 +248,11 @@ pub(super) async fn close_task(
     }
     let retarget_instructions =
         collect_retarget_instructions_for_merged_blocker(&db, &pipeline_item_id)?;
+    let workspace_teardown = crate::task_creator::prepare_workspace_teardown_for_close(
+        &db,
+        &state.config,
+        &pipeline_item_id,
+    );
 
     let mut daemon = crate::daemon_client::DaemonClient::connect(&state.config.daemon_dir)
         .await
@@ -284,6 +289,13 @@ pub(super) async fn close_task(
             format!("db error: {}", e),
         )
     })?;
+    if let Some(teardown) = workspace_teardown {
+        if let Err(error) =
+            crate::task_creator::spawn_workspace_teardown_for_api(&mut daemon, teardown).await
+        {
+            log::warn!("workspace teardown for task {pipeline_item_id} failed to start: {error}");
+        }
+    }
     notify_task_completion(&state.config, &pipeline_item_id, false)
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -300,6 +312,7 @@ async fn close_task_after_final_stage(
     state: &Arc<AppState>,
     daemon: &mut crate::daemon_client::DaemonClient,
     task_id: String,
+    workspace_teardown: Option<crate::task_creator::PreparedWorkspaceTeardown>,
 ) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
     let retarget_instructions = {
         let db = Db::open(&state.config.db_path).map_err(|e| {
@@ -340,6 +353,13 @@ async fn close_task_after_final_stage(
             format!("db error: {}", e),
         )
     })?;
+    if let Some(teardown) = workspace_teardown {
+        if let Err(error) =
+            crate::task_creator::spawn_workspace_teardown_for_api(daemon, teardown).await
+        {
+            log::warn!("workspace teardown for task {task_id} failed to start: {error}");
+        }
+    }
     notify_task_completion(&state.config, &task_id, false)
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -412,9 +432,10 @@ async fn execute_stage_transition(
             .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
             Ok(Json(dispatched))
         }
-        crate::task_creator::PreparedStageTransition::Close { task_id } => {
-            close_task_after_final_stage(state, daemon, task_id).await
-        }
+        crate::task_creator::PreparedStageTransition::Close {
+            task_id,
+            workspace_teardown,
+        } => close_task_after_final_stage(state, daemon, task_id, workspace_teardown).await,
     }
 }
 

@@ -136,6 +136,8 @@ pub async fn handle_invoke(
                 .resolve_pipeline_item_id(task_id)
                 .map_err(|e| format!("db error: {}", e))?
                 .ok_or_else(|| format!("task not found: {task_id}"))?;
+            let workspace_teardown =
+                task_creator::prepare_workspace_teardown_for_close(db, config, &pipeline_item_id);
 
             for session_id in [
                 pipeline_item_id.to_string(),
@@ -147,6 +149,15 @@ pub async fn handle_invoke(
 
             db.close_pipeline_item(&pipeline_item_id)
                 .map_err(|e| format!("db error: {}", e))?;
+            if let Some(teardown) = workspace_teardown {
+                if let Err(error) =
+                    task_creator::spawn_workspace_teardown_for_api(daemon, teardown).await
+                {
+                    log::warn!(
+                        "workspace teardown for task {pipeline_item_id} failed to start: {error}"
+                    );
+                }
+            }
             Ok(Value::Null)
         }
         "advance_stage" => {
@@ -179,7 +190,10 @@ pub async fn handle_invoke(
                     .await?;
                     serde_json::to_value(dispatched).map_err(|e| format!("serialize error: {}", e))
                 }
-                task_creator::PreparedStageTransition::Close { task_id } => {
+                task_creator::PreparedStageTransition::Close {
+                    task_id,
+                    workspace_teardown,
+                } => {
                     for session_id in [
                         task_id.to_string(),
                         format!("shell-wt-{task_id}"),
@@ -191,6 +205,15 @@ pub async fn handle_invoke(
                     let db = Db::open(&config.db_path).map_err(|e| format!("db error: {}", e))?;
                     db.close_pipeline_item(&task_id)
                         .map_err(|e| format!("db error: {}", e))?;
+                    if let Some(teardown) = workspace_teardown {
+                        if let Err(error) =
+                            task_creator::spawn_workspace_teardown_for_api(daemon, teardown).await
+                        {
+                            log::warn!(
+                                "workspace teardown for task {task_id} failed to start: {error}"
+                            );
+                        }
+                    }
                     Ok(serde_json::json!({ "task_id": task_id, "followTask": false }))
                 }
             }

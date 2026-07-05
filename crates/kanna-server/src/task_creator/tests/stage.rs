@@ -690,7 +690,7 @@ async fn prepare_advance_stage_forks_workspace_for_next_run_in_same_task() {
     assert_eq!(run.cwd, fork_worktree);
     assert!(std::path::Path::new(&fork_worktree).is_dir());
 
-    let fake_daemon = spawn_fake_daemon_fork_transition(config.daemon_dir.clone()).await;
+    let fake_daemon = spawn_fake_daemon_fork_transition(config.daemon_dir.clone(), 1).await;
     let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
     let advanced = spawn_prepared_stage_run_for_api(
         &config.db_path,
@@ -782,7 +782,15 @@ fn prepare_advance_stage_at_final_stage_prepares_close() {
         .unwrap();
 
     match prepare_advance_stage_for_api(&db, &config, "task-1").unwrap() {
-        PreparedStageTransition::Close { task_id } => assert_eq!(task_id, "task-1"),
+        PreparedStageTransition::Close {
+            task_id,
+            workspace_teardown,
+        } => {
+            assert_eq!(task_id, "task-1");
+            // No worktree exists on disk for this task, so there is no
+            // workspace teardown to run.
+            assert!(workspace_teardown.is_none());
+        }
         PreparedStageTransition::Run(_) | PreparedStageTransition::Post(_) => {
             panic!("advancing past the final stage must close the task")
         }
@@ -1451,6 +1459,230 @@ async fn dispatch_post_falls_back_to_fresh_session_when_session_is_dead() {
     assert_eq!(post_run.stage, "commit");
     assert_eq!(post_run.status, "running");
     assert_eq!(post_run.agent.as_deref(), Some("commit"));
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[tokio::test]
+async fn stage_transition_tears_down_left_workspace() {
+    let repo_root = init_git_repo("stage-transition-teardown");
+    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/pipelines/default.json"),
+        r#"{
+  "stages": [
+    { "name": "in progress", "transition": "manual" },
+    { "name": "review", "transition": "manual", "prompt": "Review $BRANCH" }
+  ]
+}"#,
+    )
+    .unwrap();
+    assert!(Command::new("git")
+        .args(["add", ".kanna"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["commit", "-m", "add kanna pipeline"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["branch", "task-source"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    let source_worktree = repo_root.join(".kanna-worktrees/task-source");
+    assert!(Command::new("git")
+        .args([
+            "worktree",
+            "add",
+            source_worktree.to_string_lossy().as_ref(),
+            "task-source",
+        ])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    // The workspace's own repo config declares the teardown commands.
+    std::fs::create_dir_all(source_worktree.join(".kanna")).unwrap();
+    std::fs::write(
+        source_worktree.join(".kanna/config.json"),
+        r#"{ "teardown": ["echo cleaning-old-workspace"] }"#,
+    )
+    .unwrap();
+
+    let config = test_config("stage-transition-teardown");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Fix teardown",
+        Some("Fix teardown"),
+        "in progress",
+        "2026-07-01 00:00:00",
+    )
+    .unwrap();
+    db.update_test_pipeline_item_stage_context("task-1", "task-source", "default", None, "claude")
+        .unwrap();
+    db.upsert_worktree(
+        "wt-task-1",
+        "task-1",
+        &source_worktree.to_string_lossy(),
+        "task-source",
+    )
+    .unwrap();
+
+    let run = match prepare_advance_stage_for_api(&db, &config, "task-1").unwrap() {
+        PreparedStageTransition::Run(run) => run,
+        PreparedStageTransition::Post(_) => panic!("expected stage swap, got post dispatch"),
+        PreparedStageTransition::Close { .. } => panic!("expected stage swap, got close"),
+    };
+
+    let teardown = run
+        .workspace_teardown
+        .as_ref()
+        .expect("forked swap must tear down the workspace it leaves");
+    // Teardown session ids derive from the workspace's stored branch, so
+    // they never collide across workspaces or with the desktop's close-time
+    // `td-<task-id>` session.
+    assert_eq!(teardown.session_id, "td-task-source");
+    assert_eq!(teardown.cwd, source_worktree.to_string_lossy());
+    assert!(teardown.command.contains("echo cleaning-old-workspace"));
+    assert!(teardown.command.contains("Running teardown"));
+
+    let fake_daemon = spawn_fake_daemon_fork_transition(config.daemon_dir.clone(), 2).await;
+    let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
+    let advanced = spawn_prepared_stage_run_for_api(
+        &config.db_path,
+        &mut daemon,
+        &crate::session_replacements::SessionReplacements::default(),
+        *run,
+    )
+    .await
+    .unwrap();
+    let commands = fake_daemon.await.unwrap();
+
+    assert_eq!(advanced.task_id, "task-1");
+    // Kill agent session, kill the stale worktree shell, spawn the next
+    // stage in the fork, then spawn the left workspace's teardown.
+    assert_eq!(commands.len(), 4);
+    assert!(matches!(
+        commands.first(),
+        Some(kanna_daemon::protocol::Command::Kill { session_id }) if session_id == "task-1"
+    ));
+    assert!(matches!(
+        commands.get(1),
+        Some(kanna_daemon::protocol::Command::Kill { session_id }) if session_id == "shell-wt-task-1"
+    ));
+    match commands.get(2) {
+        Some(kanna_daemon::protocol::Command::Spawn {
+            session_id, cwd, ..
+        }) => {
+            assert_eq!(session_id, "task-1");
+            assert_ne!(cwd, source_worktree.to_string_lossy().as_ref());
+        }
+        other => panic!("expected next-stage spawn, got {:?}", other),
+    }
+    match commands.get(3) {
+        Some(kanna_daemon::protocol::Command::Spawn {
+            session_id,
+            cwd,
+            args,
+            env,
+            ..
+        }) => {
+            assert_eq!(session_id, "td-task-source");
+            assert_eq!(cwd, source_worktree.to_string_lossy().as_ref());
+            let command_line = args.join(" ");
+            assert!(
+                command_line.contains("echo cleaning-old-workspace"),
+                "teardown spawn: {command_line}"
+            );
+            assert_eq!(env.get("KANNA_TASK_ID").map(String::as_str), Some("task-1"));
+        }
+        other => panic!("expected teardown spawn, got {:?}", other),
+    }
+
+    // The transition itself is unaffected by the teardown ride-along.
+    let updated = db.get_task_stage_source("task-1").unwrap().unwrap();
+    assert_eq!(updated.stage.as_deref(), Some("review"));
+    assert_eq!(updated.branch.as_deref(), Some("task-task-1-2"));
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
+fn advance_past_final_stage_prepares_close_with_workspace_teardown() {
+    let repo_root = init_git_repo_with_pipeline(
+        "advance-final-close-teardown",
+        "default",
+        "in progress",
+        "manual",
+        "claude",
+    );
+    assert!(Command::new("git")
+        .args(["branch", "task-source"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    let source_worktree = repo_root.join(".kanna-worktrees/task-source");
+    assert!(Command::new("git")
+        .args([
+            "worktree",
+            "add",
+            source_worktree.to_string_lossy().as_ref(),
+            "task-source",
+        ])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    std::fs::create_dir_all(source_worktree.join(".kanna")).unwrap();
+    std::fs::write(
+        source_worktree.join(".kanna/config.json"),
+        r#"{ "teardown": ["echo cleaning-final-workspace"] }"#,
+    )
+    .unwrap();
+
+    let config = test_config("advance-final-close-teardown");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Ship it",
+        Some("Ship it"),
+        "pr",
+        "2026-07-01 00:00:00",
+    )
+    .unwrap();
+    db.update_test_pipeline_item_stage_context("task-1", "task-source", "default", None, "claude")
+        .unwrap();
+
+    match prepare_advance_stage_for_api(&db, &config, "task-1").unwrap() {
+        PreparedStageTransition::Close {
+            task_id,
+            workspace_teardown,
+        } => {
+            assert_eq!(task_id, "task-1");
+            let teardown =
+                workspace_teardown.expect("closing past the final stage tears down the workspace");
+            assert_eq!(teardown.session_id, "td-task-source");
+            assert_eq!(teardown.cwd, source_worktree.to_string_lossy());
+            assert!(teardown.command.contains("echo cleaning-final-workspace"));
+        }
+        PreparedStageTransition::Run(_) | PreparedStageTransition::Post(_) => {
+            panic!("advancing past the final stage must close the task")
+        }
+    }
 
     let _ = std::fs::remove_dir_all(&repo_root);
 }

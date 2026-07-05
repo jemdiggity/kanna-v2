@@ -77,7 +77,25 @@ pub(crate) enum PreparedSessionSpawn {
 pub(crate) enum PreparedStageTransition {
     Run(Box<PreparedStageRunSpawn>),
     Post(Box<PreparedPostDispatch>),
-    Close { task_id: String },
+    Close {
+        task_id: String,
+        /// Teardown for the final workspace the close leaves behind.
+        workspace_teardown: Option<PreparedWorkspaceTeardown>,
+    },
+}
+
+/// Cleanup for a workspace the task is leaving: the workspace repo config's
+/// `teardown` commands, ready to run best-effort as a detached daemon session
+/// in the old worktree. The session id derives from the workspace's stored
+/// branch (`td-<branch>`) so concurrent teardowns of different workspaces
+/// never collide, and neither does the desktop's close-time `td-<task-id>`
+/// session.
+#[derive(Clone)]
+pub(crate) struct PreparedWorkspaceTeardown {
+    pub(super) session_id: String,
+    pub(super) cwd: String,
+    pub(super) env: HashMap<String, String>,
+    pub(super) command: String,
 }
 
 /// A stage's post, ready to be injected into the task's live agent session.
@@ -137,6 +155,9 @@ pub(crate) struct PreparedStageRunSpawn {
     /// `pipeline_item.branch` and the worktree record, and rolls the fork
     /// back if the daemon spawn fails.
     pub(super) forked_workspace: Option<ForkedWorkspace>,
+    /// Teardown for the workspace this run leaves behind (forked swaps only);
+    /// spawned after the transition succeeds, never on rollback.
+    pub(super) workspace_teardown: Option<PreparedWorkspaceTeardown>,
     pub(super) stage_agent: Option<String>,
     pub(super) agent_provider: String,
     pub(super) model: Option<String>,

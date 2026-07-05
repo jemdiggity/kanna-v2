@@ -227,6 +227,24 @@ pub(super) fn build_task_shell_command(
     command_parts.join(" && ")
 }
 
+/// Best-effort teardown script for a workspace the task has left. Mirrors the
+/// desktop's close-time rendering (`renderBestEffortLifecycleCommand`): each
+/// command is echoed dimmed before running, and a failure is reported and
+/// skipped so one broken teardown command never blocks the rest.
+pub(super) fn build_workspace_teardown_command(teardown_cmds: &[String]) -> String {
+    let parts = teardown_cmds
+        .iter()
+        .map(|cmd| {
+            let escaped = shell_single_quote(cmd);
+            format!(
+                "( {{ printf '\\033[2m$ %s\\033[0m\\n' '{escaped}' && ( {cmd} ); }} || printf '\\033[31mTeardown command failed; continuing: %s\\033[0m\\n' '{escaped}' )"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" && ");
+    format!("printf '\\033[33mRunning teardown...\\033[0m\\n' && {parts} && printf '\\n'")
+}
+
 /// Canonical Kanna runtime guidance shared with the desktop frontend.
 /// `packages/core/src/pipeline/prompt-builder.ts` mirrors this file as a TS
 /// constant; a sync test there keeps both sides byte-identical.

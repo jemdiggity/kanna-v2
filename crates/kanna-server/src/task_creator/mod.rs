@@ -14,7 +14,10 @@ mod tests;
 
 use crate::config::Config;
 use crate::db::{Db, NewPipelineItem, Repo};
-use commands::{build_agent_command, build_kanna_preamble, build_task_shell_command};
+use commands::{
+    build_agent_command, build_kanna_preamble, build_task_shell_command,
+    build_workspace_teardown_command,
+};
 use definitions::{
     read_agent_definition, read_pipeline_definition, read_repo_config,
     read_task_pipeline_definition, PipelineStage, PipelineStagePolicy, PipelineStageTransition,
@@ -30,7 +33,9 @@ use std::collections::HashMap;
 use types::{
     CreatedTask, ForkedWorkspace, PreparedSessionSpawn, PreparedStageRerun, TaskCreationRequest,
 };
-pub(crate) use types::{PreparedStageRunSpawn, PreparedStageTransition, PreparedTaskSpawn};
+pub(crate) use types::{
+    PreparedStageRunSpawn, PreparedStageTransition, PreparedTaskSpawn, PreparedWorkspaceTeardown,
+};
 use worktree::{
     create_worktree, fetch_start_point, generate_task_id, merge_branches_into_worktree,
 };
@@ -40,6 +45,7 @@ pub(crate) use lifecycle::{
     dispatch_prepared_post_for_api, kill_session_replacing, prepared_task_id,
     rerun_prepared_stage_for_api, rollback_prepared_task_for_api, spawn_prepared_stage_run_for_api,
     spawn_prepared_task_for_api_recording_stage_run, spawn_prepared_task_for_api_with_rollback,
+    spawn_workspace_teardown_for_api,
 };
 pub(crate) use merge::prepare_merge_agent_for_api;
 pub use merge::run_merge_agent;
@@ -258,6 +264,14 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
     let repo_config = read_repo_config(&repo.path)?;
     let worktree_repo_config = read_repo_config(&worktree_path)?;
     let port_env = claim_task_ports(db, task_id, repo_config.ports.as_ref())?;
+    // A forked swap leaves the source workspace behind for good; queue its
+    // teardown alongside the swap. Posts and reruns stay in place.
+    let workspace_teardown = if forked_workspace.is_some() {
+        let source_worktree_path = format!("{}/.kanna-worktrees/{}", repo.path, branch);
+        prepare_workspace_teardown(config, task_id, &source_worktree_path, branch, &port_env)
+    } else {
+        None
+    };
     let mut spawn_env = build_spawn_env(config, task_id, &port_env)?;
     apply_workspace_path_env(&mut spawn_env, &worktree_path, &worktree_repo_config);
     let mcp_config_path = write_kanna_mcp_config(&config.daemon_dir, task_id, &mut spawn_env)?;
@@ -304,6 +318,7 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
         run_stage: target_stage.name.clone(),
         run_kind,
         forked_workspace,
+        workspace_teardown,
         stage_agent: target_stage.agent.clone(),
         agent_provider: provider.as_str().to_string(),
         model: stage_run_model,
@@ -312,6 +327,93 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
         env: spawn_env,
         session,
     })
+}
+
+/// Teardown for a workspace the task is leaving: the workspace repo config's
+/// `teardown` commands, run in the old worktree with the same env the
+/// workspace's sessions ran with. Best-effort by design — a missing worktree,
+/// unreadable config, or empty `teardown` list yields `None` and the
+/// transition proceeds without cleanup.
+fn prepare_workspace_teardown(
+    config: &Config,
+    task_id: &str,
+    worktree_path: &str,
+    branch: &str,
+    port_env: &HashMap<String, String>,
+) -> Option<PreparedWorkspaceTeardown> {
+    if !std::path::Path::new(worktree_path).is_dir() {
+        return None;
+    }
+    let worktree_repo_config = match read_repo_config(worktree_path) {
+        Ok(worktree_repo_config) => worktree_repo_config,
+        Err(error) => {
+            log::warn!("skipping workspace teardown for {worktree_path}: {error}");
+            return None;
+        }
+    };
+    let teardown_cmds = worktree_repo_config.teardown.clone().unwrap_or_default();
+    if teardown_cmds.is_empty() {
+        return None;
+    }
+    let mut env = match build_spawn_env(config, task_id, port_env) {
+        Ok(env) => env,
+        Err(error) => {
+            log::warn!("skipping workspace teardown for {worktree_path}: {error}");
+            return None;
+        }
+    };
+    apply_workspace_path_env(&mut env, worktree_path, &worktree_repo_config);
+    Some(PreparedWorkspaceTeardown {
+        session_id: format!("td-{branch}"),
+        cwd: worktree_path.to_string(),
+        env,
+        command: build_workspace_teardown_command(&teardown_cmds),
+    })
+}
+
+/// Teardown for the workspace a task currently occupies, for paths that
+/// close the task (advance past the final stage, API close). Reads the
+/// task's already-claimed ports rather than claiming new ones, and never
+/// fails the close: lookup errors are logged and yield `None`.
+pub(crate) fn prepare_workspace_teardown_for_close(
+    db: &Db,
+    config: &Config,
+    task_id: &str,
+) -> Option<PreparedWorkspaceTeardown> {
+    let prepared: Result<Option<PreparedWorkspaceTeardown>, String> = (|| {
+        let item = db
+            .get_pipeline_item(task_id)
+            .map_err(|e| format!("db error: {}", e))?
+            .ok_or_else(|| format!("task not found: {}", task_id))?;
+        let Some(branch) = item.branch.filter(|branch| !branch.trim().is_empty()) else {
+            return Ok(None);
+        };
+        let repo = db
+            .get_repo(&item.repo_id)
+            .map_err(|e| format!("db error: {}", e))?
+            .ok_or_else(|| format!("repo not found for task: {}", task_id))?;
+        let worktree_path = format!("{}/.kanna-worktrees/{}", repo.path, branch);
+        let port_env = db
+            .list_task_ports_for_item(task_id)
+            .map_err(|e| format!("db error: {}", e))?
+            .into_iter()
+            .map(|(env_name, port)| (env_name, port.to_string()))
+            .collect::<HashMap<_, _>>();
+        Ok(prepare_workspace_teardown(
+            config,
+            task_id,
+            &worktree_path,
+            &branch,
+            &port_env,
+        ))
+    })();
+    match prepared {
+        Ok(teardown) => teardown,
+        Err(error) => {
+            log::warn!("skipping workspace teardown for task {task_id}: {error}");
+            None
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

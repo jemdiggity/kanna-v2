@@ -1,6 +1,6 @@
 use super::types::{
     CreatedTask, PreparedPostDispatch, PreparedSessionSpawn, PreparedStageRerun,
-    PreparedStageRunSpawn, PreparedTaskSpawn,
+    PreparedStageRunSpawn, PreparedTaskSpawn, PreparedWorkspaceTeardown,
 };
 use super::worktree::remove_prepared_worktree;
 use crate::daemon_client::DaemonClient;
@@ -202,10 +202,52 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
     })
     .map_err(|e| format!("db error: {}", e))?;
 
+    // The workspace the swap left behind gets its teardown last, once the
+    // transition is durable. Best-effort: a teardown that fails to start
+    // must never fail a transition that already happened.
+    if let Some(teardown) = prepared.workspace_teardown {
+        if let Err(error) = spawn_workspace_teardown_for_api(daemon, teardown).await {
+            log::warn!("workspace teardown for task {task_id} failed to start: {error}");
+        }
+    }
+
     Ok(crate::mobile_api::TaskActionResponse {
         task_id,
         follow_task: None,
     })
+}
+
+/// Spawn a prepared workspace-teardown session in the daemon. Best-effort by
+/// contract: callers log failures and continue — cleanup must never fail the
+/// transition or close that triggered it.
+pub(crate) async fn spawn_workspace_teardown_for_api(
+    daemon: &mut DaemonClient,
+    teardown: PreparedWorkspaceTeardown,
+) -> Result<(), String> {
+    let command = DaemonCommand::Spawn {
+        session_id: teardown.session_id,
+        executable: "/bin/zsh".to_string(),
+        args: vec![
+            "--login".to_string(),
+            "-i".to_string(),
+            "-c".to_string(),
+            teardown.command,
+        ],
+        cwd: teardown.cwd,
+        env: teardown.env,
+        cols: 120,
+        rows: 30,
+        agent_provider: None,
+    };
+    let event = daemon
+        .send_command(&command)
+        .await
+        .map_err(|e| format!("daemon error: {}", e))?;
+    match event {
+        DaemonEvent::SessionCreated { .. } => Ok(()),
+        DaemonEvent::Error { message, .. } => Err(format!("daemon error: {}", message)),
+        other => Err(format!("unexpected daemon response: {:?}", other)),
+    }
 }
 
 /// Dispatch a stage's post into the task's live agent session; when the
