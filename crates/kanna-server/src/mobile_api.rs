@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct DesktopDescriptor {
     pub id: String,
@@ -91,7 +91,7 @@ pub struct AddRepoRequest {
     pub name: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateTaskRequest {
     pub repo_id: String,
@@ -105,6 +105,10 @@ pub struct CreateTaskRequest {
     pub model: Option<String>,
     pub permission_mode: Option<String>,
     pub allowed_tools: Option<Vec<String>>,
+    pub disallowed_tools: Option<Vec<String>>,
+    pub max_turns: Option<u32>,
+    pub max_budget_usd: Option<f64>,
+    pub setup_cmds: Option<Vec<String>>,
     pub blocker_task_ids: Option<Vec<String>>,
     pub notify_task_id: Option<String>,
     pub parent_task_id: Option<String>,

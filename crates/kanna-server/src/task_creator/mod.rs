@@ -171,6 +171,9 @@ pub(crate) fn prepare_rerun_stage_for_api(
         model,
         permission_mode,
         allowed_tools,
+        Vec::new(),
+        None,
+        None,
         mcp_config_path,
         &spawn_env,
         &worktree_path,
@@ -316,6 +319,9 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
         model,
         permission_mode,
         allowed_tools,
+        Vec::new(),
+        None,
+        None,
         mcp_config_path,
         &spawn_env,
         &worktree_path,
@@ -454,6 +460,9 @@ fn build_prepared_session(
     model: Option<String>,
     permission_mode: Option<String>,
     allowed_tools: Vec<String>,
+    disallowed_tools: Vec<String>,
+    max_turns: Option<u32>,
+    max_budget_usd: Option<f64>,
     mcp_config_path: Option<String>,
     spawn_env: &HashMap<String, String>,
     worktree_path: &str,
@@ -489,6 +498,9 @@ fn build_prepared_session(
                 model.as_deref(),
                 permission_mode.as_deref(),
                 &allowed_tools,
+                &disallowed_tools,
+                max_turns,
+                max_budget_usd,
                 Some(&preamble),
                 mcp_config_path.as_deref(),
                 Some(worktree_path),
@@ -536,6 +548,9 @@ fn build_prepared_session(
                     model,
                     permission_mode,
                     allowed_tools,
+                    disallowed_tools,
+                    max_turns,
+                    max_budget_usd,
                     system_prompt,
                     mcp_config_path,
                     executable: headless_executable,
@@ -600,6 +615,10 @@ pub(crate) fn prepare_task_for_api(
             model: request.model,
             permission_mode: request.permission_mode,
             allowed_tools: request.allowed_tools.unwrap_or_default(),
+            disallowed_tools: request.disallowed_tools.unwrap_or_default(),
+            max_turns: request.max_turns,
+            max_budget_usd: request.max_budget_usd,
+            setup_cmds: request.setup_cmds.unwrap_or_default(),
             notify_task_id: request.notify_task_id,
             parent_task_id,
         },
@@ -660,6 +679,10 @@ pub(crate) fn prepare_singleton_agent_task_for_api(
             model: None,
             permission_mode: None,
             allowed_tools: Vec::new(),
+            disallowed_tools: Vec::new(),
+            max_turns: None,
+            max_budget_usd: None,
+            setup_cmds: Vec::new(),
             notify_task_id: None,
             parent_task_id: None,
         },
@@ -743,6 +766,7 @@ pub(crate) fn create_dormant_task_for_api(
         activity: "idle",
         port_offset: None,
         port_env_json: None,
+        agent_spawn_options_json: None,
         base_ref: None,
         notify_task_id: request.notify_task_id.as_deref(),
         parent_task_id: parent_task_id.as_deref(),
@@ -889,6 +913,9 @@ pub(crate) fn prepare_start_dormant_task_for_api(
         model,
         permission_mode,
         allowed_tools,
+        Vec::new(),
+        None,
+        None,
         mcp_config_path,
         &spawn_env,
         &worktree_path,
@@ -946,6 +973,10 @@ struct ResolvedTaskSpawn {
     model: Option<String>,
     permission_mode: Option<String>,
     allowed_tools: Vec<String>,
+    disallowed_tools: Vec<String>,
+    max_turns: Option<u32>,
+    max_budget_usd: Option<f64>,
+    setup_cmds: Vec<String>,
     base_ref: Option<String>,
     stored_base_ref: Option<String>,
     notify_task_id: Option<String>,
@@ -1096,6 +1127,7 @@ fn resolve_task_spawn(
     } else {
         request.allowed_tools
     };
+    let disallowed_tools = request.disallowed_tools;
     let agent_type = resolve_agent_type(request.agent_type.as_deref(), provider)?;
     let stage_name = request
         .stage_override
@@ -1121,6 +1153,10 @@ fn resolve_task_spawn(
         model,
         permission_mode,
         allowed_tools,
+        disallowed_tools,
+        max_turns: request.max_turns,
+        max_budget_usd: request.max_budget_usd,
+        setup_cmds: request.setup_cmds,
         base_ref: request.base_ref,
         stored_base_ref,
         notify_task_id: request.notify_task_id,
@@ -1135,6 +1171,7 @@ fn insert_new_task_record(
     branch: &str,
     resolved: &ResolvedTaskSpawn,
 ) -> Result<(), String> {
+    let agent_spawn_options_json = agent_spawn_options_json(resolved)?;
     db.insert_pipeline_item(NewPipelineItem {
         id: task_id,
         repo_id: &repo.id,
@@ -1149,11 +1186,24 @@ fn insert_new_task_record(
         activity: "working",
         port_offset: None,
         port_env_json: None,
+        agent_spawn_options_json: Some(&agent_spawn_options_json),
         base_ref: resolved.stored_base_ref.as_deref(),
         notify_task_id: resolved.notify_task_id.as_deref(),
         parent_task_id: resolved.parent_task_id.as_deref(),
     })
     .map_err(|e| format!("db error: {}", e))
+}
+
+fn agent_spawn_options_json(resolved: &ResolvedTaskSpawn) -> Result<String, String> {
+    serde_json::to_string(&serde_json::json!({
+        "model": resolved.model,
+        "permissionMode": resolved.permission_mode,
+        "allowedTools": resolved.allowed_tools,
+        "disallowedTools": resolved.disallowed_tools,
+        "maxTurns": resolved.max_turns,
+        "maxBudgetUsd": resolved.max_budget_usd,
+    }))
+    .map_err(|e| format!("serialize error: {}", e))
 }
 
 fn persist_task_ports(
@@ -1256,10 +1306,13 @@ fn prepare_new_task_session(
         resolved.model.clone(),
         resolved.permission_mode.clone(),
         resolved.allowed_tools.clone(),
+        resolved.disallowed_tools.clone(),
+        resolved.max_turns,
+        resolved.max_budget_usd,
         mcp_config_path,
         &spawn_env,
         worktree_path,
-        worktree_repo_config.setup.as_deref().unwrap_or(&[]),
+        &new_task_setup_cmds(&worktree_repo_config, &resolved.setup_cmds),
         None,
     )?;
     Ok(PreparedNewTaskSession {
@@ -1267,4 +1320,10 @@ fn prepare_new_task_session(
         session,
         provider_session_id,
     })
+}
+
+fn new_task_setup_cmds(repo_config: &RepoConfig, request_setup_cmds: &[String]) -> Vec<String> {
+    let mut setup = repo_config.setup.clone().unwrap_or_default();
+    setup.extend(request_setup_cmds.iter().cloned());
+    setup
 }

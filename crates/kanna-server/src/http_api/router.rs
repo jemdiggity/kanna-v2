@@ -7,8 +7,9 @@ use super::snapshot::get_snapshot;
 use super::state::{AppState, HttpInvokeResponse};
 use super::status::status;
 use super::task_actions::{
-    advance_stage, close_task, complete_stage, mark_task_read, reopen_task, request_revision,
-    rerun_stage, run_merge_agent, set_task_parent,
+    advance_stage, close_task, complete_stage, mark_task_read, pin_task, reopen_task,
+    reorder_pinned_tasks, request_revision, rerun_stage, run_merge_agent, set_task_parent,
+    unpin_task,
 };
 use super::task_blockers::{block_task, unblock_task};
 use super::task_input::send_task_input;
@@ -43,6 +44,12 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/tasks/{task_id}/input", post(send_task_input))
         .route("/v1/tasks/{task_id}/actions/block", post(block_task))
         .route("/v1/tasks/{task_id}/actions/unblock", post(unblock_task))
+        .route("/v1/tasks/{task_id}/actions/pin", post(pin_task))
+        .route("/v1/tasks/{task_id}/actions/unpin", post(unpin_task))
+        .route(
+            "/v1/tasks/actions/reorder-pinned",
+            post(reorder_pinned_tasks),
+        )
         .route(
             "/v1/tasks/{task_id}/actions/advance-stage",
             post(advance_stage),

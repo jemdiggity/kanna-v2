@@ -9,12 +9,100 @@ use axum::Json;
 use kanna_agent_protocol::StateChangeScope;
 use std::sync::Arc;
 
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct PinTaskRequest {
+    position: i64,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ReorderPinnedTasksRequest {
+    ordered_ids: Vec<String>,
+}
+
 fn stage_action_error_status(error: &str) -> axum::http::StatusCode {
     if error.starts_with("task is blocked:") {
         axum::http::StatusCode::CONFLICT
     } else {
         axum::http::StatusCode::INTERNAL_SERVER_ERROR
     }
+}
+
+pub(super) async fn pin_task(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+    Json(payload): Json<PinTaskRequest>,
+) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
+    let db = Db::open(&state.config.db_path).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("db error: {}", e),
+        )
+    })?;
+    let task_id = db
+        .resolve_pipeline_item_id(&task_id)
+        .map_err(|e| db_write_error("db error", e))?
+        .ok_or_else(|| {
+            (
+                axum::http::StatusCode::NOT_FOUND,
+                "db error: not found".to_string(),
+            )
+        })?;
+    db.pin_pipeline_item(&task_id, payload.position)
+        .map_err(|e| db_write_error("db error", e))?;
+    state.publish_state_changed(StateChangeScope::Tasks);
+    Ok(Json(crate::mobile_api::TaskActionResponse {
+        task_id,
+        follow_task: None,
+    }))
+}
+
+pub(super) async fn unpin_task(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
+    let db = Db::open(&state.config.db_path).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("db error: {}", e),
+        )
+    })?;
+    let task_id = db
+        .resolve_pipeline_item_id(&task_id)
+        .map_err(|e| db_write_error("db error", e))?
+        .ok_or_else(|| {
+            (
+                axum::http::StatusCode::NOT_FOUND,
+                "db error: not found".to_string(),
+            )
+        })?;
+    db.unpin_pipeline_item(&task_id)
+        .map_err(|e| db_write_error("db error", e))?;
+    state.publish_state_changed(StateChangeScope::Tasks);
+    Ok(Json(crate::mobile_api::TaskActionResponse {
+        task_id,
+        follow_task: None,
+    }))
+}
+
+pub(super) async fn reorder_pinned_tasks(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<ReorderPinnedTasksRequest>,
+) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
+    let db = Db::open(&state.config.db_path).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("db error: {}", e),
+        )
+    })?;
+    db.reorder_pinned_items(&payload.ordered_ids)
+        .map_err(|e| db_write_error("db error", e))?;
+    state.publish_state_changed(StateChangeScope::Tasks);
+    Ok(Json(crate::mobile_api::TaskActionResponse {
+        task_id: payload.ordered_ids.first().cloned().unwrap_or_default(),
+        follow_task: None,
+    }))
 }
 
 pub(super) async fn run_merge_agent(

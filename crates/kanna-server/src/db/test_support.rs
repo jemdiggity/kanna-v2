@@ -34,6 +34,18 @@ impl Db {
     }
 
     #[cfg(test)]
+    pub fn get_test_pipeline_item_spawn_options(
+        &self,
+        id: &str,
+    ) -> Result<Option<String>, rusqlite::Error> {
+        self.conn.query_row(
+            "SELECT agent_spawn_options FROM pipeline_item WHERE id = ?",
+            [id],
+            |row| row.get(0),
+        )
+    }
+
+    #[cfg(test)]
     fn init_test_schema(&self) -> Result<(), rusqlite::Error> {
         self.conn.execute_batch(
             r#"

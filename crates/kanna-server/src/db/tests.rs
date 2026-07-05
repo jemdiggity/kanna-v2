@@ -542,6 +542,7 @@ fn insert_pipeline_item_stores_stage_metadata() {
         activity: "working",
         port_offset: Some(1422),
         port_env_json: Some("{\"KANNA_DEV_PORT\":\"1422\"}"),
+        agent_spawn_options_json: None,
         base_ref: None,
         display_name: Some("Merge queue"),
         notify_task_id: None,

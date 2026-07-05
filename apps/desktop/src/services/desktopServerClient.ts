@@ -75,6 +75,33 @@ async function post(path: string, body?: unknown): Promise<void> {
   }
 }
 
+async function patch(path: string, body: unknown): Promise<void> {
+  const baseUrl = await desktopServerBaseUrl();
+  const response = await fetch(`${baseUrl}${path}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    throw new Error(`PATCH ${path} failed: ${response.status}${body ? ` ${body}` : ""}`);
+  }
+}
+
+async function postJson<T>(path: string, body: unknown): Promise<T> {
+  const baseUrl = await desktopServerBaseUrl();
+  const response = await fetch(`${baseUrl}${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    throw new Error(`POST ${path} failed: ${response.status}${body ? ` ${body}` : ""}`);
+  }
+  return await response.json() as T;
+}
+
 export async function fetchDesktopSnapshot(): Promise<DesktopSnapshot> {
   if (snapshotFetcherForTests) return await snapshotFetcherForTests();
   return await requestJson<DesktopSnapshot>("/v1/snapshot", { retryMs: 15_000 });
@@ -98,4 +125,57 @@ export async function blockDesktopTask(taskId: string, blockerTaskIds: string[])
 
 export async function unblockDesktopTask(taskId: string): Promise<void> {
   await post(`/v1/tasks/${encodeURIComponent(taskId)}/actions/unblock`);
+}
+
+export interface CreateDesktopTaskRequest {
+  repoId: string;
+  prompt: string;
+  displayName?: string | null;
+  pipelineName?: string;
+  baseRef?: string | null;
+  agentProvider?: string;
+  agentType?: string;
+  model?: string;
+  permissionMode?: string;
+  allowedTools?: string[];
+  disallowedTools?: string[];
+  maxTurns?: number;
+  maxBudgetUsd?: number;
+  setupCmds?: string[];
+  blockerTaskIds?: string[];
+  notifyTaskId?: string;
+  parentTaskId?: string;
+}
+
+export interface CreateDesktopTaskResponse {
+  taskId: string;
+  repoId: string;
+  title: string;
+  stage: string;
+  agentType: string;
+  worktreePath?: string | null;
+}
+
+export async function createDesktopTask(request: CreateDesktopTaskRequest): Promise<CreateDesktopTaskResponse> {
+  return await postJson<CreateDesktopTaskResponse>("/v1/tasks", request);
+}
+
+export async function renameDesktopTask(taskId: string, displayName: string | null): Promise<void> {
+  await patch(`/v1/tasks/${encodeURIComponent(taskId)}`, { displayName });
+}
+
+export async function setDesktopTaskParent(taskId: string, parentTaskId: string | null): Promise<void> {
+  await post(`/v1/tasks/${encodeURIComponent(taskId)}/actions/set-parent`, { parentTaskId });
+}
+
+export async function pinDesktopTask(taskId: string, position: number): Promise<void> {
+  await post(`/v1/tasks/${encodeURIComponent(taskId)}/actions/pin`, { position });
+}
+
+export async function unpinDesktopTask(taskId: string): Promise<void> {
+  await post(`/v1/tasks/${encodeURIComponent(taskId)}/actions/unpin`);
+}
+
+export async function reorderDesktopPinnedTasks(orderedIds: string[]): Promise<void> {
+  await post("/v1/tasks/actions/reorder-pinned", { orderedIds });
 }

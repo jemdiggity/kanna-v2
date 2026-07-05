@@ -17,6 +17,7 @@ import { formatAppWindowTitle, type AppBuildInfo } from "./windowTitle";
 import { isTaskTearingDown } from "./taskStages";
 import { requireService, type StoreContext } from "./state";
 import { applySnapshotSettingsToState } from "./snapshotSettings";
+import { closeDesktopTask } from "../services/desktopServerClient";
 
 export interface InitApi {
   init: (db: DbHandle) => Promise<void>;
@@ -34,7 +35,6 @@ interface DaemonSessionListEntry {
 
 export function createInitApi(
   context: StoreContext,
-  ports: import("./ports").PortsStore,
   tasks: Pick<import("./tasks").TasksApi, "handleAgentFinished">,
 ): InitApi {
   function isVisibleItemInSelectedRepo(item: PipelineItem | null | undefined): item is PipelineItem {
@@ -148,7 +148,6 @@ export function createInitApi(
 
   async function init(db: DbHandle) {
     context.state.db.value = db;
-    const { closePipelineItem } = await import("@kanna/db");
 
     await requireService(context.services.loadInitialData, "loadInitialData")();
 
@@ -178,7 +177,7 @@ export function createInitApi(
         const exists = await invoke<boolean>("file_exists", { path: worktreePath });
         if (!exists) {
           console.warn(`[store] closing orphaned task ${item.id}: worktree missing at ${worktreePath}`);
-          await ports.closeTaskAndReleasePorts(item.id, (id) => closePipelineItem(context.requireDb(), id));
+          await closeDesktopTask(item.id);
           item.closed_at = new Date().toISOString();
           closedOrphan = true;
         }
@@ -344,8 +343,7 @@ export function createInitApi(
             "selectReplacementAfterItemRemoval",
           )(item);
         }
-        await ports.closeTaskAndReleasePorts(item.id, (id) => closePipelineItem(context.requireDb(), id));
-        await tasks.checkUnblocked(item.id);
+        await closeDesktopTask(item.id);
         await requireService(context.services.reloadSnapshot, "reloadSnapshot")();
         return;
       }

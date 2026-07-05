@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   blockDesktopTask,
   closeDesktopTask,
+  createDesktopTask,
   markDesktopTaskRead,
   reopenDesktopTask,
   unblockDesktopTask,
@@ -74,6 +75,52 @@ describe("desktopServerClient", () => {
     expect(fetch).toHaveBeenCalledWith(
       "http://127.0.0.1:48321/v1/tasks/task-1/actions/unblock",
       { method: "POST" },
+    );
+  });
+
+  it("posts task creation to the local kanna-server", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        taskId: "task-1",
+        repoId: "repo-1",
+        title: "Ship it",
+        stage: "in progress",
+        agentType: "pty",
+        worktreePath: "/tmp/repo/.kanna-worktrees/task-1",
+      }),
+      text: async () => "",
+    } as Response);
+
+    await expect(createDesktopTask({
+      repoId: "repo-1",
+      prompt: "Ship it",
+      baseRef: "origin/main",
+      agentProvider: "claude",
+      agentType: "pty",
+      disallowedTools: ["WebFetch"],
+      maxTurns: 7,
+      maxBudgetUsd: 1.5,
+      setupCmds: ["pnpm install"],
+    })).resolves.toMatchObject({ taskId: "task-1" });
+
+    expect(fetch).toHaveBeenCalledWith(
+      "http://127.0.0.1:48321/v1/tasks",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          repoId: "repo-1",
+          prompt: "Ship it",
+          baseRef: "origin/main",
+          agentProvider: "claude",
+          agentType: "pty",
+          disallowedTools: ["WebFetch"],
+          maxTurns: 7,
+          maxBudgetUsd: 1.5,
+          setupCmds: ["pnpm install"],
+        }),
+      },
     );
   });
 });
