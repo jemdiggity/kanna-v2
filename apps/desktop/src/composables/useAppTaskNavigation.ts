@@ -489,20 +489,20 @@ export function useAppTaskNavigation({
     // Factory commands
     cmds.push({
       id: "create-agent",
-      label: "Create Agent",
-      description: "Create a new agent definition",
+      label: t('commandPalette.createAgent'),
+      description: t('commandPalette.createAgentDesc'),
       execute: () => { handleCreateAgent().catch((e) => console.error("[App] create agent failed:", e)); },
     });
     cmds.push({
       id: "create-pipeline",
-      label: "Create Pipeline",
-      description: "Create a new pipeline definition",
+      label: t('commandPalette.createPipeline'),
+      description: t('commandPalette.createPipelineDesc'),
       execute: () => { handleCreatePipeline().catch((e) => console.error("[App] create pipeline failed:", e)); },
     });
     cmds.push({
       id: "create-config",
-      label: "Create Config",
-      description: "Create or update .kanna/config.json",
+      label: t('commandPalette.createConfig'),
+      description: t('commandPalette.createConfigDesc'),
       execute: () => { handleCreateConfig().catch((e) => console.error("[App] create config failed:", e)); },
     });
     // Always include "New Custom Task" option

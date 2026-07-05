@@ -250,7 +250,14 @@ vi.mock("@kanna/db", () => ({
 
 vi.mock("vue-i18n", () => ({
   useI18n: () => ({
-    t: (key: string) => key,
+    t: (key: string) => ({
+      "commandPalette.createAgent": "エージェントを作成",
+      "commandPalette.createAgentDesc": "新しいエージェント定義を作成",
+      "commandPalette.createPipeline": "パイプラインを作成",
+      "commandPalette.createPipelineDesc": "新しいパイプライン定義を作成",
+      "commandPalette.createConfig": "設定を作成",
+      "commandPalette.createConfigDesc": ".kanna/config.json を作成または更新",
+    }[key] ?? key),
   }),
 }));
 
@@ -2812,7 +2819,7 @@ describe("App", () => {
     expect(wrapper.get('[data-testid="command-palette"]').text()).toContain("taskTransfer.pairPeer");
   });
 
-  it("adds Create Config to command palette commands and launches a config-factory task", async () => {
+  it("localizes factory command palette commands and launches a config-factory task", async () => {
     store.currentItem = null;
 
     const CommandPaletteModalStub = defineComponent({
@@ -2850,8 +2857,10 @@ describe("App", () => {
     await flushPromises();
 
     const createConfigButton = wrapper.get('[data-command-id="create-config"]');
-    expect(createConfigButton.text()).toBe("Create Config");
-    expect(createConfigButton.attributes("data-command-description")).toBe("Create or update .kanna/config.json");
+    expect(wrapper.get('[data-command-id="create-agent"]').text()).toBe("エージェントを作成");
+    expect(wrapper.get('[data-command-id="create-pipeline"]').text()).toBe("パイプラインを作成");
+    expect(createConfigButton.text()).toBe("設定を作成");
+    expect(createConfigButton.attributes("data-command-description")).toBe(".kanna/config.json を作成または更新");
 
     await createConfigButton.trigger("click");
     await flushPromises();
