@@ -83,4 +83,32 @@ impl Db {
                 })?;
         Ok(count > 0)
     }
+
+    pub fn patch_repo(
+        &self,
+        id: &str,
+        remote_url: Option<Option<&str>>,
+        remote_url_hash: Option<Option<&str>>,
+        hidden: Option<bool>,
+    ) -> Result<(), rusqlite::Error> {
+        let rows_affected = self.conn.execute(
+            "UPDATE repo
+             SET remote_url = CASE WHEN ? THEN ? ELSE remote_url END,
+                 remote_url_hash = CASE WHEN ? THEN ? ELSE remote_url_hash END,
+                 hidden = COALESCE(?, hidden)
+             WHERE id = ?",
+            (
+                remote_url.is_some(),
+                remote_url.flatten(),
+                remote_url_hash.is_some(),
+                remote_url_hash.flatten(),
+                hidden.map(|value| if value { 1_i64 } else { 0_i64 }),
+                id,
+            ),
+        )?;
+        if rows_affected == 0 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        Ok(())
+    }
 }

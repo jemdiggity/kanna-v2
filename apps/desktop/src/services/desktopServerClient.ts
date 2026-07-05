@@ -143,3 +143,16 @@ export interface DesktopRepoAnalytics {
 export async function fetchDesktopRepoAnalytics(repoId: string): Promise<DesktopRepoAnalytics> {
   return await requestJson<DesktopRepoAnalytics>(`/v1/analytics/repos/${encodeURIComponent(repoId)}`);
 }
+
+export interface PatchDesktopRepoInput {
+  remoteUrl?: string | null;
+  remoteUrlHash?: string | null;
+  hidden?: boolean;
+}
+
+export async function patchDesktopRepo(repoId: string, input: PatchDesktopRepoInput): Promise<void> {
+  await requestJson<{ repoId: string }>(`/v1/repos/${encodeURIComponent(repoId)}`, {
+    method: "PATCH",
+    body: input,
+  });
+}
