@@ -2,7 +2,7 @@ import { computed, ref, type ComputedRef, type Ref } from "vue";
 import { type PipelineItem, type Repo } from "@kanna/db";
 import { readRepoConfig, requireService, type KannaSnapshot, type StoreContext } from "./state";
 import { debugLog } from "../utils/debugLog";
-import { normalizeAppThemePreference, normalizeCodeThemePreference } from "../theme/theme";
+import { applySnapshotSettingsToState } from "./snapshotSettings";
 
 interface OptimisticItemOverlay {
   key: string;
@@ -56,25 +56,8 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
     context.state.repos.value = repos.value;
     context.state.items.value = items.value;
     context.state.taskBlockers.value = mergedSnapshot.value.taskBlockers;
-  }
-
-  function applySnapshotSettings(settings: Record<string, string>): void {
-    if (settings.suspendAfterMinutes) {
-      context.state.suspendAfterMinutes.value = parseInt(settings.suspendAfterMinutes, 10) || 30;
-    }
-    if (settings.killAfterMinutes) {
-      context.state.killAfterMinutes.value = parseInt(settings.killAfterMinutes, 10) || 60;
-    }
-    if (settings.ideCommand) context.state.ideCommand.value = settings.ideCommand;
-    context.state.hideShortcutsOnStartup.value = settings.hideShortcutsOnStartup === "true";
-    context.state.devLingerTerminals.value = settings["dev.lingerTerminals"] === "true";
-    context.state.appTheme.value = normalizeAppThemePreference(settings.appTheme ?? null);
-    context.state.codeTheme.value = normalizeCodeThemePreference(settings.codeTheme ?? null);
-    const agentMessageAppearance = settings.agentMessageAppearance ?? settings.agentMessageStyle ?? null;
-    context.state.agentMessageAppearance.value =
-      agentMessageAppearance === "log" || agentMessageAppearance === "terminal"
-        ? agentMessageAppearance
-        : "chat";
+    context.state.worktreePaths.value = { ...mergedSnapshot.value.worktreePaths };
+    context.state.snapshotSettings.value = { ...mergedSnapshot.value.settings };
   }
 
   async function reloadSnapshot(): Promise<void> {
@@ -111,7 +94,7 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
       );
 
       baseSnapshot.value = snapshot;
-      applySnapshotSettings(snapshot.settings);
+      applySnapshotSettingsToState(context.state, snapshot.settings);
       syncSnapshot();
 
       for (const item of loadedItems) {

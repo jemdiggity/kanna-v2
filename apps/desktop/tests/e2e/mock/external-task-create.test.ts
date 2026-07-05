@@ -351,4 +351,49 @@ describe("external task creation", () => {
     );
     expect(sectionLabels.filter((label) => label === "pr")).toHaveLength(0);
   });
+
+  it("refreshes a server-side task rename through KSP StateChanged without daemon session events", async () => {
+    const taskId = "external-rename-task";
+    const originalPrompt = "Task visible before external rename";
+    const renamedTitle = "Renamed through local API";
+
+    await execDb(
+      client,
+      `INSERT INTO pipeline_item (
+         id, repo_id, prompt, pipeline, stage, branch,
+         agent_type, agent_provider, activity, display_name, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', '-30 seconds'), datetime('now', '-30 seconds'))`,
+      [
+        taskId,
+        repoId,
+        originalPrompt,
+        "external-create-e2e",
+        "in progress",
+        null,
+        "agent",
+        "codex",
+        "idle",
+        null,
+      ],
+    );
+    await hydrateStoreItem(client, taskId);
+    await client.waitForText(".sidebar", originalPrompt);
+
+    const baseUrl = await desktopServerBaseUrl(client);
+    const response = await fetch(`${baseUrl}/v1/tasks/${taskId}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ displayName: renamedTitle }),
+    });
+    if (!response.ok) {
+      throw new Error(`rename task failed: ${response.status} ${await response.text()}`);
+    }
+
+    await client.waitForText(".sidebar", renamedTitle);
+    const sidebarText = await client.executeSync<string>(
+      `return document.querySelector(".sidebar")?.textContent || "";`,
+    );
+    expect(sidebarText).toContain(renamedTitle);
+    expect(sidebarText).not.toContain(originalPrompt);
+  });
 });
