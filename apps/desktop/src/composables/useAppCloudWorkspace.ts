@@ -1,6 +1,6 @@
 import { computed, ref, watch, type ComputedRef } from "vue";
 import { computedAsync } from "@vueuse/core";
-import type { DbHandle, PipelineItem } from "@kanna/db";
+import type { DbHandle, PipelineItem } from "../types/kanna";
 
 import { getConfiguredDesktopAuthSession } from "../services/desktopAuthSdk";
 import { runDesktopAutoSignIn } from "../services/desktopAutoSignIn";
@@ -16,6 +16,7 @@ import { deleteRemoteTaskSnapshots, reconcileDesktopTaskSnapshots } from "../ser
 import { getCachedRepoRemoteMetadata } from "../services/repoRemoteUrl";
 import { createConfiguredDesktopRelayTerminalClient } from "../services/desktopRelayTerminal";
 import { createConfiguredDesktopLanTerminalClient } from "../services/desktopLanTerminal";
+import { fetchClosedTaskIdentities } from "../services/desktopServerClient";
 import { computeTaskSnapshotFingerprint } from "../utils/cloudTaskFingerprint";
 import { remoteTaskClosureAliases, remoteTaskIsLocallyClosed } from "../utils/remoteTaskIdentity";
 import { buildWorkspace } from "../workspace/buildWorkspace";
@@ -76,13 +77,9 @@ export function useAppCloudWorkspace({ db, store, toast }: UseAppCloudWorkspaceO
       .join("\n");
     void openTaskMarker;
 
-    const rows = await Promise.all(repos.map((repo) =>
-      db.select<ClosedLocalTaskIdentity>(
-        "SELECT id, repo_id FROM pipeline_item WHERE repo_id = ? AND closed_at IS NOT NULL",
-        [repo.id],
-      )
-    ));
-    return rows.flat();
+    void db;
+    const repoIds = new Set(repos.map((repo) => repo.id));
+    return (await fetchClosedTaskIdentities()).filter((task) => repoIds.has(task.repo_id));
   }, []);
 
   const localTaskIdentitiesForRemoteFiltering = computed<LocalTaskIdentity[]>(() => [

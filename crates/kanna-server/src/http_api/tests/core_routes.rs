@@ -373,6 +373,113 @@ async fn task_agent_session_route_updates_provider_session_id() {
 }
 
 #[tokio::test]
+async fn transfer_routes_list_claim_and_fail_pending_incoming_transfers() {
+    let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
+        db.insert_test_task_transfer(
+            "transfer-1",
+            "incoming",
+            "pending",
+            Some(r#"{"task":{},"repo":{}}"#),
+        )
+        .unwrap();
+    });
+
+    let list_response = app
+        .clone()
+        .oneshot(
+            Request::get("/v1/transfers/incoming/pending")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(list_response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(list_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let list_json: serde_json::Value = from_slice(&body).unwrap();
+    assert_eq!(list_json["transfers"].as_array().unwrap().len(), 1);
+    assert_eq!(list_json["transfers"][0]["id"], "transfer-1");
+
+    let claim_response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/transfers/transfer-1/actions/claim")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(claim_response.status(), StatusCode::OK);
+    let claim_body = axum::body::to_bytes(claim_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let claim_json: serde_json::Value = from_slice(&claim_body).unwrap();
+    assert_eq!(claim_json["updated"], true);
+
+    let fail_response = app
+        .oneshot(
+            Request::post("/v1/transfers/transfer-1/actions/fail")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::json!({ "reason": "failed import" }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(fail_response.status(), StatusCode::OK);
+    let fail_body = axum::body::to_bytes(fail_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let fail_json: serde_json::Value = from_slice(&fail_body).unwrap();
+    assert_eq!(fail_json["updated"], true);
+}
+
+#[tokio::test]
+async fn closed_task_identities_route_returns_closed_tasks() {
+    let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "task-open",
+            "repo-1",
+            "open",
+            Some("Open"),
+            "in progress",
+            "2026-04-17 08:00:00",
+        )
+        .unwrap();
+        db.insert_test_pipeline_item(
+            "task-closed",
+            "repo-1",
+            "closed",
+            Some("Closed"),
+            "in progress",
+            "2026-04-17 08:00:00",
+        )
+        .unwrap();
+        db.set_test_pipeline_item_closed_at("task-closed", "2026-04-18 08:00:00")
+            .unwrap();
+    });
+
+    let response = app
+        .oneshot(
+            Request::get("/v1/tasks/closed-identities")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = from_slice(&body).unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!({ "tasks": [{ "id": "task-closed", "repo_id": "repo-1" }] })
+    );
+}
+
+#[tokio::test]
 async fn add_repo_route_registers_existing_git_repo() {
     let unique = format!(
         "{}-{}",

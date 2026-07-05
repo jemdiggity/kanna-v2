@@ -17,6 +17,7 @@ mod stage_runs;
 mod test_support;
 #[cfg(test)]
 mod tests;
+mod transfers;
 mod worktrees;
 
 #[allow(unused_imports)]
@@ -25,6 +26,8 @@ pub use analytics::RepoAnalytics;
 pub use operator_events::NewOperatorEvent;
 #[allow(unused_imports)]
 pub use stage_runs::FinishedStageRun;
+#[allow(unused_imports)]
+pub use transfers::PendingIncomingTransfer;
 
 const SQLITE_BUSY_TIMEOUT_MS: u64 = 10_000;
 const SQLITE_WAL_AUTOCHECKPOINT_PAGES: i64 = 100;
@@ -126,6 +129,12 @@ pub struct SnapshotPipelineItem {
 pub struct SnapshotTaskBlocker {
     pub blocked_item_id: String,
     pub blocker_item_id: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ClosedTaskIdentity {
+    pub id: String,
+    pub repo_id: String,
 }
 
 #[derive(Debug, Serialize)]

@@ -16,6 +16,7 @@ mod task_blockers;
 mod task_input;
 mod task_logs;
 mod tasks;
+mod transfers;
 
 #[cfg(test)]
 mod test_support;
