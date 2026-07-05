@@ -92,7 +92,7 @@ async fn prepared_revision_agent_task_spawn_sends_task_specific_kanna_context() 
     .unwrap();
     let task_id = prepared.task_id.clone();
     let expected_session_id = prepared.session_id.clone();
-    let fake_daemon = spawn_fake_daemon_fork_transition(config.daemon_dir.clone()).await;
+    let fake_daemon = spawn_fake_daemon_fork_transition(config.daemon_dir.clone(), 1).await;
     let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
 
     let created = spawn_prepared_stage_run_for_api(
@@ -260,7 +260,7 @@ async fn request_revision_forks_workspace_for_target_stage_run_with_feedback() {
     assert_ne!(fork_worktree, worktree.to_string_lossy());
     assert_eq!(prepared.cwd, fork_worktree);
 
-    let fake_daemon = spawn_fake_daemon_fork_transition(config.daemon_dir.clone()).await;
+    let fake_daemon = spawn_fake_daemon_fork_transition(config.daemon_dir.clone(), 1).await;
     let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
     let response = spawn_prepared_stage_run_for_api(
         &config.db_path,
