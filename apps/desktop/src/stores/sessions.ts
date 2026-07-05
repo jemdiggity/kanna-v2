@@ -1,5 +1,5 @@
 import type { AgentProvider, PipelineItem } from "@kanna/db";
-import { getRepo, updateAgentSessionId, updatePipelineItemActivity } from "@kanna/db";
+import { getRepo, updatePipelineItemActivity } from "@kanna/db";
 import { buildKannaRuntimeSystemPrompt, buildKannaRuntimeUserPrompt } from "../../../../packages/core/src/pipeline/prompt-builder";
 import { invoke } from "../invoke";
 import { isTauri } from "../tauri-mock";
@@ -21,6 +21,7 @@ import { resolveTaskItemForDaemonSession } from "./taskSessionIdentity";
 import { isReadableDirectory, resolveShellSpawnCwd } from "../utils/shellCwd";
 import { readRepoConfig, requireService, type AgentSpawnRecoveryOptions, type PreparedPtySession, type PtySpawnOptions, type StoreContext, type TaskSessionRecoveryOptions } from "./state";
 import { isTaskSelectedInAnyWindow } from "./windowSelection";
+import { putDesktopTaskAgentSession } from "../services/desktopServerClient";
 
 interface DaemonSessionInfo {
   session_id?: string;
@@ -190,7 +191,7 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
     if (!resumeSessionId) return;
     const item = resolveTaskItemForDaemonSession(context.state.items.value, sessionId);
     if (!item || item.agent_provider !== "codex") return;
-    await updateAgentSessionId(context.requireDb(), item.id, resumeSessionId);
+    await putDesktopTaskAgentSession(item.id, resumeSessionId);
   }
 
   async function spawnShellSession(
@@ -441,7 +442,7 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
       worktreePath,
       readTextFile: async (path) => invoke<string>("read_text_file", { path }),
       persistAgentSessionId: async (agentSessionId) => {
-        await updateAgentSessionId(context.requireDb(), sessionId, agentSessionId);
+        await putDesktopTaskAgentSession(sessionId, agentSessionId);
       },
       resolveBinaryPath: async (name) => invoke<string>("which_binary", { name }),
     });
