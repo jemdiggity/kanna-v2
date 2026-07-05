@@ -119,6 +119,28 @@ fn read_agent_definition_extension_applies_to_builtin_fallback() {
 }
 
 #[test]
+fn builtin_merge_agent_accepts_natural_language_open_pr_requests() {
+    let repo_root = std::env::temp_dir().join(format!(
+        "kanna-agent-def-builtin-merge-natural-language-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&repo_root);
+    std::fs::create_dir_all(&repo_root).unwrap();
+
+    let definition =
+        super::super::definitions::read_agent_definition(&repo_root.to_string_lossy(), "merge")
+            .unwrap();
+
+    assert!(definition
+        .prompt
+        .contains("Natural-language merge requests"));
+    assert!(definition.prompt.contains("merge all open"));
+    assert!(definition.prompt.contains("gh pr list"));
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
 fn build_stage_prompt_replaces_base_ref() {
     let prompt = build_stage_prompt(
         "Review changes since $BASE_REF.",
