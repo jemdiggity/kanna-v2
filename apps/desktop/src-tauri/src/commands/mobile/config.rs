@@ -6,7 +6,7 @@ use super::process::find_sidecar;
 use super::{
     current_server_version, default_desktop_name, desktop_credential, escape_toml_string,
     file_sha256_hex, generate_device_token, local_server_port_for_cloud_env, resolved_db_path,
-    server_base_url, MobileServerState,
+    server_base_url, MobileServerState, LAN_SERVER_PORT_OFFSET,
 };
 use kanna_runtime_defaults::DesktopCloudEnvironment;
 use std::fs::{File, OpenOptions};
@@ -168,8 +168,11 @@ pub(super) fn build_server_config(state: &MobileServerState) -> Result<String, S
         .map(|line| format!("{line}\n"))
         .unwrap_or_default();
 
+    let local_port = local_server_port_for_cloud_env(state.cloud_env);
+    let lan_port = local_port.saturating_add(LAN_SERVER_PORT_OFFSET);
+
     Ok(format!(
-        "relay_url = \"{}\"\ndevice_token = \"{}\"\ndaemon_dir = \"{}\"\ndb_path = \"{}\"\n{}{}desktop_id = \"{}\"\ndesktop_secret = \"{}\"\ndesktop_name = \"{}\"\nserver_version = \"{}\"\n{}lan_host = \"0.0.0.0\"\nlan_port = {}\npairing_store_path = \"{}\"\n",
+        "relay_url = \"{}\"\ndevice_token = \"{}\"\ndaemon_dir = \"{}\"\ndb_path = \"{}\"\n{}{}desktop_id = \"{}\"\ndesktop_secret = \"{}\"\ndesktop_name = \"{}\"\nserver_version = \"{}\"\n{}local_host = \"127.0.0.1\"\nlocal_port = {}\nlan_host = \"0.0.0.0\"\nlan_port = {}\npairing_store_path = \"{}\"\n",
         escape_toml_string(&relay_url),
         escape_toml_string(&device_token),
         escape_toml_string(&daemon_dir),
@@ -181,7 +184,8 @@ pub(super) fn build_server_config(state: &MobileServerState) -> Result<String, S
         escape_toml_string(&state.desktop_name),
         escape_toml_string(current_server_version()),
         firebase_config,
-        local_server_port_for_cloud_env(state.cloud_env),
+        local_port,
+        lan_port,
         escape_toml_string(&pairing_store_path.to_string_lossy()),
     ))
 }
@@ -222,6 +226,8 @@ pub(super) fn server_config_matches_runtime(
         )
     });
 
+    let local_port = local_server_port_for_cloud_env(cloud_env);
+    let lan_port = local_port.saturating_add(LAN_SERVER_PORT_OFFSET);
     let mut required_lines = vec![
         format!(
             "relay_url = \"{}\"",
@@ -245,7 +251,8 @@ pub(super) fn server_config_matches_runtime(
             "firebase_project_id = \"{}\"",
             escape_toml_string(&expected_firebase_project_id)
         ),
-        format!("lan_port = {}", local_server_port_for_cloud_env(cloud_env)),
+        format!("local_port = {}", local_port),
+        format!("lan_port = {}", lan_port),
     ];
     if let Some(device_token) = expected_device_token {
         required_lines.push(format!(

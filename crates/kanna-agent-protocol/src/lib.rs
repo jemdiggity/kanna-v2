@@ -11,6 +11,7 @@
 //! `typescript`) into `packages/agent-protocol`.
 
 mod adapter;
+pub mod api;
 pub mod claude;
 pub mod codex;
 mod events;
@@ -19,6 +20,11 @@ pub mod mcp;
 pub mod opencode;
 
 pub use adapter::{Capabilities, InterruptAction, ProviderAdapter, SpawnCtx, SpawnSpec, TurnModel};
+pub use api::{
+    AddRepoRequest, BlockTaskRequest, CompleteStageRequest, CreateTaskRequest, CreateTaskResponse,
+    DesktopDescriptor, MobileServerStatus, RepoDetail, RepoSummary, RequestRevisionRequest,
+    SetTaskParentRequest, TaskActionResponse, TaskDetail, TaskSummary,
+};
 pub use claude::ClaudeAdapter;
 pub use codex::CodexAdapter;
 pub use events::{

@@ -150,6 +150,9 @@ if (isTauri) {
 }
 
 try {
+  if (isTauri) {
+    await (await import("@tauri-apps/api/core")).invoke("wait_for_mobile_server_ready");
+  }
   const { db, dbName } = await loadDatabase();
   await runMigrations(db);
   const windowBootstrap = await resolveWindowBootstrap(

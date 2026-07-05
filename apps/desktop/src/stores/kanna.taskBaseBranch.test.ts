@@ -10,6 +10,27 @@ const toastErrorMock = vi.hoisted(() => vi.fn());
 const toastWarningMock = vi.hoisted(() => vi.fn());
 const publishDesktopTaskSnapshotMock = vi.hoisted(() => vi.fn(async () => {}));
 const fetchMock = vi.hoisted(() => vi.fn());
+const streamClientMock = vi.hoisted(() => {
+  class StreamRequestError extends Error {
+    readonly status: number;
+    readonly body: unknown;
+
+    constructor(status: number, body: unknown) {
+      super(typeof body === "string" ? body : `request failed with status ${status}`);
+      this.status = status;
+      this.body = body;
+    }
+  }
+  const client = {
+    advanceStage: vi.fn(async (taskId: string) => ({ taskId })),
+    rerunStage: vi.fn(async (taskId: string) => ({ taskId })),
+  };
+  return {
+    client,
+    getSharedStreamClient: vi.fn(async () => client),
+    StreamRequestError,
+  };
+});
 
 const mockState = vi.hoisted(() => {
   const repoPath = "/tmp/repo";
@@ -301,6 +322,11 @@ const mockState = vi.hoisted(() => {
       json: async () => ({ taskId: "item-created" }),
       text: async () => "",
     });
+    streamClientMock.client.advanceStage.mockReset();
+    streamClientMock.client.advanceStage.mockImplementation(async (taskId: string) => ({ taskId }));
+    streamClientMock.client.rerunStage.mockReset();
+    streamClientMock.client.rerunStage.mockImplementation(async (taskId: string) => ({ taskId }));
+    streamClientMock.getSharedStreamClient.mockClear();
   }
 
   return {
@@ -409,6 +435,14 @@ const mockState = vi.hoisted(() => {
 
 vi.mock("../invoke", () => ({
   invoke: mockState.invokeMock,
+}));
+
+vi.mock("../composables/desktopStreamClient", () => ({
+  getSharedStreamClient: streamClientMock.getSharedStreamClient,
+}));
+
+vi.mock("@kanna/stream-client", () => ({
+  StreamRequestError: streamClientMock.StreamRequestError,
 }));
 
 vi.stubGlobal("fetch", fetchMock);
@@ -1434,10 +1468,7 @@ describe("kanna store task base branch integration", () => {
 
     await store.rerunStage("item-existing");
 
-    expect(fetchMock).toHaveBeenCalledWith(
-      "http://127.0.0.1:48120/v1/tasks/item-existing/actions/rerun-stage",
-      { method: "POST" },
-    );
+    expect(streamClientMock.client.rerunStage).toHaveBeenCalledWith("item-existing");
     expect(mockState.invokeMock).not.toHaveBeenCalledWith("run_script", expect.anything());
   });
 
@@ -1629,10 +1660,7 @@ describe("kanna store task base branch integration", () => {
 
     await store.advanceStage("item-existing");
 
-    expect(fetchMock).toHaveBeenCalledWith(
-      "http://127.0.0.1:48120/v1/tasks/item-existing/actions/advance-stage",
-      { method: "POST" },
-    );
+    expect(streamClientMock.client.advanceStage).toHaveBeenCalledWith("item-existing");
     expect(mockState.invokeMock).not.toHaveBeenCalledWith("git_worktree_add", expect.anything());
   });
 
@@ -1676,9 +1704,7 @@ describe("kanna store task base branch integration", () => {
         stage: "in progress",
       }),
     ];
-    fetchMock.mockResolvedValueOnce({
-      ok: true,
-      json: async () => {
+    streamClientMock.client.advanceStage.mockImplementationOnce(async () => {
         mockState.pipelineItems = [
           mockState.makeItem({
             id: "item-source",
@@ -1687,8 +1713,6 @@ describe("kanna store task base branch integration", () => {
           }),
         ];
         return { taskId: "item-source" };
-      },
-      text: async () => "",
     });
 
     const store = await createStore();
@@ -1718,9 +1742,7 @@ describe("kanna store task base branch integration", () => {
         updated_at: "2026-04-14T00:01:00.000Z",
       }),
     ];
-    fetchMock.mockResolvedValueOnce({
-      ok: true,
-      json: async () => {
+    streamClientMock.client.advanceStage.mockImplementationOnce(async () => {
         mockState.pipelineItems = [
           mockState.makeItem({
             id: "item-source",
@@ -1737,8 +1759,6 @@ describe("kanna store task base branch integration", () => {
           }),
         ];
         return { taskId: "item-source", followTask: false };
-      },
-      text: async () => "",
     });
 
     const store = await createStore();
@@ -1758,12 +1778,9 @@ describe("kanna store task base branch integration", () => {
         stage: "in progress",
       }),
     ];
-    fetchMock.mockResolvedValueOnce({
-      ok: false,
-      status: 409,
-      json: async () => ({}),
-      text: async () => "task is blocked: item-blocked",
-    });
+    streamClientMock.client.advanceStage.mockRejectedValueOnce(
+      new streamClientMock.StreamRequestError(409, "task is blocked: item-blocked"),
+    );
 
     const store = await createStore();
 
@@ -1787,10 +1804,7 @@ describe("kanna store task base branch integration", () => {
 
     await store.rerunStage("item-source");
 
-    expect(fetchMock).toHaveBeenCalledWith(
-      "http://127.0.0.1:48120/v1/tasks/item-source/actions/rerun-stage",
-      { method: "POST" },
-    );
+    expect(streamClientMock.client.rerunStage).toHaveBeenCalledWith("item-source");
     expect(buildStagePrompt).not.toHaveBeenCalled();
   });
 

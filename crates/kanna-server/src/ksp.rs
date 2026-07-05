@@ -766,6 +766,8 @@ mod tests {
             desktop_secret: Some("desktop-secret".to_string()),
             desktop_name: desktop_name.to_string(),
             server_version: Some("test-version".to_string()),
+            local_host: "127.0.0.1".to_string(),
+            local_port: 0,
             lan_host: "127.0.0.1".to_string(),
             lan_port: 48120,
             pairing_store_path: format!("/tmp/kanna-pairings-{desktop_id}.json"),

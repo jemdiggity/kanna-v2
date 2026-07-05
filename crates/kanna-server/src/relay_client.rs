@@ -167,6 +167,8 @@ mod tests {
             desktop_secret: None,
             desktop_name: "Studio Mac".to_string(),
             server_version: Some("test-version".to_string()),
+            local_host: "127.0.0.1".to_string(),
+            local_port: 0,
             lan_host: "127.0.0.1".to_string(),
             lan_port: 48120,
             pairing_store_path: "/tmp/kanna-pairings.json".to_string(),

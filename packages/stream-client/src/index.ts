@@ -9,10 +9,14 @@
 import type {
   AgentEvent,
   ClientFrame,
+  CreateTaskRequest,
+  CreateTaskResponse,
   FrameAgentEvent,
   PermissionDecision,
+  RequestRevisionRequest,
   ServerFrame,
   StreamKind,
+  TaskActionResponse,
 } from "@kanna/agent-protocol";
 
 /** Minimal WebSocket surface so tests and non-browser runtimes can inject
@@ -209,6 +213,40 @@ export class StreamClient {
       ...(body === undefined ? {} : { body }),
     });
     return promise;
+  }
+
+  async createTask(request: CreateTaskRequest): Promise<CreateTaskResponse> {
+    return this.expectJson<CreateTaskResponse>(await this.request("POST", "/v1/tasks", request));
+  }
+
+  async advanceStage(taskId: string): Promise<TaskActionResponse> {
+    return this.postTaskAction(taskId, "advance-stage");
+  }
+
+  async rerunStage(taskId: string): Promise<TaskActionResponse> {
+    return this.postTaskAction(taskId, "rerun-stage");
+  }
+
+  async requestRevision(taskId: string, request: RequestRevisionRequest): Promise<TaskActionResponse> {
+    return this.expectJson<TaskActionResponse>(
+      await this.request("POST", taskActionPath(taskId, "request-revision"), request),
+    );
+  }
+
+  private async postTaskAction(
+    taskId: string,
+    action: "advance-stage" | "rerun-stage",
+  ): Promise<TaskActionResponse> {
+    return this.expectJson<TaskActionResponse>(
+      await this.request("POST", taskActionPath(taskId, action)),
+    );
+  }
+
+  private expectJson<T>(response: { status: number; body: unknown }): T {
+    if (response.status < 200 || response.status >= 300) {
+      throw new StreamRequestError(response.status, response.body);
+    }
+    return response.body as T;
   }
 
   // ---- internals ----
@@ -454,6 +492,28 @@ function parseAttachmentKey(key: string): { taskId: string; kind: StreamKind } {
     kind: key.slice(0, separator) as StreamKind,
     taskId: key.slice(separator + 1),
   };
+}
+
+function taskActionPath(taskId: string, action: string): string {
+  return `/v1/tasks/${encodeURIComponent(taskId)}/actions/${action}`;
+}
+
+export class StreamRequestError extends Error {
+  readonly status: number;
+  readonly body: unknown;
+
+  constructor(status: number, body: unknown) {
+    super(responseErrorMessage(status, body));
+    this.name = "StreamRequestError";
+    this.status = status;
+    this.body = body;
+  }
+}
+
+function responseErrorMessage(status: number, body: unknown): string {
+  if (typeof body === "string" && body.trim().length > 0) return body;
+  if (body && typeof body === "object") return JSON.stringify(body);
+  return `request failed with status ${status}`;
 }
 
 export interface RelayTunnelOptions {

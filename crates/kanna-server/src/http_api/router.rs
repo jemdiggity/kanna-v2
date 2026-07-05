@@ -173,12 +173,109 @@ async fn response_to_http_invoke(response: axum::response::Response) -> HttpInvo
 }
 
 pub async fn serve(state: Arc<AppState>) -> Result<(), String> {
-    let bind_addr = format!("{}:{}", state.config.lan_host, state.config.lan_port);
-    let listener = tokio::net::TcpListener::bind(&bind_addr)
+    let local_addr = format!("{}:{}", state.config.local_host, state.config.local_port);
+    let lan_addr = format!("{}:{}", state.config.lan_host, state.config.lan_port);
+
+    let local_listener = tokio::net::TcpListener::bind(&local_addr)
         .await
-        .map_err(|e| format!("failed to bind LAN API on {}: {}", bind_addr, e))?;
-    log::info!("LAN API listening on {}", bind_addr);
-    axum::serve(listener, router(state))
+        .map_err(|e| format!("failed to bind local API on {}: {}", local_addr, e))?;
+    log::info!("local API listening on {}", local_addr);
+
+    let serve_local = axum::serve(local_listener, router(Arc::clone(&state)));
+    if local_addr == lan_addr {
+        return serve_local
+            .await
+            .map_err(|e| format!("local API server failed: {}", e));
+    }
+
+    let lan_listener = tokio::net::TcpListener::bind(&lan_addr)
         .await
-        .map_err(|e| format!("LAN API server failed: {}", e))
+        .map_err(|e| format!("failed to bind LAN API on {}: {}", lan_addr, e))?;
+    log::info!("LAN API listening on {}", lan_addr);
+    let serve_lan = axum::serve(lan_listener, router(state));
+
+    tokio::select! {
+        result = serve_local => result.map_err(|e| format!("local API server failed: {}", e)),
+        result = serve_lan => result.map_err(|e| format!("LAN API server failed: {}", e)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use std::net::TcpListener;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn free_port() -> u16 {
+        TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    }
+
+    fn temp_path(label: &str) -> String {
+        std::env::temp_dir()
+            .join(format!(
+                "kanna-server-router-{label}-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ))
+            .to_string_lossy()
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn serve_binds_distinct_local_and_lan_listeners() {
+        let local_port = free_port();
+        let lan_port = free_port();
+        let state = Arc::new(AppState::new(Config {
+            relay_url: "".to_string(),
+            device_token: "token".to_string(),
+            firebase_project_id: "kanna-local".to_string(),
+            firebase_auth_emulator_url: None,
+            firebase_firestore_emulator_host: None,
+            daemon_dir: temp_path("daemon"),
+            db_path: temp_path("db.sqlite"),
+            kanna_cli_path: None,
+            desktop_id: "desktop-router-test".to_string(),
+            desktop_secret: Some("secret".to_string()),
+            desktop_name: "Router Test".to_string(),
+            server_version: Some("test-version".to_string()),
+            local_host: "127.0.0.1".to_string(),
+            local_port,
+            lan_host: "127.0.0.1".to_string(),
+            lan_port,
+            pairing_store_path: temp_path("pairings.json"),
+        }));
+        let server = tokio::spawn(serve(state));
+
+        let local_url = format!("http://127.0.0.1:{local_port}/v1/status");
+        let lan_url = format!("http://127.0.0.1:{lan_port}/v1/status");
+        wait_for_ok(&local_url).await;
+        wait_for_ok(&lan_url).await;
+
+        server.abort();
+    }
+
+    async fn wait_for_ok(url: &str) {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if reqwest::get(url)
+                .await
+                .is_ok_and(|response| response.status().is_success())
+            {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for {url}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
 }
