@@ -1,4 +1,4 @@
-import { setSetting, type DbHandle, type PipelineItem, type TaskBlocker } from "@kanna/db";
+import { setSetting, type DbHandle, type PipelineItem } from "@kanna/db";
 import { invoke } from "../invoke";
 import { isTauri } from "../tauri-mock";
 import { listen } from "../listen";
@@ -35,7 +35,7 @@ interface DaemonSessionListEntry {
 export function createInitApi(
   context: StoreContext,
   ports: import("./ports").PortsStore,
-  tasks: Pick<import("./tasks").TasksApi, "checkUnblocked" | "handleAgentFinished" | "restoreUnblockedTask">,
+  tasks: Pick<import("./tasks").TasksApi, "handleAgentFinished">,
 ): InitApi {
   function isVisibleItemInSelectedRepo(item: PipelineItem | null | undefined): item is PipelineItem {
     return Boolean(
@@ -105,34 +105,6 @@ export function createInitApi(
     return !sessionId.startsWith("shell-") && !isTeardownSessionId(sessionId);
   }
 
-  function resolveUnblockedItemsFromSnapshot(
-    items: readonly PipelineItem[],
-    blockers: readonly TaskBlocker[],
-  ): PipelineItem[] {
-    const openItemIds = new Set(
-      items
-        .filter((item) => item.closed_at === null)
-        .map((item) => item.id),
-    );
-    const blockerIdsByBlockedItemId = new Map<string, string[]>();
-
-    for (const blocker of blockers) {
-      const existing = blockerIdsByBlockedItemId.get(blocker.blocked_item_id);
-      if (existing) {
-        existing.push(blocker.blocker_item_id);
-      } else {
-        blockerIdsByBlockedItemId.set(blocker.blocked_item_id, [blocker.blocker_item_id]);
-      }
-    }
-
-    return items.filter((item) => {
-      if (item.closed_at !== null) return false;
-      const blockerIds = blockerIdsByBlockedItemId.get(item.id);
-      if (!blockerIds?.length) return false;
-      return blockerIds.every((blockerId) => !openItemIds.has(blockerId));
-    });
-  }
-
   async function loadPreferences() {
     const snapshot = await requireService(context.services.fetchSnapshot, "fetchSnapshot")();
     context.state.snapshotSettings.value = { ...snapshot.settings };
@@ -182,14 +154,12 @@ export function createInitApi(
 
     let eagerRepos = [...context.state.repos.value];
     let eagerItems = [...context.state.items.value];
-    let snapshotBlockers = [...context.state.taskBlockers.value];
     let worktreePathByItemId = new Map(Object.entries(context.state.worktreePaths.value));
 
     async function refreshStartupSnapshot(): Promise<void> {
       await context.services.reloadSnapshot?.();
       eagerRepos = [...context.state.repos.value];
       eagerItems = [...context.state.items.value];
-      snapshotBlockers = [...context.state.taskBlockers.value];
       worktreePathByItemId = new Map(Object.entries(context.state.worktreePaths.value));
     }
 
@@ -216,12 +186,6 @@ export function createInitApi(
       if (closedOrphan) {
         await refreshStartupSnapshot();
       }
-    }
-
-    const unblockedItems = resolveUnblockedItemsFromSnapshot(eagerItems, snapshotBlockers);
-    for (const item of unblockedItems) {
-      console.debug(`[store] restoring previously blocked task: ${item.id}`);
-      await tasks.restoreUnblockedTask(item);
     }
 
     const bootstrap = context.state.initialWindowBootstrap.value;

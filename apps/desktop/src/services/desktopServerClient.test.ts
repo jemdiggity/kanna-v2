@@ -1,5 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { closeDesktopTask, markDesktopTaskRead, reopenDesktopTask } from "./desktopServerClient";
+import {
+  blockDesktopTask,
+  closeDesktopTask,
+  markDesktopTaskRead,
+  reopenDesktopTask,
+  unblockDesktopTask,
+} from "./desktopServerClient";
 
 const invokeMock = vi.hoisted(() => vi.fn());
 
@@ -45,6 +51,28 @@ describe("desktopServerClient", () => {
 
     expect(fetch).toHaveBeenCalledWith(
       "http://127.0.0.1:48321/v1/tasks/task-1/actions/mark-read",
+      { method: "POST" },
+    );
+  });
+
+  it("posts task block actions to the local kanna-server", async () => {
+    await blockDesktopTask("task-1", ["blocker-1"]);
+
+    expect(fetch).toHaveBeenCalledWith(
+      "http://127.0.0.1:48321/v1/tasks/task-1/actions/block",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ blockerTaskIds: ["blocker-1"] }),
+      },
+    );
+  });
+
+  it("posts task unblock actions to the local kanna-server", async () => {
+    await unblockDesktopTask("task-1");
+
+    expect(fetch).toHaveBeenCalledWith(
+      "http://127.0.0.1:48321/v1/tasks/task-1/actions/unblock",
       { method: "POST" },
     );
   });

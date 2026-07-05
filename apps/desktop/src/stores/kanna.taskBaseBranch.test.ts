@@ -2002,10 +2002,14 @@ describe("kanna store task base branch integration", () => {
     const active = mockState.pipelineItems.find((item) => item.id === "item-active");
     expect(active?.branch).toBe("task-item-active");
     expect(active?.agent_session_id).toBe("claude-item-active");
-    expect(mockState.taskBlockers).toContainEqual({
-      blocked_item_id: "item-active",
-      blocker_item_id: "item-blocker",
-    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:48120/v1/tasks/item-active/actions/block",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ blockerTaskIds: ["item-blocker"] }),
+      },
+    );
     expect(store.selectedItemId).toBe("item-active");
     expect(store.currentItem?.id).toBe("item-active");
     expect(mockState.invokeMock).not.toHaveBeenCalledWith("kill_session", expect.anything());
@@ -2015,7 +2019,7 @@ describe("kanna store task base branch integration", () => {
     );
   });
 
-  it("unblocks a live blocked task in place and sends blocker context to the existing session", async () => {
+  it("unblocks a live blocked task through the server action", async () => {
     const blocker = mockState.makeItem({
       id: "item-blocker",
       branch: "task-item-blocker",
@@ -2042,20 +2046,12 @@ describe("kanna store task base branch integration", () => {
     await store.editBlockedTask("item-blocked", []);
     await flushStore();
 
-    const blocked = mockState.pipelineItems.find((item) => item.id === "item-blocked");
-    expect(blocked?.branch).toBe("task-item-blocked");
-    expect(mockState.removeTaskBlockerMock).toHaveBeenCalledWith(
-      expect.anything(),
-      "item-blocked",
-      "item-blocker",
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:48120/v1/tasks/item-blocked/actions/unblock",
+      { method: "POST" },
     );
-    expect(mockState.invokeMock).toHaveBeenCalledWith(
-      "send_input",
-      expect.objectContaining({
-        sessionId: "item-blocked",
-        data: expect.arrayContaining(Array.from(new TextEncoder().encode("Upstream dependency"))),
-      }),
-    );
+    expect(mockState.removeTaskBlockerMock).not.toHaveBeenCalled();
+    expect(mockState.invokeMock).not.toHaveBeenCalledWith("send_input", expect.anything());
     expect(mockState.invokeMock).not.toHaveBeenCalledWith(
       "spawn_session",
       expect.objectContaining({ sessionId: "item-blocked" }),
@@ -2158,7 +2154,7 @@ describe("kanna store task base branch integration", () => {
     );
   });
 
-  it("still respawns legacy blocked tasks with no live session context", async () => {
+  it("leaves legacy blocked task startup to the server unblock action", async () => {
     const blocker = mockState.makeItem({
       id: "item-blocker",
       branch: "task-item-blocker",
@@ -2183,7 +2179,11 @@ describe("kanna store task base branch integration", () => {
     await store.editBlockedTask("item-blocked", []);
     await flushStore();
 
-    expect(mockState.invokeMock).toHaveBeenCalledWith(
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:48120/v1/tasks/item-blocked/actions/unblock",
+      { method: "POST" },
+    );
+    expect(mockState.invokeMock).not.toHaveBeenCalledWith(
       "spawn_session",
       expect.objectContaining({ sessionId: "item-blocked" }),
     );

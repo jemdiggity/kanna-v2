@@ -1045,6 +1045,56 @@ async fn block_task_route_marks_task_blocked_by_requested_tasks() {
 }
 
 #[tokio::test]
+async fn block_task_route_replaces_existing_blockers() {
+    let state = super::test_state_with_seed("desktop-1", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        for id in ["task-1", "blocker-old", "blocker-new"] {
+            db.insert_test_pipeline_item(
+                id,
+                "repo-1",
+                "task prompt",
+                Some(id),
+                "in progress",
+                "2026-04-17 07:00:00",
+            )
+            .unwrap();
+        }
+        db.insert_test_task_blocker("task-1", "blocker-old")
+            .unwrap();
+    });
+    let db_path = state.config.db_path.clone();
+    let app = super::router(state);
+
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks/task-1/actions/block")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "blockerTaskIds": ["blocker-new"]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let db = Db::open(&db_path).unwrap();
+    assert_eq!(
+        db.count_test_task_blockers("task-1", "blocker-old")
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        db.count_test_task_blockers("task-1", "blocker-new")
+            .unwrap(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn block_task_route_rejects_circular_dependencies() {
     let state = super::test_state_with_seed("desktop-1", "Studio Mac", |db| {
         db.insert_test_repo("repo-1", "Repo One").unwrap();
@@ -1077,6 +1127,48 @@ async fn block_task_route_rejects_circular_dependencies() {
                 .body(Body::from(
                     serde_json::json!({
                         "blockerTaskIds": ["blocker-1"]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn block_task_route_rejects_multi_hop_circular_dependencies() {
+    let state = super::test_state_with_seed("desktop-1", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        for (id, title) in [
+            ("task-a", "Task A"),
+            ("task-b", "Task B"),
+            ("task-c", "Task C"),
+        ] {
+            db.insert_test_pipeline_item(
+                id,
+                "repo-1",
+                "task prompt",
+                Some(title),
+                "in progress",
+                "2026-04-17 07:00:00",
+            )
+            .unwrap();
+        }
+        db.insert_test_task_blocker("task-b", "task-a").unwrap();
+        db.insert_test_task_blocker("task-c", "task-b").unwrap();
+    });
+    let app = super::router(state);
+
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks/task-a/actions/block")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "blockerTaskIds": ["task-c"]
                     })
                     .to_string(),
                 ))

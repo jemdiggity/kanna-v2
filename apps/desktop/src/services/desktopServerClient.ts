@@ -60,9 +60,15 @@ async function requestJson<T>(path: string, options: { retryMs?: number } = {}):
   }
 }
 
-async function post(path: string): Promise<void> {
+async function post(path: string, body?: unknown): Promise<void> {
   const baseUrl = await desktopServerBaseUrl();
-  const response = await fetch(`${baseUrl}${path}`, { method: "POST" });
+  const response = await fetch(`${baseUrl}${path}`, body === undefined
+    ? { method: "POST" }
+    : {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
   if (!response.ok) {
     const body = await response.text().catch(() => "");
     throw new Error(`POST ${path} failed: ${response.status}${body ? ` ${body}` : ""}`);
@@ -84,4 +90,12 @@ export async function reopenDesktopTask(taskId: string): Promise<void> {
 
 export async function markDesktopTaskRead(taskId: string): Promise<void> {
   await post(`/v1/tasks/${encodeURIComponent(taskId)}/actions/mark-read`);
+}
+
+export async function blockDesktopTask(taskId: string, blockerTaskIds: string[]): Promise<void> {
+  await post(`/v1/tasks/${encodeURIComponent(taskId)}/actions/block`, { blockerTaskIds });
+}
+
+export async function unblockDesktopTask(taskId: string): Promise<void> {
+  await post(`/v1/tasks/${encodeURIComponent(taskId)}/actions/unblock`);
 }
