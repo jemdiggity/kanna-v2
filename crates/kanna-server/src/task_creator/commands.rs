@@ -233,6 +233,13 @@ pub(super) fn build_task_shell_command(
 const KANNA_TASK_ENVIRONMENT_TEMPLATE: &str =
     include_str!("../../../../packages/core/src/pipeline/kanna-task-environment.md");
 
+// Completion guidance depends on the stage's transition policy: only `auto`
+// stages advance when the agent records a successful result; `manual` stages
+// wait for the user to review and advance. Mirrors COMPLETION_GUIDANCE in
+// prompt-builder.ts — keep the texts in sync.
+const COMPLETION_AUTO: &str = "This stage's transition is `auto`: when this stage's goal is achieved, record completion so Kanna can advance the pipeline: prefer MCP `kanna_complete_stage` with status `success` and a short summary; fallback: `kanna-cli stage-complete --task-id \"$KANNA_TASK_ID\" --status success --summary \"...\"`. If you are blocked or the goal cannot be met, record status `failure` with the reason instead of stopping silently.";
+const COMPLETION_MANUAL: &str = "This stage's transition is `manual`: recording a successful result does not advance the pipeline — the user reviews your work and advances the stage themselves. When this stage's goal is achieved, finish with a clear summary of what you did; record completion only if this stage's prompt asks for it. If you are blocked or the goal cannot be met, record status `failure` with the reason instead of stopping silently: prefer MCP `kanna_complete_stage`; fallback: `kanna-cli stage-complete --task-id \"$KANNA_TASK_ID\" --status failure --summary \"...\"`.";
+
 pub(super) fn build_kanna_preamble(
     provider: &AgentProvider,
     task_id: &str,
@@ -246,9 +253,15 @@ pub(super) fn build_kanna_preamble(
     let task_context = format!(
         "This session was launched by Kanna as task `{task_id}`, stage `{stage_name}` of pipeline `{pipeline_name}` (transition: `{transition}`)."
     );
+    let completion = if transition == "auto" {
+        COMPLETION_AUTO
+    } else {
+        COMPLETION_MANUAL
+    };
     let rendered = KANNA_TASK_ENVIRONMENT_TEMPLATE
         .trim_end()
-        .replace("{{TASK_CONTEXT}}", &task_context);
+        .replace("{{TASK_CONTEXT}}", &task_context)
+        .replace("{{COMPLETION}}", completion);
     match mcp_config_path {
         Some(_) => rendered.replace("{{MCP_STATUS}}", &kanna_mcp_launch_line(*provider)),
         None => rendered.replace("- {{MCP_STATUS}}\n", ""),

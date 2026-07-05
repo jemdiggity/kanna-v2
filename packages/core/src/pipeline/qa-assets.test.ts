@@ -12,11 +12,23 @@ function readRepoFile(path: string): string {
 describe("built-in agent completion protocol", () => {
   const agentNames = readdirSync(resolve(repoRoot, ".kanna/agents"));
 
+  // The implement agent runs on manual-transition `in progress` stages: the
+  // user reviews the work and advances the pipeline, so recording success is
+  // meaningless there and the agent must not be told to do it.
+  const manualStageAgents = new Set(["implement"]);
+
   it.each(agentNames)("%s records stage completion MCP-first with a CLI fallback", (name) => {
     const agent = readRepoFile(`.kanna/agents/${name}/AGENT.md`);
 
     expect(agent).toContain("kanna_complete_stage");
-    expect(agent).toContain('kanna-cli stage-complete --task-id "$KANNA_TASK_ID" --status success');
+    if (manualStageAgents.has(name)) {
+      expect(agent).toContain("do not record stage completion");
+      expect(agent).not.toContain("--status success");
+    } else {
+      expect(agent).toContain(
+        'kanna-cli stage-complete --task-id "$KANNA_TASK_ID" --status success'
+      );
+    }
     // Every agent needs an explicit non-success path: failure completion or a revision request.
     expect(
       agent.includes("--status failure") || agent.includes("kanna_request_revision")

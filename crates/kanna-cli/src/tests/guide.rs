@@ -30,6 +30,7 @@ fn guide_markdown_includes_live_context_and_all_catalog_tools() {
     });
 
     assert!(guide.contains("You are task `task-123`, stage `review` of pipeline `qa` (`auto`)"));
+    assert!(guide.contains("Auto stages finish by recording stage completion"));
     assert!(guide.contains(
             "Prefer `kanna-mcp` tools for Kanna task operations; fall back to the instance-local `kanna-cli` from the shell only when MCP tools are unavailable."
         ));
@@ -43,6 +44,42 @@ fn guide_markdown_includes_live_context_and_all_catalog_tools() {
             tool.name
         );
     }
+}
+
+#[test]
+fn guide_markdown_tells_manual_stages_the_user_advances_the_pipeline() {
+    let task = TaskDetail {
+        id: "task-456".to_string(),
+        repo_id: "repo-1".to_string(),
+        title: "Implement feature".to_string(),
+        stage: Some("in progress".to_string()),
+        pipeline_name: Some("default".to_string()),
+        stage_transition: Some("manual".to_string()),
+        activity: Some("working".to_string()),
+        snippet: None,
+        agent_type: Some("pty".to_string()),
+        agent_provider: Some("claude".to_string()),
+        branch: Some("task-task-456".to_string()),
+        pr_url: None,
+        closed_at: None,
+        worktree_path: Some("/tmp/worktree".to_string()),
+        commits_ahead: 0,
+        commits_behind: 0,
+        dirty: false,
+    };
+
+    let guide = render_guide_markdown(&GuideContext {
+        task_id: "task-456".to_string(),
+        task: Some(task),
+        live_state_error: None,
+        catalog: kanna_tool_catalog::bundled_catalog(),
+    });
+
+    assert!(guide
+        .contains("You are task `task-456`, stage `in progress` of pipeline `default` (`manual`)"));
+    assert!(guide.contains("the user advances the pipeline after reviewing your work"));
+    assert!(guide.contains("record completion only if this stage's prompt asks for it"));
+    assert!(!guide.contains("--status success"));
 }
 
 #[tokio::test]

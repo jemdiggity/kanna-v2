@@ -171,6 +171,44 @@ describe("buildKannaRuntimeSystemPrompt", () => {
     expect(result).toContain("Start dev servers and other services on the assigned ports so parallel tasks do not collide");
     expect(result).not.toContain("{{TASK_CONTEXT}}");
     expect(result).not.toContain("{{MCP_STATUS}}");
+    expect(result).not.toContain("{{COMPLETION}}");
+  });
+
+  it("defaults to manual completion guidance, matching the Rust build_kanna_preamble default", () => {
+    const result = buildKannaRuntimeSystemPrompt({ taskId: "task-1" });
+
+    expect(result).toContain("This stage's transition is `manual`");
+    expect(result).toContain("recording a successful result does not advance the pipeline");
+    expect(result).toContain("record completion only if this stage's prompt asks for it");
+    expect(result).toContain("record status `failure` with the reason");
+    expect(result).not.toContain("--status success");
+    expect(result).not.toContain("{{COMPLETION}}");
+  });
+
+  it("renders manual completion guidance for manual-transition stages", () => {
+    const result = buildKannaRuntimeSystemPrompt({
+      taskId: "task-1",
+      stage: "in progress",
+      pipeline: "default",
+      transition: "manual",
+    });
+
+    expect(result).toContain("This stage's transition is `manual`");
+    expect(result).not.toContain("record completion so Kanna can advance the pipeline");
+  });
+
+  it("instructs auto-transition stages to record completion so Kanna advances the pipeline", () => {
+    const result = buildKannaRuntimeSystemPrompt({
+      taskId: "task-1",
+      stage: "review",
+      pipeline: "qa",
+      transition: "auto",
+    });
+
+    expect(result).toContain("This stage's transition is `auto`");
+    expect(result).toContain("record completion so Kanna can advance the pipeline");
+    expect(result).toContain('--status success --summary "..."');
+    expect(result).not.toContain("{{COMPLETION}}");
   });
 
   it("drops the MCP status bullet when registration state is unknown", () => {
