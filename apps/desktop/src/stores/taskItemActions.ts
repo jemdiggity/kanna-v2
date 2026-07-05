@@ -112,10 +112,35 @@ export function createTaskItemActions(
     agentType: AgentExecutionType,
     agentProvider: AgentProvider,
     pendingPlaceholder: PipelineItem,
+    initialStageRun: { stage: string; agent: string | null },
     opts?: CreateItemOptions,
   ) {
     const s0 = performance.now();
     const resolvedModel = opts?.customTask?.model ?? opts?.model ?? null;
+    // Best-effort run history: a recording failure must never fail task
+    // creation. A task without this row falls back to a fresh revision agent.
+    const recordInitialStageRun = async (agentSessionId: string | null) => {
+      try {
+        await insertStageRun(context.requireDb(), {
+          id: `run-${id}-${Date.now()}`,
+          task_id: id,
+          stage: initialStageRun.stage,
+          kind: "main",
+          agent: initialStageRun.agent,
+          agent_provider: agentProvider,
+          model: resolvedModel,
+          status: "running",
+          result: null,
+          feedback: null,
+          session_id: id,
+          provider_session_id: agentSessionId,
+          cwd: worktreePath,
+          resumed_from_run_id: null,
+        });
+      } catch (error) {
+        console.warn("[store] failed to record initial stage run:", error);
+      }
+    };
     let worktreeCreated = false;
     const markSetupFailed = async (error: unknown, logPrefix: string, toastMessage: string) => {
       await Promise.allSettled([
@@ -242,8 +267,9 @@ export function createTaskItemActions(
             cwd: worktreePath,
             daemon_session_id: id,
           });
+          await recordInitialStageRun(null);
         } else {
-          const { env, setupCmds, agentCmd, agentCmdPreamble, kannaCliPath } = await requireService(context.services.preparePtySession, "preparePtySession")(
+          const { env, setupCmds, agentCmd, agentCmdPreamble, kannaCliPath, agentSessionId } = await requireService(context.services.preparePtySession, "preparePtySession")(
             id,
             prompt,
             {
@@ -286,6 +312,7 @@ export function createTaskItemActions(
             cwd: worktreePath,
             daemon_session_id: id,
           });
+          await recordInitialStageRun(agentSessionId ?? null);
           if (opts?.recoverySnapshot) {
             await invoke("seed_session_recovery_state", {
               sessionId: id,
@@ -458,6 +485,7 @@ export function createTaskItemActions(
           debugLog(`[perf:createItem] readRepoConfig: ${(performance.now() - t1).toFixed(1)}ms`);
 
           let firstStageName = opts?.stage ?? "in progress";
+          let firstStageAgentName: string | null = null;
           let pipelinePrompt = effectivePrompt;
           let firstStageProviders: AgentProvider | AgentProvider[] | undefined;
           let firstStageAgentProviders: AgentProvider | AgentProvider[] | undefined;
@@ -467,6 +495,7 @@ export function createTaskItemActions(
             if (!opts?.stage && pipeline.stages.length > 0) {
               const firstStage = pipeline.stages[0];
               firstStageName = firstStage.name;
+              firstStageAgentName = firstStage.agent ?? null;
               firstStageProviders = firstStage.agent_provider as AgentProvider | AgentProvider[] | undefined;
               if (firstStage.agent && !opts?.stage) {
                 try {
@@ -637,6 +666,7 @@ export function createTaskItemActions(
             effectiveAgentType,
             effectiveAgentProvider,
             pendingPlaceholder,
+            { stage: firstStageName, agent: firstStageAgentName },
             {
               ...opts,
               baseRef,

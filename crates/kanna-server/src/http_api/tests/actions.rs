@@ -1892,6 +1892,9 @@ async fn complete_stage_route_finishes_latest_running_stage_run() {
             result: None,
             feedback: None,
             session_id: Some("task-1"),
+            provider_session_id: None,
+            cwd: None,
+            resumed_from_run_id: None,
         })
         .unwrap();
     });
@@ -1965,6 +1968,9 @@ async fn complete_stage_route_parses_pr_url_from_summary_fallback() {
             result: None,
             feedback: None,
             session_id: Some("task-1"),
+            provider_session_id: None,
+            cwd: None,
+            resumed_from_run_id: None,
         })
         .unwrap();
     });
@@ -2138,6 +2144,9 @@ async fn complete_stage_success_after_failed_post_refinishes_run_and_transitions
         result: None,
         feedback: None,
         session_id: Some("task-1"),
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
     })
     .unwrap();
     db.finish_stage_run("run-main", "succeeded", None, None)
@@ -2156,6 +2165,9 @@ async fn complete_stage_success_after_failed_post_refinishes_run_and_transitions
         result: None,
         feedback: None,
         session_id: Some("task-1"),
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
     })
     .unwrap();
     db.finish_stage_run("run-post", "failed", None, Some("dirty worktree"))

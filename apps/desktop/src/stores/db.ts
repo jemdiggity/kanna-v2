@@ -135,6 +135,9 @@ export async function runMigrations(db: DbHandle): Promise<void> {
     result TEXT,
     feedback TEXT,
     session_id TEXT,
+    provider_session_id TEXT,
+    cwd TEXT,
+    resumed_from_run_id TEXT,
     started_at TEXT NOT NULL DEFAULT (datetime('now')),
     finished_at TEXT
   )`);
@@ -516,5 +519,11 @@ export async function runMigrations(db: DbHandle): Promise<void> {
 
   await runMigration("025_stage_run_kind", async () => {
     await addColumn("stage_run", "kind", "TEXT NOT NULL DEFAULT 'main'");
+  });
+
+  await runMigration("026_stage_run_resume", async () => {
+    await addColumn("stage_run", "provider_session_id", "TEXT");
+    await addColumn("stage_run", "cwd", "TEXT");
+    await addColumn("stage_run", "resumed_from_run_id", "TEXT");
   });
 }

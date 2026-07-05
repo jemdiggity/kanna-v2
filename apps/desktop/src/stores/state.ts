@@ -58,6 +58,8 @@ export interface PreparedPtySession {
   agentProvider: AgentProvider;
   kannaCliPath?: string;
   mcpConfigPath?: string;
+  /** The agent CLI's own session id this spawn starts or resumes, when known. */
+  agentSessionId?: string;
 }
 
 export interface TaskSessionRecoveryOptions {

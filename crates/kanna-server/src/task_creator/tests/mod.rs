@@ -23,6 +23,11 @@ use tokio::net::UnixListener;
 
 static TEST_SIDECAR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Serializes tests that point `CLAUDE_CONFIG_DIR` at a test-local session
+/// store: the variable is process-global, so concurrent writers would read
+/// each other's stores.
+static CLAUDE_CONFIG_DIR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 mod core;
 mod revision;
 mod spawn;
@@ -248,6 +253,9 @@ fn insert_finished_stage_run(db: &Db, task_id: &str, stage: &str, result: &str) 
         result: None,
         feedback: None,
         session_id: Some(task_id),
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
     })
     .unwrap();
     db.finish_stage_run(
