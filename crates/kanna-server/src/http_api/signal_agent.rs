@@ -4,6 +4,7 @@ use crate::config::Config;
 use crate::db::Db;
 use axum::extract::State;
 use axum::Json;
+use kanna_agent_protocol::StateChangeScope;
 use std::sync::Arc;
 
 #[derive(Debug, serde::Deserialize)]
@@ -79,7 +80,8 @@ pub(super) async fn signal_agent(
         prepared
     };
     let task_id = prepared.task_id().to_string();
-    spawn_signal_agent_task_detached(state.config.clone(), prepared);
+    state.publish_state_changed(StateChangeScope::Tasks);
+    spawn_signal_agent_task_detached(Arc::clone(&state), prepared);
 
     Ok(Json(SignalAgentResponse {
         task_id,
@@ -88,11 +90,12 @@ pub(super) async fn signal_agent(
 }
 
 fn spawn_signal_agent_task_detached(
-    config: Config,
+    state: Arc<AppState>,
     prepared: crate::task_creator::PreparedTaskSpawn,
 ) {
     tokio::spawn(async move {
         let task_id = prepared.task_id().to_string();
+        let config: Config = state.config().clone();
         let result = async {
             let mut daemon = crate::daemon_client::DaemonClient::connect(&config.daemon_dir)
                 .await
@@ -106,8 +109,12 @@ fn spawn_signal_agent_task_detached(
             .map(|_| ())
         }
         .await;
-        if let Err(error) = result {
-            log::error!("failed to spawn signaled agent task {task_id}: {error}");
+        match result {
+            Ok(()) => state.publish_state_changed(StateChangeScope::Tasks),
+            Err(error) => {
+                log::error!("failed to spawn signaled agent task {task_id}: {error}");
+                state.publish_state_changed(StateChangeScope::Tasks);
+            }
         }
     });
 }

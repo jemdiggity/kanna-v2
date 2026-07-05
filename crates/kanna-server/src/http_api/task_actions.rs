@@ -327,7 +327,7 @@ pub(super) async fn close_task(
             format!("db error: {}", e),
         )
     })?;
-    notify_task_completion(&state.config, &pipeline_item_id, false)
+    notify_task_completion(state.as_ref(), &pipeline_item_id, false)
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
     start_dependents_unblocked_by_close_with_daemon(&state, &mut daemon, &pipeline_item_id).await;
@@ -399,7 +399,7 @@ async fn close_task_after_final_stage(
             format!("db error: {}", e),
         )
     })?;
-    notify_task_completion(&state.config, &task_id, false)
+    notify_task_completion(state.as_ref(), &task_id, false)
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
     start_dependents_unblocked_by_close_with_daemon(state, daemon, &task_id).await;
@@ -571,7 +571,10 @@ pub(super) async fn rerun_stage(
         .await
         {
             log::error!("stage rerun for {} failed: {}", rerun_task_id, error);
+            rerun_state.publish_state_changed(StateChangeScope::Tasks);
+            return;
         }
+        rerun_state.publish_state_changed(StateChangeScope::Tasks);
     });
     state.publish_state_changed(StateChangeScope::Tasks);
     Ok(Json(crate::mobile_api::TaskActionResponse {
