@@ -41,6 +41,10 @@ impl OpencodeAdapter {
             "--format".to_string(),
             "json".to_string(),
         ];
+        if !ctx.cwd.trim().is_empty() {
+            args.push("--dir".to_string());
+            args.push(ctx.cwd.clone());
+        }
         if Self::should_skip_permissions(ctx) {
             args.push("--dangerously-skip-permissions".to_string());
         }

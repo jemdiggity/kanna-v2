@@ -40,6 +40,9 @@ pub struct SpawnCtx {
     /// The task prompt (initial spawn) — resume spawns take the message
     /// separately.
     pub prompt: String,
+    /// Task worktree/project directory. The daemon also sets this as the child
+    /// process cwd, but some providers need an explicit project-dir flag.
+    pub cwd: String,
     pub model: Option<String>,
     /// Kanna permission mode (`dontAsk` / `acceptEdits` / `default`); each
     /// adapter maps it onto its provider's flags or config.
