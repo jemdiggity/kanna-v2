@@ -10,3 +10,12 @@ globalThis.window = win;
 globalThis.localStorage = win.localStorage;
 // @ts-ignore — use happy-dom's Event so dispatchEvent instanceof check passes
 globalThis.Event = win.Event;
+
+import { setDesktopSnapshotFetcherForTests } from "../services/desktopServerClient";
+
+setDesktopSnapshotFetcherForTests(async () => ({
+  entries: [],
+  taskBlockers: [],
+  worktreePaths: {},
+  settings: {},
+}));

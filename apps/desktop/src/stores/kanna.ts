@@ -14,6 +14,7 @@ import { createTasksApi } from "./tasks";
 import { createTransferApi } from "./transfer";
 import { createInitApi } from "./init";
 import type { WindowWorkspaceController } from "../windowWorkspace";
+import { fetchDesktopSnapshot } from "../services/desktopServerClient";
 
 export { readRepoConfig } from "./state";
 export { collectTeardownCommands } from "./tasks";
@@ -22,6 +23,7 @@ export const useKannaStore = defineStore("kanna", () => {
   const toast = useToast();
   const state = createStoreState();
   const services: StoreServices = {};
+  services.fetchSnapshot = fetchDesktopSnapshot;
   const context = createStoreContext(state, toast, services);
 
   const ports = createPortsStore(context);

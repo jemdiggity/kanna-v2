@@ -1,7 +1,8 @@
 import { computed, ref, type ComputedRef, type Ref } from "vue";
-import { listPipelineItems, listRepos, listTaskBlockers, type PipelineItem, type Repo } from "@kanna/db";
-import { readRepoConfig, type KannaSnapshot, type RepoSnapshotEntry, type StoreContext } from "./state";
+import { type PipelineItem, type Repo } from "@kanna/db";
+import { readRepoConfig, requireService, type KannaSnapshot, type StoreContext } from "./state";
 import { debugLog } from "../utils/debugLog";
+import { applySnapshotSettingsToState } from "./snapshotSettings";
 
 interface OptimisticItemOverlay {
   key: string;
@@ -34,7 +35,7 @@ function flattenSnapshotItems(snapshot: KannaSnapshot): PipelineItem[] {
 }
 
 export function createQueriesApi(context: StoreContext): QueriesApi {
-  const baseSnapshot = ref<KannaSnapshot>({ entries: [], taskBlockers: [] });
+  const baseSnapshot = ref<KannaSnapshot>({ entries: [], taskBlockers: [], worktreePaths: {}, settings: {} });
   const snapshotPending = ref(false);
   const snapshotError = ref<unknown>(null);
   const optimisticItems = ref<OptimisticItemOverlay[]>([]);
@@ -55,6 +56,8 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
     context.state.repos.value = repos.value;
     context.state.items.value = items.value;
     context.state.taskBlockers.value = mergedSnapshot.value.taskBlockers;
+    context.state.worktreePaths.value = { ...mergedSnapshot.value.worktreePaths };
+    context.state.snapshotSettings.value = { ...mergedSnapshot.value.settings };
   }
 
   async function reloadSnapshot(): Promise<void> {
@@ -64,18 +67,14 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
       const runId = ++refreshRunId.value;
       const refreshStart = performance.now();
 
-      const loadedRepos = await listRepos(context.requireDb());
-      const taskBlockers = await listTaskBlockers(context.requireDb());
-      const entries: RepoSnapshotEntry[] = [];
-      const loadedItems: PipelineItem[] = [];
+      const snapshot = await requireService(context.services.fetchSnapshot, "fetchSnapshot")();
+      const loadedRepos = snapshot.entries.map((entry) => entry.repo);
+      const loadedItems = flattenSnapshotItems(snapshot);
 
       debugLog(`[perf:items] refresh start #${runId}: repos=${loadedRepos.length}`);
 
-      for (const repo of loadedRepos) {
+      for (const { repo } of snapshot.entries) {
         const repoStart = performance.now();
-        const repoItems = await listPipelineItems(context.requireDb(), repo.id);
-        entries.push({ repo, items: repoItems });
-        loadedItems.push(...repoItems);
         debugLog(`[perf:items] refresh repo #${runId} ${repo.id}: ${(performance.now() - repoStart).toFixed(1)}ms`);
 
         if (!context.state.stageOrderCache.has(repo.path)) {
@@ -94,7 +93,8 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
         `[perf:items] refresh done #${runId}: ${(performance.now() - refreshStart).toFixed(1)}ms total, items=${loadedItems.length}`,
       );
 
-      baseSnapshot.value = { entries, taskBlockers };
+      baseSnapshot.value = snapshot;
+      applySnapshotSettingsToState(context.state, snapshot.settings);
       syncSnapshot();
 
       for (const item of loadedItems) {

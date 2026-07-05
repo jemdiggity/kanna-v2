@@ -328,6 +328,7 @@ vi.mock("@kanna/db", () => ({
 }));
 
 import { useKannaStore } from "./kanna";
+import { setDesktopSnapshotFetcherForTests } from "../services/desktopServerClient";
 
 function createDb(): DbHandle {
   return {
@@ -357,6 +358,7 @@ async function createStore() {
   const store = useKannaStore();
   await store.init(createDb());
   await flushStore();
+  mockState.updatePipelineItemActivityMock.mockClear();
   return store;
 }
 
@@ -364,6 +366,15 @@ describe("kanna runtime status reconciliation", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     mockState.reset();
+    setDesktopSnapshotFetcherForTests(async () => ({
+      entries: mockState.repos.map((repo) => ({
+        repo,
+        items: mockState.pipelineItems.filter((item) => item.repo_id === repo.id && item.closed_at === null),
+      })),
+      taskBlockers: [],
+      worktreePaths: {},
+      settings: {},
+    }));
     cleanupMocks.closePipelineItemAndClearCachedTerminalState.mockClear();
     cleanupMocks.getTaskIdFromTeardownSessionId.mockClear();
     cleanupMocks.isTeardownSessionId.mockClear();
@@ -380,6 +391,7 @@ describe("kanna runtime status reconciliation", () => {
     await store.selectRepo("repo-1");
     await store.selectItem("task-1");
     await flushStore();
+    mockState.pipelineItems[0]!.activity = "working";
 
     mockState.emit("status_changed", {
       session_id: "task-1",
@@ -516,6 +528,8 @@ describe("kanna runtime status reconciliation", () => {
     await store.selectItem("task-1");
     await flushStore();
     mockState.invokeMock.mockClear();
+    mockState.pipelineItems[0]!.activity = "idle";
+    mockState.updatePipelineItemActivityMock.mockClear();
 
     mockState.sessionStatuses = [{ session_id: "task-1", status: "waiting" }];
 

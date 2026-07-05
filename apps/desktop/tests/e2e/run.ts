@@ -9,6 +9,7 @@ import { buildRealE2eAgentEnv } from "./runEnv";
 import { createInstanceConfig, type InstanceConfig } from "./runConfig";
 import { pauseBeforeTestTarget, pauseForAppReady } from "./helpers/runSlowMode";
 import { isRealTestTarget, shouldStartInitialInstances } from "./runPlan";
+import { APP_READY_SCRIPT } from "./helpers/appReady";
 import {
   buildFirebaseCommandEnv,
   buildFirebaseEmulatorCommand,
@@ -206,7 +207,7 @@ async function canConnectToApp(baseUrl: string): Promise<boolean> {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        script: "return Boolean(window.__KANNA_E2E__ && window.__KANNA_E2E__.setupState);",
+        script: `return ${APP_READY_SCRIPT};`,
         args: [],
       }),
     }).then((response) => response.json());

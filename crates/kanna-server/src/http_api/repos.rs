@@ -3,6 +3,7 @@ use crate::db::Db;
 use crate::mobile_api::MobileApi;
 use axum::extract::State;
 use axum::Json;
+use kanna_agent_protocol::StateChangeScope;
 use std::sync::Arc;
 
 pub(super) async fn list_repos(
@@ -32,7 +33,7 @@ pub(super) async fn add_repo(
         )
     })?;
     let api = MobileApi::new(state.config.clone(), db);
-    api.add_repo(payload).map(Json).map_err(|e| {
+    let repo = api.add_repo(payload).map_err(|e| {
         let status = match &e {
             crate::mobile_api::AddRepoError::InvalidPath(_) => axum::http::StatusCode::BAD_REQUEST,
             crate::mobile_api::AddRepoError::DuplicatePath => axum::http::StatusCode::CONFLICT,
@@ -41,7 +42,9 @@ pub(super) async fn add_repo(
             }
         };
         (status, e.message())
-    })
+    })?;
+    state.publish_state_changed(StateChangeScope::Repos);
+    Ok(Json(repo))
 }
 
 pub(super) async fn list_repo_tasks(

@@ -24,6 +24,18 @@ pub enum StreamKind {
     Terminal,
 }
 
+/// Coarse data-model invalidation scopes. Clients should re-fetch the
+/// snapshot rather than applying row-level deltas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "typescript", derive(TS), ts(export))]
+pub enum StateChangeScope {
+    Tasks,
+    Repos,
+    Blockers,
+    Settings,
+}
+
 /// A journaled agent event paired with its sequence number (wire mirror of
 /// the daemon's journal entries).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -137,6 +149,9 @@ pub enum ServerFrame {
         /// `busy` | `waiting` | `idle` (mirrors daemon SessionStatus).
         status: String,
     },
+    StateChanged {
+        scope: StateChangeScope,
+    },
     SessionExit {
         task_id: String,
         code: i32,
@@ -213,6 +228,19 @@ mod tests {
         let json = serde_json::to_value(&frame).unwrap();
         assert_eq!(json["type"], "agent_event");
         assert_eq!(json["event"]["type"], "assistant_text");
+
+        let back: ServerFrame = serde_json::from_value(json).unwrap();
+        assert_eq!(frame, back);
+    }
+
+    #[test]
+    fn state_changed_frame_round_trip_and_tagging() {
+        let frame = ServerFrame::StateChanged {
+            scope: StateChangeScope::Tasks,
+        };
+        let json = serde_json::to_value(&frame).unwrap();
+        assert_eq!(json["type"], "state_changed");
+        assert_eq!(json["scope"], "tasks");
 
         let back: ServerFrame = serde_json::from_value(json).unwrap();
         assert_eq!(frame, back);

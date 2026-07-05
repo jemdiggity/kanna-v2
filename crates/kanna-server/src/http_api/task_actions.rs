@@ -6,6 +6,7 @@ use super::task_input::{notify_task_completion, submit_task_input};
 use crate::db::Db;
 use axum::extract::State;
 use axum::Json;
+use kanna_agent_protocol::StateChangeScope;
 use std::sync::Arc;
 
 fn stage_action_error_status(error: &str) -> axum::http::StatusCode {
@@ -52,6 +53,7 @@ pub(super) async fn run_merge_agent(
     )
     .await
     .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    state.publish_state_changed(StateChangeScope::Tasks);
     Ok(Json(crate::mobile_api::TaskActionResponse {
         task_id: created_task.task_id,
         follow_task: None,
@@ -139,6 +141,7 @@ pub(super) async fn set_task_parent(
 
     db.update_pipeline_item_parent(&task_id, parent_task_id.as_deref())
         .map_err(|e| db_write_error("db error", e))?;
+    state.publish_state_changed(StateChangeScope::Tasks);
     Ok(Json(crate::mobile_api::TaskActionResponse {
         task_id,
         follow_task: None,
@@ -324,10 +327,12 @@ pub(super) async fn close_task(
             format!("db error: {}", e),
         )
     })?;
-    notify_task_completion(&state.config, &pipeline_item_id, false)
+    notify_task_completion(state.as_ref(), &pipeline_item_id, false)
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
     start_dependents_unblocked_by_close_with_daemon(&state, &mut daemon, &pipeline_item_id).await;
+    state.publish_state_changed(StateChangeScope::Tasks);
+    state.publish_state_changed(StateChangeScope::Blockers);
 
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
@@ -394,10 +399,12 @@ async fn close_task_after_final_stage(
             format!("db error: {}", e),
         )
     })?;
-    notify_task_completion(&state.config, &task_id, false)
+    notify_task_completion(state.as_ref(), &task_id, false)
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
     start_dependents_unblocked_by_close_with_daemon(state, daemon, &task_id).await;
+    state.publish_state_changed(StateChangeScope::Tasks);
+    state.publish_state_changed(StateChangeScope::Blockers);
     Ok(Json(crate::mobile_api::TaskActionResponse {
         task_id,
         follow_task: Some(false),
@@ -430,6 +437,7 @@ pub(super) async fn advance_stage(
         follow_task: None,
     };
     execute_stage_transition_detached(Arc::clone(&state), task_id, transition);
+    state.publish_state_changed(StateChangeScope::Tasks);
     Ok(Json(response))
 }
 
@@ -451,6 +459,7 @@ async fn execute_stage_transition(
             )
             .await
             .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+            state.publish_state_changed(StateChangeScope::Tasks);
             Ok(Json(advanced))
         }
         crate::task_creator::PreparedStageTransition::Post(prepared) => {
@@ -464,6 +473,7 @@ async fn execute_stage_transition(
             )
             .await
             .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+            state.publish_state_changed(StateChangeScope::Tasks);
             Ok(Json(dispatched))
         }
         crate::task_creator::PreparedStageTransition::Close {
@@ -561,8 +571,12 @@ pub(super) async fn rerun_stage(
         .await
         {
             log::error!("stage rerun for {} failed: {}", rerun_task_id, error);
+            rerun_state.publish_state_changed(StateChangeScope::Tasks);
+            return;
         }
+        rerun_state.publish_state_changed(StateChangeScope::Tasks);
     });
+    state.publish_state_changed(StateChangeScope::Tasks);
     Ok(Json(crate::mobile_api::TaskActionResponse {
         task_id,
         follow_task: None,
@@ -685,6 +699,7 @@ pub(super) async fn complete_stage(
     };
 
     if !should_auto_advance {
+        state.publish_state_changed(StateChangeScope::Tasks);
         return Ok(Json(crate::mobile_api::TaskActionResponse {
             task_id,
             follow_task: None,
@@ -707,6 +722,7 @@ pub(super) async fn complete_stage(
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?
     };
     let Some(transition) = transition else {
+        state.publish_state_changed(StateChangeScope::Tasks);
         return Ok(Json(crate::mobile_api::TaskActionResponse {
             task_id,
             follow_task: None,
@@ -718,6 +734,7 @@ pub(super) async fn complete_stage(
         follow_task: None,
     };
     execute_stage_transition_detached(Arc::clone(&state), task_id, transition);
+    state.publish_state_changed(StateChangeScope::Tasks);
     Ok(Json(response))
 }
 
@@ -794,6 +811,7 @@ pub(super) async fn request_revision(
         source_task_id.clone(),
         crate::task_creator::PreparedStageTransition::Run(Box::new(prepared)),
     );
+    state.publish_state_changed(StateChangeScope::Tasks);
 
     Ok(Json(crate::mobile_api::TaskActionResponse {
         task_id: source_task_id,

@@ -1,11 +1,12 @@
-use crate::{config::Config, daemon_client, http_api, session_replacements};
+use crate::{daemon_client, http_api, session_replacements};
+use std::sync::Arc;
 
 pub(crate) async fn terminal_state_watcher_loop(
-    config: Config,
+    state: Arc<http_api::AppState>,
     replacements: session_replacements::SessionReplacements,
 ) {
     loop {
-        if let Err(error) = terminal_state_watcher_once(&config, &replacements).await {
+        if let Err(error) = terminal_state_watcher_once(&state, &replacements).await {
             log::warn!("terminal state watcher reconnecting after error: {}", error);
         }
         // Exits broadcast while disconnected are lost along with their
@@ -16,11 +17,12 @@ pub(crate) async fn terminal_state_watcher_loop(
 }
 
 async fn terminal_state_watcher_once(
-    config: &Config,
+    state: &http_api::AppState,
     replacements: &session_replacements::SessionReplacements,
 ) -> Result<(), String> {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
 
+    let config = state.config();
     let mut daemon = daemon_client::DaemonClient::connect(&config.daemon_dir)
         .await
         .map_err(|e| format!("daemon connection failed: {}", e))?;
@@ -59,7 +61,7 @@ async fn terminal_state_watcher_once(
                 }
                 let success = code == 0;
                 if let Err(error) =
-                    http_api::handle_task_terminal_state(config, &session_id, success).await
+                    http_api::handle_task_terminal_state(state, &session_id, success).await
                 {
                     log::warn!(
                         "failed to handle terminal state for {} (success={}): {}",
@@ -78,6 +80,7 @@ async fn terminal_state_watcher_once(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
     use crate::db::Db;
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
     use std::path::{Path, PathBuf};
@@ -242,7 +245,7 @@ mod tests {
         timeout(
             Duration::from_secs(2),
             terminal_state_watcher_once(
-                &config,
+                &http_api::AppState::new(config.clone()),
                 &session_replacements::SessionReplacements::default(),
             ),
         )
@@ -295,7 +298,7 @@ mod tests {
 
         timeout(
             Duration::from_secs(2),
-            terminal_state_watcher_once(&config, &replacements),
+            terminal_state_watcher_once(&http_api::AppState::new(config.clone()), &replacements),
         )
         .await
         .expect("watcher did not finish")
@@ -341,7 +344,7 @@ mod tests {
 
         timeout(
             Duration::from_secs(2),
-            terminal_state_watcher_once(&config, &replacements),
+            terminal_state_watcher_once(&http_api::AppState::new(config.clone()), &replacements),
         )
         .await
         .expect("watcher did not finish")

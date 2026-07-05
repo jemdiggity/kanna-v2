@@ -438,6 +438,7 @@ export function createTaskItemActions(
     };
 
     const applyPendingPlaceholderOverlay = (snapshot: KannaSnapshot): KannaSnapshot => ({
+      ...snapshot,
       entries: snapshot.entries.map((entry) =>
         entry.repo.id === repoId
           ? {
@@ -446,7 +447,6 @@ export function createTaskItemActions(
             }
           : entry,
       ),
-      taskBlockers: snapshot.taskBlockers,
     });
 
     const selectPendingPlaceholder = () => {

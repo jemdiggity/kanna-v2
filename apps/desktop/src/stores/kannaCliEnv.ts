@@ -4,8 +4,8 @@ interface BuildKannaCliEnvOptions {
   serverBaseUrl: string;
 }
 
-export function resolveKannaServerBaseUrl(mobileServerPort?: string | null): string {
-  const port = mobileServerPort?.trim();
+export function resolveKannaServerBaseUrl(mobileServerPort?: unknown): string {
+  const port = typeof mobileServerPort === "string" ? mobileServerPort.trim() : "";
   return `http://127.0.0.1:${port || "48120"}`;
 }
 

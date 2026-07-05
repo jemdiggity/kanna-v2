@@ -1,8 +1,18 @@
 import { computed, ref } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { getSetting, setSetting, type DbHandle, type PipelineItem, type Repo } from "@kanna/db";
+import {
+  getSetting,
+  getUnblockedItems,
+  listPipelineItems,
+  listRepos,
+  setSetting,
+  type DbHandle,
+  type PipelineItem,
+  type Repo,
+} from "@kanna/db";
 import { createStoreContext, createStoreState } from "./state";
 import { createInitApi } from "./init";
+import { applySnapshotSettingsToState } from "./snapshotSettings";
 
 const mockState = vi.hoisted(() => {
   const now = "2026-04-23T00:00:00.000Z";
@@ -62,6 +72,14 @@ const mockState = vi.hoisted(() => {
   let items: PipelineItem[] = [];
   let unblockedItems: PipelineItem[] = [];
   const listenMock = vi.fn(async () => () => {});
+  const stateChangedListeners: Array<(scope: string) => void> = [];
+  const streamClientMock = {
+    onStateChanged: vi.fn((listener: (scope: string) => void) => {
+      stateChangedListeners.push(listener);
+      return vi.fn();
+    }),
+  };
+  const getSharedStreamClientMock = vi.fn(async () => streamClientMock);
   const updatePipelineItemActivityMock = vi.fn(async () => {});
   const clearPipelineItemActivePostActionMock = vi.fn(async () => {});
   const loadPipelineMock = vi.fn(async () => ({
@@ -84,17 +102,32 @@ const mockState = vi.hoisted(() => {
   const setSettingMock = vi.fn(async () => {});
   let tauri = false;
 
+  function installDefaultInvokeMock(): void {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "file_exists") return true;
+      if (command === "list_sessions") return [];
+      if (command === "kill_session") return undefined;
+      if (command === "read_env_var") return "";
+      if (command === "git_app_info") return { version: "" };
+      throw new Error(`unexpected invoke: ${command}`);
+    });
+  }
+
   function reset(): void {
     repos = [makeRepo()];
     items = [];
     unblockedItems = [];
     listenMock.mockClear();
+    stateChangedListeners.length = 0;
+    streamClientMock.onStateChanged.mockClear();
+    getSharedStreamClientMock.mockClear();
     updatePipelineItemActivityMock.mockClear();
     clearPipelineItemActivePostActionMock.mockClear();
     loadPipelineMock.mockClear();
     advanceStageMock.mockClear();
     reloadSnapshotMock.mockClear();
     invokeMock.mockClear();
+    installDefaultInvokeMock();
     setSettingMock.mockClear();
     tauri = false;
   }
@@ -117,6 +150,9 @@ const mockState = vi.hoisted(() => {
       unblockedItems = value;
     },
     listenMock,
+    stateChangedListeners,
+    streamClientMock,
+    getSharedStreamClientMock,
     updatePipelineItemActivityMock,
     clearPipelineItemActivePostActionMock,
     loadPipelineMock,
@@ -160,6 +196,10 @@ vi.mock("../listen", () => ({
   listen: mockState.listenMock,
 }));
 
+vi.mock("../composables/desktopStreamClient", () => ({
+  getSharedStreamClient: mockState.getSharedStreamClientMock,
+}));
+
 function createDb(): DbHandle {
   return {
     execute: vi.fn(async () => ({ rowsAffected: 1 })),
@@ -167,12 +207,27 @@ function createDb(): DbHandle {
   };
 }
 
-function getStageCompleteHandler(): (event: unknown) => Promise<void> {
-  const handler = mockState.listenMock.mock.calls.find(
-    ([eventName]) => eventName === "pipeline_stage_complete",
-  )?.[1] as ((event: unknown) => Promise<void>) | undefined;
-  if (!handler) throw new Error("pipeline_stage_complete handler was not registered");
-  return handler;
+function createSnapshotLoader(
+  state: ReturnType<typeof createStoreState>,
+  options: {
+    repos?: Repo[];
+    items?: PipelineItem[];
+    taskBlockers?: Array<{ blocked_item_id: string; blocker_item_id: string }>;
+    worktreePaths?: Record<string, string>;
+    settings?: Record<string, string>;
+  } = {},
+) {
+  return vi.fn(async () => {
+    const repos = options.repos ?? mockState.repos;
+    const items = options.items ?? mockState.items;
+    const settings = options.settings ?? {};
+    state.repos.value = repos;
+    state.items.value = items;
+    state.taskBlockers.value = options.taskBlockers ?? [];
+    state.worktreePaths.value = options.worktreePaths ?? {};
+    state.snapshotSettings.value = settings;
+    applySnapshotSettingsToState(state, settings);
+  });
 }
 
 function getSessionCreatedHandler(): (event: unknown) => Promise<void> {
@@ -181,6 +236,11 @@ function getSessionCreatedHandler(): (event: unknown) => Promise<void> {
   )?.[1] as ((event: unknown) => Promise<void>) | undefined;
   if (!handler) throw new Error("session_created handler was not registered");
   return handler;
+}
+
+async function flushAsync(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
 }
 
 function getSharedInvalidationHandler(
@@ -218,8 +278,15 @@ describe("createInitApi", () => {
     });
 
     const state = createStoreState();
+    const item = mockState.makeItem({ id: "task-1", branch: "task-task-1" });
+    mockState.items = [item];
     const services = {
-      loadInitialData: vi.fn(async () => {}),
+      loadInitialData: createSnapshotLoader(state, {
+        items: [item],
+        worktreePaths: {
+          "task-1": "/tmp/repo/.kanna-worktrees/task-task-1",
+        },
+      }),
       prewarmWorktreeShellSession: vi.fn(async () => {}),
       spawnShellSession: vi.fn(async () => {}),
     };
@@ -273,7 +340,10 @@ describe("createInitApi", () => {
 
     const state = createStoreState();
     const services = {
-      loadInitialData: vi.fn(async () => {}),
+      loadInitialData: createSnapshotLoader(state, {
+        items: mockState.items,
+        worktreePaths: {},
+      }),
       prewarmWorktreeShellSession: vi.fn(async () => {}),
       spawnShellSession: vi.fn(async () => {}),
     };
@@ -318,7 +388,12 @@ describe("createInitApi", () => {
 
     const state = createStoreState();
     const services = {
-      loadInitialData: vi.fn(async () => {}),
+      loadInitialData: createSnapshotLoader(state, {
+        items: mockState.items,
+        worktreePaths: {
+          "task-1": "/tmp/repo/.kanna-worktrees/task-task-1",
+        },
+      }),
       prewarmWorktreeShellSession: vi.fn(async () => {}),
       spawnShellSession: vi.fn(async () => {}),
     };
@@ -357,11 +432,22 @@ describe("createInitApi", () => {
   });
 
   it("restores unblocked tasks through the shared blocked-task restore path on startup", async () => {
-    mockState.unblockedItems = [mockState.makeItem()];
+    const blockedItem = mockState.makeItem({ id: "task-blocked" });
+    const closedBlocker = mockState.makeItem({
+      id: "task-blocker",
+      closed_at: "2026-04-23T00:01:00.000Z",
+    });
+    mockState.unblockedItems = [blockedItem];
 
     const state = createStoreState();
     const services = {
-      loadInitialData: vi.fn(async () => {}),
+      loadInitialData: createSnapshotLoader(state, {
+        items: [blockedItem, closedBlocker],
+        taskBlockers: [{
+          blocked_item_id: blockedItem.id,
+          blocker_item_id: closedBlocker.id,
+        }],
+      }),
     };
     const toast = {
       toasts: ref([]),
@@ -385,7 +471,7 @@ describe("createInitApi", () => {
 
     await initApi.init(createDb());
 
-    expect(restoreUnblockedTask).toHaveBeenCalledWith(mockState.unblockedItems[0]);
+    expect(restoreUnblockedTask).toHaveBeenCalledWith(blockedItem);
     expect(startBlockedTask).not.toHaveBeenCalled();
   });
 
@@ -405,7 +491,7 @@ describe("createInitApi", () => {
     ).initialWindowBootstrap = bootstrapRef;
 
     const services = {
-      loadInitialData: vi.fn(async () => {}),
+      loadInitialData: createSnapshotLoader(state, { items: mockState.items }),
       restoreSelection: vi.fn(),
     };
     const toast = {
@@ -583,15 +669,14 @@ describe("createInitApi", () => {
   });
 
   it("loads valid theme preferences from settings", async () => {
-    vi.mocked(getSetting).mockImplementation(async (_db, key) => {
-      if (key === "appTheme") return "light";
-      if (key === "codeTheme") return "dark";
-      return null;
-    });
-
     const state = createStoreState();
     const services = {
-      loadInitialData: vi.fn(async () => {}),
+      loadInitialData: createSnapshotLoader(state, {
+        settings: {
+          appTheme: "light",
+          codeTheme: "dark",
+        },
+      }),
     };
     const context = createStoreContext(state, {
       toasts: ref([]),
@@ -614,15 +699,13 @@ describe("createInitApi", () => {
   });
 
   it("loads agent message appearance and falls back to the legacy style setting", async () => {
-    vi.mocked(getSetting).mockImplementation(async (_db, key) => {
-      if (key === "agentMessageAppearance") return null;
-      if (key === "agentMessageStyle") return "terminal";
-      return null;
-    });
-
     const state = createStoreState();
     const services = {
-      loadInitialData: vi.fn(async () => {}),
+      loadInitialData: createSnapshotLoader(state, {
+        settings: {
+          agentMessageStyle: "terminal",
+        },
+      }),
     };
     const context = createStoreContext(state, {
       toasts: ref([]),
@@ -644,15 +727,14 @@ describe("createInitApi", () => {
   });
 
   it("falls back when stored theme preferences are invalid", async () => {
-    vi.mocked(getSetting).mockImplementation(async (_db, key) => {
-      if (key === "appTheme") return "sepia";
-      if (key === "codeTheme") return "solarized";
-      return null;
-    });
-
     const state = createStoreState();
     const services = {
-      loadInitialData: vi.fn(async () => {}),
+      loadInitialData: createSnapshotLoader(state, {
+        settings: {
+          appTheme: "sepia",
+          codeTheme: "solarized",
+        },
+      }),
     };
     const context = createStoreContext(state, {
       toasts: ref([]),
@@ -674,147 +756,140 @@ describe("createInitApi", () => {
     expect(state.codeTheme.value).toBe("match");
   });
 
-  it("does not auto-advance successful stage results in the desktop listener", async () => {
-    const item = mockState.makeItem({
-      id: "task-1",
-      stage: "commit",
-      stage_result: JSON.stringify({ status: "success", summary: "committed" }),
-      tags: "[]",
-    });
-    mockState.items = [item];
-
+  it("does not register the legacy pipeline_stage_complete refresh listener", async () => {
     const state = createStoreState();
-    state.repos.value = [...mockState.repos];
-    state.items.value = [item];
     const services = {
       loadInitialData: vi.fn(async () => {}),
-      loadPipeline: mockState.loadPipelineMock,
-      advanceStage: mockState.advanceStageMock,
       reloadSnapshot: mockState.reloadSnapshotMock,
     };
-    const toast = {
+    const context = createStoreContext(state, {
       toasts: ref([]),
       dismiss: vi.fn(),
       info: vi.fn(),
       warning: vi.fn(),
       error: vi.fn(),
-    };
-    const db = {
-      ...createDb(),
-      execute: vi.fn(async () => ({ rowsAffected: 1 })),
-    };
-    const context = createStoreContext(state, toast, services);
-    const ports = {
-      closeTaskAndReleasePorts: vi.fn(async () => {}),
-    } as unknown as import("./ports").PortsStore;
-    const initApi = createInitApi(context, ports, {
+    }, services);
+    const initApi = createInitApi(context, {} as import("./ports").PortsStore, {
       checkUnblocked: vi.fn(async () => {}),
       handleAgentFinished: vi.fn(),
       startBlockedTask: vi.fn(async () => {}),
       restoreUnblockedTask: vi.fn(async () => {}),
     } as unknown as Parameters<typeof createInitApi>[2]);
 
+    await initApi.init(createDb());
+
+    expect(mockState.listenMock.mock.calls.map(([eventName]) => eventName)).not.toContain("pipeline_stage_complete");
+  });
+
+  it("hydrates startup state from the server snapshot without direct DB reads", async () => {
+    mockState.tauri = true;
+    const repo = mockState.repos[0];
+    const activeItem = mockState.makeItem({
+      id: "task-active",
+      branch: "task-active",
+      tags: "[]",
+      port_env: "{\"KANNA_DEV_PORT\":\"1422\"}",
+    });
+    const blockedItem = mockState.makeItem({
+      id: "task-blocked",
+      branch: "task-blocked",
+      tags: "[\"blocked\"]",
+      port_env: null,
+    });
+    const blockerItem = mockState.makeItem({
+      id: "task-blocker",
+      branch: "task-blocker",
+      closed_at: "2026-04-23T00:02:00.000Z",
+      tags: "[]",
+      port_env: null,
+    });
+
+    const state = createStoreState();
+    const services = {
+      loadInitialData: vi.fn(async () => {
+        state.repos.value = [repo];
+        state.items.value = [activeItem, blockedItem, blockerItem];
+        state.taskBlockers.value = [{
+          blocked_item_id: blockedItem.id,
+          blocker_item_id: blockerItem.id,
+        }];
+        state.worktreePaths.value = {
+          [activeItem.id]: "/tmp/repo/.kanna-worktrees/task-active",
+        };
+        state.suspendAfterMinutes.value = 7;
+        state.ideCommand.value = "zed";
+      }),
+      prewarmWorktreeShellSession: vi.fn(async () => {}),
+      spawnShellSession: vi.fn(async () => {}),
+      restoreSelection: vi.fn(),
+    };
+    const context = createStoreContext(state, {
+      toasts: ref([]),
+      dismiss: vi.fn(),
+      info: vi.fn(),
+      warning: vi.fn(),
+      error: vi.fn(),
+    }, services);
+    const restoreUnblockedTask = vi.fn(async () => {});
+    const initApi = createInitApi(context, {
+      closeTaskAndReleasePorts: vi.fn(async () => {}),
+    } as unknown as import("./ports").PortsStore, {
+      checkUnblocked: vi.fn(async () => {}),
+      handleAgentFinished: vi.fn(),
+      restoreUnblockedTask,
+    });
+
+    const db = createDb();
     await initApi.init(db);
 
-    const stageCompleteHandler = getStageCompleteHandler();
-
-    await stageCompleteHandler({ payload: { task_id: "task-1" } });
-
-    expect(db.execute).not.toHaveBeenCalledWith(
-      expect.stringContaining("UPDATE pipeline_item SET stage_result = NULL"),
+    expect(services.loadInitialData).toHaveBeenCalled();
+    expect(listRepos).not.toHaveBeenCalled();
+    expect(listPipelineItems).not.toHaveBeenCalled();
+    expect(getUnblockedItems).not.toHaveBeenCalled();
+    expect(getSetting).not.toHaveBeenCalled();
+    expect(db.select).not.toHaveBeenCalledWith(expect.stringContaining("FROM worktree"));
+    expect(mockState.invokeMock).toHaveBeenCalledWith("file_exists", {
+      path: "/tmp/repo/.kanna-worktrees/task-active",
+    });
+    expect(services.prewarmWorktreeShellSession).toHaveBeenCalledWith(
+      "shell-wt-task-active",
+      "/tmp/repo/.kanna-worktrees/task-active",
+      "{\"KANNA_DEV_PORT\":\"1422\"}",
+      "/tmp/repo",
+    );
+    expect(services.prewarmWorktreeShellSession).not.toHaveBeenCalledWith(
+      "shell-wt-task-blocked",
+      expect.anything(),
+      expect.anything(),
       expect.anything(),
     );
-    expect(mockState.advanceStageMock).not.toHaveBeenCalled();
+    expect(restoreUnblockedTask).toHaveBeenCalledWith(blockedItem);
+    expect(state.suspendAfterMinutes.value).toBe(7);
+    expect(state.ideCommand.value).toBe("zed");
   });
 
-  it("leaves successful active post-actions to the server-side complete-stage orchestrator", async () => {
-    const item = mockState.makeItem({
-      id: "task-post-action",
-      stage: "in progress",
-      active_post_action: "commit",
-      stage_result: JSON.stringify({ status: "success", summary: "committed" }),
-      tags: "[]",
-    });
-    mockState.loadPipelineMock.mockResolvedValueOnce({
-      name: "default",
-      stages: [
-        {
-          name: "in progress",
-          transition: "manual",
-          post_action: { name: "commit", transition: "auto", agent: "commit" },
-        },
-        { name: "pr", transition: "manual" },
-      ],
-    });
-    mockState.items = [item];
+  it("reloads the snapshot when KSP reports server state changes", async () => {
+    mockState.tauri = true;
+    const currentTask = mockState.makeItem({ id: "task-current" });
+    const externalTask = mockState.makeItem({ id: "task-external" });
 
     const state = createStoreState();
     state.repos.value = [...mockState.repos];
-    state.items.value = [item];
+    state.items.value = [currentTask];
+    state.selectedRepoId.value = "repo-1";
+    state.selectedItemId.value = "task-current";
     const services = {
       loadInitialData: vi.fn(async () => {}),
-      loadPipeline: mockState.loadPipelineMock,
-      advanceStage: mockState.advanceStageMock,
-      reloadSnapshot: mockState.reloadSnapshotMock,
-    };
-    const toast = {
-      toasts: ref([]),
-      dismiss: vi.fn(),
-      info: vi.fn(),
-      warning: vi.fn(),
-      error: vi.fn(),
-    };
-    const db = {
-      ...createDb(),
-      execute: vi.fn(async () => ({ rowsAffected: 1 })),
-    };
-    const context = createStoreContext(state, toast, services);
-    const ports = {
-      closeTaskAndReleasePorts: vi.fn(async () => {}),
-    } as unknown as import("./ports").PortsStore;
-    const initApi = createInitApi(context, ports, {
-      checkUnblocked: vi.fn(async () => {}),
-      handleAgentFinished: vi.fn(),
-      startBlockedTask: vi.fn(async () => {}),
-      restoreUnblockedTask: vi.fn(async () => {}),
-    } as unknown as Parameters<typeof createInitApi>[2]);
-
-    await initApi.init(db);
-    await getStageCompleteHandler()({ payload: { task_id: "task-post-action" } });
-
-    expect(mockState.clearPipelineItemActivePostActionMock).not.toHaveBeenCalled();
-    expect(mockState.advanceStageMock).not.toHaveBeenCalled();
-  });
-
-  it("leaves a failed active post-action in place", async () => {
-    const item = mockState.makeItem({
-      id: "task-post-action-failed",
-      stage: "in progress",
-      active_post_action: "commit",
-      stage_result: JSON.stringify({ status: "failure", summary: "dirty unrelated files" }),
-      tags: "[]",
-    });
-    mockState.loadPipelineMock.mockResolvedValueOnce({
-      name: "default",
-      stages: [
-        {
-          name: "in progress",
-          transition: "manual",
-          post_action: { name: "commit", transition: "auto", agent: "commit" },
-        },
-        { name: "pr", transition: "manual" },
-      ],
-    });
-    mockState.items = [item];
-
-    const state = createStoreState();
-    state.repos.value = [...mockState.repos];
-    state.items.value = [item];
-    const services = {
-      loadInitialData: vi.fn(async () => {}),
-      loadPipeline: mockState.loadPipelineMock,
-      advanceStage: mockState.advanceStageMock,
-      reloadSnapshot: mockState.reloadSnapshotMock,
+      reloadSnapshot: vi.fn(async () => {
+        state.items.value = [externalTask, currentTask];
+      }),
+      currentItem: computed(() => state.items.value.find((item) => item.id === state.selectedItemId.value) ?? null),
+      prewarmWorktreeShellSession: vi.fn(async () => {}),
+      spawnShellSession: vi.fn(async () => {}),
+      windowWorkspace: {
+        onSharedInvalidation: vi.fn(async () => () => undefined),
+        persistSelection: vi.fn(async () => {}),
+      },
     };
     const toast = {
       toasts: ref([]),
@@ -835,9 +910,15 @@ describe("createInitApi", () => {
     } as unknown as Parameters<typeof createInitApi>[2]);
 
     await initApi.init(createDb());
-    await getStageCompleteHandler()({ payload: { task_id: "task-post-action-failed" } });
+    await flushAsync();
 
-    expect(mockState.clearPipelineItemActivePostActionMock).not.toHaveBeenCalled();
-    expect(mockState.advanceStageMock).not.toHaveBeenCalled();
+    expect(mockState.streamClientMock.onStateChanged).toHaveBeenCalled();
+    expect(mockState.stateChangedListeners).toHaveLength(1);
+
+    mockState.stateChangedListeners[0]("tasks");
+    await flushAsync();
+
+    expect(services.reloadSnapshot).toHaveBeenCalled();
+    expect(state.selectedItemId.value).toBe("task-current");
   });
 });

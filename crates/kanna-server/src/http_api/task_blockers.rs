@@ -3,6 +3,7 @@ use crate::daemon_client::DaemonClient;
 use crate::db::Db;
 use axum::extract::State;
 use axum::Json;
+use kanna_agent_protocol::StateChangeScope;
 use std::sync::Arc;
 
 pub(super) fn resolve_existing_task_id(
@@ -292,6 +293,8 @@ pub(super) async fn block_task(
         )
     })?;
     let task_id = apply_task_blockers(&db, &task_id, &payload.blocker_task_ids)?;
+    state.publish_state_changed(StateChangeScope::Blockers);
+    state.publish_state_changed(StateChangeScope::Tasks);
     Ok(Json(crate::mobile_api::TaskActionResponse {
         task_id,
         follow_task: None,
@@ -314,6 +317,8 @@ pub(super) async fn unblock_task(
         .map_err(|e| db_write_error("db error", e))?;
     drop(db);
     start_dormant_task_if_ready(&state, &task_id, blocker_branches).await?;
+    state.publish_state_changed(StateChangeScope::Blockers);
+    state.publish_state_changed(StateChangeScope::Tasks);
     Ok(Json(crate::mobile_api::TaskActionResponse {
         task_id,
         follow_task: None,

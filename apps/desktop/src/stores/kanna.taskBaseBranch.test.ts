@@ -636,6 +636,7 @@ vi.mock("@kanna/db", () => ({
 }));
 
 import { useKannaStore } from "./kanna";
+import { setDesktopSnapshotFetcherForTests } from "../services/desktopServerClient";
 
 function createDb(): DbHandle {
   return {
@@ -712,6 +713,15 @@ async function createStore() {
 describe("kanna store task base branch integration", () => {
   beforeEach(() => {
     mockState.reset();
+    setDesktopSnapshotFetcherForTests(async () => ({
+      entries: mockState.repos.map((repo) => ({
+        repo,
+        items: mockState.pipelineItems.filter((item) => item.repo_id === repo.id),
+      })),
+      taskBlockers: mockState.taskBlockers,
+      worktreePaths: {},
+      settings: {},
+    }));
     toastErrorMock.mockClear();
     toastWarningMock.mockClear();
     publishDesktopTaskSnapshotMock.mockReset();

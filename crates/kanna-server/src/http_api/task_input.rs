@@ -1,8 +1,8 @@
 use super::state::AppState;
-use crate::config::Config;
 use crate::db::Db;
 use axum::extract::State;
 use axum::Json;
+use kanna_agent_protocol::StateChangeScope;
 use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
 use std::sync::Arc;
 
@@ -133,12 +133,12 @@ pub(super) async fn send_task_input(
 }
 
 pub(crate) async fn handle_task_terminal_state(
-    config: &Config,
+    state: &AppState,
     task_id: &str,
     success: bool,
 ) -> Result<(), String> {
     let pipeline_item_id = {
-        let db = Db::open(&config.db_path).map_err(|e| format!("db error: {}", e))?;
+        let db = Db::open(&state.config.db_path).map_err(|e| format!("db error: {}", e))?;
         let Some(pipeline_item_id) = db
             .resolve_pipeline_item_id(task_id)
             .map_err(|e| format!("db error: {}", e))?
@@ -149,15 +149,17 @@ pub(crate) async fn handle_task_terminal_state(
             .map_err(|e| format!("db error: {}", e))?;
         pipeline_item_id
     };
-    notify_task_completion(config, &pipeline_item_id, success).await
+    state.publish_state_changed(StateChangeScope::Tasks);
+    notify_task_completion(state, &pipeline_item_id, success).await
 }
 
 pub(super) async fn notify_task_completion(
-    config: &Config,
+    state: &AppState,
     child_id: &str,
     success: bool,
 ) -> Result<(), String> {
     let notification = {
+        let config = state.config();
         let db = Db::open(&config.db_path).map_err(|e| format!("db error: {}", e))?;
         db.claim_task_notification(child_id)
             .map_err(|e| format!("db error: {}", e))?
@@ -165,6 +167,8 @@ pub(super) async fn notify_task_completion(
     let Some(notification) = notification else {
         return Ok(());
     };
+    state.publish_state_changed(StateChangeScope::Tasks);
+    let config = state.config();
     let status = if success { "success" } else { "failure" };
     let message = format!(
         "TASK {} DONE [{}]: {}",

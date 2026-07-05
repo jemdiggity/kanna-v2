@@ -8,8 +8,8 @@ let sharedClient: StreamClient | null = null;
 let sharedClientPromise: Promise<StreamClient> | null = null;
 const connectionListeners = new Set<ConnectionListener>();
 
-function streamUrlFromPort(port: string | null): string {
-  const resolvedPort = port && port.trim().length > 0 ? port.trim() : "48120";
+function streamUrlFromPort(port: unknown): string {
+  const resolvedPort = typeof port === "string" && port.trim().length > 0 ? port.trim() : "48120";
   return `ws://127.0.0.1:${resolvedPort}/v1/stream`;
 }
 
