@@ -542,6 +542,7 @@ If a behavior should have E2E coverage but cannot reasonably get it yet, the cha
 - `.kanna/` per repo — project-level Kanna config:
   - `config.json` — `setup` (commands run in each new worktree), `teardown` (cleanup commands run best-effort in a workspace whenever the task leaves it: stage-transition forks, advancing past the final stage, and task close), `test` (test commands), `ports` (env var → base port mapping), `pipeline` (default pipeline name)
   - `agents/{name}/AGENT.md` — agent definitions (YAML frontmatter + markdown body). Built-in agents ship as Tauri resources; per-repo files override built-ins by name.
+  - `agents/{name}/EXTEND.md` — repo-local agent extension layered onto the resolved agent (repo override or built-in): the body is appended to the agent prompt and optional frontmatter fields (`description`, `model`, `permission_mode`, `allowed_tools`, `agent_provider`) replace the base's. Lets a repo customize a default agent without rewriting it (e.g. this repo's `review/EXTEND.md` requires the full unit & integration suites). Extensions are read only from the open repo, never from bundled resources.
   - `pipelines/{name}.json` — pipeline definitions (stages, environments, stage policies). Built-in `default.json` ships as Tauri resource.
   - `tasks/{slug}/agent.md` — custom task templates with YAML frontmatter (prompt, model, permissions, allowed tools)
 

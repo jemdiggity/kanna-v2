@@ -48,6 +48,22 @@ export interface AgentDefinition {
   prompt: string; // markdown body
 }
 
+/**
+ * A repo-local extension (`.kanna/agents/{name}/EXTEND.md`) layered onto the
+ * resolved agent definition — the repo's own AGENT.md override or the bundled
+ * built-in. The body is appended to the base prompt; frontmatter fields
+ * replace the base's when present. The agent's identity (name) comes from the
+ * directory, so an extension cannot rename the agent.
+ */
+export interface AgentExtension {
+  description?: string;
+  agent_provider?: string | string[];
+  model?: string;
+  permission_mode?: "default" | "acceptEdits" | "dontAsk";
+  allowed_tools?: string[];
+  prompt: string; // markdown body appended to the base prompt
+}
+
 export interface StageCompleteResult {
   status: "success" | "failure";
   summary: string;

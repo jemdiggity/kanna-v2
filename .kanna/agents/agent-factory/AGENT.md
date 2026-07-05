@@ -58,6 +58,28 @@ agent_provider:
   - antigravity
 ```
 
+### Extending a Built-in Agent
+
+To customize a default agent's behavior without rewriting it, write
+`.kanna/agents/{name}/EXTEND.md` instead of a full `AGENT.md`. The extension
+is layered onto the resolved agent (the repo's own `AGENT.md` override, or the
+built-in when the repo has none): its markdown body is appended to the agent's
+prompt, and its optional frontmatter fields (`description`, `model`,
+`permission_mode`, `allowed_tools`, `agent_provider`) replace the base's when
+present. The agent's identity comes from the directory name, so an extension
+cannot rename the agent. Frontmatter is optional — a plain markdown file is a
+pure prompt extension:
+
+```markdown
+## Repository Test Requirements
+
+Before passing review, run the full unit and integration suites.
+```
+
+Prefer an `EXTEND.md` over copying a built-in agent's body: the built-in keeps
+improving with Kanna updates, and the extension stays a small repo-specific
+delta.
+
 ### Stage-Complete Signal
 
 If the agent should signal completion to the Kanna pipeline engine, include instructions like these in its body:
@@ -87,7 +109,7 @@ kanna-cli stage-complete --task-id "$KANNA_TASK_ID" --status failure --summary "
 
 1. Ask the user to describe the agent's role — what it does, what inputs it needs, what it produces.
 2. Ask any clarifying questions needed to write complete instructions.
-3. Write the agent's `AGENT.md` to `.kanna/agents/{name}/AGENT.md` in the current repo.
+3. Write the agent's `AGENT.md` to `.kanna/agents/{name}/AGENT.md` in the current repo. If the user wants to customize a built-in agent rather than define a new one, write `.kanna/agents/{name}/EXTEND.md` instead.
 4. Confirm the file was written and show the user its contents.
 
 ## Completion

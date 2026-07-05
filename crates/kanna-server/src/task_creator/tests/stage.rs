@@ -335,6 +335,123 @@ fn prepare_advance_stage_uses_stored_pipeline_snapshot_for_existing_task() {
 }
 
 #[test]
+fn prepare_advance_stage_applies_repo_agent_extension() {
+    let repo_root = std::env::temp_dir().join(format!("kanna-stage-extend-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&repo_root);
+    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::create_dir_all(repo_root.join(".kanna/agents/reviewer")).unwrap();
+    std::fs::write(repo_root.join("README.md"), "test repo").unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/pipelines/default.json"),
+        r#"{
+  "stages": [
+    { "name": "in progress", "transition": "manual" },
+    { "name": "review", "transition": "manual", "agent": "reviewer", "prompt": "Review prompt $PREV_RESULT" }
+  ]
+}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/agents/reviewer/AGENT.md"),
+        "---\nagent_provider: claude\n---\nBase reviewer: $TASK_PROMPT",
+    )
+    .unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/agents/reviewer/EXTEND.md"),
+        "Repo extension: run the full unit and integration suites.",
+    )
+    .unwrap();
+    assert!(Command::new("git")
+        .arg("init")
+        .arg("-b")
+        .arg("main")
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["config", "user.email", "test@example.com"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["config", "user.name", "Test User"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["add", "README.md", ".kanna"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["commit", "-m", "init"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["branch", "task-ext-branch"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+
+    let config = test_config("stage-agent-extension");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Fix the shell",
+        Some("Shell fix"),
+        "in progress",
+        "2026-07-02 00:00:00",
+    )
+    .unwrap();
+    db.update_test_pipeline_item_stage_context(
+        "task-1",
+        "task-ext-branch",
+        "default",
+        None,
+        "claude",
+    )
+    .unwrap();
+    insert_finished_stage_run(
+        &db,
+        "task-1",
+        "in progress",
+        "{\"status\":\"success\",\"summary\":\"done\"}",
+    );
+
+    let run = match prepare_advance_stage_for_api(&db, &config, "task-1").unwrap() {
+        PreparedStageTransition::Run(run) => run,
+        PreparedStageTransition::Post(_) => panic!("expected stage swap, got post dispatch"),
+        PreparedStageTransition::Close { .. } => panic!("expected in-place stage run"),
+    };
+
+    assert_eq!(run.next_stage, "review");
+    match run.session {
+        PreparedSessionSpawn::Pty { args, .. } => {
+            let command = args.join(" ");
+            assert!(
+                command.contains(
+                    "Base reviewer: Fix the shell\n\nRepo extension: run the full unit and integration suites.\n\nReview prompt {\"status\":\"success\",\"summary\":\"done\"}"
+                ),
+                "unexpected command: {command}"
+            );
+        }
+        PreparedSessionSpawn::Agent { .. } => panic!("expected pty session"),
+    }
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
 fn prepare_advance_stage_substitutes_previous_stage_run_result_before_legacy_stage_result() {
     let repo_root = std::env::temp_dir().join(format!(
         "kanna-stage-run-prev-result-{}",
