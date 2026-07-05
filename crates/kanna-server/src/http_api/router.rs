@@ -7,8 +7,8 @@ use super::snapshot::get_snapshot;
 use super::state::{AppState, HttpInvokeResponse};
 use super::status::status;
 use super::task_actions::{
-    advance_stage, close_task, complete_stage, request_revision, rerun_stage, run_merge_agent,
-    set_task_parent,
+    advance_stage, close_task, complete_stage, reopen_task, request_revision, rerun_stage,
+    run_merge_agent, set_task_parent,
 };
 use super::task_blockers::{block_task, unblock_task};
 use super::task_input::send_task_input;
@@ -61,6 +61,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             post(set_task_parent),
         )
         .route("/v1/tasks/{task_id}/actions/close", post(close_task))
+        .route("/v1/tasks/{task_id}/actions/reopen", post(reopen_task))
         .route(
             "/v1/tasks/{task_id}/actions/run-merge-agent",
             post(run_merge_agent),

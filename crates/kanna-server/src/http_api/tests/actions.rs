@@ -92,6 +92,211 @@ async fn close_task_route_uses_task_closer() {
 }
 
 #[tokio::test]
+async fn close_task_route_releases_claimed_ports() {
+    use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+
+    let unique = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let daemon_dir = std::env::temp_dir().join(format!("kanna-http-close-ports-daemon-{unique}"));
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+    let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+    let _ = std::fs::remove_file(&socket_path);
+    let daemon_listener = UnixListener::bind(&socket_path).unwrap();
+    let daemon_server = tokio::spawn(async move {
+        let (stream, _) = daemon_listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        for expected_session_id in ["task-1", "shell-wt-task-1", "td-task-1"] {
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+            match command {
+                DaemonCommand::Kill { session_id } => assert_eq!(session_id, expected_session_id),
+                other => panic!("expected kill command, got {other:?}"),
+            }
+            write_half
+                .write_all(
+                    format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap()).as_bytes(),
+                )
+                .await
+                .unwrap();
+        }
+    });
+
+    let db_path = Db::test_db_path(&format!("http-close-ports-{unique}"));
+    let db = Db::open_for_tests(&db_path).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "task prompt",
+        Some("Task"),
+        "in progress",
+        "2026-04-17 07:00:00",
+    )
+    .unwrap();
+    assert!(db
+        .claim_task_port("task-1", "KANNA_DEV_PORT", 1421)
+        .unwrap());
+    assert!(db
+        .claim_task_port("task-1", "KANNA_MOBILE_PORT", 19001)
+        .unwrap());
+    drop(db);
+
+    let config = Config {
+        relay_url: "wss://relay.example".to_string(),
+        device_token: "device-token".to_string(),
+        firebase_project_id: "kanna-local".to_string(),
+        firebase_auth_emulator_url: None,
+        firebase_firestore_emulator_host: None,
+        daemon_dir: daemon_dir.to_string_lossy().to_string(),
+        db_path: db_path.clone(),
+        kanna_cli_path: None,
+        desktop_id: "desktop-1".to_string(),
+        desktop_secret: Some("desktop-secret".to_string()),
+        desktop_name: "Studio Mac".to_string(),
+        server_version: Some("test-version".to_string()),
+        lan_host: "127.0.0.1".to_string(),
+        lan_port: 48120,
+        pairing_store_path: format!("/tmp/kanna-pairings-close-ports-{unique}.json"),
+    };
+    let app = super::router(Arc::new(super::AppState::new(config)));
+
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks/task-1/actions/close")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let db = Db::open(&db_path).unwrap();
+    assert!(db
+        .get_pipeline_item("task-1")
+        .unwrap()
+        .unwrap()
+        .closed_at
+        .is_some());
+    assert!(
+        db.list_task_ports_for_item("task-1").unwrap().is_empty(),
+        "closing a task must free its claimed ports for later tasks"
+    );
+    daemon_server.await.unwrap();
+    let _ = std::fs::remove_file(&socket_path);
+    let _ = std::fs::remove_dir_all(&daemon_dir);
+}
+
+#[tokio::test]
+async fn reopen_task_route_reopens_and_reclaims_ports_from_worktree_config() {
+    let unique = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let repo_root = std::env::temp_dir().join(format!("kanna-http-reopen-ports-{unique}"));
+    let worktree_path = repo_root.join(".kanna-worktrees").join("task-closed");
+    std::fs::create_dir_all(worktree_path.join(".kanna")).unwrap();
+    std::fs::write(
+        worktree_path.join(".kanna/config.json"),
+        r#"{"ports":{"KANNA_DEV_PORT":1420,"API_PORT":3000}}"#,
+    )
+    .unwrap();
+
+    let db_path = Db::test_db_path(&format!("http-reopen-ports-{unique}"));
+    let db = Db::open_for_tests(&db_path).expect("open test db");
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    db.insert_test_pipeline_item(
+        "task-closed",
+        "repo-1",
+        "task prompt",
+        Some("Task"),
+        "in progress",
+        "2026-04-17 07:00:00",
+    )
+    .unwrap();
+    db.upsert_worktree(
+        "wt-task-closed",
+        "task-closed",
+        &worktree_path.to_string_lossy(),
+        "task-closed",
+    )
+    .unwrap();
+    db.close_pipeline_item("task-closed").unwrap();
+    db.insert_test_pipeline_item(
+        "task-other",
+        "repo-1",
+        "other prompt",
+        Some("Other"),
+        "in progress",
+        "2026-04-17 08:00:00",
+    )
+    .unwrap();
+    assert!(db
+        .claim_task_port("task-other", "KANNA_DEV_PORT", 1420)
+        .unwrap());
+    assert!(db.claim_task_port("task-other", "API_PORT", 3000).unwrap());
+    drop(db);
+
+    let config = Config {
+        relay_url: "wss://relay.example".to_string(),
+        device_token: "device-token".to_string(),
+        firebase_project_id: "kanna-local".to_string(),
+        firebase_auth_emulator_url: None,
+        firebase_firestore_emulator_host: None,
+        daemon_dir: "/tmp/kanna-daemon".to_string(),
+        db_path: db_path.clone(),
+        kanna_cli_path: None,
+        desktop_id: "desktop-1".to_string(),
+        desktop_secret: Some("desktop-secret".to_string()),
+        desktop_name: "Studio Mac".to_string(),
+        server_version: Some("test-version".to_string()),
+        lan_host: "127.0.0.1".to_string(),
+        lan_port: 48120,
+        pairing_store_path: format!("/tmp/kanna-pairings-reopen-ports-{unique}.json"),
+    };
+    let app = super::router(Arc::new(super::AppState::new(config)));
+
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks/task-closed/actions/reopen")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let db = Db::open(&db_path).unwrap();
+    let item = db.get_pipeline_item("task-closed").unwrap().unwrap();
+    assert!(item.closed_at.is_none());
+    let (port_offset, port_env) = db.get_test_pipeline_item_ports("task-closed").unwrap();
+    assert_eq!(port_offset, Some(1421));
+    assert_eq!(
+        port_env.as_deref(),
+        Some(r#"{"API_PORT":"3001","KANNA_DEV_PORT":"1421"}"#)
+    );
+    let ports = db.list_task_ports_for_item("task-closed").unwrap();
+    assert_eq!(ports.get("KANNA_DEV_PORT"), Some(&1421));
+    assert_eq!(ports.get("API_PORT"), Some(&3001));
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[tokio::test]
 async fn close_pr_task_sends_blocker_close_instruction_with_renamed_branch_to_running_dependents() {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};

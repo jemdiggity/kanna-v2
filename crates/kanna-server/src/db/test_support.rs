@@ -22,6 +22,18 @@ impl Db {
     }
 
     #[cfg(test)]
+    pub fn get_test_pipeline_item_ports(
+        &self,
+        id: &str,
+    ) -> Result<(Option<i64>, Option<String>), rusqlite::Error> {
+        self.conn.query_row(
+            "SELECT port_offset, port_env FROM pipeline_item WHERE id = ?",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+    }
+
+    #[cfg(test)]
     fn init_test_schema(&self) -> Result<(), rusqlite::Error> {
         self.conn.execute_batch(
             r#"

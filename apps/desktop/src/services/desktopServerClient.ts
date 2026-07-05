@@ -60,7 +60,24 @@ async function requestJson<T>(path: string, options: { retryMs?: number } = {}):
   }
 }
 
+async function post(path: string): Promise<void> {
+  const baseUrl = await desktopServerBaseUrl();
+  const response = await fetch(`${baseUrl}${path}`, { method: "POST" });
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    throw new Error(`POST ${path} failed: ${response.status}${body ? ` ${body}` : ""}`);
+  }
+}
+
 export async function fetchDesktopSnapshot(): Promise<DesktopSnapshot> {
   if (snapshotFetcherForTests) return await snapshotFetcherForTests();
   return await requestJson<DesktopSnapshot>("/v1/snapshot", { retryMs: 15_000 });
+}
+
+export async function closeDesktopTask(taskId: string): Promise<void> {
+  await post(`/v1/tasks/${encodeURIComponent(taskId)}/actions/close`);
+}
+
+export async function reopenDesktopTask(taskId: string): Promise<void> {
+  await post(`/v1/tasks/${encodeURIComponent(taskId)}/actions/reopen`);
 }

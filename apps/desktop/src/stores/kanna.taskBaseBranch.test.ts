@@ -1482,7 +1482,7 @@ describe("kanna store task base branch integration", () => {
     expect(mockState.invokeMock).not.toHaveBeenCalledWith("run_script", expect.anything());
   });
 
-  it("assigns ports freshly on undo close instead of restoring the task's previous assignment", async () => {
+  it("undo close reopens the task through the local kanna-server action endpoint", async () => {
     mockState.repoConfig = {
       ports: {
         KANNA_DEV_PORT: 1420,
@@ -1505,20 +1505,14 @@ describe("kanna store task base branch integration", () => {
 
     await store.undoClose();
 
-    const reopenedItem = mockState.pipelineItems[0];
-    expect(reopenedItem.closed_at).toBeNull();
-    expect(reopenedItem.port_offset).toBe(1421);
-    expect(reopenedItem.port_env).toBe(JSON.stringify({
-      KANNA_DEV_PORT: "1421",
-      API_PORT: "3001",
-    }));
-    expect(mockState.taskPorts.map((taskPort) => `${taskPort.env_name}:${taskPort.port}`)).toEqual([
-      "KANNA_DEV_PORT:1421",
-      "API_PORT:3001",
-    ]);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:48120/v1/tasks/item-closed/actions/reopen",
+      { method: "POST" },
+    );
+    expect(mockState.taskPorts).toEqual([]);
   });
 
-  it("reclaims ports on undo close from the task worktree config instead of the repo root config", async () => {
+  it("undo close leaves port reassignment to the server", async () => {
     mockState.repoConfig = {
       ports: {
         KANNA_DEV_PORT: 1420,
@@ -1550,17 +1544,11 @@ describe("kanna store task base branch integration", () => {
 
     await store.undoClose();
 
-    const reopenedItem = mockState.pipelineItems[0];
-    expect(reopenedItem.closed_at).toBeNull();
-    expect(reopenedItem.port_offset).toBe(1421);
-    expect(reopenedItem.port_env).toBe(JSON.stringify({
-      KANNA_DEV_PORT: "1421",
-      KANNA_TRANSFER_PORT: "4456",
-    }));
-    expect(mockState.taskPorts.map((taskPort) => `${taskPort.env_name}:${taskPort.port}`)).toEqual([
-      "KANNA_DEV_PORT:1421",
-      "KANNA_TRANSFER_PORT:4456",
-    ]);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:48120/v1/tasks/item-closed/actions/reopen",
+      { method: "POST" },
+    );
+    expect(mockState.taskPorts).toEqual([]);
   });
 
   it("passes workspace env and PATH updates to worktree shell sessions", async () => {
@@ -2091,11 +2079,14 @@ describe("kanna store task base branch integration", () => {
     await store.closeTask();
     await flushStore();
 
-    expect(mockState.invokeMock).toHaveBeenCalledWith("kill_session", { sessionId: "item-blocked" });
-    expect(mockState.invokeMock).toHaveBeenCalledWith("kill_session", { sessionId: "shell-wt-item-blocked" });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:48120/v1/tasks/item-blocked/actions/close",
+      { method: "POST" },
+    );
+    expect(mockState.invokeMock).not.toHaveBeenCalledWith("kill_session", expect.anything());
   });
 
-  it("marks a task as tearing down before spawning its teardown session", async () => {
+  it("delegates teardown closes to the server action instead of spawning teardown locally", async () => {
     mockState.repoConfig = {
       teardown: ["pnpm cleanup"],
     };
@@ -2113,20 +2104,18 @@ describe("kanna store task base branch integration", () => {
     await store.closeTask();
     await flushStore();
 
-    const teardownSpawnCallIndex = mockState.invokeMock.mock.calls.findIndex(
-      ([command, args]) =>
-        command === "spawn_session" &&
-        args?.sessionId === "td-item-teardown",
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:48120/v1/tasks/item-teardown/actions/close",
+      { method: "POST" },
     );
-    expect(teardownSpawnCallIndex).toBeGreaterThanOrEqual(0);
-
-    const markOrder = mockState.markPipelineItemTearingDownMock.mock.invocationCallOrder[0];
-    const teardownSpawnOrder = mockState.invokeMock.mock.invocationCallOrder[teardownSpawnCallIndex];
-
-    expect(markOrder).toBeLessThan(teardownSpawnOrder);
+    expect(mockState.markPipelineItemTearingDownMock).not.toHaveBeenCalled();
+    expect(mockState.invokeMock).not.toHaveBeenCalledWith(
+      "spawn_session",
+      expect.objectContaining({ sessionId: "td-item-teardown" }),
+    );
   });
 
-  it("kills SDK agent sessions before running teardown commands", async () => {
+  it("delegates SDK agent close lifecycle to the server action", async () => {
     mockState.repoConfig = {
       teardown: ["pnpm cleanup"],
       ports: {
@@ -2152,24 +2141,19 @@ describe("kanna store task base branch integration", () => {
     await store.closeTask();
     await flushStore();
 
-    expect(mockState.invokeMock).toHaveBeenCalledWith("kill_session", { sessionId: "item-sdk" });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:48120/v1/tasks/item-sdk/actions/close",
+      { method: "POST" },
+    );
+    expect(mockState.invokeMock).not.toHaveBeenCalledWith("kill_session", { sessionId: "item-sdk" });
     expect(mockState.invokeMock).not.toHaveBeenCalledWith("signal_session", {
       sessionId: "item-sdk",
       signal: "SIGINT",
     });
-    expect(mockState.invokeMock).toHaveBeenCalledWith(
+    expect(mockState.invokeMock).not.toHaveBeenCalledWith(
       "spawn_session",
       expect.objectContaining({
         sessionId: "td-item-sdk",
-        cwd: "/tmp/repo/.kanna-worktrees/task-item-sdk",
-        args: expect.arrayContaining([expect.stringContaining("pnpm cleanup")]),
-        env: expect.objectContaining({
-          KANNA_WORKTREE: "1",
-          KANNA_DEV_PORT: "1421",
-          KANNA_CLI_PATH: "/usr/bin/kanna-cli",
-          KANNA_TASK_ID: "item-sdk",
-          KANNA_SOCKET_PATH: "/tmp/kanna.sock",
-        }),
       }),
     );
   });

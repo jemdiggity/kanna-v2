@@ -478,6 +478,25 @@ impl Db {
             return Err(rusqlite::Error::QueryReturnedNoRows);
         }
         self.cancel_running_stage_runs(&pipeline_item_id)?;
+        self.release_task_ports(&pipeline_item_id)?;
+        Ok(())
+    }
+
+    pub fn reopen_pipeline_item(&self, id: &str) -> Result<(), rusqlite::Error> {
+        let Some(pipeline_item_id) = self.resolve_pipeline_item_id(id)? else {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        };
+        let rows_affected = self.conn.execute(
+            "UPDATE pipeline_item
+             SET teardown_started_at = NULL,
+                 closed_at = NULL,
+                 updated_at = datetime('now')
+             WHERE id = ?",
+            [&pipeline_item_id],
+        )?;
+        if rows_affected == 0 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
         Ok(())
     }
 

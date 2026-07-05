@@ -47,7 +47,7 @@ export function createTasksApi(
   const repoActions = createTaskRepoActions(context);
   const itemActions = createTaskItemActions(context, ports);
   const blockedActions = createTaskBlockedActions(context, ports);
-  const closeActions = createTaskCloseActions(context, ports, {
+  const closeActions = createTaskCloseActions(context, {
     checkUnblocked: blockedActions.checkUnblocked,
   });
   const metadataActions = createTaskMetadataActions(context);

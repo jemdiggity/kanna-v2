@@ -337,6 +337,25 @@ pub(super) async fn close_task(
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
+pub(super) async fn reopen_task(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
+    let db = Db::open(&state.config.db_path).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("db error: {}", e),
+        )
+    })?;
+    let task_id = crate::task_creator::reopen_task_for_api(&db, &task_id)
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    state.publish_state_changed(StateChangeScope::Tasks);
+    Ok(Json(crate::mobile_api::TaskActionResponse {
+        task_id,
+        follow_task: None,
+    }))
+}
+
 /// Close a task that advanced past its final pipeline stage. Shared by
 /// `advance_stage` and `complete_stage`: hands blocker-close instructions to
 /// dependents with workspaces, kills the task's daemon sessions, closes the

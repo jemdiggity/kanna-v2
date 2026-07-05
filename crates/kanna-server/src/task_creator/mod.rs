@@ -1163,15 +1163,44 @@ fn persist_task_ports(
 ) -> Result<(), String> {
     let first_port = port_env
         .values()
-        .next()
-        .and_then(|value| value.parse::<i64>().ok());
+        .filter_map(|value| value.parse::<i64>().ok())
+        .min();
     let port_env_json = if port_env.is_empty() {
         None
     } else {
-        Some(serde_json::to_string(&port_env).map_err(|e| format!("serialize error: {}", e))?)
+        let ordered: std::collections::BTreeMap<&String, &String> = port_env.iter().collect();
+        Some(serde_json::to_string(&ordered).map_err(|e| format!("serialize error: {}", e))?)
     };
     db.update_pipeline_item_ports(task_id, first_port, port_env_json.as_deref())
         .map_err(|e| format!("db error: {}", e))
+}
+
+pub(crate) fn reopen_task_for_api(db: &Db, task_or_branch_id: &str) -> Result<String, String> {
+    let task_id = db
+        .resolve_pipeline_item_id(task_or_branch_id)
+        .map_err(|e| format!("db error: {}", e))?
+        .ok_or_else(|| format!("task not found: {task_or_branch_id}"))?;
+    let item = db
+        .get_pipeline_item(&task_id)
+        .map_err(|e| format!("db error: {}", e))?
+        .ok_or_else(|| format!("task not found: {task_id}"))?;
+    let repo = db
+        .get_repo(&item.repo_id)
+        .map_err(|e| format!("db error: {}", e))?
+        .ok_or_else(|| format!("repo not found for task: {task_id}"))?;
+    let config_root = db
+        .get_task_worktree_path(&task_id)
+        .map_err(|e| format!("db error: {}", e))?
+        .unwrap_or(repo.path);
+    let repo_config = read_repo_config(&config_root)?;
+
+    db.release_task_ports(&task_id)
+        .map_err(|e| format!("db error: {}", e))?;
+    let port_env = claim_task_ports(db, &task_id, repo_config.ports.as_ref())?;
+    persist_task_ports(db, &task_id, &port_env)?;
+    db.reopen_pipeline_item(&task_id)
+        .map_err(|e| format!("db error: {}", e))?;
+    Ok(task_id)
 }
 
 fn create_new_task_worktree(
