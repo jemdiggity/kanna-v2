@@ -786,7 +786,7 @@ describe("kanna store task base branch integration", () => {
         repo_id: request.repoId,
         prompt: request.prompt,
         pipeline: request.pipelineName ?? "default",
-        stage: "in progress",
+        stage: request.stage ?? "in progress",
         branch,
         agent_type: request.agentType ?? "pty",
         agent_provider: request.agentProvider ?? "claude",
@@ -873,7 +873,7 @@ describe("kanna store task base branch integration", () => {
         taskId: id,
         repoId: request.repoId,
         title: request.displayName ?? request.prompt,
-        stage: "in progress",
+        stage: request.stage ?? "in progress",
         agentType: request.agentType ?? "pty",
         worktreePath,
       };

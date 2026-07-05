@@ -185,7 +185,7 @@ function createTransferDb(initial: {
       prompt: request.prompt,
       display_name: request.displayName ?? null,
       pipeline: request.pipelineName ?? "default",
-      stage: "in progress",
+      stage: request.stage ?? "in progress",
       branch,
       agent_type: request.agentType ?? "pty",
       agent_provider: agentProvider,
@@ -1428,6 +1428,7 @@ describe("incoming transfer approval", () => {
     const { useKannaStore } = await import("./kanna");
     const store = useKannaStore();
     const payload = buildIncomingTransferPayload();
+    payload.task.stage = "review";
     const fakeDb = createTransferDb({
       transfers: [{
         id: "transfer-1",
@@ -1470,7 +1471,7 @@ describe("incoming transfer approval", () => {
       repo_id: fakeDb.tables.repo[0]?.id,
       prompt: "Fix handoff",
       branch: localTaskId ? `task-${localTaskId}` : undefined,
-      stage: "in progress",
+      stage: "review",
       display_name: "Transferred task",
     });
     expect(fakeDb.tables.task_transfer[0]).toMatchObject({

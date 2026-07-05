@@ -608,7 +608,7 @@ pub(crate) fn prepare_task_for_api(
             pipeline_def: None,
             base_ref: request.base_ref,
             stored_base_ref: None,
-            stage_override: None,
+            stage_override: request.stage,
             explicit_provider,
             default_provider,
             agent_type: request.agent_type,
@@ -734,10 +734,18 @@ pub(crate) fn create_dormant_task_for_api(
     let pipeline = read_pipeline_definition(&repo.path, &pipeline_name)?;
     let pipeline_def_json =
         serde_json::to_string(&pipeline).map_err(|e| format!("serialize error: {}", e))?;
-    let stage = pipeline
-        .stages
-        .first()
-        .ok_or_else(|| format!("pipeline has no stages: {}", pipeline_name))?;
+    let stage = if let Some(stage_name) = request.stage.as_deref() {
+        pipeline
+            .stages
+            .iter()
+            .find(|stage| stage.name == stage_name)
+            .ok_or_else(|| format!("stage not found in pipeline: {}", stage_name))?
+    } else {
+        pipeline
+            .stages
+            .first()
+            .ok_or_else(|| format!("pipeline has no stages: {}", pipeline_name))?
+    };
     let agent = if let Some(agent_name) = stage.agent.as_deref() {
         Some(read_agent_definition(&repo.path, agent_name)?)
     } else {

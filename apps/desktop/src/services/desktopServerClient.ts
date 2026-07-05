@@ -148,6 +148,7 @@ export interface CreateDesktopTaskRequest {
   prompt: string;
   displayName?: string | null;
   pipelineName?: string;
+  stage?: string;
   baseRef?: string | null;
   agentProvider?: string;
   agentType?: string;

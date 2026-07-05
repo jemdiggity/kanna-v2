@@ -129,6 +129,7 @@ export function createTaskItemActions(
             prompt: effectivePrompt,
             displayName,
             pipelineName: opts?.pipelineName,
+            stage: opts?.stage,
             baseRef,
             agentProvider: effectiveAgentProvider,
             agentType: effectiveAgentType,
