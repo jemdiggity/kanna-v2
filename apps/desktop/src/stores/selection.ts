@@ -1,9 +1,11 @@
 import { computed, type ComputedRef } from "vue";
 import { watchDebounced } from "@vueuse/core";
 import { DEFAULT_STAGE_ORDER } from "@kanna/core";
-import { insertOperatorEvent, setSetting, updatePipelineItemActivity, type PipelineItem, type Repo } from "@kanna/db";
+import { insertOperatorEvent, updatePipelineItemActivity } from "@kanna/db";
+import type { PipelineItem, Repo } from "../types/kanna";
 import { createNavigationHistory } from "../composables/useNavigationHistory";
 import { beginTaskSwitch } from "../perf/taskSwitchPerf";
+import { putDesktopSetting } from "../services/desktopServerClient";
 import { sortSidebarItemsForRepo } from "../utils/sidebarOrdering";
 import { requireService, type StoreContext } from "./state";
 
@@ -116,7 +118,7 @@ export function createSelectionApi(context: StoreContext): SelectionApi {
     context.state.selectedRepoId.value = repoId;
     context.state.selectedItemId.value = context.state.lastSelectedItemByRepo.value[repoId] ?? null;
     logSelection("selectRepo", previousItemId, context.state.selectedItemId.value, { repoId });
-    await setSetting(context.requireDb(), "selected_repo_id", repoId);
+    await putDesktopSetting("selected_repo_id", repoId);
     await persistWindowSelection();
   }
 

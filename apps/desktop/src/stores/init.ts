@@ -1,4 +1,4 @@
-import { setSetting, type DbHandle, type PipelineItem, type TaskBlocker } from "@kanna/db";
+import type { DbHandle, PipelineItem, TaskBlocker } from "../types/kanna";
 import { invoke } from "../invoke";
 import { isTauri } from "../tauri-mock";
 import { listen } from "../listen";
@@ -19,6 +19,7 @@ import { resolveTaskItemForDaemonSession } from "./taskSessionIdentity";
 import { requireService, type StoreContext } from "./state";
 import { applySnapshotSettingsToState } from "./snapshotSettings";
 import { cleanupClosedTaskWorktrees } from "./taskWorktreeCleanup";
+import { putDesktopSetting } from "../services/desktopServerClient";
 
 export interface InitApi {
   init: (db: DbHandle) => Promise<void>;
@@ -142,7 +143,7 @@ export function createInitApi(
   }
 
   async function savePreference(key: string, value: string) {
-    await setSetting(context.requireDb(), key, value);
+    await putDesktopSetting(key, value);
     const reloadSnapshot = context.services.reloadSnapshot;
     if (reloadSnapshot) {
       await reloadSnapshot();
@@ -166,7 +167,7 @@ export function createInitApi(
           console.warn("[store] failed to retire stale worktree shell:", { sessionId, error });
         }),
       ));
-      await setSetting(context.requireDb(), WORKTREE_SHELL_ENV_GENERATION_KEY, WORKTREE_SHELL_ENV_GENERATION);
+      await putDesktopSetting(WORKTREE_SHELL_ENV_GENERATION_KEY, WORKTREE_SHELL_ENV_GENERATION);
       context.state.snapshotSettings.value = {
         ...context.state.snapshotSettings.value,
         [WORKTREE_SHELL_ENV_GENERATION_KEY]: WORKTREE_SHELL_ENV_GENERATION,

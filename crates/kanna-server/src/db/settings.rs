@@ -12,6 +12,15 @@ impl Db {
             .optional()
     }
 
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?, ?)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )?;
+        Ok(())
+    }
+
     pub fn select_raw(&self, query: &str, bind_values: &[Value]) -> Result<Value, rusqlite::Error> {
         // SECURITY: reject non-SELECT queries
         let trimmed = query.trim_start().to_uppercase();
