@@ -51,7 +51,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/v1/tasks/recent", get(list_recent_tasks))
         .route("/v1/tasks/search", get(search_tasks))
-        .route("/v1/tasks/closed-identities", get(list_closed_task_identities))
+        .route(
+            "/v1/tasks/closed-identities",
+            get(list_closed_task_identities),
+        )
         .route("/v1/tasks", post(create_task))
         .route("/v1/tasks/{task_id}", get(get_task).patch(update_task))
         .route(

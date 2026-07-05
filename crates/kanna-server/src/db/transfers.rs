@@ -31,7 +31,10 @@ impl Db {
         rows.collect()
     }
 
-    pub fn claim_pending_incoming_transfer(&self, transfer_id: &str) -> Result<bool, rusqlite::Error> {
+    pub fn claim_pending_incoming_transfer(
+        &self,
+        transfer_id: &str,
+    ) -> Result<bool, rusqlite::Error> {
         let rows_affected = self.conn.execute(
             "UPDATE task_transfer
              SET status = 'streaming', error = NULL

@@ -67,8 +67,10 @@ impl Db {
 
         let bucket_size = detect_bucket_size(&items[0].created_at);
         let task_buckets = build_task_buckets(&items, &bucket_size);
-        let avg_time_in_state =
-            self.average_time_in_state(repo_id, &items.iter().filter(|item| item.closed_at.is_some()).count())?;
+        let avg_time_in_state = self.average_time_in_state(
+            repo_id,
+            &items.iter().filter(|item| item.closed_at.is_some()).count(),
+        )?;
         let operator_events = self.list_analytics_operator_events(repo_id)?;
         let has_operator_data = operator_events
             .iter()
@@ -298,7 +300,10 @@ fn bucket_key(date_str: &str, size: &str) -> String {
             civil_from_days(monday_days)
         }
         "monthly" => format!("{:04}-{:02}", date_time.year, date_time.month),
-        _ => format!("{:04}-{:02}-{:02}", date_time.year, date_time.month, date_time.day),
+        _ => format!(
+            "{:04}-{:02}-{:02}",
+            date_time.year, date_time.month, date_time.day
+        ),
     }
 }
 
@@ -349,7 +354,10 @@ fn event_time(event: &OperatorEventRow) -> Option<i64> {
     parse_datetime(&event.created_at).map(|dt| dt.timestamp_millis())
 }
 
-fn compute_operator_metrics(events: &[OperatorEventRow], items: &[AnalyticsItem]) -> OperatorMetrics {
+fn compute_operator_metrics(
+    events: &[OperatorEventRow],
+    items: &[AnalyticsItem],
+) -> OperatorMetrics {
     let dwells = compute_dwells(events);
     let dwell_values = dwells.values().copied().collect::<Vec<_>>();
     let avg_dwell_time = average(&dwell_values);
@@ -491,7 +499,8 @@ fn compute_response_times(
         if event.event_type != "task_selected" {
             continue;
         }
-        let (Some(item_id), Some(t)) = (event.pipeline_item_id.as_deref(), event_time(event)) else {
+        let (Some(item_id), Some(t)) = (event.pipeline_item_id.as_deref(), event_time(event))
+        else {
             continue;
         };
         selection_times.entry(item_id).or_default().push(t);
@@ -509,7 +518,10 @@ fn compute_response_times(
         let Some(first_after) = selections.iter().find(|t| **t > unread_at) else {
             continue;
         };
-        responses.insert(item.id.clone(), ((*first_after - unread_at) as f64) / 1000.0);
+        responses.insert(
+            item.id.clone(),
+            ((*first_after - unread_at) as f64) / 1000.0,
+        );
     }
     responses
 }
