@@ -809,6 +809,9 @@ describe("pipeline_item queries", () => {
       "running-main-task": 0,
       "finished-post-task": 0,
     });
+    const runningPostItem = items.find((item) => item.id === "running-post-task");
+    const activePostAction: PipelineItem["active_post_action"] = runningPostItem?.active_post_action;
+    expect(activePostAction).toBeUndefined();
   });
 
   it("insertPipelineItem persists parent_task_id and updatePipelineItemParent sets/clears it", async () => {
