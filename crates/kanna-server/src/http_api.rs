@@ -1,5 +1,6 @@
 mod desktop;
 mod ksp;
+mod operator_events;
 mod pairing;
 mod repos;
 mod settings;

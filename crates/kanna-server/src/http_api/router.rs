@@ -1,5 +1,6 @@
 use super::desktop::list_desktops;
 use super::ksp::ksp_stream;
+use super::operator_events::post_operator_events;
 use super::pairing::create_pairing_session;
 use super::repos::{add_repo, list_repo_tasks, list_repos};
 use super::settings::{get_setting, put_setting};
@@ -29,6 +30,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/status", get(status))
         .route("/v1/snapshot", get(get_snapshot))
         .route("/v1/settings/{key}", get(get_setting).put(put_setting))
+        .route("/v1/operator-events", post(post_operator_events))
         .route("/v1/stream", get(ksp_stream))
         .route("/v1/desktops", get(list_desktops))
         .route("/v1/repos", get(list_repos).post(add_repo))

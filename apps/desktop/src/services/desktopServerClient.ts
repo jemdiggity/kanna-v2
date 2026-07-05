@@ -101,3 +101,22 @@ export async function getDesktopSetting(key: string): Promise<string | null> {
   const response = await requestOptionalJson<DesktopSettingResponse>(`/v1/settings/${encodeURIComponent(key)}`);
   return response?.value ?? null;
 }
+
+export type DesktopOperatorEventType = "task_selected" | "app_blur" | "app_focus";
+
+export interface DesktopOperatorEventInput {
+  eventType: DesktopOperatorEventType;
+  pipelineItemId?: string | null;
+  repoId?: string | null;
+}
+
+export async function postDesktopOperatorEvents(events: DesktopOperatorEventInput[]): Promise<void> {
+  await requestJson<{ inserted: number }>("/v1/operator-events", {
+    method: "POST",
+    body: { events },
+  });
+}
+
+export function postDesktopOperatorEvent(event: DesktopOperatorEventInput): Promise<void> {
+  return postDesktopOperatorEvents([event]);
+}

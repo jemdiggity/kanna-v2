@@ -188,6 +188,55 @@ async fn settings_routes_get_and_put_setting_values() {
 }
 
 #[tokio::test]
+async fn operator_events_route_inserts_batched_events() {
+    let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "task-1",
+            "repo-1",
+            "prompt",
+            Some("Task One"),
+            "in progress",
+            "2026-04-17 08:00:00",
+        )
+        .unwrap();
+    });
+
+    let response = app
+        .oneshot(
+            Request::post("/v1/operator-events")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "events": [
+                            {
+                                "eventType": "task_selected",
+                                "pipelineItemId": "task-1",
+                                "repoId": "repo-1"
+                            },
+                            {
+                                "eventType": "app_blur",
+                                "pipelineItemId": null,
+                                "repoId": null
+                            }
+                        ]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = from_slice(&body).unwrap();
+    assert_eq!(json, serde_json::json!({ "inserted": 2 }));
+}
+
+#[tokio::test]
 async fn add_repo_route_registers_existing_git_repo() {
     let unique = format!(
         "{}-{}",
