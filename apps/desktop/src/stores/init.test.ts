@@ -258,6 +258,104 @@ describe("createInitApi", () => {
     );
   });
 
+  it("does not close dormant blocked tasks whose workspace was never initialized", async () => {
+    mockState.tauri = true;
+    mockState.items = [mockState.makeItem({ id: "task-1", branch: "task-task-1" })];
+    mockState.invokeMock.mockImplementation(async (command: string) => {
+      // A dormant task has a reserved branch name but no worktree on disk.
+      if (command === "file_exists") return false;
+      if (command === "list_sessions") return [];
+      if (command === "kill_session") return undefined;
+      if (command === "read_env_var") return "";
+      if (command === "git_app_info") return { version: "" };
+      throw new Error(`unexpected invoke: ${command}`);
+    });
+
+    const state = createStoreState();
+    const services = {
+      loadInitialData: vi.fn(async () => {}),
+      prewarmWorktreeShellSession: vi.fn(async () => {}),
+      spawnShellSession: vi.fn(async () => {}),
+    };
+    const toast = {
+      toasts: ref([]),
+      dismiss: vi.fn(),
+      info: vi.fn(),
+      warning: vi.fn(),
+      error: vi.fn(),
+    };
+    const context = createStoreContext(state, toast, services);
+    const ports = {
+      closeTaskAndReleasePorts: vi.fn(async () => {}),
+    } as unknown as import("./ports").PortsStore;
+    const initApi = createInitApi(context, ports, {
+      checkUnblocked: vi.fn(async () => {}),
+      handleAgentFinished: vi.fn(),
+      restoreUnblockedTask: vi.fn(async () => {}),
+    });
+
+    const db = createDb();
+    // No worktree row exists for the dormant task.
+    db.select = vi.fn(async () => []);
+    await initApi.init(db);
+
+    expect(
+      (ports as unknown as { closeTaskAndReleasePorts: ReturnType<typeof vi.fn> }).closeTaskAndReleasePorts,
+    ).not.toHaveBeenCalled();
+  });
+
+  it("closes orphaned tasks whose initialized worktree is missing from disk", async () => {
+    mockState.tauri = true;
+    mockState.items = [mockState.makeItem({ id: "task-1", branch: "task-task-1" })];
+    mockState.invokeMock.mockImplementation(async (command: string) => {
+      if (command === "file_exists") return false;
+      if (command === "list_sessions") return [];
+      if (command === "kill_session") return undefined;
+      if (command === "read_env_var") return "";
+      if (command === "git_app_info") return { version: "" };
+      throw new Error(`unexpected invoke: ${command}`);
+    });
+
+    const state = createStoreState();
+    const services = {
+      loadInitialData: vi.fn(async () => {}),
+      prewarmWorktreeShellSession: vi.fn(async () => {}),
+      spawnShellSession: vi.fn(async () => {}),
+    };
+    const toast = {
+      toasts: ref([]),
+      dismiss: vi.fn(),
+      info: vi.fn(),
+      warning: vi.fn(),
+      error: vi.fn(),
+    };
+    const context = createStoreContext(state, toast, services);
+    const ports = {
+      closeTaskAndReleasePorts: vi.fn(async () => {}),
+    } as unknown as import("./ports").PortsStore;
+    const initApi = createInitApi(context, ports, {
+      checkUnblocked: vi.fn(async () => {}),
+      handleAgentFinished: vi.fn(),
+      restoreUnblockedTask: vi.fn(async () => {}),
+    });
+
+    const db = createDb();
+    db.select = vi.fn(async (sql: string) => {
+      if (typeof sql === "string" && sql.includes("FROM worktree")) {
+        return [{ pipeline_item_id: "task-1", path: "/tmp/repo/.kanna-worktrees/task-task-1" }];
+      }
+      return [];
+    }) as DbHandle["select"];
+    await initApi.init(db);
+
+    expect(
+      (ports as unknown as { closeTaskAndReleasePorts: ReturnType<typeof vi.fn> }).closeTaskAndReleasePorts,
+    ).toHaveBeenCalledWith("task-1", expect.any(Function));
+    expect(mockState.invokeMock).toHaveBeenCalledWith("file_exists", {
+      path: "/tmp/repo/.kanna-worktrees/task-task-1",
+    });
+  });
+
   it("restores unblocked tasks through the shared blocked-task restore path on startup", async () => {
     mockState.unblockedItems = [mockState.makeItem()];
 

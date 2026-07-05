@@ -1,6 +1,7 @@
 import { type RepoConfig } from "@kanna/core";
 import {
   insertPipelineItem,
+  insertStageRun,
   insertWorktree,
   updateAgentSessionId,
   updatePipelineItemActivity,

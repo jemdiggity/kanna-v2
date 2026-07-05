@@ -186,7 +186,8 @@ fn prepare_swap_to_index(
                 db,
                 config,
                 context.source_task_id,
-            ),
+            )
+            .map(Box::new),
         });
     };
     prepare_stage_run_for_target(

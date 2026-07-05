@@ -145,7 +145,12 @@ pub(super) async fn set_task_parent(
     }))
 }
 
-fn collect_retarget_instructions_for_merged_blocker(
+/// Build per-dependent session messages announcing that a blocker at the
+/// `pr` stage has closed. Dependents that already have a workspace need to
+/// pull the blocker's work in themselves, and the branch they need is the
+/// blocker's *current* branch — the PR stage usually renames it away from
+/// the stored fork name, so resolve it from the blocker's worktree HEAD.
+fn collect_blocker_close_instructions(
     db: &Db,
     blocker_task_id: &str,
 ) -> Result<Vec<(String, String)>, (axum::http::StatusCode, String)> {
@@ -174,7 +179,19 @@ fn collect_retarget_instructions_for_merged_blocker(
     let default_branch = repo.default_branch.unwrap_or_else(|| "main".to_string());
     let blocker_branch = blocker
         .branch
+        .as_deref()
+        .and_then(|branch| {
+            crate::task_creator::resolve_current_source_worktree_branch(&repo.path, Some(branch))
+        })
+        .or(blocker.branch)
         .unwrap_or_else(|| blocker_task_id.to_string());
+    let blocker_title = blocker
+        .display_name
+        .unwrap_or_else(|| blocker_task_id.to_string());
+    let pr_reference = blocker
+        .pr_url
+        .map(|url| format!(" (PR: {url})"))
+        .unwrap_or_default();
 
     let mut instructions = Vec::new();
     for dependent_id in db
@@ -195,7 +212,7 @@ fn collect_retarget_instructions_for_merged_blocker(
             continue;
         };
         let message = format!(
-            "Dependency branch `{blocker_branch}` has merged. Please retarget this stacked branch onto `{default_branch}` now: fetch the latest default branch, rebase your work onto `{default_branch}`, resolve conflicts if needed, and continue from the rebased branch."
+            "Blocker task \"{blocker_title}\" has finished its pipeline and closed. Its work is on branch `{blocker_branch}`{pr_reference}. Bring that work into this branch now: run `git fetch origin`, then rebase (or merge) this branch onto `{blocker_branch}` — or onto `{default_branch}` instead if that PR has already merged. Resolve conflicts if needed and continue your task."
         );
         instructions.push((session_id, message));
     }
@@ -246,8 +263,7 @@ pub(super) async fn close_task(
             "task has open subtasks; close or detach subtasks first".to_string(),
         ));
     }
-    let retarget_instructions =
-        collect_retarget_instructions_for_merged_blocker(&db, &pipeline_item_id)?;
+    let blocker_close_instructions = collect_blocker_close_instructions(&db, &pipeline_item_id)?;
     let workspace_teardown = crate::task_creator::prepare_workspace_teardown_for_close(
         &db,
         &state.config,
@@ -263,10 +279,12 @@ pub(super) async fn close_task(
             )
         })?;
 
-    for (session_id, message) in retarget_instructions {
-        submit_task_input(&mut daemon, &session_id, &message)
-            .await
-            .map_err(|(_, message)| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, message))?;
+    for (session_id, message) in blocker_close_instructions {
+        if let Err((_, error)) = submit_task_input(&mut daemon, &session_id, &message).await {
+            log::warn!(
+                "failed to deliver blocker-close instructions to dependent session {session_id}: {error}"
+            );
+        }
     }
 
     for session_id in [
@@ -309,14 +327,14 @@ pub(super) async fn close_task(
     notify_task_completion(&state.config, &pipeline_item_id, false)
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    start_dependents_unblocked_by_close_with_daemon(&state, &mut daemon, &pipeline_item_id).await?;
+    start_dependents_unblocked_by_close_with_daemon(&state, &mut daemon, &pipeline_item_id).await;
 
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
 /// Close a task that advanced past its final pipeline stage. Shared by
-/// `advance_stage` and `complete_stage`: hands merged-blocker retarget
-/// instructions to dependents, kills the task's daemon sessions, closes the
+/// `advance_stage` and `complete_stage`: hands blocker-close instructions to
+/// dependents with workspaces, kills the task's daemon sessions, closes the
 /// pipeline item, and delivers the completion notification.
 async fn close_task_after_final_stage(
     state: &Arc<AppState>,
@@ -324,19 +342,21 @@ async fn close_task_after_final_stage(
     task_id: String,
     workspace_teardown: Option<crate::task_creator::PreparedWorkspaceTeardown>,
 ) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
-    let retarget_instructions = {
+    let blocker_close_instructions = {
         let db = Db::open(&state.config.db_path).map_err(|e| {
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                 format!("db error: {}", e),
             )
         })?;
-        collect_retarget_instructions_for_merged_blocker(&db, &task_id)?
+        collect_blocker_close_instructions(&db, &task_id)?
     };
-    for (session_id, message) in retarget_instructions {
-        submit_task_input(daemon, &session_id, &message)
-            .await
-            .map_err(|(_, message)| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, message))?;
+    for (session_id, message) in blocker_close_instructions {
+        if let Err((_, error)) = submit_task_input(daemon, &session_id, &message).await {
+            log::warn!(
+                "failed to deliver blocker-close instructions to dependent session {session_id}: {error}"
+            );
+        }
     }
     for session_id in [task_id.to_string(), format!("shell-wt-{task_id}")] {
         crate::task_creator::kill_session_replacing(
@@ -377,7 +397,7 @@ async fn close_task_after_final_stage(
     notify_task_completion(&state.config, &task_id, false)
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    start_dependents_unblocked_by_close_with_daemon(state, daemon, &task_id).await?;
+    start_dependents_unblocked_by_close_with_daemon(state, daemon, &task_id).await;
     Ok(Json(crate::mobile_api::TaskActionResponse {
         task_id,
         follow_task: Some(false),
@@ -449,7 +469,15 @@ async fn execute_stage_transition(
         crate::task_creator::PreparedStageTransition::Close {
             task_id,
             workspace_teardown,
-        } => close_task_after_final_stage(state, daemon, task_id, workspace_teardown).await,
+        } => {
+            close_task_after_final_stage(
+                state,
+                daemon,
+                task_id,
+                workspace_teardown.map(|teardown| *teardown),
+            )
+            .await
+        }
     }
 }
 
