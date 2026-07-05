@@ -562,6 +562,65 @@ fn test_subscriber_receives_exit_for_pty_sessions() {
     }
 }
 
+#[test]
+fn test_kill_delivers_exit_to_attached_clients_but_not_subscribers() {
+    let daemon = DaemonHandle::start();
+
+    let mut creator = daemon.connect();
+    spawn_echo_session(&mut creator, "sess-kill-notify");
+
+    // Subscribe after the spawn so the subscriber only sees post-kill traffic.
+    let mut subscriber = daemon.connect();
+    subscriber.send(&Cmd::Subscribe);
+    match subscriber.recv() {
+        Evt::Ok => {}
+        other => panic!("expected Ok for Subscribe, got: {:?}", other),
+    }
+
+    let mut attached = daemon.connect();
+    attached.send(&Cmd::AttachSnapshot {
+        session_id: "sess-kill-notify".to_string(),
+        emulate_terminal: true,
+    });
+    match attached.recv() {
+        Evt::Snapshot { session_id, .. } => assert_eq!(session_id, "sess-kill-notify"),
+        other => panic!("expected Snapshot, got: {:?}", other),
+    }
+
+    let mut killer = daemon.connect();
+    kill_session(&mut killer, "sess-kill-notify");
+
+    // The attached client must learn the session died, exactly like a natural
+    // exit — otherwise it keeps a live-looking but permanently silent stream.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(!remaining.is_zero(), "timed out waiting for kill Exit");
+        match attached.recv_with_timeout(remaining.min(Duration::from_millis(100))) {
+            Ok(Evt::Exit { session_id, code }) => {
+                assert_eq!(session_id, "sess-kill-notify");
+                assert_eq!(code, 128 + libc::SIGKILL);
+                break;
+            }
+            Ok(Evt::Output { .. }) | Ok(Evt::StatusChanged { .. }) => continue,
+            Ok(other) => panic!("expected Exit after kill, got: {:?}", other),
+            Err(_) => continue,
+        }
+    }
+
+    // Subscribers (e.g. the completion-notify boundary) must NOT see engine
+    // kills as an Exit — that would misread stage transitions as completion.
+    let deadline = Instant::now() + Duration::from_millis(700);
+    while Instant::now() < deadline {
+        match subscriber.recv_with_timeout(Duration::from_millis(100)) {
+            Ok(Evt::Exit { session_id, .. }) if session_id == "sess-kill-notify" => {
+                panic!("kill must not broadcast Exit to subscribers");
+            }
+            Ok(_) | Err(_) => continue,
+        }
+    }
+}
+
 fn kill_session(conn: &mut ClientConn, session_id: &str) {
     conn.send(&Cmd::Kill {
         session_id: session_id.to_string(),

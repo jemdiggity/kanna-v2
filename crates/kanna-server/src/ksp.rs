@@ -489,9 +489,32 @@ impl StreamConn {
     }
 }
 
+/// Reconnect backoff for a daemon connection lost mid-stream (daemon
+/// restart/handoff). The last entry repeats, mirroring the desktop event
+/// bridge's reconnect policy: sessions survive daemon restarts, so the
+/// attachment stays alive and transparently re-attaches rather than leaving
+/// the client silently frozen on a dead stream.
+const DAEMON_STREAM_RETRY_DELAYS_MS: [u64; 5] = [250, 500, 1000, 2000, 5000];
+
+async fn daemon_stream_retry_delay(attempt: usize) {
+    let delay = DAEMON_STREAM_RETRY_DELAYS_MS[attempt.min(DAEMON_STREAM_RETRY_DELAYS_MS.len() - 1)];
+    tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+}
+
+/// How a single attach-and-forward run over one daemon connection ended.
+enum StreamRunEnd {
+    /// The stream is definitively over (client gone, session exited, or a
+    /// fatal daemon reply was forwarded to the client). Stop the attachment.
+    Done,
+    /// The daemon connection dropped mid-stream (restart/handoff/crash).
+    /// The session may still be alive in the replacement daemon; re-attach.
+    DaemonLost,
+}
+
 /// Per-attachment forwarding task: its own daemon connection attaches to the
-/// agent session, relays the snapshot, then streams live events until either
-/// side closes.
+/// agent session, relays the snapshot, then streams live events. If the
+/// daemon connection is lost after a successful attach, re-attaches with
+/// backoff from the last forwarded seq so clients resume seamlessly.
 async fn stream_agent(
     daemon_dir: String,
     task_id: String,
@@ -499,9 +522,43 @@ async fn stream_agent(
     from_seq: u64,
     frame_tx: mpsc::Sender<ServerFrame>,
 ) {
+    let mut next_from_seq = from_seq;
+    let mut attached_once = false;
+    let mut retry_attempt = 0usize;
+    loop {
+        match stream_agent_once(
+            &daemon_dir,
+            &task_id,
+            &session_id,
+            &mut next_from_seq,
+            &mut attached_once,
+            &frame_tx,
+        )
+        .await
+        {
+            StreamRunEnd::Done => return,
+            StreamRunEnd::DaemonLost => {
+                log::warn!(
+                    "[ksp] agent stream lost daemon connection (session={session_id}, attempt={retry_attempt}); re-attaching"
+                );
+                daemon_stream_retry_delay(retry_attempt).await;
+                retry_attempt += 1;
+            }
+        }
+    }
+}
+
+async fn stream_agent_once(
+    daemon_dir: &str,
+    task_id: &str,
+    session_id: &str,
+    next_from_seq: &mut u64,
+    attached_once: &mut bool,
+    frame_tx: &mpsc::Sender<ServerFrame>,
+) -> StreamRunEnd {
     let send_error = |message: String| {
         let frame_tx = frame_tx.clone();
-        let task_id = task_id.clone();
+        let task_id = task_id.to_string();
         async move {
             let code = if message.contains("session not found") {
                 "session_not_found"
@@ -517,22 +574,34 @@ async fn stream_agent(
                 .await;
         }
     };
+    // Before the first successful attach, transport failures are surfaced to
+    // the client (it has never seen this stream, so an error beats silence).
+    // After that, they mean the daemon went away mid-stream: re-attach.
+    let transport_failure = |attached_once: bool| {
+        if attached_once {
+            StreamRunEnd::DaemonLost
+        } else {
+            StreamRunEnd::Done
+        }
+    };
 
-    let connected = DaemonClient::connect(&daemon_dir)
+    let connected = DaemonClient::connect(daemon_dir)
         .await
         .map_err(|error| error.to_string());
     let mut client = match connected {
         Ok(client) => client,
         Err(error) => {
-            send_error(format!("daemon error: {error}")).await;
-            return;
+            if !*attached_once {
+                send_error(format!("daemon error: {error}")).await;
+            }
+            return transport_failure(*attached_once);
         }
     };
 
     let reply = client
         .send_command(&DaemonCommand::AttachAgent {
-            session_id: session_id.clone(),
-            from_seq,
+            session_id: session_id.to_string(),
+            from_seq: *next_from_seq,
         })
         .await
         .map_err(|error| error.to_string());
@@ -547,29 +616,33 @@ async fn stream_agent(
                     event: entry.event,
                 })
                 .collect();
+            *next_from_seq = next_seq;
+            *attached_once = true;
             if frame_tx
                 .send(ServerFrame::AgentSnapshot {
-                    task_id: task_id.clone(),
+                    task_id: task_id.to_string(),
                     next_seq,
                     events,
                 })
                 .await
                 .is_err()
             {
-                return;
+                return StreamRunEnd::Done;
             }
         }
         Ok(DaemonEvent::Error { message, .. }) => {
             send_error(message).await;
-            return;
+            return StreamRunEnd::Done;
         }
         Ok(other) => {
             send_error(format!("unexpected attach reply: {other:?}")).await;
-            return;
+            return StreamRunEnd::Done;
         }
         Err(error) => {
-            send_error(format!("daemon error: {error}")).await;
-            return;
+            if !*attached_once {
+                send_error(format!("daemon error: {error}")).await;
+            }
+            return transport_failure(*attached_once);
         }
     }
 
@@ -580,16 +653,17 @@ async fn stream_agent(
                 seq,
                 event,
             }) if event_session == session_id => {
+                *next_from_seq = seq + 1;
                 if frame_tx
                     .send(ServerFrame::AgentEvent {
-                        task_id: task_id.clone(),
+                        task_id: task_id.to_string(),
                         seq,
                         event,
                     })
                     .await
                     .is_err()
                 {
-                    return;
+                    return StreamRunEnd::Done;
                 }
             }
             Ok(DaemonEvent::StatusChanged {
@@ -598,13 +672,13 @@ async fn stream_agent(
             }) if event_session == session_id => {
                 if frame_tx
                     .send(ServerFrame::StatusChanged {
-                        task_id: task_id.clone(),
+                        task_id: task_id.to_string(),
                         status: status_str(status).to_string(),
                     })
                     .await
                     .is_err()
                 {
-                    return;
+                    return StreamRunEnd::Done;
                 }
             }
             Ok(DaemonEvent::Exit {
@@ -612,18 +686,20 @@ async fn stream_agent(
                 code,
                 ..
             }) if event_session == session_id => {
-                let _ = frame_tx
+                if frame_tx
                     .send(ServerFrame::SessionExit {
-                        task_id: task_id.clone(),
+                        task_id: task_id.to_string(),
                         code,
                     })
-                    .await;
+                    .await
+                    .is_err()
+                {
+                    return StreamRunEnd::Done;
+                }
                 // The session may resume (provider respawn); keep streaming.
             }
             Ok(DaemonEvent::ShuttingDown) | Err(_) => {
-                // Daemon restart: the client reconnects and re-attaches with
-                // its last seq; nothing to do here.
-                return;
+                return StreamRunEnd::DaemonLost;
             }
             Ok(_) => {}
         }
@@ -632,45 +708,100 @@ async fn stream_agent(
 
 /// Terminal stream: daemon AttachSnapshot returns the authoritative headless
 /// terminal snapshot first, then the same connection receives live Output.
+/// If the daemon connection is lost after a successful attach (daemon
+/// restart/handoff), re-attaches with backoff; the fresh snapshot resyncs the
+/// client instead of leaving it frozen on a dead stream.
 async fn stream_terminal(
     daemon_dir: String,
     task_id: String,
     session_id: String,
     frame_tx: mpsc::Sender<ServerFrame>,
 ) {
-    let connected = DaemonClient::connect(&daemon_dir)
+    let mut attached_once = false;
+    let mut retry_attempt = 0usize;
+    loop {
+        match stream_terminal_once(
+            &daemon_dir,
+            &task_id,
+            &session_id,
+            &mut attached_once,
+            &frame_tx,
+        )
+        .await
+        {
+            StreamRunEnd::Done => return,
+            StreamRunEnd::DaemonLost => {
+                log::warn!(
+                    "[ksp] terminal stream lost daemon connection (session={session_id}, attempt={retry_attempt}); re-attaching"
+                );
+                daemon_stream_retry_delay(retry_attempt).await;
+                retry_attempt += 1;
+            }
+        }
+    }
+}
+
+async fn stream_terminal_once(
+    daemon_dir: &str,
+    task_id: &str,
+    session_id: &str,
+    attached_once: &mut bool,
+    frame_tx: &mpsc::Sender<ServerFrame>,
+) -> StreamRunEnd {
+    let send_error = |code: &'static str, message: String| {
+        let frame_tx = frame_tx.clone();
+        let task_id = task_id.to_string();
+        async move {
+            let _ = frame_tx
+                .send(ServerFrame::Error {
+                    task_id: Some(task_id),
+                    code: code.to_string(),
+                    message,
+                })
+                .await;
+        }
+    };
+    // Before the first successful attach, transport failures are surfaced to
+    // the client (it has never seen this stream, so an error beats silence).
+    // After that, they mean the daemon went away mid-stream: re-attach.
+    let transport_failure = |attached_once: bool| {
+        if attached_once {
+            StreamRunEnd::DaemonLost
+        } else {
+            StreamRunEnd::Done
+        }
+    };
+
+    let connected = DaemonClient::connect(daemon_dir)
         .await
         .map_err(|error| error.to_string());
     let mut client = match connected {
         Ok(client) => client,
         Err(error) => {
-            let _ = frame_tx
-                .send(ServerFrame::Error {
-                    task_id: Some(task_id),
-                    code: "daemon".to_string(),
-                    message: format!("daemon error: {error}"),
-                })
-                .await;
-            return;
+            if !*attached_once {
+                send_error("daemon", format!("daemon error: {error}")).await;
+            }
+            return transport_failure(*attached_once);
         }
     };
     let attach_reply = client
         .send_command(&DaemonCommand::AttachSnapshot {
-            session_id: session_id.clone(),
+            session_id: session_id.to_string(),
             emulate_terminal: true,
         })
         .await
         .map_err(|error| error.to_string());
     match attach_reply {
         Ok(DaemonEvent::Snapshot { snapshot, .. }) => {
+            *attached_once = true;
             let frame = ServerFrame::TermSnapshot {
-                task_id: task_id.clone(),
+                task_id: task_id.to_string(),
                 cols: snapshot.cols,
                 rows: snapshot.rows,
                 data_b64: b64(snapshot.vt.as_bytes()),
             };
             if frame_tx.send(frame).await.is_err() {
-                return;
+                return StreamRunEnd::Done;
             }
         }
         Ok(DaemonEvent::Error { message, .. }) => {
@@ -679,34 +810,18 @@ async fn stream_terminal(
             } else {
                 "daemon"
             };
-            let _ = frame_tx
-                .send(ServerFrame::Error {
-                    task_id: Some(task_id),
-                    code: code.to_string(),
-                    message,
-                })
-                .await;
-            return;
+            send_error(code, message).await;
+            return StreamRunEnd::Done;
         }
         Ok(other) => {
-            let _ = frame_tx
-                .send(ServerFrame::Error {
-                    task_id: Some(task_id),
-                    code: "daemon".to_string(),
-                    message: format!("unexpected attach reply: {other:?}"),
-                })
-                .await;
-            return;
+            send_error("daemon", format!("unexpected attach reply: {other:?}")).await;
+            return StreamRunEnd::Done;
         }
         Err(error) => {
-            let _ = frame_tx
-                .send(ServerFrame::Error {
-                    task_id: Some(task_id),
-                    code: "daemon".to_string(),
-                    message: format!("daemon error: {error}"),
-                })
-                .await;
-            return;
+            if !*attached_once {
+                send_error("daemon", format!("daemon error: {error}")).await;
+            }
+            return transport_failure(*attached_once);
         }
     }
 
@@ -718,13 +833,13 @@ async fn stream_terminal(
             }) if event_session == session_id => {
                 if frame_tx
                     .send(ServerFrame::TermOutput {
-                        task_id: task_id.clone(),
+                        task_id: task_id.to_string(),
                         data_b64: b64(&data),
                     })
                     .await
                     .is_err()
                 {
-                    return;
+                    return StreamRunEnd::Done;
                 }
             }
             Ok(DaemonEvent::Exit {
@@ -733,11 +848,14 @@ async fn stream_terminal(
                 ..
             }) if event_session == session_id => {
                 let _ = frame_tx
-                    .send(ServerFrame::SessionExit { task_id, code })
+                    .send(ServerFrame::SessionExit {
+                        task_id: task_id.to_string(),
+                        code,
+                    })
                     .await;
-                return;
+                return StreamRunEnd::Done;
             }
-            Ok(DaemonEvent::ShuttingDown) | Err(_) => return,
+            Ok(DaemonEvent::ShuttingDown) | Err(_) => return StreamRunEnd::DaemonLost,
             Ok(_) => {}
         }
     }
@@ -1122,6 +1240,318 @@ mod tests {
                 assert_eq!(code, 0);
             }
             other => panic!("expected session exit, got {other:?}"),
+        }
+
+        daemon.await.expect("fake daemon task failed");
+        drop(socket);
+        let _ = std::fs::remove_file(&socket_path);
+        let _ = std::fs::remove_dir_all(&daemon_dir);
+    }
+
+    #[tokio::test]
+    async fn terminal_stream_reattaches_after_daemon_connection_loss() {
+        let unique = format!(
+            "ksp-terminal-reattach-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        std::fs::create_dir_all(&daemon_dir).expect("create daemon dir");
+        let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+        let _ = std::fs::remove_file(&socket_path);
+
+        let session_id = "shell-wt-reattach-1";
+
+        // A daemon that dies after the first attach (connection dropped with
+        // no Exit event — the handoff/restart shape) and then serves a second
+        // attach from its replacement.
+        let daemon_listener = UnixListener::bind(&socket_path).expect("bind fake daemon socket");
+        let daemon = tokio::spawn(async move {
+            for round in 0..2u32 {
+                let (stream, _) = daemon_listener
+                    .accept()
+                    .await
+                    .expect("accept daemon connection");
+                let (read_half, mut write_half) = stream.into_split();
+                let mut reader = BufReader::new(read_half);
+                let mut line = String::new();
+                reader.read_line(&mut line).await.expect("read command");
+                let command: DaemonCommand =
+                    serde_json::from_str(line.trim()).expect("parse command");
+                match command {
+                    DaemonCommand::AttachSnapshot {
+                        session_id: attached,
+                        ..
+                    } => assert_eq!(attached, "shell-wt-reattach-1"),
+                    other => panic!("expected AttachSnapshot, got {other:?}"),
+                }
+
+                let vt = if round == 0 {
+                    "before restart"
+                } else {
+                    "after restart"
+                };
+                let mut events = vec![
+                    DaemonEvent::Snapshot {
+                        session_id: "shell-wt-reattach-1".to_string(),
+                        snapshot: kanna_daemon::protocol::TerminalSnapshot {
+                            version: 1,
+                            rows: 24,
+                            cols: 80,
+                            cursor_row: 0,
+                            cursor_col: 0,
+                            cursor_visible: true,
+                            saved_at: 0,
+                            sequence: 0,
+                            vt: vt.to_string(),
+                        },
+                    },
+                    DaemonEvent::Output {
+                        session_id: "shell-wt-reattach-1".to_string(),
+                        data: format!("output {round}").into_bytes(),
+                    },
+                ];
+                if round == 1 {
+                    events.push(DaemonEvent::Exit {
+                        session_id: "shell-wt-reattach-1".to_string(),
+                        code: 0,
+                        resume_session_id: None,
+                    });
+                }
+                for event in events {
+                    write_half
+                        .write_all(
+                            format!("{}\n", serde_json::to_string(&event).unwrap()).as_bytes(),
+                        )
+                        .await
+                        .expect("write daemon event");
+                }
+                // round 0: drop the connection here without an Exit event.
+            }
+        });
+
+        let mut config = test_config("ksp-terminal-reattach", "KSP Terminal Reattach");
+        config.daemon_dir = daemon_dir.to_string_lossy().to_string();
+        config.db_path = Db::test_db_path(&unique);
+        config.pairing_store_path = format!("/tmp/kanna-pairings-{unique}.json");
+
+        let router = crate::http_api::router(Arc::new(AppState::new(config)));
+        let url = serve_router(router).await;
+        let mut socket = ws_connect(&url).await;
+
+        send_frame(&mut socket, &ClientFrame::Auth { credential: None }).await;
+        assert_eq!(recv_frame(&mut socket).await, ServerFrame::AuthOk);
+        send_frame(
+            &mut socket,
+            &ClientFrame::Attach {
+                task_id: session_id.into(),
+                kind: StreamKind::Terminal,
+                from_seq: 0,
+            },
+        )
+        .await;
+
+        let decode = |data_b64: String| {
+            base64::engine::general_purpose::STANDARD
+                .decode(data_b64)
+                .expect("decode terminal frame")
+        };
+
+        // First attach: snapshot + output, then the daemon connection dies.
+        match recv_frame(&mut socket).await {
+            ServerFrame::TermSnapshot { data_b64, .. } => {
+                assert_eq!(decode(data_b64), b"before restart");
+            }
+            other => panic!("expected first snapshot, got {other:?}"),
+        }
+        match recv_frame(&mut socket).await {
+            ServerFrame::TermOutput { data_b64, .. } => {
+                assert_eq!(decode(data_b64), b"output 0");
+            }
+            other => panic!("expected first output, got {other:?}"),
+        }
+
+        // The stream must transparently re-attach (no client action, no error
+        // frame) and resync with a fresh snapshot instead of going silent.
+        match recv_frame(&mut socket).await {
+            ServerFrame::TermSnapshot { data_b64, .. } => {
+                assert_eq!(decode(data_b64), b"after restart");
+            }
+            other => panic!("expected re-attach snapshot, got {other:?}"),
+        }
+        match recv_frame(&mut socket).await {
+            ServerFrame::TermOutput { data_b64, .. } => {
+                assert_eq!(decode(data_b64), b"output 1");
+            }
+            other => panic!("expected post-restart output, got {other:?}"),
+        }
+        match recv_frame(&mut socket).await {
+            ServerFrame::SessionExit { code, .. } => assert_eq!(code, 0),
+            other => panic!("expected session exit, got {other:?}"),
+        }
+
+        daemon.await.expect("fake daemon task failed");
+        drop(socket);
+        let _ = std::fs::remove_file(&socket_path);
+        let _ = std::fs::remove_dir_all(&daemon_dir);
+    }
+
+    #[tokio::test]
+    async fn agent_stream_reattaches_from_last_seq_after_daemon_connection_loss() {
+        let unique = format!(
+            "ksp-agent-reattach-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        std::fs::create_dir_all(&daemon_dir).expect("create daemon dir");
+        let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+        let _ = std::fs::remove_file(&socket_path);
+
+        let daemon_listener = UnixListener::bind(&socket_path).expect("bind fake daemon socket");
+        let daemon = tokio::spawn(async move {
+            // Round 0: attach from seq 0, snapshot to next_seq=2, one live
+            // event at seq 2, then the connection dies without warning.
+            // Round 1: the replacement daemon must be asked for seq 3.
+            for round in 0..2u32 {
+                let (stream, _) = daemon_listener
+                    .accept()
+                    .await
+                    .expect("accept daemon connection");
+                let (read_half, mut write_half) = stream.into_split();
+                let mut reader = BufReader::new(read_half);
+                let mut line = String::new();
+                reader.read_line(&mut line).await.expect("read command");
+                let command: DaemonCommand =
+                    serde_json::from_str(line.trim()).expect("parse command");
+                let from_seq = match command {
+                    DaemonCommand::AttachAgent {
+                        session_id,
+                        from_seq,
+                    } => {
+                        assert_eq!(session_id, "daemon-agent-reattach-1");
+                        from_seq
+                    }
+                    other => panic!("expected AttachAgent, got {other:?}"),
+                };
+                if round == 0 {
+                    assert_eq!(from_seq, 0);
+                } else {
+                    assert_eq!(
+                        from_seq, 3,
+                        "re-attach must resume from the last forwarded seq"
+                    );
+                }
+
+                let events = if round == 0 {
+                    vec![
+                        DaemonEvent::AgentSnapshot {
+                            session_id: "daemon-agent-reattach-1".to_string(),
+                            next_seq: 2,
+                            events: vec![],
+                        },
+                        DaemonEvent::AgentEvent {
+                            session_id: "daemon-agent-reattach-1".to_string(),
+                            seq: 2,
+                            event: kanna_daemon::protocol::NeutralAgentEvent::AssistantText {
+                                text: "before restart".to_string(),
+                                truncated: false,
+                            },
+                        },
+                    ]
+                } else {
+                    vec![
+                        DaemonEvent::AgentSnapshot {
+                            session_id: "daemon-agent-reattach-1".to_string(),
+                            next_seq: 3,
+                            events: vec![],
+                        },
+                        DaemonEvent::AgentEvent {
+                            session_id: "daemon-agent-reattach-1".to_string(),
+                            seq: 3,
+                            event: kanna_daemon::protocol::NeutralAgentEvent::AssistantText {
+                                text: "after restart".to_string(),
+                                truncated: false,
+                            },
+                        },
+                    ]
+                };
+                for event in events {
+                    write_half
+                        .write_all(
+                            format!("{}\n", serde_json::to_string(&event).unwrap()).as_bytes(),
+                        )
+                        .await
+                        .expect("write daemon event");
+                }
+            }
+        });
+
+        let mut config = test_config("ksp-agent-reattach", "KSP Agent Reattach");
+        config.daemon_dir = daemon_dir.to_string_lossy().to_string();
+        config.db_path = Db::test_db_path(&unique);
+        config.pairing_store_path = format!("/tmp/kanna-pairings-{unique}.json");
+
+        let db = Db::open_for_tests(&config.db_path).expect("open test db");
+        db.insert_test_repo("repo-1", "Repo One")
+            .expect("insert repo");
+        db.insert_test_pipeline_item(
+            "task-1",
+            "repo-1",
+            "Agent reattach",
+            None,
+            "in progress",
+            "2026-07-05T00:00:00Z",
+        )
+        .expect("insert task");
+        db.insert_test_terminal_session(
+            "terminal-1",
+            "repo-1",
+            "task-1",
+            "agent",
+            "daemon-agent-reattach-1",
+        )
+        .expect("insert terminal session");
+
+        let router = crate::http_api::router(Arc::new(AppState::new(config)));
+        let url = serve_router(router).await;
+        let mut socket = ws_connect(&url).await;
+
+        send_frame(&mut socket, &ClientFrame::Auth { credential: None }).await;
+        assert_eq!(recv_frame(&mut socket).await, ServerFrame::AuthOk);
+        send_frame(
+            &mut socket,
+            &ClientFrame::Attach {
+                task_id: "task-1".into(),
+                kind: StreamKind::Agent,
+                from_seq: 0,
+            },
+        )
+        .await;
+
+        match recv_frame(&mut socket).await {
+            ServerFrame::AgentSnapshot { next_seq, .. } => assert_eq!(next_seq, 2),
+            other => panic!("expected first agent snapshot, got {other:?}"),
+        }
+        match recv_frame(&mut socket).await {
+            ServerFrame::AgentEvent { seq, .. } => assert_eq!(seq, 2),
+            other => panic!("expected first agent event, got {other:?}"),
+        }
+        // Daemon connection lost; the stream re-attaches from seq 3 and keeps
+        // flowing without any client-side action.
+        match recv_frame(&mut socket).await {
+            ServerFrame::AgentSnapshot { next_seq, .. } => assert_eq!(next_seq, 3),
+            other => panic!("expected re-attach agent snapshot, got {other:?}"),
+        }
+        match recv_frame(&mut socket).await {
+            ServerFrame::AgentEvent { seq, .. } => assert_eq!(seq, 3),
+            other => panic!("expected post-restart agent event, got {other:?}"),
         }
 
         daemon.await.expect("fake daemon task failed");
