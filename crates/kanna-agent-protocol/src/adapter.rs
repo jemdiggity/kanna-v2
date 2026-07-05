@@ -114,9 +114,15 @@ pub trait ProviderAdapter: Send {
     ) -> Option<String>;
 }
 
-pub(crate) fn prompt_with_system_prompt(system_prompt: Option<&str>, prompt: &str) -> String {
+/// Join the Kanna preamble and the task prompt into one message for providers
+/// without a native system-prompt channel. A `## Your Task` heading closes the
+/// preamble's `## Kanna Task Environment` section so the agent can tell where
+/// the environment guidance ends and its assignment begins. The TS mirror is
+/// `buildKannaRuntimeUserPrompt` in `packages/core/src/pipeline/prompt-builder.ts`
+/// — keep the formats in sync.
+pub fn prompt_with_system_prompt(system_prompt: Option<&str>, prompt: &str) -> String {
     match system_prompt.filter(|value| !value.trim().is_empty()) {
-        Some(system_prompt) => format!("{system_prompt}\n\n{prompt}"),
+        Some(system_prompt) => format!("{system_prompt}\n\n## Your Task\n\n{prompt}"),
         None => prompt.to_string(),
     }
 }
@@ -128,5 +134,19 @@ mod tests {
     #[test]
     fn provider_adapter_is_object_safe() {
         fn _takes_boxed(_: Box<dyn ProviderAdapter + Send>) {}
+    }
+
+    #[test]
+    fn prompt_with_system_prompt_delimits_the_task_with_a_heading() {
+        assert_eq!(
+            prompt_with_system_prompt(Some("Kanna task context"), "ship it"),
+            "Kanna task context\n\n## Your Task\n\nship it"
+        );
+    }
+
+    #[test]
+    fn prompt_with_system_prompt_passes_the_prompt_through_without_a_preamble() {
+        assert_eq!(prompt_with_system_prompt(None, "ship it"), "ship it");
+        assert_eq!(prompt_with_system_prompt(Some("  "), "ship it"), "ship it");
     }
 }

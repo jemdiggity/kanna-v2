@@ -3,6 +3,7 @@ use super::provider::{provider_binary_name, AgentProvider};
 use kanna_agent_protocol::mcp::{
     codex_mcp_config_overrides, opencode_mcp_config_content, read_kanna_mcp_server,
 };
+use kanna_agent_protocol::prompt_with_system_prompt;
 use std::path::Path;
 
 /// How a Claude PTY spawn binds to the CLI's own session store: `Assign`
@@ -36,10 +37,7 @@ pub(super) fn build_agent_command(
             // TODO: Use native system-prompt flags for these providers once Kanna
             // has verified stable CLI support for them. Until then, prepend the
             // short preamble to the prompt body so the task remains Kanna-aware.
-            match kanna_preamble {
-                Some(preamble) if !preamble.is_empty() => format!("{preamble}\n\n{prompt}"),
-                _ => prompt.to_string(),
-            }
+            prompt_with_system_prompt(kanna_preamble, prompt)
         }
     };
     let escaped_prompt = shell_single_quote(&prompt_with_fallback);

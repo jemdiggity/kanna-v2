@@ -18,7 +18,10 @@ pub mod frames;
 pub mod mcp;
 pub mod opencode;
 
-pub use adapter::{Capabilities, InterruptAction, ProviderAdapter, SpawnCtx, SpawnSpec, TurnModel};
+pub use adapter::{
+    prompt_with_system_prompt, Capabilities, InterruptAction, ProviderAdapter, SpawnCtx, SpawnSpec,
+    TurnModel,
+};
 pub use claude::ClaudeAdapter;
 pub use codex::CodexAdapter;
 pub use events::{
