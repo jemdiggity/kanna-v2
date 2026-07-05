@@ -165,3 +165,16 @@ export async function patchDesktopRepo(repoId: string, input: PatchDesktopRepoIn
     body: input,
   });
 }
+
+export async function putDesktopTaskAgentSession(
+  taskId: string,
+  agentSessionId: string | null,
+): Promise<void> {
+  await requestJson<{ taskId: string; followTask: string | null }>(
+    `/v1/tasks/${encodeURIComponent(taskId)}/agent-session`,
+    {
+      method: "PUT",
+      body: { agentSessionId },
+    },
+  );
+}
