@@ -209,6 +209,14 @@ pub(super) struct AgentDefinition {
     pub(super) allowed_tools: Vec<String>,
 }
 
+struct AgentExtension {
+    prompt: String,
+    agent_providers: Vec<String>,
+    model: Option<String>,
+    permission_mode: Option<String>,
+    allowed_tools: Option<Vec<String>>,
+}
+
 pub(super) fn read_repo_config(repo_path: &str) -> Result<RepoConfig, String> {
     let path = Path::new(repo_path).join(".kanna/config.json");
     match std::fs::read_to_string(&path) {
@@ -338,7 +346,7 @@ fn compiled_builtin_resource(relative_path: &str) -> Option<&'static str> {
 /// when present. Frontmatter is optional; a plain markdown file is a pure
 /// prompt extension.
 fn apply_agent_extension(definition: &mut AgentDefinition, content: &str) -> Result<(), String> {
-    let extension = parse_agent_definition(content)?;
+    let extension = parse_agent_extension(content)?;
 
     if !extension.prompt.is_empty() {
         if definition.prompt.is_empty() {
@@ -356,8 +364,8 @@ fn apply_agent_extension(definition: &mut AgentDefinition, content: &str) -> Res
     if extension.permission_mode.is_some() {
         definition.permission_mode = extension.permission_mode;
     }
-    if !extension.allowed_tools.is_empty() {
-        definition.allowed_tools = extension.allowed_tools;
+    if let Some(allowed_tools) = extension.allowed_tools {
+        definition.allowed_tools = allowed_tools;
     }
 
     Ok(())
@@ -378,6 +386,29 @@ fn parse_agent_definition(content: &str) -> Result<AgentDefinition, String> {
         model: fm.model,
         permission_mode: fm.permission_mode,
         allowed_tools: fm.allowed_tools.unwrap_or_default(),
+    })
+}
+
+fn parse_agent_extension(content: &str) -> Result<AgentExtension, String> {
+    let (frontmatter, body) = split_frontmatter(content);
+    let fm: AgentFrontmatter = match frontmatter {
+        Some(raw) => {
+            serde_yaml::from_str(raw).map_err(|e| format!("invalid AGENT.md frontmatter: {}", e))?
+        }
+        None => AgentFrontmatter::default(),
+    };
+
+    let agent_providers = match fm.agent_provider {
+        Some(value) => parse_agent_providers(Some(value)),
+        None => Vec::new(),
+    };
+
+    Ok(AgentExtension {
+        prompt: body.trim().to_string(),
+        agent_providers,
+        model: fm.model,
+        permission_mode: fm.permission_mode,
+        allowed_tools: fm.allowed_tools,
     })
 }
 

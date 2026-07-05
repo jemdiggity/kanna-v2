@@ -50,6 +50,26 @@ fn read_agent_definition_appends_extension_body_and_overrides_frontmatter() {
 }
 
 #[test]
+fn read_agent_definition_extension_empty_allowed_tools_clears_base_allowed_tools() {
+    let repo_root = write_agent_repo(
+        "extend-clear-allowed-tools",
+        "---\nagent_provider: claude\nallowed_tools:\n  - Bash\n  - Read\n---\nBase prompt.",
+        Some("---\nallowed_tools: []\n---\nRun without tool restrictions."),
+    );
+
+    let definition =
+        super::super::definitions::read_agent_definition(&repo_root.to_string_lossy(), "reviewer")
+            .unwrap();
+    assert_eq!(
+        definition.prompt,
+        "Base prompt.\n\nRun without tool restrictions."
+    );
+    assert!(definition.allowed_tools.is_empty());
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
 fn read_agent_definition_extension_without_frontmatter_extends_prompt_only() {
     let repo_root = write_agent_repo(
         "extend-plain",
