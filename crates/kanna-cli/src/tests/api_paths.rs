@@ -11,6 +11,14 @@ fn repo_task_list_uses_repo_tasks_endpoint() {
 }
 
 #[test]
+fn signal_agent_uses_repo_agent_signal_endpoint() {
+    assert_eq!(
+        signal_agent_path("repo 1", "merge agent"),
+        "/v1/repos/repo%201/agents/merge%20agent/signal"
+    );
+}
+
+#[test]
 fn task_search_uses_search_endpoint() {
     assert_eq!(
         task_search_path("review me"),
