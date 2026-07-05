@@ -192,13 +192,36 @@ pub(super) fn create_worktree(
         }
     }
 
-    let output = Command::new("git")
-        .args(&args)
-        .current_dir(repo_path)
-        .output()
-        .map_err(|e| format!("failed to run git worktree add: {}", e))?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    // The main checkout is a shared resource: the desktop frontend polls git
+    // status/diff against it constantly, and agents push from sibling
+    // worktrees. `git worktree add` can transiently lose a race for the
+    // repo's lock files, so retry briefly before giving up — a one-shot
+    // failure here used to leave unblocked dependent tasks permanently
+    // dormant.
+    let mut last_error = String::new();
+    for attempt in 0..3 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            log::warn!(
+                "retrying git worktree add for {branch} after lock contention: {last_error}"
+            );
+        }
+        let output = Command::new("git")
+            .args(&args)
+            .current_dir(repo_path)
+            .output()
+            .map_err(|e| format!("failed to run git worktree add: {}", e))?;
+        if output.status.success() {
+            last_error.clear();
+            break;
+        }
+        last_error = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if !last_error.contains(".lock") {
+            return Err(last_error);
+        }
+    }
+    if !last_error.is_empty() {
+        return Err(last_error);
     }
 
     // Worktrees contain exactly what the branch checkout contains. Repo-

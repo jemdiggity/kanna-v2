@@ -83,7 +83,7 @@ pub(crate) enum PreparedStageTransition {
     Close {
         task_id: String,
         /// Teardown for the final workspace the close leaves behind.
-        workspace_teardown: Option<PreparedWorkspaceTeardown>,
+        workspace_teardown: Option<Box<PreparedWorkspaceTeardown>>,
     },
 }
 

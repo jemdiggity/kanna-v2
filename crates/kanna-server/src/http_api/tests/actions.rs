@@ -92,7 +92,7 @@ async fn close_task_route_uses_task_closer() {
 }
 
 #[tokio::test]
-async fn close_pr_task_sends_retarget_instruction_to_running_dependents() {
+async fn close_pr_task_sends_blocker_close_instruction_with_renamed_branch_to_running_dependents() {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
@@ -105,6 +105,11 @@ async fn close_pr_task_sends_retarget_instruction_to_running_dependents() {
             .unwrap()
             .as_nanos()
     );
+    // Real git repo: the blocker's worktree branch gets renamed the way the
+    // PR-stage agent renames it, so the instruction must carry the renamed
+    // branch, not the stored fork name.
+    let repo_root = std::env::temp_dir().join(format!("kanna-http-close-pr-{unique}"));
+    init_test_git_repo(&repo_root);
     let daemon_dir = std::env::temp_dir().join(format!("kanna-http-close-pr-daemon-{unique}"));
     std::fs::create_dir_all(&daemon_dir).unwrap();
     let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
@@ -128,7 +133,8 @@ async fn close_pr_task_sends_retarget_instruction_to_running_dependents() {
         pairing_store_path: format!("/tmp/kanna-pairings-close-pr-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
-    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
     db.insert_test_pipeline_item(
         "task-a",
         "repo-1",
@@ -156,6 +162,28 @@ async fn close_pr_task_sends_retarget_instruction_to_running_dependents() {
     )
     .unwrap();
     db.insert_test_task_blocker("task-b", "task-a").unwrap();
+
+    let blocker_worktree_path = repo_root.join(".kanna-worktrees").join("task-a-branch");
+    std::fs::create_dir_all(repo_root.join(".kanna-worktrees")).unwrap();
+    assert!(Command::new("git")
+        .args([
+            "worktree",
+            "add",
+            "-b",
+            "task-a-branch",
+            blocker_worktree_path.to_str().unwrap(),
+            "main",
+        ])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["branch", "-m", "feat/blocker-renamed"])
+        .current_dir(&blocker_worktree_path)
+        .status()
+        .unwrap()
+        .success());
     db.upsert_worktree(
         "wt-task-b",
         "task-b",
@@ -186,8 +214,13 @@ async fn close_pr_task_sends_retarget_instruction_to_running_dependents() {
                 (0, DaemonCommand::Input { session_id, data }) => {
                     assert_eq!(session_id, "task-b-session");
                     let message = String::from_utf8(data).unwrap();
-                    assert!(message.contains("retarget this stacked branch"));
-                    assert!(message.contains("task-a-branch"));
+                    assert!(message.contains("has finished its pipeline and closed"));
+                    assert!(message.contains("Blocker PR"));
+                    assert!(
+                        message.contains("`feat/blocker-renamed`"),
+                        "message must carry the renamed branch, got: {message}"
+                    );
+                    assert!(!message.contains("`task-a-branch`"));
                     assert!(message.contains("main"));
                 }
                 (1, DaemonCommand::Input { session_id, data }) => {
@@ -225,6 +258,7 @@ async fn close_pr_task_sends_retarget_instruction_to_running_dependents() {
 
     let _ = std::fs::remove_file(&socket_path);
     let _ = std::fs::remove_dir_all(&daemon_dir);
+    let _ = std::fs::remove_dir_all(&repo_root);
 }
 
 #[tokio::test]
