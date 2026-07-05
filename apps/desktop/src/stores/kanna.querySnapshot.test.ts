@@ -317,6 +317,7 @@ vi.mock("@kanna/db", () => ({
 }));
 
 import { useKannaStore } from "./kanna";
+import { setDesktopSnapshotFetcherForTests } from "../services/desktopServerClient";
 
 function createDb(): DbHandle {
   return {
@@ -361,12 +362,27 @@ describe("kanna query snapshot regressions", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-04-17T00:00:00.000Z"));
     mockState.reset();
+    setDesktopSnapshotFetcherForTests(async () => ({
+      entries: mockState.visibleRepos.map((repo) => ({
+        repo,
+        items: mockState.pipelineItems.filter((item) => item.repo_id === repo.id),
+      })),
+      taskBlockers: [],
+      worktreePaths: {},
+      settings: {},
+    }));
     beginTaskSwitchMock.mockReset();
     invalidateSharedDataMock.mockReset();
     onSharedInvalidationMock.mockReset();
   });
 
   afterEach(() => {
+    setDesktopSnapshotFetcherForTests(async () => ({
+      entries: [],
+      taskBlockers: [],
+      worktreePaths: {},
+      settings: {},
+    }));
     vi.useRealTimers();
   });
 

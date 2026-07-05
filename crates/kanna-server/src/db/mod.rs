@@ -1,5 +1,6 @@
 use rusqlite::{Connection, OpenFlags};
 use serde::Serialize;
+use std::collections::HashMap;
 use std::time::Duration;
 
 mod blockers;
@@ -8,6 +9,7 @@ mod pipeline_items;
 mod ports;
 mod repos;
 mod settings;
+mod snapshot;
 mod stage_runs;
 #[cfg(test)]
 mod test_support;
@@ -61,6 +63,79 @@ pub struct Repo {
     pub sort_order: Option<i64>,
     pub created_at: Option<String>,
     pub last_opened_at: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SnapshotRepo {
+    pub id: String,
+    pub path: String,
+    pub name: String,
+    pub default_branch: Option<String>,
+    pub remote_url: Option<String>,
+    pub remote_url_hash: Option<String>,
+    pub hidden: i64,
+    pub sort_order: i64,
+    pub created_at: Option<String>,
+    pub last_opened_at: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SnapshotPipelineItem {
+    pub id: String,
+    pub repo_id: String,
+    pub issue_number: Option<i64>,
+    pub issue_title: Option<String>,
+    pub prompt: Option<String>,
+    pub pipeline: String,
+    pub pipeline_def: Option<String>,
+    pub stage: String,
+    pub pr_number: Option<i64>,
+    pub pr_url: Option<String>,
+    pub branch: Option<String>,
+    pub closed_at: Option<String>,
+    pub agent_type: Option<String>,
+    pub agent_provider: String,
+    pub activity: String,
+    pub activity_changed_at: Option<String>,
+    pub unread_at: Option<String>,
+    pub port_offset: Option<i64>,
+    pub display_name: Option<String>,
+    pub last_output_preview: Option<String>,
+    pub port_env: Option<String>,
+    pub agent_spawn_options: Option<String>,
+    pub pinned: i64,
+    pub pin_order: Option<i64>,
+    pub base_ref: Option<String>,
+    pub agent_session_id: Option<String>,
+    pub teardown_started_at: Option<String>,
+    pub parent_task_id: Option<String>,
+    pub notify_task_id: Option<String>,
+    pub notified_at: Option<String>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+    pub has_running_post: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SnapshotTaskBlocker {
+    pub blocked_item_id: String,
+    pub blocker_item_id: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotEntry {
+    pub repo: SnapshotRepo,
+    pub items: Vec<SnapshotPipelineItem>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UiSnapshot {
+    pub entries: Vec<SnapshotEntry>,
+    pub task_blockers: Vec<SnapshotTaskBlocker>,
+    pub worktree_paths: HashMap<String, String>,
+    pub settings: HashMap<String, String>,
 }
 
 pub struct NewRepo<'a> {

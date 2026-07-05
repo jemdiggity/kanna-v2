@@ -2,6 +2,7 @@ import { getSetting, getUnblockedItems, listRepos, setSetting, type DbHandle, ty
 import { invoke } from "../invoke";
 import { isTauri } from "../tauri-mock";
 import { listen } from "../listen";
+import { getSharedStreamClient } from "../composables/desktopStreamClient";
 import { clearCachedTerminalState } from "../composables/terminalStateCache";
 import { markDaemonReadyObserved } from "../composables/daemonReadyState";
 import {
@@ -292,6 +293,23 @@ export function createInitApi(
       await preserveExplicitSelectionAfterExternalRefresh(selectedItemIdBeforeRefresh);
     });
 
+    if (isTauri) {
+      getSharedStreamClient().then((client) => {
+        client.onStateChanged((scope) => {
+          void (async () => {
+            const focusedTaskId = resolveFocusedTaskIdBeforeExternalRefresh();
+            await requireService(context.services.reloadSnapshot, "reloadSnapshot")();
+            await preserveFocusedTaskAfterExternalRefresh(focusedTaskId);
+            console.debug(`[store] refreshed snapshot after KSP state change: ${scope}`);
+          })().catch((error) => {
+            console.error("[store] KSP state change handler failed:", error);
+          });
+        });
+      }).catch((error) => {
+        console.warn("[store] failed to subscribe to KSP state changes:", error);
+      });
+    }
+
     listen("session_created", async (event: unknown) => {
       const sessionId = readSessionId(event);
       if (!sessionId || !isTaskAgentSession(sessionId)) return;
@@ -368,28 +386,6 @@ export function createInitApi(
       await requireService(context.services.syncTaskStatusesFromDaemon, "syncTaskStatusesFromDaemon")();
     });
 
-    listen("pipeline_stage_complete", async (event: unknown) => {
-      const payload = (event as { payload?: { task_id?: string } }).payload ?? (event as { task_id?: string });
-      const taskId = payload.task_id;
-      if (!taskId) return;
-
-      const item = context.state.items.value.find((candidate) => candidate.id === taskId);
-      if (!item) return;
-
-      await requireService(context.services.reloadSnapshot, "reloadSnapshot")();
-
-      const freshItem = context.state.items.value.find((candidate) => candidate.id === taskId);
-      if (!freshItem) return;
-
-      try {
-        if (context.state.selectedItemId.value !== taskId) {
-          await updatePipelineItemActivity(context.requireDb(), taskId, "unread");
-          await requireService(context.services.reloadSnapshot, "reloadSnapshot")();
-        }
-      } catch (error) {
-        console.error("[store] pipeline_stage_complete handler failed:", error);
-      }
-    });
   }
 
   return {

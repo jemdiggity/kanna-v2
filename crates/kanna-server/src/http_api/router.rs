@@ -3,6 +3,7 @@ use super::ksp::ksp_stream;
 use super::pairing::create_pairing_session;
 use super::repos::{add_repo, list_repo_tasks, list_repos};
 use super::signal_agent::signal_agent;
+use super::snapshot::get_snapshot;
 use super::state::{AppState, HttpInvokeResponse};
 use super::status::status;
 use super::task_actions::{
@@ -25,6 +26,7 @@ use tower_http::cors::CorsLayer;
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/v1/status", get(status))
+        .route("/v1/snapshot", get(get_snapshot))
         .route("/v1/stream", get(ksp_stream))
         .route("/v1/desktops", get(list_desktops))
         .route("/v1/repos", get(list_repos).post(add_repo))

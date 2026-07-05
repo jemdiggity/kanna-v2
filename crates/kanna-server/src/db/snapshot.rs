@@ -1,0 +1,169 @@
+use super::{
+    Db, SnapshotEntry, SnapshotPipelineItem, SnapshotRepo, SnapshotTaskBlocker, UiSnapshot,
+};
+use std::collections::HashMap;
+
+impl Db {
+    pub fn ui_snapshot(&self) -> Result<UiSnapshot, rusqlite::Error> {
+        let repos = self.list_snapshot_repos()?;
+        let mut entries = Vec::with_capacity(repos.len());
+        for repo in repos {
+            let items = self.list_snapshot_pipeline_items(&repo.id)?;
+            entries.push(SnapshotEntry { repo, items });
+        }
+
+        Ok(UiSnapshot {
+            entries,
+            task_blockers: self.list_snapshot_task_blockers()?,
+            worktree_paths: self.list_snapshot_worktree_paths()?,
+            settings: self.list_snapshot_settings()?,
+        })
+    }
+
+    fn list_snapshot_repos(&self) -> Result<Vec<SnapshotRepo>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, path, name, default_branch, remote_url, remote_url_hash,
+                    hidden, sort_order, created_at, last_opened_at
+             FROM repo
+             WHERE hidden = 0
+             ORDER BY sort_order ASC, created_at ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(SnapshotRepo {
+                id: row.get(0)?,
+                path: row.get(1)?,
+                name: row.get(2)?,
+                default_branch: row.get(3)?,
+                remote_url: row.get(4)?,
+                remote_url_hash: row.get(5)?,
+                hidden: row.get(6)?,
+                sort_order: row.get(7)?,
+                created_at: row.get(8)?,
+                last_opened_at: row.get(9)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    fn list_snapshot_pipeline_items(
+        &self,
+        repo_id: &str,
+    ) -> Result<Vec<SnapshotPipelineItem>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT pipeline_item.id, pipeline_item.repo_id, pipeline_item.issue_number,
+                    pipeline_item.issue_title, pipeline_item.prompt, pipeline_item.pipeline,
+                    pipeline_item.pipeline_def, pipeline_item.stage, pipeline_item.pr_number,
+                    pipeline_item.pr_url, pipeline_item.branch, pipeline_item.closed_at,
+                    pipeline_item.agent_type, pipeline_item.agent_provider,
+                    pipeline_item.activity, pipeline_item.activity_changed_at,
+                    pipeline_item.unread_at, pipeline_item.port_offset,
+                    pipeline_item.display_name, pipeline_item.last_output_preview,
+                    pipeline_item.port_env, pipeline_item.agent_spawn_options,
+                    pipeline_item.pinned, pipeline_item.pin_order,
+                    pipeline_item.base_ref, pipeline_item.agent_session_id,
+                    pipeline_item.teardown_started_at, pipeline_item.parent_task_id,
+                    pipeline_item.notify_task_id, pipeline_item.notified_at,
+                    pipeline_item.created_at, pipeline_item.updated_at,
+                    EXISTS (
+                      SELECT 1 FROM stage_run
+                      WHERE stage_run.task_id = pipeline_item.id
+                        AND stage_run.kind = 'post'
+                        AND stage_run.status = 'running'
+                    ) AS has_running_post
+             FROM pipeline_item
+             WHERE repo_id = ? AND closed_at IS NULL
+             ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map([repo_id], |row| {
+            Ok(SnapshotPipelineItem {
+                id: row.get(0)?,
+                repo_id: row.get(1)?,
+                issue_number: row.get(2)?,
+                issue_title: row.get(3)?,
+                prompt: row.get(4)?,
+                pipeline: row.get(5)?,
+                pipeline_def: row.get(6)?,
+                stage: row.get(7)?,
+                pr_number: row.get(8)?,
+                pr_url: row.get(9)?,
+                branch: row.get(10)?,
+                closed_at: row.get(11)?,
+                agent_type: row.get(12)?,
+                agent_provider: row.get(13)?,
+                activity: row.get(14)?,
+                activity_changed_at: row.get(15)?,
+                unread_at: row.get(16)?,
+                port_offset: row.get(17)?,
+                display_name: row.get(18)?,
+                last_output_preview: row.get(19)?,
+                port_env: row.get(20)?,
+                agent_spawn_options: row.get(21)?,
+                pinned: row.get(22)?,
+                pin_order: row.get(23)?,
+                base_ref: row.get(24)?,
+                agent_session_id: row.get(25)?,
+                teardown_started_at: row.get(26)?,
+                parent_task_id: row.get(27)?,
+                notify_task_id: row.get(28)?,
+                notified_at: row.get(29)?,
+                created_at: row.get(30)?,
+                updated_at: row.get(31)?,
+                has_running_post: row.get(32)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    fn list_snapshot_task_blockers(&self) -> Result<Vec<SnapshotTaskBlocker>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT blocked_item_id, blocker_item_id
+             FROM task_blocker
+             ORDER BY blocked_item_id, blocker_item_id",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(SnapshotTaskBlocker {
+                blocked_item_id: row.get(0)?,
+                blocker_item_id: row.get(1)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    fn list_snapshot_worktree_paths(&self) -> Result<HashMap<String, String>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT pipeline_item_id, path
+             FROM worktree
+             ORDER BY created_at DESC, id DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let pipeline_item_id: String = row.get(0)?;
+            let path: String = row.get(1)?;
+            Ok((pipeline_item_id, path))
+        })?;
+
+        let mut paths = HashMap::new();
+        for row in rows {
+            let (pipeline_item_id, path) = row?;
+            paths.entry(pipeline_item_id).or_insert(path);
+        }
+        Ok(paths)
+    }
+
+    fn list_snapshot_settings(&self) -> Result<HashMap<String, String>, rusqlite::Error> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT key, value FROM settings ORDER BY key ASC")?;
+        let rows = stmt.query_map([], |row| {
+            let key: String = row.get(0)?;
+            let value: String = row.get(1)?;
+            Ok((key, value))
+        })?;
+
+        let mut settings = HashMap::new();
+        for row in rows {
+            let (key, value) = row?;
+            settings.insert(key, value);
+        }
+        Ok(settings)
+    }
+}

@@ -84,6 +84,8 @@ export interface RepoSnapshotEntry {
 export interface KannaSnapshot {
   entries: RepoSnapshotEntry[];
   taskBlockers: TaskBlocker[];
+  worktreePaths: Record<string, string>;
+  settings: Record<string, string>;
 }
 
 export interface CreateItemOptions {
@@ -131,6 +133,7 @@ export interface StoreServices {
   windowWorkspace?: WindowWorkspaceController;
   loadInitialData?: () => Promise<void>;
   reloadSnapshot?: () => Promise<void>;
+  fetchSnapshot?: () => Promise<KannaSnapshot>;
   withOptimisticItemOverlay?: <T>(input: {
     key: string;
     apply: (snapshot: KannaSnapshot) => KannaSnapshot;

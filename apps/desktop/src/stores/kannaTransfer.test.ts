@@ -10,6 +10,7 @@ import {
   parseOutgoingTransferPreflightResult,
 } from "../utils/taskTransfer";
 import type { SessionRecoveryState } from "../composables/sessionRecoveryState";
+import { setDesktopSnapshotFetcherForTests } from "../services/desktopServerClient";
 
 const invokeMock = vi.fn<(cmd: string, args?: Record<string, unknown>) => Promise<unknown>>();
 const loadSessionRecoveryStateMock = vi.fn<(sessionId: string) => Promise<SessionRecoveryState | null>>();
@@ -158,6 +159,16 @@ function createTransferDb(initial: {
     task_transfer: [...(initial.transfers ?? [])],
     task_transfer_provenance: [] as Array<Record<string, unknown>>,
   };
+
+  setDesktopSnapshotFetcherForTests(async () => ({
+    entries: tables.repo.map((repo) => ({
+      repo,
+      items: tables.pipeline_item.filter((item) => item.repo_id === repo.id && item.closed_at === null),
+    })),
+    taskBlockers: [],
+    worktreePaths: {},
+    settings: {},
+  }));
 
   const db = {
     tables,

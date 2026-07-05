@@ -30,6 +30,8 @@ impl Db {
                 path TEXT NOT NULL,
                 name TEXT NOT NULL,
                 default_branch TEXT,
+                remote_url TEXT,
+                remote_url_hash TEXT,
                 hidden INTEGER,
                 sort_order INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT,
@@ -66,7 +68,9 @@ impl Db {
                 notify_task_id TEXT,
                 notified_at TEXT,
                 parent_task_id TEXT,
-                agent_session_id TEXT
+                agent_session_id TEXT,
+                agent_spawn_options TEXT,
+                teardown_started_at TEXT
             );
 
             CREATE TABLE worktree (

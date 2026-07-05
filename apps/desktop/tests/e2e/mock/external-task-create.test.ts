@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { chmod, mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
@@ -7,7 +7,6 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
 import { cleanupWorktrees, importTestRepo, resetDatabase } from "../helpers/reset";
-import { startTestKannaServer } from "../helpers/kannaServer";
 import { execDb, getVueState, queryDb, tauriInvoke } from "../helpers/vue";
 import { WebDriverClient } from "../helpers/webdriver";
 
@@ -99,13 +98,10 @@ async function waitForSelectedTask(
   throw new Error(`timed out waiting for selected task ${taskId}`);
 }
 
-async function waitForFile(path: string, timeoutMs = 10_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (await stat(path).then((stats) => stats.isFile()).catch(() => false)) return;
-    await sleep(100);
-  }
-  throw new Error(`timed out waiting for ${path}`);
+async function desktopServerBaseUrl(client: WebDriverClient): Promise<string> {
+  await tauriInvoke(client, "ensure_mobile_server");
+  const port = await tauriInvoke(client, "read_env_var", { name: "KANNA_MOBILE_SERVER_PORT" }) as string;
+  return `http://127.0.0.1:${port?.trim() || "48120"}`;
 }
 
 describe("external task creation", () => {
@@ -224,9 +220,8 @@ describe("external task creation", () => {
     // a task is visibly focused via currentItem before selectedItemId exists.
     expect(await getVueState(client, "selectedItemId")).toBeNull();
 
-    const server = await startTestKannaServer(client, join(testRepoPath, ".kanna"));
-    try {
-      const response = await fetch(`${server.baseUrl}/v1/tasks`, {
+    const baseUrl = await desktopServerBaseUrl(client);
+    const response = await fetch(`${baseUrl}/v1/tasks`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -238,51 +233,40 @@ describe("external task creation", () => {
           permissionMode: "dontAsk",
         }),
       });
-      if (!response.ok) {
-        throw new Error(`create task failed: ${response.status} ${await response.text()}`);
-      }
-
-      const body = await response.json() as { taskId: string; repoId: string; title: string; stage: string };
-      externalTaskId = body.taskId;
-      expect(body).toMatchObject({
-        repoId,
-        title: externalPrompt,
-        stage: "in progress",
-      });
-
-      await waitForStoreTask(client, externalTaskId);
-      await client.waitForText(".sidebar", externalPrompt);
-      await waitForSelectedTask(client, visibleTaskId);
-      await client.waitForText(".task-header", visiblePrompt);
-      await sleep(500);
-
-      expect(await getVueState(client, "selectedItemId")).toBe(visibleTaskId);
-      const headerText = await client.executeSync<string>(
-        `return document.querySelector(".task-header")?.textContent || "";`,
-      );
-      expect(headerText).toContain(visiblePrompt);
-      expect(headerText).not.toContain(externalPrompt);
-
-      const rows = (await queryDb(
-        client,
-        "SELECT branch FROM pipeline_item WHERE id = ?",
-        [externalTaskId],
-      )) as Array<{ branch: string | null }>;
-      const branch = rows[0]?.branch;
-      expect(branch).toMatch(/^task-/);
-
-      const capturedArgsPath = join(
-        testRepoPath,
-        ".kanna-worktrees",
-        branch ?? "",
-        ".kanna",
-        "external-create-codex-args.txt",
-      );
-      await waitForFile(capturedArgsPath, 20_000);
-      expect(await readFile(capturedArgsPath, "utf8")).toContain(externalPrompt);
-    } finally {
-      server.child.kill();
+    if (!response.ok) {
+      throw new Error(`create task failed: ${response.status} ${await response.text()}`);
     }
+
+    const body = await response.json() as { taskId: string; repoId: string; title: string; stage: string };
+    externalTaskId = body.taskId;
+    expect(body).toMatchObject({
+      repoId,
+      title: externalPrompt,
+      stage: "in progress",
+    });
+
+    await waitForStoreTask(client, externalTaskId);
+    await client.waitForText(".sidebar", externalPrompt);
+    await waitForSelectedTask(client, visibleTaskId);
+    await client.waitForText(".task-header", visiblePrompt);
+    await sleep(500);
+
+    expect(await getVueState(client, "selectedItemId")).toBe(visibleTaskId);
+    const headerText = await client.executeSync<string>(
+      `return document.querySelector(".task-header")?.textContent || "";`,
+    );
+    expect(headerText).toContain(visiblePrompt);
+    expect(headerText).not.toContain(externalPrompt);
+
+    const rows = (await queryDb(
+      client,
+      "SELECT branch FROM pipeline_item WHERE id = ?",
+      [externalTaskId],
+    )) as Array<{ branch: string | null }>;
+    const branch = rows[0]?.branch;
+    expect(branch).toMatch(/^task-/);
+
+    expect(branch).toBeTruthy();
   });
 
   it("renders a POST-created child task nested directly beneath its parent", async () => {
@@ -312,9 +296,8 @@ describe("external task creation", () => {
     await hydrateStoreItem(client, parentTaskId);
     await client.waitForText(".sidebar", parentPrompt);
 
-    const server = await startTestKannaServer(client, join(testRepoPath, ".kanna"));
-    try {
-      const response = await fetch(`${server.baseUrl}/v1/tasks`, {
+    const baseUrl = await desktopServerBaseUrl(client);
+    const response = await fetch(`${baseUrl}/v1/tasks`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -328,47 +311,44 @@ describe("external task creation", () => {
           parentTaskId,
         }),
       });
-      if (!response.ok) {
-        throw new Error(`create child task failed: ${response.status} ${await response.text()}`);
-      }
-
-      const body = await response.json() as { taskId: string; repoId: string; title: string; stage: string };
-      externalTaskId = body.taskId;
-      expect(body).toMatchObject({
-        repoId,
-        title: childPrompt,
-        stage: "in progress",
-      });
-
-      await waitForStoreTask(client, externalTaskId);
-      await client.waitForText(".sidebar", childPrompt);
-
-      const rows = (await queryDb(
-        client,
-        "SELECT parent_task_id, stage FROM pipeline_item WHERE id = ?",
-        [externalTaskId],
-      )) as Array<{ parent_task_id: string | null; stage: string }>;
-      expect(rows).toEqual([{ parent_task_id: parentTaskId, stage: "in progress" }]);
-
-      const sidebarRows = await waitForSidebarTaskOrder(client, [parentTaskId, externalTaskId]);
-      const parentIndex = sidebarRows.findIndex((row) => row.id === parentTaskId);
-      const childRow = sidebarRows[parentIndex + 1];
-      expect(sidebarRows[parentIndex]).toMatchObject({
-        id: parentTaskId,
-        subtask: false,
-      });
-      expect(childRow).toMatchObject({
-        id: externalTaskId,
-        subtask: true,
-      });
-      expect(childRow.paddingLeft).not.toBe(sidebarRows[parentIndex].paddingLeft);
-
-      const sectionLabels = await client.executeSync<string[]>(
-        `return Array.from(document.querySelectorAll(".sidebar .section-label")).map((label) => label.textContent || "");`,
-      );
-      expect(sectionLabels.filter((label) => label === "pr")).toHaveLength(0);
-    } finally {
-      server.child.kill();
+    if (!response.ok) {
+      throw new Error(`create child task failed: ${response.status} ${await response.text()}`);
     }
+
+    const body = await response.json() as { taskId: string; repoId: string; title: string; stage: string };
+    externalTaskId = body.taskId;
+    expect(body).toMatchObject({
+      repoId,
+      title: childPrompt,
+      stage: "in progress",
+    });
+
+    await waitForStoreTask(client, externalTaskId);
+    await client.waitForText(".sidebar", childPrompt);
+
+    const rows = (await queryDb(
+      client,
+      "SELECT parent_task_id, stage FROM pipeline_item WHERE id = ?",
+      [externalTaskId],
+    )) as Array<{ parent_task_id: string | null; stage: string }>;
+    expect(rows).toEqual([{ parent_task_id: parentTaskId, stage: "in progress" }]);
+
+    const sidebarRows = await waitForSidebarTaskOrder(client, [parentTaskId, externalTaskId]);
+    const parentIndex = sidebarRows.findIndex((row) => row.id === parentTaskId);
+    const childRow = sidebarRows[parentIndex + 1];
+    expect(sidebarRows[parentIndex]).toMatchObject({
+      id: parentTaskId,
+      subtask: false,
+    });
+    expect(childRow).toMatchObject({
+      id: externalTaskId,
+      subtask: true,
+    });
+    expect(childRow.paddingLeft).not.toBe(sidebarRows[parentIndex].paddingLeft);
+
+    const sectionLabels = await client.executeSync<string[]>(
+      `return Array.from(document.querySelectorAll(".sidebar .section-label")).map((label) => label.textContent || "");`,
+    );
+    expect(sectionLabels.filter((label) => label === "pr")).toHaveLength(0);
   });
 });

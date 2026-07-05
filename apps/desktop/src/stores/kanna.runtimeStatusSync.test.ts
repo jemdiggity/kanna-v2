@@ -328,6 +328,7 @@ vi.mock("@kanna/db", () => ({
 }));
 
 import { useKannaStore } from "./kanna";
+import { setDesktopSnapshotFetcherForTests } from "../services/desktopServerClient";
 
 function createDb(): DbHandle {
   return {
@@ -364,6 +365,15 @@ describe("kanna runtime status reconciliation", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     mockState.reset();
+    setDesktopSnapshotFetcherForTests(async () => ({
+      entries: mockState.repos.map((repo) => ({
+        repo,
+        items: mockState.pipelineItems.filter((item) => item.repo_id === repo.id && item.closed_at === null),
+      })),
+      taskBlockers: [],
+      worktreePaths: {},
+      settings: {},
+    }));
     cleanupMocks.closePipelineItemAndClearCachedTerminalState.mockClear();
     cleanupMocks.getTaskIdFromTeardownSessionId.mockClear();
     cleanupMocks.isTeardownSessionId.mockClear();

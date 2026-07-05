@@ -158,6 +158,20 @@ describe("StreamClient", () => {
     client.close();
   });
 
+  it("notifies state-change listeners for coarse server invalidations", () => {
+    const { client, socket } = connectedClient();
+    const scopes: string[] = [];
+    const unsubscribe = client.onStateChanged((scope) => scopes.push(scope));
+
+    socket.receive({ type: "state_changed", scope: "tasks" });
+    socket.receive({ type: "state_changed", scope: "repos" });
+    unsubscribe();
+    socket.receive({ type: "state_changed", scope: "settings" });
+
+    expect(scopes).toEqual(["tasks", "repos"]);
+    client.close();
+  });
+
   it("rejects in-flight requests on disconnect", async () => {
     const { client, socket } = connectedClient();
     const pending = client.request("GET", "/v1/status");

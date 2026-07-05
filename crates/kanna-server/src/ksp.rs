@@ -139,6 +139,21 @@ async fn handle_stream_channels(
 ) {
     let (frame_tx, frame_rx) = mpsc::channel::<ServerFrame>(256);
     let writer_task = tokio::spawn(write_frames(outgoing_tx, frame_rx));
+    let mut state_change_rx = state.subscribe_state_changes();
+    let state_change_tx = frame_tx.clone();
+    let state_change_task = tokio::spawn(async move {
+        loop {
+            match state_change_rx.recv().await {
+                Ok(frame) => {
+                    if state_change_tx.send(frame).await.is_err() {
+                        return;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+            }
+        }
+    });
     let mut conn = StreamConn {
         state,
         frame_tx,
@@ -169,6 +184,7 @@ async fn handle_stream_channels(
     // would lose final frames (e.g. the unauthenticated error).
     conn.shutdown();
     drop(conn);
+    state_change_task.abort();
     let _ = writer_task.await;
 }
 

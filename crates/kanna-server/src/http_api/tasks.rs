@@ -6,6 +6,7 @@ use crate::db::Db;
 use crate::mobile_api::MobileApi;
 use axum::extract::State;
 use axum::Json;
+use kanna_agent_protocol::StateChangeScope;
 use std::sync::Arc;
 
 pub(super) async fn list_recent_tasks(
@@ -85,6 +86,7 @@ pub(super) async fn update_task(
         })?;
     db.update_pipeline_item_display_name(&task_id, &display_name)
         .map_err(|e| db_write_error("db error", e))?;
+    state.publish_state_changed(StateChangeScope::Tasks);
     Ok(Json(crate::mobile_api::TaskActionResponse {
         task_id,
         follow_task: None,
@@ -177,6 +179,8 @@ pub(super) async fn create_task(
                     ),
                 });
             }
+            state.publish_state_changed(StateChangeScope::Tasks);
+            state.publish_state_changed(StateChangeScope::Blockers);
             return Ok(Json(created));
         }
     }
@@ -229,5 +233,9 @@ pub(super) async fn create_task(
     )
     .await
     .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    state.publish_state_changed(StateChangeScope::Tasks);
+    if !resolved_blocker_ids.is_empty() {
+        state.publish_state_changed(StateChangeScope::Blockers);
+    }
     Ok(Json(created))
 }

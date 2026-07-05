@@ -1,15 +1,17 @@
 use crate::config::Config;
 use crate::pairing::{self, PairingSession};
+use kanna_agent_protocol::{ServerFrame, StateChangeScope};
 use serde::Serialize;
 use std::path::Path;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{broadcast, Mutex};
 
 #[derive(Clone)]
 pub struct AppState {
     pub(super) config: Config,
     pub(super) pairing_session: Arc<Mutex<Option<PairingSession>>>,
     pub(super) session_replacements: crate::session_replacements::SessionReplacements,
+    state_changes: broadcast::Sender<ServerFrame>,
     #[cfg(test)]
     pub(super) task_creator: Option<TestTaskCreator>,
     #[cfg(test)]
@@ -124,6 +126,7 @@ impl AppState {
             config,
             pairing_session: Arc::new(Mutex::new(None)),
             session_replacements: crate::session_replacements::SessionReplacements::default(),
+            state_changes: broadcast::channel(256).0,
             #[cfg(test)]
             task_creator: None,
             #[cfg(test)]
@@ -149,6 +152,14 @@ impl AppState {
             pairing::active_pairing_code(session.as_ref())
         };
         crate::mobile_api::build_mobile_server_status(&self.config, pairing_code)
+    }
+
+    pub fn subscribe_state_changes(&self) -> broadcast::Receiver<ServerFrame> {
+        self.state_changes.subscribe()
+    }
+
+    pub fn publish_state_changed(&self, scope: StateChangeScope) {
+        let _ = self.state_changes.send(ServerFrame::StateChanged { scope });
     }
 
     #[cfg(test)]
