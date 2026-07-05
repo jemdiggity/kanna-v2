@@ -1,3 +1,4 @@
+import { Window } from "happy-dom";
 import { describe, expect, it } from "vitest";
 import {
   buildTerminalAppendScript,
@@ -6,8 +7,169 @@ import {
   buildTerminalResizeScript
 } from "./buildTerminalDocument";
 
+interface TouchPoint {
+  clientX: number;
+  clientY: number;
+}
+
+class StubTerminal {
+  cols: number;
+  rows = 0;
+  options: { fontSize: number };
+  resizeCalls: Array<{ cols: number; rows: number }> = [];
+  scrollToBottomCalls = 0;
+  writes: unknown[] = [];
+  resets = 0;
+  _core = {
+    _renderService: {
+      dimensions: {
+        css: {
+          cell: {
+            width: 9,
+            height: 18
+          }
+        }
+      }
+    }
+  };
+
+  constructor(options: { cols: number; fontSize: number }) {
+    this.cols = options.cols;
+    this.options = { fontSize: options.fontSize };
+  }
+
+  loadAddon(): void {}
+
+  open(root: HTMLElement): void {
+    const xterm = root.ownerDocument.createElement("div");
+    xterm.className = "xterm";
+    const screen = root.ownerDocument.createElement("div");
+    screen.className = "xterm-screen";
+    const viewport = root.ownerDocument.createElement("div");
+    viewport.className = "xterm-viewport";
+    Object.defineProperties(viewport, {
+      clientHeight: { configurable: true, value: 100 },
+      scrollHeight: { configurable: true, value: 1000 }
+    });
+    xterm.append(screen, viewport);
+    root.append(xterm);
+  }
+
+  resize(cols: number, rows: number): void {
+    this.cols = cols;
+    this.rows = rows;
+    this.resizeCalls.push({ cols, rows });
+  }
+
+  scrollToBottom(): void {
+    this.scrollToBottomCalls += 1;
+  }
+
+  write(data: unknown, done?: () => void): void {
+    this.writes.push(data);
+    done?.();
+  }
+
+  reset(): void {
+    this.resets += 1;
+  }
+}
+
+class StubFitAddon {
+  fitCalls = 0;
+  proposeDimensions(): { rows: number } {
+    return { rows: 42 };
+  }
+  fit(): void {
+    this.fitCalls += 1;
+  }
+}
+
 function b64(input: string): string {
   return Buffer.from(input, "utf8").toString("base64");
+}
+
+function createTouchEvent(
+  window: Window,
+  type: string,
+  touches: TouchPoint[],
+  options: EventInit = { cancelable: true }
+): Event {
+  const event = new window.Event(type, options);
+  Object.defineProperty(event, "touches", {
+    configurable: true,
+    value: touches
+  });
+  return event;
+}
+
+function extractTerminalScript(html: string): string {
+  const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(
+    (match) => match[1]
+  );
+  return scripts.at(-1) ?? "";
+}
+
+function createExecutedTerminalDocument(): {
+  terminal: StubTerminal;
+  window: Window & typeof globalThis;
+  root: HTMLElement;
+  viewport: HTMLElement;
+  terminalViewport: HTMLElement;
+  messages: string[];
+} {
+  const html = buildTerminalDocument({ bottomInset: 24 });
+  const window = new Window() as Window & typeof globalThis;
+  const messages: string[] = [];
+
+  window.document.documentElement.innerHTML =
+    html.match(/<html[^>]*>([\s\S]*)<\/html>/)?.[1] ?? html;
+  window.requestAnimationFrame = ((callback: FrameRequestCallback) => {
+    callback(0);
+    return 1;
+  }) as typeof window.requestAnimationFrame;
+  window.ReactNativeWebView = {
+    postMessage(message: string) {
+      messages.push(message);
+    }
+  };
+
+  let terminal: StubTerminal | null = null;
+  window.Terminal = class extends StubTerminal {
+    constructor(options: { cols: number; fontSize: number }) {
+      super(options);
+      terminal = this;
+    }
+  };
+  window.FitAddon = {
+    FitAddon: StubFitAddon
+  };
+
+  const viewport = window.document.getElementById("viewport");
+  if (!viewport) {
+    throw new Error("generated terminal viewport was not rendered");
+  }
+  Object.defineProperty(viewport, "clientWidth", {
+    configurable: true,
+    value: 390
+  });
+
+  window.eval(extractTerminalScript(html));
+
+  const root = window.document.getElementById("terminal-root");
+  const terminalViewport = root?.querySelector<HTMLElement>(".xterm-viewport");
+  if (!terminal || !root || !terminalViewport) {
+    throw new Error("generated terminal script did not initialize xterm");
+  }
+
+  return {
+    terminal,
+    window,
+    root,
+    viewport,
+    terminalViewport,
+    messages
+  };
 }
 
 describe("buildTerminalDocument", () => {
@@ -57,6 +219,68 @@ describe("buildTerminalDocument", () => {
     expect(html).toContain('viewport.addEventListener("touchstart"');
     expect(html).toContain('viewport.addEventListener("touchmove"');
     expect(html).toContain("term.options.fontSize = Math.round(BASE_FONT_SIZE * fontScale)");
+  });
+
+  it("executes one-finger fallback touch scrolling across the viewport and xterm buffer", () => {
+    const { terminalViewport, viewport, window } = createExecutedTerminalDocument();
+    viewport.scrollLeft = 12;
+    terminalViewport.scrollTop = 80;
+
+    viewport.dispatchEvent(createTouchEvent(window, "touchstart", [{ clientX: 220, clientY: 240 }]));
+    const touchMove = createTouchEvent(window, "touchmove", [{ clientX: 175, clientY: 180 }]);
+    viewport.dispatchEvent(touchMove);
+
+    expect(viewport.scrollLeft).toBe(57);
+    expect(terminalViewport.scrollTop).toBe(140);
+    expect(touchMove.defaultPrevented).toBe(true);
+  });
+
+  it("executes two-finger fallback pinch scaling with clamping and keeps terminal scripts working", () => {
+    const { messages, root, terminal, viewport, window } = createExecutedTerminalDocument();
+
+    viewport.dispatchEvent(
+      createTouchEvent(window, "touchstart", [
+        { clientX: 0, clientY: 0 },
+        { clientX: 100, clientY: 0 }
+      ])
+    );
+    const pinchOut = createTouchEvent(window, "touchmove", [
+      { clientX: 0, clientY: 0 },
+      { clientX: 260, clientY: 0 }
+    ]);
+    viewport.dispatchEvent(pinchOut);
+
+    expect(root.dataset.kannaFontScale).toBe("1.80");
+    expect(terminal.options.fontSize).toBe(23);
+    expect(pinchOut.defaultPrevented).toBe(true);
+
+    viewport.dispatchEvent(createTouchEvent(window, "touchend", []));
+    viewport.dispatchEvent(
+      createTouchEvent(window, "touchstart", [
+        { clientX: 0, clientY: 0 },
+        { clientX: 100, clientY: 0 }
+      ])
+    );
+    viewport.dispatchEvent(
+      createTouchEvent(window, "touchmove", [
+        { clientX: 0, clientY: 0 },
+        { clientX: 10, clientY: 0 }
+      ])
+    );
+
+    expect(root.dataset.kannaFontScale).toBe("0.75");
+    expect(terminal.options.fontSize).toBe(10);
+
+    window.__setTerminalDims({ cols: 132, rows: 43 });
+    window.__replaceTerminalState({ chunksB64: [b64("mobile terminal\n")] });
+
+    expect(root.dataset.kannaCols).toBe("132");
+    expect(root.dataset.kannaRows).toBe("43");
+    expect(terminal.resizeCalls).toContainEqual({ cols: 132, rows: 43 });
+    expect(terminal.resets).toBe(1);
+    expect(terminal.writes).toHaveLength(1);
+    expect(root.dataset.kannaByteCount).toBe("16");
+    expect(messages.map((message) => JSON.parse(message).type)).toContain("terminal-ready");
   });
 
   it("writes base64 terminal chunks as bytes in replace scripts", () => {

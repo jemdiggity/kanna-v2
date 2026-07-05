@@ -35,12 +35,24 @@ test-only desktop/mobile-server fixture path that can spawn a fake PTY command o
 register a synthetic terminal session with controlled output and dimensions, then
 surface that task through the normal `/v1/tasks` list and KSP terminal stream.
 
+True gesture E2E for mobile terminal pinch zoom and bidirectional scrolling has
+the same fixture constraint plus an Appium/WebView gesture gap: the test must
+drive native two-finger pinch and pan input into the WebView while inspecting the
+xterm DOM state after each gesture. The current smoke can switch into the
+WebView and inspect state, but it does not have a stable terminal fixture or a
+cross-driver helper that reliably injects multi-touch gestures into the embedded
+WebView. Making that coverage deterministic requires the fixture path above and
+a gesture helper that can issue native pinch/pan actions, then assert
+`#viewport.scrollLeft`, `.xterm-viewport.scrollTop`, `data-kanna-font-scale`,
+and rendered terminal bytes in the same selected task.
+
 The simulator-free coverage is:
 
 - `src/screens/TerminalWebView.test.tsx` for pending resize-before-snapshot
   script ordering.
 - `src/screens/buildTerminalDocument.test.ts` for large newline-delimited
-  base64 frame preservation and the resize bridge.
+  base64 frame preservation, the resize bridge, executable fallback touch
+  scrolling, pinch scale clamping, and the generated terminal script path.
 - `src/state/sessionStore.test.ts` for preserving large base64 frames without
   slicing mid-token.
 - `src/state/mobileController.test.ts` for applying ready-event PTY dimensions
