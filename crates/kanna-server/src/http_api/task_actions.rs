@@ -356,6 +356,34 @@ pub(super) async fn reopen_task(
     }))
 }
 
+pub(super) async fn mark_task_read(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
+    let db = Db::open(&state.config.db_path).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("db error: {}", e),
+        )
+    })?;
+    let task_id = db
+        .resolve_pipeline_item_id(&task_id)
+        .map_err(|e| db_write_error("db error", e))?
+        .ok_or_else(|| {
+            (
+                axum::http::StatusCode::NOT_FOUND,
+                format!("task not found: {task_id}"),
+            )
+        })?;
+    db.update_pipeline_item_activity(&task_id, "idle")
+        .map_err(|e| db_write_error("db error", e))?;
+    state.publish_state_changed(StateChangeScope::Tasks);
+    Ok(Json(crate::mobile_api::TaskActionResponse {
+        task_id,
+        follow_task: None,
+    }))
+}
+
 /// Close a task that advanced past its final pipeline stage. Shared by
 /// `advance_stage` and `complete_stage`: hands blocker-close instructions to
 /// dependents with workspaces, kills the task's daemon sessions, closes the

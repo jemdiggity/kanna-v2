@@ -1,11 +1,9 @@
 import {
   unhideRepo as unhideRepoQuery,
-  updatePipelineItemActivity,
   type PipelineItem,
 } from "@kanna/db";
 import { closeDesktopTask, reopenDesktopTask } from "../services/desktopServerClient";
 import { hasOpenSubtasks } from "../utils/taskParenting";
-import { isTaskSelectedInAnyWindow } from "./windowSelection";
 import { requireService, type StoreContext } from "./state";
 import { resolveAgentProvider } from "./agent-provider";
 import type { TasksApi } from "./tasks";
@@ -105,9 +103,7 @@ export function createTaskCloseActions(
     const item = context.state.items.value.find((candidate) => candidate.id === sessionId);
     if (!item) return;
     if (item.closed_at !== null) return;
-    const activity = await isTaskSelectedInAnyWindow(context, sessionId) ? "idle" : "unread";
     try {
-      await updatePipelineItemActivity(context.requireDb(), item.id, activity);
       await reloadSnapshot();
       await invalidateWindowWorkspace("taskActivity");
     } catch (error) {

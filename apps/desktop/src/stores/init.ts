@@ -176,7 +176,7 @@ export function createInitApi(
 
   async function init(db: DbHandle) {
     context.state.db.value = db;
-    const { updatePipelineItemActivity, closePipelineItem } = await import("@kanna/db");
+    const { closePipelineItem } = await import("@kanna/db");
 
     await requireService(context.services.loadInitialData, "loadInitialData")();
 
@@ -191,14 +191,6 @@ export function createInitApi(
       eagerItems = [...context.state.items.value];
       snapshotBlockers = [...context.state.taskBlockers.value];
       worktreePathByItemId = new Map(Object.entries(context.state.worktreePaths.value));
-    }
-
-    const workingItems = eagerItems.filter((item) => item.activity === "working");
-    for (const item of workingItems) {
-      await updatePipelineItemActivity(context.requireDb(), item.id, "unread");
-    }
-    if (workingItems.length > 0) {
-      await refreshStartupSnapshot();
     }
 
     if (isTauri) {

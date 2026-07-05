@@ -297,6 +297,40 @@ async fn reopen_task_route_reopens_and_reclaims_ports_from_worktree_config() {
 }
 
 #[tokio::test]
+async fn mark_read_route_sets_unread_task_idle() {
+    let state = super::test_state_with_seed("desktop-1", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "task-1",
+            "repo-1",
+            "task prompt",
+            Some("Task"),
+            "in progress",
+            "2026-04-17 07:00:00",
+        )
+        .unwrap();
+        db.update_pipeline_item_activity("task-1", "unread")
+            .unwrap();
+    });
+    let db_path = state.config.db_path.clone();
+    let app = super::router(state);
+
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks/task-1/actions/mark-read")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let db = Db::open(&db_path).unwrap();
+    let item = db.get_pipeline_item("task-1").unwrap().unwrap();
+    assert_eq!(item.activity.as_deref(), Some("idle"));
+}
+
+#[tokio::test]
 async fn close_pr_task_sends_blocker_close_instruction_with_renamed_branch_to_running_dependents() {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};

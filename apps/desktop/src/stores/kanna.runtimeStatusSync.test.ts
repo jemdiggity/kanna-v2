@@ -61,6 +61,15 @@ const mockState = vi.hoisted(() => {
   let pipelineItems = [makeItem()];
   let sessionStatuses: Array<{ session_id: string; status: string }> = [];
   const listeners = new Map<string, Array<(event: unknown) => void>>();
+  const snapshotFetcherMock = vi.fn(async () => ({
+    entries: repos.map((repo) => ({
+      repo,
+      items: pipelineItems.filter((item) => item.repo_id === repo.id && item.closed_at === null),
+    })),
+    taskBlockers: [],
+    worktreePaths: {},
+    settings: {},
+  }));
 
   const invokeMock = vi.fn(async (command: string) => {
     switch (command) {
@@ -117,6 +126,7 @@ const mockState = vi.hoisted(() => {
     invokeMock.mockClear();
     listenMock.mockClear();
     updatePipelineItemActivityMock.mockClear();
+    snapshotFetcherMock.mockClear();
   }
 
   return {
@@ -142,6 +152,7 @@ const mockState = vi.hoisted(() => {
     listenMock,
     updatePipelineItemActivityMock,
     updateAgentSessionIdMock,
+    snapshotFetcherMock,
     emit,
     reset,
   };
@@ -366,15 +377,7 @@ describe("kanna runtime status reconciliation", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     mockState.reset();
-    setDesktopSnapshotFetcherForTests(async () => ({
-      entries: mockState.repos.map((repo) => ({
-        repo,
-        items: mockState.pipelineItems.filter((item) => item.repo_id === repo.id && item.closed_at === null),
-      })),
-      taskBlockers: [],
-      worktreePaths: {},
-      settings: {},
-    }));
+    setDesktopSnapshotFetcherForTests(mockState.snapshotFetcherMock);
     cleanupMocks.closePipelineItemAndClearCachedTerminalState.mockClear();
     cleanupMocks.getTaskIdFromTeardownSessionId.mockClear();
     cleanupMocks.isTeardownSessionId.mockClear();
@@ -386,11 +389,12 @@ describe("kanna runtime status reconciliation", () => {
     mockState.updateAgentSessionIdMock.mockClear();
   });
 
-  it("reconciles a selected task to idle from a direct daemon status change", async () => {
+  it("refreshes server-owned activity from a direct daemon status change", async () => {
     const store = await createStore();
     await store.selectRepo("repo-1");
     await store.selectItem("task-1");
     await flushStore();
+    mockState.snapshotFetcherMock.mockClear();
     mockState.pipelineItems[0]!.activity = "working";
 
     mockState.emit("status_changed", {
@@ -400,12 +404,8 @@ describe("kanna runtime status reconciliation", () => {
 
     await flushStore();
 
-    expect(mockState.updatePipelineItemActivityMock).toHaveBeenCalledWith(
-      expect.anything(),
-      "task-1",
-      "idle",
-    );
-    expect(mockState.pipelineItems[0]?.activity).toBe("idle");
+    expect(mockState.updatePipelineItemActivityMock).not.toHaveBeenCalled();
+    expect(mockState.snapshotFetcherMock).toHaveBeenCalled();
   });
 
   it("ignores daemon status changes for closed tasks", async () => {
@@ -436,7 +436,7 @@ describe("kanna runtime status reconciliation", () => {
     expect(mockState.pipelineItems[0]?.activity).toBe("idle");
   });
 
-  it("keeps an exited task read when another open window has it selected", async () => {
+  it("refreshes server-owned activity when a task exits", async () => {
     const store = await createStore();
     store.attachWindowWorkspace({
       bootstrap: {
@@ -476,6 +476,7 @@ describe("kanna runtime status reconciliation", () => {
       onSharedInvalidation: vi.fn(async () => vi.fn()),
     });
     await flushStore();
+    mockState.snapshotFetcherMock.mockClear();
 
     mockState.emit("session_exit", {
       session_id: "task-1",
@@ -485,12 +486,8 @@ describe("kanna runtime status reconciliation", () => {
 
     await flushStore();
 
-    expect(mockState.updatePipelineItemActivityMock).toHaveBeenCalledWith(
-      expect.anything(),
-      "task-1",
-      "idle",
-    );
-    expect(mockState.pipelineItems[0]?.activity).toBe("idle");
+    expect(mockState.updatePipelineItemActivityMock).not.toHaveBeenCalled();
+    expect(mockState.snapshotFetcherMock).toHaveBeenCalled();
   });
 
   it("ignores session exits for closed tasks", async () => {

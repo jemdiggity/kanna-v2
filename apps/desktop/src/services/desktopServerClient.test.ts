@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { closeDesktopTask, reopenDesktopTask } from "./desktopServerClient";
+import { closeDesktopTask, markDesktopTaskRead, reopenDesktopTask } from "./desktopServerClient";
 
 const invokeMock = vi.hoisted(() => vi.fn());
 
@@ -36,6 +36,15 @@ describe("desktopServerClient", () => {
 
     expect(fetch).toHaveBeenCalledWith(
       "http://127.0.0.1:48321/v1/tasks/task-1/actions/reopen",
+      { method: "POST" },
+    );
+  });
+
+  it("posts task mark-read actions to the local kanna-server", async () => {
+    await markDesktopTaskRead("task-1");
+
+    expect(fetch).toHaveBeenCalledWith(
+      "http://127.0.0.1:48321/v1/tasks/task-1/actions/mark-read",
       { method: "POST" },
     );
   });

@@ -81,3 +81,7 @@ export async function closeDesktopTask(taskId: string): Promise<void> {
 export async function reopenDesktopTask(taskId: string): Promise<void> {
   await post(`/v1/tasks/${encodeURIComponent(taskId)}/actions/reopen`);
 }
+
+export async function markDesktopTaskRead(taskId: string): Promise<void> {
+  await post(`/v1/tasks/${encodeURIComponent(taskId)}/actions/mark-read`);
+}
