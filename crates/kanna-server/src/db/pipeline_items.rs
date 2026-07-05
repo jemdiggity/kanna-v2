@@ -547,7 +547,9 @@ impl Db {
         Ok(())
     }
 
-    pub fn list_closed_task_identities(&self) -> Result<Vec<super::ClosedTaskIdentity>, rusqlite::Error> {
+    pub fn list_closed_task_identities(
+        &self,
+    ) -> Result<Vec<super::ClosedTaskIdentity>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo_id
              FROM pipeline_item

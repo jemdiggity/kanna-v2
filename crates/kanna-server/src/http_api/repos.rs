@@ -79,7 +79,10 @@ pub(super) async fn patch_repo(
     db.patch_repo(
         &repo_id,
         payload.remote_url.as_ref().map(|value| value.as_deref()),
-        payload.remote_url_hash.as_ref().map(|value| value.as_deref()),
+        payload
+            .remote_url_hash
+            .as_ref()
+            .map(|value| value.as_deref()),
         payload.hidden,
     )
     .map_err(|e| match e {
