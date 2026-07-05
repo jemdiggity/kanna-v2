@@ -68,6 +68,10 @@ function isActivityShortcutCandidate(item: { stage?: string; teardown_started_at
   return !isTaskTearingDown({ stage: item.stage, teardown_started_at: item.teardown_started_at });
 }
 
+function isUnpinnedActivityShortcutCandidate(item: { pinned?: number | boolean | null }): boolean {
+  return !Boolean(item.pinned);
+}
+
 export function useAppTaskNavigation({
   store,
   toast,
@@ -198,7 +202,11 @@ export function useAppTaskNavigation({
 
   async function selectReadTask(mode: "oldest" | "newest") {
     const target = selectTaskByActivity(
-      visibleSidebarItemsForCurrentRepo().filter((item) => isActivityShortcutCandidate(item) && !isBlocked(item.id)),
+      visibleSidebarItemsForCurrentRepo().filter((item) =>
+        isActivityShortcutCandidate(item)
+        && isUnpinnedActivityShortcutCandidate(item)
+        && !isBlocked(item.id)
+      ),
       mode,
       "idle",
     );
@@ -207,7 +215,10 @@ export function useAppTaskNavigation({
 
   async function selectUnreadTaskWithReadFallback(mode: "oldest" | "newest") {
     const target = selectTaskByActivity(
-      visibleSidebarItemsForCurrentRepo().filter(isActivityShortcutCandidate),
+      visibleSidebarItemsForCurrentRepo().filter((item) =>
+        isActivityShortcutCandidate(item)
+        && isUnpinnedActivityShortcutCandidate(item)
+      ),
       mode,
       "unread",
     );
