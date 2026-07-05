@@ -3,7 +3,7 @@ use super::desktop::list_desktops;
 use super::ksp::ksp_stream;
 use super::operator_events::post_operator_events;
 use super::pairing::create_pairing_session;
-use super::repos::{add_repo, list_repo_tasks, list_repos};
+use super::repos::{add_repo, list_repo_tasks, list_repos, patch_repo};
 use super::settings::{get_setting, put_setting};
 use super::signal_agent::signal_agent;
 use super::snapshot::get_snapshot;
@@ -36,6 +36,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/stream", get(ksp_stream))
         .route("/v1/desktops", get(list_desktops))
         .route("/v1/repos", get(list_repos).post(add_repo))
+        .route("/v1/repos/{repo_id}", axum::routing::patch(patch_repo))
         .route("/v1/repos/{repo_id}/tasks", get(list_repo_tasks))
         .route(
             "/v1/repos/{repo_id}/agents/{agent}/signal",
