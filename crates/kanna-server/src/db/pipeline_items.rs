@@ -547,6 +547,22 @@ impl Db {
         Ok(())
     }
 
+    pub fn list_closed_task_identities(&self) -> Result<Vec<super::ClosedTaskIdentity>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, repo_id
+             FROM pipeline_item
+             WHERE closed_at IS NOT NULL
+             ORDER BY repo_id ASC, id ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(super::ClosedTaskIdentity {
+                id: row.get(0)?,
+                repo_id: row.get(1)?,
+            })
+        })?;
+        rows.collect()
+    }
+
     /// Stage transition into a freshly forked workspace: the task's current
     /// branch moves with the stage.
     pub fn update_pipeline_item_stage_and_branch(

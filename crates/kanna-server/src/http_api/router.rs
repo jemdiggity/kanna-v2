@@ -17,7 +17,12 @@ use super::task_blockers::{block_task, unblock_task};
 use super::task_input::send_task_input;
 use super::task_logs::task_logs;
 use super::tasks::{
-    create_task, get_task, list_recent_tasks, put_task_agent_session, search_tasks, update_task,
+    create_task, get_task, list_closed_task_identities, list_recent_tasks, put_task_agent_session,
+    search_tasks, update_task,
+};
+use super::transfers::{
+    claim_pending_incoming_transfer, fail_pending_incoming_transfer,
+    list_pending_incoming_transfers,
 };
 use axum::body::Body;
 use axum::http::Request;
@@ -46,6 +51,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/v1/tasks/recent", get(list_recent_tasks))
         .route("/v1/tasks/search", get(search_tasks))
+        .route("/v1/tasks/closed-identities", get(list_closed_task_identities))
         .route("/v1/tasks", post(create_task))
         .route("/v1/tasks/{task_id}", get(get_task).patch(update_task))
         .route(
@@ -81,6 +87,18 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/v1/tasks/{task_id}/actions/run-merge-agent",
             post(run_merge_agent),
+        )
+        .route(
+            "/v1/transfers/incoming/pending",
+            get(list_pending_incoming_transfers),
+        )
+        .route(
+            "/v1/transfers/{transfer_id}/actions/claim",
+            post(claim_pending_incoming_transfer),
+        )
+        .route(
+            "/v1/transfers/{transfer_id}/actions/fail",
+            post(fail_pending_incoming_transfer),
         )
         .route("/v1/pairing/sessions", post(create_pairing_session))
         .layer(CorsLayer::permissive())

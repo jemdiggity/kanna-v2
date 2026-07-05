@@ -169,3 +169,44 @@ export async function putDesktopTaskAgentSession(
     },
   );
 }
+
+export interface PendingIncomingTransfer {
+  id: string;
+  source_peer_id: string | null;
+  source_task_id: string | null;
+  payload_json: string | null;
+}
+
+export async function fetchPendingIncomingTransfers(): Promise<PendingIncomingTransfer[]> {
+  const response = await requestJson<{ transfers: PendingIncomingTransfer[] }>("/v1/transfers/incoming/pending");
+  return response.transfers;
+}
+
+export async function claimPendingIncomingTransfer(transferId: string): Promise<boolean> {
+  const response = await requestJson<{ updated: boolean }>(
+    `/v1/transfers/${encodeURIComponent(transferId)}/actions/claim`,
+    { method: "POST" },
+  );
+  return response.updated;
+}
+
+export async function failPendingIncomingTransfer(transferId: string, reason: string): Promise<boolean> {
+  const response = await requestJson<{ updated: boolean }>(
+    `/v1/transfers/${encodeURIComponent(transferId)}/actions/fail`,
+    {
+      method: "POST",
+      body: { reason },
+    },
+  );
+  return response.updated;
+}
+
+export interface ClosedTaskIdentity {
+  id: string;
+  repo_id: string;
+}
+
+export async function fetchClosedTaskIdentities(): Promise<ClosedTaskIdentity[]> {
+  const response = await requestJson<{ tasks: ClosedTaskIdentity[] }>("/v1/tasks/closed-identities");
+  return response.tasks;
+}
