@@ -276,10 +276,12 @@ function validateDevUpCloudFlags(input: Record<string, unknown>): void {
 }
 
 function normalizeHelpTopic(args: string[]): string | undefined {
-  if (!args.includes("--help") && !args.includes("-h")) {
+  const passthroughIndex = args.indexOf("--");
+  const kdArgs = passthroughIndex >= 0 ? args.slice(0, passthroughIndex) : args;
+  if (!kdArgs.includes("--help") && !kdArgs.includes("-h")) {
     return undefined;
   }
-  return args.filter((arg) => arg !== "--help" && arg !== "-h").join(" ");
+  return kdArgs.filter((arg) => arg !== "--help" && arg !== "-h").join(" ");
 }
 
 export function parseCliArgs(args: string[]): ParsedCliCommand {

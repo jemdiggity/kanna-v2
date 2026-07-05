@@ -115,6 +115,9 @@ describe("kd CLI", () => {
     await expect(runCli(["mobile", "ota", "publish", "--staging", "--help"])).resolves.toBe(0);
     expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd mobile ota publish"));
 
+    await expect(runCli(["emulators", "exec", "--help"])).resolves.toBe(0);
+    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd emulators exec -- <command...>"));
+
     await expect(runCli(["doctor", "--remote", "--help"])).resolves.toBe(0);
     expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd doctor"));
 
@@ -394,6 +397,13 @@ describe("kd CLI", () => {
     expect(parseCliArgs(["emulators", "up"])).toEqual({
       taskId: "emulators.up",
       input: {}
+    });
+  });
+
+  it("forwards help flags after emulators exec passthrough separator", () => {
+    expect(parseCliArgs(["emulators", "exec", "--", "some-tool", "--help"])).toEqual({
+      taskId: "emulators.exec",
+      input: { extraArgs: ["some-tool", "--help"] }
     });
   });
 
