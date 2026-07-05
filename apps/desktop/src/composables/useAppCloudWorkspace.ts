@@ -79,7 +79,14 @@ export function useAppCloudWorkspace({ db, store, toast }: UseAppCloudWorkspaceO
 
     void db;
     const repoIds = new Set(repos.map((repo) => repo.id));
-    return (await fetchClosedTaskIdentities()).filter((task) => repoIds.has(task.repo_id));
+    const tasks = await fetchClosedTaskIdentities().catch((error: unknown) => {
+      console.warn(
+        "[App] failed to list closed task identities:",
+        error instanceof Error ? error.message : String(error),
+      );
+      return [];
+    });
+    return tasks.filter((task) => repoIds.has(task.repo_id));
   }, []);
 
   const localTaskIdentitiesForRemoteFiltering = computed<LocalTaskIdentity[]>(() => [

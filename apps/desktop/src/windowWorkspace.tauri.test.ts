@@ -5,6 +5,7 @@ import {
   WINDOW_WORKSPACE_SETTINGS_KEY,
   type WorkspaceSnapshot,
 } from "./windowWorkspace";
+import { updateDesktopServerClientHandlersForTests } from "./services/desktopServerClient";
 
 const settingStore = vi.hoisted(() => new Map<string, string>());
 const closeMock = vi.hoisted(() => vi.fn(async () => {}));
@@ -38,6 +39,13 @@ vi.mock("@kanna/db", () => ({
 describe("windowWorkspace in Tauri", () => {
   beforeEach(() => {
     settingStore.clear();
+    updateDesktopServerClientHandlersForTests({
+      getSetting: async (key) => settingStore.get(key) ?? null,
+      putSetting: async (key, value) => {
+        settingStore.set(key, value);
+        return { key, value };
+      },
+    });
     openWebviewLabels.splice(0, openWebviewLabels.length, "main");
     closeMock.mockClear();
     destroyMock.mockClear();
