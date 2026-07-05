@@ -134,6 +134,13 @@ impl Db {
                 repo_id TEXT,
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
+
+            CREATE TABLE activity_log (
+                pipeline_item_id TEXT NOT NULL,
+                activity TEXT NOT NULL,
+                seconds INTEGER NOT NULL,
+                PRIMARY KEY (pipeline_item_id, activity)
+            );
             "#,
         )?;
         Ok(())
@@ -264,6 +271,50 @@ impl Db {
         self.conn.execute(
             "UPDATE pipeline_item SET last_output_preview = ? WHERE id = ?",
             (preview, id),
+        )?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn set_test_pipeline_item_closed_at(
+        &self,
+        id: &str,
+        closed_at: &str,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE pipeline_item SET closed_at = ?, updated_at = ? WHERE id = ?",
+            (closed_at, closed_at, id),
+        )?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn insert_test_activity_log(
+        &self,
+        pipeline_item_id: &str,
+        activity: &str,
+        seconds: i64,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "INSERT INTO activity_log (pipeline_item_id, activity, seconds)
+             VALUES (?, ?, ?)",
+            (pipeline_item_id, activity, seconds),
+        )?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn insert_test_operator_event(
+        &self,
+        event_type: &str,
+        pipeline_item_id: Option<&str>,
+        repo_id: Option<&str>,
+        created_at: &str,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "INSERT INTO operator_event (event_type, pipeline_item_id, repo_id, created_at)
+             VALUES (?, ?, ?, ?)",
+            (event_type, pipeline_item_id, repo_id, created_at),
         )?;
         Ok(())
     }

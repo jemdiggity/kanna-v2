@@ -1,3 +1,4 @@
+use super::analytics::get_repo_analytics;
 use super::desktop::list_desktops;
 use super::ksp::ksp_stream;
 use super::operator_events::post_operator_events;
@@ -31,6 +32,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/snapshot", get(get_snapshot))
         .route("/v1/settings/{key}", get(get_setting).put(put_setting))
         .route("/v1/operator-events", post(post_operator_events))
+        .route("/v1/analytics/repos/{repo_id}", get(get_repo_analytics))
         .route("/v1/stream", get(ksp_stream))
         .route("/v1/desktops", get(list_desktops))
         .route("/v1/repos", get(list_repos).post(add_repo))
