@@ -25,6 +25,19 @@ pub async fn kill_agent_session(
         if let Some(mut child) = record.child.take() {
             let _ = child.wait();
         }
+        // An exited session already broadcast its Exit from the reader; a
+        // live session killed here never reaches that path, so announce the
+        // death now. Every termination must broadcast exactly one Exit —
+        // consume-once kill orchestration (SessionReplacements) depends on it.
+        broadcast_event(
+            broadcast_tx,
+            &Event::Exit {
+                session_id: session_id.to_string(),
+                code: -1,
+                resume_session_id: None,
+                killed: true,
+            },
+        );
     }
     if let Some(fds) = record.handoff_fds.take() {
         fds.close();

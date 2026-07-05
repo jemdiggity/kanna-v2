@@ -306,11 +306,10 @@ export function createTerminalSessionLifecycle(params: {
     if (!params.state.unlistenSessionCreated) {
       // Stage transitions replace the task's agent session in place: the
       // engine kills this session id and respawns it with the next stage's
-      // agent. A SessionCreated for our session id therefore means any
-      // attachment we hold points at the killed predecessor — rebind even if
-      // we still believe we are attached; that belief is stale by definition.
-      // Only an in-flight connect is left alone: it attaches to the daemon's
-      // current (new) session anyway.
+      // agent. A SessionCreated for this id therefore means a new PTY now
+      // backs it and any prior attachment is stale; rebind regardless of
+      // what our attach state claims. Only an in-flight connect is exempt:
+      // it spawned this very session and is already attaching to it.
       const sessionCreatedUnlisten = await listen(
         "session_created",
         (event) => {

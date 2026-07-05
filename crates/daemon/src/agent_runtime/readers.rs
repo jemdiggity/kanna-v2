@@ -233,6 +233,7 @@ async fn handle_child_exit(
             session_id: session_id.to_string(),
             code,
             resume_session_id: None,
+            killed: false,
         },
     );
 }
