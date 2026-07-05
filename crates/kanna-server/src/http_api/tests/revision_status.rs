@@ -43,6 +43,40 @@ async fn request_revision_route_uses_revision_requester() {
 }
 
 #[tokio::test]
+async fn request_revision_error_body_survives_error_logging_middleware() {
+    let app = super::test_router("desktop-revision-error", "Studio Mac");
+
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks/missing-task/actions/request-revision")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "targetStage": "in progress",
+                        "summary": "QA failed",
+                        "prompt": "Add the missing coverage."
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // The error-logging middleware buffers error bodies to record them; the
+    // client must still receive the original status and message.
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let message = String::from_utf8_lossy(&body);
+    assert!(
+        message.contains("task not found: missing-task"),
+        "error body should reach the client: {message}"
+    );
+}
+
+#[tokio::test]
 async fn request_revision_route_resolves_branch_style_task_id() {
     use kanna_daemon::protocol::{AgentProvider, Command as DaemonCommand, Event as DaemonEvent};
     use std::time::{SystemTime, UNIX_EPOCH};
