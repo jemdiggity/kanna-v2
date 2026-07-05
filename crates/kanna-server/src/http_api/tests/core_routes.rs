@@ -365,14 +365,19 @@ async fn settings_routes_get_and_put_setting_values() {
         .await
         .unwrap();
     let initial_json: serde_json::Value = from_slice(&initial_body).unwrap();
-    assert_eq!(initial_json, serde_json::json!({ "key": "ideCommand", "value": "code" }));
+    assert_eq!(
+        initial_json,
+        serde_json::json!({ "key": "ideCommand", "value": "code" })
+    );
 
     let updated = app
         .clone()
         .oneshot(
             Request::put("/v1/settings/ideCommand")
                 .header("content-type", "application/json")
-                .body(Body::from(serde_json::json!({ "value": "zed" }).to_string()))
+                .body(Body::from(
+                    serde_json::json!({ "value": "zed" }).to_string(),
+                ))
                 .unwrap(),
         )
         .await
@@ -382,7 +387,10 @@ async fn settings_routes_get_and_put_setting_values() {
         .await
         .unwrap();
     let updated_json: serde_json::Value = from_slice(&updated_body).unwrap();
-    assert_eq!(updated_json, serde_json::json!({ "key": "ideCommand", "value": "zed" }));
+    assert_eq!(
+        updated_json,
+        serde_json::json!({ "key": "ideCommand", "value": "zed" })
+    );
 
     let final_response = app
         .oneshot(
@@ -475,10 +483,20 @@ async fn analytics_route_returns_repo_metrics() {
         db.insert_test_activity_log("task-1", "working", 30)
             .unwrap();
         db.insert_test_activity_log("task-1", "idle", 60).unwrap();
-        db.insert_test_operator_event("task_selected", Some("task-1"), Some("repo-1"), "2026-04-17 08:05:00")
-            .unwrap();
-        db.insert_test_operator_event("task_selected", Some("task-2"), Some("repo-1"), "2026-04-17 08:07:00")
-            .unwrap();
+        db.insert_test_operator_event(
+            "task_selected",
+            Some("task-1"),
+            Some("repo-1"),
+            "2026-04-17 08:05:00",
+        )
+        .unwrap();
+        db.insert_test_operator_event(
+            "task_selected",
+            Some("task-2"),
+            Some("repo-1"),
+            "2026-04-17 08:07:00",
+        )
+        .unwrap();
     });
 
     let response = app
@@ -633,7 +651,9 @@ async fn transfer_routes_list_claim_and_fail_pending_incoming_transfers() {
         .oneshot(
             Request::post("/v1/transfers/transfer-1/actions/fail")
                 .header("content-type", "application/json")
-                .body(Body::from(serde_json::json!({ "reason": "failed import" }).to_string()))
+                .body(Body::from(
+                    serde_json::json!({ "reason": "failed import" }).to_string(),
+                ))
                 .unwrap(),
         )
         .await

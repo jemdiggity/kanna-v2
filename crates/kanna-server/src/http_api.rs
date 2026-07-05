@@ -4,9 +4,9 @@ mod ksp;
 mod operator_events;
 mod pairing;
 mod repos;
-mod settings;
 #[path = "http_api/router.rs"]
 mod routes;
+mod settings;
 mod signal_agent;
 mod snapshot;
 mod state;
