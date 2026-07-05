@@ -18,6 +18,35 @@ export function setDesktopSnapshotFetcherForTests(fetcher: (() => Promise<Deskto
   snapshotFetcherForTests = fetcher;
 }
 
+type MaybePromise<T> = T | Promise<T>;
+
+export interface DesktopServerClientHandlersForTests {
+  getSetting?: (key: string) => MaybePromise<string | null>;
+  putSetting?: (key: string, value: string) => MaybePromise<DesktopSettingResponse | void>;
+  postOperatorEvents?: (events: DesktopOperatorEventInput[]) => MaybePromise<void>;
+  fetchRepoAnalytics?: (repoId: string) => MaybePromise<DesktopRepoAnalytics>;
+  patchRepo?: (repoId: string, input: PatchDesktopRepoInput) => MaybePromise<void>;
+  putTaskAgentSession?: (taskId: string, agentSessionId: string | null) => MaybePromise<void>;
+  fetchPendingIncomingTransfers?: () => MaybePromise<PendingIncomingTransfer[]>;
+  claimPendingIncomingTransfer?: (transferId: string) => MaybePromise<boolean>;
+  failPendingIncomingTransfer?: (transferId: string, reason: string) => MaybePromise<boolean>;
+  fetchClosedTaskIdentities?: () => MaybePromise<ClosedTaskIdentity[]>;
+}
+
+let clientHandlersForTests: DesktopServerClientHandlersForTests | null = null;
+
+export function setDesktopServerClientHandlersForTests(
+  handlers: DesktopServerClientHandlersForTests | null,
+): void {
+  clientHandlersForTests = handlers;
+}
+
+export function updateDesktopServerClientHandlersForTests(
+  handlers: DesktopServerClientHandlersForTests,
+): void {
+  clientHandlersForTests = { ...(clientHandlersForTests ?? {}), ...handlers };
+}
+
 async function desktopServerBaseUrl(): Promise<string> {
   const { resolveCurrentKannaServerBaseUrl } = await import("./kannaServerBaseUrl");
   return await resolveCurrentKannaServerBaseUrl("fetching desktop snapshot");
@@ -82,6 +111,9 @@ export interface DesktopSettingResponse {
 }
 
 export async function putDesktopSetting(key: string, value: string): Promise<DesktopSettingResponse> {
+  const response = await clientHandlersForTests?.putSetting?.(key, value);
+  if (response !== undefined) return response;
+  if (clientHandlersForTests?.putSetting) return { key, value };
   return await requestJson<DesktopSettingResponse>(`/v1/settings/${encodeURIComponent(key)}`, {
     method: "PUT",
     body: { value },
@@ -89,6 +121,7 @@ export async function putDesktopSetting(key: string, value: string): Promise<Des
 }
 
 export async function getDesktopSetting(key: string): Promise<string | null> {
+  if (clientHandlersForTests?.getSetting) return await clientHandlersForTests.getSetting(key);
   const response = await requestOptionalJson<DesktopSettingResponse>(`/v1/settings/${encodeURIComponent(key)}`);
   return response?.value ?? null;
 }
@@ -102,6 +135,10 @@ export interface DesktopOperatorEventInput {
 }
 
 export async function postDesktopOperatorEvents(events: DesktopOperatorEventInput[]): Promise<void> {
+  if (clientHandlersForTests?.postOperatorEvents) {
+    await clientHandlersForTests.postOperatorEvents(events);
+    return;
+  }
   await requestJson<{ inserted: number }>("/v1/operator-events", {
     method: "POST",
     body: { events },
@@ -141,6 +178,7 @@ export interface DesktopRepoAnalytics {
 }
 
 export async function fetchDesktopRepoAnalytics(repoId: string): Promise<DesktopRepoAnalytics> {
+  if (clientHandlersForTests?.fetchRepoAnalytics) return await clientHandlersForTests.fetchRepoAnalytics(repoId);
   return await requestJson<DesktopRepoAnalytics>(`/v1/analytics/repos/${encodeURIComponent(repoId)}`);
 }
 
@@ -151,6 +189,10 @@ export interface PatchDesktopRepoInput {
 }
 
 export async function patchDesktopRepo(repoId: string, input: PatchDesktopRepoInput): Promise<void> {
+  if (clientHandlersForTests?.patchRepo) {
+    await clientHandlersForTests.patchRepo(repoId, input);
+    return;
+  }
   await requestJson<{ repoId: string }>(`/v1/repos/${encodeURIComponent(repoId)}`, {
     method: "PATCH",
     body: input,
@@ -161,6 +203,10 @@ export async function putDesktopTaskAgentSession(
   taskId: string,
   agentSessionId: string | null,
 ): Promise<void> {
+  if (clientHandlersForTests?.putTaskAgentSession) {
+    await clientHandlersForTests.putTaskAgentSession(taskId, agentSessionId);
+    return;
+  }
   await requestJson<{ taskId: string; followTask: string | null }>(
     `/v1/tasks/${encodeURIComponent(taskId)}/agent-session`,
     {
@@ -178,11 +224,17 @@ export interface PendingIncomingTransfer {
 }
 
 export async function fetchPendingIncomingTransfers(): Promise<PendingIncomingTransfer[]> {
+  if (clientHandlersForTests?.fetchPendingIncomingTransfers) {
+    return await clientHandlersForTests.fetchPendingIncomingTransfers();
+  }
   const response = await requestJson<{ transfers: PendingIncomingTransfer[] }>("/v1/transfers/incoming/pending");
   return response.transfers;
 }
 
 export async function claimPendingIncomingTransfer(transferId: string): Promise<boolean> {
+  if (clientHandlersForTests?.claimPendingIncomingTransfer) {
+    return await clientHandlersForTests.claimPendingIncomingTransfer(transferId);
+  }
   const response = await requestJson<{ updated: boolean }>(
     `/v1/transfers/${encodeURIComponent(transferId)}/actions/claim`,
     { method: "POST" },
@@ -191,6 +243,9 @@ export async function claimPendingIncomingTransfer(transferId: string): Promise<
 }
 
 export async function failPendingIncomingTransfer(transferId: string, reason: string): Promise<boolean> {
+  if (clientHandlersForTests?.failPendingIncomingTransfer) {
+    return await clientHandlersForTests.failPendingIncomingTransfer(transferId, reason);
+  }
   const response = await requestJson<{ updated: boolean }>(
     `/v1/transfers/${encodeURIComponent(transferId)}/actions/fail`,
     {
@@ -207,6 +262,9 @@ export interface ClosedTaskIdentity {
 }
 
 export async function fetchClosedTaskIdentities(): Promise<ClosedTaskIdentity[]> {
+  if (clientHandlersForTests?.fetchClosedTaskIdentities) {
+    return await clientHandlersForTests.fetchClosedTaskIdentities();
+  }
   const response = await requestJson<{ tasks: ClosedTaskIdentity[] }>("/v1/tasks/closed-identities");
   return response.tasks;
 }

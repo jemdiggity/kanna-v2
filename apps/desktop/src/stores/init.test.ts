@@ -13,6 +13,7 @@ import {
 import { createStoreContext, createStoreState } from "./state";
 import { createInitApi } from "./init";
 import { applySnapshotSettingsToState } from "./snapshotSettings";
+import { updateDesktopServerClientHandlersForTests } from "../services/desktopServerClient";
 
 const setTitleMock = vi.hoisted(() => vi.fn(async () => {}));
 
@@ -267,6 +268,12 @@ describe("createInitApi", () => {
     mockState.reset();
     vi.mocked(getSetting).mockResolvedValue(null);
     vi.mocked(setSetting).mockClear();
+    updateDesktopServerClientHandlersForTests({
+      putSetting: async (key, value) => {
+        await mockState.setSettingMock(expect.anything(), key, value);
+        return { key, value };
+      },
+    });
   });
 
   it("sets the native window title from compiled build info in worktree builds", async () => {

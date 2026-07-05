@@ -173,7 +173,17 @@ export function useAppTaskTransfer({
 
   async function importPendingIncomingTransfers() {
     void db;
-    const rows = await fetchPendingIncomingTransfers();
+    let rows: PendingIncomingTransfer[];
+    try {
+      rows = await fetchPendingIncomingTransfers();
+    } catch (error: unknown) {
+      console.warn(
+        "[App] failed to list pending incoming transfers:",
+        error instanceof Error ? error.message : String(error),
+      );
+      return;
+    }
+
     for (const row of rows) {
       const invalidReason = validatePendingIncomingTransferRow(row);
       if (invalidReason) {
