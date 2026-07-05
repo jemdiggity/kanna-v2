@@ -85,6 +85,8 @@ export interface RepoSnapshotEntry {
 export interface KannaSnapshot {
   entries: RepoSnapshotEntry[];
   taskBlockers: TaskBlocker[];
+  worktreePaths: Record<string, string>;
+  settings: Record<string, string>;
 }
 
 export interface CreateItemOptions {
@@ -108,6 +110,8 @@ export interface StoreState {
   repos: Ref<Repo[]>;
   items: Ref<PipelineItem[]>;
   taskBlockers: Ref<TaskBlocker[]>;
+  worktreePaths: Ref<Record<string, string>>;
+  snapshotSettings: Ref<Record<string, string>>;
   initialWindowBootstrap: Ref<WindowBootstrap | null>;
   selectedRepoId: Ref<string | null>;
   selectedItemId: Ref<string | null>;
@@ -132,6 +136,7 @@ export interface StoreServices {
   windowWorkspace?: WindowWorkspaceController;
   loadInitialData?: () => Promise<void>;
   reloadSnapshot?: () => Promise<void>;
+  fetchSnapshot?: () => Promise<KannaSnapshot>;
   withOptimisticItemOverlay?: <T>(input: {
     key: string;
     apply: (snapshot: KannaSnapshot) => KannaSnapshot;
@@ -262,6 +267,8 @@ export function createStoreState(): StoreState {
   const repos = ref<Repo[]>([]);
   const items = ref<PipelineItem[]>([]);
   const taskBlockers = ref<TaskBlocker[]>([]);
+  const worktreePaths = ref<Record<string, string>>({});
+  const snapshotSettings = ref<Record<string, string>>({});
   const initialWindowBootstrap = ref<WindowBootstrap | null>(null);
   const selectedRepoId = ref<string | null>(null);
   const selectedItemId = ref<string | null>(null);
@@ -286,6 +293,8 @@ export function createStoreState(): StoreState {
     repos,
     items,
     taskBlockers,
+    worktreePaths,
+    snapshotSettings,
     initialWindowBootstrap,
     selectedRepoId,
     selectedItemId,

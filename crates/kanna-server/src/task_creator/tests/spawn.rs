@@ -324,10 +324,14 @@ async fn prepared_non_claude_pty_task_spawn_prepends_kanna_context_to_prompt() {
             let context_index = shell_command
                 .find("## Kanna Task Environment")
                 .expect("Kanna context should be prompt-prepended");
+            let task_heading_index = shell_command
+                .find("## Your Task")
+                .expect("task heading should delimit the prompt");
             let prompt_index = shell_command
                 .find("Use Copilot PTY")
                 .expect("original prompt should be retained");
-            assert!(context_index < prompt_index);
+            assert!(context_index < task_heading_index);
+            assert!(task_heading_index < prompt_index);
             assert!(shell_command.contains(&format!("task `{task_id}`")));
             assert!(shell_command.contains("stage `implement`"));
             assert!(shell_command.contains("pipeline `qa`"));
@@ -424,10 +428,14 @@ async fn prepared_antigravity_pty_task_spawn_sets_up_worktree_alias() {
             let context_index = shell_command
                 .find("## Kanna Task Environment")
                 .expect("Kanna context should be prompt-prepended");
+            let task_heading_index = shell_command
+                .find("## Your Task")
+                .expect("task heading should delimit the prompt");
             let prompt_index = shell_command
                 .find("Use Antigravity PTY")
                 .expect("original prompt should be retained");
-            assert!(context_index < prompt_index);
+            assert!(context_index < task_heading_index);
+            assert!(task_heading_index < prompt_index);
             assert!(shell_command.contains(&format!("task `{task_id}`")));
             assert!(shell_command.contains("stage `implement`"));
             assert!(shell_command.contains("pipeline `qa`"));

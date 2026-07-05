@@ -1,5 +1,20 @@
 use super::*;
 
+async fn expect_task_state_changed(
+    rx: &mut tokio::sync::broadcast::Receiver<kanna_agent_protocol::ServerFrame>,
+) {
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+        .await
+        .expect("timed out waiting for task state change")
+        .expect("state change channel closed");
+    assert_eq!(
+        frame,
+        kanna_agent_protocol::ServerFrame::StateChanged {
+            scope: kanna_agent_protocol::StateChangeScope::Tasks,
+        }
+    );
+}
+
 #[tokio::test]
 async fn signal_agent_route_sends_message_to_open_running_agent_task() {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
@@ -204,7 +219,9 @@ async fn signal_agent_route_creates_pinned_agent_task_when_absent() {
         .unwrap();
     drop(db);
 
-    let app = super::router(Arc::new(super::AppState::new(config.clone())));
+    let state = Arc::new(super::AppState::new(config.clone()));
+    let mut state_changes = state.subscribe_state_changes();
+    let app = super::router(Arc::clone(&state));
     let response = app
         .oneshot(
             Request::post("/v1/repos/repo-1/agents/merge/signal")
@@ -227,7 +244,9 @@ async fn signal_agent_route_creates_pinned_agent_task_when_absent() {
     let body: serde_json::Value = from_slice(&body).unwrap();
     assert_eq!(body["created"], true);
     let task_id = body["taskId"].as_str().expect("task id");
+    expect_task_state_changed(&mut state_changes).await;
     daemon_server.await.unwrap();
+    expect_task_state_changed(&mut state_changes).await;
 
     let db = Db::open(&config.db_path).unwrap();
     let task = db.get_pipeline_item(task_id).unwrap().unwrap();
@@ -550,9 +569,14 @@ async fn terminal_state_notification_sends_once_to_notify_target() {
         .unwrap();
     drop(db);
 
-    super::handle_task_terminal_state(&config, "task-child", true)
+    let state = Arc::new(super::AppState::new(config.clone()));
+    let mut state_changes = state.subscribe_state_changes();
+
+    super::handle_task_terminal_state(state.as_ref(), "task-child", true)
         .await
         .unwrap();
+    expect_task_state_changed(&mut state_changes).await;
+    expect_task_state_changed(&mut state_changes).await;
     let inputs = server.await.unwrap();
     assert_eq!(
         inputs,
@@ -562,9 +586,10 @@ async fn terminal_state_notification_sends_once_to_notify_target() {
         ]
     );
 
-    super::handle_task_terminal_state(&config, "task-child", true)
+    super::handle_task_terminal_state(state.as_ref(), "task-child", true)
         .await
         .unwrap();
+    expect_task_state_changed(&mut state_changes).await;
     let db = Db::open(&config.db_path).unwrap();
     let task = db.get_pipeline_item("task-child").unwrap().unwrap();
     assert_eq!(task.activity.as_deref(), Some("unread"));

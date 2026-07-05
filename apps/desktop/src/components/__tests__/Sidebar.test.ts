@@ -262,6 +262,58 @@ describe("Sidebar", () => {
     expect(sectionLabels).not.toContain("pr");
   });
 
+  it("emits a null parent when detaching a subtask from its parent", async () => {
+    const wrapper = mountSidebar([
+      item("task-1", { display_name: "Parent task", stage: "in progress" }),
+      item("task-2", {
+        display_name: "Child task",
+        stage: "pr",
+        parent_task_id: "task-1",
+        created_at: "2026-01-01T00:00:05.000Z",
+      }),
+    ]);
+
+    await wrapper.get('[data-testid="detach-subtask-task-2"]').trigger("click");
+
+    expect(wrapper.emitted("set-parent")).toEqual([["task-2", null]]);
+  });
+
+  it("does not set a parent when an unpin drag ends over another task row", () => {
+    const wrapper = mountSidebar([
+      item("task-1", {
+        display_name: "Pinned task",
+        pinned: 1,
+        pin_order: 0,
+      }),
+      item("task-2", {
+        display_name: "Unpinned task",
+        created_at: "2026-01-01T00:00:05.000Z",
+      }),
+    ]);
+    const vm = wrapper.vm as {
+      onTaskDragStart(evt: { item?: HTMLElement }): void;
+      onTaskDragPointerMove(event: PointerEvent): void;
+      onUnpinnedChange(repoId: string, evt: { added?: { element: PipelineItem; newIndex: number } }): void;
+      onTaskDragEnd(evt: { originalEvent?: Event }): void;
+    };
+    const dragged = document.createElement("div");
+    dragged.dataset.taskId = "task-1";
+    const target = wrapper.find('[data-task-id="task-2"]').element as HTMLElement;
+    const elementFromPoint = vi.spyOn(document, "elementFromPoint").mockReturnValue(target);
+
+    try {
+      vm.onTaskDragStart({ item: dragged });
+      vm.onTaskDragPointerMove(new PointerEvent("pointermove", { clientX: 12, clientY: 34 }));
+      vm.onUnpinnedChange(repo.id, { added: { element: wrapper.props("pipelineItems")[0]!, newIndex: 0 } });
+      vm.onTaskDragEnd({ originalEvent: new MouseEvent("mouseup", { clientX: 12, clientY: 34 }) });
+    } finally {
+      elementFromPoint.mockRestore();
+    }
+
+    expect(wrapper.emitted("unpin-item")).toEqual([["task-1"]]);
+    expect(wrapper.emitted("set-parent")).toBeUndefined();
+  });
+
   it("renders full task titles so sidebar width controls visual truncation", () => {
     const longTitle = "Investigate resizing the sidebar so task titles can use the available space";
     const wrapper = mountSidebar([

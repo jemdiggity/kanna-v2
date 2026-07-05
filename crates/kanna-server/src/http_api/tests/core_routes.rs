@@ -44,6 +44,96 @@ async fn list_repos_route_returns_repo_summaries() {
 }
 
 #[tokio::test]
+async fn snapshot_route_returns_ui_hydration_payload() {
+    let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_repo("repo-2", "Repo Two").unwrap();
+        db.insert_test_pipeline_item(
+            "task-visible",
+            "repo-1",
+            "visible prompt",
+            Some("Visible Task"),
+            "in progress",
+            "2026-04-17 08:00:00",
+        )
+        .unwrap();
+        db.insert_test_pipeline_item(
+            "task-blocker",
+            "repo-1",
+            "blocker prompt",
+            Some("Blocker Task"),
+            "review",
+            "2026-04-17 07:00:00",
+        )
+        .unwrap();
+        db.insert_test_pipeline_item(
+            "task-closed",
+            "repo-1",
+            "closed prompt",
+            Some("Closed Task"),
+            "done",
+            "2026-04-17 06:00:00",
+        )
+        .unwrap();
+        db.close_pipeline_item("task-closed").unwrap();
+        db.insert_task_blocker("task-visible", "task-blocker")
+            .unwrap();
+        db.upsert_worktree(
+            "wt-task-visible",
+            "task-visible",
+            "/tmp/repo-1/.kanna-worktrees/task-visible",
+            "branch-task-visible",
+        )
+        .unwrap();
+        db.insert_stage_run(crate::db::NewStageRun {
+            id: "run-post",
+            task_id: "task-visible",
+            stage: "in progress",
+            kind: "post",
+            agent: Some("commit"),
+            agent_provider: Some("claude"),
+            model: None,
+            status: "running",
+            result: None,
+            feedback: None,
+            session_id: Some("task-visible"),
+            provider_session_id: None,
+            cwd: None,
+            resumed_from_run_id: None,
+        })
+        .unwrap();
+        db.set_test_setting("ideCommand", "zed").unwrap();
+    });
+
+    let response = app
+        .oneshot(Request::get("/v1/snapshot").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let snapshot: serde_json::Value = from_slice(&body).unwrap();
+
+    assert_eq!(snapshot["entries"].as_array().unwrap().len(), 2);
+    assert_eq!(snapshot["entries"][0]["repo"]["id"], "repo-1");
+    assert_eq!(snapshot["entries"][0]["items"].as_array().unwrap().len(), 2);
+    assert_eq!(snapshot["entries"][0]["items"][0]["id"], "task-visible");
+    assert_eq!(snapshot["entries"][0]["items"][0]["has_running_post"], 1);
+    assert_eq!(snapshot["entries"][0]["items"][1]["id"], "task-blocker");
+    assert_eq!(
+        snapshot["taskBlockers"],
+        serde_json::json!([{ "blocked_item_id": "task-visible", "blocker_item_id": "task-blocker" }])
+    );
+    assert_eq!(
+        snapshot["worktreePaths"],
+        serde_json::json!({ "task-visible": "/tmp/repo-1/.kanna-worktrees/task-visible" })
+    );
+    assert_eq!(snapshot["settings"]["ideCommand"], "zed");
+}
+
+#[tokio::test]
 async fn add_repo_route_registers_existing_git_repo() {
     let unique = format!(
         "{}-{}",

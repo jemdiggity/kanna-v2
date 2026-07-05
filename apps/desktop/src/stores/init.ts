@@ -1,7 +1,8 @@
-import { getSetting, getUnblockedItems, listRepos, setSetting, type DbHandle, type PipelineItem } from "@kanna/db";
+import { setSetting, type DbHandle, type PipelineItem, type TaskBlocker } from "@kanna/db";
 import { invoke } from "../invoke";
 import { isTauri } from "../tauri-mock";
 import { listen } from "../listen";
+import { getSharedStreamClient } from "../composables/desktopStreamClient";
 import { clearCachedTerminalState } from "../composables/terminalStateCache";
 import { markDaemonReadyObserved } from "../composables/daemonReadyState";
 import {
@@ -14,9 +15,9 @@ import {
 } from "./kannaCleanup";
 import { formatAppWindowTitle, type AppBuildInfo } from "./windowTitle";
 import { isTaskTearingDown } from "./taskStages";
+import { resolveTaskItemForDaemonSession } from "./taskSessionIdentity";
 import { requireService, type StoreContext } from "./state";
-import { normalizeAppThemePreference, normalizeCodeThemePreference } from "../theme/theme";
-import type { AgentMessageAppearance } from "./state";
+import { applySnapshotSettingsToState } from "./snapshotSettings";
 
 export interface InitApi {
   init: (db: DbHandle) => Promise<void>;
@@ -105,43 +106,52 @@ export function createInitApi(
     return !sessionId.startsWith("shell-") && !isTeardownSessionId(sessionId);
   }
 
-  function normalizeAgentMessageAppearance(value: string | null): AgentMessageAppearance {
-    if (value === "log" || value === "terminal") return value;
-    return "chat";
+  function resolveUnblockedItemsFromSnapshot(
+    items: readonly PipelineItem[],
+    blockers: readonly TaskBlocker[],
+  ): PipelineItem[] {
+    const openItemIds = new Set(
+      items
+        .filter((item) => item.closed_at === null)
+        .map((item) => item.id),
+    );
+    const blockerIdsByBlockedItemId = new Map<string, string[]>();
+
+    for (const blocker of blockers) {
+      const existing = blockerIdsByBlockedItemId.get(blocker.blocked_item_id);
+      if (existing) {
+        existing.push(blocker.blocker_item_id);
+      } else {
+        blockerIdsByBlockedItemId.set(blocker.blocked_item_id, [blocker.blocker_item_id]);
+      }
+    }
+
+    return items.filter((item) => {
+      if (item.closed_at !== null) return false;
+      const blockerIds = blockerIdsByBlockedItemId.get(item.id);
+      if (!blockerIds?.length) return false;
+      return blockerIds.every((blockerId) => !openItemIds.has(blockerId));
+    });
   }
 
   async function loadPreferences() {
-    const suspendAfter = await getSetting(context.requireDb(), "suspendAfterMinutes");
-    if (suspendAfter) context.state.suspendAfterMinutes.value = parseInt(suspendAfter, 10) || 30;
-    const killAfter = await getSetting(context.requireDb(), "killAfterMinutes");
-    if (killAfter) context.state.killAfterMinutes.value = parseInt(killAfter, 10) || 60;
-    const ide = await getSetting(context.requireDb(), "ideCommand");
-    if (ide) context.state.ideCommand.value = ide;
-    const hideShortcuts = await getSetting(context.requireDb(), "hideShortcutsOnStartup");
-    context.state.hideShortcutsOnStartup.value = hideShortcuts === "true";
-    const linger = await getSetting(context.requireDb(), "dev.lingerTerminals");
-    context.state.devLingerTerminals.value = linger === "true";
-    const appTheme = await getSetting(context.requireDb(), "appTheme");
-    context.state.appTheme.value = normalizeAppThemePreference(appTheme);
-    const codeTheme = await getSetting(context.requireDb(), "codeTheme");
-    context.state.codeTheme.value = normalizeCodeThemePreference(codeTheme);
-    const agentMessageAppearance = await getSetting(context.requireDb(), "agentMessageAppearance");
-    const legacyAgentMessageStyle = agentMessageAppearance
-      ? null
-      : await getSetting(context.requireDb(), "agentMessageStyle");
-    context.state.agentMessageAppearance.value = normalizeAgentMessageAppearance(
-      agentMessageAppearance ?? legacyAgentMessageStyle,
-    );
+    const snapshot = await requireService(context.services.fetchSnapshot, "fetchSnapshot")();
+    context.state.snapshotSettings.value = { ...snapshot.settings };
+    applySnapshotSettingsToState(context.state, snapshot.settings);
   }
 
   async function savePreference(key: string, value: string) {
-    const { setSetting } = await import("@kanna/db");
     await setSetting(context.requireDb(), key, value);
-    await loadPreferences();
+    const reloadSnapshot = context.services.reloadSnapshot;
+    if (reloadSnapshot) {
+      await reloadSnapshot();
+    } else {
+      await loadPreferences();
+    }
   }
 
-  async function retireStaleWorktreeShellSessions(): Promise<void> {
-    const currentGeneration = await getSetting(context.requireDb(), WORKTREE_SHELL_ENV_GENERATION_KEY);
+  async function retireStaleWorktreeShellSessions(settings: Record<string, string>): Promise<void> {
+    const currentGeneration = settings[WORKTREE_SHELL_ENV_GENERATION_KEY] ?? null;
     if (currentGeneration === WORKTREE_SHELL_ENV_GENERATION) return;
 
     try {
@@ -156,6 +166,10 @@ export function createInitApi(
         }),
       ));
       await setSetting(context.requireDb(), WORKTREE_SHELL_ENV_GENERATION_KEY, WORKTREE_SHELL_ENV_GENERATION);
+      context.state.snapshotSettings.value = {
+        ...context.state.snapshotSettings.value,
+        [WORKTREE_SHELL_ENV_GENERATION_KEY]: WORKTREE_SHELL_ENV_GENERATION,
+      };
     } catch (error) {
       console.warn("[store] failed to inspect worktree shell sessions for env migration:", error);
     }
@@ -163,35 +177,39 @@ export function createInitApi(
 
   async function init(db: DbHandle) {
     context.state.db.value = db;
-    await loadPreferences();
-
     const { updatePipelineItemActivity, closePipelineItem } = await import("@kanna/db");
 
-    const workingItems = await context.requireDb().select<PipelineItem>(
-      "SELECT * FROM pipeline_item WHERE activity = 'working'",
-    );
+    await requireService(context.services.loadInitialData, "loadInitialData")();
+
+    let eagerRepos = [...context.state.repos.value];
+    let eagerItems = [...context.state.items.value];
+    let snapshotBlockers = [...context.state.taskBlockers.value];
+    let worktreePathByItemId = new Map(Object.entries(context.state.worktreePaths.value));
+
+    async function refreshStartupSnapshot(): Promise<void> {
+      await context.services.reloadSnapshot?.();
+      eagerRepos = [...context.state.repos.value];
+      eagerItems = [...context.state.items.value];
+      snapshotBlockers = [...context.state.taskBlockers.value];
+      worktreePathByItemId = new Map(Object.entries(context.state.worktreePaths.value));
+    }
+
+    const workingItems = eagerItems.filter((item) => item.activity === "working");
     for (const item of workingItems) {
       await updatePipelineItemActivity(context.requireDb(), item.id, "unread");
     }
-
-    const eagerRepos = await listRepos(context.requireDb());
-    const eagerItems: PipelineItem[] = [];
-    const { listPipelineItems } = await import("@kanna/db");
-    for (const repo of eagerRepos) {
-      eagerItems.push(...await listPipelineItems(context.requireDb(), repo.id));
+    if (workingItems.length > 0) {
+      await refreshStartupSnapshot();
     }
 
     if (isTauri) {
-      await retireStaleWorktreeShellSessions();
+      await retireStaleWorktreeShellSessions(context.state.snapshotSettings.value);
       // Orphan = a task whose workspace was initialized (worktree row exists)
       // but whose directory is gone from disk. Dormant blocked tasks have a
       // branch name reserved yet no worktree row until their blockers close —
       // they must survive app restarts, so key on the worktree row, not on
       // the branch column.
-      const worktreeRows = await context.requireDb().select<{ pipeline_item_id: string; path: string }>(
-        "SELECT pipeline_item_id, path FROM worktree",
-      );
-      const worktreePathByItemId = new Map(worktreeRows.map((row) => [row.pipeline_item_id, row.path]));
+      let closedOrphan = false;
       for (const item of eagerItems) {
         if (item.closed_at !== null) continue;
         const worktreePath = worktreePathByItemId.get(item.id);
@@ -201,17 +219,19 @@ export function createInitApi(
           console.warn(`[store] closing orphaned task ${item.id}: worktree missing at ${worktreePath}`);
           await ports.closeTaskAndReleasePorts(item.id, (id) => closePipelineItem(context.requireDb(), id));
           item.closed_at = new Date().toISOString();
+          closedOrphan = true;
         }
+      }
+      if (closedOrphan) {
+        await refreshStartupSnapshot();
       }
     }
 
-    const unblockedItems = await getUnblockedItems(context.requireDb());
+    const unblockedItems = resolveUnblockedItemsFromSnapshot(eagerItems, snapshotBlockers);
     for (const item of unblockedItems) {
       console.debug(`[store] restoring previously blocked task: ${item.id}`);
       await tasks.restoreUnblockedTask(item);
     }
-
-    await requireService(context.services.loadInitialData, "loadInitialData")();
 
     const bootstrap = context.state.initialWindowBootstrap.value;
     const bootstrapRepoId = bootstrap?.selectedRepoId ?? null;
@@ -269,10 +289,11 @@ export function createInitApi(
 
     if (isTauri) {
       for (const item of eagerItems) {
-        if (!item.branch || item.closed_at !== null) continue;
+        if (item.closed_at !== null) continue;
         const repo = eagerRepos.find((candidate) => candidate.id === item.repo_id);
         if (!repo) continue;
-        const worktreePath = `${repo.path}/.kanna-worktrees/${item.branch}`;
+        const worktreePath = worktreePathByItemId.get(item.id);
+        if (!worktreePath) continue;
         requireService(context.services.prewarmWorktreeShellSession, "prewarmWorktreeShellSession")(
           `shell-wt-${item.id}`,
           worktreePath,
@@ -292,6 +313,23 @@ export function createInitApi(
       await preserveExplicitSelectionAfterExternalRefresh(selectedItemIdBeforeRefresh);
     });
 
+    if (isTauri) {
+      getSharedStreamClient().then((client) => {
+        client.onStateChanged((scope) => {
+          void (async () => {
+            const focusedTaskId = resolveFocusedTaskIdBeforeExternalRefresh();
+            await requireService(context.services.reloadSnapshot, "reloadSnapshot")();
+            await preserveFocusedTaskAfterExternalRefresh(focusedTaskId);
+            console.debug(`[store] refreshed snapshot after KSP state change: ${scope}`);
+          })().catch((error) => {
+            console.error("[store] KSP state change handler failed:", error);
+          });
+        });
+      }).catch((error) => {
+        console.warn("[store] failed to subscribe to KSP state changes:", error);
+      });
+    }
+
     listen("session_created", async (event: unknown) => {
       const sessionId = readSessionId(event);
       if (!sessionId || !isTaskAgentSession(sessionId)) return;
@@ -307,7 +345,7 @@ export function createInitApi(
       const status = payload.status;
       if (!sessionId || typeof status !== "string") return;
 
-      const item = context.state.items.value.find((candidate) => candidate.id === sessionId);
+      const item = resolveTaskItemForDaemonSession(context.state.items.value, sessionId);
       if (!item) return;
       await requireService(context.services.applyTaskRuntimeStatus as ((item: PipelineItem, status: string) => Promise<void>) | undefined, "applyTaskRuntimeStatus")(item, status);
     });
@@ -368,28 +406,6 @@ export function createInitApi(
       await requireService(context.services.syncTaskStatusesFromDaemon, "syncTaskStatusesFromDaemon")();
     });
 
-    listen("pipeline_stage_complete", async (event: unknown) => {
-      const payload = (event as { payload?: { task_id?: string } }).payload ?? (event as { task_id?: string });
-      const taskId = payload.task_id;
-      if (!taskId) return;
-
-      const item = context.state.items.value.find((candidate) => candidate.id === taskId);
-      if (!item) return;
-
-      await requireService(context.services.reloadSnapshot, "reloadSnapshot")();
-
-      const freshItem = context.state.items.value.find((candidate) => candidate.id === taskId);
-      if (!freshItem) return;
-
-      try {
-        if (context.state.selectedItemId.value !== taskId) {
-          await updatePipelineItemActivity(context.requireDb(), taskId, "unread");
-          await requireService(context.services.reloadSnapshot, "reloadSnapshot")();
-        }
-      } catch (error) {
-        console.error("[store] pipeline_stage_complete handler failed:", error);
-      }
-    });
   }
 
   return {

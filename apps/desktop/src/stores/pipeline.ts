@@ -136,6 +136,7 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
     return requireService(context.services.withOptimisticItemOverlay, "withOptimisticItemOverlay")({
       key: `advance-stage:${taskId}`,
       apply: (snapshot: KannaSnapshot): KannaSnapshot => ({
+        ...snapshot,
         entries: snapshot.entries.map((entry) => ({
           ...entry,
           items: entry.items.map((candidate) =>
@@ -154,7 +155,6 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
               : candidate,
           ),
         })),
-        taskBlockers: snapshot.taskBlockers,
       }),
       run,
       reconcile: requireService(context.services.reloadSnapshot, "reloadSnapshot"),

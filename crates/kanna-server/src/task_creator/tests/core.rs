@@ -293,7 +293,7 @@ fn build_agent_command_launches_antigravity_with_prepended_kanna_context() {
     assert!(command.contains("## Kanna Task Environment"));
     assert!(command.contains("task `task-123`"));
     assert!(!command.contains("{{MCP_STATUS}}"));
-    assert!(command.contains("Ship the task."));
+    assert!(command.contains("## Your Task\n\nShip the task."));
 }
 
 fn write_test_mcp_config(label: &str) -> std::path::PathBuf {

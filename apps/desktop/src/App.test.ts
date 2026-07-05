@@ -186,7 +186,7 @@ const invokeMock = vi.fn(async (command: string, args?: Record<string, unknown>)
   if (command === "git_default_branch") return "main";
   if (command === "git_list_base_branches") return ["feature/x", "main", "origin/main"];
   if (command === "read_env_var") return "/Users/test";
-  if (command === "which_binary" && (args?.name === "claude" || args?.name === "codex")) return true;
+  if (command === "which_binary" && (args?.name === "claude" || args?.name === "codex")) return `/usr/bin/${args.name}`;
   if (command === "complete_outgoing_transfer_finalization") return { transferId: args?.transferId ?? "transfer-1" };
   throw new Error(`unexpected invoke: ${command}`);
 });
@@ -675,7 +675,7 @@ describe("App", () => {
       if (command === "git_default_branch") return "main";
       if (command === "git_list_base_branches") return ["feature/x", "main", "origin/main"];
       if (command === "read_env_var") return "/Users/test";
-      if (command === "which_binary" && (args?.name === "claude" || args?.name === "codex")) return true;
+      if (command === "which_binary" && (args?.name === "claude" || args?.name === "codex")) return `/usr/bin/${args.name}`;
       throw new Error(`unexpected invoke: ${command}`);
     });
   });
@@ -1587,7 +1587,7 @@ describe("App", () => {
     invokeMock.mockImplementation(async (command: string, args?: { name?: string; remoteUrl?: string }) => {
       if (command === "git_list_remote_base_branches") return ["origin/main", "origin/release/x"];
       if (command === "read_env_var") return "/Users/test";
-      if (command === "which_binary" && (args?.name === "claude" || args?.name === "codex")) return true;
+      if (command === "which_binary" && (args?.name === "claude" || args?.name === "codex")) return `/usr/bin/${args.name}`;
       throw new Error(`unexpected invoke: ${command}`);
     });
 
@@ -1634,7 +1634,7 @@ describe("App", () => {
       if (command === "git_list_remote_base_branches") return ["origin/main", "origin/release/x"];
       if (command === "read_env_var") return "/Users/test";
       if (command === "file_exists") return false;
-      if (command === "which_binary" && (args?.name === "claude" || args?.name === "codex")) return true;
+      if (command === "which_binary" && (args?.name === "claude" || args?.name === "codex")) return `/usr/bin/${args.name}`;
       throw new Error(`unexpected invoke: ${command}`);
     });
 
@@ -1654,15 +1654,17 @@ describe("App", () => {
       "git@github.com:jemdiggity/remote-repo.git",
       "/Users/test/.kanna/repos/remote-repo",
     );
-    expect(store.createItem).toHaveBeenCalledWith(
-      "repo-imported",
-      "/Users/test/.kanna/repos/remote-repo",
-      "Create task from remote repo",
-      "pty",
-      expect.objectContaining({
-        baseBranch: "origin/main",
-      }),
-    );
+    await vi.waitFor(() => {
+      expect(store.createItem).toHaveBeenCalledWith(
+        "repo-imported",
+        "/Users/test/.kanna/repos/remote-repo",
+        "Create task from remote repo",
+        "pty",
+        expect.objectContaining({
+          baseBranch: "origin/main",
+        }),
+      );
+    });
 
     wrapper.unmount();
   });
@@ -1701,7 +1703,7 @@ describe("App", () => {
       if (command === "git_default_branch") return "main";
       if (command === "git_list_base_branches") return [];
       if (command === "read_env_var") return "/Users/test";
-      if (command === "which_binary" && (args?.name === "claude" || args?.name === "codex")) return true;
+      if (command === "which_binary" && (args?.name === "claude" || args?.name === "codex")) return `/usr/bin/${args.name}`;
       throw new Error(`unexpected invoke: ${command}`);
     });
 
@@ -1728,7 +1730,7 @@ describe("App", () => {
       if (command === "git_default_branch") return "main";
       if (command === "git_list_base_branches") return ["feature/x"];
       if (command === "read_env_var") return "/Users/test";
-      if (command === "which_binary" && (args?.name === "claude" || args?.name === "codex")) return true;
+      if (command === "which_binary" && (args?.name === "claude" || args?.name === "codex")) return `/usr/bin/${args.name}`;
       throw new Error(`unexpected invoke: ${command}`);
     });
 
@@ -1755,7 +1757,7 @@ describe("App", () => {
       if (command === "git_default_branch") return "main";
       if (command === "git_list_base_branches") return ["feature/x", "main"];
       if (command === "read_env_var") return "/Users/test";
-      if (command === "which_binary" && (args?.name === "claude" || args?.name === "codex")) return true;
+      if (command === "which_binary" && (args?.name === "claude" || args?.name === "codex")) return `/usr/bin/${args.name}`;
       throw new Error(`unexpected invoke: ${command}`);
     });
 
@@ -2593,7 +2595,7 @@ describe("App", () => {
       if (command === "git_default_branch") return "main";
       if (command === "git_list_base_branches") return ["feature/x", "main", "origin/main"];
       if (command === "read_env_var") return "/Users/test";
-      if (command === "which_binary" && (args?.name === "claude" || args?.name === "codex")) return true;
+      if (command === "which_binary" && (args?.name === "claude" || args?.name === "codex")) return `/usr/bin/${args.name}`;
       throw new Error(`unexpected invoke: ${command}`);
     });
 
@@ -2638,7 +2640,7 @@ describe("App", () => {
       if (command === "git_default_branch") return "main";
       if (command === "git_list_base_branches") return ["feature/x", "main", "origin/main"];
       if (command === "read_env_var") return "/Users/test";
-      if (command === "which_binary" && (args?.name === "claude" || args?.name === "codex")) return true;
+      if (command === "which_binary" && (args?.name === "claude" || args?.name === "codex")) return `/usr/bin/${args.name}`;
       throw new Error(`unexpected invoke: ${command}`);
     });
 
@@ -2891,7 +2893,7 @@ describe("App", () => {
       if (command === "git_default_branch") return "main";
       if (command === "git_list_base_branches") return ["feature/x", "main", "origin/main"];
       if (command === "read_env_var") return "/Users/test";
-      if (command === "which_binary" && (args?.name === "claude" || args?.name === "codex")) return true;
+      if (command === "which_binary" && (args?.name === "claude" || args?.name === "codex")) return `/usr/bin/${args.name}`;
       if (command === "list_transfer_peers") {
         listTransferPeersCalls += 1;
         if (listTransferPeersCalls < 9) return [];
@@ -2989,7 +2991,7 @@ describe("App", () => {
       if (command === "git_default_branch") return "main";
       if (command === "git_list_base_branches") return ["feature/x", "main", "origin/main"];
       if (command === "read_env_var") return "/Users/test";
-      if (command === "which_binary" && (args?.name === "claude" || args?.name === "codex")) return true;
+      if (command === "which_binary" && (args?.name === "claude" || args?.name === "codex")) return `/usr/bin/${args.name}`;
       if (command === "list_transfer_peers") {
         return [{
           peer_id: "peer-remote",
@@ -3101,7 +3103,7 @@ describe("App", () => {
       if (command === "git_default_branch") return "main";
       if (command === "git_list_base_branches") return ["feature/x", "main", "origin/main"];
       if (command === "read_env_var") return "/Users/test";
-      if (command === "which_binary" && (args?.name === "claude" || args?.name === "codex")) return true;
+      if (command === "which_binary" && (args?.name === "claude" || args?.name === "codex")) return `/usr/bin/${args.name}`;
       if (command === "list_transfer_peers") {
         return [{
           peer_id: "peer-remote",

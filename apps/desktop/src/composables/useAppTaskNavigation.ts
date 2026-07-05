@@ -1,6 +1,6 @@
 import { computed, type ComputedRef, type Ref } from "vue";
 import { computedAsync } from "@vueuse/core";
-import type { AgentProvider } from "@kanna/db";
+import { isBlockerResolved, type AgentProvider } from "@kanna/db";
 import { NEW_CUSTOM_TASK_PROMPT } from "@kanna/core";
 import type { CustomTaskConfig } from "@kanna/core";
 
@@ -197,7 +197,14 @@ export function useAppTaskNavigation({
   }
 
   function isBlocked(itemId: string): boolean {
-    return (store.taskBlockers ?? []).some((blocker) => blocker.blocked_item_id === itemId);
+    // Optimistic resolution: a blocker parked at `pr` with a PR created no
+    // longer blocks (see isBlockerResolved). A blocker row whose task is
+    // unknown counts as unresolved.
+    return (store.taskBlockers ?? []).some((blocker) => {
+      if (blocker.blocked_item_id !== itemId) return false;
+      const blockerItem = store.items.find((item) => item.id === blocker.blocker_item_id);
+      return !blockerItem || !isBlockerResolved(blockerItem);
+    });
   }
 
   async function selectReadTask(mode: "oldest" | "newest") {

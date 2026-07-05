@@ -317,6 +317,14 @@ vi.mock("@kanna/db", () => ({
 }));
 
 import { useKannaStore } from "./kanna";
+import { setDesktopSnapshotFetcherForTests } from "../services/desktopServerClient";
+import {
+  getSetting,
+  getUnblockedItems,
+  listPipelineItems,
+  listRepos,
+  listTaskBlockers,
+} from "@kanna/db";
 
 function createDb(): DbHandle {
   return {
@@ -332,7 +340,7 @@ async function flushStore(): Promise<void> {
   await nextTick();
 }
 
-async function createStore() {
+async function createStore(db: DbHandle = createDb()) {
   setActivePinia(createPinia());
   const store = useKannaStore();
   store.attachWindowWorkspace({
@@ -351,7 +359,7 @@ async function createStore() {
     restoreAdditionalWindows: vi.fn(async () => {}),
     onSharedInvalidation: onSharedInvalidationMock,
   });
-  await store.init(createDb());
+  await store.init(db);
   await flushStore();
   return store;
 }
@@ -361,12 +369,32 @@ describe("kanna query snapshot regressions", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-04-17T00:00:00.000Z"));
     mockState.reset();
+    setDesktopSnapshotFetcherForTests(async () => ({
+      entries: mockState.visibleRepos.map((repo) => ({
+        repo,
+        items: mockState.pipelineItems.filter((item) => item.repo_id === repo.id),
+      })),
+      taskBlockers: [],
+      worktreePaths: {},
+      settings: {},
+    }));
     beginTaskSwitchMock.mockReset();
     invalidateSharedDataMock.mockReset();
     onSharedInvalidationMock.mockReset();
+    vi.mocked(listRepos).mockClear();
+    vi.mocked(listPipelineItems).mockClear();
+    vi.mocked(listTaskBlockers).mockClear();
+    vi.mocked(getSetting).mockClear();
+    vi.mocked(getUnblockedItems).mockClear();
   });
 
   afterEach(() => {
+    setDesktopSnapshotFetcherForTests(async () => ({
+      entries: [],
+      taskBlockers: [],
+      worktreePaths: {},
+      settings: {},
+    }));
     vi.useRealTimers();
   });
 
@@ -381,6 +409,20 @@ describe("kanna query snapshot regressions", () => {
 
     expect(store.repos.map((repo) => repo.id)).toEqual(["repo-1"]);
     expect(store.items.map((item) => item.id)).toEqual(["item-1"]);
+  });
+
+  it("hydrates the startup snapshot without direct database reads", async () => {
+    const db = createDb();
+    const store = await createStore(db);
+
+    expect(store.repos.map((repo) => repo.id)).toEqual(["repo-1", "repo-2"]);
+    expect(store.items.map((item) => item.id)).toEqual(["item-1", "item-2"]);
+    expect(listRepos).not.toHaveBeenCalled();
+    expect(listPipelineItems).not.toHaveBeenCalled();
+    expect(listTaskBlockers).not.toHaveBeenCalled();
+    expect(getSetting).not.toHaveBeenCalled();
+    expect(getUnblockedItems).not.toHaveBeenCalled();
+    expect(db.select).not.toHaveBeenCalled();
   });
 
   it("restores an unhidden repo with its tasks from the same refresh path", async () => {

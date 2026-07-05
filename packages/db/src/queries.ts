@@ -471,11 +471,26 @@ export async function listBlockedByItem(
   );
 }
 
+/**
+ * A blocker resolves optimistically: either it closed, or it is parked at
+ * the `pr` stage with a PR created — its work is committed, reviewed,
+ * rebased, and pushed, so dependents can build on its branch without
+ * waiting for the human review/merge loop. Keep in sync with the SQL
+ * predicate in `getUnblockedItems` below and with
+ * `count_open_task_blockers` in crates/kanna-server/src/db/blockers.rs.
+ */
+export function isBlockerResolved(
+  blocker: Pick<PipelineItem, "closed_at" | "stage" | "pr_url">,
+): boolean {
+  return blocker.closed_at != null || (blocker.stage === "pr" && blocker.pr_url != null);
+}
+
 export async function getUnblockedItems(
   db: DbHandle,
 ): Promise<PipelineItem[]> {
   // A task is "blocked" if it has entries in task_blocker.
-  // It becomes "unblocked" when all its blockers have closed_at set.
+  // It becomes "unblocked" when all its blockers have resolved — see
+  // isBlockerResolved above for the optimistic resolution predicate.
   return db.select<PipelineItem>(
     `SELECT pi.* FROM pipeline_item pi
      WHERE EXISTS (
@@ -487,6 +502,7 @@ export async function getUnblockedItems(
        JOIN pipeline_item blocker ON blocker.id = tb.blocker_item_id
        WHERE tb.blocked_item_id = pi.id
        AND blocker.closed_at IS NULL
+       AND NOT (blocker.stage = 'pr' AND blocker.pr_url IS NOT NULL)
      )`,
   );
 }

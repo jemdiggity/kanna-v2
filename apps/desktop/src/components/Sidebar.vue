@@ -39,7 +39,7 @@ const emit = defineEmits<{
   (e: "unpin-item", itemId: string): void;
   (e: "reorder-pinned", repoId: string, orderedIds: string[]): void;
   (e: "reorder-repos", orderedIds: string[]): void;
-  (e: "set-parent", childId: string, parentId: string): void;
+  (e: "set-parent", childId: string, parentId: string | null): void;
   (e: "rename-item", itemId: string, displayName: string | null): void;
   (e: "rename-repo", repoId: string, name: string): void;
   (e: "hide-repo", repoId: string): void;
@@ -324,6 +324,8 @@ function onPinnedChange(repoId: string, evt: DraggableChange<SidebarPipelineItem
   if (isSearchActive()) return;
   if (evt.added) {
     // Item dragged from unpinned to pinned zone
+    suppressParentDrop.value = true;
+    dropParentId.value = null;
     emit("pin-item", evt.added.element.id, evt.added.newIndex);
     // Reorder all pinned items with the new arrival
     const ids = sortedPinned(repoId).map((i) => i.id);
@@ -341,6 +343,8 @@ function onUnpinnedChange(repoId: string, evt: DraggableChange<SidebarPipelineIt
   const added = evt.added;
   if (added) {
     // Item dragged from pinned to unpinned zone — unpin it
+    suppressParentDrop.value = true;
+    dropParentId.value = null;
     emit("unpin-item", added.element.id);
     // Reorder remaining pinned items
     const remainingIds = sortedPinned(repoId)
@@ -362,6 +366,7 @@ interface SortableDragEvent {
 
 const draggedTaskId = ref<string | null>(null);
 const dropParentId = ref<string | null>(null);
+const suppressParentDrop = ref(false);
 
 function pointerFromEvent(event: Event | undefined | null): { x: number; y: number } | null {
   if (event instanceof MouseEvent) return { x: event.clientX, y: event.clientY };
@@ -398,6 +403,7 @@ function stopTaskDragTracking() {
 function onTaskDragStart(evt: SortableDragEvent) {
   draggedTaskId.value = isSearchActive() ? null : evt.item?.dataset.taskId ?? null;
   dropParentId.value = null;
+  suppressParentDrop.value = false;
   if (draggedTaskId.value) {
     document.addEventListener("pointermove", onTaskDragPointerMove, true);
   }
@@ -407,9 +413,12 @@ function onTaskDragEnd(evt: SortableDragEvent) {
   stopTaskDragTracking();
   const childId = draggedTaskId.value;
   let parentId = dropParentId.value;
+  const shouldSuppressParentDrop = suppressParentDrop.value;
   draggedTaskId.value = null;
   dropParentId.value = null;
+  suppressParentDrop.value = false;
   if (!childId || isSearchActive()) return;
+  if (shouldSuppressParentDrop) return;
   if (!parentId) {
     const point = pointerFromEvent(evt.originalEvent);
     if (point) parentId = resolveDropParent(point.x, point.y, childId);
@@ -417,6 +426,10 @@ function onTaskDragEnd(evt: SortableDragEvent) {
   if (parentId && parentId !== childId) {
     emit("set-parent", childId, parentId);
   }
+}
+
+function detachSubtask(itemId: string) {
+  emit("set-parent", itemId, null);
 }
 
 watch(searchQuery, (q) => {
@@ -580,6 +593,16 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
                     :title="itemTooltip(row.item)"
                   >
                     <span v-if="isRemoteTask(row.item)" class="remote-task-marker" :aria-label="t('sidebar.remoteTaskTooltip')">&lt; </span>{{ itemTitle(row.item) }}</span>
+                  <button
+                    v-if="row.depth > 0 && editingItemId !== row.item.id"
+                    type="button"
+                    class="subtask-detach"
+                    :title="$t('sidebar.detachSubtask')"
+                    :aria-label="$t('sidebar.detachSubtask')"
+                    :data-testid="`detach-subtask-${row.item.id}`"
+                    @mousedown.stop.prevent
+                    @click.stop="detachSubtask(row.item.id)"
+                  >&times;</button>
                 </div>
               </div>
             </template>
@@ -643,6 +666,16 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
                       :title="itemTooltip(row.item)"
                     >
                       <span v-if="isRemoteTask(row.item)" class="remote-task-marker" :aria-label="t('sidebar.remoteTaskTooltip')">&lt; </span>{{ itemTitle(row.item) }}</span>
+                    <button
+                      v-if="row.depth > 0 && editingItemId !== row.item.id"
+                      type="button"
+                      class="subtask-detach"
+                      :title="$t('sidebar.detachSubtask')"
+                      :aria-label="$t('sidebar.detachSubtask')"
+                      :data-testid="`detach-subtask-${row.item.id}`"
+                      @mousedown.stop.prevent
+                      @click.stop="detachSubtask(row.item.id)"
+                    >&times;</button>
                   </div>
                 </div>
               </template>
@@ -693,6 +726,16 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
                     class="blocked-by-text"
                   >{{ $t('sidebar.blockedBy') }} {{ blockerNames[row.item.id] }}</span>
                 </div>
+                <button
+                  v-if="row.depth > 0 && editingItemId !== row.item.id"
+                  type="button"
+                  class="subtask-detach"
+                  :title="$t('sidebar.detachSubtask')"
+                  :aria-label="$t('sidebar.detachSubtask')"
+                  :data-testid="`detach-subtask-${row.item.id}`"
+                  @mousedown.stop.prevent
+                  @click.stop="detachSubtask(row.item.id)"
+                >&times;</button>
               </div>
             </template>
           </div>
@@ -992,6 +1035,31 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
 .remote-task-marker {
   color: var(--kn-accent);
   font-family: "JetBrains Mono", "SF Mono", Menlo, monospace;
+}
+
+.subtask-detach {
+  width: 16px;
+  height: 16px;
+  border: 0;
+  border-radius: 3px;
+  padding: 0;
+  background: transparent;
+  color: var(--kn-text-muted);
+  font-size: 13px;
+  line-height: 16px;
+  opacity: 0;
+}
+
+.pipeline-item:hover .subtask-detach,
+.subtask-detach:focus-visible {
+  opacity: 1;
+}
+
+.subtask-detach:hover,
+.subtask-detach:focus-visible {
+  background: var(--kn-bg-hover);
+  color: var(--kn-text-primary);
+  outline: none;
 }
 
 .rename-input {

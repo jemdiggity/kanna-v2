@@ -366,7 +366,7 @@ mod tests {
 
         assert_eq!(
             spec.args.last().map(String::as_str),
-            Some("Kanna task context\n\nship it")
+            Some("Kanna task context\n\n## Your Task\n\nship it")
         );
     }
 }

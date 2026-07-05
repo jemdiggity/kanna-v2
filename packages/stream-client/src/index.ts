@@ -12,6 +12,7 @@ import type {
   FrameAgentEvent,
   PermissionDecision,
   ServerFrame,
+  StateChangeScope,
   StreamKind,
 } from "@kanna/agent-protocol";
 
@@ -91,6 +92,7 @@ interface TerminalAttachment {
 }
 
 type Attachment = AgentAttachment | TerminalAttachment;
+type StateChangedListener = (scope: StateChangeScope) => void;
 
 interface PendingRequest {
   resolve(value: { status: number; body: unknown }): void;
@@ -124,6 +126,7 @@ export class StreamClient {
   private nextRequestId = 1;
   private readonly pendingRequests = new Map<number, PendingRequest>();
   private readonly attachments = new Map<string, Attachment>();
+  private readonly stateChangedListeners = new Set<StateChangedListener>();
   /** Frames queued until the auth handshake completes. */
   private sendQueue: ClientFrame[] = [];
 
@@ -193,6 +196,13 @@ export class StreamClient {
 
   sendTermResize(taskId: string, cols: number, rows: number): void {
     this.sendFrame({ type: "term_resize", task_id: taskId, cols, rows });
+  }
+
+  onStateChanged(listener: StateChangedListener): () => void {
+    this.stateChangedListeners.add(listener);
+    return () => {
+      this.stateChangedListeners.delete(listener);
+    };
   }
 
   /** Task-API request over the stream (replaces REST calls). */
@@ -359,6 +369,12 @@ export class StreamClient {
       }
       case "status_changed": {
         this.agentAttachment(frame.task_id)?.handlers.onStatus?.(frame.status);
+        return;
+      }
+      case "state_changed": {
+        for (const listener of [...this.stateChangedListeners]) {
+          listener(frame.scope);
+        }
         return;
       }
       case "session_exit": {

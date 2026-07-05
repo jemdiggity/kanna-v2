@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import type { PipelineItem } from "@kanna/db";
+import { isBlockerResolved, type PipelineItem } from "@kanna/db";
 import { invoke } from "../invoke";
 import TaskHeader from "./TaskHeader.vue";
 import TerminalTabs from "./TerminalTabs.vue";
@@ -32,7 +32,7 @@ const COMMAND_HINT_STORAGE_KEY = "kanna:hide-command-hint";
 
 const isBlocked = computed(() => {
   if (!props.blockers || props.blockers.length === 0) return false;
-  return props.blockers.some(b => !b.closed_at);
+  return props.blockers.some(b => !isBlockerResolved(b));
 });
 const commandHintDismissed = ref(readCommandHintDismissed());
 const showCommandHint = computed(() => !commandHintDismissed.value);

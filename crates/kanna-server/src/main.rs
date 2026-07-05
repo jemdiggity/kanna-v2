@@ -108,10 +108,9 @@ async fn main() {
 
     let http_state = Arc::new(http_api::AppState::new(config.clone()));
     let session_replacements = http_state.session_replacements();
-    let terminal_state_config = config.clone();
+    let terminal_state = Arc::clone(&http_state);
     tokio::spawn(async move {
-        terminal_watcher::terminal_state_watcher_loop(terminal_state_config, session_replacements)
-            .await;
+        terminal_watcher::terminal_state_watcher_loop(terminal_state, session_replacements).await;
     });
     let lan_task = tokio::spawn(http_api::serve(Arc::clone(&http_state)));
     if relay_url.is_empty() {

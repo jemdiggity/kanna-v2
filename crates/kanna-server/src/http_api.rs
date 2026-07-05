@@ -5,6 +5,7 @@ mod repos;
 #[path = "http_api/router.rs"]
 mod routes;
 mod signal_agent;
+mod snapshot;
 mod state;
 mod status;
 mod task_actions;
