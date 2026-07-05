@@ -1,6 +1,6 @@
 import { ref } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { listBlockersForItem, type DbHandle, type PipelineItem, type Repo } from "@kanna/db";
+import { listBlockedByItem, listBlockersForItem, type DbHandle, type PipelineItem, type Repo } from "@kanna/db";
 import { createTaskBlockedActions } from "./taskBlockedActions";
 import type { StoreContext } from "./state";
 
@@ -352,5 +352,46 @@ describe("createTaskBlockedActions", () => {
       24,
       expect.objectContaining({ agentProvider: "claude" }),
     );
+  });
+
+  it("checkUnblocked optimistically restores dependents of a blocker parked at pr with a PR", async () => {
+    const actions = createTaskBlockedActions(makeContext(), {} as never);
+    const blocked = makeItem({ agent_provider: "claude", port_env: "{}" });
+    const prParkedBlocker = makeItem({
+      id: "blocker-1",
+      tags: "[]",
+      branch: "task-blocker-1",
+      stage: "pr",
+      pr_url: "https://github.com/acme/repo/pull/7",
+      closed_at: null,
+      display_name: "Dependency",
+    });
+    vi.mocked(listBlockedByItem).mockResolvedValue([blocked]);
+    mocks.listBlockersForItemMock.mockResolvedValue([prParkedBlocker]);
+
+    await actions.checkUnblocked("blocker-1");
+
+    const sendInputCall = mocks.invokeMock.mock.calls.find(([command]) => command === "send_input");
+    expect(sendInputCall?.[1]).toMatchObject({ sessionId: "task-1" });
+  });
+
+  it("checkUnblocked keeps dependents blocked while an open blocker has no PR", async () => {
+    const actions = createTaskBlockedActions(makeContext(), {} as never);
+    const blocked = makeItem({ agent_provider: "claude", port_env: "{}" });
+    const openBlocker = makeItem({
+      id: "blocker-1",
+      tags: "[]",
+      branch: "task-blocker-1",
+      stage: "pr",
+      pr_url: null,
+      closed_at: null,
+      display_name: "Dependency",
+    });
+    vi.mocked(listBlockedByItem).mockResolvedValue([blocked]);
+    mocks.listBlockersForItemMock.mockResolvedValue([openBlocker]);
+
+    await actions.checkUnblocked("blocker-1");
+
+    expect(mocks.invokeMock).not.toHaveBeenCalledWith("send_input", expect.anything());
   });
 });

@@ -94,6 +94,40 @@ describe("sidebarOrdering", () => {
     expect(ordered.map((entry) => entry.id)).toEqual(["upstream", "tagged-only", "blocked"]);
   });
 
+  it("stops treating a task as blocked once its blocker is parked at pr with a PR", () => {
+    const blockers: TaskBlocker[] = [
+      { blocked_item_id: "dependent", blocker_item_id: "upstream" },
+    ];
+    const items = [
+      item({ id: "dependent", stage: "in progress", tags: "[]" } as Partial<PipelineItem>),
+      item({
+        id: "upstream",
+        stage: "pr",
+        pr_url: "https://github.com/acme/repo/pull/7",
+      }),
+    ];
+
+    // Optimistic resolution: the dependent leaves the blocked section and
+    // appears in its own stage group even though the blocker row persists.
+    const groups = groupedSidebarItemsByStage({ repoId: "repo-1", items, blockers, getStageOrder });
+    expect(groups.flatMap((group) => group.items.map((entry) => entry.id))).toContain("dependent");
+
+    // Without a PR the blocker still blocks.
+    const unresolvedItems = [
+      item({ id: "dependent", stage: "in progress", tags: "[]" } as Partial<PipelineItem>),
+      item({ id: "upstream", stage: "pr", pr_url: null }),
+    ];
+    const unresolvedGroups = groupedSidebarItemsByStage({
+      repoId: "repo-1",
+      items: unresolvedItems,
+      blockers,
+      getStageOrder,
+    });
+    expect(
+      unresolvedGroups.flatMap((group) => group.items.map((entry) => entry.id)),
+    ).not.toContain("dependent");
+  });
+
   it("nests a subtask directly beneath its parent and hides it from its own stage group", () => {
     const items = [
       item({ id: "parent", stage: "in progress", created_at: "2026-05-31T00:00:02.000Z" }),

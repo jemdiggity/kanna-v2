@@ -648,3 +648,53 @@ fn task_listing_queries_exclude_closed_items_even_when_stage_is_not_done() {
 
     let _ = std::fs::remove_file(path);
 }
+
+#[test]
+fn count_open_task_blockers_treats_pr_stage_with_pr_url_as_resolved() {
+    let path = Db::test_db_path("open-blockers-pr-resolved");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One").expect("repo");
+    db.insert_test_pipeline_item(
+        "blocker-1",
+        "repo-1",
+        "prerequisite",
+        Some("Prerequisite"),
+        "pr",
+        "2026-07-01T00:00:00Z",
+    )
+    .expect("blocker");
+    db.insert_test_pipeline_item(
+        "dependent-1",
+        "repo-1",
+        "build on it",
+        Some("Dependent"),
+        "in progress",
+        "2026-07-01T00:01:00Z",
+    )
+    .expect("dependent");
+    db.insert_test_task_blocker("dependent-1", "blocker-1")
+        .expect("blocker row");
+
+    // Parked at pr without a PR: still blocking.
+    assert_eq!(
+        db.count_open_task_blockers("dependent-1").expect("count"),
+        1
+    );
+
+    // PR created: optimistically resolved even though the task stays open.
+    db.update_pipeline_item_pr("blocker-1", Some(7), "https://github.com/acme/repo/pull/7")
+        .expect("set pr");
+    assert_eq!(
+        db.count_open_task_blockers("dependent-1").expect("count"),
+        0
+    );
+
+    // Closing keeps it resolved.
+    db.close_pipeline_item("blocker-1").expect("close");
+    assert_eq!(
+        db.count_open_task_blockers("dependent-1").expect("count"),
+        0
+    );
+
+    let _ = std::fs::remove_file(path);
+}

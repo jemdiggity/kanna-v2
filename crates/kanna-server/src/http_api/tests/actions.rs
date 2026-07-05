@@ -894,7 +894,268 @@ async fn unblock_task_route_removes_blockers() {
 }
 
 #[tokio::test]
-async fn complete_pr_stage_does_not_start_dormant_dependent_until_blocker_closes() {
+async fn complete_pr_stage_with_pr_url_starts_dormant_dependent_optimistically() {
+    use kanna_daemon::protocol::{AgentProvider, Command as DaemonCommand, Event as DaemonEvent};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+
+    let unique = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let repo_root = std::env::temp_dir().join(format!("kanna-http-pr-optimistic-{unique}"));
+    init_test_git_repo(&repo_root);
+
+    let (kanna_cli_path, created_test_sidecar) = ensure_test_kanna_cli_sidecar();
+    let daemon_dir = std::env::temp_dir().join(format!("kanna-http-pr-optimistic-daemon-{unique}"));
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+    let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+    let _ = std::fs::remove_file(&socket_path);
+
+    let config = Config {
+        relay_url: "wss://relay.example".to_string(),
+        device_token: "device-token".to_string(),
+        firebase_project_id: "kanna-local".to_string(),
+        firebase_auth_emulator_url: None,
+        firebase_firestore_emulator_host: None,
+        daemon_dir: daemon_dir.to_string_lossy().to_string(),
+        db_path: Db::test_db_path(&format!("http-api-pr-optimistic-{unique}")),
+        kanna_cli_path: Some(kanna_cli_path.to_string_lossy().to_string()),
+        desktop_id: "desktop-1".to_string(),
+        desktop_secret: Some("desktop-secret".to_string()),
+        desktop_name: "Studio Mac".to_string(),
+        server_version: Some("test-version".to_string()),
+        lan_host: "127.0.0.1".to_string(),
+        lan_port: 48120,
+        pairing_store_path: format!("/tmp/kanna-pairings-pr-optimistic-{unique}.json"),
+    };
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    db.insert_test_pipeline_item(
+        "task-a",
+        "repo-1",
+        "Build prerequisite",
+        Some("Prerequisite"),
+        "pr",
+        "2026-07-01T00:00:00Z",
+    )
+    .unwrap();
+    db.update_test_pipeline_item_stage_context("task-a", "task-a-stage", "default", None, "claude")
+        .unwrap();
+    drop(db);
+
+    // The pr-stage agent has already rebased, renamed, and committed on the
+    // blocker's worktree branch — the state a `stage-complete` signal reports.
+    let blocker_worktree_path = repo_root.join(".kanna-worktrees").join("task-a-stage");
+    std::fs::create_dir_all(repo_root.join(".kanna-worktrees")).unwrap();
+    assert!(Command::new("git")
+        .args([
+            "worktree",
+            "add",
+            "-b",
+            "task-a-stage",
+            blocker_worktree_path.to_str().unwrap(),
+            "main",
+        ])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["branch", "-m", "task-a-pr"])
+        .current_dir(&blocker_worktree_path)
+        .status()
+        .unwrap()
+        .success());
+    std::fs::write(
+        blocker_worktree_path.join("blocker-output.txt"),
+        "blocker output",
+    )
+    .unwrap();
+    assert!(Command::new("git")
+        .args(["add", "blocker-output.txt"])
+        .current_dir(&blocker_worktree_path)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["commit", "-m", "blocker output"])
+        .current_dir(&blocker_worktree_path)
+        .status()
+        .unwrap()
+        .success());
+    let blocker_head = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&blocker_worktree_path)
+        .output()
+        .unwrap();
+    assert!(blocker_head.status.success());
+    let blocker_head = String::from_utf8_lossy(&blocker_head.stdout)
+        .trim()
+        .to_string();
+
+    let app = super::router(Arc::new(super::AppState::new(config.clone())));
+    let create_response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/tasks")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "repoId": "repo-1",
+                        "prompt": "Build on task A",
+                        "blockerTaskIds": ["task-a"]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create_response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(create_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let dependent: CreateTaskResponse = from_slice(&body).unwrap();
+    assert_eq!(dependent.worktree_path, None);
+
+    let daemon_listener = UnixListener::bind(&socket_path).unwrap();
+    let expected_task_id = dependent.task_id.clone();
+    let daemon_server = tokio::spawn(async move {
+        let (stream, _) = daemon_listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let mut spawned = Vec::new();
+        loop {
+            let mut line = String::new();
+            if reader.read_line(&mut line).await.unwrap() == 0 {
+                break;
+            }
+            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+            match command {
+                DaemonCommand::Kill { .. } => {
+                    write_half
+                        .write_all(
+                            format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap())
+                                .as_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                }
+                DaemonCommand::Spawn {
+                    session_id,
+                    cwd,
+                    agent_provider,
+                    ..
+                } => {
+                    assert_eq!(session_id, expected_task_id);
+                    assert!(cwd.contains(".kanna-worktrees/task-"));
+                    assert_eq!(agent_provider, Some(AgentProvider::Claude));
+                    spawned.push((session_id.clone(), cwd));
+                    write_half
+                        .write_all(
+                            format!(
+                                "{}\n",
+                                serde_json::to_string(&DaemonEvent::SessionCreated { session_id })
+                                    .unwrap()
+                            )
+                            .as_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                    break;
+                }
+                DaemonCommand::SpawnAgent { session_id, params } => {
+                    assert_eq!(session_id, expected_task_id);
+                    assert!(params.cwd.contains(".kanna-worktrees/task-"));
+                    assert_eq!(params.agent_provider, AgentProvider::Claude);
+                    spawned.push((session_id.clone(), params.cwd));
+                    write_half
+                        .write_all(
+                            format!(
+                                "{}\n",
+                                serde_json::to_string(&DaemonEvent::SessionCreated { session_id })
+                                    .unwrap()
+                            )
+                            .as_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                    break;
+                }
+                other => panic!("unexpected daemon command: {:?}", other),
+            }
+        }
+        spawned
+    });
+
+    let complete_response = app
+        .oneshot(
+            Request::post("/v1/tasks/task-a/actions/complete-stage")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "status": "success",
+                        "summary": "PR is ready",
+                        "metadata": { "pr_url": "https://github.com/acme/repo/pull/7" }
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(complete_response.status(), StatusCode::OK);
+    let spawned = daemon_server.await.unwrap();
+    assert_eq!(
+        spawned.len(),
+        1,
+        "pr-stage completion should start the dependent once"
+    );
+
+    let db = Db::open(&config.db_path).unwrap();
+    // Optimistic: the blocker stays open at pr awaiting human merge...
+    let blocker = db.get_pipeline_item("task-a").unwrap().unwrap();
+    assert!(blocker.closed_at.is_none());
+    assert_eq!(blocker.stage.as_deref(), Some("pr"));
+    assert_eq!(
+        blocker.pr_url.as_deref(),
+        Some("https://github.com/acme/repo/pull/7")
+    );
+    // ...while the dependent already runs, stacked on the renamed branch.
+    let dependent_item = db.get_pipeline_item(&dependent.task_id).unwrap().unwrap();
+    assert_eq!(dependent_item.base_ref.as_deref(), Some("task-a-pr"));
+    assert_eq!(dependent_item.activity.as_deref(), Some("working"));
+    let worktree_path = db
+        .get_task_worktree_path(&dependent.task_id)
+        .unwrap()
+        .expect("dependent worktree");
+    let dependent_head = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&worktree_path)
+        .output()
+        .unwrap();
+    assert!(dependent_head.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&dependent_head.stdout).trim(),
+        blocker_head
+    );
+
+    let _ = std::fs::remove_file(&socket_path);
+    let _ = std::fs::remove_dir_all(&daemon_dir);
+    let _ = std::fs::remove_dir_all(&repo_root);
+    if created_test_sidecar {
+        let _ = std::fs::remove_file(&kanna_cli_path);
+    }
+}
+
+#[tokio::test]
+async fn complete_pr_stage_without_pr_url_leaves_dormant_dependent_unstarted() {
     let unique = format!(
         "{}-{}",
         std::process::id(),
@@ -970,6 +1231,8 @@ async fn complete_pr_stage_does_not_start_dormant_dependent_until_blocker_closes
     let dependent: CreateTaskResponse = from_slice(&body).unwrap();
     assert_eq!(dependent.worktree_path, None);
 
+    // No PR was created (no pr_url in the verdict), so the blocker is not
+    // resolved and dependents must stay dormant.
     let complete_response = app
         .oneshot(
             Request::post("/v1/tasks/task-a/actions/complete-stage")
@@ -988,7 +1251,7 @@ async fn complete_pr_stage_does_not_start_dormant_dependent_until_blocker_closes
     assert_eq!(complete_response.status(), StatusCode::OK);
     assert!(
         !socket_path.exists(),
-        "PR-stage completion should not connect to the daemon for blocked dependents"
+        "completion without a PR should not connect to the daemon for blocked dependents"
     );
 
     let db = Db::open(&config.db_path).unwrap();

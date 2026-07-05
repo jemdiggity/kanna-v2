@@ -148,14 +148,26 @@ pub(super) async fn set_task_parent(
     }))
 }
 
+/// How a blocker resolved — determines the wording dependents receive.
+/// Passed explicitly because the close paths collect instructions before
+/// `closed_at` is written, so the row itself cannot be trusted mid-close.
+#[derive(Clone, Copy, PartialEq)]
+enum BlockerResolution {
+    Closed,
+    PrCreated,
+}
+
 /// Build per-dependent session messages announcing that a blocker at the
-/// `pr` stage has closed. Dependents that already have a workspace need to
+/// `pr` stage has resolved — either its PR was just created (optimistic
+/// resolution: work committed, reviewed, and pushed, awaiting human merge)
+/// or the task closed. Dependents that already have a workspace need to
 /// pull the blocker's work in themselves, and the branch they need is the
 /// blocker's *current* branch — the PR stage usually renames it away from
 /// the stored fork name, so resolve it from the blocker's worktree HEAD.
-fn collect_blocker_close_instructions(
+fn collect_blocker_resolution_instructions(
     db: &Db,
     blocker_task_id: &str,
+    resolution: BlockerResolution,
 ) -> Result<Vec<(String, String)>, (axum::http::StatusCode, String)> {
     let blocker_task_id = resolve_existing_task_id(db, blocker_task_id)?;
     let blocker = db
@@ -195,6 +207,14 @@ fn collect_blocker_close_instructions(
         .pr_url
         .map(|url| format!(" (PR: {url})"))
         .unwrap_or_default();
+    let status_sentence = match resolution {
+        BlockerResolution::Closed => {
+            format!("Blocker task \"{blocker_title}\" has finished its pipeline and closed.")
+        }
+        BlockerResolution::PrCreated => format!(
+            "Blocker task \"{blocker_title}\" has completed its work and opened a PR awaiting human review."
+        ),
+    };
 
     let mut instructions = Vec::new();
     for dependent_id in db
@@ -215,7 +235,7 @@ fn collect_blocker_close_instructions(
             continue;
         };
         let message = format!(
-            "Blocker task \"{blocker_title}\" has finished its pipeline and closed. Its work is on branch `{blocker_branch}`{pr_reference}. Bring that work into this branch now: run `git fetch origin`, then rebase (or merge) this branch onto `{blocker_branch}` — or onto `{default_branch}` instead if that PR has already merged. Resolve conflicts if needed and continue your task."
+            "{status_sentence} Its work is on branch `{blocker_branch}`{pr_reference}. Bring that work into this branch now: run `git fetch origin`, then rebase (or merge) this branch onto `{blocker_branch}` — or onto `{default_branch}` instead if that PR has already merged. Resolve conflicts if needed and continue your task."
         );
         instructions.push((session_id, message));
     }
@@ -266,7 +286,8 @@ pub(super) async fn close_task(
             "task has open subtasks; close or detach subtasks first".to_string(),
         ));
     }
-    let blocker_close_instructions = collect_blocker_close_instructions(&db, &pipeline_item_id)?;
+    let blocker_close_instructions =
+        collect_blocker_resolution_instructions(&db, &pipeline_item_id, BlockerResolution::Closed)?;
     let workspace_teardown = crate::task_creator::prepare_workspace_teardown_for_close(
         &db,
         &state.config,
@@ -354,7 +375,7 @@ async fn close_task_after_final_stage(
                 format!("db error: {}", e),
             )
         })?;
-        collect_blocker_close_instructions(&db, &task_id)?
+        collect_blocker_resolution_instructions(&db, &task_id, BlockerResolution::Closed)?
     };
     for (session_id, message) in blocker_close_instructions {
         if let Err((_, error)) = submit_task_input(daemon, &session_id, &message).await {
@@ -723,6 +744,12 @@ pub(super) async fn complete_stage(
     };
     let Some(transition) = transition else {
         state.publish_state_changed(StateChangeScope::Tasks);
+        // Parked at a manual-transition stage. When that stage is `pr` and
+        // the PR exists, the task's work is final enough for dependents:
+        // resolve blockers optimistically instead of waiting for the human
+        // review/merge loop to close the task. Best-effort — a failure here
+        // must not fail the recorded completion.
+        unblock_dependents_of_pr_resolved_blocker(&state, &task_id).await;
         return Ok(Json(crate::mobile_api::TaskActionResponse {
             task_id,
             follow_task: None,
@@ -736,6 +763,71 @@ pub(super) async fn complete_stage(
     execute_stage_transition_detached(Arc::clone(&state), task_id, transition);
     state.publish_state_changed(StateChangeScope::Tasks);
     Ok(Json(response))
+}
+
+/// Optimistic blocker resolution: a task parked at the `pr` stage with a
+/// created PR has committed, reviewed, rebased, and pushed work — dependents
+/// can start stacking on its branch now rather than waiting for the PR to
+/// merge and the task to close. Dormant dependents whose blockers are all
+/// resolved get started; dependents with a live workspace get a session
+/// message naming the resolved branch. The close path later delivers the
+/// "closed" variant of the same message as a catch-up.
+async fn unblock_dependents_of_pr_resolved_blocker(state: &Arc<AppState>, task_id: &str) {
+    let instructions = {
+        let db = match Db::open(&state.config.db_path) {
+            Ok(db) => db,
+            Err(error) => {
+                log::error!("optimistic unblock for {task_id}: db error: {error}");
+                return;
+            }
+        };
+        let item = match db.get_pipeline_item(task_id) {
+            Ok(Some(item)) => item,
+            Ok(None) => return,
+            Err(error) => {
+                log::error!("optimistic unblock for {task_id}: db error: {error}");
+                return;
+            }
+        };
+        let parked_at_pr_with_pr = item.closed_at.is_none()
+            && item.stage.as_deref() == Some("pr")
+            && item.pr_url.is_some();
+        if !parked_at_pr_with_pr {
+            return;
+        }
+        match db.list_tasks_blocked_by(task_id) {
+            Ok(dependents) if dependents.is_empty() => return,
+            Ok(_) => {}
+            Err(error) => {
+                log::error!("optimistic unblock for {task_id}: db error: {error}");
+                return;
+            }
+        }
+        match collect_blocker_resolution_instructions(&db, task_id, BlockerResolution::PrCreated) {
+            Ok(instructions) => instructions,
+            Err((_, error)) => {
+                log::error!("optimistic unblock for {task_id}: {error}");
+                Vec::new()
+            }
+        }
+    };
+
+    let mut daemon =
+        match crate::daemon_client::DaemonClient::connect(&state.config.daemon_dir).await {
+            Ok(daemon) => daemon,
+            Err(error) => {
+                log::error!("optimistic unblock for {task_id}: daemon error: {error}");
+                return;
+            }
+        };
+    for (session_id, message) in instructions {
+        if let Err((_, error)) = submit_task_input(&mut daemon, &session_id, &message).await {
+            log::warn!(
+                "failed to deliver blocker-resolution instructions to dependent session {session_id}: {error}"
+            );
+        }
+    }
+    start_dependents_unblocked_by_close_with_daemon(state, &mut daemon, task_id).await;
 }
 
 pub(super) async fn request_revision(
