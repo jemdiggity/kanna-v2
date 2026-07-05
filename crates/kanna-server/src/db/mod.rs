@@ -5,6 +5,7 @@ use std::time::Duration;
 
 mod blockers;
 mod notifications;
+mod operator_events;
 mod pipeline_items;
 mod ports;
 mod repos;
@@ -17,6 +18,8 @@ mod test_support;
 mod tests;
 mod worktrees;
 
+#[allow(unused_imports)]
+pub use operator_events::NewOperatorEvent;
 #[allow(unused_imports)]
 pub use stage_runs::FinishedStageRun;
 
