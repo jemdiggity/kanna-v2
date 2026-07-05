@@ -14,7 +14,10 @@ mod tests;
 
 use crate::config::Config;
 use crate::db::{Db, NewPipelineItem, Repo};
-use commands::{build_agent_command, build_kanna_preamble, build_task_shell_command};
+use commands::{
+    build_agent_command, build_kanna_preamble, build_task_shell_command,
+    build_teardown_shell_command,
+};
 use definitions::{
     read_agent_definition, read_pipeline_definition, read_repo_config,
     read_task_pipeline_definition, PipelineStage, PipelineStagePolicy, PipelineStageTransition,
@@ -30,7 +33,9 @@ use std::collections::HashMap;
 use types::{
     CreatedTask, ForkedWorkspace, PreparedSessionSpawn, PreparedStageRerun, TaskCreationRequest,
 };
-pub(crate) use types::{PreparedStageRunSpawn, PreparedStageTransition, PreparedTaskSpawn};
+pub(crate) use types::{
+    PreparedStageRunSpawn, PreparedStageTransition, PreparedTaskSpawn, PreparedWorkspaceTeardown,
+};
 use worktree::{
     create_worktree, fetch_start_point, generate_task_id, merge_branches_into_worktree,
 };
@@ -40,6 +45,7 @@ pub(crate) use lifecycle::{
     dispatch_prepared_post_for_api, kill_session_replacing, prepared_task_id,
     rerun_prepared_stage_for_api, rollback_prepared_task_for_api, spawn_prepared_stage_run_for_api,
     spawn_prepared_task_for_api_recording_stage_run, spawn_prepared_task_for_api_with_rollback,
+    spawn_prepared_workspace_teardown_best_effort,
 };
 pub(crate) use merge::prepare_merge_agent_for_api;
 pub use merge::run_merge_agent;
@@ -304,6 +310,7 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
         run_stage: target_stage.name.clone(),
         run_kind,
         forked_workspace,
+        workspace_teardown: None,
         stage_agent: target_stage.agent.clone(),
         agent_provider: provider.as_str().to_string(),
         model: stage_run_model,
@@ -312,6 +319,93 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
         env: spawn_env,
         session,
     })
+}
+
+pub(crate) fn prepare_workspace_teardown_for_close(
+    db: &Db,
+    config: &Config,
+    task_id: &str,
+) -> Option<PreparedWorkspaceTeardown> {
+    let source_task = db.get_task_stage_source(task_id).ok().flatten()?;
+    let branch = source_task.branch.as_deref()?;
+    let stage_name = source_task.stage.as_deref()?;
+    let repo = db.get_repo(&source_task.repo_id).ok().flatten()?;
+    let pipeline_name = source_task
+        .pipeline
+        .clone()
+        .unwrap_or_else(|| "default".to_string());
+    let pipeline = read_task_pipeline_definition(
+        &repo.path,
+        &pipeline_name,
+        source_task.pipeline_def.as_deref(),
+    )
+    .ok()?;
+    prepare_workspace_teardown(db, config, &repo, task_id, &pipeline, stage_name, branch)
+}
+
+fn prepare_workspace_teardown(
+    db: &Db,
+    config: &Config,
+    repo: &Repo,
+    task_id: &str,
+    pipeline: &definitions::PipelineDefinition,
+    stage_name: &str,
+    branch: &str,
+) -> Option<PreparedWorkspaceTeardown> {
+    let worktree_path = db
+        .get_task_worktree_path(task_id)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| format!("{}/.kanna-worktrees/{branch}", repo.path));
+    let repo_config = read_repo_config(&repo.path).ok()?;
+    let worktree_repo_config = read_repo_config(&worktree_path).unwrap_or_default();
+    let mut teardown = stage_environment_teardown(pipeline, stage_name);
+    teardown.extend(worktree_repo_config.teardown.clone().unwrap_or_default());
+    if teardown.is_empty() {
+        return None;
+    }
+
+    let port_env = claim_task_ports(db, task_id, repo_config.ports.as_ref()).ok()?;
+    let mut spawn_env = build_spawn_env(config, task_id, &port_env).ok()?;
+    apply_workspace_path_env(&mut spawn_env, &worktree_path, &worktree_repo_config);
+    let session_id = format!("td-{branch}");
+    let shell_command = build_teardown_shell_command(&teardown);
+    Some(PreparedWorkspaceTeardown {
+        session_id,
+        cwd: worktree_path,
+        env: spawn_env,
+        session: PreparedSessionSpawn::Pty {
+            executable: "/bin/zsh".to_string(),
+            args: vec![
+                "--login".to_string(),
+                "-i".to_string(),
+                "-c".to_string(),
+                shell_command,
+            ],
+            cols: 80,
+            rows: 24,
+            agent_provider: AgentProvider::Claude.to_daemon_provider(),
+        },
+    })
+}
+
+fn stage_environment_teardown(
+    pipeline: &definitions::PipelineDefinition,
+    stage_name: &str,
+) -> Vec<String> {
+    let environment_name = match definitions::resolve_stage_position(pipeline, stage_name) {
+        Some(definitions::StagePosition::Stage(index)) => {
+            pipeline.stages[index].environment.as_ref()
+        }
+        Some(definitions::StagePosition::Post { owner }) => {
+            pipeline.stages[owner].environment.as_ref()
+        }
+        None => None,
+    };
+    environment_name
+        .and_then(|name| pipeline.environments.as_ref()?.get(name))
+        .and_then(|environment| environment.teardown.clone())
+        .unwrap_or_default()
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -248,6 +248,11 @@ pub(super) async fn close_task(
     }
     let retarget_instructions =
         collect_retarget_instructions_for_merged_blocker(&db, &pipeline_item_id)?;
+    let workspace_teardown = crate::task_creator::prepare_workspace_teardown_for_close(
+        &db,
+        &state.config,
+        &pipeline_item_id,
+    );
 
     let mut daemon = crate::daemon_client::DaemonClient::connect(&state.config.daemon_dir)
         .await
@@ -267,16 +272,33 @@ pub(super) async fn close_task(
     for session_id in [
         pipeline_item_id.to_string(),
         format!("shell-wt-{pipeline_item_id}"),
-        format!("td-{pipeline_item_id}"),
     ] {
         crate::task_creator::kill_session_replacing(
             &mut daemon,
             &state.session_replacements,
-            &session_id,
+            session_id.as_str(),
         )
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
     }
+    let teardown_session_id = workspace_teardown
+        .as_ref()
+        .map(|teardown| teardown.session_id.clone())
+        .unwrap_or_else(|| format!("td-{pipeline_item_id}"));
+    if let Err(error) = crate::task_creator::kill_session_replacing(
+        &mut daemon,
+        &state.session_replacements,
+        teardown_session_id.as_str(),
+    )
+    .await
+    {
+        log::warn!("failed to replace workspace teardown session {teardown_session_id}: {error}");
+    }
+    crate::task_creator::spawn_prepared_workspace_teardown_best_effort(
+        &mut daemon,
+        workspace_teardown,
+    )
+    .await;
 
     db.close_pipeline_item(&pipeline_item_id).map_err(|e| {
         (
@@ -300,6 +322,7 @@ async fn close_task_after_final_stage(
     state: &Arc<AppState>,
     daemon: &mut crate::daemon_client::DaemonClient,
     task_id: String,
+    workspace_teardown: Option<crate::task_creator::PreparedWorkspaceTeardown>,
 ) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
     let retarget_instructions = {
         let db = Db::open(&state.config.db_path).map_err(|e| {
@@ -315,19 +338,30 @@ async fn close_task_after_final_stage(
             .await
             .map_err(|(_, message)| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, message))?;
     }
-    for session_id in [
-        task_id.to_string(),
-        format!("shell-wt-{task_id}"),
-        format!("td-{task_id}"),
-    ] {
+    for session_id in [task_id.to_string(), format!("shell-wt-{task_id}")] {
         crate::task_creator::kill_session_replacing(
             daemon,
             &state.session_replacements,
-            &session_id,
+            session_id.as_str(),
         )
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
     }
+    let teardown_session_id = workspace_teardown
+        .as_ref()
+        .map(|teardown| teardown.session_id.clone())
+        .unwrap_or_else(|| format!("td-{task_id}"));
+    if let Err(error) = crate::task_creator::kill_session_replacing(
+        daemon,
+        &state.session_replacements,
+        &teardown_session_id,
+    )
+    .await
+    {
+        log::warn!("failed to replace workspace teardown session {teardown_session_id}: {error}");
+    }
+    crate::task_creator::spawn_prepared_workspace_teardown_best_effort(daemon, workspace_teardown)
+        .await;
     let db = Db::open(&state.config.db_path).map_err(|e| {
         (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -412,9 +446,10 @@ async fn execute_stage_transition(
             .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
             Ok(Json(dispatched))
         }
-        crate::task_creator::PreparedStageTransition::Close { task_id } => {
-            close_task_after_final_stage(state, daemon, task_id).await
-        }
+        crate::task_creator::PreparedStageTransition::Close {
+            task_id,
+            workspace_teardown,
+        } => close_task_after_final_stage(state, daemon, task_id, workspace_teardown).await,
     }
 }
 

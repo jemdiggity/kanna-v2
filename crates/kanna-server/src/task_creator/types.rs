@@ -77,7 +77,10 @@ pub(crate) enum PreparedSessionSpawn {
 pub(crate) enum PreparedStageTransition {
     Run(Box<PreparedStageRunSpawn>),
     Post(Box<PreparedPostDispatch>),
-    Close { task_id: String },
+    Close {
+        task_id: String,
+        workspace_teardown: Option<PreparedWorkspaceTeardown>,
+    },
 }
 
 /// A stage's post, ready to be injected into the task's live agent session.
@@ -137,10 +140,21 @@ pub(crate) struct PreparedStageRunSpawn {
     /// `pipeline_item.branch` and the worktree record, and rolls the fork
     /// back if the daemon spawn fails.
     pub(super) forked_workspace: Option<ForkedWorkspace>,
+    pub(super) workspace_teardown: Option<PreparedWorkspaceTeardown>,
     pub(super) stage_agent: Option<String>,
     pub(super) agent_provider: String,
     pub(super) model: Option<String>,
     pub(super) feedback: Option<String>,
+    pub(super) cwd: String,
+    pub(super) env: HashMap<String, String>,
+    pub(super) session: PreparedSessionSpawn,
+}
+
+/// Detached best-effort cleanup for a workspace that the task is leaving.
+/// The teardown runs in the departed worktree and uses a session id tied to
+/// that worktree's branch so it does not collide with future task workspaces.
+pub(crate) struct PreparedWorkspaceTeardown {
+    pub(crate) session_id: String,
     pub(super) cwd: String,
     pub(super) env: HashMap<String, String>,
     pub(super) session: PreparedSessionSpawn,

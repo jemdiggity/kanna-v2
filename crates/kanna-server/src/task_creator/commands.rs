@@ -227,6 +227,29 @@ pub(super) fn build_task_shell_command(
     command_parts.join(" && ")
 }
 
+pub(super) fn build_teardown_shell_command(teardown_cmds: &[String]) -> String {
+    if teardown_cmds.is_empty() {
+        return "exit 0".to_string();
+    }
+
+    let teardown_parts = teardown_cmds
+        .iter()
+        .map(|cmd| {
+            format!(
+                "printf '\\033[2m$ %s\\033[0m\\n' '{}' ; ( {} ) || true",
+                shell_single_quote(cmd),
+                cmd
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ; ");
+
+    format!(
+        "printf '\\033[33mRunning teardown...\\033[0m\\n' ; {} ; printf '\\n' ; exit 0",
+        teardown_parts
+    )
+}
+
 /// Canonical Kanna runtime guidance shared with the desktop frontend.
 /// `packages/core/src/pipeline/prompt-builder.ts` mirrors this file as a TS
 /// constant; a sync test there keeps both sides byte-identical.

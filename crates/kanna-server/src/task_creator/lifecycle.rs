@@ -1,6 +1,6 @@
 use super::types::{
     CreatedTask, PreparedPostDispatch, PreparedSessionSpawn, PreparedStageRerun,
-    PreparedStageRunSpawn, PreparedTaskSpawn,
+    PreparedStageRunSpawn, PreparedTaskSpawn, PreparedWorkspaceTeardown,
 };
 use super::worktree::remove_prepared_worktree;
 use crate::daemon_client::DaemonClient;
@@ -111,6 +111,10 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
 ) -> Result<crate::mobile_api::TaskActionResponse, String> {
     let task_id = prepared.task_id.clone();
     let session_id = prepared.session_id.clone();
+    let teardown_session_id = prepared
+        .workspace_teardown
+        .as_ref()
+        .map(|teardown| teardown.session_id.clone());
 
     // A manual advance can leave the previous stage's run open (no explicit
     // agent verdict); moving forward treats that work as accepted. Revision
@@ -142,6 +146,15 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
             kill_session_replacing(daemon, replacements, &format!("shell-wt-{task_id}")).await
         {
             return Err(rollback_fork(error));
+        }
+        if let Some(teardown_session_id) = teardown_session_id.as_deref() {
+            if let Err(error) =
+                kill_session_replacing(daemon, replacements, teardown_session_id).await
+            {
+                log::warn!(
+                    "failed to replace workspace teardown session {teardown_session_id}: {error}"
+                );
+            }
         }
     }
 
@@ -202,10 +215,42 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
     })
     .map_err(|e| format!("db error: {}", e))?;
 
+    spawn_prepared_workspace_teardown_best_effort(daemon, prepared.workspace_teardown).await;
+
     Ok(crate::mobile_api::TaskActionResponse {
         task_id,
         follow_task: None,
     })
+}
+
+pub(crate) async fn spawn_prepared_workspace_teardown_best_effort(
+    daemon: &mut DaemonClient,
+    prepared: Option<PreparedWorkspaceTeardown>,
+) {
+    let Some(prepared) = prepared else {
+        return;
+    };
+    let session_id = prepared.session_id.clone();
+    let command = spawn_session_command(
+        prepared.session_id,
+        prepared.cwd,
+        prepared.env,
+        prepared.session,
+    );
+    match daemon.send_command(&command).await {
+        Ok(DaemonEvent::SessionCreated { .. }) => {}
+        Ok(DaemonEvent::Error { message, .. }) => {
+            log::warn!("workspace teardown session {session_id} failed to start: {message}");
+        }
+        Ok(other) => {
+            log::warn!(
+                "workspace teardown session {session_id} returned unexpected daemon response: {other:?}"
+            );
+        }
+        Err(error) => {
+            log::warn!("workspace teardown session {session_id} daemon error: {error}");
+        }
+    }
 }
 
 /// Dispatch a stage's post into the task's live agent session; when the
