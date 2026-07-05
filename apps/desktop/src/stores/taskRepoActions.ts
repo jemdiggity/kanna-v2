@@ -1,13 +1,12 @@
 import {
   findRepoByPath,
-  hideRepo as hideRepoQuery,
   insertRepo,
   reorderRepos as reorderReposQuery,
-  unhideRepo as unhideRepoQuery,
   updateRepoName,
 } from "@kanna/db";
 import { invoke } from "../invoke";
 import { isTauri } from "../tauri-mock";
+import { patchDesktopRepo } from "../services/desktopServerClient";
 import { refreshRepoRemoteMetadata } from "../services/repoRemoteUrl";
 import { reportPrewarmSessionError } from "./kannaCleanup";
 import { requireService, type StoreContext } from "./state";
@@ -25,7 +24,7 @@ export function createTaskRepoActions(
     const existing = await findRepoByPath(context.requireDb(), path);
     if (existing) {
       if (existing.hidden) {
-        await unhideRepoQuery(context.requireDb(), existing.id);
+        await patchDesktopRepo(existing.id, { hidden: false });
         await reloadSnapshot();
         await invalidateWindowWorkspace("importRepo");
         context.state.selectedRepoId.value = existing.id;
@@ -49,7 +48,7 @@ export function createTaskRepoActions(
     const existing = await findRepoByPath(context.requireDb(), path);
     if (existing) {
       if (existing.hidden) {
-        await unhideRepoQuery(context.requireDb(), existing.id);
+        await patchDesktopRepo(existing.id, { hidden: false });
         await reloadSnapshot();
         await invalidateWindowWorkspace("createRepo");
         context.state.selectedRepoId.value = existing.id;
@@ -90,7 +89,7 @@ export function createTaskRepoActions(
   }
 
   async function hideRepo(repoId: string) {
-    await hideRepoQuery(context.requireDb(), repoId);
+    await patchDesktopRepo(repoId, { hidden: true });
     if (context.state.selectedRepoId.value === repoId) context.state.selectedRepoId.value = null;
     context.state.lastHiddenRepoId.value = repoId;
     await reloadSnapshot();

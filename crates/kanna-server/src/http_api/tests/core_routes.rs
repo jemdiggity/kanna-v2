@@ -506,6 +506,42 @@ async fn analytics_route_returns_repo_metrics() {
 }
 
 #[tokio::test]
+async fn patch_repo_route_updates_remote_metadata_and_hidden_state() {
+    let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+    });
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::patch("/v1/repos/repo-1")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "remoteUrl": "git@github.com:kanna/repo-one.git",
+                        "remoteUrlHash": "hash-1",
+                        "hidden": true
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let snapshot_response = app
+        .oneshot(Request::get("/v1/snapshot").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(snapshot_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let snapshot: serde_json::Value = from_slice(&body).unwrap();
+    assert_eq!(snapshot["entries"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
 async fn add_repo_route_registers_existing_git_repo() {
     let unique = format!(
         "{}-{}",

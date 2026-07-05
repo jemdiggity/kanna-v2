@@ -1,7 +1,7 @@
 use super::state::AppState;
 use crate::db::{Db, PipelineItem};
 use crate::mobile_api::MobileApi;
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::Json;
 use kanna_agent_protocol::StateChangeScope;
 use serde::Serialize;
@@ -47,6 +47,53 @@ pub(super) async fn add_repo(
     })?;
     state.publish_state_changed(StateChangeScope::Repos);
     Ok(Json(repo))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct PatchRepoRequest {
+    #[serde(default)]
+    remote_url: Option<Option<String>>,
+    #[serde(default)]
+    remote_url_hash: Option<Option<String>>,
+    hidden: Option<bool>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct PatchRepoResponse {
+    repo_id: String,
+}
+
+pub(super) async fn patch_repo(
+    State(state): State<Arc<AppState>>,
+    Path(repo_id): Path<String>,
+    Json(payload): Json<PatchRepoRequest>,
+) -> Result<Json<PatchRepoResponse>, (axum::http::StatusCode, String)> {
+    let db = Db::open(&state.config.db_path).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("db error: {}", e),
+        )
+    })?;
+    db.patch_repo(
+        &repo_id,
+        payload.remote_url.as_ref().map(|value| value.as_deref()),
+        payload.remote_url_hash.as_ref().map(|value| value.as_deref()),
+        payload.hidden,
+    )
+    .map_err(|e| match e {
+        rusqlite::Error::QueryReturnedNoRows => (
+            axum::http::StatusCode::NOT_FOUND,
+            format!("repo not found: {repo_id}"),
+        ),
+        e => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("db error: {e}"),
+        ),
+    })?;
+    state.publish_state_changed(StateChangeScope::Repos);
+    Ok(Json(PatchRepoResponse { repo_id }))
 }
 
 pub(super) async fn list_repo_tasks(

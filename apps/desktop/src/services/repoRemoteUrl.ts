@@ -1,7 +1,8 @@
-import { updateRepoRemoteMetadata, type DbHandle, type Repo } from "@kanna/db";
+import type { DbHandle, Repo } from "../types/kanna";
 
 import { invoke } from "../invoke";
 import { hashRemoteUrl } from "../utils/cloudTaskSnapshot";
+import { patchDesktopRepo } from "./desktopServerClient";
 
 const REMOTE_URL_CACHE_TTL_MS = 5 * 60 * 1000;
 
@@ -78,9 +79,10 @@ export async function refreshRepoRemoteMetadata(
     remoteUrlHash,
     loadedAt: Date.now(),
   });
-  await updateRepoRemoteMetadata(db, repo.id, {
-    remote_url: remoteUrl,
-    remote_url_hash: remoteUrlHash,
+  void db;
+  await patchDesktopRepo(repo.id, {
+    remoteUrl,
+    remoteUrlHash,
   }).catch((error) => {
     console.warn("[repoRemoteUrl] failed to persist repo remote metadata:", error);
   });
