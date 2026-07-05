@@ -102,26 +102,35 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
     context.state.selectedItemId.value = null;
   }
 
-  async function resolveNextStageName(item: { repo_id: string; pipeline: string; stage: string }): Promise<string | null> {
+  async function resolveStageAdvanceProjection(item: {
+    repo_id: string;
+    pipeline: string;
+    stage: string;
+  }): Promise<{ nextStageName: string | null; pendingPostName: string | null }> {
     const repo = context.state.repos.value.find((candidate) => candidate.id === item.repo_id);
-    if (!repo) return null;
+    if (!repo) return { nextStageName: null, pendingPostName: null };
     try {
       const pipeline = await loadPipeline(repo.path, item.pipeline || "default");
       const currentIndex = pipeline.stages.findIndex((stage) => stage.name === item.stage);
-      if (currentIndex === -1) return null;
-      return pipeline.stages[currentIndex + 1]?.name ?? null;
+      if (currentIndex === -1) return { nextStageName: null, pendingPostName: null };
+      const currentStage = pipeline.stages[currentIndex];
+      return {
+        nextStageName: pipeline.stages[currentIndex + 1]?.name ?? null,
+        pendingPostName: currentStage?.post?.name ?? null,
+      };
     } catch (error) {
-      console.debug("[pipeline:advanceStage] could not resolve next stage for optimistic update:", error);
-      return null;
+      console.debug("[pipeline:advanceStage] could not resolve stage projection for optimistic update:", error);
+      return { nextStageName: null, pendingPostName: null };
     }
   }
 
   async function withOptimisticStageAdvance<T>(
     taskId: string,
     nextStageName: string | null,
+    pendingPostName: string | null,
     run: () => Promise<T>,
   ): Promise<T> {
-    if (!nextStageName) return run();
+    if (!nextStageName && !pendingPostName) return run();
     return requireService(context.services.withOptimisticItemOverlay, "withOptimisticItemOverlay")({
       key: `advance-stage:${taskId}`,
       apply: (snapshot: KannaSnapshot): KannaSnapshot => ({
@@ -131,9 +140,14 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
             candidate.id === taskId
               ? {
                   ...candidate,
-                  stage: nextStageName,
-                  active_post_action: null,
-                  has_running_post: 0,
+                  ...(pendingPostName
+                    ? {
+                        active_post_action: candidate.active_post_action ?? pendingPostName,
+                        has_running_post: 1,
+                      }
+                    : {
+                        stage: nextStageName ?? candidate.stage,
+                      }),
                 }
               : candidate,
           ),
@@ -207,11 +221,12 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
     if (item.closed_at != null) return;
     const sourceTaskIsSelected = context.state.selectedItemId.value === item.id;
     const fallbackSelectionId = computeNextVisibleItemId(item.id);
-    const nextStageName = await resolveNextStageName(item);
+    const { nextStageName, pendingPostName } = await resolveStageAdvanceProjection(item);
     debugLog("[pipeline:advanceStage] selection policy", {
       taskId,
       currentStage: item.stage,
       optimisticNextStage: nextStageName,
+      optimisticPendingPost: pendingPostName,
       initiatedBy: options.initiatedBy ?? "manual",
       sourceTaskIsSelected,
       fallbackSelectionId,
@@ -219,7 +234,7 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
     });
 
     try {
-      await withOptimisticStageAdvance(taskId, nextStageName, async () => {
+      await withOptimisticStageAdvance(taskId, nextStageName, pendingPostName, async () => {
         const response = await postTaskAction(taskId, "advance-stage");
         if (!response.ok) {
           const message = await response.text();

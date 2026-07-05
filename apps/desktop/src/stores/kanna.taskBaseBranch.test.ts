@@ -1786,6 +1786,68 @@ describe("kanna store task base branch integration", () => {
     await advancePromise;
   });
 
+  it("keeps a post-stage advance on the current stage while post dispatch is in flight", async () => {
+    const serverAdvanceGate = mockState.defer();
+    mockState.pipelineDefinition = {
+      name: "default",
+      stages: [
+        {
+          name: "in progress",
+          policy: { transition: "manual" },
+          post: { name: "commit" },
+        },
+        { name: "review", policy: { transition: "manual" } },
+      ],
+    };
+    mockState.pipelineItems = [
+      mockState.makeItem({
+        id: "item-source",
+        branch: "task-source",
+        stage: "in progress",
+        active_post_action: null,
+        has_running_post: 0,
+      }),
+    ];
+    fetchMock.mockImplementationOnce(async () => {
+      await serverAdvanceGate.promise;
+      mockState.pipelineItems = [
+        mockState.makeItem({
+          id: "item-source",
+          branch: "task-source",
+          stage: "in progress",
+          active_post_action: null,
+          has_running_post: 1,
+        }),
+      ];
+      return {
+        ok: true,
+        json: async () => ({ taskId: "item-source" }),
+        text: async () => "",
+      };
+    });
+
+    const store = await createStore();
+    await store.selectItem("item-source");
+    await flushStore();
+
+    const advancePromise = store.advanceStage("item-source");
+    await flushStore();
+
+    await vi.waitFor(() => {
+      expect(fetchMock).toHaveBeenCalled();
+    });
+    expect(store.currentItem?.stage).toBe("in progress");
+    expect(store.currentItem?.has_running_post).toBe(1);
+    expect(store.currentItem?.active_post_action).toBe("commit");
+    expect(store.sortedItemsForCurrentRepo.find((item) => item.id === "item-source")?.stage).toBe("in progress");
+
+    serverAdvanceGate.resolve();
+    await advancePromise;
+
+    expect(store.currentItem?.stage).toBe("in progress");
+    expect(store.currentItem?.has_running_post).toBe(1);
+  });
+
   it("moves selection to the next visible item when the advance closes the task", async () => {
     mockState.pipelineItems = [
       mockState.makeItem({
