@@ -828,6 +828,8 @@ async fn unblock_dependents_of_pr_resolved_blocker(state: &Arc<AppState>, task_i
         }
     }
     start_dependents_unblocked_by_close_with_daemon(state, &mut daemon, task_id).await;
+    state.publish_state_changed(StateChangeScope::Tasks);
+    state.publish_state_changed(StateChangeScope::Blockers);
 }
 
 pub(super) async fn request_revision(
