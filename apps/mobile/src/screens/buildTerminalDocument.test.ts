@@ -22,7 +22,7 @@ describe("buildTerminalDocument", () => {
     expect(html).toContain("padding-bottom: 132px;");
     expect(html).toContain("overflow-x: auto;");
     expect(html).toContain("-webkit-overflow-scrolling: touch;");
-    expect(html).toContain("touch-action: pan-x pan-y;");
+    expect(html).toContain("touch-action: pan-x pan-y pinch-zoom;");
     expect(html).toContain("terminalViewport.style.overflowX = \"visible\"");
     expect(html).toContain("const TERMINAL_COLS = 220;");
     expect(html).toContain("term.resize(TERMINAL_COLS, proposed.rows)");
@@ -39,6 +39,24 @@ describe("buildTerminalDocument", () => {
     expect(html).toContain('viewport.addEventListener("pointerdown"');
     expect(html).toContain("terminalViewport.style.bottom = stickyToBottom");
     expect(html).not.toContain("<pre id=\"terminal\"></pre>");
+  });
+
+  it("enables mobile pinch zoom and bidirectional touch scrolling for xterm", () => {
+    const html = buildTerminalDocument({
+      bottomInset: 24
+    });
+
+    expect(html).toContain("maximum-scale=3");
+    expect(html).toContain("user-scalable=yes");
+    expect(html).toContain("touch-action: pan-x pan-y pinch-zoom;");
+    expect(html).toContain(".xterm .xterm-screen,");
+    expect(html).toContain(".xterm .xterm-viewport {");
+    expect(html).toContain("installPinchZoomFallback()");
+    expect(html).toContain("const MIN_FONT_SCALE = 0.75;");
+    expect(html).toContain("const MAX_FONT_SCALE = 1.8;");
+    expect(html).toContain('viewport.addEventListener("touchstart"');
+    expect(html).toContain('viewport.addEventListener("touchmove"');
+    expect(html).toContain("term.options.fontSize = Math.round(BASE_FONT_SIZE * fontScale)");
   });
 
   it("writes base64 terminal chunks as bytes in replace scripts", () => {
