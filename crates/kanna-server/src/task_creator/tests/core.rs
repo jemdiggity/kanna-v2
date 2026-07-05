@@ -1,5 +1,123 @@
 use super::*;
 
+fn write_agent_repo(label: &str, agent_md: &str, extend_md: Option<&str>) -> std::path::PathBuf {
+    let repo_root =
+        std::env::temp_dir().join(format!("kanna-agent-def-{label}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&repo_root);
+    let agent_dir = repo_root.join(".kanna/agents/reviewer");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(agent_dir.join("AGENT.md"), agent_md).unwrap();
+    if let Some(extend_md) = extend_md {
+        std::fs::write(agent_dir.join("EXTEND.md"), extend_md).unwrap();
+    }
+    repo_root
+}
+
+#[test]
+fn read_agent_definition_without_extension_keeps_base() {
+    let repo_root = write_agent_repo(
+        "no-extend",
+        "---\nagent_provider: claude\nmodel: sonnet\n---\nBase prompt.",
+        None,
+    );
+
+    let definition =
+        super::super::definitions::read_agent_definition(&repo_root.to_string_lossy(), "reviewer")
+            .unwrap();
+    assert_eq!(definition.prompt, "Base prompt.");
+    assert_eq!(definition.model.as_deref(), Some("sonnet"));
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
+fn read_agent_definition_appends_extension_body_and_overrides_frontmatter() {
+    let repo_root = write_agent_repo(
+        "extend-override",
+        "---\nagent_provider: claude\nmodel: sonnet\npermission_mode: default\n---\nBase prompt.",
+        Some("---\nmodel: opus\npermission_mode: acceptEdits\nagent_provider: codex\n---\nRun the full suite."),
+    );
+
+    let definition =
+        super::super::definitions::read_agent_definition(&repo_root.to_string_lossy(), "reviewer")
+            .unwrap();
+    assert_eq!(definition.prompt, "Base prompt.\n\nRun the full suite.");
+    assert_eq!(definition.model.as_deref(), Some("opus"));
+    assert_eq!(definition.permission_mode.as_deref(), Some("acceptEdits"));
+    assert_eq!(definition.agent_providers, vec!["codex".to_string()]);
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
+fn read_agent_definition_extension_empty_allowed_tools_clears_base_allowed_tools() {
+    let repo_root = write_agent_repo(
+        "extend-clear-allowed-tools",
+        "---\nagent_provider: claude\nallowed_tools:\n  - Bash\n  - Read\n---\nBase prompt.",
+        Some("---\nallowed_tools: []\n---\nRun without tool restrictions."),
+    );
+
+    let definition =
+        super::super::definitions::read_agent_definition(&repo_root.to_string_lossy(), "reviewer")
+            .unwrap();
+    assert_eq!(
+        definition.prompt,
+        "Base prompt.\n\nRun without tool restrictions."
+    );
+    assert!(definition.allowed_tools.is_empty());
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
+fn read_agent_definition_extension_without_frontmatter_extends_prompt_only() {
+    let repo_root = write_agent_repo(
+        "extend-plain",
+        "---\nagent_provider: claude\nmodel: sonnet\n---\nBase prompt.",
+        Some("Repo-specific extra instructions."),
+    );
+
+    let definition =
+        super::super::definitions::read_agent_definition(&repo_root.to_string_lossy(), "reviewer")
+            .unwrap();
+    assert_eq!(
+        definition.prompt,
+        "Base prompt.\n\nRepo-specific extra instructions."
+    );
+    assert_eq!(definition.model.as_deref(), Some("sonnet"));
+    assert_eq!(definition.agent_providers, vec!["claude".to_string()]);
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
+fn read_agent_definition_extension_applies_to_builtin_fallback() {
+    // No repo AGENT.md: the base resolves to the compiled builtin and the
+    // repo's EXTEND.md still layers on top of it.
+    let repo_root = std::env::temp_dir().join(format!(
+        "kanna-agent-def-builtin-extend-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&repo_root);
+    let agent_dir = repo_root.join(".kanna/agents/review");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("EXTEND.md"),
+        "Repo rule: run the full unit and integration suites.",
+    )
+    .unwrap();
+
+    let definition =
+        super::super::definitions::read_agent_definition(&repo_root.to_string_lossy(), "review")
+            .unwrap();
+    assert!(definition.prompt.contains("QA review agent"));
+    assert!(definition
+        .prompt
+        .ends_with("Repo rule: run the full unit and integration suites."));
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
 #[test]
 fn build_stage_prompt_replaces_base_ref() {
     let prompt = build_stage_prompt(
