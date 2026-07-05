@@ -70,6 +70,18 @@ fn builds_send_task_input_payload() {
 }
 
 #[test]
+fn builds_signal_agent_payload() {
+    let request = build_signal_agent_request("Please merge task task-1".to_string());
+
+    assert_eq!(
+        serde_json::to_value(request).unwrap(),
+        json!({
+            "message": "Please merge task task-1",
+        })
+    );
+}
+
+#[test]
 fn builds_add_repo_payload() {
     let request =
         build_add_repo_request("/Users/me/project".to_string(), Some("Project".to_string()));

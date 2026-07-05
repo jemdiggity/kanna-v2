@@ -72,6 +72,29 @@ async fn close_task_posts_to_close_action_path() {
 }
 
 #[tokio::test]
+async fn signal_agent_posts_message_to_repo_agent_signal_path() {
+    let response = http_json_response("200 OK", "{\"taskId\":\"task-merge\",\"created\":false}");
+    let (base_url, handle) = serve_single_http_response(response).await;
+
+    let action = signal_agent_via_api(
+        &base_url,
+        "repo-1",
+        "merge",
+        &SignalAgentRequest {
+            message: "Please merge task task-1".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    let request = handle.await.unwrap();
+
+    assert_eq!(action.task_id, "task-merge");
+    assert!(!action.created);
+    assert!(request.starts_with("POST /v1/repos/repo-1/agents/merge/signal HTTP/1.1"));
+    assert!(request.contains(r#"{"message":"Please merge task task-1"}"#));
+}
+
+#[tokio::test]
 async fn rename_task_patches_task_update_path_with_display_name() {
     let response = http_json_response("200 OK", "{\"taskId\":\"task-123\"}");
     let (base_url, handle) = serve_single_http_response(response).await;

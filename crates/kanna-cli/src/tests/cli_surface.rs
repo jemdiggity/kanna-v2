@@ -180,6 +180,39 @@ fn parses_new_repo_and_task_subcommands() {
         }
         _ => panic!("expected task search command"),
     }
+
+    let cli = crate::Cli::try_parse_from([
+        "kanna-cli",
+        "repo",
+        "agent",
+        "signal",
+        "--repo-id",
+        "repo-1",
+        "--agent",
+        "merge",
+        "--message",
+        "Please merge this task",
+    ])
+    .unwrap();
+    match cli.command {
+        crate::Commands::Repo {
+            command:
+                crate::RepoCommands::Agent {
+                    command:
+                        crate::RepoAgentCommands::Signal {
+                            repo_id,
+                            agent,
+                            message,
+                            ..
+                        },
+                },
+        } => {
+            assert_eq!(repo_id, "repo-1");
+            assert_eq!(agent, "merge");
+            assert_eq!(message, "Please merge this task");
+        }
+        _ => panic!("expected repo agent signal command"),
+    }
 }
 
 #[test]
@@ -335,6 +368,25 @@ fn typed_create_body_matches_catalog_create_task_body() {
             "blocker_task_ids": ["blocker-1"],
             "notify_task_id": "parent-1",
             "parent_task_id": "root-1"
+        }),
+    )
+    .unwrap();
+
+    assert_eq!(typed_body, resolved.body);
+}
+
+#[test]
+fn typed_signal_agent_body_matches_catalog_signal_agent_body() {
+    let request = build_signal_agent_request("Please review task task-1".to_string());
+    let typed_body = serde_json::to_value(request).unwrap();
+    let catalog = kanna_tool_catalog::bundled_catalog();
+    let resolved = kanna_tool_catalog::resolve_request(
+        &catalog,
+        "kanna_signal_agent",
+        &json!({
+            "repo_id": "repo-1",
+            "agent": "review",
+            "message": "Please review task task-1",
         }),
     )
     .unwrap();
