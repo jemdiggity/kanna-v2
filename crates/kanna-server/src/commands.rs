@@ -136,14 +136,30 @@ pub async fn handle_invoke(
                 .resolve_pipeline_item_id(task_id)
                 .map_err(|e| format!("db error: {}", e))?
                 .ok_or_else(|| format!("task not found: {task_id}"))?;
+            let workspace_teardown =
+                task_creator::prepare_workspace_teardown_for_close(db, config, &pipeline_item_id);
 
             for session_id in [
                 pipeline_item_id.to_string(),
                 format!("shell-wt-{pipeline_item_id}"),
-                format!("td-{pipeline_item_id}"),
             ] {
-                task_creator::kill_session_replacing(daemon, replacements, &session_id).await?;
+                task_creator::kill_session_replacing(daemon, replacements, session_id.as_str())
+                    .await?;
             }
+            let teardown_session_id = workspace_teardown
+                .as_ref()
+                .map(|teardown| teardown.session_id.clone())
+                .unwrap_or_else(|| format!("td-{pipeline_item_id}"));
+            if let Err(error) =
+                task_creator::kill_session_replacing(daemon, replacements, &teardown_session_id)
+                    .await
+            {
+                log::warn!(
+                    "failed to replace workspace teardown session {teardown_session_id}: {error}"
+                );
+            }
+            task_creator::spawn_prepared_workspace_teardown_best_effort(daemon, workspace_teardown)
+                .await;
 
             db.close_pipeline_item(&pipeline_item_id)
                 .map_err(|e| format!("db error: {}", e))?;
@@ -179,15 +195,34 @@ pub async fn handle_invoke(
                     .await?;
                     serde_json::to_value(dispatched).map_err(|e| format!("serialize error: {}", e))
                 }
-                task_creator::PreparedStageTransition::Close { task_id } => {
-                    for session_id in [
-                        task_id.to_string(),
-                        format!("shell-wt-{task_id}"),
-                        format!("td-{task_id}"),
-                    ] {
+                task_creator::PreparedStageTransition::Close {
+                    task_id,
+                    workspace_teardown,
+                } => {
+                    for session_id in [task_id.to_string(), format!("shell-wt-{task_id}")] {
                         task_creator::kill_session_replacing(daemon, replacements, &session_id)
                             .await?;
                     }
+                    let teardown_session_id = workspace_teardown
+                        .as_ref()
+                        .map(|teardown| teardown.session_id.clone())
+                        .unwrap_or_else(|| format!("td-{task_id}"));
+                    if let Err(error) = task_creator::kill_session_replacing(
+                        daemon,
+                        replacements,
+                        &teardown_session_id,
+                    )
+                    .await
+                    {
+                        log::warn!(
+                            "failed to replace workspace teardown session {teardown_session_id}: {error}"
+                        );
+                    }
+                    task_creator::spawn_prepared_workspace_teardown_best_effort(
+                        daemon,
+                        workspace_teardown,
+                    )
+                    .await;
                     let db = Db::open(&config.db_path).map_err(|e| format!("db error: {}", e))?;
                     db.close_pipeline_item(&task_id)
                         .map_err(|e| format!("db error: {}", e))?;

@@ -176,6 +176,11 @@ fn prepare_swap_to_index(
     let Some(next_stage) = context.pipeline.stages.get(next_index) else {
         return Ok(PreparedStageTransition::Close {
             task_id: context.source_task_id.to_string(),
+            workspace_teardown: super::prepare_workspace_teardown_for_close(
+                db,
+                config,
+                context.source_task_id,
+            ),
         });
     };
     prepare_stage_run_for_target(
@@ -307,7 +312,7 @@ fn prepare_stage_run_for_target_returning_prompt(
         .as_deref()
         .ok_or_else(|| format!("task has no branch: {}", context.source_task_id))?;
 
-    prepare_stage_run_spawn(
+    let mut run = prepare_stage_run_spawn(
         db,
         config,
         context.repo,
@@ -323,8 +328,23 @@ fn prepare_stage_run_for_target_returning_prompt(
         feedback,
         source_task.agent_type.as_deref(),
         explicit_provider,
-    )
-    .map(|run| (run, final_prompt))
+    )?;
+    if run.forked_workspace.is_some() {
+        let departed_stage = source_task
+            .stage
+            .as_deref()
+            .ok_or_else(|| format!("task has no stage: {}", context.source_task_id))?;
+        run.workspace_teardown = super::prepare_workspace_teardown(
+            db,
+            config,
+            context.repo,
+            context.source_task_id,
+            context.pipeline,
+            departed_stage,
+            branch,
+        );
+    }
+    Ok((run, final_prompt))
 }
 
 pub(crate) fn previous_stage_result(

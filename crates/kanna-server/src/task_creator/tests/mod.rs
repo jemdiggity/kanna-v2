@@ -194,6 +194,50 @@ async fn spawn_fake_daemon_fork_transition(
     })
 }
 
+/// Fake daemon for a forked stage transition that also starts a detached
+/// workspace teardown session after the replacement stage has spawned.
+async fn spawn_fake_daemon_fork_transition_with_teardown(
+    daemon_dir: String,
+) -> tokio::task::JoinHandle<Vec<kanna_daemon::protocol::Command>> {
+    let socket_path = test_daemon_socket_path(&daemon_dir);
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let mut commands = Vec::new();
+        for command_index in 0..5 {
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let command: kanna_daemon::protocol::Command =
+                serde_json::from_str(line.trim()).unwrap();
+            let response = match &command {
+                kanna_daemon::protocol::Command::Kill { .. } => kanna_daemon::protocol::Event::Ok,
+                kanna_daemon::protocol::Command::Spawn { session_id, .. }
+                | kanna_daemon::protocol::Command::SpawnAgent { session_id, .. } => {
+                    kanna_daemon::protocol::Event::SessionCreated {
+                        session_id: session_id.clone(),
+                    }
+                }
+                other => panic!("unexpected daemon command: {other:?}"),
+            };
+            if command_index < 3 {
+                assert!(
+                    matches!(command, kanna_daemon::protocol::Command::Kill { .. }),
+                    "expected leading kill command, got {command:?}"
+                );
+            }
+            commands.push(command);
+            write_half
+                .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
+                .await
+                .unwrap();
+        }
+        commands
+    })
+}
+
 fn insert_finished_stage_run(db: &Db, task_id: &str, stage: &str, result: &str) {
     db.insert_stage_run(NewStageRun {
         id: &format!("{task_id}-{stage}-run"),

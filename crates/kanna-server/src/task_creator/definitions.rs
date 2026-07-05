@@ -7,6 +7,7 @@ use std::path::Path;
 pub(super) struct RepoConfig {
     pub(super) pipeline: Option<String>,
     pub(super) setup: Option<Vec<String>>,
+    pub(super) teardown: Option<Vec<String>>,
     pub(super) ports: Option<HashMap<String, u16>>,
     pub(super) workspace: Option<RepoWorkspaceConfig>,
 }
@@ -77,6 +78,7 @@ impl PipelineStageTransition {
 #[derive(Clone, Deserialize, Serialize)]
 pub(super) struct PipelineEnvironment {
     pub(super) setup: Option<Vec<String>>,
+    pub(super) teardown: Option<Vec<String>>,
 }
 
 /// Where a stored stage name sits in a pipeline. In-flight tasks created
