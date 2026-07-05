@@ -275,9 +275,17 @@ function validateDevUpCloudFlags(input: Record<string, unknown>): void {
   }
 }
 
+function normalizeHelpTopic(args: string[]): string | undefined {
+  if (!args.includes("--help") && !args.includes("-h")) {
+    return undefined;
+  }
+  return args.filter((arg) => arg !== "--help" && arg !== "-h").join(" ");
+}
+
 export function parseCliArgs(args: string[]): ParsedCliCommand {
-  if (args[0] === "--help" || args[0] === "-h") {
-    return { taskId: "help", input: {} };
+  const helpTopic = normalizeHelpTopic(args);
+  if (helpTopic !== undefined) {
+    return { taskId: "help", input: { topic: helpTopic } };
   }
   if (args.length === 0 || args[0]?.startsWith("-")) {
     const input = parseFlagInput(args, defaultDevUpInput);
@@ -445,8 +453,8 @@ export function parseCliArgs(args: string[]): ParsedCliCommand {
   throw new Error(`Unknown command: ${args.join(" ")}`);
 }
 
-function helpText(): string {
-  return [
+const helpTopics: Record<string, string[]> = {
+  "": [
     "Usage: kd <command>",
     "",
     "Commands:",
@@ -485,15 +493,402 @@ function helpText(): string {
     "  test cloud-prod-smoke",
     "  test lan-lab --hosts <path>",
     "  test remote-e2e [--dev|--staging]",
-    "  doctor [--remote] [--staging]"
-  ].join("\n");
+    "  doctor [--remote] [--staging]",
+    "",
+    "Run 'kd <command> --help' for command-specific help."
+  ],
+  dev: [
+    "Usage: kd dev <command>",
+    "",
+    "Commands:",
+    "  dev up [options]",
+    "  dev down [--kill-daemon]",
+    "  dev restart [desktop|mobile|backend] [options]",
+    "  dev status",
+    "  dev log [window]",
+    "  dev seed [options]"
+  ],
+  "dev up": [
+    "Usage: kd dev up [--mobile] [--emulators] [--seed] [--attach] [--db <path-or-name>] [--delete-db] [--firebase-env-from <task-or-path>]",
+    "Usage: kd dev up --remote",
+    "",
+    "Start the Kanna dev environment.",
+    "",
+    "Options:",
+    "  --mobile, -m                       Start desktop and mobile.",
+    "  --emulators, -e                    Start Firebase emulators.",
+    "  --remote                           Start a remote-poking dev stack.",
+    "  --seed, -s                         Seed the dev database after startup.",
+    "  --attach, -a                       Attach to the tmux session.",
+    "  --db <path-or-name>                Override the dev database.",
+    "  --daemon-dir <dir>                 Override the daemon directory.",
+    "  --transfer-root <dir>              Override the task transfer root.",
+    "  --delete-db                        Reset the dev database before startup.",
+    "  --firebase-env-from <task-or-path> Borrow Firebase emulator ports from another env."
+  ],
+  "dev down": [
+    "Usage: kd dev down [--kill-daemon]",
+    "",
+    "Stop the Kanna dev environment.",
+    "",
+    "Options:",
+    "  --kill-daemon, -k  Kill workspace daemons after stopping tmux."
+  ],
+  "dev restart": [
+    "Usage: kd dev restart [desktop|mobile|backend] [--staging|--production] [--with-credentials] [--mobile] [--emulators] [--seed] [--attach] [--delete-db]",
+    "",
+    "Restart the Kanna dev environment or one tmux component window.",
+    "",
+    "Components:",
+    "  desktop",
+    "  mobile",
+    "  backend",
+    "",
+    "Options:",
+    "  --staging              Restart against staging settings.",
+    "  --production           Restart against production settings.",
+    "  --with-credentials     Use local staging desktop credentials.",
+    "  --mobile, -m           Include mobile when restarting the full stack.",
+    "  --emulators, -e        Include Firebase emulators.",
+    "  --seed, -s             Seed the dev database.",
+    "  --attach, -a           Attach to the tmux session.",
+    "  --delete-db            Reset the dev database before startup.",
+    "  --kill-daemon, -k      Kill workspace daemons while restarting."
+  ],
+  "dev status": [
+    "Usage: kd dev status",
+    "",
+    "Show Kanna dev environment status."
+  ],
+  "dev log": [
+    "Usage: kd dev log [window]",
+    "",
+    "Show recent tmux output for a Kanna dev window."
+  ],
+  "dev seed": [
+    "Usage: kd dev seed [--db <path-or-name>] [--delete-db]",
+    "",
+    "Seed the Kanna dev database.",
+    "",
+    "Options:",
+    "  --db <path-or-name>  Override the dev database.",
+    "  --delete-db          Reset the dev database before seeding."
+  ],
+  daemon: [
+    "Usage: kd daemon <command>",
+    "",
+    "Commands:",
+    "  daemon kill"
+  ],
+  "daemon kill": [
+    "Usage: kd daemon kill",
+    "",
+    "Kill Kanna daemon processes for this workspace."
+  ],
+  mobile: [
+    "Usage: kd mobile <command>",
+    "",
+    "Commands:",
+    "  mobile up [--production|--staging] [--with-credentials]",
+    "  mobile run --device [--production|--staging] [--with-credentials]",
+    "  mobile doctor --device",
+    "  mobile ota <command>",
+    "  mobile test",
+    "  mobile device-smoke"
+  ],
+  "mobile up": [
+    "Usage: kd mobile up [--production|--staging] [--with-credentials]",
+    "",
+    "Start Kanna mobile against production or staging cloud.",
+    "",
+    "Options:",
+    "  --production        Use the installed production desktop server.",
+    "  --staging           Use staging cloud services.",
+    "  --with-credentials  Use local staging desktop credentials."
+  ],
+  "mobile run": [
+    "Usage: kd mobile run --device [--production|--staging] [--with-credentials]",
+    "",
+    "Build, install, and launch Kanna mobile on a physical iOS device.",
+    "",
+    "Options:",
+    "  --device            Required. Target a physical iOS device.",
+    "  --production        Launch against production settings.",
+    "  --staging           Launch against staging settings.",
+    "  --with-credentials  Use local staging desktop credentials."
+  ],
+  "mobile doctor": [
+    "Usage: kd mobile doctor --device [--production|--staging]",
+    "",
+    "Check physical iOS device mobile development readiness."
+  ],
+  "mobile ota": [
+    "Usage: kd mobile ota <command>",
+    "",
+    "Commands:",
+    "  mobile ota publish --staging|--production [--dry-run] [--rollback-to <updateId>]",
+    "  mobile ota status --staging|--production",
+    "  mobile ota doctor|preflight --staging|--production",
+    "  mobile ota provision-secret --staging|--production --key-path <path>"
+  ],
+  "mobile ota publish": [
+    "Usage: kd mobile ota publish --staging|--production [--dry-run] [--rollback-to <updateId>]",
+    "",
+    "Publish or roll back a Kanna mobile OTA update."
+  ],
+  "mobile ota status": [
+    "Usage: kd mobile ota status --staging|--production",
+    "",
+    "Show the current Kanna mobile OTA channel pointer."
+  ],
+  "mobile ota doctor": [
+    "Usage: kd mobile ota doctor --staging|--production",
+    "",
+    "Run read-only preflight checks for Kanna mobile OTA cloud and relay wiring."
+  ],
+  "mobile ota preflight": [
+    "Usage: kd mobile ota preflight --staging|--production",
+    "",
+    "Alias for 'kd mobile ota doctor'."
+  ],
+  "mobile ota provision-secret": [
+    "Usage: kd mobile ota provision-secret --staging|--production --key-path <path>",
+    "",
+    "Provision the Kanna mobile OTA private key into cloud Secret Manager."
+  ],
+  "mobile test": [
+    "Usage: kd mobile test",
+    "",
+    "Run Kanna mobile tests."
+  ],
+  "mobile device-smoke": [
+    "Usage: kd mobile device-smoke",
+    "",
+    "Run Kanna mobile physical-device smoke tests."
+  ],
+  emulators: [
+    "Usage: kd emulators <command>",
+    "",
+    "Commands:",
+    "  emulators up",
+    "  emulators down",
+    "  emulators status",
+    "  emulators exec -- <command...>"
+  ],
+  "emulators up": [
+    "Usage: kd emulators up",
+    "",
+    "Start Firebase emulators for Kanna."
+  ],
+  "emulators down": [
+    "Usage: kd emulators down",
+    "",
+    "Stop Firebase emulators for Kanna."
+  ],
+  "emulators status": [
+    "Usage: kd emulators status",
+    "",
+    "Show Firebase emulator status for Kanna."
+  ],
+  "emulators exec": [
+    "Usage: kd emulators exec -- <command...>",
+    "",
+    "Run a command with Firebase emulators."
+  ],
+  env: [
+    "Usage: kd env <command>",
+    "",
+    "Commands:",
+    "  env print",
+    "  env sync"
+  ],
+  "env print": [
+    "Usage: kd env print",
+    "",
+    "Print resolved Kanna development environment."
+  ],
+  "env sync": [
+    "Usage: kd env sync",
+    "",
+    "Sync Kanna development environment files."
+  ],
+  setup: [
+    "Usage: kd setup [--check]",
+    "",
+    "Check Kanna prerequisites and install workspace dependencies.",
+    "",
+    "Options:",
+    "  --check  Check prerequisites without installing dependencies."
+  ],
+  clean: [
+    "Usage: kd clean [--all] [--dry] [--shared-rust-build]",
+    "",
+    "Clean Kanna build artifacts."
+  ],
+  build: [
+    "Usage: kd build <command>",
+    "",
+    "Commands:",
+    "  build desktop",
+    "  build sidecars"
+  ],
+  "build desktop": [
+    "Usage: kd build desktop",
+    "",
+    "Build the Kanna desktop app through the workspace build graph."
+  ],
+  "build sidecars": [
+    "Usage: kd build sidecars",
+    "",
+    "Build Kanna desktop sidecars."
+  ],
+  release: [
+    "Usage: kd release <command>",
+    "",
+    "Commands:",
+    "  release ship [--staging|--production] [--dry-run] [--release] [--major|--minor|--patch] [--arm64|--x86_64]"
+  ],
+  "release ship": [
+    "Usage: kd release ship [--staging|--production] [--dry-run] [--release] [--major|--minor|--patch] [--arm64|--x86_64]",
+    "",
+    "Build, sign, notarize, and optionally publish a Kanna release."
+  ],
+  cloud: [
+    "Usage: kd cloud <command>",
+    "",
+    "Commands:",
+    "  cloud deploy --staging|--production [--relay]",
+    "  cloud relay-provision --staging|--production"
+  ],
+  "cloud deploy": [
+    "Usage: kd cloud deploy --staging|--production [--relay]",
+    "",
+    "Deploy Kanna Firebase cloud services."
+  ],
+  "cloud relay-provision": [
+    "Usage: kd cloud relay-provision --staging|--production",
+    "",
+    "Build the relay VM provisioning command plan."
+  ],
+  pages: [
+    "Usage: kd pages <command>",
+    "",
+    "Commands:",
+    "  pages build-schema --out-dir <dir>"
+  ],
+  "pages build-schema": [
+    "Usage: kd pages build-schema --out-dir <dir>",
+    "",
+    "Build the static config-schema Pages artifact."
+  ],
+  test: [
+    "Usage: kd test <command>",
+    "",
+    "Commands:",
+    "  test app-update-bundle",
+    "  test cloud-emulator",
+    "  test cloud-staging",
+    "  test cloud-prod-smoke",
+    "  test lan-lab --hosts <path>",
+    "  test remote-e2e [--dev|--staging]"
+  ],
+  "test app-update-bundle": [
+    "Usage: kd test app-update-bundle",
+    "",
+    "Run the full-bundle app update E2E test."
+  ],
+  "test cloud-emulator": [
+    "Usage: kd test cloud-emulator",
+    "",
+    "Run cloud sync E2E against Firebase emulators."
+  ],
+  "test cloud-staging": [
+    "Usage: kd test cloud-staging",
+    "",
+    "Run cloud sync E2E against staging cloud services."
+  ],
+  "test cloud-prod-smoke": [
+    "Usage: kd test cloud-prod-smoke",
+    "",
+    "Run minimal cloud smoke against production cloud services."
+  ],
+  "test lan-lab": [
+    "Usage: kd test lan-lab --hosts <path>",
+    "",
+    "Run LAN sync tests against physical Macs over SSH."
+  ],
+  "test remote-e2e": [
+    "Usage: kd test remote-e2e [--dev|--staging]",
+    "",
+    "Run remote task interaction E2E tests."
+  ],
+  doctor: [
+    "Usage: kd doctor [--remote] [--staging]",
+    "",
+    "Check Kanna development prerequisites.",
+    "",
+    "Options:",
+    "  --remote   Check remote task E2E prerequisites.",
+    "  --staging  Use staging for remote checks."
+  ],
+  start: [
+    "Usage: kd start [dev-up-options]",
+    "",
+    "Legacy alias for 'kd dev up'."
+  ],
+  restart: [
+    "Usage: kd restart [desktop|mobile|backend] [dev-restart-options]",
+    "",
+    "Legacy alias for 'kd dev restart'."
+  ],
+  stop: [
+    "Usage: kd stop [--kill-daemon]",
+    "",
+    "Legacy alias for 'kd dev down'."
+  ],
+  "kill-daemon": [
+    "Usage: kd kill-daemon",
+    "",
+    "Legacy alias for 'kd daemon kill'."
+  ],
+  log: [
+    "Usage: kd log [window]",
+    "",
+    "Legacy alias for 'kd dev log'."
+  ],
+  seed: [
+    "Usage: kd seed [dev-seed-options]",
+    "",
+    "Legacy alias for 'kd dev seed'."
+  ]
+};
+
+function helpText(topic = ""): string {
+  const parts = topic.split(" ").filter((part) => part && !part.startsWith("-"));
+  let resolvedTopic = parts.join(" ");
+  while (resolvedTopic && !helpTopics[resolvedTopic]) {
+    parts.pop();
+    resolvedTopic = parts.join(" ");
+  }
+  if (topic.trim() && parts.length === 0) {
+    const hasCommandToken = topic.split(" ").some((part) => part && !part.startsWith("-"));
+    if (hasCommandToken) {
+      throw new Error(`Unknown help topic: ${topic}`);
+    }
+  }
+  const lines = helpTopics[resolvedTopic];
+  if (!lines) {
+    throw new Error(`Unknown help topic: ${topic}`);
+  }
+  return lines.join("\n");
 }
 
 export async function runCli(args: string[], env = process.env): Promise<number> {
   try {
     const parsed = parseCliArgs(args);
     if (parsed.taskId === "help") {
-      console.log(helpText());
+      const topic = typeof parsed.input.topic === "string" ? parsed.input.topic : "";
+      console.log(helpText(topic));
       return 0;
     }
     const task = getTaskDefinition(parsed.taskId);
