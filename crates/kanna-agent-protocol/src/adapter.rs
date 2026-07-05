@@ -111,6 +111,13 @@ pub trait ProviderAdapter: Send {
     ) -> Option<String>;
 }
 
+pub(crate) fn prompt_with_system_prompt(system_prompt: Option<&str>, prompt: &str) -> String {
+    match system_prompt.filter(|value| !value.trim().is_empty()) {
+        Some(system_prompt) => format!("{system_prompt}\n\n{prompt}"),
+        None => prompt.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
