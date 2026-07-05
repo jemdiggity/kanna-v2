@@ -1798,6 +1798,25 @@ describe("App", () => {
     expect(store.selectItem).toHaveBeenCalledWith("read-newest");
   });
 
+  it("skips pinned tasks when navigating to the oldest and newest read task", async () => {
+    store.sortedItemsForCurrentRepo = [
+      { id: "pinned-oldest", activity: "idle", created_at: "2026-03-31T00:00:00.000Z", tags: "[]", pinned: 1 },
+      { id: "read-oldest", activity: "idle", created_at: "2026-03-31T01:00:00.000Z", tags: "[]", pinned: 0 },
+      { id: "read-newest", activity: "idle", created_at: "2026-03-31T03:00:00.000Z", tags: "[]", pinned: 0 },
+      { id: "pinned-newest", activity: "idle", created_at: "2026-03-31T04:00:00.000Z", tags: "[]", pinned: 1 },
+    ];
+
+    await mountApp(SidebarWithRepoStub);
+    expect(capturedKeyboardActions).not.toBeNull();
+
+    capturedKeyboardActions?.goToOldestRead();
+    expect(store.selectItem).toHaveBeenCalledWith("read-oldest");
+
+    store.selectItem.mockClear();
+    capturedKeyboardActions?.goToNewestRead();
+    expect(store.selectItem).toHaveBeenCalledWith("read-newest");
+  });
+
   it("navigates to the absolute oldest and newest read task", async () => {
     store.currentItem = { id: "current", created_at: "2026-03-31T03:00:00.000Z" };
     store.sortedItemsForCurrentRepo = [
@@ -2173,6 +2192,25 @@ describe("App", () => {
     expect(store.selectItem).toHaveBeenCalledWith("unread-newest");
   });
 
+  it("skips pinned tasks when navigating to the oldest and newest unread task", async () => {
+    store.sortedItemsForCurrentRepo = [
+      { id: "pinned-oldest", activity: "unread", created_at: "2026-03-31T00:00:00.000Z", tags: "[]", pinned: 1 },
+      { id: "unread-oldest", activity: "unread", created_at: "2026-03-31T01:00:00.000Z", tags: "[]", pinned: 0 },
+      { id: "unread-newest", activity: "unread", created_at: "2026-03-31T03:00:00.000Z", tags: "[]", pinned: 0 },
+      { id: "pinned-newest", activity: "unread", created_at: "2026-03-31T04:00:00.000Z", tags: "[]", pinned: 1 },
+    ];
+
+    await mountApp(SidebarWithRepoStub);
+    expect(capturedKeyboardActions).not.toBeNull();
+
+    capturedKeyboardActions?.goToOldestUnread();
+    expect(store.selectItem).toHaveBeenCalledWith("unread-oldest");
+
+    store.selectItem.mockClear();
+    capturedKeyboardActions?.goToNewestUnread();
+    expect(store.selectItem).toHaveBeenCalledWith("unread-newest");
+  });
+
   it("falls back to absolute read tasks when unread shortcut navigation has no unread task", async () => {
     store.currentItem = { id: "current", created_at: "2026-03-31T02:30:00.000Z" };
     store.sortedItemsForCurrentRepo = [
@@ -2187,6 +2225,25 @@ describe("App", () => {
     store.taskBlockers = [
       { blocked_item_id: "blocked-oldest", blocker_item_id: "blocker" },
       { blocked_item_id: "blocked-newest", blocker_item_id: "blocker" },
+    ];
+
+    await mountApp(SidebarWithRepoStub);
+    expect(capturedKeyboardActions).not.toBeNull();
+
+    capturedKeyboardActions?.goToOldestUnread();
+    expect(store.selectItem).toHaveBeenCalledWith("read-oldest");
+
+    store.selectItem.mockClear();
+    capturedKeyboardActions?.goToNewestUnread();
+    expect(store.selectItem).toHaveBeenCalledWith("read-newest");
+  });
+
+  it("skips pinned read tasks when unread shortcut navigation falls back to read tasks", async () => {
+    store.sortedItemsForCurrentRepo = [
+      { id: "pinned-oldest", activity: "idle", created_at: "2026-03-31T00:00:00.000Z", tags: "[]", pinned: 1 },
+      { id: "read-oldest", activity: "idle", created_at: "2026-03-31T01:00:00.000Z", tags: "[]", pinned: 0 },
+      { id: "read-newest", activity: "idle", created_at: "2026-03-31T03:00:00.000Z", tags: "[]", pinned: 0 },
+      { id: "pinned-newest", activity: "idle", created_at: "2026-03-31T04:00:00.000Z", tags: "[]", pinned: 1 },
     ];
 
     await mountApp(SidebarWithRepoStub);
