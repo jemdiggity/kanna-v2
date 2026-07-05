@@ -93,8 +93,8 @@ fn prepare_merge_agent_creates_in_progress_task() {
     let _ = std::fs::remove_dir_all(&repo_root);
 }
 
-#[test]
-fn rerun_stage_uses_compiled_post_action_stage_prompt_and_stage_setup() {
+#[tokio::test]
+async fn rerun_stage_uses_compiled_post_action_stage_prompt_and_stage_setup() {
     let repo_root = init_git_repo("rerun-post-action");
     std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
     std::fs::create_dir_all(repo_root.join(".kanna/agents/implement")).unwrap();
@@ -182,7 +182,7 @@ fn rerun_stage_uses_compiled_post_action_stage_prompt_and_stage_setup() {
     let prepared = prepare_rerun_stage_for_api(&db, &config, "task-1").unwrap();
     assert_eq!(prepared.task_id, "task-1");
     assert_eq!(prepared.cwd, worktree.to_string_lossy());
-    match prepared.session {
+    match &prepared.session {
         PreparedSessionSpawn::Pty { args, .. } => {
             let command = args.join(" ");
             assert!(command.contains("echo setup-rerun"));
@@ -194,6 +194,33 @@ fn rerun_stage_uses_compiled_post_action_stage_prompt_and_stage_setup() {
         }
         PreparedSessionSpawn::Agent { .. } => panic!("expected pty rerun"),
     }
+    let fake_daemon = spawn_fake_daemon_fork_transition(config.daemon_dir.clone(), 1).await;
+    let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
+    rerun_prepared_stage_for_api(
+        &config.db_path,
+        &mut daemon,
+        &crate::session_replacements::SessionReplacements::default(),
+        prepared,
+    )
+    .await
+    .unwrap();
+    let commands = fake_daemon.await.unwrap();
+    assert!(matches!(
+        commands.first(),
+        Some(kanna_daemon::protocol::Command::Kill { session_id }) if session_id == "task-1"
+    ));
+    assert!(matches!(
+        commands.get(1),
+        Some(kanna_daemon::protocol::Command::Spawn { session_id, .. }) if session_id == "task-1"
+    ));
+    assert_eq!(
+        db.get_pipeline_item("task-1")
+            .unwrap()
+            .unwrap()
+            .activity
+            .as_deref(),
+        Some("working")
+    );
 
     let _ = std::fs::remove_dir_all(&repo_root);
 }
@@ -852,6 +879,14 @@ async fn prepare_advance_stage_forks_workspace_for_next_run_in_same_task() {
     assert_eq!(updated.stage.as_deref(), Some("review"));
     assert_eq!(updated.branch.as_deref(), Some(fork_branch.as_str()));
     assert_eq!(updated.closed_at, None);
+    assert_eq!(
+        db.get_pipeline_item("task-1")
+            .unwrap()
+            .unwrap()
+            .activity
+            .as_deref(),
+        Some("working")
+    );
     assert_eq!(db.list_pipeline_items("repo-1").unwrap().len(), 1);
     assert_eq!(
         db.get_task_worktree_path("task-1").unwrap().as_deref(),

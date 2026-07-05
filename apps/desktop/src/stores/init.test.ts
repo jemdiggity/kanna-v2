@@ -14,6 +14,8 @@ import { createStoreContext, createStoreState } from "./state";
 import { createInitApi } from "./init";
 import { applySnapshotSettingsToState } from "./snapshotSettings";
 
+const setTitleMock = vi.hoisted(() => vi.fn(async () => {}));
+
 const mockState = vi.hoisted(() => {
   const now = "2026-04-23T00:00:00.000Z";
 
@@ -96,6 +98,7 @@ const mockState = vi.hoisted(() => {
     if (command === "list_sessions") return [];
     if (command === "kill_session") return undefined;
     if (command === "read_env_var") return "";
+    if (command === "get_app_build_info") return { version: "", branch: "", commitHash: "", worktree: "" };
     if (command === "git_app_info") return { version: "" };
     throw new Error(`unexpected invoke: ${command}`);
   });
@@ -108,6 +111,7 @@ const mockState = vi.hoisted(() => {
       if (command === "list_sessions") return [];
       if (command === "kill_session") return undefined;
       if (command === "read_env_var") return "";
+      if (command === "get_app_build_info") return { version: "", branch: "", commitHash: "", worktree: "" };
       if (command === "git_app_info") return { version: "" };
       throw new Error(`unexpected invoke: ${command}`);
     });
@@ -129,6 +133,7 @@ const mockState = vi.hoisted(() => {
     invokeMock.mockClear();
     installDefaultInvokeMock();
     setSettingMock.mockClear();
+    setTitleMock.mockClear();
     tauri = false;
   }
 
@@ -196,6 +201,12 @@ vi.mock("../listen", () => ({
   listen: mockState.listenMock,
 }));
 
+vi.mock("@tauri-apps/api/window", () => ({
+  getCurrentWindow: () => ({
+    setTitle: setTitleMock,
+  }),
+}));
+
 vi.mock("../composables/desktopStreamClient", () => ({
   getSharedStreamClient: mockState.getSharedStreamClientMock,
 }));
@@ -256,6 +267,57 @@ describe("createInitApi", () => {
     mockState.reset();
     vi.mocked(getSetting).mockResolvedValue(null);
     vi.mocked(setSetting).mockClear();
+  });
+
+  it("sets the native window title from compiled build info in worktree builds", async () => {
+    mockState.tauri = true;
+    mockState.invokeMock.mockImplementation(async (command: string) => {
+      if (command === "file_exists") return true;
+      if (command === "list_sessions") return [];
+      if (command === "kill_session") return undefined;
+      if (command === "read_env_var") return "";
+      if (command === "git_app_info") return { version: "0.0.65" };
+      if (command === "get_app_build_info") {
+        return {
+          version: "0.0.65",
+          branch: "task-37ec6039-3",
+          commit_hash: "abc1234",
+          worktree: "task-37ec6039-3",
+        };
+      }
+      throw new Error(`unexpected invoke: ${command}`);
+    });
+
+    const state = createStoreState();
+    const services = {
+      loadInitialData: createSnapshotLoader(state),
+      prewarmWorktreeShellSession: vi.fn(async () => {}),
+      spawnShellSession: vi.fn(async () => {}),
+    };
+    const toast = {
+      toasts: ref([]),
+      dismiss: vi.fn(),
+      info: vi.fn(),
+      warning: vi.fn(),
+      error: vi.fn(),
+    };
+    const context = createStoreContext(state, toast, services);
+    const ports = {
+      closeTaskAndReleasePorts: vi.fn(async () => {}),
+    } as unknown as import("./ports").PortsStore;
+    const initApi = createInitApi(context, ports, {
+      checkUnblocked: vi.fn(async () => {}),
+      handleAgentFinished: vi.fn(),
+      restoreUnblockedTask: vi.fn(async () => {}),
+    });
+
+    await initApi.init(createDb());
+    await flushAsync();
+
+    expect(mockState.invokeMock).toHaveBeenCalledWith("get_app_build_info");
+    expect(setTitleMock).toHaveBeenCalledWith(
+      "Kanna — task-37ec6039-3 · task-37ec6039-3 (0.0.65 @ abc1234)",
+    );
   });
 
   it("retires handed-off worktree shells once when the shell env generation changes", async () => {

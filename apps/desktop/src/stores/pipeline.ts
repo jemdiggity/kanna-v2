@@ -13,6 +13,8 @@ import { debugLog } from "../utils/debugLog";
 
 const LOCAL_SERVER_ACTION_TIMEOUT_MS = 30_000;
 const LOCAL_SERVER_ACTION_RETRY_DELAY_MS = 250;
+const STAGE_ADVANCE_RECONCILE_TIMEOUT_MS = 15_000;
+const STAGE_ADVANCE_RECONCILE_RETRY_MS = 100;
 
 export interface PipelineApi {
   loadPipeline: (repoPath: string, pipelineName: string) => Promise<PipelineDefinition>;
@@ -149,9 +151,11 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
                     ? {
                         active_post_action: candidate.active_post_action ?? pendingPostName,
                         has_running_post: 1,
+                        activity: "working" as const,
                       }
                     : {
                         stage: nextStageName ?? candidate.stage,
+                        activity: "working" as const,
                       }),
                 }
               : candidate,
@@ -161,6 +165,44 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
       run,
       reconcile: requireService(context.services.reloadSnapshot, "reloadSnapshot"),
     });
+  }
+
+  function stageAdvanceSnapshotCaughtUp(
+    taskId: string,
+    nextStageName: string | null,
+    pendingPostName: string | null,
+  ): boolean {
+    const item = context.state.items.value.find((candidate) => candidate.id === taskId);
+    if (!item || item.closed_at != null) return true;
+    if (pendingPostName) {
+      return Boolean(item.has_running_post) || item.active_post_action === pendingPostName;
+    }
+    if (nextStageName) {
+      return item.stage === nextStageName;
+    }
+    return true;
+  }
+
+  async function waitForStageAdvanceSnapshot(
+    taskId: string,
+    nextStageName: string | null,
+    pendingPostName: string | null,
+  ): Promise<void> {
+    const reloadSnapshot = requireService(context.services.reloadSnapshot, "reloadSnapshot");
+    const deadline = Date.now() + STAGE_ADVANCE_RECONCILE_TIMEOUT_MS;
+    while (true) {
+      await reloadSnapshot();
+      if (stageAdvanceSnapshotCaughtUp(taskId, nextStageName, pendingPostName)) return;
+      if (Date.now() >= deadline) {
+        console.warn("[pipeline:advanceStage] snapshot did not catch up before timeout", {
+          taskId,
+          nextStageName,
+          pendingPostName,
+        });
+        return;
+      }
+      await sleep(STAGE_ADVANCE_RECONCILE_RETRY_MS);
+    }
   }
 
   async function loadPipeline(repoPath: string, pipelineName: string): Promise<PipelineDefinition> {
@@ -268,7 +310,7 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
           throw new Error(message);
         }
         const result = await response.json() as TaskActionResponse;
-        await requireService(context.services.reloadSnapshot, "reloadSnapshot")();
+        await waitForStageAdvanceSnapshot(result.taskId, nextStageName, pendingPostName);
 
         // Durable tasks: an in-pipeline advance transitions the SAME task in
         // place, so the user's selection stays put. Only when the advance

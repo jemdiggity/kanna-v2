@@ -21,19 +21,17 @@ pub(super) async fn wait_for_task_stage(
     );
 }
 
-async fn recv_task_state_change(
+async fn recv_state_change_scope(
     rx: &mut tokio::sync::broadcast::Receiver<kanna_agent_protocol::ServerFrame>,
-) {
+) -> kanna_agent_protocol::StateChangeScope {
     let frame = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
         .await
-        .expect("timed out waiting for task state change")
+        .expect("timed out waiting for state change")
         .expect("state change channel closed");
-    assert_eq!(
-        frame,
-        kanna_agent_protocol::ServerFrame::StateChanged {
-            scope: kanna_agent_protocol::StateChangeScope::Tasks,
-        }
-    );
+    let kanna_agent_protocol::ServerFrame::StateChanged { scope } = frame else {
+        panic!("expected state change frame, got {frame:?}");
+    };
+    scope
 }
 
 async fn wait_for_task_closed(db: &Db, task_id: &str) -> crate::db::PipelineItem {
@@ -1134,8 +1132,20 @@ async fn complete_pr_stage_with_pr_url_starts_dormant_dependent_optimistically()
         1,
         "pr-stage completion should start the dependent once"
     );
-    recv_task_state_change(&mut state_changes).await;
-    recv_task_state_change(&mut state_changes).await;
+    let state_change_scopes = [
+        recv_state_change_scope(&mut state_changes).await,
+        recv_state_change_scope(&mut state_changes).await,
+        recv_state_change_scope(&mut state_changes).await,
+    ];
+    assert_eq!(
+        state_change_scopes,
+        [
+            kanna_agent_protocol::StateChangeScope::Tasks,
+            kanna_agent_protocol::StateChangeScope::Tasks,
+            kanna_agent_protocol::StateChangeScope::Blockers,
+        ],
+        "complete-stage should notify the task update, then the optimistic dependent-start task/blocker refreshes",
+    );
 
     let db = Db::open(&config.db_path).unwrap();
     // Optimistic: the blocker stays open at pr awaiting human merge...
