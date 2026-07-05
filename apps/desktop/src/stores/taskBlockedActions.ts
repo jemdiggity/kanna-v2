@@ -3,6 +3,7 @@ import {
   getRepo,
   hasCircularDependency,
   insertTaskBlocker,
+  isBlockerResolved,
   listBlockedByItem,
   listBlockersForItem,
   removeAllBlockersForItem,
@@ -97,7 +98,7 @@ export function createTaskBlockedActions(
       if (blocked.closed_at !== null) continue;
       const blockers = await listBlockersForItem(context.requireDb(), blocked.id);
       if (blockers.length === 0) continue;
-      const allClear = blockers.every((blocker) => blocker.closed_at !== null);
+      const allClear = blockers.every(isBlockerResolved);
       if (allClear) {
         await restoreUnblockedTask(blocked, blockers);
       }

@@ -1,4 +1,4 @@
-import type { PipelineItem, TaskBlocker } from "@kanna/db";
+import { isBlockerResolved, type PipelineItem, type TaskBlocker } from "@kanna/db";
 import { taskSearchMatch } from "./taskSearch";
 
 export interface SidebarItemGroup {
@@ -49,8 +49,24 @@ function normalizedSearchQuery(query: string | undefined): string {
   return query?.trim() ?? "";
 }
 
+/**
+ * A task shows as blocked only while at least one of its blockers is
+ * unresolved. Blockers resolve optimistically (closed, or parked at `pr`
+ * with a PR created — see isBlockerResolved), so a dependent that started
+ * stacking on a PR'd blocker leaves the blocked section even though its
+ * task_blocker rows persist until the blocker closes. A blocker row whose
+ * task is not in `items` cannot be judged and counts as unresolved.
+ */
 function blockedItemIds(options: SidebarOrderingOptions): Set<string> {
-  return new Set((options.blockers ?? []).map((blocker) => blocker.blocked_item_id));
+  const itemsById = new Map(options.items.map((item) => [item.id, item]));
+  const blocked = new Set<string>();
+  for (const blocker of options.blockers ?? []) {
+    const blockerItem = itemsById.get(blocker.blocker_item_id);
+    if (!blockerItem || !isBlockerResolved(blockerItem)) {
+      blocked.add(blocker.blocked_item_id);
+    }
+  }
+  return blocked;
 }
 
 /** Ids of visible (non-hidden) tasks in the repo — used to resolve subtask parents. */

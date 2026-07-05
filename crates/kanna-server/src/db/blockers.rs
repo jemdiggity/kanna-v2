@@ -32,16 +32,22 @@ impl Db {
         rows.collect()
     }
 
-    /// Count blockers that are still unresolved. A blocker resolves only when
-    /// it is closed; dependents started at that point inherit same-repo
-    /// blocker branches before falling back to their normal base.
+    /// Count blockers that are still unresolved. A blocker resolves
+    /// optimistically: either it closed, or it is parked at the `pr` stage
+    /// with a PR created (work committed, reviewed, rebased, renamed, and
+    /// pushed — stable enough for dependents to stack on without waiting
+    /// for the human review/merge loop). Dependents started at that point
+    /// inherit same-repo blocker branches before falling back to their
+    /// normal base. Keep this predicate in sync with `isBlockerResolved`
+    /// in packages/db/src/queries.ts.
     pub fn count_open_task_blockers(&self, blocked_item_id: &str) -> Result<i64, rusqlite::Error> {
         self.conn.query_row(
             "SELECT COUNT(*)
              FROM task_blocker blocker
              JOIN pipeline_item blocker_item ON blocker_item.id = blocker.blocker_item_id
              WHERE blocker.blocked_item_id = ?
-               AND blocker_item.closed_at IS NULL",
+               AND blocker_item.closed_at IS NULL
+               AND NOT (blocker_item.stage = 'pr' AND blocker_item.pr_url IS NOT NULL)",
             [blocked_item_id],
             |row| row.get(0),
         )

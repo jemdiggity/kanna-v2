@@ -18,6 +18,7 @@ import {
   insertPipelineItem,
   insertTaskBlocker,
   hasCircularDependency,
+  isBlockerResolved,
   updatePipelineItemStage,
   markPipelineItemTearingDown,
   updatePipelineItemPR,
@@ -1442,5 +1443,37 @@ describe("insertOperatorEvent", () => {
     expect(db.tables.operator_event).toHaveLength(1);
     expect(db.tables.operator_event[0].pipeline_item_id).toBeNull();
     expect(db.tables.operator_event[0].repo_id).toBeNull();
+  });
+});
+
+describe("isBlockerResolved", () => {
+  const base = { closed_at: null, stage: "in progress", pr_url: null };
+
+  it("is unresolved while open before the pr stage", () => {
+    expect(isBlockerResolved(base)).toBe(false);
+  });
+
+  it("is unresolved while parked at pr without a PR", () => {
+    expect(isBlockerResolved({ ...base, stage: "pr" })).toBe(false);
+  });
+
+  it("resolves optimistically once parked at pr with a PR created", () => {
+    expect(isBlockerResolved({
+      ...base,
+      stage: "pr",
+      pr_url: "https://github.com/acme/repo/pull/7",
+    })).toBe(true);
+  });
+
+  it("does not resolve from a stale pr_url after revision moves the stage back", () => {
+    expect(isBlockerResolved({
+      ...base,
+      stage: "in progress",
+      pr_url: "https://github.com/acme/repo/pull/7",
+    })).toBe(false);
+  });
+
+  it("resolves when closed regardless of stage", () => {
+    expect(isBlockerResolved({ ...base, closed_at: "2026-07-06T00:00:00.000Z" })).toBe(true);
   });
 });
