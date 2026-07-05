@@ -8,7 +8,7 @@ use super::definitions::{
 use super::prepare_stage_run_spawn;
 use super::prompt::build_target_stage_prompt;
 use super::types::{PreparedPostDispatch, PreparedStageRunSpawn, PreparedStageTransition};
-use super::worktree::generate_task_id as generate_fork_id;
+use super::worktree::next_fork_branch;
 use super::worktree::resolve_current_source_worktree_branch;
 use crate::db::Repo;
 
@@ -274,13 +274,16 @@ fn prepare_stage_run_for_target_returning_prompt(
     let task_prompt = prompt_override
         .or(source_task.prompt.as_deref())
         .unwrap_or("");
-    // Stage transitions fork a fresh workspace: a new randomly-named branch
-    // and worktree from the task's committed tip (N worktrees, N branches,
-    // one PR — the PR agent renames the final branch into something
-    // meaningful). Posts run inside the stage, so their fallback spawn keeps
-    // the stage's workspace.
+    // Stage transitions fork a fresh workspace from the task's committed
+    // tip, named `task-<taskid>-<n>` — the durable task id plus a workspace
+    // counter (N worktrees, N branches, one PR — the PR agent renames the
+    // final branch into something meaningful). Posts run inside the stage,
+    // so their fallback spawn keeps the stage's workspace.
     let fork_branch = if run_kind == "main" {
-        Some(format!("task-{}", generate_fork_id()?))
+        Some(next_fork_branch(
+            &context.repo.path,
+            context.source_task_id,
+        )?)
     } else {
         None
     };

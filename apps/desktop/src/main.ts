@@ -3,6 +3,7 @@ import { createPinia } from "pinia";
 import i18n from "./i18n";
 import "./theme/tokens.css";
 import { isTauri } from "./tauri-mock";
+import { invoke } from "./invoke";
 import { loadDatabase, runMigrations } from "./stores/db";
 import { shouldMountBaseBranchDropdownPreview } from "./previewMode";
 import { formatLogArgument } from "./logForwarding";
@@ -152,6 +153,9 @@ if (isTauri) {
 try {
   const { db, dbName } = await loadDatabase();
   await runMigrations(db);
+  if (isTauri) {
+    await invoke("wait_for_mobile_server_ready");
+  }
   const windowBootstrap = await resolveWindowBootstrap(
     db,
     parseWindowBootstrap(window.location.search),

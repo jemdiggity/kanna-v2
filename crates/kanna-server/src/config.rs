@@ -16,6 +16,8 @@ pub struct Config {
     pub desktop_secret: Option<String>,
     pub desktop_name: String,
     pub server_version: Option<String>,
+    pub local_host: String,
+    pub local_port: u16,
     pub lan_host: String,
     pub lan_port: u16,
     pub pairing_store_path: String,
@@ -35,6 +37,8 @@ struct RawConfig {
     desktop_secret: Option<String>,
     desktop_name: Option<String>,
     server_version: Option<String>,
+    local_host: Option<String>,
+    local_port: Option<u16>,
     lan_host: Option<String>,
     lan_port: Option<u16>,
     pairing_store_path: Option<String>,
@@ -56,6 +60,10 @@ fn default_desktop_name() -> String {
 
 fn default_lan_host() -> String {
     "0.0.0.0".to_string()
+}
+
+fn default_local_host() -> String {
+    "127.0.0.1".to_string()
 }
 
 fn default_lan_port() -> u16 {
@@ -140,6 +148,8 @@ fn load_from_path(
             .to_string(),
     };
 
+    let lan_port = raw.lan_port.unwrap_or_else(default_lan_port);
+
     Ok(Config {
         relay_url: raw.relay_url,
         device_token: raw.device_token,
@@ -157,8 +167,10 @@ fn load_from_path(
         desktop_secret: raw.desktop_secret,
         desktop_name: raw.desktop_name.unwrap_or_else(default_desktop_name),
         server_version: raw.server_version,
+        local_host: raw.local_host.unwrap_or_else(default_local_host),
+        local_port: raw.local_port.unwrap_or(lan_port),
         lan_host: raw.lan_host.unwrap_or_else(default_lan_host),
-        lan_port: raw.lan_port.unwrap_or_else(default_lan_port),
+        lan_port,
         pairing_store_path: raw
             .pairing_store_path
             .unwrap_or_else(|| default_pairing_store_path_for_root(data_root)),

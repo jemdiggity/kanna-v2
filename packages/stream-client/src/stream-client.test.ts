@@ -158,6 +158,28 @@ describe("StreamClient", () => {
     client.close();
   });
 
+  it("posts typed task actions over KSP requests", async () => {
+    const { client, socket } = connectedClient();
+
+    const pending = client.advanceStage("task-1");
+    const sent = socket.sent.at(-1);
+    expect(sent).toMatchObject({
+      type: "request",
+      method: "POST",
+      path: "/v1/tasks/task-1/actions/advance-stage",
+    });
+    const id = (sent as { id: number }).id;
+
+    socket.receive({
+      type: "response",
+      id,
+      status: 200,
+      body: { taskId: "task-1", followTask: true },
+    });
+    await expect(pending).resolves.toEqual({ taskId: "task-1", followTask: true });
+    client.close();
+  });
+
   it("rejects in-flight requests on disconnect", async () => {
     const { client, socket } = connectedClient();
     const pending = client.request("GET", "/v1/status");

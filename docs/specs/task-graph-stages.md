@@ -408,15 +408,16 @@ The default pipeline becomes `in progress` (post: `commit`) → `review` →
 ### Workspaces fork per transition
 
 Task *identity* is durable — the row, the run history, the blockers, the
-notify wiring. The *workspace* is not: task ids are short random strings
-precisely because identity is bookkeeping, and meaning is assigned at the
-end, when the PR agent renames the final branch into something worth
-publishing.
+notify wiring. The *workspace* is not: it is an ephemeral manifestation of
+the task, and its name says so — `task-<id>-<n>`, the durable task id plus
+a workspace counter (the creation workspace is plain `task-<id>`). Meaning
+is assigned at the end, when the PR agent renames the final branch into
+something worth publishing.
 
 - **N worktrees, N branches, one PR.** Each stage transition (advance, auto
-  completion after a post, revision) forks a fresh randomly-named branch and
-  worktree from the current branch's committed tip and moves
-  `pipeline_item.branch` with it. The previous worktree stays on disk until
+  completion after a post, revision) forks a fresh branch and
+  worktree named `task-<id>-<n>` from the current branch's committed tip
+  and moves `pipeline_item.branch` with it. The previous worktree stays on disk until
   cleanup; only committed work crosses a stage boundary — the stage's post
   (commit) is what establishes that invariant, so posts and reruns keep the
   stage's live workspace while transitions fork.

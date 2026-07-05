@@ -15,7 +15,9 @@ mod task_creator;
 mod terminal_watcher;
 
 use config::Config;
+use futures_util::FutureExt;
 use std::sync::Arc;
+use std::time::Duration;
 
 #[tokio::main]
 async fn main() {
@@ -66,7 +68,7 @@ async fn main() {
         }
     });
 
-    let db = match db::Db::open(&config.db_path) {
+    let _db = match db::Db::open(&config.db_path) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("Failed to open database at {}: {}", config.db_path, e);
@@ -76,16 +78,20 @@ async fn main() {
 
     log::info!("Database opened: {}", config.db_path);
 
-    let _mobile_bonjour = bonjour::MobileBonjourAdvertisement::start(
-        &config.desktop_name,
-        &config.desktop_id,
-        config.lan_port,
-    )
-    .map_err(|error| {
-        log::warn!("mobile Bonjour advertisement unavailable: {}", error);
-        error
-    })
-    .ok();
+    spawn_supervised("mobile Bonjour advertisement", {
+        let config = config.clone();
+        move || {
+            let config = config.clone();
+            async move {
+                let _advertisement = bonjour::MobileBonjourAdvertisement::start(
+                    &config.desktop_name,
+                    &config.desktop_id,
+                    config.lan_port,
+                )?;
+                futures_util::future::pending::<Result<(), String>>().await
+            }
+        }
+    });
 
     // Capture the login-shell PATH before the first stage action needs it —
     // loading zshrc costs seconds and must never sit on a request path.
@@ -93,32 +99,86 @@ async fn main() {
 
     let http_state = Arc::new(http_api::AppState::new(config.clone()));
     let session_replacements = http_state.session_replacements();
-    let terminal_state_config = config.clone();
-    tokio::spawn(async move {
-        terminal_watcher::terminal_state_watcher_loop(terminal_state_config, session_replacements)
-            .await;
+    spawn_supervised("terminal watcher", {
+        let config = config.clone();
+        move || {
+            let config = config.clone();
+            let session_replacements = session_replacements.clone();
+            async move {
+                terminal_watcher::terminal_state_watcher_loop(config, session_replacements).await;
+                Ok(())
+            }
+        }
     });
     let lan_task = tokio::spawn(http_api::serve(Arc::clone(&http_state)));
-    if relay_url.is_empty() {
-        match lan_task.await {
-            Ok(Ok(())) => log::warn!("LAN API exited unexpectedly"),
-            Ok(Err(err)) => log::error!("LAN API failed: {}", err),
-            Err(err) => log::error!("LAN API task join error: {}", err),
-        }
-    } else {
-        let relay_loop = relay::run_relay_loop(config, db, http_state);
-        tokio::pin!(relay_loop);
-
-        tokio::select! {
-            result = lan_task => match result {
-                Ok(Ok(())) => log::warn!("LAN API exited unexpectedly"),
-                Ok(Err(err)) => log::error!("LAN API failed: {}", err),
-                Err(err) => log::error!("LAN API task join error: {}", err),
-            },
-            result = &mut relay_loop => match result {
-                Ok(()) => log::warn!("relay loop exited unexpectedly"),
-                Err(err) => log::error!("relay loop failed: {}", err),
-            },
-        };
+    if !relay_url.is_empty() {
+        spawn_relay_supervised(config.clone(), Arc::clone(&http_state));
     }
+
+    match lan_task.await {
+        Ok(Ok(())) => log::warn!("HTTP API exited unexpectedly"),
+        Ok(Err(err)) => log::error!("HTTP API failed: {}", err),
+        Err(err) => log::error!("HTTP API task join error: {}", err),
+    }
+}
+
+fn spawn_relay_supervised(config: Config, http_state: Arc<http_api::AppState>) {
+    if let Err(error) = std::thread::Builder::new()
+        .name("kanna-relay-supervisor".to_string())
+        .spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    log::error!("failed to start relay supervisor runtime: {error}");
+                    return;
+                }
+            };
+            let mut delay = Duration::from_millis(250);
+            loop {
+                let config = config.clone();
+                let http_state = Arc::clone(&http_state);
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    runtime.block_on(async move {
+                        let db = db::Db::open(&config.db_path)
+                            .map_err(|error| format!("failed to open relay DB: {error}"))?;
+                        relay::run_relay_loop(config, db, http_state).await
+                    })
+                }));
+                match result {
+                    Ok(Ok(())) => log::warn!("relay loop exited unexpectedly"),
+                    Ok(Err(error)) => log::warn!("relay loop failed: {error}"),
+                    Err(_) => log::error!("relay loop panicked"),
+                }
+                std::thread::sleep(delay);
+                delay = std::cmp::min(delay * 2, Duration::from_secs(30));
+            }
+        })
+    {
+        log::error!("failed to spawn relay supervisor thread: {error}");
+    }
+}
+
+fn spawn_supervised<F, Fut>(name: &'static str, make_task: F)
+where
+    F: Fn() -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = Result<(), String>> + Send + 'static,
+{
+    tokio::spawn(async move {
+        let mut delay = Duration::from_millis(250);
+        loop {
+            let result = std::panic::AssertUnwindSafe(make_task())
+                .catch_unwind()
+                .await;
+            match result {
+                Ok(Ok(())) => log::warn!("{name} exited unexpectedly"),
+                Ok(Err(error)) => log::warn!("{name} failed: {error}"),
+                Err(_) => log::error!("{name} panicked"),
+            }
+            tokio::time::sleep(delay).await;
+            delay = std::cmp::min(delay * 2, Duration::from_secs(30));
+        }
+    });
 }

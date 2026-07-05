@@ -762,6 +762,8 @@ async fn create_pairing_session_route_uses_local_identity_without_desktop_secret
         desktop_secret: None,
         desktop_name: "Studio Mac".to_string(),
         server_version: Some("test-version".to_string()),
+        local_host: "127.0.0.1".to_string(),
+        local_port: 0,
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         pairing_store_path: PathBuf::from("/tmp/kanna-pairings-http-local.json")

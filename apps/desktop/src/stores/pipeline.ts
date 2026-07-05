@@ -1,14 +1,11 @@
 import { parseAgentDefinition } from "../../../../packages/core/src/pipeline/agent-loader";
 import { parsePipelineJson } from "../../../../packages/core/src/pipeline/pipeline-loader";
 import type { AgentDefinition, PipelineDefinition } from "../../../../packages/core/src/pipeline/pipeline-types";
+import { StreamRequestError } from "@kanna/stream-client";
 import { invoke } from "../invoke";
-import { resolveKannaServerBaseUrl } from "./kannaCliEnv";
-import { readEnvVarOptional } from "../utils/invokeHelpers";
+import { getSharedStreamClient } from "../composables/desktopStreamClient";
 import { requireService, type AdvanceStageOptions, type StoreContext } from "./state";
 import { debugLog } from "../utils/debugLog";
-
-const LOCAL_SERVER_ACTION_TIMEOUT_MS = 30_000;
-const LOCAL_SERVER_ACTION_RETRY_DELAY_MS = 250;
 
 export interface PipelineApi {
   loadPipeline: (repoPath: string, pipelineName: string) => Promise<PipelineDefinition>;
@@ -18,53 +15,6 @@ export interface PipelineApi {
 }
 
 export function createPipelineApi(context: StoreContext): PipelineApi {
-  interface TaskActionResponse {
-    taskId: string;
-    followTask?: boolean;
-  }
-
-  function sleep(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-  }
-
-  async function resolveLocalServerBaseUrl(): Promise<string> {
-    const deadline = Date.now() + LOCAL_SERVER_ACTION_TIMEOUT_MS;
-    let lastError: unknown = null;
-    while (Date.now() < deadline) {
-      try {
-        await invoke("ensure_mobile_server");
-        const port = await readEnvVarOptional("KANNA_MOBILE_SERVER_PORT");
-        return resolveKannaServerBaseUrl(port);
-      } catch (error) {
-        lastError = error;
-        const message = error instanceof Error ? error.message : String(error);
-        if (!message.includes("another kanna-server is already starting")) {
-          throw error;
-        }
-        await sleep(LOCAL_SERVER_ACTION_RETRY_DELAY_MS);
-      }
-    }
-    throw lastError instanceof Error ? lastError : new Error(String(lastError ?? "kanna-server did not become ready"));
-  }
-
-  async function postTaskAction(taskId: string, action: "advance-stage" | "rerun-stage"): Promise<Response> {
-    const serverBaseUrl = await resolveLocalServerBaseUrl();
-    const url = `${serverBaseUrl}/v1/tasks/${encodeURIComponent(taskId)}/actions/${action}`;
-    const deadline = Date.now() + LOCAL_SERVER_ACTION_TIMEOUT_MS;
-    let lastError: unknown = null;
-
-    while (Date.now() < deadline) {
-      try {
-        return await fetch(url, { method: "POST" });
-      } catch (error) {
-        lastError = error;
-        await sleep(LOCAL_SERVER_ACTION_RETRY_DELAY_MS);
-      }
-    }
-
-    throw lastError instanceof Error ? lastError : new Error(String(lastError ?? `failed to call ${action}`));
-  }
-
   // Selection during stage advance is only adjusted when the task being advanced
   // (and therefore closed) is the one currently selected — analogous to deletion,
   // where selection moves to the next visible task. When any other task advances
@@ -174,16 +124,7 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
     });
 
     try {
-      const response = await postTaskAction(taskId, "advance-stage");
-      if (!response.ok) {
-        const message = await response.text();
-        if (response.status === 409) {
-          context.toast.warning(context.tt("mainPanel.taskBlocked"));
-          return;
-        }
-        throw new Error(message);
-      }
-      const result = await response.json() as TaskActionResponse;
+      const result = await (await getSharedStreamClient()).advanceStage(taskId);
       await requireService(context.services.reloadSnapshot, "reloadSnapshot")();
 
       // Durable tasks: an in-pipeline advance transitions the SAME task in
@@ -196,6 +137,10 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
         await restoreStageAdvanceSelection(fallbackSelectionId);
       }
     } catch (error) {
+      if (error instanceof StreamRequestError && error.status === 409) {
+        context.toast.warning(context.tt("mainPanel.taskBlocked"));
+        return;
+      }
       console.error("[store] advanceStage: server action failed:", error);
       context.toast.error(`${context.tt("toasts.agentStartFailed")}: ${error instanceof Error ? error.message : error}`);
     }
@@ -207,10 +152,7 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
     if (item.closed_at != null) return;
 
     try {
-      const response = await postTaskAction(taskId, "rerun-stage");
-      if (!response.ok) {
-        throw new Error(await response.text());
-      }
+      await (await getSharedStreamClient()).rerunStage(taskId);
       await requireService(context.services.reloadSnapshot, "reloadSnapshot")();
     } catch (error) {
       console.error("[store] rerunStage: server action failed:", error);

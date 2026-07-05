@@ -91,6 +91,60 @@ pub(super) fn apply_task_blockers(
     Ok(task_id)
 }
 
+fn blocker_branches_for_task(
+    db: &Db,
+    blocked_task_id: &str,
+) -> Result<Vec<String>, (axum::http::StatusCode, String)> {
+    let blocked_task = db
+        .get_pipeline_item(blocked_task_id)
+        .map_err(|e| db_write_error("db error", e))?
+        .ok_or_else(|| {
+            (
+                axum::http::StatusCode::NOT_FOUND,
+                format!("task not found: {blocked_task_id}"),
+            )
+        })?;
+    let blocker_ids = db
+        .list_task_blocker_ids(blocked_task_id)
+        .map_err(|e| db_write_error("db error", e))?;
+    let mut branches = Vec::new();
+    for blocker_id in blocker_ids {
+        let blocker = db
+            .get_pipeline_item(&blocker_id)
+            .map_err(|e| db_write_error("db error", e))?
+            .ok_or_else(|| {
+                (
+                    axum::http::StatusCode::NOT_FOUND,
+                    format!("task not found: {blocker_id}"),
+                )
+            })?;
+        if blocker.repo_id != blocked_task.repo_id {
+            continue;
+        }
+        let Some(branch) = blocker
+            .branch
+            .as_deref()
+            .filter(|branch| !branch.trim().is_empty())
+        else {
+            continue;
+        };
+        let repo = db
+            .get_repo(&blocker.repo_id)
+            .map_err(|e| db_write_error("db error", e))?;
+        let resolved_branch = repo
+            .as_ref()
+            .and_then(|repo| {
+                crate::task_creator::resolve_current_source_worktree_branch(
+                    &repo.path,
+                    Some(branch),
+                )
+            })
+            .unwrap_or_else(|| branch.to_string());
+        branches.push(resolved_branch);
+    }
+    Ok(branches)
+}
+
 pub(super) async fn start_dormant_task_if_ready(
     state: &Arc<AppState>,
     task_id: &str,
@@ -183,13 +237,15 @@ pub(super) async fn start_dependents_unblocked_by_close_with_daemon(
             {
                 continue;
             }
-            ready.push(blocked_id);
+            let blocker_branches = blocker_branches_for_task(&db, &blocked_id)?;
+            ready.push((blocked_id, blocker_branches));
         }
         ready
     };
 
-    for blocked_id in ready_dependents {
-        start_dormant_task_if_ready_with_daemon(state, daemon, &blocked_id, Vec::new()).await?;
+    for (blocked_id, blocker_branches) in ready_dependents {
+        start_dormant_task_if_ready_with_daemon(state, daemon, &blocked_id, blocker_branches)
+            .await?;
     }
     Ok(())
 }
@@ -223,10 +279,11 @@ pub(super) async fn unblock_task(
         )
     })?;
     let task_id = resolve_existing_task_id(&db, &task_id)?;
+    let blocker_branches = blocker_branches_for_task(&db, &task_id)?;
     db.remove_all_task_blockers(&task_id)
         .map_err(|e| db_write_error("db error", e))?;
     drop(db);
-    start_dormant_task_if_ready(&state, &task_id, Vec::new()).await?;
+    start_dormant_task_if_ready(&state, &task_id, blocker_branches).await?;
     Ok(Json(crate::mobile_api::TaskActionResponse {
         task_id,
         follow_task: None,

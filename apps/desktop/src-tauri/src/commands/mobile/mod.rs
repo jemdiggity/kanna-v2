@@ -1,11 +1,13 @@
 use kanna_runtime_defaults::DesktopCloudEnvironment;
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
+#[cfg(unix)]
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::Manager;
 use tokio::process::Command;
-use tokio::sync::Mutex;
+use tokio::sync::{watch, Mutex};
 
 mod cloud_env;
 mod config;
@@ -15,16 +17,21 @@ use config::{
     server_config_matches_runtime, server_config_path_for_app_data_dir,
     server_lock_path_for_config, try_claim_server_lock, write_server_config,
 };
+#[cfg(test)]
+use process::server_pids_on_port;
 use process::{find_sidecar, stop_server_on_port};
 
 const LOCAL_SERVER_HOST: &str = "127.0.0.1";
 const DEFAULT_LOCAL_SERVER_PORT: u16 = kanna_runtime_defaults::PRODUCTION_MOBILE_SERVER_PORT;
+pub(super) const LAN_SERVER_PORT_OFFSET: u16 = 1;
 // kanna-server can take a while to bind and register when the machine is under
 // heavy load (e.g. an in-progress iOS/Rust build during `kd mobile run`). Poll
 // generously and only give up early if the process actually exits — a healthy
 // server must never be killed for being slow to answer /v1/status.
 const STATUS_POLL_ATTEMPTS: usize = 240;
 const STATUS_POLL_DELAY_MS: u64 = 250;
+const READY_WAIT_TIMEOUT_SECS: u64 = 60;
+const SUPERVISOR_HEALTH_POLL_MS: u64 = 500;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -48,6 +55,7 @@ struct PairingSessionPayload {
 pub struct MobileServerManager {
     inner: Arc<Mutex<MobileServerState>>,
     server_lock: Arc<Mutex<Option<File>>>,
+    readiness: watch::Sender<bool>,
     client: reqwest::Client,
 }
 
@@ -115,6 +123,7 @@ impl MobileServerManager {
         cloud_env: Option<DesktopCloudEnvironment>,
     ) -> Self {
         let config_path = server_config_path_for_app_data_dir(&app_data_dir);
+        let (readiness, _rx) = watch::channel(false);
         Self {
             inner: Arc::new(Mutex::new(MobileServerState {
                 status: "stopped".to_string(),
@@ -125,16 +134,107 @@ impl MobileServerManager {
                 cloud_env,
             })),
             server_lock: Arc::new(Mutex::new(None)),
+            readiness,
             client: reqwest::Client::new(),
         }
     }
 
     pub async fn start(&self) -> Result<(), String> {
+        let (config_path, api_base_url) = {
+            let state = self.inner.lock().await;
+            (state.config_path.clone(), state.api_base_url.clone())
+        };
+        let expected_desktop_id = desktop_id(&config_path)?;
+        if let Ok(status) = self.fetch_status(&api_base_url).await {
+            ensure_server_belongs_to_desktop(&status, &expected_desktop_id)?;
+        }
+
+        let should_spawn = {
+            let mut state = self.inner.lock().await;
+            if state.started {
+                false
+            } else {
+                state.started = true;
+                state.status = "starting".to_string();
+                true
+            }
+        };
+
+        if should_spawn {
+            let manager = self.clone();
+            tauri::async_runtime::spawn(async move {
+                manager.supervise_server().await;
+            });
+        }
+
+        self.wait_until_ready().await
+    }
+
+    pub async fn wait_until_ready(&self) -> Result<(), String> {
+        if *self.readiness.borrow() {
+            return Ok(());
+        }
+        self.start_if_needed().await;
+        let mut readiness = self.readiness.subscribe();
+        let wait = async {
+            loop {
+                if *readiness.borrow_and_update() {
+                    return Ok(());
+                }
+                readiness
+                    .changed()
+                    .await
+                    .map_err(|_| "kanna-server readiness signal closed".to_string())?;
+            }
+        };
+        tokio::time::timeout(
+            std::time::Duration::from_secs(READY_WAIT_TIMEOUT_SECS),
+            wait,
+        )
+        .await
+        .map_err(|_| "kanna-server did not become ready".to_string())?
+    }
+
+    async fn start_if_needed(&self) {
+        let should_spawn = {
+            let mut state = self.inner.lock().await;
+            if state.started {
+                false
+            } else {
+                state.started = true;
+                state.status = "starting".to_string();
+                true
+            }
+        };
+        if should_spawn {
+            let manager = self.clone();
+            tauri::async_runtime::spawn(async move {
+                manager.supervise_server().await;
+            });
+        }
+    }
+
+    async fn supervise_server(self) {
+        let mut delay = std::time::Duration::from_millis(STATUS_POLL_DELAY_MS);
+        loop {
+            match self.run_server_until_exit().await {
+                Ok(()) => {
+                    self.set_ready(false, "stopped", None).await;
+                    break;
+                }
+                Err(error) => {
+                    eprintln!("[mobile] kanna-server supervisor: {}", error);
+                    self.set_ready(false, "error", None).await;
+                }
+            }
+            tokio::time::sleep(delay).await;
+            delay = std::cmp::min(delay * 2, std::time::Duration::from_secs(30));
+        }
+    }
+
+    async fn run_server_until_exit(&self) -> Result<(), String> {
         let (config_path, desktop_name, api_base_url, cloud_env) = {
             let state = self.inner.lock().await;
-            if state.started {
-                return Ok(());
-            }
             (
                 state.config_path.clone(),
                 state.desktop_name.clone(),
@@ -150,31 +250,31 @@ impl MobileServerManager {
             if is_current_server_status(&status, &expected_desktop_id, current_server_version())
                 && server_config_matches_runtime(&config_path, &expected_desktop_id, cloud_env)
             {
-                let mut state = self.inner.lock().await;
-                state.started = true;
-                state.status = status.state;
-                state.desktop_name = status.desktop_name;
-                return Ok(());
+                self.set_ready(true, &status.state, Some(status.desktop_name))
+                    .await;
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_millis(SUPERVISOR_HEALTH_POLL_MS))
+                        .await;
+                    if self.fetch_status(&api_base_url).await.is_err() {
+                        return Err("observed kanna-server stopped".to_string());
+                    }
+                }
             }
             stop_server_on_port(local_server_port_for_cloud_env(cloud_env)).await?;
         }
 
         let lock_path = server_lock_path_for_config(&config_path)?;
         let claimed_lock = try_claim_server_lock(&lock_path)?;
+        *self.server_lock.lock().await = Some(claimed_lock);
 
         {
-            let mut state = self.inner.lock().await;
+            let state = self.inner.lock().await;
             write_server_config(&state)?;
-            state.started = true;
         }
-        *self.server_lock.lock().await = Some(claimed_lock);
 
         let server_bin = match find_sidecar("kanna-server") {
             Ok(path) => path,
             Err(err) => {
-                let mut state = self.inner.lock().await;
-                state.started = false;
-                state.status = "error".to_string();
                 *self.server_lock.lock().await = None;
                 return Err(err);
             }
@@ -189,9 +289,6 @@ impl MobileServerManager {
         {
             Ok(child) => child,
             Err(err) => {
-                let mut state = self.inner.lock().await;
-                state.started = false;
-                state.status = "error".to_string();
                 *self.server_lock.lock().await = None;
                 return Err(format!("failed to spawn kanna-server: {}", err));
             }
@@ -202,44 +299,41 @@ impl MobileServerManager {
             Err(err) => {
                 let _ = child.kill().await;
                 let _ = child.wait().await;
-                let mut state = self.inner.lock().await;
-                state.started = false;
-                state.status = "error".to_string();
                 *self.server_lock.lock().await = None;
                 return Err(err);
             }
         };
 
+        self.set_ready(true, &status.state, Some(status.desktop_name))
+            .await;
+
+        let exit = child.wait().await;
+        *self.server_lock.lock().await = None;
         {
             let mut state = self.inner.lock().await;
-            state.status = status.state.clone();
-            state.desktop_name = status.desktop_name.clone();
-        }
-
-        let state_handle = self.inner.clone();
-        let lock_handle = self.server_lock.clone();
-        tauri::async_runtime::spawn(async move {
-            let exit = child.wait().await;
-            let mut state = state_handle.lock().await;
-            state.started = false;
             state.desktop_name = desktop_name;
-            *lock_handle.lock().await = None;
-            match exit {
-                Ok(status) if status.success() => {
-                    state.status = "stopped".to_string();
-                }
-                Ok(status) => {
-                    state.status = "error".to_string();
-                    eprintln!("[mobile] kanna-server exited with {}", status);
-                }
-                Err(err) => {
-                    state.status = "error".to_string();
-                    eprintln!("[mobile] failed to wait for kanna-server: {}", err);
-                }
-            }
-        });
+        }
+        match exit {
+            Ok(status) if status.success() => Ok(()),
+            #[cfg(unix)]
+            Ok(status) if status.signal() == Some(libc::SIGTERM) => Ok(()),
+            Ok(status) => Err(format!("kanna-server exited with {}", status)),
+            Err(err) => Err(format!("failed to wait for kanna-server: {}", err)),
+        }
+    }
 
-        Ok(())
+    async fn set_ready(&self, ready: bool, status: &str, desktop_name: Option<String>) {
+        {
+            let mut state = self.inner.lock().await;
+            state.status = status.to_string();
+            if status == "stopped" {
+                state.started = false;
+            }
+            if let Some(desktop_name) = desktop_name {
+                state.desktop_name = desktop_name;
+            }
+        }
+        let _ = self.readiness.send(ready);
     }
 
     pub async fn snapshot(&self) -> Result<MobileServerStatus, String> {
@@ -333,6 +427,12 @@ impl MobileServerManager {
 pub async fn ensure_mobile_server(app: tauri::AppHandle) -> Result<(), String> {
     let manager = app.state::<MobileServerManager>();
     manager.start().await
+}
+
+#[tauri::command]
+pub async fn wait_for_mobile_server_ready(app: tauri::AppHandle) -> Result<(), String> {
+    let manager = app.state::<MobileServerManager>();
+    manager.wait_until_ready().await
 }
 
 #[tauri::command]
@@ -727,8 +827,8 @@ mod tests {
     use super::{
         app_data_dir_for_server_config, current_server_version, desktop_id, escape_toml_string,
         generate_uuid_v4_from_reader, is_current_server_status, resolved_db_path, server_base_url,
-        stop_server_on_port, stopped_snapshot, MobileServerManager, MobileServerState,
-        MobileServerStatus,
+        server_pids_on_port, stop_server_on_port, stopped_snapshot, MobileServerManager,
+        MobileServerState, MobileServerStatus,
     };
     use std::ffi::CString;
     use std::path::PathBuf;
@@ -970,6 +1070,50 @@ mod tests {
             .await
             .expect("cleanup should stop server");
         let _ = existing_server.wait().await;
+        cleanup_process_test_env();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::await_holding_lock)]
+    async fn manager_restarts_server_after_sigkill() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+        let root = unique_test_root("restart-after-sigkill");
+        let port = free_loopback_port();
+        let app_data_dir = root.join("app-data");
+        let db_path = root.join("kanna-test.db");
+        let daemon_dir = root.join("daemon");
+        configure_process_test_env(port, &db_path, &daemon_dir);
+        create_test_database(&db_path);
+        let manager = MobileServerManager::new(app_data_dir.clone());
+
+        manager.start().await.expect("manager should start server");
+        let first_pids = server_pids_on_port(port)
+            .await
+            .expect("server pids should be readable");
+        let first_pid = *first_pids
+            .first()
+            .expect("server should listen on local port");
+        unsafe {
+            libc::kill(first_pid, libc::SIGKILL);
+        }
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let pids = server_pids_on_port(port).await.unwrap_or_default();
+            if pids.iter().any(|pid| *pid != first_pid) && manager.snapshot().await.is_ok() {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "manager did not restart kanna-server after SIGKILL"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        stop_server_on_port(port)
+            .await
+            .expect("cleanup should stop restarted server");
         cleanup_process_test_env();
         let _ = std::fs::remove_dir_all(root);
     }

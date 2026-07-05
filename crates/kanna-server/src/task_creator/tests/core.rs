@@ -75,6 +75,7 @@ fn build_agent_command_adds_claude_kanna_preamble_as_system_prompt() {
         &[],
         Some(&preamble),
         None,
+        None,
     );
 
     assert!(command.contains("--append-system-prompt '"));
@@ -120,9 +121,12 @@ fn build_agent_command_launches_antigravity_with_prepended_kanna_context() {
         &[],
         Some(&preamble),
         None,
+        Some("/tmp/repo/.kanna-worktrees/task-123"),
     );
 
-    assert!(command.starts_with("agy --dangerously-skip-permissions --prompt-interactive '"));
+    assert!(command.starts_with(
+        "mkdir -p '/tmp/kanna-antigravity-workspaces' && rm -f '/tmp/kanna-antigravity-workspaces/task-123' && ln -s '/tmp/repo/.kanna-worktrees/task-123' '/tmp/kanna-antigravity-workspaces/task-123' && agy --dangerously-skip-permissions --add-dir '/tmp/kanna-antigravity-workspaces/task-123' --prompt-interactive '"
+    ));
     assert!(command.contains("## Kanna Task Environment"));
     assert!(command.contains("task `task-123`"));
     assert!(!command.contains("{{MCP_STATUS}}"));
@@ -164,6 +168,7 @@ fn build_agent_command_registers_codex_kanna_mcp_with_config_overrides() {
         &[],
         Some("Kanna preamble."),
         Some(mcp_config.to_string_lossy().as_ref()),
+        None,
     );
 
     assert!(command.starts_with("codex "));
@@ -189,6 +194,7 @@ fn build_agent_command_registers_copilot_kanna_mcp_with_additional_config() {
         &[],
         Some("Kanna preamble."),
         Some(mcp_config.to_string_lossy().as_ref()),
+        None,
     );
 
     assert!(command.starts_with("copilot "));
@@ -211,6 +217,7 @@ fn build_agent_command_registers_opencode_kanna_mcp_with_inline_config() {
         &[],
         Some("Kanna preamble."),
         Some(mcp_config.to_string_lossy().as_ref()),
+        None,
     );
 
     assert!(command.contains("OPENCODE_CONFIG_CONTENT='"));
@@ -715,6 +722,8 @@ fn prepare_task_uses_builtin_default_pipeline_when_repo_has_no_local_default_pip
         desktop_secret: Some("desktop-secret".to_string()),
         desktop_name: "Studio Mac".to_string(),
         server_version: Some("test-version".to_string()),
+        local_host: "127.0.0.1".to_string(),
+        local_port: 0,
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
         pairing_store_path: "/tmp/kanna-pairings.json".to_string(),
@@ -826,6 +835,8 @@ fn prepare_task_uses_default_agent_provider_setting_when_request_omits_provider(
         desktop_secret: Some("desktop-secret".to_string()),
         desktop_name: "Studio Mac".to_string(),
         server_version: Some("test-version".to_string()),
+        local_host: "127.0.0.1".to_string(),
+        local_port: 0,
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
         pairing_store_path: "/tmp/kanna-pairings.json".to_string(),

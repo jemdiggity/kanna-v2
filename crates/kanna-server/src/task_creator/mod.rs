@@ -47,6 +47,7 @@ pub(crate) use stages::{
     prepare_advance_stage_for_api, prepare_revision_task_for_api, prepare_stage_completion_for_api,
     resolve_stage_transition,
 };
+pub(crate) use worktree::resolve_current_source_worktree_branch;
 
 pub(crate) fn prepare_rerun_stage_for_api(
     db: &Db,
@@ -348,6 +349,7 @@ fn build_prepared_session(
                 &allowed_tools,
                 Some(&preamble),
                 mcp_config_path.as_deref(),
+                Some(worktree_path),
             );
             let full_cmd = build_task_shell_command(
                 &agent_cmd,
