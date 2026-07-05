@@ -528,6 +528,22 @@ impl Db {
         Ok(())
     }
 
+    /// Keep the task's current agent-CLI session id (the desktop's session
+    /// recovery resume handle) in step with server-side spawns: set it when a
+    /// spawn assigns or resumes a provider session, clear it when the new
+    /// session has none — a stale id would resume the wrong conversation.
+    pub fn update_pipeline_item_agent_session_id(
+        &self,
+        id: &str,
+        agent_session_id: Option<&str>,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE pipeline_item SET agent_session_id = ?, updated_at = datetime('now') WHERE id = ? AND closed_at IS NULL",
+            (agent_session_id, id),
+        )?;
+        Ok(())
+    }
+
     /// Stage transition into a freshly forked workspace: the task's current
     /// branch moves with the stage.
     pub fn update_pipeline_item_stage_and_branch(

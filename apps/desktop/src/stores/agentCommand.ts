@@ -4,6 +4,11 @@ import { shellSingleQuote } from "../utils/shell";
 export interface AgentCommandResult {
   agentCmd: string;
   agentCmdPreamble?: string;
+  /**
+   * The agent CLI's own session id this command starts (fresh assign) or
+   * resumes, when the provider supports Kanna-assigned session ids.
+   */
+  agentSessionId?: string;
 }
 
 export interface BuildAgentCommandParams {
@@ -53,10 +58,12 @@ async function buildCopilotCommand(params: BuildAgentCommandParams): Promise<Age
     for (const tool of params.disallowedTools) copilotFlags.push(`--deny-tool=${tool}`);
   }
 
+  let copilotSessionId: string;
   if (params.resumeSessionId) {
-    copilotFlags.push(`--resume=${shellSingleQuote(params.resumeSessionId)}`);
+    copilotSessionId = params.resumeSessionId;
+    copilotFlags.push(`--resume=${shellSingleQuote(copilotSessionId)}`);
   } else {
-    const copilotSessionId = createAgentSessionId(params);
+    copilotSessionId = createAgentSessionId(params);
     await persistFreshAgentSessionId(params, copilotSessionId);
     copilotFlags.push(`--session-id=${shellSingleQuote(copilotSessionId)}`);
   }
@@ -69,6 +76,7 @@ async function buildCopilotCommand(params: BuildAgentCommandParams): Promise<Age
     agentCmdPreamble: params.resumeSessionId
       ? undefined
       : `copilot ${flags} -i ${shellSingleQuote(params.runtimeUserPrompt)}`,
+    agentSessionId: copilotSessionId,
   };
 }
 
@@ -196,9 +204,12 @@ async function buildClaudeCommand(params: BuildAgentCommandParams): Promise<Agen
   }
 
   if (params.resumeSessionId || !params.prompt) {
-    return { agentCmd: `claude ${flags.join(" ")}` };
+    return { agentCmd: `claude ${flags.join(" ")}`, agentSessionId: claudeSessionId };
   }
-  return { agentCmd: `claude ${flags.join(" ")} ${shellSingleQuote(params.prompt)}` };
+  return {
+    agentCmd: `claude ${flags.join(" ")} ${shellSingleQuote(params.prompt)}`,
+    agentSessionId: claudeSessionId,
+  };
 }
 
 function createAgentSessionId(params: BuildAgentCommandParams): string {

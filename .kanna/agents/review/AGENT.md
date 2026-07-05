@@ -64,7 +64,10 @@ kanna-cli task request-revision \
   --prompt "<specific instructions for improving test coverage>"
 ```
 
-The revision prompt must include:
+A revision resumes the implement stage's previous agent session (with its
+context intact) when possible, and Kanna delivers the original task prompt
+alongside your feedback either way — do not restate the original task. The
+revision prompt must include:
 
 - what behavior lacks coverage or what change is required
 - whether E2E coverage is required and why, when applicable

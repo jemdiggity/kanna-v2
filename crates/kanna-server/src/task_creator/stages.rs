@@ -6,8 +6,14 @@ use super::definitions::{
     PipelineDefinition, PipelineStage, PipelineStageTransition, StagePosition,
 };
 use super::prepare_stage_run_spawn;
-use super::prompt::build_target_stage_prompt;
-use super::types::{PreparedPostDispatch, PreparedStageRunSpawn, PreparedStageTransition};
+use super::prompt::{
+    build_revision_resume_message, build_revision_task_prompt, build_target_stage_prompt,
+};
+use super::resume::{claude_transcript_exists, current_branch, rev_parse_head};
+use super::types::{
+    PreparedPostDispatch, PreparedRunWorkspace, PreparedStageRunSpawn, PreparedStageTransition,
+    ResumeWorkspaceSpec, RunWorkspaceSpec,
+};
 use super::worktree::next_fork_branch;
 use super::worktree::resolve_current_source_worktree_branch;
 use crate::db::Repo;
@@ -220,6 +226,7 @@ fn prepare_post_dispatch(
         "post",
         None,
         None,
+        None,
     )?;
     let message = format!(
         "{final_prompt}\n\nWhen this work is complete, record stage completion: prefer MCP `kanna_complete_stage`; fallback: `kanna-cli stage-complete --task-id \"{}\" --status success --summary \"...\"`. Kanna will then advance this task's pipeline.",
@@ -248,6 +255,31 @@ fn prepare_stage_run_for_target(
     prompt_override: Option<&str>,
     feedback: Option<String>,
 ) -> Result<PreparedStageRunSpawn, String> {
+    prepare_stage_run_for_target_with_provider(
+        db,
+        config,
+        context,
+        target_stage,
+        item_stage,
+        run_kind,
+        prompt_override,
+        feedback,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_stage_run_for_target_with_provider(
+    db: &Db,
+    config: &Config,
+    context: &StageTransitionContext<'_>,
+    target_stage: &PipelineStage,
+    item_stage: &str,
+    run_kind: &'static str,
+    prompt_override: Option<&str>,
+    feedback: Option<String>,
+    provider_override: Option<String>,
+) -> Result<PreparedStageRunSpawn, String> {
     prepare_stage_run_for_target_returning_prompt(
         db,
         config,
@@ -257,6 +289,7 @@ fn prepare_stage_run_for_target(
         run_kind,
         prompt_override,
         feedback,
+        provider_override,
     )
     .map(|(run, _)| run)
 }
@@ -271,6 +304,7 @@ fn prepare_stage_run_for_target_returning_prompt(
     run_kind: &'static str,
     prompt_override: Option<&str>,
     feedback: Option<String>,
+    provider_override: Option<String>,
 ) -> Result<(PreparedStageRunSpawn, String), String> {
     let source_task = context.source_task;
     let source_branch =
@@ -284,15 +318,17 @@ fn prepare_stage_run_for_target_returning_prompt(
     // counter (N worktrees, N branches, one PR — the PR agent renames the
     // final branch into something meaningful). Posts run inside the stage,
     // so their fallback spawn keeps the stage's workspace.
-    let fork_branch = if run_kind == "main" {
-        Some(next_fork_branch(
-            &context.repo.path,
-            context.source_task_id,
-        )?)
+    let workspace_spec = if run_kind == "main" {
+        RunWorkspaceSpec::Fork {
+            branch: next_fork_branch(&context.repo.path, context.source_task_id)?,
+        }
     } else {
-        None
+        RunWorkspaceSpec::Current
     };
-    let prompt_branch = fork_branch.clone().or(source_branch.clone());
+    let prompt_branch = match &workspace_spec {
+        RunWorkspaceSpec::Fork { branch } => Some(branch.clone()),
+        _ => source_branch.clone(),
+    };
     let final_prompt = build_target_stage_prompt(
         &context.repo.path,
         target_stage,
@@ -302,11 +338,17 @@ fn prepare_stage_run_for_target_returning_prompt(
         source_task.base_ref.as_deref(),
         source_task.branch.as_deref(),
     )?;
-    let explicit_provider = if target_stage.agent.is_some() {
-        None
-    } else {
-        source_task.agent_provider.clone()
-    };
+    // Stage transitions let the target stage's agent definition own the
+    // provider; a `provider_override` (revisions) pins it instead — a
+    // revision reruns the same stage's work and must keep the provider that
+    // work actually ran with, not re-resolve from the def's priority list.
+    let explicit_provider = provider_override.or_else(|| {
+        if target_stage.agent.is_some() {
+            None
+        } else {
+            source_task.agent_provider.clone()
+        }
+    });
     let branch = source_task
         .branch
         .as_deref()
@@ -322,14 +364,14 @@ fn prepare_stage_run_for_target_returning_prompt(
         target_stage,
         item_stage,
         run_kind,
-        fork_branch,
+        workspace_spec,
         final_prompt.clone(),
         branch,
         feedback,
         source_task.agent_type.as_deref(),
         explicit_provider,
     )?;
-    if run.forked_workspace.is_some() {
+    if matches!(run.workspace, PreparedRunWorkspace::Forked(_)) {
         let departed_stage = source_task
             .stage
             .as_deref()
@@ -396,16 +438,141 @@ pub(crate) fn prepare_revision_task_for_api(
         }
     };
 
-    prepare_stage_run_for_target(
+    // Prefer resuming the target stage's previous agent session: it already
+    // holds the exploration and decision context the feedback refers to.
+    // Every failed precondition falls back to today's fresh-fork behavior.
+    if run_kind == "main" {
+        if let Some(prepared) =
+            prepare_revision_resume(db, config, &context, &target_stage, revision_prompt)?
+        {
+            return Ok(prepared);
+        }
+    }
+
+    // Fresh fallback: compose the original task prompt with the reviewer's
+    // feedback so the new agent still sees what the task was — a bare
+    // prompt_override would clobber $TASK_PROMPT entirely. The run keeps the
+    // task's provider: a revision continues the same stage's work, so the
+    // agent def's provider priority list must not switch providers on it.
+    let composed_prompt =
+        build_revision_task_prompt(source_task.prompt.as_deref().unwrap_or(""), revision_prompt);
+    prepare_stage_run_for_target_with_provider(
         db,
         config,
         &context,
         &target_stage,
         &item_stage,
         run_kind,
-        Some(revision_prompt),
+        Some(&composed_prompt),
         Some(revision_prompt.to_string()),
+        source_task.agent_provider.clone(),
     )
+}
+
+/// Try to prepare a revision as a resumed run of the target stage's previous
+/// agent session, in that run's own worktree. Returns `Ok(None)` — fresh-fork
+/// fallback — when any precondition fails: no recorded resumable run, a
+/// non-Claude provider, the worktree or CLI transcript gone, or the worktree
+/// no longer holding exactly the task's committed tip.
+fn prepare_revision_resume(
+    db: &Db,
+    config: &Config,
+    context: &StageTransitionContext<'_>,
+    target_stage: &PipelineStage,
+    revision_prompt: &str,
+) -> Result<Option<PreparedStageRunSpawn>, String> {
+    let task_id = context.source_task_id;
+    let fall_back = |reason: &str| {
+        log::info!("revision resume unavailable for task {task_id}: {reason}; forking fresh");
+        Ok(None)
+    };
+
+    let run = match db
+        .latest_resumable_stage_run(task_id, &target_stage.name)
+        .map_err(|e| format!("db error: {}", e))?
+    {
+        Some(run) => run,
+        None => return fall_back("no stage run recorded a provider session"),
+    };
+    if run.agent_provider.as_deref() != Some("claude") {
+        return fall_back("previous run's provider does not support resume");
+    }
+    let (Some(provider_session_id), Some(run_cwd)) =
+        (run.provider_session_id.clone(), run.cwd.clone())
+    else {
+        return fall_back("previous run recorded no session id or cwd");
+    };
+    let Some(resume_head) = rev_parse_head(&run_cwd) else {
+        return fall_back("previous run's worktree is gone");
+    };
+    let source_task = context.source_task;
+    let Some(current_branch_name) = source_task.branch.as_deref() else {
+        return fall_back("task has no branch");
+    };
+    let current_worktree = format!(
+        "{}/.kanna-worktrees/{}",
+        context.repo.path, current_branch_name
+    );
+    let Some(current_head) = rev_parse_head(&current_worktree) else {
+        return fall_back("task's current worktree is gone");
+    };
+    if resume_head != current_head {
+        return fall_back("previous run's worktree diverged from the committed tip");
+    }
+    let Some(resume_branch) = current_branch(&run_cwd) else {
+        return fall_back("previous run's worktree has no checked-out branch");
+    };
+    if !claude_transcript_exists(&run_cwd, &provider_session_id) {
+        return fall_back("no CLI transcript for the previous session");
+    }
+
+    let message = build_revision_resume_message(
+        source_task.prompt.as_deref().unwrap_or(""),
+        revision_prompt,
+        task_id,
+    );
+    // A resumed run continues the recorded run's conversation, so it must
+    // resolve to that run's provider — never the agent def's priority list.
+    let explicit_provider = run.agent_provider.clone();
+    let resumed_from_run_id = run.id.clone();
+    let prepared = prepare_stage_run_spawn(
+        db,
+        config,
+        context.repo,
+        task_id,
+        context.pipeline_name,
+        context.pipeline,
+        target_stage,
+        &target_stage.name,
+        "main",
+        RunWorkspaceSpec::Resume(ResumeWorkspaceSpec {
+            cwd: run_cwd,
+            branch: resume_branch,
+            provider_session_id: provider_session_id.clone(),
+            resumed_from_run_id,
+        }),
+        message,
+        current_branch_name,
+        Some(revision_prompt.to_string()),
+        source_task.agent_type.as_deref(),
+        explicit_provider,
+    )?;
+    // The stage's current definition must still resolve to a resumable
+    // Claude PTY session; a def that changed provider or session type since
+    // the recorded run cannot continue that run's conversation. Nothing was
+    // created on disk for the resume, so discarding it is safe.
+    if prepared.agent_provider != "claude"
+        || prepared.provider_session_id.as_deref() != Some(provider_session_id.as_str())
+    {
+        return fall_back("stage no longer resolves to a resumable Claude session");
+    }
+    log::info!(
+        "revision resumes task {task_id} stage '{}' from run {} in {}",
+        target_stage.name,
+        run.id,
+        prepared.cwd
+    );
+    Ok(Some(prepared))
 }
 
 pub(crate) fn resolve_stage_transition(

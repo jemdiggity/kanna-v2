@@ -76,6 +76,7 @@ fn build_agent_command_adds_claude_kanna_preamble_as_system_prompt() {
         Some(&preamble),
         None,
         None,
+        None,
     );
 
     assert!(command.contains("--append-system-prompt '"));
@@ -165,6 +166,7 @@ fn build_agent_command_launches_antigravity_with_prepended_kanna_context() {
         Some(&preamble),
         None,
         Some("/tmp/repo/.kanna-worktrees/task-123"),
+        None,
     );
 
     assert!(command.starts_with(
@@ -212,6 +214,7 @@ fn build_agent_command_registers_codex_kanna_mcp_with_config_overrides() {
         Some("Kanna preamble."),
         Some(mcp_config.to_string_lossy().as_ref()),
         None,
+        None,
     );
 
     assert!(command.starts_with("codex "));
@@ -238,6 +241,7 @@ fn build_agent_command_registers_copilot_kanna_mcp_with_additional_config() {
         Some("Kanna preamble."),
         Some(mcp_config.to_string_lossy().as_ref()),
         None,
+        None,
     );
 
     assert!(command.starts_with("copilot "));
@@ -260,6 +264,7 @@ fn build_agent_command_registers_opencode_kanna_mcp_with_inline_config() {
         &[],
         Some("Kanna preamble."),
         Some(mcp_config.to_string_lossy().as_ref()),
+        None,
         None,
     );
 

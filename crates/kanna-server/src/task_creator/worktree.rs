@@ -117,6 +117,27 @@ pub(super) fn generate_task_id() -> Result<String, String> {
     Ok(bytes.iter().map(|byte| format!("{:02x}", byte)).collect())
 }
 
+/// Random UUIDv4 for a fresh agent-CLI session (`claude --session-id`
+/// requires a valid UUID).
+pub(super) fn generate_agent_session_uuid() -> Result<String, String> {
+    let mut bytes = [0u8; 16];
+    File::open("/dev/urandom")
+        .map_err(|e| format!("failed to open /dev/urandom: {}", e))?
+        .read_exact(&mut bytes)
+        .map_err(|e| format!("failed to read random bytes: {}", e))?;
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let hex: Vec<String> = bytes.iter().map(|byte| format!("{:02x}", byte)).collect();
+    Ok(format!(
+        "{}-{}-{}-{}-{}",
+        hex[0..4].join(""),
+        hex[4..6].join(""),
+        hex[6..8].join(""),
+        hex[8..10].join(""),
+        hex[10..16].join(""),
+    ))
+}
+
 pub(super) fn fetch_start_point(repo_path: &str, default_branch: Option<&str>) -> Option<String> {
     let branch = default_branch.unwrap_or("main");
     let fetch_success = Command::new("git")

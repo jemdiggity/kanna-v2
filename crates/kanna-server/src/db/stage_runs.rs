@@ -10,8 +10,9 @@ impl Db {
     pub fn insert_stage_run(&self, run: NewStageRun<'_>) -> Result<(), rusqlite::Error> {
         self.conn.execute(
             "INSERT INTO stage_run
-             (id, task_id, stage, kind, agent, agent_provider, model, status, result, feedback, session_id)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             (id, task_id, stage, kind, agent, agent_provider, model, status, result, feedback,
+              session_id, provider_session_id, cwd, resumed_from_run_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 run.id,
                 run.task_id,
@@ -24,6 +25,9 @@ impl Db {
                 run.result,
                 run.feedback,
                 run.session_id,
+                run.provider_session_id,
+                run.cwd,
+                run.resumed_from_run_id,
             ),
         )?;
         Ok(())
@@ -36,7 +40,7 @@ impl Db {
     ) -> Result<Vec<StageRun>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
             "SELECT id, task_id, stage, kind, agent, agent_provider, model, status, result, feedback,
-                    session_id, started_at, finished_at
+                    session_id, provider_session_id, cwd, resumed_from_run_id, started_at, finished_at
              FROM stage_run
              WHERE task_id = ?
              ORDER BY datetime(started_at) ASC, id ASC",
@@ -51,12 +55,44 @@ impl Db {
             .conn
             .query_row(
                 "SELECT id, task_id, stage, kind, agent, agent_provider, model, status, result,
-                        feedback, session_id, started_at, finished_at
+                        feedback, session_id, provider_session_id, cwd, resumed_from_run_id,
+                        started_at, finished_at
                  FROM stage_run
                  WHERE task_id = ?
                  ORDER BY datetime(started_at) DESC, id DESC
                  LIMIT 1",
                 [task_id],
+                stage_run_from_row,
+            )
+            .optional();
+        match run {
+            Ok(run) => Ok(run),
+            Err(err) if is_missing_stage_run_table(&err) => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+
+    /// The most recent main run of `stage` whose provider session could be
+    /// resumed: it recorded both the agent CLI's own session id and the
+    /// worktree it ran in. Whether resumption is actually possible (worktree
+    /// still on disk, transcript present, tips match) is the caller's check.
+    pub fn latest_resumable_stage_run(
+        &self,
+        task_id: &str,
+        stage: &str,
+    ) -> Result<Option<StageRun>, rusqlite::Error> {
+        let run = self
+            .conn
+            .query_row(
+                "SELECT id, task_id, stage, kind, agent, agent_provider, model, status, result,
+                        feedback, session_id, provider_session_id, cwd, resumed_from_run_id,
+                        started_at, finished_at
+                 FROM stage_run
+                 WHERE task_id = ? AND stage = ? AND kind = 'main'
+                   AND provider_session_id IS NOT NULL AND cwd IS NOT NULL
+                 ORDER BY datetime(started_at) DESC, id DESC
+                 LIMIT 1",
+                [task_id, stage],
                 stage_run_from_row,
             )
             .optional();
@@ -213,7 +249,10 @@ fn stage_run_from_row(row: &rusqlite::Row<'_>) -> Result<StageRun, rusqlite::Err
         result: row.get(8)?,
         feedback: row.get(9)?,
         session_id: row.get(10)?,
-        started_at: row.get(11)?,
-        finished_at: row.get(12)?,
+        provider_session_id: row.get(11)?,
+        cwd: row.get(12)?,
+        resumed_from_run_id: row.get(13)?,
+        started_at: row.get(14)?,
+        finished_at: row.get(15)?,
     })
 }

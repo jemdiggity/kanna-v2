@@ -65,7 +65,8 @@ impl Db {
                 base_ref TEXT,
                 notify_task_id TEXT,
                 notified_at TEXT,
-                parent_task_id TEXT
+                parent_task_id TEXT,
+                agent_session_id TEXT
             );
 
             CREATE TABLE worktree (
@@ -94,6 +95,9 @@ impl Db {
                 result TEXT,
                 feedback TEXT,
                 session_id TEXT,
+                provider_session_id TEXT,
+                cwd TEXT,
+                resumed_from_run_id TEXT,
                 started_at TEXT NOT NULL DEFAULT (datetime('now')),
                 finished_at TEXT
             );

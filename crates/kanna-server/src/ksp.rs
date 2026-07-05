@@ -1320,6 +1320,7 @@ mod tests {
                         session_id: "shell-wt-reattach-1".to_string(),
                         code: 0,
                         resume_session_id: None,
+                        killed: false,
                     });
                 }
                 for event in events {

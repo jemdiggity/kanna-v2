@@ -391,12 +391,14 @@ async fn request_revision_route_preserves_title_and_sends_revision_prompt() {
                     assert_eq!(params.agent_provider, AgentProvider::Codex);
                     assert!(params.cwd.contains(".kanna-worktrees/task-"));
                     assert!(params.prompt.contains("Implement revision:"));
+                    // A fresh revision agent gets the composed context: the
+                    // original task prompt plus the reviewer's feedback.
                     assert!(params
                         .prompt
-                        .contains("Add E2E coverage for title preservation."));
-                    assert!(!params
+                        .contains("Reviewer feedback:\nAdd E2E coverage for title preservation."));
+                    assert!(params
                         .prompt
-                        .contains("Review prompt that should stay hidden."));
+                        .contains("Original task:\nOriginal task prompt for revision context."));
                     session_id
                 }
                 DaemonCommand::Spawn {
@@ -410,8 +412,10 @@ async fn request_revision_route_preserves_title_and_sends_revision_prompt() {
                     assert!(cwd.contains(".kanna-worktrees/task-"));
                     let command_line = args.join(" ");
                     assert!(command_line.contains("Implement revision:"));
-                    assert!(command_line.contains("Add E2E coverage for title preservation."));
-                    assert!(!command_line.contains("Review prompt that should stay hidden."));
+                    assert!(command_line
+                        .contains("Reviewer feedback:\nAdd E2E coverage for title preservation."));
+                    assert!(command_line
+                        .contains("Original task:\nOriginal task prompt for revision context."));
                     session_id
                 }
                 other => panic!("expected revision spawn command, got {:?}", other),
@@ -453,7 +457,7 @@ async fn request_revision_route_preserves_title_and_sends_revision_prompt() {
     db.insert_test_pipeline_item(
         "review-task",
         "repo-1",
-        "Review prompt that should stay hidden.",
+        "Original task prompt for revision context.",
         Some("Preserved review title"),
         "review",
         "2026-05-12 07:00:00",
@@ -507,7 +511,7 @@ async fn request_revision_route_preserves_title_and_sends_revision_prompt() {
     );
     assert_eq!(
         reviewed.prompt.as_deref(),
-        Some("Review prompt that should stay hidden."),
+        Some("Original task prompt for revision context."),
         "revision must not overwrite the task's original prompt"
     );
 
