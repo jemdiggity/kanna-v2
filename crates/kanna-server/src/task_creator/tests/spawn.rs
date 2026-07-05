@@ -21,6 +21,7 @@ async fn spawn_prepared_task_sends_spawn_agent_for_agent_sessions() {
         stage_agent: Some("implement".to_string()),
         agent_provider: "claude".to_string(),
         model: Some("sonnet".to_string()),
+        provider_session_id: None,
         session: PreparedSessionSpawn::Agent {
             agent_provider: DaemonAgentProvider::Claude,
             prompt: "Do work".to_string(),
@@ -85,6 +86,7 @@ async fn spawn_prepared_task_records_running_stage_run_after_session_created() {
         stage_agent: Some("reviewer".to_string()),
         agent_provider: "claude".to_string(),
         model: Some("sonnet".to_string()),
+        provider_session_id: None,
         session: PreparedSessionSpawn::Agent {
             agent_provider: DaemonAgentProvider::Claude,
             prompt: "Do work".to_string(),

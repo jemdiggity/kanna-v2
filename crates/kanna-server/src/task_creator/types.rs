@@ -39,6 +39,9 @@ pub(crate) struct PreparedTaskSpawn {
     pub(super) stage_agent: Option<String>,
     pub(super) agent_provider: String,
     pub(super) model: Option<String>,
+    /// The agent CLI's own session id assigned at spawn (Claude PTY only);
+    /// recorded on the stage run so a later revision can resume it.
+    pub(super) provider_session_id: Option<String>,
     pub(super) session: PreparedSessionSpawn,
 }
 
@@ -104,6 +107,7 @@ pub(crate) struct PreparedStageRerun {
     pub(super) stage_agent: Option<String>,
     pub(super) agent_provider: String,
     pub(super) model: Option<String>,
+    pub(super) provider_session_id: Option<String>,
     pub(super) cwd: String,
     pub(super) env: HashMap<String, String>,
     pub(super) session: PreparedSessionSpawn,
@@ -119,9 +123,45 @@ pub(crate) struct ForkedWorkspace {
     pub(super) worktree_path: String,
 }
 
+/// Input to `prepare_stage_run_spawn`: which workspace the run should use.
+pub(super) enum RunWorkspaceSpec {
+    /// Keep the task's current workspace (post fallbacks, reruns).
+    Current,
+    /// Fork a fresh branch + worktree from the task's committed tip.
+    Fork { branch: String },
+    /// Adopt a previous run's workspace and resume its agent-CLI session.
+    Resume(ResumeWorkspaceSpec),
+}
+
+pub(super) struct ResumeWorkspaceSpec {
+    /// The previous run's worktree (still on disk).
+    pub(super) cwd: String,
+    /// Branch checked out in that worktree; the task's branch moves back to
+    /// it.
+    pub(super) branch: String,
+    /// The agent-CLI session id to resume.
+    pub(super) provider_session_id: String,
+    /// The stage run whose session is being resumed.
+    pub(super) resumed_from_run_id: String,
+}
+
+/// Where a prepared stage run executes, and what the spawn must do about it.
+pub(crate) enum PreparedRunWorkspace {
+    /// The task's current workspace (post fallbacks, reruns).
+    Current,
+    /// A freshly created branch + worktree; the spawn moves
+    /// `pipeline_item.branch` and the worktree record with it, and rolls the
+    /// fork back if the daemon spawn fails.
+    Forked(ForkedWorkspace),
+    /// A previous run's still-on-disk workspace adopted for a resumed
+    /// revision: moves the task's branch and worktree record like a fork,
+    /// but was never created here and is never rolled back.
+    Resumed(ForkedWorkspace),
+}
+
 /// A new stage run spawned on an existing task: same task id, but a swap runs
-/// in a freshly forked workspace (`forked_workspace`), while a post fallback
-/// or rerun keeps the task's current one.
+/// in a freshly forked workspace, a resumed revision reopens a previous run's
+/// workspace, and a post fallback or rerun keeps the task's current one.
 pub(crate) struct PreparedStageRunSpawn {
     pub(super) task_id: String,
     pub(super) session_id: String,
@@ -133,15 +173,38 @@ pub(crate) struct PreparedStageRunSpawn {
     pub(super) run_stage: String,
     /// `stage_run.kind`: "main" or "post".
     pub(super) run_kind: &'static str,
-    /// Present when this run forked a fresh workspace; the spawn updates
-    /// `pipeline_item.branch` and the worktree record, and rolls the fork
-    /// back if the daemon spawn fails.
-    pub(super) forked_workspace: Option<ForkedWorkspace>,
+    pub(super) workspace: PreparedRunWorkspace,
     pub(super) stage_agent: Option<String>,
     pub(super) agent_provider: String,
     pub(super) model: Option<String>,
     pub(super) feedback: Option<String>,
+    /// The agent CLI's own session id this run starts (fresh assign) or
+    /// continues (resume); recorded on the stage run.
+    pub(super) provider_session_id: Option<String>,
+    /// Set on a resumed revision: the stage run whose provider session this
+    /// run continues.
+    pub(super) resumed_from_run_id: Option<String>,
     pub(super) cwd: String,
     pub(super) env: HashMap<String, String>,
     pub(super) session: PreparedSessionSpawn,
+}
+
+impl PreparedStageRunSpawn {
+    /// The freshly created workspace, when this run forked one.
+    #[cfg(test)]
+    pub(crate) fn forked_workspace(&self) -> Option<&ForkedWorkspace> {
+        match &self.workspace {
+            PreparedRunWorkspace::Forked(workspace) => Some(workspace),
+            _ => None,
+        }
+    }
+
+    /// The previous run's workspace adopted by a resumed revision.
+    #[cfg(test)]
+    pub(crate) fn resumed_workspace(&self) -> Option<&ForkedWorkspace> {
+        match &self.workspace {
+            PreparedRunWorkspace::Resumed(workspace) => Some(workspace),
+            _ => None,
+        }
+    }
 }

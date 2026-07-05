@@ -5,6 +5,17 @@ use kanna_agent_protocol::mcp::{
 };
 use std::path::Path;
 
+/// How a Claude PTY spawn binds to the CLI's own session store: `Assign`
+/// starts a fresh conversation under a Kanna-chosen UUID (`--session-id`) so
+/// a later revision can resume it; `Resume` reopens a previous run's
+/// conversation (`--resume`). The desktop TS spawn path
+/// (`apps/desktop/src/stores/agentCommand.ts`) follows the same convention.
+pub(super) enum ClaudeSessionBinding {
+    Assign(String),
+    Resume(String),
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(super) fn build_agent_command(
     provider: &AgentProvider,
     prompt: &str,
@@ -14,6 +25,7 @@ pub(super) fn build_agent_command(
     kanna_preamble: Option<&str>,
     mcp_config_path: Option<&str>,
     worktree_path: Option<&str>,
+    claude_session: Option<&ClaudeSessionBinding>,
 ) -> String {
     let prompt_with_fallback = match provider {
         AgentProvider::Claude => prompt.to_string(),
@@ -51,6 +63,15 @@ pub(super) fn build_agent_command(
                     "--mcp-config '{}'",
                     shell_single_quote(mcp_config_path)
                 ));
+            }
+            match claude_session {
+                Some(ClaudeSessionBinding::Assign(session_id)) => {
+                    flags.push(format!("--session-id '{}'", shell_single_quote(session_id)));
+                }
+                Some(ClaudeSessionBinding::Resume(session_id)) => {
+                    flags.push(format!("--resume '{}'", shell_single_quote(session_id)));
+                }
+                None => {}
             }
             // `--` terminates option parsing. Without it, variadic flags eat
             // the positional prompt: `--mcp-config <path> '<prompt>'` makes

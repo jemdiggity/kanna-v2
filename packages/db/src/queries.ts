@@ -2,6 +2,7 @@ import type {
   Repo,
   PipelineItem,
   Setting,
+  StageRun,
   TaskBlocker,
   TaskPort,
   TerminalSession,
@@ -149,6 +150,34 @@ export async function insertWorktree(
        path = excluded.path,
        branch = excluded.branch`,
     [worktree.id, worktree.pipeline_item_id, worktree.path, worktree.branch],
+  );
+}
+
+export async function insertStageRun(
+  db: DbHandle,
+  run: Omit<StageRun, "started_at" | "finished_at">,
+): Promise<void> {
+  await db.execute(
+    `INSERT INTO stage_run
+       (id, task_id, stage, kind, agent, agent_provider, model, status, result, feedback,
+        session_id, provider_session_id, cwd, resumed_from_run_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      run.id,
+      run.task_id,
+      run.stage,
+      run.kind,
+      run.agent,
+      run.agent_provider,
+      run.model,
+      run.status,
+      run.result,
+      run.feedback,
+      run.session_id,
+      run.provider_session_id,
+      run.cwd,
+      run.resumed_from_run_id,
+    ],
   );
 }
 

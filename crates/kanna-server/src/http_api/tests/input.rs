@@ -86,6 +86,9 @@ async fn signal_agent_route_sends_message_to_open_running_agent_task() {
         result: None,
         feedback: None,
         session_id: Some("merge-session"),
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
     })
     .unwrap();
     drop(db);

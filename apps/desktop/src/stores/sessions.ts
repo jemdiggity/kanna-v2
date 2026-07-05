@@ -422,7 +422,7 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
     });
     const runtimeUserPrompt = buildKannaRuntimeUserPrompt(prompt, { taskId: sessionId });
     const permissionFlags = getAgentPermissionFlags(provider, options?.permissionMode);
-    const { agentCmd, agentCmdPreamble } = await buildAgentCommand(provider, {
+    const { agentCmd, agentCmdPreamble, agentSessionId } = await buildAgentCommand(provider, {
       taskId: sessionId,
       prompt,
       runtimeSystemPrompt,
@@ -450,6 +450,7 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
       agentProvider: provider,
       kannaCliPath,
       mcpConfigPath,
+      agentSessionId,
     };
   }
 

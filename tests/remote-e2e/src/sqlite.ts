@@ -93,6 +93,9 @@ CREATE TABLE IF NOT EXISTS stage_run (
   result TEXT,
   feedback TEXT,
   session_id TEXT,
+  provider_session_id TEXT,
+  cwd TEXT,
+  resumed_from_run_id TEXT,
   started_at TEXT NOT NULL DEFAULT (datetime('now')),
   finished_at TEXT
 );

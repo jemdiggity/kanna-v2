@@ -431,6 +431,9 @@ fn prepare_advance_stage_substitutes_previous_stage_run_result_before_legacy_sta
         result: Some("{\"source\":\"stage_run\"}"),
         feedback: Some("done"),
         session_id: Some("task-1"),
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
     })
     .unwrap();
     db.finish_stage_run(
@@ -659,6 +662,9 @@ async fn prepare_advance_stage_forks_workspace_for_next_run_in_same_task() {
         result: None,
         feedback: None,
         session_id: Some("task-1"),
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
     })
     .unwrap();
 
@@ -676,12 +682,11 @@ async fn prepare_advance_stage_forks_workspace_for_next_run_in_same_task() {
     // The transition forks: same task, fresh branch + worktree from the
     // committed tip of task-source.
     let fork_branch = run
-        .forked_workspace
-        .as_ref()
+        .forked_workspace()
         .expect("stage transition forks a workspace")
         .branch
         .clone();
-    let fork_worktree = run.forked_workspace.as_ref().unwrap().worktree_path.clone();
+    let fork_worktree = run.forked_workspace().unwrap().worktree_path.clone();
     // Fork workspaces carry the durable task id plus a workspace counter:
     // the creation workspace is workspace 1, so the first fork is `-2`.
     assert_eq!(fork_branch, "task-task-1-2");
@@ -879,10 +884,7 @@ fn prepare_auto_stage_completion_spawns_next_run_in_same_task() {
     // The auto transition forks; $BRANCH resolves to the fork (the branch
     // the next agent actually works on) while $SOURCE_WORKTREE still points
     // at the previous stage's worktree.
-    let fork = run
-        .forked_workspace
-        .as_ref()
-        .expect("auto transition forks");
+    let fork = run.forked_workspace().expect("auto transition forks");
     assert_eq!(run.cwd, fork.worktree_path);
     let expected_prompt = format!(
         "PR agent for Fix stage promotion\n\nCreate PR for {} from {} after {{\"status\":\"success\",\"summary\":\"committed\"}}",
@@ -1037,6 +1039,9 @@ fn prepare_advance_stage_dispatches_post_into_running_session() {
         result: None,
         feedback: None,
         session_id: Some("task-1"),
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
     })
     .unwrap();
 
@@ -1097,6 +1102,9 @@ fn prepare_advance_stage_swaps_after_succeeded_post() {
         result: None,
         feedback: None,
         session_id: Some("task-1"),
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
     })
     .unwrap();
     db.finish_stage_run("run-post", "succeeded", None, None)
@@ -1110,10 +1118,7 @@ fn prepare_advance_stage_swaps_after_succeeded_post() {
     assert_eq!(run.next_stage, "pr");
     assert_eq!(run.run_kind, "main");
     // Stage transitions fork: fresh branch + worktree from the committed tip.
-    let fork = run
-        .forked_workspace
-        .as_ref()
-        .expect("swap forks a workspace");
+    let fork = run.forked_workspace().expect("swap forks a workspace");
     assert_ne!(fork.branch, "task-source");
     assert!(std::path::Path::new(&fork.worktree_path).is_dir());
     assert_eq!(run.cwd, fork.worktree_path);
@@ -1141,6 +1146,9 @@ fn prepare_advance_stage_overrides_running_post_with_swap() {
         result: None,
         feedback: None,
         session_id: Some("task-1"),
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
     })
     .unwrap();
 
@@ -1175,6 +1183,9 @@ fn prepare_advance_stage_redispatches_failed_post() {
         result: None,
         feedback: None,
         session_id: Some("task-1"),
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
     })
     .unwrap();
     db.finish_stage_run("run-post", "failed", None, None)
@@ -1299,6 +1310,9 @@ async fn dispatch_post_injects_message_into_live_session_and_records_post_run() 
         result: None,
         feedback: None,
         session_id: Some("task-1"),
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
     })
     .unwrap();
 
