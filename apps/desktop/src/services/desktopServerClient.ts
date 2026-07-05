@@ -111,3 +111,35 @@ export async function postDesktopOperatorEvents(events: DesktopOperatorEventInpu
 export function postDesktopOperatorEvent(event: DesktopOperatorEventInput): Promise<void> {
   return postDesktopOperatorEvents([event]);
 }
+
+export type DesktopAnalyticsBucketSize = "daily" | "weekly" | "monthly";
+
+export interface DesktopAnalyticsBucket {
+  key: string;
+  created: number;
+  closed: number;
+}
+
+export interface DesktopOperatorMetrics {
+  avgResponseTime: number | null;
+  avgDwellTime: number | null;
+  switchesPerHour: number | null;
+  focusScore: number | null;
+}
+
+export interface DesktopRepoAnalytics {
+  taskBuckets: DesktopAnalyticsBucket[];
+  bucketSize: DesktopAnalyticsBucketSize;
+  hasData: boolean;
+  avgTimeInState: {
+    working: number;
+    idle: number;
+    unread: number;
+  };
+  operatorMetrics: DesktopOperatorMetrics;
+  hasOperatorData: boolean;
+}
+
+export async function fetchDesktopRepoAnalytics(repoId: string): Promise<DesktopRepoAnalytics> {
+  return await requestJson<DesktopRepoAnalytics>(`/v1/analytics/repos/${encodeURIComponent(repoId)}`);
+}
