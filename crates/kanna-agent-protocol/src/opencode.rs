@@ -9,7 +9,8 @@ use std::collections::HashSet;
 use serde_json::Value;
 
 use crate::adapter::{
-    Capabilities, InterruptAction, ProviderAdapter, SpawnCtx, SpawnSpec, TurnModel,
+    prompt_with_system_prompt, Capabilities, InterruptAction, ProviderAdapter, SpawnCtx, SpawnSpec,
+    TurnModel,
 };
 use crate::events::{truncate_text, AgentEvent, PermissionDecision, TurnStats, TurnStatus};
 use crate::mcp::{opencode_mcp_config_content, read_kanna_mcp_server};
@@ -41,6 +42,10 @@ impl OpencodeAdapter {
             "--format".to_string(),
             "json".to_string(),
         ];
+        if !ctx.cwd.trim().is_empty() {
+            args.push("--dir".to_string());
+            args.push(ctx.cwd.clone());
+        }
         if Self::should_skip_permissions(ctx) {
             args.push("--dangerously-skip-permissions".to_string());
         }
@@ -268,7 +273,10 @@ impl ProviderAdapter for OpencodeAdapter {
 
     fn initial_spawn(&self, ctx: &SpawnCtx) -> SpawnSpec {
         let mut args = Self::base_args(ctx);
-        args.push(ctx.prompt.clone());
+        args.push(prompt_with_system_prompt(
+            ctx.system_prompt.as_deref(),
+            &ctx.prompt,
+        ));
         SpawnSpec {
             executable: "opencode".to_string(),
             args,
@@ -340,5 +348,25 @@ fn value_to_text(value: &Value) -> String {
         Value::String(text) => text.clone(),
         Value::Null => String::new(),
         other => other.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn initial_spawn_prepends_system_prompt_to_user_prompt() {
+        let adapter = OpencodeAdapter::new();
+        let spec = adapter.initial_spawn(&SpawnCtx {
+            prompt: "ship it".to_string(),
+            system_prompt: Some("Kanna task context".to_string()),
+            ..SpawnCtx::default()
+        });
+
+        assert_eq!(
+            spec.args.last().map(String::as_str),
+            Some("Kanna task context\n\nship it")
+        );
     }
 }

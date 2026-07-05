@@ -181,6 +181,9 @@ fn stage_run_lifecycle_inserts_lists_and_finishes_runs() {
         result: None,
         feedback: None,
         session_id: Some("session-1"),
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
     })
     .unwrap();
 
@@ -233,6 +236,9 @@ fn close_pipeline_item_cancels_running_stage_runs() {
         result: None,
         feedback: None,
         session_id: Some("task-1"),
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
     })
     .unwrap();
 
@@ -458,6 +464,9 @@ fn resolves_task_terminal_session_id_from_latest_running_stage_run() {
         result: None,
         feedback: None,
         session_id: Some("daemon-old"),
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
     })
     .unwrap();
     db.insert_stage_run(NewStageRun {
@@ -472,6 +481,9 @@ fn resolves_task_terminal_session_id_from_latest_running_stage_run() {
         result: None,
         feedback: Some("address review feedback"),
         session_id: Some("daemon-current"),
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
     })
     .unwrap();
 

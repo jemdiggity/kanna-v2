@@ -308,7 +308,13 @@
   },
   "commandPalette": {
     "placeholder": "명령어를 입력하세요...",
-    "noCommands": "명령어를 찾을 수 없습니다"
+    "noCommands": "명령어를 찾을 수 없습니다",
+    "createAgent": "에이전트 생성",
+    "createAgentDesc": "새 에이전트 정의 생성",
+    "createPipeline": "파이프라인 생성",
+    "createPipelineDesc": "새 파이프라인 정의 생성",
+    "createConfig": "설정 생성",
+    "createConfigDesc": ".kanna/config.json 생성 또는 업데이트"
   },
   "terminalTabs": {
     "noSession": "활성 에이전트 세션 없음"

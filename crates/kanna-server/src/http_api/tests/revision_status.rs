@@ -43,6 +43,40 @@ async fn request_revision_route_uses_revision_requester() {
 }
 
 #[tokio::test]
+async fn request_revision_error_body_survives_error_logging_middleware() {
+    let app = super::test_router("desktop-revision-error", "Studio Mac");
+
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks/missing-task/actions/request-revision")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "targetStage": "in progress",
+                        "summary": "QA failed",
+                        "prompt": "Add the missing coverage."
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // The error-logging middleware buffers error bodies to record them; the
+    // client must still receive the original status and message.
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let message = String::from_utf8_lossy(&body);
+    assert!(
+        message.contains("task not found: missing-task"),
+        "error body should reach the client: {message}"
+    );
+}
+
+#[tokio::test]
 async fn request_revision_route_resolves_branch_style_task_id() {
     use kanna_daemon::protocol::{AgentProvider, Command as DaemonCommand, Event as DaemonEvent};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -357,12 +391,14 @@ async fn request_revision_route_preserves_title_and_sends_revision_prompt() {
                     assert_eq!(params.agent_provider, AgentProvider::Codex);
                     assert!(params.cwd.contains(".kanna-worktrees/task-"));
                     assert!(params.prompt.contains("Implement revision:"));
+                    // A fresh revision agent gets the composed context: the
+                    // original task prompt plus the reviewer's feedback.
                     assert!(params
                         .prompt
-                        .contains("Add E2E coverage for title preservation."));
-                    assert!(!params
+                        .contains("Reviewer feedback:\nAdd E2E coverage for title preservation."));
+                    assert!(params
                         .prompt
-                        .contains("Review prompt that should stay hidden."));
+                        .contains("Original task:\nOriginal task prompt for revision context."));
                     session_id
                 }
                 DaemonCommand::Spawn {
@@ -376,8 +412,10 @@ async fn request_revision_route_preserves_title_and_sends_revision_prompt() {
                     assert!(cwd.contains(".kanna-worktrees/task-"));
                     let command_line = args.join(" ");
                     assert!(command_line.contains("Implement revision:"));
-                    assert!(command_line.contains("Add E2E coverage for title preservation."));
-                    assert!(!command_line.contains("Review prompt that should stay hidden."));
+                    assert!(command_line
+                        .contains("Reviewer feedback:\nAdd E2E coverage for title preservation."));
+                    assert!(command_line
+                        .contains("Original task:\nOriginal task prompt for revision context."));
                     session_id
                 }
                 other => panic!("expected revision spawn command, got {:?}", other),
@@ -419,7 +457,7 @@ async fn request_revision_route_preserves_title_and_sends_revision_prompt() {
     db.insert_test_pipeline_item(
         "review-task",
         "repo-1",
-        "Review prompt that should stay hidden.",
+        "Original task prompt for revision context.",
         Some("Preserved review title"),
         "review",
         "2026-05-12 07:00:00",
@@ -473,7 +511,7 @@ async fn request_revision_route_preserves_title_and_sends_revision_prompt() {
     );
     assert_eq!(
         reviewed.prompt.as_deref(),
-        Some("Review prompt that should stay hidden."),
+        Some("Original task prompt for revision context."),
         "revision must not overwrite the task's original prompt"
     );
 

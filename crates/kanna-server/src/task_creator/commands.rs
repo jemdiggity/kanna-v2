@@ -5,6 +5,17 @@ use kanna_agent_protocol::mcp::{
 };
 use std::path::Path;
 
+/// How a Claude PTY spawn binds to the CLI's own session store: `Assign`
+/// starts a fresh conversation under a Kanna-chosen UUID (`--session-id`) so
+/// a later revision can resume it; `Resume` reopens a previous run's
+/// conversation (`--resume`). The desktop TS spawn path
+/// (`apps/desktop/src/stores/agentCommand.ts`) follows the same convention.
+pub(super) enum ClaudeSessionBinding {
+    Assign(String),
+    Resume(String),
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(super) fn build_agent_command(
     provider: &AgentProvider,
     prompt: &str,
@@ -13,6 +24,8 @@ pub(super) fn build_agent_command(
     allowed_tools: &[String],
     kanna_preamble: Option<&str>,
     mcp_config_path: Option<&str>,
+    worktree_path: Option<&str>,
+    claude_session: Option<&ClaudeSessionBinding>,
 ) -> String {
     let prompt_with_fallback = match provider {
         AgentProvider::Claude => prompt.to_string(),
@@ -50,6 +63,15 @@ pub(super) fn build_agent_command(
                     "--mcp-config '{}'",
                     shell_single_quote(mcp_config_path)
                 ));
+            }
+            match claude_session {
+                Some(ClaudeSessionBinding::Assign(session_id)) => {
+                    flags.push(format!("--session-id '{}'", shell_single_quote(session_id)));
+                }
+                Some(ClaudeSessionBinding::Resume(session_id)) => {
+                    flags.push(format!("--resume '{}'", shell_single_quote(session_id)));
+                }
+                None => {}
             }
             // `--` terminates option parsing. Without it, variadic flags eat
             // the positional prompt: `--mcp-config <path> '<prompt>'` makes
@@ -111,13 +133,31 @@ pub(super) fn build_agent_command(
             if let Some(model) = model {
                 flags.push(format!("--model {}", model));
             }
+            let mut setup = Vec::new();
+            if let Some(worktree_path) = worktree_path {
+                let alias_base = "/tmp/kanna-antigravity-workspaces";
+                let alias_path = format!(
+                    "{}/{}",
+                    alias_base,
+                    safe_antigravity_alias_name(worktree_path)
+                );
+                setup.push(format!("mkdir -p '{}'", shell_single_quote(alias_base)));
+                setup.push(format!("rm -f '{}'", shell_single_quote(&alias_path)));
+                setup.push(format!(
+                    "ln -s '{}' '{}'",
+                    shell_single_quote(worktree_path),
+                    shell_single_quote(&alias_path)
+                ));
+                flags.push(format!("--add-dir '{}'", shell_single_quote(&alias_path)));
+            }
             let mut parts = vec![provider_binary_name(*provider).to_string()];
             parts.extend(flags);
             if !prompt.is_empty() {
                 parts.push("--prompt-interactive".to_string());
                 parts.push(format!("'{}'", escaped_prompt));
             }
-            parts.join(" ")
+            setup.push(parts.join(" "));
+            setup.join(" && ")
         }
     }
 }
@@ -214,11 +254,40 @@ pub(super) fn build_task_shell_command(
     command_parts.join(" && ")
 }
 
+pub(super) fn build_teardown_shell_command(teardown_cmds: &[String]) -> String {
+    if teardown_cmds.is_empty() {
+        return "exit 0".to_string();
+    }
+
+    let teardown_parts = teardown_cmds
+        .iter()
+        .map(|cmd| {
+            let escaped = shell_single_quote(cmd);
+            format!(
+                "( {{ printf '\\033[2m$ %s\\033[0m\\n' '{escaped}' && ( {cmd} ); }} || printf '\\033[31mTeardown command failed; continuing: %s\\033[0m\\n' '{escaped}' )"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ; ");
+
+    format!(
+        "printf '\\033[33mRunning teardown...\\033[0m\\n' ; {} ; printf '\\n' ; exit 0",
+        teardown_parts
+    )
+}
+
 /// Canonical Kanna runtime guidance shared with the desktop frontend.
 /// `packages/core/src/pipeline/prompt-builder.ts` mirrors this file as a TS
 /// constant; a sync test there keeps both sides byte-identical.
 const KANNA_TASK_ENVIRONMENT_TEMPLATE: &str =
     include_str!("../../../../packages/core/src/pipeline/kanna-task-environment.md");
+
+// Completion guidance depends on the stage's transition policy: only `auto`
+// stages advance when the agent records a successful result; `manual` stages
+// wait for the user to review and advance. Mirrors COMPLETION_GUIDANCE in
+// prompt-builder.ts — keep the texts in sync.
+const COMPLETION_AUTO: &str = "This stage's transition is `auto`: when this stage's goal is achieved, record completion so Kanna can advance the pipeline: prefer MCP `kanna_complete_stage` with status `success` and a short summary; fallback: `kanna-cli stage-complete --task-id \"$KANNA_TASK_ID\" --status success --summary \"...\"`. If you are blocked or the goal cannot be met, record status `failure` with the reason instead of stopping silently.";
+const COMPLETION_MANUAL: &str = "This stage's transition is `manual`: recording a successful result does not advance the pipeline — the user reviews your work and advances the stage themselves. When this stage's goal is achieved, finish with a clear summary of what you did; record completion only if this stage's prompt asks for it. If you are blocked or the goal cannot be met, record status `failure` with the reason instead of stopping silently: prefer MCP `kanna_complete_stage`; fallback: `kanna-cli stage-complete --task-id \"$KANNA_TASK_ID\" --status failure --summary \"...\"`.";
 
 pub(super) fn build_kanna_preamble(
     provider: &AgentProvider,
@@ -233,9 +302,15 @@ pub(super) fn build_kanna_preamble(
     let task_context = format!(
         "This session was launched by Kanna as task `{task_id}`, stage `{stage_name}` of pipeline `{pipeline_name}` (transition: `{transition}`)."
     );
+    let completion = if transition == "auto" {
+        COMPLETION_AUTO
+    } else {
+        COMPLETION_MANUAL
+    };
     let rendered = KANNA_TASK_ENVIRONMENT_TEMPLATE
         .trim_end()
-        .replace("{{TASK_CONTEXT}}", &task_context);
+        .replace("{{TASK_CONTEXT}}", &task_context)
+        .replace("{{COMPLETION}}", completion);
     match mcp_config_path {
         Some(_) => rendered.replace("{{MCP_STATUS}}", &kanna_mcp_launch_line(*provider)),
         None => rendered.replace("- {{MCP_STATUS}}\n", ""),
@@ -264,4 +339,20 @@ fn kanna_mcp_launch_line(provider: AgentProvider) -> String {
 
 fn shell_single_quote(value: &str) -> String {
     value.replace('\'', "'\\''")
+}
+
+fn safe_antigravity_alias_name(value: &str) -> String {
+    Path::new(value)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(value)
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '.' || ch == '_' || ch == '-' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }

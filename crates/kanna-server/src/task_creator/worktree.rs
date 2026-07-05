@@ -46,7 +46,7 @@ pub(super) fn remove_prepared_worktree(worktree_path: &str, branch: &str) -> Res
 
     Ok(())
 }
-pub(super) fn resolve_current_source_worktree_branch(
+pub(crate) fn resolve_current_source_worktree_branch(
     repo_path: &str,
     stored_branch: Option<&str>,
 ) -> Option<String> {
@@ -74,6 +74,40 @@ pub(super) fn resolve_current_source_worktree_branch(
     }
 }
 
+/// Branch/worktree name for a stage fork: the task's durable id plus a
+/// workspace counter (`task-<id>-2`, `task-<id>-3`, ...). The creation
+/// workspace `task-<id>` is workspace 1, so forks count from 2. Each
+/// workspace is an ephemeral manifestation of the task; the visible id ties
+/// it back to the durable row. Suffixes whose branch or worktree directory
+/// still exists are skipped (revisions can revisit a stage).
+pub(super) fn next_fork_branch(repo_path: &str, task_id: &str) -> Result<String, String> {
+    for n in 2u32..10_000 {
+        let candidate = format!("task-{}-{}", task_id, n);
+        let branch_exists = Command::new("git")
+            .args([
+                "show-ref",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{}", candidate),
+            ])
+            .current_dir(repo_path)
+            .status()
+            .map_err(|e| format!("failed to run git show-ref: {}", e))?
+            .success();
+        let worktree_exists = Path::new(repo_path)
+            .join(".kanna-worktrees")
+            .join(&candidate)
+            .exists();
+        if !branch_exists && !worktree_exists {
+            return Ok(candidate);
+        }
+    }
+    Err(format!(
+        "no free fork workspace suffix for task {}",
+        task_id
+    ))
+}
+
 pub(super) fn generate_task_id() -> Result<String, String> {
     let mut bytes = [0u8; 4];
     File::open("/dev/urandom")
@@ -81,6 +115,27 @@ pub(super) fn generate_task_id() -> Result<String, String> {
         .read_exact(&mut bytes)
         .map_err(|e| format!("failed to read random bytes: {}", e))?;
     Ok(bytes.iter().map(|byte| format!("{:02x}", byte)).collect())
+}
+
+/// Random UUIDv4 for a fresh agent-CLI session (`claude --session-id`
+/// requires a valid UUID).
+pub(super) fn generate_agent_session_uuid() -> Result<String, String> {
+    let mut bytes = [0u8; 16];
+    File::open("/dev/urandom")
+        .map_err(|e| format!("failed to open /dev/urandom: {}", e))?
+        .read_exact(&mut bytes)
+        .map_err(|e| format!("failed to read random bytes: {}", e))?;
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let hex: Vec<String> = bytes.iter().map(|byte| format!("{:02x}", byte)).collect();
+    Ok(format!(
+        "{}-{}-{}-{}-{}",
+        hex[0..4].join(""),
+        hex[4..6].join(""),
+        hex[6..8].join(""),
+        hex[8..10].join(""),
+        hex[10..16].join(""),
+    ))
 }
 
 pub(super) fn fetch_start_point(repo_path: &str, default_branch: Option<&str>) -> Option<String> {

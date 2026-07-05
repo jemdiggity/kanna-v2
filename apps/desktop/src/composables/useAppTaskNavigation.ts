@@ -68,6 +68,10 @@ function isActivityShortcutCandidate(item: { stage?: string; teardown_started_at
   return !isTaskTearingDown({ stage: item.stage, teardown_started_at: item.teardown_started_at });
 }
 
+function isUnpinnedActivityShortcutCandidate(item: { pinned?: number | boolean | null }): boolean {
+  return !Boolean(item.pinned);
+}
+
 export function useAppTaskNavigation({
   store,
   toast,
@@ -198,7 +202,11 @@ export function useAppTaskNavigation({
 
   async function selectReadTask(mode: "oldest" | "newest") {
     const target = selectTaskByActivity(
-      visibleSidebarItemsForCurrentRepo().filter((item) => isActivityShortcutCandidate(item) && !isBlocked(item.id)),
+      visibleSidebarItemsForCurrentRepo().filter((item) =>
+        isActivityShortcutCandidate(item)
+        && isUnpinnedActivityShortcutCandidate(item)
+        && !isBlocked(item.id)
+      ),
       mode,
       "idle",
     );
@@ -207,7 +215,10 @@ export function useAppTaskNavigation({
 
   async function selectUnreadTaskWithReadFallback(mode: "oldest" | "newest") {
     const target = selectTaskByActivity(
-      visibleSidebarItemsForCurrentRepo().filter(isActivityShortcutCandidate),
+      visibleSidebarItemsForCurrentRepo().filter((item) =>
+        isActivityShortcutCandidate(item)
+        && isUnpinnedActivityShortcutCandidate(item)
+      ),
       mode,
       "unread",
     );
@@ -478,20 +489,20 @@ export function useAppTaskNavigation({
     // Factory commands
     cmds.push({
       id: "create-agent",
-      label: "Create Agent",
-      description: "Create a new agent definition",
+      label: t('commandPalette.createAgent'),
+      description: t('commandPalette.createAgentDesc'),
       execute: () => { handleCreateAgent().catch((e) => console.error("[App] create agent failed:", e)); },
     });
     cmds.push({
       id: "create-pipeline",
-      label: "Create Pipeline",
-      description: "Create a new pipeline definition",
+      label: t('commandPalette.createPipeline'),
+      description: t('commandPalette.createPipelineDesc'),
       execute: () => { handleCreatePipeline().catch((e) => console.error("[App] create pipeline failed:", e)); },
     });
     cmds.push({
       id: "create-config",
-      label: "Create Config",
-      description: "Create or update .kanna/config.json",
+      label: t('commandPalette.createConfig'),
+      description: t('commandPalette.createConfigDesc'),
       execute: () => { handleCreateConfig().catch((e) => console.error("[App] create config failed:", e)); },
     });
     // Always include "New Custom Task" option

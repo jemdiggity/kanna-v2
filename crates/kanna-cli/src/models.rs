@@ -28,6 +28,19 @@ pub(crate) struct AddRepoRequest {
     pub(crate) name: Option<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SignalAgentRequest {
+    pub(crate) message: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SignalAgentResponse {
+    pub(crate) task_id: String,
+    pub(crate) created: bool,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TaskSummary {

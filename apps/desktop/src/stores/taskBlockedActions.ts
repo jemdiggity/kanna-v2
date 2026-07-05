@@ -14,7 +14,6 @@ import {
 import { invoke } from "../invoke";
 import { encodeAgentPromptInputChunks } from "./daemonInput";
 import { resolveAgentProvider } from "./agent-provider";
-import { hasLiveTaskResources } from "./taskLifecycleEnv";
 import { readRepoConfig, requireService, type StoreContext } from "./state";
 import type { PortsStore } from "./ports";
 import type { TasksApi } from "./tasks";
@@ -44,6 +43,21 @@ export function createTaskBlockedActions(
     ].join("\n");
   }
 
+  async function canResumeBlockedTaskInPlace(item: PipelineItem): Promise<boolean> {
+    if (item.agent_session_id !== null || item.port_env !== null) return true;
+
+    const sessions = await context.requireDb().select<{ daemon_session_id: string | null }>(
+      `SELECT daemon_session_id
+       FROM terminal_session
+       WHERE pipeline_item_id = ?
+         AND label = 'agent'
+         AND daemon_session_id IS NOT NULL
+       LIMIT 1`,
+      [item.id],
+    );
+    return sessions.length > 0;
+  }
+
   async function checkUnblocked(blockerItemId: string) {
     const blockedItems = await listBlockedByItem(context.requireDb(), blockerItemId);
     for (const blocked of blockedItems) {
@@ -64,7 +78,7 @@ export function createTaskBlockedActions(
     const resolvedBlockers = blockers ?? await listBlockersForItem(context.requireDb(), item.id);
     if (resolvedBlockers.length === 0) return;
 
-    if (hasLiveTaskResources(item)) {
+    if (await canResumeBlockedTaskInPlace(item)) {
       await resumeBlockedTaskInPlace(item, resolvedBlockers);
       await removeAllBlockersForItem(context.requireDb(), item.id);
       await reloadSnapshot();
@@ -257,7 +271,7 @@ export function createTaskBlockedActions(
     );
     if (allClear) {
       const resumeBlockers = updatedBlockers.length > 0 ? updatedBlockers : currentBlockers;
-      if (hasLiveTaskResources(item)) {
+      if (await canResumeBlockedTaskInPlace(item)) {
         await resumeBlockedTaskInPlace(item, resumeBlockers);
       } else {
         await startBlockedTask(item);

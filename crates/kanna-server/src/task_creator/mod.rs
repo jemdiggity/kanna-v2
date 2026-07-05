@@ -5,6 +5,7 @@ mod lifecycle;
 mod merge;
 mod prompt;
 mod provider;
+mod resume;
 mod stages;
 mod types;
 mod worktree;
@@ -14,7 +15,10 @@ mod tests;
 
 use crate::config::Config;
 use crate::db::{Db, NewPipelineItem, Repo};
-use commands::{build_agent_command, build_kanna_preamble, build_task_shell_command};
+use commands::{
+    build_agent_command, build_kanna_preamble, build_task_shell_command,
+    build_teardown_shell_command,
+};
 use definitions::{
     read_agent_definition, read_pipeline_definition, read_repo_config,
     read_task_pipeline_definition, PipelineStage, PipelineStagePolicy, PipelineStageTransition,
@@ -28,9 +32,12 @@ use prompt::{build_stage_prompt, PromptContext};
 use provider::{resolve_agent_provider, resolve_agent_type, AgentProvider, AgentSessionType};
 use std::collections::HashMap;
 use types::{
-    CreatedTask, ForkedWorkspace, PreparedSessionSpawn, PreparedStageRerun, TaskCreationRequest,
+    CreatedTask, ForkedWorkspace, PreparedRunWorkspace, PreparedSessionSpawn, PreparedStageRerun,
+    RunWorkspaceSpec, TaskCreationRequest,
 };
-pub(crate) use types::{PreparedStageRunSpawn, PreparedStageTransition, PreparedTaskSpawn};
+pub(crate) use types::{
+    PreparedStageRunSpawn, PreparedStageTransition, PreparedTaskSpawn, PreparedWorkspaceTeardown,
+};
 use worktree::{
     create_worktree, fetch_start_point, generate_task_id, merge_branches_into_worktree,
 };
@@ -40,6 +47,7 @@ pub(crate) use lifecycle::{
     dispatch_prepared_post_for_api, kill_session_replacing, prepared_task_id,
     rerun_prepared_stage_for_api, rollback_prepared_task_for_api, spawn_prepared_stage_run_for_api,
     spawn_prepared_task_for_api_recording_stage_run, spawn_prepared_task_for_api_with_rollback,
+    spawn_prepared_workspace_teardown_best_effort,
 };
 pub(crate) use merge::prepare_merge_agent_for_api;
 pub use merge::run_merge_agent;
@@ -47,6 +55,7 @@ pub(crate) use stages::{
     prepare_advance_stage_for_api, prepare_revision_task_for_api, prepare_stage_completion_for_api,
     resolve_stage_transition,
 };
+pub(crate) use worktree::resolve_current_source_worktree_branch;
 
 pub(crate) fn prepare_rerun_stage_for_api(
     db: &Db,
@@ -151,7 +160,7 @@ pub(crate) fn prepare_rerun_stage_for_api(
         .and_then(|environment| environment.setup.clone())
         .unwrap_or_default();
     let stage_run_model = model.clone();
-    let session = build_prepared_session(
+    let (session, provider_session_id) = build_prepared_session(
         provider,
         agent_type,
         task_id,
@@ -166,6 +175,7 @@ pub(crate) fn prepare_rerun_stage_for_api(
         &spawn_env,
         &worktree_path,
         &stage_setup,
+        None,
     )?;
     let session_id = db
         .resolve_task_terminal_session_id(task_id)
@@ -179,6 +189,7 @@ pub(crate) fn prepare_rerun_stage_for_api(
         stage_agent: current_stage.agent.clone(),
         agent_provider: provider.as_str().to_string(),
         model: stage_run_model,
+        provider_session_id,
         cwd: worktree_path,
         env: spawn_env,
         session,
@@ -190,10 +201,12 @@ pub(crate) fn prepare_rerun_stage_for_api(
 /// (`run_kind = "post"`, where `item_stage` stays the owning stage and
 /// `target_stage` is the post viewed as a stage).
 ///
-/// `fork_branch: Some(_)` forks a fresh workspace for the run: a new branch
+/// `RunWorkspaceSpec::Fork` forks a fresh workspace for the run: a new branch
 /// and worktree created from the task's current branch tip (only committed
-/// work crosses a stage boundary — the stage's post committed it). `None`
-/// keeps the task's current workspace (post fallbacks, reruns).
+/// work crosses a stage boundary — the stage's post committed it).
+/// `RunWorkspaceSpec::Resume` adopts a previous run's worktree and resumes
+/// its agent-CLI session; `Current` keeps the task's current workspace (post
+/// fallbacks, reruns).
 #[allow(clippy::too_many_arguments)]
 pub(in crate::task_creator) fn prepare_stage_run_spawn(
     db: &Db,
@@ -205,7 +218,7 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
     target_stage: &PipelineStage,
     item_stage: &str,
     run_kind: &'static str,
-    fork_branch: Option<String>,
+    workspace_spec: RunWorkspaceSpec,
     final_prompt: String,
     branch: &str,
     feedback: Option<String>,
@@ -233,26 +246,42 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
         .map(|agent| agent.allowed_tools.clone())
         .unwrap_or_default();
 
-    let forked_workspace = match &fork_branch {
-        Some(fork_branch) => {
+    let (workspace, claude_resume, resumed_from_run_id) = match workspace_spec {
+        RunWorkspaceSpec::Fork {
+            branch: fork_branch,
+        } => {
             // Fork from the branch actually checked out in the current
             // worktree (agents may have renamed it — the PR agent does).
             let start_point =
                 worktree::resolve_current_source_worktree_branch(&repo.path, Some(branch))
                     .unwrap_or_else(|| branch.to_string());
             let worktree_path = format!("{}/.kanna-worktrees/{}", repo.path, fork_branch);
-            create_worktree(&repo.path, fork_branch, &worktree_path, Some(&start_point))?;
-            Some(ForkedWorkspace {
-                branch: fork_branch.clone(),
-                worktree_path,
-            })
+            create_worktree(&repo.path, &fork_branch, &worktree_path, Some(&start_point))?;
+            (
+                PreparedRunWorkspace::Forked(ForkedWorkspace {
+                    branch: fork_branch,
+                    worktree_path,
+                }),
+                None,
+                None,
+            )
         }
-        None => None,
+        RunWorkspaceSpec::Resume(resume) => (
+            PreparedRunWorkspace::Resumed(ForkedWorkspace {
+                branch: resume.branch,
+                worktree_path: resume.cwd,
+            }),
+            Some(resume.provider_session_id),
+            Some(resume.resumed_from_run_id),
+        ),
+        RunWorkspaceSpec::Current => (PreparedRunWorkspace::Current, None, None),
     };
-    let worktree_path = forked_workspace
-        .as_ref()
-        .map(|fork| fork.worktree_path.clone())
-        .unwrap_or_else(|| format!("{}/.kanna-worktrees/{}", repo.path, branch));
+    let worktree_path = match &workspace {
+        PreparedRunWorkspace::Forked(workspace) | PreparedRunWorkspace::Resumed(workspace) => {
+            workspace.worktree_path.clone()
+        }
+        PreparedRunWorkspace::Current => format!("{}/.kanna-worktrees/{}", repo.path, branch),
+    };
 
     let repo_config = read_repo_config(&repo.path)?;
     let worktree_repo_config = read_repo_config(&worktree_path)?;
@@ -262,7 +291,8 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
     let mcp_config_path = write_kanna_mcp_config(&config.daemon_dir, task_id, &mut spawn_env)?;
     // A forked workspace is fresh disk: run the repo's worktree setup (the
     // same commands task creation runs) before any stage-specific setup.
-    let mut setup = if forked_workspace.is_some() {
+    // Current and resumed workspaces are already set up.
+    let mut setup = if matches!(workspace, PreparedRunWorkspace::Forked(_)) {
         worktree_repo_config.setup.clone().unwrap_or_default()
     } else {
         Vec::new()
@@ -275,7 +305,7 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
             .and_then(|environment| environment.setup.clone())
             .unwrap_or_default(),
     );
-    let session = build_prepared_session(
+    let (session, provider_session_id) = build_prepared_session(
         provider,
         agent_type,
         task_id,
@@ -290,6 +320,7 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
         &spawn_env,
         &worktree_path,
         &setup,
+        claude_resume.as_deref(),
     )?;
     let session_id = db
         .resolve_task_terminal_session_id(task_id)
@@ -302,17 +333,115 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
         next_stage: item_stage.to_string(),
         run_stage: target_stage.name.clone(),
         run_kind,
-        forked_workspace,
+        workspace,
+        workspace_teardown: None,
         stage_agent: target_stage.agent.clone(),
         agent_provider: provider.as_str().to_string(),
         model: stage_run_model,
         feedback,
+        provider_session_id,
+        resumed_from_run_id,
         cwd: worktree_path,
         env: spawn_env,
         session,
     })
 }
 
+pub(crate) fn prepare_workspace_teardown_for_close(
+    db: &Db,
+    config: &Config,
+    task_id: &str,
+) -> Option<PreparedWorkspaceTeardown> {
+    let source_task = db.get_task_stage_source(task_id).ok().flatten()?;
+    let branch = source_task.branch.as_deref()?;
+    let stage_name = source_task.stage.as_deref()?;
+    let repo = db.get_repo(&source_task.repo_id).ok().flatten()?;
+    let pipeline_name = source_task
+        .pipeline
+        .clone()
+        .unwrap_or_else(|| "default".to_string());
+    let pipeline = read_task_pipeline_definition(
+        &repo.path,
+        &pipeline_name,
+        source_task.pipeline_def.as_deref(),
+    )
+    .ok()?;
+    prepare_workspace_teardown(db, config, &repo, task_id, &pipeline, stage_name, branch)
+}
+
+pub(in crate::task_creator) fn prepare_workspace_teardown(
+    db: &Db,
+    config: &Config,
+    repo: &Repo,
+    task_id: &str,
+    pipeline: &definitions::PipelineDefinition,
+    stage_name: &str,
+    branch: &str,
+) -> Option<PreparedWorkspaceTeardown> {
+    let worktree_path = db
+        .get_task_worktree_path(task_id)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| format!("{}/.kanna-worktrees/{branch}", repo.path));
+    if !std::path::Path::new(&worktree_path).is_dir() {
+        return None;
+    }
+    let repo_config = read_repo_config(&repo.path).ok()?;
+    let worktree_repo_config = read_repo_config(&worktree_path).unwrap_or_default();
+    let mut teardown = stage_environment_teardown(pipeline, stage_name);
+    teardown.extend(worktree_repo_config.teardown.clone().unwrap_or_default());
+    if teardown.is_empty() {
+        return None;
+    }
+
+    let port_env = claim_task_ports(db, task_id, repo_config.ports.as_ref()).ok()?;
+    let mut spawn_env = build_spawn_env(config, task_id, &port_env).ok()?;
+    apply_workspace_path_env(&mut spawn_env, &worktree_path, &worktree_repo_config);
+    let session_id = format!("td-{branch}");
+    let shell_command = build_teardown_shell_command(&teardown);
+    Some(PreparedWorkspaceTeardown {
+        session_id,
+        cwd: worktree_path,
+        env: spawn_env,
+        session: PreparedSessionSpawn::Pty {
+            executable: "/bin/zsh".to_string(),
+            args: vec![
+                "--login".to_string(),
+                "-i".to_string(),
+                "-c".to_string(),
+                shell_command,
+            ],
+            cols: 80,
+            rows: 24,
+            agent_provider: AgentProvider::Claude.to_daemon_provider(),
+        },
+    })
+}
+
+fn stage_environment_teardown(
+    pipeline: &definitions::PipelineDefinition,
+    stage_name: &str,
+) -> Vec<String> {
+    let environment_name = match definitions::resolve_stage_position(pipeline, stage_name) {
+        Some(definitions::StagePosition::Stage(index)) => {
+            pipeline.stages[index].environment.as_ref()
+        }
+        Some(definitions::StagePosition::Post { owner }) => {
+            pipeline.stages[owner].environment.as_ref()
+        }
+        None => None,
+    };
+    environment_name
+        .and_then(|name| pipeline.environments.as_ref()?.get(name))
+        .and_then(|environment| environment.teardown.clone())
+        .unwrap_or_default()
+}
+
+/// Build the daemon spawn for a stage run's agent session. For Claude PTY
+/// sessions the returned string is the run's provider session id: a fresh
+/// spawn assigns a new UUID (`--session-id`) and a revision resume reopens
+/// `claude_resume` (`--resume`). Other providers/session types return `None`
+/// — their sessions have no Kanna-known resume handle on this path.
 #[allow(clippy::too_many_arguments)]
 fn build_prepared_session(
     provider: AgentProvider,
@@ -329,9 +458,23 @@ fn build_prepared_session(
     spawn_env: &HashMap<String, String>,
     worktree_path: &str,
     setup: &[String],
-) -> Result<PreparedSessionSpawn, String> {
+    claude_resume: Option<&str>,
+) -> Result<(PreparedSessionSpawn, Option<String>), String> {
     Ok(match agent_type {
         AgentSessionType::Pty => {
+            let claude_session = match (provider, claude_resume) {
+                (AgentProvider::Claude, Some(session_id)) => Some(
+                    commands::ClaudeSessionBinding::Resume(session_id.to_string()),
+                ),
+                (AgentProvider::Claude, None) => Some(commands::ClaudeSessionBinding::Assign(
+                    worktree::generate_agent_session_uuid()?,
+                )),
+                _ => None,
+            };
+            let provider_session_id = claude_session.as_ref().map(|binding| match binding {
+                commands::ClaudeSessionBinding::Assign(session_id)
+                | commands::ClaudeSessionBinding::Resume(session_id) => session_id.clone(),
+            });
             let preamble = build_kanna_preamble(
                 &provider,
                 task_id,
@@ -348,6 +491,8 @@ fn build_prepared_session(
                 &allowed_tools,
                 Some(&preamble),
                 mcp_config_path.as_deref(),
+                Some(worktree_path),
+                claude_session.as_ref(),
             );
             let full_cmd = build_task_shell_command(
                 &agent_cmd,
@@ -355,18 +500,21 @@ fn build_prepared_session(
                 spawn_env.get("KANNA_CLI_PATH").map(String::as_str),
                 spawn_env.get("PATH").map(String::as_str),
             );
-            PreparedSessionSpawn::Pty {
-                executable: "/bin/zsh".to_string(),
-                args: vec![
-                    "--login".to_string(),
-                    "-i".to_string(),
-                    "-c".to_string(),
-                    full_cmd,
-                ],
-                cols: 80,
-                rows: 24,
-                agent_provider: provider.to_daemon_provider(),
-            }
+            (
+                PreparedSessionSpawn::Pty {
+                    executable: "/bin/zsh".to_string(),
+                    args: vec![
+                        "--login".to_string(),
+                        "-i".to_string(),
+                        "-c".to_string(),
+                        full_cmd,
+                    ],
+                    cols: 80,
+                    rows: 24,
+                    agent_provider: provider.to_daemon_provider(),
+                },
+                provider_session_id,
+            )
         }
         AgentSessionType::Agent => {
             let headless_executable = resolve_headless_agent_executable(
@@ -382,16 +530,19 @@ fn build_prepared_session(
                 stage_transition,
                 mcp_config_path.as_deref(),
             );
-            PreparedSessionSpawn::Agent {
-                agent_provider: provider.to_daemon_provider(),
-                prompt: final_prompt,
-                model,
-                permission_mode,
-                allowed_tools,
-                system_prompt,
-                mcp_config_path,
-                executable: headless_executable,
-            }
+            (
+                PreparedSessionSpawn::Agent {
+                    agent_provider: provider.to_daemon_provider(),
+                    prompt: final_prompt,
+                    model,
+                    permission_mode,
+                    allowed_tools,
+                    system_prompt,
+                    mcp_config_path,
+                    executable: headless_executable,
+                },
+                None,
+            )
         }
     })
 }
@@ -728,7 +879,7 @@ pub(crate) fn prepare_start_dormant_task_for_api(
     apply_workspace_path_env(&mut spawn_env, &worktree_path, &worktree_repo_config);
     let mcp_config_path = write_kanna_mcp_config(&config.daemon_dir, task_id, &mut spawn_env)?;
     let stage_run_model = model.clone();
-    let session = build_prepared_session(
+    let (session, provider_session_id) = build_prepared_session(
         provider,
         agent_type,
         task_id,
@@ -743,6 +894,7 @@ pub(crate) fn prepare_start_dormant_task_for_api(
         &spawn_env,
         &worktree_path,
         worktree_repo_config.setup.as_deref().unwrap_or(&[]),
+        None,
     )?;
     let title = item
         .display_name
@@ -766,6 +918,7 @@ pub(crate) fn prepare_start_dormant_task_for_api(
         stage_agent: stage.agent.clone(),
         agent_provider: provider.as_str().to_string(),
         model: stage_run_model,
+        provider_session_id,
         session,
     }))
 }
@@ -829,8 +982,11 @@ pub(in crate::task_creator) fn prepare_task_spawn(
         resolved.base_ref.as_deref(),
     )?;
 
-    let (spawn_env, session) =
-        prepare_new_task_session(config, &task_id, &worktree_path, &port_env, &resolved)?;
+    let PreparedNewTaskSession {
+        spawn_env,
+        session,
+        provider_session_id,
+    } = prepare_new_task_session(config, &task_id, &worktree_path, &port_env, &resolved)?;
     let title = resolved
         .display_name
         .clone()
@@ -852,6 +1008,7 @@ pub(in crate::task_creator) fn prepare_task_spawn(
         stage_agent: resolved.stage_agent,
         agent_provider: stage_run_provider,
         model: stage_run_model,
+        provider_session_id,
         session,
     })
 }
@@ -1043,18 +1200,24 @@ fn create_new_task_worktree(
     .map_err(|e| format!("db error: {}", e))
 }
 
+struct PreparedNewTaskSession {
+    spawn_env: HashMap<String, String>,
+    session: PreparedSessionSpawn,
+    provider_session_id: Option<String>,
+}
+
 fn prepare_new_task_session(
     config: &Config,
     task_id: &str,
     worktree_path: &str,
     port_env: &HashMap<String, String>,
     resolved: &ResolvedTaskSpawn,
-) -> Result<(HashMap<String, String>, PreparedSessionSpawn), String> {
+) -> Result<PreparedNewTaskSession, String> {
     let worktree_repo_config = read_repo_config(worktree_path)?;
     let mut spawn_env = build_spawn_env(config, task_id, port_env)?;
     apply_workspace_path_env(&mut spawn_env, worktree_path, &worktree_repo_config);
     let mcp_config_path = write_kanna_mcp_config(&config.daemon_dir, task_id, &mut spawn_env)?;
-    let session = build_prepared_session(
+    let (session, provider_session_id) = build_prepared_session(
         resolved.provider,
         resolved.agent_type,
         task_id,
@@ -1069,6 +1232,11 @@ fn prepare_new_task_session(
         &spawn_env,
         worktree_path,
         worktree_repo_config.setup.as_deref().unwrap_or(&[]),
+        None,
     )?;
-    Ok((spawn_env, session))
+    Ok(PreparedNewTaskSession {
+        spawn_env,
+        session,
+        provider_session_id,
+    })
 }

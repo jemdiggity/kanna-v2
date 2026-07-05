@@ -19,8 +19,6 @@ use std::sync::Arc;
 
 #[tokio::main]
 async fn main() {
-    env_logger::init();
-
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(|s| s.as_str()) == Some("register") {
         let relay_url = args
@@ -47,6 +45,23 @@ async fn main() {
             std::process::exit(1);
         }
     };
+
+    // Log to a file in the instance's daemon data dir (like the daemon
+    // does), duplicated to stderr. The desktop app spawns this sidecar with
+    // null stdio, so stderr-only logging would discard everything — the file
+    // is the durable record of stage transitions and revision decisions.
+    // RUST_LOG overrides the default filter.
+    let _ = std::fs::create_dir_all(&config.daemon_dir);
+    if let Ok(logger) = flexi_logger::Logger::try_with_env_or_str("kanna_server=info") {
+        let _ = logger
+            .log_to_file(
+                flexi_logger::FileSpec::default()
+                    .directory(&config.daemon_dir)
+                    .discriminant(std::process::id().to_string()),
+            )
+            .duplicate_to_stderr(flexi_logger::Duplicate::Info)
+            .start();
+    }
 
     let relay_url = config.relay_url.trim().to_string();
     log::info!(
