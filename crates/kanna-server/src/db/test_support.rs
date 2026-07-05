@@ -141,6 +141,20 @@ impl Db {
                 seconds INTEGER NOT NULL,
                 PRIMARY KEY (pipeline_item_id, activity)
             );
+
+            CREATE TABLE task_transfer (
+                id TEXT PRIMARY KEY,
+                direction TEXT NOT NULL,
+                status TEXT NOT NULL,
+                source_peer_id TEXT,
+                target_peer_id TEXT,
+                source_task_id TEXT,
+                local_task_id TEXT,
+                started_at TEXT NOT NULL DEFAULT (datetime('now')),
+                completed_at TEXT,
+                error TEXT,
+                payload_json TEXT
+            );
             "#,
         )?;
         Ok(())
@@ -315,6 +329,23 @@ impl Db {
             "INSERT INTO operator_event (event_type, pipeline_item_id, repo_id, created_at)
              VALUES (?, ?, ?, ?)",
             (event_type, pipeline_item_id, repo_id, created_at),
+        )?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn insert_test_task_transfer(
+        &self,
+        id: &str,
+        direction: &str,
+        status: &str,
+        payload_json: Option<&str>,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "INSERT INTO task_transfer (
+                id, direction, status, source_peer_id, source_task_id, payload_json
+             ) VALUES (?, ?, ?, 'peer-1', 'source-task-1', ?)",
+            (id, direction, status, payload_json),
         )?;
         Ok(())
     }
