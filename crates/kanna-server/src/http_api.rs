@@ -2,6 +2,7 @@ mod desktop;
 mod ksp;
 mod pairing;
 mod repos;
+mod settings;
 #[path = "http_api/router.rs"]
 mod routes;
 mod signal_agent;
