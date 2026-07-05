@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { AgentProvider } from "@kanna/db";
+import type { AgentProvider } from "../types/kanna";
 import { useAgentMessageView } from "../composables/useAgentMessageView";
 
 const props = defineProps<{

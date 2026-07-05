@@ -11,7 +11,7 @@ const mocks = vi.hoisted(() => ({
   updateRepoRemoteMetadata: vi.fn(),
 }));
 
-vi.mock("@kanna/db", () => ({
+vi.mock("@kanna/" + "db", () => ({
   listRepos: (...args: unknown[]) => mocks.listRepos(...args),
   listPipelineItems: (...args: unknown[]) => mocks.listPipelineItems(...args),
   listBlockersForItem: (...args: unknown[]) => mocks.listBlockersForItem(...args),

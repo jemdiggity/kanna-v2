@@ -69,3 +69,23 @@ pub(super) async fn put_setting(
         value: payload.value,
     }))
 }
+
+pub(super) async fn delete_setting(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let db = Db::open(&state.config.db_path).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("db error: {}", e),
+        )
+    })?;
+    db.delete_setting(&key).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("db error: {e}"),
+        )
+    })?;
+    state.publish_state_changed(StateChangeScope::Settings);
+    Ok(Json(serde_json::json!({ "key": key })))
+}

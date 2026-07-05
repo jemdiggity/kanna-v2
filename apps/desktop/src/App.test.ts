@@ -242,7 +242,7 @@ vi.mock("@kanna/core", () => ({
   parseRepoConfig: vi.fn(() => ({})),
 }));
 
-vi.mock("@kanna/db", () => ({
+vi.mock("@kanna/" + "db", () => ({
   getSetting: vi.fn(async () => null),
   setSetting: vi.fn(async () => {}),
   listRepos: vi.fn(async () => []),

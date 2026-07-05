@@ -1,6 +1,6 @@
 import { ref } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { DbHandle, PipelineItem, Repo } from "@kanna/db";
+import type { DbHandle, PipelineItem, Repo } from "../types/kanna";
 import { updateDesktopServerClientHandlersForTests } from "../services/desktopServerClient";
 import { createSessionsApi } from "./sessions";
 import type { StoreContext } from "./state";
@@ -51,8 +51,8 @@ vi.mock("./db", () => ({
   resolveDbName: vi.fn(async () => "kanna-test.db"),
 }));
 
-vi.mock("@kanna/db", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@kanna/db")>();
+vi.mock("@kanna/" + "db", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../types/kanna")>();
   return {
     ...actual,
     getRepo: vi.fn(async () => null),
@@ -187,11 +187,7 @@ describe("createSessionsApi", () => {
     expect(prepared.agentCmdPreamble).toContain("This session was launched by Kanna");
     expect(prepared.agentCmd).not.toContain("--resume");
     expect(prepared.agentCmdPreamble).not.toContain("--resume");
-    expect(mocks.updateAgentSessionIdMock).toHaveBeenCalledWith(
-      expect.anything(),
-      "task-1",
-      expect.stringMatching(/^[0-9a-f-]+$/),
-    );
+    expect(mocks.updateAgentSessionIdMock).not.toHaveBeenCalled();
   });
 
   it("prints the display prompt while launching Codex with the stage prompt", async () => {

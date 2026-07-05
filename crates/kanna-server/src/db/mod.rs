@@ -27,7 +27,9 @@ pub use operator_events::NewOperatorEvent;
 #[allow(unused_imports)]
 pub use stage_runs::FinishedStageRun;
 #[allow(unused_imports)]
-pub use transfers::PendingIncomingTransfer;
+pub use transfers::{
+    NewTaskTransfer, NewTaskTransferProvenance, PendingIncomingTransfer, TaskTransfer,
+};
 
 const SQLITE_BUSY_TIMEOUT_MS: u64 = 10_000;
 const SQLITE_WAL_AUTOCHECKPOINT_PAGES: i64 = 100;

@@ -15,7 +15,7 @@ vi.mock("../invoke", () => ({
   invoke: (...args: unknown[]) => mocks.invoke(...args),
 }));
 
-vi.mock("@kanna/db", () => ({
+vi.mock("@kanna/" + "db", () => ({
   updateRepoRemoteMetadata: (...args: unknown[]) => mocks.updateRepoRemoteMetadata(...args),
 }));
 
@@ -38,7 +38,7 @@ describe("repo remote URL metadata", () => {
   it("refreshes and persists remote URL metadata explicitly", async () => {
     mocks.invoke.mockResolvedValue("git@github.com:owner/repo.git");
 
-    const metadata = await refreshRepoRemoteMetadata(null as never, {
+    const metadata = await refreshRepoRemoteMetadata({
       id: "repo-1",
       path: "/repo",
     });

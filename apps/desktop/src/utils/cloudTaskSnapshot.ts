@@ -1,4 +1,4 @@
-import type { PipelineItem, Repo } from "@kanna/db";
+import type { PipelineItem, Repo } from "../types/kanna";
 
 export interface CloudTaskSnapshotInput {
   desktopId: string;

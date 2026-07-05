@@ -1,5 +1,5 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import type { DbHandle } from "@kanna/db";
+import type { DbHandle } from "../types/kanna";
 
 const readEnvVarMock = vi.fn<(name: string) => Promise<string>>(async () => "");
 const backupOnStartupMock = vi.hoisted(() => vi.fn(async () => {}));

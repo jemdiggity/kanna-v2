@@ -1,4 +1,4 @@
-import type { PipelineItem } from "@kanna/db";
+import type { PipelineItem } from "../types/kanna";
 import type { AgentExecutionType } from "./agentExecutionType";
 import type { CreateItemOptions, StoreContext } from "./state";
 import type { PortsStore } from "./ports";

@@ -1,4 +1,4 @@
-import type { DbHandle } from "@kanna/db";
+import type { DbHandle } from "../types/kanna";
 
 import type { KeyboardActions } from "../composables/useKeyboardShortcuts";
 import type { useAppKeyboardActions } from "../composables/useAppKeyboardActions";

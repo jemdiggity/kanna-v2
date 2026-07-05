@@ -1,6 +1,6 @@
 import { ref, type ComputedRef, type Ref } from "vue";
 import { parseRepoConfig, type RepoConfig } from "@kanna/core";
-import type { AgentProvider, DbHandle, PipelineItem, Repo, TaskBlocker } from "@kanna/db";
+import type { AgentProvider, DbHandle, PipelineItem, Repo, TaskBlocker } from "../types/kanna";
 import type { PipelineDefinition, AgentDefinition } from "../../../../packages/core/src/pipeline/pipeline-types";
 import type { SessionRecoveryState } from "../composables/sessionRecoveryState";
 import { invoke } from "../invoke";

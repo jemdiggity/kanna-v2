@@ -9,7 +9,7 @@ import {
   type Firestore,
 } from "firebase/firestore";
 import { getApps, initializeApp } from "firebase/app";
-import type { PipelineItem, Repo } from "@kanna/db";
+import type { PipelineItem, Repo } from "../types/kanna";
 import { invoke } from "../invoke";
 import { resolveDesktopFirebaseConfig } from "./desktopFirebaseConfig";
 import { listActiveDesktopIdsViaRelay } from "./desktopRelayTerminal";

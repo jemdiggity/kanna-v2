@@ -1,12 +1,12 @@
-import {
-  findRepoByPath,
-  insertRepo,
-  reorderRepos as reorderReposQuery,
-  updateRepoName,
-} from "@kanna/db";
 import { invoke } from "../invoke";
 import { isTauri } from "../tauri-mock";
-import { patchDesktopRepo } from "../services/desktopServerClient";
+import {
+  addDesktopRepo,
+  findDesktopRepoByPath,
+  patchDesktopRepo,
+  reorderDesktopRepos,
+  type DesktopRepoResponse,
+} from "../services/desktopServerClient";
 import { refreshRepoRemoteMetadata } from "../services/repoRemoteUrl";
 import { reportPrewarmSessionError } from "./kannaCleanup";
 import { requireService, type StoreContext } from "./state";
@@ -19,11 +19,14 @@ export function createTaskRepoActions(
   const invalidateWindowWorkspace = async (reason: string): Promise<void> => {
     await context.services.windowWorkspace?.invalidateSharedData(reason);
   };
+  const repoId = (repo: Pick<DesktopRepoResponse, "id">) => repo.id;
+  const repoHidden = (repo: Pick<DesktopRepoResponse, "hidden">) => Boolean(repo.hidden);
 
   async function importRepo(path: string, name: string, defaultBranch: string): Promise<string> {
-    const existing = await findRepoByPath(context.requireDb(), path);
+    void defaultBranch;
+    const existing = await findDesktopRepoByPath(path);
     if (existing) {
-      if (existing.hidden) {
+      if (repoHidden(existing)) {
         await patchDesktopRepo(existing.id, { hidden: false });
         await reloadSnapshot();
         await invalidateWindowWorkspace("importRepo");
@@ -31,9 +34,9 @@ export function createTaskRepoActions(
       }
       return existing.id;
     }
-    const id = crypto.randomUUID().slice(0, 8);
-    await insertRepo(context.requireDb(), { id, path, name, default_branch: defaultBranch });
-    await refreshRepoRemoteMetadata(context.requireDb(), { id, path });
+    const created = await addDesktopRepo({ path, name });
+    const id = repoId(created);
+    await refreshRepoRemoteMetadata({ id, path });
     await reloadSnapshot();
     await invalidateWindowWorkspace("importRepo");
     context.state.selectedRepoId.value = id;
@@ -45,9 +48,9 @@ export function createTaskRepoActions(
   }
 
   async function createRepo(name: string, path: string): Promise<string> {
-    const existing = await findRepoByPath(context.requireDb(), path);
+    const existing = await findDesktopRepoByPath(path);
     if (existing) {
-      if (existing.hidden) {
+      if (repoHidden(existing)) {
         await patchDesktopRepo(existing.id, { hidden: false });
         await reloadSnapshot();
         await invalidateWindowWorkspace("createRepo");
@@ -57,10 +60,9 @@ export function createTaskRepoActions(
     }
     await invoke("ensure_directory", { path });
     await invoke("git_init", { path });
-    const defaultBranch = await invoke<string>("git_default_branch", { repoPath: path }).catch(() => "main");
-    const id = crypto.randomUUID().slice(0, 8);
-    await insertRepo(context.requireDb(), { id, path, name, default_branch: defaultBranch });
-    await refreshRepoRemoteMetadata(context.requireDb(), { id, path });
+    const created = await addDesktopRepo({ path, name });
+    const id = repoId(created);
+    await refreshRepoRemoteMetadata({ id, path });
     await reloadSnapshot();
     await invalidateWindowWorkspace("createRepo");
     context.state.selectedRepoId.value = id;
@@ -74,10 +76,9 @@ export function createTaskRepoActions(
   async function cloneAndImportRepo(url: string, destination: string): Promise<string> {
     await invoke("git_clone", { url, destination });
     const name = destination.split("/").pop() || "repo";
-    const defaultBranch = await invoke<string>("git_default_branch", { repoPath: destination }).catch(() => "main");
-    const id = crypto.randomUUID().slice(0, 8);
-    await insertRepo(context.requireDb(), { id, path: destination, name, default_branch: defaultBranch });
-    await refreshRepoRemoteMetadata(context.requireDb(), { id, path: destination });
+    const created = await addDesktopRepo({ path: destination, name });
+    const id = repoId(created);
+    await refreshRepoRemoteMetadata({ id, path: destination });
     await reloadSnapshot();
     await invalidateWindowWorkspace("cloneAndImportRepo");
     context.state.selectedRepoId.value = id;
@@ -97,13 +98,13 @@ export function createTaskRepoActions(
   }
 
   async function renameRepo(repoId: string, name: string) {
-    await updateRepoName(context.requireDb(), repoId, name);
+    await patchDesktopRepo(repoId, { name });
     await reloadSnapshot();
     await invalidateWindowWorkspace("renameRepo");
   }
 
   async function reorderRepos(orderedIds: string[]) {
-    await reorderReposQuery(context.requireDb(), orderedIds);
+    await reorderDesktopRepos(orderedIds);
     await reloadSnapshot();
     await invalidateWindowWorkspace("reorderRepos");
   }
