@@ -1,7 +1,8 @@
 import { reactive, ref, type ComputedRef } from "vue";
-import { setSetting, type AgentProvider, type DbHandle } from "@kanna/db";
+import type { AgentProvider, DbHandle } from "../types/kanna";
 
 import i18n from "../i18n";
+import { putDesktopSetting } from "../services/desktopServerClient";
 import {
   applyCurrentDocumentTheme,
   setSystemPrefersDark,
@@ -33,7 +34,6 @@ interface UseAppPreferencesOptions {
 }
 
 export function useAppPreferences({
-  db,
   store,
   effectiveAppTheme,
   firstSupportedAgentProvider,
@@ -123,13 +123,13 @@ export function useAppPreferences({
     const counts = { ...commandUsageCounts.value };
     counts[commandId] = (counts[commandId] || 0) + 1;
     commandUsageCounts.value = counts;
-    await setSetting(db, "commandPaletteUsage", JSON.stringify(counts));
+    await putDesktopSetting("commandPaletteUsage", JSON.stringify(counts));
   }
 
   async function trackAgentChoiceUsage(choice: { provider: AgentProvider; executionType: AgentExecutionType }) {
     const choices = promoteRecentAgentChoice(preferences.recentAgentChoices, choice);
     preferences.recentAgentChoices = choices;
-    await setSetting(db, "recentAgentChoices", JSON.stringify(choices));
+    await putDesktopSetting("recentAgentChoices", JSON.stringify(choices));
   }
 
   function applyPreferenceUpdate(key: string, value: string) {

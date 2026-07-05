@@ -346,6 +346,60 @@ async fn dependent_tasks_exist_route_returns_false_for_task_without_dependents()
 }
 
 #[tokio::test]
+async fn settings_routes_get_and_put_setting_values() {
+    let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
+        db.set_test_setting("ideCommand", "code").unwrap();
+    });
+
+    let initial = app
+        .clone()
+        .oneshot(
+            Request::get("/v1/settings/ideCommand")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(initial.status(), StatusCode::OK);
+    let initial_body = axum::body::to_bytes(initial.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let initial_json: serde_json::Value = from_slice(&initial_body).unwrap();
+    assert_eq!(initial_json, serde_json::json!({ "key": "ideCommand", "value": "code" }));
+
+    let updated = app
+        .clone()
+        .oneshot(
+            Request::put("/v1/settings/ideCommand")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::json!({ "value": "zed" }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.status(), StatusCode::OK);
+    let updated_body = axum::body::to_bytes(updated.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let updated_json: serde_json::Value = from_slice(&updated_body).unwrap();
+    assert_eq!(updated_json, serde_json::json!({ "key": "ideCommand", "value": "zed" }));
+
+    let final_response = app
+        .oneshot(
+            Request::get("/v1/settings/ideCommand")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let final_body = axum::body::to_bytes(final_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let final_json: serde_json::Value = from_slice(&final_body).unwrap();
+    assert_eq!(final_json["value"], "zed");
+}
+
+#[tokio::test]
 async fn add_repo_route_registers_existing_git_repo() {
     let unique = format!(
         "{}-{}",

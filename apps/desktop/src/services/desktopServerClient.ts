@@ -1,4 +1,4 @@
-import type { PipelineItem, Repo, TaskBlocker } from "@kanna/db";
+import type { PipelineItem, Repo, TaskBlocker } from "../types/kanna";
 
 export interface DesktopSnapshotEntry {
   repo: Repo;
@@ -27,19 +27,28 @@ async function sleep(ms: number): Promise<void> {
   await new Promise<void>((resolve) => setTimeout(resolve, ms));
 }
 
-async function requestJson<T>(path: string, options: { retryMs?: number } = {}): Promise<T> {
+async function requestJson<T>(
+  path: string,
+  options: { method?: string; body?: unknown; retryMs?: number } = {},
+): Promise<T> {
   const baseUrl = await desktopServerBaseUrl();
   const deadline = Date.now() + (options.retryMs ?? 0);
   let lastError: unknown = null;
+  const method = options.method ?? "GET";
+  const requestBody = options.body === undefined ? undefined : JSON.stringify(options.body);
 
   while (true) {
     try {
-      const response = await fetch(`${baseUrl}${path}`, { method: "GET" });
+      const response = await fetch(`${baseUrl}${path}`, {
+        method,
+        headers: requestBody === undefined ? undefined : { "content-type": "application/json" },
+        body: requestBody,
+      });
       if (response.ok) {
         return await response.json() as T;
       }
-      const body = await response.text().catch(() => "");
-      lastError = new Error(`GET ${path} failed: ${response.status}${body ? ` ${body}` : ""}`);
+      const responseBody = await response.text().catch(() => "");
+      lastError = new Error(`${method} ${path} failed: ${response.status}${responseBody ? ` ${responseBody}` : ""}`);
     } catch (error) {
       lastError = error;
     }
@@ -51,7 +60,35 @@ async function requestJson<T>(path: string, options: { retryMs?: number } = {}):
   }
 }
 
+async function requestOptionalJson<T>(path: string): Promise<T | null> {
+  try {
+    return await requestJson<T>(path);
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("failed: 404")) {
+      return null;
+    }
+    throw error;
+  }
+}
+
 export async function fetchDesktopSnapshot(): Promise<DesktopSnapshot> {
   if (snapshotFetcherForTests) return await snapshotFetcherForTests();
   return await requestJson<DesktopSnapshot>("/v1/snapshot", { retryMs: 15_000 });
+}
+
+export interface DesktopSettingResponse {
+  key: string;
+  value: string;
+}
+
+export async function putDesktopSetting(key: string, value: string): Promise<DesktopSettingResponse> {
+  return await requestJson<DesktopSettingResponse>(`/v1/settings/${encodeURIComponent(key)}`, {
+    method: "PUT",
+    body: { value },
+  });
+}
+
+export async function getDesktopSetting(key: string): Promise<string | null> {
+  const response = await requestOptionalJson<DesktopSettingResponse>(`/v1/settings/${encodeURIComponent(key)}`);
+  return response?.value ?? null;
 }
