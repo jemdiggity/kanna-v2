@@ -1392,6 +1392,152 @@ describe("useTerminal", () => {
     expect(terminal.reset).toHaveBeenCalledTimes(2);
   });
 
+  it("rebinds to the respawned session on session_created while still attached (stage swap)", async () => {
+    const client = installKspStreamClient({
+      onAttach: (_taskId, handlers) => {
+        handlers.onSnapshot?.(80, 24, btoa("stage scrollback"));
+      },
+    });
+    const { useTerminal } = await import("./useTerminal");
+
+    const TestHarness = defineComponent({
+      setup() {
+        const { init, startListening } = useTerminal(
+          "session-1",
+          {
+            cwd: "/tmp/task",
+            prompt: "hello",
+            spawnFn: async () => {},
+          },
+          {
+            agentProvider: "codex",
+            worktreePath: "/tmp/task",
+          },
+        );
+
+        return { init, startListening };
+      },
+      render() {
+        return h("div");
+      },
+    });
+
+    const wrapper = mount(TestHarness);
+    const terminalElement = document.createElement("div");
+    Object.defineProperty(terminalElement, "offsetWidth", { configurable: true, value: 800 });
+    Object.defineProperty(terminalElement, "offsetHeight", { configurable: true, value: 600 });
+    terminalElement.querySelector = vi.fn(() => null) as typeof terminalElement.querySelector;
+    terminalElement.closest = vi.fn(() => null) as typeof terminalElement.closest;
+    wrapper.vm.init(terminalElement);
+
+    const startPromise = wrapper.vm.startListening();
+    const terminal = terminals[0];
+    expect(terminal).toBeDefined();
+
+    for (let attempt = 0; attempt < 10 && terminal.pendingStringWrites.length === 0; attempt += 1) {
+      await Promise.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+
+    while (terminal.pendingStringWrites.length > 0) {
+      terminal.flushNextStringWrite();
+      await Promise.resolve();
+    }
+    await startPromise;
+
+    expect(client.attachTerminal).toHaveBeenCalledTimes(1);
+
+    // Stage swap: the engine killed this session id and respawned it with the
+    // next stage's agent. The swap's Exit may be processed after the
+    // SessionCreated broadcast, so the terminal can still believe it is
+    // attached — the rebind must not depend on an exit latch.
+    const createdListeners = eventListeners.get("session_created") ?? [];
+    expect(createdListeners).toHaveLength(1);
+    createdListeners[0]({ payload: { session_id: "session-1" } });
+    await flushAsyncWork();
+
+    expect(client.attachTerminal).toHaveBeenCalledTimes(2);
+
+    // A created event for some other session must not disturb this terminal.
+    createdListeners[0]({ payload: { session_id: "session-2" } });
+    await flushAsyncWork();
+    expect(client.attachTerminal).toHaveBeenCalledTimes(2);
+  });
+
+  it("rebinds after the killed session's exit followed by session_created", async () => {
+    const client = installKspStreamClient({
+      onAttach: (_taskId, handlers) => {
+        handlers.onSnapshot?.(80, 24, btoa("stage scrollback"));
+      },
+    });
+    const { useTerminal } = await import("./useTerminal");
+
+    const TestHarness = defineComponent({
+      setup() {
+        const { init, startListening } = useTerminal(
+          "session-1",
+          {
+            cwd: "/tmp/task",
+            prompt: "hello",
+            spawnFn: async () => {},
+          },
+          {
+            agentProvider: "codex",
+            worktreePath: "/tmp/task",
+          },
+        );
+
+        return { init, startListening };
+      },
+      render() {
+        return h("div");
+      },
+    });
+
+    const wrapper = mount(TestHarness);
+    const terminalElement = document.createElement("div");
+    Object.defineProperty(terminalElement, "offsetWidth", { configurable: true, value: 800 });
+    Object.defineProperty(terminalElement, "offsetHeight", { configurable: true, value: 600 });
+    terminalElement.querySelector = vi.fn(() => null) as typeof terminalElement.querySelector;
+    terminalElement.closest = vi.fn(() => null) as typeof terminalElement.closest;
+    wrapper.vm.init(terminalElement);
+
+    const startPromise = wrapper.vm.startListening();
+    const terminal = terminals[0];
+    expect(terminal).toBeDefined();
+
+    for (let attempt = 0; attempt < 10 && terminal.pendingStringWrites.length === 0; attempt += 1) {
+      await Promise.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+
+    while (terminal.pendingStringWrites.length > 0) {
+      terminal.flushNextStringWrite();
+      await Promise.resolve();
+    }
+    await startPromise;
+
+    expect(client.attachTerminal).toHaveBeenCalledTimes(1);
+
+    // The daemon now announces orchestrated kills before the respawn, so the
+    // exit-then-created ordering is the common stage-swap sequence.
+    const exitListeners = eventListeners.get("session_exit") ?? [];
+    expect(exitListeners).toHaveLength(1);
+    exitListeners[0]({ payload: { session_id: "session-1", code: -1, killed: true } });
+
+    const createdListeners = eventListeners.get("session_created") ?? [];
+    expect(createdListeners).toHaveLength(1);
+    createdListeners[0]({ payload: { session_id: "session-1" } });
+    await flushAsyncWork();
+
+    while (terminal.pendingStringWrites.length > 0) {
+      terminal.flushNextStringWrite();
+      await Promise.resolve();
+    }
+
+    expect(client.attachTerminal).toHaveBeenCalledTimes(2);
+  });
+
   it("marks the terminal ended after session_exit so ensureConnected does not reattach", async () => {
     const callOrder: string[] = [];
     const { useTerminal } = await import("./useTerminal");

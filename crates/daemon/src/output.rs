@@ -274,6 +274,7 @@ pub(crate) async fn stream_output(
         session_id: session_id.clone(),
         code: exit_code,
         resume_session_id: resume_session_id.clone(),
+        killed: false,
     };
     if let Ok(json) = serde_json::to_string(&evt) {
         let _ = broadcast_tx.send(json);
@@ -296,6 +297,7 @@ pub(crate) async fn stream_output(
             session_id: session_id.clone(),
             code: exit_code,
             resume_session_id,
+            killed: false,
         };
         futures::future::join_all(observer_list.iter().map(|obs| {
             let evt = obs_evt.clone();
