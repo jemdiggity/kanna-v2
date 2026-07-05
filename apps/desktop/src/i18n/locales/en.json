@@ -117,6 +117,7 @@
     "newTaskTooltip": "New Task (⌘N)",
     "removeRepoTooltip": "Remove Repo",
     "remoteTaskTooltip": "Remote task",
+    "detachSubtask": "Remove parent",
     "sectionMergeQueue": "Merge Queue",
     "sectionPullRequests": "Pull Requests",
     "sectionInProgress": "In Progress",
