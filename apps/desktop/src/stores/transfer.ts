@@ -1,12 +1,12 @@
+import type { PipelineItem, Repo } from "../types/kanna";
 import {
-  getTaskTransfer,
-  insertTaskTransfer,
-  insertTaskTransferProvenance,
-  markTaskTransferCompleted,
-  markTaskTransferRejected,
-  type PipelineItem,
-  type Repo,
-} from "@kanna/db";
+  completeDesktopTaskTransfer,
+  getDesktopTaskTransfer,
+  insertDesktopTaskTransfer,
+  insertDesktopTaskTransferProvenance,
+  rejectDesktopTaskTransfer,
+  updateDesktopTaskTransferPayload,
+} from "../services/desktopServerClient";
 import { loadSessionRecoveryState } from "../composables/sessionRecoveryState";
 import { invoke } from "../invoke";
 import { fileExistsSafe } from "../utils/invokeHelpers";
@@ -584,7 +584,7 @@ export function createTransferApi(
       bundle,
     });
 
-    await insertTaskTransfer(context.requireDb(), {
+    await insertDesktopTaskTransfer({
       id: preflight.transferId,
       direction: "outgoing",
       status: "pending",
@@ -608,7 +608,7 @@ export function createTransferApi(
 
   async function recordIncomingTransfer(request: IncomingTransferRequest): Promise<void> {
     try {
-      await insertTaskTransfer(context.requireDb(), {
+      await insertDesktopTaskTransfer({
         id: request.transferId,
         direction: "incoming",
         status: "pending",
@@ -630,7 +630,7 @@ export function createTransferApi(
   async function finalizeOutgoingTransfer(
     transferId: string,
   ): Promise<FinalizedOutgoingTransferResult> {
-    const transfer = await getTaskTransfer(context.requireDb(), transferId);
+    const transfer = await getDesktopTaskTransfer(transferId);
     if (!transfer) {
       throw new Error(`outgoing transfer not found: ${transferId}`);
     }
@@ -666,8 +666,8 @@ export function createTransferApi(
       );
     }
 
-    const refreshedItems = await context.requireDb().select<PipelineItem>("SELECT * FROM pipeline_item");
-    const refreshedItem = refreshedItems.find((candidate) => candidate.id === item.id) ?? item;
+    await queries.reloadSnapshot();
+    const refreshedItem = context.state.items.value.find((candidate) => candidate.id === item.id) ?? item;
     const repoRemoteUrl = existingPayload.repo.mode === "reuse-local"
       ? null
       : await invoke<string | null>("git_remote_url", {
@@ -698,10 +698,7 @@ export function createTransferApi(
       bundle,
     });
 
-    await context.requireDb().execute(
-      "UPDATE task_transfer SET payload_json = ?, error = NULL WHERE id = ?",
-      [JSON.stringify(payload), transferId],
-    );
+    await updateDesktopTaskTransferPayload(transferId, JSON.stringify(payload));
     await queries.reloadSnapshot();
 
     return {
@@ -712,7 +709,7 @@ export function createTransferApi(
   }
 
   async function approveIncomingTransfer(transferId: string): Promise<string> {
-    const transfer = await getTaskTransfer(context.requireDb(), transferId);
+    const transfer = await getDesktopTaskTransfer(transferId);
     if (!transfer) {
       throw new Error(`incoming transfer not found: ${transferId}`);
     }
@@ -745,8 +742,8 @@ export function createTransferApi(
       },
     );
 
-    await markTaskTransferCompleted(context.requireDb(), transferId, localTaskId);
-    await insertTaskTransferProvenance(context.requireDb(), {
+    await completeDesktopTaskTransfer(transferId, localTaskId);
+    await insertDesktopTaskTransferProvenance({
       pipeline_item_id: localTaskId,
       source_peer_id: payload.task.source_peer_id,
       source_task_id: payload.task.source_task_id,
@@ -766,7 +763,7 @@ export function createTransferApi(
   }
 
   async function rejectIncomingTransfer(transferId: string): Promise<void> {
-    const transfer = await getTaskTransfer(context.requireDb(), transferId);
+    const transfer = await getDesktopTaskTransfer(transferId);
     if (!transfer) {
       throw new Error(`incoming transfer not found: ${transferId}`);
     }
@@ -777,14 +774,14 @@ export function createTransferApi(
       throw new Error(`incoming transfer is not pending: ${transferId}`);
     }
 
-    await markTaskTransferRejected(context.requireDb(), transferId, "Rejected locally");
+    await rejectDesktopTaskTransfer(transferId, "Rejected locally");
     await queries.reloadSnapshot();
   }
 
   async function handleOutgoingTransferCommitted(
     event: OutgoingTransferCommittedEvent,
   ): Promise<void> {
-    const transfer = await getTaskTransfer(context.requireDb(), event.transferId);
+    const transfer = await getDesktopTaskTransfer(event.transferId);
     if (!transfer || transfer.direction !== "outgoing") {
       return;
     }
@@ -797,11 +794,7 @@ export function createTransferApi(
       );
     }
 
-    await markTaskTransferCompleted(
-      context.requireDb(),
-      event.transferId,
-      transfer.local_task_id ?? event.sourceTaskId,
-    );
+    await completeDesktopTaskTransfer(event.transferId, transfer.local_task_id ?? event.sourceTaskId);
     await tasks.closeTask(event.sourceTaskId);
     await queries.reloadSnapshot();
   }

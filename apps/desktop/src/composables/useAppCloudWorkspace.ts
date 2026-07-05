@@ -57,7 +57,7 @@ export function useAppCloudWorkspace({ db, store, toast }: UseAppCloudWorkspaceO
 
   const localReposForCloudMatching = computedAsync(async () => {
     return Promise.all(store.repos.map(async (repo) => {
-      const metadata = await getCachedRepoRemoteMetadata(db, repo);
+      const metadata = await getCachedRepoRemoteMetadata(repo);
       return {
         repo,
         remoteUrl: metadata.remoteUrl,

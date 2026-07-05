@@ -1,4 +1,4 @@
-import type { AgentProvider } from "@kanna/db";
+import type { AgentProvider } from "../types/kanna";
 
 // Provider-selection policy (how a multi-provider agent/stage resolves to the one
 // provider a task actually spawns with):

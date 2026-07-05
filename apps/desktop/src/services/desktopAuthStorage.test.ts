@@ -3,7 +3,6 @@ import {
   createDesktopAuthSettingsPersistence,
   verifyFirebaseAuthIndexedDbStorage,
 } from "./desktopAuthStorage";
-import type { DbHandle } from "@kanna/db";
 
 type FakeRequest<T = unknown> = IDBRequest<T> & {
   result: T;
@@ -134,40 +133,26 @@ describe("verifyFirebaseAuthIndexedDbStorage", () => {
   });
 });
 
-function createFakeSettingsDb(): DbHandle {
+function createFakeSettingsClient() {
   const settings = new Map<string, string>();
   return {
-    async execute(query, bindValues = []) {
-      if (query.startsWith("CREATE TABLE")) return { rowsAffected: 0 };
-      if (query.startsWith("INSERT INTO settings")) {
-        settings.set(String(bindValues[0]), String(bindValues[1]));
-        return { rowsAffected: 1 };
-      }
-      if (query.startsWith("DELETE FROM settings")) {
-        const deleted = settings.delete(String(bindValues[0]));
-        return { rowsAffected: deleted ? 1 : 0 };
-      }
-      throw new Error(`Unexpected execute: ${query}`);
+    async getSetting(key: string) {
+      return settings.get(key) ?? null;
     },
-    async select<T>(query: string, bindValues = []) {
-      if (query.startsWith("SELECT value FROM settings")) {
-        const value = settings.get(String(bindValues[0]));
-        return (value === undefined ? [] : [{ value }]) as T[];
-      }
-      throw new Error(`Unexpected select: ${query}`);
+    async putSetting(key: string, value: string) {
+      settings.set(key, value);
+    },
+    async deleteSetting(key: string) {
+      settings.delete(key);
     },
   };
 }
 
 describe("createDesktopAuthSettingsPersistence", () => {
-  it("persists Firebase Auth values through the desktop settings database", async () => {
-    const db = createFakeSettingsDb();
-    const firstPersistence = createDesktopAuthSettingsPersistence({
-      loadDatabase: async () => ({ db }),
-    });
-    const secondPersistence = createDesktopAuthSettingsPersistence({
-      loadDatabase: async () => ({ db }),
-    });
+  it("persists Firebase Auth values through the desktop settings API", async () => {
+    const settingsClient = createFakeSettingsClient();
+    const firstPersistence = createDesktopAuthSettingsPersistence(settingsClient);
+    const secondPersistence = createDesktopAuthSettingsPersistence(settingsClient);
     const firstPersistenceInstance = new firstPersistence();
     const secondPersistenceInstance = new secondPersistence();
 

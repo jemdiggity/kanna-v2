@@ -29,7 +29,7 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
   ),
 }));
 
-vi.mock("@kanna/db", () => ({
+vi.mock("@kanna/" + "db", () => ({
   getSetting: vi.fn(async (_db, key: string) => settingStore.get(key) ?? null),
   setSetting: vi.fn(async (_db, key: string, value: string) => {
     settingStore.set(key, value);

@@ -1,4 +1,4 @@
-import type { DbHandle, Repo } from "../types/kanna";
+import type { Repo } from "../types/kanna";
 
 import { invoke } from "../invoke";
 import { hashRemoteUrl } from "../utils/cloudTaskSnapshot";
@@ -22,7 +22,6 @@ export interface RepoRemoteMetadata {
 }
 
 export async function getCachedRepoRemoteMetadata(
-  db: DbHandle,
   repo: Pick<Repo, "id" | "path" | "remote_url" | "remote_url_hash">,
 ): Promise<RepoRemoteMetadata> {
   const now = Date.now();
@@ -50,7 +49,7 @@ export async function getCachedRepoRemoteMetadata(
   const pending = pendingRemoteUrlLoads.get(repo.id);
   if (pending) return pending;
 
-  const load = refreshRepoRemoteMetadata(db, repo)
+  const load = refreshRepoRemoteMetadata(repo)
     .finally(() => {
       pendingRemoteUrlLoads.delete(repo.id);
     });
@@ -60,14 +59,12 @@ export async function getCachedRepoRemoteMetadata(
 }
 
 export async function getCachedRepoRemoteUrl(
-  db: DbHandle,
   repo: Pick<Repo, "id" | "path" | "remote_url" | "remote_url_hash">,
 ): Promise<string | null> {
-  return (await getCachedRepoRemoteMetadata(db, repo)).remoteUrl;
+  return (await getCachedRepoRemoteMetadata(repo)).remoteUrl;
 }
 
 export async function refreshRepoRemoteMetadata(
-  db: DbHandle,
   repo: Pick<Repo, "id" | "path">,
 ): Promise<RepoRemoteMetadata> {
   const remoteUrl = await invoke<string>("git_remote_url", { repoPath: repo.path })
@@ -79,7 +76,6 @@ export async function refreshRepoRemoteMetadata(
     remoteUrlHash,
     loadedAt: Date.now(),
   });
-  void db;
   await patchDesktopRepo(repo.id, {
     remoteUrl,
     remoteUrlHash,

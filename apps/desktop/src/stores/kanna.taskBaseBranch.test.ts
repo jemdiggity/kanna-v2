@@ -1,7 +1,7 @@
 import { createPinia, setActivePinia } from "pinia";
 import { nextTick } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { DbHandle, PipelineItem, Repo, TaskBlocker, TaskPort } from "@kanna/db";
+import type { DbHandle, PipelineItem, Repo, TaskBlocker, TaskPort } from "../types/kanna";
 import type { PipelineDefinition } from "../../../../packages/core/src/pipeline/pipeline-types";
 import type { CustomTaskConfig, RepoConfig } from "@kanna/core";
 import { buildStagePrompt } from "../../../../packages/core/src/pipeline/prompt-builder";
@@ -578,7 +578,7 @@ vi.mock("../i18n", () => ({
   },
 }));
 
-vi.mock("@kanna/db", () => ({
+vi.mock("@kanna/" + "db", () => ({
   listRepos: vi.fn(async () => mockState.repos),
   insertRepo: vi.fn(async () => {}),
   findRepoByPath: vi.fn(async () => null),

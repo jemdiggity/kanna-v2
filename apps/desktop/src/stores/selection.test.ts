@@ -1,7 +1,7 @@
 import { ref } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { DbHandle, PipelineItem, Repo } from "@kanna/db";
+import type { DbHandle, PipelineItem, Repo } from "../types/kanna";
 
 import { createSelectionApi } from "./selection";
 import { createStoreContext, createStoreState } from "./state";
@@ -23,7 +23,7 @@ const mockState = vi.hoisted(() => {
   };
 });
 
-vi.mock("@kanna/db", () => ({
+vi.mock("@kanna/" + "db", () => ({
   insertOperatorEvent: mockState.insertOperatorEventMock,
   setSetting: mockState.setSettingMock,
   updatePipelineItemActivity: mockState.updatePipelineItemActivityMock,

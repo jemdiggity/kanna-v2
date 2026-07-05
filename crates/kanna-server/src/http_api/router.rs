@@ -3,26 +3,29 @@ use super::desktop::list_desktops;
 use super::ksp::ksp_stream;
 use super::operator_events::post_operator_events;
 use super::pairing::create_pairing_session;
-use super::repos::{add_repo, list_repo_tasks, list_repos, patch_repo};
-use super::settings::{get_setting, put_setting};
+use super::repos::{
+    add_repo, get_repo_by_path, list_repo_tasks, list_repos, patch_repo, reorder_repos,
+};
+use super::settings::{delete_setting, get_setting, put_setting};
 use super::signal_agent::signal_agent;
 use super::snapshot::get_snapshot;
 use super::state::{AppState, HttpInvokeResponse};
 use super::status::status;
 use super::task_actions::{
-    advance_stage, close_task, complete_stage, request_revision, rerun_stage, run_merge_agent,
-    set_task_parent,
+    advance_stage, close_task, complete_stage, pin_task, reorder_pinned_tasks, request_revision,
+    rerun_stage, run_merge_agent, set_task_parent, unpin_task,
 };
 use super::task_blockers::{block_task, unblock_task};
 use super::task_input::send_task_input;
 use super::task_logs::task_logs;
 use super::tasks::{
-    create_task, get_task, list_closed_task_identities, list_recent_tasks, put_task_agent_session,
-    search_tasks, update_task,
+    create_task, get_task, list_closed_task_identities, list_recent_tasks, search_tasks,
+    update_task,
 };
 use super::transfers::{
-    claim_pending_incoming_transfer, fail_pending_incoming_transfer,
-    list_pending_incoming_transfers,
+    claim_pending_incoming_transfer, complete_task_transfer, fail_pending_incoming_transfer,
+    get_task_transfer, insert_task_transfer, insert_task_transfer_provenance,
+    list_pending_incoming_transfers, reject_task_transfer, update_task_transfer_payload,
 };
 use axum::body::Body;
 use axum::http::Request;
@@ -37,12 +40,17 @@ pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/v1/status", get(status))
         .route("/v1/snapshot", get(get_snapshot))
-        .route("/v1/settings/{key}", get(get_setting).put(put_setting))
+        .route(
+            "/v1/settings/{key}",
+            get(get_setting).put(put_setting).delete(delete_setting),
+        )
         .route("/v1/operator-events", post(post_operator_events))
         .route("/v1/analytics/repos/{repo_id}", get(get_repo_analytics))
         .route("/v1/stream", get(ksp_stream))
         .route("/v1/desktops", get(list_desktops))
         .route("/v1/repos", get(list_repos).post(add_repo))
+        .route("/v1/repos/by-path", get(get_repo_by_path))
+        .route("/v1/repos/actions/reorder", post(reorder_repos))
         .route("/v1/repos/{repo_id}", axum::routing::patch(patch_repo))
         .route("/v1/repos/{repo_id}/tasks", get(list_repo_tasks))
         .route(
@@ -57,10 +65,6 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/v1/tasks", post(create_task))
         .route("/v1/tasks/{task_id}", get(get_task).patch(update_task))
-        .route(
-            "/v1/tasks/{task_id}/agent-session",
-            axum::routing::put(put_task_agent_session),
-        )
         .route("/v1/tasks/{task_id}/logs", get(task_logs))
         .route("/v1/tasks/{task_id}/input", post(send_task_input))
         .route("/v1/tasks/{task_id}/actions/block", post(block_task))
@@ -82,6 +86,12 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/v1/tasks/{task_id}/actions/set-parent",
             post(set_task_parent),
         )
+        .route("/v1/tasks/{task_id}/actions/pin", post(pin_task))
+        .route("/v1/tasks/{task_id}/actions/unpin", post(unpin_task))
+        .route(
+            "/v1/tasks/actions/reorder-pinned",
+            post(reorder_pinned_tasks),
+        )
         .route("/v1/tasks/{task_id}/actions/close", post(close_task))
         .route(
             "/v1/tasks/{task_id}/actions/run-merge-agent",
@@ -90,6 +100,24 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/v1/transfers/incoming/pending",
             get(list_pending_incoming_transfers),
+        )
+        .route("/v1/transfers", post(insert_task_transfer))
+        .route(
+            "/v1/transfers/provenance",
+            post(insert_task_transfer_provenance),
+        )
+        .route("/v1/transfers/{transfer_id}", get(get_task_transfer))
+        .route(
+            "/v1/transfers/{transfer_id}/payload",
+            axum::routing::put(update_task_transfer_payload),
+        )
+        .route(
+            "/v1/transfers/{transfer_id}/actions/complete",
+            post(complete_task_transfer),
+        )
+        .route(
+            "/v1/transfers/{transfer_id}/actions/reject",
+            post(reject_task_transfer),
         )
         .route(
             "/v1/transfers/{transfer_id}/actions/claim",

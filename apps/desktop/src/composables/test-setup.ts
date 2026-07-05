@@ -26,6 +26,7 @@ setDesktopSnapshotFetcherForTests(async () => ({
 setDesktopServerClientHandlersForTests({
   getSetting: async () => null,
   putSetting: async (key, value) => ({ key, value }),
+  deleteSetting: async () => {},
   postOperatorEvents: async () => {},
   fetchRepoAnalytics: async () => ({
     taskBuckets: [],
@@ -45,7 +46,6 @@ setDesktopServerClientHandlersForTests({
     hasOperatorData: false,
   }),
   patchRepo: async () => {},
-  putTaskAgentSession: async () => {},
   fetchPendingIncomingTransfers: async () => [],
   claimPendingIncomingTransfer: async () => false,
   failPendingIncomingTransfer: async () => false,

@@ -55,6 +55,26 @@ export interface TaskBlocker {
   blocker_item_id: string;
 }
 
+export interface TaskPort {
+  port: number;
+  pipeline_item_id: string;
+  env_name: string;
+}
+
+export interface TaskTransfer {
+  id: string;
+  direction: "incoming" | "outgoing";
+  status: "pending" | "streaming" | "completed" | "failed" | "rejected";
+  source_peer_id: string | null;
+  target_peer_id: string | null;
+  source_task_id: string | null;
+  local_task_id: string | null;
+  started_at: string;
+  completed_at: string | null;
+  error: string | null;
+  payload_json: string | null;
+}
+
 export interface DbHandle {
   execute(query: string, bindValues?: unknown[]): Promise<{ rowsAffected: number }>;
   select<T>(query: string, bindValues?: unknown[]): Promise<T[]>;

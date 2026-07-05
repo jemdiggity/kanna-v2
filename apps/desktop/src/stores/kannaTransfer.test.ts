@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
-import type { DbHandle, PipelineItem, Repo } from "@kanna/db";
+import type { DbHandle, PipelineItem, Repo } from "../types/kanna";
 import {
   buildOutgoingTransferPayload,
   chooseRepoAcquisitionMode,
@@ -10,7 +10,12 @@ import {
   parseOutgoingTransferPreflightResult,
 } from "../utils/taskTransfer";
 import type { SessionRecoveryState } from "../composables/sessionRecoveryState";
-import { setDesktopSnapshotFetcherForTests } from "../services/desktopServerClient";
+import {
+  setDesktopSnapshotFetcherForTests,
+  updateDesktopServerClientHandlersForTests,
+  type NewTaskTransferInput,
+  type NewTaskTransferProvenanceInput,
+} from "../services/desktopServerClient";
 
 const invokeMock = vi.fn<(cmd: string, args?: Record<string, unknown>) => Promise<unknown>>();
 const loadSessionRecoveryStateMock = vi.fn<(sessionId: string) => Promise<SessionRecoveryState | null>>();
@@ -169,6 +174,70 @@ function createTransferDb(initial: {
     worktreePaths: {},
     settings: {},
   }));
+
+  updateDesktopServerClientHandlersForTests({
+    findRepoByPath: async (path: string) =>
+      tables.repo.find((repo) => repo.path === path) as never ?? null,
+    addRepo: async ({ path, name }) => {
+      const existing = tables.repo.find((repo) => repo.path === path);
+      if (existing) return existing as never;
+      const repo = {
+        ...buildRepo(),
+        id: `repo-${tables.repo.length + 1}`,
+        path,
+        name: name ?? path.split("/").pop() ?? "repo",
+      };
+      tables.repo.push(repo);
+      return repo as never;
+    },
+    patchRepo: async (repoId, input) => {
+      const repo = tables.repo.find((candidate) => candidate.id === repoId);
+      if (!repo) return;
+      if (input.name !== undefined) repo.name = input.name;
+      if (input.remoteUrl !== undefined) repo.remote_url = input.remoteUrl;
+      if (input.remoteUrlHash !== undefined) repo.remote_url_hash = input.remoteUrlHash;
+      if (input.hidden !== undefined) repo.hidden = input.hidden ? 1 : 0;
+    },
+    insertTaskTransfer: async (transfer: NewTaskTransferInput) => {
+      if (tables.task_transfer.some((row) => row.id === transfer.id)) {
+        throw new Error("UNIQUE constraint failed: task_transfer.id");
+      }
+      tables.task_transfer.push({
+        ...transfer,
+        started_at: new Date().toISOString(),
+        completed_at: null,
+      });
+    },
+    getTaskTransfer: async (transferId: string) =>
+      tables.task_transfer.find((transfer) => transfer.id === transferId) as never ?? null,
+    updateTaskTransferPayload: async (transferId: string, payloadJson: string) => {
+      const row = tables.task_transfer.find((transfer) => transfer.id === transferId);
+      if (!row) return false;
+      row.payload_json = payloadJson;
+      row.error = null;
+      return true;
+    },
+    completeTaskTransfer: async (transferId: string, localTaskId: string) => {
+      const row = tables.task_transfer.find((transfer) => transfer.id === transferId);
+      if (!row) return false;
+      row.status = "completed";
+      row.local_task_id = localTaskId;
+      row.completed_at = new Date().toISOString();
+      row.error = null;
+      return true;
+    },
+    rejectTaskTransfer: async (transferId: string, reason: string) => {
+      const row = tables.task_transfer.find((transfer) => transfer.id === transferId);
+      if (!row) return false;
+      row.status = "rejected";
+      row.completed_at = new Date().toISOString();
+      row.error = reason;
+      return true;
+    },
+    insertTaskTransferProvenance: async (provenance: NewTaskTransferProvenanceInput) => {
+      tables.task_transfer_provenance.push(provenance);
+    },
+  });
 
   const db = {
     tables,
@@ -1099,31 +1168,7 @@ describe("recordIncomingTransfer", () => {
     setActivePinia(createPinia());
     const { useKannaStore } = await import("./kanna");
     const store = useKannaStore();
-    const insertedTransfers: Array<Record<string, unknown>> = [];
-    const fakeDb = {
-      execute: vi.fn(async (sql: string, params?: unknown[]) => {
-        if (sql.includes("INSERT INTO task_transfer")) {
-          insertedTransfers.push({
-            id: params?.[0],
-            direction: params?.[1],
-            status: params?.[2],
-            source_peer_id: params?.[3],
-            target_peer_id: params?.[4],
-            source_task_id: params?.[5],
-            local_task_id: params?.[6],
-            error: params?.[7],
-            payload_json: params?.[8],
-          });
-        }
-        return { rowsAffected: 1 };
-      }),
-      select: vi.fn(async (sql: string) => {
-        if (sql.includes("FROM task_transfer")) {
-          return insertedTransfers;
-        }
-        return [];
-      }),
-    } as unknown as DbHandle;
+    const fakeDb = createTransferDb({});
 
     await store.init(fakeDb);
 
@@ -1160,10 +1205,7 @@ describe("recordIncomingTransfer", () => {
 
     await store.recordIncomingTransfer(request);
 
-    const rows = await fakeDb.select<Record<string, unknown>>(
-      "SELECT id, direction, status, source_peer_id, source_task_id FROM task_transfer",
-    );
-    expect(rows[0]).toMatchObject({
+    expect(fakeDb.tables.task_transfer[0]).toMatchObject({
       id: "transfer-1",
       direction: "incoming",
       status: "pending",
@@ -1177,18 +1219,7 @@ describe("recordIncomingTransfer", () => {
     setActivePinia(createPinia());
     const { useKannaStore } = await import("./kanna");
     const store = useKannaStore();
-    const insertedTransfers = new Set<string>();
-    const fakeDb = {
-      execute: vi.fn(async (_sql: string, params?: unknown[]) => {
-        const transferId = typeof params?.[0] === "string" ? params[0] : "";
-        if (insertedTransfers.has(transferId)) {
-          throw new Error("UNIQUE constraint failed: task_transfer.id");
-        }
-        insertedTransfers.add(transferId);
-        return { rowsAffected: 1 };
-      }),
-      select: vi.fn(async () => []),
-    } as unknown as DbHandle;
+    const fakeDb = createTransferDb({});
 
     await store.init(fakeDb);
 

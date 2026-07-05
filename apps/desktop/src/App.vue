@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, inject, type Ref } from "vue";
 import { useI18n } from "vue-i18n";
-import { type AgentProvider, type DbHandle } from "@kanna/db";
+import { type AgentProvider, type DbHandle } from "./types/kanna";
 import Sidebar from "./components/Sidebar.vue";
 import MainPanel from "./components/MainPanel.vue";
 import AppModalLayer from "./components/AppModalLayer.vue";

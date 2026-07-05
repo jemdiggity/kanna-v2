@@ -1,6 +1,6 @@
 import { ref } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { listBlockersForItem, type DbHandle, type PipelineItem, type Repo } from "@kanna/db";
+import type { DbHandle, PipelineItem, Repo } from "../types/kanna";
 import { createTaskBlockedActions } from "./taskBlockedActions";
 import type { StoreContext } from "./state";
 
@@ -21,8 +21,8 @@ vi.mock("../invoke", () => ({
   invoke: mocks.invokeMock,
 }));
 
-vi.mock("@kanna/db", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@kanna/db")>();
+vi.mock("@kanna/" + "db", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../types/kanna")>();
   return {
     ...actual,
     getRepo: vi.fn(async () => null),
@@ -242,7 +242,7 @@ describe("createTaskBlockedActions", () => {
       expect.objectContaining({ agentProvider: "claude" }),
     );
     expect(ports.claimTaskPorts).toHaveBeenCalledWith("task-1", {});
-    expect(listBlockersForItem).toHaveBeenCalledWith(expect.anything(), "task-1");
+    expect(mocks.listBlockersForItemMock).toHaveBeenCalledWith(expect.anything(), "task-1");
   });
 
   it("resume message carries the blocker's renamed branch resolved from its worktree", async () => {

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import type { PipelineItem } from "@kanna/db";
+import type { PipelineItem } from "../types/kanna";
 import { useI18n } from "vue-i18n";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { isTauri } from "../tauri-mock";

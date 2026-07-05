@@ -72,7 +72,8 @@ pub(super) async fn get_task(
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct UpdateTaskRequest {
-    display_name: Option<String>,
+    #[serde(default)]
+    display_name: Option<Option<String>>,
 }
 
 pub(super) async fn update_task(
@@ -80,16 +81,25 @@ pub(super) async fn update_task(
     axum::extract::Path(task_id): axum::extract::Path<String>,
     Json(payload): Json<UpdateTaskRequest>,
 ) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
-    let display_name = payload
-        .display_name
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            (
+    let display_name = match payload.display_name {
+        Some(Some(value)) => {
+            let trimmed = value.trim().to_string();
+            if trimmed.is_empty() {
+                return Err((
+                    axum::http::StatusCode::BAD_REQUEST,
+                    "displayName must be non-empty when provided".to_string(),
+                ));
+            }
+            Some(trimmed)
+        }
+        Some(None) => None,
+        None => {
+            return Err((
                 axum::http::StatusCode::BAD_REQUEST,
-                "displayName must be a non-empty string".to_string(),
-            )
-        })?;
+                "displayName must be provided".to_string(),
+            ));
+        }
+    };
     let db = Db::open(&state.config.db_path).map_err(|e| {
         (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -105,42 +115,7 @@ pub(super) async fn update_task(
                 "db error: not found".to_string(),
             )
         })?;
-    db.update_pipeline_item_display_name(&task_id, &display_name)
-        .map_err(|e| db_write_error("db error", e))?;
-    state.publish_state_changed(StateChangeScope::Tasks);
-    Ok(Json(crate::mobile_api::TaskActionResponse {
-        task_id,
-        follow_task: None,
-    }))
-}
-
-#[derive(Debug, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct PutAgentSessionRequest {
-    agent_session_id: Option<String>,
-}
-
-pub(super) async fn put_task_agent_session(
-    State(state): State<Arc<AppState>>,
-    axum::extract::Path(task_id): axum::extract::Path<String>,
-    Json(payload): Json<PutAgentSessionRequest>,
-) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
-    let db = Db::open(&state.config.db_path).map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("db error: {}", e),
-        )
-    })?;
-    let task_id = db
-        .resolve_pipeline_item_id(&task_id)
-        .map_err(|e| db_write_error("db error", e))?
-        .ok_or_else(|| {
-            (
-                axum::http::StatusCode::NOT_FOUND,
-                "db error: not found".to_string(),
-            )
-        })?;
-    db.update_pipeline_item_agent_session_id(&task_id, payload.agent_session_id.as_deref())
+    db.update_pipeline_item_display_name(&task_id, display_name.as_deref())
         .map_err(|e| db_write_error("db error", e))?;
     state.publish_state_changed(StateChangeScope::Tasks);
     Ok(Json(crate::mobile_api::TaskActionResponse {

@@ -382,6 +382,42 @@ impl Db {
         Ok(())
     }
 
+    pub fn pin_pipeline_item(&self, task_id: &str, pin_order: i64) -> Result<(), rusqlite::Error> {
+        let rows_affected = self.conn.execute(
+            "UPDATE pipeline_item SET pinned = 1, pin_order = ?, updated_at = datetime('now') WHERE id = ?",
+            (pin_order, task_id),
+        )?;
+        if rows_affected == 0 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        Ok(())
+    }
+
+    pub fn unpin_pipeline_item(&self, task_id: &str) -> Result<(), rusqlite::Error> {
+        let rows_affected = self.conn.execute(
+            "UPDATE pipeline_item SET pinned = 0, pin_order = NULL, updated_at = datetime('now') WHERE id = ?",
+            [task_id],
+        )?;
+        if rows_affected == 0 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        Ok(())
+    }
+
+    pub fn reorder_pinned_items(
+        &self,
+        repo_id: &str,
+        ordered_ids: &[String],
+    ) -> Result<(), rusqlite::Error> {
+        for (index, task_id) in ordered_ids.iter().enumerate() {
+            self.conn.execute(
+                "UPDATE pipeline_item SET pin_order = ?, updated_at = datetime('now') WHERE id = ? AND repo_id = ?",
+                (index as i64, task_id, repo_id),
+            )?;
+        }
+        Ok(())
+    }
+
     #[cfg(test)]
     pub fn get_test_pipeline_item_parent(
         &self,
@@ -484,7 +520,7 @@ impl Db {
     pub fn update_pipeline_item_display_name(
         &self,
         id: &str,
-        display_name: &str,
+        display_name: Option<&str>,
     ) -> Result<(), rusqlite::Error> {
         let Some(pipeline_item_id) = self.resolve_pipeline_item_id(id)? else {
             return Err(rusqlite::Error::QueryReturnedNoRows);

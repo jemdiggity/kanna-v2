@@ -1,4 +1,4 @@
-import { updatePipelineItemParent } from "@kanna/db";
+import { setDesktopTaskParent } from "../services/desktopServerClient";
 import { validateParentAssignment } from "../utils/taskParenting";
 import { requireService, type StoreContext } from "./state";
 import type { TasksApi } from "./tasks";
@@ -31,7 +31,7 @@ export function createTaskParentActions(
 
     if ((child.parent_task_id ?? null) === parentId) return;
 
-    await updatePipelineItemParent(context.requireDb(), itemId, parentId);
+    await setDesktopTaskParent(itemId, parentId);
     await reloadSnapshot();
     await invalidateWindowWorkspace("setTaskParent");
   }

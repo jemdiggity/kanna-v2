@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { PipelineItem, TaskBlocker } from "@kanna/db";
+import type { PipelineItem, TaskBlocker } from "../types/kanna";
 
 import {
   groupedSidebarItemsByStage,

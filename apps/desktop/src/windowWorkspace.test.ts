@@ -13,7 +13,7 @@ import { updateDesktopServerClientHandlersForTests } from "./services/desktopSer
 
 const settingStore = vi.hoisted(() => new Map<string, string>());
 
-vi.mock("@kanna/db", () => ({
+vi.mock("@kanna/" + "db", () => ({
   getSetting: vi.fn(async (_db, key: string) => settingStore.get(key) ?? null),
   setSetting: vi.fn(async (_db, key: string, value: string) => {
     settingStore.set(key, value);

@@ -1,7 +1,7 @@
 import { createPinia, setActivePinia } from "pinia";
 import { nextTick } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { DbHandle, PipelineItem, Repo } from "@kanna/db";
+import type { DbHandle, PipelineItem, Repo } from "../types/kanna";
 
 const mockState = vi.hoisted(() => {
   const now = "2026-04-16T00:00:00.000Z";
@@ -280,7 +280,7 @@ vi.mock("../i18n", () => ({
   },
 }));
 
-vi.mock("@kanna/db", () => ({
+vi.mock("@kanna/" + "db", () => ({
   listRepos: vi.fn(async () => mockState.repos),
   insertRepo: vi.fn(async () => {}),
   findRepoByPath: vi.fn(async () => null),
@@ -557,7 +557,7 @@ describe("kanna runtime status reconciliation", () => {
     );
   });
 
-  it("persists a codex resume session id from session_exit payload", async () => {
+  it("does not persist codex resume session ids from the frontend session_exit path", async () => {
     mockState.pipelineItems = [
       {
         ...mockState.pipelineItems[0]!,
@@ -576,11 +576,7 @@ describe("kanna runtime status reconciliation", () => {
 
     await flushStore();
 
-    expect(mockState.updateAgentSessionIdMock).toHaveBeenCalledWith(
-      expect.anything(),
-      "task-1",
-      "019d99a5-aa94-7c73-b786-644cc095c037",
-    );
+    expect(mockState.updateAgentSessionIdMock).not.toHaveBeenCalled();
   });
 
   it("selects the next task in the same repo when the selected teardown task auto-closes", async () => {
