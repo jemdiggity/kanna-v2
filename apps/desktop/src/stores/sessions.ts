@@ -16,6 +16,7 @@ import {
   type AgentProviderAvailability,
 } from "./agent-provider";
 import { resolveActivityForRuntimeStatus, shouldIgnoreRuntimeStatusDuringSetup } from "./taskRuntimeStatus";
+import { resolveTaskItemForDaemonSession } from "./taskSessionIdentity";
 import { isReadableDirectory, resolveShellSpawnCwd } from "../utils/shellCwd";
 import { readRepoConfig, requireService, type AgentSpawnRecoveryOptions, type PreparedPtySession, type PtySpawnOptions, type StoreContext, type TaskSessionRecoveryOptions } from "./state";
 import { isTaskSelectedInAnyWindow } from "./windowSelection";
@@ -139,7 +140,7 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
         const sessionId = session.session_id;
         const status = session.status;
         if (!sessionId || !status) continue;
-        const item = context.state.items.value.find((candidate) => candidate.id === sessionId);
+        const item = resolveTaskItemForDaemonSession(context.state.items.value, sessionId);
         if (!item) continue;
         await applyTaskRuntimeStatus(item, status);
       }
@@ -186,9 +187,9 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
     resumeSessionId?: string | null,
   ): Promise<void> {
     if (!resumeSessionId) return;
-    const item = context.state.items.value.find((candidate) => candidate.id === sessionId);
+    const item = resolveTaskItemForDaemonSession(context.state.items.value, sessionId);
     if (!item || item.agent_provider !== "codex") return;
-    await updateAgentSessionId(context.requireDb(), sessionId, resumeSessionId);
+    await updateAgentSessionId(context.requireDb(), item.id, resumeSessionId);
   }
 
   async function spawnShellSession(

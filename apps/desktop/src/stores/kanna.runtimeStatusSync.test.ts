@@ -436,6 +436,63 @@ describe("kanna runtime status reconciliation", () => {
     expect(mockState.pipelineItems[0]?.activity).toBe("idle");
   });
 
+  it("reconciles busy status from a forked workspace branch to the durable task", async () => {
+    mockState.pipelineItems = [
+      {
+        ...mockState.pipelineItems[0]!,
+        id: "5aa7c7ec",
+        branch: "task-5aa7c7ec-7",
+        stage: "pr",
+        agent_provider: "codex",
+        activity: "idle",
+      },
+    ];
+
+    await createStore();
+    await flushStore();
+
+    mockState.emit("status_changed", {
+      session_id: "task-5aa7c7ec-7",
+      status: "busy",
+    });
+
+    await flushStore();
+
+    expect(mockState.updatePipelineItemActivityMock).toHaveBeenCalledWith(
+      expect.anything(),
+      "5aa7c7ec",
+      "working",
+    );
+    expect(mockState.pipelineItems[0]?.activity).toBe("working");
+  });
+
+  it("syncs daemon status from a forked workspace branch to the durable task", async () => {
+    mockState.pipelineItems = [
+      {
+        ...mockState.pipelineItems[0]!,
+        id: "5aa7c7ec",
+        branch: "task-5aa7c7ec-7",
+        stage: "pr",
+        agent_provider: "codex",
+        activity: "idle",
+      },
+    ];
+    mockState.sessionStatuses = [{ session_id: "task-5aa7c7ec-7", status: "busy" }];
+
+    await createStore();
+    await flushStore();
+
+    mockState.emit("daemon_ready", {});
+    await flushStore();
+
+    expect(mockState.updatePipelineItemActivityMock).toHaveBeenCalledWith(
+      expect.anything(),
+      "5aa7c7ec",
+      "working",
+    );
+    expect(mockState.pipelineItems[0]?.activity).toBe("working");
+  });
+
   it("keeps an exited task read when another open window has it selected", async () => {
     const store = await createStore();
     store.attachWindowWorkspace({

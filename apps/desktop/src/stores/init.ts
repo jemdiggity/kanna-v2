@@ -15,6 +15,7 @@ import {
 } from "./kannaCleanup";
 import { formatAppWindowTitle, type AppBuildInfo } from "./windowTitle";
 import { isTaskTearingDown } from "./taskStages";
+import { resolveTaskItemForDaemonSession } from "./taskSessionIdentity";
 import { requireService, type StoreContext } from "./state";
 import { applySnapshotSettingsToState } from "./snapshotSettings";
 
@@ -344,7 +345,7 @@ export function createInitApi(
       const status = payload.status;
       if (!sessionId || typeof status !== "string") return;
 
-      const item = context.state.items.value.find((candidate) => candidate.id === sessionId);
+      const item = resolveTaskItemForDaemonSession(context.state.items.value, sessionId);
       if (!item) return;
       await requireService(context.services.applyTaskRuntimeStatus as ((item: PipelineItem, status: string) => Promise<void>) | undefined, "applyTaskRuntimeStatus")(item, status);
     });
