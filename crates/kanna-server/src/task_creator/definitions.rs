@@ -256,7 +256,27 @@ pub(super) fn read_agent_definition(
         Ok(content) => content,
         Err(_) => read_builtin_resource(&format!(".kanna/agents/{agent_name}/AGENT.md"))?,
     };
-    parse_agent_definition(&content)
+    let mut definition = parse_agent_definition(&content)?;
+
+    // Repo-local extension: layered onto the resolved agent (repo override or
+    // built-in) so a repo can customize a default agent without rewriting it.
+    let extend_path = Path::new(repo_path).join(format!(".kanna/agents/{agent_name}/EXTEND.md"));
+    match std::fs::read_to_string(&extend_path) {
+        Ok(extension) => {
+            apply_agent_extension(&mut definition, &extension)
+                .map_err(|e| format!("invalid agent extension {}: {}", extend_path.display(), e))?;
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            return Err(format!(
+                "failed to read agent extension {}: {}",
+                extend_path.display(),
+                err
+            ))
+        }
+    }
+
+    Ok(definition)
 }
 
 fn read_builtin_resource(relative_path: &str) -> Result<String, String> {
@@ -311,6 +331,36 @@ fn compiled_builtin_resource(relative_path: &str) -> Option<&'static str> {
         }
         _ => None,
     }
+}
+
+/// Merge an `EXTEND.md` document into a resolved agent definition: the body
+/// is appended to the base prompt and frontmatter fields replace the base's
+/// when present. Frontmatter is optional; a plain markdown file is a pure
+/// prompt extension.
+fn apply_agent_extension(definition: &mut AgentDefinition, content: &str) -> Result<(), String> {
+    let extension = parse_agent_definition(content)?;
+
+    if !extension.prompt.is_empty() {
+        if definition.prompt.is_empty() {
+            definition.prompt = extension.prompt;
+        } else {
+            definition.prompt = format!("{}\n\n{}", definition.prompt, extension.prompt);
+        }
+    }
+    if !extension.agent_providers.is_empty() {
+        definition.agent_providers = extension.agent_providers;
+    }
+    if extension.model.is_some() {
+        definition.model = extension.model;
+    }
+    if extension.permission_mode.is_some() {
+        definition.permission_mode = extension.permission_mode;
+    }
+    if !extension.allowed_tools.is_empty() {
+        definition.allowed_tools = extension.allowed_tools;
+    }
+
+    Ok(())
 }
 
 fn parse_agent_definition(content: &str) -> Result<AgentDefinition, String> {

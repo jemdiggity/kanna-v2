@@ -1,4 +1,8 @@
-import { parseAgentDefinition } from "../../../../packages/core/src/pipeline/agent-loader";
+import {
+  applyAgentExtension,
+  parseAgentDefinition,
+  parseAgentExtension,
+} from "../../../../packages/core/src/pipeline/agent-loader";
 import { parsePipelineJson } from "../../../../packages/core/src/pipeline/pipeline-loader";
 import type { AgentDefinition, PipelineDefinition } from "../../../../packages/core/src/pipeline/pipeline-types";
 import { invoke } from "../invoke";
@@ -207,6 +211,25 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
       } catch (error) {
         throw new Error(
           `Agent "${agentName}" not found on disk or in bundled resources: ${error instanceof Error ? error.message : JSON.stringify(error)}`,
+        );
+      }
+    }
+
+    // Repo-local extension: layered onto the resolved agent (repo override or
+    // built-in) so a repo can customize a default agent without rewriting it.
+    const extendPath = `${repoPath}/.kanna/agents/${agentName}/EXTEND.md`;
+    let extendContent: string | null = null;
+    try {
+      extendContent = await invoke<string>("read_text_file", { path: extendPath });
+    } catch (error) {
+      console.debug(`[pipeline] no extension for agent "${agentName}":`, error);
+    }
+    if (extendContent !== null) {
+      try {
+        agent = applyAgentExtension(agent, parseAgentExtension(extendContent));
+      } catch (error) {
+        throw new Error(
+          `Invalid agent extension at ${extendPath}: ${error instanceof Error ? error.message : JSON.stringify(error)}`,
         );
       }
     }
