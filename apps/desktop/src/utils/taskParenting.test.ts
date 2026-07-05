@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { PipelineItem } from "@kanna/db";
+import type { PipelineItem } from "../types/kanna";
 
 import { hasOpenSubtasks, validateParentAssignment } from "./taskParenting";
 

@@ -1,4 +1,4 @@
-import type { PipelineItem, Repo } from "@kanna/db";
+import type { PipelineItem, Repo } from "../types/kanna";
 import { publishDesktopTaskSnapshot } from "../services/desktopCloudPublisher";
 import { publishDesktopLanTaskSnapshot } from "../services/desktopLanTaskIndex";
 import type { StoreContext } from "./state";

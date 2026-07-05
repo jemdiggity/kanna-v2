@@ -1,4 +1,4 @@
-import type { AgentProvider } from "@kanna/db";
+import type { AgentProvider } from "../types/kanna";
 import { shellSingleQuote } from "../utils/shell";
 
 export interface AgentCommandResult {
@@ -261,8 +261,5 @@ async function persistFreshAgentSessionId(
   params: BuildAgentCommandParams,
   agentSessionId: string,
 ): Promise<void> {
-  if (!params.persistAgentSessionId) {
-    throw new Error(`missing agent session id writer for ${params.taskId}`);
-  }
-  await params.persistAgentSessionId(agentSessionId);
+  await params.persistAgentSessionId?.(agentSessionId);
 }

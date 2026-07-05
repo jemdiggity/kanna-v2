@@ -1,4 +1,4 @@
-import type { PipelineItem } from "@kanna/db";
+import type { PipelineItem } from "../types/kanna";
 import type { DesktopCloudTerminalRef } from "../services/desktopCloudTaskIndex";
 
 export function remoteTaskClosureKey(ref: DesktopCloudTerminalRef | undefined | null): string | null {

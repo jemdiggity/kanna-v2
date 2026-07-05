@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import { isBlockerResolved, type PipelineItem } from "@kanna/db";
+import type { PipelineItem } from "../types/kanna";
+import { isBlockerResolved } from "../utils/blockerResolution";
 import { invoke } from "../invoke";
 import TaskHeader from "./TaskHeader.vue";
 import TerminalTabs from "./TerminalTabs.vue";

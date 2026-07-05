@@ -157,6 +157,78 @@ enum BlockerResolution {
     PrCreated,
 }
 
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct PinTaskRequest {
+    position: i64,
+}
+
+pub(super) async fn pin_task(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+    Json(payload): Json<PinTaskRequest>,
+) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
+    let db = Db::open(&state.config.db_path).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("db error: {}", e),
+        )
+    })?;
+    let task_id = resolve_existing_task_id(&db, &task_id)?;
+    db.pin_pipeline_item(&task_id, payload.position)
+        .map_err(|e| db_write_error("db error", e))?;
+    state.publish_state_changed(StateChangeScope::Tasks);
+    Ok(Json(crate::mobile_api::TaskActionResponse {
+        task_id,
+        follow_task: None,
+    }))
+}
+
+pub(super) async fn unpin_task(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
+    let db = Db::open(&state.config.db_path).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("db error: {}", e),
+        )
+    })?;
+    let task_id = resolve_existing_task_id(&db, &task_id)?;
+    db.unpin_pipeline_item(&task_id)
+        .map_err(|e| db_write_error("db error", e))?;
+    state.publish_state_changed(StateChangeScope::Tasks);
+    Ok(Json(crate::mobile_api::TaskActionResponse {
+        task_id,
+        follow_task: None,
+    }))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ReorderPinnedTasksRequest {
+    repo_id: String,
+    ordered_ids: Vec<String>,
+}
+
+pub(super) async fn reorder_pinned_tasks(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<ReorderPinnedTasksRequest>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let db = Db::open(&state.config.db_path).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("db error: {}", e),
+        )
+    })?;
+    db.reorder_pinned_items(&payload.repo_id, &payload.ordered_ids)
+        .map_err(|e| db_write_error("db error", e))?;
+    state.publish_state_changed(StateChangeScope::Tasks);
+    Ok(Json(
+        serde_json::json!({ "updated": payload.ordered_ids.len() }),
+    ))
+}
+
 /// Build per-dependent session messages announcing that a blocker at the
 /// `pr` stage has resolved — either its PR was just created (optimistic
 /// resolution: work committed, reviewed, and pushed, awaiting human merge)

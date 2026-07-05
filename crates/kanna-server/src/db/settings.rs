@@ -21,6 +21,12 @@ impl Db {
         Ok(())
     }
 
+    pub fn delete_setting(&self, key: &str) -> Result<(), rusqlite::Error> {
+        self.conn
+            .execute("DELETE FROM settings WHERE key = ?", [key])?;
+        Ok(())
+    }
+
     pub fn select_raw(&self, query: &str, bind_values: &[Value]) -> Result<Value, rusqlite::Error> {
         // SECURITY: reject non-SELECT queries
         let trimmed = query.trim_start().to_uppercase();

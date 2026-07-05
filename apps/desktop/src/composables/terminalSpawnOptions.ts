@@ -1,4 +1,4 @@
-import type { AgentProvider } from "@kanna/db";
+import type { AgentProvider } from "../types/kanna";
 import type { SpawnOptions } from "./useTerminal";
 
 export interface TerminalSpawnConfig {

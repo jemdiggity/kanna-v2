@@ -1,4 +1,4 @@
-import type { PipelineItem } from "@kanna/db";
+import type { PipelineItem } from "../types/kanna";
 
 /** A task is open while it has not been closed. */
 export function isOpenTask(item: Pick<PipelineItem, "closed_at">): boolean {

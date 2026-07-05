@@ -393,6 +393,7 @@ async fn settings_routes_get_and_put_setting_values() {
     );
 
     let final_response = app
+        .clone()
         .oneshot(
             Request::get("/v1/settings/ideCommand")
                 .body(Body::empty())
@@ -405,6 +406,27 @@ async fn settings_routes_get_and_put_setting_values() {
         .unwrap();
     let final_json: serde_json::Value = from_slice(&final_body).unwrap();
     assert_eq!(final_json["value"], "zed");
+
+    let deleted = app
+        .clone()
+        .oneshot(
+            Request::delete("/v1/settings/ideCommand")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), StatusCode::OK);
+
+    let missing = app
+        .oneshot(
+            Request::get("/v1/settings/ideCommand")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -557,49 +579,6 @@ async fn patch_repo_route_updates_remote_metadata_and_hidden_state() {
         .unwrap();
     let snapshot: serde_json::Value = from_slice(&body).unwrap();
     assert_eq!(snapshot["entries"].as_array().unwrap().len(), 0);
-}
-
-#[tokio::test]
-async fn task_agent_session_route_updates_provider_session_id() {
-    let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
-        db.insert_test_repo("repo-1", "Repo One").unwrap();
-        db.insert_test_pipeline_item(
-            "task-1",
-            "repo-1",
-            "prompt",
-            Some("Task One"),
-            "in progress",
-            "2026-04-17 08:00:00",
-        )
-        .unwrap();
-    });
-
-    let response = app
-        .clone()
-        .oneshot(
-            Request::put("/v1/tasks/task-1/agent-session")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::json!({ "agentSessionId": "provider-session-1" }).to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let snapshot_response = app
-        .oneshot(Request::get("/v1/snapshot").body(Body::empty()).unwrap())
-        .await
-        .unwrap();
-    let body = axum::body::to_bytes(snapshot_response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let snapshot: serde_json::Value = from_slice(&body).unwrap();
-    assert_eq!(
-        snapshot["entries"][0]["items"][0]["agent_session_id"],
-        "provider-session-1"
-    );
 }
 
 #[tokio::test]

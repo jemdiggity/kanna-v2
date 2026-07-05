@@ -1,7 +1,7 @@
 import { invoke } from "../invoke";
 import { isTauri } from "../tauri-mock";
 import type { Ref } from "vue";
-import type { DbHandle } from "@kanna/db";
+import type { DbHandle } from "../types/kanna";
 
 const RETENTION_DAYS = 7;
 const BACKUP_SUFFIX_REGEX = /\.backup-(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2})(?:-\d+)?$/;

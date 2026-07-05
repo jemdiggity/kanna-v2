@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { Repo, PipelineItem } from "@kanna/db";
+import type { Repo, PipelineItem } from "../types/kanna";
 import { computed, ref, nextTick, onBeforeUnmount, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import draggable from "vuedraggable";

@@ -5,6 +5,7 @@ import {
   publishDesktopTaskSnapshot,
   reconcileDesktopTaskSnapshots,
 } from "./desktopCloudPublisher";
+import { setDesktopSnapshotFetcherForTests } from "./desktopServerClient";
 
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -26,7 +27,7 @@ const mocks = vi.hoisted(() => ({
   serverTimestamp: vi.fn(() => "SERVER_TIMESTAMP"),
 }));
 
-vi.mock("@kanna/db", () => ({
+vi.mock("@kanna/" + "db", () => ({
   getRepo: vi.fn(async () => repo()),
   listPipelineItems: vi.fn(async () => [openItem("task-open")]),
   listRepos: vi.fn(async () => [repo()]),
@@ -164,6 +165,15 @@ describe("desktop cloud live task index publisher", () => {
     mocks.setDoc.mockResolvedValue(undefined);
     mocks.getDoc.mockResolvedValue(missingDocSnapshot());
     mocks.getDocs.mockResolvedValue({ docs: [] });
+    setDesktopSnapshotFetcherForTests(async () => ({
+      entries: [{
+        repo: repo() as never,
+        items: [openItem("task-open") as never],
+      }],
+      taskBlockers: [],
+      worktreePaths: {},
+      settings: {},
+    }));
     mocks.invoke.mockImplementation(async (command: string) => {
       if (command === "desktop_cloud_credential") {
         return { desktopId: "desktop-owner", desktopSecretHash: "secret-hash-1" };

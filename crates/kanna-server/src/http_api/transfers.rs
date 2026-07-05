@@ -23,12 +23,115 @@ pub(super) struct FailTransferRequest {
     reason: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct UpsertTransferRequest {
+    transfer: crate::db::NewTaskTransfer,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct UpdateTransferPayloadRequest {
+    payload_json: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct CompleteTransferRequest {
+    local_task_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct RejectTransferRequest {
+    reason: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct InsertTransferProvenanceRequest {
+    provenance: crate::db::NewTaskTransferProvenance,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct TransferResponse {
+    transfer: Option<crate::db::TaskTransfer>,
+}
+
 pub(super) async fn list_pending_incoming_transfers(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<PendingIncomingTransfersResponse>, (axum::http::StatusCode, String)> {
     let db = open_db(&state)?;
     let transfers = db.list_pending_incoming_transfers().map_err(db_error)?;
     Ok(Json(PendingIncomingTransfersResponse { transfers }))
+}
+
+pub(super) async fn insert_task_transfer(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<UpsertTransferRequest>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let db = open_db(&state)?;
+    db.insert_task_transfer(&payload.transfer)
+        .map_err(db_error)?;
+    Ok(Json(serde_json::json!({ "id": payload.transfer.id })))
+}
+
+pub(super) async fn get_task_transfer(
+    State(state): State<Arc<AppState>>,
+    Path(transfer_id): Path<String>,
+) -> Result<Json<TransferResponse>, (axum::http::StatusCode, String)> {
+    let db = open_db(&state)?;
+    let transfer = db.get_task_transfer(&transfer_id).map_err(db_error)?;
+    Ok(Json(TransferResponse { transfer }))
+}
+
+pub(super) async fn update_task_transfer_payload(
+    State(state): State<Arc<AppState>>,
+    Path(transfer_id): Path<String>,
+    Json(payload): Json<UpdateTransferPayloadRequest>,
+) -> Result<Json<TransferUpdateResponse>, (axum::http::StatusCode, String)> {
+    let db = open_db(&state)?;
+    let updated = db
+        .update_task_transfer_payload(&transfer_id, &payload.payload_json)
+        .map_err(db_error)?;
+    Ok(Json(TransferUpdateResponse { updated }))
+}
+
+pub(super) async fn complete_task_transfer(
+    State(state): State<Arc<AppState>>,
+    Path(transfer_id): Path<String>,
+    Json(payload): Json<CompleteTransferRequest>,
+) -> Result<Json<TransferUpdateResponse>, (axum::http::StatusCode, String)> {
+    let db = open_db(&state)?;
+    let updated = db
+        .mark_task_transfer_completed(&transfer_id, &payload.local_task_id)
+        .map_err(db_error)?;
+    Ok(Json(TransferUpdateResponse { updated }))
+}
+
+pub(super) async fn reject_task_transfer(
+    State(state): State<Arc<AppState>>,
+    Path(transfer_id): Path<String>,
+    Json(payload): Json<RejectTransferRequest>,
+) -> Result<Json<TransferUpdateResponse>, (axum::http::StatusCode, String)> {
+    let db = open_db(&state)?;
+    let updated = db
+        .mark_task_transfer_rejected(&transfer_id, &payload.reason)
+        .map_err(db_error)?;
+    Ok(Json(TransferUpdateResponse { updated }))
+}
+
+pub(super) async fn insert_task_transfer_provenance(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<InsertTransferProvenanceRequest>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let db = open_db(&state)?;
+    db.insert_task_transfer_provenance(&payload.provenance)
+        .map_err(db_error)?;
+    Ok(Json(
+        serde_json::json!({ "pipelineItemId": payload.provenance.pipeline_item_id }),
+    ))
 }
 
 pub(super) async fn claim_pending_incoming_transfer(

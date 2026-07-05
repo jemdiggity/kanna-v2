@@ -1,5 +1,9 @@
 import type { Persistence } from "firebase/auth";
-import type { DbHandle } from "@kanna/db";
+import {
+  deleteDesktopSetting,
+  getDesktopSetting,
+  putDesktopSetting,
+} from "./desktopServerClient";
 
 export type FirebaseAuthIndexedDbOperation =
   | "unavailable"
@@ -19,11 +23,9 @@ const PROBE_KEY = "kanna:firebase-auth-storage-probe";
 const SETTINGS_KEY_PREFIX = "firebaseAuth:";
 
 interface DesktopAuthSettingsPersistenceOptions {
-  loadDatabase?: () => Promise<{ db: DbHandle }>;
-}
-
-interface SettingValueRow {
-  value: string;
+  getSetting?: (key: string) => Promise<string | null>;
+  putSetting?: (key: string, value: string) => Promise<unknown>;
+  deleteSetting?: (key: string) => Promise<unknown>;
 }
 
 export interface DesktopAuthSettingsPersistenceInstance {
@@ -44,21 +46,10 @@ export type DesktopAuthSettingsPersistence = Persistence & {
 export function createDesktopAuthSettingsPersistence(
   options: DesktopAuthSettingsPersistenceOptions = {},
 ): DesktopAuthSettingsPersistence {
-  let dbPromise: Promise<DbHandle> | null = null;
-
-  const getDb = async () => {
-    if (!dbPromise) {
-      dbPromise = (options.loadDatabase?.() ?? import("../stores/db").then((module) => module.loadDatabase()))
-        .then(({ db }) => db);
-    }
-    return dbPromise;
-  };
-
-  const ensureSettingsTable = async (db: DbHandle) => {
-    await db.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
-  };
-
   const settingsKey = (key: string) => `${SETTINGS_KEY_PREFIX}${key}`;
+  const getSetting = options.getSetting ?? getDesktopSetting;
+  const putSetting = options.putSetting ?? putDesktopSetting;
+  const deleteSetting = options.deleteSetting ?? deleteDesktopSetting;
 
   class DesktopAuthSettingsPersistenceClass implements DesktopAuthSettingsPersistenceInstance {
     static readonly type = "LOCAL";
@@ -67,7 +58,7 @@ export function createDesktopAuthSettingsPersistence(
 
     async _isAvailable() {
       try {
-        await ensureSettingsTable(await getDb());
+        await getSetting(settingsKey("__availability_probe__"));
         return true;
       } catch (error) {
         console.warn("[cloud] desktop auth settings persistence unavailable:", error);
@@ -76,32 +67,17 @@ export function createDesktopAuthSettingsPersistence(
     }
 
     async _set(key: string, value: unknown) {
-      const db = await getDb();
-      await ensureSettingsTable(db);
-      await db.execute(
-        `INSERT INTO settings (key, value)
-           VALUES (?, ?)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-        [settingsKey(key), JSON.stringify(value)],
-      );
+      await putSetting(settingsKey(key), JSON.stringify(value));
     }
 
     async _get<T = unknown>(key: string): Promise<T | null> {
-      const db = await getDb();
-      await ensureSettingsTable(db);
-      const rows = await db.select<SettingValueRow>(
-        "SELECT value FROM settings WHERE key = ?",
-        [settingsKey(key)],
-      );
-      const raw = rows[0]?.value;
-      if (raw === undefined) return null;
+      const raw = await getSetting(settingsKey(key));
+      if (raw === null) return null;
       return JSON.parse(raw) as T;
     }
 
     async _remove(key: string) {
-      const db = await getDb();
-      await ensureSettingsTable(db);
-      await db.execute("DELETE FROM settings WHERE key = ?", [settingsKey(key)]);
+      await deleteSetting(settingsKey(key));
     }
 
     _addListener() {

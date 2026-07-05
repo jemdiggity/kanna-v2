@@ -1,5 +1,5 @@
 import { computed, ref, type ComputedRef, type Ref } from "vue";
-import { type PipelineItem, type Repo } from "@kanna/db";
+import { type PipelineItem, type Repo } from "../types/kanna";
 import { readRepoConfig, requireService, type KannaSnapshot, type StoreContext } from "./state";
 import { debugLog } from "../utils/debugLog";
 import { applySnapshotSettingsToState } from "./snapshotSettings";

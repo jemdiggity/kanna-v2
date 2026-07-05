@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
-import type { AgentProvider } from "@kanna/db"
+import type { AgentProvider } from "../types/kanna"
 import type { AgentExecutionType } from "../stores/agentExecutionType"
 import { invoke } from "../invoke"
 import { useModalZIndex } from '../composables/useModalZIndex'
