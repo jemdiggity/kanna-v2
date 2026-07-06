@@ -609,6 +609,15 @@ async fn transfer_routes_list_claim_and_fail_pending_incoming_transfers() {
     let list_json: serde_json::Value = from_slice(&body).unwrap();
     assert_eq!(list_json["transfers"].as_array().unwrap().len(), 1);
     assert_eq!(list_json["transfers"][0]["id"], "transfer-1");
+    assert_eq!(list_json["transfers"][0]["sourcePeerId"], "peer-1");
+    assert_eq!(list_json["transfers"][0]["sourceTaskId"], "source-task-1");
+    assert_eq!(
+        list_json["transfers"][0]["payloadJson"],
+        r#"{"task":{},"repo":{}}"#
+    );
+    assert!(list_json["transfers"][0]["source_peer_id"].is_null());
+    assert!(list_json["transfers"][0]["source_task_id"].is_null());
+    assert!(list_json["transfers"][0]["payload_json"].is_null());
 
     let claim_response = app
         .clone()
