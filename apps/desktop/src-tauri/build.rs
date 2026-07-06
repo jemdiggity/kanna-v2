@@ -83,11 +83,20 @@ fn main() {
     let build_info = if build_branch.is_empty() {
         String::new()
     } else if !build_task_id.is_empty() && build_worktree.is_empty() {
-        format!("task {} · {} @ {}", build_task_id, build_branch, build_commit)
+        format!(
+            "task {} · {} @ {}",
+            build_task_id, build_branch, build_commit
+        )
     } else if !build_task_id.is_empty() && build_branch == build_worktree {
-        format!("task {} · {} @ {}", build_task_id, build_worktree, build_commit)
+        format!(
+            "task {} · {} @ {}",
+            build_task_id, build_worktree, build_commit
+        )
     } else if !build_task_id.is_empty() && build_worktree == format!("task-{}", build_task_id) {
-        format!("task {} · {} @ {}", build_task_id, build_branch, build_commit)
+        format!(
+            "task {} · {} @ {}",
+            build_task_id, build_branch, build_commit
+        )
     } else if !build_task_id.is_empty() {
         format!(
             "task {} · {} · {} @ {}",
