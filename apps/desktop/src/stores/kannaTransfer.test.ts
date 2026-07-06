@@ -197,6 +197,12 @@ function createTransferDb(initial: {
       if (item?.activity === "unread") item.activity = "idle";
       return { taskId, activity: item?.activity === "idle" ? "idle" : null };
     },
+    putTaskAgentSession: async (taskId, agentSessionId) => {
+      const item = tables.pipeline_item.find((candidate) => candidate.id === taskId);
+      if (item) {
+        item.agent_session_id = agentSessionId;
+      }
+    },
     claimTaskPorts: async (taskId) => ({ taskId, portEnv: {}, firstPort: null }),
     releaseTaskPorts: async () => {},
     closeTask: async (taskId) => {

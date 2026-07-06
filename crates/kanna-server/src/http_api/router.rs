@@ -17,6 +17,7 @@ use super::task_actions::{
     rerun_stage, run_merge_agent, set_task_parent, unpin_task,
 };
 use super::task_activity::{apply_runtime_status, mark_task_read};
+use super::task_agent_session::put_task_agent_session;
 use super::task_blockers::{block_task, unblock_task};
 use super::task_input::send_task_input;
 use super::task_logs::task_logs;
@@ -83,6 +84,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/v1/tasks/{task_id}/actions/mark-read",
             post(mark_task_read),
+        )
+        .route(
+            "/v1/tasks/{task_id}/actions/agent-session",
+            post(put_task_agent_session),
         )
         .route(
             "/v1/tasks/{task_id}/actions/advance-stage",
