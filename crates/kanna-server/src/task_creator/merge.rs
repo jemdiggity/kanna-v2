@@ -1,4 +1,6 @@
-use super::definitions::read_agent_definition;
+use super::definitions::{
+    PipelineDefinition, PipelineStage, PipelineStagePolicy, PipelineStageTransition,
+};
 use super::lifecycle::spawn_prepared_task_for_api_recording_stage_run;
 use super::types::{PreparedTaskSpawn, TaskCreationRequest};
 use crate::config::Config;
@@ -46,12 +48,32 @@ fn load_merge_source_repo(db: &Db, source_task_id: &str) -> Result<Repo, String>
 }
 
 fn build_merge_task_request(repo_path: &str) -> Result<TaskCreationRequest, String> {
-    let merge_agent = read_agent_definition(repo_path, "merge")?;
+    let pipeline_name = "singleton-merge".to_string();
+    let pipeline = PipelineDefinition {
+        name: Some(pipeline_name.clone()),
+        stages: vec![PipelineStage {
+            name: "in progress".to_string(),
+            agent: Some("merge".to_string()),
+            prompt: Some("$TASK_PROMPT".to_string()),
+            agent_provider: None,
+            environment: None,
+            policy: PipelineStagePolicy {
+                transition: PipelineStageTransition::Manual,
+            },
+            post: None,
+        }],
+        environments: None,
+    };
+    let pipeline_def =
+        serde_json::to_string(&pipeline).map_err(|e| format!("serialize error: {}", e))?;
+    // Validate the merge agent can be resolved from either repo-local or
+    // bundled definitions before creating any DB/worktree state.
+    super::definitions::read_agent_definition(repo_path, "merge")?;
     Ok(TaskCreationRequest {
-        task_prompt: merge_agent.prompt,
+        task_prompt: String::new(),
         display_name: Some("Merge Master".to_string()),
-        pipeline_name: None,
-        pipeline_def: None,
+        pipeline_name: Some(pipeline_name),
+        pipeline_def: Some(pipeline_def),
         base_ref: None,
         stored_base_ref: None,
         stage_override: None,
