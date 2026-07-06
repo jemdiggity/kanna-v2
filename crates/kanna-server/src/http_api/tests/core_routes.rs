@@ -134,6 +134,120 @@ async fn snapshot_route_returns_ui_hydration_payload() {
 }
 
 #[tokio::test]
+async fn dependent_tasks_exist_route_detects_blockers_and_base_refs_for_task() {
+    let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "blocker-1",
+            "repo-1",
+            "blocker prompt",
+            Some("Blocker Task"),
+            "pr",
+            "2026-04-17 08:00:00",
+        )
+        .unwrap();
+        db.update_test_pipeline_item_branch("blocker-1", "feature/parent")
+            .unwrap();
+        db.update_test_pipeline_item_pr_url("blocker-1", "https://github.com/acme/repo/pull/7")
+            .unwrap();
+        db.insert_test_pipeline_item(
+            "dependent-blocked",
+            "repo-1",
+            "dependent prompt",
+            Some("Dependent Blocked"),
+            "blocked",
+            "2026-04-17 07:00:00",
+        )
+        .unwrap();
+        db.insert_test_pipeline_item(
+            "dependent-started",
+            "repo-1",
+            "started prompt",
+            Some("Dependent Started"),
+            "in progress",
+            "2026-04-17 06:00:00",
+        )
+        .unwrap();
+        db.update_test_pipeline_item_base_ref("dependent-started", "origin/feature/parent")
+            .unwrap();
+        db.insert_task_blocker("dependent-blocked", "blocker-1")
+            .unwrap();
+    });
+
+    let response = app
+        .oneshot(
+            Request::get("/v1/tasks/blocker-1/dependent-tasks-exist")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = from_slice(&body).unwrap();
+
+    assert_eq!(payload["exists"], true);
+    assert_eq!(
+        payload["dependentTasks"],
+        serde_json::json!([
+            {
+                "taskId": "dependent-blocked",
+                "title": "Dependent Blocked",
+                "branch": "branch-dependent-blocked",
+                "baseRef": null,
+                "reason": "task_blocker"
+            },
+            {
+                "taskId": "dependent-started",
+                "title": "Dependent Started",
+                "branch": "branch-dependent-started",
+                "baseRef": "origin/feature/parent",
+                "reason": "base_ref"
+            }
+        ])
+    );
+}
+
+#[tokio::test]
+async fn dependent_tasks_exist_route_returns_false_for_task_without_dependents() {
+    let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "task-1",
+            "repo-1",
+            "standalone prompt",
+            Some("Standalone"),
+            "pr",
+            "2026-04-17 08:00:00",
+        )
+        .unwrap();
+        db.update_test_pipeline_item_branch("task-1", "feature/standalone")
+            .unwrap();
+    });
+
+    let response = app
+        .oneshot(
+            Request::get("/v1/tasks/task-1/dependent-tasks-exist")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = from_slice(&body).unwrap();
+
+    assert_eq!(payload["exists"], false);
+    assert_eq!(payload["dependentTasks"], serde_json::json!([]));
+}
+
+#[tokio::test]
 async fn add_repo_route_registers_existing_git_repo() {
     let unique = format!(
         "{}-{}",

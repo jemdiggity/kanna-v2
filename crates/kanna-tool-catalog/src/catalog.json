@@ -200,6 +200,16 @@
       ]
     },
     {
+      "name": "kanna_is_dependent_tasks_exist",
+      "description": "Check whether open Kanna tasks still depend on a task's branch before deleting its remote branch.",
+      "method": "GET",
+      "path": "/v1/tasks/{task_id}/dependent-tasks-exist",
+      "response": "json",
+      "params": [
+        { "name": "task_id", "type": "string", "required": true, "location": "path" }
+      ]
+    },
+    {
       "name": "kanna_complete_stage",
       "description": "Record pipeline stage completion; success can trigger configured auto-advance, while failure stops advancement.",
       "method": "POST",

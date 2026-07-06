@@ -1,7 +1,7 @@
 use super::desktop::list_desktops;
 use super::ksp::ksp_stream;
 use super::pairing::create_pairing_session;
-use super::repos::{add_repo, list_repo_tasks, list_repos};
+use super::repos::{add_repo, dependent_tasks_exist, list_repo_tasks, list_repos};
 use super::signal_agent::signal_agent;
 use super::snapshot::get_snapshot;
 use super::state::{AppState, HttpInvokeResponse};
@@ -39,6 +39,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/tasks/search", get(search_tasks))
         .route("/v1/tasks", post(create_task))
         .route("/v1/tasks/{task_id}", get(get_task).patch(update_task))
+        .route(
+            "/v1/tasks/{task_id}/dependent-tasks-exist",
+            get(dependent_tasks_exist),
+        )
         .route("/v1/tasks/{task_id}/logs", get(task_logs))
         .route("/v1/tasks/{task_id}/input", post(send_task_input))
         .route("/v1/tasks/{task_id}/actions/block", post(block_task))

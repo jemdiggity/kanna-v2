@@ -88,10 +88,16 @@ describe("QA pipeline assets", () => {
 
   it("keeps the merge master git-first and safe for stacked branches", () => {
     const mergeAgent = readRepoFile(".kanna/agents/merge/AGENT.md");
+    const approveAgent = readRepoFile(".kanna/agents/approve/AGENT.md");
 
     expect(mergeAgent).toContain("PR metadata can explain intent, but topology decides ordering.");
     expect(mergeAgent).toContain("Do not infer stack relationships from PR titles or descriptions");
     expect(mergeAgent).toContain("Do not delete a parent branch while an unmerged child still uses it");
+    expect(approveAgent).toContain("MERGE <branch> -> <target> [TASK <task_id>] [PR <url>]: <summary>");
+    expect(mergeAgent).toContain("MERGE <branch> -> <target> [TASK <task_id>] [PR <url>]: <summary>");
+    expect(mergeAgent).toContain("Before deleting any merged remote branch, call `kanna_is_dependent_tasks_exist` with the merged task id");
+    expect(mergeAgent).toContain("If it returns `exists: true`, do not delete the remote branch");
+    expect(mergeAgent).toContain("A blocker that has reached `pr` can already have dependent tasks stacked on its branch");
     expect(mergeAgent).toContain("After the full detected stack has merged, delete the stack branches that are no longer needed");
     expect(mergeAgent).toContain("gh pr merge <PR> --merge");
     expect(mergeAgent).toContain("Do not push directly to the target branch.");
