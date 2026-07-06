@@ -21,7 +21,7 @@ export function buildTerminalDocument({ bottomInset }: BuildTerminalDocumentOpti
     <meta charset="utf-8" />
     <meta
       name="viewport"
-      content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=yes"
+      content="width=device-width, initial-scale=1, maximum-scale=3, user-scalable=yes"
     />
     <style>
       ${XTERM_WEBVIEW_CSS}
@@ -53,7 +53,7 @@ export function buildTerminalDocument({ bottomInset }: BuildTerminalDocumentOpti
         overflow-x: auto;
         overflow-y: auto;
         padding-bottom: ${bottomInset}px;
-        touch-action: pan-x pan-y;
+        touch-action: pan-x pan-y pinch-zoom;
       }
 
       #terminal-root {
@@ -67,14 +67,16 @@ export function buildTerminalDocument({ bottomInset }: BuildTerminalDocumentOpti
       }
 
       .xterm,
+      #terminal-root,
       .xterm .xterm-screen,
       .xterm .xterm-viewport {
         background: transparent !important;
+        touch-action: pan-x pan-y pinch-zoom;
       }
 
+      .xterm .xterm-screen,
       .xterm .xterm-viewport {
         overscroll-behavior: contain;
-        touch-action: pan-y;
       }
     </style>
   </head>
@@ -90,10 +92,13 @@ export function buildTerminalDocument({ bottomInset }: BuildTerminalDocumentOpti
       const TerminalCtor = globalThis.Terminal;
       const FitAddonCtor = globalThis.FitAddon && globalThis.FitAddon.FitAddon;
       const TERMINAL_COLS = 220;
+      const BASE_FONT_SIZE = 13;
+      const MIN_FONT_SCALE = 0.75;
+      const MAX_FONT_SCALE = 1.8;
       const term = new TerminalCtor({
         cols: TERMINAL_COLS,
         fontFamily: '"JetBrains Mono", "SF Mono", Menlo, monospace',
-        fontSize: 13,
+        fontSize: BASE_FONT_SIZE,
         lineHeight: 1,
         letterSpacing: 0,
         cursorBlink: false,
@@ -127,6 +132,9 @@ export function buildTerminalDocument({ bottomInset }: BuildTerminalDocumentOpti
       let stickyToBottom = true;
       let pinnedCols = 0;
       let pinnedRows = 0;
+      let fontScale = 1;
+      let touchScroll = null;
+      let pinch = null;
 
       term.loadAddon(fitAddon);
       term.open(root);
@@ -229,6 +237,103 @@ export function buildTerminalDocument({ bottomInset }: BuildTerminalDocumentOpti
         }
       }
 
+      function clamp(value, min, max) {
+        return Math.min(max, Math.max(min, value));
+      }
+
+      function touchDistance(touches) {
+        const dx = touches[0].clientX - touches[1].clientX;
+        const dy = touches[0].clientY - touches[1].clientY;
+        return Math.hypot(dx, dy);
+      }
+
+      function applyFontScale(nextScale) {
+        fontScale = clamp(nextScale, MIN_FONT_SCALE, MAX_FONT_SCALE);
+        term.options.fontSize = Math.round(BASE_FONT_SIZE * fontScale);
+        root.dataset.kannaFontScale = fontScale.toFixed(2);
+        fitTerminal();
+        if (stickyToBottom) {
+          term.scrollToBottom();
+        }
+      }
+
+      function installPinchZoomFallback() {
+        viewport.addEventListener("touchstart", (event) => {
+          if (event.touches.length === 2) {
+            pinch = {
+              distance: touchDistance(event.touches),
+              scale: fontScale
+            };
+            touchScroll = null;
+            return;
+          }
+
+          if (event.touches.length !== 1) {
+            touchScroll = null;
+            pinch = null;
+            return;
+          }
+
+          const touch = event.touches[0];
+          touchScroll = {
+            x: touch.clientX,
+            y: touch.clientY,
+            scrollLeft: viewport.scrollLeft,
+            terminalScrollTop: terminalViewport ? terminalViewport.scrollTop : 0
+          };
+        }, { passive: true, capture: true });
+
+        viewport.addEventListener("touchmove", (event) => {
+          if (event.touches.length === 2 && pinch) {
+            const distance = touchDistance(event.touches);
+            if (pinch.distance > 0) {
+              applyFontScale(pinch.scale * (distance / pinch.distance));
+            }
+            if (event.cancelable) {
+              event.preventDefault();
+            }
+            event.stopPropagation();
+            return;
+          }
+
+          if (event.touches.length !== 1 || !touchScroll) {
+            return;
+          }
+
+          const touch = event.touches[0];
+          const deltaX = touchScroll.x - touch.clientX;
+          const deltaY = touchScroll.y - touch.clientY;
+          if (Math.abs(deltaX) < 4 && Math.abs(deltaY) < 4) {
+            return;
+          }
+
+          viewport.scrollLeft = touchScroll.scrollLeft + deltaX;
+          if (terminalViewport) {
+            terminalViewport.scrollTop = touchScroll.terminalScrollTop + deltaY;
+            stickyToBottom = isNearBottom();
+            applyViewportInset();
+          }
+          if (event.cancelable) {
+            event.preventDefault();
+          }
+          event.stopPropagation();
+        }, { passive: false, capture: true });
+
+        viewport.addEventListener("touchend", (event) => {
+          if (event.touches.length < 2) {
+            pinch = null;
+          }
+          if (event.touches.length === 0) {
+            touchScroll = null;
+          }
+        }, { passive: true, capture: true });
+
+        viewport.addEventListener("touchcancel", () => {
+          touchScroll = null;
+          pinch = null;
+        }, { passive: true, capture: true });
+      }
+
       function isNearBottom() {
         if (!terminalViewport) {
           return true;
@@ -283,6 +388,7 @@ export function buildTerminalDocument({ bottomInset }: BuildTerminalDocumentOpti
       }
 
       viewport.addEventListener("pointerdown", notifyTerminalTap, { passive: true });
+      installPinchZoomFallback();
 
       function base64ToBytes(dataB64) {
         try {
