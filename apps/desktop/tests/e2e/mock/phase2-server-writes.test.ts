@@ -10,12 +10,40 @@ import { WebDriverClient } from "../helpers/webdriver";
 
 interface TaskRow {
   id: string;
+  repo_id?: string;
   prompt: string | null;
+  display_name?: string | null;
   pipeline: string | null;
+  pipeline_def?: string | null;
   stage: string | null;
   branch: string | null;
   closed_at: string | null;
+  agent_type?: string | null;
+  agent_provider?: string | null;
+  activity?: string | null;
+  port_offset?: number | null;
   port_env: string | null;
+  agent_spawn_options?: string | null;
+  parent_task_id?: string | null;
+  notify_task_id?: string | null;
+  teardown_started_at?: string | null;
+}
+
+interface WorktreeRow {
+  pipeline_item_id: string;
+  path: string;
+  branch: string;
+}
+
+interface TaskPortRow {
+  pipeline_item_id: string;
+  env_name: string;
+  port: number;
+}
+
+interface TaskBlockerRow {
+  blocked_item_id: string;
+  blocker_item_id: string;
 }
 
 interface CountRow {
@@ -71,6 +99,52 @@ async function selectTask(client: WebDriverClient, taskId: string): Promise<void
 async function refreshSnapshot(client: WebDriverClient): Promise<void> {
   const result = await callVueMethod(client, "refreshAllItems");
   if (isVueCallError(result)) throw new Error(result.__error);
+}
+
+async function createServerTask(
+  client: WebDriverClient,
+  repoId: string,
+  repoPath: string,
+  prompt: string,
+  options: Record<string, unknown> = {},
+): Promise<string> {
+  const createResult = await client.executeAsync<string>(
+    `const cb = arguments[arguments.length - 1];
+     const ctx = window.__KANNA_E2E__.setupState;
+     ctx.createItem(${JSON.stringify(repoId)}, ${JSON.stringify(repoPath)}, ${JSON.stringify(prompt)}, "pty", ${JSON.stringify({
+       agentProvider: "codex",
+       pipelineName: "default",
+       selectOnCreate: false,
+       ...options,
+     })})
+       .then((id) => cb(id))
+       .catch((error) => cb("__error:" + (error?.message || String(error))));`,
+  );
+  if (createResult.startsWith("__error:")) throw new Error(createResult);
+  return createResult;
+}
+
+async function postDesktopTaskAction(
+  client: WebDriverClient,
+  taskId: string,
+  action: string,
+): Promise<{ status: number; body: string }> {
+  const result = await client.executeAsync<{ status?: number; body?: string; __error?: string }>(
+    `const cb = arguments[arguments.length - 1];
+     import("/src/utils/invokeHelpers.ts")
+       .then(async ({ readEnvVarOptional }) => {
+         const port = (await readEnvVarOptional("KANNA_MOBILE_SERVER_PORT")) || "48120";
+         const response = await fetch(
+           "http://127.0.0.1:" + port + "/v1/tasks/" + encodeURIComponent(${JSON.stringify(taskId)}) + "/actions/" + ${JSON.stringify(action)},
+           { method: "POST" }
+         );
+         const body = await response.text();
+         cb({ status: response.status, body });
+       })
+       .catch((error) => cb({ __error: error?.message || String(error) }));`,
+  );
+  if (result.__error) throw new Error(result.__error);
+  return { status: result.status ?? 0, body: result.body ?? "" };
 }
 
 describe("Phase 2 server-owned task writes", () => {
@@ -138,37 +212,72 @@ describe("Phase 2 server-owned task writes", () => {
 
   it("creates through the desktop API with worktree, port, and transfer stage parity", async () => {
     const prompt = "Phase2 create server-owned transfer stage";
-    const createResult = await client.executeAsync<string>(
-      `const cb = arguments[arguments.length - 1];
-       const ctx = window.__KANNA_E2E__.setupState;
-       ctx.createItem(${JSON.stringify(repoId)}, ${JSON.stringify(testRepoPath)}, ${JSON.stringify(prompt)}, "pty", {
-         agentProvider: "codex",
-         pipelineName: "default",
-         stage: "review",
-         displayName: "Transferred review task",
-         selectOnCreate: false
-       })
-         .then((id) => cb(id))
-         .catch((error) => cb("__error:" + (error?.message || String(error))));`,
-    );
-    if (createResult.startsWith("__error:")) throw new Error(createResult);
+    const createResult = await createServerTask(client, repoId, testRepoPath, prompt, {
+      stage: "review",
+      displayName: "Transferred review task",
+    });
 
     const row = await waitForRow<TaskRow>(
       client,
-      "SELECT id, prompt, pipeline, stage, branch, closed_at, port_env FROM pipeline_item WHERE id = ?",
+      `SELECT id, repo_id, prompt, display_name, pipeline, pipeline_def, stage, branch,
+              closed_at, agent_type, agent_provider, activity, port_offset, port_env,
+              agent_spawn_options, parent_task_id, notify_task_id, teardown_started_at
+       FROM pipeline_item WHERE id = ?`,
       [createResult],
       (candidate) => candidate?.stage === "review" && Boolean(candidate.branch),
       "server-created review task",
     );
     expect(row).toMatchObject({
+      repo_id: repoId,
       prompt,
+      display_name: "Transferred review task",
       pipeline: "default",
       stage: "review",
       closed_at: null,
+      agent_type: "pty",
+      agent_provider: "codex",
+      activity: "working",
+      parent_task_id: null,
+      notify_task_id: null,
+      teardown_started_at: null,
     });
+    expect(row.pipeline_def).toContain('"stages"');
+    expect(JSON.parse(row.agent_spawn_options ?? "{}")).toMatchObject({
+      allowedTools: [],
+      disallowedTools: [],
+      maxBudgetUsd: null,
+      maxTurns: null,
+      model: null,
+      permissionMode: null,
+    });
+    expect(row.port_offset).toBeGreaterThanOrEqual(1);
     expect(row.port_env).toContain("KANNA_DEV_PORT");
-    expect(await countRows(client, "SELECT COUNT(*) AS count FROM worktree WHERE pipeline_item_id = ?", [row.id])).toBe(1);
-    expect(await countRows(client, "SELECT COUNT(*) AS count FROM task_port WHERE pipeline_item_id = ?", [row.id])).toBe(1);
+
+    const worktrees = await queryDb(
+      client,
+      "SELECT pipeline_item_id, path, branch FROM worktree WHERE pipeline_item_id = ?",
+      [row.id],
+    ) as WorktreeRow[];
+    expect(worktrees).toEqual([
+      {
+        pipeline_item_id: row.id,
+        path: join(testRepoPath, ".kanna-worktrees", row.branch as string),
+        branch: row.branch as string,
+      },
+    ]);
+
+    const ports = await queryDb(
+      client,
+      "SELECT pipeline_item_id, env_name, port FROM task_port WHERE pipeline_item_id = ?",
+      [row.id],
+    ) as TaskPortRow[];
+    expect(ports).toEqual([
+      {
+        pipeline_item_id: row.id,
+        env_name: "KANNA_DEV_PORT",
+        port: Number(JSON.parse(row.port_env ?? "{}").KANNA_DEV_PORT),
+      },
+    ]);
   });
 
   it("closes through the desktop API and lets the server release ports", async () => {
@@ -185,13 +294,25 @@ describe("Phase 2 server-owned task writes", () => {
 
     const row = await waitForRow<TaskRow>(
       client,
-      "SELECT id, prompt, pipeline, stage, branch, closed_at, port_env FROM pipeline_item WHERE id = ?",
+      `SELECT id, prompt, pipeline, stage, branch, closed_at, agent_type, agent_provider,
+              activity, port_env, teardown_started_at
+       FROM pipeline_item WHERE id = ?`,
       [taskId],
       (candidate) => typeof candidate?.closed_at === "string" && candidate.closed_at.length > 0,
       "closed task row",
     );
-    expect(row.stage).toBe("review");
+    expect(row).toMatchObject({
+      prompt: "Phase2 create server-owned transfer stage",
+      pipeline: "default",
+      stage: "review",
+      agent_type: "pty",
+      agent_provider: "codex",
+      activity: "working",
+      port_env: expect.stringContaining("KANNA_DEV_PORT"),
+    });
+    expect(row.teardown_started_at).toBeNull();
     expect(await countRows(client, "SELECT COUNT(*) AS count FROM task_port WHERE pipeline_item_id = ?", [taskId])).toBe(0);
+    expect(await countRows(client, "SELECT COUNT(*) AS count FROM stage_run WHERE task_id = ? AND status = 'running'", [taskId])).toBe(0);
   });
 
   it("blocks, unblocks, and surfaces server cycle rejection through the desktop API", async () => {
@@ -208,7 +329,13 @@ describe("Phase 2 server-owned task writes", () => {
 
     let result = await callVueMethod(client, "store.blockTask", ["phase2-blocker"]);
     if (isVueCallError(result)) throw new Error(result.__error);
-    expect(await countRows(client, "SELECT COUNT(*) AS count FROM task_blocker WHERE blocked_item_id = ? AND blocker_item_id = ?", ["phase2-blocked", "phase2-blocker"])).toBe(1);
+    expect(await queryDb(
+      client,
+      "SELECT blocked_item_id, blocker_item_id FROM task_blocker WHERE blocked_item_id = ? ORDER BY blocker_item_id",
+      ["phase2-blocked"],
+    ) as TaskBlockerRow[]).toEqual([
+      { blocked_item_id: "phase2-blocked", blocker_item_id: "phase2-blocker" },
+    ]);
 
     result = await callVueMethod(client, "store.editBlockedTask", "phase2-blocked", []);
     if (isVueCallError(result)) throw new Error(result.__error);
@@ -227,35 +354,48 @@ describe("Phase 2 server-owned task writes", () => {
   });
 
   it("does not resurrect a closed task when advance and close race from the desktop", async () => {
-    await execDb(
+    const taskId = await createServerTask(client, repoId, testRepoPath, "Phase2 advance close race");
+    const original = await waitForRow<TaskRow>(
       client,
-      `INSERT INTO pipeline_item (id, repo_id, prompt, pipeline, stage, branch, agent_type, agent_provider, activity, created_at, updated_at)
-       VALUES (?, ?, ?, 'default', 'review', ?, 'pty', 'codex', 'idle', datetime('now'), datetime('now'))`,
-      ["phase2-race", repoId, "Phase2 advance close race", "task-phase2-race"],
+      "SELECT id, stage, branch, closed_at, port_env FROM pipeline_item WHERE id = ?",
+      [taskId],
+      (candidate) => candidate?.stage === "in progress" && Boolean(candidate.branch) && candidate.closed_at === null,
+      "server-created race task",
     );
     await refreshSnapshot(client);
-    await selectTask(client, "phase2-race");
+    await selectTask(client, taskId);
 
-    const result = await client.executeAsync<string>(
-      `const cb = arguments[arguments.length - 1];
-       const store = window.__KANNA_E2E__.setupState.store;
-       Promise.allSettled([
-         store.advanceStage("phase2-race"),
-         store.closeTask("phase2-race", { selectNext: false })
-       ])
-         .then((results) => cb(JSON.stringify(results.map((entry) => entry.status))))
-         .catch((error) => cb("__error:" + (error?.message || String(error))));`,
-    );
-    if (result.startsWith("__error:")) throw new Error(result);
+    const advance = await postDesktopTaskAction(client, taskId, "advance-stage");
+    expect(advance.status, advance.body).toBe(200);
+    expect(JSON.parse(advance.body)).toMatchObject({ taskId });
+
+    const closeResult = await callVueMethod(client, "store.closeTask", taskId, { selectNext: false });
+    if (isVueCallError(closeResult)) throw new Error(closeResult.__error);
 
     const row = await waitForRow<TaskRow>(
       client,
       "SELECT id, prompt, pipeline, stage, branch, closed_at, port_env FROM pipeline_item WHERE id = ?",
-      ["phase2-race"],
+      [taskId],
       (candidate) => typeof candidate?.closed_at === "string" && candidate.closed_at.length > 0,
       "race task closed",
     );
-    expect(row.stage).toBe("review");
-    expect(await countRows(client, "SELECT COUNT(*) AS count FROM pipeline_item WHERE id = ?", ["phase2-race"])).toBe(1);
+    await sleep(1_000);
+
+    const settled = await waitForRow<TaskRow>(
+      client,
+      "SELECT id, prompt, pipeline, stage, branch, closed_at, port_env FROM pipeline_item WHERE id = ?",
+      [taskId],
+      (candidate) => candidate?.closed_at === row.closed_at,
+      "race task settled after detached advance",
+      1_000,
+    );
+    // The real mock E2E daemon cannot be paused between the detached
+    // advance's SessionCreated response and its DB write. This proves the
+    // desktop wiring sends a valid server advance request for a server-created
+    // task, then closes through the UI without resurrecting the row. The
+    // deterministic "close lands before detached stage write" interleaving is
+    // covered by the kanna-server race-boundary test.
+    expect([original.stage, "review"]).toContain(settled.stage);
+    expect(await countRows(client, "SELECT COUNT(*) AS count FROM pipeline_item WHERE id = ?", [taskId])).toBe(1);
   });
 });
