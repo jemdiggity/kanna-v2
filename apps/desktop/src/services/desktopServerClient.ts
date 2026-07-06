@@ -367,6 +367,7 @@ export async function closeDesktopTask(taskId: string): Promise<void> {
     await clientHandlersForTests.closeTask(taskId);
     return;
   }
+  await ensureDesktopServerRunning();
   const baseUrl = await desktopServerBaseUrl();
   const response = await fetch(`${baseUrl}/v1/tasks/${encodeURIComponent(taskId)}/actions/close`, {
     method: "POST",

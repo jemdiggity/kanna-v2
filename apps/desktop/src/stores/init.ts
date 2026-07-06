@@ -1,5 +1,4 @@
 import type { DbHandle, PipelineItem, TaskBlocker } from "../types/kanna";
-import { closePipelineItem, updatePipelineItemActivity } from "@kanna/db";
 import { invoke } from "../invoke";
 import { isTauri } from "../tauri-mock";
 import { listen } from "../listen";
@@ -18,7 +17,7 @@ import { formatAppWindowTitle, type AppBuildInfo } from "./windowTitle";
 import { isTaskTearingDown } from "./taskStages";
 import { requireService, type StoreContext } from "./state";
 import { applySnapshotSettingsToState } from "./snapshotSettings";
-import { putDesktopSetting } from "../services/desktopServerClient";
+import { applyDesktopTaskRuntimeStatus, closeDesktopTask, putDesktopSetting } from "../services/desktopServerClient";
 
 export interface InitApi {
   init: (db: DbHandle) => Promise<void>;
@@ -195,10 +194,15 @@ export function createInitApi(
     }
 
     const workingItems = eagerItems.filter((item) => item.activity === "working");
+    let changedStartupActivity = false;
     for (const item of workingItems) {
-      await updatePipelineItemActivity(context.requireDb(), item.id, "unread");
+      const response = await applyDesktopTaskRuntimeStatus(item.id, {
+        status: "idle",
+        selected: false,
+      });
+      changedStartupActivity = changedStartupActivity || response.activity != null;
     }
-    if (workingItems.length > 0) {
+    if (changedStartupActivity) {
       await refreshStartupSnapshot();
     }
 
@@ -217,7 +221,7 @@ export function createInitApi(
         const exists = await invoke<boolean>("file_exists", { path: worktreePath });
         if (!exists) {
           console.warn(`[store] closing orphaned task ${item.id}: worktree missing at ${worktreePath}`);
-          await ports.closeTaskAndReleasePorts(item.id, (id) => closePipelineItem(context.requireDb(), id));
+          await ports.closeTaskAndReleasePorts(item.id, closeDesktopTask);
           item.closed_at = new Date().toISOString();
           closedOrphan = true;
         }
@@ -389,7 +393,7 @@ export function createInitApi(
             "selectReplacementAfterItemRemoval",
           )(item);
         }
-        await ports.closeTaskAndReleasePorts(item.id, (id) => closePipelineItem(context.requireDb(), id));
+        await ports.closeTaskAndReleasePorts(item.id, closeDesktopTask);
         await tasks.checkUnblocked(item.id);
         await requireService(context.services.reloadSnapshot, "reloadSnapshot")();
         return;

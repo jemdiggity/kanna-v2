@@ -1,11 +1,10 @@
 import { computed, type ComputedRef } from "vue";
 import { watchDebounced } from "@vueuse/core";
 import { DEFAULT_STAGE_ORDER } from "@kanna/core";
-import { updatePipelineItemActivity } from "@kanna/db";
 import type { PipelineItem, Repo } from "../types/kanna";
 import { createNavigationHistory } from "../composables/useNavigationHistory";
 import { beginTaskSwitch } from "../perf/taskSwitchPerf";
-import { postDesktopOperatorEvent, putDesktopSetting } from "../services/desktopServerClient";
+import { markDesktopTaskRead, postDesktopOperatorEvent, putDesktopSetting } from "../services/desktopServerClient";
 import { sortSidebarItemsForRepo } from "../utils/sidebarOrdering";
 import { requireService, type StoreContext } from "./state";
 
@@ -110,7 +109,8 @@ export function createSelectionApi(context: StoreContext): SelectionApi {
       const item = context.state.items.value.find((candidate) => candidate.id === itemId);
       if (!item || item.activity !== "unread") return;
       if (item.activity_changed_at && new Date(item.activity_changed_at).getTime() > selectionTime) return;
-      await updatePipelineItemActivity(context.requireDb(), itemId, "idle");
+      const response = await markDesktopTaskRead(itemId);
+      if (response.activity == null) return;
       await requireService(context.services.reloadSnapshot, "reloadSnapshot")();
       await context.services.windowWorkspace?.invalidateSharedData("taskActivity");
     },
