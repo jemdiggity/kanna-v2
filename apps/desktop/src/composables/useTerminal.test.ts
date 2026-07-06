@@ -176,6 +176,10 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: invokeMock,
 }));
 
+vi.mock("../invoke", () => ({
+  invoke: invokeMock,
+}));
+
 vi.mock("../perf/taskSwitchPerf", () => ({
   markTaskSwitchFirstOutput: (...args: unknown[]) => markTaskSwitchFirstOutputMock(...args),
 }));
@@ -894,9 +898,13 @@ describe("useTerminal", () => {
   it("respawns when the KSP stream reports a missing task session after initial attach", async () => {
     const spawnFn = vi.fn(async () => {});
     const { useTerminal } = await import("./useTerminal");
-    installKspStreamClient({
+    const client = installKspStreamClient({
       onAttach: (_taskId, handlers) => {
-        handlers.onError?.("session_not_found", "session not found: session-1");
+        if (client.attachTerminal.mock.calls.length === 1) {
+          handlers.onSnapshot?.(80, 24, btoa("initial scrollback"));
+          return;
+        }
+        handlers.onSnapshot?.(80, 24, btoa("fresh session output"));
       },
     });
 
@@ -938,6 +946,7 @@ describe("useTerminal", () => {
     wrapper.vm.init(terminalElement);
 
     await wrapper.vm.startListening();
+    terminalStreamHandlers.get("session-1")?.onError?.("session_not_found", "session not found: session-1");
     await flushAsyncWork();
 
     const terminal = terminals[0];
