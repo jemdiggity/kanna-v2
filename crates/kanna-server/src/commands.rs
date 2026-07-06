@@ -138,6 +138,7 @@ pub async fn handle_invoke(
                 .ok_or_else(|| format!("task not found: {task_id}"))?;
             let workspace_teardown =
                 task_creator::prepare_workspace_teardown_for_close(db, config, &pipeline_item_id);
+            let has_workspace_teardown = workspace_teardown.is_some();
 
             for session_id in [
                 pipeline_item_id.to_string(),
@@ -163,6 +164,12 @@ pub async fn handle_invoke(
 
             db.close_pipeline_item(&pipeline_item_id)
                 .map_err(|e| format!("db error: {}", e))?;
+            if !has_workspace_teardown {
+                crate::worktree_cleanup::cleanup_closed_task_worktrees_by_id(
+                    db,
+                    &pipeline_item_id,
+                )?;
+            }
             Ok(Value::Null)
         }
         "advance_stage" => {

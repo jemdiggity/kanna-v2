@@ -82,6 +82,7 @@ const mockState = vi.hoisted(() => {
   let repoConfigResolver: ((path: string) => RepoConfig | undefined) | null = null;
   let taskPorts: TaskPort[] = [];
   let taskBlockers: TaskBlocker[] = [];
+  let worktreeRows: Array<{ pipeline_item_id: string; path: string; branch: string }> = [];
   let blockCleanupGate: Promise<void> | null = null;
   let failingCommands: Record<string, string> = {};
   let commandGates: Record<string, Promise<void>> = {};
@@ -278,6 +279,7 @@ const mockState = vi.hoisted(() => {
     repoConfigResolver = null;
     taskPorts = [];
     taskBlockers = [];
+    worktreeRows = [];
     blockCleanupGate = null;
     failingCommands = {};
     commandGates = {};
@@ -376,6 +378,12 @@ const mockState = vi.hoisted(() => {
     },
     set taskBlockers(value: TaskBlocker[]) {
       taskBlockers = value;
+    },
+    get worktreeRows() {
+      return worktreeRows;
+    },
+    set worktreeRows(value: Array<{ pipeline_item_id: string; path: string; branch: string }>) {
+      worktreeRows = value;
     },
     invokeMock,
     insertPipelineItemMock,
@@ -687,6 +695,21 @@ function createDb(): DbHandle {
         return { rowsAffected: 1 };
       }
 
+      if (query.startsWith("DELETE FROM worktree WHERE pipeline_item_id = ?")) {
+        const [itemId] = bindValues as [string];
+        mockState.worktreeRows = mockState.worktreeRows.filter((row) => row.pipeline_item_id !== itemId);
+        return { rowsAffected: 1 };
+      }
+
+      if (query.startsWith("INSERT INTO worktree")) {
+        const [_id, itemId, path, branch] = bindValues as [string, string, string, string];
+        mockState.worktreeRows = [
+          ...mockState.worktreeRows.filter((row) => row.pipeline_item_id !== itemId),
+          { pipeline_item_id: itemId, path, branch },
+        ];
+        return { rowsAffected: 1 };
+      }
+
       return { rowsAffected: 1 };
     }),
     select: vi.fn(async <T>(query: string, bindValues?: unknown[]) => {
@@ -701,6 +724,19 @@ function createDb(): DbHandle {
           .filter((item) => item.closed_at !== null)
           .sort((a, b) => String(b.closed_at).localeCompare(String(a.closed_at)));
         return (closed[0] ? [closed[0]] : []) as T[];
+      }
+
+      if (query === "SELECT id FROM pipeline_item WHERE id = ? LIMIT 1") {
+        const [itemId] = bindValues as [string];
+        const item = mockState.pipelineItems.find((candidate) => candidate.id === itemId);
+        return (item ? [{ id: item.id }] : []) as T[];
+      }
+
+      if (query === "SELECT path FROM worktree WHERE pipeline_item_id = ?") {
+        const [itemId] = bindValues as [string];
+        return mockState.worktreeRows
+          .filter((row) => row.pipeline_item_id === itemId)
+          .map((row) => ({ path: row.path })) as T[];
       }
 
       return [];
@@ -1709,6 +1745,38 @@ describe("kanna store task base branch integration", () => {
     );
   });
 
+  it("recreates a missing worktree before respawning a reopened task", async () => {
+    mockState.pipelineItems = [
+      mockState.makeItem({
+        id: "item-closed",
+        branch: "task-closed",
+        prompt: "continue e3d1fc75",
+        closed_at: "2026-04-14T12:00:00.000Z",
+        agent_type: "pty",
+      }),
+    ];
+    const store = await createStore();
+
+    await store.undoClose();
+
+    expect(mockState.invokeMock).toHaveBeenCalledWith("file_exists", {
+      path: "/tmp/repo/.kanna-worktrees/task-closed",
+    });
+    expect(mockState.invokeMock).toHaveBeenCalledWith("git_worktree_add", {
+      repoPath: "/tmp/repo",
+      branch: "task-closed",
+      path: "/tmp/repo/.kanna-worktrees/task-closed",
+      startPoint: null,
+    });
+    expect(mockState.worktreeRows).toEqual([
+      {
+        pipeline_item_id: "item-closed",
+        path: "/tmp/repo/.kanna-worktrees/task-closed",
+        branch: "task-closed",
+      },
+    ]);
+  });
+
   it("advances stages through the local kanna-server action endpoint", async () => {
     mockState.pipelineDefinition = {
       name: "default",
@@ -2202,6 +2270,42 @@ describe("kanna store task base branch integration", () => {
 
     expect(mockState.invokeMock).toHaveBeenCalledWith("kill_session", { sessionId: "item-blocked" });
     expect(mockState.invokeMock).toHaveBeenCalledWith("kill_session", { sessionId: "shell-wt-item-blocked" });
+  });
+
+  it("snapshots and removes task worktrees after finishing close", async () => {
+    mockState.pipelineItems = [
+      mockState.makeItem({
+        id: "item-cleanup",
+        branch: "task-item-cleanup",
+      }),
+    ];
+    mockState.worktreeRows = [
+      {
+        pipeline_item_id: "item-cleanup",
+        path: "/tmp/repo/.kanna-worktrees/task-item-cleanup",
+        branch: "task-item-cleanup",
+      },
+    ];
+
+    const store = await createStore();
+    await store.selectItem("item-cleanup");
+    await flushStore();
+
+    await store.closeTask();
+    await flushStore();
+
+    const cleanupCall = mockState.invokeMock.mock.calls.find(([command, args]) =>
+      command === "run_script" &&
+      typeof args?.script === "string" &&
+      args.script.includes("WIP at task close")
+    );
+    expect(cleanupCall).toBeTruthy();
+    expect(cleanupCall?.[1]).toEqual(expect.objectContaining({
+      cwd: "/tmp/repo",
+      env: {},
+      script: expect.stringContaining("git -C \"$repo\" worktree remove --force --force \"$wt\""),
+    }));
+    expect(mockState.worktreeRows).toEqual([]);
   });
 
   it("marks a task as tearing down before spawning its teardown session", async () => {
