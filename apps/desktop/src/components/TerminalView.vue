@@ -3,6 +3,7 @@ import { ref, onMounted, onUnmounted, onActivated, onDeactivated, watch, nextTic
 import { getCurrentWebview } from "@tauri-apps/api/webview"
 import { useTerminal, type SpawnOptions } from "../composables/useTerminal"
 import { shouldDelayConnectUntilAfterInitialLayout } from "../composables/terminalSessionRecovery"
+import { nextFrameOrTimeout } from "../utils/animationFrame"
 import { shouldStartTerminalSession } from "../composables/terminalVisibility"
 import { markTaskSwitchMounted, markTaskSwitchReady } from "../perf/taskSwitchPerf"
 import { isTauri } from "../tauri-mock"
@@ -78,7 +79,7 @@ async function restoreNativeWebviewFocus() {
 async function waitForStableLayout(el: HTMLElement) {
   let last = { width: 0, height: 0 }
   for (let i = 0; i < 10; i++) {
-    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+    await nextFrameOrTimeout()
     const current = { width: el.offsetWidth, height: el.offsetHeight }
     if (
       current.width > 0 &&

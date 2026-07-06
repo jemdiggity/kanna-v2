@@ -3,6 +3,7 @@ import type { Terminal } from "@xterm/xterm"
 import type { FitAddon } from "@xterm/addon-fit"
 import type { StreamClient } from "@kanna/stream-client"
 import { listen } from "../listen"
+import { nextFrameOrTimeout } from "../utils/animationFrame"
 import {
   getReconnectRedrawPolicy,
   getReconnectResizeDelayMs,
@@ -42,8 +43,10 @@ export function createTerminalLayoutController(params: {
       params.fitAddon.fit()
       return
     }
-    // Container not yet laid out — wait one animation frame for the browser to compute layout
-    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+    // Container not yet laid out — wait one animation frame (bounded, since
+    // frames stop ticking while the window is not composited) for the
+    // browser to compute layout.
+    await nextFrameOrTimeout()
     const settledContainer = params.getContainer()
     if (settledContainer && settledContainer.offsetWidth > 0 && settledContainer.offsetHeight > 0) {
       params.fitAddon.fit()
