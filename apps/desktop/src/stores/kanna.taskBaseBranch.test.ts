@@ -1796,6 +1796,53 @@ describe("kanna store task base branch integration", () => {
     await advancePromise;
   });
 
+  it("keeps the next-stage projection when the detached server action returns before the snapshot advances", async () => {
+    mockState.pipelineDefinition = {
+      name: "default",
+      stages: [
+        { name: "in progress", transition: "manual" },
+        { name: "review", transition: "manual" },
+      ],
+    };
+    mockState.pipelineItems = [
+      mockState.makeItem({
+        id: "item-source",
+        branch: "task-source",
+        stage: "in progress",
+        activity: "idle",
+      }),
+    ];
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ taskId: "item-source" }),
+      text: async () => "",
+    });
+
+    const store = await createStore();
+    await store.selectItem("item-source");
+    await flushStore();
+
+    const advancePromise = store.advanceStage("item-source");
+    await flushStore();
+
+    expect(store.currentItem?.stage).toBe("review");
+    expect(store.currentItem?.activity).toBe("working");
+    expect(store.sortedItemsForCurrentRepo.find((item) => item.id === "item-source")?.stage).toBe("review");
+
+    mockState.pipelineItems = [
+      mockState.makeItem({
+        id: "item-source",
+        branch: "task-source-2",
+        stage: "review",
+        activity: "working",
+      }),
+    ];
+    await advancePromise;
+
+    expect(store.currentItem?.stage).toBe("review");
+    expect(store.currentItem?.activity).toBe("working");
+  });
+
   it("keeps a post-stage advance on the current stage while post dispatch is in flight", async () => {
     const serverAdvanceGate = mockState.defer();
     mockState.pipelineDefinition = {

@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   executeDevDownWithContext,
+  executeDevUpWithContext,
   executeDevRestartWithContext,
   executeDevStatus,
   executeMobileDeviceDoctorWithContext,
@@ -257,6 +258,151 @@ describe("task executors", () => {
     expect(mobileCall?.env?.KANNA_DESKTOP_AUTO_SIGN_IN_PASSWORD).toBeUndefined();
     expect(calls.map((call) => call.args.join(" ")).join("\n")).not.toContain("do-not-print");
     expect(calls.map((call) => call.args.join(" ")).join("\n")).not.toContain("dev@example.com");
+  });
+
+  it("starts dev desktop against staging cloud with opt-in desktop credentials", async () => {
+    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-kd-dev-up-staging-creds-"));
+    const home = await mkdtemp(join(tmpdir(), "kanna-kd-dev-up-staging-creds-home-"));
+    await mkdir(join(repoRoot, "apps", "desktop", "src-tauri"), { recursive: true });
+    await writeFile(
+      join(repoRoot, "firebase.json"),
+      JSON.stringify({ functions: { source: "services/firebase-functions" }, emulators: {} })
+    );
+    await writeStagingDesktopAuth(home);
+    const calls: Array<{ command: string; args: string[]; env?: NodeJS.ProcessEnv; stdin?: string }> = [];
+    const runner: CommandRunner = {
+      async run(command, args, options) {
+        calls.push({ command, args, env: options?.env, stdin: options?.stdin });
+        if (args.includes("list-windows")) {
+          return { exitCode: 0, stdout: "desktop\n", stderr: "" };
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+    };
+
+    const result = await executeDevUpWithContext(
+      {
+        mobile: false,
+        emulators: false,
+        seed: false,
+        attach: false,
+        deleteDb: false,
+        killDaemon: false,
+        staging: true,
+        withCredentials: true
+      },
+      {
+        runner,
+        context: {
+          repoRoot,
+          tmux: { server: "kanna-task-abc", session: "kanna-task-abc" },
+          ports: {
+            KANNA_DEV_PORT: 1421,
+            KANNA_MOBILE_PORT: 8084,
+            KANNA_FIREBASE_AUTH_PORT: 9100,
+            KANNA_FIREBASE_FIRESTORE_PORT: 9101,
+            KANNA_FIREBASE_FUNCTIONS_PORT: 9102,
+            KANNA_FIREBASE_UI_PORT: 9103
+          },
+          env: {
+            HOME: home,
+            KANNA_DEV_PORT: "1421",
+            KANNA_MOBILE_PORT: "8084",
+            KANNA_FIREBASE_AUTH_PORT: "9100",
+            KANNA_FIREBASE_FIRESTORE_PORT: "9101",
+            KANNA_FIREBASE_FUNCTIONS_PORT: "9102",
+            KANNA_FIREBASE_UI_PORT: "9103"
+          }
+        }
+      }
+    );
+
+    expect(result).toMatchObject({
+      ok: true,
+      message: "Started tmux session 'kanna-task-abc'.",
+      data: {
+        windows: ["desktop"]
+      }
+    });
+    const desktopCalls = calls.filter((call) => call.env?.KANNA_DESKTOP_AUTO_SIGN_IN_EMAIL);
+    expect(desktopCalls.length).toBeGreaterThan(0);
+    expect(desktopCalls.every((call) => call.env?.KANNA_CLOUD_ENV === "staging")).toBe(true);
+    expect(desktopCalls.every((call) => call.env?.KANNA_FIREBASE_PROJECT_ID === "kanna-staging")).toBe(true);
+    expect(desktopCalls.every((call) => call.env?.KANNA_RELAY_URL === "wss://relay-staging.kanna.build")).toBe(true);
+    expect(desktopCalls.every((call) => call.env?.KANNA_DESKTOP_AUTO_SIGN_IN_EMAIL === "dev@example.com")).toBe(true);
+    expect(desktopCalls.every((call) => call.env?.KANNA_DESKTOP_AUTO_SIGN_IN_PASSWORD === "do-not-print")).toBe(true);
+    expect(calls.map((call) => call.args.join(" ")).join("\n")).not.toContain("do-not-print");
+    expect(calls.map((call) => call.args.join(" ")).join("\n")).not.toContain("dev@example.com");
+  });
+
+  it("starts dev desktop with emulator seed credentials when opt-in credentials are requested", async () => {
+    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-kd-dev-up-creds-"));
+    const home = await mkdtemp(join(tmpdir(), "kanna-kd-dev-up-creds-home-"));
+    await mkdir(join(repoRoot, "apps", "desktop", "src-tauri"), { recursive: true });
+    await writeFile(
+      join(repoRoot, "firebase.json"),
+      JSON.stringify({ functions: { source: "services/firebase-functions" }, emulators: {} })
+    );
+    const calls: Array<{ command: string; args: string[]; env?: NodeJS.ProcessEnv; stdin?: string }> = [];
+    const runner: CommandRunner = {
+      async run(command, args, options) {
+        calls.push({ command, args, env: options?.env, stdin: options?.stdin });
+        if (args.includes("list-windows")) {
+          return { exitCode: 0, stdout: "desktop\n", stderr: "" };
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+    };
+
+    const result = await executeDevUpWithContext(
+      {
+        mobile: false,
+        emulators: false,
+        seed: false,
+        attach: false,
+        deleteDb: false,
+        killDaemon: false,
+        withCredentials: true
+      },
+      {
+        runner,
+        context: {
+          repoRoot,
+          tmux: { server: "kanna-task-abc", session: "kanna-task-abc" },
+          ports: {
+            KANNA_DEV_PORT: 1421,
+            KANNA_MOBILE_PORT: 8084,
+            KANNA_FIREBASE_AUTH_PORT: 9100,
+            KANNA_FIREBASE_FIRESTORE_PORT: 9101,
+            KANNA_FIREBASE_FUNCTIONS_PORT: 9102,
+            KANNA_FIREBASE_UI_PORT: 9103
+          },
+          env: {
+            HOME: home,
+            KANNA_DEV_PORT: "1421",
+            KANNA_MOBILE_PORT: "8084",
+            KANNA_FIREBASE_AUTH_PORT: "9100",
+            KANNA_FIREBASE_FIRESTORE_PORT: "9101",
+            KANNA_FIREBASE_FUNCTIONS_PORT: "9102",
+            KANNA_FIREBASE_UI_PORT: "9103"
+          }
+        }
+      }
+    );
+
+    expect(result).toMatchObject({
+      ok: true,
+      data: {
+        windows: ["emulators", "relay", "desktop"]
+      }
+    });
+    const desktopCalls = calls.filter((call) => call.env?.KANNA_DESKTOP_AUTO_SIGN_IN_EMAIL);
+    expect(desktopCalls.length).toBeGreaterThan(0);
+    expect(desktopCalls.every((call) => call.env?.KANNA_CLOUD_ENV)).toBe(false);
+    expect(desktopCalls.every((call) => call.env?.KANNA_DESKTOP_AUTO_SIGN_IN_EMAIL === "upvote.sieve.7t@icloud.com")).toBe(true);
+    expect(desktopCalls.every((call) => call.env?.KANNA_DESKTOP_AUTO_SIGN_IN_PASSWORD === "password123")).toBe(true);
+    expect(calls.map((call) => call.args.join(" ")).join("\n")).not.toContain("password123");
+    expect(calls.map((call) => call.args.join(" ")).join("\n")).not.toContain("upvote.sieve.7t@icloud.com");
   });
 
   it("restarts only the desktop tmux window against staging cloud env", async () => {

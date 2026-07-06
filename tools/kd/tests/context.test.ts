@@ -18,10 +18,39 @@ describe("resolveKdContext", () => {
 
     expect(context.isWorktree).toBe(true);
     expect(context.worktreeName).toBe("task-abc123");
+    expect(context.env.KANNA_BUILD_TASK_ID).toBe("abc123");
     expect(context.env.KANNA_DB_NAME).toBe("kanna-wt-task-abc123.db");
     expect(context.env.KANNA_DAEMON_DIR).toBe("/repo/.kanna-worktrees/task-abc123/.kanna-daemon");
     expect(context.env.CARGO_BUILD_BUILD_DIR).toBe("/repo/.kanna-worktrees/task-abc123/.build/cargo-build");
     expect(context.tmux.session).toBe("kanna-task-abc123");
+  });
+
+  it("derives the durable task id from numbered worktree names", () => {
+    const context = resolveKdContext({
+      repoRoot: "/repo/.kanna-worktrees/task-37ec6039-5",
+      homeDir: "/Users/tester",
+      env: {},
+      branch: "task-37ec6039-5",
+      commit: "cafebabe",
+      bundleIdentifier: "build.kanna",
+      configPorts: {}
+    });
+
+    expect(context.env.KANNA_BUILD_TASK_ID).toBe("37ec6039");
+  });
+
+  it("uses the inherited task id when present", () => {
+    const context = resolveKdContext({
+      repoRoot: "/repo/.kanna-worktrees/task-37ec6039-5",
+      homeDir: "/Users/tester",
+      env: { KANNA_TASK_ID: "durable-from-session" },
+      branch: "task-37ec6039-5",
+      commit: "cafebabe",
+      bundleIdentifier: "build.kanna",
+      configPorts: {}
+    });
+
+    expect(context.env.KANNA_BUILD_TASK_ID).toBe("durable-from-session");
   });
 
   it("replaces the legacy shared Rust build cache in worktrees", () => {

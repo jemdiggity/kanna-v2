@@ -206,6 +206,8 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
                 .map_err(|e| format!("db error: {}", e))?;
         }
     }
+    db.update_pipeline_item_activity(&task_id, "working")
+        .map_err(|e| format!("db error: {}", e))?;
     db.update_pipeline_item_agent_session_id(&task_id, prepared.provider_session_id.as_deref())
         .map_err(|e| format!("db error: {}", e))?;
     let run_id = generate_stage_run_id(&task_id);
@@ -536,6 +538,8 @@ fn record_rerun_stage_run(
 ) -> Result<(), String> {
     let db = Db::open(db_path).map_err(|e| format!("db error: {}", e))?;
     db.cancel_running_stage_runs(task_id)
+        .map_err(|e| format!("db error: {}", e))?;
+    db.update_pipeline_item_activity(task_id, "working")
         .map_err(|e| format!("db error: {}", e))?;
     db.update_pipeline_item_agent_session_id(task_id, provider_session_id)
         .map_err(|e| format!("db error: {}", e))?;
