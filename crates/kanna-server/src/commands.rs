@@ -159,12 +159,15 @@ pub async fn handle_invoke(
                     "failed to replace workspace teardown session {teardown_session_id}: {error}"
                 );
             }
-            task_creator::spawn_prepared_workspace_teardown_best_effort(daemon, workspace_teardown)
-                .await;
-
             db.close_pipeline_item(&pipeline_item_id)
                 .map_err(|e| format!("db error: {}", e))?;
-            if !has_workspace_teardown {
+            if has_workspace_teardown {
+                task_creator::spawn_prepared_workspace_teardown_best_effort(
+                    daemon,
+                    workspace_teardown,
+                )
+                .await;
+            } else {
                 crate::worktree_cleanup::cleanup_closed_task_worktrees_by_id(
                     db,
                     &pipeline_item_id,
@@ -225,14 +228,20 @@ pub async fn handle_invoke(
                             "failed to replace workspace teardown session {teardown_session_id}: {error}"
                         );
                     }
-                    task_creator::spawn_prepared_workspace_teardown_best_effort(
-                        daemon,
-                        workspace_teardown.map(|teardown| *teardown),
-                    )
-                    .await;
                     let db = Db::open(&config.db_path).map_err(|e| format!("db error: {}", e))?;
                     db.close_pipeline_item(&task_id)
                         .map_err(|e| format!("db error: {}", e))?;
+                    if let Some(teardown) = workspace_teardown {
+                        task_creator::spawn_prepared_workspace_teardown_best_effort(
+                            daemon,
+                            Some(*teardown),
+                        )
+                        .await;
+                    } else {
+                        crate::worktree_cleanup::cleanup_closed_task_worktrees_by_id(
+                            &db, &task_id,
+                        )?;
+                    }
                     Ok(serde_json::json!({ "task_id": task_id, "followTask": false }))
                 }
             }
@@ -267,11 +276,60 @@ pub async fn handle_invoke(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     fn daemon_socket_path_for_dir(daemon_dir: &str) -> std::path::PathBuf {
         kanna_runtime_defaults::socket_path(std::path::Path::new(daemon_dir))
+    }
+
+    fn init_test_git_repo(repo_root: &std::path::Path) {
+        let _ = std::fs::remove_dir_all(repo_root);
+        std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+        std::fs::write(repo_root.join("README.md"), "test repo\n").unwrap();
+        std::fs::write(
+            repo_root.join(".kanna/pipelines/default.json"),
+            serde_json::json!({
+                "stages": [
+                    { "name": "in progress", "transition": "manual" }
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(Command::new("git")
+            .arg("init")
+            .arg("-b")
+            .arg("main")
+            .current_dir(repo_root)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(repo_root)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(repo_root)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["add", "README.md", ".kanna"])
+            .current_dir(repo_root)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(repo_root)
+            .status()
+            .unwrap()
+            .success());
     }
 
     fn test_config(unique: &str, db_path: String, daemon_dir: String) -> Config {
@@ -407,5 +465,132 @@ mod tests {
         // an installed desktop runtime.
         let _ = std::fs::remove_dir_all(daemon_dir);
         let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn advance_stage_invoke_final_close_without_teardown_cleans_worktree() {
+        let unique = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let repo_root = std::env::temp_dir().join(format!("kanna-command-final-close-{unique}"));
+        init_test_git_repo(&repo_root);
+        assert!(Command::new("git")
+            .args(["branch", "task-source"])
+            .current_dir(&repo_root)
+            .status()
+            .unwrap()
+            .success());
+        let source_worktree = repo_root.join(".kanna-worktrees/task-source");
+        assert!(Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                source_worktree.to_string_lossy().as_ref(),
+                "task-source",
+            ])
+            .current_dir(&repo_root)
+            .status()
+            .unwrap()
+            .success());
+
+        let daemon_dir =
+            std::env::temp_dir().join(format!("kanna-command-final-close-daemon-{unique}"));
+        std::fs::create_dir_all(&daemon_dir).unwrap();
+        let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+        let _ = std::fs::remove_file(&socket_path);
+        let daemon_listener = UnixListener::bind(&socket_path).unwrap();
+        let daemon_server = tokio::spawn(async move {
+            let (stream, _) = daemon_listener.accept().await.unwrap();
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let expected = ["task-1", "shell-wt-task-1", "td-task-1"];
+
+            for expected_session_id in expected {
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+                match command {
+                    DaemonCommand::Kill { session_id } => {
+                        assert_eq!(session_id, expected_session_id)
+                    }
+                    other => panic!("expected kill command, got {:?}", other),
+                }
+                write_half
+                    .write_all(
+                        format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap())
+                            .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
+
+        let db_path = Db::test_db_path(&format!("command-final-close-{unique}"));
+        let db = Db::open_for_tests(&db_path).expect("open test db");
+        db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+            .unwrap();
+        db.insert_test_pipeline_item(
+            "task-1",
+            "repo-1",
+            "Final close",
+            Some("Final close"),
+            "in progress",
+            "2026-07-07 10:00:00",
+        )
+        .unwrap();
+        db.update_test_pipeline_item_stage_context(
+            "task-1",
+            "task-source",
+            "default",
+            None,
+            "claude",
+        )
+        .unwrap();
+        db.upsert_worktree(
+            "wt-task-1",
+            "task-1",
+            &source_worktree.to_string_lossy(),
+            "task-source",
+        )
+        .unwrap();
+
+        let mut daemon = DaemonClient::connect(&daemon_dir.to_string_lossy())
+            .await
+            .expect("connect fake daemon");
+        let config = test_config(
+            &unique,
+            db_path.clone(),
+            daemon_dir.to_string_lossy().to_string(),
+        );
+
+        let result = handle_invoke(
+            "advance_stage",
+            &serde_json::json!({ "task_id": "task-1" }),
+            &db,
+            &mut daemon,
+            &config,
+            &SessionReplacements::default(),
+        )
+        .await
+        .expect("advance final stage invoke");
+
+        assert_eq!(
+            result,
+            serde_json::json!({ "task_id": "task-1", "followTask": false })
+        );
+        daemon_server.await.unwrap();
+        let item = db.get_pipeline_item("task-1").unwrap().unwrap();
+        assert!(item.closed_at.is_some());
+        assert!(!source_worktree.exists());
+        assert_eq!(db.get_task_worktree_path("task-1").unwrap(), None);
+
+        let _ = std::fs::remove_dir_all(daemon_dir);
+        let _ = std::fs::remove_file(db_path);
+        let _ = std::fs::remove_dir_all(repo_root);
     }
 }

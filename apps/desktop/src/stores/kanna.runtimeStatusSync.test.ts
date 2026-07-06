@@ -59,6 +59,7 @@ const mockState = vi.hoisted(() => {
 
   let repos = [makeRepo()];
   let pipelineItems = [makeItem()];
+  let worktreeRows: Array<{ pipeline_item_id: string; path: string; branch: string }> = [];
   let sessionStatuses: Array<{ session_id: string; status: string }> = [];
   const listeners = new Map<string, Array<(event: unknown) => void>>();
 
@@ -66,10 +67,13 @@ const mockState = vi.hoisted(() => {
     switch (command) {
       case "list_sessions":
         return sessionStatuses;
+      case "list_dir":
+        return [];
       case "spawn_session":
       case "ensure_term_init":
       case "get_app_data_dir":
       case "get_pipeline_socket_path":
+      case "run_script":
         return undefined;
       case "file_exists":
         return true;
@@ -112,6 +116,7 @@ const mockState = vi.hoisted(() => {
   function reset(): void {
     repos = [makeRepo()];
     pipelineItems = [makeItem()];
+    worktreeRows = [];
     sessionStatuses = [];
     listeners.clear();
     invokeMock.mockClear();
@@ -131,6 +136,12 @@ const mockState = vi.hoisted(() => {
     },
     set pipelineItems(value: PipelineItem[]) {
       pipelineItems = value;
+    },
+    get worktreeRows() {
+      return worktreeRows;
+    },
+    set worktreeRows(value: Array<{ pipeline_item_id: string; path: string; branch: string }>) {
+      worktreeRows = value;
     },
     get sessionStatuses() {
       return sessionStatuses;
@@ -332,7 +343,13 @@ import { setDesktopSnapshotFetcherForTests } from "../services/desktopServerClie
 
 function createDb(): DbHandle {
   return {
-    execute: vi.fn(async () => ({ rowsAffected: 1 })),
+    execute: vi.fn(async (sql: string, params?: unknown[]) => {
+      if (sql === "DELETE FROM worktree WHERE pipeline_item_id = ?") {
+        const itemId = typeof params?.[0] === "string" ? params[0] : null;
+        mockState.worktreeRows = mockState.worktreeRows.filter((row) => row.pipeline_item_id !== itemId);
+      }
+      return { rowsAffected: 1 };
+    }),
     select: vi.fn(async (sql: string, params?: unknown[]) => {
       if (sql.includes("SELECT agent_provider FROM pipeline_item")) {
         const itemId = typeof params?.[0] === "string" ? params[0] : null;
@@ -340,6 +357,16 @@ function createDb(): DbHandle {
           ? mockState.pipelineItems.find((candidate) => candidate.id === itemId)
           : null;
         return item ? [{ agent_provider: item.agent_provider }] : [];
+      }
+      if (sql === "SELECT path FROM worktree WHERE pipeline_item_id = ?") {
+        const itemId = typeof params?.[0] === "string" ? params[0] : null;
+        return mockState.worktreeRows
+          .filter((row) => row.pipeline_item_id === itemId)
+          .map((row) => ({ path: row.path }));
+      }
+      if (sql === "SELECT id FROM pipeline_item WHERE id = ? LIMIT 1") {
+        const itemId = typeof params?.[0] === "string" ? params[0] : null;
+        return mockState.pipelineItems.some((item) => item.id === itemId) ? [{ id: itemId }] : [];
       }
       return [];
     }),
@@ -687,6 +714,54 @@ describe("kanna runtime status reconciliation", () => {
     expect(store.selectedRepoId).toBe("repo-1");
     expect(store.selectedItemId).toBe("task-next");
     expect(store.currentItem?.id).toBe("task-next");
+  });
+
+  it("cleans closed task worktrees when teardown session exit auto-closes the task", async () => {
+    mockState.pipelineItems = [
+      {
+        ...mockState.pipelineItems[0]!,
+        id: "task-closing",
+        repo_id: "repo-1",
+        branch: "task-task-closing",
+        teardown_started_at: "2026-04-16T00:04:00.000Z",
+      },
+    ];
+    mockState.worktreeRows = [
+      {
+        pipeline_item_id: "task-closing",
+        path: "/tmp/repo/.kanna-worktrees/task-task-closing",
+        branch: "task-task-closing",
+      },
+    ];
+
+    await createStore();
+    await flushStore();
+
+    mockState.emit("session_exit", {
+      session_id: "td-task-closing",
+      code: 0,
+    });
+
+    await vi.waitFor(() => {
+      const cleanupCall = mockState.invokeMock.mock.calls.find(([command, args]) =>
+        command === "run_script" &&
+        typeof args?.script === "string" &&
+        args.script.includes("WIP at task close")
+      );
+      expect(cleanupCall).toBeTruthy();
+    });
+
+    const cleanupCall = mockState.invokeMock.mock.calls.find(([command, args]) =>
+      command === "run_script" &&
+      typeof args?.script === "string" &&
+      args.script.includes("WIP at task close")
+    );
+    expect(cleanupCall?.[1]).toEqual(expect.objectContaining({
+      cwd: "/tmp/repo",
+      env: {},
+      script: expect.stringContaining("git -C \"$repo\" worktree remove --force --force \"$wt\""),
+    }));
+    expect(mockState.worktreeRows).toEqual([]);
   });
 
   it("falls back to another repo when the selected teardown task leaves its repo empty", async () => {

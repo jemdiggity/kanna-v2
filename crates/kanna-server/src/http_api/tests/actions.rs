@@ -642,7 +642,9 @@ async fn close_task_route_tears_down_current_stage_environment_before_repo_teard
     let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
     let _ = std::fs::remove_file(&socket_path);
     let daemon_listener = UnixListener::bind(&socket_path).unwrap();
+    let db_path = Db::test_db_path(&format!("http-close-env-teardown-{unique}"));
     let expected_worktree = source_worktree.to_string_lossy().to_string();
+    let daemon_db_path = db_path.clone();
     let daemon_server = tokio::spawn(async move {
         let (stream, _) = daemon_listener.accept().await.unwrap();
         let (read_half, mut write_half) = stream.into_split();
@@ -667,6 +669,15 @@ async fn close_task_route_tears_down_current_stage_environment_before_repo_teard
 
         let mut line = String::new();
         reader.read_line(&mut line).await.unwrap();
+        let item = Db::open(&daemon_db_path)
+            .expect("open db before teardown spawn assertion")
+            .get_pipeline_item("task-1")
+            .expect("read task before teardown spawn")
+            .expect("task exists before teardown spawn");
+        assert!(
+            item.closed_at.is_some(),
+            "close route must mark the task closed before spawning teardown cleanup"
+        );
         let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
         match command {
             DaemonCommand::Spawn {
@@ -703,7 +714,6 @@ async fn close_task_route_tears_down_current_stage_environment_before_repo_teard
             .unwrap();
     });
 
-    let db_path = Db::test_db_path(&format!("http-close-env-teardown-{unique}"));
     let db = Db::open_for_tests(&db_path).expect("open test db");
     db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
         .unwrap();
@@ -2766,7 +2776,9 @@ async fn advance_stage_route_closes_final_stage_and_tears_down_environment_befor
     let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
     let _ = std::fs::remove_file(&socket_path);
     let daemon_listener = UnixListener::bind(&socket_path).unwrap();
+    let db_path = Db::test_db_path(&format!("http-api-final-close-{unique}"));
     let expected_worktree = source_worktree.to_string_lossy().to_string();
+    let daemon_db_path = db_path.clone();
     let daemon_server = tokio::spawn(async move {
         let (stream, _) = daemon_listener.accept().await.unwrap();
         let (read_half, mut write_half) = stream.into_split();
@@ -2791,6 +2803,15 @@ async fn advance_stage_route_closes_final_stage_and_tears_down_environment_befor
 
         let mut line = String::new();
         reader.read_line(&mut line).await.unwrap();
+        let item = Db::open(&daemon_db_path)
+            .expect("open db before final-stage teardown spawn assertion")
+            .get_pipeline_item("task-1")
+            .expect("read task before final-stage teardown spawn")
+            .expect("task exists before final-stage teardown spawn");
+        assert!(
+            item.closed_at.is_some(),
+            "final-stage close must mark the task closed before spawning teardown cleanup"
+        );
         let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
         match command {
             DaemonCommand::Spawn {
@@ -2837,7 +2858,7 @@ async fn advance_stage_route_closes_final_stage_and_tears_down_environment_befor
         firebase_auth_emulator_url: None,
         firebase_firestore_emulator_host: None,
         daemon_dir: daemon_dir.to_string_lossy().to_string(),
-        db_path: Db::test_db_path(&format!("http-api-final-close-{unique}")),
+        db_path,
         kanna_cli_path: None,
         desktop_id: "desktop-1".to_string(),
         desktop_secret: Some("desktop-secret".to_string()),
