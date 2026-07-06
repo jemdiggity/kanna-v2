@@ -1,7 +1,7 @@
 import { ref } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DbHandle, PipelineItem, Repo } from "../types/kanna";
-import { updateDesktopServerClientHandlersForTests } from "../services/desktopServerClient";
+import { setDesktopServerClientHandlersForTests } from "../services/desktopServerClient";
 import { createSessionsApi } from "./sessions";
 import type { StoreContext } from "./state";
 
@@ -40,7 +40,8 @@ const mocks = vi.hoisted(() => {
   };
   const invokeMock = vi.fn(invokeDefault);
   const updateAgentSessionIdMock = vi.fn(async () => {});
-  return { invokeMock, invokeDefault, updateAgentSessionIdMock };
+  const putTaskAgentSessionMock = vi.fn(async () => {});
+  return { invokeMock, invokeDefault, updateAgentSessionIdMock, putTaskAgentSessionMock };
 });
 
 vi.mock("../invoke", () => ({
@@ -105,10 +106,9 @@ describe("createSessionsApi", () => {
     mocks.invokeMock.mockReset();
     mocks.invokeMock.mockImplementation(mocks.invokeDefault);
     mocks.updateAgentSessionIdMock.mockClear();
-    updateDesktopServerClientHandlersForTests({
-      putTaskAgentSession: async (taskId, agentSessionId) => {
-        await mocks.updateAgentSessionIdMock(expect.anything(), taskId, agentSessionId);
-      },
+    mocks.putTaskAgentSessionMock.mockClear();
+    setDesktopServerClientHandlersForTests({
+      putTaskAgentSession: mocks.putTaskAgentSessionMock,
     });
   });
 
@@ -187,6 +187,11 @@ describe("createSessionsApi", () => {
     expect(prepared.agentCmdPreamble).toContain("This session was launched by Kanna");
     expect(prepared.agentCmd).not.toContain("--resume");
     expect(prepared.agentCmdPreamble).not.toContain("--resume");
+    expect(mocks.putTaskAgentSessionMock).toHaveBeenCalledOnce();
+    expect(mocks.putTaskAgentSessionMock).toHaveBeenCalledWith(
+      "task-1",
+      expect.stringMatching(/^[0-9a-f-]+$/),
+    );
     expect(mocks.updateAgentSessionIdMock).not.toHaveBeenCalled();
   });
 
@@ -261,6 +266,12 @@ describe("createSessionsApi", () => {
       path: "/tmp/kanna-daemon/runtime/mcp/task-1.json",
       content: expect.stringContaining("\"kanna-mcp\""),
     });
+    expect(mocks.putTaskAgentSessionMock).toHaveBeenCalledOnce();
+    expect(mocks.putTaskAgentSessionMock).toHaveBeenCalledWith(
+      "task-1",
+      expect.stringMatching(/^[0-9a-f-]+$/),
+    );
+    expect(mocks.updateAgentSessionIdMock).not.toHaveBeenCalled();
     const writeCall = mocks.invokeMock.mock.calls.find(([command]) => command === "write_text_file");
     const content = String(writeCall?.[1]?.content ?? "");
     expect(JSON.parse(content)).toEqual({

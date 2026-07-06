@@ -4,7 +4,6 @@ import { invoke } from "../invoke";
 import { isTauri } from "../tauri-mock";
 import { buildTaskShellCommand, getShellTerminalEnv, getTaskTerminalEnv } from "../composables/terminalSessionRecovery";
 import { resolveCurrentKannaServerBaseUrl } from "../services/kannaServerBaseUrl";
-import { putDesktopTaskAgentSession } from "../services/desktopServerClient";
 import { buildKannaCliPathEnv, buildTaskRuntimeEnv } from "./kannaCliEnv";
 import { prepareKannaMcpRuntime } from "./kannaMcpRuntime";
 import { readEnvVarOptional, whichBinaryOptional } from "../utils/invokeHelpers";
@@ -21,7 +20,7 @@ import { resolveTaskItemForDaemonSession } from "./taskSessionIdentity";
 import { isReadableDirectory, resolveShellSpawnCwd } from "../utils/shellCwd";
 import { readRepoConfig, requireService, type AgentSpawnRecoveryOptions, type PreparedPtySession, type PtySpawnOptions, type StoreContext, type TaskSessionRecoveryOptions } from "./state";
 import { isTaskSelectedInAnyWindow } from "./windowSelection";
-import { applyDesktopTaskRuntimeStatus } from "../services/desktopServerClient";
+import { applyDesktopTaskRuntimeStatus, putDesktopTaskAgentSession } from "../services/desktopServerClient";
 
 interface DaemonSessionInfo {
   session_id?: string;

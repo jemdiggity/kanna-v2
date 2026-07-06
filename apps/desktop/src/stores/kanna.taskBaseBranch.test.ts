@@ -114,6 +114,8 @@ const mockState = vi.hoisted(() => {
   });
   const insertWorktreeMock = vi.fn(async () => {});
   const upsertTerminalSessionMock = vi.fn(async () => {});
+  const updateAgentSessionIdMock = vi.fn(async () => {});
+  const putTaskAgentSessionMock = vi.fn(async () => {});
 
   function defer(): { promise: Promise<void>; resolve: () => void } {
     let resolve = () => {};
@@ -300,6 +302,8 @@ const mockState = vi.hoisted(() => {
     updatePipelineItemTagsMock.mockClear();
     insertWorktreeMock.mockClear();
     upsertTerminalSessionMock.mockClear();
+    updateAgentSessionIdMock.mockClear();
+    putTaskAgentSessionMock.mockClear();
     listBlockersForItemMock.mockResolvedValue([]);
     listBlockedByItemMock.mockResolvedValue([]);
     fetchMock.mockReset();
@@ -404,6 +408,8 @@ const mockState = vi.hoisted(() => {
     updatePipelineItemTagsMock,
     insertWorktreeMock,
     upsertTerminalSessionMock,
+    updateAgentSessionIdMock,
+    putTaskAgentSessionMock,
     get blockCleanupGate() {
       return blockCleanupGate;
     },
@@ -631,7 +637,7 @@ vi.mock("@kanna/" + "db", () => ({
   getUnblockedItems: vi.fn(async () => []),
   hasCircularDependency: vi.fn(async () => false),
   insertOperatorEvent: vi.fn(async () => {}),
-  updateAgentSessionId: vi.fn(async () => {}),
+  updateAgentSessionId: mockState.updateAgentSessionIdMock,
   listTaskPorts: vi.fn(async () => [...mockState.taskPorts].sort((a, b) => a.port - b.port)),
   listTaskPortsForItem: vi.fn(async (_db: DbHandle, itemId: string) =>
     mockState.taskPorts
@@ -786,6 +792,14 @@ describe("kanna store task base branch integration", () => {
         const item = mockState.pipelineItems.find((candidate) => candidate.id === taskId);
         if (item?.activity === "unread") item.activity = "idle";
         return { taskId, activity: item?.activity === "idle" ? "idle" : null };
+      },
+      putTaskAgentSession: async (taskId, agentSessionId) => {
+        await mockState.putTaskAgentSessionMock(taskId, agentSessionId);
+        const item = mockState.pipelineItems.find((candidate) => candidate.id === taskId);
+        if (item) {
+          item.agent_session_id = agentSessionId;
+          item.updated_at = mockState.makeItem().updated_at;
+        }
       },
       claimTaskPorts: async (taskId, input) => {
         const portEnv: Record<string, string> = {};
@@ -1375,6 +1389,30 @@ describe("kanna store task base branch integration", () => {
       cwd: worktreePath,
       daemon_session_id: taskId,
     });
+  });
+
+  it("persists frontend-created PTY provider session ids through the server client", async () => {
+    const store = await createStore();
+
+    const taskId = await store.createItem("repo-1", "/tmp/repo", "Ship provider session", "pty", {
+      agentProvider: "copilot",
+    });
+
+    await vi.waitFor(() => {
+      expect(mockState.invokeMock).toHaveBeenCalledWith(
+        "spawn_session",
+        expect.objectContaining({ sessionId: taskId }),
+      );
+    });
+
+    expect(mockState.putTaskAgentSessionMock).toHaveBeenCalledOnce();
+    expect(mockState.putTaskAgentSessionMock).toHaveBeenCalledWith(
+      taskId,
+      expect.stringMatching(/^[0-9a-f-]+$/),
+    );
+    expect(mockState.updateAgentSessionIdMock).not.toHaveBeenCalled();
+    expect(mockState.pipelineItems.find((item) => item.id === taskId)?.agent_session_id)
+      .toEqual(expect.stringMatching(/^[0-9a-f-]+$/));
   });
 
   it("passes workspace env and PATH updates to PTY task sessions", async () => {
