@@ -19,7 +19,11 @@ import { resolveTaskItemForDaemonSession } from "./taskSessionIdentity";
 import { requireService, type StoreContext } from "./state";
 import { applySnapshotSettingsToState } from "./snapshotSettings";
 import { cleanupClosedTaskWorktrees } from "./taskWorktreeCleanup";
-import { putDesktopSetting } from "../services/desktopServerClient";
+import {
+  applyDesktopTaskRuntimeStatus,
+  closeDesktopTask,
+  putDesktopSetting,
+} from "../services/desktopServerClient";
 
 export interface InitApi {
   init: (db: DbHandle) => Promise<void>;
@@ -179,7 +183,6 @@ export function createInitApi(
 
   async function init(db: DbHandle) {
     context.state.db.value = db;
-    const { updatePipelineItemActivity, closePipelineItem } = await import("@kanna/db");
 
     await requireService(context.services.loadInitialData, "loadInitialData")();
 
@@ -198,7 +201,7 @@ export function createInitApi(
 
     const workingItems = eagerItems.filter((item) => item.activity === "working");
     for (const item of workingItems) {
-      await updatePipelineItemActivity(context.requireDb(), item.id, "unread");
+      await applyDesktopTaskRuntimeStatus(item.id, { status: "idle", selected: false });
     }
     if (workingItems.length > 0) {
       await refreshStartupSnapshot();
@@ -219,7 +222,7 @@ export function createInitApi(
         const exists = await invoke<boolean>("file_exists", { path: worktreePath });
         if (!exists) {
           console.warn(`[store] closing orphaned task ${item.id}: worktree missing at ${worktreePath}`);
-          await ports.closeTaskAndReleasePorts(item.id, (id) => closePipelineItem(context.requireDb(), id));
+          await ports.closeTaskAndReleasePorts(item.id, closeDesktopTask);
           item.closed_at = new Date().toISOString();
           closedOrphan = true;
         }
@@ -387,7 +390,7 @@ export function createInitApi(
             "selectReplacementAfterItemRemoval",
           )(item);
         }
-        await ports.closeTaskAndReleasePorts(item.id, (id) => closePipelineItem(context.requireDb(), id));
+        await ports.closeTaskAndReleasePorts(item.id, closeDesktopTask);
         if (repo) {
           await cleanupClosedTaskWorktrees(context, item, repo);
         } else {

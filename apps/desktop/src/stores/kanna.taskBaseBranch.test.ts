@@ -644,7 +644,10 @@ vi.mock("@kanna/" + "db", () => ({
 }));
 
 import { useKannaStore } from "./kanna";
-import { setDesktopSnapshotFetcherForTests } from "../services/desktopServerClient";
+import {
+  setDesktopServerClientHandlersForTests,
+  setDesktopSnapshotFetcherForTests,
+} from "../services/desktopServerClient";
 
 function createDb(): DbHandle {
   return {
@@ -758,6 +761,95 @@ describe("kanna store task base branch integration", () => {
       worktreePaths: {},
       settings: {},
     }));
+    setDesktopServerClientHandlersForTests({
+      getSetting: async () => null,
+      putSetting: async (key, value) => ({ key, value }),
+      deleteSetting: async () => {},
+      postOperatorEvents: async () => {},
+      applyTaskRuntimeStatus: async (taskId, input) => {
+        const item = mockState.pipelineItems.find((candidate) => candidate.id === taskId);
+        if (!item || item.closed_at != null) return { taskId, activity: null };
+        let activity: PipelineItem["activity"] | null = null;
+        if (input.status === "busy" && item.activity !== "working") {
+          activity = "working";
+        } else if ((input.status === "idle" || input.status === "waiting") && item.activity === "working") {
+          activity = input.selected ? "idle" : "unread";
+        }
+        if (activity) {
+          item.activity = activity;
+          item.activity_changed_at = mockState.makeItem().activity_changed_at;
+          item.updated_at = mockState.makeItem().updated_at;
+        }
+        return { taskId, activity };
+      },
+      markTaskRead: async (taskId) => {
+        const item = mockState.pipelineItems.find((candidate) => candidate.id === taskId);
+        if (item?.activity === "unread") item.activity = "idle";
+        return { taskId, activity: item?.activity === "idle" ? "idle" : null };
+      },
+      claimTaskPorts: async (taskId, input) => {
+        const portEnv: Record<string, string> = {};
+        let firstPort: number | null = null;
+        const occupiedPorts = new Set(mockState.taskPorts.map((taskPort) => taskPort.port));
+        for (const port of input.reservedPorts ?? []) {
+          if (Number.isInteger(port) && port > 0 && port <= 65535) {
+            occupiedPorts.add(port);
+          }
+        }
+        for (const preferredPort of Object.values(input.ports ?? {})) {
+          for (const offset of input.reservedPortOffsets ?? []) {
+            if (!Number.isInteger(offset) || offset < 0) continue;
+            const reservedPort = preferredPort + offset;
+            if (reservedPort > 0 && reservedPort <= 65535) {
+              occupiedPorts.add(reservedPort);
+            }
+          }
+        }
+        for (const [envName, preferredPort] of Object.entries(input.ports ?? {})) {
+          const existing = mockState.taskPorts.find(
+            (taskPort) => taskPort.pipeline_item_id === taskId && taskPort.env_name === envName,
+          );
+          if (existing) {
+            occupiedPorts.add(existing.port);
+            portEnv[envName] = String(existing.port);
+            if (firstPort === null) firstPort = existing.port;
+            continue;
+          }
+          for (let candidate = preferredPort + 1; candidate <= 65535; candidate += 1) {
+            if (occupiedPorts.has(candidate)) continue;
+            mockState.taskPorts = [
+              ...mockState.taskPorts,
+              {
+                port: candidate,
+                pipeline_item_id: taskId,
+                env_name: envName,
+                created_at: mockState.makeItem().created_at,
+              },
+            ];
+            occupiedPorts.add(candidate);
+            portEnv[envName] = String(candidate);
+            if (firstPort === null) firstPort = candidate;
+            break;
+          }
+        }
+        return { taskId, portEnv, firstPort };
+      },
+      releaseTaskPorts: async (taskId) => {
+        mockState.taskPorts = mockState.taskPorts.filter((taskPort) => taskPort.pipeline_item_id !== taskId);
+        const item = mockState.pipelineItems.find((candidate) => candidate.id === taskId);
+        if (item) {
+          item.port_offset = null;
+          item.port_env = null;
+        }
+      },
+      closeTask: async (taskId) => {
+        const item = mockState.pipelineItems.find((candidate) => candidate.id === taskId);
+        if (item) {
+          item.closed_at = mockState.makeItem().created_at;
+          item.updated_at = mockState.makeItem().updated_at;
+        }
+      },
+    });
     toastErrorMock.mockClear();
     toastWarningMock.mockClear();
     publishDesktopTaskSnapshotMock.mockReset();
