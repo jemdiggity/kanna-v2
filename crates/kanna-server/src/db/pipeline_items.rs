@@ -208,6 +208,24 @@ impl Db {
             return Ok(None);
         };
 
+        let terminal_session_id = self
+            .conn
+            .query_row(
+                "SELECT daemon_session_id
+                 FROM terminal_session
+                 WHERE pipeline_item_id = ?
+                   AND daemon_session_id IS NOT NULL
+                   AND daemon_session_id != ''
+                 ORDER BY CASE WHEN label = 'agent' THEN 0 ELSE 1 END, id
+                 LIMIT 1",
+                [&pipeline_item_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if terminal_session_id.is_some() {
+            return Ok(terminal_session_id);
+        }
+
         let stage_run_session_id = self
             .conn
             .query_row(
@@ -227,22 +245,7 @@ impl Db {
             return Ok(stage_run_session_id);
         }
 
-        let terminal_session_id = self
-            .conn
-            .query_row(
-                "SELECT daemon_session_id
-                 FROM terminal_session
-                 WHERE pipeline_item_id = ?
-                   AND daemon_session_id IS NOT NULL
-                   AND daemon_session_id != ''
-                 ORDER BY CASE WHEN label = 'agent' THEN 0 ELSE 1 END, id
-                 LIMIT 1",
-                [&pipeline_item_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-
-        Ok(terminal_session_id.or(Some(pipeline_item_id)))
+        Ok(Some(pipeline_item_id))
     }
 
     pub fn find_open_running_agent_task(

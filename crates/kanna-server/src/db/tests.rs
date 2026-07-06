@@ -496,6 +496,50 @@ fn resolves_task_terminal_session_id_from_latest_running_stage_run() {
 }
 
 #[test]
+fn resolves_task_terminal_session_id_prefers_daemon_mapping_over_provider_uuid_run_id() {
+    let path = Db::test_db_path("resolve-task-terminal-provider-uuid");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "b5181132",
+        "repo-1",
+        "Reconnect historical task",
+        Some("Reconnect historical task"),
+        "in progress",
+        "2026-07-06 12:00:00",
+    )
+    .unwrap();
+    db.update_test_pipeline_item_stage_context("b5181132", "task-b5181132", "qa", None, "claude")
+        .unwrap();
+    db.insert_test_terminal_session("agent-b5181132", "repo-1", "b5181132", "agent", "b5181132")
+        .unwrap();
+    db.insert_stage_run(NewStageRun {
+        id: "run-historical-provider-id",
+        task_id: "b5181132",
+        stage: "in progress",
+        kind: "main",
+        agent: None,
+        agent_provider: Some("claude"),
+        model: None,
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: Some("173d6399-8d10-4933-8481-9ba5e551c149"),
+        provider_session_id: Some("173d6399-8d10-4933-8481-9ba5e551c149"),
+        cwd: Some("/tmp/repo/.kanna-worktrees/task-b5181132"),
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+
+    assert_eq!(
+        db.resolve_task_terminal_session_id("task-b5181132")
+            .unwrap()
+            .as_deref(),
+        Some("b5181132")
+    );
+}
+
+#[test]
 fn insert_pipeline_item_stores_stage_metadata() {
     let path = temp_db_path();
     let conn = Connection::open(&path).expect("open temp db");
