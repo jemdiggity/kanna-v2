@@ -17,7 +17,7 @@ interface LanTaskSnapshotPayload {
   tasks?: DesktopCloudTaskSnapshot[];
 }
 
-export async function publishDesktopLanTaskSnapshot(db: DbHandle): Promise<void> {
+export async function publishDesktopLanTaskSnapshot(db?: DbHandle | null): Promise<void> {
   void db;
   const [desktopId, snapshot] = await Promise.all([
     resolveLanDesktopId(),
