@@ -65,23 +65,29 @@ describe("terminal recovery", () => {
   // reconcile the stale exit latch against the live daemon session instead of
   // staying frozen on the dead PTY's last frame.
   it("reattaches after a kill+respawn that happened while the task was deselected", async () => {
+    // Per-task setup overrides the repo-config fixture so the marker comes
+    // straight from this PTY, independent of the shared fixture's
+    // first-vs-respawn state; tasks are created serially to keep worktree
+    // creation and session spawn deterministic under load.
     const taskId = await createRecoverableTask(client, {
       repoId,
       repoPath: testRepoPath,
       prompt: "Reattach after an unseen stage-swap respawn",
+      setup: ["printf 'ORIGINAL_READY\\n'; while true; do sleep 60; done"],
     });
     taskIds.push(taskId);
+    await waitForSessionPresence(client, taskId, true);
+    await selectTask(client, taskId);
+    await client.waitForElement(".main-panel .terminal-container", 15_000);
+    await waitForTerminalEndMarker(client, taskId, "ORIGINAL_READY", "^ORIGINAL_READY$", 30_000);
+
     const otherTaskId = await createRecoverableTask(client, {
       repoId,
       repoPath: testRepoPath,
       prompt: "Temporary task used to pause the frozen task's terminal",
+      setup: ["printf 'OTHER_READY\\n'; while true; do sleep 60; done"],
     });
     taskIds.push(otherTaskId);
-
-    await waitForSessionPresence(client, taskId, true);
-    await selectTask(client, taskId);
-    await client.waitForElement(".main-panel .terminal-container", 15_000);
-    await waitForTerminalEndMarker(client, taskId, "ORIGINAL_READY", "^ORIGINAL_READY$", 15_000);
 
     // Kill while attached: the exit reaches the view and latches.
     await strictTauriInvoke(client, "kill_session", { sessionId: taskId });
@@ -113,7 +119,7 @@ describe("terminal recovery", () => {
     // Reselect: the terminal must attach to the respawned PTY instead of
     // staying frozen on the killed session's last frame.
     await selectTask(client, taskId);
-    await waitForTerminalEndMarker(client, taskId, "RESPAWN_READY", "^RESPAWN_READY$", 20_000);
+    await waitForTerminalEndMarker(client, taskId, "RESPAWN_READY", "^RESPAWN_READY$", 30_000);
 
     // This is a clean reattach, not the missing-session respawn fallback.
     expect(await findRespawnToasts(client)).toEqual([]);
@@ -293,9 +299,17 @@ async function createRecoverableTask(
     repoPath: string;
     prompt: string;
     agentProvider?: "claude" | "codex";
+    setup?: string[];
   },
 ): Promise<string> {
   const agentProvider = options.agentProvider ?? "claude";
+  const customTaskOption = options.setup
+    ? `customTask: {
+         executionMode: "pty",
+         agentProvider: ${JSON.stringify(agentProvider)},
+         setup: ${JSON.stringify(options.setup)},
+       },`
+    : "";
   const taskId = await client.executeAsync<string>(
     `const cb = arguments[arguments.length - 1];
      const ctx = window.__KANNA_E2E__.setupState;
@@ -303,6 +317,7 @@ async function createRecoverableTask(
        ctx.createItem(${JSON.stringify(options.repoId)}, ${JSON.stringify(options.repoPath)}, ${JSON.stringify(options.prompt)}, "pty", {
          selectOnCreate: false,
          agentProvider: ${JSON.stringify(agentProvider)},
+         ${customTaskOption}
        })
      ).then((id) => cb(id)).catch((error) => cb("__error:" + (error?.message || String(error))));`,
   );
@@ -373,6 +388,24 @@ async function selectTask(client: WebDriverClient, taskId: string): Promise<void
   if (result !== "ok") {
     throw new Error(`select task failed: ${result}`);
   }
+  await waitForSelectedItem(client, taskId);
+}
+
+async function waitForSelectedItem(
+  client: WebDriverClient,
+  taskId: string,
+  timeoutMs = 10_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let latest: unknown = null;
+  while (Date.now() < deadline) {
+    latest = await client.executeSync(
+      "return window.__KANNA_E2E__.setupState.store.selectedItemId ?? null;",
+    );
+    if (latest === taskId) return;
+    await sleep(100);
+  }
+  throw new Error(`timed out waiting for task ${taskId} to be selected; latest=${JSON.stringify(latest)}`);
 }
 
 function buildRecoverySnapshot(lineCount: number): string {
