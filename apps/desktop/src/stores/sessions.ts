@@ -1,4 +1,5 @@
 import type { AgentProvider, PipelineItem } from "../types/kanna";
+import { updatePipelineItemActivity } from "@kanna/db";
 import { buildKannaRuntimeSystemPrompt, buildKannaRuntimeUserPrompt } from "../../../../packages/core/src/pipeline/prompt-builder";
 import { invoke } from "../invoke";
 import { isTauri } from "../tauri-mock";
@@ -20,7 +21,7 @@ import { resolveTaskItemForDaemonSession } from "./taskSessionIdentity";
 import { isReadableDirectory, resolveShellSpawnCwd } from "../utils/shellCwd";
 import { readRepoConfig, requireService, type AgentSpawnRecoveryOptions, type PreparedPtySession, type PtySpawnOptions, type StoreContext, type TaskSessionRecoveryOptions } from "./state";
 import { isTaskSelectedInAnyWindow } from "./windowSelection";
-import { applyDesktopTaskRuntimeStatus, putDesktopTaskAgentSession } from "../services/desktopServerClient";
+import { putDesktopTaskAgentSession } from "../services/desktopServerClient";
 
 interface DaemonSessionInfo {
   session_id?: string;
@@ -119,9 +120,14 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
     }
 
     if (status === "busy" || status === "idle" || status === "waiting") {
-      const selected = await isTaskSelectedInAnyWindow(context, item.id);
-      const response = await applyDesktopTaskRuntimeStatus(item.id, { status, selected });
-      if (response.activity == null) return;
+      const nextActivity = resolveActivityForRuntimeStatus(
+        item.activity,
+        status,
+        await isTaskSelectedInAnyWindow(context, item.id),
+      );
+      if (nextActivity == null) return;
+
+      await updatePipelineItemActivity(context.requireDb(), item.id, nextActivity);
       await requireService(context.services.reloadSnapshot, "reloadSnapshot")();
       await context.services.windowWorkspace?.invalidateSharedData("taskActivity");
     }

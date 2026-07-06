@@ -22,7 +22,7 @@ export const useKannaStore = defineStore("kanna", () => {
   services.fetchSnapshot = fetchDesktopSnapshot;
   const context = createStoreContext(state, toast, services);
 
-  const ports = createPortsStore();
+  const ports = createPortsStore(context);
   const queries = createQueriesApi(context);
   const selection = createSelectionApi(context);
   const sessions = createSessionsApi(context);
