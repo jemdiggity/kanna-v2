@@ -12,9 +12,11 @@ mod snapshot;
 mod state;
 mod status;
 mod task_actions;
+mod task_activity;
 mod task_blockers;
 mod task_input;
 mod task_logs;
+mod task_ports;
 mod tasks;
 mod transfers;
 

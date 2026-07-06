@@ -582,6 +582,181 @@ async fn patch_repo_route_updates_remote_metadata_and_hidden_state() {
 }
 
 #[tokio::test]
+async fn task_activity_routes_persist_runtime_status_and_mark_read() {
+    let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "task-1",
+            "repo-1",
+            "prompt",
+            Some("Task One"),
+            "in progress",
+            "2026-04-17 08:00:00",
+        )
+        .unwrap();
+    });
+
+    let busy_response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/tasks/task-1/actions/runtime-status")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "status": "busy", "selected": false }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(busy_response.status(), StatusCode::OK);
+
+    let exited_response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/tasks/task-1/actions/runtime-status")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "status": "idle", "selected": false }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(exited_response.status(), StatusCode::OK);
+
+    let unread_snapshot = app
+        .clone()
+        .oneshot(Request::get("/v1/snapshot").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let unread_body = axum::body::to_bytes(unread_snapshot.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let unread_json: serde_json::Value = from_slice(&unread_body).unwrap();
+    assert_eq!(
+        unread_json["entries"][0]["items"][0]["activity"],
+        serde_json::json!("unread")
+    );
+
+    let mark_read_response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/tasks/task-1/actions/mark-read")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(mark_read_response.status(), StatusCode::OK);
+
+    let read_snapshot = app
+        .oneshot(Request::get("/v1/snapshot").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let read_body = axum::body::to_bytes(read_snapshot.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let read_json: serde_json::Value = from_slice(&read_body).unwrap();
+    assert_eq!(
+        read_json["entries"][0]["items"][0]["activity"],
+        serde_json::json!("idle")
+    );
+}
+
+#[tokio::test]
+async fn task_port_routes_claim_reuse_and_release_allocations() {
+    let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "task-1",
+            "repo-1",
+            "prompt",
+            Some("Task One"),
+            "in progress",
+            "2026-04-17 08:00:00",
+        )
+        .unwrap();
+        db.insert_test_pipeline_item(
+            "task-2",
+            "repo-1",
+            "prompt",
+            Some("Task Two"),
+            "in progress",
+            "2026-04-17 08:00:00",
+        )
+        .unwrap();
+    });
+
+    let body = serde_json::json!({
+        "ports": { "KANNA_DEV_PORT": 1420 },
+        "reservedPorts": [1421],
+        "reservedPortOffsets": [2]
+    })
+    .to_string();
+    let first = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/tasks/task-1/ports")
+                .header("content-type", "application/json")
+                .body(Body::from(body.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    let first_body = axum::body::to_bytes(first.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let first_json: serde_json::Value = from_slice(&first_body).unwrap();
+    assert_eq!(first_json["portEnv"]["KANNA_DEV_PORT"], "1423");
+    assert_eq!(first_json["firstPort"], 1423);
+
+    let reused = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/tasks/task-1/ports")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let reused_body = axum::body::to_bytes(reused.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let reused_json: serde_json::Value = from_slice(&reused_body).unwrap();
+    assert_eq!(reused_json["portEnv"]["KANNA_DEV_PORT"], "1423");
+
+    let released = app
+        .clone()
+        .oneshot(
+            Request::delete("/v1/tasks/task-1/ports")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(released.status(), StatusCode::OK);
+
+    let claimed_after_release = app
+        .oneshot(
+            Request::post("/v1/tasks/task-2/ports")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "ports": { "KANNA_DEV_PORT": 1420 } }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let claimed_body = axum::body::to_bytes(claimed_after_release.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let claimed_json: serde_json::Value = from_slice(&claimed_body).unwrap();
+    assert_eq!(claimed_json["portEnv"]["KANNA_DEV_PORT"], "1421");
+}
+
+#[tokio::test]
 async fn transfer_routes_list_claim_and_fail_pending_incoming_transfers() {
     let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
         db.insert_test_task_transfer(

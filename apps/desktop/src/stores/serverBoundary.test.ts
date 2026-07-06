@@ -9,14 +9,6 @@ const ALLOWED_DB_BOUNDARY_FILES = new Set([
   "stores/taskCloseActions.ts",
   "stores/taskBlockedActions.ts",
   "stores/taskItemActions.ts",
-  // Phase 2 owns task activity writes. These files still mark-read/sync
-  // activity until the parallel Phase 2 branch moves that path server-side.
-  "stores/init.ts",
-  "stores/selection.ts",
-  "stores/sessions.ts",
-  // Phase 2 create/close owns legacy port allocation while task creation is
-  // still frontend-driven. Server task creation already owns ports.
-  "stores/ports.ts",
 ]);
 
 function listSourceFiles(dir: string): string[] {
