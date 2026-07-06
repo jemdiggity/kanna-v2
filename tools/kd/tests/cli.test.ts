@@ -558,6 +558,10 @@ describe("kd CLI", () => {
       taskId: "release.ship",
       input: { dryRun: true, minor: true, arm64: true, staging: true }
     });
+    expect(parseCliArgs(["release", "ship", "--staging", "--rollback-to", "1.2.4-staging.3"])).toEqual({
+      taskId: "release.ship",
+      input: { staging: true, rollbackTo: "1.2.4-staging.3" }
+    });
     expect(parseCliArgs(["cloud", "deploy", "--production"])).toEqual({
       taskId: "cloud.deploy",
       input: { staging: false, production: true, relay: false }

@@ -13,6 +13,7 @@ export interface ReleaseShipInput {
   environment?: ReleaseEnvironment;
   release: boolean;
   dryRun: boolean;
+  rollbackTo?: string;
   env: NodeJS.ProcessEnv;
   runner: CommandRunner;
 }
@@ -23,6 +24,10 @@ export interface ReleaseShipResult {
   updaterPaths: string[];
   latestJson: string;
 }
+
+const STAGING_CHANNEL_TAG = "desktop-staging";
+const STAGING_MANIFEST_NAME = "latest-staging.json";
+const STAGING_RETENTION_COUNT = 5;
 
 export function bumpVersion(sourceVersion: string, bump: ReleaseBump): string {
   const [majorRaw, minorRaw, patchRaw] = sourceVersion.split(".");
@@ -131,6 +136,10 @@ function restoreVersionFiles(snapshot: Array<{ path: string; contents: string }>
   }
 }
 
+function stagingTag(version: string): string {
+  return version.startsWith("v") ? version : `v${version}`;
+}
+
 async function mustRun(runner: CommandRunner, command: string, args: string[], cwd: string, env?: NodeJS.ProcessEnv): Promise<string> {
   const result = await runner.run(command, args, { cwd, env });
   if (result.exitCode !== 0) {
@@ -149,7 +158,7 @@ async function assertCleanGitWorktree(repoRoot: string, runner: CommandRunner, e
 }
 
 async function ensureStagingGithubRelease(input: ReleaseShipInput, repoSlug: string): Promise<void> {
-  const view = await input.runner.run("gh", ["release", "view", "desktop-staging", "--repo", repoSlug], {
+  const view = await input.runner.run("gh", ["release", "view", STAGING_CHANNEL_TAG, "--repo", repoSlug], {
     cwd: input.repoRoot,
     env: input.env
   });
@@ -158,15 +167,164 @@ async function ensureStagingGithubRelease(input: ReleaseShipInput, repoSlug: str
   await mustRun(input.runner, "gh", [
     "release",
     "create",
-    "desktop-staging",
+    STAGING_CHANNEL_TAG,
     "--repo",
     repoSlug,
     "--title",
     "Kanna Desktop Staging",
     "--notes",
-    "Mutable desktop staging updater channel.",
+    "Pointer-only desktop staging updater channel.",
     "--prerelease"
   ], input.repoRoot, input.env);
+}
+
+function parseExistingStagingNumbers(output: string, baseVersion: string): number[] {
+  const pattern = new RegExp(`(?:refs/tags/)?v${baseVersion.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-staging\\.(\\d+)(?:\\^\\{\\})?$`);
+  const numbers = new Set<number>();
+  for (const line of output.split(/\r?\n/)) {
+    const ref = line.trim().split(/\s+/).at(-1) ?? "";
+    const match = pattern.exec(ref);
+    if (!match) continue;
+    const value = Number.parseInt(match[1] ?? "", 10);
+    if (!Number.isNaN(value)) numbers.add(value);
+  }
+  return [...numbers];
+}
+
+async function resolveNextStagingVersion(input: ReleaseShipInput, baseVersion: string): Promise<string> {
+  const tags = await mustRun(input.runner, "git", ["ls-remote", "--tags", "origin", `v${baseVersion}-staging.*`], input.repoRoot, input.env);
+  const highest = Math.max(0, ...parseExistingStagingNumbers(tags, baseVersion));
+  return `${baseVersion}-staging.${highest + 1}`;
+}
+
+interface GithubAsset {
+  name?: string;
+}
+
+interface GithubReleaseView {
+  assets?: GithubAsset[];
+}
+
+function parseGithubReleaseView(raw: string): GithubReleaseView {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (typeof parsed !== "object" || parsed === null) return {};
+    const assets = "assets" in parsed ? (parsed as { assets?: unknown }).assets : undefined;
+    if (!Array.isArray(assets)) return {};
+    return {
+      assets: assets
+        .filter((asset): asset is { name?: unknown } => typeof asset === "object" && asset !== null)
+        .map((asset) => ({ name: typeof asset.name === "string" ? asset.name : undefined }))
+    };
+  } catch {
+    return {};
+  }
+}
+
+async function pruneStagingChannelAssets(input: ReleaseShipInput, repoSlug: string): Promise<void> {
+  const raw = await mustRun(input.runner, "gh", ["release", "view", STAGING_CHANNEL_TAG, "--repo", repoSlug, "--json", "assets"], input.repoRoot, input.env);
+  const view = parseGithubReleaseView(raw);
+  for (const asset of view.assets ?? []) {
+    if (!asset.name || asset.name === STAGING_MANIFEST_NAME) continue;
+    await mustRun(input.runner, "gh", ["release", "delete-asset", STAGING_CHANNEL_TAG, asset.name, "--repo", repoSlug, "--yes"], input.repoRoot, input.env);
+  }
+}
+
+interface StagingRelease {
+  tag: string;
+  createdAt: string;
+}
+
+function parseStagingReleaseList(raw: string): StagingRelease[] {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (Array.isArray(parsed)) {
+      return parsed.flatMap((item) => {
+        if (typeof item !== "object" || item === null) return [];
+        const record = item as { tagName?: unknown; tag_name?: unknown; createdAt?: unknown; created_at?: unknown };
+        const tag = typeof record.tagName === "string"
+          ? record.tagName
+          : typeof record.tag_name === "string"
+            ? record.tag_name
+            : "";
+        const createdAt = typeof record.createdAt === "string"
+          ? record.createdAt
+          : typeof record.created_at === "string"
+            ? record.created_at
+            : "";
+        return /^v\d+\.\d+\.\d+-staging\.\d+$/.test(tag) ? [{ tag, createdAt }] : [];
+      });
+    }
+  } catch {
+    // Fall through to parsing gh's tabular output, which is easier to mock in tests.
+  }
+
+  return raw.split(/\r?\n/).flatMap((line) => {
+    const columns = line.trim().split("\t");
+    const tag = columns.find((column) => /^v\d+\.\d+\.\d+-staging\.\d+$/.test(column.trim()))?.trim() ?? "";
+    if (!tag) return [];
+    return [{ tag, createdAt: columns.at(-1)?.trim() ?? "" }];
+  });
+}
+
+function compareStagingReleasesDesc(left: StagingRelease, right: StagingRelease): number {
+  const leftTime = Date.parse(left.createdAt);
+  const rightTime = Date.parse(right.createdAt);
+  if (!Number.isNaN(leftTime) || !Number.isNaN(rightTime)) {
+    return (Number.isNaN(rightTime) ? 0 : rightTime) - (Number.isNaN(leftTime) ? 0 : leftTime);
+  }
+  return right.tag.localeCompare(left.tag, undefined, { numeric: true });
+}
+
+async function pruneOldStagingPrereleases(input: ReleaseShipInput, repoSlug: string, protectedTag: string): Promise<void> {
+  const raw = await mustRun(input.runner, "gh", ["release", "list", "--repo", repoSlug, "--limit", "100", "--json", "tagName,createdAt"], input.repoRoot, input.env);
+  const byTag = new Map(parseStagingReleaseList(raw).map((release) => [release.tag, release]));
+  if (!byTag.has(protectedTag)) {
+    byTag.set(protectedTag, { tag: protectedTag, createdAt: new Date().toISOString() });
+  }
+  const releases = [...byTag.values()].sort(compareStagingReleasesDesc);
+  const keep = new Set(releases.slice(0, STAGING_RETENTION_COUNT).map((release) => release.tag));
+  keep.add(protectedTag);
+  for (const release of releases) {
+    if (keep.has(release.tag)) continue;
+    await mustRun(input.runner, "gh", ["release", "delete", release.tag, "--repo", repoSlug, "--cleanup-tag", "--yes"], input.repoRoot, input.env);
+  }
+}
+
+async function rollbackStagingRelease(input: ReleaseShipInput, version: string): Promise<ReleaseShipResult> {
+  if (releaseEnvironment(input.environment) !== "staging") {
+    throw new Error("--rollback-to is only supported with --staging.");
+  }
+  await assertCleanGitWorktree(input.repoRoot, input.runner, input.env);
+  const normalizedVersion = version.replace(/^v/, "");
+  const releaseTag = stagingTag(normalizedVersion);
+  const releaseDir = releaseOutputDir(input.repoRoot, "staging");
+  mkdirSync(releaseDir, { recursive: true });
+  const latestJson = join(releaseDir, STAGING_MANIFEST_NAME);
+  rmSync(latestJson, { force: true });
+
+  const remoteUrl = await mustRun(input.runner, "git", ["remote", "get-url", "origin"], input.repoRoot, input.env);
+  const repoSlug = releaseRepoSlug(remoteUrl);
+  const releaseView = await input.runner.run("gh", ["release", "view", releaseTag, "--repo", repoSlug], {
+    cwd: input.repoRoot,
+    env: input.env
+  });
+  if (releaseView.exitCode !== 0) {
+    throw new Error(`Staging prerelease not found: ${releaseTag}`);
+  }
+  if (!input.dryRun) {
+    const download = await input.runner.run("gh", ["release", "download", releaseTag, "--repo", repoSlug, "--pattern", STAGING_MANIFEST_NAME, "--dir", releaseDir, "--clobber"], {
+      cwd: input.repoRoot,
+      env: input.env
+    });
+    if (download.exitCode !== 0) {
+      throw new Error(`Staging manifest asset not found on ${releaseTag}: ${STAGING_MANIFEST_NAME}`);
+    }
+    if (!existsSync(latestJson)) throw new Error(`Staging manifest asset not found on ${releaseTag}: ${STAGING_MANIFEST_NAME}`);
+    await ensureStagingGithubRelease(input, repoSlug);
+    await mustRun(input.runner, "gh", ["release", "upload", STAGING_CHANNEL_TAG, latestJson, "--repo", repoSlug, "--clobber"], input.repoRoot, input.env);
+  }
+  return { version: normalizedVersion, dmgPaths: [], updaterPaths: [], latestJson };
 }
 
 async function resolveBazelOutput(input: ReleaseShipInput, target: string): Promise<string> {
@@ -224,6 +382,9 @@ export async function createUpdaterBundle(input: ReleaseShipInput, bundleSource:
 
 export async function shipRelease(input: ReleaseShipInput): Promise<ReleaseShipResult> {
   const environment = releaseEnvironment(input.environment);
+  if (input.rollbackTo) {
+    return rollbackStagingRelease(input, input.rollbackTo);
+  }
   if (input.release && input.archLabels.length !== 2) {
     throw new Error("updater releases must include both arm64 and x86_64 artifacts");
   }
@@ -233,7 +394,10 @@ export async function shipRelease(input: ReleaseShipInput): Promise<ReleaseShipR
   await assertCleanGitWorktree(input.repoRoot, input.runner, input.env);
 
   const sourceVersion = readCurrentVersion(input.repoRoot);
-  const version = bumpVersion(sourceVersion, input.bump);
+  const baseVersion = bumpVersion(sourceVersion, input.bump);
+  const version = environment === "staging"
+    ? await resolveNextStagingVersion(input, baseVersion)
+    : baseVersion;
 
   const bazelArgs = [input.dryRun ? "-c" : "--config=notarize", input.dryRun ? "opt" : "-c", ...(input.dryRun ? [] : ["opt"])];
   const targets = input.archLabels.flatMap((label) => [bazelTargetForLabel(label, input.dryRun, environment), updaterBundleTargetForLabel(label, environment)]);
@@ -257,7 +421,7 @@ export async function shipRelease(input: ReleaseShipInput): Promise<ReleaseShipR
   const remoteUrl = await mustRun(input.runner, "git", ["remote", "get-url", "origin"], input.repoRoot, input.env);
   const repoSlug = releaseRepoSlug(remoteUrl);
   const downloadBase = environment === "staging"
-    ? `https://github.com/${repoSlug}/releases/download/desktop-staging`
+    ? `https://github.com/${repoSlug}/releases/download/v${version}`
     : `https://github.com/${repoSlug}/releases/download/v${version}`;
 
   for (const label of input.archLabels) {
@@ -278,7 +442,7 @@ export async function shipRelease(input: ReleaseShipInput): Promise<ReleaseShipR
     };
   }
 
-  const latestJson = join(releaseDir, environment === "staging" ? "latest-staging.json" : "latest.json");
+  const latestJson = join(releaseDir, environment === "staging" ? STAGING_MANIFEST_NAME : "latest.json");
   const notes = input.release && environment === "production"
     ? await mustRun(input.runner, "gh", ["api", `repos/${releaseRepoSlug(remoteUrl)}/releases/generate-notes`, "-X", "POST", "-f", `tag_name=v${version}`, "-f", "target_commitish=main", "--jq", ".body"], input.repoRoot, input.env)
     : environment === "staging"
@@ -288,8 +452,28 @@ export async function shipRelease(input: ReleaseShipInput): Promise<ReleaseShipR
   writeLatestJson(latestJson, version, notes, pubDate, platforms);
 
   if (input.release && environment === "staging") {
+    const targetCommit = await mustRun(input.runner, "git", ["rev-parse", "HEAD"], input.repoRoot, input.env);
+    await mustRun(input.runner, "gh", [
+      "release",
+      "create",
+      `v${version}`,
+      "--repo",
+      repoSlug,
+      "--title",
+      `Kanna Staging v${version}`,
+      "--notes",
+      notes,
+      "--target",
+      targetCommit,
+      "--prerelease",
+      ...dmgPaths,
+      ...updaterPaths,
+      latestJson
+    ], input.repoRoot, input.env);
     await ensureStagingGithubRelease(input, repoSlug);
-    await mustRun(input.runner, "gh", ["release", "upload", "desktop-staging", ...dmgPaths, ...updaterPaths, latestJson, "--repo", repoSlug, "--clobber"], input.repoRoot, input.env);
+    await mustRun(input.runner, "gh", ["release", "upload", STAGING_CHANNEL_TAG, latestJson, "--repo", repoSlug, "--clobber"], input.repoRoot, input.env);
+    await pruneStagingChannelAssets(input, repoSlug);
+    await pruneOldStagingPrereleases(input, repoSlug, `v${version}`);
   } else if (input.release) {
     await mustRun(input.runner, "git", ["add", "-f", "VERSION", "apps/desktop/src-tauri/tauri.conf.json", "apps/desktop/src-tauri/Cargo.toml", "apps/desktop/src-tauri/Cargo.lock"], input.repoRoot, input.env);
     await mustRun(input.runner, "git", ["commit", "-m", `release: v${version}`], input.repoRoot, input.env);
