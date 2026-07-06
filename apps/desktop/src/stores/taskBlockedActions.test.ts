@@ -1,43 +1,20 @@
-import { ref } from "vue";
+import { computed, ref } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { DbHandle, PipelineItem, Repo } from "../types/kanna";
-import { listBlockedByItem, listBlockersForItem } from "@kanna/db";
+import type { PipelineItem, Repo } from "../types/kanna";
 import { createTaskBlockedActions } from "./taskBlockedActions";
 import type { StoreContext } from "./state";
 
-const mocks = vi.hoisted(() => {
-  const invokeMock = vi.fn(async () => undefined);
-  const updatePipelineItemActivityMock = vi.fn(async () => {});
-  const updatePipelineItemTagsMock = vi.fn(async () => {});
-  const listBlockersForItemMock = vi.fn(async () => []);
-  return {
-    invokeMock,
-    updatePipelineItemActivityMock,
-    updatePipelineItemTagsMock,
-    listBlockersForItemMock,
-  };
-});
-
-vi.mock("../invoke", () => ({
-  invoke: mocks.invokeMock,
+const mocks = vi.hoisted(() => ({
+  blockDesktopTask: vi.fn(async () => {}),
+  unblockDesktopTask: vi.fn(async () => {}),
 }));
 
-vi.mock("@kanna/" + "db", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../types/kanna")>();
-  return {
-    ...actual,
-    getRepo: vi.fn(async () => null),
-    hasCircularDependency: vi.fn(async () => false),
-    insertTaskBlocker: vi.fn(async () => {}),
-    listBlockedByItem: vi.fn(async () => []),
-    listBlockersForItem: mocks.listBlockersForItemMock,
-    removeTaskBlocker: vi.fn(async () => {}),
-    updatePipelineItemActivity: mocks.updatePipelineItemActivityMock,
-    updatePipelineItemTags: mocks.updatePipelineItemTagsMock,
-  };
-});
+vi.mock("../services/desktopServerClient", () => ({
+  blockDesktopTask: mocks.blockDesktopTask,
+  unblockDesktopTask: mocks.unblockDesktopTask,
+}));
 
-function makeItem(overrides: Partial<PipelineItem> = {}): PipelineItem {
+function item(overrides: Partial<PipelineItem> = {}): PipelineItem {
   return {
     id: "task-1",
     repo_id: "repo-1",
@@ -48,7 +25,7 @@ function makeItem(overrides: Partial<PipelineItem> = {}): PipelineItem {
     stage: "in progress",
     stage_result: null,
     active_post_action: null,
-    tags: JSON.stringify(["blocked"]),
+    tags: "[]",
     pr_number: null,
     pr_url: null,
     branch: "task-task-1",
@@ -73,326 +50,94 @@ function makeItem(overrides: Partial<PipelineItem> = {}): PipelineItem {
   };
 }
 
-function makeContext(): StoreContext {
-  const db = {
-    select: vi.fn(async () => []),
-    execute: vi.fn(async () => undefined),
-  } as unknown as DbHandle;
-
+function repo(overrides: Partial<Repo> = {}): Repo {
   return {
-    state: {
-      db: ref(db),
-      repos: ref<Repo[]>([]),
-      items: ref<PipelineItem[]>([]),
-      initialWindowBootstrap: ref(null),
-      selectedRepoId: ref(null),
-      selectedItemId: ref(null),
-      lastSelectedItemByRepo: ref({}),
-      suspendAfterMinutes: ref(5),
-      killAfterMinutes: ref(30),
-      ideCommand: ref("code"),
-      hideShortcutsOnStartup: ref(false),
-      devLingerTerminals: ref(false),
-      appTheme: ref("system"),
-      codeTheme: ref("github-dark"),
-      agentMessageAppearance: ref("terminal"),
-      lastHiddenRepoId: ref(null),
-      pendingSetupIds: ref([]),
-      pipelineCache: new Map(),
-      agentCache: new Map(),
-      stageOrderCache: new Map(),
-      pendingCreateVisibility: new Map(),
-    },
-    services: {
-      reloadSnapshot: vi.fn(async () => {}),
-    },
-    toast: {
-      success: vi.fn(),
-      error: vi.fn(),
-      info: vi.fn(),
-    },
-    tt: (key: string) => key,
-    requireDb: () => db,
+    id: "repo-1",
+    path: "/repo",
+    name: "Repo",
+    default_branch: "main",
+    hidden: 0,
+    sort_order: 0,
+    created_at: "2026-06-30T00:00:00.000Z",
+    last_opened_at: "2026-06-30T00:00:00.000Z",
+    ...overrides,
   };
 }
 
-function decode(data: unknown): string {
-  return new TextDecoder().decode(new Uint8Array(data as number[]));
+function context(items: PipelineItem[] = [item()]): StoreContext {
+  const repos = [repo()];
+  const reloadSnapshot = vi.fn(async () => {});
+  const invalidateSharedData = vi.fn(async () => {});
+  const selectItem = vi.fn(async () => {});
+  return {
+    state: {
+      items: ref(items),
+      repos: ref(repos),
+      taskBlockers: ref([]),
+      selectedRepoId: ref("repo-1"),
+      selectedItemId: ref("task-1"),
+    } as unknown as StoreContext["state"],
+    services: {
+      currentItem: computed(() => items[0] ?? null),
+      selectedRepo: computed(() => repos[0] ?? null),
+      isItemHidden: (candidate: PipelineItem) => candidate.closed_at !== null,
+      reloadSnapshot,
+      selectItem,
+      windowWorkspace: {
+        invalidateSharedData,
+      } as unknown as StoreContext["services"]["windowWorkspace"],
+    },
+    toast: {
+      error: vi.fn(),
+      warning: vi.fn(),
+      info: vi.fn(),
+      dismiss: vi.fn(),
+      toasts: ref([]),
+    } as unknown as StoreContext["toast"],
+    requireDb: () => {
+      throw new Error("blocker actions must not use direct DB writes");
+    },
+    tt: (key: string) => key,
+  } as StoreContext;
 }
 
 describe("createTaskBlockedActions", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    mocks.blockDesktopTask.mockClear();
+    mocks.unblockDesktopTask.mockClear();
   });
 
-  it("submits blocked resume prompts to Claude with terminal enter", async () => {
-    const actions = createTaskBlockedActions(makeContext(), {} as never);
-    const blocked = makeItem({ agent_provider: "claude", port_env: "{}" });
-    const blocker = makeItem({
-      id: "blocker-1",
-      tags: "[]",
-      branch: "task-blocker-1",
-      closed_at: "2026-06-30T00:00:00.000Z",
-      display_name: "Dependency",
-    });
+  it("blocks the current task through the server", async () => {
+    const ctx = context();
+    const actions = createTaskBlockedActions(ctx);
 
-    await (actions.restoreUnblockedTask as (item: PipelineItem, blockers: PipelineItem[]) => Promise<void>)(blocked, [blocker]);
+    await actions.blockTask(["blocker-1"]);
 
-    const sendInputCall = mocks.invokeMock.mock.calls.find(([command]) => command === "send_input");
-    expect(sendInputCall?.[1]).toMatchObject({ sessionId: "task-1" });
-    expect(decode(sendInputCall?.[1]?.data)).toBe(
-      "\x1b[200~This task was previously blocked by the following tasks, which have now completed:\n"
-        + "- Dependency (branch: task-blocker-1)\n"
-        + "Their changes may be on branches that haven't merged to main yet.\n"
-        + "Bring their work into this branch if relevant: `git fetch origin`, then merge or rebase onto the listed branch (or onto the default branch if their PR already merged).\n"
-        + "Please continue this task using that context.\x1b[201~\r",
-    );
+    expect(mocks.blockDesktopTask).toHaveBeenCalledWith("task-1", ["blocker-1"]);
+    expect(ctx.services.reloadSnapshot).toHaveBeenCalled();
+    expect(ctx.services.windowWorkspace?.invalidateSharedData).toHaveBeenCalledWith("blockTask");
+    expect(ctx.services.selectItem).toHaveBeenCalledWith("task-1");
   });
 
-  it("submits blocked resume prompts to Codex with the terminal Enter sequence", async () => {
-    const actions = createTaskBlockedActions(makeContext(), {} as never);
-    const blocked = makeItem({ agent_provider: "codex", port_env: "{}" });
-    const blocker = makeItem({
-      id: "blocker-1",
-      tags: "[]",
-      branch: "task-blocker-1",
-      closed_at: "2026-06-30T00:00:00.000Z",
-      display_name: "Dependency",
-    });
+  it("replaces blockers through the server block action", async () => {
+    const ctx = context();
+    const actions = createTaskBlockedActions(ctx);
 
-    await (actions.restoreUnblockedTask as (item: PipelineItem, blockers: PipelineItem[]) => Promise<void>)(blocked, [blocker]);
+    await actions.editBlockedTask("task-1", ["blocker-2"]);
 
-    const sendInputCalls = mocks.invokeMock.mock.calls.filter(([command]) => command === "send_input");
-    expect(sendInputCalls.map(([, args]) => ({
-      sessionId: args?.sessionId,
-      data: decode(args?.data),
-    }))).toEqual([
-      {
-        sessionId: "task-1",
-        data: "This task was previously blocked by the following tasks, which have now completed:\n"
-          + "- Dependency (branch: task-blocker-1)\n"
-          + "Their changes may be on branches that haven't merged to main yet.\n"
-          + "Bring their work into this branch if relevant: `git fetch origin`, then merge or rebase onto the listed branch (or onto the default branch if their PR already merged).\n"
-          + "Please continue this task using that context.",
-      },
-      {
-        sessionId: "task-1",
-        data: "\x1b[13u",
-      },
-    ]);
+    expect(mocks.blockDesktopTask).toHaveBeenCalledWith("task-1", ["blocker-2"]);
+    expect(mocks.unblockDesktopTask).not.toHaveBeenCalled();
+    expect(ctx.services.reloadSnapshot).toHaveBeenCalled();
   });
 
-  it("starts a dormant branch-only blocked task instead of sending input to a missing session", async () => {
-    const repo: Repo = {
-      id: "repo-1",
-      path: "/repo",
-      name: "Repo",
-      default_branch: "main",
-      remote_url: null,
-      remote_url_hash: null,
-      hidden: 0,
-      sort_order: 0,
-      created_at: "2026-06-30T00:00:00.000Z",
-      last_opened_at: "2026-06-30T00:00:00.000Z",
-    };
-    const spawnPtySession = vi.fn(async () => {});
-    const context = makeContext();
-    context.state.repos.value = [repo];
-    context.services.getAgentProviderAvailability = vi.fn(async () => ({
-      claude: true,
-      copilot: false,
-      codex: false,
-      opencode: false,
-      antigravity: false,
-    }));
-    context.services.spawnPtySession = spawnPtySession;
-    const ports = {
-      claimTaskPorts: vi.fn(async () => ({ portEnv: {}, firstPort: null })),
-    };
-    const blocker = makeItem({
-      id: "blocker-1",
-      tags: "[]",
-      branch: "task-blocker-1",
-      closed_at: "2026-06-30T00:00:00.000Z",
-      display_name: "Dependency",
-    });
-    mocks.listBlockersForItemMock.mockResolvedValue([blocker]);
-    mocks.invokeMock.mockImplementation(async (command: string) => {
-      if (command === "file_exists") return false;
-      if (command === "git_default_branch") return "main";
-      if (command === "read_text_file") return "";
-      return undefined;
-    });
+  it("clears blockers through the server unblock action", async () => {
+    const ctx = context();
+    const actions = createTaskBlockedActions(ctx);
 
-    const actions = createTaskBlockedActions(context, ports as never);
-    const dormant = makeItem({
-      branch: "task-task-1",
-      agent_session_id: null,
-      port_env: null,
-    });
+    await actions.editBlockedTask("task-1", []);
 
-    await actions.restoreUnblockedTask(dormant, [blocker]);
-
-    expect(mocks.invokeMock).not.toHaveBeenCalledWith("send_input", expect.anything());
-    expect(spawnPtySession).toHaveBeenCalledWith(
-      "task-1",
-      "/repo/.kanna-worktrees/task-task-1",
-      expect.stringContaining("Original task:\nShip it"),
-      80,
-      24,
-      expect.objectContaining({ agentProvider: "claude" }),
-    );
-    expect(ports.claimTaskPorts).toHaveBeenCalledWith("task-1", {});
-    expect(mocks.listBlockersForItemMock).toHaveBeenCalledWith(expect.anything(), "task-1");
-  });
-
-  it("resume message carries the blocker's renamed branch resolved from its worktree", async () => {
-    const repo: Repo = {
-      id: "repo-1",
-      path: "/repo",
-      name: "Repo",
-      default_branch: "main",
-      remote_url: null,
-      remote_url_hash: null,
-      hidden: 0,
-      sort_order: 0,
-      created_at: "2026-06-30T00:00:00.000Z",
-      last_opened_at: "2026-06-30T00:00:00.000Z",
-    };
-    const context = makeContext();
-    context.state.repos.value = [repo];
-    mocks.invokeMock.mockImplementation(async (command: string, args?: { repoPath?: string }) => {
-      if (command === "git_current_branch") {
-        expect(args?.repoPath).toBe("/repo/.kanna-worktrees/task-blocker-1");
-        return "feat/blocker-renamed";
-      }
-      return undefined;
-    });
-
-    const actions = createTaskBlockedActions(context, {} as never);
-    const blocked = makeItem({ agent_provider: "claude", port_env: "{}" });
-    const blocker = makeItem({
-      id: "blocker-1",
-      tags: "[]",
-      branch: "task-blocker-1",
-      closed_at: "2026-06-30T00:00:00.000Z",
-      display_name: "Dependency",
-    });
-
-    await (actions.restoreUnblockedTask as (item: PipelineItem, blockers: PipelineItem[]) => Promise<void>)(blocked, [blocker]);
-
-    const sendInputCall = mocks.invokeMock.mock.calls.find(([command]) => command === "send_input");
-    const message = decode(sendInputCall?.[1]?.data);
-    expect(message).toContain("- Dependency (branch: feat/blocker-renamed)");
-    expect(message).not.toContain("task-blocker-1");
-  });
-
-  it("bases a dormant task's fresh worktree on the blocker's live branch", async () => {
-    const repo: Repo = {
-      id: "repo-1",
-      path: "/repo",
-      name: "Repo",
-      default_branch: "main",
-      remote_url: null,
-      remote_url_hash: null,
-      hidden: 0,
-      sort_order: 0,
-      created_at: "2026-06-30T00:00:00.000Z",
-      last_opened_at: "2026-06-30T00:00:00.000Z",
-    };
-    const spawnPtySession = vi.fn(async () => {});
-    const context = makeContext();
-    context.state.repos.value = [repo];
-    context.services.getAgentProviderAvailability = vi.fn(async () => ({
-      claude: true,
-      copilot: false,
-      codex: false,
-      opencode: false,
-      antigravity: false,
-    }));
-    context.services.spawnPtySession = spawnPtySession;
-    const ports = {
-      claimTaskPorts: vi.fn(async () => ({ portEnv: {}, firstPort: null })),
-    };
-    const blocker = makeItem({
-      id: "blocker-1",
-      tags: "[]",
-      branch: "task-blocker-1",
-      closed_at: "2026-06-30T00:00:00.000Z",
-      display_name: "Dependency",
-    });
-    mocks.listBlockersForItemMock.mockResolvedValue([blocker]);
-    mocks.invokeMock.mockImplementation(async (command: string) => {
-      if (command === "file_exists") return false;
-      if (command === "git_current_branch") return "feat/blocker-renamed";
-      if (command === "read_text_file") return "";
-      return undefined;
-    });
-
-    const actions = createTaskBlockedActions(context, ports as never);
-    const dormant = makeItem({
-      branch: "task-task-1",
-      agent_session_id: null,
-      port_env: null,
-    });
-
-    await actions.restoreUnblockedTask(dormant, [blocker]);
-
-    expect(mocks.invokeMock).toHaveBeenCalledWith("git_worktree_add", {
-      repoPath: "/repo",
-      branch: "task-task-1",
-      path: "/repo/.kanna-worktrees/task-task-1",
-      startPoint: "feat/blocker-renamed",
-    });
-    expect(mocks.invokeMock).not.toHaveBeenCalledWith("git_fetch", expect.anything());
-    expect(spawnPtySession).toHaveBeenCalledWith(
-      "task-1",
-      "/repo/.kanna-worktrees/task-task-1",
-      expect.stringContaining("(branch: feat/blocker-renamed)"),
-      80,
-      24,
-      expect.objectContaining({ agentProvider: "claude" }),
-    );
-  });
-
-  it("checkUnblocked optimistically restores dependents of a blocker parked at pr with a PR", async () => {
-    const actions = createTaskBlockedActions(makeContext(), {} as never);
-    const blocked = makeItem({ agent_provider: "claude", port_env: "{}" });
-    const prParkedBlocker = makeItem({
-      id: "blocker-1",
-      tags: "[]",
-      branch: "task-blocker-1",
-      stage: "pr",
-      pr_url: "https://github.com/acme/repo/pull/7",
-      closed_at: null,
-      display_name: "Dependency",
-    });
-    vi.mocked(listBlockedByItem).mockResolvedValue([blocked]);
-    mocks.listBlockersForItemMock.mockResolvedValue([prParkedBlocker]);
-
-    await actions.checkUnblocked("blocker-1");
-
-    const sendInputCall = mocks.invokeMock.mock.calls.find(([command]) => command === "send_input");
-    expect(sendInputCall?.[1]).toMatchObject({ sessionId: "task-1" });
-  });
-
-  it("checkUnblocked keeps dependents blocked while an open blocker has no PR", async () => {
-    const actions = createTaskBlockedActions(makeContext(), {} as never);
-    const blocked = makeItem({ agent_provider: "claude", port_env: "{}" });
-    const openBlocker = makeItem({
-      id: "blocker-1",
-      tags: "[]",
-      branch: "task-blocker-1",
-      stage: "pr",
-      pr_url: null,
-      closed_at: null,
-      display_name: "Dependency",
-    });
-    vi.mocked(listBlockedByItem).mockResolvedValue([blocked]);
-    mocks.listBlockersForItemMock.mockResolvedValue([openBlocker]);
-
-    await actions.checkUnblocked("blocker-1");
-
-    expect(mocks.invokeMock).not.toHaveBeenCalledWith("send_input", expect.anything());
+    expect(mocks.unblockDesktopTask).toHaveBeenCalledWith("task-1");
+    expect(mocks.blockDesktopTask).not.toHaveBeenCalled();
+    expect(ctx.services.reloadSnapshot).toHaveBeenCalled();
   });
 });

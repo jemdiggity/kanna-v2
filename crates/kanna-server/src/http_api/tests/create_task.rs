@@ -315,7 +315,7 @@ async fn create_task_route_persists_display_name_alias_and_returns_it_as_title()
 }
 
 #[tokio::test]
-async fn create_task_route_ignores_stage_override_and_starts_pipeline_first_stage() {
+async fn create_task_route_preserves_stage_override_for_transferred_tasks() {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
@@ -381,10 +381,10 @@ async fn create_task_route_ignores_stage_override_and_starts_pipeline_first_stag
         let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
         let session_id = match command {
             DaemonCommand::SpawnAgent { session_id, params } => {
-                assert_eq!(params.prompt, "Implement this first: Ship safely");
+                assert_eq!(params.prompt, "Ship safely");
                 let system_prompt = params.system_prompt.expect("system prompt");
-                assert!(system_prompt.contains("stage `in progress`"));
-                assert!(!system_prompt.contains("stage `pr`"));
+                assert!(system_prompt.contains("stage `pr`"));
+                assert!(!system_prompt.contains("stage `in progress`"));
                 session_id
             }
             other => panic!("expected SpawnAgent command, got {:?}", other),
@@ -449,11 +449,11 @@ async fn create_task_route_ignores_stage_override_and_starts_pipeline_first_stag
         .await
         .unwrap();
     let created: CreateTaskResponse = from_slice(&body).unwrap();
-    assert_eq!(created.stage, "in progress");
+    assert_eq!(created.stage, "pr");
 
     let db = Db::open(&config.db_path).unwrap();
     let created_source = db.get_task_stage_source(&created.task_id).unwrap().unwrap();
-    assert_eq!(created_source.stage.as_deref(), Some("in progress"));
+    assert_eq!(created_source.stage.as_deref(), Some("pr"));
 
     daemon_server.await.unwrap();
     let _ = std::fs::remove_file(&socket_path);

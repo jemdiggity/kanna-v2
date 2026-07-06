@@ -199,6 +199,7 @@ pub struct NewPipelineItem<'a> {
     pub activity: &'a str,
     pub port_offset: Option<i64>,
     pub port_env_json: Option<&'a str>,
+    pub agent_spawn_options_json: Option<&'a str>,
     pub base_ref: Option<&'a str>,
     pub notify_task_id: Option<&'a str>,
     pub parent_task_id: Option<&'a str>,

@@ -11,15 +11,18 @@ const mockState = vi.hoisted(() => {
   const insertOperatorEventMock = vi.fn(async () => {});
   const setSettingMock = vi.fn(async () => {});
   const updatePipelineItemActivityMock = vi.fn(async () => {});
+  const markDesktopTaskReadMock = vi.fn(async () => {});
 
   return {
     insertOperatorEventMock,
     setSettingMock,
     updatePipelineItemActivityMock,
+    markDesktopTaskReadMock,
     reset() {
       insertOperatorEventMock.mockClear();
       setSettingMock.mockClear();
       updatePipelineItemActivityMock.mockClear();
+      markDesktopTaskReadMock.mockClear();
     },
   };
 });
@@ -28,6 +31,10 @@ vi.mock("@kanna/" + "db", () => ({
   insertOperatorEvent: mockState.insertOperatorEventMock,
   setSetting: mockState.setSettingMock,
   updatePipelineItemActivity: mockState.updatePipelineItemActivityMock,
+}));
+
+vi.mock("../services/desktopServerClient", () => ({
+  markDesktopTaskRead: mockState.markDesktopTaskReadMock,
 }));
 
 function createDb(): DbHandle {
@@ -180,11 +187,8 @@ describe("createSelectionApi", () => {
     await api.selectItem("task-1");
     await vi.advanceTimersByTimeAsync(1000);
 
-    expect(mockState.updatePipelineItemActivityMock).toHaveBeenCalledWith(
-      expect.anything(),
-      "task-1",
-      "idle",
-    );
+    expect(mockState.markDesktopTaskReadMock).toHaveBeenCalledWith("task-1");
+    expect(mockState.updatePipelineItemActivityMock).not.toHaveBeenCalled();
     expect(reloadSnapshot).toHaveBeenCalled();
     expect(invalidateSharedData).toHaveBeenCalledWith("taskActivity");
   });
