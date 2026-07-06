@@ -1,5 +1,4 @@
 import type { DbHandle, PipelineItem, TaskBlocker } from "../types/kanna";
-import { closePipelineItem, updatePipelineItemActivity } from "@kanna/db";
 import { invoke } from "../invoke";
 import { isTauri } from "../tauri-mock";
 import { listen } from "../listen";
@@ -201,10 +200,15 @@ export function createInitApi(
     }
 
     const workingItems = eagerItems.filter((item) => item.activity === "working");
+    let changedStartupActivity = false;
     for (const item of workingItems) {
-      await updatePipelineItemActivity(context.requireDb(), item.id, "unread");
+      const response = await applyDesktopTaskRuntimeStatus(item.id, {
+        status: "idle",
+        selected: false,
+      });
+      changedStartupActivity = changedStartupActivity || response.activity != null;
     }
-    if (workingItems.length > 0) {
+    if (changedStartupActivity) {
       await refreshStartupSnapshot();
     }
 
@@ -223,7 +227,7 @@ export function createInitApi(
         const exists = await invoke<boolean>("file_exists", { path: worktreePath });
         if (!exists) {
           console.warn(`[store] closing orphaned task ${item.id}: worktree missing at ${worktreePath}`);
-          await ports.closeTaskAndReleasePorts(item.id, (id) => closePipelineItem(context.requireDb(), id));
+          await ports.closeTaskAndReleasePorts(item.id, closeDesktopTask);
           item.closed_at = new Date().toISOString();
           closedOrphan = true;
         }

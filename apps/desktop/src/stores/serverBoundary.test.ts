@@ -11,30 +11,6 @@ const ALLOWED_DB_BOUNDARY_FILES = new Set([
   "stores/taskItemActions.ts",
 ]);
 
-const TEMPORARY_PHASE_2_DIRECT_DB_FILES = new Set([
-  "stores/init.ts",
-  "stores/ports.ts",
-  "stores/selection.ts",
-  "stores/sessions.ts",
-]);
-
-const PHASE_2_SERVER_ENDPOINTS_BY_FILE: Record<string, string[]> = {
-  "stores/init.ts": [
-    "applyDesktopTaskRuntimeStatus",
-    "closeDesktopTask",
-  ],
-  "stores/ports.ts": [
-    "claimDesktopTaskPorts",
-    "releaseDesktopTaskPorts",
-  ],
-  "stores/selection.ts": [
-    "markDesktopTaskRead",
-  ],
-  "stores/sessions.ts": [
-    "applyDesktopTaskRuntimeStatus",
-  ],
-};
-
 function databaseBoundaryViolations(source: string): string[] {
   const violations: string[] = [];
   const databasePackage = ["@kanna", "db"].join("/");
@@ -99,26 +75,10 @@ describe("desktop server boundary", () => {
       const rel = relative(SRC_ROOT, file);
       if (rel === "stores/serverBoundary.test.ts") continue;
       if (ALLOWED_DB_BOUNDARY_FILES.has(rel)) continue;
-      if (TEMPORARY_PHASE_2_DIRECT_DB_FILES.has(rel)) continue;
       const source = readFileSync(file, "utf8");
       const reasons = databaseBoundaryViolations(source);
       if (reasons.length > 0) {
         violations.push({ file: rel, reasons });
-      }
-    }
-
-    expect(violations).toEqual([]);
-  });
-
-  it("does not route Phase 2-owned task activity, close, or port writes through desktop server endpoints", () => {
-    const violations: Array<{ file: string; endpoint: string }> = [];
-
-    for (const [rel, endpoints] of Object.entries(PHASE_2_SERVER_ENDPOINTS_BY_FILE)) {
-      const source = readFileSync(resolve(SRC_ROOT, rel), "utf8");
-      for (const endpoint of endpoints) {
-        if (source.includes(endpoint)) {
-          violations.push({ file: rel, endpoint });
-        }
       }
     }
 

@@ -14,7 +14,6 @@ import {
   Legend,
   Filler,
 } from "chart.js";
-import type { DbHandle } from "../types/kanna";
 import { useAnalytics } from "../composables/useAnalytics";
 import { getChartTheme } from "../theme/theme";
 import { useThemeRuntime } from "../theme/runtime";
@@ -24,7 +23,6 @@ ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Title, T
 const { zIndex } = useModalZIndex();
 
 const props = defineProps<{
-  db: DbHandle | null;
   repoId: string | null;
 }>();
 const emit = defineEmits<{ (e: "close"): void }>();
@@ -45,7 +43,7 @@ const {
   loading,
   operatorMetrics,
   hasOperatorData,
-} = useAnalytics(toRef(props, "db"), toRef(props, "repoId"));
+} = useAnalytics(toRef(props, "repoId"));
 
 const overlayRef = ref<HTMLDivElement | null>(null);
 

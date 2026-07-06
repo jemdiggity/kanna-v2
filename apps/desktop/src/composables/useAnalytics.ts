@@ -1,5 +1,4 @@
 import { ref, computed, watch, type Ref } from "vue";
-import type { DbHandle } from "../types/kanna";
 import { fetchDesktopRepoAnalytics, type DesktopAnalyticsBucketSize } from "../services/desktopServerClient";
 
 interface TaskBucket {
@@ -17,7 +16,7 @@ interface OperatorMetrics {
 
 type BucketSize = DesktopAnalyticsBucketSize;
 
-export function useAnalytics(db: Ref<DbHandle | null>, repoId: Ref<string | null>) {
+export function useAnalytics(repoId: Ref<string | null>) {
   const taskBuckets = ref<TaskBucket[]>([]);
   const bucketSize = ref<BucketSize>("daily");
   const hasData = ref(false);
@@ -51,7 +50,7 @@ export function useAnalytics(db: Ref<DbHandle | null>, repoId: Ref<string | null
   }
 
   async function refresh() {
-    if (!db.value || !repoId.value) {
+    if (!repoId.value) {
       hasData.value = false;
       taskBuckets.value = [];
       avgTimeInState.value = { working: 0, idle: 0, unread: 0 };
@@ -84,7 +83,7 @@ export function useAnalytics(db: Ref<DbHandle | null>, repoId: Ref<string | null
     }
   }
 
-  watch([db, repoId], refresh, { immediate: true });
+  watch(repoId, refresh, { immediate: true });
 
   return {
     taskBuckets,
