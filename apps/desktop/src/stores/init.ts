@@ -257,6 +257,8 @@ export function createInitApi(
         type AppBuildInfoResponse = Omit<AppBuildInfo, "commitHash"> & {
           commitHash?: string;
           commit_hash?: string;
+          taskId?: string;
+          task_id?: string;
         };
         const buildInfo = await invoke<AppBuildInfoResponse>("get_app_build_info")
           .catch((error): AppBuildInfoResponse => {
@@ -266,6 +268,7 @@ export function createInitApi(
         const title = formatAppWindowTitle({
           branch: buildInfo.branch,
           commitHash: buildInfo.commitHash ?? buildInfo.commit_hash ?? "",
+          taskId: buildInfo.taskId ?? buildInfo.task_id ?? "",
           worktree: buildInfo.worktree,
           version: buildInfo.version,
         } satisfies AppBuildInfo);

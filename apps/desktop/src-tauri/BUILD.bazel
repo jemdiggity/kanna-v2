@@ -319,6 +319,7 @@ cargo_build_script(
         "DEP_TAURI_DEV": "false",
         "KANNA_BUILD_BRANCH": "",
         "KANNA_BUILD_COMMIT": "",
+        "KANNA_BUILD_TASK_ID": "",
         "KANNA_BUILD_WORKTREE": "",
         "KANNA_VERSION_FILE": "$(location //:VERSION)",
         "TAURI_CONFIG": "{\"bundle\":{\"externalBin\":[],\"resources\":[]}}",
@@ -358,6 +359,7 @@ rust_library(
         "KANNA_BUILD_BRANCH": "",
         "KANNA_BUILD_COMMIT": "",
         "KANNA_BUILD_INFO": "",
+        "KANNA_BUILD_TASK_ID": "",
         "KANNA_BUILD_WORKTREE": "",
     },
     deps = all_crate_deps(
@@ -386,6 +388,7 @@ rust_library(
         "KANNA_BUILD_BRANCH": "",
         "KANNA_BUILD_COMMIT": "",
         "KANNA_BUILD_INFO": "",
+        "KANNA_BUILD_TASK_ID": "",
         "KANNA_BUILD_WORKTREE": "",
     },
     deps = all_crate_deps(

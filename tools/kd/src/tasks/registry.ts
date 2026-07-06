@@ -45,7 +45,7 @@ import {
 import { buildConfigSchemaPages } from "../runtime/pages";
 import { getPortStatuses } from "../runtime/port-status";
 import { nodeCommandRunner, type CommandRunner } from "../runtime/process";
-import { readStagingDesktopAuth } from "../runtime/developer-config";
+import { readDevDesktopAuth, readStagingDesktopAuth } from "../runtime/developer-config";
 import { shipRelease } from "../runtime/release";
 import { buildDesktopSidecars } from "../runtime/sidecars";
 import { checkSetupPrerequisites, installSetupDependencies } from "../runtime/setup";
@@ -67,6 +67,8 @@ export interface DevUpInput {
   daemonDir?: string;
   transferRoot?: string;
   firebaseEnvFrom?: string;
+  staging?: boolean;
+  withCredentials?: boolean;
 }
 
 export type RestartComponent = "desktop" | "mobile" | "backend";
@@ -106,7 +108,9 @@ export const devUpInputSchema = z.object({
   db: z.string().optional(),
   daemonDir: z.string().optional(),
   transferRoot: z.string().optional(),
-  firebaseEnvFrom: z.string().optional()
+  firebaseEnvFrom: z.string().optional(),
+  staging: z.boolean().default(false),
+  withCredentials: z.boolean().default(false)
 });
 
 const devRestartInputSchema = devUpInputSchema.extend({
@@ -288,22 +292,17 @@ export async function executeDevStatus(input: ExecutorInput): Promise<TaskResult
   };
 }
 
-async function executeDevUp(input: DevUpInput): Promise<TaskResult> {
-  const context = await resolveDefaultContext(process.env, {
-    dbOverride: input.db,
-    daemonDirOverride: input.daemonDir,
-    transferRootOverride: input.transferRoot,
-    firebaseEnvFrom: input.firebaseEnvFrom
-  });
-  const dbTarget = devDbTarget(context);
+export async function executeDevUpWithContext(input: DevUpInput, executor: ExecutorInput): Promise<TaskResult> {
+  const dbTarget = devDbTarget(executor.context);
   assertNotProductionDb(dbTarget);
+  const devPorts = requireMobileDeviceDevPorts(executor.context.ports);
 
   if (input.firebaseEnvFrom) {
-    const statuses = await getPortStatuses(nodeCommandRunner, {
-      auth: context.ports.KANNA_FIREBASE_AUTH_PORT,
-      firestore: context.ports.KANNA_FIREBASE_FIRESTORE_PORT,
-      functions: context.ports.KANNA_FIREBASE_FUNCTIONS_PORT,
-      ui: context.ports.KANNA_FIREBASE_UI_PORT
+    const statuses = await getPortStatuses(executor.runner, {
+      auth: devPorts.KANNA_FIREBASE_AUTH_PORT,
+      firestore: devPorts.KANNA_FIREBASE_FIRESTORE_PORT,
+      functions: devPorts.KANNA_FIREBASE_FUNCTIONS_PORT,
+      ui: devPorts.KANNA_FIREBASE_UI_PORT
     });
     const missing = formatMissingFirebaseEmulators(input.firebaseEnvFrom, statuses);
     if (missing) {
@@ -312,34 +311,62 @@ async function executeDevUp(input: DevUpInput): Promise<TaskResult> {
   }
 
   if (input.deleteDb) {
-    await resetSqliteDb(nodeCommandRunner, dbTarget);
+    await resetSqliteDb(executor.runner, dbTarget);
   }
 
-  const emulators = input.emulators || input.remote === true;
-  const firebaseConfigPath = writeFirebaseEmulatorConfig(context.repoRoot, context.ports);
-  writeTauriLocalConfig(context.repoRoot, context.ports.KANNA_DEV_PORT);
+  const env: NodeJS.ProcessEnv = input.staging
+    ? {
+        ...executor.context.env,
+        KANNA_CLOUD_ENV: "staging",
+        KANNA_APP_ENV: executor.context.env.KANNA_APP_ENV ?? "staging"
+      }
+    : executor.context.env;
+  const emulators = input.emulators ||
+    input.remote === true ||
+    (input.withCredentials === true && input.staging !== true && !input.firebaseEnvFrom);
+  const firebaseConfigPath = writeFirebaseEmulatorConfig(executor.context.repoRoot, devPorts);
+  writeTauriLocalConfig(executor.context.repoRoot, devPorts.KANNA_DEV_PORT);
   const plan = buildDevPlan({
-    repoRoot: context.repoRoot,
-    env: context.env,
+    repoRoot: executor.context.repoRoot,
+    env,
+    desktopSecretEnv: desktopCredentialEnv(input, env, input.staging ? "staging" : "dev"),
     mobile: input.mobile,
     emulators,
     firebaseConfigPath,
-    mobileServerUrl: resolveMobileServerUrl(context.env)
+    mobileServerUrl: resolveMobileServerUrl(env)
   });
 
-  await startTmuxSession(nodeCommandRunner, context.tmux, plan.windows);
+  await startTmuxSession(executor.runner, executor.context.tmux, plan.windows);
   if (input.seed) {
-    await seedSqliteDb(nodeCommandRunner, context.repoRoot, context.env.KANNA_DB_PATH ?? "");
+    await seedSqliteDb(executor.runner, executor.context.repoRoot, env.KANNA_DB_PATH ?? "");
   }
   if (input.attach) {
-    await nodeCommandRunner.run("tmux", ["-L", context.tmux.server, "attach", "-t", context.tmux.session]);
+    await executor.runner.run("tmux", ["-L", executor.context.tmux.server, "attach", "-t", executor.context.tmux.session]);
   }
 
   return {
     ok: true,
-    message: `Started tmux session '${context.tmux.session}'.`,
+    message: `Started tmux session '${executor.context.tmux.session}'.`,
     data: { windows: plan.windows.map((window) => window.name), remote: input.remote }
   };
+}
+
+async function executeDevUp(input: DevUpInput): Promise<TaskResult> {
+  const context = await resolveDefaultContext(process.env, {
+    dbOverride: input.db,
+    daemonDirOverride: input.daemonDir,
+    transferRootOverride: input.transferRoot,
+    firebaseEnvFrom: input.firebaseEnvFrom
+  });
+  return executeDevUpWithContext(input, {
+    runner: nodeCommandRunner,
+    context: {
+      repoRoot: context.repoRoot,
+      tmux: context.tmux,
+      ports: context.ports,
+      env: context.env
+    }
+  });
 }
 
 type ResolvedRestartEnvironment = "dev" | "staging" | "production";
@@ -417,8 +444,8 @@ async function buildRestartWindow(
   const plan = buildDevPlan({
     repoRoot: executor.context.repoRoot,
     env,
-    desktopSecretEnv: environment === "staging" && component === "desktop"
-      ? stagingDesktopCredentialEnv(input, env)
+    desktopSecretEnv: component === "desktop"
+      ? desktopCredentialEnv(input, env, environment)
       : undefined,
     mobile: component === "mobile",
     emulators: input.emulators,
@@ -542,7 +569,7 @@ export async function executeProductionMobileUpWithContext(
     const desktopPlan = buildDevPlan({
       repoRoot: executor.context.repoRoot,
       env,
-      desktopSecretEnv: stagingDesktopCredentialEnv(input, env),
+      desktopSecretEnv: desktopCredentialEnv(input, env, "staging"),
       mobile: false,
       emulators: false,
       firebaseConfigPath: "",
@@ -648,9 +675,17 @@ function requireMobileDeviceDevPorts(ports: Partial<KdPorts>): FirebasePortInput
   };
 }
 
-function stagingDesktopCredentialEnv(input: { withCredentials?: boolean }, env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+function desktopCredentialEnv(
+  input: { withCredentials?: boolean },
+  env: NodeJS.ProcessEnv,
+  environment: "dev" | "staging" | "production"
+): NodeJS.ProcessEnv {
   if (!input.withCredentials) return {};
-  const credentials = readStagingDesktopAuth(env.HOME?.trim() || homedir());
+  if (environment === "production") return {};
+  const home = env.HOME?.trim() || homedir();
+  const credentials = environment === "staging"
+    ? readStagingDesktopAuth(home)
+    : readDevDesktopAuth(home);
   return {
     KANNA_DESKTOP_AUTO_SIGN_IN_EMAIL: credentials.email,
     KANNA_DESKTOP_AUTO_SIGN_IN_PASSWORD: credentials.password
@@ -959,7 +994,7 @@ function prepareMobileDeviceLaunch(
     const desktopPlan = buildDevPlan({
       repoRoot: executor.context.repoRoot,
       env,
-      desktopSecretEnv: stagingDesktopCredentialEnv(input, env),
+      desktopSecretEnv: desktopCredentialEnv(input, env, "staging"),
       mobile: false,
       emulators: false,
       firebaseConfigPath: "",
@@ -1174,7 +1209,7 @@ function formatJsonResult(result: unknown): string {
   return JSON.stringify(result, null, 2);
 }
 
-function devDbTarget(context: KdContext): DevDbTarget {
+function devDbTarget(context: { env: NodeJS.ProcessEnv }): DevDbTarget {
   return {
     dbName: context.env.KANNA_DB_NAME ?? "",
     dbPath: context.env.KANNA_DB_PATH ?? ""

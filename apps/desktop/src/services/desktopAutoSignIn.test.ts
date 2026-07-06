@@ -48,6 +48,25 @@ describe("runDesktopAutoSignIn", () => {
     });
   });
 
+  it("signs in when a local emulator dev desktop is signed out and credentials are present", async () => {
+    const session = createSession();
+
+    await runDesktopAutoSignIn({
+      dev: true,
+      session,
+      getState: () => ({ status: "signedOut" }),
+      readEnv: createReadEnv({
+        KANNA_DESKTOP_AUTO_SIGN_IN_EMAIL: "upvote.sieve.7t@icloud.com",
+        KANNA_DESKTOP_AUTO_SIGN_IN_PASSWORD: "password123",
+      }),
+    });
+
+    expect(session.signInWithEmailPassword).toHaveBeenCalledWith({
+      email: "upvote.sieve.7t@icloud.com",
+      password: "password123",
+    });
+  });
+
   it("does nothing when already signed in", async () => {
     const session = createSession({
       status: "signedIn",
@@ -70,7 +89,7 @@ describe("runDesktopAutoSignIn", () => {
     expect(readEnv).not.toHaveBeenCalled();
   });
 
-  it("does nothing outside dev staging", async () => {
+  it("does nothing outside dev and production", async () => {
     const session = createSession();
 
     await runDesktopAutoSignIn({

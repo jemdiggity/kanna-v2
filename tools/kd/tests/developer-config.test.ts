@@ -3,7 +3,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  devDesktopAuth,
+  devDesktopAuthPath,
   parseStagingDesktopAuth,
+  readDevDesktopAuth,
   readStagingDesktopAuth,
   resolveDeveloperConfigRoot,
   stagingDesktopAuthPath,
@@ -51,6 +54,40 @@ describe("developer config", () => {
     expect(stagingDesktopAuthPath("/Users/example")).toBe(
       "/Users/example/.kanna/developer/staging/desktop-auth.toml",
     );
+  });
+
+  it("uses the committed emulator seed account for dev desktop auth by default", () => {
+    const home = mkdtempSync(join(tmpdir(), "kd-developer-config-"));
+
+    try {
+      expect(devDesktopAuthPath(home)).toBe(
+        join(home, ".kanna", "developer", "dev", "desktop-auth.toml"),
+      );
+      expect(readDevDesktopAuth(home)).toEqual(devDesktopAuth);
+      expect(readDevDesktopAuth(home)).toEqual({
+        email: "upvote.sieve.7t@icloud.com",
+        password: "password123",
+      });
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("allows dev desktop auth to be overridden by local developer config", () => {
+    const home = mkdtempSync(join(tmpdir(), "kd-developer-config-"));
+    const authPath = devDesktopAuthPath(home);
+
+    try {
+      mkdirSync(join(home, ".kanna", "developer", "dev"), { recursive: true });
+      writeFileSync(authPath, '[desktop_auth]\nemail = "local@example.com"\npassword = "local-secret"\n');
+
+      expect(readDevDesktopAuth(home)).toEqual({
+        email: "local@example.com",
+        password: "local-secret",
+      });
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   it("parses staging desktop auth credentials", () => {

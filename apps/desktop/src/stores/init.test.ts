@@ -282,6 +282,7 @@ describe("createInitApi", () => {
           version: "0.0.65",
           branch: "task-37ec6039-3",
           commit_hash: "abc1234",
+          task_id: "37ec6039",
           worktree: "task-37ec6039-3",
         };
       }
@@ -316,7 +317,7 @@ describe("createInitApi", () => {
 
     expect(mockState.invokeMock).toHaveBeenCalledWith("get_app_build_info");
     expect(setTitleMock).toHaveBeenCalledWith(
-      "Kanna — task-37ec6039-3 · task-37ec6039-3 (0.0.65 @ abc1234)",
+      "Kanna — task 37ec6039 · task-37ec6039-3 (0.0.65 @ abc1234)",
     );
   });
 

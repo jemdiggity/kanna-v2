@@ -74,12 +74,25 @@ fn main() {
 
     let build_branch = std::env::var("KANNA_BUILD_BRANCH").unwrap_or_default();
     let build_commit = std::env::var("KANNA_BUILD_COMMIT").unwrap_or_default();
+    let build_task_id = std::env::var("KANNA_BUILD_TASK_ID").unwrap_or_default();
     let build_worktree = std::env::var("KANNA_BUILD_WORKTREE").unwrap_or_default();
     println!("cargo:rustc-env=KANNA_BUILD_BRANCH={}", build_branch);
     println!("cargo:rustc-env=KANNA_BUILD_COMMIT={}", build_commit);
+    println!("cargo:rustc-env=KANNA_BUILD_TASK_ID={}", build_task_id);
     println!("cargo:rustc-env=KANNA_BUILD_WORKTREE={}", build_worktree);
     let build_info = if build_branch.is_empty() {
         String::new()
+    } else if !build_task_id.is_empty() && build_worktree.is_empty() {
+        format!("task {} · {} @ {}", build_task_id, build_branch, build_commit)
+    } else if !build_task_id.is_empty() && build_branch == build_worktree {
+        format!("task {} · {} @ {}", build_task_id, build_worktree, build_commit)
+    } else if !build_task_id.is_empty() && build_worktree == format!("task-{}", build_task_id) {
+        format!("task {} · {} @ {}", build_task_id, build_branch, build_commit)
+    } else if !build_task_id.is_empty() {
+        format!(
+            "task {} · {} · {} @ {}",
+            build_task_id, build_worktree, build_branch, build_commit
+        )
     } else if build_worktree.is_empty() {
         format!("{} @ {}", build_branch, build_commit)
     } else {
@@ -88,6 +101,7 @@ fn main() {
     println!("cargo:rustc-env=KANNA_BUILD_INFO={}", build_info);
     println!("cargo:rerun-if-env-changed=KANNA_BUILD_BRANCH");
     println!("cargo:rerun-if-env-changed=KANNA_BUILD_COMMIT");
+    println!("cargo:rerun-if-env-changed=KANNA_BUILD_TASK_ID");
     println!("cargo:rerun-if-env-changed=KANNA_BUILD_WORKTREE");
 
     merge_updater_pubkey_into_tauri_config();
