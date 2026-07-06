@@ -1,5 +1,6 @@
 import type { PipelineItem, Repo, TaskBlocker } from "../types/kanna";
 import type { TaskTransfer } from "../types/kanna";
+import { invoke } from "../invoke";
 
 export interface DesktopSnapshotEntry {
   repo: Repo;
@@ -22,6 +23,7 @@ export function setDesktopSnapshotFetcherForTests(fetcher: (() => Promise<Deskto
 type MaybePromise<T> = T | Promise<T>;
 
 export interface DesktopServerClientHandlersForTests {
+  ensureMobileServer?: () => MaybePromise<void>;
   getSetting?: (key: string) => MaybePromise<string | null>;
   putSetting?: (key: string, value: string) => MaybePromise<DesktopSettingResponse | void>;
   deleteSetting?: (key: string) => MaybePromise<void>;
@@ -88,11 +90,18 @@ async function sleep(ms: number): Promise<void> {
   await new Promise<void>((resolve) => setTimeout(resolve, ms));
 }
 
+async function ensureDesktopServerRunning(): Promise<void> {
+  if (clientHandlersForTests?.ensureMobileServer) {
+    await clientHandlersForTests.ensureMobileServer();
+    return;
+  }
+  await invoke("ensure_mobile_server");
+}
+
 async function requestJson<T>(
   path: string,
   options: { method?: string; body?: unknown; retryMs?: number } = {},
 ): Promise<T> {
-  const baseUrl = await desktopServerBaseUrl();
   const deadline = Date.now() + (options.retryMs ?? 0);
   let lastError: unknown = null;
   const method = options.method ?? "GET";
@@ -100,6 +109,8 @@ async function requestJson<T>(
 
   while (true) {
     try {
+      await ensureDesktopServerRunning();
+      const baseUrl = await desktopServerBaseUrl();
       const response = await fetch(`${baseUrl}${path}`, {
         method,
         headers: requestBody === undefined ? undefined : { "content-type": "application/json" },
@@ -110,8 +121,14 @@ async function requestJson<T>(
       }
       const responseBody = await response.text().catch(() => "");
       lastError = new Error(`${method} ${path} failed: ${response.status}${responseBody ? ` ${responseBody}` : ""}`);
+      if (response.status === 404) {
+        throw lastError;
+      }
     } catch (error) {
       lastError = error;
+      if (error instanceof Error && error.message.includes("failed: 404")) {
+        throw error;
+      }
     }
 
     if (Date.now() >= deadline) {
@@ -121,9 +138,12 @@ async function requestJson<T>(
   }
 }
 
-async function requestOptionalJson<T>(path: string): Promise<T | null> {
+async function requestOptionalJson<T>(
+  path: string,
+  options: { retryMs?: number } = {},
+): Promise<T | null> {
   try {
-    return await requestJson<T>(path);
+    return await requestJson<T>(path, options);
   } catch (error) {
     if (error instanceof Error && error.message.includes("failed: 404")) {
       return null;
@@ -154,7 +174,10 @@ export async function putDesktopSetting(key: string, value: string): Promise<Des
 
 export async function getDesktopSetting(key: string): Promise<string | null> {
   if (clientHandlersForTests?.getSetting) return await clientHandlersForTests.getSetting(key);
-  const response = await requestOptionalJson<DesktopSettingResponse>(`/v1/settings/${encodeURIComponent(key)}`);
+  const response = await requestOptionalJson<DesktopSettingResponse>(
+    `/v1/settings/${encodeURIComponent(key)}`,
+    { retryMs: 15_000 },
+  );
   return response?.value ?? null;
 }
 

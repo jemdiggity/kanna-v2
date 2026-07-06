@@ -339,6 +339,7 @@ const invokeHandlers: Record<string, (...args: any[]) => any> = {
   run_script: () => "",
   append_log: () => ({}),
   read_clipboard_image_png: () => null,
+  ensure_mobile_server: () => ({}),
   mobile_server_status: () => ({
     state: "running",
     desktopId: "desktop-mock-current",
