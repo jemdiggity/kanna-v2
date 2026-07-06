@@ -5,7 +5,7 @@
   "main": "dist/src/index.js",
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "pnpm exec vitest run --exclude dist/**"
+    "test": "pnpm exec vitest run --exclude 'dist/**'"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
