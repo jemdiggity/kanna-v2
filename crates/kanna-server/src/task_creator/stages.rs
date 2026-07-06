@@ -229,9 +229,9 @@ fn prepare_post_dispatch(
         None,
         None,
     )?;
+    let task_id = context.source_task_id;
     let message = format!(
-        "{final_prompt}\n\nWhen this work is complete, record stage completion: prefer MCP `kanna_complete_stage`; fallback: `kanna-cli stage-complete --task-id \"{}\" --status success --summary \"...\"`. Kanna will then advance this task's pipeline.",
-        context.source_task_id
+        "{final_prompt}\n\nWhen this work is complete, record stage completion: call MCP `kanna_complete_stage {{\"task_id\": \"{task_id}\", \"status\": \"success\", \"summary\": \"...\"}}`; only if MCP tools are unavailable, fall back to `kanna-cli stage-complete --task-id \"{task_id}\" --status success --summary \"...\"`. Kanna will then advance this task's pipeline."
     );
 
     Ok(PreparedStageTransition::Post(Box::new(
@@ -531,6 +531,7 @@ fn prepare_revision_resume(
         source_task.prompt.as_deref().unwrap_or(""),
         revision_prompt,
         task_id,
+        target_stage.policy.transition,
     );
     // A resumed run continues the recorded run's conversation, so it must
     // resolve to that run's provider — never the agent def's priority list.

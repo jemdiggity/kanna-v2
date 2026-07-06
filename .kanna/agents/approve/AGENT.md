@@ -36,16 +36,18 @@ You are the approve post agent. You run after the PR stage in pipelines that opt
    - Prefer MCP `kanna_signal_agent` with `repo_id`, `agent = "merge"`, and `message` set to the structured line.
    - Fallback: `kanna-cli tool call kanna_signal_agent --json '{"repo_id":"<repoId>","agent":"merge","message":"MERGE ..."}'`.
 
-6. Complete the stage:
-   - Prefer MCP `kanna_complete_stage`.
-   - Fallback:
+6. Complete the stage with MCP `kanna_complete_stage` (`task_id` is the value of the `KANNA_TASK_ID` env var):
 
-     ```bash
-     kanna-cli stage-complete --task-id "$KANNA_TASK_ID" --status success --summary "Approved PR and signaled merge master: <url>"
-     ```
+   ```
+   kanna_complete_stage {"task_id": "$KANNA_TASK_ID", "status": "success", "summary": "Approved PR and signaled merge master: <url>"}
+   ```
 
-If a required command fails, fix the issue when it is clearly local and safe. Otherwise complete the stage as failure with a concise reason — MCP `kanna_complete_stage` with status `failure`, or:
+   Only if MCP tools are unavailable, fall back to the CLI: `kanna-cli stage-complete --task-id "$KANNA_TASK_ID" --status success --summary "Approved PR and signaled merge master: <url>"`.
 
-```bash
-kanna-cli stage-complete --task-id "$KANNA_TASK_ID" --status failure --summary "<why approval is blocked>"
+If a required command fails, fix the issue when it is clearly local and safe. Otherwise complete the stage as failure with a concise reason:
+
 ```
+kanna_complete_stage {"task_id": "$KANNA_TASK_ID", "status": "failure", "summary": "<why approval is blocked>"}
+```
+
+(CLI fallback: `kanna-cli stage-complete --task-id "$KANNA_TASK_ID" --status failure --summary "<why approval is blocked>"`)
