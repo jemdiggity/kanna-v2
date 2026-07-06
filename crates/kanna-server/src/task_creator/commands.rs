@@ -254,7 +254,7 @@ pub(super) fn build_task_shell_command(
 
 pub(super) fn build_teardown_shell_command(teardown_cmds: &[String]) -> String {
     if teardown_cmds.is_empty() {
-        return "exit 0".to_string();
+        return "true".to_string();
     }
 
     let teardown_parts = teardown_cmds
@@ -269,7 +269,7 @@ pub(super) fn build_teardown_shell_command(teardown_cmds: &[String]) -> String {
         .join(" ; ");
 
     format!(
-        "printf '\\033[33mRunning teardown...\\033[0m\\n' ; {} ; printf '\\n' ; exit 0",
+        "printf '\\033[33mRunning teardown...\\033[0m\\n' ; {} ; printf '\\n'",
         teardown_parts
     )
 }

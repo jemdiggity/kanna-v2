@@ -10,6 +10,7 @@ import {
 } from "@kanna/db";
 import { invoke } from "../invoke";
 import { renderBestEffortLifecycleCommand } from "../utils/lifecycleCommands";
+import { shellSingleQuote } from "../utils/shell";
 import { hasOpenSubtasks } from "../utils/taskParenting";
 import { getTaskCloseBehavior } from "./taskCloseBehavior";
 import { shouldSelectNextOnCloseTransition } from "./taskCloseSelection";
@@ -59,6 +60,88 @@ export function createTaskCloseActions(
     await publishTaskSnapshotBestEffort(context, item.id, repo);
   }
 
+  function taskIdCandidatesFromWorktreeName(name: string): string[] {
+    if (!name.startsWith("task-")) return [];
+    const remainder = name.slice("task-".length);
+    if (!remainder) return [];
+    const candidates = [remainder];
+    const lastDash = remainder.lastIndexOf("-");
+    if (lastDash > 0) {
+      const suffix = remainder.slice(lastDash + 1);
+      if (/^\d+$/.test(suffix)) {
+        candidates.push(remainder.slice(0, lastDash));
+      }
+    }
+    return candidates;
+  }
+
+  async function resolveTaskIdFromWorktreeName(name: string): Promise<string | null> {
+    for (const candidate of taskIdCandidatesFromWorktreeName(name)) {
+      const rows = await context.requireDb().select<{ id: string }>(
+        "SELECT id FROM pipeline_item WHERE id = ? LIMIT 1",
+        [candidate],
+      );
+      if (rows.length > 0) return candidate;
+    }
+    return null;
+  }
+
+  async function collectTaskWorktreeCleanupPaths(item: PipelineItem, repo: Repo): Promise<string[]> {
+    const paths = new Set<string>();
+    const rows = await context.requireDb().select<{ path: string }>(
+      "SELECT path FROM worktree WHERE pipeline_item_id = ?",
+      [item.id],
+    );
+    rows.forEach((row) => {
+      if (row.path) paths.add(row.path);
+    });
+
+    const worktreesDir = `${repo.path}/.kanna-worktrees`;
+    const names = await invoke<string[]>("list_dir", { path: worktreesDir }).catch(() => []);
+    for (const name of names) {
+      if (await resolveTaskIdFromWorktreeName(name) === item.id) {
+        paths.add(`${worktreesDir}/${name}`);
+      }
+    }
+
+    return [...paths].sort();
+  }
+
+  async function cleanupClosedTaskWorktrees(item: PipelineItem, repo: Repo): Promise<void> {
+    const paths = await collectTaskWorktreeCleanupPaths(item, repo);
+    if (paths.length > 0) {
+      const quotedPaths = paths.map((path) => shellSingleQuote(path)).join(" ");
+      const script = [
+        "set -e",
+        `repo=${shellSingleQuote(repo.path)}`,
+        `for wt in ${quotedPaths}; do`,
+        "  if [ -d \"$wt\" ]; then",
+        "    if [ -n \"$(git -C \"$wt\" status --porcelain)\" ]; then",
+        `      git -C "$wt" add -A && git -C "$wt" commit -m ${shellSingleQuote("WIP at task close")}`,
+        "    fi",
+        "  fi",
+        "  git -C \"$repo\" worktree remove --force --force \"$wt\" || { [ ! -e \"$wt\" ] || rm -rf \"$wt\"; }",
+        "done",
+        "git -C \"$repo\" worktree prune",
+      ].join("\n");
+      await invoke("run_script", { script, cwd: repo.path, env: {} });
+    } else {
+      await invoke("run_script", {
+        script: "git worktree prune",
+        cwd: repo.path,
+        env: {},
+      }).catch((error: unknown) => {
+        console.debug("[store] git worktree prune skipped during close cleanup:", error);
+      });
+    }
+    await context.requireDb().execute("DELETE FROM worktree WHERE pipeline_item_id = ?", [item.id]);
+  }
+
+  async function closePipelineItemReleasePortsPublishAndCleanup(item: PipelineItem, repo: Repo): Promise<void> {
+    await closePipelineItemReleasePortsAndPublish(item, repo);
+    await cleanupClosedTaskWorktrees(item, repo);
+  }
+
   async function closeTask(targetItemId?: string, opts?: { selectNext?: boolean }) {
     const item = targetItemId
       ? context.state.items.value.find((candidate) => candidate.id === targetItemId)
@@ -100,7 +183,7 @@ export function createTaskCloseActions(
         if (wasBlocked) {
           await removeAllBlockersForItem(context.requireDb(), item.id);
         }
-        await closePipelineItemReleasePortsAndPublish(item, repo);
+        await closePipelineItemReleasePortsPublishAndCleanup(item, repo);
 
         if (opts?.selectNext !== false) await selectReplacementAfterTaskRemoval(item);
         await dependencies.checkUnblocked(item.id);
@@ -111,7 +194,7 @@ export function createTaskCloseActions(
 
       if (closeBehavior === "finish" && wasBlocked && !ownsLiveTaskResources) {
         await removeAllBlockersForItem(context.requireDb(), item.id);
-        await closePipelineItemReleasePortsAndPublish(item, repo);
+        await closePipelineItemReleasePortsPublishAndCleanup(item, repo);
 
         if (opts?.selectNext !== false) await selectReplacementAfterTaskRemoval(item);
         await reloadSnapshot();
@@ -142,7 +225,7 @@ export function createTaskCloseActions(
         })) {
           await selectReplacementAfterTaskRemoval(item);
         }
-        await closePipelineItemReleasePortsAndPublish(item, repo);
+        await closePipelineItemReleasePortsPublishAndCleanup(item, repo);
         await dependencies.checkUnblocked(item.id);
         await reloadSnapshot();
         await invalidateWindowWorkspace("closeTask");
@@ -227,6 +310,21 @@ export function createTaskCloseActions(
       const worktreePath = item.branch ? `${repo.path}/.kanna-worktrees/${item.branch}` : repo.path;
 
       await reopenPipelineItem(context.requireDb(), item.id);
+      if (item.branch) {
+        const worktreeExists = await invoke<boolean>("file_exists", { path: worktreePath }).catch(() => false);
+        if (!worktreeExists) {
+          await invoke("git_worktree_add", {
+            repoPath: repo.path,
+            branch: item.branch,
+            path: worktreePath,
+            startPoint: null,
+          });
+          await context.requireDb().execute(
+            "INSERT INTO worktree (id, pipeline_item_id, path, branch) VALUES (?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET pipeline_item_id = excluded.pipeline_item_id, path = excluded.path, branch = excluded.branch",
+            [`wt-${item.id}`, item.id, worktreePath, item.branch],
+          );
+        }
+      }
       let portEnv: Record<string, string> = {};
       let portOffset: number | null = null;
       let portAllocationFailed = false;

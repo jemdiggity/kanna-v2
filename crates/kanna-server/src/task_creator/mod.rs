@@ -414,7 +414,10 @@ pub(crate) fn prepare_workspace_teardown_for_close(
         source_task.pipeline_def.as_deref(),
     )
     .ok()?;
-    prepare_workspace_teardown(db, config, &repo, task_id, &pipeline, stage_name, branch)
+    let mut teardown =
+        prepare_workspace_teardown(db, config, &repo, task_id, &pipeline, stage_name, branch)?;
+    append_close_cleanup_to_teardown(&mut teardown, &config.db_path, &repo.path, task_id);
+    Some(teardown)
 }
 
 pub(in crate::task_creator) fn prepare_workspace_teardown(
@@ -464,6 +467,24 @@ pub(in crate::task_creator) fn prepare_workspace_teardown(
             agent_provider: AgentProvider::Claude.to_daemon_provider(),
         },
     })
+}
+
+fn append_close_cleanup_to_teardown(
+    teardown: &mut PreparedWorkspaceTeardown,
+    db_path: &str,
+    repo_path: &str,
+    task_id: &str,
+) {
+    let cleanup = crate::worktree_cleanup::cleanup_closed_task_worktrees_shell_command(
+        db_path, repo_path, task_id,
+    );
+    if let PreparedSessionSpawn::Pty { args, .. } = &mut teardown.session {
+        if let Some(command) = args.last_mut() {
+            command
+                .push_str(" ; printf '\\033[33mCleaning closed task worktrees...\\033[0m\\n' ; ");
+            command.push_str(&cleanup);
+        }
+    }
 }
 
 fn stage_environment_teardown(
