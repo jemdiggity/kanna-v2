@@ -23,6 +23,8 @@ export interface TerminalRuntimeState {
   disposed: boolean
   hasAttachedOnce: boolean
   sessionExited: boolean
+  pendingSessionCreatedRebind: boolean
+  connectSpawnedSession: boolean
   preserveRecoveredScrollbackForNextSnapshot: boolean
   streamClient: StreamClient | null
   respawningAfterAttachFailure: boolean
@@ -49,6 +51,8 @@ export function createTerminalRuntimeState(): TerminalRuntimeState {
     disposed: false,
     hasAttachedOnce: false,
     sessionExited: false,
+    pendingSessionCreatedRebind: false,
+    connectSpawnedSession: false,
     preserveRecoveredScrollbackForNextSnapshot: false,
     streamClient: null,
     respawningAfterAttachFailure: false,

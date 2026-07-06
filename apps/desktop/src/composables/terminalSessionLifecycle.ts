@@ -1,6 +1,7 @@
 import type { Ref } from "vue"
 import type { Terminal } from "@xterm/xterm"
 import type { StreamClient } from "@kanna/stream-client"
+import { invoke } from "../invoke"
 import { listen } from "../listen"
 import { getAppErrorMessage } from "../appError"
 import { markTaskSwitchFirstOutput } from "../perf/taskSwitchPerf"
@@ -74,10 +75,17 @@ export function createTerminalSessionLifecycle(params: {
 
   async function connectSession() {
     if (params.state.paused) return
-    if (params.state.sessionExited) return
+    if (params.state.sessionExited) {
+      console.warn("[terminal][connect] skip: session exited", {
+        sessionId: params.sessionId,
+        instanceId: params.instanceId,
+      })
+      return
+    }
     if (shouldSkipReconnect(params.state.connecting, params.state.attached)) return
     const generation = params.state.connectionGeneration
     params.state.connecting = true
+    params.state.connectSpawnedSession = false
     const shouldApplyReconnectEffects = params.state.hasAttachedOnce
     console.warn("[terminal][connect] start", {
       sessionId: params.sessionId,
@@ -103,6 +111,7 @@ export function createTerminalSessionLifecycle(params: {
           if (!fittedTerminal) return
           const { cols, rows } = fittedTerminal
           try {
+            params.state.connectSpawnedSession = true
             await params.spawnOptions.spawnFn(params.sessionId, params.spawnOptions.cwd, params.spawnOptions.prompt, cols, rows)
           } catch (error) {
             if (!isExistingDaemonSessionFailure(error)) {
@@ -135,6 +144,7 @@ export function createTerminalSessionLifecycle(params: {
           },
           onSessionExit: (code) => {
             params.state.attached = false
+            params.state.terminalStreamAttached = false
             params.state.sessionExited = true
             params.terminal.value?.write(`\r\n[Process exited with code ${code}]\r\n`)
           },
@@ -197,7 +207,55 @@ export function createTerminalSessionLifecycle(params: {
         hasAttachedOnce: params.state.hasAttachedOnce,
         instanceId: params.instanceId,
       })
+      if (params.state.pendingSessionCreatedRebind) {
+        params.state.pendingSessionCreatedRebind = false
+        if (!params.state.paused && !params.state.disposed) {
+          console.warn("[terminal][event] applying deferred session_created rebind", {
+            sessionId: params.sessionId,
+            instanceId: params.instanceId,
+          })
+          params.state.sessionExited = false
+          params.state.attached = false
+          params.state.terminalStreamAttached = false
+          void connectSession().catch((e) =>
+            console.error("[terminal] deferred session_created re-attach failed:", e)
+          )
+        }
+      }
     }
+  }
+
+  /** A stage swap kills and respawns this session id in place. When that
+   *  happens while this view is paused, the exit can already be latched
+   *  (sessionExited) while the session_created rebind that would clear it is
+   *  never delivered to the paused view — the latch then vetoes every
+   *  reconnect and the view stays frozen on a stale frame. Before honoring
+   *  the latch on an explicit resume, ask the daemon whether the session id
+   *  is live again; if it is, the recorded exit belongs to a previous PTY and
+   *  must not block the attach. */
+  async function reconcileStaleExitLatch() {
+    if (!params.state.sessionExited) return
+    let alive = false
+    try {
+      const sessions = await invoke<{ session_id?: string }[] | null>("list_sessions")
+      alive = Array.isArray(sessions) &&
+        sessions.some((session) => session?.session_id === params.sessionId)
+    } catch (e) {
+      console.warn("[terminal][connect] stale exit-latch probe failed", {
+        sessionId: params.sessionId,
+        instanceId: params.instanceId,
+        error: getAppErrorMessage(e),
+      })
+      return
+    }
+    if (!alive) return
+    console.warn("[terminal][connect] clearing stale exit latch for respawned session", {
+      sessionId: params.sessionId,
+      instanceId: params.instanceId,
+    })
+    params.state.sessionExited = false
+    params.state.attached = false
+    params.state.terminalStreamAttached = false
   }
 
   async function handleAttachError(error: { code?: string; message: string }) {
@@ -284,6 +342,7 @@ export function createTerminalSessionLifecycle(params: {
           if (sid === params.sessionId || sid === teardownId) {
             if (sid === params.sessionId) {
               params.state.attached = false
+              params.state.terminalStreamAttached = false
               params.state.sessionExited = true
             }
             if (params.terminal.value) {
@@ -315,7 +374,19 @@ export function createTerminalSessionLifecycle(params: {
         (event) => {
           const sid = (event.payload as { session_id?: string } | undefined)?.session_id
           if (sid !== params.sessionId) return
-          if (params.state.connecting) return
+          if (params.state.connecting) {
+            // The in-flight connect spawned this very session and is already
+            // attaching to it; any other in-flight connect may be racing a
+            // stage-swap respawn and must rebind once it settles instead of
+            // dropping the signal.
+            if (params.state.connectSpawnedSession) return
+            params.state.pendingSessionCreatedRebind = true
+            console.warn("[terminal][event] session_created during connect; rebind deferred", {
+              sessionId: params.sessionId,
+              instanceId: params.instanceId,
+            })
+            return
+          }
           console.warn("[terminal][event] session_created rebind", {
             sessionId: params.sessionId,
             instanceId: params.instanceId,
@@ -401,6 +472,16 @@ export function createTerminalSessionLifecycle(params: {
     if (!params.state.unlistenSharedStreamConnection) {
       params.state.unlistenSharedStreamConnection = onSharedStreamConnectionChange((connected) => {
         if (!connected || params.state.paused || params.state.disposed || !params.state.hasAttachedOnce) return
+        if (!params.state.terminalStreamAttached) {
+          // The stream connection came back but this session has no live
+          // attachment for the client to resync — reconnect explicitly
+          // rather than claiming an attachment that does not exist.
+          // connectSession itself vetoes exited/connecting states.
+          void connectSession().catch((e) =>
+            console.error("[terminal] stream reconnect re-attach failed:", e)
+          )
+          return
+        }
         params.state.attached = true
         const liveTerminal = getLiveTerminal()
         if (!liveTerminal || params.state.connecting) return
@@ -409,6 +490,8 @@ export function createTerminalSessionLifecycle(params: {
       })
     }
 
+    if (!isCurrentListeningGeneration(params.state, listeningGeneration)) return
+    await reconcileStaleExitLatch()
     if (!isCurrentListeningGeneration(params.state, listeningGeneration)) return
     await connectSession()
   }
@@ -488,6 +571,7 @@ export function createTerminalSessionLifecycle(params: {
   async function ensureConnected() {
     if (!params.terminal.value) return
     if (getTerminalRecoveryMode(params.spawnOptions, params.options) === "attach-only") {
+      await reconcileStaleExitLatch()
       await connectSession()
       return
     }

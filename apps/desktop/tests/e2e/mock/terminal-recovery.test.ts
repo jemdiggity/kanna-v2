@@ -58,6 +58,67 @@ describe("terminal recovery", () => {
     await client.deleteSession();
   });
 
+  // Reproduces the stage-swap freeze: the engine kills the task session while
+  // the terminal is attached (the exit latches), the respawn with the same
+  // session id happens while the task is deselected (the session_created
+  // rebind is never delivered to the paused view), and the reselect must
+  // reconcile the stale exit latch against the live daemon session instead of
+  // staying frozen on the dead PTY's last frame.
+  it("reattaches after a kill+respawn that happened while the task was deselected", async () => {
+    const taskId = await createRecoverableTask(client, {
+      repoId,
+      repoPath: testRepoPath,
+      prompt: "Reattach after an unseen stage-swap respawn",
+    });
+    taskIds.push(taskId);
+    const otherTaskId = await createRecoverableTask(client, {
+      repoId,
+      repoPath: testRepoPath,
+      prompt: "Temporary task used to pause the frozen task's terminal",
+    });
+    taskIds.push(otherTaskId);
+
+    await waitForSessionPresence(client, taskId, true);
+    await selectTask(client, taskId);
+    await client.waitForElement(".main-panel .terminal-container", 15_000);
+    await waitForTerminalEndMarker(client, taskId, "ORIGINAL_READY", "^ORIGINAL_READY$", 15_000);
+
+    // Kill while attached: the exit reaches the view and latches.
+    await strictTauriInvoke(client, "kill_session", { sessionId: taskId });
+    await waitForSessionPresence(client, taskId, false);
+    await waitForTerminalLineMatch(
+      client,
+      taskId,
+      "^\\[Process exited with code \\d+\\]$",
+      15_000,
+    );
+
+    // Deselect, then respawn the same session id (what a stage transition
+    // does) while the view is paused and cannot observe session_created.
+    await waitForSessionPresence(client, otherTaskId, true);
+    await selectTask(client, otherTaskId);
+    await sleep(500);
+    await strictTauriInvoke(client, "spawn_session", {
+      sessionId: taskId,
+      cwd: testRepoPath,
+      executable: "/bin/zsh",
+      args: ["-c", "printf 'RESPAWN_READY\\n'; while true; do sleep 60; done"],
+      env: {},
+      cols: 80,
+      rows: 24,
+    });
+    await waitForSessionPresence(client, taskId, true);
+    await sleep(500);
+
+    // Reselect: the terminal must attach to the respawned PTY instead of
+    // staying frozen on the killed session's last frame.
+    await selectTask(client, taskId);
+    await waitForTerminalEndMarker(client, taskId, "RESPAWN_READY", "^RESPAWN_READY$", 20_000);
+
+    // This is a clean reattach, not the missing-session respawn fallback.
+    expect(await findRespawnToasts(client)).toEqual([]);
+  });
+
   // Skipped during the KSP migration: this fixture asserts the retired Tauri
   // terminal attach/recovery lifecycle. KSP output and reselect snapshot
   // coverage lives in terminal-output-performance.test.ts.
@@ -348,6 +409,24 @@ async function waitForSessionPresence(
 
   throw new Error(
     `timed out waiting for session ${sessionId} to be ${expectedPresent ? "present" : "absent"}`,
+  );
+}
+
+async function waitForTerminalLineMatch(
+  client: WebDriverClient,
+  sessionId: string,
+  matcherSource: string,
+  timeoutMs: number,
+): Promise<TerminalBufferStats> {
+  const deadline = Date.now() + timeoutMs;
+  let latest: TerminalBufferStats | null = null;
+  while (Date.now() < deadline) {
+    latest = await readTerminalStats(client, sessionId, matcherSource, "__unused__");
+    if (latest.matchingLineCount >= 1) return latest;
+    await sleep(100);
+  }
+  throw new Error(
+    `timed out waiting for terminal line ${matcherSource} in ${sessionId}; latest=${JSON.stringify(latest)}`,
   );
 }
 
