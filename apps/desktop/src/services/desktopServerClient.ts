@@ -143,6 +143,14 @@ export async function unblockDesktopTask(taskId: string): Promise<void> {
   await post(`/v1/tasks/${encodeURIComponent(taskId)}/actions/unblock`);
 }
 
+export async function updateDesktopTaskAgentSessionId(
+  taskId: string,
+  agentSessionId: string | null,
+): Promise<void> {
+  if (taskActionForTests) return await taskActionForTests("agent-session-id", taskId, { agentSessionId });
+  await post(`/v1/tasks/${encodeURIComponent(taskId)}/actions/agent-session-id`, { agentSessionId });
+}
+
 export interface CreateDesktopTaskRequest {
   repoId: string;
   prompt: string;

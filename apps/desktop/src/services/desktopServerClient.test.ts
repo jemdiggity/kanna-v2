@@ -8,6 +8,7 @@ import {
   setDesktopTaskActionForTests,
   setDesktopTaskCreatorForTests,
   unblockDesktopTask,
+  updateDesktopTaskAgentSessionId,
 } from "./desktopServerClient";
 
 const invokeMock = vi.hoisted(() => vi.fn());
@@ -79,6 +80,19 @@ describe("desktopServerClient", () => {
     expect(fetch).toHaveBeenCalledWith(
       "http://127.0.0.1:48321/v1/tasks/task-1/actions/unblock",
       { method: "POST" },
+    );
+  });
+
+  it("posts task agent session id actions to the local kanna-server", async () => {
+    await updateDesktopTaskAgentSessionId("task-1", "provider-session-1");
+
+    expect(fetch).toHaveBeenCalledWith(
+      "http://127.0.0.1:48321/v1/tasks/task-1/actions/agent-session-id",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ agentSessionId: "provider-session-1" }),
+      },
     );
   });
 

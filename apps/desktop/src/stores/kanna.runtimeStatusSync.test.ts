@@ -5,7 +5,7 @@ import type { DbHandle, PipelineItem, Repo } from "@kanna/db";
 
 const mockState = vi.hoisted(() => {
   const now = "2026-04-16T00:00:00.000Z";
-  const updateAgentSessionIdMock = vi.fn(async () => {});
+  const taskActionMock = vi.fn(async () => {});
 
   function makeRepo(overrides: Partial<Repo> = {}): Repo {
     return {
@@ -151,7 +151,7 @@ const mockState = vi.hoisted(() => {
     invokeMock,
     listenMock,
     updatePipelineItemActivityMock,
-    updateAgentSessionIdMock,
+    taskActionMock,
     snapshotFetcherMock,
     emit,
     reset,
@@ -332,14 +332,13 @@ vi.mock("@kanna/db", () => ({
   getUnblockedItems: vi.fn(async () => []),
   hasCircularDependency: vi.fn(async () => false),
   insertOperatorEvent: vi.fn(async () => {}),
-  updateAgentSessionId: mockState.updateAgentSessionIdMock,
   listTaskPorts: vi.fn(async () => []),
   listTaskPortsForItem: vi.fn(async () => []),
   deleteTaskPortsForItem: vi.fn(async () => {}),
 }));
 
 import { useKannaStore } from "./kanna";
-import { setDesktopSnapshotFetcherForTests } from "../services/desktopServerClient";
+import { setDesktopSnapshotFetcherForTests, setDesktopTaskActionForTests } from "../services/desktopServerClient";
 
 function createDb(): DbHandle {
   return {
@@ -386,7 +385,8 @@ describe("kanna runtime status reconciliation", () => {
     cleanupMocks.shouldAutoCloseTaskAfterTeardownExit.mockClear();
     cleanupMocks.shouldAutoCloseTaskImmediatelyAfterEnteringTeardown.mockClear();
     cleanupMocks.shouldClearCachedTerminalStateOnSessionExit.mockClear();
-    mockState.updateAgentSessionIdMock.mockClear();
+    mockState.taskActionMock.mockClear();
+    setDesktopTaskActionForTests(mockState.taskActionMock);
   });
 
   it("refreshes server-owned activity from a direct daemon status change", async () => {
@@ -565,10 +565,10 @@ describe("kanna runtime status reconciliation", () => {
 
     await flushStore();
 
-    expect(mockState.updateAgentSessionIdMock).toHaveBeenCalledWith(
-      expect.anything(),
+    expect(mockState.taskActionMock).toHaveBeenCalledWith(
+      "agent-session-id",
       "task-1",
-      "019d99a5-aa94-7c73-b786-644cc095c037",
+      { agentSessionId: "019d99a5-aa94-7c73-b786-644cc095c037" },
     );
   });
 

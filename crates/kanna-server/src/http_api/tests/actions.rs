@@ -331,6 +331,50 @@ async fn mark_read_route_sets_unread_task_idle() {
 }
 
 #[tokio::test]
+async fn agent_session_id_route_persists_provider_session_id() {
+    let state = super::test_state_with_seed("desktop-1", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "task-1",
+            "repo-1",
+            "task prompt",
+            Some("Task"),
+            "in progress",
+            "2026-04-17 07:00:00",
+        )
+        .unwrap();
+    });
+    let db_path = state.config.db_path.clone();
+    let app = super::router(state);
+
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks/task-1/actions/agent-session-id")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "agentSessionId": "provider-session-1",
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let agent_session_id: Option<String> = conn
+        .query_row(
+            "SELECT agent_session_id FROM pipeline_item WHERE id = 'task-1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(agent_session_id.as_deref(), Some("provider-session-1"));
+}
+
+#[tokio::test]
 async fn close_pr_task_sends_blocker_close_instruction_with_renamed_branch_to_running_dependents() {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
