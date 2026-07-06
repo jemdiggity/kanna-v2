@@ -370,6 +370,50 @@ async fn patch_repo_route_updates_remote_metadata_and_hidden_state() {
 }
 
 #[tokio::test]
+async fn task_agent_session_route_persists_provider_session_id() {
+    let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "task-1",
+            "repo-1",
+            "prompt",
+            Some("Task One"),
+            "in progress",
+            "2026-04-17 08:00:00",
+        )
+        .unwrap();
+    });
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/tasks/task-1/actions/agent-session")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "agentSessionId": "claude-session-1" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let snapshot_response = app
+        .oneshot(Request::get("/v1/snapshot").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(snapshot_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let snapshot: serde_json::Value = from_slice(&body).unwrap();
+    assert_eq!(
+        snapshot["entries"][0]["items"][0]["agent_session_id"],
+        serde_json::json!("claude-session-1")
+    );
+}
+
+#[tokio::test]
 async fn task_activity_routes_persist_runtime_status_and_mark_read() {
     let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
         db.insert_test_repo("repo-1", "Repo One").unwrap();

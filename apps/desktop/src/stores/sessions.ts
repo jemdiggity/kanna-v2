@@ -18,7 +18,7 @@ import { shouldIgnoreRuntimeStatusDuringSetup } from "./taskRuntimeStatus";
 import { isReadableDirectory, resolveShellSpawnCwd } from "../utils/shellCwd";
 import { readRepoConfig, requireService, type AgentSpawnRecoveryOptions, type PreparedPtySession, type PtySpawnOptions, type StoreContext, type TaskSessionRecoveryOptions } from "./state";
 import { isTaskSelectedInAnyWindow } from "./windowSelection";
-import { applyDesktopTaskRuntimeStatus } from "../services/desktopServerClient";
+import { applyDesktopTaskRuntimeStatus, putDesktopTaskAgentSession } from "../services/desktopServerClient";
 
 interface DaemonSessionInfo {
   session_id?: string;
@@ -180,8 +180,8 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
     sessionId: string,
     resumeSessionId?: string | null,
   ): Promise<void> {
-    void sessionId;
-    void resumeSessionId;
+    if (!resumeSessionId) return;
+    await putDesktopTaskAgentSession(sessionId, resumeSessionId);
   }
 
   async function spawnShellSession(
@@ -428,6 +428,9 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
       maxBudgetUsd: options?.maxBudgetUsd,
       resumeSessionId: options?.resumeSessionId,
       worktreePath,
+      persistAgentSessionId: async (agentSessionId) => {
+        await putDesktopTaskAgentSession(sessionId, agentSessionId);
+      },
       resolveBinaryPath: async (name) => invoke<string>("which_binary", { name }),
     });
 

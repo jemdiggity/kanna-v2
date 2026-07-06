@@ -30,6 +30,7 @@ export interface DesktopServerClientHandlersForTests {
   patchRepo?: (repoId: string, input: PatchDesktopRepoInput) => MaybePromise<void>;
   applyTaskRuntimeStatus?: (taskId: string, input: DesktopTaskRuntimeStatusInput) => MaybePromise<DesktopTaskActivityResponse>;
   markTaskRead?: (taskId: string) => MaybePromise<DesktopTaskActivityResponse>;
+  putTaskAgentSession?: (taskId: string, agentSessionId: string | null) => MaybePromise<void>;
   claimTaskPorts?: (taskId: string, input: ClaimDesktopTaskPortsInput) => MaybePromise<ClaimDesktopTaskPortsResponse>;
   releaseTaskPorts?: (taskId: string) => MaybePromise<void>;
   closeTask?: (taskId: string) => MaybePromise<void>;
@@ -277,6 +278,23 @@ export async function markDesktopTaskRead(taskId: string): Promise<DesktopTaskAc
   return await requestJson<DesktopTaskActivityResponse>(
     `/v1/tasks/${encodeURIComponent(taskId)}/actions/mark-read`,
     { method: "POST" },
+  );
+}
+
+export async function putDesktopTaskAgentSession(
+  taskId: string,
+  agentSessionId: string | null,
+): Promise<void> {
+  if (clientHandlersForTests?.putTaskAgentSession) {
+    await clientHandlersForTests.putTaskAgentSession(taskId, agentSessionId);
+    return;
+  }
+  await requestJson<{ taskId: string }>(
+    `/v1/tasks/${encodeURIComponent(taskId)}/actions/agent-session`,
+    {
+      method: "POST",
+      body: { agentSessionId },
+    },
   );
 }
 

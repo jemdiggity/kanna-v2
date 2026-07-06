@@ -13,6 +13,7 @@ mod state;
 mod status;
 mod task_actions;
 mod task_activity;
+mod task_agent_session;
 mod task_blockers;
 mod task_input;
 mod task_logs;

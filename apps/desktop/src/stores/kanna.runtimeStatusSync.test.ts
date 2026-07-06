@@ -6,6 +6,7 @@ import type { DbHandle, PipelineItem, Repo } from "../types/kanna";
 const mockState = vi.hoisted(() => {
   const now = "2026-04-16T00:00:00.000Z";
   const updateAgentSessionIdMock = vi.fn(async () => {});
+  const putTaskAgentSessionMock = vi.fn(async () => {});
 
   function makeRepo(overrides: Partial<Repo> = {}): Repo {
     return {
@@ -142,6 +143,7 @@ const mockState = vi.hoisted(() => {
     listenMock,
     updatePipelineItemActivityMock,
     updateAgentSessionIdMock,
+    putTaskAgentSessionMock,
     emit,
     reset,
   };
@@ -406,7 +408,7 @@ describe("kanna runtime status reconciliation", () => {
         return { taskId, activity };
       },
       putTaskAgentSession: async (taskId, agentSessionId) => {
-        await mockState.updateAgentSessionIdMock(expect.anything(), taskId, agentSessionId);
+        await mockState.putTaskAgentSessionMock(taskId, agentSessionId);
       },
     });
     cleanupMocks.closePipelineItemAndClearCachedTerminalState.mockClear();
@@ -418,6 +420,7 @@ describe("kanna runtime status reconciliation", () => {
     cleanupMocks.shouldAutoCloseTaskImmediatelyAfterEnteringTeardown.mockClear();
     cleanupMocks.shouldClearCachedTerminalStateOnSessionExit.mockClear();
     mockState.updateAgentSessionIdMock.mockClear();
+    mockState.putTaskAgentSessionMock.mockClear();
   });
 
   it("reconciles a selected task to idle from a direct daemon status change", async () => {
@@ -583,7 +586,7 @@ describe("kanna runtime status reconciliation", () => {
     );
   });
 
-  it("does not persist codex resume session ids from the frontend session_exit path", async () => {
+  it("persists codex resume session ids through the server client from the frontend session_exit path", async () => {
     mockState.pipelineItems = [
       {
         ...mockState.pipelineItems[0]!,
@@ -602,6 +605,10 @@ describe("kanna runtime status reconciliation", () => {
 
     await flushStore();
 
+    expect(mockState.putTaskAgentSessionMock).toHaveBeenCalledWith(
+      "task-1",
+      "019d99a5-aa94-7c73-b786-644cc095c037",
+    );
     expect(mockState.updateAgentSessionIdMock).not.toHaveBeenCalled();
   });
 
