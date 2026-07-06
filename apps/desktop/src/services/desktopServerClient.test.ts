@@ -1,7 +1,15 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  fetchDesktopSnapshot,
+  fetchPendingIncomingTransfers,
+  getDesktopSetting,
+  setDesktopServerClientHandlersForTests,
+  setDesktopSnapshotFetcherForTests,
+} from "./desktopServerClient";
 
 const mocks = vi.hoisted(() => {
   const invoke = vi.fn(async (command: string, args?: { name?: string }) => {
+    if (command === "ensure_mobile_server") return undefined;
     if (command === "mobile_server_status") return { state: "running", lanPort: 48121 };
     if (command === "read_env_var" && args?.name === "KANNA_MOBILE_SERVER_PORT") {
       throw new Error("env var not set");
@@ -16,26 +24,125 @@ vi.mock("../invoke", () => ({
 }));
 
 describe("desktopServerClient", () => {
-  afterEach(() => {
-    vi.unstubAllGlobals();
-    vi.resetModules();
+  beforeEach(() => {
+    setDesktopServerClientHandlersForTests(null);
+    setDesktopSnapshotFetcherForTests(null);
     mocks.invoke.mockClear();
   });
 
-  it("uses the running desktop server port when fetching the snapshot", async () => {
-    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+  afterEach(() => {
+    setDesktopServerClientHandlersForTests(null);
+    setDesktopSnapshotFetcherForTests(null);
+    vi.unstubAllGlobals();
+  });
+
+  it("ensures the desktop server is running and uses its current port when fetching the snapshot", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          entries: [],
+          taskBlockers: [],
+          worktreePaths: {},
+          settings: {},
+        }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchDesktopSnapshot()).resolves.toEqual({
       entries: [],
       taskBlockers: [],
       worktreePaths: {},
       settings: {},
-    })));
-    vi.stubGlobal("fetch", fetchMock);
+    });
 
-    const { fetchDesktopSnapshot, setDesktopSnapshotFetcherForTests } = await import("./desktopServerClient");
-    setDesktopSnapshotFetcherForTests(null);
+    expect(mocks.invoke).toHaveBeenCalledWith("mobile_server_status");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:48121/v1/snapshot",
+      {
+        method: "GET",
+        headers: undefined,
+        body: undefined,
+      },
+    );
+  });
+
+  it("allows tests to override server readiness checks", async () => {
+    const ensureMobileServer = vi.fn(async () => {});
+    setDesktopServerClientHandlersForTests({ ensureMobileServer });
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          entries: [],
+          taskBlockers: [],
+          worktreePaths: {},
+          settings: {},
+        }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
 
     await fetchDesktopSnapshot();
 
-    expect(fetchMock).toHaveBeenCalledWith("http://127.0.0.1:48121/v1/snapshot", { method: "GET" });
+    expect(ensureMobileServer).toHaveBeenCalled();
+    expect(ensureMobileServer.mock.invocationCallOrder[0]).toBeLessThan(fetchMock.mock.invocationCallOrder[0]);
+  });
+
+  it("retries transient setting read failures during startup", async () => {
+    const fetchMock = vi.fn()
+      .mockRejectedValueOnce(new TypeError("Load failed"))
+      .mockResolvedValueOnce(new Response("setting not found", { status: 404 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(getDesktopSetting("window_workspace_v1")).resolves.toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(mocks.invoke.mock.calls.filter(([command]) => command === "mobile_server_status")).toHaveLength(2);
+  });
+
+  it("normalizes pending incoming transfers returned by the server", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          transfers: [
+            {
+              id: "transfer-1",
+              sourcePeerId: "peer-source",
+              sourceTaskId: "task-source",
+              payloadJson: "{\"task\":{},\"repo\":{}}",
+            },
+          ],
+        }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchPendingIncomingTransfers()).resolves.toEqual([
+      {
+        id: "transfer-1",
+        source_peer_id: "peer-source",
+        source_task_id: "task-source",
+        payload_json: "{\"task\":{},\"repo\":{}}",
+      },
+    ]);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:48121/v1/transfers/incoming/pending",
+      {
+        method: "GET",
+        headers: undefined,
+        body: undefined,
+      },
+    );
   });
 });
