@@ -27,10 +27,10 @@ You are the approve post agent. You run after the PR stage in pipelines that opt
 4. Build one structured merge request line:
 
    ```
-   MERGE <branch> -> <target> [PR <url>]: <summary>
+   MERGE <branch> -> <target> [TASK <task_id>] [PR <url>]: <summary>
    ```
 
-   Use `headRefName` as `<branch>`, `baseRefName` as `<target>`, the PR URL as `<url>`, and a concise summary from the PR title or task title.
+   Use `headRefName` as `<branch>`, `baseRefName` as `<target>`, the durable Kanna task id as `<task_id>`, the PR URL as `<url>`, and a concise summary from the PR title or task title.
 
 5. Signal the merge master:
    - Prefer MCP `kanna_signal_agent` with `repo_id`, `agent = "merge"`, and `message` set to the structured line.

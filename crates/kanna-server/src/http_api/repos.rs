@@ -1,9 +1,11 @@
 use super::state::AppState;
-use crate::db::Db;
+use crate::db::{Db, PipelineItem};
 use crate::mobile_api::MobileApi;
 use axum::extract::State;
 use axum::Json;
 use kanna_agent_protocol::StateChangeScope;
+use serde::Serialize;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 pub(super) async fn list_repos(
@@ -62,4 +64,178 @@ pub(super) async fn list_repo_tasks(
         .list_repo_tasks(&repo_id)
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(tasks))
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct DependentTaskInfo {
+    task_id: String,
+    title: String,
+    branch: Option<String>,
+    base_ref: Option<String>,
+    reason: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct DependentTasksExistResponse {
+    exists: bool,
+    dependent_tasks: Vec<DependentTaskInfo>,
+}
+
+pub(super) async fn dependent_tasks_exist(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+) -> Result<Json<DependentTasksExistResponse>, (axum::http::StatusCode, String)> {
+    let db = Db::open(&state.config.db_path).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("db error: {}", e),
+        )
+    })?;
+    let task_id = db
+        .resolve_pipeline_item_id(&task_id)
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("db error: {}", e),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                axum::http::StatusCode::NOT_FOUND,
+                format!("task not found: {task_id}"),
+            )
+        })?;
+    let task = db
+        .get_pipeline_item(&task_id)
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("db error: {}", e),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                axum::http::StatusCode::NOT_FOUND,
+                format!("task not found: {task_id}"),
+            )
+        })?;
+    let repo = db
+        .get_repo(&task.repo_id)
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("db error: {}", e),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                axum::http::StatusCode::NOT_FOUND,
+                format!("repo not found: {}", task.repo_id),
+            )
+        })?;
+    let branch = resolve_task_branch(&repo.path, &task).ok_or_else(|| {
+        (
+            axum::http::StatusCode::BAD_REQUEST,
+            format!("task has no branch: {task_id}"),
+        )
+    })?;
+    let open_items = db.list_pipeline_items(&task.repo_id).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("db error: {}", e),
+        )
+    })?;
+
+    let mut dependent_tasks = Vec::new();
+    let mut seen = HashSet::new();
+
+    let dependent_ids = db.list_tasks_blocked_by(&task_id).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("db error: {}", e),
+        )
+    })?;
+    for dependent_id in dependent_ids {
+        let Some(dependent) = db.get_pipeline_item(&dependent_id).map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("db error: {}", e),
+            )
+        })?
+        else {
+            continue;
+        };
+        if dependent.closed_at.is_none() && dependent.repo_id == task.repo_id {
+            push_dependent_task(&mut dependent_tasks, &mut seen, dependent, "task_blocker");
+        }
+    }
+
+    for item in open_items {
+        if ref_matches_branch(item.base_ref.as_deref(), &branch) {
+            push_dependent_task(&mut dependent_tasks, &mut seen, item, "base_ref");
+        }
+    }
+
+    Ok(Json(DependentTasksExistResponse {
+        exists: !dependent_tasks.is_empty(),
+        dependent_tasks,
+    }))
+}
+
+fn push_dependent_task(
+    dependent_tasks: &mut Vec<DependentTaskInfo>,
+    seen: &mut HashSet<(String, String)>,
+    item: PipelineItem,
+    reason: &str,
+) {
+    let key = (item.id.clone(), reason.to_string());
+    if !seen.insert(key) {
+        return;
+    }
+    let title = item
+        .display_name
+        .clone()
+        .or(item.prompt.clone())
+        .unwrap_or_else(|| item.id.clone());
+    dependent_tasks.push(DependentTaskInfo {
+        task_id: item.id,
+        title,
+        branch: item.branch,
+        base_ref: item.base_ref,
+        reason: reason.to_string(),
+    });
+}
+
+fn resolve_task_branch(repo_path: &str, item: &PipelineItem) -> Option<String> {
+    let stored_branch = item.branch.as_deref();
+    let live_branch =
+        crate::task_creator::resolve_current_source_worktree_branch(repo_path, stored_branch);
+    live_branch
+        .as_deref()
+        .or(stored_branch)
+        .and_then(normalize_branch_ref)
+}
+
+fn ref_matches_branch(value: Option<&str>, branch: &str) -> bool {
+    value
+        .and_then(normalize_branch_ref)
+        .as_deref()
+        .is_some_and(|normalized| normalized == branch)
+}
+
+fn normalize_branch_ref(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(
+        trimmed
+            .strip_prefix("refs/remotes/origin/")
+            .or_else(|| trimmed.strip_prefix("refs/heads/"))
+            .or_else(|| trimmed.strip_prefix("origin/"))
+            .unwrap_or(trimmed)
+            .to_string(),
+    )
 }

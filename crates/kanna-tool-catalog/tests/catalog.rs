@@ -34,6 +34,7 @@ fn bundled_catalog_parses_and_declares_all_tools() {
             "kanna_block_task",
             "kanna_unblock_task",
             "kanna_set_task_parent",
+            "kanna_is_dependent_tasks_exist",
             "kanna_complete_stage",
             "kanna_request_revision",
         ]
@@ -265,6 +266,14 @@ fn resolves_expected_requests_for_every_bundled_tool() {
             Method::Post,
             ResponseKind::Json,
             "/v1/tasks/task-1/actions/set-parent",
+            json!({}),
+        ),
+        (
+            "kanna_is_dependent_tasks_exist",
+            json!({ "task_id": "task-1" }),
+            Method::Get,
+            ResponseKind::Json,
+            "/v1/tasks/task-1/dependent-tasks-exist",
             json!({}),
         ),
         (

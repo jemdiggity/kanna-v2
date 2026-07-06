@@ -318,6 +318,32 @@ impl Db {
     }
 
     #[cfg(test)]
+    pub fn update_test_pipeline_item_branch(
+        &self,
+        id: &str,
+        branch: &str,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE pipeline_item SET branch = ? WHERE id = ?",
+            (branch, id),
+        )?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn update_test_pipeline_item_pr_url(
+        &self,
+        id: &str,
+        pr_url: &str,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE pipeline_item SET pr_url = ? WHERE id = ?",
+            (pr_url, id),
+        )?;
+        Ok(())
+    }
+
+    #[cfg(test)]
     pub fn update_test_pipeline_item_pipeline_def(
         &self,
         id: &str,
