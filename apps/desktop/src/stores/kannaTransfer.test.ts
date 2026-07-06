@@ -12,7 +12,7 @@ import {
 import type { SessionRecoveryState } from "../composables/sessionRecoveryState";
 import {
   setDesktopSnapshotFetcherForTests,
-  updateDesktopServerClientHandlersForTests,
+  setDesktopServerClientHandlersForTests,
   type NewTaskTransferInput,
   type NewTaskTransferProvenanceInput,
 } from "../services/desktopServerClient";
@@ -175,7 +175,37 @@ function createTransferDb(initial: {
     settings: {},
   }));
 
-  updateDesktopServerClientHandlersForTests({
+  setDesktopServerClientHandlersForTests({
+    getSetting: async () => null,
+    deleteSetting: async () => {},
+    putSetting: async (key, value) => ({ key, value }),
+    postOperatorEvents: async () => {},
+    applyTaskRuntimeStatus: async (taskId, input) => {
+      const item = tables.pipeline_item.find((candidate) => candidate.id === taskId);
+      if (!item || item.closed_at != null) return { taskId, activity: null };
+      let activity: PipelineItem["activity"] | null = null;
+      if (input.status === "busy" && item.activity !== "working") {
+        activity = "working";
+      } else if ((input.status === "idle" || input.status === "waiting") && item.activity === "working") {
+        activity = input.selected ? "idle" : "unread";
+      }
+      if (activity) item.activity = activity;
+      return { taskId, activity };
+    },
+    markTaskRead: async (taskId) => {
+      const item = tables.pipeline_item.find((candidate) => candidate.id === taskId);
+      if (item?.activity === "unread") item.activity = "idle";
+      return { taskId, activity: item?.activity === "idle" ? "idle" : null };
+    },
+    claimTaskPorts: async (taskId) => ({ taskId, portEnv: {}, firstPort: null }),
+    releaseTaskPorts: async () => {},
+    closeTask: async (taskId) => {
+      const item = tables.pipeline_item.find((candidate) => candidate.id === taskId);
+      if (item) {
+        item.closed_at = new Date().toISOString();
+        item.updated_at = item.closed_at;
+      }
+    },
     findRepoByPath: async (path: string) =>
       tables.repo.find((repo) => repo.path === path) as never ?? null,
     addRepo: async ({ path, name }) => {

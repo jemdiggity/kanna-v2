@@ -28,6 +28,11 @@ export interface DesktopServerClientHandlersForTests {
   postOperatorEvents?: (events: DesktopOperatorEventInput[]) => MaybePromise<void>;
   fetchRepoAnalytics?: (repoId: string) => MaybePromise<DesktopRepoAnalytics>;
   patchRepo?: (repoId: string, input: PatchDesktopRepoInput) => MaybePromise<void>;
+  applyTaskRuntimeStatus?: (taskId: string, input: DesktopTaskRuntimeStatusInput) => MaybePromise<DesktopTaskActivityResponse>;
+  markTaskRead?: (taskId: string) => MaybePromise<DesktopTaskActivityResponse>;
+  claimTaskPorts?: (taskId: string, input: ClaimDesktopTaskPortsInput) => MaybePromise<ClaimDesktopTaskPortsResponse>;
+  releaseTaskPorts?: (taskId: string) => MaybePromise<void>;
+  closeTask?: (taskId: string) => MaybePromise<void>;
   addRepo?: (input: AddDesktopRepoInput) => MaybePromise<DesktopRepoResponse>;
   findRepoByPath?: (path: string) => MaybePromise<DesktopRepoResponse | null>;
   reorderRepos?: (orderedIds: string[]) => MaybePromise<void>;
@@ -234,6 +239,101 @@ export async function patchDesktopRepo(repoId: string, input: PatchDesktopRepoIn
     method: "PATCH",
     body: input,
   });
+}
+
+export type DesktopRuntimeStatus = "busy" | "idle" | "waiting" | string;
+
+export interface DesktopTaskRuntimeStatusInput {
+  status: DesktopRuntimeStatus;
+  selected: boolean;
+}
+
+export interface DesktopTaskActivityResponse {
+  taskId?: string;
+  task_id?: string;
+  activity?: "idle" | "working" | "unread" | null;
+}
+
+export async function applyDesktopTaskRuntimeStatus(
+  taskId: string,
+  input: DesktopTaskRuntimeStatusInput,
+): Promise<DesktopTaskActivityResponse> {
+  if (clientHandlersForTests?.applyTaskRuntimeStatus) {
+    return await clientHandlersForTests.applyTaskRuntimeStatus(taskId, input);
+  }
+  return await requestJson<DesktopTaskActivityResponse>(
+    `/v1/tasks/${encodeURIComponent(taskId)}/actions/runtime-status`,
+    {
+      method: "POST",
+      body: input,
+    },
+  );
+}
+
+export async function markDesktopTaskRead(taskId: string): Promise<DesktopTaskActivityResponse> {
+  if (clientHandlersForTests?.markTaskRead) {
+    return await clientHandlersForTests.markTaskRead(taskId);
+  }
+  return await requestJson<DesktopTaskActivityResponse>(
+    `/v1/tasks/${encodeURIComponent(taskId)}/actions/mark-read`,
+    { method: "POST" },
+  );
+}
+
+export interface ClaimDesktopTaskPortsInput {
+  ports?: Record<string, number>;
+  reservedPorts?: number[];
+  reservedPortOffsets?: number[];
+}
+
+export interface ClaimDesktopTaskPortsResponse {
+  taskId?: string;
+  task_id?: string;
+  portEnv?: Record<string, string>;
+  port_env?: Record<string, string>;
+  firstPort?: number | null;
+  first_port?: number | null;
+}
+
+export async function claimDesktopTaskPorts(
+  taskId: string,
+  input: ClaimDesktopTaskPortsInput,
+): Promise<ClaimDesktopTaskPortsResponse> {
+  if (clientHandlersForTests?.claimTaskPorts) {
+    return await clientHandlersForTests.claimTaskPorts(taskId, input);
+  }
+  return await requestJson<ClaimDesktopTaskPortsResponse>(
+    `/v1/tasks/${encodeURIComponent(taskId)}/ports`,
+    {
+      method: "POST",
+      body: input,
+    },
+  );
+}
+
+export async function releaseDesktopTaskPorts(taskId: string): Promise<void> {
+  if (clientHandlersForTests?.releaseTaskPorts) {
+    await clientHandlersForTests.releaseTaskPorts(taskId);
+    return;
+  }
+  await requestJson<{ taskId: string }>(`/v1/tasks/${encodeURIComponent(taskId)}/ports`, {
+    method: "DELETE",
+  });
+}
+
+export async function closeDesktopTask(taskId: string): Promise<void> {
+  if (clientHandlersForTests?.closeTask) {
+    await clientHandlersForTests.closeTask(taskId);
+    return;
+  }
+  const baseUrl = await desktopServerBaseUrl();
+  const response = await fetch(`${baseUrl}/v1/tasks/${encodeURIComponent(taskId)}/actions/close`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    const responseBody = await response.text().catch(() => "");
+    throw new Error(`POST /v1/tasks/${taskId}/actions/close failed: ${response.status}${responseBody ? ` ${responseBody}` : ""}`);
+  }
 }
 
 export interface DesktopRepoResponse {

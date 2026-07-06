@@ -330,7 +330,7 @@ vi.mock("@kanna/" + "db", () => ({
 import { useKannaStore } from "./kanna";
 import {
   setDesktopSnapshotFetcherForTests,
-  updateDesktopServerClientHandlersForTests,
+  setDesktopServerClientHandlersForTests,
 } from "../services/desktopServerClient";
 
 function createDb(): DbHandle {
@@ -378,7 +378,33 @@ describe("kanna runtime status reconciliation", () => {
       worktreePaths: {},
       settings: {},
     }));
-    updateDesktopServerClientHandlersForTests({
+    setDesktopServerClientHandlersForTests({
+      getSetting: async () => null,
+      deleteSetting: async () => {},
+      putSetting: async (key, value) => ({ key, value }),
+      postOperatorEvents: async () => {},
+      releaseTaskPorts: async () => {},
+      closeTask: async (taskId) => {
+        const item = mockState.pipelineItems.find((candidate) => candidate.id === taskId);
+        if (item) {
+          item.closed_at = "2026-04-16T00:00:00.000Z";
+          item.updated_at = "2026-04-16T00:00:00.000Z";
+        }
+      },
+      applyTaskRuntimeStatus: async (taskId, input) => {
+        const item = mockState.pipelineItems.find((candidate) => candidate.id === taskId);
+        if (!item || item.closed_at != null) return { taskId, activity: null };
+        let activity: PipelineItem["activity"] | null = null;
+        if (input.status === "busy" && item.activity !== "working") {
+          activity = "working";
+        } else if ((input.status === "idle" || input.status === "waiting") && item.activity === "working") {
+          activity = input.selected ? "idle" : "unread";
+        }
+        if (activity) {
+          await mockState.updatePipelineItemActivityMock(expect.anything(), taskId, activity);
+        }
+        return { taskId, activity };
+      },
       putTaskAgentSession: async (taskId, agentSessionId) => {
         await mockState.updateAgentSessionIdMock(expect.anything(), taskId, agentSessionId);
       },

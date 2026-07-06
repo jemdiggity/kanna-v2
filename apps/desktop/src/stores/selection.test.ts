@@ -5,6 +5,7 @@ import type { DbHandle, PipelineItem, Repo } from "../types/kanna";
 
 import { createSelectionApi } from "./selection";
 import { createStoreContext, createStoreState } from "./state";
+import { setDesktopServerClientHandlersForTests } from "../services/desktopServerClient";
 
 const mockState = vi.hoisted(() => {
   const insertOperatorEventMock = vi.fn(async () => {});
@@ -90,6 +91,14 @@ function createItem(overrides: Partial<PipelineItem> = {}): PipelineItem {
 describe("createSelectionApi", () => {
   beforeEach(() => {
     mockState.reset();
+    setDesktopServerClientHandlersForTests({
+      putSetting: async (key, value) => ({ key, value }),
+      postOperatorEvents: async () => {},
+      markTaskRead: async (taskId) => {
+        await mockState.updatePipelineItemActivityMock(expect.anything(), taskId, "idle");
+        return { taskId, activity: "idle" };
+      },
+    });
   });
 
   afterEach(() => {

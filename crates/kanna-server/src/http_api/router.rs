@@ -15,9 +15,11 @@ use super::task_actions::{
     advance_stage, close_task, complete_stage, pin_task, reorder_pinned_tasks, request_revision,
     rerun_stage, run_merge_agent, set_task_parent, unpin_task,
 };
+use super::task_activity::{apply_runtime_status, mark_task_read};
 use super::task_blockers::{block_task, unblock_task};
 use super::task_input::send_task_input;
 use super::task_logs::task_logs;
+use super::task_ports::{claim_task_ports, release_task_ports};
 use super::tasks::{
     create_task, get_task, list_closed_task_identities, list_recent_tasks, search_tasks,
     update_task,
@@ -70,6 +72,14 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/tasks/{task_id}/actions/block", post(block_task))
         .route("/v1/tasks/{task_id}/actions/unblock", post(unblock_task))
         .route(
+            "/v1/tasks/{task_id}/actions/runtime-status",
+            post(apply_runtime_status),
+        )
+        .route(
+            "/v1/tasks/{task_id}/actions/mark-read",
+            post(mark_task_read),
+        )
+        .route(
             "/v1/tasks/{task_id}/actions/advance-stage",
             post(advance_stage),
         )
@@ -93,6 +103,10 @@ pub fn router(state: Arc<AppState>) -> Router {
             post(reorder_pinned_tasks),
         )
         .route("/v1/tasks/{task_id}/actions/close", post(close_task))
+        .route(
+            "/v1/tasks/{task_id}/ports",
+            post(claim_task_ports).delete(release_task_ports),
+        )
         .route(
             "/v1/tasks/{task_id}/actions/run-merge-agent",
             post(run_merge_agent),
