@@ -211,7 +211,8 @@ const releaseShipInputSchema = z.object({
   staging: z.boolean().default(false),
   production: z.boolean().default(false),
   release: z.boolean().default(false),
-  dryRun: z.boolean().default(false)
+  dryRun: z.boolean().default(false),
+  rollbackTo: z.string().optional()
 });
 
 const cloudDeployInputSchema = z.object({
@@ -1589,6 +1590,9 @@ export const taskDefinitions = [
       if (parsed.staging && parsed.production) {
         return { ok: false, message: "release ship accepts only one of --staging or --production." };
       }
+      if (parsed.rollbackTo && !parsed.staging) {
+        return { ok: false, message: "release ship --rollback-to requires --staging." };
+      }
       const bump = parsed.major ? "major" : parsed.minor ? "minor" : "patch";
       const archLabels = [
         ...(parsed.arm64 ? ["arm64" as const] : []),
@@ -1603,6 +1607,7 @@ export const taskDefinitions = [
         environment,
         release: parsed.release,
         dryRun: parsed.dryRun,
+        rollbackTo: parsed.rollbackTo,
         env: context.env,
         runner: nodeCommandRunner
       });
