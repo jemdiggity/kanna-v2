@@ -2,9 +2,9 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readlinkSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import pkg from "../package.json";
-import { parseCliArgs } from "../src/cli";
+import { parseCliArgs, runCli } from "../src/cli";
 import { getTaskDefinition } from "../src/tasks/registry";
 
 function commandPath(command: string): string {
@@ -36,6 +36,10 @@ function copyLauncherFixture(sourceRepoRoot: string, fixtureRepoRoot: string): v
 }
 
 describe("kd CLI", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it("exposes install-time bin entrypoints for setup scripts", () => {
     const packageRoot = resolve(import.meta.dirname, "..");
     const repoRoot = resolve(packageRoot, "..", "..");
@@ -91,6 +95,35 @@ describe("kd CLI", () => {
       rmSync(tempRoot, { recursive: true, force: true });
     }
   }, 240_000);
+
+  it("prints contextual help for command groups and leaf commands", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await expect(runCli(["dev", "--help"])).resolves.toBe(0);
+    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd dev <command>"));
+    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("dev up"));
+    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("dev restart"));
+
+    await expect(runCli(["dev", "up", "--help"])).resolves.toBe(0);
+    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd dev up"));
+    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("--firebase-env-from <task-or-path>"));
+
+    await expect(runCli(["mobile", "run", "--help"])).resolves.toBe(0);
+    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd mobile run --device"));
+
+    await expect(runCli(["mobile", "ota", "publish", "--staging", "--help"])).resolves.toBe(0);
+    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd mobile ota publish"));
+
+    await expect(runCli(["emulators", "exec", "--help"])).resolves.toBe(0);
+    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd emulators exec -- <command...>"));
+
+    await expect(runCli(["doctor", "--remote", "--help"])).resolves.toBe(0);
+    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd doctor"));
+
+    await expect(runCli(["not-a-command", "--help"])).resolves.toBe(1);
+    expect(error).toHaveBeenLastCalledWith("Unknown help topic: not-a-command");
+  });
 
   it("parses dev up with mobile and emulators flags", () => {
     expect(parseCliArgs(["dev", "up", "--mobile", "--emulators", "--seed"])).toEqual({
@@ -364,6 +397,13 @@ describe("kd CLI", () => {
     expect(parseCliArgs(["emulators", "up"])).toEqual({
       taskId: "emulators.up",
       input: {}
+    });
+  });
+
+  it("forwards help flags after emulators exec passthrough separator", () => {
+    expect(parseCliArgs(["emulators", "exec", "--", "some-tool", "--help"])).toEqual({
+      taskId: "emulators.exec",
+      input: { extraArgs: ["some-tool", "--help"] }
     });
   });
 
