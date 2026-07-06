@@ -1,44 +1,19 @@
-import { type RepoConfig } from "@kanna/core";
-import {
-  insertPipelineItem,
-  insertStageRun,
-  insertWorktree,
-  updateAgentSessionId,
-  updatePipelineItemActivity,
-  upsertTerminalSession,
-  type AgentProvider,
-  type PipelineItem,
-} from "@kanna/db";
-import { buildKannaRuntimeSystemPrompt, buildStagePrompt } from "../../../../packages/core/src/pipeline/prompt-builder";
+import { type AgentProvider, type PipelineItem } from "@kanna/db";
 import { invoke } from "../invoke";
+import { createDesktopTask } from "../services/desktopServerClient";
 import { publishDesktopTaskSnapshot } from "../services/desktopCloudPublisher";
 import { publishDesktopLanTaskSnapshot } from "../services/desktopLanTaskIndex";
-import { buildTaskShellCommand } from "../composables/terminalSessionRecovery";
-import { buildTaskBootstrapCommand } from "../utils/taskBootstrap";
 import { debugLog } from "../utils/debugLog";
-import { getPreferredAgentProviders, resolveAgentProvider } from "./agent-provider";
 import { resolveRealE2eAgentOverride } from "./e2eRealAgentOverride";
 import { buildPendingTaskPlaceholder } from "./taskCreationPlaceholder";
-import { shouldPrewarmTaskShellOnCreate } from "./taskShellPrewarm";
-import { getCreateWorktreeStartPoint, getOriginFetchBranch, resolveInitialBaseRef } from "./taskBaseBranch";
-import { buildTaskLifecycleEnv } from "./taskLifecycleEnv";
-import { encodeDaemonInput } from "./daemonInput";
+import { resolveInitialBaseRef } from "./taskBaseBranch";
 import { normalizeAgentExecutionType, type AgentExecutionType } from "./agentExecutionType";
-import { reportPrewarmSessionError } from "./kannaCleanup";
+import { requireService, type CreateItemOptions, type KannaSnapshot, type StoreContext } from "./state";
 import { showCloudPublishErrorToast } from "./taskPublishing";
-import { readRepoConfig, requireService, type AgentSpawnRecoveryOptions, type CreateItemOptions, type KannaSnapshot, type StoreContext, type WorktreeBootstrapResult } from "./state";
-import type { PortsStore } from "./ports";
 import type { TasksApi } from "./tasks";
-
-const CODEX_SPAWN_SUBMIT_DELAY_MS = 5_000;
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 export function createTaskItemActions(
   context: StoreContext,
-  ports: PortsStore,
 ): Pick<TasksApi, "createItem"> {
   const reloadSnapshot = () => requireService(context.services.reloadSnapshot, "reloadSnapshot")();
   const invalidateWindowWorkspace = async (reason: string): Promise<void> => {
@@ -47,333 +22,19 @@ export function createTaskItemActions(
   const withOptimisticItemOverlay = <T>(input: Parameters<NonNullable<StoreContext["services"]["withOptimisticItemOverlay"]>>[0]) =>
     requireService(context.services.withOptimisticItemOverlay, "withOptimisticItemOverlay")(input) as Promise<T>;
 
-  async function createWorktree(
-    repoPath: string,
-    branch: string,
-    worktreePath: string,
-    baseRef?: string | null,
-  ): Promise<WorktreeBootstrapResult> {
-    const visibleBootstrapSteps: string[] = [];
-    let startPoint = getCreateWorktreeStartPoint(baseRef ?? undefined);
-    let renderedStartPoint = startPoint ?? "HEAD";
-    const originFetchBranch = getOriginFetchBranch(startPoint);
-
-    if (originFetchBranch) {
-      renderedStartPoint = startPoint ?? renderedStartPoint;
-      visibleBootstrapSteps.push(`git fetch origin ${originFetchBranch}`);
-      try {
-        await invoke("git_fetch", { repoPath, branch: originFetchBranch });
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        console.warn("[store] fetch origin failed:", message);
-        context.toast.warning(context.tt("toasts.fetchFailed"));
-      }
-    } else if (!startPoint) {
-      try {
-        const defaultBranch = await invoke<string>("git_default_branch", { repoPath });
-        renderedStartPoint = defaultBranch;
-        visibleBootstrapSteps.push(`git fetch origin ${defaultBranch}`);
-        await invoke("git_fetch", { repoPath, branch: defaultBranch });
-        startPoint = `origin/${defaultBranch}`;
-        renderedStartPoint = startPoint;
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        const isOffline = /could not resolve host|network is unreachable|connection refused|timed out/i.test(message);
-        const noRemote = /does not appear to be a git repository|could not find remote|no remote|remote.*not found/i.test(message);
-        if (isOffline || noRemote) {
-          console.debug("[store] fetch origin failed (offline or no remote), using local HEAD");
-        } else {
-          console.warn("[store] fetch origin failed:", message);
-          context.toast.warning(context.tt("toasts.fetchFailed"));
-        }
-      }
-    }
-
-    await invoke("git_worktree_add", {
-      repoPath,
-      branch,
-      path: worktreePath,
-      startPoint,
-    });
-
-    visibleBootstrapSteps.push(
-      `git worktree add -b ${branch} '${worktreePath.replace(/'/g, `'\\''`)}' ${renderedStartPoint}`,
-    );
-
-    return { visibleBootstrapSteps };
-  }
-
-  async function setupWorktreeAndSpawn(
-    id: string,
-    repoId: string,
-    repoPath: string,
-    worktreePath: string,
-    branch: string,
-    prompt: string,
-    displayPrompt: string,
-    agentType: AgentExecutionType,
-    agentProvider: AgentProvider,
-    pendingPlaceholder: PipelineItem,
-    initialStageRun: { stage: string; agent: string | null },
-    opts?: CreateItemOptions,
-  ) {
-    const s0 = performance.now();
-    const resolvedModel = opts?.customTask?.model ?? opts?.model ?? null;
-    // Best-effort run history: a recording failure must never fail task
-    // creation. A task without this row falls back to a fresh revision agent.
-    const recordInitialStageRun = async (agentSessionId: string | null) => {
-      try {
-        await insertStageRun(context.requireDb(), {
-          id: `run-${id}-${Date.now()}`,
-          task_id: id,
-          stage: initialStageRun.stage,
-          kind: "main",
-          agent: initialStageRun.agent,
-          agent_provider: agentProvider,
-          model: resolvedModel,
-          status: "running",
-          result: null,
-          feedback: null,
-          session_id: id,
-          provider_session_id: agentSessionId,
-          cwd: worktreePath,
-          resumed_from_run_id: null,
-        });
-      } catch (error) {
-        console.warn("[store] failed to record initial stage run:", error);
-      }
-    };
-    let worktreeCreated = false;
-    const markSetupFailed = async (error: unknown, logPrefix: string, toastMessage: string) => {
-      await Promise.allSettled([
-        invoke("kill_session", { sessionId: id }),
-        invoke("kill_session", { sessionId: `shell-wt-${id}` }),
-      ]);
-      await ports.releaseTaskPorts(id).catch((cleanupError) => {
-        console.debug("[store] failed to release ports after task setup failure:", cleanupError);
-      });
-      if (worktreeCreated) {
-        await invoke("git_worktree_remove", { repoPath, path: worktreePath }).catch((cleanupError) => {
-          console.debug("[store] failed to remove worktree after task setup failure:", cleanupError);
-        });
-      }
-      await context.requireDb().execute("DELETE FROM pipeline_item WHERE id = ?", [id]).catch((cleanupError) => {
-        console.debug("[store] failed to delete partially-created task after setup failure:", cleanupError);
-        return updatePipelineItemActivity(context.requireDb(), id, "idle");
-      });
-      await reloadSnapshot();
-      if (context.state.selectedItemId.value === id) {
-        await requireService(context.services.selectReplacementAfterItemRemoval, "selectReplacementAfterItemRemoval")(pendingPlaceholder);
-      }
-      console.error(logPrefix, error);
-      context.toast.error(toastMessage);
-    };
-    const finishPendingSetup = () => {
-      context.state.pendingSetupIds.value = context.state.pendingSetupIds.value.filter((pendingId) => pendingId !== id);
-      context.state.pendingCreateVisibility.delete(id);
-    };
-
+  async function resolveCreateBaseRef(repoPath: string, opts?: CreateItemOptions): Promise<string | null> {
+    if (opts?.baseRef !== undefined) return opts.baseRef;
     try {
-      let s1 = performance.now();
-      let worktreeBootstrap: WorktreeBootstrapResult | null = null;
-      let repoConfig: RepoConfig = {};
-      let portEnv: Record<string, string> = {};
-      let ptySetupCmds: string[] = [];
-      try {
-        worktreeBootstrap = await createWorktree(repoPath, branch, worktreePath, opts?.baseBranch ?? opts?.baseRef ?? null);
-        worktreeCreated = true;
-        await insertWorktree(context.requireDb(), {
-          id: `wt-${id}`,
-          pipeline_item_id: id,
-          path: worktreePath,
-          branch,
-        });
-        repoConfig = await readRepoConfig(worktreePath);
-        ptySetupCmds = repoConfig.setup || [];
-      } catch (error) {
-        await markSetupFailed(error, "[store] failed to read repo config or create worktree:", context.tt("toasts.worktreeFailed"));
-        return;
-      }
-      debugLog(`[perf:setup] readConfig+createWorktree: ${(performance.now() - s1).toFixed(1)}ms`);
-
-      s1 = performance.now();
-      try {
-        const allocated = await ports.claimTaskPorts(id, repoConfig);
-        portEnv = allocated.portEnv;
-        const portOffset = allocated.firstPort;
-        await context.requireDb().execute(
-          "UPDATE pipeline_item SET port_offset = ?, port_env = ?, updated_at = datetime('now') WHERE id = ?",
-          [portOffset, Object.keys(portEnv).length > 0 ? JSON.stringify(portEnv) : null, id],
-        );
-        await reloadSnapshot();
-      } catch (error) {
-        await markSetupFailed(error, "[store] task port allocation failed:", `${context.tt("toasts.agentStartFailed")}: ${error instanceof Error ? error.message : error}`);
-        return;
-      }
-      debugLog(`[perf:setup] portAllocation: ${(performance.now() - s1).toFixed(1)}ms`);
-
-      s1 = performance.now();
-      try {
-        if (shouldPrewarmTaskShellOnCreate(agentType)) {
-          requireService(context.services.prewarmWorktreeShellSession, "prewarmWorktreeShellSession")(
-            `shell-wt-${id}`,
-            worktreePath,
-            JSON.stringify(portEnv),
-            repoPath,
-          ).catch((error) => reportPrewarmSessionError("[store] shell pre-warm failed:", error));
-        }
-
-        if (agentType === "agent") {
-          const { env: agentEnv, mcpConfigPath } = await buildTaskLifecycleEnv({
-            taskId: id,
-            worktreePath,
-            repoConfig,
-            portEnv,
-            logContext: "SDK task",
-          });
-          const setupCmds = [...(repoConfig.setup || []), ...(opts?.customTask?.setup || [])];
-          for (const setupCmd of setupCmds) {
-            await invoke("run_script", {
-              script: setupCmd,
-              cwd: worktreePath,
-              env: agentEnv,
-            }).catch((error: unknown) => {
-              console.warn("[store] SDK setup command failed; continuing:", error);
-            });
-          }
-          await invoke("spawn_agent_session", {
-            sessionId: id,
-            cwd: worktreePath,
-            prompt,
-            env: agentEnv,
-            agentProvider,
-            systemPrompt: buildKannaRuntimeSystemPrompt({
-              taskId: id,
-              provider: agentProvider,
-              mcpConfigured: !!mcpConfigPath,
-            }),
-            mcpConfigPath: mcpConfigPath ?? null,
-            permissionMode: opts?.customTask?.permissionMode ?? opts?.permissionMode ?? null,
-            model: resolvedModel,
-            allowedTools: opts?.customTask?.allowedTools ?? opts?.allowedTools ?? null,
-            disallowedTools: opts?.customTask?.disallowedTools ?? null,
-            maxTurns: opts?.customTask?.maxTurns ?? null,
-            maxBudgetUsd: opts?.customTask?.maxBudgetUsd ?? null,
-            executable: null,
-          });
-          await upsertTerminalSession(context.requireDb(), {
-            id: `agent-${id}`,
-            repo_id: repoId,
-            pipeline_item_id: id,
-            label: "agent",
-            cwd: worktreePath,
-            daemon_session_id: id,
-          });
-          await recordInitialStageRun(null);
-        } else {
-          const { env, setupCmds, agentCmd, agentCmdPreamble, kannaCliPath, agentSessionId } = await requireService(context.services.preparePtySession, "preparePtySession")(
-            id,
-            prompt,
-            {
-              agentProvider,
-              model: resolvedModel ?? undefined,
-              permissionMode: opts?.customTask?.permissionMode,
-              allowedTools: opts?.customTask?.allowedTools,
-              disallowedTools: opts?.customTask?.disallowedTools,
-              maxTurns: opts?.customTask?.maxTurns,
-              maxBudgetUsd: opts?.customTask?.maxBudgetUsd,
-              setupCmdsOverride: opts?.customTask?.setup,
-              worktreePath,
-              repoConfig,
-              portEnv,
-              setupCmds: ptySetupCmds,
-              displayPrompt,
-              resumeSessionId: opts?.resumeSessionId ?? undefined,
-            },
-          );
-          const fullCmd = buildTaskBootstrapCommand({
-            worktreePath,
-            visibleBootstrapSteps: worktreeBootstrap?.visibleBootstrapSteps ?? [],
-            setupCmds,
-            agentCmd: buildTaskShellCommand(agentCmd, [], { kannaCliPath, agentCmdPreamble }),
-          });
-          await invoke("spawn_session", {
-            sessionId: id,
-            cwd: worktreePath,
-            executable: "/bin/zsh",
-            args: ["--login", "-i", "-c", fullCmd],
-            env,
-            cols: 80,
-            rows: 24,
-            agentProvider,
-          });
-          await upsertTerminalSession(context.requireDb(), {
-            id: `agent-${id}`,
-            repo_id: repoId,
-            pipeline_item_id: id,
-            label: "agent",
-            cwd: worktreePath,
-            daemon_session_id: id,
-          });
-          await recordInitialStageRun(agentSessionId ?? null);
-          if (opts?.recoverySnapshot) {
-            await invoke("seed_session_recovery_state", {
-              sessionId: id,
-              serialized: opts.recoverySnapshot.serialized,
-              cols: opts.recoverySnapshot.cols,
-              rows: opts.recoverySnapshot.rows,
-              cursorRow: opts.recoverySnapshot.cursorRow,
-              cursorCol: opts.recoverySnapshot.cursorCol,
-              cursorVisible: opts.recoverySnapshot.cursorVisible,
-            });
-          }
-          await requireService(context.services.syncTaskStatusesFromDaemon, "syncTaskStatusesFromDaemon")();
-        }
-      } catch (error) {
-        if (import.meta.env.DEV && typeof window !== "undefined") {
-          (window as unknown as { __KANNA_E2E_LAST_AGENT_SPAWN_ERROR__?: unknown }).__KANNA_E2E_LAST_AGENT_SPAWN_ERROR__ = {
-            taskId: id,
-            message: error instanceof Error ? error.message : String(error),
-            error,
-          };
-        }
-        await markSetupFailed(
-          error,
-          "[store] agent spawn failed:",
-          `${context.tt("toasts.agentStartFailed")}: ${error instanceof Error ? error.message : error}`,
-        );
-        return;
-      }
-      debugLog(`[perf:setup] spawnSession: ${(performance.now() - s1).toFixed(1)}ms`);
-
-      s1 = performance.now();
-      finishPendingSetup();
-      debugLog("[tasks:createItem] setup selection policy", {
-        taskId: id,
-        stage: opts?.stage,
-        selectOnCreate: opts?.selectOnCreate,
-        selectedBeforeSetupSelect: context.state.selectedItemId.value,
+      const defaultBranch = await invoke<string>("git_default_branch", { repoPath });
+      const availableBaseBranches = await invoke<string[]>("git_list_base_branches", { repoPath });
+      return resolveInitialBaseRef({
+        selectedBaseBranch: opts?.baseBranch,
+        availableBaseBranches,
+        defaultBranch,
       });
-      if (opts?.selectOnCreate !== false) {
-        await requireService(context.services.selectItem, "selectItem")(id);
-        debugLog(`[perf:setup] selectItem: ${(performance.now() - s1).toFixed(1)}ms`);
-      } else {
-        debugLog("[tasks:createItem] skipped setup auto-select", {
-          taskId: id,
-          selectedAfterSkip: context.state.selectedItemId.value,
-        });
-      }
-      if (agentType === "pty" && agentProvider === "codex" && prompt.trim().length > 0) {
-        await delay(CODEX_SPAWN_SUBMIT_DELAY_MS);
-        await invoke("send_input", {
-          sessionId: id,
-          data: encodeDaemonInput("\r"),
-        });
-      }
-      debugLog(`[perf:setup] TOTAL (background): ${(performance.now() - s0).toFixed(1)}ms`);
-    } finally {
-      finishPendingSetup();
-      await requireService(context.services.syncTaskStatusesFromDaemon, "syncTaskStatusesFromDaemon")();
+    } catch (error) {
+      console.warn("[store] failed to verify base branch:", error);
+      return null;
     }
   }
 
@@ -385,315 +46,117 @@ export function createTaskItemActions(
     opts?: CreateItemOptions,
   ): Promise<string> {
     const t0 = performance.now();
-    const id = crypto.randomUUID().slice(0, 8);
-    const branch = `task-${id}`;
-    const worktreePath = `${repoPath}/.kanna-worktrees/${branch}`;
-    const customTaskAgentName = opts?.customTask?.agent?.trim() || null;
-    const customTaskPrompt = opts?.customTask?.prompt ?? "";
-    const effectivePrompt = opts?.customTask
-      ? customTaskAgentName
-        ? (customTaskPrompt || prompt)
-        : customTaskPrompt
-      : prompt;
+    const placeholderId = crypto.randomUUID().slice(0, 8);
+    const effectivePrompt = opts?.customTask?.prompt ?? prompt;
     const effectiveAgentType = normalizeAgentExecutionType(opts?.customTask?.executionMode ?? agentType);
     const customTaskAgentProvider = opts?.customTask?.agentProvider;
-    const customTaskModel = opts?.customTask?.model;
     const requestedAgentProviders = customTaskAgentProvider ?? opts?.agentProvider;
-    const requestedModel = customTaskModel ?? opts?.model;
+    const requestedModel = opts?.customTask?.model ?? opts?.model;
     const displayName = opts?.customTask?.name ?? opts?.displayName ?? null;
-    debugLog("[tasks:createItem] start", {
-      taskId: id,
+    debugLog("[tasks:createItem] server create start", {
+      placeholderId,
       repoId,
       agentType: effectiveAgentType,
-      requestedStage: opts?.stage,
       requestedPipeline: opts?.pipelineName,
       selectOnCreate: opts?.selectOnCreate,
       selectedAtStart: context.state.selectedItemId.value,
     });
+
     const realE2eAgentOverride = await resolveRealE2eAgentOverride({
       agentType: effectiveAgentType,
       explicitAgentProvider: requestedAgentProviders,
       explicitModel: requestedModel,
     });
-    const providerCandidatesExplicit = customTaskAgentProvider ?? realE2eAgentOverride?.agentProvider ?? requestedAgentProviders;
-    const resolvedModel = customTaskModel ?? realE2eAgentOverride?.model ?? requestedModel ?? null;
-    const agentSpawnOptions: AgentSpawnRecoveryOptions = {
-      model: resolvedModel,
-      permissionMode: opts?.customTask?.permissionMode ?? null,
-      allowedTools: opts?.customTask?.allowedTools ?? null,
-      disallowedTools: opts?.customTask?.disallowedTools ?? null,
-      maxTurns: opts?.customTask?.maxTurns ?? null,
-      maxBudgetUsd: opts?.customTask?.maxBudgetUsd ?? null,
-    };
+    const effectiveAgentProvider = (customTaskAgentProvider ?? realE2eAgentOverride?.agentProvider ?? requestedAgentProviders) as AgentProvider | undefined;
+    const resolvedModel = opts?.customTask?.model ?? realE2eAgentOverride?.model ?? opts?.model;
+    const baseRef = await resolveCreateBaseRef(repoPath, opts);
+    if (!baseRef) {
+      context.toast.error("No valid base branch selected");
+      throw new Error("No valid base branch selected");
+    }
 
     const pendingPlaceholder = buildPendingTaskPlaceholder({
-      id,
+      id: placeholderId,
       repoId,
       prompt: effectivePrompt,
-      branch,
+      branch: `task-${placeholderId}`,
       agentType: effectiveAgentType,
       requestedAgentProviders,
       pipelineName: opts?.pipelineName,
-      stage: opts?.stage,
       displayName,
     });
-    context.state.pendingSetupIds.value = [...context.state.pendingSetupIds.value, id];
-    context.state.pendingCreateVisibility.set(id, { bumpAt: performance.now() });
+    context.state.pendingSetupIds.value = [...context.state.pendingSetupIds.value, placeholderId];
+    context.state.pendingCreateVisibility.set(placeholderId, { bumpAt: performance.now() });
 
     const removePendingPlaceholder = () => {
-      context.state.pendingSetupIds.value = context.state.pendingSetupIds.value.filter((pendingId) => pendingId !== id);
-      context.state.pendingCreateVisibility.delete(id);
+      context.state.pendingSetupIds.value = context.state.pendingSetupIds.value.filter((pendingId) => pendingId !== placeholderId);
+      context.state.pendingCreateVisibility.delete(placeholderId);
     };
-
     const applyPendingPlaceholderOverlay = (snapshot: KannaSnapshot): KannaSnapshot => ({
       ...snapshot,
       entries: snapshot.entries.map((entry) =>
         entry.repo.id === repoId
           ? {
               ...entry,
-              items: [pendingPlaceholder, ...entry.items.filter((item) => item.id !== id)],
+              items: [pendingPlaceholder, ...entry.items.filter((item) => item.id !== placeholderId)],
             }
           : entry,
       ),
     });
-
     const selectPendingPlaceholder = () => {
       if (opts?.selectOnCreate === false) return;
       context.state.selectedRepoId.value = repoId;
-      context.state.selectedItemId.value = id;
+      context.state.selectedItemId.value = placeholderId;
       context.state.lastSelectedItemByRepo.value = {
         ...context.state.lastSelectedItemByRepo.value,
-        [repoId]: id,
+        [repoId]: placeholderId,
       };
     };
-
     const selectReplacementAfterPendingRemoval = async () => {
-      if (context.state.selectedItemId.value !== id) return;
+      if (context.state.selectedItemId.value !== placeholderId) return;
       await requireService(context.services.selectReplacementAfterItemRemoval, "selectReplacementAfterItemRemoval")(pendingPlaceholder);
     };
 
+    let createdTaskId = placeholderId;
     try {
       await withOptimisticItemOverlay<void>({
-        key: `create:immediate:${id}`,
+        key: `create:immediate:${placeholderId}`,
         apply: applyPendingPlaceholderOverlay,
         run: async () => {
           selectPendingPlaceholder();
-
-          let pipelineName = opts?.pipelineName;
-          let repoConfig: RepoConfig = {};
-          let t1 = performance.now();
-          if (!pipelineName) {
-            try {
-              repoConfig = await readRepoConfig(repoPath);
-              pipelineName = repoConfig.pipeline ?? "default";
-            } catch (error) {
-              console.debug("[store] no repo config while creating task; using default pipeline:", error);
-              pipelineName = "default";
-            }
-          }
-          debugLog(`[perf:createItem] readRepoConfig: ${(performance.now() - t1).toFixed(1)}ms`);
-
-          let firstStageName = opts?.stage ?? "in progress";
-          let firstStageAgentName: string | null = null;
-          let pipelinePrompt = effectivePrompt;
-          let firstStageProviders: AgentProvider | AgentProvider[] | undefined;
-          let firstStageAgentProviders: AgentProvider | AgentProvider[] | undefined;
-          let firstStagePrompt: string | undefined;
-          t1 = performance.now();
-          try {
-            const pipeline = await requireService(context.services.loadPipeline, "loadPipeline")(repoPath, pipelineName);
-            if (!opts?.stage && pipeline.stages.length > 0) {
-              const firstStage = pipeline.stages[0];
-              firstStageName = firstStage.name;
-              firstStageAgentName = firstStage.agent ?? null;
-              firstStageProviders = firstStage.agent_provider as AgentProvider | AgentProvider[] | undefined;
-              firstStagePrompt = firstStage.prompt;
-            }
-          } catch (error) {
-            console.error("[store] failed to load pipeline definition:", error);
-          }
-
-          const launchAgentName = customTaskAgentName ?? firstStageAgentName;
-          if (launchAgentName && (customTaskAgentName || !opts?.stage)) {
-            try {
-              const agent = await requireService(context.services.loadAgent, "loadAgent")(repoPath, launchAgentName);
-              firstStageAgentName = launchAgentName;
-              firstStageAgentProviders = agent.agent_provider as AgentProvider | AgentProvider[] | undefined;
-              const stagePrompt = customTaskAgentName
-                ? customTaskPrompt.trim() === agent.prompt.trim()
-                  ? undefined
-                  : customTaskPrompt
-                : firstStagePrompt;
-              pipelinePrompt = buildStagePrompt(
-                agent.prompt,
-                stagePrompt,
-                { taskPrompt: effectivePrompt },
-              );
-            } catch (error) {
-              console.error(`[store] failed to load agent "${launchAgentName}" for task creation:`, error);
-              if (customTaskAgentName) throw error;
-            }
-          }
-          debugLog(`[perf:createItem] loadPipeline+loadAgent: ${(performance.now() - t1).toFixed(1)}ms`);
-
-          if (Object.keys(repoConfig).length === 0) {
-            try {
-              repoConfig = await readRepoConfig(repoPath);
-            } catch (error) {
-              console.debug("[store] no repo config while creating task; using empty config:", error);
-              repoConfig = {};
-            }
-          }
-
-          let effectiveAgentProvider: AgentProvider;
-          try {
-            const candidates = getPreferredAgentProviders({
-              explicit: providerCandidatesExplicit,
-              stage: firstStageProviders,
-              agent: firstStageAgentProviders,
-            });
-            const availability = await requireService(context.services.getAgentProviderAvailability, "getAgentProviderAvailability")();
-            effectiveAgentProvider = resolveAgentProvider(candidates, availability);
-          } catch (error) {
-            console.error("[store] createItem: failed to resolve agent provider:", error);
-            throw error;
-          }
-
-          let baseRef: string | null = null;
-          let pipelineItemInserted = false;
-
-          try {
-            t1 = performance.now();
-            if (opts?.baseRef !== undefined) {
-              baseRef = opts.baseRef;
-            } else {
-              try {
-                const defaultBranch = await invoke<string>("git_default_branch", { repoPath });
-                const availableBaseBranches = await invoke<string[]>("git_list_base_branches", { repoPath });
-                baseRef = resolveInitialBaseRef({
-                  selectedBaseBranch: opts?.baseBranch,
-                  availableBaseBranches,
-                  defaultBranch,
-                });
-              } catch (error) {
-                console.warn("[store] failed to verify base branch:", error);
-                baseRef = null;
-              }
-            }
-            if (!baseRef) {
-              throw new Error("No valid base branch selected");
-            }
-            debugLog(`[perf:createItem] git base_ref: ${(performance.now() - t1).toFixed(1)}ms`);
-
-            t1 = performance.now();
-            await insertPipelineItem(context.requireDb(), {
-              id,
-              repo_id: repoId,
-              issue_number: null,
-              issue_title: null,
-              prompt: effectivePrompt,
-              pipeline: pipelineName,
-              stage: firstStageName,
-              pr_number: null,
-              pr_url: null,
-              branch,
-              agent_type: effectiveAgentType,
-              agent_provider: effectiveAgentProvider,
-              port_offset: null,
-              port_env: null,
-              activity: "working",
-              display_name: displayName,
-              base_ref: baseRef,
-              agent_spawn_options: JSON.stringify(agentSpawnOptions),
-            });
-
-            pipelineItemInserted = true;
-            if (opts?.resumeSessionId) {
-              await updateAgentSessionId(context.requireDb(), id, opts.resumeSessionId);
-            }
-          } catch (error) {
-            if (pipelineItemInserted) {
-              await context.requireDb().execute("DELETE FROM pipeline_item WHERE id = ?", [id]).catch((cleanupError) => {
-                console.debug("[store] failed to clean up partially inserted pipeline item:", cleanupError);
-              });
-            }
-            await ports.releaseTaskPorts(id).catch((cleanupError) => {
-              console.debug("[store] failed to release ports after task creation failure:", cleanupError);
-            });
-            console.error("[store] task creation failed:", error);
-            const message = error instanceof Error ? error.message : String(error);
-            context.toast.error(message === "No valid base branch selected" ? message : context.tt("toasts.dbInsertFailed"));
-            throw error;
-          }
-          debugLog(`[perf:createItem] DB insert: ${(performance.now() - t1).toFixed(1)}ms`);
-
+          const created = await createDesktopTask({
+            repoId,
+            prompt: effectivePrompt,
+            displayName,
+            pipelineName: opts?.pipelineName,
+            stage: opts?.stage,
+            baseRef,
+            agent: opts?.customTask?.agent,
+            agentProvider: effectiveAgentProvider,
+            agentType: effectiveAgentType,
+            model: resolvedModel,
+            permissionMode: opts?.customTask?.permissionMode ?? opts?.permissionMode,
+            allowedTools: opts?.customTask?.allowedTools ?? opts?.allowedTools,
+            disallowedTools: opts?.customTask?.disallowedTools,
+            maxTurns: opts?.customTask?.maxTurns,
+            maxBudgetUsd: opts?.customTask?.maxBudgetUsd,
+            setupCmds: opts?.customTask?.setup,
+            resumeSessionId: opts?.resumeSessionId,
+            recoverySnapshot: opts?.recoverySnapshot,
+          });
+          createdTaskId = created.taskId;
+          removePendingPlaceholder();
           await reloadSnapshot();
-          const createdItem = context.state.items.value.find((candidate) => candidate.id === id);
+          if (opts?.selectOnCreate !== false) {
+            await requireService(context.services.selectItem, "selectItem")(createdTaskId);
+          }
+          const createdItem = context.state.items.value.find((candidate) => candidate.id === createdTaskId);
           const createdRepo = context.state.repos.value.find((candidate) => candidate.id === repoId) ?? null;
           if (createdItem) {
             void publishDesktopLanTaskSnapshot(context.requireDb());
-            const publishPromise = publishDesktopTaskSnapshot(context.requireDb(), createdItem, createdRepo)
-              .then(() => {
-                if (import.meta.env.DEV && typeof window !== "undefined") {
-                  (window as unknown as { __KANNA_E2E_CLOUD_PUBLISH__?: unknown }).__KANNA_E2E_CLOUD_PUBLISH__ = {
-                    status: "ok",
-                    taskId: id,
-                  };
-                }
-              })
-              .catch((error) => {
-                if (import.meta.env.DEV && typeof window !== "undefined") {
-                  (window as unknown as { __KANNA_E2E_CLOUD_PUBLISH__?: unknown }).__KANNA_E2E_CLOUD_PUBLISH__ = {
-                    status: "error",
-                    taskId: id,
-                    message: error instanceof Error ? error.message : String(error),
-                  };
-                }
-                console.warn("[cloud] failed to publish task snapshot:", error);
-                showCloudPublishErrorToast(context, error);
-                throw error;
-              });
-            const awaitCloudPublish = import.meta.env.DEV
-              ? await invoke<string>("read_env_var", { name: "KANNA_E2E_AWAIT_CLOUD_PUBLISH" }).catch((error) => {
-                  console.debug("[store] E2E cloud publish await flag not set:", error);
-                  return "";
-                })
-              : "";
-            if (awaitCloudPublish === "1") {
-              await publishPromise;
-            } else {
-              void publishPromise.catch((error) => {
-                console.debug("[cloud] async publish task snapshot failed after non-awaited path:", error);
-              });
-            }
+            publishCreatedTaskSnapshot(createdTaskId, createdItem, createdRepo);
           }
-          debugLog(`[perf:createItem] reload -> waiting for items refresh (id=${id})`);
-          debugLog(`[perf:createItem] TOTAL (modal → reload): ${(performance.now() - t0).toFixed(1)}ms`);
-          debugLog("[tasks:createItem] inserted and reloaded", {
-            taskId: id,
-            stage: firstStageName,
-            selectOnCreate: opts?.selectOnCreate,
-            selectedAfterReload: context.state.selectedItemId.value,
-          });
-
-          void setupWorktreeAndSpawn(
-            id,
-            repoId,
-            repoPath,
-            worktreePath,
-            branch,
-            pipelinePrompt,
-            effectivePrompt,
-            effectiveAgentType,
-            effectiveAgentProvider,
-            pendingPlaceholder,
-            { stage: firstStageName, agent: firstStageAgentName },
-            {
-              ...opts,
-              baseRef,
-              model: resolvedModel ?? undefined,
-            },
-          );
+          debugLog(`[perf:createItem] server create TOTAL: ${(performance.now() - t0).toFixed(1)}ms`);
         },
         reconcile: reloadSnapshot,
       });
@@ -702,15 +165,36 @@ export function createTaskItemActions(
       await selectReplacementAfterPendingRemoval();
       throw error;
     }
-    debugLog("[tasks:createItem] returning", {
-      taskId: id,
-      selectOnCreate: opts?.selectOnCreate,
-      selectedBeforeReturn: context.state.selectedItemId.value,
-    });
     await invalidateWindowWorkspace("createItem");
-    return id;
+    return createdTaskId;
   }
 
+  function publishCreatedTaskSnapshot(taskId: string, createdItem: PipelineItem, createdRepo: Parameters<typeof publishDesktopTaskSnapshot>[2]) {
+    const publishPromise = publishDesktopTaskSnapshot(context.requireDb(), createdItem, createdRepo)
+      .then(() => {
+        if (import.meta.env.DEV && typeof window !== "undefined") {
+          (window as unknown as { __KANNA_E2E_CLOUD_PUBLISH__?: unknown }).__KANNA_E2E_CLOUD_PUBLISH__ = {
+            status: "ok",
+            taskId,
+          };
+        }
+      })
+      .catch((error) => {
+        if (import.meta.env.DEV && typeof window !== "undefined") {
+          (window as unknown as { __KANNA_E2E_CLOUD_PUBLISH__?: unknown }).__KANNA_E2E_CLOUD_PUBLISH__ = {
+            status: "error",
+            taskId,
+            message: error instanceof Error ? error.message : String(error),
+          };
+        }
+        console.warn("[cloud] failed to publish task snapshot:", error);
+        showCloudPublishErrorToast(context, error);
+        throw error;
+      });
+    void publishPromise.catch((error) => {
+      console.debug("[cloud] async publish task snapshot failed after non-awaited path:", error);
+    });
+  }
 
   return { createItem };
 }

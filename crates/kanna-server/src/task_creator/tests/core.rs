@@ -424,6 +424,9 @@ fn build_agent_command_adds_claude_kanna_preamble_as_system_prompt() {
         None,
         Some("dontAsk"),
         &[],
+        &[],
+        None,
+        None,
         Some(&preamble),
         None,
         None,
@@ -514,6 +517,9 @@ fn build_agent_command_launches_antigravity_with_prepended_kanna_context() {
         None,
         Some("dontAsk"),
         &[],
+        &[],
+        None,
+        None,
         Some(&preamble),
         None,
         Some("/tmp/repo/.kanna-worktrees/task-123"),
@@ -562,6 +568,9 @@ fn build_agent_command_registers_codex_kanna_mcp_with_config_overrides() {
         None,
         Some("dontAsk"),
         &[],
+        &[],
+        None,
+        None,
         Some("Kanna preamble."),
         Some(mcp_config.to_string_lossy().as_ref()),
         None,
@@ -589,6 +598,9 @@ fn build_agent_command_registers_copilot_kanna_mcp_with_additional_config() {
         None,
         Some("dontAsk"),
         &[],
+        &[],
+        None,
+        None,
         Some("Kanna preamble."),
         Some(mcp_config.to_string_lossy().as_ref()),
         None,
@@ -613,6 +625,9 @@ fn build_agent_command_registers_opencode_kanna_mcp_with_inline_config() {
         None,
         Some("dontAsk"),
         &[],
+        &[],
+        None,
+        None,
         Some("Kanna preamble."),
         Some(mcp_config.to_string_lossy().as_ref()),
         None,
@@ -723,12 +738,18 @@ fn prepare_task_defaults_to_agent_session_for_claude_and_codex() {
                 prompt: format!("Use {provider}"),
                 display_name: None,
                 pipeline_name: None,
+                stage: None,
                 base_ref: None,
                 agent_provider: Some(provider.to_string()),
                 agent_type: None,
                 model: Some("model-a".to_string()),
                 permission_mode: Some("dontAsk".to_string()),
                 allowed_tools: Some(vec!["Bash".to_string()]),
+                disallowed_tools: None,
+                max_turns: None,
+                max_budget_usd: None,
+                setup_cmds: None,
+                resume_session_id: None,
                 notify_task_id: None,
                 parent_task_id: None,
                 blocker_task_ids: None,
@@ -753,6 +774,126 @@ fn prepare_task_defaults_to_agent_session_for_claude_and_codex() {
 }
 
 #[test]
+fn prepare_task_persists_create_spawn_options_and_custom_setup() {
+    let repo_root = init_git_repo("create-spawn-options");
+    let config = test_config("create-spawn-options");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+
+    let prepared = prepare_task_for_api(
+        &db,
+        &config,
+        CreateTaskRequest {
+            repo_id: "repo-1".to_string(),
+            prompt: "Run with custom options".to_string(),
+            display_name: None,
+            pipeline_name: None,
+            stage: None,
+            base_ref: None,
+            agent_provider: Some("claude".to_string()),
+            agent_type: Some("pty".to_string()),
+            model: Some("opus".to_string()),
+            permission_mode: Some("acceptEdits".to_string()),
+            allowed_tools: Some(vec!["Bash".to_string()]),
+            disallowed_tools: Some(vec!["WebFetch".to_string()]),
+            max_turns: Some(7),
+            max_budget_usd: Some(1.5),
+            setup_cmds: Some(vec!["echo custom setup".to_string()]),
+            resume_session_id: None,
+            notify_task_id: None,
+            parent_task_id: None,
+            blocker_task_ids: None,
+        },
+    )
+    .unwrap();
+
+    let spawn_options: serde_json::Value = serde_json::from_str(
+        &db.get_test_pipeline_item_spawn_options(&prepared.created_task.task_id)
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(spawn_options["model"], "opus");
+    assert_eq!(spawn_options["permissionMode"], "acceptEdits");
+    assert_eq!(spawn_options["allowedTools"], serde_json::json!(["Bash"]));
+    assert_eq!(
+        spawn_options["disallowedTools"],
+        serde_json::json!(["WebFetch"])
+    );
+    assert_eq!(spawn_options["maxTurns"], 7);
+    assert_eq!(spawn_options["maxBudgetUsd"], 1.5);
+
+    match prepared.session {
+        PreparedSessionSpawn::Pty { args, .. } => {
+            let command = args.join(" ");
+            assert!(command.contains("echo custom setup"));
+            assert!(command.contains("--model opus"));
+            assert!(command.contains("--permission-mode acceptEdits"));
+            assert!(command.contains("--allowedTools Bash"));
+            assert!(command.contains("--disallowedTools WebFetch"));
+            assert!(command.contains("--max-turns 7"));
+            assert!(command.contains("--max-budget-usd 1.5"));
+        }
+        _ => panic!("expected pty spawn"),
+    }
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
+fn prepare_task_for_api_resumes_requested_claude_session() {
+    let repo_root = init_git_repo("create-resume-claude");
+    let config = test_config("create-resume-claude");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+
+    let resume_session_id = "364643cc-5e6d-48fc-86ca-ca7764380900";
+    let prepared = prepare_task_for_api(
+        &db,
+        &config,
+        CreateTaskRequest {
+            repo_id: "repo-1".to_string(),
+            prompt: "Resume imported work".to_string(),
+            display_name: None,
+            pipeline_name: None,
+            stage: None,
+            base_ref: None,
+            agent_provider: Some("claude".to_string()),
+            agent_type: Some("pty".to_string()),
+            model: None,
+            permission_mode: None,
+            allowed_tools: None,
+            disallowed_tools: None,
+            max_turns: None,
+            max_budget_usd: None,
+            setup_cmds: None,
+            resume_session_id: Some(resume_session_id.to_string()),
+            notify_task_id: None,
+            parent_task_id: None,
+            blocker_task_ids: None,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        prepared.provider_session_id.as_deref(),
+        Some(resume_session_id)
+    );
+    match prepared.session {
+        PreparedSessionSpawn::Pty { args, .. } => {
+            let command = args.join(" ");
+            assert!(command.contains(&format!("--resume '{resume_session_id}'")));
+            assert!(!command.contains("--session-id"));
+        }
+        _ => panic!("expected pty spawn"),
+    }
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
 fn prepare_task_for_api_creates_worktree_without_cargo_config() {
     let repo_root = init_git_repo("no-cargo-config");
     let config = test_config("no-cargo-config");
@@ -768,12 +909,18 @@ fn prepare_task_for_api_creates_worktree_without_cargo_config() {
             prompt: "Create a task worktree".to_string(),
             display_name: None,
             pipeline_name: None,
+            stage: None,
             base_ref: None,
             agent_provider: Some("claude".to_string()),
             agent_type: Some("agent".to_string()),
             model: None,
             permission_mode: None,
             allowed_tools: None,
+            disallowed_tools: None,
+            max_turns: None,
+            max_budget_usd: None,
+            setup_cmds: None,
+            resume_session_id: None,
             notify_task_id: None,
             parent_task_id: None,
             blocker_task_ids: None,
@@ -813,12 +960,18 @@ fn prepare_codex_agent_uses_resolved_executable_for_headless_spawn() {
             prompt: "Use codex".to_string(),
             display_name: None,
             pipeline_name: None,
+            stage: None,
             base_ref: None,
             agent_provider: Some("codex".to_string()),
             agent_type: None,
             model: None,
             permission_mode: None,
             allowed_tools: None,
+            disallowed_tools: None,
+            max_turns: None,
+            max_budget_usd: None,
+            setup_cmds: None,
+            resume_session_id: None,
             notify_task_id: None,
             parent_task_id: None,
             blocker_task_ids: None,
@@ -889,12 +1042,18 @@ fn prepare_headless_agent_uses_worktree_workspace_path_for_executable_resolution
             prompt: "Use codex".to_string(),
             display_name: None,
             pipeline_name: None,
+            stage: None,
             base_ref: None,
             agent_provider: Some("codex".to_string()),
             agent_type: None,
             model: None,
             permission_mode: None,
             allowed_tools: None,
+            disallowed_tools: None,
+            max_turns: None,
+            max_budget_usd: None,
+            setup_cmds: None,
+            resume_session_id: None,
             notify_task_id: None,
             parent_task_id: None,
             blocker_task_ids: None,
@@ -939,12 +1098,18 @@ fn prepare_task_defaults_to_pty_session_for_copilot() {
             prompt: "Use copilot".to_string(),
             display_name: None,
             pipeline_name: None,
+            stage: None,
             base_ref: None,
             agent_provider: Some("copilot".to_string()),
             agent_type: None,
             model: None,
             permission_mode: None,
             allowed_tools: None,
+            disallowed_tools: None,
+            max_turns: None,
+            max_budget_usd: None,
+            setup_cmds: None,
+            resume_session_id: None,
             notify_task_id: None,
             parent_task_id: None,
             blocker_task_ids: None,
@@ -1072,12 +1237,18 @@ fn prepare_task_stores_parent_task_id_for_subtasks() {
             prompt: "Child prompt".to_string(),
             display_name: None,
             pipeline_name: None,
+            stage: None,
             base_ref: None,
             agent_provider: Some("claude".to_string()),
             agent_type: Some("agent".to_string()),
             model: None,
             permission_mode: None,
             allowed_tools: None,
+            disallowed_tools: None,
+            max_turns: None,
+            max_budget_usd: None,
+            setup_cmds: None,
+            resume_session_id: None,
             blocker_task_ids: None,
             notify_task_id: None,
             parent_task_id: Some("parent-1".to_string()),
@@ -1111,12 +1282,18 @@ fn prepare_task_rejects_missing_parent_task() {
             prompt: "Child prompt".to_string(),
             display_name: None,
             pipeline_name: None,
+            stage: None,
             base_ref: None,
             agent_provider: Some("claude".to_string()),
             agent_type: Some("agent".to_string()),
             model: None,
             permission_mode: None,
             allowed_tools: None,
+            disallowed_tools: None,
+            max_turns: None,
+            max_budget_usd: None,
+            setup_cmds: None,
+            resume_session_id: None,
             blocker_task_ids: None,
             notify_task_id: None,
             parent_task_id: Some("missing-parent".to_string()),
@@ -1229,12 +1406,18 @@ fn prepare_task_uses_builtin_default_pipeline_when_repo_has_no_local_default_pip
             prompt: "Implement the fallback".to_string(),
             display_name: None,
             pipeline_name: None,
+            stage: None,
             base_ref: None,
             agent_provider: Some("codex".to_string()),
             agent_type: None,
             model: None,
             permission_mode: None,
             allowed_tools: None,
+            disallowed_tools: None,
+            max_turns: None,
+            max_budget_usd: None,
+            setup_cmds: None,
+            resume_session_id: None,
             blocker_task_ids: None,
             notify_task_id: None,
 
@@ -1333,12 +1516,18 @@ fn prepare_task_uses_default_agent_provider_setting_when_request_omits_provider(
             prompt: "Use the configured default provider".to_string(),
             display_name: None,
             pipeline_name: None,
+            stage: None,
             base_ref: None,
             agent_provider: None,
             agent_type: None,
             model: None,
             permission_mode: None,
             allowed_tools: None,
+            disallowed_tools: None,
+            max_turns: None,
+            max_budget_usd: None,
+            setup_cmds: None,
+            resume_session_id: None,
             blocker_task_ids: None,
             notify_task_id: None,
 
@@ -1361,12 +1550,18 @@ fn prepare_task_uses_default_agent_provider_setting_when_request_omits_provider(
             prompt: "Use the explicit provider".to_string(),
             display_name: None,
             pipeline_name: None,
+            stage: None,
             base_ref: None,
             agent_provider: Some("codex".to_string()),
             agent_type: None,
             model: None,
             permission_mode: None,
             allowed_tools: None,
+            disallowed_tools: None,
+            max_turns: None,
+            max_budget_usd: None,
+            setup_cmds: None,
+            resume_session_id: None,
             blocker_task_ids: None,
             notify_task_id: None,
 
