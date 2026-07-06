@@ -18,6 +18,7 @@ import { isTaskTearingDown } from "./taskStages";
 import { resolveTaskItemForDaemonSession } from "./taskSessionIdentity";
 import { requireService, type StoreContext } from "./state";
 import { applySnapshotSettingsToState } from "./snapshotSettings";
+import { cleanupClosedTaskWorktrees } from "./taskWorktreeCleanup";
 
 export interface InitApi {
   init: (db: DbHandle) => Promise<void>;
@@ -370,6 +371,7 @@ export function createInitApi(
         if (!item || !isTaskTearingDown(item)) {
           return;
         }
+        const repo = context.state.repos.value.find((candidate) => candidate.id === item.repo_id);
 
         await Promise.all([
           invoke("kill_session", { sessionId: item.id }).catch((error: unknown) =>
@@ -384,6 +386,11 @@ export function createInitApi(
           )(item);
         }
         await ports.closeTaskAndReleasePorts(item.id, (id) => closePipelineItem(context.requireDb(), id));
+        if (repo) {
+          await cleanupClosedTaskWorktrees(context, item, repo);
+        } else {
+          console.warn(`[store] skipped closed task worktree cleanup for ${item.id}: repo not found`);
+        }
         await tasks.checkUnblocked(item.id);
         await requireService(context.services.reloadSnapshot, "reloadSnapshot")();
         return;
