@@ -10,7 +10,11 @@ import {
   parseOutgoingTransferPreflightResult,
 } from "../utils/taskTransfer";
 import type { SessionRecoveryState } from "../composables/sessionRecoveryState";
-import { setDesktopSnapshotFetcherForTests } from "../services/desktopServerClient";
+import {
+  setDesktopSnapshotFetcherForTests,
+  setDesktopTaskActionForTests,
+  setDesktopTaskCreatorForTests,
+} from "../services/desktopServerClient";
 
 const invokeMock = vi.fn<(cmd: string, args?: Record<string, unknown>) => Promise<unknown>>();
 const loadSessionRecoveryStateMock = vi.fn<(sessionId: string) => Promise<SessionRecoveryState | null>>();
@@ -169,6 +173,120 @@ function createTransferDb(initial: {
     worktreePaths: {},
     settings: {},
   }));
+
+  setDesktopTaskCreatorForTests(async (request) => {
+    const id = `task-${tables.pipeline_item.length + 1}`;
+    const branch = `task-${id}`;
+    const agentProvider = request.agentProvider ?? "claude";
+    const item = {
+      ...buildItem(request.repoId),
+      id,
+      repo_id: request.repoId,
+      prompt: request.prompt,
+      display_name: request.displayName ?? null,
+      pipeline: request.pipelineName ?? "default",
+      stage: request.stage ?? "in progress",
+      branch,
+      agent_type: request.agentType ?? "pty",
+      agent_provider: agentProvider,
+      activity: "working",
+      base_ref: request.baseRef ?? null,
+      agent_session_id: request.resumeSessionId ?? null,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    } satisfies PipelineItem;
+    tables.pipeline_item.push(item);
+    const resumeArgs = request.resumeSessionId
+      ? {
+          claude: [`claude --resume ${request.resumeSessionId}`],
+          copilot: [`copilot --resume='${request.resumeSessionId}'`],
+          codex: [`codex resume '${request.resumeSessionId}'`],
+        }[agentProvider] ?? [`${agentProvider} --resume ${request.resumeSessionId}`]
+      : [`${agentProvider} ${JSON.stringify(request.prompt)}`];
+    try {
+      await invokeMock("spawn_session", {
+        sessionId: id,
+        agentProvider,
+        args: resumeArgs,
+        env: {
+          PATH: "/Applications/Kanna.app/Contents/MacOS:/usr/local/bin:/usr/bin:/bin",
+        },
+      });
+    } catch (error) {
+      if (!(error instanceof Error) || !error.message.includes("unexpected invoke: spawn_session")) {
+        throw error;
+      }
+    }
+    if (request.recoverySnapshot) {
+      const recovery = request.recoverySnapshot;
+      await invokeMock("seed_session_recovery_state", {
+        sessionId: id,
+        serialized: recovery.serialized,
+        cols: recovery.cols,
+        rows: recovery.rows,
+        cursorRow: recovery.cursorRow,
+        cursorCol: recovery.cursorCol,
+        cursorVisible: recovery.cursorVisible,
+      });
+    }
+    return {
+      taskId: id,
+      repoId: request.repoId,
+      title: request.displayName ?? request.prompt,
+      stage: item.stage,
+      agentType: item.agent_type ?? "pty",
+      worktreePath: `${tables.repo.find((repo) => repo.id === request.repoId)?.path ?? "/tmp/repo"}/.kanna-worktrees/${branch}`,
+    };
+  });
+  setDesktopTaskActionForTests(async (action, taskId) => {
+    const item = tables.pipeline_item.find((candidate) => candidate.id === taskId);
+    if (!item) return;
+    if (action === "close") {
+      const repo = tables.repo.find((candidate) => candidate.id === item.repo_id);
+      let teardownCommands: string[] = [];
+      if (repo && item.branch) {
+        try {
+          const configText = await invokeMock("read_text_file", {
+            path: `${repo.path}/.kanna-worktrees/${item.branch}/.kanna/config.json`,
+          });
+          const config = typeof configText === "string" ? JSON.parse(configText) as { teardown?: unknown } : {};
+          if (Array.isArray(config.teardown)) {
+            teardownCommands = config.teardown.filter((value): value is string => typeof value === "string");
+          }
+        } catch {
+          teardownCommands = [];
+        }
+      }
+      if (repo && item.branch && teardownCommands.length > 0) {
+        item.teardown_started_at = new Date().toISOString();
+        item.updated_at = item.teardown_started_at;
+        await invokeMock("spawn_session", {
+          sessionId: `td-${taskId}`,
+          cwd: `${repo.path}/.kanna-worktrees/${item.branch}`,
+          executable: "/bin/zsh",
+          args: [
+            "--login",
+            "-i",
+            "-c",
+            `set -e\n${teardownCommands.join("\n")} || echo 'Teardown command failed'`,
+          ],
+          env: {
+            KANNA_WORKTREE: "1",
+            KANNA_DAEMON_DIR: "",
+            KANNA_DB_NAME: "",
+            KANNA_DB_PATH: "",
+            KANNA_E2E_TARGET_WEBDRIVER_PORT: "",
+            KANNA_TMUX_SESSION: "",
+            KANNA_TRANSFER_ROOT: "",
+            KANNA_WEBDRIVER_PORT: "",
+          },
+        });
+      } else {
+        item.closed_at = new Date().toISOString();
+        item.updated_at = item.closed_at;
+      }
+    }
+  });
 
   const db = {
     tables,
@@ -1310,6 +1428,7 @@ describe("incoming transfer approval", () => {
     const { useKannaStore } = await import("./kanna");
     const store = useKannaStore();
     const payload = buildIncomingTransferPayload();
+    payload.task.stage = "review";
     const fakeDb = createTransferDb({
       transfers: [{
         id: "transfer-1",
@@ -1352,7 +1471,7 @@ describe("incoming transfer approval", () => {
       repo_id: fakeDb.tables.repo[0]?.id,
       prompt: "Fix handoff",
       branch: localTaskId ? `task-${localTaskId}` : undefined,
-      stage: "in progress",
+      stage: "review",
       display_name: "Transferred task",
     });
     expect(fakeDb.tables.task_transfer[0]).toMatchObject({

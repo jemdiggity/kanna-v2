@@ -1,9 +1,9 @@
 import {
-  pinPipelineItem,
-  reorderPinnedItems,
-  unpinPipelineItem,
-  updatePipelineItemDisplayName,
-} from "@kanna/db";
+  pinDesktopTask,
+  renameDesktopTask,
+  reorderDesktopPinnedTasks,
+  unpinDesktopTask,
+} from "../services/desktopServerClient";
 import { requireService, type StoreContext } from "./state";
 import type { TasksApi } from "./tasks";
 
@@ -16,25 +16,26 @@ export function createTaskMetadataActions(
   };
 
   async function pinItem(itemId: string, position: number) {
-    await pinPipelineItem(context.requireDb(), itemId, position);
+    await pinDesktopTask(itemId, position);
     await reloadSnapshot();
     await invalidateWindowWorkspace("pinItem");
   }
 
   async function unpinItem(itemId: string) {
-    await unpinPipelineItem(context.requireDb(), itemId);
+    await unpinDesktopTask(itemId);
     await reloadSnapshot();
     await invalidateWindowWorkspace("unpinItem");
   }
 
   async function reorderPinned(repoId: string, orderedIds: string[]) {
-    await reorderPinnedItems(context.requireDb(), repoId, orderedIds);
+    void repoId;
+    await reorderDesktopPinnedTasks(orderedIds);
     await reloadSnapshot();
     await invalidateWindowWorkspace("reorderPinned");
   }
 
   async function renameItem(itemId: string, displayName: string | null) {
-    await updatePipelineItemDisplayName(context.requireDb(), itemId, displayName);
+    await renameDesktopTask(itemId, displayName);
     await reloadSnapshot();
     await invalidateWindowWorkspace("renameItem");
   }

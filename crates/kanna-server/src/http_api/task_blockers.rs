@@ -39,6 +39,8 @@ pub(super) fn persist_resolved_task_blockers(
     task_id: &str,
     resolved_blocker_ids: &[String],
 ) -> Result<(), (axum::http::StatusCode, String)> {
+    db.remove_all_task_blockers(task_id)
+        .map_err(|e| db_write_error("db error", e))?;
     persist_task_blocker_rows(db, task_id, resolved_blocker_ids)?;
     db.update_pipeline_item_activity(task_id, "idle")
         .map_err(|e| db_write_error("db error", e))

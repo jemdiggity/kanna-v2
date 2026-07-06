@@ -1,6 +1,7 @@
 import { ref } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DbHandle, PipelineItem, Repo } from "@kanna/db";
+import { setDesktopTaskActionForTests } from "../services/desktopServerClient";
 import { createSessionsApi } from "./sessions";
 import type { StoreContext } from "./state";
 
@@ -35,8 +36,8 @@ const mocks = vi.hoisted(() => {
         throw new Error(`unexpected invoke: ${command}`);
     }
   });
-  const updateAgentSessionIdMock = vi.fn(async () => {});
-  return { invokeMock, updateAgentSessionIdMock };
+  const taskActionMock = vi.fn(async () => {});
+  return { invokeMock, taskActionMock };
 });
 
 vi.mock("../invoke", () => ({
@@ -52,7 +53,6 @@ vi.mock("@kanna/db", async (importOriginal) => {
   return {
     ...actual,
     getRepo: vi.fn(async () => null),
-    updateAgentSessionId: mocks.updateAgentSessionIdMock,
     updatePipelineItemActivity: vi.fn(async () => {}),
   };
 });
@@ -99,7 +99,8 @@ describe("createSessionsApi", () => {
   beforeEach(() => {
     vi.useRealTimers();
     mocks.invokeMock.mockClear();
-    mocks.updateAgentSessionIdMock.mockClear();
+    mocks.taskActionMock.mockClear();
+    setDesktopTaskActionForTests(mocks.taskActionMock);
   });
 
   it("reports OpenCode CLI availability", async () => {
@@ -131,7 +132,11 @@ describe("createSessionsApi", () => {
     expect(prepared.agentCmdPreamble).toContain("Ship it");
     expect(prepared.agentCmdPreamble).toContain("This session was launched by Kanna");
     expect(prepared.agentProvider).toBe("antigravity");
-    expect(mocks.updateAgentSessionIdMock).not.toHaveBeenCalled();
+    expect(mocks.taskActionMock).not.toHaveBeenCalledWith(
+      "agent-session-id",
+      expect.any(String),
+      expect.anything(),
+    );
   });
 
   it("builds a fresh OpenCode TUI command with prompt and model flags", async () => {
@@ -147,7 +152,11 @@ describe("createSessionsApi", () => {
     expect(prepared.agentCmdPreamble).toContain("Ship it");
     expect(prepared.agentCmdPreamble).toContain("This session was launched by Kanna");
     expect(prepared.agentProvider).toBe("opencode");
-    expect(mocks.updateAgentSessionIdMock).not.toHaveBeenCalled();
+    expect(mocks.taskActionMock).not.toHaveBeenCalledWith(
+      "agent-session-id",
+      expect.any(String),
+      expect.anything(),
+    );
   });
 
   it("builds an OpenCode resume command with the stored session id", async () => {
@@ -177,10 +186,10 @@ describe("createSessionsApi", () => {
     expect(prepared.agentCmdPreamble).toContain("This session was launched by Kanna");
     expect(prepared.agentCmd).not.toContain("--resume");
     expect(prepared.agentCmdPreamble).not.toContain("--resume");
-    expect(mocks.updateAgentSessionIdMock).toHaveBeenCalledWith(
-      expect.anything(),
+    expect(mocks.taskActionMock).toHaveBeenCalledWith(
+      "agent-session-id",
       "task-1",
-      expect.stringMatching(/^[0-9a-f-]+$/),
+      { agentSessionId: expect.stringMatching(/^[0-9a-f-]+$/) },
     );
   });
 
@@ -231,7 +240,11 @@ describe("createSessionsApi", () => {
     expect(prepared.agentCmd).toBe("copilot --yolo --resume='5fc2bd17-1d1b-4ae9-bed8-011fa4011100'");
     expect(prepared.agentCmdPreamble).toBeUndefined();
     expect(prepared.agentProvider).toBe("copilot");
-    expect(mocks.updateAgentSessionIdMock).not.toHaveBeenCalled();
+    expect(mocks.taskActionMock).not.toHaveBeenCalledWith(
+      "agent-session-id",
+      expect.any(String),
+      expect.anything(),
+    );
   });
 
   it("does not send kitty CSI-u enter when spawning a Codex PTY task", async () => {

@@ -20,7 +20,7 @@ async fn terminal_state_watcher_once(
     state: &http_api::AppState,
     replacements: &session_replacements::SessionReplacements,
 ) -> Result<(), String> {
-    use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
+    use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent, SessionStatus};
 
     let config = state.config();
     let mut daemon = daemon_client::DaemonClient::connect(&config.daemon_dir)
@@ -72,6 +72,22 @@ async fn terminal_state_watcher_once(
                 }
             }
             DaemonEvent::ShuttingDown => return Ok(()),
+            DaemonEvent::StatusChanged { session_id, status } => {
+                let activity = match status {
+                    SessionStatus::Busy => "working",
+                    SessionStatus::Waiting | SessionStatus::Idle => "idle",
+                };
+                if let Err(error) =
+                    http_api::handle_task_activity_state(state, &session_id, activity).await
+                {
+                    log::warn!(
+                        "failed to update terminal activity for {} ({:?}): {}",
+                        session_id,
+                        status,
+                        error
+                    );
+                }
+            }
             _ => {}
         }
     }
@@ -82,7 +98,7 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::db::Db;
-    use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
+    use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent, SessionStatus};
     use std::path::{Path, PathBuf};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
@@ -173,6 +189,20 @@ mod tests {
         writer.write_all(b"\n").await.unwrap();
     }
 
+    fn seed_task(config: &Config, task_id: &str) {
+        let db = Db::open_for_tests(&config.db_path).unwrap();
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            task_id,
+            "repo-1",
+            "Task prompt",
+            Some("Task Display"),
+            "in progress",
+            "2026-04-18 10:00:00",
+        )
+        .unwrap();
+    }
+
     async fn expect_no_notification_connection(listener: &UnixListener) {
         match timeout(Duration::from_millis(150), listener.accept()).await {
             Err(_) => {}
@@ -255,6 +285,46 @@ mod tests {
         server.await.unwrap();
 
         assert_task_not_completed(&config);
+        let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_dir_all(daemon_dir);
+    }
+
+    #[tokio::test]
+    async fn watcher_marks_busy_status_as_working() {
+        let unique = unique_name("terminal-watcher-status-busy");
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        let config = test_config(&unique, &daemon_dir);
+        seed_task(&config, "task-child");
+        let (listener, socket_path) = bind_daemon_listener(&daemon_dir);
+
+        let server = tokio::spawn(async move {
+            let mut subscriber = expect_subscribe(&listener).await;
+            write_event(
+                &mut subscriber,
+                &DaemonEvent::StatusChanged {
+                    session_id: "task-child".to_string(),
+                    status: SessionStatus::Busy,
+                },
+            )
+            .await;
+            write_event(&mut subscriber, &DaemonEvent::ShuttingDown).await;
+        });
+
+        timeout(
+            Duration::from_secs(2),
+            terminal_state_watcher_once(
+                &http_api::AppState::new(config.clone()),
+                &session_replacements::SessionReplacements::default(),
+            ),
+        )
+        .await
+        .expect("watcher did not finish")
+        .unwrap();
+        server.await.unwrap();
+
+        let db = Db::open(&config.db_path).unwrap();
+        let task = db.get_pipeline_item("task-child").unwrap().unwrap();
+        assert_eq!(task.activity.as_deref(), Some("working"));
         let _ = std::fs::remove_file(socket_path);
         let _ = std::fs::remove_dir_all(daemon_dir);
     }

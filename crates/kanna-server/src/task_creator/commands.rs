@@ -22,6 +22,9 @@ pub(super) fn build_agent_command(
     model: Option<&str>,
     permission_mode: Option<&str>,
     allowed_tools: &[String],
+    disallowed_tools: &[String],
+    max_turns: Option<u32>,
+    max_budget_usd: Option<f64>,
     kanna_preamble: Option<&str>,
     mcp_config_path: Option<&str>,
     worktree_path: Option<&str>,
@@ -51,6 +54,15 @@ pub(super) fn build_agent_command(
             }
             if !allowed_tools.is_empty() {
                 flags.push(format!("--allowedTools {}", allowed_tools.join(",")));
+            }
+            if !disallowed_tools.is_empty() {
+                flags.push(format!("--disallowedTools {}", disallowed_tools.join(",")));
+            }
+            if let Some(max_turns) = max_turns {
+                flags.push(format!("--max-turns {}", max_turns));
+            }
+            if let Some(max_budget_usd) = max_budget_usd {
+                flags.push(format!("--max-budget-usd {}", max_budget_usd));
             }
             if let Some(preamble) = kanna_preamble {
                 flags.push(format!(
@@ -93,6 +105,11 @@ pub(super) fn build_agent_command(
             if !allowed_tools.is_empty() {
                 for tool in allowed_tools {
                     flags.push(format!("--allow-tool={}", tool));
+                }
+            }
+            if !disallowed_tools.is_empty() {
+                for tool in disallowed_tools {
+                    flags.push(format!("--deny-tool={}", tool));
                 }
             }
             format!("copilot {} -i '{}'", flags.join(" "), escaped_prompt)

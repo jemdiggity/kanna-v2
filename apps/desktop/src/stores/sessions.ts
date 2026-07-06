@@ -1,9 +1,10 @@
 import type { AgentProvider, PipelineItem } from "@kanna/db";
-import { getRepo, updateAgentSessionId, updatePipelineItemActivity } from "@kanna/db";
+import { getRepo } from "@kanna/db";
 import { buildKannaRuntimeSystemPrompt, buildKannaRuntimeUserPrompt } from "../../../../packages/core/src/pipeline/prompt-builder";
 import { invoke } from "../invoke";
 import { isTauri } from "../tauri-mock";
 import { buildTaskShellCommand, getShellTerminalEnv, getTaskTerminalEnv } from "../composables/terminalSessionRecovery";
+import { updateDesktopTaskAgentSessionId } from "../services/desktopServerClient";
 import { buildKannaCliPathEnv, buildTaskRuntimeEnv, resolveKannaServerBaseUrl } from "./kannaCliEnv";
 import { prepareKannaMcpRuntime } from "./kannaMcpRuntime";
 import { readEnvVarOptional, whichBinaryOptional } from "../utils/invokeHelpers";
@@ -15,10 +16,9 @@ import {
   requireResolvedAgentProvider,
   type AgentProviderAvailability,
 } from "./agent-provider";
-import { resolveActivityForRuntimeStatus, shouldIgnoreRuntimeStatusDuringSetup } from "./taskRuntimeStatus";
+import { shouldIgnoreRuntimeStatusDuringSetup } from "./taskRuntimeStatus";
 import { isReadableDirectory, resolveShellSpawnCwd } from "../utils/shellCwd";
 import { readRepoConfig, requireService, type AgentSpawnRecoveryOptions, type PreparedPtySession, type PtySpawnOptions, type StoreContext, type TaskSessionRecoveryOptions } from "./state";
-import { isTaskSelectedInAnyWindow } from "./windowSelection";
 
 interface DaemonSessionInfo {
   session_id?: string;
@@ -117,14 +117,6 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
     }
 
     if (status === "busy" || status === "idle" || status === "waiting") {
-      const nextActivity = resolveActivityForRuntimeStatus(
-        item.activity,
-        status,
-        await isTaskSelectedInAnyWindow(context, item.id),
-      );
-      if (nextActivity == null) return;
-
-      await updatePipelineItemActivity(context.requireDb(), item.id, nextActivity);
       await requireService(context.services.reloadSnapshot, "reloadSnapshot")();
       await context.services.windowWorkspace?.invalidateSharedData("taskActivity");
     }
@@ -188,7 +180,7 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
     if (!resumeSessionId) return;
     const item = context.state.items.value.find((candidate) => candidate.id === sessionId);
     if (!item || item.agent_provider !== "codex") return;
-    await updateAgentSessionId(context.requireDb(), sessionId, resumeSessionId);
+    await updateDesktopTaskAgentSessionId(sessionId, resumeSessionId);
   }
 
   async function spawnShellSession(
@@ -437,7 +429,7 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
       resumeSessionId: options?.resumeSessionId,
       worktreePath,
       persistAgentSessionId: async (agentSessionId) => {
-        await updateAgentSessionId(context.requireDb(), sessionId, agentSessionId);
+        await updateDesktopTaskAgentSessionId(sessionId, agentSessionId);
       },
       resolveBinaryPath: async (name) => invoke<string>("which_binary", { name }),
     });

@@ -1,4 +1,3 @@
-import { clearCachedTerminalState } from "../composables/terminalStateCache";
 import { getAppErrorCode } from "../appError";
 
 export function isTeardownSessionId(sessionId: string): boolean {
@@ -59,13 +58,4 @@ export function reportPrewarmSessionError(
   }
 
   logger(prefix, error);
-}
-
-export async function closePipelineItemAndClearCachedTerminalState(
-  itemId: string,
-  closePipelineItem: (itemId: string) => Promise<unknown>,
-  clearCachedState: (sessionId: string) => void = clearCachedTerminalState,
-): Promise<void> {
-  await closePipelineItem(itemId);
-  clearCachedState(itemId);
 }

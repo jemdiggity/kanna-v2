@@ -13,6 +13,7 @@ import {
 import { createStoreContext, createStoreState } from "./state";
 import { createInitApi } from "./init";
 import { applySnapshotSettingsToState } from "./snapshotSettings";
+import { setDesktopTaskActionForTests } from "../services/desktopServerClient";
 
 const mockState = vi.hoisted(() => {
   const now = "2026-04-23T00:00:00.000Z";
@@ -254,6 +255,7 @@ function getSharedInvalidationHandler(
 describe("createInitApi", () => {
   beforeEach(() => {
     mockState.reset();
+    setDesktopTaskActionForTests(null);
     vi.mocked(getSetting).mockResolvedValue(null);
     vi.mocked(setSetting).mockClear();
   });
@@ -298,9 +300,7 @@ describe("createInitApi", () => {
       error: vi.fn(),
     };
     const context = createStoreContext(state, toast, services);
-    const ports = {
-      closeTaskAndReleasePorts: vi.fn(async () => {}),
-    } as unknown as import("./ports").PortsStore;
+    const ports = {} as unknown as import("./ports").PortsStore;
     const initApi = createInitApi(context, ports, {
       checkUnblocked: vi.fn(async () => {}),
       handleAgentFinished: vi.fn(),
@@ -377,6 +377,10 @@ describe("createInitApi", () => {
   it("closes orphaned tasks whose initialized worktree is missing from disk", async () => {
     mockState.tauri = true;
     mockState.items = [mockState.makeItem({ id: "task-1", branch: "task-task-1" })];
+    const closeAction = vi.fn(async () => {});
+    setDesktopTaskActionForTests(async (action, taskId) => {
+      if (action === "close") await closeAction(taskId);
+    });
     mockState.invokeMock.mockImplementation(async (command: string) => {
       if (command === "file_exists") return false;
       if (command === "list_sessions") return [];
@@ -423,15 +427,13 @@ describe("createInitApi", () => {
     }) as DbHandle["select"];
     await initApi.init(db);
 
-    expect(
-      (ports as unknown as { closeTaskAndReleasePorts: ReturnType<typeof vi.fn> }).closeTaskAndReleasePorts,
-    ).toHaveBeenCalledWith("task-1", expect.any(Function));
+    expect(closeAction).toHaveBeenCalledWith("task-1");
     expect(mockState.invokeMock).toHaveBeenCalledWith("file_exists", {
       path: "/tmp/repo/.kanna-worktrees/task-task-1",
     });
   });
 
-  it("restores unblocked tasks through the shared blocked-task restore path on startup", async () => {
+  it("leaves close-driven unblock startup restoration to the server", async () => {
     const blockedItem = mockState.makeItem({ id: "task-blocked" });
     const closedBlocker = mockState.makeItem({
       id: "task-blocker",
@@ -471,7 +473,7 @@ describe("createInitApi", () => {
 
     await initApi.init(createDb());
 
-    expect(restoreUnblockedTask).toHaveBeenCalledWith(blockedItem);
+    expect(restoreUnblockedTask).not.toHaveBeenCalled();
     expect(startBlockedTask).not.toHaveBeenCalled();
   });
 
@@ -863,7 +865,7 @@ describe("createInitApi", () => {
       expect.anything(),
       expect.anything(),
     );
-    expect(restoreUnblockedTask).toHaveBeenCalledWith(blockedItem);
+    expect(restoreUnblockedTask).not.toHaveBeenCalled();
     expect(state.suspendAfterMinutes.value).toBe(7);
     expect(state.ideCommand.value).toBe("zed");
   });

@@ -1,7 +1,6 @@
 import type { PipelineItem } from "@kanna/db";
 import type { AgentExecutionType } from "./agentExecutionType";
 import type { CreateItemOptions, StoreContext } from "./state";
-import type { PortsStore } from "./ports";
 import { createTaskBlockedActions } from "./taskBlockedActions";
 import { createTaskCloseActions } from "./taskCloseActions";
 import { createTaskItemActions } from "./taskItemActions";
@@ -42,12 +41,11 @@ export interface TasksApi {
 
 export function createTasksApi(
   context: StoreContext,
-  ports: PortsStore,
 ): TasksApi {
   const repoActions = createTaskRepoActions(context);
-  const itemActions = createTaskItemActions(context, ports);
-  const blockedActions = createTaskBlockedActions(context, ports);
-  const closeActions = createTaskCloseActions(context, ports, {
+  const itemActions = createTaskItemActions(context);
+  const blockedActions = createTaskBlockedActions(context);
+  const closeActions = createTaskCloseActions(context, {
     checkUnblocked: blockedActions.checkUnblocked,
   });
   const metadataActions = createTaskMetadataActions(context);
