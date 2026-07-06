@@ -354,12 +354,31 @@ export interface PendingIncomingTransfer {
   payload_json: string | null;
 }
 
+interface PendingIncomingTransferResponse {
+  id: string;
+  sourcePeerId?: string | null;
+  sourceTaskId?: string | null;
+  payloadJson?: string | null;
+  source_peer_id?: string | null;
+  source_task_id?: string | null;
+  payload_json?: string | null;
+}
+
+function normalizePendingIncomingTransfer(row: PendingIncomingTransferResponse): PendingIncomingTransfer {
+  return {
+    id: row.id,
+    source_peer_id: row.source_peer_id ?? row.sourcePeerId ?? null,
+    source_task_id: row.source_task_id ?? row.sourceTaskId ?? null,
+    payload_json: row.payload_json ?? row.payloadJson ?? null,
+  };
+}
+
 export async function fetchPendingIncomingTransfers(): Promise<PendingIncomingTransfer[]> {
   if (clientHandlersForTests?.fetchPendingIncomingTransfers) {
     return await clientHandlersForTests.fetchPendingIncomingTransfers();
   }
-  const response = await requestJson<{ transfers: PendingIncomingTransfer[] }>("/v1/transfers/incoming/pending");
-  return response.transfers;
+  const response = await requestJson<{ transfers: PendingIncomingTransferResponse[] }>("/v1/transfers/incoming/pending");
+  return response.transfers.map(normalizePendingIncomingTransfer);
 }
 
 export async function claimPendingIncomingTransfer(transferId: string): Promise<boolean> {
