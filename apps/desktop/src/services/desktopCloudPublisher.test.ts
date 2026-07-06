@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   __resetDesktopCloudPublisherCachesForTests,
+  deleteDesktopTaskSnapshotForLocalTask,
   deleteRemoteTaskSnapshots,
   publishDesktopTaskSnapshot,
   reconcileDesktopTaskSnapshots,
@@ -484,6 +485,21 @@ describe("desktop cloud live task index publisher", () => {
     });
 
     expect(mocks.delete).toHaveBeenCalledWith({ kind: "doc-ref", id: "task-remote-doc" });
+    expect(mocks.commit).toHaveBeenCalledTimes(1);
+  });
+
+  it("deletes current desktop task metadata by local repo and task id", async () => {
+    mocks.getDoc.mockResolvedValue({ exists: () => true });
+    mocks.getDocs.mockResolvedValueOnce({ docs: [
+      docSnapshot("task-local-doc", {
+        localRepoId: "repo-1",
+        ownerLocalTaskId: "task-local",
+      }),
+    ] });
+
+    await deleteDesktopTaskSnapshotForLocalTask("repo-1", "task-local");
+
+    expect(mocks.delete).toHaveBeenCalledWith({ kind: "doc-ref", id: "task-local-doc" });
     expect(mocks.commit).toHaveBeenCalledTimes(1);
   });
 

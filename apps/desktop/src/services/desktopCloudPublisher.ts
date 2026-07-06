@@ -51,7 +51,7 @@ type TaskSnapshotDocument = Record<string, unknown> & {
 };
 
 export async function publishDesktopTaskSnapshot(
-  db: DbHandle,
+  db: DbHandle | null | undefined,
   item: PipelineItem,
   repo: Repo | null = null,
 ): Promise<void> {
@@ -91,7 +91,20 @@ export async function deleteRemoteTaskSnapshots(identity: RemoteTaskSnapshotIden
   await deleteTaskSnapshotByIdentity(context, identity, { createDesktopDoc: false });
 }
 
-export async function reconcileDesktopTaskSnapshots(db: DbHandle): Promise<void> {
+export async function deleteDesktopTaskSnapshotForLocalTask(
+  localRepoId: string,
+  ownerLocalTaskId: string,
+): Promise<void> {
+  const context = await getCloudWriteContext();
+  if (!context) return;
+  await deleteTaskSnapshotByIdentity(context, {
+    ownerDesktopId: context.desktopId,
+    localRepoId,
+    ownerLocalTaskId,
+  }, { createDesktopDoc: false });
+}
+
+export async function reconcileDesktopTaskSnapshots(db: DbHandle | null | undefined): Promise<void> {
   void db;
   const context = await getCloudWriteContext();
   if (!context) return;
@@ -118,7 +131,7 @@ export async function reconcileDesktopTaskSnapshots(db: DbHandle): Promise<void>
 }
 
 export async function publishDesktopTaskSnapshots(
-  db: DbHandle,
+  db: DbHandle | null | undefined,
   _options: PublishDesktopTaskSnapshotsOptions = {},
 ): Promise<void> {
   await reconcileDesktopTaskSnapshots(db);
