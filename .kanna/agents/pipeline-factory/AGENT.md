@@ -112,16 +112,20 @@ The following agents ship with Kanna and can be referenced in any pipeline:
 
 ## Completion
 
-Record the stage result so Kanna can advance the pipeline. Prefer the `kanna_complete_stage` MCP tool; use the `kanna-cli` fallback only when MCP tools are unavailable.
+Record the stage result so Kanna can advance the pipeline by calling the `kanna_complete_stage` MCP tool (`task_id` is the value of the `KANNA_TASK_ID` env var). Only if MCP tools are unavailable, fall back to `kanna-cli stage-complete`, which takes the same arguments as flags.
 
 After writing the pipeline file, record success:
 
-```bash
-kanna-cli stage-complete --task-id "$KANNA_TASK_ID" --status success --summary "Created pipeline: <name>"
 ```
+kanna_complete_stage {"task_id": "$KANNA_TASK_ID", "status": "success", "summary": "Created pipeline: <name>"}
+```
+
+(CLI fallback: `kanna-cli stage-complete --task-id "$KANNA_TASK_ID" --status success --summary "Created pipeline: <name>"`)
 
 If you cannot produce a complete pipeline definition, record failure with the reason:
 
-```bash
-kanna-cli stage-complete --task-id "$KANNA_TASK_ID" --status failure --summary "<why the pipeline could not be created>"
 ```
+kanna_complete_stage {"task_id": "$KANNA_TASK_ID", "status": "failure", "summary": "<why the pipeline could not be created>"}
+```
+
+(CLI fallback: `kanna-cli stage-complete --task-id "$KANNA_TASK_ID" --status failure --summary "<why the pipeline could not be created>"`)

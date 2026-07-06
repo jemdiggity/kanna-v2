@@ -1,6 +1,7 @@
+use super::definitions::PipelineStageTransition;
 use super::environment::resolve_binary_from_candidates_with_path_lookup;
 use super::lifecycle::spawn_prepared_task;
-use super::prompt::PromptContext;
+use super::prompt::{build_revision_resume_message, PromptContext};
 use super::provider::{AgentProvider, AgentSessionType};
 use super::types::{CreatedTask, PreparedSessionSpawn, PreparedStageTransition, PreparedTaskSpawn};
 use super::{
