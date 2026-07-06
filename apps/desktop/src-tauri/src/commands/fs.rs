@@ -53,6 +53,7 @@ pub struct AppBuildInfo {
     pub version: String,
     pub branch: String,
     pub commit_hash: String,
+    pub task_id: String,
     pub worktree: String,
 }
 
@@ -62,6 +63,7 @@ pub fn get_app_build_info() -> AppBuildInfo {
         version: crate::KANNA_VERSION.to_string(),
         branch: crate::KANNA_BUILD_BRANCH.to_string(),
         commit_hash: crate::KANNA_BUILD_COMMIT.to_string(),
+        task_id: crate::KANNA_BUILD_TASK_ID.to_string(),
         worktree: crate::KANNA_BUILD_WORKTREE.to_string(),
     }
 }

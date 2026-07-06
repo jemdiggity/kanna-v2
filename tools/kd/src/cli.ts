@@ -67,8 +67,8 @@ function parseDevRestartInput(rest: string[]): ParsedCliCommand {
   if (hasComponent) {
     input.component = first;
   }
-  if (input.withCredentials === true && !(input.staging === true && input.component === "desktop")) {
-    throw new Error("--with-credentials is only supported for staging desktop launch commands");
+  if (input.withCredentials === true && (input.component !== "desktop" || input.production === true)) {
+    throw new Error("--with-credentials is only supported for dev or staging desktop launch commands");
   }
   return { taskId: "dev.restart", input };
 }
@@ -85,7 +85,7 @@ function parseMobileUpInput(rest: string[]): ParsedCliCommand {
     throw new Error("mobile up accepts only one of --production or --staging");
   }
   if (input.withCredentials === true && input.staging !== true) {
-    throw new Error("--with-credentials is only supported for staging desktop launch commands");
+    throw new Error("--with-credentials is only supported for dev or staging desktop launch commands");
   }
   if (input.production === true || input.staging === true) {
     return {
@@ -115,7 +115,7 @@ function parseMobileRunInput(rest: string[]): ParsedCliCommand {
     throw new Error("mobile run requires --device");
   }
   if (input.withCredentials === true && input.staging !== true) {
-    throw new Error("--with-credentials is only supported for staging desktop launch commands");
+    throw new Error("--with-credentials is only supported for dev or staging desktop launch commands");
   }
   return {
     taskId: "mobile.run",
@@ -265,7 +265,13 @@ function parseFlagInput(rest: string[], defaults: Record<string, unknown>): Reco
 
 function rejectUnsupportedCredentialsFlag(input: Record<string, unknown>): void {
   if (input.withCredentials === true) {
-    throw new Error("--with-credentials is only supported for staging desktop launch commands");
+    throw new Error("--with-credentials is only supported for dev or staging desktop launch commands");
+  }
+}
+
+function validateDevUpCloudFlags(input: Record<string, unknown>): void {
+  if (input.production === true) {
+    throw new Error("dev up only supports --staging for cloud launch");
   }
 }
 
@@ -275,7 +281,7 @@ export function parseCliArgs(args: string[]): ParsedCliCommand {
   }
   if (args.length === 0 || args[0]?.startsWith("-")) {
     const input = parseFlagInput(args, defaultDevUpInput);
-    rejectUnsupportedCredentialsFlag(input);
+    validateDevUpCloudFlags(input);
     return { taskId: "dev.up", input };
   }
 
@@ -284,7 +290,7 @@ export function parseCliArgs(args: string[]): ParsedCliCommand {
 
   if (group === "dev" && command === "up") {
     const input = parseFlagInput(rest, defaultDevUpInput);
-    rejectUnsupportedCredentialsFlag(input);
+    validateDevUpCloudFlags(input);
     return { taskId: "dev.up", input };
   }
   if (group === "mobile" && command === "up") {
@@ -296,7 +302,7 @@ export function parseCliArgs(args: string[]): ParsedCliCommand {
   if (group === "mobile" && command === "doctor") {
     const parsed = parseMobileRunInput(rest);
     if (parsed.input.withCredentials === true) {
-      throw new Error("--with-credentials is only supported for staging desktop launch commands");
+      throw new Error("--with-credentials is only supported for dev or staging desktop launch commands");
     }
     return { taskId: "mobile.doctor", input: parsed.input };
   }
@@ -397,9 +403,9 @@ export function parseCliArgs(args: string[]): ParsedCliCommand {
   if (group === "clean") {
     return { taskId: "clean", input: parseFlagInput([command, ...rest].filter((arg): arg is string => Boolean(arg)), { all: false, dry: false, sharedRustBuild: false }) };
   }
-  if (group === "start") {
+  if (group === "start" || group === "up") {
     const input = parseFlagInput([command, ...rest].filter((arg): arg is string => Boolean(arg)), defaultDevUpInput);
-    rejectUnsupportedCredentialsFlag(input);
+    validateDevUpCloudFlags(input);
     return { taskId: "dev.up", input };
   }
   if (group === "restart") {
@@ -444,7 +450,7 @@ function helpText(): string {
     "Usage: kd <command>",
     "",
     "Commands:",
-    "  dev up [--mobile] [--emulators] [--seed] [--attach] [--db <path-or-name>] [--delete-db] [--firebase-env-from <task-or-path>]",
+    "  dev up [--staging] [--with-credentials] [--mobile] [--emulators] [--seed] [--attach] [--db <path-or-name>] [--delete-db] [--firebase-env-from <task-or-path>]",
     "  dev up --remote",
     "  dev down [--kill-daemon]",
     "  dev restart [desktop|mobile|backend] [--staging|--production] [--with-credentials] [--mobile] [--emulators] [--seed] [--attach] [--delete-db]",

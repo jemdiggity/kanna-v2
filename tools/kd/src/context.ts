@@ -40,6 +40,12 @@ function isWorktreePath(repoRoot: string, env: NodeJS.ProcessEnv): boolean {
   return env.KANNA_WORKTREE === "1" || repoRoot.includes("/.kanna-worktrees/");
 }
 
+function deriveTaskIdFromWorktreeName(worktreeName: string | undefined): string | undefined {
+  if (!worktreeName) return undefined;
+  const match = /^task-(.+?)(?:-\d+)?$/.exec(worktreeName);
+  return match?.[1];
+}
+
 function applicationSupportPath(homeDir: string, bundleIdentifier: string, dbName: string): string {
   return join(homeDir, "Library", "Application Support", bundleIdentifier, dbName);
 }
@@ -53,6 +59,8 @@ export function resolveKdContext(input: ResolveKdContextInput): KdContext {
   if (isWorktree) {
     env.KANNA_WORKTREE = "1";
     env.KANNA_BUILD_WORKTREE = worktreeName;
+    env.KANNA_BUILD_TASK_ID =
+      env.KANNA_TASK_ID?.trim() || deriveTaskIdFromWorktreeName(worktreeName) || "";
     const legacySharedRustBuildDir = join(input.homeDir, "Library", "Caches", "kanna", "rust-build");
     const inheritedRustBuildDir = env.CARGO_BUILD_BUILD_DIR?.trim();
     env.CARGO_BUILD_BUILD_DIR =

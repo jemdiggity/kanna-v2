@@ -29,6 +29,7 @@ pub type PipelineSocketState = Arc<Mutex<Option<String>>>;
 pub(crate) const KANNA_VERSION: &str = env!("KANNA_VERSION");
 pub(crate) const KANNA_BUILD_BRANCH: &str = env!("KANNA_BUILD_BRANCH");
 pub(crate) const KANNA_BUILD_COMMIT: &str = env!("KANNA_BUILD_COMMIT");
+pub(crate) const KANNA_BUILD_TASK_ID: &str = env!("KANNA_BUILD_TASK_ID");
 pub(crate) const KANNA_BUILD_WORKTREE: &str = env!("KANNA_BUILD_WORKTREE");
 pub(crate) const KANNA_BUILD_INFO: &str = env!("KANNA_BUILD_INFO");
 pub type TransferServiceState = Arc<Mutex<Option<transfer_sidecar::TransferSidecarClient>>>;

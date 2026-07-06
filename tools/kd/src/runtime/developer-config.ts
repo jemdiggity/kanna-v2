@@ -8,15 +8,24 @@ export interface DeveloperCredentials {
   password: string;
 }
 
+export const devDesktopAuth: DeveloperCredentials = {
+  email: "upvote.sieve.7t@icloud.com",
+  password: "password123"
+};
+
 export function resolveDeveloperConfigRoot(homeDir: string = homedir()): string {
   return join(homeDir, ".kanna", "developer");
+}
+
+export function devDesktopAuthPath(homeDir: string = homedir()): string {
+  return join(resolveDeveloperConfigRoot(homeDir), "dev", "desktop-auth.toml");
 }
 
 export function stagingDesktopAuthPath(homeDir: string = homedir()): string {
   return join(resolveDeveloperConfigRoot(homeDir), "staging", "desktop-auth.toml");
 }
 
-export function parseStagingDesktopAuth(body: string): DeveloperCredentials | null {
+export function parseDesktopAuth(body: string): DeveloperCredentials | null {
   let parsed: unknown;
   try {
     parsed = parseToml(body);
@@ -32,6 +41,23 @@ export function parseStagingDesktopAuth(body: string): DeveloperCredentials | nu
     return null;
   }
   return { email: email.trim(), password: password.trim() };
+}
+
+export function parseStagingDesktopAuth(body: string): DeveloperCredentials | null {
+  return parseDesktopAuth(body);
+}
+
+export function readDevDesktopAuth(homeDir: string = homedir()): DeveloperCredentials {
+  const path = devDesktopAuthPath(homeDir);
+  if (!existsSync(path)) {
+    return devDesktopAuth;
+  }
+
+  const credentials = parseDesktopAuth(readFileSync(path, "utf8"));
+  if (!credentials) {
+    throw new Error(`${path} exists but has no [desktop_auth] email/password entries.`);
+  }
+  return credentials;
 }
 
 export function readStagingDesktopAuth(homeDir: string = homedir()): DeveloperCredentials {

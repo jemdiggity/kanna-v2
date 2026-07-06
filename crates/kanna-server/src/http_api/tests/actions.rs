@@ -21,6 +21,19 @@ pub(super) async fn wait_for_task_stage(
     );
 }
 
+async fn recv_state_change_scope(
+    rx: &mut tokio::sync::broadcast::Receiver<kanna_agent_protocol::ServerFrame>,
+) -> kanna_agent_protocol::StateChangeScope {
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+        .await
+        .expect("timed out waiting for state change")
+        .expect("state change channel closed");
+    let kanna_agent_protocol::ServerFrame::StateChanged { scope } = frame else {
+        panic!("expected state change frame, got {frame:?}");
+    };
+    scope
+}
+
 async fn wait_for_task_closed(db: &Db, task_id: &str) -> crate::db::PipelineItem {
     for _ in 0..100 {
         let task = db.get_pipeline_item(task_id).unwrap().unwrap();
@@ -999,7 +1012,8 @@ async fn complete_pr_stage_with_pr_url_starts_dormant_dependent_optimistically()
         .trim()
         .to_string();
 
-    let app = super::router(Arc::new(super::AppState::new(config.clone())));
+    let state = Arc::new(super::AppState::new(config.clone()));
+    let app = super::router(Arc::clone(&state));
     let create_response = app
         .clone()
         .oneshot(
@@ -1023,6 +1037,7 @@ async fn complete_pr_stage_with_pr_url_starts_dormant_dependent_optimistically()
         .unwrap();
     let dependent: CreateTaskResponse = from_slice(&body).unwrap();
     assert_eq!(dependent.worktree_path, None);
+    let mut state_changes = state.subscribe_state_changes();
 
     let daemon_listener = UnixListener::bind(&socket_path).unwrap();
     let expected_task_id = dependent.task_id.clone();
@@ -1116,6 +1131,20 @@ async fn complete_pr_stage_with_pr_url_starts_dormant_dependent_optimistically()
         spawned.len(),
         1,
         "pr-stage completion should start the dependent once"
+    );
+    let state_change_scopes = [
+        recv_state_change_scope(&mut state_changes).await,
+        recv_state_change_scope(&mut state_changes).await,
+        recv_state_change_scope(&mut state_changes).await,
+    ];
+    assert_eq!(
+        state_change_scopes,
+        [
+            kanna_agent_protocol::StateChangeScope::Tasks,
+            kanna_agent_protocol::StateChangeScope::Tasks,
+            kanna_agent_protocol::StateChangeScope::Blockers,
+        ],
+        "complete-stage should notify the task update, then the optimistic dependent-start task/blocker refreshes",
     );
 
     let db = Db::open(&config.db_path).unwrap();
