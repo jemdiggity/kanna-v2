@@ -384,10 +384,17 @@ function taskRowAtPoint(x: number, y: number): { id: string; pinned: boolean } |
   return { id, pinned: Boolean(row.closest(".pinned-zone")) };
 }
 
-function resolveDropParent(x: number, y: number, childId: string): string | null {
-  const hit = taskRowAtPoint(x, y);
+function parentIdFromHit(hit: { id: string; pinned: boolean } | null, childId: string): string | null {
   // Dropping into the pinned zone stays a pin gesture, so only nest in other zones.
   return hit && !hit.pinned && hit.id !== childId ? hit.id : null;
+}
+
+function resolveDropParent(x: number, y: number, childId: string): string | null {
+  return parentIdFromHit(taskRowAtPoint(x, y), childId);
+}
+
+function currentParentId(taskId: string): string | null {
+  return props.pipelineItems.find((item) => item.id === taskId)?.parent_task_id ?? null;
 }
 
 function onTaskDragPointerMove(event: PointerEvent) {
@@ -400,8 +407,17 @@ function stopTaskDragTracking() {
   document.removeEventListener("pointermove", onTaskDragPointerMove, true);
 }
 
+function taskIdFromDragStart(evt: SortableDragEvent): string | null {
+  const target = evt.originalEvent?.target;
+  if (target instanceof HTMLElement) {
+    const rowTaskId = target.closest<HTMLElement>(".pipeline-item[data-task-id]")?.dataset.taskId;
+    if (rowTaskId) return rowTaskId;
+  }
+  return evt.item?.dataset.taskId ?? null;
+}
+
 function onTaskDragStart(evt: SortableDragEvent) {
-  draggedTaskId.value = isSearchActive() ? null : evt.item?.dataset.taskId ?? null;
+  draggedTaskId.value = isSearchActive() ? null : taskIdFromDragStart(evt);
   dropParentId.value = null;
   suppressParentDrop.value = false;
   if (draggedTaskId.value) {
@@ -419,12 +435,20 @@ function onTaskDragEnd(evt: SortableDragEvent) {
   suppressParentDrop.value = false;
   if (!childId || isSearchActive()) return;
   if (shouldSuppressParentDrop) return;
+  let hit: { id: string; pinned: boolean } | null = null;
+  let hasDropPoint = false;
   if (!parentId) {
     const point = pointerFromEvent(evt.originalEvent);
-    if (point) parentId = resolveDropParent(point.x, point.y, childId);
+    if (point) {
+      hasDropPoint = true;
+      hit = taskRowAtPoint(point.x, point.y);
+      parentId = parentIdFromHit(hit, childId);
+    }
   }
   if (parentId && parentId !== childId) {
     emit("set-parent", childId, parentId);
+  } else if (!parentId && hasDropPoint && !hit && currentParentId(childId)) {
+    emit("set-parent", childId, null);
   }
 }
 
