@@ -21,6 +21,7 @@ export type DiffRenderTheme = "github-dark" | "github-light";
 export interface DiffRenderContext {
   loadId: number;
   loadStartedAt: number;
+  allLines: boolean;
 }
 
 interface DiffFilePathMetadata {
@@ -257,6 +258,7 @@ export function useDiffRenderer(options: UseDiffRendererOptions) {
         diffStyle: "unified",
         diffIndicators: "classic",
         disableFileHeader: true,
+        expandUnchanged: context.allLines,
         onPostRender: () => {
           if (didLogPostRender || !options.isActiveDiffLoad(context.loadId)) return;
           didLogPostRender = true;
