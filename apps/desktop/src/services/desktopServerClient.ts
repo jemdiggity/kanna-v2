@@ -112,6 +112,7 @@ async function requestJson<T>(
         body: requestBody,
       });
       if (response.ok) {
+        if (response.status === 204) return undefined as T;
         return await response.json() as T;
       }
       const responseBody = await response.text().catch(() => "");
