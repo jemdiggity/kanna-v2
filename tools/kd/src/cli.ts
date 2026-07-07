@@ -34,7 +34,8 @@ const booleanFlagMap: Record<string, string> = {
   "--device": "device",
   "--remote": "remote",
   "--dev": "dev",
-  "--with-credentials": "withCredentials"
+  "--with-credentials": "withCredentials",
+  "--ota": "ota"
 };
 
 const defaultDevUpInput = {
@@ -137,6 +138,26 @@ function parseMobileRunInput(rest: string[]): ParsedCliCommand {
       production: input.production === true,
       staging: input.staging === true,
       ...(input.withCredentials === true ? { withCredentials: true } : {})
+    }
+  };
+}
+
+function parseMobileQaInput(rest: string[]): ParsedCliCommand {
+  const input = parseFlagInput(rest, { production: false, ota: false });
+  const unsupportedFlags = Object.entries(input)
+    .filter(([key, value]) => !["production", "ota"].includes(key) && value === true)
+    .map(([key]) => key);
+  if (unsupportedFlags.length > 0) {
+    throw new Error("mobile qa only accepts --production and --ota");
+  }
+  if (input.production !== true) {
+    throw new Error("mobile qa requires --production");
+  }
+  return {
+    taskId: "mobile.qa",
+    input: {
+      production: true,
+      ota: input.ota === true
     }
   };
 }
@@ -322,6 +343,9 @@ export function parseCliArgs(args: string[]): ParsedCliCommand {
   if (group === "mobile" && command === "run") {
     return parseMobileRunInput(rest);
   }
+  if (group === "mobile" && command === "qa") {
+    return parseMobileQaInput(rest);
+  }
   if (group === "mobile" && command === "doctor") {
     const parsed = parseMobileRunInput(rest);
     if (parsed.input.withCredentials === true) {
@@ -484,6 +508,7 @@ const helpTopics: Record<string, string[]> = {
     "  mobile up [--production|--staging] [--with-credentials]",
     "  mobile run --device [--production|--staging] [--with-credentials]",
     "  mobile doctor --device",
+    "  mobile qa --production [--ota]",
     "  mobile ota publish --staging|--production [--dry-run] [--rollback-to <updateId>]",
     "  mobile ota status --staging|--production",
     "  mobile ota doctor|preflight --staging|--production",
@@ -607,6 +632,7 @@ const helpTopics: Record<string, string[]> = {
     "  mobile up [--production|--staging] [--with-credentials]",
     "  mobile run --device [--production|--staging] [--with-credentials]",
     "  mobile doctor --device",
+    "  mobile qa --production [--ota]",
     "  mobile ota <command>",
     "  mobile test",
     "  mobile device-smoke"
@@ -636,6 +662,22 @@ const helpTopics: Record<string, string[]> = {
     "Usage: kd mobile doctor --device [--production|--staging]",
     "",
     "Check physical iOS device mobile development readiness."
+  ],
+  "mobile qa": [
+    "Usage: kd mobile qa --production [--ota]",
+    "",
+    "Run the repo-side production mobile QA gate for TestFlight/App Store candidates.",
+    "",
+    "Checks:",
+    "  production config sanity",
+    "  pnpm --dir apps/mobile run typecheck",
+    "  pnpm --dir apps/mobile run test",
+    "  pnpm --dir apps/mobile run test:e2e:preflight",
+    "  pnpm --dir apps/mobile run test:e2e:smoke",
+    "",
+    "Options:",
+    "  --production  Required. Validate the production mobile identity.",
+    "  --ota         Also run production OTA status and doctor checks."
   ],
   "mobile ota": [
     "Usage: kd mobile ota <command>",

@@ -112,6 +112,9 @@ describe("kd CLI", () => {
     await expect(runCli(["mobile", "run", "--help"])).resolves.toBe(0);
     expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd mobile run --device"));
 
+    await expect(runCli(["mobile", "qa", "--help"])).resolves.toBe(0);
+    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd mobile qa --production"));
+
     await expect(runCli(["mobile", "ota", "publish", "--staging", "--help"])).resolves.toBe(0);
     expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd mobile ota publish"));
 
@@ -472,6 +475,21 @@ describe("kd CLI", () => {
       taskId: "mobile.doctor",
       input: { device: true, production: false, staging: false }
     });
+  });
+
+  it("parses production mobile QA gate commands", () => {
+    expect(parseCliArgs(["mobile", "qa", "--production"])).toEqual({
+      taskId: "mobile.qa",
+      input: { production: true, ota: false }
+    });
+    expect(parseCliArgs(["mobile", "qa", "--production", "--ota"])).toEqual({
+      taskId: "mobile.qa",
+      input: { production: true, ota: true }
+    });
+    expect(() => parseCliArgs(["mobile", "qa"])).toThrow("mobile qa requires --production");
+    expect(() => parseCliArgs(["mobile", "qa", "--production", "--device"])).toThrow(
+      "mobile qa only accepts --production and --ota"
+    );
   });
 
   it("maps retired wrapper argument shapes to kd tasks", () => {

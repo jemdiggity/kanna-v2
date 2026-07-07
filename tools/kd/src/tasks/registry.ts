@@ -37,6 +37,11 @@ import {
   type PhysicalDeviceMetroReadinessInput
 } from "../runtime/mobile-device";
 import {
+  executeProductionMobileQa,
+  formatProductionMobileQaResult,
+  isProductionMobileQaOk
+} from "../runtime/mobile-qa";
+import {
   executeMobileOtaDoctorWithContext,
   executeMobileOtaProvisionSecretWithContext,
   executeMobileOtaPublishWithContext,
@@ -97,6 +102,11 @@ export interface MobileRunInput {
   withCredentials?: boolean;
 }
 
+export interface MobileQaInput {
+  production: boolean;
+  ota: boolean;
+}
+
 export const devUpInputSchema = z.object({
   mobile: z.boolean().default(false),
   emulators: z.boolean().default(false),
@@ -135,6 +145,11 @@ const mobileRunInputSchema = z.object({
   production: z.boolean().default(false),
   staging: z.boolean().default(false),
   withCredentials: z.boolean().default(false)
+});
+
+const mobileQaInputSchema = z.object({
+  production: z.boolean().default(false),
+  ota: z.boolean().default(false)
 });
 
 const mobileOtaPublishInputSchema = z.object({
@@ -1375,6 +1390,49 @@ async function executeMobileDeviceDoctor(input: MobileRunInput): Promise<TaskRes
   });
 }
 
+async function executeMobileQa(input: MobileQaInput): Promise<TaskResult> {
+  if (!input.production) {
+    return { ok: false, message: "mobile.qa requires --production." };
+  }
+
+  const context = await resolveDefaultContext(process.env);
+  const qa = await executeProductionMobileQa({
+    repoRoot: context.repoRoot,
+    env: context.env,
+    runner: nodeCommandRunner
+  });
+  const localOk = isProductionMobileQaOk(qa);
+  const messages = [formatProductionMobileQaResult(qa)];
+  const otaResults: TaskResult[] = [];
+
+  if (localOk && input.ota) {
+    const otaContext = {
+      repoRoot: context.repoRoot,
+      env: context.env,
+      runner: nodeCommandRunner
+    };
+    const status = await executeMobileOtaStatusWithContext({ production: true, staging: false }, otaContext);
+    otaResults.push(status);
+    messages.push("", status.message);
+    if (status.ok) {
+      const doctor = await executeMobileOtaDoctorWithContext({ production: true, staging: false }, otaContext);
+      otaResults.push(doctor);
+      messages.push("", doctor.message);
+    }
+  } else if (localOk) {
+    messages.push(
+      "",
+      "OTA production checks are not part of this run. For OTA-affecting releases, run `./kd mobile qa --production --ota` or `./kd mobile ota status --production` and `./kd mobile ota doctor --production`."
+    );
+  }
+
+  return {
+    ok: localOk && otaResults.every((result) => result.ok),
+    message: messages.join("\n"),
+    data: { qa, otaResults }
+  };
+}
+
 export async function executeDevDownWithContext(
   input: DevDownInput,
   executor: ExecutorInput,
@@ -1577,6 +1635,12 @@ export const taskDefinitions = [
     description: "Check physical iOS device mobile development readiness.",
     inputSchema: mobileRunInputSchema,
     execute: async (_context, input) => executeMobileDeviceDoctor(mobileRunInputSchema.parse(input))
+  },
+  {
+    id: "mobile.qa",
+    description: "Run the repo-side production mobile QA gate.",
+    inputSchema: mobileQaInputSchema,
+    execute: async (_context, input) => executeMobileQa(mobileQaInputSchema.parse(input))
   },
   {
     id: "mobile.ota.publish",

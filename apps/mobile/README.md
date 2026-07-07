@@ -1,5 +1,10 @@
 # Kanna Mobile
 
+## Production QA
+
+Before TestFlight external testing or App Store submission, run the production
+mobile QA gate in [docs/testing/mobile-production-qa-gate.md](../../docs/testing/mobile-production-qa-gate.md).
+
 ## OTA Runtime Version
 
 `apps/mobile/src/mobileEnvironments.json` is the source of truth for the mobile
