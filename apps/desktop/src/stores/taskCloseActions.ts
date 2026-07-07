@@ -22,6 +22,7 @@ import { readRepoConfig, requireService, type StoreContext } from "./state";
 import { resolveAgentProvider } from "./agent-provider";
 import { normalizeAgentExecutionType } from "./agentExecutionType";
 import { publishTaskSnapshotBestEffort } from "./taskPublishing";
+import { cleanupClosedTaskWorktrees } from "./taskWorktreeCleanup";
 import type { PortsStore } from "./ports";
 import type { TasksApi } from "./tasks";
 
@@ -57,6 +58,11 @@ export function createTaskCloseActions(
   async function closePipelineItemReleasePortsAndPublish(item: PipelineItem, repo: Repo): Promise<void> {
     await ports.closeTaskAndReleasePorts(item.id, (id) => closePipelineItem(context.requireDb(), id));
     await publishTaskSnapshotBestEffort(context, item.id, repo);
+  }
+
+  async function closePipelineItemReleasePortsPublishAndCleanup(item: PipelineItem, repo: Repo): Promise<void> {
+    await closePipelineItemReleasePortsAndPublish(item, repo);
+    await cleanupClosedTaskWorktrees(context, item, repo);
   }
 
   async function closeTask(targetItemId?: string, opts?: { selectNext?: boolean }) {
@@ -100,7 +106,7 @@ export function createTaskCloseActions(
         if (wasBlocked) {
           await removeAllBlockersForItem(context.requireDb(), item.id);
         }
-        await closePipelineItemReleasePortsAndPublish(item, repo);
+        await closePipelineItemReleasePortsPublishAndCleanup(item, repo);
 
         if (opts?.selectNext !== false) await selectReplacementAfterTaskRemoval(item);
         await dependencies.checkUnblocked(item.id);
@@ -111,7 +117,7 @@ export function createTaskCloseActions(
 
       if (closeBehavior === "finish" && wasBlocked && !ownsLiveTaskResources) {
         await removeAllBlockersForItem(context.requireDb(), item.id);
-        await closePipelineItemReleasePortsAndPublish(item, repo);
+        await closePipelineItemReleasePortsPublishAndCleanup(item, repo);
 
         if (opts?.selectNext !== false) await selectReplacementAfterTaskRemoval(item);
         await reloadSnapshot();
@@ -142,7 +148,7 @@ export function createTaskCloseActions(
         })) {
           await selectReplacementAfterTaskRemoval(item);
         }
-        await closePipelineItemReleasePortsAndPublish(item, repo);
+        await closePipelineItemReleasePortsPublishAndCleanup(item, repo);
         await dependencies.checkUnblocked(item.id);
         await reloadSnapshot();
         await invalidateWindowWorkspace("closeTask");
@@ -227,6 +233,21 @@ export function createTaskCloseActions(
       const worktreePath = item.branch ? `${repo.path}/.kanna-worktrees/${item.branch}` : repo.path;
 
       await reopenPipelineItem(context.requireDb(), item.id);
+      if (item.branch) {
+        const worktreeExists = await invoke<boolean>("file_exists", { path: worktreePath }).catch(() => false);
+        if (!worktreeExists) {
+          await invoke("git_worktree_add", {
+            repoPath: repo.path,
+            branch: item.branch,
+            path: worktreePath,
+            startPoint: null,
+          });
+          await context.requireDb().execute(
+            "INSERT INTO worktree (id, pipeline_item_id, path, branch) VALUES (?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET pipeline_item_id = excluded.pipeline_item_id, path = excluded.path, branch = excluded.branch",
+            [`wt-${item.id}`, item.id, worktreePath, item.branch],
+          );
+        }
+      }
       let portEnv: Record<string, string> = {};
       let portOffset: number | null = null;
       let portAllocationFailed = false;

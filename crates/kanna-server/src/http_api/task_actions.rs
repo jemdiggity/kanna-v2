@@ -293,6 +293,7 @@ pub(super) async fn close_task(
         &state.config,
         &pipeline_item_id,
     );
+    let has_workspace_teardown = workspace_teardown.is_some();
 
     let mut daemon = crate::daemon_client::DaemonClient::connect(&state.config.daemon_dir)
         .await
@@ -336,18 +337,22 @@ pub(super) async fn close_task(
     {
         log::warn!("failed to replace workspace teardown session {teardown_session_id}: {error}");
     }
-    crate::task_creator::spawn_prepared_workspace_teardown_best_effort(
-        &mut daemon,
-        workspace_teardown,
-    )
-    .await;
-
     db.close_pipeline_item(&pipeline_item_id).map_err(|e| {
         (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             format!("db error: {}", e),
         )
     })?;
+    if has_workspace_teardown {
+        crate::task_creator::spawn_prepared_workspace_teardown_best_effort(
+            &mut daemon,
+            workspace_teardown,
+        )
+        .await;
+    } else {
+        crate::worktree_cleanup::cleanup_closed_task_worktrees_by_id(&db, &pipeline_item_id)
+            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    }
     notify_task_completion(state.as_ref(), &pipeline_item_id, false)
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -368,6 +373,7 @@ async fn close_task_after_final_stage(
     task_id: String,
     workspace_teardown: Option<crate::task_creator::PreparedWorkspaceTeardown>,
 ) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
+    let has_workspace_teardown = workspace_teardown.is_some();
     let blocker_close_instructions = {
         let db = Db::open(&state.config.db_path).map_err(|e| {
             (
@@ -406,8 +412,6 @@ async fn close_task_after_final_stage(
     {
         log::warn!("failed to replace workspace teardown session {teardown_session_id}: {error}");
     }
-    crate::task_creator::spawn_prepared_workspace_teardown_best_effort(daemon, workspace_teardown)
-        .await;
     let db = Db::open(&state.config.db_path).map_err(|e| {
         (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -420,6 +424,16 @@ async fn close_task_after_final_stage(
             format!("db error: {}", e),
         )
     })?;
+    if has_workspace_teardown {
+        crate::task_creator::spawn_prepared_workspace_teardown_best_effort(
+            daemon,
+            workspace_teardown,
+        )
+        .await;
+    } else {
+        crate::worktree_cleanup::cleanup_closed_task_worktrees_by_id(&db, &task_id)
+            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    }
     notify_task_completion(state.as_ref(), &task_id, false)
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;

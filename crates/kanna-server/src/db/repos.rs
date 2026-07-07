@@ -1,11 +1,8 @@
 use super::{Db, NewRepo, Repo};
 
 impl Db {
-    pub fn list_repos(&self) -> Result<Vec<Repo>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, path, name, default_branch, hidden, sort_order, created_at, last_opened_at \
-             FROM repo WHERE hidden = 0 OR hidden IS NULL ORDER BY last_opened_at DESC",
-        )?;
+    fn collect_repos(&self, sql: &str) -> Result<Vec<Repo>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(sql)?;
         let rows = stmt.query_map([], |row| {
             Ok(Repo {
                 id: row.get(0)?,
@@ -19,6 +16,20 @@ impl Db {
             })
         })?;
         rows.collect()
+    }
+
+    pub fn list_repos(&self) -> Result<Vec<Repo>, rusqlite::Error> {
+        self.collect_repos(
+            "SELECT id, path, name, default_branch, hidden, sort_order, created_at, last_opened_at \
+             FROM repo WHERE hidden = 0 OR hidden IS NULL ORDER BY last_opened_at DESC",
+        )
+    }
+
+    pub fn list_repos_for_maintenance(&self) -> Result<Vec<Repo>, rusqlite::Error> {
+        self.collect_repos(
+            "SELECT id, path, name, default_branch, hidden, sort_order, created_at, last_opened_at \
+             FROM repo ORDER BY last_opened_at DESC",
+        )
     }
 
     pub fn get_repo(&self, id: &str) -> Result<Option<Repo>, rusqlite::Error> {

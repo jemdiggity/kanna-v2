@@ -1,4 +1,4 @@
-use super::Db;
+use super::{Db, WorktreeRecord};
 use rusqlite::OptionalExtension;
 
 impl Db {
@@ -38,6 +38,64 @@ impl Db {
                 |row| row.get(0),
             )
             .optional()
+    }
+
+    pub fn list_worktrees_for_task(
+        &self,
+        pipeline_item_id: &str,
+    ) -> Result<Vec<WorktreeRecord>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT pipeline_item_id, path, branch
+             FROM worktree
+             WHERE pipeline_item_id = ?
+             ORDER BY created_at ASC, id ASC",
+        )?;
+        let rows = stmt.query_map([pipeline_item_id], |row| {
+            Ok(WorktreeRecord {
+                pipeline_item_id: row.get(0)?,
+                path: row.get(1)?,
+                branch: row.get(2)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn list_worktrees_for_repo(
+        &self,
+        repo_id: &str,
+    ) -> Result<Vec<WorktreeRecord>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT worktree.pipeline_item_id, worktree.path, worktree.branch
+             FROM worktree
+             JOIN pipeline_item ON pipeline_item.id = worktree.pipeline_item_id
+             WHERE pipeline_item.repo_id = ?
+             ORDER BY worktree.created_at ASC, worktree.id ASC",
+        )?;
+        let rows = stmt.query_map([repo_id], |row| {
+            Ok(WorktreeRecord {
+                pipeline_item_id: row.get(0)?,
+                path: row.get(1)?,
+                branch: row.get(2)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn delete_worktree_rows_for_task(
+        &self,
+        pipeline_item_id: &str,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "DELETE FROM worktree WHERE pipeline_item_id = ?",
+            [pipeline_item_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_worktree_row_for_path(&self, path: &str) -> Result<(), rusqlite::Error> {
+        self.conn
+            .execute("DELETE FROM worktree WHERE path = ?", [path])?;
+        Ok(())
     }
 
     pub fn upsert_worktree(

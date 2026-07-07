@@ -13,7 +13,7 @@ Kanna is a product distributed to end users as a signed macOS app. All dependenc
 ### Core concepts
 
 - **Task** — A unit of work. Has a prompt, a git worktree, a Claude agent session, and a lifecycle stage. One task = one branch = one PR.
-- **Pipeline** — User-definable agentic pipeline: an ordered list of stages, each with an agent, an optional environment, a stage policy, and an optional post. Defined in `.kanna/pipelines/*.json`. Default: `in progress` (post: `commit`) `→ review → pr`. Tasks are durable (same id, run history, blockers), but each stage transition forks a fresh workspace: a new branch + worktree named `task-{id}-{n}` (the durable task id plus a workspace counter; the creation workspace is plain `task-{id}`) cut from the previous branch's committed tip — N worktrees, N branches, one PR (the PR agent renames the final branch into something meaningful). A workspace is an ephemeral manifestation of the task. A stage's `post` (e.g. commit) is tail work injected into the stage's running agent session before the transition — stages fork workspaces and swap sessions, posts continue them. Only committed work crosses a stage boundary; when the task leaves a workspace, the workspace's repo-config `teardown` commands run best-effort in a detached `td-{branch}` daemon session, but the old worktree itself stays on disk until cleanup. Advancing past the final stage closes the task.
+- **Pipeline** — User-definable agentic pipeline: an ordered list of stages, each with an agent, an optional environment, a stage policy, and an optional post. Defined in `.kanna/pipelines/*.json`. Default: `in progress` (post: `commit`) `→ review → pr`. Tasks are durable (same id, run history, blockers), but each stage transition forks a fresh workspace: a new branch + worktree named `task-{id}-{n}` (the durable task id plus a workspace counter; the creation workspace is plain `task-{id}`) cut from the previous branch's committed tip — N worktrees, N branches, one PR (the PR agent renames the final branch into something meaningful). A workspace is an ephemeral manifestation of the task. A stage's `post` (e.g. commit) is tail work injected into the stage's running agent session before the transition — stages fork workspaces and swap sessions, posts continue them. Only committed work crosses a stage boundary; when the task leaves a workspace, the workspace's repo-config `teardown` commands run best-effort in a detached `td-{branch}` daemon session, and open-task worktrees stay available for revision resume until the task closes. Advancing past the final stage closes the task; close snapshots dirty workspace state into local WIP commits, removes the task's worktrees, and keeps the branches.
 - **Daemon** — Standalone process that manages PTY sessions. Survives app restarts. Handles seamless upgrades via fd handoff.
 
 ### Workflows
@@ -43,10 +43,14 @@ Kanna is a product distributed to end users as a signed macOS app. All dependenc
 ### Closing a task (Cmd+Delete)
 
 1. Kills the agent PTY session and shell session in the daemon
-2. Sets `closed_at` in the DB
-3. Selects the next task in the sidebar
-4. Tasks with `closed_at` are hidden from the sidebar. The sidebar shows tasks whose `closed_at` is null.
-5. Closed tasks remain in the database and on disk until a future explicit cleanup workflow removes them.
+2. Runs workspace teardown commands best-effort when configured
+3. Sets `closed_at` in the DB
+4. Snapshots dirty state in each of the task's worktrees with a local `WIP at task close` commit, then removes those worktrees with `git worktree remove --force --force` and prunes worktree registrations
+5. Deletes the task's `worktree` table rows but keeps the task row and all branches. Branches are never deleted by close.
+6. Selects the next task in the sidebar
+7. Tasks with `closed_at` are hidden from the sidebar. The sidebar shows tasks whose `closed_at` is null.
+
+On server startup, Kanna reconciles leftovers across all repos, including hidden repos: closed-task worktrees are snapshotted and removed, stale registrations are pruned, and young orphan `task-*` directories without a task row are spared. This bounds registered worktrees by construction to roughly the number of open tasks. The bound matters because each registered git worktree expands sandboxed agent shell spawn profiles; unbounded worktrees can overflow macOS `ARG_MAX` and cause sandboxed shell launches to fail with `E2BIG`.
 
 ### Task activity
 

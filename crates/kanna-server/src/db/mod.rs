@@ -138,6 +138,13 @@ pub struct UiSnapshot {
     pub settings: HashMap<String, String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct WorktreeRecord {
+    pub pipeline_item_id: String,
+    pub path: String,
+    pub branch: String,
+}
+
 pub struct NewRepo<'a> {
     pub id: &'a str,
     pub path: &'a str,
