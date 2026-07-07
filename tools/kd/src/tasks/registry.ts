@@ -631,7 +631,7 @@ function parseRelayActiveDesktopIdsResponse(payload: unknown): Set<string> | nul
   );
 }
 
-async function listStagingRelayActiveDesktopIds(input: StagingRelayActiveDesktopIdsInput): Promise<Set<string>> {
+export async function listStagingRelayActiveDesktopIds(input: StagingRelayActiveDesktopIdsInput): Promise<Set<string>> {
   const credentials = readStagingDesktopAuth(input.env.HOME?.trim() || homedir());
   const apiKey = await readMobileFirebaseApiKey(input.repoRoot, "staging");
   const idToken = await fetchFirebaseIdToken(apiKey, credentials);
@@ -659,7 +659,7 @@ async function listStagingRelayActiveDesktopIds(input: StagingRelayActiveDesktop
     };
 
     ws.onopen = () => {
-      ws.send(JSON.stringify({ type: "auth", device_token: idToken }));
+      ws.send(JSON.stringify({ type: "auth", id_token: idToken }));
     };
     ws.onerror = () => {
       fail(new Error("Relay WebSocket failed while verifying staging relay active desktops."));
