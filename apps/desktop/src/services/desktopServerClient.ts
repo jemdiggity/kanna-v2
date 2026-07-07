@@ -1,6 +1,7 @@
 import type { PipelineItem, Repo, TaskBlocker } from "../types/kanna";
 import type { TaskTransfer } from "../types/kanna";
 import { invoke } from "../invoke";
+import type { SessionRecoveryState } from "../composables/sessionRecoveryState";
 
 export interface DesktopSnapshotEntry {
   repo: Repo;
@@ -148,6 +149,48 @@ async function requestOptionalJson<T>(
 export async function fetchDesktopSnapshot(): Promise<DesktopSnapshot> {
   if (snapshotFetcherForTests) return await snapshotFetcherForTests();
   return await requestJson<DesktopSnapshot>("/v1/snapshot", { retryMs: 15_000 });
+}
+
+export interface CreateDesktopTaskRequest {
+  repoId: string;
+  prompt: string;
+  displayName?: string | null;
+  pipelineName?: string;
+  stage?: string;
+  baseRef?: string | null;
+  agentProvider?: string;
+  agentType?: string;
+  model?: string;
+  permissionMode?: string;
+  allowedTools?: string[];
+  disallowedTools?: string[];
+  maxTurns?: number;
+  maxBudgetUsd?: number;
+  setupCmds?: string[];
+  resumeSessionId?: string | null;
+  recoverySnapshot?: SessionRecoveryState | null;
+  blockerTaskIds?: string[];
+  notifyTaskId?: string;
+  parentTaskId?: string;
+}
+
+export interface CreateDesktopTaskResponse {
+  taskId: string;
+  repoId: string;
+  title: string;
+  stage: string;
+  agentType: string;
+  worktreePath?: string | null;
+}
+
+export async function createDesktopTask(
+  request: CreateDesktopTaskRequest,
+): Promise<CreateDesktopTaskResponse> {
+  if (clientHandlersForTests?.createTask) return await clientHandlersForTests.createTask(request);
+  return await requestJson<CreateDesktopTaskResponse>("/v1/tasks", {
+    method: "POST",
+    body: request,
+  });
 }
 
 export interface DesktopSettingResponse {

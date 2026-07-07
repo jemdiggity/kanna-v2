@@ -3,7 +3,6 @@ import { computed, ref, watch } from "vue";
 import type { PipelineItem } from "../types/kanna";
 import { isBlockerResolved } from "../utils/blockerResolution";
 import { invoke } from "../invoke";
-import { isBlockerResolved } from "../utils/blockerResolution";
 import TaskHeader from "./TaskHeader.vue";
 import TerminalTabs from "./TerminalTabs.vue";
 import CloudTerminalView from "./CloudTerminalView.vue";
