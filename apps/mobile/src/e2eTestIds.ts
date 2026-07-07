@@ -21,6 +21,16 @@ export const MOBILE_E2E_IDS = {
   accountPasswordToggle: "mobile.account-toggle-password",
   accountSignInButton: "mobile.account-sign-in",
   accountSignOutButton: "mobile.account-sign-out",
+  createTaskPromptInput: "mobile.create-task.prompt",
+  createTaskSubmitButton: "mobile.create-task.submit",
+  createTaskError: "mobile.create-task.error",
+  createTaskOptionsToggle: "mobile.create-task.options-toggle",
+  createTaskMachineOption(desktopId: string): string {
+    return `mobile.create-task.machine.${desktopId}`;
+  },
+  createTaskAgentOption(provider: string): string {
+    return `mobile.create-task.agent.${provider}`;
+  },
   updateInfoOtaValue: "mobile.update-info.ota",
   updateReadyBanner: "mobile.update-ready",
   updateReadyDismissButton: "mobile.update-ready.dismiss",

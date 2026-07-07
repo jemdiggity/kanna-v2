@@ -605,6 +605,13 @@ class RelayTunnelSocket implements WebSocketLike {
     }
 
     if (parsed.type === "response" && typeof parsed.error === "string") {
+      this.onmessage?.({
+        data: JSON.stringify({
+          type: "error",
+          code: "relay_tunnel",
+          message: parsed.error,
+        }),
+      });
       this.onerror?.(new Error(parsed.error));
       if (!this.closed) this.close();
     }

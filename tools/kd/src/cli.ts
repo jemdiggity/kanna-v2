@@ -53,6 +53,7 @@ const defaultDevRestartInput = {
 };
 
 const restartComponents = new Set(["desktop", "mobile", "backend"]);
+const CREDENTIALS_FLAG_ERROR = "--with-credentials is only supported for dev or staging desktop launch commands";
 
 function parseDevRestartInput(rest: string[]): ParsedCliCommand {
   const [first, ...remaining] = rest;
@@ -67,8 +68,11 @@ function parseDevRestartInput(rest: string[]): ParsedCliCommand {
   if (hasComponent) {
     input.component = first;
   }
-  if (input.withCredentials === true && (input.component !== "desktop" || input.production === true)) {
-    throw new Error("--with-credentials is only supported for dev or staging desktop launch commands");
+  if (input.withCredentials === true && input.production === true) {
+    throw new Error(CREDENTIALS_FLAG_ERROR);
+  }
+  if (input.withCredentials === true && input.component && input.component !== "desktop") {
+    throw new Error(CREDENTIALS_FLAG_ERROR);
   }
   return { taskId: "dev.restart", input };
 }
@@ -84,8 +88,8 @@ function parseMobileUpInput(rest: string[]): ParsedCliCommand {
   if (input.production === true && input.staging === true) {
     throw new Error("mobile up accepts only one of --production or --staging");
   }
-  if (input.withCredentials === true && input.staging !== true) {
-    throw new Error("--with-credentials is only supported for dev or staging desktop launch commands");
+  if (input.withCredentials === true && input.production === true) {
+    throw new Error(CREDENTIALS_FLAG_ERROR);
   }
   if (input.production === true || input.staging === true) {
     return {
@@ -97,7 +101,16 @@ function parseMobileUpInput(rest: string[]): ParsedCliCommand {
       }
     };
   }
-  return { taskId: "dev.up", input: { ...defaultDevUpInput, mobile: true } };
+  return {
+    taskId: "dev.up",
+    input: {
+      ...defaultDevUpInput,
+      mobile: true,
+      ...(input.withCredentials === true
+        ? { emulators: true, withCredentials: true }
+        : {})
+    }
+  };
 }
 
 function parseMobileRunInput(rest: string[]): ParsedCliCommand {
@@ -114,8 +127,8 @@ function parseMobileRunInput(rest: string[]): ParsedCliCommand {
   if (input.device !== true) {
     throw new Error("mobile run requires --device");
   }
-  if (input.withCredentials === true && input.staging !== true) {
-    throw new Error("--with-credentials is only supported for dev or staging desktop launch commands");
+  if (input.withCredentials === true && input.production === true) {
+    throw new Error(CREDENTIALS_FLAG_ERROR);
   }
   return {
     taskId: "mobile.run",
@@ -265,7 +278,7 @@ function parseFlagInput(rest: string[], defaults: Record<string, unknown>): Reco
 
 function rejectUnsupportedCredentialsFlag(input: Record<string, unknown>): void {
   if (input.withCredentials === true) {
-    throw new Error("--with-credentials is only supported for dev or staging desktop launch commands");
+    throw new Error(CREDENTIALS_FLAG_ERROR);
   }
 }
 
@@ -312,7 +325,7 @@ export function parseCliArgs(args: string[]): ParsedCliCommand {
   if (group === "mobile" && command === "doctor") {
     const parsed = parseMobileRunInput(rest);
     if (parsed.input.withCredentials === true) {
-      throw new Error("--with-credentials is only supported for dev or staging desktop launch commands");
+      throw new Error(CREDENTIALS_FLAG_ERROR);
     }
     return { taskId: "mobile.doctor", input: parsed.input };
   }

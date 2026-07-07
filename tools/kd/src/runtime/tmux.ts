@@ -44,6 +44,10 @@ function tmuxCommandLine(command: string, args: string[]): string {
   return [command, ...args.map(tmuxQuote)].join(" ");
 }
 
+async function setRemainOnExit(runner: CommandRunner, target: TmuxTarget): Promise<void> {
+  await runner.run("tmux", ["-L", target.server, "set-option", "-t", target.session, "remain-on-exit", "on"]);
+}
+
 async function newTmuxWindowWithEnv(
   runner: CommandRunner,
   target: TmuxTarget,
@@ -119,7 +123,7 @@ export async function startTmuxSession(runner: CommandRunner, target: TmuxTarget
     throw new Error(`tmux failed to start ${target.session}:${first.name}: ${firstResult.stderr}`);
   }
 
-  await runner.run("tmux", ["-L", target.server, "set-option", "-t", target.session, "remain-on-exit", "on"]);
+  await setRemainOnExit(runner, target);
 
   if (hasTmuxWindowEnv(first.env)) {
     const respawned = await respawnTmuxWindow(runner, target, first);
@@ -167,6 +171,7 @@ async function addMissingTmuxWindows(
   if (list.exitCode !== 0) {
     throw new Error(`tmux failed to inspect existing session ${target.session}: ${list.stderr}`);
   }
+  await setRemainOnExit(runner, target);
 
   const existing = new Set(
     list.stdout
@@ -252,6 +257,8 @@ export async function respawnTmuxWindow(runner: CommandRunner, target: TmuxTarge
     return false;
   }
 
+  await setRemainOnExit(runner, target);
+
   const result = hasTmuxWindowEnv(window.env)
     ? await respawnTmuxWindowWithEnv(runner, target, window)
     : await runner.run(
@@ -272,7 +279,15 @@ export async function respawnTmuxWindow(runner: CommandRunner, target: TmuxTarge
   if (result.exitCode !== 0) {
     throw new Error(`tmux failed to respawn ${target.session}:${window.name}: ${result.stderr}`);
   }
-  return true;
+  const after = await runner.run("tmux", ["-L", target.server, "list-windows", "-t", target.session, "-F", "#{window_name}"]);
+  if (after.exitCode !== 0) {
+    return false;
+  }
+  return after.stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .includes(window.name);
 }
 
 export async function captureTmuxLog(runner: CommandRunner, target: TmuxTarget, window: string): Promise<string> {

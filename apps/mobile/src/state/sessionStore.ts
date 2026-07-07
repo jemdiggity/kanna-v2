@@ -8,6 +8,7 @@ import type { FrameAgentEvent } from "@kanna/agent-protocol";
 import type { MobileAuthState } from "../lib/firebase/auth";
 import type {
   PersistedSessionContext,
+  RepoCreationProfile,
   TrustedDesktopRecord
 } from "./sessionPersistence";
 
@@ -34,6 +35,12 @@ export type MobileView = "tasks" | "recent" | "search" | "desktops" | "more";
 export type TaskTerminalStatus = "idle" | "connecting" | "live" | "closed" | "error";
 export type RefreshStatus = "idle" | "refreshing" | "updated" | "error";
 export type AuthState = MobileAuthState;
+export type ComposerAgentProvider =
+  | "claude"
+  | "copilot"
+  | "codex"
+  | "opencode"
+  | "antigravity";
 
 export interface SessionState {
   connectionMode: DesktopMode | null;
@@ -46,6 +53,7 @@ export interface SessionState {
   auth: AuthState;
   desktops: DesktopSummary[];
   trustedDesktops: TrustedDesktopRecord[];
+  repoCreationProfiles: RepoCreationProfile[];
   selectedDesktopId: string | null;
   repos: RepoSummary[];
   selectedRepoId: string | null;
@@ -58,6 +66,11 @@ export interface SessionState {
   pairingCode: string | null;
   isComposerOpen: boolean;
   composerPrompt: string;
+  composerDesktopId: string | null;
+  composerAgentProvider: ComposerAgentProvider;
+  isComposerOptionsExpanded: boolean;
+  composerErrorMessage: string | null;
+  isComposerSubmitting: boolean;
   taskTerminalTaskId: string | null;
   taskTerminalStatus: TaskTerminalStatus;
   taskTerminalOutput: string;
@@ -84,6 +97,7 @@ export interface SessionStore {
   setDesktops(desktops: DesktopSummary[]): void;
   setTrustedDesktops(desktops: TrustedDesktopRecord[]): void;
   upsertTrustedDesktop(desktop: TrustedDesktopRecord): void;
+  upsertRepoCreationProfile(profile: RepoCreationProfile): void;
   selectDesktop(desktopId: string): void;
   setRepos(repos: RepoSummary[]): void;
   selectRepo(repoId: string): void;
@@ -94,6 +108,11 @@ export interface SessionStore {
   setActiveView(view: MobileView): void;
   setPairingCode(code: string | null): void;
   setComposerState(isOpen: boolean, prompt: string): void;
+  setComposerDesktop(desktopId: string | null): void;
+  setComposerAgentProvider(provider: ComposerAgentProvider): void;
+  setComposerOptionsExpanded(isExpanded: boolean): void;
+  setComposerErrorMessage(message: string | null): void;
+  setComposerSubmitting(isSubmitting: boolean): void;
   beginTaskTerminal(taskId: string, initialOutput: string): void;
   appendTaskTerminal(taskId: string, chunk: string): void;
   setTaskTerminalStatus(taskId: string, status: TaskTerminalStatus): void;
@@ -118,6 +137,7 @@ export function createSessionStore(): SessionStore {
     auth: { status: "signedOut" },
     desktops: [],
     trustedDesktops: [],
+    repoCreationProfiles: [],
     selectedDesktopId: null,
     repos: [],
     selectedRepoId: null,
@@ -130,6 +150,11 @@ export function createSessionStore(): SessionStore {
     pairingCode: null,
     isComposerOpen: false,
     composerPrompt: "",
+    composerDesktopId: null,
+    composerAgentProvider: "claude",
+    isComposerOptionsExpanded: true,
+    composerErrorMessage: null,
+    isComposerSubmitting: false,
     taskTerminalTaskId: null,
     taskTerminalStatus: "idle",
     taskTerminalOutput: "",
@@ -207,7 +232,8 @@ export function createSessionStore(): SessionStore {
         selectedTaskId: state.selectedTaskId,
         activeView: state.activeView,
         authUser: state.auth.status === "signedIn" ? state.auth.user : null,
-        trustedDesktops: state.trustedDesktops
+        trustedDesktops: state.trustedDesktops,
+        repoCreationProfiles: state.repoCreationProfiles
       };
     },
     hydrateContext(context) {
@@ -220,7 +246,8 @@ export function createSessionStore(): SessionStore {
         auth: context.authUser
           ? { status: "signedIn", user: context.authUser }
           : state.auth,
-        trustedDesktops: context.trustedDesktops ?? []
+        trustedDesktops: context.trustedDesktops ?? [],
+        repoCreationProfiles: context.repoCreationProfiles ?? []
       };
       publish();
     },
@@ -282,6 +309,19 @@ export function createSessionStore(): SessionStore {
       }
 
       state = { ...state, trustedDesktops };
+      publish();
+    },
+    upsertRepoCreationProfile(profile) {
+      const existing = state.repoCreationProfiles.find(
+        (candidate) => candidate.repoId === profile.repoId
+      );
+      const repoCreationProfiles = existing
+        ? state.repoCreationProfiles.map((candidate) =>
+            candidate.repoId === profile.repoId ? profile : candidate
+          )
+        : [profile, ...state.repoCreationProfiles];
+
+      state = { ...state, repoCreationProfiles };
       publish();
     },
     selectDesktop(desktopId) {
@@ -376,7 +416,36 @@ export function createSessionStore(): SessionStore {
       publish();
     },
     setComposerState(isComposerOpen, composerPrompt) {
-      state = { ...state, isComposerOpen, composerPrompt };
+      state = {
+        ...state,
+        isComposerOpen,
+        composerPrompt,
+        composerErrorMessage:
+          !isComposerOpen || composerPrompt !== state.composerPrompt
+            ? null
+            : state.composerErrorMessage,
+        isComposerSubmitting: isComposerOpen ? state.isComposerSubmitting : false
+      };
+      publish();
+    },
+    setComposerDesktop(composerDesktopId) {
+      state = { ...state, composerDesktopId, composerErrorMessage: null };
+      publish();
+    },
+    setComposerAgentProvider(composerAgentProvider) {
+      state = { ...state, composerAgentProvider, composerErrorMessage: null };
+      publish();
+    },
+    setComposerOptionsExpanded(isComposerOptionsExpanded) {
+      state = { ...state, isComposerOptionsExpanded };
+      publish();
+    },
+    setComposerErrorMessage(composerErrorMessage) {
+      state = { ...state, composerErrorMessage };
+      publish();
+    },
+    setComposerSubmitting(isComposerSubmitting) {
+      state = { ...state, isComposerSubmitting };
       publish();
     },
     beginTaskTerminal(taskId, initialOutput) {

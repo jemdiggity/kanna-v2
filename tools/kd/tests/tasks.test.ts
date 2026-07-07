@@ -210,7 +210,9 @@ describe("task executors", () => {
     expect(calls[2]?.args.join(" ")).toContain("KANNA_APP_ENV='staging'");
     expect(calls[2]?.args.join(" ")).toContain("EXPO_PUBLIC_FIREBASE_PROJECT_ID='kanna-staging'");
     expect(calls[2]?.args.join(" ")).toContain("EXPO_PUBLIC_KANNA_RELAY_URL='wss://relay-staging.kanna.build'");
-    expect(calls.map((call) => `${call.command} ${call.args.join(" ")}`).join("\n")).not.toContain("curl --fail");
+    expect(calls.map((call) => `${call.command} ${call.args.join(" ")}`).join("\n")).not.toContain(
+      "http://127.0.0.1:48120/v1/status"
+    );
   });
 
   it("injects staging desktop credentials only into the desktop window for staging mobile up", async () => {
@@ -455,14 +457,20 @@ describe("task executors", () => {
         environment: "staging"
       }
     });
-    expect(calls.map((call) => call.args[2])).toEqual(["list-windows", "respawn-window"]);
-    expect(calls[1]).toMatchObject({
+    const respawnCall = calls.find((call) => call.args.includes("respawn-window"));
+    expect(calls.filter((call) => call.command === "tmux").map((call) => call.args[2])).toEqual([
+      "list-windows",
+      "set-option",
+      "respawn-window",
+      "list-windows"
+    ]);
+    expect(respawnCall).toMatchObject({
       command: "tmux",
       args: expect.arrayContaining(["respawn-window", "-t", "kanna-task-abc:desktop", "-c", `${repoRoot}/apps/desktop`])
     });
-    expect(calls[1]?.env?.KANNA_CLOUD_ENV).toBe("staging");
-    expect(calls[1]?.env?.KANNA_FIREBASE_PROJECT_ID).toBe("kanna-staging");
-    expect(calls[1]?.env?.KANNA_RELAY_URL).toBe("wss://relay-staging.kanna.build");
+    expect(respawnCall?.env?.KANNA_CLOUD_ENV).toBe("staging");
+    expect(respawnCall?.env?.KANNA_FIREBASE_PROJECT_ID).toBe("kanna-staging");
+    expect(respawnCall?.env?.KANNA_RELAY_URL).toBe("wss://relay-staging.kanna.build");
     expect(calls.map((call) => call.args.join(" ")).join("\n")).not.toContain("mobile");
   });
 
@@ -510,10 +518,60 @@ describe("task executors", () => {
       }
     );
 
-    expect(calls[1]?.env?.KANNA_DESKTOP_AUTO_SIGN_IN_EMAIL).toBe("dev@example.com");
-    expect(calls[1]?.env?.KANNA_DESKTOP_AUTO_SIGN_IN_PASSWORD).toBe("do-not-print");
-    expect(calls[1]?.args.join(" ")).not.toContain("do-not-print");
-    expect(calls[1]?.args.join(" ")).not.toContain("dev@example.com");
+    const respawnCall = calls.find((call) => call.args.includes("source-file"));
+    expect(respawnCall?.env?.KANNA_DESKTOP_AUTO_SIGN_IN_EMAIL).toBe("dev@example.com");
+    expect(respawnCall?.env?.KANNA_DESKTOP_AUTO_SIGN_IN_PASSWORD).toBe("do-not-print");
+    expect(respawnCall?.args.join(" ")).not.toContain("do-not-print");
+    expect(respawnCall?.args.join(" ")).not.toContain("dev@example.com");
+  });
+
+  it("injects dev emulator desktop credentials on dev desktop restart", async () => {
+    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-kd-restart-dev-creds-"));
+    await mkdir(join(repoRoot, "apps", "desktop", "src-tauri"), { recursive: true });
+    const calls: Array<{ command: string; args: string[]; env?: NodeJS.ProcessEnv }> = [];
+    const runner: CommandRunner = {
+      async run(command, args, options) {
+        calls.push({ command, args, env: options?.env });
+        if (args.includes("list-windows")) {
+          return { exitCode: 0, stdout: "desktop\nmobile\n", stderr: "" };
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+    };
+
+    await executeDevRestartWithContext(
+      {
+        component: "desktop",
+        mobile: false,
+        emulators: false,
+        seed: false,
+        attach: false,
+        deleteDb: false,
+        killDaemon: false,
+        staging: false,
+        production: false,
+        withCredentials: true
+      },
+      {
+        runner,
+        context: {
+          repoRoot,
+          tmux: { server: "kanna-task-abc", session: "kanna-task-abc" },
+          ports: { KANNA_DEV_PORT: 1421, KANNA_MOBILE_PORT: 8084 },
+          env: {
+            KANNA_DEV_PORT: "1421",
+            KANNA_MOBILE_PORT: "8084"
+          }
+        }
+      }
+    );
+
+    const respawnCall = calls.find((call) => call.args.includes("source-file"));
+    expect(respawnCall?.env?.KANNA_CLOUD_ENV).toBeUndefined();
+    expect(respawnCall?.env?.KANNA_DESKTOP_AUTO_SIGN_IN_EMAIL).toBe("upvote.sieve.7t@icloud.com");
+    expect(respawnCall?.env?.KANNA_DESKTOP_AUTO_SIGN_IN_PASSWORD).toBe("password123");
+    expect(respawnCall?.args.join(" ")).not.toContain("password123");
+    expect(respawnCall?.args.join(" ")).not.toContain("upvote.sieve.7t@icloud.com");
   });
 
   it("restarts only the mobile tmux window without respawning desktop", async () => {
@@ -552,12 +610,13 @@ describe("task executors", () => {
     );
 
     expect(result.ok).toBe(true);
-    expect(calls.map((call) => call.args[2])).toEqual(["list-windows", "respawn-window"]);
-    expect(calls[1]?.args).toEqual(
+    const respawnCall = calls.find((call) => call.args.includes("respawn-window"));
+    expect(calls.map((call) => call.args[2])).toEqual(["list-windows", "set-option", "respawn-window", "list-windows"]);
+    expect(respawnCall?.args).toEqual(
       expect.arrayContaining(["respawn-window", "-t", "kanna-task-abc:mobile", "-c", "/repo/apps/mobile"])
     );
-    expect(calls[1]?.args.join(" ")).toContain("pnpm run dev -- --port 8084 --dev-client");
-    expect(calls[1]?.args.join(" ")).not.toContain("apps/desktop");
+    expect(respawnCall?.args.join(" ")).toContain("pnpm run dev -- --port 8084 --dev-client");
+    expect(respawnCall?.args.join(" ")).not.toContain("apps/desktop");
   });
 
   it("reports backend component restart as unsupported until it has a clean pane boundary", async () => {
@@ -1022,6 +1081,81 @@ describe("task executors", () => {
     expect(calls[prebuildIndex]?.env?.KANNA_APP_ENV).toBe("staging");
     expect(calls[installIndex]?.env?.KANNA_APP_ENV).toBe("staging");
     expect(calls[installIndex]?.env?.REACT_NATIVE_PACKAGER_HOSTNAME).toBe("172.16.0.193");
+  });
+
+  it("blocks staging physical-device launch when the installed staging desktop is absent from the relay", async () => {
+    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-kd-device-staging-offline-"));
+    await mkdir(join(repoRoot, "apps", "desktop", "src-tauri"), { recursive: true });
+    const calls: Array<{ command: string; args: string[] }> = [];
+    const runner: CommandRunner = {
+      async run(command, args) {
+        calls.push({ command, args });
+        if (command === "xcrun" && args.join(" ") === "xcdevice list") {
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify([
+              {
+                available: true,
+                identifier: "00008130-001015CA1091401C",
+                name: "Jerome's iPhone 15",
+                operatingSystemVersion: "17.5 (21F79)",
+                platform: "com.apple.platform.iphoneos",
+                simulator: false
+              }
+            ]),
+            stderr: ""
+          };
+        }
+        if (command === "tmux" && args.includes("list-windows")) {
+          return { exitCode: 0, stdout: "desktop\nmobile\n", stderr: "" };
+        }
+        if (command === "curl" && args.at(-1) === "http://127.0.0.1:48121/v1/status") {
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({
+              desktopId: "desktop-installed-staging",
+              version: "0.1.0",
+              relayUrl: "wss://relay-staging.kanna.build"
+            }),
+            stderr: ""
+          };
+        }
+        if (command === "curl") {
+          return { exitCode: 0, stdout: "packager-status:running\n", stderr: "" };
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+    };
+
+    const result = await executeMobileDeviceRunWithContext(
+      { device: true, production: false, staging: true },
+      {
+        runner,
+        context: {
+          repoRoot,
+          tmux: { server: "kanna-task-abc", session: "kanna-task-abc" },
+          ports: {
+            KANNA_DEV_PORT: 1421,
+            KANNA_MOBILE_PORT: 1430
+          },
+          env: {
+            KANNA_DEV_PORT: "1421",
+            KANNA_MOBILE_PORT: "1430",
+            KANNA_MOBILE_SERVER_PORT: "48120",
+            KANNA_IOS_DEVICE_UDID: "00008130-001015CA1091401C"
+          }
+        }
+      },
+      {
+        resolveLanAddress: () => "172.16.0.193",
+        listStagingRelayActiveDesktopIds: async () => new Set(["desktop-worktree-staging"])
+      }
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("Installed staging desktop desktop-installed-staging is not active in staging relay.");
+    expect(calls.some((call) => call.command === "pnpm" && call.args.includes("prebuild"))).toBe(false);
+    expect(calls.some((call) => call.command === "pnpm" && call.args[2] === "ios")).toBe(false);
   });
 
   it("runs physical-device mobile doctor checks without building or launching the app", async () => {
