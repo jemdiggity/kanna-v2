@@ -842,6 +842,80 @@ describe("DiffView", () => {
     wrapper.unmount();
   });
 
+  it("skips files with oversized raw patch lines when parsed metadata omits the full line", async () => {
+    const patch = [
+      "diff --git a/src/normal.ts b/src/normal.ts",
+      "index 7898192..6178079 100644",
+      "--- a/src/normal.ts",
+      "+++ b/src/normal.ts",
+      "@@ -1 +1 @@",
+      "-const ok = false;",
+      "+const ok = true;",
+      "diff --git a/artifacts/raw-capture.json b/artifacts/raw-capture.json",
+      "index 7898192..6178079 100644",
+      "--- a/artifacts/raw-capture.json",
+      "+++ b/artifacts/raw-capture.json",
+      "@@ -1 +1 @@",
+      "-{}",
+      `+${"x".repeat(300_000)}`,
+      "",
+    ].join("\n");
+
+    diffMocks.parsePatchFilesMock.mockReturnValueOnce([
+      {
+        files: [
+          {
+            name: "src/normal.ts",
+            hunks: [],
+            additionLines: ["const ok = true;"],
+            deletionLines: ["const ok = false;"],
+          },
+          {
+            name: "artifacts/raw-capture.json",
+            hunks: [],
+            additionLines: ["[large line omitted by parser]"],
+            deletionLines: ["{}"],
+          },
+        ],
+      },
+    ]);
+
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "git_diff") return patch;
+      return "";
+    });
+
+    const wrapper = mount(DiffView, {
+      props: {
+        repoPath: "/repo",
+        initialScope: "working",
+      },
+      attachTo: document.body,
+      global: {
+        mocks: {
+          $t: (key: string) => key,
+        },
+      },
+    });
+
+    await flushPromises();
+    await flushPromises();
+
+    expect(renderMock).toHaveBeenCalledTimes(1);
+    expect(renderMock.mock.calls[0][0].fileDiff).toMatchObject({
+      name: "src/normal.ts",
+    });
+    expect(wrapper.findAll(".diff-file-header").map((header) => header.text())).toEqual([
+      "src/normal.ts",
+      "artifacts/raw-capture.json",
+    ]);
+    expect(wrapper.get(".diff-file-skipped").text()).toBe(
+      "Large diff omitted to keep the viewer responsive.",
+    );
+
+    wrapper.unmount();
+  });
+
   it("yields after the first file render so broad diffs can paint early", async () => {
     vi.useFakeTimers();
     diffMocks.parsePatchFilesMock.mockReturnValueOnce([
