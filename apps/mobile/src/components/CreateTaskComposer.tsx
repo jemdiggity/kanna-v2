@@ -65,7 +65,10 @@ export function CreateTaskComposer({
     AGENT_OPTIONS.find((option) => option.provider === selectedAgentProvider)?.label ??
     selectedAgentProvider;
   const canSubmit =
-    Boolean(selectedRepoId && selectedDesktopId && prompt.trim()) && !isSubmitting;
+    Boolean(selectedRepoId && selectedDesktop && prompt.trim()) && !isSubmitting;
+  const selectedDesktopLabel = selectedDesktop
+    ? `${selectedDesktop.name} (${selectedDesktop.online ? "online" : "offline"})`
+    : "Choose machine";
 
   return (
     <Modal animationType="slide" onRequestClose={onClose} transparent visible={isOpen}>
@@ -88,7 +91,7 @@ export function CreateTaskComposer({
             <View>
               <Text style={styles.optionsTitle}>Options</Text>
               <Text style={styles.optionsValue} numberOfLines={1}>
-                {selectedDesktop?.name ?? "Choose machine"} · {selectedAgentLabel}
+                {selectedDesktopLabel} · {selectedAgentLabel}
               </Text>
             </View>
             <Text style={styles.optionsChevron}>
@@ -102,7 +105,7 @@ export function CreateTaskComposer({
                 <Text style={styles.optionLabel}>Machine</Text>
                 <View style={styles.choiceGroup}>
                   {desktops.map((desktop) => {
-                    const selected = desktop.id === selectedDesktopId;
+                    const selected = desktop.id === selectedDesktop?.id;
                     return (
                       <Pressable
                         key={desktop.id}
@@ -122,6 +125,14 @@ export function CreateTaskComposer({
                           ]}
                         >
                           {desktop.name}
+                        </Text>
+                        <Text
+                          style={[
+                            styles.choiceOptionMeta,
+                            selected ? styles.choiceOptionMetaSelected : null
+                          ]}
+                        >
+                          {desktop.online ? "Online" : "Offline"}
                         </Text>
                       </Pressable>
                     );
@@ -161,7 +172,7 @@ export function CreateTaskComposer({
             </View>
           ) : null}
 
-          {!selectedDesktopId && !errorMessage ? (
+          {!selectedDesktop && !errorMessage ? (
             <Text style={styles.helperText}>Choose a machine before creating.</Text>
           ) : null}
 
@@ -189,7 +200,7 @@ export function CreateTaskComposer({
               disabled={!canSubmit}
               style={[styles.primaryButton, !canSubmit ? styles.primaryButtonDisabled : null]}
               testID={MOBILE_E2E_IDS.createTaskSubmitButton}
-              onPress={onSubmit}
+              onPress={canSubmit ? onSubmit : undefined}
             >
               <Text style={styles.primaryLabel}>
                 {isSubmitting ? "Creating..." : "Create"}
@@ -294,6 +305,15 @@ const styles = StyleSheet.create({
   },
   choiceOptionLabelSelected: {
     color: "#0B1220"
+  },
+  choiceOptionMeta: {
+    color: "#93A7C8",
+    fontSize: 11,
+    fontWeight: "700",
+    marginTop: 2
+  },
+  choiceOptionMetaSelected: {
+    color: "#30405D"
   },
   helperText: {
     color: "#A9B8D1",

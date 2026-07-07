@@ -393,6 +393,45 @@ describe("createMobileController", () => {
     });
   });
 
+  it("treats a saved machine that is no longer listed as unselected", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    store.selectRepo("repo-2");
+    store.upsertRepoCreationProfile({
+      repoId: "repo-2",
+      desktopId: "desktop-stale",
+      agentProvider: "opencode",
+      updatedAt: "2026-07-06T00:00:00.000Z"
+    });
+
+    controller.openComposer();
+    controller.updateComposerPrompt("Ship mobile shell");
+    await controller.createTask();
+
+    expect(client.createTask).not.toHaveBeenCalled();
+    expect(store.getState()).toMatchObject({
+      isComposerOpen: true,
+      composerDesktopId: null,
+      composerAgentProvider: "opencode",
+      composerErrorMessage: "Choose a machine for this repo first.",
+      isComposerOptionsExpanded: true
+    });
+
+    controller.selectComposerDesktop("desktop-1");
+    await controller.createTask();
+
+    expect(client.createTask).toHaveBeenCalledWith({
+      repoId: "repo-2",
+      prompt: "Ship mobile shell",
+      desktopId: "desktop-1",
+      agentProvider: "opencode",
+      agentType: "pty"
+    });
+  });
+
   it("opens composer options expanded when no machine can be inferred", async () => {
     const store = createSessionStore();
     const client = createClientMock();
@@ -417,6 +456,10 @@ describe("createMobileController", () => {
     const controller = createMobileController(client, store);
 
     await controller.bootstrap();
+    store.setDesktops([
+      ...store.getState().desktops,
+      { id: "desktop-owner", name: "Owner Mac", online: true, mode: "remote" }
+    ]);
     store.selectRepo("repo-cloud");
     store.setRepoTasks([
       {

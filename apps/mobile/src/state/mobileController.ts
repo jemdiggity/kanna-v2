@@ -293,6 +293,15 @@ export function createMobileController(
       : null;
   };
 
+  const resolveKnownDesktopId = (desktopId: string | null | undefined): string | null => {
+    if (!desktopId) {
+      return null;
+    }
+    return store.getState().desktops.some((desktop) => desktop.id === desktopId)
+      ? desktopId
+      : null;
+  };
+
   const inferComposerDesktopId = (repoId: string): string | null => {
     const state = store.getState();
     const ownerIds = new Set<string>();
@@ -310,11 +319,11 @@ export function createMobileController(
       }
     }
     if (ownerIds.size === 1) {
-      return Array.from(ownerIds)[0] ?? null;
+      return resolveKnownDesktopId(Array.from(ownerIds)[0]);
     }
 
     const repoExistsOnCurrentDesktop = state.repos.some((repo) => repo.id === repoId);
-    return repoExistsOnCurrentDesktop ? state.selectedDesktopId : null;
+    return repoExistsOnCurrentDesktop ? resolveKnownDesktopId(state.selectedDesktopId) : null;
   };
 
   const startCloudTaskSubscription = (uid: string): boolean => {
@@ -535,7 +544,11 @@ export function createMobileController(
         ? state.repoCreationProfiles.find((candidate) => candidate.repoId === selectedRepoId)
         : null;
       const composerDesktopId =
-        profile?.desktopId ?? (selectedRepoId ? inferComposerDesktopId(selectedRepoId) : null);
+        profile
+          ? resolveKnownDesktopId(profile.desktopId)
+          : selectedRepoId
+            ? inferComposerDesktopId(selectedRepoId)
+            : null;
 
       store.setComposerDesktop(composerDesktopId);
       store.setComposerAgentProvider(profile?.agentProvider ?? state.composerAgentProvider);
@@ -588,7 +601,9 @@ export function createMobileController(
         return;
       }
 
-      if (!state.composerDesktopId) {
+      const composerDesktopId = resolveKnownDesktopId(state.composerDesktopId);
+      if (!composerDesktopId) {
+        store.setComposerDesktop(null);
         store.setComposerErrorMessage("Choose a machine for this repo first.");
         store.setComposerOptionsExpanded(true);
         store.setComposerSubmitting(false);
@@ -601,7 +616,7 @@ export function createMobileController(
         const created = await client.createTask({
           repoId: state.selectedRepoId,
           prompt: state.composerPrompt.trim(),
-          desktopId: state.composerDesktopId,
+          desktopId: composerDesktopId,
           agentProvider: state.composerAgentProvider,
           agentType: "pty"
         });
@@ -619,7 +634,7 @@ export function createMobileController(
         store.setRepoTasks(repoTasks);
         store.upsertRepoCreationProfile({
           repoId: state.selectedRepoId,
-          desktopId: state.composerDesktopId,
+          desktopId: composerDesktopId,
           agentProvider: state.composerAgentProvider,
           updatedAt: new Date().toISOString()
         });
