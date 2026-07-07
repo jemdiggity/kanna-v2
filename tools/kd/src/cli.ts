@@ -485,7 +485,7 @@ const helpTopics: Record<string, string[]> = {
     "  clean [--all] [--dry] [--shared-rust-build]",
     "  build desktop",
     "  build sidecars",
-    "  release ship [--staging|--production] [--dry-run] [--release] [--major|--minor|--patch] [--arm64|--x86_64]",
+    "  release ship [--staging|--production] [--dry-run] [--release] [--major|--minor|--patch] [--arm64|--x86_64] [--rollback-to <version>]",
     "  cloud deploy --staging|--production [--relay]",
     "  cloud relay-provision --staging|--production",
     "  pages build-schema --out-dir <dir>",
@@ -748,12 +748,13 @@ const helpTopics: Record<string, string[]> = {
     "Usage: kd release <command>",
     "",
     "Commands:",
-    "  release ship [--staging|--production] [--dry-run] [--release] [--major|--minor|--patch] [--arm64|--x86_64]"
+    "  release ship [--staging|--production] [--dry-run] [--release] [--major|--minor|--patch] [--arm64|--x86_64] [--rollback-to <version>]"
   ],
   "release ship": [
-    "Usage: kd release ship [--staging|--production] [--dry-run] [--release] [--major|--minor|--patch] [--arm64|--x86_64]",
+    "Usage: kd release ship [--staging|--production] [--dry-run] [--release] [--major|--minor|--patch] [--arm64|--x86_64] [--rollback-to <version>]",
     "",
-    "Build, sign, notarize, and optionally publish a Kanna release."
+    "Build, sign, notarize, and optionally publish a Kanna release.",
+    "Use --staging --rollback-to <version> to repoint the staging channel manifest without building."
   ],
   cloud: [
     "Usage: kd cloud <command>",

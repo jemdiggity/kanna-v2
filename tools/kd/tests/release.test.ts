@@ -174,6 +174,9 @@ describe("release shipping", () => {
           if (command === "git" && args.join(" ") === "status --porcelain") {
             return { exitCode: 0, stdout: "", stderr: "" };
           }
+          if (command === "git" && args.join(" ") === "ls-remote --tags origin v1.2.4-staging.*") {
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
           if (command === "bazel" && args[0] === "build") {
             expect(args).toContain("//:kanna_signed_dmg_staging_arm64");
             expect(args).toContain("//:kanna_updater_bundle_staging_arm64");
@@ -189,7 +192,7 @@ describe("release shipping", () => {
           if (command === "sh" && args[0] === "-c") {
             expect(args[1]).toContain("hdiutil attach");
             expect(args[1]).toContain("sips -g pixelWidth -g pixelHeight");
-            expect(args.at(-1)).toBe(join(repoRoot, ".build", "release", "staging", "Kanna_Staging_1.2.4_arm64.dmg"));
+            expect(args.at(-1)).toBe(join(repoRoot, ".build", "release", "staging", "Kanna_Staging_1.2.4-staging.1_arm64.dmg"));
             return { exitCode: 0, stdout: "", stderr: "" };
           }
           if (command === "pnpm") {
@@ -213,13 +216,13 @@ describe("release shipping", () => {
         runner
       });
 
-      expect(releaseAssetName("1.2.4", "arm64", "staging")).toBe("Kanna_Staging_1.2.4_arm64.dmg");
-      expect(updaterAssetName("1.2.4", "arm64", "staging")).toBe("Kanna_Staging_1.2.4_arm64.app.tar.gz");
-      expect(updaterSignatureName("1.2.4", "arm64", "staging")).toBe("Kanna_Staging_1.2.4_arm64.app.tar.gz.sig");
-      expect(result.dmgPaths).toEqual([join(repoRoot, ".build", "release", "staging", "Kanna_Staging_1.2.4_arm64.dmg")]);
+      expect(releaseAssetName("1.2.4-staging.1", "arm64", "staging")).toBe("Kanna_Staging_1.2.4-staging.1_arm64.dmg");
+      expect(updaterAssetName("1.2.4-staging.1", "arm64", "staging")).toBe("Kanna_Staging_1.2.4-staging.1_arm64.app.tar.gz");
+      expect(updaterSignatureName("1.2.4-staging.1", "arm64", "staging")).toBe("Kanna_Staging_1.2.4-staging.1_arm64.app.tar.gz.sig");
+      expect(result.dmgPaths).toEqual([join(repoRoot, ".build", "release", "staging", "Kanna_Staging_1.2.4-staging.1_arm64.dmg")]);
       expect(result.updaterPaths).toEqual([
-        join(repoRoot, ".build", "release", "staging", "Kanna_Staging_1.2.4_arm64.app.tar.gz"),
-        join(repoRoot, ".build", "release", "staging", "Kanna_Staging_1.2.4_arm64.app.tar.gz.sig")
+        join(repoRoot, ".build", "release", "staging", "Kanna_Staging_1.2.4-staging.1_arm64.app.tar.gz"),
+        join(repoRoot, ".build", "release", "staging", "Kanna_Staging_1.2.4-staging.1_arm64.app.tar.gz.sig")
       ]);
       expect(result.latestJson).toBe(join(repoRoot, ".build", "release", "staging", "latest-staging.json"));
       const validationCall = calls.find((call) => call.command === "sh" && call.args[0] === "-c");
@@ -232,7 +235,7 @@ describe("release shipping", () => {
     }
   });
 
-  it("uploads staging releases to the mutable desktop-staging channel without tagging production", async () => {
+  it("publishes staging as an immutable prerelease, then repoints desktop-staging", async () => {
     const root = await mkdtemp(join(tmpdir(), "kd-release-"));
     try {
       const { repoRoot, privateKeyPath } = createReleaseRepo(root);
@@ -255,6 +258,20 @@ describe("release shipping", () => {
           if (command === "git" && args.join(" ") === "remote get-url origin") {
             return { exitCode: 0, stdout: "git@github.com:jemdiggity/kanna.git\n", stderr: "" };
           }
+          if (command === "git" && args.join(" ") === "ls-remote --tags origin v1.2.4-staging.*") {
+            return {
+              exitCode: 0,
+              stdout: [
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\trefs/tags/v1.2.4-staging.1",
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\trefs/tags/v1.2.4-staging.4",
+                "cccccccccccccccccccccccccccccccccccccccc\trefs/tags/v1.2.4-staging.4^{}"
+              ].join("\n"),
+              stderr: ""
+            };
+          }
+          if (command === "git" && args.join(" ") === "rev-parse HEAD") {
+            return { exitCode: 0, stdout: "1234567890abcdef\n", stderr: "" };
+          }
           if (command === "bazel" && args[0] === "cquery") {
             return { exitCode: 0, stdout: `${outputs.get(args[3]) ?? ""}\n`, stderr: "" };
           }
@@ -268,27 +285,71 @@ describe("release shipping", () => {
             return { exitCode: 0, stdout: "", stderr: "" };
           }
           if (command === "gh" && args.join(" ") === "release view desktop-staging --repo jemdiggity/kanna") {
-            return { exitCode: 1, stdout: "", stderr: "not found" };
+            return { exitCode: 0, stdout: "", stderr: "" };
           }
           if (command === "gh" && args[0] === "release" && args[1] === "create") {
             expect(args).toEqual([
               "release",
               "create",
-              "desktop-staging",
+              "v1.2.4-staging.5",
               "--repo",
               "jemdiggity/kanna",
               "--title",
-              "Kanna Desktop Staging",
+              "Kanna Staging v1.2.4-staging.5",
               "--notes",
-              "Mutable desktop staging updater channel.",
-              "--prerelease"
+              "Staging updater manifest for v1.2.4-staging.5",
+              "--target",
+              "1234567890abcdef",
+              "--prerelease",
+              join(repoRoot, ".build", "release", "staging", "Kanna_Staging_1.2.4-staging.5_arm64.dmg"),
+              join(repoRoot, ".build", "release", "staging", "Kanna_Staging_1.2.4-staging.5_x86_64.dmg"),
+              join(repoRoot, ".build", "release", "staging", "Kanna_Staging_1.2.4-staging.5_arm64.app.tar.gz"),
+              join(repoRoot, ".build", "release", "staging", "Kanna_Staging_1.2.4-staging.5_arm64.app.tar.gz.sig"),
+              join(repoRoot, ".build", "release", "staging", "Kanna_Staging_1.2.4-staging.5_x86_64.app.tar.gz"),
+              join(repoRoot, ".build", "release", "staging", "Kanna_Staging_1.2.4-staging.5_x86_64.app.tar.gz.sig"),
+              join(repoRoot, ".build", "release", "staging", "latest-staging.json")
             ]);
             return { exitCode: 0, stdout: "", stderr: "" };
           }
-          if (command === "gh" && args[0] === "release" && args[1] === "upload") {
+          if (command === "gh" && args[0] === "release" && args[1] === "upload" && args[2] === "desktop-staging") {
             expect(args[2]).toBe("desktop-staging");
-            expect(args).toContain(join(repoRoot, ".build", "release", "staging", "latest-staging.json"));
-            expect(args).toContain("--clobber");
+            expect(args).toEqual([
+              "release",
+              "upload",
+              "desktop-staging",
+              join(repoRoot, ".build", "release", "staging", "latest-staging.json"),
+              "--repo",
+              "jemdiggity/kanna",
+              "--clobber"
+            ]);
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (command === "gh" && args[0] === "release" && args[1] === "delete-asset") {
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (command === "gh" && args[0] === "release" && args[1] === "list") {
+            return {
+              exitCode: 0,
+              stdout: [
+                "Kanna Staging v1.2.4-staging.5\tLatest\tv1.2.4-staging.5\t2026-07-06T00:00:00Z",
+                "Kanna Staging v1.2.4-staging.4\t\tv1.2.4-staging.4\t2026-07-05T00:00:00Z"
+              ].join("\n"),
+              stderr: ""
+            };
+          }
+          if (command === "gh" && args[0] === "release" && args[1] === "view" && args[2] === "desktop-staging") {
+            if (args.includes("--json")) {
+              return {
+                exitCode: 0,
+                stdout: JSON.stringify({
+                  assets: [
+                    { name: "latest-staging.json" },
+                    { name: "Kanna_Staging_1.2.4_arm64.dmg" }
+                  ]
+                }),
+                stderr: ""
+              };
+            }
             return { exitCode: 0, stdout: "", stderr: "" };
           }
           return { exitCode: 1, stdout: "", stderr: `unexpected command ${command} ${args.join(" ")}` };
@@ -307,11 +368,198 @@ describe("release shipping", () => {
       });
 
       expect(readVersionFiles(repoRoot)).toEqual(originalFiles);
+      const releaseCreateCall = calls.find((call) => call.command === "gh" && call.args[0] === "release" && call.args[1] === "create");
       const uploadCall = calls.find((call) => call.command === "gh" && call.args[0] === "release" && call.args[1] === "upload");
       expect(uploadCall?.args[2]).toBe("desktop-staging");
+      expect(releaseCreateCall).toBeDefined();
+      expect(uploadCall).toBeDefined();
+      expect(calls.indexOf(releaseCreateCall!)).toBeLessThan(calls.indexOf(uploadCall!));
       expect(calls.some((call) => call.command === "git" && ["add", "commit", "tag", "push"].includes(call.args[0] ?? ""))).toBe(false);
       expect(calls.some((call) => call.command === "gh" && call.args[0] === "api")).toBe(false);
-      expect(calls.some((call) => call.command === "gh" && call.args[0] === "release" && call.args[1] === "create" && call.args[2] !== "desktop-staging")).toBe(false);
+      expect(readFileSync(join(repoRoot, ".build", "release", "staging", "latest-staging.json"), "utf8")).toContain(
+        "releases/download/v1.2.4-staging.5/Kanna_Staging_1.2.4-staging.5_arm64.app.tar.gz"
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps five newest staging prereleases without deleting the pointed release", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-"));
+    try {
+      const { repoRoot, privateKeyPath } = createReleaseRepo(root);
+      const outputs = writeStagingReleaseBuildOutputs(repoRoot, ["arm64", "x86_64"]);
+      const calls: CommandCall[] = [];
+      const runner: CommandRunner = {
+        async run(command, args, options) {
+          calls.push({ command, args, options });
+          if (command === "git" && args.join(" ") === "status --porcelain") return { exitCode: 0, stdout: "", stderr: "" };
+          if (command === "git" && args.join(" ") === "remote get-url origin") return { exitCode: 0, stdout: "git@github.com:jemdiggity/kanna.git\n", stderr: "" };
+          if (command === "git" && args.join(" ") === "ls-remote --tags origin v1.2.4-staging.*") {
+            return {
+              exitCode: 0,
+              stdout: [
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\trefs/tags/v1.2.4-staging.1",
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\trefs/tags/v1.2.4-staging.2",
+                "cccccccccccccccccccccccccccccccccccccccc\trefs/tags/v1.2.4-staging.3",
+                "dddddddddddddddddddddddddddddddddddddddd\trefs/tags/v1.2.4-staging.4",
+                "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\trefs/tags/v1.2.4-staging.5",
+                "ffffffffffffffffffffffffffffffffffffffff\trefs/tags/v1.2.4-staging.6"
+              ].join("\n"),
+              stderr: ""
+            };
+          }
+          if (command === "git" && args.join(" ") === "rev-parse HEAD") return { exitCode: 0, stdout: "1234567890abcdef\n", stderr: "" };
+          if (command === "bazel" && args[0] === "build") return { exitCode: 0, stdout: "", stderr: "" };
+          if (command === "bazel" && args[0] === "cquery") return { exitCode: 0, stdout: `${outputs.get(args[3]) ?? ""}\n`, stderr: "" };
+          if (command === "sh" && args[0] === "-c") return { exitCode: 0, stdout: "", stderr: "" };
+          if (command === "pnpm") {
+            writeFileSync(`${args.at(-1)}.sig`, "staging signature\n");
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (command === "gh" && args.join(" ") === "release view desktop-staging --repo jemdiggity/kanna") return { exitCode: 0, stdout: "", stderr: "" };
+          if (command === "gh" && args[0] === "release" && args[1] === "create") return { exitCode: 0, stdout: "", stderr: "" };
+          if (command === "gh" && args[0] === "release" && args[1] === "upload") return { exitCode: 0, stdout: "", stderr: "" };
+          if (command === "gh" && args[0] === "release" && args[1] === "view" && args[2] === "desktop-staging" && args.includes("--json")) {
+            return {
+              exitCode: 0,
+              stdout: JSON.stringify({ assets: [{ name: "latest-staging.json" }] }),
+              stderr: ""
+            };
+          }
+          if (command === "gh" && args[0] === "release" && args[1] === "list") {
+            return {
+              exitCode: 0,
+              stdout: [
+                "Kanna Staging v1.2.4-staging.1\t\tv1.2.4-staging.1\t2026-07-01T00:00:00Z",
+                "Kanna Staging v1.2.4-staging.2\t\tv1.2.4-staging.2\t2026-07-02T00:00:00Z",
+                "Kanna Staging v1.2.4-staging.3\t\tv1.2.4-staging.3\t2026-07-03T00:00:00Z",
+                "Kanna Staging v1.2.4-staging.4\t\tv1.2.4-staging.4\t2026-07-04T00:00:00Z",
+                "Kanna Staging v1.2.4-staging.5\t\tv1.2.4-staging.5\t2026-07-05T00:00:00Z",
+                "Kanna Staging v1.2.4-staging.6\t\tv1.2.4-staging.6\t2026-07-06T00:00:00Z"
+              ].join("\n"),
+              stderr: ""
+            };
+          }
+          if (command === "gh" && args[0] === "release" && args[1] === "delete") return { exitCode: 0, stdout: "", stderr: "" };
+          return { exitCode: 1, stdout: "", stderr: `unexpected command ${command} ${args.join(" ")}` };
+        }
+      };
+
+      await shipRelease({
+        repoRoot,
+        bump: "patch",
+        archLabels: ["arm64", "x86_64"],
+        release: true,
+        dryRun: false,
+        environment: "staging",
+        env: releaseEnv(privateKeyPath),
+        runner
+      });
+
+      const deleteTags = calls
+        .filter((call) => call.command === "gh" && call.args[0] === "release" && call.args[1] === "delete")
+        .map((call) => call.args[2]);
+      expect([...deleteTags].sort()).toEqual(["v1.2.4-staging.1", "v1.2.4-staging.2"]);
+      expect(deleteTags).not.toContain("v1.2.4-staging.6");
+      expect(deleteTags).not.toContain("v1.2.4-staging.7");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rolls back staging by clobbering the pointer manifest from a versioned prerelease", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-"));
+    try {
+      const { repoRoot, privateKeyPath } = createReleaseRepo(root);
+      const calls: CommandCall[] = [];
+      const runner: CommandRunner = {
+        async run(command, args, options) {
+          calls.push({ command, args, options });
+          if (command === "git" && args.join(" ") === "status --porcelain") return { exitCode: 0, stdout: "", stderr: "" };
+          if (command === "git" && args.join(" ") === "remote get-url origin") return { exitCode: 0, stdout: "git@github.com:jemdiggity/kanna.git\n", stderr: "" };
+          if (command === "gh" && args.join(" ") === "release view v1.2.4-staging.3 --repo jemdiggity/kanna") return { exitCode: 0, stdout: "", stderr: "" };
+          if (command === "gh" && args.join(" ") === "release view desktop-staging --repo jemdiggity/kanna") return { exitCode: 0, stdout: "", stderr: "" };
+          if (command === "gh" && args[0] === "release" && args[1] === "download") {
+            expect(args).toEqual([
+              "release",
+              "download",
+              "v1.2.4-staging.3",
+              "--repo",
+              "jemdiggity/kanna",
+              "--pattern",
+              "latest-staging.json",
+              "--dir",
+              join(repoRoot, ".build", "release", "staging"),
+              "--clobber"
+            ]);
+            mkdirSync(join(repoRoot, ".build", "release", "staging"), { recursive: true });
+            writeFileSync(join(repoRoot, ".build", "release", "staging", "latest-staging.json"), "{}\n");
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          if (command === "gh" && args[0] === "release" && args[1] === "upload") return { exitCode: 0, stdout: "", stderr: "" };
+          return { exitCode: 1, stdout: "", stderr: `unexpected command ${command} ${args.join(" ")}` };
+        }
+      };
+
+      const result = await shipRelease({
+        repoRoot,
+        bump: "patch",
+        archLabels: ["arm64", "x86_64"],
+        release: false,
+        dryRun: false,
+        environment: "staging",
+        rollbackTo: "1.2.4-staging.3",
+        env: releaseEnv(privateKeyPath),
+        runner
+      });
+
+      expect(result.version).toBe("1.2.4-staging.3");
+      expect(result.dmgPaths).toEqual([]);
+      expect(result.updaterPaths).toEqual([]);
+      expect(calls.some((call) => call.command === "bazel")).toBe(false);
+      expect(calls.some((call) => call.command === "git" && call.args[0] === "ls-remote")).toBe(false);
+      expect(calls.find((call) => call.command === "gh" && call.args[0] === "release" && call.args[1] === "upload")?.args).toEqual([
+        "release",
+        "upload",
+        "desktop-staging",
+        join(repoRoot, ".build", "release", "staging", "latest-staging.json"),
+        "--repo",
+        "jemdiggity/kanna",
+        "--clobber"
+      ]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("fails clearly when rollback prerelease has no staging manifest asset", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-release-"));
+    try {
+      const { repoRoot, privateKeyPath } = createReleaseRepo(root);
+      const runner: CommandRunner = {
+        async run(command, args) {
+          if (command === "git" && args.join(" ") === "status --porcelain") return { exitCode: 0, stdout: "", stderr: "" };
+          if (command === "git" && args.join(" ") === "remote get-url origin") return { exitCode: 0, stdout: "git@github.com:jemdiggity/kanna.git\n", stderr: "" };
+          if (command === "gh" && args.join(" ") === "release view v1.2.4-staging.3 --repo jemdiggity/kanna") return { exitCode: 0, stdout: "", stderr: "" };
+          if (command === "gh" && args[0] === "release" && args[1] === "download") return { exitCode: 1, stdout: "", stderr: "no assets match pattern" };
+          return { exitCode: 1, stdout: "", stderr: `unexpected command ${command} ${args.join(" ")}` };
+        }
+      };
+
+      await expect(
+        shipRelease({
+          repoRoot,
+          bump: "patch",
+          archLabels: ["arm64", "x86_64"],
+          release: false,
+          dryRun: false,
+          environment: "staging",
+          rollbackTo: "1.2.4-staging.3",
+          env: releaseEnv(privateKeyPath),
+          runner
+        })
+      ).rejects.toThrow("Staging manifest asset not found on v1.2.4-staging.3: latest-staging.json");
     } finally {
       await rm(root, { recursive: true, force: true });
     }

@@ -4,13 +4,13 @@ description: Build, sign, notarize, and release a new version of Kanna
 execution_mode: pty
 ---
 
-You are the shipping agent. Your job is to rename the current worktree branch to a release branch, push it, and run the ship script to build, sign, notarize, and release a new version of Kanna. You are already running inside a worktree — your CWD is the worktree root.
+You are the shipping agent. Your job is to run the ship script to build, sign, notarize, and release a new version of Kanna. For production releases, rename the current worktree branch to a release branch and push it before publishing. For staging releases, do not rename or push the branch; staging releases are created against the current commit. You are already running inside a worktree — your CWD is the worktree root.
 
 ## Before running
 
 1. Ask whether they want to ship `--staging` or `--production` (default).
 2. Ask the user which version bump they want: `--major`, `--minor`, or `--patch` (default).
-3. Ask if this is a full release (`--release`) or just a build (`--dry-run` for testing).
+3. Ask if this is a full release (`--release`) or just a build (`--dry-run` for testing). For staging, also ask whether this is a rollback; rollback uses `--staging --rollback-to <version>` and does not build.
 4. Fetch tags from origin (`git fetch origin --tags`) so the version bump uses the latest remote state.
 5. Confirm the prerequisites are met (see sandbox note below):
    - Clean git working directory
@@ -49,16 +49,18 @@ LAST_VERSION="${LAST_TAG#v}"
 
 ## Rename branch and push
 
-Rename the current branch to `release-vX.Y.Z` and push it:
+For production releases, rename the current branch to `release-vX.Y.Z` and push it:
 
 ```bash
 git branch -m "release-v$VERSION"
 git push -u origin "release-v$VERSION"
 ```
 
+Skip this step for staging releases. Staging publishes `vX.Y.Z-staging.N` against the current commit.
+
 ## How releases work
 
-The ship script runs from a worktree branched off main. When `--release` is used:
+The ship script runs from a worktree branched off main. When production `--release` is used:
 
 1. Version files are bumped and committed on the worktree branch
 2. The commit is tagged `vX.Y.Z`
@@ -66,6 +68,16 @@ The ship script runs from a worktree branched off main. When `--release` is used
 4. Both main and the tag are pushed to origin
 
 This means the tag always lands on main. If the build needs hotfixes before release, commit fixes on the worktree branch — it becomes a hotfix branch. Re-run the ship script after fixing.
+
+When staging `--release` is used:
+
+1. The next version is computed as `bump(VERSION)-staging.N`, where `N` is one higher than existing remote staging tags for that base version
+2. Version files are temporarily synced to that full prerelease version for the build, then restored
+3. A new immutable GitHub prerelease tagged `vX.Y.Z-staging.N` is created with the DMGs, updater bundles, signatures, and a copy of `latest-staging.json`
+4. The fixed `desktop-staging` release is kept as a pointer-only channel and receives only `latest-staging.json`
+5. Older staging prereleases are pruned after the channel is repointed, keeping the five newest and never deleting the currently pointed release
+
+Rollback uses `./kd release ship --staging --rollback-to X.Y.Z-staging.N`: it downloads `latest-staging.json` from that prerelease and clobbers the pointer manifest on `desktop-staging` without building.
 
 ## Run the ship script
 
@@ -82,6 +94,7 @@ Options:
 - `--major` / `--minor` / `--patch` (default: patch)
 - `--release` — tag, push, and create GitHub release after building
 - `--dry-run` — build and sign only, skip notarization and release
+- `--rollback-to <version>` — staging only; repoint `desktop-staging/latest-staging.json` to a manifest copied from an immutable prerelease
 
 ## After running
 

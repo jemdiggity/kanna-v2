@@ -234,6 +234,8 @@ The script is idempotent: it upserts the Firebase Auth user `upvote.sieve.7t@icl
 # Release
 ./kd release ship --dry-run  # build/sign release artifacts without publishing
 ./kd release ship --release  # tag, publish, and upload updater manifest
+./kd release ship --staging --release  # publish immutable staging prerelease and repoint desktop-staging/latest-staging.json
+./kd release ship --staging --rollback-to 1.2.4-staging.3  # repoint staging channel to an existing prerelease manifest
 
 # Cloud deploy
 ./kd cloud deploy --staging     # deploy Firebase cloud services to staging
@@ -602,7 +604,7 @@ Current E2E status: notify has server boundary coverage with a fake daemon asser
 
 ## Versioning
 
-Single `VERSION` file is the source of truth for packaged app versioning. `kd release ship` updates `VERSION`, `tauri.conf.json`, and Rust package metadata for releases. Development builds may include separate branch/worktree metadata in the UI, but that metadata is not the packaged version. Package.json versions are all `0.0.0` (meaningless). The desktop app reads `VERSION` at compile time via `build.rs`.
+Single `VERSION` file is the source of truth for packaged app versioning. Production `kd release ship --release` updates `VERSION`, `tauri.conf.json`, and Rust package metadata, commits them, tags `vX.Y.Z`, and publishes a per-version GitHub release. Staging ships do not persist version bumps: each `--staging` ship builds with `X.Y.Z-staging.N`, publishes an immutable prerelease tagged `vX.Y.Z-staging.N`, uploads a manifest copy there, and then clobbers only `latest-staging.json` on the pointer release tagged `desktop-staging`. Development builds may include separate branch/worktree metadata in the UI, but that metadata is not the packaged version. Package.json versions are all `0.0.0` (meaningless). The desktop app reads `VERSION` at compile time via `build.rs`.
 
 ## Common Pitfalls
 
