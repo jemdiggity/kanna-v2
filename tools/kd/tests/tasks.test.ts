@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -9,7 +9,8 @@ import {
   executeDevStatus,
   executeMobileDeviceDoctorWithContext,
   executeMobileDeviceRunWithContext,
-  executeProductionMobileUpWithContext
+  executeProductionMobileUpWithContext,
+  listStagingRelayActiveDesktopIds
 } from "../src/tasks/registry";
 import type { CommandRunner } from "../src/runtime/process";
 
@@ -23,6 +24,86 @@ async function writeStagingDesktopAuth(home: string): Promise<void> {
 }
 
 describe("task executors", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it("authenticates staging relay active-desktop lookup with the Firebase id token", async () => {
+    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-kd-relay-active-"));
+    const home = await mkdtemp(join(tmpdir(), "kanna-kd-relay-home-"));
+    await mkdir(join(repoRoot, "apps", "mobile", "src"), { recursive: true });
+    await writeFile(
+      join(repoRoot, "apps", "mobile", "src", "mobileEnvironments.json"),
+      JSON.stringify({ staging: { firebase: { apiKey: "staging-api-key" } } })
+    );
+    await writeStagingDesktopAuth(home);
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({ idToken: "firebase-id-token" })
+      }))
+    );
+
+    const sentFrames: unknown[] = [];
+    let openedUrl: string | undefined;
+    class FakeWebSocket {
+      onopen: (() => void) | null = null;
+      onmessage: ((event: { data?: unknown }) => void) | null = null;
+      onerror: ((event: unknown) => void) | null = null;
+      onclose: (() => void) | null = null;
+
+      constructor(url: string) {
+        openedUrl = url;
+        queueMicrotask(() => this.onopen?.());
+      }
+
+      send(data: string): void {
+        const frame = JSON.parse(data) as { type?: string; id?: string };
+        sentFrames.push(frame);
+        if (frame.type === "auth") {
+          queueMicrotask(() => {
+            this.onmessage?.({ data: JSON.stringify({ type: "auth_ok" }) });
+          });
+        }
+        if (frame.type === "invoke" && frame.id === "kd-active-desktops") {
+          queueMicrotask(() => {
+            this.onmessage?.({
+              data: JSON.stringify({
+                type: "response",
+                id: "kd-active-desktops",
+                data: { desktopIds: ["desktop-installed-staging", "desktop-worktree-staging"] }
+              })
+            });
+          });
+        }
+      }
+
+      close(): void {}
+    }
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+
+    const result = await listStagingRelayActiveDesktopIds({
+      repoRoot,
+      env: { HOME: home },
+      relayUrl: "wss://relay-staging.kanna.build"
+    });
+
+    expect(openedUrl).toBe("wss://relay-staging.kanna.build");
+    expect(sentFrames[0]).toEqual({ type: "auth", id_token: "firebase-id-token" });
+    expect(sentFrames[0]).not.toHaveProperty("device_token");
+    expect(sentFrames[1]).toEqual({
+      type: "invoke",
+      id: "kd-active-desktops",
+      command: "list_active_desktops",
+      args: {}
+    });
+    expect(result).toEqual(new Set(["desktop-installed-staging", "desktop-worktree-staging"]));
+  });
+
   it("reports no running tmux session as ok status", async () => {
     const runner: CommandRunner = {
       async run(command, args) {
