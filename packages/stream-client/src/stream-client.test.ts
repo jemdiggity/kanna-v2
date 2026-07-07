@@ -530,4 +530,47 @@ describe("StreamClient", () => {
     expect(onAuthError).toHaveBeenCalledTimes(1);
     client.close();
   });
+
+  it("surfaces relay tunnel request failures to terminal attachments", async () => {
+    const tunnelFactory = createRelayTunnelWebSocketFactory({
+      relayUrl: "ws://relay",
+      desktopId: "desktop-offline",
+      getIdentityToken: async () => "id-token",
+      webSocketFactory: factory,
+      nextId: () => "tunnel-request-1",
+    });
+    const errors: string[] = [];
+    const client = new StreamClient({
+      url: "ignored-by-tunnel-factory",
+      webSocketFactory: tunnelFactory,
+    });
+
+    client.attachTerminal("task-1", {
+      onOutput: () => {},
+      onError: (code, message) => errors.push(`${code}:${message}`),
+    });
+
+    const socket = sockets[0];
+    socket.open();
+    await Promise.resolve();
+    expect(socket.sent[0]).toEqual({ type: "auth", id_token: "id-token" });
+
+    socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok" }) });
+    expect(socket.sent[1]).toEqual({
+      type: "tunnel_request",
+      id: "tunnel-request-1",
+      desktopId: "desktop-offline",
+    });
+
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: "response",
+        id: "tunnel-request-1",
+        error: "desktop is not connected",
+      }),
+    });
+
+    expect(errors).toEqual(["relay_tunnel:desktop is not connected"]);
+    client.close();
+  });
 });

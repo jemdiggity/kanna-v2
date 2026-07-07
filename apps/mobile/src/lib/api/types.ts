@@ -42,6 +42,7 @@ export interface PairingSession {
 export interface CreateTaskRequest {
   repoId: string;
   prompt: string;
+  desktopId?: string;
   pipelineName?: string;
   baseRef?: string;
   stage?: string;

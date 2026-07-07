@@ -123,6 +123,38 @@ describe("createCloudWithLanFallbackClient", () => {
     expect(cloudClient.listRepoTasks).not.toHaveBeenCalled();
     expect(lanClient.listRecentTasks).not.toHaveBeenCalled();
   });
+
+  it("creates new tasks on the LAN desktop when cloud tasks are visible and LAN fallback is enabled", async () => {
+    const cloudClient = createClientMock();
+    const lanClient = createClientMock();
+    const liveCloudTasks = [
+      {
+        id: "cloud:task-1",
+        repoId: "repo-cloud",
+        repoName: "Cloud Repo",
+        title: "Cloud task",
+        stage: "in progress"
+      }
+    ];
+    const client = createCloudWithLanFallbackClient(cloudClient, lanClient, {
+      getLiveCloudTasks: () => liveCloudTasks,
+      isLanFallbackEnabled: () => true,
+      hasLiveCloudTasks: () => true
+    });
+
+    await client.createTask({
+      repoId: "repo-cloud",
+      prompt: "Create from mobile",
+      agentProvider: "claude"
+    });
+
+    expect(lanClient.createTask).toHaveBeenCalledWith({
+      repoId: "repo-cloud",
+      prompt: "Create from mobile",
+      agentProvider: "claude"
+    });
+    expect(cloudClient.createTask).not.toHaveBeenCalled();
+  });
 });
 
 describe("createAppModel cloud routing", () => {
@@ -165,7 +197,8 @@ describe("createAppModel cloud routing", () => {
       invokeDesktop: vi.fn().mockResolvedValue(null),
       observeTaskTerminal: vi.fn(() => ({ close: vi.fn() })),
       observeTaskAgent,
-      sendTaskInput: vi.fn().mockResolvedValue(undefined)
+      sendTaskInput: vi.fn().mockResolvedValue(undefined),
+      listActiveDesktopIds: vi.fn().mockResolvedValue(new Set(["desktop-owner"]))
     };
     const app = createAppModel({
       authSession,
@@ -214,5 +247,105 @@ describe("createAppModel cloud routing", () => {
       );
     });
     expect(taskIndex.listRecentTasks).not.toHaveBeenCalled();
+  });
+
+  it("routes duplicate cloud task snapshots to the active owner desktop", async () => {
+    let authState: MobileAuthState = {
+      status: "signedIn",
+      user: { uid: "user-1", email: "dev@example.com", displayName: null }
+    };
+    const authSession: MobileAuthSession = {
+      initialize: vi.fn().mockResolvedValue(undefined),
+      getState: () => authState,
+      subscribe: vi.fn((listener) => {
+        listener(authState);
+        return vi.fn();
+      }),
+      signInWithEmailPassword: vi.fn().mockResolvedValue(undefined),
+      signOut: vi.fn().mockImplementation(async () => {
+        authState = { status: "signedOut" };
+      }),
+      getIdToken: vi.fn().mockResolvedValue("id-token"),
+      notifyAuthExpired: vi.fn()
+    };
+    let pushCloudTasks: ((tasks: Awaited<ReturnType<CloudTaskIndex["listRecentTasks"]>>) => void) | null = null;
+    const taskIndex: CloudTaskIndex = {
+      listRecentTasks: vi.fn().mockResolvedValue([]),
+      subscribeRecentTasks: vi.fn((_uid, onUpdate) => {
+        pushCloudTasks = onUpdate;
+        return vi.fn();
+      })
+    };
+    const observeTaskAgent = vi.fn(() => ({
+      close: vi.fn(),
+      sendInput: vi.fn(),
+      sendPermission: vi.fn(),
+      interrupt: vi.fn()
+    }));
+    const relayClient: RelayDesktopClient = {
+      close: vi.fn(),
+      invokeDesktop: vi.fn().mockResolvedValue(null),
+      observeTaskTerminal: vi.fn(() => ({ close: vi.fn() })),
+      observeTaskAgent,
+      sendTaskInput: vi.fn().mockResolvedValue(undefined),
+      listActiveDesktopIds: vi.fn().mockResolvedValue(new Set(["desktop-current"]))
+    };
+    const app = createAppModel({
+      authSession,
+      persistence: {
+        load: vi.fn().mockResolvedValue(null),
+        save: vi.fn().mockResolvedValue(undefined)
+      },
+      options: {
+        forceCloud: true,
+        relayUrl: "wss://relay.test",
+        taskIndex,
+        bonjourBrowser: {
+          start: vi.fn(),
+          stop: vi.fn(),
+          getServices: () => [],
+          subscribe: () => vi.fn()
+        },
+        createRelayClient: () => relayClient
+      }
+    });
+
+    await app.initialize();
+    pushCloudTasks?.([
+      {
+        id: "cloud:task-shared",
+        repoId: "repo-1",
+        repoName: "Repo One",
+        title: "Visible task",
+        stage: "in progress",
+        agentType: "agent",
+        ownerDesktopId: "desktop-current",
+        ownerLocalTaskId: "task-current",
+        ownerOnline: true
+      },
+      {
+        id: "cloud:task-shared",
+        repoId: "repo-1",
+        repoName: "Repo One",
+        title: "Visible task",
+        stage: "in progress",
+        agentType: "agent",
+        ownerDesktopId: "desktop-stale",
+        ownerLocalTaskId: "task-stale",
+        ownerOnline: false
+      }
+    ]);
+
+    app.controller.openTask("cloud:task-shared");
+
+    await vi.waitFor(() => {
+      expect(observeTaskAgent).toHaveBeenCalledWith(
+        {
+          desktopId: "desktop-current",
+          taskId: "task-current"
+        },
+        expect.any(Function)
+      );
+    });
   });
 });

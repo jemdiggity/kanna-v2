@@ -79,12 +79,14 @@ export function createLanTransport(
     listRecentTasks: () => request<TaskSummary[]>("/v1/tasks/recent"),
     searchTasks: (query) =>
       request<TaskSummary[]>(`/v1/tasks/search?query=${encodeURIComponent(query)}`),
-    createTask: (input: CreateTaskRequest) =>
-      request<CreateTaskResponse>("/v1/tasks", {
+    createTask: (input: CreateTaskRequest) => {
+      const { desktopId: _desktopId, ...taskInput } = input;
+      return request<CreateTaskResponse>("/v1/tasks", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(input)
-      }),
+        body: JSON.stringify(taskInput)
+      });
+    },
     runMergeAgent: (taskId: string) =>
       request<TaskActionResponse>(`/v1/tasks/${encodeURIComponent(taskId)}/actions/run-merge-agent`, {
         method: "POST"

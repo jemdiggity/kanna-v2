@@ -275,4 +275,61 @@ describe("createSessionStore", () => {
       }
     });
   });
+
+  it("hydrates and persists repo creation profiles", () => {
+    const store = createSessionStore();
+
+    store.hydrateContext({
+      selectedDesktopId: "desktop-1",
+      selectedRepoId: "repo-1",
+      selectedTaskId: null,
+      activeView: "tasks",
+      repoCreationProfiles: [
+        {
+          repoId: "repo-1",
+          desktopId: "desktop-1",
+          agentProvider: "claude",
+          updatedAt: "2026-07-06T00:00:00.000Z"
+        }
+      ]
+    });
+
+    expect(store.getState().repoCreationProfiles).toEqual([
+      {
+        repoId: "repo-1",
+        desktopId: "desktop-1",
+        agentProvider: "claude",
+        updatedAt: "2026-07-06T00:00:00.000Z"
+      }
+    ]);
+    expect(store.getPersistedContext().repoCreationProfiles).toEqual(
+      store.getState().repoCreationProfiles
+    );
+  });
+
+  it("upserts repo creation profiles by repo id", () => {
+    const store = createSessionStore();
+
+    store.upsertRepoCreationProfile({
+      repoId: "repo-1",
+      desktopId: "desktop-1",
+      agentProvider: "claude",
+      updatedAt: "2026-07-06T00:00:00.000Z"
+    });
+    store.upsertRepoCreationProfile({
+      repoId: "repo-1",
+      desktopId: "desktop-2",
+      agentProvider: "copilot",
+      updatedAt: "2026-07-06T01:00:00.000Z"
+    });
+
+    expect(store.getState().repoCreationProfiles).toEqual([
+      {
+        repoId: "repo-1",
+        desktopId: "desktop-2",
+        agentProvider: "copilot",
+        updatedAt: "2026-07-06T01:00:00.000Z"
+      }
+    ]);
+  });
 });

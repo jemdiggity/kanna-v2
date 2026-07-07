@@ -4,7 +4,7 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
-packageExtensionsChecksum: sha256-0yCgs74hjonHF9GkBSYtqvzDH84U72K/M7Y5lB4dY7U=
+packageExtensionsChecksum: sha256-Cvg9lPWD6oDaYB6AAn65iGO86lcZRCI49/QhKfmK0RM=
 
 importers:
 
@@ -184,7 +184,7 @@ importers:
         version: 2.5.0
       expo-updates:
         specifier: ~0.28.18
-        version: 0.28.18(expo@53.0.27(react-native-webview@13.13.5(react-native@0.79.6(@babel/core@7.29.0)(@types/react@19.0.14)(react@19.0.0))(react@19.0.0))(react-native@0.79.6(@babel/core@7.29.0)(@types/react@19.0.14)(react@19.0.0))(react@19.0.0))(react@19.0.0)
+        version: 0.28.18(expo@53.0.27(react-native-webview@13.13.5(react-native@0.79.6(@babel/core@7.29.0)(@types/react@19.0.14)(react@19.0.0))(react@19.0.0))(react-native@0.79.6(@babel/core@7.29.0)(@types/react@19.0.14)(react@19.0.0))(react@19.0.0))(react-native-webview@13.13.5(react-native@0.79.6(@babel/core@7.29.0)(@types/react@19.0.14)(react@19.0.0))(react@19.0.0))(react-native@0.79.6(@babel/core@7.29.0)(@types/react@19.0.14)(react@19.0.0))(react@19.0.0)
       firebase:
         specifier: ^12.12.1
         version: 12.12.1(@react-native-async-storage/async-storage@2.1.2(react-native@0.79.6(@babel/core@7.29.0)(@types/react@19.0.14)(react@19.0.0)))
@@ -8929,6 +8929,7 @@ snapshots:
       - '@expo/metro-runtime'
       - babel-plugin-react-compiler
       - bufferutil
+      - graphql
       - react
       - react-native
       - react-native-webview
@@ -12317,14 +12318,16 @@ snapshots:
     dependencies:
       expo: 53.0.27(react-native-webview@13.13.5(react-native@0.79.6(@babel/core@7.29.0)(@types/react@19.0.14)(react@19.0.0))(react@19.0.0))(react-native@0.79.6(@babel/core@7.29.0)(@types/react@19.0.14)(react@19.0.0))(react@19.0.0)
 
-  expo-updates@0.28.18(expo@53.0.27(react-native-webview@13.13.5(react-native@0.79.6(@babel/core@7.29.0)(@types/react@19.0.14)(react@19.0.0))(react@19.0.0))(react-native@0.79.6(@babel/core@7.29.0)(@types/react@19.0.14)(react@19.0.0))(react@19.0.0))(react@19.0.0):
+  expo-updates@0.28.18(expo@53.0.27(react-native-webview@13.13.5(react-native@0.79.6(@babel/core@7.29.0)(@types/react@19.0.14)(react@19.0.0))(react@19.0.0))(react-native@0.79.6(@babel/core@7.29.0)(@types/react@19.0.14)(react@19.0.0))(react@19.0.0))(react-native-webview@13.13.5(react-native@0.79.6(@babel/core@7.29.0)(@types/react@19.0.14)(react@19.0.0))(react@19.0.0))(react-native@0.79.6(@babel/core@7.29.0)(@types/react@19.0.14)(react@19.0.0))(react@19.0.0):
     dependencies:
+      '@expo/cli': 0.24.24(react-native-webview@13.13.5(react-native@0.79.6(@babel/core@7.29.0)(@types/react@19.0.14)(react@19.0.0))(react@19.0.0))(react-native@0.79.6(@babel/core@7.29.0)(@types/react@19.0.14)(react@19.0.0))(react@19.0.0)
       '@expo/code-signing-certificates': 0.0.6
       '@expo/config': 11.0.13
       '@expo/config-plugins': 10.1.2
       '@expo/spawn-async': 1.7.2
       arg: 4.1.0
       chalk: 4.1.2
+      debug: 4.4.3
       expo: 53.0.27(react-native-webview@13.13.5(react-native@0.79.6(@babel/core@7.29.0)(@types/react@19.0.14)(react@19.0.0))(react@19.0.0))(react-native@0.79.6(@babel/core@7.29.0)(@types/react@19.0.14)(react@19.0.0))(react@19.0.0)
       expo-eas-client: 0.14.4
       expo-manifests: 0.16.6(expo@53.0.27(react-native-webview@13.13.5(react-native@0.79.6(@babel/core@7.29.0)(@types/react@19.0.14)(react@19.0.0))(react@19.0.0))(react-native@0.79.6(@babel/core@7.29.0)(@types/react@19.0.14)(react@19.0.0))(react@19.0.0))
@@ -12335,7 +12338,15 @@ snapshots:
       react: 19.0.0
       resolve-from: 5.0.0
     transitivePeerDependencies:
+      - '@expo/dom-webview'
+      - '@expo/metro-runtime'
+      - babel-plugin-react-compiler
+      - bufferutil
+      - graphql
+      - react-native
+      - react-native-webview
       - supports-color
+      - utf-8-validate
 
   expo@53.0.27(react-native-webview@13.13.5(react-native@0.79.6(@babel/core@7.29.0)(@types/react@19.0.14)(react@19.0.0))(react@19.0.0))(react-native@0.79.6(@babel/core@7.29.0)(@types/react@19.0.14)(react@19.0.0))(react@19.0.0):
     dependencies:

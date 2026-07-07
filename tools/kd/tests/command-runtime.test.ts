@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { checkRequiredCommands } from "../src/runtime/doctor";
+import { findWorkspaceDesktopDevProcesses, killWorkspaceDesktopDevProcesses } from "../src/runtime/daemon";
 import { buildMobileDeviceSmokeCommand, buildMobileTestCommand } from "../src/runtime/mobile-commands";
 import { getPortStatuses } from "../src/runtime/port-status";
 import { respawnTmuxWindow, startTmuxSession, stopTmuxWindow } from "../src/runtime/tmux";
@@ -80,6 +81,46 @@ describe("command runtime helpers", () => {
     ]);
   });
 
+  it("finds only this worktree's desktop dev processes for restart cleanup", () => {
+    const repoRoot = "/repo/task-abc";
+    const psOutput = [
+      `101 node /repo/task-abc/apps/desktop/node_modules/.bin/../vite/bin/vite.js`,
+      `102 node /repo/task-abc/apps/desktop/node_modules/.bin/../@tauri-apps/cli/tauri.js dev --config /repo/task-abc/apps/desktop/src-tauri/tauri.conf.local.json`,
+      `103 /repo/task-abc/.build/debug/kanna-desktop`,
+      `104 /repo/task-abc/.build/debug/kanna-server`,
+      `105 node /repo/other/apps/desktop/node_modules/.bin/../vite/bin/vite.js`,
+    ].join("\n");
+
+    expect(findWorkspaceDesktopDevProcesses(repoRoot, psOutput).map((process) => process.pid)).toEqual([101, 102, 103]);
+  });
+
+  it("kills matched desktop dev processes before a component restart", async () => {
+    const killed: number[] = [];
+    const runner: CommandRunner = {
+      async run(command, args) {
+        expect(command).toBe("ps");
+        expect(args).toEqual(["-axo", "pid=,command="]);
+        return {
+          exitCode: 0,
+          stdout: [
+            `101 node /repo/task-abc/apps/desktop/node_modules/.bin/../vite/bin/vite.js`,
+            `102 /repo/task-abc/.build/debug/kanna-desktop`,
+          ].join("\n"),
+          stderr: ""
+        };
+      }
+    };
+
+    const result = await killWorkspaceDesktopDevProcesses({
+      repoRoot: "/repo/task-abc",
+      runner,
+      killProcess: (pid) => killed.push(pid)
+    });
+
+    expect(result.map((process) => process.pid)).toEqual([101, 102]);
+    expect(killed).toEqual([101, 102]);
+  });
+
   it("stops a single tmux window without killing the dev session", async () => {
     const calls: string[] = [];
     const runner: CommandRunner = {
@@ -137,6 +178,11 @@ describe("command runtime helpers", () => {
       },
       {
         command: "tmux",
+        args: ["-L", "kanna-task", "set-option", "-t", "kanna-task", "remain-on-exit", "on"],
+        env: undefined
+      },
+      {
+        command: "tmux",
         args: [
           "-L",
           "kanna-task",
@@ -149,6 +195,11 @@ describe("command runtime helpers", () => {
         },
         stdin:
           "respawn-window '-k' '-t' 'kanna-task:desktop' '-c' '/repo/apps/desktop' '-e' 'KANNA_DESKTOP_AUTO_SIGN_IN_EMAIL=dev@example.com' 'pnpm exec tauri dev'\n"
+      },
+      {
+        command: "tmux",
+        args: ["-L", "kanna-task", "list-windows", "-t", "kanna-task", "-F", "#{window_name}"],
+        env: undefined
       }
     ]);
     expect(calls.map((call) => call.args.join(" ")).join("\n")).not.toContain("dev@example.com");
@@ -182,6 +233,7 @@ describe("command runtime helpers", () => {
     expect(calls).toEqual([
       "tmux -L kanna-task new-session -d -s kanna-task -n desktop -c /repo/apps/desktop desktop",
       "tmux -L kanna-task list-windows -t kanna-task -F #{window_name}",
+      "tmux -L kanna-task set-option -t kanna-task remain-on-exit on",
       "tmux -L kanna-task new-window -t kanna-task -n mobile -c /repo/apps/mobile mobile",
       "tmux -L kanna-task new-window -t kanna-task -n emulators -c /repo emulators"
     ]);

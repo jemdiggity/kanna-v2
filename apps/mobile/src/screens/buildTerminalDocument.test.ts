@@ -221,18 +221,32 @@ describe("buildTerminalDocument", () => {
     expect(html).toContain("term.options.fontSize = Math.round(BASE_FONT_SIZE * fontScale)");
   });
 
-  it("executes one-finger fallback touch scrolling across the viewport and xterm buffer", () => {
+  it("executes one-finger fallback horizontal scrolling across the viewport", () => {
     const { terminalViewport, viewport, window } = createExecutedTerminalDocument();
     viewport.scrollLeft = 12;
     terminalViewport.scrollTop = 80;
 
     viewport.dispatchEvent(createTouchEvent(window, "touchstart", [{ clientX: 220, clientY: 240 }]));
-    const touchMove = createTouchEvent(window, "touchmove", [{ clientX: 175, clientY: 180 }]);
+    const touchMove = createTouchEvent(window, "touchmove", [{ clientX: 175, clientY: 232 }]);
     viewport.dispatchEvent(touchMove);
 
     expect(viewport.scrollLeft).toBe(57);
-    expect(terminalViewport.scrollTop).toBe(140);
+    expect(terminalViewport.scrollTop).toBe(80);
     expect(touchMove.defaultPrevented).toBe(true);
+  });
+
+  it("leaves primarily vertical one-finger scrolling to the xterm viewport", () => {
+    const { terminalViewport, viewport, window } = createExecutedTerminalDocument();
+    viewport.scrollLeft = 12;
+    terminalViewport.scrollTop = 80;
+
+    viewport.dispatchEvent(createTouchEvent(window, "touchstart", [{ clientX: 220, clientY: 240 }]));
+    const touchMove = createTouchEvent(window, "touchmove", [{ clientX: 216, clientY: 180 }]);
+    viewport.dispatchEvent(touchMove);
+
+    expect(viewport.scrollLeft).toBe(12);
+    expect(terminalViewport.scrollTop).toBe(80);
+    expect(touchMove.defaultPrevented).toBe(false);
   });
 
   it("executes two-finger fallback pinch scaling with clamping and keeps terminal scripts working", () => {

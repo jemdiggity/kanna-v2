@@ -17,7 +17,7 @@ export async function runDesktopAutoSignIn({
 }: DesktopAutoSignInOptions): Promise<void> {
   if (!dev || attemptedSessions.has(session) || getState().status !== "signedOut") return;
 
-  const cloudEnv = normalizeEnv(await readOptionalEnv(readEnv, "KANNA_CLOUD_ENV"));
+  const cloudEnv = normalizeCloudEnv(await readOptionalEnv(readEnv, "KANNA_CLOUD_ENV"));
   if (!allowsAutoSignInCloudEnv(cloudEnv)) return;
 
   const [email, password] = await Promise.all([
@@ -52,6 +52,11 @@ async function readOptionalEnv(
 
 function normalizeEnv(value: string | undefined): string | undefined {
   const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function normalizeCloudEnv(value: string | undefined): string | undefined {
+  const trimmed = value?.trim().toLowerCase();
   return trimmed ? trimmed : undefined;
 }
 

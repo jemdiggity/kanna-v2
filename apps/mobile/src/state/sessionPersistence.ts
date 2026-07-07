@@ -1,4 +1,4 @@
-import type { MobileView } from "./sessionStore";
+import type { ComposerAgentProvider, MobileView } from "./sessionStore";
 import type { MobileAuthUser } from "../lib/firebase/auth";
 
 const MOBILE_CONTEXT_STORAGE_KEY = "kanna.mobile.context.v1";
@@ -10,6 +10,14 @@ export interface PersistedSessionContext {
   activeView: MobileView;
   authUser?: MobileAuthUser | null;
   trustedDesktops?: TrustedDesktopRecord[];
+  repoCreationProfiles?: RepoCreationProfile[];
+}
+
+export interface RepoCreationProfile {
+  repoId: string;
+  desktopId: string;
+  agentProvider: ComposerAgentProvider;
+  updatedAt: string;
 }
 
 export interface TrustedDesktopLanEndpoint {
@@ -73,7 +81,8 @@ function parsePersistedSessionContext(
       selectedTaskId: normalizeNullableString(parsed.selectedTaskId),
       activeView: parsed.activeView,
       authUser: parsePersistedAuthUser(parsed.authUser),
-      trustedDesktops: parseTrustedDesktops(parsed.trustedDesktops)
+      trustedDesktops: parseTrustedDesktops(parsed.trustedDesktops),
+      repoCreationProfiles: parseRepoCreationProfiles(parsed.repoCreationProfiles)
     };
   } catch {
     return null;
@@ -91,6 +100,16 @@ function isMobileView(value: unknown): value is MobileView {
     value === "search" ||
     value === "desktops" ||
     value === "more"
+  );
+}
+
+function isComposerAgentProvider(value: unknown): value is ComposerAgentProvider {
+  return (
+    value === "claude" ||
+    value === "copilot" ||
+    value === "codex" ||
+    value === "opencode" ||
+    value === "antigravity"
   );
 }
 
@@ -143,6 +162,40 @@ function parseTrustedDesktops(value: unknown): TrustedDesktopRecord[] {
       }
     ];
   });
+}
+
+function parseRepoCreationProfiles(value: unknown): RepoCreationProfile[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const profiles = new Map<string, RepoCreationProfile>();
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object") {
+      continue;
+    }
+
+    const candidate = entry as Partial<RepoCreationProfile>;
+    if (
+      typeof candidate.repoId !== "string" ||
+      typeof candidate.desktopId !== "string" ||
+      !isComposerAgentProvider(candidate.agentProvider)
+    ) {
+      continue;
+    }
+
+    profiles.set(candidate.repoId, {
+      repoId: candidate.repoId,
+      desktopId: candidate.desktopId,
+      agentProvider: candidate.agentProvider,
+      updatedAt:
+        typeof candidate.updatedAt === "string"
+          ? candidate.updatedAt
+          : new Date(0).toISOString()
+    });
+  }
+
+  return Array.from(profiles.values());
 }
 
 function parseTrustedDesktopLanEndpoints(value: unknown): TrustedDesktopLanEndpoint[] {

@@ -333,7 +333,8 @@ describe("createMobileController", () => {
 
     await controller.bootstrap();
     store.selectRepo("repo-2");
-    store.setComposerState(true, "Ship mobile shell");
+    controller.openComposer();
+    controller.updateComposerPrompt("Ship mobile shell");
 
     await controller.createTask();
 
@@ -347,6 +348,268 @@ describe("createMobileController", () => {
     expect(store.getState().composerPrompt).toBe("");
   });
 
+  it("creates a task with the selected composer agent provider", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    store.selectRepo("repo-2");
+    controller.openComposer();
+    controller.updateComposerPrompt("Ship mobile shell");
+    controller.selectComposerAgentProvider("copilot");
+
+    await controller.createTask();
+
+    expect(client.createTask).toHaveBeenCalledWith({
+      repoId: "repo-2",
+      prompt: "Ship mobile shell",
+      desktopId: "desktop-1",
+      agentProvider: "copilot",
+      agentType: "pty"
+    });
+  });
+
+  it("opens the composer with the selected repo's saved machine and agent", async () => {
+    const store = createSessionStore();
+    const controller = createMobileController(createClientMock(), store);
+
+    await controller.bootstrap();
+    store.selectRepo("repo-2");
+    store.upsertRepoCreationProfile({
+      repoId: "repo-2",
+      desktopId: "desktop-2",
+      agentProvider: "opencode",
+      updatedAt: "2026-07-06T00:00:00.000Z"
+    });
+
+    controller.openComposer();
+
+    expect(store.getState()).toMatchObject({
+      isComposerOpen: true,
+      composerDesktopId: "desktop-2",
+      composerAgentProvider: "opencode",
+      isComposerOptionsExpanded: false
+    });
+  });
+
+  it("opens a no-profile repo composer with Claude after another repo selected a different agent", async () => {
+    const store = createSessionStore();
+    const controller = createMobileController(createClientMock(), store);
+
+    await controller.bootstrap();
+    store.selectRepo("repo-1");
+    store.upsertRepoCreationProfile({
+      repoId: "repo-1",
+      desktopId: "desktop-1",
+      agentProvider: "opencode",
+      updatedAt: "2026-07-06T00:00:00.000Z"
+    });
+    controller.openComposer();
+    expect(store.getState().composerAgentProvider).toBe("opencode");
+
+    store.selectRepo("repo-2");
+    controller.openComposer();
+
+    expect(store.getState()).toMatchObject({
+      isComposerOpen: true,
+      composerAgentProvider: "claude"
+    });
+  });
+
+  it("treats a saved machine that is no longer listed as unselected", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    store.selectRepo("repo-2");
+    store.upsertRepoCreationProfile({
+      repoId: "repo-2",
+      desktopId: "desktop-stale",
+      agentProvider: "opencode",
+      updatedAt: "2026-07-06T00:00:00.000Z"
+    });
+
+    controller.openComposer();
+    controller.updateComposerPrompt("Ship mobile shell");
+    await controller.createTask();
+
+    expect(client.createTask).not.toHaveBeenCalled();
+    expect(store.getState()).toMatchObject({
+      isComposerOpen: true,
+      composerDesktopId: null,
+      composerAgentProvider: "opencode",
+      composerErrorMessage: "Choose a machine for this repo first.",
+      isComposerOptionsExpanded: true
+    });
+
+    controller.selectComposerDesktop("desktop-1");
+    await controller.createTask();
+
+    expect(client.createTask).toHaveBeenCalledWith({
+      repoId: "repo-2",
+      prompt: "Ship mobile shell",
+      desktopId: "desktop-1",
+      agentProvider: "opencode",
+      agentType: "pty"
+    });
+  });
+
+  it("opens composer options expanded when no machine can be inferred", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    vi.mocked(client.listRepoTasks).mockResolvedValueOnce([]);
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    store.selectRepo("repo-empty");
+    store.setRepoTasks([]);
+    controller.openComposer();
+
+    expect(store.getState()).toMatchObject({
+      isComposerOpen: true,
+      composerDesktopId: null,
+      isComposerOptionsExpanded: true
+    });
+  });
+
+  it("infers the composer machine from a single cloud repo owner", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    store.setDesktops([
+      ...store.getState().desktops,
+      { id: "desktop-owner", name: "Owner Mac", online: true, mode: "remote" }
+    ]);
+    store.selectRepo("repo-cloud");
+    store.setRepoTasks([
+      {
+        id: "cloud-task-1",
+        repoId: "repo-cloud",
+        title: "Cloud task",
+        stage: "in progress",
+        ownerDesktopId: "desktop-owner",
+        ownerLocalTaskId: "local-task-1"
+      }
+    ] as never);
+
+    controller.openComposer();
+
+    expect(store.getState()).toMatchObject({
+      composerDesktopId: "desktop-owner",
+      isComposerOptionsExpanded: false
+    });
+  });
+
+  it("requires a composer machine before creating a task", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    store.selectRepo("repo-empty");
+    controller.openComposer();
+    controller.updateComposerPrompt("Ship mobile shell");
+
+    await controller.createTask();
+
+    expect(client.createTask).not.toHaveBeenCalled();
+    expect(store.getState()).toMatchObject({
+      composerErrorMessage: "Choose a machine for this repo first.",
+      isComposerOptionsExpanded: true
+    });
+  });
+
+  it("persists the repo machine and agent after successful create", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    store.selectRepo("repo-2");
+    controller.openComposer();
+    controller.updateComposerPrompt("Ship mobile shell");
+    controller.selectComposerDesktop("desktop-2");
+    controller.selectComposerAgentProvider("codex");
+
+    await controller.createTask();
+
+    expect(client.createTask).toHaveBeenCalledWith({
+      repoId: "repo-2",
+      prompt: "Ship mobile shell",
+      desktopId: "desktop-2",
+      agentProvider: "codex",
+      agentType: "pty"
+    });
+    expect(store.getState().repoCreationProfiles).toEqual([
+      expect.objectContaining({
+        repoId: "repo-2",
+        desktopId: "desktop-2",
+        agentProvider: "codex"
+      })
+    ]);
+  });
+
+  it("keeps create task feedback inside the composer while submitting", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    let resolveCreateTask:
+      | ((response: Awaited<ReturnType<ClientMock["createTask"]>>) => void)
+      | null = null;
+    vi.mocked(client.createTask).mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveCreateTask = resolve;
+      })
+    );
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    store.selectRepo("repo-2");
+    controller.openComposer();
+    controller.updateComposerPrompt("Ship mobile shell");
+
+    const createPromise = controller.createTask();
+
+    expect(store.getState()).toMatchObject({
+      isComposerSubmitting: true,
+      composerErrorMessage: null
+    });
+
+    resolveCreateTask?.({
+      taskId: "task-3",
+      repoId: "repo-2",
+      title: "Ship mobile shell",
+      stage: "in progress"
+    });
+    await createPromise;
+
+    expect(store.getState().isComposerSubmitting).toBe(false);
+  });
+
+  it("shows missing task details as a composer error instead of a global connection error", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+
+    await controller.bootstrap();
+    store.selectRepo("repo-2");
+    store.setComposerState(true, " ");
+
+    await controller.createTask();
+
+    expect(client.createTask).not.toHaveBeenCalled();
+    expect(store.getState()).toMatchObject({
+      connectionState: "connected",
+      errorMessage: null,
+      isComposerOpen: true,
+      composerErrorMessage: "Choose a repo and enter a task prompt first.",
+      isComposerSubmitting: false
+    });
+  });
+
   it("keeps the created task visible when terminal startup throws after creation", async () => {
     const store = createSessionStore();
     const client = createClientMock();
@@ -357,13 +620,17 @@ describe("createMobileController", () => {
 
     await controller.bootstrap();
     store.selectRepo("repo-2");
-    store.setComposerState(true, "Ship mobile shell");
+    controller.openComposer();
+    controller.updateComposerPrompt("Ship mobile shell");
 
     await controller.createTask();
 
     expect(client.createTask).toHaveBeenCalledWith({
       repoId: "repo-2",
-      prompt: "Ship mobile shell"
+      prompt: "Ship mobile shell",
+      desktopId: "desktop-1",
+      agentProvider: "claude",
+      agentType: "pty"
     });
     expect(store.getState()).toMatchObject({
       connectionState: "connected",
