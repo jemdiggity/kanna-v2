@@ -141,7 +141,8 @@ export function getConnectionAuthSummary(auth: AuthState): {
     default:
       return {
         title: "Signed out",
-        detail: "Use local alpha credentials"
+        detail:
+          "Sign in with your Kanna account, or connect to a paired desktop on your local network."
       };
   }
 }

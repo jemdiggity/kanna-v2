@@ -8,6 +8,8 @@ const {
 } = require("@expo/config-plugins");
 
 const SERVICE_TYPE = "_kanna-mobile._tcp";
+const LOCAL_NETWORK_USAGE_DESCRIPTION =
+  "Kanna uses your local network to find and connect to your paired Kanna desktop app.";
 
 const SWIFT_SOURCE = `import Foundation
 import React
@@ -158,12 +160,7 @@ function writeNativeSources(projectRoot) {
 
 function withKannaBonjour(config) {
   config = withInfoPlist(config, (config) => {
-    const services = new Set(config.modResults.NSBonjourServices || []);
-    services.add(SERVICE_TYPE);
-    config.modResults.NSBonjourServices = Array.from(services);
-    config.modResults.NSLocalNetworkUsageDescription =
-      config.modResults.NSLocalNetworkUsageDescription ||
-      "Kanna discovers trusted desktop apps on your local network.";
+    config.modResults = applyInfoPlist(config.modResults);
     return config;
   });
 
@@ -201,3 +198,17 @@ function withKannaBonjour(config) {
 }
 
 module.exports = withKannaBonjour;
+module.exports.__internal = {
+  applyInfoPlist
+};
+
+function applyInfoPlist(plist) {
+  const services = new Set(plist.NSBonjourServices || []);
+  services.add(SERVICE_TYPE);
+
+  return {
+    ...plist,
+    NSBonjourServices: Array.from(services),
+    NSLocalNetworkUsageDescription: LOCAL_NETWORK_USAGE_DESCRIPTION
+  };
+}
