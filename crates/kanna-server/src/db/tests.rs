@@ -78,6 +78,11 @@ fn server_connection_opens_with_desktop_like_wal_client_active() {
                   closed_at TEXT,
                   updated_at TEXT
                 );
+                CREATE TABLE task_port (
+                  port INTEGER PRIMARY KEY,
+                  pipeline_item_id TEXT NOT NULL,
+                  env_name TEXT NOT NULL
+                );
                 INSERT INTO pipeline_item (id, stage) VALUES ('task-1', 'in progress');
                 "#,
         )
@@ -129,6 +134,11 @@ fn close_pipeline_item_sets_closed_at_without_changing_stage() {
               stage TEXT NOT NULL,
               closed_at TEXT,
               updated_at TEXT
+            );
+            CREATE TABLE task_port (
+              port INTEGER PRIMARY KEY,
+              pipeline_item_id TEXT NOT NULL,
+              env_name TEXT NOT NULL
             );
             INSERT INTO pipeline_item (id, stage) VALUES ('task-1', 'in progress');
             "#,
@@ -515,6 +525,7 @@ fn insert_pipeline_item_stores_stage_metadata() {
               activity_changed_at TEXT,
               port_offset INTEGER,
               port_env TEXT,
+              agent_spawn_options TEXT,
               base_ref TEXT,
               notify_task_id TEXT,
               notified_at TEXT,
@@ -542,6 +553,7 @@ fn insert_pipeline_item_stores_stage_metadata() {
         activity: "working",
         port_offset: Some(1422),
         port_env_json: Some("{\"KANNA_DEV_PORT\":\"1422\"}"),
+        agent_spawn_options_json: None,
         base_ref: None,
         display_name: Some("Merge queue"),
         notify_task_id: None,

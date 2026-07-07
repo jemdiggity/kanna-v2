@@ -1,5 +1,5 @@
-import { clearCachedTerminalState } from "../composables/terminalStateCache";
 import { getAppErrorCode } from "../appError";
+import { clearCachedTerminalState } from "../composables/terminalStateCache";
 
 export function isTeardownSessionId(sessionId: string): boolean {
   return sessionId.startsWith("td-");

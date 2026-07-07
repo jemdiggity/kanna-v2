@@ -27,7 +27,7 @@ export const useKannaStore = defineStore("kanna", () => {
   const selection = createSelectionApi(context);
   const sessions = createSessionsApi(context);
   const pipeline = createPipelineApi(context);
-  const tasks = createTasksApi(context, ports);
+  const tasks = createTasksApi(context);
   const initApi = createInitApi(context, ports, tasks);
 
   services.loadInitialData = queries.loadInitialData;

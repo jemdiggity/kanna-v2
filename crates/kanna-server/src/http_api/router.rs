@@ -12,8 +12,9 @@ use super::snapshot::get_snapshot;
 use super::state::{AppState, HttpInvokeResponse};
 use super::status::status;
 use super::task_actions::{
-    advance_stage, close_task, complete_stage, pin_task, reorder_pinned_tasks, request_revision,
-    rerun_stage, run_merge_agent, set_task_parent, unpin_task,
+    advance_stage, close_task, complete_stage, pin_task, reopen_task, reorder_pinned_tasks,
+    request_revision, rerun_stage, run_merge_agent, set_task_agent_session_id, set_task_parent,
+    unpin_task,
 };
 use super::task_activity::{apply_runtime_status, mark_task_read};
 use super::task_agent_session::put_task_agent_session;
@@ -108,6 +109,11 @@ pub fn router(state: Arc<AppState>) -> Router {
             post(reorder_pinned_tasks),
         )
         .route("/v1/tasks/{task_id}/actions/close", post(close_task))
+        .route("/v1/tasks/{task_id}/actions/reopen", post(reopen_task))
+        .route(
+            "/v1/tasks/{task_id}/actions/agent-session-id",
+            post(set_task_agent_session_id),
+        )
         .route(
             "/v1/tasks/{task_id}/ports",
             post(claim_task_ports).delete(release_task_ports),

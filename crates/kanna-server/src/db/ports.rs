@@ -65,6 +65,14 @@ impl Db {
         Ok(())
     }
 
+    pub fn release_task_ports(&self, item_id: &str) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "DELETE FROM task_port WHERE pipeline_item_id = ?",
+            [item_id],
+        )?;
+        Ok(())
+    }
+
     pub fn delete_task_ports_for_item(&self, item_id: &str) -> Result<(), rusqlite::Error> {
         self.conn.execute(
             "DELETE FROM task_port WHERE pipeline_item_id = ?",

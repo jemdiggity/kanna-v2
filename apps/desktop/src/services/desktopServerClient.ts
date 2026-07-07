@@ -1,6 +1,7 @@
 import type { PipelineItem, Repo, TaskBlocker } from "../types/kanna";
 import type { TaskTransfer } from "../types/kanna";
 import { invoke } from "../invoke";
+import type { SessionRecoveryState } from "../composables/sessionRecoveryState";
 
 export interface DesktopSnapshotEntry {
   repo: Repo;
@@ -35,7 +36,11 @@ export interface DesktopServerClientHandlersForTests {
   putTaskAgentSession?: (taskId: string, agentSessionId: string | null) => MaybePromise<void>;
   claimTaskPorts?: (taskId: string, input: ClaimDesktopTaskPortsInput) => MaybePromise<ClaimDesktopTaskPortsResponse>;
   releaseTaskPorts?: (taskId: string) => MaybePromise<void>;
+  createTask?: (request: CreateDesktopTaskRequest) => MaybePromise<CreateDesktopTaskResponse>;
   closeTask?: (taskId: string) => MaybePromise<void>;
+  reopenTask?: (taskId: string) => MaybePromise<void>;
+  blockTask?: (taskId: string, blockerTaskIds: string[]) => MaybePromise<void>;
+  unblockTask?: (taskId: string) => MaybePromise<void>;
   addRepo?: (input: AddDesktopRepoInput) => MaybePromise<DesktopRepoResponse>;
   findRepoByPath?: (path: string) => MaybePromise<DesktopRepoResponse | null>;
   reorderRepos?: (orderedIds: string[]) => MaybePromise<void>;
@@ -362,6 +367,50 @@ export async function releaseDesktopTaskPorts(taskId: string): Promise<void> {
   });
 }
 
+export interface CreateDesktopTaskRequest {
+  repoId: string;
+  prompt: string;
+  displayName?: string | null;
+  pipelineName?: string;
+  stage?: string;
+  baseRef?: string | null;
+  agentProvider?: string;
+  agentType?: string;
+  model?: string;
+  permissionMode?: string;
+  allowedTools?: string[];
+  disallowedTools?: string[];
+  maxTurns?: number;
+  maxBudgetUsd?: number;
+  setupCmds?: string[];
+  resumeSessionId?: string | null;
+  recoverySnapshot?: SessionRecoveryState | null;
+  blockerTaskIds?: string[];
+  notifyTaskId?: string;
+  parentTaskId?: string;
+}
+
+export interface CreateDesktopTaskResponse {
+  taskId: string;
+  repoId: string;
+  title: string;
+  stage: string;
+  agentType: string;
+  worktreePath?: string | null;
+}
+
+export async function createDesktopTask(
+  request: CreateDesktopTaskRequest,
+): Promise<CreateDesktopTaskResponse> {
+  if (clientHandlersForTests?.createTask) {
+    return await clientHandlersForTests.createTask(request);
+  }
+  return await requestJson<CreateDesktopTaskResponse>("/v1/tasks", {
+    method: "POST",
+    body: request,
+  });
+}
+
 export async function closeDesktopTask(taskId: string): Promise<void> {
   if (clientHandlersForTests?.closeTask) {
     await clientHandlersForTests.closeTask(taskId);
@@ -376,6 +425,17 @@ export async function closeDesktopTask(taskId: string): Promise<void> {
     const responseBody = await response.text().catch(() => "");
     throw new Error(`POST /v1/tasks/${taskId}/actions/close failed: ${response.status}${responseBody ? ` ${responseBody}` : ""}`);
   }
+}
+
+export async function reopenDesktopTask(taskId: string): Promise<void> {
+  if (clientHandlersForTests?.reopenTask) {
+    await clientHandlersForTests.reopenTask(taskId);
+    return;
+  }
+  await requestJson<{ taskId: string }>(
+    `/v1/tasks/${encodeURIComponent(taskId)}/actions/reopen`,
+    { method: "POST" },
+  );
 }
 
 export interface DesktopRepoResponse {
@@ -454,6 +514,31 @@ export async function setDesktopTaskParent(taskId: string, parentTaskId: string 
       method: "POST",
       body: { parentTaskId },
     },
+  );
+}
+
+export async function blockDesktopTask(taskId: string, blockerTaskIds: string[]): Promise<void> {
+  if (clientHandlersForTests?.blockTask) {
+    await clientHandlersForTests.blockTask(taskId, blockerTaskIds);
+    return;
+  }
+  await requestJson<{ taskId: string }>(
+    `/v1/tasks/${encodeURIComponent(taskId)}/actions/block`,
+    {
+      method: "POST",
+      body: { blockerTaskIds },
+    },
+  );
+}
+
+export async function unblockDesktopTask(taskId: string): Promise<void> {
+  if (clientHandlersForTests?.unblockTask) {
+    await clientHandlersForTests.unblockTask(taskId);
+    return;
+  }
+  await requestJson<{ taskId: string }>(
+    `/v1/tasks/${encodeURIComponent(taskId)}/actions/unblock`,
+    { method: "POST" },
   );
 }
 

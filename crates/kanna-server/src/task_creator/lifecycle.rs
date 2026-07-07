@@ -130,17 +130,8 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
 
     // Only a freshly forked workspace is rolled back on failure; a resumed
     // workspace pre-exists this spawn and must survive it.
-    let rollback_fork = |error: String| -> String {
-        if let PreparedRunWorkspace::Forked(fork) = &prepared.workspace {
-            if let Err(rollback_err) = remove_prepared_worktree(&fork.worktree_path, &fork.branch) {
-                return format!("{error}; fork rollback failed: {rollback_err}");
-            }
-        }
-        error
-    };
-
     if let Err(error) = kill_session_replacing(daemon, replacements, &session_id).await {
-        return Err(rollback_fork(error));
+        return Err(rollback_prepared_stage_fork(&prepared, error));
     }
     if !matches!(prepared.workspace, PreparedRunWorkspace::Current) {
         // The prewarmed shell session points at the previous worktree; kill
@@ -148,7 +139,7 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
         if let Err(error) =
             kill_session_replacing(daemon, replacements, &format!("shell-wt-{task_id}")).await
         {
-            return Err(rollback_fork(error));
+            return Err(rollback_prepared_stage_fork(&prepared, error));
         }
         if let Some(teardown_session_id) = teardown_session_id.as_deref() {
             if let Err(error) =
@@ -164,35 +155,71 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
     let command = spawn_session_command(
         session_id.clone(),
         prepared.cwd.clone(),
-        prepared.env,
-        prepared.session,
+        prepared.env.clone(),
+        prepared.session.clone(),
     );
     let event = match daemon.send_command(&command).await {
         Ok(event) => event,
-        Err(e) => return Err(rollback_fork(format!("daemon error: {}", e))),
+        Err(e) => {
+            return Err(rollback_prepared_stage_fork(
+                &prepared,
+                format!("daemon error: {}", e),
+            ))
+        }
     };
     match event {
         DaemonEvent::SessionCreated { .. } => {}
         DaemonEvent::Error { message, .. } => {
-            return Err(rollback_fork(format!("daemon error: {}", message)))
+            return Err(rollback_prepared_stage_fork(
+                &prepared,
+                format!("daemon error: {}", message),
+            ))
         }
         other => {
-            return Err(rollback_fork(format!(
-                "unexpected daemon response: {:?}",
-                other
-            )))
+            return Err(rollback_prepared_stage_fork(
+                &prepared,
+                format!("unexpected daemon response: {:?}", other),
+            ))
         }
     }
 
     let db = Db::open(db_path).map_err(|e| format!("db error: {}", e))?;
+    if db
+        .get_pipeline_item(&task_id)
+        .map_err(|e| format!("db error: {}", e))?
+        .map(|item| item.closed_at.is_some())
+        .unwrap_or(true)
+    {
+        if let Err(error) = kill_session_replacing(daemon, replacements, &session_id).await {
+            log::warn!("failed to clean up stale stage session {session_id}: {error}");
+        }
+        return Err(rollback_prepared_stage_fork(
+            &prepared,
+            format!("task {task_id} closed before stage transition landed"),
+        ));
+    }
     match &prepared.workspace {
         PreparedRunWorkspace::Forked(workspace) | PreparedRunWorkspace::Resumed(workspace) => {
-            db.update_pipeline_item_stage_and_branch(
+            if let Err(error) = db.update_pipeline_item_stage_and_branch(
                 &task_id,
                 &prepared.next_stage,
                 &workspace.branch,
-            )
-            .map_err(|e| format!("db error: {}", e))?;
+            ) {
+                if matches!(error, rusqlite::Error::QueryReturnedNoRows) {
+                    if let Err(kill_error) =
+                        kill_session_replacing(daemon, replacements, &session_id).await
+                    {
+                        log::warn!(
+                            "failed to clean up stale stage session {session_id}: {kill_error}"
+                        );
+                    }
+                    return Err(rollback_prepared_stage_fork(
+                        &prepared,
+                        format!("task {task_id} closed before stage transition landed"),
+                    ));
+                }
+                return Err(format!("db error: {}", error));
+            }
             db.upsert_worktree(
                 &format!("wt-{task_id}"),
                 &task_id,
@@ -202,8 +229,22 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
             .map_err(|e| format!("db error: {}", e))?;
         }
         PreparedRunWorkspace::Current => {
-            db.update_pipeline_item_stage(&task_id, &prepared.next_stage)
-                .map_err(|e| format!("db error: {}", e))?;
+            if let Err(error) = db.update_pipeline_item_stage(&task_id, &prepared.next_stage) {
+                if matches!(error, rusqlite::Error::QueryReturnedNoRows) {
+                    if let Err(kill_error) =
+                        kill_session_replacing(daemon, replacements, &session_id).await
+                    {
+                        log::warn!(
+                            "failed to clean up stale stage session {session_id}: {kill_error}"
+                        );
+                    }
+                    return Err(rollback_prepared_stage_fork(
+                        &prepared,
+                        format!("task {task_id} closed before stage transition landed"),
+                    ));
+                }
+                return Err(format!("db error: {}", error));
+            }
         }
     }
     db.update_pipeline_item_agent_session_id(&task_id, prepared.provider_session_id.as_deref())
@@ -233,6 +274,15 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
         task_id,
         follow_task: None,
     })
+}
+
+fn rollback_prepared_stage_fork(prepared: &PreparedStageRunSpawn, error: String) -> String {
+    if let PreparedRunWorkspace::Forked(fork) = &prepared.workspace {
+        if let Err(rollback_err) = remove_prepared_worktree(&fork.worktree_path, &fork.branch) {
+            return format!("{error}; fork rollback failed: {rollback_err}");
+        }
+    }
+    error
 }
 
 pub(crate) async fn spawn_prepared_workspace_teardown_best_effort(
@@ -470,6 +520,9 @@ fn spawn_session_command(
             model,
             permission_mode,
             allowed_tools,
+            disallowed_tools,
+            max_turns,
+            max_budget_usd,
             system_prompt,
             mcp_config_path,
             executable,
@@ -483,9 +536,9 @@ fn spawn_session_command(
                 model,
                 permission_mode,
                 allowed_tools,
-                disallowed_tools: Vec::new(),
-                max_turns: None,
-                max_budget_usd: None,
+                disallowed_tools,
+                max_turns,
+                max_budget_usd,
                 system_prompt: Some(system_prompt),
                 mcp_config_path,
                 executable,
