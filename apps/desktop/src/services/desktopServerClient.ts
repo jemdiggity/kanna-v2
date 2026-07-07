@@ -2,7 +2,6 @@ import type { PipelineItem, Repo, TaskBlocker } from "../types/kanna";
 import type { TaskTransfer } from "../types/kanna";
 import type { SessionRecoveryState } from "../composables/sessionRecoveryState";
 import { invoke } from "../invoke";
-import type { SessionRecoveryState } from "../composables/sessionRecoveryState";
 
 export interface DesktopSnapshotEntry {
   repo: Repo;
