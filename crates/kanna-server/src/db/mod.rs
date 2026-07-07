@@ -1,6 +1,7 @@
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::Serialize;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 mod analytics;
@@ -33,6 +34,37 @@ pub use transfers::{
 
 const SQLITE_BUSY_TIMEOUT_MS: u64 = 10_000;
 const SQLITE_WAL_AUTOCHECKPOINT_PAGES: i64 = 100;
+#[cfg(test)]
+pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
+    "001_default_settings",
+    "002_pipeline_item_metadata_columns",
+    "003_legacy_stage_to_tags_backfill",
+    "004_activity_log_accumulator",
+    "005_task_blocker_table",
+    "006_operator_event_table",
+    "007_pipeline_stage_columns",
+    "008_tags_to_stage_backfill",
+    "009_task_port_table",
+    "010_rename_torndown_stage",
+    "011_pipeline_item_last_output_preview",
+    "012_pipeline_item_active_post_action",
+    "013_task_transfer_tables",
+    "014_task_transfer_payload_json",
+    "015_agent_session_id_rename",
+    "016_repo_sort_order",
+    "016_task_teardown_state",
+    "017_theme_preferences",
+    "018_merge_stage_to_in_progress",
+    "019_repo_remote_metadata_columns",
+    "020_agent_message_appearance_preference",
+    "020_pipeline_item_notify_task",
+    "021_pipeline_item_agent_spawn_options",
+    "022_pipeline_item_parent_task_id",
+    "023_stage_run_pipeline_snapshot",
+    "024_pipeline_item_stage_graph_cleanup",
+    "025_stage_run_kind",
+    "026_stage_run_resume",
+];
 
 #[derive(Debug, Serialize)]
 pub struct PipelineItem {
@@ -267,7 +299,9 @@ pub struct Db {
 }
 
 fn database_open_flags() -> OpenFlags {
-    OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_FULL_MUTEX
+    OpenFlags::SQLITE_OPEN_READ_WRITE
+        | OpenFlags::SQLITE_OPEN_CREATE
+        | OpenFlags::SQLITE_OPEN_FULL_MUTEX
 }
 
 #[cfg(test)]
@@ -300,10 +334,645 @@ fn run_quick_check(conn: &Connection) -> Result<(), rusqlite::Error> {
     )))
 }
 
+fn create_base_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+          id TEXT PRIMARY KEY,
+          applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS repo (
+          id TEXT PRIMARY KEY, path TEXT NOT NULL, name TEXT NOT NULL,
+          default_branch TEXT NOT NULL DEFAULT 'main',
+          remote_url TEXT,
+          remote_url_hash TEXT,
+          sort_order INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          last_opened_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS pipeline_item (
+          id TEXT PRIMARY KEY, repo_id TEXT NOT NULL REFERENCES repo(id) ON DELETE CASCADE,
+          issue_number INTEGER, issue_title TEXT, prompt TEXT,
+          pipeline_def TEXT,
+          stage TEXT NOT NULL DEFAULT 'in_progress', pr_number INTEGER, pr_url TEXT,
+          branch TEXT, agent_type TEXT,
+          agent_spawn_options TEXT,
+          teardown_started_at TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS task_port (
+          port INTEGER PRIMARY KEY,
+          pipeline_item_id TEXT NOT NULL REFERENCES pipeline_item(id) ON DELETE CASCADE,
+          env_name TEXT NOT NULL,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          UNIQUE(pipeline_item_id, env_name)
+        );
+        CREATE TABLE IF NOT EXISTS worktree (
+          id TEXT PRIMARY KEY, pipeline_item_id TEXT NOT NULL REFERENCES pipeline_item(id) ON DELETE CASCADE,
+          path TEXT NOT NULL, branch TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS terminal_session (
+          id TEXT PRIMARY KEY, repo_id TEXT NOT NULL REFERENCES repo(id) ON DELETE CASCADE,
+          pipeline_item_id TEXT REFERENCES pipeline_item(id) ON DELETE SET NULL,
+          label TEXT, cwd TEXT, daemon_session_id TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS agent_run (
+          id TEXT PRIMARY KEY, repo_id TEXT NOT NULL REFERENCES repo(id) ON DELETE CASCADE,
+          agent_type TEXT NOT NULL, issue_number INTEGER, pr_number INTEGER,
+          status TEXT NOT NULL DEFAULT 'running', started_at TEXT NOT NULL DEFAULT (datetime('now')),
+          finished_at TEXT, error TEXT
+        );
+        CREATE TABLE IF NOT EXISTS stage_run (
+          id TEXT PRIMARY KEY,
+          task_id TEXT NOT NULL REFERENCES pipeline_item(id) ON DELETE CASCADE,
+          stage TEXT NOT NULL,
+          kind TEXT NOT NULL DEFAULT 'main' CHECK (kind IN ('main', 'post')),
+          agent TEXT,
+          agent_provider TEXT,
+          model TEXT,
+          status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'succeeded', 'failed', 'cancelled')),
+          result TEXT,
+          feedback TEXT,
+          session_id TEXT,
+          provider_session_id TEXT,
+          cwd TEXT,
+          resumed_from_run_id TEXT,
+          started_at TEXT NOT NULL DEFAULT (datetime('now')),
+          finished_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_stage_run_task_started ON stage_run(task_id, started_at);
+        CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        "#,
+    )
+}
+
+fn has_migration(conn: &Connection, id: &str) -> Result<bool, rusqlite::Error> {
+    let found: Option<String> = conn
+        .query_row(
+            "SELECT id FROM schema_migrations WHERE id = ?1",
+            [id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(found.is_some())
+}
+
+fn record_migration(conn: &Connection, id: &str) -> Result<(), rusqlite::Error> {
+    conn.execute("INSERT INTO schema_migrations (id) VALUES (?1)", [id])?;
+    Ok(())
+}
+
+fn run_migration(
+    conn: &Connection,
+    id: &str,
+    migrate: impl FnOnce(&Connection) -> Result<(), rusqlite::Error>,
+) -> Result<(), rusqlite::Error> {
+    if has_migration(conn, id)? {
+        return Ok(());
+    }
+    migrate(conn)?;
+    record_migration(conn, id)
+}
+
+fn add_column(conn: &Connection, table: &str, column: &str, definition: &str) {
+    let sql = format!("ALTER TABLE {table} ADD COLUMN {column} {definition}");
+    if let Err(error) = conn.execute_batch(&sql) {
+        log::debug!("column {table}.{column} already exists or cannot be added: {error}");
+    }
+}
+
+fn drop_column(conn: &Connection, table: &str, column: &str) {
+    let sql = format!("ALTER TABLE {table} DROP COLUMN {column}");
+    if let Err(error) = conn.execute_batch(&sql) {
+        log::debug!("column {table}.{column} already absent or cannot be dropped: {error}");
+    }
+}
+
+fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
+    create_base_schema(conn)?;
+
+    run_migration(conn, "001_default_settings", |conn| {
+        conn.execute_batch(
+            r#"
+            INSERT OR IGNORE INTO settings (key, value) VALUES ('suspendAfterMinutes', '5');
+            INSERT OR IGNORE INTO settings (key, value) VALUES ('killAfterMinutes', '30');
+            INSERT OR IGNORE INTO settings (key, value) VALUES ('ideCommand', 'code');
+            INSERT OR IGNORE INTO settings (key, value) VALUES ('locale', 'en');
+            "#,
+        )
+    })?;
+
+    run_migration(conn, "002_pipeline_item_metadata_columns", |conn| {
+        add_column(
+            conn,
+            "pipeline_item",
+            "activity",
+            "TEXT NOT NULL DEFAULT 'idle'",
+        );
+        add_column(conn, "pipeline_item", "activity_changed_at", "TEXT");
+        add_column(conn, "pipeline_item", "port_offset", "INTEGER");
+        add_column(conn, "pipeline_item", "port_env", "TEXT");
+        add_column(
+            conn,
+            "pipeline_item",
+            "pinned",
+            "INTEGER NOT NULL DEFAULT 0",
+        );
+        add_column(conn, "pipeline_item", "pin_order", "INTEGER");
+        add_column(conn, "pipeline_item", "display_name", "TEXT");
+        add_column(conn, "pipeline_item", "unread_at", "TEXT");
+        add_column(conn, "repo", "hidden", "INTEGER NOT NULL DEFAULT 0");
+        add_column(conn, "repo", "sort_order", "INTEGER NOT NULL DEFAULT 0");
+        add_column(conn, "pipeline_item", "closed_at", "TEXT");
+        add_column(conn, "pipeline_item", "agent_type", "TEXT");
+        add_column(conn, "pipeline_item", "agent_session_id", "TEXT");
+        add_column(conn, "pipeline_item", "tags", "TEXT NOT NULL DEFAULT '[]'");
+        add_column(conn, "pipeline_item", "base_ref", "TEXT");
+        add_column(
+            conn,
+            "pipeline_item",
+            "agent_provider",
+            "TEXT NOT NULL DEFAULT 'claude'",
+        );
+        add_column(conn, "pipeline_item", "agent_spawn_options", "TEXT");
+        add_column(conn, "pipeline_item", "previous_stage", "TEXT");
+        add_column(conn, "pipeline_item", "teardown_started_at", "TEXT");
+        add_column(conn, "pipeline_item", "created_at", "TEXT");
+        add_column(conn, "pipeline_item", "updated_at", "TEXT");
+        Ok(())
+    })?;
+
+    run_migration(conn, "003_legacy_stage_to_tags_backfill", |conn| {
+        let _ = conn.execute_batch(
+            r#"
+            UPDATE pipeline_item SET stage = 'in_progress' WHERE stage = 'queued';
+            UPDATE pipeline_item SET closed_at = COALESCE(closed_at, updated_at, datetime('now')) WHERE stage IN ('needs_review', 'merged', 'closed');
+            UPDATE pipeline_item SET closed_at = COALESCE(closed_at, updated_at, datetime('now')) WHERE stage = 'done';
+            UPDATE pipeline_item SET tags = '["pr"]' WHERE stage = 'pr' AND tags = '[]';
+            UPDATE pipeline_item SET tags = '["merge"]' WHERE stage = 'merge' AND tags = '[]';
+            UPDATE pipeline_item SET stage = 'in_progress' WHERE stage = 'merge' AND closed_at IS NULL;
+            UPDATE pipeline_item SET tags = '["blocked"]' WHERE stage = 'blocked' AND tags = '[]';
+            "#,
+        );
+        Ok(())
+    })?;
+
+    run_migration(conn, "004_activity_log_accumulator", |conn| {
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS activity_log (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              pipeline_item_id TEXT NOT NULL REFERENCES pipeline_item(id) ON DELETE CASCADE,
+              activity TEXT NOT NULL,
+              started_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_activity_log_item ON activity_log(pipeline_item_id);
+            DROP TABLE IF EXISTS activity_log;
+            DROP INDEX IF EXISTS idx_activity_log_item;
+            CREATE TABLE IF NOT EXISTS activity_log (
+              pipeline_item_id TEXT NOT NULL REFERENCES pipeline_item(id) ON DELETE CASCADE,
+              activity TEXT NOT NULL,
+              seconds INTEGER NOT NULL DEFAULT 0,
+              PRIMARY KEY (pipeline_item_id, activity)
+            );
+            "#,
+        )
+    })?;
+
+    run_migration(conn, "005_task_blocker_table", |conn| {
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS task_blocker (
+              blocked_item_id TEXT NOT NULL REFERENCES pipeline_item(id) ON DELETE CASCADE,
+              blocker_item_id TEXT NOT NULL REFERENCES pipeline_item(id) ON DELETE CASCADE,
+              PRIMARY KEY (blocked_item_id, blocker_item_id)
+            );
+            "#,
+        )
+    })?;
+
+    run_migration(conn, "006_operator_event_table", |conn| {
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS operator_event (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              event_type TEXT NOT NULL,
+              pipeline_item_id TEXT,
+              repo_id TEXT,
+              created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_operator_event_repo ON operator_event(repo_id, created_at);
+            "#,
+        )
+    })?;
+
+    run_migration(conn, "007_pipeline_stage_columns", |conn| {
+        add_column(
+            conn,
+            "pipeline_item",
+            "pipeline",
+            "TEXT NOT NULL DEFAULT 'default'",
+        );
+        add_column(conn, "pipeline_item", "stage_result", "TEXT");
+        Ok(())
+    })?;
+
+    run_migration(conn, "008_tags_to_stage_backfill", |conn| {
+        conn.execute_batch(
+            r#"
+            UPDATE pipeline_item SET stage = 'in progress' WHERE tags LIKE '%"in progress"%' AND closed_at IS NULL AND stage IN ('in_progress', 'legacy');
+            UPDATE pipeline_item SET stage = 'pr' WHERE tags LIKE '%"pr"%' AND closed_at IS NULL AND stage IN ('in_progress', 'legacy');
+            UPDATE pipeline_item SET stage = 'in progress' WHERE tags LIKE '%"merge"%' AND closed_at IS NULL AND stage IN ('in_progress', 'legacy', 'merge');
+            UPDATE pipeline_item SET stage = 'in progress' WHERE stage = 'in_progress';
+            UPDATE pipeline_item SET stage = 'in progress' WHERE stage = 'merge' AND closed_at IS NULL;
+            UPDATE pipeline_item SET stage = 'in progress' WHERE stage = 'legacy';
+            "#,
+        )
+    })?;
+
+    run_migration(conn, "009_task_port_table", |conn| {
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS task_port (
+              port INTEGER PRIMARY KEY,
+              pipeline_item_id TEXT NOT NULL REFERENCES pipeline_item(id) ON DELETE CASCADE,
+              env_name TEXT NOT NULL,
+              created_at TEXT NOT NULL DEFAULT (datetime('now')),
+              UNIQUE(pipeline_item_id, env_name)
+            );
+            "#,
+        )?;
+        let mut stmt = conn.prepare(
+            "SELECT id, port_env FROM pipeline_item WHERE closed_at IS NULL AND port_env IS NOT NULL",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })?;
+        for row in rows {
+            let (item_id, port_env) = row?;
+            let Some(port_env) = port_env else { continue };
+            let Ok(env) =
+                serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&port_env)
+            else {
+                continue;
+            };
+            for (env_name, value) in env {
+                let port = match value {
+                    serde_json::Value::Number(number) => number.as_i64(),
+                    serde_json::Value::String(text) => text.parse::<i64>().ok(),
+                    _ => None,
+                };
+                let Some(port) = port else { continue };
+                if port <= 0 {
+                    continue;
+                }
+                conn.execute(
+                    "INSERT OR IGNORE INTO task_port (port, pipeline_item_id, env_name) VALUES (?1, ?2, ?3)",
+                    params![port, item_id, env_name],
+                )?;
+            }
+        }
+        Ok(())
+    })?;
+
+    run_migration(conn, "010_rename_torndown_stage", |conn| {
+        conn.execute_batch("UPDATE pipeline_item SET stage = 'teardown' WHERE stage = 'torndown';")
+    })?;
+
+    run_migration(conn, "011_pipeline_item_last_output_preview", |conn| {
+        add_column(conn, "pipeline_item", "last_output_preview", "TEXT");
+        Ok(())
+    })?;
+
+    run_migration(conn, "012_pipeline_item_active_post_action", |conn| {
+        add_column(conn, "pipeline_item", "active_post_action", "TEXT");
+        Ok(())
+    })?;
+
+    run_migration(conn, "013_task_transfer_tables", |conn| {
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS trusted_peer (
+              id TEXT PRIMARY KEY,
+              peer_id TEXT NOT NULL UNIQUE,
+              display_name TEXT NOT NULL,
+              public_key TEXT NOT NULL,
+              capabilities_json TEXT NOT NULL,
+              paired_at TEXT NOT NULL DEFAULT (datetime('now')),
+              last_seen_at TEXT,
+              revoked_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS task_transfer (
+              id TEXT PRIMARY KEY,
+              direction TEXT NOT NULL,
+              status TEXT NOT NULL,
+              source_peer_id TEXT,
+              target_peer_id TEXT,
+              source_task_id TEXT,
+              local_task_id TEXT REFERENCES pipeline_item(id) ON DELETE CASCADE,
+              started_at TEXT NOT NULL DEFAULT (datetime('now')),
+              completed_at TEXT,
+              error TEXT,
+              payload_json TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_task_transfer_local_task ON task_transfer(local_task_id, started_at DESC);
+            CREATE TABLE IF NOT EXISTS task_transfer_provenance (
+              pipeline_item_id TEXT PRIMARY KEY REFERENCES pipeline_item(id) ON DELETE CASCADE,
+              source_peer_id TEXT NOT NULL,
+              source_task_id TEXT NOT NULL,
+              source_machine_task_label TEXT,
+              imported_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            "#,
+        )
+    })?;
+
+    run_migration(conn, "014_task_transfer_payload_json", |conn| {
+        add_column(conn, "task_transfer", "payload_json", "TEXT");
+        Ok(())
+    })?;
+
+    run_migration(conn, "015_agent_session_id_rename", |conn| {
+        add_column(conn, "pipeline_item", "agent_session_id", "TEXT");
+        let _ = conn.execute_batch(
+            r#"
+            UPDATE pipeline_item
+               SET agent_session_id = claude_session_id
+             WHERE agent_session_id IS NULL
+               AND claude_session_id IS NOT NULL;
+            "#,
+        );
+        Ok(())
+    })?;
+
+    run_migration(conn, "016_repo_sort_order", |conn| {
+        add_column(conn, "repo", "sort_order", "INTEGER NOT NULL DEFAULT 0");
+        let ids = {
+            let mut stmt = conn.prepare("SELECT id FROM repo ORDER BY created_at ASC")?;
+            let ids = stmt
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            ids
+        };
+        for (index, id) in ids.iter().enumerate() {
+            conn.execute(
+                "UPDATE repo SET sort_order = ?1 WHERE id = ?2",
+                params![index as i64, id],
+            )?;
+        }
+        Ok(())
+    })?;
+
+    run_migration(conn, "016_task_teardown_state", |conn| {
+        add_column(conn, "pipeline_item", "teardown_started_at", "TEXT");
+        conn.execute_batch(
+            r#"
+            UPDATE pipeline_item
+            SET
+              teardown_started_at = COALESCE(teardown_started_at, updated_at, datetime('now')),
+              stage = 'in progress',
+              updated_at = datetime('now')
+            WHERE stage IN ('teardown', 'torndown')
+              AND closed_at IS NULL;
+            "#,
+        )
+    })?;
+
+    run_migration(conn, "017_theme_preferences", |conn| {
+        conn.execute(
+            "INSERT OR IGNORE INTO settings (key, value) VALUES (?1, ?2)",
+            ["appTheme", "dark"],
+        )?;
+        conn.execute(
+            "INSERT OR IGNORE INTO settings (key, value) VALUES (?1, ?2)",
+            ["codeTheme", "match"],
+        )?;
+        Ok(())
+    })?;
+
+    run_migration(conn, "018_merge_stage_to_in_progress", |conn| {
+        conn.execute_batch("UPDATE pipeline_item SET stage = 'in progress' WHERE stage = 'merge' AND closed_at IS NULL;")
+    })?;
+
+    run_migration(conn, "019_repo_remote_metadata_columns", |conn| {
+        add_column(conn, "repo", "remote_url", "TEXT");
+        add_column(conn, "repo", "remote_url_hash", "TEXT");
+        Ok(())
+    })?;
+
+    run_migration(conn, "020_agent_message_appearance_preference", |conn| {
+        conn.execute(
+            "INSERT OR IGNORE INTO settings (key, value) VALUES (?1, ?2)",
+            ["agentMessageAppearance", "chat"],
+        )?;
+        Ok(())
+    })?;
+
+    run_migration(conn, "020_pipeline_item_notify_task", |conn| {
+        add_column(conn, "pipeline_item", "notify_task_id", "TEXT");
+        add_column(conn, "pipeline_item", "notified_at", "TEXT");
+        Ok(())
+    })?;
+
+    run_migration(conn, "021_pipeline_item_agent_spawn_options", |conn| {
+        add_column(conn, "pipeline_item", "agent_spawn_options", "TEXT");
+        Ok(())
+    })?;
+
+    run_migration(conn, "022_pipeline_item_parent_task_id", |conn| {
+        add_column(conn, "pipeline_item", "parent_task_id", "TEXT");
+        Ok(())
+    })?;
+
+    run_migration(conn, "023_stage_run_pipeline_snapshot", |conn| {
+        add_column(conn, "pipeline_item", "pipeline_def", "TEXT");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS stage_run (
+              id TEXT PRIMARY KEY,
+              task_id TEXT NOT NULL REFERENCES pipeline_item(id) ON DELETE CASCADE,
+              stage TEXT NOT NULL,
+              agent TEXT,
+              agent_provider TEXT,
+              model TEXT,
+              status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'succeeded', 'failed', 'cancelled')),
+              result TEXT,
+              feedback TEXT,
+              session_id TEXT,
+              started_at TEXT NOT NULL DEFAULT (datetime('now')),
+              finished_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_stage_run_task_started ON stage_run(task_id, started_at);
+            INSERT OR IGNORE INTO stage_run (
+              id, task_id, stage, agent, agent_provider, model, status, result, feedback, session_id, started_at, finished_at
+            )
+            SELECT
+              'migration-current-' || id,
+              id,
+              stage,
+              agent_type,
+              agent_provider,
+              NULL,
+              CASE
+                WHEN stage_result IS NOT NULL
+                  AND json_valid(stage_result)
+                  AND json_extract(stage_result, '$.status') = 'success'
+                  THEN 'succeeded'
+                WHEN stage_result IS NOT NULL
+                  AND json_valid(stage_result)
+                  AND json_extract(stage_result, '$.status') = 'failure'
+                  THEN 'failed'
+                ELSE 'running'
+              END,
+              stage_result,
+              CASE
+                WHEN stage_result IS NOT NULL AND json_valid(stage_result)
+                  THEN json_extract(stage_result, '$.summary')
+                ELSE NULL
+              END,
+              agent_session_id,
+              COALESCE(activity_changed_at, created_at, datetime('now')),
+              CASE
+                WHEN stage_result IS NOT NULL
+                  AND json_valid(stage_result)
+                  AND json_extract(stage_result, '$.status') IN ('success', 'failure')
+                  THEN COALESCE(updated_at, datetime('now'))
+                ELSE NULL
+              END
+            FROM pipeline_item
+            WHERE closed_at IS NULL
+              AND stage != 'done'
+              AND NOT EXISTS (
+                SELECT 1 FROM stage_run WHERE stage_run.task_id = pipeline_item.id
+              );
+            "#,
+        )
+    })?;
+
+    run_migration(conn, "024_pipeline_item_stage_graph_cleanup", |conn| {
+        if conn
+            .execute_batch(
+                r#"
+                UPDATE pipeline_item
+                SET
+                  closed_at = COALESCE(closed_at, updated_at, datetime('now')),
+                  stage = COALESCE(NULLIF(previous_stage, ''), 'in progress'),
+                  updated_at = datetime('now')
+                WHERE stage = 'done'
+                  AND closed_at IS NULL;
+                "#,
+            )
+            .is_err()
+        {
+            conn.execute_batch(
+                r#"
+                UPDATE pipeline_item
+                SET
+                  closed_at = COALESCE(closed_at, updated_at, datetime('now')),
+                  stage = 'in progress',
+                  updated_at = datetime('now')
+                WHERE stage = 'done'
+                  AND closed_at IS NULL;
+                "#,
+            )?;
+        }
+        drop_column(conn, "pipeline_item", "tags");
+        drop_column(conn, "pipeline_item", "stage_result");
+        drop_column(conn, "pipeline_item", "active_post_action");
+        drop_column(conn, "pipeline_item", "previous_stage");
+        Ok(())
+    })?;
+
+    run_migration(conn, "025_stage_run_kind", |conn| {
+        add_column(conn, "stage_run", "kind", "TEXT NOT NULL DEFAULT 'main'");
+        Ok(())
+    })?;
+
+    run_migration(conn, "026_stage_run_resume", |conn| {
+        add_column(conn, "stage_run", "provider_session_id", "TEXT");
+        add_column(conn, "stage_run", "cwd", "TEXT");
+        add_column(conn, "stage_run", "resumed_from_run_id", "TEXT");
+        Ok(())
+    })?;
+
+    Ok(())
+}
+
 impl Db {
+    #[cfg(debug_assertions)]
+    pub(crate) fn connection_for_e2e_tests(&self) -> &Connection {
+        &self.conn
+    }
+
     pub fn open(path: &str) -> Result<Self, rusqlite::Error> {
         let conn = Connection::open_with_flags(path, database_open_flags())?;
         configure_shared_database_connection(&conn)?;
+        run_schema_migrations(&conn)?;
+        run_quick_check(&conn)?;
         Ok(Self { conn })
     }
+
+    pub fn backup_database(&self, db_path: &str) -> Result<PathBuf, rusqlite::Error> {
+        let backup_path = backup_path_for_database(Path::new(db_path))?;
+        let backup_path_string = backup_path.to_string_lossy().to_string();
+        self.conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE);")?;
+        self.conn
+            .execute("VACUUM main INTO ?1", [&backup_path_string])?;
+        let backup_conn = Connection::open(&backup_path)?;
+        run_quick_check(&backup_conn)?;
+        Ok(backup_path)
+    }
+}
+
+fn backup_path_for_database(db_path: &Path) -> Result<PathBuf, rusqlite::Error> {
+    let file_name = db_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            rusqlite::Error::InvalidParameterName("database path has no filename".to_string())
+        })?;
+    let timestamp = backup_timestamp();
+    let first = db_path.with_file_name(format!("{file_name}.backup-{timestamp}"));
+    if !first.exists() {
+        return Ok(first);
+    }
+    for suffix in 1..1000 {
+        let candidate = db_path.with_file_name(format!("{file_name}.backup-{timestamp}-{suffix}"));
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+    Err(rusqlite::Error::InvalidParameterName(
+        "failed to choose a unique backup path".to_string(),
+    ))
+}
+
+fn backup_timestamp() -> String {
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let days = seconds.div_euclid(86_400);
+    let day_seconds = seconds.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    let hour = day_seconds / 3_600;
+    let minute = (day_seconds % 3_600) / 60;
+    let second = day_seconds % 60;
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}-{minute:02}-{second:02}")
+}
+
+fn civil_from_days(days_since_unix_epoch: i64) -> (i64, i64, i64) {
+    let z = days_since_unix_epoch + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 }.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096).div_euclid(365);
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2).div_euclid(153);
+    let day = doy - (153 * mp + 2).div_euclid(5) + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    let year = y + if month <= 2 { 1 } else { 0 };
+    (year, month, day)
 }

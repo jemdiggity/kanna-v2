@@ -3,6 +3,12 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { relative, resolve } from "node:path";
 
 const SRC_ROOT = resolve(__dirname, "..");
+const DESKTOP_ROOT = resolve(SRC_ROOT, "..");
+const REPO_ROOT = resolve(DESKTOP_ROOT, "..", "..");
+const TAURI_SQL_PACKAGE = ["@tauri-apps", "plugin-sql"].join("/");
+const RUST_SQL_PLUGIN = ["tauri", "plugin", "sql"].join("-");
+const RUST_SQL_SYMBOL = ["tauri", "plugin", "sql"].join("_");
+const BAZEL_SQL_REPO = ["desktop_crates", RUST_SQL_PLUGIN].join("__");
 
 const ALLOWED_DB_BOUNDARY_FILES = new Set([
   "stores/db.ts",
@@ -73,6 +79,7 @@ describe("desktop server boundary", () => {
 
     for (const file of listSourceFiles(SRC_ROOT)) {
       const rel = relative(SRC_ROOT, file);
+      if (/\.test\.ts$/.test(rel)) continue;
       if (rel === "stores/serverBoundary.test.ts") continue;
       if (ALLOWED_DB_BOUNDARY_FILES.has(rel)) continue;
       const source = readFileSync(file, "utf8");
@@ -81,6 +88,27 @@ describe("desktop server boundary", () => {
         violations.push({ file: rel, reasons });
       }
     }
+
+    expect(violations).toEqual([]);
+  });
+
+  it("does not ship the Tauri SQL plugin in the desktop frontend boundary", () => {
+    const forbidden = [
+      { file: resolve(REPO_ROOT, "bun.lock"), needle: TAURI_SQL_PACKAGE },
+      { file: resolve(REPO_ROOT, "Cargo.desktop.lock"), needle: RUST_SQL_PLUGIN },
+      { file: resolve(REPO_ROOT, "MODULE.bazel"), needle: BAZEL_SQL_REPO },
+      { file: resolve(REPO_ROOT, "MODULE.bazel.lock"), needle: BAZEL_SQL_REPO },
+      { file: resolve(DESKTOP_ROOT, "bun.lock"), needle: TAURI_SQL_PACKAGE },
+      { file: resolve(DESKTOP_ROOT, "package.json"), needle: TAURI_SQL_PACKAGE },
+      { file: resolve(DESKTOP_ROOT, "src", "stores", "db.ts"), needle: TAURI_SQL_PACKAGE },
+      { file: resolve(DESKTOP_ROOT, "src-tauri", "Cargo.lock"), needle: RUST_SQL_PLUGIN },
+      { file: resolve(DESKTOP_ROOT, "src-tauri", "Cargo.toml"), needle: RUST_SQL_PLUGIN },
+      { file: resolve(DESKTOP_ROOT, "src-tauri", "src", "lib.rs"), needle: RUST_SQL_SYMBOL },
+    ];
+
+    const violations = forbidden
+      .filter(({ file, needle }) => readFileSync(file, "utf8").includes(needle))
+      .map(({ file, needle }) => `${relative(REPO_ROOT, file)} contains ${needle}`);
 
     expect(violations).toEqual([]);
   });

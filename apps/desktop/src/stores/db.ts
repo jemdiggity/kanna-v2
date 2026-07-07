@@ -1,4 +1,3 @@
-import * as tauriMock from "../tauri-mock";
 import { invoke } from "../invoke";
 import { migrateLegacyDatabaseIfNeeded } from "../composables/useBackup";
 import { debugLog } from "../utils/debugLog";
@@ -8,13 +7,44 @@ interface AppliedMigrationRow {
   id: string;
 }
 
-interface QuickCheckRow {
-  quick_check?: unknown;
+const SERVER_SCHEMA_MARKER = "026_stage_run_resume";
+const FRONTEND_SQL_DISABLED_MESSAGE = "frontend SQLite access is disabled";
+
+async function e2eSqlRequest<T>(
+  sql: string,
+  params: unknown[],
+  query: boolean,
+): Promise<{ rows: T[]; rowsAffected: number }> {
+  if (!import.meta.env.DEV || typeof window === "undefined" || !window.__KANNA_E2E__) {
+    throw new Error("frontend SQLite access is disabled; use kanna-server APIs");
+  }
+
+  const { resolveCurrentKannaServerBaseUrl } = await import("../services/kannaServerBaseUrl");
+  const baseUrl = await resolveCurrentKannaServerBaseUrl("running E2E SQL");
+  const response = await fetch(`${baseUrl}/v1/e2e/sql`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ sql, params, query }),
+  });
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    throw new Error(`E2E SQL failed: ${response.status}${body ? ` ${body}` : ""}`);
+  }
+  return await response.json() as { rows: T[]; rowsAffected: number };
 }
 
-export async function resolveDbName(): Promise<string> {
-  if (!tauriMock.isTauri) return "mock";
+const frontendSqlDisabledDb: DbHandle = {
+  async execute(sql: string, params: unknown[] = []): Promise<{ rowsAffected: number }> {
+    const result = await e2eSqlRequest<unknown>(sql, params, false);
+    return { rowsAffected: result.rowsAffected };
+  },
+  async select<T>(sql: string, params: unknown[] = []): Promise<T[]> {
+    const result = await e2eSqlRequest<T>(sql, params, true);
+    return result.rows;
+  },
+};
 
+export async function resolveDbName(): Promise<string> {
   let dbName = "kanna-v2.db";
   try {
     const envDb = await invoke<string>("read_env_var", { name: "KANNA_DB_NAME" });
@@ -28,53 +58,41 @@ export async function resolveDbName(): Promise<string> {
 
 export async function loadDatabase(): Promise<{ db: DbHandle; dbName: string }> {
   const dbName = await resolveDbName();
-
-  if (!tauriMock.isTauri) {
-    const db = tauriMock.getMockDatabase() as unknown as DbHandle;
-    return { db, dbName };
-  }
-
-  debugLog("[db] using database:", dbName);
+  debugLog("[db] using server-owned database:", dbName);
   await migrateLegacyDatabaseIfNeeded(dbName);
-  const { default: Database } = await import("@tauri-apps/plugin-sql");
-  const db = (await Database.load(`sqlite:${dbName}`)) as unknown as DbHandle;
-  await checkDatabaseHealth(db, "startup");
-  return { db, dbName };
+  return { db: frontendSqlDisabledDb, dbName };
 }
 
-export async function checkDatabaseHealth(db: DbHandle, context: string): Promise<void> {
-  let rows: QuickCheckRow[];
-  try {
-    rows = await db.select<QuickCheckRow>("PRAGMA quick_check");
-  } catch (error) {
-    throw new Error(databaseHealthErrorMessage(context, String(error)));
-  }
-
-  const results = rows.map((row) => String(row.quick_check ?? ""));
-  if (results.length > 0 && results.every((result) => result === "ok")) {
-    return;
-  }
-
-  throw new Error(databaseHealthErrorMessage(context, results.join("; ") || "no quick_check rows"));
-}
-
-function databaseHealthErrorMessage(context: string, detail: string): string {
-  return [
-    `Database health check failed during ${context}.`,
-    `SQLite reported: ${detail}.`,
-    "Stop all Kanna processes, preserve the current database files, and restore from a recent backup or a vetted .recover output before continuing.",
-  ].join(" ");
+export async function checkDatabaseHealth(_db: DbHandle, _context: string): Promise<void> {
+  // kanna-server now owns SQLite health checks during boot. This temporary
+  // frontend shim remains for one release so older bootstrap call sites can
+  // exist while the frontend has no SQLite connection.
 }
 
 export async function runMigrations(db: DbHandle): Promise<void> {
-  // Enable foreign key enforcement so ON DELETE CASCADE works
+  // Temporary compatibility fallback: when an older frontend path hands us a
+  // SQL handle, treat the server's final migration marker as proof that the
+  // schema is already owned and migrated by kanna-server. If that marker is
+  // absent on a real SQL handle, run the legacy frontend sequence for one
+  // release only. The desired end state is deleting this function after the
+  // compatibility window, not keeping frontend schema ownership.
+  try {
+    const rows = await db.select<AppliedMigrationRow>(
+      "SELECT id FROM schema_migrations WHERE id = ?",
+      [SERVER_SCHEMA_MARKER],
+    );
+    if (rows.length > 0) return;
+  } catch (error) {
+    if (String(error).includes(FRONTEND_SQL_DISABLED_MESSAGE)) {
+      return;
+    }
+  }
+
+  await runLegacyFrontendMigrations(db);
+}
+
+async function runLegacyFrontendMigrations(db: DbHandle): Promise<void> {
   await db.execute("PRAGMA foreign_keys = ON");
-  // Checkpoint every 100 pages (~400 KB) instead of the default 1000 (~4 MB).
-  // tauri-plugin-sql uses a 10-connection pool; idle connections hold open WAL read
-  // snapshots that block checkpoints. A large WAL can then be partially truncated
-  // mid-read by a checkpoint, causing SQLITE_IOERR_SHORT_READ (522) bursts.
-  // Frequent small checkpoints keep the WAL too small for this race to matter.
-  await db.execute("PRAGMA wal_autocheckpoint = 100");
 
   await db.execute(`CREATE TABLE IF NOT EXISTS schema_migrations (
     id TEXT PRIMARY KEY,
@@ -218,8 +236,8 @@ export async function runMigrations(db: DbHandle): Promise<void> {
       await db.execute(`UPDATE pipeline_item SET tags = '["merge"]' WHERE stage = 'merge' AND tags = '[]'`);
       await db.execute(`UPDATE pipeline_item SET stage = 'in_progress' WHERE stage = 'merge' AND closed_at IS NULL`);
       await db.execute(`UPDATE pipeline_item SET tags = '["blocked"]' WHERE stage = 'blocked' AND tags = '[]'`);
-    } catch (e) {
-      console.debug("[db] stage/tags migration:", e);
+    } catch (error) {
+      console.debug("[db] stage/tags migration:", error);
     }
   });
 
@@ -240,8 +258,8 @@ export async function runMigrations(db: DbHandle): Promise<void> {
         seconds INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (pipeline_item_id, activity)
       )`);
-    } catch (e) {
-      console.debug("[db] activity_log accumulator migration:", e);
+    } catch (error) {
+      console.debug("[db] activity_log accumulator migration:", error);
     }
   });
 
@@ -300,14 +318,16 @@ export async function runMigrations(db: DbHandle): Promise<void> {
             [port, item.id, envName],
           );
         }
-      } catch (e) {
-        console.debug("[db] task_port backfill failed:", e);
+      } catch (error) {
+        console.debug("[db] task_port backfill failed:", error);
       }
     }
   });
+
   await runMigration("010_rename_torndown_stage", async () => {
     await db.execute(`UPDATE pipeline_item SET stage = 'teardown' WHERE stage = 'torndown'`);
   });
+
   await runMigration("011_pipeline_item_last_output_preview", async () => {
     await addColumn("pipeline_item", "last_output_preview", "TEXT");
   });
@@ -349,6 +369,7 @@ export async function runMigrations(db: DbHandle): Promise<void> {
       imported_at TEXT NOT NULL DEFAULT (datetime('now'))
     )`);
   });
+
   await runMigration("014_task_transfer_payload_json", async () => {
     await addColumn("task_transfer", "payload_json", "TEXT");
   });
@@ -362,8 +383,8 @@ export async function runMigrations(db: DbHandle): Promise<void> {
           WHERE agent_session_id IS NULL
             AND claude_session_id IS NOT NULL`,
       );
-    } catch (e) {
-      console.debug("[db] agent_session_id backfill:", e);
+    } catch (error) {
+      console.debug("[db] agent_session_id backfill:", error);
     }
   });
 
@@ -374,6 +395,7 @@ export async function runMigrations(db: DbHandle): Promise<void> {
       await db.execute("UPDATE repo SET sort_order = ? WHERE id = ?", [index, repo.id]);
     }
   });
+
   await runMigration("016_task_teardown_state", async () => {
     await addColumn("pipeline_item", "teardown_started_at", "TEXT");
     await db.execute(`

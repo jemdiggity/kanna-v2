@@ -15,11 +15,6 @@
     "opener:default",
     "shell:allow-open",
     "shell:allow-execute",
-    "sql:default",
-    "sql:allow-load",
-    "sql:allow-execute",
-    "sql:allow-select",
-    "sql:allow-close",
     "dialog:default",
     "updater:default",
     "process:allow-restart"

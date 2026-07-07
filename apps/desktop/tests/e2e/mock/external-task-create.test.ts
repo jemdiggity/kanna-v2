@@ -304,7 +304,6 @@ describe("external task creation", () => {
           repoId,
           prompt: childPrompt,
           pipelineName: "external-create-e2e",
-          stage: "pr",
           agentType: "pty",
           agentProvider: "codex",
           permissionMode: "dontAsk",

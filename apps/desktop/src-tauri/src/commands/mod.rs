@@ -5,5 +5,4 @@ pub mod fs;
 pub mod git;
 pub mod mobile;
 pub mod shell;
-pub mod sqlite;
 pub mod transfer;

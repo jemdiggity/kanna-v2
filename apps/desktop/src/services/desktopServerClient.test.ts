@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  createDesktopBackup,
   fetchDesktopSnapshot,
   fetchPendingIncomingTransfers,
   getDesktopSetting,
@@ -94,6 +95,34 @@ describe("desktopServerClient", () => {
 
     expect(ensureMobileServer).toHaveBeenCalled();
     expect(ensureMobileServer.mock.invocationCallOrder[0]).toBeLessThan(fetchMock.mock.invocationCallOrder[0]);
+  });
+
+  it("creates backups through the desktop server endpoint", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          backupPath: "/mock/data/kanna-v2.db.backup-2026-07-07T00-00-00",
+        }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(createDesktopBackup()).resolves.toEqual({
+      backupPath: "/mock/data/kanna-v2.db.backup-2026-07-07T00-00-00",
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:48121/v1/backup",
+      {
+        method: "POST",
+        headers: undefined,
+        body: undefined,
+      },
+    );
   });
 
   it("retries transient setting read failures during startup", async () => {

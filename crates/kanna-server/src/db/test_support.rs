@@ -1,4 +1,5 @@
 use super::{configure_shared_database_connection, database_create_flags, Db};
+use crate::db::CURRENT_SCHEMA_MIGRATIONS;
 use rusqlite::Connection;
 use std::path::PathBuf;
 
@@ -136,6 +137,11 @@ impl Db {
                 value TEXT NOT NULL
             );
 
+            CREATE TABLE schema_migrations (
+                id TEXT PRIMARY KEY,
+                applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
             CREATE TABLE terminal_session (
                 id TEXT PRIMARY KEY,
                 repo_id TEXT NOT NULL,
@@ -181,6 +187,12 @@ impl Db {
             );
             "#,
         )?;
+        let mut stmt = self
+            .conn
+            .prepare("INSERT INTO schema_migrations (id) VALUES (?1)")?;
+        for id in CURRENT_SCHEMA_MIGRATIONS {
+            stmt.execute([id])?;
+        }
         Ok(())
     }
 

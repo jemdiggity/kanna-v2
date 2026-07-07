@@ -48,6 +48,8 @@ const appUpdate = useAppUpdate();
 useOperatorEvents(computed(() => db) as unknown as Ref<DbHandle | null>);
 store.attachWindowWorkspace(windowWorkspace);
 const {
+  cloudSnapshot,
+  lanSnapshot,
   selectedCloudRepoId,
   selectedCloudItemId,
   remoteSnapshot,
@@ -68,6 +70,10 @@ const {
   advanceSelectedRemoteWorkspaceTask,
   disposeDesktopCloudWorkspace,
 } = useAppCloudWorkspace({ db, store, toast });
+if (import.meta.env.DEV) {
+  void cloudSnapshot;
+  void lanSnapshot;
+}
 
 const appModals = useAppModals({ isMobile, store, windowWorkspace });
 const {

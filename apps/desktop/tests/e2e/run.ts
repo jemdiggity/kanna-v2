@@ -378,6 +378,7 @@ async function main(): Promise<void> {
     FIRESTORE_EMULATOR_HOST: `127.0.0.1:${firebaseFirestorePort}`,
     KANNA_E2E_DEVICE_TOKEN: "e2e-token",
     KANNA_E2E_AWAIT_CLOUD_PUBLISH: "1",
+    KANNA_E2E_TEST_SQL: "1",
     RUST_LOG: process.env.RUST_LOG ?? "kanna_server::ksp=warn",
   };
   const relayUrl = `ws://127.0.0.1:${relayPort}`;
