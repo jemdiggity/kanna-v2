@@ -125,6 +125,7 @@ const mockState = vi.hoisted(() => {
   }
 
   return {
+    makeItem,
     get repos() {
       return repos;
     },
@@ -517,6 +518,45 @@ describe("kanna runtime status reconciliation", () => {
       "5aa7c7ec",
       "working",
     );
+    expect(mockState.pipelineItems[0]?.activity).toBe("working");
+  });
+
+  it("syncs daemon status after an externally-created task first appears on session_created", async () => {
+    mockState.pipelineItems = [];
+    mockState.sessionStatuses = [{ session_id: "task-a4f9a008-3", status: "busy" }];
+
+    await createStore();
+    await flushStore();
+
+    mockState.emit("status_changed", {
+      session_id: "task-a4f9a008-3",
+      status: "busy",
+    });
+    await flushStore();
+
+    expect(mockState.updatePipelineItemActivityMock).not.toHaveBeenCalled();
+
+    mockState.pipelineItems = [
+      mockState.makeItem({
+        id: "a4f9a008",
+        repo_id: "repo-1",
+        branch: "task-a4f9a008-3",
+        agent_provider: "codex",
+        activity: "idle",
+      }),
+    ];
+
+    mockState.emit("session_created", {
+      session_id: "task-a4f9a008-3",
+    });
+
+    await vi.waitFor(() => {
+      expect(mockState.updatePipelineItemActivityMock).toHaveBeenCalledWith(
+        expect.anything(),
+        "a4f9a008",
+        "working",
+      );
+    });
     expect(mockState.pipelineItems[0]?.activity).toBe("working");
   });
 
