@@ -101,4 +101,30 @@ impl Db {
             .execute("DELETE FROM pipeline_item WHERE id = ?", [item_id])?;
         Ok(())
     }
+
+    pub fn delete_dormant_task_start_artifacts(
+        &self,
+        item_id: &str,
+        previous_base_ref: Option<&str>,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "DELETE FROM terminal_session WHERE pipeline_item_id = ?",
+            [item_id],
+        )?;
+        self.conn
+            .execute("DELETE FROM worktree WHERE pipeline_item_id = ?", [item_id])?;
+        self.conn.execute(
+            "DELETE FROM task_port WHERE pipeline_item_id = ?",
+            [item_id],
+        )?;
+        self.conn.execute(
+            "UPDATE pipeline_item
+             SET base_ref = ?, port_offset = NULL, port_env = NULL,
+                 activity = 'idle', activity_changed_at = datetime('now'),
+                 updated_at = datetime('now')
+             WHERE id = ? AND closed_at IS NULL",
+            (previous_base_ref, item_id),
+        )?;
+        Ok(())
+    }
 }
