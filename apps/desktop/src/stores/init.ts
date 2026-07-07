@@ -332,6 +332,7 @@ export function createInitApi(
       const focusedTaskId = resolveFocusedTaskIdBeforeExternalRefresh();
       await requireService(context.services.reloadSnapshot, "reloadSnapshot")();
       await preserveFocusedTaskAfterExternalRefresh(focusedTaskId);
+      await context.services.syncTaskStatusesFromDaemon?.();
     });
 
     listen("status_changed", async (event: unknown) => {
