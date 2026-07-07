@@ -2114,7 +2114,7 @@ describe("kanna store task base branch integration", () => {
     );
   });
 
-  it("recreates a missing worktree before respawning a reopened task", async () => {
+  it("delegates missing worktree recreation to the server before respawning a reopened task", async () => {
     mockState.pipelineItems = [
       mockState.makeItem({
         id: "item-closed",
@@ -2128,22 +2128,17 @@ describe("kanna store task base branch integration", () => {
 
     await store.undoClose();
 
-    expect(mockState.invokeMock).toHaveBeenCalledWith("file_exists", {
+    expect(mockState.invokeMock).not.toHaveBeenCalledWith("file_exists", {
       path: "/tmp/repo/.kanna-worktrees/task-closed",
     });
-    expect(mockState.invokeMock).toHaveBeenCalledWith("git_worktree_add", {
-      repoPath: "/tmp/repo",
-      branch: "task-closed",
-      path: "/tmp/repo/.kanna-worktrees/task-closed",
-      startPoint: null,
-    });
-    expect(mockState.worktreeRows).toEqual([
-      {
-        pipeline_item_id: "item-closed",
-        path: "/tmp/repo/.kanna-worktrees/task-closed",
-        branch: "task-closed",
-      },
-    ]);
+    expect(mockState.invokeMock).not.toHaveBeenCalledWith("git_worktree_add", expect.anything());
+    expect(mockState.invokeMock).toHaveBeenCalledWith(
+      "spawn_session",
+      expect.objectContaining({
+        sessionId: "item-closed",
+        cwd: "/tmp/repo/.kanna-worktrees/task-closed",
+      }),
+    );
   });
 
   it("advances stages through the local kanna-server action endpoint", async () => {
@@ -2641,7 +2636,7 @@ describe("kanna store task base branch integration", () => {
     expect(mockState.invokeMock).toHaveBeenCalledWith("kill_session", { sessionId: "shell-wt-item-blocked" });
   });
 
-  it("snapshots and removes task worktrees after finishing close", async () => {
+  it("delegates close cleanup to the server task action", async () => {
     mockState.pipelineItems = [
       mockState.makeItem({
         id: "item-cleanup",
@@ -2663,18 +2658,12 @@ describe("kanna store task base branch integration", () => {
     await store.closeTask();
     await flushStore();
 
-    const cleanupCall = mockState.invokeMock.mock.calls.find(([command, args]) =>
+    expect(mockState.invokeMock.mock.calls.some(([command, args]) =>
       command === "run_script" &&
       typeof args?.script === "string" &&
       args.script.includes("WIP at task close")
-    );
-    expect(cleanupCall).toBeTruthy();
-    expect(cleanupCall?.[1]).toEqual(expect.objectContaining({
-      cwd: "/tmp/repo",
-      env: {},
-      script: expect.stringContaining("git -C \"$repo\" worktree remove --force --force \"$wt\""),
-    }));
-    expect(mockState.worktreeRows).toEqual([]);
+    )).toBe(false);
+    expect(mockState.pipelineItems[0]?.closed_at).toBe(mockState.makeItem().updated_at);
   });
 
   it("marks a task as tearing down before spawning its teardown session", async () => {

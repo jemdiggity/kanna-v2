@@ -271,7 +271,7 @@ async fn create_integration_task_for_conflict(
         (prepared, previous_blockers)
     };
 
-    match crate::task_creator::spawn_prepared_task_for_api_with_rollback(
+    match crate::task_creator::spawn_prepared_task_for_api_with_diagnostics(
         &state.config.db_path,
         daemon,
         prepared.clone(),
