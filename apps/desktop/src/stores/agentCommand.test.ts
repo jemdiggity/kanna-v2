@@ -2,6 +2,35 @@ import { describe, expect, it, vi } from "vitest";
 import { buildAgentCommand } from "./agentCommand";
 
 describe("buildAgentCommand", () => {
+  it("builds Codex commands with Kanna MCP config overrides", async () => {
+    const command = await buildAgentCommand("codex", {
+      taskId: "task-1",
+      prompt: "Ship it",
+      permissionFlags: ["--yolo"],
+      runtimeSystemPrompt: "system",
+      runtimeUserPrompt: "Ship it\n\nThis session was launched by Kanna",
+      mcpConfigPath: "/tmp/kanna-daemon/runtime/mcp/task-1.json",
+      readTextFile: async () => JSON.stringify({
+        mcpServers: {
+          "kanna-mcp": {
+            command: "/Applications/Kanna Staging.app/Contents/MacOS/kanna-mcp",
+            args: ["serve"],
+            env: {
+              KANNA_SERVER_BASE_URL: "http://127.0.0.1:48121",
+            },
+          },
+        },
+      }),
+    });
+
+    expect(command.agentCmd).toBe(
+      "codex --yolo -c 'mcp_servers.kanna-mcp.command=\"/Applications/Kanna Staging.app/Contents/MacOS/kanna-mcp\"' -c 'mcp_servers.kanna-mcp.args=[\"serve\"]' -c 'mcp_servers.kanna-mcp.env.KANNA_SERVER_BASE_URL=\"http://127.0.0.1:48121\"' 'Ship it'",
+    );
+    expect(command.agentCmdPreamble).toBe(
+      "codex --yolo -c 'mcp_servers.kanna-mcp.command=\"/Applications/Kanna Staging.app/Contents/MacOS/kanna-mcp\"' -c 'mcp_servers.kanna-mcp.args=[\"serve\"]' -c 'mcp_servers.kanna-mcp.env.KANNA_SERVER_BASE_URL=\"http://127.0.0.1:48121\"' 'Ship it\n\nThis session was launched by Kanna'",
+    );
+  });
+
   it("builds Codex resume commands with byte-identical quote escaping", async () => {
     const command = await buildAgentCommand("codex", {
       taskId: "task-1",
