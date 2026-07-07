@@ -208,9 +208,104 @@ function createTransferDb(initial: {
     closeTask: async (taskId) => {
       const item = tables.pipeline_item.find((candidate) => candidate.id === taskId);
       if (item) {
+        const repo = tables.repo.find((candidate) => candidate.id === item.repo_id);
+        if (repo && item.branch) {
+          const worktreePath = `${repo.path}/.kanna-worktrees/${item.branch}`;
+          try {
+            const rawConfig = await invokeMock("read_text_file", {
+              path: `${worktreePath}/.kanna/config.json`,
+            });
+            const parsed = JSON.parse(String(rawConfig || "{}")) as { teardown?: string[] };
+            if (parsed.teardown && parsed.teardown.length > 0) {
+              item.teardown_started_at = new Date().toISOString();
+              await invokeMock("spawn_session", {
+                sessionId: `td-${taskId}`,
+                cwd: worktreePath,
+                executable: "/bin/zsh",
+                args: [
+                  "--login",
+                  "-i",
+                  "-c",
+                  `printf '\\033[33mRunning teardown...\\033[0m\\n' && ${parsed.teardown[0]} || printf '\\nTeardown command failed\\n'`,
+                ],
+                env: {
+                  KANNA_WORKTREE: "1",
+                  KANNA_TMUX_SESSION: "",
+                  KANNA_DB_NAME: "",
+                  KANNA_DB_PATH: "",
+                  KANNA_DAEMON_DIR: "",
+                  KANNA_TRANSFER_ROOT: "",
+                  KANNA_WEBDRIVER_PORT: "",
+                  KANNA_E2E_TARGET_WEBDRIVER_PORT: "",
+                },
+                cols: 120,
+                rows: 30,
+              });
+              await invokeMock("attach_session_with_snapshot", { sessionId: `td-${taskId}` });
+              return;
+            }
+          } catch {
+            // No repo teardown config in this test fixture.
+          }
+        }
         item.closed_at = new Date().toISOString();
         item.updated_at = item.closed_at;
       }
+    },
+    createTask: async (request) => {
+      const repo = tables.repo.find((candidate) => candidate.id === request.repoId);
+      if (!repo) throw new Error(`repo not found: ${request.repoId}`);
+      const id = `task-${tables.pipeline_item.length + 1}`;
+      const item = buildItem(repo.id);
+      item.id = id;
+      item.prompt = request.prompt;
+      item.branch = `task-${id}`;
+      item.display_name = request.displayName ?? null;
+      item.pipeline = request.pipelineName ?? "default";
+      item.stage = request.stage ?? "in progress";
+      item.agent_type = request.agentType ?? "pty";
+      item.agent_provider = (request.agentProvider ?? "claude") as PipelineItem["agent_provider"];
+      item.base_ref = request.baseRef ?? null;
+      item.agent_session_id = request.resumeSessionId ?? null;
+      tables.pipeline_item.push(item);
+      if (request.recoverySnapshot) {
+        const snapshot = request.recoverySnapshot;
+        await invokeMock("seed_session_recovery_state", {
+          sessionId: id,
+          serialized: snapshot.serialized,
+          cols: snapshot.cols,
+          rows: snapshot.rows,
+          cursorRow: snapshot.cursorRow,
+          cursorCol: snapshot.cursorCol,
+          cursorVisible: snapshot.cursorVisible,
+        }).catch(() => undefined);
+      }
+      const resumeFlag = request.resumeSessionId
+        ? item.agent_provider === "copilot"
+          ? `--resume='${request.resumeSessionId}'`
+          : item.agent_provider === "codex"
+            ? `codex resume '${request.resumeSessionId}'`
+          : `--resume ${request.resumeSessionId}`
+        : request.prompt;
+      const spawnArgs: Record<string, unknown> = {
+        sessionId: id,
+        agentProvider: item.agent_provider,
+        args: [resumeFlag],
+      };
+      if (item.agent_provider === "codex") {
+        spawnArgs.env = {
+          PATH: "/Applications/Kanna.app/Contents/MacOS:/usr/local/bin:/usr/bin:/bin",
+        };
+      }
+      await invokeMock("spawn_session", spawnArgs).catch(() => undefined);
+      return {
+        taskId: id,
+        repoId: repo.id,
+        title: request.displayName ?? request.prompt,
+        stage: item.stage,
+        agentType: item.agent_type ?? "pty",
+        worktreePath: `${repo.path}/.kanna-worktrees/${item.branch}`,
+      };
     },
     findRepoByPath: async (path: string) =>
       tables.repo.find((repo) => repo.path === path) as never ?? null,

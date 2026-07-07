@@ -1,5 +1,4 @@
 import type { RepoConfig } from "@kanna/core";
-import { closePipelineItemAndClearCachedTerminalState } from "./kannaCleanup";
 import type { StoreContext } from "./state";
 import { claimDesktopTaskPorts, releaseDesktopTaskPorts } from "../services/desktopServerClient";
 
@@ -54,8 +53,7 @@ export function createPortsStore(_context: StoreContext): PortsStore {
     itemId: string,
     closeFn: (id: string) => Promise<void>,
   ): Promise<void> {
-    await closePipelineItemAndClearCachedTerminalState(itemId, closeFn);
-    await releaseTaskPorts(itemId);
+    await closeFn(itemId);
   }
 
   return {

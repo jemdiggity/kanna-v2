@@ -1,6 +1,7 @@
 import { defineStore } from "pinia";
 import { useToast } from "../composables/useToast";
 import { createStoreContext, createStoreState, type StoreServices } from "./state";
+import { createPortsStore } from "./ports";
 import { createQueriesApi } from "./queries";
 import { createSelectionApi } from "./selection";
 import { createSessionsApi } from "./sessions";
@@ -21,12 +22,13 @@ export const useKannaStore = defineStore("kanna", () => {
   services.fetchSnapshot = fetchDesktopSnapshot;
   const context = createStoreContext(state, toast, services);
 
+  const ports = createPortsStore(context);
   const queries = createQueriesApi(context);
   const selection = createSelectionApi(context);
   const sessions = createSessionsApi(context);
   const pipeline = createPipelineApi(context);
   const tasks = createTasksApi(context);
-  const initApi = createInitApi(context, tasks);
+  const initApi = createInitApi(context, ports, tasks);
 
   services.loadInitialData = queries.loadInitialData;
   services.reloadSnapshot = queries.reloadSnapshot;
