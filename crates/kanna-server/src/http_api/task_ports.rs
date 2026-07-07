@@ -144,7 +144,7 @@ pub(super) async fn claim_task_ports(
     let port_env = match claim_ports(&db, &task_id, &payload) {
         Ok(port_env) => port_env,
         Err(error) => {
-            let _ = db.delete_task_ports_for_item(&task_id);
+            let _ = db.release_task_ports(&task_id);
             return Err((axum::http::StatusCode::INTERNAL_SERVER_ERROR, error));
         }
     };
@@ -168,7 +168,7 @@ pub(super) async fn release_task_ports(
         )
     })?;
     let task_id = resolve_existing_task_id(&db, &task_id)?;
-    db.delete_task_ports_for_item(&task_id)
+    db.release_task_ports(&task_id)
         .map_err(|e| db_write_error("db error", e))?;
     state.publish_state_changed(StateChangeScope::Tasks);
     Ok(Json(serde_json::json!({ "taskId": task_id })))

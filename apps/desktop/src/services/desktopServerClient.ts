@@ -35,7 +35,11 @@ export interface DesktopServerClientHandlersForTests {
   putTaskAgentSession?: (taskId: string, agentSessionId: string | null) => MaybePromise<void>;
   claimTaskPorts?: (taskId: string, input: ClaimDesktopTaskPortsInput) => MaybePromise<ClaimDesktopTaskPortsResponse>;
   releaseTaskPorts?: (taskId: string) => MaybePromise<void>;
+  createTask?: (request: CreateDesktopTaskRequest) => MaybePromise<CreateDesktopTaskResponse>;
   closeTask?: (taskId: string) => MaybePromise<void>;
+  reopenTask?: (taskId: string) => MaybePromise<void>;
+  blockTask?: (taskId: string, blockerTaskIds: string[]) => MaybePromise<void>;
+  unblockTask?: (taskId: string) => MaybePromise<void>;
   addRepo?: (input: AddDesktopRepoInput) => MaybePromise<DesktopRepoResponse>;
   findRepoByPath?: (path: string) => MaybePromise<DesktopRepoResponse | null>;
   reorderRepos?: (orderedIds: string[]) => MaybePromise<void>;
@@ -356,15 +360,45 @@ export async function closeDesktopTask(taskId: string): Promise<void> {
     await clientHandlersForTests.closeTask(taskId);
     return;
   }
-  await ensureDesktopServerRunning();
-  const baseUrl = await desktopServerBaseUrl();
-  const response = await fetch(`${baseUrl}/v1/tasks/${encodeURIComponent(taskId)}/actions/close`, {
+  await requestJson<{ taskId?: string }>(`/v1/tasks/${encodeURIComponent(taskId)}/actions/close`, {
     method: "POST",
   });
-  if (!response.ok) {
-    const responseBody = await response.text().catch(() => "");
-    throw new Error(`POST /v1/tasks/${taskId}/actions/close failed: ${response.status}${responseBody ? ` ${responseBody}` : ""}`);
+}
+
+export async function reopenDesktopTask(taskId: string): Promise<void> {
+  if (clientHandlersForTests?.reopenTask) {
+    await clientHandlersForTests.reopenTask(taskId);
+    return;
   }
+  await requestJson<{ taskId: string }>(
+    `/v1/tasks/${encodeURIComponent(taskId)}/actions/reopen`,
+    { method: "POST" },
+  );
+}
+
+export async function blockDesktopTask(taskId: string, blockerTaskIds: string[]): Promise<void> {
+  if (clientHandlersForTests?.blockTask) {
+    await clientHandlersForTests.blockTask(taskId, blockerTaskIds);
+    return;
+  }
+  await requestJson<{ taskId: string }>(
+    `/v1/tasks/${encodeURIComponent(taskId)}/actions/block`,
+    {
+      method: "POST",
+      body: { blockerTaskIds },
+    },
+  );
+}
+
+export async function unblockDesktopTask(taskId: string): Promise<void> {
+  if (clientHandlersForTests?.unblockTask) {
+    await clientHandlersForTests.unblockTask(taskId);
+    return;
+  }
+  await requestJson<{ taskId: string }>(
+    `/v1/tasks/${encodeURIComponent(taskId)}/actions/unblock`,
+    { method: "POST" },
+  );
 }
 
 export interface DesktopRepoResponse {

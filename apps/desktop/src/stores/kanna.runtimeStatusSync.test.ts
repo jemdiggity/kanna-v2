@@ -465,11 +465,13 @@ describe("kanna runtime status reconciliation", () => {
 
     await flushStore();
 
-    expect(mockState.updatePipelineItemActivityMock).toHaveBeenCalledWith(
-      expect.anything(),
-      "task-1",
-      "idle",
-    );
+    await vi.waitFor(() => {
+      expect(mockState.updatePipelineItemActivityMock).toHaveBeenCalledWith(
+        expect.anything(),
+        "task-1",
+        "idle",
+      );
+    });
     expect(mockState.pipelineItems[0]?.activity).toBe("idle");
   });
 
@@ -637,6 +639,7 @@ describe("kanna runtime status reconciliation", () => {
       onSharedInvalidation: vi.fn(async () => vi.fn()),
     });
     await flushStore();
+    mockState.pipelineItems[0]!.activity = "working";
 
     mockState.emit("session_exit", {
       session_id: "task-1",
@@ -646,11 +649,13 @@ describe("kanna runtime status reconciliation", () => {
 
     await flushStore();
 
-    expect(mockState.updatePipelineItemActivityMock).toHaveBeenCalledWith(
-      expect.anything(),
-      "task-1",
-      "idle",
-    );
+    await vi.waitFor(() => {
+      expect(mockState.updatePipelineItemActivityMock).toHaveBeenCalledWith(
+        expect.anything(),
+        "task-1",
+        "idle",
+      );
+    });
     expect(mockState.pipelineItems[0]?.activity).toBe("idle");
   });
 
