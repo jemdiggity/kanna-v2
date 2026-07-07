@@ -153,24 +153,6 @@ pub(crate) async fn handle_task_terminal_state(
     notify_task_completion(state, &pipeline_item_id, success).await
 }
 
-pub(crate) async fn handle_task_activity_state(
-    state: &AppState,
-    task_id: &str,
-    activity: &str,
-) -> Result<(), String> {
-    let db = Db::open(&state.config.db_path).map_err(|e| format!("db error: {}", e))?;
-    let Some(pipeline_item_id) = db
-        .resolve_pipeline_item_id(task_id)
-        .map_err(|e| format!("db error: {}", e))?
-    else {
-        return Ok(());
-    };
-    db.update_pipeline_item_activity(&pipeline_item_id, activity)
-        .map_err(|e| format!("db error: {}", e))?;
-    state.publish_state_changed(StateChangeScope::Tasks);
-    Ok(())
-}
-
 pub(super) async fn notify_task_completion(
     state: &AppState,
     child_id: &str,
