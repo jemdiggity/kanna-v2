@@ -1,5 +1,6 @@
 import type { PipelineItem, Repo, TaskBlocker } from "../types/kanna";
 import type { TaskTransfer } from "../types/kanna";
+import type { SessionRecoveryState } from "../composables/sessionRecoveryState";
 import { invoke } from "../invoke";
 import type { SessionRecoveryState } from "../composables/sessionRecoveryState";
 
@@ -29,6 +30,7 @@ export interface DesktopServerClientHandlersForTests {
   putSetting?: (key: string, value: string) => MaybePromise<DesktopSettingResponse | void>;
   deleteSetting?: (key: string) => MaybePromise<void>;
   postOperatorEvents?: (events: DesktopOperatorEventInput[]) => MaybePromise<void>;
+  createBackup?: () => MaybePromise<DesktopBackupResponse>;
   fetchRepoAnalytics?: (repoId: string) => MaybePromise<DesktopRepoAnalytics>;
   patchRepo?: (repoId: string, input: PatchDesktopRepoInput) => MaybePromise<void>;
   applyTaskRuntimeStatus?: (taskId: string, input: DesktopTaskRuntimeStatusInput) => MaybePromise<DesktopTaskActivityResponse>;
@@ -248,6 +250,17 @@ export async function postDesktopOperatorEvents(events: DesktopOperatorEventInpu
 
 export function postDesktopOperatorEvent(event: DesktopOperatorEventInput): Promise<void> {
   return postDesktopOperatorEvents([event]);
+}
+
+export interface DesktopBackupResponse {
+  backupPath: string;
+}
+
+export async function createDesktopBackup(): Promise<DesktopBackupResponse> {
+  if (clientHandlersForTests?.createBackup) return await clientHandlersForTests.createBackup();
+  return await requestJson<DesktopBackupResponse>("/v1/backup", {
+    method: "POST",
+  });
 }
 
 export type DesktopAnalyticsBucketSize = "daily" | "weekly" | "monthly";

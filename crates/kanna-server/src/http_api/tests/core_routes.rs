@@ -1,4 +1,7 @@
 use super::*;
+use rusqlite::Connection;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 #[tokio::test]
 async fn list_desktops_route_returns_configured_desktop() {
@@ -140,6 +143,81 @@ async fn snapshot_route_returns_ui_hydration_payload() {
     assert_eq!(snapshot["settings"]["ideCommand"], "zed");
 
     let _ = std::fs::remove_dir_all(visible_worktree);
+}
+
+#[tokio::test]
+async fn backup_route_creates_valid_snapshot_while_writes_continue() {
+    let state = super::test_state_with_seed("desktop-1", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+    });
+    let db_path = state.config.db_path.clone();
+    let seed_conn = Connection::open(&db_path).unwrap();
+    seed_conn
+        .execute_batch(
+            r#"
+                CREATE TABLE backup_probe (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  note TEXT NOT NULL
+                );
+                INSERT INTO backup_probe (note) VALUES ('seed');
+            "#,
+        )
+        .unwrap();
+    drop(seed_conn);
+    let app = super::router(state);
+    let stop = Arc::new(AtomicBool::new(false));
+    let writer_stop = Arc::clone(&stop);
+    let writer_db_path = db_path.clone();
+    let writer = std::thread::spawn(move || {
+        let conn = Connection::open(writer_db_path).unwrap();
+        conn.busy_timeout(std::time::Duration::from_millis(10_000))
+            .unwrap();
+        conn.execute_batch("PRAGMA journal_mode = WAL;").unwrap();
+        let mut i = 0;
+        while !writer_stop.load(Ordering::Relaxed) {
+            let _ = conn.execute(
+                "INSERT INTO backup_probe (note) VALUES (?1)",
+                [format!("live-{i}")],
+            );
+            i += 1;
+        }
+    });
+
+    let response = app
+        .oneshot(
+            Request::post("/v1/backup")
+                .header("content-type", "application/json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    stop.store(true, Ordering::Relaxed);
+    writer.join().unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = from_slice(&body).unwrap();
+    let backup_path = payload["backupPath"].as_str().expect("backup path");
+
+    let backup = Connection::open(backup_path).expect("open backup");
+    let quick_check: String = backup
+        .query_row("PRAGMA quick_check", [], |row| row.get(0))
+        .expect("quick check backup");
+    assert_eq!(quick_check, "ok");
+    let seed_count: i64 = backup
+        .query_row(
+            "SELECT COUNT(*) FROM backup_probe WHERE note = 'seed'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("seed row copied");
+    assert_eq!(seed_count, 1);
+
+    let _ = std::fs::remove_file(backup_path);
+    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]

@@ -1,5 +1,8 @@
 use super::analytics::get_repo_analytics;
+use super::backup::create_backup;
 use super::desktop::list_desktops;
+#[cfg(debug_assertions)]
+use super::e2e_sql::execute_e2e_sql;
 use super::ksp::ksp_stream;
 use super::operator_events::post_operator_events;
 use super::pairing::create_pairing_session;
@@ -41,9 +44,10 @@ use tower::ServiceExt;
 use tower_http::cors::CorsLayer;
 
 pub fn router(state: Arc<AppState>) -> Router {
-    Router::new()
+    let router = Router::new()
         .route("/v1/status", get(status))
         .route("/v1/snapshot", get(get_snapshot))
+        .route("/v1/backup", post(create_backup))
         .route(
             "/v1/settings/{key}",
             get(get_setting).put(put_setting).delete(delete_setting),
@@ -156,7 +160,12 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/v1/transfers/{transfer_id}/actions/fail",
             post(fail_pending_incoming_transfer),
         )
-        .route("/v1/pairing/sessions", post(create_pairing_session))
+        .route("/v1/pairing/sessions", post(create_pairing_session));
+
+    #[cfg(debug_assertions)]
+    let router = router.route("/v1/e2e/sql", post(execute_e2e_sql));
+
+    router
         .layer(CorsLayer::permissive())
         .layer(axum::middleware::from_fn(log_error_responses))
         .with_state(state)

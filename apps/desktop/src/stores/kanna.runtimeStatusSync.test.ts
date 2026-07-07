@@ -798,7 +798,7 @@ describe("kanna runtime status reconciliation", () => {
     expect(store.currentItem?.id).toBe("task-next");
   });
 
-  it("cleans closed task worktrees when teardown session exit auto-closes the task", async () => {
+  it("delegates teardown session auto-close cleanup to the server", async () => {
     mockState.pipelineItems = [
       {
         ...mockState.pipelineItems[0]!,
@@ -825,12 +825,7 @@ describe("kanna runtime status reconciliation", () => {
     });
 
     await vi.waitFor(() => {
-      const cleanupCall = mockState.invokeMock.mock.calls.find(([command, args]) =>
-        command === "run_script" &&
-        typeof args?.script === "string" &&
-        args.script.includes("WIP at task close")
-      );
-      expect(cleanupCall).toBeTruthy();
+      expect(mockState.pipelineItems[0]?.closed_at).toBe("2026-04-16T00:00:00.000Z");
     });
 
     const cleanupCall = mockState.invokeMock.mock.calls.find(([command, args]) =>
@@ -838,12 +833,7 @@ describe("kanna runtime status reconciliation", () => {
       typeof args?.script === "string" &&
       args.script.includes("WIP at task close")
     );
-    expect(cleanupCall?.[1]).toEqual(expect.objectContaining({
-      cwd: "/tmp/repo",
-      env: {},
-      script: expect.stringContaining("git -C \"$repo\" worktree remove --force --force \"$wt\""),
-    }));
-    expect(mockState.worktreeRows).toEqual([]);
+    expect(cleanupCall).toBeUndefined();
   });
 
   it("falls back to another repo when the selected teardown task leaves its repo empty", async () => {
