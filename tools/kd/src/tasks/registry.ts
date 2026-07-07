@@ -26,6 +26,7 @@ import { writeCargoConfig } from "../runtime/env-sync";
 import { buildFirebaseCommandEnv, buildFirebaseEmulatorArgs, formatMissingFirebaseEmulators, resolveFirebaseEnvFromReference, writeFirebaseEmulatorConfig, type FirebasePortInput } from "../runtime/firebase";
 import { resolveMobileServerUrl } from "../runtime/mobile";
 import { buildMobileDeviceSmokeCommand, buildMobileTestCommand } from "../runtime/mobile-commands";
+import { executeMobileIosArchiveWithContext } from "../runtime/mobile-archive";
 import {
   buildMobileDevicePrebuildCommand,
   buildMobileDeviceRelaunchCommand,
@@ -150,6 +151,15 @@ const mobileRunInputSchema = z.object({
 const mobileQaInputSchema = z.object({
   production: z.boolean().default(false),
   ota: z.boolean().default(false)
+});
+
+const mobileArchiveInputSchema = z.object({
+  production: z.boolean().default(false),
+  dryRun: z.boolean().default(false),
+  upload: z.boolean().default(false),
+  buildNumber: z.string().optional(),
+  version: z.string().optional(),
+  outDir: z.string().optional()
 });
 
 const mobileOtaPublishInputSchema = z.object({
@@ -1629,6 +1639,19 @@ export const taskDefinitions = [
     description: "Build, install, and launch Kanna mobile on a physical iOS device.",
     inputSchema: mobileRunInputSchema,
     execute: async (_context, input) => executeMobileDeviceRun(mobileRunInputSchema.parse(input))
+  },
+  {
+    id: "mobile.archive",
+    description: "Build and optionally upload a production iOS archive for App Store Connect.",
+    inputSchema: mobileArchiveInputSchema,
+    execute: async (_context, input) => {
+      const context = await resolveDefaultContext(process.env);
+      return executeMobileIosArchiveWithContext(mobileArchiveInputSchema.parse(input), {
+        repoRoot: context.repoRoot,
+        env: context.env,
+        runner: nodeCommandRunner
+      });
+    }
   },
   {
     id: "mobile.doctor",
