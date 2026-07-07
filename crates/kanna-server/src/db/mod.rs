@@ -34,6 +34,37 @@ pub use transfers::{
 
 const SQLITE_BUSY_TIMEOUT_MS: u64 = 10_000;
 const SQLITE_WAL_AUTOCHECKPOINT_PAGES: i64 = 100;
+#[cfg(test)]
+pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
+    "001_default_settings",
+    "002_pipeline_item_metadata_columns",
+    "003_legacy_stage_to_tags_backfill",
+    "004_activity_log_accumulator",
+    "005_task_blocker_table",
+    "006_operator_event_table",
+    "007_pipeline_stage_columns",
+    "008_tags_to_stage_backfill",
+    "009_task_port_table",
+    "010_rename_torndown_stage",
+    "011_pipeline_item_last_output_preview",
+    "012_pipeline_item_active_post_action",
+    "013_task_transfer_tables",
+    "014_task_transfer_payload_json",
+    "015_agent_session_id_rename",
+    "016_repo_sort_order",
+    "016_task_teardown_state",
+    "017_theme_preferences",
+    "018_merge_stage_to_in_progress",
+    "019_repo_remote_metadata_columns",
+    "020_agent_message_appearance_preference",
+    "020_pipeline_item_notify_task",
+    "021_pipeline_item_agent_spawn_options",
+    "022_pipeline_item_parent_task_id",
+    "023_stage_run_pipeline_snapshot",
+    "024_pipeline_item_stage_graph_cleanup",
+    "025_stage_run_kind",
+    "026_stage_run_resume",
+];
 
 #[derive(Debug, Serialize)]
 pub struct PipelineItem {
@@ -455,6 +486,7 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
         add_column(conn, "repo", "hidden", "INTEGER NOT NULL DEFAULT 0");
         add_column(conn, "repo", "sort_order", "INTEGER NOT NULL DEFAULT 0");
         add_column(conn, "pipeline_item", "closed_at", "TEXT");
+        add_column(conn, "pipeline_item", "agent_type", "TEXT");
         add_column(conn, "pipeline_item", "agent_session_id", "TEXT");
         add_column(conn, "pipeline_item", "tags", "TEXT NOT NULL DEFAULT '[]'");
         add_column(conn, "pipeline_item", "base_ref", "TEXT");
@@ -467,6 +499,8 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
         add_column(conn, "pipeline_item", "agent_spawn_options", "TEXT");
         add_column(conn, "pipeline_item", "previous_stage", "TEXT");
         add_column(conn, "pipeline_item", "teardown_started_at", "TEXT");
+        add_column(conn, "pipeline_item", "created_at", "TEXT");
+        add_column(conn, "pipeline_item", "updated_at", "TEXT");
         Ok(())
     })?;
 

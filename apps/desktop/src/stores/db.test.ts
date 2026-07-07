@@ -71,4 +71,32 @@ describe("desktop DB bootstrap boundary", () => {
     );
     expect(db.execute).not.toHaveBeenCalled();
   });
+
+  it("keeps the temporary frontend migration fallback when the server marker is absent", async () => {
+    const appliedMigrations: string[] = [];
+    const db = {
+      execute: vi.fn(async (sql: string, params: unknown[] = []) => {
+        if (/INSERT INTO schema_migrations/i.test(sql)) {
+          appliedMigrations.push(String(params[0]));
+        }
+        return { rowsAffected: 1 };
+      }),
+      select: vi.fn(async <T>(sql: string, params: unknown[] = []) => {
+        if (/FROM schema_migrations/i.test(sql)) {
+          const migrationId = String(params[0]);
+          return appliedMigrations.includes(migrationId)
+            ? ([{ id: migrationId }] as T[])
+            : [];
+        }
+        return [];
+      }),
+    } satisfies DbHandle;
+
+    await expect(runMigrations(db)).resolves.toBeUndefined();
+
+    expect(appliedMigrations[0]).toBe("001_default_settings");
+    expect(appliedMigrations).toContain("026_stage_run_resume");
+    expect(appliedMigrations.at(-1)).toBe("026_stage_run_resume");
+    expect(db.execute).toHaveBeenCalledWith(expect.stringContaining("CREATE TABLE IF NOT EXISTS schema_migrations"));
+  });
 });
