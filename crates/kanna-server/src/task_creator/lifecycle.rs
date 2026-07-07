@@ -79,7 +79,7 @@ pub(crate) async fn spawn_prepared_task_for_api_recording_stage_run(
     Ok(created)
 }
 
-pub(crate) async fn spawn_prepared_task_for_api_with_rollback(
+pub(crate) async fn spawn_prepared_task_for_api_with_diagnostics(
     db_path: &str,
     daemon: &mut DaemonClient,
     prepared: PreparedTaskSpawn,
@@ -88,11 +88,13 @@ pub(crate) async fn spawn_prepared_task_for_api_with_rollback(
         Ok(created) => Ok(created),
         Err(err) => {
             let db = Db::open(db_path)
-                .map_err(|open_err| format!("{err}; rollback failed: db error: {open_err}"))?;
-            match rollback_prepared_task_for_api(&db, &prepared) {
-                Ok(()) => Err(err),
-                Err(rollback_err) => Err(format!("{err}; rollback failed: {rollback_err}")),
-            }
+                .map_err(|open_err| format!("{err}; diagnostics failed: db error: {open_err}"))?;
+            record_prepared_task_spawn_failure(&db, &prepared, &err)
+                .map_err(|record_err| format!("{err}; diagnostics failed: {record_err}"))?;
+            Err(format!(
+                "task {} failed to spawn: {err}",
+                prepared.created_task.task_id
+            ))
         }
     }
 }
@@ -515,6 +517,39 @@ fn record_spawned_stage_run(db_path: &str, prepared: &PreparedTaskSpawn) -> Resu
         status: "running",
         result: None,
         feedback: None,
+        session_id: Some(&prepared.session_id),
+        provider_session_id: prepared.provider_session_id.as_deref(),
+        cwd: Some(&prepared.cwd),
+        resumed_from_run_id: None,
+    })
+    .map_err(|e| format!("db error: {}", e))
+}
+
+fn record_prepared_task_spawn_failure(
+    db: &Db,
+    prepared: &PreparedTaskSpawn,
+    error: &str,
+) -> Result<(), String> {
+    let task_id = prepared.created_task.task_id.as_str();
+    let result = format!("failed to spawn task {task_id}: {error}");
+    db.cancel_running_stage_runs(task_id)
+        .map_err(|e| format!("db error: {}", e))?;
+    db.update_pipeline_item_activity(task_id, "unread")
+        .map_err(|e| format!("db error: {}", e))?;
+    db.update_pipeline_item_agent_session_id(task_id, prepared.provider_session_id.as_deref())
+        .map_err(|e| format!("db error: {}", e))?;
+    let run_id = generate_stage_run_id(task_id);
+    db.insert_stage_run(NewStageRun {
+        id: &run_id,
+        task_id,
+        stage: &prepared.created_task.stage,
+        kind: "main",
+        agent: prepared.stage_agent.as_deref(),
+        agent_provider: Some(prepared.agent_provider.as_str()),
+        model: prepared.model.as_deref(),
+        status: "failed",
+        result: Some(&result),
+        feedback: Some("task spawn failed"),
         session_id: Some(&prepared.session_id),
         provider_session_id: prepared.provider_session_id.as_deref(),
         cwd: Some(&prepared.cwd),

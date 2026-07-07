@@ -18,6 +18,11 @@ pub(super) async fn list_recent_tasks(
             format!("db error: {}", e),
         )
     })?;
+    if crate::mobile_api::record_orphaned_initialized_tasks(&db)
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?
+    {
+        state.publish_state_changed(StateChangeScope::Tasks);
+    }
     let api = MobileApi::new(state.config.clone(), db);
     let tasks = api
         .list_recent_tasks()
@@ -35,6 +40,11 @@ pub(super) async fn get_task(
             format!("db error: {}", e),
         )
     })?;
+    if crate::mobile_api::record_orphaned_initialized_tasks(&db)
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?
+    {
+        state.publish_state_changed(StateChangeScope::Tasks);
+    }
     let api = MobileApi::new(state.config.clone(), db);
     let task = api
         .get_task(&task_id)
@@ -109,6 +119,11 @@ pub(super) async fn search_tasks(
             format!("db error: {}", e),
         )
     })?;
+    if crate::mobile_api::record_orphaned_initialized_tasks(&db)
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?
+    {
+        state.publish_state_changed(StateChangeScope::Tasks);
+    }
     let api = MobileApi::new(state.config.clone(), db);
     let tasks = api
         .search_tasks(&query.query)
@@ -226,7 +241,7 @@ pub(super) async fn create_task(
                 format!("daemon error: {}", e),
             )
         })?;
-    let created = crate::task_creator::spawn_prepared_task_for_api_with_rollback(
+    let created = crate::task_creator::spawn_prepared_task_for_api_with_diagnostics(
         &state.config.db_path,
         &mut daemon,
         prepared,

@@ -233,6 +233,44 @@ async fn rerun_stage_uses_compiled_post_action_stage_prompt_and_stage_setup() {
 }
 
 #[test]
+fn prepare_rerun_stage_recreates_missing_initial_worktree() {
+    let repo_root = init_git_repo("rerun-missing-worktree");
+    let config = test_config("rerun-missing-worktree");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Recover missing workspace",
+        Some("Recover missing workspace"),
+        "in progress",
+        "2026-07-01 00:00:00",
+    )
+    .unwrap();
+    db.update_test_pipeline_item_stage_context("task-1", "task-task-1", "default", None, "claude")
+        .unwrap();
+
+    let worktree = repo_root.join(".kanna-worktrees/task-task-1");
+    assert!(!worktree.exists());
+
+    let prepared = prepare_rerun_stage_for_api(&db, &config, "task-1").unwrap();
+
+    assert_eq!(prepared.cwd, worktree.to_string_lossy());
+    assert!(worktree.is_dir());
+    assert_eq!(
+        db.get_task_worktree_path("task-1").unwrap().as_deref(),
+        Some(worktree.to_string_lossy().as_ref())
+    );
+
+    let _ = super::super::worktree::remove_prepared_worktree(
+        worktree.to_string_lossy().as_ref(),
+        "task-task-1",
+    );
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
 fn prepare_advance_stage_uses_stored_pipeline_snapshot_for_existing_task() {
     let repo_root =
         std::env::temp_dir().join(format!("kanna-stage-snapshot-{}", std::process::id()));

@@ -131,9 +131,11 @@ impl Db {
 
     fn list_snapshot_worktree_paths(&self) -> Result<HashMap<String, String>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
-            "SELECT pipeline_item_id, path
+            "SELECT worktree.pipeline_item_id, worktree.path
              FROM worktree
-             ORDER BY created_at DESC, id DESC",
+             JOIN pipeline_item ON pipeline_item.id = worktree.pipeline_item_id
+             WHERE pipeline_item.closed_at IS NULL
+             ORDER BY worktree.created_at DESC, worktree.id DESC",
         )?;
         let rows = stmt.query_map([], |row| {
             let pipeline_item_id: String = row.get(0)?;
@@ -144,7 +146,9 @@ impl Db {
         let mut paths = HashMap::new();
         for row in rows {
             let (pipeline_item_id, path) = row?;
-            paths.entry(pipeline_item_id).or_insert(path);
+            if std::path::Path::new(&path).exists() {
+                paths.entry(pipeline_item_id).or_insert(path);
+            }
         }
         Ok(paths)
     }
