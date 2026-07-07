@@ -79,6 +79,24 @@ pub(crate) async fn spawn_prepared_task_for_api_recording_stage_run(
     Ok(created)
 }
 
+pub(crate) async fn spawn_prepared_task_for_api_with_rollback(
+    db_path: &str,
+    daemon: &mut DaemonClient,
+    prepared: PreparedTaskSpawn,
+) -> Result<crate::mobile_api::CreateTaskResponse, String> {
+    match spawn_prepared_task_for_api_recording_stage_run(db_path, daemon, prepared.clone()).await {
+        Ok(created) => Ok(created),
+        Err(err) => {
+            let db = Db::open(db_path)
+                .map_err(|open_err| format!("{err}; rollback failed: db error: {open_err}"))?;
+            match rollback_prepared_task_for_api(&db, &prepared) {
+                Ok(()) => Err(err),
+                Err(rollback_err) => Err(format!("{err}; rollback failed: {rollback_err}")),
+            }
+        }
+    }
+}
+
 pub(crate) async fn spawn_prepared_task_for_api_with_diagnostics(
     db_path: &str,
     daemon: &mut DaemonClient,

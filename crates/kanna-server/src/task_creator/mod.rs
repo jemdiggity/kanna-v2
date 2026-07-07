@@ -48,7 +48,7 @@ pub(crate) use lifecycle::{
     dispatch_prepared_post_for_api, kill_session_replacing, prepared_task_id,
     rerun_prepared_stage_for_api, rollback_prepared_task_for_api, spawn_prepared_stage_run_for_api,
     spawn_prepared_task_for_api_recording_stage_run, spawn_prepared_task_for_api_with_diagnostics,
-    spawn_prepared_workspace_teardown_best_effort,
+    spawn_prepared_task_for_api_with_rollback, spawn_prepared_workspace_teardown_best_effort,
 };
 pub(crate) use merge::prepare_merge_agent_for_api;
 pub use merge::run_merge_agent;
