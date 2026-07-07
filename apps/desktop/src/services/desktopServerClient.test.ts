@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  closeDesktopTask,
   createDesktopBackup,
   fetchDesktopSnapshot,
   fetchPendingIncomingTransfers,
@@ -117,6 +118,22 @@ describe("desktopServerClient", () => {
 
     expect(fetchMock).toHaveBeenCalledWith(
       "http://127.0.0.1:48121/v1/backup",
+      {
+        method: "POST",
+        headers: undefined,
+        body: undefined,
+      },
+    );
+  });
+
+  it("treats a 204 close-task response as success", async () => {
+    const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(closeDesktopTask("task-1")).resolves.toBeUndefined();
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:48121/v1/tasks/task-1/actions/close",
       {
         method: "POST",
         headers: undefined,
