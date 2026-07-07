@@ -551,7 +551,7 @@ export function createMobileController(
             : null;
 
       store.setComposerDesktop(composerDesktopId);
-      store.setComposerAgentProvider(profile?.agentProvider ?? state.composerAgentProvider);
+      store.setComposerAgentProvider(profile?.agentProvider ?? "claude");
       store.setComposerOptionsExpanded(!composerDesktopId);
       store.setComposerState(true, state.composerPrompt);
     },

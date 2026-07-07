@@ -393,6 +393,30 @@ describe("createMobileController", () => {
     });
   });
 
+  it("opens a no-profile repo composer with Claude after another repo selected a different agent", async () => {
+    const store = createSessionStore();
+    const controller = createMobileController(createClientMock(), store);
+
+    await controller.bootstrap();
+    store.selectRepo("repo-1");
+    store.upsertRepoCreationProfile({
+      repoId: "repo-1",
+      desktopId: "desktop-1",
+      agentProvider: "opencode",
+      updatedAt: "2026-07-06T00:00:00.000Z"
+    });
+    controller.openComposer();
+    expect(store.getState().composerAgentProvider).toBe("opencode");
+
+    store.selectRepo("repo-2");
+    controller.openComposer();
+
+    expect(store.getState()).toMatchObject({
+      isComposerOpen: true,
+      composerAgentProvider: "claude"
+    });
+  });
+
   it("treats a saved machine that is no longer listed as unselected", async () => {
     const store = createSessionStore();
     const client = createClientMock();
