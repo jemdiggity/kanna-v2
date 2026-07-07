@@ -153,6 +153,10 @@ function renderAuthText(auth: AuthState): string {
 describe("ConnectionScreen", () => {
   it("shows signed-out auth state", () => {
     expect(renderAuthText({ status: "signedOut" })).toContain("Signed out");
+    expect(renderAuthText({ status: "signedOut" })).toContain(
+      "Sign in with your Kanna account"
+    );
+    expect(renderAuthText({ status: "signedOut" })).not.toContain("alpha");
   });
 
   it("shows signed-in auth state with the current user email", () => {
