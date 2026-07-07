@@ -21,13 +21,27 @@ impl Db {
         Ok(())
     }
 
+    pub fn replace_task_blockers(
+        &self,
+        blocked_item_id: &str,
+        blocker_item_ids: &[String],
+    ) -> Result<(), rusqlite::Error> {
+        self.remove_all_task_blockers(blocked_item_id)?;
+        for blocker_item_id in blocker_item_ids {
+            self.insert_task_blocker(blocked_item_id, blocker_item_id)?;
+        }
+        Ok(())
+    }
+
     pub fn list_task_blocker_ids(
         &self,
         blocked_item_id: &str,
     ) -> Result<Vec<String>, rusqlite::Error> {
         let mut stmt = self
             .conn
-            .prepare("SELECT blocker_item_id FROM task_blocker WHERE blocked_item_id = ?")?;
+            .prepare(
+                "SELECT blocker_item_id FROM task_blocker WHERE blocked_item_id = ? ORDER BY blocker_item_id",
+            )?;
         let rows = stmt.query_map([blocked_item_id], |row| row.get(0))?;
         rows.collect()
     }
