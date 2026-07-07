@@ -137,6 +137,25 @@ export function createRemoteTransport({
     return rememberCloudTasks(await listCloudTasks());
   };
 
+  const resolveCloudRepoDesktopId = async (
+    repoId: string
+  ): Promise<string | null> => {
+    if (!listCloudTasks) {
+      return null;
+    }
+
+    const tasks = await listFreshCloudTasks();
+    const routeTask = tasks.find(
+      (
+        task
+      ): task is CloudIndexedTaskSummary & {
+        ownerDesktopId: string;
+        ownerLocalTaskId: string;
+      } => task.repoId === repoId && isCloudTaskRoute(task)
+    );
+    return routeTask?.ownerDesktopId ?? null;
+  };
+
   const requestDesktop = async <T>(
     desktopId: string,
     method: RemoteDesktopInvocationRequest["method"],
@@ -258,8 +277,21 @@ export function createRemoteTransport({
         `/v1/tasks/search?query=${encodeURIComponent(query)}`,
         null
       ),
-    createTask: (input: CreateTaskRequest) =>
-      request<CreateTaskResponse>("POST", "/v1/tasks", input),
+    createTask: async (input: CreateTaskRequest) => {
+      const { desktopId: requestedDesktopId, ...taskInput } = input;
+      const desktopId =
+        requestedDesktopId ?? (await resolveCloudRepoDesktopId(input.repoId));
+      if (desktopId) {
+        return requestDesktop<CreateTaskResponse>(
+          desktopId,
+          "POST",
+          "/v1/tasks",
+          taskInput
+        );
+      }
+
+      return request<CreateTaskResponse>("POST", "/v1/tasks", taskInput);
+    },
     runMergeAgent: (taskId: string) =>
       requestTask<TaskActionResponse>(
         taskId,

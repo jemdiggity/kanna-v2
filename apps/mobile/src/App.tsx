@@ -317,11 +317,19 @@ export default function App() {
           isOpen={state.isComposerOpen}
           prompt={state.composerPrompt}
           repos={state.repos}
+          desktops={state.desktops}
           selectedRepoId={state.selectedRepoId}
+          selectedDesktopId={state.composerDesktopId}
+          selectedAgentProvider={state.composerAgentProvider}
+          isOptionsExpanded={state.isComposerOptionsExpanded}
+          errorMessage={state.composerErrorMessage}
+          isSubmitting={state.isComposerSubmitting}
           onClose={() => controller.closeComposer()}
-          onSelectRepo={(repoId) => {
-            void controller.selectRepo(repoId);
-          }}
+          onSelectDesktop={(desktopId) => controller.selectComposerDesktop(desktopId)}
+          onSelectAgentProvider={(provider) => controller.selectComposerAgentProvider(provider)}
+          onToggleOptions={() =>
+            controller.setComposerOptionsExpanded(!state.isComposerOptionsExpanded)
+          }
           onChangePrompt={(prompt) => controller.updateComposerPrompt(prompt)}
           onSubmit={() => {
             void controller.createTask();

@@ -96,7 +96,8 @@ describe("createLanTransport", () => {
     ]);
     await expect(transport.createTask({
       repoId: "repo-1",
-      prompt: "Ship it"
+      prompt: "Ship it",
+      desktopId: "desktop-ignored"
     })).resolves.toEqual({
       taskId: "task-1",
       repoId: "repo-1",

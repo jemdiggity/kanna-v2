@@ -46,4 +46,37 @@ describe("createSessionPersistence", () => {
       ]
     });
   });
+
+  it("preserves local repo creation profiles", async () => {
+    const storage = createMemoryStorage();
+    const persistence = createSessionPersistence(storage);
+
+    await persistence.save({
+      selectedDesktopId: "desktop-e2e",
+      selectedRepoId: "repo-1",
+      selectedTaskId: null,
+      activeView: "tasks",
+      repoCreationProfiles: [
+        {
+          repoId: "repo-1",
+          desktopId: "desktop-e2e",
+          agentProvider: "copilot",
+          updatedAt: "2026-07-06T00:00:00.000Z"
+        }
+      ],
+      trustedDesktops: []
+    });
+
+    await expect(persistence.load()).resolves.toMatchObject({
+      selectedRepoId: "repo-1",
+      repoCreationProfiles: [
+        {
+          repoId: "repo-1",
+          desktopId: "desktop-e2e",
+          agentProvider: "copilot",
+          updatedAt: "2026-07-06T00:00:00.000Z"
+        }
+      ]
+    });
+  });
 });

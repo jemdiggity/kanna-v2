@@ -112,6 +112,45 @@ describe("createRelayDesktopClient", () => {
     await expect(invocation).rejects.toThrow("desktop failed");
   });
 
+  it("lists active desktop ids through a relay command", async () => {
+    const socket = createSocket();
+    const client = createRelayDesktopClient({
+      createSocket: () => socket,
+      getIdToken: async () => "id-token-1",
+      nextId: () => "active-1",
+      relayUrl: "wss://relay.example"
+    });
+
+    const activeDesktopIds = client.listActiveDesktopIds();
+    socket.onopen?.();
+    await flushPromises();
+    socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok", userId: "user-1" }) });
+    await flushPromises();
+
+    expect(socket.send).toHaveBeenLastCalledWith(
+      JSON.stringify({
+        type: "invoke",
+        id: "active-1",
+        command: "list_active_desktops",
+        args: {}
+      })
+    );
+
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: "response",
+        id: "active-1",
+        data: {
+          desktopIds: ["desktop-1", "", "desktop-2", 12]
+        }
+      })
+    });
+
+    await expect(activeDesktopIds).resolves.toEqual(
+      new Set(["desktop-1", "desktop-2"])
+    );
+  });
+
   it("opens a fresh invoke socket after a relay socket error", async () => {
     const sockets: RelaySocketLike[] = [];
     const client = createRelayDesktopClient({

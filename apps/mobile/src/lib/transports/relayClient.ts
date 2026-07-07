@@ -26,6 +26,7 @@ export type RelaySocketFactory = (url: string) => RelaySocketLike;
 export interface RelayDesktopClient {
   close(): void;
   invokeDesktop: RemoteDesktopInvoker;
+  listActiveDesktopIds(): Promise<Set<string>>;
   observeTaskTerminal: RemoteTaskTerminalObserver;
   observeTaskAgent: RemoteTaskAgentObserver;
   sendTaskInput(options: { desktopId: string; taskId: string; data: string }): Promise<void>;
@@ -167,6 +168,15 @@ export function createRelayDesktopClient({
     desktopId: string,
     payload: Record<string, unknown>
   ): Promise<unknown> => {
+    return sendRelayMessage({
+      desktopId,
+      ...payload
+    });
+  };
+
+  const sendRelayMessage = async (
+    payload: Record<string, unknown>
+  ): Promise<unknown> => {
     const openSocket = ensureSocket();
     await readyPromise;
     const id = nextId();
@@ -178,7 +188,6 @@ export function createRelayDesktopClient({
       JSON.stringify({
         type: "invoke",
         id,
-        desktopId,
         ...payload
       })
     );
@@ -322,6 +331,22 @@ export function createRelayDesktopClient({
         path: request.path,
         body: request.body
       });
+    },
+    async listActiveDesktopIds() {
+      const response = await sendRelayMessage({
+        command: "list_active_desktops",
+        args: {}
+      });
+      if (!isRecord(response) || !Array.isArray(response.desktopIds)) {
+        return new Set();
+      }
+
+      return new Set(
+        response.desktopIds.filter(
+          (desktopId): desktopId is string =>
+            typeof desktopId === "string" && desktopId.length > 0
+        )
+      );
     },
     observeTaskTerminal({ desktopId, taskId }, listener) {
       const client = streamClientForDesktop(desktopId);
