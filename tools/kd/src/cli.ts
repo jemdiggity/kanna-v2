@@ -35,6 +35,7 @@ const booleanFlagMap: Record<string, string> = {
   "--remote": "remote",
   "--dev": "dev",
   "--with-credentials": "withCredentials",
+  "--upload": "upload",
   "--ota": "ota"
 };
 
@@ -162,6 +163,21 @@ function parseMobileQaInput(rest: string[]): ParsedCliCommand {
   };
 }
 
+function parseMobileArchiveInput(rest: string[]): ParsedCliCommand {
+  const input = parseFlagInput(rest, { production: false, dryRun: false, upload: false });
+  const allowedKeys = new Set(["production", "dryRun", "upload", "buildNumber", "version", "outDir"]);
+  const unsupportedKeys = Object.keys(input).filter((key) => !allowedKeys.has(key));
+  if (unsupportedKeys.length > 0) {
+    throw new Error(
+      "mobile archive only accepts --production, --build-number, --version, --out-dir, --upload, or --dry-run"
+    );
+  }
+  return {
+    taskId: "mobile.archive",
+    input
+  };
+}
+
 function parseRemoteE2eInput(rest: string[]): ParsedCliCommand {
   const input = parseFlagInput(rest, { dev: false, staging: false });
   const unsupportedFlags = Object.entries(input)
@@ -260,6 +276,24 @@ function parseFlagInput(rest: string[], defaults: Record<string, unknown>): Reco
       index += 1;
       continue;
     }
+    if (arg === "--build-number") {
+      const value = rest[index + 1];
+      if (!value) {
+        throw new Error("--build-number requires a value");
+      }
+      input.buildNumber = value;
+      index += 1;
+      continue;
+    }
+    if (arg === "--version") {
+      const value = rest[index + 1];
+      if (!value) {
+        throw new Error("--version requires a value");
+      }
+      input.version = value;
+      index += 1;
+      continue;
+    }
     if (arg === "--rollback-to") {
       const value = rest[index + 1];
       if (!value) {
@@ -345,6 +379,9 @@ export function parseCliArgs(args: string[]): ParsedCliCommand {
   }
   if (group === "mobile" && command === "qa") {
     return parseMobileQaInput(rest);
+  }
+  if (group === "mobile" && command === "archive") {
+    return parseMobileArchiveInput(rest);
   }
   if (group === "mobile" && command === "doctor") {
     const parsed = parseMobileRunInput(rest);
@@ -507,6 +544,7 @@ const helpTopics: Record<string, string[]> = {
     "  daemon kill",
     "  mobile up [--production|--staging] [--with-credentials]",
     "  mobile run --device [--production|--staging] [--with-credentials]",
+    "  mobile archive --production --build-number <number> [--version <version>] [--out-dir <dir>] [--upload] [--dry-run]",
     "  mobile doctor --device",
     "  mobile qa --production [--ota]",
     "  mobile ota publish --staging|--production [--dry-run] [--rollback-to <updateId>]",
@@ -631,6 +669,7 @@ const helpTopics: Record<string, string[]> = {
     "Commands:",
     "  mobile up [--production|--staging] [--with-credentials]",
     "  mobile run --device [--production|--staging] [--with-credentials]",
+    "  mobile archive --production --build-number <number> [--version <version>] [--out-dir <dir>] [--upload] [--dry-run]",
     "  mobile doctor --device",
     "  mobile qa --production [--ota]",
     "  mobile ota <command>",
@@ -657,6 +696,19 @@ const helpTopics: Record<string, string[]> = {
     "  --production        Launch against production settings.",
     "  --staging           Launch against staging settings.",
     "  --with-credentials  Use local staging desktop credentials."
+  ],
+  "mobile archive": [
+    "Usage: kd mobile archive --production --build-number <number> [--version <version>] [--out-dir <dir>] [--upload] [--dry-run]",
+    "",
+    "Build a production iOS archive and IPA through local Expo CNG and Xcode.",
+    "",
+    "Options:",
+    "  --production              Required. Use the production Kanna mobile identity.",
+    "  --build-number <number>   Required. App Store Connect build number (CFBundleVersion).",
+    "  --version <version>       Marketing version (defaults to VERSION).",
+    "  --out-dir <dir>           Archive output directory (defaults to .build/mobile/ios-production).",
+    "  --upload                  Upload the exported IPA with xcrun iTMSTransporter.",
+    "  --dry-run                 Print the archive/upload plan without building or uploading."
   ],
   "mobile doctor": [
     "Usage: kd mobile doctor --device [--production|--staging]",
