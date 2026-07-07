@@ -1,7 +1,8 @@
 # Forge Independence
 
-Status: proposed (direction sketch)
-Related: [native-review.md](./native-review.md), [merge-master.md](./merge-master.md)
+Status: proposed (design spec, no implementation yet)
+Related: [native-review.md](./native-review.md), [merge-master.md](./merge-master.md),
+[task-graph-stages.md](./task-graph-stages.md)
 
 The path from single-operator Kanna to large, multi-contributor projects —
 without a forge. Builds on native-review (review in-app) and merge-master
@@ -27,119 +28,284 @@ pay that tooling tax for free — text-first, ceremony-heavy, asynchronous
 protocols are agent-native. Kanna's move is the kernel's architecture with
 the encodings modernized.
 
-## The unit: signed events
+Design invariants, in force everywhere below:
 
-Everything shared is an **append-only, self-authenticating event**: thread
-opened, comment added, verdict issued, check reported, merge performed,
-roster changed. Events are SSH-signed by their author, idempotent, and
-order-insensitive (state is derived by folding the log). This is the one
-day-one constraint on nearer-term work: native-review's records must be
-*modeled* as events even while stored in SQLite, so the storage swap later
-is mechanical, not semantic.
+1. **The record is self-authenticating.** Every shared fact is a signed,
+   append-only event. Verification never depends on which channel
+   delivered it.
+2. **Channels are untrusted and lossless-optional.** Losing a transport
+   costs freshness, never truth.
+3. **Git is the source of durability.** Everything else — SQLite, relay,
+   inboxes — is a view or a hint.
+
+## The event
+
+One envelope for every shared fact. Canonical JSON (RFC 8785 JCS) signed
+with `ssh-keygen -Y sign`:
+
+```json
+{
+  "event": {
+    "v": 1,
+    "id": "01J9ZK7Q4R8XN2M5P0WVT3E6BD",        // ULID, assigned at creation
+    "ts": "2026-07-07T12:34:56Z",
+    "task": "8f41c409",                          // pipeline_item id; absent for repo-scoped events
+    "type": "thread.open",
+    "author": "jeremy",                          // roster principal
+    "body": { }                                  // type-specific, schemas below
+  },
+  "sig": {
+    "key": "ssh-ed25519 AAAA…",                  // public key, must appear in roster
+    "namespace": "kanna-event@1",
+    "signature": "-----BEGIN SSH SIGNATURE-----…"
+  }
+}
+```
+
+- `id` is a ULID: unique, lexically time-sortable, assignable offline.
+  Cross-references between events use ids (a thread's id is its
+  `thread.open` event id).
+- The signature covers the JCS bytes of `event` only. `sig.key` must
+  belong to `event.author` in the roster **as of the event's position**
+  (see roster validity).
+- Unknown `type`s and unknown `body` fields are preserved and ignored —
+  forward compatibility is load-bearing for mixed-version teams.
+
+### Event types and bodies
+
+| type | body | notes |
+|---|---|---|
+| `thread.open` | `{file_path, side, line_start, line_end, anchor_commit, anchor_excerpt, text, severity?}` | anchor fields per native-review; `severity`: `blocking`/`advisory`/`nit` |
+| `thread.comment` | `{thread, text}` | `thread` = thread.open event id |
+| `thread.resolve` / `thread.reopen` | `{thread, reason?}` | resolve by the change author ≠ resolve by reviewer; fold tracks who |
+| `verdict` | `{stage_run?, decision, summary, threads?}` | `decision`: `approve` / `request-changes` / `escalate` |
+| `check` | `{commit, name, status, detail?, log_ref?}` | `status`: `pass`/`fail`/`error`; signed by a `runner` key |
+| `merge` | `{source_branch, target_branch, merge_commit, strategy, approvals}` | `approvals` = verdict event ids the merge relied on |
+| `task.meta` | `{title?, prompt?, stage?, closed?}` | enough shared task state for teammates' sidebars |
+| `roster.change` | `{roster_commit}` | pointer to the commit that changed `.kanna/roster.json` |
+| `calibration` | `{verdict, outcome, evidence}` | joins reality back to a judgment (phase 4) |
+
+Escalation is a first-class `verdict.decision`, not a comment convention:
+"needs a human, here's why" routes to the review inbox like any awaiting
+verdict.
+
+### Fold (deriving state)
+
+State = a deterministic fold over the union of all writers' logs:
+
+- Order events by `(ts, id)`; ties cannot collide because ULIDs embed
+  randomness. Per-writer logs are already internally ordered; the fold is
+  a merge of sorted streams.
+- Duplicates (same `id`) collapse to one.
+- Thread status is the last resolve/reopen in fold order, tagged with the
+  resolver's role (author-resolve vs reviewer-resolve, per native-review).
+- Events that fail signature or roster validation are **quarantined**, not
+  dropped: retained, excluded from state, surfaced in a diagnostics view.
+  A misconfigured clock or an offboarded key must be debuggable, not
+  silent.
+- The fold is pure and versioned (`fold@1`). Changing fold semantics is a
+  spec change, because two instances disagreeing on derived state is the
+  one unrecoverable sin.
 
 ## Storage: git is the database
 
-- Events live under per-writer refs — `refs/kanna/events/<key-id>` — so
-  every push is a fast-forward of a ref only its author writes: no write
-  contention, ever. Readers fetch all writers' logs and union them.
-- Each instance's SQLite is a **materialized view** of the folded log
-  (Gerrit NoteDb's design). The `/v1` API, MCP tools, and review UI from
-  native-review are unchanged; only kanna-server's storage layer learns to
-  sync.
-- Any dumb remote works: bare repo over SSH, Gitea, or GitHub demoted to
-  byte hosting. The remote is the only centralized component left.
+- Events live under **per-writer refs**: `refs/kanna/events/<key-fpr>`
+  where `<key-fpr>` is the hex SHA-256 fingerprint of the signing key.
+  One writer per ref means every push is a fast-forward by construction —
+  no write contention, ever. (A person with two devices has two keys and
+  two refs; the roster maps both to one principal.)
+- Each git commit on an event ref carries exactly one event at path
+  `event.json`; commit timestamp mirrors `event.ts`. The chain gives
+  per-writer ordering and tamper evidence: rewriting history under an
+  event ref is a non-fast-forward that every peer's stored tip detects.
+- Ingest = walk new commits since the last seen tip, verify, fold.
+  Sync = `git fetch 'refs/kanna/events/*'` + push own ref. Any dumb
+  remote works: bare repo over SSH, Gitea, or GitHub demoted to byte
+  hosting — the only centralized component left.
+- Each instance's SQLite remains the **materialized view** of the fold
+  (Gerrit NoteDb's design, proven at Android scale). The `/v1` API, MCP
+  tools, and review UI from native-review sit on the view and do not
+  change; only kanna-server's storage layer learns to sync.
 
 ## Transport: pluggable, untrusted
 
-The event is the unit; delivery is a detail. Three transports, one
-invariant — the record is self-authenticating, the channel is untrusted
-and lossless-optional (losing it costs freshness, never truth):
+| Transport | Role | Latency |
+|---|---|---|
+| git push/fetch | Durability; the baseline that is always true | seconds, pull-based |
+| Kanna relay | Liveness hints for the tight same-team loop | ~100ms hint + fetch |
+| Email | Reach: cross-org, and humans who will never install Kanna | seconds–minutes |
 
-| Transport | Role |
-|---|---|
-| git push/fetch | Baseline and source of durability; always true |
-| Kanna relay | Liveness hints ("repo X: refs changed") for the tight same-team agent loop; notify-then-fetch, seconds end-to-end |
-| Email | Reach: cross-org, and humans who will never install Kanna |
-
-Email deserves the emphasis: it is a forty-year-old federated relay with
-store-and-forward, push delivery, and thread structure (`Message-ID` /
-`In-Reply-To`) built in. Events travel as multipart mail — human-readable
-body plus a structured signed part, the calendar-invite (iMIP) pattern — so
-a non-Kanna teammate reviews by replying to a patch mail, full stop. A
-resident **postmaster agent** bridges: inbound mail → verify signed part →
-append event; outbound event → render mail. Endgame: a Kanna maintainer
-agent can participate in any mailing-list project (including the kernel)
-with zero adoption on their side.
+- **Relay hints** are one message type: `{repo, kind: "events"}` — no
+  event data, so the relay stays untrusted and optional. Receipt triggers
+  a sync; absence degrades to polling (configurable interval).
+- **Email** carries full events as multipart mail: a `text/plain` part
+  rendered for humans (kernel-style quoted context) plus
+  `application/vnd.kanna.event+json` parts — the calendar-invite (iMIP)
+  pattern. Threading maps to `Message-ID`/`In-Reply-To`. A resident
+  **postmaster agent** bridges: inbound mail → verify signed part →
+  append to its own event ref on the sender's behalf is **not** allowed —
+  the sender's signature is the sender's; the postmaster merely ingests
+  and relays. A non-Kanna human replies in plain text; the postmaster
+  wraps the reply as a `thread.comment` signed by the postmaster key with
+  `body.on_behalf_of` set, and policy decides what that's worth.
+- At-least-once, unordered delivery is safe by construction: events are
+  idempotent and the fold is order-insensitive across writers.
 
 ## Identity: zero new ceremony
 
-- Identity = the SSH key contributors already push with; git signs with it
-  natively (`gpg.format ssh`, since 2.34). Signing happens via ssh-agent;
-  Kanna never touches key files. No-SSH users get a generated ed25519 key
-  in the Keychain.
-- The **roster** is a committed allowed-signers file in `.kanna/` with
-  roles (`human`, `merge-master`, `runner`, resident agents) — plain
-  `git verify-commit` works without Kanna. Membership and policy changes
-  are themselves reviewed, signed commits: a chain of custody from the
-  founder's genesis commit (validity of roster N is judged by roster N−1).
-- Point-in-time validity: records verify against the roster as of their
-  DAG position, so rotation and offboarding never invalidate history.
-  Per-writer append-only refs that peers have already fetched make
-  backdating tamper-evident (rewrites are visible non-fast-forwards).
+- Identity = the SSH key contributors already push with; git signs with
+  it natively (`gpg.format ssh`, git ≥ 2.34). kanna-server signs via the
+  user's ssh-agent socket — private keys are never read. Users without
+  SSH keys get a generated ed25519 signing key in the macOS Keychain.
+- **Roster**: `.kanna/roster.json` is authoritative; a derived
+  `.kanna/allowed_signers` is committed beside it so plain
+  `git verify-commit` / `ssh-keygen -Y verify` work with no Kanna
+  installed. The roster-change flow regenerates both in one commit.
 
-## Serialization and the agent hierarchy
+```json
+{
+  "v": 1,
+  "members": [
+    {"principal": "jeremy", "role": "human", "keys": ["ssh-ed25519 AAAA…"],
+     "email": "gu.jungun@gmail.com"},
+    {"principal": "merge-master", "role": "merge-master", "keys": ["…"]},
+    {"principal": "ci-mac-mini", "role": "runner", "keys": ["…"]}
+  ],
+  "policy": {
+    "roster_change": {"require": {"human": 1}},
+    "merge": {"require_verdicts": {"human": 1},
+               "require_checks": ["unit"],
+               "trusted_runners": ["ci-mac-mini"]},
+    "subsystems": [
+      {"paths": ["crates/daemon/**"], "resident": "daemon-maintainer",
+       "owner": "jeremy"}
+    ]
+  }
+}
+```
 
-- Mechanical merge ordering needs no coordinator: remote ref updates are
-  atomic compare-and-swap (`push --force-with-lease`) — prepare, push with
-  lease, retry on a lost race.
-- The **merge master** (already specced) is the kernel's maintainer role
-  as an agent. At scale it generalizes to **path-scoped resident
-  maintainer agents** — the roster gains a subsystems section mapping path
-  patterns → resident agent + human owner. `MAINTAINERS` was accidentally
-  a context-sharding scheme for agents: partition-by-subsystem answers
-  scarce attention *and* scarce context.
-- A **continuous integrator** resident (linux-next, per push instead of
-  per day) merges in-flight branches and flags conflicts — semantic
-  conflict watching is already in the merge master's job description.
-- **Escalation is a first-class verdict** alongside approve /
-  request-changes: "needs a human, here's why" — routed to the review
-  inbox. Humans keep intent, invariants, the trust root, sampling audits,
-  and taste; agents keep the pipeline.
+- **Validity chain**: roster at commit N is valid iff the commit that
+  introduced it satisfies `policy.roster_change` of the roster at N−1.
+  Genesis (the founder's first roster commit) is axiomatic — every trust
+  system has one.
+- **Point-in-time validity**: an event verifies against the roster as of
+  the event's `ts` position in the roster's history, so rotation and
+  offboarding never invalidate old records. Backdating with a stolen key
+  is tamper-evident (per-writer ref rewrites are visible
+  non-fast-forwards against peers' stored tips).
+- Roles: `human`, `merge-master`, `runner`, `resident`, `postmaster`.
+  Policy references roles and principals; verdict weight is a policy
+  concern, not an envelope concern.
 
-## Verification and trust
+## Serialization: CAS, not a coordinator
 
-- Checks are signed events from roster-listed runner keys; the committed
-  policy says which runners count toward merge. CI stops being a forge
-  feature and becomes "anyone trusted who did the work and signed it."
-- Ceremony stops filtering once agents make it free, so the gate moves to
-  **identity plus track record** — and agent track record is computable:
-  every verdict is a signed record that reality later grades (did the
-  approved change regress? did the green check hold?). **Calibration
-  records** join outcomes back to the verdicts that predicted them;
-  per-domain earned weight ("approvals count in `drivers/`, not `mm/`")
-  feeds the merge policy. The kernel's trust-by-track-record, made
-  queryable.
+Remote git ref updates are atomic compare-and-swap. The merge master:
+
+1. folds current state; checks `policy.merge` (required verdicts present,
+   signed by qualifying keys; required checks green from trusted
+   runners),
+2. prepares the merge commit locally,
+3. `git push --force-with-lease=refs/heads/<target>:<expected-tip>`,
+4. on rejection: fetch, re-verify policy against the new tip, retry,
+5. appends a `merge` event citing the verdict event ids it relied on.
+
+No merge-queue service exists; correctness comes from the lease, ordering
+from the single per-repo merge master (an optimization, not a
+requirement). Where the remote is controllable, a pre-receive hook
+enforcing "target branch updates must come from a `merge-master` key"
+adds server-side depth; where it isn't, the signed merge events make any
+bypass visible after the fact.
+
+## Scale: the agent hierarchy
+
+- **Path-scoped resident maintainer agents** — `policy.subsystems` maps
+  path patterns to a resident agent and a human owner. `MAINTAINERS` was
+  accidentally a context-sharding scheme: partition-by-subsystem answers
+  scarce attention *and* scarce context. Residents review changes
+  touching their paths, file threads, issue verdicts, and escalate.
+  Engine primitive required: the find-or-create-and-signal singleton from
+  merge-master.md, keyed by `(repo, agent)` — already specced.
+- **Continuous integrator** — a resident that merges in-flight branches
+  on every push (linux-next at machine cadence) and files
+  `thread.open` events for semantic conflicts between them.
+- **Calibration** — `calibration` events join outcomes back to verdicts
+  (approved change reverted? trusted check went green on a regression?).
+  Per-domain earned weight ("approvals count in `drivers/`, not `mm/`")
+  feeds `policy.merge`. Deliberately last: policy is only trustworthy
+  once verdicts, threads, and checks have been structured data for a
+  while.
+- Ceremony stops filtering once agents make it free; the gate moves to
+  identity plus computable track record. This is the spam defense — a
+  flood of perfect-looking contributions is rate-limited by what its
+  signing keys have earned.
+
+## Integration with the codebase
+
+- New crate `crates/kanna-events`: envelope types, JCS canonicalization,
+  ssh sign/verify (via ssh-agent), roster parsing/validity chain, the
+  versioned fold. Shared by kanna-server, kanna-cli, and tests. No I/O —
+  storage and transport live with their owners.
+- kanna-server (`crates/kanna-server`):
+  - phase 1–2: an `event` table (`id, task_id, type, author, ts, body,
+    sig, quarantined`) written *alongside* the native-review tables,
+    which become derived views of the fold. This is the day-one
+    constraint: review records are events from the start, even while
+    SQLite-only.
+  - phase 3: a `git-sync` module — ingest/egress walker over
+    `refs/kanna/events/*` (git2, already vendored), sync scheduling
+    (relay hint → sync; fallback poll), and quarantine surfacing.
+  - `/v1` additions: `GET /v1/tasks/{id}/events`, `GET /v1/repos/{id}/roster`,
+    `POST /v1/repos/{id}/sync`; SSE gains `events_appended {task_ids}`.
+- MCP/CLI (`crates/kanna-tool-catalog`): the native-review tools already
+  planned (`kanna_add_review_thread`, …) emit events under the hood;
+  new: `kanna_issue_verdict`, `kanna_report_check`, `kanna_sync_repo`.
+- Desktop: no new surface beyond native-review's; the review inbox gains
+  escalations and a quarantine/diagnostics view later.
 
 ## Staging
 
-1. **Native review** (specced) — threads, verdicts, round trip; SQLite;
-   *records modeled as append-only events from day one*.
-2. **Merge without the forge** (specced) — merge master, `merge_record`,
-   git-first agents.
+1. **Native review** ([native-review.md](./native-review.md)) — threads,
+   verdicts, round trip; SQLite; **records modeled as signed events from
+   day one** (the `event` table + `kanna-events` crate, local key only).
+2. **Merge without the forge** ([merge-master.md](./merge-master.md)) —
+   merge master, `merge` events, git-first agents, CAS push.
 3. **Shared metadata** — event log under `refs/kanna/events/*`; SQLite
-   becomes the materialized view; roster + SSH signing; relay liveness
-   hints. Forge = dumb remote from here on.
-4. **Team scale** — path-scoped residents, escalation verdicts,
+   becomes the materialized view; roster + validity chain; relay hints;
+   second-contributor onboarding = clone + roster entry.
+4. **Team scale** — path-scoped residents, escalation routing,
    calibration records, policy-weighted merge. Postmaster/email gateway
    any time after 3.
 
-## Risks, named
+## Testing expectations
 
-- The event-log rearchitecture is real work; the day-one modeling
-  constraint in stage 1 is what keeps it mechanical.
-- Sync latency needs the liveness plane; without relay or list, you
-  degrade to polling freshness, never correctness.
-- Key UX must stay zero-ceremony or it dies the web-of-trust death; the
-  SSH piggyback is the design, not an optimization.
-- Agent-scale contribution floods arrive dressed as quality work; the
-  identity + calibration gate is load-bearing, not optional.
+- `kanna-events`: property tests — fold determinism (any interleaving of
+  writer logs folds identically), idempotence, quarantine on bad
+  sig/roster; roster validity-chain fixtures (rotation, offboarding,
+  genesis, backdating attempt).
+- Sync: two kanna-server instances against a bare-remote fixture —
+  concurrent writes, offline catch-up, tip-rewrite detection. Extends the
+  existing `http_api/tests` style.
+- Merge CAS: race two merge masters at one remote; exactly one merge
+  event, loser retries cleanly.
+- Desktop E2E (mock): review round trip asserting the underlying records
+  are events (phase 1); two-instance shared-review E2E when phase 3
+  lands.
+- Email: postmaster round-trip against a local SMTP/IMAP fixture —
+  outbound render, inbound verify, `on_behalf_of` wrapping (phase 4).
+
+## Open questions
+
+- **Event retention/compaction**: per-writer logs grow forever; likely
+  fine for years (events are small), but a checkpoint/archive scheme
+  (fold snapshot + ref truncation with signed checkpoint) needs design
+  before very large deployments.
+- **Task identity across instances**: ULIDs avoid collision, but two
+  operators independently creating "the same" task is a human-level
+  dedup problem; punt — tasks are cheap and closable.
+- **Roster bootstrap UX**: founder genesis is axiomatic, but the
+  second-contributor invitation flow (send roster-change proposal by
+  email? by branch?) deserves a concrete design in phase 3.
+- **Clock skew**: fold order uses `ts`; skewed clocks reorder
+  cross-writer interleavings harmlessly (fold is still deterministic)
+  but can misorder a conversation's rendering. Consider hybrid logical
+  clocks in `v2` if it bites in practice.

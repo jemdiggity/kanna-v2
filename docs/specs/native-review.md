@@ -207,6 +207,13 @@ Verdicts need **no new table**: approve/request-changes are already
 stage action with `author: operator` in metadata — one history for agent
 and human judgments, which is what a 5-year audit trail wants.
 
+Day-one constraint from [forge-independence.md](./forge-independence.md):
+model these records as **append-only signed events** (thread.open,
+thread.comment, thread.resolve, verdict) with the tables as derived views
+of the fold — even while storage is SQLite-only — so the later move to a
+shared event log under `refs/kanna/events/*` is a storage swap, not a
+semantic migration.
+
 ## API and tool surface
 
 `/v1` (kanna-server; desktop uses these, not tauri-plugin-sql):
