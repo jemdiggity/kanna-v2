@@ -1,4 +1,4 @@
-import type { AgentProvider } from "@kanna/db";
+import type { AgentProvider } from "../types/kanna";
 
 export function normalizePermissionMode(permissionMode?: string): string | undefined {
   if (!permissionMode || permissionMode === "default") {

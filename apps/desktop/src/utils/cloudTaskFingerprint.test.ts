@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { PipelineItem } from "@kanna/db";
+import type { PipelineItem } from "../types/kanna";
 import { computeTaskSnapshotFingerprint } from "./cloudTaskFingerprint";
 
 function makeItem(overrides: Partial<PipelineItem> = {}): PipelineItem {

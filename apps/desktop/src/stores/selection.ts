@@ -1,9 +1,10 @@
 import { computed, type ComputedRef } from "vue";
 import { watchDebounced } from "@vueuse/core";
 import { DEFAULT_STAGE_ORDER } from "@kanna/core";
-import { insertOperatorEvent, setSetting, updatePipelineItemActivity, type PipelineItem, type Repo } from "@kanna/db";
+import type { PipelineItem, Repo } from "../types/kanna";
 import { createNavigationHistory } from "../composables/useNavigationHistory";
 import { beginTaskSwitch } from "../perf/taskSwitchPerf";
+import { markDesktopTaskRead, postDesktopOperatorEvent, putDesktopSetting } from "../services/desktopServerClient";
 import { sortSidebarItemsForRepo } from "../utils/sidebarOrdering";
 import { requireService, type StoreContext } from "./state";
 
@@ -50,7 +51,11 @@ export function createSelectionApi(context: StoreContext): SelectionApi {
 
   function emitTaskSelected(itemId: string) {
     const item = context.state.items.value.find((candidate) => candidate.id === itemId);
-    insertOperatorEvent(context.requireDb(), "task_selected", itemId, item?.repo_id ?? null).catch((error) =>
+    postDesktopOperatorEvent({
+      eventType: "task_selected",
+      pipelineItemId: itemId,
+      repoId: item?.repo_id ?? null,
+    }).catch((error) =>
       console.error("[store] operator event failed:", error),
     );
   }
@@ -104,7 +109,8 @@ export function createSelectionApi(context: StoreContext): SelectionApi {
       const item = context.state.items.value.find((candidate) => candidate.id === itemId);
       if (!item || item.activity !== "unread") return;
       if (item.activity_changed_at && new Date(item.activity_changed_at).getTime() > selectionTime) return;
-      await updatePipelineItemActivity(context.requireDb(), itemId, "idle");
+      const response = await markDesktopTaskRead(itemId);
+      if (response.activity == null) return;
       await requireService(context.services.reloadSnapshot, "reloadSnapshot")();
       await context.services.windowWorkspace?.invalidateSharedData("taskActivity");
     },
@@ -116,7 +122,7 @@ export function createSelectionApi(context: StoreContext): SelectionApi {
     context.state.selectedRepoId.value = repoId;
     context.state.selectedItemId.value = context.state.lastSelectedItemByRepo.value[repoId] ?? null;
     logSelection("selectRepo", previousItemId, context.state.selectedItemId.value, { repoId });
-    await setSetting(context.requireDb(), "selected_repo_id", repoId);
+    await putDesktopSetting("selected_repo_id", repoId);
     await persistWindowSelection();
   }
 

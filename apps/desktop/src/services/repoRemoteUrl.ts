@@ -1,7 +1,8 @@
-import { updateRepoRemoteMetadata, type DbHandle, type Repo } from "@kanna/db";
+import type { Repo } from "../types/kanna";
 
 import { invoke } from "../invoke";
 import { hashRemoteUrl } from "../utils/cloudTaskSnapshot";
+import { patchDesktopRepo } from "./desktopServerClient";
 
 const REMOTE_URL_CACHE_TTL_MS = 5 * 60 * 1000;
 
@@ -21,7 +22,6 @@ export interface RepoRemoteMetadata {
 }
 
 export async function getCachedRepoRemoteMetadata(
-  db: DbHandle,
   repo: Pick<Repo, "id" | "path" | "remote_url" | "remote_url_hash">,
 ): Promise<RepoRemoteMetadata> {
   const now = Date.now();
@@ -49,7 +49,7 @@ export async function getCachedRepoRemoteMetadata(
   const pending = pendingRemoteUrlLoads.get(repo.id);
   if (pending) return pending;
 
-  const load = refreshRepoRemoteMetadata(db, repo)
+  const load = refreshRepoRemoteMetadata(repo)
     .finally(() => {
       pendingRemoteUrlLoads.delete(repo.id);
     });
@@ -59,14 +59,12 @@ export async function getCachedRepoRemoteMetadata(
 }
 
 export async function getCachedRepoRemoteUrl(
-  db: DbHandle,
   repo: Pick<Repo, "id" | "path" | "remote_url" | "remote_url_hash">,
 ): Promise<string | null> {
-  return (await getCachedRepoRemoteMetadata(db, repo)).remoteUrl;
+  return (await getCachedRepoRemoteMetadata(repo)).remoteUrl;
 }
 
 export async function refreshRepoRemoteMetadata(
-  db: DbHandle,
   repo: Pick<Repo, "id" | "path">,
 ): Promise<RepoRemoteMetadata> {
   const remoteUrl = await invoke<string>("git_remote_url", { repoPath: repo.path })
@@ -78,9 +76,9 @@ export async function refreshRepoRemoteMetadata(
     remoteUrlHash,
     loadedAt: Date.now(),
   });
-  await updateRepoRemoteMetadata(db, repo.id, {
-    remote_url: remoteUrl,
-    remote_url_hash: remoteUrlHash,
+  await patchDesktopRepo(repo.id, {
+    remoteUrl,
+    remoteUrlHash,
   }).catch((error) => {
     console.warn("[repoRemoteUrl] failed to persist repo remote metadata:", error);
   });

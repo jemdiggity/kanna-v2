@@ -3,7 +3,7 @@ import MarkdownIt from "markdown-it";
 import type { AgentEvent, PermissionDecision, TurnStats } from "@kanna/agent-protocol";
 import { getActivePinia } from "pinia";
 import type { BundledLanguage } from "shiki";
-import type { AgentProvider } from "@kanna/db";
+import type { AgentProvider } from "../types/kanna";
 import { agentModelsFor } from "@kanna/core";
 import { useAgentStream } from "./useAgentStream";
 import { useSlashCommands, type SlashCommand } from "./useSlashCommands";

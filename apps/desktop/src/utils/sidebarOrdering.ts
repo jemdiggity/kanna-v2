@@ -1,4 +1,5 @@
-import { isBlockerResolved, type PipelineItem, type TaskBlocker } from "@kanna/db";
+import type { PipelineItem, TaskBlocker } from "../types/kanna";
+import { isBlockerResolved } from "./blockerResolution";
 import { taskSearchMatch } from "./taskSearch";
 
 export interface SidebarItemGroup {

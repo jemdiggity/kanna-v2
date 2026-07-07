@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import type { PipelineItem, Repo } from "@kanna/db";
+import type { PipelineItem, Repo } from "../../types/kanna";
 import { mount } from "@vue/test-utils";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";

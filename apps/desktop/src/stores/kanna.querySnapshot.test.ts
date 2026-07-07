@@ -1,7 +1,7 @@
 import { createPinia, setActivePinia } from "pinia";
 import { nextTick } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { DbHandle, PipelineItem, Repo } from "@kanna/db";
+import type { DbHandle, PipelineItem, Repo } from "../types/kanna";
 
 const beginTaskSwitchMock = vi.hoisted(() => vi.fn());
 const invalidateSharedDataMock = vi.hoisted(() => vi.fn(async () => {}));
@@ -96,6 +96,13 @@ const mockState = vi.hoisted(() => {
         throw new Error(`unexpected invoke: ${command}`);
     }
   });
+  const listReposMock = vi.fn(async () => allRepos.filter((repo) => !repo.hidden));
+  const listPipelineItemsMock = vi.fn(async (_db: DbHandle, repoId: string) =>
+    pipelineItems.filter((item) => item.repo_id === repoId),
+  );
+  const listTaskBlockersMock = vi.fn(async () => []);
+  const getSettingMock = vi.fn(async () => null);
+  const getUnblockedItemsMock = vi.fn(async () => []);
 
   function reset(): void {
     allRepos = [
@@ -107,6 +114,11 @@ const mockState = vi.hoisted(() => {
       makeItem({ id: "item-2", repo_id: "repo-2" }),
     ];
     invokeMock.mockClear();
+    listReposMock.mockClear();
+    listPipelineItemsMock.mockClear();
+    listTaskBlockersMock.mockClear();
+    getSettingMock.mockClear();
+    getUnblockedItemsMock.mockClear();
   }
 
   reset();
@@ -130,6 +142,11 @@ const mockState = vi.hoisted(() => {
     makeRepo,
     makeItem,
     invokeMock,
+    listReposMock,
+    listPipelineItemsMock,
+    listTaskBlockersMock,
+    getSettingMock,
+    getUnblockedItemsMock,
     reset,
   };
 });
@@ -263,8 +280,8 @@ vi.mock("../i18n", () => ({
   },
 }));
 
-vi.mock("@kanna/db", () => ({
-  listRepos: vi.fn(async () => mockState.visibleRepos),
+vi.mock("@kanna/" + "db", () => ({
+  listRepos: mockState.listReposMock,
   insertRepo: vi.fn(async (_db: DbHandle, repo: Repo) => {
     mockState.allRepos = [...mockState.allRepos, repo];
   }),
@@ -281,10 +298,8 @@ vi.mock("@kanna/db", () => ({
       repo.id === repoId ? { ...repo, hidden: 0 } : repo,
     );
   }),
-  listPipelineItems: vi.fn(async (_db: DbHandle, repoId: string) =>
-    mockState.pipelineItems.filter((item) => item.repo_id === repoId),
-  ),
-  listTaskBlockers: vi.fn(async () => []),
+  listPipelineItems: mockState.listPipelineItemsMock,
+  listTaskBlockers: mockState.listTaskBlockersMock,
   insertPipelineItem: vi.fn(async () => {}),
   updatePipelineItemActivity: vi.fn(async () => {}),
   markPipelineItemTearingDown: vi.fn(async () => {}),
@@ -300,14 +315,14 @@ vi.mock("@kanna/db", () => ({
   getRepo: vi.fn(async (_db: DbHandle, repoId: string) =>
     mockState.allRepos.find((repo) => repo.id === repoId) ?? null,
   ),
-  getSetting: vi.fn(async () => null),
+  getSetting: mockState.getSettingMock,
   setSetting: vi.fn(async () => {}),
   insertTaskBlocker: vi.fn(async () => {}),
   removeTaskBlocker: vi.fn(async () => {}),
   removeAllBlockersForItem: vi.fn(async () => {}),
   listBlockersForItem: vi.fn(async () => []),
   listBlockedByItem: vi.fn(async () => []),
-  getUnblockedItems: vi.fn(async () => []),
+  getUnblockedItems: mockState.getUnblockedItemsMock,
   hasCircularDependency: vi.fn(async () => false),
   insertOperatorEvent: vi.fn(async () => {}),
   updateAgentSessionId: vi.fn(async () => {}),
@@ -317,14 +332,10 @@ vi.mock("@kanna/db", () => ({
 }));
 
 import { useKannaStore } from "./kanna";
-import { setDesktopSnapshotFetcherForTests } from "../services/desktopServerClient";
 import {
-  getSetting,
-  getUnblockedItems,
-  listPipelineItems,
-  listRepos,
-  listTaskBlockers,
-} from "@kanna/db";
+  setDesktopSnapshotFetcherForTests,
+  updateDesktopServerClientHandlersForTests,
+} from "../services/desktopServerClient";
 
 function createDb(): DbHandle {
   return {
@@ -378,14 +389,40 @@ describe("kanna query snapshot regressions", () => {
       worktreePaths: {},
       settings: {},
     }));
+    updateDesktopServerClientHandlersForTests({
+      findRepoByPath: async (path) =>
+        mockState.allRepos.find((repo) => repo.path === path) as never ?? null,
+      addRepo: async ({ path, name }) => {
+        const repo = mockState.makeRepo({
+          id: `repo-${mockState.allRepos.length + 1}`,
+          path,
+          name: name ?? path.split("/").pop() ?? "repo",
+          hidden: 0,
+        });
+        mockState.allRepos = [...mockState.allRepos, repo];
+        return repo as never;
+      },
+      patchRepo: async (repoId, input) => {
+        mockState.allRepos = mockState.allRepos.map((repo) =>
+          repo.id === repoId
+            ? {
+                ...repo,
+                hidden: input.hidden === undefined ? repo.hidden : (input.hidden ? 1 : 0),
+                remote_url: input.remoteUrl === undefined ? repo.remote_url : input.remoteUrl,
+                remote_url_hash: input.remoteUrlHash === undefined ? repo.remote_url_hash : input.remoteUrlHash,
+              }
+            : repo,
+        );
+      },
+    });
     beginTaskSwitchMock.mockReset();
     invalidateSharedDataMock.mockReset();
     onSharedInvalidationMock.mockReset();
-    vi.mocked(listRepos).mockClear();
-    vi.mocked(listPipelineItems).mockClear();
-    vi.mocked(listTaskBlockers).mockClear();
-    vi.mocked(getSetting).mockClear();
-    vi.mocked(getUnblockedItems).mockClear();
+    mockState.listReposMock.mockClear();
+    mockState.listPipelineItemsMock.mockClear();
+    mockState.listTaskBlockersMock.mockClear();
+    mockState.getSettingMock.mockClear();
+    mockState.getUnblockedItemsMock.mockClear();
   });
 
   afterEach(() => {
@@ -417,12 +454,12 @@ describe("kanna query snapshot regressions", () => {
 
     expect(store.repos.map((repo) => repo.id)).toEqual(["repo-1", "repo-2"]);
     expect(store.items.map((item) => item.id)).toEqual(["item-1", "item-2"]);
-    expect(listRepos).not.toHaveBeenCalled();
-    expect(listPipelineItems).not.toHaveBeenCalled();
-    expect(listTaskBlockers).not.toHaveBeenCalled();
-    expect(getSetting).not.toHaveBeenCalled();
-    expect(getUnblockedItems).not.toHaveBeenCalled();
-    expect(db.select).not.toHaveBeenCalled();
+    expect(mockState.listReposMock).not.toHaveBeenCalled();
+    expect(mockState.listPipelineItemsMock).not.toHaveBeenCalled();
+    expect(mockState.listTaskBlockersMock).not.toHaveBeenCalled();
+    expect(mockState.getSettingMock).not.toHaveBeenCalled();
+    expect(mockState.getUnblockedItemsMock).not.toHaveBeenCalled();
+    expect(db["select"]).not.toHaveBeenCalled();
   });
 
   it("restores an unhidden repo with its tasks from the same refresh path", async () => {

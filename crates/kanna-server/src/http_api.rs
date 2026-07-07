@@ -1,18 +1,25 @@
+mod analytics;
 mod desktop;
 mod ksp;
+mod operator_events;
 mod pairing;
 mod repos;
 #[path = "http_api/router.rs"]
 mod routes;
+mod settings;
 mod signal_agent;
 mod snapshot;
 mod state;
 mod status;
 mod task_actions;
+mod task_activity;
+mod task_agent_session;
 mod task_blockers;
 mod task_input;
 mod task_logs;
+mod task_ports;
 mod tasks;
+mod transfers;
 
 #[cfg(test)]
 mod test_support;

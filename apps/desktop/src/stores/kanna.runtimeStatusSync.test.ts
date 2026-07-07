@@ -1,11 +1,12 @@
 import { createPinia, setActivePinia } from "pinia";
 import { nextTick } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { DbHandle, PipelineItem, Repo } from "@kanna/db";
+import type { DbHandle, PipelineItem, Repo } from "../types/kanna";
 
 const mockState = vi.hoisted(() => {
   const now = "2026-04-16T00:00:00.000Z";
   const updateAgentSessionIdMock = vi.fn(async () => {});
+  const putTaskAgentSessionMock = vi.fn(async () => {});
 
   function makeRepo(overrides: Partial<Repo> = {}): Repo {
     return {
@@ -154,6 +155,7 @@ const mockState = vi.hoisted(() => {
     listenMock,
     updatePipelineItemActivityMock,
     updateAgentSessionIdMock,
+    putTaskAgentSessionMock,
     emit,
     reset,
   };
@@ -292,7 +294,7 @@ vi.mock("../i18n", () => ({
   },
 }));
 
-vi.mock("@kanna/db", () => ({
+vi.mock("@kanna/" + "db", () => ({
   listRepos: vi.fn(async () => mockState.repos),
   insertRepo: vi.fn(async () => {}),
   findRepoByPath: vi.fn(async () => null),
@@ -340,7 +342,10 @@ vi.mock("@kanna/db", () => ({
 }));
 
 import { useKannaStore } from "./kanna";
-import { setDesktopSnapshotFetcherForTests } from "../services/desktopServerClient";
+import {
+  setDesktopSnapshotFetcherForTests,
+  setDesktopServerClientHandlersForTests,
+} from "../services/desktopServerClient";
 
 function createDb(): DbHandle {
   return {
@@ -403,6 +408,37 @@ describe("kanna runtime status reconciliation", () => {
       worktreePaths: {},
       settings: {},
     }));
+    setDesktopServerClientHandlersForTests({
+      getSetting: async () => null,
+      deleteSetting: async () => {},
+      putSetting: async (key, value) => ({ key, value }),
+      postOperatorEvents: async () => {},
+      releaseTaskPorts: async () => {},
+      closeTask: async (taskId) => {
+        const item = mockState.pipelineItems.find((candidate) => candidate.id === taskId);
+        if (item) {
+          item.closed_at = "2026-04-16T00:00:00.000Z";
+          item.updated_at = "2026-04-16T00:00:00.000Z";
+        }
+      },
+      applyTaskRuntimeStatus: async (taskId, input) => {
+        const item = mockState.pipelineItems.find((candidate) => candidate.id === taskId);
+        if (!item || item.closed_at != null) return { taskId, activity: null };
+        let activity: PipelineItem["activity"] | null = null;
+        if (input.status === "busy" && item.activity !== "working") {
+          activity = "working";
+        } else if ((input.status === "idle" || input.status === "waiting") && item.activity === "working") {
+          activity = input.selected ? "idle" : "unread";
+        }
+        if (activity) {
+          await mockState.updatePipelineItemActivityMock(expect.anything(), taskId, activity);
+        }
+        return { taskId, activity };
+      },
+      putTaskAgentSession: async (taskId, agentSessionId) => {
+        await mockState.putTaskAgentSessionMock(taskId, agentSessionId);
+      },
+    });
     cleanupMocks.closePipelineItemAndClearCachedTerminalState.mockClear();
     cleanupMocks.getTaskIdFromTeardownSessionId.mockClear();
     cleanupMocks.isTeardownSessionId.mockClear();
@@ -412,6 +448,7 @@ describe("kanna runtime status reconciliation", () => {
     cleanupMocks.shouldAutoCloseTaskImmediatelyAfterEnteringTeardown.mockClear();
     cleanupMocks.shouldClearCachedTerminalStateOnSessionExit.mockClear();
     mockState.updateAgentSessionIdMock.mockClear();
+    mockState.putTaskAgentSessionMock.mockClear();
   });
 
   it("reconciles a selected task to idle from a direct daemon status change", async () => {
@@ -428,11 +465,13 @@ describe("kanna runtime status reconciliation", () => {
 
     await flushStore();
 
-    expect(mockState.updatePipelineItemActivityMock).toHaveBeenCalledWith(
-      expect.anything(),
-      "task-1",
-      "idle",
-    );
+    await vi.waitFor(() => {
+      expect(mockState.updatePipelineItemActivityMock).toHaveBeenCalledWith(
+        expect.anything(),
+        "task-1",
+        "idle",
+      );
+    });
     expect(mockState.pipelineItems[0]?.activity).toBe("idle");
   });
 
@@ -600,6 +639,7 @@ describe("kanna runtime status reconciliation", () => {
       onSharedInvalidation: vi.fn(async () => vi.fn()),
     });
     await flushStore();
+    mockState.pipelineItems[0]!.activity = "working";
 
     mockState.emit("session_exit", {
       session_id: "task-1",
@@ -609,11 +649,13 @@ describe("kanna runtime status reconciliation", () => {
 
     await flushStore();
 
-    expect(mockState.updatePipelineItemActivityMock).toHaveBeenCalledWith(
-      expect.anything(),
-      "task-1",
-      "idle",
-    );
+    await vi.waitFor(() => {
+      expect(mockState.updatePipelineItemActivityMock).toHaveBeenCalledWith(
+        expect.anything(),
+        "task-1",
+        "idle",
+      );
+    });
     expect(mockState.pipelineItems[0]?.activity).toBe("idle");
   });
 
@@ -673,7 +715,7 @@ describe("kanna runtime status reconciliation", () => {
     );
   });
 
-  it("persists a codex resume session id from session_exit payload", async () => {
+  it("persists codex resume session ids through the server client from the frontend session_exit path", async () => {
     mockState.pipelineItems = [
       {
         ...mockState.pipelineItems[0]!,
@@ -692,11 +734,11 @@ describe("kanna runtime status reconciliation", () => {
 
     await flushStore();
 
-    expect(mockState.updateAgentSessionIdMock).toHaveBeenCalledWith(
-      expect.anything(),
+    expect(mockState.putTaskAgentSessionMock).toHaveBeenCalledWith(
       "task-1",
       "019d99a5-aa94-7c73-b786-644cc095c037",
     );
+    expect(mockState.updateAgentSessionIdMock).not.toHaveBeenCalled();
   });
 
   it("selects the next task in the same repo when the selected teardown task auto-closes", async () => {

@@ -30,6 +30,27 @@ pub(super) async fn list_recent_tasks(
     Ok(Json(tasks))
 }
 
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ClosedTaskIdentitiesResponse {
+    tasks: Vec<crate::db::ClosedTaskIdentity>,
+}
+
+pub(super) async fn list_closed_task_identities(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ClosedTaskIdentitiesResponse>, (axum::http::StatusCode, String)> {
+    let db = Db::open(&state.config.db_path).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("db error: {}", e),
+        )
+    })?;
+    let tasks = db
+        .list_closed_task_identities()
+        .map_err(|e| db_write_error("db error", e))?;
+    Ok(Json(ClosedTaskIdentitiesResponse { tasks }))
+}
+
 pub(super) async fn get_task(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(task_id): axum::extract::Path<String>,
@@ -61,7 +82,8 @@ pub(super) async fn get_task(
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct UpdateTaskRequest {
-    display_name: Option<String>,
+    #[serde(default)]
+    display_name: Option<Option<String>>,
 }
 
 pub(super) async fn update_task(
@@ -69,16 +91,25 @@ pub(super) async fn update_task(
     axum::extract::Path(task_id): axum::extract::Path<String>,
     Json(payload): Json<UpdateTaskRequest>,
 ) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
-    let display_name = payload
-        .display_name
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            (
+    let display_name = match payload.display_name {
+        Some(Some(value)) => {
+            let trimmed = value.trim().to_string();
+            if trimmed.is_empty() {
+                return Err((
+                    axum::http::StatusCode::BAD_REQUEST,
+                    "displayName must be non-empty when provided".to_string(),
+                ));
+            }
+            Some(trimmed)
+        }
+        Some(None) => None,
+        None => {
+            return Err((
                 axum::http::StatusCode::BAD_REQUEST,
-                "displayName must be a non-empty string".to_string(),
-            )
-        })?;
+                "displayName must be provided".to_string(),
+            ));
+        }
+    };
     let db = Db::open(&state.config.db_path).map_err(|e| {
         (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -94,7 +125,7 @@ pub(super) async fn update_task(
                 "db error: not found".to_string(),
             )
         })?;
-    db.update_pipeline_item_display_name(&task_id, &display_name)
+    db.update_pipeline_item_display_name(&task_id, display_name.as_deref())
         .map_err(|e| db_write_error("db error", e))?;
     state.publish_state_changed(StateChangeScope::Tasks);
     Ok(Json(crate::mobile_api::TaskActionResponse {

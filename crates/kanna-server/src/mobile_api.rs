@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct DesktopDescriptor {
     pub id: String,
@@ -91,7 +91,7 @@ pub struct AddRepoRequest {
     pub name: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateTaskRequest {
     pub repo_id: String,
@@ -99,12 +99,18 @@ pub struct CreateTaskRequest {
     #[serde(alias = "display_name")]
     pub display_name: Option<String>,
     pub pipeline_name: Option<String>,
+    pub stage: Option<String>,
     pub base_ref: Option<String>,
     pub agent_provider: Option<String>,
     pub agent_type: Option<String>,
     pub model: Option<String>,
     pub permission_mode: Option<String>,
     pub allowed_tools: Option<Vec<String>>,
+    pub disallowed_tools: Option<Vec<String>>,
+    pub max_turns: Option<u32>,
+    pub max_budget_usd: Option<f64>,
+    pub setup_cmds: Option<Vec<String>>,
+    pub resume_session_id: Option<String>,
     pub blocker_task_ids: Option<Vec<String>>,
     pub notify_task_id: Option<String>,
     pub parent_task_id: Option<String>,
@@ -617,12 +623,18 @@ mod tests {
                 "prompt": "Build the view",
                 "displayName": "Short task title",
                 "pipelineName": null,
+                "stage": null,
                 "baseRef": null,
                 "agentProvider": "claude",
                 "agentType": "agent",
                 "model": null,
                 "permissionMode": null,
                 "allowedTools": null,
+                "disallowedTools": null,
+                "maxTurns": null,
+                "maxBudgetUsd": null,
+                "setupCmds": null,
+                "resumeSessionId": null,
                 "blockerTaskIds": null,
                 "notifyTaskId": null,
                 "parentTaskId": null

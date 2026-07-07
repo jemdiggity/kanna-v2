@@ -105,6 +105,289 @@ async fn close_task_route_uses_task_closer() {
 }
 
 #[tokio::test]
+async fn close_task_route_releases_claimed_ports() {
+    use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+
+    let unique = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let daemon_dir = std::env::temp_dir().join(format!("kanna-http-close-ports-daemon-{unique}"));
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+    let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+    let _ = std::fs::remove_file(&socket_path);
+    let daemon_listener = UnixListener::bind(&socket_path).unwrap();
+    let daemon_server = tokio::spawn(async move {
+        let (stream, _) = daemon_listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        for expected_session_id in ["task-1", "shell-wt-task-1", "td-task-1"] {
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+            match command {
+                DaemonCommand::Kill { session_id } => assert_eq!(session_id, expected_session_id),
+                other => panic!("expected kill command, got {other:?}"),
+            }
+            write_half
+                .write_all(
+                    format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap()).as_bytes(),
+                )
+                .await
+                .unwrap();
+        }
+    });
+
+    let db_path = Db::test_db_path(&format!("http-close-ports-{unique}"));
+    let db = Db::open_for_tests(&db_path).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "task prompt",
+        Some("Task"),
+        "in progress",
+        "2026-04-17 07:00:00",
+    )
+    .unwrap();
+    assert!(db
+        .claim_task_port("task-1", "KANNA_DEV_PORT", 1421)
+        .unwrap());
+    assert!(db
+        .claim_task_port("task-1", "KANNA_MOBILE_PORT", 19001)
+        .unwrap());
+    drop(db);
+
+    let config = Config {
+        relay_url: "wss://relay.example".to_string(),
+        device_token: "device-token".to_string(),
+        firebase_project_id: "kanna-local".to_string(),
+        firebase_auth_emulator_url: None,
+        firebase_firestore_emulator_host: None,
+        daemon_dir: daemon_dir.to_string_lossy().to_string(),
+        db_path: db_path.clone(),
+        kanna_cli_path: None,
+        desktop_id: "desktop-1".to_string(),
+        desktop_secret: Some("desktop-secret".to_string()),
+        desktop_name: "Studio Mac".to_string(),
+        server_version: Some("test-version".to_string()),
+        lan_host: "127.0.0.1".to_string(),
+        lan_port: 48120,
+        pairing_store_path: format!("/tmp/kanna-pairings-close-ports-{unique}.json"),
+    };
+    let app = super::router(Arc::new(super::AppState::new(config)));
+
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks/task-1/actions/close")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let db = Db::open(&db_path).unwrap();
+    assert!(db
+        .get_pipeline_item("task-1")
+        .unwrap()
+        .unwrap()
+        .closed_at
+        .is_some());
+    assert!(
+        db.list_task_ports_for_item("task-1").unwrap().is_empty(),
+        "closing a task must free its claimed ports for later tasks"
+    );
+    daemon_server.await.unwrap();
+    let _ = std::fs::remove_file(&socket_path);
+    let _ = std::fs::remove_dir_all(&daemon_dir);
+}
+
+#[tokio::test]
+async fn reopen_task_route_reopens_and_reclaims_ports_from_worktree_config() {
+    let unique = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let repo_root = std::env::temp_dir().join(format!("kanna-http-reopen-ports-{unique}"));
+    let worktree_path = repo_root.join(".kanna-worktrees").join("task-closed");
+    std::fs::create_dir_all(worktree_path.join(".kanna")).unwrap();
+    std::fs::write(
+        worktree_path.join(".kanna/config.json"),
+        r#"{"ports":{"KANNA_DEV_PORT":1420,"API_PORT":3000}}"#,
+    )
+    .unwrap();
+
+    let db_path = Db::test_db_path(&format!("http-reopen-ports-{unique}"));
+    let db = Db::open_for_tests(&db_path).expect("open test db");
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    db.insert_test_pipeline_item(
+        "task-closed",
+        "repo-1",
+        "task prompt",
+        Some("Task"),
+        "in progress",
+        "2026-04-17 07:00:00",
+    )
+    .unwrap();
+    db.upsert_worktree(
+        "wt-task-closed",
+        "task-closed",
+        &worktree_path.to_string_lossy(),
+        "task-closed",
+    )
+    .unwrap();
+    db.close_pipeline_item("task-closed").unwrap();
+    db.insert_test_pipeline_item(
+        "task-other",
+        "repo-1",
+        "other prompt",
+        Some("Other"),
+        "in progress",
+        "2026-04-17 08:00:00",
+    )
+    .unwrap();
+    assert!(db
+        .claim_task_port("task-other", "KANNA_DEV_PORT", 1420)
+        .unwrap());
+    assert!(db.claim_task_port("task-other", "API_PORT", 3000).unwrap());
+    drop(db);
+
+    let config = Config {
+        relay_url: "wss://relay.example".to_string(),
+        device_token: "device-token".to_string(),
+        firebase_project_id: "kanna-local".to_string(),
+        firebase_auth_emulator_url: None,
+        firebase_firestore_emulator_host: None,
+        daemon_dir: "/tmp/kanna-daemon".to_string(),
+        db_path: db_path.clone(),
+        kanna_cli_path: None,
+        desktop_id: "desktop-1".to_string(),
+        desktop_secret: Some("desktop-secret".to_string()),
+        desktop_name: "Studio Mac".to_string(),
+        server_version: Some("test-version".to_string()),
+        lan_host: "127.0.0.1".to_string(),
+        lan_port: 48120,
+        pairing_store_path: format!("/tmp/kanna-pairings-reopen-ports-{unique}.json"),
+    };
+    let app = super::router(Arc::new(super::AppState::new(config)));
+
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks/task-closed/actions/reopen")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let db = Db::open(&db_path).unwrap();
+    let item = db.get_pipeline_item("task-closed").unwrap().unwrap();
+    assert!(item.closed_at.is_none());
+    let (port_offset, port_env) = db.get_test_pipeline_item_ports("task-closed").unwrap();
+    assert_eq!(port_offset, Some(1421));
+    assert_eq!(
+        port_env.as_deref(),
+        Some(r#"{"API_PORT":"3001","KANNA_DEV_PORT":"1421"}"#)
+    );
+    let ports = db.list_task_ports_for_item("task-closed").unwrap();
+    assert_eq!(ports.get("KANNA_DEV_PORT"), Some(&1421));
+    assert_eq!(ports.get("API_PORT"), Some(&3001));
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[tokio::test]
+async fn mark_read_route_sets_unread_task_idle() {
+    let state = super::test_state_with_seed("desktop-1", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "task-1",
+            "repo-1",
+            "task prompt",
+            Some("Task"),
+            "in progress",
+            "2026-04-17 07:00:00",
+        )
+        .unwrap();
+        db.update_pipeline_item_activity("task-1", "unread")
+            .unwrap();
+    });
+    let db_path = state.config.db_path.clone();
+    let app = super::router(state);
+
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks/task-1/actions/mark-read")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let db = Db::open(&db_path).unwrap();
+    let item = db.get_pipeline_item("task-1").unwrap().unwrap();
+    assert_eq!(item.activity.as_deref(), Some("idle"));
+}
+
+#[tokio::test]
+async fn agent_session_id_route_persists_provider_session_id() {
+    let state = super::test_state_with_seed("desktop-1", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "task-1",
+            "repo-1",
+            "task prompt",
+            Some("Task"),
+            "in progress",
+            "2026-04-17 07:00:00",
+        )
+        .unwrap();
+    });
+    let db_path = state.config.db_path.clone();
+    let app = super::router(state);
+
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks/task-1/actions/agent-session-id")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "agentSessionId": "provider-session-1",
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let agent_session_id: Option<String> = conn
+        .query_row(
+            "SELECT agent_session_id FROM pipeline_item WHERE id = 'task-1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(agent_session_id.as_deref(), Some("provider-session-1"));
+}
+
+#[tokio::test]
 async fn close_pr_task_sends_blocker_close_instruction_with_renamed_branch_to_running_dependents() {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -829,6 +1112,56 @@ async fn block_task_route_marks_task_blocked_by_requested_tasks() {
 }
 
 #[tokio::test]
+async fn block_task_route_replaces_existing_blockers() {
+    let state = super::test_state_with_seed("desktop-1", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        for id in ["task-1", "blocker-old", "blocker-new"] {
+            db.insert_test_pipeline_item(
+                id,
+                "repo-1",
+                "task prompt",
+                Some(id),
+                "in progress",
+                "2026-04-17 07:00:00",
+            )
+            .unwrap();
+        }
+        db.insert_test_task_blocker("task-1", "blocker-old")
+            .unwrap();
+    });
+    let db_path = state.config.db_path.clone();
+    let app = super::router(state);
+
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks/task-1/actions/block")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "blockerTaskIds": ["blocker-new"]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let db = Db::open(&db_path).unwrap();
+    assert_eq!(
+        db.count_test_task_blockers("task-1", "blocker-old")
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        db.count_test_task_blockers("task-1", "blocker-new")
+            .unwrap(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn block_task_route_rejects_circular_dependencies() {
     let state = super::test_state_with_seed("desktop-1", "Studio Mac", |db| {
         db.insert_test_repo("repo-1", "Repo One").unwrap();
@@ -861,6 +1194,48 @@ async fn block_task_route_rejects_circular_dependencies() {
                 .body(Body::from(
                     serde_json::json!({
                         "blockerTaskIds": ["blocker-1"]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn block_task_route_rejects_multi_hop_circular_dependencies() {
+    let state = super::test_state_with_seed("desktop-1", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        for (id, title) in [
+            ("task-a", "Task A"),
+            ("task-b", "Task B"),
+            ("task-c", "Task C"),
+        ] {
+            db.insert_test_pipeline_item(
+                id,
+                "repo-1",
+                "task prompt",
+                Some(title),
+                "in progress",
+                "2026-04-17 07:00:00",
+            )
+            .unwrap();
+        }
+        db.insert_test_task_blocker("task-b", "task-a").unwrap();
+        db.insert_test_task_blocker("task-c", "task-b").unwrap();
+    });
+    let app = super::router(state);
+
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks/task-a/actions/block")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "blockerTaskIds": ["task-c"]
                     })
                     .to_string(),
                 ))
@@ -2691,6 +3066,273 @@ async fn advance_stage_route_records_stage_run_for_spawned_next_task() {
     assert_eq!(runs[0].session_id.as_deref(), Some("source-1"));
 
     daemon_server.await.unwrap();
+    if created_sidecar {
+        let _ = std::fs::remove_file(&kanna_cli_path);
+    }
+    let _ = std::fs::remove_file(&socket_path);
+    let _ = std::fs::remove_dir_all(&daemon_dir);
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[tokio::test]
+async fn advance_stage_detached_transition_aborts_when_task_closes_before_stage_write() {
+    use kanna_daemon::protocol::{AgentProvider, Command as DaemonCommand, Event as DaemonEvent};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+    use tokio::sync::oneshot;
+
+    let unique = format!(
+        "{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let repo_root = std::env::temp_dir().join(format!("kanna-http-advance-close-race-{unique}"));
+    init_test_git_repo(&repo_root);
+    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/pipelines/default.json"),
+        r#"{
+  "stages": [
+    { "name": "in progress", "transition": "manual" },
+    { "name": "review", "transition": "manual", "agent_provider": "claude" }
+  ]
+}"#,
+    )
+    .unwrap();
+    assert!(Command::new("git")
+        .args(["add", ".kanna"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["commit", "-m", "add pipeline"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["branch", "task-source"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+
+    let daemon_dir =
+        std::env::temp_dir().join(format!("kanna-http-advance-close-race-daemon-{unique}"));
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+    let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+    let _ = std::fs::remove_file(&socket_path);
+    let daemon_listener = UnixListener::bind(&socket_path).unwrap();
+    let (spawn_seen_tx, spawn_seen_rx) = oneshot::channel::<()>();
+    let (release_spawn_tx, release_spawn_rx) = oneshot::channel::<()>();
+    let (cleanup_seen_tx, cleanup_seen_rx) = oneshot::channel::<String>();
+    let daemon_server = tokio::spawn(async move {
+        let mut spawn_seen_tx = Some(spawn_seen_tx);
+        let mut release_spawn_rx = Some(release_spawn_rx);
+        let mut cleanup_seen_tx = Some(cleanup_seen_tx);
+        'connections: loop {
+            let (stream, _) = daemon_listener.accept().await.unwrap();
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).await.unwrap() == 0 {
+                    continue 'connections;
+                }
+                let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+                match command {
+                    DaemonCommand::Kill { session_id, .. } if session_id == "source-1" => {
+                        let response = DaemonEvent::Error {
+                            code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
+                            message: "session not found".to_string(),
+                        };
+                        write_half
+                            .write_all(
+                                format!("{}\n", serde_json::to_string(&response).unwrap())
+                                    .as_bytes(),
+                            )
+                            .await
+                            .unwrap();
+                    }
+                    DaemonCommand::Kill { session_id, .. } if session_id == "shell-wt-source-1" => {
+                        let response = DaemonEvent::Error {
+                            code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
+                            message: "session not found".to_string(),
+                        };
+                        write_half
+                            .write_all(
+                                format!("{}\n", serde_json::to_string(&response).unwrap())
+                                    .as_bytes(),
+                            )
+                            .await
+                            .unwrap();
+                    }
+                    DaemonCommand::Spawn {
+                        session_id,
+                        cwd,
+                        agent_provider,
+                        ..
+                    } => {
+                        assert_eq!(agent_provider, Some(AgentProvider::Claude));
+                        assert!(cwd.contains(".kanna-worktrees/task-"));
+                        if let Some(tx) = spawn_seen_tx.take() {
+                            tx.send(()).unwrap();
+                        }
+                        release_spawn_rx.take().unwrap().await.unwrap();
+                        write_half
+                            .write_all(
+                                format!(
+                                    "{}\n",
+                                    serde_json::to_string(&DaemonEvent::SessionCreated {
+                                        session_id
+                                    })
+                                    .unwrap()
+                                )
+                                .as_bytes(),
+                            )
+                            .await
+                            .unwrap();
+                    }
+                    DaemonCommand::SpawnAgent { session_id, params } => {
+                        assert_eq!(params.agent_provider, AgentProvider::Claude);
+                        assert!(params.cwd.contains(".kanna-worktrees/task-"));
+                        if let Some(tx) = spawn_seen_tx.take() {
+                            tx.send(()).unwrap();
+                        }
+                        release_spawn_rx.take().unwrap().await.unwrap();
+                        write_half
+                            .write_all(
+                                format!(
+                                    "{}\n",
+                                    serde_json::to_string(&DaemonEvent::SessionCreated {
+                                        session_id
+                                    })
+                                    .unwrap()
+                                )
+                                .as_bytes(),
+                            )
+                            .await
+                            .unwrap();
+                    }
+                    DaemonCommand::Kill { session_id, .. } => {
+                        if let Some(tx) = cleanup_seen_tx.take() {
+                            tx.send(session_id).unwrap();
+                        }
+                        write_half
+                            .write_all(
+                                format!(
+                                    "{}\n",
+                                    serde_json::to_string(&DaemonEvent::Exit {
+                                        session_id: "source-1".to_string(),
+                                        code: 0,
+                                        resume_session_id: None,
+                                        killed: true,
+                                    })
+                                    .unwrap()
+                                )
+                                .as_bytes(),
+                            )
+                            .await
+                            .unwrap();
+                        break;
+                    }
+                    other => panic!(
+                        "unexpected daemon command during advance/close race: {:?}",
+                        other
+                    ),
+                }
+            }
+        }
+    });
+
+    let (kanna_cli_path, created_sidecar) = ensure_test_kanna_cli_sidecar();
+    let config = Config {
+        relay_url: "wss://relay.example".to_string(),
+        device_token: "device-token".to_string(),
+        firebase_project_id: "kanna-local".to_string(),
+        firebase_auth_emulator_url: None,
+        firebase_firestore_emulator_host: None,
+        daemon_dir: daemon_dir.to_string_lossy().to_string(),
+        db_path: Db::test_db_path(&format!("http-api-advance-close-race-{unique}")),
+        kanna_cli_path: Some(kanna_cli_path.to_string_lossy().to_string()),
+        desktop_id: "desktop-1".to_string(),
+        desktop_secret: Some("desktop-secret".to_string()),
+        desktop_name: "Studio Mac".to_string(),
+        server_version: Some("test-version".to_string()),
+        lan_host: "127.0.0.1".to_string(),
+        lan_port: 48120,
+        pairing_store_path: format!("/tmp/kanna-pairings-advance-close-race-{unique}.json"),
+    };
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    db.insert_test_pipeline_item(
+        "source-1",
+        "repo-1",
+        "Implement it",
+        Some("Implement it"),
+        "in progress",
+        "2026-07-02 00:00:00",
+    )
+    .unwrap();
+    db.update_test_pipeline_item_stage_context(
+        "source-1",
+        "task-source",
+        "default",
+        None,
+        "claude",
+    )
+    .unwrap();
+    drop(db);
+
+    let app = super::router(Arc::new(super::AppState::new(config.clone())));
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks/source-1/actions/advance-stage")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    spawn_seen_rx.await.unwrap();
+    let db = Db::open(&config.db_path).unwrap();
+    db.close_pipeline_item("source-1").unwrap();
+    assert!(db
+        .get_pipeline_item("source-1")
+        .unwrap()
+        .unwrap()
+        .closed_at
+        .is_some());
+    drop(db);
+    release_spawn_tx.send(()).unwrap();
+
+    let cleanup_session_id =
+        tokio::time::timeout(std::time::Duration::from_millis(500), cleanup_seen_rx)
+            .await
+            .ok()
+            .map(|received| received.unwrap());
+    if let Some(cleanup_session_id) = cleanup_session_id {
+        assert_eq!(cleanup_session_id, "source-1");
+        daemon_server.await.unwrap();
+    } else {
+        daemon_server.abort();
+    }
+
+    let db = Db::open(&config.db_path).unwrap();
+    let task = db.get_pipeline_item("source-1").unwrap().unwrap();
+    assert_eq!(task.stage.as_deref(), Some("in progress"));
+    assert_eq!(task.branch.as_deref(), Some("task-source"));
+    assert!(task.closed_at.is_some());
+    let runs = db.list_stage_runs_for_task("source-1").unwrap();
+    assert!(runs.iter().all(|run| run.stage != "review"));
+
     if created_sidecar {
         let _ = std::fs::remove_file(&kanna_cli_path);
     }

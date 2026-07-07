@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { PipelineItem, Repo } from "@kanna/db";
+import type { PipelineItem, Repo } from "../types/kanna";
 import { collectTeardownCommands, readRepoConfig } from "./kanna";
 
 const { invokeMock } = vi.hoisted(() => ({

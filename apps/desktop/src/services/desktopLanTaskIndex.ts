@@ -1,7 +1,8 @@
-import { listBlockersForItem, listPipelineItems, listRepos, type DbHandle, type Repo } from "@kanna/db";
+import type { DbHandle, Repo, TaskBlocker } from "../types/kanna";
 import { invoke } from "../invoke";
 import { buildCloudTaskSnapshot } from "../utils/cloudTaskSnapshot";
 import { mapDesktopCloudTasks, type DesktopCloudSnapshot, type DesktopCloudTaskSnapshot } from "./desktopCloudTaskIndex";
+import { fetchDesktopSnapshot } from "./desktopServerClient";
 import { getCachedRepoRemoteUrl } from "./repoRemoteUrl";
 
 interface PeerTaskSnapshotEnvelope {
@@ -16,25 +17,22 @@ interface LanTaskSnapshotPayload {
   tasks?: DesktopCloudTaskSnapshot[];
 }
 
-export async function publishDesktopLanTaskSnapshot(db: DbHandle): Promise<void> {
-  const [desktopId, repos] = await Promise.all([
+export async function publishDesktopLanTaskSnapshot(db?: DbHandle | null): Promise<void> {
+  void db;
+  const [desktopId, snapshot] = await Promise.all([
     resolveLanDesktopId(),
-    listRepos(db),
+    fetchDesktopSnapshot(),
   ]);
   const tasks: DesktopCloudTaskSnapshot[] = [];
 
-  for (const repo of repos) {
-    const [items, remoteUrl] = await Promise.all([
-      listPipelineItems(db, repo.id),
-      getCachedRepoRemoteUrl(db, repo),
-    ]);
+  for (const { repo, items } of snapshot.entries) {
+    const remoteUrl = await getCachedRepoRemoteUrl(repo);
     for (const item of items.filter((candidate) => !candidate.closed_at)) {
-      const blockers = await listBlockersForItem(db, item.id);
       tasks.push(await buildCloudTaskSnapshot({
         desktopId,
         item,
         repo: { ...repo, remote_url: remoteUrl },
-        blockedByTaskIds: blockers.map((blocker) => blocker.id),
+        blockedByTaskIds: blockedByTaskIds(snapshot.taskBlockers, item.id),
       }));
     }
   }
@@ -48,6 +46,12 @@ export async function publishDesktopLanTaskSnapshot(db: DbHandle): Promise<void>
   }).catch((error) => {
     console.warn("[lan] failed to publish task snapshot:", error);
   });
+}
+
+function blockedByTaskIds(blockers: TaskBlocker[], itemId: string): string[] {
+  return blockers
+    .filter((blocker) => blocker.blocked_item_id === itemId)
+    .map((blocker) => blocker.blocker_item_id);
 }
 
 export async function listDesktopLanTasks(options: {

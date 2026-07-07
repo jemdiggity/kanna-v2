@@ -2,7 +2,7 @@ import * as tauriMock from "../tauri-mock";
 import { invoke } from "../invoke";
 import { migrateLegacyDatabaseIfNeeded } from "../composables/useBackup";
 import { debugLog } from "../utils/debugLog";
-import type { DbHandle } from "@kanna/db";
+import type { DbHandle } from "../types/kanna";
 
 interface AppliedMigrationRow {
   id: string;

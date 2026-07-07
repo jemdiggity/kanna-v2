@@ -346,6 +346,579 @@ async fn dependent_tasks_exist_route_returns_false_for_task_without_dependents()
 }
 
 #[tokio::test]
+async fn settings_routes_get_and_put_setting_values() {
+    let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
+        db.set_test_setting("ideCommand", "code").unwrap();
+    });
+
+    let initial = app
+        .clone()
+        .oneshot(
+            Request::get("/v1/settings/ideCommand")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(initial.status(), StatusCode::OK);
+    let initial_body = axum::body::to_bytes(initial.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let initial_json: serde_json::Value = from_slice(&initial_body).unwrap();
+    assert_eq!(
+        initial_json,
+        serde_json::json!({ "key": "ideCommand", "value": "code" })
+    );
+
+    let updated = app
+        .clone()
+        .oneshot(
+            Request::put("/v1/settings/ideCommand")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "value": "zed" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.status(), StatusCode::OK);
+    let updated_body = axum::body::to_bytes(updated.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let updated_json: serde_json::Value = from_slice(&updated_body).unwrap();
+    assert_eq!(
+        updated_json,
+        serde_json::json!({ "key": "ideCommand", "value": "zed" })
+    );
+
+    let final_response = app
+        .clone()
+        .oneshot(
+            Request::get("/v1/settings/ideCommand")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let final_body = axum::body::to_bytes(final_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let final_json: serde_json::Value = from_slice(&final_body).unwrap();
+    assert_eq!(final_json["value"], "zed");
+
+    let deleted = app
+        .clone()
+        .oneshot(
+            Request::delete("/v1/settings/ideCommand")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), StatusCode::OK);
+
+    let missing = app
+        .oneshot(
+            Request::get("/v1/settings/ideCommand")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn operator_events_route_inserts_batched_events() {
+    let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "task-1",
+            "repo-1",
+            "prompt",
+            Some("Task One"),
+            "in progress",
+            "2026-04-17 08:00:00",
+        )
+        .unwrap();
+    });
+
+    let response = app
+        .oneshot(
+            Request::post("/v1/operator-events")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "events": [
+                            {
+                                "eventType": "task_selected",
+                                "pipelineItemId": "task-1",
+                                "repoId": "repo-1"
+                            },
+                            {
+                                "eventType": "app_blur",
+                                "pipelineItemId": null,
+                                "repoId": null
+                            }
+                        ]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = from_slice(&body).unwrap();
+    assert_eq!(json, serde_json::json!({ "inserted": 2 }));
+}
+
+#[tokio::test]
+async fn analytics_route_returns_repo_metrics() {
+    let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "task-1",
+            "repo-1",
+            "prompt one",
+            Some("Task One"),
+            "in progress",
+            "2026-04-17 08:00:00",
+        )
+        .unwrap();
+        db.insert_test_pipeline_item(
+            "task-2",
+            "repo-1",
+            "prompt two",
+            Some("Task Two"),
+            "in progress",
+            "2026-04-18 08:00:00",
+        )
+        .unwrap();
+        db.set_test_pipeline_item_closed_at("task-1", "2026-04-19 08:00:00")
+            .unwrap();
+        db.insert_test_activity_log("task-1", "working", 30)
+            .unwrap();
+        db.insert_test_activity_log("task-1", "idle", 60).unwrap();
+        db.insert_test_operator_event(
+            "task_selected",
+            Some("task-1"),
+            Some("repo-1"),
+            "2026-04-17 08:05:00",
+        )
+        .unwrap();
+        db.insert_test_operator_event(
+            "task_selected",
+            Some("task-2"),
+            Some("repo-1"),
+            "2026-04-17 08:07:00",
+        )
+        .unwrap();
+    });
+
+    let response = app
+        .oneshot(
+            Request::get("/v1/analytics/repos/repo-1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = from_slice(&body).unwrap();
+    assert_eq!(json["hasData"], true);
+    assert_eq!(json["taskBuckets"].as_array().unwrap().len(), 1);
+    assert_eq!(json["taskBuckets"][0]["created"], 2);
+    assert_eq!(json["taskBuckets"][0]["closed"], 1);
+    assert_eq!(json["avgTimeInState"]["working"], 30.0);
+    assert_eq!(json["avgTimeInState"]["idle"], 60.0);
+    assert_eq!(json["hasOperatorData"], true);
+    assert!(json["operatorMetrics"]["switchesPerHour"].as_f64().unwrap() > 0.0);
+}
+
+#[tokio::test]
+async fn patch_repo_route_updates_remote_metadata_and_hidden_state() {
+    let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+    });
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::patch("/v1/repos/repo-1")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "remoteUrl": "git@github.com:kanna/repo-one.git",
+                        "remoteUrlHash": "hash-1",
+                        "hidden": true
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let snapshot_response = app
+        .oneshot(Request::get("/v1/snapshot").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(snapshot_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let snapshot: serde_json::Value = from_slice(&body).unwrap();
+    assert_eq!(snapshot["entries"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn task_agent_session_route_persists_provider_session_id() {
+    let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "task-1",
+            "repo-1",
+            "prompt",
+            Some("Task One"),
+            "in progress",
+            "2026-04-17 08:00:00",
+        )
+        .unwrap();
+    });
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/tasks/task-1/actions/agent-session")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "agentSessionId": "claude-session-1" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let snapshot_response = app
+        .oneshot(Request::get("/v1/snapshot").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(snapshot_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let snapshot: serde_json::Value = from_slice(&body).unwrap();
+    assert_eq!(
+        snapshot["entries"][0]["items"][0]["agent_session_id"],
+        serde_json::json!("claude-session-1")
+    );
+}
+
+#[tokio::test]
+async fn task_activity_routes_persist_runtime_status_and_mark_read() {
+    let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "task-1",
+            "repo-1",
+            "prompt",
+            Some("Task One"),
+            "in progress",
+            "2026-04-17 08:00:00",
+        )
+        .unwrap();
+    });
+
+    let busy_response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/tasks/task-1/actions/runtime-status")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "status": "busy", "selected": false }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(busy_response.status(), StatusCode::OK);
+
+    let exited_response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/tasks/task-1/actions/runtime-status")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "status": "idle", "selected": false }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(exited_response.status(), StatusCode::OK);
+
+    let unread_snapshot = app
+        .clone()
+        .oneshot(Request::get("/v1/snapshot").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let unread_body = axum::body::to_bytes(unread_snapshot.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let unread_json: serde_json::Value = from_slice(&unread_body).unwrap();
+    assert_eq!(
+        unread_json["entries"][0]["items"][0]["activity"],
+        serde_json::json!("unread")
+    );
+
+    let mark_read_response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/tasks/task-1/actions/mark-read")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(mark_read_response.status(), StatusCode::OK);
+
+    let read_snapshot = app
+        .oneshot(Request::get("/v1/snapshot").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let read_body = axum::body::to_bytes(read_snapshot.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let read_json: serde_json::Value = from_slice(&read_body).unwrap();
+    assert_eq!(
+        read_json["entries"][0]["items"][0]["activity"],
+        serde_json::json!("idle")
+    );
+}
+
+#[tokio::test]
+async fn task_port_routes_claim_reuse_and_release_allocations() {
+    let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "task-1",
+            "repo-1",
+            "prompt",
+            Some("Task One"),
+            "in progress",
+            "2026-04-17 08:00:00",
+        )
+        .unwrap();
+        db.insert_test_pipeline_item(
+            "task-2",
+            "repo-1",
+            "prompt",
+            Some("Task Two"),
+            "in progress",
+            "2026-04-17 08:00:00",
+        )
+        .unwrap();
+    });
+
+    let body = serde_json::json!({
+        "ports": { "KANNA_DEV_PORT": 1420 },
+        "reservedPorts": [1421],
+        "reservedPortOffsets": [2]
+    })
+    .to_string();
+    let first = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/tasks/task-1/ports")
+                .header("content-type", "application/json")
+                .body(Body::from(body.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    let first_body = axum::body::to_bytes(first.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let first_json: serde_json::Value = from_slice(&first_body).unwrap();
+    assert_eq!(first_json["portEnv"]["KANNA_DEV_PORT"], "1423");
+    assert_eq!(first_json["firstPort"], 1423);
+
+    let reused = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/tasks/task-1/ports")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let reused_body = axum::body::to_bytes(reused.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let reused_json: serde_json::Value = from_slice(&reused_body).unwrap();
+    assert_eq!(reused_json["portEnv"]["KANNA_DEV_PORT"], "1423");
+
+    let released = app
+        .clone()
+        .oneshot(
+            Request::delete("/v1/tasks/task-1/ports")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(released.status(), StatusCode::OK);
+
+    let claimed_after_release = app
+        .oneshot(
+            Request::post("/v1/tasks/task-2/ports")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "ports": { "KANNA_DEV_PORT": 1420 } }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let claimed_body = axum::body::to_bytes(claimed_after_release.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let claimed_json: serde_json::Value = from_slice(&claimed_body).unwrap();
+    assert_eq!(claimed_json["portEnv"]["KANNA_DEV_PORT"], "1421");
+}
+
+#[tokio::test]
+async fn transfer_routes_list_claim_and_fail_pending_incoming_transfers() {
+    let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
+        db.insert_test_task_transfer(
+            "transfer-1",
+            "incoming",
+            "pending",
+            Some(r#"{"task":{},"repo":{}}"#),
+        )
+        .unwrap();
+    });
+
+    let list_response = app
+        .clone()
+        .oneshot(
+            Request::get("/v1/transfers/incoming/pending")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(list_response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(list_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let list_json: serde_json::Value = from_slice(&body).unwrap();
+    assert_eq!(list_json["transfers"].as_array().unwrap().len(), 1);
+    assert_eq!(list_json["transfers"][0]["id"], "transfer-1");
+    assert_eq!(list_json["transfers"][0]["sourcePeerId"], "peer-1");
+    assert_eq!(list_json["transfers"][0]["sourceTaskId"], "source-task-1");
+    assert_eq!(
+        list_json["transfers"][0]["payloadJson"],
+        r#"{"task":{},"repo":{}}"#
+    );
+    assert!(list_json["transfers"][0]["source_peer_id"].is_null());
+    assert!(list_json["transfers"][0]["source_task_id"].is_null());
+    assert!(list_json["transfers"][0]["payload_json"].is_null());
+
+    let claim_response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/transfers/transfer-1/actions/claim")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(claim_response.status(), StatusCode::OK);
+    let claim_body = axum::body::to_bytes(claim_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let claim_json: serde_json::Value = from_slice(&claim_body).unwrap();
+    assert_eq!(claim_json["updated"], true);
+
+    let fail_response = app
+        .oneshot(
+            Request::post("/v1/transfers/transfer-1/actions/fail")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "reason": "failed import" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(fail_response.status(), StatusCode::OK);
+    let fail_body = axum::body::to_bytes(fail_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let fail_json: serde_json::Value = from_slice(&fail_body).unwrap();
+    assert_eq!(fail_json["updated"], true);
+}
+
+#[tokio::test]
+async fn closed_task_identities_route_returns_closed_tasks() {
+    let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "task-open",
+            "repo-1",
+            "open",
+            Some("Open"),
+            "in progress",
+            "2026-04-17 08:00:00",
+        )
+        .unwrap();
+        db.insert_test_pipeline_item(
+            "task-closed",
+            "repo-1",
+            "closed",
+            Some("Closed"),
+            "in progress",
+            "2026-04-17 08:00:00",
+        )
+        .unwrap();
+        db.set_test_pipeline_item_closed_at("task-closed", "2026-04-18 08:00:00")
+            .unwrap();
+    });
+
+    let response = app
+        .oneshot(
+            Request::get("/v1/tasks/closed-identities")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = from_slice(&body).unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!({ "tasks": [{ "id": "task-closed", "repo_id": "repo-1" }] })
+    );
+}
+
+#[tokio::test]
 async fn add_repo_route_registers_existing_git_repo() {
     let unique = format!(
         "{}-{}",
