@@ -14,7 +14,7 @@ mod worktree;
 mod tests;
 
 use crate::config::Config;
-use crate::db::{Db, NewPipelineItem, Repo};
+use crate::db::{Db, NewPipelineItem, NewStageRun, Repo};
 use commands::{
     build_agent_command, build_kanna_preamble, build_task_shell_command,
     build_teardown_shell_command,
@@ -46,7 +46,7 @@ pub(crate) use environment::warm_login_shell_path;
 pub(crate) use lifecycle::{
     dispatch_prepared_post_for_api, kill_session_replacing, prepared_task_id,
     rerun_prepared_stage_for_api, rollback_prepared_task_for_api, spawn_prepared_stage_run_for_api,
-    spawn_prepared_task_for_api_recording_stage_run, spawn_prepared_task_for_api_with_rollback,
+    spawn_prepared_task_for_api_recording_stage_run, spawn_prepared_task_for_api_with_diagnostics,
     spawn_prepared_workspace_teardown_best_effort,
 };
 pub(crate) use merge::prepare_merge_agent_for_api;
@@ -147,6 +147,24 @@ pub(crate) fn prepare_rerun_stage_for_api(
         .unwrap_or_default();
     let agent_type = resolve_agent_type(source_task.agent_type.as_deref(), provider)?;
     let worktree_path = format!("{}/.kanna-worktrees/{}", repo.path, branch);
+    if !std::path::Path::new(&worktree_path).is_dir() {
+        let start_point = source_task
+            .base_ref
+            .clone()
+            .or_else(|| fetch_start_point(&repo.path, repo.default_branch.as_deref()));
+        create_worktree(&repo.path, branch, &worktree_path, start_point.as_deref())?;
+        db.upsert_worktree(&format!("wt-{task_id}"), task_id, &worktree_path, branch)
+            .map_err(|e| format!("db error: {}", e))?;
+        db.upsert_terminal_session(
+            &format!("agent-{task_id}"),
+            &repo.id,
+            Some(task_id),
+            Some("agent"),
+            Some(&worktree_path),
+            Some(task_id),
+        )
+        .map_err(|e| format!("db error: {}", e))?;
+    }
     let repo_config = read_repo_config(&repo.path)?;
     let worktree_repo_config = read_repo_config(&worktree_path)?;
     let port_env = claim_task_ports(db, task_id, repo_config.ports.as_ref())?;
@@ -970,23 +988,32 @@ pub(in crate::task_creator) fn prepare_task_spawn(
 
     insert_new_task_record(db, repo, &task_id, &branch, &resolved)?;
 
-    let port_env = claim_task_ports(db, &task_id, repo_config.ports.as_ref())?;
-    persist_task_ports(db, &task_id, &port_env)?;
+    let prepared = (|| {
+        let port_env = claim_task_ports(db, &task_id, repo_config.ports.as_ref())?;
+        persist_task_ports(db, &task_id, &port_env)?;
 
-    create_new_task_worktree(
-        db,
-        repo,
-        &task_id,
-        &branch,
-        &worktree_path,
-        resolved.base_ref.as_deref(),
-    )?;
+        create_new_task_worktree(
+            db,
+            repo,
+            &task_id,
+            &branch,
+            &worktree_path,
+            resolved.base_ref.as_deref(),
+        )?;
 
+        prepare_new_task_session(config, &task_id, &worktree_path, &port_env, &resolved)
+    })();
     let PreparedNewTaskSession {
         spawn_env,
         session,
         provider_session_id,
-    } = prepare_new_task_session(config, &task_id, &worktree_path, &port_env, &resolved)?;
+    } = match prepared {
+        Ok(prepared) => prepared,
+        Err(err) => {
+            record_task_prepare_failure(db, &task_id, &worktree_path, &resolved, &err)?;
+            return Err(format!("task {task_id} failed to prepare: {err}"));
+        }
+    };
     let title = resolved
         .display_name
         .clone()
@@ -1011,6 +1038,47 @@ pub(in crate::task_creator) fn prepare_task_spawn(
         provider_session_id,
         session,
     })
+}
+
+fn record_task_prepare_failure(
+    db: &Db,
+    task_id: &str,
+    worktree_path: &str,
+    resolved: &ResolvedTaskSpawn,
+    error: &str,
+) -> Result<(), String> {
+    let result = format!("failed to prepare task {task_id}: {error}");
+    db.cancel_running_stage_runs(task_id)
+        .map_err(|e| format!("db error: {}", e))?;
+    db.update_pipeline_item_activity(task_id, "unread")
+        .map_err(|e| format!("db error: {}", e))?;
+    let run_id = generate_failure_run_id(task_id);
+    db.insert_stage_run(NewStageRun {
+        id: &run_id,
+        task_id,
+        stage: &resolved.stage_name,
+        kind: "main",
+        agent: resolved.stage_agent.as_deref(),
+        agent_provider: Some(resolved.provider.as_str()),
+        model: resolved.model.as_deref(),
+        status: "failed",
+        result: Some(&result),
+        feedback: Some("task preparation failed"),
+        session_id: Some(task_id),
+        provider_session_id: None,
+        cwd: Some(worktree_path),
+        resumed_from_run_id: None,
+    })
+    .map_err(|e| format!("db error: {}", e))?;
+    Ok(())
+}
+
+fn generate_failure_run_id(task_id: &str) -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    format!("run-{task_id}-{nanos}")
 }
 
 fn resolve_task_spawn(

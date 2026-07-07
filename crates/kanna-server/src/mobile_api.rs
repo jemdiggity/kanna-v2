@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::db::{Db, NewRepo};
+use crate::db::{Db, NewRepo, NewStageRun};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -220,6 +220,7 @@ impl MobileApi {
     }
 
     pub fn list_repo_tasks(&self, repo_id: &str) -> Result<Vec<TaskSummary>, String> {
+        record_orphaned_initialized_tasks(&self._db)?;
         self._db
             .list_pipeline_items(repo_id)
             .map(|items| items.into_iter().map(map_task_summary).collect())
@@ -227,6 +228,7 @@ impl MobileApi {
     }
 
     pub fn list_recent_tasks(&self) -> Result<Vec<TaskSummary>, String> {
+        record_orphaned_initialized_tasks(&self._db)?;
         self._db
             .list_recent_pipeline_items()
             .map(|items| items.into_iter().map(map_task_summary).collect())
@@ -234,6 +236,7 @@ impl MobileApi {
     }
 
     pub fn search_tasks(&self, query: &str) -> Result<Vec<TaskSummary>, String> {
+        record_orphaned_initialized_tasks(&self._db)?;
         self._db
             .search_pipeline_items(query)
             .map(|items| items.into_iter().map(map_task_summary).collect())
@@ -241,6 +244,7 @@ impl MobileApi {
     }
 
     pub fn get_task(&self, task_or_branch_id: &str) -> Result<Option<TaskDetail>, String> {
+        record_orphaned_initialized_tasks(&self._db)?;
         let task_id = self
             ._db
             .resolve_pipeline_item_id(task_or_branch_id)
@@ -265,6 +269,73 @@ impl MobileApi {
             .map_err(|e| format!("db error: {}", e))?;
         Ok(Some(map_task_detail(item, repo.as_ref(), worktree_path)))
     }
+}
+
+pub fn record_orphaned_initialized_tasks(db: &Db) -> Result<bool, String> {
+    let worktree_paths = db
+        .list_open_task_worktree_paths()
+        .map_err(|e| format!("db error: {}", e))?;
+    let mut recorded_any = false;
+    for (task_id, worktree_path) in worktree_paths {
+        if Path::new(&worktree_path).exists() {
+            continue;
+        }
+        let result = format!(
+            "task workspace missing: {worktree_path}. Use rerun-stage to recreate the workspace and restart the current stage."
+        );
+        let already_recorded = db
+            .latest_stage_run(&task_id)
+            .map_err(|e| format!("db error: {}", e))?;
+        if already_recorded
+            .as_ref()
+            .and_then(|run| run.result.as_deref())
+            .is_some_and(|existing| existing == result)
+        {
+            continue;
+        }
+        log::warn!("recording orphaned task {task_id}: worktree missing at {worktree_path}");
+        db.cancel_running_stage_runs(&task_id)
+            .map_err(|e| format!("db error: {}", e))?;
+        db.update_pipeline_item_activity(&task_id, "unread")
+            .map_err(|e| format!("db error: {}", e))?;
+        let run_id = durable_failure_run_id(&task_id);
+        db.insert_stage_run(NewStageRun {
+            id: &run_id,
+            task_id: &task_id,
+            stage: already_recorded
+                .as_ref()
+                .map(|run| run.stage.as_str())
+                .unwrap_or("in progress"),
+            kind: "main",
+            agent: already_recorded
+                .as_ref()
+                .and_then(|run| run.agent.as_deref()),
+            agent_provider: already_recorded
+                .as_ref()
+                .and_then(|run| run.agent_provider.as_deref()),
+            model: already_recorded
+                .as_ref()
+                .and_then(|run| run.model.as_deref()),
+            status: "failed",
+            result: Some(&result),
+            feedback: Some("worktree missing"),
+            session_id: Some(&task_id),
+            provider_session_id: None,
+            cwd: Some(&worktree_path),
+            resumed_from_run_id: None,
+        })
+        .map_err(|e| format!("db error: {}", e))?;
+        recorded_any = true;
+    }
+    Ok(recorded_any)
+}
+
+fn durable_failure_run_id(task_id: &str) -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    format!("run-{task_id}-{nanos}")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

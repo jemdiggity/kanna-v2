@@ -45,6 +45,13 @@ async fn list_repos_route_returns_repo_summaries() {
 
 #[tokio::test]
 async fn snapshot_route_returns_ui_hydration_payload() {
+    let visible_worktree = std::env::temp_dir().join(format!(
+        "kanna-snapshot-visible-worktree-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&visible_worktree);
+    std::fs::create_dir_all(&visible_worktree).unwrap();
+    let visible_worktree = visible_worktree.to_string_lossy().to_string();
     let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
         db.insert_test_repo("repo-1", "Repo One").unwrap();
         db.insert_test_repo("repo-2", "Repo Two").unwrap();
@@ -81,7 +88,7 @@ async fn snapshot_route_returns_ui_hydration_payload() {
         db.upsert_worktree(
             "wt-task-visible",
             "task-visible",
-            "/tmp/repo-1/.kanna-worktrees/task-visible",
+            &visible_worktree,
             "branch-task-visible",
         )
         .unwrap();
@@ -128,9 +135,100 @@ async fn snapshot_route_returns_ui_hydration_payload() {
     );
     assert_eq!(
         snapshot["worktreePaths"],
-        serde_json::json!({ "task-visible": "/tmp/repo-1/.kanna-worktrees/task-visible" })
+        serde_json::json!({ "task-visible": visible_worktree.clone() })
     );
     assert_eq!(snapshot["settings"]["ideCommand"], "zed");
+
+    let _ = std::fs::remove_dir_all(visible_worktree);
+}
+
+#[tokio::test]
+async fn snapshot_route_records_initialized_tasks_whose_worktree_is_missing() {
+    let missing_worktree =
+        std::env::temp_dir().join(format!("kanna-missing-worktree-{}", std::process::id()));
+    let missing_worktree = missing_worktree.to_string_lossy().to_string();
+    let state = super::test_state_with_seed("desktop-1", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "task-orphan",
+            "repo-1",
+            "Orphaned task",
+            Some("Orphaned Task"),
+            "in progress",
+            "2026-04-17 08:00:00",
+        )
+        .unwrap();
+        db.upsert_worktree(
+            "wt-task-orphan",
+            "task-orphan",
+            &missing_worktree,
+            "branch-task-orphan",
+        )
+        .unwrap();
+    });
+    let db_path = state.config.db_path.clone();
+    let app = super::router(state);
+
+    let response = app
+        .oneshot(Request::get("/v1/snapshot").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let snapshot: serde_json::Value = from_slice(&body).unwrap();
+    assert_eq!(snapshot["entries"][0]["items"].as_array().unwrap().len(), 1);
+    assert_eq!(snapshot["entries"][0]["items"][0]["id"], "task-orphan");
+    assert_eq!(snapshot["entries"][0]["items"][0]["activity"], "unread");
+    assert_eq!(snapshot["worktreePaths"], serde_json::json!({}));
+
+    let db = Db::open(&db_path).unwrap();
+    let item = db.get_pipeline_item("task-orphan").unwrap().unwrap();
+    assert!(item.closed_at.is_none());
+    assert_eq!(item.activity.as_deref(), Some("unread"));
+    let runs = db.list_stage_runs_for_task("task-orphan").unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].status, "failed");
+    assert!(runs[0]
+        .result
+        .as_deref()
+        .unwrap_or_default()
+        .contains("task workspace missing"));
+}
+
+#[tokio::test]
+async fn recent_tasks_route_keeps_dormant_tasks_without_worktree_rows() {
+    let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "task-dormant",
+            "repo-1",
+            "Wait for blocker",
+            Some("Dormant Task"),
+            "in progress",
+            "2026-04-17 08:00:00",
+        )
+        .unwrap();
+    });
+
+    let response = app
+        .oneshot(
+            Request::get("/v1/tasks/recent")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let tasks: Vec<crate::mobile_api::TaskSummary> = from_slice(&body).unwrap();
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].id, "task-dormant");
 }
 
 #[tokio::test]

@@ -100,7 +100,7 @@ fn spawn_signal_agent_task_detached(
             let mut daemon = crate::daemon_client::DaemonClient::connect(&config.daemon_dir)
                 .await
                 .map_err(|e| format!("daemon error: {}", e))?;
-            crate::task_creator::spawn_prepared_task_for_api_with_rollback(
+            crate::task_creator::spawn_prepared_task_for_api_with_diagnostics(
                 &config.db_path,
                 &mut daemon,
                 prepared,

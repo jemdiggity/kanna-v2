@@ -2,6 +2,31 @@ use super::Db;
 use rusqlite::OptionalExtension;
 
 impl Db {
+    pub fn list_open_task_worktree_paths(&self) -> Result<Vec<(String, String)>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT worktree.pipeline_item_id, worktree.path
+             FROM worktree
+             JOIN pipeline_item ON pipeline_item.id = worktree.pipeline_item_id
+             WHERE pipeline_item.closed_at IS NULL
+             ORDER BY worktree.created_at DESC, worktree.id DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let pipeline_item_id: String = row.get(0)?;
+            let path: String = row.get(1)?;
+            Ok((pipeline_item_id, path))
+        })?;
+
+        let mut paths = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for row in rows {
+            let (pipeline_item_id, path) = row?;
+            if seen.insert(pipeline_item_id.clone()) {
+                paths.push((pipeline_item_id, path));
+            }
+        }
+        Ok(paths)
+    }
+
     pub fn get_task_worktree_path(
         &self,
         pipeline_item_id: &str,
