@@ -415,15 +415,16 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
 
     const { mcpConfigPath } = await prepareKannaMcpRuntime(sessionId, env);
 
-    // Only the Claude PTY command registers kanna-mcp in this spawn path; the
-    // prompt-prepended providers fall back to kanna-cli per the guidance.
-    const runtimeSystemPrompt = buildKannaRuntimeSystemPrompt({
+    const runtimeContext = {
       taskId: sessionId,
-      provider: "claude",
+      provider,
       mcpConfigured: !!mcpConfigPath,
+    };
+    const runtimeSystemPrompt = buildKannaRuntimeSystemPrompt({
+      ...runtimeContext,
     });
-    const runtimeUserPrompt = buildKannaRuntimeUserPrompt(prompt, { taskId: sessionId });
     const visiblePrompt = options?.displayPrompt ?? prompt;
+    const runtimeUserPrompt = buildKannaRuntimeUserPrompt(prompt, runtimeContext);
     const permissionFlags = getAgentPermissionFlags(provider, options?.permissionMode);
     const { agentCmd, agentCmdPreamble, agentSessionId } = await buildAgentCommand(provider, {
       taskId: sessionId,
@@ -439,6 +440,7 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
       maxBudgetUsd: options?.maxBudgetUsd,
       resumeSessionId: options?.resumeSessionId,
       worktreePath,
+      readTextFile: async (path) => invoke<string>("read_text_file", { path }),
       persistAgentSessionId: async (agentSessionId) => {
         await updateAgentSessionId(context.requireDb(), sessionId, agentSessionId);
       },
