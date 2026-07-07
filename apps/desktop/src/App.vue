@@ -71,6 +71,10 @@ const {
   advanceSelectedRemoteWorkspaceTask,
   disposeDesktopCloudWorkspace,
 } = useAppCloudWorkspace({ db, store, toast });
+if (import.meta.env.DEV) {
+  void cloudSnapshot;
+  void lanSnapshot;
+}
 
 defineExpose({
   cloudSnapshot,
