@@ -1,30 +1,45 @@
 use super::diff_to_patch;
 use git2::Repository;
 
+fn diff_options(context_lines: Option<u32>) -> git2::DiffOptions {
+    let mut opts = git2::DiffOptions::new();
+    if let Some(context_lines) = context_lines {
+        opts.context_lines(context_lines);
+    }
+    opts
+}
+
+fn workdir_diff_options(context_lines: Option<u32>) -> git2::DiffOptions {
+    let mut opts = diff_options(context_lines);
+    opts.include_untracked(true)
+        .recurse_untracked_dirs(true)
+        .show_untracked_content(true);
+    opts
+}
+
 #[tauri::command]
-pub fn git_diff(repo_path: String, mode: String) -> Result<String, String> {
+pub fn git_diff(
+    repo_path: String,
+    mode: String,
+    context_lines: Option<u32>,
+) -> Result<String, String> {
     let repo = Repository::open(&repo_path).map_err(|e| e.to_string())?;
 
     let diff = match mode.as_str() {
         "staged" => {
             let head = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
-            repo.diff_tree_to_index(head.as_ref(), None, None)
+            let mut opts = diff_options(context_lines);
+            repo.diff_tree_to_index(head.as_ref(), None, Some(&mut opts))
                 .map_err(|e| e.to_string())?
         }
         "all" => {
             let head = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
-            let mut opts = git2::DiffOptions::new();
-            opts.include_untracked(true)
-                .recurse_untracked_dirs(true)
-                .show_untracked_content(true);
+            let mut opts = workdir_diff_options(context_lines);
             repo.diff_tree_to_workdir_with_index(head.as_ref(), Some(&mut opts))
                 .map_err(|e| e.to_string())?
         }
         _ => {
-            let mut opts = git2::DiffOptions::new();
-            opts.include_untracked(true)
-                .recurse_untracked_dirs(true)
-                .show_untracked_content(true);
+            let mut opts = workdir_diff_options(context_lines);
             repo.diff_index_to_workdir(None, Some(&mut opts))
                 .map_err(|e| e.to_string())?
         }
@@ -63,6 +78,7 @@ pub fn git_diff_branch_range(
     repo_path: String,
     from: String,
     mode: String,
+    context_lines: Option<u32>,
 ) -> Result<String, String> {
     let repo = Repository::open(&repo_path).map_err(|e| e.to_string())?;
 
@@ -81,19 +97,18 @@ pub fn git_diff_branch_range(
             let head_tree = head_obj
                 .peel_to_tree()
                 .map_err(|e| format!("can't peel 'HEAD' to tree: {}", e))?;
-            repo.diff_tree_to_tree(Some(&from_tree), Some(&head_tree), None)
+            let mut opts = diff_options(context_lines);
+            repo.diff_tree_to_tree(Some(&from_tree), Some(&head_tree), Some(&mut opts))
                 .map_err(|e| e.to_string())?
         }
         "staged" => {
             let index = repo.index().map_err(|e| e.to_string())?;
-            repo.diff_tree_to_index(Some(&from_tree), Some(&index), None)
+            let mut opts = diff_options(context_lines);
+            repo.diff_tree_to_index(Some(&from_tree), Some(&index), Some(&mut opts))
                 .map_err(|e| e.to_string())?
         }
         "all" => {
-            let mut opts = git2::DiffOptions::new();
-            opts.include_untracked(true)
-                .recurse_untracked_dirs(true)
-                .show_untracked_content(true);
+            let mut opts = workdir_diff_options(context_lines);
             repo.diff_tree_to_workdir_with_index(Some(&from_tree), Some(&mut opts))
                 .map_err(|e| e.to_string())?
         }
@@ -210,6 +225,7 @@ mod tests {
             temp_repo.path.to_string_lossy().into_owned(),
             base_commit.to_string(),
             "none".to_string(),
+            None,
         )
         .expect("branch diff should succeed");
 
@@ -227,6 +243,7 @@ mod tests {
             temp_repo.path.to_string_lossy().into_owned(),
             base_commit.to_string(),
             "staged".to_string(),
+            None,
         )
         .expect("branch diff should succeed");
 
@@ -244,6 +261,7 @@ mod tests {
             temp_repo.path.to_string_lossy().into_owned(),
             base_commit.to_string(),
             "all".to_string(),
+            None,
         )
         .expect("branch diff should succeed");
 
@@ -254,6 +272,47 @@ mod tests {
     }
 
     #[test]
+    fn git_diff_branch_range_can_include_all_unchanged_context_lines() {
+        let temp_repo = TempRepo::new("branch-diff-full-context");
+        let repo = Repository::init(&temp_repo.path).expect("repo should initialize");
+        create_commit(&repo, &temp_repo.path);
+
+        fs::write(
+            temp_repo.path.join("context.txt"),
+            "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\nline 9\nline 10\nline 11\nline 12\nline 13\nline 14\nline 15\n",
+        )
+        .expect("context fixture should be written");
+        let base_commit = commit_paths(&repo, &["context.txt"], "add context fixture");
+
+        fs::write(
+            temp_repo.path.join("context.txt"),
+            "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nchanged 8\nline 9\nline 10\nline 11\nline 12\nline 13\nline 14\nline 15\n",
+        )
+        .expect("context fixture should be updated");
+        commit_paths(&repo, &["context.txt"], "change middle line");
+
+        let compact_patch = git_diff_branch_range(
+            temp_repo.path.to_string_lossy().into_owned(),
+            base_commit.to_string(),
+            "none".to_string(),
+            None,
+        )
+        .expect("compact branch diff should succeed");
+        let full_patch = git_diff_branch_range(
+            temp_repo.path.to_string_lossy().into_owned(),
+            base_commit.to_string(),
+            "none".to_string(),
+            Some(u32::MAX),
+        )
+        .expect("full-context branch diff should succeed");
+
+        assert!(!compact_patch.contains(" line 1\n"));
+        assert!(!compact_patch.contains(" line 15\n"));
+        assert!(full_patch.contains(" line 1\n"));
+        assert!(full_patch.contains(" line 15\n"));
+    }
+
+    #[test]
     fn git_diff_branch_range_rejects_invalid_mode() {
         let (temp_repo, base_commit) = create_branch_diff_fixture("branch-diff-invalid");
 
@@ -261,6 +320,7 @@ mod tests {
             temp_repo.path.to_string_lossy().into_owned(),
             base_commit.to_string(),
             "workspace".to_string(),
+            None,
         )
         .expect_err("invalid branch diff mode should fail");
 

@@ -197,6 +197,50 @@ describe("DiffView", () => {
     wrapper.unmount();
   });
 
+  it("can reload the working diff with all unchanged lines", async () => {
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "git_diff") return "diff --git a/example.txt b/example.txt";
+      return "";
+    });
+
+    const wrapper = mount(DiffView, {
+      props: {
+        repoPath: "/repo",
+        initialScope: "working",
+      },
+      attachTo: document.body,
+      global: {
+        mocks: {
+          $t: (key: string) => key,
+        },
+      },
+    });
+
+    await flushPromises();
+    await flushPromises();
+
+    expect(invokeMock).toHaveBeenCalledWith("git_diff", {
+      repoPath: "/repo",
+      mode: "all",
+    });
+
+    const contextButton = wrapper.get(".context-toggle");
+    expect(contextButton.text()).toBe("Context");
+
+    await contextButton.trigger("click");
+    await flushPromises();
+    await flushPromises();
+
+    expect(invokeMock).toHaveBeenLastCalledWith("git_diff", {
+      repoPath: "/repo",
+      mode: "all",
+      contextLines: 4294967295,
+    });
+    expect(contextButton.text()).toBe("All lines");
+
+    wrapper.unmount();
+  });
+
   it("forces Bazel diffs to use python highlighting", async () => {
     diffMocks.parsePatchFilesMock.mockReturnValueOnce([
       {

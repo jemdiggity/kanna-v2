@@ -5,12 +5,15 @@ defineProps<{
   scope: DiffScope;
   workingFilterLabel: string;
   branchIncludeLabel: string;
+  contextLabel: string;
+  allLines: boolean;
 }>();
 
 defineEmits<{
   (e: "set-scope", scope: DiffScope): void;
   (e: "cycle-working-filter"): void;
   (e: "cycle-branch-include"): void;
+  (e: "toggle-context-lines"): void;
 }>();
 </script>
 
@@ -30,6 +33,11 @@ defineEmits<{
       class="branch-include-toggle staged-toggle"
       @click="$emit('cycle-branch-include')"
     >{{ branchIncludeLabel }}</button>
+    <button
+      class="context-toggle"
+      :class="{ active: allLines }"
+      @click="$emit('toggle-context-lines')"
+    >{{ contextLabel }}</button>
   </div>
 </template>
 
@@ -76,5 +84,22 @@ defineEmits<{
   font-size: 11px;
   border-radius: 4px;
   cursor: pointer;
+}
+
+.context-toggle {
+  margin-left: 8px;
+  padding: 3px 10px;
+  background: var(--kn-bg-panel-raised);
+  border: 1px solid var(--kn-border-strong);
+  color: var(--kn-text-muted);
+  font-size: 11px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.context-toggle.active {
+  background: var(--kn-accent);
+  border-color: var(--kn-accent-hover);
+  color: var(--kn-text-inverse);
 }
 </style>
