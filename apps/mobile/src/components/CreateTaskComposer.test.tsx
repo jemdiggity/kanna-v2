@@ -164,7 +164,7 @@ describe("CreateTaskComposer", () => {
     const optionsToggle = findNodeByTestId(tree, "mobile.create-task.options-toggle");
 
     expect(findNodeByText(tree, "Repo One")).not.toBeNull();
-    expect(findNodeByText(tree, "Studio Mac · Claude")).not.toBeNull();
+    expect(findNodeByText(tree, "Studio Mac (online) · Claude")).not.toBeNull();
     expect(findNodeByText(tree, "Copilot")).toBeNull();
 
     (optionsToggle?.props?.onPress as (() => void) | undefined)?.();
@@ -180,13 +180,15 @@ describe("CreateTaskComposer", () => {
       onSelectDesktop,
       onSelectAgentProvider
     });
-    const laptopOption = findNodeByText(tree, "Laptop");
+    const laptopOption = findNodeByTestId(tree, "mobile.create-task.machine.desktop-2");
     const copilotOption = findNodeByText(tree, "Copilot");
 
     expect(findNodeByText(tree, "Studio Mac")).not.toBeNull();
+    expect(findNodeByText(tree, "Online")).not.toBeNull();
     expect(findNodeByText(tree, "Claude")).not.toBeNull();
     expect(findNodeByText(tree, "Codex")).not.toBeNull();
-    expect(laptopOption).not.toBeNull();
+    expect(findNodeByText(tree, "Laptop")).not.toBeNull();
+    expect(findNodeByText(tree, "Offline")).not.toBeNull();
     expect(copilotOption).not.toBeNull();
 
     (laptopOption?.props?.onPress as (() => void) | undefined)?.();
@@ -235,5 +237,22 @@ describe("CreateTaskComposer", () => {
     expect(findNodeByText(tree, "Choose machine · Claude")).not.toBeNull();
     expect(findNodeByText(tree, "Choose a machine before creating.")).not.toBeNull();
     expect(createButton?.props?.disabled).toBe(true);
+  });
+
+  it("treats a selected machine id that is not in the desktop list as missing", () => {
+    const onSubmit = vi.fn();
+    const tree = renderComposer({
+      selectedDesktopId: "desktop-stale",
+      isOptionsExpanded: true,
+      onSubmit
+    });
+    const createButton = findNodeByText(tree, "Create");
+
+    (createButton?.props?.onPress as (() => void) | undefined)?.();
+
+    expect(findNodeByText(tree, "Choose machine · Claude")).not.toBeNull();
+    expect(findNodeByText(tree, "Choose a machine before creating.")).not.toBeNull();
+    expect(createButton?.props?.disabled).toBe(true);
+    expect(onSubmit).not.toHaveBeenCalled();
   });
 });
