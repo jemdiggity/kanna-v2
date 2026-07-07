@@ -1,4 +1,4 @@
-import { chmod, mkdir, writeFile } from "node:fs/promises";
+import { chmod, mkdir, realpath, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -157,7 +157,7 @@ describe("Phase 2 server-owned task writes", () => {
     await client.createSession();
     await resetDatabase(client);
     fixtureRepoRoot = await createFixtureRepo("phase2-server-writes-test");
-    testRepoPath = fixtureRepoRoot;
+    testRepoPath = await realpath(fixtureRepoRoot);
 
     const kannaDir = join(testRepoPath, ".kanna");
     await mkdir(join(kannaDir, "pipelines"), { recursive: true });

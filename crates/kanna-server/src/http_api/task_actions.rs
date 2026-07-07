@@ -9,12 +9,6 @@ use axum::Json;
 use kanna_agent_protocol::StateChangeScope;
 use std::sync::Arc;
 
-#[derive(Debug, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct SetTaskAgentSessionIdRequest {
-    agent_session_id: Option<String>,
-}
-
 fn stage_action_error_status(error: &str) -> axum::http::StatusCode {
     if error.starts_with("task is blocked:") {
         axum::http::StatusCode::CONFLICT
@@ -453,63 +447,6 @@ pub(super) async fn reopen_task(
     })?;
     let task_id = crate::task_creator::reopen_task_for_api(&db, &task_id)
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    state.publish_state_changed(StateChangeScope::Tasks);
-    Ok(Json(crate::mobile_api::TaskActionResponse {
-        task_id,
-        follow_task: None,
-    }))
-}
-
-pub(super) async fn mark_task_read(
-    State(state): State<Arc<AppState>>,
-    axum::extract::Path(task_id): axum::extract::Path<String>,
-) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
-    let db = Db::open(&state.config.db_path).map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("db error: {}", e),
-        )
-    })?;
-    let task_id = db
-        .resolve_pipeline_item_id(&task_id)
-        .map_err(|e| db_write_error("db error", e))?
-        .ok_or_else(|| {
-            (
-                axum::http::StatusCode::NOT_FOUND,
-                format!("task not found: {task_id}"),
-            )
-        })?;
-    db.update_pipeline_item_activity(&task_id, "idle")
-        .map_err(|e| db_write_error("db error", e))?;
-    state.publish_state_changed(StateChangeScope::Tasks);
-    Ok(Json(crate::mobile_api::TaskActionResponse {
-        task_id,
-        follow_task: None,
-    }))
-}
-
-pub(super) async fn set_task_agent_session_id(
-    State(state): State<Arc<AppState>>,
-    axum::extract::Path(task_id): axum::extract::Path<String>,
-    Json(payload): Json<SetTaskAgentSessionIdRequest>,
-) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
-    let db = Db::open(&state.config.db_path).map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("db error: {}", e),
-        )
-    })?;
-    let task_id = db
-        .resolve_pipeline_item_id(&task_id)
-        .map_err(|e| db_write_error("db error", e))?
-        .ok_or_else(|| {
-            (
-                axum::http::StatusCode::NOT_FOUND,
-                format!("task not found: {task_id}"),
-            )
-        })?;
-    db.update_pipeline_item_agent_session_id(&task_id, payload.agent_session_id.as_deref())
-        .map_err(|e| db_write_error("db error", e))?;
     state.publish_state_changed(StateChangeScope::Tasks);
     Ok(Json(crate::mobile_api::TaskActionResponse {
         task_id,
