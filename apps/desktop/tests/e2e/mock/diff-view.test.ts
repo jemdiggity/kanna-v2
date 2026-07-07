@@ -93,6 +93,23 @@ async function clickDiffToolbarButton(client: WebDriverClient, label: string): P
   }
 }
 
+async function getContextToggleState(
+  client: WebDriverClient,
+): Promise<{ text: string; active: boolean }> {
+  const state = await client.executeSync<{ text: string; active: boolean } | null>(
+    `const button = document.querySelector(".diff-toolbar .context-toggle");
+     if (!(button instanceof HTMLButtonElement)) return null;
+     return {
+       text: (button.textContent || "").trim(),
+       active: button.classList.contains("active"),
+     };`
+  );
+  if (!state) {
+    throw new Error("diff context toggle not found");
+  }
+  return state;
+}
+
 async function setDiffScope(client: WebDriverClient, scope: "Working" | "Branch"): Promise<void> {
   const active = await client.executeSync<boolean>(
     `const scope = ${JSON.stringify(scope)};
@@ -239,6 +256,34 @@ describe("diff view", () => {
     await resetDatabase(client);
     fixtureRepoRoot = await createFixtureRepo("diff-test");
     testRepoPath = fixtureRepoRoot;
+
+    await tauriInvoke(client, "run_script", {
+      script: [
+        "cat > e2e-all-lines-context.txt <<'EOF'",
+        "all-lines hidden top marker",
+        "all-lines context 02",
+        "all-lines context 03",
+        "all-lines context 04",
+        "all-lines context 05",
+        "all-lines context 06",
+        "all-lines context 07",
+        "all-lines original center marker",
+        "all-lines context 09",
+        "all-lines context 10",
+        "all-lines context 11",
+        "all-lines context 12",
+        "all-lines context 13",
+        "all-lines context 14",
+        "all-lines hidden bottom marker",
+        "EOF",
+        "git add e2e-all-lines-context.txt",
+        "git commit -m 'add e2e all-lines context fixture'",
+        "git push origin main",
+      ].join("\n"),
+      cwd: testRepoPath,
+      env: {},
+    });
+
     await importTestRepo(client, testRepoPath, "diff-test");
 
     // Create a task with worktree but no Claude session (Agent mode, will fail gracefully)
@@ -325,6 +370,126 @@ describe("diff view", () => {
     });
     expect(typeof patch).toBe("string");
     expect(String(patch)).toContain("# diff test marker");
+  });
+
+  it("expands Working diff hidden context lines from the toolbar", async () => {
+    const worktreePath = await getSelectedWorktreePath(client, testRepoPath);
+
+    await tauriInvoke(client, "run_script", {
+      script: [
+        "cat > e2e-all-lines-context.txt <<'EOF'",
+        "all-lines hidden top marker",
+        "all-lines context 02",
+        "all-lines context 03",
+        "all-lines context 04",
+        "all-lines context 05",
+        "all-lines context 06",
+        "all-lines context 07",
+        "working all-lines changed center marker",
+        "all-lines context 09",
+        "all-lines context 10",
+        "all-lines context 11",
+        "all-lines context 12",
+        "all-lines context 13",
+        "all-lines context 14",
+        "all-lines hidden bottom marker",
+        "EOF",
+      ].join("\n"),
+      cwd: worktreePath,
+      env: {},
+    });
+
+    await openDiffModal(client);
+    await setDiffScope(client, "Working");
+
+    const compactState = await getContextToggleState(client);
+    expect(compactState).toEqual({ text: "Context", active: false });
+
+    const compactText = await waitForDiffText(
+      client,
+      `return text.includes("working all-lines changed center marker")
+        && !text.includes("all-lines hidden top marker")
+        && !text.includes("all-lines hidden bottom marker");`,
+    );
+    expect(compactText).toContain("working all-lines changed center marker");
+    expect(compactText).not.toContain("all-lines hidden top marker");
+    expect(compactText).not.toContain("all-lines hidden bottom marker");
+
+    await clickDiffToolbarButton(client, "Context");
+
+    const allLinesText = await waitForDiffText(
+      client,
+      `return text.includes("working all-lines changed center marker")
+        && text.includes("all-lines hidden top marker")
+        && text.includes("all-lines hidden bottom marker");`,
+    );
+    expect(allLinesText).toContain("working all-lines changed center marker");
+    expect(allLinesText).toContain("all-lines hidden top marker");
+    expect(allLinesText).toContain("all-lines hidden bottom marker");
+
+    const allLinesState = await getContextToggleState(client);
+    expect(allLinesState).toEqual({ text: "All lines", active: true });
+  });
+
+  it("expands Branch diff hidden context lines with the keyboard shortcut", async () => {
+    const worktreePath = await getSelectedWorktreePath(client, testRepoPath);
+
+    await tauriInvoke(client, "run_script", {
+      script: [
+        "cat > e2e-all-lines-context.txt <<'EOF'",
+        "all-lines hidden top marker",
+        "all-lines context 02",
+        "all-lines context 03",
+        "all-lines context 04",
+        "all-lines context 05",
+        "all-lines context 06",
+        "all-lines context 07",
+        "branch all-lines changed center marker",
+        "all-lines context 09",
+        "all-lines context 10",
+        "all-lines context 11",
+        "all-lines context 12",
+        "all-lines context 13",
+        "all-lines context 14",
+        "all-lines hidden bottom marker",
+        "EOF",
+        "git add e2e-all-lines-context.txt",
+        "git commit -m 'e2e branch all-lines context change'",
+      ].join("\n"),
+      cwd: worktreePath,
+      env: {},
+    });
+
+    await openDiffModal(client);
+    await setDiffScope(client, "Branch");
+
+    const compactState = await getContextToggleState(client);
+    expect(compactState).toEqual({ text: "Context", active: false });
+
+    const compactText = await waitForDiffText(
+      client,
+      `return text.includes("branch all-lines changed center marker")
+        && !text.includes("all-lines hidden top marker")
+        && !text.includes("all-lines hidden bottom marker");`,
+    );
+    expect(compactText).toContain("branch all-lines changed center marker");
+    expect(compactText).not.toContain("all-lines hidden top marker");
+    expect(compactText).not.toContain("all-lines hidden bottom marker");
+
+    await client.executeSync(buildGlobalKeydownScript({ key: "a" }));
+
+    const allLinesText = await waitForDiffText(
+      client,
+      `return text.includes("branch all-lines changed center marker")
+        && text.includes("all-lines hidden top marker")
+        && text.includes("all-lines hidden bottom marker");`,
+    );
+    expect(allLinesText).toContain("branch all-lines changed center marker");
+    expect(allLinesText).toContain("all-lines hidden top marker");
+    expect(allLinesText).toContain("all-lines hidden bottom marker");
+
+    const allLinesState = await getContextToggleState(client);
+    expect(allLinesState).toEqual({ text: "All lines", active: true });
   });
 
   it("skips an oversized diff line while rendering a normal changed file", async () => {
