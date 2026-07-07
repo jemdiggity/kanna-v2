@@ -1,11 +1,16 @@
 import { spawnSync } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { checkRequiredCommands } from "../src/runtime/doctor";
 import { findWorkspaceDesktopDevProcesses, killWorkspaceDesktopDevProcesses } from "../src/runtime/daemon";
 import { buildMobileDeviceSmokeCommand, buildMobileTestCommand } from "../src/runtime/mobile-commands";
+import {
+  buildProductionMobileQaCommands,
+  executeProductionMobileQa,
+  validateProductionMobileConfig
+} from "../src/runtime/mobile-qa";
 import { getPortStatuses } from "../src/runtime/port-status";
 import { respawnTmuxWindow, startTmuxSession, stopTmuxWindow } from "../src/runtime/tmux";
 import { nodeCommandRunner, type CommandRunner } from "../src/runtime/process";
@@ -60,6 +65,137 @@ describe("command runtime helpers", () => {
       command: "pnpm",
       args: ["--dir", "/repo/apps/mobile", "run", "test:e2e:device:smoke"]
     });
+  });
+
+  it("builds the automated production mobile QA command sequence", () => {
+    expect(buildProductionMobileQaCommands("/repo")).toEqual([
+      {
+        name: "typecheck",
+        command: "pnpm",
+        args: ["--dir", "/repo/apps/mobile", "run", "typecheck"]
+      },
+      {
+        name: "unit",
+        command: "pnpm",
+        args: ["--dir", "/repo/apps/mobile", "run", "test"]
+      },
+      {
+        name: "simulator-preflight",
+        command: "pnpm",
+        args: ["--dir", "/repo/apps/mobile", "run", "test:e2e:preflight"]
+      },
+      {
+        name: "simulator-smoke",
+        command: "pnpm",
+        args: ["--dir", "/repo/apps/mobile", "run", "test:e2e:smoke"]
+      }
+    ]);
+  });
+
+  it("validates production mobile config against kd production identity", () => {
+    const checks = validateProductionMobileConfig({
+      prod: {
+        runtimeVersion: "1.0.0",
+        name: "prod",
+        displayName: "Kanna",
+        scheme: "kanna",
+        iosBundleId: "build.kanna.app",
+        iosGoogleServicesFile: "./firebase/GoogleService-Info.production.plist",
+        firebase: {
+          apiKey: "real-key",
+          authDomain: "kanna-build.firebaseapp.com",
+          projectId: "kanna-build",
+          storageBucket: "kanna-build.firebasestorage.app",
+          messagingSenderId: "402613185450",
+          appId: "1:402613185450:ios:adcedeadcd241285d859d3"
+        },
+        relayUrl: "wss://relay.kanna.build",
+        otaChannel: "production"
+      }
+    });
+
+    expect(checks.every((check) => check.ok)).toBe(true);
+  });
+
+  it("reports production mobile config drift", () => {
+    const checks = validateProductionMobileConfig({
+      prod: {
+        runtimeVersion: "",
+        name: "prod",
+        displayName: "Kanna Dev",
+        scheme: "kanna-dev",
+        iosBundleId: "build.kanna.app.dev",
+        iosGoogleServicesFile: "./firebase/GoogleService-Info.staging.plist",
+        firebase: {
+          apiKey: "kanna-local",
+          projectId: "kanna-local",
+          appId: ""
+        },
+        relayUrl: "ws://127.0.0.1:9080",
+        otaChannel: "staging"
+      }
+    });
+
+    expect(checks.filter((check) => !check.ok).map((check) => check.name)).toEqual([
+      "displayName",
+      "scheme",
+      "iosBundleId",
+      "iosGoogleServicesFile",
+      "runtimeVersion",
+      "firebase.projectId",
+      "firebase.storageBucket",
+      "firebase.apiKey",
+      "firebase.appId",
+      "relayUrl",
+      "otaChannel"
+    ]);
+  });
+
+  it("runs production mobile QA commands with production E2E environment defaults", async () => {
+    const repoRoot = await mkdtemp(join(tmpdir(), "mobile-qa-"));
+    await mkdir(join(repoRoot, "apps/mobile/src"), { recursive: true });
+    await writeFile(
+      join(repoRoot, "apps/mobile/src/mobileEnvironments.json"),
+      JSON.stringify({
+        prod: {
+          runtimeVersion: "1.0.0",
+          name: "prod",
+          displayName: "Kanna",
+          scheme: "kanna",
+          iosBundleId: "build.kanna.app",
+          iosGoogleServicesFile: "./firebase/GoogleService-Info.production.plist",
+          firebase: {
+            apiKey: "real-key",
+            projectId: "kanna-build",
+            storageBucket: "kanna-build.firebasestorage.app",
+            appId: "1:402613185450:ios:adcedeadcd241285d859d3"
+          },
+          relayUrl: "wss://relay.kanna.build",
+          otaChannel: "production"
+        }
+      })
+    );
+    const envs: Array<NodeJS.ProcessEnv | undefined> = [];
+    const runner: CommandRunner = {
+      async run(_command, _args, options) {
+        envs.push(options?.env);
+        return { exitCode: 0, stdout: "ok", stderr: "" };
+      }
+    };
+
+    try {
+      const result = await executeProductionMobileQa({
+        repoRoot,
+        env: { KANNA_APPIUM_PORT: "4723", KANNA_MOBILE_PORT: "8081" },
+        runner
+      });
+
+      expect(result.commands).toHaveLength(4);
+      expect(envs.every((env) => env?.KANNA_APP_ENV === "prod")).toBe(true);
+      expect(envs.every((env) => env?.KANNA_E2E_DESKTOP_SERVER_URL === "http://127.0.0.1:48120")).toBe(true);
+    } finally {
+      await rm(repoRoot, { recursive: true, force: true });
+    }
   });
 
   it("reports required command availability for doctor", async () => {
