@@ -15,8 +15,10 @@ Do not push a branch or create a pull request unless this stage's prompt explici
 
 This stage advances manually: the user reviews your work and advances the pipeline themselves, and recording a result does not move the task forward. When the implementation is complete, finish by summarizing what changed and stop — do not record stage completion. Committing and the later pipeline stages happen after the user advances the task.
 
-If you cannot complete the task, record failure with the reason instead of stopping silently. Prefer the `kanna_complete_stage` MCP tool; use the `kanna-cli` fallback only when MCP tools are unavailable:
+If you cannot complete the task, record failure with the reason instead of stopping silently — call the `kanna_complete_stage` MCP tool (`task_id` is the value of the `KANNA_TASK_ID` env var):
 
-```bash
-kanna-cli stage-complete --task-id "$KANNA_TASK_ID" --status failure --summary "<what is blocking>"
 ```
+kanna_complete_stage {"task_id": "$KANNA_TASK_ID", "status": "failure", "summary": "<what is blocking>"}
+```
+
+Only if MCP tools are unavailable, fall back to the CLI: `kanna-cli stage-complete --task-id "$KANNA_TASK_ID" --status failure --summary "<what is blocking>"`.

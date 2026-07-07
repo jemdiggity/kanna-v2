@@ -195,6 +195,9 @@ describe("buildKannaRuntimeSystemPrompt", () => {
 
     expect(result).toContain("This stage's transition is `manual`");
     expect(result).not.toContain("record completion so Kanna can advance the pipeline");
+    expect(result).toContain(
+      'kanna_complete_stage {"task_id": "$KANNA_TASK_ID", "status": "failure"'
+    );
   });
 
   it("instructs auto-transition stages to record completion so Kanna advances the pipeline", () => {
@@ -207,6 +210,9 @@ describe("buildKannaRuntimeSystemPrompt", () => {
 
     expect(result).toContain("This stage's transition is `auto`");
     expect(result).toContain("record completion so Kanna can advance the pipeline");
+    expect(result).toContain(
+      'kanna_complete_stage {"task_id": "$KANNA_TASK_ID", "status": "success"'
+    );
     expect(result).toContain('--status success --summary "..."');
     expect(result).not.toContain("{{COMPLETION}}");
   });

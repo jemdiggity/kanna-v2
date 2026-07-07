@@ -1,5 +1,33 @@
 use super::*;
 
+#[test]
+fn revision_resume_message_follows_target_stage_transition() {
+    let manual = build_revision_resume_message(
+        "Original prompt",
+        "Add coverage.",
+        "task-1",
+        PipelineStageTransition::Manual,
+    );
+    assert!(manual.contains("do not record stage completion"));
+    assert!(
+        manual.contains("kanna_complete_stage {\"task_id\": \"task-1\", \"status\": \"failure\"")
+    );
+    assert!(manual.contains("--status failure"));
+    assert!(!manual.contains("--status success"));
+    assert!(!manual.contains("Kanna will then advance"));
+
+    let auto = build_revision_resume_message(
+        "Original prompt",
+        "Add coverage.",
+        "task-1",
+        PipelineStageTransition::Auto,
+    );
+    assert!(auto.contains("record stage completion"));
+    assert!(auto.contains("kanna_complete_stage {\"task_id\": \"task-1\", \"status\": \"success\""));
+    assert!(auto.contains("--status success"));
+    assert!(auto.contains("Kanna will then advance this task's pipeline."));
+}
+
 #[tokio::test]
 async fn prepared_revision_agent_task_spawn_sends_task_specific_kanna_context() {
     let repo_root = std::env::temp_dir().join(format!(
@@ -556,7 +584,12 @@ async fn request_revision_resumes_previous_stage_run_session_in_its_worktree() {
             assert!(command_line.contains("Original task:\nOriginal implementation prompt"));
             assert!(command_line
                 .contains("Reviewer feedback:\nAdd e2e coverage for the revision loop."));
+            // The target stage is manual, so the resume message must not ask
+            // for a success verdict (which would not advance anything) —
+            // only the failure fallback.
+            assert!(command_line.contains("do not record stage completion"));
             assert!(command_line.contains("kanna_complete_stage"));
+            assert!(!command_line.contains("--status success"));
         }
         other => panic!("expected PTY spawn command, got {:?}", other),
     }

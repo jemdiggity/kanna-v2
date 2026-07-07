@@ -20,11 +20,20 @@ describe("built-in agent completion protocol", () => {
   it.each(agentNames)("%s records stage completion MCP-first with a CLI fallback", (name) => {
     const agent = readRepoFile(`.kanna/agents/${name}/AGENT.md`);
 
-    expect(agent).toContain("kanna_complete_stage");
+    // The primary example must be the MCP tool call; the CLI form only
+    // appears after it, as the no-MCP fallback.
+    expect(agent).toContain('kanna_complete_stage {"task_id": "$KANNA_TASK_ID"');
+    expect(agent.indexOf("kanna_complete_stage")).toBeLessThan(
+      agent.indexOf("kanna-cli stage-complete")
+    );
     if (manualStageAgents.has(name)) {
       expect(agent).toContain("do not record stage completion");
       expect(agent).not.toContain("--status success");
+      expect(agent).not.toContain('"status": "success"');
     } else {
+      expect(agent).toContain(
+        'kanna_complete_stage {"task_id": "$KANNA_TASK_ID", "status": "success"'
+      );
       expect(agent).toContain(
         'kanna-cli stage-complete --task-id "$KANNA_TASK_ID" --status success'
       );

@@ -46,23 +46,23 @@ If E2E coverage is applicable but not feasible, the branch must explicitly docum
 
 ## Passing Review
 
-If the branch is ready for human PR review with no required changes, record success. Prefer the `kanna_complete_stage` MCP tool; use the `kanna-cli` fallback only when MCP tools are unavailable:
+If the branch is ready for human PR review with no required changes, record success by calling the `kanna_complete_stage` MCP tool (`task_id` is the value of the `KANNA_TASK_ID` env var):
 
-```bash
-kanna-cli stage-complete --task-id "$KANNA_TASK_ID" --status success --summary "QA passed: <brief coverage summary>"
 ```
+kanna_complete_stage {"task_id": "$KANNA_TASK_ID", "status": "success", "summary": "QA passed: <brief coverage summary>"}
+```
+
+Only if MCP tools are unavailable, fall back to the CLI: `kanna-cli stage-complete --task-id "$KANNA_TASK_ID" --status success --summary "QA passed: <brief coverage summary>"`.
 
 ## Requesting Revision
 
-If coverage is missing, too weak, or any branch changes are required, request a revision instead of approving the branch. Prefer the `kanna_request_revision` MCP tool (`task_id`, `target_stage`, `summary`, `prompt`); CLI fallback:
+If coverage is missing, too weak, or any branch changes are required, request a revision instead of approving the branch by calling the `kanna_request_revision` MCP tool (`task_id` is the value of the `KANNA_TASK_ID` env var):
 
-```bash
-kanna-cli task request-revision \
-  --task-id "$KANNA_TASK_ID" \
-  --target-stage "in progress" \
-  --summary "<short reason review failed>" \
-  --prompt "<specific instructions for improving test coverage>"
 ```
+kanna_request_revision {"task_id": "$KANNA_TASK_ID", "target_stage": "in progress", "summary": "<short reason review failed>", "prompt": "<specific instructions for improving test coverage>"}
+```
+
+Only if MCP tools are unavailable, fall back to the CLI: `kanna-cli task request-revision --task-id "$KANNA_TASK_ID" --target-stage "in progress" --summary "<short reason review failed>" --prompt "<specific instructions for improving test coverage>"`.
 
 A revision resumes the implement stage's previous agent session (with its
 context intact) when possible, and Kanna delivers the original task prompt
