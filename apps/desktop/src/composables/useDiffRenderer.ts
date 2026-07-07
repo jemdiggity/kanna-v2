@@ -168,6 +168,42 @@ function shouldSkipDiffFileRender(fileMeta: FileDiffMetadata): boolean {
   return false;
 }
 
+function splitPatchFileSections(patch: string): string[] {
+  const sections: string[] = [];
+  let currentLines: string[] = [];
+
+  for (const line of patch.split("\n")) {
+    if (line.startsWith("diff --git ") && currentLines.length > 0) {
+      sections.push(currentLines.join("\n"));
+      currentLines = [];
+    }
+    currentLines.push(line);
+  }
+
+  if (currentLines.length > 0) {
+    sections.push(currentLines.join("\n"));
+  }
+
+  return sections;
+}
+
+function shouldSkipRawDiffSection(rawSection?: string): boolean {
+  if (!rawSection) return false;
+
+  let totalContentLength = 0;
+  for (const line of rawSection.split("\n")) {
+    if (line.length > MAX_RENDERABLE_DIFF_LINE_LENGTH) {
+      return true;
+    }
+    totalContentLength += line.length;
+    if (totalContentLength > MAX_RENDERABLE_DIFF_FILE_CONTENT_LENGTH) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 function resolveRenderableFileMeta(
   rawFileMeta: FileDiffMetadata & DiffFilePathMetadata,
   displayPath: string,
@@ -356,6 +392,7 @@ export function useDiffRenderer(options: UseDiffRendererOptions) {
       fileCount: allFiles.length,
     });
 
+    const rawFileSections = splitPatchFileSections(normalizedPatch);
     const renderEntries: DiffRenderFileEntry[] = allFiles.map((rawFileMeta, fileIndex) => {
       const typedFileMeta = rawFileMeta as FileDiffMetadata & DiffFilePathMetadata;
       const id = `${context.loadId}:${fileIndex}`;
@@ -365,7 +402,11 @@ export function useDiffRenderer(options: UseDiffRendererOptions) {
         rawFileMeta: typedFileMeta,
         displayPath,
         wrapper: createDiffFileWrapper({ id, displayPath }),
-        skipReason: shouldSkipDiffFileRender(typedFileMeta) ? "oversized" : undefined,
+        skipReason:
+          shouldSkipRawDiffSection(rawFileSections[fileIndex]) ||
+          shouldSkipDiffFileRender(typedFileMeta)
+            ? "oversized"
+            : undefined,
       };
     });
 
