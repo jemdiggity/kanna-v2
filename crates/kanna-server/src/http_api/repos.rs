@@ -59,6 +59,11 @@ pub(super) async fn list_repo_tasks(
             format!("db error: {}", e),
         )
     })?;
+    if crate::mobile_api::record_orphaned_initialized_tasks(&db)
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?
+    {
+        state.publish_state_changed(StateChangeScope::Tasks);
+    }
     let api = MobileApi::new(state.config.clone(), db);
     let tasks = api
         .list_repo_tasks(&repo_id)
