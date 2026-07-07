@@ -3,6 +3,18 @@ use std::io::Read;
 use std::path::Path;
 use std::process::Command;
 
+#[derive(Debug)]
+pub(super) struct MergeConflict {
+    pub(super) branch: String,
+    pub(super) message: String,
+}
+
+#[derive(Debug)]
+pub(super) enum MergeBranchesError {
+    Conflict(MergeConflict),
+    Other(String),
+}
+
 pub(super) fn remove_prepared_worktree(worktree_path: &str, branch: &str) -> Result<(), String> {
     let worktree = Path::new(worktree_path);
     let repo_path = worktree
@@ -236,18 +248,42 @@ pub(super) fn create_worktree(
 pub(super) fn merge_branches_into_worktree(
     worktree_path: &str,
     branches: &[String],
-) -> Result<(), String> {
+) -> Result<(), MergeBranchesError> {
     for branch in branches {
         let output = Command::new("git")
             .args(["merge", "--no-edit", branch])
             .current_dir(worktree_path)
             .output()
-            .map_err(|e| format!("failed to run git merge {branch}: {e}"))?;
+            .map_err(|e| {
+                MergeBranchesError::Other(format!("failed to run git merge {branch}: {e}"))
+            })?;
         if !output.status.success() {
-            return Err(format!(
-                "failed to merge blocker branch {branch}: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ));
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let details = format!("{}{}", stdout, stderr).trim().to_string();
+            let message = format!("failed to merge blocker branch {branch}: {}", details);
+            if details.contains("CONFLICT")
+                || details.contains("Automatic merge failed")
+                || details.contains("fix conflicts")
+            {
+                let abort_output = Command::new("git")
+                    .args(["merge", "--abort"])
+                    .current_dir(worktree_path)
+                    .output();
+                if let Ok(abort_output) = abort_output {
+                    if !abort_output.status.success() {
+                        log::warn!(
+                            "failed to abort conflicted blocker merge for {branch}: {}",
+                            String::from_utf8_lossy(&abort_output.stderr).trim()
+                        );
+                    }
+                }
+                return Err(MergeBranchesError::Conflict(MergeConflict {
+                    branch: branch.clone(),
+                    message,
+                }));
+            }
+            return Err(MergeBranchesError::Other(message));
         }
     }
     Ok(())
