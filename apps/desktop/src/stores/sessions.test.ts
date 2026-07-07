@@ -202,6 +202,42 @@ describe("createSessionsApi", () => {
     expect(prepared.agentCmdPreamble).toContain("Ship it");
   });
 
+  it("builds Codex PTY tasks with the instance-local Kanna MCP config", async () => {
+    mocks.invokeMock.mockImplementation(async (command, args) => {
+      if (command === "read_text_file" && args?.path === "/tmp/kanna-daemon/runtime/mcp/task-1.json") {
+        return JSON.stringify({
+          mcpServers: {
+            "kanna-mcp": {
+              command: "/usr/bin/kanna-mcp",
+              args: ["serve"],
+              env: {
+                KANNA_SERVER_BASE_URL: "http://127.0.0.1:48120",
+              },
+            },
+          },
+        });
+      }
+      return mocks.invokeDefault(command, args);
+    });
+    const sessions = createSessionsApi(makeContext());
+
+    const prepared = await sessions.preparePtySession("task-1", "Ship it", {
+      agentProvider: "codex",
+    });
+
+    expect(prepared.agentCmd).toBe(
+      "codex --yolo -c 'mcp_servers.kanna-mcp.command=\"/usr/bin/kanna-mcp\"' -c 'mcp_servers.kanna-mcp.args=[\"serve\"]' -c 'mcp_servers.kanna-mcp.env.KANNA_SERVER_BASE_URL=\"http://127.0.0.1:48120\"' 'Ship it'",
+    );
+    expect(prepared.agentCmdPreamble).toContain(
+      "Codex is launched with Kanna MCP registration via `-c mcp_servers.kanna-mcp.*` overrides",
+    );
+    expect(prepared.env).toEqual(expect.objectContaining({
+      KANNA_MCP_PATH: "/usr/bin/kanna-mcp",
+      KANNA_MCP_CONFIG: "/tmp/kanna-daemon/runtime/mcp/task-1.json",
+      KANNA_CLI_PATH: "/usr/bin/kanna-cli",
+    }));
+  });
+
   it("builds Claude PTY tasks with the instance-local Kanna MCP config", async () => {
     const sessions = createSessionsApi(makeContext());
 

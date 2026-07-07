@@ -25,9 +25,22 @@ export interface BuildAgentCommandParams {
   maxBudgetUsd?: number;
   resumeSessionId?: string;
   worktreePath?: string;
+  readTextFile?: (path: string) => Promise<string>;
   createSessionId?: () => string;
   persistAgentSessionId?: (agentSessionId: string) => Promise<void>;
   resolveBinaryPath?: (name: string) => Promise<string>;
+}
+
+interface KannaMcpServerConfig {
+  command: string;
+  args?: string[];
+  env?: Record<string, string>;
+}
+
+interface KannaMcpConfig {
+  mcpServers?: {
+    "kanna-mcp"?: KannaMcpServerConfig;
+  };
 }
 
 export async function buildAgentCommand(
@@ -80,8 +93,9 @@ async function buildCopilotCommand(params: BuildAgentCommandParams): Promise<Age
   };
 }
 
-function buildCodexCommand(params: BuildAgentCommandParams): AgentCommandResult {
+async function buildCodexCommand(params: BuildAgentCommandParams): Promise<AgentCommandResult> {
   const codexFlags: string[] = [...params.permissionFlags];
+  codexFlags.push(...await buildCodexMcpConfigFlags(params));
   if (params.model) codexFlags.push(`-m ${params.model}`);
   const flags = codexFlags.join(" ");
   if (params.resumeSessionId) {
@@ -104,6 +118,33 @@ function buildCodexCommand(params: BuildAgentCommandParams): AgentCommandResult 
       ? `codex ${flags} ${shellSingleQuote(params.runtimeUserPrompt)}`
       : undefined,
   };
+}
+
+async function buildCodexMcpConfigFlags(params: BuildAgentCommandParams): Promise<string[]> {
+  if (!params.mcpConfigPath || !params.readTextFile) return [];
+
+  try {
+    const content = await params.readTextFile(params.mcpConfigPath);
+    const config = JSON.parse(content) as KannaMcpConfig;
+    const server = config.mcpServers?.["kanna-mcp"];
+    if (!server?.command) return [];
+
+    const flags = [
+      codexConfigFlag("mcp_servers.kanna-mcp.command", JSON.stringify(server.command)),
+      codexConfigFlag("mcp_servers.kanna-mcp.args", JSON.stringify(server.args ?? [])),
+    ];
+    for (const [key, value] of Object.entries(server.env ?? {}).sort(([a], [b]) => a.localeCompare(b))) {
+      flags.push(codexConfigFlag(`mcp_servers.kanna-mcp.env.${key}`, JSON.stringify(value)));
+    }
+    return flags;
+  } catch (error) {
+    console.warn("[store] failed to read Kanna MCP config for Codex:", error);
+    return [];
+  }
+}
+
+function codexConfigFlag(key: string, value: string): string {
+  return `-c ${shellSingleQuote(`${key}=${value}`)}`;
 }
 
 async function buildOpenCodeCommand(params: BuildAgentCommandParams): Promise<AgentCommandResult> {
