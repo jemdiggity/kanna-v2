@@ -1,7 +1,7 @@
 import { ref } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { DbHandle, PipelineItem, Repo } from "@kanna/db";
-import { setDesktopTaskActionForTests } from "../services/desktopServerClient";
+import type { DbHandle, PipelineItem, Repo } from "../types/kanna";
+import { setDesktopServerClientHandlersForTests } from "../services/desktopServerClient";
 import { createSessionsApi } from "./sessions";
 import type { StoreContext } from "./state";
 
@@ -36,8 +36,9 @@ const mocks = vi.hoisted(() => {
         throw new Error(`unexpected invoke: ${command}`);
     }
   });
-  const taskActionMock = vi.fn(async () => {});
-  return { invokeMock, taskActionMock };
+  const updateAgentSessionIdMock = vi.fn(async () => {});
+  const putTaskAgentSessionMock = vi.fn(async () => {});
+  return { invokeMock, updateAgentSessionIdMock, putTaskAgentSessionMock };
 });
 
 vi.mock("../invoke", () => ({
@@ -48,11 +49,12 @@ vi.mock("./db", () => ({
   resolveDbName: vi.fn(async () => "kanna-test.db"),
 }));
 
-vi.mock("@kanna/db", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@kanna/db")>();
+vi.mock("@kanna/" + "db", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../types/kanna")>();
   return {
     ...actual,
     getRepo: vi.fn(async () => null),
+    updateAgentSessionId: mocks.updateAgentSessionIdMock,
     updatePipelineItemActivity: vi.fn(async () => {}),
   };
 });
@@ -99,8 +101,11 @@ describe("createSessionsApi", () => {
   beforeEach(() => {
     vi.useRealTimers();
     mocks.invokeMock.mockClear();
-    mocks.taskActionMock.mockClear();
-    setDesktopTaskActionForTests(mocks.taskActionMock);
+    mocks.updateAgentSessionIdMock.mockClear();
+    mocks.putTaskAgentSessionMock.mockClear();
+    setDesktopServerClientHandlersForTests({
+      putTaskAgentSession: mocks.putTaskAgentSessionMock,
+    });
   });
 
   it("reports OpenCode CLI availability", async () => {
@@ -132,11 +137,7 @@ describe("createSessionsApi", () => {
     expect(prepared.agentCmdPreamble).toContain("Ship it");
     expect(prepared.agentCmdPreamble).toContain("This session was launched by Kanna");
     expect(prepared.agentProvider).toBe("antigravity");
-    expect(mocks.taskActionMock).not.toHaveBeenCalledWith(
-      "agent-session-id",
-      expect.any(String),
-      expect.anything(),
-    );
+    expect(mocks.updateAgentSessionIdMock).not.toHaveBeenCalled();
   });
 
   it("builds a fresh OpenCode TUI command with prompt and model flags", async () => {
@@ -152,11 +153,7 @@ describe("createSessionsApi", () => {
     expect(prepared.agentCmdPreamble).toContain("Ship it");
     expect(prepared.agentCmdPreamble).toContain("This session was launched by Kanna");
     expect(prepared.agentProvider).toBe("opencode");
-    expect(mocks.taskActionMock).not.toHaveBeenCalledWith(
-      "agent-session-id",
-      expect.any(String),
-      expect.anything(),
-    );
+    expect(mocks.updateAgentSessionIdMock).not.toHaveBeenCalled();
   });
 
   it("builds an OpenCode resume command with the stored session id", async () => {
@@ -186,11 +183,12 @@ describe("createSessionsApi", () => {
     expect(prepared.agentCmdPreamble).toContain("This session was launched by Kanna");
     expect(prepared.agentCmd).not.toContain("--resume");
     expect(prepared.agentCmdPreamble).not.toContain("--resume");
-    expect(mocks.taskActionMock).toHaveBeenCalledWith(
-      "agent-session-id",
+    expect(mocks.putTaskAgentSessionMock).toHaveBeenCalledOnce();
+    expect(mocks.putTaskAgentSessionMock).toHaveBeenCalledWith(
       "task-1",
-      { agentSessionId: expect.stringMatching(/^[0-9a-f-]+$/) },
+      expect.stringMatching(/^[0-9a-f-]+$/),
     );
+    expect(mocks.updateAgentSessionIdMock).not.toHaveBeenCalled();
   });
 
   it("builds Claude PTY tasks with the instance-local Kanna MCP config", async () => {
@@ -214,6 +212,12 @@ describe("createSessionsApi", () => {
       path: "/tmp/kanna-daemon/runtime/mcp/task-1.json",
       content: expect.stringContaining("\"kanna-mcp\""),
     });
+    expect(mocks.putTaskAgentSessionMock).toHaveBeenCalledOnce();
+    expect(mocks.putTaskAgentSessionMock).toHaveBeenCalledWith(
+      "task-1",
+      expect.stringMatching(/^[0-9a-f-]+$/),
+    );
+    expect(mocks.updateAgentSessionIdMock).not.toHaveBeenCalled();
     const writeCall = mocks.invokeMock.mock.calls.find(([command]) => command === "write_text_file");
     const content = String(writeCall?.[1]?.content ?? "");
     expect(JSON.parse(content)).toEqual({
@@ -240,11 +244,7 @@ describe("createSessionsApi", () => {
     expect(prepared.agentCmd).toBe("copilot --yolo --resume='5fc2bd17-1d1b-4ae9-bed8-011fa4011100'");
     expect(prepared.agentCmdPreamble).toBeUndefined();
     expect(prepared.agentProvider).toBe("copilot");
-    expect(mocks.taskActionMock).not.toHaveBeenCalledWith(
-      "agent-session-id",
-      expect.any(String),
-      expect.anything(),
-    );
+    expect(mocks.updateAgentSessionIdMock).not.toHaveBeenCalled();
   });
 
   it("does not send kitty CSI-u enter when spawning a Codex PTY task", async () => {

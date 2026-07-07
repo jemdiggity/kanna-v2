@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
-import type { DbHandle, PipelineItem, Repo } from "@kanna/db";
+import type { DbHandle, PipelineItem, Repo } from "../types/kanna";
 import {
   buildOutgoingTransferPayload,
   chooseRepoAcquisitionMode,
@@ -12,8 +12,9 @@ import {
 import type { SessionRecoveryState } from "../composables/sessionRecoveryState";
 import {
   setDesktopSnapshotFetcherForTests,
-  setDesktopTaskActionForTests,
-  setDesktopTaskCreatorForTests,
+  setDesktopServerClientHandlersForTests,
+  type NewTaskTransferInput,
+  type NewTaskTransferProvenanceInput,
 } from "../services/desktopServerClient";
 
 const invokeMock = vi.fn<(cmd: string, args?: Record<string, unknown>) => Promise<unknown>>();
@@ -174,118 +175,104 @@ function createTransferDb(initial: {
     settings: {},
   }));
 
-  setDesktopTaskCreatorForTests(async (request) => {
-    const id = `task-${tables.pipeline_item.length + 1}`;
-    const branch = `task-${id}`;
-    const agentProvider = request.agentProvider ?? "claude";
-    const item = {
-      ...buildItem(request.repoId),
-      id,
-      repo_id: request.repoId,
-      prompt: request.prompt,
-      display_name: request.displayName ?? null,
-      pipeline: request.pipelineName ?? "default",
-      stage: request.stage ?? "in progress",
-      branch,
-      agent_type: request.agentType ?? "pty",
-      agent_provider: agentProvider,
-      activity: "working",
-      base_ref: request.baseRef ?? null,
-      agent_session_id: request.resumeSessionId ?? null,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    } satisfies PipelineItem;
-    tables.pipeline_item.push(item);
-    const resumeArgs = request.resumeSessionId
-      ? {
-          claude: [`claude --resume ${request.resumeSessionId}`],
-          copilot: [`copilot --resume='${request.resumeSessionId}'`],
-          codex: [`codex resume '${request.resumeSessionId}'`],
-        }[agentProvider] ?? [`${agentProvider} --resume ${request.resumeSessionId}`]
-      : [`${agentProvider} ${JSON.stringify(request.prompt)}`];
-    try {
-      await invokeMock("spawn_session", {
-        sessionId: id,
-        agentProvider,
-        args: resumeArgs,
-        env: {
-          PATH: "/Applications/Kanna.app/Contents/MacOS:/usr/local/bin:/usr/bin:/bin",
-        },
-      });
-    } catch (error) {
-      if (!(error instanceof Error) || !error.message.includes("unexpected invoke: spawn_session")) {
-        throw error;
+  setDesktopServerClientHandlersForTests({
+    getSetting: async () => null,
+    deleteSetting: async () => {},
+    putSetting: async (key, value) => ({ key, value }),
+    postOperatorEvents: async () => {},
+    applyTaskRuntimeStatus: async (taskId, input) => {
+      const item = tables.pipeline_item.find((candidate) => candidate.id === taskId);
+      if (!item || item.closed_at != null) return { taskId, activity: null };
+      let activity: PipelineItem["activity"] | null = null;
+      if (input.status === "busy" && item.activity !== "working") {
+        activity = "working";
+      } else if ((input.status === "idle" || input.status === "waiting") && item.activity === "working") {
+        activity = input.selected ? "idle" : "unread";
       }
-    }
-    if (request.recoverySnapshot) {
-      const recovery = request.recoverySnapshot;
-      await invokeMock("seed_session_recovery_state", {
-        sessionId: id,
-        serialized: recovery.serialized,
-        cols: recovery.cols,
-        rows: recovery.rows,
-        cursorRow: recovery.cursorRow,
-        cursorCol: recovery.cursorCol,
-        cursorVisible: recovery.cursorVisible,
-      });
-    }
-    return {
-      taskId: id,
-      repoId: request.repoId,
-      title: request.displayName ?? request.prompt,
-      stage: item.stage,
-      agentType: item.agent_type ?? "pty",
-      worktreePath: `${tables.repo.find((repo) => repo.id === request.repoId)?.path ?? "/tmp/repo"}/.kanna-worktrees/${branch}`,
-    };
-  });
-  setDesktopTaskActionForTests(async (action, taskId) => {
-    const item = tables.pipeline_item.find((candidate) => candidate.id === taskId);
-    if (!item) return;
-    if (action === "close") {
-      const repo = tables.repo.find((candidate) => candidate.id === item.repo_id);
-      let teardownCommands: string[] = [];
-      if (repo && item.branch) {
-        try {
-          const configText = await invokeMock("read_text_file", {
-            path: `${repo.path}/.kanna-worktrees/${item.branch}/.kanna/config.json`,
-          });
-          const config = typeof configText === "string" ? JSON.parse(configText) as { teardown?: unknown } : {};
-          if (Array.isArray(config.teardown)) {
-            teardownCommands = config.teardown.filter((value): value is string => typeof value === "string");
-          }
-        } catch {
-          teardownCommands = [];
-        }
+      if (activity) item.activity = activity;
+      return { taskId, activity };
+    },
+    markTaskRead: async (taskId) => {
+      const item = tables.pipeline_item.find((candidate) => candidate.id === taskId);
+      if (item?.activity === "unread") item.activity = "idle";
+      return { taskId, activity: item?.activity === "idle" ? "idle" : null };
+    },
+    putTaskAgentSession: async (taskId, agentSessionId) => {
+      const item = tables.pipeline_item.find((candidate) => candidate.id === taskId);
+      if (item) {
+        item.agent_session_id = agentSessionId;
       }
-      if (repo && item.branch && teardownCommands.length > 0) {
-        item.teardown_started_at = new Date().toISOString();
-        item.updated_at = item.teardown_started_at;
-        await invokeMock("spawn_session", {
-          sessionId: `td-${taskId}`,
-          cwd: `${repo.path}/.kanna-worktrees/${item.branch}`,
-          executable: "/bin/zsh",
-          args: [
-            "--login",
-            "-i",
-            "-c",
-            `set -e\n${teardownCommands.join("\n")} || echo 'Teardown command failed'`,
-          ],
-          env: {
-            KANNA_WORKTREE: "1",
-            KANNA_DAEMON_DIR: "",
-            KANNA_DB_NAME: "",
-            KANNA_DB_PATH: "",
-            KANNA_E2E_TARGET_WEBDRIVER_PORT: "",
-            KANNA_TMUX_SESSION: "",
-            KANNA_TRANSFER_ROOT: "",
-            KANNA_WEBDRIVER_PORT: "",
-          },
-        });
-      } else {
+    },
+    claimTaskPorts: async (taskId) => ({ taskId, portEnv: {}, firstPort: null }),
+    releaseTaskPorts: async () => {},
+    closeTask: async (taskId) => {
+      const item = tables.pipeline_item.find((candidate) => candidate.id === taskId);
+      if (item) {
         item.closed_at = new Date().toISOString();
         item.updated_at = item.closed_at;
       }
-    }
+    },
+    findRepoByPath: async (path: string) =>
+      tables.repo.find((repo) => repo.path === path) as never ?? null,
+    addRepo: async ({ path, name }) => {
+      const existing = tables.repo.find((repo) => repo.path === path);
+      if (existing) return existing as never;
+      const repo = {
+        ...buildRepo(),
+        id: `repo-${tables.repo.length + 1}`,
+        path,
+        name: name ?? path.split("/").pop() ?? "repo",
+      };
+      tables.repo.push(repo);
+      return repo as never;
+    },
+    patchRepo: async (repoId, input) => {
+      const repo = tables.repo.find((candidate) => candidate.id === repoId);
+      if (!repo) return;
+      if (input.name !== undefined) repo.name = input.name;
+      if (input.remoteUrl !== undefined) repo.remote_url = input.remoteUrl;
+      if (input.remoteUrlHash !== undefined) repo.remote_url_hash = input.remoteUrlHash;
+      if (input.hidden !== undefined) repo.hidden = input.hidden ? 1 : 0;
+    },
+    insertTaskTransfer: async (transfer: NewTaskTransferInput) => {
+      if (tables.task_transfer.some((row) => row.id === transfer.id)) {
+        throw new Error("UNIQUE constraint failed: task_transfer.id");
+      }
+      tables.task_transfer.push({
+        ...transfer,
+        started_at: new Date().toISOString(),
+        completed_at: null,
+      });
+    },
+    getTaskTransfer: async (transferId: string) =>
+      tables.task_transfer.find((transfer) => transfer.id === transferId) as never ?? null,
+    updateTaskTransferPayload: async (transferId: string, payloadJson: string) => {
+      const row = tables.task_transfer.find((transfer) => transfer.id === transferId);
+      if (!row) return false;
+      row.payload_json = payloadJson;
+      row.error = null;
+      return true;
+    },
+    completeTaskTransfer: async (transferId: string, localTaskId: string) => {
+      const row = tables.task_transfer.find((transfer) => transfer.id === transferId);
+      if (!row) return false;
+      row.status = "completed";
+      row.local_task_id = localTaskId;
+      row.completed_at = new Date().toISOString();
+      row.error = null;
+      return true;
+    },
+    rejectTaskTransfer: async (transferId: string, reason: string) => {
+      const row = tables.task_transfer.find((transfer) => transfer.id === transferId);
+      if (!row) return false;
+      row.status = "rejected";
+      row.completed_at = new Date().toISOString();
+      row.error = reason;
+      return true;
+    },
+    insertTaskTransferProvenance: async (provenance: NewTaskTransferProvenanceInput) => {
+      tables.task_transfer_provenance.push(provenance);
+    },
   });
 
   const db = {
@@ -1217,31 +1204,7 @@ describe("recordIncomingTransfer", () => {
     setActivePinia(createPinia());
     const { useKannaStore } = await import("./kanna");
     const store = useKannaStore();
-    const insertedTransfers: Array<Record<string, unknown>> = [];
-    const fakeDb = {
-      execute: vi.fn(async (sql: string, params?: unknown[]) => {
-        if (sql.includes("INSERT INTO task_transfer")) {
-          insertedTransfers.push({
-            id: params?.[0],
-            direction: params?.[1],
-            status: params?.[2],
-            source_peer_id: params?.[3],
-            target_peer_id: params?.[4],
-            source_task_id: params?.[5],
-            local_task_id: params?.[6],
-            error: params?.[7],
-            payload_json: params?.[8],
-          });
-        }
-        return { rowsAffected: 1 };
-      }),
-      select: vi.fn(async (sql: string) => {
-        if (sql.includes("FROM task_transfer")) {
-          return insertedTransfers;
-        }
-        return [];
-      }),
-    } as unknown as DbHandle;
+    const fakeDb = createTransferDb({});
 
     await store.init(fakeDb);
 
@@ -1278,10 +1241,7 @@ describe("recordIncomingTransfer", () => {
 
     await store.recordIncomingTransfer(request);
 
-    const rows = await fakeDb.select<Record<string, unknown>>(
-      "SELECT id, direction, status, source_peer_id, source_task_id FROM task_transfer",
-    );
-    expect(rows[0]).toMatchObject({
+    expect(fakeDb.tables.task_transfer[0]).toMatchObject({
       id: "transfer-1",
       direction: "incoming",
       status: "pending",
@@ -1295,18 +1255,7 @@ describe("recordIncomingTransfer", () => {
     setActivePinia(createPinia());
     const { useKannaStore } = await import("./kanna");
     const store = useKannaStore();
-    const insertedTransfers = new Set<string>();
-    const fakeDb = {
-      execute: vi.fn(async (_sql: string, params?: unknown[]) => {
-        const transferId = typeof params?.[0] === "string" ? params[0] : "";
-        if (insertedTransfers.has(transferId)) {
-          throw new Error("UNIQUE constraint failed: task_transfer.id");
-        }
-        insertedTransfers.add(transferId);
-        return { rowsAffected: 1 };
-      }),
-      select: vi.fn(async () => []),
-    } as unknown as DbHandle;
+    const fakeDb = createTransferDb({});
 
     await store.init(fakeDb);
 
@@ -1428,7 +1377,6 @@ describe("incoming transfer approval", () => {
     const { useKannaStore } = await import("./kanna");
     const store = useKannaStore();
     const payload = buildIncomingTransferPayload();
-    payload.task.stage = "review";
     const fakeDb = createTransferDb({
       transfers: [{
         id: "transfer-1",
@@ -1471,7 +1419,7 @@ describe("incoming transfer approval", () => {
       repo_id: fakeDb.tables.repo[0]?.id,
       prompt: "Fix handoff",
       branch: localTaskId ? `task-${localTaskId}` : undefined,
-      stage: "review",
+      stage: "in progress",
       display_name: "Transferred task",
     });
     expect(fakeDb.tables.task_transfer[0]).toMatchObject({

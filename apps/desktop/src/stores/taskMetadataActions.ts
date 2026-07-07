@@ -1,7 +1,7 @@
 import {
+  patchDesktopTask,
   pinDesktopTask,
-  renameDesktopTask,
-  reorderDesktopPinnedTasks,
+  reorderPinnedDesktopTasks,
   unpinDesktopTask,
 } from "../services/desktopServerClient";
 import { requireService, type StoreContext } from "./state";
@@ -28,14 +28,13 @@ export function createTaskMetadataActions(
   }
 
   async function reorderPinned(repoId: string, orderedIds: string[]) {
-    void repoId;
-    await reorderDesktopPinnedTasks(orderedIds);
+    await reorderPinnedDesktopTasks(repoId, orderedIds);
     await reloadSnapshot();
     await invalidateWindowWorkspace("reorderPinned");
   }
 
   async function renameItem(itemId: string, displayName: string | null) {
-    await renameDesktopTask(itemId, displayName);
+    await patchDesktopTask(itemId, { displayName });
     await reloadSnapshot();
     await invalidateWindowWorkspace("renameItem");
   }

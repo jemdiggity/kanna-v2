@@ -1,5 +1,5 @@
 import { nextTick, onBeforeUnmount, onMounted, onUnmounted, ref, type Ref } from "vue";
-import { getSetting, type DbHandle } from "@kanna/db";
+import type { DbHandle } from "../types/kanna";
 
 import i18n from "../i18n";
 import { invoke } from "../invoke";
@@ -11,6 +11,7 @@ import {
   normalizeCodeThemePreference,
 } from "../theme/theme";
 import { normalizeAgentExecutionType } from "../stores/agentExecutionType";
+import { getDesktopSetting } from "../services/desktopServerClient";
 import {
   parseIncomingTransferRequest,
   parseOutgoingTransferCommittedEvent,
@@ -411,7 +412,7 @@ export function useAppLifecycle({
     });
 
     // Load persisted locale
-    const savedLocale = await getSetting(db, "locale");
+    const savedLocale = await getDesktopSetting("locale");
     if (savedLocale && ["en", "ja", "ko"].includes(savedLocale)) {
       i18n.global.locale.value = savedLocale as "en" | "ja" | "ko";
       preferences.locale = savedLocale;
@@ -424,23 +425,23 @@ export function useAppLifecycle({
     preferences.devLingerTerminals = store.devLingerTerminals;
     preferences.agentMessageAppearance = store.agentMessageAppearance;
 
-    const savedAgentProvider = await getSetting(db, "defaultAgentProvider");
+    const savedAgentProvider = await getDesktopSetting("defaultAgentProvider");
     if (savedAgentProvider === "copilot") preferences.defaultAgentProvider = "copilot";
     else if (savedAgentProvider === "codex") preferences.defaultAgentProvider = "codex";
     else if (savedAgentProvider === "opencode") preferences.defaultAgentProvider = "opencode";
     else if (savedAgentProvider === "antigravity") preferences.defaultAgentProvider = "antigravity";
-    const savedAgentType = await getSetting(db, "defaultAgentType");
+    const savedAgentType = await getDesktopSetting("defaultAgentType");
     if (savedAgentType !== null) {
       preferences.defaultAgentType = normalizeAgentExecutionType(savedAgentType);
     }
-    preferences.recentAgentChoices = parseRecentAgentChoices(await getSetting(db, "recentAgentChoices"));
+    preferences.recentAgentChoices = parseRecentAgentChoices(await getDesktopSetting("recentAgentChoices"));
 
     startPeriodicBackup(dbName, ref(db) as Ref<DbHandle | null>);
     if (!store.hideShortcutsOnStartup) {
       shortcutsStartFull.value = true;
       showShortcutsModal.value = true;
     }
-    const raw = await getSetting(db, "commandPaletteUsage");
+    const raw = await getDesktopSetting("commandPaletteUsage");
     if (raw) {
       try { commandUsageCounts.value = JSON.parse(raw) as Record<string, number>; }
       catch (e) { console.error("[App] corrupt commandPaletteUsage setting:", e); }

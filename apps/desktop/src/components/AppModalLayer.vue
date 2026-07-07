@@ -190,7 +190,6 @@ function setPreferencesRef(component: Element | ComponentPublicInstance | null) 
   />
   <AnalyticsModal
     v-if="m.showAnalyticsModal.value"
-    :db="c.db"
     :repo-id="c.store.selectedRepoId"
     @close="m.showAnalyticsModal.value = false"
   />

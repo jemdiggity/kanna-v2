@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import type { PipelineItem } from "@kanna/db";
+import type { PipelineItem } from "../../types/kanna";
 import { mount } from "@vue/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import { openUrl } from "@tauri-apps/plugin-opener";

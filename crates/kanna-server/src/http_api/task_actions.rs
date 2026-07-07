@@ -11,18 +11,6 @@ use std::sync::Arc;
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct PinTaskRequest {
-    position: i64,
-}
-
-#[derive(Debug, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct ReorderPinnedTasksRequest {
-    ordered_ids: Vec<String>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub(super) struct SetTaskAgentSessionIdRequest {
     agent_session_id: Option<String>,
 }
@@ -33,82 +21,6 @@ fn stage_action_error_status(error: &str) -> axum::http::StatusCode {
     } else {
         axum::http::StatusCode::INTERNAL_SERVER_ERROR
     }
-}
-
-pub(super) async fn pin_task(
-    State(state): State<Arc<AppState>>,
-    axum::extract::Path(task_id): axum::extract::Path<String>,
-    Json(payload): Json<PinTaskRequest>,
-) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
-    let db = Db::open(&state.config.db_path).map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("db error: {}", e),
-        )
-    })?;
-    let task_id = db
-        .resolve_pipeline_item_id(&task_id)
-        .map_err(|e| db_write_error("db error", e))?
-        .ok_or_else(|| {
-            (
-                axum::http::StatusCode::NOT_FOUND,
-                "db error: not found".to_string(),
-            )
-        })?;
-    db.pin_pipeline_item(&task_id, payload.position)
-        .map_err(|e| db_write_error("db error", e))?;
-    state.publish_state_changed(StateChangeScope::Tasks);
-    Ok(Json(crate::mobile_api::TaskActionResponse {
-        task_id,
-        follow_task: None,
-    }))
-}
-
-pub(super) async fn unpin_task(
-    State(state): State<Arc<AppState>>,
-    axum::extract::Path(task_id): axum::extract::Path<String>,
-) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
-    let db = Db::open(&state.config.db_path).map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("db error: {}", e),
-        )
-    })?;
-    let task_id = db
-        .resolve_pipeline_item_id(&task_id)
-        .map_err(|e| db_write_error("db error", e))?
-        .ok_or_else(|| {
-            (
-                axum::http::StatusCode::NOT_FOUND,
-                "db error: not found".to_string(),
-            )
-        })?;
-    db.unpin_pipeline_item(&task_id)
-        .map_err(|e| db_write_error("db error", e))?;
-    state.publish_state_changed(StateChangeScope::Tasks);
-    Ok(Json(crate::mobile_api::TaskActionResponse {
-        task_id,
-        follow_task: None,
-    }))
-}
-
-pub(super) async fn reorder_pinned_tasks(
-    State(state): State<Arc<AppState>>,
-    Json(payload): Json<ReorderPinnedTasksRequest>,
-) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
-    let db = Db::open(&state.config.db_path).map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("db error: {}", e),
-        )
-    })?;
-    db.reorder_pinned_items(&payload.ordered_ids)
-        .map_err(|e| db_write_error("db error", e))?;
-    state.publish_state_changed(StateChangeScope::Tasks);
-    Ok(Json(crate::mobile_api::TaskActionResponse {
-        task_id: payload.ordered_ids.first().cloned().unwrap_or_default(),
-        follow_task: None,
-    }))
 }
 
 pub(super) async fn run_merge_agent(
@@ -240,6 +152,78 @@ pub(super) async fn set_task_parent(
         task_id,
         follow_task: None,
     }))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct PinTaskRequest {
+    position: i64,
+}
+
+pub(super) async fn pin_task(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+    Json(payload): Json<PinTaskRequest>,
+) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
+    let db = Db::open(&state.config.db_path).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("db error: {}", e),
+        )
+    })?;
+    let task_id = resolve_existing_task_id(&db, &task_id)?;
+    db.pin_pipeline_item(&task_id, payload.position)
+        .map_err(|e| db_write_error("db error", e))?;
+    state.publish_state_changed(StateChangeScope::Tasks);
+    Ok(Json(crate::mobile_api::TaskActionResponse {
+        task_id,
+        follow_task: None,
+    }))
+}
+
+pub(super) async fn unpin_task(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
+    let db = Db::open(&state.config.db_path).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("db error: {}", e),
+        )
+    })?;
+    let task_id = resolve_existing_task_id(&db, &task_id)?;
+    db.unpin_pipeline_item(&task_id)
+        .map_err(|e| db_write_error("db error", e))?;
+    state.publish_state_changed(StateChangeScope::Tasks);
+    Ok(Json(crate::mobile_api::TaskActionResponse {
+        task_id,
+        follow_task: None,
+    }))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ReorderPinnedTasksRequest {
+    repo_id: String,
+    ordered_ids: Vec<String>,
+}
+
+pub(super) async fn reorder_pinned_tasks(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<ReorderPinnedTasksRequest>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let db = Db::open(&state.config.db_path).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("db error: {}", e),
+        )
+    })?;
+    db.reorder_pinned_items(&payload.repo_id, &payload.ordered_ids)
+        .map_err(|e| db_write_error("db error", e))?;
+    state.publish_state_changed(StateChangeScope::Tasks);
+    Ok(Json(
+        serde_json::json!({ "updated": payload.ordered_ids.len() }),
+    ))
 }
 
 /// Build per-dependent session messages announcing that a blocker at the

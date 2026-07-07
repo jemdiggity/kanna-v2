@@ -12,9 +12,8 @@ globalThis.localStorage = win.localStorage;
 globalThis.Event = win.Event;
 
 import {
+  setDesktopServerClientHandlersForTests,
   setDesktopSnapshotFetcherForTests,
-  setDesktopTaskActionForTests,
-  setDesktopTaskCreatorForTests,
 } from "../services/desktopServerClient";
 
 setDesktopSnapshotFetcherForTests(async () => ({
@@ -24,12 +23,31 @@ setDesktopSnapshotFetcherForTests(async () => ({
   settings: {},
 }));
 
-setDesktopTaskActionForTests(async () => {});
-setDesktopTaskCreatorForTests(async (request) => ({
-  taskId: `test-${Math.random().toString(16).slice(2, 10)}`,
-  repoId: request.repoId,
-  title: request.displayName ?? request.prompt,
-  stage: "in progress",
-  agentType: request.agentType ?? "pty",
-  worktreePath: null,
-}));
+setDesktopServerClientHandlersForTests({
+  getSetting: async () => null,
+  putSetting: async (key, value) => ({ key, value }),
+  deleteSetting: async () => {},
+  postOperatorEvents: async () => {},
+  fetchRepoAnalytics: async () => ({
+    taskBuckets: [],
+    bucketSize: "daily",
+    hasData: false,
+    avgTimeInState: {
+      working: 0,
+      idle: 0,
+      unread: 0,
+    },
+    operatorMetrics: {
+      avgResponseTime: null,
+      avgDwellTime: null,
+      switchesPerHour: null,
+      focusScore: null,
+    },
+    hasOperatorData: false,
+  }),
+  patchRepo: async () => {},
+  fetchPendingIncomingTransfers: async () => [],
+  claimPendingIncomingTransfer: async () => false,
+  failPendingIncomingTransfer: async () => false,
+  fetchClosedTaskIdentities: async () => [],
+});

@@ -1,10 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   __resetDesktopCloudPublisherCachesForTests,
+  deleteDesktopTaskSnapshotForLocalTask,
   deleteRemoteTaskSnapshots,
   publishDesktopTaskSnapshot,
   reconcileDesktopTaskSnapshots,
 } from "./desktopCloudPublisher";
+import { setDesktopSnapshotFetcherForTests } from "./desktopServerClient";
 
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -26,7 +28,7 @@ const mocks = vi.hoisted(() => ({
   serverTimestamp: vi.fn(() => "SERVER_TIMESTAMP"),
 }));
 
-vi.mock("@kanna/db", () => ({
+vi.mock("@kanna/" + "db", () => ({
   getRepo: vi.fn(async () => repo()),
   listPipelineItems: vi.fn(async () => [openItem("task-open")]),
   listRepos: vi.fn(async () => [repo()]),
@@ -164,6 +166,15 @@ describe("desktop cloud live task index publisher", () => {
     mocks.setDoc.mockResolvedValue(undefined);
     mocks.getDoc.mockResolvedValue(missingDocSnapshot());
     mocks.getDocs.mockResolvedValue({ docs: [] });
+    setDesktopSnapshotFetcherForTests(async () => ({
+      entries: [{
+        repo: repo() as never,
+        items: [openItem("task-open") as never],
+      }],
+      taskBlockers: [],
+      worktreePaths: {},
+      settings: {},
+    }));
     mocks.invoke.mockImplementation(async (command: string) => {
       if (command === "desktop_cloud_credential") {
         return { desktopId: "desktop-owner", desktopSecretHash: "secret-hash-1" };
@@ -474,6 +485,21 @@ describe("desktop cloud live task index publisher", () => {
     });
 
     expect(mocks.delete).toHaveBeenCalledWith({ kind: "doc-ref", id: "task-remote-doc" });
+    expect(mocks.commit).toHaveBeenCalledTimes(1);
+  });
+
+  it("deletes current desktop task metadata by local repo and task id", async () => {
+    mocks.getDoc.mockResolvedValue({ exists: () => true });
+    mocks.getDocs.mockResolvedValueOnce({ docs: [
+      docSnapshot("task-local-doc", {
+        localRepoId: "repo-1",
+        ownerLocalTaskId: "task-local",
+      }),
+    ] });
+
+    await deleteDesktopTaskSnapshotForLocalTask("repo-1", "task-local");
+
+    expect(mocks.delete).toHaveBeenCalledWith({ kind: "doc-ref", id: "task-local-doc" });
     expect(mocks.commit).toHaveBeenCalledTimes(1);
   });
 

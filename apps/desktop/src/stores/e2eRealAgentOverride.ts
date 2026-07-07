@@ -1,4 +1,4 @@
-import type { AgentProvider } from "@kanna/db";
+import type { AgentProvider } from "../types/kanna";
 import { invoke } from "../invoke";
 import type { AgentExecutionType } from "./agentExecutionType";
 

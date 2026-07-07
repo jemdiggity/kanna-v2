@@ -1,6 +1,6 @@
 import { computed, type ComputedRef, type Ref } from "vue";
 import { computedAsync } from "@vueuse/core";
-import type { AgentProvider } from "@kanna/db";
+import type { AgentProvider, PipelineItem } from "../types/kanna";
 import { NEW_CUSTOM_TASK_PROMPT } from "@kanna/core";
 import type { CustomTaskConfig } from "@kanna/core";
 
@@ -281,7 +281,7 @@ export function useAppTaskNavigation({
     const item = store.currentItem;
     if (!item) return [];
     const blockers = await store.listBlockersForItem(item.id);
-    return blockers.map((b) => b.id);
+    return blockers.map((b: PipelineItem) => b.id);
   }, []);
 
   // Build a map of blocked item ID → blocker names for the sidebar
@@ -293,7 +293,7 @@ export function useAppTaskNavigation({
     for (const item of blockedItems) {
       const blockers = await store.listBlockersForItem(item.id);
       map[item.id] = blockers
-        .map((b) => b.display_name || (b.prompt ? b.prompt.slice(0, 30) : "Untitled"))
+        .map((b: PipelineItem) => b.display_name || (b.prompt ? b.prompt.slice(0, 30) : "Untitled"))
         .join(", ");
     }
     return map;

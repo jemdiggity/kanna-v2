@@ -1,10 +1,7 @@
 import { defineStore } from "pinia";
-import {
-  listBlockedByItem,
-  listBlockersForItem,
-} from "@kanna/db";
 import { useToast } from "../composables/useToast";
 import { createStoreContext, createStoreState, type StoreServices } from "./state";
+import { createPortsStore } from "./ports";
 import { createQueriesApi } from "./queries";
 import { createSelectionApi } from "./selection";
 import { createSessionsApi } from "./sessions";
@@ -25,12 +22,13 @@ export const useKannaStore = defineStore("kanna", () => {
   services.fetchSnapshot = fetchDesktopSnapshot;
   const context = createStoreContext(state, toast, services);
 
+  const ports = createPortsStore(context);
   const queries = createQueriesApi(context);
   const selection = createSelectionApi(context);
   const sessions = createSessionsApi(context);
   const pipeline = createPipelineApi(context);
   const tasks = createTasksApi(context);
-  const initApi = createInitApi(context, tasks);
+  const initApi = createInitApi(context, ports, tasks);
 
   services.loadInitialData = queries.loadInitialData;
   services.reloadSnapshot = queries.reloadSnapshot;
@@ -184,8 +182,16 @@ Use this branch as the default when the user does not specify a target branch. B
     handleOutgoingTransferCommitted: transfer.handleOutgoingTransferCommitted,
     blockTask: tasks.blockTask,
     editBlockedTask: tasks.editBlockedTask,
-    listBlockersForItem: (itemId: string) => listBlockersForItem(context.requireDb(), itemId),
-    listBlockedByItem: (itemId: string) => listBlockedByItem(context.requireDb(), itemId),
+    listBlockersForItem: async (itemId: string) =>
+      state.taskBlockers.value
+        .filter((blocker) => blocker.blocked_item_id === itemId)
+        .map((blocker) => state.items.value.find((item) => item.id === blocker.blocker_item_id))
+        .filter((item): item is NonNullable<typeof item> => item != null),
+    listBlockedByItem: async (itemId: string) =>
+      state.taskBlockers.value
+        .filter((blocker) => blocker.blocker_item_id === itemId)
+        .map((blocker) => state.items.value.find((item) => item.id === blocker.blocked_item_id))
+        .filter((item): item is NonNullable<typeof item> => item != null),
     pinItem: tasks.pinItem,
     unpinItem: tasks.unpinItem,
     reorderPinned: tasks.reorderPinned,

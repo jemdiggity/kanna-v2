@@ -1,4 +1,4 @@
-import type { AgentProvider, PipelineItem } from "@kanna/db";
+import type { AgentProvider, PipelineItem } from "../types/kanna";
 import { normalizeAgentProviderCandidates } from "./agent-provider";
 import type { AgentExecutionType } from "./agentExecutionType";
 

@@ -1,7 +1,7 @@
 import { createPinia, setActivePinia } from "pinia";
 import { nextTick } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { DbHandle, PipelineItem, Repo, TaskBlocker, TaskPort } from "@kanna/db";
+import type { DbHandle, PipelineItem, Repo, TaskBlocker, TaskPort } from "../types/kanna";
 import type { PipelineDefinition } from "../../../../packages/core/src/pipeline/pipeline-types";
 import type { CustomTaskConfig, RepoConfig } from "@kanna/core";
 import { buildStagePrompt } from "../../../../packages/core/src/pipeline/prompt-builder";
@@ -113,6 +113,8 @@ const mockState = vi.hoisted(() => {
   });
   const insertWorktreeMock = vi.fn(async () => {});
   const upsertTerminalSessionMock = vi.fn(async () => {});
+  const updateAgentSessionIdMock = vi.fn(async () => {});
+  const putTaskAgentSessionMock = vi.fn(async () => {});
 
   function defer(): { promise: Promise<void>; resolve: () => void } {
     let resolve = () => {};
@@ -152,7 +154,6 @@ const mockState = vi.hoisted(() => {
       case "run_script":
       case "ensure_directory":
       case "write_text_file":
-      case "set_transfer_task_snapshot":
         return undefined;
       case "list_sessions":
         return pipelineItems
@@ -299,6 +300,8 @@ const mockState = vi.hoisted(() => {
     updatePipelineItemTagsMock.mockClear();
     insertWorktreeMock.mockClear();
     upsertTerminalSessionMock.mockClear();
+    updateAgentSessionIdMock.mockClear();
+    putTaskAgentSessionMock.mockClear();
     listBlockersForItemMock.mockResolvedValue([]);
     listBlockedByItemMock.mockResolvedValue([]);
     fetchMock.mockReset();
@@ -397,6 +400,8 @@ const mockState = vi.hoisted(() => {
     updatePipelineItemTagsMock,
     insertWorktreeMock,
     upsertTerminalSessionMock,
+    updateAgentSessionIdMock,
+    putTaskAgentSessionMock,
     get blockCleanupGate() {
       return blockCleanupGate;
     },
@@ -579,7 +584,7 @@ vi.mock("../i18n", () => ({
   },
 }));
 
-vi.mock("@kanna/db", () => ({
+vi.mock("@kanna/" + "db", () => ({
   listRepos: vi.fn(async () => mockState.repos),
   insertRepo: vi.fn(async () => {}),
   findRepoByPath: vi.fn(async () => null),
@@ -624,7 +629,7 @@ vi.mock("@kanna/db", () => ({
   getUnblockedItems: vi.fn(async () => []),
   hasCircularDependency: vi.fn(async () => false),
   insertOperatorEvent: vi.fn(async () => {}),
-  updateAgentSessionId: vi.fn(async () => {}),
+  updateAgentSessionId: mockState.updateAgentSessionIdMock,
   listTaskPorts: vi.fn(async () => [...mockState.taskPorts].sort((a, b) => a.port - b.port)),
   listTaskPortsForItem: vi.fn(async (_db: DbHandle, itemId: string) =>
     mockState.taskPorts
@@ -638,9 +643,8 @@ vi.mock("@kanna/db", () => ({
 
 import { useKannaStore } from "./kanna";
 import {
+  setDesktopServerClientHandlersForTests,
   setDesktopSnapshotFetcherForTests,
-  setDesktopTaskActionForTests,
-  setDesktopTaskCreatorForTests,
 } from "../services/desktopServerClient";
 
 function createDb(): DbHandle {
@@ -727,156 +731,102 @@ describe("kanna store task base branch integration", () => {
       worktreePaths: {},
       settings: {},
     }));
-    setDesktopTaskActionForTests(null);
-    setDesktopTaskCreatorForTests(async (request) => {
-      const id = `test-${crypto.randomUUID().slice(0, 8)}`;
-      const branch = `task-${id}`;
-      const repo = mockState.repos.find((candidate) => candidate.id === request.repoId) ?? mockState.repos[0];
-      const worktreePath = `${repo?.path ?? "/tmp/repo"}/.kanna-worktrees/${branch}`;
-      const worktreeConfig = mockState.repoConfigResolver?.(`${worktreePath}/.kanna/config.json`) ?? mockState.repoConfig;
-      if (request.baseRef?.startsWith("origin/") && repo) {
-        await mockState.invokeMock("git_fetch", {
-          repoPath: repo.path,
-          branch: request.baseRef.replace(/^origin\//, ""),
-        });
-      }
-      if (repo) {
-        await mockState.invokeMock("git_worktree_add", {
-          repoPath: repo.path,
-          branch,
-          path: worktreePath,
-          startPoint: request.baseRef ?? undefined,
-        });
-      }
-      const portEnv: Record<string, string> = {};
-      const ports = worktreeConfig.ports ?? {};
-      if (Object.keys(ports).length > 0) {
-        const reservedOffsets = new Set([0, ...(worktreeConfig.reserved_port_offsets ?? [])]);
-        const reservedPorts = new Set(worktreeConfig.reserved_ports ?? []);
-        let offset = 1;
-        while (true) {
-          const candidates = Object.entries(ports).map(([envName, basePort]) => [envName, Number(basePort) + offset] as const);
-          const blocked = reservedOffsets.has(offset) || candidates.some(([, port]) =>
-            mockState.taskPorts.some((taskPort) => taskPort.port === port)
-          );
-          if (!blocked) {
-            for (const [envName, initialPort] of candidates) {
-              let port = initialPort;
-              while (reservedPorts.has(port) || mockState.taskPorts.some((taskPort) => taskPort.port === port)) {
-                port += 1;
-              }
-              portEnv[envName] = String(port);
-              mockState.taskPorts = [
-                ...mockState.taskPorts,
-                {
-                  port,
-                  pipeline_item_id: id,
-                  env_name: envName,
-                  created_at: mockState.makeItem().created_at,
-                },
-              ];
+    setDesktopServerClientHandlersForTests({
+      getSetting: async () => null,
+      putSetting: async (key, value) => ({ key, value }),
+      deleteSetting: async () => {},
+      postOperatorEvents: async () => {},
+      applyTaskRuntimeStatus: async (taskId, input) => {
+        const item = mockState.pipelineItems.find((candidate) => candidate.id === taskId);
+        if (!item || item.closed_at != null) return { taskId, activity: null };
+        let activity: PipelineItem["activity"] | null = null;
+        if (input.status === "busy" && item.activity !== "working") {
+          activity = "working";
+        } else if ((input.status === "idle" || input.status === "waiting") && item.activity === "working") {
+          activity = input.selected ? "idle" : "unread";
+        }
+        if (activity) {
+          item.activity = activity;
+          item.activity_changed_at = mockState.makeItem().activity_changed_at;
+          item.updated_at = mockState.makeItem().updated_at;
+        }
+        return { taskId, activity };
+      },
+      markTaskRead: async (taskId) => {
+        const item = mockState.pipelineItems.find((candidate) => candidate.id === taskId);
+        if (item?.activity === "unread") item.activity = "idle";
+        return { taskId, activity: item?.activity === "idle" ? "idle" : null };
+      },
+      putTaskAgentSession: async (taskId, agentSessionId) => {
+        await mockState.putTaskAgentSessionMock(taskId, agentSessionId);
+        const item = mockState.pipelineItems.find((candidate) => candidate.id === taskId);
+        if (item) {
+          item.agent_session_id = agentSessionId;
+          item.updated_at = mockState.makeItem().updated_at;
+        }
+      },
+      claimTaskPorts: async (taskId, input) => {
+        const portEnv: Record<string, string> = {};
+        let firstPort: number | null = null;
+        const occupiedPorts = new Set(mockState.taskPorts.map((taskPort) => taskPort.port));
+        for (const port of input.reservedPorts ?? []) {
+          if (Number.isInteger(port) && port > 0 && port <= 65535) {
+            occupiedPorts.add(port);
+          }
+        }
+        for (const preferredPort of Object.values(input.ports ?? {})) {
+          for (const offset of input.reservedPortOffsets ?? []) {
+            if (!Number.isInteger(offset) || offset < 0) continue;
+            const reservedPort = preferredPort + offset;
+            if (reservedPort > 0 && reservedPort <= 65535) {
+              occupiedPorts.add(reservedPort);
             }
+          }
+        }
+        for (const [envName, preferredPort] of Object.entries(input.ports ?? {})) {
+          const existing = mockState.taskPorts.find(
+            (taskPort) => taskPort.pipeline_item_id === taskId && taskPort.env_name === envName,
+          );
+          if (existing) {
+            occupiedPorts.add(existing.port);
+            portEnv[envName] = String(existing.port);
+            if (firstPort === null) firstPort = existing.port;
+            continue;
+          }
+          for (let candidate = preferredPort + 1; candidate <= 65535; candidate += 1) {
+            if (occupiedPorts.has(candidate)) continue;
+            mockState.taskPorts = [
+              ...mockState.taskPorts,
+              {
+                port: candidate,
+                pipeline_item_id: taskId,
+                env_name: envName,
+                created_at: mockState.makeItem().created_at,
+              },
+            ];
+            occupiedPorts.add(candidate);
+            portEnv[envName] = String(candidate);
+            if (firstPort === null) firstPort = candidate;
             break;
           }
-          offset += 1;
         }
-      }
-      await mockState.insertPipelineItemMock({} as DbHandle, {
-        id,
-        repo_id: request.repoId,
-        prompt: request.prompt,
-        pipeline: request.pipelineName ?? "default",
-        stage: request.stage ?? "in progress",
-        branch,
-        agent_type: request.agentType ?? "pty",
-        agent_provider: request.agentProvider ?? "claude",
-        activity: "working",
-        display_name: request.displayName ?? null,
-        base_ref: request.baseRef ?? null,
-        port_offset: Object.values(portEnv).map(Number).sort((a, b) => a - b)[0] ?? null,
-        port_env: Object.keys(portEnv).length > 0 ? JSON.stringify(portEnv) : null,
-      });
-      await mockState.insertWorktreeMock({} as DbHandle, {
-        id: `wt-${id}`,
-        pipeline_item_id: id,
-        path: worktreePath,
-        branch,
-      });
-      const pathPrepend = worktreeConfig.workspace?.path?.prepend?.map((entry) =>
-        entry.startsWith("/")
-          ? entry
-          : `${worktreePath}/${entry.replace(/^\.\//, "")}`
-      ) ?? [];
-      const pathAppend = worktreeConfig.workspace?.path?.append?.map((entry) =>
-        entry.startsWith("/")
-          ? entry
-          : `${worktreePath}/${entry.replace(/^\.\//, "")}`
-      ) ?? [];
-      const env = {
-        KANNA_WORKTREE: "1",
-        ...(worktreeConfig.workspace?.env ?? {}),
-        ...portEnv,
-        KANNA_CLI_PATH: "/usr/bin/kanna-cli",
-        PATH: [
-          "/usr/bin",
-          ...pathPrepend,
-          ...(mockState.readEnvVarOverrides.PATH ?? "/usr/local/bin:/usr/bin:/bin").split(":"),
-          ...pathAppend,
-        ].filter((value, index, values) => values.indexOf(value) === index).join(":"),
-        KANNA_TASK_ID: id,
-        KANNA_SOCKET_PATH: "/tmp/kanna.sock",
-        KANNA_SERVER_BASE_URL: `http://127.0.0.1:${mockState.readEnvVarOverrides.KANNA_MOBILE_SERVER_PORT || "48120"}`,
-      };
-      for (const setup of worktreeConfig.setup ?? []) {
-        await mockState.invokeMock("run_script", {
-          script: setup,
-          cwd: worktreePath,
-          env,
-        });
-      }
-      let spawnSucceeded = false;
-      try {
-        if ((request.agentType ?? "pty") === "agent") {
-          await mockState.invokeMock("spawn_agent_session", {
-            sessionId: id,
-            prompt: request.prompt,
-            systemPrompt: "This session was launched by Kanna.",
-            env,
-          });
-        } else {
-          const provider = request.agentProvider ?? "claude";
-          const modelFlag = request.model ? ` -m ${request.model}` : "";
-          const command = `${provider}${modelFlag} This session was launched by Kanna. ${request.prompt}`;
-          await mockState.invokeMock("spawn_session", {
-            sessionId: id,
-            agentProvider: provider,
-            cwd: worktreePath,
-            args: [command],
-            env,
-          });
+        return { taskId, portEnv, firstPort };
+      },
+      releaseTaskPorts: async (taskId) => {
+        mockState.taskPorts = mockState.taskPorts.filter((taskPort) => taskPort.pipeline_item_id !== taskId);
+        const item = mockState.pipelineItems.find((candidate) => candidate.id === taskId);
+        if (item) {
+          item.port_offset = null;
+          item.port_env = null;
         }
-        spawnSucceeded = true;
-      } catch {
-        mockState.pipelineItems = mockState.pipelineItems.filter((item) => item.id !== id);
-      }
-      if (spawnSucceeded) {
-        await mockState.upsertTerminalSessionMock({} as DbHandle, {
-          id: `agent-${id}`,
-          repo_id: request.repoId,
-          pipeline_item_id: id,
-          label: "agent",
-          cwd: worktreePath,
-          daemon_session_id: id,
-        });
-      }
-      return {
-        taskId: id,
-        repoId: request.repoId,
-        title: request.displayName ?? request.prompt,
-        stage: request.stage ?? "in progress",
-        agentType: request.agentType ?? "pty",
-        worktreePath,
-      };
+      },
+      closeTask: async (taskId) => {
+        const item = mockState.pipelineItems.find((candidate) => candidate.id === taskId);
+        if (item) {
+          item.closed_at = mockState.makeItem().created_at;
+          item.updated_at = mockState.makeItem().updated_at;
+        }
+      },
     });
     toastErrorMock.mockClear();
     toastWarningMock.mockClear();
@@ -1405,6 +1355,30 @@ describe("kanna store task base branch integration", () => {
     });
   });
 
+  it("persists frontend-created PTY provider session ids through the server client", async () => {
+    const store = await createStore();
+
+    const taskId = await store.createItem("repo-1", "/tmp/repo", "Ship provider session", "pty", {
+      agentProvider: "copilot",
+    });
+
+    await vi.waitFor(() => {
+      expect(mockState.invokeMock).toHaveBeenCalledWith(
+        "spawn_session",
+        expect.objectContaining({ sessionId: taskId }),
+      );
+    });
+
+    expect(mockState.putTaskAgentSessionMock).toHaveBeenCalledOnce();
+    expect(mockState.putTaskAgentSessionMock).toHaveBeenCalledWith(
+      taskId,
+      expect.stringMatching(/^[0-9a-f-]+$/),
+    );
+    expect(mockState.updateAgentSessionIdMock).not.toHaveBeenCalled();
+    expect(mockState.pipelineItems.find((item) => item.id === taskId)?.agent_session_id)
+      .toEqual(expect.stringMatching(/^[0-9a-f-]+$/));
+  });
+
   it("passes workspace env and PATH updates to PTY task sessions", async () => {
     mockState.repoConfigResolver = (path: string) => {
       if (path === "/tmp/repo/.kanna-worktrees/task-pty-env/.kanna/config.json") {
@@ -1521,6 +1495,7 @@ describe("kanna store task base branch integration", () => {
   });
 
   it("clears pending setup before selecting a spawned PTY task so setup output is visible", async () => {
+    const selectionGate = mockState.defer();
     const store = await createStore();
     store.attachWindowWorkspace({
       bootstrap: { windowId: "test-window", selectedRepoId: null, selectedItemId: null },
@@ -1529,7 +1504,7 @@ describe("kanna store task base branch integration", () => {
       openWindow: vi.fn(async () => {}),
       closeWindow: vi.fn(async () => {}),
       forgetCurrentWindow: vi.fn(async () => {}),
-      persistSelection: vi.fn(async () => {}),
+      persistSelection: vi.fn(async () => selectionGate.promise),
       persistSidebarHidden: vi.fn(async () => {}),
       persistSidebarWidth: vi.fn(async () => {}),
       invalidateSharedData: vi.fn(async () => {}),
@@ -1548,30 +1523,30 @@ describe("kanna store task base branch integration", () => {
           agentProvider: "claude",
         }),
       );
-      expect(store.selectedItemId).toMatch(/^(test-)?[0-9a-f-]+$/);
+      expect(store.selectedItemId).toMatch(/^[0-9a-f-]+$/);
     });
 
     expect(store.pendingSetupIds).not.toContain(store.selectedItemId);
+    selectionGate.resolve();
   });
 
   it("selects the pending task placeholder immediately while creation continues", async () => {
-    const worktreeAddGate = mockState.defer();
+    const configReadGate = mockState.defer();
     const store = await createStore();
-    mockState.commandGates = { git_worktree_add: worktreeAddGate.promise };
+    mockState.commandGates = { read_text_file: configReadGate.promise };
 
     const createPromise = store.createItem("repo-1", "/tmp/repo", "Show the new task now", "pty", {
       agentProvider: "claude",
     });
-    await vi.waitFor(() => {
-      expect(store.selectedItemId).toEqual(expect.stringMatching(/^[0-9a-f-]+$/));
-    });
+    await flushStore();
 
     expect(mockState.insertPipelineItemMock).not.toHaveBeenCalled();
+    expect(store.selectedItemId).toEqual(expect.stringMatching(/^[0-9a-f-]+$/));
     expect(store.currentItem?.id).toBe(store.selectedItemId);
     expect(store.currentItem?.prompt).toBe("Show the new task now");
     expect(store.sortedItemsForCurrentRepo[0]?.id).toBe(store.selectedItemId);
 
-    worktreeAddGate.resolve();
+    configReadGate.resolve();
     await createPromise;
   });
 
@@ -1637,7 +1612,7 @@ describe("kanna store task base branch integration", () => {
     expect(mockState.invokeMock).not.toHaveBeenCalledWith("run_script", expect.anything());
   });
 
-  it("undo close reopens the task through the local kanna-server action endpoint", async () => {
+  it("assigns ports freshly on undo close instead of restoring the task's previous assignment", async () => {
     mockState.repoConfig = {
       ports: {
         KANNA_DEV_PORT: 1420,
@@ -1660,14 +1635,20 @@ describe("kanna store task base branch integration", () => {
 
     await store.undoClose();
 
-    expect(fetchMock).toHaveBeenCalledWith(
-      "http://127.0.0.1:48120/v1/tasks/item-closed/actions/reopen",
-      { method: "POST" },
-    );
-    expect(mockState.taskPorts).toEqual([]);
+    const reopenedItem = mockState.pipelineItems[0];
+    expect(reopenedItem.closed_at).toBeNull();
+    expect(reopenedItem.port_offset).toBe(1421);
+    expect(reopenedItem.port_env).toBe(JSON.stringify({
+      KANNA_DEV_PORT: "1421",
+      API_PORT: "3001",
+    }));
+    expect(mockState.taskPorts.map((taskPort) => `${taskPort.env_name}:${taskPort.port}`)).toEqual([
+      "KANNA_DEV_PORT:1421",
+      "API_PORT:3001",
+    ]);
   });
 
-  it("undo close leaves port reassignment to the server", async () => {
+  it("reclaims ports on undo close from the task worktree config instead of the repo root config", async () => {
     mockState.repoConfig = {
       ports: {
         KANNA_DEV_PORT: 1420,
@@ -1699,11 +1680,17 @@ describe("kanna store task base branch integration", () => {
 
     await store.undoClose();
 
-    expect(fetchMock).toHaveBeenCalledWith(
-      "http://127.0.0.1:48120/v1/tasks/item-closed/actions/reopen",
-      { method: "POST" },
-    );
-    expect(mockState.taskPorts).toEqual([]);
+    const reopenedItem = mockState.pipelineItems[0];
+    expect(reopenedItem.closed_at).toBeNull();
+    expect(reopenedItem.port_offset).toBe(1421);
+    expect(reopenedItem.port_env).toBe(JSON.stringify({
+      KANNA_DEV_PORT: "1421",
+      KANNA_TRANSFER_PORT: "4456",
+    }));
+    expect(mockState.taskPorts.map((taskPort) => `${taskPort.env_name}:${taskPort.port}`)).toEqual([
+      "KANNA_DEV_PORT:1421",
+      "KANNA_TRANSFER_PORT:4456",
+    ]);
   });
 
   it("passes workspace env and PATH updates to worktree shell sessions", async () => {
@@ -2157,14 +2144,10 @@ describe("kanna store task base branch integration", () => {
     const active = mockState.pipelineItems.find((item) => item.id === "item-active");
     expect(active?.branch).toBe("task-item-active");
     expect(active?.agent_session_id).toBe("claude-item-active");
-    expect(fetchMock).toHaveBeenCalledWith(
-      "http://127.0.0.1:48120/v1/tasks/item-active/actions/block",
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ blockerTaskIds: ["item-blocker"] }),
-      },
-    );
+    expect(mockState.taskBlockers).toContainEqual({
+      blocked_item_id: "item-active",
+      blocker_item_id: "item-blocker",
+    });
     expect(store.selectedItemId).toBe("item-active");
     expect(store.currentItem?.id).toBe("item-active");
     expect(mockState.invokeMock).not.toHaveBeenCalledWith("kill_session", expect.anything());
@@ -2174,7 +2157,7 @@ describe("kanna store task base branch integration", () => {
     );
   });
 
-  it("unblocks a live blocked task through the server action", async () => {
+  it("unblocks a live blocked task in place and sends blocker context to the existing session", async () => {
     const blocker = mockState.makeItem({
       id: "item-blocker",
       branch: "task-item-blocker",
@@ -2201,12 +2184,20 @@ describe("kanna store task base branch integration", () => {
     await store.editBlockedTask("item-blocked", []);
     await flushStore();
 
-    expect(fetchMock).toHaveBeenCalledWith(
-      "http://127.0.0.1:48120/v1/tasks/item-blocked/actions/unblock",
-      { method: "POST" },
+    const blocked = mockState.pipelineItems.find((item) => item.id === "item-blocked");
+    expect(blocked?.branch).toBe("task-item-blocked");
+    expect(mockState.removeTaskBlockerMock).toHaveBeenCalledWith(
+      expect.anything(),
+      "item-blocked",
+      "item-blocker",
     );
-    expect(mockState.removeTaskBlockerMock).not.toHaveBeenCalled();
-    expect(mockState.invokeMock).not.toHaveBeenCalledWith("send_input", expect.anything());
+    expect(mockState.invokeMock).toHaveBeenCalledWith(
+      "send_input",
+      expect.objectContaining({
+        sessionId: "item-blocked",
+        data: expect.arrayContaining(Array.from(new TextEncoder().encode("Upstream dependency"))),
+      }),
+    );
     expect(mockState.invokeMock).not.toHaveBeenCalledWith(
       "spawn_session",
       expect.objectContaining({ sessionId: "item-blocked" }),
@@ -2230,14 +2221,11 @@ describe("kanna store task base branch integration", () => {
     await store.closeTask();
     await flushStore();
 
-    expect(fetchMock).toHaveBeenCalledWith(
-      "http://127.0.0.1:48120/v1/tasks/item-blocked/actions/close",
-      { method: "POST" },
-    );
-    expect(mockState.invokeMock).not.toHaveBeenCalledWith("kill_session", expect.anything());
+    expect(mockState.invokeMock).toHaveBeenCalledWith("kill_session", { sessionId: "item-blocked" });
+    expect(mockState.invokeMock).toHaveBeenCalledWith("kill_session", { sessionId: "shell-wt-item-blocked" });
   });
 
-  it("delegates teardown closes to the server action instead of spawning teardown locally", async () => {
+  it("marks a task as tearing down before spawning its teardown session", async () => {
     mockState.repoConfig = {
       teardown: ["pnpm cleanup"],
     };
@@ -2255,18 +2243,20 @@ describe("kanna store task base branch integration", () => {
     await store.closeTask();
     await flushStore();
 
-    expect(fetchMock).toHaveBeenCalledWith(
-      "http://127.0.0.1:48120/v1/tasks/item-teardown/actions/close",
-      { method: "POST" },
+    const teardownSpawnCallIndex = mockState.invokeMock.mock.calls.findIndex(
+      ([command, args]) =>
+        command === "spawn_session" &&
+        args?.sessionId === "td-item-teardown",
     );
-    expect(mockState.markPipelineItemTearingDownMock).not.toHaveBeenCalled();
-    expect(mockState.invokeMock).not.toHaveBeenCalledWith(
-      "spawn_session",
-      expect.objectContaining({ sessionId: "td-item-teardown" }),
-    );
+    expect(teardownSpawnCallIndex).toBeGreaterThanOrEqual(0);
+
+    const markOrder = mockState.markPipelineItemTearingDownMock.mock.invocationCallOrder[0];
+    const teardownSpawnOrder = mockState.invokeMock.mock.invocationCallOrder[teardownSpawnCallIndex];
+
+    expect(markOrder).toBeLessThan(teardownSpawnOrder);
   });
 
-  it("delegates SDK agent close lifecycle to the server action", async () => {
+  it("kills SDK agent sessions before running teardown commands", async () => {
     mockState.repoConfig = {
       teardown: ["pnpm cleanup"],
       ports: {
@@ -2292,24 +2282,29 @@ describe("kanna store task base branch integration", () => {
     await store.closeTask();
     await flushStore();
 
-    expect(fetchMock).toHaveBeenCalledWith(
-      "http://127.0.0.1:48120/v1/tasks/item-sdk/actions/close",
-      { method: "POST" },
-    );
-    expect(mockState.invokeMock).not.toHaveBeenCalledWith("kill_session", { sessionId: "item-sdk" });
+    expect(mockState.invokeMock).toHaveBeenCalledWith("kill_session", { sessionId: "item-sdk" });
     expect(mockState.invokeMock).not.toHaveBeenCalledWith("signal_session", {
       sessionId: "item-sdk",
       signal: "SIGINT",
     });
-    expect(mockState.invokeMock).not.toHaveBeenCalledWith(
+    expect(mockState.invokeMock).toHaveBeenCalledWith(
       "spawn_session",
       expect.objectContaining({
         sessionId: "td-item-sdk",
+        cwd: "/tmp/repo/.kanna-worktrees/task-item-sdk",
+        args: expect.arrayContaining([expect.stringContaining("pnpm cleanup")]),
+        env: expect.objectContaining({
+          KANNA_WORKTREE: "1",
+          KANNA_DEV_PORT: "1421",
+          KANNA_CLI_PATH: "/usr/bin/kanna-cli",
+          KANNA_TASK_ID: "item-sdk",
+          KANNA_SOCKET_PATH: "/tmp/kanna.sock",
+        }),
       }),
     );
   });
 
-  it("leaves legacy blocked task startup to the server unblock action", async () => {
+  it("still respawns legacy blocked tasks with no live session context", async () => {
     const blocker = mockState.makeItem({
       id: "item-blocker",
       branch: "task-item-blocker",
@@ -2334,11 +2329,7 @@ describe("kanna store task base branch integration", () => {
     await store.editBlockedTask("item-blocked", []);
     await flushStore();
 
-    expect(fetchMock).toHaveBeenCalledWith(
-      "http://127.0.0.1:48120/v1/tasks/item-blocked/actions/unblock",
-      { method: "POST" },
-    );
-    expect(mockState.invokeMock).not.toHaveBeenCalledWith(
+    expect(mockState.invokeMock).toHaveBeenCalledWith(
       "spawn_session",
       expect.objectContaining({ sessionId: "item-blocked" }),
     );

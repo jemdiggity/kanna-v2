@@ -1,10 +1,11 @@
 import { ref } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { DbHandle, PipelineItem, Repo } from "@kanna/db";
+import type { DbHandle, PipelineItem, Repo } from "../types/kanna";
 
 import { createSelectionApi } from "./selection";
 import { createStoreContext, createStoreState } from "./state";
+import { setDesktopServerClientHandlersForTests } from "../services/desktopServerClient";
 
 const mockState = vi.hoisted(() => {
   const insertOperatorEventMock = vi.fn(async () => {});
@@ -26,13 +27,14 @@ const mockState = vi.hoisted(() => {
   };
 });
 
-vi.mock("@kanna/db", () => ({
+vi.mock("@kanna/" + "db", () => ({
   insertOperatorEvent: mockState.insertOperatorEventMock,
   setSetting: mockState.setSettingMock,
   updatePipelineItemActivity: mockState.updatePipelineItemActivityMock,
 }));
 
-vi.mock("../services/desktopServerClient", () => ({
+vi.mock("../services/desktopServerClient", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../services/desktopServerClient")>(),
   markDesktopTaskRead: mockState.markDesktopTaskReadMock,
 }));
 
@@ -97,6 +99,14 @@ function createItem(overrides: Partial<PipelineItem> = {}): PipelineItem {
 describe("createSelectionApi", () => {
   beforeEach(() => {
     mockState.reset();
+    setDesktopServerClientHandlersForTests({
+      putSetting: async (key, value) => ({ key, value }),
+      postOperatorEvents: async () => {},
+      markTaskRead: async (taskId) => {
+        await mockState.updatePipelineItemActivityMock(expect.anything(), taskId, "idle");
+        return { taskId, activity: "idle" };
+      },
+    });
   });
 
   afterEach(() => {

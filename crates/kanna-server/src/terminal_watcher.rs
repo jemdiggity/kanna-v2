@@ -1,6 +1,31 @@
 use crate::{daemon_client, http_api, session_replacements};
 use std::sync::Arc;
 
+fn persist_exit_resume_session_id(
+    state: &http_api::AppState,
+    session_id: &str,
+    resume_session_id: Option<&str>,
+) -> Result<(), String> {
+    let Some(resume_session_id) = resume_session_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(());
+    };
+
+    let db = crate::db::Db::open(&state.config().db_path).map_err(|e| format!("db error: {e}"))?;
+    let Some(task_id) = db
+        .resolve_pipeline_item_id(session_id)
+        .map_err(|e| format!("db error: {e}"))?
+    else {
+        return Ok(());
+    };
+    db.update_pipeline_item_agent_session_id(&task_id, Some(resume_session_id))
+        .map_err(|e| format!("db error: {e}"))?;
+    state.publish_state_changed(kanna_agent_protocol::StateChangeScope::Tasks);
+    Ok(())
+}
+
 pub(crate) async fn terminal_state_watcher_loop(
     state: Arc<http_api::AppState>,
     replacements: session_replacements::SessionReplacements,
@@ -20,7 +45,7 @@ async fn terminal_state_watcher_once(
     state: &http_api::AppState,
     replacements: &session_replacements::SessionReplacements,
 ) -> Result<(), String> {
-    use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent, SessionStatus};
+    use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
 
     let config = state.config();
     let mut daemon = daemon_client::DaemonClient::connect(&config.daemon_dir)
@@ -48,7 +73,7 @@ async fn terminal_state_watcher_once(
                 session_id,
                 code,
                 killed,
-                ..
+                resume_session_id,
             } => {
                 // Consume the replacement entry even when the event is
                 // self-describing — a leftover entry would swallow a future
@@ -58,6 +83,15 @@ async fn terminal_state_watcher_once(
                     // Orchestrated kill (stage swap, rerun, close) — not the
                     // agent finishing.
                     continue;
+                }
+                if let Err(error) =
+                    persist_exit_resume_session_id(state, &session_id, resume_session_id.as_deref())
+                {
+                    log::warn!(
+                        "failed to persist terminal resume session id for {}: {}",
+                        session_id,
+                        error
+                    );
                 }
                 let success = code == 0;
                 if let Err(error) =
@@ -72,22 +106,6 @@ async fn terminal_state_watcher_once(
                 }
             }
             DaemonEvent::ShuttingDown => return Ok(()),
-            DaemonEvent::StatusChanged { session_id, status } => {
-                let activity = match status {
-                    SessionStatus::Busy => "working",
-                    SessionStatus::Waiting | SessionStatus::Idle => "idle",
-                };
-                if let Err(error) =
-                    http_api::handle_task_activity_state(state, &session_id, activity).await
-                {
-                    log::warn!(
-                        "failed to update terminal activity for {} ({:?}): {}",
-                        session_id,
-                        status,
-                        error
-                    );
-                }
-            }
             _ => {}
         }
     }
@@ -98,7 +116,7 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::db::Db;
-    use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent, SessionStatus};
+    use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
     use std::path::{Path, PathBuf};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
@@ -156,6 +174,20 @@ mod tests {
             .unwrap();
     }
 
+    fn seed_plain_task(config: &Config) {
+        let db = Db::open_for_tests(&config.db_path).unwrap();
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "task-child",
+            "repo-1",
+            "Child prompt",
+            Some("Child Display"),
+            "in progress",
+            "2026-04-18 10:00:00",
+        )
+        .unwrap();
+    }
+
     fn bind_daemon_listener(daemon_dir: &Path) -> (UnixListener, PathBuf) {
         std::fs::create_dir_all(daemon_dir).unwrap();
         let socket_path = daemon_socket_path_for_dir(daemon_dir);
@@ -187,20 +219,6 @@ mod tests {
     async fn write_raw_event(writer: &mut tokio::net::unix::OwnedWriteHalf, event: &str) {
         writer.write_all(event.as_bytes()).await.unwrap();
         writer.write_all(b"\n").await.unwrap();
-    }
-
-    fn seed_task(config: &Config, task_id: &str) {
-        let db = Db::open_for_tests(&config.db_path).unwrap();
-        db.insert_test_repo("repo-1", "Repo One").unwrap();
-        db.insert_test_pipeline_item(
-            task_id,
-            "repo-1",
-            "Task prompt",
-            Some("Task Display"),
-            "in progress",
-            "2026-04-18 10:00:00",
-        )
-        .unwrap();
     }
 
     async fn expect_no_notification_connection(listener: &UnixListener) {
@@ -248,6 +266,18 @@ mod tests {
         assert!(task.notified_at.is_some());
     }
 
+    fn assert_task_agent_session_id(config: &Config, expected: &str) {
+        let conn = rusqlite::Connection::open(&config.db_path).unwrap();
+        let actual: Option<String> = conn
+            .query_row(
+                "SELECT agent_session_id FROM pipeline_item WHERE id = ?",
+                ["task-child"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(actual.as_deref(), Some(expected));
+    }
+
     #[tokio::test]
     async fn watcher_ignores_killed_exit_without_completion_side_effects() {
         let unique = unique_name("terminal-watcher-killed");
@@ -290,24 +320,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn watcher_marks_busy_status_as_working() {
-        let unique = unique_name("terminal-watcher-status-busy");
+    async fn watcher_persists_exit_resume_session_id() {
+        let unique = unique_name("terminal-watcher-resume-session");
         let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
         let config = test_config(&unique, &daemon_dir);
-        seed_task(&config, "task-child");
+        seed_plain_task(&config);
         let (listener, socket_path) = bind_daemon_listener(&daemon_dir);
 
         let server = tokio::spawn(async move {
             let mut subscriber = expect_subscribe(&listener).await;
             write_event(
                 &mut subscriber,
-                &DaemonEvent::StatusChanged {
+                &DaemonEvent::Exit {
                     session_id: "task-child".to_string(),
-                    status: SessionStatus::Busy,
+                    code: 0,
+                    resume_session_id: Some("019d99a5-aa94-7c73-b786-644cc095c037".to_string()),
+                    killed: false,
                 },
             )
             .await;
             write_event(&mut subscriber, &DaemonEvent::ShuttingDown).await;
+            expect_no_notification_connection(&listener).await;
         });
 
         timeout(
@@ -322,9 +355,7 @@ mod tests {
         .unwrap();
         server.await.unwrap();
 
-        let db = Db::open(&config.db_path).unwrap();
-        let task = db.get_pipeline_item("task-child").unwrap().unwrap();
-        assert_eq!(task.activity.as_deref(), Some("working"));
+        assert_task_agent_session_id(&config, "019d99a5-aa94-7c73-b786-644cc095c037");
         let _ = std::fs::remove_file(socket_path);
         let _ = std::fs::remove_dir_all(daemon_dir);
     }

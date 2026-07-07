@@ -1,10 +1,8 @@
-import type { AgentProvider, PipelineItem } from "@kanna/db";
-import { getRepo } from "@kanna/db";
+import type { AgentProvider, PipelineItem } from "../types/kanna";
 import { buildKannaRuntimeSystemPrompt, buildKannaRuntimeUserPrompt } from "../../../../packages/core/src/pipeline/prompt-builder";
 import { invoke } from "../invoke";
 import { isTauri } from "../tauri-mock";
 import { buildTaskShellCommand, getShellTerminalEnv, getTaskTerminalEnv } from "../composables/terminalSessionRecovery";
-import { updateDesktopTaskAgentSessionId } from "../services/desktopServerClient";
 import { buildKannaCliPathEnv, buildTaskRuntimeEnv, resolveKannaServerBaseUrl } from "./kannaCliEnv";
 import { prepareKannaMcpRuntime } from "./kannaMcpRuntime";
 import { readEnvVarOptional, whichBinaryOptional } from "../utils/invokeHelpers";
@@ -19,6 +17,8 @@ import {
 import { shouldIgnoreRuntimeStatusDuringSetup } from "./taskRuntimeStatus";
 import { isReadableDirectory, resolveShellSpawnCwd } from "../utils/shellCwd";
 import { readRepoConfig, requireService, type AgentSpawnRecoveryOptions, type PreparedPtySession, type PtySpawnOptions, type StoreContext, type TaskSessionRecoveryOptions } from "./state";
+import { isTaskSelectedInAnyWindow } from "./windowSelection";
+import { applyDesktopTaskRuntimeStatus, putDesktopTaskAgentSession } from "../services/desktopServerClient";
 
 interface DaemonSessionInfo {
   session_id?: string;
@@ -36,7 +36,7 @@ function agentProviderBinary(provider: AgentProvider): string {
 }
 
 export interface SessionsApi {
-  applyTaskRuntimeStatus: (item: import("@kanna/db").PipelineItem, status: string) => Promise<void>;
+  applyTaskRuntimeStatus: (item: PipelineItem, status: string) => Promise<void>;
   syncTaskStatusesFromDaemon: () => Promise<void>;
   isAgentProviderAvailable: (provider: AgentProvider) => Promise<boolean>;
   getAgentProviderAvailability: () => Promise<AgentProviderAvailability>;
@@ -107,7 +107,7 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
     return inheritedPath && inheritedPath.length > 0 ? inheritedPath : null;
   }
 
-  async function applyTaskRuntimeStatus(item: import("@kanna/db").PipelineItem, status: string) {
+  async function applyTaskRuntimeStatus(item: PipelineItem, status: string) {
     if (item.closed_at !== null) {
       return;
     }
@@ -117,6 +117,12 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
     }
 
     if (status === "busy" || status === "idle" || status === "waiting") {
+      const response = await applyDesktopTaskRuntimeStatus(item.id, {
+        status,
+        selected: await isTaskSelectedInAnyWindow(context, item.id),
+      });
+      if (response.activity == null) return;
+
       await requireService(context.services.reloadSnapshot, "reloadSnapshot")();
       await context.services.windowWorkspace?.invalidateSharedData("taskActivity");
     }
@@ -178,9 +184,7 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
     resumeSessionId?: string | null,
   ): Promise<void> {
     if (!resumeSessionId) return;
-    const item = context.state.items.value.find((candidate) => candidate.id === sessionId);
-    if (!item || item.agent_provider !== "codex") return;
-    await updateDesktopTaskAgentSessionId(sessionId, resumeSessionId);
+    await putDesktopTaskAgentSession(sessionId, resumeSessionId);
   }
 
   async function spawnShellSession(
@@ -267,8 +271,7 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
   }
 
   async function resolveTaskWorktreePath(item: PipelineItem): Promise<string> {
-    const repo = context.state.repos.value.find((candidate) => candidate.id === item.repo_id)
-      ?? await getRepo(context.requireDb(), item.repo_id);
+    const repo = context.state.repos.value.find((candidate) => candidate.id === item.repo_id);
     if (!repo) {
       throw new Error(`repo not found for task ${item.id}`);
     }
@@ -348,7 +351,7 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
 
       if (!worktreePath || (setupCmds.length === 0 && !repoConfig)) {
         try {
-          const repo = await getRepo(context.requireDb(), item.repo_id);
+          const repo = context.state.repos.value.find((candidate) => candidate.id === item.repo_id);
           if (repo && item.branch) {
             worktreePath ??= `${repo.path}/.kanna-worktrees/${item.branch}`;
           }
@@ -429,7 +432,7 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
       resumeSessionId: options?.resumeSessionId,
       worktreePath,
       persistAgentSessionId: async (agentSessionId) => {
-        await updateDesktopTaskAgentSessionId(sessionId, agentSessionId);
+        await putDesktopTaskAgentSession(sessionId, agentSessionId);
       },
       resolveBinaryPath: async (name) => invoke<string>("which_binary", { name }),
     });

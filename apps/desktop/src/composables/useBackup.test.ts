@@ -288,15 +288,13 @@ describe("useBackup", () => {
 
       expect(testState.invokeCalls.find((c) => c.cmd === "backup_sqlite_database")).toBeUndefined();
 
-      for (let attempt = 0; attempt < 10; attempt++) {
-        await vi.runOnlyPendingTimersAsync();
-        await Promise.resolve();
-        await Promise.resolve();
-        if (testState.invokeCalls.some((c) => c.cmd === "backup_sqlite_database")) break;
-      }
+      await vi.runOnlyPendingTimersAsync();
+      await vi.waitFor(() => {
+        const backupCalls = testState.invokeCalls.filter((c) => c.cmd === "backup_sqlite_database");
+        expect(backupCalls).toHaveLength(1);
+      });
 
       const backupCalls = testState.invokeCalls.filter((c) => c.cmd === "backup_sqlite_database");
-      expect(backupCalls).toHaveLength(1);
       expect(backupCalls[0]!.args).toEqual({ dbName: "kanna-v2-scheduled.db" });
 
       requestAnimationFrameSpy.mockRestore();

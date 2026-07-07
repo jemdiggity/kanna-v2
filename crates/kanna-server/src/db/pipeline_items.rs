@@ -383,15 +383,10 @@ impl Db {
         Ok(())
     }
 
-    pub fn pin_pipeline_item(&self, id: &str, pin_order: i64) -> Result<(), rusqlite::Error> {
-        let Some(pipeline_item_id) = self.resolve_pipeline_item_id(id)? else {
-            return Err(rusqlite::Error::QueryReturnedNoRows);
-        };
+    pub fn pin_pipeline_item(&self, task_id: &str, pin_order: i64) -> Result<(), rusqlite::Error> {
         let rows_affected = self.conn.execute(
-            "UPDATE pipeline_item
-             SET pinned = 1, pin_order = ?, updated_at = datetime('now')
-             WHERE id = ?",
-            (pin_order, pipeline_item_id),
+            "UPDATE pipeline_item SET pinned = 1, pin_order = ?, updated_at = datetime('now') WHERE id = ?",
+            (pin_order, task_id),
         )?;
         if rows_affected == 0 {
             return Err(rusqlite::Error::QueryReturnedNoRows);
@@ -399,15 +394,10 @@ impl Db {
         Ok(())
     }
 
-    pub fn unpin_pipeline_item(&self, id: &str) -> Result<(), rusqlite::Error> {
-        let Some(pipeline_item_id) = self.resolve_pipeline_item_id(id)? else {
-            return Err(rusqlite::Error::QueryReturnedNoRows);
-        };
+    pub fn unpin_pipeline_item(&self, task_id: &str) -> Result<(), rusqlite::Error> {
         let rows_affected = self.conn.execute(
-            "UPDATE pipeline_item
-             SET pinned = 0, pin_order = NULL, updated_at = datetime('now')
-             WHERE id = ?",
-            [pipeline_item_id],
+            "UPDATE pipeline_item SET pinned = 0, pin_order = NULL, updated_at = datetime('now') WHERE id = ?",
+            [task_id],
         )?;
         if rows_affected == 0 {
             return Err(rusqlite::Error::QueryReturnedNoRows);
@@ -415,20 +405,16 @@ impl Db {
         Ok(())
     }
 
-    pub fn reorder_pinned_items(&self, ordered_ids: &[String]) -> Result<(), rusqlite::Error> {
-        for (index, id) in ordered_ids.iter().enumerate() {
-            let Some(pipeline_item_id) = self.resolve_pipeline_item_id(id)? else {
-                return Err(rusqlite::Error::QueryReturnedNoRows);
-            };
-            let rows_affected = self.conn.execute(
-                "UPDATE pipeline_item
-                 SET pin_order = ?, updated_at = datetime('now')
-                 WHERE id = ?",
-                (index as i64, pipeline_item_id),
+    pub fn reorder_pinned_items(
+        &self,
+        repo_id: &str,
+        ordered_ids: &[String],
+    ) -> Result<(), rusqlite::Error> {
+        for (index, task_id) in ordered_ids.iter().enumerate() {
+            self.conn.execute(
+                "UPDATE pipeline_item SET pin_order = ?, updated_at = datetime('now') WHERE id = ? AND repo_id = ?",
+                (index as i64, task_id, repo_id),
             )?;
-            if rows_affected == 0 {
-                return Err(rusqlite::Error::QueryReturnedNoRows);
-            }
         }
         Ok(())
     }
@@ -612,6 +598,24 @@ impl Db {
             (agent_session_id, id),
         )?;
         Ok(())
+    }
+
+    pub fn list_closed_task_identities(
+        &self,
+    ) -> Result<Vec<super::ClosedTaskIdentity>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, repo_id
+             FROM pipeline_item
+             WHERE closed_at IS NOT NULL
+             ORDER BY repo_id ASC, id ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(super::ClosedTaskIdentity {
+                id: row.get(0)?,
+                repo_id: row.get(1)?,
+            })
+        })?;
+        rows.collect()
     }
 
     /// Stage transition into a freshly forked workspace: the task's current

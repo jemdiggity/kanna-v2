@@ -1,4 +1,4 @@
-import { setSetting, type DbHandle, type PipelineItem } from "@kanna/db";
+import type { DbHandle, PipelineItem, TaskBlocker } from "../types/kanna";
 import { invoke } from "../invoke";
 import { isTauri } from "../tauri-mock";
 import { listen } from "../listen";
@@ -17,7 +17,7 @@ import { formatAppWindowTitle, type AppBuildInfo } from "./windowTitle";
 import { isTaskTearingDown } from "./taskStages";
 import { requireService, type StoreContext } from "./state";
 import { applySnapshotSettingsToState } from "./snapshotSettings";
-import { closeDesktopTask } from "../services/desktopServerClient";
+import { applyDesktopTaskRuntimeStatus, closeDesktopTask, putDesktopSetting } from "../services/desktopServerClient";
 
 export interface InitApi {
   init: (db: DbHandle) => Promise<void>;
@@ -35,7 +35,8 @@ interface DaemonSessionListEntry {
 
 export function createInitApi(
   context: StoreContext,
-  tasks: Pick<import("./tasks").TasksApi, "handleAgentFinished">,
+  ports: import("./ports").PortsStore,
+  tasks: Pick<import("./tasks").TasksApi, "checkUnblocked" | "handleAgentFinished" | "restoreUnblockedTask">,
 ): InitApi {
   function isVisibleItemInSelectedRepo(item: PipelineItem | null | undefined): item is PipelineItem {
     return Boolean(
@@ -105,6 +106,34 @@ export function createInitApi(
     return !sessionId.startsWith("shell-") && !isTeardownSessionId(sessionId);
   }
 
+  function resolveUnblockedItemsFromSnapshot(
+    items: readonly PipelineItem[],
+    blockers: readonly TaskBlocker[],
+  ): PipelineItem[] {
+    const openItemIds = new Set(
+      items
+        .filter((item) => item.closed_at === null)
+        .map((item) => item.id),
+    );
+    const blockerIdsByBlockedItemId = new Map<string, string[]>();
+
+    for (const blocker of blockers) {
+      const existing = blockerIdsByBlockedItemId.get(blocker.blocked_item_id);
+      if (existing) {
+        existing.push(blocker.blocker_item_id);
+      } else {
+        blockerIdsByBlockedItemId.set(blocker.blocked_item_id, [blocker.blocker_item_id]);
+      }
+    }
+
+    return items.filter((item) => {
+      if (item.closed_at !== null) return false;
+      const blockerIds = blockerIdsByBlockedItemId.get(item.id);
+      if (!blockerIds?.length) return false;
+      return blockerIds.every((blockerId) => !openItemIds.has(blockerId));
+    });
+  }
+
   async function loadPreferences() {
     const snapshot = await requireService(context.services.fetchSnapshot, "fetchSnapshot")();
     context.state.snapshotSettings.value = { ...snapshot.settings };
@@ -112,7 +141,7 @@ export function createInitApi(
   }
 
   async function savePreference(key: string, value: string) {
-    await setSetting(context.requireDb(), key, value);
+    await putDesktopSetting(key, value);
     const reloadSnapshot = context.services.reloadSnapshot;
     if (reloadSnapshot) {
       await reloadSnapshot();
@@ -136,7 +165,7 @@ export function createInitApi(
           console.warn("[store] failed to retire stale worktree shell:", { sessionId, error });
         }),
       ));
-      await setSetting(context.requireDb(), WORKTREE_SHELL_ENV_GENERATION_KEY, WORKTREE_SHELL_ENV_GENERATION);
+      await putDesktopSetting(WORKTREE_SHELL_ENV_GENERATION_KEY, WORKTREE_SHELL_ENV_GENERATION);
       context.state.snapshotSettings.value = {
         ...context.state.snapshotSettings.value,
         [WORKTREE_SHELL_ENV_GENERATION_KEY]: WORKTREE_SHELL_ENV_GENERATION,
@@ -153,13 +182,28 @@ export function createInitApi(
 
     let eagerRepos = [...context.state.repos.value];
     let eagerItems = [...context.state.items.value];
+    let snapshotBlockers = [...context.state.taskBlockers.value];
     let worktreePathByItemId = new Map(Object.entries(context.state.worktreePaths.value));
 
     async function refreshStartupSnapshot(): Promise<void> {
       await context.services.reloadSnapshot?.();
       eagerRepos = [...context.state.repos.value];
       eagerItems = [...context.state.items.value];
+      snapshotBlockers = [...context.state.taskBlockers.value];
       worktreePathByItemId = new Map(Object.entries(context.state.worktreePaths.value));
+    }
+
+    const workingItems = eagerItems.filter((item) => item.activity === "working");
+    let changedStartupActivity = false;
+    for (const item of workingItems) {
+      const response = await applyDesktopTaskRuntimeStatus(item.id, {
+        status: "idle",
+        selected: false,
+      });
+      changedStartupActivity = changedStartupActivity || response.activity != null;
+    }
+    if (changedStartupActivity) {
+      await refreshStartupSnapshot();
     }
 
     if (isTauri) {
@@ -177,7 +221,7 @@ export function createInitApi(
         const exists = await invoke<boolean>("file_exists", { path: worktreePath });
         if (!exists) {
           console.warn(`[store] closing orphaned task ${item.id}: worktree missing at ${worktreePath}`);
-          await closeDesktopTask(item.id);
+          await ports.closeTaskAndReleasePorts(item.id, closeDesktopTask);
           item.closed_at = new Date().toISOString();
           closedOrphan = true;
         }
@@ -185,6 +229,12 @@ export function createInitApi(
       if (closedOrphan) {
         await refreshStartupSnapshot();
       }
+    }
+
+    const unblockedItems = resolveUnblockedItemsFromSnapshot(eagerItems, snapshotBlockers);
+    for (const item of unblockedItems) {
+      console.debug(`[store] restoring previously blocked task: ${item.id}`);
+      await tasks.restoreUnblockedTask(item);
     }
 
     const bootstrap = context.state.initialWindowBootstrap.value;
@@ -343,7 +393,8 @@ export function createInitApi(
             "selectReplacementAfterItemRemoval",
           )(item);
         }
-        await closeDesktopTask(item.id);
+        await ports.closeTaskAndReleasePorts(item.id, closeDesktopTask);
+        await tasks.checkUnblocked(item.id);
         await requireService(context.services.reloadSnapshot, "reloadSnapshot")();
         return;
       }
