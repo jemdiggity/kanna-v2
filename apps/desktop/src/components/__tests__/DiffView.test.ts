@@ -26,6 +26,25 @@ interface MockFileDiff {
   __searchRows?: MockSearchRow[];
   __deferPostRender?: boolean;
   __postRenderDelayMs?: number;
+  isPartial?: boolean;
+  additionLines?: string[];
+  deletionLines?: string[];
+  hunks?: Array<{
+    hunkContent?: Array<
+      | {
+        type: "context";
+        lines: number;
+        additionLineIndex: number;
+      }
+      | {
+        type: "change";
+        additions: number;
+        deletions: number;
+        additionLineIndex: number;
+        deletionLineIndex: number;
+      }
+    >;
+  }>;
 }
 
 const diffMocks = vi.hoisted(() => ({
@@ -53,13 +72,46 @@ vi.mock("@pierre/diffs", async () => {
   const actual = await vi.importActual<typeof import("@pierre/diffs")>("@pierre/diffs");
   diffMocks.actualParsePatchFiles = actual.parsePatchFiles;
   diffMocks.parsePatchFilesMock.mockImplementation(actual.parsePatchFiles);
+
+  function rowsFromParsedFileDiff(fileDiff: MockFileDiff, expandUnchanged?: boolean): MockSearchRow[] {
+    const rows: MockSearchRow[] = [];
+    for (const hunk of fileDiff.hunks ?? []) {
+      for (const content of hunk.hunkContent ?? []) {
+        if (content.type === "context") {
+          for (let offset = 0; offset < content.lines; offset += 1) {
+            rows.push({
+              lineIndex: `context-${rows.length}`,
+              text: fileDiff.additionLines?.[content.additionLineIndex + offset] ?? "",
+            });
+          }
+        } else {
+          for (let offset = 0; offset < content.deletions; offset += 1) {
+            rows.push({
+              lineIndex: `deletion-${rows.length}`,
+              text: fileDiff.deletionLines?.[content.deletionLineIndex + offset] ?? "",
+            });
+          }
+          for (let offset = 0; offset < content.additions; offset += 1) {
+            rows.push({
+              lineIndex: `addition-${rows.length}`,
+              text: fileDiff.additionLines?.[content.additionLineIndex + offset] ?? "",
+            });
+          }
+        }
+      }
+    }
+
+    if (expandUnchanged || rows.length <= 8) return rows;
+    return rows.slice(3, -3);
+  }
+
   return {
     ...actual,
     parsePatchFiles: (...args: Parameters<typeof actual.parsePatchFiles>) => diffMocks.parsePatchFilesMock(...args),
     FileDiff: class {
-      private options?: { onPostRender?: () => void };
+      private options?: { expandUnchanged?: boolean; onPostRender?: () => void };
 
-      constructor(options?: { onPostRender?: () => void }) {
+      constructor(options?: { expandUnchanged?: boolean; onPostRender?: () => void }) {
         this.options = options;
       }
 
@@ -72,7 +124,7 @@ vi.mock("@pierre/diffs", async () => {
           const container = document.createElement("diffs-container");
           const shadowRoot = container.attachShadow({ mode: "open" });
           const header = diffMeta.newName ?? diffMeta.oldName ?? diffMeta.name ?? "";
-          const rows = diffMeta.__searchRows ?? [];
+          const rows = diffMeta.__searchRows ?? rowsFromParsedFileDiff(diffMeta, this.options?.expandUnchanged);
 
           shadowRoot.innerHTML = `
             <div data-title="">${header}</div>
@@ -237,6 +289,122 @@ describe("DiffView", () => {
       contextLines: 4294967295,
     });
     expect(contextButton.text()).toBe("All lines");
+
+    wrapper.unmount();
+  });
+
+  it("toggles branch diffs to all unchanged lines with the keyboard shortcut and renders hidden context", async () => {
+    const compactPatch = [
+      "diff --git a/context.txt b/context.txt",
+      "index 1111111..2222222 100644",
+      "--- a/context.txt",
+      "+++ b/context.txt",
+      "@@ -5,7 +5,7 @@",
+      " line 5",
+      " line 6",
+      " line 7",
+      "-line 8",
+      "+changed 8",
+      " line 9",
+      " line 10",
+      " line 11",
+      "",
+    ].join("\n");
+    const fullPatch = [
+      "diff --git a/context.txt b/context.txt",
+      "index 1111111..2222222 100644",
+      "--- a/context.txt",
+      "+++ b/context.txt",
+      "@@ -1,15 +1,15 @@",
+      " line 1",
+      " line 2",
+      " line 3",
+      " line 4",
+      " line 5",
+      " line 6",
+      " line 7",
+      "-line 8",
+      "+changed 8",
+      " line 9",
+      " line 10",
+      " line 11",
+      " line 12",
+      " line 13",
+      " line 14",
+      " line 15",
+      "",
+    ].join("\n");
+
+    invokeMock.mockImplementation(async (command, args) => {
+      if (command === "git_branch_upstream") return null;
+      if (command === "git_merge_base") return "merge-base-sha";
+      if (command === "git_diff_branch_range") {
+        return (args?.contextLines === 4294967295) ? fullPatch : compactPatch;
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    const wrapper = mount(DiffView, {
+      props: {
+        repoPath: "/repo",
+        initialScope: "branch",
+        baseRef: "origin/main",
+      },
+      attachTo: document.body,
+      global: {
+        mocks: {
+          $t: (key: string) => key,
+        },
+      },
+    });
+
+    await flushPromises();
+    await flushPromises();
+
+    const renderedText = () =>
+      Array.from(wrapper.findAll(".diff-file diffs-container"))
+        .map((container) => (container.element as HTMLElement).shadowRoot?.textContent ?? "")
+        .join("\n");
+    const renderedRows = () =>
+      Array.from(wrapper.findAll(".diff-file diffs-container"))
+        .flatMap((container) =>
+          Array.from(
+            (container.element as HTMLElement).shadowRoot?.querySelectorAll("[data-content] [data-line-index]") ?? [],
+          ).map((row) => (row.textContent ?? "").trimEnd()),
+        );
+
+    expect(invokeMock).toHaveBeenCalledWith("git_diff_branch_range", {
+      repoPath: "/repo",
+      from: "merge-base-sha",
+      mode: "none",
+    });
+    expect(renderedText()).toContain("changed 8");
+    expect(renderedRows()).not.toContain("line 1");
+    expect(renderedRows()).not.toContain("line 15");
+    expect(renderMock.mock.calls.at(-1)?.[0].fileDiff).toEqual(
+      expect.objectContaining({ name: "context.txt" }),
+    );
+
+    window.dispatchEvent(new KeyboardEvent("keydown", {
+      key: "a",
+      bubbles: true,
+    }));
+    await flushPromises();
+    await flushPromises();
+    await waitForTimerTurn();
+
+    expect(invokeMock).toHaveBeenLastCalledWith("git_diff_branch_range", {
+      repoPath: "/repo",
+      from: "merge-base-sha",
+      mode: "none",
+      contextLines: 4294967295,
+    });
+    expect(renderMock.mock.calls.at(-1)?.[0].fileDiff).toEqual(
+      expect.objectContaining({ name: "context.txt" }),
+    );
+    expect(renderedRows()).toContain("line 1");
+    expect(renderedRows()).toContain("line 15");
+    expect(renderedText()).toContain("changed 8");
 
     wrapper.unmount();
   });
