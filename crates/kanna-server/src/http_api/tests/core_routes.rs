@@ -965,6 +965,17 @@ async fn closed_task_identities_route_returns_closed_tasks() {
         )
         .unwrap();
         db.insert_test_pipeline_item(
+            "task-older-closed",
+            "repo-1",
+            "older closed",
+            Some("Older Closed"),
+            "in progress",
+            "2026-04-17 08:00:00",
+        )
+        .unwrap();
+        db.set_test_pipeline_item_closed_at("task-older-closed", "2026-04-17 08:00:00")
+            .unwrap();
+        db.insert_test_pipeline_item(
             "task-closed",
             "repo-1",
             "closed",
@@ -992,7 +1003,12 @@ async fn closed_task_identities_route_returns_closed_tasks() {
     let json: serde_json::Value = from_slice(&body).unwrap();
     assert_eq!(
         json,
-        serde_json::json!({ "tasks": [{ "id": "task-closed", "repo_id": "repo-1" }] })
+        serde_json::json!({
+            "tasks": [
+                { "id": "task-closed", "repo_id": "repo-1" },
+                { "id": "task-older-closed", "repo_id": "repo-1" }
+            ]
+        })
     );
 }
 
@@ -1314,6 +1330,62 @@ async fn update_task_route_persists_display_name_and_get_list_return_new_title()
         .unwrap();
     let tasks: Vec<crate::mobile_api::TaskSummary> = from_slice(&body).unwrap();
     assert_eq!(tasks[0].title, "Renamed task");
+}
+
+#[tokio::test]
+async fn update_task_route_clears_display_name_with_null() {
+    let state = super::test_state_with_seed("desktop-1", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "task-1",
+            "repo-1",
+            "Original prompt",
+            Some("Custom title"),
+            "in progress",
+            "2026-04-18 10:00:00",
+        )
+        .unwrap();
+    });
+    let db_path = state.config.db_path.clone();
+    let app = super::router(state);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::patch("/v1/tasks/task-1")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "displayName": null
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let db = Db::open(&db_path).unwrap();
+    let item = db.get_pipeline_item("task-1").unwrap().unwrap();
+    assert_eq!(item.display_name, None);
+    drop(db);
+
+    let get_response = app
+        .oneshot(
+            Request::get("/v1/tasks/task-1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get_response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(get_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let task: crate::mobile_api::TaskDetail = from_slice(&body).unwrap();
+    assert_eq!(task.title, "Original prompt");
 }
 
 #[tokio::test]

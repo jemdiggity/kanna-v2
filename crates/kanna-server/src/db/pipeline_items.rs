@@ -610,7 +610,7 @@ impl Db {
             "SELECT id, repo_id
              FROM pipeline_item
              WHERE closed_at IS NOT NULL
-             ORDER BY repo_id ASC, id ASC",
+             ORDER BY closed_at DESC, id ASC",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(super::ClosedTaskIdentity {

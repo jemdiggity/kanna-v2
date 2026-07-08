@@ -655,6 +655,7 @@ import { useKannaStore } from "./kanna";
 import {
   setDesktopServerClientHandlersForTests,
   setDesktopSnapshotFetcherForTests,
+  updateDesktopServerClientHandlersForTests,
 } from "../services/desktopServerClient";
 
 let activeStore: ReturnType<typeof useKannaStore> | null = null;
@@ -927,6 +928,18 @@ describe("kanna store task base branch integration", () => {
       putSetting: async (key, value) => ({ key, value }),
       deleteSetting: async () => {},
       postOperatorEvents: async () => {},
+      patchRepo: async (repoId, input) => {
+        const repo = mockState.repos.find((candidate) => candidate.id === repoId);
+        if (!repo) return;
+        if (input.hidden !== undefined) {
+          repo.hidden = input.hidden ? 1 : 0;
+        }
+      },
+      fetchClosedTaskIdentities: async () =>
+        mockState.pipelineItems
+          .filter((item) => item.closed_at !== null)
+          .sort((a, b) => String(b.closed_at).localeCompare(String(a.closed_at)) || a.id.localeCompare(b.id))
+          .map((item) => ({ id: item.id, repo_id: item.repo_id })),
       createTask: async (request) => {
         const repo = mockState.repos.find((candidate) => candidate.id === request.repoId);
         if (!repo) throw new Error(`repo not found: ${request.repoId}`);
@@ -1947,6 +1960,42 @@ describe("kanna store task base branch integration", () => {
       { method: "POST" },
     );
     expect(mockState.invokeMock).not.toHaveBeenCalledWith("run_script", expect.anything());
+  });
+
+  it("retries repo unhide undo through the server API after a failed attempt", async () => {
+    mockState.repos = [
+      mockState.makeRepo({ id: "repo-1", path: "/tmp/repo-1", name: "repo-1" }),
+      mockState.makeRepo({ id: "repo-2", path: "/tmp/repo-2", name: "repo-2" }),
+    ];
+    const store = await createStore();
+    await vi.waitFor(() => {
+      expect(store.repos).toHaveLength(2);
+    });
+
+    await store.hideRepo("repo-2");
+    expect(mockState.repos.find((repo) => repo.id === "repo-2")?.hidden).toBe(1);
+
+    updateDesktopServerClientHandlersForTests({
+      patchRepo: async () => {
+        throw new Error("server unavailable");
+      },
+    });
+
+    await store.undoClose();
+    expect(mockState.repos.find((repo) => repo.id === "repo-2")?.hidden).toBe(1);
+
+    updateDesktopServerClientHandlersForTests({
+      patchRepo: async (repoId, input) => {
+        const repo = mockState.repos.find((candidate) => candidate.id === repoId);
+        if (!repo) return;
+        if (input.hidden !== undefined) {
+          repo.hidden = input.hidden ? 1 : 0;
+        }
+      },
+    });
+
+    await store.undoClose();
+    expect(mockState.repos.find((repo) => repo.id === "repo-2")?.hidden).toBe(0);
   });
 
   it("assigns ports freshly on undo close instead of restoring the task's previous assignment", async () => {

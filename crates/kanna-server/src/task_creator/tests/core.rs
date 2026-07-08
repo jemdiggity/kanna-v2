@@ -1,5 +1,41 @@
 use super::*;
 
+#[test]
+fn claim_task_ports_skips_reserved_ports_and_offsets() {
+    let config = test_config("reserved-port-claim");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Use reserved ports",
+        Some("Reserved ports"),
+        "in progress",
+        "2026-04-18 10:00:00",
+    )
+    .unwrap();
+    let repo_config = super::super::definitions::RepoConfig {
+        ports: Some(HashMap::from([
+            ("KANNA_DEV_PORT".to_string(), 1420),
+            ("API_PORT".to_string(), 3000),
+        ])),
+        reserved_ports: vec![1421],
+        reserved_port_offsets: vec![1],
+        ..Default::default()
+    };
+
+    let port_env =
+        super::super::environment::claim_task_ports(&db, "task-1", &repo_config).unwrap();
+
+    assert_eq!(
+        port_env,
+        HashMap::from([
+            ("KANNA_DEV_PORT".to_string(), "1422".to_string()),
+            ("API_PORT".to_string(), "3002".to_string()),
+        ])
+    );
+}
+
 fn write_agent_repo(label: &str, agent_md: &str, extend_md: Option<&str>) -> std::path::PathBuf {
     let repo_root =
         std::env::temp_dir().join(format!("kanna-agent-def-{label}-{}", std::process::id()));

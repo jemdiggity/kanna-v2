@@ -90,7 +90,7 @@ async fn main() {
         }
     });
 
-    let db = match db::Db::open(&config.db_path) {
+    let db = match db::Db::open_migrated(&config.db_path) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("Failed to open database at {}: {}", config.db_path, e);

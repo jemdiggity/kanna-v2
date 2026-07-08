@@ -39,6 +39,7 @@ use axum::http::Request;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::Router;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tower::ServiceExt;
 use tower_http::cors::CorsLayer;
@@ -317,7 +318,10 @@ pub async fn serve(state: Arc<AppState>) -> Result<(), String> {
         .await
         .map_err(|e| format!("failed to bind LAN API on {}: {}", bind_addr, e))?;
     log::info!("LAN API listening on {}", bind_addr);
-    axum::serve(listener, router(state))
-        .await
-        .map_err(|e| format!("LAN API server failed: {}", e))
+    axum::serve(
+        listener,
+        router(state).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .map_err(|e| format!("LAN API server failed: {}", e))
 }

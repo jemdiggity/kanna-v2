@@ -12,7 +12,6 @@ const BAZEL_SQL_REPO = ["desktop_crates", RUST_SQL_PLUGIN].join("__");
 
 const ALLOWED_DB_BOUNDARY_FILES = new Set([
   "stores/db.ts",
-  "stores/taskCloseActions.ts",
   "stores/taskBlockedActions.ts",
   "stores/taskItemActions.ts",
 ]);
