@@ -103,12 +103,21 @@ fn start_http_fixture(
 }
 
 fn run_kanna_mcp(base_url: &str, messages: &[Value]) -> Vec<Value> {
+    run_kanna_mcp_with_env(base_url, messages, &[])
+}
+
+fn run_kanna_mcp_with_env(
+    base_url: &str,
+    messages: &[Value],
+    env_pairs: &[(&str, &str)],
+) -> Vec<Value> {
     let binary = env!("CARGO_BIN_EXE_kanna-mcp");
     let mut child = Command::new(binary)
         .args(["serve", "--server-url", base_url])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .envs(env_pairs.iter().copied())
         .spawn()
         .expect("spawn kanna-mcp");
 
@@ -361,6 +370,72 @@ fn serve_forwards_get_and_post_tool_calls_to_configured_http_server() {
     assert_eq!(
         tool_text(&responses[3]),
         json!({ "taskId": "task-1", "stage": "pr" })
+    );
+}
+
+#[test]
+fn serve_infers_create_task_repo_from_current_task_context() {
+    let (base_url, server) = start_http_fixture(vec![
+        ExpectedRequest {
+            method: "GET",
+            path: "/v1/tasks/task-current",
+            body: None,
+            response_status: "200 OK",
+            response_body: json!({
+                "id": "task-current",
+                "repoId": "repo-current",
+                "title": "Current task",
+                "stage": "in progress",
+                "activity": "working"
+            }),
+        },
+        ExpectedRequest {
+            method: "POST",
+            path: "/v1/tasks",
+            body: Some(json!({
+                "repoId": "repo-current",
+                "prompt": "Create the child task",
+                "agentType": "pty"
+            })),
+            response_status: "200 OK",
+            response_body: json!({
+                "taskId": "task-child",
+                "repoId": "repo-current",
+                "title": "Create the child task",
+                "stage": "in progress",
+                "agentType": "pty"
+            }),
+        },
+    ]);
+
+    let responses = run_kanna_mcp_with_env(
+        &base_url,
+        &[json!({
+            "jsonrpc": "2.0",
+            "id": 12,
+            "method": "tools/call",
+            "params": {
+                "name": "kanna_create_task",
+                "arguments": {
+                    "prompt": "Create the child task"
+                }
+            }
+        })],
+        &[("KANNA_TASK_ID", "task-current")],
+    );
+
+    let observed = server.join().expect("fixture server");
+    assert_eq!(observed.len(), 2);
+    assert_eq!(responses.len(), 1);
+    assert_eq!(
+        tool_text(&responses[0]),
+        json!({
+            "taskId": "task-child",
+            "repoId": "repo-current",
+            "title": "Create the child task",
+            "stage": "in progress",
+            "agentType": "pty"
+        })
     );
 }
 
