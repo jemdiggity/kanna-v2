@@ -20,6 +20,8 @@ export interface RepoConfig {
   teardown?: string[];
   test?: string[];
   ports?: Record<string, number>;
+  flavors?: Record<string, string>;
+  vars?: Record<string, string>;
   reserved_port_offsets?: number[];
   reserved_ports?: number[];
   stage_order?: string[];
@@ -58,6 +60,26 @@ export function parseRepoConfig(json: string): RepoConfig {
       if (typeof value === "number") ports[name] = value;
     }
     if (Object.keys(ports).length > 0) config.ports = ports;
+  }
+
+  if (raw.flavors && typeof raw.flavors === "object" && !Array.isArray(raw.flavors)) {
+    const flavors: Record<string, string> = {};
+    for (const [role, flavor] of Object.entries(raw.flavors as Record<string, unknown>)) {
+      if (typeof flavor === "string") {
+        flavors[role] = flavor;
+      }
+    }
+    if (Object.keys(flavors).length > 0) config.flavors = flavors;
+  }
+
+  if (raw.vars && typeof raw.vars === "object" && !Array.isArray(raw.vars)) {
+    const vars: Record<string, string> = {};
+    for (const [name, value] of Object.entries(raw.vars as Record<string, unknown>)) {
+      if (typeof value === "string") {
+        vars[name] = value;
+      }
+    }
+    if (Object.keys(vars).length > 0) config.vars = vars;
   }
 
   if (Array.isArray(raw.reserved_port_offsets)) {

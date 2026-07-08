@@ -3,6 +3,7 @@ import {
   parseAgentDefinition,
   parseAgentExtension,
 } from "../../../../packages/core/src/pipeline/agent-loader";
+import { parseRepoConfig } from "../../../../packages/core/src/config/repo-config";
 import { parsePipelineJson } from "../../../../packages/core/src/pipeline/pipeline-loader";
 import type { AgentDefinition, PipelineDefinition } from "../../../../packages/core/src/pipeline/pipeline-types";
 import { invoke } from "../invoke";
@@ -258,33 +259,111 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
     return pipeline;
   }
 
+  async function loadRepoConfigForAgent(repoPath: string): Promise<{
+    flavors?: Record<string, string>;
+    vars?: Record<string, string>;
+  }> {
+    try {
+      const content = await invoke<string>("read_text_file", { path: `${repoPath}/.kanna/config.json` });
+      const config = parseRepoConfig(content);
+      return {
+        flavors: config.flavors,
+        vars: config.vars,
+      };
+    } catch {
+      return {};
+    }
+  }
+
+  function resolveAgentSelector(agentName: string, flavors?: Record<string, string>): {
+    role: string;
+    repoAgentDir: string;
+    builtinFlavorPath: string | null;
+  } {
+    const [role, explicitFlavor] = splitAgentSelector(agentName);
+    const selectedFlavor = explicitFlavor ?? flavors?.[role] ?? null;
+    return {
+      role,
+      repoAgentDir: role,
+      builtinFlavorPath: selectedFlavor ? `.kanna/agents/${role}/flavors/${selectedFlavor}/AGENT.md` : null,
+    };
+  }
+
+  function splitAgentSelector(agentName: string): [string, string | null] {
+    const parts = agentName.split("@");
+    if (parts.length !== 2 || parts[0] === "" || parts[1] === "") {
+      return [agentName, null];
+    }
+    return [parts[0], parts[1]];
+  }
+
+  const reservedPromptVars = new Set([
+    "BASE_REF",
+    "BRANCH",
+    "KANNA_TASK_ID",
+    "PREV_RESULT",
+    "SOURCE_WORKTREE",
+    "TASK_PROMPT",
+  ]);
+
+  function substituteAgentPromptVars(agent: AgentDefinition, vars: Record<string, string> | undefined): AgentDefinition {
+    if (!vars || Object.keys(vars).length === 0) return agent;
+    return {
+      ...agent,
+      prompt: agent.prompt.replace(
+        /\$\{([A-Z][A-Z0-9_]*)\}|\$([A-Z][A-Z0-9_]*)/g,
+        (match: string, braced: string | undefined, bare: string | undefined): string => {
+          const name = braced ?? bare;
+          if (name === undefined) return match;
+          if (reservedPromptVars.has(name)) return match;
+          return vars[name] ?? match;
+        },
+      ),
+    };
+  }
+
   async function loadAgent(repoPath: string, agentName: string): Promise<AgentDefinition> {
     const cacheKey = `${repoPath}::${agentName}`;
     const cached = context.state.agentCache.get(cacheKey);
     if (cached) return cached;
 
+    const repoConfig = await loadRepoConfigForAgent(repoPath);
+    const selector = resolveAgentSelector(agentName, repoConfig.flavors);
     let agent: AgentDefinition;
     try {
-      const path = `${repoPath}/.kanna/agents/${agentName}/AGENT.md`;
+      const path = `${repoPath}/.kanna/agents/${selector.repoAgentDir}/AGENT.md`;
       const content = await invoke<string>("read_text_file", { path });
       agent = parseAgentDefinition(content);
     } catch (error) {
       console.debug(`[pipeline] failed to load agent "${agentName}" from repo; trying bundled resource:`, error);
       try {
         const content = await invoke<string>("read_builtin_resource", {
-          relativePath: `.kanna/agents/${agentName}/AGENT.md`,
+          relativePath: selector.builtinFlavorPath ?? `.kanna/agents/${selector.role}/AGENT.md`,
         });
         agent = parseAgentDefinition(content);
-      } catch (error) {
-        throw new Error(
-          `Agent "${agentName}" not found on disk or in bundled resources: ${error instanceof Error ? error.message : JSON.stringify(error)}`,
-        );
+      } catch (flavorError) {
+        if (selector.builtinFlavorPath) {
+          try {
+            const content = await invoke<string>("read_builtin_resource", {
+              relativePath: `.kanna/agents/${selector.role}/AGENT.md`,
+            });
+            agent = parseAgentDefinition(content);
+          } catch (defaultError) {
+            throw new Error(
+              `Agent "${agentName}" not found on disk or in bundled resources: ${defaultError instanceof Error ? defaultError.message : JSON.stringify(defaultError)}`,
+            );
+          }
+        } else {
+          throw new Error(
+            `Agent "${agentName}" not found on disk or in bundled resources: ${flavorError instanceof Error ? flavorError.message : JSON.stringify(flavorError)}`,
+          );
+        }
       }
     }
 
     // Repo-local extension: layered onto the resolved agent (repo override or
     // built-in) so a repo can customize a default agent without rewriting it.
-    const extendPath = `${repoPath}/.kanna/agents/${agentName}/EXTEND.md`;
+    const extendPath = `${repoPath}/.kanna/agents/${selector.repoAgentDir}/EXTEND.md`;
     let extendContent: string | null = null;
     try {
       extendContent = await invoke<string>("read_text_file", { path: extendPath });
@@ -300,6 +379,7 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
         );
       }
     }
+    agent = substituteAgentPromptVars(agent, repoConfig.vars);
 
     context.state.agentCache.set(cacheKey, agent);
     return agent;

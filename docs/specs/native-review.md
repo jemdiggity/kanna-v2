@@ -151,7 +151,9 @@ setup path frictionless and tested:
    is one line (`agent: merge@github` in a pipeline stage, or a
    `flavors` map in `.kanna/config.json`) instead of copying AGENT.md
    files. Resolution order stays: repo override → built-in flavor →
-   built-in default.
+   built-in default. Repo overrides and extensions are role-scoped:
+   `.kanna/agents/pr/AGENT.md` or `.kanna/agents/pr/EXTEND.md` apply even
+   when the stage selects `agent: pr@push-only`.
 2. **Contracts.** A role is defined by the tool calls it must make —
    `pr` ends with `kanna_complete_stage` (+ `metadata.pr_url` when a PR
    exists); `merge` consumes a `MERGE <branch> → <target>` signal;
@@ -162,9 +164,12 @@ setup path frictionless and tested:
    live model makes the required calls (the `tests/cli-contract` pattern,
    extended).
 3. **Config-var substitution.** Stage prompts already substitute
-   `$BRANCH`/`$BASE_REF`/etc.; let AGENT.md bodies substitute repo-config
-   variables too, so one agent body can parametrize on e.g. `$BASE_REF`
-   or a repo-declared merge strategy instead of forking into a new file.
+   `$BRANCH`/`$BASE_REF`/etc.; let AGENT.md bodies substitute variables
+   declared in `.kanna/config.json` `vars`, so one agent body can
+   parametrize on a repo-declared merge strategy instead of forking into a
+   new file. Runtime variables (`$BASE_REF`, `$BRANCH`, `$KANNA_TASK_ID`,
+   `$PREV_RESULT`, `$SOURCE_WORKTREE`, `$TASK_PROMPT`) stay runtime-bound
+   and are not replaced by repo config.
 
 A fourth kind is unique to agents — **inference-time dispatch**: an agent
 told to inspect the environment (GitHub remote? `gh` authed? branch
