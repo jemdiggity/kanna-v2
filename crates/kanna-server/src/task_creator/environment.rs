@@ -9,8 +9,9 @@ use std::process::Command;
 pub(super) fn claim_task_ports(
     db: &Db,
     item_id: &str,
-    ports: Option<&HashMap<String, u16>>,
+    repo_config: &RepoConfig,
 ) -> Result<HashMap<String, String>, String> {
+    let ports = repo_config.ports.as_ref();
     let Some(ports) = ports else {
         return Ok(HashMap::new());
     };
@@ -20,6 +21,7 @@ pub(super) fn claim_task_ports(
         .map_err(|e| format!("db error: {}", e))?
         .into_iter()
         .collect::<HashSet<_>>();
+    add_reserved_ports(&mut claimed, repo_config);
     let existing = db
         .list_task_ports_for_item(item_id)
         .map_err(|e| format!("db error: {}", e))?;
@@ -51,6 +53,31 @@ pub(super) fn claim_task_ports(
     }
 
     Ok(port_env)
+}
+
+fn add_reserved_ports(occupied: &mut HashSet<i64>, repo_config: &RepoConfig) {
+    for port in &repo_config.reserved_ports {
+        if (1..=65535).contains(port) {
+            occupied.insert(*port);
+        }
+    }
+
+    let Some(ports) = repo_config.ports.as_ref() else {
+        return;
+    };
+    for preferred in ports.values() {
+        for offset in &repo_config.reserved_port_offsets {
+            if *offset < 0 {
+                continue;
+            }
+            let Some(reserved) = i64::from(*preferred).checked_add(*offset) else {
+                continue;
+            };
+            if (1..=65535).contains(&reserved) {
+                occupied.insert(reserved);
+            }
+        }
+    }
 }
 
 pub(super) fn build_spawn_env(

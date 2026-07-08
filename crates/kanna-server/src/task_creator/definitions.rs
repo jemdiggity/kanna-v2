@@ -9,6 +9,10 @@ pub(super) struct RepoConfig {
     pub(super) setup: Option<Vec<String>>,
     pub(super) teardown: Option<Vec<String>>,
     pub(super) ports: Option<HashMap<String, u16>>,
+    #[serde(default)]
+    pub(super) reserved_ports: Vec<i64>,
+    #[serde(default)]
+    pub(super) reserved_port_offsets: Vec<i64>,
     pub(super) workspace: Option<RepoWorkspaceConfig>,
 }
 
