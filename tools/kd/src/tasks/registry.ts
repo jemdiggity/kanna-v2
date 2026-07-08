@@ -209,7 +209,9 @@ const lanLabInputSchema = z.object({
 
 const remoteE2eInputSchema = z.object({
   dev: z.boolean().default(true),
-  staging: z.boolean().default(false)
+  staging: z.boolean().default(false),
+  mobileRelay: z.boolean().default(false),
+  desktopPairing: z.boolean().default(false)
 });
 
 const remoteDoctorInputSchema = z.object({
@@ -2261,10 +2263,19 @@ export const taskDefinitions = [
       if (parsed.dev && parsed.staging) {
         return { ok: false, message: "remote-e2e accepts only one of --dev or --staging." };
       }
+      if (parsed.staging && (parsed.mobileRelay || parsed.desktopPairing)) {
+        return {
+          ok: false,
+          message: "remote-e2e staging is only supported for the headless Layer B lane."
+        };
+      }
       const context = await resolveDefaultContext(process.env);
+      const args = ["--dir", "tests/remote-e2e", "exec", "tsx", "src/run.ts", parsed.staging ? "--staging" : "--dev"];
+      if (parsed.mobileRelay) args.push("--mobile-relay");
+      if (parsed.desktopPairing) args.push("--desktop-pairing");
       return runBuiltCommand(
         "pnpm",
-        ["--dir", "tests/remote-e2e", "exec", "tsx", "src/run.ts", parsed.staging ? "--staging" : "--dev"],
+        args,
         context.repoRoot,
         context.env
       );

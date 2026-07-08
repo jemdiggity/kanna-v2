@@ -49,7 +49,10 @@ export function createSimulatorCapabilities(input: SimulatorCapabilityInput) {
       input.reservedPorts
     ),
     "appium:newCommandTimeout": 120,
-    "appium:noReset": true,
+    "appium:noReset": false,
+    "appium:autoDismissAlerts": true,
+    "appium:includeSafariInWebviews": true,
+    "appium:webviewConnectTimeout": 15_000,
     ...(input.platformVersion
       ? { "appium:platformVersion": input.platformVersion }
       : {})

@@ -208,12 +208,23 @@ function parseMobileArchiveInput(rest: string[]): ParsedCliCommand {
 }
 
 function parseRemoteE2eInput(rest: string[]): ParsedCliCommand {
-  const input = parseFlagInput(rest, { dev: false, staging: false });
+  const input = parseFlagInput(rest, {
+    dev: false,
+    staging: false,
+    mobileRelay: false,
+    desktopPairing: false
+  }, {
+    "--mobile-relay": "mobileRelay",
+    "--desktop-pairing": "desktopPairing"
+  });
   const unsupportedFlags = Object.entries(input)
-    .filter(([key, value]) => !["dev", "staging"].includes(key) && value === true)
+    .filter(([key, value]) =>
+      !["dev", "staging", "mobileRelay", "desktopPairing"].includes(key) &&
+      value === true
+    )
     .map(([key]) => key);
   if (unsupportedFlags.length > 0) {
-    throw new Error("remote-e2e only accepts --dev or --staging");
+    throw new Error("remote-e2e only accepts --dev, --staging, --mobile-relay, or --desktop-pairing");
   }
   if (input.dev === true && input.staging === true) {
     throw new Error("remote-e2e accepts only one of --dev or --staging");
@@ -222,7 +233,9 @@ function parseRemoteE2eInput(rest: string[]): ParsedCliCommand {
     taskId: "test.remote-e2e",
     input: {
       dev: input.staging !== true,
-      staging: input.staging === true
+      staging: input.staging === true,
+      mobileRelay: input.mobileRelay === true,
+      desktopPairing: input.desktopPairing === true
     }
   };
 }
@@ -599,7 +612,7 @@ const helpTopics: Record<string, string[]> = {
     "  test cloud-staging",
     "  test cloud-prod-smoke",
     "  test lan-lab --hosts <path>",
-    "  test remote-e2e [--dev|--staging]",
+    "  test remote-e2e [--dev|--staging] [--mobile-relay] [--desktop-pairing]",
     "  doctor [--remote] [--staging]",
     "",
     "Run 'kd <command> --help' for command-specific help."
@@ -928,7 +941,7 @@ const helpTopics: Record<string, string[]> = {
     "  test cloud-staging",
     "  test cloud-prod-smoke",
     "  test lan-lab --hosts <path>",
-    "  test remote-e2e [--dev|--staging]"
+    "  test remote-e2e [--dev|--staging] [--mobile-relay] [--desktop-pairing]"
   ],
   "test app-update-bundle": [
     "Usage: kd test app-update-bundle",
@@ -956,9 +969,12 @@ const helpTopics: Record<string, string[]> = {
     "Run LAN sync tests against physical Macs over SSH."
   ],
   "test remote-e2e": [
-    "Usage: kd test remote-e2e [--dev|--staging]",
+    "Usage: kd test remote-e2e [--dev|--staging] [--mobile-relay] [--desktop-pairing]",
     "",
-    "Run remote task interaction E2E tests."
+    "Run remote task interaction E2E tests.",
+    "",
+    "  --mobile-relay     Run Layer C mobile Appium over relay.",
+    "  --desktop-pairing  Run Layer D desktop pairing UI WebDriver test."
   ],
   doctor: [
     "Usage: kd doctor [--remote] [--staging]",

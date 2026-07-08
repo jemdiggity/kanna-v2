@@ -1,9 +1,25 @@
 import WebSocket, { type RawData } from "ws";
-import {
-  createRelayDesktopClient,
-  type RelayDesktopClient,
-  type RelaySocketLike
+import * as relayClientModule from "../../../apps/mobile/src/lib/transports/relayClient";
+import type {
+  RelayDesktopClient,
+  RelaySocketLike
 } from "../../../apps/mobile/src/lib/transports/relayClient";
+
+type RelayClientModule = typeof relayClientModule;
+type RelayClientModuleWithInterop = RelayClientModule & {
+  default?: RelayClientModule;
+  "module.exports"?: RelayClientModule;
+};
+
+const relayClientExports = relayClientModule as RelayClientModuleWithInterop;
+const createRelayDesktopClient =
+  relayClientExports.createRelayDesktopClient ??
+  relayClientExports.default?.createRelayDesktopClient ??
+  relayClientExports["module.exports"]?.createRelayDesktopClient;
+
+if (!createRelayDesktopClient) {
+  throw new Error("Could not load createRelayDesktopClient from the mobile relay transport module.");
+}
 
 class NodeRelaySocket implements RelaySocketLike {
   private readonly socket: WebSocket;

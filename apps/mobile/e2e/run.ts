@@ -28,7 +28,9 @@ import { seedTrustedDesktopThroughDeepLink } from "./helpers/trust-seed";
 import {
   assertSimulatorAppInstalled,
   bootSimulator,
-  resolveSimulatorDevice
+  openSimulatorDevelopmentClient,
+  resolveSimulatorDevice,
+  type AvailableSimulatorDevice
 } from "./helpers/simulator";
 import { runListDetailBackSmoke } from "./specs/smoke/list-detail-back.e2e";
 import {
@@ -36,14 +38,17 @@ import {
   runProfileDisconnectedConnectionSmoke
 } from "./specs/smoke/profile-connection.e2e";
 import { runCloudTaskFlow } from "./specs/cloud/cloud-task-flow.e2e";
+import { runRelayTaskFlow } from "./specs/relay/relay-task-flow.e2e";
+import { startMobileRelayHarness } from "./helpers/relay-harness";
 
 export const smokeSpecPaths = [
   "specs/cloud/cloud-task-flow.e2e.ts",
+  "specs/relay/relay-task-flow.e2e.ts",
   "specs/smoke/list-detail-back.e2e.ts",
   "specs/smoke/profile-connection.e2e.ts"
 ];
 export const supportedSmokeTargets = ["simulator", "device"] as const;
-export const supportedSmokeModes = ["smoke", "profile-disconnected", "cloud"] as const;
+export const supportedSmokeModes = ["smoke", "profile-disconnected", "cloud", "relay"] as const;
 
 interface StoppedDesktopServerHandle {
   baseUrl: string;
@@ -104,10 +109,24 @@ async function closeServer(server: Server): Promise<void> {
   });
 }
 
+async function dismissExpoDevClientFirstLaunch(driver: Browser): Promise<void> {
+  const continueButton = await driver.$("~Continue");
+  const isVisible = await continueButton
+    .waitForDisplayed({ timeout: 5_000 })
+    .then(() => true)
+    .catch(() => false);
+  if (isVisible) {
+    await continueButton.click();
+  }
+}
+
 async function main(): Promise<void> {
   const mode = process.argv[2] ?? "smoke";
   if (!supportedSmokeModes.includes(mode as (typeof supportedSmokeModes)[number])) {
     throw new Error(`Unsupported mobile E2E mode: ${mode}`);
+  }
+  if (mode === "relay" && !process.env.KANNA_E2E_DESKTOP_SERVER_URL) {
+    process.env.KANNA_E2E_DESKTOP_SERVER_URL = "http://127.0.0.1:1";
   }
 
   const env = resolveRequiredMobileE2eEnv(
@@ -124,7 +143,9 @@ async function main(): Promise<void> {
   );
   let driver: Browser | null = null;
   let expoServer: Awaited<ReturnType<typeof ensureExpoServer>> | null = null;
+  let relayHarness: Awaited<ReturnType<typeof startMobileRelayHarness>> | null = null;
   let stoppedDesktopServer: StoppedDesktopServerHandle | null = null;
+  let simulatorDevice: AvailableSimulatorDevice | null = null;
 
   try {
     await waitForLocalAppiumServer(env.appiumPort);
@@ -154,6 +175,7 @@ async function main(): Promise<void> {
       });
     } else {
       const device = await resolveSimulatorDevice(env.deviceName);
+      simulatorDevice = device;
       await bootSimulator(device);
       await assertSimulatorAppInstalled(device, env.bundleId);
       capabilities = createSimulatorCapabilities({
@@ -177,9 +199,15 @@ async function main(): Promise<void> {
     if (mode === "smoke") {
       await assertDesktopServerReachable(resolvedDesktopServerUrl);
     }
+    if (mode === "relay") {
+      relayHarness = await startMobileRelayHarness();
+    }
 
     expoServer = await ensureExpoServer({
       env:
+        mode === "relay" && relayHarness
+          ? relayHarness.env
+          :
         mode === "cloud"
           ? {
               EXPO_PUBLIC_KANNA_FORCE_CLOUD: "1",
@@ -194,9 +222,23 @@ async function main(): Promise<void> {
       port: env.appiumPort,
       capabilities
     });
+    if (simulatorDevice) {
+      await openSimulatorDevelopmentClient({
+        device: simulatorDevice,
+        metroPort: env.metroPort
+      });
+      await dismissExpoDevClientFirstLaunch(driver);
+    }
 
     if (mode === "profile-disconnected") {
       await runProfileDisconnectedConnectionSmoke(driver);
+    } else if (mode === "relay" && relayHarness) {
+      await runRelayTaskFlow(driver, {
+        credentials: relayHarness.credentials,
+        fixture: relayHarness.fixture,
+        input: relayHarness.inputMarker
+      });
+      await relayHarness.waitForInput();
     } else if (mode === "cloud") {
       await runCloudTaskFlow(driver, {
         email: env.cloudEmail,
@@ -223,6 +265,7 @@ async function main(): Promise<void> {
     }
     appiumServer.kill("SIGTERM");
     await expoServer?.stop();
+    await relayHarness?.stop();
     await stoppedDesktopServer?.close();
   }
 }
