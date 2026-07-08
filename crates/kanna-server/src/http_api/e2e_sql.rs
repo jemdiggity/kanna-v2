@@ -1,10 +1,11 @@
 use super::state::AppState;
 use crate::db::Db;
-use axum::extract::State;
+use axum::extract::{ConnectInfo, State};
 use axum::Json;
 use rusqlite::types::{Value, ValueRef};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map};
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 #[derive(Debug, Deserialize)]
@@ -25,11 +26,18 @@ pub(super) struct E2eSqlResponse {
 }
 
 pub(super) async fn execute_e2e_sql(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     State(state): State<Arc<AppState>>,
     Json(request): Json<E2eSqlRequest>,
 ) -> Result<Json<E2eSqlResponse>, (axum::http::StatusCode, String)> {
     if std::env::var("KANNA_E2E_TEST_SQL").ok().as_deref() != Some("1") {
         return Err((axum::http::StatusCode::NOT_FOUND, "not found".to_string()));
+    }
+    if !is_loopback_peer(Some(peer)) {
+        return Err((
+            axum::http::StatusCode::FORBIDDEN,
+            "E2E SQL is only available from loopback clients".to_string(),
+        ));
     }
 
     let db = Db::open(&state.config.db_path).map_err(internal_error)?;
@@ -54,6 +62,10 @@ pub(super) async fn execute_e2e_sql(
         rows: Vec::new(),
         rows_affected,
     }))
+}
+
+fn is_loopback_peer(peer: Option<SocketAddr>) -> bool {
+    peer.is_some_and(|addr| addr.ip().is_loopback())
 }
 
 fn json_to_sql_value(value: serde_json::Value) -> Result<Value, (axum::http::StatusCode, String)> {
@@ -118,4 +130,22 @@ fn internal_error(error: impl std::fmt::Display) -> (axum::http::StatusCode, Str
         axum::http::StatusCode::INTERNAL_SERVER_ERROR,
         error.to_string(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    #[test]
+    fn e2e_sql_peer_gate_allows_only_loopback() {
+        assert!(super::is_loopback_peer(Some(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            48120,
+        ))));
+        assert!(!super::is_loopback_peer(Some(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 20)),
+            48120,
+        ))));
+        assert!(!super::is_loopback_peer(None));
+    }
 }
