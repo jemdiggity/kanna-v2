@@ -39,6 +39,12 @@ interface BuildMobileDeviceRunCommandInput {
   repoRoot: string;
 }
 
+interface BuildMobileDeviceReleaseInstallCommandInput {
+  deviceUdid: string;
+  nativeIdentity: MobileNativeIdentity;
+  repoRoot: string;
+}
+
 interface BuildMobileDevicePrebuildCommandInput {
   nativeIdentity: MobileNativeIdentity;
   repoRoot: string;
@@ -262,6 +268,30 @@ export function buildMobileDeviceRunCommand(
         : {}),
       REACT_NATIVE_PACKAGER_HOSTNAME: input.lanHost,
       RCT_METRO_PORT: String(input.metroPort)
+    }
+  };
+}
+
+export function buildMobileDeviceReleaseInstallCommand(
+  input: BuildMobileDeviceReleaseInstallCommandInput
+): MobileDeviceRunCommand {
+  return {
+    command: "pnpm",
+    args: [
+      "--dir",
+      `${input.repoRoot}/apps/mobile`,
+      "exec",
+      "expo",
+      "run:ios",
+      "--configuration",
+      "Release",
+      "--no-bundler",
+      "--device",
+      input.deviceUdid
+    ],
+    cwd: input.repoRoot,
+    env: {
+      KANNA_APP_ENV: input.nativeIdentity.appEnv
     }
   };
 }

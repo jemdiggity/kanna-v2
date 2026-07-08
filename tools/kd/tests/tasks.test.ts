@@ -1151,6 +1151,116 @@ describe("task executors", () => {
     expect(calls[installIndex]?.env?.REACT_NATIVE_PACKAGER_HOSTNAME).toBe("172.16.0.193");
   });
 
+  it("installs a staging Release app on a physical device without starting Metro", async () => {
+    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-kd-device-staging-install-"));
+    const calls: Array<{ command: string; args: string[]; env?: NodeJS.ProcessEnv; cwd?: string }> = [];
+    const runner: CommandRunner = {
+      async run(command, args, options) {
+        calls.push({ command, args, env: options?.env, cwd: options?.cwd });
+        if (command === "xcrun" && args.join(" ") === "xcdevice list") {
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify([
+              {
+                available: true,
+                identifier: "00008130-001015CA1091401C",
+                name: "Jerome's iPhone 15",
+                operatingSystemVersion: "17.5 (21F79)",
+                platform: "com.apple.platform.iphoneos",
+                simulator: false
+              }
+            ]),
+            stderr: ""
+          };
+        }
+        if (command === "curl") {
+          return { exitCode: 1, stdout: "", stderr: "install mode should not check Metro" };
+        }
+        if (command === "tmux") {
+          return { exitCode: 1, stdout: "", stderr: "install mode should not start tmux" };
+        }
+        return { exitCode: 0, stdout: "Installed Kanna Staging\n", stderr: "" };
+      }
+    };
+
+    const result = await executeMobileDeviceRunWithContext(
+      { device: true, production: false, staging: true, install: true },
+      {
+        runner,
+        context: {
+          repoRoot,
+          tmux: { server: "kanna-task-abc", session: "kanna-task-abc" },
+          ports: {
+            KANNA_DEV_PORT: 1421,
+            KANNA_MOBILE_PORT: 1430
+          },
+          env: {
+            KANNA_DEV_PORT: "1421",
+            KANNA_MOBILE_PORT: "1430",
+            KANNA_MOBILE_SERVER_PORT: "48120",
+            KANNA_APP_ENV: "dev",
+            KANNA_IOS_PHYSICAL_DEVICE_NAME: "Jerome's iPhone 15"
+          }
+        }
+      }
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.message).toContain("Installed Kanna mobile on Jerome's iPhone 15.");
+    expect(result.message).toContain("Bundle ID: build.kanna.app.staging");
+    expect(result.message).toContain("Environment: staging");
+    expect(result.message).toContain("Metro is not required");
+    expect(result.data).toMatchObject({
+      bundleId: "build.kanna.app.staging",
+      environment: "staging",
+      device: {
+        name: "Jerome's iPhone 15",
+        udid: "00008130-001015CA1091401C"
+      }
+    });
+    expect(calls.some((call) => call.command === "tmux")).toBe(false);
+    expect(calls.some((call) => call.command === "curl")).toBe(false);
+    const prebuildIndex = calls.findIndex(
+      (call) => call.command === "pnpm" && call.args.includes("prebuild")
+    );
+    const installIndex = calls.findIndex(
+      (call) => call.command === "pnpm" && call.args.includes("run:ios")
+    );
+    expect(calls[prebuildIndex]).toMatchObject({
+      command: "pnpm",
+      args: [
+        "--dir",
+        `${repoRoot}/apps/mobile`,
+        "exec",
+        "expo",
+        "prebuild",
+        "--platform",
+        "ios"
+      ],
+      cwd: repoRoot
+    });
+    expect(calls[prebuildIndex]?.env?.KANNA_APP_ENV).toBe("staging");
+    expect(calls[installIndex]).toMatchObject({
+      command: "pnpm",
+      args: [
+        "--dir",
+        `${repoRoot}/apps/mobile`,
+        "exec",
+        "expo",
+        "run:ios",
+        "--configuration",
+        "Release",
+        "--no-bundler",
+        "--device",
+        "00008130-001015CA1091401C"
+      ],
+      cwd: repoRoot
+    });
+    expect(calls[installIndex]?.env?.KANNA_APP_ENV).toBe("staging");
+    expect(calls[installIndex]?.env?.REACT_NATIVE_PACKAGER_HOSTNAME).toBeUndefined();
+    expect(calls[installIndex]?.env?.RCT_METRO_PORT).toBeUndefined();
+  });
+
   it("blocks staging physical-device launch when the installed staging desktop is absent from the relay", async () => {
     const repoRoot = await mkdtemp(join(tmpdir(), "kanna-kd-device-staging-offline-"));
     await mkdir(join(repoRoot, "apps", "desktop", "src-tauri"), { recursive: true });

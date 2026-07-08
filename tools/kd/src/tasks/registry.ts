@@ -29,6 +29,7 @@ import { buildMobileDeviceSmokeCommand, buildMobileTestCommand } from "../runtim
 import { executeMobileIosArchiveWithContext } from "../runtime/mobile-archive";
 import {
   buildMobileDevicePrebuildCommand,
+  buildMobileDeviceReleaseInstallCommand,
   buildMobileDeviceRelaunchCommand,
   buildMobileDeviceRunCommand,
   checkPhysicalDeviceRunPreflight,
@@ -50,7 +51,7 @@ import {
 } from "../runtime/mobile-ota";
 import { buildConfigSchemaPages } from "../runtime/pages";
 import { getPortStatuses } from "../runtime/port-status";
-import { nodeCommandRunner, type CommandRunner } from "../runtime/process";
+import { nodeCommandRunner, type CommandResult, type CommandRunner } from "../runtime/process";
 import { readDevDesktopAuth, readStagingDesktopAuth } from "../runtime/developer-config";
 import { shipRelease } from "../runtime/release";
 import { buildDesktopSidecars } from "../runtime/sidecars";
@@ -100,6 +101,7 @@ export interface MobileRunInput {
   device: boolean;
   production?: boolean;
   staging?: boolean;
+  install?: boolean;
   withCredentials?: boolean;
 }
 
@@ -145,6 +147,7 @@ const mobileRunInputSchema = z.object({
   device: z.boolean().default(false),
   production: z.boolean().default(false),
   staging: z.boolean().default(false),
+  install: z.boolean().default(false),
   withCredentials: z.boolean().default(false)
 });
 
@@ -984,6 +987,37 @@ function formatPhysicalDeviceRunFailure(input: {
   ].join("\n");
 }
 
+function formatPhysicalDeviceInstallSuccess(input: {
+  bundleId: string;
+  deviceName: string;
+  environment: string;
+}): string {
+  return [
+    `Installed Kanna mobile on ${input.deviceName}.`,
+    `Bundle ID: ${input.bundleId}`,
+    `Environment: ${input.environment}`,
+    "Metro is not required for this Release install because JavaScript is bundled into the app."
+  ].join("\n");
+}
+
+function formatPhysicalDeviceInstallFailure(input: {
+  bundleId: string;
+  deviceName: string;
+  environment: string;
+  phase: "prebuild" | "install";
+  result: CommandResult;
+}): string {
+  const output = [input.result.stderr.trim(), input.result.stdout.trim()].filter(Boolean).join("\n");
+  const action = input.phase === "prebuild" ? "prebuild" : "install";
+  return [
+    `Failed to ${action} Kanna mobile on ${input.deviceName}.`,
+    `Bundle ID: ${input.bundleId}`,
+    `Environment: ${input.environment}`,
+    `Exit code: ${input.result.exitCode}`,
+    output ? `Command output:\n${output}` : "Command output: <empty>"
+  ].join("\n");
+}
+
 function physicalDeviceChecksWithMetroReadiness(input: {
   checks: Awaited<ReturnType<typeof checkPhysicalDeviceRunPreflight>>["checks"];
   metroMessage: string;
@@ -1008,11 +1042,15 @@ export async function executeMobileDeviceRunWithContext(
     throw new Error("mobile.run accepts only one of --production or --staging.");
   }
 
-  const lanHost = requireMobileDeviceLanHost(options);
   const device = await resolvePhysicalDevice(executor.runner, {
     requestedUdid: executor.context.env.KANNA_IOS_DEVICE_UDID?.trim() || undefined,
     requestedName: executor.context.env.KANNA_IOS_PHYSICAL_DEVICE_NAME?.trim() || undefined
   });
+  if (input.install) {
+    return executeMobileDeviceReleaseInstall(input, executor, device);
+  }
+
+  const lanHost = requireMobileDeviceLanHost(options);
   const launch = prepareMobileDeviceLaunch(input, executor, lanHost, device.udid);
   await launch.resetTmux();
   await startTmuxSession(executor.runner, executor.context.tmux, launch.plan.windows);
@@ -1228,6 +1266,115 @@ export async function executeMobileDeviceRunWithContext(
         afterLaunch: postLaunchMetroReadiness
       },
       windows: launch.plan.windows.map((window) => window.name)
+    }
+  };
+}
+
+function mobileDeviceInstallEnv(
+  input: MobileRunInput,
+  executor: ExecutorInput,
+  deviceUdid: string
+): NodeJS.ProcessEnv {
+  if (input.staging) {
+    return {
+      ...executor.context.env,
+      KANNA_CLOUD_ENV: "staging",
+      KANNA_APP_ENV: "staging",
+      KANNA_IOS_DEVICE_UDID: deviceUdid
+    };
+  }
+
+  if (input.production) {
+    const production = resolveKdEnvironment("prod");
+    return {
+      ...executor.context.env,
+      KANNA_APP_ENV: executor.context.env.KANNA_APP_ENV ?? "prod",
+      KANNA_IOS_DEVICE_UDID: deviceUdid,
+      EXPO_PUBLIC_KANNA_RELAY_URL:
+        executor.context.env.EXPO_PUBLIC_KANNA_RELAY_URL ?? production.relayUrl
+    };
+  }
+
+  return {
+    ...executor.context.env,
+    KANNA_APP_ENV: executor.context.env.KANNA_APP_ENV ?? "dev",
+    KANNA_IOS_DEVICE_UDID: deviceUdid
+  };
+}
+
+async function executeMobileDeviceReleaseInstall(
+  input: MobileRunInput,
+  executor: ExecutorInput,
+  device: Awaited<ReturnType<typeof resolvePhysicalDevice>>
+): Promise<TaskResult> {
+  const env = mobileDeviceInstallEnv(input, executor, device.udid);
+  const nativeIdentity = resolveMobileNativeIdentity(env);
+  const prebuildCommand = buildMobileDevicePrebuildCommand({
+    repoRoot: executor.context.repoRoot,
+    nativeIdentity
+  });
+  const prebuildResult = await executor.runner.run(prebuildCommand.command, prebuildCommand.args, {
+    cwd: prebuildCommand.cwd,
+    env: { ...env, ...prebuildCommand.env },
+    streamOutput: true
+  });
+  if (prebuildResult.exitCode !== 0) {
+    return {
+      ok: false,
+      message: formatPhysicalDeviceInstallFailure({
+        bundleId: nativeIdentity.bundleId,
+        deviceName: device.name,
+        environment: nativeIdentity.appEnv,
+        phase: "prebuild",
+        result: prebuildResult
+      }),
+      data: {
+        bundleId: nativeIdentity.bundleId,
+        environment: nativeIdentity.appEnv,
+        device
+      }
+    };
+  }
+
+  const installCommand = buildMobileDeviceReleaseInstallCommand({
+    repoRoot: executor.context.repoRoot,
+    deviceUdid: device.udid,
+    nativeIdentity
+  });
+  const installResult = await executor.runner.run(installCommand.command, installCommand.args, {
+    cwd: installCommand.cwd,
+    env: { ...env, ...installCommand.env },
+    streamOutput: true
+  });
+  if (installResult.exitCode !== 0) {
+    return {
+      ok: false,
+      message: formatPhysicalDeviceInstallFailure({
+        bundleId: nativeIdentity.bundleId,
+        deviceName: device.name,
+        environment: nativeIdentity.appEnv,
+        phase: "install",
+        result: installResult
+      }),
+      data: {
+        bundleId: nativeIdentity.bundleId,
+        environment: nativeIdentity.appEnv,
+        device
+      }
+    };
+  }
+
+  return {
+    ok: true,
+    message: formatPhysicalDeviceInstallSuccess({
+      bundleId: nativeIdentity.bundleId,
+      deviceName: device.name,
+      environment: nativeIdentity.appEnv
+    }),
+    data: {
+      bundleId: nativeIdentity.bundleId,
+      environment: nativeIdentity.appEnv,
+      device
     }
   };
 }

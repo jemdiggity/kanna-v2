@@ -116,12 +116,16 @@ function parseMobileUpInput(rest: string[]): ParsedCliCommand {
 }
 
 function parseMobileRunInput(rest: string[]): ParsedCliCommand {
-  const input = parseFlagInput(rest, { device: false, production: false, staging: false });
+  const input = parseFlagInput(
+    rest,
+    { device: false, production: false, staging: false, install: false },
+    { "--install": "install" }
+  );
   const unsupportedFlags = Object.entries(input)
-    .filter(([key, value]) => !["device", "production", "staging", "withCredentials"].includes(key) && value === true)
+    .filter(([key, value]) => !["device", "production", "staging", "withCredentials", "install"].includes(key) && value === true)
     .map(([key]) => key);
   if (unsupportedFlags.length > 0) {
-    throw new Error("mobile run only accepts --device, --production, or --staging");
+    throw new Error("mobile run only accepts --device, --production, --staging, or --install");
   }
   if (input.production === true && input.staging === true) {
     throw new Error("mobile run accepts only one of --production or --staging");
@@ -138,9 +142,34 @@ function parseMobileRunInput(rest: string[]): ParsedCliCommand {
       device: true,
       production: input.production === true,
       staging: input.staging === true,
+      ...(input.install === true ? { install: true } : {}),
       ...(input.withCredentials === true ? { withCredentials: true } : {})
     }
   };
+}
+
+function parseMobileDoctorInput(rest: string[]): ParsedCliCommand {
+  const input = parseFlagInput(
+    rest,
+    { device: false, production: false, staging: false },
+    { "--install": "install" }
+  );
+  const unsupportedFlags = Object.entries(input)
+    .filter(([key, value]) => !["device", "production", "staging", "withCredentials"].includes(key) && value === true)
+    .map(([key]) => key);
+  if (unsupportedFlags.length > 0) {
+    throw new Error("mobile doctor only accepts --device, --production, or --staging");
+  }
+  if (input.production === true && input.staging === true) {
+    throw new Error("mobile run accepts only one of --production or --staging");
+  }
+  if (input.device !== true) {
+    throw new Error("mobile run requires --device");
+  }
+  if (input.withCredentials === true) {
+    throw new Error(CREDENTIALS_FLAG_ERROR);
+  }
+  return { taskId: "mobile.doctor", input };
 }
 
 function parseMobileQaInput(rest: string[]): ParsedCliCommand {
@@ -218,7 +247,11 @@ function parseRemoteDoctorInput(rest: string[]): ParsedCliCommand {
   };
 }
 
-function parseFlagInput(rest: string[], defaults: Record<string, unknown>): Record<string, unknown> {
+function parseFlagInput(
+  rest: string[],
+  defaults: Record<string, unknown>,
+  localBooleanFlagMap: Record<string, string> = {}
+): Record<string, unknown> {
   const input: Record<string, unknown> = { ...defaults };
   for (let index = 0; index < rest.length; index += 1) {
     const arg = rest[index];
@@ -316,7 +349,7 @@ function parseFlagInput(rest: string[], defaults: Record<string, unknown>): Reco
       input.extraArgs = rest.slice(index + 1);
       break;
     }
-    const flagName = booleanFlagMap[arg];
+    const flagName = localBooleanFlagMap[arg] ?? booleanFlagMap[arg];
     if (!flagName) {
       throw new Error(`Unknown flag: ${arg}`);
     }
@@ -384,11 +417,7 @@ export function parseCliArgs(args: string[]): ParsedCliCommand {
     return parseMobileArchiveInput(rest);
   }
   if (group === "mobile" && command === "doctor") {
-    const parsed = parseMobileRunInput(rest);
-    if (parsed.input.withCredentials === true) {
-      throw new Error(CREDENTIALS_FLAG_ERROR);
-    }
-    return { taskId: "mobile.doctor", input: parsed.input };
+    return parseMobileDoctorInput(rest);
   }
   if (group === "mobile" && command === "ota") {
     const [subcommand, ...otaRest] = rest;
@@ -543,7 +572,7 @@ const helpTopics: Record<string, string[]> = {
     "  dev seed [--db <path-or-name>] [--delete-db]",
     "  daemon kill",
     "  mobile up [--production|--staging] [--with-credentials]",
-    "  mobile run --device [--production|--staging] [--with-credentials]",
+    "  mobile run --device [--production|--staging] [--install] [--with-credentials]",
     "  mobile archive --production --build-number <number> [--version <version>] [--out-dir <dir>] [--upload] [--dry-run]",
     "  mobile doctor --device",
     "  mobile qa --production [--ota]",
@@ -668,7 +697,7 @@ const helpTopics: Record<string, string[]> = {
     "",
     "Commands:",
     "  mobile up [--production|--staging] [--with-credentials]",
-    "  mobile run --device [--production|--staging] [--with-credentials]",
+    "  mobile run --device [--production|--staging] [--install] [--with-credentials]",
     "  mobile archive --production --build-number <number> [--version <version>] [--out-dir <dir>] [--upload] [--dry-run]",
     "  mobile doctor --device",
     "  mobile qa --production [--ota]",
@@ -686,14 +715,15 @@ const helpTopics: Record<string, string[]> = {
     "  --staging           Use the installed staging desktop server and staging cloud services."
   ],
   "mobile run": [
-    "Usage: kd mobile run --device [--production|--staging]",
+    "Usage: kd mobile run --device [--production|--staging] [--install]",
     "",
     "Build, install, and launch Kanna mobile on a physical iOS device.",
     "",
     "Options:",
     "  --device            Required. Target a physical iOS device.",
     "  --production        Launch against production settings.",
-    "  --staging           Launch against installed staging desktop settings."
+    "  --staging           Launch against installed staging desktop settings.",
+    "  --install           Build and install a bundled Release app; skips Metro and dev-client hot loading."
   ],
   "mobile archive": [
     "Usage: kd mobile archive --production --build-number <number> [--version <version>] [--out-dir <dir>] [--upload] [--dry-run]",
