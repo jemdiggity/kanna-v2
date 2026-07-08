@@ -72,6 +72,7 @@ fn mcp_error(id: Value, code: i64, message: impl Into<String>) -> Value {
 fn mcp_tool_error_code(message: &str) -> i64 {
     if message.starts_with("missing required argument:")
         || message.contains(" must be ")
+        || message.starts_with("repo_id is required")
         || message == "status must be success or failure"
     {
         -32602
@@ -247,6 +248,7 @@ async fn handle_mcp_tool_call(
     name: &str,
     args: Value,
 ) -> Result<Value, String> {
+    let args = maybe_augment_create_task_args(base_url, name, args).await?;
     let request = {
         let catalog = catalog
             .read()
@@ -254,6 +256,44 @@ async fn handle_mcp_tool_call(
         resolve_request(&catalog, name, &args)?
     };
     execute_resolved_request(base_url, request).await
+}
+
+async fn maybe_augment_create_task_args(
+    base_url: &str,
+    name: &str,
+    args: Value,
+) -> Result<Value, String> {
+    if name != "kanna_create_task" || args.get("repo_id").is_some() {
+        return Ok(args);
+    }
+
+    let task_id = env::var("KANNA_TASK_ID")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "repo_id is required when KANNA_TASK_ID is not available".to_string())?;
+    let path = format!("/v1/tasks/{}", encode_path_segment(&task_id));
+    let current_task: Value = get_json(base_url, &path)
+        .await
+        .map_err(|e| format!("failed to infer repo_id from KANNA_TASK_ID={task_id}: {e}"))?;
+    augment_create_task_args(args, Some(&current_task))
+}
+
+fn augment_create_task_args(args: Value, current_task: Option<&Value>) -> Result<Value, String> {
+    if args.get("repo_id").is_some() {
+        return Ok(args);
+    }
+
+    let repo_id = current_task
+        .and_then(|task| task.get("repoId").or_else(|| task.get("repo_id")))
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "repo_id is required when KANNA_TASK_ID is not available".to_string())?;
+    let mut args_object = args
+        .as_object()
+        .cloned()
+        .ok_or_else(|| "tool arguments must be a JSON object".to_string())?;
+    args_object.insert("repo_id".to_string(), Value::String(repo_id.to_string()));
+    Ok(Value::Object(args_object))
 }
 
 async fn execute_resolved_request(
@@ -492,13 +532,16 @@ mod tests {
                 "kanna_search_tasks",
                 "kanna_list_repo_tasks",
                 "kanna_create_task",
+                "kanna_signal_agent",
                 "kanna_send_task_input",
                 "kanna_close_task",
                 "kanna_rename_task",
                 "kanna_advance_stage",
+                "kanna_rerun_stage",
                 "kanna_block_task",
                 "kanna_unblock_task",
                 "kanna_set_task_parent",
+                "kanna_is_dependent_tasks_exist",
                 "kanna_complete_stage",
                 "kanna_request_revision",
             ]
@@ -543,6 +586,40 @@ mod tests {
 
         assert_eq!(response["error"]["code"], -32602);
         assert_eq!(response["error"]["message"], "missing tool name");
+    }
+
+    #[test]
+    fn create_task_args_can_infer_repo_id_from_current_task() {
+        let args = json!({ "prompt": "Spin up a child task" });
+        let current_task = json!({ "id": "task-1", "repoId": "repo-1" });
+
+        let augmented = augment_create_task_args(args, Some(&current_task)).unwrap();
+
+        assert_eq!(
+            augmented,
+            json!({ "prompt": "Spin up a child task", "repo_id": "repo-1" })
+        );
+    }
+
+    #[test]
+    fn explicit_create_task_repo_id_is_not_replaced() {
+        let args = json!({ "repo_id": "repo-explicit", "prompt": "Spin up a child task" });
+        let current_task = json!({ "id": "task-1", "repoId": "repo-current" });
+
+        let augmented = augment_create_task_args(args.clone(), Some(&current_task)).unwrap();
+
+        assert_eq!(augmented, args);
+    }
+
+    #[test]
+    fn create_task_without_repo_id_requires_current_task_context() {
+        let err = augment_create_task_args(json!({ "prompt": "Spin up a child task" }), None)
+            .expect_err("missing current task should fail");
+
+        assert_eq!(
+            err,
+            "repo_id is required when KANNA_TASK_ID is not available".to_string()
+        );
     }
 
     #[test]

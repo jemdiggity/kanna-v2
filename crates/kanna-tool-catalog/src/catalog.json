@@ -83,12 +83,12 @@
     },
     {
       "name": "kanna_create_task",
-      "description": "Create a new Kanna task.",
+      "description": "Create a new Kanna task. When called from a Kanna task session, repo_id defaults to the current task's repo.",
       "method": "POST",
       "path": "/v1/tasks",
       "response": "json",
       "params": [
-        { "name": "repo_id", "type": "string", "required": true, "location": "body", "key": "repoId" },
+        { "name": "repo_id", "type": "string", "required": false, "location": "body", "key": "repoId" },
         { "name": "prompt", "type": "string", "required": true, "location": "body" },
         { "name": "display_name", "type": "string", "required": false, "location": "body", "key": "displayName" },
         { "name": "pipeline_name", "type": "string", "required": false, "location": "body", "key": "pipelineName" },
