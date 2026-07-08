@@ -60,11 +60,34 @@ fn open_applies_desktop_compatible_pragmas() {
 }
 
 #[test]
+fn open_does_not_create_or_migrate_schema() {
+    let path = temp_db_path();
+    let conn = Connection::open(&path).expect("open temp db");
+    conn.execute_batch("CREATE TABLE probe (id INTEGER PRIMARY KEY);")
+        .expect("seed db");
+    drop(conn);
+
+    let db = Db::open(path.to_str().expect("utf8 path")).expect("open db");
+
+    let schema_migrations_count: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("schema migration table probe");
+    assert_eq!(schema_migrations_count, 0);
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn open_creates_and_migrates_fresh_profile_database() {
     let path = temp_db_path();
     let _ = std::fs::remove_file(&path);
 
-    let db = Db::open(path.to_str().expect("utf8 path")).expect("open fresh db");
+    let db = Db::open_migrated(path.to_str().expect("utf8 path")).expect("open fresh db");
 
     let setting_count: i64 = db
         .conn
@@ -140,7 +163,7 @@ fn open_migrates_legacy_frontend_schema_with_backfills() {
     .expect("seed legacy db");
     drop(conn);
 
-    let db = Db::open(path.to_str().expect("utf8 path")).expect("migrate legacy db");
+    let db = Db::open_migrated(path.to_str().expect("utf8 path")).expect("migrate legacy db");
 
     let (stage, pipeline, provider): (String, String, String) = db
         .conn
@@ -218,7 +241,7 @@ fn open_fails_with_clear_error_when_quick_check_cannot_read_database() {
     let path = temp_db_path();
     std::fs::write(&path, b"this is not a sqlite database").expect("write corrupt db");
 
-    let err = Db::open(path.to_str().expect("utf8 path")).expect_err("corrupt db should fail");
+    let err = Db::open_migrated(path.to_str().expect("utf8 path")).expect_err("corrupt db should fail");
     let message = err.to_string();
 
     assert!(
