@@ -160,7 +160,7 @@ export interface StoreServices {
   loadPipeline?: (repoPath: string, pipelineName: string) => Promise<PipelineDefinition>;
   loadAgent?: (repoPath: string, agentName: string) => Promise<AgentDefinition>;
   advanceStage?: (taskId: string, options?: AdvanceStageOptions) => Promise<void>;
-  requestRevision?: (taskId: string, options: RequestRevisionOptions) => Promise<void>;
+  requestRevision?: (taskId: string, options: RequestRevisionOptions) => Promise<boolean>;
   rerunStage?: (taskId: string) => Promise<void>;
   spawnShellSession?: (
     sessionId: string,

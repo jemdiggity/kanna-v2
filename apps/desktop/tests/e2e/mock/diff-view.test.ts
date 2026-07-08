@@ -185,9 +185,18 @@ async function waitForDiffScrollHeight(
   return result;
 }
 
-async function installStageActionRecorder(client: WebDriverClient): Promise<void> {
+interface StageActionRecorderOptions {
+  requestRevisionStatus?: number;
+  requestRevisionBody?: string;
+}
+
+async function installStageActionRecorder(
+  client: WebDriverClient,
+  options: StageActionRecorderOptions = {},
+): Promise<void> {
   await client.executeSync(
     `window.__KANNA_NATIVE_REVIEW_ACTIONS__ = [];
+     window.__KANNA_NATIVE_REVIEW_OPTIONS__ = ${JSON.stringify(options)};
      if (!window.__KANNA_NATIVE_REVIEW_ORIGINAL_FETCH__) {
        window.__KANNA_NATIVE_REVIEW_ORIGINAL_FETCH__ = window.fetch.bind(window);
      }
@@ -203,7 +212,15 @@ async function installStageActionRecorder(client: WebDriverClient): Promise<void
          const ctx = window.__KANNA_E2E__.setupState;
          const item = ctx.selectedItem();
          const db = ctx.db.value || ctx.db;
+         const recorderOptions = window.__KANNA_NATIVE_REVIEW_OPTIONS__ || {};
          if (item && url.endsWith("/actions/request-revision")) {
+           const status = recorderOptions.requestRevisionStatus || 200;
+           if (status < 200 || status >= 300) {
+             return new Response(recorderOptions.requestRevisionBody || "request revision failed", {
+               status,
+               headers: { "content-type": "text/plain" },
+             });
+           }
            await db.execute("UPDATE pipeline_item SET stage = ? WHERE id = ?", ["in progress", item.id]);
          } else if (item && url.endsWith("/actions/advance-stage")) {
            await db.execute("UPDATE pipeline_item SET stage = ? WHERE id = ?", ["pr", item.id]);
@@ -414,11 +431,17 @@ describe("diff view", () => {
        setRef("showDiffModal", false);
        setRef("maximizedModal", null);
        const key = ctx?.currentDiffViewKey?.value ?? ctx?.currentDiffViewKey;
+       const resetState = {
+         scope: "working",
+         scrollPositions: { working: 0, branch: 0 },
+         reviewComments: [],
+         reviewHeadCommit: undefined,
+       };
+       if (typeof ctx?.appModals?.updateCurrentDiffViewState === "function") {
+         ctx.appModals.updateCurrentDiffViewState(resetState);
+       }
        if (key && ctx?.diffViewStates) {
-         ctx.diffViewStates[key] = {
-           scope: "working",
-           scrollPositions: { working: 0, branch: 0 },
-         };
+         ctx.diffViewStates[key] = resetState;
        }`
     ).catch(() => undefined);
     await client.executeAsync<string>(
@@ -1142,6 +1165,73 @@ describe("diff view", () => {
     const callsAfterApprove = await waitForRecordedStageActions(client, 2);
     expect(callsAfterApprove[1].url).toContain(`/v1/tasks/${encodeURIComponent(taskId)}/actions/advance-stage`);
     expect(callsAfterApprove[1].method).toBe("POST");
+  });
+
+  it("keeps pending review comments and summary draft when request-revision fails", async () => {
+    const taskId = await client.executeSync<string>(
+      `const ctx = window.__KANNA_E2E__.setupState;
+       return ctx.selectedItem().id;`
+    );
+    const worktreePath = await getSelectedWorktreePath(client, testRepoPath);
+    await tauriInvoke(client, "run_script", {
+      script: [
+        "mkdir -p native-review-e2e",
+        "for i in $(seq 1 40); do printf 'export const failingMarker%03d = \"before-%03d\";\\n' \"$i\" \"$i\"; done > native-review-e2e/failing-request.ts",
+        "git add native-review-e2e/failing-request.ts",
+        "git commit -m 'e2e native review failed request content'",
+      ].join("\n"),
+      cwd: worktreePath,
+      env: {},
+    });
+
+    await client.executeAsync<string>(
+      `const cb = arguments[arguments.length - 1];
+       const ctx = window.__KANNA_E2E__.setupState;
+       const db = ctx.db.value || ctx.db;
+       const item = ctx.selectedItem();
+       db.execute("UPDATE pipeline_item SET stage = ? WHERE id = ?", ["review", item.id])
+         .then(function() { return ctx.refreshAllItems(); })
+         .then(function() { cb("ok"); })
+         .catch(function(e) { cb("err:" + e); });`
+    );
+    await installStageActionRecorder(client, {
+      requestRevisionStatus: 500,
+      requestRevisionBody: "mock request revision failure",
+    });
+
+    await openDiffModal(client);
+    await setDiffScope(client, "Branch");
+    await waitForDiffText(client, `return text.includes("native-review-e2e/failing-request.ts");`);
+    await addReviewCommentThroughDiffUi(
+      client,
+      "native-review-e2e/failing-request.ts",
+      12,
+      "Keep this note after the failed request.",
+    );
+    await waitForReviewCommentCount(client, 1);
+
+    await client.executeSync(buildGlobalKeydownScript({ key: "s", meta: true, shift: true }));
+    await client.waitForElement(".summary-composer", 2_000);
+    const summaryTextarea = await client.findElement(".summary-composer textarea");
+    await client.sendKeys(summaryTextarea, "This draft should survive.");
+    await client.click(await client.findElement(".summary-actions .primary"));
+
+    const calls = await waitForRecordedStageActions(client, 1);
+    expect(calls[0].url).toContain(`/v1/tasks/${encodeURIComponent(taskId)}/actions/request-revision`);
+    await client.waitForElement(".summary-composer", 2_000);
+    await waitForReviewCommentCount(client, 1);
+    const retainedDraft = await client.executeSync<string>(
+      `const textarea = document.querySelector(".summary-composer textarea");
+       return textarea instanceof HTMLTextAreaElement ? textarea.value : "";`
+    );
+    expect(retainedDraft).toBe("This draft should survive.");
+    const retainedCommentText = await client.executeSync<string>(
+      `return Array.from(document.querySelectorAll(".summary-comment"))
+        .map((element) => element.textContent || "")
+        .join("\\n");`
+    );
+    expect(retainedCommentText).toContain("native-review-e2e/failing-request.ts:12");
+    expect(retainedCommentText).toContain("Keep this note after the failed request.");
   });
 
   it("jumps, edits, and deletes pending review comments from the drawer", async () => {

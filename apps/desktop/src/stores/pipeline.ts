@@ -19,7 +19,7 @@ export interface PipelineApi {
   loadPipeline: (repoPath: string, pipelineName: string) => Promise<PipelineDefinition>;
   loadAgent: (repoPath: string, agentName: string) => Promise<AgentDefinition>;
   advanceStage: (taskId: string, options?: AdvanceStageOptions) => Promise<void>;
-  requestRevision: (taskId: string, options: RequestRevisionOptions) => Promise<void>;
+  requestRevision: (taskId: string, options: RequestRevisionOptions) => Promise<boolean>;
   rerunStage: (taskId: string) => Promise<void>;
 }
 
@@ -371,10 +371,10 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
     }
   }
 
-  async function requestRevision(taskId: string, options: RequestRevisionOptions): Promise<void> {
+  async function requestRevision(taskId: string, options: RequestRevisionOptions): Promise<boolean> {
     const item = context.state.items.value.find((candidate) => candidate.id === taskId);
-    if (!item) return;
-    if (item.closed_at != null) return;
+    if (!item) return false;
+    if (item.closed_at != null) return false;
 
     try {
       const response = await postTaskAction(taskId, "request-revision", {
@@ -387,9 +387,11 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
         throw new Error(await response.text());
       }
       await requireService(context.services.reloadSnapshot, "reloadSnapshot")();
+      return true;
     } catch (error) {
       console.error("[store] requestRevision: server action failed:", error);
       context.toast.error(`${context.tt("toasts.agentStartFailed")}: ${error instanceof Error ? error.message : error}`);
+      return false;
     }
   }
 

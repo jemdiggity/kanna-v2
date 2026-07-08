@@ -70,7 +70,7 @@ async function submitRequestChanges() {
     summary: summaryDraft.value,
   });
   try {
-    await store.requestRevision(props.taskId, {
+    const requestDelivered = await store.requestRevision(props.taskId, {
       targetStage: "in progress",
       summary,
       prompt,
@@ -80,6 +80,7 @@ async function submitRequestChanges() {
         headCommit: currentHeadCommit.value,
       },
     });
+    if (!requestDelivered) return;
     emit("review-comments-change", []);
     summaryDraft.value = "";
     summaryComposerOpen.value = false;
