@@ -209,7 +209,7 @@ Layer D verifies the user-facing pairing flow, status display, and preference su
 Staging has two lanes:
 
 - Automatable headless smoke: use staging Firebase/relay credentials with the Node mobile-equivalent client and a worktree desktop server.
-- Human-gated physical device runbook: use `./kd mobile run --device --staging` after staging Buffy data has been provisioned by a human with staging credentials.
+- Human-gated physical device runbook: use `./kd mobile run --device --staging` for Metro/dev-client checks, or `./kd mobile run --device --staging --install` to install the bundled staging Release app without Metro/hot loading, after staging Buffy data has been provisioned by a human with staging credentials.
 
 The committed staging Buffy identity is:
 

@@ -32,6 +32,7 @@ const booleanFlagMap: Record<string, string> = {
   "--production": "production",
   "--relay": "relay",
   "--device": "device",
+  "--install": "install",
   "--remote": "remote",
   "--dev": "dev",
   "--with-credentials": "withCredentials",
@@ -116,12 +117,12 @@ function parseMobileUpInput(rest: string[]): ParsedCliCommand {
 }
 
 function parseMobileRunInput(rest: string[]): ParsedCliCommand {
-  const input = parseFlagInput(rest, { device: false, production: false, staging: false });
+  const input = parseFlagInput(rest, { device: false, production: false, staging: false, install: false });
   const unsupportedFlags = Object.entries(input)
-    .filter(([key, value]) => !["device", "production", "staging", "withCredentials"].includes(key) && value === true)
+    .filter(([key, value]) => !["device", "production", "staging", "withCredentials", "install"].includes(key) && value === true)
     .map(([key]) => key);
   if (unsupportedFlags.length > 0) {
-    throw new Error("mobile run only accepts --device, --production, or --staging");
+    throw new Error("mobile run only accepts --device, --production, --staging, or --install");
   }
   if (input.production === true && input.staging === true) {
     throw new Error("mobile run accepts only one of --production or --staging");
@@ -138,6 +139,7 @@ function parseMobileRunInput(rest: string[]): ParsedCliCommand {
       device: true,
       production: input.production === true,
       staging: input.staging === true,
+      ...(input.install === true ? { install: true } : {}),
       ...(input.withCredentials === true ? { withCredentials: true } : {})
     }
   };
@@ -543,7 +545,7 @@ const helpTopics: Record<string, string[]> = {
     "  dev seed [--db <path-or-name>] [--delete-db]",
     "  daemon kill",
     "  mobile up [--production|--staging] [--with-credentials]",
-    "  mobile run --device [--production|--staging] [--with-credentials]",
+    "  mobile run --device [--production|--staging] [--install] [--with-credentials]",
     "  mobile archive --production --build-number <number> [--version <version>] [--out-dir <dir>] [--upload] [--dry-run]",
     "  mobile doctor --device",
     "  mobile qa --production [--ota]",
@@ -668,7 +670,7 @@ const helpTopics: Record<string, string[]> = {
     "",
     "Commands:",
     "  mobile up [--production|--staging] [--with-credentials]",
-    "  mobile run --device [--production|--staging] [--with-credentials]",
+    "  mobile run --device [--production|--staging] [--install] [--with-credentials]",
     "  mobile archive --production --build-number <number> [--version <version>] [--out-dir <dir>] [--upload] [--dry-run]",
     "  mobile doctor --device",
     "  mobile qa --production [--ota]",
@@ -686,14 +688,15 @@ const helpTopics: Record<string, string[]> = {
     "  --staging           Use the installed staging desktop server and staging cloud services."
   ],
   "mobile run": [
-    "Usage: kd mobile run --device [--production|--staging]",
+    "Usage: kd mobile run --device [--production|--staging] [--install]",
     "",
     "Build, install, and launch Kanna mobile on a physical iOS device.",
     "",
     "Options:",
     "  --device            Required. Target a physical iOS device.",
     "  --production        Launch against production settings.",
-    "  --staging           Launch against installed staging desktop settings."
+    "  --staging           Launch against installed staging desktop settings.",
+    "  --install           Build and install a bundled Release app; skips Metro and dev-client hot loading."
   ],
   "mobile archive": [
     "Usage: kd mobile archive --production --build-number <number> [--version <version>] [--out-dir <dir>] [--upload] [--dry-run]",
