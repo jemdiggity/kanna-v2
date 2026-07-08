@@ -456,10 +456,17 @@ describe("kd CLI", () => {
       taskId: "mobile.run",
       input: { device: true, production: false, staging: true }
     });
+    expect(parseCliArgs(["mobile", "run", "--device", "--staging", "--install"])).toEqual({
+      taskId: "mobile.run",
+      input: { device: true, production: false, staging: true, install: true }
+    });
     expect(parseCliArgs(["mobile", "run", "--device", "--production"])).toEqual({
       taskId: "mobile.run",
       input: { device: true, production: true, staging: false }
     });
+    expect(() => parseCliArgs(["mobile", "run", "--staging", "--install"])).toThrow(
+      "mobile run requires --device"
+    );
     expect(() => parseCliArgs(["mobile", "run", "--device", "--production", "--staging"])).toThrow(
       "mobile run accepts only one of --production or --staging"
     );
