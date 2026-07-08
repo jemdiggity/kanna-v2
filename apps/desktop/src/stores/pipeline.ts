@@ -19,7 +19,15 @@ export interface PipelineApi {
   loadPipeline: (repoPath: string, pipelineName: string) => Promise<PipelineDefinition>;
   loadAgent: (repoPath: string, agentName: string) => Promise<AgentDefinition>;
   advanceStage: (taskId: string, options?: AdvanceStageOptions) => Promise<void>;
+  requestRevision: (taskId: string, options: RequestRevisionOptions) => Promise<boolean>;
   rerunStage: (taskId: string) => Promise<void>;
+}
+
+export interface RequestRevisionOptions {
+  targetStage: string;
+  summary: string;
+  prompt: string;
+  metadata?: Record<string, unknown>;
 }
 
 export function createPipelineApi(context: StoreContext): PipelineApi {
@@ -51,7 +59,11 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
     throw lastError instanceof Error ? lastError : new Error(String(lastError ?? "kanna-server did not become ready"));
   }
 
-  async function postTaskAction(taskId: string, action: "advance-stage" | "rerun-stage"): Promise<Response> {
+  async function postTaskAction(
+    taskId: string,
+    action: "advance-stage" | "rerun-stage" | "request-revision",
+    body?: unknown,
+  ): Promise<Response> {
     const serverBaseUrl = await resolveLocalServerBaseUrl();
     const url = `${serverBaseUrl}/v1/tasks/${encodeURIComponent(taskId)}/actions/${action}`;
     const deadline = Date.now() + LOCAL_SERVER_ACTION_TIMEOUT_MS;
@@ -59,7 +71,15 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
 
     while (Date.now() < deadline) {
       try {
-        return await fetch(url, { method: "POST" });
+        return await fetch(url, {
+          method: "POST",
+          ...(body == null
+            ? {}
+            : {
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(body),
+              }),
+        });
       } catch (error) {
         lastError = error;
         await sleep(LOCAL_SERVER_ACTION_RETRY_DELAY_MS);
@@ -110,21 +130,24 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
     repo_id: string;
     pipeline: string;
     stage: string;
-  }): Promise<{ nextStageName: string | null; pendingPostName: string | null }> {
+  }): Promise<{ nextStageName: string | null; pendingPostName: string | null; expectClosed: boolean }> {
     const repo = context.state.repos.value.find((candidate) => candidate.id === item.repo_id);
-    if (!repo) return { nextStageName: null, pendingPostName: null };
+    if (!repo) return { nextStageName: null, pendingPostName: null, expectClosed: false };
     try {
       const pipeline = await loadPipeline(repo.path, item.pipeline || "default");
       const currentIndex = pipeline.stages.findIndex((stage) => stage.name === item.stage);
-      if (currentIndex === -1) return { nextStageName: null, pendingPostName: null };
+      if (currentIndex === -1) return { nextStageName: null, pendingPostName: null, expectClosed: false };
       const currentStage = pipeline.stages[currentIndex];
+      const nextStageName = pipeline.stages[currentIndex + 1]?.name ?? null;
+      const pendingPostName = currentStage?.post?.name ?? null;
       return {
-        nextStageName: pipeline.stages[currentIndex + 1]?.name ?? null,
-        pendingPostName: currentStage?.post?.name ?? null,
+        nextStageName,
+        pendingPostName,
+        expectClosed: !nextStageName && !pendingPostName,
       };
     } catch (error) {
       console.debug("[pipeline:advanceStage] could not resolve stage projection for optimistic update:", error);
-      return { nextStageName: null, pendingPostName: null };
+      return { nextStageName: null, pendingPostName: null, expectClosed: false };
     }
   }
 
@@ -169,9 +192,11 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
     taskId: string,
     nextStageName: string | null,
     pendingPostName: string | null,
+    expectClosed: boolean,
   ): boolean {
     const item = context.state.items.value.find((candidate) => candidate.id === taskId);
     if (!item || item.closed_at != null) return true;
+    if (expectClosed) return false;
     if (pendingPostName) {
       return Boolean(item.has_running_post) || item.active_post_action === pendingPostName;
     }
@@ -185,17 +210,19 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
     taskId: string,
     nextStageName: string | null,
     pendingPostName: string | null,
+    expectClosed: boolean,
   ): Promise<void> {
     const reloadSnapshot = requireService(context.services.reloadSnapshot, "reloadSnapshot");
     const deadline = Date.now() + STAGE_ADVANCE_RECONCILE_TIMEOUT_MS;
     while (true) {
       await reloadSnapshot();
-      if (stageAdvanceSnapshotCaughtUp(taskId, nextStageName, pendingPostName)) return;
+      if (stageAdvanceSnapshotCaughtUp(taskId, nextStageName, pendingPostName, expectClosed)) return;
       if (Date.now() >= deadline) {
         console.warn("[pipeline:advanceStage] snapshot did not catch up before timeout", {
           taskId,
           nextStageName,
           pendingPostName,
+          expectClosed,
         });
         return;
       }
@@ -284,12 +311,13 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
     if (item.closed_at != null) return;
     const sourceTaskIsSelected = context.state.selectedItemId.value === item.id;
     const fallbackSelectionId = computeNextVisibleItemId(item.id);
-    const { nextStageName, pendingPostName } = await resolveStageAdvanceProjection(item);
+    const { nextStageName, pendingPostName, expectClosed } = await resolveStageAdvanceProjection(item);
     debugLog("[pipeline:advanceStage] selection policy", {
       taskId,
       currentStage: item.stage,
       optimisticNextStage: nextStageName,
       optimisticPendingPost: pendingPostName,
+      expectClosed,
       initiatedBy: options.initiatedBy ?? "manual",
       sourceTaskIsSelected,
       fallbackSelectionId,
@@ -308,7 +336,7 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
           throw new Error(message);
         }
         const result = await response.json() as TaskActionResponse;
-        await waitForStageAdvanceSnapshot(result.taskId, nextStageName, pendingPostName);
+        await waitForStageAdvanceSnapshot(result.taskId, nextStageName, pendingPostName, expectClosed);
 
         // Durable tasks: an in-pipeline advance transitions the SAME task in
         // place, so the user's selection stays put. Only when the advance
@@ -343,10 +371,35 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
     }
   }
 
+  async function requestRevision(taskId: string, options: RequestRevisionOptions): Promise<boolean> {
+    const item = context.state.items.value.find((candidate) => candidate.id === taskId);
+    if (!item) return false;
+    if (item.closed_at != null) return false;
+
+    try {
+      const response = await postTaskAction(taskId, "request-revision", {
+        targetStage: options.targetStage,
+        summary: options.summary,
+        prompt: options.prompt,
+        metadata: options.metadata,
+      });
+      if (!response.ok) {
+        throw new Error(await response.text());
+      }
+      await requireService(context.services.reloadSnapshot, "reloadSnapshot")();
+      return true;
+    } catch (error) {
+      console.error("[store] requestRevision: server action failed:", error);
+      context.toast.error(`${context.tt("toasts.agentStartFailed")}: ${error instanceof Error ? error.message : error}`);
+      return false;
+    }
+  }
+
   return {
     loadPipeline,
     loadAgent,
     advanceStage,
+    requestRevision,
     rerunStage,
   };
 }
