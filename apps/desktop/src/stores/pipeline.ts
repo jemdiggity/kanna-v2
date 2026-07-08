@@ -28,6 +28,12 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
     followTask?: boolean;
   }
 
+  interface StageAdvanceProjection {
+    nextStageName: string | null;
+    pendingPostName: string | null;
+    closesOnSuccess: boolean;
+  }
+
   function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
@@ -110,21 +116,23 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
     repo_id: string;
     pipeline: string;
     stage: string;
-  }): Promise<{ nextStageName: string | null; pendingPostName: string | null }> {
+  }): Promise<StageAdvanceProjection> {
     const repo = context.state.repos.value.find((candidate) => candidate.id === item.repo_id);
-    if (!repo) return { nextStageName: null, pendingPostName: null };
+    if (!repo) return { nextStageName: null, pendingPostName: null, closesOnSuccess: false };
     try {
       const pipeline = await loadPipeline(repo.path, item.pipeline || "default");
       const currentIndex = pipeline.stages.findIndex((stage) => stage.name === item.stage);
-      if (currentIndex === -1) return { nextStageName: null, pendingPostName: null };
+      if (currentIndex === -1) return { nextStageName: null, pendingPostName: null, closesOnSuccess: false };
       const currentStage = pipeline.stages[currentIndex];
+      const pendingPostName = currentStage?.post?.name ?? null;
       return {
         nextStageName: pipeline.stages[currentIndex + 1]?.name ?? null,
-        pendingPostName: currentStage?.post?.name ?? null,
+        pendingPostName,
+        closesOnSuccess: currentIndex === pipeline.stages.length - 1 && pendingPostName === null,
       };
     } catch (error) {
       console.debug("[pipeline:advanceStage] could not resolve stage projection for optimistic update:", error);
-      return { nextStageName: null, pendingPostName: null };
+      return { nextStageName: null, pendingPostName: null, closesOnSuccess: false };
     }
   }
 
@@ -169,9 +177,11 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
     taskId: string,
     nextStageName: string | null,
     pendingPostName: string | null,
+    closesOnSuccess: boolean,
   ): boolean {
     const item = context.state.items.value.find((candidate) => candidate.id === taskId);
     if (!item || item.closed_at != null) return true;
+    if (closesOnSuccess) return false;
     if (pendingPostName) {
       return Boolean(item.has_running_post) || item.active_post_action === pendingPostName;
     }
@@ -185,17 +195,19 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
     taskId: string,
     nextStageName: string | null,
     pendingPostName: string | null,
+    closesOnSuccess: boolean,
   ): Promise<void> {
     const reloadSnapshot = requireService(context.services.reloadSnapshot, "reloadSnapshot");
     const deadline = Date.now() + STAGE_ADVANCE_RECONCILE_TIMEOUT_MS;
     while (true) {
       await reloadSnapshot();
-      if (stageAdvanceSnapshotCaughtUp(taskId, nextStageName, pendingPostName)) return;
+      if (stageAdvanceSnapshotCaughtUp(taskId, nextStageName, pendingPostName, closesOnSuccess)) return;
       if (Date.now() >= deadline) {
         console.warn("[pipeline:advanceStage] snapshot did not catch up before timeout", {
           taskId,
           nextStageName,
           pendingPostName,
+          closesOnSuccess,
         });
         return;
       }
@@ -284,12 +296,13 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
     if (item.closed_at != null) return;
     const sourceTaskIsSelected = context.state.selectedItemId.value === item.id;
     const fallbackSelectionId = computeNextVisibleItemId(item.id);
-    const { nextStageName, pendingPostName } = await resolveStageAdvanceProjection(item);
+    const { nextStageName, pendingPostName, closesOnSuccess } = await resolveStageAdvanceProjection(item);
     debugLog("[pipeline:advanceStage] selection policy", {
       taskId,
       currentStage: item.stage,
       optimisticNextStage: nextStageName,
       optimisticPendingPost: pendingPostName,
+      closesOnSuccess,
       initiatedBy: options.initiatedBy ?? "manual",
       sourceTaskIsSelected,
       fallbackSelectionId,
@@ -308,7 +321,7 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
           throw new Error(message);
         }
         const result = await response.json() as TaskActionResponse;
-        await waitForStageAdvanceSnapshot(result.taskId, nextStageName, pendingPostName);
+        await waitForStageAdvanceSnapshot(result.taskId, nextStageName, pendingPostName, closesOnSuccess);
 
         // Durable tasks: an in-pipeline advance transitions the SAME task in
         // place, so the user's selection stays put. Only when the advance
