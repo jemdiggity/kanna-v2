@@ -53,11 +53,14 @@ async function getSelectedWorktreePath(
 }
 
 async function closeDiffModalIfOpen(client: WebDriverClient): Promise<void> {
-  const isOpen = await client.executeSync<boolean>(
-    `return Boolean(document.querySelector(".diff-view"));`
-  );
-  if (!isOpen) return;
-  await client.executeSync(buildGlobalKeydownScript({ key: "Escape" }));
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const isOpen = await client.executeSync<boolean>(
+      `return Boolean(document.querySelector(".diff-view"));`
+    );
+    if (!isOpen) return;
+    await client.executeSync(buildGlobalKeydownScript({ key: "Escape" }));
+    await sleep(100);
+  }
   await client.waitForNoElement(".diff-view", 2_000);
 }
 
@@ -239,6 +242,144 @@ async function waitForRecordedStageActions(
      const timeout = setTimeout(() => finish(read()), 10000);
      check();`
   );
+}
+
+async function clickRenderedDiffLineNumber(
+  client: WebDriverClient,
+  filePath: string,
+  lineNumber: number,
+): Promise<void> {
+  const result = await client.executeAsync<{ clicked: boolean; debug: string }>(
+    `const cb = arguments[arguments.length - 1];
+     const filePath = ${JSON.stringify(filePath)};
+     const lineNumber = ${lineNumber};
+     const expectedText = String(lineNumber);
+     const collectText = (element) => (element.textContent || "").trim();
+     const findWrapper = () => {
+       const wrappers = Array.from(document.querySelectorAll(".diff-container .diff-file"));
+       return wrappers.find((candidate) => {
+         const header = candidate.querySelector(".diff-file-header");
+         return (header?.getAttribute("title") || header?.textContent || "") === filePath;
+       });
+     };
+     const findLineNumberElement = (wrapper) => {
+       const containers = Array.from(wrapper.querySelectorAll("diffs-container"));
+       for (const container of containers) {
+         const root = container.shadowRoot;
+         if (!root) continue;
+         const numbers = Array.from(root.querySelectorAll("[data-line-number-content]"));
+         const match = numbers.find((element) => collectText(element) === expectedText);
+         if (match instanceof HTMLElement) return match;
+       }
+       return null;
+     };
+     let done = false;
+     const finish = (value) => {
+       if (done) return;
+       done = true;
+       clearInterval(interval);
+       clearTimeout(timeout);
+       cb(value);
+     };
+     const tryClick = () => {
+       const wrapper = findWrapper();
+       if (!(wrapper instanceof HTMLElement)) return;
+       const lineNumberElement = findLineNumberElement(wrapper);
+       if (!(lineNumberElement instanceof HTMLElement)) return;
+       lineNumberElement.dispatchEvent(new MouseEvent("click", {
+         bubbles: true,
+         cancelable: true,
+         composed: true,
+         view: window,
+       }));
+       finish({ clicked: true, debug: "" });
+     };
+     const interval = setInterval(tryClick, 50);
+     const timeout = setTimeout(() => {
+       const wrapper = findWrapper();
+       const available = wrapper
+         ? Array.from(wrapper.querySelectorAll("diffs-container"))
+             .flatMap((container) => container.shadowRoot
+               ? Array.from(container.shadowRoot.querySelectorAll("[data-line-number-content]"))
+                   .map((element) => collectText(element)).filter(Boolean)
+               : [])
+             .slice(0, 40)
+         : [];
+       finish({ clicked: false, debug: JSON.stringify({ filePath, lineNumber, available }) });
+     }, 10000);
+     tryClick();`
+  );
+  if (!result.clicked) {
+    throw new Error(`failed to click rendered diff line ${filePath}:${lineNumber}: ${result.debug}`);
+  }
+  await client.waitForElement(".review-composer", 2_000);
+}
+
+async function addReviewCommentThroughDiffUi(
+  client: WebDriverClient,
+  filePath: string,
+  lineNumber: number,
+  note: string,
+): Promise<void> {
+  await clickRenderedDiffLineNumber(client, filePath, lineNumber);
+  const textarea = await client.findElement(".review-composer textarea");
+  await client.sendKeys(textarea, note);
+  await client.click(await client.findElement(".review-composer-actions .primary"));
+}
+
+async function waitForReviewCommentCount(client: WebDriverClient, expectedCount: number): Promise<void> {
+  await client.executeAsync<string>(
+    `const cb = arguments[arguments.length - 1];
+     const expectedCount = ${expectedCount};
+     const readCount = () => {
+       const ctx = window.__KANNA_E2E__.setupState;
+       const stateRef = ctx.appModals?.currentDiffViewState || ctx.currentDiffViewState;
+       const state = stateRef?.__v_isRef ? stateRef.value : stateRef;
+       return (state?.reviewComments || []).length;
+     };
+     let done = false;
+     const finish = (value) => {
+       if (done) return;
+       done = true;
+       clearInterval(interval);
+       clearTimeout(timeout);
+       cb(value);
+     };
+     const check = () => {
+       const count = readCount();
+       if (count === expectedCount) finish("ok");
+     };
+     const interval = setInterval(check, 50);
+     const timeout = setTimeout(() => finish("count:" + readCount()), 3000);
+     check();`
+  ).then((result) => {
+    if (result !== "ok") {
+      throw new Error(`timed out waiting for ${expectedCount} review comments: ${result}`);
+    }
+  });
+}
+
+async function ensureCommentDrawerOpen(client: WebDriverClient): Promise<void> {
+  const isOpen = await client.executeSync<boolean>(
+    `return Boolean(document.querySelector(".comment-drawer"));`
+  );
+  if (isOpen) return;
+  await client.executeSync(buildGlobalKeydownScript({ key: "c" }));
+  await client.waitForElement(".comment-drawer", 2_000);
+}
+
+async function clickCommentDrawerAnchor(client: WebDriverClient, anchorText: string): Promise<void> {
+  const clicked = await client.executeSync<boolean>(
+    `const anchorText = ${JSON.stringify(anchorText)};
+     const anchors = Array.from(document.querySelectorAll(".comment-drawer .comment-anchor"));
+     const anchor = anchors.find((element) => (element.textContent || "").trim() === anchorText);
+     if (!(anchor instanceof HTMLButtonElement)) return false;
+     anchor.click();
+     return true;`
+  );
+  if (!clicked) {
+    throw new Error(`comment drawer anchor not found: ${anchorText}`);
+  }
 }
 
 describe("diff view", () => {
@@ -826,13 +967,96 @@ describe("diff view", () => {
       script: [
         "mkdir -p native-review-e2e",
         "cat > native-review-e2e/review.ts <<'EOF'",
-        "export function first() {",
-        "  return 'before';",
-        "}",
-        "",
-        "export function second() {",
-        "  return 'before';",
-        "}",
+        "export const marker001 = 'before-001';",
+        "export const marker002 = 'before-002';",
+        "export const marker003 = 'before-003';",
+        "export const marker004 = 'before-004';",
+        "export const marker005 = 'before-005';",
+        "export const marker006 = 'before-006';",
+        "export const marker007 = 'before-007';",
+        "export const marker008 = 'before-008';",
+        "export const marker009 = 'before-009';",
+        "export const marker010 = 'before-010';",
+        "export const marker011 = 'before-011';",
+        "export const marker012 = 'before-012';",
+        "export const marker013 = 'before-013';",
+        "export const marker014 = 'before-014';",
+        "export const marker015 = 'before-015';",
+        "export const marker016 = 'before-016';",
+        "export const marker017 = 'before-017';",
+        "export const marker018 = 'before-018';",
+        "export const marker019 = 'before-019';",
+        "export const marker020 = 'before-020';",
+        "export const marker021 = 'before-021';",
+        "export const marker022 = 'before-022';",
+        "export const marker023 = 'before-023';",
+        "export const marker024 = 'before-024';",
+        "export const marker025 = 'before-025';",
+        "export const marker026 = 'before-026';",
+        "export const marker027 = 'before-027';",
+        "export const marker028 = 'before-028';",
+        "export const marker029 = 'before-029';",
+        "export const marker030 = 'before-030';",
+        "export const marker031 = 'before-031';",
+        "export const marker032 = 'before-032';",
+        "export const marker033 = 'before-033';",
+        "export const marker034 = 'before-034';",
+        "export const marker035 = 'before-035';",
+        "export const marker036 = 'before-036';",
+        "export const marker037 = 'before-037';",
+        "export const marker038 = 'before-038';",
+        "export const marker039 = 'before-039';",
+        "export const marker040 = 'before-040';",
+        "export const marker041 = 'before-041';",
+        "export const marker042 = 'before-042';",
+        "export const marker043 = 'before-043';",
+        "export const marker044 = 'before-044';",
+        "export const marker045 = 'before-045';",
+        "export const marker046 = 'before-046';",
+        "export const marker047 = 'before-047';",
+        "export const marker048 = 'before-048';",
+        "export const marker049 = 'before-049';",
+        "export const marker050 = 'before-050';",
+        "export const marker051 = 'before-051';",
+        "export const marker052 = 'before-052';",
+        "export const marker053 = 'before-053';",
+        "export const marker054 = 'before-054';",
+        "export const marker055 = 'before-055';",
+        "export const marker056 = 'before-056';",
+        "export const marker057 = 'before-057';",
+        "export const marker058 = 'before-058';",
+        "export const marker059 = 'before-059';",
+        "export const marker060 = 'before-060';",
+        "export const marker061 = 'before-061';",
+        "export const marker062 = 'before-062';",
+        "export const marker063 = 'before-063';",
+        "export const marker064 = 'before-064';",
+        "export const marker065 = 'before-065';",
+        "export const marker066 = 'before-066';",
+        "export const marker067 = 'before-067';",
+        "export const marker068 = 'before-068';",
+        "export const marker069 = 'before-069';",
+        "export const marker070 = 'before-070';",
+        "export const marker071 = 'before-071';",
+        "export const marker072 = 'before-072';",
+        "export const marker073 = 'before-073';",
+        "export const marker074 = 'before-074';",
+        "export const marker075 = 'before-075';",
+        "export const marker076 = 'before-076';",
+        "export const marker077 = 'before-077';",
+        "export const marker078 = 'before-078';",
+        "export const marker079 = 'before-079';",
+        "export const marker080 = 'before-080';",
+        "export const marker081 = 'before-081';",
+        "export const marker082 = 'before-082';",
+        "export const marker083 = 'before-083';",
+        "export const marker084 = 'before-084';",
+        "export const marker085 = 'before-085';",
+        "export const marker086 = 'before-086';",
+        "export const marker087 = 'before-087';",
+        "export const marker088 = 'before-088';",
+        "export const marker089 = 'before-089';",
+        "export const marker090 = 'before-090';",
         "EOF",
         "git add native-review-e2e/review.ts",
         "git commit -m 'e2e native review branch content'",
@@ -861,33 +1085,20 @@ describe("diff view", () => {
     await openDiffModal(client);
     await setDiffScope(client, "Branch");
     await waitForDiffText(client, `return text.includes("native-review-e2e/review.ts");`);
-    await client.executeSync(
-      `const ctx = window.__KANNA_E2E__.setupState;
-       ctx.appModals.updateCurrentDiffViewState({
-         scope: "branch",
-         reviewHeadCommit: ${JSON.stringify(headCommit)},
-         reviewComments: [
-           {
-             id: "e2e-comment-1",
-             filePath: "native-review-e2e/review.ts",
-             startLine: 2,
-             endLine: 3,
-             excerpt: "  return 'before';\\n}",
-             note: "Change the first return value.",
-             headCommit: ${JSON.stringify(headCommit)}
-           },
-           {
-             id: "e2e-comment-2",
-             filePath: "native-review-e2e/review.ts",
-             startLine: 6,
-             endLine: 6,
-             excerpt: "  return 'before';",
-             note: "Change the second return value.",
-             headCommit: ${JSON.stringify(headCommit)}
-           }
-         ]
-       });`
+    await addReviewCommentThroughDiffUi(
+      client,
+      "native-review-e2e/review.ts",
+      2,
+      "Change the second marker.",
     );
+    await waitForReviewCommentCount(client, 1);
+    await addReviewCommentThroughDiffUi(
+      client,
+      "native-review-e2e/review.ts",
+      80,
+      "Change the eightieth marker.",
+    );
+    await waitForReviewCommentCount(client, 2);
 
     await client.executeSync(buildGlobalKeydownScript({ key: "s", meta: true, shift: true }));
     await client.waitForElement(".summary-composer", 2_000);
@@ -906,11 +1117,12 @@ describe("diff view", () => {
     expect(requestPayload.targetStage).toBe("in progress");
     expect(requestPayload.summary).toBe("Please apply both review notes.");
     expect(requestPayload.prompt).toContain(`Revision requested from review of task-${taskId} @ ${headCommit.slice(0, 8)} (branch diff vs main).`);
-    expect(requestPayload.prompt).toContain("native-review-e2e/review.ts:2-3");
-    expect(requestPayload.prompt).toContain(">   return 'before';");
-    expect(requestPayload.prompt).toContain("Change the first return value.");
-    expect(requestPayload.prompt).toContain("native-review-e2e/review.ts:6");
-    expect(requestPayload.prompt).toContain("Change the second return value.");
+    expect(requestPayload.prompt).toContain("native-review-e2e/review.ts:2");
+    expect(requestPayload.prompt).toContain("> export const marker002 = 'before-002';");
+    expect(requestPayload.prompt).toContain("Change the second marker.");
+    expect(requestPayload.prompt).toContain("native-review-e2e/review.ts:80");
+    expect(requestPayload.prompt).toContain("> export const marker080 = 'before-080';");
+    expect(requestPayload.prompt).toContain("Change the eightieth marker.");
     expect(requestPayload.prompt).toContain("Overall: Please apply both review notes.");
 
     await client.executeAsync<string>(
@@ -930,6 +1142,105 @@ describe("diff view", () => {
     const callsAfterApprove = await waitForRecordedStageActions(client, 2);
     expect(callsAfterApprove[1].url).toContain(`/v1/tasks/${encodeURIComponent(taskId)}/actions/advance-stage`);
     expect(callsAfterApprove[1].method).toBe("POST");
+  });
+
+  it("jumps, edits, and deletes pending review comments from the drawer", async () => {
+    const worktreePath = await getSelectedWorktreePath(client, testRepoPath);
+    await tauriInvoke(client, "run_script", {
+      script: [
+        "mkdir -p native-review-e2e",
+        "for i in $(seq 1 120); do printf 'export const drawerMarker%03d = \"before-%03d\";\\n' \"$i\" \"$i\"; done > native-review-e2e/drawer.ts",
+        "git add native-review-e2e/drawer.ts",
+        "git commit -m 'e2e native review drawer content'",
+      ].join("\n"),
+      cwd: worktreePath,
+      env: {},
+    });
+
+    await client.executeAsync<string>(
+      `const cb = arguments[arguments.length - 1];
+       const ctx = window.__KANNA_E2E__.setupState;
+       const db = ctx.db.value || ctx.db;
+       const item = ctx.selectedItem();
+       db.execute("UPDATE pipeline_item SET stage = ? WHERE id = ?", ["review", item.id])
+         .then(function() { return ctx.refreshAllItems(); })
+         .then(function() { cb("ok"); })
+         .catch(function(e) { cb("err:" + e); });`
+    );
+
+    await openDiffModal(client);
+    await setDiffScope(client, "Branch");
+    await waitForDiffText(client, `return text.includes("native-review-e2e/drawer.ts");`);
+    await addReviewCommentThroughDiffUi(
+      client,
+      "native-review-e2e/drawer.ts",
+      2,
+      "Edit this note from the drawer.",
+    );
+    await waitForReviewCommentCount(client, 1);
+    await addReviewCommentThroughDiffUi(
+      client,
+      "native-review-e2e/drawer.ts",
+      100,
+      "Delete this note from the drawer.",
+    );
+    await waitForReviewCommentCount(client, 2);
+    await ensureCommentDrawerOpen(client);
+
+    await clickCommentDrawerAnchor(client, "native-review-e2e/drawer.ts:100");
+    const jumpedScrollTop = await client.executeAsync<number>(
+      `const cb = arguments[arguments.length - 1];
+       const read = () => {
+         const container = document.querySelector(".diff-container");
+         return container instanceof HTMLElement ? container.scrollTop : 0;
+       };
+       let done = false;
+       const finish = (value) => {
+         if (done) return;
+         done = true;
+         clearInterval(interval);
+         clearTimeout(timeout);
+         cb(value);
+       };
+       const interval = setInterval(() => {
+         const top = read();
+         if (top > 1000) finish(top);
+       }, 50);
+       const timeout = setTimeout(() => finish(read()), 3000);`
+    );
+    expect(jumpedScrollTop).toBeGreaterThan(1000);
+
+    const drawerResult = await client.executeAsync<{ edited: boolean; deleted: boolean; count: number }>(
+      `const cb = arguments[arguments.length - 1];
+       const cards = Array.from(document.querySelectorAll(".comment-drawer .comment-card"));
+       const editCard = cards.find((card) => (card.querySelector(".comment-anchor")?.textContent || "").includes("native-review-e2e/drawer.ts:2"));
+       const deleteCard = cards.find((card) => (card.querySelector(".comment-anchor")?.textContent || "").includes("native-review-e2e/drawer.ts:100"));
+       const textarea = editCard?.querySelector("textarea");
+       if (textarea instanceof HTMLTextAreaElement) {
+         const valueSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
+         valueSetter?.call(textarea, "Edited from the comment drawer.");
+         textarea.dispatchEvent(new Event("input", { bubbles: true }));
+       }
+       setTimeout(() => {
+         const deleteButton = Array.from(deleteCard?.querySelectorAll(".comment-actions button") || [])
+           .find((button) => (button.textContent || "").includes("Delete"));
+         if (deleteButton instanceof HTMLButtonElement) {
+           deleteButton.click();
+         }
+         setTimeout(() => {
+         const ctx = window.__KANNA_E2E__.setupState;
+         const stateRef = ctx.appModals?.currentDiffViewState || ctx.currentDiffViewState;
+         const state = stateRef?.__v_isRef ? stateRef.value : stateRef;
+         const comments = state?.reviewComments || [];
+         cb({
+           edited: comments.some((comment) => comment.note === "Edited from the comment drawer."),
+           deleted: comments.every((comment) => comment.startLine !== 100),
+           count: comments.length,
+         });
+         }, 0);
+       }, 0);`
+    );
+    expect(drawerResult).toEqual({ edited: true, deleted: true, count: 1 });
   });
 
   it("refreshes an open Branch diff after the task branch history is rewritten", async () => {

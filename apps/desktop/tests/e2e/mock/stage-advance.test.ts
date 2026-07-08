@@ -124,6 +124,22 @@ async function getStageRuns(client: WebDriverClient, taskId: string): Promise<St
   )) as StageRunRow[];
 }
 
+async function waitForStageRuns(
+  client: WebDriverClient,
+  taskId: string,
+  predicate: (runs: StageRunRow[]) => boolean,
+  timeoutMs = 20_000,
+): Promise<StageRunRow[]> {
+  const deadline = Date.now() + timeoutMs;
+  let last: StageRunRow[] = [];
+  while (Date.now() < deadline) {
+    last = await getStageRuns(client, taskId);
+    if (predicate(last)) return last;
+    await sleep(100);
+  }
+  throw new Error(`timed out waiting for stage runs for ${taskId}; last rows: ${JSON.stringify(last)}`);
+}
+
 async function countRepoTasks(client: WebDriverClient, repoId: string): Promise<number> {
   const rows = (await queryDb(
     client,
@@ -173,6 +189,22 @@ async function waitForSelectedTaskId(
     await sleep(100);
   }
   throw new Error(`timed out waiting for selected task ${expectedTaskId}; saw ${JSON.stringify(lastSelectedTaskId)}`);
+}
+
+async function waitForSelectedTaskNotId(
+  client: WebDriverClient,
+  taskId: string,
+  timeoutMs = 10_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let lastSelectedTaskId: unknown = undefined;
+  while (Date.now() < deadline) {
+    const selectedTaskId = await getVueState(client, "selectedItemId");
+    lastSelectedTaskId = selectedTaskId;
+    if (selectedTaskId !== taskId) return;
+    await sleep(100);
+  }
+  throw new Error(`timed out waiting for selected task to leave ${taskId}; saw ${JSON.stringify(lastSelectedTaskId)}`);
 }
 
 async function selectTask(client: WebDriverClient, taskId: string): Promise<void> {
@@ -418,12 +450,14 @@ describe("stage advance", () => {
         throw new Error(`advance-stage failed: ${response.status} ${await response.text()}`);
       }
       expect(await response.json()).toEqual({ taskId });
+
+      // The SAME pipeline_item transitions: same id, still open, no
+      // next-stage task created — but the workspace forked: a fresh
+      // randomly-named branch cut from the previous branch's committed tip.
+      await waitForTaskRow(client, taskId, (candidate) => candidate.stage === "pr");
     });
 
-    // The SAME pipeline_item transitions: same id, still open, no
-    // next-stage task created — but the workspace forked: a fresh
-    // randomly-named branch cut from the previous branch's committed tip.
-    const row = await waitForTaskRow(client, taskId, (candidate) => candidate.stage === "pr");
+    const row = await getTaskRow(client, taskId);
     expect(row).toMatchObject({
       id: taskId,
       stage: "pr",
@@ -432,7 +466,7 @@ describe("stage advance", () => {
       agent_provider: "codex",
     });
     expect(row.branch).not.toBe(branch);
-    expect(row.branch).toMatch(/^task-[0-9a-f]{8}$/);
+    expect(row.branch).toBe(`task-${taskId}-2`);
     const forkWorktree = join(testRepoPath, ".kanna-worktrees", row.branch as string);
     expect((await stat(forkWorktree)).isDirectory()).toBe(true);
     expect(await countRepoTasks(client, repoId)).toBe(taskCountBefore);
@@ -494,7 +528,7 @@ describe("stage advance", () => {
     // closed_at is the sole done indicator; the stage keeps its last real value.
     expect(row.stage).toBe("pr");
     await waitForSidebarToExcludeTaskId(client, taskId);
-    expect(await getVueState(client, "selectedItemId")).not.toBe(taskId);
+    await waitForSelectedTaskNotId(client, taskId);
   });
 
   it("rejects advancing a blocked task with a toast and leaves it untouched", async () => {
@@ -571,12 +605,14 @@ describe("stage advance", () => {
         throw new Error(`complete-stage failed: ${response.status} ${await response.text()}`);
       }
       expect((await response.json() as { taskId: string }).taskId).toBe(sourceTaskId);
+
+      await waitForTaskRow(client, sourceTaskId, (candidate) => candidate.stage === "review");
     });
 
-    const row = await waitForTaskRow(client, sourceTaskId, (candidate) => candidate.stage === "review");
+    const row = await getTaskRow(client, sourceTaskId);
     expect(row).toMatchObject({ id: sourceTaskId, closed_at: null });
     expect(row.branch).not.toBe(sourceBranch);
-    expect(row.branch).toMatch(/^task-[0-9a-f]{8}$/);
+    expect(row.branch).toBe(`task-${sourceTaskId}-2`);
 
     const runs = await getStageRuns(client, sourceTaskId);
     const seededRun = runs.find((run) => run.id === "run-auto-complete-source-seed");
@@ -615,6 +651,12 @@ describe("stage advance", () => {
         throw new Error(`rerun-stage failed: ${response.status} ${await response.text()}`);
       }
       expect(await response.json()).toEqual({ taskId });
+
+      await waitForStageRuns(client, taskId, (runs) => {
+        const seededRun = runs.find((run) => run.id === seedRunId);
+        return seededRun?.status === "cancelled"
+          && runs.some((run) => run.id !== seedRunId && run.stage === "in progress");
+      });
     });
 
     const row = await getTaskRow(client, taskId);
@@ -664,9 +706,11 @@ describe("stage advance", () => {
       }
       // The revision reruns an earlier stage on the SAME durable task.
       expect((await response.json() as { taskId: string }).taskId).toBe(taskId);
+
+      await waitForTaskRow(client, taskId, (candidate) => candidate.stage === "in progress");
     });
 
-    const row = await waitForTaskRow(client, taskId, (candidate) => candidate.stage === "in progress");
+    const row = await getTaskRow(client, taskId);
     expect(row).toMatchObject({
       id: taskId,
       stage: "in progress",
@@ -676,7 +720,7 @@ describe("stage advance", () => {
     });
     // The revision forked a fresh workspace from the reviewed branch's tip.
     expect(row.branch).not.toBe(branch);
-    expect(row.branch).toMatch(/^task-[0-9a-f]{8}$/);
+    expect(row.branch).toBe(`task-${taskId}-2`);
 
     const runs = await getStageRuns(client, taskId);
     const seededRun = runs.find((run) => run.id === seedRunId);
@@ -697,6 +741,7 @@ describe("stage advance", () => {
     await waitForFile(capturedArgsPath, 20_000);
     const capturedArgs = await readFile(capturedArgsPath, "utf8");
     expect(capturedArgs).toContain("--yolo\n");
-    expect(capturedArgs).toContain(`Implement revision:\n${revisionPrompt}`);
+    expect(capturedArgs).toContain("Implement revision:");
+    expect(capturedArgs).toContain(`Reviewer feedback:\n${revisionPrompt}`);
   });
 });

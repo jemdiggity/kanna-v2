@@ -237,6 +237,7 @@ function submitReviewComposer() {
       excerpt: anchor.excerpt,
       note,
       headCommit: props.reviewHeadCommit ?? "HEAD",
+      overlayTop: anchor.overlayTop,
     },
   ];
   composerDrafts.delete(buildComposerKey(anchor));
@@ -264,7 +265,52 @@ function shortSha(sha: string): string {
   return sha.slice(0, 8);
 }
 
-function jumpToReviewAnchor(anchor: { filePath: string; startLine: number }) {
+function getFileWrapper(filePath: string): HTMLElement | null {
+  const container = containerRef.value;
+  if (!container) return null;
+  const wrappers = Array.from(container.querySelectorAll<HTMLElement>(".diff-file"));
+  return wrappers.find((candidate) => {
+    const header = candidate.querySelector<HTMLElement>(".diff-file-header");
+    return (header?.title || header?.textContent || "") === filePath;
+  }) ?? null;
+}
+
+function getElementOverlayTop(element: HTMLElement): number | null {
+  const container = containerRef.value;
+  if (!container) return null;
+  const containerRect = container.getBoundingClientRect();
+  const elementRect = element.getBoundingClientRect();
+  return Math.max(0, elementRect.top - containerRect.top + container.scrollTop);
+}
+
+function findRenderedLineTop(anchor: { filePath: string; startLine: number }): number | null {
+  const wrapper = getFileWrapper(anchor.filePath);
+  if (!wrapper) return null;
+  const lineSelector = `[data-line="${anchor.startLine}"]`;
+  const lineNumberText = String(anchor.startLine);
+  const diffContainers = Array.from(wrapper.querySelectorAll<HTMLElement>("diffs-container"));
+  for (const diffContainer of diffContainers) {
+    const root = diffContainer.shadowRoot;
+    if (!root) continue;
+    const line = root.querySelector<HTMLElement>(lineSelector);
+    const lineTop = line ? getElementOverlayTop(line) : null;
+    if (lineTop != null) return lineTop;
+
+    const lineNumber = Array.from(root.querySelectorAll<HTMLElement>("[data-line-number-content]"))
+      .find((candidate) => candidate.textContent?.trim() === lineNumberText);
+    const lineNumberTop = lineNumber ? getElementOverlayTop(lineNumber) : null;
+    if (lineNumberTop != null) return lineNumberTop;
+  }
+  return null;
+}
+
+function scrollToReviewTop(top: number) {
+  const container = containerRef.value;
+  if (!container) return;
+  container.scrollTo({ top: Math.max(0, top - 12), behavior: "smooth" });
+}
+
+function jumpToReviewAnchor(anchor: { filePath: string; startLine: number; overlayTop?: number }) {
   if (scope.value !== "branch") {
     void setScope("branch").then(() => jumpToReviewAnchor(anchor));
     return;
@@ -272,10 +318,18 @@ function jumpToReviewAnchor(anchor: { filePath: string; startLine: number }) {
   nextTick(() => {
     const container = containerRef.value;
     if (!container) return;
-    const headers = Array.from(container.querySelectorAll<HTMLElement>(".diff-file-header"));
-    const header = headers.find((candidate) => candidate.textContent === anchor.filePath);
-    if (!header) return;
-    container.scrollTo({ top: Math.max(0, header.offsetTop - 12), behavior: "smooth" });
+    if (anchor.overlayTop != null && Number.isFinite(anchor.overlayTop)) {
+      scrollToReviewTop(anchor.overlayTop);
+      return;
+    }
+    const renderedLineTop = findRenderedLineTop(anchor);
+    if (renderedLineTop != null) {
+      scrollToReviewTop(renderedLineTop);
+      return;
+    }
+    const wrapper = getFileWrapper(anchor.filePath);
+    if (!wrapper) return;
+    scrollToReviewTop(wrapper.offsetTop);
   });
 }
 

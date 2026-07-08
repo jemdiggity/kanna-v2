@@ -9,6 +9,7 @@ export interface PendingReviewComment extends ReviewAnchor {
   excerpt: string;
   note: string;
   headCommit: string;
+  overlayTop?: number;
 }
 
 export interface BuildRevisionPromptOptions {
