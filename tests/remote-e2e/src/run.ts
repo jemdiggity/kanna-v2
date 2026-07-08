@@ -1,5 +1,9 @@
 import { fileURLToPath } from "node:url";
 import { runCommand } from "./processes";
+import {
+  buffyStagingCredentialsFromEnv,
+  stagingRemoteE2eSkipMessage
+} from "./staging";
 
 const args = process.argv.slice(2);
 const staging = args.includes("--staging");
@@ -10,7 +14,11 @@ if (staging && dev && args.includes("--dev")) {
 }
 
 if (staging) {
-  throw new Error("Layer B staging remote-e2e is intentionally gated until staging credentials are supplied to this harness.");
+  const credentials = buffyStagingCredentialsFromEnv(process.env);
+  if (!credentials.ok) {
+    console.log(stagingRemoteE2eSkipMessage(credentials.missing));
+    process.exit(0);
+  }
 }
 
 await runCommand("pnpm", [
@@ -18,12 +26,13 @@ await runCommand("pnpm", [
   "vitest",
   "run",
   "--no-file-parallelism",
-  "src/remote-harness.smoke.test.ts",
-  "src/terminal-flow.e2e.test.ts"
+  ...(staging
+    ? ["src/staging-smoke.e2e.test.ts"]
+    : ["src/remote-harness.smoke.test.ts", "src/terminal-flow.e2e.test.ts"])
 ], {
   cwd: fileURLToPath(new URL("..", import.meta.url)),
   env: {
     ...process.env,
-    KANNA_REMOTE_E2E_ENV: "dev"
+    KANNA_REMOTE_E2E_ENV: staging ? "staging" : "dev"
   }
 });
