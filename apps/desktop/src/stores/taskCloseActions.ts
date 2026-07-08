@@ -8,6 +8,7 @@ import {
 import { hasOpenSubtasks } from "../utils/taskParenting";
 import { requireService, type StoreContext } from "./state";
 import { resolveAgentProvider } from "./agent-provider";
+import { resolveTaskItemForDaemonSession } from "./taskSessionIdentity";
 import type { TasksApi } from "./tasks";
 
 export function createTaskCloseActions(
@@ -100,7 +101,7 @@ export function createTaskCloseActions(
   }
 
   async function handleAgentFinished(sessionId: string) {
-    const item = context.state.items.value.find((candidate) => candidate.id === sessionId);
+    const item = resolveTaskItemForDaemonSession(context.state.items.value, sessionId);
     if (!item) return;
     if (item.closed_at !== null) return;
     try {

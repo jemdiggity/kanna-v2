@@ -659,6 +659,81 @@ describe("kanna runtime status reconciliation", () => {
     expect(mockState.pipelineItems[0]?.activity).toBe("idle");
   });
 
+  it("keeps an exited forked workspace task read when another open window has it selected", async () => {
+    mockState.pipelineItems = [
+      {
+        ...mockState.pipelineItems[0]!,
+        id: "5aa7c7ec",
+        branch: "task-5aa7c7ec-7",
+        stage: "pr",
+        agent_provider: "codex",
+        activity: "working",
+      },
+    ];
+    const store = await createStore();
+    store.attachWindowWorkspace({
+      bootstrap: {
+        windowId: "window-a",
+        selectedRepoId: "repo-1",
+        selectedItemId: null,
+      },
+      loadSnapshot: vi.fn(async () => ({
+        windows: [
+          {
+            windowId: "window-a",
+            selectedRepoId: "repo-1",
+            selectedItemId: null,
+            sidebarHidden: false,
+            sidebarWidth: 260,
+            order: 0,
+          },
+          {
+            windowId: "window-b",
+            selectedRepoId: "repo-1",
+            selectedItemId: "5aa7c7ec",
+            sidebarHidden: false,
+            sidebarWidth: 260,
+            order: 1,
+          },
+        ],
+      })),
+      saveSnapshot: vi.fn(async () => {}),
+      openWindow: vi.fn(async () => {}),
+      closeWindow: vi.fn(async () => {}),
+      forgetCurrentWindow: vi.fn(async () => {}),
+      persistSelection: vi.fn(async () => {}),
+      persistSidebarHidden: vi.fn(async () => {}),
+      persistSidebarWidth: vi.fn(async () => {}),
+      invalidateSharedData: vi.fn(async () => {}),
+      restoreAdditionalWindows: vi.fn(async () => {}),
+      onSharedInvalidation: vi.fn(async () => vi.fn()),
+    });
+    await flushStore();
+    mockState.pipelineItems[0]!.activity = "working";
+    expect(store.items[0]).toMatchObject({
+      id: "5aa7c7ec",
+      branch: "task-5aa7c7ec-7",
+      activity: "working",
+    });
+
+    mockState.emit("session_exit", {
+      session_id: "task-5aa7c7ec-7",
+      code: 0,
+      resume_session_id: null,
+    });
+
+    await flushStore();
+
+    await vi.waitFor(() => {
+      expect(mockState.updatePipelineItemActivityMock).toHaveBeenCalledWith(
+        expect.anything(),
+        "5aa7c7ec",
+        "idle",
+      );
+    });
+    expect(mockState.pipelineItems[0]?.activity).toBe("idle");
+  });
+
   it("ignores session exits for closed tasks", async () => {
     mockState.pipelineItems = [
       {
