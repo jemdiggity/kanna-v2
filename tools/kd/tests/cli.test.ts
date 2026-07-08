@@ -335,23 +335,6 @@ describe("kd CLI", () => {
         withCredentials: true
       }
     });
-    expect(parseCliArgs(["mobile", "up", "--staging", "--with-credentials"])).toEqual({
-      taskId: "mobile.up",
-      input: {
-        production: false,
-        staging: true,
-        withCredentials: true
-      }
-    });
-    expect(parseCliArgs(["mobile", "run", "--device", "--staging", "--with-credentials"])).toEqual({
-      taskId: "mobile.run",
-      input: {
-        device: true,
-        production: false,
-        staging: true,
-        withCredentials: true
-      }
-    });
     expect(parseCliArgs(["dev", "restart", "desktop", "--staging", "--with-credentials"])).toEqual({
       taskId: "dev.restart",
       input: {
@@ -383,6 +366,12 @@ describe("kd CLI", () => {
       }
     });
     expect(() => parseCliArgs(["mobile", "up", "--production", "--with-credentials"])).toThrow(
+      "--with-credentials is only supported for dev or staging desktop launch commands"
+    );
+    expect(() => parseCliArgs(["mobile", "up", "--staging", "--with-credentials"])).toThrow(
+      "--with-credentials is only supported for dev or staging desktop launch commands"
+    );
+    expect(() => parseCliArgs(["mobile", "run", "--device", "--staging", "--with-credentials"])).toThrow(
       "--with-credentials is only supported for dev or staging desktop launch commands"
     );
     expect(() => parseCliArgs(["mobile", "doctor", "--device", "--staging", "--with-credentials"])).toThrow(

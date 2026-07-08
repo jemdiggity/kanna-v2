@@ -179,6 +179,7 @@ describe("createAppModel cloud routing", () => {
     };
     let pushCloudTasks: ((tasks: Awaited<ReturnType<CloudTaskIndex["listRecentTasks"]>>) => void) | null = null;
     const taskIndex: CloudTaskIndex = {
+      listDesktops: vi.fn().mockResolvedValue([]),
       listRecentTasks: vi.fn().mockResolvedValue([]),
       subscribeRecentTasks: vi.fn((_uid, onUpdate) => {
         pushCloudTasks = onUpdate;
@@ -270,6 +271,7 @@ describe("createAppModel cloud routing", () => {
     };
     let pushCloudTasks: ((tasks: Awaited<ReturnType<CloudTaskIndex["listRecentTasks"]>>) => void) | null = null;
     const taskIndex: CloudTaskIndex = {
+      listDesktops: vi.fn().mockResolvedValue([]),
       listRecentTasks: vi.fn().mockResolvedValue([]),
       subscribeRecentTasks: vi.fn((_uid, onUpdate) => {
         pushCloudTasks = onUpdate;
@@ -347,5 +349,89 @@ describe("createAppModel cloud routing", () => {
         expect.any(Function)
       );
     });
+  });
+
+  it("trusts desktops published to the signed-in cloud account", async () => {
+    const authState: MobileAuthState = {
+      status: "signedIn",
+      user: { uid: "user-1", email: "dev@example.com", displayName: null }
+    };
+    const authSession: MobileAuthSession = {
+      initialize: vi.fn().mockResolvedValue(undefined),
+      getState: () => authState,
+      subscribe: vi.fn((listener) => {
+        listener(authState);
+        return vi.fn();
+      }),
+      signInWithEmailPassword: vi.fn().mockResolvedValue(undefined),
+      signOut: vi.fn().mockResolvedValue(undefined),
+      getIdToken: vi.fn().mockResolvedValue("id-token"),
+      notifyAuthExpired: vi.fn()
+    };
+    const taskIndex: CloudTaskIndex = {
+      listDesktops: vi.fn().mockResolvedValue([
+        {
+          desktopId: "desktop-owner",
+          displayName: "Staging Mac",
+          updatedAt: "2026-07-06T12:30:00.000Z"
+        }
+      ]),
+      listRecentTasks: vi.fn().mockResolvedValue([]),
+      subscribeRecentTasks: vi.fn((_uid, onUpdate) => {
+        onUpdate([]);
+        return vi.fn();
+      })
+    };
+    const relayClient: RelayDesktopClient = {
+      close: vi.fn(),
+      invokeDesktop: vi.fn().mockResolvedValue(null),
+      observeTaskTerminal: vi.fn(() => ({ close: vi.fn() })),
+      observeTaskAgent: vi.fn(() => ({
+        close: vi.fn(),
+        sendInput: vi.fn(),
+        sendPermission: vi.fn(),
+        interrupt: vi.fn()
+      })),
+      sendTaskInput: vi.fn().mockResolvedValue(undefined),
+      listActiveDesktopIds: vi.fn().mockResolvedValue(new Set(["desktop-owner"]))
+    };
+    const app = createAppModel({
+      authSession,
+      persistence: {
+        load: vi.fn().mockResolvedValue({
+          selectedDesktopId: null,
+          trustedDesktops: [],
+          repoCreationProfiles: []
+        }),
+        save: vi.fn().mockResolvedValue(undefined)
+      },
+      options: {
+        forceCloud: true,
+        relayUrl: "wss://relay.test",
+        taskIndex,
+        bonjourBrowser: {
+          start: vi.fn(),
+          stop: vi.fn(),
+          getServices: () => [],
+          subscribe: () => vi.fn()
+        },
+        createRelayClient: () => relayClient
+      }
+    });
+
+    await app.initialize();
+
+    expect(app.sessionStore.getState().desktops).toEqual([
+      {
+        id: "desktop-owner",
+        name: "Staging Mac",
+        online: true,
+        mode: "remote",
+        reachableViaRelay: true,
+        connectionMode: "internet",
+        lastSeenAt: "2026-07-06T12:30:00.000Z"
+      }
+    ]);
+    expect(taskIndex.listDesktops).toHaveBeenCalledWith("user-1");
   });
 });

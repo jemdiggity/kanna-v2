@@ -26,6 +26,8 @@ import { getConfiguredDesktopAuthSession } from "./desktopAuthSdk";
 import { fetchDesktopSnapshot } from "./desktopServerClient";
 import { getCachedRepoRemoteUrl, __resetRepoRemoteUrlCacheForTests } from "./repoRemoteUrl";
 
+const GENERIC_DESKTOP_NAME = "Kanna Desktop";
+
 export interface RemoteTaskSnapshotIdentity {
   ownerDesktopId: string;
   localRepoId: string;
@@ -376,7 +378,7 @@ async function resolveDesktopIdentity(): Promise<DesktopIdentity> {
     invoke<DesktopCloudCredentialPayload>("desktop_cloud_credential").catch(() => null),
     invoke<{ desktopId?: string; desktopName?: string }>("mobile_server_status").catch(() => null),
   ]);
-  const desktopName = mobileStatus?.desktopName?.trim();
+  const desktopName = normalizeDesktopDisplayName(mobileStatus?.desktopName);
   const desktopSecretHash =
     typeof credential?.desktopSecretHash === "string" && credential.desktopSecretHash.trim()
       ? credential.desktopSecretHash.trim()
@@ -419,7 +421,13 @@ async function resolveFallbackDesktopDisplayName(): Promise<string> {
   if (hostName.trim()) return hostName.trim();
   const computerName = await readEnvString("COMPUTERNAME");
   if (computerName.trim()) return computerName.trim();
-  return "Kanna Desktop";
+  return GENERIC_DESKTOP_NAME;
+}
+
+function normalizeDesktopDisplayName(value: unknown): string {
+  if (typeof value !== "string") return "";
+  const trimmed = value.trim();
+  return trimmed === GENERIC_DESKTOP_NAME ? "" : trimmed;
 }
 
 async function readEnvString(name: string): Promise<string> {
