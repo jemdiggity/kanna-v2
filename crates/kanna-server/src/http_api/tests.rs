@@ -88,5 +88,6 @@ fn init_test_git_repo(repo_root: &Path) {
 mod actions;
 mod core_routes;
 mod create_task;
+mod e2e_sql_routes;
 mod input;
 mod revision_status;
