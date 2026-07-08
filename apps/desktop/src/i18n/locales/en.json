@@ -135,6 +135,7 @@
     "taskCreationFailed": "Task creation failed",
     "prCreationFailed": "PR creation failed",
     "repoCreationFailed": "Failed to create repo",
+    "repoImportFailed": "Failed to import repo",
     "cloneFailed": "Clone failed",
     "worktreeFailed": "Failed to create worktree",
     "fetchFailed": "Could not fetch latest from remote — worktree may be based on stale main",
@@ -332,6 +333,8 @@
     "createAgentDesc": "Create a new agent definition",
     "createPipeline": "Create Pipeline",
     "createPipelineDesc": "Create a new pipeline definition",
+    "setupRepo": "Set Up Repository",
+    "setupRepoDesc": "Configure .kanna pipeline and agent flavors",
     "createConfig": "Create Config",
     "createConfigDesc": "Create or update .kanna/config.json"
   },

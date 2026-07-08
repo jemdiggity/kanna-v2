@@ -13,6 +13,8 @@ import type { DesktopCloudSnapshot } from "../services/desktopCloudTaskIndex";
 import type { useKannaStore } from "../stores/kanna";
 import type { useToast } from "./useToast";
 
+const SETUP_TASK_PROMPT = "Set up Kanna for this repository.";
+
 interface SidebarRepoProjection {
   id: string;
 }
@@ -230,10 +232,50 @@ export function useAppTaskCreation({
     return sanitized.length > 0 ? sanitized : "repo";
   }
 
+  function firstSupportedAgentProvider(agentProvider: AgentProvider | AgentProvider[] | string | string[] | undefined): AgentProvider | undefined {
+    const providers = Array.isArray(agentProvider) ? agentProvider : [agentProvider];
+    return providers.find((provider): provider is AgentProvider =>
+      provider === "claude"
+      || provider === "copilot"
+      || provider === "codex"
+      || provider === "opencode"
+      || provider === "antigravity"
+    );
+  }
+
+  async function launchSetupTask(repoId: string | null | undefined, repoPath: string) {
+    if (!repoId) return;
+    try {
+      const agent = await store.loadAgent(repoPath, "setup");
+      await store.createItem(
+        repoId,
+        repoPath,
+        SETUP_TASK_PROMPT,
+        "pty",
+        {
+          agentProvider: firstSupportedAgentProvider(agent.agent_provider),
+          customTask: {
+            name: "Set Up Repository",
+            agent: "setup",
+            prompt: SETUP_TASK_PROMPT,
+            model: agent.model,
+            permissionMode: agent.permission_mode,
+            allowedTools: agent.allowed_tools,
+          },
+        },
+      );
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      console.error("[App] setup task creation failed:", error);
+      toast.error(`${t('toasts.taskCreationFailed')}: ${msg}`);
+    }
+  }
+
   async function handleCreateRepo(name: string, path: string) {
     try {
-      await store.createRepo(name, path);
+      const repoId = await store.createRepo(name, path);
       showAddRepoModal.value = false;
+      await launchSetupTask(repoId, path);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       toast.error(`${t('toasts.repoCreationFailed')}: ${msg}`);
@@ -241,15 +283,22 @@ export function useAppTaskCreation({
   }
 
   async function handleImportRepo(path: string, name: string, defaultBranch: string) {
-    await store.importRepo(path, name, defaultBranch);
-    showAddRepoModal.value = false;
+    try {
+      const repoId = await store.importRepo(path, name, defaultBranch);
+      showAddRepoModal.value = false;
+      await launchSetupTask(repoId, path);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      toast.error(`${t('toasts.repoImportFailed')}: ${msg}`);
+    }
   }
 
   async function handleCloneRepo(url: string, destination: string) {
     cloningRepo.value = true;
     try {
-      await store.cloneAndImportRepo(url, destination);
+      const repoId = await store.cloneAndImportRepo(url, destination);
       showAddRepoModal.value = false;
+      await launchSetupTask(repoId, destination);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       toast.error(`${t('toasts.cloneFailed')}: ${msg}`);

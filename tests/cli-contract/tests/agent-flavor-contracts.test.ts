@@ -14,8 +14,24 @@ const requiredFlavors = [
   { role: "merge", flavor: "git" },
 ];
 
+const requiredBuiltInAgents = ["setup"];
+
 function read(path: string): string {
   return readFileSync(path, "utf8");
+}
+
+function parseJsonFenceAfter(content: string, marker: string): unknown {
+  const markerIndex = content.indexOf(marker);
+  if (markerIndex === -1) {
+    throw new Error(`Could not find marker: ${marker}`);
+  }
+
+  const fenceMatch = /```json\n([\s\S]*?)\n```/.exec(content.slice(markerIndex));
+  if (!fenceMatch) {
+    throw new Error(`Could not find JSON fence after marker: ${marker}`);
+  }
+
+  return JSON.parse(fenceMatch[1]);
 }
 
 function catalogToolNames(): Set<string> {
@@ -83,6 +99,76 @@ describe("bundled agent flavor contracts", () => {
       expect([...new Set(missing)]).toEqual([]);
     });
   }
+
+  for (const role of requiredBuiltInAgents) {
+    const agentPath = join(agentsRoot, role, "AGENT.md");
+    const contractPath = join(agentsRoot, role, "CONTRACT.md");
+
+    it(`${role} ships as a bundled AGENT.md resource`, () => {
+      expect(existsSync(agentPath), `${agentPath} must exist`).toBe(true);
+    });
+
+    it(`${role} parses and renders`, () => {
+      const agent = parseAgentDefinition(read(agentPath));
+      expect(agent.name).toBe(role);
+      expect(agent.description).not.toBe("");
+      expect(renderPrompt(agent.prompt).trim()).not.toBe("");
+    });
+
+    it(`${role} contract doc ships next to the agent definition`, () => {
+      expect(existsSync(contractPath), `${contractPath} must exist`).toBe(true);
+    });
+
+    it(`${role} references only catalogued Kanna tools`, () => {
+      const missing = [
+        ...toolReferences(read(agentPath)),
+        ...toolReferences(read(contractPath)),
+      ].filter((name) => !tools.has(name));
+      expect([...new Set(missing)]).toEqual([]);
+    });
+  }
+
+  it("setup GitHub preset publishes a PR before native review approval", () => {
+    const setupAgent = read(join(agentsRoot, "setup", "AGENT.md"));
+    const setupContract = read(join(agentsRoot, "setup", "CONTRACT.md"));
+    const setupConfig = parseJsonFenceAfter(
+      setupAgent,
+      "`.kanna/config.json` selects the pipeline and stock flavors",
+    ) as { flavors?: { pr?: unknown; merge?: unknown } };
+    const setupPipeline = parseJsonFenceAfter(
+      setupAgent,
+      "`.kanna/pipelines/github-flow.json` composes the built-in roles",
+    ) as {
+      stages?: Array<{
+        name?: unknown;
+        agent?: unknown;
+        post?: { name?: unknown; agent?: unknown; prompt?: unknown };
+      }>;
+    };
+
+    expect(setupConfig.flavors).toMatchObject({
+      pr: "draft-pr",
+      merge: "github",
+    });
+    expect(setupPipeline.stages?.map((stage) => stage.name)).toEqual([
+      "in progress",
+      "pr",
+    ]);
+
+    const prStage = setupPipeline.stages?.find((stage) => stage.name === "pr");
+    expect(prStage?.agent).toBe("pr");
+    expect(prStage?.post).toMatchObject({
+      name: "approve",
+      agent: "approve",
+    });
+    expect(prStage?.post?.prompt).toContain("$PREV_RESULT");
+    expect(setupAgent).toContain(
+      "This composes `pr@draft-pr -> review in Cmd+D -> approve post -> merge@github`",
+    );
+    expect(setupContract).toContain(
+      "must not insert an automatic `review` stage before the `pr` stage",
+    );
+  });
 
   it("does not silently drop newly added flavor files from contract coverage", () => {
     const shipped = requiredFlavors.map(({ role, flavor }) => `${role}/${flavor}`).sort();

@@ -388,7 +388,13 @@ export function createTaskItemActions(
     const id = crypto.randomUUID().slice(0, 8);
     const branch = `task-${id}`;
     const worktreePath = `${repoPath}/.kanna-worktrees/${branch}`;
-    const effectivePrompt = opts?.customTask?.prompt ?? prompt;
+    const customTaskAgentName = opts?.customTask?.agent?.trim() || null;
+    const customTaskPrompt = opts?.customTask?.prompt ?? "";
+    const effectivePrompt = opts?.customTask
+      ? customTaskAgentName
+        ? (customTaskPrompt || prompt)
+        : customTaskPrompt
+      : prompt;
     const effectiveAgentType = normalizeAgentExecutionType(opts?.customTask?.executionMode ?? agentType);
     const customTaskAgentProvider = opts?.customTask?.agentProvider;
     const customTaskModel = opts?.customTask?.model;
@@ -492,6 +498,7 @@ export function createTaskItemActions(
           let pipelinePrompt = effectivePrompt;
           let firstStageProviders: AgentProvider | AgentProvider[] | undefined;
           let firstStageAgentProviders: AgentProvider | AgentProvider[] | undefined;
+          let firstStagePrompt: string | undefined;
           t1 = performance.now();
           try {
             const pipeline = await requireService(context.services.loadPipeline, "loadPipeline")(repoPath, pipelineName);
@@ -500,22 +507,32 @@ export function createTaskItemActions(
               firstStageName = firstStage.name;
               firstStageAgentName = firstStage.agent ?? null;
               firstStageProviders = firstStage.agent_provider as AgentProvider | AgentProvider[] | undefined;
-              if (firstStage.agent && !opts?.stage) {
-                try {
-                  const agent = await requireService(context.services.loadAgent, "loadAgent")(repoPath, firstStage.agent);
-                  firstStageAgentProviders = agent.agent_provider as AgentProvider | AgentProvider[] | undefined;
-                  pipelinePrompt = buildStagePrompt(
-                    agent.prompt,
-                    firstStage.prompt,
-                    { taskPrompt: effectivePrompt },
-                  );
-                } catch (error) {
-                  console.error("[store] failed to load agent for first stage:", error);
-                }
-              }
+              firstStagePrompt = firstStage.prompt;
             }
           } catch (error) {
             console.error("[store] failed to load pipeline definition:", error);
+          }
+
+          const launchAgentName = customTaskAgentName ?? firstStageAgentName;
+          if (launchAgentName && (customTaskAgentName || !opts?.stage)) {
+            try {
+              const agent = await requireService(context.services.loadAgent, "loadAgent")(repoPath, launchAgentName);
+              firstStageAgentName = launchAgentName;
+              firstStageAgentProviders = agent.agent_provider as AgentProvider | AgentProvider[] | undefined;
+              const stagePrompt = customTaskAgentName
+                ? customTaskPrompt.trim() === agent.prompt.trim()
+                  ? undefined
+                  : customTaskPrompt
+                : firstStagePrompt;
+              pipelinePrompt = buildStagePrompt(
+                agent.prompt,
+                stagePrompt,
+                { taskPrompt: effectivePrompt },
+              );
+            } catch (error) {
+              console.error(`[store] failed to load agent "${launchAgentName}" for task creation:`, error);
+              if (customTaskAgentName) throw error;
+            }
           }
           debugLog(`[perf:createItem] loadPipeline+loadAgent: ${(performance.now() - t1).toFixed(1)}ms`);
 

@@ -45,7 +45,7 @@ export function createTaskRepoActions(
     return id;
   }
 
-  async function createRepo(name: string, path: string) {
+  async function createRepo(name: string, path: string): Promise<string> {
     const existing = await findRepoByPath(context.requireDb(), path);
     if (existing) {
       if (existing.hidden) {
@@ -54,7 +54,7 @@ export function createTaskRepoActions(
         await invalidateWindowWorkspace("createRepo");
         context.state.selectedRepoId.value = existing.id;
       }
-      return;
+      return existing.id;
     }
     await invoke("ensure_directory", { path });
     await invoke("git_init", { path });
@@ -69,9 +69,10 @@ export function createTaskRepoActions(
       requireService(context.services.spawnShellSession, "spawnShellSession")(`shell-repo-${id}`, path, null, false)
         .catch((error) => reportPrewarmSessionError("[store] repo shell pre-warm failed:", error));
     }
+    return id;
   }
 
-  async function cloneAndImportRepo(url: string, destination: string) {
+  async function cloneAndImportRepo(url: string, destination: string): Promise<string> {
     await invoke("git_clone", { url, destination });
     const name = destination.split("/").pop() || "repo";
     const defaultBranch = await invoke<string>("git_default_branch", { repoPath: destination }).catch(() => "main");
@@ -85,6 +86,7 @@ export function createTaskRepoActions(
       requireService(context.services.spawnShellSession, "spawnShellSession")(`shell-repo-${id}`, destination, null, false)
         .catch((error) => reportPrewarmSessionError("[store] repo shell pre-warm failed:", error));
     }
+    return id;
   }
 
   async function hideRepo(repoId: string) {
