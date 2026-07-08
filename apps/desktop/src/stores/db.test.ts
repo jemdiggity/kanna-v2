@@ -72,6 +72,27 @@ describe("desktop DB bootstrap boundary", () => {
     expect(db.execute).not.toHaveBeenCalled();
   });
 
+  it("logs and skips legacy migrations when the marker probe fails unexpectedly", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const db = {
+      execute: vi.fn(async () => ({ rowsAffected: 0 })),
+      select: vi.fn(async () => {
+        throw new Error("database is locked");
+      }),
+    } satisfies DbHandle;
+
+    try {
+      await expect(runMigrations(db)).resolves.toBeUndefined();
+      expect(warn).toHaveBeenCalledWith(
+        "[db] server schema marker probe failed; skipping legacy frontend migrations:",
+        expect.any(Error),
+      );
+      expect(db.execute).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("keeps the temporary frontend migration fallback when the server marker is absent", async () => {
     const appliedMigrations: string[] = [];
     const db = {

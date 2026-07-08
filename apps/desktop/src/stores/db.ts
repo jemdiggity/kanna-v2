@@ -86,6 +86,8 @@ export async function runMigrations(db: DbHandle): Promise<void> {
     if (String(error).includes(FRONTEND_SQL_DISABLED_MESSAGE)) {
       return;
     }
+    console.warn("[db] server schema marker probe failed; skipping legacy frontend migrations:", error);
+    return;
   }
 
   await runLegacyFrontendMigrations(db);
