@@ -182,6 +182,65 @@ async function waitForDiffScrollHeight(
   return result;
 }
 
+async function installStageActionRecorder(client: WebDriverClient): Promise<void> {
+  await client.executeSync(
+    `window.__KANNA_NATIVE_REVIEW_ACTIONS__ = [];
+     if (!window.__KANNA_NATIVE_REVIEW_ORIGINAL_FETCH__) {
+       window.__KANNA_NATIVE_REVIEW_ORIGINAL_FETCH__ = window.fetch.bind(window);
+     }
+     window.fetch = async function(input, init) {
+       const url = String(input instanceof Request ? input.url : input);
+       if (url.includes("/v1/tasks/") && url.includes("/actions/")) {
+         const body = typeof init?.body === "string" ? init.body : "";
+         window.__KANNA_NATIVE_REVIEW_ACTIONS__.push({
+           url,
+           method: init?.method || "GET",
+           body,
+         });
+         const ctx = window.__KANNA_E2E__.setupState;
+         const item = ctx.selectedItem();
+         const db = ctx.db.value || ctx.db;
+         if (item && url.endsWith("/actions/request-revision")) {
+           await db.execute("UPDATE pipeline_item SET stage = ? WHERE id = ?", ["in progress", item.id]);
+         } else if (item && url.endsWith("/actions/advance-stage")) {
+           await db.execute("UPDATE pipeline_item SET stage = ? WHERE id = ?", ["pr", item.id]);
+         }
+         return new Response(JSON.stringify({ taskId: item?.id || "unknown" }), {
+           status: 200,
+           headers: { "content-type": "application/json" },
+         });
+       }
+       return window.__KANNA_NATIVE_REVIEW_ORIGINAL_FETCH__(input, init);
+     };`
+  );
+}
+
+async function waitForRecordedStageActions(
+  client: WebDriverClient,
+  count: number,
+): Promise<Array<{ url: string; method: string; body: string }>> {
+  return client.executeAsync<Array<{ url: string; method: string; body: string }>>(
+    `const cb = arguments[arguments.length - 1];
+     const expected = ${count};
+     let done = false;
+     const read = () => window.__KANNA_NATIVE_REVIEW_ACTIONS__ || [];
+     const finish = (value) => {
+       if (done) return;
+       done = true;
+       clearInterval(interval);
+       clearTimeout(timeout);
+       cb(value);
+     };
+     const check = () => {
+       const calls = read();
+       if (calls.length >= expected) finish(calls);
+     };
+     const interval = setInterval(check, 100);
+     const timeout = setTimeout(() => finish(read()), 10000);
+     check();`
+  );
+}
+
 describe("diff view", () => {
   const client = new WebDriverClient();
   let fixtureRepoRoot = "";
@@ -220,6 +279,17 @@ describe("diff view", () => {
            scrollPositions: { working: 0, branch: 0 },
          };
        }`
+    ).catch(() => undefined);
+    await client.executeAsync<string>(
+      `const cb = arguments[arguments.length - 1];
+       const ctx = window.__KANNA_E2E__.setupState;
+       const item = ctx.selectedItem?.();
+       const db = ctx.db.value || ctx.db;
+       if (!item) { cb("ok"); return; }
+       db.execute("UPDATE pipeline_item SET stage = ? WHERE id = ?", ["in progress", item.id])
+         .then(function() { return ctx.refreshAllItems(); })
+         .then(function() { cb("ok"); })
+         .catch(function(e) { cb("err:" + e); });`
     ).catch(() => undefined);
     await client.waitForNoElement(".diff-view", 2_000).catch(() => undefined);
     await tauriInvoke(client, "run_script", {
@@ -744,6 +814,122 @@ describe("diff view", () => {
         env: {},
       });
     }
+  });
+
+  it("sends pending review comments as a request-revision prompt and approves via advance-stage", async () => {
+    const taskId = await client.executeSync<string>(
+      `const ctx = window.__KANNA_E2E__.setupState;
+       return ctx.selectedItem().id;`
+    );
+    const worktreePath = await getSelectedWorktreePath(client, testRepoPath);
+    await tauriInvoke(client, "run_script", {
+      script: [
+        "mkdir -p native-review-e2e",
+        "cat > native-review-e2e/review.ts <<'EOF'",
+        "export function first() {",
+        "  return 'before';",
+        "}",
+        "",
+        "export function second() {",
+        "  return 'before';",
+        "}",
+        "EOF",
+        "git add native-review-e2e/review.ts",
+        "git commit -m 'e2e native review branch content'",
+      ].join("\n"),
+      cwd: worktreePath,
+      env: {},
+    });
+    const headCommit = String(await tauriInvoke(client, "run_script", {
+      script: "git rev-parse HEAD",
+      cwd: worktreePath,
+      env: {},
+    })).trim();
+
+    await client.executeAsync<string>(
+      `const cb = arguments[arguments.length - 1];
+       const ctx = window.__KANNA_E2E__.setupState;
+       const db = ctx.db.value || ctx.db;
+       const item = ctx.selectedItem();
+       db.execute("UPDATE pipeline_item SET stage = ? WHERE id = ?", ["review", item.id])
+         .then(function() { return ctx.refreshAllItems(); })
+         .then(function() { cb("ok"); })
+         .catch(function(e) { cb("err:" + e); });`
+    );
+    await installStageActionRecorder(client);
+
+    await openDiffModal(client);
+    await setDiffScope(client, "Branch");
+    await waitForDiffText(client, `return text.includes("native-review-e2e/review.ts");`);
+    await client.executeSync(
+      `const ctx = window.__KANNA_E2E__.setupState;
+       ctx.appModals.updateCurrentDiffViewState({
+         scope: "branch",
+         reviewHeadCommit: ${JSON.stringify(headCommit)},
+         reviewComments: [
+           {
+             id: "e2e-comment-1",
+             filePath: "native-review-e2e/review.ts",
+             startLine: 2,
+             endLine: 3,
+             excerpt: "  return 'before';\\n}",
+             note: "Change the first return value.",
+             headCommit: ${JSON.stringify(headCommit)}
+           },
+           {
+             id: "e2e-comment-2",
+             filePath: "native-review-e2e/review.ts",
+             startLine: 6,
+             endLine: 6,
+             excerpt: "  return 'before';",
+             note: "Change the second return value.",
+             headCommit: ${JSON.stringify(headCommit)}
+           }
+         ]
+       });`
+    );
+
+    await client.executeSync(buildGlobalKeydownScript({ key: "s", meta: true, shift: true }));
+    await client.waitForElement(".summary-composer", 2_000);
+    const summaryTextarea = await client.findElement(".summary-composer textarea");
+    await client.sendKeys(summaryTextarea, "Please apply both review notes.");
+    await client.click(await client.findElement(".summary-actions .primary"));
+
+    const callsAfterRequest = await waitForRecordedStageActions(client, 1);
+    const requestCall = callsAfterRequest[0];
+    expect(requestCall.url).toContain(`/v1/tasks/${encodeURIComponent(taskId)}/actions/request-revision`);
+    const requestPayload = JSON.parse(requestCall.body) as {
+      targetStage: string;
+      summary: string;
+      prompt: string;
+    };
+    expect(requestPayload.targetStage).toBe("in progress");
+    expect(requestPayload.summary).toBe("Please apply both review notes.");
+    expect(requestPayload.prompt).toContain(`Revision requested from review of task-${taskId} @ ${headCommit.slice(0, 8)} (branch diff vs main).`);
+    expect(requestPayload.prompt).toContain("native-review-e2e/review.ts:2-3");
+    expect(requestPayload.prompt).toContain(">   return 'before';");
+    expect(requestPayload.prompt).toContain("Change the first return value.");
+    expect(requestPayload.prompt).toContain("native-review-e2e/review.ts:6");
+    expect(requestPayload.prompt).toContain("Change the second return value.");
+    expect(requestPayload.prompt).toContain("Overall: Please apply both review notes.");
+
+    await client.executeAsync<string>(
+      `const cb = arguments[arguments.length - 1];
+       const ctx = window.__KANNA_E2E__.setupState;
+       const db = ctx.db.value || ctx.db;
+       const item = ctx.selectedItem();
+       db.execute("UPDATE pipeline_item SET stage = ? WHERE id = ?", ["review", item.id])
+         .then(function() { return ctx.refreshAllItems(); })
+         .then(function() { cb("ok"); })
+         .catch(function(e) { cb("err:" + e); });`
+    );
+    await openDiffModal(client);
+    await setDiffScope(client, "Branch");
+    await client.executeSync(buildGlobalKeydownScript({ key: "s", meta: true }));
+
+    const callsAfterApprove = await waitForRecordedStageActions(client, 2);
+    expect(callsAfterApprove[1].url).toContain(`/v1/tasks/${encodeURIComponent(taskId)}/actions/advance-stage`);
+    expect(callsAfterApprove[1].method).toBe("POST");
   });
 
   it("refreshes an open Branch diff after the task branch history is rewritten", async () => {

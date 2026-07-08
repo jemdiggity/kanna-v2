@@ -15,6 +15,7 @@ import {
   type CodeThemePreference,
 } from "../theme/theme";
 import type { AgentExecutionType } from "./agentExecutionType";
+import type { RequestRevisionOptions } from "./pipeline";
 
 export type AgentMessageAppearance = "chat" | "log" | "terminal";
 
@@ -159,6 +160,7 @@ export interface StoreServices {
   loadPipeline?: (repoPath: string, pipelineName: string) => Promise<PipelineDefinition>;
   loadAgent?: (repoPath: string, agentName: string) => Promise<AgentDefinition>;
   advanceStage?: (taskId: string, options?: AdvanceStageOptions) => Promise<void>;
+  requestRevision?: (taskId: string, options: RequestRevisionOptions) => Promise<void>;
   rerunStage?: (taskId: string) => Promise<void>;
   spawnShellSession?: (
     sessionId: string,

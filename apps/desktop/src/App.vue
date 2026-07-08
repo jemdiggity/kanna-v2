@@ -48,6 +48,8 @@ const appUpdate = useAppUpdate();
 useOperatorEvents(computed(() => db) as unknown as Ref<DbHandle | null>);
 store.attachWindowWorkspace(windowWorkspace);
 const {
+  cloudSnapshot,
+  lanSnapshot,
   selectedCloudRepoId,
   selectedCloudItemId,
   remoteSnapshot,
@@ -62,12 +64,19 @@ const {
   mainPanelCloudTerminalRef,
   isCloudOnlyRepoId,
   cloudRepoRemoteUrl,
+  refreshLanTasks,
   initializeDesktopCloudAuth,
   initializeDesktopLanTaskSync,
   closeSelectedWorkspaceTask,
   advanceSelectedRemoteWorkspaceTask,
   disposeDesktopCloudWorkspace,
 } = useAppCloudWorkspace({ db, store, toast });
+
+defineExpose({
+  cloudSnapshot,
+  lanSnapshot,
+  refreshLanTasks,
+});
 
 const appModals = useAppModals({ isMobile, store, windowWorkspace });
 const {

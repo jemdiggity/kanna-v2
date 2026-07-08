@@ -24,6 +24,7 @@ import type {
   DiffScope,
   DiffScrollPositions,
 } from "../composables/useAppModals";
+import type { PendingReviewComment } from "../utils/reviewComments";
 import type { AppModalLayerController } from "./AppModalLayer.types";
 
 const props = defineProps<{
@@ -132,9 +133,15 @@ function setPreferencesRef(component: Element | ComponentPublicInstance | null) 
     :base-ref="c.store.currentItem?.base_ref ?? undefined"
     :view-key="m.currentDiffViewKey.value"
     :maximized="m.maximizedModal.value === 'diff'"
+    :task-id="c.store.currentItem?.id"
+    :review-stage="c.store.currentItem?.stage ?? undefined"
+    :review-comments="m.currentDiffViewState.value?.reviewComments"
+    :review-head-commit="m.currentDiffViewState.value?.reviewHeadCommit"
     @scope-change="(scope: DiffScope) => m.updateCurrentDiffViewState({ scope })"
     @scroll-state-change="(scrollPositions: DiffScrollPositions) => m.updateCurrentDiffViewState({ scrollPositions })"
     @branch-include-change="(branchInclude: BranchInclude) => m.updateCurrentDiffViewState({ branchInclude })"
+    @review-head-change="(reviewHeadCommit: string) => m.updateCurrentDiffViewState({ reviewHeadCommit })"
+    @review-comments-change="(reviewComments: PendingReviewComment[]) => m.updateCurrentDiffViewState({ reviewComments })"
     @close="m.showDiffModal.value = false; m.maximizedModal.value = null"
   />
   <CommitGraphModal

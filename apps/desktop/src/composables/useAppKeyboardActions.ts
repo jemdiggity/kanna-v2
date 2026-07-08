@@ -232,6 +232,9 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
       if (store.selectedItemId && item.id !== store.selectedItemId) return;
       void store.advanceStage(item.id);
     },
+    requestChanges: () => {
+      diffModalRef.value?.requestChanges();
+    },
     closeTask: () => closeSelectedWorkspaceTask(),
     undoClose: () => store.undoClose(),
     navigateUp: () => navigateItems(-1),
@@ -259,7 +262,14 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
       }
       // Shell before diff: let Escape reach the shell terminal (vim, etc.)
       if (showShellModal.value) { return; }
-      if (showDiffModal.value) { showDiffModal.value = false; maximizedModal.value = null; return true; }
+      if (showDiffModal.value) {
+        const shouldCloseDiff = diffModalRef.value?.dismiss() ?? true;
+        if (shouldCloseDiff) {
+          showDiffModal.value = false;
+          maximizedModal.value = null;
+        }
+        return true;
+      }
       if (showAnalyticsModal.value) { showAnalyticsModal.value = false; return true; }
       if (showCommitGraphModal.value) {
         const shouldCloseCommitGraph = commitGraphModalRef.value?.dismiss() ?? true;

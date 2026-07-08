@@ -1,6 +1,6 @@
 # Native Review
 
-Status: proposed (design spec, no implementation yet)
+Status: phase 1 implemented; phases 2-3 proposed
 Related: [merge-master.md](./merge-master.md),
 [task-graph-stages.md](./task-graph-stages.md),
 [forge-independence.md](./forge-independence.md) (parked horizon)
@@ -97,6 +97,12 @@ All frontend; the engine needs nothing new.
   cross-revision anchoring. If shadow-DOM internals make per-line overlay
   brittle, a margin rail aligned to rendered line positions is an
   acceptable fallback.
+  - Implementation note: phase 1 uses @pierre/diffs public line
+    interaction callbacks (`onLineNumberClick` / `onLineSelected`) and
+    renderer-provided line metadata rather than querying shadow-DOM
+    internals directly. The composer overlay is still owned by
+    `DiffView.vue` and anchored to the rendered line when the renderer
+    supplies its element.
 - **Verdict bar** in `DiffModal.vue`, shown when the task is parked at a
   reviewable stage: comment count, Request changes, Approve. Wired
   through `stores/pipeline.ts::postTaskAction` to the existing

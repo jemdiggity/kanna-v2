@@ -66,6 +66,7 @@ export const useKannaStore = defineStore("kanna", () => {
   services.loadPipeline = pipeline.loadPipeline;
   services.loadAgent = pipeline.loadAgent;
   services.advanceStage = pipeline.advanceStage;
+  services.requestRevision = pipeline.requestRevision;
   services.rerunStage = pipeline.rerunStage;
 
   services.createItem = tasks.createItem;
@@ -172,6 +173,7 @@ Use this branch as the default when the user does not specify a target branch. B
     undoClose: tasks.undoClose,
 
     advanceStage: pipeline.advanceStage,
+    requestRevision: pipeline.requestRevision,
     rerunStage: pipeline.rerunStage,
     loadPipeline: pipeline.loadPipeline,
     loadAgent: pipeline.loadAgent,

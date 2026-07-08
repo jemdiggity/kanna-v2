@@ -33,12 +33,8 @@
  *   advance": advancing never closes the source mid-pipeline anymore; the
  *   final-stage test covers the one remaining close path.
  * - "Cmd+S with a remote workspace task selected does not close a stale
- *   local fallback": still a real guard in useAppKeyboardActions, but the
- *   old test injected the cloud snapshot through a setupState ref that no
- *   longer exists (`remoteSnapshot` is now a read-only computed and
- *   `cloudSnapshot` is not exposed on App.vue's setupState). Making this
- *   testable again needs a deliberate snapshot-injection hook in
- *   useAppCloudWorkspace; until then the guard has no E2E coverage here.
+ *   local fallback": covered by the keyboard-shortcuts mock suite, which
+ *   injects snapshots through the App.vue setupState refs.
  */
 import { join } from "node:path";
 import { chmod, mkdir, readFile, stat, writeFile } from "node:fs/promises";

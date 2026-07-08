@@ -20,6 +20,7 @@ import {
   type WindowWorkspaceController,
 } from "../windowWorkspace";
 import type { useKannaStore } from "../stores/kanna";
+import type { PendingReviewComment } from "../utils/reviewComments";
 
 export type DiffScope = "branch" | "working";
 export type BranchInclude = "none" | "staged" | "all";
@@ -33,6 +34,8 @@ export interface DiffViewState {
   scope?: DiffScope;
   scrollPositions?: DiffScrollPositions;
   branchInclude?: BranchInclude;
+  reviewComments?: PendingReviewComment[];
+  reviewHeadCommit?: string;
 }
 
 interface FilePreviewRecallState {

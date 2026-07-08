@@ -19,7 +19,15 @@ export interface PipelineApi {
   loadPipeline: (repoPath: string, pipelineName: string) => Promise<PipelineDefinition>;
   loadAgent: (repoPath: string, agentName: string) => Promise<AgentDefinition>;
   advanceStage: (taskId: string, options?: AdvanceStageOptions) => Promise<void>;
+  requestRevision: (taskId: string, options: RequestRevisionOptions) => Promise<void>;
   rerunStage: (taskId: string) => Promise<void>;
+}
+
+export interface RequestRevisionOptions {
+  targetStage: string;
+  summary: string;
+  prompt: string;
+  metadata?: Record<string, unknown>;
 }
 
 export function createPipelineApi(context: StoreContext): PipelineApi {
@@ -51,7 +59,11 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
     throw lastError instanceof Error ? lastError : new Error(String(lastError ?? "kanna-server did not become ready"));
   }
 
-  async function postTaskAction(taskId: string, action: "advance-stage" | "rerun-stage"): Promise<Response> {
+  async function postTaskAction(
+    taskId: string,
+    action: "advance-stage" | "rerun-stage" | "request-revision",
+    body?: unknown,
+  ): Promise<Response> {
     const serverBaseUrl = await resolveLocalServerBaseUrl();
     const url = `${serverBaseUrl}/v1/tasks/${encodeURIComponent(taskId)}/actions/${action}`;
     const deadline = Date.now() + LOCAL_SERVER_ACTION_TIMEOUT_MS;
@@ -59,7 +71,15 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
 
     while (Date.now() < deadline) {
       try {
-        return await fetch(url, { method: "POST" });
+        return await fetch(url, {
+          method: "POST",
+          ...(body == null
+            ? {}
+            : {
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(body),
+              }),
+        });
       } catch (error) {
         lastError = error;
         await sleep(LOCAL_SERVER_ACTION_RETRY_DELAY_MS);
@@ -343,10 +363,33 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
     }
   }
 
+  async function requestRevision(taskId: string, options: RequestRevisionOptions): Promise<void> {
+    const item = context.state.items.value.find((candidate) => candidate.id === taskId);
+    if (!item) return;
+    if (item.closed_at != null) return;
+
+    try {
+      const response = await postTaskAction(taskId, "request-revision", {
+        targetStage: options.targetStage,
+        summary: options.summary,
+        prompt: options.prompt,
+        metadata: options.metadata,
+      });
+      if (!response.ok) {
+        throw new Error(await response.text());
+      }
+      await requireService(context.services.reloadSnapshot, "reloadSnapshot")();
+    } catch (error) {
+      console.error("[store] requestRevision: server action failed:", error);
+      context.toast.error(`${context.tt("toasts.agentStartFailed")}: ${error instanceof Error ? error.message : error}`);
+    }
+  }
+
   return {
     loadPipeline,
     loadAgent,
     advanceStage,
+    requestRevision,
     rerunStage,
   };
 }
