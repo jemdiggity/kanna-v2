@@ -319,7 +319,6 @@ fn configure_shared_database_connection(conn: &Connection) -> Result<(), rusqlit
     }
     conn.pragma_update(None, "foreign_keys", "ON")?;
     conn.pragma_update(None, "wal_autocheckpoint", SQLITE_WAL_AUTOCHECKPOINT_PAGES)?;
-    run_quick_check(conn)?;
     Ok(())
 }
 
@@ -429,11 +428,24 @@ fn run_migration(
     id: &str,
     migrate: impl FnOnce(&Connection) -> Result<(), rusqlite::Error>,
 ) -> Result<(), rusqlite::Error> {
-    if has_migration(conn, id)? {
-        return Ok(());
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let result = (|| {
+        if has_migration(conn, id)? {
+            return Ok(());
+        }
+        migrate(conn)?;
+        record_migration(conn, id)
+    })();
+
+    match result {
+        Ok(()) => conn.execute_batch("COMMIT"),
+        Err(error) => {
+            if let Err(rollback_error) = conn.execute_batch("ROLLBACK") {
+                log::warn!("failed to roll back migration {id} after {error}: {rollback_error}");
+            }
+            Err(error)
+        }
     }
-    migrate(conn)?;
-    record_migration(conn, id)
 }
 
 fn add_column(conn: &Connection, table: &str, column: &str, definition: &str) {
@@ -907,6 +919,12 @@ impl Db {
     }
 
     pub fn open(path: &str) -> Result<Self, rusqlite::Error> {
+        let conn = Connection::open_with_flags(path, database_open_flags())?;
+        configure_shared_database_connection(&conn)?;
+        Ok(Self { conn })
+    }
+
+    pub fn open_migrated(path: &str) -> Result<Self, rusqlite::Error> {
         let conn = Connection::open_with_flags(path, database_open_flags())?;
         configure_shared_database_connection(&conn)?;
         run_schema_migrations(&conn)?;
