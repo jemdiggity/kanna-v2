@@ -197,7 +197,7 @@ pub(crate) fn prepare_rerun_stage_for_api(
     }
     let repo_config = read_repo_config(&repo.path)?;
     let worktree_repo_config = read_repo_config(&worktree_path)?;
-    let port_env = claim_task_ports(db, task_id, repo_config.ports.as_ref())?;
+    let port_env = claim_task_ports(db, task_id, &repo_config)?;
     let mut spawn_env = build_spawn_env(config, task_id, &port_env)?;
     apply_workspace_path_env(&mut spawn_env, &worktree_path, &worktree_repo_config);
     let mcp_config_path = write_kanna_mcp_config(&config.daemon_dir, task_id, &mut spawn_env)?;
@@ -336,7 +336,7 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
 
     let repo_config = read_repo_config(&repo.path)?;
     let worktree_repo_config = read_repo_config(&worktree_path)?;
-    let port_env = claim_task_ports(db, task_id, repo_config.ports.as_ref())?;
+    let port_env = claim_task_ports(db, task_id, &repo_config)?;
     let mut spawn_env = build_spawn_env(config, task_id, &port_env)?;
     apply_workspace_path_env(&mut spawn_env, &worktree_path, &worktree_repo_config);
     let mcp_config_path = write_kanna_mcp_config(&config.daemon_dir, task_id, &mut spawn_env)?;
@@ -451,7 +451,7 @@ pub(in crate::task_creator) fn prepare_workspace_teardown(
         return None;
     }
 
-    let port_env = claim_task_ports(db, task_id, repo_config.ports.as_ref()).ok()?;
+    let port_env = claim_task_ports(db, task_id, &repo_config).ok()?;
     let mut spawn_env = build_spawn_env(config, task_id, &port_env).ok()?;
     apply_workspace_path_env(&mut spawn_env, &worktree_path, &worktree_repo_config);
     let session_id = format!("td-{branch}");
@@ -1094,7 +1094,7 @@ pub(crate) fn prepare_start_dormant_task_for_api(
         return Err(rollback_start(error.into()));
     }
 
-    let port_env = match claim_task_ports(db, task_id, repo_config.ports.as_ref()) {
+    let port_env = match claim_task_ports(db, task_id, &repo_config) {
         Ok(port_env) => port_env,
         Err(error) => return Err(rollback_start(error.into())),
     };
@@ -1226,7 +1226,7 @@ pub(in crate::task_creator) fn prepare_task_spawn(
     insert_new_task_record(db, repo, &task_id, &branch, &resolved)?;
 
     let prepared = (|| {
-        let port_env = claim_task_ports(db, &task_id, repo_config.ports.as_ref())?;
+        let port_env = claim_task_ports(db, &task_id, &repo_config)?;
         persist_task_ports(db, &task_id, &port_env)?;
 
         create_new_task_worktree(
@@ -1522,7 +1522,7 @@ pub(crate) fn reopen_task_for_api(db: &Db, task_or_branch_id: &str) -> Result<St
 
     db.release_task_ports(&task_id)
         .map_err(|e| format!("db error: {}", e))?;
-    let port_env = claim_task_ports(db, &task_id, repo_config.ports.as_ref())?;
+    let port_env = claim_task_ports(db, &task_id, &repo_config)?;
     persist_task_ports(db, &task_id, &port_env)?;
     db.reopen_pipeline_item(&task_id)
         .map_err(|e| format!("db error: {}", e))?;
