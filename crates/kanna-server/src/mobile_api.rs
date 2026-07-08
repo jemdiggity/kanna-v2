@@ -174,7 +174,7 @@ impl MobileApi {
         Ok(vec![DesktopDescriptor {
             id: self.config.desktop_id.clone(),
             name: self.config.desktop_name.clone(),
-            connection_mode: "local".to_string(),
+            connection_mode: "both".to_string(),
         }])
     }
 
@@ -681,7 +681,7 @@ mod tests {
         assert_eq!(desktops.len(), 1);
         assert_eq!(desktops[0].id, "desktop-1");
         assert_eq!(desktops[0].name, "Studio Mac");
-        assert_eq!(desktops[0].connection_mode, "local");
+        assert_eq!(desktops[0].connection_mode, "both");
     }
 
     #[test]

@@ -2,9 +2,9 @@ use super::*;
 use axum::extract::connect_info::ConnectInfo;
 use serde_json::json;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::Mutex;
+use tokio::sync::Mutex;
 
-static E2E_SQL_ENV_LOCK: Mutex<()> = Mutex::new(());
+static E2E_SQL_ENV_LOCK: Mutex<()> = Mutex::const_new(());
 
 struct E2eSqlEnvGuard(Option<String>);
 
@@ -42,7 +42,7 @@ fn e2e_sql_request(peer: SocketAddr) -> Request<Body> {
 
 #[tokio::test]
 async fn e2e_sql_route_requires_loopback_connect_info() {
-    let _lock = E2E_SQL_ENV_LOCK.lock().unwrap();
+    let _lock = E2E_SQL_ENV_LOCK.lock().await;
     let _env = E2eSqlEnvGuard::enable();
 
     let loopback_response = super::test_router("desktop-e2e-sql-loopback", "Studio Mac")
