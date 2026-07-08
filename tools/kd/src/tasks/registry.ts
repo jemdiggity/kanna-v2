@@ -819,24 +819,13 @@ export async function executeProductionMobileUpWithContext(
       KANNA_CLOUD_ENV: "staging",
       KANNA_APP_ENV: executor.context.env.KANNA_APP_ENV ?? "staging"
     };
-    writeTauriLocalConfig(executor.context.repoRoot, requireNumberPort(executor.context.ports, "KANNA_DEV_PORT"));
-    const desktopPlan = buildDevPlan({
-      repoRoot: executor.context.repoRoot,
-      env,
-      desktopSecretEnv: desktopCredentialEnv(input, env, "staging"),
-      mobile: false,
-      emulators: false,
-      firebaseConfigPath: "",
-      mobileServerUrl: resolveMobileServerUrl(env)
-    });
     const mobilePlan = buildProductionMobilePlan({
       repoRoot: executor.context.repoRoot,
       env,
       environment: "staging"
     });
-    const plan = { windows: [...desktopPlan.windows, ...mobilePlan.windows] };
 
-    await startTmuxSession(executor.runner, executor.context.tmux, plan.windows);
+    await startTmuxSession(executor.runner, executor.context.tmux, mobilePlan.windows);
     const ownerCheck = await checkInstalledStagingDesktopRelayOwner({
       runner: executor.runner,
       repoRoot: executor.context.repoRoot,
@@ -849,7 +838,7 @@ export async function executeProductionMobileUpWithContext(
       message: "Started mobile against staging cloud environment.",
       data: {
         relayUrl: staging.relayUrl,
-        windows: plan.windows.map((window) => window.name)
+        windows: mobilePlan.windows.map((window) => window.name)
       }
     };
   }
@@ -1260,16 +1249,6 @@ function prepareMobileDeviceLaunch(
       KANNA_APP_ENV: executor.context.env.KANNA_APP_ENV ?? "staging",
       KANNA_IOS_DEVICE_UDID: deviceUdid
     };
-    writeTauriLocalConfig(executor.context.repoRoot, requireNumberPort(executor.context.ports, "KANNA_DEV_PORT"));
-    const desktopPlan = buildDevPlan({
-      repoRoot: executor.context.repoRoot,
-      env,
-      desktopSecretEnv: desktopCredentialEnv(input, env, "staging"),
-      mobile: false,
-      emulators: false,
-      firebaseConfigPath: "",
-      mobileServerUrl: resolveMobileServerUrl(env)
-    });
     const mobilePlan = buildProductionMobilePlan({
       repoRoot: executor.context.repoRoot,
       env,
@@ -1277,8 +1256,8 @@ function prepareMobileDeviceLaunch(
     });
     return {
       env,
-      plan: { windows: [...desktopPlan.windows, ...mobilePlan.windows] },
-      resetTmux: () => stopTmuxSession(executor.runner, executor.context.tmux)
+      plan: mobilePlan,
+      resetTmux: () => stopTmuxWindow(executor.runner, executor.context.tmux, "mobile")
         .then(() => undefined)
     };
   }

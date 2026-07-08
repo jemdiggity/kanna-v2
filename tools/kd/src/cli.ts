@@ -90,7 +90,7 @@ function parseMobileUpInput(rest: string[]): ParsedCliCommand {
   if (input.production === true && input.staging === true) {
     throw new Error("mobile up accepts only one of --production or --staging");
   }
-  if (input.withCredentials === true && input.production === true) {
+  if (input.withCredentials === true && (input.production === true || input.staging === true)) {
     throw new Error(CREDENTIALS_FLAG_ERROR);
   }
   if (input.production === true || input.staging === true) {
@@ -129,7 +129,7 @@ function parseMobileRunInput(rest: string[]): ParsedCliCommand {
   if (input.device !== true) {
     throw new Error("mobile run requires --device");
   }
-  if (input.withCredentials === true && input.production === true) {
+  if (input.withCredentials === true && (input.production === true || input.staging === true)) {
     throw new Error(CREDENTIALS_FLAG_ERROR);
   }
   return {
@@ -677,25 +677,23 @@ const helpTopics: Record<string, string[]> = {
     "  mobile device-smoke"
   ],
   "mobile up": [
-    "Usage: kd mobile up [--production|--staging] [--with-credentials]",
+    "Usage: kd mobile up [--production|--staging]",
     "",
     "Start Kanna mobile against production or staging cloud.",
     "",
     "Options:",
     "  --production        Use the installed production desktop server.",
-    "  --staging           Use staging cloud services.",
-    "  --with-credentials  Use local staging desktop credentials."
+    "  --staging           Use the installed staging desktop server and staging cloud services."
   ],
   "mobile run": [
-    "Usage: kd mobile run --device [--production|--staging] [--with-credentials]",
+    "Usage: kd mobile run --device [--production|--staging]",
     "",
     "Build, install, and launch Kanna mobile on a physical iOS device.",
     "",
     "Options:",
     "  --device            Required. Target a physical iOS device.",
     "  --production        Launch against production settings.",
-    "  --staging           Launch against staging settings.",
-    "  --with-credentials  Use local staging desktop credentials."
+    "  --staging           Launch against installed staging desktop settings."
   ],
   "mobile archive": [
     "Usage: kd mobile archive --production --build-number <number> [--version <version>] [--out-dir <dir>] [--upload] [--dry-run]",

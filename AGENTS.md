@@ -193,7 +193,7 @@ Mobile OTA runtime compatibility is keyed by the `runtimeVersion` value in `apps
 
 When asked to launch the mobile app against production, use `./kd mobile up --production`. Production desktop mobile API comes from the installed `/Applications/Kanna.app/Contents/MacOS/kanna-server`, not the current worktree desktop server. The production launch path verifies `curl http://127.0.0.1:48120/v1/status`, checks `~/Library/Application Support/build.kanna/Kanna/server.toml`, starts only the mobile Metro/Expo window, and uses production Firebase/relay defaults from the installed desktop status and mobile app defaults. Plain `./kd mobile up` remains a development workflow that starts the worktree desktop plus mobile; do not assume it targets production.
 
-When asked to launch mobile against staging on a physical iPhone, set `KANNA_IOS_DEVICE_UDID` or `KANNA_IOS_PHYSICAL_DEVICE_NAME`, then use `./kd mobile run --device --staging` from a worktree. This is the canonical physical-device staging flow: it starts the worktree desktop with `KANNA_CLOUD_ENV=staging`, resolves Firebase to `kanna-staging` and relay to `wss://relay-staging.kanna.build`, starts staging dev-client Metro with `KANNA_APP_ENV=staging`, prebuilds the staging native identity, and runs `expo run:ios` with both `--port <KANNA_MOBILE_PORT>` and `RCT_METRO_PORT=<KANNA_MOBILE_PORT>` so the installed app bakes the correct script URL. Use `./kd mobile up --staging` only when the staging app is already installed and you only need desktop + Metro running; it does not install or relaunch a physical iPhone app. To use the committed persistent Buffy the Bug Slayer test identity, a human with `kanna-staging` credentials first provisions the real staging Firebase data with:
+When asked to launch mobile against staging on a physical iPhone, set `KANNA_IOS_DEVICE_UDID` or `KANNA_IOS_PHYSICAL_DEVICE_NAME`, then use `./kd mobile run --device --staging` from a worktree. Staging means the installed `/Applications/Kanna Staging.app` desktop/server is the desktop owner; only dev launches should start a worktree desktop. The staging physical-device flow starts only staging dev-client Metro with `KANNA_APP_ENV=staging`, uses staging Firebase/relay defaults (`kanna-staging`, `wss://relay-staging.kanna.build`), prebuilds the staging native identity, and runs `expo run:ios` with both `--port <KANNA_MOBILE_PORT>` and `RCT_METRO_PORT=<KANNA_MOBILE_PORT>` so the installed app bakes the correct script URL. Use `./kd mobile up --staging` only when the staging app is already installed and you only need staging Metro running; it does not install or relaunch a physical iPhone app and does not start a worktree desktop. To use the committed persistent Buffy the Bug Slayer test identity, a human with `kanna-staging` credentials first provisions the real staging Firebase data with:
 
 ```bash
 gcloud auth application-default login
@@ -216,10 +216,10 @@ The script is idempotent: it upserts the Firebase Auth user `upvote.sieve.7t@icl
 ./kd dev log                 # print recent desktop tmux output
 ./kd dev log mobile          # print recent mobile tmux output
 ./kd mobile run --device     # start dev stack + install/launch on a physical iPhone
-./kd mobile run --device --staging # start staging stack + install/launch staging build on a physical iPhone
+./kd mobile run --device --staging # start staging Metro + install/launch staging build against installed Kanna Staging
 ./kd mobile doctor --device  # check physical iPhone Metro reachability, install state, and Local Network guidance
 ./kd mobile up --production  # start mobile with installed /Applications/Kanna.app production status/relay defaults
-./kd mobile up --staging     # start worktree desktop + staging Metro only; does not install/launch a physical iPhone
+./kd mobile up --staging     # start staging Metro only against installed Kanna Staging; does not install/launch a physical iPhone
 ./kd mobile ota publish --staging     # publish a signed staging JS/asset OTA update
 ./kd mobile ota publish --production  # publish a signed production JS/asset OTA update
 ./kd mobile ota status --staging      # inspect the staging OTA channel pointer
