@@ -130,7 +130,7 @@ describe("useAppTaskCreation", () => {
         customTask: expect.objectContaining({
           name: "Set Up Repository",
           agent: "setup",
-          prompt: "Configure the GitHub flow by composing stock flavors.",
+          prompt: "Set up Kanna for this repository.",
         }),
       }),
     );

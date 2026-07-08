@@ -257,7 +257,7 @@ export function useAppTaskCreation({
           customTask: {
             name: "Set Up Repository",
             agent: "setup",
-            prompt: agent.prompt,
+            prompt: SETUP_TASK_PROMPT,
             model: agent.model,
             permissionMode: agent.permission_mode,
             allowedTools: agent.allowed_tools,

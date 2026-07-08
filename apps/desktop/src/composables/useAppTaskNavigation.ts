@@ -356,7 +356,6 @@ export function useAppTaskNavigation({
 
         resolvedTask = {
           ...task,
-          prompt: task.prompt || agent.prompt,
           model: task.model ?? agent.model,
           permissionMode: task.permissionMode ?? agent.permission_mode,
           allowedTools: task.allowedTools ?? agent.allowed_tools,
@@ -458,7 +457,7 @@ export function useAppTaskNavigation({
           customTask: {
             name: "Create Config",
             agent: "config-factory",
-            prompt: agent.prompt,
+            prompt: "Help me create or update the .kanna/config.json for this repository.",
             model: agent.model,
             permissionMode: agent.permission_mode,
             allowedTools: agent.allowed_tools,
@@ -494,7 +493,7 @@ export function useAppTaskNavigation({
           customTask: {
             name: "Set Up Repository",
             agent: "setup",
-            prompt: agent.prompt,
+            prompt: "Set up Kanna for this repository.",
             model: agent.model,
             permissionMode: agent.permission_mode,
             allowedTools: agent.allowed_tools,

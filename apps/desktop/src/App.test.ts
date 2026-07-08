@@ -2887,7 +2887,7 @@ describe("App", () => {
         customTask: expect.objectContaining({
           agent: "setup",
           name: "Set Up Repository",
-          prompt: expect.stringContaining("GitHub flow"),
+          prompt: "Set up Kanna for this repository.",
         }),
       }),
     );
@@ -2909,7 +2909,7 @@ describe("App", () => {
         customTask: expect.objectContaining({
           agent: "config-factory",
           name: "Create Config",
-          prompt: expect.stringContaining("https://schemas.kanna.build/config.schema.json"),
+          prompt: "Help me create or update the .kanna/config.json for this repository.",
         }),
       }),
     );
@@ -2955,7 +2955,7 @@ describe("App", () => {
         customTask: expect.objectContaining({
           agent: "setup",
           name: "Set Up Repository",
-          prompt: expect.stringContaining("GitHub flow"),
+          prompt: "Set up Kanna for this repository.",
         }),
       }),
     );
