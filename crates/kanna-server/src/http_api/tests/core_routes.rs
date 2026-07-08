@@ -965,6 +965,17 @@ async fn closed_task_identities_route_returns_closed_tasks() {
         )
         .unwrap();
         db.insert_test_pipeline_item(
+            "task-older-closed",
+            "repo-1",
+            "older closed",
+            Some("Older Closed"),
+            "in progress",
+            "2026-04-17 08:00:00",
+        )
+        .unwrap();
+        db.set_test_pipeline_item_closed_at("task-older-closed", "2026-04-17 08:00:00")
+            .unwrap();
+        db.insert_test_pipeline_item(
             "task-closed",
             "repo-1",
             "closed",
@@ -992,7 +1003,12 @@ async fn closed_task_identities_route_returns_closed_tasks() {
     let json: serde_json::Value = from_slice(&body).unwrap();
     assert_eq!(
         json,
-        serde_json::json!({ "tasks": [{ "id": "task-closed", "repo_id": "repo-1" }] })
+        serde_json::json!({
+            "tasks": [
+                { "id": "task-closed", "repo_id": "repo-1" },
+                { "id": "task-older-closed", "repo_id": "repo-1" }
+            ]
+        })
     );
 }
 
