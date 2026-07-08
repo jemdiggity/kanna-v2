@@ -47,6 +47,7 @@ if (!mobileRelay && !desktopPairing) {
       ? ["src/staging-smoke.e2e.test.ts"]
       : [
           "src/remote-harness.smoke.test.ts",
+          "src/cloud-pairing-auth-discovery.e2e.test.ts",
           "src/terminal-flow.e2e.test.ts",
           "src/task-listing-actions.e2e.test.ts",
           "src/lan-layer.e2e.test.ts"

@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -51,9 +51,12 @@ export interface RemoteHarness {
   };
   relayUrl: string;
   getIdToken(): Promise<string>;
+  restartServerWithIdentity(identity: { desktopId: string; desktopSecret?: string | null }): Promise<void>;
   startRelay(): Promise<void>;
+  startServer(): Promise<void>;
   stopRelay(): Promise<void>;
-  waitForDesktop(): Promise<void>;
+  stopServer(): Promise<void>;
+  waitForDesktop(desktopId?: string): Promise<void>;
   stop(): Promise<void>;
 }
 
@@ -86,6 +89,24 @@ function firebasePortInput(ports: RemoteHarness["ports"]): FirebasePortInput {
     KANNA_FIREBASE_FUNCTIONS_PORT: ports.functions,
     KANNA_FIREBASE_UI_PORT: ports.ui
   };
+}
+
+async function writeRemoteHarnessFirebaseConfig(
+  repoRoot: string,
+  ports: RemoteHarness["ports"]
+): Promise<string> {
+  const configPath = writeFirebaseEmulatorConfig(repoRoot, firebasePortInput(ports));
+  const eventarcPort = await findFreePort();
+  const tasksPort = await findFreePort();
+  const config = JSON.parse(await readFile(configPath, "utf8")) as Record<string, unknown>;
+  const emulators = isRecord(config.emulators) ? config.emulators : {};
+  config.emulators = {
+    ...emulators,
+    eventarc: { host: "127.0.0.1", port: eventarcPort },
+    tasks: { host: "127.0.0.1", port: tasksPort }
+  };
+  await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`);
+  return configPath;
 }
 
 async function waitForRelayDesktop(input: {
@@ -149,6 +170,7 @@ async function writeServerConfig(input: {
   desktopId: string;
   environment: RemoteHarnessEnvironment;
   stagingCredentials?: StagingBuffyCredentials;
+  desktopSecret?: string | null;
   ports: RemoteHarness["ports"];
 }): Promise<void> {
   await mkdir(dirname(input.configPath), { recursive: true });
@@ -170,6 +192,7 @@ async function writeServerConfig(input: {
         `daemon_dir = "${shellTomlString(input.daemonDir)}"`,
         `db_path = "${shellTomlString(input.dbPath)}"`,
         `desktop_id = "${input.desktopId}"`,
+        ...(input.desktopSecret ? [`desktop_secret = "${shellTomlString(input.desktopSecret)}"`] : []),
         `desktop_name = "${DESKTOP_NAME}"`,
         `server_version = "remote-e2e"`,
         `lan_host = "127.0.0.1"`,
@@ -198,9 +221,12 @@ export async function startRemoteHarness(options: RemoteHarnessOptions = {}): Pr
   const dbPath = join(root, "kanna.sqlite3");
   const processes: ManagedProcess[] = [];
   let relayProcess: ManagedProcess | null = null;
+  let serverProcess: ManagedProcess | null = null;
   let client: RelayDesktopClient | null = null;
   let idToken: string | null = null;
   let stopped = false;
+  let currentDesktopId = desktopId;
+  let currentDesktopSecret: string | null = null;
 
   const startRelay = async () => {
     if (environment === "staging") {
@@ -236,6 +262,55 @@ export async function startRemoteHarness(options: RemoteHarnessOptions = {}): Pr
     await processHandle.stop();
   };
 
+  const startServer = async () => {
+    if (serverProcess?.process.exitCode === null && serverProcess.process.signalCode === null) {
+      return;
+    }
+    serverProcess = startManagedProcess("kanna-server", join(repoRoot, ".build/debug/kanna-server"), [], {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        KANNA_SERVER_CONFIG: configPath,
+        RUST_LOG: process.env.RUST_LOG ?? "info"
+      }
+    });
+    processes.push(serverProcess);
+    await waitForHttpOk(`http://127.0.0.1:${ports.server}/v1/status`, timeoutMs);
+  };
+
+  const stopServer = async () => {
+    const processHandle = serverProcess;
+    if (!processHandle) {
+      return;
+    }
+    serverProcess = null;
+    const index = processes.indexOf(processHandle);
+    if (index >= 0) {
+      processes.splice(index, 1);
+    }
+    await processHandle.stop();
+  };
+
+  const restartServerWithIdentity = async (identity: {
+    desktopId: string;
+    desktopSecret?: string | null;
+  }) => {
+    currentDesktopId = identity.desktopId;
+    currentDesktopSecret = identity.desktopSecret ?? null;
+    await stopServer();
+    await writeServerConfig({
+      configPath,
+      daemonDir,
+      dbPath,
+      desktopId: currentDesktopId,
+      desktopSecret: currentDesktopSecret,
+      environment,
+      stagingCredentials: staging?.credentials,
+      ports
+    });
+    await startServer();
+  };
+
   const stop = async () => {
     if (stopped) {
       return;
@@ -265,7 +340,7 @@ export async function startRemoteHarness(options: RemoteHarnessOptions = {}): Pr
     });
 
     if (environment === "dev") {
-      const firebaseConfigPath = writeFirebaseEmulatorConfig(repoRoot, firebasePortInput(ports));
+      const firebaseConfigPath = await writeRemoteHarnessFirebaseConfig(repoRoot, ports);
       processes.push(startManagedProcess(
         "firebase",
         "pnpm",
@@ -294,23 +369,7 @@ export async function startRemoteHarness(options: RemoteHarnessOptions = {}): Pr
     }));
     await waitForFile(join(daemonDir, "daemon.pid"), timeoutMs);
 
-    processes.push(startManagedProcess("kanna-server", join(repoRoot, ".build/debug/kanna-server"), [], {
-      cwd: repoRoot,
-      env: {
-        ...process.env,
-        KANNA_SERVER_CONFIG: configPath,
-        ...(environment === "staging"
-          ? {
-              KANNA_CLOUD_ENV: "staging",
-              KANNA_FIREBASE_PROJECT_ID: "kanna-staging",
-              KANNA_RELAY_URL: "wss://relay-staging.kanna.build"
-            }
-          : {}),
-        KANNA_E2E_TEST_SQL: "1",
-        RUST_LOG: process.env.RUST_LOG ?? "info"
-      }
-    }));
-    await waitForHttpOk(`http://127.0.0.1:${ports.server}/v1/status`, timeoutMs);
+    await startServer();
 
     const relayUrl = environment === "staging" ? "wss://relay-staging.kanna.build" : `ws://127.0.0.1:${ports.relay}`;
     client = createNodeRelayDesktopClient({
@@ -333,9 +392,13 @@ export async function startRemoteHarness(options: RemoteHarnessOptions = {}): Pr
         }
         return idToken;
       },
+      restartServerWithIdentity,
       startRelay,
+      startServer,
       stopRelay,
-      waitForDesktop: () => waitForRelayDesktop({ client: client!, desktopId, timeoutMs }),
+      stopServer,
+      waitForDesktop: (targetDesktopId = currentDesktopId) =>
+        waitForRelayDesktop({ client: client!, desktopId: targetDesktopId, timeoutMs }),
       stop
     };
     return harness;
@@ -343,4 +406,8 @@ export async function startRemoteHarness(options: RemoteHarnessOptions = {}): Pr
     await stop();
     throw error;
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
