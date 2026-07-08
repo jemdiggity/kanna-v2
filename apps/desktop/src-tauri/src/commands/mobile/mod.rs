@@ -734,8 +734,72 @@ fn file_sha256_hex(path: &Path) -> Result<String, String> {
     Ok(digest.iter().map(|b| format!("{:02x}", b)).collect())
 }
 
+const GENERIC_DESKTOP_NAME: &str = "Kanna Desktop";
+
 fn default_desktop_name() -> String {
-    std::env::var("HOSTNAME").unwrap_or_else(|_| "Kanna Desktop".to_string())
+    default_desktop_name_from_sources(
+        system_computer_name(),
+        std::env::var("COMPUTERNAME")
+            .ok()
+            .or_else(|| std::env::var("HOSTNAME").ok()),
+        system_host_name(),
+    )
+}
+
+fn default_desktop_name_from_sources(
+    computer_name: Option<String>,
+    env_host_name: Option<String>,
+    system_host_name: Option<String>,
+) -> String {
+    [computer_name, env_host_name, system_host_name]
+        .into_iter()
+        .flatten()
+        .find_map(|name| {
+            let trimmed = name.trim();
+            if trimmed.is_empty() || trimmed == GENERIC_DESKTOP_NAME {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        })
+        .unwrap_or_else(|| GENERIC_DESKTOP_NAME.to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn system_computer_name() -> Option<String> {
+    let output = std::process::Command::new("/usr/sbin/scutil")
+        .args(["--get", "ComputerName"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout)
+        .ok()
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn system_computer_name() -> Option<String> {
+    None
+}
+
+fn system_host_name() -> Option<String> {
+    let mut buffer = [0_u8; 256];
+    let result =
+        unsafe { libc::gethostname(buffer.as_mut_ptr() as *mut libc::c_char, buffer.len()) };
+    if result != 0 {
+        return None;
+    }
+    let len = buffer
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(buffer.len());
+    String::from_utf8(buffer[..len].to_vec())
+        .ok()
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
 }
 
 fn escape_toml_string(value: &str) -> String {
@@ -747,10 +811,10 @@ mod tests {
     use super::cloud_env::relay_url;
     use super::config::{build_server_config, sidecar_sha256_config_line};
     use super::{
-        app_data_dir_for_server_config, current_server_version, desktop_id, escape_toml_string,
-        generate_uuid_v4_from_reader, is_current_server_status, resolved_db_path, server_base_url,
-        server_stderr_log, stop_server_on_port, stopped_snapshot, MobileServerManager,
-        MobileServerState, MobileServerStatus,
+        app_data_dir_for_server_config, current_server_version, default_desktop_name_from_sources,
+        desktop_id, escape_toml_string, generate_uuid_v4_from_reader, is_current_server_status,
+        resolved_db_path, server_base_url, server_stderr_log, stop_server_on_port,
+        stopped_snapshot, MobileServerManager, MobileServerState, MobileServerStatus,
     };
     use std::ffi::CString;
     use std::path::PathBuf;
@@ -774,6 +838,30 @@ mod tests {
     pub(super) unsafe fn unset_env_var(key: &str) {
         let key = CString::new(key).expect("env key should be valid");
         assert_eq!(libc::unsetenv(key.as_ptr()), 0);
+    }
+
+    #[test]
+    fn default_desktop_name_prefers_system_computer_name() {
+        assert_eq!(
+            default_desktop_name_from_sources(
+                Some("Gus MacBook Pro".to_string()),
+                Some("hostname.local".to_string()),
+                Some("kernel-host".to_string()),
+            ),
+            "Gus MacBook Pro"
+        );
+    }
+
+    #[test]
+    fn default_desktop_name_ignores_blank_and_generic_sources() {
+        assert_eq!(
+            default_desktop_name_from_sources(
+                Some("  ".to_string()),
+                Some("Kanna Desktop".to_string()),
+                Some("Gus-MacBook-Pro.local".to_string()),
+            ),
+            "Gus-MacBook-Pro.local"
+        );
     }
 
     #[test]
@@ -1664,6 +1752,9 @@ mod tests {
                 result TEXT,
                 feedback TEXT,
                 session_id TEXT,
+                provider_session_id TEXT,
+                cwd TEXT,
+                resumed_from_run_id TEXT,
                 started_at TEXT NOT NULL DEFAULT (datetime('now')),
                 finished_at TEXT
             );

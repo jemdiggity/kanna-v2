@@ -314,6 +314,34 @@ describe("desktop cloud live task index publisher", () => {
     );
   });
 
+  it("does not publish the generic desktop name when a host fallback is available", async () => {
+    mocks.invoke.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === "desktop_cloud_credential") {
+        return { desktopId: "desktop-owner", desktopSecretHash: "secret-hash-1" };
+      }
+      if (command === "mobile_server_status") return { desktopId: "desktop-owner", desktopName: "Kanna Desktop" };
+      if (command === "read_env_var") {
+        const name = (args as { name?: string } | undefined)?.name;
+        return name === "HOSTNAME" ? "Gus-MacBook-Pro.local" : "";
+      }
+      if (command === "git_remote_url") return "git@github.com:owner/repo.git";
+      return "";
+    });
+    mocks.getDocs
+      .mockResolvedValueOnce({ docs: [] })
+      .mockResolvedValueOnce({ docs: [] });
+
+    await publishDesktopTaskSnapshot(null as never, openItem("task-host-name") as never, repo() as never);
+
+    expect(mocks.setDoc).toHaveBeenCalledWith(
+      desktopRef,
+      expect.objectContaining({
+        displayName: "Gus-MacBook-Pro.local",
+      }),
+      { merge: true },
+    );
+  });
+
   it("publishes saved desktop credentials into the desktop document for relay auth", async () => {
     mocks.invoke.mockImplementation(async (command: string) => {
       if (command === "desktop_cloud_credential") {

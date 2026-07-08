@@ -66,10 +66,12 @@ export function createMobileController(
     | null = null;
   let backgroundRefreshTimer: ReturnType<typeof setInterval> | null = null;
   let backgroundRefreshInFlight = false;
+  let backgroundRefreshMode: "collections" | "desktops" = "collections";
   let authUnsubscribe: (() => void) | null = null;
   let cloudTasksUnsubscribe: (() => void) | null = null;
   let bootstrapInFlight: Promise<void> | null = null;
   let liveCloudTasksApplied = false;
+  let refreshDesktopsInFlight: Promise<void> | null = null;
 
   const setTerminalStartupError = (taskId: string, error: unknown) => {
     const message =
@@ -222,6 +224,22 @@ export function createMobileController(
     reconcileSelectedTask();
   };
 
+  const refreshDesktops = async (options: { force?: boolean } = {}) => {
+    if (options.force && refreshDesktopsInFlight) {
+      await refreshDesktopsInFlight;
+    }
+    if (options.force || !refreshDesktopsInFlight) {
+      refreshDesktopsInFlight = client.listDesktops()
+        .then((desktops) => {
+          store.setDesktops(desktops);
+        })
+        .finally(() => {
+          refreshDesktopsInFlight = null;
+        });
+    }
+    await refreshDesktopsInFlight;
+  };
+
   const refreshTaskCollections = async () => {
     const selectedRepoId = store.getState().selectedRepoId;
     const [recentTasks, repoTasks] = await Promise.all([
@@ -238,6 +256,7 @@ export function createMobileController(
   const applyLiveCloudTasks = (tasks: TaskSummary[]) => {
     liveCloudTasksApplied = true;
     tasks = uniqueTasksById(tasks);
+    void refreshDesktops().catch(fail);
     store.setRepos(mergeReposWithTaskRepos(store.getState().repos, tasks));
     store.setRecentTasks(tasks);
     let selectedRepoId = store.getState().selectedRepoId;
@@ -339,7 +358,8 @@ export function createMobileController(
     liveCloudTasksApplied = false;
   };
 
-  const startBackgroundRefresh = () => {
+  const startBackgroundRefresh = (mode: "collections" | "desktops") => {
+    backgroundRefreshMode = mode;
     if (backgroundRefreshTimer) {
       return;
     }
@@ -350,7 +370,11 @@ export function createMobileController(
       }
 
       backgroundRefreshInFlight = true;
-      void refreshTaskCollections()
+      const refresh =
+        backgroundRefreshMode === "desktops"
+          ? refreshDesktops({ force: true })
+          : refreshTaskCollections();
+      void refresh
         .catch(fail)
         .finally(() => {
           backgroundRefreshInFlight = false;
@@ -423,15 +447,13 @@ export function createMobileController(
           auth?.status === "signedIn" &&
           startCloudTaskSubscription(auth.user.uid);
         if (liveCloudTasksApplied) {
-          store.setDesktops(await client.listDesktops());
+          await refreshDesktops({ force: true });
           await refreshSearchResults();
           reconcileSelectedTask();
         } else {
           await loadCollections();
         }
-        if (!useLiveCloudTasks) {
-          startBackgroundRefresh();
-        }
+        startBackgroundRefresh(useLiveCloudTasks ? "desktops" : "collections");
         const selectedTaskId = store.getState().selectedTaskId;
         if (selectedTaskId) {
           startTaskView(selectedTaskId);

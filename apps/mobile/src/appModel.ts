@@ -8,6 +8,7 @@ import type { MobileAuthSession } from "./lib/firebase/auth";
 import { createConfiguredMobileAuthSession } from "./lib/firebase/sdk";
 import {
   createFirestoreTaskIndex,
+  type CloudDesktopRecord,
   type CloudTaskIndex
 } from "./lib/firebase/taskIndex";
 import { createLanTransport, type FetchLike } from "./lib/transports/lanTransport";
@@ -15,7 +16,10 @@ import {
   createRelayDesktopClient,
   type RelayDesktopClient
 } from "./lib/transports/relayClient";
-import { createRemoteTransport } from "./lib/transports/remoteTransport";
+import {
+  createRemoteTransport,
+  type RemoteDesktopRecord
+} from "./lib/transports/remoteTransport";
 import { readExpoConfig } from "./lib/expoConfig";
 import { createRootNavigator } from "./navigation/RootNavigator";
 import { installE2eTrustSeedHandler } from "./e2eTrustSeed";
@@ -275,11 +279,16 @@ function createClientForMode({
         activeDesktopIds
       );
     };
+    const listCloudDesktopRecords = async () => {
+      const activeDesktopIds = await relayClient.listActiveDesktopIds().catch(() => null);
+      const records = await resolvedTaskIndex.listDesktops(authState.user.uid);
+      return records.map((record) =>
+        mapCloudDesktopRecord(record, activeDesktopIds)
+      );
+    };
     const cloudClient = createKannaClient(
       createRemoteTransport({
-        async listDesktopRecords() {
-          return getTrustedDesktops().map(mapTrustedDesktopRecord);
-        },
+        listDesktopRecords: listCloudDesktopRecords,
         getSelectedDesktopId,
         invokeDesktop: relayClient.invokeDesktop,
         observeTaskTerminal: relayClient.observeTaskTerminal,
@@ -612,14 +621,18 @@ function getCloudTaskOwnerDesktopId(task: TaskSummary): string | null {
     : null;
 }
 
-function mapTrustedDesktopRecord(desktop: TrustedDesktopRecord) {
+function mapCloudDesktopRecord(
+  desktop: CloudDesktopRecord,
+  activeDesktopIds: Set<string> | null
+): RemoteDesktopRecord {
+  const online = activeDesktopIds?.has(desktop.desktopId) ?? false;
   return {
     desktopId: desktop.desktopId,
     displayName: desktop.displayName,
-    online: true,
-    reachableViaRelay: false,
-    connectionMode: "lan" as const,
-    lastSeenAt: desktop.lastSeenAt
+    online,
+    reachableViaRelay: online,
+    connectionMode: "internet",
+    lastSeenAt: desktop.updatedAt
   };
 }
 

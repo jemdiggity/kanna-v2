@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createSessionStore } from "./sessionStore";
 import { createMobileController } from "./mobileController";
 import type { MobileAuthSession } from "../lib/firebase/auth";
@@ -157,6 +157,10 @@ function createAuthSessionMock(): MobileAuthSession {
 }
 
 describe("createMobileController", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("bootstraps connection, desktops, repos, and recent tasks", async () => {
     const store = createSessionStore();
     const controller = createMobileController(createClientMock(), store);
@@ -1029,6 +1033,136 @@ describe("createMobileController", () => {
 
     expect(store.getState().repos).toEqual([
       { id: "repo-cloud-1", name: "Cloud Repo" }
+    ]);
+  });
+
+  it("refreshes machines when live cloud tasks arrive", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const auth = createAuthSessionMock();
+    const liveCloudTasks = [
+      {
+        id: "cloud-task-1",
+        repoId: "repo-cloud-1",
+        repoName: "Cloud Repo",
+        title: "First cloud task",
+        stage: "in progress",
+        ownerDesktopId: "desktop-owner",
+        ownerLocalTaskId: "local-task-1",
+        ownerOnline: true
+      }
+    ];
+    client.listDesktops
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        {
+          id: "desktop-owner",
+          name: "Kanna Desktop",
+          online: true,
+          mode: "remote",
+          reachableViaRelay: true,
+          connectionMode: "internet"
+        }
+      ]);
+    client.getStatus.mockResolvedValueOnce({
+      state: "running",
+      desktopId: "cloud",
+      desktopName: "Kanna Cloud",
+      lanHost: "cloud",
+      lanPort: 0,
+      pairingCode: null
+    });
+    const subscribeCloudTasks = vi.fn((
+      _uid: string,
+      onUpdate: (tasks: typeof liveCloudTasks) => void
+    ) => {
+      onUpdate(liveCloudTasks);
+      return vi.fn();
+    });
+    auth.getState = vi.fn(() => ({
+      status: "signedIn",
+      user: { uid: "user-1", email: "u@example.com", displayName: null }
+    }));
+    const controller = createMobileController(client, store, auth, {
+      subscribeCloudTasks
+    });
+
+    await controller.bootstrap();
+    await vi.waitFor(() => {
+      expect(store.getState().desktops).toEqual([
+        expect.objectContaining({
+          id: "desktop-owner",
+          name: "Kanna Desktop",
+          mode: "remote"
+        })
+      ]);
+    });
+
+    store.selectRepo("repo-cloud-1");
+    controller.openComposer();
+
+    expect(store.getState()).toMatchObject({
+      composerDesktopId: "desktop-owner",
+      isComposerOptionsExpanded: false
+    });
+  });
+
+  it("keeps refreshing machines while live cloud tasks replace task polling", async () => {
+    vi.useFakeTimers();
+    const store = createSessionStore();
+    const client = createClientMock();
+    const auth = createAuthSessionMock();
+    let liveUpdate: ((tasks: TaskSummary[]) => void) | null = null;
+    client.getStatus.mockResolvedValue({
+      state: "running",
+      desktopId: "cloud",
+      desktopName: "Kanna Cloud",
+      lanHost: "cloud",
+      lanPort: 0,
+      pairingCode: null
+    });
+    client.listDesktops
+      .mockResolvedValueOnce([
+        { id: "desktop-owner", name: "Studio Mac", online: false, mode: "remote" }
+      ])
+      .mockResolvedValueOnce([
+        { id: "desktop-owner", name: "Studio Mac", online: false, mode: "remote" }
+      ])
+      .mockResolvedValueOnce([
+        { id: "desktop-owner", name: "Studio Mac", online: true, mode: "remote" }
+      ]);
+    auth.getState = vi.fn(() => ({
+      status: "signedIn",
+      user: { uid: "user-1", email: "u@example.com", displayName: null }
+    }));
+    const controller = createMobileController(client, store, auth, {
+      subscribeCloudTasks: vi.fn((_uid, onUpdate) => {
+        liveUpdate = onUpdate;
+        onUpdate([
+          {
+            id: "cloud-task-1",
+            repoId: "repo-1",
+            title: "Cloud task",
+            stage: "in progress",
+            ownerDesktopId: "desktop-owner"
+          } as TaskSummary
+        ]);
+        return () => undefined;
+      })
+    });
+
+    await controller.bootstrap();
+    await Promise.resolve();
+    expect(liveUpdate).not.toBeNull();
+    expect(store.getState().desktops).toEqual([
+      { id: "desktop-owner", name: "Studio Mac", online: false, mode: "remote" }
+    ]);
+
+    await vi.advanceTimersByTimeAsync(3_000);
+
+    expect(client.listRecentTasks).not.toHaveBeenCalled();
+    expect(store.getState().desktops).toEqual([
+      { id: "desktop-owner", name: "Studio Mac", online: true, mode: "remote" }
     ]);
   });
 
