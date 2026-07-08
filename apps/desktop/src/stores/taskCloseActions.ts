@@ -1,8 +1,10 @@
+import type { PipelineItem } from "../types/kanna";
 import {
-  unhideRepo as unhideRepoQuery,
-  type PipelineItem,
-} from "@kanna/db";
-import { closeDesktopTask, reopenDesktopTask } from "../services/desktopServerClient";
+  closeDesktopTask,
+  fetchClosedTaskIdentities,
+  patchDesktopRepo,
+  reopenDesktopTask,
+} from "../services/desktopServerClient";
 import { hasOpenSubtasks } from "../utils/taskParenting";
 import { requireService, type StoreContext } from "./state";
 import { resolveAgentProvider } from "./agent-provider";
@@ -50,29 +52,27 @@ export function createTaskCloseActions(
   }
 
   async function undoClose() {
-    if (context.state.lastHiddenRepoId.value) {
-      const repoId = context.state.lastHiddenRepoId.value;
-      context.state.lastHiddenRepoId.value = null;
-      await unhideRepoQuery(context.requireDb(), repoId);
-      await reloadSnapshot();
-      await invalidateWindowWorkspace("undoClose");
-      return;
-    }
-
     try {
-      const rows = await context.requireDb().select<PipelineItem>(
-        "SELECT * FROM pipeline_item WHERE closed_at IS NOT NULL ORDER BY closed_at DESC LIMIT 1",
-      );
-      const item = rows[0];
-      if (!item) return;
-      const repo = context.state.repos.value.find((candidate) => candidate.id === item.repo_id);
-      if (!repo) return;
-      const worktreePath = item.branch ? `${repo.path}/.kanna-worktrees/${item.branch}` : repo.path;
+      if (context.state.lastHiddenRepoId.value) {
+        const repoId = context.state.lastHiddenRepoId.value;
+        await patchDesktopRepo(repoId, { hidden: false });
+        context.state.lastHiddenRepoId.value = null;
+        await reloadSnapshot();
+        await invalidateWindowWorkspace("undoClose");
+        return;
+      }
 
-      await reopenDesktopTask(item.id);
+      const [identity] = await fetchClosedTaskIdentities();
+      if (!identity) return;
+
+      await reopenDesktopTask(identity.id);
       await reloadSnapshot();
-      const reopenedItem = context.state.items.value.find((candidate) => candidate.id === item.id) ?? item;
-      await requireService(context.services.selectItem, "selectItem")(item.id);
+      const reopenedItem = context.state.items.value.find((candidate) => candidate.id === identity.id);
+      if (!reopenedItem) return;
+      const repo = context.state.repos.value.find((candidate) => candidate.id === reopenedItem.repo_id);
+      if (!repo) return;
+      const worktreePath = reopenedItem.branch ? `${repo.path}/.kanna-worktrees/${reopenedItem.branch}` : repo.path;
+      await requireService(context.services.selectItem, "selectItem")(reopenedItem.id);
       await invalidateWindowWorkspace("undoClose");
 
       if (reopenedItem.branch) {
