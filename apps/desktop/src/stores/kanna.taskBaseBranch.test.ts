@@ -2399,6 +2399,68 @@ describe("kanna store task base branch integration", () => {
     expect(store.currentItem?.activity).toBe("working");
   });
 
+  it("waits for a terminal-stage advance snapshot before restoring selection", async () => {
+    mockState.pipelineDefinition = {
+      name: "default",
+      stages: [
+        { name: "in progress", transition: "manual" },
+        { name: "pr", transition: "manual" },
+      ],
+    };
+    mockState.pipelineItems = [
+      mockState.makeItem({
+        id: "item-source",
+        branch: "task-source",
+        stage: "pr",
+        created_at: "2026-04-14T00:02:00.000Z",
+        updated_at: "2026-04-14T00:02:00.000Z",
+      }),
+      mockState.makeItem({
+        id: "item-next",
+        branch: "task-next",
+        stage: "in progress",
+        created_at: "2026-04-14T00:01:00.000Z",
+        updated_at: "2026-04-14T00:01:00.000Z",
+      }),
+    ];
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ taskId: "item-source" }),
+      text: async () => "",
+    });
+
+    const store = await createStore();
+    await store.selectItem("item-source");
+    await flushStore();
+
+    const advancePromise = store.advanceStage("item-source");
+    await flushStore();
+
+    expect(store.selectedItemId).toBe("item-source");
+
+    mockState.pipelineItems = [
+      mockState.makeItem({
+        id: "item-source",
+        branch: "task-source",
+        stage: "pr",
+        closed_at: "2026-04-14T00:03:00.000Z",
+        created_at: "2026-04-14T00:02:00.000Z",
+        updated_at: "2026-04-14T00:03:00.000Z",
+      }),
+      mockState.makeItem({
+        id: "item-next",
+        branch: "task-next",
+        stage: "in progress",
+        created_at: "2026-04-14T00:01:00.000Z",
+        updated_at: "2026-04-14T00:01:00.000Z",
+      }),
+    ];
+
+    await advancePromise;
+
+    expect(store.selectedItemId).toBe("item-next");
+  });
+
   it("keeps a post-stage advance on the current stage while post dispatch is in flight", async () => {
     const serverAdvanceGate = mockState.defer();
     mockState.pipelineDefinition = {
