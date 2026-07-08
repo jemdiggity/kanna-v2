@@ -1279,7 +1279,7 @@ function mobileDeviceInstallEnv(
     return {
       ...executor.context.env,
       KANNA_CLOUD_ENV: "staging",
-      KANNA_APP_ENV: executor.context.env.KANNA_APP_ENV ?? "staging",
+      KANNA_APP_ENV: "staging",
       KANNA_IOS_DEVICE_UDID: deviceUdid
     };
   }

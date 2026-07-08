@@ -32,7 +32,6 @@ const booleanFlagMap: Record<string, string> = {
   "--production": "production",
   "--relay": "relay",
   "--device": "device",
-  "--install": "install",
   "--remote": "remote",
   "--dev": "dev",
   "--with-credentials": "withCredentials",
@@ -117,7 +116,11 @@ function parseMobileUpInput(rest: string[]): ParsedCliCommand {
 }
 
 function parseMobileRunInput(rest: string[]): ParsedCliCommand {
-  const input = parseFlagInput(rest, { device: false, production: false, staging: false, install: false });
+  const input = parseFlagInput(
+    rest,
+    { device: false, production: false, staging: false, install: false },
+    { "--install": "install" }
+  );
   const unsupportedFlags = Object.entries(input)
     .filter(([key, value]) => !["device", "production", "staging", "withCredentials", "install"].includes(key) && value === true)
     .map(([key]) => key);
@@ -143,6 +146,30 @@ function parseMobileRunInput(rest: string[]): ParsedCliCommand {
       ...(input.withCredentials === true ? { withCredentials: true } : {})
     }
   };
+}
+
+function parseMobileDoctorInput(rest: string[]): ParsedCliCommand {
+  const input = parseFlagInput(
+    rest,
+    { device: false, production: false, staging: false },
+    { "--install": "install" }
+  );
+  const unsupportedFlags = Object.entries(input)
+    .filter(([key, value]) => !["device", "production", "staging", "withCredentials"].includes(key) && value === true)
+    .map(([key]) => key);
+  if (unsupportedFlags.length > 0) {
+    throw new Error("mobile doctor only accepts --device, --production, or --staging");
+  }
+  if (input.production === true && input.staging === true) {
+    throw new Error("mobile run accepts only one of --production or --staging");
+  }
+  if (input.device !== true) {
+    throw new Error("mobile run requires --device");
+  }
+  if (input.withCredentials === true) {
+    throw new Error(CREDENTIALS_FLAG_ERROR);
+  }
+  return { taskId: "mobile.doctor", input };
 }
 
 function parseMobileQaInput(rest: string[]): ParsedCliCommand {
@@ -220,7 +247,11 @@ function parseRemoteDoctorInput(rest: string[]): ParsedCliCommand {
   };
 }
 
-function parseFlagInput(rest: string[], defaults: Record<string, unknown>): Record<string, unknown> {
+function parseFlagInput(
+  rest: string[],
+  defaults: Record<string, unknown>,
+  localBooleanFlagMap: Record<string, string> = {}
+): Record<string, unknown> {
   const input: Record<string, unknown> = { ...defaults };
   for (let index = 0; index < rest.length; index += 1) {
     const arg = rest[index];
@@ -318,7 +349,7 @@ function parseFlagInput(rest: string[], defaults: Record<string, unknown>): Reco
       input.extraArgs = rest.slice(index + 1);
       break;
     }
-    const flagName = booleanFlagMap[arg];
+    const flagName = localBooleanFlagMap[arg] ?? booleanFlagMap[arg];
     if (!flagName) {
       throw new Error(`Unknown flag: ${arg}`);
     }
@@ -386,11 +417,7 @@ export function parseCliArgs(args: string[]): ParsedCliCommand {
     return parseMobileArchiveInput(rest);
   }
   if (group === "mobile" && command === "doctor") {
-    const parsed = parseMobileRunInput(rest);
-    if (parsed.input.withCredentials === true) {
-      throw new Error(CREDENTIALS_FLAG_ERROR);
-    }
-    return { taskId: "mobile.doctor", input: parsed.input };
+    return parseMobileDoctorInput(rest);
   }
   if (group === "mobile" && command === "ota") {
     const [subcommand, ...otaRest] = rest;

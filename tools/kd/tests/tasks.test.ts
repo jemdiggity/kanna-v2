@@ -1198,6 +1198,7 @@ describe("task executors", () => {
             KANNA_DEV_PORT: "1421",
             KANNA_MOBILE_PORT: "1430",
             KANNA_MOBILE_SERVER_PORT: "48120",
+            KANNA_APP_ENV: "dev",
             KANNA_IOS_PHYSICAL_DEVICE_NAME: "Jerome's iPhone 15"
           }
         }
