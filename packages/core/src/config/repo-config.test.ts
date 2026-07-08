@@ -79,7 +79,45 @@ describe("parseRepoConfig", () => {
   it("ignores unknown top-level keys", () => {
     const config = parseRepoConfig(JSON.stringify({ unknown: true, setup: ["ls"] }));
     expect(config.setup).toEqual(["ls"]);
-    expect((config as any).unknown).toBeUndefined();
+    expect("unknown" in config).toBe(false);
+  });
+
+  it("parses agent flavors and AGENT.md vars", () => {
+    const config = parseRepoConfig(JSON.stringify({
+      flavors: {
+        pr: "draft-pr",
+        merge: "github",
+      },
+      vars: {
+        REVIEW_TEAM: "platform",
+        MERGE_STRATEGY: "merge",
+      },
+    }));
+
+    expect(config.flavors).toEqual({
+      pr: "draft-pr",
+      merge: "github",
+    });
+    expect(config.vars).toEqual({
+      REVIEW_TEAM: "platform",
+      MERGE_STRATEGY: "merge",
+    });
+  });
+
+  it("ignores malformed agent flavor and var entries", () => {
+    const config = parseRepoConfig(JSON.stringify({
+      flavors: {
+        pr: "draft-pr",
+        merge: 42,
+      },
+      vars: {
+        REVIEW_TEAM: "platform",
+        MERGE_STRATEGY: false,
+      },
+    }));
+
+    expect(config.flavors).toEqual({ pr: "draft-pr" });
+    expect(config.vars).toEqual({ REVIEW_TEAM: "platform" });
   });
 
   it("parses test scripts", () => {

@@ -37,6 +37,20 @@
         "type": "integer"
       }
     },
+    "flavors": {
+      "type": "object",
+      "description": "Per-role built-in agent flavor selections. A stage with agent \"pr\" uses flavors.pr when present; an explicit selector such as \"pr@draft-pr\" takes precedence.",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "vars": {
+      "type": "object",
+      "description": "String variables substituted in AGENT.md bodies with $NAME or ${NAME}. Runtime prompt variables such as $BASE_REF, $BRANCH, $PREV_RESULT, $SOURCE_WORKTREE, and $TASK_PROMPT remain runtime-bound and are not replaced by config vars.",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
     "reserved_port_offsets": {
       "type": "array",
       "items": {
@@ -112,6 +126,16 @@
         "env": {
           "FOO": "bar"
         }
+      }
+    },
+    {
+      "flavors": {
+        "pr": "draft-pr",
+        "merge": "github"
+      },
+      "vars": {
+        "MERGE_STRATEGY": "merge",
+        "REVIEW_TEAM": "platform"
       }
     }
   ]
