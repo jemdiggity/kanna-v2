@@ -3,314 +3,183 @@
 Status: proposed (design spec, no implementation yet)
 Related: [merge-master.md](./merge-master.md),
 [task-graph-stages.md](./task-graph-stages.md),
-[../kanna-server-boundary.md](../kanna-server-boundary.md)
+[forge-independence.md](./forge-independence.md) (parked horizon)
 
-How Kanna makes reviewing a task's changes a first-class, in-app experience —
-and in doing so removes the last reason `gh` is load-bearing. Merge-master
-established **git ≠ gh** and deliberately deferred "line-anchored diff
-feedback" pending an @pierre/diffs annotation spike. This spec is that
-follow-up, plus the review data model and UX around it.
+Review a task's diff in Kanna, comment on lines, and send the task back
+down the pipeline with those comments as the revision prompt — then let it
+climb back up to PR. Merge-master established **git ≠ gh** for merging and
+deferred line-anchored feedback; this spec is that follow-up, rescoped
+after a deliberate rethink.
 
-## Why the GitHub PR is the wrong surface
+## The rethink: feedback is a message, not a record
 
-A forge PR bundles five things. For Kanna's workflow, four of them are
-already better served in-app, and the fifth is optional:
+An earlier draft of this spec added `review_thread`/`review_comment`
+tables, `/v1` review endpoints, MCP thread tools, and a re-anchoring
+algorithm — importing the *forge's* data model into Kanna. That was wrong
+for what Kanna is: **scaffolding for agents**. In Kanna, review feedback
+is a message to an agent, and messages need composition and delivery, not
+storage. The durable record already exists twice over:
 
-| Forge PR provides | Kanna equivalent |
-|---|---|
-| A diff to read | ⌘D branch diff (`DiffModal.vue`, @pierre/diffs) — already better: live, scoped, searchable, no page loads |
-| A place to comment | **Missing — this spec** |
-| A verdict (approve / request changes) | Stage actions: `complete-stage` / `request-revision` — exist, but only agents call them today |
-| A merge button + audit record | Merge master (git-first, [merge-master.md](./merge-master.md)) + a merge record — partially specced |
-| Team distribution / branch protection / external CI | Genuinely forge territory — stays optional, user-space |
+- `stage_run.feedback`/`result` hold what was said and what came back —
+  the task's run history *is* the review history;
+- for forge users, the forge remains the durable conversation store. A
+  team that wants comments on the GitHub PR hands the composed feedback
+  to a user-space agent that posts it via `gh`. The engine never learns
+  what GitHub is.
 
-The deeper problem is structural, not cosmetic. A GitHub review comment is a
-message **to a human author** who will read it, interpret it, and edit code.
-In Kanna the author is an agent with a live (or resumable) session. Routing
-feedback through a forge means: human reads agent's diff in Kanna → switches
-to github.com → writes comments → copies them back into a revision prompt →
-agent gets flattened free text with no file/line anchors. Every hop loses
-structure the agent could have used. The forge is a fax machine between two
-parties who share a database.
+So: **no new tables, no new endpoints, no persistent threads, no
+re-anchoring.** Comments are ephemeral, per review pass, composed into a
+prompt and delivered through the engine actions that already exist.
 
-## Where SWE work is going (the forcing function)
+## The flow
 
-**Now → 1 year: review is the job.** Agents author the overwhelming
-majority of diffs; the human's scarce resource is judgment per minute.
-Review stops being an occasional social ritual between peers and becomes
-the operator's primary activity — a continuous inbox, not an event. The
-tooling consequences:
+1. A task parks at a reviewable stage (`review` awaiting a human, or
+   `pr`). The operator opens ⌘D (branch scope).
+2. **Comment on lines.** Click a line number or press `c` on the focused
+   line (range via selection); an inline composer opens. Comments
+   accumulate client-side — a badge shows the count, `]` / `[` jump
+   between them, a drawer lists them all for editing/deleting.
+3. **Request changes** (`⇧⌘R`): the comments (file, line range, hunk
+   excerpt, note) plus an optional summary are assembled into a prompt
+   and sent as `POST /v1/tasks/{id}/actions/request-revision` with
+   `target_stage: "in progress"`. The engine does the rest — it already
+   resumes the implement session in its worktree with the composed
+   message (or forks fresh when resume preconditions fail), and the task
+   proceeds back up the ladder: in progress → review → pr.
+4. **Approve** (`⇧⌘A` in review context): fires the existing advance
+   path (⌘S semantics). What approval *means* is whatever the pipeline
+   wired there — a `pr` stage approve post signaling a GitHub merge
+   agent, a merge-queue signal, or nothing but a stage swap. User-space,
+   per merge-master.md.
 
-- Latency of the feedback loop dominates. A comment that round-trips
-  through a forge and a copy-paste costs minutes; a comment that resumes
-  the authoring session with anchored context costs seconds. At tens of
-  reviews a day this is the whole ballgame.
-- The first reviewer is another agent. The review stage already runs a QA
-  agent; its findings should land in the same anchored-comment medium the
-  human uses, so the human triages findings instead of re-deriving them
-  from terminal scrollback.
-- Keyboard-first, modal, zero-navigation. The operator lives in Kanna;
-  review must be a mode of the app, not a browser tab.
-
-**5 years: review shifts from diffs to intent and evidence.** Humans state
-invariants and acceptance criteria; agents author, cross-review, and gather
-evidence (tests run, behaviors exercised, properties checked). The human
-verdict increasingly attaches to *outcomes* ("the checks the repo declared
-all pass, the risk annotations are green, the agent-reviewer signed off")
-rather than to every hunk. Low-risk changes merge under policy without a
-human reading the diff at all; the durable artifact is not a PR page but the
-**task record**: prompt, runs, review threads, verdicts, checks, merge
-commit. Kanna already owns every piece of that record except review
-threads and verdicts — which is exactly what this spec adds. The PR as a
-social artifact disappears; the audit trail doesn't.
-
-Designing for that trajectory means: structured review data owned by
-kanna-server (so policy can act on it later), comments that are
-machine-actionable prompts (so agents are first-class participants), and
-verdicts that are engine actions (so "approve" can later be issued by
-policy as easily as by a keypress).
-
-## Principles
-
-- **The task is the change request.** One task = one branch = one review.
-  No parallel "PR" object; review state hangs off `pipeline_item` and
-  `stage_run`, which already carry the prompt, runs, branch, and verdicts.
-- **A comment is a prompt fragment.** Every review comment is structured
-  (file, line range, anchored hunk snapshot, body, author) precisely so it
-  can be composed into a revision prompt or answered by an agent tool call.
-  Human-to-agent and agent-to-human comments are the same row.
-- **Verdicts are stage actions.** Approve = advance (⌘S path); request
-  changes = `request-revision` with the open threads attached. The engine
-  already has both actions; this spec gives humans a surface for them.
-- **Forge-blind engine, forge in user-space.** Same rule as merge-master:
-  the engine ships neutral primitives (threads, verdicts, merge records).
-  A repo that needs GitHub keeps a `pr` agent that pushes/mirrors; a repo
-  that doesn't declares a pipeline without one and merges git-first.
-- **kanna-server owns review state.** Comments and verdicts go through
-  `/v1`, not `tauri-plugin-sql` — consistent with the desktop → server
-  migration direction ([kanna-server-boundary.md](../kanna-server-boundary.md)).
-  Mobile and future clients get review for free.
-
-## The review workspace (UX)
-
-⌘D grows from "diff viewer" into the review workspace. No new modal; review
-is a capability of the branch-scope diff, present whenever the task has
-review threads or is parked at a reviewable stage.
-
-- **File rail + viewed tracking.** File list with per-file viewed
-  checkmarks (`v` toggles, auto-advance to next unviewed). Viewed state
-  persists per (task, head commit) so a revision resets only the files
-  that changed.
-- **Line-anchored threads.** Click a line number or press `c` on the
-  focused line (range via selection or `V` line-select mode) → inline
-  comment composer. Threads render in the gutter/margin of the diff,
-  collapsed to a chip when not focused. `]` / `[` jump next/prev thread,
-  `r` reply, `⌥⏎` resolve.
-- **Agent findings arrive as threads.** The review-stage agent files its
-  findings through the same API (see MCP tools below). The human opens ⌘D
-  and sees the QA agent's anchored findings alongside their own — triage,
-  not re-derivation.
-- **Verdict bar.** When the task is parked at a stage whose policy is
-  manual and reviewable, the workspace shows a verdict bar:
-  - **Request changes** (`⇧⌘R`): composes every open thread plus an
-    optional summary into a `request-revision` payload. Threads transition
-    to `pending-rework`.
-  - **Approve** (`⇧⌘A` in review context): fires the existing advance
-    path (⌘S semantics) — which at the `pr` stage dispatches the approve
-    post → merge master, per merge-master.md.
-  - Open threads gate approve by default (override with confirm) — the
-    same nudge a forge gives, without the forge.
-- **Revision round-trip.** When the implement agent finishes a revision,
-  each thread it addressed shows the agent's reply and a "re-anchored ✓ /
-  outdated" badge; the diff refreshes to the new tip. The operator's loop
-  is: read reply → glance at new hunk → resolve or push back — without
-  leaving the modal.
-- **Review inbox.** The sidebar already bolds unread tasks; tasks parked
-  awaiting a human verdict additionally surface a thread/verdict badge.
-  ⌘⌥↑/↓ between them makes the queue workable at fleet scale.
-
-Terminal stays one keystroke away: threads are the durable, anchored
-channel; the live session (type-in-terminal, `send-input`) remains the
-ephemeral one. Both already share a task.
-
-## Comments are prompts (the round trip)
-
-1. Human files threads in ⌘D. Each stores the anchor (below) and body.
-2. **Request changes** → `POST /v1/tasks/{id}/actions/request-revision`
-   with `threads: [thread_id, ...]`. The engine composes the revision
-   message from the existing template
-   (`task_creator/prompt.rs::build_revision_resume_message`) plus a
-   structured block per thread:
-
-   ```
-   [thread kn-42] apps/desktop/src/stores/pipeline.ts:118-124 (new side)
-   > (anchored hunk excerpt)
-   Comment: this retry loop hides the real error — surface it and drop the loop.
-   Reply with kanna_reply_review_thread when addressed.
-   ```
-
-3. The revision resumes the implement session in its worktree (existing
-   `prepare_revision_resume` path — session already has full context; the
-   threads are deltas, which is exactly what resume is good at).
-4. The agent addresses each thread and calls
-   `kanna_reply_review_thread` (reply + optional `resolves: true`;
-   resolution by the author-agent marks `resolved-by-author`, human
-   confirmation closes it — mirrors how good human teams use "resolved").
-5. On run completion the server re-anchors every open thread against the
-   new tip (below) and emits SSE so the open ⌘D refreshes in place.
-
-The same tools make the **review agent** a first-class reviewer: its
-AGENT.md gains "file each finding with `kanna_add_review_thread`, then
-either `kanna_request_revision` (blocking findings) or
-`kanna_complete_stage` (clean / advisory-only)". Advisory threads persist
-into the human's review instead of dying in the run summary.
-
-## Anchoring and re-anchoring
-
-Forge comments rot on force-push; ours must survive revision cycles, which
-are the common case, under a workflow that rebases and forks branches.
-
-Each thread stores at creation:
-
-- `anchor_commit` — head SHA when filed
-- `file_path`, `side` (`old`/`new`), `line_start`/`line_end`
-- `anchor_excerpt` — the anchored lines plus N context lines (text)
-
-Re-anchor on new head: locate `anchor_excerpt` in the new blob (exact →
-whitespace-insensitive → fuzzy window). Found → update lines, badge
-`re-anchored`; not found → mark `outdated`, keep rendering the stored
-excerpt so the conversation stays legible (a thing GitHub still gets wrong).
-Same algorithm family as `utils/fuzzyMatch.ts` in spirit: cheap, local,
-no git-blame dependency. Outdated-but-open threads still block approve.
-
-## Data model (kanna-server owns it)
+### Composed revision prompt
 
 ```
-review_thread
-  id, pipeline_item_id, stage_run_id,            -- run that was under review
-  author_type ('human'|'agent'), author,          -- agent name or operator
-  file_path, side, line_start, line_end,
-  anchor_commit, anchor_excerpt,
-  status ('open'|'pending-rework'|'resolved-by-author'|'resolved'|'outdated'),
-  created_at, resolved_at
+Revision requested from review of task-8f41c409 @ 83b57a05 (branch diff vs main).
 
-review_comment
-  id, thread_id, author_type, author, body, created_at
+apps/desktop/src/stores/pipeline.ts:118-124
+> (excerpt of the commented lines)
+This retry loop hides the real error — surface it and drop the loop.
 
-merge_record                                       -- from merge-master, made durable
-  id, pipeline_item_id, target_branch, merge_commit,
-  strategy, merged_by, merged_at
+crates/kanna-server/src/http_api/task_actions.rs:41
+> (excerpt)
+Same guard as close_task; extract and share it.
+
+Overall: good direction; fix the two issues above and re-run the daemon tests.
 ```
 
-Verdicts need **no new table**: approve/request-changes are already
-`stage_run` outcomes (`result`, `feedback`, `status`). A human verdict is a
-stage action with `author: operator` in metadata — one history for agent
-and human judgments, which is what a 5-year audit trail wants.
+Plain text, file:line-anchored, self-contained — agent-native. It is
+persisted exactly where revision feedback already lives (`stage_run` of
+the revision run), and `build_revision_resume_message` /
+`build_revision_task_prompt` (`task_creator/prompt.rs`) wrap it with task
+context as they do today. The review-stage QA agent is encouraged (in its
+AGENT.md) to use the same file:line format in its own
+`kanna_request_revision` calls — one convention for human and agent
+feedback, enforced by prompt, not schema.
 
-Day-one constraint from [forge-independence.md](./forge-independence.md):
-model these records as **append-only signed events** (thread.open,
-thread.comment, thread.resolve, verdict) with the tables as derived views
-of the fold — even while storage is SQLite-only — so the later move to a
-shared event log under `refs/kanna/events/*` is a storage swap, not a
-semantic migration.
+### Comment lifetime
 
-## API and tool surface
+Comments are keyed to (task, head commit) in frontend state, alongside
+the per-task view state ⌘D already keeps (`useAppModals.ts`
+`diffViewStates`). If the branch tip changes under an unsent review pass,
+the comments are stale by definition — surface them in the drawer as
+"written against <old-sha>" for copy-out rather than silently dropping
+them. Sent comments need no lifetime: they became a prompt.
 
-`/v1` (kanna-server; desktop uses these, not tauri-plugin-sql):
+## UI work
 
-- `GET  /v1/tasks/{id}/review` — threads + comments + anchors for the task
-- `POST /v1/tasks/{id}/review/threads` — create thread (anchor payload)
-- `POST /v1/tasks/{id}/review/threads/{tid}/comments` — reply
-- `POST /v1/tasks/{id}/review/threads/{tid}/resolve` | `/reopen`
-- `request-revision` gains optional `threads: [...]`
-- `POST /v1/tasks/{id}/actions/merge` — merge-master trigger already
-  specced; writes `merge_record`
-- SSE `/v1/stream`: `review_thread_changed` events (thread id + status)
-  so open clients refresh in place
+All frontend; the engine needs nothing new.
 
-MCP tools (via `kanna-tool-catalog`, so kanna-cli gets them for free):
-`kanna_list_review_threads`, `kanna_add_review_thread`,
-`kanna_reply_review_thread`, `kanna_resolve_review_thread`. Review and
-implement AGENT.md reference them.
+- **Comment gutter/overlay** in `DiffView.vue` — the @pierre/diffs spike,
+  now smaller: map rendered line elements to (file, line) and position an
+  overlay composer and comment chips; no persistent thread rendering, no
+  cross-revision anchoring. If shadow-DOM internals make per-line overlay
+  brittle, a margin rail aligned to rendered line positions is an
+  acceptable fallback.
+- **Verdict bar** in `DiffModal.vue`, shown when the task is parked at a
+  reviewable stage: comment count, Request changes, Approve. Wired
+  through `stores/pipeline.ts::postTaskAction` to the existing
+  `request-revision` / `advance-stage` actions.
+- **Keyboard**: `c` comment, `]`/`[` next/prev comment, `⇧⌘R` request
+  changes, `⇧⌘A` approve — registered in the `diff` shortcut context.
+- Sidebar: tasks parked awaiting a human verdict show a badge (they
+  already bold on unread); ⌘⌥↑/↓ makes the review queue workable.
 
-Diff data for anchors comes from the same source the modal renders
-(`git_diff_branch_range` et al.); the composer captures the excerpt
-client-side at comment time, so the server never needs to re-run a diff to
-store an anchor.
+## Agent polymorphism (making "what approval means" frictionless)
 
-## What happens to `gh`
+Kanna's agent system is already duck-typed with late binding: pipelines
+dispatch by name (`agent: merge`), resolution is repo file → built-in
+resource, `EXTEND.md` layers overrides. Three cheap additions make the
+setup path frictionless and tested:
 
-- **Default pipelines stop requiring it.** The `pr` agent's essential job
-  shrinks to: rebase onto `$BASE_REF`, rename the branch, `git push`.
-  Review happens in Kanna; approve signals the merge master; the merge
-  master merges git-first and records `merge_record`. No forge round-trip
-  anywhere on the golden path. (For a single-remote solo repo, even the
-  push is optional — merge can be a local fast-forward plus push of the
-  default branch.)
-- **Forge mode stays user-space.** A team on GitHub with branch protection
-  keeps a `pr` AGENT.md that creates a draft PR and an approve post that
-  runs `gh pr ready`; the merge master already prefers `gh pr merge` when
-  a `pr_url` exists. Optionally, a `mirror` post can push thread summaries
-  to the PR as a single comment for non-Kanna teammates — an agent
-  behavior, never an engine dependency.
-- `pr_number`/`pr_url` on `pipeline_item` remain what merge-master already
-  declared them: optional metadata, never load-bearing.
+1. **Flavors.** Built-ins ship variants of a role:
+   `pr@draft-pr`, `pr@push-only`, `merge@github`, `merge@git`. Selection
+   is one line (`agent: merge@github` in a pipeline stage, or a
+   `flavors` map in `.kanna/config.json`) instead of copying AGENT.md
+   files. Resolution order stays: repo override → built-in flavor →
+   built-in default.
+2. **Contracts.** A role is defined by the tool calls it must make —
+   `pr` ends with `kanna_complete_stage` (+ `metadata.pr_url` when a PR
+   exists); `merge` consumes a `MERGE <branch> → <target>` signal;
+   `review` ends with `kanna_complete_stage` or `kanna_request_revision`
+   (file:line-formatted feedback). Contracts are documented per role and
+   enforced by tests: prompt renders, referenced tools exist in the
+   catalog (`crates/kanna-tool-catalog`), and an E2E smoke with a cheap
+   live model makes the required calls (the `tests/cli-contract` pattern,
+   extended).
+3. **Config-var substitution.** Stage prompts already substitute
+   `$BRANCH`/`$BASE_REF`/etc.; let AGENT.md bodies substitute repo-config
+   variables too, so one agent body can parametrize on e.g. `$BASE_REF`
+   or a repo-declared merge strategy instead of forking into a new file.
 
-## Checks (evidence, not vibes)
+A fourth kind is unique to agents — **inference-time dispatch**: an agent
+told to inspect the environment (GitHub remote? `gh` authed? branch
+protection?) and adapt. Least deterministic, so it belongs in setup, not
+the hot path:
 
-`.kanna/config.json` already declares `test` commands. The review stage
-runs them in the review worktree today, but the evidence dies in terminal
-scrollback. Small, high-leverage addition: the review agent reports check
-outcomes in its `complete_stage` / `request_revision` **metadata**
-(`checks: [{name, status, detail}]`), and the verdict bar renders them as
-chips. No new runner, no CI system — just surfacing evidence the pipeline
-already produces next to the verdict it should inform. This is the seam
-where policy auto-merge attaches later (phase 3), and where external CI
-results could be reported by a user-space agent without engine changes.
+### The setup agent
+
+A `setup` factory agent (composing the existing `agent-factory` /
+`pipeline-factory` / `config-factory`) runs at repo import or on demand:
+inspects the repo to pre-answer what it can (remote URL, `gh auth
+status`, CI config), asks only what it must ("draft PRs or push-only?
+merge yourself or a merge agent?"), then writes the `.kanna/` files —
+pipeline JSON, flavor selections, an EXTEND.md where an answer doesn't
+match a stock flavor. It composes tested flavors; it does not author
+agents from scratch. The first stock preset is the GitHub flow:
+`pr@draft-pr` → review in ⌘D → approve post → `merge@github`.
 
 ## Phasing
 
-**Phase 1 — threads and the round trip** (removes the forge from *review*):
-@pierre/diffs annotation spike (gutter widgets inside its shadow DOM is the
-one real rendering risk — de-risk first); `review_thread`/`review_comment`
-tables + `/v1` endpoints + SSE; thread UI in ⌘D branch scope; verdict bar
-firing existing `advance` / `request-revision`; `request-revision` thread
-composition; MCP reply/resolve tools; review AGENT.md files findings as
-threads. GitHub still merges.
-
-**Phase 2 — merge without the forge** (removes `gh` from the golden path):
-merge-master engine primitive (`signal` find-or-create singleton, already
-specced) + `merge_record`; git-first default `pr`/`approve`/`merge` agent
-definitions; re-anchoring on revision completion; viewed-file tracking.
-
-**Phase 3 — review at fleet scale**: review inbox surfacing awaiting-verdict
-tasks with thread/check badges; agent risk annotations (review agent tags
-threads `blocking`/`advisory`/`nit`); policy hooks — repo-declared rules
-(e.g. "docs-only diffs with green checks auto-approve") issuing the same
-verdict actions a human does. This is deliberately last: policy is only
-trustworthy once verdicts, threads, and checks have been structured data
-for a while.
+1. **The loop** — comment composer + drawer + verdict bar; request-changes
+   composition into `request-revision`; approve → advance. Ships the full
+   review-in-Kanna experience for a GitHub user with zero engine changes.
+2. **Flavors and contracts** — stock `pr`/`merge`/`approve` variants,
+   contract docs + tests, config-var substitution in agent bodies.
+3. **Setup agent** — the interview/inspect/compose flow at repo import.
 
 ## Testing expectations
 
-Per the repo's E2E bar, each phase lands with wiring-level coverage:
+- Desktop E2E (mock): open ⌘D on a fixture branch → add two line
+  comments → request changes → assert the composed `request-revision`
+  payload (file:line anchors, excerpts, summary) and the stage action
+  call; approve path asserts `advance-stage`.
+- Unit: prompt composition (anchor formatting, stale-tip handling).
+- Contract tests per flavor (phase 2); live-agent smoke uses the
+  cheap-model convention already used for agent-flow tests.
+- Full round trip (comment → revision → task re-parks at pr) needs the
+  harness to drive agent completion deterministically — same documented
+  gap as notify; add when that harness lands.
 
-- server: thread CRUD + revision composition + re-anchoring against real
-  git fixtures (`http_api/tests/`, `task_creator/tests/`)
-- desktop E2E (mock): open ⌘D → file a thread → request changes →
-  assert the `request-revision` payload carries the anchored thread
-- desktop E2E (real, later): full round trip with a live agent replying
-  via MCP — gated on the harness driving agent completion deterministically
-  (same gap already documented for notify)
+## Non-goals (cut deliberately)
 
-## Open questions
-
-- Multi-operator: `author` is a free string today (single-operator app).
-  When Kanna grows accounts/relay identity, threads inherit it — schema
-  reserves the column, nothing else assumes identity.
-- Stacked tasks: threads anchor to the task's own branch scope
-  (merge-base with `base_ref`), so stacks work naturally, but a thread on
-  code a *parent* task authored should arguably route to the parent —
-  punt until stacks are common.
-- Thread on unchanged context lines (forge supports commenting outside the
-  diff): defer; anchor model permits it, UI can add "comment on file" later.
+- Persistent review threads, comment tables, `/v1` review endpoints, MCP
+  thread tools, re-anchoring across revisions — the forge (for forge
+  users) or the run history (for everyone) is the record. If a genuinely
+  shared, forge-free review store is ever needed, that is
+  [forge-independence.md](./forge-independence.md), which stays parked
+  behind its decision gate: a second real contributor wanting shared
+  review state, and the forge-API-backed variant evaluated and found
+  wanting for concrete reasons.
+- Blocking approve on open comments, review checklists, multi-reviewer
+  coordination — single-operator app; revisit with real demand.

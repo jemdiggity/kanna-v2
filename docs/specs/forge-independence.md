@@ -9,6 +9,21 @@ without a forge. Builds on native-review (review in-app) and merge-master
 (merge git-first) by answering the remaining question: where does *shared*
 state live when there are N operators and no GitHub?
 
+**Parked behind a decision gate.** Native-review's rethink removed the
+review data model this spec was going to inherit: review feedback in Kanna
+is a composed message, not a stored record, and for forge users the forge
+already is the shared store. Do not build phase 3+ until (a) a second real
+contributor wants shared review state on a real repo, and (b) a
+forge-API-backed variant (threads as PR review comments, checks as
+check-runs) has been evaluated and found wanting for concrete reasons —
+this spec must beat that boring competitor on evidence, not rhetoric.
+Known risks to weigh at the gate: the decentralized-review graveyard
+(git-appraise, git-bug, Radicle; Gerrit NoteDb is a *centralized* server
+using git storage, a weaker precedent than it looks), DIY trust-system
+subtlety (the roster/validity design needs hostile external review before
+a merge policy trusts it), and the split-brain middle state while a team
+is half-migrated.
+
 ## Thesis
 
 Strip a forge to its kernel and it is four things: a highly-available git
@@ -75,7 +90,7 @@ with `ssh-keygen -Y sign`:
 
 | type | body | notes |
 |---|---|---|
-| `thread.open` | `{file_path, side, line_start, line_end, anchor_commit, anchor_excerpt, text, severity?}` | anchor fields per native-review; `severity`: `blocking`/`advisory`/`nit` |
+| `thread.open` | `{file_path, side, line_start, line_end, anchor_commit, anchor_excerpt, text, severity?}` | excerpt-based anchor (survives revision forks); `severity`: `blocking`/`advisory`/`nit` |
 | `thread.comment` | `{thread, text}` | `thread` = thread.open event id |
 | `thread.resolve` / `thread.reopen` | `{thread, reason?}` | resolve by the change author ≠ resolve by reviewer; fold tracks who |
 | `verdict` | `{stage_run?, decision, summary, threads?}` | `decision`: `approve` / `request-changes` / `escalate` |
@@ -98,7 +113,7 @@ State = a deterministic fold over the union of all writers' logs:
   a merge of sorted streams.
 - Duplicates (same `id`) collapse to one.
 - Thread status is the last resolve/reopen in fold order, tagged with the
-  resolver's role (author-resolve vs reviewer-resolve, per native-review).
+  resolver's role (author-resolve vs reviewer-resolve are distinct).
 - Events that fail signature or roster validation are **quarantined**, not
   dropped: retained, excluded from state, surfaced in a diagnostics view.
   A misconfigured clock or an offboarded key must be debuggable, not
@@ -123,9 +138,8 @@ State = a deterministic fold over the union of all writers' logs:
   remote works: bare repo over SSH, Gitea, or GitHub demoted to byte
   hosting — the only centralized component left.
 - Each instance's SQLite remains the **materialized view** of the fold
-  (Gerrit NoteDb's design, proven at Android scale). The `/v1` API, MCP
-  tools, and review UI from native-review sit on the view and do not
-  change; only kanna-server's storage layer learns to sync.
+  (Gerrit NoteDb's design, proven at Android scale). The `/v1` API and
+  MCP tools sit on the view; kanna-server's storage layer learns to sync.
 
 ## Transport: pluggable, untrusted
 
@@ -245,33 +259,37 @@ bypass visible after the fact.
   ssh sign/verify (via ssh-agent), roster parsing/validity chain, the
   versioned fold. Shared by kanna-server, kanna-cli, and tests. No I/O —
   storage and transport live with their owners.
+- New crate boundary aside, existing shared state is the seed corpus:
+  `stage_run` results/feedback and merge outcomes already capture
+  verdict-shaped facts. If this spec is ever built, the first migration
+  derives `verdict`/`merge` events from that history rather than starting
+  empty.
 - kanna-server (`crates/kanna-server`):
-  - phase 1–2: an `event` table (`id, task_id, type, author, ts, body,
-    sig, quarantined`) written *alongside* the native-review tables,
-    which become derived views of the fold. This is the day-one
-    constraint: review records are events from the start, even while
-    SQLite-only.
-  - phase 3: a `git-sync` module — ingest/egress walker over
+  - an `event` table (`id, task_id, type, author, ts, body, sig,
+    quarantined`) as the local materialized store, populated from engine
+    actions (verdicts from stage actions, checks from runners, merges
+    from the merge master).
+  - a `git-sync` module — ingest/egress walker over
     `refs/kanna/events/*` (git2, already vendored), sync scheduling
     (relay hint → sync; fallback poll), and quarantine surfacing.
   - `/v1` additions: `GET /v1/tasks/{id}/events`, `GET /v1/repos/{id}/roster`,
     `POST /v1/repos/{id}/sync`; SSE gains `events_appended {task_ids}`.
-- MCP/CLI (`crates/kanna-tool-catalog`): the native-review tools already
-  planned (`kanna_add_review_thread`, …) emit events under the hood;
-  new: `kanna_issue_verdict`, `kanna_report_check`, `kanna_sync_repo`.
-- Desktop: no new surface beyond native-review's; the review inbox gains
-  escalations and a quarantine/diagnostics view later.
+- MCP/CLI (`crates/kanna-tool-catalog`): `kanna_issue_verdict`,
+  `kanna_report_check`, `kanna_sync_repo`.
+- Desktop: no new review surface beyond native-review's; the review inbox
+  gains escalations and a quarantine/diagnostics view later.
 
 ## Staging
 
-1. **Native review** ([native-review.md](./native-review.md)) — threads,
-   verdicts, round trip; SQLite; **records modeled as signed events from
-   day one** (the `event` table + `kanna-events` crate, local key only).
+1. **Native review** ([native-review.md](./native-review.md)) — the
+   review loop in ⌘D; composed messages, no review storage. No
+   dependency on this spec.
 2. **Merge without the forge** ([merge-master.md](./merge-master.md)) —
-   merge master, `merge` events, git-first agents, CAS push.
-3. **Shared metadata** — event log under `refs/kanna/events/*`; SQLite
-   becomes the materialized view; roster + validity chain; relay hints;
-   second-contributor onboarding = clone + roster entry.
+   merge master, git-first agents, CAS push.
+3. **Shared metadata** *(gated — see the decision gate above)* — the
+   `kanna-events` crate; event log under `refs/kanna/events/*`; local
+   `event` table as materialized view; roster + validity chain; relay
+   hints; second-contributor onboarding = clone + roster entry.
 4. **Team scale** — path-scoped residents, escalation routing,
    calibration records, policy-weighted merge. Postmaster/email gateway
    any time after 3.
