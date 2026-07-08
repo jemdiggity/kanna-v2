@@ -14,6 +14,8 @@ const requiredFlavors = [
   { role: "merge", flavor: "git" },
 ];
 
+const requiredBuiltInAgents = ["setup"];
+
 function read(path: string): string {
   return readFileSync(path, "utf8");
 }
@@ -80,6 +82,34 @@ describe("bundled agent flavor contracts", () => {
 
     it(`${role} contract references only catalogued Kanna tools`, () => {
       const missing = toolReferences(read(contractPath)).filter((name) => !tools.has(name));
+      expect([...new Set(missing)]).toEqual([]);
+    });
+  }
+
+  for (const role of requiredBuiltInAgents) {
+    const agentPath = join(agentsRoot, role, "AGENT.md");
+    const contractPath = join(agentsRoot, role, "CONTRACT.md");
+
+    it(`${role} ships as a bundled AGENT.md resource`, () => {
+      expect(existsSync(agentPath), `${agentPath} must exist`).toBe(true);
+    });
+
+    it(`${role} parses and renders`, () => {
+      const agent = parseAgentDefinition(read(agentPath));
+      expect(agent.name).toBe(role);
+      expect(agent.description).not.toBe("");
+      expect(renderPrompt(agent.prompt).trim()).not.toBe("");
+    });
+
+    it(`${role} contract doc ships next to the agent definition`, () => {
+      expect(existsSync(contractPath), `${contractPath} must exist`).toBe(true);
+    });
+
+    it(`${role} references only catalogued Kanna tools`, () => {
+      const missing = [
+        ...toolReferences(read(agentPath)),
+        ...toolReferences(read(contractPath)),
+      ].filter((name) => !tools.has(name));
       expect([...new Set(missing)]).toEqual([]);
     });
   }

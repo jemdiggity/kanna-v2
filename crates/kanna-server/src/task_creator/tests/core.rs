@@ -141,6 +141,28 @@ fn builtin_merge_agent_accepts_natural_language_open_pr_requests() {
 }
 
 #[test]
+fn read_agent_definition_loads_builtin_setup_agent() {
+    let repo_root = std::env::temp_dir().join(format!(
+        "kanna-agent-def-builtin-setup-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&repo_root);
+    std::fs::create_dir_all(&repo_root).unwrap();
+
+    let definition =
+        super::super::definitions::read_agent_definition(&repo_root.to_string_lossy(), "setup")
+            .unwrap();
+
+    assert!(definition.prompt.contains("GitHub flow"));
+    assert!(definition
+        .prompt
+        .contains("Do not author new agents from scratch"));
+    assert!(definition.prompt.contains("kanna_complete_stage"));
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
 fn read_agent_definition_uses_explicit_builtin_flavor() {
     let repo_root = std::env::temp_dir().join(format!(
         "kanna-agent-def-explicit-flavor-{}",

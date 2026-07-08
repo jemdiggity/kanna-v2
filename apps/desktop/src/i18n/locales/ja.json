@@ -135,6 +135,7 @@
     "taskCreationFailed": "タスクの作成に失敗しました",
     "prCreationFailed": "PRの作成に失敗しました",
     "repoCreationFailed": "リポジトリの作成に失敗しました",
+    "repoImportFailed": "リポジトリのインポートに失敗しました",
     "cloneFailed": "クローンに失敗しました",
     "worktreeFailed": "ワークツリーの作成に失敗しました",
     "fetchFailed": "リモートから最新を取得できませんでした — ワークツリーは古いmainに基づいている可能性があります",
@@ -332,6 +333,8 @@
     "createAgentDesc": "新しいエージェント定義を作成",
     "createPipeline": "パイプラインを作成",
     "createPipelineDesc": "新しいパイプライン定義を作成",
+    "setupRepo": "リポジトリをセットアップ",
+    "setupRepoDesc": ".kanna のパイプラインとエージェントフレーバーを構成",
     "createConfig": "設定を作成",
     "createConfigDesc": ".kanna/config.json を作成または更新"
   },

@@ -13,8 +13,8 @@ export { collectTeardownCommands } from "./taskLifecycleEnv";
 
 export interface TasksApi {
   importRepo: (path: string, name: string, defaultBranch: string) => Promise<string>;
-  createRepo: (name: string, path: string) => Promise<void>;
-  cloneAndImportRepo: (url: string, destination: string) => Promise<void>;
+  createRepo: (name: string, path: string) => Promise<string>;
+  cloneAndImportRepo: (url: string, destination: string) => Promise<string>;
   hideRepo: (repoId: string) => Promise<void>;
   renameRepo: (repoId: string, name: string) => Promise<void>;
   reorderRepos: (orderedIds: string[]) => Promise<void>;

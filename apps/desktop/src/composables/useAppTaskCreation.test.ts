@@ -16,7 +16,16 @@ function createTaskCreationHarness() {
     selectedRepoId: "repo-1",
     repos: [{ id: "repo-1", path: "/repo" }],
     createItem: vi.fn(async () => {}),
+    createRepo: vi.fn(async () => "repo-1"),
+    importRepo: vi.fn(async () => "repo-1"),
     cloneAndImportRepo: vi.fn(async () => {}),
+    loadAgent: vi.fn(async () => ({
+      prompt: "Configure the GitHub flow by composing stock flavors.",
+      agent_provider: ["codex", "claude"],
+      model: undefined,
+      permission_mode: "default",
+      allowed_tools: undefined,
+    })),
   };
 
   const creation = useAppTaskCreation({
@@ -102,5 +111,28 @@ describe("useAppTaskCreation", () => {
     await openPromise;
 
     expect(showNewTaskModal.value).toBe(true);
+  });
+
+  it("launches the setup agent after importing a repository", async () => {
+    const { creation, store } = createTaskCreationHarness();
+
+    await creation.handleImportRepo("/repo", "repo", "main");
+
+    expect(store.importRepo).toHaveBeenCalledWith("/repo", "repo", "main");
+    expect(store.loadAgent).toHaveBeenCalledWith("/repo", "setup");
+    expect(store.createItem).toHaveBeenCalledWith(
+      "repo-1",
+      "/repo",
+      "Set up Kanna for this repository.",
+      "pty",
+      expect.objectContaining({
+        agentProvider: "codex",
+        customTask: expect.objectContaining({
+          name: "Set Up Repository",
+          agent: "setup",
+          prompt: "Configure the GitHub flow by composing stock flavors.",
+        }),
+      }),
+    );
   });
 });
