@@ -322,6 +322,6 @@ pub async fn serve(state: Arc<AppState>) -> Result<(), String> {
         listener,
         router(state).into_make_service_with_connect_info::<SocketAddr>(),
     )
-        .await
-        .map_err(|e| format!("LAN API server failed: {}", e))
+    .await
+    .map_err(|e| format!("LAN API server failed: {}", e))
 }

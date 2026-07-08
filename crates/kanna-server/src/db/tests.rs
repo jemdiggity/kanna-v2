@@ -241,7 +241,8 @@ fn open_fails_with_clear_error_when_quick_check_cannot_read_database() {
     let path = temp_db_path();
     std::fs::write(&path, b"this is not a sqlite database").expect("write corrupt db");
 
-    let err = Db::open_migrated(path.to_str().expect("utf8 path")).expect_err("corrupt db should fail");
+    let err =
+        Db::open_migrated(path.to_str().expect("utf8 path")).expect_err("corrupt db should fail");
     let message = err.to_string();
 
     assert!(
