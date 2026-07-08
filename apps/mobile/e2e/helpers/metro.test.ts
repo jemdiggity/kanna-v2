@@ -83,7 +83,8 @@ describe("mobile Metro helpers", () => {
       "expo",
       "start",
       "--port",
-      "1430"
+      "1430",
+      "--dev-client"
     ]);
   });
 });
