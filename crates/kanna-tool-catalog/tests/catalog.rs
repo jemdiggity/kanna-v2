@@ -51,10 +51,7 @@ fn generated_schema_preserves_required_order_types_and_enums() {
         .find(|tool| tool["name"] == "kanna_create_task")
         .expect("create task tool");
 
-    assert_eq!(
-        create_task["inputSchema"]["required"],
-        json!(["repo_id", "prompt"])
-    );
+    assert_eq!(create_task["inputSchema"]["required"], json!(["prompt"]));
     assert_eq!(
         create_task["inputSchema"]["properties"]["allowed_tools"],
         json!({ "type": "array", "items": { "type": "string" } })
@@ -135,6 +132,19 @@ fn resolves_expected_requests_for_every_bundled_tool() {
             ResponseKind::Json,
             "/v1/repos/repo-1/tasks",
             json!({}),
+        ),
+        (
+            "kanna_create_task",
+            json!({
+                "prompt": "Inferred repo task"
+            }),
+            Method::Post,
+            ResponseKind::Json,
+            "/v1/tasks",
+            json!({
+                "prompt": "Inferred repo task",
+                "agentType": "pty"
+            }),
         ),
         (
             "kanna_create_task",
