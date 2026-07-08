@@ -47,7 +47,6 @@ pub(super) async fn add_repo(
         (status, e.message())
     })?;
     state.publish_state_changed(StateChangeScope::Repos);
-    state.publish_state_changed(StateChangeScope::Repos);
     Ok(Json(repo))
 }
 
