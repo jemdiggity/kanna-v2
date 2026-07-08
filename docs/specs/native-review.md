@@ -35,22 +35,23 @@ prompt and delivered through the engine actions that already exist.
 
 1. A task parks at a reviewable stage (`review` awaiting a human, or
    `pr`). The operator opens ⌘D (branch scope).
-2. **Comment on lines.** Click a line number or press `c` on the focused
-   line (range via selection); an inline composer opens. Comments
-   accumulate client-side — a badge shows the count, `]` / `[` jump
-   between them, a drawer lists them all for editing/deleting.
-3. **Request changes** (`⇧⌘R`): the comments (file, line range, hunk
+2. **Comment on lines.** Click a line number (drag for a range); an
+   inline composer opens. Comments accumulate client-side — a badge
+   shows the count, and a drawer (`c`) lists them for jumping, editing,
+   and deleting.
+3. **Request changes** (`⇧⌘S`): the comments (file, line range, hunk
    excerpt, note) plus an optional summary are assembled into a prompt
    and sent as `POST /v1/tasks/{id}/actions/request-revision` with
    `target_stage: "in progress"`. The engine does the rest — it already
    resumes the implement session in its worktree with the composed
    message (or forks fresh when resume preconditions fail), and the task
    proceeds back up the ladder: in progress → review → pr.
-4. **Approve** (`⇧⌘A` in review context): fires the existing advance
-   path (⌘S semantics). What approval *means* is whatever the pipeline
-   wired there — a `pr` stage approve post signaling a GitHub merge
-   agent, a merge-queue signal, or nothing but a stage swap. User-space,
-   per merge-master.md.
+4. **Approve** (`⌘S`): approval *is* the existing advance-stage action —
+   no new chord, no new concept; the `advanceStage` binding's context
+   just grows from `["main"]` to include `diff`. What approval *means*
+   is whatever the pipeline wired there — a `pr` stage approve post
+   signaling a GitHub merge agent, a merge-queue signal, or nothing but
+   a stage swap. User-space, per merge-master.md.
 
 ### Composed revision prompt
 
@@ -100,8 +101,35 @@ All frontend; the engine needs nothing new.
   reviewable stage: comment count, Request changes, Approve. Wired
   through `stores/pipeline.ts::postTaskAction` to the existing
   `request-revision` / `advance-stage` actions.
-- **Keyboard**: `c` comment, `]`/`[` next/prev comment, `⇧⌘R` request
-  changes, `⇧⌘A` approve — registered in the `diff` shortcut context.
+- **Keyboard.** The diff modal's keyscape is crowded and must be
+  respected: `useLessScroll` owns `j/k/f/b/d/u/g/G/q` (and space/arrows)
+  for scrolling, `/`+`⌘F` own search with `n/N` while searching, `s`
+  cycles the working filter, `⇧⌘[`/`⇧⌘]` cycle scopes, and Escape
+  closes. Chords already bound elsewhere are off the table even when the
+  context system would technically allow reuse: `⇧⌘A` is Analytics,
+  `⌘R`/`⇧⌘R` are read-navigation. New bindings, registered as
+  supplementary shortcuts in the `diff` context (so `⌘/` lists them):
+  - **`⌘S` approve** — the existing `advanceStage` action, context
+    extended to `diff`. Advancing *is* approving; one meaning, one chord.
+  - **`⇧⌘S` request changes** — the shift-variant of `⌘S`, matching the
+    app's existing shift-pair convention (`⌘U`/`⇧⌘U`, `⌘R`/`⇧⌘R`):
+    same axis, opposite direction — send the task back down. Opens the
+    summary composer with the pending comments listed, `⌘Enter` sends.
+  - **`c` toggle comment drawer** — the only free single letter that
+    reads as "comments"; drawer entries jump on click/Enter.
+  - **Composer keys**: `⌘Enter` submits (the NewTaskModal convention),
+    Escape closes the composer *keeping the draft*. Escape layers:
+    composer → drawer → modal, one level per press. While any text
+    input has focus, single-letter shortcuts are inert (the existing
+    input-element guard in `useLessScroll`).
+  - **Deliberately absent**: per-comment next/prev keys. Targeting a
+    line for commenting is pointer-first in phase 1 — the modal has no
+    keyboard line-cursor, and inventing one (with all of `j/k` already
+    meaning scroll) is its own design problem. If review sessions turn
+    out to want it, a line-cursor mode is future work with its own
+    thinking; bracket keys are ruled out regardless (shadowed by the
+    scope-cycle pair, and awkward on the JIS/Korean layouts the app
+    ships locales for).
 - Sidebar: tasks parked awaiting a human verdict show a badge (they
   already bold on unread); ⌘⌥↑/↓ makes the review queue workable.
 
