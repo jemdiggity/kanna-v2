@@ -327,10 +327,7 @@ impl AgentSelector {
     }
 
     fn repo_agent_dir(&self) -> String {
-        match self.explicit_flavor.as_deref() {
-            Some(flavor) => format!("{}@{}", self.role, flavor),
-            None => self.role.clone(),
-        }
+        self.role.clone()
     }
 }
 
@@ -457,6 +454,7 @@ fn apply_agent_extension(definition: &mut AgentDefinition, content: &str) -> Res
 const RESERVED_PROMPT_VARS: &[&str] = &[
     "BASE_REF",
     "BRANCH",
+    "KANNA_TASK_ID",
     "PREV_RESULT",
     "SOURCE_WORKTREE",
     "TASK_PROMPT",

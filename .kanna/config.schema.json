@@ -39,14 +39,14 @@
     },
     "flavors": {
       "type": "object",
-      "description": "Per-role built-in agent flavor selections. A stage with agent \"pr\" uses flavors.pr when present; an explicit selector such as \"pr@draft-pr\" takes precedence.",
+      "description": "Per-role built-in agent flavor selections. A stage with agent \"pr\" uses flavors.pr when present; an explicit selector such as \"pr@draft-pr\" takes precedence. Repo overrides and extensions remain role-scoped at .kanna/agents/<role>/AGENT.md and EXTEND.md.",
       "additionalProperties": {
         "type": "string"
       }
     },
     "vars": {
       "type": "object",
-      "description": "String variables substituted in AGENT.md bodies with $NAME or ${NAME}. Runtime prompt variables such as $BASE_REF, $BRANCH, $PREV_RESULT, $SOURCE_WORKTREE, and $TASK_PROMPT remain runtime-bound and are not replaced by config vars.",
+      "description": "String variables substituted in AGENT.md bodies with $NAME or ${NAME}. Runtime prompt variables such as $BASE_REF, $BRANCH, $KANNA_TASK_ID, $PREV_RESULT, $SOURCE_WORKTREE, and $TASK_PROMPT remain runtime-bound and are not replaced by config vars.",
       "additionalProperties": {
         "type": "string"
       }

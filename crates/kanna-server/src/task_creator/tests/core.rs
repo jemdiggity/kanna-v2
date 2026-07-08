@@ -217,6 +217,63 @@ fn read_agent_definition_prefers_repo_override_over_config_flavor() {
 }
 
 #[test]
+fn read_agent_definition_prefers_repo_override_over_explicit_flavor() {
+    let repo_root = std::env::temp_dir().join(format!(
+        "kanna-agent-def-repo-over-explicit-flavor-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&repo_root);
+    let agent_dir = repo_root.join(".kanna/agents/pr");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("AGENT.md"),
+        "---\nagent_provider: claude\n---\nRepo-owned PR agent.",
+    )
+    .unwrap();
+
+    let definition = super::super::definitions::read_agent_definition(
+        &repo_root.to_string_lossy(),
+        "pr@push-only",
+    )
+    .unwrap();
+
+    assert_eq!(definition.prompt, "Repo-owned PR agent.");
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
+fn read_agent_definition_layers_role_extension_on_explicit_builtin_flavor() {
+    let repo_root = std::env::temp_dir().join(format!(
+        "kanna-agent-def-explicit-flavor-role-extend-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&repo_root);
+    let agent_dir = repo_root.join(".kanna/agents/pr");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("EXTEND.md"),
+        "Repo rule: publish only after local CI passes.",
+    )
+    .unwrap();
+
+    let definition = super::super::definitions::read_agent_definition(
+        &repo_root.to_string_lossy(),
+        "pr@push-only",
+    )
+    .unwrap();
+
+    assert!(definition
+        .prompt
+        .contains("push the branch without creating a PR"));
+    assert!(definition
+        .prompt
+        .ends_with("Repo rule: publish only after local CI passes."));
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
 fn read_agent_definition_falls_back_to_builtin_default_for_missing_flavor() {
     let repo_root = std::env::temp_dir().join(format!(
         "kanna-agent-def-missing-config-flavor-{}",
@@ -251,12 +308,12 @@ fn read_agent_definition_substitutes_repo_config_vars_in_agent_body() {
     std::fs::create_dir_all(&agent_dir).unwrap();
     std::fs::write(
         repo_root.join(".kanna/config.json"),
-        r#"{"vars":{"MERGE_STRATEGY":"squash","REVIEW_TEAM":"platform"}}"#,
+        r#"{"vars":{"KANNA_TASK_ID":"config-task","MERGE_STRATEGY":"squash","REVIEW_TEAM":"platform"}}"#,
     )
     .unwrap();
     std::fs::write(
         agent_dir.join("AGENT.md"),
-        "---\nagent_provider: claude\n---\nUse $MERGE_STRATEGY for ${REVIEW_TEAM}. Keep $BASE_REF runtime-bound.",
+        "---\nagent_provider: claude\n---\nUse $MERGE_STRATEGY for ${REVIEW_TEAM}. Keep $BASE_REF and $KANNA_TASK_ID runtime-bound.",
     )
     .unwrap();
 
@@ -266,7 +323,7 @@ fn read_agent_definition_substitutes_repo_config_vars_in_agent_body() {
 
     assert_eq!(
         definition.prompt,
-        "Use squash for platform. Keep $BASE_REF runtime-bound."
+        "Use squash for platform. Keep $BASE_REF and $KANNA_TASK_ID runtime-bound."
     );
 
     let _ = std::fs::remove_dir_all(&repo_root);

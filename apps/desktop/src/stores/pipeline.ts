@@ -284,7 +284,7 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
     const selectedFlavor = explicitFlavor ?? flavors?.[role] ?? null;
     return {
       role,
-      repoAgentDir: explicitFlavor ? `${role}@${explicitFlavor}` : role,
+      repoAgentDir: role,
       builtinFlavorPath: selectedFlavor ? `.kanna/agents/${role}/flavors/${selectedFlavor}/AGENT.md` : null,
     };
   }
@@ -297,7 +297,14 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
     return [parts[0], parts[1]];
   }
 
-  const reservedPromptVars = new Set(["BASE_REF", "BRANCH", "PREV_RESULT", "SOURCE_WORKTREE", "TASK_PROMPT"]);
+  const reservedPromptVars = new Set([
+    "BASE_REF",
+    "BRANCH",
+    "KANNA_TASK_ID",
+    "PREV_RESULT",
+    "SOURCE_WORKTREE",
+    "TASK_PROMPT",
+  ]);
 
   function substituteAgentPromptVars(agent: AgentDefinition, vars: Record<string, string> | undefined): AgentDefinition {
     if (!vars || Object.keys(vars).length === 0) return agent;

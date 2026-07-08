@@ -132,6 +132,42 @@ Push only.
     expect(agent.prompt).toBe("Push only.");
   });
 
+  it("prefers a repo agent override over an explicit built-in flavor", async () => {
+    mockAgentFiles({
+      "/repo/.kanna/agents/pr/AGENT.md": BASE_AGENT_MD,
+      "builtin:.kanna/agents/pr/flavors/push-only/AGENT.md": `---
+name: pr@push-only
+description: Push only
+agent_provider: claude
+---
+
+Push only.
+`,
+    });
+
+    const agent = await makeApi().loadAgent("/repo", "pr@push-only");
+    expect(agent.name).toBe("review");
+    expect(agent.prompt).toBe("Review the branch.");
+  });
+
+  it("layers the role extension onto an explicit built-in flavor", async () => {
+    mockAgentFiles({
+      "builtin:.kanna/agents/pr/flavors/push-only/AGENT.md": `---
+name: pr@push-only
+description: Push only
+agent_provider: claude
+---
+
+Push only.
+`,
+      "/repo/.kanna/agents/pr/EXTEND.md": "Repo rule: publish only after local CI passes.",
+    });
+
+    const agent = await makeApi().loadAgent("/repo", "pr@push-only");
+    expect(agent.name).toBe("pr@push-only");
+    expect(agent.prompt).toBe("Push only.\n\nRepo rule: publish only after local CI passes.");
+  });
+
   it("uses the repo config flavor map before the built-in default", async () => {
     mockAgentFiles({
       "/repo/.kanna/config.json": JSON.stringify({ flavors: { merge: "git" } }),
@@ -179,18 +215,20 @@ Push only.
 
   it("substitutes repo config vars in the loaded agent body", async () => {
     mockAgentFiles({
-      "/repo/.kanna/config.json": JSON.stringify({ vars: { REVIEW_TEAM: "platform", MERGE_STRATEGY: "squash" } }),
+      "/repo/.kanna/config.json": JSON.stringify({
+        vars: { KANNA_TASK_ID: "config-task", REVIEW_TEAM: "platform", MERGE_STRATEGY: "squash" },
+      }),
       "/repo/.kanna/agents/review/AGENT.md": `---
 name: review
 description: Reviews branches
 agent_provider: claude
 ---
 
-Use $MERGE_STRATEGY for ${"${REVIEW_TEAM}"}. Keep $BASE_REF runtime-bound.
+Use $MERGE_STRATEGY for ${"${REVIEW_TEAM}"}. Keep $BASE_REF and $KANNA_TASK_ID runtime-bound.
 `,
     });
 
     const agent = await makeApi().loadAgent("/repo", "review");
-    expect(agent.prompt).toBe("Use squash for platform. Keep $BASE_REF runtime-bound.");
+    expect(agent.prompt).toBe("Use squash for platform. Keep $BASE_REF and $KANNA_TASK_ID runtime-bound.");
   });
 });
