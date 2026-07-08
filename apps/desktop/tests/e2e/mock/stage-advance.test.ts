@@ -2,8 +2,9 @@
  * Stage advance E2E — durable task semantics.
  *
  * Stage transitions happen on the same pipeline_item: the task keeps its id
- * while each transition FORKS a fresh workspace — a new randomly-named
- * branch and worktree created from the previous branch's committed tip
+ * while each transition FORKS a fresh workspace — a new branch/worktree
+ * named from the durable task id plus workspace counter and created from
+ * the previous branch's committed tip
  * (N worktrees, N branches, one PR; the PR agent renames the final branch).
  * Only committed work crosses a stage boundary; the previous worktree stays
  * on disk until cleanup. Posts and reruns keep the current workspace.
@@ -47,7 +48,7 @@ import { resetDatabase, importTestRepo, cleanupWorktrees } from "../helpers/rese
 import { callVueMethod, execDb, getVueState, queryDb, tauriInvoke } from "../helpers/vue";
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
 import { advanceStageWithShortcut, pressAdvanceStageShortcut } from "../helpers/stageAdvance";
-import { startTestKannaServer, type TestKannaServer } from "../helpers/kannaServer";
+import { resolveAppKannaServer, type AppKannaServer } from "../helpers/kannaServer";
 
 const execFileAsync = promisify(execFile);
 
@@ -328,13 +329,8 @@ describe("stage advance", () => {
     spawnedSessionIds.add(taskId);
   }
 
-  async function withTestKannaServer<T>(run: (server: TestKannaServer) => Promise<T>): Promise<T> {
-    const server = await startTestKannaServer(client, join(testRepoPath, ".kanna"));
-    try {
-      return await run(server);
-    } finally {
-      server.child.kill();
-    }
+  async function withAppKannaServer<T>(run: (server: AppKannaServer) => Promise<T>): Promise<T> {
+    return await run(await resolveAppKannaServer(client));
   }
 
   beforeAll(async () => {
@@ -441,7 +437,7 @@ describe("stage advance", () => {
     });
 
     const taskCountBefore = await countRepoTasks(client, repoId);
-    await withTestKannaServer(async (server) => {
+    await withAppKannaServer(async (server) => {
       const response = await fetch(
         `${server.baseUrl}/v1/tasks/${encodeURIComponent(taskId)}/actions/advance-stage`,
         { method: "POST" },
@@ -457,7 +453,10 @@ describe("stage advance", () => {
       await waitForTaskRow(client, taskId, (candidate) => candidate.stage === "pr");
     });
 
-    const row = await getTaskRow(client, taskId);
+    // The SAME pipeline_item transitions: same id, still open, no
+    // next-stage task created — but the workspace forked: a fresh
+    // counter-suffixed branch cut from the previous branch's committed tip.
+    const row = await waitForTaskRow(client, taskId, (candidate) => candidate.stage === "pr");
     expect(row).toMatchObject({
       id: taskId,
       stage: "pr",
@@ -592,7 +591,7 @@ describe("stage advance", () => {
 
     await selectTask(client, selectedTaskId);
 
-    await withTestKannaServer(async (server) => {
+    await withAppKannaServer(async (server) => {
       const response = await fetch(
         `${server.baseUrl}/v1/tasks/${encodeURIComponent(sourceTaskId)}/actions/complete-stage`,
         {
@@ -642,7 +641,7 @@ describe("stage advance", () => {
     });
     await insertRunningStageRun(taskId, seedRunId, "in progress");
 
-    await withTestKannaServer(async (server) => {
+    await withAppKannaServer(async (server) => {
       const response = await fetch(
         `${server.baseUrl}/v1/tasks/${encodeURIComponent(taskId)}/actions/rerun-stage`,
         { method: "POST" },
@@ -662,7 +661,11 @@ describe("stage advance", () => {
     const row = await getTaskRow(client, taskId);
     expect(row).toMatchObject({ stage: "in progress", closed_at: null, branch });
 
-    const runs = await getStageRuns(client, taskId);
+    const runs = await waitForStageRuns(client, taskId, (candidateRuns) => {
+      const seeded = candidateRuns.find((run) => run.id === seedRunId);
+      const fresh = candidateRuns.find((run) => run.id !== seedRunId && run.stage === "in progress");
+      return seeded?.status === "cancelled" && fresh?.status === "running";
+    });
     const seededRun = runs.find((run) => run.id === seedRunId);
     expect(seededRun?.status).toBe("cancelled");
     const freshRun = runs.find((run) => run.id !== seedRunId && run.stage === "in progress");
@@ -687,7 +690,7 @@ describe("stage advance", () => {
     });
     await insertRunningStageRun(taskId, seedRunId, "review");
 
-    await withTestKannaServer(async (server) => {
+    await withAppKannaServer(async (server) => {
       const response = await fetch(
         `${server.baseUrl}/v1/tasks/${encodeURIComponent(taskId)}/actions/request-revision`,
         {
@@ -742,6 +745,7 @@ describe("stage advance", () => {
     const capturedArgs = await readFile(capturedArgsPath, "utf8");
     expect(capturedArgs).toContain("--yolo\n");
     expect(capturedArgs).toContain("Implement revision:");
+    expect(capturedArgs).toContain(`Original task:\n${reviewPrompt}`);
     expect(capturedArgs).toContain(`Reviewer feedback:\n${revisionPrompt}`);
   });
 });
