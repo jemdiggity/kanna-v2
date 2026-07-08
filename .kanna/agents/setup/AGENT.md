@@ -64,7 +64,7 @@ When the repository is on GitHub, `gh auth status` succeeds, and the user accept
 {
   "$schema": "./schema.json",
   "name": "github-flow",
-  "description": "Implement, review in Kanna, create a draft GitHub PR, then approve into the GitHub merge master.",
+  "description": "Implement, create a draft GitHub PR, review in Kanna, then approve into the GitHub merge master.",
   "stages": [
     {
       "name": "in progress",
@@ -79,29 +79,22 @@ When the repository is on GitHub, `gh auth status` succeeds, and the user accept
       }
     },
     {
-      "name": "review",
-      "description": "Review agent checks quality and test coverage before PR creation",
-      "agent": "review",
-      "prompt": "Review branch $BRANCH for task quality and test coverage against base $BASE_REF. Original task: $TASK_PROMPT.",
-      "policy": { "transition": "auto" }
-    },
-    {
       "name": "pr",
-      "description": "Agent publishes a draft GitHub PR and waits for human review in Kanna",
+      "description": "Agent publishes a draft GitHub PR, then waits for human review in Kanna",
       "agent": "pr",
       "prompt": "Create a PR for the work on branch $BRANCH.",
       "policy": { "transition": "manual" },
       "post": {
         "name": "approve",
         "agent": "approve",
-        "prompt": "Approve this PR after the human review in Kanna. Previous result: $PREV_RESULT"
+        "prompt": "After human approval in Kanna, mark this PR ready and signal the configured merge master. Previous result: $PREV_RESULT"
       }
     }
   ]
 }
 ```
 
-This is equivalent to `pr@draft-pr -> review in-app -> approve post -> merge@github`, with the `pr` and `merge` flavor selections stored in `.kanna/config.json`.
+This composes `pr@draft-pr -> review in Cmd+D -> approve post -> merge@github`, with the `pr` and `merge` flavor selections stored in `.kanna/config.json`. Do not insert an automatic QA `review` stage into this stock preset; if the user wants pre-PR QA, offer it as a separate non-stock pipeline option.
 
 ## Writing Rules
 
