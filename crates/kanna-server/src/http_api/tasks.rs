@@ -82,8 +82,16 @@ pub(super) async fn get_task(
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct UpdateTaskRequest {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_nullable_field")]
     display_name: Option<Option<String>>,
+}
+
+fn deserialize_nullable_field<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    <Option<T> as serde::Deserialize>::deserialize(deserializer).map(Some)
 }
 
 pub(super) async fn update_task(

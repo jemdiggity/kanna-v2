@@ -1333,6 +1333,62 @@ async fn update_task_route_persists_display_name_and_get_list_return_new_title()
 }
 
 #[tokio::test]
+async fn update_task_route_clears_display_name_with_null() {
+    let state = super::test_state_with_seed("desktop-1", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "task-1",
+            "repo-1",
+            "Original prompt",
+            Some("Custom title"),
+            "in progress",
+            "2026-04-18 10:00:00",
+        )
+        .unwrap();
+    });
+    let db_path = state.config.db_path.clone();
+    let app = super::router(state);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::patch("/v1/tasks/task-1")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "displayName": null
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let db = Db::open(&db_path).unwrap();
+    let item = db.get_pipeline_item("task-1").unwrap().unwrap();
+    assert_eq!(item.display_name, None);
+    drop(db);
+
+    let get_response = app
+        .oneshot(
+            Request::get("/v1/tasks/task-1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get_response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(get_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let task: crate::mobile_api::TaskDetail = from_slice(&body).unwrap();
+    assert_eq!(task.title, "Original prompt");
+}
+
+#[tokio::test]
 async fn update_task_route_returns_not_found_for_unknown_task() {
     let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
         db.insert_test_repo("repo-1", "Repo One").unwrap();
