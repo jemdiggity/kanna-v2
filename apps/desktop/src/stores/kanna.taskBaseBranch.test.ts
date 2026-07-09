@@ -972,6 +972,18 @@ describe("kanna store task base branch integration", () => {
           branch,
           startPoint: request.baseRef ?? repo.default_branch,
         });
+        const requestedAgent = request.agent;
+        const resolvedAgent = requestedAgent
+          ? {
+              name: requestedAgent,
+              prompt: `${requestedAgent} agent prompt`,
+              agentProvider: requestedAgent === "setup" ? "codex" : "claude",
+            }
+          : null;
+        const taskPrompt = resolvedAgent
+          ? `${resolvedAgent.prompt}\n\n${request.prompt}`
+          : request.prompt;
+        const taskProvider = request.agentProvider ?? resolvedAgent?.agentProvider ?? "claude";
         const spawnOptions = {
           model: request.model ?? null,
           permissionMode: request.permissionMode ?? null,
@@ -987,18 +999,29 @@ describe("kanna store task base branch integration", () => {
         await mockState.insertPipelineItemMock({} as DbHandle, {
           id: taskId,
           repo_id: repo.id,
-          prompt: request.prompt,
+          prompt: taskPrompt,
           pipeline: request.pipelineName ?? "default",
           stage: request.stage ?? "in progress",
           tags: [],
           branch,
           agent_type: request.agentType ?? "pty",
-          agent_provider: request.agentProvider ?? "claude",
+          agent_provider: taskProvider,
           activity: "idle",
           display_name: request.displayName ?? null,
           base_ref: request.baseRef ?? null,
           agent_session_id: request.resumeSessionId ?? null,
           agent_spawn_options: agentSpawnOptions,
+        });
+        await mockState.insertStageRunMock({} as DbHandle, {
+          task_id: taskId,
+          stage: request.stage ?? "in progress",
+          kind: "main",
+          agent: requestedAgent ?? null,
+          agent_provider: taskProvider,
+          model: request.model ?? null,
+          status: "running",
+          session_id: taskId,
+          cwd: worktreePath,
         });
         const portEnv = claimPortsForTask(taskId, worktreeConfig);
         await mockState.insertWorktreeMock({} as DbHandle, {

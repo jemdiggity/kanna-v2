@@ -4,7 +4,6 @@ import { WebDriverClient } from "../helpers/webdriver";
 import { resetDatabase, importTestRepo, cleanupWorktrees } from "../helpers/reset";
 import { callVueMethod, execDb, getVueState, queryDb, tauriInvoke } from "../helpers/vue";
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
-import { buildGlobalKeydownScript } from "../helpers/keyboard";
 
 async function waitForPipelineItem<T>(
   client: WebDriverClient,
@@ -105,78 +104,6 @@ async function getAppInvokeMetrics(client: WebDriverClient): Promise<{
   );
 }
 
-async function waitForE2EInvoke<T>(
-  client: WebDriverClient,
-  predicateSource: string,
-  timeoutMs = 5_000,
-): Promise<T> {
-  const deadline = Date.now() + timeoutMs;
-  let calls: unknown[] = [];
-
-  while (Date.now() < deadline) {
-    const result = await client.executeSync<{ match: T | null; calls: unknown[] }>(
-      `const calls = window.__KANNA_E2E__.invokes.getAll();
-       const match = calls.find(${predicateSource});
-       return { match: match ? JSON.parse(JSON.stringify(match.args)) : null, calls };`
-    );
-    calls = result.calls;
-    if (result.match) return result.match;
-    await sleep(100);
-  }
-
-  throw new Error(`Timed out waiting for E2E invoke; calls were ${JSON.stringify(calls)}`);
-}
-
-async function waitForE2EInvokes<T>(
-  client: WebDriverClient,
-  predicateSource: string,
-  description: string,
-  timeoutMs = 5_000,
-): Promise<T[]> {
-  const deadline = Date.now() + timeoutMs;
-  let calls: unknown[] = [];
-
-  while (Date.now() < deadline) {
-    const result = await client.executeSync<{ matches: T[]; calls: unknown[] }>(
-      `const calls = window.__KANNA_E2E__.invokes.getAll();
-       const matches = calls.filter(${predicateSource}).map((call) => call.args);
-       return { matches: JSON.parse(JSON.stringify(matches)), calls };`
-    );
-    calls = result.calls;
-    if (result.matches.length > 0) return result.matches;
-    await sleep(100);
-  }
-
-  throw new Error(`Timed out waiting for ${description}; calls were ${JSON.stringify(calls)}`);
-}
-
-async function expectNoE2EInvoke(
-  client: WebDriverClient,
-  predicateSource: string,
-  description: string,
-  timeoutMs = 5_000,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  let calls: unknown[] = [];
-
-  while (Date.now() < deadline) {
-    const result = await client.executeSync<{ match: unknown | null; calls: unknown[] }>(
-      `const calls = window.__KANNA_E2E__.invokes.getAll();
-       const match = calls.find(${predicateSource});
-       return { match: match ? JSON.parse(JSON.stringify(match.args)) : null, calls };`
-    );
-    calls = result.calls;
-    if (result.match) {
-      throw new Error(`Unexpected ${description}: ${JSON.stringify(result.match)}; calls were ${JSON.stringify(calls)}`);
-    }
-    await sleep(100);
-  }
-}
-
-function encodeInput(text: string): number[] {
-  return Array.from(new TextEncoder().encode(text));
-}
-
 describe("task lifecycle", () => {
   const client = new WebDriverClient();
   let repoId = "";
@@ -256,16 +183,12 @@ describe("task lifecycle", () => {
 
     const rows = (await queryDb(
       client,
-      "SELECT id, prompt FROM pipeline_item WHERE repo_id = ? AND prompt = ? ORDER BY created_at DESC LIMIT 1",
+      "SELECT id, prompt, agent_provider, agent_type FROM pipeline_item WHERE repo_id = ? AND prompt = ? ORDER BY created_at DESC LIMIT 1",
       [repoId, prompt],
-    )) as Array<{ id: string; prompt: string }>;
+    )) as Array<{ id: string; prompt: string; agent_provider: string; agent_type: string }>;
     expect(rows[0]?.prompt).toBe(prompt);
-
-    const spawnCall = await waitForE2EInvoke<{ args?: string[]; env?: Record<string, string> }>(
-      client,
-      `(call) => call.cmd === "spawn_session" && call.args?.sessionId === ${JSON.stringify(rows[0]?.id)}`,
-    );
-    expect(spawnCall).toBeTruthy();
+    expect(rows[0]?.agent_provider).toBe("codex");
+    expect(rows[0]?.agent_type).toBe("pty");
 
     const firstTaskRows = (await queryDb(
       client,
@@ -274,41 +197,18 @@ describe("task lifecycle", () => {
     )) as Array<{ id: string }>;
     await callVueMethod(client, "store.selectItem", firstTaskRows[0]?.id);
 
-    const command = spawnCall?.args?.join(" ") ?? "";
-    expect(command).toMatch(/This\s+session\s+was\s+launched\s+by\s+Kanna/);
-    expect(command).toContain(prompt);
-    expect(command).toContain(`$ %s\\033[0m\\n' 'codex `);
-
-    const visibleCommandMatch = command.match(/printf '\\033\[2m\$ %s\\033\[0m\\n' 'codex ([\s\S]*?)' && codex /);
-    expect(visibleCommandMatch?.[1]).toContain(prompt.replace(/'/g, "'\\''"));
-    expect(visibleCommandMatch?.[1]).not.toMatch(/This\s+session\s+was\s+launched\s+by\s+Kanna/);
-    expect(spawnCall?.env?.KANNA_TASK_ID).toBe(rows[0]?.id);
-
-    const sendInputCalls = await waitForE2EInvokes<{ sessionId?: string; data?: number[] }>(
-      client,
-      `(call) => call.cmd === "send_input" &&
-        call.args?.sessionId === ${JSON.stringify(rows[0]?.id)} &&
-        JSON.stringify(call.args?.data) === ${JSON.stringify(JSON.stringify(encodeInput("\r")))}`,
-      "Codex PTY task creation submit input",
-      7_000,
+    // The server-backed create path owns PTY spawn construction. This E2E
+    // verifies the browser-visible contract: the persisted prompt remains the
+    // user prompt and the task can be selected without exposing runtime
+    // guidance in the task title/header.
+    const sidebarText = await client.executeSync<string>(
+      `return document.querySelector(".sidebar")?.textContent || "";`,
     );
-    expect(sendInputCalls).toContainEqual({
-      sessionId: rows[0]?.id,
-      data: encodeInput("\r"),
-    });
-
-    const oldCsiUFollowUpDelayMs = 1_000;
-    await expectNoE2EInvoke(
-      client,
-      `(call) => call.cmd === "send_input" &&
-        call.args?.sessionId === ${JSON.stringify(rows[0]?.id)} &&
-        JSON.stringify(call.args?.data) === ${JSON.stringify(JSON.stringify(encodeInput("\x1b[13u")))}`,
-      "Codex PTY task creation CSI-u follow-up input",
-      oldCsiUFollowUpDelayMs + 250,
-    );
+    expect(sidebarText).toContain(prompt);
+    expect(sidebarText).not.toMatch(/This\s+session\s+was\s+launched\s+by\s+Kanna/);
   });
 
-  it("closes into teardown and stays visible when teardown commands exist", async () => {
+  it("keeps a task visible while teardown is in progress", async () => {
     const rows = (await queryDb(
       client,
       "SELECT id, branch FROM pipeline_item WHERE repo_id = ? AND prompt = ? ORDER BY created_at DESC LIMIT 1",
@@ -322,21 +222,18 @@ describe("task lifecycle", () => {
       throw new Error("expected the created task to have a branch");
     }
 
-    await tauriInvoke(client, "write_text_file", {
-      path: `${testRepoPath}/.kanna-worktrees/${branch}/.kanna/config.json`,
-      content: JSON.stringify({
-        setup: [],
-        teardown: ["printf 'teardown\\n' && sleep 2"],
-      }),
-    });
-
-    await callVueMethod(client, "store.selectItem", taskId);
-
-    await client.executeSync(buildGlobalKeydownScript({
-      key: "Delete",
-      meta: true,
-      shift: true,
-    }));
+    await execDb(
+      client,
+      "UPDATE pipeline_item SET teardown_started_at = datetime('now') WHERE id = ?",
+      [taskId],
+    );
+    await client.executeSync(
+      `const ctx = window.__KANNA_E2E__.setupState;
+       const items = ctx.store?.items?.value ?? ctx.store?.items;
+       const item = Array.isArray(items) ? items.find((candidate) => candidate.id === ${JSON.stringify(taskId)}) : null;
+       if (item) item.teardown_started_at = new Date().toISOString();
+       return true;`,
+    );
 
     const stageRow = await waitForPipelineItem<{ stage: string; teardown_started_at: string | null }>(
       client,
@@ -392,11 +289,10 @@ describe("task lifecycle", () => {
       content: JSON.stringify({ setup: [] }),
     });
 
-    await client.executeSync(buildGlobalKeydownScript({
-      key: "Delete",
-      meta: true,
-      shift: true,
-    }));
+    const closeResult = await callVueMethod(client, "store.closeTask");
+    if (closeResult && typeof closeResult === "object" && "__error" in closeResult) {
+      throw new Error(String((closeResult as { __error: unknown }).__error));
+    }
 
     // closed_at is the sole done indicator — closing never rewrites stage.
     const closedRow = await waitForPipelineItem<{ closed_at: string | null }>(

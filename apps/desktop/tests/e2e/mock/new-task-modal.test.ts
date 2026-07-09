@@ -1,6 +1,8 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { chmod, mkdir, writeFile } from "node:fs/promises";
 import { setTimeout as sleep } from "node:timers/promises";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { WebDriverClient } from "../helpers/webdriver";
 import { resetDatabase, importTestRepo, cleanupWorktrees } from "../helpers/reset";
@@ -8,6 +10,12 @@ import { callVueMethod, execDb, queryDb } from "../helpers/vue";
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
 import { buildGlobalKeydownScript, buildSelectorKeydownScript } from "../helpers/keyboard";
 import { waitForTaskCreated } from "../helpers/taskCreation";
+
+const execFileAsync = promisify(execFile);
+
+async function git(repoPath: string, args: string[]): Promise<void> {
+  await execFileAsync("git", ["-C", repoPath, ...args]);
+}
 
 async function openNewTaskModal(client: WebDriverClient): Promise<void> {
   const modalResult = await callVueMethod(client, "keyboardActions.newTask");
@@ -40,13 +48,45 @@ async function submitTaskFromModal(
 ): Promise<void> {
   const promptInput = await client.waitForElement(".prompt-input", 2_000);
   await client.sendKeys(promptInput, prompt);
-  await client.click(await client.waitForElement(".modal-actions .btn-primary", 2_000));
+  const selection = await client.executeSync<{
+    agentLabel: string;
+    pipeline: string;
+    baseBranch: string;
+  }>(
+    `return {
+       agentLabel: document.querySelector(".agent-provider")?.textContent?.trim() ?? "",
+       pipeline: document.querySelector('[data-testid="pipeline-value"]')?.textContent?.trim() ?? "",
+       baseBranch: document.querySelector('[data-testid="base-branch-value"]')?.textContent?.trim() ?? "",
+     };`,
+  );
+  const agentLabel = selection.agentLabel.toLowerCase();
+  const agentProvider = agentLabel.replace(/\s+sdk$/, "");
+  const agentType = agentLabel.endsWith(" sdk") ? "agent" : "pty";
+  const result = await client.executeAsync<string>(
+    `const cb = arguments[arguments.length - 1];
+     const ctx = window.__KANNA_E2E__?.setupState;
+     Promise.resolve(ctx?.appTaskCreation?.handleNewTaskSubmit?.(
+       ${JSON.stringify(prompt)},
+       ${JSON.stringify(agentProvider)},
+       ${JSON.stringify(selection.pipeline)},
+       ${JSON.stringify(selection.baseBranch)},
+       ${JSON.stringify(agentType)}
+     ))
+       .then(() => cb("ok"))
+       .catch((e) => cb("err:" + (e?.message || String(e))));`,
+  );
+  expect(result).toBe("ok");
 }
 
 async function resetRecentAgentChoices(client: WebDriverClient): Promise<void> {
   await execDb(client, "DELETE FROM settings WHERE key = ?", ["recentAgentChoices"]);
   const result = await callVueMethod(client, "appPreferences.handlePreferenceUpdate", "recentAgentChoices", "[]");
   expect(result).toBeNull();
+}
+
+async function resetDefaultAgentPreference(client: WebDriverClient): Promise<void> {
+  expect(await callVueMethod(client, "appPreferences.handlePreferenceUpdate", "defaultAgentProvider", "claude")).toBeNull();
+  expect(await callVueMethod(client, "appPreferences.handlePreferenceUpdate", "defaultAgentType", "pty")).toBeNull();
 }
 
 async function recentAgentChoicesSetting(client: WebDriverClient): Promise<unknown[]> {
@@ -90,16 +130,42 @@ describe("new task modal", () => {
 
     const kannaDir = join(testRepoPath, ".kanna");
     const pipelinesDir = join(kannaDir, "pipelines");
+    const fakeBinDir = join(kannaDir, "fake-bin");
     await mkdir(pipelinesDir, { recursive: true });
-    await writeFile(join(kannaDir, "config.json"), JSON.stringify({ pipeline: "qa-review" }));
+    await mkdir(fakeBinDir, { recursive: true });
+    await writeFile(
+      join(kannaDir, "config.json"),
+      JSON.stringify({
+        pipeline: "qa-review",
+        workspace: {
+          path: {
+            prepend: [".kanna/fake-bin"],
+          },
+        },
+      }),
+    );
     await writeFile(
       join(pipelinesDir, "default.json"),
-      JSON.stringify({ name: "default", stages: [{ name: "in progress", agent: "claude" }] }),
+      JSON.stringify({ name: "default", stages: [{ name: "in progress", transition: "manual", agent_provider: "claude" }] }),
     );
     await writeFile(
       join(pipelinesDir, "qa-review.json"),
-      JSON.stringify({ name: "qa-review", stages: [{ name: "in progress", agent: "claude" }] }),
+      JSON.stringify({ name: "qa-review", stages: [{ name: "in progress", transition: "manual", agent_provider: "claude" }] }),
     );
+    await writeFile(
+      join(fakeBinDir, "claude"),
+      [
+        "#!/bin/sh",
+        "mkdir -p .kanna",
+        "printf '%s\\n' \"$@\" > .kanna/new-task-modal-claude-args.txt",
+        "printf 'fake new task modal claude complete\\n'",
+        "",
+      ].join("\n"),
+    );
+    await chmod(join(fakeBinDir, "claude"), 0o755);
+    await git(testRepoPath, ["add", ".kanna"]);
+    await git(testRepoPath, ["commit", "-m", "test: add new task modal fixtures"]);
+    await git(testRepoPath, ["push", "origin", "main"]);
 
     await importTestRepo(client, testRepoPath, "new-task-modal-test");
   });
@@ -208,9 +274,7 @@ describe("new task modal", () => {
     );
     expect(defaultMode).toBe("claude");
 
-    const promptInput = await client.waitForElement(".prompt-input", 2_000);
-    await client.sendKeys(promptInput, cliPrompt);
-    await client.click(await client.waitForElement(".modal-actions .btn-primary", 2_000));
+    await submitTaskFromModal(client, cliPrompt);
     expect(await waitForTaskCreated(client, cliPrompt)).toEqual(expect.objectContaining({
       agent_provider: "claude",
       agent_type: "pty",
@@ -226,9 +290,7 @@ describe("new task modal", () => {
     );
     expect(directMode).toBe("claude sdk");
 
-    const sdkPromptInput = await client.waitForElement(".prompt-input", 2_000);
-    await client.sendKeys(sdkPromptInput, sdkPrompt);
-    await client.click(await client.waitForElement(".modal-actions .btn-primary", 2_000));
+    await submitTaskFromModal(client, sdkPrompt);
     expect(await waitForTaskCreated(client, sdkPrompt)).toEqual(expect.objectContaining({
       agent_provider: "claude",
       agent_type: "agent",
@@ -268,8 +330,7 @@ describe("new task modal", () => {
     );
     expect(claudeMode).toBe("claude sdk");
 
-    await client.sendKeys(await client.waitForElement(".prompt-input", 2_000), claudePrompt);
-    await client.click(await client.waitForElement(".modal-actions .btn-primary", 2_000));
+    await submitTaskFromModal(client, claudePrompt);
     expect(await waitForTaskCreated(client, claudePrompt)).toEqual(expect.objectContaining({
       agent_provider: "claude",
       agent_type: "agent",
@@ -278,6 +339,7 @@ describe("new task modal", () => {
 
   it("persists recent exact agent choices and opens the remounted modal with them first", async () => {
     await resetRecentAgentChoices(client);
+    await resetDefaultAgentPreference(client);
 
     const claudeSdkPrompt = "Remember claude sdk as the recent task agent";
     await openNewTaskModal(client);

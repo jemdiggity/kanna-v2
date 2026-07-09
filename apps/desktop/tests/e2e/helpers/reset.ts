@@ -159,9 +159,16 @@ async function importRepoThroughUi(
   }
   await client.clear(nameInput);
   await client.sendKeys(nameInput, name);
-  const submit = await client.waitForElement(IMPORT_REPO_SUBMIT_SELECTOR, 2_000);
+  const submit = await client.waitForElement(IMPORT_REPO_SUBMIT_SELECTOR, 5_000);
   await client.click(submit);
-  await client.waitForNoElement(IMPORT_REPO_MODAL_SELECTOR, IMPORT_REPO_MODAL_DISMISS_TIMEOUT_MS);
+  try {
+    await client.waitForNoElement(IMPORT_REPO_MODAL_SELECTOR, IMPORT_REPO_MODAL_DISMISS_TIMEOUT_MS);
+  } catch (error) {
+    const modalText = await client.executeSync<string>(
+      `return document.querySelector(${JSON.stringify(IMPORT_REPO_MODAL_SELECTOR)})?.textContent || "";`,
+    ).catch(() => "");
+    throw new Error(`${error instanceof Error ? error.message : String(error)}; modal text: ${modalText}`);
+  }
 }
 
 async function waitForImportedRepoInStore(

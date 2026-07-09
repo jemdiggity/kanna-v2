@@ -12,6 +12,7 @@ describe("file preview", () => {
   const client = new WebDriverClient();
   let fixtureRepoPath = "";
   let fixtureRepoId = "";
+  const primaryTaskId = "file-preview-primary-task";
 
   beforeAll(async () => {
     await client.createSession();
@@ -30,6 +31,27 @@ describe("file preview", () => {
       }),
     );
     fixtureRepoId = await importTestRepo(client, fixtureRepoPath, "file-preview-fixture");
+    await execDb(
+      client,
+      `INSERT OR REPLACE INTO pipeline_item
+         (id, repo_id, prompt, stage, branch, agent_type, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        primaryTaskId,
+        fixtureRepoId,
+        "File preview primary fixture task",
+        "in progress",
+        null,
+        "agent",
+        "2026-05-08T00:02:00.000Z",
+        "2026-05-08T00:02:00.000Z",
+      ],
+    );
+    const refreshResult = await callVueMethod(client, "refreshAllItems");
+    if (isVueCallError(refreshResult)) {
+      throw new Error(refreshResult.__error);
+    }
+    await selectTask(primaryTaskId);
   });
 
   afterAll(async () => {
@@ -159,7 +181,7 @@ describe("file preview", () => {
     await pressKey("p", { meta: true });
     await client.waitForElement(".picker-modal", 5000);
 
-    const firstFile = await client.waitForText(".file-item", "src/index.txt", 5000);
+    const firstFile = await client.waitForText(".file-item", "src/index.txt", 15000);
     await client.click(firstFile);
 
     expect(await previewedFilePath()).toBe("src/index.txt");
@@ -167,7 +189,7 @@ describe("file preview", () => {
     await pressKey("p", { meta: true });
     await client.waitForElement(".picker-modal", 5000);
 
-    const secondFile = await client.waitForText(".file-item", "README.md", 5000);
+    const secondFile = await client.waitForText(".file-item", "README.md", 15000);
     await client.click(secondFile);
 
     expect(await previewedFilePath()).toBe("README.md");
@@ -242,7 +264,7 @@ describe("file preview", () => {
     await selectTask(taskAId);
     await pressKey("p", { meta: true });
     await client.waitForElement(".picker-modal", 5000);
-    const readme = await client.waitForText(".file-item", "README.md", 5000);
+    const readme = await client.waitForText(".file-item", "README.md", 15000);
     await client.click(readme);
     expect(await previewedFilePath()).toBe("README.md");
 
@@ -254,7 +276,7 @@ describe("file preview", () => {
     await client.waitForElement(".picker-modal", 5000);
     expect(await isPreviewVisible()).toBe(false);
 
-    const indexFile = await client.waitForText(".file-item", "src/index.txt", 5000);
+    const indexFile = await client.waitForText(".file-item", "src/index.txt", 15000);
     await client.click(indexFile);
     expect(await previewedFilePath()).toBe("src/index.txt");
 

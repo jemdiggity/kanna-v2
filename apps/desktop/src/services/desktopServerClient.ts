@@ -160,6 +160,7 @@ export interface CreateDesktopTaskRequest {
   pipelineName?: string;
   stage?: string;
   baseRef?: string | null;
+  agent?: string;
   agentProvider?: string;
   agentType?: string;
   model?: string;

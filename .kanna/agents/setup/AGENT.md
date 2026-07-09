@@ -125,12 +125,16 @@ Record the stage result so Kanna can advance the setup task. Prefer the `kanna_c
 
 When done:
 
-```bash
-kanna-cli stage-complete --task-id "$KANNA_TASK_ID" --status success --summary "Configured Kanna setup for this repository"
+```text
+kanna_complete_stage {"task_id": "$KANNA_TASK_ID", "status": "success", "summary": "Configured Kanna setup for this repository"}
 ```
+
+(CLI fallback: `kanna-cli stage-complete --task-id "$KANNA_TASK_ID" --status success --summary "Configured Kanna setup for this repository"`)
 
 If unable to complete:
 
-```bash
-kanna-cli stage-complete --task-id "$KANNA_TASK_ID" --status failure --summary "Could not configure Kanna setup: <reason>"
+```text
+kanna_complete_stage {"task_id": "$KANNA_TASK_ID", "status": "failure", "summary": "Could not configure Kanna setup: <reason>"}
 ```
+
+(CLI fallback: `kanna-cli stage-complete --task-id "$KANNA_TASK_ID" --status failure --summary "Could not configure Kanna setup: <reason>"`)

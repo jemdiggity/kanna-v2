@@ -415,8 +415,8 @@ pub fn list_files(path: String) -> Result<Vec<String>, String> {
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().to_string();
 
-            // Always hide .git
-            if name == ".git" {
+            // Always hide git and Kanna's internal worktree storage.
+            if name == ".git" || name == ".kanna-worktrees" {
                 continue;
             }
 

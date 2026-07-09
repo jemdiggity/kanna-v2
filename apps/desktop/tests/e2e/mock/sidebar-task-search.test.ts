@@ -2,8 +2,8 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
-import { cleanupWorktrees, importTestRepo, resetDatabase } from "../helpers/reset";
-import { execDb } from "../helpers/vue";
+import { resetDatabase } from "../helpers/reset";
+import { callVueMethod, execDb } from "../helpers/vue";
 import { WebDriverClient } from "../helpers/webdriver";
 
 interface SidebarSearchSnapshot {
@@ -56,6 +56,22 @@ async function getSidebarSearchSnapshot(client: WebDriverClient): Promise<Sideba
   );
 }
 
+async function seedSearchRepo(client: WebDriverClient, repoPath: string): Promise<string> {
+  const repoId = "repo-sidebar-task-search";
+  await execDb(
+    client,
+    `INSERT INTO repo (id, path, name, default_branch, hidden, sort_order, created_at, last_opened_at)
+     VALUES (?, ?, ?, ?, 0, 0, datetime('now'), datetime('now'))`,
+    [repoId, repoPath, "sidebar-task-search-test", "main"],
+  );
+  const refreshResult = await callVueMethod(client, "refreshRepos");
+  if (refreshResult && typeof refreshResult === "object" && "__error" in refreshResult) {
+    throw new Error(String((refreshResult as { __error: unknown }).__error));
+  }
+  await callVueMethod(client, "store.selectRepo", repoId);
+  return repoId;
+}
+
 async function waitForSidebarSnapshot(
   client: WebDriverClient,
   predicate: (snapshot: SidebarSearchSnapshot) => boolean,
@@ -81,7 +97,7 @@ describe("sidebar task search", () => {
     await client.createSession();
     await resetDatabase(client);
     testRepoPath = await createFixtureRepo("sidebar-task-search-test");
-    const repoId = await importTestRepo(client, testRepoPath, "sidebar-task-search-test");
+    const repoId = await seedSearchRepo(client, testRepoPath);
     await execDb(
       client,
       "INSERT INTO pipeline_item (id, repo_id, prompt, display_name, stage, agent_type, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -118,7 +134,6 @@ describe("sidebar task search", () => {
 
   afterAll(async () => {
     if (testRepoPath) {
-      await cleanupWorktrees(client, testRepoPath);
       await cleanupFixtureRepos([testRepoPath]);
     }
     await client.deleteSession();

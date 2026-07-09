@@ -776,6 +776,7 @@ fn prepare_task_defaults_to_agent_session_for_claude_and_codex() {
                 pipeline_name: None,
                 stage: None,
                 base_ref: None,
+                agent: None,
                 agent_provider: Some(provider.to_string()),
                 agent_type: None,
                 model: Some("model-a".to_string()),
@@ -810,6 +811,70 @@ fn prepare_task_defaults_to_agent_session_for_claude_and_codex() {
 }
 
 #[test]
+fn prepare_task_uses_create_request_agent_selector() {
+    let repo_root = init_git_repo("create-request-agent-selector");
+    let config = test_config("create-request-agent-selector");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+
+    let agent_dir = repo_root.join(".kanna/agents/setup");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("AGENT.md"),
+        "---\nagent_provider: codex\nmodel: gpt-5\npermission_mode: dontAsk\nallowed_tools:\n  - Bash\n---\nsetup agent prompt",
+    )
+    .unwrap();
+
+    let prepared = prepare_task_for_api(
+        &db,
+        &config,
+        CreateTaskRequest {
+            repo_id: "repo-1".to_string(),
+            prompt: "Set up Kanna for this repository.".to_string(),
+            display_name: Some("Set Up Repository".to_string()),
+            pipeline_name: None,
+            stage: None,
+            base_ref: None,
+            agent: Some("setup".to_string()),
+            agent_provider: None,
+            agent_type: Some("pty".to_string()),
+            model: None,
+            permission_mode: None,
+            allowed_tools: None,
+            disallowed_tools: None,
+            max_turns: None,
+            max_budget_usd: None,
+            setup_cmds: None,
+            resume_session_id: None,
+            notify_task_id: None,
+            parent_task_id: None,
+            blocker_task_ids: None,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(prepared.stage_agent.as_deref(), Some("setup"));
+    assert_eq!(prepared.agent_provider, "codex");
+    assert_eq!(prepared.model.as_deref(), Some("gpt-5"));
+    match prepared.session {
+        PreparedSessionSpawn::Pty {
+            args,
+            agent_provider,
+            ..
+        } => {
+            assert_eq!(agent_provider, DaemonAgentProvider::Codex);
+            let command = args.join(" ");
+            assert!(command.contains("setup agent prompt"));
+            assert!(!command.contains("implement agent prompt"));
+        }
+        _ => panic!("expected pty session"),
+    }
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
 fn prepare_task_persists_create_spawn_options_and_custom_setup() {
     let repo_root = init_git_repo("create-spawn-options");
     let config = test_config("create-spawn-options");
@@ -827,6 +892,7 @@ fn prepare_task_persists_create_spawn_options_and_custom_setup() {
             pipeline_name: None,
             stage: None,
             base_ref: None,
+            agent: None,
             agent_provider: Some("claude".to_string()),
             agent_type: Some("pty".to_string()),
             model: Some("opus".to_string()),
@@ -896,6 +962,7 @@ fn prepare_task_for_api_resumes_requested_claude_session() {
             pipeline_name: None,
             stage: None,
             base_ref: None,
+            agent: None,
             agent_provider: Some("claude".to_string()),
             agent_type: Some("pty".to_string()),
             model: None,
@@ -947,6 +1014,7 @@ fn prepare_task_for_api_creates_worktree_without_cargo_config() {
             pipeline_name: None,
             stage: None,
             base_ref: None,
+            agent: None,
             agent_provider: Some("claude".to_string()),
             agent_type: Some("agent".to_string()),
             model: None,
@@ -998,6 +1066,7 @@ fn prepare_codex_agent_uses_resolved_executable_for_headless_spawn() {
             pipeline_name: None,
             stage: None,
             base_ref: None,
+            agent: None,
             agent_provider: Some("codex".to_string()),
             agent_type: None,
             model: None,
@@ -1080,6 +1149,7 @@ fn prepare_headless_agent_uses_worktree_workspace_path_for_executable_resolution
             pipeline_name: None,
             stage: None,
             base_ref: None,
+            agent: None,
             agent_provider: Some("codex".to_string()),
             agent_type: None,
             model: None,
@@ -1136,6 +1206,7 @@ fn prepare_task_defaults_to_pty_session_for_copilot() {
             pipeline_name: None,
             stage: None,
             base_ref: None,
+            agent: None,
             agent_provider: Some("copilot".to_string()),
             agent_type: None,
             model: None,
@@ -1215,6 +1286,7 @@ fn prepare_pty_task_restores_workspace_path_inside_login_shell_command() {
             pipeline_name: None,
             stage: None,
             base_ref: None,
+            agent: None,
             agent_provider: Some("codex".to_string()),
             agent_type: Some("pty".to_string()),
             model: None,
@@ -1281,6 +1353,7 @@ fn prepare_task_stores_parent_task_id_for_subtasks() {
             pipeline_name: None,
             stage: None,
             base_ref: None,
+            agent: None,
             agent_provider: Some("claude".to_string()),
             agent_type: Some("agent".to_string()),
             model: None,
@@ -1326,6 +1399,7 @@ fn prepare_task_rejects_missing_parent_task() {
             pipeline_name: None,
             stage: None,
             base_ref: None,
+            agent: None,
             agent_provider: Some("claude".to_string()),
             agent_type: Some("agent".to_string()),
             model: None,
@@ -1450,6 +1524,7 @@ fn prepare_task_uses_builtin_default_pipeline_when_repo_has_no_local_default_pip
             pipeline_name: None,
             stage: None,
             base_ref: None,
+            agent: None,
             agent_provider: Some("codex".to_string()),
             agent_type: None,
             model: None,
@@ -1560,6 +1635,7 @@ fn prepare_task_uses_default_agent_provider_setting_when_request_omits_provider(
             pipeline_name: None,
             stage: None,
             base_ref: None,
+            agent: None,
             agent_provider: None,
             agent_type: None,
             model: None,
@@ -1594,6 +1670,7 @@ fn prepare_task_uses_default_agent_provider_setting_when_request_omits_provider(
             pipeline_name: None,
             stage: None,
             base_ref: None,
+            agent: None,
             agent_provider: Some("codex".to_string()),
             agent_type: None,
             model: None,

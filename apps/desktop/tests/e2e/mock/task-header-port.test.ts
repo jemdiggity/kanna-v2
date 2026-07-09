@@ -3,7 +3,7 @@ import { mkdir } from "node:fs/promises";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { WebDriverClient } from "../helpers/webdriver";
 import { resetDatabase, importTestRepo } from "../helpers/reset";
-import { callVueMethod, execDb } from "../helpers/vue";
+import { execDb, queryDb } from "../helpers/vue";
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
 
 interface CapturedMouseEvent {
@@ -20,15 +20,6 @@ interface HeaderPortLayoutSnapshot {
 }
 
 const TASK_BRANCH = "task-header-port-wrapping-branch";
-
-function isVueCallError(value: unknown): value is { __error: string } {
-  return Boolean(
-    value &&
-    typeof value === "object" &&
-    "__error" in value &&
-    typeof (value as { __error?: unknown }).__error === "string",
-  );
-}
 
 async function installMousedownCapture(client: WebDriverClient): Promise<void> {
   const result = await client.executeSync<string>(
@@ -167,12 +158,37 @@ describe("task header port badge", () => {
     );
     await mkdir(`${fixtureRepoRoot}/.kanna-worktrees/${TASK_BRANCH}`, { recursive: true });
 
-    const loadResult = await callVueMethod(client, "loadItems");
-    if (isVueCallError(loadResult)) throw new Error(loadResult.__error);
-    const selectResult = await callVueMethod(client, "handleSelectItem", "task-header-port-task");
-    if (isVueCallError(selectResult)) throw new Error(selectResult.__error);
-    const refreshResult = await callVueMethod(client, "refreshAllItems");
-    if (isVueCallError(refreshResult)) throw new Error(refreshResult.__error);
+    const rows = await queryDb(
+      client,
+      "SELECT * FROM pipeline_item WHERE id = ?",
+      ["task-header-port-task"],
+    ) as Array<Record<string, unknown>>;
+    const task = rows[0];
+    if (!task) throw new Error("failed to seed task-header-port-task");
+    const hydrateResult = await client.executeSync<string>(
+      `const task = ${JSON.stringify(task)};
+       const ctx = window.__KANNA_E2E__.setupState;
+       const items = ctx.store?.items?.value ?? ctx.store?.items;
+       if (!Array.isArray(items)) return "items-unavailable";
+       const index = items.findIndex((candidate) => candidate.id === task.id);
+       if (index >= 0) items.splice(index, 1, task);
+       else items.unshift(task);
+       const lastSelected = ctx.store?.lastSelectedItemByRepo?.value ?? ctx.store?.lastSelectedItemByRepo ?? {};
+       const nextLastSelected = { ...lastSelected, [${JSON.stringify(repoId)}]: task.id };
+       if (typeof ctx.store?.$patch === "function") {
+         ctx.store.$patch({
+           selectedRepoId: ${JSON.stringify(repoId)},
+           selectedItemId: task.id,
+           lastSelectedItemByRepo: nextLastSelected,
+         });
+       } else {
+         ctx.store.selectedRepoId = ${JSON.stringify(repoId)};
+         ctx.store.selectedItemId = task.id;
+         ctx.store.lastSelectedItemByRepo = nextLastSelected;
+       }
+       return "ok";`,
+    );
+    if (hydrateResult !== "ok") throw new Error(`failed to hydrate task header fixture: ${hydrateResult}`);
   });
 
   afterAll(async () => {

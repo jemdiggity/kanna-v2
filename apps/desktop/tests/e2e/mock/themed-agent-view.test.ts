@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, realpath, writeFile } from "node:fs/promises";
 import { setTimeout as sleep } from "node:timers/promises";
 import { join } from "node:path";
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
@@ -135,7 +135,7 @@ describe("themed agent view", () => {
     await client.createSession();
     await resetDatabase(client);
     fixtureRepoRoot = await createFixtureRepo("themed-agent-view-test");
-    testRepoPath = fixtureRepoRoot;
+    testRepoPath = await realpath(fixtureRepoRoot);
     await mkdir(join(testRepoPath, ".kanna"), { recursive: true });
     await importTestRepo(client, testRepoPath, "themed-agent-view-test");
     await client.executeSync(installMockKspScript());
