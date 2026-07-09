@@ -24,6 +24,7 @@ export interface RemoteHarnessOptions {
 export interface RemoteHarness {
   client: RelayDesktopClient;
   desktopId: string;
+  lanBaseUrl: string;
   repoRoot: string;
   paths: {
     configPath: string;
@@ -263,6 +264,7 @@ export async function startRemoteHarness(options: RemoteHarnessOptions = {}): Pr
     const harness: RemoteHarness = {
       client,
       desktopId,
+      lanBaseUrl: `http://127.0.0.1:${ports.server}`,
       repoRoot,
       paths: { configPath, daemonDir, dbPath, root },
       ports,
