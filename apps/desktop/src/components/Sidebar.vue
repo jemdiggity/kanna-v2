@@ -135,6 +135,46 @@ function subtreeRows(repoId: string, item: SidebarPipelineItem): SidebarTreeRow[
   return sidebarSubtreeRows(sidebarOrderingOptions(repoId), item);
 }
 
+function renderedTaskIds(repoId: string): Set<string> {
+  const ids = new Set<string>();
+  const roots = [
+    ...sortedPinned(repoId),
+    ...groupedByStage(repoId).flatMap((group) => group.items),
+    ...sortedBlocked(repoId),
+  ];
+  for (const root of roots) {
+    for (const row of subtreeRows(repoId, root)) {
+      ids.add(row.item.id);
+    }
+  }
+  return ids;
+}
+
+function fallbackItems(repoId: string): SidebarPipelineItem[] {
+  const rendered = renderedTaskIds(repoId);
+  return itemsForRepo(repoId).filter((item) => !rendered.has(item.id));
+}
+
+function fallbackGroups(repoId: string): StageGroup[] {
+  const groups = new Map<string, SidebarPipelineItem[]>();
+  for (const item of fallbackItems(repoId)) {
+    if (!groups.has(item.stage)) groups.set(item.stage, []);
+    groups.get(item.stage)!.push(item);
+  }
+
+  const order = store.getStageOrder(repoId);
+  return [...groups.entries()]
+    .sort(([left], [right]) => {
+      const leftIndex = order.indexOf(left);
+      const rightIndex = order.indexOf(right);
+      const leftOrder = leftIndex === -1 ? order.length : leftIndex;
+      const rightOrder = rightIndex === -1 ? order.length : rightIndex;
+      if (leftOrder !== rightOrder) return leftOrder - rightOrder;
+      return left.localeCompare(right);
+    })
+    .map(([stageName, items]) => ({ stageName, items }));
+}
+
 function subtaskIndentStyle(depth: number): Record<string, string> {
   return depth > 0 ? { paddingLeft: `${14 + depth * 16}px` } : {};
 }
@@ -764,6 +804,45 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
             </template>
           </div>
 
+          <!-- Fallback for invalid parent graphs: keep every open task visible. -->
+          <template v-for="group in fallbackGroups(repo.id)" :key="`fallback-${group.stageName}`">
+            <div class="section-label" :class="{ 'filtered-label': hasActiveSearch }">{{ group.stageName }}</div>
+            <div class="type-zone">
+              <div
+                v-for="item in group.items"
+                :key="item.id"
+                class="pipeline-item"
+                :data-task-id="item.id"
+                :class="{ selected: selectedItemId === item.id, 'drop-target': dropParentId === item.id }"
+                @click="handleSelectItem(item)"
+                @dblclick.stop="startRename(item)"
+              >
+                <input
+                  v-if="editingItemId === item.id"
+                  class="rename-input"
+                  v-model="editingValue"
+                  v-bind="macOsTextInputAttrs"
+                  @keydown.enter="commitRename(item.id)"
+                  @keydown.escape="cancelRename()"
+                  @blur="commitRename(item.id)"
+                  @click.stop
+                />
+                <span
+                  v-else
+                  class="item-title"
+                  :style="{
+                    fontWeight: item.activity === 'unread' ? 'bold' : 'normal',
+                    fontStyle: item.activity === 'working' ? 'italic' : 'normal',
+                    textDecoration: isTaskTearingDown(item) ? 'line-through' : 'none',
+                    opacity: isTaskTearingDown(item) ? 0.5 : 1,
+                  }"
+                  :title="itemTooltip(item)"
+                >
+                  <span v-if="isRemoteTask(item)" class="remote-task-marker" :aria-label="t('sidebar.remoteTaskTooltip')">&lt; </span>{{ itemTitle(item) }}</span>
+              </div>
+            </div>
+          </template>
+
           <div v-if="itemsForRepo(repo.id).length === 0" class="no-items">
             {{ hasActiveSearch
               ? $t('sidebar.noTasksMatching', { query: trimmedSearchQuery })
@@ -817,11 +896,11 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
 
 .sidebar.is-filtering {
   background: var(--kn-bg-sidebar);
-  border-right-color: var(--kn-accent);
+  border-right-color: var(--kn-warning);
 }
 
 .sidebar.is-filtering .sidebar-content {
-  box-shadow: inset 0 1px 0 var(--kn-bg-accent-subtle);
+  box-shadow: inset 0 1px 0 var(--kn-warning-bg);
 }
 
 .sidebar.is-filtering .repo-header {
@@ -829,11 +908,11 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
 }
 
 .sidebar.is-filtering .repo-count {
-  color: var(--kn-accent);
+  color: var(--kn-warning);
 }
 
 .sidebar.is-filtering .search-input {
-  border-color: var(--kn-accent);
+  border-color: var(--kn-warning);
   background: var(--kn-bg-input);
 }
 
@@ -908,6 +987,22 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
 
 .sidebar.is-filtering .repo-header {
   cursor: pointer;
+}
+
+.sidebar.is-filtering .repo-header.selected {
+  box-shadow:
+    inset 0 1px 0 var(--kn-warning),
+    inset 0 -1px 0 var(--kn-warning);
+}
+
+.sidebar.is-filtering .repo-header.contains-selected-task {
+  box-shadow:
+    inset 0 1px 0 var(--kn-warning),
+    inset 0 -1px 0 var(--kn-warning);
+}
+
+.sidebar.is-filtering .repo-drag-over .repo-header {
+  box-shadow: inset 0 2px 0 var(--kn-warning);
 }
 
 .collapse-btn {
@@ -1043,6 +1138,14 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
 .pipeline-item.drop-target {
   background: var(--kn-bg-selected);
   outline: 1px dashed var(--kn-accent);
+}
+
+.sidebar.is-filtering .pipeline-item.selected {
+  outline-color: var(--kn-warning);
+}
+
+.sidebar.is-filtering .pipeline-item.drop-target {
+  outline-color: var(--kn-warning);
 }
 
 .item-title {
