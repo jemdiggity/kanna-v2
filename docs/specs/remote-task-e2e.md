@@ -85,13 +85,18 @@ Reuse existing config surfaces only: `server.toml` (`relay_url`,
 
 Status key: ✅ landed · ⬜ v2 scope.
 
-1. ⬜ **Cloud pairing** — desktop calls `createPairingCode` (functions
-   emulator) → `pairingCode`/`desktopId`/`desktopSecret`/`desktopClaimToken`
-   issued and `pairingCodes/{id}` + `pendingDesktops/{desktopId}` written;
-   phone claims the code; desktop appears under `users/{uid}/desktops`;
-   desktop persists `DesktopIdentity` and re-authenticates to the relay with
-   `desktop_id`+`desktop_secret` (`create_cloud_pairing_session` path in
-   `crates/kanna-server/src/pairing.rs`).
+1. ⬜ **Cloud credential provisioning** — the `createPairingCode` Cloud
+   Function bootstrap is retired and must not be redeployed (see
+   `docs/2026-06-12-relay-desktop-credential-bootstrap.md`; Kanna deploys no
+   Cloud Functions). The current flow: desktop persists
+   `desktop_id`+`desktop_secret` in `desktop-identity.json`/`server.toml`;
+   the signed-in desktop app (`desktopCloudPublisher.ts`) upserts the SHA-256
+   `desktopSecretHash` onto `users/{uid}/desktops` per `firestore.rules` (the
+   plain secret never enters Firestore); the relay verifies the presented
+   secret against the hash (timing-safe). E2E: provision the doc the way the
+   publisher does (as signed-in Buffy), assert relay auth succeeds with the
+   right secret and rejects a wrong secret and a `revokedAt` doc. Pairing
+   codes remain LAN/local-trust only (`create_pairing_session`).
 2. ⬜ **Auth matrix (full stack)** — desktop via `device_token` AND via
    `desktop_id`+`desktop_secret`; phone via Firebase `id_token`; bad/revoked
    creds rejected — asserted through the running kanna-server↔relay stack
