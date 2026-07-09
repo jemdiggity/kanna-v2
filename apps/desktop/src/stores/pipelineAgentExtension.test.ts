@@ -213,7 +213,10 @@ Push only.
     expect(agent.prompt).toBe("Review the branch.");
   });
 
-  it("substitutes repo config vars in the loaded agent body", async () => {
+  it("leaves repo config vars in the loaded agent body for server-side substitution", async () => {
+    // Config-var substitution happens in a single pass server-side
+    // (kanna-server read_agent_definition/build_stage_prompt); the frontend
+    // loader must return the raw body so vars are never expanded twice.
     mockAgentFiles({
       "/repo/.kanna/config.json": JSON.stringify({
         vars: { KANNA_TASK_ID: "config-task", REVIEW_TEAM: "platform", MERGE_STRATEGY: "squash" },
@@ -229,6 +232,8 @@ Use $MERGE_STRATEGY for ${"${REVIEW_TEAM}"}. Keep $BASE_REF and $KANNA_TASK_ID r
     });
 
     const agent = await makeApi().loadAgent("/repo", "review");
-    expect(agent.prompt).toBe("Use squash for platform. Keep $BASE_REF and $KANNA_TASK_ID runtime-bound.");
+    expect(agent.prompt).toBe(
+      `Use $MERGE_STRATEGY for ${"${REVIEW_TEAM}"}. Keep $BASE_REF and $KANNA_TASK_ID runtime-bound.`,
+    );
   });
 });
