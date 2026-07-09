@@ -1,4 +1,8 @@
-use super::definitions::{read_agent_definition, PipelineStage, PipelineStageTransition};
+use std::collections::HashMap;
+
+use super::definitions::{
+    read_agent_definition, read_repo_config, PipelineStage, PipelineStageTransition,
+};
 
 pub(super) fn build_target_stage_prompt(
     repo_path: &str,
@@ -11,12 +15,14 @@ pub(super) fn build_target_stage_prompt(
 ) -> Result<String, String> {
     let source_worktree =
         source_worktree_branch.map(|branch| format!("{repo_path}/.kanna-worktrees/{branch}"));
+    let repo_vars = read_repo_config(repo_path)?.vars;
     let context = PromptContext {
         task_prompt: Some(task_prompt),
         prev_result,
         branch,
         base_ref,
         source_worktree: source_worktree.as_deref(),
+        vars: repo_vars.as_ref(),
     };
     if let Some(agent_name) = stage.agent.as_deref() {
         let agent = read_agent_definition(repo_path, agent_name)?;
@@ -41,6 +47,92 @@ pub(super) struct PromptContext<'a> {
     pub(super) branch: Option<&'a str>,
     pub(super) base_ref: Option<&'a str>,
     pub(super) source_worktree: Option<&'a str>,
+    /// Repo-declared config vars (`.kanna/config.json` `vars`), substituted
+    /// in the same single pass as the runtime bindings below.
+    pub(super) vars: Option<&'a HashMap<String, String>>,
+}
+
+/// Names bound by the engine (or, for KANNA_TASK_ID, the session
+/// environment). They win over repo config vars and can never be shadowed.
+const RESERVED_PROMPT_VARS: &[&str] = &[
+    "BASE_REF",
+    "BRANCH",
+    "KANNA_TASK_ID",
+    "PREV_RESULT",
+    "SOURCE_WORKTREE",
+    "TASK_PROMPT",
+];
+
+/// Resolve one `$NAME` / `${NAME}` token. `None` means "leave the token
+/// literal in the output" (unknown names, and KANNA_TASK_ID which the
+/// session resolves from its environment at runtime).
+fn prompt_var_value<'a>(name: &str, context: &'a PromptContext<'_>) -> Option<&'a str> {
+    match name {
+        "TASK_PROMPT" => Some(context.task_prompt.unwrap_or("")),
+        "PREV_RESULT" => Some(context.prev_result.unwrap_or("")),
+        "BRANCH" => Some(context.branch.unwrap_or("")),
+        "BASE_REF" => Some(context.base_ref.unwrap_or("")),
+        "SOURCE_WORKTREE" => Some(context.source_worktree.unwrap_or("")),
+        _ if RESERVED_PROMPT_VARS.contains(&name) => None,
+        _ => context
+            .vars
+            .and_then(|vars| vars.get(name))
+            .map(String::as_str),
+    }
+}
+
+/// Single left-to-right substitution pass over the assembled prompt.
+/// Spliced values are appended to the output and never rescanned, so a
+/// config var value containing a reserved token (e.g. `$TASK_PROMPT`)
+/// stays literal instead of being expanded a second time.
+fn substitute_prompt_vars(template: &str, context: &PromptContext<'_>) -> String {
+    let chars: Vec<char> = template.chars().collect();
+    let mut out = String::with_capacity(template.len());
+    let mut index = 0;
+
+    while index < chars.len() {
+        if chars[index] != '$' {
+            out.push(chars[index]);
+            index += 1;
+            continue;
+        }
+
+        // ${NAME}
+        if chars.get(index + 1) == Some(&'{') {
+            if let Some(end) = chars[index + 2..].iter().position(|ch| *ch == '}') {
+                let name: String = chars[index + 2..index + 2 + end].iter().collect();
+                if let Some(value) = prompt_var_value(&name, context) {
+                    out.push_str(value);
+                    index += end + 3;
+                    continue;
+                }
+            }
+            out.push('$');
+            index += 1;
+            continue;
+        }
+
+        // $NAME — longest run of [A-Za-z0-9_]
+        let mut end = index + 1;
+        while end < chars.len() && (chars[end].is_ascii_alphanumeric() || chars[end] == '_') {
+            end += 1;
+        }
+        if end == index + 1 {
+            out.push('$');
+            index += 1;
+            continue;
+        }
+        let name: String = chars[index + 1..end].iter().collect();
+        if let Some(value) = prompt_var_value(&name, context) {
+            out.push_str(value);
+            index = end;
+        } else {
+            out.push('$');
+            index += 1;
+        }
+    }
+
+    out
 }
 
 /// Composed revision context: what the task originally was plus what the
@@ -99,11 +191,5 @@ pub(super) fn build_stage_prompt(
         }
     }
 
-    parts
-        .join("\n\n")
-        .replace("$TASK_PROMPT", context.task_prompt.unwrap_or(""))
-        .replace("$PREV_RESULT", context.prev_result.unwrap_or(""))
-        .replace("$BRANCH", context.branch.unwrap_or(""))
-        .replace("$BASE_REF", context.base_ref.unwrap_or(""))
-        .replace("$SOURCE_WORKTREE", context.source_worktree.unwrap_or(""))
+    substitute_prompt_vars(&parts.join("\n\n"), context)
 }

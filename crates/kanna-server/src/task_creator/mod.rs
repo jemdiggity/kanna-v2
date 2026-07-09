@@ -147,6 +147,7 @@ pub(crate) fn prepare_rerun_stage_for_api(
         .filter(|base_ref| base_ref.starts_with("task-"))
         .map(|base_ref| format!("{}/.kanna-worktrees/{base_ref}", repo.path));
     let prev_result = stages::previous_stage_result(db, task_id, &source_task)?;
+    let repo_vars = definitions::read_repo_config(&repo.path)?.vars;
     let prompt = build_stage_prompt(
         agent
             .as_ref()
@@ -159,6 +160,7 @@ pub(crate) fn prepare_rerun_stage_for_api(
             branch: Some(branch),
             base_ref: source_task.base_ref.as_deref(),
             source_worktree: source_worktree.as_deref(),
+            vars: repo_vars.as_ref(),
         },
     );
     let provider = resolve_agent_provider(
@@ -1025,6 +1027,7 @@ pub(crate) fn prepare_start_dormant_task_for_api(
         .or_else(|| item.base_ref.clone())
         .or_else(|| fetch_start_point(&repo.path, repo.default_branch.as_deref()));
 
+    let repo_vars = definitions::read_repo_config(&repo.path)?.vars;
     let final_prompt = build_stage_prompt(
         agent
             .as_ref()
@@ -1037,6 +1040,7 @@ pub(crate) fn prepare_start_dormant_task_for_api(
             branch: base_ref.as_deref(),
             base_ref: base_ref.as_deref(),
             source_worktree: None,
+            vars: repo_vars.as_ref(),
         },
     );
 
@@ -1366,6 +1370,7 @@ fn resolve_task_spawn(
     let final_prompt = if request.stage_override.is_some() {
         original_prompt.clone()
     } else {
+        let repo_vars = definitions::read_repo_config(&repo.path)?.vars;
         build_stage_prompt(
             agent
                 .as_ref()
@@ -1381,6 +1386,7 @@ fn resolve_task_spawn(
                     .as_deref()
                     .or(request.base_ref.as_deref()),
                 source_worktree: None,
+                vars: repo_vars.as_ref(),
             },
         )
     };

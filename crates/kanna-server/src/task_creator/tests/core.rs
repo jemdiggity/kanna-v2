@@ -375,16 +375,94 @@ fn read_agent_definition_substitutes_repo_config_vars_in_agent_body() {
     )
     .unwrap();
 
+    // The agent body is returned raw: config-var substitution happens in the
+    // single build_stage_prompt pass, never at definition-read time.
     let definition =
         super::super::definitions::read_agent_definition(&repo_root.to_string_lossy(), "reviewer")
             .unwrap();
 
     assert_eq!(
         definition.prompt,
-        "Use squash for platform. Keep $BASE_REF and $KANNA_TASK_ID runtime-bound."
+        "Use $MERGE_STRATEGY for ${REVIEW_TEAM}. Keep $BASE_REF and $KANNA_TASK_ID runtime-bound."
+    );
+
+    let vars: std::collections::HashMap<String, String> = [
+        ("KANNA_TASK_ID", "config-task"),
+        ("MERGE_STRATEGY", "squash"),
+        ("REVIEW_TEAM", "platform"),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v.to_string()))
+    .collect();
+    let prompt = build_stage_prompt(
+        &definition.prompt,
+        None,
+        &PromptContext {
+            task_prompt: None,
+            prev_result: None,
+            branch: None,
+            base_ref: Some("origin/main"),
+            source_worktree: None,
+            vars: Some(&vars),
+        },
+    );
+
+    // Config vars substitute ($NAME and ${NAME} forms); reserved names bind
+    // to runtime context ($BASE_REF) or stay literal for the session
+    // environment ($KANNA_TASK_ID) — a config var can never shadow them.
+    assert_eq!(
+        prompt,
+        "Use squash for platform. Keep origin/main and $KANNA_TASK_ID runtime-bound."
     );
 
     let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
+fn build_stage_prompt_does_not_reexpand_reserved_tokens_in_var_values() {
+    let vars: std::collections::HashMap<String, String> = [(
+        "NOTE".to_string(),
+        "See $TASK_PROMPT for full context.".to_string(),
+    )]
+    .into_iter()
+    .collect();
+    let prompt = build_stage_prompt(
+        "$NOTE\n\nTask: $TASK_PROMPT",
+        None,
+        &PromptContext {
+            task_prompt: Some("actual task prompt"),
+            prev_result: None,
+            branch: None,
+            base_ref: None,
+            source_worktree: None,
+            vars: Some(&vars),
+        },
+    );
+
+    // The spliced var value is never rescanned: its $TASK_PROMPT stays
+    // literal while the template's own $TASK_PROMPT binds normally.
+    assert_eq!(
+        prompt,
+        "See $TASK_PROMPT for full context.\n\nTask: actual task prompt"
+    );
+}
+
+#[test]
+fn build_stage_prompt_leaves_unknown_vars_literal() {
+    let prompt = build_stage_prompt(
+        "Ping $UNKNOWN_NAME and ${ALSO_UNKNOWN}.",
+        None,
+        &PromptContext {
+            task_prompt: None,
+            prev_result: None,
+            branch: None,
+            base_ref: None,
+            source_worktree: None,
+            vars: None,
+        },
+    );
+
+    assert_eq!(prompt, "Ping $UNKNOWN_NAME and ${ALSO_UNKNOWN}.");
 }
 
 #[test]
@@ -398,6 +476,7 @@ fn build_stage_prompt_replaces_base_ref() {
             branch: Some("task-source"),
             base_ref: Some("origin/main"),
             source_worktree: Some("/tmp/repo/.kanna-worktrees/task-source"),
+            vars: None,
         },
     );
 

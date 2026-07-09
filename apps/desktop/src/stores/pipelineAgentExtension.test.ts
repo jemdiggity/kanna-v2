@@ -215,8 +215,8 @@ Push only.
 
   it("leaves repo config vars in the loaded agent body for server-side substitution", async () => {
     // Config-var substitution happens in a single pass server-side
-    // (kanna-server read_agent_definition/build_stage_prompt); the frontend
-    // loader must return the raw body so vars are never expanded twice.
+    // (kanna-server build_stage_prompt); the frontend loader must return
+    // the raw body so vars are never expanded twice.
     mockAgentFiles({
       "/repo/.kanna/config.json": JSON.stringify({
         vars: { KANNA_TASK_ID: "config-task", REVIEW_TEAM: "platform", MERGE_STRATEGY: "squash" },
