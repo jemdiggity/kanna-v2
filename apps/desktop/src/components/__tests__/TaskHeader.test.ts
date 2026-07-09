@@ -100,6 +100,24 @@ describe("TaskHeader", () => {
     ).toEqual([":1421", ":3001"]);
   });
 
+  it("shows the source environment variable in each port badge tooltip", async () => {
+    const { default: TaskHeader } = await import("../TaskHeader.vue");
+    const wrapper = mount(TaskHeader, {
+      props: {
+        item: makeItem(),
+      },
+      global: {
+        mocks: {
+          $t: (key: string, fallback?: string) => fallback ?? key,
+        },
+      },
+    });
+
+    expect(
+      wrapper.findAll(".meta-item.port").map((node) => node.attributes("title")),
+    ).toEqual(["KANNA_DEV_PORT=1421", "API_PORT=3001"]);
+  });
+
   it("uses the full task prompt as the truncated title tooltip", async () => {
     const { default: TaskHeader } = await import("../TaskHeader.vue");
     const prompt = "Add a tooltip to task titles so long prompts remain inspectable when the visible title is truncated";
