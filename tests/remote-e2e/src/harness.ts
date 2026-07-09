@@ -13,9 +13,18 @@ import { BUFFY_UID, waitForBuffyIdToken } from "./firebaseAuth";
 import { createNodeRelayDesktopClient } from "./nodeRelayClient";
 import { findFreePort, runCommand, startManagedProcess, waitForFile, waitForHttpOk, type ManagedProcess } from "./processes";
 import { createHarnessDatabase } from "./sqlite";
+import {
+  fetchStagingBuffyIdToken,
+  stagingServerEnvironment,
+  stagingServerTomlLines,
+  type StagingBuffyCredentials
+} from "./staging";
 import type { RelayDesktopClient } from "../../../apps/mobile/src/lib/transports/relayClient";
 
+export type RemoteHarnessEnvironment = "dev" | "staging";
+
 export interface RemoteHarnessOptions {
+  environment?: RemoteHarnessEnvironment;
   repoRoot?: string;
   keepArtifacts?: boolean;
   timeoutMs?: number;
@@ -40,6 +49,8 @@ export interface RemoteHarness {
     server: number;
     ui: number;
   };
+  relayUrl: string;
+  getIdToken(): Promise<string>;
   startRelay(): Promise<void>;
   stopRelay(): Promise<void>;
   waitForDesktop(): Promise<void>;
@@ -114,15 +125,17 @@ async function waitForRelayDesktop(input: {
   throw new Error(`timed out waiting for relay desktop ${input.desktopId}: ${lastError}`);
 }
 
-async function buildBinaries(repoRoot: string): Promise<void> {
-  await runCommand("pnpm", ["--dir", "services/firebase-functions", "build"], {
-    cwd: repoRoot,
-    env: process.env
-  });
-  await runCommand("pnpm", ["--dir", "services/relay", "build"], {
-    cwd: repoRoot,
-    env: process.env
-  });
+async function buildBinaries(repoRoot: string, environment: RemoteHarnessEnvironment): Promise<void> {
+  if (environment === "dev") {
+    await runCommand("pnpm", ["--dir", "services/firebase-functions", "build"], {
+      cwd: repoRoot,
+      env: process.env
+    });
+    await runCommand("pnpm", ["--dir", "services/relay", "build"], {
+      cwd: repoRoot,
+      env: process.env
+    });
+  }
   await runCommand("cargo", ["build", "-p", "kanna-server", "-p", "kanna-daemon"], {
     cwd: repoRoot,
     env: process.env
@@ -134,44 +147,65 @@ async function writeServerConfig(input: {
   daemonDir: string;
   dbPath: string;
   desktopId: string;
+  environment: RemoteHarnessEnvironment;
+  stagingCredentials?: StagingBuffyCredentials;
   ports: RemoteHarness["ports"];
 }): Promise<void> {
   await mkdir(dirname(input.configPath), { recursive: true });
+  const lines = input.environment === "staging"
+    ? stagingServerTomlLines({
+        daemonDir: input.daemonDir,
+        dbPath: input.dbPath,
+        desktopId: input.desktopId,
+        deviceToken: input.stagingCredentials?.deviceToken ?? "",
+        lanPort: input.ports.server,
+        pairingStorePath: join(input.daemonDir, "pairings.json")
+      })
+    : [
+        `relay_url = "ws://127.0.0.1:${input.ports.relay}"`,
+        `device_token = "${DEVICE_TOKEN}"`,
+        `firebase_project_id = "kanna-local"`,
+        `firebase_auth_emulator_url = "http://127.0.0.1:${input.ports.auth}"`,
+        `firebase_firestore_emulator_host = "127.0.0.1:${input.ports.firestore}"`,
+        `daemon_dir = "${shellTomlString(input.daemonDir)}"`,
+        `db_path = "${shellTomlString(input.dbPath)}"`,
+        `desktop_id = "${input.desktopId}"`,
+        `desktop_name = "${DESKTOP_NAME}"`,
+        `server_version = "remote-e2e"`,
+        `lan_host = "127.0.0.1"`,
+        `lan_port = ${input.ports.server}`,
+        `pairing_store_path = "${shellTomlString(join(input.daemonDir, "pairings.json"))}"`
+      ];
   await writeFile(
     input.configPath,
-    [
-      `relay_url = "ws://127.0.0.1:${input.ports.relay}"`,
-      `device_token = "${DEVICE_TOKEN}"`,
-      `firebase_project_id = "kanna-local"`,
-      `firebase_auth_emulator_url = "http://127.0.0.1:${input.ports.auth}"`,
-      `firebase_firestore_emulator_host = "127.0.0.1:${input.ports.firestore}"`,
-      `daemon_dir = "${shellTomlString(input.daemonDir)}"`,
-      `db_path = "${shellTomlString(input.dbPath)}"`,
-      `desktop_id = "${input.desktopId}"`,
-      `desktop_name = "${DESKTOP_NAME}"`,
-      `server_version = "remote-e2e"`,
-      `lan_host = "127.0.0.1"`,
-      `lan_port = ${input.ports.server}`,
-      `pairing_store_path = "${shellTomlString(join(input.daemonDir, "pairings.json"))}"`
-    ].join("\n")
+    lines.join("\n")
   );
 }
 
 export async function startRemoteHarness(options: RemoteHarnessOptions = {}): Promise<RemoteHarness> {
+  const environment = options.environment ?? "dev";
   const repoRoot = options.repoRoot ?? defaultRepoRoot();
   const timeoutMs = options.timeoutMs ?? 60_000;
   const root = await mkdtemp(join(tmpdir(), "kanna-remote-e2e-"));
   const ports = await allocatePorts();
-  const desktopId = `remote-e2e-${process.pid}-${Date.now()}`;
+  const staging = environment === "staging" ? stagingServerEnvironment(process.env) : null;
+  if (staging && !staging.ok) {
+    throw new Error(`staging remote harness missing credentials: ${staging.missing.join(", ")}`);
+  }
+  const desktopId = staging?.desktopId ?? `remote-e2e-${process.pid}-${Date.now()}`;
   const configPath = join(root, "server.toml");
   const daemonDir = join(root, "daemon");
   const dbPath = join(root, "kanna.sqlite3");
   const processes: ManagedProcess[] = [];
   let relayProcess: ManagedProcess | null = null;
   let client: RelayDesktopClient | null = null;
+  let idToken: string | null = null;
   let stopped = false;
 
   const startRelay = async () => {
+    if (environment === "staging") {
+      return;
+    }
     if (relayProcess?.process.exitCode === null && relayProcess.process.signalCode === null) {
       return;
     }
@@ -218,21 +252,36 @@ export async function startRemoteHarness(options: RemoteHarnessOptions = {}): Pr
 
   try {
     await mkdir(daemonDir, { recursive: true });
-    await buildBinaries(repoRoot);
+    await buildBinaries(repoRoot, environment);
     await createHarnessDatabase(repoRoot, dbPath);
-    await writeServerConfig({ configPath, daemonDir, dbPath, desktopId, ports });
+    await writeServerConfig({
+      configPath,
+      daemonDir,
+      dbPath,
+      desktopId,
+      environment,
+      stagingCredentials: staging?.credentials,
+      ports
+    });
 
-    const firebaseConfigPath = writeFirebaseEmulatorConfig(repoRoot, firebasePortInput(ports));
-    processes.push(startManagedProcess(
-      "firebase",
-      "pnpm",
-      buildFirebaseEmulatorArgs(firebaseConfigPath, []),
-      {
-        cwd: repoRoot,
-        env: buildFirebaseCommandEnv(repoRoot, process.env)
-      }
-    ));
-    const idToken = await waitForBuffyIdToken(ports.auth, timeoutMs);
+    if (environment === "dev") {
+      const firebaseConfigPath = writeFirebaseEmulatorConfig(repoRoot, firebasePortInput(ports));
+      processes.push(startManagedProcess(
+        "firebase",
+        "pnpm",
+        buildFirebaseEmulatorArgs(firebaseConfigPath, []),
+        {
+          cwd: repoRoot,
+          env: buildFirebaseCommandEnv(repoRoot, process.env)
+        }
+      ));
+      idToken = await waitForBuffyIdToken(ports.auth, timeoutMs);
+    } else if (staging) {
+      idToken = await fetchStagingBuffyIdToken({
+        repoRoot,
+        credentials: staging.credentials
+      });
+    }
 
     await startRelay();
 
@@ -250,13 +299,22 @@ export async function startRemoteHarness(options: RemoteHarnessOptions = {}): Pr
       env: {
         ...process.env,
         KANNA_SERVER_CONFIG: configPath,
+        ...(environment === "staging"
+          ? {
+              KANNA_CLOUD_ENV: "staging",
+              KANNA_FIREBASE_PROJECT_ID: "kanna-staging",
+              KANNA_RELAY_URL: "wss://relay-staging.kanna.build"
+            }
+          : {}),
+        KANNA_E2E_TEST_SQL: "1",
         RUST_LOG: process.env.RUST_LOG ?? "info"
       }
     }));
     await waitForHttpOk(`http://127.0.0.1:${ports.server}/v1/status`, timeoutMs);
 
+    const relayUrl = environment === "staging" ? "wss://relay-staging.kanna.build" : `ws://127.0.0.1:${ports.relay}`;
     client = createNodeRelayDesktopClient({
-      relayUrl: `ws://127.0.0.1:${ports.relay}`,
+      relayUrl,
       getIdToken: async () => idToken
     });
     await waitForRelayDesktop({ client, desktopId, timeoutMs });
@@ -268,6 +326,13 @@ export async function startRemoteHarness(options: RemoteHarnessOptions = {}): Pr
       repoRoot,
       paths: { configPath, daemonDir, dbPath, root },
       ports,
+      relayUrl,
+      getIdToken: async () => {
+        if (!idToken) {
+          throw new Error("remote harness id token is not available");
+        }
+        return idToken;
+      },
       startRelay,
       stopRelay,
       waitForDesktop: () => waitForRelayDesktop({ client: client!, desktopId, timeoutMs }),

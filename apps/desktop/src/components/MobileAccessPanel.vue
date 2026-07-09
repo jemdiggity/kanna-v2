@@ -23,13 +23,17 @@ const statusClass = computed(() => `status-${props.serverStatus}`);
 </script>
 
 <template>
-  <section class="mobile-access-panel">
+  <section class="mobile-access-panel" data-testid="mobile-access-panel">
     <div class="panel-header">
       <div>
         <p class="eyebrow">Mobile Access</p>
         <h3 class="desktop-name">{{ desktopName }}</h3>
       </div>
-      <span class="status-pill" :class="statusClass">{{ statusLabel }}</span>
+      <span
+        class="status-pill"
+        :class="statusClass"
+        data-testid="mobile-access-status"
+      >{{ statusLabel }}</span>
     </div>
 
     <p class="description">
@@ -39,11 +43,20 @@ const statusClass = computed(() => `status-${props.serverStatus}`);
     <div class="pairing-area">
       <div class="pairing-code">
         <span class="label">Pairing code</span>
-        <code v-if="pairingCode" class="code">{{ pairingCode }}</code>
+        <code
+          v-if="pairingCode"
+          class="code"
+          data-testid="mobile-access-pairing-code"
+        >{{ pairingCode }}</code>
         <span v-else class="placeholder">No pairing session active</span>
       </div>
 
-      <button type="button" class="start-pairing" @click="emit('start-pairing')">
+      <button
+        type="button"
+        class="start-pairing"
+        data-testid="mobile-access-start-pairing"
+        @click="emit('start-pairing')"
+      >
         Start pairing
       </button>
     </div>
