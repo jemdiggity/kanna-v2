@@ -70,3 +70,33 @@ async fn e2e_sql_route_requires_loopback_connect_info() {
 
     assert_eq!(lan_response.status(), StatusCode::FORBIDDEN);
 }
+
+#[tokio::test]
+async fn e2e_sql_route_accepts_in_process_http_invokes_as_loopback() {
+    let _lock = E2E_SQL_ENV_LOCK.lock().await;
+    let _env = E2eSqlEnvGuard::enable();
+    let state = super::test_state_with_seed("desktop-e2e-sql-invoke", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+    });
+
+    let response = super::dispatch_http_invoke(
+        state,
+        "POST",
+        "/v1/e2e/sql",
+        json!({
+            "query": true,
+            "sql": "SELECT name FROM repo WHERE id = ?1",
+            "params": ["repo-1"]
+        }),
+    )
+    .await;
+
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(
+        response.body,
+        Some(json!({
+            "rows": [{ "name": "Repo One" }],
+            "rowsAffected": 0
+        }))
+    );
+}

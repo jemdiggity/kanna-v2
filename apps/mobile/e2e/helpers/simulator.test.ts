@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildExpoDevelopmentClientUrl,
   selectSimulatorDevice,
   type AvailableSimulatorDevice
 } from "./simulator";
@@ -40,5 +41,11 @@ describe("selectSimulatorDevice", () => {
     expect(() =>
       selectSimulatorDevice([device("iPhone 17 Pro")], "iPhone 15")
     ).toThrow("Available simulators: iPhone 17 Pro");
+  });
+
+  it("builds the Expo development client URL for a Metro server", () => {
+    expect(buildExpoDevelopmentClientUrl("http://127.0.0.1:8679")).toBe(
+      "exp+kanna-mobile://expo-development-client/?url=http%3A%2F%2F127.0.0.1%3A8679"
+    );
   });
 });

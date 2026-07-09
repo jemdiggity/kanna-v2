@@ -74,3 +74,4 @@ packageExtensions:
     dependencies:
       "@expo/cli": 0.24.24
       debug: 4.4.3
+      getenv: 2.0.0
