@@ -99,6 +99,26 @@ pub(crate) async fn spawn_prepared_task_for_api_with_diagnostics(
     }
 }
 
+pub(crate) async fn spawn_prepared_task_for_api_with_diagnostics(
+    db_path: &str,
+    daemon: &mut DaemonClient,
+    prepared: PreparedTaskSpawn,
+) -> Result<crate::mobile_api::CreateTaskResponse, String> {
+    match spawn_prepared_task_for_api_recording_stage_run(db_path, daemon, prepared.clone()).await {
+        Ok(created) => Ok(created),
+        Err(err) => {
+            let db = Db::open(db_path)
+                .map_err(|open_err| format!("{err}; diagnostics failed: db error: {open_err}"))?;
+            record_prepared_task_spawn_failure(&db, &prepared, &err)
+                .map_err(|record_err| format!("{err}; diagnostics failed: {record_err}"))?;
+            Err(format!(
+                "task {} failed to spawn: {err}",
+                prepared.created_task.task_id
+            ))
+        }
+    }
+}
+
 /// Spawn a new stage run on an existing task: kill the previous stage's
 /// agent session and respawn the same daemon session id with the target
 /// stage's agent. A stage transition runs in a freshly forked workspace

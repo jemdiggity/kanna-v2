@@ -215,6 +215,50 @@ async function waitForImportedRepoInStore(
   );
 }
 
+async function waitForImportedRepoInStore(
+  client: WebDriverClient,
+  repoPath: string,
+  name: string,
+): Promise<{ id: string; name: string }> {
+  const deadline = Date.now() + IMPORT_REPO_STORE_TIMEOUT_MS;
+  const canonicalRepoPath = await realpath(repoPath).catch(() => repoPath);
+  const repoPaths = new Set([repoPath, canonicalRepoPath]);
+  let lastState: unknown = null;
+
+  while (Date.now() < deadline) {
+    const state = await client.executeSync<{
+      selectedRepoId: string | null;
+      selectedRepoPath: string | null;
+      repos: Array<{ id: string; name: string; path: string }>;
+    }>(`const ctx = window.__KANNA_E2E__.setupState;
+      const reposRef = ctx.store?.repos ?? ctx.repos ?? [];
+      const repos = reposRef?.value ?? reposRef ?? [];
+      const selectedRepo = ctx.store?.selectedRepo ?? null;
+      const selectedRepoValue = selectedRepo?.value ?? selectedRepo;
+      const selectedRepoId = ctx.store?.selectedRepoId?.value ?? ctx.store?.selectedRepoId ?? null;
+      return {
+        selectedRepoId,
+        selectedRepoPath: selectedRepoValue?.path ?? ctx.store?.selectedRepo?.path ?? null,
+        repos: Array.from(repos).map((repo) => ({ id: repo.id, name: repo.name, path: repo.path })),
+      };`);
+    lastState = state;
+    const repos = Array.isArray(state.repos) ? state.repos : [];
+    const repo = repos.find((entry) => repoPaths.has(entry.path) && entry.name === name)
+      ?? repos.find((entry) => repoPaths.has(entry.path))
+      ?? (
+        state.selectedRepoId && state.selectedRepoPath && repoPaths.has(state.selectedRepoPath)
+          ? { id: state.selectedRepoId, name }
+          : null
+      );
+    if (repo) return repo;
+    await sleep(IMPORT_REPO_STORE_POLL_MS);
+  }
+
+  throw new Error(
+    `Repo "${name}" not found in store after import; last state: ${JSON.stringify(lastState)}`,
+  );
+}
+
 function shouldPreKillTaskSession(task: OpenCleanupTask): boolean {
   return task.agent_type === "agent" || task.agent_type === "sdk";
 }
