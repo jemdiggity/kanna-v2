@@ -305,6 +305,7 @@ export async function startRemoteHarness(options: RemoteHarnessOptions = {}): Pr
               KANNA_RELAY_URL: "wss://relay-staging.kanna.build"
             }
           : {}),
+        KANNA_E2E_TEST_SQL: "1",
         RUST_LOG: process.env.RUST_LOG ?? "info"
       }
     }));

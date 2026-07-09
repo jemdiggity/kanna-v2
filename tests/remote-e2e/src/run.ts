@@ -28,7 +28,11 @@ await runCommand("pnpm", [
   "--no-file-parallelism",
   ...(staging
     ? ["src/staging-smoke.e2e.test.ts"]
-    : ["src/remote-harness.smoke.test.ts", "src/terminal-flow.e2e.test.ts"])
+    : [
+        "src/remote-harness.smoke.test.ts",
+        "src/terminal-flow.e2e.test.ts",
+        "src/task-listing-actions.e2e.test.ts"
+      ])
 ], {
   cwd: fileURLToPath(new URL("..", import.meta.url)),
   env: {
