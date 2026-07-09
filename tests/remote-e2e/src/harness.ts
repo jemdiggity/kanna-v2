@@ -19,6 +19,7 @@ import {
   stagingServerTomlLines,
   type StagingBuffyCredentials
 } from "./staging";
+import { writeScriptedAgentBinary } from "./scriptedAgent";
 import type { RelayDesktopClient } from "../../../apps/mobile/src/lib/transports/relayClient";
 
 export type RemoteHarnessEnvironment = "dev" | "staging";
@@ -39,7 +40,9 @@ export interface RemoteHarness {
     configPath: string;
     daemonDir: string;
     dbPath: string;
+    fakeAgentBinDir: string;
     root: string;
+    zshStartupDir: string;
   };
   ports: {
     auth: number;
@@ -157,10 +160,34 @@ async function buildBinaries(repoRoot: string, environment: RemoteHarnessEnviron
       env: process.env
     });
   }
-  await runCommand("cargo", ["build", "-p", "kanna-server", "-p", "kanna-daemon"], {
+  await runCommand("cargo", ["build", "-p", "kanna-server", "-p", "kanna-daemon", "-p", "kanna-cli"], {
     cwd: repoRoot,
     env: process.env
   });
+}
+
+export function remoteHarnessKannaCliPath(repoRoot: string): string {
+  return join(repoRoot, ".build", "debug", process.platform === "win32" ? "kanna-cli.exe" : "kanna-cli");
+}
+
+export async function writeRemoteHarnessZshStartupFiles(zshStartupDir: string): Promise<void> {
+  await mkdir(zshStartupDir, { recursive: true });
+  const zshEnv = [
+    "# Remote E2E zsh startup file.",
+    "skip_global_compinit=1",
+    "unsetopt GLOBAL_RCS"
+  ].join("\n") + "\n";
+  const emptyStartup = "# Remote E2E zsh startup file.\n";
+  await Promise.all([
+    writeFile(join(zshStartupDir, ".zshenv"), zshEnv),
+    writeFile(join(zshStartupDir, ".zprofile"), emptyStartup),
+    writeFile(join(zshStartupDir, ".zshrc"), emptyStartup),
+    writeFile(join(zshStartupDir, ".zlogin"), emptyStartup)
+  ]);
+}
+
+function prependPath(pathEntry: string, existingPath: string | undefined): string {
+  return existingPath ? `${pathEntry}:${existingPath}` : pathEntry;
 }
 
 async function writeServerConfig(input: {
@@ -169,6 +196,7 @@ async function writeServerConfig(input: {
   dbPath: string;
   desktopId: string;
   environment: RemoteHarnessEnvironment;
+  repoRoot: string;
   stagingCredentials?: StagingBuffyCredentials;
   desktopSecret?: string | null;
   ports: RemoteHarness["ports"];
@@ -180,6 +208,7 @@ async function writeServerConfig(input: {
         dbPath: input.dbPath,
         desktopId: input.desktopId,
         deviceToken: input.stagingCredentials?.deviceToken ?? "",
+        kannaCliPath: remoteHarnessKannaCliPath(input.repoRoot),
         lanPort: input.ports.server,
         pairingStorePath: join(input.daemonDir, "pairings.json")
       })
@@ -191,6 +220,7 @@ async function writeServerConfig(input: {
         `firebase_firestore_emulator_host = "127.0.0.1:${input.ports.firestore}"`,
         `daemon_dir = "${shellTomlString(input.daemonDir)}"`,
         `db_path = "${shellTomlString(input.dbPath)}"`,
+        `kanna_cli_path = "${shellTomlString(remoteHarnessKannaCliPath(input.repoRoot))}"`,
         `desktop_id = "${input.desktopId}"`,
         ...(input.desktopSecret ? [`desktop_secret = "${shellTomlString(input.desktopSecret)}"`] : []),
         `desktop_name = "${DESKTOP_NAME}"`,
@@ -219,6 +249,8 @@ export async function startRemoteHarness(options: RemoteHarnessOptions = {}): Pr
   const configPath = join(root, "server.toml");
   const daemonDir = join(root, "daemon");
   const dbPath = join(root, "kanna.sqlite3");
+  const fakeAgentBinDir = join(root, "fake-agent-bin");
+  const zshStartupDir = join(root, "zsh");
   const processes: ManagedProcess[] = [];
   let relayProcess: ManagedProcess | null = null;
   let serverProcess: ManagedProcess | null = null;
@@ -271,7 +303,18 @@ export async function startRemoteHarness(options: RemoteHarnessOptions = {}): Pr
       env: {
         ...process.env,
         KANNA_SERVER_CONFIG: configPath,
-        RUST_LOG: process.env.RUST_LOG ?? "info"
+        ...(environment === "staging"
+          ? {
+              KANNA_CLOUD_ENV: "staging",
+              KANNA_FIREBASE_PROJECT_ID: "kanna-staging",
+              KANNA_RELAY_URL: "wss://relay-staging.kanna.build"
+            }
+          : {}),
+        KANNA_E2E_TEST_SQL: "1",
+        HOME: zshStartupDir,
+        PATH: prependPath(fakeAgentBinDir, process.env.PATH),
+        RUST_LOG: process.env.RUST_LOG ?? "info",
+        ZDOTDIR: zshStartupDir
       }
     });
     processes.push(serverProcess);
@@ -305,6 +348,7 @@ export async function startRemoteHarness(options: RemoteHarnessOptions = {}): Pr
       desktopId: currentDesktopId,
       desktopSecret: currentDesktopSecret,
       environment,
+      repoRoot,
       stagingCredentials: staging?.credentials,
       ports
     });
@@ -327,6 +371,9 @@ export async function startRemoteHarness(options: RemoteHarnessOptions = {}): Pr
 
   try {
     await mkdir(daemonDir, { recursive: true });
+    await mkdir(fakeAgentBinDir, { recursive: true });
+    await writeScriptedAgentBinary(join(fakeAgentBinDir, "codex"));
+    await writeRemoteHarnessZshStartupFiles(zshStartupDir);
     await buildBinaries(repoRoot, environment);
     await createHarnessDatabase(repoRoot, dbPath);
     await writeServerConfig({
@@ -335,6 +382,7 @@ export async function startRemoteHarness(options: RemoteHarnessOptions = {}): Pr
       dbPath,
       desktopId,
       environment,
+      repoRoot,
       stagingCredentials: staging?.credentials,
       ports
     });
@@ -364,7 +412,10 @@ export async function startRemoteHarness(options: RemoteHarnessOptions = {}): Pr
       cwd: repoRoot,
       env: {
         ...process.env,
-        KANNA_DAEMON_DIR: daemonDir
+        KANNA_DAEMON_DIR: daemonDir,
+        HOME: zshStartupDir,
+        PATH: prependPath(fakeAgentBinDir, process.env.PATH),
+        ZDOTDIR: zshStartupDir
       }
     }));
     await waitForFile(join(daemonDir, "daemon.pid"), timeoutMs);
@@ -383,7 +434,7 @@ export async function startRemoteHarness(options: RemoteHarnessOptions = {}): Pr
       desktopId,
       lanBaseUrl: `http://127.0.0.1:${ports.server}`,
       repoRoot,
-      paths: { configPath, daemonDir, dbPath, root },
+      paths: { configPath, daemonDir, dbPath, fakeAgentBinDir, root, zshStartupDir },
       ports,
       relayUrl,
       getIdToken: async () => {

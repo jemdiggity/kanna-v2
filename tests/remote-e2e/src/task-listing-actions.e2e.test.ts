@@ -59,7 +59,7 @@ describe("remote task listing, creation, and actions E2E", () => {
 
   beforeAll(async () => {
     harness = await startRemoteHarness();
-  }, 120_000);
+  }, 240_000);
 
   afterAll(async () => {
     await harness?.stop();

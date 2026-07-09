@@ -4,6 +4,7 @@ import {
   buffyStagingCredentialsFromEnv,
   stagingRemoteE2eSkipMessage
 } from "./staging";
+import { remoteHarnessSpecFiles, remoteHarnessVitestArgs } from "./vitestArgs";
 
 const args = process.argv.slice(2);
 const staging = args.includes("--staging");
@@ -38,28 +39,16 @@ if (staging) {
 }
 
 if (!mobileRelay && !desktopPairing) {
-  await runCommand("pnpm", [
-    "exec",
-    "vitest",
-    "run",
-    "--no-file-parallelism",
-    ...(staging
-      ? ["src/staging-smoke.e2e.test.ts"]
-      : [
-          "src/remote-harness.smoke.test.ts",
-          "src/cloud-pairing-auth-discovery.e2e.test.ts",
-          "src/terminal-flow.e2e.test.ts",
-          "src/task-listing-actions.e2e.test.ts",
-          "src/lan-layer.e2e.test.ts"
-        ])
-  ], {
-    cwd: fileURLToPath(new URL("..", import.meta.url)),
-    env: {
-      ...process.env,
-      KANNA_APP_ENV: process.env.KANNA_APP_ENV || "dev",
-      KANNA_REMOTE_E2E_ENV: staging ? "staging" : "dev"
-    }
-  });
+  for (const specFile of remoteHarnessSpecFiles(staging)) {
+    await runCommand("pnpm", remoteHarnessVitestArgs(specFile), {
+      cwd: fileURLToPath(new URL("..", import.meta.url)),
+      env: {
+        ...process.env,
+        KANNA_APP_ENV: process.env.KANNA_APP_ENV || "dev",
+        KANNA_REMOTE_E2E_ENV: staging ? "staging" : "dev"
+      }
+    });
+  }
 }
 
 if (mobileRelay) {
